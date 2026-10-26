@@ -1,5 +1,3 @@
-// @ts-check
-//
 // cron 面板展示 bug 回归（fix/cron-view-display）：
 //   #1 执行历史：后端每 job 只嵌 5 条 recent_runs，前端不得因 `< 10` 误判
 //      "已到结尾"；首次「加载更多」必须真的请求 /api/cron/runs。
@@ -80,7 +78,6 @@ async function openCronDrawer(page, url) {
 }
 
 test.describe('cron 面板展示回归', () => {
-  /** @type {Awaited<ReturnType<typeof startMockServer>>} */
   let mock;
   test.beforeAll(async () => { mock = await startMockServer({ cronJobs: jobs(), cronListMeta: SHANGHAI_META }); });
   test.afterAll(() => mock.server.close());
@@ -202,7 +199,7 @@ test('行的 when 列与子行图标、面板的错过横幅 / 汇总 / 筛选�
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
     await page.click('#abnav-cron');
-    const row = (/** @type {string} */ id) => page.locator(`.cj-row[data-cron-id="${id}"]`);
+    const row = (id) => page.locator(`.cj-row[data-cron-id="${id}"]`);
     await expect(row('cj-err')).toHaveCount(1);
 
     // Running: the when column is the live clock, titled with the run, and the
@@ -247,7 +244,6 @@ test('#1 少于 recent_runs_cap 条 recent_runs 即全部历史：「已到结�
   const mock = await startMockServer({ cronJobs: [job] });
   const ctx = await browser.newContext({ viewport: { width: 1600, height: 900 } });
   const page = await ctx.newPage();
-  /** @type {string[]} */
   const pages = [];
   page.on('request', (r) => { if (/\/api\/cron\/runs\?job_id=/.test(r.url())) pages.push(r.url()); });
   try {

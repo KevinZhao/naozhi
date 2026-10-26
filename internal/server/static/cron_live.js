@@ -79,7 +79,7 @@ function isCronLiveKey(key) {
 // cron-live RFC §1.3 / §2.3: cron stub spawn 完成会广播 session_state running，
 // suspended sub 此时升级 —— re-sub 才能拿到 eventPushLoop 推送。fresh 模式下
 // 这是默认路径（每次 run 前 Reset 销毁旧 stub）。
-function onCronLiveSessionState(/** @type {WsFrames['session_state']} */ msg) {
+function onCronLiveSessionState(msg) {
   if (msg.state === 'running' && cronLive.suspended) {
     const jobId = cronLive.jobId;
     if (jobId) {
@@ -106,7 +106,7 @@ function onCronLiveSessionState(/** @type {WsFrames['session_state']} */ msg) {
 
 // cron-live RFC §5: 首批 history 帧到达。EventEntriesSince(after) 后端无条数
 // 上限（After>0 时 Limit 被忽略），前端必须自己截尾到 CRON_LIVE_MAX_EVENTS。
-function onCronLiveHistory(/** @type {WsFrames['history']} */ msg) {
+function onCronLiveHistory(msg) {
   if (isCronSessionFrozen(msg.key)) return;
   const incoming = msg.events || [];
   if (incoming.length === 0) return;
@@ -131,7 +131,7 @@ function onCronLiveHistory(/** @type {WsFrames['history']} */ msg) {
   repaintCronLive();
 }
 
-function onCronLiveEvent(/** @type {WsFrames['event']} */ msg) {
+function onCronLiveEvent(msg) {
   if (isCronSessionFrozen(msg.key)) return;
   const ev = msg.event;
   if (!ev) return;
@@ -277,7 +277,7 @@ export function ensureCronLiveSubscription() {
 
 // cron-live RFC §2.2: the acks and errors that answer a pending cron live
 // subscribe stay out of the session subscription's bookkeeping.
-const cronLivePending = (/** @type {WsFrames['subscribed' | 'error']} */ msg) => cronLive.pendingJobId && msg.key === ('cron:' + cronLive.pendingJobId);
+const cronLivePending = (msg) => cronLive.pendingJobId && msg.key === ('cron:' + cronLive.pendingJobId);
 wsm.on(NZ_CONTRACT.WS.subscribed, (msg) => {
   cronLive.subscribedKey = msg.key;
   cronLive.pendingJobId = null;
@@ -291,7 +291,7 @@ wsm.on(NZ_CONTRACT.WS.error, () => {
   cronLive.status = 'stopped';
   setCronLiveStatus('stopped');
 }, (msg) => msg.key && cronLivePending(msg));
-const cronLiveKey = (/** @type {WsFrames['history' | 'event' | 'session_state']} */ msg) => isCronLiveKey(msg.key);
+const cronLiveKey = (msg) => isCronLiveKey(msg.key);
 wsm.on(NZ_CONTRACT.WS.history, (msg) => onCronLiveHistory(msg), cronLiveKey);
 wsm.on(NZ_CONTRACT.WS.event, (msg) => onCronLiveEvent(msg), cronLiveKey);
 wsm.on(NZ_CONTRACT.WS.session_state, (msg) => onCronLiveSessionState(msg), cronLiveKey);

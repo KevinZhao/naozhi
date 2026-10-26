@@ -1,9 +1,6 @@
-// split_view.js — extracted from dashboard.js (#2558 D4).
-//
-// Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
-// back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Shared state is read from the state.js objects; its helpers are
-// imported. dashboard's module body runs initSplitWidth().
+// split_view.js — the desktop split dock for the preview and 追问 panes.
+// Layering: never import dashboard.js back; dashboard's module body runs
+// initSplitWidth().
 import { lsGet, lsRemove, lsSet } from './platform.js';
 import { stickEventsBottom } from './utilities.js';
 
@@ -30,7 +27,7 @@ const MIN_W = 320;
 const MIN_LEFT = 420;
 // dock.hasCustomW: the user has dragged the seam, so we stop auto-tracking the
 // half-width on resize and honour their saved value instead. Seeded by
-// initSplitWidth(), which dashboard's module body runs (#2558 D4-4).
+// initSplitWidth(), which dashboard's module body runs.
 const dock = { hasCustomW: false };
 
 function isMobileVp() {

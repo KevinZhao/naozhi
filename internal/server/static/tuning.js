@@ -1,19 +1,13 @@
-// tuning.js — extracted from dashboard.js (#2558 D4).
-//
-// Verbatim region move: `git diff --color-moved` shows the body as a pure
-// move; the import block and the export block below are the only additions.
-//
-// Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
-// back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Shared state is read from the state.js objects and helpers are
-// imported. session_list.js imports this module, so the session_list functions
-// it calls back are shell slots, as is dashboard's renderMainHeader.
+// tuning.js — per-session tuning: the tuning popover, rename, dismiss and
+// the git-state chip.
+// Layering: never import dashboard.js back. session_list.js imports this
+// module, so the session_list functions it calls are shell slots, as is
+// dashboard's renderMainHeader.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, serverInfo, sessionList } from './state.js';
 import { esc, escAttr, fetchJSON, isCronSessionKey, showToast } from './nz_util.js';
 import { sessionStream } from './session_stream.js';
 import { mainEmptyHtml, promptDialog, removePendingSession, removeSidebarCard, showAPIError, showNetworkError, stopPreviewPolling } from './utilities.js';
-import { getToken } from './platform.js';
 import { dropDiscovered, findDiscovered, isDiscoveredKey, parseDiscoveredPid, sameDiscovered, sid } from './session_ident.js';
 import { gitChipHtml, gitStateCache, setHeaderGitChip } from './session_header.js';
 import { wireQuickAskInput } from './auth_modal.js';
@@ -204,8 +198,6 @@ async function postTuningOverride(kind, value) {
   const restore = () => { if (chip) chip.style.opacity = ''; };
   try {
     const headers = { 'Content-Type': 'application/json' };
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
     const body = { key };
     body[kind] = value;
     const resp = await fetch(NZ_CONTRACT.API.sessions_override, {
@@ -264,8 +256,6 @@ async function fetchGitState(key, node) {
   const cacheKey = sid(key, node);
   try {
     const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
     const resp = await fetch(NZ_CONTRACT.API.sessions_git + '?key=' + encodeURIComponent(key), { headers });
     // The cache entry is per-session so dropping it is always right; the
     // header chip is only cleared when this session is still the selected one.
@@ -317,8 +307,6 @@ async function dismissDiscovered(key, node) {
   if (!d) { showToast('未找到该外部会话', 'warning'); return; }
   try {
     const headers = {'Content-Type': 'application/json'};
-    const token = getToken();
-    if (token) headers['Authorization'] = 'Bearer ' + token;
     try {
       await fetchJSON(NZ_CONTRACT.API.discovered_close, {
         timeoutMs: 10000,
@@ -356,8 +344,6 @@ function dismissManaged(key, node) {
   removeSidebarCard(key);
 
   const headers = {'Content-Type': 'application/json'};
-  const token = getToken();
-  if (token) headers['Authorization'] = 'Bearer ' + token;
   const body = {key: key};
   if (node && node !== 'local') body.node = node;
   // Fire-and-forget: do NOT await — the UI is already updated. On failure we
@@ -439,7 +425,7 @@ async function renameSession() {
   if (!selection.key) return;
   const s = sessionList.sessionsData[sid(selection.key, selection.node)] || {};
   const current = s.user_label || '';
-  // RNEW-UX-013: replaced window.prompt with themed promptDialog so the
+  // replaced window.prompt with themed promptDialog so the
   // rename flow matches the rest of the dashboard (dark theme, trapFocus,
   // Esc/backdrop cancel) and doesn't block the event loop on mobile.
   const input = await promptDialog({
@@ -454,8 +440,6 @@ async function renameSession() {
   const next = input.trim();
   if (next === current) return;
   const headers = {'Content-Type': 'application/json'};
-  const token = getToken();
-  if (token) headers['Authorization'] = 'Bearer ' + token;
   const body = {key: selection.key, label: next};
   if (selection.node && selection.node !== 'local') body.node = selection.node;
   try {

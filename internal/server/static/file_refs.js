@@ -1,17 +1,14 @@
-// file_refs.js — extracted from dashboard.js (#2558 D4).
-//
-// Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
-// back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Shared state is read from the state.js objects; the path
-// parsing it shares with render_md.js lives in the file_ref_parse.js leaf.
+// file_refs.js — file references in the transcript: existence checks, the
+// file preview drawer and avatar regrouping. Layering: never import
+// dashboard.js back; the path parsing shared with render_md.js lives in the
+// file_ref_parse.js leaf.
 import { NZ_CONTRACT } from './contract.js';
 import { selection, sessionList } from './state.js';
 import { esc, fetchJSON, showToast } from './nz_util.js';
 import { splitDock } from './split_view.js';
 import { isInternalEvent, matchProject, sid } from './session_ident.js';
-import { AVATAR_GROUP_GAP_MS, formatFileSize } from './utilities.js';
+import { AVATAR_GROUP_GAP_MS, copyText, formatFileSize } from './utilities.js';
 import { ICONS } from './icons.js';
-import { getToken } from './platform.js';
 import { isFileRefCandidate, splitPathLine } from './file_ref_parse.js';
 import { loadKatex, loadMermaid, renderRich, runPendingAsync } from './render_md.js';
 import { collapseSidebarForDrawer, restoreSidebarAfterDrawer } from './mobile_nav.js';
@@ -254,9 +251,7 @@ async function flushFileRefBatch() {
   const paths = Array.from(batch.paths.keys());
   try {
     const headers = { 'Content-Type': 'application/json' };
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    // RNEW-UX-003: 10s timeout — batch exists-check touches the FS for every
+    // 10s timeout — batch exists-check touches the FS for every
     // path; a stalled disk shouldn't leak pending renders forever.
     let data;
     try {
@@ -486,8 +481,6 @@ async function openFilePreview(wrapEl) {
   // Text / unknown: go through preview endpoint which returns structured JSON.
   try {
     const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
     const r = await fetch(fileApiUrl(project, node, path, 'preview'), { headers });
     if (!r.ok) {
       body.innerHTML = '<div class="fv-error">preview failed (' + r.status + ')</div>';
@@ -582,12 +575,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const text = isSnippet ? _pendingSnippet : drawer.dataset.path;
     if (!text) return;
     const label = isSnippet ? '片段已复制' : '路径已复制';
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(
-        () => showToast(label, 'success', 1000),
-        () => showToast('复制失败', 'warning', 1000)
-      );
-    }
+    copyText(text).then((ok) => showToast(ok ? label : '复制失败', ok ? 'success' : 'warning', 1000));
   });
   const download = document.getElementById('fv-btn-download');
   if (download) download.addEventListener('click', () => {

@@ -1,9 +1,5 @@
-/* responsive.css — extracted verbatim from dashboard.html's inline <style> block
- * (#2559 D6). The split is sequential: each file is a contiguous slice of the
- * original block and dashboard.html links them in the same order, so the
- * cascade (later rule wins at equal specificity, @media position) is
- * unchanged. Edit a view's rules here, next to the module that renders it.
- */
+/* responsive.css — dashboard.html links the css files in a fixed order that the
+ * cascade depends on (later rule wins at equal specificity); keep it. */
 /* ===== Tablet / narrow desktop (≤1024px) ===== */
 @media(max-width:1024px) and (min-width:769px){
   .sidebar{width:300px!important}
@@ -24,7 +20,7 @@
      become direct flex children of the horizontal bar (margin-top:auto is a
      no-op once the wrapper is display:contents). */
   .activity-bar{position:fixed;left:0;right:0;bottom:0;top:auto;width:100%;height:auto;flex-direction:row;border-right:none;border-top:1px solid var(--nz-border);padding:4px 0 max(4px,env(safe-area-inset-bottom));z-index:var(--nz-z-rail);justify-content:space-around}
-  /* ui-polish-light-theme D9: 6 tabs over-crowd a 390px bar. 系统 is the
+  /* 6 tabs over-crowd a 390px bar. 系统 is the
      lowest-frequency, read-only view — its entry moves into 设置 (the
      .settings-syslink row + mirrored attention badge on the 设置 tab). */
   #abnav-system{display:none}
@@ -117,7 +113,7 @@
   .session-card .sc-prompt{font-size:var(--nz-fs-base)}
   /* Touch devices keep the dismiss × visible (no hover), absolutely
      positioned over the header's right edge — reserve room so the
-     timestamp doesn't slide underneath it (ui-polish-light-theme D4). */
+     timestamp doesn't slide underneath it. */
   .session-card .sc-header{padding-right:30px}
   .section-header{padding:5px 12px;font-size:var(--nz-fs-2xs)}
   /* Compact "no sessions" on mobile */

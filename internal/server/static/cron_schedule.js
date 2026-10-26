@@ -1,5 +1,4 @@
-// cron_schedule.js — schedule expressions and the frequency picker
-// (#2715 D4 follow-up: cron_view.js four-region split, region 1).
+// cron_schedule.js — schedule expressions and the frequency picker.
 //
 // Owns everything that understands a cron expression: the humanize family
 // (expression → 中文 label, with deliberate fallback-to-raw for shapes the
@@ -434,7 +433,7 @@ function freqSelectMode(mode) {
   const time = document.getElementById('freq-time');
   const dow = document.getElementById('freq-weekly-dow');
   const day = document.getElementById('freq-monthly-day');
-  // Class toggle, matching the renderer's .nz-hidden (#2559 D6-3): mixing an
+  // Class toggle, matching the renderer's .nz-hidden: mixing an
   // inline display with the class would leave the stale inline value winning.
   if (time) time.classList.toggle('nz-hidden', mode === 'hourly');
   if (dow) dow.classList.toggle('nz-hidden', mode !== 'weekly');

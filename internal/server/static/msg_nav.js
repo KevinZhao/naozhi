@@ -1,12 +1,6 @@
-// msg_nav.js — extracted from dashboard.js (#2558 D4).
-//
-// Verbatim region move: `git diff --color-moved` shows the body as a pure
-// move; the import block and the export block below are the only additions.
-//
-// Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
-// back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Shared state is read from the state.js objects; dashboard's
-// selectSession is reached through shell.js.
+// msg_nav.js — the transcript's message navigator (pill, list popover,
+// prev/next) and composer paste handling.
+// Layering: never import dashboard.js back; selectSession is a shell slot.
 import { selection, sessionList } from './state.js';
 import { esc } from './nz_util.js';
 import { shell } from './shell.js';
@@ -17,7 +11,7 @@ let navPopoverCloseHandler = null;
 // navState is the navigation position; this module is its only writer.
 export const navState = {
   userEls: [],
-  // #1772: synchronous "is the nav popover mounted" flag. Set true the moment
+  // synchronous "is the nav popover mounted" flag. Set true the moment
   // the popover is appended, false when dismissed. Lets the per-scroll-tick
   // handler skip a getElementById on the common (no-popover) path without the
   // race of reading navPopoverCloseHandler, which is only assigned in a
@@ -179,7 +173,7 @@ function navShowList() {
     // so the next arrow-key press re-seeds from what the user actually sees.
     let scrollResetTimer = null;
     el.addEventListener('scroll', () => {
-      // #1772: only touch the DOM to dismiss the nav popover when one is
+      // only touch the DOM to dismiss the nav popover when one is
       // actually open, skipping a per-scroll-tick getElementById on the
       // overwhelmingly common path (no popover) during inertial scrolling.
       if (navState.popoverOpen) navDismissPopover();

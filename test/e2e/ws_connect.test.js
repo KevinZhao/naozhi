@@ -1,4 +1,3 @@
-// @ts-check
 // WebSocket connect-path regression. The rest of the suite runs against a
 // mock server without an upgrade listener, so the dashboard silently falls
 // back to polling and the wsm connect → auth → onMessage dispatch chain is
@@ -46,9 +45,9 @@ test.describe('WebSocket connect path', () => {
     // correct (a later snapshot is how a dropped push heals), so push only
     // once that refresh has started.
     await page.evaluate(async () => {
-      /** @type {any} */ (window).__timers = (await import('/static/state.js')).timers;
+      window.__timers = (await import('/static/state.js')).timers;
     });
-    await page.waitForFunction(() => /** @type {any} */ (window).__timers.fetchDebounce === null);
+    await page.waitForFunction(() => window.__timers.fetchDebounce === null);
 
     const conn = mock.wsConnections[mock.wsConnections.length - 1];
     conn.send({ type: 'session_state', key: SESSION_KEY, node: 'local', state: 'running' });

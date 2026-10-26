@@ -1,4 +1,3 @@
-// @ts-check
 // Regressions for #1772 (mobile render hotspots). The two highest-value
 // debounces are verified by behavior; the touchmove/popover micro-opts are
 // guarded by source-shape assertions (they're hot-loop layout-read removals

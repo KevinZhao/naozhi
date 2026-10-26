@@ -1,11 +1,7 @@
 // mobile_nav.js — mobile shell navigation: viewport tracking, list/chat
 // switching, swipe-back, long-press session actions, and the desktop
-// sidebar fully-collapse helpers that share its drawer bookkeeping
-// (#2558 D4-3).
-//
-// Verbatim move out of dashboard.js; only the import lines are new.
-// Layering (D4-1 rule): never import dashboard back — selectSession is
-// reached through shell.js.
+// sidebar fully-collapse helpers that share its drawer bookkeeping.
+// Layering: never import dashboard.js back; selectSession is a shell slot.
 import { selection } from './state.js';
 import { esc, showToast } from './nz_util.js';
 import { ICONS } from './icons.js';
@@ -13,7 +9,7 @@ import { lsGet, lsSet } from './platform.js';
 import { shell } from './shell.js';
 import { splitDock } from './split_view.js';
 import { dismissSession, renameSession } from './tuning.js';
-import { isMobile, mobileQuery } from './utilities.js';
+import { copyText, isMobile, mobileQuery } from './utilities.js';
 
 /* ===== Mobile Navigation ===== */
 
@@ -34,7 +30,7 @@ function mobileShowList() {
 
 // In-app back button / swipe-back. Flips the view synchronously, then pops
 // the history entry mobileEnterChat pushed so the browser stack stays in
-// step (#2431); the popstate below sees list view already and no-ops.
+// step; the popstate below sees list view already and no-ops.
 function mobileBack() {
   const ownsEntry = isMobile() && history.state && history.state.view === 'chat';
   mobileShowList();
@@ -165,35 +161,6 @@ function showSessionContextMenu(x, y, items) {
   if (first) first.focus();
 }
 
-// copyStringToClipboard writes a string to the system clipboard using the
-// modern navigator.clipboard API with a document.execCommand fallback for
-// older browsers / non-HTTPS contexts. Returns a Promise<boolean>.
-async function copyStringToClipboard(s) {
-  try {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      await navigator.clipboard.writeText(s);
-      return true;
-    }
-  } catch (_) { /* fall through */ }
-  const ta = document.createElement('textarea');
-  try {
-    ta.value = s;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    return document.execCommand('copy');
-  } catch (_) {
-    return false;
-  } finally {
-    // Always detach — if execCommand throws (sandboxed iframes, locked
-    // clipboards) the caught return skipped an inline removeChild before,
-    // leaking the <textarea> (containing the user-supplied string) into
-    // the DOM for the page lifetime.
-    if (ta.parentNode) ta.parentNode.removeChild(ta);
-  }
-}
-
 // openSessionContextMenu assembles the items for a given session card and
 // opens the menu anchored near the touch coordinates. Rename reuses the
 // existing modal-prompt pattern by selecting the session first, then
@@ -220,7 +187,7 @@ function openSessionContextMenu(card, x, y) {
     {
       label: '复制 key', icon: ICONS.copy,
       action: async () => {
-        const ok = await copyStringToClipboard(key);
+        const ok = await copyText(key);
         showToast(ok ? '已复制 key' : '复制失败', ok ? 'success' : 'warning');
       },
     },
@@ -282,7 +249,7 @@ function initSwipeDelete() {
       if (Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
       if (Math.abs(dy) >= Math.abs(dx)) { card = null; return; }
       tracking = true;
-      // #1772: cache the card width once, here — before any transform write
+      // cache the card width once, here — before any transform write
       // this gesture. Reading card.offsetWidth inside the per-frame transform
       // write below is a getter that the browser must keep coherent with
       // pending style writes; caching it (the width can't change mid-swipe)

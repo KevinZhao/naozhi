@@ -86,12 +86,10 @@ const MODE_RANK = { none: 0, delta: 1, full: 2 };
  * @property {number} setAt when the last workflow_set arrived (ms)
  */
 
-/** @param {string} st */
 export function isSettled(st) {
   return WORKFLOW_STATUS_DISPLAY[st]?.settled === true;
 }
 
-/** @param {Map<string, WorkflowBucket>} store @param {string} s */
 function bucket(store, s) {
   let b = store.get(s);
   if (!b) {
@@ -101,7 +99,6 @@ function bucket(store, s) {
   return b;
 }
 
-/** @param {string} key @param {string} node @param {string} taskId @returns {WorkflowEntry} */
 function newEntry(key, node, taskId) {
   return {
     key, node, taskId, epoch: '', version: 0, workflow: null,
@@ -112,7 +109,6 @@ function newEntry(key, node, taskId) {
   };
 }
 
-/** @param {WorkflowBucket} b @param {string} key @param {string} node @param {string} taskId @param {number} now */
 function entryFor(b, key, node, taskId, now) {
   let e = b.tasks.get(taskId);
   if (!e) {
@@ -126,32 +122,27 @@ function entryFor(b, key, node, taskId, now) {
 
 // capEntries drops the least recently used entries past SID_ENTRY_CAP that
 // the session's last list does not name, never a listed one nor keep.
-/** @param {WorkflowBucket} b @param {WorkflowEntry} keep */
 function capEntries(b, keep) {
   if (b.tasks.size <= SID_ENTRY_CAP) return;
   const spare = [...b.tasks.values()].filter((e) => e !== keep && !b.listed?.has(e.taskId)).sort((x, y) => x.used - y.used);
   for (const e of spare.slice(0, b.tasks.size - SID_ENTRY_CAP)) b.tasks.delete(e.taskId);
 }
 
-/** @param {WorkflowEntry} e @param {FetchMode} mode */
 function want(e, mode) {
   if (!e.want || MODE_RANK[mode] > MODE_RANK[e.want]) e.want = mode;
 }
 
-/** @param {WorkflowEntry} e @param {WireView} w */
 function setHeader(e, w) {
   e.workflow = { ...w, agents: [] };
   if (!isSettled(w.status)) e.sawUnsettled = true;
 }
 
-/** @param {WorkflowEntry} e */
 function dropRows(e) {
   e.rows = new Map();
   e.rowsLoaded = false;
   e.rowsAt = 0;
 }
 
-/** @param {WorkflowEntry} e */
 function dropResult(e) {
   e.result = null;
   e.logs = null;
@@ -160,20 +151,17 @@ function dropResult(e) {
   e.resultTries = 0;
 }
 
-/** @param {WorkflowEntry} e @param {Agent[]} rows */
 function mergeRows(e, rows) {
   for (const a of rows) e.rows.set(a.index, a);
 }
 
 // resultDue: an expanded, ended workflow whose result file was read and
 // whose result this page has not got (RFC §6.1 结果拉取).
-/** @param {WorkflowEntry} e */
 function resultDue(e) {
   const w = e.workflow;
   return e.open && !!w && isSettled(w.status) && w.source === SOURCE_RESULT_FILE && !e.resultLoaded && e.resultTries < RESULT_TRIES;
 }
 
-/** @param {WorkflowEntry} e */
 function settle(e) {
   if (e.rowsLoaded && e.rowsAt < e.version) want(e, 'delta');
   if (resultDue(e)) want(e, e.rowsLoaded ? 'delta' : 'none');
@@ -182,9 +170,6 @@ function settle(e) {
 /**
  * applySet takes a workflow_set: the session's entries it does not name, or
  * that belong to another epoch, go.
- * @param {Map<string, WorkflowBucket>} store
- * @param {WsFrames['workflow_set']} set
- * @param {number} now
  */
 export function applySet(store, set, now) {
   const b = bucket(store, sidOf(set.key, set.node));
@@ -199,9 +184,6 @@ export function applySet(store, set, now) {
 
 /**
  * applyFrame takes a workflow_state frame.
- * @param {Map<string, WorkflowBucket>} store
- * @param {WsFrames['workflow_state']} frame
- * @param {number} now
  */
 export function applyFrame(store, frame, now) {
   const b = bucket(store, sidOf(frame.key, frame.node));
@@ -214,7 +196,6 @@ export function applyFrame(store, frame, now) {
   due(e);
 }
 
-/** @param {WorkflowEntry} e @param {WsFrames['workflow_state']} frame */
 function applyFull(e, frame) {
   if (frame.epoch !== e.epoch) {
     e.epoch = frame.epoch;
@@ -231,7 +212,6 @@ function applyFull(e, frame) {
   }
 }
 
-/** @param {WorkflowEntry} e @param {WsFrames['workflow_state']} frame */
 function applyDelta(e, frame) {
   if (frame.epoch !== e.epoch) {
     want(e, e.open ? 'full' : 'none');
@@ -268,10 +248,6 @@ function applyDelta(e, frame) {
  * ones only when newer. What the landing leaves due is worked out afresh,
  * so a frame that asked for the same fetch while it was in flight costs no
  * second one.
- * @param {Map<string, WorkflowBucket>} store
- * @param {string} s
- * @param {RestResponses['sessions_workflow']} resp
- * @param {number} now
  */
 export function applyHttp(store, s, resp, now) {
   const e = store.get(s)?.tasks.get(resp.workflow.task_id);
@@ -333,13 +309,11 @@ export function applyHttp(store, s, resp, now) {
 
 // due records what e is owed now: rows when expanded without them, plus
 // what settle finds.
-/** @param {WorkflowEntry} e */
 function due(e) {
   if (e.open && !e.rowsLoaded) want(e, 'full');
   settle(e);
 }
 
-/** @param {WorkflowEntry} e */
 function replay(e) {
   const held = e.buffered;
   e.buffered = [];
@@ -348,7 +322,6 @@ function replay(e) {
 
 // backoff doubles the entry's wait from BACKOFF_MIN_MS up to BACKOFF_MAX_MS,
 // or takes retryAfterMs when that is longer.
-/** @param {WorkflowEntry} e @param {number} retryAfterMs */
 function backoff(e, retryAfterMs) {
   e.backoffMs = Math.min(BACKOFF_MAX_MS, e.backoffMs ? e.backoffMs * 2 : BACKOFF_MIN_MS);
   return Math.max(e.backoffMs, retryAfterMs);
@@ -359,12 +332,6 @@ function backoff(e, retryAfterMs) {
  * node) drops the entry; anything else (429, 5xx, network error: status 0)
  * keeps the state and retries the same fetch after a backoff, at least
  * retryAfter seconds.
- * @param {Map<string, WorkflowBucket>} store
- * @param {string} s
- * @param {string} taskId
- * @param {number} status
- * @param {number} retryAfter
- * @param {number} now
  */
 export function applyHttpError(store, s, taskId, status, retryAfter, now) {
   const b = store.get(s);
@@ -384,9 +351,6 @@ export function applyHttpError(store, s, taskId, status, retryAfter, now) {
  * needsFetch is the mode of the fetch e is due, or null: none is due, one
  * is in flight (its landing looks again), or it must wait (backoff, or the
  * per-task refetch gap).
- * @param {WorkflowEntry} e
- * @param {number} now
- * @returns {FetchMode | null}
  */
 export function needsFetch(e, now) {
   if (!e.want || e.fetchInFlight || now < e.retryAt || now - e.lastFetchAt < REFETCH_GAP_MS) return null;
@@ -395,9 +359,6 @@ export function needsFetch(e, now) {
 
 /**
  * startFetch marks a fetch of mode in flight and returns its query string.
- * @param {WorkflowEntry} e
- * @param {FetchMode} mode
- * @param {number} now
  */
 export function startFetch(e, mode, now) {
   e.fetchInFlight = true;
@@ -417,15 +378,12 @@ export function startFetch(e, mode, now) {
 /**
  * expand records whether the panel shows e expanded; an expanded entry asks
  * for its rows, and an ended one for its result, in one fetch.
- * @param {WorkflowEntry} e
- * @param {boolean} open
  */
 export function expand(e, open) {
   e.open = open;
   if (open) due(e);
 }
 
-/** @param {string} s */
 function splitSid(s) {
   const i = s.lastIndexOf('\t');
   return { key: s.slice(0, i), node: s.slice(i + 1) };
@@ -438,10 +396,6 @@ function splitSid(s) {
  * rows are held); with neither a workflow_set nor a frame for the session
  * in that time, the Summary list trims its entries. A remote node's
  * sessions are skipped.
- * @param {Map<string, WorkflowBucket>} store
- * @param {string} s
- * @param {Summary[] | undefined} summaries
- * @param {number} now
  */
 export function reconcileSummaries(store, s, summaries, now) {
   const { key, node } = splitSid(s);
@@ -462,7 +416,6 @@ export function reconcileSummaries(store, s, summaries, now) {
 }
 
 // pushedAt is when session b last had a workflow_set or frame (ms).
-/** @param {WorkflowBucket} b */
 function pushedAt(b) {
   let at = b.setAt;
   for (const e of b.tasks.values()) at = Math.max(at, e.frameAt);
@@ -471,7 +424,6 @@ function pushedAt(b) {
 
 // headerOf stands a Summary in for a header until a frame or response
 // brings one; version 0 lets either replace it.
-/** @param {Summary} sum @returns {WireView} */
 function headerOf(sum) {
   return {
     task_id: sum.task_id, name: sum.name, status: sum.status, counts: sum.counts, tokens: sum.tokens,
@@ -483,8 +435,6 @@ function headerOf(sum) {
 /**
  * releaseRows drops the rows and results of a session the panel stopped
  * showing; headers stay.
- * @param {Map<string, WorkflowBucket>} store
- * @param {string} s
  */
 export function releaseRows(store, s) {
   for (const e of store.get(s)?.tasks.values() || []) {
@@ -499,8 +449,6 @@ export function releaseRows(store, s) {
  * visibleWorkflows is what the panel shows of session s: every workflow not
  * settled (unknown included), newest started first, then the latest
  * TERMINAL_SHOWN settled ones, newest ended first.
- * @param {Map<string, WorkflowBucket>} store
- * @param {string} s
  */
 export function visibleWorkflows(store, s) {
   const all = [...(store.get(s)?.tasks.values() || [])].filter((e) => e.workflow);
@@ -513,7 +461,6 @@ export function visibleWorkflows(store, s) {
 
 /**
  * rowsOf is e's rows in index order.
- * @param {WorkflowEntry} e
  */
 export function rowsOf(e) {
   return [...e.rows.values()].sort((x, y) => x.index - y.index);
@@ -524,10 +471,6 @@ export function rowsOf(e) {
  * (task, settled status) once per page, recorded in announced. Only the
  * selected session's are returned; one first seen settled, or ended in a
  * session not shown, is recorded silently.
- * @param {Map<string, WorkflowBucket>} store
- * @param {string} s
- * @param {string} selectedSid
- * @param {Set<string>} announced
  */
 export function announceable(store, s, selectedSid, announced) {
   const out = [];

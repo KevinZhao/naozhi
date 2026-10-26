@@ -1,9 +1,5 @@
 // system_view.js — the 系统 view (sysession daemons).
-//
-// Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
-// back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Shared state is read from the state.js objects; the one
-// call back into dashboard (setActivityView) goes through shell.js.
+// Layering: never import dashboard.js back; setActivityView is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, sessionList, ui } from './state.js';
 import { esc, escAttr, fetchJSON, formatBytes, formatDurationShort, showToast } from './nz_util.js';
@@ -105,7 +101,7 @@ function systemTickLabel(ns) {
 // systemStatLabel maps a flattened TickReport stat key (flattenTickReport in
 // manager.go) to a Chinese label. Keys MUST match what the daemons emit:
 // AutoTitler's bumpSkip(...) reasons as skipped_*, attachment-gc's gcCount*
-// Counts keys verbatim (pinned by TestDashboardJS_SystemStatLabels*).
+// Counts keys verbatim.
 // Unknown reasons keep their raw suffix so a new skip-bucket still shows up.
 // A live (non-dry-run) tick's would_reap_* counted that tick's deletions.
 const SYSTEM_STAT_LABELS = {
