@@ -126,7 +126,7 @@
 </head>
 <body>
 <h1>naozhi dashboard 新原型 —— 精简版</h1>
-<p class="sub">对应 <code>docs/rfc/planner.md</code> v7 与 D75：<b>一个主屏 + 一个状态页</b>，没有顶层导航，也不再有专家视图模式。主屏三栏：左栏会话列表（等你 · Planner · 按工作区分组）、中间对话、右栏工作台（默认关闭，有可预览产物时自动打开并收起左栏）。三个面仍在：对话面 = 中栏，监督面 = 列表里的"等你"与 Planner + 状态页，工作台面 = 右栏。所有内容均为示意数据。</p>
+<p class="sub">对应 <code>docs/rfc/planner.md</code> v7 与 D75：<b>一个主屏 + 一个状态页</b>，没有顶层导航，也不再有专家视图模式。主屏三栏：左栏会话列表（等你 · Planner · 按工作区分组）、中间对话、右栏工作台（预览 · 产出 · 文件 · 详情；默认关闭，有可预览产物时自动打开并收起左栏；不放代码 diff）。三个面仍在：对话面 = 中栏，监督面 = 列表里的"等你"与 Planner + 状态页，工作台面 = 右栏。所有内容均为示意数据。</p>
 
 <div class="shot">
 <h2>① 主屏 · 和会话结对：左栏列表 + 对话，右栏关闭</h2>
@@ -142,7 +142,7 @@
     <div class="msg"><span class="av gw">S</span><div class="mbody"><div class="h">进行中</div><span class="muted">正在改 arch.html · 第 1/2 步</span></div></div>
   </div>
   <div class="menu" style="right:18px;top:44px;width:250px">
-    <div class="hi"><span>模型与 effort</span><span class="muted">opus 5.5 · high</span></div><div><span>后端</span><span class="muted">claude</span></div><div><span>节点</span><span class="muted">Mac</span></div><div><span>git</span><span class="muted">main · 2 处改动</span></div>
+    <div class="hi"><span>模型与 effort</span><span class="muted">opus 5.5 · high</span></div><div><span>后端</span><span class="muted">claude</span></div><div><span>节点</span><span class="muted">Mac</span></div>
     <div class="sep2"></div><div><span>原始记录</span></div><div><span>工作流与 agent</span></div><div><span>托管</span><span class="muted">关</span></div>
     <div class="sep2"></div><div><span style="color:var(--red)">关闭会话</span></div>
   </div>
@@ -176,7 +176,7 @@
   </div>
 </div>
 <div class="rp" style="width:600px">
-  <div class="rph"><span class="on">预览</span><span>改动 3</span><span>文件</span><span>运行</span><span>详情</span><span class="sp"></span><span class="muted">⤢ 放大</span><span class="muted">✕</span></div>
+  <div class="rph"><span class="on">预览</span><span>产出 3</span><span>文件</span><span>详情</span><span class="sp"></span><span class="muted">⤢ 放大</span><span class="muted">✕</span></div>
   <div class="sbody">
     <div class="prev"><div class="bar2"><span>arch.html · 目录级预览 · 跟随刷新</span><span>↗ 新窗口</span></div>
       <div style="padding:28px 14px;text-align:center">
@@ -187,7 +187,7 @@
       </div></div>
   </div>
 </div></div></div>
-<p class="note">右栏默认关闭；会话产出可预览的东西时自动打开（与现在的逻辑一致），同时左栏收成 48px 窄条，只留展开、"等你"角标、Planner 状态点，视线集中在对话和预览上；关掉右栏，左栏自动恢复。右栏五个页签：预览 · 改动 · 文件 · 运行 · 详情（契约、血缘、计数、工作流、agent 下钻）。</p>
+<p class="note">右栏默认关闭；会话产出可预览的东西时自动打开（与现在的逻辑一致），同时左栏收成 48px 窄条，只留展开、"等你"角标、Planner 状态点，视线集中在对话和预览上；关掉右栏，左栏自动恢复。右栏四个页签：预览 · 产出（这个会话做出来的东西）· 文件 · 详情（契约、血缘、计数、工作流、agent 下钻）。不放代码 diff：审阅交给 agent 的评审与 CI。</p>
 </div>
 
 <div class="shot">
@@ -221,43 +221,36 @@
 </div>
 
 <div class="shot">
-<h2>④ 右栏放大：全屏看改动、跑测试</h2>
-<div class="win"><div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#s=review-issues&panel=changes&full=1</span></div><div class="top"><span class="logo">naozhi</span><span class="sp"></span><span class="health">⚠ Midway 2 小时后过期</span><span class="avatar">我</span></div><div class="body">
+<h2>④ 右栏放大：全屏看产物</h2>
+<div class="win"><div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#s=jd-arch&amp;panel=outputs&amp;full=1</span></div><div class="top"><span class="logo">naozhi</span><span class="sp"></span><span class="health">⚠ Midway 2 小时后过期</span><span class="avatar">我</span></div><div class="body">
 <div class="rp" style="flex:1;border-left:none">
-  <div class="rph"><span class="muted">处理 review issues ·</span><span>预览</span><span class="on">改动 6</span><span>文件</span><span>运行</span><span>详情</span><span class="sp"></span><span class="muted">⤡ 还原</span><span class="muted">✕</span></div>
+  <div class="rph"><span class="muted">网络架构图 ·</span><span>预览</span><span class="on">产出 3</span><span>文件</span><span>详情</span><span class="sp"></span><span class="muted">⤡ 还原</span><span class="muted">✕</span></div>
   <div style="flex:1;display:flex;min-height:0">
-    <div style="width:250px;flex:none;border-right:1px solid var(--line);padding:10px;background:var(--bg1)">
+    <div style="width:260px;flex:none;border-right:1px solid var(--line);padding:10px;background:var(--bg1)">
       <div class="tree">
-        <div class="r">改动的文件（worktree · 3 个提交）</div>
-        <div class="on">internal/turn/queue.go <span style="color:var(--green)">+18</span> <span style="color:var(--red)">−7</span></div>
-        <div>internal/turn/queue_test.go <span style="color:var(--green)">+42</span></div>
-        <div>internal/server/health.go <span style="color:var(--green)">+5</span> <span style="color:var(--red)">−1</span></div>
-        <div>internal/turn/orchestrator.go <span style="color:var(--green)">+9</span> <span style="color:var(--red)">−3</span></div>
-        <div>docs/rfc/planner.md <span style="color:var(--green)">+2</span></div>
-        <div>CHANGELOG.md <span style="color:var(--green)">+4</span></div>
+        <div class="r">这个会话的产出</div>
+        <div class="on">📐 arch.html　<span class="muted">10:07 更新</span></div>
+        <div>📝 会前材料.md　<span class="muted">10:12</span></div>
+        <div>📊 NAT 费用估算.xlsx　<span class="muted">10:15</span></div>
+        <div class="r">所有会话 · 成品库</div>
+        <div>📄 PR #3701 修 flaky　<span class="chip">待审</span></div>
+        <div>🖼 dashboard 截图 ×3</div>
+        <div>📑 Q4 架构评审.pptx</div>
       </div>
     </div>
-    <div style="flex:1;padding:14px 18px;min-width:0">
-      <div class="sbs">
-        <div class="hd">a41f^ · queue.go</div><div class="hd">a41f · queue.go</div>
-        <div class="e">85 // Pop returns the oldest request.</div><div class="e">85 // Pop returns the oldest request.</div>
-        <div>86 func (q *Queue) Pop() *Req {</div><div>86 func (q *Queue) Pop() *Req {</div>
-        <div class="d">87     return q.items[len(q.items)-1]</div><div class="a">87     r := q.items[0]</div>
-        <div></div><div class="a">88     q.items = q.items[1:]</div>
-        <div></div><div class="a">89     return r</div>
-        <div>88 }</div><div>90 }</div>
-      </div>
-      <div class="row" style="margin:14px 0 8px"><span class="btn pri">▶ make test</span><span class="btn">go test ./internal/turn/...</span><span class="btn">交给会话："看看还有没有边界情况"</span><span class="btn">轻量编辑</span></div>
-      <div class="term">$ go test ./internal/turn/...
---- PASS: TestQueuePopFIFO (0.00s)
---- PASS: TestQueueConcurrentSubmit (0.41s)
-<span class="ok">ok  	github.com/naozhi/naozhi/internal/turn	1.203s</span></div>
+    <div style="flex:1;padding:16px 20px;min-width:0;display:flex;flex-direction:column;gap:12px">
+      <div class="prev" style="flex:1"><div class="bar2"><span>arch.html · 目录级预览 · 跟随刷新</span><span>↗ 新窗口　⬇ 下载</span></div>
+        <div style="padding:60px 14px;text-align:center">
+          <div class="archbox" style="border-color:#0969da;padding:14px 26px;font-size:14px">Network 账号<br><b>TGW · 集中出口</b></div><br><br><br>
+          <div class="archbox" style="border-color:#1a7f37;padding:14px 26px;font-size:14px">BU-A VPC</div><div class="archbox" style="border-color:#1a7f37;padding:14px 26px;font-size:14px">BU-B VPC</div><div class="archbox" style="border-color:#1a7f37;padding:14px 26px;font-size:14px">BU-C VPC</div><br><br><br>
+          <div class="archbox" style="border-color:#9a6700;font-size:13px">注：NAT 费用按 BU 用量分摊</div>
+        </div></div>
+      <div class="row"><span class="btn">对这个产出说："把出口改成双活"</span><span class="btn">发给客户…</span></div>
     </div>
   </div>
 </div></div></div>
-<p class="note">右栏点"⤢ 放大"后占满整个窗口，左栏与对话都收起，适合认真审 diff：左侧是这个会话改动的文件，中间左右对比，下方直接运行与"交给会话"。"⤡ 还原"回到②。工作台面不再是单独的页面。</p>
+<p class="note">右栏点"⤢ 放大"后占满窗口，专心看产物：左侧是这个会话的产出与所有会话的成品库，中间是全尺寸预览（HTML 目录级可交互、Markdown、图片、PDF、幻灯片）。对产出的修改直接说给会话；"发给客户"这类对外动作会走外发确认卡片。"⤡ 还原"回到②。</p>
 </div>
-
 <div class="shot">
 <h2>⑤ 状态页 · 运行状况（从头像菜单进入，平时很少来）</h2>
 <div class="win"><div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#status</span></div><div class="top"><span class="logo">naozhi</span><span class="sp"></span><span class="health">⚠ Midway 2 小时后过期</span><span class="avatar">我</span></div><div class="body">

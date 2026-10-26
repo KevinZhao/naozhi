@@ -149,7 +149,7 @@
       <div class="card sess">
         <div class="t">JD 网络架构图 <span class="chip green">已完成</span></div>
         <div class="muted">执行会话 · opus 5.5 · JD 工作区</div>
-        <div style="margin-top:6px;font-size:13px">已改 arch.html：移除共享 VPC，新增 Network 账号 + TGW 集中出口。<span style="color:var(--blue)">在工作台看 diff ›</span></div>
+        <div style="margin-top:6px;font-size:13px">已改 arch.html：移除共享 VPC，新增 Network 账号 + TGW 集中出口。<span style="color:var(--blue)">在工作台看预览 ›</span></div>
       </div>
       <div class="who">🧭 Planner · 旁注（不插进会话）</div>
       <div class="bubble pl advice">上周三你和客户确认过"出口按 BU 分账"，集中出口后 NAT 费用会落在网络账号。要在图上标出分摊方式吗？<div class="muted" style="margin-top:4px">依据：10/21 会议纪要 · 懂你 / 先例</div></div>
@@ -242,40 +242,35 @@
 </div>
 
 <div class="shot">
-  <h2>⑤ 工作台：这个会话改了什么、成品库</h2>
+  <h2>⑤ 工作台：看产出与成品库</h2>
   <div class="phone">
     <div class="island"></div>
     <div class="status"><span>9:41</span><span>5G ▮▮▮</span></div>
     <div class="nav"><span class="title">工作台</span></div>
-    <div class="seg"><span class="on">改动</span><span>成品库</span><span>文件</span></div>
+    <div class="seg"><span class="on">产出</span><span>成品库</span><span>文件</span></div>
     <div class="content">
       <div class="card">
-        <div style="font-weight:600">处理 review issues · 改了 6 个文件</div>
-        <div class="file"><span>internal/turn/queue.go</span><span><span class="plus">+18</span> <span class="minus">−7</span></span></div>
-        <div class="file"><span>internal/turn/queue_test.go</span><span><span class="plus">+42</span></span></div>
-        <div class="file"><span>internal/server/health.go</span><span><span class="plus">+5</span> <span class="minus">−1</span></span></div>
-        <div class="file muted"><span>另 3 个</span><span>›</span></div>
+        <div style="font-weight:600">网络架构图 · 产出 3</div>
+        <div class="file"><span>📐 arch.html</span><span class="muted">10:07 更新 ›</span></div>
+        <div class="file"><span>📝 会前材料.md</span><span class="muted">10:12 ›</span></div>
+        <div class="file"><span>📊 NAT 费用估算.xlsx</span><span class="muted">10:15 ›</span></div>
       </div>
-      <div class="diff">
-        <div class="h">internal/turn/queue.go</div>
-        <div>  func (q *Queue) Pop() *Req {</div>
-        <div class="d">-   return q.items[len(q.items)-1]</div>
-        <div class="a">+   r := q.items[0]</div>
-        <div class="a">+   q.items = q.items[1:]</div>
-        <div class="a">+   return r</div>
-        <div>  }</div>
+      <div class="card" style="text-align:center;padding:18px 8px">
+        <div class="muted" style="text-align:left;margin-bottom:10px">arch.html · 预览</div>
+        <div style="display:inline-block;border:2px solid #0a84ff;border-radius:8px;padding:6px 12px;font-size:12px">Network 账号 · TGW 集中出口</div><br>
+        <div style="display:inline-block;border:2px solid #30d158;border-radius:8px;padding:4px 8px;font-size:11px;margin:8px 3px">BU-A</div><div style="display:inline-block;border:2px solid #30d158;border-radius:8px;padding:4px 8px;font-size:11px;margin:8px 3px">BU-B</div><div style="display:inline-block;border:2px solid #30d158;border-radius:8px;padding:4px 8px;font-size:11px;margin:8px 3px">BU-C</div><br>
+        <div style="display:inline-block;border:2px solid #ff9f0a;border-radius:8px;padding:4px 8px;font-size:11px">注：NAT 费用按 BU 分摊</div>
       </div>
       <div class="sect"><span>成品库 · 最近</span><span class="muted">全部 ›</span></div>
       <div class="card" style="font-size:13px">
-        <div class="kv"><span>📐 arch.html（JD 网络架构）</span><span class="muted">预览 ›</span></div>
         <div class="kv"><span>📄 PR #3701 修 flaky</span><span class="muted">待审</span></div>
-        <div class="kv"><span>🖼 dashboard 截图 ×3</span><span class="muted">10:12</span></div>
+        <div class="kv"><span>📑 Q4 架构评审.pptx</span><span class="muted">昨天</span></div>
       </div>
-      <div class="btns"><span class="btn">交给会话…</span><span class="btn">直接运行 make test</span></div>
+      <div class="btns"><span class="btn">对这个产出说…</span><span class="btn">分享…</span></div>
     </div>
     <div class="tabbar"><div class="tab"><span class="ic">💬</span>对话</div><div class="tab"><span class="ic">📥</span>收件箱<span class="badge">3</span></div><div class="tab on"><span class="ic">🗂</span>工作台</div><div class="tab"><span class="ic">🛰</span>系统</div><div class="tab"><span class="ic">👤</span>我</div></div>
   </div>
-  <p class="note">工作台面：你自己直接看、直接动。手机上先做"改了什么 + diff"和成品库；"直接运行"与"交给会话"在第二批。你在这里的操作记为"代表你本人"的状态变更，Planner 也看得到。</p>
+  <p class="note">工作台面在手机上只做"看"：会话的产出（HTML、文档、表格、截图）可直接预览，成品库汇总所有会话的产出。不放代码 diff，审阅交给 agent 的评审与 CI。</p>
 </div>
 
 <div class="shot">
