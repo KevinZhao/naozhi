@@ -2088,7 +2088,7 @@ v4 的 `GET /api/sessions/workflow_agent`（per-agent 预览）连同它专用�
 | `testdata/routes.golden.json` | `UPDATE_GOLDEN=1 go test -run TestRoutesSnapshot ./internal/server/` | `TestRoutesSnapshot` | PR-10、PR-11（静态资源路由） |
 | workflow REST 响应类型 | `internal/dashboard/ext/workflows/rest_schema_test.go` + `testdata/rest.schema.json`（仿 session 包的 `restResponses` 生成器）；`tools/gen-contract` 与 `contractjs.BuildWireDTS` 改为也读这份 schema，重生成 `static/wire.d.ts`，前端经 `RestResponse_*` 类型使用；路径追加到 `scripts/check-mock-rest.test.mjs:13` 的 schema 读取 | 新包自己的 `TestRESTSchema_IsGenerated`、`TestWireDTS_Current`、tsc（lint-js） | PR-10 |
 | mock-server 的 workflow 路由 | 新增 `/workflow`，含三种行模式（`rows=none`、`since=` → delta / 退回 full）与 `result_unavailable`；**不**扩 `check-mock-rest.test.mjs:51-55` 的 `ROUTES`（那是 EventEntry 夹具专用），另写 workflow 响应的 schema 校验用例 | `check-mock-rest` | PR-10 |
-| 新 ES module 资产 | `static_assets.go` `//go:embed` + 资产表行、`routes.go` 静态路由 + golden | `TestStaticJS_ModuleInventory`（`static_module_inventory_test.go:13-21`）、`TestDashboardPage_ImportMapAndPreload`（`static_versioning_test.go:78`） | PR-11 |
+| 新 ES module 资产 | 放进 `static/` 即自动嵌入并由 `GET /static/{file...}` 服务（#3748 起无需登记 embed、资产表或路由） | `TestStaticJS_ModuleInventory`（`static_module_inventory_test.go:13-21`）、`TestDashboardPage_ImportMapAndPreload`（`static_versioning_test.go:78`） | PR-11 |
 | lint-server-handlers | `-mode fail`；新 server 文件 ≤ 500 行，**不抬基线** | CI | PR-10/11 |
 
 `scripts/js-deps-freeze.mjs` 的 LOAD_ORDER 与 `js-deps-baseline.json` 只覆盖 7 个历史
@@ -2130,7 +2130,7 @@ classic→module 文件（`:36-44`），新 ES module **不**登记在那里。
     `registerActions` 并入——新模块不能顶层调用 `registerActions`，同理也不能顶层调 `onSessionsApplied`：由 `dashboard.js` 在
     :346-347 那组旁加一行 `onSessionsApplied(onSessionsRefreshed)`）。
   - 不 import dashboard.js（D4-1，js-ratchet 的 `importCycles` 必须为 0）。
-- 新文件登记：`static_assets.go` 的 `//go:embed` + 资产表行、`routes.go` 静态路由 + golden、js-ratchet
+- 新文件登记：放进 `static/` 即自动嵌入和路由（#3748）、js-ratchet
   baseline 行、CLAUDE.md:242 模块段落。闸门是 `TestStaticJS_ModuleInventory` 与
   `TestDashboardPage_ImportMapAndPreload`（§6.3）。**由谁 import**：`dashboard.js`（v3 写"dashboard.html 或 event_stream.js"，而 §7.6
   又说 event_stream.js 不碰，PR-11 的文件清单里两者都没有——模块从不被执行，`wsm.on` handler 从不注册；import map 与 modulepreload

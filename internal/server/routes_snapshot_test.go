@@ -307,15 +307,6 @@ func handlerTypeOf(e ast.Expr) string {
 				return "*AuthHandlers"
 			}
 		}
-		// serveStaticJS("render_md.js") — #2554 collapsed 24 byte-identical
-		// module handlers into one factory. The call resolves to the same
-		// http.HandlerFunc the individual handlers did, so the golden is
-		// unchanged; the pattern is still a literal at the call site.
-		if id, ok := call.Fun.(*ast.Ident); ok {
-			if t, ok := packageFuncType[id.Name]; ok {
-				return t
-			}
-		}
 		// s.apiChain()(...) — the chain is a value now (#2554), so the wrapper is
 		// a call on a call. Resolve the wrapped handler when it names one
 		// (s.auth.HandleX → *AuthHandlers); fall back to *AuthHandlers when
@@ -394,13 +385,10 @@ func handlerTypeOf(e ast.Expr) string {
 // http.HandlerFunc. Listing them here pins their handler_type in the
 // golden snapshot.
 var packageFuncType = map[string]string{
-	// serveStaticJS replaced 24 per-module handlers in #2554; every /static/*.js
-	// route now goes through it, and the resolved type is unchanged.
-	"serveStaticJS":      "http.HandlerFunc",
-	"handleManifest":     "http.HandlerFunc",
-	"handleSW":           "http.HandlerFunc",
-	"handleDashboardCSS": "http.HandlerFunc",
-	"handleFavicon":      "http.HandlerFunc",
+	"handleManifest":    "http.HandlerFunc",
+	"handleSW":          "http.HandlerFunc",
+	"handleStaticAsset": "http.HandlerFunc",
+	"handleFavicon":     "http.HandlerFunc",
 }
 
 var serverFieldType = map[string]string{

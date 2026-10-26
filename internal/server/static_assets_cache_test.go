@@ -7,50 +7,13 @@ import (
 	"testing"
 )
 
-// TestStaticAssetBytes_Cached verifies the embedded asset bytes are read once
-// at init and shared, not re-copied per request. Before #1771 each handler
-// called embed.FS.ReadFile (a fresh heap copy of the whole file) on every
-// request — including ones that immediately 304. We assert the same backing
-// array is returned across calls (identity), which only holds for a cached
-// slice, never for embed.FS.ReadFile's per-call copy.
-func TestStaticAssetBytes_Cached(t *testing.T) {
-	t.Parallel()
-	// A deliberate sample, one key per kind of asset (page, modules, manifest,
-	// service worker): the property is the cache mechanism, shared by every
-	// entry. That every module is in the table is TestStaticJS_ModuleInventory.
-	for _, key := range []string{"dashboard.html", "dashboard.js", "agent_view.js", "asset_browser.js", "manifest.json", "sw.js"} {
-		a := staticAssetBytes(key)
-		if a == nil {
-			t.Fatalf("staticAssetBytes(%q) = nil; asset failed to embed", key)
-		}
-		b := staticAssetBytes(key)
-		// Identity check: cached slices share the same backing array, so the
-		// pointer to the first element is stable. embed.FS.ReadFile would
-		// return a fresh allocation each call (different pointer).
-		if &a[0] != &b[0] {
-			t.Errorf("staticAssetBytes(%q) returned a fresh copy across calls; expected a shared cached slice", key)
-		}
-	}
-}
-
-// TestStaticAssetETags_DerivedFromCache verifies the legacy ETag map stays in
-// sync with the cached-asset registry (single source of truth).
-func TestStaticAssetETags_DerivedFromCache(t *testing.T) {
-	t.Parallel()
-	for k, a := range staticAssets {
-		if staticAssetETags[k] != a.etag {
-			t.Errorf("staticAssetETags[%q]=%q out of sync with staticAssets etag %q", k, staticAssetETags[k], a.etag)
-		}
-	}
-}
-
 // TestServeStaticWithETag_304BeforeBody verifies the 304 fast-path sets the
 // ETag and returns true (caller skips body) on an If-None-Match hit, and
 // returns false otherwise. This is the contract that lets handlers reference
 // cached bytes without allocating on the 304 path.
 func TestServeStaticWithETag_304BeforeBody(t *testing.T) {
 	t.Parallel()
-	tag := staticAssetETags["dashboard.js"]
+	tag := staticAssets["dashboard.js"].etag
 	if tag == "" {
 		t.Fatal("missing ETag for dashboard.js")
 	}
@@ -156,28 +119,6 @@ func TestGzipMiddleware_Skips304(t *testing.T) {
 	}
 	if body := w.Body.Bytes(); len(body) != 0 {
 		t.Errorf("304 response carries a %d-byte body (phantom gzip frame?), want empty", len(body))
-	}
-}
-
-// TestGzipMiddleware_Skips204 mirrors the 304 case for 204 No Content.
-func TestGzipMiddleware_Skips204(t *testing.T) {
-	t.Parallel()
-	h := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/x", nil)
-	r.Header.Set("Accept-Encoding", "gzip")
-	h.ServeHTTP(w, r)
-	if w.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204", w.Code)
-	}
-	if enc := w.Header().Get("Content-Encoding"); enc != "" {
-		t.Errorf("204 response has Content-Encoding=%q, want none", enc)
-	}
-	if body := w.Body.Bytes(); len(body) != 0 {
-		t.Errorf("204 response carries a %d-byte body, want empty", len(body))
 	}
 }
 

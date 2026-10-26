@@ -120,7 +120,7 @@ When `projects.root` is configured, `project.Manager` scans every non-hidden sub
 
 ### Dashboard & WebSocket
 
-Embedded PWA at `/dashboard`: `internal/server/static/` (`dashboard.html`, ES modules, `vendor/` KaTeX + mermaid served from `/static/vendor/`). Every module must be listed in the embed inventory (`static_module_inventory_test.go`) or the dashboard loads blank; no inline `onclick` handlers (CSP).
+Embedded PWA at `/dashboard`: `internal/server/static/` (`dashboard.html`, ES modules, `vendor/` KaTeX + mermaid served from `/static/vendor/`). Everything under `static/` is embedded and served from `/static/` by one auth-gated route (`static_module_inventory_test.go` checks every module answers 401/200); no inline `onclick` handlers (CSP).
 `/ws` frame types live in `internal/wsproto` and `contract.js`; the dashboard registers handlers via `wsm.on(NZ_CONTRACT.WS.<type>, ...)` (`ws_manager.js`). Remote node events are relayed with a `node` field.
 REST routes: `internal/server/routes.go` is the authoritative list (grep `HandleFunc`). Health: `/health`, `/livez`, `/readyz`.
 
