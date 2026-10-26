@@ -166,7 +166,7 @@ type CronView = cronview.CronView
 // once per call so the in-loop predicate is O(1) per session.
 type historyFilter struct {
 	skipWorkspace string              // sys-sessions absolute path; "" disables
-	skipSessions  map[string]struct{} // cron known IDs; nil disables. READ-ONLY: shared cache snapshot (#1544).
+	skipSessions  map[string]struct{} // cron known IDs; nil disables. READ-ONLY.
 }
 
 func (f historyFilter) SkipWorkspace(ws string) bool {
@@ -193,11 +193,6 @@ type Handlers struct {
 	// deps is read-only after New. The few test-only mutators live in
 	// test_setters.go and are the only writers.
 	deps Deps
-
-	// uptimeCache memoises the formatted uptime string per 1-second bucket so
-	// N tabs polling at 1 Hz share one alloc. Races are benign: concurrent
-	// misses re-format the same value.
-	uptimeCache atomic.Pointer[uptimeSnapshot]
 
 	// projectListCache memoises the projectList slice per 1-second bucket so N
 	// tabs share one rebuild. The cached slice is READ-ONLY (HandleList copies
@@ -244,18 +239,6 @@ type Handlers struct {
 	// summaryFlight collapses concurrent misses at the TTL boundary into one
 	// LookupSummaries (N×os.Stat) invocation; mirrors historyFlight.
 	summaryFlight singleflight.Group
-}
-
-// workspacesPool recycles the []string scratch that fillProjectAndSummary and
-// loadHistorySessions hand to ProjectManager.ResolveWorkspaces on every poll
-// (#616). ResolveWorkspaces never retains the backing array, so recycling is
-// safe. Entries are *[]string so Put doesn't re-alloc a header; slices grown
-// past 4096 are dropped on Put to bound the steady-state footprint.
-var workspacesPool = sync.Pool{
-	New: func() any {
-		s := make([]string, 0, 32) // typical sidebar fits in this prefix
-		return &s
-	},
 }
 
 // maxEventsPageLimit caps the per-request history slice so a malicious or

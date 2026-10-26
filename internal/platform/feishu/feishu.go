@@ -36,29 +36,16 @@ const (
 	// short expiry, keeping singleflight effective against refresh storms.
 	minTokenCacheDuration = 30 * time.Second
 
-	// maxWebhookBodyBytes caps the webhook request body; 64 KiB is well above
-	// any legitimate Feishu payload.
-	maxWebhookBodyBytes = 64 * 1024
+	// tokenFailCooldown bounds how long a failed token refresh is cached: 5s
+	// balances operator-visible recovery with upstream rate protection.
+	tokenFailCooldown = 5 * time.Second
 
-	// maxWebhookNonceLen bounds X-Lark-Request-Nonce (16 chars in practice)
-	// so a header flood cannot bloat the seenNonces map.
-	maxWebhookNonceLen = 128
-
-	// maxEventIDLen caps inbound event_id before it lands in the dedup map;
-	// shared by transport_ws.go and transport_hook.go.
+	// maxEventIDLen caps inbound event_id before it lands in the dedup map.
 	maxEventIDLen = 256
 
 	// maxIncomingTextBytes caps decoded inbound text; aliases
 	// platform.DefaultMaxIncomingBytes so all adapters share one source of truth.
 	maxIncomingTextBytes = platform.DefaultMaxIncomingBytes
-
-	// maxWebhookTokenLen bounds the body token before constantTimeEqualString
-	// hashes it (~32 bytes real) so a 64 KiB body is not a per-request SHA-256 DoS lever.
-	maxWebhookTokenLen = 512
-
-	// maxWebhookSigLen bounds X-Lark-Signature (64-byte hex real) before
-	// verifySignature concatenates + hashes.
-	maxWebhookSigLen = 256
 
 	// wsStopTimeout caps how long Stop() waits for the lark-ws SDK, whose
 	// Start() may block in select{} — keep systemd's stop deadline meaningful.
@@ -151,22 +138,14 @@ func (e *APIError) IsTokenInvalidated() bool {
 type Config struct {
 	AppID             string `yaml:"app_id"`
 	AppSecret         string `yaml:"app_secret"`
-	ConnectionMode    string `yaml:"connection_mode"` // "websocket" (default) | "webhook"
 	VerificationToken string `yaml:"verification_token"`
 	EncryptKey        string `yaml:"encrypt_key"`
 	MaxReplyLen       int    `yaml:"max_reply_length"`
-
-	// AllowInsecureWebhook opts in to verification_token-only webhook mode (no
-	// encrypt_key HMAC): a passive observer who sees the plaintext token can
-	// forge/replay events within the 5min window, so the webhook refuses to
-	// start without this explicit, audited choice (#1507).
-	AllowInsecureWebhook bool `yaml:"allow_insecure_webhook"`
 }
 
 // Feishu implements the Platform and RunnablePlatform interfaces.
 type Feishu struct {
 	cfg         Config
-	mode        string       // resolved connection mode
 	baseURL     string       // API base URL (overridable for testing)
 	fileHTTP    *http.Client // file downloads (overridable for testing)
 	accessToken string
@@ -189,7 +168,7 @@ type Feishu struct {
 	// Set by SetAdmission before RegisterRoutes/Start, read-only after.
 	admit platform.AdmitFunc
 
-	// Lifecycle context: cancelled on Stop(), used by webhook goroutines.
+	// Lifecycle context: cancelled on Stop(), used by message goroutines.
 	stopCtx    context.Context
 	stopCancel context.CancelFunc
 
@@ -197,7 +176,7 @@ type Feishu struct {
 	handler platform.MessageHandler
 	cancel  context.CancelFunc
 	done    chan struct{}
-	// dispatch bounds concurrent inbound handler goroutines (both transports)
+	// dispatch bounds concurrent inbound handler goroutines
 	// and tracks them plus the bot-info self-heal so Stop() can drain (#2254).
 	dispatch platform.BoundedDispatch
 	startMu  sync.Mutex
@@ -205,27 +184,12 @@ type Feishu struct {
 	// connState is fed by the websocket transport's lifecycle hooks.
 	connState platform.ConnTracker
 
-	// cleanupWg tracks the cleanupNonces goroutine so Stop() can wait it out.
+	// cleanupWg tracks the cleanupReactions goroutine so Stop() can wait it out.
 	cleanupWg sync.WaitGroup
-
-	// Replay protection: stores "ts:nonce" -> expiry unix timestamp.
-	seenNonces sync.Map
-	// seenNoncesCount approximates len(seenNonces) so the cap check avoids an
-	// O(n) Range. Eventually consistent: a few extra entries between check and
-	// increment are bounded and harmless.
-	seenNoncesCount atomic.Int64
-	// nonceEvictMu serializes evictOldestNonces: overlapping evictions would
-	// split the counter adjustment and let it dip below the map's real size,
-	// bypassing the cap gate. Eviction-and-recount is one critical section (#1534).
-	nonceEvictMu sync.Mutex
-
-	// evictNoncesFn lets tests inject the eviction step (incl. the evicted==0
-	// fallback) without seeding a 50k-entry map; nil = evictOldestNonces.
-	evictNoncesFn func() int
 
 	// reactionIDs caches (messageID + emoji_type) -> reactionCacheEntry because
 	// Feishu's delete endpoint needs the reaction_id. Entries go on successful
-	// removal or when cleanupNoncesTick sees the expiry, so unpaired Adds
+	// removal or when cleanupReactionsTick sees the expiry, so unpaired Adds
 	// (restart, message deleted) cannot accumulate forever.
 	reactionIDs sync.Map
 
@@ -240,11 +204,6 @@ type Feishu struct {
 
 	// unsupportedNotices rate-limits the unsupported-message-type notice per chat.
 	unsupportedNotices noticeThrottle
-
-	// insecureWebhookWarnOnce emits one runtime SECURITY error on the first
-	// live delivery in verification_token-only mode — traffic-correlated and
-	// harder to miss than the boot Warn; Once prevents log amplification (#1724).
-	insecureWebhookWarnOnce sync.Once
 }
 
 // New creates a Feishu platform adapter. transcriber may be nil to disable voice.
@@ -252,18 +211,14 @@ func New(cfg Config, transcriber transcribe.Service) *Feishu {
 	if cfg.MaxReplyLen <= 0 {
 		cfg.MaxReplyLen = platform.DefaultMaxReplyLen
 	}
-	mode := cfg.ConnectionMode
-	if mode == "" {
-		mode = "websocket"
-	}
 	ctx, cancel := context.WithCancel(context.Background())
-	f := &Feishu{cfg: cfg, mode: mode, baseURL: "https://open.feishu.cn", fileHTTP: feishuFileDownloadClient, transcriber: transcriber, dispatch: platform.BoundedDispatch{Name: "feishu"}, stopCtx: ctx, stopCancel: cancel}
+	f := &Feishu{cfg: cfg, baseURL: "https://open.feishu.cn", fileHTTP: feishuFileDownloadClient, transcriber: transcriber, dispatch: platform.BoundedDispatch{Name: "feishu"}, stopCtx: ctx, stopCancel: cancel}
 	f.cleanupWg.Add(1)
 	go func() {
 		defer f.cleanupWg.Done()
 		// Field lookup (not the local ctx) so a future stopCtx swap cannot
 		// leave this goroutine on a never-cancelled context.
-		f.cleanupNonces(f.stopCtx)
+		f.cleanupReactions(f.stopCtx)
 	}()
 	return f
 }
@@ -274,12 +229,9 @@ func (f *Feishu) MaxReplyLength() int { return f.cfg.MaxReplyLen }
 
 func (f *Feishu) SupportsInterimMessages() bool { return true }
 
-// ConnState implements platform.ConnStateReporter. Only the websocket
-// transport holds a connection; webhook mode reports not-observable.
+// ConnState implements platform.ConnStateReporter from the websocket
+// transport's lifecycle hooks.
 func (f *Feishu) ConnState() (platform.ConnState, bool) {
-	if f.mode != "websocket" {
-		return platform.ConnState{}, false
-	}
 	return f.connState.Snapshot()
 }
 
@@ -292,14 +244,11 @@ func (f *Feishu) admitted(ctx context.Context, msg platform.IncomingMessage) boo
 	return f.admit == nil || f.admit(ctx, msg)
 }
 
-// RegisterRoutes registers webhook routes (only in webhook mode).
-func (f *Feishu) RegisterRoutes(mux *http.ServeMux, handler platform.MessageHandler) {
-	if f.mode == "webhook" {
-		f.registerWebhook(mux, handler)
-	}
-}
+// RegisterRoutes is a no-op: Feishu events arrive over the websocket long
+// connection, so there is no HTTP route.
+func (f *Feishu) RegisterRoutes(*http.ServeMux, platform.MessageHandler) {}
 
-// Start implements RunnablePlatform. Launches WebSocket connection in WS mode.
+// Start implements RunnablePlatform. Launches the WebSocket connection.
 func (f *Feishu) Start(handler platform.MessageHandler) error {
 	f.startMu.Lock()
 	if f.started {
@@ -326,26 +275,8 @@ func (f *Feishu) Start(handler platform.MessageHandler) error {
 		}
 	}()
 
-	if f.mode == "websocket" {
-		slog.Info("feishu using websocket mode (no public IP needed)")
-		return f.startWebSocket()
-	}
-	// Webhook mode is a public endpoint: without either credential anyone on
-	// the internet could inject forged events.
-	if f.cfg.VerificationToken == "" && f.cfg.EncryptKey == "" {
-		return fmt.Errorf("feishu webhook mode requires verification_token or encrypt_key to be configured")
-	}
-	// Token-only mode is forgeable if the plaintext token leaks; require the
-	// explicit allow_insecure_webhook opt-in (#1507).
-	if f.cfg.EncryptKey == "" {
-		if !f.cfg.AllowInsecureWebhook {
-			return fmt.Errorf("feishu webhook: verification_token-only mode has no HMAC and is replay/forgery-prone if the token leaks; " +
-				"configure encrypt_key (recommended) or set allow_insecure_webhook: true to accept this risk")
-		}
-		slog.Warn("feishu webhook: running in verification_token-only mode (allow_insecure_webhook=true) — no encrypt_key HMAC; events are replay/forgery-prone if the token leaks")
-	}
-	slog.Info("feishu using webhook mode")
-	return nil
+	slog.Info("feishu using websocket mode (no public IP needed)")
+	return f.startWebSocket()
 }
 
 // Stop implements RunnablePlatform. Stops WebSocket connection.
@@ -369,6 +300,6 @@ func (f *Feishu) Stop() error {
 		}
 	}
 	f.dispatch.Wait()  // in-flight message handlers
-	f.cleanupWg.Wait() // cleanupNonces goroutine
+	f.cleanupWg.Wait() // cleanupReactions goroutine
 	return nil
 }

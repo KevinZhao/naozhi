@@ -34,7 +34,7 @@ func TestRegistry_SwapAndExpireHandClosuresBack(t *testing.T) {
 	}
 	old()
 
-	stale, _ := r.expire(c, "k", 0)
+	stale := r.expire(c, "k", 0)
 	if calls != 1 {
 		t.Fatal("expire ran the displaced closure itself")
 	}

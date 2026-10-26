@@ -79,11 +79,8 @@ type Config struct {
 type Connector struct {
 	cfg *Config
 	// router is the SessionRouter subset used by Connector (consumer.go).
-	router  SessionRouter
-	projMgr *project.Manager // may be nil
-	// resolver derives planner-view opts for reverse-RPC restart_planner
-	// (docs/rfc/key-resolver.md Phase 5); nil refuses restart_planner.
-	resolver         PlannerResolver
+	router           SessionRouter
+	projMgr          *project.Manager // may be nil
 	claudeDir        string
 	hostname         string
 	defaultWorkspace string // used as allowedRoot for incoming workspace overrides
@@ -96,9 +93,8 @@ type Connector struct {
 }
 
 // New creates a Connector. projMgr may be nil if projects are not configured;
-// resolver may be nil (restart_planner then refuses);
 // turns may be nil only where nothing sends.
-func New(cfg *Config, router SessionRouter, projMgr *project.Manager, resolver PlannerResolver, discovery Discovery, turns TurnSubmitter) *Connector {
+func New(cfg *Config, router SessionRouter, projMgr *project.Manager, discovery Discovery, turns TurnSubmitter) *Connector {
 	claudeDir := ""
 	if home, err := os.UserHomeDir(); err == nil {
 		claudeDir = filepath.Join(home, ".claude")
@@ -112,7 +108,6 @@ func New(cfg *Config, router SessionRouter, projMgr *project.Manager, resolver P
 		cfg:              cfg,
 		router:           router,
 		projMgr:          projMgr,
-		resolver:         resolver,
 		claudeDir:        claudeDir,
 		hostname:         hostname,
 		defaultWorkspace: router.DefaultWorkspace(),

@@ -75,8 +75,7 @@ func TestParseSDKEvent_FileMessage(t *testing.T) {
 	}
 }
 
-// The WS transport validates resource keys like the webhook does: the key is
-// sender-controlled and goes into the download URL.
+// The WS transport validates resource keys: the key is sender-controlled and goes into the download URL.
 func TestParseSDKEvent_RejectsMalformedResourceKey(t *testing.T) {
 	t.Parallel()
 	bad := map[string]string{
@@ -204,9 +203,9 @@ func TestHandleFile_RefusedOrCancelledForwardsNothing(t *testing.T) {
 	})
 }
 
-// Both transports route a file message to the download and on to the
+// The websocket transport routes a file message to the download and on to the
 // handler with the sender's file name.
-func TestFileMessage_BothTransports(t *testing.T) {
+func TestFileMessage_WebSocket(t *testing.T) {
 	t.Parallel()
 	check := func(t *testing.T, stub *fileStub, h *handled) {
 		t.Helper()
@@ -226,21 +225,6 @@ func TestFileMessage_BothTransports(t *testing.T) {
 	}
 	const content = `{"file_key":"file_v3_abc","file_name":"notes.md"}`
 
-	t.Run("webhook", func(t *testing.T) {
-		t.Parallel()
-		stub := &fileStub{body: pdfBytes}
-		f := newFileFeishu(t, Config{ConnectionMode: "webhook", VerificationToken: "test_token"}, stub)
-		var h handled
-		mux := http.NewServeMux()
-		f.registerWebhook(mux, h.handler)
-		w := httptest.NewRecorder()
-		mux.ServeHTTP(w, buildTokenRequest(buildV2MediaBody("ev_file", "file", content)))
-		if w.Code != http.StatusOK {
-			t.Fatalf("webhook status = %d, want 200", w.Code)
-		}
-		f.dispatch.Wait()
-		check(t, stub, &h)
-	})
 	t.Run("websocket", func(t *testing.T) {
 		t.Parallel()
 		stub := &fileStub{body: pdfBytes}
@@ -254,21 +238,6 @@ func TestFileMessage_BothTransports(t *testing.T) {
 		f.dispatch.Wait()
 		check(t, stub, &h)
 	})
-}
-
-func TestWebhook_FileMessageMalformedKeyNotDownloaded(t *testing.T) {
-	t.Parallel()
-	stub := &fileStub{body: pdfBytes}
-	f := newFileFeishu(t, Config{ConnectionMode: "webhook", VerificationToken: "test_token"}, stub)
-	var h handled
-	mux := http.NewServeMux()
-	f.registerWebhook(mux, h.handler)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, buildTokenRequest(buildV2MediaBody("ev_badfile", "file", `{"file_key":"file key","file_name":"a.pdf"}`)))
-	f.dispatch.Wait()
-	if stub.hits.Load() != 0 || len(h.all()) != 0 {
-		t.Errorf("malformed file_key: downloads=%d handled=%d, want 0/0", stub.hits.Load(), len(h.all()))
-	}
 }
 
 // The shared client's 10s Client.Timeout also covers the body read, so a file

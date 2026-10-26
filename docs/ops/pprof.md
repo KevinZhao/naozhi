@@ -121,7 +121,7 @@ curl -s -H "Authorization: Bearer $TOK" 'http://127.0.0.1:8180/api/debug/pprof/g
 | `naozhi_ws_auth_fail_invalid_token_total` | WSAuthFail 的 invalid-token 分支子集 | 相对 rate_limited 占比高 = 单 IP 在 pace 下撞密码（credential spray 特征） |
 | `naozhi_shim_restart_total` | `shim.StartShimWithBackend` 成功（Reconnect **不计**） | 两次重启间持续增长 = shim 在 crash→respawn |
 | `naozhi_spawn_panic_recovered_total` | `panicSafeSpawn` 吞掉的 wrapper.Spawn panic | 非零即需 grep journalctl 定位 root cause（进程活着但 bug 存在） |
-| `naozhi_panic_recovered_total` | 全局 recover() 吞掉的 panic 数（wsclient readPump / wshub 远程 send+interrupt goroutine / dispatch ownerLoop / feishu cleanupNoncesTick 等高信号点）；`spawn_panic_recovered` 是其真子集 | 非零=有 panic 被 recover；按时间戳对齐 slog.Error stack dump 定位 root cause |
+| `naozhi_panic_recovered_total` | 全局 recover() 吞掉的 panic 数（wsclient readPump / wshub 远程 send+interrupt goroutine / dispatch ownerLoop / feishu cleanupReactionsTick 等高信号点）；`spawn_panic_recovered` 是其真子集 | 非零=有 panic 被 recover；按时间戳对齐 slog.Error stack dump 定位 root cause |
 | `naozhi_shim_reconnect_grace_backfill_total` | shim 场景 `shimReconnectGraceDelay` 超时的 JSONL 延后 backfill（R53-ARCH-001 兜底路径） | 非零 = ReconnectShims 漏了某些 shim（shim 在 shimManagedKeys 与 Discover 间 die） |
 | `naozhi_interrupt_sent_total` | InterruptViaControl 成功把 control_request 送到 CLI | dashboard interrupt 按钮的 happy path，pair Interrupt* 其它 3 个看用户效用 |
 | `naozhi_interrupt_no_turn_total` | InterruptViaControl session 在但无 active turn | 相对 sent 占比高 = UI 该在 idle 状态禁用 interrupt 按钮 |
@@ -176,7 +176,7 @@ curl -s -H "Authorization: Bearer $TOK" 'http://127.0.0.1:8180/api/debug/pprof/g
 | `naozhi_dispatch_reply_error_total` | IM 轮次在 Claude 侧失败的次数（`handleSendError`：Send 报错、超时、`ErrSessionReset`）；平台回复路径本身正常 | 看它与 `naozhi_dispatch_message_total` 的比值；比值抬升 = backend / session 退化，对照 slog 的 send error 日志 |
 | `naozhi_dispatch_send_fail_total` | 平台 adapter `Reply` / `EditMessage` 返回错误的次数：回复**没送到** IM 频道 | 持续非零即告警；查平台 adapter 日志与 webhook / bot 凭证 |
 | `naozhi_dispatch_denied_total` | expvar.Map，键 `<platform>:<reason>`：`im_access` 拒绝的 IM 消息数。reason 为 `not_allowed`（不在 allowed_users / admin_users）/ `not_admin`（允许聊天但发了 /cron /cd /project）/ `empty_user`（平台没给发送者 ID）/ `default_deny`（`default_deny: true` 且该平台无条目） | 非零即有人被挡在外面：对照 slog 的 `im access denied` 行取 user ID，是自己人就加进 `im_access.platforms.<p>.allowed_users` |
-| `naozhi_dispatch_budget_blocked_total` | expvar.Map，按 scope 分键：`cost.budget` 拒绝的 IM 轮次数。键为 `chat`（会话的 `per_chat_daily_usd` 用完）/ `project`（绑定项目的 planner 用完同一档）/ `global`（`daily_usd` 用完） | 非零 = 当天有会话被挡：`global` 涨要看整机花费是否异常（对照 `naozhi cost`）；`chat` 集中在某一会话就对照 slog 的 `im turn refused: daily budget spent` 行 |
+| `naozhi_dispatch_budget_blocked_total` | expvar.Map，按 scope 分键：`cost.budget` 拒绝的 IM 轮次数。键为 `chat`（会话的 `per_chat_daily_usd` 用完）/ `project`（绑定项目的 planner 用完同一档）/ `global`（`daily_usd` 用完） | 非零 = 当天有会话被挡：`global` 涨要看整机花费是否异常（对照 `/api/cost/summary`）；`chat` 集中在某一会话就对照 slog 的 `im turn refused: daily budget spent` 行 |
 | `naozhi_dispatch_rate_limited_total` | `im_rate_limit` 丢弃的 IM 消息数（某个发送者超出 `msgs_per_min` / `burst`；`/stop` 不计） | 非零 = 有人发得比限额快：对照 slog 的 `im message rate limited` 行看是谁；自己人常被挡就调大 `burst` |
 | `naozhi_webhook_delivered_total` | expvar.Map，键 = `integrations.webhooks` 下标：某端点 2xx 接收的事件数 | 观察量；与 failed 对比看端点健康 |
 | `naozhi_webhook_failed_total` | expvar.Map，键 = 端点下标：重试用尽（4 次）或被 4xx 拒绝的事件数 | 非零即接收方有问题：slog `webhook delivery failed` / `webhook rejected` 带 status 与 host |

@@ -359,7 +359,7 @@ func (d *Dispatcher) inboundLogger(msg platform.IncomingMessage) *slog.Logger {
 // resolution, image conversion). Returns false when the message was fully
 // handled or dropped here.
 func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMessage) (preparedInbound, bool) {
-	// Dedup first: platform retries (e.g. Feishu webhook re-delivery) must
+	// Dedup first: platform retries (e.g. IM event re-delivery) must
 	// not double-dispatch. Empty EventID (#1310) falls back to a composite
 	// minute-bucketed key since Seen("") never records. The ID is consumed
 	// even if the message is later gated/dropped — benign in practice.

@@ -99,29 +99,6 @@ func NewStore(dir string, opts Options) *Store {
 	return s
 }
 
-// OpenReadOnly opens the ledger at dir for Scan, Entries and Summarize
-// without creating, sweeping or writing anything: Append always returns
-// false.
-func OpenReadOnly(dir string, opts Options) *Store {
-	if dir == "" {
-		return &Store{disabled: true}
-	}
-	rd := clampRetention(opts.RetentionDays)
-	now := opts.Now
-	if now == nil {
-		now = time.Now
-	}
-	s := &Store{
-		dir:       dir,
-		retention: time.Duration(rd) * 24 * time.Hour,
-		now:       now,
-		ch:        make(chan Entry),
-		rates:     NewRateBook(),
-	}
-	s.closed.Store(true)
-	return s
-}
-
 // clampRetention applies the documented range [1, MaxRetentionDays]
 // (0 = DefaultRetentionDays); an out-of-range value warns and clamps, never
 // fails.

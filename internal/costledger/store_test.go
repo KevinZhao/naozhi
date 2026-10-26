@@ -126,45 +126,26 @@ func TestStore_AdjustEntriesNetOut(t *testing.T) {
 	}
 	s.Close()
 
-	for _, st := range []*Store{NewStore(dir, Options{Now: func() time.Time { return t0 }}), OpenReadOnly(dir, Options{Now: func() time.Time { return t0 }})} {
-		q := Query{From: t0.Add(-time.Hour), To: t0.Add(time.Hour), GroupBy: GroupBySource}
-		sum, err := st.Summarize(q)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if b, _ := bucket(sum, "session", UnitUSD); b.Amount != 2.5 || b.Tokens.CacheRead != 400 || sum.Kinds["adjust"] != 1 {
-			t.Errorf("by source = %+v kinds=%v, want 2.5 / 400 cache-read / one adjust", b, sum.Kinds)
-		}
-		q.GroupBy, q.SessionKey = GroupByModel, "feishu:p2p:u1"
-		sum, _ = st.Summarize(q)
-		if b, _ := bucket(sum, "opus", UnitUSD); b.Amount != 2.5 {
-			t.Errorf("by model (scan) = %+v, want 2.5", b)
-		}
-		var got []Entry
-		_ = st.Scan(Query{From: t0.Add(-time.Hour), To: t0.Add(time.Hour), RunID: "reconcile:x"}, func(e Entry) bool { got = append(got, e); return true })
-		if len(got) != 1 || got[0].Amount != -7.5 || got[0].Models[0].CostUSD != -7.5 || got[0].Models[0].CacheRead != -600 {
-			t.Errorf("scan = %+v", got)
-		}
-		st.Close()
+	st := NewStore(dir, Options{Now: func() time.Time { return t0 }})
+	q := Query{From: t0.Add(-time.Hour), To: t0.Add(time.Hour), GroupBy: GroupBySource}
+	sum, err := st.Summarize(q)
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-// A read-only store answers queries over existing day files but never
-// writes: Append refuses, and a missing directory is not created.
-func TestOpenReadOnly_NeverWrites(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "cost")
-	s := OpenReadOnly(dir, Options{})
-	if s.Append(mk(t0, SourceSession, UnitUSD, 1)) || s.Dropped() != 0 {
-		t.Errorf("read-only store took an append (dropped=%d); it must refuse it outright", s.Dropped())
+	if b, _ := bucket(sum, "session", UnitUSD); b.Amount != 2.5 || b.Tokens.CacheRead != 400 || sum.Kinds["adjust"] != 1 {
+		t.Errorf("by source = %+v kinds=%v, want 2.5 / 400 cache-read / one adjust", b, sum.Kinds)
 	}
-	if err := s.Scan(Query{From: t0.Add(-time.Hour), To: t0}, func(Entry) bool { return true }); err != nil {
-		t.Errorf("scan of a missing ledger: %v", err)
+	q.GroupBy, q.SessionKey = GroupByModel, "feishu:p2p:u1"
+	sum, _ = st.Summarize(q)
+	if b, _ := bucket(sum, "opus", UnitUSD); b.Amount != 2.5 {
+		t.Errorf("by model (scan) = %+v, want 2.5", b)
 	}
-	s.Close()
-	s.Close()
-	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Errorf("read-only open created %s (err=%v)", dir, err)
+	var got []Entry
+	_ = st.Scan(Query{From: t0.Add(-time.Hour), To: t0.Add(time.Hour), RunID: "reconcile:x"}, func(e Entry) bool { got = append(got, e); return true })
+	if len(got) != 1 || got[0].Amount != -7.5 || got[0].Models[0].CostUSD != -7.5 || got[0].Models[0].CacheRead != -600 {
+		t.Errorf("scan = %+v", got)
 	}
+	st.Close()
 }
 
 func seed(t *testing.T, s *Store) {

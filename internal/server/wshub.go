@@ -9,7 +9,6 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
-	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -75,11 +74,6 @@ type Hub struct {
 	// tailers is the agentTailer registry behind agent_subscribe /
 	// agent_unsubscribe; initialised by NewHub, torn down in Shutdown.
 	tailers *tailerRegistry
-
-	// historyMarshalCache lets N tabs on one session pay one "history" frame
-	// marshal per notify wave; cleared on last unsubscribe per key and on
-	// Shutdown (see wshub_eventpush_cache.go).
-	historyMarshalCache *historyMarshalCache
 }
 
 // HubOptions holds configuration for a Hub.
@@ -158,7 +152,6 @@ func NewHub(opts HubOptions) *Hub {
 		workflowPace:         defaultWorkflowPace,
 	}
 	h.tailers = newTailerRegistry(opts.AllowedRoot)
-	h.historyMarshalCache = newHistoryMarshalCache()
 	return h
 }
 
@@ -175,16 +168,9 @@ func (h *Hub) register(c *wsClient) {
 func (h *Hub) unregister(c *wsClient) {
 	// The closures take EventLog locks; the registry hands them back so they
 	// run with its lock released.
-	unsubs, dropKeys, removed := h.subs.remove(c)
+	unsubs, removed := h.subs.remove(c)
 	for _, unsub := range unsubs {
 		unsub()
-	}
-	// Keys left with no subscriber drop their historyMarshalCache slot, as
-	// handleUnsubscribe does.
-	if len(dropKeys) > 0 {
-		for _, key := range dropKeys {
-			h.historyMarshalCache.drop(key)
-		}
 	}
 	if removed {
 		// Guarded on `removed` so a double-unregister cannot drive the
@@ -198,19 +184,8 @@ func (h *Hub) unregister(c *wsClient) {
 		h.tailers.detachClient(c)
 	}
 
-	// appendConns skips alloc on an empty table (nodesPtr stays nil) so the
-	// common single-node disconnect makes no pool round-trip; the pool borrow
-	// runs inside alloc so count check + fill share one lock acquisition.
-	var nodesPtr *[]node.Conn
-	nodes := h.nodes.appendConns(func(n int) []node.Conn {
-		nodesPtr = unregisterNodesPool.Get().(*[]node.Conn)
-		buf := (*nodesPtr)[:0]
-		if cap(buf) < n {
-			buf = make([]node.Conn, 0, n)
-		}
-		return buf
-	})
-	if nodesPtr == nil {
+	nodes := h.nodes.Conns()
+	if len(nodes) == 0 {
 		return
 	}
 
@@ -231,21 +206,6 @@ func (h *Hub) unregister(c *wsClient) {
 		}
 		wg.Wait()
 	}
-	// Nil out references so returned node.Conn values stay GC-eligible.
-	for i := range nodes {
-		nodes[i] = nil
-	}
-	*nodesPtr = nodes[:0]
-	unregisterNodesPool.Put(nodesPtr)
-}
-
-// unregisterNodesPool reuses Hub.unregister's []node.Conn snapshot; it holds
-// pointers so Pool.Put does not allocate (go vet "Put argument allocates").
-var unregisterNodesPool = sync.Pool{
-	New: func() any {
-		s := make([]node.Conn, 0, 4)
-		return &s
-	},
 }
 
 // Shutdown closes all WebSocket client connections and relays.
@@ -294,12 +254,9 @@ func (h *Hub) Shutdown() {
 	// gone and silently drop a wiring. After Wait no client goroutine remains.
 	h.clientWG.Wait()
 	// A fire that started before close may still be fanning out; let it
-	// finish before the marshal cache and admission state go.
+	// finish before the admission state goes.
 	h.bcast.wait()
 	h.tailers.releaseLinkers()
-
-	// Safe after clientWG.Wait — no eventPushLoop calls getOrMarshal again.
-	h.historyMarshalCache.reset()
 
 	// After clientWG.Wait: no owner-slot or send-budget caller remains.
 	h.admit.close()

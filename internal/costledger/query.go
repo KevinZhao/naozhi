@@ -158,8 +158,8 @@ func (s *Store) Entries(q Query, limit int) ([]Entry, error) {
 }
 
 // Scan streams every entry matching q (filters + window) through fn in day
-// order, stopping when fn returns false. Backfill and audits use it; the
-// same validation and caps as Summarize apply.
+// order, stopping when fn returns false. The same validation and caps as
+// Summarize apply.
 func (s *Store) Scan(q Query, fn func(Entry) bool) error {
 	if s == nil || s.disabled {
 		return nil

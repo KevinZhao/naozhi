@@ -18,11 +18,6 @@ func (a testRouterAdapter) SessionFor(key string) Session {
 	return testSession(a.Router.SessionFor(key))
 }
 
-func (a testRouterAdapter) ResetAndRecreate(ctx context.Context, key string, opts sessionview.AgentOpts) (Session, error) {
-	s, err := a.Router.ResetAndRecreate(ctx, key, opts)
-	return testSession(s), err
-}
-
 func (a testRouterAdapter) ReserveTakeover(key string, opts sessionview.AgentOpts) (TakeoverLease, error) {
 	lease, err := a.Router.ReserveTakeover(key, opts)
 	if err != nil {

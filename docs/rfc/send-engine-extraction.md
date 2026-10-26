@@ -331,7 +331,7 @@ func (e *sendEngine) drain() {
 
 **幂等与二次调用**：`drain()` 调两次安全（`closed` 是 `trackMu` 下的单调 bool，`WaitGroup.Wait` 可并发调用）。生产上 `Hub.Shutdown` 只有一个调用者（`server.go:607-614` 的 once-only shutdown goroutine），`h.cancel()` 全仓只出现一次（`wshub.go:643`）。
 
-**`h.engine != nil`** 这一个判断是给 12 个测试文件里 35 处手搓 `&Hub{}` 留的（不走 `NewHub`），与同文件既有的 `h.tailers != nil` / `h.historyMarshalCache != nil` 同类，注释写明原因。
+**`h.engine != nil`** 这一个判断是给 12 个测试文件里 35 处手搓 `&Hub{}` 留的（不走 `NewHub`），与同文件既有的 `h.tailers != nil` 同类，注释写明原因。
 
 **新增源序 pin**（比 markdown 里的 grep 有用，与既有 `TestHubShutdown_OrderingInSource` 同构）：`h.engine.drain()` 的源码 offset 必须 > `h.cancel()`、> `debounceMu.Unlock()`、> 最后一个 `h.mu.Unlock()`、> `h.clientWG.Wait()`，且 < `h.nodes.Conns()`。
 

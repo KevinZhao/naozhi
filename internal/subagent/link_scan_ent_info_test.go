@@ -47,36 +47,6 @@ func TestRawScanSubagentsDir_EntInfo_SkipsOversized(t *testing.T) {
 	}
 }
 
-// TestRawScanSubagentsDir_EntInfo_MissingFile exercises the ent.Info()
-// error branch: if the DirEntry's Info() call fails the entry must be
-// skipped gracefully (no panic, no error propagation). On real filesystems
-// this is rare but covered by the branch — we simulate it by passing a
-// directory that disappears under the scan; instead we just verify a
-// corrupt (zero-byte, non-JSON) file is handled without crashing.
-func TestRawScanSubagentsDir_EntInfo_ValidFile(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-
-	hex1 := "aabbccdd11223344c"
-	hex2 := "ccddee001122334d0"
-	writeMetaJSON(t, dir, hex1, map[string]string{"agentType": "orchestrator"})
-	writeMetaJSON(t, dir, hex2, map[string]string{"agentType": "worker"})
-
-	entries := rawScanSubagentsDir(dir)
-	if len(entries) != 2 {
-		t.Fatalf("expected 2 entries, got %d", len(entries))
-	}
-	found := map[string]string{}
-	for _, e := range entries {
-		found[e.hex] = e.agentType
-	}
-	for hex, wantType := range map[string]string{hex1: "orchestrator", hex2: "worker"} {
-		if got := found[hex]; got != wantType {
-			t.Errorf("hex=%q: got agentType=%q, want %q", hex, got, wantType)
-		}
-	}
-}
-
 func writeMetaJSON(t *testing.T, dir, hex string, v any) {
 	t.Helper()
 	data, err := json.Marshal(v)
