@@ -63,13 +63,12 @@ func TestUpstreamConfig_LogValue_RedactsToken(t *testing.T) {
 
 // R20260616-SEC-1: FeishuConfig implements slog.LogValuer so a direct slog
 // serialization redacts AppSecret / VerificationToken / EncryptKey instead of
-// leaking them, while non-secret fields (app_id, connection_mode) survive.
+// leaking them, while non-secret fields (app_id) survive.
 func TestFeishuConfig_LogValue_RedactsSecrets(t *testing.T) {
 	t.Parallel()
 	cfg := FeishuConfig{
 		AppID:             "cli_app_1234",
 		AppSecret:         "feishu-app-secret-PLAINTEXT-1",
-		ConnectionMode:    "websocket",
 		VerificationToken: "verify-token-PLAINTEXT-2",
 		EncryptKey:        "encrypt-key-PLAINTEXT-3",
 		MaxReplyLength:    4000,
@@ -89,9 +88,6 @@ func TestFeishuConfig_LogValue_RedactsSecrets(t *testing.T) {
 	}
 	if !strings.Contains(out, "cli_app_1234") {
 		t.Errorf("non-secret app_id should still be logged: %s", out)
-	}
-	if !strings.Contains(out, "websocket") {
-		t.Errorf("non-secret connection_mode should still be logged: %s", out)
 	}
 }
 

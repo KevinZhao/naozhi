@@ -37,8 +37,7 @@
 #                            profile NAME, and adds chat bindings and display
 #                            name/emoji. It never carries env values.
 #   Process environment      a few runtime knobs are read directly, e.g. TZ,
-#                            HOME, NAOZHI_ALLOW_INSECURE_WEBHOOK and
-#                            NAOZHI_ALLOW_PRIVATE_BASE_URL.
+#                            HOME and NAOZHI_ALLOW_PRIVATE_BASE_URL.
 #
 # Commands:
 #   `naozhi config check -config config.yaml`    validate without booting;

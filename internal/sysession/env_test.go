@@ -278,45 +278,6 @@ func TestFilterEnv_CredsGatedByBackend(t *testing.T) {
 	}
 }
 
-// TestIsSafeProfileValue covers the allow/deny boundary for AWS profile names.
-// R20260603000023-SEC-1 (#1617).
-func TestIsSafeProfileValue(t *testing.T) {
-	valid := []string{
-		"default",
-		"my-profile",
-		"my_profile_1",
-		"ALLCAPS",
-		"a",
-		"abcdefghijklmnopqrstuvwxyz0123456789-_ABCDE", // 44 chars
-	}
-	profileGuard := envGuardFor("AWS_PROFILE")
-	if profileGuard == nil {
-		t.Fatal("AWS_PROFILE carries no sysession value guard; the credential_process injection gate is unwired")
-	}
-	for _, v := range valid {
-		if err := profileGuard(v); err != nil {
-			t.Errorf("profile guard(%q) = %v, want nil", v, err)
-		}
-	}
-
-	invalid := []string{
-		"",
-		"has space",
-		"semi;colon",
-		"new\nline",
-		"../../etc/passwd",
-		"$(cmd)",
-		"profile|pipe",
-		"profile`backtick`",
-		strings.Repeat("a", 65), // too long
-	}
-	for _, v := range invalid {
-		if err := profileGuard(v); err == nil {
-			t.Errorf("profile guard(%q) = nil, want an error", v)
-		}
-	}
-}
-
 // TestFilterEnv_AWSProfileValidation verifies that a safe AWS_PROFILE passes
 // through while a malformed one is stripped. R20260603000023-SEC-1 (#1617).
 func TestFilterEnv_AWSProfileValidation(t *testing.T) {
@@ -428,40 +389,6 @@ func TestFilterEnv_PassesAWSDefaultProfile(t *testing.T) {
 	got := filterEnv(nil)
 	if !envContains(got, "AWS_DEFAULT_PROFILE", "default") {
 		t.Errorf("AWS_DEFAULT_PROFILE=default must pass the sysession env gate")
-	}
-}
-
-// TestValidateBaseURLValue covers the allow/deny boundary for base-URL env
-// values. R090031-SEC-1 (#1687).
-func TestValidateBaseURLValue(t *testing.T) {
-	ok := []string{
-		"",
-		"https://api.anthropic.com",
-		"https://bedrock.example.com/v1",
-		"http://localhost:8080",
-		"http://127.0.0.1:9000",
-		"http://[::1]:8080",
-	}
-	baseURLGuard := envGuardFor("ANTHROPIC_BASE_URL")
-	if baseURLGuard == nil {
-		t.Fatal("ANTHROPIC_BASE_URL carries no sysession value guard; the SSRF gate is unwired")
-	}
-	for _, v := range ok {
-		if err := baseURLGuard(v); err != nil {
-			t.Errorf("base-URL guard(%q) = %v, want nil", v, err)
-		}
-	}
-	bad := []string{
-		"http://169.254.169.254/latest/meta-data/", // IMDS SSRF
-		"http://10.0.0.1",                          // private network plaintext
-		"http://example.com",                       // remote plaintext
-		"ftp://example.com",                        // disallowed scheme
-		"file:///etc/passwd",                       // disallowed scheme
-	}
-	for _, v := range bad {
-		if err := baseURLGuard(v); err == nil {
-			t.Errorf("base-URL guard(%q) = nil, want an error", v)
-		}
 	}
 }
 

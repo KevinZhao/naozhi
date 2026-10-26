@@ -13,7 +13,7 @@ import (
 // TestDispatchCardActionTracked is the regression guard for
 // R20260608-133914-LB-4 (#1964): the WS OnP2CardActionTrigger path must run
 // the card dispatch under the same wg + semaphore discipline as the WS
-// message branches and the webhook card branch, instead of calling the
+// message branches, instead of calling the
 // handler synchronously with no tracking or back-pressure. The cases pin:
 //   - the dispatch actually fires the handler (happy path),
 //   - f.wg tracks it so Stop()'s wg.Wait() can drain it,

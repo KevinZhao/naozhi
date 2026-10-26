@@ -38,13 +38,11 @@ func initPlatforms(cfg *config.Config, stt transcribe.Service) (map[string]platf
 	platforms := make(map[string]platform.Platform)
 	if cfg.Platforms.Feishu != nil {
 		f := feishu.New(feishu.Config{
-			AppID:                cfg.Platforms.Feishu.AppID,
-			AppSecret:            cfg.Platforms.Feishu.AppSecret,
-			ConnectionMode:       cfg.Platforms.Feishu.ConnectionMode,
-			VerificationToken:    cfg.Platforms.Feishu.VerificationToken,
-			EncryptKey:           cfg.Platforms.Feishu.EncryptKey,
-			MaxReplyLen:          cfg.Platforms.Feishu.MaxReplyLength,
-			AllowInsecureWebhook: cfg.Platforms.Feishu.AllowInsecureWebhook,
+			AppID:             cfg.Platforms.Feishu.AppID,
+			AppSecret:         cfg.Platforms.Feishu.AppSecret,
+			VerificationToken: cfg.Platforms.Feishu.VerificationToken,
+			EncryptKey:        cfg.Platforms.Feishu.EncryptKey,
+			MaxReplyLen:       cfg.Platforms.Feishu.MaxReplyLength,
 		}, stt)
 		platforms["feishu"] = f
 	}
@@ -192,7 +190,7 @@ func chatIDSuffix(id string) string {
 }
 
 // logWebhookEndpoints logs the webhook URLs operators paste into the IM vendor
-// console; platforms without a webhook route (feishu websocket mode) are skipped.
+// console; platforms without a webhook route (feishu, slack socket mode) are skipped.
 func logWebhookEndpoints(cfg *config.Config, platforms map[string]platform.Platform) {
 	addr := cfg.Server.Addr
 	if strings.HasPrefix(addr, ":") {
@@ -200,10 +198,6 @@ func logWebhookEndpoints(cfg *config.Config, platforms map[string]platform.Platf
 	}
 	for name := range platforms {
 		switch name {
-		case "feishu":
-			if cfg.Platforms.Feishu != nil && cfg.Platforms.Feishu.ConnectionMode == "webhook" {
-				slog.Info("platform webhook endpoint", "platform", name, "path", "/webhook/feishu", "addr", addr)
-			}
 		case "slack":
 			// Route is only exposed when not using socket mode.
 			if cfg.Platforms.Slack != nil && cfg.Platforms.Slack.AppToken == "" {
