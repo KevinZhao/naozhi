@@ -143,7 +143,7 @@ func TestResume_RegistersEntryAndCache(t *testing.T) {
 		t.Error("entryID = 0 after resume: the commit never applied back")
 	}
 	if period <= 0 || sched == nil {
-		t.Errorf("cache not populated after resume: period=%v sched=%v — jitter and HasMissedSchedule fall back to re-parsing", period, sched)
+		t.Errorf("cache not populated after resume: period=%v sched=%v — jitter falls back to re-parsing", period, sched)
 	}
 }
 
