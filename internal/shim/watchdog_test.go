@@ -69,9 +69,14 @@ func TestWatchdog_StopThenStartResumes(t *testing.T) {
 	}
 
 	w.Start()
+	fired := w.Fired()
+	w.Start() // Start while running must not re-arm or swap the Fired() channel
 	c.advance(50 * time.Millisecond)
 	if got := count.Load(); got != 1 {
 		t.Errorf("expected the second Start to fire once at its deadline, got %d", got)
+	}
+	if !isClosed(fired) {
+		t.Error("the Fired() channel handed out before a repeated Start was never closed")
 	}
 }
 

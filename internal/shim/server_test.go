@@ -2,6 +2,7 @@ package shim
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"net"
@@ -1005,6 +1006,20 @@ func TestHandleClient_WriteCommand(t *testing.T) {
 
 	// Detach
 	sendClientCmd(t, client, ClientMsg{Type: "detach"})
+}
+
+// TestHandleClient_OversizeLineDisconnects pins the per-line LimitedReader
+// (maxClientLineBytes): a client streaming past the limit without a newline
+// must be disconnected rather than buffered without bound.
+func TestHandleClient_OversizeLineDisconnects(t *testing.T) {
+	ss := setupShimServer(t)
+	defer ss.cleanup()
+
+	go func() {
+		ss.client.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))      //nolint:errcheck
+		ss.client.conn.Write(bytes.Repeat([]byte("a"), maxClientLineBytes+1)) //nolint:errcheck
+	}()
+	ss.waitHandlerDone(t, "an oversize line without newline")
 }
 
 func TestHandleClient_InterruptCommand(t *testing.T) {
