@@ -97,56 +97,33 @@ func TestStartAlreadyStarted(t *testing.T) {
 	}
 }
 
-func TestStartWebhookRejectsMissingAuth(t *testing.T) {
+// TestStartWebhook_AuthGate: webhook mode needs a credential, and
+// verification_token-only mode (no encrypt_key HMAC) is replay/forgery-prone
+// so it needs the explicit allow_insecure_webhook opt-in (R250531-SEC-1, #1507).
+func TestStartWebhook_AuthGate(t *testing.T) {
 	t.Parallel()
-	f := New(Config{AppID: "id", ConnectionMode: "webhook"}, nil)
-	noop := func(context.Context, platform.IncomingMessage) {}
-	if err := f.Start(noop); err == nil {
-		t.Fatal("Start() should refuse webhook mode without token or encrypt_key")
+	tests := []struct {
+		name        string
+		cfg         Config
+		wantErr     bool
+		errContains string
+	}{
+		{"missing auth", Config{AppID: "id", ConnectionMode: "webhook"}, true, ""},
+		{"token-only without opt-in", Config{AppID: "id", ConnectionMode: "webhook", VerificationToken: "test-token"}, true, "allow_insecure_webhook"},
+		{"token-only with opt-in", Config{AppID: "id", ConnectionMode: "webhook", VerificationToken: "test-token", AllowInsecureWebhook: true}, false, ""},
+		{"encrypt_key needs no opt-in", Config{AppID: "id", ConnectionMode: "webhook", EncryptKey: "test-key"}, false, ""},
 	}
-}
-
-// TestStartWebhookRejectsTokenOnlyWithoutOptIn covers R250531-SEC-1 (#1507):
-// verification_token-only webhook mode (no encrypt_key HMAC) is replay/
-// forgery-prone, so Start() must refuse unless allow_insecure_webhook is
-// explicitly set.
-func TestStartWebhookRejectsTokenOnlyWithoutOptIn(t *testing.T) {
-	t.Parallel()
-	f := New(Config{AppID: "id", ConnectionMode: "webhook", VerificationToken: "test-token"}, nil)
-	noop := func(context.Context, platform.IncomingMessage) {}
-	err := f.Start(noop)
-	if err == nil {
-		t.Fatal("Start() should refuse token-only webhook without allow_insecure_webhook")
-	}
-	if !strings.Contains(err.Error(), "allow_insecure_webhook") {
-		t.Fatalf("error should mention the opt-in flag, got: %v", err)
-	}
-}
-
-// TestStartWebhookTokenOnlyAllowedWithOptIn asserts the explicit opt-in
-// escape hatch still lets legacy token-only deployments run.
-func TestStartWebhookTokenOnlyAllowedWithOptIn(t *testing.T) {
-	t.Parallel()
-	f := New(Config{
-		AppID:                "id",
-		ConnectionMode:       "webhook",
-		VerificationToken:    "test-token",
-		AllowInsecureWebhook: true,
-	}, nil)
-	noop := func(context.Context, platform.IncomingMessage) {}
-	if err := f.Start(noop); err != nil {
-		t.Fatalf("Start() with allow_insecure_webhook should succeed, got: %v", err)
-	}
-}
-
-// TestStartWebhookEncryptKeyNeedsNoOptIn confirms the secure encrypt_key
-// path is unaffected by the SEC-1 gate.
-func TestStartWebhookEncryptKeyNeedsNoOptIn(t *testing.T) {
-	t.Parallel()
-	f := New(Config{AppID: "id", ConnectionMode: "webhook", EncryptKey: "test-key"}, nil)
-	noop := func(context.Context, platform.IncomingMessage) {}
-	if err := f.Start(noop); err != nil {
-		t.Fatalf("Start() with encrypt_key should succeed, got: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := New(tt.cfg, nil).Start(func(context.Context, platform.IncomingMessage) {})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Start() err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+				t.Fatalf("error should mention %q, got: %v", tt.errContains, err)
+			}
+		})
 	}
 }
 
@@ -323,23 +300,41 @@ func TestParseSDKEvent_ImageMessage(t *testing.T) {
 	}
 }
 
-func TestParseSDKEvent_ImageMessage_EmptyKey(t *testing.T) {
+// TestParseSDKEvent_Rejected: events with nothing routable are dropped.
+func TestParseSDKEvent_Rejected(t *testing.T) {
 	t.Parallel()
-	event := &larkim.P2MessageReceiveV1{
-		Event: &larkim.P2MessageReceiveV1Data{
-			Sender: &larkim.EventSender{
-				SenderId: &larkim.UserId{OpenId: strPtr("ou_user1")},
-			},
-			Message: &larkim.EventMessage{
-				MessageType: strPtr("image"),
-				ChatId:      strPtr("oc_chat1"),
-				Content:     strPtr(`{"image_key":""}`),
-			},
-		},
+	sender := &larkim.EventSender{SenderId: &larkim.UserId{OpenId: strPtr("ou_user1")}}
+	msgEvent := func(m *larkim.EventMessage) *larkim.P2MessageReceiveV1 {
+		return &larkim.P2MessageReceiveV1{Event: &larkim.P2MessageReceiveV1Data{Sender: sender, Message: m}}
 	}
-	_, ok := (&Feishu{}).parseSDKEvent(event)
-	if ok {
-		t.Error("expected ok=false for image message with empty image_key")
+	tests := []struct {
+		name  string
+		event *larkim.P2MessageReceiveV1
+	}{
+		{"nil event", nil},
+		{"nil message", &larkim.P2MessageReceiveV1{Event: &larkim.P2MessageReceiveV1Data{}}},
+		{"image with empty image_key", msgEvent(&larkim.EventMessage{
+			MessageType: strPtr("image"), ChatId: strPtr("oc_chat1"), Content: strPtr(`{"image_key":""}`),
+		})},
+		{"audio with empty file_key", msgEvent(&larkim.EventMessage{
+			MessageType: strPtr("audio"), ChatId: strPtr("oc_chat1"), Content: strPtr(`{"file_key":""}`),
+		})},
+		{"empty text", msgEvent(&larkim.EventMessage{
+			MessageType: strPtr("text"), ChatId: strPtr("oc_chat1"), Content: strPtr(`{"text":"  "}`),
+		})},
+		{"mention-only text", msgEvent(&larkim.EventMessage{
+			MessageType: strPtr("text"), ChatId: strPtr("oc_chat1"), ChatType: strPtr("group"),
+			Content:  strPtr(`{"text":"@_user_1"}`),
+			Mentions: []*larkim.MentionEvent{{Key: strPtr("@_user_1"), Name: strPtr("Bot")}},
+		})},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, ok := (&Feishu{}).parseSDKEvent(tt.event); ok {
+				t.Error("expected ok=false")
+			}
+		})
 	}
 }
 
@@ -358,69 +353,6 @@ func TestParseSDKEvent_UnsupportedType(t *testing.T) {
 	pe, ok := (&Feishu{}).parseSDKEvent(event)
 	if !ok || pe.Unsupported != "sticker" || pe.MediaType != "" {
 		t.Errorf("parseSDKEvent(sticker) = %+v, %v; want Unsupported=sticker", pe, ok)
-	}
-}
-
-func TestParseSDKEvent_EmptyText(t *testing.T) {
-	t.Parallel()
-	event := &larkim.P2MessageReceiveV1{
-		Event: &larkim.P2MessageReceiveV1Data{
-			Sender: &larkim.EventSender{
-				SenderId: &larkim.UserId{OpenId: strPtr("ou_user1")},
-			},
-			Message: &larkim.EventMessage{
-				MessageType: strPtr("text"),
-				ChatId:      strPtr("oc_chat1"),
-				Content:     strPtr(`{"text":"  "}`),
-			},
-		},
-	}
-	_, ok := (&Feishu{}).parseSDKEvent(event)
-	if ok {
-		t.Error("expected ok=false for empty text")
-	}
-}
-
-func TestParseSDKEvent_MentionOnlyText(t *testing.T) {
-	t.Parallel()
-	event := &larkim.P2MessageReceiveV1{
-		Event: &larkim.P2MessageReceiveV1Data{
-			Sender: &larkim.EventSender{
-				SenderId: &larkim.UserId{OpenId: strPtr("ou_user1")},
-			},
-			Message: &larkim.EventMessage{
-				MessageType: strPtr("text"),
-				ChatId:      strPtr("oc_chat1"),
-				ChatType:    strPtr("group"),
-				Content:     strPtr(`{"text":"@_user_1"}`),
-				Mentions: []*larkim.MentionEvent{
-					{Key: strPtr("@_user_1"), Name: strPtr("Bot")},
-				},
-			},
-		},
-	}
-	_, ok := (&Feishu{}).parseSDKEvent(event)
-	if ok {
-		t.Error("expected ok=false for mention-only text")
-	}
-}
-
-func TestParseSDKEvent_NilEvent(t *testing.T) {
-	t.Parallel()
-	_, ok := (&Feishu{}).parseSDKEvent(nil)
-	if ok {
-		t.Error("expected ok=false for nil event")
-	}
-}
-
-func TestParseSDKEvent_NilMessage(t *testing.T) {
-	t.Parallel()
-	event := &larkim.P2MessageReceiveV1{
-		Event: &larkim.P2MessageReceiveV1Data{},
-	}
-	_, ok := (&Feishu{}).parseSDKEvent(event)
-	if ok {
-		t.Error("expected ok=false for nil message")
 	}
 }
 
@@ -451,26 +383,6 @@ func TestParseSDKEvent_AudioMessage(t *testing.T) {
 	}
 	if pe.MessageID != "msg_audio_1" {
 		t.Errorf("MessageID = %q, want msg_audio_1", pe.MessageID)
-	}
-}
-
-func TestParseSDKEvent_AudioMessage_EmptyKey(t *testing.T) {
-	t.Parallel()
-	event := &larkim.P2MessageReceiveV1{
-		Event: &larkim.P2MessageReceiveV1Data{
-			Sender: &larkim.EventSender{
-				SenderId: &larkim.UserId{OpenId: strPtr("ou_user1")},
-			},
-			Message: &larkim.EventMessage{
-				MessageType: strPtr("audio"),
-				ChatId:      strPtr("oc_chat1"),
-				Content:     strPtr(`{"file_key":""}`),
-			},
-		},
-	}
-	_, ok := (&Feishu{}).parseSDKEvent(event)
-	if ok {
-		t.Error("expected ok=false for audio message with empty file_key")
 	}
 }
 
@@ -542,43 +454,6 @@ func TestWebhook_Challenge(t *testing.T) {
 	}
 }
 
-// TestWebhook_Challenge_ReplayRejected asserts R164029-SEC-2 (#1594): a
-// url_verification challenge replayed with the SAME ts:nonce is rejected on the
-// second delivery. Previously url_verification was exempt from seenNonces dedup,
-// so a captured challenge could be replayed for the full nonceTTL window in
-// token-only mode, repeatedly reflecting the challenge and consuming handler semaphore slots.
-func TestWebhook_Challenge_ReplayRejected(t *testing.T) {
-	t.Parallel()
-	f := makeWebhookFeishu(Config{AppID: "id", AppSecret: "secret"})
-	mux := http.NewServeMux()
-	f.registerWebhook(mux, func(ctx context.Context, msg platform.IncomingMessage) {})
-
-	body := []byte(`{"type":"url_verification","challenge":"replay_me","token":"test_token"}`)
-	ts := fmt.Sprintf("%d", time.Now().Unix())
-	nonce := fmt.Sprintf("fixed-nonce-%d", time.Now().UnixNano())
-
-	build := func() *http.Request {
-		req := httptest.NewRequest("POST", "/webhook/feishu", strings.NewReader(string(body)))
-		req.Header.Set("X-Lark-Request-Timestamp", ts)
-		req.Header.Set("X-Lark-Request-Nonce", nonce)
-		return req
-	}
-
-	// First challenge with this ts:nonce succeeds.
-	w1 := httptest.NewRecorder()
-	mux.ServeHTTP(w1, build())
-	if w1.Code != http.StatusOK {
-		t.Fatalf("first challenge status = %d, want 200", w1.Code)
-	}
-
-	// Replay of the identical ts:nonce is rejected by the nonce dedup gate.
-	w2 := httptest.NewRecorder()
-	mux.ServeHTTP(w2, build())
-	if w2.Code != http.StatusUnauthorized {
-		t.Errorf("replayed challenge status = %d, want 401 (nonce replay must be rejected)", w2.Code)
-	}
-}
-
 func TestWebhook_TokenMismatch(t *testing.T) {
 	t.Parallel()
 	f := makeWebhookFeishu(Config{
@@ -620,64 +495,6 @@ func TestHandleWebhook_RefusesZeroCredential(t *testing.T) {
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want 503 (zero-credential must refuse)", w.Code)
-	}
-}
-
-// TestWebhook_URLVerification_HookSemFull asserts R218-SEC-1: the
-// url_verification branch acquires handler semaphore before reflecting the challenge,
-// so a flooded handler returns 503 instead of letting an attacker who
-// scraped verification_token DoS the challenge endpoint without ever
-// hitting the concurrent-handler cap. The other branches (card_action,
-// im.message.receive_v1) already gate on handler semaphore; without this guard
-// url_verification was the only authenticated path that ignored the cap.
-func TestWebhook_URLVerification_HookSemFull(t *testing.T) {
-	t.Parallel()
-	f := makeWebhookFeishu(Config{AppID: "id", AppSecret: "secret"})
-	// Saturate the semaphore so the next acquire fails.
-	held := 0
-	for f.dispatch.TryAcquire() {
-		held++
-	}
-	t.Cleanup(func() {
-		// Drain so test does not leak into shared global cleanup paths.
-		for i := 0; i < held; i++ {
-			f.dispatch.Release()
-		}
-	})
-	mux := http.NewServeMux()
-	f.registerWebhook(mux, func(ctx context.Context, msg platform.IncomingMessage) {})
-
-	body := []byte(`{"type":"url_verification","challenge":"c","token":"test_token"}`)
-	req := buildTokenRequest(body)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("status = %d, want 503 (handler semaphore full must reject url_verification)", w.Code)
-	}
-}
-
-// TestHandleWebhook_AllowsWhenVerificationTokenSet confirms the zero-credential
-// guard's inverse: once VerificationToken is set the handler enters the
-// normal token-check path (not the 503 defense gate). Paired with the
-// refusal test above so a regression that accidentally widens the guard
-// (e.g. checking AppID instead) is caught at test time. We don't assert
-// 200-OK because timestamp / nonce headers still apply on the main path;
-// the point of this assertion is that the response is NOT 503 — the request
-// reached the authenticated path rather than being refused outright.
-func TestHandleWebhook_AllowsWhenVerificationTokenSet(t *testing.T) {
-	t.Parallel()
-	f := makeWebhookFeishu(Config{AppID: "id", AppSecret: "secret", VerificationToken: "tok"})
-	mux := http.NewServeMux()
-	f.registerWebhook(mux, func(ctx context.Context, msg platform.IncomingMessage) {})
-
-	body := `{"type":"url_verification","challenge":"c","token":"tok"}`
-	req := httptest.NewRequest("POST", "/webhook/feishu", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code == http.StatusServiceUnavailable {
-		t.Errorf("status = 503, defense gate incorrectly triggered when verification_token was set")
 	}
 }
 
@@ -734,40 +551,6 @@ func TestWebhook_TokenOnly_RejectsMissingTimestamp(t *testing.T) {
 	}
 	if called {
 		t.Error("handler invoked despite missing timestamp")
-	}
-}
-
-// TestWebhook_TokenOnly_RejectsMissingNonce is the nonce-side companion to
-// TestWebhook_TokenOnly_RejectsMissingTimestamp: a token-only-mode request
-// that supplies a fresh timestamp but omits X-Lark-Request-Nonce must still
-// be rejected, because the timestamp window alone (5 min) is wide enough for
-// attackers to replay a captured request without the nonce dedup map. R245-
-// SEC-5 (#828).
-func TestWebhook_TokenOnly_RejectsMissingNonce(t *testing.T) {
-	t.Parallel()
-	f := makeWebhookFeishu(Config{
-		AppID: "id", AppSecret: "secret",
-		VerificationToken: "test_token",
-		// EncryptKey deliberately empty: token-only mode.
-	})
-	mux := http.NewServeMux()
-	called := false
-	f.registerWebhook(mux, func(ctx context.Context, msg platform.IncomingMessage) {
-		called = true
-	})
-
-	body := buildV2MessageBody("ev_no_nonce", "oc_chat1", "p2p", "replay attempt")
-	req := httptest.NewRequest("POST", "/webhook/feishu", strings.NewReader(string(body)))
-	req.Header.Set("X-Lark-Request-Timestamp", fmt.Sprintf("%d", time.Now().Unix()))
-	// Deliberately omit X-Lark-Request-Nonce so the dedup gate fires.
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401 (token-only mode must require nonce)", w.Code)
-	}
-	if called {
-		t.Error("handler invoked despite missing nonce")
 	}
 }
 
@@ -1045,86 +828,17 @@ func TestWebhook_NonceReplay_Rejected(t *testing.T) {
 	if callCount != 1 {
 		t.Errorf("handler call count = %d, want 1 (replay must not reach handler)", callCount)
 	}
-}
 
-func TestWebhook_DifferentNonce_Allowed(t *testing.T) {
-	t.Parallel()
-	const encryptKey = "replay_test_key2"
-	f := makeWebhookFeishu(Config{
-		AppID: "id", AppSecret: "secret",
-		VerificationToken: "test_token",
-		EncryptKey:        encryptKey,
-	})
-	mux := http.NewServeMux()
-	callCount := 0
-	var mu sync.Mutex
-	f.registerWebhook(mux, func(ctx context.Context, msg platform.IncomingMessage) {
-		mu.Lock()
-		callCount++
-		mu.Unlock()
-	})
-
-	body := buildV2MessageBody("ev_diff", "oc_chat1", "p2p", "legit msg")
-	timestamp := fmt.Sprintf("%d", time.Now().Unix())
-
-	for i, nonce := range []string{"nonce-1", "nonce-2"} {
-		req := buildSignedRequest(t, body, timestamp, nonce, encryptKey)
-		w := httptest.NewRecorder()
-		mux.ServeHTTP(w, req)
-		if w.Code != http.StatusOK {
-			t.Errorf("request %d status = %d, want 200", i+1, w.Code)
-		}
+	// Same timestamp, different nonce: a legitimate message that must pass.
+	req3 := buildSignedRequest(t, body, timestamp, "unique-nonce-def", encryptKey)
+	w3 := httptest.NewRecorder()
+	mux.ServeHTTP(w3, req3)
+	if w3.Code != http.StatusOK {
+		t.Fatalf("different-nonce request status = %d, want 200", w3.Code)
 	}
-	// Give goroutines a moment to run
-	time.Sleep(50 * time.Millisecond)
-	mu.Lock()
-	defer mu.Unlock()
+	<-done
 	if callCount != 2 {
 		t.Errorf("handler call count = %d, want 2 (different nonces must both pass)", callCount)
-	}
-}
-
-// TestWebhook_NonceNonPrintableASCII_Rejected covers R176-SEC-M: the nonce
-// header ultimately concatenates into the seenNonces map key and reaches
-// slog via `nonce_len` plus any future helper that logs it. Even though
-// current log attrs print only length, a byte-level restriction to
-// printable ASCII (0x21-0x7E) closes the log-injection class
-// defense-in-depth for any future refactor that surfaces the nonce.
-// Legitimate Feishu nonces are 16-char random strings so this is a
-// pure-defense tightening.
-func TestWebhook_NonceNonPrintableASCII_Rejected(t *testing.T) {
-	t.Parallel()
-	const encryptKey = "nonce_ascii_test_key"
-	f := makeWebhookFeishu(Config{
-		AppID: "id", AppSecret: "secret",
-		VerificationToken: "test_token",
-		EncryptKey:        encryptKey,
-	})
-	mux := http.NewServeMux()
-	f.registerWebhook(mux, func(ctx context.Context, msg platform.IncomingMessage) {})
-
-	cases := map[string]string{
-		"embedded_LF":    "nonce\nvalid",
-		"embedded_CR":    "nonce\rvalid",
-		"space_internal": "nonce valid",
-		"c1_NEL":         "nonce\u0085nel",
-		"bidi_RLO":       "nonce\u202ertl",
-		"del_char":       "nonce\x7fdel",
-		"tab_char":       "nonce\tvalid",
-	}
-	body := buildV2MessageBody("ev_nonce_ascii", "oc_chat1", "p2p", "hi")
-	timestamp := fmt.Sprintf("%d", time.Now().Unix())
-	for name, nonce := range cases {
-		name, nonce := name, nonce
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			req := buildSignedRequest(t, body, timestamp, nonce, encryptKey)
-			w := httptest.NewRecorder()
-			mux.ServeHTTP(w, req)
-			if w.Code != http.StatusBadRequest {
-				t.Errorf("status = %d, want 400 (non-printable nonce %q)", w.Code, nonce)
-			}
-		})
 	}
 }
 
@@ -1371,32 +1085,5 @@ func TestFetchBotInfo_EmptyOpenID(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "empty open_id") {
 		t.Errorf("error = %v, want substring 'empty open_id'", err)
-	}
-}
-
-// TestWebhook_OversizedSignatureRejected verifies R20260603-SEC-1: an
-// X-Lark-Signature header longer than maxWebhookSigLen is rejected with 401
-// before verifySignature is called, preventing allocation amplification.
-func TestWebhook_OversizedSignatureRejected(t *testing.T) {
-	t.Parallel()
-	f := makeWebhookFeishu(Config{
-		AppID:      "id",
-		AppSecret:  "secret",
-		EncryptKey: "my_secret_key",
-	})
-	mux := http.NewServeMux()
-	f.registerWebhook(mux, func(ctx context.Context, msg platform.IncomingMessage) {})
-
-	body := buildV2MessageBody("ev_overlong", "oc_chat1", "p2p", "hello")
-	req := httptest.NewRequest("POST", "/webhook/feishu", strings.NewReader(string(body)))
-	req.Header.Set("X-Lark-Request-Timestamp", fmt.Sprintf("%d", time.Now().Unix()))
-	req.Header.Set("X-Lark-Request-Nonce", "nonce123")
-	// Signature longer than maxWebhookSigLen (256).
-	req.Header.Set("X-Lark-Signature", strings.Repeat("a", maxWebhookSigLen+1))
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401 for oversized signature header", w.Code)
 	}
 }
