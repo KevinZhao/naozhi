@@ -13,7 +13,7 @@
 
 ### Changed
 
-- **`config.example.yaml` 注释精简**（#3776）：从 634 行压到 414 行，删掉了已移除拼写、`auto_chain` 沿革之类的考古注释；所有键、取值和注释掉的示例都没变。`im_access` 段原先被出站 webhook 的注释从中间截断，现在拆成两段，并删掉了「改动需要重启」这句错误说明（`im_access` 支持 `naozhi config reload` 热加载）。
+- **`config.example.yaml` 注释精简**（#3776）：从 634 行压到 415 行，删掉了已移除拼写、`auto_chain` 沿革之类的考古注释；所有键、取值和注释掉的示例都没变。`im_access` 段原先被出站 webhook 的注释从中间截断，现在拆成两段，并删掉了「改动需要重启」这句错误说明（`im_access` 支持 `naozhi config reload` 热加载）。
 
 ## [0.1.48] - 2026-10-26
 
