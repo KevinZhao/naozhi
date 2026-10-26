@@ -11,8 +11,7 @@ import (
 )
 
 // R20260527122801-SEC-1: enforceCLIPathSafe must REJECT a FIFO / socket
-// cliPath at spawn time, even though construction-time validateCLIPath is
-// warn-only — the last-hop refusal before exec.Command sees the argv, so a
+// cliPath at spawn time — the last-hop refusal before exec.Command sees the argv, so a
 // `cli.path = /tmp/fifo` misconfig cannot deliver a file-type-confusion
 // attack to the shim.
 func TestEnforceCLIPathSafe_RejectsSpecialFiles(t *testing.T) {

@@ -231,7 +231,8 @@ func initBackendWrappers(
 		proto := profile.NewProtocol(backend.ProtocolDeps{})
 		// NewWrapperLazy + Probe(ctx) so a hung `<cli> --version` cannot pin
 		// startup for the full 5s when SIGTERM arrives mid-init.
-		w := cli.NewWrapperLazy(b.Path, proto, b.ID).WithManager(shimMgr)
+		w := cli.NewWrapperLazy(b.Path, proto, b.ID)
+		w.ShimManager = shimMgr
 		w.Probe(ctx)
 		rt := session.BackendRuntime{Wrapper: w}
 		if b.Model != "" {
