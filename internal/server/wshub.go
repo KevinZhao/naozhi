@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -22,11 +21,6 @@ import (
 type Hub struct {
 	// subs is who is connected, authenticated and subscribed to what.
 	subs *subscriberRegistry
-	// droppedTotal is the Hub-wide count of SendRaw drops (send channel
-	// full). Deliberately aggregated, not per-client: it is exported only
-	// via the auth-gated /health, and all authenticated users share one trust
-	// boundary. Multi-tenant auth would require moving it behind debug_mode (#1100).
-	droppedTotal atomic.Int64
 	// router is the HubRouter consumer subset (consumer.go) so tests can
 	// inject a fake.
 	router HubRouter
@@ -153,12 +147,6 @@ func NewHub(opts HubOptions) *Hub {
 	}
 	h.tailers = newTailerRegistry(opts.AllowedRoot)
 	return h
-}
-
-// DroppedMessages returns the total number of messages dropped across all
-// clients since the process started (lock-free atomic load).
-func (h *Hub) DroppedMessages() int64 {
-	return h.droppedTotal.Load()
 }
 
 func (h *Hub) register(c *wsClient) {

@@ -5,10 +5,11 @@ package dispatch
 // one the real answer is sent on, so a "please wait" would swallow it.
 
 import (
-	"bytes"
 	"context"
 	"log/slog"
+	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/platform"
@@ -16,6 +17,39 @@ import (
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 	"github.com/naozhi/naozhi/internal/turn"
 )
+
+// fakeSingleUseReactorless is a single-use-token platform that is NOT a
+// Reactor (Weixin-like): no AddReaction surface, so reaction acks fall
+// through to text and every Reply is recorded. limit is MaxReplyLength
+// (0 means 4000).
+type fakeSingleUseReactorless struct {
+	mu      sync.Mutex
+	limit   int
+	replies []platform.OutgoingMessage
+}
+
+func (f *fakeSingleUseReactorless) Name() string                                               { return "fake-su" }
+func (f *fakeSingleUseReactorless) RegisterRoutes(_ *http.ServeMux, _ platform.MessageHandler) {}
+func (f *fakeSingleUseReactorless) Reply(_ context.Context, msg platform.OutgoingMessage) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.replies = append(f.replies, msg)
+	return "msg-1", nil
+}
+func (f *fakeSingleUseReactorless) EditMessage(_ context.Context, _, _ string) error { return nil }
+func (f *fakeSingleUseReactorless) MaxReplyLength() int {
+	if f.limit == 0 {
+		return 4000
+	}
+	return f.limit
+}
+func (f *fakeSingleUseReactorless) SupportsInterimMessages() bool { return false }
+func (f *fakeSingleUseReactorless) UsesSingleUseReplyToken() bool { return true }
+func (f *fakeSingleUseReactorless) replyCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.replies)
+}
 
 // fakeSingleUseInterim is a single-use, non-Reactor platform that claims
 // interim support, so the resume-lost notice reaches the single-use gate
@@ -112,26 +146,5 @@ func TestNotices_SingleUseTokenGate(t *testing.T) {
 				t.Errorf("%s notice spent the cooldown = %v, want %v", site.name, spent, site.rateLimited)
 			}
 		})
-	}
-}
-
-// TestAdmittedDropped_LogsTheDrop: with the busy notice gated, the dropped
-// message must still leave an Info line saying nobody was told.
-func TestAdmittedDropped_LogsTheDrop(t *testing.T) {
-	t.Parallel()
-	fp := &fakeSingleUseReactorless{}
-	d := newTestDispatcher(&fakePlatform{}, withQueue(turn.QueueOptions{}))
-	d.platforms = map[string]platform.Platform{fp.Name(): fp}
-	var buf bytes.Buffer
-	lg := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	o := d.newIMOrigin(noticeMsg(fp.Name()), lg, "k1", "general", session.AgentOpts{}, imMessage, 6, 0)
-
-	o.Admitted(context.Background(), turn.AckDropped)
-
-	if out := buf.String(); !strings.Contains(out, "message dropped: session busy") || !strings.Contains(out, "notified=false") {
-		t.Errorf("AckDropped on a single-use platform logged %q; want the drop at Info with notified=false", out)
-	}
-	if n := fp.replyCount(); n != 0 {
-		t.Errorf("busy notice sent %d replies on a single-use platform; want 0", n)
 	}
 }

@@ -1,9 +1,7 @@
 package config
 
 import (
-	"math"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -23,8 +21,8 @@ func reportFallback(key, action, reason string) {
 }
 
 // resolveFallbackValues parses, once, the values whose consumers fall back
-// instead of failing: the cron time zone, the shim lifetimes and buffer size,
-// the stdio cap, and the sysession durations. Load calls it; each unusable value is reported
+// instead of failing: the cron time zone, the shim idle timeout and the
+// sysession daemon durations. Load calls it; each unusable value is reported
 // and cached as zero, which the accessors turn into the default.
 func resolveFallbackValues(cfg *Config) {
 	if name := strings.TrimSpace(cfg.Cron.Timezone); name != "" && !strings.EqualFold(name, "Local") {
@@ -33,24 +31,10 @@ func resolveFallbackValues(cfg *Config) {
 		}
 	}
 
-	shim := cfg.Session.Shim
-	cfg.cachedShimIdleTimeout, _ = fallbackDuration(shim.IdleTimeout, "session.shim.idle_timeout", false,
+	cfg.cachedShimIdleTimeout, _ = fallbackDuration(cfg.Session.Shim.IdleTimeout, "session.shim.idle_timeout", false,
 		"a shim exits after 4h without a client")
-	cfg.cachedShimWatchdogTimeout, _ = fallbackDuration(shim.WatchdogTimeout, "session.shim.disconnect_watchdog", false,
-		"the disconnect watchdog fires after 30m")
-	cfg.cachedShimMaxBufferBytes, _ = fallbackSize(shim.MaxBufferBytes, "session.shim.max_buffer_bytes", false,
-		"the ring buffer holds 50MB")
-	stdioMax, set := fallbackSize(cfg.Log.StdioMaxSize, "log.stdio_max_size", true,
-		"stdout and stderr are capped at 64MB")
-	cfg.cachedStdioMaxSize, cfg.stdioCapOff = stdioMax, set && stdioMax == 0
 
 	sys := &cfg.cachedSysession
-	sys.tickTimeout, _ = fallbackDuration(cfg.Sysession.TickTimeout, "sysession.tick_timeout", false,
-		"a tick is capped at 30s")
-	maxAge, set := fallbackDuration(cfg.Sysession.Runner.JSONLMaxAge, "sysession.runner.jsonl_max_age", true,
-		"sys-session logs are kept for 7 days")
-	sys.jsonlMaxAge, sys.jsonlSweepOff = maxAge, set && maxAge == 0
-
 	names := make([]string, 0, len(cfg.Sysession.Daemons))
 	for name := range cfg.Sysession.Daemons {
 		names = append(names, name)
@@ -87,43 +71,4 @@ func fallbackDuration(s, key string, zeroOK bool, uses string) (d time.Duration,
 	}
 	reportFallback(key, "fallback", "not "+want+"; "+uses)
 	return 0, false
-}
-
-// fallbackSize is fallbackDuration for a byte size such as "50MB".
-func fallbackSize(s, key string, zeroOK bool, uses string) (n int64, set bool) {
-	if s == "" {
-		return 0, false
-	}
-	n, ok := parseByteSize(s)
-	if ok && (n > 0 || (zeroOK && n == 0)) {
-		return n, true
-	}
-	want := "a positive size such as 50MB"
-	if zeroOK {
-		want = "a size such as 64MB, or 0"
-	}
-	reportFallback(key, "fallback", "not "+want+"; "+uses)
-	return 0, false
-}
-
-// parseByteSize parses a size such as "50MB", "1gb", "512KB" or "4096B" (case
-// insensitive, binary multiples; a bare number is bytes). ok is false for any
-// other form and for a value that overflows int64.
-func parseByteSize(s string) (n int64, ok bool) {
-	s = strings.ToUpper(strings.TrimSpace(s))
-	multiplier := int64(1)
-	for _, u := range []struct {
-		suffix string
-		mult   int64
-	}{{"GB", 1 << 30}, {"MB", 1 << 20}, {"KB", 1 << 10}, {"B", 1}} {
-		if strings.HasSuffix(s, u.suffix) {
-			s, multiplier = strings.TrimSuffix(s, u.suffix), u.mult
-			break
-		}
-	}
-	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
-	if err != nil || n > math.MaxInt64/multiplier || n < math.MinInt64/multiplier {
-		return 0, false
-	}
-	return n * multiplier, true
 }

@@ -4,9 +4,9 @@
 // Load decodes with yaml.Unmarshal, which SILENTLY IGNORES an unknown key. So
 // an operator who misspells one, or who follows documentation for a key that
 // was never wired, gets no error, no effect and no way to tell why. #2553 is
-// the worked example: `server.debug_mode` and `projects.public_tmp` were both
-// recorded as shipped and neither key existed, so configuring them did nothing
-// for months.
+// the worked example: `server.debug_mode` and `projects.public_tmp` (both
+// since removed) were recorded as shipped and neither key existed, so
+// configuring them did nothing for months.
 //
 // That is precisely the failure mode SpawnDiag was built to end ("a flag being
 // stripped for months with only a log line as evidence", internal/cli/
@@ -36,6 +36,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/naozhi/naozhi/internal/spawndiag"
 	"gopkg.in/yaml.v3"
@@ -202,9 +203,9 @@ func reportUnknownKeys(expanded []byte, deprecated map[string]bool) {
 // findDeprecatedKeys lists the schema v1 key spellings (nodes,
 // session.workspace, session.auto_chain) as config-deprecated diags naming the
 // v2 replacement, plus the keys of removed features (server.metrics_enabled,
-// cron.sandbox, the feishu webhook mode's connection_mode /
-// allow_insecure_webhook). None of them has any effect any more: Load no longer rewrites
-// them. The v1 `--append-system-prompt` inside agents[].args is not
+// server.debug_mode, cron.sandbox, the feishu webhook mode's connection_mode /
+// allow_insecure_webhook) and the hard-wired tuning knobs in removedKeys. None
+// of them has any effect any more: Load no longer rewrites them. The v1 `--append-system-prompt` inside agents[].args is not
 // listed here: validateArgvStrings already warns about it (argv-denylist) and
 // names agents[<id>].system_prompt.
 func findDeprecatedKeys(doc *yaml.Node) []spawndiag.Diag {
@@ -219,8 +220,13 @@ func findDeprecatedKeys(doc *yaml.Node) []spawndiag.Diag {
 	if hasYAMLKey(root, "nodes") {
 		add("nodes", "'nodes' is no longer read and its remote workspaces are NOT configured; rename it to 'workspaces'")
 	}
-	if server := yamlChildMap(root, "server"); server != nil && hasYAMLKey(server, "metrics_enabled") {
-		add("server.metrics_enabled", "'server.metrics_enabled' has no effect: GET /metrics (Prometheus export) was removed; remove this key")
+	if server := yamlChildMap(root, "server"); server != nil {
+		if hasYAMLKey(server, "metrics_enabled") {
+			add("server.metrics_enabled", "'server.metrics_enabled' has no effect: GET /metrics (Prometheus export) was removed; remove this key")
+		}
+		if hasYAMLKey(server, "debug_mode") {
+			add("server.debug_mode", "'server.debug_mode' has no effect: /api/debug/pprof was removed; remove this key")
+		}
 	}
 	if session := yamlChildMap(root, "session"); session != nil {
 		if hasYAMLKey(session, "workspace") {
@@ -249,7 +255,39 @@ func findDeprecatedKeys(doc *yaml.Node) []spawndiag.Diag {
 			add("platforms.feishu.allow_insecure_webhook", "'platforms.feishu.allow_insecure_webhook' has no effect: the feishu webhook mode was removed; remove this key")
 		}
 	}
+	for _, k := range removedKeys {
+		parent := root
+		for _, seg := range k.parent {
+			if parent = yamlChildMap(parent, seg); parent == nil {
+				break
+			}
+		}
+		if parent == nil || !hasYAMLKey(parent, k.key) {
+			continue
+		}
+		path := strings.Join(append(slices.Clone(k.parent), k.key), ".")
+		add(path, fmt.Sprintf("'%s' was removed and has no effect: %s; remove this key", path, k.reason))
+	}
 	return diags
+}
+
+// removedKeys are leaf keys whose setting was dropped; reason says what now
+// happens instead.
+var removedKeys = []struct {
+	parent []string
+	key    string
+	reason string
+}{
+	{[]string{"projects"}, "public_tmp", "the __public_tmp__ pseudo-project was removed"},
+	{[]string{"session"}, "project_stable_key", "project-level stable session keys are always on"},
+	{[]string{"session", "shim"}, "buffer_size", "the shim ring buffer always holds 10000 lines"},
+	{[]string{"session", "shim"}, "max_buffer_bytes", "the shim ring buffer is always capped at 50MB"},
+	{[]string{"session", "shim"}, "disconnect_watchdog", "the shim disconnect watchdog always fires after 30m"},
+	{[]string{"session", "shim"}, "max_shims", "at most 50 shims run at once"},
+	{[]string{"log"}, "format", "logs are always JSON"},
+	{[]string{"log"}, "stdio_max_size", "stdout/stderr files are always capped at 64MB"},
+	{[]string{"sysession"}, "tick_timeout", "a daemon tick is always capped at 30s"},
+	{[]string{"sysession", "runner"}, "jsonl_max_age", "sys-session logs are always kept for 7 days"},
 }
 
 // reportDeprecatedKeys emits findDeprecatedKeys and returns the reported key

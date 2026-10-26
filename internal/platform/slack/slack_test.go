@@ -11,7 +11,12 @@ import (
 	"github.com/slack-go/slack/slackevents"
 )
 
-var _ platform.RunnablePlatform = (*Slack)(nil)
+var (
+	_ platform.RunnablePlatform   = (*Slack)(nil)
+	_ platform.Reactor            = (*Slack)(nil)
+	_ platform.QuestionCardSender = (*Slack)(nil)
+	_ platform.ConnStateReporter  = (*Slack)(nil)
+)
 
 func TestNew_Defaults(t *testing.T) {
 	t.Parallel()

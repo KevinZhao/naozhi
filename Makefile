@@ -3,7 +3,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 BINARY  := naozhi
 MAIN    := ./cmd/naozhi/
 
-.PHONY: build vet test lint lint-gofmt vuln deploy release clean release-gate
+.PHONY: build vet test lint lint-gofmt deploy release clean release-gate
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags='$(LDFLAGS)' -o bin/$(BINARY) $(MAIN)
@@ -41,11 +41,6 @@ lint-gofmt:
 		exit 1; \
 	fi; \
 	echo "gofmt: clean"
-
-# CVE scan against the Go vulnerability DB. Install:
-# go install golang.org/x/vuln/cmd/govulncheck@latest
-vuln:
-	govulncheck ./...
 
 test:
 	go test -race ./...

@@ -49,20 +49,6 @@ const (
 	fileStatTimeout  = 2 * time.Second
 )
 
-// publicTmpProject is a reserved pseudo-project name that maps onto /tmp so
-// the dashboard can preview/download chat-mentioned /tmp paths without
-// registering /tmp as a project. Any authenticated dashboard user can then
-// read non-credential files under /tmp — acceptable for a single-operator
-// dashboard, not multi-tenant — so it is gated by Handlers.publicTmpEnabled
-// (`server.public_tmp_enabled`, default false) (#646). Symlink escapes are
-// still rejected by resolveProjectFileWithRoot and the credential allowlist
-// still applies. The handler intercepts the name before the projectMgr
-// lookup so a real project with this name cannot shadow it.
-const (
-	publicTmpProject = "__public_tmp__"
-	publicTmpRoot    = "/tmp"
-)
-
 // isClientPathRejection reports whether err is one of the well-known
 // "client supplied a malformed path" rejections from resolveProjectFile, so
 // the handler logs only genuine filesystem failures and a probing client
@@ -175,33 +161,23 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "project and path are required"})
 		return
 	}
-	// __public_tmp__ pseudo-project (see publicTmpProject godoc): resolve
-	// against /tmp; the traversal / symlink / credential guards still apply.
-	rootPath := ""
-	// restrictedRoot marks a root the dashboard is NOT unconditionally cleared
-	// to read: __public_tmp__ (/tmp) and the include_root whole-workspace
-	// project. Both get the foreign-private / denied-name / irregular-type
-	// gates and the audit log below; a registered subdirectory project is
-	// readable by definition.
-	restrictedRoot := false
-	if project == publicTmpProject && h.deps.PublicTmpEnabled {
-		rootPath = publicTmpRoot
-		restrictedRoot = true
-	} else {
-		// Same trust-boundary gate as HandleFilesExists.
-		if err := validateProjectName(project); err != nil {
-			httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
-			return
-		}
-
-		p := h.deps.ProjectMgr.Get(project)
-		if p == nil {
-			httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
-			return
-		}
-		rootPath = p.Path
-		restrictedRoot = p.IsRoot
+	// Same trust-boundary gate as HandleFilesExists.
+	if err := validateProjectName(project); err != nil {
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
+		return
 	}
+
+	p := h.deps.ProjectMgr.Get(project)
+	if p == nil {
+		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		return
+	}
+	rootPath := p.Path
+	// restrictedRoot marks a root the dashboard is NOT unconditionally cleared
+	// to read: the include_root whole-workspace project. It gets the
+	// foreign-private / denied-name / irregular-type gates and the audit log
+	// below; a registered subdirectory project is readable by definition.
+	restrictedRoot := p.IsRoot
 
 	resolved, err := resolveProjectFile(rootPath, path)
 	if err != nil {
@@ -228,25 +204,25 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Restricted roots (publicTmpProject, include_root): refuse owner-private
+	// Restricted roots (include_root): refuse owner-private
 	// files owned by another UID (#831). Linux DAC checks the naozhi process,
 	// not the dashboard caller, so a foreign 0600 file would otherwise flow
 	// through. Same-UID and world/group-readable files stay accessible.
-	if restrictedRoot && isPublicTmpForeignPrivate(info) {
+	if restrictedRoot && isRestrictedForeignPrivate(info) {
 		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}
 
 	// Name-based deny-list (#1330): even world/group-readable files such as
 	// ssh-agent's 0o777 socket, core dumps and PID files must never be served.
-	if restrictedRoot && isPublicTmpDeniedName(resolved) {
+	if restrictedRoot && isRestrictedDeniedName(resolved) {
 		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}
 
 	// Defence-in-depth type gate (#1688): refuse any non-regular file, e.g. a
 	// world-readable custom-named IPC socket that passes the two gates above.
-	if restrictedRoot && isPublicTmpIrregularType(info) {
+	if restrictedRoot && isRestrictedIrregularType(info) {
 		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}

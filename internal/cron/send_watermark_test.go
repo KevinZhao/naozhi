@@ -1,7 +1,6 @@
 package cron
 
 import (
-	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -28,15 +27,6 @@ func (w *watermarkSession) SendWatermark() string {
 	}
 }
 
-type watermarkRouter struct {
-	reapRouter
-	sess Session
-}
-
-func (r *watermarkRouter) GetOrCreate(_ context.Context, _ string, _ AgentOpts) (Session, SessionStatus, error) {
-	return r.sess, SessionNew, nil
-}
-
 // runAndReadMarker starts one local run on sess, and returns its marker as
 // read while Send is blocked — the only moment the marker exists.
 func runAndReadMarker(t *testing.T, sess Session, gate *gatedSendSession) (runstore.InflightMarker, *Job) {
@@ -58,7 +48,7 @@ func runAndReadMarker(t *testing.T, sess Session, gate *gatedSendSession) (runst
 // run is inside sess's Send, where it stays until the test ends.
 func startBlockedRun(t *testing.T, s *Scheduler, sess Session, gate *gatedSendSession) *Job {
 	t.Helper()
-	s.router = &watermarkRouter{sess: sess}
+	s.router = &reapRouter{sess: sess}
 	j := &Job{ID: mustGenerateID(), Schedule: "@every 5m", Prompt: "do thing", WorkDir: "/tmp/wd"}
 	s.putJobForTest(j)
 

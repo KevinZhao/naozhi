@@ -44,14 +44,6 @@ func (s *costSession) spend() costledger.Totals {
 		"m[1m]": {CostUSD: s.spent, Canonical: "m", Basis: costledger.BasisList}}}
 }
 
-type costRouter struct{ sess *costSession }
-
-func (r costRouter) RegisterCronStubWithChain(string, string, string, []string) {}
-func (r costRouter) Reset(string)                                               {}
-func (r costRouter) GetOrCreate(context.Context, string, AgentOpts) (Session, SessionStatus, error) {
-	return r.sess, SessionExisting, nil
-}
-
 func newCostScheduler(t *testing.T, router SessionRouter) (*Scheduler, *costledger.Store) {
 	t.Helper()
 	ledger := costledger.NewStore(filepath.Join(t.TempDir(), "cost"), costledger.Options{})
@@ -77,7 +69,7 @@ func ledgerEntries(t *testing.T, l *costledger.Store) []costledger.Entry {
 // was booked at 0.5.
 func TestLocalRun_CostIsPerRunDeltaNotCumulative(t *testing.T) {
 	sess := &costSession{cumulative: []float64{0.3, 0.5}}
-	s, ledger := newCostScheduler(t, costRouter{sess: sess})
+	s, ledger := newCostScheduler(t, &reapRouter{sess: sess})
 	j := &Job{ID: "0123456789abcdef", Schedule: "@every 5m", Prompt: "ping", WorkDir: "/home/u/proj"}
 	s.putJobForTest(j)
 
@@ -126,16 +118,8 @@ func (s *failingCostSession) BeginCostWindow()                      { s.begin(s.
 func (s *failingCostSession) EndCostWindow() costledger.Increment   { return s.end(s.spend()) }
 func (s *failingCostSession) spend() costledger.Totals              { return costledger.Totals{USD: s.spent} }
 
-type failingCostRouter struct{ sess *failingCostSession }
-
-func (r failingCostRouter) RegisterCronStubWithChain(string, string, string, []string) {}
-func (r failingCostRouter) Reset(string)                                               {}
-func (r failingCostRouter) GetOrCreate(context.Context, string, AgentOpts) (Session, SessionStatus, error) {
-	return r.sess, SessionExisting, nil
-}
-
 func TestLocalRun_SendErrorStillBooksSpend(t *testing.T) {
-	s, ledger := newCostScheduler(t, failingCostRouter{sess: &failingCostSession{}})
+	s, ledger := newCostScheduler(t, &reapRouter{sess: &failingCostSession{}})
 	j := &Job{ID: "00000000deadbeef", Schedule: "@every 5m", Prompt: "ping"}
 	s.putJobForTest(j)
 	s.executeOpt(j.ID, true)
@@ -165,8 +149,8 @@ func (s *totalsOnlySession) CostTotals() costledger.Totals         { return cost
 // it books zero, even one whose CostTotals grew across the Send.
 func TestLocalRun_SessionWithoutCostWindowRecordsZero(t *testing.T) {
 	for name, router := range map[string]SessionRouter{
-		"no cost capability": okRouter{sid: "sess-1"},
-		"CostTotals only":    backendRouter{sess: &totalsOnlySession{}},
+		"no cost capability": &reapRouter{sid: "sess-1"},
+		"CostTotals only":    &reapRouter{sess: &totalsOnlySession{}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			s, ledger := newCostScheduler(t, router)
@@ -241,14 +225,6 @@ type reportingBackendSession struct{ *backendSession }
 
 func (s reportingBackendSession) Backend() string { return s.backend }
 
-type backendRouter struct{ sess Session }
-
-func (r backendRouter) RegisterCronStubWithChain(string, string, string, []string) {}
-func (r backendRouter) Reset(string)                                               {}
-func (r backendRouter) GetOrCreate(context.Context, string, AgentOpts) (Session, SessionStatus, error) {
-	return r.sess, SessionExisting, nil
-}
-
 // runLedgerBackends runs job once against sess and returns the Backend of
 // every ledger row it booked, checking that both the USD and the credit row
 // exist.
@@ -257,7 +233,7 @@ func runLedgerBackends(t *testing.T, sess Session, agents map[string]AgentOpts, 
 	ledger := costledger.NewStore(filepath.Join(t.TempDir(), "cost"), costledger.Options{})
 	t.Cleanup(ledger.Close)
 	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(t.TempDir(), "cron.json"), MaxJobs: 5},
-		SchedulerDeps{Router: backendRouter{sess: sess}, Ledger: ledger, Agents: agents})
+		SchedulerDeps{Router: &reapRouter{sess: sess}, Ledger: ledger, Agents: agents})
 	j := &Job{ID: "0123456789abcdef", Schedule: "@every 5m", Prompt: "ping", Backend: jobBackend}
 	s.putJobForTest(j)
 	s.executeOpt(j.ID, true)

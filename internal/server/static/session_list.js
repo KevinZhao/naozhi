@@ -2,7 +2,7 @@
 // merge with pending (not yet sent) sessions, the cards and badges, the status
 // bar, the node helpers, and the WS state, subscription and session_state frames.
 import { NZ_CONTRACT } from './contract.js';
-import { authHeaders, lsGet } from './platform.js';
+import { lsGet } from './platform.js';
 import { sessionStream } from './session_stream.js';
 import { WS_STATES, wsm } from './ws_manager.js';
 import { perSession, selection, serverInfo, sessionList, timers, transcript } from './state.js';
@@ -69,15 +69,14 @@ export function restorePending() {
 // lastVersion > 0 (the sites that need a repaint zero it) and, for a body the
 // sidebar has not painted, only over a live socket. A header rebuild, which
 // paints the chips from cache, drops the validator (setHeaderEffortChip).
-// 8 s timeout: RNEW-UX-003.
 const NOT_MODIFIED = 'not-modified';
 async function fetchSessionsPayload() {
-  const headers = authHeaders();
+  const headers = {};
   const v = sessionList.lastETag;
   if (v && sessionList.lastVersion > 0 && (!v.unpainted || wsm.state === WS_STATES.CONNECTED)) headers['If-None-Match'] = v.etag;
   let etag = '';
   try {
-    const data = /** @type {RestResponses['sessions'] | RestResponses['sessions_multi']} */ (await fetchJSON(NZ_CONTRACT.API.sessions, { headers, timeoutMs: 8000, onResponse: r => { etag = r.headers.get('ETag') || ''; } }));
+    const data = (await fetchJSON(NZ_CONTRACT.API.sessions, { headers, timeoutMs: 8000, onResponse: r => { etag = r.headers.get('ETag') || ''; } }));
     return data && { data, validator: etag && { etag, unpainted: true } };
   } catch (err) {
     if (err.status === 304) return NOT_MODIFIED;
@@ -94,7 +93,7 @@ async function fetchSessionsPayload() {
 // version and compare as JSON. State flips (running↔ready, last_response)
 // never advance it: over a live socket session_state covers them, but under
 // WS-fallback polling REST is the only state source, so the short-circuit
-// applies only while connected (#2431); idempotent renderSidebar runs every 5 s.
+// applies only while connected; idempotent renderSidebar runs every 5 s.
 function sessionsUnchanged(data, wsConnected) {
   const version = (data.stats && data.stats.version) || 0;
   const nodesHash = JSON.stringify(data.nodes || {});
@@ -111,7 +110,7 @@ function sessionsUnchanged(data, wsConnected) {
 function syncHistory(tag) {
   sessionList.historyPollTag = tag;
   if (tag === sessionList.historyTag) return;
-  const load = /** @type {Promise<RestResponses['sessions_history'] | null>} */ (tag ? fetchJSON(NZ_CONTRACT.API.sessions_history, { headers: authHeaders(), timeoutMs: 8000 }) : Promise.resolve(null));
+  const load = (tag ? fetchJSON(NZ_CONTRACT.API.sessions_history, { timeoutMs: 8000 }) : Promise.resolve(null));
   load.then(h => {
     sessionList.historySessionsData = (h && h.history_sessions) || [];
     sessionList.historyTag = (h && h.history_tag) || '';
@@ -152,7 +151,7 @@ function mergeBackendSessions(polled, backendKeys, pushesBefore) {
     // Keep the optimistic 'running' flip while the REST snapshot lags the send,
     // or the banner hides until the push catches up. The returned copy keeps it
     // too, or a re-render from the cached payload (project collapse, sidebar
-    // search) paints the card idle under a running banner (#2431).
+    // search) paints the card idle under a running banner.
     if (perSession.optimisticRunning[sKey] && s.state !== 'running') {
       s = Object.assign({}, s, { state: 'running' });
     }
@@ -211,13 +210,13 @@ function pendingCardFor(key) {
   // On the default backend the live version (from system/init, refreshed
   // every poll) beats the manifest, which is cached up to 60 s and would flash
   // the pre-upgrade version; another backend has no live source, and the
-  // default's version would mislabel it. R20260613-pending-version.
+  // default's version would mislabel it.
   const isDefaultBackend = !pendingBackend || (serverInfo.cliBackends !== null && pendingBackend === serverInfo.cliBackends.default);
   const pendingCLIVersion = isDefaultBackend
     ? (serverInfo.defaultCLIVersion || backendDisplayVersion(pendingBackend))
     : (backendDisplayVersion(pendingBackend) || serverInfo.defaultCLIVersion);
   // Mirror the server's project/project_fallback shape, so an unregistered
-  // workspace groups under its basename from the first paint (#2431).
+  // workspace groups under its basename from the first paint.
   const pendingWS = perSession.workspaces[key];
   const pendingProject = matchProject(pendingWS);
   const pendingFallback = pendingProject ? '' : workspaceFallbackName(pendingWS);
@@ -263,7 +262,6 @@ export async function fetchSessions() {
     // The effort tier, spawn diagnosis and overlay drift change at turn
     // boundaries, which do not advance stats.version, and renderMainShell does
     // not run on turn completion: they repaint here, before the short-circuit.
-    // docs/rfc/kiro-effort-visibility.md §5.1 / R1b
     if (selection.key) setHeaderEffortChip(data.sessions);
     if (selection.key) setHeaderSpawnDiagChip(data.sessions);
     if (selection.key) setHeaderOverlayDriftChip(data.sessions);
@@ -321,7 +319,7 @@ export function renderSidebar(data) {
   if (st.projects) sessionList.projectsData = st.projects;
 
   const list = document.getElementById('session-list');
-  // R110-P2 empty-state CTA: the "no sessions" text E2E asserts + the header `+` action.
+  // Empty state: the "no sessions" text + the header `+` action.
   const html = sidebarHtml(buildSidebarItems(data)) || '<div class="no-sessions">no sessions<br><button type="button" class="no-sessions-cta" data-action="session-new">+ 开启你的第一个会话</button></div>';
   // Keyed reconcile: only rows whose markup changed are replaced, so a poll
   // with nothing new touches no DOM, in-place patches (state dot, unread chip,
@@ -334,7 +332,7 @@ export function renderSidebar(data) {
     setActiveSessionCard(selection.key, selection.node);
   }
 
-  // The Home panel's 最近会话 list mirrors every repaint (R110-P1).
+  // The Home panel's 最近会话 list mirrors every repaint.
   renderRecentSessionsPanel();
 }
 
@@ -492,19 +490,10 @@ function workspaceFallbackName(ws) {
 }
 
 // PLATFORM_ORIGINS maps the first component of a session key (the platform
-// tag emitted by session.SessionKey in internal/session/managed.go) to the
-// user-facing Chinese label shown on the IM-origin badge. Adding a new IM
-// platform means extending this map PLUS picking a CSS variant in
-// dashboard.html `.sc-origin.kind-*` PLUS wiring the adapter in
-// cmd/naozhi/main.go initPlatforms — see R230-ARCH-11 (#1021) for the
-// `GET /api/platforms` proposal that would let the dashboard hydrate this
-// list at boot instead of hardcoding it. Non-IM prefixes (dashboard, local,
-// cron, scratch_*, planner) intentionally do NOT appear here — originBadgeInfo
-// returns null for them so those sessions don't grow a misleading "外部
-// 来源" chip. The two dashboard-local sources of truth (this map and the
-// `.sc-origin.kind-*` CSS) are cross-checked by
-// TestDashboardJS_R230ARCH11_PlatformOriginsAndCSSStayInSync so a partial
-// addition fails CI.
+// tag emitted by session.SessionKey) to the label on the IM-origin badge. A
+// new IM platform needs this map, a `.sc-origin.kind-*` CSS variant and the
+// adapter in cmd/naozhi initPlatforms. Non-IM prefixes (dashboard, local,
+// cron, scratch_*, planner) are deliberately absent so they get no badge.
 const PLATFORM_ORIGINS = {
   feishu:  { name: '飞书',    kind: 'feishu' },
   slack:   { name: 'Slack',   kind: 'slack' },
@@ -516,15 +505,7 @@ const PLATFORM_ORIGINS = {
 // Returns null when the key doesn't come from a real IM platform — that's
 // the common case (dashboard-created sessions, cron jobs, scratch drawers,
 // planner sessions, local takeovers) and those should render without a
-// badge. Pure function, no DOM touch, so it's easy to unit-test from a
-// contract test that loads dashboard.js as text.
-//
-// R110-P3: scope of this helper is intentionally "platform + 私聊/群"
-// only; it does NOT attempt to display the opaque chat_id nor a jump-back
-// URL because those require backend schema changes (see TODO R110-P3-IM
-// 来源指示 residual scope). Surfacing platform alone already tells the
-// operator "this is a real IM thread, not a dashboard-local conversation",
-// which is the 80% case.
+// badge. Scope is "platform + 私聊/群" only; the opaque chat_id is not shown.
 function originBadgeInfo(key) {
   if (typeof key !== 'string' || !key) return null;
   const colon = key.indexOf(':');
@@ -562,7 +543,7 @@ function cliIcon(name) {
   // Inlined here so the asset works offline + survives CSP. Compressed to
   // the essential shapes: rounded purple bg + white ghost body + 2 black
   // eyes. The original 1200×1200 is recoordinatized for the 16×16 viewbox
-  // sidebar / header sc-cli-icon slot. UI Round 5 R5-1.
+  // sidebar / header sc-cli-icon slot.
   if (name === 'kiro') return '<svg class="sc-cli-icon" viewBox="0 0 1200 1200" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="1200" height="1200" rx="260" fill="#9046FF"/><path d="M398.554 818.914C316.315 1001.03 491.477 1046.74 620.672 940.156C658.687 1059.66 801.052 970.473 852.234 877.795C964.787 673.567 919.318 465.357 907.64 422.374C827.637 129.443 427.623 128.946 358.8 423.865C342.651 475.544 342.402 534.18 333.458 595.051C328.986 625.86 325.507 645.488 313.83 677.785C306.873 696.424 297.68 712.819 282.773 740.645C259.915 783.881 269.604 867.113 387.87 823.883L399.051 818.914H398.554Z" fill="white"/><ellipse cx="636" cy="487" rx="40" ry="63" fill="black"/><ellipse cx="771" cy="487" rx="40" ry="63" fill="black"/></svg>';
   // codex: official OpenAI logomark (Simple Icons, MIT/brand path, 24×24).
   // Inlined for offline + CSP. Single path filled with the OpenAI brand green
@@ -573,7 +554,7 @@ function cliIcon(name) {
   return '<svg class="sc-cli-icon" viewBox="0 0 248 248" fill="none"><path d="M52.4285 162.873L98.7844 136.879L99.5485 134.602L98.7844 133.334H96.4921L88.7237 132.862L62.2346 132.153L39.3113 131.207L17.0249 130.026L11.4214 128.844L6.2 121.873L6.7094 118.447L11.4214 115.257L18.171 115.847L33.0711 116.911L55.485 118.447L71.6586 119.392L95.728 121.873H99.5485L100.058 120.337L98.7844 119.392L97.7656 118.447L74.5877 102.732L49.4995 86.1905L36.3823 76.62L29.3779 71.7757L25.8121 67.2858L24.2839 57.3608L30.6515 50.2716L39.3113 50.8623L41.4763 51.4531L50.2636 58.1879L68.9842 72.7209L93.4357 90.6804L97.0015 93.6343L98.4374 92.6652L98.6571 91.9801L97.0015 89.2625L83.757 65.2772L69.621 40.8192L63.2534 30.6579L61.5978 24.632C60.9565 22.1032 60.579 20.0111 60.579 17.4246L67.8381 7.49965L71.9133 6.19995L81.7193 7.49965L85.7946 11.0443L91.9074 24.9865L101.714 46.8451L116.996 76.62L121.453 85.4816L123.873 93.6343L124.764 96.1155H126.292V94.6976L127.566 77.9197L129.858 57.3608L132.15 30.8942L132.915 23.4505L136.608 14.4708L143.994 9.62643L149.725 12.344L154.437 19.0788L153.8 23.4505L150.998 41.6463L145.522 70.1215L141.957 89.2625H143.994L146.414 86.7813L156.093 74.0206L172.266 53.698L179.398 45.6635L187.803 36.802L193.152 32.5484H203.34L210.726 43.6549L207.415 55.1159L196.972 68.3492L188.312 79.5739L175.896 96.2095L168.191 109.585L168.882 110.689L170.738 110.53L198.755 104.504L213.91 101.787L231.994 98.7149L240.144 102.496L241.036 106.395L237.852 114.311L218.495 119.037L195.826 123.645L162.07 131.592L161.696 131.893L162.137 132.547L177.36 133.925L183.855 134.279H199.774L229.447 136.524L237.215 141.605L241.8 147.867L241.036 152.711L229.065 158.737L213.019 154.956L175.45 145.977L162.587 142.787H160.805V143.85L171.502 154.366L191.242 172.089L215.82 195.011L217.094 200.682L213.91 205.172L210.599 204.699L188.949 188.394L180.544 181.069L161.696 165.118H160.422V166.772L164.752 173.152L187.803 207.771L188.949 218.405L187.294 221.832L181.308 223.959L174.813 222.777L161.187 203.754L147.305 182.486L136.098 163.345L134.745 164.2L128.075 235.42L125.019 239.082L117.887 241.8L111.902 237.31L108.718 229.984L111.902 215.452L115.722 196.547L118.779 181.541L121.58 162.873L123.291 156.636L123.14 156.219L121.773 156.449L107.699 175.752L86.304 204.699L69.3663 222.777L65.291 224.431L58.2867 220.768L58.9235 214.27L62.8713 208.48L86.304 178.705L100.44 160.155L109.551 149.507L109.462 147.967L108.959 147.924L46.6977 188.512L35.6182 189.93L30.7788 185.44L31.4156 178.115L33.7079 175.752L52.4285 162.873Z" fill="#D97757"/></svg>';
 }
 
-function sessionCardHtml(/** @type {SessionSnapshot & {source?: 'managed' | 'terminal', type_label?: string}} */ s) {
+function sessionCardHtml(s) {
   const sNode = s.node || 'local';
   const isActive = selection.key === s.key && selection.node === sNode;
   const isNew = s.state === 'new';
@@ -616,7 +597,7 @@ function sessionCardHtml(/** @type {SessionSnapshot & {source?: 'managed' | 'ter
   const typeTag = s.source === 'terminal' ? sessionTypeTag(s.type_label) : '';
   const agentCount = (isActive && turnState.agents.length) || (s.subagents ? s.subagents.length : 0);
   const agentBadge = agentCount > 0 ? '<span class="sc-agents">' + ICONS.robot + '\u00D7' + agentCount + '</span>' : '';
-  // R110-P3 IM origin: show a small chip for sessions sourced from feishu /
+  // IM origin: show a small chip for sessions sourced from feishu /
   // slack / discord / weixin so operators can eyeball which cards are real
   // IM threads vs dashboard-local conversations. originBadgeHtml returns ''
   // for non-IM prefixes so the meta line stays clean for those.
@@ -627,10 +608,7 @@ function sessionCardHtml(/** @type {SessionSnapshot & {source?: 'managed' | 'ter
   // personal 1P or the company Bedrock account?"). Empty for single-auth mode /
   // global default so deployments that don't use profiles see no change.
   const accessProfileChip = accessProfileChipHtml(s.access_profile);
-  // ui-polish-light-theme D4: the cli icon rides inside the meta line at
-  // 18px instead of a dedicated 36px column — at 36px every card led with
-  // a saturated brand mark that outweighed its own title, while the icon
-  // only carries one low-entropy bit (which backend). Title owns line 1.
+  // The cli icon rides inside the meta line at 18px so the title owns line 1.
   const metaHtml = icon +
     '<span class="sc-dot ' + dotCls + '"></span>' +
     '<span>' + esc(displayState) + '</span>' + sessionExitChipHtml(s.state, s.death_reason, s.death_detail, s.startup_failure) +
@@ -640,7 +618,7 @@ function sessionCardHtml(/** @type {SessionSnapshot & {source?: 'managed' | 'ter
     typeTag +
     agentBadge + workflowBadgeHtml(s, sNode);
 
-  // R110-P1: dim 30-rune preview of last assistant text reply. Skipped when
+  // Dim 30-rune preview of last assistant text reply. Skipped when
   // empty (omitempty hides it for brand-new sessions / runs that have not
   // produced an assistant text block yet — tool-only turns intentionally
   // leave the slot blank rather than echoing the prompt). Server already
@@ -671,7 +649,7 @@ function sessionCardHtml(/** @type {SessionSnapshot & {source?: 'managed' | 'ter
 // as of the last /api/sessions, up to 30 s behind (docs/rfc/workflow-dashboard.md
 // §5.8); the open session's card hides it in CSS. A remote node's workflows
 // cannot be opened, so its cards get none (NG3).
-function workflowBadgeHtml(/** @type {SessionSnapshot} */ s, sNode) {
+function workflowBadgeHtml(s, sNode) {
   if (sNode !== 'local' || !Array.isArray(s.workflows)) return '';
   let done = 0, total = 0;
   const lines = [];
@@ -778,7 +756,7 @@ export function updateStatusBar() {
     ? '<button type="button" class="status-reconnect" data-action="ws-reconnect" title="立即重连" aria-label="立即重连">重连</button>'
     : '';
 
-  // R110-P1 outage duration hint: only when we have a stamped disconnect
+  // Outage duration hint: only when we have a stamped disconnect
   // timestamp (live outage) AND the state is not CONNECTED. A stale non-zero
   // timestamp on CONNECTED would be a bug elsewhere; the state gate is
   // defensive. Empty string from formatOutageDuration means "< 5s, suppress"
@@ -837,7 +815,7 @@ export function updateStatusBar() {
 function wsStateChanged(s, prev) {
   updateStatusBar();
   if (s === WS_STATES.CONNECTED) {
-    // RNEW-UX-010 — sighted users see the dot flip; AT users get the
+    // Sighted users see the dot flip; AT users get the
     // transition announced politely. Only announce when it's a real
     // transition (prev !== CONNECTED) to avoid re-announcing on no-op
     // state refreshes.
@@ -846,16 +824,16 @@ function wsStateChanged(s, prev) {
     if (timers.sessionPoll) { clearInterval(timers.sessionPoll); timers.sessionPoll = null; }
     // Reduce discovered scan frequency
     if (timers.discoveredPoll) { clearInterval(timers.discoveredPoll); timers.discoveredPoll = null; }
-    // #2431: a hidden tab has had its pollers suspended by stopPollers;
+    // A hidden tab has had its pollers suspended by stopPollers;
     // re-arming here would undo that. startPollers re-arms on return.
     if (!document.hidden) timers.discoveredPoll = setInterval(scanDiscovered, 30000);
     // Pull fresh node/session state immediately to clear stale data
     debouncedFetchSessions();
   } else if (s === WS_STATES.DISCONNECTED) {
-    // RNEW-UX-010 — announce only on real transitions from connected, so
+    // Announce only on real transitions from connected, so
     // initial cold boot (OFF→CONNECTING→DISCONNECTED retry) stays silent.
     if (prev === WS_STATES.CONNECTED) announce('连接已断开，正在重试');
-    // WS lost: start fallback polling — unless the tab is hidden (#2431):
+    // WS lost: start fallback polling — unless the tab is hidden:
     // stopPollers already suspended everything and startPollers re-arms on
     // visibilitychange from the then-current WS state.
     const visible = !document.hidden;
@@ -872,7 +850,7 @@ wsm.onStateChange(wsStateChanged);
 
 // onSessionState applies a pushed process state to the session: the optimistic
 // flip it settles, its bookkeeping, its card, the header and the subscription.
-function onSessionState(/** @type {WsFrames['session_state']} */ msg) {
+function onSessionState(msg) {
   const msgNode = msg.node || 'local';
   const sKey = sid(msg.key, msgNode);
   sessionList.statePushes.at.set(sKey, ++sessionList.statePushes.n);
@@ -933,7 +911,7 @@ function onSessionState(/** @type {WsFrames['session_state']} */ msg) {
 
 // settleTurnBoundary is what a session_state owes the turn it ends: the unread
 // count, the sent-text cache, the HTTP send mark and the git chip.
-function settleTurnBoundary(/** @type {WsFrames['session_state']} */ msg, msgNode, sKey, prevState) {
+function settleTurnBoundary(msg, msgNode, sKey, prevState) {
   // Chat-style unread: a running→ready (or dead) transition means the model
   // just produced a reply. Bump the unread counter unless the operator is
   // already looking at that card — in which case they're reading it live.
@@ -955,9 +933,9 @@ function settleTurnBoundary(/** @type {WsFrames['session_state']} */ msg, msgNod
 
 // paintSessionCardState patches the session's sidebar card in place: badge,
 // dot, state text, exit chip and unread chip.
-function paintSessionCardState(/** @type {WsFrames['session_state']} */ msg, msgNode, sKey) {
-  let card = /** @type {HTMLElement | null} */ (null);
-  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.session-card')).forEach(c => {
+function paintSessionCardState(msg, msgNode, sKey) {
+  let card = null;
+  document.querySelectorAll('.session-card').forEach(c => {
     if (c.dataset.key === msg.key && (c.dataset.node || 'local') === msgNode) card = c;
   });
   if (!card) return;
@@ -992,7 +970,7 @@ function paintSessionCardState(/** @type {WsFrames['session_state']} */ msg, msg
 //            — detected by the "suspended" reason the server sends for no-process subscribes.
 // Case 3 must NOT fire on normal ready→running transitions for already-subscribed
 // sessions — that would cause full re-render and wipe the optimistic user message.
-function resubscribeOnRunning(/** @type {WsFrames['session_state']} */ msg, msgNode, wasDead) {
+function resubscribeOnRunning(msg, msgNode, wasDead) {
   if (msg.key === selection.key && msgNode === selection.node && msg.state === 'running') {
     const needSub = (
       (sessionStream.subscribedKey !== msg.key && sessionStream._pendingSubscribeKey !== msg.key) || // case 1: not subscribed and no pending subscribe
@@ -1086,7 +1064,7 @@ wsm.on(NZ_CONTRACT.WS.error, (msg) => {
 });
 wsm.on(NZ_CONTRACT.WS.session_state, (msg) => onSessionState(msg));
 wsm.on(NZ_CONTRACT.WS.sessions_update, () => {
-  // RNEW-UX-010 — snapshot pre-update session-key set so we can spot
+  // Snapshot the pre-update session-key set so we can spot
   // a newly-added key after the fetch completes. Comparing sizes is
   // not enough (delete+create at the same tick would net to zero).
   const prevSessKeys = new Set(Object.keys(sessionList.sessionsData || {}));

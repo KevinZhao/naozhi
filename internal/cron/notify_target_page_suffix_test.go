@@ -130,10 +130,9 @@ func TestNotifyTarget_FencedResultStaysBalanced(t *testing.T) {
 // Renumbering to the delivered subset would tell the recipient they have all of it.
 func TestNotifyTarget_CapDroppedTailKeepsOriginalTotal(t *testing.T) {
 	t.Parallel()
-	// maxLen must be wide enough to FIT a suffix: at 8 runes (what the cap test
-	// next door uses) ReserveForPageSuffix correctly suppresses it, since a
-	// one-digit suffix is itself 8 runes. The first version of this test used 8 and
-	// failed for that reason — the fixture was wrong, not the reservation.
+	// maxLen must be wide enough to FIT a suffix: at 8 runes
+	// ReserveForPageSuffix correctly suppresses it, since a one-digit suffix is
+	// itself 8 runes.
 	const maxLen = 40
 	fp := &fakePartialPlatform{failAt: 1000, maxLen: maxLen}
 	s := &Scheduler{}
@@ -148,8 +147,8 @@ func TestNotifyTarget_CapDroppedTailKeepsOriginalTotal(t *testing.T) {
 	s.notifyTarget("fake-notify", "chat-x", long)
 
 	sent := fp.sentChunks()
-	if len(sent) == 0 {
-		t.Fatal("nothing was sent")
+	if len(sent) != cronNotifyMaxChunks {
+		t.Fatalf("sent %d chunks, want the cap %d (#568: the tail past the cap is dropped)", len(sent), cronNotifyMaxChunks)
 	}
 	m := pageSuffixRe.FindStringSubmatch(sent[0])
 	if m == nil {

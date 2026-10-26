@@ -11,7 +11,7 @@
 // .cc-clawd { color: var(--nz-clawd-rust) }) — no inline hex in JS.
 export const CLAWD_SVG = '<svg class="cc-clawd" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill="currentColor" d="M4.5 6h15v5H22v2h-2.5v3h-1v2H17v-2h-1v2h-1.5v-2h-5v2H8v-2H7v2H5.5v-2h-1v-3H2v-2h2.5ZM7 8v3h1V8Zm9 0v3h1V8Z"/></svg>';
 
-// ICONS — single source of truth for the non-SVG glyph set (#2027). Before
+// ICONS — single source of truth for the non-SVG glyph set. Before
 // this map the dashboard carried four parallel icon notations (SVG consts,
 // `&#x..;` / `&#..;` HTML entities, bare Unicode glyphs like `✎ ⎘`, and raw
 // `\u{..}` escapes) with the same semantic icon spelled differently at each

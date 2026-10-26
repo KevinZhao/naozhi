@@ -846,7 +846,7 @@ func TestRunStore_RecentReturnsNewestFirst(t *testing.T) {
 }
 
 // TestRunStore_ListHonoursConfiguredKeepCount is the regression test for
-// R249-ARCH-1 (#969): once SchedulerConfig.RunsKeepCount is plumbed into
+// R249-ARCH-1 (#969): once Options.KeepCount is plumbed into
 // s.keepCount, List / RecentSessionIDs must clamp the requested limit to the
 // configured retention cap rather than the hardcoded DefaultKeepCount
 // (200). An operator who raised retention above 200 previously could never

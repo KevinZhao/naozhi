@@ -3,7 +3,6 @@
 // apply. event_render.js imports the renderer; dashboard.js registers the two
 // data-action handlers.
 import { NZ_CONTRACT } from './contract.js';
-import { getToken } from './platform.js';
 import { selection, transcript } from './state.js';
 import { esc, escAttr } from './nz_util.js';
 import { featureForCurrent } from './features.js';
@@ -35,7 +34,7 @@ export function hydrateAskAnsweredFromHistory(events) {
 // screen was answered on some surface (Feishu, the input box, another tab), so
 // it must lock now — not only after a reload replays history. Without this the
 // stale card stayed submittable and pushed an out-of-date answer into the
-// next turn (#2430). Idempotent: cards onAskSubmit already locked are skipped
+// next turn. Idempotent: cards onAskSubmit already locked are skipped
 // via the existing .ask-status marker.
 export function lockRenderedAskCards(scrollEl) {
   if (!scrollEl) return;
@@ -263,8 +262,6 @@ async function sendAskAnswerViaAPI(text, card) {
   }
   if (!key) throw new Error('no active session');
   const headers = { 'Content-Type': 'application/json' };
-  const token = getToken();
-  if (token) headers['Authorization'] = 'Bearer ' + token;
   const payload = { key: key, text: text };
   if (node && node !== 'local') payload.node = node;
   const r = await fetch(NZ_CONTRACT.API.sessions_send, { method: 'POST', headers, body: JSON.stringify(payload) });

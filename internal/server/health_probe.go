@@ -3,9 +3,7 @@ package server
 import (
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/platform"
-	"github.com/naozhi/naozhi/internal/spawndiag"
 )
 
 // HealthProbe populates one or more /health auth-section fields without
@@ -39,8 +37,6 @@ func EventLogHealthProbe(router healthRouter) HealthProbe {
 			Fsyncs:         el.Fsyncs,
 			Malformed:      el.Malformed,
 			ReplayLeak:     el.ReplayLeak,
-			FSType:         el.FSType,
-			FSSupported:    el.FSSupported,
 		}
 	}
 }
@@ -51,13 +47,10 @@ func EventLogHealthProbe(router healthRouter) HealthProbe {
 func (h *HealthHandler) subsystemProbes() []HealthProbe {
 	return []HealthProbe{
 		platformConnProbe(h.platforms),
-		wsDroppedHealthProbe(h.hubDropped),
 		dispatchHealthProbe(h.dispatcherMetrics),
 		EventLogHealthProbe(h.router),
 		AttachmentTrackerHealthProbe(h.router),
-		runStoresHealthProbe(h.cronRunStore, h.router),
 		sessionStoreHealthProbe(h.router),
-		spawnDiagsHealthProbe,
 	}
 }
 
@@ -117,60 +110,6 @@ func sessionStoreHealthProbe(router healthRouter) HealthProbe {
 			return
 		}
 		auth.SessionStore = &healthSessionStore{Blocked: blocked}
-	}
-}
-
-// spawnDiagsHealthProbe populates spawn_diags from the process-wide gate
-// summary; the field stays omitted until some gate has dropped an input.
-func spawnDiagsHealthProbe(auth *healthAuthSection) {
-	if s, ok := spawndiag.Snapshot(); ok {
-		auth.SpawnDiags = &s
-	}
-}
-
-// runStoresHealthProbe populates run_stores from the cron and session
-// run-history stores. A store that does not persist contributes no
-// sub-object, and with neither persisting the section is omitted.
-func runStoresHealthProbe(cronRunStore func() cron.RunStoreHealth, router healthRouter) HealthProbe {
-	return func(auth *healthAuthSection) {
-		if auth == nil {
-			return
-		}
-		var rs healthRunStores
-		if cronRunStore != nil {
-			if c := cronRunStore(); c.Enabled {
-				rs.Cron = &healthCronRunStore{
-					WriteFailedDiskFull: c.WriteFailedDiskFull,
-					WriteFailedOther:    c.WriteFailedOther,
-					HistoryDropped:      c.HistoryDropped,
-					CacheStaleEvictions: c.CacheStaleEvictions,
-				}
-			}
-		}
-		if sr := router.Runs().Health(); sr.Enabled {
-			rs.Session = &healthSessionRunStore{
-				WriteFailedDiskFull: sr.WriteFailedDiskFull,
-				WriteFailedOther:    sr.WriteFailedOther,
-				AsyncDropped:        sr.AsyncDropped,
-			}
-		}
-		if rs.Cron == nil && rs.Session == nil {
-			return
-		}
-		auth.RunStores = &rs
-	}
-}
-
-// wsDroppedHealthProbe returns a HealthProbe that populates the ws_dropped
-// field from the hub's DroppedMessages counter. Injected as a closure so
-// HealthHandler has no upward dependency on the Hub; nil closure omits the field.
-func wsDroppedHealthProbe(hubDropped func() int64) HealthProbe {
-	return func(auth *healthAuthSection) {
-		if auth == nil || hubDropped == nil {
-			return
-		}
-		n := hubDropped()
-		auth.WSDropped = &n
 	}
 }
 

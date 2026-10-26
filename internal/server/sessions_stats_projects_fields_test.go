@@ -45,9 +45,6 @@ func TestSessionsStatsProjects_CarriesPaletteFields(t *testing.T) {
 		Platforms:      map[string]platform.Platform{"test": &mockPlatform{}},
 		Backend:        "claude",
 		ProjectManager: mgr,
-		Features: FeatureOptions{
-			ProjectStableKey: true,
-		},
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)

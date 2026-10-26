@@ -125,13 +125,8 @@ func (c *wsClient) trySendRaw(data []byte) bool {
 		return false
 	default:
 		// Drop when the buffer is full so a slow client cannot block the hub
-		// mutex during broadcast. Per-client and hub-wide counters both bump so
-		// /health reports totals without scanning clients. c.hub is nil in
-		// unit tests that build a wsClient without a Hub (#1396).
+		// mutex during broadcast.
 		n := c.dropped.Add(1)
-		if c.hub != nil {
-			c.hub.droppedTotal.Add(1)
-		}
 		// A permanently-slow client silently falling behind is worse than a
 		// forced reconnect: past wsDropThreshold close the connection so the
 		// browser resyncs via a fresh subscribe. doneOnce collapses concurrent

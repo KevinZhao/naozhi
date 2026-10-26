@@ -98,17 +98,6 @@ func TestHandleAPISessions_StatsStructShape(t *testing.T) {
 		}
 	}
 
-	// system retained as map[string]any with the 5 known fingerprint keys —
-	// changing these requires a session_list.js renderSidebar update.
-	sys, ok := stats["system"].(map[string]any)
-	if !ok {
-		t.Fatalf("system wrong type: %T", stats["system"])
-	}
-	for _, k := range []string{"os", "arch", "cpus", "memory_mb", "ip_count"} {
-		if _, ok := sys[k]; !ok {
-			t.Errorf("system.%s missing", k)
-		}
-	}
 }
 
 // TestHandleAPISessions_StatsProjectsAlwaysArray verifies that the

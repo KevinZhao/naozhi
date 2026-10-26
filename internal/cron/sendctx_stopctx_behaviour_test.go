@@ -28,15 +28,6 @@ func (s *blockingSendSession) Send(ctx context.Context, _ string) (SendResult, e
 func (s *blockingSendSession) SessionID() string                     { return "sess-block" }
 func (s *blockingSendSession) InterruptViaControl() InterruptOutcome { return InterruptSent }
 
-type blockingSendRouter struct {
-	reapRouter
-	sess *blockingSendSession
-}
-
-func (r *blockingSendRouter) GetOrCreate(_ context.Context, _ string, _ AgentOpts) (Session, SessionStatus, error) {
-	return r.sess, SessionNew, nil
-}
-
 // TestSendCtxCancelsWhenStopCtxCancels replaces a textual assertion that
 // scheduler_run.go contains the literal
 // `sendCtx, sendCancel := context.WithTimeout(s.stopCtx, a.sendBudget)`.
@@ -59,7 +50,7 @@ func TestSendCtxCancelsWhenStopCtxCancels(t *testing.T) {
 	t.Parallel()
 
 	sess := &blockingSendSession{entered: make(chan struct{}), ctxErr: make(chan error, 1)}
-	router := &blockingSendRouter{sess: sess}
+	router := &reapRouter{sess: sess}
 	rec := &recordingBroadcaster{}
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 

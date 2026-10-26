@@ -1,7 +1,6 @@
 // cron_drawer.js — the per-job drawer: open/close lifecycle, the drawer
 // shell (header / summary / actions / spec), keyboard focus
-// bookkeeping and the missing-job placeholder with its fetch-once reconcile
-// (#2715 D4 follow-up: cron_view.js four-region split, region 3).
+// bookkeeping and the missing-job placeholder with its fetch-once reconcile.
 //
 // It opens and closes the drawer through cron_state's cronDrawerState.jobId,
 // the ONLY state gate for the drawer (RFC §4.5); the delete flow goes through
@@ -107,7 +106,7 @@ function renderCronDrawer() {
 // syncCronDrawerHeaderHeight publishes the sticky drawer header's measured
 // height as --nz-cron-drawer-header-h on the scroll container so the 执行历史
 // .ct-head (also sticky) can stick just below it instead of at top:0 where
-// the z-index:2 header covers it (#2434). The header height isn't fixed —
+// the z-index:2 header covers it. The header height isn't fixed —
 // .cdh-row2 wraps and the coarse-pointer media bumps the icon buttons to
 // 44px — so a ResizeObserver keeps the value honest. Idempotent per host.
 function syncCronDrawerHeaderHeight(host) {
@@ -432,7 +431,7 @@ function openCronDetail(jobId, originRow) {
   };
   if (typeof requestAnimationFrame === 'function') requestAnimationFrame(focusDrawerHead);
   else setTimeout(focusDrawerHead, 0);
-  // R236-SEC-08 (#494): the drawer's prompt body comes from the cached
+  // The drawer's prompt body comes from the cached
   // job whose body may be 256-byte truncated (poll uses ?compact=1).
   // Refetch the full job in the background so the drawer's "做什么"
   // section shows the entire prompt rather than a clipped preview.

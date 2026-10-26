@@ -25,7 +25,7 @@ import (
 // stopped / startedAtNanos / triggerWG / gcWG) written once at NewScheduler /
 // Start / Stop, otherwise read-only or atomic; immutable config (router /
 // configMapsPtr / location / notifyDefault / allowedRoot* / jitterMax /
-// slowThreshold / execTimeout / maxJobs* / storePath / stopBudget) set in
+// execTimeout / maxJobs* / storePath / stopBudget) set in
 // NewScheduler and read lock-free; mu-guarded mutable state (jobs /
 // chatJobCount / jobsByChat / sortedJobIDs); independently synchronised state
 // (runningJobs, telemetry, store*, *Once) with own primitives.
@@ -49,9 +49,9 @@ type Scheduler struct {
 	configMapsPtr atomic.Pointer[cronConfigMaps]
 	storePath     string
 	maxJobs       int
-	// maxJobsPerChat is the resolved per-chat cap: SchedulerConfig
-	// MaxJobsPerChat when > 0, otherwise DefaultMaxJobsPerChat. Immutable
-	// after NewScheduler returns, so AddJob can read it lock-free.
+	// maxJobsPerChat is the per-chat cap, seeded from DefaultMaxJobsPerChat
+	// (in-package tests lower it before Start). Immutable once the Scheduler
+	// is shared, so AddJob can read it lock-free.
 	maxJobsPerChat int
 	// autoPauseAfter is the failure streak that auto-pauses a job; 0 disables
 	// it (a negative SchedulerConfig value, or a hand-built Scheduler).
@@ -69,12 +69,6 @@ type Scheduler struct {
 	// *Scheduler. The 5s default is what TestWaitGCDrain_BoundedByBudget was
 	// paying in wall time before this seam existed.
 	gcBudget time.Duration
-	// watchdogInterruptTimeoutNanos bounds sess.InterruptViaControl inside
-	// runDeadlineWatchdog. Per-instance so parallel timeout tests stay
-	// isolated (#1904); atomic because the AfterFunc watchdog goroutine reads
-	// it concurrently with a test's Store. Seeded with
-	// watchdogInterruptTimeoutDefault in NewScheduler.
-	watchdogInterruptTimeoutNanos atomic.Int64
 	// location is the timezone used to interpret schedule expressions and to
 	// compute preview/next-run times exposed via the dashboard.
 	location *time.Location
@@ -96,10 +90,6 @@ type Scheduler struct {
 	// jitterMax is the scheduling jitter cap. See SchedulerConfig.JitterMax.
 	// Immutable after NewScheduler returns, so no lock needed.
 	jitterMax time.Duration
-	// slowThreshold is the wall-clock budget beyond which a successful run
-	// counts as "slow"; zero/negative falls through to
-	// defaultCronSlowThreshold at the callsite. Immutable after NewScheduler.
-	slowThreshold time.Duration
 	// routerNilOnce limits registerStubByValue's "router missing" slog.Error
 	// to once per Scheduler lifetime, so a router-less fixture (or an
 	// AllowNilRouter deployment) does not spam the log every tick; with
@@ -213,7 +203,6 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 		slog.Warn("cron max_jobs exceeds hard cap, clamping", "requested", before, "cap", maxJobsHardCap)
 	}
 	cfg.applyDefaults()
-	maxPerChat := cfg.MaxJobsPerChat
 	parent := cfg.ParentCtx
 	if parent == nil {
 		parent = context.Background()
@@ -245,7 +234,7 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 		// notifySender / agents / agentCommands are published via configMapsPtr below.
 		storePath:      cfg.StorePath,
 		maxJobs:        cfg.MaxJobs,
-		maxJobsPerChat: maxPerChat,
+		maxJobsPerChat: DefaultMaxJobsPerChat,
 		autoPauseAfter: max(cfg.AutoPauseAfterFailures, 0),
 		execTimeout:    cfg.ExecTimeout,
 		// Seeded from the const; tests override per-instance via
@@ -257,16 +246,11 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 		allowedRoot:         cfg.AllowedRoot,
 		allowedRootResolved: allowedRootResolved,
 		jitterMax:           cfg.JitterMax,
-		slowThreshold:       cfg.SlowThreshold,
 		stopCtx:             stopCtx,
 		stopCancel:          stopCancel,
-		runs: runstore.New(runstore.Options{
-			StorePath:  cfg.StorePath,
-			KeepCount:  cfg.RunsKeepCount,
-			KeepWindow: cfg.RunsKeepWindow,
-		}),
-		ledger: deps.Ledger,
-		budget: deps.Budget,
+		runs:                runstore.New(runstore.Options{StorePath: cfg.StorePath}),
+		ledger:              deps.Ledger,
+		budget:              deps.Budget,
 		// Tests swap a fake via the withClock seam.
 		clock: defaultClock,
 	}
@@ -274,7 +258,6 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 	// address, so it is built once s exists.
 	s.marshalJobs.Store(&defaultMarshalJobs)
 	s.tbl = newJobTable(&s.marshalJobs)
-	s.watchdogInterruptTimeoutNanos.Store(int64(watchdogInterruptTimeoutDefault))
 	// maps.Clone severs the alias to the caller-supplied maps so post-Start
 	// mutation of deps.* cannot race the lock-free readers (#506, #991).
 	s.configMapsPtr.Store(&cronConfigMaps{

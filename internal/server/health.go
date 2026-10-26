@@ -2,15 +2,11 @@ package server
 
 import (
 	"net/http"
-	"runtime"
-	"sync/atomic"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
-	"github.com/naozhi/naozhi/internal/spawndiag"
 )
 
 // HealthHandler serves the /health endpoint with system status information.
@@ -22,25 +18,11 @@ type HealthHandler struct {
 	workspaceName string
 	// version is the build tag surfaced on the authenticated part of /health;
 	// empty means unknown and the field is omitted.
-	version         string
-	noOutputTimeout time.Duration
-	totalTimeout    time.Duration
-	// noOutputTimeoutStr / totalTimeoutStr are the pre-formatted watchdog
-	// duration strings (timeouts never change after construction).
-	noOutputTimeoutStr string
-	totalTimeoutStr    string
-	watchdogNoOut      *atomic.Int64
-	watchdogTotal      *atomic.Int64
-	nodeAccess         NodeAccessor
+	version    string
+	nodeAccess NodeAccessor
 	// platforms is the registry (read-only after init); platformConnProbe asks
 	// each entry for its live connection state per request.
 	platforms map[string]platform.Platform
-	// platformCaps is the pre-built capability matrix served as the /health
-	// `platform_capabilities` sub-object (J10 of #2548). Read-only after init.
-	// Without it, "AskUserQuestion renders as a card on Feishu and a text list
-	// everywhere else" was only discoverable by reading four adapters.
-	platformCaps map[string]platform.Capabilities
-	hubDropped   func() int64 // hub.DroppedMessages
 	// dispatcherMetrics returns (message_count, reply_error_count, send_fail_count, last_reply_success).
 	// Injected after Start() wires the Dispatcher; nil-safe. last_reply_success
 	// is zero-valued until the first successful user-visible reply.
@@ -51,17 +33,6 @@ type HealthHandler struct {
 	configLoadedAt time.Time
 	configLive     *ConfigFingerprint // nil ⇒ the two static fields above
 	configPath     string
-	// cronRunStore snapshots the cron run store's loss counters; nil when the
-	// server runs without a scheduler.
-	cronRunStore func() cron.RunStoreHealth
-}
-
-// healthWatchdogStats is the /health "watchdog" sub-object.
-type healthWatchdogStats struct {
-	NoOutputKills   int64  `json:"no_output_kills"`
-	TotalKills      int64  `json:"total_kills"`
-	NoOutputTimeout string `json:"no_output_timeout"`
-	TotalTimeout    string `json:"total_timeout"`
 }
 
 // healthSessionStats and healthDispatchStats are fixed-shape /health sub-objects.
@@ -89,10 +60,6 @@ type healthAuthSection struct {
 	Sessions      healthSessionStats   `json:"sessions"`
 	WorkspaceID   string               `json:"workspace_id"`
 	WorkspaceName string               `json:"workspace_name"`
-	System        map[string]any       `json:"system"`
-	Goroutines    int                  `json:"goroutines"`
-	Watchdog      healthWatchdogStats  `json:"watchdog"`
-	WSDropped     *int64               `json:"ws_dropped,omitempty"`
 	Dispatch      *healthDispatchStats `json:"dispatch,omitempty"`
 	CLIAvailable  bool                 `json:"cli_available"`
 	// ConfigSHA256 / ConfigLoadedAt / ConfigPath fingerprint the config the
@@ -113,27 +80,14 @@ type healthAuthSection struct {
 	Platforms map[string]string `json:"platforms"`
 	// PlatformConn is the detail behind Platforms, only for the platforms that
 	// report a state; omitted when none do.
-	PlatformConn map[string]healthPlatformConn `json:"platform_conn,omitempty"`
-	// PlatformCapabilities is which optional capability each registered platform
-	// actually has, so a feature degrading silently on one platform is visible
-	// without reading its adapter. Auth-only, like the rest of this struct.
-	PlatformCapabilities map[string]platform.Capabilities `json:"platform_capabilities,omitempty"`
-	EventLog             *healthEventLogStats             `json:"eventlog,omitempty"`
-	AttachmentTracker    *healthAttachTrackStats          `json:"attachment_tracker,omitempty"`
-	// RunStores carries the run-history stores' loss counters (#2792). Both
-	// stores are best-effort — a write failure never fails the run it records —
-	// so these counters are the only operator-visible trace of lost history.
-	RunStores *healthRunStores `json:"run_stores,omitempty"`
+	PlatformConn      map[string]healthPlatformConn `json:"platform_conn,omitempty"`
+	EventLog          *healthEventLogStats          `json:"eventlog,omitempty"`
+	AttachmentTracker *healthAttachTrackStats       `json:"attachment_tracker,omitempty"`
 	// SessionStore lists the session-store files whose writes are refused
 	// because startup could not read them (#2680, #2972). Omitted while every
 	// store file is writable, so its presence alone means "sessions are not
 	// being persisted".
 	SessionStore *healthSessionStore `json:"session_store,omitempty"`
-	// SpawnDiags is every gate decision that dropped or ignored configured
-	// input since start: counts per layer|action and the latest keys, never
-	// the values. Without it an env var the filter refused shows up only in
-	// the log. Omitted while there are none.
-	SpawnDiags *spawndiag.Summary `json:"spawn_diags,omitempty"`
 }
 
 // healthPlatformConn is one /health "platform_conn" entry. since_ago is
@@ -150,27 +104,6 @@ type healthPlatformConn struct {
 // healthSessionStore is the /health "session_store" sub-object.
 type healthSessionStore struct {
 	Blocked []session.StoreBlock `json:"blocked"`
-}
-
-// healthRunStores groups the two run-history stores. Each sub-object is nil
-// when that store does not persist, and the whole section is omitted when
-// neither does.
-type healthRunStores struct {
-	Cron    *healthCronRunStore    `json:"cron,omitempty"`
-	Session *healthSessionRunStore `json:"session,omitempty"`
-}
-
-type healthCronRunStore struct {
-	WriteFailedDiskFull int64 `json:"write_failed_disk_full_total"`
-	WriteFailedOther    int64 `json:"write_failed_other_total"`
-	HistoryDropped      int64 `json:"history_dropped_total"`
-	CacheStaleEvictions int64 `json:"cache_stale_evictions_total"`
-}
-
-type healthSessionRunStore struct {
-	WriteFailedDiskFull int64 `json:"write_failed_disk_full_total"`
-	WriteFailedOther    int64 `json:"write_failed_other_total"`
-	AsyncDropped        int64 `json:"async_dropped_total"`
 }
 
 // healthEventLogStats mirrors session.EventLogHealth over the wire; kept
@@ -190,8 +123,6 @@ type healthEventLogStats struct {
 	Fsyncs         int64  `json:"fsync_total"`
 	Malformed      int64  `json:"malformed_total"`
 	ReplayLeak     int64  `json:"replay_leak_total"`
-	FSType         string `json:"fs_type"`
-	FSSupported    bool   `json:"fs_supported"`
 }
 
 // healthAttachTrackStats mirrors session.AttachmentTrackerHealth over the
@@ -276,25 +207,16 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Sessions:      healthSessionStats{Active: active, Total: total},
 		WorkspaceID:   h.workspaceID,
 		WorkspaceName: h.workspaceName,
-		System:        systemInfo(),
-		Goroutines:    runtime.NumGoroutine(),
-		Watchdog: healthWatchdogStats{
-			NoOutputKills:   h.watchdogNoOut.Load(),
-			TotalKills:      h.watchdogTotal.Load(),
-			NoOutputTimeout: h.noOutputTimeoutStr,
-			TotalTimeout:    h.totalTimeoutStr,
-		},
-		CLIAvailable: cliAvailable(h.router.Backends().CLIPath()),
-		ConfigPath:   h.configPath,
+		CLIAvailable:  cliAvailable(h.router.Backends().CLIPath()),
+		ConfigPath:    h.configPath,
 	}
 	auth.ConfigSHA256, auth.ConfigLoadedAt, auth.ConfigRestartRequired, auth.ConfigReloadedSHA256 = h.configFingerprint()
 
 	if nodeStatus := h.nodeAccess.NodesStatus(); len(nodeStatus) > 0 {
 		auth.Nodes = nodeStatus
 	}
-	auth.PlatformCapabilities = h.platformCaps
 
-	// Per-subsystem fields (platforms, ws_dropped, dispatch, eventlog, ...)
+	// Per-subsystem fields (platforms, dispatch, eventlog, ...)
 	// come from the HealthProbe factories in health_probe.go.
 	for _, probe := range h.subsystemProbes() {
 		probe(auth)

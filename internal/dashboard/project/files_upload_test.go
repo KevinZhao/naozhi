@@ -327,15 +327,6 @@ func TestHandleFilesUpload_UnknownProject(t *testing.T) {
 	}
 }
 
-func TestHandleFilesUpload_PublicTmpRejected(t *testing.T) {
-	h, _, _ := newProjectHandlersForTest(t, nil)
-	h.deps.PublicTmpEnabled = true
-	w := doUpload(t, h, "", "__public_tmp__", "", "f.txt", []byte("x"))
-	if w.Code != http.StatusForbidden {
-		t.Errorf("public_tmp upload: want 403, got %d", w.Code)
-	}
-}
-
 func TestValidUploadLeaf(t *testing.T) {
 	cases := []struct {
 		in   string

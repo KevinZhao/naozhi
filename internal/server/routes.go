@@ -82,11 +82,6 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	s.mux.HandleFunc("GET /health", hs.healthH.handleHealth)
 	s.mux.HandleFunc("GET /livez", hs.healthH.handleLivez)
 	s.mux.HandleFunc("GET /readyz", hs.healthH.handleReadyz)
-	// pprof is auth-gated + loopback-only AND requires debug_mode so a leaked
-	// dashboard token cannot enumerate goroutine stacks. Runbook: docs/ops/pprof.md.
-	if hs.wiring.debugMode {
-		s.registerPprof()
-	}
 
 	// Server-owned routes: the dashboard shell, static assets and the WS
 	// upgrade. These stay here because they are not a feature's API surface —

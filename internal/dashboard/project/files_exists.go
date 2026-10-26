@@ -47,25 +47,12 @@ func (h *Handlers) HandleFilesExists(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "project is required"})
 		return
 	}
-	// __public_tmp__ pseudo-project: pin rootPath to /tmp without a project
-	// registration; resolveProjectFileWithRoot still guards symlink escape /
-	// traversal / credential names.
-	rootPath := ""
-	// restrictedRoot mirrors HandleFileGet: __public_tmp__ and include_root
-	// projects get the foreign-private / denied-name / irregular-type gates and
-	// the credential-name filter so batch-exists cannot enumerate what GET refuses.
-	restrictedRoot := false
-	if req.Project == publicTmpProject && h.deps.PublicTmpEnabled {
-		rootPath = publicTmpRoot
-		restrictedRoot = true
-	} else {
-		// Same validateProjectName trust-boundary gate as every other
-		// /api/projects path; a future log of the miss path must not become a
-		// log-injection hole.
-		if err := validateProjectName(req.Project); err != nil {
-			httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
-			return
-		}
+	// Same validateProjectName trust-boundary gate as every other
+	// /api/projects path; a future log of the miss path must not become a
+	// log-injection hole.
+	if err := validateProjectName(req.Project); err != nil {
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
+		return
 	}
 	if len(req.Paths) == 0 {
 		httputil.WriteJSON(w, map[string]any{"results": map[string]existsEntry{}})
@@ -76,15 +63,16 @@ func (h *Handlers) HandleFilesExists(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if rootPath == "" {
-		p := h.deps.ProjectMgr.Get(req.Project)
-		if p == nil {
-			httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
-			return
-		}
-		rootPath = p.Path
-		restrictedRoot = p.IsRoot
+	p := h.deps.ProjectMgr.Get(req.Project)
+	if p == nil {
+		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		return
 	}
+	rootPath := p.Path
+	// restrictedRoot mirrors HandleFileGet: include_root projects get the
+	// foreign-private / denied-name / irregular-type gates and the
+	// credential-name filter so batch-exists cannot enumerate what GET refuses.
+	restrictedRoot := p.IsRoot
 
 	ctx, cancel := context.WithTimeout(r.Context(), fileStatTimeout)
 	defer cancel()
@@ -123,12 +111,12 @@ func (h *Handlers) HandleFilesExists(w http.ResponseWriter, r *http.Request) {
 				// symlink `pub -> secrets` would otherwise evade the segment match.
 				if isSensitiveDownloadPath(workspaceScanPath(rootResolved, abs)) {
 					entry = existsEntry{Exists: false}
-				} else if isPublicTmpDeniedName(abs) {
+				} else if isRestrictedDeniedName(abs) {
 					// Deny sensitive names (sockets / pid / core dumps) so IPC
 					// endpoints are not enumerable even when world-readable (#1330).
 					entry = existsEntry{Exists: false}
 				} else if info, lerr := os.Lstat(abs); lerr == nil &&
-					(isPublicTmpForeignPrivate(info) || isPublicTmpIrregularType(info)) {
+					(isRestrictedForeignPrivate(info) || isRestrictedIrregularType(info)) {
 					// Non-regular-type parity with HandleFileGet (#1688).
 					entry = existsEntry{Exists: false}
 				}

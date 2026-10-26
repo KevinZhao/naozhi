@@ -1,9 +1,5 @@
-/* cron.css — extracted verbatim from dashboard.html's inline <style> block
- * (#2559 D6). The split is sequential: each file is a contiguous slice of the
- * original block and dashboard.html links them in the same order, so the
- * cascade (later rule wins at equal specificity, @media position) is
- * unchanged. Edit a view's rules here, next to the module that renders it.
- */
+/* cron.css — dashboard.html links the css files in a fixed order that the
+ * cascade depends on (later rule wins at equal specificity); keep it. */
 /* ===== Cron tab ===== */
 .cron-detail{flex:1;display:flex;flex-direction:column;min-height:0;overflow:hidden}
 .cron-detail-body{padding:16px 20px;overflow-y:auto;flex:1;min-height:0}
@@ -40,7 +36,7 @@
 .cron-empty-sub{color:var(--nz-text-faint);font-size:var(--nz-fs-sm);margin-bottom:16px;max-width:320px;margin-left:auto;margin-right:auto;line-height:1.5}
 .cron-empty-cta{padding:10px 22px;border-radius:var(--nz-radius-ms);border:1px solid var(--nz-blue);background:rgba(31,111,235,.12);color:var(--nz-accent);cursor:pointer;font-size:var(--nz-fs-sm2);font-family:inherit;min-height:40px}
 .cron-empty-cta:hover{background:rgba(31,111,235,.2)}
-/* R110-P2 cron filter bar (Round 139). The search input lives inside the
+/* cron filter bar. The search input lives inside the
    cron-detail-body but *outside* #cron-list-items so paint-the-list updates
    (keystroke-driven) don't clobber input value/focus. Chips mirror the
    sidebar-search aesthetic for consistency. */
@@ -61,9 +57,6 @@
 .cron-sort-select:focus{outline:none;border-color:var(--nz-rust);color:var(--nz-text)}
 .cron-filter-empty{padding:24px 16px;text-align:center;color:var(--nz-text-dim);font-size:var(--nz-fs-sm)}
 .cron-filter-empty .cfe-hint{display:block;margin-top:6px;color:var(--nz-text-faint);font-size:var(--nz-fs-xs)}
-.cc-notify{font-size:var(--nz-fs-xs);padding:1px 6px;border-radius:var(--nz-radius-xs)}
-.cc-notify.on{background:rgba(46,160,67,.15);color:var(--nz-green)}
-.cc-notify.off{background:rgba(139,148,158,.15);color:var(--nz-text-mute)}
 
 /* ===== Cron list rows (v3 redesign) =====
  * 高密度行式布局，取代 v2 的 .cron-card 大卡片。灵感：Claude Code Routines、
@@ -209,7 +202,6 @@
 .cron-timeline-panel:empty{display:none;padding:0;border:0}
 .cron-timeline-panel .ct-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
 .cron-timeline-panel .ct-head h3{margin:0;font-size:var(--nz-fs-sm2);color:var(--nz-text-strong);font-weight:600;letter-spacing:.2px}
-.cron-timeline-panel .ct-head-err{font-size:var(--nz-fs-xs);color:var(--nz-red);background:rgba(218,54,51,.1);border:1px solid rgba(218,54,51,.3);border-radius:var(--nz-radius-sm);padding:2px 8px}
 .cron-timeline-panel .ct-empty{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);padding:14px 4px;line-height:1.6}
 .cron-timeline-panel .ct-rows{display:flex;flex-direction:column;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);overflow:hidden;background:var(--nz-bg-0)}
 .cron-timeline-panel .ctr{padding:8px 12px;border-bottom:1px solid var(--nz-border);cursor:pointer;transition:background .12s}
@@ -231,33 +223,10 @@
 .cron-timeline-panel .ctr-sub{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-top:3px;padding-left:18px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 .cron-timeline-panel .ctr-sub .ctr-sep{opacity:.5}
 .cron-timeline-panel .ctr-trigger{color:var(--nz-text-mute)}
-.cron-timeline-panel .ctr-session{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--nz-chip-info-fg);background:var(--nz-chip-info-bg);border-radius:var(--nz-radius-xs);padding:0 5px;font-size:var(--nz-fs-2xs)}
 .cron-timeline-panel .ctr-errcls{color:var(--nz-red)}
 .cron-timeline-panel .ctr-loading{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);font-style:italic}
 .cron-timeline-panel .ctr-err-load{font-size:var(--nz-fs-sm);color:var(--nz-red)}
 .cron-timeline-panel .ctr-empty-detail{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);font-style:italic}
-.cron-timeline-panel .ctr-fresh-hint{font-size:var(--nz-fs-sm);color:var(--nz-text);background:rgba(31,111,235,.08);border:1px solid rgba(31,111,235,.25);border-radius:var(--nz-radius-ms);padding:6px 10px;margin-bottom:8px;line-height:1.5}
-.cron-timeline-panel .ctr-sid-chip{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--nz-accent);background:transparent;border:1px solid var(--nz-border);border-radius:var(--nz-radius-xs);padding:1px 6px;font-size:var(--nz-fs-xs);cursor:pointer;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
-.cron-timeline-panel .ctr-sid-chip:hover{background:rgba(31,111,235,.12);border-color:var(--nz-accent)}
-.cron-timeline-panel .ctr-block{margin-bottom:8px}
-.cron-timeline-panel .ctr-block:last-child{margin-bottom:0}
-.cron-timeline-panel .ctr-block-label{font-size:var(--nz-fs-2xs);color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px}
-.cron-timeline-panel .ctr-block.err .ctr-block-label{color:var(--nz-red)}
-.cron-timeline-panel .ctr-bytes{text-transform:none;font-size:var(--nz-fs-2xs);color:var(--nz-text-faint);margin-left:6px}
-.cron-timeline-panel .ctr-block-body{margin:0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:var(--nz-fs-sm);color:var(--nz-text);background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:8px 10px;white-space:pre-wrap;word-break:break-word;max-height:240px;overflow-y:auto;line-height:1.5}
-/* Markdown variant for result block: drop the monospace/pre-wrap so renderMd's
-   headings/lists/tables/code-blocks render natively; raise max-height a bit
-   because md output tends to be taller than equivalent <pre>. Inner .md-pre
-   keeps its own monospace styling. */
-.cron-timeline-panel .ctr-block-body.md{font-family:inherit;font-size:var(--nz-fs-sm2);white-space:normal;word-break:normal;overflow-wrap:anywhere;max-height:380px;line-height:1.55}
-.cron-timeline-panel .ctr-block-body.md p{margin:0 0 8px}
-.cron-timeline-panel .ctr-block-body.md p:last-child{margin-bottom:0}
-.cron-timeline-panel .ctr-block-body.md > :first-child{margin-top:0}
-.cron-timeline-panel .ctr-block-body.md > :last-child{margin-bottom:0}
-.cron-timeline-panel .ctr-md-toggle{margin-left:auto;float:right;background:transparent;border:1px solid var(--nz-border);color:var(--nz-text-mute);font-size:var(--nz-fs-2xs);font-family:inherit;padding:0 6px;border-radius:var(--nz-radius-xs);cursor:pointer;line-height:1.6;text-transform:none;letter-spacing:0}
-.cron-timeline-panel .ctr-md-toggle:hover{color:var(--nz-text);border-color:var(--nz-accent)}
-.cron-timeline-panel .ctr-block-label{display:flex;align-items:center;gap:4px}
-.cron-timeline-panel .ctr-block.err .ctr-block-body{color:var(--nz-red)}
 .cron-timeline-panel .ctr-meta-row{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-top:4px}
 .cron-timeline-panel .ctr-meta-row code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-xs);padding:0 4px}
 .cron-timeline-panel .ct-more{display:flex;justify-content:center;margin-top:10px}
@@ -317,18 +286,8 @@
  * 长 result 通过 max-height + overflow-y:auto 内部滚动而不撑爆列表。
  * 视觉上以浅色背景 + 上下边框区分于普通 timeline 行。 */
 .ctr-detail{padding:14px 16px;background:var(--nz-bg-0);border-top:1px solid var(--nz-border);border-bottom:1px solid var(--nz-border);max-height:60vh;overflow-y:auto;cursor:default}
-.ctr-detail .ctr-block{margin-bottom:12px}
-.ctr-detail .ctr-block:last-child{margin-bottom:0}
-.ctr-detail .ctr-block-label{font-size:var(--nz-fs-2xs);color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px;display:flex;align-items:center;gap:6px}
-.ctr-detail .ctr-block.err .ctr-block-label{color:var(--nz-red)}
-.ctr-detail .ctr-bytes{text-transform:none;font-size:var(--nz-fs-2xs);color:var(--nz-text-faint)}
-.ctr-detail .ctr-block-body{margin:0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:var(--nz-fs-sm);color:var(--nz-text);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:10px 12px;white-space:pre-wrap;word-break:break-word;line-height:1.5;max-height:none}
-.ctr-detail .ctr-block.err .ctr-block-body{color:var(--nz-red)}
 .ctr-detail .ctr-loading,.ctr-detail .ctr-err-load,.ctr-detail .ctr-empty-detail{font-size:var(--nz-fs-sm2);color:var(--nz-text-mute);font-style:italic;padding:14px 4px;text-align:center}
 .ctr-detail .ctr-err-load{color:var(--nz-red)}
-.ctr-detail .ctr-fresh-hint{font-size:var(--nz-fs-sm);color:var(--nz-text);background:rgba(31,111,235,.08);border:1px solid rgba(31,111,235,.25);border-radius:var(--nz-radius-ms);padding:8px 10px;margin-bottom:10px;line-height:1.5}
-.ctr-detail .ctr-sid-chip{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--nz-accent);background:transparent;border:1px solid var(--nz-border);border-radius:var(--nz-radius-xs);padding:1px 6px;font-size:var(--nz-fs-xs);cursor:pointer}
-.ctr-detail .ctr-sid-chip:hover{background:rgba(31,111,235,.12);border-color:var(--nz-accent)}
 .ctr-detail .ctr-meta-row{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-top:4px}
 .ctr-detail .ctr-meta-row code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-xs);padding:0 4px}
 .ctr-detail .ctr-session-row{margin-top:10px}
@@ -383,12 +342,9 @@
 .cron-drawer-header .cdh-btn-icon:hover{background:var(--nz-bg-1);color:var(--nz-text-strong);border-color:var(--nz-border)}
 .cron-drawer-header .cdh-row2{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:var(--nz-fs-sm);color:var(--nz-text-mute)}
 .cron-drawer-header .cdh-row2 .cj-schedule{cursor:pointer}
-.cron-drawer-header .cdh-chip{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:1px 6px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.cron-drawer-header .cdh-chip.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
 /* cron-dashboard-redesign P1 §4.3 — running banner at the top of the
  * drawer while the job is currently in flight. High-contrast accent treatment so
- * the live elapsed clock + state are the focal point; old .cdc-* classes
- * retained below for any test that greps the v2 surface. */
+ * the live elapsed clock + state are the focal point. */
 .cron-drawer-running{padding:14px 20px;border-bottom:1px solid rgba(31,111,235,.4);background:linear-gradient(135deg,rgba(31,111,235,.18),rgba(31,111,235,.06));display:flex;align-items:center;gap:14px}
 .cron-drawer-running .cdr-clock{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-variant-numeric:tabular-nums;font-size:26px;color:var(--nz-accent);font-weight:600;line-height:1;flex-shrink:0}
 .cron-drawer-running .cdr-info{flex:1;min-width:0}
@@ -414,24 +370,6 @@
  * (visible when closed) shows a one-line prompt preview so a glance still
  * conveys what this job does. */
 .cron-drawer-summary{padding:0 20px;border-bottom:1px solid var(--nz-border)}
-.cron-drawer-summary .cds-summary-row{padding:12px 0;display:flex;align-items:center;gap:10px;cursor:pointer;list-style:none;font-size:var(--nz-fs-sm);outline:none;-webkit-tap-highlight-color:transparent}
-.cron-drawer-summary .cds-summary-row::-webkit-details-marker{display:none}
-.cron-drawer-summary .cds-summary-row:hover .cds-summary-toggle{color:var(--nz-text-strong)}
-.cron-drawer-summary .cds-summary-row:focus-visible{outline:1px solid var(--nz-accent);outline-offset:2px;border-radius:var(--nz-radius-sm)}
-.cron-drawer-summary .cds-summary-label{font-size:var(--nz-fs-2xs);color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;flex-shrink:0}
-.cron-drawer-summary .cds-summary-preview{flex:1;min-width:0;color:var(--nz-text);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:var(--nz-fs-sm);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.cron-drawer-summary .cds-summary-toggle{flex-shrink:0;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);transition:color .12s}
-.cron-drawer-summary[open] .cds-summary-toggle::before{content:"收起 "}
-.cron-drawer-summary:not([open]) .cds-summary-toggle::before{content:"展开 "}
-.cron-drawer-summary[open] .cds-summary-toggle{color:transparent}
-.cron-drawer-summary[open] .cds-summary-toggle::before{color:var(--nz-text-mute)}
-.cron-drawer-summary .cds-summary-body{padding-bottom:14px;display:flex;flex-direction:column;gap:10px}
-.cron-drawer-summary .cds-meta label{display:block;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px}
-.cron-drawer-summary .cds-prompt-body{font-size:var(--nz-fs-sm2);color:var(--nz-text);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);padding:10px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:240px;overflow-y:auto;margin:0}
-.cron-drawer-summary .cds-meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px 16px}
-.cron-drawer-summary .cds-meta > div{font-size:var(--nz-fs-sm2)}
-.cron-drawer-summary .cds-meta span{color:var(--nz-text)}
-.cron-drawer-summary .cds-meta span.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:var(--nz-fs-sm)}
 /* Drawer actions — cron-dashboard-redesign P1 §4.3 made sticky at bottom
  * of the drawer scroll viewport (.is-sticky variant) so 立即执行 stays in
  * reach when scrolling through long history. The base class without
@@ -445,7 +383,7 @@
 .cron-drawer-actions .cda-btn.primary:hover:not([disabled]){background:rgba(31,111,235,.12)}
 .cron-drawer-actions .cda-btn.danger{margin-left:auto;color:var(--nz-red);border-color:rgba(218,54,51,.45);background:transparent}
 .cron-drawer-actions .cda-btn.danger:hover{background:rgba(218,54,51,.12)}
-/* Round 2 R-4 — trigger button visual feedback states (RFC §4.3.1).
+/* trigger button visual feedback states (RFC §4.3.1).
  * is-running: pulse the same accent ring as cdc-card so the disabled
  *             button reads as "actively waiting", not just "greyed".
  * is-sending: 1 s spinner orbiting the ▷ glyph; opacity stays full so
@@ -546,16 +484,6 @@
 .cron-drawer-history .ct-show-all{background:transparent;border:1px solid var(--nz-border);color:var(--nz-text-mute);font-family:inherit;font-size:var(--nz-fs-sm);padding:6px 14px;border-radius:var(--nz-radius-ms);cursor:pointer;-webkit-tap-highlight-color:transparent;transition:color .12s,border-color .12s,background .12s}
 .cron-drawer-history .ct-show-all:hover{color:var(--nz-accent);border-color:var(--nz-accent);background:rgba(31,111,235,.06)}
 
-/* Drawer current execution */
-.cron-drawer-current{padding:14px 20px;border-bottom:1px solid var(--nz-border)}
-.cron-drawer-current h3{margin:0 0 10px;font-size:var(--nz-fs-sm2);color:var(--nz-text-strong);font-weight:600;letter-spacing:.2px}
-.cron-drawer-current .cdc-card{background:rgba(31,111,235,.08);border:1px solid var(--nz-accent);border-radius:var(--nz-radius-md);padding:12px}
-.cron-drawer-current .cdc-row1{display:flex;align-items:center;gap:8px;font-size:var(--nz-fs-base);color:var(--nz-text-strong)}
-.cron-drawer-current .cdc-state{font-weight:600;color:var(--nz-accent)}
-.cron-drawer-current .cdc-clock{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-variant-numeric:tabular-nums;color:var(--nz-text-strong);font-size:18px;margin-left:4px}
-.cron-drawer-current .cdc-trigger{margin-left:auto;font-size:var(--nz-fs-sm);color:var(--nz-text-mute);background:var(--nz-bg-1);border-radius:var(--nz-radius-sm);padding:2px 6px}
-.cron-drawer-current .cdc-row2{margin-top:8px;font-size:var(--nz-fs-sm);color:var(--nz-text-mute)}
-.cron-drawer-current .cdc-row3{margin-top:6px;font-size:var(--nz-fs-xs);color:var(--nz-text-faint);font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
 /* Drawer history (override timeline panel for in-drawer use) */
 .cron-drawer-history{padding:14px 20px;flex:1 1 auto}
 .cron-drawer-history .cron-timeline-panel{padding:0;background:transparent;border:none;max-height:none;overflow:visible}
@@ -568,7 +496,7 @@
 .cj-row.is-active.is-error{box-shadow:inset 4px 0 0 var(--nz-selected-bar),inset 0 0 0 1px rgba(218,54,51,.45)}
 .cj-row.is-active.is-missed{box-shadow:inset 4px 0 0 var(--nz-selected-bar),inset 0 0 0 1px rgba(210,153,34,.45)}
 .cj-row.is-active.is-running{background:var(--nz-row-active-running-bg);box-shadow:inset 4px 0 0 var(--nz-selected-bar)}
-/* cron-panel-consolidation-ui RFC §2 (Round 2 R-1) — responsive collapse
+/* cron-panel-consolidation-ui RFC §2 — responsive collapse
  * gated on the *main column width* rather than the viewport width. The
  * sidebar can occupy 200–60vw, so 1280px viewport with a 720px sidebar
  * leaves only ~560px for main; a viewport @media query miscategorises
@@ -601,7 +529,7 @@
   .cron-detail-body:not([data-cron-layout]) .cron-detail-pane.is-open{flex:1 1 auto;border-left:none}
 }
 @media(max-width:540px){
-  .cron-drawer-header,.cron-drawer-summary,.cron-drawer-actions,.cron-drawer-current,.cron-drawer-history,.cron-drawer-spec{padding-left:14px;padding-right:14px}
+  .cron-drawer-header,.cron-drawer-summary,.cron-drawer-actions,.cron-drawer-history,.cron-drawer-spec{padding-left:14px;padding-right:14px}
 }
 
 /* ===== Frequency picker (Claude-style compact row) =====
@@ -680,8 +608,8 @@
      overflow-y:auto is the fallback for modals WITHOUT a .modal-body (every
      dashboard.js modal: 新建会话 / 项目设置 / API token / confirm / prompt /
      onboarding / cheatsheet …): their content would otherwise spill past the
-     85dvh cap with no scroll container, leaving .modal-btns unreachable
-     (#2434). Cron modals keep a .modal-body scroller: it shrinks to fit (a
+     85dvh cap with no scroll container, leaving .modal-btns unreachable.
+     Cron modals keep a .modal-body scroller: it shrinks to fit (a
      scroll container's min-height:auto resolves to 0), so the outer box never
      overflows and no second scrollbar appears. */
   .modal{max-height:85dvh;display:flex;flex-direction:column;overflow-y:auto}
@@ -715,25 +643,12 @@
 .modal.cheatsheet .ks-keys{display:inline-flex;gap:4px;align-items:center;flex-wrap:wrap;justify-self:start}
 .modal.cheatsheet kbd{background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:1px 6px;font-size:var(--nz-fs-sm);color:var(--nz-text);font-family:inherit;min-width:18px;text-align:center}
 .modal.cheatsheet .ks-desc{font-size:var(--nz-fs-sm2);color:var(--nz-text);line-height:1.45}
-.modal.cheatsheet .ks-sep{grid-column:1/-1;height:1px;background:var(--nz-bg-2);margin:6px 0}
 .modal.cheatsheet .ks-section{grid-column:1/-1;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-top:2px}
 /* Cheatsheet "好的" confirm is informational (dismiss), not a submit/save
    action — align it with the global primary blue (--nz-blue) instead of
-   the green used for send/save across the rest of the app (R110-P2 report:
-   "green #22c55e clashes with blue #4a9eff everywhere else"). Other modals
+   the green used for send/save across the rest of the app. Other modals
    keep green because their primary button semantically commits data. */
 .modal.cheatsheet .modal-btns button.primary{background:var(--nz-blue);border-color:var(--nz-blue)}
-
-/* Sidebar footer: version + help trigger. Keeps the info at the very
-   bottom, above the safe-area inset on iOS. Pointer-events isolation so
-   the line itself doesn't steal taps meant for scrollable content above. */
-.sidebar-footer{padding:6px 16px;border-top:1px solid var(--nz-border);font-size:var(--nz-fs-xs);color:var(--nz-text-dim);display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-shrink:0;min-height:28px}
-.sidebar-footer .sf-help{background:transparent;border:1px solid var(--nz-border);color:var(--nz-text-mute);cursor:pointer;border-radius:50%;width:20px;height:20px;line-height:1;padding:0;font-size:var(--nz-fs-sm);display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;font-family:inherit}
-.sidebar-footer .sf-help:hover{color:var(--nz-text-strong);border-color:var(--nz-accent)}
-@media (pointer: coarse){
-  .sidebar-footer .sf-help{width:32px;height:32px;font-size:var(--nz-fs-base)}
-}
-body.kbd-open .sidebar-footer{display:none}
 
 /* ==========================================================================
    UX sweep — non-functional polish (2026-04-27)

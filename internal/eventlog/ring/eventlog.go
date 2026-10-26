@@ -53,7 +53,6 @@ type EventLog struct {
 	// Cached summaries stored atomically under l.mu on Append so AppendBatch's
 	// last-writer ordering stays consistent; read lock-free. atomic.Pointer
 	// distinguishes never-stored (nil) from a stored empty string.
-	lastPromptSummary   atomic.Pointer[string] // most recent "user" entry summary
 	lastActivitySummary atomic.Pointer[string] // most recent "tool_use"/"thinking" entry summary
 	lastResponseSummary atomic.Pointer[string] // most recent assistant "text" entry summary
 

@@ -2,7 +2,6 @@
 // tail, "load earlier" paging, the full render, the live append and its DOM
 // cap, and the history / event / send-ack WS frames that feed them.
 import { NZ_CONTRACT } from './contract.js';
-import { authHeaders } from './platform.js';
 import { INITIAL_HISTORY_LIMIT, sessionStream } from './session_stream.js';
 import { wsm } from './ws_manager.js';
 import { perSession, selection, sessionList, transcript } from './state.js';
@@ -42,8 +41,8 @@ export async function fetchEvents(full) {
       url += '&limit=' + INITIAL_HISTORY_LIMIT;
     }
 
-    const headers = authHeaders();
-    // RNEW-UX-003: 5s timeout — events poll fallback ticks every 1s, so
+    const headers = {};
+    // 5s timeout — events poll fallback ticks every 1s, so
     // a hung response must release well before the next tick or the UI
     // falls behind the live stream.
     let events;
@@ -194,7 +193,7 @@ async function loadEarlierEvents(maxPages) {
   const stale = () => selection.key !== key || selection.node !== node || gen !== transcript.earlierGen;
   transcript.earlierLoading = true;
   try {
-    const headers = authHeaders();
+    const headers = {};
     let steppedPast = false;
     for (let n = 1; ; n++) {
       // Per page: prependEvents re-mounts the button in its 'ready' state.
@@ -341,7 +340,7 @@ const EARLIER_BUTTON_STATES = {
 };
 
 function updateEarlierButton(state) {
-  const btn = /** @type {HTMLButtonElement | null} */ (document.getElementById('earlier-events-btn'));
+  const btn = document.getElementById('earlier-events-btn');
   if (!btn) return;
   btn.dataset.state = state;
   [btn.textContent, btn.disabled] = EARLIER_BUTTON_STATES[state] || ['加载更早的事件', false];
@@ -363,7 +362,7 @@ export function renderEvents(events, hasMore) {
     }
   } catch (_) { /* getSelection unavailable — proceed with refresh */ }
   // Poll-fallback twin of onHistory's pre-render hydrate: rebuild the
-  // answered-set so replayed AskUserQuestion cards render locked (#2430).
+  // answered-set so replayed AskUserQuestion cards render locked.
   hydrateAskAnsweredFromHistory(events);
   paintWholePane(el, events, processEventsForDisplay(events), hasMore);
 }
@@ -417,14 +416,14 @@ function paintWholePane(el, events, display, hasMore) {
 }
 
 // drilledIn: an agent drill-in owns the pane (agent-team-ui §3.6.2): the session's
-// frames feed turnState and the cursors only; the way back repaints (#3698).
+// frames feed turnState and the cursors only; the way back repaints.
 const drilledIn = () => !!nzViews.agent?.activeTaskID();
 
 // keepReader / placeRepaint bracket a whole-pane paint. A repaint of the session
 // on screen (a resubscribe, the REST full fetch; a switch paints an empty shell)
 // puts its reader back where they stand, but pins one who was at the bottom or a
 // teammate's new message, as appendEvents does — not this tab's echo, which
-// replaces an optimistic bubble (#3687). A hidden pane has no position to keep.
+// replaces an optimistic bubble. A hidden pane has no position to keep.
 function keepReader(el) {
   if (!el.querySelector('.event')) return null;
   if (el.clientHeight) saveScrollPos(selection.key, selection.node);
@@ -438,7 +437,7 @@ function placeRepaint(el, kept) {
 }
 const lastUserUuid = (el) => [...el.querySelectorAll(':scope > .event.user[data-uuid]')].pop()?.getAttribute('data-uuid') || '';
 
-// trimEventsScroll bounds the live DOM (#398): drop oldest top children once the
+// trimEventsScroll bounds the live DOM: drop oldest top children once the
 // scroller exceeds MAX_LIVE_DOM_EVENTS. Preserves a pinned "load earlier" button
 // (it always lives at the top) and moves oldestFetchedEventTime to the new head
 // so a later loadEarlierEvents re-fetches whatever we just evicted, gap-free.
@@ -493,7 +492,7 @@ export function appendEvents(events) {
       // uuid is already on screen is a replay, and the first arrival of the
       // real user event replaces the optimistic bubble the send rendered.
       // Without this a send that left over WS and was echoed by the poll
-      // (socket dropped in between) painted the message twice (#2430).
+      // (socket dropped in between) painted the message twice.
       if (eventAlreadyRendered(el, e.uuid)) {
         if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
         return;
@@ -513,7 +512,7 @@ export function appendEvents(events) {
     if (e.type === 'user' && !echo) sawUser = true;
   });
   // Bound the live DOM before scroll/scan so a long streaming session can't
-  // grow #events-scroll without limit and OOM the tab (#398).
+  // grow #events-scroll without limit and OOM the tab.
   trimEventsScroll(el);
   if (sawUser) stickEventsBottom();
   else if (wasBottom) el.scrollTop = el.scrollHeight;
@@ -524,7 +523,7 @@ export function appendEvents(events) {
 /* ===== Session-stream frames: history, event and the send / interrupt acks ===== */
 
 // renderInitialHistory paints a subscribe's opening frame over the whole pane.
-function renderInitialHistory(el, /** @type {WsFrames['history']} */ msg, events, display) {
+function renderInitialHistory(el, msg, events, display) {
   paintWholePane(el, events, display, typeof msg.has_more === 'boolean' ? msg.has_more : null);
 }
 
@@ -577,7 +576,7 @@ function appendHistoryBackfill(el, display) {
     }
     if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
   });
-  // Bound the live DOM on the incremental WS history path too (#398);
+  // Bound the live DOM on the incremental WS history path too;
   // mirror appendEvents — trim before the scrollHeight reads below.
   trimEventsScroll(el);
   if (sawUser) stickEventsBottom();
@@ -692,10 +691,10 @@ function appendLiveEvent(ev) {
   }
   el.insertAdjacentHTML('beforeend', html);
   // Advance the cursor on first render too, like appendEvents and onHistory: a
-  // uuid-less entry this push painted is otherwise admitted again (#2063).
+  // uuid-less entry this push painted is otherwise admitted again.
   if (evT && evT > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = evT;
   // Bound the live DOM so a long streaming session over the WS push path
-  // can't grow #events-scroll without limit and OOM the tab (#398). Must run
+  // can't grow #events-scroll without limit and OOM the tab. Must run
   // before the scrollHeight reads below, matching appendEvents.
   trimEventsScroll(el);
   if (isUser && !echo) stickEventsBottom();
@@ -706,7 +705,7 @@ function appendLiveEvent(ev) {
 
 // Session-stream frame handlers; the subscription bookkeeping is sessionStream.
 const sessionFrames = {
-  onHistory(/** @type {WsFrames['history']} */ msg) {
+  onHistory(msg) {
     if (msg.key !== selection.key || (msg.node || 'local') !== selection.node) return;
     const el = document.getElementById('events-scroll');
     if (!el) return;
@@ -743,7 +742,7 @@ const sessionFrames = {
     refreshBanner();
   },
 
-  onEvent(/** @type {WsFrames['event']} */ msg) {
+  onEvent(msg) {
     if (msg.key !== selection.key || (msg.node || 'local') !== selection.node) return;
     // Cron timed_out / failed 终态后丢弃后续 ghost 事件（CLI 子进程
     // 在 deadline 命中后还会再吐 result，但 cron run 已记录为终态，
@@ -761,7 +760,7 @@ const sessionFrames = {
       }
       resetTurnStateForUserEcho();
       // A user message after an AskUserQuestion means it was answered on some
-      // surface — lock the card before the bubble lands (#2430).
+      // surface — lock the card before the bubble lands.
       lockRenderedAskCards(document.getElementById('events-scroll'));
     } else if (ev.type === 'result') {
       applyTurnResult(ev);
@@ -773,7 +772,7 @@ const sessionFrames = {
     appendLiveEvent(ev);
   },
 
-  onSendAck(/** @type {Omit<WsFrames['send_ack'], 'type'>} */ msg) {
+  onSendAck(msg) {
     // "reset" = /clear or /new — the send was consumed by the router to reset
     // the session, not handed to the CLI, so roll back the optimistic running
     // flip. No banner, no turn.
@@ -835,7 +834,7 @@ const sessionFrames = {
   // so a status:"error" ack (unknown node / server shutting down / remote RPC
   // failure / internal error) or "not_running" (no live process to interrupt)
   // must be reported or the operator believes the interrupt landed.
-  onInterruptAck(/** @type {WsFrames['interrupt_ack']} */ msg) {
+  onInterruptAck(msg) {
     if (!msg || msg.status === 'ok') return;
     if (msg.status === 'not_running') {
       showToast('会话未在运行，无需中断', 'warning');
@@ -862,7 +861,7 @@ const sessionFrames = {
   // (toast, drop the optimistic bubble if any, roll back running) for the
   // on-screen key, or just undo the running flip for a key we sent to and
   // then navigated away from.
-  onSendError(/** @type {WsFrames['send_error']} */ msg) {
+  onSendError(msg) {
     if (!msg || !msg.key) return;
     const node = msg.node || 'local';
     const sKey = sid(msg.key, node);

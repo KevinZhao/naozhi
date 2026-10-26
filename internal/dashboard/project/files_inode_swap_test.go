@@ -70,33 +70,5 @@ func TestHandleFileGet_OpenOnce_NoFollowSymlink(t *testing.T) {
 	}
 }
 
-// TestHandleFileGet_OpenOnce_DispatchPasses_FD pins the structural
-// invariant: HandleFileGet opens once with openWorkspaceFile and the
-// serve* helpers do not re-open. Implemented as a smoke test that round-
-// trips a regular file through every mode under the in-memory fixture
-// — if any helper still ran a second os.Open(resolved), the change would
-// shift the fstat-vs-Lstat semantics enough to break this round-trip
-// (e.g. the Seek(0) dance in serveDownload only works when the fd has
-// previously read its head bytes via serveRaw). The test acts as a
-// canary that the plumbed-in fd is the one being read end-to-end.
-func TestHandleFileGet_OpenOnce_DispatchPasses_FD(t *testing.T) {
-	body := []byte("plumbed-fd-canary\n")
-	h, projName, _ := newProjectHandlersForTest(t, map[string]string{
-		"canary.txt": string(body),
-	})
-
-	for _, mode := range []string{"preview", "raw", "download"} {
-		t.Run(mode, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet,
-				"/api/projects/file?project="+projName+"&path=canary.txt&mode="+mode, nil)
-			w := httptest.NewRecorder()
-			h.HandleFileGet(w, req)
-			if w.Code != http.StatusOK {
-				t.Fatalf("mode=%s: status = %d, want 200 (canary round-trip broken — fd plumbing regression)", mode, w.Code)
-			}
-		})
-	}
-}
-
 // containsBytes is provided by ws_retry_after_test.go in the same package —
 // reused here to keep the inode-swap fixture allocation-free.

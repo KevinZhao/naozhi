@@ -62,12 +62,6 @@ func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// __public_tmp__ is scoped to "preview a chat-mentioned path"; browsing it
-	// as a tree would let a user enumerate all of /tmp. Registered roots only.
-	if project == publicTmpProject {
-		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "directory listing is not available for this scope"})
-		return
-	}
 	if err := validateProjectName(project); err != nil {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
 		return
@@ -170,7 +164,7 @@ func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		// Skip irregular types (sockets, fifos, devices) — never legitimate
-		// browsable content, parity with isPublicTmpIrregularType.
+		// browsable content, parity with isRestrictedIrregularType.
 		if !mode.IsRegular() && !mode.IsDir() {
 			continue
 		}

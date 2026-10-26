@@ -91,10 +91,6 @@ type Persister struct {
 	// (gap.go). Run-goroutine only.
 	runGap map[string]gapTally
 
-	// fs is the filesystem classification captured at startup; never
-	// mutated after NewPersister returns.
-	fs FSDetection
-
 	// counters exposed for /health + doctor.
 	writtenCnt    atomic.Int64
 	droppedCnt    atomic.Int64
@@ -205,24 +201,10 @@ func NewPersister(opts Options) (*Persister, error) {
 		dropping: make(map[string]*dropState),
 		failing:  make(map[string]*failureState),
 		runGap:   make(map[string]gapTally),
-		fs:       DetectFS(opts.Dir),
-	}
-	if !p.fs.Supported {
-		slog.Warn("event log persist: filesystem is not a recommended target",
-			"dir", opts.Dir, "fs_type", p.fs.Type, "err", p.fs.Err)
 	}
 	p.wg.Add(1)
 	go p.run()
 	return p, nil
-}
-
-// FS returns the filesystem classification for the persister's directory,
-// frozen at NewPersister time. Safe from any goroutine.
-func (p *Persister) FS() FSDetection {
-	if p == nil {
-		return FSDetection{Type: FSTypeUnknown}
-	}
-	return p.fs
 }
 
 // Pressure reports ingest channel utilisation in [0, 1] (1 = the next
@@ -336,11 +318,6 @@ type Stats struct {
 	ChannelDepth int
 	ChannelCap   int
 	LastDrainAgo time.Duration
-
-	// FSType / FSSupported report the filesystem backing opts.Dir, cached
-	// at NewPersister (a remount needs a restart). RFC §5.4.
-	FSType      string
-	FSSupported bool
 }
 
 func (p *Persister) Stats() Stats {
@@ -357,8 +334,6 @@ func (p *Persister) Stats() Stats {
 		ChannelDepth: len(p.in),
 		ChannelCap:   cap(p.in),
 		LastDrainAgo: lastAgo,
-		FSType:       p.fs.Type,
-		FSSupported:  p.fs.Supported,
 	}
 }
 

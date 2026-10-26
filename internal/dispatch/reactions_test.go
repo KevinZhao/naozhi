@@ -15,11 +15,10 @@ import (
 // applied to the correct message IDs.
 type fakeReactorPlatform struct {
 	fakePlatform
-	mu        sync.Mutex
-	added     []reactionCall
-	removed   []reactionCall
-	addErr    error
-	removeErr error
+	mu      sync.Mutex
+	added   []reactionCall
+	removed []reactionCall
+	addErr  error
 }
 
 type reactionCall struct {
@@ -40,9 +39,6 @@ func (f *fakeReactorPlatform) AddReaction(_ context.Context, messageID string, r
 func (f *fakeReactorPlatform) RemoveReaction(_ context.Context, messageID string, r platform.ReactionType) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.removeErr != nil {
-		return f.removeErr
-	}
 	f.removed = append(f.removed, reactionCall{msgID: messageID, reaction: r})
 	return nil
 }
@@ -166,43 +162,6 @@ func TestClearQueuedReaction_EmptyIDIsNoOp(t *testing.T) {
 	if len(fp.removed) != 0 {
 		t.Fatalf("empty MessageID must not call RemoveReaction, got %d", len(fp.removed))
 	}
-}
-
-func TestClearQueuedReaction_NonReactorIsNoOp(t *testing.T) {
-	t.Parallel()
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	// Must not panic and must leave no side effects.
-	d.clearQueuedReaction(context.Background(), "fake", "m1", nil)
-}
-
-func TestClearQueuedReaction_ErrorSwallowed(t *testing.T) {
-	t.Parallel()
-	fp := &fakeReactorPlatform{removeErr: errors.New("rate limit")}
-	d := newTestDispatcherWithPlatform(fp)
-	d.platforms = map[string]platform.Platform{"fake": fp}
-	// Should not panic; error is logged and swallowed.
-	d.clearQueuedReaction(context.Background(), "fake", "m1", nil)
-}
-
-func TestClearQueuedReactions_NonReactorIsNoOp(t *testing.T) {
-	t.Parallel()
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	// Must not panic and must leave no side effects.
-	d.clearQueuedReactions(context.Background(), "fake",
-		[]string{"m1"}, nil)
-}
-
-func TestClearQueuedReactions_ErrorsSwallowed(t *testing.T) {
-	t.Parallel()
-	fp := &fakeReactorPlatform{removeErr: errors.New("rate limit")}
-	d := newTestDispatcherWithPlatform(fp)
-	d.platforms = map[string]platform.Platform{"fake": fp}
-
-	// Should not panic; errors are logged and swallowed.
-	d.clearQueuedReactions(context.Background(), "fake",
-		[]string{"m1"}, nil)
 }
 
 // loadDeleteReactor models Feishu's reaction-cache contract

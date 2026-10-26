@@ -14,9 +14,7 @@ import "time"
 
 // defaultCronSlowThreshold is the wall-clock budget beyond which a successful
 // cron execution logs a "cron execution slow" warning: an
-// order of magnitude above a typical interactive agent turn. Overridable per
-// Scheduler via SchedulerConfig.SlowThreshold so ExecTimeout=300s deployments
-// are not flooded with slow-alerts (#519).
+// order of magnitude above a typical interactive agent turn.
 const defaultCronSlowThreshold = 30 * time.Second
 
 // spawnElapsedWarnRatio is the fraction of jobTimeout the spawn phase

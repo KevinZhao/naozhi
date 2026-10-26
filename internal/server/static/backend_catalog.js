@@ -33,7 +33,7 @@ export async function fetchCLIBackends(node) {
     }
   }
   try {
-    // RNEW-UX-003: default 10s timeout is fine here — this fetch is cached
+    // default 10s timeout is fine here — this fetch is cached
     // for 60s and only fires at modal-open time, not on a poll.
     const url = isLocal
       ? NZ_CONTRACT.API.cli_backends
@@ -55,7 +55,7 @@ export async function fetchCLIBackends(node) {
       serverInfo.cliBackendsByNode[node] = { data: manifest, at: Date.now() };
     } else {
       // A null / malformed remote manifest must not be pinned for 60s —
-      // drop any stale entry so the next open refetches (#2429).
+      // drop any stale entry so the next open refetches.
       delete serverInfo.cliBackendsByNode[node];
     }
     return manifest;

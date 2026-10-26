@@ -37,7 +37,7 @@ Naozhi is an IM gateway that wraps AI CLI agents (Claude CLI, Kiro, or Codex) as
 - **Multi-node**: `node` (protocol, HTTP/reverse clients), `upstream` (reverse-connect dialer).
 - **Persistence / history**: `eventlog`, `history` (claudejsonl/kirojsonl/codexjsonl/naozhilog/merged), `attachment`, `runlog`, `claudefs` (Claude CLI on-disk layout), `discovery`, `subagent`.
 - **Domain helpers**: `selfupdate`, `transcribe`, `imauth`, `costledger`, `budget`, `webhook`, `runtelemetry`, `naozhisettings`, `ccassets`, `ccmodels`, `uiprefs`, `replyfmt`, `usermsg`, `gitinfo`.
-- **Leaves**: `osutil`, `textutil`, `netutil`, `ratelimit`, `limits`, `sessionkey`, `tuningspec`, `backendid`, `cliinfo`, `apierr`, `ctxutil`, `leakguard`, `spawndiag`, `envpolicy`, `datadir`, `imageorient`, `testhelper`.
+- **Leaves**: `osutil`, `textutil`, `netutil`, `ratelimit`, `limits`, `sessionkey`, `tuningspec`, `backendid`, `cliinfo`, `apierr`, `ctxutil`, `spawndiag`, `envpolicy`, `datadir`, `imageorient`, `testhelper`.
 
 ### CLI Process Lifecycle
 
@@ -188,4 +188,4 @@ macOS: a launchd job (label read from `XPC_SERVICE_NAME`); `naozhi upgrade` keep
 
 ## Documentation
 
-`docs/design/` (`DESIGN.md` is the architecture source of truth), `docs/rfc/` (working RFCs; status table in `docs/rfc/README.md`), `docs/ops/` (deployment / release / pprof playbooks), `docs/guides/`. TODOs go to GitHub Issues.
+`docs/design/` (`DESIGN.md` is the architecture source of truth), `docs/rfc/` (working RFCs; status table in `docs/rfc/README.md`), `docs/ops/` (release-gate / doctor / codesign playbooks). TODOs go to GitHub Issues.

@@ -16,8 +16,8 @@ import (
 )
 
 // newProjectsListForStableKeyTest materialises a one-project workspace and
-// returns the decoded /api/projects rows for the given enabled flag.
-func newProjectsListForStableKeyTest(t *testing.T, enabled bool) (rows []map[string]any, projPath string) {
+// returns the decoded /api/projects rows.
+func newProjectsListForStableKeyTest(t *testing.T) (rows []map[string]any, projPath string) {
 	t.Helper()
 	root := t.TempDir()
 	projDir := filepath.Join(root, "demo")
@@ -42,9 +42,6 @@ func newProjectsListForStableKeyTest(t *testing.T, enabled bool) (rows []map[str
 		Platforms:      map[string]platform.Platform{"test": &mockPlatform{}},
 		Backend:        "claude",
 		ProjectManager: mgr,
-		Features: FeatureOptions{
-			ProjectStableKey: enabled,
-		},
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/projects", nil)
@@ -62,14 +59,14 @@ func newProjectsListForStableKeyTest(t *testing.T, enabled bool) (rows []map[str
 	return rows, projDir
 }
 
-// TestProjectsList_StableKeyEmittedWhenEnabled: with the feature on, each
+// TestProjectsList_StableKeyEmitted: each
 // project row carries a well-formed dashboard:pj:<hash>:general stable key
 // matching sessionkey.ProjectStableKey for that path.
-func TestProjectsList_StableKeyEmittedWhenEnabled(t *testing.T) {
-	rows, projPath := newProjectsListForStableKeyTest(t, true)
+func TestProjectsList_StableKeyEmitted(t *testing.T) {
+	rows, projPath := newProjectsListForStableKeyTest(t)
 	got, _ := rows[0]["stableKey"].(string)
 	if got == "" {
-		t.Fatal("stableKey missing when feature enabled")
+		t.Fatal("stableKey missing")
 	}
 	want := sessionkey.ProjectStableKey(projPath, "general")
 	if got != want {
@@ -77,14 +74,5 @@ func TestProjectsList_StableKeyEmittedWhenEnabled(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, "dashboard:pj:") || !strings.HasSuffix(got, ":general") {
 		t.Errorf("stableKey shape unexpected: %q", got)
-	}
-}
-
-// TestProjectsList_StableKeyOmittedWhenDisabled: with the feature off, the
-// omitempty field is absent so the frontend falls back to timestamp keys.
-func TestProjectsList_StableKeyOmittedWhenDisabled(t *testing.T) {
-	rows, _ := newProjectsListForStableKeyTest(t, false)
-	if v, ok := rows[0]["stableKey"]; ok && v != "" {
-		t.Errorf("stableKey should be omitted when disabled, got %v", v)
 	}
 }

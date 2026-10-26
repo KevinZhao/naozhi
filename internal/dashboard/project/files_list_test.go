@@ -221,15 +221,6 @@ func TestHandleFilesList_InvalidProjectName(t *testing.T) {
 	}
 }
 
-func TestHandleFilesList_PublicTmpRejected(t *testing.T) {
-	h, _, _ := newProjectHandlersForTest(t, nil)
-	h.deps.PublicTmpEnabled = true
-	w, _ := doList(t, h, "project=__public_tmp__")
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("public_tmp list: want 400, got %d", w.Code)
-	}
-}
-
 func TestHandleFilesList_Truncation(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow: skipped in -short")

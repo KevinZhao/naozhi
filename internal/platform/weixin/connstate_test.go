@@ -15,6 +15,11 @@ import (
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
+var (
+	_ platform.RunnablePlatform  = (*Weixin)(nil)
+	_ platform.ConnStateReporter = (*Weixin)(nil)
+)
+
 const connStateTestTimeout = 5 * time.Second
 
 // scriptedRelay is a fake iLink relay that answers getupdates one scripted

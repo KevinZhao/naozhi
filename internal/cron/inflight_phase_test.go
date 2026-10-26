@@ -118,7 +118,7 @@ func TestExecPopulateInflight_SeedsPhaseQueued(t *testing.T) {
 	t.Parallel()
 
 	rec := &recordingBroadcaster{}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: okRouter{sid: "sess-q"}, Telemetry: rec})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &reapRouter{sid: "sess-q"}, Telemetry: rec})
 
 	j := &Job{ID: "job-phase-queued", Schedule: "@every 5m", Prompt: "ping"}
 	s.putJobForTest(j)

@@ -15,13 +15,19 @@ import { esc, escAttr, showToast, nzBus, nzViews } from './nz_util.js';
 import { fetchEvents } from './event_stream.js';
 import { eventHtml, renderEventsWithDividers } from './event_render.js';
 import { wsm } from './ws_manager.js';
-import { fmtDuration, refreshBanner, saveScrollPos, turnState } from './running_banner.js';
+import { refreshBanner, saveScrollPos, turnState } from './running_banner.js';
 import { sid } from './session_ident.js';
 
 (function () {
   'use strict';
 
   // ─── Phase 2.5 banner helpers ─────────────────────────────────────────
+
+  function fmtDuration(ms) {
+    if (ms < 1000) return ms + 'ms';
+    var s = ms / 1000;
+    return s < 60 ? s.toFixed(1) + 's' : Math.floor(s / 60) + 'm' + Math.floor(s % 60) + 's';
+  }
 
   function renderAgentRows() {
     var agents = turnState.agents;
@@ -145,7 +151,7 @@ import { sid } from './session_ident.js';
   };
 
   var MAX_SWITCH_RETRIES = 20; // §R14: 5 s retry ceiling
-  // #2030: the "no internal record" toast was copied verbatim at 3 call sites
+  // the "no internal record" toast was copied verbatim at 3 call sites
   // (HTTP 202 ceiling / HTTP 404 / WS subscribe rejected). Single source of
   // truth so the wording can't drift between paths.
   var TOAST_NO_RECORD = '该 agent 暂无内部记录';
@@ -184,8 +190,8 @@ import { sid } from './session_ident.js';
   function switchTo(taskID, opts) {
     var seq = ++state.switchSeq;
     // Unsubscribe the agent left, or its tailer keeps streaming here and holds
-    // a Hub-wide slot until it ends (#3696). On the way in, snapshot the parent
-    // pane: the way back and a switch away restore it, not the agent's (#3697).
+    // a Hub-wide slot until it ends. On the way in, snapshot the parent
+    // pane: the way back and a switch away restore it, not the agent's.
     if (state.activeTaskID && state.activeTaskID !== (taskID || '')) unsubscribeCurrent();
     if (!state.activeTaskID && taskID) saveScrollPos(selection.key, selection.node);
     // Each drill-in gets the whole 202 budget; seq retires the old loop.
@@ -482,7 +488,7 @@ import { sid } from './session_ident.js';
   // A tailer replays its buffer from the transcript's start, so events the
   // HTTP page already showed are dropped against the same watermark the
   // HTTP poll keeps.
-  function onAgentEvent(/** @type {WsFrames['agent_event']} */ msg) {
+  function onAgentEvent(msg) {
     if (!msg || !msg.event) return;
     if (msg.task_id !== state.activeTaskID) return;
     var batch = dedupAgentPollBatch([msg.event], state.pollCursor);
@@ -490,7 +496,7 @@ import { sid } from './session_ident.js';
     if (batch.events.length) appendAgentEvent(batch.events[0]);
   }
 
-  function onAgentMeta(/** @type {WsFrames['agent_meta']} */ msg) {
+  function onAgentMeta(msg) {
     if (!msg || !msg.task_id) return;
     // Apply meta to the banner row so stat line stays fresh.
     var row = findAgentByTaskId(msg.task_id);
@@ -505,7 +511,7 @@ import { sid } from './session_ident.js';
     }
   }
 
-  function onAgentDone(/** @type {WsFrames['agent_done']} */ msg) {
+  function onAgentDone(msg) {
     if (!msg || !msg.task_id) return;
     var row = findAgentByTaskId(msg.task_id);
     if (row) {
@@ -523,7 +529,7 @@ import { sid } from './session_ident.js';
     }
   }
 
-  function onAgentSubscribeRejected(/** @type {WsFrames['agent_subscribe_rejected']} */ msg) {
+  function onAgentSubscribeRejected(msg) {
     if (!msg) return;
     if (msg.task_id !== state.activeTaskID) return;
     switch (msg.reason) {
@@ -573,7 +579,7 @@ import { sid } from './session_ident.js';
   // reuses its untimed set): the newest real time shown (afterMS), the keys
   // shown at that ms (seenKeys) and those of every entry shown with no time
   // (untimed), which passes every time filter. The server re-admits the
-  // watermark ms (#2432 item 5) and the WS tailer replays from the start.
+  // watermark ms and the WS tailer replays from the start.
   function dedupAgentPollBatch(events, cursor) {
     var afterMS = cursor ? cursor.afterMS : 0;
     var prev = cursor ? cursor.seenKeys : [];
@@ -658,9 +664,9 @@ import { sid } from './session_ident.js';
   // decoded the HTML-attr escape, so the value is a plain JS string and
   // never crosses a JS-parse boundary.
   document.addEventListener('click', function (e) {
-    var t = /** @type {Element} */ (e.target);
+    var t = e.target;
     if (!t || typeof t.closest !== 'function') return;
-    var row = /** @type {HTMLElement} */ (t.closest('.rb-agent-row[data-task]'));
+    var row = t.closest('.rb-agent-row[data-task]');
     if (!row) return;
     var taskID = row.dataset ? row.dataset.task : row.getAttribute('data-task');
     if (!taskID) return; // pre-task_start agents (no taskId yet) — dead tap.
@@ -675,7 +681,7 @@ import { sid } from './session_ident.js';
     if (!state.activeTaskID) return;
     // Don't hijack Esc if the user is focused in a text input (the
     // dashboard's interrupt shortcut owns Esc there).
-    var t = /** @type {HTMLElement} */ (e.target);
+    var t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||
       t.isContentEditable)) {
       return;
@@ -711,7 +717,7 @@ import { sid } from './session_ident.js';
   wsm.on(NZ_CONTRACT.WS.agent_subscribe_rejected, (msg) => onAgentSubscribeRejected(msg));
   // ─── Exports ───────────────────────────────────────────────────────
 
-  // nz.views.agent — the view's public surface (#2557 PR-E3). dashboard
+  // nz.views.agent — the view's public surface. dashboard
   // reaches it at call time; it cannot import this module (that would
   // create an import cycle and invert execution order).
   nzViews.agent = {

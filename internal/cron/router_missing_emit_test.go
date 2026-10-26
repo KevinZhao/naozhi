@@ -41,8 +41,8 @@ func TestExecuteOpt_RouterMissingEmitsTerminalEvent(t *testing.T) {
 	if got.ErrorClass != ErrClassRouterMissing {
 		t.Errorf("error_class: want router_missing, got %q", got.ErrorClass)
 	}
-	if got.JobID != "job-router-missing" {
-		t.Errorf("job_id: want job-router-missing, got %q", got.JobID)
+	if got.OwnerID != "job-router-missing" {
+		t.Errorf("job_id: want job-router-missing, got %q", got.OwnerID)
 	}
 	if got.Trigger != TriggerManual {
 		t.Errorf("trigger: want manual, got %q", got.Trigger)

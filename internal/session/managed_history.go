@@ -36,85 +36,9 @@ func (s *ManagedSession) SnapshotChainIDs() []string {
 	return out
 }
 
-// SetPrevSessionOrigins records the origin label for the most-recently
-// appended chain segment (the trailing len(ids) entries of prevSessionIDs).
-// Older entries keep their value, defaulting to "manual". origin is one of
-// "manual" / "auto-spawn" / "auto-backfill" / "resume"; empty is a no-op.
-//
-// Invariant: prev_session_ids is append-only — every write path only grows the
-// slice or replaces it wholesale. Drift (origins longer than ids, or a
-// negative tail position) rebuilds origins to all-"manual" rather than letting
-// a misaligned label persist, and is metric-counted.
-func (s *ManagedSession) SetPrevSessionOrigins(ids []string, origin string) {
-	if origin == "" || len(ids) == 0 {
-		return
-	}
-	s.historyMu.Lock()
-	defer s.historyMu.Unlock()
-
-	// Drift detection: start < 0 means the batch was not appended to the tail;
-	// origins longer than IDs means a past write left dangling labels. Both
-	// rebuild the parallel slice with "manual" defaults so origin↔id never
-	// misaligns silently.
-	start := len(s.prevSessionIDs) - len(ids)
-	driftLonger := len(s.prevSessionOrigins) > len(s.prevSessionIDs)
-	if start < 0 || driftLonger {
-		slog.Warn("auto-chain: prev_session_origins length drift; rebuilding to manual",
-			"key", s.key,
-			"prev_ids_len", len(s.prevSessionIDs),
-			"prev_origins_len", len(s.prevSessionOrigins),
-			"incoming_len", len(ids))
-		rebuilt := make([]string, len(s.prevSessionIDs))
-		for i := range rebuilt {
-			rebuilt[i] = "manual"
-		}
-		s.prevSessionOrigins = rebuilt
-		// A negative start is meaningless against this chain — bail.
-		if start < 0 {
-			return
-		}
-	}
-
-	// Grow origins to match the chain length, defaulting the untracked prefix
-	// to "manual".
-	if len(s.prevSessionOrigins) < len(s.prevSessionIDs) {
-		grown := make([]string, len(s.prevSessionIDs))
-		copy(grown, s.prevSessionOrigins)
-		for i := len(s.prevSessionOrigins); i < len(grown); i++ {
-			grown[i] = "manual"
-		}
-		s.prevSessionOrigins = grown
-	}
-
-	for i := range ids {
-		s.prevSessionOrigins[start+i] = origin
-	}
-}
-
-// SnapshotPrevSessionOrigins returns a defensive copy of the parallel origins
-// slice; callers must not mutate the result. Length is exactly
-// len(prevSessionIDs), with unset entries materialised as "manual" so
-// consumers can align positionally without nil-checks.
-func (s *ManagedSession) SnapshotPrevSessionOrigins() []string {
-	s.historyMu.RLock()
-	defer s.historyMu.RUnlock()
-	if len(s.prevSessionIDs) == 0 {
-		return nil
-	}
-	out := make([]string, len(s.prevSessionIDs))
-	for i := range out {
-		if i < len(s.prevSessionOrigins) && s.prevSessionOrigins[i] != "" {
-			out[i] = s.prevSessionOrigins[i]
-		} else {
-			out[i] = "manual"
-		}
-	}
-	return out
-}
-
 // SnapshotPrevSessionIDs returns a defensive copy of the prevSessionIDs chain
 // (oldest → newest) for read-only callers in router_*.go. Returns nil when the
-// chain is empty (matches SnapshotPrevSessionOrigins shape).
+// chain is empty.
 func (s *ManagedSession) SnapshotPrevSessionIDs() []string {
 	s.historyMu.RLock()
 	defer s.historyMu.RUnlock()
@@ -125,9 +49,7 @@ func (s *ManagedSession) SnapshotPrevSessionIDs() []string {
 }
 
 // ReplacePrevSessionIDs swaps the prevSessionIDs chain wholesale. The supplied
-// slice is cloned so the caller can reuse its argument. Origins are NOT
-// touched — callers that need both must call ReplacePrevSessionIDs first, then
-// SetPrevSessionOrigins, so its drift detector sees the post-replace baseline.
+// slice is cloned so the caller can reuse its argument.
 func (s *ManagedSession) ReplacePrevSessionIDs(ids []string) {
 	s.historyMu.Lock()
 	defer s.historyMu.Unlock()
@@ -136,60 +58,6 @@ func (s *ManagedSession) ReplacePrevSessionIDs(ids []string) {
 		return
 	}
 	s.prevSessionIDs = slices.Clone(ids)
-}
-
-// RebuildChainFiltered atomically rebuilds prevSessionIDs and
-// prevSessionOrigins under a SINGLE historyMu write hold, keeping only the
-// indices where keepMask is true, so no reader can observe the two parallel
-// slices differing in length. Composing ReplacePrevSessionIDs +
-// SetPrevSessionOrigins cannot achieve this: each takes historyMu
-// independently and a reader in between would synthesise wrong "manual"
-// labels (RFC §9.2 v2.1). keepMask must have len == len(prevSessionIDs); a
-// mismatch is a caller bug and is a no-op. Origins shorter than the chain are
-// treated as "manual" for surviving entries. Returns the number removed.
-func (s *ManagedSession) RebuildChainFiltered(keepMask []bool) int {
-	s.historyMu.Lock()
-	defer s.historyMu.Unlock()
-
-	n := len(s.prevSessionIDs)
-	if len(keepMask) != n {
-		// Refuse to touch the chain rather than misalign the parallel slices.
-		return 0
-	}
-	if n == 0 {
-		return 0
-	}
-
-	newIDs := make([]string, 0, n)
-	newOrigins := make([]string, 0, n)
-	removed := 0
-	for i := 0; i < n; i++ {
-		if !keepMask[i] {
-			removed++
-			continue
-		}
-		newIDs = append(newIDs, s.prevSessionIDs[i])
-		origin := "manual"
-		if i < len(s.prevSessionOrigins) && s.prevSessionOrigins[i] != "" {
-			origin = s.prevSessionOrigins[i]
-		}
-		newOrigins = append(newOrigins, origin)
-	}
-
-	if removed == 0 {
-		// Leave the slices untouched so a possibly-shorter origins slice that
-		// callers tolerate is not perturbed.
-		return 0
-	}
-
-	if len(newIDs) == 0 {
-		s.prevSessionIDs = nil
-		s.prevSessionOrigins = nil
-		return removed
-	}
-	s.prevSessionIDs = newIDs
-	s.prevSessionOrigins = newOrigins
-	return removed
 }
 
 // SnapshotPersistedHistory returns a defensive copy of the persistedHistory

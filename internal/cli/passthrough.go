@@ -3,13 +3,10 @@ package cli
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
@@ -17,24 +14,14 @@ import (
 	"github.com/naozhi/naozhi/internal/ctxutil"
 )
 
-// slotUUIDFallbackSeq is the monotonic counter newSlotUUID's crypto/rand
-// fallback reads. It used to be shared with the event-log ring's minting path;
-// that sharing was incidental (the two hash prefixes already keep the outputs
-// disjoint) and the ring now lives in internal/eventlog/ring, so each side keeps
-// its own counter. Uniqueness is only ever needed within one fallback path.
-var slotUUIDFallbackSeq atomic.Int64
-
 // newSlotUUID returns a 128-bit random hex string for the Claude CLI's uuid
-// field (an opaque round-tripped blob; RFC4122 formatting is not needed). On
-// a crypto/rand failure it falls back to a hashed counter rather than an
-// all-zero UUID, which would break slot FIFO matching.
+// field (an opaque round-tripped blob; RFC4122 formatting is not needed).
+// crypto/rand.Read never returns an error (it aborts the process on an OS
+// failure), so the result is never the all-zero UUID that would break slot
+// FIFO matching.
 func newSlotUUID() string {
 	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		slog.Warn("crypto/rand.Read failed for slot UUID; using fallback identity", "err", err)
-		sum := sha256.Sum256([]byte("naozhi-slot-uuid-fallback-" + strconv.FormatInt(int64(slotUUIDFallbackSeq.Add(1)), 10)))
-		copy(b[:], sum[:])
-	}
+	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
 }
 

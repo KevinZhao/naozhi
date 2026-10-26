@@ -69,14 +69,6 @@ func (s *Scheduler) dropJobForTest(id string) {
 	}
 }
 
-// findByPrefixForTest resolves idPrefix within (plat, chatID) under the table
-// lock, as the prefix-scoped mutations do.
-func (s *Scheduler) findByPrefixForTest(idPrefix, plat, chatID string) (*Job, error) {
-	s.tbl.mu.RLock()
-	defer s.tbl.mu.RUnlock()
-	return s.tbl.findByPrefixLocked(idPrefix, plat, chatID)
-}
-
 // marshalForTest serialises the job set under the table lock, the way a
 // persist does.
 func (s *Scheduler) marshalForTest() ([]byte, error) {
@@ -116,48 +108,6 @@ func (s *Scheduler) registerJobForTest(j *Job) error {
 	}
 	applyCronEntry(j, p, s.commitCronEntry(p))
 	return nil
-}
-
-// chatCountsForTest returns, from one lock hold, the per-chat counter and a
-// recount grouped from the job map, so the two can be checked against each
-// other. Both are copies.
-func (s *Scheduler) chatCountsForTest() (counter, recount map[chatJobKey]int) {
-	s.tbl.mu.RLock()
-	defer s.tbl.mu.RUnlock()
-	counter = make(map[chatJobKey]int, len(s.tbl.chatJobCount))
-	for k, v := range s.tbl.chatJobCount {
-		counter[k] = v
-	}
-	recount = make(map[chatJobKey]int, len(s.tbl.jobs))
-	for _, j := range s.tbl.jobs {
-		recount[chatKeyFor(j.Platform, j.ChatID)]++
-	}
-	return counter, recount
-}
-
-// chatIndexForTest returns, from one lock hold, the per-chat index as job IDs
-// and a regrouping of the job map, so the two can be checked against each
-// other. Both are copies.
-func (s *Scheduler) chatIndexForTest() (index map[chatJobKey][]string, regroup map[chatJobKey]map[string]bool) {
-	s.tbl.mu.RLock()
-	defer s.tbl.mu.RUnlock()
-	index = make(map[chatJobKey][]string, len(s.tbl.jobsByChat))
-	for k, list := range s.tbl.jobsByChat {
-		ids := make([]string, len(list))
-		for i, j := range list {
-			ids[i] = j.ID
-		}
-		index[k] = ids
-	}
-	regroup = make(map[chatJobKey]map[string]bool, len(s.tbl.jobs))
-	for _, j := range s.tbl.jobs {
-		k := chatKeyFor(j.Platform, j.ChatID)
-		if regroup[k] == nil {
-			regroup[k] = make(map[string]bool)
-		}
-		regroup[k][j.ID] = true
-	}
-	return index, regroup
 }
 
 // putUnindexedJobForTest writes j into the job map and nothing else, leaving

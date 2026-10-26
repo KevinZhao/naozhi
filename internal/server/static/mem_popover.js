@@ -17,7 +17,6 @@
 //
 // docs/rfc/memory-link-rendering.md
 import { NZ_CONTRACT } from './contract.js';
-import { authHeaders } from './platform.js';
 import { esc, escAttr, fetchJSON } from './nz_util.js';
 import { renderMd, runPendingAsync } from './render_md.js';
 
@@ -130,16 +129,14 @@ async function fetchMemory(slug) {
   const cached = memCache.get(slug);
   if (cached === NOT_FOUND) return null;
   if (cached) return cached;
-  // RNEW-UX-003 (#444): fetchJSON wraps fetch with AbortController +
+  // fetchJSON wraps fetch with AbortController +
   // 10s timeout. Memory popovers are click-to-open so a hung backend
   // (NAT idle drop) leaves the user staring at a never-resolving
   // popover; fetchJSON guarantees a deterministic failure path that
   // returns `undefined` (preserves caller's "transient — retry next
   // hover" semantics).
   try {
-    const data = await fetchJSON(NZ_CONTRACT.API.memory_slug.replace('{slug}', encodeURIComponent(slug)), {
-      headers: authHeaders(),
-    });
+    const data = await fetchJSON(NZ_CONTRACT.API.memory_slug.replace('{slug}', encodeURIComponent(slug)));
     if (!data || !data.found) {
       memCache.set(slug, NOT_FOUND);
       markBroken(slug);

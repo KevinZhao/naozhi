@@ -1,4 +1,4 @@
-// RNEW-UX-005: minimal service worker kept intentionally small.
+// minimal service worker kept intentionally small.
 // Exists purely for PWA installability (browsers require a fetch listener)
 // and as a future escape hatch — bump SW_VERSION and drop stale nz-sw- caches
 // if we ever add real caching, so existing users are never pinned on old UI.

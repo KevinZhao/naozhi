@@ -31,8 +31,7 @@ type CacheView interface {
 }
 
 // NodeAccessor is the 2-method subset of contracts.NodeAccessor these handlers
-// call; kept narrow for the test doubles, and asserted a strict subset by
-// TestDashboardContractsDeclaredOnce (#2285).
+// call; kept narrow for the test doubles (#2285).
 type NodeAccessor interface {
 	HasNodes() bool
 	LookupNode(w http.ResponseWriter, id string) (node.Conn, bool)

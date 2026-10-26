@@ -98,7 +98,6 @@ type healthRouter interface {
 	Stats() (active, total int)
 	Backends() *session.BackendRegistry
 	History() *session.HistoryIO
-	Runs() *session.RunLedger
 	StoreWriteBlocks() []session.StoreBlock
 }
 

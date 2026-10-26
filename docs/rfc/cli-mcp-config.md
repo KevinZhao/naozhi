@@ -195,7 +195,7 @@ G4 是明确正确性契约（漏传 → 升级后重启所有存活会话），
 5. `internal/session/router_shim.go` — **arg-drift 比较镜像**（G4；漏了会在升级后重启所有存活会话）
 6. `cmd/naozhi/main.go` + `internal/config/config.go` — `cli.mcp_config` 读取、`ExpandHome`、绝对路径校验 + **信封预校验**（G5，见 §4.1）+ 权限位告警（F4）
 7. 文档同步（评审 F8）：
-   - **`docs/design/DESIGN.md:1277` —— 修正既有事实错误**。原文断言 `--setting-sources ""` 下"MCP/skills 正常"，本 RFC §1 实测矩阵证明 MCP **完全不加载**（`mcp_servers: []`）。不修则后续读者会据此错误结论排查。同页 `:1088` 表格"完整 CC 工具 (需 `--setting-sources ""`)"须加注。
+   - **`docs/design/DESIGN.md`「风险」一节的「hooks 隔离」条 —— 修正既有事实错误**。原文断言 `--setting-sources ""` 下"MCP/skills 正常"，本 RFC §1 实测矩阵证明 MCP **完全不加载**（`mcp_servers: []`）。不修则后续读者会据此错误结论排查。（当时同页还有一张"完整 CC 工具 (需 `--setting-sources ""`)"对比表须加注，该表所在的备选方案评估一节已删除。）
    - `CLAUDE.md:292` —— `cli` 字段清单补 `mcp_config`
    - `config.example.yaml` 的 `cli:` 段 —— 补注释掉的范例，写明"仅绝对文件路径、不支持内联 JSON"（F6）与 0600 要求（F4）
 
@@ -264,4 +264,4 @@ claude -p --output-format stream-json --verbose \
   缓存在该 server 自己的进程侧，**不经 cc 的 `~/.claude.json` `mcpOAuth`**，因此与
   `--setting-sources ""` 是否共享 OAuth 无关。远程 http server 的该问题仍未验证。
 
-发布：合入 master 后按 `docs/ops/deployment-strategy.md` 打 tag，各机 `naozhi upgrade`。本机 launchd 实例可先本地构建验证（开发用途），但分发必须走 release pipeline。
+发布：合入 master 后按 `.claude/skills/dev-workflow/SKILL.md` 的 Releasing 流程打 tag，各机 `naozhi upgrade`。本机 launchd 实例可先本地构建验证（开发用途），但分发必须走 release pipeline。

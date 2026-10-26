@@ -156,7 +156,7 @@ func TestClassifyError_RealMutationFailures(t *testing.T) {
 // interval case also stays inside the ErrInvalidSchedule chain.
 func TestClassifyError_AddJobRejections(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 2, MaxJobsPerChat: 1, AllowNilRouter: true}, SchedulerDeps{})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 2, AllowNilRouter: true}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -190,7 +190,8 @@ func TestClassifyError_AddJobRejections(t *testing.T) {
 	}
 
 	// Per-chat cap: room globally, chat "a" already holds its one job.
-	perChat := NewScheduler(SchedulerConfig{MaxJobs: 10, MaxJobsPerChat: 1, AllowNilRouter: true}, SchedulerDeps{})
+	perChat := NewScheduler(SchedulerConfig{MaxJobs: 10, AllowNilRouter: true}, SchedulerDeps{})
+	perChat.maxJobsPerChat = 1
 	if err := perChat.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

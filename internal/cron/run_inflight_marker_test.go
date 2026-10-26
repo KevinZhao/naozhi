@@ -228,7 +228,7 @@ func TestExecuteWritesTheInflightMarker(t *testing.T) {
 
 	release := make(chan struct{})
 	sess := &gatedSendSession{entered: make(chan struct{}), release: release}
-	s.router = &gatedSendRouter{sess: sess}
+	s.router = &reapRouter{sess: sess}
 
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m", Prompt: "do thing"}
@@ -280,12 +280,3 @@ func (g *gatedSendSession) Send(ctx context.Context, _ string) (SendResult, erro
 }
 func (g *gatedSendSession) SessionID() string                     { return "sess-gated" }
 func (g *gatedSendSession) InterruptViaControl() InterruptOutcome { return InterruptSent }
-
-type gatedSendRouter struct {
-	reapRouter
-	sess *gatedSendSession
-}
-
-func (r *gatedSendRouter) GetOrCreate(_ context.Context, _ string, _ AgentOpts) (Session, SessionStatus, error) {
-	return r.sess, SessionNew, nil
-}

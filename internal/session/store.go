@@ -28,11 +28,7 @@ type storeEntry struct {
 	Key            string   `json:"key"`
 	SessionID      string   `json:"session_id"`
 	PrevSessionIDs []string `json:"prev_session_ids,omitempty"` // oldest → newest
-	// PrevSessionOrigins is parallel to PrevSessionIDs: "manual" / "auto-spawn"
-	// / "auto-backfill" / "resume". A shorter slice is forward-compatible
-	// (loadStore fills the tail with "manual"). docs/rfc/auto-workspace-chain.md §4.6.
-	PrevSessionOrigins []string `json:"prev_session_origins,omitempty"`
-	TotalCost          float64  `json:"total_cost,omitempty"`
+	TotalCost      float64  `json:"total_cost,omitempty"`
 	// CostSpent is the authoritative cumulative spend (monotonic across
 	// resume/restart); TotalCost mirrors the CLI's per-incarnation total.
 	// LastCumulativeCost is the baseline the next per-turn delta diffs against.
@@ -108,24 +104,18 @@ func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 	} else {
 		cost = loadTotalCost(&s.totalCost)
 	}
-	// Clone both chain slices in ONE historyMu critical section so the
-	// persistence path never aliases live mutations and a concurrent
-	// SetPrevSessionOrigins cannot publish a half-mutated pair.
+	// Clone the chain under historyMu so the persistence path never aliases
+	// live mutations.
 	var prevIDs []string
-	var prevOrigins []string
 	s.historyMu.RLock()
 	if len(s.prevSessionIDs) > 0 {
 		prevIDs = slices.Clone(s.prevSessionIDs)
-	}
-	if len(s.prevSessionOrigins) > 0 {
-		prevOrigins = slices.Clone(s.prevSessionOrigins)
 	}
 	s.historyMu.RUnlock()
 	return storeEntry{
 		Key:                s.key,
 		SessionID:          sid,
 		PrevSessionIDs:     prevIDs,
-		PrevSessionOrigins: prevOrigins,
 		TotalCost:          cost,
 		CostSpent:          loadTotalCost(&s.costSpent),
 		LastCumulativeCost: loadTotalCost(&s.lastCumulativeCost),
