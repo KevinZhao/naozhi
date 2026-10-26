@@ -57,6 +57,6 @@
 
 ## 4. 与 DESIGN.md 的关系
 
-- `DESIGN.md` 里的 "Phase 6: Multi-Node" 描述**用户视角**的功能。
-- `multi-node-design.md` 描述**组件关系**与 NodeClient / ReverseNodeConn 职责。
-- 本文档只约束**帧字段**，是三者中唯一允许被其他实现 (如非-Go peer) 直接引用的层。
+- `DESIGN.md` 的「扩展设计文档」表把多节点指向 `multi-node-design.md`。
+- `multi-node-design.md` 描述**用户视角**的功能、**组件关系**与 NodeClient / ReverseNodeConn 职责。
+- 本文档只约束**帧字段**，是其中唯一允许被其他实现 (如非-Go peer) 直接引用的层。
