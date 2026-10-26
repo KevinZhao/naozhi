@@ -22,7 +22,7 @@ func mkTuningRouter(t *testing.T) *Router {
 		defaultCWD: "/default/ws",
 	}
 	r.setWrappersForTest(map[string]*cli.Wrapper{
-		"kiro": cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
+		"kiro": cli.NewWrapperLazy("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
 	})
 	r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "kiro" })
 	stateOf(r).picks.backend = make(map[string]string)

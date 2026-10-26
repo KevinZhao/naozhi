@@ -83,9 +83,6 @@ type ManagerConfig struct {
 	// StateDir holds the per-shim state JSON files (<keyhash>.json). Defaults
 	// to ~/.naozhi/shims. Created 0700 because the files embed AuthToken.
 	StateDir string
-	// CLIPath is the default CLI binary used by StartShim; multi-backend
-	// callers pass an explicit cliPath to StartShimWithBackend instead.
-	CLIPath string
 	// IdleTimeout is how long a shim sits with no client attached before
 	// exiting (RAM vs cold-spawn penalty). Defaults to 4h.
 	IdleTimeout time.Duration
@@ -143,7 +140,6 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 
 	return &Manager{
 		stateDir:        cfg.StateDir,
-		cliPath:         cfg.CLIPath,
 		idleTimeout:     cfg.IdleTimeout,
 		watchdogTimeout: cfg.WatchdogTimeout,
 		bufferSize:      cfg.BufferSize,
@@ -182,12 +178,6 @@ func emitEnvDrops(scope string, drops []envpolicy.Drop) {
 		})
 	}
 	spawndiag.Emit(scope, diags)
-}
-
-// StartShim spawns a new shim process using the manager's default CLI path;
-// a wrapper around StartShimWithBackend for single-backend callers.
-func (m *Manager) StartShim(ctx context.Context, key string, cliArgs []string, cwd string) (*ShimHandle, error) {
-	return m.StartShimWithBackend(ctx, key, m.cliPath, "", cliArgs, cwd, nil, nil)
 }
 
 // buildShimArgs assembles the argv for the shim subprocess. Pure function of
@@ -278,8 +268,8 @@ func awaitReady(ctx context.Context, stdout io.ReadCloser, timeout time.Duration
 
 // StartShimWithBackend spawns a new shim process with an explicit CLI binary
 // and backend identifier; the backend is recorded in the shim state file so
-// post-restart reconnects route back to the matching wrapper. cliPath == ""
-// falls back to the manager default; backend == "" means legacy single-backend.
+// post-restart reconnects route back to the matching wrapper. backend == ""
+// means legacy single-backend.
 //
 // envOverlay (RFC project-access-profile §4) overrides m.shimEnv for this shim
 // only and is re-gated through envpolicy.FilterShimEnv by MergeShimEnv — never a bypass.
@@ -290,9 +280,6 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 	// trust that upstream callers already ran sessionkey.ValidateSessionKey.
 	if err := validateKeyForShim(key); err != nil {
 		return nil, fmt.Errorf("shim key rejected: %w", err)
-	}
-	if cliPath == "" {
-		cliPath = m.cliPath
 	}
 	// Reserve a slot atomically to prevent TOCTOU race with concurrent callers
 	m.mu.Lock()
@@ -565,8 +552,3 @@ func (h *ShimHandle) Shutdown() {
 // transient systemd scope with KillMode=none (direct cgroup write fallback);
 // Darwin is a no-op because launchd only kills the plist's main process and a
 // Setsid child is reparented to PID 1.
-
-// CLIPath returns the configured CLI binary path.
-func (m *Manager) CLIPath() string {
-	return m.cliPath
-}

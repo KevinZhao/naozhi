@@ -115,8 +115,8 @@ func TestHandleOpen_UnspawnedSourceBackendIsRouterDefault(t *testing.T) {
 	r := session.NewRouter(session.RouterConfig{
 		MaxProcs: 3,
 		BackendRuntimes: map[string]session.BackendRuntime{
-			"claude": {Wrapper: cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")},
-			"kiro":   {Wrapper: cli.NewWrapper("/nonexistent/kiro", &cli.ClaudeProtocol{}, "kiro")},
+			"claude": {Wrapper: cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")},
+			"kiro":   {Wrapper: cli.NewWrapperLazy("/nonexistent/kiro", &cli.ClaudeProtocol{}, "kiro")},
 		},
 		DefaultBackend: "claude",
 		AccessProfiles: map[string]session.AccessProfile{"viakiro": {DefaultBackend: "kiro"}},

@@ -198,7 +198,7 @@ func TestReconnectShims_DriftBackfillOnlyFillsEmptyHistory(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			w := cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
+			w := cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
 			w.ShimManager = mgr
 			loader := &racingHistoryLoader{jsonl: jsonl}
 			r := NewRouter(RouterConfig{Wrapper: w, ClaudeDir: filepath.Join(dir, "claude"), HistoryLoader: loader})
@@ -242,7 +242,7 @@ func TestReconnectShims_ReconnectKeepsHistoryLoadedDuringRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
+	w := cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
 	w.ShimManager = mgr
 	loader := &racingHistoryLoader{jsonl: historyEntries("jsonl", 3)}
 	r := NewRouter(RouterConfig{Wrapper: w, ClaudeDir: filepath.Join(dir, "claude"), HistoryLoader: loader})

@@ -40,7 +40,7 @@ func findBackend(list []clipkg.BackendInfo, id string) (clipkg.BackendInfo, bool
 // routerWithWrapper builds a single-wrapper router whose lone backend is
 // "claude" with the given spawn-time CLIVersion.
 func routerWithWrapper(spawnVersion string) (*session.Router, *clipkg.Wrapper) {
-	w := clipkg.NewWrapper("/nonexistent/cli-binary", &clipkg.ClaudeProtocol{}, "claude")
+	w := clipkg.NewWrapperLazy("/nonexistent/cli-binary", &clipkg.ClaudeProtocol{}, "claude")
 	w.CLIVersion = spawnVersion
 	r := session.NewRouter(session.RouterConfig{Wrapper: w})
 	return r, w

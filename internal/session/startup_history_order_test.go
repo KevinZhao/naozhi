@@ -79,7 +79,7 @@ func TestReconnectShims_RestoresEventLogBeforeJSONL(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			w := cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
+			w := cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
 			w.ShimManager = mgr
 			loader := &racingHistoryLoader{jsonl: historyEntries("jsonl", 3)}
 			r := historyOrderRouter(t, dir, w, loader)
@@ -201,7 +201,7 @@ func TestStartupHistory_ShimGraceWait(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			w := cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
+			w := cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
 			w.ShimManager = mgr
 			loader := &timedHistoryLoader{jsonl: historyEntries("jsonl", 3), at: map[string]time.Duration{}}
 			r := historyOrderRouter(t, dir, w, loader)

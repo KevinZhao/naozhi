@@ -46,7 +46,7 @@ func TestReconnectShimsCtx_CancelAbortsShimHandshake(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			w := cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
+			w := cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
 			w.ShimManager = mgr
 			r := NewRouter(RouterConfig{Wrapper: w})
 			t.Cleanup(r.Shutdown)

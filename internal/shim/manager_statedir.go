@@ -28,7 +28,6 @@ func (m *Manager) StateDir() string { return m.stateDir }
 // Manager manages shim process lifecycle: starting, discovering, and reconnecting.
 type Manager struct {
 	stateDir        string
-	cliPath         string
 	idleTimeout     time.Duration
 	watchdogTimeout time.Duration
 	bufferSize      int

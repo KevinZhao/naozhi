@@ -293,7 +293,7 @@ func newTestRouter(maxProcs int) *Router {
 		pruneTTL: 72 * time.Hour,
 	}
 	r.editBackendsForTest(func(c *backendstore.Config) {
-		c.Wrapper = cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
+		c.Wrapper = cli.NewWrapperLazy("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
 	})
 	return r
 }
@@ -1100,7 +1100,7 @@ func TestGetOrCreate_AgentOptsOverride(t *testing.T) {
 		ttl:      30 * time.Minute,
 	}
 	r.editBackendsForTest(func(c *backendstore.Config) {
-		c.Wrapper = cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
+		c.Wrapper = cli.NewWrapperLazy("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
 	})
 	r.editBackendsForTest(func(c *backendstore.Config) { c.Model = "default-model" })
 	r.editBackendsForTest(func(c *backendstore.Config) { c.ExtraArgs = []string{"--base-arg"} })
@@ -2048,8 +2048,8 @@ func TestResolveSpawnParamsLocked_KiroResumeAndCase(t *testing.T) {
 			defaultCWD: "/default/ws",
 		}
 		r.setWrappersForTest(map[string]*cli.Wrapper{
-			"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
-			"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
+			"claude": cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "claude"),
+			"kiro":   cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
 		})
 		r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "claude" })
 		stateOf(r).picks.backend = make(map[string]string)
@@ -2132,8 +2132,8 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 			defaultCWD: "/default/ws",
 		}
 		r.setWrappersForTest(map[string]*cli.Wrapper{
-			"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
-			"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
+			"claude": cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "claude"),
+			"kiro":   cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
 		})
 		r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "claude" })
 		r.editBackendsForTest(func(c *backendstore.Config) { c.Model = "sonnet-default" })
@@ -2308,7 +2308,7 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 			defaultCWD: "/default/ws",
 		}
 		r.setWrappersForTest(map[string]*cli.Wrapper{
-			"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
+			"claude": cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "claude"),
 		})
 		r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "claude" })
 		r.editBackendsForTest(func(c *backendstore.Config) { c.Model = "sonnet-default" })

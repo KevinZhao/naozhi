@@ -182,9 +182,7 @@ func TestResumeJobByID_RollbackRemovesCronEntry(t *testing.T) {
 
 // TestResumeJobByID_RollbackRestoresCachedSched pins R250531-CR-3: the rollback
 // closure in ResumeJobByID previously omitted restoring j.cachedSched after
-// registerJob wrote it. HasMissedScheduleCached uses j.cachedSched for the 1Hz
-// dashboard fanout; a stale (post-resume) schedule on a still-paused job would
-// cause missed-schedule false-positives. After the fix, rollback restores
+// registerJob wrote it. After the fix, rollback restores
 // cachedSched to its pre-op value.
 func TestResumeJobByID_RollbackRestoresCachedSched(t *testing.T) {
 	s, id := newTestSchedulerForPersist(t)

@@ -16,7 +16,7 @@ func TestRouter_CLIVersion_PrefersLiveObserved(t *testing.T) {
 	r := &Router{
 		ss: newSessionTable(),
 	}
-	w := cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
+	w := cli.NewWrapperLazy("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
 	w.CLIVersion = "2.1.100" // simulate spawn-time detection
 	r.editBackendsForTest(func(c *backendstore.Config) { c.Wrapper = w })
 	if got := r.backends.CLIVersion(); got != "2.1.100" {

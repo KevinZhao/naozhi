@@ -53,7 +53,7 @@ func newBudgetFixture(t *testing.T, lim budget.Limits) *budgetFixture {
 		AutoPauseAfterFailures: 2,
 	}, SchedulerDeps{Router: f.r, Telemetry: f.rec, Budget: budget.NewGate(lim, f.idx)})
 	f.s.configMapsPtr.Store(&cronConfigMaps{notifySender: f.ns})
-	j := NewJob("@every 10m", "ping", JobIMContext{Platform: "feishu", ChatID: "chat-1"})
+	j := NewJobFull(JobInit{Schedule: "@every 10m", Prompt: "ping", IM: JobIMContext{Platform: "feishu", ChatID: "chat-1"}})
 	if err := f.s.AddJob(j); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestBudget_GlobalCapAndSiblingJobs(t *testing.T) {
 	f := newBudgetFixture(t, budget.Limits{PerJobDailyUSD: 5, DailyUSD: 10})
 	var others []string
 	for _, prompt := range []string{"pong", "pang"} {
-		j := NewJob("@every 10m", prompt, JobIMContext{Platform: "feishu", ChatID: "chat-" + prompt})
+		j := NewJobFull(JobInit{Schedule: "@every 10m", Prompt: prompt, IM: JobIMContext{Platform: "feishu", ChatID: "chat-" + prompt}})
 		if err := f.s.AddJob(j); err != nil {
 			t.Fatal(err)
 		}

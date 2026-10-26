@@ -337,7 +337,7 @@ func (p *Process) IsRunning() bool {
 //
 // After sending "kill" and closing the conn, SIGUSR2 makes the shim shut down
 // immediately (listener.Close + os.Remove(socket)); otherwise it holds the
-// socket for its 30s disconnect grace and the next StartShim for the same key
+// socket for its 30s disconnect grace and the next StartShimWithBackend for the same key
 // trips the "refusing to clobber" guard. Skipped when shimPID is 0 (no hello);
 // PID reuse is negligible since we signal microseconds after it was seen alive.
 func (p *Process) Kill() {

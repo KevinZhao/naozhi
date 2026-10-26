@@ -29,11 +29,7 @@ type JobIMContext struct {
 }
 
 // JobInit bundles every operator-settable field a cron Job can carry at
-// creation time — the input to NewJobFull, covering the dashboard-only fields
-// (Title / WorkDir / Notify* / FreshContext / Backend / Paused) that NewJob's
-// (schedule, prompt, JobIMContext) signature cannot express (#1142).
-// All fields are optional; the zero value yields a Job equivalent to
-// NewJob(schedule, prompt, ctx) with empty inputs.
+// creation time — the input to NewJobFull (#1142). All fields are optional.
 type JobInit struct {
 	Schedule string
 	Prompt   string
@@ -49,21 +45,10 @@ type JobInit struct {
 	Paused         bool
 }
 
-// NewJob constructs a Job ready to hand to Scheduler.AddJob from the
-// (schedule, prompt) pair plus the IM-channel context that originated it.
-// The dashboard path that also needs Title / WorkDir / Notify* / FreshContext
-// / Backend / Paused must use NewJobFull so no surface hand-rolls a cron.Job{}
-// literal (#1142).
-//
-// CreatedAt is intentionally NOT stamped here: AddJob owns Job persistence
-// and needs a single coherent timestamp source.
-func NewJob(schedule, prompt string, ctx JobIMContext) *Job {
-	return NewJobFull(JobInit{Schedule: schedule, Prompt: prompt, IM: ctx})
-}
-
 // NewJobFull constructs a Job from the full JobInit field set so every
-// surface routes through one field-mapping site (#1142). CreatedAt is left
-// zero for AddJob to stamp, mirroring NewJob.
+// surface routes through one field-mapping site and none hand-rolls a
+// cron.Job{} literal (#1142). CreatedAt is intentionally left zero: AddJob
+// owns Job persistence and stamps a single coherent timestamp.
 func NewJobFull(in JobInit) *Job {
 	return &Job{
 		Schedule:       in.Schedule,
@@ -179,9 +164,8 @@ type Job struct {
 	// not yet registered; callers fall back to the live computation (#664).
 	cachedPeriod time.Duration // runtime only, not persisted
 
-	// cachedSched is the parsed robfigcron.Schedule populated by registerJob so
-	// HasMissedScheduleCached skips cronParser.Parse on every 1Hz tick (#477).
-	// nil = not yet registered; callers fall back to the parse path.
+	// cachedSched is the parsed robfigcron.Schedule populated by registerJob
+	// alongside cachedPeriod (#477). nil = not yet registered.
 	cachedSched robfigcron.Schedule // runtime only, not persisted
 }
 
@@ -587,39 +571,14 @@ func previousTickBeforeFromSched(sched robfigcron.Schedule, period time.Duration
 //  4. 跑过：prevExpectedAt - LastRunAt > period × 1.5 则判 missed（裕量应对
 //     jitter + 轻微延迟）。
 func HasMissedSchedule(j *Job, now, startedAt time.Time) (bool, time.Time) {
-	return hasMissedScheduleImpl(j, nil, 0, now, startedAt)
-}
-
-// HasMissedScheduleCached is the alloc-free variant of HasMissedSchedule for
-// the dashboard 1Hz handleList fanout (#477): when registerJob has run,
-// j.cachedSched / j.cachedPeriod skip the cronParser.Parse regex. Falls back
-// to the parse path on a cold cache so behaviour matches HasMissedSchedule.
-func HasMissedScheduleCached(j *Job, now, startedAt time.Time) (bool, time.Time) {
 	if j == nil {
 		return false, time.Time{}
 	}
-	return hasMissedScheduleImpl(j, j.cachedSched, j.cachedPeriod, now, startedAt)
-}
-
-// hasMissedScheduleImpl is the shared body of HasMissedSchedule and
-// HasMissedScheduleCached. cached (non-nil) skips the regex parse and
-// cachedPeriod (>0) skips the 2× sched.Next; zero values recompute.
-func hasMissedScheduleImpl(j *Job, cached robfigcron.Schedule, cachedPeriod time.Duration, now, startedAt time.Time) (bool, time.Time) {
-	if j == nil {
+	sched, err := cronParser.Parse(j.Schedule)
+	if err != nil {
 		return false, time.Time{}
 	}
-	sched := cached
-	if sched == nil {
-		var err error
-		sched, err = cronParser.Parse(j.Schedule)
-		if err != nil {
-			return false, time.Time{}
-		}
-	}
-	period := cachedPeriod
-	if period <= 0 {
-		period = schedulePeriodFromSched(sched, now)
-	}
+	period := schedulePeriodFromSched(sched, now)
 	if period <= 0 {
 		return false, time.Time{}
 	}

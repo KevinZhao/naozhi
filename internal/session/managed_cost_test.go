@@ -616,7 +616,7 @@ type hookedTestProcess struct {
 // A spawned session binds the hook to itself, so its CLI-started turns land
 // on its own ledger.
 func TestSpawn_BindsUnownedResultBooking(t *testing.T) {
-	r := NewRouter(RouterConfig{Wrapper: cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")})
+	r := NewRouter(RouterConfig{Wrapper: cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")})
 	t.Cleanup(r.Shutdown)
 	proc := &hookedTestProcess{TestProcess: &TestProcess{AliveVal: true}}
 	r.spawn.hook = func(context.Context, cli.SpawnOptions) (processIface, error) { return proc, nil }
@@ -639,7 +639,7 @@ func TestSpawn_BindsUnownedResultBooking(t *testing.T) {
 // key AND again by the fresh session, whose baseline did not see them), and
 // the fresh session must book the CLI-started turns from then on.
 func TestBookUnownedResults_RenameMovesBookingWithTheProcess(t *testing.T) {
-	r := NewRouter(RouterConfig{Wrapper: cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")})
+	r := NewRouter(RouterConfig{Wrapper: cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")})
 	t.Cleanup(r.Shutdown)
 	ledger := costledger.NewStore(t.TempDir(), costledger.Options{})
 	t.Cleanup(ledger.Close)

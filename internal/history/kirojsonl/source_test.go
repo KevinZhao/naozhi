@@ -657,12 +657,12 @@ func TestSource_LoadBefore_AssistantEmptyTextDropped(t *testing.T) {
 
 // TestKirojsonlFactory_RegistrationOnInit confirms the package-level
 // init() registered "kiro" with history.RegisterFactory. Without
-// this, NewWrapper(... "kiro" ...) would never wire a history.Source
+// this, NewWrapperLazy(... "kiro" ...) would never wire a history.Source
 // and the dashboard would silently lose kiro JSONL fallback after
 // upgrade.
 func TestKirojsonlFactory_RegistrationOnInit(t *testing.T) {
 	t.Parallel()
-	w := cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro")
+	w := cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "kiro")
 	src := w.NewHistorySource(&stubKiroSession{sid: "x"}, history.Wiring{BackendDirs: map[string]string{"kiro": "/kiro/dir"}})
 	if _, ok := src.(*Source); !ok {
 		t.Errorf("wrapper(kiro).NewHistorySource = %T; want *kirojsonl.Source — init() registration regressed", src)

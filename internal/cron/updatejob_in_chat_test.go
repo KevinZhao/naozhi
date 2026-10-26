@@ -45,7 +45,7 @@ func newFreshModeScheduler(t *testing.T, paused bool) (*Scheduler, *resetCountin
 		MaxJobs:   5,
 		StorePath: filepath.Join(t.TempDir(), "cron_jobs.json"),
 	}, SchedulerDeps{Router: r})
-	j := NewJob("@every 10m", "ping", JobIMContext{Platform: "feishu", ChatID: "chat-1"})
+	j := NewJobFull(JobInit{Schedule: "@every 10m", Prompt: "ping", IM: JobIMContext{Platform: "feishu", ChatID: "chat-1"}})
 	j.Paused = paused
 	if err := s.AddJob(j); err != nil {
 		t.Fatalf("AddJob: %v", err)
@@ -97,7 +97,7 @@ func TestUpdateJobInChat_ScopeAndAmbiguity(t *testing.T) {
 		t.Errorf("other chat changed the job: FreshContext=%v ConsecutiveFailures=%d", j.FreshContext, j.ConsecutiveFailures)
 	}
 
-	other := NewJob("@every 10m", "pong", JobIMContext{Platform: "feishu", ChatID: "chat-1"})
+	other := NewJobFull(JobInit{Schedule: "@every 10m", Prompt: "pong", IM: JobIMContext{Platform: "feishu", ChatID: "chat-1"}})
 	if err := s.AddJob(other); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestUpdateJobInChat_RescheduleUsesFullID(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(s.Stop)
-	j := NewJob("@every 10m", "ping", JobIMContext{Platform: "feishu", ChatID: "chat-1"})
+	j := NewJobFull(JobInit{Schedule: "@every 10m", Prompt: "ping", IM: JobIMContext{Platform: "feishu", ChatID: "chat-1"}})
 	if err := s.AddJob(j); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}

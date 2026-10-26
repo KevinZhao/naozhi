@@ -75,7 +75,7 @@ func newAutoPauseScheduler(t *testing.T, threshold int, platform string) (*Sched
 	}, SchedulerDeps{Router: r})
 	ns := &recordingNotifySender{}
 	s.configMapsPtr.Store(&cronConfigMaps{notifySender: ns})
-	j := NewJob("@every 10m", "ping", JobIMContext{Platform: platform, ChatID: "chat-1"})
+	j := NewJobFull(JobInit{Schedule: "@every 10m", Prompt: "ping", IM: JobIMContext{Platform: platform, ChatID: "chat-1"}})
 	if platform == "dashboard" {
 		j.NotifyPlatform, j.NotifyChatID = "feishu", "chat-1"
 	}
@@ -593,7 +593,7 @@ func TestAutoPause_LandsBeforeRunEnded(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		MaxJobs: 5, StorePath: filepath.Join(t.TempDir(), "cron_jobs.json"), AutoPauseAfterFailures: 2,
 	}, SchedulerDeps{Router: r, Telemetry: obs})
-	j := NewJob("@every 10m", "ping", JobIMContext{Platform: "feishu", ChatID: "chat-1"})
+	j := NewJobFull(JobInit{Schedule: "@every 10m", Prompt: "ping", IM: JobIMContext{Platform: "feishu", ChatID: "chat-1"}})
 	if err := s.AddJob(j); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}

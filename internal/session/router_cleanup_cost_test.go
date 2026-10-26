@@ -31,7 +31,7 @@ const shutdownCostKey = "dashboard:direct:shutdown-cost:general"
 
 func newCostRouter(t *testing.T, storePath string) *Router {
 	t.Helper()
-	r := NewRouter(RouterConfig{StorePath: storePath, Wrapper: cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")})
+	r := NewRouter(RouterConfig{StorePath: storePath, Wrapper: cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")})
 	t.Cleanup(r.Shutdown)
 	return r
 }

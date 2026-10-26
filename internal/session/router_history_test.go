@@ -62,8 +62,8 @@ func makeRoutedRouter(t *testing.T, defaultBackend string) (r *Router, claudeSrc
 		hist: HistoryIO{claudeDir: "/claude/dir", backendDirs: map[string]string{"kiro": "/kiro/dir"}},
 	}
 	r.setWrappersForTest(map[string]*cli.Wrapper{
-		"claude-routed": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude-routed"),
-		"kiro-routed":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro-routed"),
+		"claude-routed": cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "claude-routed"),
+		"kiro-routed":   cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "kiro-routed"),
 	})
 	r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = defaultBackend })
 	stateOf(r).picks.backend = make(map[string]string)
@@ -251,7 +251,7 @@ func TestRouter_KiroBackendDirRoundTrip(t *testing.T) {
 		hist: HistoryIO{backendDirs: map[string]string{"kiro": "/the/kiro/dir"}},
 	}
 	r.setWrappersForTest(map[string]*cli.Wrapper{
-		"kiro-rt-probe": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro-rt-probe"),
+		"kiro-rt-probe": cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "kiro-rt-probe"),
 	})
 	r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "kiro-rt-probe" })
 	stateOf(r).picks.backend = make(map[string]string)
@@ -281,8 +281,8 @@ func TestAttachHistorySource_KiroBackendUsesKirojsonl(t *testing.T) {
 		hist: HistoryIO{claudeDir: "/claude/dir", backendDirs: map[string]string{"kiro": "/kiro/sessions/cli"}},
 	}
 	r.setWrappersForTest(map[string]*cli.Wrapper{
-		"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
-		"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
+		"claude": cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "claude"),
+		"kiro":   cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
 	})
 	r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "claude" })
 	stateOf(r).picks.backend = make(map[string]string)
@@ -315,8 +315,8 @@ func TestHistorySource_RouterSitesResolveTheSessionBackend(t *testing.T) {
 		hist: HistoryIO{claudeDir: "/claude/dir", backendDirs: map[string]string{"kiro": "/kiro/sessions/cli"}},
 	}
 	r.setWrappersForTest(map[string]*cli.Wrapper{
-		"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
-		"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
+		"claude": cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "claude"),
+		"kiro":   cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
 	})
 	r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "claude" })
 	r.editBackendsForTest(func(c *backendstore.Config) { c.Wrapper = r.backends.bk.Runtime("claude").Wrapper })
@@ -343,9 +343,9 @@ func TestHistorySource_RouterSitesResolveTheSessionBackend(t *testing.T) {
 // from every row here, so each branch is visible.
 func TestSourceWrapperFor_RowThenFallback(t *testing.T) {
 	t.Parallel()
-	wClaude := cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude")
-	wKiro := cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro")
-	wFallback := cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "fallback")
+	wClaude := cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "claude")
+	wKiro := cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "kiro")
+	wFallback := cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "fallback")
 	b := BackendRegistry{bk: backendstore.New(backendstore.Config{
 		Wrapper:        wFallback,
 		DefaultBackend: "kiro",

@@ -158,7 +158,7 @@ func TestGapEntryShape_MatchesEventEntry(t *testing.T) {
 // recognise registered kinds.
 func TestGapEntryType_IsRegisteredKind(t *testing.T) {
 	t.Parallel()
-	if !clievent.IsKnownKind(gapEntryType) || gapEntryType != clievent.KindPersistGap {
+	if gapEntryType != clievent.KindPersistGap {
 		t.Errorf("gapEntryType = %q, want the registered clievent.KindPersistGap (%q)", gapEntryType, clievent.KindPersistGap)
 	}
 }

@@ -65,7 +65,7 @@ func TestPermissionModeDriftParity_NoFalsePositive(t *testing.T) {
 func TestPermissionModeSwitch_ReadsAsDrift(t *testing.T) {
 	t.Parallel()
 	const key = "feishu:direct:alice:general"
-	w := cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
+	w := cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
 	modes := []cli.PermissionMode{cli.PermissionModeDefault, cli.PermissionModeAuto}
 	for _, spawnedUnder := range modes {
 		spawner := permissionModeRouter(spawnedUnder)

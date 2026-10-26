@@ -74,7 +74,7 @@ func TestReconnectShims_ReplayLinksOnlyAgentTasks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
+	w := cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
 	w.ShimManager = mgr
 	r := NewRouter(RouterConfig{Wrapper: w, ClaudeDir: filepath.Join(dir, "claude"), HistoryLoader: &racingHistoryLoader{}})
 	t.Cleanup(r.Shutdown)

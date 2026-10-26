@@ -25,8 +25,8 @@ func mkManifestRouter(t *testing.T) *Router {
 		ss: newSessionTable(),
 	}
 	r.setWrappersForTest(map[string]*cli.Wrapper{
-		"kiro":   cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
-		"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
+		"kiro":   cli.NewWrapperLazy("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
+		"claude": cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "claude"),
 	})
 	r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "claude" })
 	r.setModelManifestsForTest(make(map[string][]cli.ModelInfo))

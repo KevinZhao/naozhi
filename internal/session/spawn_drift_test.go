@@ -48,7 +48,7 @@ func TestReconnectShims_DriftCheckUsesTheRoutersFacets(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			w := cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
+			w := cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
 			w.ShimManager = mgr
 			r := NewRouter(RouterConfig{
 				Wrapper:            w,
@@ -115,7 +115,7 @@ func TestReconnectShims_ReconnectCarriesTheRoutersSpawnTimeouts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
+	w := cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
 	w.ShimManager = mgr
 	const noOutput, total = time.Millisecond, 97 * time.Minute
 	r := NewRouter(RouterConfig{Wrapper: w, NoOutputTimeout: noOutput, TotalTimeout: total})

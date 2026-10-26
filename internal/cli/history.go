@@ -17,7 +17,7 @@ import (
 // non-nil: a nil receiver, an unregistered backend, or a nil-returning factory
 // all degrade to history.Noop.
 //
-// The registry is consulted on every call, not cached at NewWrapper time, so
+// The registry is consulted on every call, not cached at construction time, so
 // a RegisterFactory that lands after construction (per-t.Run tests, lazily
 // imported backends) is honoured; the RWMutex read is ~30ns.
 func (w *Wrapper) NewHistorySource(s history.SessionView, deps history.Wiring) history.Source {

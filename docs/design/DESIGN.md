@@ -352,7 +352,7 @@ func (p *Process) Kill()
    - `Source.LoadHistory(ctx, dir, sid)` 把磁盘转写翻成 `cli.EventEntry` 流
    - `Source.ListSessions(ctx, dir)` 让 dashboard 历史面板枚举可恢复 session
    - 在子包 `init()` 里调 `cli.RegisterHistoryFactory(<id>, factory)`
-     —— `cli.Wrapper.NewWrapper` 在 spawn 时按 BackendID 取工厂；未注册的
+     —— `cli.Wrapper` 在 spawn 时按 BackendID 取工厂；未注册的
      backend fallback 到 `NoopHistorySource`（dashboard 显示空磁盘层）。
 
 4. **shim hint**（可选，仅在 backend 需要 reverse-node 路由时）
