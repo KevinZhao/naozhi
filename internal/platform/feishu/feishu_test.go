@@ -210,23 +210,41 @@ func TestParseSDKEvent_ImageMessage(t *testing.T) {
 	}
 }
 
-func TestParseSDKEvent_ImageMessage_EmptyKey(t *testing.T) {
+// TestParseSDKEvent_Rejected: events with nothing routable are dropped.
+func TestParseSDKEvent_Rejected(t *testing.T) {
 	t.Parallel()
-	event := &larkim.P2MessageReceiveV1{
-		Event: &larkim.P2MessageReceiveV1Data{
-			Sender: &larkim.EventSender{
-				SenderId: &larkim.UserId{OpenId: strPtr("ou_user1")},
-			},
-			Message: &larkim.EventMessage{
-				MessageType: strPtr("image"),
-				ChatId:      strPtr("oc_chat1"),
-				Content:     strPtr(`{"image_key":""}`),
-			},
-		},
+	sender := &larkim.EventSender{SenderId: &larkim.UserId{OpenId: strPtr("ou_user1")}}
+	msgEvent := func(m *larkim.EventMessage) *larkim.P2MessageReceiveV1 {
+		return &larkim.P2MessageReceiveV1{Event: &larkim.P2MessageReceiveV1Data{Sender: sender, Message: m}}
 	}
-	_, ok := (&Feishu{}).parseSDKEvent(event)
-	if ok {
-		t.Error("expected ok=false for image message with empty image_key")
+	tests := []struct {
+		name  string
+		event *larkim.P2MessageReceiveV1
+	}{
+		{"nil event", nil},
+		{"nil message", &larkim.P2MessageReceiveV1{Event: &larkim.P2MessageReceiveV1Data{}}},
+		{"image with empty image_key", msgEvent(&larkim.EventMessage{
+			MessageType: strPtr("image"), ChatId: strPtr("oc_chat1"), Content: strPtr(`{"image_key":""}`),
+		})},
+		{"audio with empty file_key", msgEvent(&larkim.EventMessage{
+			MessageType: strPtr("audio"), ChatId: strPtr("oc_chat1"), Content: strPtr(`{"file_key":""}`),
+		})},
+		{"empty text", msgEvent(&larkim.EventMessage{
+			MessageType: strPtr("text"), ChatId: strPtr("oc_chat1"), Content: strPtr(`{"text":"  "}`),
+		})},
+		{"mention-only text", msgEvent(&larkim.EventMessage{
+			MessageType: strPtr("text"), ChatId: strPtr("oc_chat1"), ChatType: strPtr("group"),
+			Content:  strPtr(`{"text":"@_user_1"}`),
+			Mentions: []*larkim.MentionEvent{{Key: strPtr("@_user_1"), Name: strPtr("Bot")}},
+		})},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, ok := (&Feishu{}).parseSDKEvent(tt.event); ok {
+				t.Error("expected ok=false")
+			}
+		})
 	}
 }
 
@@ -245,69 +263,6 @@ func TestParseSDKEvent_UnsupportedType(t *testing.T) {
 	pe, ok := (&Feishu{}).parseSDKEvent(event)
 	if !ok || pe.Unsupported != "sticker" || pe.MediaType != "" {
 		t.Errorf("parseSDKEvent(sticker) = %+v, %v; want Unsupported=sticker", pe, ok)
-	}
-}
-
-func TestParseSDKEvent_EmptyText(t *testing.T) {
-	t.Parallel()
-	event := &larkim.P2MessageReceiveV1{
-		Event: &larkim.P2MessageReceiveV1Data{
-			Sender: &larkim.EventSender{
-				SenderId: &larkim.UserId{OpenId: strPtr("ou_user1")},
-			},
-			Message: &larkim.EventMessage{
-				MessageType: strPtr("text"),
-				ChatId:      strPtr("oc_chat1"),
-				Content:     strPtr(`{"text":"  "}`),
-			},
-		},
-	}
-	_, ok := (&Feishu{}).parseSDKEvent(event)
-	if ok {
-		t.Error("expected ok=false for empty text")
-	}
-}
-
-func TestParseSDKEvent_MentionOnlyText(t *testing.T) {
-	t.Parallel()
-	event := &larkim.P2MessageReceiveV1{
-		Event: &larkim.P2MessageReceiveV1Data{
-			Sender: &larkim.EventSender{
-				SenderId: &larkim.UserId{OpenId: strPtr("ou_user1")},
-			},
-			Message: &larkim.EventMessage{
-				MessageType: strPtr("text"),
-				ChatId:      strPtr("oc_chat1"),
-				ChatType:    strPtr("group"),
-				Content:     strPtr(`{"text":"@_user_1"}`),
-				Mentions: []*larkim.MentionEvent{
-					{Key: strPtr("@_user_1"), Name: strPtr("Bot")},
-				},
-			},
-		},
-	}
-	_, ok := (&Feishu{}).parseSDKEvent(event)
-	if ok {
-		t.Error("expected ok=false for mention-only text")
-	}
-}
-
-func TestParseSDKEvent_NilEvent(t *testing.T) {
-	t.Parallel()
-	_, ok := (&Feishu{}).parseSDKEvent(nil)
-	if ok {
-		t.Error("expected ok=false for nil event")
-	}
-}
-
-func TestParseSDKEvent_NilMessage(t *testing.T) {
-	t.Parallel()
-	event := &larkim.P2MessageReceiveV1{
-		Event: &larkim.P2MessageReceiveV1Data{},
-	}
-	_, ok := (&Feishu{}).parseSDKEvent(event)
-	if ok {
-		t.Error("expected ok=false for nil message")
 	}
 }
 
@@ -338,26 +293,6 @@ func TestParseSDKEvent_AudioMessage(t *testing.T) {
 	}
 	if pe.MessageID != "msg_audio_1" {
 		t.Errorf("MessageID = %q, want msg_audio_1", pe.MessageID)
-	}
-}
-
-func TestParseSDKEvent_AudioMessage_EmptyKey(t *testing.T) {
-	t.Parallel()
-	event := &larkim.P2MessageReceiveV1{
-		Event: &larkim.P2MessageReceiveV1Data{
-			Sender: &larkim.EventSender{
-				SenderId: &larkim.UserId{OpenId: strPtr("ou_user1")},
-			},
-			Message: &larkim.EventMessage{
-				MessageType: strPtr("audio"),
-				ChatId:      strPtr("oc_chat1"),
-				Content:     strPtr(`{"file_key":""}`),
-			},
-		},
-	}
-	_, ok := (&Feishu{}).parseSDKEvent(event)
-	if ok {
-		t.Error("expected ok=false for audio message with empty file_key")
 	}
 }
 

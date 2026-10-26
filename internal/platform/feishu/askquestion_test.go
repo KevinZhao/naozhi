@@ -241,101 +241,58 @@ func TestDispatchCardAction_IgnoresUnknownKind(t *testing.T) {
 	}
 }
 
-// TestBuildQuestionCardJSON_EmbedsChatType verifies the originating chat type
-// rides in the button value so the WS card-action path can route the answer
-// back to the same session key (regression for the 1:1-misrouted-as-group bug
-// where every "oc_" prefix was treated as group).
-func TestBuildQuestionCardJSON_EmbedsChatType(t *testing.T) {
+// TestBuildQuestionCardJSON_ValueFields: the originating chat type and agent
+// id ride in the button value so the card-click answer routes back to the same
+// session. chat_type fixes the 1:1-misrouted-as-group bug (every "oc_" prefix
+// was treated as group); agent_id fixes #2148 (answers defaulted to the
+// "general" agent). Non-whitelisted chat types and empty agent ids must not be
+// emitted — the value round-trips through Feishu into the session key.
+func TestBuildQuestionCardJSON_ValueFields(t *testing.T) {
 	t.Parallel()
-	card := platform.QuestionCard{
-		ToolUseID: "t1",
-		ChatType:  "direct",
-		Items: []platform.QuestionItem{{
-			Question: "q",
-			Header:   "H",
-			Options:  []platform.QuestionOption{{Label: "A"}},
-		}},
+	tests := []struct {
+		name, chatType, agentID string
+		want, notWant           []string
+	}{
+		{"embeds chat_type", "direct", "", []string{`"chat_type":"direct"`}, []string{`"agent_id"`}},
+		{"omits unknown chat_type", "p2p", "", nil, []string{`"chat_type"`}},
+		{"embeds agent_id", "direct", "code-reviewer", []string{`"agent_id":"code-reviewer"`}, nil},
 	}
-	data, err := buildQuestionCardJSON(card)
-	if err != nil {
-		t.Fatalf("err=%v", err)
-	}
-	if !strings.Contains(string(data), `"chat_type":"direct"`) {
-		t.Errorf("card value missing chat_type:direct: %s", data)
-	}
-}
-
-// TestBuildQuestionCardJSON_OmitsUnknownChatType ensures a non-whitelisted
-// chat type is not propagated into the button value (defence in depth — the
-// value round-trips through Feishu and back into the session key).
-func TestBuildQuestionCardJSON_OmitsUnknownChatType(t *testing.T) {
-	t.Parallel()
-	card := platform.QuestionCard{
-		ToolUseID: "t1",
-		ChatType:  "p2p", // not a router value; must be dropped
-		Items: []platform.QuestionItem{{
-			Question: "q",
-			Options:  []platform.QuestionOption{{Label: "A"}},
-		}},
-	}
-	data, err := buildQuestionCardJSON(card)
-	if err != nil {
-		t.Fatalf("err=%v", err)
-	}
-	if strings.Contains(string(data), `"chat_type"`) {
-		t.Errorf("non-whitelisted chat_type leaked into card: %s", data)
-	}
-}
-
-// TestDispatchCardAction_DirectChatTypeRoutesToDirect is the core regression:
-// a 1:1 card click whose value carries chat_type=direct must route to a
-// direct session even though the chat_id is an "oc_" prefix (Feishu p2p chats
-// use oc_ open_chat_ids); this asserts the resulting IncomingMessage stays
-// "direct".
-func TestDispatchCardAction_DirectChatTypeRoutesToDirect(t *testing.T) {
-	t.Parallel()
-	f := &Feishu{}
-	var got platform.IncomingMessage
-	var called atomic.Int32
-	handler := func(_ context.Context, m platform.IncomingMessage) {
-		called.Add(1)
-		got = m
-	}
-	// chatID is an oc_ prefix (a real 1:1 open_chat_id) but the value-derived
-	// chatType is "direct" — the bug was treating this as "group".
-	f.dispatchCardAction(context.Background(),
-		platform.AskAnswerPayload{Kind: "ask_answer", ToolUseID: "t1", Header: "H", Label: "L", ChatType: "direct"},
-		"oc_p2p_chat", "", "direct", "ou_user", handler)
-	if called.Load() != 1 {
-		t.Fatalf("handler called %d times, want 1", called.Load())
-	}
-	if got.ChatType != "direct" {
-		t.Errorf("1:1 card answer routed as %q, want direct (oc_ prefix must not force group)", got.ChatType)
-	}
-}
-
-// TestDispatchCardAction_FallsBackToValueChatType pins #2007: when the
-// envelope chat_type is empty (v2 card.action.trigger has none), the chat type
-// must fall back to the whitelisted value embedded in the button so a group
-// card answer routes back to the group session instead of a phantom direct one.
-func TestDispatchCardAction_FallsBackToValueChatType(t *testing.T) {
-	t.Parallel()
-	f := &Feishu{}
-	var got platform.IncomingMessage
-	handler := func(_ context.Context, m platform.IncomingMessage) { got = m }
-	// Envelope chatType empty; value carries the originating "group".
-	f.dispatchCardAction(context.Background(),
-		platform.AskAnswerPayload{Kind: "ask_answer", Label: "L", ChatType: "group"},
-		"oc_grp", "", "", "ou_user", handler)
-	if got.ChatType != "group" {
-		t.Errorf("ChatType = %q, want group (value fallback failed)", got.ChatType)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			data, err := buildQuestionCardJSON(platform.QuestionCard{
+				ToolUseID: "t1",
+				ChatType:  tt.chatType,
+				AgentID:   tt.agentID,
+				Items: []platform.QuestionItem{{
+					Question: "q",
+					Header:   "H",
+					Options:  []platform.QuestionOption{{Label: "A"}},
+				}},
+			})
+			if err != nil {
+				t.Fatalf("err=%v", err)
+			}
+			for _, w := range tt.want {
+				if !strings.Contains(string(data), w) {
+					t.Errorf("card value missing %s: %s", w, data)
+				}
+			}
+			for _, w := range tt.notWant {
+				if strings.Contains(string(data), w) {
+					t.Errorf("card value must not contain %s: %s", w, data)
+				}
+			}
+		})
 	}
 }
 
 // TestDispatchCardAction_ChatTypeResolution pins the routing chat type for
 // every envelope/value pairing. The WS path passes an empty envelope, so the
 // tampered-value rows are what stop a forged button chat_type from reaching
-// the session key.
+// the session key. ws_value_group pins #2007 (v2 envelopes carry no chat_type,
+// so the value must win); the chat id is an "oc_" prefix throughout, which must
+// not force group for a 1:1 chat.
 func TestDispatchCardAction_ChatTypeResolution(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -370,53 +327,6 @@ func TestDispatchCardAction_ChatTypeResolution(t *testing.T) {
 				t.Errorf("ChatType = %q, want %q", got.ChatType, tt.want)
 			}
 		})
-	}
-}
-
-// TestBuildQuestionCardJSON_EmbedsAgentID verifies the originating session's
-// agent id rides in the button value so the card-click answer routes back to
-// the SAME agent session that asked the question (#2148). Without it the
-// answer defaults to the "general" agent and the asking code-reviewer session
-// never receives the reply.
-func TestBuildQuestionCardJSON_EmbedsAgentID(t *testing.T) {
-	t.Parallel()
-	card := platform.QuestionCard{
-		ToolUseID: "t1",
-		ChatType:  "direct",
-		AgentID:   "code-reviewer",
-		Items: []platform.QuestionItem{{
-			Question: "q",
-			Header:   "H",
-			Options:  []platform.QuestionOption{{Label: "A"}},
-		}},
-	}
-	data, err := buildQuestionCardJSON(card)
-	if err != nil {
-		t.Fatalf("err=%v", err)
-	}
-	if !strings.Contains(string(data), `"agent_id":"code-reviewer"`) {
-		t.Errorf("card value missing agent_id:code-reviewer: %s", data)
-	}
-}
-
-// TestBuildQuestionCardJSON_OmitsEmptyAgentID ensures an empty agent id is not
-// emitted into the button value (omitempty parity with chat_type).
-func TestBuildQuestionCardJSON_OmitsEmptyAgentID(t *testing.T) {
-	t.Parallel()
-	card := platform.QuestionCard{
-		ToolUseID: "t1",
-		ChatType:  "direct",
-		Items: []platform.QuestionItem{{
-			Question: "q",
-			Options:  []platform.QuestionOption{{Label: "A"}},
-		}},
-	}
-	data, err := buildQuestionCardJSON(card)
-	if err != nil {
-		t.Fatalf("err=%v", err)
-	}
-	if strings.Contains(string(data), `"agent_id"`) {
-		t.Errorf("empty agent_id leaked into card: %s", data)
 	}
 }
 

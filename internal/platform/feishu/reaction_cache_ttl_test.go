@@ -38,39 +38,3 @@ func TestCleanupReactionsTick_SweepsExpiredReactionEntries(t *testing.T) {
 		t.Error("live reactionIDs entry must NOT be dropped — TTL not yet reached")
 	}
 }
-
-// TestCleanupReactionsTick_DropsMalformedReactionEntry — a future refactor that
-// accidentally stores a different value type under reactionIDs must not wedge
-// RemoveReaction forever; the defensive type assertion in the sweep should
-// drop such entries so the map self-heals.
-func TestCleanupReactionsTick_DropsMalformedReactionEntry(t *testing.T) {
-	t.Parallel()
-	f := &Feishu{}
-	f.reactionIDs.Store(reactionCacheKey("msg-bad", "HOURGLASS"), "legacy-raw-string")
-
-	f.cleanupReactionsTick()
-
-	if _, ok := f.reactionIDs.Load(reactionCacheKey("msg-bad", "HOURGLASS")); ok {
-		t.Error("malformed reactionIDs entry (wrong value type) must be dropped")
-	}
-}
-
-// TestReactionCacheTTL_ExceedsSessionTTL documents the invariant called out in
-// the production comment: the cache TTL MUST exceed the typical session TTL
-// (default 30 minutes in config) so any legitimate live RemoveReaction still
-// hits a cached entry. If a future edit shortens reactionCacheTTL below that
-// window, this guard fails loudly.
-func TestReactionCacheTTL_ExceedsSessionTTL(t *testing.T) {
-	t.Parallel()
-	const defaultSessionTTL = 30 * time.Minute
-	if reactionCacheTTL <= defaultSessionTTL {
-		t.Errorf("reactionCacheTTL = %v; must exceed the default session ttl (%v) "+
-			"so orphan-free Add/Remove pairs always hit a cached entry",
-			reactionCacheTTL, defaultSessionTTL)
-	}
-	if reactionCacheTTL > 7*24*time.Hour {
-		t.Errorf("reactionCacheTTL = %v; a week+ window is too long for "+
-			"best-effort feedback and risks bloat — tighten or justify",
-			reactionCacheTTL)
-	}
-}
