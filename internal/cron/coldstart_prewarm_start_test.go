@@ -7,10 +7,10 @@ import (
 )
 
 // TestScheduler_Start_PrewarmsRecentCacheOnRestart pins R250-PERF-9 (#1112)
-// at the Scheduler.Start integration level (the unit test
-// TestRunStore_TrimAll_PrewarmsRecentCache exercises the run store's TrimAll in
-// isolation; this one proves the cold-start GC goroutine Start() spawns
-// actually drives the pre-warm on a process restart).
+// at the Scheduler.Start integration level. It is the only test covering the
+// TrimAll pre-warm loop: it proves the cold-start GC goroutine Start() spawns
+// actually drives the pre-warm on a process restart. Do not delete it as a
+// duplicate.
 //
 // Scenario: a first scheduler persists a job + one run record to a shared
 // StorePath, then a SECOND scheduler boots against the same StorePath
