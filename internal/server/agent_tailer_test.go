@@ -171,10 +171,9 @@ func TestTailer_AttachReplaysBufferedEvents(t *testing.T) {
 }
 
 // TestTailer_AttachEmptyBufferNoReplay: attaching before any transcript line
-// has landed (empty buffer) must succeed and emit no agent_event replay. Guards
-// the R249-PERF-4 (#926) follow-up short-circuit that skips the buffer pool
-// Get/Put when len(t.buffered)==0 — the subscriber still attaches, it just has
-// nothing to replay yet (live events arrive via the next pollOnce fan-out).
+// has landed (empty buffer) must succeed and emit no agent_event replay — the
+// subscriber still attaches, it just has nothing to replay yet (live events
+// arrive via the next pollOnce fan-out).
 func TestTailer_AttachEmptyBufferNoReplay(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

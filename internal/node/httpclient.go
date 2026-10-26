@@ -408,20 +408,6 @@ func (n *HTTPClient) ProxyCloseDiscovered(ctx context.Context, pid int, sessionI
 	return nil
 }
 
-// ProxyRestartPlanner forwards a planner restart request to the remote node.
-func (n *HTTPClient) ProxyRestartPlanner(ctx context.Context, projectName string) error {
-	resp, err := n.doRequest(ctx, http.MethodPost, "/api/projects/planner/restart?name="+url.QueryEscape(projectName), nil)
-	if err != nil {
-		return fmt.Errorf("proxy restart planner to %s: %w", n.ID, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-		return fmt.Errorf("proxy restart planner to %s: status %d: %s", n.ID, resp.StatusCode, string(body))
-	}
-	return nil
-}
-
 // ProxyUpdateConfig forwards a project config update to the remote node.
 func (n *HTTPClient) ProxyUpdateConfig(ctx context.Context, projectName string, cfg json.RawMessage) error {
 	resp, err := n.doRequest(ctx, http.MethodPut, "/api/projects/config?name="+url.QueryEscape(projectName), bytes.NewReader(cfg))

@@ -2,8 +2,6 @@ package session
 
 import (
 	"testing"
-
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // TestRebuildChainFiltered_RemovesMaskedKeepsAligned: a mixed chain, drop the
@@ -83,28 +81,16 @@ func TestRebuildChainFiltered_LengthMismatchIsSafeNoop(t *testing.T) {
 	}
 }
 
-// TestRebuildChainFiltered_NoDriftMetricFired pins the BLOCKING-2 contract:
-// rebuilding must NOT trip the origins-length-mismatch drift detector, because
+// TestRebuildChainFiltered_KeepsSlicesAligned pins the BLOCKING-2 contract:
 // the rebuild keeps the two slices aligned in one lock hold (unlike the
 // Replace+Set two-call composition it replaces).
-func TestRebuildChainFiltered_NoDriftMetricFired(t *testing.T) {
-	// Not parallel: reads a process-global expvar counter.
-	before := metrics.AutoChainOriginsLengthMismatch.Value()
-
+func TestRebuildChainFiltered_KeepsSlicesAligned(t *testing.T) {
 	s := &ManagedSession{key: "test:key"}
 	s.prevSessionIDs = []string{"a", "b", "c", "d", "e"}
 	s.prevSessionOrigins = []string{"manual", "auto-spawn", "auto-spawn", "auto-backfill", "manual"}
 
 	s.RebuildChainFiltered([]bool{true, false, false, false, true})
 
-	// A subsequent SetPrevSessionOrigins-style read path must see aligned
-	// slices. Snapshot triggers the positional fallback but not the drift
-	// metric (that only fires inside SetPrevSessionOrigins). Assert the
-	// counter did not move as a result of our rebuild.
-	if after := metrics.AutoChainOriginsLengthMismatch.Value(); after != before {
-		t.Errorf("drift metric fired: before=%d after=%d", before, after)
-	}
-	// Sanity: result is aligned.
 	if len(s.SnapshotPrevSessionIDs()) != len(s.SnapshotPrevSessionOrigins()) {
 		t.Errorf("post-rebuild slices misaligned")
 	}

@@ -22,7 +22,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -448,9 +447,6 @@ func (p *ACPProtocol) WriteInterrupt(w io.Writer, _ string) error {
 	if _, err := w.Write(out); err != nil {
 		return fmt.Errorf("acp write session/cancel: %w", err)
 	}
-	// Record only successful sends; the pre-handshake early return is not a
-	// real cancel reaching the agent.
-	metrics.RecordACPCancel(p.BackendID)
 	return nil
 }
 
@@ -616,9 +612,6 @@ func (p *ACPProtocol) ReadEvent(line string) ([]clievent.Event, bool, error) {
 			}
 		}
 		if msg.Error != nil {
-			// Method on a Response is unknown without caller-side correlation, so
-			// pass "" and let operators read the vector by code+backend.
-			metrics.RecordProtocolRPCError(p.BackendID, "", strconv.Itoa(msg.Error.Code))
 			// msg.Error's text crosses a trust boundary (the ACP agent) and flows
 			// into slog attrs + the dashboard, so control chars / bidi are scrubbed.
 			// done=true: an error response to session/prompt closes that turn from
@@ -901,8 +894,7 @@ func (p *ACPProtocol) sendAndWaitResponse(rw *JSONRW, req RPCRequest) error {
 }
 
 // sendAndWaitResponseMsg writes req then blocks until a matching response
-// arrives, returning the parsed RPCMessage. All handshake RPCs go through here
-// so they share one metric-emitting code path; callers that don't need the
+// arrives, returning the parsed RPCMessage. Callers that don't need the
 // payload use sendAndWaitResponse.
 func (p *ACPProtocol) sendAndWaitResponseMsg(rw *JSONRW, req RPCRequest) (*RPCMessage, error) {
 	data, err := json.Marshal(req)
@@ -912,15 +904,7 @@ func (p *ACPProtocol) sendAndWaitResponseMsg(rw *JSONRW, req RPCRequest) (*RPCMe
 	if err := rw.WriteLine(data); err != nil {
 		return nil, err
 	}
-	resp, err := p.readUntilResponse(rw, req.ID)
-	if err != nil {
-		// Record at the call site where req.Method is known. code="" always:
-		// extracting the JSON-RPC code from ErrACPRPC would mean re-parsing the
-		// formatted error string. Method already splits "init failed" from
-		// "prompt failed"; transport errors (ErrACPTimeout) are separable by type.
-		metrics.RecordProtocolRPCError(p.BackendID, req.Method, "")
-	}
-	return resp, err
+	return p.readUntilResponse(rw, req.ID)
 }
 
 // normalizeContextUsage maps kiro's contextUsagePercentage onto 0-100,

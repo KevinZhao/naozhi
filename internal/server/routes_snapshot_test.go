@@ -48,7 +48,7 @@ func TestRoutesSnapshot(t *testing.T) {
 	// Scanning BOTH is the point: when the patterns moved out of routes.go this
 	// gate briefly saw only 36 of 95 routes, i.e. it would have gone quietly
 	// green while two thirds of the API left its field of view.
-	routes, err := scanRoutes("routes.go", "server.go", "debug_expvar.go", "debug_pprof.go", "static_assets.go", "static_js_handlers.go")
+	routes, err := scanRoutes("routes.go", "server.go", "debug_pprof.go", "static_assets.go", "static_js_handlers.go")
 	if err != nil {
 		t.Fatalf("scanRoutes: %v", err)
 	}
@@ -298,8 +298,8 @@ func handlerTypeOf(e ast.Expr) string {
 		}
 		// e.g. s.auth.requireAuth(handler) — the *outer* call is the
 		// auth wrapper; report it as *AuthHandlers regardless of the
-		// inline handler-arg shape (debug_pprof / debug_expvar both
-		// pass closure-typed `handler` vars whose type can't be
+		// inline handler-arg shape (debug_pprof passes a
+		// closure-typed `handler` var whose type can't be
 		// resolved by this lightweight AST walker). Recognise the
 		// shape `<recv>.auth.<method>(...)`.
 		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
@@ -307,20 +307,11 @@ func handlerTypeOf(e ast.Expr) string {
 				return "*AuthHandlers"
 			}
 		}
-		// serveStaticJS("render_md.js") — #2554 collapsed 24 byte-identical
-		// module handlers into one factory. The call resolves to the same
-		// http.HandlerFunc the individual handlers did, so the golden is
-		// unchanged; the pattern is still a literal at the call site.
-		if id, ok := call.Fun.(*ast.Ident); ok {
-			if t, ok := packageFuncType[id.Name]; ok {
-				return t
-			}
-		}
 		// s.apiChain()(...) — the chain is a value now (#2554), so the wrapper is
 		// a call on a call. Resolve the wrapped handler when it names one
 		// (s.auth.HandleX → *AuthHandlers); fall back to *AuthHandlers when
-		// it does not, which keeps the pre-#2554 answer for debug_pprof /
-		// debug_expvar. Those two pass closure-typed `handler` vars this
+		// it does not, which keeps the pre-#2554 answer for debug_pprof. It
+		// passes a closure-typed `handler` var this
 		// lightweight walker cannot type, and the old s.auth.requireAuth(handler)
 		// shape reported the wrapper for exactly that reason.
 		if wrapped, ok := call.Fun.(*ast.CallExpr); ok {
@@ -394,13 +385,10 @@ func handlerTypeOf(e ast.Expr) string {
 // http.HandlerFunc. Listing them here pins their handler_type in the
 // golden snapshot.
 var packageFuncType = map[string]string{
-	// serveStaticJS replaced 24 per-module handlers in #2554; every /static/*.js
-	// route now goes through it, and the resolved type is unchanged.
-	"serveStaticJS":      "http.HandlerFunc",
-	"handleManifest":     "http.HandlerFunc",
-	"handleSW":           "http.HandlerFunc",
-	"handleDashboardCSS": "http.HandlerFunc",
-	"handleFavicon":      "http.HandlerFunc",
+	"handleManifest":    "http.HandlerFunc",
+	"handleSW":          "http.HandlerFunc",
+	"handleStaticAsset": "http.HandlerFunc",
+	"handleFavicon":     "http.HandlerFunc",
 }
 
 var serverFieldType = map[string]string{

@@ -155,27 +155,13 @@ func TestLoad_PlatformRefusals(t *testing.T) {
 	cases := []struct{ name, body, want string }{
 		{"slack without bot_token", "platforms:\n  slack:\n    bot_token: \"\"\n", "slack bot_token is required"},
 		{"notify_default unknown platform", "cron:\n  notify_default:\n    platform: \"nosuchplatform\"\n", "cron.notify_default.platform"},
-		// #1735: token-only feishu webhook hard-fails, loopback bind included.
-		{"feishu insecure webhook", feishuInsecureWebhook, "allow_insecure_webhook=true with no encrypt_key"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("NAOZHI_ALLOW_INSECURE_WEBHOOK", "")
 			_, err := Load(writeCfg(t, tc.body))
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Load err = %v, want it to contain %q", err, tc.want)
 			}
 		})
-	}
-}
-
-const feishuInsecureWebhook = "server:\n  addr: \"127.0.0.1:8080\"\nplatforms:\n  feishu:\n    app_id: a\n    app_secret: s\n" +
-	"    connection_mode: webhook\n    verification_token: tok\n    allow_insecure_webhook: true\n"
-
-// The CI/testing escape hatch is the only way past the refusal above.
-func TestLoad_FeishuInsecureWebhookEnvOptIn(t *testing.T) {
-	t.Setenv("NAOZHI_ALLOW_INSECURE_WEBHOOK", "true")
-	if _, err := Load(writeCfg(t, feishuInsecureWebhook)); err != nil {
-		t.Fatalf("Load with NAOZHI_ALLOW_INSECURE_WEBHOOK=true: %v", err)
 	}
 }

@@ -1,13 +1,11 @@
 package project
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	projectpkg "github.com/naozhi/naozhi/internal/project"
-	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
 // fakeStore / fakeRouter are ProjectStore / RouterView implementations with
@@ -35,21 +33,13 @@ func (f *fakeStore) UpdateConfig(string, projectpkg.ProjectConfig) error { retur
 func (f *fakeStore) EffectivePlannerModel(*projectpkg.Project) string    { return "" }
 
 type fakeRouter struct {
-	bumps     int
-	resets    int
-	resetKey  string
-	resetOpts sessionview.AgentOpts
+	bumps int
 }
 
 var _ RouterView = (*fakeRouter)(nil)
 
 func (f *fakeRouter) SessionFor(string) PlannerSession { return nil }
-func (f *fakeRouter) ResetAndRecreate(_ context.Context, key string, opts sessionview.AgentOpts) error {
-	f.resets++
-	f.resetKey, f.resetOpts = key, opts
-	return nil
-}
-func (f *fakeRouter) BumpVersion() { f.bumps++ }
+func (f *fakeRouter) BumpVersion()                     { f.bumps++ }
 
 // TestHandleFavoriteToggle_DrivenByFakes: the favorite flip is forwarded to
 // the store, ErrNotFound maps to 404, and every successful write bumps the

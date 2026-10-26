@@ -1,18 +1,14 @@
 package server
 
 import (
-	"context"
-
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/session"
-	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
 // Compile-time guards so method-set drift lands here, next to the adapter.
 var (
-	_ dashproject.RouterView         = projectRouter{}
-	_ dashproject.PlannerSession     = (*session.ManagedSession)(nil)
-	_ dashproject.PlannerKeyResolver = (*session.KeyResolver)(nil)
+	_ dashproject.RouterView     = projectRouter{}
+	_ dashproject.PlannerSession = (*session.ManagedSession)(nil)
 )
 
 // projectRouter adapts *session.Router to dashproject.RouterView, so the
@@ -28,9 +24,4 @@ func (p projectRouter) SessionFor(key string) dashproject.PlannerSession {
 		return s
 	}
 	return nil
-}
-
-func (p projectRouter) ResetAndRecreate(ctx context.Context, key string, opts sessionview.AgentOpts) error {
-	_, err := p.Router.ResetAndRecreate(ctx, key, opts)
-	return err
 }

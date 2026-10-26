@@ -60,7 +60,7 @@ const invalidIdent = "<invalid>"
 
 // Entry is one billing event. Amount is the increment in Unit and the only
 // authoritative figure; Models is a per-model drill-down that never feeds the
-// rollup sums.
+// non-model sums.
 type Entry struct {
 	TS         time.Time    `json:"ts"`
 	Source     Source       `json:"source"`

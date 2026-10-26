@@ -140,7 +140,7 @@ func TestMarshalBroadcastAuth_WithAuthClient_Delivers(t *testing.T) {
 // TestSnapshotAuthenticated_SingleLockWindow verifies R20260616-PERF-004 (#2141):
 // the snapshot-based fast-path returns exactly the authenticated clients and the
 // empty-check shares that one snapshot. Two authenticated clients must both be
-// present; the snapshot is returned to the pool by the helper.
+// present.
 func TestSnapshotAuthenticated_SingleLockWindow(t *testing.T) {
 	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
@@ -152,11 +152,9 @@ func TestSnapshotAuthenticated_SingleLockWindow(t *testing.T) {
 	registerSub(hub, c1, "")
 	registerSub(hub, c2, "")
 
-	snapPtr, snap := hub.bcast.snapshotAuthenticated()
-	if got := len(snap); got != 2 {
+	if got := len(hub.bcast.snapshotAuthenticated()); got != 2 {
 		t.Errorf("snapshot len = %d, want 2", got)
 	}
-	releaseBroadcastSnap(snapPtr, snap)
 }
 
 // TestSnapshotAuthenticated_EmptyMirror confirms the snapshot is empty when no
@@ -165,11 +163,9 @@ func TestSnapshotAuthenticated_EmptyMirror(t *testing.T) {
 	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 
-	snapPtr, snap := hub.bcast.snapshotAuthenticated()
-	if len(snap) != 0 {
-		t.Errorf("snapshot len = %d, want 0", len(snap))
+	if got := len(hub.bcast.snapshotAuthenticated()); got != 0 {
+		t.Errorf("snapshot len = %d, want 0", got)
 	}
-	releaseBroadcastSnap(snapPtr, snap)
 }
 
 // TestMarshalBroadcastAuth_ConcurrentRegisterAndBroadcast stresses the broadcast

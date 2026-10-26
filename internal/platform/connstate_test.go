@@ -199,7 +199,7 @@ func TestCapabilitiesOf_ConnStateIsTypeAssertion(t *testing.T) {
 	if CapabilitiesOf(fakePlat{}).ConnState {
 		t.Error("a platform without ConnStateReporter reports conn_state")
 	}
-	// Declining at runtime (feishu webhook) is still the capability.
+	// Declining at runtime is still the capability.
 	if !CapabilitiesOf(connPlat{}).ConnState {
 		t.Error("a ConnStateReporter is not reported as conn_state")
 	}

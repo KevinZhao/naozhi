@@ -4,8 +4,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // TestRouter_OnSessionRetired_RemoveCarriesSessionID locks the contract
@@ -184,7 +182,6 @@ func TestRouter_KeyRetiredPanicStillTearsDown(t *testing.T) {
 			close(proc.release)
 			installSession(t, r, key, proc)
 			observe(r).retired = func(string, string) { panic("consumer bug") }
-			start := metrics.PanicRecoveredTotal.Value()
 
 			retire(r, key)
 			select {
@@ -193,9 +190,6 @@ func TestRouter_KeyRetiredPanicStillTearsDown(t *testing.T) {
 				t.Fatal("process was not closed after KeyRetired panicked")
 			}
 			r.removes.Wait()
-			if got := metrics.PanicRecoveredTotal.Value() - start; got < 1 {
-				t.Fatalf("PanicRecoveredTotal moved by %d, want >= 1", got)
-			}
 		})
 	}
 }

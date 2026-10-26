@@ -248,14 +248,10 @@ func TestDegradedDecodeErrors(t *testing.T) {
 	if w := get(t, tr, "w1"); w.Degraded != "" {
 		t.Fatalf("a clean snapshot did not clear decode_error: %q", w.Degraded)
 	}
-	identity := itemsIdentityTotal.Value()
 	failed := &clievent.Event{Type: "system", SubType: "task_progress", TaskID: "w1", Description: "P: z", WorkflowDecode: clievent.WorkflowDecodeFailed}
 	tr.Observe(failed, t0)
 	if w := get(t, tr, "w1"); w.Degraded != DegradedDecodeError || len(w.Agents) != 2 || w.Current != "P: z" || w.SnapshotSeq != 3 {
 		t.Fatalf("failed snapshot must keep the rows and update the header: %+v", *w)
-	}
-	if itemsIdentityTotal.Value() <= identity {
-		t.Error("identity counter did not move")
 	}
 	tr.Observe(started("w9", "header only"), t0)
 	if w := get(t, tr, "w9"); w.Degraded != DegradedNoSnapshot || w.Agents != nil {
@@ -293,20 +289,16 @@ func TestNoteDropped(t *testing.T) {
 }
 
 // TestCaps covers the per-process bounds: 16 unsettled workflows with
-// tracked, 5 terminal. Not parallel: it reads a process-wide counter.
+// tracked, 5 terminal.
 func TestCaps(t *testing.T) {
+	t.Parallel()
 	tr := New(nil)
-	before := untrackedTotal.Value()
 	for i := 1; i <= maxTracked+1; i++ {
 		tr.Observe(progress(fmt.Sprintf("w%02d", i), running(1, "a")), t0)
 	}
 	set := tr.Load()
 	if len(set.Workflows) != maxTracked {
 		t.Fatalf("%d tracked, want %d", len(set.Workflows), maxTracked)
-	}
-	tr.Observe(progress(fmt.Sprintf("w%02d", maxTracked+1), running(1, "a")), t0) // counted once
-	if d := untrackedTotal.Value() - before; d != 1 {
-		t.Errorf("untracked counter moved by %d, want 1", d)
 	}
 	for i := 1; i <= maxTracked; i++ {
 		w := get(t, tr, fmt.Sprintf("w%02d", i))
@@ -553,8 +545,7 @@ func TestEndTimeAfterTerminal(t *testing.T) {
 
 // TestCaps_PastCapItemsNotNormalized: items past the row and phase caps are
 // counted but never redacted, given a memo or kept in a backing array, in
-// CC's ascending order and out of it. Not parallel: it swaps the redactor
-// and reads process-wide counters.
+// CC's ascending order and out of it. Not parallel: it swaps the redactor.
 func TestCaps_PastCapItemsNotNormalized(t *testing.T) {
 	n := countRedactions(t)
 	for _, descending := range []bool{false, true} {
@@ -569,13 +560,10 @@ func TestCaps_PastCapItemsNotNormalized(t *testing.T) {
 			slices.Reverse(items)
 		}
 		tr := New(nil)
-		before, capped := n.Load(), phasesCappedTotal.Value()
+		before := n.Load()
 		tr.Observe(progress("w1", items...), t0)
 		if d := n.Load() - before; d != maxAgents+maxPhases {
 			t.Errorf("descending=%v: %d redactions, want one per kept label and title (%d)", descending, d, maxAgents+maxPhases)
-		}
-		if d := phasesCappedTotal.Value() - capped; d != 1 {
-			t.Errorf("descending=%v: phases_capped counter moved by %d, want 1", descending, d)
 		}
 		b := tr.builders["w1"]
 		w := b.wf
@@ -600,27 +588,13 @@ func TestCaps_PastCapItemsNotNormalized(t *testing.T) {
 	}
 }
 
-// TestItemCounters: an item of an unknown type is ignored and the snapshot
-// holding it counted once; a result file's phases[] past the cap counts
-// too. Not parallel: process-wide counters.
-func TestItemCounters(t *testing.T) {
+// TestUnknownItemIgnored: an item of an unknown type is ignored.
+func TestUnknownItemIgnored(t *testing.T) {
+	t.Parallel()
 	tr := New(nil)
-	before := itemsUnknownTotal.Value()
-	tr.Observe(progress("w1", running(1, "a1")), t0)
-	if d := itemsUnknownTotal.Value() - before; d != 0 {
-		t.Fatalf("known items counted %d", d)
-	}
 	odd := clievent.WorkflowItem{Type: "workflow_gizmo", Index: 2}
 	tr.Observe(progress("w1", running(1, "a1"), odd, odd), t0)
-	if d := itemsUnknownTotal.Value() - before; d != 1 {
-		t.Fatalf("unknown items: counter moved by %d, want 1", d)
-	}
 	if w := get(t, tr, "w1"); len(w.Agents) != 1 || w.Phases != nil || w.Counts.Total != 1 {
 		t.Fatalf("unknown item not ignored: %+v", *w)
-	}
-	capped := phasesCappedTotal.Value()
-	MergeResultFile(&Workflow{TaskID: "w1"}, &ResultFile{TaskID: "w1", Status: "completed", Phases: make([]resultPhase, maxPhases+1)})
-	if d := phasesCappedTotal.Value() - capped; d != 1 {
-		t.Fatalf("phases[] past the cap: counter moved by %d, want 1", d)
 	}
 }

@@ -26,33 +26,6 @@ func marshalSessionsUpdate() []byte {
 	return data
 }
 
-// broadcastSnapPoolMaxCap: snapshots grown past the connection ceiling are not
-// returned to broadcastClientSnapPool, so a spike cannot pin an oversized array.
-const broadcastSnapPoolMaxCap = maxWSConns
-
-// broadcastClientSnapPool reuses []*wsClient backing arrays across broadcasts.
-var broadcastClientSnapPool = sync.Pool{
-	New: func() any {
-		s := make([]*wsClient, 0, 32)
-		return &s
-	},
-}
-
-// releaseBroadcastSnap returns a fan-out snapshot to broadcastClientSnapPool.
-// Slots are nil'd so disconnected clients can be GC'd before reuse; oversized
-// arrays are replaced with a fresh small slice instead of being pooled.
-func releaseBroadcastSnap(snapPtr *[]*wsClient, snap []*wsClient) {
-	for i := range snap {
-		snap[i] = nil
-	}
-	if cap(snap) <= broadcastSnapPoolMaxCap {
-		*snapPtr = snap[:0]
-	} else {
-		*snapPtr = make([]*wsClient, 0, 32)
-	}
-	broadcastClientSnapPool.Put(snapPtr)
-}
-
 // wsBroadcaster is the dashboard notifier: it fans frames out to the clients
 // in recipients (the Hub's own registry, so both see one set of subscribers)
 // and coalesces sessions_update through debounce. It holds neither a Hub nor
@@ -83,19 +56,14 @@ func (b *wsBroadcaster) wait() { b.pending.Wait() }
 // The recipient snapshot is taken before the per-client SendRaw loop so
 // register / unregister never serialise behind a broadcast.
 func (b *wsBroadcaster) broadcastToAuthenticated(data []byte) {
-	snapPtr, snap := b.snapshotAuthenticated()
-	for _, c := range snap {
+	for _, c := range b.snapshotAuthenticated() {
 		c.SendRaw(data)
 	}
-	releaseBroadcastSnap(snapPtr, snap)
 }
 
-// snapshotAuthenticated returns a pooled snapshot of the authenticated
-// clients. The caller MUST return it via releaseBroadcastSnap once the
-// fan-out completes.
-func (b *wsBroadcaster) snapshotAuthenticated() (*[]*wsClient, []*wsClient) {
-	snapPtr := broadcastClientSnapPool.Get().(*[]*wsClient)
-	return snapPtr, b.recipients.authenticated((*snapPtr)[:0])
+// snapshotAuthenticated returns a fresh snapshot of the authenticated clients.
+func (b *wsBroadcaster) snapshotAuthenticated() []*wsClient {
+	return b.recipients.authenticated(nil)
 }
 
 // marshalBroadcastAuth marshals v and fans it out to every authenticated client.
@@ -105,20 +73,17 @@ func (b *wsBroadcaster) snapshotAuthenticated() (*[]*wsClient, []*wsClient) {
 // fixed-shape and cannot fail in practice, and dropping beats panicking the
 // producer goroutine.
 func (b *wsBroadcaster) marshalBroadcastAuth(v any) {
-	snapPtr, snap := b.snapshotAuthenticated()
+	snap := b.snapshotAuthenticated()
 	if len(snap) == 0 {
-		releaseBroadcastSnap(snapPtr, snap)
 		return
 	}
 	data, err := marshalPooled(v)
 	if err != nil {
-		releaseBroadcastSnap(snapPtr, snap)
 		return
 	}
 	for _, c := range snap {
 		c.SendRaw(data)
 	}
-	releaseBroadcastSnap(snapPtr, snap)
 }
 
 // broadcastState sends a session_state message to ALL authenticated clients.

@@ -15,7 +15,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cli/workflow"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/shim"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
@@ -242,7 +241,6 @@ func TestProcessWorkflow_OversizeSnapshot(t *testing.T) {
 		drainEvents(p)
 	}()
 	probe := readWorkflowProbe(t)
-	before := workflowLinesOversize.Value()
 	barrier := func(text string) { // a frame the read loop delivers after everything sent so far
 		srv.SendStdout(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"` + text + `"}]}}`)
 		for ev := range p.eventCh {
@@ -274,9 +272,6 @@ func TestProcessWorkflow_OversizeSnapshot(t *testing.T) {
 	}
 	if w.LastObservedAt <= observed {
 		t.Errorf("LastObservedAt = %d after the oversized snapshot, want past %d", w.LastObservedAt, observed)
-	}
-	if n := workflowLinesOversize.Value() - before; n != 3 {
-		t.Errorf("%s moved by %d, want 3", "naozhi_cli_workflow_lines_oversize_total", n)
 	}
 
 	srv.SendStdout(probe[10]) // the next snapshot
@@ -416,17 +411,13 @@ func (d panicOnSnapshot) ReadEvent(line string) ([]clievent.Event, bool, error) 
 	return d.ClaudeProtocol.ReadEvent(line)
 }
 
-// TestProcessWorkflow_SeedPanic: a seed panic is absorbed and counted; the
+// TestProcessWorkflow_SeedPanic: a seed panic is absorbed; the
 // Process carries on with an empty, wrapped Tracker that still knows the
 // session's ids and is not left locked.
 func TestProcessWorkflow_SeedPanic(t *testing.T) {
 	p, _ := shimTestPair(&ClaudeProtocol{})
 	probe := readWorkflowProbe(t)
-	before := metrics.PanicRecoveredTotal.Value()
 	p.seedWorkflows(rvReplays(1, probe...), 0, panicOnSnapshot{&ClaudeProtocol{}}, []string{probeTaskID})
-	if n := metrics.PanicRecoveredTotal.Value() - before; n != 1 {
-		t.Errorf("%s moved by %d, want 1", "naozhi_panic_recovered_total", n)
-	}
 	if set := p.Workflows(); !set.SeedWrapped || len(set.Workflows) != 0 {
 		t.Errorf("after the panic: wrapped %v, %d workflows; want wrapped and empty", set.SeedWrapped, len(set.Workflows))
 	}

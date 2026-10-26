@@ -6,8 +6,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // panickingRouter is a SessionRouter whose GetOrCreate panics on first
@@ -39,13 +37,7 @@ func (p *panickingRouter) GetOrCreate(context.Context, string, AgentOpts) (Sessi
 // ordering luck). Post-fix: the recover swallows the panic, slog.Error
 // records it, and the goroutine returns normally so the scheduler stays
 // healthy for subsequent triggers.
-//
-// #2174: also asserts metrics.CronRunInflight returns to its baseline —
-// the runScaffold defer must release the gauge before the panic reaches
-// executeIfNotDeletedOrPaused's recover. Not t.Parallel: the gauge is
-// process-global and the delta assertion needs the sequential window.
 func TestTriggerNowRecoversExecuteOptPanic(t *testing.T) {
-	inflightBase := metrics.CronRunInflight.Value()
 	r := &panickingRouter{}
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: r})
 	if err := s.Start(); err != nil {
@@ -88,10 +80,6 @@ func TestTriggerNowRecoversExecuteOptPanic(t *testing.T) {
 		// pass
 	case <-time.After(5 * time.Second):
 		t.Fatal("TriggerNow goroutine did not return within 5s; recover must let executeIfNotDeletedOrPaused complete")
-	}
-
-	if got := metrics.CronRunInflight.Value() - inflightBase; got != 0 {
-		t.Errorf("CronRunInflight after recovered panic = base%+d, want base+0 (runScaffold gauge -1 must fire on the panic path, #2174)", got)
 	}
 
 	// Confirm the panicking router actually panicked at least once —

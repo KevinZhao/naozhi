@@ -9,15 +9,12 @@ package sysession
 import (
 	"time"
 
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
-// emitRunStarted broadcasts a run-started event tagged SubsystemSysession. The
-// metric bump happens unconditionally so the counter cannot drift from the
-// broadcast path. Fired post-CAS, pre-IO from runOnce, outside any lock.
+// emitRunStarted broadcasts a run-started event tagged SubsystemSysession.
+// Fired post-CAS, pre-IO from runOnce, outside any lock.
 func (m *Manager) emitRunStarted(name, runID string, trigger DaemonTriggerKind, startedAt time.Time) {
-	metrics.SysessionRunStartedTotal.Add(1)
 	b := m.telemetry
 	if b == nil {
 		return
@@ -33,10 +30,9 @@ func (m *Manager) emitRunStarted(name, runID string, trigger DaemonTriggerKind, 
 
 // emitRunEnded broadcasts dr, the run just recorded, as a terminal run event
 // tagged SubsystemSysession. ErrorMsg is deliberately NOT forwarded so the
-// no-leak invariant (RFC §9.4) is local to the producer. Metric bump is
-// unconditional; fired from recordRun outside any lock.
+// no-leak invariant (RFC §9.4) is local to the producer. Fired from recordRun
+// outside any lock.
 func (m *Manager) emitRunEnded(dr DaemonRun) {
-	metrics.SysessionRunEndedTotal.Add(1)
 	b := m.telemetry
 	if b == nil {
 		return
