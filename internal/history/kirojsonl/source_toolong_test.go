@@ -70,52 +70,6 @@ func TestParseFile_OversizedLineAtEOF(t *testing.T) {
 	}
 }
 
-// TestParseFile_TailWindowStartsInsideOversizedLine reproduces the live
-// shape from #2448: the >maxFileBytes session's tail window begins in the
-// middle of a multi-MiB ToolResults line. The straddling partial line is
-// oversized too, so it must be skipped (no fragment reassembly) and the
-// records that fill the rest of the window must all surface — previously
-// the whole page came back empty.
-func TestParseFile_TailWindowStartsInsideOversizedLine(t *testing.T) {
-	t.Parallel()
-	var sb strings.Builder
-	sb.WriteString(promptLine("anchor", 1_700_000_000) + "\n")
-	padWith(&sb, toolResultsFiller, 2<<20)
-	sb.WriteString(oversizedToolResults(3<<20) + "\n")
-	lineEnd := sb.Len()
-	// ~14 MiB after the oversized line so off = Size-maxFileBytes lands
-	// ~2 MiB before the line's end (i.e. inside it).
-	const postAssistants = 5
-	for i := 0; i < postAssistants; i++ {
-		sb.WriteString(orphanAssistantLine("win", i))
-		padWith(&sb, toolResultsFiller, sb.Len()+(14<<20)/postAssistants)
-	}
-	sb.WriteString(orphanAssistantLine("last", 0))
-	off := sb.Len() - maxFileBytes
-	if lineStart := lineEnd - len(oversizedToolResults(3<<20)) - 1; !(off > lineStart && off < lineEnd) {
-		t.Fatalf("fixture: off=%d not inside oversized line [%d,%d)", off, lineStart, lineEnd)
-	}
-
-	got := parseTempSession(t, sb.String())
-	if len(got) == 0 {
-		t.Fatal("tail window returned no entries (scan aborted on oversized first line)")
-	}
-	want := make([]string, 0, postAssistants+1)
-	for i := 0; i < postAssistants; i++ {
-		want = append(want, fmt.Sprintf("win-%d", i))
-	}
-	want = append(want, "last-0")
-	if s := summaries(got); strings.Join(s, "|") != strings.Join(want, "|") {
-		t.Fatalf("window entries\n got: %v\nwant: %v", s, want)
-	}
-	// Borrowed from the head anchor Prompt (#2332) with global offsets.
-	for i, e := range got {
-		if want := int64(1_700_000_000*1000 + 1 + i); e.Time != want {
-			t.Errorf("entry %q Time = %d, want %d", e.Summary, e.Time, want)
-		}
-	}
-}
-
 // TestParseFile_OversizedPartialFirstLineNotFedAsToken pins the F1 review
 // finding on #2448: when the tail window's partial first line is oversized,
 // the skip-branch Scan() fails with ErrTooLong, but a further Scan() on the

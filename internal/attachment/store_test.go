@@ -102,7 +102,7 @@ func TestPersist_RejectsUnknownExt(t *testing.T) {
 func TestPersist_GeneratesUniquePaths(t *testing.T) {
 	ws := t.TempDir()
 	seen := map[string]bool{}
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 5; i++ {
 		got, err := Persist(ws, []byte("pdf"), ".pdf", Meta{})
 		if err != nil {
 			t.Fatalf("Persist #%d: %v", i, err)

@@ -15,6 +15,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -56,25 +57,11 @@ type imageSource struct {
 // If cwd is non-empty, the JSONL is located directly via the CWD-based path (O(1));
 // an empty cwd falls back to scanning all project directories.
 func LoadHistory(claudeDir, sessionID, cwd string) ([]clievent.EventEntry, error) {
-	// Path-traversal guard: reject non-UUID sessionIDs before joining into a
-	// filepath (mirrors resolveJSONLPath) so "../../etc/passwd" cannot
-	// escape claudeDir/projects.
-	if !claudefs.IsValidSessionID(sessionID) {
-		return nil, nil
-	}
-	var path string
-	if cwd != "" {
-		candidate := claudefs.SessionJSONL(claudeDir, cwd, sessionID)
-		if _, err := os.Stat(candidate); err == nil {
-			path = candidate
-		}
-	}
-	if path == "" {
-		var err error
-		path, err = findSessionJSONL(claudeDir, sessionID)
-		if err != nil || path == "" {
-			return nil, err
-		}
+	// resolveJSONLPath rejects non-UUID sessionIDs before joining into a
+	// filepath, so "../../etc/passwd" cannot escape claudeDir/projects.
+	path, err := resolveJSONLPath(claudeDir, sessionID, cwd)
+	if err != nil || path == "" {
+		return nil, err
 	}
 	return parseJSONL(path)
 }
@@ -220,12 +207,12 @@ func parseJSONL(path string) ([]clievent.EventEntry, error) {
 	entries := make([]clievent.EventEntry, 0, 128)
 	// bufio.Reader, not bufio.Scanner: the CLI inlines uploaded images as
 	// base64 on a single NDJSON line (5-10 MB), and Scanner would abort the
-	// whole file with "token too long". readJSONLLine skips just that line;
+	// whole file with "token too long". ReadJSONLLine skips just that line;
 	// its 4 MB threshold matches parseTail's maxCarryBytes so both readers
 	// drop the same lines.
 	r := bufio.NewReaderSize(f, 64*1024)
 	for {
-		line, oversized, rerr := readJSONLLine(r)
+		line, oversized, rerr := history.ReadJSONLLine(r, maxJSONLLineBytes)
 		if len(line) > 0 && !oversized {
 			if parsed, ok := parseHistoryLine(line); ok {
 				entries = append(entries, parsed...)
@@ -241,70 +228,9 @@ func parseJSONL(path string) ([]clievent.EventEntry, error) {
 }
 
 // maxJSONLLineBytes caps a JSONL line's content length (excluding '\n')
-// before readJSONLLine skips it. Equal to parseTail's maxCarryBytes so the
+// before history.ReadJSONLLine skips it. Equal to parseTail's maxCarryBytes so the
 // forward and reverse readers drop exactly the same oversized lines.
 const maxJSONLLineBytes = 4 * 1024 * 1024
-
-// readJSONLLine reads one '\n'-terminated line from r. A normal line is
-// returned without its '\n' (the slice is only valid until the next read); a
-// line over maxJSONLLineBytes is drained and reported as oversized=true with
-// nil bytes, retaining at most ~maxJSONLLineBytes of memory; at EOF the final
-// unterminated line (if any) is returned with io.EOF. Any other non-nil err
-// is a real read failure.
-func readJSONLLine(r *bufio.Reader) (line []byte, oversized bool, err error) {
-	frag, err := r.ReadSlice('\n')
-	if !errors.Is(err, bufio.ErrBufferFull) {
-		// Fast path: a complete line fit in the reader's buffer (or EOF / real
-		// error). frag aliases the internal buffer; hand it over without copying.
-		return trimNewline(frag), false, err
-	}
-
-	// Slow path: the line exceeds the reader buffer. `content` counts bytes
-	// excluding the terminator (like parseTail's maxCarryBytes) and buf only
-	// grows while under the cap, so an oversized line is drained, not retained.
-	// Mid-line fragments never contain '\n'; only the final one carries it.
-	content := len(frag)
-	buf := append([]byte(nil), frag...)
-	for {
-		frag, err = r.ReadSlice('\n')
-		full := errors.Is(err, bufio.ErrBufferFull)
-		if full {
-			content += len(frag)
-		} else {
-			content += len(trimNewline(frag))
-		}
-		if content <= maxJSONLLineBytes {
-			buf = append(buf, frag...)
-		}
-		if !full {
-			break
-		}
-		if content > maxJSONLLineBytes {
-			// Drain the rest of the line without retaining it; err ends as nil
-			// or io.EOF, both handled by the caller.
-			for errors.Is(err, bufio.ErrBufferFull) {
-				_, err = r.ReadSlice('\n')
-			}
-			return nil, true, err
-		}
-	}
-	if content > maxJSONLLineBytes {
-		return nil, true, err
-	}
-	return trimNewline(buf), false, err
-}
-
-// trimNewline drops a single trailing '\n' (and a preceding '\r') so callers
-// see the same line bytes a bufio.Scanner would have produced.
-func trimNewline(b []byte) []byte {
-	if n := len(b); n > 0 && b[n-1] == '\n' {
-		b = b[:n-1]
-		if n := len(b); n > 0 && b[n-1] == '\r' {
-			b = b[:n-1]
-		}
-	}
-	return b
-}
 
 // uuidFromClaudeLine returns a stable UUID for a single-entry Claude JSONL
 // line: Claude's own uuid (dashes stripped to match cli.newEventUUID's 32

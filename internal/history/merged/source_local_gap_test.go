@@ -2,7 +2,6 @@ package merged
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -123,10 +122,8 @@ func TestMerged_LocalInteriorGap_MultipleDroppedTurns(t *testing.T) {
 
 // TestMerged_GapRecordSortsAheadOfItsBatch pins why persist's gap record has no
 // UUID: it shares Time with the batch it fronts, and only an empty UUID sorts
-// before every hex UUID, so local stays on the (Time, UUID) fast path and the
-// record reads ahead of the turns it precedes.
+// before every hex UUID, so the record reads ahead of the turns it precedes.
 func TestMerged_GapRecordSortsAheadOfItsBatch(t *testing.T) {
-	logs := captureSlog(t)
 	m := &Source{
 		Local: &stubSource{entries: []clievent.EventEntry{
 			{UUID: "l1", Time: 1000, Type: "user", Detail: "q1"},
@@ -141,9 +138,6 @@ func TestMerged_GapRecordSortsAheadOfItsBatch(t *testing.T) {
 	got, err := m.LoadBefore(context.Background(), 0, 100)
 	if err != nil {
 		t.Fatalf("LoadBefore: %v", err)
-	}
-	if strings.Contains(logs.String(), "unsorted entries") {
-		t.Errorf("local with a UUID-less gap record left the sorted fast path:\n%s", logs)
 	}
 	gapAt := -1
 	for i, e := range got {

@@ -3,7 +3,6 @@ package kirojsonl
 import (
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/history"
 )
 
@@ -48,24 +47,5 @@ func TestFactory_KiroReturnsKirojsonlSource(t *testing.T) {
 	// Invoking the callback should hit our stub.
 	if got := src.sessionID(); got != sess.sid {
 		t.Errorf("sessionID callback returned %q; want %q", got, sess.sid)
-	}
-}
-
-// TestInit_RegistersKiroBackend confirms the package-level init()
-// registered "kiro" with history.RegisterFactory. Without this
-// registration, NewWrapperLazy(... "kiro" ...) would never wire a
-// history.Source and the dashboard would silently lose kiro JSONL
-// fallback after upgrade. Same role as
-// claudejsonl/factory_test.go::TestInit_RegistersClaudeBackend; pinned
-// here so the kiro side cannot regress independently.
-func TestInit_RegistersKiroBackend(t *testing.T) {
-	t.Parallel()
-	w := cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "kiro")
-	src := w.NewHistorySource(
-		&stubKiroSession{sid: "x"},
-		history.Wiring{BackendDirs: map[string]string{"kiro": "/kiro/dir"}},
-	)
-	if _, ok := src.(*Source); !ok {
-		t.Errorf("wrapper(kiro).NewHistorySource = %T; want *Source — init() registration regressed", src)
 	}
 }

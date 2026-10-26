@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 
@@ -287,11 +288,9 @@ func TestMerged_NilSources(t *testing.T) {
 	}
 }
 
-// TestMerged_FastPathSortedInputs exercises the 2-way merge fast
-// path: both sources return chronological slices (the contract).
-// Asserts interleaved ordering + UUID-based dedup in the same pass.
-// Regression guard: if mergeSorted accidentally drops `seen` seeding
-// from local this test fails on the dedup check.
+// TestMerged_FastPathSortedInputs: both sources return chronological
+// slices. Asserts interleaved ordering + UUID-based dedup in the same pass;
+// fails on the dedup check if `seen` stops being seeded from local.
 func TestMerged_FastPathSortedInputs(t *testing.T) {
 	m := &Source{
 		Local: &stubSource{entries: []clievent.EventEntry{
@@ -342,15 +341,12 @@ func TestMerged_FastPathFallbackWithEmptyUUID(t *testing.T) {
 	}
 }
 
-// TestMerged_SlowPathUnsortedInputs forces the defensive path by
-// feeding descending-time entries. Exercises mergeSortFallback. The
-// existing TestMerged_SortedByTime also covers this, but an explicit
-// test with reversed inputs pins the intent in case someone later
-// removes the runtime check.
+// TestMerged_SlowPathUnsortedInputs feeds descending-time entries and
+// asserts the output is re-sorted ascending.
 func TestMerged_SlowPathUnsortedInputs(t *testing.T) {
 	m := &Source{
 		Local: &stubSource{entries: []clievent.EventEntry{
-			{UUID: "z", Time: 500}, // descending — triggers repair
+			{UUID: "z", Time: 500}, // descending
 			{UUID: "y", Time: 300},
 			{UUID: "x", Time: 100},
 		}},
@@ -372,10 +368,8 @@ func TestMerged_SlowPathUnsortedInputs(t *testing.T) {
 	}
 }
 
-// TestMerged_FastPathBeforeMSFilter covers beforeMS filtering inside
-// the fast path — the filter used to live in a single loop, now lives
-// inside emit() which is called from both branches of the 2-way merge.
-// Missing the filter in either branch would leak "too new" entries.
+// TestMerged_FastPathBeforeMSFilter: beforeMS filtering applies to both
+// tiers; missing it on either would leak "too new" entries.
 func TestMerged_FastPathBeforeMSFilter(t *testing.T) {
 	m := &Source{
 		Local: &stubSource{entries: []clievent.EventEntry{
@@ -402,8 +396,7 @@ func TestMerged_FastPathBeforeMSFilter(t *testing.T) {
 // a local entry at/above beforeMS is dropped by the emit filter, so it
 // must NOT seed the dedup set. Otherwise a same-UUID fallback entry that
 // is BELOW the cutoff — a legitimately visible backfill — would be
-// silently deduped away, losing one row of visible history. Inputs are
-// pre-sorted so the fast-path mergeSorted runs.
+// silently deduped away, losing one row of visible history.
 func TestMerged_AboveCutoffLocalDoesNotEvictFallback(t *testing.T) {
 	m := &Source{
 		Local: &stubSource{entries: []clievent.EventEntry{
@@ -470,11 +463,11 @@ func TestMerged_CrossSourceContentDedup_DistinctNotCollapsed(t *testing.T) {
 }
 
 // TestMerged_CrossSourceContentDedup_SlowPath: the same cross-source
-// dedup must hold on the defensive concat+sort path (unsorted inputs).
+// dedup must hold for unsorted inputs.
 func TestMerged_CrossSourceContentDedup_SlowPath(t *testing.T) {
 	m := &Source{
 		Local: &stubSource{entries: []clievent.EventEntry{
-			// Descending Time forces mergeSortFallback.
+			// Descending Time: out-of-contract input.
 			{UUID: "nativeB", Time: 200, Type: "text", Summary: "two", Detail: "d2"},
 			{UUID: "nativeA", Time: 100, Type: "text", Summary: "one", Detail: "d1"},
 		}},
@@ -485,7 +478,7 @@ func TestMerged_CrossSourceContentDedup_SlowPath(t *testing.T) {
 	}
 	got, _ := m.LoadBefore(context.Background(), 0, 100)
 	if len(got) != 2 {
-		t.Fatalf("got %d, want 2 (both turns deduped cross-source on slow path)", len(got))
+		t.Fatalf("got %d, want 2 (both turns deduped cross-source on unsorted input)", len(got))
 	}
 	for _, e := range got {
 		if e.UUID != "nativeA" && e.UUID != "nativeB" {
@@ -494,137 +487,43 @@ func TestMerged_CrossSourceContentDedup_SlowPath(t *testing.T) {
 	}
 }
 
-// generalMergeSorted is the pre-fast-path reference implementation of
-// mergeSorted: it always seeds `seen` from local and runs the full
-// two-way merge regardless of whether a tier is empty. The fast-path
-// branches in mergeSorted must produce element-for-element identical
-// output to this on the one-tier-empty inputs below.
-func generalMergeSorted(local, fallback []clievent.EventEntry, beforeMS int64) []clievent.EventEntry {
-	seen := make(map[string]struct{}, len(local))
-	for _, e := range local {
-		if e.UUID != "" && (beforeMS <= 0 || e.Time < beforeMS) {
-			seen[e.UUID] = struct{}{}
+// TestMerged_SingleTier_DedupAndCutoff pins the single-tier shapes: with
+// local empty, fallback still self-dedups by UUID (first occurrence wins,
+// including across an intervening empty-UUID entry: `b, <empty>, b`) and
+// honours the cutoff; with fallback empty, local is filtered by the cutoff.
+func TestMerged_SingleTier_DedupAndCutoff(t *testing.T) {
+	uuids := func(es []clievent.EventEntry) []string {
+		out := make([]string, len(es))
+		for i, e := range es {
+			out[i] = e.UUID
 		}
+		return out
 	}
-	out := make([]clievent.EventEntry, 0, len(local)+len(fallback))
-	emit := func(e clievent.EventEntry) {
-		if beforeMS > 0 && e.Time >= beforeMS {
-			return
-		}
-		out = append(out, e)
+	m := &Source{
+		Local: &stubSource{},
+		Fallback: &stubSource{entries: []clievent.EventEntry{
+			{UUID: "a", Time: 100},
+			{UUID: "b", Time: 200, Summary: "b1"},
+			{UUID: "b", Time: 200, Summary: "b2-dup"},
+			{UUID: "", Time: 210, Summary: "legacy"},
+			{UUID: "b", Time: 220, Summary: "b3-dup"},
+			{UUID: "c", Time: 300},
+		}},
 	}
-	i, j := 0, 0
-	for i < len(local) && j < len(fallback) {
-		if entryCmp(local[i], fallback[j]) <= 0 {
-			emit(local[i])
-			i++
-			continue
-		}
-		f := fallback[j]
-		if f.UUID == "" {
-			emit(f)
-		} else if _, dup := seen[f.UUID]; !dup {
-			seen[f.UUID] = struct{}{}
-			emit(f)
-		}
-		j++
+	got, _ := m.LoadBefore(context.Background(), 250, 100)
+	if want := []string{"a", "b", ""}; !slices.Equal(uuids(got), want) {
+		t.Errorf("local empty: got %v, want %v", uuids(got), want)
+	} else if got[1].Summary != "b1" {
+		t.Errorf("local empty: first b must win, got %q", got[1].Summary)
 	}
-	for ; i < len(local); i++ {
-		emit(local[i])
-	}
-	for ; j < len(fallback); j++ {
-		f := fallback[j]
-		if f.UUID == "" {
-			emit(f)
-			continue
-		}
-		if _, dup := seen[f.UUID]; dup {
-			continue
-		}
-		seen[f.UUID] = struct{}{}
-		emit(f)
-	}
-	return out
-}
 
-func eventsEqual(a, b []clievent.EventEntry) bool {
-	if len(a) != len(b) {
-		return false
+	m = &Source{
+		Local:    &stubSource{entries: []clievent.EventEntry{{UUID: "x", Time: 100}, {UUID: "y", Time: 300}}},
+		Fallback: &stubSource{},
 	}
-	for i := range a {
-		if a[i].UUID != b[i].UUID || a[i].Time != b[i].Time || a[i].Summary != b[i].Summary {
-			return false
-		}
-	}
-	return true
-}
-
-// TestMergeSorted_FastPathFallbackEmpty_EquivalentToGeneral pins the
-// [R202606b-PERF-003] fast path (len(fallback)==0): output must equal the
-// reference two-way-merge implementation element-for-element across
-// cutoff boundaries and empty-UUID entries.
-func TestMergeSorted_FastPathFallbackEmpty_EquivalentToGeneral(t *testing.T) {
-	local := []clievent.EventEntry{
-		{UUID: "a", Time: 100, Summary: "a"},
-		{UUID: "", Time: 150, Summary: "legacy"}, // empty UUID kept
-		{UUID: "b", Time: 200, Summary: "b"},
-		{UUID: "c", Time: 300, Summary: "c"},
-	}
-	for _, beforeMS := range []int64{0, -1, 150, 200, 250, 1000} {
-		fast := mergeSorted(local, nil, beforeMS)
-		ref := generalMergeSorted(local, nil, beforeMS)
-		if !eventsEqual(fast, ref) {
-			t.Errorf("beforeMS=%d: fast=%+v ref=%+v", beforeMS, fast, ref)
-		}
-	}
-	// empty local + empty fallback degenerate case
-	if got := mergeSorted(nil, nil, 0); len(got) != 0 {
-		t.Errorf("empty/empty: got %+v, want nil", got)
-	}
-}
-
-// TestMergeSorted_FastPathLocalEmpty_EquivalentToGeneral pins the
-// [R202606b-PERF-003] fast path (len(local)==0): fallback self-dedup
-// (first UUID wins), empty-UUID pass-through, and cutoff filtering must
-// match the reference implementation.
-func TestMergeSorted_FastPathLocalEmpty_EquivalentToGeneral(t *testing.T) {
-	fallback := []clievent.EventEntry{
-		{UUID: "a", Time: 100, Summary: "a"},
-		{UUID: "", Time: 120, Summary: "legacy1"}, // empty UUID kept
-		{UUID: "b", Time: 200, Summary: "b1"},
-		{UUID: "b", Time: 200, Summary: "b2-dup"}, // self-dup, first wins
-		{UUID: "", Time: 220, Summary: "legacy2"}, // empty UUID kept
-		{UUID: "c", Time: 300, Summary: "c"},
-	}
-	for _, beforeMS := range []int64{0, -1, 120, 200, 201, 300, 1000} {
-		fast := mergeSorted(nil, fallback, beforeMS)
-		ref := generalMergeSorted(nil, fallback, beforeMS)
-		if !eventsEqual(fast, ref) {
-			t.Errorf("beforeMS=%d: fast=%+v ref=%+v", beforeMS, fast, ref)
-		}
-	}
-}
-
-// TestMergeSorted_LocalEmpty_EmptyUUIDBetweenDups pins the [R202606g-PERF-011]
-// lastUUID tracker against the reference's global-set dedup for the
-// `b, <empty>, b` pattern: the empty-UUID entry must NOT reset the tracker,
-// so the trailing duplicate `b` is still dropped exactly as the reference
-// (keep-first-occurrence) would. An empty-UUID entry sitting between two
-// copies of the same UUID is the one input that distinguishes a naive
-// reset-on-empty tracker from the reference.
-func TestMergeSorted_LocalEmpty_EmptyUUIDBetweenDups(t *testing.T) {
-	fallback := []clievent.EventEntry{
-		{UUID: "b", Time: 100, Summary: "b1"},
-		{UUID: "", Time: 110, Summary: "legacy"},
-		{UUID: "b", Time: 120, Summary: "b2-dup"}, // global dup of first b
-		{UUID: "c", Time: 130, Summary: "c"},
-	}
-	for _, beforeMS := range []int64{0, -1, 110, 120, 121, 1000} {
-		fast := mergeSorted(nil, fallback, beforeMS)
-		ref := generalMergeSorted(nil, fallback, beforeMS)
-		if !eventsEqual(fast, ref) {
-			t.Errorf("beforeMS=%d: fast=%+v ref=%+v", beforeMS, fast, ref)
-		}
+	got, _ = m.LoadBefore(context.Background(), 200, 100)
+	if want := []string{"x"}; !slices.Equal(uuids(got), want) {
+		t.Errorf("fallback empty: got %v, want %v", uuids(got), want)
 	}
 }
 
@@ -639,74 +538,5 @@ func TestMerged_NilReceiver(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("nil-receiver returned data: %+v", got)
-	}
-}
-
-// TestIsSortedContract_ShortCircuit verifies the R202606g-PERF-001 (#2307)
-// short-circuit: slices of length ≤1 are reported sorted without invoking
-// the O(n) comparison walk, while a genuinely unsorted slice of length >1
-// still returns false so the defensive concat+sort fallback fires.
-func TestIsSortedContract_ShortCircuit(t *testing.T) {
-	cases := []struct {
-		name string
-		in   []clievent.EventEntry
-		want bool
-	}{
-		{"nil", nil, true},
-		{"empty", []clievent.EventEntry{}, true},
-		{"single", []clievent.EventEntry{{UUID: "a", Time: 100}}, true},
-		{"sorted-pair", []clievent.EventEntry{{UUID: "a", Time: 100}, {UUID: "b", Time: 200}}, true},
-		{"sorted-tie-uuid", []clievent.EventEntry{{UUID: "a", Time: 100}, {UUID: "b", Time: 100}}, true},
-		{"unsorted-time", []clievent.EventEntry{{UUID: "b", Time: 200}, {UUID: "a", Time: 100}}, false},
-		{"unsorted-tie-uuid", []clievent.EventEntry{{UUID: "b", Time: 100}, {UUID: "a", Time: 100}}, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := isSortedContract(tc.in); got != tc.want {
-				t.Errorf("isSortedContract(%+v) = %v; want %v", tc.in, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestMerged_SingleTierTakesFastPath_NoWarn guards the optimization's
-// observable contract: a single-tier LoadBefore (one source empty, the
-// other sorted) must take the linear fast path and emit NO "unsorted
-// entries" repair WARN. The empty side skips its scan; the non-empty side
-// is sorted so the contract holds. A regression that mis-classified the
-// empty side as unsorted would surface here as a spurious WARN.
-func TestMerged_SingleTierTakesFastPath_NoWarn(t *testing.T) {
-	buf := captureSlog(t)
-	m := &Source{
-		Local: &stubSource{entries: []clievent.EventEntry{
-			{UUID: "a", Time: 100},
-			{UUID: "b", Time: 200},
-		}},
-		Fallback: &stubSource{}, // empty — its scan must be skipped
-	}
-	got, err := m.LoadBefore(context.Background(), 0, 100)
-	if err != nil {
-		t.Fatalf("LoadBefore err: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("got %d entries, want 2", len(got))
-	}
-	if strings.Contains(buf.String(), "unsorted entries") {
-		t.Errorf("single-tier sorted input took repair path; log:\n%s", buf.String())
-	}
-}
-
-// BenchmarkMergeDedup_SingleTier exercises the dominant LoadBefore shape
-// (fallback empty, local carries the page) so the #2307 saved scan shows
-// up as a measurable allocation/time delta vs. the prior double-scan.
-func BenchmarkMergeDedup_SingleTier(b *testing.B) {
-	local := make([]clievent.EventEntry, 256)
-	for i := range local {
-		local[i] = clievent.EventEntry{UUID: string(rune('a' + i%26)), Time: int64(i)}
-	}
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = mergeDedup(local, nil, 0)
 	}
 }

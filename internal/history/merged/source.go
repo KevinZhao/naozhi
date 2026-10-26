@@ -74,8 +74,7 @@ func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]c
 	return merged, nil
 }
 
-// entryCmp is the canonical (Time, UUID) ordering shared by the fast-path
-// merge and the defensive sort so both paths order identical inputs alike.
+// entryCmp is the canonical (Time, UUID) ordering of merged output.
 func entryCmp(a, b clievent.EventEntry) int {
 	if c := cmp.Compare(a.Time, b.Time); c != 0 {
 		return c
@@ -154,8 +153,8 @@ func skewWindowFor(entryType string) (lead, lag int64) {
 
 // dupSet holds the fallback indices pairContent decided are duplicates of a
 // local entry. It is computed once for the whole page so the verdict is a
-// fixed function of (local, fallback) — independent of walk order, which the
-// fast and slow merge paths differ in — and one-to-one, so exactly min(N, M)
+// fixed function of (local, fallback) — independent of walk order — and
+// one-to-one, so exactly min(N, M)
 // same-content copies are ever removed.
 type dupSet map[int]struct{}
 
@@ -323,9 +322,9 @@ func typeOfKey(k string) string {
 	return k
 }
 
-// mergeDedup merges two already-sorted slices with an O(n) two-way merge;
-// when a source violates the chronological contract it falls back to
-// concat+sort and logs a WARN.
+// mergeDedup returns the deduped union of local and fallback, sorted by
+// (Time, UUID): seed `seen` from visible local entries and emit them, append
+// non-duplicate fallback entries, then stable-sort. Inputs need not be sorted.
 //
 // Dedup rule: on a shared UUID keep the LOCAL entry — it has full EventEntry
 // fidelity (Images, AskQuestion, agent-team linkage…) where the JSONL
@@ -335,154 +334,6 @@ func mergeDedup(local, fallback []clievent.EventEntry, beforeMS int64) []clieven
 	if len(local) == 0 && len(fallback) == 0 {
 		return nil
 	}
-
-	// Fast path: both inputs honour the chronological contract. isSortedContract
-	// skips the scan for len ≤ 1, so the dominant single-tier shapes pay for
-	// one O(n) scan (#2307).
-	if isSortedContract(local) && isSortedContract(fallback) {
-		return mergeSorted(local, fallback, beforeMS)
-	}
-
-	// Contract violation: warn so the offending Source.LoadBefore can be
-	// traced, then repair with concat+sort.
-	slog.Warn("merged: source returned unsorted entries; repairing with sort",
-		"local_len", len(local), "fallback_len", len(fallback))
-	return mergeSortFallback(local, fallback, beforeMS)
-}
-
-// isSortedContract reports whether s honours the (Time, UUID) contract that
-// lets mergeDedup take the linear merge path. len ≤ 1 is trivially sorted and
-// skips the scan — the common single-tier LoadBefore shape (#2307).
-func isSortedContract(s []clievent.EventEntry) bool {
-	if len(s) <= 1 {
-		return true
-	}
-	return slices.IsSortedFunc(s, entryCmp)
-}
-
-// mergeSorted walks two sorted slices linearly and returns their deduped
-// union, sorted by (Time, UUID). Local entries are ALWAYS kept; fallback
-// entries are dropped when their UUID was already seen (from local or an
-// earlier fallback entry) or when pairContent paired them. Empty UUIDs bypass
-// UUID dedup.
-func mergeSorted(local, fallback []clievent.EventEntry, beforeMS int64) []clievent.EventEntry {
-	// fallback empty: `seen` is only ever read for fallback entries, so the
-	// work reduces to local filtered by the cutoff. No map, no dedup.
-	if len(fallback) == 0 {
-		out := make([]clievent.EventEntry, 0, len(local))
-		for _, e := range local {
-			if beforeMS > 0 && e.Time >= beforeMS {
-				continue
-			}
-			out = append(out, e)
-		}
-		return out
-	}
-	// local empty: only the fallback tail-flush runs. fallback is sorted by
-	// (Time, UUID) and duplicate UUIDs share a Time, so they sort adjacently
-	// and "drop later dups" reduces to "drop a UUID equal to the last non-empty
-	// UUID emitted". Empty-UUID entries are kept and do NOT reset lastUUID, so
-	// `b, <empty>, b` still drops the trailing b, matching the general path.
-	if len(local) == 0 {
-		out := make([]clievent.EventEntry, 0, len(fallback))
-		lastUUID := ""
-		for _, e := range fallback {
-			if beforeMS > 0 && e.Time >= beforeMS {
-				continue
-			}
-			if e.UUID != "" {
-				if e.UUID == lastUUID {
-					continue
-				}
-				lastUUID = e.UUID
-			}
-			out = append(out, e)
-		}
-		return out
-	}
-
-	// Step 1: seed `seen` with the UUID of every local entry the merge will
-	// emit. A local entry above the cutoff must NOT seed `seen`, otherwise a
-	// same-UUID fallback entry below the cutoff — a legitimately visible
-	// backfill — would be deduped away.
-	seen := make(map[string]struct{}, len(local))
-	for _, e := range local {
-		if beforeMS <= 0 || e.Time < beforeMS {
-			if e.UUID != "" {
-				seen[e.UUID] = struct{}{}
-			}
-		}
-	}
-	// contentDups pairs fallback entries whose UUID differs from their local
-	// twin (see pairContent). Computed from the visible local set only, so it
-	// can never collapse two distinct LOCAL events.
-	contentDups := pairContent(local, fallback, beforeMS, seen)
-
-	out := make([]clievent.EventEntry, 0, len(local)+len(fallback))
-	emit := func(e clievent.EventEntry) {
-		if beforeMS > 0 && e.Time >= beforeMS {
-			return
-		}
-		out = append(out, e)
-	}
-	// fallbackDup: duplicate by UUID or by content pairing. Empty-UUID fallback
-	// entries still get the content check. `seen` is extended at the emit
-	// sites so a record read twice via a resume chain dedups against its
-	// first copy; contentDups is immutable so the verdict cannot drift.
-	fallbackDup := func(fi int, f clievent.EventEntry) bool {
-		if f.UUID != "" {
-			if _, dup := seen[f.UUID]; dup {
-				return true
-			}
-		}
-		_, dup := contentDups[fi]
-		return dup
-	}
-
-	// Step 2: two-way merge. `<= 0` picks local on an exact (Time, UUID) tie
-	// so "local wins" holds even for identical keys.
-	i, j := 0, 0
-	for i < len(local) && j < len(fallback) {
-		if entryCmp(local[i], fallback[j]) <= 0 {
-			emit(local[i])
-			i++
-			continue
-		}
-		f := fallback[j]
-		dup := fallbackDup(j, f)
-		// Record the UUID whether or not we emit: a resume chain can surface the
-		// SAME fallback record twice, and if the content pairing removed the
-		// first copy the second would otherwise leak.
-		if f.UUID != "" {
-			seen[f.UUID] = struct{}{}
-		}
-		if !dup {
-			emit(f)
-		}
-		j++
-	}
-	for ; i < len(local); i++ {
-		emit(local[i])
-	}
-	for ; j < len(fallback); j++ {
-		f := fallback[j]
-		dup := fallbackDup(j, f)
-		if f.UUID != "" {
-			seen[f.UUID] = struct{}{}
-		}
-		if dup {
-			continue
-		}
-		emit(f)
-	}
-	return out
-}
-
-// mergeSortFallback is the concat-then-sort path for the contract-violation
-// branch: seed `seen` from visible local entries and emit them, append
-// non-duplicate fallback entries, then stable-sort by (Time, UUID). Kept
-// separate from mergeDedup so the fast path's semantics stay obvious.
-func mergeSortFallback(local, fallback []clievent.EventEntry, beforeMS int64) []clievent.EventEntry {
 	seen := make(map[string]struct{}, len(local))
 	out := make([]clievent.EventEntry, 0, len(local)+len(fallback))
 	for _, e := range local {
@@ -494,10 +345,11 @@ func mergeSortFallback(local, fallback []clievent.EventEntry, beforeMS int64) []
 		}
 		out = append(out, e)
 	}
-	// Same content pairing as the fast path. Computed after the local loop so
-	// `seen` holds exactly the visible-local UUID set, before any fallback UUID
-	// is recorded. pairContent sorts each bucket, so the verdict does not
-	// depend on walk order.
+	// contentDups pairs fallback entries whose UUID differs from their local
+	// twin (see pairContent). Computed after the local loop so `seen` holds
+	// exactly the visible-local UUID set, before any fallback UUID is
+	// recorded; pairContent sorts each bucket, so the verdict does not depend
+	// on walk order.
 	contentDups := pairContent(local, fallback, beforeMS, seen)
 	for i, e := range fallback {
 		if beforeMS > 0 && e.Time >= beforeMS {
@@ -506,7 +358,9 @@ func mergeSortFallback(local, fallback []clievent.EventEntry, beforeMS int64) []
 		uuidDup := false
 		if e.UUID != "" {
 			_, uuidDup = seen[e.UUID]
-			// Record whether or not we emit — mirrors mergeSorted.
+			// Record whether or not we emit: a resume chain can surface the
+			// SAME fallback record twice, and if the content pairing removed
+			// the first copy the second would otherwise leak.
 			seen[e.UUID] = struct{}{}
 		}
 		if uuidDup {

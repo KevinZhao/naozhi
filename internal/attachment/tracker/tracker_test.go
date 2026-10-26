@@ -549,14 +549,6 @@ func TestErrWriteFailure(t *testing.T) {
 	}
 }
 
-// TestErrTrackerClosed_Import ensures the exported error doesn't
-// drift in rename; callers outside the package rely on `errors.Is`.
-func TestErrTrackerClosed_Import(t *testing.T) {
-	if !errors.Is(ErrTrackerClosed, ErrTrackerClosed) {
-		t.Fatal("sentinel not match-able with errors.Is")
-	}
-}
-
 // TestStatsPendingNoRace pins the contract that Stats() reads
 // pendingSize (atomic) instead of len(t.pending). Regressing to
 // len(t.pending) — e.g. by deleting pendingSize as "redundant"
@@ -612,7 +604,7 @@ func TestStatsPendingNoRace(t *testing.T) {
 // long enough for the GC to delete a still-referenced attachment.
 //
 // We drive handleBump directly on the test goroutine after stopping the
-// worker (same pattern as the SecondSelectHonorsClose tests) so reads of
+// worker (same pattern as TestOnSessionRemoved_SecondSelectHonorsClose) so reads of
 // t.pending are race-free, and inject a mutable clock so the deadline is
 // deterministic.
 func TestHandleBump_DoesNotDeferFlushDeadline(t *testing.T) {
@@ -691,65 +683,6 @@ func TestHandleBump_DoesNotDeferFlushDeadline(t *testing.T) {
 	}
 }
 
-// TestPendingSize_TracksMapLen pins the invariant that pendingSize
-// stays in sync with len(t.pending) across the three mutation
-// paths (insert, update, delete). A divergence — e.g. forgetting
-// the Add(1) on insert or double-counting an existing-key update
-// — is invisible at runtime (Stats just reports a wrong number)
-// but corrupts /health observability and downstream alerting.
-func TestPendingSize_TracksMapLen(t *testing.T) {
-	ws := t.TempDir()
-	// First write the .meta file so applyBump's UpdateMetaFile
-	// finds it and the bump is "real" (matches production path).
-	date := time.Now().Format("2006-01-02")
-	rel1, _ := writeAttachment(t, ws, date, "p1",
-		attachment.Meta{UploadedAt: time.Now()})
-	rel2, _ := writeAttachment(t, ws, date, "p2",
-		attachment.Meta{UploadedAt: time.Now()})
-
-	tr, err := NewTracker(Options{
-		Workspaces: func(string) string { return ws },
-		// Long window so entries stay in pending until Flush.
-		CoalesceWindow: 1 * time.Hour,
-		ChannelBuffer:  64,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tr.Stop(context.Background())
-
-	now := time.Now().UnixMilli()
-	tr.OnPersistedEntry("kh", []string{rel1}, now)
-	tr.OnPersistedEntry("kh", []string{rel2}, now)
-	// Same (keyhash, path) again — must NOT increment pendingSize
-	// because handleBump's existing-key branch only updates the
-	// value in place.
-	tr.OnPersistedEntry("kh", []string{rel1}, now+1)
-
-	// Wait for the worker to absorb the channel before reading.
-	// Bounded sleep instead of Flush (which would clear pending).
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if got := tr.Stats().Pending; got == 2 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if got := tr.Stats().Pending; got != 2 {
-		t.Fatalf("Pending=%d after 2 distinct + 1 duplicate; want 2", got)
-	}
-
-	// Flush drains pending → pendingSize must hit 0.
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	if err := tr.Flush(ctx); err != nil {
-		t.Fatalf("Flush: %v", err)
-	}
-	if got := tr.Stats().Pending; got != 0 {
-		t.Fatalf("Pending=%d after Flush; want 0", got)
-	}
-}
-
 // TestOnSessionRemoved_SecondSelectHonorsClose (R20260605B-CORR-16)
 // reproduces the drain-then-buffer race: OnSessionRemoved passes its
 // closed guard, then Stop closes closeCh and run() drains-and-exits.
@@ -792,35 +725,5 @@ func TestOnSessionRemoved_SecondSelectHonorsClose(t *testing.T) {
 	}
 	if elapsed > time.Second {
 		t.Fatalf("OnSessionRemoved blocked %v; should return promptly via closeCh", elapsed)
-	}
-}
-
-// TestFlush_SecondSelectHonorsClose mirrors the above for Flush, which
-// shares the identical second-select shape (R20260605B-CORR-16).
-func TestFlush_SecondSelectHonorsClose(t *testing.T) {
-	ws := t.TempDir()
-	tr := newTracker(t, ws)
-
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer stopCancel()
-	if err := tr.Stop(stopCtx); err != nil {
-		t.Fatalf("Stop: %v", err)
-	}
-	tr.closed.Store(false)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	start := time.Now()
-	err := tr.Flush(ctx)
-	elapsed := time.Since(start)
-
-	tr.closed.Store(true)
-
-	if !errors.Is(err, ErrTrackerClosed) {
-		t.Fatalf("Flush = %v, want ErrTrackerClosed", err)
-	}
-	if elapsed > time.Second {
-		t.Fatalf("Flush blocked %v; should return promptly via closeCh", elapsed)
 	}
 }

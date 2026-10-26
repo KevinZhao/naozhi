@@ -407,9 +407,8 @@ func TestMerged_SkewWindowIsDirectional(t *testing.T) {
 }
 
 // TestMerged_DedupVerdictIsOrderIndependent pins the purity property that
-// keeps the fast path (walks in (Time,UUID) order) and the slow path (walks
-// in raw input order) in agreement: reversing the fallback input must not
-// change the rendered set. A stateful, consume-as-you-go dedup fails this.
+// makes the dedup verdict independent of input order: reversing the fallback
+// input must not change the rendered set. A stateful, consume-as-you-go dedup fails this.
 func TestMerged_DedupVerdictIsOrderIndependent(t *testing.T) {
 	const text = "同一句话"
 	mk := func(uuid string, ts int64) clievent.EventEntry {
@@ -459,10 +458,8 @@ func TestMerged_ContentlessEntries_NotCrossMatched(t *testing.T) {
 	}
 }
 
-// TestMerged_ClockSkew_SlowPath: the same skew tolerance must hold on the
-// defensive concat+sort branch. Descending input Time forces
-// mergeSortFallback, so a fix applied only to mergeSorted would leave the
-// duplicate visible whenever a source violates the sorted contract.
+// TestMerged_ClockSkew_SlowPath: the same skew tolerance must hold when a
+// source returns entries out of (Time, UUID) order.
 func TestMerged_ClockSkew_SlowPath(t *testing.T) {
 	const a, b = "second turn", "first turn"
 	m := &Source{
@@ -477,7 +474,7 @@ func TestMerged_ClockSkew_SlowPath(t *testing.T) {
 	}
 	got, _ := m.LoadBefore(context.Background(), 0, 100)
 	if len(got) != 2 {
-		t.Fatalf("got %d, want 2 (slow path must dedup across skew)", len(got))
+		t.Fatalf("got %d, want 2 (unsorted input must dedup across skew)", len(got))
 	}
 	for _, e := range got {
 		if e.UUID != "nativeA" && e.UUID != "nativeB" {
@@ -490,9 +487,7 @@ func TestMerged_ClockSkew_SlowPath(t *testing.T) {
 // fallback copies of the same text must pair up 1:1, leaving both locals and
 // dropping both fallbacks. Passing the fallback entries in reverse order must
 // not change the outcome — pairContent sorts each content bucket internally so
-// the pairing is a fixed function of the inputs, which is what keeps the fast
-// path (walks in (Time,UUID) order) and the slow path (raw input order) from
-// disagreeing.
+// the pairing is a fixed function of the inputs.
 func TestMerged_TwoTiersTwoCopies_PairwiseMatched(t *testing.T) {
 	const text = "ok"
 	mk := func(uuid string, ts int64) clievent.EventEntry {

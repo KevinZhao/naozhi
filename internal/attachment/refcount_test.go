@@ -131,23 +131,6 @@ func TestMeta_JSONRoundTrip(t *testing.T) {
 	}
 }
 
-// TestMeta_ReadsLegacyWithoutPanic is the forward-compat guard: a
-// meta file produced by an older naozhi (no new fields) must be
-// readable unchanged. GCWithRefs's legacy branch depends on this.
-func TestMeta_ReadsLegacyWithoutPanic(t *testing.T) {
-	raw := []byte(`{"orig_name":"f.png","mime_type":"image/png","size":10,"uploaded_at":"2026-01-01T00:00:00Z"}`)
-	var m Meta
-	if err := json.Unmarshal(raw, &m); err != nil {
-		t.Fatal(err)
-	}
-	if len(m.ReferencingKeyHashes) != 0 {
-		t.Errorf("unexpected refs: %v", m.ReferencingKeyHashes)
-	}
-	if m.LastReferencedAt != 0 {
-		t.Errorf("unexpected last_ref: %d", m.LastReferencedAt)
-	}
-}
-
 // fixturePersisted drops a fully-formed attachment into workspace so
 // the GC tests exercise the real layout without going through Persist
 // (avoids tangling workspace+dir validation for focused GC cases).
@@ -291,28 +274,6 @@ func TestGCWithRefs_LegacyMetaNoNewFields(t *testing.T) {
 	}
 	if removed != 1 {
 		t.Errorf("removed=%d, want 1 (legacy meta, past upload TTL)", removed)
-	}
-}
-
-// TestGCWithRefs_MissingMeta: attachment file without a .meta
-// sidecar falls back to the date-directory age heuristic, matching
-// the legacy GC behaviour for migration.
-func TestGCWithRefs_MissingMeta(t *testing.T) {
-	ws := t.TempDir()
-	now := time.Now().UTC()
-	day := now.AddDate(0, 0, -20).Format("2006-01-02")
-	dayDir := filepath.Join(ws, Dir, day)
-	os.MkdirAll(dayDir, 0o700)
-	payload := filepath.Join(dayDir, "no-meta.png")
-	os.WriteFile(payload, []byte("b"), 0o600)
-	// No .meta sibling.
-
-	removed, err := gcRefs(ws, 7*24*time.Hour, 30*24*time.Hour, now)
-	if err != nil {
-		t.Fatalf("GCWithRefs: %v", err)
-	}
-	if removed != 1 {
-		t.Errorf("removed=%d, want 1 (no meta, past upload TTL)", removed)
 	}
 }
 

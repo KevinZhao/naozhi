@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/history"
 )
 
 // oversizedUserLine builds a single JSONL "user" record whose serialized
@@ -74,8 +76,9 @@ func TestParseJSONL_OversizedLineDoesNotPoisonFile(t *testing.T) {
 }
 
 // TestParseJSONL_OversizedLineAtPositions verifies the skip works regardless
-// of where the oversized line sits — head, middle, tail (no trailing
-// newline) — and that the surrounding records always load.
+// of where the oversized line sits — head, tail (with and without trailing
+// newline) — and that the surrounding records always load; the middle case
+// is TestParseJSONL_OversizedLineDoesNotPoisonFile.
 func TestParseJSONL_OversizedLineAtPositions(t *testing.T) {
 	big := oversizedUserLine(5 * 1024 * 1024)
 	normalA := userJSONLLine("user", "alpha")
@@ -88,7 +91,6 @@ func TestParseJSONL_OversizedLineAtPositions(t *testing.T) {
 		noTrailingNewline bool
 	}{
 		{name: "head", lines: []string{big, normalA, normalB}},
-		{name: "middle", lines: []string{normalA, big, normalB}},
 		{name: "tail_with_newline", lines: []string{normalA, normalB, big}},
 		{name: "tail_no_newline", lines: []string{normalA, normalB, big}, noTrailingNewline: true},
 		{name: "two_oversized", lines: []string{big, normalA, big, normalB, big}},
@@ -192,7 +194,7 @@ func TestReadJSONLLine_Boundary(t *testing.T) {
 			// Build a payload of exactly tc.lineLen bytes followed by '\n'.
 			payload := bytes.Repeat([]byte("x"), tc.lineLen)
 			r := bufio.NewReaderSize(bytes.NewReader(append(payload, '\n')), 64*1024)
-			line, oversized, err := readJSONLLine(r)
+			line, oversized, err := history.ReadJSONLLine(r, maxJSONLLineBytes)
 			if oversized != tc.wantSkipped {
 				t.Fatalf("lineLen=%d: oversized=%v want %v (err=%v)", tc.lineLen, oversized, tc.wantSkipped, err)
 			}

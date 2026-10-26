@@ -184,10 +184,6 @@ var scanUserPromptBufPool = sync.Pool{
 // []byte literal does not allocate on every line of the hot scan loop.
 var userTypeMarker = []byte(`"type":"user"`)
 
-// summaryStatFn is the os.Stat indirection used by loadSummaryIndex; a var so
-// tests can count syscalls (#2247).
-var summaryStatFn = os.Stat
-
 func DefaultScanner() *Scanner {
 	defaultScannerOnce.Do(func() {
 		defaultScannerInst = NewScanner()
@@ -760,7 +756,7 @@ func (s *Scanner) loadSummaryIndex(indexPath string) (sessionsIndex, bool) {
 	// singleflight. On a miss the stat's mtime is carried into the flight so
 	// the closure does not re-stat the same file (#2247).
 	fastMtime, haveFastMtime := int64(0), false
-	if fi, err := summaryStatFn(indexPath); err == nil {
+	if fi, err := os.Stat(indexPath); err == nil {
 		mtime := fi.ModTime().UnixNano()
 		fastMtime, haveFastMtime = mtime, true
 		if cachedIdx, ok := s.getCachedSummary(indexPath, mtime); ok {
@@ -773,7 +769,7 @@ func (s *Scanner) loadSummaryIndex(indexPath string) (sessionsIndex, bool) {
 		if !haveFastMtime {
 			// This caller's fast-path stat failed (transient error); stat inside
 			// the flight so a genuine miss still surfaces the file's mtime.
-			fi, err := summaryStatFn(indexPath)
+			fi, err := os.Stat(indexPath)
 			if err != nil {
 				return sessionsIndex{}, err
 			}

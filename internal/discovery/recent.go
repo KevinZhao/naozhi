@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/claudefs"
+	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -305,12 +306,12 @@ func recentFromJSONLFiles(projDir, workspace string, exclude map[string]bool) []
 // firstPromptScanBudget bounds how many bytes of normal (sub-cap) lines
 // extractFirstPrompt accumulates before giving up; the first text turn lands
 // within a few KB on any normal transcript. Oversized lines are drained by
-// readJSONLLine without counting, so an inline-image head is skipped cheaply.
+// history.ReadJSONLLine without counting, so an inline-image head is skipped cheaply.
 const firstPromptScanBudget = 512 * 1024
 
 // extractFirstPrompt reads the first user message from a JSONL file, scanning
 // at most firstPromptScanBudget bytes and skipping (not aborting on) a leading
-// oversized inline-image line via readJSONLLine.
+// oversized inline-image line via history.ReadJSONLLine.
 func extractFirstPrompt(path string) string {
 	f, err := os.Open(path)
 	if err != nil {
@@ -321,7 +322,7 @@ func extractFirstPrompt(path string) string {
 	r := bufio.NewReaderSize(f, 16*1024)
 	var scanned int
 	for {
-		line, oversized, rerr := readJSONLLine(r)
+		line, oversized, rerr := history.ReadJSONLLine(r, maxJSONLLineBytes)
 		scanned += len(line)
 		// Cheap pre-filter before json.Unmarshal; the Unmarshal below is the
 		// authoritative check. Oversized lines carry no first-prompt text.

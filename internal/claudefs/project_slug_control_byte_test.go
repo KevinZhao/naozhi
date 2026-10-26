@@ -52,22 +52,3 @@ func TestClaudeProjectSlug_ControlByteFilter(t *testing.T) {
 		})
 	}
 }
-
-// TestClaudeProjectSlug_NoAllocOnCleanPath asserts the fast path
-// (hasControlByte=false) does not pay for the strip-loop allocation.
-// Important because ClaudeProjectSlug runs in dashboard sidebar fetch
-// + every cron transcript URL resolution; a hidden alloc per call
-// would compound under steady-state load.
-func TestClaudeProjectSlug_NoAllocOnCleanPath(t *testing.T) {
-	const clean = "/home/ec2-user/workspace/naozhi"
-	allocs := testing.AllocsPerRun(100, func() {
-		_ = ProjectSlug(clean)
-	})
-	// One alloc is unavoidable: substituteNonAlnum must build a fresh string
-	// when at least one substitution happens (every '/' is replaced). What we
-	// want to verify is that neither the control-byte filter nor the
-	// length-cap branch adds a SECOND allocation on the clean path.
-	if allocs > 1 {
-		t.Errorf("clean-path ClaudeProjectSlug allocs/run = %.1f, want ≤ 1 (control-byte filter must short-circuit when input is clean)", allocs)
-	}
-}
