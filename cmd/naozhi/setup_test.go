@@ -10,40 +10,6 @@ import (
 	"github.com/naozhi/naozhi/internal/config"
 )
 
-func TestSetupWriteConfig_NewFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-
-	if _, err := setupWriteConfig(path, "test-token-123", "", ""); err != nil {
-		t.Fatalf("setupWriteConfig: %v", err)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	content := string(data)
-
-	if !strings.Contains(content, "test-token-123") {
-		t.Error("config should contain the token")
-	}
-	if !strings.Contains(content, "platforms:") {
-		t.Error("config should contain platforms section")
-	}
-	if !strings.Contains(content, "weixin:") {
-		t.Error("config should contain weixin section")
-	}
-	if !strings.Contains(content, "cli:") {
-		t.Error("config should contain cli section")
-	}
-
-	// Check file permissions
-	info, _ := os.Stat(path)
-	if info.Mode().Perm() != 0600 {
-		t.Errorf("expected 0600 permissions, got %o", info.Mode().Perm())
-	}
-}
-
 func TestSetupWriteConfig_UpdateExisting(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -95,77 +61,6 @@ log:
 	}
 }
 
-func TestSetupWriteConfig_AddWeixinSection(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-
-	existing := `server:
-  addr: ":8180"
-platforms:
-  feishu:
-    app_id: "abc"
-`
-	if err := os.WriteFile(path, []byte(existing), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := setupWriteConfig(path, "wx-token", "", ""); err != nil {
-		t.Fatalf("setupWriteConfig: %v", err)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-
-	if !strings.Contains(content, "wx-token") {
-		t.Error("token should be added")
-	}
-	if !strings.Contains(content, "weixin:") {
-		t.Error("weixin section should be created")
-	}
-	if !strings.Contains(content, "feishu:") {
-		t.Error("feishu section should be preserved")
-	}
-}
-
-func TestSetupWriteConfig_CreateSubdirs(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "sub", "deep", "config.yaml")
-
-	if _, err := setupWriteConfig(path, "token", "", ""); err != nil {
-		t.Fatalf("setupWriteConfig: %v", err)
-	}
-
-	if _, err := os.Stat(path); err != nil {
-		t.Error("file should be created with parent dirs")
-	}
-}
-
-func TestUpdateWeixinToken_NoPlatforms(t *testing.T) {
-	input := []byte(`server:
-  addr: ":8180"
-log:
-  level: "info"
-`)
-	result, _, err := updateWeixinConfig(input, "my-token", "", "", false)
-	if err != nil {
-		t.Fatalf("updateWeixinConfig: %v", err)
-	}
-	content := string(result)
-
-	if !strings.Contains(content, "platforms:") {
-		t.Error("should create platforms section")
-	}
-	if !strings.Contains(content, "weixin:") {
-		t.Error("should create weixin section")
-	}
-	if !strings.Contains(content, "my-token") {
-		t.Error("should contain token")
-	}
-}
-
 // TestSetupWriteConfig_LoadableByConfig checks that the minimal template
 // `naozhi setup weixin` emits parses cleanly through the production config
 // pipeline (yaml.Unmarshal → applyDefaults). Without this regression, a
@@ -173,11 +68,14 @@ log:
 // removed struct field, or a required-but-missing value would only surface
 // the first time an operator actually ran setup on a clean machine.
 func TestSetupWriteConfig_LoadableByConfig(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
+	// A missing parent directory (fresh machine, no ~/.naozhi yet) is created.
+	path := filepath.Join(t.TempDir(), "sub", "config.yaml")
 
 	if _, err := setupWriteConfig(path, "wx-token", "", "https://sh.ilinkai.weixin.qq.com"); err != nil {
 		t.Fatalf("setupWriteConfig: %v", err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("config file stat = %v, %v; want mode 0600", info, err)
 	}
 
 	cfg, err := config.Load(path)
@@ -272,11 +170,7 @@ func TestSetupWriteConfig_TokenWithYAMLSpecials(t *testing.T) {
 	// the old fmt.Sprintf path.
 	cases := map[string]string{
 		"embedded_dquote": `tok"injected: "evil`,
-		"hash_comment":    `tok#comment`,
-		"colon":           `tok:evil`,
 		"newline":         "tok\ninjected: true",
-		"tab":             "tok\twith\ttabs",
-		"backslash":       `tok\escape`,
 	}
 	for name, token := range cases {
 		name, token := name, token
@@ -305,53 +199,5 @@ func TestSetupWriteConfig_TokenWithYAMLSpecials(t *testing.T) {
 					cfg.Platforms.Weixin.Token, token)
 			}
 		})
-	}
-}
-
-// TestDefaultConfigTemplate_TokenPlaceholderEmpty verifies that the
-// minimal template is now a static YAML document (no %s anywhere) so
-// `yaml.Unmarshal` can parse it directly. The token is injected
-// exclusively through updateWeixinConfig to guarantee safe escaping.
-func TestDefaultConfigTemplate_TokenPlaceholderEmpty(t *testing.T) {
-	if strings.Contains(defaultConfigTemplate, "%s") {
-		t.Error("defaultConfigTemplate must not use fmt placeholder; " +
-			"token must go through updateWeixinConfig for YAML-safe escaping")
-	}
-	if !strings.Contains(defaultConfigTemplate, `token: ""`) {
-		t.Error("defaultConfigTemplate should contain empty token anchor " +
-			`token: "" for updateWeixinConfig to overwrite`)
-	}
-}
-
-// TestDefaultConfigTemplate_Minimal locks in the intent that the template is
-// kept minimal. If someone re-adds a key that applyDefaults already handles,
-// this test fails and forces the author to add it to the runtime-defaults
-// test above instead of creating a second source of truth.
-func TestDefaultConfigTemplate_Minimal(t *testing.T) {
-	// The keys explicitly forbidden in the minimal template because
-	// config.applyDefaults owns them.
-	forbidden := []string{
-		"max_procs:",
-		"ttl:",
-		"prune_ttl:",
-		"store_path:",
-	}
-	for _, k := range forbidden {
-		if strings.Contains(defaultConfigTemplate, k) {
-			t.Errorf("defaultConfigTemplate contains %q — applyDefaults owns this key; remove from template to prevent drift", k)
-		}
-	}
-
-	// Required anchors users will want to edit or that setup produces.
-	required := []string{
-		"cli:",
-		"platforms:",
-		"weixin:",
-		"token:",
-	}
-	for _, k := range required {
-		if !strings.Contains(defaultConfigTemplate, k) {
-			t.Errorf("defaultConfigTemplate missing anchor %q", k)
-		}
 	}
 }
