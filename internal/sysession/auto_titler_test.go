@@ -741,6 +741,14 @@ func TestEvictOldestHighwater_DropsOldestFirst(t *testing.T) {
 	if _, ok := m["oldest"]; ok {
 		t.Errorf("oldest must be evicted first")
 	}
+	// R260528-BUG-9: equal timestamps tie-break by key, not map order.
+	for i := 0; i < 50; i++ {
+		tied := map[string]autoTitlerHighwater{"a": {lastRenamedAt: now}, "b": {lastRenamedAt: now}, "c": {lastRenamedAt: now}}
+		evictOldestHighwater(tied, 1)
+		if _, ok := tied["c"]; !ok || len(tied) != 1 {
+			t.Fatalf("iter %d: tie-break must keep the largest key, got %v", i, tied)
+		}
+	}
 }
 
 // TestCommitHighwater_HardCapEnforcedOnEarlyStop pins R238-GO-16 (#808):
