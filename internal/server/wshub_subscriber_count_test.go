@@ -11,8 +11,7 @@ import (
 
 // TestSubscriberCount_KeyAbsentIffNoSubscriber: a key is tracked exactly while
 // it has a subscriber, so the per-key cap check stays O(1) and the index is
-// bounded by keys currently watched. Only the last subscriber leaving reports
-// the key emptied.
+// bounded by keys currently watched.
 func TestSubscriberCount_KeyAbsentIffNoSubscriber(t *testing.T) {
 	h := &Hub{subs: newSubscriberRegistry()}
 	a := &wsClient{done: make(chan struct{})}
@@ -23,29 +22,26 @@ func TestSubscriberCount_KeyAbsentIffNoSubscriber(t *testing.T) {
 		t.Fatalf("count = %d, want 2", n)
 	}
 
-	if emptied := h.subs.unsubscribe(a, "k", 0); emptied {
-		t.Error("unsubscribe reported the key emptied while b still subscribes")
-	}
+	h.subs.unsubscribe(a, "k", 0)
 	if n := subscriberCountOf(h, "k"); n != 1 {
 		t.Fatalf("count = %d after one unsubscribe, want 1", n)
 	}
-	if emptied := h.subs.unsubscribe(a, "k", 0); emptied {
-		t.Error("a second unsubscribe of the same key reported it emptied")
-	}
+	h.subs.unsubscribe(a, "k", 0)
 	if n := subscriberCountOf(h, "k"); n != 1 {
 		t.Fatalf("a repeated unsubscribe changed the count to %d", n)
 	}
-	if emptied := h.subs.unsubscribe(b, "k", 0); !emptied {
-		t.Error("the last subscriber leaving did not report the key emptied")
+	h.subs.unsubscribe(b, "k", 0)
+	if _, ok := h.subs.countFast.Load("k"); ok {
+		t.Error("countFast still tracks k with no subscriber left")
 	}
 	if n := subscribedKeyCount(h); n != 0 {
 		t.Errorf("%d keys tracked with no subscriber left", n)
 	}
 }
 
-// TestSubscriberCount_RemoveReportsEmptiedKeys: unregistering a client hands
-// back its closures and exactly the keys it was the last subscriber of.
-func TestSubscriberCount_RemoveReportsEmptiedKeys(t *testing.T) {
+// TestSubscriberCount_RemoveHandsBackClosures: unregistering a client hands
+// back its closures and drops the keys it was the last subscriber of.
+func TestSubscriberCount_RemoveHandsBackClosures(t *testing.T) {
 	h := &Hub{subs: newSubscriberRegistry()}
 	a := &wsClient{done: make(chan struct{})}
 	b := &wsClient{done: make(chan struct{})}
@@ -55,7 +51,7 @@ func TestSubscriberCount_RemoveReportsEmptiedKeys(t *testing.T) {
 	subscribeTest(h, a, "solo", func() { ran++ })
 	registerSub(h, b, "shared")
 
-	unsubs, emptied, removed := h.subs.remove(a)
+	unsubs, removed := h.subs.remove(a)
 	if !removed {
 		t.Fatal("remove of a registered client reported removed=false")
 	}
@@ -65,13 +61,10 @@ func TestSubscriberCount_RemoveReportsEmptiedKeys(t *testing.T) {
 	if ran != 2 {
 		t.Errorf("remove handed back %d of a's 2 closures", ran)
 	}
-	if len(emptied) != 1 || emptied[0] != "solo" {
-		t.Errorf("emptied = %v, want [solo]", emptied)
-	}
 	if subscriberCountOf(h, "shared") != 1 || subscriberCountOf(h, "solo") != 0 {
 		t.Errorf("counts shared=%d solo=%d after remove, want 1/0", subscriberCountOf(h, "shared"), subscriberCountOf(h, "solo"))
 	}
-	if _, _, again := h.subs.remove(a); again {
+	if _, again := h.subs.remove(a); again {
 		t.Error("a second remove reported removed=true")
 	}
 }

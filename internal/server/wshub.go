@@ -168,7 +168,7 @@ func (h *Hub) register(c *wsClient) {
 func (h *Hub) unregister(c *wsClient) {
 	// The closures take EventLog locks; the registry hands them back so they
 	// run with its lock released.
-	unsubs, _, removed := h.subs.remove(c)
+	unsubs, removed := h.subs.remove(c)
 	for _, unsub := range unsubs {
 		unsub()
 	}

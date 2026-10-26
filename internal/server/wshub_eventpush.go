@@ -247,7 +247,7 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 	// expired" instead of stale state, and free the dead subscription slot so
 	// it stops counting toward the per-connection cap. The stale unsub runs
 	// after the registry's lock is released.
-	staleUnsub, _ := h.subs.expire(c, key, time.Now().UnixNano())
+	staleUnsub := h.subs.expire(c, key, time.Now().UnixNano())
 	if staleUnsub != nil {
 		staleUnsub()
 	}
