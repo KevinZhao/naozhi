@@ -75,7 +75,7 @@ func TestStore_BatchSpanningThreeDaysSplitsFiles(t *testing.T) {
 	}
 }
 
-func TestSummarize_FutureToUsesRollupAndMatchesScan(t *testing.T) {
+func TestSummarize_FutureTo(t *testing.T) {
 	s, _ := newTestStore(t, t0)
 	seed(t, s)
 	q := Query{From: t0.Add(-72 * time.Hour), To: t0.Add(48 * time.Hour), GroupBy: GroupByUnit}
@@ -102,7 +102,7 @@ func TestStore_RejectsInvalidWithoutCountingDrop(t *testing.T) {
 }
 
 func TestStore_QueueFullCountsDropped(t *testing.T) {
-	s := &Store{dir: t.TempDir(), now: func() time.Time { return t0 }, ch: make(chan Entry, 1), rollup: newRollup()}
+	s := &Store{dir: t.TempDir(), now: func() time.Time { return t0 }, ch: make(chan Entry, 1)}
 	if !s.Append(mk(t0, SourceSession, UnitUSD, 1)) {
 		t.Fatal("first append should queue")
 	}
@@ -114,7 +114,7 @@ func TestStore_QueueFullCountsDropped(t *testing.T) {
 	}
 }
 
-// Adjust entries net out of every sum, on the rollup path and the scan path,
+// Adjust entries net out of every sum, filtered or not,
 // and their negative per-model rows round-trip through the day file.
 func TestStore_AdjustEntriesNetOut(t *testing.T) {
 	s, dir := newTestStore(t, t0)
@@ -135,7 +135,7 @@ func TestStore_AdjustEntriesNetOut(t *testing.T) {
 		if b, _ := bucket(sum, "session", UnitUSD); b.Amount != 2.5 || b.Tokens.CacheRead != 400 || sum.Kinds["adjust"] != 1 {
 			t.Errorf("by source = %+v kinds=%v, want 2.5 / 400 cache-read / one adjust", b, sum.Kinds)
 		}
-		q.GroupBy, q.SessionKey = GroupByModel, "feishu:p2p:u1" // filtered: the scan path
+		q.GroupBy, q.SessionKey = GroupByModel, "feishu:p2p:u1"
 		sum, _ = st.Summarize(q)
 		if b, _ := bucket(sum, "opus", UnitUSD); b.Amount != 2.5 {
 			t.Errorf("by model (scan) = %+v, want 2.5", b)
@@ -197,42 +197,23 @@ func bucket(sum Summary, key string, unit Unit) (Bucket, bool) {
 	return Bucket{}, false
 }
 
-func TestSummarize_UnitsNeverMixAndRollupMatchesScan(t *testing.T) {
-	s, dir := newTestStore(t, t0)
+func TestSummarize_UnitsNeverMix(t *testing.T) {
+	s, _ := newTestStore(t, t0)
 	seed(t, s)
-	// Reopen so the rollup is warmed from disk (startup path), then compare
-	// with a forced scan.
-	s2 := NewStore(dir, Options{Now: func() time.Time { return t0.Add(time.Hour) }})
-	defer s2.Close()
-	q := Query{From: t0.Add(-72 * time.Hour), To: t0.Add(time.Hour), GroupBy: GroupBySource}
-	viaRollup, err := s2.Summarize(q)
+	sum, err := s.Summarize(Query{From: t0.Add(-72 * time.Hour), To: t0.Add(time.Hour), GroupBy: GroupBySource})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !s2.rollup.covers(q.From) {
-		t.Fatal("test premise: rollup should cover the window")
-	}
-	agg := newAggregator(GroupBySource)
-	s2.scanRange(q, func(e Entry) bool { agg.add(e); return true })
-	viaScan := agg.summary()
-	if len(viaRollup.Buckets) != len(viaScan.Buckets) {
-		t.Fatalf("rollup %+v vs scan %+v", viaRollup.Buckets, viaScan.Buckets)
-	}
-	for i := range viaScan.Buckets {
-		if viaRollup.Buckets[i] != viaScan.Buckets[i] {
-			t.Fatalf("bucket %d: rollup %+v vs scan %+v", i, viaRollup.Buckets[i], viaScan.Buckets[i])
-		}
-	}
-	usd, _ := bucket(viaRollup, "session", UnitUSD)
-	cr, _ := bucket(viaRollup, "session", UnitCredits)
+	usd, _ := bucket(sum, "session", UnitUSD)
+	cr, _ := bucket(sum, "session", UnitCredits)
 	if usd.Amount != 3.0 || usd.Entries != 2 || usd.Tokens.Input != 100 {
 		t.Fatalf("session USD = %+v", usd)
 	}
 	if cr.Amount != 3.0 || cr.Entries != 1 {
 		t.Fatalf("session credits = %+v", cr)
 	}
-	if viaRollup.Basis["list"] != 3 || viaRollup.Basis[""] != 2 || viaRollup.Kinds["receipt"] != 1 {
-		t.Fatalf("basis/kinds = %v / %v", viaRollup.Basis, viaRollup.Kinds)
+	if sum.Basis["list"] != 3 || sum.Basis[""] != 2 || sum.Kinds["receipt"] != 1 {
+		t.Fatalf("basis/kinds = %v / %v", sum.Basis, sum.Kinds)
 	}
 }
 
@@ -346,17 +327,12 @@ func TestStore_RefusesSymlinkDayFile(t *testing.T) {
 	}
 }
 
-func TestStore_ClampsDays(t *testing.T) {
-	r, u := clampDays(0, 0)
-	if r != DefaultRetentionDays || u != DefaultRetentionDays {
-		t.Fatalf("defaults = %d/%d (rollup must default to the whole retention window)", r, u)
+func TestStore_ClampsRetention(t *testing.T) {
+	if r := clampRetention(0); r != DefaultRetentionDays {
+		t.Fatalf("default = %d", r)
 	}
-	r, u = clampDays(99999, 500)
-	if r != MaxRetentionDays || u != 500 {
-		t.Fatalf("clamped = %d/%d", r, u)
-	}
-	if r, u = clampDays(10, 20); u != 10 {
-		t.Fatalf("rollup must not exceed retention: %d/%d", r, u)
+	if r := clampRetention(99999); r != MaxRetentionDays {
+		t.Fatalf("clamped = %d", r)
 	}
 }
 

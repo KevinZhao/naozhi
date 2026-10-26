@@ -605,7 +605,6 @@ func NewRouter(cfg RouterConfig) *Router {
 	if cfg.StorePath != "" && !cfg.CostLedger.Disabled {
 		ledger = costledger.NewStore(datadir.ForStore(cfg.StorePath).CostRoot(), costledger.Options{
 			RetentionDays: cfg.CostLedger.RetentionDays,
-			RollupDays:    cfg.CostLedger.RollupDays,
 		})
 	}
 	r.runs.cost = newCostAccounting(ledger)

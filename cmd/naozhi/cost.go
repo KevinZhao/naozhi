@@ -80,7 +80,7 @@ func backfillLedger(p backfillPaths, dryRun bool, out io.Writer) (backfillReport
 		return rep, fmt.Errorf("cost.enabled is false")
 	}
 	ledgerDir := datadir.ForStore(p.SessionStorePath).CostRoot()
-	store := costledger.NewStore(ledgerDir, costledger.Options{RetentionDays: p.Cost.RetentionDays, RollupDays: p.Cost.RollupDays})
+	store := costledger.NewStore(ledgerDir, costledger.Options{RetentionDays: p.Cost.RetentionDays})
 	if !store.Enabled() {
 		return rep, fmt.Errorf("open ledger at %s", ledgerDir)
 	}

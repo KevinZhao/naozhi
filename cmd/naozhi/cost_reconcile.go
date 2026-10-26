@@ -154,7 +154,7 @@ func reconcileLedger(o reconcileOpts, out io.Writer) (reconcileReport, error) {
 		o.Until = time.Now().UTC().Truncate(24 * time.Hour)
 	}
 	ledgerDir := datadir.ForStore(o.SessionStorePath).CostRoot()
-	lopts := costledger.Options{RetentionDays: o.Cost.RetentionDays, RollupDays: o.Cost.RollupDays}
+	lopts := costledger.Options{RetentionDays: o.Cost.RetentionDays}
 	var store *costledger.Store
 	if o.Write {
 		store = costledger.NewStore(ledgerDir, lopts)
