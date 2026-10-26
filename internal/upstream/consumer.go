@@ -36,12 +36,6 @@ type Session interface {
 	DeathReason() string
 }
 
-// PlannerResolver derives the key and spawn options of a project's planner
-// (docs/rfc/key-resolver.md Phase 5).
-type PlannerResolver interface {
-	ResolveForPlannerKey(projectName string) (key string, opts sessionview.AgentOpts, ok bool)
-}
-
 // SessionLookup is the read-only lookup sub-capability used by hot RPC paths
 // (subscribe stream filter, ListSessions response).
 type SessionLookup interface {
@@ -53,7 +47,6 @@ type SessionLookup interface {
 // handlers that allocate or tear down sessions. ReserveTakeover refuses a
 // takeover of key, or reserves the key for it until the lease ends.
 type SessionLifecycle interface {
-	ResetAndRecreate(ctx context.Context, key string, opts sessionview.AgentOpts) (Session, error)
 	ReserveTakeover(key string, opts sessionview.AgentOpts) (TakeoverLease, error)
 	Remove(key string) bool
 	DefaultWorkspace() string

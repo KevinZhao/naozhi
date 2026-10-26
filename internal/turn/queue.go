@@ -7,7 +7,6 @@
 package turn
 
 import (
-	"container/list"
 	"log/slog"
 	"strings"
 	"sync"
@@ -66,9 +65,8 @@ type sessionQueue struct {
 	busy bool
 	// gen is drawn from queue.genSeq, so it is unique across every entry the
 	// queue ever creates: an old owner's gen never matches a later entry.
-	gen uint64
-	// ring holds queued messages in a fixed-capacity FIFO ring buffer (#570).
-	ring         msgRing
+	gen          uint64
+	msgs         []Msg // queued messages, FIFO; at most queue.maxDepth
 	lastNotifyNs int64 // unix nanoseconds of last ShouldNotify call
 	lastEvictNs  int64 // unix nanoseconds of last eviction Warn log (rate-limit)
 
@@ -78,92 +76,14 @@ type sessionQueue struct {
 	interruptRequested bool
 }
 
-// msgRing is a single-producer / single-consumer FIFO ring buffer; all access
-// is serialised under queue.mu. Capacity is fixed by the first push
-// (queue.maxDepth) and never grows; eviction-on-full is an O(1) head
-// advance with the evicted slot zeroed for GC (#570). Layout:
-//
-//	buf:   [_, A, B, C, _, _]
-//	head=1, used=3 → logical view = [A, B, C]
-//
-// push at full advances head and writes at (head+used)%cap, dropping A.
-type msgRing struct {
-	buf  []Msg
-	head int // index of the oldest live element when used > 0
-	used int // number of live elements; 0 <= used <= cap(buf)
-
-	// scratch is the reusable backing array for drainInto: the owner drains one
-	// batch per turn and fully consumes it before the next drain, so one
-	// per-ring scratch avoids a per-turn allocation (#1827). Sound because each
-	// *sessionQueue owns its ring exclusively under queue.mu.
-	scratch []Msg
-}
-
-// len returns the current number of queued messages.
-func (r *msgRing) len() int { return r.used }
-
-// push appends m. When the ring holds capacity (queue.maxDepth)
-// elements the oldest is overwritten and returned as dropped with
-// evicted=true so the caller can warn and clear its queued reaction (#1945).
-func (r *msgRing) push(m Msg, capacity int) (evicted bool, dropped Msg) {
-	if cap(r.buf) == 0 {
-		r.buf = make([]Msg, capacity)
-	}
-	if r.used == capacity {
-		// Capture the dropped message before zeroing the slot (frees held image data).
-		dropped = r.buf[r.head]
-		r.buf[r.head] = Msg{}
-		r.head = (r.head + 1) % capacity
-		r.used--
-		evicted = true
-	}
-	idx := (r.head + r.used) % capacity
-	r.buf[idx] = m
-	r.used++
-	return evicted, dropped
-}
-
-// drainInto returns the queued messages in FIFO order and resets the ring,
-// zeroing consumed slots so retained image data is GC-eligible. Returns nil
-// when empty. dst is reused when it has enough capacity, else a fresh slice
-// is allocated. The caller MUST fully consume the returned slice before the
-// next drainInto/drainAll on the same ring (#1827).
-func (r *msgRing) drainInto(dst []Msg) []Msg {
-	if r.used == 0 {
-		return nil
-	}
-	var out []Msg
-	if cap(dst) >= r.used {
-		out = dst[:r.used]
-	} else {
-		out = make([]Msg, r.used)
-	}
-	c := cap(r.buf)
-	for i := 0; i < r.used; i++ {
-		idx := (r.head + i) % c
-		out[i] = r.buf[idx]
-		r.buf[idx] = Msg{}
-	}
-	r.head = 0
-	r.used = 0
-	return out
-}
-
-// drainAll returns the queued messages in a freshly allocated slice (FIFO
-// order) and empties the ring. Equivalent to drainInto(nil).
-func (r *msgRing) drainAll() []Msg {
-	return r.drainInto(nil)
-}
-
 // queue implements per-session message queuing: when a session is busy,
 // incoming messages are queued (up to MaxDepth) instead of dropped and the
 // owner goroutine drains the queue after each turn. Only the Orchestrator
 // that New built it for holds one.
 //
-// Thread-safe: mutating methods take mu.Lock; ShouldNotify's cooldown-active
-// fast path takes mu.RLock only (#1358).
+// Thread-safe: queues, genSeq and dropNotify are guarded by mu.
 type queue struct {
-	mu           sync.RWMutex
+	mu           sync.Mutex
 	queues       map[string]*sessionQueue
 	maxDepth     int
 	collectDelay time.Duration
@@ -171,63 +91,15 @@ type queue struct {
 	// genSeq is the last generation handed to a sessionQueue.
 	genSeq uint64
 
-	// dropNotifyLRU/dropNotifyIndex form a bounded per-key cooldown LRU for
+	// dropNotify holds key → last notify nanos, the per-key cooldown for
 	// notifies when no sessionQueue exists (maxDepth<=0 drop path, or between
 	// a discard and a new owner), so one chat's notify never silences another's.
-	// The index maps key → *dropNotifyEntry directly so the hot ShouldNotify
-	// probe avoids a list.Element.Value assertion (#932).
-	dropNotifyLRU   *list.List                  // element.Value = *dropNotifyEntry
-	dropNotifyIndex map[string]*dropNotifyEntry // key → entry
-
-	// dropNotifyPool recycles *dropNotifyEntry structs so steady-state cold-key
-	// churn (evict tail + insert) does not heap-allocate per key (#1694).
-	// Entries are reset before reuse and nil'd on return so a pooled entry
-	// doesn't pin a removed list.Element.
-	dropNotifyPool sync.Pool
+	dropNotify map[string]int64
 }
 
-// dropNotifyEntry is a single LRU entry: key + last notify nanos. elem links
-// back to the *list.Element that boxes this entry in dropNotifyLRU.
-type dropNotifyEntry struct {
-	key  string
-	ts   int64
-	elem *list.Element
-}
-
-// takePooledEntry returns a reset *dropNotifyEntry: preferred (the entry just
-// evicted from the LRU tail) if non-nil, else one from dropNotifyPool, else a
-// fresh allocation. Callers must hold q.mu.
-func (q *queue) takePooledEntry(preferred *dropNotifyEntry) *dropNotifyEntry {
-	if preferred != nil {
-		preferred.key = ""
-		preferred.ts = 0
-		preferred.elem = nil
-		return preferred
-	}
-	if v := q.dropNotifyPool.Get(); v != nil {
-		e := v.(*dropNotifyEntry)
-		e.key = ""
-		e.ts = 0
-		e.elem = nil
-		return e
-	}
-	return &dropNotifyEntry{}
-}
-
-// releasePooledEntry returns an already-unlinked entry to dropNotifyPool,
-// nil'ing its fields so it pins nothing. Callers must hold q.mu.
-func (q *queue) releasePooledEntry(e *dropNotifyEntry) {
-	if e == nil {
-		return
-	}
-	e.key = ""
-	e.ts = 0
-	e.elem = nil
-	q.dropNotifyPool.Put(e)
-}
-
-// dropNotifyMaxKeys bounds dropNotifyLRU; the oldest entry is evicted on
-// insert when at capacity.
+// dropNotifyMaxKeys bounds dropNotify; inserting past it first drops the
+// entries whose cooldown expired, then everything if none had. A full table
+// still all in cooldown therefore costs at most one extra receipt per key.
 const dropNotifyMaxKeys = 1024
 
 // evictWarnCooldownNs rate-limits the per-key "queue full" eviction Warn so a
@@ -247,12 +119,11 @@ type QueueOptions struct {
 
 func newQueue(o QueueOptions) *queue {
 	return &queue{
-		queues:          make(map[string]*sessionQueue),
-		maxDepth:        o.MaxDepth,
-		collectDelay:    o.CollectDelay,
-		mode:            o.Mode,
-		dropNotifyLRU:   list.New(),
-		dropNotifyIndex: make(map[string]*dropNotifyEntry),
+		queues:       make(map[string]*sessionQueue),
+		maxDepth:     o.MaxDepth,
+		collectDelay: o.CollectDelay,
+		mode:         o.Mode,
+		dropNotify:   make(map[string]int64),
 	}
 }
 
@@ -314,7 +185,14 @@ func (q *queue) Enqueue(key string, msg Msg) enqueueResult {
 	}
 
 	r := enqueueResult{enqueued: true}
-	if r.evicted, r.dropped = sq.ring.push(msg, q.maxDepth); r.evicted {
+	if len(sq.msgs) >= q.maxDepth {
+		// Drop the oldest, zeroing its slot so held image data is freed (#1945).
+		r.evicted, r.dropped = true, sq.msgs[0]
+		sq.msgs[0] = Msg{}
+		sq.msgs = sq.msgs[1:]
+	}
+	sq.msgs = append(sq.msgs, msg)
+	if r.evicted {
 		// Queue-full eviction is silent data loss for the sender; Warn so
 		// operators can observe backpressure, rate-limited per key.
 		now := time.Now().UnixNano()
@@ -322,7 +200,7 @@ func (q *queue) Enqueue(key string, msg Msg) enqueueResult {
 		// rate-limit is not defeated (mirrors ShouldNotify).
 		if delta := now - sq.lastEvictNs; delta < 0 || delta >= evictWarnCooldownNs {
 			slog.Warn("msgqueue: dropping oldest message (queue full)",
-				"key", key, "depth", sq.ring.len(), "max_depth", q.maxDepth)
+				"key", key, "depth", len(sq.msgs), "max_depth", q.maxDepth)
 			sq.lastEvictNs = now
 		}
 	}
@@ -358,38 +236,40 @@ func (q *queue) DoneOrDrain(key string, gen uint64) []Msg {
 		return nil
 	}
 
-	if sq.ring.len() == 0 {
-		// Release ownership. Also purge any stale dropNotify LRU entry so the
-		// next ShouldNotify doesn't fall through to a stale LRU timestamp and
+	if len(sq.msgs) == 0 {
+		// Release ownership. Also purge any stale dropNotify entry so the
+		// next ShouldNotify doesn't fall through to a stale timestamp and
 		// silence a legitimate notification. interruptRequested is zeroed
 		// explicitly in case a future refactor reuses the *sessionQueue.
 		sq.interruptRequested = false
 		delete(q.queues, key)
-		if e, ok := q.dropNotifyIndex[key]; ok {
-			q.dropNotifyLRU.Remove(e.elem)
-			delete(q.dropNotifyIndex, key)
-			q.releasePooledEntry(e)
-		}
+		delete(q.dropNotify, key)
 		return nil
 	}
 
 	// Drain all; keep ownership. Clearing interruptRequested makes the next
-	// in-flight turn a fresh interrupt target. The ring's scratch is reused
-	// across turns — the owner fully consumes each batch before the next
-	// DoneOrDrain (#1827).
-	msgs := sq.ring.drainInto(sq.ring.scratch)
-	sq.ring.scratch = msgs
+	// in-flight turn a fresh interrupt target.
 	sq.interruptRequested = false
-	return msgs
+	return takeMsgs(sq)
+}
+
+// takeMsgs returns sq's queued messages FIFO and empties the queue; nil when
+// none were queued (the owner loop stops on a nil batch).
+func takeMsgs(sq *sessionQueue) []Msg {
+	if len(sq.msgs) == 0 {
+		return nil
+	}
+	out := sq.msgs
+	sq.msgs = nil
+	return out
 }
 
 // DiscardAndReturn clears key's queued messages and releases ownership,
 // giving the entry a fresh generation so a stale owner loop stops on its next
 // DoneOrDrain (/new, /clear, a detached turn's panic, Submit's shutdown
-// drop when Admit fails). The entry is kept so
-// the next Enqueue reuses its ring; deleting it would be equally safe. The
-// discarded messages come back FIFO so each origin can be told (#2013); nil
-// when nothing was queued.
+// drop when Admit fails). The entry is kept; deleting it would be equally
+// safe. The discarded messages come back FIFO so each origin can be told
+// (#2013); nil when nothing was queued.
 func (q *queue) DiscardAndReturn(key string) []Msg {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -416,18 +296,14 @@ func (q *queue) discardLocked(key string, sq *sessionQueue) []Msg {
 	var dropped []Msg
 	if sq != nil {
 		sq.gen = q.nextGen()
-		dropped = sq.ring.drainAll()
+		dropped = takeMsgs(sq)
 		sq.busy = false
 		sq.lastNotifyNs = 0
 		sq.interruptRequested = false
 	}
-	// Mirror DoneOrDrain's LRU cleanup so a pre-discard drop-path cooldown
+	// Mirror DoneOrDrain's cleanup so a pre-discard drop-path cooldown
 	// cannot silence the first notify after a discard.
-	if e, ok := q.dropNotifyIndex[key]; ok {
-		q.dropNotifyLRU.Remove(e.elem)
-		delete(q.dropNotifyIndex, key)
-		q.releasePooledEntry(e)
-	}
+	delete(q.dropNotify, key)
 	return dropped
 }
 
@@ -441,14 +317,10 @@ func (q *queue) Cleanup(key string) []Msg {
 	defer q.mu.Unlock()
 	var dropped []Msg
 	if sq := q.queues[key]; sq != nil {
-		dropped = sq.ring.drainAll()
+		dropped = takeMsgs(sq)
 		delete(q.queues, key)
 	}
-	if e, ok := q.dropNotifyIndex[key]; ok {
-		q.dropNotifyLRU.Remove(e.elem)
-		delete(q.dropNotifyIndex, key)
-		q.releasePooledEntry(e)
-	}
+	delete(q.dropNotify, key)
 	return dropped
 }
 
@@ -459,71 +331,42 @@ func (q *queue) CollectDelay() time.Duration {
 
 // ShouldNotify returns true if the 3s cooldown since the last enqueue
 // notification for key has elapsed, so rapid-fire messages don't each get a
-// "message received" confirmation. The drop-path cooldown uses the bounded
-// list+map LRU so chat A's notify does not silence chat B's. All O(1).
-//
-// The cooldown-active fast path takes mu.RLock only (#1358); the expired /
-// cold-key path re-checks under mu.Lock before mutating, so two goroutines
-// racing through the RUnlock→Lock window yield at most one extra notify per
-// window — acceptable since the cooldown is "approximately 3s".
+// "message received" confirmation. The drop-path cooldown is per key so chat
+// A's notify does not silence chat B's.
 func (q *queue) ShouldNotify(key string) bool {
 	const cooldown = int64(3 * time.Second)
 	now := time.Now().UnixNano()
-
-	// Fast path: RLock-only probe; return early while the cooldown is active.
-	q.mu.RLock()
-	if sq, ok := q.queues[key]; ok {
-		// delta < 0 means the wall clock stepped backwards; treat as expired so
-		// the slow path re-anchors instead of silencing notifications forever.
-		if delta := now - sq.lastNotifyNs; delta >= 0 && delta < cooldown {
-			q.mu.RUnlock()
-			return false
-		}
-	} else if entry, ok := q.dropNotifyIndex[key]; ok {
-		if delta := now - entry.ts; delta >= 0 && delta < cooldown {
-			q.mu.RUnlock()
-			return false
-		}
+	// delta < 0 means the wall clock stepped backwards; treat as expired so
+	// the timestamp re-anchors instead of silencing notifications forever.
+	cooling := func(ts int64) bool {
+		delta := now - ts
+		return delta >= 0 && delta < cooldown
 	}
-	q.mu.RUnlock()
 
-	// Slow path: re-check under the write lock — a sibling may have published
-	// a fresh timestamp in the RUnlock→Lock window.
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if sq, ok := q.queues[key]; ok {
-		if delta := now - sq.lastNotifyNs; delta >= 0 && delta < cooldown {
+		if cooling(sq.lastNotifyNs) {
 			return false
 		}
 		sq.lastNotifyNs = now
 		return true
 	}
-	// No queue entry — per-key cooldown via bounded LRU.
-	if entry, ok := q.dropNotifyIndex[key]; ok {
-		if delta := now - entry.ts; delta >= 0 && delta < cooldown {
-			return false
-		}
-		entry.ts = now
-		q.dropNotifyLRU.MoveToFront(entry.elem)
-		return true
+	// No queue entry — per-key cooldown via the bounded dropNotify map.
+	ts, ok := q.dropNotify[key]
+	if ok && cooling(ts) {
+		return false
 	}
-	// Insert new entry; evict the LRU tail if at capacity and recycle the
-	// evicted struct for this insert (#1694).
-	var reuse *dropNotifyEntry
-	if q.dropNotifyLRU.Len() >= dropNotifyMaxKeys {
-		if oldest := q.dropNotifyLRU.Back(); oldest != nil {
-			evicted := oldest.Value.(*dropNotifyEntry)
-			delete(q.dropNotifyIndex, evicted.key)
-			q.dropNotifyLRU.Remove(oldest)
-			reuse = q.takePooledEntry(evicted)
+	if !ok && len(q.dropNotify) >= dropNotifyMaxKeys {
+		for k, ts := range q.dropNotify {
+			if !cooling(ts) {
+				delete(q.dropNotify, k)
+			}
+		}
+		if len(q.dropNotify) >= dropNotifyMaxKeys {
+			clear(q.dropNotify)
 		}
 	}
-	if reuse == nil {
-		reuse = q.takePooledEntry(nil)
-	}
-	reuse.key = key
-	reuse.ts = now
-	reuse.elem = q.dropNotifyLRU.PushFront(reuse)
-	q.dropNotifyIndex[key] = reuse
+	q.dropNotify[key] = now
 	return true
 }

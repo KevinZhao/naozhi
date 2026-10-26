@@ -77,6 +77,7 @@ func TestValidateSchedule(t *testing.T) {
 		{"@hourly", false},
 		{"0 9 * * 1-5", false},
 		{"*/5 * * * *", false},
+		{"0 */5 * * * *", true}, // seconds field is not part of the user syntax
 		{"invalid", true},
 		{"", true},
 	}

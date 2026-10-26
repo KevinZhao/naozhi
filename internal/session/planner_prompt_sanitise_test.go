@@ -162,10 +162,9 @@ func TestSanitisePlannerPrompt_AllowsAtSizeBoundary(t *testing.T) {
 }
 
 // TestSanitisePlannerPrompt_PlannerKeyPathAlsoSanitised pins the
-// administrative-restart path: ResolveForPlannerKey must run the same
-// validator. Without this, /api/projects/{n}/planner-restart with a
-// disk-tampered prompt would inject through the RPC path even with
-// the chat-view path fixed.
+// planner-key path: ResolveForPlannerKey must run the same validator.
+// Without this, a disk-tampered prompt would inject through
+// ResolveForKey's planner branch even with the chat-view path fixed.
 func TestSanitisePlannerPrompt_PlannerKeyPathAlsoSanitised(t *testing.T) {
 	t.Parallel()
 
@@ -186,6 +185,6 @@ func TestSanitisePlannerPrompt_PlannerKeyPathAlsoSanitised(t *testing.T) {
 		t.Fatal("ResolveForPlannerKey returned ok=false; expected ok=true with empty/sanitised prompt")
 	}
 	if got, hit := argvHasAppendSystemPrompt(opts); hit {
-		t.Fatalf("oversize PlannerPrompt reached argv via planner-restart path: %q...", got[:32])
+		t.Fatalf("oversize PlannerPrompt reached argv via planner-key path: %q...", got[:32])
 	}
 }

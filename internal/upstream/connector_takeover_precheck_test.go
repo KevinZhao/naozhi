@@ -54,7 +54,7 @@ func TestHandleRequest_Takeover_RefusalKeepsCLIAlive(t *testing.T) {
 			if tc.stop {
 				r.Shutdown()
 			}
-			c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(r), nil, nil, Discovery{}, nil)
+			c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(r), nil, Discovery{}, nil)
 			params, _ := json.Marshal(map[string]any{
 				"pid": cmd.Process.Pid, "session_id": "12345678-1234-1234-1234-123456789012",
 				"cwd": tc.cwd, "proc_start_time": start,
@@ -121,7 +121,7 @@ func TestHandleRequest_Takeover_SecondTakeoverOfKeyKeepsItsCLI(t *testing.T) {
 
 	r := makeRouter()
 	t.Cleanup(r.Shutdown)
-	c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(r), nil, nil, Discovery{}, nil)
+	c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(r), nil, Discovery{}, nil)
 	c.claudeDir = t.TempDir()
 	appCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -229,7 +229,7 @@ func TestHandleRequest_Takeover_RefusalAfterReserveReleasesTheKey(t *testing.T) 
 			pid, start := tc.target(t)
 			r := makeRouter()
 			t.Cleanup(r.Shutdown)
-			c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(r), nil, nil, Discovery{}, nil)
+			c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(r), nil, Discovery{}, nil)
 			c.claudeDir = t.TempDir()
 			var wg sync.WaitGroup
 			req := node.ReverseMsg{Method: "takeover", Params: takeoverParams(t, pid, "12345678-1234-1234-1234-123456789012", start)}

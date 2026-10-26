@@ -59,7 +59,7 @@ var watchdogParkedInterruptGoroutines = expvar.NewInt("naozhi_cron_watchdog_park
 
 // watchdogInterruptTimeout reads this Scheduler's active interrupt-call
 // timeout. Production callers see watchdogInterruptTimeoutDefault unless a test
-// has overridden it on this instance via setWatchdogInterruptTimeoutForScheduler.
+// has overridden it on this instance.
 func (s *Scheduler) watchdogInterruptTimeout() time.Duration {
 	return time.Duration(s.watchdogInterruptTimeoutNanos.Load())
 }
