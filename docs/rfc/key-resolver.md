@@ -25,7 +25,7 @@
 
 - **B1 修复**:v1 的 §4.6 / §4.7 迁移会让 `#6 planner-restart` 和 `#7 reverse-RPC restart_planner` 从**字面量空 opts**(`session.AgentOpts{Model, Workspace, Exempt}`)悄悄变成**从 `defaults["general"]` 起步**,线上首次遇到 P1 风险(planner argv 会新增 defaults["general"] 的 Model / ExtraArgs / Backend)。v2 引入 `ResolveForPlannerKey(name)` 独立签名,**不读 defaults**,明确与 #1/#5 正向路径区分;同时 §3.1 的 ResolveForKey 在 planner 分支也走 ResolveForPlannerKey,保持单一真源。
 - **B2 修复**:v1 §3.1 只给 `ResolveForChat` 伪代码,`ResolveForKey` / planner-missing / scratch+cron key 等 fallback 行为未定义。v2 §3.1a 新增 ResolveForKey 的完整 4 分支伪代码(planner+存在 / planner+缺失 / IM 4 段 / 非 4 段 fallback),并引入 `(AgentOpts, bool)` 返回值让 caller 能区分"正常默认"vs"project 查不到"(采纳 S2)。
-- **B3 修复**:v1 §6.1 "aliasing 断言用 `reflect.DeepEqual(snapshot, defaults)`" 抓不到 write-past-len——`append(s, x)` 在 `cap>len` 时写入 backing array 的 len 位但 header 不变,DeepEqual 只比 header 内可见范围。v2 §6.1 改成 **canary write-past-len** 手法,复用 `planner_args_isolation_test.go:82` 的 `shared[:cap(shared)]` peek 模式。
+- **B3 修复**:v1 §6.1 "aliasing 断言用 `reflect.DeepEqual(snapshot, defaults)`" 抓不到 write-past-len——`append(s, x)` 在 `cap>len` 时写入 backing array 的 len 位但 header 不变,DeepEqual 只比 header 内可见范围。v2 §6.1 改成 **canary write-past-len** 手法,复用 `shared[:cap(shared)]` peek 模式(原 `planner_args_isolation_test.go` 已于 round-3 删除,现存守卫见 `internal/session/routing_test.go` 的 `bound_general_aliasing_canary` / `TestResolveForChat_NonPlannerNoAliasing`)。
 - **B4 修复**:v1 §2.1 表格第 7 行写 "连 aliasing 防护没 → aliasing 风险"定性错;#6/#7 实际是 `[]string{...}` 字面量新 slice,无 aliasing。v2 正文和表格对齐为"不继承 defaults(与 #1/#5 不对齐) / 若被改成 `append` 会破"。
 - **B5 修复**:v1 §3.1 bullet 3 只说"字符串复刻",未说明是否复用 `ProjectKeyPrefix` 常量,也没提 `isPlannerKey` 需要同样复刻。v2 §3.5 给出 session 包内 `plannerKeyFor` / `isPlannerKey` 完整实现 + 和 project 包 `PlannerKeyFor` / `IsPlannerKey` 的一致性测试隔离策略(双端各自硬编码字面量断言,不成 import cycle)。
 - **B6 修复**:§3.1 non-general 分支显式 `base.Exempt = false`(defense-in-depth)+ §3.3 表格列改 "base 值"保持准确。
@@ -606,7 +606,7 @@ if peek := shared[:cap(shared)]; peek[2] != "" || peek[3] != "" {
 }
 ```
 
-参考 `internal/dispatch/planner_args_isolation_test.go:82` 的 `shared[:cap(shared)]` peek 模式(文件名里有 "TwoArgAppendDoesLeak" 作为 negative-control,展示了"不安全" append 的真实表现)。
+参考 `internal/session/routing_test.go` 的 `bound_general_aliasing_canary` 行与 `TestResolveForChat_NonPlannerNoAliasing`(原 `internal/dispatch/planner_args_isolation_test.go` 已于 round-3 删除)。
 
 ### 6.2 race / 并发测试
 
@@ -715,7 +715,7 @@ Phase 2-5 在每个调用点都保留了 `if d.resolver != nil { resolver.X } el
 - `dispatch.go::keyForChat` / `BuildHandler` 主路径删 `if d.resolver != nil` 分支
 - `commands.go::handleUrgentCommand` 删同款分支
 - `Dispatcher.projectMgr` 字段 doc 显式标注"仅用于 slash-command UX 文案,routing 走 resolver",防止未来重抄
-- 新增 `TestNewDispatcher_ResolverFabricatedWhenNil` pin fabricate + explicit pass-through 两条路径
+- 新增 `TestNewDispatcher_ResolverFabricatedWhenNil` pin fabricate + explicit pass-through 两条路径(round-3 已删,优先级现由 `internal/dispatch/resolver_fallback_test.go::TestResolveOrFabricateKeyResolver_Precedence` 守)
 - `go test -race ./internal/dispatch/... ./internal/server/...` 通过
 
 **未在 Phase 6 处理**:`internal/server/dashboard.go::buildSessionOpts` 仍保留 `if resolver != nil` 双轨,因为它的输入是 raw key(不是 chat coords)且要兼容已废 / 不存在的 project 的 dashboard resume 路径,行为分支语义与 dispatch 路径不同。后续若把这条路径完全收敛进 `ResolveForKey + ok 分支`,可加 Phase 7 关闭。
@@ -777,7 +777,7 @@ session 包的 `plannerKeyFor("x")` 和 project 包的 `PlannerKeyFor("x")` 是�
 
 - `internal/dispatch/dispatch.go:214-252` 规范参考实现(chat-view)
 - `internal/server/project_api.go:326-333` 规范参考实现(planner-view)
-- `internal/dispatch/planner_args_isolation_test.go:82` aliasing canary 正确姿势
+- `internal/session/routing_test.go` 的 `bound_general_aliasing_canary` / `TestResolveForChat_NonPlannerNoAliasing` aliasing canary 正确姿势
 - R37-CONCUR1 修复记录(`docs/TODO.md` 里搜 R37)
 - `docs/design/DESIGN.md` "Session key 命名空间"章节
 - `docs/rfc/attachment-refcount.md` / `docs/rfc/event-log-persistence.md`(本 RFC 风格参考)
