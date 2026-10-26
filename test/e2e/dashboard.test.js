@@ -169,6 +169,9 @@ test.describe('Session selection & events', () => {
     const thTexts = await page.$$eval('.event.text table th', ths => ths.map(th => th.textContent.trim()));
     expect(thTexts).toEqual(['Col A', 'Col B']);
 
+    // Fenced code blocks get a copy button.
+    await expect(page.locator('.md-code-wrap .md-copy-btn').first()).toHaveText('copy');
+
     await ctx.close();
   });
 
@@ -447,9 +450,9 @@ test.describe('Auth modal & login', () => {
     await page.goto(authMock.url + '/dashboard');
     await page.waitForSelector('.modal-overlay');
 
-    // Enter correct token
+    // Enter correct token; submit via the Enter key path.
     await page.fill('#token-input', 'secret-token');
-    await page.click('.modal-btns button.primary');
+    await page.keyboard.press('Enter');
 
     // Modal should close
     await page.waitForSelector('.modal-overlay', { state: 'detached' });
@@ -880,6 +883,12 @@ test.describe('History popover', () => {
 
     const popover = await page.$('.history-popover');
     expect(popover).not.toBeNull();
+
+    // Since #1800 a .history-backdrop covers the page while open; a click on
+    // it closes the popover and both nodes must be removed.
+    await page.locator('.history-backdrop').click({ position: { x: 5, y: 5 } });
+    await page.waitForSelector('.history-popover', { state: 'detached' });
+    expect(await page.$('.history-backdrop')).toBeNull();
 
     await ctx.close();
   });
