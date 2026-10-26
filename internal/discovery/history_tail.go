@@ -80,8 +80,8 @@ func LoadHistoryTailBeforeCtx(ctx context.Context, claudeDir, sessionID, cwd str
 	return entries, nil
 }
 
-// resolveJSONLPath mirrors LoadHistory's path resolution without parsing the
-// file, so both entry points share the same lookup semantics.
+// resolveJSONLPath locates the session JSONL (CWD-derived path first, then
+// the projects scan); LoadHistory and the tail readers share it.
 //
 // Non-UUID sessionIDs are rejected up front so an attacker-controlled
 // prev-session-id cannot produce a `filepath.Join(..., "../etc/passwd.jsonl")` escape.

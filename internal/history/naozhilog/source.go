@@ -22,7 +22,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sync"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
@@ -40,13 +39,6 @@ type Source struct {
 // LoadLatest / LoadBefore. dir="" disables reads (both return (nil, nil)).
 func New(dir, key string) *Source {
 	return &Source{dir: dir, key: key}
-}
-
-// bufReaderPool recycles the 64 KiB bufio.Reader used by decodeFrom and
-// readAllEntries. Callers MUST Reset(f) before use and Reset(nil) before
-// returning it so a pooled reader never pins a closed fd.
-var bufReaderPool = sync.Pool{
-	New: func() any { return bufio.NewReaderSize(nil, 64*1024) },
 }
 
 // LoadLatest returns up to `limit` newest entries from the session's log, in
@@ -200,12 +192,7 @@ func (s *Source) decodeFrom(ctx context.Context, byteOff int64) ([]clievent.Even
 		return nil, fmt.Errorf("seek naozhi log %s to %d: %w", path, byteOff, err)
 	}
 
-	br := bufReaderPool.Get().(*bufio.Reader)
-	br.Reset(f)
-	defer func() {
-		br.Reset(nil) // release the *os.File so the pooled reader pins no fd
-		bufReaderPool.Put(br)
-	}()
+	br := bufio.NewReaderSize(f, 64*1024)
 	out := make([]clievent.EventEntry, 0, 512)
 	if err := decodeRecords(ctx, br, path, &out); err != nil {
 		return nil, err
@@ -228,12 +215,7 @@ func (s *Source) readAllEntries(ctx context.Context) ([]clievent.EventEntry, err
 	}
 	defer f.Close()
 
-	br := bufReaderPool.Get().(*bufio.Reader)
-	br.Reset(f)
-	defer func() {
-		br.Reset(nil) // release the *os.File so the pooled reader pins no fd
-		bufReaderPool.Put(br)
-	}()
+	br := bufio.NewReaderSize(f, 64*1024)
 	// Pre-size to the persistedHistory ring cap (~500) to avoid append doubling.
 	const estEntries = 512
 	out := make([]clievent.EventEntry, 0, estEntries)

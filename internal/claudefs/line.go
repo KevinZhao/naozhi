@@ -52,7 +52,7 @@ func ParseTimestamp(s string) (time.Time, bool) {
 // There is deliberately no hand-written parser for the CLI's canonical "…Z"
 // shape (#3522): every caller decodes the whole JSON line first, which costs
 // microseconds, so a few ns saved here never shows end to end. Adding one needs
-// an end-to-end win such as in BenchmarkLoadHistoryTail_vs_LoadHistory.
+// a measured end-to-end win on a history load.
 func TimestampMillis(s string) int64 {
 	t, ok := ParseTimestamp(s)
 	if !ok {

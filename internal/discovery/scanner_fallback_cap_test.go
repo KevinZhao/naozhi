@@ -51,35 +51,3 @@ func TestExtractLastPromptUncached_FallbackBounded(t *testing.T) {
 		t.Errorf("extractLastPromptUncached = %q, want \"\" (buried prompt beyond both bounded windows must not be read)", got)
 	}
 }
-
-// BenchmarkExtractLastPromptUncached_FallbackLargeFile shows the fallback no
-// longer scales with total file size: a 10MB file whose tail is all
-// tool_result lines triggers the head fallback, which now reads at most the
-// first 512KB instead of all 10MB.
-func BenchmarkExtractLastPromptUncached_FallbackLargeFile(b *testing.B) {
-	dir := b.TempDir()
-	path := filepath.Join(dir, "big.jsonl")
-
-	noText := `{"type":"user","timestamp":"2026-01-01T01:00:00Z","message":{"role":"user","content":[{"type":"tool_result","content":"x"}]}}`
-	head := `{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"head prompt"}}`
-	var sb strings.Builder
-	sb.WriteString(head)
-	sb.WriteByte('\n')
-	for sb.Len() < 10<<20 {
-		sb.WriteString(noText)
-		sb.WriteByte('\n')
-	}
-	if err := os.WriteFile(path, []byte(sb.String()), 0o644); err != nil {
-		b.Fatal(err)
-	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		b.Fatal(err)
-	}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if got := extractLastPromptUncached(path, fi.Size()); got != "head prompt" {
-			b.Fatalf("got %q", got)
-		}
-	}
-}

@@ -29,7 +29,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/history"
@@ -45,23 +44,9 @@ const maxFileBytes = 16 << 20 // 16 MiB
 // ctxCheckEvery is how many parsed lines elapse between context.Done checks.
 const ctxCheckEvery = 100
 
-// scanBufPool recycles the 64 KiB initial bufio.Scanner buffer across pages.
-var scanBufPool = sync.Pool{
-	New: func() any {
-		b := make([]byte, 0, 64*1024)
-		return &b
-	},
-}
-
 // maxLineBytes is the longest jsonl record the scan accepts; longer records
 // (kiro ToolResults reach tens of MiB) are skipped, not fatal (#2448).
 const maxLineBytes = 1 << 20
-
-// lineReaderPool recycles the bufio.Reader between file and scanner that lets
-// an oversized record be drained and the scan resumed (see parseFile).
-var lineReaderPool = sync.Pool{
-	New: func() any { return bufio.NewReaderSize(nil, 64*1024) },
-}
 
 // kindPromptMarker / kindAsstMarker are byte quick-filters so decodeLine can
 // skip lines that cannot be a Prompt or AssistantMessage before paying for
@@ -210,24 +195,9 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 			anchor = headPromptAnchor(ctx, f, off)
 		}
 	}
-	// br lets an oversized record be drained and a fresh scanner resume without
-	// losing buffered bytes (bufio.Scanner is unusable after ErrTooLong) (#2448).
-	br := lineReaderPool.Get().(*bufio.Reader)
-	br.Reset(io.LimitReader(f, maxFileBytes))
-	defer func() {
-		br.Reset(nil)
-		lineReaderPool.Put(br)
-	}()
-	// The initial buffer is pooled: bufio.Scanner only grows the slice we hand
-	// it, so returning it at zero length recycles the backing array.
-	bufPtr := scanBufPool.Get().(*[]byte)
-	defer func() {
-		b := (*bufPtr)[:0]
-		*bufPtr = b
-		scanBufPool.Put(bufPtr)
-	}()
-	scanner := bufio.NewScanner(br)
-	scanner.Buffer(*bufPtr, maxLineBytes)
+	// history.ReadJSONLLine skips an oversized record (kiro ToolResults reach
+	// tens of MiB) instead of aborting the read like bufio.Scanner (#2448).
+	br := bufio.NewReaderSize(io.LimitReader(f, maxFileBytes), 64*1024)
 
 	out := make([]clievent.EventEntry, 0, 16)
 	processed := 0
@@ -267,27 +237,17 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 		out = append(out, entry)
 	}
 
-	if skipPartialFirstLine {
-		if scanner.Scan() {
+	for first := true; ; first = false {
+		line, oversized, err := history.ReadJSONLLine(br, maxLineBytes)
+		if first && skipPartialFirstLine {
 			// Reassemble the record straddling the seek boundary with the head
 			// bytes so it parses (and advances the borrow state) exactly as in
-			// a whole-file read; with no fragment it stays dropped.
-			if len(anchor.fragment) > 0 {
-				processLine(append(anchor.fragment, scanner.Bytes()...))
+			// a whole-file read; with no fragment, or when the straddling part
+			// is itself oversized, it stays dropped.
+			if !oversized && (err == nil || len(line) > 0) && len(anchor.fragment) > 0 {
+				processLine(append(anchor.fragment, line...))
 			}
-		} else if errors.Is(scanner.Err(), bufio.ErrTooLong) {
-			// The straddling partial line is itself oversized. With an error set,
-			// bufio.Scanner would hand the buffered prefix back as a final token
-			// and it would reach processLine as a whole record; drain and rebuild.
-			if !discardRestOfLine(br) {
-				return out
-			}
-			scanner = bufio.NewScanner(br)
-			scanner.Buffer(*bufPtr, maxLineBytes)
-		}
-	}
-	for {
-		for scanner.Scan() {
+		} else {
 			if processed%ctxCheckEvery == 0 {
 				select {
 				case <-ctx.Done():
@@ -296,39 +256,16 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 				}
 			}
 			processed++
-			processLine(scanner.Bytes())
+			if !oversized {
+				processLine(line)
+			}
 		}
-		err := scanner.Err()
-		if !errors.Is(err, bufio.ErrTooLong) {
-			if err != nil {
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
 				// Partial-write tails surface here; treat as EOF so accumulated entries are kept.
-				slog.Debug("kirojsonl: scanner error treated as EOF", "err", err)
+				slog.Debug("kirojsonl: read error treated as EOF", "err", err)
 			}
 			return out
-		}
-		// One record exceeds maxLineBytes (#2448): drop the remainder and
-		// resume with a fresh scanner so later records still surface. Also
-		// covers an oversized partial first line (fragment never reassembled).
-		if !discardRestOfLine(br) {
-			return out
-		}
-		scanner = bufio.NewScanner(br)
-		scanner.Buffer(*bufPtr, maxLineBytes)
-	}
-}
-
-// discardRestOfLine drops bytes from br up to and including the next '\n'.
-// Returns false when the input ends before a newline is seen.
-func discardRestOfLine(br *bufio.Reader) bool {
-	for {
-		_, err := br.ReadSlice('\n')
-		switch {
-		case err == nil:
-			return true
-		case errors.Is(err, bufio.ErrBufferFull):
-			continue
-		default:
-			return false
 		}
 	}
 }
@@ -421,7 +358,7 @@ func headPromptAnchor(ctx context.Context, f *os.File, off int64) headAnchor {
 			carry = append(carry[:0], buf...)
 		}
 		if len(carry) > maxLineBytes {
-			// Longer than the forward scanner accepts; stop growing the fragment.
+			// Longer than ReadJSONLLine accepts; stop growing the fragment.
 			carry = carry[:0]
 		}
 		pos = chunkStart

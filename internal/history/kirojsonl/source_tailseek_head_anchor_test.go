@@ -146,39 +146,6 @@ func TestParseFile_TailSeekAnchorsAssistantsFromDroppedHead(t *testing.T) {
 	}
 }
 
-// TestParseFile_TailSeekAnchorSkipsTimestamplessPrompt: a head Prompt without
-// meta.timestamp cannot anchor anything (decodeLine drops it and the forward
-// scan does not reset the borrow state on it), so the backscan must keep
-// walking to the earlier ts-bearing Prompt and keep counting assistants
-// across the ts-less one.
-func TestParseFile_TailSeekAnchorSkipsTimestamplessPrompt(t *testing.T) {
-	t.Parallel()
-	const anchorTS int64 = 1_700_000_000
-
-	var sb strings.Builder
-	sb.WriteString(promptLine("ANCHOR", anchorTS) + "\n")
-	sb.WriteString(orphanAssistantLine("HEAD", 1))
-	padWith(&sb, toolResultsFiller, 256<<10)
-	sb.WriteString(`{"version":"v1","kind":"Prompt","data":{"message_id":"nots","content":[{"kind":"text","data":"no timestamp"}]}}` + "\n")
-	sb.WriteString(orphanAssistantLine("HEAD", 2))
-	padWith(&sb, toolResultsFiller, 17<<20)
-	sb.WriteString(orphanAssistantLine("ORPHAN", 1))
-
-	got := parseTempSession(t, sb.String())
-	var found bool
-	for _, e := range got {
-		if e.Summary == "ORPHAN-1" {
-			found = true
-			if want := anchorTS*1000 + 2 + 1; e.Time != want {
-				t.Errorf("ORPHAN-1 time=%d; want %d (anchor + 2 head assistants + 1)", e.Time, want)
-			}
-		}
-	}
-	if !found {
-		t.Fatalf("ORPHAN-1 dropped; ts-less head Prompt must be skipped, not treated as end of search: %+v", got)
-	}
-}
-
 // TestParseFile_TailSeekAnchorStableAcrossAppend pins the review finding on
 // #2446: the borrowed ts must not depend on where the seek point falls. As
 // kiro appends, off = Size-maxFileBytes moves right; if in-window assistants

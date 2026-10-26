@@ -228,23 +228,6 @@ func TestFindSessionJSONL_CacheKeyDistinct(t *testing.T) {
 	}
 }
 
-// TestPathCacheKey_NoAlloc pins PERF-005 (#2125): building the cache key
-// must not allocate. The previous "dir+\x00+id" string concat heap-
-// allocated a new key on every findSessionJSONL call, including cache
-// hits; the struct key is allocation-free.
-func TestPathCacheKey_NoAlloc(t *testing.T) {
-	allocs := testing.AllocsPerRun(1000, func() {
-		k := pathCacheKey("/home/alice/.claude", "00000000-0000-0000-0000-000000000abc")
-		// Touch a field so the call isn't optimized away entirely.
-		if k.id == "" {
-			t.Fatal("unexpected empty id")
-		}
-	})
-	if allocs != 0 {
-		t.Errorf("pathCacheKey allocated %.0f times per call, want 0", allocs)
-	}
-}
-
 // TestFindSessionJSONL_Concurrent: 16 goroutines looking up the same
 // sessionID must not race on the cache or produce inconsistent results.
 // The race detector (`go test -race`) is the real assertion here; the

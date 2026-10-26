@@ -481,3 +481,39 @@ func rune2hex(i int) string {
 	const hex = "0123456789abcdef"
 	return string([]byte{hex[i/16], hex[i%16]})
 }
+
+// TestDecode_KeepsUUIDLessEntries: persist's gap record is UUID-less by
+// design, and a producer bug can leave others without one. decodeRecords
+// (shared by the full-scan and idx paths) must keep them: dropping would lose
+// the gap marker and history.
+func TestDecode_KeepsUUIDLessEntries(t *testing.T) {
+	p, src, sink, _ := newPersister(t, "k")
+	for _, e := range []clievent.EventEntry{
+		{UUID: "a", Time: 1000, Type: "user", Summary: "q"},
+		{Time: 2000, Type: clievent.KindPersistGap, Detail: "dropped=3"},
+		{Time: 3000, Type: "text", Summary: "producer bug 1"},
+		{Time: 4000, Type: "text", Summary: "producer bug 2"},
+	} {
+		persistOne(t, sink, e)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = p.Flush(ctx)
+
+	got, err := src.LoadLatest(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("LoadLatest: %v", err)
+	}
+	var gaps, uuidless int
+	for _, e := range got {
+		if e.UUID == "" {
+			uuidless++
+			if e.Type == clievent.KindPersistGap {
+				gaps++
+			}
+		}
+	}
+	if gaps != 1 || uuidless != 3 {
+		t.Errorf("%d gap records and %d UUID-less entries, want 1 and 3", gaps, uuidless)
+	}
+}

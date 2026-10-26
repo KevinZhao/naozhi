@@ -35,23 +35,9 @@ const maxFileBytes = 16 << 20 // 16 MiB
 // ctxCheckEvery is how many parsed lines elapse between context.Done checks.
 const ctxCheckEvery = 100
 
-// scanBufPool recycles the 64 KiB initial bufio.Scanner buffer across pages.
-var scanBufPool = sync.Pool{
-	New: func() any {
-		b := make([]byte, 0, 64*1024)
-		return &b
-	},
-}
-
 // maxLineBytes is the longest rollout record the scan accepts; longer records
 // are skipped rather than aborting the scan (#2448).
 const maxLineBytes = 1 << 20
-
-// lineReaderPool recycles the bufio.Reader between file and scanner that lets
-// an oversized record be drained and the scan resumed (see parseFile).
-var lineReaderPool = sync.Pool{
-	New: func() any { return bufio.NewReaderSize(nil, 64*1024) },
-}
 
 // Source is the codex rollout-JSONL-backed history.Source.
 type Source struct {
@@ -214,39 +200,20 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 			skipPartialFirstLine = true
 		}
 	}
-	// br lets an oversized record be drained and a fresh scanner resume without
-	// losing buffered bytes (bufio.Scanner is unusable after ErrTooLong) (#2448).
-	br := lineReaderPool.Get().(*bufio.Reader)
-	br.Reset(io.LimitReader(f, maxFileBytes))
-	defer func() {
-		br.Reset(nil)
-		lineReaderPool.Put(br)
-	}()
-	// The initial buffer is pooled: bufio.Scanner only grows the slice we hand
-	// it, so returning it at zero length recycles the backing array.
-	bufPtr := scanBufPool.Get().(*[]byte)
-	defer func() {
-		b := (*bufPtr)[:0]
-		*bufPtr = b
-		scanBufPool.Put(bufPtr)
-	}()
-	scanner := bufio.NewScanner(br)
-	scanner.Buffer(*bufPtr, maxLineBytes)
-	if skipPartialFirstLine && !scanner.Scan() && errors.Is(scanner.Err(), bufio.ErrTooLong) {
-		// The partial first line is itself oversized. With an error set,
-		// bufio.Scanner would hand the buffered prefix back as a final token
-		// and it would decode as a whole record; drain and rebuild instead.
-		if !discardRestOfLine(br) {
-			return nil
-		}
-		scanner = bufio.NewScanner(br)
-		scanner.Buffer(*bufPtr, maxLineBytes)
-	}
+	// history.ReadJSONLLine skips an oversized record instead of aborting the
+	// read like bufio.Scanner (#2448).
+	br := bufio.NewReaderSize(io.LimitReader(f, maxFileBytes), 64*1024)
 
 	out := make([]clievent.EventEntry, 0, 16)
 	processed := 0
-	for {
-		for scanner.Scan() {
+	for first := true; ; first = false {
+		line, oversized, err := history.ReadJSONLLine(br, maxLineBytes)
+		// The partial first line is dropped, oversized or not.
+		if first && skipPartialFirstLine {
+			if oversized && err != nil {
+				return nil // the whole window is one unterminated oversized line
+			}
+		} else {
 			if processed%ctxCheckEvery == 0 {
 				select {
 				case <-ctx.Done():
@@ -255,49 +222,17 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 				}
 			}
 			processed++
-
-			line := scanner.Bytes()
-			if len(line) == 0 {
-				continue
+			if !oversized && len(line) > 0 {
+				if entry, ok := decodeLine(line); ok && (beforeMS <= 0 || entry.Time < beforeMS) {
+					out = append(out, entry)
+				}
 			}
-			entry, ok := decodeLine(line)
-			if !ok {
-				continue
-			}
-			if beforeMS > 0 && entry.Time >= beforeMS {
-				continue
-			}
-			out = append(out, entry)
 		}
-		err := scanner.Err()
-		if !errors.Is(err, bufio.ErrTooLong) {
-			if err != nil {
-				slog.Debug("codexjsonl: scanner error treated as EOF", "err", err)
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				slog.Debug("codexjsonl: read error treated as EOF", "err", err)
 			}
 			return out
-		}
-		// One record exceeds maxLineBytes (#2448): drop the remainder and
-		// resume with a fresh scanner so later records still surface.
-		if !discardRestOfLine(br) {
-			return out
-		}
-		scanner = bufio.NewScanner(br)
-		scanner.Buffer(*bufPtr, maxLineBytes)
-	}
-}
-
-// discardRestOfLine drops bytes from br up to and including the next '\n'.
-// Returns false when the input ends before a newline is seen.
-func discardRestOfLine(br *bufio.Reader) bool {
-	for {
-		_, err := br.ReadSlice('\n')
-		switch {
-		case err == nil:
-			return true
-		case errors.Is(err, bufio.ErrBufferFull):
-			continue
-		default:
-			return false
 		}
 	}
 }
