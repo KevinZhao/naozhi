@@ -244,6 +244,7 @@ func TestStartupDefaultBackendID_MatchesInitBackendWrappers(t *testing.T) {
 		name     string
 		backend  string
 		backends []string
+		want     string // optional: expected default backend id
 	}{
 		{name: "single default", backend: ""},
 		{name: "single kiro", backend: "kiro"},
@@ -254,7 +255,7 @@ func TestStartupDefaultBackendID_MatchesInitBackendWrappers(t *testing.T) {
 		{name: "cli.backend unknown", backend: "definitely-not-a-backend", backends: []string{"kiro", "claude"}},
 		{name: "unknown id first", backends: []string{"definitely-not-a-backend", "kiro"}},
 		{name: "leading empty id", backends: []string{"", "kiro", "claude"}},
-		{name: "leading empty id, kiro only", backends: []string{"", "kiro"}},
+		{name: "leading empty id, kiro only", backends: []string{"", "kiro"}, want: "kiro"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -272,6 +273,9 @@ func TestStartupDefaultBackendID_MatchesInitBackendWrappers(t *testing.T) {
 			}
 			if bws.DefaultID != bws.Default.BackendID {
 				t.Errorf("DefaultID = %q, default wrapper = %q", bws.DefaultID, bws.Default.BackendID)
+			}
+			if c.want != "" && bws.Default.BackendID != c.want {
+				t.Errorf("default wrapper = %q, want %q", bws.Default.BackendID, c.want)
 			}
 			if _, ok := bws.Runtimes[bws.DefaultID]; !ok {
 				t.Errorf("DefaultID %q has no runtime; runtimes=%v", bws.DefaultID, bws.Runtimes)

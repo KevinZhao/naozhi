@@ -168,7 +168,7 @@ func recoveryHint() string {
 		"  1. Inspect journal:   sudo journalctl -u naozhi --since '5 min ago'",
 		"  2. Check unit file:   sudo cat " + systemdUnitPath,
 		"  3. Remove if stuck:   sudo naozhi uninstall",
-		"  4. Re-run install:    sudo naozhi install",
+		"  4. Re-run install:    sudo naozhi install -force",
 	}, "\n")
 }
 

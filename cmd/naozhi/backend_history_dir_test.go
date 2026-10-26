@@ -65,5 +65,8 @@ func TestBackendHistoryDirs_OneEntryPerRegisteredBackend(t *testing.T) {
 		if want := osutil.ExpandHome(p.HistoryDir); got[p.ID] != want {
 			t.Errorf("backendHistoryDirs()[%q] = %q, want %q", p.ID, got[p.ID], want)
 		}
+		if strings.HasPrefix(got[p.ID], "~") {
+			t.Errorf("backendHistoryDirs()[%q] = %q: leading ~ was not expanded", p.ID, got[p.ID])
+		}
 	}
 }
