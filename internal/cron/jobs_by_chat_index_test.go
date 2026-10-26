@@ -43,9 +43,8 @@ func TestJobsByChatIndex_TracksAddDelete(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := NewScheduler(SchedulerConfig{
-		StorePath:      filepath.Join(dir, "cron.json"),
-		MaxJobs:        50,
-		MaxJobsPerChat: 10,
+		StorePath: filepath.Join(dir, "cron.json"),
+		MaxJobs:   50,
 	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -115,9 +114,8 @@ func TestFindByPrefixLocked_UsesPerChatIndex(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := NewScheduler(SchedulerConfig{
-		StorePath:      filepath.Join(dir, "cron.json"),
-		MaxJobs:        50,
-		MaxJobsPerChat: 10,
+		StorePath: filepath.Join(dir, "cron.json"),
+		MaxJobs:   50,
 	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)

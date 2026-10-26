@@ -767,8 +767,8 @@ func TestRedactPathsInCronError_FastPathLengthBoundary(t *testing.T) {
 	}
 }
 
-// TestSchedulerMaxJobsPerChat pins the per-chat cap wiring — default
-// path, override path, and the zero-means-default fallback. R208-BL2.
+// TestSchedulerMaxJobsPerChat pins the per-chat cap wiring at the
+// DefaultMaxJobsPerChat default. R208-BL2.
 func TestSchedulerMaxJobsPerChat(t *testing.T) {
 	t.Parallel()
 
@@ -795,29 +795,6 @@ func TestSchedulerMaxJobsPerChat(t *testing.T) {
 		got := addN(t, s, DefaultMaxJobsPerChat+1)
 		if got != DefaultMaxJobsPerChat {
 			t.Errorf("default cap: accepted %d jobs, want %d", got, DefaultMaxJobsPerChat)
-		}
-	})
-
-	t.Run("override_lower", func(t *testing.T) {
-		t.Parallel()
-		s := NewScheduler(SchedulerConfig{MaxJobs: 500, MaxJobsPerChat: 5}, SchedulerDeps{})
-		if err := s.Start(); err != nil {
-			t.Fatalf("Start: %v", err)
-		}
-		defer s.Stop()
-		got := addN(t, s, 6)
-		if got != 5 {
-			t.Errorf("override cap=5: accepted %d jobs, want 5", got)
-		}
-	})
-
-	t.Run("zero_falls_back_to_default", func(t *testing.T) {
-		t.Parallel()
-		// Explicit zero must behave identically to unset — no way to
-		// disable the cap without recompiling.
-		s := NewScheduler(SchedulerConfig{MaxJobs: 500, MaxJobsPerChat: 0}, SchedulerDeps{})
-		if s.maxJobsPerChat != DefaultMaxJobsPerChat {
-			t.Errorf("zero cap: resolved to %d, want %d (default)", s.maxJobsPerChat, DefaultMaxJobsPerChat)
 		}
 	})
 }
@@ -896,38 +873,20 @@ func TestKnownSessionIDs_NoJobsReturnsEmpty(t *testing.T) {
 	}
 }
 
-// TestSchedulerConfig_RunsKeepPlumbing verifies that SchedulerConfig.
-// RunsKeepCount and RunsKeepWindow flow through to the run store. Zero
-// values must fall back to the documented defaults so existing callers
-// that omit the fields keep prior behaviour. R250-GO-3.
-func TestSchedulerConfig_RunsKeepPlumbing(t *testing.T) {
+// TestSchedulerRunsKeepDefaults pins the run-history retention every
+// Scheduler gets from the run store: DefaultRunsKeepCount newest records and
+// DefaultRunsKeepWindow age. R250-GO-3.
+func TestSchedulerRunsKeepDefaults(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-
-	// Custom values are preserved.
-	custom := NewScheduler(SchedulerConfig{
-		StorePath:      filepath.Join(dir, "custom.json"),
-		MaxJobs:        5,
-		RunsKeepCount:  17,
-		RunsKeepWindow: 3 * time.Hour,
-	}, SchedulerDeps{})
-	if got := custom.runs.KeepCount(); got != 17 {
-		t.Errorf("keepCount: got %d, want 17", got)
-	}
-	if got := custom.runs.KeepWindow(); got != 3*time.Hour {
-		t.Errorf("keepWindow: got %v, want 3h", got)
-	}
-
-	// Zero values fall back to defaults — additive contract.
-	dflt := NewScheduler(SchedulerConfig{
-		StorePath: filepath.Join(dir, "default.json"),
+	s := NewScheduler(SchedulerConfig{
+		StorePath: filepath.Join(t.TempDir(), "cron.json"),
 		MaxJobs:   5,
 	}, SchedulerDeps{})
-	if got := dflt.runs.KeepCount(); got != DefaultRunsKeepCount {
-		t.Errorf("default keepCount: got %d, want %d", got, DefaultRunsKeepCount)
+	if got := s.runs.KeepCount(); got != DefaultRunsKeepCount {
+		t.Errorf("keepCount: got %d, want %d", got, DefaultRunsKeepCount)
 	}
-	if got := dflt.runs.KeepWindow(); got != DefaultRunsKeepWindow {
-		t.Errorf("default keepWindow: got %v, want %v", got, DefaultRunsKeepWindow)
+	if got := s.runs.KeepWindow(); got != DefaultRunsKeepWindow {
+		t.Errorf("keepWindow: got %v, want %v", got, DefaultRunsKeepWindow)
 	}
 }
 

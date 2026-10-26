@@ -16,9 +16,9 @@ import (
 // clock coupling explicit and preventing an extra s.now() call inside
 // the helper that would advance step-based test clocks a third time.
 //
-// This test verifies end-to-end: a fake clock that is 200ms ahead of
-// startedAt produces elapsed = 200ms, which exceeds the 1ms
-// slowThreshold and fires CronExecutionSlowTotal. If the caller were
+// This test verifies end-to-end: a fake clock that is 31s ahead of
+// startedAt produces elapsed = 31s, which exceeds the 30s
+// defaultCronSlowThreshold and fires CronExecutionSlowTotal. If the caller were
 // still using time.Since(startedAt) the elapsed would be near-zero
 // (test runs instantly) and the counter would NOT fire.
 //
@@ -29,19 +29,16 @@ func TestObserveSuccessLatency_UsesInjectableClock(t *testing.T) {
 	snap := jobSnapshot{jobID: "job-clock-latency"}
 	res := SendResult{Text: "ok", SessionID: "s-clock"}
 
-	// Fake clock is 200ms ahead of startedAt so elapsed = 200ms.
+	// Fake clock is just past defaultCronSlowThreshold ahead of startedAt.
 	t0 := time.Date(2026, 6, 7, 10, 0, 0, 0, time.UTC)
-	clk := &fakeClock{now: t0.Add(200 * time.Millisecond)}
+	clk := &fakeClock{now: t0.Add(defaultCronSlowThreshold + time.Second)}
 	startedAt := t0
 
-	s := &Scheduler{
-		clock:         clk,
-		slowThreshold: time.Millisecond, // 1ms threshold → 200ms elapsed fires the counter
-	}
+	s := &Scheduler{clock: clk}
 
 	// Compute elapsed the same way the production call site does:
 	// s.now().Sub(startedAt) uses the injectable clock, not time.Since.
-	elapsed := s.now().Sub(startedAt) // = 200ms via fake clock
+	elapsed := s.now().Sub(startedAt) // = 31s via fake clock
 
 	before := metrics.CronExecutionSlowTotal.Value()
 	s.observeSuccessLatency(elapsed, res, snap, lg)

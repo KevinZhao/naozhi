@@ -148,8 +148,8 @@ const (
 )
 
 // CronRun history limits, re-exported from the run store that enforces them.
-// The defaults are fallbacks when SchedulerConfig leaves RunsKeepCount /
-// RunsKeepWindow zero; MaxRunRecordBytes is a per-record format invariant.
+// The keep defaults are the retention policy every Scheduler uses;
+// MaxRunRecordBytes is a per-record format invariant.
 const (
 	DefaultRunsKeepCount  = runstore.DefaultKeepCount
 	DefaultRunsKeepWindow = runstore.DefaultKeepWindow

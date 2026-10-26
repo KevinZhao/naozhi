@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/costledger"
+	"github.com/naozhi/naozhi/internal/runtelemetry"
 
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -526,8 +527,8 @@ func (s *Scheduler) execSnapshotAndEmit(jobID string, viaTriggerNow bool, runID 
 	// Broadcast started — placed after snapshot so the event carries the
 	// effective fresh flag and after notifyTo resolution so server-side
 	// hub locks aren't held while we read s.tbl.mu.
-	s.emitRunStarted(RunStartedEvent{
-		JobID:     snap.jobID,
+	s.emitRunStarted(runtelemetry.RunStartedEvent{
+		OwnerID:   snap.jobID,
 		RunID:     runID,
 		StartedAt: startedAt,
 		Trigger:   trigger,
@@ -870,7 +871,8 @@ func (s *Scheduler) releasePersistentProcess(key string, lg *slog.Logger) {
 
 // observeSuccessLatency emits the three success-path latency signals for a
 // completed cron run: the "cron job completed" info log, the execution-duration
-// histogram, and the slow-tail counter + warn when elapsed exceeds slowThreshold.
+// histogram, and the slow-tail counter + warn when elapsed exceeds
+// defaultCronSlowThreshold.
 //
 // Observed here (not in finishRun) because only the success path carries a
 // meaningful end-to-end latency — error / timeout / canceled paths are counted
@@ -882,19 +884,15 @@ func (s *Scheduler) observeSuccessLatency(elapsed time.Duration, result SendResu
 	lg.Info("cron job completed",
 		"result_len", len(result.Text),
 		"elapsed_ms", elapsed.Milliseconds())
-	// Histogram buckets straddle slowThreshold so the histogram and the slow
-	// counter below stay consistent (#392).
+	// Histogram buckets straddle defaultCronSlowThreshold so the histogram
+	// and the slow counter below stay consistent (#392).
 	metrics.ObserveCronExecutionDuration(elapsed.Milliseconds())
-	slowThreshold := s.slowThreshold
-	if slowThreshold <= 0 {
-		slowThreshold = defaultCronSlowThreshold
-	}
-	if elapsed > slowThreshold {
+	if elapsed > defaultCronSlowThreshold {
 		metrics.CronExecutionSlowTotal.Add(1)
 		lg.Warn("cron execution slow",
 			"job_id", snap.jobID,
 			"elapsed_ms", elapsed.Milliseconds(),
-			"threshold_ms", slowThreshold.Milliseconds())
+			"threshold_ms", defaultCronSlowThreshold.Milliseconds())
 	}
 }
 

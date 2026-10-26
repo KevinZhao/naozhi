@@ -223,7 +223,6 @@ curl -s -H "Authorization: Bearer $TOK" http://127.0.0.1:8180/api/debug/vars | j
 | `naozhi_cron_run_inflight` | 当前在跑的 cron run 数（run scaffold 进入时 +1，defer 里 -1） | 长期不回 0 而没有 job 在跑 = 某个 run 卡死；与 `naozhi_cron_run_started_total` − `naozhi_cron_run_ended_total` 对照 |
 | `naozhi_cron_execution_duration_ms_bucket` | expvar.Map，cron 成功路径耗时的累积直方图：键为桶上界（ms：100 / 500 / 1000 / 5000 / 15000 / 30000 / 60000 / 120000 / 300000）加 `+Inf`，每个桶计 `<=` 上界的次数；`+Inf` 等于总观测数 | 高桶占比上升 = job 整体变慢；30000 桶对应 `naozhi_cron_execution_slow_total` 的阈值 |
 | `naozhi_cron_execution_duration_ms_sum` | 上述直方图观测值（ms）的累加和 | 均值 = `sum` / bucket 的 `"+Inf"` 键 |
-| `naozhi_cron_watchdog_parked_interrupt_goroutines` | **实时**数：watchdog 的 interrupt 调用超时后仍卡在 wedged stdin 写入上的 goroutine（#1632）；返回时 -1 | 持续非零 = 当前仍有泄漏（常见于不走 `session.Reset` 的持久 job）；与累计的 `naozhi_cron_watchdog_interrupt_timeout_total` 对照区分"触发过但已回收"和"现在还漏着" |
 | `naozhi_upstream_reqsem_inflight` | 节点侧当前占着 reqSem 槽位的反向 RPC 请求数（容量 16） | 持续接近 16 = primary 派发快于 handleRequest 收尾；配合 `naozhi_upstream_reqsem_wait_total` 看 |
 | `naozhi_upstream_connector_backoff_millis` | 节点 connector 当前的重连退避（ms，Set 而非 Add；每进程一个 Connector） | 稳定在 1000 = 重连健康；钉在 `circuitBreakerBackoff`（5 分钟）= 熔断已触发，查与 primary 的链路 |
 

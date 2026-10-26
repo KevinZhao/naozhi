@@ -37,7 +37,7 @@ func (t *jobTable) load(restored []*Job, maxJobs, maxPerChat int) loadResult {
 			continue
 		}
 		if t.chatJobCount[chatKeyFor(j.Platform, j.ChatID)] >= maxPerChat {
-			slog.Warn("cron job over per-chat cap; skipping (raise cron.MaxJobsPerChat to restore)",
+			slog.Warn("cron job over per-chat cap; skipping",
 				"job_id", j.ID, "platform", j.Platform, "chat_id", j.ChatID, "cap", maxPerChat)
 			r.skippedOverPerChat++
 			continue
