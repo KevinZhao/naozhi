@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cliinfo"
@@ -139,3 +140,7 @@ func TestEmitSpawnDiags_MetricsAndDedup(t *testing.T) {
 		t.Fatalf("new scope logged warn=%d, want 2", h.counts[slog.LevelWarn])
 	}
 }
+
+// testRun numbers the runs of tests that key package-level dedup state, so
+// each run under -count uses keys the earlier runs did not.
+var testRun atomic.Int64
