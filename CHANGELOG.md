@@ -5,8 +5,20 @@
 
 ## [Unreleased]
 
+## [0.1.49] - 2026-10-26
+
+第三轮「做减法」：逐包删掉钉实现细节、钉性能、钉日志文案的测试，以及冷路径上的缓存和 sync.Pool、死代码和历史文档，再加上几项 owner 确认删除的调试接口与配置开关。从 0.1.48 起 +6.8k / −77k 行。基本功能保持不变：claude / kiro 会话经 shim 跑，重启 naozhi 后仍能接回；dashboard、cron、IM、多节点、语音、自升级都不受影响。升级前请先看 **Removed**。
+
 ### Removed
 
+- **BREAKING：`/health` 与 `/api/sessions` 去掉没有读者的诊断字段**（#3775、#3753）：`/health` 的 `system`、`goroutines`、`watchdog`、`ws_dropped`、`run_stores`、`spawn_diags`、`platform_capabilities`、`eventlog.fs_type` / `eventlog.fs_supported`，`session_store` 里的 `need_restart`；`/api/sessions` 的 `stats.system`。`naozhi doctor` 读取的字段与 `status` 不变。
+- **BREAKING：删除 `/api/v1/*` 路径别名与 `POST /api/projects/planner/restart`**（#3751）：两者都没有调用方，访问会收到 404。
+- **session store**（#3753、#3774）：
+  - 不再读写 `sessions.meta.json`，可以删掉这个文件；
+  - 启动时读不了 `sessions.json` 就拒绝写入，运行中不再自动重试解封，修好文件后需要重启；
+  - `sessions.json` 不再带 `prev_session_origins`；
+  - 启动时的 auto-chain retire 迁移已移除：直接用 v0.0.30 之前生成的 `sessions.json` 升级时，旧的自动续接段不会再被清理；
+  - 环境变量 `NAOZHI_LEAK_RECOVERY` 及其背后默认关闭的 leak recovery 已删除。
 - **BREAKING：删除没人改的配置开关**（#3782）。下面这些键不再读取，行为固定为原默认值；配置里还留着时启动报 `config-deprecated`（服务照常启动，`naozhi config check` 以 1 退出），删掉即可：
   - `projects.public_tmp` 与 `__public_tmp__` 伪项目：dashboard 从来没有入口，只能手工调 API。现在这个名字按普通项目处理（不存在则 404）。`include_root` 的 UID / 敏感文件名 / 非常规文件类型闸门和审计日志不变；
   - `session.project_stable_key`：项目级稳定 session key 始终开启，`/api/projects` 与 `stats.projects` 始终带 `stableKey`；
@@ -20,7 +32,17 @@
 
 ### Changed
 
+- **dashboard 静态资源**（#3748）：`static/` 只嵌入一次，由一条 `GET /static/{file...}` 路由提供。URL、鉴权、缓存头、ETag 和预压缩都不变；唯一可见的差别是匿名请求不存在的 `/static/x.js` 会先得到 401，以前是 404。
+- **开发与内部实现**，不影响运行：
+  - 删除钉实现细节、钉性能、钉日志文案的测试，重复入口的测试改为表驱动（#3743 #3745 #3747 #3750 #3754–#3764 #3766 #3769 #3771 #3783 #3784 #3786 等）；
+  - 去掉冷路径上的缓存和 sync.Pool、自写环形缓冲和只给测试用的接缝（#3746 #3752 #3753 #3779 #3781 #3785 #3786 #3787 #3788）；
+  - 删除死代码（#3751 #3778 #3784），删除 20 篇已实装的历史 RFC，精简 DESIGN、运维文档与 skills（#3777 等）；
+  - 删除 dashboard JS 里的死函数、死 CSS 与 tsc 时代的 JSDoc（#3772）。
 - **`config.example.yaml` 注释精简**（#3776）：从 634 行压到 415 行，删掉了已移除拼写、`auto_chain` 沿革之类的考古注释；所有键、取值和注释掉的示例都没变。`im_access` 段原先被出站 webhook 的注释从中间截断，现在拆成两段，并删掉了「改动需要重启」这句错误说明（`im_access` 支持 `naozhi config reload` 热加载）。
+
+### Fixed
+
+- **dashboard 用户气泡顺序**（#3789）：passthrough 模式下连发两条消息时，event log 记录的顺序可能和 CLI 实际收到的相反，dashboard 上两个气泡会对调。现在写入 event log 和写入 shim 在同一把锁内完成，顺序一致。
 
 ## [0.1.48] - 2026-10-26
 
