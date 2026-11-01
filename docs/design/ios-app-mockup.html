@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>naozhi iOS app —— 界面草图（对应 docs/rfc/planner.md v5）</title>
+<title>naozhi iOS app —— 界面草图（对应 docs/rfc/planner.md v7，D77）</title>
 <style>
   :root {
     --bg: #f2f2f7; --card: #ffffff; --text: #1c1c1e; --muted: #8e8e93; --line: #e5e5ea;
@@ -81,239 +81,235 @@
   .la .bar { background: rgba(255,255,255,.25); } .la .bar > i { background: #7ee0a1; }
   .di { position: absolute; top: 11px; left: 50%; transform: translateX(-50%); height: 37px; background: #000; border-radius: 20px; color: #fff; display: flex; align-items: center; gap: 10px; padding: 0 14px; font-size: 12px; font-weight: 600; white-space: nowrap; }
   .dot { width: 8px; height: 8px; border-radius: 4px; display: inline-block; }
+
+  .tab { width: 62px; }
+  .rcpt { font-size: 12px; color: #5b34c2; background: #f3eeff; border-radius: 10px; padding: 6px 10px; margin: 4px 0 8px; display: inline-block; }
+  .undo { font-size: 11px; color: #a35f00; background: #fff0d9; border-radius: 8px; padding: 2px 8px; display: inline-block; margin-top: 6px; }
+  .lvl { display: flex; gap: 4px; margin-top: 8px; }
+  .lvl span { flex: 1; text-align: center; font-size: 11px; padding: 6px 0; border-radius: 8px; background: #eef0f5; color: #3a3a3c; }
+  .lvl span.on { background: #ede5ff; color: #5b34c2; font-weight: 700; }
+  .echo { font-size: 12px; background: #f3eeff; border-left: 3px solid var(--purple); border-radius: 8px; padding: 8px 10px; margin-top: 8px; }
+  .diff { font: 11.5px/1.5 ui-monospace, Menlo, monospace; background: #fff; border-radius: 10px; overflow: hidden; border: 1px solid var(--line); }
+  .diff div { padding: 0 8px; white-space: pre; overflow: hidden; }
+  .diff .h { background: #f6f8fa; color: #57606a; padding: 4px 8px; font-family: -apple-system, "PingFang SC", sans-serif; font-weight: 600; }
+  .diff .a { background: #e6ffec; } .diff .d { background: #ffebe9; }
+  .seg { display: flex; background: #e3e3e8; border-radius: 9px; padding: 2px; margin: 0 4px 10px; }
+  .seg span { flex: 1; text-align: center; font-size: 12.5px; padding: 5px 0; border-radius: 7px; color: #3a3a3c; }
+  .seg span.on { background: #fff; font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+  .file { display: flex; justify-content: space-between; font-size: 13px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+  .file:last-child { border: none; }
+  .plus { color: #1d8a3c; } .minus { color: #c4281f; }
+
+  .tab { width: 100px; }
+  .new { outline: 2px dashed #fb8f44; outline-offset: 2px; border-radius: 10px; position: relative; }
+  .newtag { position: absolute; top: -9px; right: 8px; background: #fb8f44; color: #fff; font-size: 10px; font-weight: 700; padding: 0 6px; border-radius: 6px; line-height: 16px; z-index: 3; }
+  .wrow { display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .wrow:last-child { border: none; }
+  .rdot { width: 8px; height: 8px; border-radius: 4px; background: var(--red); display: inline-block; margin-right: 6px; }
+  .pdot { width: 8px; height: 8px; border-radius: 4px; background: var(--purple); display: inline-block; margin-right: 6px; }
+  .sheet { position: absolute; left: 0; right: 0; bottom: 0; height: 560px; background: #fff; border-radius: 16px 16px 0 0; box-shadow: 0 -8px 30px rgba(0,0,0,.2); padding: 8px 14px; z-index: 4; }
+  .grab { width: 40px; height: 5px; border-radius: 3px; background: #d1d1d6; margin: 2px auto 10px; }
+  .dim { position: absolute; inset: 0; background: rgba(0,0,0,.25); z-index: 3; }
+  .lrow { background: #fff; border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; font-size: 14px; }
+  .lrow .m { font-size: 12px; color: var(--muted); margin-top: 2px; }
 </style>
 </head>
 <body>
 <h1>naozhi iOS app —— 界面草图</h1>
-<p class="sub">对应 <code>docs/rfc/planner.md</code> v5 与 <code>docs/design/ios-app.md</code>。四个标签：对话 · 收件箱 · 系统（懂系统）· 我（懂你）；锁屏承载推送与 Live Activity。所有内容均为示意数据。</p>
-
+<p class="sub">对应 <code>docs/rfc/planner.md</code> v7（D77）与 <code>docs/design/ios-app.md</code>。三个标签：Planner（新增：等你 · 答应你的 · Planner 对话）· 会话（现有）· 设置（懂你 · 节点 · 系统）。工作台是底部弹出面板。橙色虚线框为相对现有界面新增的部分。所有内容均为示意数据。</p>
 <div class="grid">
 
-<!-- 1. 锁屏 -->
 <div class="shot">
-  <h2>① 锁屏：推送三级 + Live Activity</h2>
+  <h2>① 锁屏：推送三级 + Live Activity + 早报</h2>
   <div class="phone lock">
     <div class="di"><span class="dot" style="background:#30d158"></span>3 在跑<span class="dot" style="background:#ff9f0a"></span>1 等你</div>
     <div class="status"><span></span><span>5G ▮▮▮</span></div>
     <div class="time">9:41</div>
-    <div class="date">10月19日 星期日</div>
-
+    <div class="date">10月26日 星期一</div>
     <div class="glass la" style="margin-top:22px">
       <div class="app"><span>naozhi · 正在替你盯着 3 件事</span><span>托管中</span></div>
-      <div class="h">处理 review issues（ultracode）</div>
+      <div class="h">处理 review issues</div>
       <div class="bar"><i style="width:72%"></i></div>
-      <div class="row"><span>阶段 4/5 · 18/24 PR</span><span>自动继续 2/8</span></div>
-      <div class="row" style="opacity:.8"><span>ClickHouse 压测 · 跑第 3 轮</span><span>flaky 清扫 · 提议 2 条</span></div>
+      <div class="row"><span>正在跑测试 · 第 3/5 项验收</span><span>18/24 PR</span></div>
+      <div class="row" style="opacity:.8"><span>ClickHouse 压测 · 等你</span><span>答应你的 · 2 件</span></div>
       <div class="acts"><span>暂停托管</span><span>打开</span></div>
     </div>
-
     <div class="glass">
-      <div class="app"><span>naozhi · 需要你决定 · 时效</span><span>刚刚</span></div>
+      <div class="app"><span>naozhi · 需要你决定 · 每次确认</span><span>刚刚</span></div>
       <div class="h">发版 v0.1.46？</div>
       <div class="b">CI 绿 · 12 个 PR 已合并 · changelog 草稿已备好（你过去 9 次合并后都发版）</div>
       <div class="acts"><span>发版（Face ID）</span><span>稍后</span><span>查看</span></div>
     </div>
-
     <div class="glass">
-      <div class="app"><span>naozhi · 系统 · 时效</span><span>3 分钟前</span></div>
-      <div class="h">Midway 2 小时后过期</div>
-      <div class="b">今晚有 2 个托管任务要用到。现在跑一下 mwinit，可以避免半夜失败。</div>
-      <div class="acts"><span>我去处理</span><span>1 小时后提醒</span></div>
+      <div class="app"><span>naozhi · 早报</span><span>8:30</span></div>
+      <div class="h">1 件事等你 · 1 个承诺今天到期</div>
+      <div class="b">昨晚合并 9 个 PR；Midway 2 小时后过期，今晚 2 个托管任务要用；周五客户会的会前材料已起草。</div>
+      <div class="acts"><span>打开早报</span><span>我去 mwinit</span></div>
     </div>
   </div>
-  <p class="note">紧急 / 需人决定 → time-sensitive，带操作按钮，敏感操作要 Face ID；里程碑 → active；其余进日报（passive）。Live Activity 只有一个"总览"，避免每个会话各占一块；灵动岛显示在跑 / 等你计数。</p>
+  <p class="note">只推三类时刻：需要你决定（每次确认的动作要 Face ID）、守护型提醒、早报。早报由网关确定性生成，没有内容就不发。</p>
 </div>
 
-<!-- 2. 对话 -->
 <div class="shot">
-  <h2>② 对话：一个输入框，会话以卡片出现</h2>
+  <h2>② Planner 标签（新增）：顶部是等你与答应你的，下面是 Planner 对话</h2>
   <div class="phone">
     <div class="island"></div>
     <div class="status"><span>9:41</span><span>5G ▮▮▮</span></div>
-    <div class="nav"><div class="row"><span class="title">对话</span><span class="chip green">环境正常</span></div></div>
-    <div class="strip"><span class="chip blue">3 在跑</span><span class="chip orange">1 等你</span><span class="chip">2 待审</span><span class="chip">naozhi ▾</span></div>
+    <div class="nav"><div class="row"><span class="title">Planner</span><span class="chip purple">只出意见</span></div></div>
     <div class="content">
-      <div class="bubble me">那个 TGW 方案图里，把共享 VPC 那块去掉，换成网络账号集中出口</div>
-      <div class="card sess">
-        <div class="t">JD 网络架构图 <span class="chip green">已完成</span></div>
-        <div class="muted">执行会话 · opus 5.5 · ~/Workspace/JD</div>
-        <div style="margin-top:6px;font-size:13px">已改 arch.html：移除共享 VPC，新增 Network 账号 + TGW 集中出口。</div>
+      <div class="card" style="padding:8px 12px">
+        <div class="wrow"><span><span class="rdot"></span><b>发版 v0.1.46？</b> <span class="muted">每次确认</span></span><span style="color:var(--blue)">处理 ›</span></div>
+        <div class="wrow"><span><span class="rdot"></span><b>副本数 2 → 3？</b> <span class="muted">40 分钟</span></span><span style="color:var(--blue)">处理 ›</span></div>
+        <div class="wrow"><span><span class="pdot"></span>答应你的 · 2 <span class="muted">JD 会前材料今天到期</span></span><span class="muted">›</span></div>
       </div>
-      <div class="who">🧭 Planner · 顾问意见</div>
-      <div class="bubble pl advice">提醒一下：上周三你和客户确认过"出口要按 BU 分账"，集中出口后 NAT 费用会落在网络账号。要不要在图上标出分摊方式？<div class="muted" style="margin-top:4px">依据：10/15 讨论记录 · 懂你/决定与先例</div></div>
-      <div class="bubble me">要，加一行注释</div>
+      <div class="who">⚙ 早报 · 08:30</div>
+      <div class="bubble pl">昨晚合并 9 个 PR · 1 件事等你 · 1 个承诺今天到期</div>
+      <div class="bubble me">交给你：review issues 剩下的处理完，每个一个 PR，我出去一趟</div>
+      <div class="rcpt">🧭 收到 · 交给 naozhi 工作区 · 已登记承诺</div>
       <div class="card sess">
-        <div class="t">处理 review issues <span class="chip blue">托管中</span><span class="chip purple">Planner 派出</span></div>
-        <div class="bar"><i style="width:72%"></i></div>
-        <div class="muted">阶段 4/5 · 18/24 PR · 最近：⚙ 自动继续（E · 第 2/8 次）</div>
+        <div class="t">处理 review issues <span class="chip blue">托管中</span></div>
+        <div class="muted" style="margin-top:4px">正在跑测试 · 第 3/5 项验收 · 18/24 PR</div>
+        <div class="undo">⚙ 已按建议执行：方案 A · 撤回</div>
       </div>
     </div>
     <div class="composer">
-      <div class="target">→ 发往：JD 网络架构图 ▾　　＋ 新话题</div>
-      <div class="inputrow"><span class="round">＋</span><span class="input">说点什么…</span><span class="round">🎙</span><span class="round send">↑</span></div>
+      <div class="target">→ Planner</div>
+      <div class="inputrow"><span class="round">＋</span><span class="input">交代、追问、改设置…</span><span class="round">🎙</span><span class="round send">↑</span></div>
     </div>
-    <div class="tabbar">
-      <div class="tab on"><span class="ic">💬</span>对话</div>
-      <div class="tab"><span class="ic">📥</span>收件箱<span class="badge">3</span></div>
-      <div class="tab"><span class="ic">🛰</span>系统</div>
-      <div class="tab"><span class="ic">👤</span>我</div>
-    </div>
+    <div class="tabbar"><div class="tab on"><span class="ic">🧭</span>Planner<span class="badge" style="right:28px">2</span></div><div class="tab"><span class="ic">💬</span>会话</div><div class="tab"><span class="ic">⚙︎</span>设置</div></div>
   </div>
-  <p class="note">输入框常显"→ 发往 X"；焦点会话在跑而新消息不像短跟进时，先提示"像是新话题，要另开吗？"。Planner 的顾问意见以紫色旁注出现，附依据，不插进你正在对话的会话。</p>
+  <p class="note">Planner 标签是新增的唯一一页：顶部固定一张卡，列出等你的事和"答应你的"，点"处理"弹出卡片直接拍板；下面是 Planner 对话（早报、回执、派出的会话卡片、意见、提议）。标签角标是等你的数量。</p>
 </div>
 
-<!-- 3. 收件箱 -->
 <div class="shot">
-  <h2>③ 收件箱：等你的事按优先级排好</h2>
+  <h2>③ 点"处理"：卡片从底部弹出，直接拍板</h2>
   <div class="phone">
     <div class="island"></div>
     <div class="status"><span>9:41</span><span>5G ▮▮▮</span></div>
-    <div class="nav"><span class="title">收件箱</span></div>
-    <div class="content">
-      <div class="card" style="background:#f7f3ff">
-        <div style="font-weight:600">你不在的 7 小时里</div>
-        <div style="font-size:13px;margin-top:4px">合并 9 个 PR · 自动继续 4 次 · 地区 400 打断 3 个会话，已合并处理并恢复 · 1 件事等你</div>
+    <div class="nav"><div class="row"><span class="title">Planner</span></div></div>
+    <div class="content"><div class="card" style="padding:8px 12px">
+        <div class="wrow"><span><span class="rdot"></span><b>发版 v0.1.46？</b> <span class="muted">每次确认</span></span><span style="color:var(--blue)">处理 ›</span></div>
+        <div class="wrow"><span><span class="rdot"></span><b>副本数 2 → 3？</b> <span class="muted">40 分钟</span></span><span style="color:var(--blue)">处理 ›</span></div>
+        <div class="wrow"><span><span class="pdot"></span>答应你的 · 2 <span class="muted">JD 会前材料今天到期</span></span><span class="muted">›</span></div>
+      </div></div>
+    <div class="dim"></div>
+    <div class="sheet">
+      <div class="grab"></div>
+      <span class="chip red">决定 · 每次确认</span><span class="muted">naozhi · 等了 12 分钟 · 18 分钟后过期</span>
+      <div style="font-size:20px;font-weight:700;margin-top:10px">发版 v0.1.46？</div>
+      <div class="muted" style="margin-top:6px">CI 绿 · 12 个 PR 已合并 · changelog 草稿已备好（你过去 9 次合并后都发版）</div>
+      <div class="card" style="margin-top:12px;background:#f2f2f7;font-size:13px">
+        <b>changelog 草稿</b><div style="margin-top:4px">· 修复 queue 出队顺序导致的 flaky（#3664）</div><div>· /health 按实际健康降级</div><div>· …另 10 条</div>
       </div>
-      <div class="sect"><span>Waiting on you · 2</span><span class="muted">按紧急程度</span></div>
-      <div class="card">
-        <span class="chip red">决定</span><span class="muted">naozhi · 等了 12 分钟</span>
-        <div style="font-weight:600;margin-top:6px">发版 v0.1.46？</div>
-        <div class="muted">CI 绿 · 12 个 PR · changelog 草稿已备好</div>
-        <div class="btns"><span class="btn pri">发版</span><span class="btn">看 changelog</span><span class="btn">稍后</span></div>
-      </div>
-      <div class="card">
-        <span class="chip orange">提问</span><span class="muted">ClickHouse 压测 · 等了 40 分钟</span>
-        <div style="font-weight:600;margin-top:6px">第 3 轮要不要把副本数从 2 提到 3？</div>
-        <div class="muted">它给了两个方案；Planner 拿不准（不可逆：会重建集群）</div>
-        <div class="btns"><span class="btn">保持 2</span><span class="btn">提到 3</span><span class="btn">回复…</span></div>
-      </div>
-      <div class="sect"><span>Ready for review · 2</span><span class="muted">展开</span></div>
-      <div class="card">
-        <span class="chip blue">PR #3701</span><span class="muted">flaky 清扫 · verifier PASS</span>
-        <div style="font-size:13px;margin-top:4px">修 TestShimWriteDeadline 的竞态（根因：未等真实输出）</div>
-        <div class="btns"><span class="btn pri">合并</span><span class="btn">要求修改</span></div>
-      </div>
-      <div class="sect"><span>Working · 3　Idle · 5　Resolved · 21</span><span class="muted">›</span></div>
+      <div class="btns" style="flex-direction:column"><span class="btn pri" style="padding:12px 0">发版（Face ID）</span><span class="btn" style="padding:12px 0">今天不发</span><span class="btn" style="padding:12px 0">回复…</span></div>
     </div>
-    <div class="tabbar">
-      <div class="tab"><span class="ic">💬</span>对话</div>
-      <div class="tab on"><span class="ic">📥</span>收件箱<span class="badge">3</span></div>
-      <div class="tab"><span class="ic">🛰</span>系统</div>
-      <div class="tab"><span class="ic">👤</span>我</div>
-    </div>
+    <div class="tabbar"><div class="tab on"><span class="ic">🧭</span>Planner<span class="badge" style="right:28px">2</span></div><div class="tab"><span class="ic">💬</span>会话</div><div class="tab"><span class="ic">⚙︎</span>设置</div></div>
   </div>
-  <p class="note">"离开期间"摘要置顶，由事件流确定性渲染。同一会话的多个问题合并成一张卡。只有 notify 会自动关闭，决定 / 提问 / 待审只有你能关。</p>
+  <p class="note">等你的事在手机上用底部弹出卡片处理：信息够做决定就行，"每次确认"类动作要 Face ID。处理完卡片回到原对话，状态写回。</p>
 </div>
 
-<!-- 4. 会话详情 -->
 <div class="shot">
-  <h2>④ 会话详情：契约、里程碑、为什么</h2>
+  <h2>④ 会话卡片点开：在 Planner 里打开，状态三层</h2>
   <div class="phone">
     <div class="island"></div>
     <div class="status"><span>9:41</span><span>5G ▮▮▮</span></div>
-    <div class="nav"><div class="muted">‹ 对话</div><div style="font-size:20px;font-weight:700;margin-top:4px">处理 review issues</div>
-      <div style="margin-top:4px"><span class="chip">naozhi</span><span class="chip">opus 5.5 · high</span><span class="chip purple">Planner 派出</span></div></div>
+    <div class="nav"><div class="muted">‹ Planner</div><div style="font-size:20px;font-weight:700;margin-top:4px">处理 review issues</div>
+      <div style="margin-top:4px"><span class="chip">naozhi</span><span class="chip purple">Planner 派出</span></div></div>
     <div class="content">
-      <div class="card">
-        <div class="kv"><span>托管</span><span class="toggle"></span></div>
-        <div class="kv"><span>目标</span><span class="muted">处理 #3650–#3672 的 24 个 issue</span></div>
-        <div class="kv"><span>验收</span><span class="muted">每个 issue 一个 PR · CI 绿 · 不弱化测试</span></div>
-        <div class="kv"><span>血缘</span><span class="muted">由 Planner 派出 · 接续自 #a41f</span></div>
+      <div class="card" style="background:#eef6ff">
+        <div style="font-weight:600;font-size:14px">正在跑测试 · 第 3/5 项验收</div>
+        <div class="bar"><i style="width:72%"></i></div>
+        <div class="muted">18/24 PR · 最近一次检查 08:05</div>
       </div>
       <div class="sect"><span>里程碑</span><span class="muted">原始记录 ›</span></div>
       <div class="tl">
         <div class="ev ok">阶段 3 完成 · 14 个 PR 已合并 <span class="muted">07:12</span></div>
-        <div class="ev auto">⚙ 自动继续 · E（做了一部分就停）· 第 2/8 次 <span class="muted">07:40</span></div>
-        <div class="ev adv">🧭 顾问：#3664 的修法在改症状，根因在 queue 的 FIFO 假设，建议改 Orchestrator 而不是加 sleep <span class="muted">08:05</span></div>
+        <div class="ev auto">⚙ 已按建议执行：方案 A <span class="muted">07:40</span><div class="undo">撤回</div></div>
+        <div class="ev adv">🧭 意见：#3664 在改症状，根因在出队顺序 <span class="muted">08:05</span></div>
         <div class="ev">会话回应：接受，已改为调整出队顺序 <span class="muted">08:09</span></div>
-        <div class="ev auto">⚙ 地区 400 · 退避 2 分钟后恢复（同一根因影响 3 个会话）<span class="muted">08:31</span></div>
+        <div class="ev ok">验证通过：全部 CI 绿 <span class="muted">09:02</span></div>
       </div>
-      <div class="card"><div class="muted">产物</div><div style="font-size:13px;margin-top:4px">PR #3688 … #3705（18）· 分支 naozhi/run-7f3c</div></div>
     </div>
     <div class="composer">
-      <div class="target">→ 直接对这个会话说</div>
+      <div class="target">→ 直接对这个会话说　｜　交给 Planner</div>
       <div class="inputrow"><span class="round">⏸</span><span class="input">追问或调整方向…</span><span class="round send">↑</span></div>
     </div>
   </div>
-  <p class="note">每条自动动作带原因码与计数；顾问意见与会话的回应都留在时间线上。托管开关可一键关闭；"原始记录"进入完整 transcript（与网页专家视图同源）。</p>
+  <p class="note">从 Planner 对话里点开的会话在本页打开，左上角返回 Planner；只看里程碑，"原始记录"展开工具调用。</p>
 </div>
 
-<!-- 5. 系统 -->
 <div class="shot">
-  <h2>⑤ 系统：懂系统</h2>
+  <h2>⑤ 有产出可预览：工作台从底部弹出</h2>
   <div class="phone">
     <div class="island"></div>
     <div class="status"><span>9:41</span><span>5G ▮▮▮</span></div>
-    <div class="nav"><span class="title">系统</span></div>
+    <div class="nav"><div class="row"><span class="title">Planner</span></div></div>
     <div class="content">
-      <div class="tiles">
-        <div class="tile warn"><div class="k">Midway</div><div class="v">2 小时后过期</div></div>
-        <div class="tile good"><div class="k">Bedrock / 网络</div><div class="v">正常 · us-east-1</div></div>
-        <div class="tile good"><div class="k">master CI</div><div class="v">绿</div></div>
-        <div class="tile"><div class="k">Mac 节点</div><div class="v">在线 · 磁盘 78%</div></div>
-      </div>
-      <div class="sect"><span>在途会话</span><span class="muted">按工作区</span></div>
-      <div class="card">
-        <div class="kv"><span>处理 review issues</span><span class="chip blue">托管 · 4/5</span></div>
-        <div class="kv"><span>ClickHouse 压测</span><span class="chip orange">等你</span></div>
-        <div class="kv"><span>flaky 清扫（例行任务）</span><span class="chip">提议 2</span></div>
-        <div class="kv"><span>JD 网络架构图</span><span class="chip green">完成</span></div>
-      </div>
-      <div class="sect"><span>冲突与关系</span></div>
-      <div class="card"><span class="chip red">冲突</span><span style="font-size:13px">"review issues"与"flaky 清扫"都改了 internal/turn/queue.go · Planner 已让后者排后</span></div>
-      <div class="sect"><span>Planner 最近的决定</span><span class="muted">全部 ›</span></div>
-      <div class="card" style="font-size:13px">
-        <div>通知已有会话：把 #3666 交给"review issues"——同一模块、上下文 62k</div>
-        <div class="muted" style="margin-top:4px">理由来自：懂系统/在途会话 · 可改判</div>
-      </div>
+      <div class="bubble me">JD 周五的会前材料弄好了吗</div>
+      <div class="bubble pl">草稿已备好，按你的写作风格写的，客户上周的两个问题都覆盖了。</div>
     </div>
-    <div class="tabbar">
-      <div class="tab"><span class="ic">💬</span>对话</div>
-      <div class="tab"><span class="ic">📥</span>收件箱<span class="badge">3</span></div>
-      <div class="tab on"><span class="ic">🛰</span>系统</div>
-      <div class="tab"><span class="ic">👤</span>我</div>
+    <div class="dim"></div>
+    <div class="sheet">
+      <div class="grab"></div>
+      <div class="seg" style="margin:0 0 10px"><span class="on">预览</span><span>产出 2</span><span>文件</span><span>详情</span></div>
+      <div style="font-size:16px;font-weight:700">JD 网络架构评审 · 会前材料</div>
+      <div style="font-size:13px;line-height:1.6;margin-top:8px"><b>结论</b>：建议采用网络账号集中出口（TGW），NAT 费用按 BU 用量分摊。<br><b>回应上周的两个问题</b><br>1. 出口分账：按 BU 出口流量计量……<br>2. 跨区容灾：主备区域各一套 TGW……</div>
+      <div class="btns"><span class="btn">发给客户…</span><span class="btn">改一下</span><span class="btn">分享</span></div>
     </div>
+    <div class="tabbar"><div class="tab on"><span class="ic">🧭</span>Planner<span class="badge" style="right:28px">2</span></div><div class="tab"><span class="ic">💬</span>会话</div><div class="tab"><span class="ic">⚙︎</span>设置</div></div>
   </div>
-  <p class="note">环境健康、在途会话、冲突、Planner 的决定与理由——全部来自事件流派生，Planner 只加批注。"为什么"总能点开看依据。</p>
+  <p class="note">手机上的工作台是底部弹出面板：预览 · 产出 · 文件 · 详情，与桌面右栏同一套页签；不放代码 diff。</p>
 </div>
 
-<!-- 6. 我 -->
 <div class="shot">
-  <h2>⑥ 我：懂你（只有你能改）</h2>
+  <h2>⑥ 会话标签（现有）：只加 Planner 旁注与"交给 Planner"</h2>
   <div class="phone">
     <div class="island"></div>
     <div class="status"><span>9:41</span><span>5G ▮▮▮</span></div>
-    <div class="nav"><span class="title">我</span></div>
+    <div class="nav"><div class="muted">‹ 会话</div><div style="font-size:20px;font-weight:700;margin-top:4px">网络架构图</div></div>
     <div class="content">
-      <div class="sect"><span>关注点 · naozhi</span><span class="muted">编辑 ›</span></div>
-      <div class="card" style="font-size:13px">
-        <div><span class="chip green">Now</span>Planner 托管 MVP；推送管线</div>
-        <div style="margin-top:6px"><span class="chip blue">Next</span>iOS app；多节点 dispatch-v1</div>
-        <div style="margin-top:6px"><span class="chip">Not-now</span>多 Planner 协作；邮箱接入</div>
-        <div class="muted" style="margin-top:6px">9 天前确认 · 14 天未确认会在早报里问你</div>
+      <div class="bubble me">TGW 方案图里，把共享 VPC 去掉，换成网络账号集中出口</div>
+      <div class="bubble pl">已改 arch.html：移除共享 VPC，新增 Network 账号 + TGW 集中出口。</div>
+      <div class="new" style="margin:14px 0 8px;padding:2px 4px"><span class="newtag">新增</span>
+        <div class="who">🧭 Planner · 旁注（不进会话）</div>
+        <div class="bubble pl advice" style="max-width:100%">上周三你和客户确认过"出口按 BU 分账"，集中出口后 NAT 费用会落在网络账号。要标出分摊方式吗？<div class="muted" style="margin-top:4px">依据：10/21 会议纪要 · 转达 · 忽略</div></div>
       </div>
-      <div class="sect"><span>注意力</span></div>
-      <div class="card">
-        <div class="kv"><span>想听</span><span class="muted">需要我决定的、CI 变红、凭证将过期</span></div>
-        <div class="kv"><span>永远别提</span><span class="muted">依赖小版本、外观类 issue</span></div>
-        <div class="kv"><span>什么时候</span><span class="muted">22:30–08:00 只推紧急</span></div>
-        <div class="kv"><span>每天立即推送上限</span><span>6 次</span></div>
-      </div>
-      <div class="sect"><span>授权（Planner 可代你做的）</span><span class="muted">全部 ›</span></div>
-      <div class="card">
-        <div class="kv"><span>修 flaky 并开 PR</span><span class="muted">剩 17 次 · 12/31 到期 · 撤销</span></div>
-        <div class="kv"><span>依赖安全补丁</span><span class="muted">永久 · 撤销</span></div>
-      </div>
-      <div class="kill">急停：暂停所有托管与派活</div>
+      <div class="bubble me">要，加一行注释</div>
     </div>
-    <div class="tabbar">
-      <div class="tab"><span class="ic">💬</span>对话</div>
-      <div class="tab"><span class="ic">📥</span>收件箱<span class="badge">3</span></div>
-      <div class="tab"><span class="ic">🛰</span>系统</div>
-      <div class="tab on"><span class="ic">👤</span>我</div>
+    <div class="composer">
+      <div class="target">→ 网络架构图　<span class="new" style="padding:0 6px"><span class="newtag" style="top:-12px;right:-8px">新增</span>交给 Planner</span></div>
+      <div class="inputrow"><span class="round">＋</span><span class="input">说点什么…</span><span class="round">🎙</span><span class="round send">↑</span></div>
     </div>
+    <div class="tabbar"><div class="tab"><span class="ic">🧭</span>Planner<span class="badge" style="right:28px">2</span></div><div class="tab on"><span class="ic">💬</span>会话</div><div class="tab"><span class="ic">⚙︎</span>设置</div></div>
   </div>
-  <p class="note">Now/Next/Not-now、注意力偏好（想听 / 别提 / 何时 / 上限）、授权与撤销、需人决定清单都在这里，修改需 Face ID。急停同时提供控制中心开关。</p>
+  <p class="note">"会话"标签就是现有的会话列表与对话，行为不变；只多两处：Planner 旁注（只给你看）与"交给 Planner"。</p>
+</div>
+
+<div class="shot">
+  <h2>⑦ 设置标签：懂你、节点、系统</h2>
+  <div class="phone">
+    <div class="island"></div>
+    <div class="status"><span>9:41</span><span>5G ▮▮▮</span></div>
+    <div class="nav"><span class="title">设置</span></div>
+    <div class="content">
+      <div class="new" style="padding:2px;margin-top:6px"><span class="newtag">新增</span>
+        <div class="sect"><span>懂你</span></div>
+        <div class="lrow">关注点<div class="m">Now：Planner 托管 MVP；监控底座</div></div>
+        <div class="lrow">最近的一句话设置<div class="m">"晚上别推了" → 22:30–08:00 只推紧急 · 撤销</div></div>
+        <div class="lrow">信任阶梯 · 授权<div class="m">只出意见 · 发版 / 对外发信每次确认</div></div>
+      </div>
+      <div class="new" style="padding:2px;margin-top:14px"><span class="newtag">新增</span>
+        <div class="sect"><span>节点</span><span style="color:var(--blue)">＋ 连接一台机器</span></div>
+        <div class="lrow"><div class="row" style="justify-content:space-between"><span>本机 Mac（主控）</span><span class="chip green">在线</span></div></div>
+        <div class="lrow"><div class="row" style="justify-content:space-between"><span>ec2-dev</span><span class="chip green">在线 · 2 个会话</span></div></div>
+      </div>
+      <div class="sect" style="margin-top:14px"><span>系统</span></div>
+      <div class="lrow">全会话健康 · 系统任务<div class="m">无人负责 0 · 心跳正常</div></div>
+      <div class="btns"><span class="btn">暂停推送</span><span class="btn">暂停托管</span><span class="btn danger">急停</span></div>
+    </div>
+    <div class="tabbar"><div class="tab"><span class="ic">🧭</span>Planner<span class="badge" style="right:28px">2</span></div><div class="tab"><span class="ic">💬</span>会话</div><div class="tab on"><span class="ic">⚙︎</span>设置</div></div>
+  </div>
+  <p class="note">设置标签把懂你、节点、系统收在一页：懂你只用于查看与撤销（平时一句话设置）；节点里"连接一台机器"在手机上显示配对码与命令，方便发到那台机器；底部是三级停止。</p>
 </div>
 
 </div>

@@ -1,7 +1,7 @@
 # RFC: 计算机使用 —— 让会话看到并操作这台 Mac
 
 - 状态: Draft v1（方向已与 owner 确认，未实施）
-- 日期: 2026-10-25
+- 日期: 2026-10-26
 - 范围: 给 naozhi 的执行会话加上两项能力——**把桌面截图交给 CC 作为上下文**，以及**操作这台 Mac 上的浏览器和桌面应用**（含需要 Midway 认证的内网站点）。云端浏览器（AgentCore Browser）与自建的 Bedrock computer use 循环列为候选，未决定。
 - 相关: `docs/rfc/planner.md`（PR #3685：执行会话、事件流、污染标记、需人决定清单、按会话挂载、工作台面）、`docs/rfc/cli-mcp-config.md`、`docs/rfc/attachment-refcount.md`、`internal/server/dashboard_csp.go`（dashboard CSP 现状；原 `dashboard-csp-strict.md` 已随 #3737 删除）
 
@@ -104,6 +104,7 @@ naozhi：图片提取 → 附件落盘 + 缩略图进事件流 → 对话 / 预�
 - **运行方式**：Playwright MCP 以持久化配置文件启动（headless 或有窗口）。浏览器自动化走 CDP，**不需要屏幕录制与辅助功能授权，锁屏时也能跑**——这是远程场景最稳的一条。
 - **域名白名单**：浏览器 MCP 只允许访问白名单里的源（Playwright MCP 的允许 / 拦截源参数），白名单放在 naozhi 配置里，内网域名按需添加。
 - **以无障碍树为主**：页面操作优先用元素引用而不是像素坐标，截图作为辅助；更快、更省、更可靠。
+- **能看、能接管**（CU9）：浏览器操作期间，预览面板能看到当前画面（P2 先用低帧率截图，P4 再换实时推流）；碰到人机验证、MFA、需要你本人输入的地方，会话停下并推送，你一键接管（本机就是直接在这个 Chrome 窗口里操作），完成后交还。Claude Duet 因为看不到也接管不了浏览器，卡在人机验证上（`planner-landscape.md`）。
 
 ### 4.4 桌面操作（C4）
 
@@ -195,7 +196,7 @@ WorkSpaces for AI agents（2026-06 GA，托管 MCP 操作 Windows 桌面，可�
 |---|---|
 | P0 实测 | ① 给 naozhi 授予屏幕录制后，经 shim → claude → MCP 子进程能否截屏；naozhi 重启后存活的 shim 是否仍有授权；② 桌面 MCP 候选（Peekaboo / computer-use-mcp / macos-computer-use-kit）在 launchd 下的表现、是否支持后台窗口与 AX 操作；③ Playwright MCP 持久化配置文件下 Midway 登录态能维持多久、锁屏下 headless 与有窗口两种模式；④ stream-json 中工具结果图片的大小与延迟、每张截图的 token；⑤ Retina 坐标换算；⑥ Bedrock 上 `computer_toolset_20260801` 是否可用；⑦ 屏幕录制周期性再确认的频率 |
 | P1 截图进上下文 | 工具结果图片进事件流（§4.2）；"截屏发送"按钮；只读的截图 MCP 工具（全局挂载即可，不涉及写操作） |
-| P2 浏览器操作 | Playwright MCP + 专用配置文件 + 域名白名单；以一个真实的、没有接口的内网任务试点；提交前确认 |
+| P2 浏览器操作 | Playwright MCP + 专用配置文件 + 域名白名单；**画面可见与接管**（低帧率截图）；以一个真实的、没有接口的内网任务试点；提交前确认 |
 | P3 桌面操作 | 桌面 MCP（AX 优先）；单一控制者锁、让路、应用白名单；**前置条件：按会话挂载落地**（只给"计算机"能力档的会话） |
 | P4 实时画面 | 预览面板里的服务端截屏推流；Planner / 验证环节用截图做视觉检查 |
 | 以后 | §8 候选按需 |
@@ -226,6 +227,7 @@ WorkSpaces for AI agents（2026-06 GA，托管 MCP 操作 Windows 桌面，可�
 | CU6 | 10-25 | 屏幕内容按外部内容处理；你发起的任务最终提交前确认，Planner / 例行任务发起的默认只读 | Rule of Two；与 planner RFC 的污染与闸门规则一致 |
 | CU7 | 10-25 | 默认截窗口不截整桌面；原图只存本机并随 GC 回收 | 隐私 |
 | CU8 | 10-25 | AgentCore Browser、自建 Bedrock 循环、Windows 桌面列为候选，满足 §8 条件再接 | owner 不确定是否需要；进不了内网 |
+| CU9 | 10-26 | 浏览器操作必须能看、能接管，P2 起就要有（先用低帧率截图） | 第二代个人 agent 的教训；planner RFC D67 |
 
 ## 附录：参考
 
