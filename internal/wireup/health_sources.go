@@ -38,14 +38,14 @@ type HealthSources struct {
 
 // Collect is health.Config.Collect. Cron jobs and daemons come before the
 // sessions they run in, so a merged unit keeps their kind.
-func (h HealthSources) Collect() []health.Fact {
+func (h HealthSources) Collect(since time.Time) []health.Fact {
 	var out []health.Fact
 	now := time.Now()
 	if h.Cron != nil {
 		started := h.Cron.StartedAt()
 		for _, jw := range h.Cron.ListAllJobsWithNextRun() {
 			_, running := h.Cron.CurrentRun(jw.Job.ID)
-			out = append(out, cronFact(jw.Job, running, now, started))
+			out = append(out, cronFact(jw.Job, running, now, started, since))
 		}
 	}
 	if h.Sysession != nil {
@@ -65,6 +65,12 @@ func (h HealthSources) Collect() []health.Fact {
 				if f, ok := remoteFact(nodeID, status[nodeID] == "error", m); ok {
 					out = append(out, f)
 				}
+			}
+		}
+		// A purged node lists no sessions but stays "error".
+		for nodeID, st := range status {
+			if st == "error" {
+				out = append(out, health.Fact{Node: nodeID, NodeDown: true})
 			}
 		}
 	}
@@ -131,7 +137,7 @@ func sessionFact(snap session.SessionSnapshot, s *session.ManagedSession, logDir
 	return f
 }
 
-func cronFact(j cron.Job, running bool, now, started time.Time) health.Fact {
+func cronFact(j cron.Job, running bool, now, started, since time.Time) health.Fact {
 	f := health.Fact{
 		ID:         sessionkey.CronKey(j.ID),
 		Kind:       health.KindCron,
@@ -148,7 +154,19 @@ func cronFact(j cron.Job, running bool, now, started time.Time) health.Fact {
 	case j.Paused:
 	case j.LastError != "" && cronRunFailed(j.LastErrorClass):
 		f.Failed, f.ErrText = "last run failed ("+cmp.Or(string(j.LastErrorClass), "error")+")", j.LastError
+	case running:
+		// LastRunAt moves only when a run ends: a long run, or the catch-up
+		// after a wake, is not a miss.
 	default:
+		// Lateness counts from the last run, the job's creation or since,
+		// whichever is latest: ticks slept through are not the job's.
+		floor := since
+		if j.CreatedAt.After(floor) {
+			floor = j.CreatedAt
+		}
+		if j.LastRunAt.Before(floor) {
+			j.LastRunAt = floor
+		}
 		if missed, at := cron.HasMissedSchedule(&j, now, started); missed {
 			f.Missed = at
 		}

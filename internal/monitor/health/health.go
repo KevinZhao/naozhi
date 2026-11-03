@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -102,6 +103,9 @@ type Fact struct {
 	Dir      string
 	Register bool
 	// Node is a remote unit's node; NodeDown is set while its polls fail.
+	// A fact with no ID only reports its Node down: the node's sessions are
+	// no longer listed (a reverse node is purged after its grace), and the
+	// units it had are kept and judged Lost.
 	Node     string
 	NodeDown bool
 
@@ -116,7 +120,7 @@ type Fact struct {
 	ErrClass ErrorClass
 	// Missed is when a cron job's last scheduled run should have happened
 	// and did not; a miss before the last wake or start is the machine's
-	// sleep, not the job's failure.
+	// sleep, not the job's failure, and a job still running has not missed.
 	Missed time.Time
 	// Workflow names a running workflow; WorkflowSeen is its latest
 	// observation.
@@ -173,10 +177,12 @@ type Fault struct {
 }
 
 // Config wires a Machine. Collect is the only required field; a nil Journal
-// or empty IndexPath turns that output off.
+// or empty IndexPath turns that output off. Collect's since is when the
+// machine's timers last restarted (its start or the last wake): a source
+// judges lateness from it at the earliest.
 type Config struct {
 	Clock      wake.Clock
-	Collect    func() []Fact
+	Collect    func(since time.Time) []Fact
 	Journal    *journal.Journal
 	Workspaces *workspace.Registry
 	IndexPath  string
@@ -210,14 +216,16 @@ type Machine struct {
 type unit struct {
 	Unit
 	// first holds until the unit leaves the Unknown it starts in.
-	first    bool
-	pending  State
-	pendingN int
-	failedAt time.Time // when ErrClass was confirmed, for fault merging
+	first        bool
+	pending      State
+	pendingN     int
+	pendingClass ErrorClass
+	failedAt     time.Time // when ErrClass was confirmed, for fault merging
+	node         string
 }
 
 // New returns a Machine whose timers start now, seeded with each unit's last
-// journaled state.
+// journaled state and the systemic faults the journal left open.
 func New(cfg Config) *Machine {
 	if cfg.Clock == nil {
 		cfg.Clock = wake.SystemClock()
@@ -262,11 +270,17 @@ func (m *Machine) seed(now time.Time) {
 	}
 	for _, e := range entries {
 		var d journalData
-		if e.Kind != journal.KindHealth || json.Unmarshal(e.Data, &d) != nil || d.Systemic || d.To == "" {
+		if e.Kind != journal.KindHealth || json.Unmarshal(e.Data, &d) != nil {
 			continue
 		}
-		m.last[e.Unit] = d.To
+		switch {
+		case d.Systemic && d.ErrClass != "":
+			m.faults[d.ErrClass] = !d.Resolved
+		case !d.Systemic && d.To != "":
+			m.last[e.Unit] = d.To
+		}
 	}
+	maps.DeleteFunc(m.faults, func(_ ErrorClass, open bool) bool { return !open })
 }
 
 // Run reconciles every Interval until ctx ends, beating the "health" loop,
@@ -347,7 +361,6 @@ func (m *Machine) Snapshot() Snapshot {
 
 // Reconcile collects the facts, judges every unit and reports what changed.
 func (m *Machine) Reconcile() {
-	facts := mergeFacts(m.cfg.Collect())
 	now, mono := m.cfg.Clock.Now(), m.cfg.Clock.Mono()
 	if m.detector.Woke() {
 		m.baseline, m.wokeAt, m.woke = now, mono, true
@@ -358,19 +371,31 @@ func (m *Machine) Reconcile() {
 			m.nodeDown[n] = mono
 		}
 	}
-	m.trackNodes(facts, mono)
+	facts, down := m.collect()
+	m.trackNodes(down, mono)
 
 	var events []Event
 	seen := make(map[string]bool, len(facts))
+	for _, f := range facts {
+		seen[f.ID] = true
+	}
+	// A down node's sessions that are no longer listed are still its
+	// sessions: keep judging them, as unreachable.
+	for id, u := range m.units {
+		if !seen[id] && u.Kind == KindRemote && down[u.node] {
+			facts = append(facts, Fact{ID: id, Kind: KindRemote, Source: u.Source, Coverage: u.Coverage,
+				Node: u.node, NodeDown: true, Running: u.State == Active, LastActive: u.LastActive})
+			seen[id] = true
+		}
+	}
 	for i := range facts {
 		f := &facts[i]
-		seen[f.ID] = true
 		u := m.units[f.ID]
 		if u == nil {
 			u = &unit{Unit: Unit{ID: f.ID, State: Unknown, Since: now}, first: true}
 			m.units[f.ID] = u
 		}
-		u.Kind, u.Source, u.Coverage = f.Kind, f.Source, f.Coverage
+		u.Kind, u.Source, u.Coverage, u.node = f.Kind, f.Source, f.Coverage, f.Node
 		u.Workspace = m.workspaceFor(f)
 		u.LastActive = f.LastActive
 		state, evidence, class := m.judge(f, now, mono)
@@ -419,14 +444,34 @@ func (m *Machine) RefreshIndex() {
 	if m.cfg.IndexPath == "" {
 		return
 	}
-	m.writeIndex(mergeFacts(m.cfg.Collect()))
+	facts, _ := m.collect()
+	m.writeIndex(facts)
+}
+
+// collect gathers the units' facts, merged, and the nodes reported down.
+func (m *Machine) collect() ([]Fact, map[string]bool) {
+	all := m.cfg.Collect(m.baseline)
+	facts := make([]Fact, 0, len(all))
+	down := map[string]bool{}
+	for _, f := range all {
+		if f.NodeDown {
+			down[f.Node] = true
+		}
+		if f.ID != "" {
+			facts = append(facts, f)
+		}
+	}
+	return mergeFacts(facts), down
 }
 
 // step applies one judged state to u and returns the transition it causes.
 // Healthy states take effect at once; the others once two reconciles in a
-// row agree. A unit's first state counts from the one the journal last
-// recorded for it, so a restart reports only what changed meanwhile; with no
-// record, settling into a healthy state is not news.
+// row agree, except Lost, which is judged only once two reconciles LostAfter
+// apart saw the node down. A unit's first state counts from the one the
+// journal last recorded for it, so a restart reports only what changed
+// meanwhile; with no record, settling into a healthy state is not news. A
+// failure a unit already had when first seen is dated by its last activity,
+// so old failures do not merge into a systemic fault.
 func (m *Machine) step(u *unit, state State, evidence string, class ErrorClass, now time.Time) (Event, bool) {
 	if state == u.State {
 		u.pending, u.pendingN = "", 0
@@ -436,23 +481,26 @@ func (m *Machine) step(u *unit, state State, evidence string, class ErrorClass, 
 		}
 		return Event{}, false
 	}
-	if !state.healthy() {
+	if !state.healthy() && state != Lost {
 		if u.pending != state {
 			u.pending, u.pendingN = state, 0
 		}
 		u.pendingN++
+		u.pendingClass = class
 		if u.pendingN < 2 {
 			return Event{}, false
 		}
 	}
 	u.pending, u.pendingN = "", 0
 	from, first := u.State, u.first
+	u.failedAt = now
 	if first {
 		from = cmp.Or(m.last[u.ID], Unknown)
 		delete(m.last, u.ID)
 		u.first = false
+		u.failedAt = u.LastActive
 	}
-	u.State, u.Evidence, u.ErrClass, u.Since, u.failedAt = state, evidence, class, now, now
+	u.State, u.Evidence, u.ErrClass, u.Since = state, evidence, class, now
 	if from == state || first && from == Unknown && state.healthy() {
 		return Event{}, false
 	}
@@ -466,7 +514,7 @@ func (m *Machine) judge(f *Fact, now time.Time, mono time.Duration) (State, stri
 		return Lost, fmt.Sprintf("node %s unreachable", f.Node), ErrNone
 	case f.Failed != "":
 		return Failed, f.Failed, cmp.Or(f.ErrClass, Classify(f.ErrText))
-	case !f.Missed.IsZero() && f.Missed.After(m.baseline):
+	case !f.Missed.IsZero() && f.Missed.After(m.baseline) && !f.Running:
 		return Failed, "missed the run due " + f.Missed.Format(time.RFC3339), ErrOther
 	case f.Asking:
 		return Waiting, "unanswered AskUserQuestion", ErrNone
@@ -488,14 +536,8 @@ func (m *Machine) judge(f *Fact, now time.Time, mono time.Duration) (State, stri
 	return Idle, "", ErrNone
 }
 
-// trackNodes records when each node's polls began failing.
-func (m *Machine) trackNodes(facts []Fact, mono time.Duration) {
-	down := map[string]bool{}
-	for _, f := range facts {
-		if f.NodeDown {
-			down[f.Node] = true
-		}
-	}
+// trackNodes records when each down node's polls began failing.
+func (m *Machine) trackNodes(down map[string]bool, mono time.Duration) {
 	for n := range m.nodeDown {
 		if !down[n] {
 			delete(m.nodeDown, n)
@@ -509,17 +551,24 @@ func (m *Machine) trackNodes(facts []Fact, mono time.Duration) {
 }
 
 // faultEvents opens a systemic fault for each error class FaultMin units
-// entered within FaultWindow, and resolves an open one once no unit has its
-// class. ErrOther never merges: two unrelated failures share it.
+// entered within FaultWindow, and resolves an open one once no unit has or
+// is about to confirm its class. ErrOther never merges: two unrelated
+// failures share it.
 func (m *Machine) faultEvents(now time.Time) []Event {
 	recent := map[ErrorClass][]string{}
 	current := map[ErrorClass]bool{}
 	for _, u := range m.units {
-		if u.ErrClass == ErrNone || u.ErrClass == ErrOther || u.State != Failed {
+		if u.State != Failed {
+			if u.pending == Failed {
+				current[u.pendingClass] = true
+			}
+			continue
+		}
+		if u.ErrClass == ErrNone || u.ErrClass == ErrOther {
 			continue
 		}
 		current[u.ErrClass] = true
-		if now.Sub(u.failedAt) <= FaultWindow {
+		if !u.failedAt.IsZero() && now.Sub(u.failedAt) <= FaultWindow {
 			recent[u.ErrClass] = append(recent[u.ErrClass], u.ID)
 		}
 	}

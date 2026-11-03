@@ -2,6 +2,7 @@ package wireup
 
 import (
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cron"
@@ -65,22 +66,33 @@ func TestAskPending(t *testing.T) {
 }
 
 func TestCronFact(t *testing.T) {
+	now := time.Date(2026, 11, 4, 10, 30, 0, 0, time.UTC)
+	ranAt := now.Add(-210 * time.Minute) // three hourly ticks ago
 	tests := []struct {
-		name   string
-		job    cron.Job
-		failed bool
+		name    string
+		job     cron.Job
+		running bool
+		since   time.Time
+		failed  bool
+		missed  bool
 	}{
-		{"never failed", cron.Job{}, false},
-		{"manually paused", cron.Job{Paused: true, LastError: "x", LastErrorClass: cron.ErrClassTurnFailed}, false},
-		{"auto-paused", cron.Job{Paused: true, PausedReason: cron.PausedReasonAutoFailures}, true},
-		{"last run failed", cron.Job{LastError: "boom", LastErrorClass: cron.ErrClassTurnFailed}, true},
-		{"last run skipped", cron.Job{LastError: "busy", LastErrorClass: cron.ErrClassOverlapSkipped}, false},
+		{"never failed", cron.Job{}, false, time.Time{}, false, false},
+		{"manually paused", cron.Job{Paused: true, LastError: "x", LastErrorClass: cron.ErrClassTurnFailed}, false, time.Time{}, false, false},
+		{"auto-paused", cron.Job{Paused: true, PausedReason: cron.PausedReasonAutoFailures}, false, time.Time{}, true, false},
+		{"last run failed", cron.Job{LastError: "boom", LastErrorClass: cron.ErrClassTurnFailed}, false, time.Time{}, true, false},
+		{"last run skipped", cron.Job{LastError: "busy", LastErrorClass: cron.ErrClassOverlapSkipped}, false, time.Time{}, false, false},
+		{"ticks went by without a run", cron.Job{LastRunAt: ranAt}, false, time.Time{}, false, true},
+		{"a long run is not a miss", cron.Job{LastRunAt: ranAt}, true, time.Time{}, false, false},
+		{"ticks slept through are not a miss", cron.Job{LastRunAt: ranAt}, false, now.Add(-45 * time.Minute), false, false},
 	}
 	for _, tt := range tests {
-		tt.job.ID, tt.job.Schedule = "j", "@every 1h"
-		f := cronFact(tt.job, false, tt.job.CreatedAt, tt.job.CreatedAt)
+		tt.job.ID, tt.job.Schedule = "j", "0 * * * *"
+		f := cronFact(tt.job, tt.running, now, time.Time{}, tt.since)
 		if got := f.Failed != ""; got != tt.failed {
 			t.Errorf("%s: failed = %v (%q), want %v", tt.name, got, f.Failed, tt.failed)
+		}
+		if got := !f.Missed.IsZero(); got != tt.missed {
+			t.Errorf("%s: missed = %v (%v), want %v", tt.name, got, f.Missed, tt.missed)
 		}
 		if f.Kind != health.KindCron || f.ID != "cron:j" {
 			t.Errorf("%s: fact = %+v", tt.name, f)

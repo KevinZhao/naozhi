@@ -43,7 +43,7 @@ func newRig(t *testing.T, cfg Config, at ...time.Time) *rig {
 		r.clock.wall = at[0]
 	}
 	cfg.Clock = r.clock
-	cfg.Collect = func() []Fact { return slices.Clone(r.facts) }
+	cfg.Collect = func(time.Time) []Fact { return slices.Clone(r.facts) }
 	r.m = New(cfg)
 	r.m.Subscribe(func(ev Event) { r.events = append(r.events, ev) })
 	return r
@@ -171,8 +171,18 @@ func TestStates(t *testing.T) {
 			{facts: []Fact{remote(false)}},
 			{tick: Interval, facts: []Fact{remote(true)}},
 			{tick: Interval, facts: []Fact{remote(true)}},
-			{tick: Interval, facts: []Fact{remote(true)}},
 		}, Lost, nil}, // unowned: journaled, not delivered
+		{"a purged node's sessions stay lost", []step{
+			{facts: []Fact{remote(false)}},
+			{tick: Interval, facts: []Fact{remote(true)}},
+			{tick: Interval, facts: []Fact{{Node: "n1", NodeDown: true}}},
+			{tick: Interval, facts: []Fact{{Node: "n1", NodeDown: true}}},
+		}, Lost, nil},
+		{"a running cron job has not missed", []step{
+			{facts: []Fact{owned(dir, Fact{Running: true, Missed: start.Add(time.Minute)})}},
+			{tick: 2 * Interval, facts: []Fact{owned(dir, Fact{Running: true, Missed: start.Add(time.Minute)})}},
+			{tick: Interval, facts: []Fact{owned(dir, Fact{Running: true, Missed: start.Add(time.Minute)})}},
+		}, Active, nil},
 		{"a missed cron run fails", []step{
 			{facts: []Fact{owned(dir, Fact{Missed: start.Add(time.Minute)})}},
 			{tick: 2 * Interval, facts: []Fact{owned(dir, Fact{Missed: start.Add(time.Minute)})}},
@@ -228,8 +238,13 @@ func TestSystemicFault(t *testing.T) {
 			{facts: []Fact{auth("a"), idle("b")}},
 			{tick: Interval, facts: []Fact{auth("a"), idle("b")}},
 		}, nil},
-		{"two units with one class merge once", []step{
+		{"failures older than the first sight do not merge", []step{
 			{facts: []Fact{auth("a"), auth("b")}},
+			{tick: Interval, facts: []Fact{auth("a"), auth("b")}},
+		}, nil},
+		{"two units with one class merge once", []step{
+			{facts: []Fact{idle("a"), idle("b")}},
+			{tick: Interval, facts: []Fact{auth("a"), auth("b")}},
 			{tick: Interval, facts: []Fact{auth("a"), auth("b")}},
 			{tick: Interval, facts: []Fact{auth("a"), auth("b"), auth("c")}},
 			{tick: Interval, facts: []Fact{auth("a"), auth("b"), auth("c")}},
@@ -245,7 +260,8 @@ func TestSystemicFault(t *testing.T) {
 			{tick: Interval, facts: []Fact{other("a"), other("b")}},
 		}, nil},
 		{"resolves once every unit recovered", []step{
-			{facts: []Fact{auth("a"), auth("b")}},
+			{facts: []Fact{idle("a"), idle("b")}},
+			{tick: Interval, facts: []Fact{auth("a"), auth("b")}},
 			{tick: Interval, facts: []Fact{auth("a"), auth("b")}},
 			{tick: Interval, facts: []Fact{idle("a"), auth("b")}},
 			{tick: Interval, facts: []Fact{idle("a"), idle("b")}},
@@ -315,6 +331,51 @@ func TestJournal(t *testing.T) {
 	})
 	if got, want := r2.transitions(), []string{"sys:x:failed>idle"}; !slices.Equal(got, want) {
 		t.Errorf("after restart = %q, want %q", got, want)
+	}
+}
+
+func TestFaultAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	j, err := journal.Open(filepath.Join(dir, "log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := func(id string) Fact {
+		return owned(dir, Fact{ID: id, Failed: "api error", ErrText: "API Error: 403 permission_error"})
+	}
+	faults := func(r *rig) (out []bool) {
+		for _, ev := range r.events {
+			if ev.Fault != nil {
+				out = append(out, ev.Fault.Resolved)
+			}
+		}
+		return out
+	}
+	cfg := Config{Journal: j, Workspaces: workspace.Load("", "node")}
+	r := newRig(t, cfg)
+	r.run([]step{
+		{facts: []Fact{owned(dir, Fact{ID: "a"}), owned(dir, Fact{ID: "b"})}},
+		{tick: Interval, facts: []Fact{auth("a"), auth("b")}},
+		{tick: Interval, facts: []Fact{auth("a"), auth("b")}},
+	})
+	if got := faults(r); !slices.Equal(got, []bool{false}) {
+		t.Fatalf("before restart: faults = %v", got)
+	}
+
+	// Restarted within the window: the open fault is neither reported again
+	// nor resolved while its units settle; it resolves once they recover.
+	r2 := newRig(t, cfg, r.clock.wall.Add(2*time.Minute))
+	r2.run([]step{
+		{facts: []Fact{auth("a"), auth("b")}},
+		{tick: Interval, facts: []Fact{auth("a"), auth("b")}},
+		{tick: Interval, facts: []Fact{auth("a"), auth("b")}},
+	})
+	if got := faults(r2); len(got) != 0 {
+		t.Errorf("after restart: faults = %v, want none", got)
+	}
+	r2.run([]step{{tick: Interval, facts: []Fact{owned(dir, Fact{ID: "a"}), owned(dir, Fact{ID: "b"})}}})
+	if got := faults(r2); !slices.Equal(got, []bool{true}) {
+		t.Errorf("after recovery: faults = %v, want one resolution", got)
 	}
 }
 
