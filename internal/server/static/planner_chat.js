@@ -17,10 +17,11 @@
 // is hidden, and stopped it is disabled.
 // Layering: never import dashboard.js back; setActivityView is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
-import { selection, ui } from './state.js';
+import { selection, sessionList, ui } from './state.js';
 import { esc, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
-import { isDiscoveredKey } from './session_ident.js';
+import { isDiscoveredKey, sid } from './session_ident.js';
 import { eventHtml } from './event_render.js';
+import { hydrateAskAnsweredFromHistory, lockRenderedAskCards } from './ask_card.js';
 import { runPendingAsync } from './render_md.js';
 import { ICONS } from './icons.js';
 import { refreshHealth, sessionStatusHtml, sessionTitle } from './planner_cards.js';
@@ -117,6 +118,10 @@ function composerTarget() {
   return st.sess ? st.sess.key : PLANNER_KEY;
 }
 
+function sessionListed(key) {
+  return !!sessionList.sessionsData[sid(key, 'local')];
+}
+
 // mountComposer fills #pl-composer once.
 export function mountComposer() {
   const box = $('pl-composer');
@@ -152,12 +157,15 @@ function paintComposer() {
   const note = $('pl-target-note');
   const handoff = $('pl-sess-handoff');
   if (st.sess) {
+    // A card may name a session that does not exist (yet): a send would
+    // create it as an ordinary session under that key.
+    const listed = sessionListed(st.sess.key);
     to.textContent = '→ ' + sessionTitle(st.sess.key);
-    if (note) note.textContent = '';
-    input.placeholder = '追问或调整方向…';
-    input.disabled = false;
-    send.disabled = st.sending;
-    if (handoff) { handoff.hidden = !(st.status && st.status.enabled); handoff.disabled = !plannerUsable(); }
+    if (note) note.textContent = listed ? '' : '不在会话列表里，不能发消息';
+    input.placeholder = listed ? '追问或调整方向…' : '';
+    input.disabled = !listed;
+    send.disabled = st.sending || !listed;
+    if (handoff) { handoff.hidden = !(st.status && st.status.enabled); handoff.disabled = !plannerUsable() || !listed; }
     return;
   }
   to.textContent = '→ Planner';
@@ -175,6 +183,7 @@ async function sendFromComposer() {
   const text = input.value.trim();
   if (!text) return;
   const key = composerTarget();
+  if (key !== PLANNER_KEY && !sessionListed(key)) return;
   st.sending = true;
   paintComposer();
   const box = key === PLANNER_KEY ? $('pl-stream') : $('pl-sess-stream');
@@ -233,13 +242,19 @@ function paintSessionPane(reset, fresh) {
   const scroller = $('pl-sess-events');
   if (!p || !box || !scroller) return;
   const atBottom = reset || scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 40;
+  // An AskUserQuestion followed by a user event was answered: its card
+  // renders locked (answering it posts to #pl-sess's key, ask_card.js).
+  hydrateAskAnsweredFromHistory(p.events);
   if (reset) {
     box.innerHTML = sessHtml(p.events) || '<div class="pl-empty">还没有记录</div>';
   } else if (fresh.length) {
     const html = sessHtml(fresh);
     if (html) {
       box.querySelector(':scope > .pl-empty')?.remove();
-      if (fresh.some((e) => e.type === 'user')) clearPending(box);
+      if (fresh.some((e) => e.type === 'user')) {
+        clearPending(box);
+        lockRenderedAskCards(box);
+      }
       box.insertAdjacentHTML('beforeend', html);
     }
     fresh.forEach(noteWorkbenchEvent);
@@ -264,6 +279,7 @@ function paintSessionStatus() {
     raw.setAttribute('aria-pressed', p.raw ? 'true' : 'false');
     raw.textContent = p.raw ? '只看里程碑' : '原始记录';
   }
+  paintComposer();
 }
 
 async function loadSession(reset) {
@@ -291,11 +307,10 @@ export function openPlannerSession(key) {
   st.sess = { key, events: [], uuids: new Set(), lastTime: 0, raw: false, loading: false, gen: 0, timer: 0 };
   $('planner-main')?.classList.add('pl-sess-open');
   const pane = $('pl-sess');
-  if (pane) pane.hidden = false;
+  if (pane) { pane.hidden = false; pane.dataset.key = key; }
   const box = $('pl-sess-stream');
   if (box) box.innerHTML = '<div class="pl-empty">正在加载…</div>';
   paintSessionStatus();
-  paintComposer();
   followPlannerSubject(key);
   loadSession(true);
   refreshHealth($('pl-sess-line')?.parentElement);
@@ -314,17 +329,13 @@ export function closePlannerSession(quiet) {
   st.sess = null;
   $('planner-main')?.classList.remove('pl-sess-open');
   const pane = $('pl-sess');
-  if (pane) pane.hidden = true;
+  if (pane) { pane.hidden = true; delete pane.dataset.key; }
   const box = $('pl-sess-stream');
   if (box) box.innerHTML = '';
   if (!quiet) {
     paintComposer();
     followPlannerSubject(PLANNER_KEY);
   }
-}
-
-export function plannerSessionKey() {
-  return st.sess ? st.sess.key : '';
 }
 
 // ---- 交给 Planner ----

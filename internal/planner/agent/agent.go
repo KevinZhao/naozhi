@@ -589,8 +589,8 @@ func (a *Agent) askHandoff(ctx context.Context) string {
 
 // Send takes a user message to the Planner: it puts the snapshot before the
 // text, submits the turn and shows the receipt. ref is a session the user
-// hands over with it (交给 Planner), "" for none; with one the text may be
-// empty.
+// hands over with it (交给 Planner), "" for none; its block goes before the
+// snapshot, and with one the text may be empty.
 func (a *Agent) Send(text, ref string) error {
 	if !a.cfg.Enabled {
 		return ErrOff
@@ -608,13 +608,17 @@ func (a *Agent) Send(text, ref string) error {
 	case len(text) > maxMessageBytes:
 		return ErrTooLong
 	}
+	// A handed-over session leads: the logged user bubble keeps only the
+	// first EventDetailMaxRunes of the message, which the snapshot alone may
+	// fill.
+	head := ""
 	if ref != "" {
 		if ref == Key || !a.cfg.Sessions.State(ref).Exists {
 			return ErrNoRef
 		}
-		text = strings.TrimSpace(sessionRef(ref, a.cfg.Sessions.Name(ref), a.cfg.Sessions.Label(ref)) + "\n" + text)
+		head = sessionRef(ref, a.cfg.Sessions.Name(ref), a.cfg.Sessions.Label(ref)) + "\n"
 	}
-	if _, err := turns.SubmitPlanner(Key, a.Snapshot()+"\n\n"+text, opts, nil); err != nil {
+	if _, err := turns.SubmitPlanner(Key, strings.TrimSpace(head+a.Snapshot()+"\n\n"+text), opts, nil); err != nil {
 		return err
 	}
 	turns.PlannerReceipt(Key, ReceiptText)

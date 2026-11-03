@@ -27,7 +27,7 @@ import { renderEventsWithDividers } from './event_render.js';
 import { runPendingAsync } from './render_md.js';
 import { inbox, notifySupported, onInboxCount, requestNotifyPermission } from './notify.js';
 import { followWorkbenchSubject, noteWorkbenchEvent } from './workbench_panes.js';
-import { decorateEvents, paintSessionCards, refreshHealth, setInboxItems } from './planner_cards.js';
+import { decisionActsHtml, decorateEvents, paintSessionCards, refreshHealth, setInboxItems } from './planner_cards.js';
 import { clearPending, closePlannerSession, mountComposer, notePlannerStatus } from './planner_chat.js';
 import { workbench } from './workbench.js';
 import { wsm } from './ws_manager.js';
@@ -46,7 +46,6 @@ const SLOW_TICKS = 10;
 
 const KIND_LABEL = { decision: '决定', question: '提问', error: '错误', notice: '通知' };
 const KIND_ORDER = { decision: 0, question: 1, error: 2, notice: 3 };
-const ACTION_LABEL = { approve: '批准', reject: '驳回' };
 
 const pl = {
   status: null, // GET /api/planner
@@ -96,12 +95,7 @@ function itemHtml(it) {
     ? [target.project, target.title].filter(Boolean).map(esc).join(' · ') +
       ' <button type="button" class="pl-link" data-action="session-select" data-key="' + escAttr(target.key) + '" data-node="local">打开</button>'
     : (it.unit ? esc(it.unit === PLANNER_KEY ? 'Planner' : it.unit) : '');
-  let acts = '';
-  if (it.kind === 'decision' && it.decision && Array.isArray(it.decision.actions)) {
-    acts = '<div class="pl-card-acts">' + it.decision.actions.map((a, i) =>
-      '<button type="button" class="pl-btn' + (i === 0 ? ' pri' : '') + '" data-action="planner-inbox-decide" data-id="' + escAttr(it.id) + '" data-act="' + escAttr(a) + '">' +
-        esc(ACTION_LABEL[a] || a) + '</button>').join('') + '</div>';
-  }
+  const acts = decisionActsHtml(it);
   return '<div class="pl-card pl-k-' + kind + '" role="listitem" data-id="' + escAttr(it.id) + '">' +
       '<div class="pl-card-top">' +
         '<span class="pl-kind">' + esc(KIND_LABEL[kind]) + '</span>' +
@@ -272,19 +266,28 @@ function admitEvent(e) {
 
 // SNAPSHOT_RE is the <naozhi-snapshot> block the gateway puts before every
 // message to the Planner (planner/agent Send); the bubble shows what you wrote.
-// A session handed over with it (<naozhi-session-ref>) becomes a fence that
-// planner_cards.js turns into its card.
+// A session handed over with it (<naozhi-session-ref>) leads the message and
+// becomes a fence that planner_cards.js turns into its card. The logged
+// bubble keeps only the message's head (detail 2000 runes, summary 120), so
+// either block may arrive cut.
 const SNAPSHOT_RE = /^<naozhi-snapshot[\s>][\s\S]*?<\/naozhi-snapshot>\s*/;
-const SNAPSHOT_CUT_RE = /^<naozhi-snapshot[\s>][\s\S]*$/; // a summary cut inside the block
+const SNAPSHOT_CUT_RE = /^<naozhi-snapshot[\s>][\s\S]*$/;
 const SESSION_REF_RE = /^<naozhi-session-ref>(\{[^\n]*?\})<\/naozhi-session-ref>\s*/;
+const SESSION_REF_CUT_RE = /^<naozhi-session-ref>[\s\S]*$/;
+const GATEWAY_HEAD_RE = /^<naozhi-(?:snapshot[\s>]|session-ref>)/;
 function withoutSnapshot(e) {
-  if (e.type !== 'user' || !/^<naozhi-snapshot[\s>]/.test(e.detail || e.summary || '')) return e;
-  const detail = (e.detail || '').replace(SNAPSHOT_RE, '');
-  const summary = (e.summary || '').replace(SNAPSHOT_RE, '').replace(SNAPSHOT_CUT_RE, '');
-  return Object.assign({}, e, {
-    detail: detail.replace(SESSION_REF_RE, (_, ref) => '```naozhi-session-ref\n' + ref + '\n```\n'),
-    summary: summary.replace(SESSION_REF_RE, '交给 Planner：'),
-  });
+  if (e.type !== 'user' || !GATEWAY_HEAD_RE.test(e.detail || e.summary || '')) return e;
+  let ref = '';
+  let detail = (e.detail || '').replace(SESSION_REF_RE, (_, r) => { ref = r; return ''; });
+  const cut = SNAPSHOT_CUT_RE.test(detail.replace(SNAPSHOT_RE, ''));
+  detail = detail.replace(SNAPSHOT_RE, '').replace(SNAPSHOT_CUT_RE, '').replace(SESSION_REF_CUT_RE, '');
+  if (cut) detail = '（消息过长，气泡里显示不下）';
+  if (ref) detail = '```naozhi-session-ref\n' + ref + '\n```\n' + detail;
+  const handed = /^<naozhi-session-ref>/.test(e.summary || '');
+  let summary = (e.summary || '').replace(SESSION_REF_RE, '').replace(SESSION_REF_CUT_RE, '');
+  summary = summary.replace(SNAPSHOT_RE, '').replace(SNAPSHOT_CUT_RE, '');
+  if (handed) summary = '交给 Planner' + (summary ? '：' + summary : '');
+  return Object.assign({}, e, { detail, summary });
 }
 
 const RENDER_OPTS = { key: PLANNER_KEY };

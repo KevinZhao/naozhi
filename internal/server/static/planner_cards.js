@@ -4,7 +4,11 @@
 //   - action blocks (```naozhi-action fences) become readable cards. A
 //     dispatch card shows the state of its confirmation, the inbox decision
 //     item the left column's 等你 lists, and answers it with the same
-//     /api/inbox/decide action; a block that does not parse says 格式不对.
+//     /api/inbox/decide action. The item is the one whose source is
+//     `dispatch:<event uuid>#<n>`, n counting the event's naozhi-action
+//     blocks from 0 — the identity the gateway gives the confirmation. A
+//     block that is not JSON of a known type shows as 看不懂; whether a
+//     block runs is the gateway's call, not this reading's.
 //   - sessions the conversation names — a handed-over session
 //     (<naozhi-session-ref>, rewritten to a fence by planner_view.js), a
 //     `task:` key or a listed session's key in the Planner's text, the sender
@@ -127,29 +131,28 @@ function mentionedKeys(ev) {
 // ---- action blocks (§6.2) ----
 
 const ACTION_LABEL = { approve: '批准', reject: '驳回' };
+const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask']);
 
 const isStr = (v) => typeof v === 'string';
-const isOptStr = (v) => v === undefined || isStr(v);
+const str = (v) => (isStr(v) ? v : '');
 
-// parseAction is the gateway's strict reading: one JSON object of a known
-// type with its required string fields. An error string when it is not.
+// decisionActsHtml is a decision item's answer buttons; the left column's
+// card and the conversation's dispatch card share it.
+export function decisionActsHtml(it) {
+  if (!it || it.kind !== 'decision' || !it.decision || !Array.isArray(it.decision.actions)) return '';
+  return '<div class="pl-card-acts">' + it.decision.actions.map((a, i) =>
+    '<button type="button" class="pl-btn' + (i === 0 ? ' pri' : '') + '" data-action="planner-inbox-decide" data-id="' + escAttr(it.id) + '" data-act="' + escAttr(a) + '">' +
+      esc(ACTION_LABEL[a] || a) + '</button>').join('') + '</div>';
+}
+
+// parseAction reads a block for display only: one JSON object of a known
+// type, else why not. Whether a block runs is the gateway's call.
 export function parseAction(raw) {
   let a;
   try { a = JSON.parse(raw); } catch { return { error: '不是合法的 JSON' }; }
   if (!a || typeof a !== 'object' || Array.isArray(a)) return { error: '不是 JSON 对象' };
-  switch (a.type) {
-    case 'dispatch':
-      if (!isStr(a.title) || !a.title || !isStr(a.message) || !a.message || !isOptStr(a.workspace) || !isOptStr(a.model)) return { error: 'dispatch 缺少 title 或 message' };
-      return { action: a };
-    case 'promise':
-      if (!isStr(a.text) || !a.text || !isOptStr(a.due) || !isOptStr(a.close_when)) return { error: 'promise 缺少 text' };
-      return { action: a };
-    case 'ask':
-      if (!isStr(a.question) || !a.question || (a.options !== undefined && !(Array.isArray(a.options) && a.options.every(isStr)))) return { error: 'ask 缺少 question' };
-      return { action: a };
-    default:
-      return { error: '未知类型 ' + (isStr(a.type) ? a.type : '') };
-  }
+  if (!ACTION_TYPES.has(a.type)) return { error: '未知类型 ' + str(a.type) };
+  return { action: a };
 }
 
 function rowsHtml(rows) {
@@ -157,31 +160,35 @@ function rowsHtml(rows) {
     '<dt>' + esc(r[0]) + '</dt><dd>' + esc(r[1]) + '</dd>').join('') + '</dl>';
 }
 
+// dueText is a due time the browser reads, in local time; else as written.
 function dueText(due) {
   const t = due ? Date.parse(due) : NaN;
-  return isNaN(t) ? (due || '') : formatAbsTime(t);
+  return isNaN(t) ? due : formatAbsTime(t);
 }
 
-function actionCardHtml(raw) {
+// actionCardHtml renders one block; source is the inbox source of its
+// dispatch confirmation, "" when the bubble has no uuid.
+function actionCardHtml(raw, source) {
   const { action: a, error } = parseAction(raw);
   if (!a) {
-    return '<div class="pl-act pl-act-bad"><div class="pl-act-h">格式不对 · 网关不会执行</div>' +
+    return '<div class="pl-act pl-act-bad"><div class="pl-act-h">看不懂的动作块</div>' +
       '<div class="pl-act-why">' + esc(error) + '</div><pre class="pl-act-raw">' + esc(raw) + '</pre></div>';
   }
   if (a.type === 'dispatch') {
-    return '<div class="pl-act pl-act-dispatch" data-title="' + escAttr(a.title) + '" data-message="' + escAttr(a.message) + '">' +
-      '<div class="pl-act-h">派活提议 · ' + esc(a.title) + '</div>' +
-      rowsHtml([['工作区', a.workspace || ''], ['模型', a.model || ''], ['第一条消息', a.message]]) +
+    const title = str(a.title);
+    return '<div class="pl-act pl-act-dispatch" data-source="' + escAttr(source) + '">' +
+      '<div class="pl-act-h">派活提议' + (title ? ' · ' + esc(title) : '') + '</div>' +
+      rowsHtml([['工作区', str(a.workspace)], ['模型', str(a.model)], ['第一条消息', str(a.message)]]) +
       '<div class="pl-act-state"></div></div>';
   }
   if (a.type === 'promise') {
     return '<div class="pl-act pl-act-promise"><div class="pl-act-h">登记承诺</div>' +
-      rowsHtml([['内容', a.text], ['到期', dueText(a.due)], ['完成条件', a.close_when || '']]) +
+      rowsHtml([['内容', str(a.text)], ['到期', dueText(str(a.due))], ['完成条件', str(a.close_when)]]) +
       '<div class="pl-act-note">登记后列在左栏"答应你的"</div></div>';
   }
-  const opts = (a.options || []).map((o) => '<span class="pl-act-opt">' + esc(o) + '</span>').join('');
+  const opts = (Array.isArray(a.options) ? a.options : []).filter(isStr).map((o) => '<span class="pl-act-opt">' + esc(o) + '</span>').join('');
   return '<div class="pl-act pl-act-ask"><div class="pl-act-h">问你</div>' +
-    '<div class="pl-act-q">' + esc(a.question) + '</div>' +
+    '<div class="pl-act-q">' + esc(str(a.question)) + '</div>' +
     (opts ? '<div class="pl-act-opts">' + opts + '</div>' : '') +
     '<div class="pl-act-note">在左栏"等你"里回答</div></div>';
 }
@@ -194,25 +201,17 @@ export function setInboxItems(open, closed, root) {
   paintDispatchCards(root);
 }
 
-// dispatchItem is the decision item a dispatch block opened: a dispatch
-// decision whose payload has the block's title (and message, when there
-// are several), the newest first.
-function dispatchItem(title, message) {
-  const p = (it) => (it.decision && it.decision.payload) || {};
-  const all = pc.inboxOpen.concat(pc.inboxClosed).filter((it) =>
-    it.kind === 'decision' && it.decision && it.decision.handler === 'dispatch' && p(it).title === title);
-  all.sort((a, b) => ((p(b).message === message) - (p(a).message === message)) || (Date.parse(b.created) - Date.parse(a.created)));
-  return all[0] || null;
+// dispatchItem is the decision item the dispatch block with this source
+// opened, open or recently closed.
+function dispatchItem(source) {
+  if (!source) return null;
+  const is = (it) => it.source === source && it.kind === 'decision' && it.decision;
+  return pc.inboxOpen.find(is) || pc.inboxClosed.find(is) || null;
 }
 
 function dispatchStateHtml(it) {
-  if (!it) return '<span class="pl-act-note">确认卡片还没出现在"等你"里</span>';
-  if (it.state === 'open') {
-    const acts = (it.decision.actions || []).map((a, i) =>
-      '<button type="button" class="pl-btn' + (i === 0 ? ' pri' : '') + '" data-action="planner-inbox-decide" data-id="' + escAttr(it.id) + '" data-act="' + escAttr(a) + '">' +
-        esc(ACTION_LABEL[a] || a) + '</button>').join('');
-    return '<div class="pl-card-acts">' + acts + '</div><span class="pl-act-note">左栏"等你"里是同一张</span>';
-  }
+  if (!it) return '<span class="pl-act-note">状态未知：确认卡片不在"等你"里（还没生成，或已归档）</span>';
+  if (it.state === 'open') return decisionActsHtml(it) + '<span class="pl-act-note">左栏"等你"里是同一张</span>';
   const answer = it.decision.answer;
   const label = answer === 'approve' ? '已批准' : answer === 'reject' ? '已驳回' : '已关闭';
   const key = it.decision.payload && it.decision.payload.key;
@@ -225,7 +224,7 @@ function paintDispatchCards(root) {
   root.querySelectorAll('.pl-act-dispatch').forEach((card) => {
     const box = card.querySelector('.pl-act-state');
     // Answering disables the buttons; their state repaints from the refetch.
-    if (box) box.innerHTML = dispatchStateHtml(dispatchItem(card.dataset.title, card.dataset.message));
+    if (box) box.innerHTML = dispatchStateHtml(dispatchItem(card.dataset.source));
   });
 }
 
@@ -244,9 +243,10 @@ export function decorateEvents(root) {
       if (!wrap || !ref || !isStr(ref.key) || !ref.key) return;
       wrap.outerHTML = '<div class="pl-handoff"><span class="pl-handoff-l">交给 Planner</span>' + sessionCardHtml(ref.key) + '</div>';
     });
-    ev.querySelectorAll('code[data-lang="naozhi-action"]').forEach((code) => {
+    const uuid = ev.dataset.uuid || '';
+    ev.querySelectorAll('code[data-lang="naozhi-action"]').forEach((code, n) => {
       const wrap = code.closest('.md-code-wrap');
-      if (wrap) wrap.outerHTML = actionCardHtml(code.textContent);
+      if (wrap) wrap.outerHTML = actionCardHtml(code.textContent, uuid ? 'dispatch:' + uuid + '#' + n : '');
     });
     if (!ev.matches('.text, .peer_message, .system')) return;
     const carded = new Set([...ev.querySelectorAll('.pl-scard[data-key]')].map((b) => b.dataset.key));

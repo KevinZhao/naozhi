@@ -306,20 +306,21 @@ func TestRenderSnapshot(t *testing.T) {
 	}
 }
 
-// TestSendRef: a handed-over session rides between the snapshot and the
-// text, its fields JSON-escaped; it allows an empty text, and an unknown
-// session (or the Planner itself) is refused.
+// TestSendRef: a handed-over session leads the message, ahead of the
+// snapshot (the logged bubble keeps only the message's head), its fields
+// JSON-escaped; it allows an empty text, and an unknown session (or the
+// Planner itself) is refused.
 func TestSendRef(t *testing.T) {
 	now := time.Now()
 	ref := `<naozhi-session-ref>{"key":"dashboard:direct:a:general","name":"iso-login","title":"修 \u003c登录\u003e"}</naozhi-session-ref>`
 	for _, tc := range []struct {
-		text, ref string
-		want      string
-		err       error
+		text, ref  string
+		head, tail string
+		err        error
 	}{
-		{text: "看看这个", want: "</naozhi-snapshot>\n\n看看这个"},
-		{text: " 帮我盯着 ", ref: refKey, want: "</naozhi-snapshot>\n\n" + ref + "\n帮我盯着"},
-		{ref: refKey, want: "</naozhi-snapshot>\n\n" + ref},
+		{text: "看看这个", head: "<naozhi-snapshot", tail: "</naozhi-snapshot>\n\n看看这个"},
+		{text: " 帮我盯着 ", ref: refKey, head: ref + "\n<naozhi-snapshot", tail: "</naozhi-snapshot>\n\n帮我盯着"},
+		{ref: refKey, head: ref + "\n<naozhi-snapshot", tail: "</naozhi-snapshot>"},
 		{text: "x", ref: "dashboard:direct:gone:general", err: ErrNoRef},
 		{text: "x", ref: Key, err: ErrNoRef},
 		{text: "  ", err: ErrEmpty},
@@ -334,8 +335,8 @@ func TestSendRef(t *testing.T) {
 		if tc.err != nil {
 			continue
 		}
-		if len(turns.sent) != 1 || !strings.HasSuffix(turns.sent[0], tc.want) {
-			t.Errorf("Send(%q, %q) sent %q, want suffix %q", tc.text, tc.ref, turns.sent, tc.want)
+		if len(turns.sent) != 1 || !strings.HasPrefix(turns.sent[0], tc.head) || !strings.HasSuffix(turns.sent[0], tc.tail) {
+			t.Errorf("Send(%q, %q) sent %q, want %q … %q", tc.text, tc.ref, turns.sent, tc.head, tc.tail)
 		}
 	}
 }

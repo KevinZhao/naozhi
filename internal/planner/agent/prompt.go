@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // PromptVersion names the system prompt below; a surviving session keeps the
@@ -70,6 +72,10 @@ const handoffPrompt = `现在换班：请写交接摘要，交给接班的新会
 ## 用户新说的偏好与决定
 ## 待跟进`
 
+// refTitleRunes bounds a session reference's title, keeping the block well
+// inside the logged bubble's EventDetailMaxRunes.
+const refTitleRunes = 100
+
 // sessionRef is the block naming a session the user hands over. The fields
 // go through JSON, whose escaping of < and > keeps a title from closing the
 // tag; the dashboard reads the same block back into a session card.
@@ -78,7 +84,7 @@ func sessionRef(key, name, title string) string {
 		Key   string `json:"key"`
 		Name  string `json:"name,omitempty"`
 		Title string `json:"title,omitempty"`
-	}{key, name, title})
+	}{key, name, textutil.TruncateRunes(title, refTitleRunes)})
 	return "<naozhi-session-ref>" + string(b) + "</naozhi-session-ref>"
 }
 
