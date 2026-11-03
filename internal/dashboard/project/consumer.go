@@ -46,9 +46,11 @@ type RouterView interface {
 	BumpVersion()
 }
 
-// PlannerSession is what the project list reads off a planner session.
+// PlannerSession is what the project list reads off a planner session, plus
+// the workspace a root=session:<key> file root is resolved from.
 type PlannerSession interface {
 	Snapshot() sessionview.SessionSnapshot
+	Workspace() string
 }
 
 // NodeCacheReader is the *node.CacheManager surface: the cached remote-node
