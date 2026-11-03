@@ -1,13 +1,16 @@
-// Package monitor holds the gateway's self-monitoring building blocks: a
-// clock that exposes wall and monotonic time separately, and a detector for
-// the sleep/wake jumps between them (docs/rfc/planner.md §3.8, §15.1).
-package monitor
+// Package wake holds the clock the gateway's self-monitoring times against
+// and detects sleep/wake jumps between its wall and monotonic readings
+// (docs/rfc/planner.md §3.8, §15.1). It is a leaf so internal/monitor itself
+// stays free for the ledger and health state machine, which import it and
+// beat.
+package wake
 
 import "time"
 
 // Clock is the time source for heartbeat and health timing. Mono stands still
-// while the machine sleeps (Go's monotonic clock on darwin and linux does), so
-// a sleep shows up as Now running ahead of Mono.
+// while the machine sleeps (Go's monotonic clock on darwin and linux does, and
+// the runtime's timers run on it), so a sleep shows up as Now running ahead
+// of Mono.
 type Clock interface {
 	Now() time.Time
 	Mono() time.Duration
@@ -25,28 +28,28 @@ func (c systemClock) Mono() time.Duration { return time.Since(c.origin) }
 // observations before the gap counts as one sleep/wake (or a wall-clock step).
 const SleepJump = 2 * time.Minute
 
-// WakeDetector reports sleep/wake jumps between successive observations. Not
-// safe for concurrent use; callers serialise Woke under their own lock.
-type WakeDetector struct {
+// Detector reports sleep/wake jumps between successive observations. Not safe
+// for concurrent use; callers serialise Woke under their own lock.
+type Detector struct {
 	clock Clock
 	skew  time.Duration // wall minus monotonic at the last observation
 }
 
-// NewWakeDetector returns a detector whose baseline is the current instant.
-func NewWakeDetector(clock Clock) *WakeDetector {
-	d := &WakeDetector{clock: clock}
+// NewDetector returns a detector whose baseline is the current instant.
+func NewDetector(clock Clock) *Detector {
+	d := &Detector{clock: clock}
 	d.skew = d.observe()
 	return d
 }
 
-func (d *WakeDetector) observe() time.Duration {
+func (d *Detector) observe() time.Duration {
 	return time.Duration(d.clock.Now().UnixNano()) - d.clock.Mono()
 }
 
 // Woke reports whether wall and monotonic time drifted apart by more than
 // SleepJump since the previous call, and moves the baseline to now. Timers
 // measured against a baseline taken before the jump should restart from now.
-func (d *WakeDetector) Woke() bool {
+func (d *Detector) Woke() bool {
 	skew := d.observe()
 	jump := skew - d.skew
 	d.skew = skew

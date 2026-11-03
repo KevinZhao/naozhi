@@ -66,8 +66,17 @@ func TestRegistryStale(t *testing.T) {
 			c.tick(StartupGrace)
 			a.Beat()
 			r.Register("b", time.Minute)
+			c.tick(90 * time.Second)
 			c.sleep(time.Hour)
 			c.tick(time.Minute)
+		}, nil},
+		{"a sleep under the wake threshold adds no beat age", func(c *fakeClock, r *Registry, a *Beat) {
+			c.tick(StartupGrace)
+			a.Beat()
+			r.Register("b", 30*time.Second)
+			c.tick(25 * time.Second)
+			c.sleep(90 * time.Second)
+			c.tick(2 * time.Second)
 		}, nil},
 		{"a loop stopped across a sleep goes stale after waking", func(c *fakeClock, r *Registry, a *Beat) {
 			c.tick(StartupGrace)
@@ -78,12 +87,10 @@ func TestRegistryStale(t *testing.T) {
 			}
 			c.tick(2*time.Minute + time.Second)
 		}, []string{"a"}},
-		{"wall drift under the sleep threshold is not a sleep", func(c *fakeClock, r *Registry, a *Beat) {
-			c.tick(StartupGrace)
-			a.Beat()
-			c.tick(time.Minute)
-			c.sleep(time.Minute + 30*time.Second)
-		}, []string{"a"}},
+		{"the startup grace does not count sleep", func(c *fakeClock, r *Registry, a *Beat) {
+			c.sleep(time.Hour)
+			c.tick(StartupGrace - time.Second)
+		}, nil},
 		{"stale names are sorted", func(c *fakeClock, r *Registry, a *Beat) {
 			r.Register("c", time.Minute)
 			r.Register("b", time.Minute)

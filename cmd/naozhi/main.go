@@ -17,8 +17,8 @@ import (
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/dispatch"
-	"github.com/naozhi/naozhi/internal/monitor"
 	"github.com/naozhi/naozhi/internal/monitor/beat"
+	"github.com/naozhi/naozhi/internal/monitor/wake"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
@@ -213,7 +213,7 @@ func main() {
 
 	// Critical-loop heartbeats; /health degrades when one goes stale. Its
 	// startup grace starts here, before the first loop registers.
-	beats := beat.New(monitor.SystemClock())
+	beats := beat.New(wake.SystemClock())
 	router.StartCleanupLoop(ctx, cfg.ParseTTL()/2, beats)
 	router.StartShimReconcileLoop(ctx, 30*time.Second)
 
