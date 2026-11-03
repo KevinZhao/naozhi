@@ -12,6 +12,7 @@ import (
 	"github.com/naozhi/naozhi/internal/budget"
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/monitor/beat"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/session"
@@ -55,6 +56,9 @@ type SchedulersDeps struct {
 
 	// Budget refuses cron runs past cost.budget; nil runs every job.
 	Budget *budget.Gate
+
+	// Beats receives the cron tick heartbeat; nil disables it.
+	Beats *beat.Registry
 }
 
 // Schedulers holds the constructed subsystem instances for caller-side
@@ -122,6 +126,7 @@ func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 		Telemetry:     deps.Telemetry,
 		Ledger:        deps.Router.Runs().CostLedger(),
 		Budget:        budgetGate,
+		Beats:         deps.Beats,
 	})
 	if err := scheduler.Start(); err != nil {
 		return out, fmt.Errorf("start cron scheduler: %w", err)
