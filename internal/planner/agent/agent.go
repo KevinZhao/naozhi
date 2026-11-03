@@ -610,6 +610,26 @@ func (a *Agent) Send(text string) error {
 	return nil
 }
 
+// Tell sends the gateway's own message to the Planner: the outcome of an
+// action block (a dispatch, the user's answer). It carries no snapshot and
+// gets no receipt.
+func (a *Agent) Tell(text string) error {
+	if !a.cfg.Enabled {
+		return ErrOff
+	}
+	a.mu.Lock()
+	turns, stopped, opts := a.turns, a.state.Stopped, a.opts
+	a.mu.Unlock()
+	switch {
+	case stopped:
+		return ErrStopped
+	case turns == nil:
+		return ErrNotReady
+	}
+	_, err := turns.SubmitPlanner(Key, "<naozhi-receipt>\n"+strings.TrimSpace(text)+"\n</naozhi-receipt>", opts, nil)
+	return err
+}
+
 // Snapshot renders the snapshot the next message would carry.
 func (a *Agent) Snapshot() string {
 	a.mu.Lock()

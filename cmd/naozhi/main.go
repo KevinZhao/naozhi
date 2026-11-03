@@ -23,10 +23,12 @@ import (
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/planner/action"
 	"github.com/naozhi/naozhi/internal/planner/activity"
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/brief"
 	"github.com/naozhi/naozhi/internal/planner/promise"
+	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/routerrelay"
 	"github.com/naozhi/naozhi/internal/selfupdate"
@@ -288,6 +290,9 @@ func main() {
 	// The Planner's promises ("答应你的"); their reminder exits are bound
 	// once the inbox and the server exist.
 	promises := promise.New(promise.Config{Path: sessionLayout.PlannerPromisesPath(), Journal: plannerState.Journal})
+	// Sidecar files of the sessions the Planner dispatches (lineage and
+	// purpose, §3.7); swept below once the router has its sessions.
+	sidecars := sidecar.Open(sessionLayout.PlannerSessionsRoot(), nil)
 	// The global Planner (planner:main); Start below, once the turn entry and
 	// the health machine exist. Built even when planner.enabled is off, so
 	// /api/planner answers "off" rather than 404.
@@ -454,6 +459,9 @@ func main() {
 	})
 
 	routing := buildRouting(cfg, agents, projectMgr, scheduler)
+	// The options of the sessions the Planner dispatches: at dispatch, and
+	// rebuilt from their sidecar when one respawns from the dashboard.
+	taskOpts := wireup.TaskOpts{Base: agents["general"], Sessions: sidecars}
 	// The health monitor reads srv's node and discovery caches, so it is built
 	// after srv; srv only reads it once it serves.
 	srv := server.NewWithOptions(server.ServerOptions{
@@ -471,6 +479,8 @@ func main() {
 		Workspaces:       plannerState.Workspaces,
 		Notify:           notifier,
 		Promises:         promises,
+		Purpose:          sidecars.Purpose,
+		TaskOpts:         taskOpts.ForKey,
 		AllowedRoot:      workspace,
 		IMAccess:         cfg.IMAccessPolicy(),
 		IMRateLimit:      dispatch.RateLimit{MsgsPerMin: cfg.IMRateLimit.MsgsPerMin, Burst: cfg.IMRateLimit.Burst},
@@ -551,6 +561,7 @@ func main() {
 			Remote:      srv.RemoteSessions,
 			Discovered:  srv.DiscoveredSessions,
 			EventLogDir: eventLogDir,
+			Sidecars:    sidecars,
 		}.Collect,
 		Journal:    plannerState.Journal,
 		Workspaces: plannerState.Workspaces,
@@ -568,6 +579,22 @@ func main() {
 	go notifier.Run(ctx)
 	promises.SetReminder(wireup.PromiseReminder{Notify: notifier, Dialog: srv.PlannerNote})
 	go promises.Run(ctx)
+	// The Planner's action blocks (§6.2): parsed from planner:main's turn
+	// results; an approved dispatch starts a task: session.
+	actions := action.New(action.Config{
+		Planner:    agent.Key,
+		Inbox:      notifier,
+		Promises:   promises,
+		Workspaces: plannerState.Workspaces,
+		Sessions:   sidecars,
+		Spawn:      wireup.TaskSpawner{Router: router, Opts: taskOpts, Submit: srv.SubmitPlanner}.Spawn,
+		Note:       func(text string) { srv.PlannerNote(agent.Key, text) },
+		Tell:       plannerAgent.Tell,
+		Ctx:        ctx,
+	})
+	router.SetResultSink(actions.Result)
+	go actions.Run(ctx)
+	go sidecars.Run(ctx, func(key string) bool { return router.SessionFor(key) != nil })
 	go briefer.Run(ctx)
 
 	// Upstream connector: this node connects to a primary.

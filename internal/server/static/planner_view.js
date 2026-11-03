@@ -92,7 +92,8 @@ function itemHtml(it) {
       ' <button type="button" class="pl-link" data-action="session-select" data-key="' + escAttr(target.key) + '" data-node="local">打开</button>'
     : (it.unit ? esc(it.unit === PLANNER_KEY ? 'Planner' : it.unit) : '');
   let acts = '';
-  if (it.kind === 'decision' && it.decision && Array.isArray(it.decision.actions)) {
+  // A decision's actions, or a Planner question's options (§6.2 ask).
+  if (it.decision && Array.isArray(it.decision.actions)) {
     acts = '<div class="pl-card-acts">' + it.decision.actions.map((a, i) =>
       '<button type="button" class="pl-btn' + (i === 0 ? ' pri' : '') + '" data-action="planner-inbox-decide" data-id="' + escAttr(it.id) + '" data-act="' + escAttr(a) + '">' +
         esc(ACTION_LABEL[a] || a) + '</button>').join('') + '</div>';
@@ -128,6 +129,19 @@ function paintWaiting() {
     ((KIND_ORDER[a.kind] ?? 3) - (KIND_ORDER[b.kind] ?? 3)) || (Date.parse(a.created) - Date.parse(b.created)));
   box.innerHTML = items.length ? items.map(itemHtml).join('') : '<div class="pl-empty">没有等你的事</div>';
   paintCounts();
+  paintInlineCards(items);
+}
+
+// paintInlineCards repeats the Planner's open cards (dispatch confirmations,
+// its questions) at the end of the conversation, where they were asked; the
+// left column keeps them too, and either answers.
+function paintInlineCards(items) {
+  const box = $('pl-cards');
+  if (!box) return;
+  const mine = items.filter((it) => it.unit === PLANNER_KEY && it.decision);
+  const html = mine.length ? '<div class="pl-cards-h">待你确认 · ' + mine.length + '</div>' + mine.map(itemHtml).join('') : '';
+  if (box.innerHTML !== html) box.innerHTML = html;
+  box.hidden = !html;
 }
 
 async function fetchInbox() {
@@ -267,7 +281,13 @@ function admitEvent(e) {
 // message to the Planner (planner/agent Send); the bubble shows what you wrote.
 const SNAPSHOT_RE = /^<naozhi-snapshot[\s>][\s\S]*?<\/naozhi-snapshot>\s*/;
 const SNAPSHOT_CUT_RE = /^<naozhi-snapshot[\s>][\s\S]*$/; // a summary cut inside the block
+// RECEIPT_RE is a gateway receipt to the Planner (planner/agent Tell: a
+// dispatch's outcome, your answer to its card): not something you wrote, so
+// it shows as a gateway line rather than your bubble.
+const RECEIPT_RE = /^<naozhi-receipt>\s*([\s\S]*?)\s*(?:<\/naozhi-receipt>\s*)?$/;
 function withoutSnapshot(e) {
+  const r = e.type === 'user' && RECEIPT_RE.exec(e.detail || e.summary || '');
+  if (r) return Object.assign({}, e, { type: 'system', summary: '回执给 Planner：' + r[1], detail: '' });
   if (e.type !== 'user' || !/^<naozhi-snapshot[\s>]/.test(e.detail || e.summary || '')) return e;
   return Object.assign({}, e, {
     detail: (e.detail || '').replace(SNAPSHOT_RE, ''),

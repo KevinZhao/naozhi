@@ -30,6 +30,8 @@ const (
 	RoleSys
 	// RolePlanner is the global Planner. Key shape "planner:main".
 	RolePlanner
+	// RoleTask is a session the Planner dispatched. Key shape "task:<id>".
+	RoleTask
 )
 
 // String returns the lower-case role label used in metrics / logs.
@@ -47,6 +49,8 @@ func (r SessionRole) String() string {
 		return "sys"
 	case RolePlanner:
 		return "planner"
+	case RoleTask:
+		return "task"
 	default:
 		return "unknown"
 	}
@@ -69,6 +73,8 @@ func classifyKey(key string) SessionRole {
 		return RoleSys
 	case sessionkey.IsPlannerNSKey(key):
 		return RolePlanner
+	case sessionkey.IsTaskKey(key):
+		return RoleTask
 	case isPlannerKey(key):
 		return RoleProject
 	default:

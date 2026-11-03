@@ -42,6 +42,11 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 			h.deps.SnapshotEnricher(&snapshots[i])
 		}
 	}
+	if h.deps.Purpose != nil {
+		for i := range snapshots {
+			snapshots[i].Purpose = h.deps.Purpose(snapshots[i].Key)
+		}
+	}
 
 	h.fillProjectAndSummary(snapshots)
 

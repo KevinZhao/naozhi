@@ -107,6 +107,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		agents:        agents,
 		agentCommands: agentCommands,
 		allowedRoot:   opts.AllowedRoot,
+		taskOpts:      opts.TaskOpts,
 		projectsRoot:  claudefs.ResolvedProjectsRoot(claudeDir),
 		imAccess:      opts.IMAccess,
 		imRateLimit:   opts.IMRateLimit,
@@ -309,6 +310,7 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 		Outputs:          outputs,
 		Health:           opts.Health,
 		Workspaces:       workspaces,
+		Purpose:          opts.Purpose,
 	})
 	sessionH.InitStaticStats()
 	sessionH.WarmHistoryCache()

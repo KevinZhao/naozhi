@@ -19,6 +19,10 @@ import (
 // errPlannerNamespace answers a dashboard or relayed send to a planner: key.
 var errPlannerNamespace = sendUsageError("Planner 的消息请从 Planner 页面发送")
 
+// errTaskNamespace answers a send creating a task: session: only an approved
+// dispatch does.
+var errTaskNamespace = sendUsageError("task: 会话只能由 Planner 派出")
+
 var (
 	errPlannerBusy     = errors.New("服务忙：Planner 消息未送达，请稍后重试")
 	errPlannerClosing  = errors.New("服务正在关闭，消息未送达")
@@ -28,7 +32,9 @@ var (
 
 // SubmitPlanner runs text as a turn on key, spawning it with opts; done (nil
 // for none) gets the reply text or the turn's error. queued is text waiting
-// behind a running turn. It is the agent's Turns.SubmitPlanner.
+// behind a running turn. It is the agent's Turns.SubmitPlanner, and sends
+// the first message of a session the Planner dispatched (task:), which also
+// spawns with options the gateway set.
 func (s *Server) SubmitPlanner(key, text string, opts session.AgentOpts, done func(reply string, err error)) (queued bool, err error) {
 	if s.hub == nil || s.hub.engine == nil {
 		return false, errPlannerNoEngine

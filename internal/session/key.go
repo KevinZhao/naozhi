@@ -53,6 +53,9 @@ var keyNamespaces = []keyNamespace{
 	{prefix: ProjectKeyPrefix, exempt: true, kind: "project"},
 	{prefix: sessionkey.ScratchKeyPrefix, exempt: false, kind: ""},
 	{prefix: SysKeyPrefix, exempt: true, kind: "sys"},
+	// The Planner's dispatched sessions count against max_procs like the
+	// sessions you start yourself (§15.1).
+	{prefix: sessionkey.TaskKeyPrefix, exempt: false, kind: ""},
 }
 
 // reservedKeyPrefixes lists the namespaces that do NOT follow the standard IM

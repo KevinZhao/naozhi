@@ -17,14 +17,14 @@ import (
 // so another session's message is only noted there, never acted on; "" (the
 // CLI default) for every other namespace (cron, sys, scratch, project
 // planners); "accept" for the global Planner (planner:main), which also sets
-// it explicitly. A session that should take messages (the sessions the
-// Planner dispatches) sets AgentOpts.CrossSessionInbound to "accept".
+// it explicitly, and for the sessions it dispatches (task:), so one resumed
+// from the dashboard still takes the Planner's messages.
 //
 // Only fresh spawns read it: a surviving shim's drift check rebuilds its argv
 // from the overlay it recorded, so a session spawned before the policy keeps
 // running without it until its next spawn.
 func crossSessionInboundFor(key string) string {
-	if sessionkey.IsPlannerNSKey(key) {
+	if sessionkey.IsPlannerNSKey(key) || sessionkey.IsTaskKey(key) {
 		return "accept"
 	}
 	// The IM key shape, tested as ResolveForKey does: a scratch key has four

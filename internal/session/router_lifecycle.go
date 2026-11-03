@@ -843,6 +843,7 @@ func (r *Router) installFreshSession(tx sessTx,
 	bookUnownedResults(s, proc)
 	bookCodeChanges(s, proc, func() { r.ss.Update(markChanged); r.notifyChange() })
 	r.bookActivity(s, proc)
+	r.bookResults(s, proc)
 	r.bindPeerKeys(proc)
 	bookWorkflows(s, proc, r.hist.projectsRoot, func() { r.ss.Update(markChanged); r.notifyChange() }, r.BumpVersion)
 	bookProcessEnd(s, proc, r.hist.claudeDir)
