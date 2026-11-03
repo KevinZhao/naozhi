@@ -19,6 +19,7 @@ import { sid } from './session_ident.js';
 import { esc, escAttr, showToast, fetchJSON, nzViews } from './nz_util.js';
 import { fileApiUrl, renderSandboxedBlob } from './file_refs.js';
 import { formatFileSize } from './utilities.js';
+import { renderRich, runPendingAsync } from './render_md.js';
 
 (function () {
   'use strict';
@@ -305,9 +306,28 @@ import { formatFileSize } from './utilities.js';
     document.body.appendChild(a); a.click(); a.remove();
   }
 
+  // Markdown preview renders through renderRich (the chat renderer: tables,
+  // mermaid, KaTeX) by default; the header toggle flips to the raw source.
+  // state.md holds the fetched preview so toggling never refetches.
+  function renderMarkdown() {
+    var md = state.md, btn = $('files-md-toggle');
+    if (!md) return;
+    var body = $('files-main-body');
+    if (md.raw) {
+      body.innerHTML = md.note + '<pre class="files-raw">' + esc(md.content) + '</pre>';
+    } else {
+      body.innerHTML = md.note + '<div class="fv-rich">' + renderRich(md.content) + '</div>';
+      runPendingAsync();
+    }
+    btn.textContent = md.raw ? '渲染' : '原文';
+    btn.setAttribute('aria-pressed', md.raw ? 'true' : 'false');
+  }
+
   function preview(name) {
     var rel = relOf(name);
     state.previewRel = rel; state.previewName = name;
+    state.md = null;
+    $('files-md-toggle').hidden = true;
     document.body.classList.add('files-reading');
     $('files-main-head').hidden = false;
     $('files-main-title').textContent = name;
@@ -353,12 +373,20 @@ import { formatFileSize } from './utilities.js';
     }
     // Text / unknown → preview JSON {content, truncated, size, mime}.
     fetchJSON(fileApiUrl(cur(), 'local', rel, 'preview')).then(function (res) {
+      // A slower fetch for a file the operator already left must not paint.
+      if (state.previewRel !== rel) return;
       // Server shape for non-text files is {content:"", binary:true}.
       if (res && res.binary) {
         body.innerHTML = '<div class="files-empty">该文件不可预览，请下载查看。</div>';
         return;
       }
       var note = (res && res.truncated) ? '<div class="files-note">文件过大，仅显示前一部分。</div>' : '';
+      if (ext === 'md' || ext === 'markdown') {
+        state.md = { content: (res && res.content) || '', note: note, raw: false };
+        $('files-md-toggle').hidden = false;
+        renderMarkdown();
+        return;
+      }
       body.innerHTML = note + '<pre class="files-raw">' + esc((res && res.content) || '') + '</pre>';
     }).catch(function (e) {
       body.innerHTML = '<div class="files-empty">不可预览（' + esc(e.message) + '），可尝试下载。</div>';
@@ -468,6 +496,10 @@ import { formatFileSize } from './utilities.js';
     });
 
     var dl = $('files-download'); if (dl) dl.addEventListener('click', function () { download(); });
+    var mt = $('files-md-toggle');
+    if (mt) mt.addEventListener('click', function () {
+      if (state.md) { state.md.raw = !state.md.raw; renderMarkdown(); }
+    });
     var bk = $('files-back'); if (bk) bk.addEventListener('click', backToList);
     var rf = $('files-refresh'); if (rf) rf.addEventListener('click', function () { loadDir(state.dir); });
 
