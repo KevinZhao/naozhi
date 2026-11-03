@@ -544,6 +544,9 @@ func (p *ClaudeProtocol) ReadEventInto(line string, buf []clievent.Event) ([]cli
 	if ev.Type == "user" && !ev.IsReplay && strings.Contains(line, toolImageGate) {
 		ev.ToolResultImages = parseToolResultImages(line)
 	}
+	if ev.Type == "user" && !ev.IsReplay && strings.Contains(line, prLinkGate) {
+		ev.ToolResultPRs = parseToolResultPRs(line)
+	}
 	if ev.Type == "user" && strings.Contains(line, peerOriginGate) {
 		ev.Peer = parsePeerOrigin(line)
 	}

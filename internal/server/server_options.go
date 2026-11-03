@@ -12,6 +12,7 @@ import (
 	"github.com/naozhi/naozhi/internal/imauth"
 	"github.com/naozhi/naozhi/internal/monitor/beat"
 	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/planner/activity"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/routerrelay"
@@ -92,6 +93,9 @@ type ServerOptions struct {
 	// Beats holds the critical-loop heartbeats /health degrades on; nil
 	// keeps /health at "ok".
 	Beats *beat.Registry
+	// Outputs is the outputs index /api/sessions/outputs lists; nil lists
+	// none.
+	Outputs *activity.Recorder
 
 	// Logger is the component logger the Server derives its structured logging
 	// from. nil falls back to slog.Default() (#620).

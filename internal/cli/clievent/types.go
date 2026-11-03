@@ -40,6 +40,15 @@ type EventEntry struct {
 	Tokens     int      `json:"tokens,omitempty"`      // total tokens consumed by agent task
 	DurationMS int64    `json:"duration_ms,omitempty"` // elapsed ms for agent task
 	Status     string   `json:"status,omitempty"`      // agent task status (completed, error, etc.)
+	// Path is a Write / Edit class tool call's target relative to the
+	// session's file root (the path= of a root=session:<key> file-API
+	// request); "" outside that root.
+	Path string `json:"path,omitempty"`
+	// Activity is the planner/activity types a state-changing tool_use is
+	// classified as, comma-separated (git_push,pr_create); set before the
+	// call runs, so it may still fail. The journal holds the activities that
+	// happened, the turn-end scan's outputs and result-linked PRs included.
+	Activity string `json:"activity,omitempty"`
 	// Peer and PeerMode are the sender of a peer_message (its --name and
 	// permission mode) and Peer the sender of a peer_hold. PeerKey is the
 	// naozhi session key that name belonged to when the message arrived

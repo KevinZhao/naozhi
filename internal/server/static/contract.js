@@ -74,6 +74,7 @@ export const NZ_CONTRACT = Object.freeze({
     sessions_interrupt: '/api/sessions/interrupt',
     sessions_label: '/api/sessions/label',
     sessions_orient: '/api/sessions/orient',
+    sessions_outputs: '/api/sessions/outputs',
     sessions_override: '/api/sessions/override',
     sessions_resume: '/api/sessions/resume',
     sessions_runs: '/api/sessions/runs',

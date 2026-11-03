@@ -270,6 +270,10 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 	if retiredStore != nil {
 		retiredReader = retiredStore
 	}
+	var outputs dashsession.OutputSource
+	if opts.Outputs != nil {
+		outputs = opts.Outputs
+	}
 	sessionH := dashsession.New(dashsession.Deps{
 		// /api/sessions snapshot enrichment goes through the hub's tailer registry.
 		SnapshotEnricher: s.hub.enrichSnapshot,
@@ -293,6 +297,7 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 		WatchdogTotal:    w.watchdog.totalPtr(),
 		RetiredStore:     retiredReader,
 		ValidateWS:       validateWorkspace,
+		Outputs:          outputs,
 	})
 	sessionH.InitStaticStats()
 	sessionH.WarmHistoryCache()

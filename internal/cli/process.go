@@ -120,6 +120,10 @@ type Process struct {
 	// onCodeChange receives each valid system/code_change_published frame so
 	// the session can record the PR. Set via SetOnCodeChange at any time.
 	onCodeChange atomic.Pointer[func(clievent.CodeChange)]
+	// activityHook receives the activities the tool calls produce
+	// (process_activity.go); acts is the read loop's state behind it.
+	activityHook atomic.Pointer[activityHook]
+	acts         activityTracker
 	// peerKeyFor resolves a cross-session message's sender name to the
 	// session key its entry carries. Set via SetPeerKeyResolver at any time.
 	peerKeyFor atomic.Pointer[func(string) string]

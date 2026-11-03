@@ -413,3 +413,30 @@ func TestDetect_WalkUpIsBounded(t *testing.T) {
 		t.Error("ok=true beyond maxWalkUp, want the walk to stop")
 	}
 }
+
+// TreeRoot finds the tree root only within allowedRoot; past the bound, or
+// outside any tree, it is dir itself.
+func TestTreeRoot(t *testing.T) {
+	t.Parallel()
+	repo, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeGitDir(t, repo, "ref: refs/heads/master\n")
+	allowed := filepath.Join(repo, "home")
+	ws := filepath.Join(allowed, "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct{ dir, allowed, want string }{
+		{ws, "", repo},
+		{ws, repo, repo},
+		{ws, allowed, ws},
+		{filepath.Join(ws, "missing"), allowed, filepath.Join(ws, "missing")},
+	}
+	for _, c := range cases {
+		if got := TreeRoot(c.dir, c.allowed); got != c.want {
+			t.Errorf("TreeRoot(%q, %q) = %q, want %q", c.dir, c.allowed, got, c.want)
+		}
+	}
+}
