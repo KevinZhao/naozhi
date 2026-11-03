@@ -1,7 +1,9 @@
 package notify
 
 import (
+	"errors"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -29,11 +31,11 @@ func (c *fakeClock) advance(d time.Duration) {
 type fakeBrowser struct {
 	mu     sync.Mutex
 	pushes []Push
-	count  int
+	count  Counts
 }
 
 func (b *fakeBrowser) Notify(p Push)       { b.mu.Lock(); b.pushes = append(b.pushes, p); b.mu.Unlock() }
-func (b *fakeBrowser) InboxCount(open int) { b.mu.Lock(); b.count = open; b.mu.Unlock() }
+func (b *fakeBrowser) InboxCount(c Counts) { b.mu.Lock(); b.count = c; b.mu.Unlock() }
 func (b *fakeBrowser) titles() []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -261,8 +263,111 @@ func TestSources(t *testing.T) {
 	if got := b.titles(); !slices.Equal(got, []string{"a 失败", "系统性故障：凭证 / 权限拒绝"}) {
 		t.Errorf("pushes = %v", got)
 	}
-	if b.count != 2 {
-		t.Errorf("inbox count = %d, want 2", b.count)
+	if b.count != (Counts{Open: 2}) {
+		t.Errorf("inbox counts = %+v, want 2 open errors and no badge", b.count)
+	}
+}
+
+// TestRestartKeepsQuestion: a restart dates a session's wait anew; its open
+// question stays open, one the user closed stays closed, and neither is
+// pushed again.
+func TestRestartKeepsQuestion(t *testing.T) {
+	lay := datadir.FromRoot(t.TempDir())
+	if err := datadir.EnsureDir(lay.PlannerRoot()); err != nil {
+		t.Fatal(err)
+	}
+	n, clock, b := newTest(t, local(10, 0), lay)
+	h := &fakeHealth{}
+	n.SetHealth(h)
+	waiting := func(id string) health.Unit {
+		return health.Unit{ID: id, Workspace: "ws_1", State: health.Waiting, Since: clock.Now()}
+	}
+	h.snap = health.Snapshot{At: clock.Now(), Units: []health.Unit{waiting("a"), waiting("b")}}
+	n.Check()
+	clock.advance(AskAfter)
+	h.snap.At = clock.Now()
+	n.Check()
+	open, _ := n.List(0)
+	if len(open) != 2 || b.count != (Counts{Open: 2, Badge: 2}) {
+		t.Fatalf("open = %d, counts %+v; want both questions, both on the badge", len(open), b.count)
+	}
+	for _, it := range open {
+		if it.Source == "waiting:b" {
+			if err := n.Dismiss(it.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	n2, _, b2 := newTest(t, clock.Now(), lay)
+	n2.SetHealth(h)
+	h.snap = health.Snapshot{At: clock.Now(), Units: []health.Unit{waiting("a"), waiting("b")}}
+	for range 2 {
+		n2.Check()
+		clock.advance(AskAfter)
+		h.snap.At = clock.Now()
+	}
+	open, closed := n2.List(10)
+	if len(open) != 1 || open[0].Source != "waiting:a" || len(closed) != 1 || closed[0].Source != "waiting:b" {
+		t.Fatalf("after restart open = %+v, closed = %+v", open, closed)
+	}
+	if len(b2.pushes) != 0 {
+		t.Errorf("pushed again after restart: %v", b2.titles())
+	}
+}
+
+// TestAutoCloseWithFullHistory: closing several items in one check while
+// the closed history is at keepClosed prunes it without losing an item.
+func TestAutoCloseWithFullHistory(t *testing.T) {
+	n, clock, _ := newTest(t, local(10, 0), datadir.Layout{})
+	h := &fakeHealth{}
+	n.SetHealth(h)
+	for i := range keepClosed {
+		n.items = append(n.items, Item{ID: "old" + strconv.Itoa(i), Source: "x", State: StateClosed, ClosedAt: clock.Now()})
+	}
+	for _, id := range []string{"a", "b"} {
+		n.items = append(n.items, Item{ID: id, Source: "waiting:" + id, State: StateOpen, AutoClose: true})
+	}
+	h.snap = health.Snapshot{At: clock.Now()}
+	n.Check()
+	open, closed := n.List(2 * keepClosed)
+	if len(open) != 0 || len(closed) != keepClosed {
+		t.Fatalf("open = %d, closed = %d; want 0 and %d", len(open), len(closed), keepClosed)
+	}
+}
+
+func TestDecideOnce(t *testing.T) {
+	n, _, _ := newTest(t, local(10, 0), datadir.Layout{})
+	it, _ := n.Add(Item{Kind: KindDecision, Source: "d", Title: "派活",
+		Decision: &Decision{Handler: "h", Actions: []Action{ActionApprove, ActionReject}}})
+	entered, release := make(chan struct{}), make(chan struct{})
+	var applied []Action
+	n.HandleDecisions("h", func(_ Item, a Action) error {
+		applied = append(applied, a)
+		if a == ActionApprove {
+			close(entered)
+			<-release
+		}
+		return nil
+	})
+	done := make(chan error)
+	go func() { done <- n.Decide(it.ID, ActionApprove) }()
+	<-entered
+	if err := n.Decide(it.ID, ActionReject); !errors.Is(err, ErrPending) {
+		t.Errorf("second answer = %v, want ErrPending", err)
+	}
+	if err := n.Dismiss(it.ID); !errors.Is(err, ErrPending) {
+		t.Errorf("dismiss while deciding = %v, want ErrPending", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if err := n.Decide(it.ID, ActionReject); !errors.Is(err, ErrClosed) {
+		t.Errorf("answer after close = %v, want ErrClosed", err)
+	}
+	if !slices.Equal(applied, []Action{ActionApprove}) {
+		t.Errorf("applied = %v, want only the first answer", applied)
 	}
 }
 
@@ -270,18 +375,24 @@ func TestOsascriptArgs(t *testing.T) {
 	title := `x" & (do shell script "touch /tmp/pwned") & "`
 	body := "line1\nline2\x00\u202etail"
 	args := osascriptArgs(title, body)
-	if n := len(args); n != 8 || args[0] != "-e" || args[6] != title {
+	if n := len(args); n != 9 || args[0] != "-e" || args[6] != "--" || args[7] != title {
 		t.Fatalf("args = %q", args)
 	}
-	for _, a := range args[:6] {
+	for _, a := range args[:7] {
 		if strings.Contains(a, "touch") || strings.Contains(a, "line") {
-			t.Fatalf("text reached the script: %q", args[:6])
+			t.Fatalf("text reached the script: %q", args[:7])
 		}
 	}
-	if got := args[7]; got != "line1 line2  tail" {
+	if got := args[8]; got != "line1 line2  tail" {
 		t.Errorf("body = %q, want control and bidi runes blanked", got)
 	}
-	if got := osascriptArgs(strings.Repeat("长", 200), "")[6]; len([]rune(got)) > titleRunes+3 {
+	// A title that reads as an option comes after "--", so osascript takes
+	// it as an argument rather than another script line.
+	opt := `-eproperty p:(do shell script"id>x")-- 在等你回复`
+	if args := osascriptArgs(opt, ""); slices.Index(args, "--") != 6 || args[7] != opt {
+		t.Errorf("option-like title args = %q", args)
+	}
+	if got := osascriptArgs(strings.Repeat("长", 200), "")[7]; len([]rune(got)) > titleRunes+3 {
 		t.Errorf("title not capped: %d runes", len([]rune(got)))
 	}
 }

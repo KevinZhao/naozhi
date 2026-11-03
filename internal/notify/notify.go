@@ -125,6 +125,8 @@ var (
 	ErrClosed     = errors.New("notify: item already closed")
 	ErrNoDecision = errors.New("notify: not a decision item, or the action is not offered")
 	ErrNoHandler  = errors.New("notify: no handler for this decision")
+	// ErrPending: another answer to the decision is being applied.
+	ErrPending = errors.New("notify: decision is being applied")
 )
 
 // Retention for closed items: they are kept this long, at most keepClosed
@@ -148,12 +150,19 @@ type Push struct {
 	Unit string
 }
 
+// Counts are the open items: Open all of them, Badge those the "等你" count
+// shows (§10.1: decisions and questions; P2 adds reviews).
+type Counts struct {
+	Open  int `json:"open"`
+	Badge int `json:"badge"`
+}
+
 // Browser is the dashboard exit: the WebSocket hub.
 type Browser interface {
 	// Notify asks open dashboards to show p if they are in the background.
 	Notify(p Push)
-	// InboxCount reports the number of open items.
-	InboxCount(open int)
+	// InboxCount reports the open counts after a change.
+	InboxCount(c Counts)
 }
 
 // Config wires a Notifier. A zero Config keeps everything in memory and
@@ -198,7 +207,8 @@ type Notifier struct {
 	st        pushState
 	readOnly  bool // inbox.json is on disk but unusable: do not overwrite it
 	deciders  map[string]DecisionFunc
-	condSince map[string]time.Time // Run goroutine: when a gateway condition began
+	deciding  map[string]bool      // decision items whose answer is being applied
+	condSince map[string]time.Time // Run goroutine: when a level-triggered condition began
 }
 
 // pushState is notify.json.
@@ -233,6 +243,7 @@ func New(cfg Config) *Notifier {
 		cfg:       cfg,
 		events:    make(chan healthEvent, 256),
 		deciders:  map[string]DecisionFunc{},
+		deciding:  map[string]bool{},
 		condSince: map[string]time.Time{},
 	}
 	if lay.Root() == "" {
@@ -312,6 +323,13 @@ func (n *Notifier) List(limit int) (open, closed []Item) {
 	return open, closed
 }
 
+// Counts returns the open counts the inbox_count frame carries.
+func (n *Notifier) Counts() Counts {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.countsLocked()
+}
+
 // Add opens it unless an item with its Source is already open, filling in
 // ID, Created and State, and pushes it by its level. It returns the open
 // item for the source and whether this call opened it.
@@ -334,16 +352,21 @@ func (n *Notifier) Dismiss(id string) error {
 	case n.items[i].State != StateOpen:
 		n.mu.Unlock()
 		return ErrClosed
+	case n.deciding[id]:
+		n.mu.Unlock()
+		return ErrPending
 	}
-	fx := n.closeLocked(i, ClosedByUser, "")
+	fx := n.changedLocked(n.closeLocked(i, ClosedByUser, ""))
 	n.mu.Unlock()
 	n.apply(fx)
 	return nil
 }
 
 // Decide answers a decision item with a and closes it once its handler
-// applied the answer. The handler runs outside the inbox lock; of two
-// concurrent answers the first to finish wins and the other gets ErrClosed.
+// applied the answer. The handler runs outside the inbox lock; the first
+// answer wins: while it is being applied, another answer or a Dismiss gets
+// ErrPending, and once it is, ErrClosed. A handler error leaves the item
+// open for another answer.
 func (n *Notifier) Decide(id string, a Action) error {
 	n.mu.Lock()
 	i := n.indexLocked(id)
@@ -352,31 +375,54 @@ func (n *Notifier) Decide(id string, a Action) error {
 		return ErrNotFound
 	}
 	it := n.items[i]
-	if it.State != StateOpen {
+	switch {
+	case it.State != StateOpen:
 		n.mu.Unlock()
 		return ErrClosed
-	}
-	if it.Decision == nil || !slices.Contains(it.Decision.Actions, a) {
+	case n.deciding[id]:
+		n.mu.Unlock()
+		return ErrPending
+	case it.Decision == nil || !slices.Contains(it.Decision.Actions, a):
 		n.mu.Unlock()
 		return ErrNoDecision
 	}
 	fn := n.deciders[it.Decision.Handler]
-	n.mu.Unlock()
 	if fn == nil {
+		n.mu.Unlock()
 		return ErrNoHandler
 	}
-	if err := fn(it, a); err != nil {
+	n.deciding[id] = true
+	n.mu.Unlock()
+	if err := n.applyDecision(fn, it, a); err != nil {
 		return err
 	}
 	n.mu.Lock()
+	delete(n.deciding, id)
 	if i = n.indexLocked(id); i < 0 || n.items[i].State != StateOpen {
 		n.mu.Unlock()
 		return ErrClosed
 	}
-	fx := n.closeLocked(i, ClosedByUser, a)
+	fx := n.changedLocked(n.closeLocked(i, ClosedByUser, a))
 	n.mu.Unlock()
 	n.apply(fx)
 	return nil
+}
+
+// applyDecision runs fn. When it fails or panics the item is no longer
+// marked as being decided; on success Decide clears the mark as it closes
+// the item, so no other answer starts in between.
+func (n *Notifier) applyDecision(fn DecisionFunc, it Item, a Action) (err error) {
+	ok := false
+	defer func() {
+		if !ok {
+			n.mu.Lock()
+			delete(n.deciding, it.ID)
+			n.mu.Unlock()
+		}
+	}()
+	err = fn(it, a)
+	ok = err == nil
+	return err
 }
 
 // PausedUntil returns when the push pause ends; zero when not paused.
@@ -413,12 +459,20 @@ func EndOfToday(now time.Time) time.Time {
 type effects struct {
 	journal []journalLine
 	pushes  []Push
-	count   int // open items after the change; -1 when unchanged
+	counts  *Counts // after the change; nil when unchanged
+}
+
+func (fx *effects) merge(o effects) {
+	fx.journal = append(fx.journal, o.journal...)
+	fx.pushes = append(fx.pushes, o.pushes...)
+	if o.counts != nil {
+		fx.counts = o.counts
+	}
 }
 
 type journalLine struct {
-	unit string
-	data notifyData
+	unit, ws string
+	data     notifyData
 }
 
 // notifyData is a notify journal entry's data.
@@ -435,10 +489,9 @@ type notifyData struct {
 }
 
 func (n *Notifier) addLocked(it Item) (Item, bool, effects) {
-	fx := effects{count: -1}
 	for _, o := range n.items {
 		if o.State == StateOpen && o.Source == it.Source {
-			return o, false, fx
+			return o, false, effects{}
 		}
 	}
 	now := n.cfg.Clock.Now()
@@ -446,40 +499,51 @@ func (n *Notifier) addLocked(it Item) (Item, bool, effects) {
 	it.Created, it.State, it.ClosedBy, it.ClosedAt = now, StateOpen, "", time.Time{}
 	it.Level = cmp.Or(it.Level, LevelTimely)
 	n.items = append(n.items, it)
-	n.saveLocked(now)
-	fx.count = n.openLocked()
-	fx.journal = append(fx.journal, journalLine{it.Unit, notifyData{Event: "open", ID: it.ID, Kind: it.Kind, Level: it.Level, Source: it.Source}})
+	fx := n.changedLocked(journalLine{it.Unit, it.WS, notifyData{Event: "open", ID: it.ID, Kind: it.Kind, Level: it.Level, Source: it.Source}})
 	if ok, reason := n.admitLocked(it.Level, now); ok {
 		fx.pushes = append(fx.pushes, n.pushFor(it))
-		fx.journal = append(fx.journal, journalLine{it.Unit, notifyData{Event: "push", ID: it.ID, Level: it.Level}})
+		fx.journal = append(fx.journal, journalLine{it.Unit, it.WS, notifyData{Event: "push", ID: it.ID, Level: it.Level}})
 	} else {
-		fx.journal = append(fx.journal, journalLine{it.Unit, notifyData{Event: "held", ID: it.ID, Level: it.Level, Reason: reason}})
+		fx.journal = append(fx.journal, journalLine{it.Unit, it.WS, notifyData{Event: "held", ID: it.ID, Level: it.Level, Reason: reason}})
 	}
 	return it, true, fx
 }
 
-func (n *Notifier) closeLocked(i int, by Closer, answer Action) effects {
-	now := n.cfg.Clock.Now()
+// closeLocked closes n.items[i] without saving: saving prunes closed items
+// and so moves the ones after i. The caller saves through changedLocked once
+// it is done with indexes.
+func (n *Notifier) closeLocked(i int, by Closer, answer Action) journalLine {
 	it := &n.items[i]
-	it.State, it.ClosedBy, it.ClosedAt = StateClosed, by, now
+	it.State, it.ClosedBy, it.ClosedAt = StateClosed, by, n.cfg.Clock.Now()
 	if answer != "" {
 		it.Decision.Answer = answer
 	}
-	d := notifyData{Event: "close", ID: it.ID, Kind: it.Kind, Source: it.Source, ClosedBy: by, Answer: answer}
-	unit := it.Unit
-	n.saveLocked(now)
-	return effects{journal: []journalLine{{unit, d}}, count: n.openLocked()}
+	return journalLine{it.Unit, it.WS, notifyData{Event: "close", ID: it.ID, Kind: it.Kind, Source: it.Source, ClosedBy: by, Answer: answer}}
+}
+
+// changedLocked saves the inbox after a change and returns its effects: the
+// journal lines and the new counts.
+func (n *Notifier) changedLocked(lines ...journalLine) effects {
+	n.saveLocked(n.cfg.Clock.Now())
+	c := n.countsLocked()
+	return effects{journal: lines, counts: &c}
 }
 
 func (n *Notifier) indexLocked(id string) int {
 	return slices.IndexFunc(n.items, func(it Item) bool { return it.ID == id })
 }
 
-func (n *Notifier) openLocked() int {
-	c := 0
+func (n *Notifier) openLocked() int { return n.countsLocked().Open }
+
+func (n *Notifier) countsLocked() Counts {
+	var c Counts
 	for _, it := range n.items {
-		if it.State == StateOpen {
-			c++
+		if it.State != StateOpen {
+			continue
+		}
+		c.Open++
+		if it.Kind == KindDecision || it.Kind == KindQuestion {
+			c.Badge++
 		}
 	}
 	return c
@@ -530,24 +594,27 @@ func (n *Notifier) saveStateLocked() {
 // apply runs fx's journal writes, count report and pushes.
 func (n *Notifier) apply(fx effects) {
 	for _, l := range fx.journal {
-		n.record(l.unit, l.data)
+		n.recordIn(l.ws, l.unit, l.data)
 	}
 	b := n.browser.Load()
-	if fx.count >= 0 && b != nil {
-		(*b).InboxCount(fx.count)
+	if fx.counts != nil && b != nil {
+		(*b).InboxCount(*fx.counts)
 	}
 	for _, p := range fx.pushes {
 		n.deliver(p)
 	}
 }
 
-func (n *Notifier) record(unit string, d notifyData) {
+func (n *Notifier) record(unit string, d notifyData) { n.recordIn("", unit, d) }
+
+// recordIn writes a notify journal entry about unit in workspace ws.
+func (n *Notifier) recordIn(ws, unit string, d notifyData) {
 	if n.cfg.Journal == nil {
 		return
 	}
 	data, err := json.Marshal(d)
 	if err == nil {
-		err = n.cfg.Journal.Append(journal.Entry{TS: n.cfg.Clock.Now(), Kind: journal.KindNotify, Unit: unit, Data: data})
+		err = n.cfg.Journal.Append(journal.Entry{TS: n.cfg.Clock.Now(), Kind: journal.KindNotify, WS: ws, Unit: unit, Data: data})
 	}
 	if err != nil {
 		slog.Warn("notify: journal append failed", "event", d.Event, "err", err)

@@ -27,8 +27,14 @@ const (
 // loopName is this pipeline's heartbeat; the health loop watches it.
 const loopName = "notify"
 
-// gatewaySources are the source prefixes Check dates itself (condSince).
-var gatewaySources = []string{"beat:", "disk"}
+// gatewaySources are the gateway's own level-triggered source prefixes, judged
+// at every check; unitSources those judged once the health machine has
+// reconciled. Check dates all of them itself (condSince), since a restart
+// restarts the health machine's Since.
+var (
+	gatewaySources = []string{"beat:", "disk"}
+	unitSources    = []string{"waiting:", "stalled:"}
+)
 
 // Health is the health state machine (monitor/health.Machine).
 type Health interface {
@@ -57,7 +63,9 @@ func (n *Notifier) Run(ctx context.Context) {
 		defer cancel()
 	}
 	if n.crashed {
-		n.Add(Item{Kind: KindNotice, Level: LevelTimely, Source: "crash", Title: "naozhi 上次异常退出", Why: "上次运行没有正常结束，已重新启动"})
+		// Each abnormal exit is its own item, even with an earlier one open.
+		n.Add(Item{Kind: KindNotice, Level: LevelTimely, Source: "crash:" + n.cfg.Clock.Now().Format(time.RFC3339),
+			Title: "naozhi 上次异常退出", Why: "上次运行没有正常结束，已重新启动"})
 	}
 	n.safely("check", n.Check)
 	tick := time.NewTicker(Interval)
@@ -104,7 +112,7 @@ func (n *Notifier) Check() {
 	judged := slices.Clone(gatewaySources)
 	if n.health != nil {
 		if snap := n.health.Snapshot(); !snap.At.IsZero() {
-			judged = append(judged, "waiting:", "stalled:")
+			judged = append(judged, unitSources...)
 			var c []condition
 			c, keep = n.unitConditions(snap, now)
 			conds = append(conds, c...)
@@ -134,18 +142,28 @@ func (n *Notifier) Check() {
 		active[src] = true
 	}
 	for src := range n.condSince {
-		if !active[src] {
+		if !active[src] && underAny(src, judged) {
 			delete(n.condSince, src)
 		}
 	}
+	n.apply(n.settle(conds, active, judged))
+}
 
+// settle closes the open auto-close items whose condition cleared and opens
+// the conditions not open yet, nor closed by the user since they began.
+func (n *Notifier) settle(conds []condition, active map[string]bool, judged []string) effects {
 	n.mu.Lock()
-	var fx []effects
+	defer n.mu.Unlock()
+	var closed []journalLine
 	for i := range n.items {
 		it := &n.items[i]
 		if it.State == StateOpen && it.AutoClose && !active[it.Source] && underAny(it.Source, judged) {
-			fx = append(fx, n.closeLocked(i, ClosedByAuto, ""))
+			closed = append(closed, n.closeLocked(i, ClosedByAuto, ""))
 		}
+	}
+	var fx effects
+	if len(closed) > 0 {
+		fx = n.changedLocked(closed...)
 	}
 	for _, c := range conds {
 		if n.dismissedLocked(c.item.Source, c.since) {
@@ -153,19 +171,18 @@ func (n *Notifier) Check() {
 		}
 		c.item.AutoClose = true
 		if _, opened, f := n.addLocked(c.item); opened {
-			fx = append(fx, f)
+			fx.merge(f)
 		}
 	}
-	n.mu.Unlock()
-	for _, f := range fx {
-		n.apply(f)
-	}
+	return fx
 }
 
 // unitConditions are the sessions waiting on the user past AskAfter and the
 // stalled workflows. Units without a workspace are only counted (§3.8).
-// keep are the sources of units whose state is Unknown: their items stay
-// open, since right after a restart a unit's state is not known yet.
+// keep are the sources whose items stay open without being conditions: a
+// session still waiting (its question stays open until answered, even when
+// a restart dated its wait anew) and units whose state is Unknown, as right
+// after a restart.
 func (n *Notifier) unitConditions(snap health.Snapshot, now time.Time) (out []condition, keep []string) {
 	for _, u := range snap.Units {
 		if u.Workspace == "" {
@@ -174,20 +191,34 @@ func (n *Notifier) unitConditions(snap health.Snapshot, now time.Time) (out []co
 		name := n.name(u.ID)
 		switch u.State {
 		case health.Waiting:
-			if now.Sub(u.Since) >= AskAfter {
-				out = append(out, condition{since: u.Since, item: Item{Kind: KindQuestion, Level: LevelTimely,
-					Unit: u.ID, WS: u.Workspace, Source: "waiting:" + u.ID,
+			src := "waiting:" + u.ID
+			keep = append(keep, src)
+			if since := n.unitSince(src, u.Since); now.Sub(since) >= AskAfter {
+				out = append(out, condition{since: since, item: Item{Kind: KindQuestion, Level: LevelTimely,
+					Unit: u.ID, WS: u.Workspace, Source: src,
 					Title: name + " 在等你回复", Why: fmt.Sprintf("有提问等你回答超过 %d 分钟", int(AskAfter/time.Minute))}})
 			}
 		case health.Stalled:
-			out = append(out, condition{since: u.Since, item: Item{Kind: KindNotice, Level: LevelTimely,
-				Unit: u.ID, WS: u.Workspace, Source: "stalled:" + u.ID,
+			src := "stalled:" + u.ID
+			out = append(out, condition{since: n.unitSince(src, u.Since), item: Item{Kind: KindNotice, Level: LevelTimely,
+				Unit: u.ID, WS: u.Workspace, Source: src,
 				Title: name + " 停滞", Why: fmt.Sprintf("工作流 %d 分钟没有新进展", int(health.StallAfter/time.Minute))}})
 		case health.Unknown:
 			keep = append(keep, "waiting:"+u.ID, "stalled:"+u.ID)
 		}
 	}
 	return out, keep
+}
+
+// unitSince dates a unit condition by the earlier of the unit's Since and
+// what this run already holds for it: when an earlier check saw it, or the
+// item the user closed before a restart (seedDismissed).
+func (n *Notifier) unitSince(src string, since time.Time) time.Time {
+	if s, ok := n.condSince[src]; ok && s.Before(since) {
+		return s
+	}
+	n.condSince[src] = since
+	return since
 }
 
 // gatewayCondition dates a gateway condition from when a check first saw it.
@@ -200,12 +231,13 @@ func (n *Notifier) gatewayCondition(now time.Time, it Item) condition {
 	return condition{item: it, since: since}
 }
 
-// seedDismissed dates the gateway conditions whose latest item the user
-// closed from that item, so a restart does not reopen it while the
-// condition still holds; the first check drops the date if it cleared.
+// seedDismissed dates the level-triggered conditions whose latest item the
+// user closed from that item, so a restart does not reopen it while the
+// condition still holds; the first check judging it drops the date if it
+// cleared.
 func (n *Notifier) seedDismissed() {
 	for _, it := range n.items {
-		if !underAny(it.Source, gatewaySources) {
+		if !underAny(it.Source, gatewaySources) && !underAny(it.Source, unitSources) {
 			continue
 		}
 		if it.State == StateClosed && it.ClosedBy == ClosedByUser {

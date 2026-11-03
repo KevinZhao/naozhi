@@ -64,7 +64,7 @@ func quiet(now time.Time) bool {
 	return t >= QuietStart || t < QuietEnd
 }
 
-// pushFor builds it's notification: what happened and to what.
+// pushFor builds its notification: what happened and to what.
 func (n *Notifier) pushFor(it Item) Push {
 	return Push{ID: it.ID, Kind: it.Kind, Level: it.Level, Title: it.Title, Body: it.Why, Unit: it.Unit}
 }
@@ -106,13 +106,15 @@ func systemExit() func(title, body string) error {
 // osascriptArgs runs a fixed script that reads the title and body from its
 // argv, so neither is ever parsed as AppleScript (a quote in a session name
 // cannot end the string literal and run code) and no shell is involved.
-// Control characters are blanked and both are capped to what a notification
-// shows.
+// "--" ends osascript's options, so a title starting with "-" (a session
+// named "-e …") is an argument, not another script line. Control
+// characters are blanked and both are capped to what a notification shows.
 func osascriptArgs(title, body string) []string {
 	return []string{
 		"-e", "on run argv",
 		"-e", "display notification (item 2 of argv) with title (item 1 of argv)",
 		"-e", "end run",
+		"--",
 		clean(title, titleRunes), clean(body, bodyRunes),
 	}
 }

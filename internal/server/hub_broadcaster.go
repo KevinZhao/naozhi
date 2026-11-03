@@ -52,6 +52,6 @@ func (hn hubNotifier) Notify(p notify.Push) {
 	}))
 }
 
-func (hn hubNotifier) InboxCount(open int) {
-	hn.b.marshalBroadcastAuth(wsproto.NewInboxCount(open))
+func (hn hubNotifier) InboxCount(c notify.Counts) {
+	hn.b.marshalBroadcastAuth(wsproto.NewInboxCount(c.Open, c.Badge))
 }

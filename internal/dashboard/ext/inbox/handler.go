@@ -29,6 +29,7 @@ const maxPause = 7 * 24 * time.Hour
 // Source is the inbox (notify.Notifier).
 type Source interface {
 	List(limit int) (open, closed []notify.Item)
+	Counts() notify.Counts
 	Dismiss(id string) error
 	Decide(id string, a notify.Action) error
 	PausedUntil() time.Time
@@ -45,9 +46,11 @@ type Handler struct {
 // New returns a Handler over src.
 func New(src Source) *Handler { return &Handler{src: src, now: time.Now} }
 
+// listResp's Counts are the first value of the inbox_count frames.
 type listResp struct {
 	Open        []notify.Item `json:"open"`
 	Closed      []notify.Item `json:"closed"`
+	Counts      notify.Counts `json:"counts"`
 	PausedUntil time.Time     `json:"paused_until,omitzero"`
 }
 
@@ -62,6 +65,7 @@ func (h *Handler) HandleList(w http.ResponseWriter, _ *http.Request) {
 		if closed != nil {
 			resp.Closed = closed
 		}
+		resp.Counts = h.src.Counts()
 		resp.PausedUntil = h.src.PausedUntil()
 	}
 	httputil.WriteJSON(w, resp)
@@ -146,6 +150,8 @@ func (h *Handler) reply(w http.ResponseWriter, err error) {
 		http.Error(w, "no such item", http.StatusNotFound)
 	case errors.Is(err, notify.ErrClosed):
 		http.Error(w, "item already closed", http.StatusConflict)
+	case errors.Is(err, notify.ErrPending):
+		http.Error(w, "another answer is being applied", http.StatusConflict)
 	case errors.Is(err, notify.ErrNoDecision), errors.Is(err, notify.ErrNoHandler):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	default:

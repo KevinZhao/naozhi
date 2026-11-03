@@ -46,14 +46,14 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
       await page.evaluate(async () => {
         const { nzBus } = await import('/static/nz_util.js');
         window.__counts = [];
-        nzBus.addEventListener('inbox:count', (e) => window.__counts.push(e.detail.open));
+        nzBus.addEventListener('inbox:count', (e) => window.__counts.push([e.detail.open, e.detail.badge]));
       });
       const conn = mock.wsConnections[mock.wsConnections.length - 1];
       const frame = { type: 'notify', id: 'in_1', kind: 'question', level: 'timely', title: 'iso 会话 在等你回复', body: '有提问等你回答超过 10 分钟', key: SESSION_KEY };
 
       // In the foreground the inbox shows it; no notification.
       conn.send(frame);
-      conn.send({ type: 'inbox_count', open: 1 });
+      conn.send({ type: 'inbox_count', open: 1, badge: 1 });
       await page.waitForFunction(() => window.__counts.length === 1);
       expect(await page.evaluate(() => window.__notes.length)).toBe(0);
 
@@ -66,10 +66,10 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
       // Not allowed: nothing, even in the background.
       await page.evaluate(() => { window.Notification.permission = 'denied'; });
       conn.send({ ...frame, id: 'in_2' });
-      conn.send({ type: 'inbox_count', open: 2 });
+      conn.send({ type: 'inbox_count', open: 2, badge: 1 });
       await page.waitForFunction(() => window.__counts.length === 2);
       expect(await page.evaluate(() => window.__notes.length)).toBe(1);
-      expect(await page.evaluate(() => window.__counts)).toEqual([1, 2]);
+      expect(await page.evaluate(() => window.__counts)).toEqual([[1, 1], [2, 1]]);
 
       await page.evaluate(() => { window.__hidden = false; window.__notes[0].onclick(); });
       await page.waitForFunction((key) => window.nz.test.selectedKey === key, SESSION_KEY);

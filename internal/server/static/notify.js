@@ -2,8 +2,11 @@
 // A notify frame becomes a browser notification only while the page is in
 // the background and the user has allowed notifications; in the foreground
 // the inbox itself shows it. A click brings the tab forward and opens the
-// session the item is about. inbox_count frames carry the open "等你" count,
-// re-dispatched on nzBus as 'inbox:count' for the Planner page's badge.
+// session the item is about. inbox_count frames carry the open "等你" counts
+// (open: every open item; badge: decisions and questions, the §10.1 badge),
+// re-dispatched on nzBus as 'inbox:count' for the Planner page's badge. The
+// frames only come on a change: the page takes the first counts from
+// GET /api/inbox (its `counts`) and passes them to onInboxCount.
 import { NZ_CONTRACT } from './contract.js';
 import { wsm } from './ws_manager.js';
 import { nzBus } from './nz_util.js';
@@ -11,7 +14,7 @@ import { shell } from './shell.js';
 import { sessionList } from './state.js';
 import { sid } from './session_ident.js';
 
-export const inbox = { open: null };
+export const inbox = { open: null, badge: null };
 
 // notifySupported: the Notification API exists (absent in some in-app
 // browsers and older iOS Safari tabs not added to the home screen).
@@ -57,7 +60,8 @@ export function onNotify(msg) {
 
 export function onInboxCount(msg) {
   inbox.open = typeof msg.open === 'number' ? msg.open : 0;
-  nzBus.dispatchEvent(new CustomEvent('inbox:count', { detail: { open: inbox.open } }));
+  inbox.badge = typeof msg.badge === 'number' ? msg.badge : 0;
+  nzBus.dispatchEvent(new CustomEvent('inbox:count', { detail: { open: inbox.open, badge: inbox.badge } }));
 }
 
 wsm.on(NZ_CONTRACT.WS.notify, (msg) => onNotify(msg));
