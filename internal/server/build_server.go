@@ -118,6 +118,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		scheduler:     scheduler,
 		routerEvents:  opts.Relays.Router,
 		runTelemetry:  opts.Relays.RunTelemetry,
+		notify:        opts.Notify,
 		stateDir:      opts.StateDir,
 	}
 
@@ -154,6 +155,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		accessProfilesH: accessprofile.New(router.Backends(), opts.Config.Path, opts.Config.AccessProfileSecretsDir),
 		cronH:           buildCronHandlers(opts, claudeDir),
 		transcribeH:     buildTranscribeHandler(opts),
+		inboxH:          buildInboxHandler(opts),
 	}
 
 	// The process-lifetime context is created HERE, not in Start (#2552).

@@ -12,6 +12,7 @@ import (
 	"github.com/naozhi/naozhi/internal/imauth"
 	"github.com/naozhi/naozhi/internal/monitor/beat"
 	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/activity"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
@@ -96,6 +97,9 @@ type ServerOptions struct {
 	// Outputs is the outputs index /api/sessions/outputs lists; nil lists
 	// none.
 	Outputs *activity.Recorder
+	// Notify is the "等你" inbox /api/inbox serves; the server binds the
+	// Hub to it as its dashboard push exit. nil serves an empty inbox.
+	Notify *notify.Notifier
 
 	// Logger is the component logger the Server derives its structured logging
 	// from. nil falls back to slog.Default() (#620).

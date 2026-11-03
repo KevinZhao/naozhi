@@ -1,6 +1,10 @@
 package server
 
-import "github.com/naozhi/naozhi/internal/runtelemetry"
+import (
+	"github.com/naozhi/naozhi/internal/notify"
+	"github.com/naozhi/naozhi/internal/runtelemetry"
+	"github.com/naozhi/naozhi/internal/wsproto"
+)
 
 // hubBroadcaster implements runtelemetry.Broadcaster against *wsBroadcaster.
 // Cron and sysession both register one at construction so their run lifecycle
@@ -35,4 +39,19 @@ func (hb hubBroadcaster) BroadcastRunEnded(ev runtelemetry.RunEndedEvent) {
 		ev.ErrorMsg = ""
 	}
 	hb.b.BroadcastRunEnded(ev)
+}
+
+// hubNotifier is the dashboard exit of the push pipeline (notify.Browser):
+// every authenticated client gets the frame, and the page decides whether it
+// is in the background and allowed to show a notification.
+type hubNotifier struct{ b *wsBroadcaster }
+
+func (hn hubNotifier) Notify(p notify.Push) {
+	hn.b.marshalBroadcastAuth(wsproto.NewNotify(wsproto.Notify{
+		ID: p.ID, Kind: string(p.Kind), Level: string(p.Level), Title: p.Title, Body: p.Body, Key: p.Unit,
+	}))
+}
+
+func (hn hubNotifier) InboxCount(c notify.Counts) {
+	hn.b.marshalBroadcastAuth(wsproto.NewInboxCount(c.Open, c.Badge))
 }

@@ -187,6 +187,9 @@ type Config struct {
 	Workspaces *workspace.Registry
 	IndexPath  string
 	Beats      *beat.Registry
+	// Watch runs on the loop after every reconcile: the push pipeline's
+	// check on its heartbeat, which it cannot report itself once stopped.
+	Watch func()
 }
 
 // Machine is the health state machine. Reconcile and RefreshIndex run on
@@ -303,6 +306,9 @@ func (m *Machine) Run(ctx context.Context) {
 		case <-tick.C:
 			m.safely("reconcile", m.Reconcile)
 			hb.Beat()
+			if m.cfg.Watch != nil {
+				m.safely("watch", m.cfg.Watch)
+			}
 		case <-m.poke:
 			if debounce == nil {
 				debounce = time.NewTimer(indexDebounce)

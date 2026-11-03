@@ -121,6 +121,31 @@
   },
   {
     "method": "GET",
+    "path": "/api/inbox",
+    "handler_type": "*inbox.Handler"
+  },
+  {
+    "method": "POST",
+    "path": "/api/inbox/close",
+    "handler_type": "*inbox.Handler"
+  },
+  {
+    "method": "POST",
+    "path": "/api/inbox/decide",
+    "handler_type": "*inbox.Handler"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/inbox/pause",
+    "handler_type": "*inbox.Handler"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/inbox/pause",
+    "handler_type": "*inbox.Handler"
+  },
+  {
+    "method": "GET",
     "path": "/api/memory/{slug}",
     "handler_type": "*memory.Handler"
   },

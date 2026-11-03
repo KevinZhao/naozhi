@@ -69,6 +69,11 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 	if hs.wiring.runTelemetry != nil {
 		hs.wiring.runTelemetry.Bind(newHubBroadcaster(hs.wiring.bcast))
 	}
+
+	// The notifier is built in main.go before the Hub, like the relays.
+	if hs.wiring.notify != nil {
+		hs.wiring.notify.SetBrowser(hubNotifier{b: hs.wiring.bcast})
+	}
 }
 
 // buildWSStack builds the WebSocket stack in dependency order: the
