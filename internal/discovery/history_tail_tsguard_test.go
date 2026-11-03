@@ -25,7 +25,7 @@ func TestParseHistoryLine_DropsUnparseableTimestamp(t *testing.T) {
 		`{"type":"assistant","timestamp":"xyz","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}`,
 	}
 	for _, line := range cases {
-		if got, ok := parseHistoryLine([]byte(line)); ok {
+		if got, ok := parseHistoryLine([]byte(line), 0, true); ok {
 			t.Errorf("expected line with bad timestamp to be dropped, but it parsed (%+v): %s", got, line)
 		}
 	}
@@ -37,7 +37,7 @@ func TestParseHistoryLine_DropsUnparseableTimestamp(t *testing.T) {
 func TestParseHistoryLine_KeepsValidTimestamp(t *testing.T) {
 	t.Parallel()
 	line := `{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}`
-	got, ok := parseHistoryLine([]byte(line))
+	got, ok := parseHistoryLine([]byte(line), 0, true)
 	if !ok {
 		t.Fatal("valid-timestamp line was dropped — guard too aggressive")
 	}

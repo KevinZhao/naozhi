@@ -91,10 +91,10 @@ naozhi：图片提取 → 附件落盘 + 缩略图进事件流 → 对话 / 预�
 
 **截图进事件流（必须补的缺口）**：评审核实，`internal/cli/process_event_format.go` 只处理 system / assistant / result 三类事件，**工具结果里的图片块被直接丢掉**，dashboard 看不到 agent 的截图。改动：
 
-- 从 `user` 事件的 `tool_result` 内容中提取 image 块，挂到对应 `tool_use` 条目上。
-- 原图写入附件目录（`<workspace>/.naozhi/attachments/…`，沿用 `internal/attachment` 的引用计数与 GC），事件里只存缩略图（复用 `clievent.ThumbMaxDim = 600`）与附件路径。
+- 从 `user` 事件的 `tool_result` 内容中提取 image 块，每个带图的结果生成一条独立的 `tool_result` 条目，用 `ToolUseID` 关联到对应的工具调用（`tool_use` 条目在主对话里不显示，图片挂上去会看不见）。
+- 原图写入状态根目录的附件区（`<状态根>/planner/attachments/<日期>/…`，planner RFC D83，不写进仓库目录），沿用 `internal/attachment` 的目录布局与 GC；不计会话引用，开启 `attachment-gc` 后按 `upload_ttl` 回收。事件里只存缩略图（复用 `clievent.ThumbMaxDim = 600`）与附件路径。
 - 前端 `event_render.js` 已能渲染任意事件的 `images`，点开走灯箱，改动很小。
-- 历史回放（`internal/discovery/history.go`）同步提取，保证重启后仍可见。
+- 历史回放（`internal/discovery/history.go`）同步提取，保证重启后仍可见；分页只对游标之前的行生成缩略图，整份读取的预览（终端会话预览、upstream 预览）不提取工具截图。
 
 这一项不止服务计算机使用：任何返回图片的工具（读图、渲染、绘图）都会受益。
 

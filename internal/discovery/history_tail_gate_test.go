@@ -22,7 +22,7 @@ func TestParseHistoryLine_ByteGateSkipsNonUserAssistant(t *testing.T) {
 		``,
 	}
 	for _, line := range skip {
-		if _, ok := parseHistoryLine([]byte(line)); ok {
+		if _, ok := parseHistoryLine([]byte(line), 0, true); ok {
 			t.Errorf("expected line to be skipped, but it parsed: %s", line)
 		}
 	}
@@ -35,7 +35,7 @@ func TestParseHistoryLine_ByteGateLetsUserAssistantThrough(t *testing.T) {
 	t.Parallel()
 
 	userLine := `{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"hello there"}}`
-	got, ok := parseHistoryLine([]byte(userLine))
+	got, ok := parseHistoryLine([]byte(userLine), 0, true)
 	if !ok {
 		t.Fatal("user line rejected by gate — should parse")
 	}
@@ -44,7 +44,7 @@ func TestParseHistoryLine_ByteGateLetsUserAssistantThrough(t *testing.T) {
 	}
 
 	asstLine := `{"type":"assistant","timestamp":"2026-01-01T00:01:00Z","message":{"role":"assistant","content":[{"type":"text","text":"hi back"}]}}`
-	got, ok = parseHistoryLine([]byte(asstLine))
+	got, ok = parseHistoryLine([]byte(asstLine), 0, true)
 	if !ok {
 		t.Fatal("assistant line rejected by gate — should parse")
 	}
@@ -59,7 +59,7 @@ func TestParseHistoryLine_ByteGateLetsUserAssistantThrough(t *testing.T) {
 func TestParseHistoryLine_ByteGateToleratesSpacedTypeField(t *testing.T) {
 	t.Parallel()
 	spaced := `{"type": "user", "timestamp": "2026-01-01T00:00:00Z", "message": {"role": "user", "content": "spaced out"}}`
-	got, ok := parseHistoryLine([]byte(spaced))
+	got, ok := parseHistoryLine([]byte(spaced), 0, true)
 	if !ok {
 		t.Fatal("spaced user line rejected by gate — should parse")
 	}
@@ -77,7 +77,7 @@ func TestParseHistoryLine_GateAllowsMarkerInsideStringButSwitchRejects(t *testin
 	t.Parallel()
 	// type is tool_use, but the embedded command text contains the marker.
 	line := `{"type":"tool_use","name":"Bash","input":{"command":"echo '\"type\":\"user\"'"}}`
-	if _, ok := parseHistoryLine([]byte(line)); ok {
+	if _, ok := parseHistoryLine([]byte(line), 0, true); ok {
 		t.Error("tool_use line with embedded marker must still be rejected by the type switch")
 	}
 }
