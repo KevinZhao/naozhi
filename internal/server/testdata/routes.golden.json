@@ -321,6 +321,11 @@
   },
   {
     "method": "GET",
+    "path": "/api/system/health",
+    "handler_type": "*system.Handlers"
+  },
+  {
+    "method": "GET",
     "path": "/api/system/update",
     "handler_type": "*system.Handlers"
   },

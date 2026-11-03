@@ -16,6 +16,8 @@ func (h *Handlers) Routes() []httputil.Route {
 	return []httputil.Route{
 		// system-session daemons (docs/rfc/system-session.md §9.2/§9.3).
 		{Pattern: "GET /api/system/daemons", Handler: h.HandleDaemons},
+		// session health table (docs/rfc/planner.md §3.8).
+		{Pattern: "GET /api/system/health", Handler: h.HandleHealth},
 		// self-update (docs/rfc/dashboard-update-notice.md).
 		{Pattern: "GET /api/system/update", Handler: h.HandleUpdateStatus},
 		{Pattern: "POST /api/system/update/apply", Handler: h.HandleUpdateApply},

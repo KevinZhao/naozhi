@@ -419,6 +419,9 @@ func main() {
 	})
 
 	routing := buildRouting(cfg, agents, projectMgr, scheduler)
+	// The health monitor reads srv's node and discovery caches, so it is built
+	// after srv; srv only reads it once it serves.
+	var healthMon *health.Machine
 	srv := server.NewWithOptions(server.ServerOptions{
 		Addr:             cfg.Server.Addr,
 		Router:           router,
@@ -428,6 +431,8 @@ func main() {
 		Backend:          defaultBackend,
 		Beats:            beats,
 		Outputs:          activities,
+		Health:           func() health.Snapshot { return healthMon.Snapshot() },
+		Workspaces:       plannerState.Workspaces,
 		Notify:           notifier,
 		AllowedRoot:      workspace,
 		IMAccess:         cfg.IMAccessPolicy(),
@@ -500,7 +505,7 @@ func main() {
 	// Session ledger and health state machine (docs/rfc/planner.md §3.8). It
 	// only reads; with no planner state root it still runs, journaling and
 	// writing index.json nothing. Its loop ends with ctx.
-	healthMon := health.New(health.Config{
+	healthMon = health.New(health.Config{
 		Clock: wake.SystemClock(),
 		Collect: wireup.HealthSources{
 			Router:      router,
