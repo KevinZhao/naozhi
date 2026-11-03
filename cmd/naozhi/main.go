@@ -268,6 +268,10 @@ func main() {
 		slog.Error("init failed", "err", projErr)
 		os.Exit(1)
 	}
+	// After the project scan so the first start can register projects as
+	// workspaces. Nothing consumes the state yet; opening it here runs the
+	// journal retention and the first-start seed once per process.
+	_ = wireup.OpenPlannerState(sessionLayout, cfg.Workspace.ID, projectMgr)
 	// Attachments live under each workspace root, usually outside the state dir
 	// checked above; walking every root must not hold up startup.
 	go warnIfAttachmentsLarge(workspaceRootLister{router: router, projectMgr: projectMgr}, attachmentGCMode(cfg))
