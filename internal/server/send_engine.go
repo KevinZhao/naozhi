@@ -61,6 +61,8 @@ type sendEngine struct {
 	projectMgr  *project.Manager
 	scratchPool *session.ScratchPool
 	allowedRoot string
+	// taskOpts is ServerOptions.TaskOpts; nil when not wired.
+	taskOpts func(key string) (session.AgentOpts, bool)
 
 	// notify is the only way out to the dashboard; never nil after
 	// newSendEngine (a nil interface would panic inside a turn goroutine,
@@ -81,6 +83,7 @@ type sendEngineOpts struct {
 	ProjectMgr  *project.Manager
 	ScratchPool *session.ScratchPool
 	AllowedRoot string
+	TaskOpts    func(key string) (session.AgentOpts, bool)
 	Notify      sendNotifier
 }
 
@@ -116,6 +119,7 @@ func newSendEngine(o sendEngineOpts) *sendEngine {
 		projectMgr:  o.ProjectMgr,
 		scratchPool: o.ScratchPool,
 		allowedRoot: o.AllowedRoot,
+		taskOpts:    o.TaskOpts,
 		notify:      notify,
 	}
 }

@@ -107,6 +107,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		agents:        agents,
 		agentCommands: agentCommands,
 		allowedRoot:   opts.AllowedRoot,
+		taskOpts:      opts.TaskOpts,
 		projectsRoot:  claudefs.ResolvedProjectsRoot(claudeDir),
 		imAccess:      opts.IMAccess,
 		imRateLimit:   opts.IMRateLimit,

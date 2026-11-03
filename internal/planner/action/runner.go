@@ -241,6 +241,7 @@ func (r *Runner) decideDispatch(it notify.Item, a notify.Action) error {
 	key := sidecar.TaskKey()
 	if err := r.cfg.Sessions.Put(sidecar.Meta{
 		Key: key, Purpose: sidecar.PurposeTask, Parent: r.cfg.Planner, Title: c.Title, Workspace: c.Workspace,
+		Dir: dir, Model: c.Model,
 	}); err != nil {
 		r.note("派出「" + c.Title + "」失败：记不下会话信息（" + err.Error() + "）")
 		return err

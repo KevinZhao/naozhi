@@ -110,6 +110,7 @@ type wiring struct {
 	agents        map[string]session.AgentOpts
 	agentCommands map[string]string
 	allowedRoot   string
+	taskOpts      func(key string) (session.AgentOpts, bool)
 	imRateLimit   dispatch.RateLimit
 	imGroupScope  dispatch.GroupScope
 	imAutoThread  bool

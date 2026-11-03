@@ -51,9 +51,14 @@ type Meta struct {
 	// Parent is the key of the session that dispatched this one.
 	Parent string `json:"parent,omitempty"`
 	Title  string `json:"title,omitempty"`
-	// Workspace is the workspace ID the session was dispatched into.
-	Workspace string    `json:"workspace,omitempty"`
-	Created   time.Time `json:"created"`
+	// Workspace is the workspace ID the session was dispatched into; Dir is
+	// the directory it ran in.
+	Workspace string `json:"workspace,omitempty"`
+	Dir       string `json:"dir,omitempty"`
+	// Model is the model the dispatch asked for ("" = the default). Dir and
+	// Model let a session whose process went away respawn as dispatched.
+	Model   string    `json:"model,omitempty"`
+	Created time.Time `json:"created"`
 	// Retired is when the session was first seen gone from the router; the
 	// file is removed Retention later.
 	Retired time.Time `json:"retired,omitzero"`
@@ -71,15 +76,19 @@ type Store struct {
 
 	mu sync.Mutex
 	m  map[string]Meta
+	// newer holds the keys whose file a newer naozhi wrote: read, never
+	// rewritten or removed, so the fields this build does not know survive.
+	newer map[string]bool
 }
 
 // Open loads every sidecar under dir. A file that cannot be read or parsed
-// is left in place and skipped. An empty dir keeps the store in memory.
+// is left in place and skipped; one a newer naozhi wrote is read but never
+// rewritten. An empty dir keeps the store in memory.
 func Open(dir string, now func() time.Time) *Store {
 	if now == nil {
 		now = time.Now
 	}
-	s := &Store{dir: dir, now: now, m: map[string]Meta{}}
+	s := &Store{dir: dir, now: now, m: map[string]Meta{}, newer: map[string]bool{}}
 	if dir == "" {
 		return s
 	}
@@ -95,6 +104,10 @@ func Open(dir string, now func() time.Time) *Store {
 		case out != jsonfile.Parsed:
 		case m.Key == "" || filepath.Base(p) != fileName(m.Key):
 			slog.Warn("session sidecar does not match its name; skipped", "path", p)
+		case m.V > Version:
+			slog.Warn("session sidecar written by a newer naozhi; not overwriting it", "path", p, "version", m.V)
+			s.m[m.Key] = m
+			s.newer[m.Key] = true
 		default:
 			s.m[m.Key] = m
 		}
@@ -125,6 +138,9 @@ func (s *Store) Put(m Meta) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.newer[m.Key] {
+		return errors.New("sidecar: written by a newer naozhi")
+	}
 	if err := s.writeLocked(m); err != nil {
 		return err
 	}
@@ -147,7 +163,7 @@ func (s *Store) writeLocked(m Meta) error {
 	return osutil.WriteFileAtomic(p, data, 0o600)
 }
 
-// Remove drops key's sidecar.
+// Remove drops key's sidecar, unless a newer naozhi wrote it.
 func (s *Store) Remove(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -155,6 +171,9 @@ func (s *Store) Remove(key string) {
 }
 
 func (s *Store) removeLocked(key string) {
+	if s.newer[key] {
+		return
+	}
 	delete(s.m, key)
 	if p := s.path(key); p != "" {
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -179,12 +198,15 @@ func (s *Store) Purpose(key string) string {
 
 // Sweep marks the sidecars whose session live no longer reports as retired,
 // clears the mark of one that came back, and removes those retired longer
-// than Retention.
+// than Retention. A sidecar a newer naozhi wrote is left to it.
 func (s *Store) Sweep(live func(key string) bool) {
 	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for key, m := range s.m {
+		if s.newer[key] {
+			continue
+		}
 		switch alive := live(key); {
 		case alive && !m.Retired.IsZero():
 			m.Retired = time.Time{}

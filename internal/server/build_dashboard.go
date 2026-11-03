@@ -94,6 +94,7 @@ func (s *Server) buildWSStack(w *wiring) *Hub {
 		ProjectMgr:  s.projectMgr,
 		ScratchPool: s.scratchPool,
 		AllowedRoot: w.allowedRoot,
+		TaskOpts:    w.taskOpts,
 		Notify:      w.bcast,
 	})
 	return NewHub(HubOptions{

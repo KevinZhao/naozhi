@@ -99,7 +99,7 @@ func TestDispatchApproveSpawns(t *testing.T) {
 		t.Errorf("spawn = %+v", s)
 	}
 	m, ok := side.Get(key)
-	if !ok || m.Purpose != sidecar.PurposeTask || m.Parent != sessionkey.PlannerMainKey || m.Title != "iso 写 hello" || !m.DispatchedByPlanner() || m.Created.IsZero() {
+	if !ok || m.Purpose != sidecar.PurposeTask || m.Parent != sessionkey.PlannerMainKey || m.Title != "iso 写 hello" || m.Dir != dir || !m.DispatchedByPlanner() || m.Created.IsZero() {
 		t.Errorf("sidecar = %+v, %v", m, ok)
 	}
 	if len(g.told) != 1 || !strings.Contains(g.told[0], "已派出") || !strings.Contains(g.told[0], key) {

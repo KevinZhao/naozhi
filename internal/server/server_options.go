@@ -123,6 +123,10 @@ type ServerOptions struct {
 	// Purpose is a session's purpose from its sidecar file (task: a session
 	// the Planner dispatched), stamped on /api/sessions; nil stamps none.
 	Purpose func(key string) string
+	// TaskOpts rebuilds a task: session's spawn options (the Planner's
+	// dispatch spec) when it respawns from the dashboard; nil, or false, falls
+	// back to the general agent's.
+	TaskOpts func(key string) (session.AgentOpts, bool)
 
 	// Logger is the component logger the Server derives its structured logging
 	// from. nil falls back to slog.Default() (#620).

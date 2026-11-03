@@ -66,3 +66,28 @@ func TestSidecarRetention(t *testing.T) {
 		}
 	}
 }
+
+// A sidecar a newer naozhi wrote is read but never rewritten or removed, so
+// the fields this build does not know survive a downgrade.
+func TestSidecarNewerVersionKept(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)
+	key := TaskKey()
+	file := filepath.Join(dir, fileName(key))
+	data := []byte(`{"v":2,"key":"` + key + `","purpose":"task","contract":{"goal":"x"},"retired":"2026-01-01T00:00:00Z"}`)
+	if err := os.WriteFile(file, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := Open(dir, func() time.Time { return now })
+	if s.Purpose(key) != PurposeTask {
+		t.Fatalf("purpose = %q", s.Purpose(key))
+	}
+	s.Sweep(func(string) bool { return false })
+	if err := s.Put(Meta{Key: key, Purpose: PurposeTask}); err == nil {
+		t.Error("Put overwrote a newer sidecar")
+	}
+	s.Remove(key)
+	if got, err := os.ReadFile(file); err != nil || string(got) != string(data) {
+		t.Errorf("newer sidecar changed: %q, %v", got, err)
+	}
+}

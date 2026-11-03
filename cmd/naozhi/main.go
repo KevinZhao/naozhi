@@ -459,6 +459,9 @@ func main() {
 	})
 
 	routing := buildRouting(cfg, agents, projectMgr, scheduler)
+	// The options of the sessions the Planner dispatches: at dispatch, and
+	// rebuilt from their sidecar when one respawns from the dashboard.
+	taskOpts := wireup.TaskOpts{Base: agents["general"], Sessions: sidecars}
 	// The health monitor reads srv's node and discovery caches, so it is built
 	// after srv; srv only reads it once it serves.
 	srv := server.NewWithOptions(server.ServerOptions{
@@ -477,6 +480,7 @@ func main() {
 		Notify:           notifier,
 		Promises:         promises,
 		Purpose:          sidecars.Purpose,
+		TaskOpts:         taskOpts.ForKey,
 		AllowedRoot:      workspace,
 		IMAccess:         cfg.IMAccessPolicy(),
 		IMRateLimit:      dispatch.RateLimit{MsgsPerMin: cfg.IMRateLimit.MsgsPerMin, Burst: cfg.IMRateLimit.Burst},
@@ -583,7 +587,7 @@ func main() {
 		Promises:   promises,
 		Workspaces: plannerState.Workspaces,
 		Sessions:   sidecars,
-		Spawn:      wireup.TaskSpawner{Router: router, Base: agents["general"], Submit: srv.SubmitPlanner}.Spawn,
+		Spawn:      wireup.TaskSpawner{Router: router, Opts: taskOpts, Submit: srv.SubmitPlanner}.Spawn,
 		Note:       func(text string) { srv.PlannerNote(agent.Key, text) },
 		Tell:       plannerAgent.Tell,
 		Ctx:        ctx,
