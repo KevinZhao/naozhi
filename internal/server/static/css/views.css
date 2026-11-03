@@ -125,6 +125,77 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .hl-state.idle{color:var(--nz-text-mute)}
 .hl-state.off{color:var(--nz-text-dim)}
 
+/* ===== Planner page (planner_view.js, docs/rfc/planner.md §10 D77) =====
+   Left 等你 / 答应你的 + controls, middle the Planner conversation; the
+   workbench docks on the right through the split (split_view.css), and while
+   it is open (.pl-wb-open) the left column folds to a 48px strip. */
+.planner-main{display:none}
+body.nz-view-planner .sidebar,body.nz-view-planner .resizer,body.nz-view-planner .main{display:none!important}
+body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
+.pl-left{width:280px;flex-shrink:0;display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--nz-border);background:var(--nz-bg-1)}
+.pl-left-toggle,.pl-strip{display:none}
+.pl-left-body{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:var(--nz-space-4);padding:14px 12px;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent}
+.pl-group-h{font-size:var(--nz-fs-sm);font-weight:600;color:var(--nz-text-mute);margin:0 2px 8px}
+.pl-list{display:flex;flex-direction:column;gap:8px}
+.pl-card{position:relative;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);padding:9px 10px;font-size:var(--nz-fs-sm2);color:var(--nz-text)}
+.pl-card-top{display:flex;align-items:center;gap:8px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.pl-kind{font-weight:600;color:var(--nz-text-mute)}
+.pl-k-decision .pl-kind,.pl-k-question .pl-kind{color:var(--nz-accent)}
+.pl-k-error .pl-kind{color:var(--nz-red)}
+.pl-wait{font-variant-numeric:tabular-nums}
+.pl-close{margin-left:auto;font-size:var(--nz-fs-md);padding:0 2px}
+.pl-close:hover{color:var(--nz-text)}
+.pl-card-title{margin-top:4px;color:var(--nz-text-strong);font-weight:600;word-break:break-word}
+.pl-card-why{margin-top:2px;color:var(--nz-text-mute);font-size:var(--nz-fs-xs);word-break:break-word}
+.pl-card-meta{margin-top:4px;color:var(--nz-text-dim);font-size:var(--nz-fs-xs);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pl-card-acts{display:flex;gap:6px;margin-top:8px}
+.pl-link{background:none;border:0;padding:0;font:inherit;color:var(--nz-accent);cursor:pointer}
+.pl-link:hover{text-decoration:underline}
+.pl-btn{padding:3px 10px;border-radius:var(--nz-radius-ms);border:1px solid var(--nz-border);background:var(--nz-bg-0);color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-xs);cursor:pointer}
+.pl-btn:hover:not(:disabled){background:var(--nz-bg-2)}
+.pl-btn.pri{border-color:var(--nz-accent);color:var(--nz-accent)}
+.pl-btn:disabled{opacity:.55;cursor:default}
+.pl-empty{color:var(--nz-text-faint);font-size:var(--nz-fs-sm);padding:6px 2px}
+.pl-empty span{display:block;font-size:var(--nz-fs-xs);margin-top:2px}
+.pl-events>#pl-stream>.pl-empty{text-align:center;padding:40px 20px}
+.pl-tools{margin-top:auto;display:flex;flex-direction:column;gap:10px;padding-top:12px;border-top:1px solid var(--nz-border)}
+.pl-tool{display:flex;flex-direction:column;gap:6px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.pl-tool-l{font-weight:600}
+.pl-tool-btns{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.pl-tool-note{color:var(--nz-text-mute)}
+.pl-pause-custom{display:inline-flex;align-items:center;gap:4px}
+.pl-pause-custom input{width:56px;padding:2px 6px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);background:var(--nz-bg-0);color:var(--nz-text);font:inherit}
+.pl-switch{display:inline-flex;align-items:center;gap:6px;cursor:pointer;color:var(--nz-text)}
+.pl-switch.off{color:var(--nz-text-dim);cursor:default}
+.pl-switch input{accent-color:var(--nz-accent)}
+.pl-center{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column}
+.pl-head{flex-shrink:0;height:48px;display:flex;align-items:center;gap:10px;padding:0 18px;border-bottom:1px solid var(--nz-border)}
+.pl-title{font-size:var(--nz-fs-md);font-weight:600;color:var(--nz-text-strong)}
+.pl-status{font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.pl-status.on{color:var(--nz-green)}
+.pl-status.wait{color:var(--nz-amber)}
+.pl-head-sp{flex:1}
+.pl-note{flex-shrink:0;margin:12px 18px 0;padding:10px 12px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1);color:var(--nz-text-mute);font-size:var(--nz-fs-sm2);line-height:1.6}
+.pl-note b{color:var(--nz-text-strong)}
+.pl-note code{font-family:var(--nz-font-mono);font-size:var(--nz-fs-xs)}
+.pl-brief{margin:0 24px 8px}
+.pl-brief-empty{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);padding:6px 0;border-bottom:1px dashed var(--nz-border)}
+.pl-brief-empty b{color:var(--nz-text-mute)}
+.pl-composer{flex-shrink:0;border-top:1px solid var(--nz-border)}
+.pl-composer[hidden]{display:none}
+/* Workbench open: the 48px strip (展开 · 等你 · 答应你的). */
+.planner-main.pl-wb-open:not(.pl-left-peek) .pl-left{width:48px}
+.planner-main.pl-wb-open:not(.pl-left-peek) .pl-left-body{display:none}
+.planner-main.pl-wb-open:not(.pl-left-peek) .pl-strip{display:flex;flex-direction:column;align-items:center;gap:14px;padding:12px 0}
+.pl-strip-btn{width:32px;height:32px;display:flex;align-items:center;justify-content:center;border:0;border-radius:var(--nz-radius-ms);background:none;color:var(--nz-text-mute);cursor:pointer}
+.pl-strip-btn:hover{background:var(--nz-bg-2);color:var(--nz-text)}
+.pl-strip-btn svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round}
+.pl-strip-item{display:flex;flex-direction:column;align-items:center;gap:2px;font-size:var(--nz-fs-2xs);color:var(--nz-text-dim)}
+.pl-strip-n{font-size:var(--nz-fs-sm);color:var(--nz-text);font-variant-numeric:tabular-nums}
+/* The rail's Planner "等你" count. */
+.ab-count{position:absolute;top:2px;right:0;min-width:16px;height:16px;padding:0 4px;border-radius:var(--nz-radius-pill);background:var(--nz-red);color:#fff;font-size:var(--nz-fs-2xs);font-weight:700;line-height:16px;text-align:center;font-variant-numeric:tabular-nums}
+.ab-count[hidden]{display:none}
+
 .asset-sidebar{width:340px;min-width:240px;max-width:60vw;flex-shrink:0;border-right:1px solid var(--nz-border);flex-direction:column;background:var(--nz-bg-0);min-height:0}
 .asset-sb-head{flex-shrink:0;display:flex;align-items:center;gap:8px;padding:14px 16px 8px}
 .asset-sb-head h1{font-size:19px;color:var(--nz-text-strong);font-weight:600;flex:1}
