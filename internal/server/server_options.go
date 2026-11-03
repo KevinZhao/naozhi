@@ -103,8 +103,10 @@ type ServerOptions struct {
 	// Planner is the global Planner behind /api/planner; nil answers those
 	// routes as planner.enabled off.
 	Planner *agent.Agent
-	// Health is the session health table /api/system/health serves, called
-	// per request; nil serves an empty one. Workspaces names its workspaces.
+	// Health is the session health table /api/system/health serves and
+	// /api/sessions/detail reads, called per request; nil serves an empty
+	// one (and leaves the detail's health unit out). Workspaces names their
+	// workspaces.
 	Health     func() health.Snapshot
 	Workspaces *workspace.Registry
 	// Notify is the "等你" inbox /api/inbox serves; the server binds the

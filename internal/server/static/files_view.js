@@ -4,7 +4,8 @@
 // asset_browser.js' shell. Reads GET /api/projects (roots) +
 // GET /api/projects/files/list (directory listing), serves file content via
 // the existing GET /api/projects/file modes, and uploads via
-// POST /api/projects/files/upload.
+// POST /api/projects/files/upload. The 成品库 chip lists every session's
+// outputs (GET /api/sessions/outputs, docs/rfc/planner.md §10.2) by time.
 //
 // ES module (RFC docs/rfc/dashboard-es-modules.md): utilities and the
 // file-ref helpers (fileApiUrl, renderSandboxedBlob) come in via explicit
@@ -18,7 +19,8 @@ import { selection, sessionList } from './state.js';
 import { sid } from './session_ident.js';
 import { esc, escAttr, showToast, fetchJSON, nzViews } from './nz_util.js';
 import { fileApiUrl, renderSandboxedBlob } from './file_refs.js';
-import { formatFileSize } from './utilities.js';
+import { crumbsHtml, fileRowsHtml, isPreviewableOutput, outputRowsHtml } from './file_rows.js';
+import { previewRef } from './workbench_panes.js';
 import { renderRich, runPendingAsync } from './render_md.js';
 
 (function () {
@@ -37,8 +39,9 @@ import { renderRich, runPendingAsync } from './render_md.js';
   // of the is_root project, used to exclude the root from the quick-jump chips.
   // state.root: a "session:<key>" root when browsing a session's working tree
   // (the 本会话 chip), '' when browsing state.project; state.rootLabel names it
-  // in the breadcrumb.
-  var state = { roots: [], project: '', rootName: '', root: '', rootLabel: '', dir: '', loaded: false, wired: false };
+  // in the breadcrumb. state.library: the 成品库 list is showing instead of a
+  // directory; state.outputs holds its rows.
+  var state = { roots: [], project: '', rootName: '', root: '', rootLabel: '', dir: '', library: false, outputs: [], loaded: false, wired: false };
 
   // cur is the browse root the file API calls take: the session root when
   // set, else the project name (fileApiUrl maps "session:" to root=).
@@ -143,16 +146,42 @@ import { renderRich, runPendingAsync } from './render_md.js';
       }
     });
     var sess = activeSessionRoot();
-    if (!chips.length && !sess) { wrap.innerHTML = ''; wrap.hidden = true; return; }
     wrap.hidden = false;
+    var libChip = '<button type="button" class="files-qj' + (state.library ? ' files-qj-on' : '') +
+      '" data-library="1" title="所有会话的产出，按时间排列">成品库</button>';
     // 本会话 leads: the selected session's working tree (its git root when
     // the workspace is in a repo, resolved server-side).
     var sessChip = sess ? '<button type="button" class="files-qj" data-root="' + escAttr(sess.ref) +
       '" data-label="' + escAttr(sess.label) + '" title="' + escAttr(sess.path) + '">本会话 · ' + esc(sess.label) + '</button>' : '';
-    wrap.innerHTML = '<span class="files-qj-label">快速跳转</span>' + sessChip + chips.map(function (c) {
+    wrap.innerHTML = '<span class="files-qj-label">快速跳转</span>' + libChip + sessChip + chips.map(function (c) {
       return '<button type="button" class="files-qj" data-project="' + escAttr(c.name) + '" title="' +
         escAttr(byName[c.name].path || c.name) + '">' + (c.fav ? '★ ' : '') + esc(c.name) + '</button>';
     }).join('');
+  }
+
+  // sessionLabel names an output's session in the 成品库 rows: its title
+  // while it is listed, else its key's last segment.
+  function sessionLabel(o) {
+    var sd = sessionList.sessionsData[sid(o.key, 'local')];
+    var t = (sd && (sd.user_label || sd.summary || sd.last_prompt)) || o.key.split(':').pop() || o.key;
+    return t.length > 24 ? t.slice(0, 23) + '…' : t;
+  }
+
+  // openLibrary lists every session's outputs, newest first.
+  function openLibrary() {
+    state.library = true;
+    syncUploadBtn();
+    buildQuickJump();
+    renderCrumbs();
+    var box = $('files-list');
+    if (box) box.innerHTML = '<div class="files-empty">加载中…</div>';
+    fetchJSON(NZ_CONTRACT.API.sessions_outputs).then(function (res) {
+      if (!state.library) return;
+      state.outputs = (res && Array.isArray(res.outputs)) ? res.outputs : [];
+      if (box) box.innerHTML = outputRowsHtml(state.outputs, sessionLabel) || '<div class="files-empty">会话还没有产出：写出的文档、网页、图片和 PR 会出现在这里</div>';
+    }).catch(function (e) {
+      if (state.library && box) box.innerHTML = '<div class="files-empty">加载失败：' + esc(e.message) + '</div>';
+    });
   }
 
   // jumpToSession switches the browse root to a session's working tree.
@@ -182,7 +211,7 @@ import { renderRich, runPendingAsync } from './render_md.js';
 
   function syncUploadBtn() {
     var btn = $('files-upload-btn');
-    if (btn) btn.hidden = !!state.root;
+    if (btn) btn.hidden = !!state.root || state.library;
   }
 
   // jumpToProject switches the browse root to a named project (quick-jump
@@ -210,6 +239,7 @@ import { renderRich, runPendingAsync } from './render_md.js';
 
   // ---- directory listing ----
   function loadDir(dir) {
+    if (state.library) { state.library = false; syncUploadBtn(); buildQuickJump(); }
     if (!cur()) { renderEmpty('没有可浏览的工作区'); return; }
     state.dir = dir || '';
     var box = $('files-list');
@@ -237,52 +267,18 @@ import { renderRich, runPendingAsync } from './render_md.js';
   function renderCrumbs() {
     var wrap = $('files-crumbs');
     if (!wrap) return;
-    var parts = state.dir ? state.dir.split('/') : [];
+    if (state.library) { wrap.innerHTML = '<span class="files-crumb">成品库</span>'; return; }
     var head = state.root ? '会话 · ' + (state.rootLabel || '工作目录') : (state.project || '项目');
-    var html = '<button type="button" class="files-crumb" data-dir="">' + esc(head) + '</button>';
-    var acc = '';
-    parts.forEach(function (seg) {
-      if (!seg) return;
-      acc = acc ? acc + '/' + seg : seg;
-      html += '<span class="files-crumb-sep">/</span>' +
-        '<button type="button" class="files-crumb" data-dir="' + escAttr(acc) + '">' + esc(seg) + '</button>';
-    });
-    wrap.innerHTML = html;
+    wrap.innerHTML = crumbsHtml(head, state.dir);
   }
 
   function renderList(res) {
     var box = $('files-list');
     if (!box) return;
-    var entries = (res && res.entries) || [];
-    var html = '';
-    if (state.dir) {
-      html += '<div class="files-row files-up" role="listitem" data-kind="up"><span class="files-ic">↑</span>' +
-        '<span class="files-name">上级目录</span></div>';
-    }
-    if (!entries.length) {
-      // Keep the ↑ 上级目录 row (when present) so an empty subdirectory is
-      // still navigable out of.
-      box.innerHTML = html + '<div class="files-empty">空目录</div>';
-      return;
-    }
-    entries.forEach(function (e) {
-      var icon = e.is_dir ? '📁' : (e.symlink ? '🔗' : '📄');
-      var meta = e.is_dir ? '' : (e.symlink ? '链接' : formatFileSize(e.size));
-      var cls = 'files-row' + (e.is_dir ? ' files-dir' : '') + (e.symlink ? ' files-link' : '');
-      var kind = e.symlink ? 'symlink' : (e.is_dir ? 'dir' : 'file');
-      html += '<div class="' + cls + '" role="listitem" data-kind="' + kind + '" data-name="' + escAttr(e.name) + '">' +
-        '<span class="files-ic">' + icon + '</span>' +
-        '<span class="files-name">' + esc(e.name) + '</span>' +
-        '<span class="files-meta">' + esc(meta) + '</span>';
-      // No per-row action buttons: clicking the row previews (and the preview
-      // pane header carries the 下载 button). Keeps the narrow sidebar to
-      // icon + name + size. A folder row navigates; a file row previews.
-      html += '</div>';
-    });
-    if (res && res.truncated) {
-      html += '<div class="files-empty">条目过多，仅显示前若干项，请进入子目录细化。</div>';
-    }
-    box.innerHTML = html;
+    // No per-row action buttons: clicking the row previews (and the preview
+    // pane header carries the 下载 button). Keeps the narrow sidebar to
+    // icon + name + size.
+    box.innerHTML = fileRowsHtml(res, state.dir);
   }
 
   // ---- relative path helpers ----
@@ -298,9 +294,10 @@ import { renderRich, runPendingAsync } from './render_md.js';
   // regardless of the current dir). When called with one arg it downloads the
   // currently-previewed file.
   function download(rel, name) {
-    if (rel == null) { rel = state.previewRel; name = state.previewName; }
+    var root = cur();
+    if (rel == null) { rel = state.previewRel; name = state.previewName; root = state.previewRoot; }
     if (!rel) return;
-    var url = fileApiUrl(cur(), 'local', rel, 'download');
+    var url = fileApiUrl(root, 'local', rel, 'download');
     var a = document.createElement('a');
     a.href = url; a.download = name || (rel.split('/').pop() || 'file'); a.rel = 'noopener';
     document.body.appendChild(a); a.click(); a.remove();
@@ -324,8 +321,12 @@ import { renderRich, runPendingAsync } from './render_md.js';
   }
 
   function preview(name) {
-    var rel = relOf(name);
-    state.previewRel = rel; state.previewName = name;
+    previewAt(cur(), relOf(name), name);
+  }
+
+  // previewAt previews rel under root (a project name or a session: root).
+  function previewAt(root, rel, name) {
+    state.previewRoot = root; state.previewRel = rel; state.previewName = name;
     state.md = null;
     $('files-md-toggle').hidden = true;
     document.body.classList.add('files-reading');
@@ -340,13 +341,13 @@ import { renderRich, runPendingAsync } from './render_md.js';
     var imgExt = { png: 1, jpg: 1, jpeg: 1, gif: 1, webp: 1, bmp: 1, ico: 1 };
     if (ext === 'svg') {
       body.innerHTML = '';
-      renderSandboxedBlob(cur(), 'local', rel, body, 'image/svg+xml');
+      renderSandboxedBlob(root, 'local', rel, body, 'image/svg+xml');
       return;
     }
     if (imgExt[ext]) {
       body.innerHTML = '';
       var img = document.createElement('img');
-      img.src = fileApiUrl(cur(), 'local', rel, 'raw');
+      img.src = fileApiUrl(root, 'local', rel, 'raw');
       img.alt = name; img.loading = 'lazy';
       body.appendChild(img);
       return;
@@ -361,20 +362,20 @@ import { renderRich, runPendingAsync } from './render_md.js';
       // JS same-origin. sandbox="" grants zero capabilities — no scripts, no
       // plugins — while still allowing the browser's native PDF viewer.
       frame.setAttribute('sandbox', '');
-      frame.src = fileApiUrl(cur(), 'local', rel, 'raw');
+      frame.src = fileApiUrl(root, 'local', rel, 'raw');
       frame.title = name;
       body.appendChild(frame);
       return;
     }
     if (ext === 'html' || ext === 'htm' || ext === 'xhtml') {
       body.innerHTML = '';
-      renderSandboxedBlob(cur(), 'local', rel, body, 'text/html');
+      renderSandboxedBlob(root, 'local', rel, body, 'text/html');
       return;
     }
     // Text / unknown → preview JSON {content, truncated, size, mime}.
-    fetchJSON(fileApiUrl(cur(), 'local', rel, 'preview')).then(function (res) {
+    fetchJSON(fileApiUrl(root, 'local', rel, 'preview')).then(function (res) {
       // A slower fetch for a file the operator already left must not paint.
-      if (state.previewRel !== rel) return;
+      if (state.previewRel !== rel || state.previewRoot !== root) return;
       // Server shape for non-text files is {content:"", binary:true}.
       if (res && res.binary) {
         body.innerHTML = '<div class="files-empty">该文件不可预览，请下载查看。</div>';
@@ -397,6 +398,7 @@ import { renderRich, runPendingAsync } from './render_md.js';
   function uploadFiles(fileList) {
     // Drag-drop still reaches here while the upload button is hidden.
     if (state.root) { toast('会话工作目录不支持上传'); return; }
+    if (state.library) { toast('成品库不支持上传，请先进入一个目录'); return; }
     if (!state.project) { toast('没有可浏览的工作区'); return; }
     var files = Array.prototype.slice.call(fileList || []);
     if (!files.length) return;
@@ -463,6 +465,13 @@ import { renderRich, runPendingAsync } from './render_md.js';
     };
   }
 
+  function previewOutput(o) {
+    if (!o || !isPreviewableOutput(o)) return;
+    var ref = previewRef(o);
+    if (!ref) { toast('这个产出所在的目录已不在可浏览范围，无法预览'); return; }
+    previewAt(ref.project, ref.path, o.path.split('/').pop() || o.path);
+  }
+
   function backToList() {
     document.body.classList.remove('files-reading');
   }
@@ -475,6 +484,7 @@ import { renderRich, runPendingAsync } from './render_md.js';
     var qj = $('files-quickjump');
     if (qj) qj.addEventListener('click', function (e) {
       var b = e.target.closest('.files-qj'); if (!b) return;
+      if (b.dataset.library) { openLibrary(); return; }
       if (b.dataset.root) { jumpToSession(b.dataset.root, b.dataset.label); return; }
       jumpToProject(b.dataset.project || '');
     });
@@ -491,8 +501,9 @@ import { renderRich, runPendingAsync } from './render_md.js';
       var kind = row.dataset.kind;
       if (kind === 'up') { loadDir(parentDir()); return; }
       if (kind === 'dir') { loadDir(relOf(row.dataset.name)); return; }
-      if (kind === 'file') { preview(row.dataset.name); }
-      // symlink rows are inert.
+      if (kind === 'file') { preview(row.dataset.name); return; }
+      if (kind === 'output') { previewOutput(state.outputs[+row.dataset.i]); }
+      // symlink rows are inert; PR rows are links.
     });
 
     var dl = $('files-download'); if (dl) dl.addEventListener('click', function () { download(); });
@@ -501,7 +512,9 @@ import { renderRich, runPendingAsync } from './render_md.js';
       if (state.md) { state.md.raw = !state.md.raw; renderMarkdown(); }
     });
     var bk = $('files-back'); if (bk) bk.addEventListener('click', backToList);
-    var rf = $('files-refresh'); if (rf) rf.addEventListener('click', function () { loadDir(state.dir); });
+    var rf = $('files-refresh'); if (rf) rf.addEventListener('click', function () {
+      if (state.library) openLibrary(); else loadDir(state.dir);
+    });
 
     // Upload button → hidden input.
     var btn = $('files-upload-btn'), input = $('files-upload-input');
@@ -533,7 +546,7 @@ import { renderRich, runPendingAsync } from './render_md.js';
     $('files-main').hidden = false;
     document.body.classList.add('nz-view-files');
     syncSessionRoot();
-    loadRoots().then(function () { loadDir(state.loaded ? state.dir : ''); })
+    loadRoots().then(function () { if (state.library) openLibrary(); else loadDir(state.loaded ? state.dir : ''); })
       .catch(function (e) { renderEmpty('加载项目失败：' + e.message); });
   }
   function hide() {

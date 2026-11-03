@@ -4,14 +4,13 @@
 // file_ref_parse.js leaf.
 import { NZ_CONTRACT } from './contract.js';
 import { selection, sessionList } from './state.js';
-import { esc, fetchJSON, showToast } from './nz_util.js';
-import { splitDock } from './split_view.js';
+import { esc, fetchJSON, nzBus, showToast } from './nz_util.js';
+import { workbench } from './workbench.js';
 import { isInternalEvent, matchProject, sid } from './session_ident.js';
 import { AVATAR_GROUP_GAP_MS, copyText, formatFileSize } from './utilities.js';
 import { ICONS } from './icons.js';
 import { isFileRefCandidate, splitPathLine } from './file_ref_parse.js';
 import { loadKatex, loadMermaid, renderRich, runPendingAsync } from './render_md.js';
-import { collapseSidebarForDrawer, restoreSidebarAfterDrawer } from './mobile_nav.js';
 
 // Late-bound hooks: assigned by the code below, read by other modules at event
 // time (never at load time) — the shape they had as dashboard module-scope
@@ -462,14 +461,8 @@ async function openFilePreview(wrapEl) {
   const mime = wrapEl.dataset.mime || '';
   const size = +wrapEl.dataset.size || 0;
 
-  drawer.classList.remove('hidden');
-  drawer.classList.add('fv-open');
-  // Dock as a right-hand split on desktop so the transcript stays visible
-  // beside the preview (no-op on phone — falls back to the overlay).
-  splitDock.enter();
-  // Opened last → stack on top of the 追问 pane if both are docked.
-  splitDock.bringToFront('preview');
-  collapseSidebarForDrawer();
+  // The preview is the workbench's 预览 tab.
+  workbench.open('preview');
   drawer.dataset.project = project;
   drawer.dataset.node = node;
   drawer.dataset.path = path;
@@ -478,7 +471,7 @@ async function openFilePreview(wrapEl) {
   // use the workspace-relative `path`.
   const headerPath = wrapEl.dataset.displayPath || path;
   title.textContent = headerPath + (line ? ':' + line : '');
-  meta.textContent = (mime ? mime + ' \u00b7 ' : '') + formatFileSize(size);
+  meta.textContent = [mime, formatFileSize(size)].filter(Boolean).join(' \u00b7 ');
   body.innerHTML = '<div class="fv-loading">loading\u2026</div>';
   if (renderPreviewByMime(project, node, path, body, mime)) return;
 
@@ -550,27 +543,29 @@ function inferLang(path, mime) {
   return '';
 }
 
+// closeFilePreview closes the workbench, whose close clears the preview.
 function closeFilePreview() {
+  workbench.close();
+}
+
+// Closing the workbench, from any surface, drops what the 预览 tab showed.
+nzBus.addEventListener('workbench:close', () => {
   const drawer = document.getElementById('fv-drawer');
   if (!drawer) return;
-  drawer.classList.remove('fv-open');
-  drawer.classList.add('hidden');
-  // Undock the split (no-op if the 追问 drawer is still open).
-  splitDock.exit();
-  // Re-expand the sidebar if the open path auto-collapsed it (no-op if the
-  // 追问 drawer is still open or the user collapsed it themselves).
-  restoreSidebarAfterDrawer();
   delete drawer.dataset.snippetMode;
   delete drawer.dataset.snippetName;
+  delete drawer.dataset.path;
   _pendingSnippet = null;
   const body = document.getElementById('fv-body');
   if (body) body.innerHTML = '';
-}
+  const title = document.getElementById('fv-title');
+  if (title) title.textContent = '预览';
+  const meta = document.getElementById('fv-meta');
+  if (meta) meta.textContent = '';
+});
 
 // Wire drawer buttons once on load.
 document.addEventListener('DOMContentLoaded', function () {
-  const close = document.getElementById('fv-btn-close');
-  if (close) close.addEventListener('click', closeFilePreview);
   const copy = document.getElementById('fv-btn-copy');
   if (copy) copy.addEventListener('click', () => {
     const drawer = document.getElementById('fv-drawer');
@@ -602,15 +597,6 @@ document.addEventListener('DOMContentLoaded', function () {
     if (!drawer.dataset.path) return;
     triggerFileDownload({ dataset: drawer.dataset });
   });
-  // Esc closes drawer (but only when nothing else is handling Esc).
-  document.addEventListener('keydown', evt => {
-    if (evt.key !== 'Escape') return;
-    const drawer = document.getElementById('fv-drawer');
-    if (drawer && !drawer.classList.contains('hidden')) {
-      evt.stopPropagation();
-      closeFilePreview();
-    }
-  }, true);
 });
 
 // Observe #events-scroll so every newly-inserted event bubble gets scanned
@@ -703,8 +689,10 @@ function processEventsForDisplay(events) {
 export {
   closeFilePreview,
   fileApiUrl,
+  openFilePreview,
   processEventsForDisplay,
   regroupAvatars,
   renderSandboxedBlob,
+  resolveProjectForAbsPath,
   startFileRefObserver,
 };

@@ -717,6 +717,7 @@ function selectSession(key, node) {
   selection.node = node;
   selection.lastAppliedMainState = null; // #2431: new session → first poll must reconcile
   if (prevKey && (prevKey !== key || prevNode !== node)) onWorkflowSessionSwitched(sid(prevKey, prevNode));
+  if (prevKey !== key || prevNode !== node) nzBus.dispatchEvent(new CustomEvent('session:select'));
   // Opening a card counts as "reading" it — clear the chat-style unread chip
   // before the DOM toggle below so the next render reflects a zeroed state.
   const selSid = sid(key, node);
@@ -1060,6 +1061,12 @@ function mainHeaderHtml(s) {
     ? '<button type="button" class="btn-rename btn-download" data-action="session-download-md" title="导出会话为 Markdown" aria-label="导出会话为 Markdown">' + ICONS.download + '</button>'
     : '';
 
+  // The workbench (预览 · 产出 · 文件 · 详情) for local sessions; its panes
+  // have nothing to show for a remote or discovered one.
+  const workbenchBtn = selection.key && !isDiscoveredKey(selection.key) && (!selection.node || selection.node === 'local')
+    ? '<button type="button" class="fv-btn btn-workbench" data-action="workbench-toggle" title="工作台：预览 · 产出 · 文件 · 详情" aria-label="打开或关闭工作台">工作台</button>'
+    : '';
+
   return '<div class="main-header">' +
       '<button type="button" class="btn-mobile-back" data-action="mobile-back" title="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868" aria-label="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868">' + ICONS.back + '</button>' +
       '<div class="main-header-content">' +
@@ -1092,6 +1099,7 @@ function mainHeaderHtml(s) {
         '<span class="detail-runstats" id="header-runstats"></span>' +
       '</div>' +
       '</div>' +
+      workbenchBtn +
     '</div>';
 }
 

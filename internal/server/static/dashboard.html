@@ -216,19 +216,40 @@
      docks as a right-hand split on desktop). Dragging it resizes the split;
      double-click resets to the default width. Driven by dashboard.js. -->
 <div id="split-resizer" role="separator" aria-orientation="vertical" aria-label="拖动调整分屏宽度" tabindex="-1"></div>
-<aside class="fv-drawer hidden" id="fv-drawer" role="dialog" aria-modal="false" aria-label="文件预览">
-  <header class="fv-header">
-    <div class="fv-title-wrap">
-      <span class="fv-title" id="fv-title">文件</span>
-      <span class="fv-meta" id="fv-meta"></span>
-    </div>
-    <div class="fv-actions">
-      <button type="button" class="fv-btn" id="fv-btn-copy" title="复制路径" aria-label="复制路径">复制</button>
-      <button type="button" class="fv-btn" id="fv-btn-download" title="下载文件" aria-label="下载文件">下载</button>
-      <button type="button" class="fv-btn fv-close btn-close" id="fv-btn-close" title="关闭" aria-label="关闭预览">&times;</button>
-    </div>
-  </header>
-  <div class="fv-body" id="fv-body"></div>
+<!-- The workbench (workbench.js): 预览 · 产出 · 文件 · 详情 over one drawer. -->
+<aside class="fv-drawer hidden" id="fv-drawer" role="dialog" aria-modal="false" aria-label="工作台" data-wb-tab="preview">
+  <div class="wb-tabs" role="tablist" aria-label="工作台">
+    <button type="button" class="wb-tab" role="tab" data-wb-tab="preview" aria-selected="true">预览</button>
+    <button type="button" class="wb-tab" role="tab" data-wb-tab="outputs" aria-selected="false">产出<span class="wb-count" id="wb-outputs-count"></span></button>
+    <button type="button" class="wb-tab" role="tab" data-wb-tab="files" aria-selected="false">文件</button>
+    <button type="button" class="wb-tab" role="tab" data-wb-tab="details" aria-selected="false">详情</button>
+    <span class="wb-tabs-sp"></span>
+    <button type="button" class="fv-btn wb-max-btn" id="wb-btn-max" title="占满窗口" aria-pressed="false">⤢ 放大</button>
+    <button type="button" class="fv-btn fv-close btn-close" id="fv-btn-close" title="关闭" aria-label="关闭工作台">&times;</button>
+  </div>
+  <section class="wb-pane wb-pane-preview" data-wb-pane="preview" role="tabpanel" aria-label="预览">
+    <header class="fv-header">
+      <div class="fv-title-wrap">
+        <span class="fv-title" id="fv-title">预览</span>
+        <span class="fv-meta" id="fv-meta"></span>
+      </div>
+      <div class="fv-actions">
+        <button type="button" class="fv-btn" id="fv-btn-copy" title="复制路径" aria-label="复制路径">复制</button>
+        <button type="button" class="fv-btn" id="fv-btn-download" title="下载文件" aria-label="下载文件">下载</button>
+      </div>
+    </header>
+    <div class="fv-body" id="fv-body"></div>
+  </section>
+  <section class="wb-pane" data-wb-pane="outputs" role="tabpanel" aria-label="产出" hidden>
+    <div class="wb-list" id="wb-outputs" role="list"></div>
+  </section>
+  <section class="wb-pane" data-wb-pane="files" role="tabpanel" aria-label="文件" hidden>
+    <div class="files-crumbs" id="wb-files-crumbs" aria-label="路径"></div>
+    <div class="files-list wb-list" id="wb-files-list" role="list"></div>
+  </section>
+  <section class="wb-pane" data-wb-pane="details" role="tabpanel" aria-label="详情" hidden>
+    <dl class="wb-details" id="wb-details"></dl>
+  </section>
 </aside>
 <aside class="aside-drawer" id="aside-drawer" role="dialog" aria-modal="false" aria-label="追问抽屉">
   <header class="ad-header">
@@ -291,6 +312,7 @@
 <script type="module" src="/static/system_view.js"></script>
 <script type="module" src="/static/running_banner.js"></script>
 <script type="module" src="/static/file_refs.js"></script>
+<script type="module" src="/static/workbench_panes.js"></script>
 <script type="module" src="/static/utilities.js"></script>
 <script type="module" src="/static/discovery.js"></script>
 <script type="module" src="/static/tuning.js"></script>

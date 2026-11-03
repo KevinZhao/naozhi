@@ -699,8 +699,8 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .fv-body pre.fv-lined{display:grid;grid-template-columns:auto 1fr;gap:0 12px;white-space:normal}
 .fv-body pre.fv-lined .fv-gutter{text-align:right;color:var(--nz-text-faint);user-select:none;padding-right:8px;border-right:1px solid var(--nz-border);white-space:pre;font-variant-numeric:tabular-nums}
 .fv-body pre.fv-lined code{white-space:pre;display:block}
-.fv-body img{max-width:100%;max-height:calc(100vh - 120px);display:block;margin:0 auto;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms)}
-.fv-body iframe{width:100%;height:calc(100vh - 80px);border:none;background:#fff;border-radius:var(--nz-radius-ms)}
+.fv-body img{max-width:100%;max-height:calc(100vh - 164px);display:block;margin:0 auto;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms)}
+.fv-body iframe{width:100%;height:calc(100vh - 124px);border:none;background:#fff;border-radius:var(--nz-radius-ms)}
 .fv-body .fv-binary{padding:32px;text-align:center;color:var(--nz-text-mute)}
 .fv-body .fv-binary .fv-mime{display:block;margin-top:8px;font-family:'SF Mono',ui-monospace,monospace;font-size:var(--nz-fs-xs);color:var(--nz-text-dim)}
 .fv-body .fv-truncated{padding:8px 12px;background:rgba(210,153,34,.1);border-left:3px solid var(--nz-amber);color:var(--nz-amber);font-size:var(--nz-fs-sm);margin-bottom:10px;border-radius:var(--nz-radius-xs)}
@@ -709,7 +709,31 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 /* Phone: full-width, and follow the visualViewport vars like .main / .sidebar
    do so the iOS soft keyboard shrinks the drawer instead of covering its
    bottom. */
-@media(max-width:768px){.fv-drawer{width:100%;max-width:100vw;top:var(--vv-top,0);height:var(--vv-height,100%);bottom:auto}.fv-body iframe{height:calc(100vh - 100px)}}
+/* Workbench (workbench.js): the tab strip over the drawer, one pane shown. */
+.wb-tabs{display:flex;align-items:center;gap:4px;padding:0 10px 0 14px;height:44px;border-bottom:1px solid var(--nz-border);flex-shrink:0}
+.wb-tab{height:100%;padding:0 8px;border:0;border-bottom:2px solid transparent;background:none;color:var(--nz-text-mute);font-family:inherit;font-size:var(--nz-fs-sm2);cursor:pointer}
+.wb-tab:hover{color:var(--nz-text-strong)}
+.wb-tab[aria-selected="true"]{color:var(--nz-text-strong);font-weight:600;border-bottom-color:var(--nz-accent)}
+.wb-count{margin-left:4px;font-size:var(--nz-fs-2xs);color:var(--nz-text-dim);font-variant-numeric:tabular-nums}
+.wb-tabs-sp{flex:1}
+.wb-pane{flex:1;min-height:0;display:flex;flex-direction:column}
+.wb-pane[hidden]{display:none}
+.wb-list{flex:1;overflow-y:auto;min-height:0;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent}
+.wb-pane .files-crumbs{padding:10px 14px 6px}
+.wb-group{padding:10px 14px 4px;font-size:var(--nz-fs-2xs);color:var(--nz-text-dim)}
+a.files-row{color:inherit;text-decoration:none}
+.wb-out-path{display:block;font-size:var(--nz-fs-2xs);color:var(--nz-text-faint);font-family:var(--nz-font-mono);overflow:hidden;text-overflow:ellipsis}
+.files-row.wb-out-off{cursor:default;opacity:.55}
+.wb-details{display:grid;grid-template-columns:auto 1fr;gap:8px 16px;margin:0;padding:14px 16px;font-size:var(--nz-fs-sm2);overflow-y:auto}
+.wb-details dt{color:var(--nz-text-mute)}
+.wb-details dd{margin:0;color:var(--nz-text-strong);word-break:break-all}
+.wb-details .files-empty{grid-column:1 / -1}
+.main-header .btn-workbench{flex-shrink:0}
+.files-qj.files-qj-on{color:var(--nz-text-strong);border-color:var(--nz-accent);background:var(--nz-selected-bg)}
+/* ⤢ 放大: the pane covers the window (the split rule in split_view.css
+   widens it past the docked width). */
+.fv-drawer.wb-max{width:100%;max-width:100vw;z-index:var(--nz-z-split-front)}
+@media(max-width:768px){.wb-max-btn{display:none}.fv-drawer{width:100%;max-width:100vw;top:var(--vv-top,0);height:var(--vv-height,100%);bottom:auto}.fv-body iframe{height:calc(100vh - 144px)}}
 
 /* Workflow panel (docs/rfc/workflow-dashboard.md §7.2-7.4): one <details> per
    Workflow tool run, above the transcript, in the session-runs-panel's quiet
