@@ -18,10 +18,12 @@ func (p PlannerSessions) State(key string) agent.SessionState {
 	if s == nil {
 		return agent.SessionState{}
 	}
+	state := s.State()
 	return agent.SessionState{
 		Exists: true,
 		// With no process State reads "ready"; a suspended session has none.
-		Alive:     s.HasProcess() && s.State() != "dead",
+		Alive:     s.HasProcess() && state != "dead",
+		Running:   state == "running",
 		SessionID: s.SessionID(),
 	}
 }

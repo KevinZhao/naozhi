@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,6 +24,9 @@ type fakeSessions struct {
 	mu        sync.Mutex
 	st        SessionState
 	recreated int
+	// recreateErr fails Recreate after the old session is gone, as
+	// Router.ResetAndRecreate does.
+	recreateErr error
 }
 
 func (f *fakeSessions) State(string) SessionState {
@@ -42,6 +46,10 @@ func (f *fakeSessions) Recreate(context.Context, string, sessionview.AgentOpts) 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.recreated++
+	if f.recreateErr != nil {
+		f.st = SessionState{}
+		return f.recreateErr
+	}
 	f.st = SessionState{Exists: true, Alive: true}
 	return nil
 }
@@ -55,15 +63,16 @@ type fakeTurns struct {
 	sent  []string
 }
 
-func (f *fakeTurns) SubmitPlanner(_, text string, _ sessionview.AgentOpts, done func(string, error)) error {
+func (f *fakeTurns) SubmitPlanner(_, text string, _ sessionview.AgentOpts, done func(string, error)) (bool, error) {
 	f.sent = append(f.sent, text)
 	if done != nil {
 		done(f.reply, nil)
 	}
-	return nil
+	return false, nil
 }
 
 func (*fakeTurns) PlannerReceipt(string, string) {}
+func (*fakeTurns) DropPlannerQueue(string)       {}
 
 func newTestAgent(t *testing.T, sess *fakeSessions, now *time.Time) (*Agent, datadir.Layout) {
 	t.Helper()
@@ -152,14 +161,19 @@ func TestShiftChange(t *testing.T) {
 	a.reconcile(ctx) // first run: today's shift is the current conversation
 	steps := []struct {
 		at        time.Time
+		running   bool
 		recreated int
 	}{
-		{time.Date(2026, 11, 4, 8, 29, 0, 0, loc), 0},
-		{time.Date(2026, 11, 4, 8, 30, 0, 0, loc), 1},
-		{time.Date(2026, 11, 4, 9, 30, 0, 0, loc), 1},
+		{time.Date(2026, 11, 4, 8, 29, 0, 0, loc), false, 0},
+		{time.Date(2026, 11, 4, 8, 30, 0, 0, loc), true, 0}, // waits out a running turn
+		{time.Date(2026, 11, 4, 8, 31, 0, 0, loc), false, 1},
+		{time.Date(2026, 11, 4, 9, 30, 0, 0, loc), false, 1},
 	}
 	for _, s := range steps {
 		now = s.at
+		sess.mu.Lock()
+		sess.st.Running = s.running
+		sess.mu.Unlock()
 		a.reconcile(ctx)
 		if sess.recreated != s.recreated {
 			t.Fatalf("at %s: recreated %d, want %d", s.at.Format(time.Kitchen), sess.recreated, s.recreated)
@@ -174,6 +188,47 @@ func TestShiftChange(t *testing.T) {
 	}
 	if st := a.Status(); st.Shift != "2026-11-04" {
 		t.Errorf("shift = %s", st.Shift)
+	}
+}
+
+// TestShiftChangeRestartFails: a failed restart leaves the Planner gone and
+// the stored summary pending; revival waits out the backoff, and the fresh
+// conversation it starts still gets the summary.
+func TestShiftChangeRestartFails(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+	now := time.Date(2026, 11, 3, 20, 0, 0, 0, loc)
+	sess := &fakeSessions{st: SessionState{Exists: true, Alive: true, SessionID: "s1"}}
+	a, _ := newTestAgent(t, sess, &now)
+	turns := &fakeTurns{reply: "## 进行中\n无"}
+	a.turns = turns
+	ctx := context.Background()
+	a.reconcile(ctx)
+
+	sess.recreateErr = errors.New("spawn failed")
+	now = time.Date(2026, 11, 4, 8, 30, 0, 0, loc)
+	a.reconcile(ctx)
+	sess.recreateErr = nil
+	if st := a.Status(); st.Alive || st.Shift != "2026-11-03" || len(turns.sent) != 1 {
+		t.Fatalf("after failed restart: %+v, turns %q", st, turns.sent)
+	}
+
+	now = now.Add(30 * time.Second) // inside the backoff
+	a.reconcile(ctx)
+	if a.Status().Alive {
+		t.Fatal("revived inside the backoff")
+	}
+
+	now = now.Add(time.Minute)
+	a.reconcile(ctx)
+	if st := a.Status(); !st.Alive || st.Shift != "2026-11-04" {
+		t.Fatalf("after revival: %+v", st)
+	}
+	if len(turns.sent) != 2 || !strings.Contains(turns.sent[1], turns.reply) || sess.recreated != 1 {
+		t.Fatalf("turns = %q, recreated %d", turns.sent, sess.recreated)
+	}
+	a.reconcile(ctx)
+	if len(turns.sent) != 2 {
+		t.Fatalf("handoff sent again: %q", turns.sent)
 	}
 }
 

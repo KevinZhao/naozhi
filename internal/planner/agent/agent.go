@@ -64,9 +64,9 @@ const (
 
 // Errors Send and SetStopped report; the HTTP layer maps them to statuses.
 var (
-	ErrOff      = errors.New("Planner 未开启（planner.enabled）")
-	ErrStopped  = errors.New("Planner 已停用")
-	ErrNotReady = errors.New("Planner 还在启动，请稍后再试")
+	ErrOff      = errors.New("未开启 Planner（planner.enabled）")
+	ErrStopped  = errors.New("已停用 Planner")
+	ErrNotReady = errors.New("正在启动 Planner，请稍后再试")
 	ErrEmpty    = errors.New("消息为空")
 	ErrTooLong  = errors.New("消息太长")
 )
@@ -75,7 +75,9 @@ var (
 type SessionState struct {
 	Exists bool
 	// Alive is a running process; a suspended session only has an ID.
-	Alive     bool
+	Alive bool
+	// Running is a turn in flight.
+	Running   bool
 	SessionID string
 }
 
@@ -98,10 +100,13 @@ type Sessions interface {
 type Turns interface {
 	// SubmitPlanner runs text as a turn on key, spawning it with opts;
 	// done (nil for none) gets the reply, or the error the turn ended with.
-	SubmitPlanner(key, text string, opts sessionview.AgentOpts, done func(reply string, err error)) error
+	// queued is text waiting behind a turn already running.
+	SubmitPlanner(key, text string, opts sessionview.AgentOpts, done func(reply string, err error)) (queued bool, err error)
 	// PlannerReceipt shows text in key's conversation as a system event,
 	// never sent to the CLI.
 	PlannerReceipt(key, text string)
+	// DropPlannerQueue discards the messages queued for key's next turn.
+	DropPlannerQueue(key string)
 }
 
 // Config wires an Agent.
@@ -141,6 +146,9 @@ type persisted struct {
 	V       int    `json:"v"`
 	Stopped bool   `json:"stopped"`
 	Shift   string `json:"shift,omitempty"`
+	// Handoff is the day of a stored summary not yet handed to a new
+	// conversation (its restart failed, or the send did).
+	Handoff string `json:"handoff,omitempty"`
 }
 
 // Agent keeps planner:main running and takes the user's messages to it.
@@ -393,13 +401,19 @@ func (a *Agent) reconcile(ctx context.Context) {
 		}
 	}
 	a.mu.Lock()
-	shift := a.state.Shift
+	shift, pending := a.state.Shift, a.state.Handoff
 	a.mu.Unlock()
 	switch {
 	case shift == "":
 		a.markShift(now)
 	case shift != shiftDay(now):
-		a.changeShift(ctx, now)
+		// A busy Planner changes at a later reconcile, so the handoff
+		// request runs at once rather than queued behind a turn.
+		if !st.Running {
+			a.changeShift(ctx, now)
+		}
+	case pending != "":
+		a.sendHandoff(pending, nil, opts)
 	}
 }
 
@@ -411,21 +425,27 @@ func (a *Agent) revive(ctx context.Context, now time.Time, opts sessionview.Agen
 	if wait {
 		return false
 	}
-	err := a.cfg.Sessions.Ensure(ctx, Key, opts)
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if err != nil {
-		a.failures++
-		backoff := min(reviveBackoffBase<<min(a.failures-1, 5), reviveBackoffMax)
-		a.retryAt = now.Add(backoff)
-		slog.Warn("planner: start failed", "err", err, "failures", a.failures, "retry_in", backoff)
+	if err := a.cfg.Sessions.Ensure(ctx, Key, opts); err != nil {
+		a.failed(now, "planner: start failed", err)
 		return false
 	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.failures > 0 {
 		slog.Info("planner: started after failures", "failures", a.failures)
 	}
 	a.failures, a.retryAt = 0, time.Time{}
 	return true
+}
+
+// failed records a failed spawn and backs the next revival off.
+func (a *Agent) failed(now time.Time, msg string, err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.failures++
+	backoff := min(reviveBackoffBase<<min(a.failures-1, 5), reviveBackoffMax)
+	a.retryAt = now.Add(backoff)
+	slog.Warn(msg, "err", err, "failures", a.failures, "retry_in", backoff)
 }
 
 // shiftDay is the shift t belongs to: a day's shift starts at 08:30 local,
@@ -445,16 +465,24 @@ func (a *Agent) markShift(now time.Time) {
 	a.saveLocked()
 }
 
+func (a *Agent) handoffPath(day string) string {
+	return filepath.Join(a.cfg.Layout.PlannerHandoffRoot(), day+".md")
+}
+
 // changeShift has the outgoing session write a handoff summary, retires it,
 // and starts a fresh conversation whose first message carries the summary.
-// A summary already stored for this shift (a retry after a failed restart)
-// is reused rather than asked for again.
+// A summary already stored for this shift is reused rather than asked for
+// again. It stays pending until sent, so after a failed restart the
+// conversation revival starts still gets it.
 func (a *Agent) changeShift(ctx context.Context, now time.Time) {
 	day := shiftDay(now)
-	path := filepath.Join(a.cfg.Layout.PlannerHandoffRoot(), day+".md")
+	path := a.handoffPath(day)
 	summary, err := os.ReadFile(path)
 	if err != nil {
 		text := a.askHandoff(ctx)
+		if ctx.Err() != nil {
+			return // shutting down: the next start changes the shift
+		}
 		summary = []byte(text)
 		if text != "" {
 			if err := datadir.EnsureDir(filepath.Dir(path)); err != nil {
@@ -467,18 +495,50 @@ func (a *Agent) changeShift(ctx context.Context, now time.Time) {
 	a.mu.Lock()
 	// The memory indexes and prompt are re-read for the new conversation.
 	a.opts = a.buildOpts()
-	opts, turns := a.opts, a.turns
+	opts := a.opts
+	a.state.Handoff = ""
+	if len(summary) > 0 {
+		a.state.Handoff = day
+	}
+	a.saveLocked()
 	a.mu.Unlock()
 	if err := a.cfg.Sessions.Recreate(ctx, Key, opts); err != nil {
-		slog.Warn("planner: shift change: start new session", "err", err)
+		// The old session is gone: revival starts the new one, and the
+		// pending summary follows it.
+		a.failed(now, "planner: shift change: start new session failed", err)
 		return
 	}
 	a.markShift(now)
 	slog.Info("planner: shift changed", "day", day, "handoff_bytes", len(summary))
 	if len(summary) > 0 {
-		if err := turns.SubmitPlanner(Key, handoffMessage(day, string(summary)), opts, nil); err != nil {
-			slog.Warn("planner: send handoff to new session", "err", err)
+		a.sendHandoff(day, summary, opts)
+	}
+}
+
+// sendHandoff hands day's summary to the current conversation, reading it
+// from its file when summary is nil, and clears it as pending once
+// submitted.
+func (a *Agent) sendHandoff(day string, summary []byte, opts sessionview.AgentOpts) {
+	if summary == nil {
+		var err error
+		if summary, err = os.ReadFile(a.handoffPath(day)); err != nil {
+			slog.Warn("planner: pending handoff unreadable; dropped", "day", day, "err", err)
 		}
+	}
+	if len(summary) > 0 {
+		a.mu.Lock()
+		turns := a.turns
+		a.mu.Unlock()
+		if _, err := turns.SubmitPlanner(Key, handoffMessage(day, string(summary)), opts, nil); err != nil {
+			slog.Warn("planner: send handoff to new session", "err", err)
+			return
+		}
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.state.Handoff == day {
+		a.state.Handoff = ""
+		a.saveLocked()
 	}
 }
 
@@ -496,9 +556,10 @@ func (a *Agent) askHandoff(ctx context.Context) string {
 		err  error
 	}
 	ch := make(chan reply, 1)
-	if err := turns.SubmitPlanner(Key, handoffPrompt, opts, func(text string, err error) {
+	queued, err := turns.SubmitPlanner(Key, handoffPrompt, opts, func(text string, err error) {
 		ch <- reply{text, err}
-	}); err != nil {
+	})
+	if err != nil {
 		slog.Warn("planner: ask for handoff", "err", err)
 		return ""
 	}
@@ -514,6 +575,11 @@ func (a *Agent) askHandoff(ctx context.Context) string {
 	case <-t.C:
 		slog.Warn("planner: handoff timed out; changing shift without one")
 	case <-ctx.Done():
+	}
+	// A request that never started would otherwise run first on the new
+	// conversation once the restart frees the queue.
+	if queued {
+		turns.DropPlannerQueue(Key)
 	}
 	return ""
 }
@@ -537,7 +603,7 @@ func (a *Agent) Send(text string) error {
 	case len(text) > maxMessageBytes:
 		return ErrTooLong
 	}
-	if err := turns.SubmitPlanner(Key, a.Snapshot()+"\n\n"+text, opts, nil); err != nil {
+	if _, err := turns.SubmitPlanner(Key, a.Snapshot()+"\n\n"+text, opts, nil); err != nil {
 		return err
 	}
 	turns.PlannerReceipt(Key, ReceiptText)

@@ -19,20 +19,28 @@ import (
 var errPlannerNamespace = sendUsageError("Planner 的消息请从 Planner 页面发送")
 
 var (
-	errPlannerBusy     = errors.New("Planner 正忙，消息未送达，请稍后重试")
+	errPlannerBusy     = errors.New("服务忙：Planner 消息未送达，请稍后重试")
 	errPlannerClosing  = errors.New("服务正在关闭，消息未送达")
 	errPlannerDropped  = errors.New("消息未被处理")
 	errPlannerNoEngine = errors.New("planner turn entry not wired")
 )
 
 // SubmitPlanner runs text as a turn on key, spawning it with opts; done (nil
-// for none) gets the reply text or the turn's error. It is the agent's
-// Turns.SubmitPlanner.
-func (s *Server) SubmitPlanner(key, text string, opts session.AgentOpts, done func(reply string, err error)) error {
+// for none) gets the reply text or the turn's error. queued is text waiting
+// behind a running turn. It is the agent's Turns.SubmitPlanner.
+func (s *Server) SubmitPlanner(key, text string, opts session.AgentOpts, done func(reply string, err error)) (queued bool, err error) {
 	if s.hub == nil || s.hub.engine == nil {
-		return errPlannerNoEngine
+		return false, errPlannerNoEngine
 	}
 	return s.hub.engine.submitPlanner(key, text, opts, done)
+}
+
+// DropPlannerQueue discards the messages queued for key's next turn; their
+// origins are told DropRemoved. The running turn, if any, is left alone.
+func (s *Server) DropPlannerQueue(key string) {
+	if s.hub != nil && s.hub.engine != nil {
+		s.hub.engine.turns.Retire(s.hub.engine.ctx, key)
+	}
 }
 
 // PlannerReceipt shows text to key's subscribers as a system event. It is
@@ -44,15 +52,17 @@ func (s *Server) PlannerReceipt(key, text string) {
 	}
 }
 
-func (e *sendEngine) submitPlanner(key, text string, opts session.AgentOpts, done func(string, error)) error {
+func (e *sendEngine) submitPlanner(key, text string, opts session.AgentOpts, done func(string, error)) (bool, error) {
 	o := &plannerOrigin{key: key, opts: opts, notify: e.notify, done: done}
 	switch e.turns.Submit(e.ctx, turn.Request{Key: key, Text: text, Origin: o}, dashAdmission{track: e.TrackSend, ctx: e.ctx}) {
-	case turn.AckOwner, turn.AckQueued, turn.AckDetached:
-		return nil
+	case turn.AckOwner, turn.AckDetached:
+		return false, nil
+	case turn.AckQueued:
+		return true, nil
 	case turn.AckDropped:
-		return errPlannerBusy
+		return false, errPlannerBusy
 	default:
-		return errPlannerClosing
+		return false, errPlannerClosing
 	}
 }
 
