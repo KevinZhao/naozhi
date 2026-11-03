@@ -37,6 +37,7 @@ import {
   renderSystemView,
   stopSystemPoll,
 } from './system_view.js';
+import { closePlannerPanel, openPlannerPanel } from './planner_view.js';
 import { interruptSession, resetTurnState, saveScrollPos, updateSendButton } from './running_banner.js';
 import { closeFilePreview, startFileRefObserver } from './file_refs.js';
 import {
@@ -207,7 +208,7 @@ document.addEventListener('DOMContentLoaded', function () {
   // Activity-bar view switch (codex-style rail). Each abnav-* routes through the top-level
   // setActivityView() which toggles the matching body.nz-view-* class and
   // swaps the chat sidebar/main for the target view's panels in place.
-  ['abnav-chat', 'abnav-assets', 'abnav-files', 'abnav-cron', 'abnav-system', 'abnav-settings'].forEach(function (id) {
+  ['abnav-planner', 'abnav-chat', 'abnav-assets', 'abnav-files', 'abnav-cron', 'abnav-system', 'abnav-settings'].forEach(function (id) {
     const el = document.getElementById(id);
     if (el) el.addEventListener('click', function () { setActivityView(el.dataset.view); });
   });
@@ -234,14 +235,14 @@ document.addEventListener('DOMContentLoaded', function () {
 // setActivityView('cron') when not already in cron view. We set activeView
 // BEFORE dispatching, so openCronPanel's own `activeView !== 'cron'` guard is
 // already false on the re-entry and the loop terminates after one hop.
-const ACTIVITY_VIEWS = ['chat', 'assets', 'files', 'cron', 'system', 'settings'];
+const ACTIVITY_VIEWS = ['planner', 'chat', 'assets', 'files', 'cron', 'system', 'settings'];
 function setActivityView(view) {
   if (ACTIVITY_VIEWS.indexOf(view) === -1) view = 'chat';
   if (view === ui.activeView) return;
   const prev = ui.activeView;
   ui.activeView = view;
   // Rail button active / aria-pressed state.
-  [['abnav-chat', 'chat'], ['abnav-assets', 'assets'], ['abnav-files', 'files'], ['abnav-cron', 'cron'], ['abnav-system', 'system'], ['abnav-settings', 'settings']]
+  [['abnav-planner', 'planner'], ['abnav-chat', 'chat'], ['abnav-assets', 'assets'], ['abnav-files', 'files'], ['abnav-cron', 'cron'], ['abnav-system', 'system'], ['abnav-settings', 'settings']]
     .forEach(function (pair) {
       const el = document.getElementById(pair[0]);
       if (el) { el.classList.toggle('active', pair[1] === view); el.setAttribute('aria-pressed', String(pair[1] === view)); }
@@ -252,6 +253,7 @@ function setActivityView(view) {
   document.body.classList.toggle('nz-view-cron', view === 'cron');
   document.body.classList.toggle('nz-view-system', view === 'system');
   document.body.classList.toggle('nz-view-settings', view === 'settings');
+  document.body.classList.toggle('nz-view-planner', view === 'planner');
   // Keep the [hidden] attr in sync with CSS for the always-resident containers
   // (asset_browser.js manages its own hidden flags on show/hide).
   const cm = document.getElementById('cron-main');
@@ -260,10 +262,13 @@ function setActivityView(view) {
   if (sm) sm.hidden = view !== 'settings';
   const sysm = document.getElementById('system-main');
   if (sysm) sysm.hidden = view !== 'system';
+  const plm = document.getElementById('planner-main');
+  if (plm) plm.hidden = view !== 'planner';
   // Tear down the previous view if it owns external state.
   if (prev === 'assets' && view !== 'assets' && nzViews.asset) nzViews.asset.hide();
   if (prev === 'files' && view !== 'files' && nzViews.files) nzViews.files.hide();
   if (prev === 'system' && view !== 'system') stopSystemPoll();
+  if (prev === 'planner' && view !== 'planner') closePlannerPanel();
   // Leaving chat: close any docked preview / 追问 drawer. They are position:fixed
   // siblings of .container with no nz-view-* hide rule, so without this they
   // float over the assets/cron/settings view and leave the split padding
@@ -278,6 +283,7 @@ function setActivityView(view) {
   else if (view === 'cron') { nzBus.dispatchEvent(new CustomEvent('cron:open-panel')); }
   else if (view === 'system') { openSystemPanel(); }
   else if (view === 'settings') { renderSettingsView(); }
+  else if (view === 'planner') { openPlannerPanel(); }
 }
 
 // reconcileMainStateAfterPoll brings the open session's banner and send/stop

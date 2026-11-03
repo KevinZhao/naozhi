@@ -47,6 +47,14 @@
          setActivityView(data-view) in dashboard.js (no inline onclick —
          R236-SEC-02 inline-handler cap is 0). -->
     <div class="ab-top">
+      <!-- Planner page (docs/rfc/planner.md §10, D77): 等你 · 答应你的 on the
+           left, the Planner conversation in the middle, the workbench on the
+           right. The count is the "等你" badge (inbox_count frames). -->
+      <button type="button" class="ab-nav" id="abnav-planner" data-view="planner" title="Planner" aria-label="Planner 页面" aria-pressed="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><polygon points="15.5 8.5 10.5 10.5 8.5 15.5 13.5 13.5 15.5 8.5"/></svg>
+        <span class="ab-nav-label">Planner</span>
+        <span class="ab-count" id="abnav-planner-count" hidden aria-label="等你的条目数"></span>
+      </button>
       <button type="button" class="ab-nav active" id="abnav-chat" data-view="chat" title="会话" aria-label="会话视图" aria-pressed="true">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
         <span class="ab-nav-label">会话</span>
@@ -199,6 +207,48 @@
        shown under body.nz-view-system. renderSystemView() in dashboard.js
        paints the read-only daemon status list (GET /api/system/daemons). -->
   <main class="system-main" id="system-main" aria-label="系统任务" hidden></main>
+  <!-- Planner page (planner_view.js): left 等你 / 答应你的 (a 48px strip
+       while the workbench is open), the Planner conversation in the middle.
+       The workbench (#fv-drawer) docks on the right as in the chat view. -->
+  <main class="planner-main" id="planner-main" aria-label="Planner" hidden>
+    <aside class="pl-left" id="pl-left" aria-label="等你与答应你的">
+      <button type="button" class="pl-left-toggle" id="pl-left-toggle" aria-expanded="false" aria-controls="pl-left-body">
+        <span>等你 <b id="pl-wait-n">0</b> · 答应你的 <b id="pl-promise-n">0</b></span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>
+      <div class="pl-strip" id="pl-strip">
+        <button type="button" class="pl-strip-btn" id="pl-strip-expand" title="展开左栏" aria-label="展开左栏"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg></button>
+        <span class="pl-strip-item" title="等你"><span>等你</span><b class="pl-strip-n" id="pl-strip-wait">0</b></span>
+        <span class="pl-strip-item" title="答应你的"><span>答应</span><b class="pl-strip-n" id="pl-strip-promise">0</b></span>
+      </div>
+      <div class="pl-left-body" id="pl-left-body">
+        <section class="pl-group" aria-labelledby="pl-wait-h">
+          <h2 class="pl-group-h" id="pl-wait-h">等你 · <span id="pl-wait-count">0</span></h2>
+          <div class="pl-list" id="pl-wait" role="list"></div>
+        </section>
+        <section class="pl-group" aria-labelledby="pl-promise-h">
+          <h2 class="pl-group-h" id="pl-promise-h">答应你的 · <span id="pl-promise-count">0</span></h2>
+          <div class="pl-list" id="pl-promise" role="list"></div>
+        </section>
+        <div class="pl-tools" id="pl-tools"></div>
+      </div>
+    </aside>
+    <section class="pl-center" aria-label="Planner 对话">
+      <header class="pl-head">
+        <span class="pl-title">Planner</span>
+        <span class="pl-status" id="pl-status"></span>
+        <span class="pl-head-sp"></span>
+        <button type="button" class="files-dl-btn" data-action="workbench-toggle" title="工作台（预览 · 产出 · 文件 · 详情）">工作台</button>
+      </header>
+      <div class="pl-note" id="pl-note" hidden></div>
+      <div class="events pl-events" id="pl-events" role="log" aria-live="off">
+        <div class="pl-brief" id="pl-brief"></div>
+        <div id="pl-stream"></div>
+      </div>
+      <!-- The Planner's input box (§15.1 PR ⑬) mounts here. -->
+      <div class="pl-composer" id="pl-composer" hidden></div>
+    </section>
+  </main>
   <!-- Settings view: shown under body.nz-view-settings. renderSettingsView()
        fills it (theme switch + connection info). -->
   <main class="settings-main" id="settings-main" aria-label="设置" hidden></main>
@@ -326,5 +376,6 @@
 <script type="module" src="/static/asset_browser.js"></script>
 <script type="module" src="/static/files_view.js"></script>
 <script type="module" src="/static/notify.js"></script>
+<script type="module" src="/static/planner_view.js"></script>
 </body>
 </html>

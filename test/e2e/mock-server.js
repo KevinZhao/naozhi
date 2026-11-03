@@ -249,6 +249,13 @@ function defaultGitStates() {
  * @param {object[]} [overrides.outputs] - GET /api/sessions/outputs entries (activity.Output wire
  *   shape, newest first); ?key= filters them. A test may edit the array in place.
  * @param {object} [overrides.sessionDetails] - key → GET /api/sessions/detail payload.
+ * @param {object} [overrides.inbox] - GET /api/inbox body ({open, closed, counts, paused_until});
+ *   POST /api/inbox/close drops the item from open, PUT / DELETE /api/inbox/pause set
+ *   paused_until. Every write lands in inboxCalls. Unset, the routes 404.
+ * @param {object} [overrides.planner] - GET /api/planner body ({enabled, stopped, key, alive});
+ *   POST /api/planner/state sets `stopped` and lands in plannerStateCalls. Unset, the routes 404.
+ * @param {object[]} [overrides.plannerEvents] - GET /api/sessions/events answer for key=planner:main
+ *   (the other keys keep the default events). A test may push to it.
  * @param {object[]} [overrides.cronJobs] - Custom cron jobs response.
  * @param {object} [overrides.cronListMeta] - Extra top-level fields merged into GET /api/cron
  *   (timezone / timezone_abbr / timezone_label ...). recent_runs_cap defaults to 5 like the backend.
@@ -304,6 +311,11 @@ function startMockServer(overrides = {}) {
   const outputs = overrides.outputs || [];
   const sessionDetails = overrides.sessionDetails || {};
   const outputsCalls = [];
+  const inboxData = overrides.inbox || null;
+  const inboxCalls = [];
+  const plannerData = overrides.planner || null;
+  const plannerStateCalls = [];
+  const plannerEvents = overrides.plannerEvents || null;
   const workflowDelayMs = overrides.workflowDelayMs || 0;
   // Every GET /api/sessions/workflow, as its query parameters.
   const workflowCalls = [];
@@ -490,7 +502,7 @@ function startMockServer(overrides = {}) {
       if (!checkAuth()) return;
       // Mirror EventLog.EntriesSince: `after` is strictly greater-than, so the
       // 1 s poll never re-delivers the watermark millisecond.
-      const all = eventsData;
+      const all = plannerEvents && url.searchParams.get('key') === 'planner:main' ? plannerEvents : eventsData;
       const after = Number(url.searchParams.get('after') || 0);
       const before = Number(url.searchParams.get('before') || 0);
       const limit = Number(url.searchParams.get('limit') || 0);
@@ -559,6 +571,59 @@ function startMockServer(overrides = {}) {
       const outs = outputs.filter((o) => !key || o.key === key);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ outputs: outs }));
+      return;
+    }
+
+    // 等你 (overrides.inbox): the list, close and the push pause.
+    if (inboxData && pathname === NZ_CONTRACT.API.inbox && req.method === 'GET') {
+      if (!checkAuth()) return;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(inboxData));
+      return;
+    }
+    if (inboxData && (pathname === NZ_CONTRACT.API.inbox_close || pathname === NZ_CONTRACT.API.inbox_pause)) {
+      if (!checkAuth()) return;
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        const b = body ? JSON.parse(body) : {};
+        inboxCalls.push({ path: pathname, method: req.method, body: b });
+        let out = { status: 'ok' };
+        if (pathname === NZ_CONTRACT.API.inbox_close) {
+          inboxData.open = (inboxData.open || []).filter(it => it.id !== b.id);
+          inboxData.counts = { open: inboxData.open.length, badge: inboxData.open.filter(it => it.kind === 'decision' || it.kind === 'question').length };
+        } else if (req.method === 'PUT') {
+          const ms = b.for === 'today' ? 6 * 3600000 : parseInt(b.for, 10) * 3600000;
+          inboxData.paused_until = new Date(Date.now() + ms).toISOString();
+          out = { paused_until: inboxData.paused_until };
+        } else {
+          delete inboxData.paused_until;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(out));
+      });
+      return;
+    }
+
+    // Planner status and the 停用 Planner switch (overrides.planner).
+    if (plannerData && pathname === NZ_CONTRACT.API.planner && req.method === 'GET') {
+      if (!checkAuth()) return;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(plannerData));
+      return;
+    }
+    if (plannerData && pathname === NZ_CONTRACT.API.planner_state && req.method === 'POST') {
+      if (!checkAuth()) return;
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        const b = JSON.parse(body || '{}');
+        plannerStateCalls.push(b);
+        plannerData.stopped = !!b.stopped;
+        plannerData.alive = !b.stopped;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(plannerData));
+      });
       return;
     }
 
@@ -962,6 +1027,8 @@ function startMockServer(overrides = {}) {
         get wsConnections() { return wsConnections; },
         get workflowCalls() { return workflowCalls; },
         get outputsCalls() { return outputsCalls; },
+        get inboxCalls() { return inboxCalls; },
+        get plannerStateCalls() { return plannerStateCalls; },
         resetCalls() { sendCalls = []; bindCalls = []; loginCalls = []; favoriteCalls = []; },
       });
     }));

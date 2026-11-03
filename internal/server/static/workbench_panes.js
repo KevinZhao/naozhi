@@ -7,7 +7,8 @@
 // Outputs come from GET /api/sessions/outputs?key= (planner/activity), which
 // is refetched shortly after a tool event the backend tagged with an
 // activity and after a turn ends (the turn-end scan reports files written by
-// Bash). The tabs follow the selected local session.
+// Bash). The tabs follow the selected local session, and planner:main on
+// the Planner page (planner_view.js feeds its events to noteWorkbenchEvent).
 import { NZ_CONTRACT } from './contract.js';
 import { selection, sessionList, ui } from './state.js';
 import { esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
@@ -33,9 +34,12 @@ const st = {
   files: { root: '', dir: '', label: '' },
 };
 
+const PLANNER_KEY = 'planner:main';
+
 // subject is the local session the tabs describe, or null: remote and
 // discovered sessions have no outputs index or readable tree here.
 function subject() {
+  if (ui.activeView === 'planner') return { key: PLANNER_KEY, sid: sid(PLANNER_KEY, 'local'), sd: null };
   const key = selection.key;
   if (!key || isDiscoveredKey(key) || (selection.node && selection.node !== 'local')) return null;
   return { key, sid: sid(key, 'local'), sd: sessionList.sessionsData[sid(key, 'local')] || null };
@@ -57,10 +61,12 @@ function refreshOutputs(auto) {
     st.outputsFor = s.sid;
     paintOutputs();
     // Newest first: the first fresh previewable one is the latest. Only the
-    // chat view docks the workbench; elsewhere (or on a phone back on the
-    // session list, which keeps the selection) it would cover the view.
-    const show = auto && ui.activeView === 'chat' && !document.body.classList.contains('mobile-list-view') &&
-      fresh.find(isPreviewableOutput);
+    // chat view and the Planner page dock the workbench; elsewhere (or on a
+    // phone back on the session list, which keeps the selection) it would
+    // cover the view.
+    const docks = ui.activeView === 'planner' ||
+      (ui.activeView === 'chat' && !document.body.classList.contains('mobile-list-view'));
+    const show = auto && docks && fresh.find(isPreviewableOutput);
     if (show) openOutput(show);
   }).catch(() => {});
 }
@@ -194,26 +200,34 @@ function paintTab(tab) {
   if (tab === 'preview' && body && !body.childElementCount) {
     body.innerHTML = '<div class="fv-loading">还没有打开的文件：在「产出」或「文件」里点一个</div>';
   } else if (tab === 'outputs') { paintOutputs(); refreshOutputs(false); }
-  else if (tab === 'files') loadFiles(st.files.root === 'session:' + (selection.key || '') ? st.files.dir : '');
+  else if (tab === 'files') loadFiles(st.files.root === 'session:' + (subject()?.key || '') ? st.files.dir : '');
   else if (tab === 'details') loadDetails();
 }
 
 nzBus.addEventListener('workbench:tab', (e) => paintTab(e.detail.tab));
 
-// session:event is a live event of the selected session (event_stream.js).
-nzBus.addEventListener('session:event', (e) => {
-  const ev = e.detail.ev;
+// noteWorkbenchEvent takes a live event of the subject.
+export function noteWorkbenchEvent(ev) {
   if (ev.activity || ev.type === 'result') scheduleRefresh();
+}
+
+// session:event is a live event of the selected session (event_stream.js);
+// on the Planner page the selection is not the subject.
+nzBus.addEventListener('session:event', (e) => {
+  if (ui.activeView !== 'planner') noteWorkbenchEvent(e.detail.ev);
 });
 
-// session:select follows the selection (selectSession, and the new-session
-// paths in auth_modal.js): the session's outputs seed its seen set, and an
-// open tab repaints for it.
-nzBus.addEventListener('session:select', () => {
+// followWorkbenchSubject re-points the tabs after the subject changed: the
+// session's outputs seed its seen set, and an open tab repaints for it.
+export function followWorkbenchSubject() {
   st.files.root = '';
   refreshOutputs(false);
   if (workbench.isOpen() && workbench.tab() !== 'preview') paintTab(workbench.tab());
-});
+}
+
+// session:select follows the selection (selectSession, and the new-session
+// paths in auth_modal.js).
+nzBus.addEventListener('session:select', followWorkbenchSubject);
 
 // workbench-toggle is the session header's 工作台 button; with nothing
 // previewed it opens on 产出.
