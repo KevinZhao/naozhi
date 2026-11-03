@@ -70,6 +70,7 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	s.mountRoutes(hs.uiSettingsH.Routes())
 	s.mountRoutes(hs.memoryH.Routes())
 	s.mountRoutes(hs.ccAssetsH.Routes())
+	s.mountRoutes(hs.inboxH.Routes())
 	// scratchH is nil when the ephemeral-aside feature is off.
 	if hs.scratchH != nil {
 		s.mountRoutes(hs.scratchH.Routes())
