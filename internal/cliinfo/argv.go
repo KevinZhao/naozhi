@@ -26,6 +26,8 @@ var deniedExtraFlags = map[string]struct{}{
 	"--resume":                       {}, // BuildArgs owns ResumeID validation
 	"--allowed-tools":                {}, // permission allowlist override
 	"--disallowed-tools":             {}, // permission allowlist override
+	"--tools":                        {}, // SpawnOptions.Tools owns the built-in tool set
+	"--name":                         {}, // SpawnOptions.Name owns the session display name
 	"--model":                        {}, // SpawnOptions.Model owns model selection
 	"--effort":                       {}, // SpawnOptions.Effort owns the tier; config validates a closed set
 	"--permission-mode":              {}, // SpawnOptions.PermissionMode owns this
