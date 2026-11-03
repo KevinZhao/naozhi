@@ -291,6 +291,7 @@ const (
 	rvStarted   = `{"type":"command_lifecycle","command_uuid":"c1","state":"started","uuid":"u7","session_id":"s1"}`
 	rvCompleted = `{"type":"command_lifecycle","command_uuid":"c1","state":"completed","uuid":"u8","session_id":"s1"}`
 	rvUser      = `{"type":"user","message":{"role":"user","content":"hi"},"isReplay":true,"session_id":"s1"}`
+	rvHold      = `{"type":"system","subtype":"peer_message_hold","state":"held","message_uuid":"m","from_name":"iso-ext","cause":"explicit-setting","uuid":"u9","session_id":"s1"}`
 )
 
 func rvReplays(firstSeq int64, lines ...string) []shim.ServerMsg {
@@ -339,6 +340,8 @@ func TestReconnectVerdict_BackgroundTaskFrames(t *testing.T) {
 			rvReplays(1, rvTitle, rvQueued, rvStarted, rvInit, rvUser, rvResult, rvCompleted), verdictFinished},
 		{"turn started, nothing answered yet",
 			rvReplays(1, rvTitle, rvQueued, rvStarted, rvInit, rvUser), verdictMidTurn},
+		{"cross-session message held after the turn",
+			rvReplays(1, rvInit, rvUser, rvResult, rvCompleted, rvHold), verdictFinished},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -417,7 +420,7 @@ func TestReconnectVerdict_SkipsNeutralFramesUndecoded(t *testing.T) {
 // semantic frame.
 func TestTurnNeutralLinePrefixesMatchEvents(t *testing.T) {
 	proto := &ClaudeProtocol{}
-	for _, line := range []string{rvProgress, rvBgChanged, rvUpdated, rvNotification, rvTitle, rvQueued, rvCompleted} {
+	for _, line := range []string{rvProgress, rvBgChanged, rvUpdated, rvNotification, rvTitle, rvQueued, rvCompleted, rvHold} {
 		if !isTurnNeutralLine(line) {
 			t.Errorf("isTurnNeutralLine(%.60s) = false", line)
 		}
