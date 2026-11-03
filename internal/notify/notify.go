@@ -105,8 +105,14 @@ type Item struct {
 	Source string `json:"source"`
 	// AutoClose items close themselves when their condition clears; the
 	// others only the user closes.
-	AutoClose bool      `json:"auto_close,omitempty"`
-	Decision  *Decision `json:"decision,omitempty"`
+	AutoClose bool `json:"auto_close,omitempty"`
+	// Uncapped timely items skip the daily cap: a promise's reminder is not
+	// squeezed by the interruption budget (§3.6). Quiet hours and the pause
+	// still hold one, and PushPending carries it to the first check that
+	// lets it out.
+	Uncapped    bool      `json:"uncapped,omitempty"`
+	PushPending bool      `json:"push_pending,omitempty"`
+	Decision    *Decision `json:"decision,omitempty"`
 }
 
 // Decision is what a decision item asks: Payload is its handler's own
@@ -345,6 +351,20 @@ func (n *Notifier) Add(it Item) (Item, bool) {
 	return it, opened
 }
 
+// DismissSource closes source's open item for the user, if there is one:
+// what it reminded of was settled elsewhere.
+func (n *Notifier) DismissSource(source string) {
+	n.mu.Lock()
+	i := slices.IndexFunc(n.items, func(it Item) bool { return it.State == StateOpen && it.Source == source })
+	if i < 0 || n.deciding[n.items[i].ID] {
+		n.mu.Unlock()
+		return
+	}
+	fx := n.changedLocked(n.closeLocked(i, ClosedByUser, ""))
+	n.mu.Unlock()
+	n.apply(fx)
+}
+
 // Dismiss closes an open item for the user.
 func (n *Notifier) Dismiss(id string) error {
 	n.mu.Lock()
@@ -502,15 +522,39 @@ func (n *Notifier) addLocked(it Item) (Item, bool, effects) {
 	it.ID = newID()
 	it.Created, it.State, it.ClosedBy, it.ClosedAt = now, StateOpen, "", time.Time{}
 	it.Level = cmp.Or(it.Level, LevelTimely)
+	ok, reason := n.admitLocked(it.Level, it.Uncapped, now)
+	it.PushPending = !ok && it.Uncapped
 	n.items = append(n.items, it)
 	fx := n.changedLocked(journalLine{it.Unit, it.WS, notifyData{Event: "open", ID: it.ID, Kind: it.Kind, Level: it.Level, Source: it.Source}})
-	if ok, reason := n.admitLocked(it.Level, now); ok {
+	if ok {
 		fx.pushes = append(fx.pushes, n.pushFor(it))
 		fx.journal = append(fx.journal, journalLine{it.Unit, it.WS, notifyData{Event: "push", ID: it.ID, Level: it.Level}})
 	} else {
 		fx.journal = append(fx.journal, journalLine{it.Unit, it.WS, notifyData{Event: "held", ID: it.ID, Level: it.Level, Reason: reason}})
 	}
 	return it, true, fx
+}
+
+// releaseLocked pushes the held uncapped items that the quiet hours and the
+// pause no longer hold.
+func (n *Notifier) releaseLocked(now time.Time) effects {
+	var fx effects
+	for i := range n.items {
+		it := &n.items[i]
+		if it.State != StateOpen || !it.PushPending {
+			continue
+		}
+		if ok, _ := n.admitLocked(it.Level, true, now); !ok {
+			continue
+		}
+		it.PushPending = false
+		fx.pushes = append(fx.pushes, n.pushFor(*it))
+		fx.journal = append(fx.journal, journalLine{it.Unit, it.WS, notifyData{Event: "push", ID: it.ID, Level: it.Level}})
+	}
+	if len(fx.pushes) > 0 {
+		n.saveLocked(now)
+	}
+	return fx
 }
 
 // closeLocked closes n.items[i] without saving: saving prunes closed items

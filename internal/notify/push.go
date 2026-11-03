@@ -36,8 +36,9 @@ const (
 )
 
 // admitLocked decides whether an item of level is pushed now, counting a
-// timely push against today's cap; reason says why one is held.
-func (n *Notifier) admitLocked(level Level, now time.Time) (bool, string) {
+// timely push against today's cap unless uncapped; reason says why one is
+// held.
+func (n *Notifier) admitLocked(level Level, uncapped bool, now time.Time) (bool, string) {
 	if now.Before(n.st.PausedUntil) {
 		return false, "paused"
 	}
@@ -46,6 +47,9 @@ func (n *Notifier) admitLocked(level Level, now time.Time) (bool, string) {
 	}
 	if quiet(now) {
 		return false, "quiet_hours"
+	}
+	if uncapped {
+		return true, ""
 	}
 	if day := now.Format(time.DateOnly); n.st.Day != day {
 		n.st.Day, n.st.Pushed = day, 0
@@ -77,7 +81,7 @@ func (n *Notifier) pushFor(it Item) Push {
 func (n *Notifier) Announce(p Push) bool {
 	p.Level = cmp.Or(p.Level, LevelTimely)
 	n.mu.Lock()
-	ok, reason := n.admitLocked(p.Level, n.cfg.Clock.Now())
+	ok, reason := n.admitLocked(p.Level, false, n.cfg.Clock.Now())
 	n.mu.Unlock()
 	d := notifyData{Event: "push", ID: p.ID, Kind: p.Kind, Level: p.Level}
 	if !ok {

@@ -17,6 +17,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/activity"
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/brief"
+	"github.com/naozhi/naozhi/internal/planner/promise"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
@@ -116,6 +117,9 @@ type ServerOptions struct {
 	// Notify is the "等你" inbox /api/inbox serves; the server binds the
 	// Hub to it as its dashboard push exit. nil serves an empty inbox.
 	Notify *notify.Notifier
+	// Promises are the Planner's promises /api/promises serves; nil lists
+	// none.
+	Promises *promise.Store
 
 	// Logger is the component logger the Server derives its structured logging
 	// from. nil falls back to slog.Default() (#620).

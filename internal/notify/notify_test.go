@@ -94,7 +94,7 @@ func TestAdmit(t *testing.T) {
 			if c.paused {
 				n.st.PausedUntil = c.at.Add(time.Hour)
 			}
-			got, reason := n.admitLocked(c.level, c.at)
+			got, reason := n.admitLocked(c.level, false, c.at)
 			if got != c.want || reason != c.reason {
 				t.Errorf("admit = %v %q, want %v %q", got, reason, c.want, c.reason)
 			}
@@ -394,5 +394,52 @@ func TestOsascriptArgs(t *testing.T) {
 	}
 	if got := osascriptArgs(strings.Repeat("长", 200), "")[7]; len([]rune(got)) > titleRunes+3 {
 		t.Errorf("title not capped: %d runes", len([]rune(got)))
+	}
+}
+
+// An uncapped item (a promise's reminder) is pushed past the daily cap, and
+// one the quiet hours or the pause held goes out at the first check after,
+// across a restart too.
+func TestUncapped(t *testing.T) {
+	lay := datadir.FromRoot(t.TempDir())
+	if err := datadir.EnsureDir(lay.PlannerRoot()); err != nil {
+		t.Fatal(err)
+	}
+	n, clock, b := newTest(t, local(10, 0), lay)
+	n.st.Day, n.st.Pushed = local(10, 0).Format(time.DateOnly), DailyCap
+	n.Add(Item{Kind: KindNotice, Source: "capped", Title: "capped"})
+	n.Add(Item{Kind: KindNotice, Uncapped: true, Source: "promise:a", Title: "past the cap"})
+	if got := b.titles(); !slices.Equal(got, []string{"past the cap"}) {
+		t.Fatalf("pushed %q, want only the uncapped item", got)
+	}
+
+	n.Pause(clock.Now().Add(time.Hour))
+	n.Add(Item{Kind: KindNotice, Uncapped: true, Source: "promise:b", Title: "after the pause"})
+	clock.advance(30 * time.Minute)
+	n.Check()
+	clock.advance(30 * time.Minute)
+	n.Check()
+	n.Check()
+	if got := b.titles(); !slices.Equal(got, []string{"past the cap", "after the pause"}) {
+		t.Fatalf("pushed %q, want the held item once the pause ended", got)
+	}
+
+	clock.advance(12 * time.Hour) // 23:00, quiet hours
+	n.Add(Item{Kind: KindNotice, Uncapped: true, Source: "promise:c", Title: "in the morning"})
+	n.Check()
+	if len(b.titles()) != 2 {
+		t.Fatalf("pushed %q in quiet hours", b.titles())
+	}
+	n2, clock2, b2 := newTest(t, local(23, 30), lay)
+	clock2.advance(8*time.Hour + 30*time.Minute) // 08:00
+	n2.Check()
+	n2.Check()
+	if got := b2.titles(); !slices.Equal(got, []string{"in the morning"}) {
+		t.Errorf("after a restart pushed %q, want the held item once at 08:00", got)
+	}
+
+	n2.DismissSource("promise:c")
+	if open, _ := n2.List(0); slices.ContainsFunc(open, func(it Item) bool { return it.Source == "promise:c" }) {
+		t.Error("DismissSource left the item open")
 	}
 }

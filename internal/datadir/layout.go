@@ -162,6 +162,10 @@ func (l Layout) PlannerHandoffRoot() string { return l.Join("planner", "handoff"
 // §15.1).
 func (l Layout) PlannerInboxPath() string { return l.Join("planner", "inbox.json") }
 
+// PlannerPromisesPath holds the promises the Planner made to the user
+// (<root>/planner/promises.json, §3.6).
+func (l Layout) PlannerPromisesPath() string { return l.Join("planner", "promises.json") }
+
 // PlannerPushStatePath holds the push pause and today's push count
 // (<root>/planner/notify.json).
 func (l Layout) PlannerPushStatePath() string { return l.Join("planner", "notify.json") }

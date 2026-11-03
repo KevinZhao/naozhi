@@ -912,6 +912,36 @@ function startMockServer(overrides = {}) {
       return;
     }
 
+    // GET /api/promises and POST /api/promises/close: opt-in via
+    // overrides.promises ({open, closed}); a close moves the promise from
+    // open to closed in place, so the test's object shows it.
+    if (pathname === NZ_CONTRACT.API.promises && req.method === 'GET' && overrides.promises) {
+      if (!checkAuth()) return;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(overrides.promises));
+      return;
+    }
+    if (pathname === NZ_CONTRACT.API.promises_close && req.method === 'POST' && overrides.promises) {
+      if (!checkAuth()) return;
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        const { id } = JSON.parse(body || '{}');
+        const pm = overrides.promises;
+        const i = pm.open.findIndex(p => p.id === id);
+        if (i < 0) {
+          res.writeHead(pm.closed.some(p => p.id === id) ? 409 : 404);
+          res.end();
+          return;
+        }
+        const [p] = pm.open.splice(i, 1);
+        pm.closed.unshift({ ...p, state: 'closed', closed_at: new Date().toISOString() });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok' }));
+      });
+      return;
+    }
+
     // Transcribe route
     if (pathname === NZ_CONTRACT.API.transcribe && req.method === 'POST') {
       if (!checkAuth()) return;

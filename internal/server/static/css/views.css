@@ -124,6 +124,19 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .hl-state.run{color:var(--nz-accent)}
 .hl-state.idle{color:var(--nz-text-mute)}
 .hl-state.off{color:var(--nz-text-dim)}
+/* "答应你的" (promises.js): the Planner page's left-column promise group */
+.pm-group{display:flex;flex-direction:column;gap:6px}
+.pm-head{font-size:var(--nz-fs-sm);font-weight:600;color:var(--nz-text-mute);padding:2px 2px 0}
+.pm-card{position:relative;padding:8px 10px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1)}
+.pm-card.closed{opacity:.65}
+.pm-text{font-size:var(--nz-fs-base);color:var(--nz-text);overflow-wrap:anywhere;padding-right:52px}
+.pm-meta{margin-top:3px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);overflow-wrap:anywhere}
+.pm-due.today{color:var(--nz-amber)}
+.pm-due.overdue{color:var(--nz-red)}
+.pm-close{position:absolute;top:6px;right:8px;height:22px;padding:0 8px}
+.pm-empty{font-size:var(--nz-fs-sm);color:var(--nz-text-dim);padding:2px}
+.pm-closed>summary{cursor:pointer;font-size:var(--nz-fs-xs);color:var(--nz-text-dim);padding:2px}
+.pm-closed>.pm-card{margin-top:6px}
 
 /* ===== Planner page (planner_view.js, docs/rfc/planner.md §10 D77) =====
    Left 等你 / 答应你的 + controls, middle the Planner conversation; the

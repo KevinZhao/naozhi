@@ -210,6 +210,16 @@
     "handler_type": "*dashproject.Handlers"
   },
   {
+    "method": "GET",
+    "path": "/api/promises",
+    "handler_type": "*promises.Handler"
+  },
+  {
+    "method": "POST",
+    "path": "/api/promises/close",
+    "handler_type": "*promises.Handler"
+  },
+  {
     "method": "POST",
     "path": "/api/scratch/open",
     "handler_type": "*scratch.Handler"

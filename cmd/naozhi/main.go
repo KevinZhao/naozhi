@@ -26,6 +26,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/activity"
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/brief"
+	"github.com/naozhi/naozhi/internal/planner/promise"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/routerrelay"
 	"github.com/naozhi/naozhi/internal/selfupdate"
@@ -284,6 +285,9 @@ func main() {
 		slog.Warn("planner outputs index partly rebuilt", "err", err)
 	}
 	router.SetActivitySink(activities)
+	// The Planner's promises ("答应你的"); their reminder exits are bound
+	// once the inbox and the server exist.
+	promises := promise.New(promise.Config{Path: sessionLayout.PlannerPromisesPath(), Journal: plannerState.Journal})
 	// The global Planner (planner:main); Start below, once the turn entry and
 	// the health machine exist. Built even when planner.enabled is off, so
 	// /api/planner answers "off" rather than 404.
@@ -295,6 +299,7 @@ func main() {
 		DenyPaths:  []string{absConfigPath(*configPath), shimMgr.StateDir()},
 		Sessions:   wireup.PlannerSessions{Router: router},
 		Workspaces: plannerState.Workspaces,
+		Promises:   wireup.PlannerPromises(promises),
 	})
 	// Attachments live under each workspace root, usually outside the state dir
 	// checked above; walking every root must not hold up startup.
@@ -465,6 +470,7 @@ func main() {
 		Health:           func() health.Snapshot { return healthMon.Snapshot() },
 		Workspaces:       plannerState.Workspaces,
 		Notify:           notifier,
+		Promises:         promises,
 		AllowedRoot:      workspace,
 		IMAccess:         cfg.IMAccessPolicy(),
 		IMRateLimit:      dispatch.RateLimit{MsgsPerMin: cfg.IMRateLimit.MsgsPerMin, Burst: cfg.IMRateLimit.Burst},
@@ -560,6 +566,8 @@ func main() {
 	plannerAgent.Start(ctx, srv, healthMon.Snapshot)
 	notifier.SetHealth(healthMon)
 	go notifier.Run(ctx)
+	promises.SetReminder(wireup.PromiseReminder{Notify: notifier, Dialog: srv.PlannerNote})
+	go promises.Run(ctx)
 	go briefer.Run(ctx)
 
 	// Upstream connector: this node connects to a primary.

@@ -41,6 +41,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/ext/inbox"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/memory"
 	dashplanner "github.com/naozhi/naozhi/internal/dashboard/ext/planner"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/promises"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/scratch"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/system"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/transcribe"
@@ -81,6 +82,7 @@ type handlerSet struct {
 	accessProfilesH *accessprofile.Handler
 	plannerH        *dashplanner.Handler
 	inboxH          *inbox.Handler
+	promisesH       *promises.Handler
 	// healthH serves the server-owned probes (/health, /livez, /readyz).
 	healthH *HealthHandler
 
