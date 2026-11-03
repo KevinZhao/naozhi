@@ -187,7 +187,7 @@ func TestParseHistoryLine_UserWithImage(t *testing.T) {
 	msg, _ := json.Marshal(map[string]any{"role": "user", "content": content})
 	line := `{"type":"user","timestamp":"2026-01-01T00:00:00Z","uuid":"u1","message":` + string(msg) + `}`
 
-	entries, ok := parseHistoryLine([]byte(line))
+	entries, ok := parseHistoryLine([]byte(line), 0, true)
 	if !ok || len(entries) != 1 {
 		t.Fatalf("parseHistoryLine ok=%v entries=%d, want ok=true entries=1", ok, len(entries))
 	}
@@ -214,7 +214,7 @@ func TestParseHistoryLine_ImageOnlyNotDropped(t *testing.T) {
 	msg, _ := json.Marshal(map[string]any{"role": "user", "content": content})
 	line := `{"type":"user","timestamp":"2026-01-01T00:00:00Z","uuid":"u2","message":` + string(msg) + `}`
 
-	entries, ok := parseHistoryLine([]byte(line))
+	entries, ok := parseHistoryLine([]byte(line), 0, true)
 	if !ok || len(entries) != 1 {
 		t.Fatalf("parseHistoryLine ok=%v entries=%d, want ok=true entries=1", ok, len(entries))
 	}
@@ -231,7 +231,7 @@ func TestParseHistoryLine_NoTextNoImageDropped(t *testing.T) {
 	msg, _ := json.Marshal(map[string]any{"role": "user", "content": json.RawMessage(content)})
 	line := `{"type":"user","timestamp":"2026-01-01T00:00:00Z","uuid":"u3","message":` + string(msg) + `}`
 
-	if entries, ok := parseHistoryLine([]byte(line)); ok || len(entries) != 0 {
+	if entries, ok := parseHistoryLine([]byte(line), 0, true); ok || len(entries) != 0 {
 		t.Errorf("parseHistoryLine ok=%v entries=%d, want ok=false entries=0", ok, len(entries))
 	}
 }
@@ -261,7 +261,7 @@ func TestParseHistoryLine_ToolResultImages(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			msg, _ := json.Marshal(map[string]any{"role": "user", "content": tc.content})
 			line := `{"type":"user","timestamp":"2026-01-01T00:00:00Z","uuid":"` + lineUUID + `","message":` + string(msg) + `}`
-			entries, ok := parseHistoryLine([]byte(line))
+			entries, ok := parseHistoryLine([]byte(line), 0, true)
 			if ok != (len(tc.want) > 0) || len(entries) != len(tc.want) {
 				t.Fatalf("ok=%v entries=%d, want %d", ok, len(entries), len(tc.want))
 			}
@@ -273,6 +273,37 @@ func TestParseHistoryLine_ToolResultImages(t *testing.T) {
 				if e.UUID == "" || e.UUID == strings.ReplaceAll(lineUUID, "-", "") {
 					t.Errorf("entry %d UUID = %q, want one derived from the line's", i, e.UUID)
 				}
+			}
+		})
+	}
+}
+
+// TestParseHistoryLine_ToolResultImagesSkipped: a line newer than the paging
+// cursor, or a whole-file preview read, never thumbnails a tool screenshot.
+func TestParseHistoryLine_ToolResultImagesSkipped(t *testing.T) {
+	thumbs := 0
+	setThumbnailFn(t, func(d []byte, n int) string { thumbs++; return stubThumb(d, n) })
+	msg, _ := json.Marshal(map[string]any{"role": "user", "content": []map[string]any{
+		{"type": "tool_result", "tool_use_id": "tu1", "content": imageBlockContent("", b64("png"))},
+	}})
+	line := `{"type":"user","timestamp":"2026-01-01T00:00:00Z","uuid":"0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0","message":` + string(msg) + `}`
+	const ts = 1767225600000
+	tests := []struct {
+		name       string
+		beforeMS   int64
+		toolImages bool
+		want       int
+	}{
+		{name: "older than cursor", beforeMS: ts + 1, toolImages: true, want: 1},
+		{name: "at cursor", beforeMS: ts, toolImages: true},
+		{name: "preview read", toolImages: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			thumbs = 0
+			entries, _ := parseHistoryLine([]byte(line), tc.beforeMS, tc.toolImages)
+			if len(entries) != tc.want || thumbs != tc.want {
+				t.Errorf("entries=%d thumbnails=%d, want %d", len(entries), thumbs, tc.want)
 			}
 		})
 	}

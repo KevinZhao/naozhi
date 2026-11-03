@@ -53,7 +53,10 @@ type imageSource struct {
 }
 
 // LoadHistory finds and parses the JSONL for sessionID under claudeDir/projects/,
-// returning EventEntries for user and assistant messages.
+// returning EventEntries for user and assistant messages. It serves the
+// whole-file previews, so it leaves out tool_result screenshots: a
+// computer-use session's hundreds of them would each be thumbnailed and
+// shipped in one response.
 // If cwd is non-empty, the JSONL is located directly via the CWD-based path (O(1));
 // an empty cwd falls back to scanning all project directories.
 func LoadHistory(claudeDir, sessionID, cwd string) ([]clievent.EventEntry, error) {
@@ -214,7 +217,7 @@ func parseJSONL(path string) ([]clievent.EventEntry, error) {
 	for {
 		line, oversized, rerr := history.ReadJSONLLine(r, maxJSONLLineBytes)
 		if len(line) > 0 && !oversized {
-			if parsed, ok := parseHistoryLine(line); ok {
+			if parsed, ok := parseHistoryLine(line, 0, false); ok {
 				entries = append(entries, parsed...)
 			}
 		}
