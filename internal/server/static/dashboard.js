@@ -38,6 +38,7 @@ import {
   stopSystemPoll,
 } from './system_view.js';
 import { closePlannerPanel, openPlannerPanel } from './planner_view.js';
+import { paintHandoffButton } from './planner_chat.js';
 import { interruptSession, resetTurnState, saveScrollPos, updateSendButton } from './running_banner.js';
 import { closeFilePreview, startFileRefObserver } from './file_refs.js';
 import {
@@ -1169,6 +1170,7 @@ function renderMainShell() {
         '<button type="button" class="btn-icon btn-mic" id="btn-mic" data-action="input-mode-toggle" title="' + (composer.voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3') + '" aria-label="' + (composer.voiceInputMode ? '\u5207\u6362\u5230\u952e\u76d8\u8f93\u5165' : '\u5207\u6362\u5230\u8bed\u97f3\u8f93\u5165') + '">' + (composer.voiceInputMode ? ICONS.keyboard : ICONS.mic) + '</button>' +
         '<div id="msg-input" contenteditable="true" role="textbox" aria-label="消息输入框" aria-multiline="true" data-placeholder="send a message..." data-action-keydown="msg-input-key" data-action-compositionend="msg-input-compend"></div>' +
         '<button type="button" class="btn-hold-talk" id="btn-hold-talk" title="\u6309\u4f4f\u8bf4\u8bdd\u6539\u5f55\u97f3" aria-label="\u6309\u4f4f\u8bf4\u8bdd\u5f00\u59cb\u5f55\u97f3">\u6309\u4f4f\u8bf4\u8bdd</button>' +
+        '<button type="button" class="btn-handoff" id="btn-handoff" data-action="planner-handoff" hidden>交给 Planner</button>' +
         '<button type="button" class="btn-icon btn-send" id="btn-send" data-action="msg-send" title="发送" aria-label="发送消息">' + ICONS.send + '</button>' +
         '<button type="button" class="btn-icon btn-stop" id="btn-stop" data-action="session-interrupt" title="停止" aria-label="停止当前回合">' + ICONS.stop + '</button>' +
       '</div>' +
@@ -1210,6 +1212,7 @@ function renderMainShell() {
   // active session's backend doesn't support. Single-backend deployments
   // short-circuit inside applyFeatureGates so this is a no-op there.
   applyFeatureGates();
+  paintHandoffButton();
   // The header was just rebuilt from scratch, which emptied #header-git.
   // Repaint from cache so a rebuild driven by something unrelated (rename,
   // model arriving) doesn't blank the branch chip until the next fetch.

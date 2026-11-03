@@ -209,6 +209,62 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .pl-strip-btn svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round}
 .pl-strip-item{display:flex;flex-direction:column;align-items:center;gap:2px;font-size:var(--nz-fs-2xs);color:var(--nz-text-dim)}
 .pl-strip-n{font-size:var(--nz-fs-sm);color:var(--nz-text);font-variant-numeric:tabular-nums}
+/* The input box, the cards in the conversation, and a session card opened
+   in the middle column (planner_chat.js, planner_cards.js; §15.1 PR ⑬). */
+.pl-composer{padding:8px 18px 12px;background:var(--nz-bg-0)}
+.pl-target{display:flex;align-items:center;gap:10px;min-height:20px;margin-bottom:6px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.pl-target-to{font-weight:600;color:var(--nz-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.pl-target-note{color:var(--nz-text-dim)}
+#pl-sess-handoff{margin-left:auto;flex-shrink:0}
+#pl-sess-handoff:disabled{color:var(--nz-text-dim);cursor:default;text-decoration:none}
+.pl-input-row{display:flex;gap:8px;align-items:flex-end}
+#pl-input{flex:1;min-width:0;resize:none;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);color:var(--nz-text);padding:8px 12px;font-family:inherit;font-size:var(--nz-fs-md);min-height:38px;max-height:160px;line-height:1.4;outline:none}
+#pl-input:focus{border-color:var(--nz-rust)}
+#pl-input:disabled{opacity:.6;cursor:not-allowed}
+#pl-send:disabled{opacity:.5;cursor:default}
+.pl-pending{opacity:.6}
+.pl-scards{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.pl-scard{display:flex;align-items:center;gap:10px;width:100%;max-width:560px;padding:7px 10px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1);color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-sm2);text-align:left;cursor:pointer}
+.pl-scard:hover{border-color:var(--nz-accent)}
+.pl-scard-line,.pl-sess-line{flex:1;min-width:0;display:flex;align-items:center;gap:8px;overflow:hidden;white-space:nowrap}
+.pl-scard-name{min-width:0;overflow:hidden;text-overflow:ellipsis;font-weight:600;color:var(--nz-text-strong)}
+.pl-scard-line .hl-state,.pl-sess-line .hl-state{flex-shrink:0;font-size:var(--nz-fs-xs)}
+.pl-scard-time{min-width:0;overflow:hidden;text-overflow:ellipsis;font-size:var(--nz-fs-xs);color:var(--nz-text-dim)}
+.pl-scard-open{flex-shrink:0;font-size:var(--nz-fs-xs);color:var(--nz-accent)}
+.pl-handoff{margin:2px 0 6px}
+.pl-handoff-l{display:block;margin-bottom:4px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.pl-act{max-width:560px;margin:8px 0;padding:9px 12px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1);font-size:var(--nz-fs-sm2)}
+.pl-act-h{margin-bottom:6px;font-weight:600;color:var(--nz-text-strong)}
+.pl-act-rows{display:grid;grid-template-columns:auto 1fr;gap:3px 10px;margin:0}
+.pl-act-rows dt{font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.pl-act-rows dd{margin:0;white-space:pre-wrap;word-break:break-word}
+.pl-act-state{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:8px}
+.pl-act-state .pl-card-acts{margin-top:0}
+.pl-act-state .pl-scard{margin-top:2px}
+.pl-act-note{font-size:var(--nz-fs-xs);color:var(--nz-text-dim)}
+.pl-act-promise .pl-act-note,.pl-act-ask .pl-act-note{display:block;margin-top:6px}
+.pl-act-done{font-size:var(--nz-fs-xs);font-weight:600;color:var(--nz-text-mute)}
+.pl-act-done.ok{color:var(--nz-green)}
+.pl-act-q{word-break:break-word}
+.pl-act-opts{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.pl-act-opt{padding:2px 8px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);font-size:var(--nz-fs-xs)}
+.pl-act-bad{border-color:var(--nz-red)}
+.pl-act-bad .pl-act-h{color:var(--nz-red)}
+.pl-act-why{font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.pl-act-raw{max-height:200px;overflow:auto;margin:6px 0 0;padding:6px 8px;border-radius:var(--nz-radius-sm);background:var(--nz-bg-0);font-family:var(--nz-font-mono);font-size:var(--nz-fs-xs);white-space:pre-wrap;word-break:break-all}
+.pl-sess{flex:1;min-height:0;display:flex;flex-direction:column}
+.pl-sess[hidden],.planner-main.pl-sess-open .pl-center>.pl-head,.planner-main.pl-sess-open #pl-note,.planner-main.pl-sess-open #pl-events{display:none}
+.pl-crumb{display:flex;align-items:center;gap:6px;min-width:0;font-size:var(--nz-fs-sm2);color:var(--nz-text-mute)}
+.pl-crumb b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--nz-text-strong)}
+.pl-sess-status{flex-shrink:0;display:flex;align-items:center;gap:12px;margin:10px 18px 0;padding:8px 12px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1);font-size:var(--nz-fs-sm2)}
+#pl-sess-raw{flex-shrink:0;font-size:var(--nz-fs-xs)}
+.pl-sess .pl-events>#pl-sess-stream>.pl-empty{text-align:center;padding:40px 20px}
+/* 交给 Planner beside the chat view's input (planner_chat.js). */
+.btn-handoff{flex-shrink:0;height:36px;padding:0 10px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1);color:var(--nz-text-mute);font-family:inherit;font-size:var(--nz-fs-xs);white-space:nowrap;cursor:pointer}
+.btn-handoff:hover:not(:disabled){border-color:var(--nz-accent);color:var(--nz-accent)}
+.btn-handoff:disabled{opacity:.5;cursor:default}
+.btn-handoff[hidden],.input-area.voice-mode .btn-handoff{display:none}
+.handoff-note{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
 /* The rail's Planner "等你" count. */
 .ab-count{position:absolute;top:2px;right:0;min-width:16px;height:16px;padding:0 4px;border-radius:var(--nz-radius-pill);background:var(--nz-red);color:#fff;font-size:var(--nz-fs-2xs);font-weight:700;line-height:16px;text-align:center;font-variant-numeric:tabular-nums}
 .ab-count[hidden]{display:none}

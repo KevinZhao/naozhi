@@ -3,8 +3,9 @@
 //
 //	GET  /api/planner        status: planner.enabled, the stop switch, the session
 //	POST /api/planner/state  {"stopped": bool} — the runtime "停用 Planner" switch
-//	POST /api/planner/send   {"text": "..."} — a message to the Planner, with
-//	                         the gateway's snapshot before it and a receipt
+//	POST /api/planner/send   {"text": "...", "ref": "<session key>"} — a message
+//	                         to the Planner (ref: a session handed over with
+//	                         it), the gateway's snapshot before it and a receipt
 //	GET  /api/planner/briefs the latest morning briefs, newest first (?limit=)
 //
 // All sit behind the /api/* auth middleware.
@@ -19,6 +20,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/brief"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // Handler serves the endpoints over an *agent.Agent; a nil agent answers
@@ -92,16 +94,22 @@ func (h *Handler) HandleSend(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	var req struct {
 		Text string `json:"text"`
+		// Ref is a local session key handed over with the text (交给 Planner).
+		Ref string `json:"ref"`
 	}
 	if err := httputil.DecodeJSONBody(r, &req); err != nil {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if req.Ref != "" && sessionkey.ValidateSessionKey(req.Ref) != nil {
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid ref"})
 		return
 	}
 	if h.agent == nil {
 		writeErr(w, agent.ErrOff)
 		return
 	}
-	if err := h.agent.Send(req.Text); err != nil {
+	if err := h.agent.Send(req.Text, req.Ref); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -116,6 +124,8 @@ func writeErr(w http.ResponseWriter, err error) {
 		status = http.StatusConflict
 	case errors.Is(err, agent.ErrEmpty), errors.Is(err, agent.ErrTooLong):
 		status = http.StatusBadRequest
+	case errors.Is(err, agent.ErrNoRef):
+		status = http.StatusNotFound
 	case errors.Is(err, agent.ErrNotReady):
 	default:
 		slog.Warn("planner send failed", "err", err)

@@ -54,3 +54,11 @@ func (p PlannerSessions) Label(key string) string {
 	snap := s.Snapshot()
 	return cmp.Or(snap.UserLabel, snap.Summary)
 }
+
+func (p PlannerSessions) Name(key string) string {
+	s := p.Router.SessionFor(key)
+	if s == nil {
+		return ""
+	}
+	return s.CLISessionName()
+}

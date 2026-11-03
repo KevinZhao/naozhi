@@ -35,11 +35,17 @@ const st = {
 };
 
 const PLANNER_KEY = 'planner:main';
+// plannerSubject is what the tabs describe on the Planner page: planner:main,
+// or the session opened in its middle column (planner_chat.js).
+let plannerSubject = PLANNER_KEY;
 
 // subject is the local session the tabs describe, or null: remote and
 // discovered sessions have no outputs index or readable tree here.
 function subject() {
-  if (ui.activeView === 'planner') return { key: PLANNER_KEY, sid: sid(PLANNER_KEY, 'local'), sd: null };
+  if (ui.activeView === 'planner') {
+    const key = plannerSubject;
+    return { key, sid: sid(key, 'local'), sd: key === PLANNER_KEY ? null : sessionList.sessionsData[sid(key, 'local')] || null };
+  }
   const key = selection.key;
   if (!key || isDiscoveredKey(key) || (selection.node && selection.node !== 'local')) return null;
   return { key, sid: sid(key, 'local'), sd: sessionList.sessionsData[sid(key, 'local')] || null };
@@ -223,6 +229,12 @@ export function followWorkbenchSubject() {
   st.files.root = '';
   refreshOutputs(false);
   if (workbench.isOpen() && workbench.tab() !== 'preview') paintTab(workbench.tab());
+}
+
+// followPlannerSubject points the tabs on the Planner page at key.
+export function followPlannerSubject(key) {
+  plannerSubject = key || PLANNER_KEY;
+  if (ui.activeView === 'planner') followWorkbenchSubject();
 }
 
 // session:select follows the selection (selectSession, and the new-session

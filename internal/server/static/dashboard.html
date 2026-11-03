@@ -251,7 +251,19 @@
         <!-- The Planner's open cards (dispatch confirmations, questions). -->
         <div class="pl-cards" id="pl-cards" role="list" aria-label="待你确认" hidden></div>
       </div>
-      <!-- The Planner's input box (§15.1 PR ⑬) mounts here. -->
+      <!-- A session card opened in the middle column (planner_chat.js): the
+           breadcrumb back to the conversation, its status line, its events. -->
+      <div class="pl-sess" id="pl-sess" hidden>
+        <header class="pl-head">
+          <nav class="pl-crumb" aria-label="位置"><button type="button" class="pl-link" data-action="planner-close-session">Planner</button><span aria-hidden="true">›</span><b id="pl-sess-name"></b></nav>
+          <span class="pl-head-sp"></span>
+          <button type="button" class="files-dl-btn" data-action="workbench-toggle" title="工作台（预览 · 产出 · 文件 · 详情）">工作台</button>
+          <button type="button" class="pl-btn" data-action="planner-close-session">‹ 返回 Planner</button>
+        </header>
+        <div class="pl-sess-status"><span class="pl-sess-line" id="pl-sess-line"></span><button type="button" class="pl-link" id="pl-sess-raw" data-action="planner-sess-raw" aria-pressed="false">原始记录</button></div>
+        <div class="events pl-events" id="pl-sess-events" role="log" aria-live="off"><div id="pl-sess-stream"></div></div>
+      </div>
+      <!-- The input box (planner_chat.js): to the Planner, or to the opened session. -->
       <div class="pl-composer" id="pl-composer" hidden></div>
     </section>
   </main>

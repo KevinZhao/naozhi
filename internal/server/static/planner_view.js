@@ -3,9 +3,12 @@
 // closable; decision cards answer through /api/inbox/decide) and the
 // #pl-promise container 答应你的 mounts into, then the browser-notification,
 // push-pause and 停用 Planner controls. Middle: the 早报 slot and the
-// planner:main event stream, read-only. Right: the workbench, on planner:main
-// (workbench_panes.js); while it is open the left column folds to a 48px
-// strip. On a phone the left column is a collapsible block above the stream.
+// planner:main event stream, its action blocks and the sessions it names as
+// cards (planner_cards.js), and the input box and the opened session card
+// (planner_chat.js). Right: the workbench, on planner:main or the opened
+// session (workbench_panes.js); while it is open the left column folds to a
+// 48px strip. On a phone the left column is a collapsible block above the
+// stream.
 //
 // The stream follows a WS subscription to planner:main (receipts are pushed
 // to subscribers only, never logged); GET /api/sessions/events loads the
@@ -24,6 +27,8 @@ import { renderEventsWithDividers } from './event_render.js';
 import { runPendingAsync } from './render_md.js';
 import { inbox, notifySupported, onInboxCount, requestNotifyPermission } from './notify.js';
 import { followWorkbenchSubject, noteWorkbenchEvent } from './workbench_panes.js';
+import { decisionActsHtml, decorateEvents, paintSessionCards, refreshHealth, setInboxItems } from './planner_cards.js';
+import { clearPending, closePlannerSession, mountComposer, notePlannerStatus } from './planner_chat.js';
 import { workbench } from './workbench.js';
 import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
@@ -41,7 +46,6 @@ const SLOW_TICKS = 10;
 
 const KIND_LABEL = { decision: '决定', question: '提问', error: '错误', notice: '通知' };
 const KIND_ORDER = { decision: 0, question: 1, error: 2, notice: 3 };
-const ACTION_LABEL = { approve: '批准', reject: '驳回' };
 
 const pl = {
   status: null, // GET /api/planner
@@ -91,13 +95,7 @@ function itemHtml(it) {
     ? [target.project, target.title].filter(Boolean).map(esc).join(' · ') +
       ' <button type="button" class="pl-link" data-action="session-select" data-key="' + escAttr(target.key) + '" data-node="local">打开</button>'
     : (it.unit ? esc(it.unit === PLANNER_KEY ? 'Planner' : it.unit) : '');
-  let acts = '';
-  // A decision's actions, or a Planner question's options (§6.2 ask).
-  if (it.decision && Array.isArray(it.decision.actions)) {
-    acts = '<div class="pl-card-acts">' + it.decision.actions.map((a, i) =>
-      '<button type="button" class="pl-btn' + (i === 0 ? ' pri' : '') + '" data-action="planner-inbox-decide" data-id="' + escAttr(it.id) + '" data-act="' + escAttr(a) + '">' +
-        esc(ACTION_LABEL[a] || a) + '</button>').join('') + '</div>';
-  }
+  const acts = decisionActsHtml(it);
   return '<div class="pl-card pl-k-' + kind + '" role="listitem" data-id="' + escAttr(it.id) + '">' +
       '<div class="pl-card-top">' +
         '<span class="pl-kind">' + esc(KIND_LABEL[kind]) + '</span>' +
@@ -148,6 +146,7 @@ async function fetchInbox() {
   try {
     const res = await fetchJSON(NZ_CONTRACT.API.inbox, { timeoutMs: 8000 });
     pl.open = (res && Array.isArray(res.open)) ? res.open : [];
+    setInboxItems(pl.open, (res && Array.isArray(res.closed)) ? res.closed : [], $('pl-stream'));
     pl.pausedUntil = res && res.paused_until ? Date.parse(res.paused_until) || 0 : 0;
     if (res && res.counts) {
       pl.seeding = true;
@@ -252,6 +251,7 @@ async function fetchStatus() {
   try {
     pl.status = await fetchJSON(NZ_CONTRACT.API.planner, { timeoutMs: 8000 });
   } catch { return; }
+  notePlannerStatus(pl.status);
   if (ui.activeView === 'planner') { paintStatus(); paintTools(); paintStreamEmpty(); }
 }
 
@@ -279,8 +279,15 @@ function admitEvent(e) {
 
 // SNAPSHOT_RE is the <naozhi-snapshot> block the gateway puts before every
 // message to the Planner (planner/agent Send); the bubble shows what you wrote.
+// A session handed over with it (<naozhi-session-ref>) leads the message and
+// becomes a fence that planner_cards.js turns into its card. The logged
+// bubble keeps only the message's head (detail 2000 runes, summary 120), so
+// either block may arrive cut.
 const SNAPSHOT_RE = /^<naozhi-snapshot[\s>][\s\S]*?<\/naozhi-snapshot>\s*/;
-const SNAPSHOT_CUT_RE = /^<naozhi-snapshot[\s>][\s\S]*$/; // a summary cut inside the block
+const SNAPSHOT_CUT_RE = /^<naozhi-snapshot[\s>][\s\S]*$/;
+const SESSION_REF_RE = /^<naozhi-session-ref>(\{[^\n]*?\})<\/naozhi-session-ref>\s*/;
+const SESSION_REF_CUT_RE = /^<naozhi-session-ref>[\s\S]*$/;
+const GATEWAY_HEAD_RE = /^<naozhi-(?:snapshot[\s>]|session-ref>)/;
 // RECEIPT_RE is a gateway receipt to the Planner (planner/agent Tell: a
 // dispatch's outcome, your answer to its card): not something you wrote, so
 // it shows as a gateway line rather than your bubble.
@@ -288,11 +295,18 @@ const RECEIPT_RE = /^<naozhi-receipt>\s*([\s\S]*?)\s*(?:<\/naozhi-receipt>\s*)?$
 function withoutSnapshot(e) {
   const r = e.type === 'user' && RECEIPT_RE.exec(e.detail || e.summary || '');
   if (r) return Object.assign({}, e, { type: 'system', summary: '回执给 Planner：' + r[1], detail: '' });
-  if (e.type !== 'user' || !/^<naozhi-snapshot[\s>]/.test(e.detail || e.summary || '')) return e;
-  return Object.assign({}, e, {
-    detail: (e.detail || '').replace(SNAPSHOT_RE, ''),
-    summary: (e.summary || '').replace(SNAPSHOT_RE, '').replace(SNAPSHOT_CUT_RE, ''),
-  });
+  if (e.type !== 'user' || !GATEWAY_HEAD_RE.test(e.detail || e.summary || '')) return e;
+  let ref = '';
+  let detail = (e.detail || '').replace(SESSION_REF_RE, (_, r) => { ref = r; return ''; });
+  const cut = SNAPSHOT_CUT_RE.test(detail.replace(SNAPSHOT_RE, ''));
+  detail = detail.replace(SNAPSHOT_RE, '').replace(SNAPSHOT_CUT_RE, '').replace(SESSION_REF_CUT_RE, '');
+  if (cut) detail = '（消息过长，气泡里显示不下）';
+  if (ref) detail = '```naozhi-session-ref\n' + ref + '\n```\n' + detail;
+  const handed = /^<naozhi-session-ref>/.test(e.summary || '');
+  let summary = (e.summary || '').replace(SESSION_REF_RE, '').replace(SESSION_REF_CUT_RE, '');
+  summary = summary.replace(SNAPSHOT_RE, '').replace(SNAPSHOT_CUT_RE, '');
+  if (handed) summary = '交给 Planner' + (summary ? '：' + summary : '');
+  return Object.assign({}, e, { detail, summary });
 }
 
 const RENDER_OPTS = { key: PLANNER_KEY };
@@ -308,9 +322,11 @@ function appendEvents(events, reset) {
   if (reset) box.innerHTML = html;
   else if (fresh.length) {
     box.querySelector(':scope > .pl-empty')?.remove();
+    if (fresh.some((e) => e.type === 'user')) clearPending(box);
     box.insertAdjacentHTML('beforeend', html);
     fresh.forEach(noteWorkbenchEvent);
   }
+  decorateEvents(box);
   paintStreamEmpty();
   runPendingAsync();
   if (atBottom) scroller.scrollTop = scroller.scrollHeight;
@@ -349,9 +365,11 @@ async function loadEvents(reset) {
 
 export function openPlannerPanel() {
   if (ui.activeView !== 'planner') { shell.setActivityView('planner'); return; }
+  mountComposer();
   paintStatus();
   paintWaiting();
   paintTools();
+  refreshHealth($('planner-main'), false);
   // The subscription follows the first page: its `after` is the page's end.
   loadEvents(true).then(() => { if (ui.activeView === 'planner' && !pl.sub) subscribe(); });
   fetchStatus();
@@ -364,6 +382,8 @@ export function openPlannerPanel() {
       if (++pl.ticks % SLOW_TICKS === 0) {
         paintWaiting();
         fetchStatus();
+        refreshHealth($('planner-main'), false);
+        paintSessionCards($('planner-main'));
         if (!pl.sub) subscribe();
       }
     }, POLL_MS);
@@ -375,6 +395,7 @@ export function openPlannerPanel() {
 export function closePlannerPanel() {
   if (pl.timer) { clearInterval(pl.timer); pl.timer = 0; }
   unsubscribe();
+  closePlannerSession(false);
   pl.customPause = false;
   if (workbench.isOpen()) workbench.close();
   $('planner-main')?.classList.remove('pl-wb-open', 'pl-left-peek');
@@ -438,7 +459,9 @@ registerActions({
     fetchInbox();
   },
   'planner-inbox-decide': async (el) => {
-    const card = el.closest('.pl-card');
+    // The left column's card and the conversation's dispatch card answer
+    // the same item.
+    const card = el.closest('.pl-card, .pl-act');
     card?.querySelectorAll('.pl-card-acts button').forEach((b) => { b.disabled = true; });
     try {
       await fetchJSON(NZ_CONTRACT.API.inbox_decide, {
@@ -477,6 +500,7 @@ registerActions({
       pl.status = await fetchJSON(NZ_CONTRACT.API.planner_state, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ stopped }), timeoutMs: 15000,
       });
+      notePlannerStatus(pl.status);
     } catch (e) {
       showToast((stopped ? '停用' : '恢复') + '失败：' + e.message, 'error');
     }

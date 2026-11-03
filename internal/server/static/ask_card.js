@@ -246,7 +246,8 @@ export function onAskSubmit(btn) {
 // sendAskAnswerViaAPI routes the composed answer text to the session that
 // rendered the AskUserQuestion card. The renderer (eventHtml →
 // renderAskQuestionCard) is shared between the main transcript and the
-// scratch (aside) drawer, so we MUST pick the route from the card's DOM
+// scratch (aside) drawer and the Planner page's opened session, so we MUST
+// pick the route from the card's DOM
 // ancestry rather than the global selectedKey — otherwise an answer chosen
 // inside the drawer would land in the parent session and silently bypass
 // the scratch CLI process.
@@ -258,6 +259,10 @@ async function sendAskAnswerViaAPI(text, card) {
     if (!scratchKey) throw new Error('no active scratch session');
     key = scratchKey;
     // Scratch sessions are always local — never forward to a remote node.
+    node = 'local';
+  } else if (card && card.closest && card.closest('#pl-sess')) {
+    // The Planner page's opened session card (planner_chat.js), local only.
+    key = card.closest('#pl-sess').dataset.key || '';
     node = 'local';
   }
   if (!key) throw new Error('no active session');
