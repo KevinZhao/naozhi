@@ -64,6 +64,10 @@ var Frames = map[MsgType]any{
 	TypeWorkflowSet: NewWorkflowSet(WorkflowSet{
 		Key: "k", Node: "n", Epoch: "e", TaskIDs: []string{"t"}, ServerNow: 1,
 	}),
+	TypeNotify: NewNotify(Notify{
+		ID: "i", Kind: "error", Level: "urgent", Title: "t", Body: "b", Key: "k",
+	}),
+	TypeInboxCount: NewInboxCount(1),
 }
 
 // exemplarWorkflow is a WireView with every field set.

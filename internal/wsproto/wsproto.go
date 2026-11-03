@@ -45,6 +45,8 @@ const (
 	TypeAgentSubscribeRejected MsgType = "agent_subscribe_rejected"
 	TypeWorkflowState          MsgType = "workflow_state"
 	TypeWorkflowSet            MsgType = "workflow_set"
+	TypeNotify                 MsgType = "notify"
+	TypeInboxCount             MsgType = "inbox_count"
 )
 
 // Inbound (browser → server) message types, parsed out of node.ClientMsg.
@@ -335,3 +337,27 @@ func NewWorkflowSet(f WorkflowSet) WorkflowSet {
 	}
 	return f
 }
+
+// Notify asks every dashboard to show a browser notification for an inbox
+// item, if its page is in the background (docs/rfc/planner.md §10.1). Key
+// is the session a click opens ("" for none). Title and Body are the
+// gateway's own text: state and names, never tool output.
+type Notify struct {
+	Type  MsgType `json:"type"`
+	ID    string  `json:"id"`
+	Kind  string  `json:"kind"`
+	Level string  `json:"level"`
+	Title string  `json:"title"`
+	Body  string  `json:"body,omitempty"`
+	Key   string  `json:"key,omitempty"`
+}
+
+func NewNotify(f Notify) Notify { f.Type = TypeNotify; return f }
+
+// InboxCount is the number of open "等你" items, sent when it changes.
+type InboxCount struct {
+	Type MsgType `json:"type"`
+	Open int     `json:"open"`
+}
+
+func NewInboxCount(open int) InboxCount { return InboxCount{Type: TypeInboxCount, Open: open} }

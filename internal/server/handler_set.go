@@ -38,6 +38,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/ext/agentevents"
 	extccassets "github.com/naozhi/naozhi/internal/dashboard/ext/ccassets"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/cli"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/inbox"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/memory"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/scratch"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/system"
@@ -48,6 +49,7 @@ import (
 	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/imauth"
+	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/routerrelay"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
@@ -76,6 +78,7 @@ type handlerSet struct {
 	uiSettingsH     *uisettings.Handler
 	systemH         *system.Handlers
 	accessProfilesH *accessprofile.Handler
+	inboxH          *inbox.Handler
 	// healthH serves the server-owned probes (/health, /livez, /readyz).
 	healthH *HealthHandler
 
@@ -116,6 +119,8 @@ type wiring struct {
 	routerEvents *routerrelay.Relay
 	// runTelemetry is opts.Relays.RunTelemetry; buildDashboard binds the hub to it.
 	runTelemetry *runtelemetry.Relay
+	// notify is opts.Notify; buildDashboard binds the hub to it.
+	notify *notify.Notifier
 	// watchdog holds the no-output / total watchdog-kill counters; the
 	// dispatcher, the session handlers and /health each get pointers into it.
 	watchdog watchdogCounters
