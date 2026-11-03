@@ -8,6 +8,7 @@ package cron
 
 import (
 	"github.com/naozhi/naozhi/internal/costledger"
+	"github.com/naozhi/naozhi/internal/monitor/beat"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
@@ -34,6 +35,8 @@ type SchedulerDeps struct {
 	// Budget refuses a run whose job or machine has spent its daily cap
 	// (budget.go). nil = no budget.
 	Budget BudgetGate
+	// Beats receives the tick loop's heartbeat. nil = no heartbeat.
+	Beats *beat.Registry
 }
 
 // CostLedger is the append-only sink cron writes run costs to; satisfied by

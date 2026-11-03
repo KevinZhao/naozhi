@@ -11,6 +11,7 @@ import (
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/ctxutil"
+	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
@@ -211,6 +212,7 @@ func initBackendWrappers(
 ) (backendWrappers, bool) {
 	backendsCfg := cfg.EnabledBackends()
 	defaultBackend := cfg.DefaultBackendID()
+	stateDir := datadir.ForStore(osutil.ExpandHome(cfg.Session.StorePath)).Root()
 
 	out := backendWrappers{
 		Runtimes: make(map[string]session.BackendRuntime, len(backendsCfg)),
@@ -233,6 +235,7 @@ func initBackendWrappers(
 		// startup for the full 5s when SIGTERM arrives mid-init.
 		w := cli.NewWrapperLazy(b.Path, proto, b.ID)
 		w.ShimManager = shimMgr
+		w.StateDir = stateDir
 		w.Probe(ctx)
 		rt := session.BackendRuntime{Wrapper: w}
 		if b.Model != "" {

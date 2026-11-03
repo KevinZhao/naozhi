@@ -86,6 +86,30 @@ func TestAttachmentGC_ReapsAcrossRoots(t *testing.T) {
 	}
 }
 
+// TestAttachmentGC_ReapsAttachmentDirs: a root outside any workspace (the
+// state root's planner/attachments) is swept like a workspace's, even with
+// no workspace lister wired.
+func TestAttachmentGC_ReapsAttachmentDirs(t *testing.T) {
+	now := time.Now().UTC()
+	ws := t.TempDir()
+	p := seedOldAttachment(t, ws, "a", now)
+
+	d, _ := newAttachmentGC(DaemonDeps{AttachmentDirs: []string{filepath.Join(ws, attachment.Dir)}})
+	gc := d.(*attachmentGC)
+	gc.nowFn = func() time.Time { return now }
+	gc.metaGrace = 0
+	rep, err := gc.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if rep.Examined != 1 || rep.Acted != 1 {
+		t.Errorf("Examined=%d Acted=%d, want 1 and 1", rep.Examined, rep.Acted)
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Errorf("payload not removed: %v", err)
+	}
+}
+
 // TestAttachmentGC_DryRunDeletesNothing: dry-run reports work but leaves
 // files on disk.
 func TestAttachmentGC_DryRunDeletesNothing(t *testing.T) {

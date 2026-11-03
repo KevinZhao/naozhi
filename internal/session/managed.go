@@ -338,6 +338,9 @@ type ManagedSession struct {
 	// §7.3). Writes must go through Router.SetUserLabelWithOrigin so the table lock
 	// re-read closes the daemon-vs-user race (RFC §11.1).
 	labelOrigin atomic.Pointer[string]
+	// cliSessionName is the --name the current or last process spawned with,
+	// the handle other CC sessions see; set at spawn and shim reconnect.
+	cliSessionName atomic.Pointer[string]
 	// model is the most-recent CLI model identifier (system/init for claude,
 	// SpawnOptions.Model for kiro), persisted to sessions.json as the
 	// fallback for restart / pre-init windows; live proc.Model() wins.

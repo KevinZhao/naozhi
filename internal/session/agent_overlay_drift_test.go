@@ -66,7 +66,7 @@ func spawnShimState(t *testing.T, r *Router, key, resumeID string, opts AgentOpt
 	if sp.Wrapper == nil {
 		t.Fatalf("no wrapper for backend %q", sp.BackendID)
 	}
-	spawnOpts := r.spawn.argvSpawnOptions(sp.Model, sp.Effort, r.spawn.cliDebugFileFor(key), sp.SystemPrompt, sp.Args)
+	spawnOpts := r.spawn.argvSpawnOptions(sp.Model, sp.Effort, r.spawn.cliDebugFileFor(key), sp.SystemPrompt, sp.Args, sp.Launch)
 	spawnOpts.ResumeID = sp.ResumeID
 	overlay := sp.Overlay
 	spawnOpts.SpawnOverlay = &overlay
@@ -280,7 +280,10 @@ func TestAgentOverlayDrift_LegacyStateFallsBack(t *testing.T) {
 		s.SetBackend("claude")
 		putT(r, key, s)
 		state, _ := spawnShimState(t, r, key, "", AgentOpts{Backend: "claude", Workspace: "/ws"})
-		state.SpawnOverlay = nil // written by a pre-#2494 shim
+		state.SpawnOverlay = nil // written by a pre-#2494 shim, which also predates --name
+		if i := slices.Index(state.CLIArgs, "--name"); i >= 0 {
+			state.CLIArgs = slices.Delete(state.CLIArgs, i, i+2)
+		}
 
 		if drift, stored, current := driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, s); drift {
 			t.Fatalf("legacy no-override shim misread as drift\n  stored:  %v\n  current: %v", stored, current)

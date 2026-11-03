@@ -129,4 +129,7 @@ type wiring struct {
 	// the WS agent tailer and agent_events check transcript paths against;
 	// allowedRoot (the operator workspace) is a different root.
 	projectsRoot string
+	// stateDir is ServerOptions.StateDir, the root the tool-image originals
+	// in EventEntry.ImagePaths are relative to.
+	stateDir string
 }

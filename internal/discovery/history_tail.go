@@ -236,6 +236,7 @@ var (
 	userTypeGateSpaced = []byte(`"type": "user"`)
 	asstTypeGate       = []byte(`"type":"assistant"`)
 	asstTypeGateSpaced = []byte(`"type": "assistant"`)
+	imageTypeGate      = []byte(`"type":"image"`)
 )
 
 // parseHistoryLine decodes a single JSONL line into zero or more EventEntry
@@ -269,10 +270,16 @@ func parseHistoryLine(line []byte) ([]clievent.EventEntry, bool) {
 			return nil, false
 		}
 		text, images := extractTextAndImages(msg.Content)
+		// Images a tool returned ride inside tool_result blocks; the byte gate
+		// keeps the second decode off every other user record.
+		var toolImages []clievent.EventEntry
+		if bytes.Contains(line, imageTypeGate) {
+			toolImages = toolResultImageEntries(hl, ts, msg.Content)
+		}
 		// Drop only when there is nothing to show; an image-only turn is still
 		// surfaced, and the system-injected check only applies when text exists.
 		if (text == "" && len(images) == 0) || (text != "" && IsClaudeSystemInjectedText(text)) {
-			return nil, false
+			return toolImages, len(toolImages) > 0
 		}
 		summary := textutil.TruncateRunes(text, 120)
 		detail := textutil.TruncateRunes(text, 2000)
@@ -289,7 +296,7 @@ func parseHistoryLine(line []byte) ([]clievent.EventEntry, bool) {
 		if len(images) > 0 {
 			e.Images = images
 		}
-		return []clievent.EventEntry{e}, true
+		return append([]clievent.EventEntry{e}, toolImages...), true
 
 	case "assistant":
 		var msg historyMessage

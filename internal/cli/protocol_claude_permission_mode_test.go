@@ -39,6 +39,7 @@ func TestClaudeProtocol_BuildArgs_PermissionModes(t *testing.T) {
 	}{
 		{"default (bypass)", PermissionModeDefault, []string{"--dangerously-skip-permissions"}},
 		{"auto", PermissionModeAuto, []string{"--permission-mode", "auto"}},
+		{"dontAsk", PermissionModeDontAsk, []string{"--permission-mode", "dontAsk"}},
 		{"standard", PermissionModeStandard, nil},
 	}
 	for _, tc := range cases {

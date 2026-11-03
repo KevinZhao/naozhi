@@ -621,6 +621,9 @@ func (r *Router) commitShimReattach(state shim.State, sess *ManagedSession, proc
 		if wrapper.CLIVersion != "" {
 			sess.SetCLIVersion(wrapper.CLIVersion)
 		}
+		if state.SpawnOverlay != nil {
+			sess.setCLISessionName(state.SpawnOverlay.Name)
+		}
 		if state.SessionID != "" {
 			r.kid.Track(state.SessionID)
 			tx.SetID(state.SessionID, state.Key)

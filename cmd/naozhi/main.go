@@ -17,6 +17,8 @@ import (
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/dispatch"
+	"github.com/naozhi/naozhi/internal/monitor/beat"
+	"github.com/naozhi/naozhi/internal/monitor/wake"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
@@ -209,7 +211,10 @@ func main() {
 
 	router.ReconnectShimsCtx(ctx)
 
-	router.StartCleanupLoop(ctx, cfg.ParseTTL()/2)
+	// Critical-loop heartbeats; /health degrades when one goes stale. Its
+	// startup grace starts here, before the first loop registers.
+	beats := beat.New(wake.SystemClock())
+	router.StartCleanupLoop(ctx, cfg.ParseTTL()/2, beats)
 	router.StartShimReconcileLoop(ctx, 30*time.Second)
 
 	// Parallel init: transcriber and project scan can overlap
@@ -263,6 +268,10 @@ func main() {
 		slog.Error("init failed", "err", projErr)
 		os.Exit(1)
 	}
+	// After the project scan so the first start can register projects as
+	// workspaces. Nothing consumes the state yet; opening it here runs the
+	// journal retention and the first-start seed once per process.
+	_ = wireup.OpenPlannerState(sessionLayout, cfg.Workspace.ID, projectMgr)
 	// Attachments live under each workspace root, usually outside the state dir
 	// checked above; walking every root must not hold up startup.
 	go warnIfAttachmentsLarge(workspaceRootLister{router: router, projectMgr: projectMgr}, attachmentGCMode(cfg))
@@ -317,6 +326,7 @@ func main() {
 			return buildSysessionManager(cfg, router, projectMgr, wrapper, storePath, runTelemetry)
 		},
 		Budget: budgetGate,
+		Beats:  beats,
 	})
 	if err != nil {
 		slog.Error("start cron scheduler", "err", err)
@@ -395,6 +405,7 @@ func main() {
 		Routing:          routing,
 		Scheduler:        scheduler,
 		Backend:          defaultBackend,
+		Beats:            beats,
 		AllowedRoot:      workspace,
 		IMAccess:         cfg.IMAccessPolicy(),
 		IMRateLimit:      dispatch.RateLimit{MsgsPerMin: cfg.IMRateLimit.MsgsPerMin, Burst: cfg.IMRateLimit.Burst},

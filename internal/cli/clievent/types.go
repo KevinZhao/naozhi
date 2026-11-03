@@ -25,11 +25,13 @@ type EventEntry struct {
 	Subagent   string   `json:"subagent,omitempty"`   // subagent_type or name (empty for team-only agents)
 	TeamName   string   `json:"team_name,omitempty"`  // team grouping key for agent team members
 	Background bool     `json:"background,omitempty"` // true for run_in_background team agents
-	Images     []string `json:"images,omitempty"`     // thumbnail data URIs for user image uploads
-	// ImagePaths is the workspace-relative on-disk copy of each inline image,
-	// index-aligned with Images (empty slot → thumbnail fallback); used by the
-	// lightbox via /api/sessions/attachment. ALWAYS sanitized before use: the
-	// HTTP handler rejects absolute/escaping paths; persisted history is pass-through.
+	Images     []string `json:"images,omitempty"`     // thumbnail data URIs for user image uploads and tool_result images
+	// ImagePaths is the workspace-relative on-disk copy of each inline image
+	// (a tool_result image's is state-root-relative, under
+	// datadir.PlannerAttachmentsRel), index-aligned with Images (empty slot →
+	// thumbnail fallback); used by the lightbox via /api/sessions/attachment.
+	// ALWAYS sanitized before use: the HTTP handler rejects absolute/escaping
+	// paths; persisted history is pass-through.
 	ImagePaths []string `json:"image_paths,omitempty"`
 	TaskID     string   `json:"task_id,omitempty"`     // agent task correlation ID
 	ToolUseID  string   `json:"tool_use_id,omitempty"` // links Agent tool_use → task_started

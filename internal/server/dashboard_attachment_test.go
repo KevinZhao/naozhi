@@ -76,6 +76,50 @@ func TestHandleAttachment_ServesImage(t *testing.T) {
 	}
 }
 
+// A tool-returned image's original lives under the state root, not the
+// workspace (cli.storeToolImages).
+func TestHandleAttachment_ServesToolImage(t *testing.T) {
+	pngBytes := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13}
+	tests := []struct {
+		name     string
+		stateDir bool
+		path     string
+		want     int
+	}{
+		{name: "served", stateDir: true, path: "planner/attachments/2026-11-03/feed.png", want: http.StatusOK},
+		{name: "outside the planner attachments", stateDir: true, path: "planner/other.png", want: http.StatusNotFound},
+		{name: "no state dir", path: "planner/attachments/2026-11-03/feed.png", want: http.StatusNotFound},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ws, stateDir := t.TempDir(), t.TempDir()
+			for _, rel := range []string{"planner/attachments/2026-11-03/feed.png", "planner/other.png"} {
+				abs := filepath.Join(stateDir, filepath.FromSlash(rel))
+				if err := os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(abs, pngBytes, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, hs := newAttachmentServer(t, ws)
+			if tc.stateDir {
+				hs.sendH.stateDir = stateDir
+			}
+			u := "/api/sessions/attachment?key=" + url.QueryEscape("dash:direct:alice:general") +
+				"&path=" + url.QueryEscape(tc.path)
+			w := httptest.NewRecorder()
+			hs.sendH.handleAttachment(w, httptest.NewRequest(http.MethodGet, u, nil))
+			if w.Code != tc.want {
+				t.Fatalf("status=%d want %d (body=%s)", w.Code, tc.want, w.Body.String())
+			}
+			if tc.want == http.StatusOK && w.Header().Get("Content-Type") != "image/png" {
+				t.Errorf("Content-Type=%q want image/png", w.Header().Get("Content-Type"))
+			}
+		})
+	}
+}
+
 func TestHandleAttachment_MissingParams(t *testing.T) {
 	ws := t.TempDir()
 	_, hs := newAttachmentServer(t, ws)

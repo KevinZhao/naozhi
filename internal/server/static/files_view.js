@@ -14,6 +14,8 @@
 // leaves quotes alone, so a file named `a"b` would truncate data-name="…" and
 // the click handler navigated to the wrong path.
 import { NZ_CONTRACT } from './contract.js';
+import { selection, sessionList } from './state.js';
+import { sid } from './session_ident.js';
 import { esc, escAttr, showToast, fetchJSON, nzViews } from './nz_util.js';
 import { fileApiUrl, renderSandboxedBlob } from './file_refs.js';
 import { formatFileSize } from './utilities.js';
@@ -33,7 +35,24 @@ import { renderRich, runPendingAsync } from './render_md.js';
   // breadcrumb is project-relative, not always workspace-relative). state.dir:
   // dir relative to state.project ("" = its root). state.rootName: cached name
   // of the is_root project, used to exclude the root from the quick-jump chips.
-  var state = { roots: [], project: '', rootName: '', dir: '', loaded: false, wired: false };
+  // state.root: a "session:<key>" root when browsing a session's working tree
+  // (the 本会话 chip), '' when browsing state.project; state.rootLabel names it
+  // in the breadcrumb.
+  var state = { roots: [], project: '', rootName: '', root: '', rootLabel: '', dir: '', loaded: false, wired: false };
+
+  // cur is the browse root the file API calls take: the session root when
+  // set, else the project name (fileApiUrl maps "session:" to root=).
+  function cur() { return state.root || state.project; }
+
+  // activeSessionRoot returns the selected local session's root ref and label,
+  // or null when no local session with a workspace is selected — remote nodes
+  // have no readable FS here.
+  function activeSessionRoot() {
+    if (!selection.key || (selection.node && selection.node !== 'local')) return null;
+    var sd = sessionList.sessionsData[sid(selection.key, selection.node)];
+    if (!sd || !sd.workspace) return null;
+    return { ref: 'session:' + selection.key, label: sd.workspace.split('/').filter(Boolean).pop() || sd.workspace, path: sd.workspace };
+  }
 
   // Recent browse roots (favorite/recent quick-jump panel). master had no
   // recent-projects store, so this view owns its own localStorage key. Each
@@ -103,6 +122,11 @@ import { renderRich, runPendingAsync } from './render_md.js';
     // jumping there is redundant when it's already the default browse root.
     var seen = {};
     var chips = [];
+    // While a session root is open the workspace root is no longer the
+    // current root, so it gets a chip back.
+    if (state.root && state.rootName) {
+      seen[state.rootName] = 1; chips.push({ name: state.rootName, fav: false });
+    }
     state.roots.forEach(function (p) {
       if (p.favorite && p.name !== state.rootName && !seen[p.name]) {
         seen[p.name] = 1; chips.push({ name: p.name, fav: true });
@@ -118,12 +142,47 @@ import { renderRich, runPendingAsync } from './render_md.js';
         seen[n] = 1; chips.push({ name: n, fav: false });
       }
     });
-    if (!chips.length) { wrap.innerHTML = ''; wrap.hidden = true; return; }
+    var sess = activeSessionRoot();
+    if (!chips.length && !sess) { wrap.innerHTML = ''; wrap.hidden = true; return; }
     wrap.hidden = false;
-    wrap.innerHTML = '<span class="files-qj-label">快速跳转</span>' + chips.map(function (c) {
+    // 本会话 leads: the selected session's working tree (its git root when
+    // the workspace is in a repo, resolved server-side).
+    var sessChip = sess ? '<button type="button" class="files-qj" data-root="' + escAttr(sess.ref) +
+      '" data-label="' + escAttr(sess.label) + '" title="' + escAttr(sess.path) + '">本会话 · ' + esc(sess.label) + '</button>' : '';
+    wrap.innerHTML = '<span class="files-qj-label">快速跳转</span>' + sessChip + chips.map(function (c) {
       return '<button type="button" class="files-qj" data-project="' + escAttr(c.name) + '" title="' +
         escAttr(byName[c.name].path || c.name) + '">' + (c.fav ? '★ ' : '') + esc(c.name) + '</button>';
     }).join('');
+  }
+
+  // jumpToSession switches the browse root to a session's working tree.
+  // Upload stays project-only, so its button hides while a session root is open.
+  function jumpToSession(ref, label) {
+    if (!ref) return;
+    state.root = ref;
+    state.rootLabel = label || '';
+    syncUploadBtn();
+    buildQuickJump();
+    loadDir('');
+  }
+
+  // syncSessionRoot keeps an open session root on the selected session: the
+  // 本会话 chip follows selection, so a root left over from a previously
+  // selected session moves to the current one (or back to the project root
+  // when none is selected) and restarts at its top.
+  function syncSessionRoot() {
+    if (!state.root) return;
+    var sess = activeSessionRoot();
+    if (sess && sess.ref === state.root) return;
+    state.root = sess ? sess.ref : '';
+    state.rootLabel = sess ? sess.label : '';
+    state.dir = '';
+    syncUploadBtn();
+  }
+
+  function syncUploadBtn() {
+    var btn = $('files-upload-btn');
+    if (btn) btn.hidden = !!state.root;
   }
 
   // jumpToProject switches the browse root to a named project (quick-jump
@@ -135,7 +194,14 @@ import { renderRich, runPendingAsync } from './render_md.js';
     if (!name) return;
     var known = state.roots.some(function (p) { return p.name === name; });
     if (!known) { buildQuickJump(); return; }
-    if (name === state.project) { loadDir(''); return; }
+    var leavingSession = !!state.root;
+    state.root = ''; state.rootLabel = '';
+    syncUploadBtn();
+    if (name === state.project) {
+      if (leavingSession) buildQuickJump();
+      loadDir('');
+      return;
+    }
     state.project = name;
     pushRecent(name);
     buildQuickJump();
@@ -144,14 +210,17 @@ import { renderRich, runPendingAsync } from './render_md.js';
 
   // ---- directory listing ----
   function loadDir(dir) {
-    if (!state.project) { renderEmpty('没有可浏览的工作区'); return; }
+    if (!cur()) { renderEmpty('没有可浏览的工作区'); return; }
     state.dir = dir || '';
     var box = $('files-list');
     if (box) box.innerHTML = '<div class="files-empty">加载中…</div>';
-    var qs = 'project=' + encodeURIComponent(state.project) +
+    var qs = (state.root ? 'root=' : 'project=') + encodeURIComponent(cur()) +
       (state.dir ? '&dir=' + encodeURIComponent(state.dir) : '');
     fetchJSON(NZ_CONTRACT.API.projects_files_list + '?' + qs).then(function (res) {
       state.loaded = true;
+      // The server names the tree a session root resolved to (its git root
+      // can sit above the session's cwd).
+      if (state.root && res && res.root_name) state.rootLabel = res.root_name;
       renderCrumbs();
       renderList(res);
     }).catch(function (e) {
@@ -169,7 +238,8 @@ import { renderRich, runPendingAsync } from './render_md.js';
     var wrap = $('files-crumbs');
     if (!wrap) return;
     var parts = state.dir ? state.dir.split('/') : [];
-    var html = '<button type="button" class="files-crumb" data-dir="">' + esc(state.project || '项目') + '</button>';
+    var head = state.root ? '会话 · ' + (state.rootLabel || '工作目录') : (state.project || '项目');
+    var html = '<button type="button" class="files-crumb" data-dir="">' + esc(head) + '</button>';
     var acc = '';
     parts.forEach(function (seg) {
       if (!seg) return;
@@ -230,7 +300,7 @@ import { renderRich, runPendingAsync } from './render_md.js';
   function download(rel, name) {
     if (rel == null) { rel = state.previewRel; name = state.previewName; }
     if (!rel) return;
-    var url = fileApiUrl(state.project, 'local', rel, 'download');
+    var url = fileApiUrl(cur(), 'local', rel, 'download');
     var a = document.createElement('a');
     a.href = url; a.download = name || (rel.split('/').pop() || 'file'); a.rel = 'noopener';
     document.body.appendChild(a); a.click(); a.remove();
@@ -270,13 +340,13 @@ import { renderRich, runPendingAsync } from './render_md.js';
     var imgExt = { png: 1, jpg: 1, jpeg: 1, gif: 1, webp: 1, bmp: 1, ico: 1 };
     if (ext === 'svg') {
       body.innerHTML = '';
-      renderSandboxedBlob(state.project, 'local', rel, body, 'image/svg+xml');
+      renderSandboxedBlob(cur(), 'local', rel, body, 'image/svg+xml');
       return;
     }
     if (imgExt[ext]) {
       body.innerHTML = '';
       var img = document.createElement('img');
-      img.src = fileApiUrl(state.project, 'local', rel, 'raw');
+      img.src = fileApiUrl(cur(), 'local', rel, 'raw');
       img.alt = name; img.loading = 'lazy';
       body.appendChild(img);
       return;
@@ -291,18 +361,18 @@ import { renderRich, runPendingAsync } from './render_md.js';
       // JS same-origin. sandbox="" grants zero capabilities — no scripts, no
       // plugins — while still allowing the browser's native PDF viewer.
       frame.setAttribute('sandbox', '');
-      frame.src = fileApiUrl(state.project, 'local', rel, 'raw');
+      frame.src = fileApiUrl(cur(), 'local', rel, 'raw');
       frame.title = name;
       body.appendChild(frame);
       return;
     }
     if (ext === 'html' || ext === 'htm' || ext === 'xhtml') {
       body.innerHTML = '';
-      renderSandboxedBlob(state.project, 'local', rel, body, 'text/html');
+      renderSandboxedBlob(cur(), 'local', rel, body, 'text/html');
       return;
     }
     // Text / unknown → preview JSON {content, truncated, size, mime}.
-    fetchJSON(fileApiUrl(state.project, 'local', rel, 'preview')).then(function (res) {
+    fetchJSON(fileApiUrl(cur(), 'local', rel, 'preview')).then(function (res) {
       // A slower fetch for a file the operator already left must not paint.
       if (state.previewRel !== rel) return;
       // Server shape for non-text files is {content:"", binary:true}.
@@ -325,6 +395,8 @@ import { renderRich, runPendingAsync } from './render_md.js';
 
   // ---- upload (XHR for progress) ----
   function uploadFiles(fileList) {
+    // Drag-drop still reaches here while the upload button is hidden.
+    if (state.root) { toast('会话工作目录不支持上传'); return; }
     if (!state.project) { toast('没有可浏览的工作区'); return; }
     var files = Array.prototype.slice.call(fileList || []);
     if (!files.length) return;
@@ -403,6 +475,7 @@ import { renderRich, runPendingAsync } from './render_md.js';
     var qj = $('files-quickjump');
     if (qj) qj.addEventListener('click', function (e) {
       var b = e.target.closest('.files-qj'); if (!b) return;
+      if (b.dataset.root) { jumpToSession(b.dataset.root, b.dataset.label); return; }
       jumpToProject(b.dataset.project || '');
     });
 
@@ -459,6 +532,7 @@ import { renderRich, runPendingAsync } from './render_md.js';
     $('files-sidebar').hidden = false;
     $('files-main').hidden = false;
     document.body.classList.add('nz-view-files');
+    syncSessionRoot();
     loadRoots().then(function () { loadDir(state.loaded ? state.dir : ''); })
       .catch(function (e) { renderEmpty('加载项目失败：' + e.message); });
   }

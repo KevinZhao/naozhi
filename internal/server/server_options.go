@@ -10,6 +10,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/imauth"
+	"github.com/naozhi/naozhi/internal/monitor/beat"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
@@ -88,6 +89,9 @@ type ServerOptions struct {
 	Routing   RoutingOptions
 	Scheduler *cron.Scheduler
 	Backend   string // "claude" | "kiro" | "" (empty → "claude")
+	// Beats holds the critical-loop heartbeats /health degrades on; nil
+	// keeps /health at "ok".
+	Beats *beat.Registry
 
 	// Logger is the component logger the Server derives its structured logging
 	// from. nil falls back to slog.Default() (#620).

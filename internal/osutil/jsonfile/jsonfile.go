@@ -77,10 +77,10 @@ const (
 	// (#673). This is the zero value: a store whose contents cannot be
 	// reconstructed from anywhere else wants it, and that is most of them.
 	PreserveCorrupt CorruptPolicy = iota
-	// LeaveCorrupt leaves the file where it is. Only for stores carrying nothing
+	// LeaveCorrupt leaves the file where it is. For stores carrying nothing
 	// irreplaceable, where a .corrupt sibling per bad parse is litter rather than
-	// evidence — uiprefs is the one, and it made that call before this package
-	// existed.
+	// evidence (uiprefs), and for callers that then refuse to save until the
+	// file is fixed (the workspace registry), which needs it still in place.
 	LeaveCorrupt
 )
 

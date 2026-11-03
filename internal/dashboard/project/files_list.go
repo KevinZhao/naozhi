@@ -34,17 +34,13 @@ type listEntry struct {
 
 // HandleFilesList serves GET /api/projects/files/list?project=X&node=&dir=Y:
 // the immediate children of a workspace directory for the dashboard "文件"
-// browser. Same security posture as HandleFilesExists (project name
+// browser; root=session:<key> in place of project=X lists that session's
+// working tree. Same security posture as HandleFilesExists (project name
 // validation, symlink-escape / traversal guards). dir is
 // workspace-relative; "" or "." is the root. All errors collapse to one 404
 // so a probing client gets no oracle; credential-named children are never
 // enumerated.
 func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
-	if h.deps.ProjectMgr == nil {
-		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "projects not configured"})
-		return
-	}
-
 	// Remote-node filesystems are not readable from this process; reject rather
 	// than silently listing the local dir under the same name.
 	if node := r.URL.Query().Get("node"); node != "" && node != "local" {
@@ -52,27 +48,16 @@ func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	project := r.URL.Query().Get("project")
 	dir := r.URL.Query().Get("dir")
 	// show_hidden=1 surfaces dotfiles and noise directories (node_modules,
 	// dist, …) that the files view hides by default.
 	showHidden := r.URL.Query().Get("show_hidden") == "1"
-	if project == "" {
-		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "project is required"})
-		return
-	}
 
-	if err := validateProjectName(project); err != nil {
-		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
+	root, ok := h.resolveBrowseRoot(w, r.URL.Query())
+	if !ok {
 		return
 	}
-
-	p := h.deps.ProjectMgr.Get(project)
-	if p == nil {
-		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
-		return
-	}
-	rootPath := p.Path
+	rootPath := root.path
 	// Empty BEFORE EvalSymlinks: EvalSymlinks("") returns (".", nil), which
 	// would bind resolution to the process CWD.
 	if rootPath == "" {
@@ -93,7 +78,7 @@ func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
 		resolved, rerr := resolveProjectFileWithRoot(rootResolved, dir)
 		if rerr != nil {
 			if !errors.Is(rerr, fs.ErrNotExist) && !isClientPathRejection(rerr) {
-				slog.Warn("project files/list: resolve IO failure", "err", rerr, "project", project)
+				slog.Warn("project files/list: resolve IO failure", "err", rerr, "root", root.label)
 			}
 			httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "directory not found"})
 			return
@@ -107,7 +92,7 @@ func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
 	f, err := OpenWorkspaceFile(dirResolved)
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
-			slog.Warn("project files/list: open dir IO failure", "err", err, "project", project)
+			slog.Warn("project files/list: open dir IO failure", "err", err, "root", root.label)
 		}
 		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "directory not found"})
 		return
@@ -132,7 +117,7 @@ func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
 		// ReadDir(n>0) returns io.EOF as the normal terminal signal (including
 		// on an empty dir). A non-EOF error is genuine IO: keep what was read
 		// but flag the listing as possibly incomplete.
-		slog.Warn("project files/list: readdir IO failure", "err", rderr, "project", project)
+		slog.Warn("project files/list: readdir IO failure", "err", rderr, "root", root.label)
 		truncated = true
 	}
 	if len(dirents) > maxListEntries {
@@ -180,11 +165,17 @@ func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
 	// of readdir order.
 	sortEntries(entries)
 
-	httputil.WriteJSON(w, map[string]any{
+	resp := map[string]any{
 		"dir":       cleanDir,
 		"entries":   entries,
 		"truncated": truncated,
-	})
+	}
+	// A session root has no project name for the breadcrumb; name the tree it
+	// resolved to (the git root can sit above the session's cwd).
+	if root.session {
+		resp["root_name"] = filepath.Base(rootResolved)
+	}
+	httputil.WriteJSON(w, resp)
 }
 
 // noiseBrowseDirs are non-dot directory names hidden from the files view by

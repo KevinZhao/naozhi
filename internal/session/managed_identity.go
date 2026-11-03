@@ -150,6 +150,12 @@ func (s *ManagedSession) UserLabel() string { return loadAtomicString(&s.userLab
 // stays consistent; this bare setter is for router restore and tests.
 func (s *ManagedSession) SetUserLabel(v string) { storeAtomicString(&s.userLabel, v) }
 
+// CLISessionName returns the --name the session's process spawned with ("" before
+// any spawn, or for a shim whose overlay predates names). Lock-free.
+func (s *ManagedSession) CLISessionName() string { return loadAtomicString(&s.cliSessionName) }
+
+func (s *ManagedSession) setCLISessionName(v string) { storeAtomicString(&s.cliSessionName, v) }
+
 // LabelOrigin returns the recorded origin of the current UserLabel:
 // "" (legacy / empty equivalent to "user") / "user" / "auto". Lock-free.
 func (s *ManagedSession) LabelOrigin() string { return loadAtomicString(&s.labelOrigin) }

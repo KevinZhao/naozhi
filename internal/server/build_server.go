@@ -118,6 +118,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		scheduler:     scheduler,
 		routerEvents:  opts.Relays.Router,
 		runTelemetry:  opts.Relays.RunTelemetry,
+		stateDir:      opts.StateDir,
 	}
 
 	s := &Server{
@@ -328,5 +329,6 @@ func buildHealthHandler(opts ServerOptions, s *Server, w *wiring, router healthR
 		configLive:        opts.Config.Live,
 		configPath:        opts.Config.Path,
 		platforms:         s.platforms,
+		beats:             opts.Beats,
 	}
 }

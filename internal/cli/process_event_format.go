@@ -26,6 +26,10 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 	base := clievent.EventEntry{Time: now}
 
 	switch ev.Type {
+	case "user":
+		// A non-replay user frame is a tool result (or CLI-injected text) and
+		// gets no row of its own; only the images a tool returned do.
+		return toolResultImageEntries(base, ev.ToolResultImages)
 	case "system":
 		entry := base
 		entry.Type = clievent.KindSystem
@@ -250,11 +254,47 @@ func workflowTaskType(ev clievent.Event) string {
 	return ""
 }
 
+// toolResultImageEntries renders one tool_result entry per result that
+// returned an image, linked to its tool call by ToolUseID. The entry holds
+// thumbnails and the stored originals' paths, never the originals. Detail
+// stays empty so merged.contentKey identifies it by its thumbnails, which the
+// Claude JSONL tier derives from the same bytes (discovery.parseHistoryLine).
+func toolResultImageEntries(base clievent.EventEntry, results []clievent.ToolResultImages) []clievent.EventEntry {
+	var out []clievent.EventEntry
+	for _, r := range results {
+		entry := base
+		entry.Type = clievent.KindToolResult
+		entry.ToolUseID = r.ToolUseID
+		entry.Summary = textutil.TruncateRunes(r.Text, 120)
+		paths := make([]string, 0, len(r.Images))
+		anyPath := false
+		for _, img := range r.Images {
+			thumb := MakeThumbnail(img.Data, clievent.ThumbMaxDim)
+			if thumb == "" {
+				continue
+			}
+			entry.Images = append(entry.Images, thumb)
+			paths = append(paths, img.Path)
+			anyPath = anyPath || img.Path != ""
+		}
+		if len(entry.Images) == 0 {
+			continue
+		}
+		if anyPath {
+			entry.ImagePaths = paths
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 // logEventAt converts an clievent.Event to one or more EventEntry values and appends them to the event log.
 // readLoop passes the same time.Now() value that stamps ev.RecvAt so timestamps match,
 // and for a result the run it answers, which its result entry carries.
 func (p *Process) logEventAt(ev clievent.Event, nowMS int64, runID string) {
 	p.meter.TrackShadow(ev, nowMS)
+	// Before formatting: the entries carry the paths storeToolImages records.
+	p.storeToolImages(ev.ToolResultImages)
 	entries := EventEntriesFromEventAt(ev, nowMS)
 	if len(entries) == 0 {
 		return

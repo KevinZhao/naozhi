@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -114,11 +115,18 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 	// SettingsFile instead gets `--setting-sources "" --settings <file>`. The
 	// path must be absolute with no leading '-' (argv-injection guard); a bad
 	// value falls back to `user` rather than spawning with no settings.
+	// A per-session settings file takes the --settings slot in either branch
+	// without moving settingsPath: it carries the base file's model manifest,
+	// and the drift check re-runs BuildArgs on the shared wrapper protocol.
+	sessionSettings := usableSettingsFile(opts.SessionSettingsFile)
 	if f := usableSettingsFile(opts.SettingsFile); f != "" {
-		args = append(args, "--setting-sources", "", "--settings", f)
+		args = append(args, "--setting-sources", "", "--settings", cmp.Or(sessionSettings, f))
 		p.settingsPath.Store(&f)
 	} else {
 		args = append(args, "--setting-sources", "user")
+		if sessionSettings != "" {
+			args = append(args, "--settings", sessionSettings)
+		}
 		p.settingsPath.Store(&localSettingsMarker)
 	}
 	// Headless `-p` has no prompt surface, so the zero-value PermissionModeDefault
@@ -131,6 +139,24 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 		args = append(args, "--dangerously-skip-permissions")
 	case PermissionModeAuto:
 		args = append(args, "--permission-mode", "auto")
+	case PermissionModeDontAsk:
+		args = append(args, "--permission-mode", "dontAsk")
+	}
+	// --tools is variadic on the CLI, so the list goes as one comma-joined
+	// value. A value that could parse as a flag becomes "" (no tools): a
+	// restricted session must not fall back to the full set.
+	if len(opts.Tools) > 0 {
+		tools := strings.Join(opts.Tools, ",")
+		if strings.HasPrefix(tools, "-") || strings.IndexByte(tools, 0) >= 0 {
+			tools = ""
+		}
+		args = append(args, "--tools", tools)
+	}
+	if opts.StrictMCPConfig {
+		args = append(args, "--strict-mcp-config")
+	}
+	if opts.Name != "" && !strings.HasPrefix(opts.Name, "-") && strings.IndexByte(opts.Name, 0) < 0 {
+		args = append(args, "--name", opts.Name)
 	}
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
@@ -514,6 +540,9 @@ func (p *ClaudeProtocol) ReadEventInto(line string, buf []clievent.Event) ([]cli
 	// tool_use_result of a Read or Bash can run to megabytes.
 	if ev.Type == "user" && strings.Contains(line, `"async_launched"`) {
 		ev.WorkflowLaunch = parseWorkflowLaunch(line)
+	}
+	if ev.Type == "user" && !ev.IsReplay && strings.Contains(line, toolImageGate) {
+		ev.ToolResultImages = parseToolResultImages(line)
 	}
 	// Copy the value out so the caller owns an independent clievent.Event; the deferred
 	// Put resets only the pooled struct's view, not the freshly-unmarshalled

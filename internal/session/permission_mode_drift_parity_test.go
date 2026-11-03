@@ -46,9 +46,9 @@ func TestPermissionModeDriftParity_NoFalsePositive(t *testing.T) {
 	bd := r.backends.backendDefaultsFor("claude")
 
 	driftArgs := proto.BuildArgs(
-		r.spawn.argvSpawnOptions(bd.Model, bd.Effort, r.spawn.cliDebugPathFor(key), "", bd.Args))
+		r.spawn.argvSpawnOptions(bd.Model, bd.Effort, r.spawn.cliDebugPathFor(key), "", bd.Args, LaunchSpec{}))
 	spawnArgs := proto.BuildArgs(
-		r.spawn.argvSpawnOptions(bd.Model, bd.Effort, r.spawn.cliDebugFileFor(key), "", bd.Args))
+		r.spawn.argvSpawnOptions(bd.Model, bd.Effort, r.spawn.cliDebugFileFor(key), "", bd.Args, LaunchSpec{}))
 
 	if !slices.Equal(stripResumeArgs(spawnArgs), stripResumeArgs(driftArgs)) {
 		t.Errorf("drift check disagrees with the real spawn:\n spawn = %v\n drift = %v",

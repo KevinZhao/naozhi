@@ -34,6 +34,17 @@ type AgentOpts struct {
 	// there and silently stripped (#2493). Only the Claude backend renders it.
 	SystemPrompt string
 	Exempt       bool // exempt from TTL, eviction, and activeCount (planner sessions)
+
+	// Per-session Claude launch spec, carried by shim.SpawnOverlay (see the
+	// same-named fields there); zero values keep today's spawn. Name "" gets
+	// the session label, else a key-derived short name; a resume keeps the
+	// name its transcript holds.
+	Tools               []string
+	PermissionMode      string
+	Name                string
+	StrictMCPConfig     bool
+	CrossSessionInbound string
+	PermissionsDeny     []string
 }
 
 // SessionStatus indicates how a session was obtained.

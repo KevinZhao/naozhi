@@ -72,6 +72,7 @@ type SendHandler struct {
 	auth         *auth.Handlers // for isSecure(r) when minting the nz_anon cookie in no-token mode
 	trustedProxy bool           // whether to trust X-Forwarded-For for client IP
 	orient       *orientConfig  // image auto-orientation; nil = feature off
+	stateDir     string         // root of tool-image ImagePaths; "" serves none
 }
 
 func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {

@@ -329,8 +329,12 @@ function applyFileRefResult(wrapEl, entry) {
   wrapEl.appendChild(download);
 }
 
+// project may also be a "session:<key>" root (the files view browsing a
+// session's working tree), sent as root= instead; project names cannot
+// contain ':', so the two never collide.
 function fileApiUrl(project, node, path, mode) {
-  const qs = 'project=' + encodeURIComponent(project) +
+  const param = (project && project.startsWith('session:')) ? 'root=' : 'project=';
+  const qs = param + encodeURIComponent(project) +
     '&path=' + encodeURIComponent(path) +
     '&mode=' + encodeURIComponent(mode) +
     (node && node !== 'local' ? '&node=' + encodeURIComponent(node) : '');
