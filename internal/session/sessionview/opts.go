@@ -37,7 +37,8 @@ type AgentOpts struct {
 
 	// Per-session Claude launch spec, carried by shim.SpawnOverlay (see the
 	// same-named fields there); zero values keep today's spawn. Name "" gets
-	// the session label, else a key-derived short name.
+	// the session label, else a key-derived short name; a resume keeps the
+	// name its transcript holds.
 	Tools               []string
 	PermissionMode      string
 	Name                string

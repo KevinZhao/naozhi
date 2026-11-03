@@ -3,11 +3,13 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/shim"
 )
@@ -157,6 +159,78 @@ func TestCLISessionName(t *testing.T) {
 	for _, tc := range cases {
 		if got := cliSessionName(tc.key, tc.label, tc.workspace); got != tc.want {
 			t.Errorf("cliSessionName(%q, %q, %q) = %q, want %q", tc.key, tc.label, tc.workspace, got, tc.want)
+		}
+	}
+}
+
+func TestResumedCLIName(t *testing.T) {
+	t.Parallel()
+	const ph = "ws" // the key-derived placeholder
+	cases := []struct {
+		name, def, held, aiTitle, want string
+	}{
+		{"held name re-passed", ph, "my-feature", "", "my-feature"},
+		{"held name outlives a relabel", "New title", "Old title", "", "Old title"},
+		{"held placeholder, still untitled", ph, ph, "AI title", ph},
+		{"held placeholder gives way to the title", "Fix build", ph, "", "Fix build"},
+		{"no held name keeps the ai-title", ph, "", "AI title", "AI title"},
+		{"label over ai-title", "Fix build", "", "AI title", "Fix build"},
+		{"nothing recorded", ph, "", "", ph},
+		{"held name cleaned", ph, "--resume\tx", "", "resume x"},
+	}
+	for _, tc := range cases {
+		if got := resumedCLIName(tc.def, ph, tc.held, tc.aiTitle); got != tc.want {
+			t.Errorf("%s: resumedCLIName(%q, %q, %q, %q) = %q, want %q", tc.name, tc.def, ph, tc.held, tc.aiTitle, got, tc.want)
+		}
+	}
+}
+
+// TestTakeoverKeepsTranscriptName: a takeover resumes with the name the
+// external session holds (here set by a terminal /rename), records it in the
+// overlay and on the session, and falls back to the ai-title, then the
+// placeholder.
+func TestTakeoverKeepsTranscriptName(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	claudeDir := t.TempDir()
+	ws := filepath.Join(t.TempDir(), "ws")
+	r := NewRouter(RouterConfig{
+		MaxProcs:  4,
+		StorePath: filepath.Join(t.TempDir(), "sessions.json"),
+		ClaudeDir: claudeDir,
+		BackendRuntimes: map[string]BackendRuntime{
+			"claude": {Wrapper: cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")},
+		},
+		DefaultBackend: "claude",
+	})
+	var got cli.SpawnOptions
+	r.spawn.hook = func(_ context.Context, opts cli.SpawnOptions) (processIface, error) {
+		got = opts
+		return newIdleProc(), nil
+	}
+	t.Cleanup(r.Shutdown)
+
+	cases := []struct{ name, transcript, want string }{
+		{"custom title", `{"type":"custom-title","customTitle":"my-feature","sessionId":"%s"}`, "my-feature"},
+		{"ai title", `{"type":"ai-title","aiTitle":"Fix the build","sessionId":"%s"}`, "Fix the build"},
+		{"none", `{"type":"last-prompt","lastPrompt":"go","sessionId":"%s"}`, "ws"},
+	}
+	for i, tc := range cases {
+		sid := fmt.Sprintf("0000000%d-0000-4000-8000-000000000000", i)
+		path := claudefs.SessionJSONL(claudeDir, ws, sid)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(fmt.Sprintf(tc.transcript, sid)+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		key := fmt.Sprintf("local:takeover:t%d:general", i)
+		s, err := reserveAndTakeover(context.Background(), r, key, sid, ws, AgentOpts{})
+		if err != nil {
+			t.Fatalf("%s: Takeover: %v", tc.name, err)
+		}
+		if got.ResumeID != sid || got.Name != tc.want || got.SpawnOverlay.Name != tc.want || s.CLISessionName() != tc.want {
+			t.Errorf("%s: resume %q, name %q, overlay %q, session %q; want %q", tc.name,
+				got.ResumeID, got.Name, got.SpawnOverlay.Name, s.CLISessionName(), tc.want)
 		}
 	}
 }

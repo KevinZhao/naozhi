@@ -60,19 +60,9 @@ func TranscriptTurnEnded(path string) (bool, error) {
 // the cheap error (its result is still consumed as unowned); the alternative
 // would read metadata mid-write after an ended turn as one still running.
 func lastTurnRecord(r io.ReaderAt, size, window int64) (ended, found bool, err error) {
-	off := max(0, size-window)
-	buf := make([]byte, size-off)
-	n, err := r.ReadAt(buf, off)
-	if err != nil && !errors.Is(err, io.EOF) {
+	buf, err := readTail(r, size, window)
+	if err != nil {
 		return false, false, err
-	}
-	buf = buf[:n]
-	if off > 0 {
-		i := bytes.IndexByte(buf, '\n')
-		if i < 0 {
-			return false, false, nil
-		}
-		buf = buf[i+1:]
 	}
 	for len(buf) > 0 {
 		i := bytes.LastIndexByte(buf, '\n')
@@ -83,6 +73,26 @@ func lastTurnRecord(r io.ReaderAt, size, window int64) (ended, found bool, err e
 		}
 	}
 	return false, false, nil
+}
+
+// readTail returns the last window bytes of r, less the partial first line
+// of a window starting mid-file.
+func readTail(r io.ReaderAt, size, window int64) ([]byte, error) {
+	off := max(0, size-window)
+	buf := make([]byte, size-off)
+	n, err := r.ReadAt(buf, off)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	buf = buf[:n]
+	if off > 0 {
+		i := bytes.IndexByte(buf, '\n')
+		if i < 0 {
+			return nil, nil
+		}
+		buf = buf[i+1:]
+	}
+	return buf, nil
 }
 
 // turnRecord classifies one transcript line; ok is false for a line that is

@@ -379,8 +379,9 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 		workspace = osutil.CanonicalCase(workspace)
 	}
 
-	// Every Claude spawn carries --name, re-passed on resume (the CLI keeps the
-	// name only if it is given again). Computed once here and recorded in the
+	// Every Claude spawn carries --name: the caller's, else the session label,
+	// else a key-derived placeholder. A resume re-passes the name its
+	// transcript holds instead (completeSpawn, resumedCLIName). Recorded in the
 	// overlay, so a later relabel is not drift.
 	if overlay.Name == "" {
 		var label string
@@ -635,6 +636,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (_ *M
 			return nil, fmt.Errorf("session settings: %w", err)
 		}
 	}
+	r.settleResumedCLIName(res)
 	// Before the spawn, so every line the new process writes lies past it.
 	mark := markTranscript(r.hist.claudeDir, r.hist.backendDirs, res.backendID, res.workspace, res.resumeID)
 	proc, err := r.spawn.spawnProcess(ctx, res.wrapper, res.spawnOpts, key, res.backendID)
@@ -698,6 +700,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (_ *M
 			oldHistory, respawnChain(prevIDs, res.rejectedResumeID, ""), snap.cost, snap.spent.USD, snap.createdAt, res.opts.Exempt, snap.sid,
 			hist.userTurns, overrides, snap.workflows,
 		)
+		s.setCLISessionName(res.spawnOpts.Name)
 		s.startupFails.Store(max(snap.startupFails, failedSpawns.Streak))
 		s.setCodeChanges(snap.codeChanges)
 		s.costMu.Lock()

@@ -1,14 +1,17 @@
 package session
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"unicode"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -107,6 +110,40 @@ func cliSessionName(key, label, workspace string) string {
 		base += "-" + parts[3]
 	}
 	return cleanCLIName(base)
+}
+
+// settleResumedCLIName resets the defaulted --name of a resumed Claude spawn
+// to resumedCLIName, overlay included so the drift side rebuilds it. Outside
+// any lock: it reads the transcript tail.
+func (r *Router) settleResumedCLIName(res *spawnReservation) {
+	if res.opts.Name != "" || res.resumeID == "" || r.hist.claudeDir == "" ||
+		cmp.Or(res.backendID, "claude") != "claude" || res.spawnOpts.SpawnOverlay == nil {
+		return
+	}
+	held, aiTitle, err := claudefs.TranscriptTitles(claudefs.SessionJSONL(r.hist.claudeDir, res.workspace, res.resumeID))
+	if err != nil {
+		slog.Debug("cli name: transcript titles unreadable", "key", res.key, "err", err)
+	}
+	name := resumedCLIName(res.spawnOpts.Name, cliSessionName(res.key, "", res.workspace), held, aiTitle)
+	res.spawnOpts.Name, res.spawnOpts.SpawnOverlay.Name = name, name
+}
+
+// resumedCLIName is the --name of a resumed session whose caller set none.
+// It re-passes the name the transcript holds (held: an earlier --name or a
+// terminal /rename), as the CLI keeps a name only if it is given again — so a
+// name, once given, stays and a later relabel does not rename the session.
+// The exception is a held placeholder (the key-derived name) once the session
+// has a title: def, the label-derived default, replaces it. A session holding
+// no name keeps its aiTitle over the placeholder.
+func resumedCLIName(def, placeholder, held, aiTitle string) string {
+	held, aiTitle = cleanCLIName(held), cleanCLIName(aiTitle)
+	switch {
+	case held != "" && (held != placeholder || def == placeholder):
+		return held
+	case def == placeholder && aiTitle != "":
+		return aiTitle
+	}
+	return def
 }
 
 // cleanCLIName folds whitespace and control runes to single spaces, drops
