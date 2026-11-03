@@ -3,6 +3,8 @@ package session
 import (
 	"cmp"
 	"strings"
+
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // Cross-session messages (CC's ListAgents / SendMessage channel,
@@ -14,13 +16,17 @@ import (
 // IM or dashboard session, keyed {platform}:{chatType}:{chatID}:{agentId}),
 // so another session's message is only noted there, never acted on; "" (the
 // CLI default) for every other namespace (cron, sys, scratch, project
-// planners). A session that should take messages (the Planner and the
-// sessions it dispatches) sets AgentOpts.CrossSessionInbound to "accept".
+// planners); "accept" for the global Planner (planner:main), which also sets
+// it explicitly. A session that should take messages (the sessions the
+// Planner dispatches) sets AgentOpts.CrossSessionInbound to "accept".
 //
 // Only fresh spawns read it: a surviving shim's drift check rebuilds its argv
 // from the overlay it recorded, so a session spawned before the policy keeps
 // running without it until its next spawn.
 func crossSessionInboundFor(key string) string {
+	if sessionkey.IsPlannerNSKey(key) {
+		return "accept"
+	}
 	// The IM key shape, tested as ResolveForKey does: a scratch key has four
 	// segments too.
 	if !IsReservedNamespace(key) && len(strings.SplitN(key, ":", 4)) == 4 {

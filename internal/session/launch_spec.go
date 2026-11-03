@@ -38,14 +38,14 @@ func (c *spawnConfig) launchSpecFor(key string, ov shim.SpawnOverlay) LaunchSpec
 }
 
 func hasSettingsOverrides(ov shim.SpawnOverlay) bool {
-	return ov.CrossSessionInbound != "" || len(ov.PermissionsDeny) > 0
+	return ov.CrossSessionInbound != "" || len(ov.PermissionsDeny) > 0 || len(ov.PermissionsAllow) > 0
 }
 
 // writeSessionSettings writes the per-session settings file at path: the
 // naozhi-owned settings file base (or {} when base is "" and the CLI loads
 // ~/.claude/settings.json itself) plus ov's crossSessionInbound and
-// permissions.deny. Rewritten on every spawn, so a base edit reaches the
-// session on its next spawn, not live.
+// permissions.deny / permissions.allow. Rewritten on every spawn, so a base
+// edit reaches the session on its next spawn, not live.
 func writeSessionSettings(path, base string, ov shim.SpawnOverlay) error {
 	doc := map[string]any{}
 	if base != "" {
@@ -63,20 +63,8 @@ func writeSessionSettings(path, base string, ov shim.SpawnOverlay) error {
 	if ov.CrossSessionInbound != "" {
 		doc["crossSessionInbound"] = ov.CrossSessionInbound
 	}
-	if len(ov.PermissionsDeny) > 0 {
-		perms, _ := doc["permissions"].(map[string]any)
-		if perms == nil {
-			perms = map[string]any{}
-		}
-		deny, _ := perms["deny"].([]any)
-		for _, rule := range ov.PermissionsDeny {
-			if !slices.Contains(deny, any(rule)) {
-				deny = append(deny, rule)
-			}
-		}
-		perms["deny"] = deny
-		doc["permissions"] = perms
-	}
+	addPermissionRules(doc, "deny", ov.PermissionsDeny)
+	addPermissionRules(doc, "allow", ov.PermissionsAllow)
 	data, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err
@@ -85,6 +73,26 @@ func writeSessionSettings(path, base string, ov shim.SpawnOverlay) error {
 		return err
 	}
 	return osutil.WriteFileAtomic(path, data, 0o600)
+}
+
+// addPermissionRules appends rules to doc's permissions.<list>, keeping the
+// base file's own rules.
+func addPermissionRules(doc map[string]any, list string, rules []string) {
+	if len(rules) == 0 {
+		return
+	}
+	perms, _ := doc["permissions"].(map[string]any)
+	if perms == nil {
+		perms = map[string]any{}
+	}
+	cur, _ := perms[list].([]any)
+	for _, rule := range rules {
+		if !slices.Contains(cur, any(rule)) {
+			cur = append(cur, rule)
+		}
+	}
+	perms[list] = cur
+	doc["permissions"] = perms
 }
 
 // maxCLINameRunes caps a --name value; ListAgents shows it in a table.

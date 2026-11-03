@@ -22,6 +22,8 @@ const (
 	ProjectKeyPrefix = sessionkey.ProjectKeyPrefix
 	// SysKeyPrefix re-exports sessionkey.SysKeyPrefix.
 	SysKeyPrefix = sessionkey.SysKeyPrefix
+	// PlannerNSPrefix re-exports sessionkey.PlannerNSPrefix.
+	PlannerNSPrefix = sessionkey.PlannerNSPrefix
 )
 
 // keyNamespace is one row of the reserved-namespace policy table. Reserved
@@ -47,6 +49,7 @@ type keyNamespace struct {
 // reserveSpawn falls back to maxExemptSessions).
 var keyNamespaces = []keyNamespace{
 	{prefix: CronKeyPrefix, exempt: true, kind: "cron"},
+	{prefix: PlannerNSPrefix, exempt: true, kind: "planner"},
 	{prefix: ProjectKeyPrefix, exempt: true, kind: "project"},
 	{prefix: sessionkey.ScratchKeyPrefix, exempt: false, kind: ""},
 	{prefix: SysKeyPrefix, exempt: true, kind: "sys"},

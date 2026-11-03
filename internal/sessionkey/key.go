@@ -17,7 +17,13 @@ const (
 	// ProjectKeyPrefix is the namespace prefix for project-scoped session
 	// keys; the canonical key shape is `project:{name}:planner`.
 	ProjectKeyPrefix = "project:"
+	// PlannerNSPrefix is the namespace of the one global Planner
+	// (docs/rfc/planner.md §15.1), unrelated to the project planners above.
+	PlannerNSPrefix = "planner:"
 )
+
+// PlannerMainKey is the global Planner's session key.
+const PlannerMainKey = PlannerNSPrefix + "main"
 
 // DashboardPlatform is the platform segment (parts[0]) of dashboard-
 // originated session keys.
@@ -43,6 +49,9 @@ func IsCronKey(s string) bool { return strings.HasPrefix(s, CronKeyPrefix) }
 
 // IsSysKey reports whether s belongs to the system-session namespace.
 func IsSysKey(s string) bool { return strings.HasPrefix(s, SysKeyPrefix) }
+
+// IsPlannerNSKey reports whether s belongs to the global Planner's namespace.
+func IsPlannerNSKey(s string) bool { return strings.HasPrefix(s, PlannerNSPrefix) }
 
 // IsScratchKey reports whether s belongs to the dashboard scratch namespace.
 func IsScratchKey(s string) bool { return strings.HasPrefix(s, ScratchKeyPrefix) }

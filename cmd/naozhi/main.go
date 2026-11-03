@@ -23,6 +23,7 @@ import (
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/planner/activity"
+	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/routerrelay"
 	"github.com/naozhi/naozhi/internal/selfupdate"
@@ -281,6 +282,18 @@ func main() {
 		slog.Warn("planner outputs index partly rebuilt", "err", err)
 	}
 	router.SetActivitySink(activities)
+	// The global Planner (planner:main); Start below, once the turn entry and
+	// the health machine exist. Built even when planner.enabled is off, so
+	// /api/planner answers "off" rather than 404.
+	home, _ := os.UserHomeDir()
+	plannerAgent := agent.New(agent.Config{
+		Enabled:    cfg.Planner.Enabled,
+		Layout:     sessionLayout,
+		Home:       home,
+		DenyPaths:  []string{absConfigPath(*configPath), shimMgr.StateDir()},
+		Sessions:   wireup.PlannerSessions{Router: router},
+		Workspaces: plannerState.Workspaces,
+	})
 	// Attachments live under each workspace root, usually outside the state dir
 	// checked above; walking every root must not hold up startup.
 	go warnIfAttachmentsLarge(workspaceRootLister{router: router, projectMgr: projectMgr}, attachmentGCMode(cfg))
@@ -416,6 +429,7 @@ func main() {
 		Backend:          defaultBackend,
 		Beats:            beats,
 		Outputs:          activities,
+		Planner:          plannerAgent,
 		AllowedRoot:      workspace,
 		IMAccess:         cfg.IMAccessPolicy(),
 		IMRateLimit:      dispatch.RateLimit{MsgsPerMin: cfg.IMRateLimit.MsgsPerMin, Burst: cfg.IMRateLimit.Burst},
@@ -504,6 +518,7 @@ func main() {
 	})
 	routerEvents.BindMonitor(healthMon.Poke)
 	go healthMon.Run(ctx)
+	plannerAgent.Start(ctx, srv, healthMon.Snapshot)
 
 	// Upstream connector: this node connects to a primary.
 	if cfg.Upstream != nil {

@@ -18,6 +18,7 @@ func TestClassifyKey(t *testing.T) {
 		{"scratch", "scratch:abc:general:general", RoleScratch},
 		{"sys daemon", "sys:auto-titler", RoleSys},
 		{"project planner", "project:naozhi:planner", RoleProject},
+		{"global planner", "planner:main", RolePlanner},
 		{"plain IM", "feishu:c2c:U_oc_abc:general", RoleIM},
 		{"empty defaults to IM", "", RoleIM},
 	}
@@ -42,6 +43,7 @@ func TestSessionRole_String(t *testing.T) {
 		{RoleProject, "project"},
 		{RoleScratch, "scratch"},
 		{RoleSys, "sys"},
+		{RolePlanner, "planner"},
 		{RoleUnknown, "unknown"},
 		{SessionRole(99), "unknown"},
 	}

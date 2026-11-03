@@ -32,6 +32,11 @@ func ArgvSpawnOptions(model, effort, debugFile, systemPrompt string, extraArgs [
 	if launch.PermissionMode != "" {
 		permissionMode = cli.PermissionModeByName(launch.PermissionMode)
 	}
+	// --strict-mcp-config still loads the --mcp-config file, so a strict
+	// session gets none: it is meant to have no MCP servers at all.
+	if launch.StrictMCPConfig {
+		mcpConfigFile = ""
+	}
 	return cli.SpawnOptions{
 		Model:              model,
 		Effort:             effort,

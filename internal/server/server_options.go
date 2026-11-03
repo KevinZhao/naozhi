@@ -13,6 +13,7 @@ import (
 	"github.com/naozhi/naozhi/internal/monitor/beat"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/planner/activity"
+	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/routerrelay"
@@ -96,6 +97,9 @@ type ServerOptions struct {
 	// Outputs is the outputs index /api/sessions/outputs lists; nil lists
 	// none.
 	Outputs *activity.Recorder
+	// Planner is the global Planner behind /api/planner; nil answers those
+	// routes as planner.enabled off.
+	Planner *agent.Agent
 
 	// Logger is the component logger the Server derives its structured logging
 	// from. nil falls back to slog.Default() (#620).

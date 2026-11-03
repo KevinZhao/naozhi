@@ -313,6 +313,7 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 		StrictMCPConfig:     opts.StrictMCPConfig,
 		CrossSessionInbound: opts.CrossSessionInbound,
 		PermissionsDeny:     slices.Clone(opts.PermissionsDeny),
+		PermissionsAllow:    slices.Clone(opts.PermissionsAllow),
 	}
 
 	// mergeArgvLayers is shared verbatim with driftCompareArgs so the two argv

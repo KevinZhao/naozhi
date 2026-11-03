@@ -14,6 +14,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/ext/accessprofile"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/agentevents"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/cli"
+	dashplanner "github.com/naozhi/naozhi/internal/dashboard/ext/planner"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/uisettings"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/workflows"
 	"github.com/naozhi/naozhi/internal/node"
@@ -154,6 +155,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		accessProfilesH: accessprofile.New(router.Backends(), opts.Config.Path, opts.Config.AccessProfileSecretsDir),
 		cronH:           buildCronHandlers(opts, claudeDir),
 		transcribeH:     buildTranscribeHandler(opts),
+		plannerH:        dashplanner.New(opts.Planner),
 	}
 
 	// The process-lifetime context is created HERE, not in Start (#2552).

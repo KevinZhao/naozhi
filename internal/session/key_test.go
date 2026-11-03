@@ -14,7 +14,7 @@ func TestReservedNamespacePrefixes(t *testing.T) {
 	t.Parallel()
 	// Sanity: canonical constants carry their trailing colon so substring
 	// checks cannot accidentally match "cronographer:" or "projectile:".
-	for _, p := range []string{CronKeyPrefix, ProjectKeyPrefix, sessionkey.ScratchKeyPrefix, SysKeyPrefix} {
+	for _, p := range []string{CronKeyPrefix, ProjectKeyPrefix, sessionkey.ScratchKeyPrefix, SysKeyPrefix, PlannerNSPrefix} {
 		if p == "" {
 			t.Errorf("empty reserved prefix in set")
 		}
@@ -31,6 +31,7 @@ func TestReservedNamespacePrefixes(t *testing.T) {
 		ProjectKeyPrefix:            true,
 		sessionkey.ScratchKeyPrefix: true,
 		SysKeyPrefix:                true,
+		PlannerNSPrefix:             true,
 	}
 	for _, p := range reservedKeyPrefixes {
 		if !wantSet[p] {
@@ -61,6 +62,7 @@ func TestIsReservedNamespace(t *testing.T) {
 		{"scratch bare prefix", "scratch:", true},
 		{"sys daemon", "sys:auto-titler", true},
 		{"sys bare prefix", "sys:", true},
+		{"global planner", "planner:main", true},
 		// Substring collisions must NOT be classified as reserved: keeping
 		// trailing-colon tokens in the prefix set prevents this, but
 		// testing it explicitly locks the contract so future refactors
@@ -93,6 +95,7 @@ func TestExemptKeyPrefixesUsesConstants(t *testing.T) {
 		CronKeyPrefix:    true,
 		ProjectKeyPrefix: true,
 		SysKeyPrefix:     true,
+		PlannerNSPrefix:  true,
 	}
 	for _, p := range exemptKeyPrefixes {
 		if !want[p] {
