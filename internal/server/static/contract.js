@@ -85,6 +85,7 @@ export const NZ_CONTRACT = Object.freeze({
     settings: '/api/settings',
     system_config_reload: '/api/system/config/reload',
     system_daemons: '/api/system/daemons',
+    system_health: '/api/system/health',
     system_update: '/api/system/update',
     system_update_apply: '/api/system/update/apply',
     transcribe: '/api/transcribe',

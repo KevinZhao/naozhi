@@ -65,6 +65,13 @@
   body.nz-view-cron .cron-main,body.nz-view-settings .settings-main,body.nz-view-system .system-main{position:fixed;inset:var(--vv-top,0) 0 0 0;width:100%!important;height:var(--vv-height,100%);z-index:10;padding-bottom:var(--nz-tabbar-h)}
   body.nz-view-cron .cron-list-head .btn-mobile-back{display:none}
   .settings-head,.system-head{padding-top:max(14px,env(safe-area-inset-top))}
+  /* 全会话健康: fold the workspace under the name so the state column stays
+     on screen. */
+  .sh-table{min-width:0}
+  .sh-table th,.sh-table td{padding:7px 8px}
+  .sh-col-ws{display:none}
+  .sh-sub{display:block;font-size:var(--nz-fs-2xs);color:var(--nz-text-mute);margin-top:2px}
+  .sh-open,.sh-name{max-width:120px}
   /* Sidebar: full-screen drawer. Default = visible (translateX(0)), slides
      out only when body.mobile-chat-view is set. Rationale: the previous
      default was translateX(-100%) relying on JS to add body.mobile-list-view

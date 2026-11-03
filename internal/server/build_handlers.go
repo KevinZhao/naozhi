@@ -200,6 +200,10 @@ func buildSystemHandlers(opts ServerOptions, router *session.Router) *system.Han
 	if opts.Update.Checker != nil {
 		checker = opts.Update.Checker
 	}
+	var workspaces system.WorkspaceLister
+	if opts.Workspaces != nil {
+		workspaces = opts.Workspaces
+	}
 	return system.New(system.Deps{
 		Daemons:       daemons,
 		Router:        router,
@@ -209,5 +213,7 @@ func buildSystemHandlers(opts ServerOptions, router *session.Router) *system.Han
 		// nil ⇒ enabled, matching config.UpdateDashboardInstall's default.
 		InstallEnabled: opts.Update.DashboardInstall == nil || *opts.Update.DashboardInstall,
 		ConfigReload:   system.ConfigReloader(opts.Config.Reload),
+		Health:         opts.Health,
+		Workspaces:     workspaces,
 	})
 }
