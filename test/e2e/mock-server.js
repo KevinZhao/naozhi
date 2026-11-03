@@ -500,8 +500,8 @@ function startMockServer(overrides = {}) {
 
     if (pathname === NZ_CONTRACT.API.sessions_events && req.method === 'GET') {
       if (!checkAuth()) return;
-      // Mirror EventLog.EntriesSince: `after` is strictly greater-than, so the
-      // 1 s poll never re-delivers the watermark millisecond.
+      // Mirror HandleEvents: `after` is inclusive (clievent.SinceInclusive),
+      // so every poll re-delivers the watermark millisecond.
       const all = plannerEvents && url.searchParams.get('key') === 'planner:main' ? plannerEvents : eventsData;
       const after = Number(url.searchParams.get('after') || 0);
       const before = Number(url.searchParams.get('before') || 0);
@@ -509,7 +509,7 @@ function startMockServer(overrides = {}) {
       const headers = { 'Content-Type': 'application/json' };
       let out;
       if (after > 0) {
-        out = all.filter(e => !e?.time || e.time > after);
+        out = all.filter(e => !e?.time || e.time >= after);
         if (limit > 0 && out.length > limit) out = out.slice(-limit);
       } else if (before > 0) {
         // events.go `before` branch: strictly older, newest `limit` of them,

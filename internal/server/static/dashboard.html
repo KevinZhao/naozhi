@@ -226,9 +226,13 @@
           <h2 class="pl-group-h" id="pl-wait-h">等你 · <span id="pl-wait-count">0</span></h2>
           <div class="pl-list" id="pl-wait" role="list"></div>
         </section>
-        <section class="pl-group" aria-labelledby="pl-promise-h">
-          <h2 class="pl-group-h" id="pl-promise-h">答应你的 · <span id="pl-promise-count">0</span></h2>
-          <div class="pl-list" id="pl-promise" role="list"></div>
+        <!-- 答应你的: promises.js (§15.1 PR ⑫) mountPromises(#pl-promise)
+             replaces this heading and empty state with its own group. -->
+        <section class="pl-group" aria-label="答应你的">
+          <div id="pl-promise">
+            <h2 class="pl-group-h">答应你的 · <span id="pl-promise-count">0</span></h2>
+            <div class="pl-empty">还没有答应你的事<span>你交代给 Planner 的承诺会列在这里</span></div>
+          </div>
         </section>
         <div class="pl-tools" id="pl-tools"></div>
       </div>
