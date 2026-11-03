@@ -45,10 +45,11 @@ test('markdown file renders, toggles to raw and back', async ({ page }) => {
   const toggle = page.locator('#files-md-toggle');
   await expect(body.locator('.fv-rich .md-h1')).toHaveText('Title');
   await expect(body.locator('.md-table')).toHaveCount(1);
-  // Math and diagrams render once their vendor bundles load; their slots
-  // being emitted is what proves the chat renderer is wired in.
-  await expect(body.locator('.katex, .katex-pending')).toHaveCount(1);
-  await expect(body.locator('.mermaid-wrap')).toHaveCount(1);
+  // Wait for the real output: mermaid only renders via runPendingAsync, so
+  // asserting the placeholder slots alone would miss a dropped call.
+  await expect(body.locator('.mermaid-wrap svg')).toHaveCount(1);
+  await expect(body.locator('.katex')).toHaveCount(1);
+  await expect(body.locator('.katex-pending')).toHaveCount(0);
   await expect(toggle).toBeVisible();
   await expect(toggle).toHaveText('原文');
 
