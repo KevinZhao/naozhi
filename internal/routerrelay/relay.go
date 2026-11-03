@@ -17,6 +17,7 @@ import "sync/atomic"
 // slot unbound.
 type Relay struct {
 	sessionsChanged atomic.Pointer[func()]
+	monitor         atomic.Pointer[func()]
 	keyRetired      atomic.Pointer[func(key, sessionID string)]
 }
 
@@ -25,7 +26,14 @@ func (r *Relay) SessionsChanged() {
 	if fn := r.sessionsChanged.Load(); fn != nil {
 		(*fn)()
 	}
+	if fn := r.monitor.Load(); fn != nil {
+		(*fn)()
+	}
 }
+
+// BindMonitor installs a second SessionsChanged consumer, the health
+// monitor's; it runs on the router's hot path and must not block.
+func (r *Relay) BindMonitor(fn func()) { bindOnce(&r.monitor, fn, "Monitor") }
 
 // KeyRetired forwards the router's key-retirement notification.
 func (r *Relay) KeyRetired(key, sessionID string) {

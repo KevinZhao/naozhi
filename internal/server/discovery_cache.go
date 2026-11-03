@@ -294,6 +294,17 @@ func (dc *discoveryCache) snapshot() []discovery.DiscoveredSession {
 	return out
 }
 
+// DiscoveredSessions returns the cached terminal CLI sessions (a copy).
+func (s *Server) DiscoveredSessions() []discovery.DiscoveredSession {
+	return s.discoveryCache.snapshot()
+}
+
+// RemoteSessions returns the remote node cache's sessions and node statuses;
+// read-only, see node.CacheManager.Sessions.
+func (s *Server) RemoteSessions() (map[string][]map[string]any, map[string]string) {
+	return s.nodeCache.Sessions()
+}
+
 // Snapshot is the exported alias used by internal/dashboard/discovery via the
 // CacheView interface.
 func (dc *discoveryCache) Snapshot() []discovery.DiscoveredSession { return dc.snapshot() }

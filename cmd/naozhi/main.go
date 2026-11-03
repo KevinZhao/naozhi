@@ -18,6 +18,7 @@ import (
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/monitor/beat"
+	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/monitor/wake"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -269,9 +270,9 @@ func main() {
 		os.Exit(1)
 	}
 	// After the project scan so the first start can register projects as
-	// workspaces. Nothing consumes the state yet; opening it here runs the
-	// journal retention and the first-start seed once per process.
-	_ = wireup.OpenPlannerState(sessionLayout, cfg.Workspace.ID, projectMgr)
+	// workspaces; opening it here runs the journal retention and the
+	// first-start seed once per process.
+	plannerState := wireup.OpenPlannerState(sessionLayout, cfg.Workspace.ID, projectMgr)
 	// Attachments live under each workspace root, usually outside the state dir
 	// checked above; walking every root must not hold up startup.
 	go warnIfAttachmentsLarge(workspaceRootLister{router: router, projectMgr: projectMgr}, attachmentGCMode(cfg))
@@ -473,6 +474,27 @@ func main() {
 			RunTelemetry: hubTelemetry,
 		},
 	})
+
+	// Session ledger and health state machine (docs/rfc/planner.md §3.8). It
+	// only reads; with no planner state root it still runs, journaling and
+	// writing index.json nothing. Its loop ends with ctx.
+	healthMon := health.New(health.Config{
+		Clock: wake.SystemClock(),
+		Collect: wireup.HealthSources{
+			Router:      router,
+			Cron:        scheduler,
+			Sysession:   sysMgr,
+			Remote:      srv.RemoteSessions,
+			Discovered:  srv.DiscoveredSessions,
+			EventLogDir: eventLogDir,
+		}.Collect,
+		Journal:    plannerState.Journal,
+		Workspaces: plannerState.Workspaces,
+		IndexPath:  plannerState.IndexPath,
+		Beats:      beats,
+	})
+	routerEvents.BindMonitor(healthMon.Poke)
+	go healthMon.Run(ctx)
 
 	// Upstream connector: this node connects to a primary.
 	if cfg.Upstream != nil {

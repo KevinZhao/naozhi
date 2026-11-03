@@ -15,6 +15,8 @@ import (
 type PlannerState struct {
 	Journal    *journal.Journal
 	Workspaces *workspace.Registry
+	// IndexPath is where the session index goes; "" without a state root.
+	IndexPath string
 }
 
 // OpenPlannerState creates the Planner state root next to the session store,
@@ -32,6 +34,7 @@ func OpenPlannerState(lay datadir.Layout, nodeID string, projects *project.Manag
 		slog.Warn("planner state root unavailable", "path", root, "err", err)
 		return st
 	}
+	st.IndexPath = lay.PlannerIndexPath()
 	if j, err := journal.Open(lay.PlannerLogRoot()); err != nil {
 		slog.Warn("planner journal unavailable", "err", err)
 	} else {
