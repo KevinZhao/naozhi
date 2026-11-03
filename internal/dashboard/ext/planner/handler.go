@@ -5,6 +5,7 @@
 //	POST /api/planner/state  {"stopped": bool} — the runtime "停用 Planner" switch
 //	POST /api/planner/send   {"text": "..."} — a message to the Planner, with
 //	                         the gateway's snapshot before it and a receipt
+//	GET  /api/planner/briefs the latest morning briefs, newest first (?limit=)
 //
 // All sit behind the /api/* auth middleware.
 package planner
@@ -13,19 +14,47 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/planner/agent"
+	"github.com/naozhi/naozhi/internal/planner/brief"
 )
 
 // Handler serves the endpoints over an *agent.Agent; a nil agent answers
-// every request as planner.enabled off.
+// every request as planner.enabled off. The briefs do not depend on the
+// Planner: they are listed whether it is on or not.
 type Handler struct {
-	agent *agent.Agent
+	agent  *agent.Agent
+	briefs *brief.Briefer
 }
 
-// New returns a Handler for a (nil when not built).
-func New(a *agent.Agent) *Handler { return &Handler{agent: a} }
+// New returns a Handler for a and b (either nil when not built).
+func New(a *agent.Agent, b *brief.Briefer) *Handler { return &Handler{agent: a, briefs: b} }
+
+// Brief list sizes: the default and the most one request returns.
+const (
+	briefsDefault = 7
+	briefsMax     = 14
+)
+
+// HandleBriefs lists the latest morning briefs, newest first.
+func (h *Handler) HandleBriefs(w http.ResponseWriter, r *http.Request) {
+	limit := briefsDefault
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "limit must be a positive integer"})
+			return
+		}
+		limit = min(n, briefsMax)
+	}
+	out := []brief.Brief{}
+	if h.briefs != nil {
+		out = h.briefs.Recent(limit)
+	}
+	httputil.WriteJSON(w, map[string]any{"briefs": out})
+}
 
 // HandleStatus reports the Planner's switch and session.
 func (h *Handler) HandleStatus(w http.ResponseWriter, _ *http.Request) {

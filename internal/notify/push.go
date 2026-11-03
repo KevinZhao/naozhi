@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"cmp"
 	"context"
 	"log/slog"
 	"os/exec"
@@ -67,6 +68,26 @@ func quiet(now time.Time) bool {
 // pushFor builds its notification: what happened and to what.
 func (n *Notifier) pushFor(it Item) Push {
 	return Push{ID: it.ID, Kind: it.Kind, Level: it.Level, Title: it.Title, Body: it.Why, Unit: it.Unit}
+}
+
+// Announce pushes p once by its level (timely when unset) without an inbox
+// item: a message the user reads elsewhere, as the morning brief. It counts
+// against the cap and is held like an item's push, never queued, and
+// reports whether it went out.
+func (n *Notifier) Announce(p Push) bool {
+	p.Level = cmp.Or(p.Level, LevelTimely)
+	n.mu.Lock()
+	ok, reason := n.admitLocked(p.Level, n.cfg.Clock.Now())
+	n.mu.Unlock()
+	d := notifyData{Event: "push", ID: p.ID, Kind: p.Kind, Level: p.Level}
+	if !ok {
+		d.Event, d.Reason = "held", reason
+	}
+	n.record(p.Unit, d)
+	if ok {
+		n.deliver(p)
+	}
+	return ok
 }
 
 // deliver sends p to both exits. The hub only queues frames; the system

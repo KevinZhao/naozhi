@@ -45,6 +45,10 @@ const (
 	KindDecision Kind = "decision"
 )
 
+// WaitsOnUser reports whether items of kind k count as "等你" (§10.1:
+// decisions and questions; P2 adds reviews).
+func (k Kind) WaitsOnUser() bool { return k == KindDecision || k == KindQuestion }
+
 // Level is how an item may be pushed.
 type Level string
 
@@ -542,7 +546,7 @@ func (n *Notifier) countsLocked() Counts {
 			continue
 		}
 		c.Open++
-		if it.Kind == KindDecision || it.Kind == KindQuestion {
+		if it.Kind.WaitsOnUser() {
 			c.Badge++
 		}
 	}
