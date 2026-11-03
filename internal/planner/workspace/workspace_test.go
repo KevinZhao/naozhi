@@ -67,18 +67,18 @@ func TestSeedLookupEnsure(t *testing.T) {
 	}
 
 	other := filepath.Join(root, "other")
-	w, err := r.Ensure(other)
-	if err != nil {
-		t.Fatal(err)
+	w, ok := r.Ensure(other)
+	if !ok {
+		t.Fatal("Ensure(other) refused")
 	}
 	if w.Name != "other" || !idRE.MatchString(w.ID) || len(w.Paths[node]) != 1 || w.Paths[node][0] != other {
 		t.Errorf("Ensure registered %+v", w)
 	}
-	again, err := r.Ensure(filepath.Join(other, "sub"))
-	if err != nil || again.ID != w.ID {
-		t.Errorf("Ensure(child) = %+v, %v; want existing %s", again, err, w.ID)
+	again, ok := r.Ensure(filepath.Join(other, "sub"))
+	if !ok || again.ID != w.ID {
+		t.Errorf("Ensure(child) = %+v, %v; want existing %s", again, ok, w.ID)
 	}
-	if _, err := r.Ensure("relative"); err == nil {
+	if _, ok := r.Ensure("relative"); ok {
 		t.Error("Ensure accepted a relative path")
 	}
 
@@ -127,6 +127,54 @@ func TestLookupCaseFolded(t *testing.T) {
 	if w, ok := r.Lookup(filepath.Join(folded, "internal")); !ok || w.Name != "naozhi" {
 		t.Errorf("Lookup(case-folded) = %+v, %v", w, ok)
 	}
+	// A shallower path matching byte-wise must not hide the deeper folded one.
+	if _, ok := r.Ensure(filepath.Join(root, "workspace")); !ok {
+		t.Fatal("Ensure(workspace) refused")
+	}
+	if w, ok := r.Lookup(filepath.Join(folded, "internal")); !ok || w.Name != "naozhi" {
+		t.Errorf("Lookup(case-folded, shallow byte match) = %+v, %v", w, ok)
+	}
+}
+
+// TestEnsureContainer: the projects root and its ancestors hold workspaces
+// rather than being one, so registering one would claim every project
+// created below it later.
+func TestEnsureContainer(t *testing.T) {
+	root := tempRoot(t, "projects/proj", "projects/newproj")
+	projects := filepath.Join(root, "projects")
+	r := Load("", node, projects)
+	if n := r.SeedIfEmpty([]Seed{{Path: projects}, {Path: filepath.Join(projects, "proj")}}); n != 1 {
+		t.Fatalf("SeedIfEmpty added %d, want 1 (container skipped)", n)
+	}
+	for _, dir := range []string{projects, root} {
+		if w, ok := r.Ensure(dir); ok {
+			t.Errorf("Ensure(%s) registered %+v", dir, w)
+		}
+	}
+	w, ok := r.Ensure(filepath.Join(projects, "newproj"))
+	if !ok || w.Name != "newproj" || len(r.List()) != 2 {
+		t.Errorf("Ensure(newproj) = %+v, %v; want a new workspace", w, ok)
+	}
+}
+
+// TestLoadCorruptFailsClosed: IDs cannot be regenerated, so a registry that no
+// longer parses is left in place and never replaced by a fresh seed, on this
+// start or the next.
+func TestLoadCorruptFailsClosed(t *testing.T) {
+	root := tempRoot(t, "repo")
+	path := filepath.Join(root, "workspaces.json")
+	orig := []byte(`{"v":1,"workspaces":[{"id":"ws_aaaaaaaa","name":"renamed",,"paths":{}}]}`)
+	if err := os.WriteFile(path, orig, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		r := Load(path, node)
+		r.SeedIfEmpty([]Seed{{Path: filepath.Join(root, "repo")}})
+		r.Ensure(filepath.Join(root, "repo"))
+		if got, _ := os.ReadFile(path); string(got) != string(orig) {
+			t.Fatalf("corrupt registry overwritten: %s", got)
+		}
+	}
 }
 
 // TestLookupOtherNode: paths registered for another node never match here.
@@ -144,9 +192,9 @@ func TestLookupOtherNode(t *testing.T) {
 	if _, ok := r.Lookup(repo); ok {
 		t.Error("matched a path registered for another node")
 	}
-	w, err := r.Ensure(repo)
-	if err != nil || w.ID == "ws_remote01" || len(r.List()) != 2 {
-		t.Errorf("Ensure = %+v, %v; want a new local workspace", w, err)
+	w, ok := r.Ensure(repo)
+	if !ok || w.ID == "ws_remote01" || len(r.List()) != 2 {
+		t.Errorf("Ensure = %+v, %v; want a new local workspace", w, ok)
 	}
 }
 
@@ -158,8 +206,8 @@ func TestLoadNewerVersionNotOverwritten(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := Load(path, node)
-	if _, err := r.Ensure(filepath.Join(root, "repo")); err != nil {
-		t.Fatal(err)
+	if _, ok := r.Ensure(filepath.Join(root, "repo")); !ok {
+		t.Fatal("Ensure refused")
 	}
 	if got, _ := os.ReadFile(path); string(got) != string(orig) {
 		t.Errorf("newer-version registry overwritten: %s", got)

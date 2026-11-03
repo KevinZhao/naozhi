@@ -42,15 +42,14 @@ func OpenPlannerState(lay datadir.Layout, nodeID string, projects *project.Manag
 		}
 		st.Journal = j
 	}
-	st.Workspaces = workspace.Load(lay.PlannerWorkspacesPath(), nodeID)
-	if projects != nil {
+	if projects == nil {
+		st.Workspaces = workspace.Load(lay.PlannerWorkspacesPath(), nodeID)
+	} else {
+		// The projects root holds workspaces rather than being one, so the
+		// include_root synthetic project is skipped as a seed too.
+		st.Workspaces = workspace.Load(lay.PlannerWorkspacesPath(), nodeID, projects.Root())
 		var seeds []workspace.Seed
 		for _, p := range projects.All() {
-			// The synthetic root project spans every other project; as a
-			// workspace it would swallow each new directory under the root.
-			if p.IsRoot {
-				continue
-			}
 			seeds = append(seeds, workspace.Seed{Name: p.Name, Path: p.Path})
 		}
 		if n := st.Workspaces.SeedIfEmpty(seeds); n > 0 {

@@ -6,14 +6,15 @@
 // path hashes break on a move or a case-folded spelling, so the ID is what
 // other Planner state (journal entries, knowledge, charters) stores. A session
 // belongs to the registered path that contains its working directory; Ensure
-// registers the directory itself when none does.
+// registers the directory itself when none does, unless it is a container
+// (the projects root or one of its ancestors) that holds workspaces rather
+// than being one.
 package workspace
 
 import (
 	"cmp"
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"maps"
 	"math/rand/v2"
@@ -75,28 +76,39 @@ type Seed struct {
 type Registry struct {
 	path string
 	node string
+	// containers are resolved directories that are never registered: a
+	// workspace there would contain every project created below it later.
+	containers []string
 
 	mu sync.Mutex
 	ws []Workspace
-	// readOnly is set when the file is on disk but could not be used, or was
-	// written by a newer naozhi: saving would destroy what this build cannot
-	// read, so changes stay in memory.
+	// readOnly is set when the file is on disk but could not be used (corrupt,
+	// unreadable) or was written by a newer naozhi: saving would replace IDs
+	// that cannot be regenerated, so changes stay in memory.
 	readOnly    bool
 	saveFailing bool
 }
 
-// Load reads the registry at path for node. A missing file starts empty; a
-// corrupt one is moved aside and starts empty. An empty path keeps the
-// registry in memory only.
-func Load(path, node string) *Registry {
+// Load reads the registry at path for node. containers are directories (the
+// projects root) that Ensure and SeedIfEmpty never register. A missing file
+// starts empty. A corrupt or unreadable one is left in place and the registry
+// runs in memory only until it is fixed: its IDs cannot be regenerated, so
+// starting over would orphan everything stored under them. An empty path
+// keeps the registry in memory only.
+func Load(path, node string, containers ...string) *Registry {
 	r := &Registry{path: path, node: node}
+	for _, c := range containers {
+		if c, ok := resolve(c); ok {
+			r.containers = append(r.containers, c)
+		}
+	}
 	if path == "" {
 		return r
 	}
 	f, out, err := jsonfile.Load[file](path, jsonfile.Options{
 		MaxBytes: maxBytes,
 		Label:    "workspace registry",
-		Corrupt:  jsonfile.PreserveCorrupt,
+		Corrupt:  jsonfile.LeaveCorrupt,
 	})
 	if err != nil {
 		slog.Warn("workspace registry unusable; changes kept in memory only", "path", path, "err", err)
@@ -104,8 +116,9 @@ func Load(path, node string) *Registry {
 		return r
 	}
 	switch out {
-	case jsonfile.CorruptPreserved:
-		slog.Warn("workspace registry was corrupt and moved aside; starting empty", "path", path)
+	case jsonfile.CorruptLeft:
+		slog.Warn("workspace registry is corrupt; changes kept in memory only until it is fixed and naozhi restarted", "path", path)
+		r.readOnly = true
 	case jsonfile.Parsed:
 		if f.V > Version {
 			slog.Warn("workspace registry written by a newer naozhi; not overwriting it", "path", path, "version", f.V)
@@ -144,25 +157,30 @@ func (r *Registry) Lookup(dir string) (Workspace, bool) {
 
 // Ensure returns the workspace containing dir, registering dir as a new
 // workspace named after its base name when no registered path contains it.
-// The error is only for a dir that is not absolute.
-func (r *Registry) Ensure(dir string) (Workspace, error) {
+// ok is false when dir is not absolute, or is a container (or an ancestor of
+// one) outside every workspace: such a dir belongs to none.
+func (r *Registry) Ensure(dir string) (Workspace, bool) {
 	resolved, ok := resolve(dir)
 	if !ok {
-		return Workspace{}, fmt.Errorf("workspace: %q is not an absolute path", dir)
+		return Workspace{}, false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if i := r.lookupLocked(resolved); i >= 0 {
-		return r.ws[i].clone(), nil
+		return r.ws[i].clone(), true
+	}
+	if r.isContainer(resolved) {
+		return Workspace{}, false
 	}
 	w := r.addLocked(filepath.Base(resolved), resolved)
 	r.saveLocked()
-	return w.clone(), nil
+	return w.clone(), true
 }
 
 // SeedIfEmpty registers one workspace per seed when the registry holds none —
 // the first start, before any session directory has been seen — and returns
-// how many it added. Seeds that are not absolute or repeat a path are skipped.
+// how many it added. Seeds that are not absolute, repeat a path or are a
+// container are skipped.
 func (r *Registry) SeedIfEmpty(seeds []Seed) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -172,7 +190,7 @@ func (r *Registry) SeedIfEmpty(seeds []Seed) int {
 	seen := make(map[string]bool, len(seeds))
 	for _, s := range seeds {
 		p, ok := resolve(s.Path)
-		if !ok || seen[p] {
+		if !ok || seen[p] || r.isContainer(p) {
 			continue
 		}
 		seen[p] = true
@@ -185,9 +203,10 @@ func (r *Registry) SeedIfEmpty(seeds []Seed) int {
 }
 
 // lookupLocked returns the index of the workspace with the longest path on
-// this node containing dir, or -1. Byte-wise prefix first; only when that
-// misses, the inode walk of osutil.PathContainedInRoot, which is what matches
-// a case-folded spelling (~/Workspace vs ~/workspace) on macOS.
+// this node containing dir, or -1. Byte-wise prefix first; then the inode
+// walk of osutil.PathContainedInRoot, which matches a case-folded spelling
+// (~/Workspace vs ~/workspace) on macOS, only for paths longer than the
+// byte-wise best so a shallow exact match cannot hide a deeper folded one.
 func (r *Registry) lookupLocked(dir string) int {
 	best, bestLen := -1, 0
 	for i, w := range r.ws {
@@ -197,9 +216,6 @@ func (r *Registry) lookupLocked(dir string) int {
 			}
 		}
 	}
-	if best >= 0 {
-		return best
-	}
 	for i, w := range r.ws {
 		for _, p := range w.Paths[r.node] {
 			if len(p) > bestLen && osutil.PathContainedInRoot(dir, p) {
@@ -208,6 +224,13 @@ func (r *Registry) lookupLocked(dir string) int {
 		}
 	}
 	return best
+}
+
+// isContainer reports whether dir is a container or an ancestor of one.
+func (r *Registry) isContainer(dir string) bool {
+	return slices.ContainsFunc(r.containers, func(c string) bool {
+		return osutil.PathContainedInRoot(c, dir)
+	})
 }
 
 func (r *Registry) addLocked(name, path string) Workspace {
