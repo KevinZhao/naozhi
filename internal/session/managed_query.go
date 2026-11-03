@@ -94,6 +94,16 @@ func (s *ManagedSession) DeathReason() string {
 	return loadAtomicString(&s.deathReason)
 }
 
+// ProcessDeathReason is the session's process's own death reason, which an
+// exit outside a turn leaves without touching DeathReason; "" without a
+// process.
+func (s *ManagedSession) ProcessDeathReason() string {
+	if proc := s.loadProcess(); proc != nil {
+		return proc.DeathReason()
+	}
+	return ""
+}
+
 // Snapshot returns a point-in-time view of this session.
 //
 // Side effect: a live process Model() that differs from the persisted

@@ -91,6 +91,10 @@ func ClassifyError(text string) (Kind, bool) {
 	return classify(strings.ToLower(trimmed), isEnvelope(trimmed))
 }
 
+// IsEnvelope reports whether text, as an assistant reply, is an API-error
+// envelope ("API Error: …") rather than prose that mentions one.
+func IsEnvelope(text string) bool { return isEnvelope(strings.TrimSpace(text)) }
+
 // isEnvelope reports whether trimmed starts with an API-error prefix.
 // Lowercases only the leading bytes; replies can be tens of KB.
 func isEnvelope(trimmed string) bool {
