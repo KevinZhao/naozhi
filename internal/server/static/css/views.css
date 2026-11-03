@@ -93,6 +93,37 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .sys-stat b{color:var(--nz-text);font-weight:600}
 .sys-warn{color:var(--nz-red);font-size:var(--nz-fs-xs);margin-top:8px}
 .system-empty{color:var(--nz-text-dim);font-size:var(--nz-fs-sm);text-align:center;padding:40px 20px}
+/* 全会话健康: the health state machine's table. On a phone the workspace
+   column folds under the name (responsive.css); anything still too wide
+   scrolls sideways inside .hl-scroll. State colours follow the mockup and
+   the daemon cards: 活跃 uses --nz-accent like .sys-state-dot.running, and
+   待你回复 shares 失败's red because both need the user. */
+.sys-health{margin-top:var(--nz-space-5);padding-top:var(--nz-space-4);border-top:1px solid var(--nz-border)}
+.hl-head{display:flex;align-items:baseline;gap:10px}
+.hl-head .svc-overview-title{flex:1}
+.hl-at{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);font-variant-numeric:tabular-nums}
+.hl-counts{display:flex;flex-wrap:wrap;gap:6px 14px;margin-bottom:10px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.hl-count b{color:var(--nz-text);font-weight:600;font-variant-numeric:tabular-nums}
+.hl-scroll{overflow-x:auto;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1)}
+.hl-table{width:100%;min-width:560px;border-collapse:collapse;font-size:var(--nz-fs-xs);color:var(--nz-text)}
+.hl-table th{text-align:left;font-weight:500;color:var(--nz-text-dim);padding:8px 12px;border-bottom:1px solid var(--nz-border);white-space:nowrap}
+.hl-table td{padding:7px 12px;border-bottom:1px solid var(--nz-border);white-space:nowrap;vertical-align:middle}
+.hl-table tbody tr:last-child td{border-bottom:0}
+.hl-open,.hl-name{display:inline-block;max-width:280px;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
+.hl-open{background:none;border:0;padding:0;font:inherit;color:var(--nz-text-strong);cursor:pointer;text-align:left}
+.hl-open:hover{color:var(--nz-accent);text-decoration:underline}
+.hl-open:focus-visible{outline:2px solid var(--nz-focus);outline-offset:1px}
+.hl-tag{font-size:var(--nz-fs-2xs);color:var(--nz-text-dim);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:0 5px;margin-left:4px}
+.hl-dim{color:var(--nz-text-dim)}
+.hl-sub{display:none}
+.hl-num{font-variant-numeric:tabular-nums;color:var(--nz-text-mute)}
+.hl-state{display:inline-flex;align-items:center;gap:5px;color:var(--nz-text-mute)}
+.hl-state::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;flex-shrink:0}
+.hl-state.fail,.hl-state.ask{color:var(--nz-red)}
+.hl-state.warn{color:var(--nz-amber)}
+.hl-state.run{color:var(--nz-accent)}
+.hl-state.idle{color:var(--nz-text-mute)}
+.hl-state.off{color:var(--nz-text-dim)}
 
 .asset-sidebar{width:340px;min-width:240px;max-width:60vw;flex-shrink:0;border-right:1px solid var(--nz-border);flex-direction:column;background:var(--nz-bg-0);min-height:0}
 .asset-sb-head{flex-shrink:0;display:flex;align-items:center;gap:8px;padding:14px 16px 8px}

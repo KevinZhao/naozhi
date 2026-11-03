@@ -21,6 +21,7 @@ import (
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/monitor/wake"
 	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/planner/activity"
 	"github.com/naozhi/naozhi/internal/planner/agent"
@@ -419,7 +420,21 @@ func main() {
 	}
 	updateDashboardInstall := cfg.UpdateDashboardInstall()
 
+	// "等你" inbox and push pipeline (docs/rfc/planner.md §15.1); its
+	// sources are bound once the health machine exists, below.
+	notifier := notify.New(notify.Config{
+		Clock:   wake.SystemClock(),
+		Layout:  sessionLayout,
+		Journal: plannerState.Journal,
+		Beats:   beats,
+		Name:    wireup.UnitNames(router, scheduler),
+		Link:    wireup.DashboardLink(cfg.Server.Addr),
+	})
+
 	routing := buildRouting(cfg, agents, projectMgr, scheduler)
+	// The health monitor reads srv's node and discovery caches, so it is built
+	// after srv; srv only reads it once it serves.
+	var healthMon *health.Machine
 	srv := server.NewWithOptions(server.ServerOptions{
 		Addr:             cfg.Server.Addr,
 		Router:           router,
@@ -430,6 +445,9 @@ func main() {
 		Beats:            beats,
 		Outputs:          activities,
 		Planner:          plannerAgent,
+		Health:           func() health.Snapshot { return healthMon.Snapshot() },
+		Workspaces:       plannerState.Workspaces,
+		Notify:           notifier,
 		AllowedRoot:      workspace,
 		IMAccess:         cfg.IMAccessPolicy(),
 		IMRateLimit:      dispatch.RateLimit{MsgsPerMin: cfg.IMRateLimit.MsgsPerMin, Burst: cfg.IMRateLimit.Burst},
@@ -501,7 +519,7 @@ func main() {
 	// Session ledger and health state machine (docs/rfc/planner.md §3.8). It
 	// only reads; with no planner state root it still runs, journaling and
 	// writing index.json nothing. Its loop ends with ctx.
-	healthMon := health.New(health.Config{
+	healthMon = health.New(health.Config{
 		Clock: wake.SystemClock(),
 		Collect: wireup.HealthSources{
 			Router:      router,
@@ -515,10 +533,13 @@ func main() {
 		Workspaces: plannerState.Workspaces,
 		IndexPath:  plannerState.IndexPath,
 		Beats:      beats,
+		Watch:      notifier.WatchPeer,
 	})
 	routerEvents.BindMonitor(healthMon.Poke)
 	go healthMon.Run(ctx)
 	plannerAgent.Start(ctx, srv, healthMon.Snapshot)
+	notifier.SetHealth(healthMon)
+	go notifier.Run(ctx)
 
 	// Upstream connector: this node connects to a primary.
 	if cfg.Upstream != nil {
@@ -597,6 +618,9 @@ func main() {
 				{name: "http-drain", run: func() { <-srv.ShutdownComplete() }},
 				{name: "router", run: router.Shutdown},
 			})
+			// Last: a run marker left behind tells the next start this
+			// shutdown did not finish.
+			notifier.Close()
 			slog.Info("shutdown complete", "reason", reason, "total_ms", time.Since(shutdownT0).Milliseconds())
 		})
 	}

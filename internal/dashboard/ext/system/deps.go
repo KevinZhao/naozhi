@@ -1,8 +1,10 @@
 // Package system hosts the dashboard /api/system/* endpoints: the sysession
-// daemon status list, the self-update state / apply pair, and config reload.
+// daemon status list, the session health table, the self-update state /
+// apply pair, and config reload.
 // All sit behind the /api/* auth middleware.
 //
 //	GET  /api/system/daemons        read-only daemon status list
+//	GET  /api/system/health         read-only session health table
 //	GET  /api/system/update         version state + what the operator can do
 //	POST /api/system/update/apply   carry it out (install and/or restart)
 //	POST /api/system/config/reload  re-read config.yaml, apply hot sections
@@ -12,6 +14,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/ratelimit"
 	"github.com/naozhi/naozhi/internal/selfupdate"
 	"github.com/naozhi/naozhi/internal/session"
@@ -45,6 +48,11 @@ type Deps struct {
 	InstallEnabled bool
 	// ConfigReload is nil when the server has no config path.
 	ConfigReload ConfigReloader
+	// Health is the health state machine's Snapshot; nil serves an empty
+	// table. Workspaces names its workspaces (nil interface when there is
+	// no registry).
+	Health     func() health.Snapshot
+	Workspaces WorkspaceLister
 }
 
 // Handlers serves the /api/system/* endpoint family.
@@ -62,6 +70,8 @@ type Handlers struct {
 	// configReload / reloadLimiter back POST /api/system/config/reload.
 	configReload  ConfigReloader
 	reloadLimiter *ratelimit.Limiter
+	health        func() health.Snapshot
+	workspaces    WorkspaceLister
 }
 
 // New returns Handlers wired from d.
@@ -84,6 +94,8 @@ func New(d Deps) *Handlers {
 		applyLimiter:   newUpdateApplyLimiter(),
 		configReload:   d.ConfigReload,
 		reloadLimiter:  newConfigReloadLimiter(),
+		health:         d.Health,
+		workspaces:     d.Workspaces,
 	}
 }
 

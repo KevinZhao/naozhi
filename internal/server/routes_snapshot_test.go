@@ -210,6 +210,7 @@ var routeDeclOwners = map[string]string{
 	"../dashboard/ext/cli/routes.go":           "*cli.Handler",
 	"../dashboard/ext/ccassets/routes.go":      "*extccassets.Handler",
 	"../dashboard/ext/planner/routes.go":       "*dashplanner.Handler",
+	"../dashboard/ext/inbox/routes.go":         "*inbox.Handler",
 }
 
 // scanRouteDecls reads the `{Pattern: "METHOD /path", Handler: h.X}` composite
