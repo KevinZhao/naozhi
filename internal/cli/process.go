@@ -514,11 +514,12 @@ func (p *Process) seedEffort(tier string) {
 // SeedFromSpawnArgs restores the launch-time state a reattached process cannot
 // get from SpawnOptions (SpawnReconnect has none) out of the shim-recorded
 // spawn argv: the effort tier, and for claude the settings file its model list
-// comes from. Fill-if-unset on both, so state already reported wins.
-func (p *Process) SeedFromSpawnArgs(args []string) {
+// comes from (baseSettings: the naozhi-owned settings file, "" for none).
+// Fill-if-unset on both, so state already reported wins.
+func (p *Process) SeedFromSpawnArgs(args []string, baseSettings string) {
 	p.seedEffort(effortFromArgs(args))
-	if s, ok := p.protocol.(interface{ seedSettingsFromArgs([]string) }); ok {
-		s.seedSettingsFromArgs(args)
+	if s, ok := p.protocol.(interface{ seedSettingsFromArgs([]string, string) }); ok {
+		s.seedSettingsFromArgs(args, baseSettings)
 	}
 }
 

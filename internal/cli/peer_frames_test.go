@@ -8,8 +8,9 @@ import (
 
 // TestPeerAndRefusalEntries: the frames CC 2.1.316 writes for a cross-session
 // message (an idle session's replay with the model-facing preamble, a busy
-// one's bare one), a held message and the two refusals each become one entry
-// of their own kind; a replay with no peer origin stays out of the log.
+// one's bare one), a held or dropped message and the two refusals each become
+// one entry of their own kind; a replay with no peer origin and a release
+// (its replay follows) stay out of the log.
 func TestPeerAndRefusalEntries(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -31,7 +32,13 @@ func TestPeerAndRefusalEntries(t *testing.T) {
 			nil},
 		{"held",
 			`{"type":"system","subtype":"peer_message_hold","state":"held","message_uuid":"m","lane":"socket","from":"uds:/tmp/cc-socks/3.sock","from_name":"p9-sender","cause":"explicit-setting","uuid":"u3","session_id":"s"}`,
-			[]clievent.EventEntry{{Type: clievent.KindPeerHold, Peer: "p9-sender", Summary: "p9-sender", Reason: "explicit-setting"}}},
+			[]clievent.EventEntry{{Type: clievent.KindPeerHold, Peer: "p9-sender", Summary: "p9-sender", Status: "held", Reason: "explicit-setting"}}},
+		{"released",
+			`{"type":"system","subtype":"peer_message_hold","state":"released","message_uuid":"m","lane":"socket","from":"uds:/tmp/cc-socks/3.sock","from_name":"p9-sender","uuid":"u6","session_id":"s"}`,
+			nil},
+		{"dropped",
+			`{"type":"system","subtype":"peer_message_hold","state":"dropped","message_uuid":"m","lane":"socket","from":"uds:/tmp/cc-socks/3.sock","from_name":"p9-sender","outcome":"expired","uuid":"u7","session_id":"s"}`,
+			[]clievent.EventEntry{{Type: clievent.KindPeerHold, Peer: "p9-sender", Summary: "p9-sender", Status: "dropped", Reason: "expired"}}},
 		{"permission denied",
 			`{"type":"system","subtype":"permission_denied","tool_name":"Bash","tool_use_id":"toolu_2","decision_reason_type":"classifier","decision_reason":"pushes to an untrusted repo","message":"Permission to use Bash has been denied.","uuid":"u4","session_id":"s"}`,
 			[]clievent.EventEntry{{Type: clievent.KindPermissionDenied, Tool: "Bash", Reason: "pushes to an untrusted repo", Summary: "Permission to use Bash has been denied.", Detail: "Permission to use Bash has been denied."}}},
@@ -53,7 +60,7 @@ func TestPeerAndRefusalEntries(t *testing.T) {
 			for i := range got {
 				if got[i].Type != tc.want[i].Type || got[i].UUID != tc.want[i].UUID || got[i].Peer != tc.want[i].Peer ||
 					got[i].PeerMode != tc.want[i].PeerMode || got[i].Summary != tc.want[i].Summary ||
-					got[i].Detail != tc.want[i].Detail || got[i].Tool != tc.want[i].Tool || got[i].Reason != tc.want[i].Reason {
+					got[i].Detail != tc.want[i].Detail || got[i].Tool != tc.want[i].Tool || got[i].Reason != tc.want[i].Reason || got[i].Status != tc.want[i].Status {
 					t.Errorf("entry %d = %+v, want %+v", i, got[i], tc.want[i])
 				}
 			}

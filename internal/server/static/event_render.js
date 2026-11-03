@@ -129,16 +129,26 @@ function peerMessageHtml(e, cleanRaw) {
   return '<div class="peer-source">' + peerSourceHtml(e) + '</div>' + renderMd(cleanRaw || '');
 }
 
-// PEER_HOLD_CAUSES words the causes CC reports for holding a message.
+// PEER_HOLD_CAUSES words the causes CC reports for holding a message, and
+// PEER_DROP_OUTCOMES why a held one was finally dropped.
 const PEER_HOLD_CAUSES = new Map([
   ['explicit-setting', '本会话只提示、不收'],
   ['mode-mismatch', '双方权限模式不同'],
 ]);
+const PEER_DROP_OUTCOMES = new Map([
+  ['expired', '无人放行，已过期'],
+  ['refused', '收件策略改为拒收'],
+  ['dropped', '被限流或去重丢弃'],
+  ['discarded', '会话结束时仍未放行'],
+]);
 
-// peerHoldHtml: the side note for a message the CLI held instead of delivering.
+// peerHoldHtml: the side note for a message the CLI held instead of
+// delivering (status "held"), or one it then dropped (status "dropped").
 function peerHoldHtml(e) {
-  const why = PEER_HOLD_CAUSES.get(e.reason) || e.reason || '';
-  return '已扣住' + peerSourceHtml(e) + ' 的消息' + (why ? '（' + esc(why) + '）' : '');
+  const dropped = e.status === 'dropped';
+  const why = (dropped ? PEER_DROP_OUTCOMES : PEER_HOLD_CAUSES).get(e.reason) || e.reason || '';
+  const note = dropped ? peerSourceHtml(e) + ' 的消息未送达' : '已扣住' + peerSourceHtml(e) + ' 的消息';
+  return note + (why ? '（' + esc(why) + '）' : '');
 }
 
 // refusalHtml: permission_denied / model_refusal, tagged so they stand apart

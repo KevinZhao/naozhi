@@ -60,33 +60,47 @@ func (p *ClaudeProtocol) AvailableModels() []ModelInfo {
 }
 
 // seedSettingsFromArgs records the settings source from a shim-recorded spawn
-// argv, for a reattached process that never ran BuildArgs. Fill-if-unset, and
-// a no-op when argv names no source.
-func (p *ClaudeProtocol) seedSettingsFromArgs(args []string) {
-	if src, ok := settingsSourceFromArgs(args); ok {
+// argv, for a reattached process that never ran BuildArgs. base is the
+// naozhi-owned settings file the session spawns with now ("" for none; see
+// settingsSourceFromArgs). Fill-if-unset, and a no-op when argv names no
+// source.
+func (p *ClaudeProtocol) seedSettingsFromArgs(args []string, base string) {
+	if src, ok := settingsSourceFromArgs(args, base); ok {
 		p.settingsPath.CompareAndSwap(nil, &src)
 	}
 }
 
-// settingsSourceFromArgs inverts BuildArgs' settings flags: `--settings <file>`
-// yields the file, `--setting-sources user` yields localSettingsMarker. Last
-// occurrence wins; a file usableSettingsFile rejects is ignored.
-func settingsSourceFromArgs(args []string) (src string, ok bool) {
+// settingsSourceFromArgs inverts BuildArgs' settings flags into the source it
+// recorded: `--setting-sources user` yields localSettingsMarker and
+// `--setting-sources ""` yields base, whatever `--settings` names, since a
+// per-session settings file may hold that slot (SessionSettingsFile). An argv
+// with no `--setting-sources`, or "" with no usable base, yields its
+// `--settings` file. Last occurrence wins; a file usableSettingsFile rejects
+// is ignored.
+func settingsSourceFromArgs(args []string, base string) (src string, ok bool) {
+	var file, sources string
+	sourcesSet := false
 	for i := 0; i+1 < len(args); i++ {
 		switch args[i] {
 		case "--settings":
 			if f := usableSettingsFile(args[i+1]); f != "" {
-				src, ok = f, true
+				file = f
 			}
 			i++
 		case "--setting-sources":
-			if args[i+1] == "user" {
-				src, ok = localSettingsMarker, true
-			}
+			sources, sourcesSet = args[i+1], true
 			i++
 		}
 	}
-	return src, ok
+	switch {
+	case sourcesSet && sources == "user":
+		return localSettingsMarker, true
+	case sourcesSet && sources == "" && usableSettingsFile(base) != "":
+		return base, true
+	case file != "":
+		return file, true
+	}
+	return "", false
 }
 
 // get returns the cached list for path, re-reading when the file's size or

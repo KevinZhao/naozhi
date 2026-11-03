@@ -47,7 +47,8 @@ type EventEntry struct {
 	Peer     string `json:"peer,omitempty"`
 	PeerMode string `json:"peer_mode,omitempty"`
 	PeerKey  string `json:"peer_key,omitempty"`
-	// Reason is why: a peer_hold's cause (explicit-setting, mode-mismatch),
+	// Reason is why: a peer_hold's cause (explicit-setting, mode-mismatch;
+	// Status "held") or outcome (expired, refused, ...; Status "dropped"),
 	// a permission_denied's decision reason, a model_refusal's category.
 	Reason string `json:"reason,omitempty"`
 	// RunID is the run id (ctxutil.RunID) of the Send behind a "user" or

@@ -21,7 +21,9 @@ import (
 // from the overlay it recorded, so a session spawned before the policy keeps
 // running without it until its next spawn.
 func crossSessionInboundFor(key string) string {
-	if strings.Count(key, ":") == 3 {
+	// The IM key shape, tested as ResolveForKey does: a scratch key has four
+	// segments too.
+	if !IsReservedNamespace(key) && len(strings.SplitN(key, ":", 4)) == 4 {
 		return "hold"
 	}
 	return ""

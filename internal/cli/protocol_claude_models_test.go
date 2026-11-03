@@ -162,21 +162,33 @@ func TestClaudeAvailableModels_ReattachSeedsFromArgv(t *testing.T) {
 	writeSettings(t, filepath.Join(home, ".claude", "settings.json"), `{"availableModels":["claude-opus-5"]}`)
 	owned := filepath.Join(t.TempDir(), "naozhi-settings.json")
 	writeSettings(t, owned, `{"availableModels":["claude-opus-5-5[1m]","claude-sonnet-5-5[1m]"]}`)
+	// A per-session file holding only overrides: the model list is never read
+	// from it, so the seed must not land on it either.
+	perSession := filepath.Join(t.TempDir(), "abc.json")
+	writeSettings(t, perSession, `{"crossSessionInbound":"hold"}`)
 
+	ownedModels := []ModelInfo{{ID: "claude-opus-5-5[1m]"}, {ID: "claude-sonnet-5-5[1m]"}}
 	cases := map[string]struct {
 		opts SpawnOptions
 		want []ModelInfo
 	}{
-		"naozhi-owned file": {SpawnOptions{SettingsFile: owned}, []ModelInfo{{ID: "claude-opus-5-5[1m]"}, {ID: "claude-sonnet-5-5[1m]"}}},
-		"user settings":     {SpawnOptions{}, []ModelInfo{{ID: "claude-opus-5"}}},
+		"naozhi-owned file":               {SpawnOptions{SettingsFile: owned}, ownedModels},
+		"user settings":                   {SpawnOptions{}, []ModelInfo{{ID: "claude-opus-5"}}},
+		"owned file, per-session file":    {SpawnOptions{SettingsFile: owned, SessionSettingsFile: perSession}, ownedModels},
+		"user settings, per-session file": {SpawnOptions{SessionSettingsFile: perSession}, []ModelInfo{{ID: "claude-opus-5"}}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			argv := (&ClaudeProtocol{}).BuildArgs(tc.opts)
+			direct := &ClaudeProtocol{}
+			argv := direct.BuildArgs(tc.opts)
 			p := &ClaudeProtocol{}
-			p.seedSettingsFromArgs(argv)
-			if got := p.AvailableModels(); !reflect.DeepEqual(got, tc.want) {
+			p.seedSettingsFromArgs(argv, tc.opts.SettingsFile)
+			got := p.AvailableModels()
+			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("AvailableModels() = %+v, want %+v", got, tc.want)
+			}
+			if live := direct.AvailableModels(); !reflect.DeepEqual(got, live) {
+				t.Errorf("seeded AvailableModels() = %+v, direct spawn %+v", got, live)
 			}
 		})
 	}
@@ -189,7 +201,7 @@ func TestClaudeSeedSettings_FillIfUnset(t *testing.T) {
 	writeSettings(t, first, `{"availableModels":["claude-opus-5"]}`)
 	p := &ClaudeProtocol{}
 	p.BuildArgs(SpawnOptions{SettingsFile: first})
-	p.seedSettingsFromArgs([]string{"--settings", filepath.Join(dir, "b.json")})
+	p.seedSettingsFromArgs([]string{"--settings", filepath.Join(dir, "b.json")}, "")
 	if got := p.AvailableModels(); len(got) != 1 || got[0].ID != "claude-opus-5" {
 		t.Errorf("AvailableModels() = %+v, want the BuildArgs file's list", got)
 	}
@@ -199,20 +211,24 @@ func TestSettingsSourceFromArgs(t *testing.T) {
 	cases := []struct {
 		name   string
 		args   []string
+		base   string
 		want   string
 		wantOK bool
 	}{
-		{"owned file", []string{"-p", "--setting-sources", "", "--settings", "/abs/s.json", "--verbose"}, "/abs/s.json", true},
-		{"user", []string{"--setting-sources", "user"}, localSettingsMarker, true},
-		{"absent", []string{"-p", "--verbose"}, "", false},
-		{"dangling", []string{"--settings"}, "", false},
-		{"relative file ignored", []string{"--settings", "rel.json"}, "", false},
-		{"flag-shaped file ignored", []string{"--settings", "-x"}, "", false},
-		{"last wins", []string{"--setting-sources", "user", "--settings", "/abs/s.json"}, "/abs/s.json", true},
+		{"owned file", []string{"-p", "--setting-sources", "", "--settings", "/abs/s.json", "--verbose"}, "", "/abs/s.json", true},
+		{"owned file, base known", []string{"--setting-sources", "", "--settings", "/abs/s.json"}, "/abs/s.json", "/abs/s.json", true},
+		{"per-session file over base", []string{"--setting-sources", "", "--settings", "/store/session-settings/abc.json"}, "/abs/s.json", "/abs/s.json", true},
+		{"user", []string{"--setting-sources", "user"}, "", localSettingsMarker, true},
+		{"per-session file over user", []string{"--setting-sources", "user", "--settings", "/store/session-settings/abc.json"}, "/abs/s.json", localSettingsMarker, true},
+		{"absent", []string{"-p", "--verbose"}, "", "", false},
+		{"dangling", []string{"--settings"}, "", "", false},
+		{"relative file ignored", []string{"--settings", "rel.json"}, "", "", false},
+		{"flag-shaped file ignored", []string{"--settings", "-x"}, "", "", false},
+		{"no sources flag", []string{"--settings", "/abs/a.json", "--settings", "/abs/b.json"}, "", "/abs/b.json", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := settingsSourceFromArgs(tc.args)
+			got, ok := settingsSourceFromArgs(tc.args, tc.base)
 			if got != tc.want || ok != tc.wantOK {
 				t.Errorf("settingsSourceFromArgs(%q) = (%q, %v), want (%q, %v)", tc.args, got, ok, tc.want, tc.wantOK)
 			}
@@ -227,7 +243,7 @@ func TestProcess_SeedFromSpawnArgs_Settings(t *testing.T) {
 	writeSettings(t, path, `{"availableModels":["claude-sonnet-5-5[1m]"]}`)
 	p, srv := shimTestPair(&ClaudeProtocol{})
 	defer srv.conn.Close()
-	p.SeedFromSpawnArgs([]string{"--setting-sources", "", "--settings", path})
+	p.SeedFromSpawnArgs([]string{"--setting-sources", "", "--settings", path}, "")
 	if got := p.AvailableModels(); len(got) != 1 || got[0].ID != "claude-sonnet-5-5[1m]" {
 		t.Errorf("AvailableModels() = %+v, want the argv file's list", got)
 	}
@@ -237,7 +253,7 @@ func TestProcess_SeedFromSpawnArgs_Settings(t *testing.T) {
 	q, srv2 := shimTestPair(acp)
 	defer srv2.conn.Close()
 	before := acp.AvailableModels()
-	q.SeedFromSpawnArgs([]string{"--settings", path})
+	q.SeedFromSpawnArgs([]string{"--settings", path}, "")
 	if got := q.AvailableModels(); !reflect.DeepEqual(got, before) {
 		t.Errorf("ACP AvailableModels() = %+v after seeding, want unchanged %+v", got, before)
 	}

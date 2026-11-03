@@ -97,10 +97,18 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 				entry.DurationMS = ev.Usage.DurationMS
 			}
 		case "peer_message_hold":
-			if ev.Peer != nil {
+			if p := ev.Peer; p != nil {
+				// A message is held, then at most released (its peer replay,
+				// logged as a peer_message, follows) or dropped.
+				if p.State == "released" {
+					return nil
+				}
 				entry.Type = clievent.KindPeerHold
-				entry.Peer, entry.Summary = ev.Peer.Name, ev.Peer.Name
-				entry.Reason = ev.Peer.Cause
+				entry.Peer, entry.Summary = p.Name, p.Name
+				entry.Status, entry.Reason = "held", p.Cause
+				if p.State == "dropped" {
+					entry.Status, entry.Reason = "dropped", p.Outcome
+				}
 			}
 		case "permission_denied", "model_refusal_no_fallback":
 			if r := ev.Refusal; r != nil {

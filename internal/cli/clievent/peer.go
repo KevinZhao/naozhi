@@ -11,9 +11,15 @@ type Peer struct {
 	Mode string
 	// Body is the message text; inbound only.
 	Body string
+	// State is where a held message stands: "held", then at most one of
+	// "released" (queued after all) or "dropped" (never delivered); hold only.
+	State string
 	// Cause is why the CLI held the message ("explicit-setting" under
-	// crossSessionInbound: hold, "mode-mismatch", ...); hold only.
+	// crossSessionInbound: hold, "mode-mismatch", ...); state "held" only.
 	Cause string
+	// Outcome is why a dropped message was ("expired", "refused", "dropped",
+	// "discarded"); state "dropped" only.
+	Outcome string
 }
 
 // Refusal is a system/permission_denied or system/model_refusal_no_fallback

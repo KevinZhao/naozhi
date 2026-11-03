@@ -2,6 +2,8 @@ package session
 
 import (
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // TestSessionKeyForCLIName: a sender name resolves to the Claude session
@@ -53,7 +55,7 @@ func TestCrossSessionInboundPolicy(t *testing.T) {
 		{"local:takeover:Users-me-ws:general", AgentOpts{}, "hold"},
 		{"cron:job1", AgentOpts{}, ""},
 		{"sys:attachment-gc", AgentOpts{}, ""},
-		{"scratch:abc", AgentOpts{}, ""},
+		{sessionkey.ScratchKeyPrefix + "abc123:general:general", AgentOpts{}, ""}, // scratch.go's 4-segment shape
 		{"project:naozhi:planner", AgentOpts{}, ""},
 		{"dashboard:direct:p2:general", AgentOpts{Backend: "kiro"}, ""},
 		{"dashboard:direct:p3:general", AgentOpts{CrossSessionInbound: "accept"}, "accept"},

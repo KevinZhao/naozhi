@@ -46,7 +46,9 @@ func parsePeerOrigin(line string) *clievent.Peer {
 // assistant message; decodeClaudeEvent tolerates that clash.
 type wireSystemDetail struct {
 	FromName           string `json:"from_name"`
+	State              string `json:"state"`
 	Cause              string `json:"cause"`
+	Outcome            string `json:"outcome"`
 	ToolName           string `json:"tool_name"`
 	DecisionReason     string `json:"decision_reason"`
 	Message            string `json:"message"`
@@ -69,7 +71,7 @@ func parseSystemDetail(line string, ev *clievent.Event) {
 	}
 	switch ev.SubType {
 	case "peer_message_hold":
-		ev.Peer = &clievent.Peer{Name: w.FromName, Cause: w.Cause}
+		ev.Peer = &clievent.Peer{Name: w.FromName, State: w.State, Cause: w.Cause, Outcome: w.Outcome}
 	case "permission_denied":
 		ev.Refusal = &clievent.Refusal{Tool: w.ToolName, Reason: w.DecisionReason, Text: w.Message}
 	case "model_refusal_no_fallback":

@@ -25,7 +25,7 @@ func TestParseHistoryLine_PeerMessage(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, ok := parseHistoryLine([]byte(tc.line))
+			got, ok := parseHistoryLine([]byte(tc.line), 0, true)
 			if !ok || len(got) != 1 {
 				t.Fatalf("parseHistoryLine = %+v, %v; want one entry", got, ok)
 			}
