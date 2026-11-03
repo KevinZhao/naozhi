@@ -17,6 +17,8 @@ import (
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/dispatch"
+	"github.com/naozhi/naozhi/internal/monitor"
+	"github.com/naozhi/naozhi/internal/monitor/beat"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
@@ -209,7 +211,10 @@ func main() {
 
 	router.ReconnectShimsCtx(ctx)
 
-	router.StartCleanupLoop(ctx, cfg.ParseTTL()/2)
+	// Critical-loop heartbeats; /health degrades when one goes stale. Its
+	// startup grace starts here, before the first loop registers.
+	beats := beat.New(monitor.SystemClock())
+	router.StartCleanupLoop(ctx, cfg.ParseTTL()/2, beats)
 	router.StartShimReconcileLoop(ctx, 30*time.Second)
 
 	// Parallel init: transcriber and project scan can overlap
@@ -317,6 +322,7 @@ func main() {
 			return buildSysessionManager(cfg, router, projectMgr, wrapper, storePath, runTelemetry)
 		},
 		Budget: budgetGate,
+		Beats:  beats,
 	})
 	if err != nil {
 		slog.Error("start cron scheduler", "err", err)
@@ -395,6 +401,7 @@ func main() {
 		Routing:          routing,
 		Scheduler:        scheduler,
 		Backend:          defaultBackend,
+		Beats:            beats,
 		AllowedRoot:      workspace,
 		IMAccess:         cfg.IMAccessPolicy(),
 		IMRateLimit:      dispatch.RateLimit{MsgsPerMin: cfg.IMRateLimit.MsgsPerMin, Burst: cfg.IMRateLimit.Burst},
