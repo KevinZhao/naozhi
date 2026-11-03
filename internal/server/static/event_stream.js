@@ -5,7 +5,7 @@ import { NZ_CONTRACT } from './contract.js';
 import { INITIAL_HISTORY_LIMIT, sessionStream } from './session_stream.js';
 import { wsm } from './ws_manager.js';
 import { perSession, selection, sessionList, transcript } from './state.js';
-import { fetchJSON, nzViews, showToast } from './nz_util.js';
+import { fetchJSON, nzBus, nzViews, showToast } from './nz_util.js';
 import { eventAlreadyRendered, eventHtml, leadingTimeDivider, removeOptimisticMsg, renderEventsWithDividers } from './event_render.js';
 import { hydrateAskAnsweredFromHistory, lockRenderedAskCards } from './ask_card.js';
 import { runPendingAsync } from './render_md.js';
@@ -751,6 +751,8 @@ const sessionFrames = {
     const ev = msg.event;
     if (!ev) return;
     if (ev.time > sessionStream.lastEventTimeWs) sessionStream.lastEventTimeWs = ev.time;
+    // The workbench refetches the session's outputs off these (workbench_panes.js).
+    nzBus.dispatchEvent(new CustomEvent('session:event', { detail: { ev } }));
     // Turn boundaries: reset state, don't feed into applyEventToTurnState
     if (ev.type === 'user') {
       const text = ev.detail || ev.summary || '';

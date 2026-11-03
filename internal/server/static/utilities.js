@@ -1329,6 +1329,7 @@ export {
   formatAbsTime,
   formatHomeCost,
   formatTimeFull,
+  formatTimeShort,
   historyDayLabel,
   mainEmptyHtml,
   promptDialog,

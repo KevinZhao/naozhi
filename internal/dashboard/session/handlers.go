@@ -11,6 +11,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/dashboard/cronview"
 	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/osutil"
 	sessionpkg "github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/textutil"
@@ -297,6 +298,10 @@ type Deps struct {
 	ValidateWS func(ws, root string) (string, error)
 	// Outputs serves /api/sessions/outputs; nil lists none.
 	Outputs OutputSource
+	// Health and Workspaces fill /api/sessions/detail's health unit and
+	// workspace; nil leaves them out.
+	Health     func() health.Snapshot
+	Workspaces WorkspaceLookup
 }
 
 // New constructs a Handlers from injected deps. Deps is stored as-is; the

@@ -11,8 +11,10 @@ import (
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/imauth"
 	"github.com/naozhi/naozhi/internal/monitor/beat"
+	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/planner/activity"
+	"github.com/naozhi/naozhi/internal/planner/workspace"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/routerrelay"
@@ -96,6 +98,11 @@ type ServerOptions struct {
 	// Outputs is the outputs index /api/sessions/outputs lists; nil lists
 	// none.
 	Outputs *activity.Recorder
+	// Health and Workspaces fill /api/sessions/detail. Health is called
+	// only while serving requests, so it may read a monitor built after the
+	// server; nil leaves the health unit (or the workspace) out.
+	Health     func() health.Snapshot
+	Workspaces *workspace.Registry
 
 	// Logger is the component logger the Server derives its structured logging
 	// from. nil falls back to slog.Default() (#620).

@@ -41,6 +41,9 @@
      has no visual cost. */
   body.nz-split-open:not(.nz-view-assets):not(.nz-view-cron):not(.nz-view-settings) #split-resizer{display:block;position:fixed;top:0;bottom:0;right:var(--nz-split-w);width:6px;margin-right:-3px;cursor:col-resize;z-index:var(--nz-z-split-resizer);background:transparent;transition:background .15s}
   body.nz-split-open #split-resizer:hover,#split-resizer.dragging{background:var(--nz-accent)}
+  /* The workbench's ⤢ 放大 covers the window, seam included. */
+  body.nz-split-open:not(.nz-view-assets):not(.nz-view-cron):not(.nz-view-settings) .fv-drawer.fv-open.wb-max{width:100%}
+  body.nz-split-open:not(.nz-view-assets):not(.nz-view-cron):not(.nz-view-settings):has(.fv-drawer.wb-max) #split-resizer{display:none}
 }
 
 /* Voice recording overlay */

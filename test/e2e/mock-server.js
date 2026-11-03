@@ -246,6 +246,9 @@ function defaultGitStates() {
  *   the route applies rows=none / since=&epoch= to it and 404s task ids not listed. A test may edit
  *   the object in place; each request reads it then.
  * @param {number} [overrides.workflowDelayMs] - Hold GET /api/sessions/workflow answers this long.
+ * @param {object[]} [overrides.outputs] - GET /api/sessions/outputs entries (activity.Output wire
+ *   shape, newest first); ?key= filters them. A test may edit the array in place.
+ * @param {object} [overrides.sessionDetails] - key → GET /api/sessions/detail payload.
  * @param {object[]} [overrides.cronJobs] - Custom cron jobs response.
  * @param {object} [overrides.cronListMeta] - Extra top-level fields merged into GET /api/cron
  *   (timezone / timezone_abbr / timezone_label ...). recent_runs_cap defaults to 5 like the backend.
@@ -298,6 +301,9 @@ function startMockServer(overrides = {}) {
   const cronListMeta = Object.assign({ recent_runs_cap: 5 }, overrides.cronListMeta || {});
   const gitStates = defaultGitStates();
   const workflows = overrides.workflows || {};
+  const outputs = overrides.outputs || [];
+  const sessionDetails = overrides.sessionDetails || {};
+  const outputsCalls = [];
   const workflowDelayMs = overrides.workflowDelayMs || 0;
   // Every GET /api/sessions/workflow, as its query parameters.
   const workflowCalls = [];
@@ -540,6 +546,28 @@ function startMockServer(overrides = {}) {
       const state = gitStates[key] || { is_repo: false };
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(state));
+      return;
+    }
+
+    // Outputs index: overrides.outputs, newest first, filtered by ?key= like
+    // the backend (no key = the 成品库 across sessions). Tests may edit the
+    // array in place; each request reads it then.
+    if (pathname === NZ_CONTRACT.API.sessions_outputs && req.method === 'GET') {
+      if (!checkAuth()) return;
+      const key = url.searchParams.get('key');
+      outputsCalls.push(key || '');
+      const outs = outputs.filter((o) => !key || o.key === key);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ outputs: outs }));
+      return;
+    }
+
+    // Workbench 详情: overrides.sessionDetails[key], else just the key.
+    if (pathname === NZ_CONTRACT.API.sessions_detail && req.method === 'GET') {
+      if (!checkAuth()) return;
+      const key = url.searchParams.get('key') || '';
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(sessionDetails[key] || { key }));
       return;
     }
 
@@ -924,6 +952,7 @@ function startMockServer(overrides = {}) {
         get favoriteCalls() { return favoriteCalls; },
         get wsConnections() { return wsConnections; },
         get workflowCalls() { return workflowCalls; },
+        get outputsCalls() { return outputsCalls; },
         resetCalls() { sendCalls = []; bindCalls = []; loginCalls = []; favoriteCalls = []; },
       });
     }));

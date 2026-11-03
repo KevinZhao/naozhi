@@ -206,6 +206,11 @@
   },
   {
     "method": "GET",
+    "path": "/api/sessions/detail",
+    "handler_type": "*dashsession.Handlers"
+  },
+  {
+    "method": "GET",
     "path": "/api/sessions/events",
     "handler_type": "*dashsession.Handlers"
   },
