@@ -731,6 +731,9 @@ const sessionFrames = {
 
     if (isInitial) renderInitialHistory(el, msg, events, display);
     else appendHistoryBackfill(el, display);
+    // A local session's live events arrive as these frames (the hub's event
+    // push), not as 'event' frames: the workbench refetches outputs off them.
+    if (!isInitial) events.forEach((ev) => nzBus.dispatchEvent(new CustomEvent('session:event', { detail: { ev } })));
 
     if (events.length > 0) {
       const last = events[events.length - 1];

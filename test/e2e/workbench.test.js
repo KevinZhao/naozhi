@@ -45,7 +45,8 @@ test('a new output opens the workbench once; closed, it waits for the next one',
     await expect.poll(() => mock.outputsCalls.filter((k) => k === A).length).toBeGreaterThan(0);
     await expect(drawer(page)).not.toHaveClass(/fv-open/);
 
-    const event = (ev) => conn.send({ type: 'event', key: A, event: { time: Date.now(), ...ev } });
+    // Live events of a local session come as history frames, as the hub pushes them.
+    const event = (ev) => conn.send({ type: 'history', key: A, events: [{ time: Date.now(), uuid: 'wb-' + Math.random(), ...ev }] });
     outputs.unshift(file(A, 'docs/report.md', 0));
     event({ type: 'tool_use', tool: 'Write', summary: 'docs/report.md', path: 'docs/report.md', activity: 'output' });
     await expect(drawer(page)).toHaveClass(/fv-open/);
