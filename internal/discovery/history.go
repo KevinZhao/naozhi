@@ -259,37 +259,8 @@ func uuidFromClaudeBlock(hl claudefs.Line, blockIndex int, ts int64, typ, summar
 }
 
 // normalizeClaudeUUID strips dashes from a Claude-style UUID so its shape
-// matches cli.newEventUUID's dashless 32-char hex. Empty or non-hex input
-// returns "" so the caller falls back to DeriveLegacyUUID.
-func normalizeClaudeUUID(u string) string {
-	if u == "" {
-		return ""
-	}
-	// Stack buffer avoids a per-row alloc on JSONL replay.
-	var b [32]byte
-	n := 0
-	for i := 0; i < len(u); i++ {
-		c := u[i]
-		if c == '-' {
-			continue
-		}
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-			return ""
-		}
-		if n >= 32 {
-			return ""
-		}
-		if c >= 'A' && c <= 'F' {
-			c = c + 32
-		}
-		b[n] = c
-		n++
-	}
-	if n != 32 {
-		return ""
-	}
-	return string(b[:])
-}
+// matches cli.newEventUUID's dashless 32-char hex; see textutil.DashlessUUID.
+func normalizeClaudeUUID(u string) string { return textutil.DashlessUUID(u) }
 
 // intToA is a minimal int-to-string without pulling strconv just
 // for the block-index formatter. Values here are small (< 10).

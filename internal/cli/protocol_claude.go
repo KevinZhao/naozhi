@@ -544,6 +544,12 @@ func (p *ClaudeProtocol) ReadEventInto(line string, buf []clievent.Event) ([]cli
 	if ev.Type == "user" && !ev.IsReplay && strings.Contains(line, toolImageGate) {
 		ev.ToolResultImages = parseToolResultImages(line)
 	}
+	if ev.Type == "user" && strings.Contains(line, peerOriginGate) {
+		ev.Peer = parsePeerOrigin(line)
+	}
+	if ev.Type == "system" {
+		parseSystemDetail(line, ev)
+	}
 	// Copy the value out so the caller owns an independent clievent.Event; the deferred
 	// Put resets only the pooled struct's view, not the freshly-unmarshalled
 	// graph (Message, AskQuestion, ...) the copy points at.
@@ -556,12 +562,14 @@ func (p *ClaudeProtocol) ReadEventInto(line string, buf []clievent.Event) ([]cli
 // encoding/json reports only its first type error, a tolerated one is followed
 // by a second pass with workflow_progress shadowed as raw bytes, so an error
 // elsewhere in the frame is still returned whatever the key order, and a
-// Partial snapshot's identity fields are re-decoded from those bytes.
+// Partial snapshot's identity fields are re-decoded from those bytes. A
+// system frame whose "message" is a string is kept too
+// (decodeSystemMessageClash).
 func decodeClaudeEvent(data []byte, ev *clievent.Event) error {
 	if err := json.Unmarshal(data, ev); err != nil {
 		grade, ok := clievent.WorkflowDecodeFromError(err)
 		if !ok {
-			return err
+			return decodeSystemMessageClash(data, ev, err)
 		}
 		items := ev.WorkflowProgress
 		if grade == clievent.WorkflowDecodeFailed {

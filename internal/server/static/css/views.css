@@ -492,6 +492,18 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .event.system,.event.init{justify-content:center;padding-top:12px;padding-bottom:12px}
 .event.system .event-icon,.event.init .event-icon{display:none}
 .event.system .event-content,.event.init .event-content{flex:none;color:var(--nz-text-dim);font-size:var(--nz-fs-sm);text-align:center}
+/* Cross-session messages (RFC planner §6.2): an inbound one is a bubble of
+   its own, neither yours nor the assistant's; a held one and the refusal
+   frames are centered notes like system rows. */
+.event.peer_message .event-icon{background:var(--nz-bg-2);color:var(--nz-text-mute)}
+.event.peer_message .event-content{flex:0 1 auto;max-width:80%;background:var(--nz-bg-2);border:1px dashed var(--nz-border);padding:10px 14px;border-radius:18px 18px 18px 4px}
+.peer-source{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-bottom:4px}
+.peer-link{background:none;border:none;padding:0;font:inherit;color:var(--nz-accent);cursor:pointer}
+.peer-link:hover{text-decoration:underline}
+.event.peer_hold,.event.permission_denied,.event.model_refusal{justify-content:center;padding-top:8px;padding-bottom:8px}
+.event.peer_hold .event-icon,.event.permission_denied .event-icon,.event.model_refusal .event-icon{display:none}
+.event.peer_hold .event-content,.event.permission_denied .event-content,.event.model_refusal .event-content{flex:none;color:var(--nz-text-dim);font-size:var(--nz-fs-sm);text-align:center}
+.refusal-tag{display:inline-block;font-size:var(--nz-fs-2xs);padding:1px 8px;border-radius:var(--nz-radius-pill);border:1px solid var(--nz-warn);color:var(--nz-warn)}
 /* Hidden types (kept for safety) */
 .event.thinking .event-content{color:var(--nz-event-agent-fg);font-style:italic}
 .event.result{margin:2px 0}

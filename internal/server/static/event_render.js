@@ -106,6 +106,49 @@ function stripLeakedToolCalls(text) {
   return { prose: text.slice(0, start).replace(/\s+$/, ''), leaked: text.slice(start, end) };
 }
 
+// peerSourceHtml names a cross-session message's sender (RFC planner §6.2):
+// the Planner, a naozhi session (a link to it; peer_key was resolved when the
+// message arrived, the title is the session's current one) or a CC session
+// naozhi does not manage.
+export function peerSourceHtml(e) {
+  const name = e.peer || '';
+  if (name === 'planner') return '来自 Planner';
+  if (e.peer_key) {
+    const node = selection.node || 'local';
+    const s = sessionList.sessionsData[sid(e.peer_key, node)] || {};
+    const title = s.user_label || s.summary || s.last_prompt || name;
+    return '<button type="button" class="peer-link" data-key="' + escAttr(e.peer_key) + '" data-node="' + escAttr(node) +
+      '" data-action="session-select">来自会话 ' + esc(title) + '</button>';
+  }
+  return '来自终端会话 ' + esc(name);
+}
+
+// peerMessageHtml: an inbound cross-session message, its sender above the
+// body, in a bubble of its own so it never reads as something you typed.
+function peerMessageHtml(e, cleanRaw) {
+  return '<div class="peer-source">' + peerSourceHtml(e) + '</div>' + renderMd(cleanRaw || '');
+}
+
+// PEER_HOLD_CAUSES words the causes CC reports for holding a message.
+const PEER_HOLD_CAUSES = new Map([
+  ['explicit-setting', '本会话只提示、不收'],
+  ['mode-mismatch', '双方权限模式不同'],
+]);
+
+// peerHoldHtml: the side note for a message the CLI held instead of delivering.
+function peerHoldHtml(e) {
+  const why = PEER_HOLD_CAUSES.get(e.reason) || e.reason || '';
+  return '已扣住' + peerSourceHtml(e) + '的消息' + (why ? '（' + esc(why) + '）' : '');
+}
+
+// refusalHtml: permission_denied / model_refusal, tagged so they stand apart
+// from generic system rows.
+function refusalHtml(e) {
+  const tag = e.type === 'model_refusal' ? '模型拒答' : '权限拒绝';
+  const what = [e.tool, e.detail || e.summary].filter(Boolean).join('：');
+  return '<span class="refusal-tag">' + tag + '</span>' + (what ? ' ' + esc(what) : '');
+}
+
 // EVENT_WHOLE renders a type's entire bubble, bypassing the generic
 // icon/content/time wrapper below (ask_question is its own card). A Map, not
 // a plain object: an unlisted e.type like 'constructor' must resolve to
@@ -129,6 +172,10 @@ const EVENT_CONTENT = new Map([
   ['task_progress', defaultTextContentHtml],
   ['task_done', defaultTextContentHtml],
   ['persist_gap', defaultEventChip],
+  ['peer_message', peerMessageHtml],
+  ['peer_hold', peerHoldHtml],
+  ['permission_denied', refusalHtml],
+  ['model_refusal', refusalHtml],
 ]);
 
 // EVENT_ICONS: the .event-icon glyph for a handful of known types; anything
@@ -139,6 +186,7 @@ const EVENT_ICONS = new Map([
   ['user', ICONS.user],
   ['text', ICONS.spark],
   ['todo', ICONS.todo],
+  ['peer_message', ICONS.robot],
 ]);
 
 // shouldHideEvent is eventHtml's pre-filter, run before any table lookup: a

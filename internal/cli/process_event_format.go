@@ -17,13 +17,17 @@ import (
 // known content block of an assistant message (thinking / tool_use / text)
 // yields its own entry so downstream consumers don't drop blocks after the first.
 func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEntry {
+	now := nowMS
+	base := clievent.EventEntry{Time: now}
+	// A cross-session message arrives as a replay no bubble showed.
+	if ev.Type == "user" && ev.Peer != nil {
+		return []clievent.EventEntry{peerMessageEntry(base, ev)}
+	}
 	// Replay events are the CLI's ack for a message already shown via the
 	// optimistic bubble; logging them double-displays. readLoop skips them too.
 	if ev.Type == "user" && ev.IsReplay {
 		return nil
 	}
-	now := nowMS
-	base := clievent.EventEntry{Time: now}
 
 	switch ev.Type {
 	case "user":
@@ -91,6 +95,22 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 				entry.ToolUses = ev.Usage.ToolUses
 				entry.Tokens = ev.Usage.TotalTokens
 				entry.DurationMS = ev.Usage.DurationMS
+			}
+		case "peer_message_hold":
+			if ev.Peer != nil {
+				entry.Type = clievent.KindPeerHold
+				entry.Peer, entry.Summary = ev.Peer.Name, ev.Peer.Name
+				entry.Reason = ev.Peer.Cause
+			}
+		case "permission_denied", "model_refusal_no_fallback":
+			if r := ev.Refusal; r != nil {
+				entry.Type = clievent.KindPermissionDenied
+				if ev.SubType == "model_refusal_no_fallback" {
+					entry.Type = clievent.KindModelRefusal
+				}
+				entry.Tool = r.Tool
+				entry.Reason = r.Reason
+				entry.Summary, entry.Detail = textutil.TruncateRunesPair(r.Text, 120, clievent.EventDetailMaxRunes)
 			}
 		case "stop_hook_summary", "turn_duration", "hook_started", "hook_response",
 			// 1p auth (e.g. fable-5) streams these telemetry events many times per
@@ -288,6 +308,19 @@ func toolResultImageEntries(base clievent.EventEntry, results []clievent.ToolRes
 	return out
 }
 
+// peerMessageEntry is the entry of an inbound cross-session message. Its UUID
+// is the CLI's message uuid, which the transcript line (or, mid-turn, its
+// queued_command's source_uuid) repeats, so the Claude JSONL tier's copy
+// dedups against it (discovery.parseHistoryLine).
+func peerMessageEntry(base clievent.EventEntry, ev clievent.Event) clievent.EventEntry {
+	entry := base
+	entry.Type = clievent.KindPeerMessage
+	entry.UUID = textutil.DashlessUUID(ev.UUID)
+	entry.Peer, entry.PeerMode = ev.Peer.Name, ev.Peer.Mode
+	entry.Summary, entry.Detail = textutil.TruncateRunesPair(ev.Peer.Body, 120, clievent.EventDetailMaxRunes)
+	return entry
+}
+
 // logEventAt converts an clievent.Event to one or more EventEntry values and appends them to the event log.
 // readLoop passes the same time.Now() value that stamps ev.RecvAt so timestamps match,
 // and for a result the run it answers, which its result entry carries.
@@ -298,6 +331,13 @@ func (p *Process) logEventAt(ev clievent.Event, nowMS int64, runID string) {
 	entries := EventEntriesFromEventAt(ev, nowMS)
 	if len(entries) == 0 {
 		return
+	}
+	if ev.Peer != nil {
+		if fn := p.peerKeyFor.Load(); fn != nil {
+			for i := range entries {
+				entries[i].PeerKey = (*fn)(entries[i].Peer)
+			}
+		}
 	}
 	if ev.Type == "result" {
 		p.meter.RecordResultCost(ev.CostUSD)

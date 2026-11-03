@@ -120,6 +120,9 @@ type Process struct {
 	// onCodeChange receives each valid system/code_change_published frame so
 	// the session can record the PR. Set via SetOnCodeChange at any time.
 	onCodeChange atomic.Pointer[func(clievent.CodeChange)]
+	// peerKeyFor resolves a cross-session message's sender name to the
+	// session key its entry carries. Set via SetPeerKeyResolver at any time.
+	peerKeyFor atomic.Pointer[func(string) string]
 	// stateDir is Wrapper.StateDir, where storeToolImages keeps the originals
 	// of the images tools return. Assigned once before startReadLoop.
 	stateDir string
@@ -435,6 +438,17 @@ func (p *Process) SetOnCodeChange(fn func(clievent.CodeChange)) {
 		return
 	}
 	p.onCodeChange.Store(&fn)
+}
+
+// SetPeerKeyResolver sets the lookup that stamps a peer_message or peer_hold
+// entry's PeerKey from its sender name. Called on the read loop, so it must
+// not block on the process. Lock-free; nil clears it.
+func (p *Process) SetPeerKeyResolver(fn func(name string) string) {
+	if fn == nil {
+		p.peerKeyFor.Store(nil)
+		return
+	}
+	p.peerKeyFor.Store(&fn)
 }
 
 // SetOnLiveVersion sets the callback fired by setLiveVersion when a distinct
