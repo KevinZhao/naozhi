@@ -688,8 +688,10 @@ func lastReplayedSeq(replays []shim.ServerMsg) int64 {
 // emits with or without a turn in flight. task_started is not among them: it
 // belongs to the turn whose tool call launched the task. session_title_changed
 // is session metadata: --name writes one at spawn, before any turn, so a
-// session that never had a turn holds only it.
-var turnNeutralSystemSubtypes = [...]string{"task_progress", "task_updated", "task_notification", "background_tasks_changed", "session_title_changed"}
+// session that never had a turn holds only it. peer_message_hold reports a
+// cross-session message held, released or dropped, often after the turn's
+// result; a released one is followed by its user replay, which decides.
+var turnNeutralSystemSubtypes = [...]string{"task_progress", "task_updated", "task_notification", "background_tasks_changed", "session_title_changed", "peer_message_hold"}
 
 // commandLifecycleType is the frame the CLI brackets every input command with
 // (queued / started / completed). "completed" lands after the turn's result,
