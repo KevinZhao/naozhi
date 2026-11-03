@@ -390,6 +390,11 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 		}
 		overlay.Name = cliSessionName(key, label, workspace)
 	}
+	// Settings overrides need the per-session settings directory, and only
+	// the Claude CLI reads them.
+	if overlay.CrossSessionInbound == "" && cmp.Or(backendID, "claude") == "claude" && r.spawn.sessionSettingsDir != "" {
+		overlay.CrossSessionInbound = crossSessionInboundFor(key)
+	}
 
 	return spawnParams{
 		BackendID:        backendID,
@@ -836,6 +841,7 @@ func (r *Router) installFreshSession(tx sessTx,
 	s.workflows.Store(board)
 	bookUnownedResults(s, proc)
 	bookCodeChanges(s, proc, func() { r.ss.Update(markChanged); r.notifyChange() })
+	r.bindPeerKeys(proc)
 	bookWorkflows(s, proc, r.hist.projectsRoot, func() { r.ss.Update(markChanged); r.notifyChange() }, r.BumpVersion)
 	bookProcessEnd(s, proc, r.hist.claudeDir)
 	if len(snapshot) > 0 {

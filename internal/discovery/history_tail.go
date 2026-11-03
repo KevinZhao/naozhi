@@ -232,7 +232,63 @@ var (
 	asstTypeGate       = []byte(`"type":"assistant"`)
 	asstTypeGateSpaced = []byte(`"type": "assistant"`)
 	imageTypeGate      = []byte(`"type":"image"`)
+	peerOriginGate     = []byte(`"kind":"peer"`)
+	peerOriginSpaced   = []byte(`"kind": "peer"`)
 )
+
+// historyPeerOrigin is the origin CC records on a cross-session message.
+type historyPeerOrigin struct {
+	Kind     string `json:"kind"`
+	Name     string `json:"name"`
+	FromMode string `json:"fromMode"`
+	Body     string `json:"body"`
+}
+
+// historyPeerLine is the part of a transcript line that carries a
+// cross-session message: an idle session's user line, or a busy one's
+// queued_command attachment, whose source_uuid is the uuid the live stream
+// gave the message.
+type historyPeerLine struct {
+	Origin     *historyPeerOrigin `json:"origin"`
+	Attachment *struct {
+		Type       string             `json:"type"`
+		SourceUUID string             `json:"source_uuid"`
+		Origin     *historyPeerOrigin `json:"origin"`
+	} `json:"attachment"`
+}
+
+// peerHistoryEntry returns the peer_message entry of a transcript line that
+// delivered a cross-session message; it mirrors cli.peerMessageEntry so the
+// two tiers dedup by UUID.
+func peerHistoryEntry(line []byte, hl claudefs.Line, ts int64) (clievent.EventEntry, bool) {
+	var pl historyPeerLine
+	if json.Unmarshal(line, &pl) != nil {
+		return clievent.EventEntry{}, false
+	}
+	origin, uuid := pl.Origin, hl.UUID
+	switch {
+	case hl.Type == "user":
+	case hl.Type == "attachment" && pl.Attachment != nil && pl.Attachment.Type == "queued_command":
+		origin, uuid = pl.Attachment.Origin, pl.Attachment.SourceUUID
+	default:
+		return clievent.EventEntry{}, false
+	}
+	if origin == nil || origin.Kind != "peer" {
+		return clievent.EventEntry{}, false
+	}
+	e := clievent.EventEntry{
+		UUID:     normalizeClaudeUUID(uuid),
+		Time:     ts,
+		Type:     clievent.KindPeerMessage,
+		Peer:     origin.Name,
+		PeerMode: origin.FromMode,
+	}
+	e.Summary, e.Detail = textutil.TruncateRunesPair(origin.Body, 120, clievent.EventDetailMaxRunes)
+	if e.UUID == "" {
+		e.UUID = textutil.DeriveLegacyUUID(ts, e.Type, e.Summary, e.Detail)
+	}
+	return e, true
+}
 
 // parseHistoryLine decodes a single JSONL line into zero or more EventEntry
 // values. Returns ok=false for malformed lines so callers can skip them
@@ -244,7 +300,8 @@ var (
 // without bound.
 func parseHistoryLine(line []byte, beforeMS int64, toolImages bool) ([]clievent.EventEntry, bool) {
 	// Fast-negative byte gate; see userTypeGate.
-	if !bytes.Contains(line, userTypeGate) && !bytes.Contains(line, userTypeGateSpaced) &&
+	isPeer := bytes.Contains(line, peerOriginGate) || bytes.Contains(line, peerOriginSpaced)
+	if !isPeer && !bytes.Contains(line, userTypeGate) && !bytes.Contains(line, userTypeGateSpaced) &&
 		!bytes.Contains(line, asstTypeGate) && !bytes.Contains(line, asstTypeGateSpaced) {
 		return nil, false
 	}
@@ -261,6 +318,11 @@ func parseHistoryLine(line []byte, beforeMS int64, toolImages bool) ([]clievent.
 	// entries. codexjsonl/kirojsonl drop ts<=0 for the same reason.
 	if ts <= 0 || (beforeMS > 0 && ts >= beforeMS) {
 		return nil, false
+	}
+	if isPeer {
+		if e, ok := peerHistoryEntry(line, hl, ts); ok {
+			return []clievent.EventEntry{e}, true
+		}
 	}
 
 	switch hl.Type {

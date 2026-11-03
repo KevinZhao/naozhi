@@ -91,7 +91,7 @@ func TestProcess_SeedFromSpawnArgs_Effort(t *testing.T) {
 			t.Parallel()
 			p, srv := shimTestPair(&ClaudeProtocol{})
 			defer srv.conn.Close()
-			p.SeedFromSpawnArgs(tc.args)
+			p.SeedFromSpawnArgs(tc.args, "")
 			if got := p.Effort(); got != tc.want {
 				t.Errorf("Effort() = %q, want %q", got, tc.want)
 			}

@@ -40,6 +40,17 @@ type EventEntry struct {
 	Tokens     int      `json:"tokens,omitempty"`      // total tokens consumed by agent task
 	DurationMS int64    `json:"duration_ms,omitempty"` // elapsed ms for agent task
 	Status     string   `json:"status,omitempty"`      // agent task status (completed, error, etc.)
+	// Peer and PeerMode are the sender of a peer_message (its --name and
+	// permission mode) and Peer the sender of a peer_hold. PeerKey is the
+	// naozhi session key that name belonged to when the message arrived
+	// ("" for a session naozhi does not manage), so the dashboard can link it.
+	Peer     string `json:"peer,omitempty"`
+	PeerMode string `json:"peer_mode,omitempty"`
+	PeerKey  string `json:"peer_key,omitempty"`
+	// Reason is why: a peer_hold's cause (explicit-setting, mode-mismatch;
+	// Status "held") or outcome (expired, refused, ...; Status "dropped"),
+	// a permission_denied's decision reason, a model_refusal's category.
+	Reason string `json:"reason,omitempty"`
 	// RunID is the run id (ctxutil.RunID) of the Send behind a "user" or
 	// "result" entry, the key that joins the transcript with runhistory and
 	// the cost ledger. A merged turn's result names its head run, which

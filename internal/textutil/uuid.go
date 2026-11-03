@@ -29,3 +29,36 @@ func DeriveLegacyUUID(timeMS int64, typ, summary, detail string) string {
 	sum := h.Sum(nil)
 	return hex.EncodeToString(sum[:16])
 }
+
+// DashlessUUID strips dashes from a Claude-style UUID so its shape matches
+// the event log's dashless 32-char hex identities; "" for empty or non-hex
+// input.
+func DashlessUUID(u string) string {
+	if u == "" {
+		return ""
+	}
+	// Stack buffer avoids a per-row alloc on JSONL replay.
+	var b [32]byte
+	n := 0
+	for i := 0; i < len(u); i++ {
+		c := u[i]
+		if c == '-' {
+			continue
+		}
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return ""
+		}
+		if n >= 32 {
+			return ""
+		}
+		if c >= 'A' && c <= 'F' {
+			c = c + 32
+		}
+		b[n] = c
+		n++
+	}
+	if n != 32 {
+		return ""
+	}
+	return string(b[:])
+}

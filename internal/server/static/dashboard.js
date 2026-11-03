@@ -786,6 +786,14 @@ function sessionMarkdownFilename(title, whenMS) {
 // Kept as a pure function (no DOM / fetch access) so it can be tested
 // in isolation — see TestDashboardJS_MarkdownExport_FormatsContent
 // which grep-checks the input→output contract.
+// markdownPeerSource is the plain-text sender label of a peer_message or
+// peer_hold, the export's copy of event_render.js's peerSourceHtml.
+function markdownPeerSource(e) {
+  const name = e.peer || '';
+  if (name === 'planner') return '来自 Planner';
+  return (e.peer_key ? '来自会话 ' : '来自终端会话 ') + name;
+}
+
 function formatSessionMarkdown(meta, events) {
   const lines = [];
   lines.push('# ' + (meta.title || '未命名会话'));
@@ -850,6 +858,20 @@ function formatSessionMarkdown(meta, events) {
       // boundaries (init, restart) without mixing them into conversation.
       const summary = e.summary || e.type;
       lines.push('> _' + summary + '_' + (ts ? ' · ' + ts : ''));
+      lines.push('');
+    } else if (e.type === 'peer_message') {
+      lines.push('## ' + markdownPeerSource(e) + (ts ? ' · ' + ts : ''));
+      lines.push('');
+      lines.push(raw);
+      lines.push('');
+    } else if (e.type === 'peer_hold' || e.type === 'permission_denied' || e.type === 'model_refusal') {
+      let note;
+      if (e.type === 'peer_hold') {
+        note = (e.status === 'dropped' ? '未送达：' : '已扣住：') + markdownPeerSource(e) + ' 的消息';
+      } else {
+        note = (e.type === 'model_refusal' ? '模型拒答' : '权限拒绝') + '：' + [e.tool, raw].filter(Boolean).join(' ');
+      }
+      lines.push('> _' + note + (e.reason ? '（' + e.reason + '）' : '') + '_' + (ts ? ' · ' + ts : ''));
       lines.push('');
     }
   }

@@ -31,8 +31,8 @@ func TestPermissionCheckFrames_TimelineRows(t *testing.T) {
 			if len(entries) != tc.want {
 				t.Fatalf("entries = %+v, want %d", entries, tc.want)
 			}
-			if tc.want == 1 && entries[0].Type != clievent.KindSystem {
-				t.Errorf("permission_denied entry type = %q, want %q", entries[0].Type, clievent.KindSystem)
+			if tc.want == 1 && entries[0].Type != clievent.KindPermissionDenied {
+				t.Errorf("permission_denied entry type = %q, want %q", entries[0].Type, clievent.KindPermissionDenied)
 			}
 		})
 	}
