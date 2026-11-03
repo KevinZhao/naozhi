@@ -283,6 +283,16 @@ const (
 	rvResult       = `{"duration_api_ms":24185,"stop_reason":"end_turn","session_id":"s1","is_error":false,"subtype":"success","result":"ok","type":"result"}`
 )
 
+// Frames CC 2.1.316 writes around every turn (ids trimmed): --name emits the
+// title at spawn, and each input command is bracketed by lifecycle frames.
+const (
+	rvTitle     = `{"type":"system","subtype":"session_title_changed","title":"planner","uuid":"u5","session_id":"s1"}`
+	rvQueued    = `{"type":"command_lifecycle","command_uuid":"c1","state":"queued","uuid":"u6","session_id":"s1"}`
+	rvStarted   = `{"type":"command_lifecycle","command_uuid":"c1","state":"started","uuid":"u7","session_id":"s1"}`
+	rvCompleted = `{"type":"command_lifecycle","command_uuid":"c1","state":"completed","uuid":"u8","session_id":"s1"}`
+	rvUser      = `{"type":"user","message":{"role":"user","content":"hi"},"isReplay":true,"session_id":"s1"}`
+)
+
 func rvReplays(firstSeq int64, lines ...string) []shim.ServerMsg {
 	out := make([]shim.ServerMsg, len(lines))
 	for i, l := range lines {
@@ -323,6 +333,12 @@ func TestReconnectVerdict_BackgroundTaskFrames(t *testing.T) {
 		// decoded, then skipped as an event.
 		{"neutral frame in another key order",
 			rvReplays(1, rvResult, `{"subtype":"task_progress","type":"system","task_id":"w1","session_id":"s1"}`), verdictFinished},
+		{"named session that never had a turn",
+			rvReplays(1, rvTitle), verdictIdle},
+		{"turn ended, lifecycle completed after the result",
+			rvReplays(1, rvTitle, rvQueued, rvStarted, rvInit, rvUser, rvResult, rvCompleted), verdictFinished},
+		{"turn started, nothing answered yet",
+			rvReplays(1, rvTitle, rvQueued, rvStarted, rvInit, rvUser), verdictMidTurn},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -401,7 +417,7 @@ func TestReconnectVerdict_SkipsNeutralFramesUndecoded(t *testing.T) {
 // semantic frame.
 func TestTurnNeutralLinePrefixesMatchEvents(t *testing.T) {
 	proto := &ClaudeProtocol{}
-	for _, line := range []string{rvProgress, rvBgChanged, rvUpdated, rvNotification} {
+	for _, line := range []string{rvProgress, rvBgChanged, rvUpdated, rvNotification, rvTitle, rvQueued, rvCompleted} {
 		if !isTurnNeutralLine(line) {
 			t.Errorf("isTurnNeutralLine(%.60s) = false", line)
 		}

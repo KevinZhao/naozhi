@@ -686,8 +686,16 @@ func lastReplayedSeq(replays []shim.ServerMsg) int64 {
 
 // turnNeutralSystemSubtypes are the claude system frames a background task
 // emits with or without a turn in flight. task_started is not among them: it
-// belongs to the turn whose tool call launched the task.
-var turnNeutralSystemSubtypes = [...]string{"task_progress", "task_updated", "task_notification", "background_tasks_changed"}
+// belongs to the turn whose tool call launched the task. session_title_changed
+// is session metadata: --name writes one at spawn, before any turn, so a
+// session that never had a turn holds only it.
+var turnNeutralSystemSubtypes = [...]string{"task_progress", "task_updated", "task_notification", "background_tasks_changed", "session_title_changed"}
+
+// commandLifecycleType is the frame the CLI brackets every input command with
+// (queued / started / completed). "completed" lands after the turn's result,
+// so it would read as a turn still running; the user replay and result
+// between the brackets already decide.
+const commandLifecycleType = "command_lifecycle"
 
 // turnNeutralLinePrefixes are those frames' line heads as the CLI writes them.
 var turnNeutralLinePrefixes = func() (p [len(turnNeutralSystemSubtypes)]string) {
@@ -700,6 +708,9 @@ var turnNeutralLinePrefixes = func() (p [len(turnNeutralSystemSubtypes)]string) 
 // isTurnNeutralLine reports whether line is a turn-neutral frame recognisable
 // without decoding it. A miss (other key order) is caught by isTurnNeutralEvent.
 func isTurnNeutralLine(line string) bool {
+	if strings.HasPrefix(line, `{"type":"`+commandLifecycleType+`"`) {
+		return true
+	}
 	for _, p := range turnNeutralLinePrefixes {
 		if strings.HasPrefix(line, p) {
 			return true
@@ -714,7 +725,7 @@ func isTurnNeutralLine(line string) bool {
 // an idle session that switched models leaves it as the LAST buffered line,
 // and counting it would park the session in StateRunning after a restart.
 func isTurnNeutralEvent(ev clievent.Event) bool {
-	if ev.Type == "control_ack" {
+	if ev.Type == "control_ack" || ev.Type == commandLifecycleType {
 		return true
 	}
 	return ev.Type == "system" && slices.Contains(turnNeutralSystemSubtypes[:], ev.SubType)
