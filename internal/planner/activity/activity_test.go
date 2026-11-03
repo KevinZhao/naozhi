@@ -2,6 +2,8 @@ package activity
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 )
@@ -162,10 +164,11 @@ func TestPRLinks(t *testing.T) {
 
 func TestRelPath(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
+	type relCase struct {
 		root, abs, want string
 		ok              bool
-	}{
+	}
+	cases := []relCase{
 		{"/r", "/r/docs/a.md", "docs/a.md", true},
 		{"/r", "/r/./x/../a.md", "a.md", true},
 		{"/r", "/other/a.md", "", false},
@@ -173,6 +176,21 @@ func TestRelPath(t *testing.T) {
 		{"/r", "docs/a.md", "", false},
 		{"", "/r/a.md", "", false},
 	}
+	// A root stored resolved and a path spelled through a symlink to it (the
+	// workspace is validated resolved; macOS /tmp is a symlink).
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases = append(cases,
+		relCase{resolved, filepath.Join(link, "new", "a.md"), "new/a.md", true},
+		relCase{link, filepath.Join(resolved, "a.md"), "a.md", true},
+	)
 	for _, c := range cases {
 		got, ok := RelPath(c.root, c.abs)
 		if got != c.want || ok != c.ok {

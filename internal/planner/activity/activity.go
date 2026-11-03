@@ -81,16 +81,48 @@ func IsOutputFile(name string) bool {
 }
 
 // RelPath returns abs relative to root in slash form, false when abs is not
-// absolute or lies outside root (or is root itself).
+// absolute or lies outside root (or is root itself). When the spellings
+// differ only by a symlink (a workspace stored resolved, /private/tmp/w, and
+// a tool writing to /tmp/w/a.md) both sides are compared resolved; abs need
+// not exist yet.
 func RelPath(root, abs string) (string, bool) {
 	if root == "" || !filepath.IsAbs(abs) {
 		return "", false
 	}
+	if rel, ok := relLexical(root, abs); ok {
+		return rel, true
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", false
+	}
+	return relLexical(resolvedRoot, resolveExisting(abs))
+}
+
+func relLexical(root, abs string) (string, bool) {
 	rel, err := filepath.Rel(root, filepath.Clean(abs))
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", false
 	}
 	return filepath.ToSlash(rel), true
+}
+
+// resolveExisting resolves the symlinks of p's longest existing ancestor and
+// appends the rest.
+func resolveExisting(p string) string {
+	p = filepath.Clean(p)
+	rest := ""
+	for {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return filepath.Join(r, rest)
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return filepath.Join(p, rest)
+		}
+		rest = filepath.Join(filepath.Base(p), rest)
+		p = parent
+	}
 }
 
 // toolInput is the part of a tool_use input Classify reads.
