@@ -327,13 +327,7 @@ func TestEncodeCurrentProjectDir_Roundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	encoded := "-" + filepath.ToSlash(pwd)[1:] // mirror the encoder
-	// strip slashes
-	for i := 0; i < len(encoded); i++ {
-		if encoded[i] == '/' {
-			encoded = encoded[:i] + "-" + encoded[i+1:]
-		}
-	}
+	encoded := claudefs.ProjectSlug(pwd)
 
 	// create the memory dir for that encoded name
 	if err := os.MkdirAll(filepath.Join(dir, encoded, "memory"), 0o755); err != nil {
