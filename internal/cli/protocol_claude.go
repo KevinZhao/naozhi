@@ -541,6 +541,9 @@ func (p *ClaudeProtocol) ReadEventInto(line string, buf []clievent.Event) ([]cli
 	if ev.Type == "user" && strings.Contains(line, `"async_launched"`) {
 		ev.WorkflowLaunch = parseWorkflowLaunch(line)
 	}
+	if ev.Type == "user" && !ev.IsReplay && strings.Contains(line, toolImageGate) {
+		ev.ToolResultImages = parseToolResultImages(line)
+	}
 	// Copy the value out so the caller owns an independent clievent.Event; the deferred
 	// Put resets only the pooled struct's view, not the freshly-unmarshalled
 	// graph (Message, AskQuestion, ...) the copy points at.

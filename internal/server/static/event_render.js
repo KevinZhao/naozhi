@@ -233,8 +233,13 @@ function toolUseHtml(e) {
 }
 
 // toolResultHtml folds long outputs by default; a <persisted-output> Tool
-// field of "persisted:tool-results/<id>.ext" gets a fetch-full button.
+// field of "persisted:tool-results/<id>.ext" gets a fetch-full button. The
+// images a tool returned (a screenshot) carry no detail to fold: their text
+// is a caption above the thumbnails eventHtml appends.
 function toolResultHtml(e) {
+  if (e.images && e.images.length > 0 && !e.detail) {
+    return e.summary ? '<div class="tr-caption">' + esc(e.summary) + '</div>' : '';
+  }
   const summary = e.summary || '(tool result)';
   const detail = e.detail || '';
   let persistedPath = '';

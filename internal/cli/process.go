@@ -120,6 +120,9 @@ type Process struct {
 	// onCodeChange receives each valid system/code_change_published frame so
 	// the session can record the PR. Set via SetOnCodeChange at any time.
 	onCodeChange atomic.Pointer[func(clievent.CodeChange)]
+	// stateDir is Wrapper.StateDir, where storeToolImages keeps the originals
+	// of the images tools return. Assigned once before startReadLoop.
+	stateDir string
 	// workflows tracks the CLI's background workflows from its task frames
 	// (process_workflow.go); onWorkflowChange is woken after each change.
 	// workflows is nil only in &Process{} test fixtures.

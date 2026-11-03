@@ -141,6 +141,18 @@ func (l Layout) PlannerLogRoot() string { return l.Join("planner", "log") }
 // (<root>/planner/workspaces.json).
 func (l Layout) PlannerWorkspacesPath() string { return l.Join("planner", "workspaces.json") }
 
+// PlannerAttachmentsRel is PlannerAttachmentsRoot relative to the root, in
+// the forward-slash form an EventEntry.ImagePaths value carries.
+const PlannerAttachmentsRel = "planner/attachments"
+
+// PlannerAttachmentsRoot holds the originals of the images tools return
+// (<root>/planner/attachments, docs/rfc/planner.md §3.7), in the
+// internal/attachment day-dir + .meta layout. It is in the state root rather
+// than a workspace so a screenshot never lands in the session's repository.
+func (l Layout) PlannerAttachmentsRoot() string {
+	return l.Join(filepath.FromSlash(PlannerAttachmentsRel))
+}
+
 // Cron-store siblings.
 
 // RunsRoot is the cron run-record root (<root>/runs), with per-job

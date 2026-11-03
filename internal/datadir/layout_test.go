@@ -29,6 +29,7 @@ func TestLayoutSiblings(t *testing.T) {
 		{"planner", lay.PlannerRoot(), "/data/naozhi/planner"},
 		{"planner_log", lay.PlannerLogRoot(), "/data/naozhi/planner/log"},
 		{"planner_workspaces", lay.PlannerWorkspacesPath(), "/data/naozhi/planner/workspaces.json"},
+		{"planner_attachments", lay.PlannerAttachmentsRoot(), "/data/naozhi/planner/attachments"},
 		{"cron_runs", lay.RunsRoot(), "/data/naozhi/runs"},
 		{"join", lay.Join("a", "b"), "/data/naozhi/a/b"},
 	}

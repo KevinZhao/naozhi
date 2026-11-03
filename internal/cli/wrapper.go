@@ -160,6 +160,10 @@ type Wrapper struct {
 	CLIVersion  string // semver from --version, e.g. "2.1.92" (spawn-time, immutable)
 	Protocol    Protocol
 	ShimManager *shim.Manager
+	// StateDir is the session store's directory (datadir root); its processes
+	// keep the originals of tool-returned images under its planner/attachments.
+	// Empty keeps thumbnails only.
+	StateDir string
 
 	// liveVersion is the CLI version self-reported by a spawned process (system/
 	// init claude_code_version). CLIVersion goes stale after a host claude upgrade
@@ -491,6 +495,7 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 	proc.setSpawnDiags(spawnDiags)
 	// Push the self-reported binary version (init frame) up for the global banner.
 	proc.SetOnLiveVersion(w.ObserveLiveVersion)
+	proc.stateDir = w.StateDir
 
 	// Protocol init handshake (stream-json: no-op; ACP: initialize + session/new)
 	sessionID, err := initHandshake(proto, proc, opts.ResumeID, opts.WorkingDir)
@@ -572,6 +577,7 @@ func (w *Wrapper) attachReconnected(ctx context.Context, handle *shim.ShimHandle
 	proc.InitLinker("")
 	// Mirror the fresh-spawn wiring so a re-attached process also feeds its live version.
 	proc.SetOnLiveVersion(w.ObserveLiveVersion)
+	proc.stateDir = w.StateDir
 
 	if handle.Hello.SessionID != "" {
 		proc.turn.sessionID = handle.Hello.SessionID

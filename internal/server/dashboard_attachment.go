@@ -16,6 +16,7 @@ import (
 	"time"
 
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
+	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
@@ -67,15 +68,17 @@ func cleanAttachmentRelPath(relRaw string) (string, string) {
 }
 
 // handleAttachment streams an on-disk inline image from the session
-// workspace attachment directory for the dashboard lightbox "view original"
-// (the data-URI thumbnail in EventEntry.Images remains the fallback).
+// workspace attachment directory, or a tool-returned image from the state
+// root's, for the dashboard lightbox "view original" (the data-URI thumbnail
+// in EventEntry.Images remains the fallback).
 //
-// Request: GET /api/sessions/attachment?key=<session>&path=<ws-rel>
+// Request: GET /api/sessions/attachment?key=<session>&path=<ws-rel | state-rel>
 // Response: image/jpeg | image/png | image/gif | image/webp
 //
 // Authorization is the "session exists" boundary shared with
 // /api/sessions/events. The path is pinned to attachmentDirPrefix under the
-// session's workspace so a crafted key cannot exfiltrate other files.
+// session's workspace or toolImageDirPrefix under the state root, so a
+// crafted key cannot exfiltrate other files.
 func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	key := q.Get("key")
@@ -96,29 +99,11 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": errMsg})
 		return
 	}
-	// Pin to the attachment subtree: persistFileRefs is the only producer
-	// of these paths, so a legitimate URL always starts with the prefix.
-	if !strings.HasPrefix(cleaned, attachmentDirPrefix) {
+	attachRootAbs, abs, ok := h.attachmentFile(key, cleaned)
+	if !ok {
 		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}
-
-	// Resolve the workspace from the key only (live session, else router
-	// fallback — the same rule resolveAttachmentWorkspace applies on the
-	// write side). A `workspace` query parameter is deliberately NOT
-	// accepted.
-	ws := h.engine.sessionWorkspace(key)
-	if ws == "" {
-		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
-		return
-	}
-	validatedWS, err := h.engine.validateWorkspace(ws)
-	if err != nil {
-		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
-		return
-	}
-
-	abs := filepath.Join(validatedWS, filepath.FromSlash(cleaned))
 	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -129,8 +114,7 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}
-	// Symlink-escape defence: resolved MUST still live under validatedWS/attachmentDir.
-	attachRootAbs := filepath.Join(validatedWS, filepath.FromSlash(strings.TrimSuffix(attachmentDirPrefix, "/")))
+	// Symlink-escape defence: resolved MUST still live under the attachment root.
 	if resolved != attachRootAbs &&
 		!strings.HasPrefix(resolved, attachRootAbs+string(filepath.Separator)) {
 		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
@@ -261,6 +245,50 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox; img-src 'self' data:")
 
 	http.ServeContent(w, r, filepath.Base(resolved), info.ModTime(), f)
+}
+
+// toolImageDirPrefix is the state-root-relative prefix of a tool-returned
+// image's stored original (cli.storeToolImages), the other path shape
+// /api/sessions/attachment serves.
+const toolImageDirPrefix = datadir.PlannerAttachmentsRel + "/"
+
+// attachmentFile maps a cleaned wire path to the attachment root it must stay
+// inside and the file under it: the session workspace's .naozhi/attachments
+// for an upload, the state root's planner/attachments for a tool image. Both
+// keep the "session exists" boundary. ok=false is a 404.
+func (h *SendHandler) attachmentFile(key, cleaned string) (root, abs string, ok bool) {
+	// Resolve the workspace from the key only (live session, else router
+	// fallback — the same rule resolveAttachmentWorkspace applies on the
+	// write side). A `workspace` query parameter is deliberately NOT
+	// accepted.
+	ws := h.engine.sessionWorkspace(key)
+	if ws == "" {
+		return "", "", false
+	}
+	if strings.HasPrefix(cleaned, toolImageDirPrefix) {
+		if h.stateDir == "" {
+			return "", "", false
+		}
+		// Resolved so the containment check holds when the state root sits
+		// behind a symlink (macOS /tmp).
+		base, err := filepath.EvalSymlinks(h.stateDir)
+		if err != nil {
+			return "", "", false
+		}
+		return filepath.Join(base, filepath.FromSlash(datadir.PlannerAttachmentsRel)),
+			filepath.Join(base, filepath.FromSlash(cleaned)), true
+	}
+	// Pin to the attachment subtree: persistFileRefs is the only producer
+	// of these paths, so a legitimate URL always starts with the prefix.
+	if !strings.HasPrefix(cleaned, attachmentDirPrefix) {
+		return "", "", false
+	}
+	validatedWS, err := h.engine.validateWorkspace(ws)
+	if err != nil {
+		return "", "", false
+	}
+	return filepath.Join(validatedWS, filepath.FromSlash(strings.TrimSuffix(attachmentDirPrefix, "/"))),
+		filepath.Join(validatedWS, filepath.FromSlash(cleaned)), true
 }
 
 // buildAttachmentETagSeed builds the SHA-256 input for the attachment ETag:

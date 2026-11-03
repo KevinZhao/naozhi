@@ -153,6 +153,23 @@ func Persist(workspace string, data []byte, ext string, meta Meta) (Persisted, e
 	if !filepath.IsAbs(workspace) {
 		return Persisted{}, fmt.Errorf("attachment: workspace must be absolute, got %q", workspace)
 	}
+	p, err := PersistIn(filepath.Join(workspace, Dir), data, ext, meta)
+	if err != nil {
+		return Persisted{}, err
+	}
+	// Forward slashes regardless of host OS: backslashes would be rejected
+	// or misresolved by the CLI Read tool.
+	p.RelPath = strings.ReplaceAll(path.Join(Dir, p.RelPath), `\`, "/")
+	return p, nil
+}
+
+// PersistIn is Persist into an attachment root that is not under a workspace
+// (datadir's PlannerAttachmentsRoot): same <dir>/<yyyy-mm-dd>/<uuid>.<ext> +
+// .meta layout, so GCDir reaps it the same way. RelPath is relative to dir.
+func PersistIn(dir string, data []byte, ext string, meta Meta) (Persisted, error) {
+	if !filepath.IsAbs(dir) {
+		return Persisted{}, fmt.Errorf("attachment: dir must be absolute, got %q", dir)
+	}
 	if len(data) == 0 {
 		return Persisted{}, ErrEmptyData
 	}
@@ -163,7 +180,7 @@ func Persist(workspace string, data []byte, ext string, meta Meta) (Persisted, e
 
 	// UTC date dir: one timezone for GC and operators, no DST day-boundary race.
 	dateDir := time.Now().UTC().Format("2006-01-02")
-	absDir := filepath.Join(workspace, Dir, dateDir)
+	absDir := filepath.Join(dir, dateDir)
 	// 0o700: co-resident users on a multi-tenant host must not be able to
 	// walk the attachments subtree.
 	if err := os.MkdirAll(absDir, 0o700); err != nil {
@@ -202,13 +219,8 @@ func Persist(workspace string, data []byte, ext string, meta Meta) (Persisted, e
 		return Persisted{}, err
 	}
 
-	// Forward slashes regardless of host OS: backslashes would be rejected
-	// or misresolved by the CLI Read tool.
-	rel := path.Join(Dir, dateDir, baseName)
-	rel = strings.ReplaceAll(rel, `\`, "/")
-
 	return Persisted{
-		RelPath: rel,
+		RelPath: path.Join(dateDir, baseName),
 		AbsPath: absPath,
 		Size:    int64(len(data)),
 	}, nil
@@ -302,17 +314,22 @@ func (r *GCResult) bump(reason ReapReason, fe fs.DirEntry) {
 // upload-TTL check and count as unreferenced. ctx is honoured per day-dir
 // and per file; on cancellation the partial result is returned with ctx.Err().
 func GCWithRefs(ctx context.Context, workspace string, opts GCOptions) (GCResult, error) {
-	var res GCResult
 	if workspace == "" {
-		return res, ErrWorkspaceRequired
+		return GCResult{}, ErrWorkspaceRequired
 	}
+	return GCDir(ctx, filepath.Join(workspace, Dir), opts)
+}
+
+// GCDir is GCWithRefs over an attachment root itself (the dir PersistIn
+// wrote to) rather than a workspace.
+func GCDir(ctx context.Context, root string, opts GCOptions) (GCResult, error) {
+	var res GCResult
 	// A non-positive UploadTTL would make the keep-branch never fire and reap
 	// every unreferenced upload, including ones seconds old. Treat it as
 	// "GC disabled" rather than "delete everything". (#2226)
 	if opts.UploadTTL <= 0 {
 		return res, nil
 	}
-	root := filepath.Join(workspace, Dir)
 	dayEntries, err := os.ReadDir(root)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {

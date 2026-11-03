@@ -627,6 +627,8 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 		runID = p.turn.resultRunID()
 	}
 	p.logEventAt(ev, nowMS, runID)
+	// The entries hold the thumbnails; the originals must not sit in eventCh.
+	ev.ToolResultImages = nil
 
 	// A result no Send owns ends its turn: a reconnect's in-flight turn (the
 	// one-shot reconnectedMidTurn) or one the CLI started itself (unowned).

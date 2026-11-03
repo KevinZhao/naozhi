@@ -115,6 +115,12 @@ type Event struct {
 	// (ClaudeProtocol.ReadEventInto); nil otherwise.
 	CodeChange *CodeChange `json:"-"`
 
+	// ToolResultImages holds the image blocks of a user frame's tool_result
+	// blocks (ClaudeProtocol.ReadEventInto), one element per tool_result that
+	// returned an image; nil otherwise. It carries the decoded originals, so
+	// readLoop drops it once the frame is logged.
+	ToolResultImages []ToolResultImages `json:"-"`
+
 	// ToolCall is populated for ACP tool_call / tool_call_update events
 	// (dashboard progress row with collapsible rawOutput). nil on stream-json,
 	// where tool use flows through Message.Content[].Type=="tool_use".
@@ -246,6 +252,25 @@ type ContentBlock struct {
 	Input json.RawMessage `json:"input,omitempty"` // tool_use input
 	// ToolUseID is the tool_use a tool_result block (in a user event) answers.
 	ToolUseID string `json:"tool_use_id,omitempty"`
+}
+
+// ToolResultImages is what one tool_result block returned besides text: the
+// images of a screenshot, a Read of an image file, a rendered chart
+// (docs/rfc/computer-use.md §4.2).
+type ToolResultImages struct {
+	ToolUseID string
+	// Text is the block's text parts joined, the entry's summary.
+	Text   string
+	Images []ToolImage
+}
+
+// ToolImage is one image a tool returned.
+type ToolImage struct {
+	MimeType string
+	Data     []byte
+	// Path is the stored original as an EventEntry.ImagePaths value, set by
+	// the process before the frame is logged; "" when it was not stored.
+	Path string
 }
 
 // MaxAssistantMessageContentBytes caps the total content-block bytes of an

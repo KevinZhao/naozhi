@@ -235,3 +235,45 @@ func TestParseHistoryLine_NoTextNoImageDropped(t *testing.T) {
 		t.Errorf("parseHistoryLine ok=%v entries=%d, want ok=false entries=0", ok, len(entries))
 	}
 }
+
+// TestParseHistoryLine_ToolResultImages: an image a tool returned replays as a
+// tool_result entry linked to its call, so a screenshot survives a restart
+// when only the Claude JSONL has it.
+func TestParseHistoryLine_ToolResultImages(t *testing.T) {
+	setThumbnailFn(t, stubThumb)
+	toolResult := func(id string, content json.RawMessage) map[string]any {
+		return map[string]any{"type": "tool_result", "tool_use_id": id, "content": content}
+	}
+	const lineUUID = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
+	tests := []struct {
+		name    string
+		content []map[string]any
+		want    []string // ToolUseID of each tool_result entry
+	}{
+		{name: "screenshot", content: []map[string]any{toolResult("tu1", imageBlockContent("shot", b64("png")))}, want: []string{"tu1"}},
+		{name: "text-only result dropped", content: []map[string]any{toolResult("tu1", json.RawMessage(`"plain output"`))}},
+		{name: "one entry per result", content: []map[string]any{
+			toolResult("tu1", imageBlockContent("", b64("a"))),
+			toolResult("tu2", imageBlockContent("", b64("b"), b64("c"))),
+		}, want: []string{"tu1", "tu2"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			msg, _ := json.Marshal(map[string]any{"role": "user", "content": tc.content})
+			line := `{"type":"user","timestamp":"2026-01-01T00:00:00Z","uuid":"` + lineUUID + `","message":` + string(msg) + `}`
+			entries, ok := parseHistoryLine([]byte(line))
+			if ok != (len(tc.want) > 0) || len(entries) != len(tc.want) {
+				t.Fatalf("ok=%v entries=%d, want %d", ok, len(entries), len(tc.want))
+			}
+			for i, e := range entries {
+				if e.Type != "tool_result" || e.ToolUseID != tc.want[i] || len(e.Images) == 0 || e.Detail != "" {
+					t.Errorf("entry %d = {%s %s %d images detail %q}, want tool_result %s with images, no detail",
+						i, e.Type, e.ToolUseID, len(e.Images), e.Detail, tc.want[i])
+				}
+				if e.UUID == "" || e.UUID == strings.ReplaceAll(lineUUID, "-", "") {
+					t.Errorf("entry %d UUID = %q, want one derived from the line's", i, e.UUID)
+				}
+			}
+		})
+	}
+}
