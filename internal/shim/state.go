@@ -70,6 +70,26 @@ type SpawnOverlay struct {
 	// --append-system-prompt (#2493); without it every prompted session
 	// would read as drift on restart.
 	AppendSystemPrompt string `json:"append_system_prompt,omitempty"`
+
+	// Per-session Claude launch spec (RFC planner §15.1). Each field renders
+	// its own BuildArgs-owned flag, so it must ride here or a session spawned
+	// with it reads as drift on restart. Kiro / Codex ignore them.
+	//
+	// Tools is the built-in tool list (--tools); empty keeps the CLI default.
+	Tools []string `json:"tools,omitempty"`
+	// PermissionMode overrides cli.permission_mode for this session:
+	// "bypass" | "auto" | "dontAsk"; "" keeps the router-wide mode.
+	PermissionMode string `json:"permission_mode,omitempty"`
+	// Name is the CLI session display name (--name), the handle other CC
+	// sessions see in ListAgents.
+	Name            string `json:"name,omitempty"`
+	StrictMCPConfig bool   `json:"strict_mcp_config,omitempty"`
+	// CrossSessionInbound and PermissionsDeny are settings keys, not flags:
+	// the CLI takes one --settings, so a session carrying either spawns on a
+	// per-session settings file (base settings plus these) at a path derived
+	// from its key.
+	CrossSessionInbound string   `json:"cross_session_inbound,omitempty"`
+	PermissionsDeny     []string `json:"permissions_deny,omitempty"`
 }
 
 // EncodeSpawnOverlay serialises ov for the --spawn-overlay flag. Nil encodes

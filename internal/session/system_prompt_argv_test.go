@@ -54,7 +54,7 @@ func mkSystemPromptRouter(t *testing.T) *Router {
 func spawnArgvFor(r *Router, key string, opts AgentOpts) []string {
 	sp := resolveT(r, key, "", opts)
 	return sp.Wrapper.Protocol.BuildArgs(
-		r.spawn.argvSpawnOptions(sp.Model, sp.Effort, r.spawn.cliDebugFileFor(key), sp.SystemPrompt, sp.Args))
+		r.spawn.argvSpawnOptions(sp.Model, sp.Effort, r.spawn.cliDebugFileFor(key), sp.SystemPrompt, sp.Args, sp.Launch))
 }
 
 // appendSystemPromptValues returns every value following an

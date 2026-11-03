@@ -15,6 +15,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
+	"github.com/naozhi/naozhi/internal/monitor/beat"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
@@ -496,15 +497,14 @@ var saveTickInterval = sessionSaveInterval
 // that panics every tick fails loudly and stops instead of spinning forever.
 const cleanupLoopMaxRestarts = 10
 
-// StartCleanupLoop runs Cleanup periodically and saves dirty session state
-// on a shorter interval to reduce data loss on crash.
-func (r *Router) StartCleanupLoop(ctx context.Context, interval time.Duration) {
-	r.startCleanupLoop(ctx, interval, 0)
-}
+// cleanupLoopBeat is the cleanup loop's heartbeat name on /health.
+const cleanupLoopBeat = "session_cleanup"
 
-// startCleanupLoop is the panic-restart-aware variant; attempt counts restarts
-// so far and the panic handler bails out at cleanupLoopMaxRestarts.
-func (r *Router) startCleanupLoop(ctx context.Context, interval time.Duration, attempt int) {
+// StartCleanupLoop runs Cleanup periodically and saves dirty session state
+// on a shorter interval to reduce data loss on crash. The loop beats on beats
+// (nil = no heartbeat) every iteration; once it gives up after repeated
+// panics the beats stop and /health reports it stale.
+func (r *Router) StartCleanupLoop(ctx context.Context, interval time.Duration, beats *beat.Registry) {
 	// time.NewTicker(d) panics for d<=0; the recovery defer would re-schedule
 	// and re-panic on the same call, so reject the misconfiguration up front.
 	if interval <= 0 {
@@ -512,6 +512,13 @@ func (r *Router) startCleanupLoop(ctx context.Context, interval time.Duration, a
 			"interval", interval)
 		return
 	}
+	hb := beats.Register(cleanupLoopBeat, min(interval, saveTickInterval))
+	r.startCleanupLoop(ctx, interval, hb, 0)
+}
+
+// startCleanupLoop is the panic-restart-aware variant; attempt counts restarts
+// so far and the panic handler bails out at cleanupLoopMaxRestarts.
+func (r *Router) startCleanupLoop(ctx context.Context, interval time.Duration, hb *beat.Beat, attempt int) {
 	saveEvery := saveTickInterval
 	go func() {
 		// A panic inside Cleanup or saveIfDirty would silently kill the loop,
@@ -538,7 +545,7 @@ func (r *Router) startCleanupLoop(ctx context.Context, interval time.Duration, a
 					if ctx.Err() != nil {
 						return
 					}
-					r.startCleanupLoop(ctx, interval, attempt+1)
+					r.startCleanupLoop(ctx, interval, hb, attempt+1)
 				})
 			}
 		}()
@@ -558,6 +565,7 @@ func (r *Router) startCleanupLoop(ctx context.Context, interval time.Duration, a
 				r.saveIfDirty()
 				sweepWorkflowBoards(r.ss, time.Now())
 			}
+			hb.Beat()
 		}
 	}()
 }

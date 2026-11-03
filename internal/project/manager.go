@@ -373,6 +373,9 @@ func (m *Manager) Get(name string) *Project {
 	return p.snapshot()
 }
 
+// Root returns the absolute projects root.
+func (m *Manager) Root() string { return m.root }
+
 // All returns snapshots of all projects sorted by CreatedAt ascending (name as
 // tiebreaker) so the sidebar renders newly-added folders at the bottom.
 func (m *Manager) All() []*Project {

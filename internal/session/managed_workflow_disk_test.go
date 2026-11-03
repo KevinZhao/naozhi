@@ -738,7 +738,7 @@ func TestCleanupLoop_SweepsWorkflowBoards(t *testing.T) {
 	b.mu.Unlock()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	r.StartCleanupLoop(ctx, time.Hour)
+	r.StartCleanupLoop(ctx, time.Hour, nil)
 	testhelper.Eventually(t, func() bool {
 		w := boardEntry(r.SessionFor(key), "w1")
 		return w != nil && w.Status == workflow.StatusInterrupted
@@ -768,7 +768,7 @@ func TestCleanupLoop_SweepSettlesLostTerminalFrame(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	r.StartCleanupLoop(ctx, time.Hour)
+	r.StartCleanupLoop(ctx, time.Hour, nil)
 	testhelper.Eventually(t, func() bool {
 		w := boardEntry(s, "w1")
 		return w != nil && w.Status == workflow.StatusCompleted && w.Source == workflow.SourceResultFile

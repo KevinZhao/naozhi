@@ -96,6 +96,11 @@ func (l Layout) SessionRunsRoot() string { return l.Join("session-runs") }
 // EnsureDir hardening as the other state roots.
 func (l Layout) CLIDebugRoot() string { return l.Join("cli-debug") }
 
+// SessionSettingsRoot holds the per-session Claude settings files
+// (<root>/session-settings/<keyhash>.json): the naozhi-owned settings plus a
+// session's crossSessionInbound / permissions.deny overrides.
+func (l Layout) SessionSettingsRoot() string { return l.Join("session-settings") }
+
 // AccessProfileSecretsRoot holds per-profile secret material.
 func (l Layout) AccessProfileSecretsRoot() string { return l.Join("access-profile-secrets") }
 
@@ -121,6 +126,20 @@ func (l Layout) UISettingsPath() string { return l.Join("ui-settings.json") }
 // .naozhi/project.yaml carries none, so discovery never writes into a
 // project directory.
 func (l Layout) ProjectsIndexPath() string { return l.Join("projects-index.json") }
+
+// PlannerRoot is the Planner state root (<root>/planner). Everything the
+// Planner adds lives beneath it and no existing file is touched, so rolling
+// back is "install the old binary and delete this directory"; an isolated
+// instance with its own store_path gets its own root.
+func (l Layout) PlannerRoot() string { return l.Join("planner") }
+
+// PlannerLogRoot holds the Planner journal's monthly <YYYY-MM>.jsonl files
+// (<root>/planner/log).
+func (l Layout) PlannerLogRoot() string { return l.Join("planner", "log") }
+
+// PlannerWorkspacesPath is the workspace registry
+// (<root>/planner/workspaces.json).
+func (l Layout) PlannerWorkspacesPath() string { return l.Join("planner", "workspaces.json") }
 
 // PlannerAttachmentsRel is PlannerAttachmentsRoot relative to the root, in
 // the forward-slash form an EventEntry.ImagePaths value carries.
