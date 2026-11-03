@@ -57,6 +57,11 @@ type Config struct {
 	// Router because it spans router + project manager.
 	WorkspaceRoots WorkspaceRootLister
 
+	// AttachmentDirs are attachment roots that belong to no workspace (the
+	// state root's planner/attachments); attachment-gc sweeps them after the
+	// workspace roots.
+	AttachmentDirs []string
+
 	// NewTicker is an optional test injection point; nil means
 	// time.NewTicker. Tests return a channel they poke to drive runOnce.
 	NewTicker tickerFactory
@@ -220,6 +225,7 @@ func NewManager(cfg Config) (*Manager, error) {
 			Runner:         cfg.Runner,
 			Cfg:            runtime.Specific,
 			WorkspaceRoots: cfg.WorkspaceRoots,
+			AttachmentDirs: cfg.AttachmentDirs,
 		}
 		d, err := factory.Build(deps)
 		if err != nil {

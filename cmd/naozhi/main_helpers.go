@@ -321,6 +321,10 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 		return nil, "", fmt.Errorf("new runner: %w", err)
 	}
 
+	var attachmentDirs []string
+	if dir := datadir.ForStore(storePath).PlannerAttachmentsRoot(); dir != "" {
+		attachmentDirs = append(attachmentDirs, dir)
+	}
 	mgr, err := sysession.NewManager(sysession.Config{
 		Enabled: true,
 		Runner:  runner,
@@ -328,6 +332,7 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 		Daemons: sysessionDaemons(cfg),
 		// attachment-gc sweeps these roots; nil-safe inside the lister.
 		WorkspaceRoots: workspaceRootLister{router: router, projectMgr: projectMgr},
+		AttachmentDirs: attachmentDirs,
 		Telemetry:      telemetry,
 	})
 	if err != nil {

@@ -31,6 +31,7 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 		auth:         s.auth,
 		trustedProxy: s.auth.TrustedProxy,
 		orient:       hs.wiring.orient,
+		stateDir:     hs.wiring.stateDir,
 	}
 
 	// Scratch (ephemeral aside) API: pool built in buildServer; the sweeper

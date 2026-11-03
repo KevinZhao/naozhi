@@ -52,6 +52,9 @@ type DaemonDeps struct {
 	// WorkspaceRoots is non-nil only for daemons that sweep workspace
 	// attachment dirs (attachment-gc). Other daemons ignore it.
 	WorkspaceRoots WorkspaceRootLister
+	// AttachmentDirs are attachment roots outside any workspace that
+	// attachment-gc sweeps as well (Config.AttachmentDirs).
+	AttachmentDirs []string
 }
 
 // builtinDaemons is the immutable list of compiled-in daemons; order pins

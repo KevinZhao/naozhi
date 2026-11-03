@@ -344,6 +344,62 @@ func extractTextAndImages(raw json.RawMessage) (string, []string) {
 	return strings.Join(parts, "\n"), images
 }
 
+// toolResultBlock is a tool_result block of a user record; its content is a
+// plain string for a text-only result.
+type toolResultBlock struct {
+	Type      string          `json:"type"`
+	ToolUseID string          `json:"tool_use_id"`
+	Content   json.RawMessage `json:"content"`
+}
+
+// toolResultImageEntries is the Claude JSONL tier of cli.toolResultImageEntries:
+// one tool_result entry per result that returned an image. Its thumbnails come
+// from the same bytes through the same ThumbnailFn and ThumbMaxDim, so
+// merged.contentKey pairs it with the naozhi event-log copy. ImagePaths stays
+// empty: the JSONL does not know where naozhi stored the original.
+func toolResultImageEntries(hl claudefs.Line, ts int64, raw json.RawMessage) []clievent.EventEntry {
+	var blocks []toolResultBlock
+	if json.Unmarshal(raw, &blocks) != nil {
+		return nil
+	}
+	var out []clievent.EventEntry
+	for idx, b := range blocks {
+		if b.Type != "tool_result" {
+			continue
+		}
+		var parts []historyBlock
+		if json.Unmarshal(b.Content, &parts) != nil {
+			continue
+		}
+		var texts, thumbs []string
+		for _, p := range parts {
+			switch {
+			case p.Type == "text" && p.Text != "":
+				texts = append(texts, p.Text)
+			case p.Type == "image" && p.Source != nil &&
+				p.Source.Type == "base64" && p.Source.Data != "":
+				if thumb := thumbnailFromBase64(p.Source.Data); thumb != "" {
+					thumbs = append(thumbs, thumb)
+				}
+			}
+		}
+		if len(thumbs) == 0 {
+			continue
+		}
+		summary := textutil.TruncateRunes(strings.Join(texts, "\n"), 120)
+		out = append(out, clievent.EventEntry{
+			// idx+1: the line UUID itself belongs to the record's user entry.
+			UUID:      uuidFromClaudeBlock(hl, idx+1, ts, clievent.KindToolResult, summary, ""),
+			Time:      ts,
+			Type:      clievent.KindToolResult,
+			ToolUseID: b.ToolUseID,
+			Summary:   summary,
+			Images:    thumbs,
+		})
+	}
+	return out
+}
+
 // thumbnailFromBase64 decodes a base64 image payload and downsamples it to a
 // data URI, returning "" if ThumbnailFn is unset, the base64 is malformed, or
 // the image cannot be thumbnailed.

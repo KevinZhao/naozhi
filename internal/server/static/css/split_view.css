@@ -120,6 +120,7 @@
 .event.tool_result .tr-wrap{border-left:2px solid var(--nz-border);padding-left:10px;margin:2px 0}
 .event.tool_result .tr-summary{color:var(--nz-text-dim);cursor:pointer;font-size:var(--nz-fs-sm);padding:2px 0}
 .event.tool_result .tr-summary:hover{color:var(--nz-text)}
+.event.tool_result .tr-caption{color:var(--nz-text-dim);font-size:var(--nz-fs-sm);padding:2px 0;white-space:pre-wrap}
 .event.tool_result .tr-detail{margin:4px 0;padding:6px 8px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);font-size:var(--nz-fs-xs);max-height:400px;overflow:auto;white-space:pre-wrap;word-break:break-word}
 .event.tool_result .tr-persisted{display:inline-block;margin-top:4px;font-size:var(--nz-fs-xs);color:var(--nz-accent);text-decoration:none;border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:2px 8px}
 .event.tool_result .tr-persisted:hover{background:var(--nz-bg-2)}

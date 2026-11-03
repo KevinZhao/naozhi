@@ -39,6 +39,8 @@ const (
 // sweeper with no LLM Runner. See docs/rfc/attachment-gc-daemon.md.
 type attachmentGC struct {
 	roots WorkspaceRootLister
+	// dirs are attachment roots outside any workspace (DaemonDeps.AttachmentDirs).
+	dirs []string
 
 	uploadTTL  time.Duration
 	refTTL     time.Duration
@@ -58,6 +60,7 @@ type attachmentGC struct {
 func newAttachmentGC(deps DaemonDeps) (Daemon, error) {
 	a := &attachmentGC{
 		roots:      deps.WorkspaceRoots,
+		dirs:       deps.AttachmentDirs,
 		uploadTTL:  attachmentGCDefaultUploadTTL,
 		refTTL:     attachmentGCDefaultRefTTL,
 		perRootCap: attachmentGCDefaultPerRootCap,
@@ -102,15 +105,15 @@ func (a *attachmentGC) now() time.Time {
 	return time.Now()
 }
 
-// Tick sweeps every known workspace root once. Per-root budget + round-robin
+// Tick sweeps every attachment root once. Per-root budget + round-robin
 // cursor bound per-tick deletion work and prevent root starvation (RFC §4.3);
-// ctx is honoured between roots and, via GCWithRefs, inside a root's walk.
+// ctx is honoured between roots and, via GCDir, inside a root's walk.
 func (a *attachmentGC) Tick(ctx context.Context) (TickReport, error) {
-	if a.roots == nil {
+	if a.roots == nil && len(a.dirs) == 0 {
 		slog.Warn("attachment-gc: no WorkspaceRootLister wired; skipping")
 		return TickReport{}, nil
 	}
-	roots := a.roots.KnownWorkspaceRoots()
+	roots := a.attachmentRoots()
 	if len(roots) == 0 {
 		return TickReport{}, nil
 	}
@@ -136,7 +139,7 @@ func (a *attachmentGC) Tick(ctx context.Context) (TickReport, error) {
 			continue
 		}
 
-		res, err := attachment.GCWithRefs(ctx, root, attachment.GCOptions{
+		res, err := attachment.GCDir(ctx, root, attachment.GCOptions{
 			UploadTTL: a.uploadTTL,
 			RefTTL:    a.refTTL,
 			Now:       now,
@@ -170,6 +173,19 @@ func (a *attachmentGC) Tick(ctx context.Context) (TickReport, error) {
 		}
 	}
 	return report, firstErr
+}
+
+// attachmentRoots is every attachment root one tick sweeps: each known
+// workspace's <root>/.naozhi/attachments, then a.dirs. An empty or relative
+// workspace root stays relative after the join, so Tick counts it as bad_root.
+func (a *attachmentGC) attachmentRoots() []string {
+	var out []string
+	if a.roots != nil {
+		for _, r := range a.roots.KnownWorkspaceRoots() {
+			out = append(out, filepath.Join(r, attachment.Dir))
+		}
+	}
+	return append(out, a.dirs...)
 }
 
 // Counts keys attachment-gc reports; each has a SYSTEM_STAT_LABELS entry
