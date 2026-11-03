@@ -115,6 +115,13 @@ type Event struct {
 	// (ClaudeProtocol.ReadEventInto); nil otherwise.
 	CodeChange *CodeChange `json:"-"`
 
+	// Peer is populated for an inbound cross-session message (a user frame
+	// with a peer origin) and for system/peer_message_hold; Refusal for
+	// system/permission_denied and system/model_refusal_no_fallback
+	// (ClaudeProtocol.ReadEventInto). nil otherwise.
+	Peer    *Peer    `json:"-"`
+	Refusal *Refusal `json:"-"`
+
 	// ToolResultImages holds the image blocks of a user frame's tool_result
 	// blocks (ClaudeProtocol.ReadEventInto), one element per tool_result that
 	// returned an image; nil otherwise. It carries the decoded originals, so

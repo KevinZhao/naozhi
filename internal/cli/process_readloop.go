@@ -546,6 +546,11 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 		p.slots.mu.Lock()
 		p.handleReplayEventLocked(ev)
 		p.slots.mu.Unlock()
+		// A cross-session message reaches the stream only as a replay, but no
+		// bubble showed it: it is the one replay the transcript records.
+		if ev.Peer != nil {
+			p.logEventAt(ev, nowMS, "")
+		}
 		return false
 	}
 

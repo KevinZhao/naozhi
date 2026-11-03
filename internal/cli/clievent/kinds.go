@@ -25,6 +25,14 @@ const (
 	KindResult       = "result"
 	KindSystem       = "system"
 	KindPersistGap   = "persist_gap"
+	// A cross-session message another CC session sent this one, and one the
+	// CLI held back instead of delivering (docs/rfc/planner.md §6.2).
+	KindPeerMessage = "peer_message"
+	KindPeerHold    = "peer_hold"
+	// The refusal frames (system/permission_denied,
+	// system/model_refusal_no_fallback; planner.md §3.4).
+	KindPermissionDenied = "permission_denied"
+	KindModelRefusal     = "model_refusal"
 )
 
 // KindInfo classifies one kind. Internal: the dashboard filters it out of the
@@ -63,6 +71,10 @@ var kindTable = []KindInfo{
 	{Name: KindResult, Internal: true, MarkdownIgnore: true},
 	{Name: KindSystem},
 	{Name: KindPersistGap},
+	{Name: KindPeerMessage},
+	{Name: KindPeerHold},
+	{Name: KindPermissionDenied},
+	{Name: KindModelRefusal},
 }
 
 var kindByName = func() map[string]KindInfo {

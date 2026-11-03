@@ -124,6 +124,9 @@ type Process struct {
 	// (process_activity.go); acts is the read loop's state behind it.
 	activityHook atomic.Pointer[activityHook]
 	acts         activityTracker
+	// peerKeyFor resolves a cross-session message's sender name to the
+	// session key its entry carries. Set via SetPeerKeyResolver at any time.
+	peerKeyFor atomic.Pointer[func(string) string]
 	// stateDir is Wrapper.StateDir, where storeToolImages keeps the originals
 	// of the images tools return. Assigned once before startReadLoop.
 	stateDir string
@@ -441,6 +444,17 @@ func (p *Process) SetOnCodeChange(fn func(clievent.CodeChange)) {
 	p.onCodeChange.Store(&fn)
 }
 
+// SetPeerKeyResolver sets the lookup that stamps a peer_message or peer_hold
+// entry's PeerKey from its sender name. Called on the read loop, so it must
+// not block on the process. Lock-free; nil clears it.
+func (p *Process) SetPeerKeyResolver(fn func(name string) string) {
+	if fn == nil {
+		p.peerKeyFor.Store(nil)
+		return
+	}
+	p.peerKeyFor.Store(&fn)
+}
+
 // SetOnLiveVersion sets the callback fired by setLiveVersion when a distinct
 // CLI binary version is first observed. Not synchronised: Wrapper.Spawn calls
 // it once before startReadLoop; never call it while the read loop is running.
@@ -504,11 +518,12 @@ func (p *Process) seedEffort(tier string) {
 // SeedFromSpawnArgs restores the launch-time state a reattached process cannot
 // get from SpawnOptions (SpawnReconnect has none) out of the shim-recorded
 // spawn argv: the effort tier, and for claude the settings file its model list
-// comes from. Fill-if-unset on both, so state already reported wins.
-func (p *Process) SeedFromSpawnArgs(args []string) {
+// comes from (baseSettings: the naozhi-owned settings file, "" for none).
+// Fill-if-unset on both, so state already reported wins.
+func (p *Process) SeedFromSpawnArgs(args []string, baseSettings string) {
 	p.seedEffort(effortFromArgs(args))
-	if s, ok := p.protocol.(interface{ seedSettingsFromArgs([]string) }); ok {
-		s.seedSettingsFromArgs(args)
+	if s, ok := p.protocol.(interface{ seedSettingsFromArgs([]string, string) }); ok {
+		s.seedSettingsFromArgs(args, baseSettings)
 	}
 }
 

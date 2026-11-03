@@ -53,7 +53,10 @@ type imageSource struct {
 }
 
 // LoadHistory finds and parses the JSONL for sessionID under claudeDir/projects/,
-// returning EventEntries for user and assistant messages.
+// returning EventEntries for user and assistant messages. It serves the
+// whole-file previews, so it leaves out tool_result screenshots: a
+// computer-use session's hundreds of them would each be thumbnailed and
+// shipped in one response.
 // If cwd is non-empty, the JSONL is located directly via the CWD-based path (O(1));
 // an empty cwd falls back to scanning all project directories.
 func LoadHistory(claudeDir, sessionID, cwd string) ([]clievent.EventEntry, error) {
@@ -214,7 +217,7 @@ func parseJSONL(path string) ([]clievent.EventEntry, error) {
 	for {
 		line, oversized, rerr := history.ReadJSONLLine(r, maxJSONLLineBytes)
 		if len(line) > 0 && !oversized {
-			if parsed, ok := parseHistoryLine(line); ok {
+			if parsed, ok := parseHistoryLine(line, 0, false); ok {
 				entries = append(entries, parsed...)
 			}
 		}
@@ -259,37 +262,8 @@ func uuidFromClaudeBlock(hl claudefs.Line, blockIndex int, ts int64, typ, summar
 }
 
 // normalizeClaudeUUID strips dashes from a Claude-style UUID so its shape
-// matches cli.newEventUUID's dashless 32-char hex. Empty or non-hex input
-// returns "" so the caller falls back to DeriveLegacyUUID.
-func normalizeClaudeUUID(u string) string {
-	if u == "" {
-		return ""
-	}
-	// Stack buffer avoids a per-row alloc on JSONL replay.
-	var b [32]byte
-	n := 0
-	for i := 0; i < len(u); i++ {
-		c := u[i]
-		if c == '-' {
-			continue
-		}
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-			return ""
-		}
-		if n >= 32 {
-			return ""
-		}
-		if c >= 'A' && c <= 'F' {
-			c = c + 32
-		}
-		b[n] = c
-		n++
-	}
-	if n != 32 {
-		return ""
-	}
-	return string(b[:])
-}
+// matches cli.newEventUUID's dashless 32-char hex; see textutil.DashlessUUID.
+func normalizeClaudeUUID(u string) string { return textutil.DashlessUUID(u) }
 
 // intToA is a minimal int-to-string without pulling strconv just
 // for the block-index formatter. Values here are small (< 10).

@@ -421,10 +421,11 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 		bookUnownedResults(sess, proc)
 		bookCodeChanges(sess, proc, func() { r.ss.Update(markChanged); r.notifyChange() })
 		r.bookActivity(sess, proc)
+		r.bindPeerKeys(proc)
 
 		// SpawnReconnect has no SpawnOptions, so launch-time state (effort tier,
 		// settings file) is recovered from the argv the shim recorded.
-		proc.SeedFromSpawnArgs(state.CLIArgs)
+		proc.SeedFromSpawnArgs(state.CLIArgs, r.spawn.naozhiSettingsFile)
 
 		// SpawnReconnect has no cwd (shim owns it), so the SubagentLinker has an
 		// empty projectDir and Resolve bails on every team agent task_id. Replay

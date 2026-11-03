@@ -79,7 +79,8 @@ func TestLaunchSpecDrift(t *testing.T) {
 
 // TestSessionSettingsFile_WrittenOnSpawn: a session with settings overrides
 // spawns on its own settings file holding the naozhi-owned settings plus the
-// overrides; a session without them keeps the shared file.
+// overrides; a session without them (a cron one, which the inbound policy
+// leaves alone) keeps the shared file.
 func TestSessionSettingsFile_WrittenOnSpawn(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	dir := t.TempDir()
@@ -103,7 +104,7 @@ func TestSessionSettingsFile_WrittenOnSpawn(t *testing.T) {
 	}
 	t.Cleanup(r.Shutdown)
 
-	if _, _, err := r.GetOrCreate(context.Background(), "feishu:direct:plain:general", AgentOpts{}); err != nil {
+	if _, _, err := r.GetOrCreate(context.Background(), "cron:plain", AgentOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := r.GetOrCreate(context.Background(), "feishu:direct:held:general", AgentOpts{

@@ -49,6 +49,17 @@ type EventEntry struct {
 	// call runs, so it may still fail. The journal holds the activities that
 	// happened, the turn-end scan's outputs and result-linked PRs included.
 	Activity string `json:"activity,omitempty"`
+	// Peer and PeerMode are the sender of a peer_message (its --name and
+	// permission mode) and Peer the sender of a peer_hold. PeerKey is the
+	// naozhi session key that name belonged to when the message arrived
+	// ("" for a session naozhi does not manage), so the dashboard can link it.
+	Peer     string `json:"peer,omitempty"`
+	PeerMode string `json:"peer_mode,omitempty"`
+	PeerKey  string `json:"peer_key,omitempty"`
+	// Reason is why: a peer_hold's cause (explicit-setting, mode-mismatch;
+	// Status "held") or outcome (expired, refused, ...; Status "dropped"),
+	// a permission_denied's decision reason, a model_refusal's category.
+	Reason string `json:"reason,omitempty"`
 	// RunID is the run id (ctxutil.RunID) of the Send behind a "user" or
 	// "result" entry, the key that joins the transcript with runhistory and
 	// the cost ledger. A merged turn's result names its head run, which

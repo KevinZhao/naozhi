@@ -52,7 +52,8 @@ func TestKindTable(t *testing.T) {
 		seen[k.Name] = true
 	}
 	consts := []string{KindUser, KindText, KindThinking, KindToolUse, KindToolResult, KindAgent, KindTodo,
-		KindAskQuestion, KindTaskStart, KindTaskProgress, KindTaskDone, KindResult, KindSystem, KindPersistGap}
+		KindAskQuestion, KindTaskStart, KindTaskProgress, KindTaskDone, KindResult, KindSystem, KindPersistGap,
+		KindPeerMessage, KindPeerHold, KindPermissionDenied, KindModelRefusal}
 	for _, k := range consts {
 		if _, ok := kindByName[k]; !ok {
 			t.Errorf("constant %q has no kindTable row", k)

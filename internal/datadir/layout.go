@@ -141,12 +141,16 @@ func (l Layout) PlannerLogRoot() string { return l.Join("planner", "log") }
 // (<root>/planner/workspaces.json).
 func (l Layout) PlannerWorkspacesPath() string { return l.Join("planner", "workspaces.json") }
 
+// PlannerIndexPath is the session index the Planner reads instead of asking
+// every session (<root>/planner/index.json, docs/rfc/planner.md §6.2).
+func (l Layout) PlannerIndexPath() string { return l.Join("planner", "index.json") }
+
 // PlannerAttachmentsRel is PlannerAttachmentsRoot relative to the root, in
 // the forward-slash form an EventEntry.ImagePaths value carries.
 const PlannerAttachmentsRel = "planner/attachments"
 
 // PlannerAttachmentsRoot holds the originals of the images tools return
-// (<root>/planner/attachments, docs/rfc/planner.md §3.7), in the
+// (<root>/planner/attachments, docs/rfc/planner.md §15.1 W1 / D83), in the
 // internal/attachment day-dir + .meta layout. It is in the state root rather
 // than a workspace so a screenshot never lands in the session's repository.
 func (l Layout) PlannerAttachmentsRoot() string {

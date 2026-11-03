@@ -290,6 +290,7 @@ Message{ id, from, on_behalf_of, origin, chain[], to, kind, session?, body, refs
 | 会话新字段（契约、血缘、产物、托管、污染、所属工作区、`purpose`） | **旁路文件** `~/.naozhi/planner/sessions/`，按 key 索引；`sessions.json` 不改 | 网关 | 否 |
 | 懂系统：项目长期知识 | `~/.naozhi/planner/workspaces/<工作区 ID>/knowledge/`，可选导出到仓库 | Planner / 工作区幕僚提议，网关写入 | 可选 |
 | charter / duties | `~/.naozhi/planner/workspaces/<工作区 ID>/planner.yaml`（权威）；仓库内 `.naozhi/planner.yaml` 只作初始导入 | 只有你 | 否 |
+| 工具结果截图原图（D83） | `~/.naozhi/planner/attachments/<日期>/`，`internal/attachment` 布局，开启 `attachment-gc` 后按 `upload_ttl` 回收 | 网关 | 否 |
 
 charter 与"懂你"的权威副本放在仓库外：Planner 派出的 session 改的就是这个仓库，任何一次合并都不能改写自己的边界（评审发现）。没有仓库的工作区（邮箱、个人杂事）同样登记 ID、放在 `~/.naozhi/planner/workspaces/<工作区 ID>/`。
 
