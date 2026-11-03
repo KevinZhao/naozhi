@@ -1,7 +1,7 @@
 // E2E: the workbench (workbench.js / workbench_panes.js) — it opens by itself
 // on a session's new previewable output and stays closed once closed until
 // the next one; its 产出 · 文件 · 详情 tabs; and the files view's 成品库.
-const { test, expect } = require('@playwright/test');
+const { test, expect, devices } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
 const { waitForWs } = require('./shim_wait');
 
@@ -70,6 +70,70 @@ test('a new output opens the workbench once; closed, it waits for the next one',
     await expect(page.locator('#fv-body img')).toHaveCount(1);
   } finally {
     // Not awaited: the page's socket keeps the server open.
+    mock.server.close();
+  }
+});
+
+test('a session made from New Session opens the workbench on its first output', async ({ page }) => {
+  const outputs = [];
+  const mock = await startMockServer({ ws: true, outputs });
+  await routeFiles(page);
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await page.click('.hdr-btn[title="New Session"]');
+    await page.locator('.cmd-palette-item', { hasText: 'myproject' }).first().click();
+    await page.waitForSelector('.cmd-palette-overlay', { state: 'detached' });
+    const key = await page.evaluate(() => selectedKey);
+    // Selecting it seeded its (empty) outputs.
+    await expect.poll(() => mock.outputsCalls.filter((k) => k === key).length).toBe(1);
+
+    const conn = mock.wsConnections[mock.wsConnections.length - 1];
+    outputs.unshift(file(key, 'report.md', 0));
+    conn.send({ type: 'event', key, event: { time: Date.now(), type: 'tool_use', tool: 'Write', summary: 'report.md', path: 'report.md', activity: 'output' } });
+    await expect(drawer(page)).toHaveClass(/fv-open/);
+    await expect(page.locator('#fv-title')).toHaveText('report.md');
+  } finally {
+    mock.server.close();
+  }
+});
+
+test('phone: an output made while back on the session list does not cover it; a PDF never auto-opens', async ({ browser }) => {
+  const ctx = await browser.newContext({ ...devices['iPhone 13'] });
+  const page = await ctx.newPage();
+  const outputs = [];
+  const mock = await startMockServer({ ws: true, outputs });
+  await routeFiles(page);
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await page.click(`.session-card[data-key="${A}"]`);
+    await expect.poll(() => mock.outputsCalls.filter((k) => k === A).length).toBe(1);
+    const conn = mock.wsConnections[mock.wsConnections.length - 1];
+    const write = (p) => {
+      outputs.unshift(file(A, p, 0));
+      conn.send({ type: 'event', key: A, event: { time: Date.now(), type: 'tool_use', tool: 'Write', summary: p, path: p, activity: 'output' } });
+    };
+
+    write('paper.pdf');
+    await expect.poll(() => mock.outputsCalls.filter((k) => k === A).length).toBe(2);
+    await expect(drawer(page)).not.toHaveClass(/fv-open/);
+
+    await page.click('.main-header .btn-mobile-back');
+    await expect(page.locator('body')).toHaveClass(/mobile-list-view/);
+    write('list.md');
+    await expect.poll(() => mock.outputsCalls.filter((k) => k === A).length).toBe(3);
+    await expect(drawer(page)).not.toHaveClass(/fv-open/);
+
+    // Back in the chat, the next output opens it full screen.
+    await page.click(`.session-card[data-key="${A}"]`);
+    write('chat.md');
+    await expect(drawer(page)).toHaveClass(/fv-open/);
+    await expect(page.locator('#fv-title')).toHaveText('chat.md');
+    const box = await drawer(page).boundingBox();
+    expect(Math.round(box.width)).toBe(page.viewportSize().width);
+  } finally {
+    await ctx.close();
     mock.server.close();
   }
 });

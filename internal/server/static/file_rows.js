@@ -3,7 +3,7 @@
 // the outputs of GET /api/sessions/outputs (docs/rfc/planner.md §10.2).
 // A leaf: callers own the containers and the click delegation.
 import { esc, escAttr } from './nz_util.js';
-import { formatFileSize } from './utilities.js';
+import { formatFileSize, historyDayLabel } from './utilities.js';
 
 // fileRowsHtml renders a /api/projects/files/list answer. Rows carry
 // data-kind (up / dir / file / symlink) and data-name; a folder row
@@ -59,11 +59,12 @@ export function mimeForPath(p) {
   return '';
 }
 
-// Office files (pptx / xlsx / docx) are outputs the preview cannot show.
-const UNPREVIEWABLE = { pptx: 1, xlsx: 1, docx: 1 };
+// Office files (pptx / xlsx / docx) and PDFs are outputs the preview cannot
+// show: the raw endpoint serves a PDF as a forced attachment.
+const UNPREVIEWABLE = { pptx: 1, xlsx: 1, docx: 1, pdf: 1 };
 
 // isPreviewableOutput reports whether the 预览 tab can show output o: a file,
-// not an Office document.
+// not an Office document or a PDF.
 export function isPreviewableOutput(o) {
   if (!o || !o.path) return false;
   return !UNPREVIEWABLE[(o.path.split('.').pop() || '').toLowerCase()];
@@ -75,23 +76,19 @@ export function outputId(o) {
 }
 
 // outputRowsHtml renders outputs newest first, grouped by calendar day
-// (今天 / 昨天 / M月D日). A file row is data-kind="output" with data-i its
-// index in outputs; a PR row is a link that opens GitHub. sessionLabel(o),
-// when given, names the session in the row's meta (the outputs library).
+// (historyDayLabel). A file row is data-kind="output" with data-i its index
+// in outputs; a PR row is a link that opens GitHub. sessionLabel(o), when
+// given, names the session in the row's meta (the outputs library).
 export function outputRowsHtml(outputs, sessionLabel) {
   if (!outputs.length) return '';
-  const now = new Date();
-  const dayKey = (d) => d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate();
-  const yest = new Date(now); yest.setDate(now.getDate() - 1);
   let html = '';
   let group = '';
   outputs.forEach((o, i) => {
     const t = new Date(o.time);
-    const k = dayKey(t);
-    if (k !== group) {
-      group = k;
-      const label = k === dayKey(now) ? '今天' : (k === dayKey(yest) ? '昨天' : (t.getMonth() + 1) + '月' + t.getDate() + '日');
-      html += '<div class="wb-group" role="presentation">' + esc(label) + '</div>';
+    const day = historyDayLabel(t);
+    if (day !== group) {
+      group = day;
+      html += '<div class="wb-group" role="presentation">' + esc(day) + '</div>';
     }
     const hm = String(t.getHours()).padStart(2, '0') + ':' + String(t.getMinutes()).padStart(2, '0');
     const who = sessionLabel ? sessionLabel(o) : '';

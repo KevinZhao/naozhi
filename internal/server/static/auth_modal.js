@@ -5,7 +5,7 @@
 // dashboard's renderMainShell.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, serverInfo, sessionList, transcript } from './state.js';
-import { esc, escAttr, showToast, trapFocus } from './nz_util.js';
+import { esc, escAttr, nzBus, showToast, trapFocus } from './nz_util.js';
 import { sessionStream } from './session_stream.js';
 import { wsm } from './ws_manager.js';
 import { accessProfileChipInfo, fetchAccessProfiles, fetchCLIBackends, renderAccessProfilePicker, renderBackendPicker } from './backend_catalog.js';
@@ -999,6 +999,7 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   sessionStream.unsubscribe();
   selection.key = key;
   selection.node = nodeId || 'local';
+  nzBus.dispatchEvent(new CustomEvent('session:select'));
   try { localStorage.setItem('nz_selectedNode', selection.node); } catch(_) {}
   transcript.lastEventTime = 0;
   mobileEnterChat();
@@ -1042,6 +1043,7 @@ function doCreateSession() {
   sessionStream.unsubscribe();
   selection.key = key;
   selection.node = targetNode;
+  nzBus.dispatchEvent(new CustomEvent('session:select'));
   try { localStorage.setItem('nz_selectedNode', selection.node); } catch(_) {}
   transcript.lastEventTime = 0;
   mobileEnterChat();
@@ -1096,6 +1098,7 @@ function createQuickSession(initialText, onTextStranded) {
   sessionStream.unsubscribe();
   selection.key = key;
   selection.node = 'local';
+  nzBus.dispatchEvent(new CustomEvent('session:select'));
   try { localStorage.setItem('nz_selectedNode', selection.node); } catch(_) {}
   transcript.lastEventTime = 0;
   mobileEnterChat();

@@ -57,8 +57,10 @@ function refreshOutputs(auto) {
     st.outputsFor = s.sid;
     paintOutputs();
     // Newest first: the first fresh previewable one is the latest. Only the
-    // chat view docks the workbench; elsewhere it would float over the view.
-    const show = auto && ui.activeView === 'chat' && fresh.find(isPreviewableOutput);
+    // chat view docks the workbench; elsewhere (or on a phone back on the
+    // session list, which keeps the selection) it would cover the view.
+    const show = auto && ui.activeView === 'chat' && !document.body.classList.contains('mobile-list-view') &&
+      fresh.find(isPreviewableOutput);
     if (show) openOutput(show);
   }).catch(() => {});
 }
@@ -204,8 +206,9 @@ nzBus.addEventListener('session:event', (e) => {
   if (ev.activity || ev.type === 'result') scheduleRefresh();
 });
 
-// session:select follows the selection: the new session's outputs seed its
-// seen set, and an open tab repaints for it.
+// session:select follows the selection (selectSession, and the new-session
+// paths in auth_modal.js): the session's outputs seed its seen set, and an
+// open tab repaints for it.
 nzBus.addEventListener('session:select', () => {
   st.files.root = '';
   refreshOutputs(false);
