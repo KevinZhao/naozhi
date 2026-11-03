@@ -3,6 +3,8 @@
 // background and notifications are allowed, and a click opens the session the
 // item is about; inbox_count frames reach nzBus for the Planner page's badge.
 // Notification and document.hidden are stubbed so the test drives both.
+// The morning brief's in-page links (#session=<key>) open their session, at
+// load and on hashchange.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
 const { waitForWs } = require('./shim_wait');
@@ -74,6 +76,31 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
       await page.evaluate(() => { window.__hidden = false; window.__notes[0].onclick(); });
       await page.waitForFunction((key) => window.nz.test.selectedKey === key, SESSION_KEY);
       expect(await page.evaluate(() => window.__notes[0].closed)).toBe(true);
+
+      await ctx.close();
+    });
+
+    test('a brief link opens its session at load and on hashchange', async ({ browser }) => {
+      const ctx = await browser.newContext({ viewport });
+      const page = await ctx.newPage();
+      await page.goto(mock.url + '/dashboard#session=' + encodeURIComponent(SESSION_KEY));
+      await page.waitForFunction((key) => window.nz.test.selectedKey === key, SESSION_KEY);
+      // Cleared once handled, so a reload does not open it again.
+      expect(await page.evaluate(() => location.hash)).toBe('');
+      if (name === 'mobile') await expect(page.locator('body')).toHaveClass(/mobile-chat-view/);
+      await page.waitForTimeout(400); // let the phone's slide into chat settle
+      await page.screenshot({ path: `test-results/brief-link-${name}.png` });
+
+      const other = 'dashboard:direct:2026-01-01-120002-3:myproject';
+      await page.evaluate((key) => { location.hash = 'session=' + encodeURIComponent(key); }, other);
+      await page.waitForFunction((key) => window.nz.test.selectedKey === key, other);
+      expect(await page.evaluate(() => location.hash)).toBe('');
+
+      // Unknown keys and other hashes change nothing.
+      await page.evaluate(() => { location.hash = 'session=dashboard%3Adirect%3Anope%3Ageneral'; });
+      await page.evaluate(() => { location.hash = 'top'; });
+      await page.waitForTimeout(100);
+      expect(await page.evaluate(() => window.nz.test.selectedKey)).toBe(other);
 
       await ctx.close();
     });
