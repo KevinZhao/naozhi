@@ -110,7 +110,7 @@ function stripLeakedToolCalls(text) {
 // the Planner, a naozhi session (a link to it; peer_key was resolved when the
 // message arrived, the title is the session's current one) or a CC session
 // naozhi does not manage.
-export function peerSourceHtml(e) {
+function peerSourceHtml(e) {
   const name = e.peer || '';
   if (name === 'planner') return '来自 Planner';
   if (e.peer_key) {
@@ -138,7 +138,7 @@ const PEER_HOLD_CAUSES = new Map([
 // peerHoldHtml: the side note for a message the CLI held instead of delivering.
 function peerHoldHtml(e) {
   const why = PEER_HOLD_CAUSES.get(e.reason) || e.reason || '';
-  return '已扣住' + peerSourceHtml(e) + '的消息' + (why ? '（' + esc(why) + '）' : '');
+  return '已扣住' + peerSourceHtml(e) + ' 的消息' + (why ? '（' + esc(why) + '）' : '');
 }
 
 // refusalHtml: permission_denied / model_refusal, tagged so they stand apart
