@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	projectpkg "github.com/naozhi/naozhi/internal/project"
+	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
 // fakeStore / fakeRouter are ProjectStore / RouterView implementations with
@@ -34,12 +35,24 @@ func (f *fakeStore) EffectivePlannerModel(*projectpkg.Project) string    { retur
 
 type fakeRouter struct {
 	bumps int
+	// workspaces maps a session key to its workspace; absent keys are unknown.
+	workspaces map[string]string
 }
 
 var _ RouterView = (*fakeRouter)(nil)
 
-func (f *fakeRouter) SessionFor(string) PlannerSession { return nil }
-func (f *fakeRouter) BumpVersion()                     { f.bumps++ }
+func (f *fakeRouter) SessionFor(key string) PlannerSession {
+	if ws, ok := f.workspaces[key]; ok {
+		return fakeSession{ws: ws}
+	}
+	return nil
+}
+func (f *fakeRouter) BumpVersion() { f.bumps++ }
+
+type fakeSession struct{ ws string }
+
+func (s fakeSession) Snapshot() sessionview.SessionSnapshot { return sessionview.SessionSnapshot{} }
+func (s fakeSession) Workspace() string                     { return s.ws }
 
 // TestHandleFavoriteToggle_DrivenByFakes: the favorite flip is forwarded to
 // the store, ErrNotFound maps to 404, and every successful write bumps the

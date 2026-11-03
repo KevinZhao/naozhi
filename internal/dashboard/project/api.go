@@ -72,6 +72,11 @@ type Deps struct {
 	// UploadQuotaBytes caps cumulative per-project upload bytes within a
 	// process (#2311). <=0 disables enforcement.
 	UploadQuotaBytes int64
+	// AllowedRoot bounds root=session:<key> file roots; ValidateWS injects the
+	// server-package workspace check without a reverse import. A nil
+	// ValidateWS disables session roots.
+	AllowedRoot string
+	ValidateWS  func(ws, root string) (string, error)
 }
 
 // New constructs a Handlers from injected deps.

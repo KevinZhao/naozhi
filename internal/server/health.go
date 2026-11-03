@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
+	"github.com/naozhi/naozhi/internal/monitor/beat"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -33,6 +34,9 @@ type HealthHandler struct {
 	configLoadedAt time.Time
 	configLive     *ConfigFingerprint // nil ⇒ the two static fields above
 	configPath     string
+	// beats holds the critical-loop heartbeats; a stale one turns status
+	// "degraded". nil-safe.
+	beats *beat.Registry
 }
 
 // healthSessionStats and healthDispatchStats are fixed-shape /health sub-objects.
@@ -88,6 +92,9 @@ type healthAuthSection struct {
 	// store file is writable, so its presence alone means "sessions are not
 	// being persisted".
 	SessionStore *healthSessionStore `json:"session_store,omitempty"`
+	// StaleLoops names the critical loops whose heartbeat missed two periods,
+	// the reason status is "degraded"; omitted while every loop beats.
+	StaleLoops []string `json:"stale_loops,omitempty"`
 }
 
 // healthPlatformConn is one /health "platform_conn" entry. since_ago is
@@ -145,6 +152,9 @@ type healthAttachTrackStats struct {
 
 // healthResp is the JSON response for /health.
 type healthResp struct {
+	// Status is "ok", or "degraded" once a critical loop's heartbeat is stale.
+	// The HTTP status stays 200 either way: release-gate and doctor read this
+	// field, not the code.
 	Status string `json:"status"`
 	Uptime string `json:"uptime"`
 	// Anonymous pointer embed: nil for unauthenticated probes (status/uptime
@@ -186,6 +196,10 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Status: "ok",
 		Uptime: time.Since(h.startedAt).Round(time.Second).String(),
 	}
+	staleLoops := h.beats.Stale()
+	if len(staleLoops) > 0 {
+		resp.Status = "degraded"
+	}
 	if !h.auth.IsAuthenticated(r) {
 		// Fail closed when the client IP is unresolvable in trusted-proxy mode
 		// (XFF stripped) instead of sharing the unknownIPKey bucket, so one
@@ -209,6 +223,7 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		WorkspaceName: h.workspaceName,
 		CLIAvailable:  cliAvailable(h.router.Backends().CLIPath()),
 		ConfigPath:    h.configPath,
+		StaleLoops:    staleLoops,
 	}
 	auth.ConfigSHA256, auth.ConfigLoadedAt, auth.ConfigRestartRequired, auth.ConfigReloadedSHA256 = h.configFingerprint()
 

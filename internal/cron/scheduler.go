@@ -16,7 +16,15 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cron/runstore"
 	"github.com/naozhi/naozhi/internal/datadir"
+	"github.com/naozhi/naozhi/internal/monitor/beat"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
+)
+
+// tickBeat is the cron tick loop's heartbeat name on /health; it beats every
+// tickBeatPeriod.
+const (
+	tickBeat       = "cron_tick"
+	tickBeatPeriod = time.Minute
 )
 
 // Scheduler manages cron jobs and executes them on schedule.
@@ -160,6 +168,8 @@ type Scheduler struct {
 	ledger CostLedger
 	// budget is checked before each run spawns; nil runs every job.
 	budget BudgetGate
+	// beats receives the tick heartbeat Start schedules; nil schedules none.
+	beats *beat.Registry
 
 	// marshalJobs is the JSON serializer used by marshalLocked, behind
 	// atomic.Pointer so tests (withFailingMarshal) can swap a failing stub
@@ -251,6 +261,7 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 		runs:                runstore.New(runstore.Options{StorePath: cfg.StorePath}),
 		ledger:              deps.Ledger,
 		budget:              deps.Budget,
+		beats:               deps.Beats,
 		// Tests swap a fake via the withClock seam.
 		clock: defaultClock,
 	}
@@ -404,6 +415,12 @@ func (s *Scheduler) Start() error {
 	// sending a second turn into the same live CLI (#2751). The run-store half
 	// of the reconcile stays async below.
 	inflight := s.claimRunInflight()
+	// The tick heartbeat is an entry like any job's, so it stops when robfig's
+	// dispatcher stops dispatching.
+	if s.beats != nil {
+		hb := s.beats.Register(tickBeat, tickBeatPeriod)
+		s.cron.Schedule(robfigcron.Every(tickBeatPeriod), robfigcron.FuncJob(hb.Beat))
+	}
 	s.cron.Start()
 	// P1 cron-run-history: cold-start GC pass over 'runs/' tree to collect
 	// retention-policy violators that accumulated while this process was

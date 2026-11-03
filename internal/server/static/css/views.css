@@ -187,6 +187,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .files-main-head{flex-shrink:0;padding:12px 20px;border-bottom:1px solid var(--nz-border);display:flex;align-items:center;gap:10px}
 .files-main-title-wrap{min-width:0;flex:1;display:flex;flex-direction:column;gap:2px}
 .files-dl-btn{flex-shrink:0;display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border-radius:var(--nz-radius-ms);border:1px solid var(--nz-border);background:var(--nz-bg-1);color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-sm2);cursor:pointer}
+.files-dl-btn[hidden]{display:none}
 .files-dl-btn:hover{background:var(--nz-bg-2);color:var(--nz-text-strong)}
 .files-dl-btn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .files-main-title{font-size:var(--nz-fs-md);color:var(--nz-text-strong);font-weight:600;letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

@@ -26,6 +26,9 @@ func TestLayoutSiblings(t *testing.T) {
 		{"naozhi_settings", lay.NaozhiSettingsPath(), "/data/naozhi/naozhi-settings.json"},
 		{"ui_settings", lay.UISettingsPath(), "/data/naozhi/ui-settings.json"},
 		{"projects_index", lay.ProjectsIndexPath(), "/data/naozhi/projects-index.json"},
+		{"planner", lay.PlannerRoot(), "/data/naozhi/planner"},
+		{"planner_log", lay.PlannerLogRoot(), "/data/naozhi/planner/log"},
+		{"planner_workspaces", lay.PlannerWorkspacesPath(), "/data/naozhi/planner/workspaces.json"},
 		{"planner_attachments", lay.PlannerAttachmentsRoot(), "/data/naozhi/planner/attachments"},
 		{"cron_runs", lay.RunsRoot(), "/data/naozhi/runs"},
 		{"join", lay.Join("a", "b"), "/data/naozhi/a/b"},
@@ -68,6 +71,7 @@ func TestZeroLayoutYieldsEmptyPaths(t *testing.T) {
 			lay.SessionIDsPath(), lay.WorkspaceOverridesPath(), lay.SessionRunsRoot(),
 			lay.CLIDebugRoot(), lay.AccessProfileSecretsRoot(), lay.SysSessionsRoot(),
 			lay.NaozhiSettingsPath(), lay.UISettingsPath(), lay.ProjectsIndexPath(),
+			lay.PlannerRoot(), lay.PlannerLogRoot(), lay.PlannerWorkspacesPath(),
 		} {
 			if p != "" {
 				t.Errorf("%s: got %q, want empty", name, p)

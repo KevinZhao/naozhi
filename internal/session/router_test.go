@@ -1570,7 +1570,7 @@ func TestStartCleanupLoop_TriggersCleanup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	r.StartCleanupLoop(ctx, 20*time.Millisecond)
+	r.StartCleanupLoop(ctx, 20*time.Millisecond, nil)
 
 	// Wait for at least one cleanup cycle.
 	testhelper.Eventually(t, func() bool {
@@ -1582,7 +1582,7 @@ func TestStartCleanupLoop_StopsOnContextCancel(t *testing.T) {
 	r := newTestRouter(3)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	r.StartCleanupLoop(ctx, 10*time.Millisecond)
+	r.StartCleanupLoop(ctx, 10*time.Millisecond, nil)
 
 	cancel() // cancelling the context should stop the goroutine (no hang)
 	time.Sleep(50 * time.Millisecond)

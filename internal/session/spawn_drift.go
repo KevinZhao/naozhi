@@ -44,7 +44,9 @@ func (d driftArgs) driftCompareArgs(recWrapper *cli.Wrapper, backendID, key stri
 	// systemPrompt is "" by design: AgentOpts.SystemPrompt is per-session and
 	// not reconstructible here, so stripResumeArgs removes the stored
 	// --append-system-prompt pair instead (#2493).
-	opts := d.spawn.argvSpawnOptions(merged.Model, merged.Effort, d.spawn.cliDebugPathFor(key), merged.SystemPrompt, merged.Args)
+	// launchSpecFor rebuilds the per-session launch spec (tools, permission
+	// mode, --name, settings file) from the overlay alone.
+	opts := d.spawn.argvSpawnOptions(merged.Model, merged.Effort, d.spawn.cliDebugPathFor(key), merged.SystemPrompt, merged.Args, d.spawn.launchSpecFor(key, ov))
 	// Re-deriving argv re-hits the same gates every 30s reconcile tick; the
 	// emitter's per-scope dedup keeps that as one Warn then Debug repeats.
 	cli.EmitSpawnDiags(key, cli.SpawnDiagsFor(opts, cli.ProtocolCaps(recWrapper.Protocol)))

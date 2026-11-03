@@ -166,6 +166,8 @@ func buildProjectHandlers(
 		NodeCache:  nodeCache,
 		// Process-local (resets on restart); not a filesystem quota.
 		UploadQuotaBytes: defaultUploadQuotaBytes,
+		AllowedRoot:      opts.AllowedRoot,
+		ValidateWS:       validateWorkspace,
 	})
 }
 

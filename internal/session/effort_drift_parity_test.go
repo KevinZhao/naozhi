@@ -63,7 +63,7 @@ func TestEffortDriftCheck_MirrorsSpawn(t *testing.T) {
 	//
 	// Still deliberately absent: ResumeID (session state, stripped from the
 	// stored argv by stripResumeArgs).
-	required := []string{"Model", "ExtraArgs", "Effort", "SettingsFile", "MCPConfigFile", "PermissionMode", "DebugFile", "AppendSystemPrompt"}
+	required := []string{"Model", "ExtraArgs", "Effort", "SettingsFile", "MCPConfigFile", "PermissionMode", "DebugFile", "AppendSystemPrompt", "Tools", "Name", "StrictMCPConfig", "SessionSettingsFile"}
 
 	got, literals := spawnOptionsLiteralFields(t, argvConstructorFile)
 	if literals == 0 {
