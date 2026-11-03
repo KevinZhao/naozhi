@@ -35,7 +35,7 @@ Naozhi is an IM gateway that wraps AI CLI agents (Claude CLI, Kiro, or Codex) as
 - **HTTP / dashboard**: `server` (routes, WebSocket hub, REST), `dashboard/*` handler packages, `wsproto` (browser WS frames), `contractjs` (generates `static/contract.js`), `assets`.
 - **Scheduling / projects**: `cron` (+ `runstore` run history), `sysession` (background daemons), `project` / `projectapi` (discovery, chat binding, planner).
 - **Multi-node**: `node` (protocol, HTTP/reverse clients), `upstream` (reverse-connect dialer).
-- **Persistence / history**: `eventlog`, `history` (claudejsonl/kirojsonl/codexjsonl/naozhilog/merged), `attachment`, `runlog`, `claudefs` (Claude CLI on-disk layout), `discovery`, `subagent`.
+- **Persistence / history**: `eventlog`, `history` (claudejsonl/kirojsonl/codexjsonl/naozhilog/merged), `attachment`, `runlog`, `claudefs` (Claude CLI on-disk layout), `discovery`, `subagent`, `planner/journal` + `planner/workspace` (Planner state root: event journal, workspace registry; `docs/rfc/planner.md` §3.7).
 - **Domain helpers**: `selfupdate`, `transcribe`, `imauth`, `costledger`, `budget`, `webhook`, `runtelemetry`, `naozhisettings`, `ccassets`, `ccmodels`, `uiprefs`, `replyfmt`, `usermsg`, `gitinfo`.
 - **Leaves**: `osutil`, `textutil`, `netutil`, `ratelimit`, `limits`, `sessionkey`, `tuningspec`, `backendid`, `cliinfo`, `apierr`, `ctxutil`, `spawndiag`, `envpolicy`, `datadir`, `imageorient`, `testhelper`.
 
