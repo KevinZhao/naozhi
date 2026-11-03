@@ -133,7 +133,8 @@ func resolveProjectFileWithRoot(rootResolved, rel string) (string, error) {
 	return resolved, nil
 }
 
-// HandleFileGet serves GET /api/projects/file?project=X&path=Y&mode=preview|raw|render|download.
+// HandleFileGet serves GET /api/projects/file?project=X&path=Y&mode=preview|raw|render|download;
+// root=session:<key> in place of project=X reads from that session's working tree.
 //   - preview: JSON {content, truncated, size, mime}; text only, capped to
 //     maxPreviewBytes, invalid UTF-8 replaced with U+FFFD.
 //   - raw: inline stream with Content-Type=mime, capped to maxRawBytes.
@@ -142,12 +143,6 @@ func resolveProjectFileWithRoot(rootResolved, rel string) (string, error) {
 //
 // ETag is sha256(size||mtime||FileETagSalt)[:12] in all modes; 304 on If-None-Match.
 func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
-	if h.deps.ProjectMgr == nil {
-		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "projects not configured"})
-		return
-	}
-
-	project := r.URL.Query().Get("project")
 	path := r.URL.Query().Get("path")
 	mode := r.URL.Query().Get("mode")
 	if mode == "" {
@@ -157,27 +152,21 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid mode"})
 		return
 	}
-	if project == "" || path == "" {
-		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "project and path are required"})
-		return
-	}
-	// Same trust-boundary gate as HandleFilesExists.
-	if err := validateProjectName(project); err != nil {
-		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
-		return
-	}
 
-	p := h.deps.ProjectMgr.Get(project)
-	if p == nil {
-		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+	root, ok := h.resolveBrowseRoot(w, r.URL.Query())
+	if !ok {
 		return
 	}
-	rootPath := p.Path
+	if path == "" {
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "path is required"})
+		return
+	}
+	rootPath := root.path
 	// restrictedRoot marks a root the dashboard is NOT unconditionally cleared
-	// to read: the include_root whole-workspace project. It gets the
+	// to read (include_root project, session root). It gets the
 	// foreign-private / denied-name / irregular-type gates and the audit log
-	// below; a registered subdirectory project is readable by definition.
-	restrictedRoot := p.IsRoot
+	// below.
+	restrictedRoot := root.restricted
 
 	resolved, err := resolveProjectFile(rootPath, path)
 	if err != nil {
@@ -189,7 +178,7 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 		if !errors.Is(err, fs.ErrNotExist) && !isClientPathRejection(err) {
 			slog.Warn("project files: resolveProjectFile IO failure",
 				"err", err,
-				"project", project)
+				"root", root.label)
 		}
 		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
@@ -233,7 +222,7 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 	// attacker-controlled values into the log.
 	if restrictedRoot {
 		slog.Info("restricted_root file access",
-			"project", project,
+			"root", root.label,
 			"path", osutil.SanitizeForLog(resolved, 512),
 			"mode", mode,
 			"remote_addr", r.RemoteAddr)
@@ -252,7 +241,7 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 		if !errors.Is(rrErr, fs.ErrNotExist) {
 			slog.Warn("project files: rootPath EvalSymlinks IO failure",
 				"err", rrErr,
-				"project", project,
+				"root", root.label,
 				"path", osutil.SanitizeForLog(path, 256))
 		}
 		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
@@ -276,7 +265,7 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 		if !errors.Is(err, fs.ErrNotExist) {
 			slog.Warn("project files: OpenWorkspaceFile IO failure",
 				"err", err,
-				"project", project)
+				"root", root.label)
 		}
 		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
