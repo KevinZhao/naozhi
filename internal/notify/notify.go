@@ -248,6 +248,7 @@ func New(cfg Config) *Notifier {
 		n.readOnly = true
 	case out == jsonfile.Parsed:
 		n.items = f.Items
+		n.seedDismissed()
 	}
 	if st, out, err := jsonfile.Load[pushState](lay.PlannerPushStatePath(), jsonfile.Options{MaxBytes: maxBytes, Label: "push state"}); err == nil && out == jsonfile.Parsed && st.V <= Version {
 		n.st = st

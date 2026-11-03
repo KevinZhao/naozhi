@@ -27,6 +27,9 @@ const (
 // loopName is this pipeline's heartbeat; the health loop watches it.
 const loopName = "notify"
 
+// gatewaySources are the source prefixes Check dates itself (condSince).
+var gatewaySources = []string{"beat:", "disk"}
+
 // Health is the health state machine (monitor/health.Machine).
 type Health interface {
 	Snapshot() health.Snapshot
@@ -98,7 +101,7 @@ func (n *Notifier) Check() {
 	var keep []string
 	// Prefixes this check judged; an open auto-close item under one whose
 	// source is not among conds has cleared.
-	judged := []string{"beat:", "disk"}
+	judged := slices.Clone(gatewaySources)
 	if n.health != nil {
 		if snap := n.health.Snapshot(); !snap.At.IsZero() {
 			judged = append(judged, "waiting:", "stalled:")
@@ -195,6 +198,22 @@ func (n *Notifier) gatewayCondition(now time.Time, it Item) condition {
 		n.condSince[it.Source] = since
 	}
 	return condition{item: it, since: since}
+}
+
+// seedDismissed dates the gateway conditions whose latest item the user
+// closed from that item, so a restart does not reopen it while the
+// condition still holds; the first check drops the date if it cleared.
+func (n *Notifier) seedDismissed() {
+	for _, it := range n.items {
+		if !underAny(it.Source, gatewaySources) {
+			continue
+		}
+		if it.State == StateClosed && it.ClosedBy == ClosedByUser {
+			n.condSince[it.Source] = it.Created
+		} else {
+			delete(n.condSince, it.Source)
+		}
+	}
 }
 
 // dismissedLocked reports whether the user closed source's latest item after

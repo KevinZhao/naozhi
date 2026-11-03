@@ -214,6 +214,12 @@ func TestSources(t *testing.T) {
 	}
 	clock.advance(time.Minute)
 	check()
+	re := New(Config{Clock: clock, DiskFree: n.cfg.DiskFree, System: func(string, string) error { return nil }})
+	re.items = slices.Clone(n.items)
+	re.seedDismissed()
+	if re.Check(); len(re.items) != len(n.items) {
+		t.Fatal("a restart reopened the dismissed disk item while the disk is still low")
+	}
 	free = 0.5
 	clock.advance(time.Minute)
 	check()
