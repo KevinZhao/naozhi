@@ -10,6 +10,7 @@ import (
 	dashcron "github.com/naozhi/naozhi/internal/dashboard/cron"
 	dashdiscovery "github.com/naozhi/naozhi/internal/dashboard/discovery"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/inbox"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/promises"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/system"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/transcribe"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
@@ -84,6 +85,14 @@ func buildInboxHandler(opts ServerOptions) *inbox.Handler {
 		return inbox.New(nil)
 	}
 	return inbox.New(opts.Notify)
+}
+
+// buildPromisesHandler unwraps a nil *promise.Store the same way.
+func buildPromisesHandler(opts ServerOptions) *promises.Handler {
+	if opts.Promises == nil {
+		return promises.New(nil)
+	}
+	return promises.New(opts.Promises)
 }
 
 // buildRetiredStoreWithErr constructs the discovery.RetiredStore eagerly so

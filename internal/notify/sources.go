@@ -102,7 +102,7 @@ type condition struct {
 
 // Check evaluates the level-triggered sources: sessions waiting on the user,
 // stalled workflows, stale loops and a low disk. Items whose condition
-// cleared close themselves.
+// cleared close themselves, and held uncapped items go out once allowed.
 func (n *Notifier) Check() {
 	now := n.cfg.Clock.Now()
 	var conds []condition
@@ -149,11 +149,13 @@ func (n *Notifier) Check() {
 	n.apply(n.settle(conds, active, judged))
 }
 
-// settle closes the open auto-close items whose condition cleared and opens
-// the conditions not open yet, nor closed by the user since they began.
+// settle closes the open auto-close items whose condition cleared, opens
+// the conditions not open yet, nor closed by the user since they began, and
+// pushes the held items that may go out now.
 func (n *Notifier) settle(conds []condition, active map[string]bool, judged []string) effects {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	fx := n.releaseLocked(n.cfg.Clock.Now())
 	var closed []journalLine
 	for i := range n.items {
 		it := &n.items[i]
@@ -161,9 +163,8 @@ func (n *Notifier) settle(conds []condition, active map[string]bool, judged []st
 			closed = append(closed, n.closeLocked(i, ClosedByAuto, ""))
 		}
 	}
-	var fx effects
 	if len(closed) > 0 {
-		fx = n.changedLocked(closed...)
+		fx.merge(n.changedLocked(closed...))
 	}
 	for _, c := range conds {
 		if n.dismissedLocked(c.item.Source, c.since) {

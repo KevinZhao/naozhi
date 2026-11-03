@@ -35,8 +35,9 @@ const (
 )
 
 // admitLocked decides whether an item of level is pushed now, counting a
-// timely push against today's cap; reason says why one is held.
-func (n *Notifier) admitLocked(level Level, now time.Time) (bool, string) {
+// timely push against today's cap unless uncapped; reason says why one is
+// held.
+func (n *Notifier) admitLocked(level Level, uncapped bool, now time.Time) (bool, string) {
 	if now.Before(n.st.PausedUntil) {
 		return false, "paused"
 	}
@@ -45,6 +46,9 @@ func (n *Notifier) admitLocked(level Level, now time.Time) (bool, string) {
 	}
 	if quiet(now) {
 		return false, "quiet_hours"
+	}
+	if uncapped {
+		return true, ""
 	}
 	if day := now.Format(time.DateOnly); n.st.Day != day {
 		n.st.Day, n.st.Pushed = day, 0

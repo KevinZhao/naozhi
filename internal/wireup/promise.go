@@ -1,0 +1,58 @@
+package wireup
+
+import (
+	"github.com/naozhi/naozhi/internal/notify"
+	"github.com/naozhi/naozhi/internal/planner/agent"
+	"github.com/naozhi/naozhi/internal/planner/promise"
+	"github.com/naozhi/naozhi/internal/textutil"
+)
+
+// promiseTitleRunes caps a promise's text in an inbox title.
+const promiseTitleRunes = 60
+
+// PromiseReminder is promise.Reminder: a due promise opens a "等你" item
+// pushed past the daily cap (§3.6) and shows a reminder in the Planner
+// conversation; closing the promise closes its item.
+type PromiseReminder struct {
+	Notify *notify.Notifier
+	// Dialog shows text in a session's conversation as a gateway event
+	// (Server.PlannerReceipt); nil skips it.
+	Dialog func(key, text string)
+}
+
+func promiseSource(p promise.Promise) string { return "promise:" + p.ID }
+
+// Due implements promise.Reminder.
+func (r PromiseReminder) Due(p promise.Promise) {
+	at := p.Due.Local().Format("01-02 15:04")
+	if r.Notify != nil {
+		why := "答应你的，到期 " + at
+		if p.CloseWhen != "" {
+			why += "；完成条件：" + p.CloseWhen
+		}
+		r.Notify.Add(notify.Item{Kind: notify.KindNotice, Level: notify.LevelTimely, Uncapped: true,
+			Source: promiseSource(p), Title: "到点提醒：" + textutil.TruncateRunes(p.Text, promiseTitleRunes), Why: why})
+	}
+	if r.Dialog != nil {
+		r.Dialog(agent.Key, "到点提醒（答应你的，到期 "+at+"）："+p.Text)
+	}
+}
+
+// Closed implements promise.Reminder.
+func (r PromiseReminder) Closed(p promise.Promise) {
+	if r.Notify != nil {
+		r.Notify.DismissSource(promiseSource(p))
+	}
+}
+
+// PlannerPromises feeds the Planner's snapshot the open promises.
+func PlannerPromises(s *promise.Store) func() []agent.Promise {
+	return func() []agent.Promise {
+		open, _ := s.List(0)
+		out := make([]agent.Promise, 0, len(open))
+		for _, p := range open {
+			out = append(out, agent.Promise{Text: p.Text, Due: p.Due})
+		}
+		return out
+	}
+}
