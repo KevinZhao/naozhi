@@ -158,6 +158,11 @@ func (l Layout) PlannerAgentPath() string { return l.Join("planner", "agent.json
 // <YYYY-MM-DD>.md per shift change (<root>/planner/handoff).
 func (l Layout) PlannerHandoffRoot() string { return l.Join("planner", "handoff") }
 
+// PlannerSessionsRoot holds the session sidecar files, one
+// <sha256(key)>.json per session with Planner fields (lineage, purpose;
+// <root>/planner/sessions, §3.7). sessions.json is never touched.
+func (l Layout) PlannerSessionsRoot() string { return l.Join("planner", "sessions") }
+
 // PlannerInboxPath holds the "等你" items (<root>/planner/inbox.json,
 // §15.1).
 func (l Layout) PlannerInboxPath() string { return l.Join("planner", "inbox.json") }

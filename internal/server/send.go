@@ -97,6 +97,10 @@ func (e *sendEngine) prepareSend(p sendParams) (cmd turn.Cmd, reset bool, err er
 	if sessionkey.IsPlannerNSKey(key) {
 		return cmd, false, errPlannerNamespace
 	}
+	// task: keys are the Planner's to create; you talk to one it dispatched.
+	if sessionkey.IsTaskKey(key) && e.router.SessionFor(key) == nil {
+		return cmd, false, errTaskNamespace
+	}
 
 	// /clear and /new without an argument reset (the CLI built-in does not
 	// work in stream-json); "/new <arg>" is sent as text. The workspace

@@ -119,6 +119,7 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 			bookUnownedResults(fresh, proc)
 			bookCodeChanges(fresh, proc, func() { r.ss.Update(markChanged); r.notifyChange() })
 			r.bookActivity(fresh, proc)
+			r.bookResults(fresh, proc)
 			bookWorkflows(fresh, proc, r.hist.projectsRoot, func() { r.ss.Update(markChanged); r.notifyChange() }, r.BumpVersion)
 			bookProcessEnd(fresh, proc, r.hist.claudeDir)
 		}

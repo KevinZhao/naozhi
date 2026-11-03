@@ -15,6 +15,7 @@ import (
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/monitor/health"
+	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/sysession"
@@ -34,6 +35,8 @@ type HealthSources struct {
 	Remote      func() (map[string][]map[string]any, map[string]string)
 	Discovered  func() []discovery.DiscoveredSession
 	EventLogDir string
+	// Sidecars fill index.json's purpose and dispatched_by_planner.
+	Sidecars *sidecar.Store
 }
 
 // Collect is health.Config.Collect. Cron jobs and daemons come before the
@@ -55,7 +58,13 @@ func (h HealthSources) Collect(since time.Time) []health.Fact {
 	}
 	if h.Router != nil {
 		for _, snap := range h.Router.ListSessions() {
-			out = append(out, sessionFact(snap, h.Router.SessionFor(snap.Key), h.EventLogDir))
+			f := sessionFact(snap, h.Router.SessionFor(snap.Key), h.EventLogDir)
+			if h.Sidecars != nil {
+				if m, ok := h.Sidecars.Get(snap.Key); ok {
+					f.Index.Purpose, f.Index.DispatchedByPlanner = m.Purpose, m.DispatchedByPlanner()
+				}
+			}
+			out = append(out, f)
 		}
 	}
 	if h.Remote != nil {

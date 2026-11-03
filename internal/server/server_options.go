@@ -120,6 +120,9 @@ type ServerOptions struct {
 	// Promises are the Planner's promises /api/promises serves; nil lists
 	// none.
 	Promises *promise.Store
+	// Purpose is a session's purpose from its sidecar file (task: a session
+	// the Planner dispatched), stamped on /api/sessions; nil stamps none.
+	Purpose func(key string) string
 
 	// Logger is the component logger the Server derives its structured logging
 	// from. nil falls back to slog.Default() (#620).

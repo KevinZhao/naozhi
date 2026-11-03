@@ -250,8 +250,8 @@ function defaultGitStates() {
  *   shape, newest first); ?key= filters them. A test may edit the array in place.
  * @param {object} [overrides.sessionDetails] - key → GET /api/sessions/detail payload.
  * @param {object} [overrides.inbox] - GET /api/inbox body ({open, closed, counts, paused_until});
- *   POST /api/inbox/close drops the item from open, PUT / DELETE /api/inbox/pause set
- *   paused_until. Every write lands in inboxCalls. Unset, the routes 404.
+ *   POST /api/inbox/close and /api/inbox/decide drop the item from open, PUT / DELETE
+ *   /api/inbox/pause set paused_until. Every write lands in inboxCalls. Unset, the routes 404.
  * @param {object} [overrides.planner] - GET /api/planner body ({enabled, stopped, key, alive});
  *   POST /api/planner/state sets `stopped` and lands in plannerStateCalls. Unset, the routes 404.
  * @param {object[]} [overrides.plannerEvents] - GET /api/sessions/events answer for key=planner:main
@@ -581,7 +581,7 @@ function startMockServer(overrides = {}) {
       res.end(JSON.stringify(inboxData));
       return;
     }
-    if (inboxData && (pathname === NZ_CONTRACT.API.inbox_close || pathname === NZ_CONTRACT.API.inbox_pause)) {
+    if (inboxData && (pathname === NZ_CONTRACT.API.inbox_close || pathname === NZ_CONTRACT.API.inbox_decide || pathname === NZ_CONTRACT.API.inbox_pause)) {
       if (!checkAuth()) return;
       let body = '';
       req.on('data', c => (body += c));
@@ -589,7 +589,7 @@ function startMockServer(overrides = {}) {
         const b = body ? JSON.parse(body) : {};
         inboxCalls.push({ path: pathname, method: req.method, body: b });
         let out = { status: 'ok' };
-        if (pathname === NZ_CONTRACT.API.inbox_close) {
+        if (pathname === NZ_CONTRACT.API.inbox_close || pathname === NZ_CONTRACT.API.inbox_decide) {
           inboxData.open = (inboxData.open || []).filter(it => it.id !== b.id);
           inboxData.counts = { open: inboxData.open.length, badge: inboxData.open.filter(it => it.kind === 'decision' || it.kind === 'question').length };
         } else if (req.method === 'PUT') {

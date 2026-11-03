@@ -421,6 +421,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 		bookUnownedResults(sess, proc)
 		bookCodeChanges(sess, proc, func() { r.ss.Update(markChanged); r.notifyChange() })
 		r.bookActivity(sess, proc)
+		r.bookResults(sess, proc)
 		r.bindPeerKeys(proc)
 
 		// SpawnReconnect has no SpawnOptions, so launch-time state (effort tier,

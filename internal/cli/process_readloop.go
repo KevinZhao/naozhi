@@ -525,6 +525,11 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 	orphaned, orphanRun := false, ""
 	if ev.Type == "result" {
 		ev.Aborted, orphaned, orphanRun = p.turn.abortRequested.take()
+		if fn := p.onResult.Load(); fn != nil {
+			if res := resultFromEvent(ev); !res.Aborted && !res.IsError && !res.CLIAborted() {
+				(*fn)(res.Text)
+			}
+		}
 	}
 
 	// ---- Passthrough mode hooks ----

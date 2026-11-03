@@ -309,6 +309,7 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 		Outputs:          outputs,
 		Health:           opts.Health,
 		Workspaces:       workspaces,
+		Purpose:          opts.Purpose,
 	})
 	sessionH.InitStaticStats()
 	sessionH.WarmHistoryCache()

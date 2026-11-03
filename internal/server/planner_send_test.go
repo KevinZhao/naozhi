@@ -17,6 +17,30 @@ func TestPrepareSend_RefusesPlannerNamespace(t *testing.T) {
 			t.Errorf("prepareSend(%q) err = %v, want errPlannerNamespace", key, err)
 		}
 	}
+	// task: is reserved too, but a dispatched session takes your messages.
+	for _, tc := range []struct {
+		existing bool
+		want     error
+	}{{false, errTaskNamespace}, {true, nil}} {
+		e := &sendEngine{router: taskSendRouter{existing: tc.existing}}
+		if _, _, err := e.prepareSend(sendParams{Key: "task:0a1b2c3d4e5f", Text: "hi"}); !errors.Is(err, tc.want) {
+			t.Errorf("prepareSend(task:, existing=%v) err = %v, want %v", tc.existing, err, tc.want)
+		}
+	}
+}
+
+// taskSendRouter reports whether a session exists; prepareSend reaches no
+// other method for a task: key without a workspace.
+type taskSendRouter struct {
+	sendEngineRouter
+	existing bool
+}
+
+func (r taskSendRouter) SessionFor(string) *session.ManagedSession {
+	if !r.existing {
+		return nil
+	}
+	return &session.ManagedSession{}
 }
 
 // plannerNoteRouter hands out one session for every key.

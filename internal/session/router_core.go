@@ -219,6 +219,9 @@ type Router struct {
 	// activity receives sessions' activities (SetActivitySink); read at
 	// report time, so processes bound before it is set report too.
 	activity atomic.Pointer[ActivitySink]
+	// results receives sessions' turn results (SetResultSink), read the
+	// same way.
+	results atomic.Pointer[ResultSink]
 
 	// shutdownOnce guards Shutdown against re-entry: a double call would race
 	// the broadcast timer, re-cancel the history ctx and double-detach shim processes.

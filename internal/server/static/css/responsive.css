@@ -80,6 +80,7 @@
   .pl-head{height:44px;padding:0 16px}
   .pl-note{margin:10px 12px 0}
   .pl-brief{margin:0 16px 8px}
+  .pl-cards{margin:4px 16px 12px}
   .ab-count{right:calc(50% - 26px)}
   /* 全会话健康: fold the workspace under the name so the state column stays
      on screen. */
