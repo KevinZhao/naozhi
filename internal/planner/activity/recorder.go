@@ -26,7 +26,8 @@ type Output struct {
 	Time time.Time `json:"time"`
 	Activity
 	// Root is the file-API root Path is relative to (root=session:<key>);
-	// empty for a PR.
+	// empty for a PR. It holds only while session Key still works in Dir,
+	// which the caller checks (Outputs cannot see the session table).
 	Root string `json:"root,omitempty"`
 }
 
@@ -36,7 +37,7 @@ func (o Output) same(n Output) bool {
 		return false
 	}
 	if n.Path != "" {
-		return o.Path == n.Path
+		return o.Path == n.Path && o.Dir == n.Dir
 	}
 	return n.URL != "" && o.URL == n.URL
 }
@@ -77,9 +78,13 @@ func (r *Recorder) Load(now time.Time) error {
 }
 
 // Record journals a as an activity of the session key working in dir and
-// indexes it when it is an output. ws is the workspace registered for dir.
+// indexes it when it is an output. ws is the workspace registered for dir; a
+// file records dir as its Dir.
 func (r *Recorder) Record(key, dir string, a Activity) {
 	now := time.Now()
+	if a.Path != "" {
+		a.Dir = dir
+	}
 	var wsID string
 	if r.ws != nil {
 		if w, ok := r.ws.Lookup(dir); ok {
@@ -123,7 +128,8 @@ func (r *Recorder) index(o Output) {
 
 // Outputs returns up to limit outputs, newest first: the session key's, or
 // every session's when key is "" (the outputs library). A file's Root is set
-// so Root and Path go to the file API as they are.
+// so Root and Path go to the file API as they are, while the session works in
+// the file's Dir.
 func (r *Recorder) Outputs(key string, limit int) []Output {
 	r.mu.Lock()
 	defer r.mu.Unlock()

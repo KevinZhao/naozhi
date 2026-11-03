@@ -3,7 +3,6 @@ package project
 import (
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
@@ -100,23 +99,8 @@ func (h *Handlers) sessionRootPath(key string) string {
 	if err != nil {
 		return ""
 	}
-	// allowed_root bounds the walk up to the tree root, as in GET /api/sessions/git.
-	if st, ok := gitinfo.Detect(wsPath, resolveRootForBound(h.deps.AllowedRoot)); ok {
-		return st.Root
-	}
-	return wsPath
-}
-
-// resolveRootForBound symlink-resolves allowedRoot so it compares lexically
-// with the resolved workspace, falling back to the raw path like
-// validateWorkspace: an unresolvable root must still bound the walk.
-func resolveRootForBound(allowedRoot string) string {
-	if allowedRoot == "" {
-		return ""
-	}
-	resolved, err := filepath.EvalSymlinks(allowedRoot)
-	if err != nil {
-		return allowedRoot
-	}
-	return resolved
+	// allowed_root bounds the walk up to the tree root, as in GET
+	// /api/sessions/git; the process side relativizes output paths the same
+	// way (cli SetOnActivity).
+	return gitinfo.TreeRoot(wsPath, h.deps.AllowedRoot)
 }

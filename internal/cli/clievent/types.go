@@ -44,8 +44,10 @@ type EventEntry struct {
 	// session's file root (the path= of a root=session:<key> file-API
 	// request); "" outside that root.
 	Path string `json:"path,omitempty"`
-	// Activity is the planner/activity type a state-changing tool call is
-	// classified as (git_push, output, ...); the call itself may still fail.
+	// Activity is the planner/activity types a state-changing tool_use is
+	// classified as, comma-separated (git_push,pr_create); set before the
+	// call runs, so it may still fail. The journal holds the activities that
+	// happened, the turn-end scan's outputs and result-linked PRs included.
 	Activity string `json:"activity,omitempty"`
 	// RunID is the run id (ctxutil.RunID) of the Send behind a "user" or
 	// "result" entry, the key that joins the transcript with runhistory and

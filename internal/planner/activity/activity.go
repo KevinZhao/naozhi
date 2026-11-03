@@ -55,13 +55,20 @@ type Activity struct {
 	// Path is an output file relative to the session's file root, the
 	// path= of a root=session:<key> file-API request.
 	Path string `json:"path,omitempty"`
+	// Dir is the session's workspace when it was recorded (Recorder.Record):
+	// Path resolves through root=session:<key> only while the session still
+	// works there.
+	Dir string `json:"dir,omitempty"`
 }
 
-// IsOutput reports whether a lands in the outputs index: a file or a PR.
+// IsOutput reports whether a lands in the outputs index: a file, or a PR
+// known by its URL (a merge by number alone names no product).
 func (a Activity) IsOutput() bool {
 	switch a.Type {
-	case TypeOutput, TypePRCreate, TypePRMerge, TypePR:
-		return true
+	case TypeOutput:
+		return a.Path != ""
+	case TypePRCreate, TypePRMerge, TypePR:
+		return a.URL != ""
 	}
 	return false
 }
@@ -135,35 +142,34 @@ type toolInput struct {
 	Title        string `json:"title"`
 }
 
-// Classify reads one tool_use. path is the file a Write / Edit class tool
-// writes, whatever its extension ("" for other tools). ok reports a state
-// change; an output's Path is left absolute for the caller to make relative
-// (RelPath).
-func Classify(tool string, input json.RawMessage) (a Activity, path string, ok bool) {
+// Classify reads one tool_use: the state changes it makes (none for most
+// tools), and path, the file a Write / Edit class tool writes whatever its
+// extension ("" for other tools). An output's Path is left absolute for the
+// caller to make relative (RelPath).
+func Classify(tool string, input json.RawMessage) (acts []Activity, path string) {
 	var in toolInput
 	switch {
 	case tool == "Bash":
 		if json.Unmarshal(input, &in) != nil {
-			return Activity{}, "", false
+			return nil, ""
 		}
-		a, ok = FromCommand(in.Command)
-		return a, "", ok
+		return FromCommand(in.Command), ""
 	case tool == "Write" || tool == "Edit" || tool == "MultiEdit" || tool == "NotebookEdit":
 		if json.Unmarshal(input, &in) != nil {
-			return Activity{}, "", false
+			return nil, ""
 		}
 		path = in.FilePath
 		if path == "" {
 			path = in.NotebookPath
 		}
 		if path == "" || !IsOutputFile(path) {
-			return Activity{}, path, false
+			return nil, path
 		}
-		return Activity{Type: TypeOutput, Summary: filepath.Base(path), Path: path}, path, true
+		return []Activity{{Type: TypeOutput, Summary: filepath.Base(path), Path: path}}, path
 	case strings.HasPrefix(tool, "mcp__"):
 		typ, leaf, ok := classifyMCP(tool)
 		if !ok {
-			return Activity{}, "", false
+			return nil, ""
 		}
 		summary := leaf
 		if json.Unmarshal(input, &in) == nil {
@@ -171,20 +177,26 @@ func Classify(tool string, input json.RawMessage) (a Activity, path string, ok b
 				summary += ": " + t
 			}
 		}
-		return Activity{Type: typ, Summary: oneLine(summary)}, "", true
+		return []Activity{{Type: typ, Summary: oneLine(summary)}}, ""
 	}
-	return Activity{}, "", false
+	return nil, ""
 }
 
-// mcpEmailVerbs and mcpAsanaVerbs are the words that make an MCP tool a
+// mcpEmailVerbs and mcpAsanaVerbs are the verbs that make an MCP tool a
 // write. Drafting a mail is not sending one.
 var (
 	mcpEmailVerbs = wordSet("send", "reply", "forward")
 	mcpAsanaVerbs = wordSet("create", "update", "delete", "add", "remove", "set", "save", "instantiate", "duplicate", "move")
 )
 
-// classifyMCP classifies an mcp__<server>__<tool> name: mail tools that send
-// and Asana tools that write. leaf is the tool part.
+// mcpServiceNouns are the words a tool name may put before its verb
+// (email_send, asana_create_task).
+var mcpServiceNouns = wordSet("asana", "email", "mail", "gmail", "outlook")
+
+// classifyMCP classifies an mcp__<server>__<tool> name by its verb, the
+// first word after any service noun: mail tools that send and Asana tools
+// that write (GetStatusUpdate reads, whatever follows its verb). leaf is the
+// tool part.
 func classifyMCP(name string) (Type, string, bool) {
 	rest := strings.TrimPrefix(name, "mcp__")
 	server, leaf, found := strings.Cut(rest, "__")
@@ -194,15 +206,23 @@ func classifyMCP(name string) (Type, string, bool) {
 	leaf = strings.TrimLeft(leaf, "_")
 	server = strings.ToLower(server)
 	words := splitWords(leaf)
+	leaf = trimServicePrefix(leaf)
+	verb := ""
+	for _, w := range splitWords(leaf) {
+		if !mcpServiceNouns[w] {
+			verb = w
+			break
+		}
+	}
 	switch {
 	case strings.Contains(server, "asana") || hasWord(words, "asana"):
-		if anyWordIn(words, mcpAsanaVerbs) {
-			return TypeAsana, trimServicePrefix(leaf), true
+		if mcpAsanaVerbs[verb] {
+			return TypeAsana, leaf, true
 		}
 	case strings.Contains(server, "mail") || strings.Contains(server, "outlook") ||
 		hasWord(words, "email") || hasWord(words, "mail"):
-		if anyWordIn(words, mcpEmailVerbs) {
-			return TypeEmail, trimServicePrefix(leaf), true
+		if mcpEmailVerbs[verb] {
+			return TypeEmail, leaf, true
 		}
 	}
 	return "", "", false
@@ -267,19 +287,20 @@ func PRLinks(text string) []string {
 	return out
 }
 
-// FromCommand classifies a Bash command line: the first simple command in it
-// that changes state wins.
-func FromCommand(cmd string) (Activity, bool) {
+// FromCommand classifies a Bash command line: one Activity per simple
+// command in it that changes state (git push && gh pr create is two).
+func FromCommand(cmd string) []Activity {
+	var out []Activity
 	for _, words := range segments(cmd) {
 		words = stripWrappers(words)
 		if len(words) == 0 {
 			continue
 		}
 		if a, ok := classifyWords(words); ok {
-			return a, true
+			out = append(out, a)
 		}
 	}
-	return Activity{}, false
+	return out
 }
 
 func classifyWords(words []string) (Activity, bool) {
@@ -381,6 +402,10 @@ func classifyGH(words []string) (Activity, bool) {
 	case "pr create":
 		return Activity{Type: TypePRCreate, Summary: summarize(words[:3]), State: StateOpened}, true
 	case "pr merge":
+		// --auto only queues the merge, and --disable-auto unqueues it.
+		if hasWord(words, "--auto") || hasWord(words, "--disable-auto") {
+			return Activity{}, false
+		}
 		a := Activity{Type: TypePRMerge, Summary: summarize(words), State: StateMerged}
 		for _, w := range words[3:] {
 			if prLinkRE.MatchString(w) {
@@ -396,9 +421,16 @@ func classifyGH(words []string) (Activity, bool) {
 	return Activity{}, false
 }
 
-// awsValueOpts are the aws CLI global options that take the next word.
+// awsValueOpts are the aws CLI options that take the next word, skipped
+// wherever they stand: the global ones, and s3's (only s3 cp / mv / sync
+// read past the operation, so other operations' own options need no entry).
 var awsValueOpts = wordSet("--region", "--profile", "--output", "--endpoint-url", "--query",
-	"--color", "--ca-bundle", "--cli-read-timeout", "--cli-connect-timeout", "--cli-binary-format")
+	"--color", "--ca-bundle", "--cli-read-timeout", "--cli-connect-timeout", "--cli-binary-format",
+	"--exclude", "--include", "--acl", "--storage-class", "--grants", "--sse", "--sse-c", "--sse-c-key",
+	"--sse-kms-key-id", "--sse-c-copy-source", "--sse-c-copy-source-key", "--content-type",
+	"--cache-control", "--content-disposition", "--content-encoding", "--content-language",
+	"--expires", "--metadata", "--metadata-directive", "--website-redirect", "--expected-size",
+	"--page-size", "--request-payer", "--source-region", "--checksum-algorithm", "--copy-props")
 
 // awsWriteVerbs are the leading words of AWS API operations that change
 // state. Anything else (describe, get, list, scan, query, wait, assume, ...)
@@ -416,7 +448,7 @@ func classifyAWS(words []string) (Activity, bool) {
 	for i := 1; i < len(words); i++ {
 		w := words[i]
 		if strings.HasPrefix(w, "--") {
-			if len(pos) == 0 && awsValueOpts[w] {
+			if awsValueOpts[w] {
 				i++
 			}
 			continue
@@ -436,8 +468,8 @@ func classifyAWS(words []string) (Activity, bool) {
 		case "rm", "mb", "rb":
 			return a, true
 		case "cp", "mv", "sync":
-			// Writes when the destination (the last path) is a bucket.
-			if len(pos) >= 4 && strings.HasPrefix(pos[len(pos)-1], "s3://") {
+			// Writes when the destination (the second path) is a bucket.
+			if len(pos) >= 4 && strings.HasPrefix(pos[3], "s3://") {
 				return a, true
 			}
 		}
@@ -618,12 +650,3 @@ func wordSet(words ...string) map[string]bool {
 }
 
 func hasWord(words []string, w string) bool { return slices.Contains(words, w) }
-
-func anyWordIn(words []string, set map[string]bool) bool {
-	for _, w := range words {
-		if set[w] {
-			return true
-		}
-	}
-	return false
-}

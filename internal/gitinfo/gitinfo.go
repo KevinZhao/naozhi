@@ -72,6 +72,29 @@ func Detect(dir, root string) (State, bool) {
 	return State{}, false
 }
 
+// TreeRoot returns the working tree root holding the absolute dir (a linked
+// worktree's own root) with the walk up bounded by allowedRoot, else dir:
+// the root a session's files are browsed from (root=session:<key>) and its
+// output paths are relative to. Both are symlink-resolved here; one that
+// does not resolve is used as given, so allowedRoot still bounds the walk.
+func TreeRoot(dir, allowedRoot string) string {
+	dir = resolveOrRaw(dir)
+	if st, ok := Detect(dir, resolveOrRaw(allowedRoot)); ok {
+		return st.Root
+	}
+	return dir
+}
+
+func resolveOrRaw(p string) string {
+	if p == "" {
+		return ""
+	}
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return p
+}
+
 // containedIn reports whether p is root or a descendant of it; empty root
 // means unbounded. Inputs are Clean and symlink-resolved, so this is a pure
 // lexical check (osutil.PathContainedInRoot's inode walk would add syscalls here).

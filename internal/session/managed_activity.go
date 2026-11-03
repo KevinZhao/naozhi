@@ -14,7 +14,7 @@ type ActivitySink interface {
 // activityNotifier is the optional hook a process offers for the activities
 // its tool calls produce; see bookActivity.
 type activityNotifier interface {
-	SetOnActivity(cwd string, fn func(activity.Activity))
+	SetOnActivity(cwd, allowedRoot string, fn func(activity.Activity))
 }
 
 var _ activityNotifier = (*cli.Process)(nil)
@@ -32,14 +32,15 @@ func (r *Router) SetActivitySink(sink ActivitySink) {
 
 // bookActivity reports the activities proc's tool calls produce in s's
 // workspace as s's. Bound wherever bookCodeChanges is; no I/O, so it is safe
-// inside a table transaction.
+// inside a table transaction. The default workspace is the dashboard's
+// allowed_root, which bounds the file API's session root the same way.
 func (r *Router) bookActivity(s *ManagedSession, proc processIface) {
 	n, ok := proc.(activityNotifier)
 	if !ok {
 		return
 	}
 	ws := s.Workspace()
-	n.SetOnActivity(ws, func(a activity.Activity) {
+	n.SetOnActivity(ws, r.defaultCWD, func(a activity.Activity) {
 		if sink := r.activity.Load(); sink != nil {
 			(*sink).Record(s.key, ws, a)
 		}

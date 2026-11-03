@@ -34,24 +34,19 @@ const (
 
 // activityHook is what SetOnActivity installs.
 type activityHook struct {
-	cwd string // scanned at turn end
-	fn  func(activity.Activity)
+	cwd         string // scanned at turn end
+	allowedRoot string // bounds the walk up to rootDir
+	fn          func(activity.Activity)
 
 	rootOnce sync.Once
 	root     string
 }
 
-// rootDir is the directory output paths are relative to: the git working
-// tree holding cwd (a linked worktree's own root), else cwd — the root a
-// root=session:<key> file-API request resolves to. Resolved on first use,
-// on the read loop, so binding the hook does no I/O.
+// rootDir is the directory output paths are relative to: gitinfo.TreeRoot,
+// the root a root=session:<key> file-API request resolves to. Resolved on
+// first use, on the read loop, so binding the hook does no I/O.
 func (h *activityHook) rootDir() string {
-	h.rootOnce.Do(func() {
-		h.root = h.cwd
-		if st, ok := gitinfo.Detect(h.cwd, ""); ok {
-			h.root = st.Root
-		}
-	})
+	h.rootOnce.Do(func() { h.root = gitinfo.TreeRoot(h.cwd, h.allowedRoot) })
 	return h.root
 }
 
@@ -69,22 +64,25 @@ type activityTracker struct {
 	scanning  atomic.Bool
 }
 
+// pendingCall is a tool call awaiting its result: the state changes it makes
+// once it succeeds (none for a Bash / MCP call kept only for its links).
 type pendingCall struct {
-	act        activity.Activity
-	classified bool
+	acts []activity.Activity
 }
 
 // SetOnActivity installs fn to receive the activities this process's tool
 // calls produce in the absolute working directory cwd, which is also scanned
-// for outputs at each turn end. Lock-free, so safe at any time; a nil fn or a
+// for outputs at each turn end. allowedRoot (the dashboard's allowed_root,
+// "" for none) bounds the search for the git tree output paths are relative
+// to, as the file API's does. Lock-free, so safe at any time; a nil fn or a
 // relative cwd clears it. fn runs on the read loop or the scan goroutine and
 // must not block.
-func (p *Process) SetOnActivity(cwd string, fn func(activity.Activity)) {
+func (p *Process) SetOnActivity(cwd, allowedRoot string, fn func(activity.Activity)) {
 	if fn == nil || !filepath.IsAbs(cwd) {
 		p.activityHook.Store(nil)
 		return
 	}
-	p.activityHook.Store(&activityHook{cwd: cwd, fn: fn})
+	p.activityHook.Store(&activityHook{cwd: cwd, allowedRoot: allowedRoot, fn: fn})
 }
 
 // activityRoot is the root Write / Edit entries' paths are relative to, ""
@@ -116,14 +114,14 @@ func (p *Process) observeActivity(ev *clievent.Event, now time.Time) {
 			if b.Type != "tool_use" || b.ID == "" || len(t.pending) >= maxPendingCalls {
 				continue
 			}
-			a, ok := classifyToolUse(b, h.rootDir())
-			if !ok && b.Name != "Bash" && !strings.HasPrefix(b.Name, "mcp__") {
+			acts := classifyToolUse(b, h.rootDir())
+			if len(acts) == 0 && b.Name != "Bash" && !strings.HasPrefix(b.Name, "mcp__") {
 				continue
 			}
 			if t.pending == nil {
 				t.pending = make(map[string]pendingCall)
 			}
-			t.pending[b.ID] = pendingCall{act: a, classified: ok}
+			t.pending[b.ID] = pendingCall{acts: acts}
 		}
 	case "user":
 		if ev.Message == nil {
@@ -143,11 +141,14 @@ func (p *Process) observeActivity(ev *clievent.Event, now time.Time) {
 			if b.IsError {
 				continue
 			}
+			// The first link names the PR a create or merge without one
+			// acted on; the rest, and every link of another call, report as
+			// PRs (reportActivity drops the one just reported).
 			links := ev.ToolResultPRs[b.ToolUseID]
-			if call.classified {
-				a := call.act
-				if (a.Type == activity.TypePRCreate || a.Type == activity.TypePRMerge) && a.URL == "" && len(links) > 0 {
-					a.URL = links[0]
+			linked := false
+			for _, a := range call.acts {
+				if (a.Type == activity.TypePRCreate || a.Type == activity.TypePRMerge) && a.URL == "" && len(links) > 0 && !linked {
+					a.URL, linked = links[0], true
 				}
 				p.reportActivity(h, a)
 			}
@@ -225,33 +226,42 @@ func (p *Process) scanOutputs(h *activityHook, start time.Time, written map[stri
 // classifyToolUse classifies one tool_use block, making an output's path
 // relative to root; an output outside root is not one (it cannot be
 // previewed, and is usually CLI state such as a plan file).
-func classifyToolUse(b clievent.ContentBlock, root string) (activity.Activity, bool) {
-	a, _, ok := activity.Classify(b.Name, b.Input)
-	if !ok {
-		return activity.Activity{}, false
-	}
-	if a.Type == activity.TypeOutput {
-		rel, inRoot := activity.RelPath(root, a.Path)
-		if !inRoot {
-			return activity.Activity{}, false
+func classifyToolUse(b clievent.ContentBlock, root string) []activity.Activity {
+	acts, _ := activity.Classify(b.Name, b.Input)
+	out := acts[:0]
+	for _, a := range acts {
+		if a.Type == activity.TypeOutput {
+			rel, inRoot := activity.RelPath(root, a.Path)
+			if !inRoot {
+				continue
+			}
+			a.Path, a.Summary = rel, rel
 		}
-		a.Path, a.Summary = rel, rel
+		out = append(out, a)
 	}
-	return a, true
+	return out
 }
 
 // tagToolEntry sets a tool_use entry's Path (any Write / Edit target under
-// root) and Activity.
+// root) and Activity, the types the call is classified as. The tag is what
+// the call attempts: it is set before the call runs, so a call that fails
+// keeps it, and the PRs its result links and the turn-end scan's outputs
+// have no entry of their own. The journal (planner/activity.Recorder) is the
+// complete record.
 func tagToolEntry(entry *clievent.EventEntry, b clievent.ContentBlock, root string) {
-	a, target, ok := activity.Classify(b.Name, b.Input)
+	acts, target := activity.Classify(b.Name, b.Input)
 	if target != "" {
 		if rel, inRoot := activity.RelPath(root, target); inRoot {
 			entry.Path = rel
 		}
 	}
-	if ok && (a.Type != activity.TypeOutput || entry.Path != "") {
-		entry.Activity = string(a.Type)
+	var types []string
+	for _, a := range acts {
+		if a.Type != activity.TypeOutput || entry.Path != "" {
+			types = append(types, string(a.Type))
+		}
 	}
+	entry.Activity = strings.Join(types, ",")
 }
 
 // parseToolResultPRs returns the PR URLs each tool_result block of a user

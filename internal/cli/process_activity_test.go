@@ -27,7 +27,7 @@ func TestProcessActivity_Turn(t *testing.T) {
 		mu  sync.Mutex
 		got []activity.Activity
 	)
-	p.SetOnActivity(cwd, func(a activity.Activity) {
+	p.SetOnActivity(cwd, "", func(a activity.Activity) {
 		mu.Lock()
 		got = append(got, a)
 		mu.Unlock()
@@ -69,6 +69,8 @@ func TestProcessActivity_Turn(t *testing.T) {
 	feed(toolResult("t5", "https://github.com/o/r/pull/12 https://github.com/o/r/pull/13", false))
 	feed(toolUse("t6", "Read", map[string]string{"file_path": filepath.Join(cwd, "notes.md")}))
 	feed(toolResult("t6", "https://github.com/o/r/pull/14", false))
+	feed(toolUse("t7", "Bash", map[string]string{"command": "git push -u origin feat && gh pr create --title y"}))
+	feed(toolResult("t7", "remote: https://github.com/o/r/pull/new/feat\nhttps://github.com/o/r/pull/15\n", false))
 
 	// Written by a script during the turn, and an older file that was not.
 	if err := os.WriteFile(filepath.Join(cwd, "chart.svg"), []byte("<svg/>"), 0o600); err != nil {
@@ -94,6 +96,8 @@ func TestProcessActivity_Turn(t *testing.T) {
 		{Type: activity.TypeOutput, Summary: "docs/a.md", Path: "docs/a.md"},
 		{Type: activity.TypePRCreate, Summary: "gh pr create", State: activity.StateOpened, URL: "https://github.com/o/r/pull/12"},
 		{Type: activity.TypePR, Summary: "https://github.com/o/r/pull/13", URL: "https://github.com/o/r/pull/13"},
+		{Type: activity.TypeGitPush, Summary: "git push -u origin feat"},
+		{Type: activity.TypePRCreate, Summary: "gh pr create", State: activity.StateOpened, URL: "https://github.com/o/r/pull/15"},
 		{Type: activity.TypeOutput, Summary: "chart.svg", Path: "chart.svg"},
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -122,10 +126,11 @@ func TestProcessActivity_Turn(t *testing.T) {
 			acts = append(acts, e.Activity)
 		}
 	}
-	if want := []string{"docs/a.md", "main.go", "", "", "", ""}; !slices.Equal(paths, want) {
+	if want := []string{"docs/a.md", "main.go", "", "", "", "", ""}; !slices.Equal(paths, want) {
 		t.Errorf("tool_use paths = %q, want %q", paths, want)
 	}
-	if want := []string{"output", "", "git_push", "pr_create", "", ""}; !slices.Equal(acts, want) {
+	// Tagged before the call runs: t3's push failed, and is not reported.
+	if want := []string{"output", "", "git_push", "pr_create", "", "", "git_push,pr_create"}; !slices.Equal(acts, want) {
 		t.Errorf("tool_use activities = %q, want %q", acts, want)
 	}
 }
