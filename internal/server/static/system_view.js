@@ -172,7 +172,7 @@ const HEALTH_STATES = {
   stalled: { label: '停滞', cls: 'warn' },
   waiting: { label: '待你回复', cls: 'ask' },
   unknown: { label: '未知', cls: 'off' },
-  active: { label: '活跃', cls: 'ok' },
+  active: { label: '活跃', cls: 'run' },
   idle: { label: '空闲', cls: 'idle' },
 };
 // HEALTH_ERROR_CLASSES labels health.Classify's error classes (§15.1).
@@ -229,9 +229,9 @@ function healthRowHtml(u) {
   let tag = HEALTH_KIND_TAGS[u.kind] || '';
   if (u.kind === 'remote') tag += ' · ' + getNodeDisplayName(u.id.slice(0, u.id.indexOf('/')));
   const cell = (target
-    ? '<button type="button" class="sh-open" data-action="session-select" data-key="' + escAttr(target.key) + '" data-node="' + escAttr(target.node) + '" title="' + escAttr(u.id) + '">' + esc(name) + '</button>'
-    : '<span class="sh-name" title="' + escAttr(u.id) + '">' + esc(name) + '</span>') +
-    (tag ? '<span class="sh-tag">' + esc(tag) + '</span>' : '');
+    ? '<button type="button" class="hl-open" data-action="session-select" data-key="' + escAttr(target.key) + '" data-node="' + escAttr(target.node) + '" title="' + escAttr(u.id) + '">' + esc(name) + '</button>'
+    : '<span class="hl-name" title="' + escAttr(u.id) + '">' + esc(name) + '</span>') +
+    (tag ? '<span class="hl-tag">' + esc(tag) + '</span>' : '');
   const since = Date.parse(u.since);
   const stTitle = [u.evidence || '', !isNaN(since) ? '始于 ' + formatAbsTime(since) : ''].filter(Boolean).join(' · ');
   const last = u.last_active ? Date.parse(u.last_active) : NaN;
@@ -239,14 +239,14 @@ function healthRowHtml(u) {
     ? '<span title="' + escAttr(formatAbsTime(last)) + '">' + esc(timeAgo(last)) + '</span>'
     : '—';
   const errHtml = u.error_class ? esc(HEALTH_ERROR_CLASSES[u.error_class] || u.error_class) : '—';
-  const ws = u.workspace ? esc(u.workspace_name || u.workspace) : '<span class="sh-dim">无人负责</span>';
-  // On a phone the workspace folds under the name (.sh-sub) instead of
+  const ws = u.workspace ? esc(u.workspace_name || u.workspace) : '<span class="hl-dim">无人负责</span>';
+  // On a phone the workspace folds under the name (.hl-sub) instead of
   // taking a column.
   return '<tr data-unit="' + escAttr(u.id) + '">' +
-      '<td>' + cell + '<div class="sh-sub">' + ws + '</div></td>' +
-      '<td class="sh-col-ws">' + ws + '</td>' +
-      '<td><span class="sh-state ' + st.cls + '"' + (stTitle ? ' title="' + escAttr(stTitle) + '"' : '') + '>' + esc(st.label) + '</span></td>' +
-      '<td class="sh-num">' + lastHtml + '</td>' +
+      '<td>' + cell + '<div class="hl-sub">' + ws + '</div></td>' +
+      '<td class="hl-col-ws">' + ws + '</td>' +
+      '<td><span class="hl-state ' + st.cls + '"' + (stTitle ? ' title="' + escAttr(stTitle) + '"' : '') + '>' + esc(st.label) + '</span></td>' +
+      '<td class="hl-num">' + lastHtml + '</td>' +
       '<td>' + errHtml + '</td>' +
     '</tr>';
 }
@@ -259,20 +259,20 @@ function renderSystemHealthHtml() {
   const counts = {};
   for (const u of units) counts[u.state] = (counts[u.state] || 0) + 1;
   const chips = Object.keys(HEALTH_STATES).filter(k => counts[k]).map(k =>
-    '<span class="sh-count"><span class="sh-state ' + HEALTH_STATES[k].cls + '">' + esc(HEALTH_STATES[k].label) + '</span> <b>' + counts[k] + '</b></span>'
+    '<span class="hl-count"><span class="hl-state ' + HEALTH_STATES[k].cls + '">' + esc(HEALTH_STATES[k].label) + '</span> <b>' + counts[k] + '</b></span>'
   );
-  chips.push('<span class="sh-count" data-count="unowned">无人负责 <b>' + (systemHealth.unowned || 0) + '</b></span>');
+  chips.push('<span class="hl-count" data-count="unowned">无人负责 <b>' + (systemHealth.unowned || 0) + '</b></span>');
   const at = systemHealth.at ? Date.parse(systemHealth.at) : NaN;
-  const atHtml = !isNaN(at) ? '<span class="sh-at" title="' + escAttr(formatAbsTime(at)) + '">对账于 ' + esc(timeAgo(at)) + '</span>' : '';
+  const atHtml = !isNaN(at) ? '<span class="hl-at" title="' + escAttr(formatAbsTime(at)) + '">对账于 ' + esc(timeAgo(at)) + '</span>' : '';
   const table = units.length
-    ? '<div class="sh-scroll"><table class="sh-table">' +
-        '<thead><tr><th>会话</th><th class="sh-col-ws">工作区</th><th>健康状态</th><th>最后活动</th><th>错误类别</th></tr></thead>' +
+    ? '<div class="hl-scroll"><table class="hl-table">' +
+        '<thead><tr><th>会话</th><th class="hl-col-ws">工作区</th><th>健康状态</th><th>最后活动</th><th>错误类别</th></tr></thead>' +
         '<tbody>' + units.map(healthRowHtml).join('') + '</tbody>' +
       '</table></div>'
     : '<div class="system-empty">' + (isNaN(at) ? '健康状态机尚未完成首次对账。' : '暂无会话。') + '</div>';
   return '<section class="sys-health" aria-label="全会话健康">' +
-      '<div class="sh-head"><h2 class="svc-overview-title">全会话健康</h2>' + atHtml + '</div>' +
-      '<div class="sh-counts">' + chips.join('') + '</div>' +
+      '<div class="hl-head"><h2 class="svc-overview-title">全会话健康</h2>' + atHtml + '</div>' +
+      '<div class="hl-counts">' + chips.join('') + '</div>' +
       table +
     '</section>';
 }
@@ -344,7 +344,7 @@ function renderSystemView() {
     '<div class="system-empty">暂无系统任务。<br>内置后台守护（如自动化改名）需在配置中启用 <code>sysession</code> 后重启生效。</div>';
   // The poll repaints every 5s: keep the reader where they scrolled to.
   const prevBody = root.querySelector('.system-body');
-  const prevTable = root.querySelector('.sh-scroll');
+  const prevTable = root.querySelector('.hl-scroll');
   const top = prevBody ? prevBody.scrollTop : 0;
   const left = prevTable ? prevTable.scrollLeft : 0;
   root.innerHTML =
@@ -356,7 +356,7 @@ function renderSystemView() {
       renderSystemHealthHtml() +
     '</div>';
   const nextBody = root.querySelector('.system-body');
-  const nextTable = root.querySelector('.sh-scroll');
+  const nextTable = root.querySelector('.hl-scroll');
   if (nextBody) nextBody.scrollTop = top;
   if (nextTable) nextTable.scrollLeft = left;
 }

@@ -39,27 +39,27 @@ test('health table lists units and a row opens its session', async ({ page }) =>
   await page.click('#abnav-system');
 
   const section = page.locator('.sys-health');
-  await expect(section.locator('.sh-table tbody tr')).toHaveCount(4);
+  await expect(section.locator('.hl-table tbody tr')).toHaveCount(4);
   await expect(section.locator('[data-count="unowned"] b')).toHaveText('2');
-  await expect(section.locator('.sh-counts')).toContainText('失败 1');
-  await expect(section.locator('.sh-counts')).toContainText('空闲 2');
+  await expect(section.locator('.hl-counts')).toContainText('失败 1');
+  await expect(section.locator('.hl-counts')).toContainText('空闲 2');
 
   const first = section.locator('tbody tr').first();
-  await expect(first.locator('.sh-state')).toHaveText('失败');
-  await expect(first.locator('.sh-state')).toHaveClass(/fail/);
-  await expect(first.locator('.sh-state')).toHaveAttribute('title', /last turn ended in an API error/);
+  await expect(first.locator('.hl-state')).toHaveText('失败');
+  await expect(first.locator('.hl-state')).toHaveClass(/fail/);
+  await expect(first.locator('.hl-state')).toHaveAttribute('title', /last turn ended in an API error/);
   await expect(first).toContainText('凭证 / 权限拒绝');
   await expect(first).toContainText('myproject');
-  await expect(first.locator('.sh-open')).toHaveText('hello world');
+  await expect(first.locator('.hl-open')).toHaveText('hello world');
 
   const lost = section.locator(`tr[data-unit="gpu-box/dashboard:direct:x:general"]`);
-  await expect(lost.locator('.sh-state')).toHaveText('失联');
+  await expect(lost.locator('.hl-state')).toHaveText('失联');
   await expect(lost).toContainText('无人负责');
   // Nothing on the dashboard to open for these: plain text, no button.
-  await expect(lost.locator('.sh-open')).toHaveCount(0);
-  await expect(section.locator('tr[data-unit="cron:nightly"] .sh-name')).toContainText('nightly');
+  await expect(lost.locator('.hl-open')).toHaveCount(0);
+  await expect(section.locator('tr[data-unit="cron:nightly"] .hl-name')).toContainText('nightly');
 
-  await first.locator('.sh-open').click();
+  await first.locator('.hl-open').click();
   await expect(page.locator('#system-main')).toBeHidden();
   await expect(page.locator(`.session-card.active[data-key="${KEY}"]`)).toHaveCount(1);
 });
