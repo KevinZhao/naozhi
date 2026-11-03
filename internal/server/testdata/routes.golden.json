@@ -151,6 +151,21 @@
   },
   {
     "method": "GET",
+    "path": "/api/planner",
+    "handler_type": "*dashplanner.Handler"
+  },
+  {
+    "method": "POST",
+    "path": "/api/planner/send",
+    "handler_type": "*dashplanner.Handler"
+  },
+  {
+    "method": "POST",
+    "path": "/api/planner/state",
+    "handler_type": "*dashplanner.Handler"
+  },
+  {
+    "method": "GET",
     "path": "/api/projects",
     "handler_type": "*dashproject.Handlers"
   },

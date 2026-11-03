@@ -119,10 +119,12 @@ func filterAndCountSnapshots(snapshots []sessionpkg.SessionSnapshot, now time.Ti
 		case "ready":
 			ready++
 		}
-		// Scratch, cron and sys: sessions own a CLI process so they appear in
-		// ListSessions, but each has its own panel (drawer / 「定时任务」 / System
-		// drawer, docs/rfc/system-session.md §9.2) and must not render here.
-		if sessionkey.IsScratchKey(snap.Key) || sessionkey.IsCronKey(snap.Key) || sessionkey.IsSysKey(snap.Key) {
+		// Scratch, cron, sys: and planner: sessions own a CLI process so they
+		// appear in ListSessions, but each has its own panel (drawer /
+		// 「定时任务」 / System drawer, docs/rfc/system-session.md §9.2 / the
+		// Planner page) and must not render here.
+		if sessionkey.IsScratchKey(snap.Key) || sessionkey.IsCronKey(snap.Key) || sessionkey.IsSysKey(snap.Key) ||
+			sessionkey.IsPlannerNSKey(snap.Key) {
 			continue
 		}
 		snapshots[n] = snap

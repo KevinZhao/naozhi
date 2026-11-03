@@ -50,7 +50,7 @@ func isExemptKey(key string) bool {
 	return exempt
 }
 
-// exemptKind classifies an exempt session key as "cron", "project", "sys",
+// exemptKind classifies an exempt session key as "cron", "project", "sys", "planner",
 // or "" if the key is not exempt. Drives the per-namespace sub-quota gate
 // in reserveSpawn so a noisy cron chat can't starve planner / sys sessions.
 func exemptKind(key string) string {
@@ -69,6 +69,8 @@ func exemptCapFor(kind string) int {
 		return maxProjectExempt
 	case "sys":
 		return maxSysExempt
+	case "planner":
+		return maxPlannerExempt
 	default:
 		return maxExemptSessions
 	}

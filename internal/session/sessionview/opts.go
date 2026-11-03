@@ -45,6 +45,7 @@ type AgentOpts struct {
 	StrictMCPConfig     bool
 	CrossSessionInbound string
 	PermissionsDeny     []string
+	PermissionsAllow    []string
 }
 
 // SessionStatus indicates how a session was obtained.

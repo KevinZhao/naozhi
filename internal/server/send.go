@@ -92,6 +92,11 @@ func (e *sendEngine) prepareSend(p sendParams) (cmd turn.Cmd, reset bool, err er
 	if err := sessionkey.ValidateSessionKey(key); err != nil {
 		return cmd, false, fmt.Errorf("invalid key")
 	}
+	// The Planner's namespace is reserved like cron's: a send here would
+	// create planner:main as an ordinary session, without its launch spec.
+	if sessionkey.IsPlannerNSKey(key) {
+		return cmd, false, errPlannerNamespace
+	}
 
 	// /clear and /new without an argument reset (the CLI built-in does not
 	// work in stream-json); "/new <arg>" is sent as text. The workspace

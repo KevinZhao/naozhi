@@ -55,6 +55,7 @@ func TestExemptKindClassification(t *testing.T) {
 		{"cron:" + "x", "cron"},
 		{"project:my-proj:planner", "project"},
 		{"sys:auto-titler", "sys"},
+		{"planner:main", "planner"},
 		{"feishu:direct:alice:general", ""},
 		{"scratch:feishu:direct:alice:general", ""},
 		{"", ""},
@@ -84,6 +85,7 @@ func TestExemptInfo(t *testing.T) {
 		{"cron:abc123", true, "cron"},
 		{"project:my-proj:planner", true, "project"},
 		{"sys:auto-titler", true, "sys"},
+		{"planner:main", true, "planner"},
 		{"scratch:feishu:direct:alice:general", false, ""},
 		{"feishu:direct:alice:general", false, ""},
 		{"", false, ""},
@@ -148,7 +150,7 @@ func TestExemptCapFor(t *testing.T) {
 // the relief valve, never the primary trigger. R242-ARCH-2.
 func TestExemptSubQuotasFitGlobalCeiling(t *testing.T) {
 	t.Parallel()
-	sum := maxCronExempt + maxProjectExempt + maxSysExempt
+	sum := maxCronExempt + maxProjectExempt + maxSysExempt + maxPlannerExempt
 	if sum > maxExemptSessions {
 		t.Fatalf("sum of sub-quotas %d exceeds maxExemptSessions %d", sum, maxExemptSessions)
 	}
