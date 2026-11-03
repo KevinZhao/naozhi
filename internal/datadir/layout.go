@@ -127,7 +127,7 @@ func (l Layout) ProjectsIndexPath() string { return l.Join("projects-index.json"
 const PlannerAttachmentsRel = "planner/attachments"
 
 // PlannerAttachmentsRoot holds the originals of the images tools return
-// (<root>/planner/attachments, docs/rfc/planner.md §3.7), in the
+// (<root>/planner/attachments, docs/rfc/planner.md §15.1 W1 / D83), in the
 // internal/attachment day-dir + .meta layout. It is in the state root rather
 // than a workspace so a screenshot never lands in the session's repository.
 func (l Layout) PlannerAttachmentsRoot() string {
