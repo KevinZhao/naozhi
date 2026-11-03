@@ -166,7 +166,7 @@ function daemonCostHtml(name) {
 
 // HEALTH_STATES maps a health state (monitor/health, wire-stable) to its
 // label and colour class, in the server's order: abnormal first.
-const HEALTH_STATES = {
+export const HEALTH_STATES = {
   failed: { label: '失败', cls: 'fail' },
   lost: { label: '失联', cls: 'warn' },
   stalled: { label: '停滞', cls: 'warn' },

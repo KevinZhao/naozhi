@@ -80,6 +80,10 @@
   .pl-head{height:44px;padding:0 16px}
   .pl-note{margin:10px 12px 0}
   .pl-brief{margin:0 16px 8px}
+  .pl-composer{padding:6px 12px 10px}
+  #pl-input{font-size:var(--nz-fs-md)} /* prevents iOS zoom on focus */
+  .pl-sess-status{margin:8px 12px 0;flex-wrap:wrap}
+  .btn-handoff{width:46px;height:40px;padding:0 2px;white-space:normal;line-height:1.15;font-size:var(--nz-fs-2xs)}
   .ab-count{right:calc(50% - 26px)}
   /* 全会话健康: fold the workspace under the name so the state column stays
      on screen. */

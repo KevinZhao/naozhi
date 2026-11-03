@@ -250,12 +250,15 @@ function defaultGitStates() {
  *   shape, newest first); ?key= filters them. A test may edit the array in place.
  * @param {object} [overrides.sessionDetails] - key → GET /api/sessions/detail payload.
  * @param {object} [overrides.inbox] - GET /api/inbox body ({open, closed, counts, paused_until});
- *   POST /api/inbox/close drops the item from open, PUT / DELETE /api/inbox/pause set
+ *   POST /api/inbox/close drops the item from open, /decide moves it to closed with its answer,
+ *   PUT / DELETE /api/inbox/pause set
  *   paused_until. Every write lands in inboxCalls. Unset, the routes 404.
  * @param {object} [overrides.planner] - GET /api/planner body ({enabled, stopped, key, alive});
  *   POST /api/planner/state sets `stopped` and lands in plannerStateCalls. Unset, the routes 404.
  * @param {object[]} [overrides.plannerEvents] - GET /api/sessions/events answer for key=planner:main
- *   (the other keys keep the default events). A test may push to it.
+ *   (the other keys keep the default events). A test may push to it. POST /api/planner/send
+ *   (with overrides.planner) lands in plannerSendCalls and answers 202, or 409 while stopped.
+ * @param {object} [overrides.keyEvents] - key → GET /api/sessions/events answer for that key.
  * @param {object[]} [overrides.cronJobs] - Custom cron jobs response.
  * @param {object} [overrides.cronListMeta] - Extra top-level fields merged into GET /api/cron
  *   (timezone / timezone_abbr / timezone_label ...). recent_runs_cap defaults to 5 like the backend.
@@ -316,6 +319,8 @@ function startMockServer(overrides = {}) {
   const plannerData = overrides.planner || null;
   const plannerStateCalls = [];
   const plannerEvents = overrides.plannerEvents || null;
+  const plannerSendCalls = [];
+  const keyEvents = overrides.keyEvents || {};
   const workflowDelayMs = overrides.workflowDelayMs || 0;
   // Every GET /api/sessions/workflow, as its query parameters.
   const workflowCalls = [];
@@ -502,7 +507,8 @@ function startMockServer(overrides = {}) {
       if (!checkAuth()) return;
       // Mirror HandleEvents: `after` is inclusive (clievent.SinceInclusive),
       // so every poll re-delivers the watermark millisecond.
-      const all = plannerEvents && url.searchParams.get('key') === 'planner:main' ? plannerEvents : eventsData;
+      const evKey = url.searchParams.get('key');
+      const all = keyEvents[evKey] || (plannerEvents && evKey === 'planner:main' ? plannerEvents : eventsData);
       const after = Number(url.searchParams.get('after') || 0);
       const before = Number(url.searchParams.get('before') || 0);
       const limit = Number(url.searchParams.get('limit') || 0);
@@ -581,7 +587,7 @@ function startMockServer(overrides = {}) {
       res.end(JSON.stringify(inboxData));
       return;
     }
-    if (inboxData && (pathname === NZ_CONTRACT.API.inbox_close || pathname === NZ_CONTRACT.API.inbox_pause)) {
+    if (inboxData && (pathname === NZ_CONTRACT.API.inbox_close || pathname === NZ_CONTRACT.API.inbox_decide || pathname === NZ_CONTRACT.API.inbox_pause)) {
       if (!checkAuth()) return;
       let body = '';
       req.on('data', c => (body += c));
@@ -589,7 +595,14 @@ function startMockServer(overrides = {}) {
         const b = body ? JSON.parse(body) : {};
         inboxCalls.push({ path: pathname, method: req.method, body: b });
         let out = { status: 'ok' };
-        if (pathname === NZ_CONTRACT.API.inbox_close) {
+        if (pathname === NZ_CONTRACT.API.inbox_close || pathname === NZ_CONTRACT.API.inbox_decide) {
+          // A decision answered moves to closed with its answer.
+          const it = (inboxData.open || []).find(x => x.id === b.id);
+          if (it && b.action) {
+            it.state = 'closed';
+            it.decision = Object.assign({}, it.decision, { answer: b.action });
+            inboxData.closed = [it].concat(inboxData.closed || []);
+          }
           inboxData.open = (inboxData.open || []).filter(it => it.id !== b.id);
           inboxData.counts = { open: inboxData.open.length, badge: inboxData.open.filter(it => it.kind === 'decision' || it.kind === 'question').length };
         } else if (req.method === 'PUT') {
@@ -623,6 +636,19 @@ function startMockServer(overrides = {}) {
         plannerData.alive = !b.stopped;
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(plannerData));
+      });
+      return;
+    }
+
+    if (plannerData && pathname === NZ_CONTRACT.API.planner_send && req.method === 'POST') {
+      if (!checkAuth()) return;
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        plannerSendCalls.push(JSON.parse(body || '{}'));
+        const off = !plannerData.enabled || plannerData.stopped;
+        res.writeHead(off ? 409 : 202, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(off ? { error: '已停用 Planner' } : { status: 'accepted', key: 'planner:main' }));
       });
       return;
     }
@@ -1059,6 +1085,7 @@ function startMockServer(overrides = {}) {
         get outputsCalls() { return outputsCalls; },
         get inboxCalls() { return inboxCalls; },
         get plannerStateCalls() { return plannerStateCalls; },
+        get plannerSendCalls() { return plannerSendCalls; },
         resetCalls() { sendCalls = []; bindCalls = []; loginCalls = []; favoriteCalls = []; },
       });
     }));

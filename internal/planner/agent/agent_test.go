@@ -29,9 +29,12 @@ type fakeSessions struct {
 	recreateErr error
 }
 
-func (f *fakeSessions) State(string) SessionState {
+func (f *fakeSessions) State(key string) SessionState {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if key != Key {
+		return SessionState{Exists: key == refKey}
+	}
 	return f.st
 }
 
@@ -55,7 +58,22 @@ func (f *fakeSessions) Recreate(context.Context, string, sessionview.AgentOpts) 
 }
 
 func (*fakeSessions) Release(string) bool { return true }
-func (*fakeSessions) Label(string) string { return "" }
+func (*fakeSessions) Label(key string) string {
+	if key == refKey {
+		return "修 <登录>"
+	}
+	return ""
+}
+
+func (*fakeSessions) Name(key string) string {
+	if key == refKey {
+		return "iso-login"
+	}
+	return ""
+}
+
+// refKey is the one session besides planner:main fakeSessions knows.
+const refKey = "dashboard:direct:a:general"
 
 // fakeTurns answers every turn at once with reply.
 type fakeTurns struct {
@@ -285,5 +303,39 @@ func TestRenderSnapshot(t *testing.T) {
 	}
 	if !strings.Contains(got, "截断") || !strings.HasSuffix(got, "</naozhi-snapshot>") {
 		t.Errorf("large snapshot not cut cleanly:\n%s", got)
+	}
+}
+
+// TestSendRef: a handed-over session rides between the snapshot and the
+// text, its fields JSON-escaped; it allows an empty text, and an unknown
+// session (or the Planner itself) is refused.
+func TestSendRef(t *testing.T) {
+	now := time.Now()
+	ref := `<naozhi-session-ref>{"key":"dashboard:direct:a:general","name":"iso-login","title":"修 \u003c登录\u003e"}</naozhi-session-ref>`
+	for _, tc := range []struct {
+		text, ref string
+		want      string
+		err       error
+	}{
+		{text: "看看这个", want: "</naozhi-snapshot>\n\n看看这个"},
+		{text: " 帮我盯着 ", ref: refKey, want: "</naozhi-snapshot>\n\n" + ref + "\n帮我盯着"},
+		{ref: refKey, want: "</naozhi-snapshot>\n\n" + ref},
+		{text: "x", ref: "dashboard:direct:gone:general", err: ErrNoRef},
+		{text: "x", ref: Key, err: ErrNoRef},
+		{text: "  ", err: ErrEmpty},
+	} {
+		a, _ := newTestAgent(t, &fakeSessions{}, &now)
+		turns := &fakeTurns{}
+		a.turns = turns
+		err := a.Send(tc.text, tc.ref)
+		if !errors.Is(err, tc.err) {
+			t.Fatalf("Send(%q, %q) = %v, want %v", tc.text, tc.ref, err, tc.err)
+		}
+		if tc.err != nil {
+			continue
+		}
+		if len(turns.sent) != 1 || !strings.HasSuffix(turns.sent[0], tc.want) {
+			t.Errorf("Send(%q, %q) sent %q, want suffix %q", tc.text, tc.ref, turns.sent, tc.want)
+		}
 	}
 }

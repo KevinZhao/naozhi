@@ -3,9 +3,12 @@
 // closable; decision cards answer through /api/inbox/decide) and the
 // #pl-promise container 答应你的 mounts into, then the browser-notification,
 // push-pause and 停用 Planner controls. Middle: the 早报 slot and the
-// planner:main event stream, read-only. Right: the workbench, on planner:main
-// (workbench_panes.js); while it is open the left column folds to a 48px
-// strip. On a phone the left column is a collapsible block above the stream.
+// planner:main event stream, its action blocks and the sessions it names as
+// cards (planner_cards.js), and the input box and the opened session card
+// (planner_chat.js). Right: the workbench, on planner:main or the opened
+// session (workbench_panes.js); while it is open the left column folds to a
+// 48px strip. On a phone the left column is a collapsible block above the
+// stream.
 //
 // The stream follows a WS subscription to planner:main (receipts are pushed
 // to subscribers only, never logged); GET /api/sessions/events loads the
@@ -24,6 +27,8 @@ import { renderEventsWithDividers } from './event_render.js';
 import { runPendingAsync } from './render_md.js';
 import { inbox, notifySupported, onInboxCount, requestNotifyPermission } from './notify.js';
 import { followWorkbenchSubject, noteWorkbenchEvent } from './workbench_panes.js';
+import { decorateEvents, paintSessionCards, refreshHealth, setInboxItems } from './planner_cards.js';
+import { clearPending, closePlannerSession, mountComposer, notePlannerStatus } from './planner_chat.js';
 import { workbench } from './workbench.js';
 import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
@@ -134,6 +139,7 @@ async function fetchInbox() {
   try {
     const res = await fetchJSON(NZ_CONTRACT.API.inbox, { timeoutMs: 8000 });
     pl.open = (res && Array.isArray(res.open)) ? res.open : [];
+    setInboxItems(pl.open, (res && Array.isArray(res.closed)) ? res.closed : [], $('pl-stream'));
     pl.pausedUntil = res && res.paused_until ? Date.parse(res.paused_until) || 0 : 0;
     if (res && res.counts) {
       pl.seeding = true;
@@ -238,6 +244,7 @@ async function fetchStatus() {
   try {
     pl.status = await fetchJSON(NZ_CONTRACT.API.planner, { timeoutMs: 8000 });
   } catch { return; }
+  notePlannerStatus(pl.status);
   if (ui.activeView === 'planner') { paintStatus(); paintTools(); paintStreamEmpty(); }
 }
 
@@ -265,13 +272,18 @@ function admitEvent(e) {
 
 // SNAPSHOT_RE is the <naozhi-snapshot> block the gateway puts before every
 // message to the Planner (planner/agent Send); the bubble shows what you wrote.
+// A session handed over with it (<naozhi-session-ref>) becomes a fence that
+// planner_cards.js turns into its card.
 const SNAPSHOT_RE = /^<naozhi-snapshot[\s>][\s\S]*?<\/naozhi-snapshot>\s*/;
 const SNAPSHOT_CUT_RE = /^<naozhi-snapshot[\s>][\s\S]*$/; // a summary cut inside the block
+const SESSION_REF_RE = /^<naozhi-session-ref>(\{[^\n]*?\})<\/naozhi-session-ref>\s*/;
 function withoutSnapshot(e) {
   if (e.type !== 'user' || !/^<naozhi-snapshot[\s>]/.test(e.detail || e.summary || '')) return e;
+  const detail = (e.detail || '').replace(SNAPSHOT_RE, '');
+  const summary = (e.summary || '').replace(SNAPSHOT_RE, '').replace(SNAPSHOT_CUT_RE, '');
   return Object.assign({}, e, {
-    detail: (e.detail || '').replace(SNAPSHOT_RE, ''),
-    summary: (e.summary || '').replace(SNAPSHOT_RE, '').replace(SNAPSHOT_CUT_RE, ''),
+    detail: detail.replace(SESSION_REF_RE, (_, ref) => '```naozhi-session-ref\n' + ref + '\n```\n'),
+    summary: summary.replace(SESSION_REF_RE, '交给 Planner：'),
   });
 }
 
@@ -288,9 +300,11 @@ function appendEvents(events, reset) {
   if (reset) box.innerHTML = html;
   else if (fresh.length) {
     box.querySelector(':scope > .pl-empty')?.remove();
+    if (fresh.some((e) => e.type === 'user')) clearPending(box);
     box.insertAdjacentHTML('beforeend', html);
     fresh.forEach(noteWorkbenchEvent);
   }
+  decorateEvents(box);
   paintStreamEmpty();
   runPendingAsync();
   if (atBottom) scroller.scrollTop = scroller.scrollHeight;
@@ -329,9 +343,11 @@ async function loadEvents(reset) {
 
 export function openPlannerPanel() {
   if (ui.activeView !== 'planner') { shell.setActivityView('planner'); return; }
+  mountComposer();
   paintStatus();
   paintWaiting();
   paintTools();
+  refreshHealth($('planner-main'), false);
   // The subscription follows the first page: its `after` is the page's end.
   loadEvents(true).then(() => { if (ui.activeView === 'planner' && !pl.sub) subscribe(); });
   fetchStatus();
@@ -344,6 +360,8 @@ export function openPlannerPanel() {
       if (++pl.ticks % SLOW_TICKS === 0) {
         paintWaiting();
         fetchStatus();
+        refreshHealth($('planner-main'), false);
+        paintSessionCards($('planner-main'));
         if (!pl.sub) subscribe();
       }
     }, POLL_MS);
@@ -355,6 +373,7 @@ export function openPlannerPanel() {
 export function closePlannerPanel() {
   if (pl.timer) { clearInterval(pl.timer); pl.timer = 0; }
   unsubscribe();
+  closePlannerSession(false);
   pl.customPause = false;
   if (workbench.isOpen()) workbench.close();
   $('planner-main')?.classList.remove('pl-wb-open', 'pl-left-peek');
@@ -418,7 +437,9 @@ registerActions({
     fetchInbox();
   },
   'planner-inbox-decide': async (el) => {
-    const card = el.closest('.pl-card');
+    // The left column's card and the conversation's dispatch card answer
+    // the same item.
+    const card = el.closest('.pl-card, .pl-act');
     card?.querySelectorAll('.pl-card-acts button').forEach((b) => { b.disabled = true; });
     try {
       await fetchJSON(NZ_CONTRACT.API.inbox_decide, {
@@ -457,6 +478,7 @@ registerActions({
       pl.status = await fetchJSON(NZ_CONTRACT.API.planner_state, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ stopped }), timeoutMs: 15000,
       });
+      notePlannerStatus(pl.status);
     } catch (e) {
       showToast((stopped ? '停用' : '恢复') + '失败：' + e.message, 'error');
     }

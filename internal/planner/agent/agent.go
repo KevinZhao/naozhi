@@ -69,6 +69,7 @@ var (
 	ErrNotReady = errors.New("正在启动 Planner，请稍后再试")
 	ErrEmpty    = errors.New("消息为空")
 	ErrTooLong  = errors.New("消息太长")
+	ErrNoRef    = errors.New("没有这个会话")
 )
 
 // SessionState is what the router knows of planner:main.
@@ -94,6 +95,8 @@ type Sessions interface {
 	Release(key string) bool
 	// Label is a session's title for the snapshot, "" when unknown.
 	Label(key string) string
+	// Name is a session's cross-session name, "" when unknown.
+	Name(key string) string
 }
 
 // Turns is the gateway's turn entry for the Planner.
@@ -585,8 +588,10 @@ func (a *Agent) askHandoff(ctx context.Context) string {
 }
 
 // Send takes a user message to the Planner: it puts the snapshot before the
-// text, submits the turn and shows the receipt.
-func (a *Agent) Send(text string) error {
+// text, submits the turn and shows the receipt. ref is a session the user
+// hands over with it (交给 Planner), "" for none; with one the text may be
+// empty.
+func (a *Agent) Send(text, ref string) error {
 	if !a.cfg.Enabled {
 		return ErrOff
 	}
@@ -598,10 +603,16 @@ func (a *Agent) Send(text string) error {
 		return ErrStopped
 	case turns == nil:
 		return ErrNotReady
-	case text == "":
+	case text == "" && ref == "":
 		return ErrEmpty
 	case len(text) > maxMessageBytes:
 		return ErrTooLong
+	}
+	if ref != "" {
+		if ref == Key || !a.cfg.Sessions.State(ref).Exists {
+			return ErrNoRef
+		}
+		text = strings.TrimSpace(sessionRef(ref, a.cfg.Sessions.Name(ref), a.cfg.Sessions.Label(ref)) + "\n" + text)
 	}
 	if _, err := turns.SubmitPlanner(Key, a.Snapshot()+"\n\n"+text, opts, nil); err != nil {
 		return err
