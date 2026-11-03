@@ -176,7 +176,7 @@ naozhi：图片提取 → 附件落盘 + 缩略图进事件流 → 对话 / 预�
 
 - 能力：每会话一个托管 Chrome（microVM），CDP 自动化 + 2026-04 起的系统级鼠标、键盘与整桌面截图，实时画面（可接管）、录制、持久化登录态、URL 白名单、VPC 模式；约 $0.012 / 10 分钟会话；14 个区域。
 - 局限：**进不了 Midway 与内网**；实时画面是外部源，受 CSP 限制需新标签页打开或服务端代理；输入只支持 ASCII。
-- 什么时候值得接：需要大量并行的公网网页任务；需要和你的 Mac 完全隔离；或者终态 EC2 控制面上需要在 Mac 睡眠时继续做公网浏览器任务。届时做成一个独立的 MCP（例如 `cmd/naozhi-browser-mcp`），复用 `internal/agentcore` 的凭证链路（SDK `bedrockagentcore v1.50.1` 已含 `Start/Stop/GetBrowserSession`、`UpdateBrowserStream`、`InvokeBrowser`）。
+- 什么时候值得接：需要大量并行的公网网页任务；需要和你的 Mac 完全隔离；或者终态 EC2 控制面上需要在 Mac 睡眠时继续做公网浏览器任务。届时做成一个独立的 MCP（例如 `cmd/naozhi-browser-mcp`），需要重新引入 AgentCore 的凭证链路与 SDK（`internal/agentcore` 与 `bedrockagentcore` 依赖已在 v0.1.48 的减法中删除；SDK 提供 `Start/Stop/GetBrowserSession`、`UpdateBrowserStream`、`InvokeBrowser`）。
 
 ### 8.2 自建 Bedrock computer use 循环
 

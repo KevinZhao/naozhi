@@ -1,6 +1,6 @@
 # naozhi iOS app 设计（草案）
 
-- 状态: 草案，待 owner 决定是否做原生 app
+- 状态: 草案；owner 已决定做原生 iOS app（app 内推送），作为独立项目后续立项（planner RFC D80，2026-11-03）
 - 日期: 2026-10-19（2026-10-26 按 RFC v7 更新）
 - 依据: `docs/rfc/planner.md` v7（核心模型、全局 Planner、信任阶梯、承诺与早报、推送；界面按 D77：现有视图保留 + 新增 Planner）
 - 草图: `docs/design/ios-app-mockup.html`（7 屏：锁屏、Planner、拍板弹出卡、会话卡片详情、工作台弹出面板、会话、设置）
