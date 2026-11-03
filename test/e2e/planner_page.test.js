@@ -1,6 +1,6 @@
 // E2E: the Planner page (planner_view.js, planner RFC §10 D77, §15.1 PR ⑥):
 // the rail entry and its "等你" badge, the left column's 等你 cards (closing
-// one) and 答应你的 empty state, the read-only planner:main stream (no
+// one) and 答应你的 (refetched after a Planner turn), the read-only planner:main stream (no
 // snapshot block, no 追问, receipts over the subscription, no idle refetch
 // on the inclusive `after` replay), the push pause and 停用 Planner
 // controls, the workbench opening by itself on a new output and folding the
@@ -51,8 +51,9 @@ test('desktop: badge, 等你 cards, stream, controls, and the workbench folds th
   const outputs = [];
   const events = plannerEvents();
   const box = inbox();
+  const promises = { open: [{ id: 'pr_1', text: 'iso 两分钟后提醒你看 hello.md', due: iso(now + 120000), state: 'open', created: iso(now - 60000), source: 'planner' }], closed: [] };
   const mock = await startMockServer({
-    ws: true, outputs, plannerEvents: events, inbox: box,
+    ws: true, outputs, plannerEvents: events, inbox: box, promises,
     planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
   });
   await routePreview(page);
@@ -81,7 +82,8 @@ test('desktop: badge, 等你 cards, stream, controls, and the workbench folds th
     await expect(q.locator('.pl-kind')).toHaveText('提问');
     await expect(q.locator('.pl-wait')).toHaveText('等了 12 分钟');
     await expect(q.locator('.pl-link')).toHaveText('打开');
-    await expect(page.locator('#pl-promise')).toContainText('还没有答应你的事');
+    await expect(page.locator('#pl-promise .pm-card')).toHaveText(/iso 两分钟后提醒你看 hello\.md/);
+    await expect(page.locator('#pl-strip-promise')).toHaveText('1');
     await expect(page.locator('#pl-status')).toHaveText('在线');
     await expect(page.locator('#pl-brief')).toContainText('早报');
     await expect(page.locator('#pl-stream .event')).toHaveCount(3);
@@ -118,11 +120,14 @@ test('desktop: badge, 等你 cards, stream, controls, and the workbench folds th
     await expect.poll(() => mock.outputsCalls.filter((k) => k === PLANNER).length).toBeGreaterThan(0);
     await expect(page.locator('.pl-left')).toHaveCSS('width', '280px');
     outputs.unshift(output('handoff/2026-11-04.md'));
+    promises.open.push({ id: 'pr_2', text: 'iso 明早告诉你结果', state: 'open', created: iso(now), source: 'planner' });
     events.push({ type: 'result', summary: 'done', time: Date.now(), uuid: 'pl-r1' });
     await expect(page.locator('#fv-drawer')).toHaveClass(/fv-open/, { timeout: 10000 });
     await expect(page.locator('#fv-title')).toHaveText('handoff/2026-11-04.md');
     await expect(page.locator('#planner-main')).toHaveClass(/pl-wb-open/);
     await expect(page.locator('.pl-left')).toHaveCSS('width', '48px');
+    // The turn's end refetches 答应你的: a promise it registered shows.
+    await expect(page.locator('#pl-strip-promise')).toHaveText('2');
     await expect(page.locator('#pl-strip-wait')).toHaveText('1');
     await page.screenshot({ path: test.info().outputPath('planner-desktop-workbench.png') });
     await page.click('#fv-btn-close');

@@ -29,6 +29,7 @@ import { inbox, notifySupported, onInboxCount, requestNotifyPermission } from '.
 import { followWorkbenchSubject, noteWorkbenchEvent } from './workbench_panes.js';
 import { decisionActsHtml, decorateEvents, paintSessionCards, refreshHealth, setInboxItems } from './planner_cards.js';
 import { clearPending, closePlannerSession, mountComposer, notePlannerStatus } from './planner_chat.js';
+import { mountPromises, refreshPromises } from './promises.js';
 import { workbench } from './workbench.js';
 import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
@@ -43,6 +44,9 @@ const EVENTS_LIMIT = 200;
 // the status, and retries a subscription that is not up.
 const POLL_MS = 3000;
 const SLOW_TICKS = 10;
+// PROMISE_REFRESH_MS is how long after a Planner turn ends 答应你的 is
+// refetched: the turn's promise blocks are registered off the read loop.
+const PROMISE_REFRESH_MS = 1500;
 
 const KIND_LABEL = { decision: '决定', question: '提问', error: '错误', notice: '通知' };
 const KIND_ORDER = { decision: 0, question: 1, error: 2, notice: 3 };
@@ -323,6 +327,7 @@ function appendEvents(events, reset) {
   else if (fresh.length) {
     box.querySelector(':scope > .pl-empty')?.remove();
     if (fresh.some((e) => e.type === 'user')) clearPending(box);
+    if (fresh.some((e) => e.type === 'result')) setTimeout(refreshPromises, PROMISE_REFRESH_MS);
     box.insertAdjacentHTML('beforeend', html);
     fresh.forEach(noteWorkbenchEvent);
   }
@@ -366,6 +371,7 @@ async function loadEvents(reset) {
 export function openPlannerPanel() {
   if (ui.activeView !== 'planner') { shell.setActivityView('planner'); return; }
   mountComposer();
+  mountPromises($('pl-promise'));
   paintStatus();
   paintWaiting();
   paintTools();
