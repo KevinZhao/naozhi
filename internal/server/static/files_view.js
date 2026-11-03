@@ -165,6 +165,20 @@ import { formatFileSize } from './utilities.js';
     loadDir('');
   }
 
+  // syncSessionRoot keeps an open session root on the selected session: the
+  // 本会话 chip follows selection, so a root left over from a previously
+  // selected session moves to the current one (or back to the project root
+  // when none is selected) and restarts at its top.
+  function syncSessionRoot() {
+    if (!state.root) return;
+    var sess = activeSessionRoot();
+    if (sess && sess.ref === state.root) return;
+    state.root = sess ? sess.ref : '';
+    state.rootLabel = sess ? sess.label : '';
+    state.dir = '';
+    syncUploadBtn();
+  }
+
   function syncUploadBtn() {
     var btn = $('files-upload-btn');
     if (btn) btn.hidden = !!state.root;
@@ -486,6 +500,7 @@ import { formatFileSize } from './utilities.js';
     $('files-sidebar').hidden = false;
     $('files-main').hidden = false;
     document.body.classList.add('nz-view-files');
+    syncSessionRoot();
     loadRoots().then(function () { loadDir(state.loaded ? state.dir : ''); })
       .catch(function (e) { renderEmpty('加载项目失败：' + e.message); });
   }
