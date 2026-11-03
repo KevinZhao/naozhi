@@ -637,7 +637,7 @@ runtelemetry 扩展普通会话类别（`SubsystemSession` 已预留但未发出
 - `-p --input-format stream-json` 的进程会绑定收件 socket（`/tmp/cc-socks/<pid>.sock`），出现在 `ListAgents` 里；naozhi 现有会话也已在其中，名字由 CC 自动起（如 `naozhi-44`、按工作目录名起的 `ws-07`）。`ListAgents` 不显示这类会话的工作目录，所以**拉起时必须给 `--name`**。
 - 空闲会话收到消息，CC 会自己开一轮处理；回信同样会唤醒发送方。naozhi 能正确记录这类"CC 自发的回合"（后台任务完成时本来就会出现），之后的正常回合不受影响。
 - 收到的消息在流里是一个 user 事件，外层是 `<cross-session-message from="uds:…" from-name="…" from-mode="bypass">…</cross-session-message>`，并附"不是你的用户打的、不算授权"的提示。**naozhi 目前没有记录这个入站事件**，界面上看不出这一轮是谁触发的——需要补（下表）。
-- 文档：同机消息走本地 socket、不经 Anthropic，Bedrock 可用（≥ 2.1.248）；`crossSessionInbound: accept / hold / refuse` 控制收件；发送方可以用 deny 规则禁掉 `SendMessage` / `ListAgents`；`notify_when_idle` 可订阅"对方下次空闲或退出时通知我"；权限模式不同的会话之间可能被 hold（混用 auto / bypass 时要实测）。
+- 文档：同机消息走本地 socket、不经 Anthropic，Bedrock 可用（≥ 2.1.248）；`crossSessionInbound: accept / hold / refuse` 控制收件；发送方可以用 deny 规则禁掉 `SendMessage` / `ListAgents`；`notify_when_idle` 可订阅"对方下次空闲或退出时通知我"；权限模式不同的会话之间默认被 hold（实测原因 `mode-mismatch`），**显式设 `crossSessionInbound: accept` 可覆盖**（实测 `dontAsk` 的 Planner 与 bypass 的执行会话双向送达）；被 hold 时接收方流里有 `system/peer_message_hold` 事件（含发送方名字与原因），可据此在界面上显示为旁注；`notify_when_idle` 实测可用（一次性通知，接收时 CC 自开一轮）；`--resume` 时再给一次 `--name`，名字保持。
 
 **通道分工**：
 
@@ -1106,7 +1106,18 @@ v8 复核时确认已删除、RFC 不再依赖的：Prometheus / `/metrics`、Ag
 
 **PR 拆分（按依赖顺序）**：① 状态根目录、日志、工作区登记表；② 关键循环心跳与 `/health`；③ 台账与健康状态机（含睡眠识别、错误分类、系统性故障合并，噪音风险最高）；④ "等你"与推送、暂停推送；⑤ 早报；⑥ Planner 页面骨架；⑦ 系统视图"全会话健康"；⑧ `SpawnOverlay` 承载按会话启动规格（工具、权限模式、`--name`、收件策略、追加提示词）；⑨ 跨会话消息入站记录与来源标注、`--name`；⑩ `planner:main` 生命周期（每天换班、交接摘要）与快照；⑪ 动作块解析、确认卡片与派活（`task:` 前缀、旁路文件、"Planner 派出"分组）；⑫ 承诺与提醒；⑬ Planner 页面对话与"交给 Planner"；W-a 截图进事件流；W-b 产出索引与 Activity；W-c 浏览范围；W-d Markdown；W-g 右栏页签与成品库。估算 P1 约 3.8k 行、P3a 约 2.5–3k 行、W1 约 1.3k 行（含测试）。
 
-**v0.2.0 前置验证**（P0 中必须先做的）：⑨ 按会话启动规格的重启存活；⑧ Planner 启动时是否加载仓库内 CLAUDE.md / skills / `.mcp.json`；新增：`--tools` + `dontAsk` 在 naozhi 启动参数下确实拦住 Edit / Bash；`crossSessionInbound: hold` 在 `-p` 模式下的表现（提示出现在哪）；`--name` 在续接与 naozhi 重启后保持；一轮进行中收到跨会话消息时的回合匹配；auto / bypass 混用时是否被 hold。
+**v0.2.0 前置验证**（2026-11-03 已完成，CC 2.1.316，naozhi 同款启动参数）：
+
+| 项 | 结果 |
+|---|---|
+| ⑧ Planner 是否加载工作目录里的 CLAUDE.md / skill / `.mcp.json` | 都不加载（`--setting-sources ""`），只加载用户级 skills；Planner 的工作目录仍放在状态根目录 |
+| `--tools Read,Grep,Glob,ListAgents,SendMessage` + `dontAsk` | 启动时工具列表只有这 5 个；Bash / Write / Edit 不存在；`Read(~/.aws/**)` 的 deny 生效 |
+| `crossSessionInbound: hold` | 消息被扣住，接收方流里出现 `system/peer_message_hold`（`cause: explicit-setting`） |
+| 权限模式混用 | 默认 hold（`cause: mode-mismatch`）；双方显式 `accept` 后双向送达 |
+| `notify_when_idle` | 可用 |
+| `--name` 续接 | `--resume` 时再给一次即保持 |
+| 一轮进行中收到跨会话消息（隔离 naozhi，passthrough） | 同一轮内处理，回合匹配正确，之后的回合正常；入站消息本身仍未被记录（与 §6.2 一致，待补） |
+| ⑨ 按会话启动规格的重启存活 | 需随 PR ⑧（`SpawnOverlay`）一起验收：重启 naozhi 后 Planner 与派出的会话都存活 |
 
 **测试**（只写必要的）：健康规则用假时钟做表驱动（状态、去抖、睡眠识别、合并）；心跳与 `/health` 一个；推送分级 / 上限 / 暂停各一个；早报"无内容不发"一个；动作块解析（合法 / 非法 / 未知类型）一个；入站跨会话消息识别一个；Planner 页面一个 e2e。推送前跑全仓 `go test ./...` 与 `gofmt -l`。
 
@@ -1179,7 +1190,12 @@ v8 复核时确认已删除、RFC 不再依赖的：Prometheus / `/metrics`、Ag
 
 ### 17.1 v8 待确认清单（2026-11-03）
 
-**已全部确认**（owner 2026-11-03，D82、D83）：§15.1 的范围、阈值与规则；Planner 对话版的能力与形态；协作通道改用 CC 原生跨会话消息（D81）。实施中如有新的待定项，追加在这里。
+**已全部确认**（owner 2026-11-03，D82、D83）：§15.1 的范围、阈值与规则；Planner 对话版的能力与形态；协作通道改用 CC 原生跨会话消息（D81）。
+
+**前置验证中发现的两个现有问题**（与 Planner 无关，待 owner 决定）：
+
+1. **naozhi 拉起的会话读不到项目 CLAUDE.md**：开启 `naozhi_settings` 时用 `--setting-sources ""`，连带排除了项目级 CLAUDE.md（实测：`""` 时模型回答"没有项目说明"，`user,project` 时能读到并照做）。naozhi 仓库自己的 191 行 CLAUDE.md 与 `~/Workspace` 下十几个仓库的 CLAUDE.md 目前对 naozhi 会话都不生效。
+2. **正式实例 :8180 在局域网上没有鉴权**：监听 `*:8180`，`dashboard_token` 为空，macOS 防火墙关闭；从本机局域网 IP 请求 `/api/sessions` 返回 200。同一网络里的人可以往 bypass 模式的会话里发消息。
 
 **历史**：v7 的重审问题 ①–⑫ 已全部定稿（D60–D77），讨论过程见 git 历史与 `planner-landscape.md`。
 
