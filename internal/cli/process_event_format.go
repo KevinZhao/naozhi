@@ -139,6 +139,8 @@ func eventEntriesAt(ev clievent.Event, nowMS int64, root string) []clievent.Even
 			// The slash-command list changed (plugin/MCP load); the frame carries
 			// nothing a timeline row could show.
 			"commands_changed",
+			// --name titles every session at spawn; the sidebar already shows it.
+			"session_title_changed",
 			// Auto-mode classifier progress (checking/done) for a tool call already
 			// on the timeline; no row-worthy payload. permission_denied stays a row.
 			"permission_check_status":

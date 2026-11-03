@@ -27,7 +27,7 @@ func UnitNames(router *session.Router, sched *cron.Scheduler) func(unit string) 
 		if name == "" && router != nil {
 			if s := router.SessionFor(unit); s != nil {
 				snap := s.Snapshot()
-				name = cmp.Or(snap.UserLabel, snap.Summary)
+				name = cmp.Or(snap.UserLabel, snap.Summary, s.CLISessionName())
 			}
 		}
 		return textutil.TruncateRunes(strings.Join(strings.Fields(name), " "), unitNameRunes)

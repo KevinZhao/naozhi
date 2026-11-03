@@ -300,8 +300,8 @@ func TestJournal(t *testing.T) {
 		{facts: []Fact{failed, unowned}},
 		{tick: Interval, facts: []Fact{failed, unowned}},
 	})
-	if got, want := r.transitions(), []string{"s:unknown>failed"}; !slices.Equal(got, want) {
-		t.Errorf("delivered = %q, want %q (an unowned unit is only journaled)", got, want)
+	if got, want := r.transitions(), []string{"s:unknown>failed", "sys:x:unknown>failed"}; !slices.Equal(got, want) {
+		t.Errorf("delivered = %q, want %q (an unowned daemon still fails loudly)", got, want)
 	}
 	entries, err := j.Read(time.Time{}, r.clock.wall.Add(time.Hour))
 	if err != nil {
