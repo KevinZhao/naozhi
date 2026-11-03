@@ -35,8 +35,8 @@ Naozhi is an IM gateway that wraps AI CLI agents (Claude CLI, Kiro, or Codex) as
 - **HTTP / dashboard**: `server` (routes, WebSocket hub, REST), `dashboard/*` handler packages, `wsproto` (browser WS frames), `contractjs` (generates `static/contract.js`), `assets`.
 - **Scheduling / projects**: `cron` (+ `runstore` run history), `sysession` (background daemons), `project` / `projectapi` (discovery, chat binding, planner).
 - **Multi-node**: `node` (protocol, HTTP/reverse clients), `upstream` (reverse-connect dialer).
-- **Persistence / history**: `eventlog`, `history` (claudejsonl/kirojsonl/codexjsonl/naozhilog/merged), `attachment`, `runlog`, `claudefs` (Claude CLI on-disk layout), `discovery`, `subagent`, `planner/journal` + `planner/workspace` (Planner state root: event journal, workspace registry; `docs/rfc/planner.md` §3.7), `planner/activity` (Activity records derived from tool events, outputs index behind `/api/sessions/outputs`; §3.4).
-- **Domain helpers**: `selfupdate`, `transcribe`, `imauth`, `costledger`, `budget`, `webhook`, `runtelemetry`, `naozhisettings`, `ccassets`, `ccmodels`, `uiprefs`, `replyfmt`, `usermsg`, `gitinfo`, `monitor` (`beat`: critical-loop heartbeats behind `/health` status; `wake`: sleep/wake detection; `health`: session ledger and health state machine, writes the Planner journal and `planner/index.json`, sources wired in `wireup/health_sources.go`).
+- **Persistence / history**: `eventlog`, `history` (claudejsonl/kirojsonl/codexjsonl/naozhilog/merged), `attachment`, `runlog`, `claudefs` (Claude CLI on-disk layout), `discovery`, `subagent`, `planner/journal` + `planner/workspace` (Planner state root: event journal, workspace registry; `docs/rfc/planner.md` §3.7), `planner/activity` (Activity records derived from tool events, outputs index behind `/api/sessions/outputs`; §3.4), `planner/agent` (the global Planner session `planner:main`: launch spec, revival, daily shift change with handoff summary, message snapshot and receipt behind `/api/planner/*`).
+- **Domain helpers**: `selfupdate`, `transcribe`, `imauth`, `costledger`, `budget`, `webhook`, `runtelemetry`, `naozhisettings`, `ccassets`, `ccmodels`, `uiprefs`, `replyfmt`, `usermsg`, `gitinfo`, `monitor` (`beat`: critical-loop heartbeats behind `/health` status; `wake`: sleep/wake detection; `health`: session ledger and health state machine, writes the Planner journal and `planner/index.json`, sources wired in `wireup/health_sources.go`), `notify` (the "等你" inbox `planner/inbox.json` opened from health transitions, heartbeats and disk; push to the dashboard and macOS notifications with a daily cap, quiet hours and the push pause; `dashboard/ext/inbox` serves `/api/inbox`).
 - **Leaves**: `osutil`, `textutil`, `netutil`, `ratelimit`, `limits`, `sessionkey`, `tuningspec`, `backendid`, `cliinfo`, `apierr`, `ctxutil`, `spawndiag`, `envpolicy`, `datadir`, `imageorient`, `testhelper`.
 
 ### CLI Process Lifecycle
@@ -102,6 +102,7 @@ Session key format: `{platform}:{chatType}:{chatID}:{agentId}` (e.g., `feishu:di
 Other key namespaces (canonical home: `internal/sessionkey`, wire-stable constants):
 - `project:{name}:planner` -- project planner sessions (exempt from TTL and max_procs)
 - `cron:<jobID>` / `sys:<daemonID>` / `scratch:<sessionID>` -- cron jobs, sysession daemons, scratch sessions
+- `planner:main` -- the global Planner (exempt; dashboard sends refuse the namespace, messages go through `/api/planner/send`)
 - `dashboard:pj:<workspace-hash>:<agent>` -- project-stable dashboard keys (chatType `pj`, deliberately not `project`)
 
 Each session owns one long-lived CLI process with its own context, session ID and per-agent model/args.
@@ -161,6 +162,7 @@ Each phase emits a `phase=` timing log line. A new subsystem MUST be inserted at
 - **agents**: Map of agent_id -> {model, args, backend, access_profile, effort, system_prompt}. `system_prompt` is passed as `--append-system-prompt` (Claude only); the flag itself is denylisted in `args`
 - **agent_commands**: Map of command -> agent_id (e.g., `review: code-reviewer`)
 - **platforms**: `feishu`, `slack`, `discord`, `weixin`
+- **planner**: `enabled` (default false) runs the global Planner session `planner:main` (`docs/rfc/planner.md` §15.1); `POST /api/planner/state` stops it at runtime
 - **cron**, **projects**, **sysession**, **transcribe**, **update**, **im_access**, **log**
 - **workspace** / **workspaces** / **reverse_nodes** / **upstream**: local node identity, polled nodes, accepted reverse nodes, dial-out to a primary
 

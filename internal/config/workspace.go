@@ -147,3 +147,10 @@ func validateAgentCommands(cfg *Config) error {
 	}
 	return nil
 }
+
+// PlannerConfig switches the global Planner session (planner:main) on.
+// Default off; the dashboard's stop switch turns a running Planner off
+// without a restart.
+type PlannerConfig struct {
+	Enabled bool `yaml:"enabled,omitempty"`
+}

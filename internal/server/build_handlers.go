@@ -9,6 +9,7 @@ import (
 	dashcost "github.com/naozhi/naozhi/internal/dashboard/cost"
 	dashcron "github.com/naozhi/naozhi/internal/dashboard/cron"
 	dashdiscovery "github.com/naozhi/naozhi/internal/dashboard/discovery"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/inbox"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/system"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/transcribe"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
@@ -74,6 +75,15 @@ func buildTranscribeHandler(opts ServerOptions) *transcribe.Handler {
 		Limiter:     newIPLimiterWithProxy(rate.Every(12*time.Second), 5, opts.TrustedProxy),
 		SemCap:      transcribe.TranscribeSemCap,
 	})
+}
+
+// buildInboxHandler unwraps a nil *notify.Notifier before the interface
+// boxing (#2561), so the handler sees no inbox rather than a typed nil.
+func buildInboxHandler(opts ServerOptions) *inbox.Handler {
+	if opts.Notify == nil {
+		return inbox.New(nil)
+	}
+	return inbox.New(opts.Notify)
 }
 
 // buildRetiredStoreWithErr constructs the discovery.RetiredStore eagerly so
@@ -200,6 +210,10 @@ func buildSystemHandlers(opts ServerOptions, router *session.Router) *system.Han
 	if opts.Update.Checker != nil {
 		checker = opts.Update.Checker
 	}
+	var workspaces system.WorkspaceLister
+	if opts.Workspaces != nil {
+		workspaces = opts.Workspaces
+	}
 	return system.New(system.Deps{
 		Daemons:       daemons,
 		Router:        router,
@@ -209,5 +223,7 @@ func buildSystemHandlers(opts ServerOptions, router *session.Router) *system.Han
 		// nil ⇒ enabled, matching config.UpdateDashboardInstall's default.
 		InstallEnabled: opts.Update.DashboardInstall == nil || *opts.Update.DashboardInstall,
 		ConfigReload:   system.ConfigReloader(opts.Config.Reload),
+		Health:         opts.Health,
+		Workspaces:     workspaces,
 	})
 }

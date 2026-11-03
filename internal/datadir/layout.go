@@ -145,6 +145,32 @@ func (l Layout) PlannerWorkspacesPath() string { return l.Join("planner", "works
 // every session (<root>/planner/index.json, docs/rfc/planner.md §6.2).
 func (l Layout) PlannerIndexPath() string { return l.Join("planner", "index.json") }
 
+// PlannerWorkDir is the global Planner session's working directory
+// (<root>/planner/main): inside the state root, so the Planner loads no
+// repository's CLAUDE.md, skills or .mcp.json.
+func (l Layout) PlannerWorkDir() string { return l.Join("planner", "main") }
+
+// PlannerAgentPath is the global Planner's own state: the runtime stop switch
+// and the day of its last shift change (<root>/planner/agent.json).
+func (l Layout) PlannerAgentPath() string { return l.Join("planner", "agent.json") }
+
+// PlannerHandoffRoot holds the daily handoff summaries, one
+// <YYYY-MM-DD>.md per shift change (<root>/planner/handoff).
+func (l Layout) PlannerHandoffRoot() string { return l.Join("planner", "handoff") }
+
+// PlannerInboxPath holds the "等你" items (<root>/planner/inbox.json,
+// §15.1).
+func (l Layout) PlannerInboxPath() string { return l.Join("planner", "inbox.json") }
+
+// PlannerPushStatePath holds the push pause and today's push count
+// (<root>/planner/notify.json).
+func (l Layout) PlannerPushStatePath() string { return l.Join("planner", "notify.json") }
+
+// PlannerRunMarkerPath is written at start and removed on a clean shutdown
+// (<root>/planner/running); finding it at start means the last run did not
+// end cleanly.
+func (l Layout) PlannerRunMarkerPath() string { return l.Join("planner", "running") }
+
 // PlannerAttachmentsRel is PlannerAttachmentsRoot relative to the root, in
 // the forward-slash form an EventEntry.ImagePaths value carries.
 const PlannerAttachmentsRel = "planner/attachments"

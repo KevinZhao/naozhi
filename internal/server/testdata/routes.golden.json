@@ -121,8 +121,48 @@
   },
   {
     "method": "GET",
+    "path": "/api/inbox",
+    "handler_type": "*inbox.Handler"
+  },
+  {
+    "method": "POST",
+    "path": "/api/inbox/close",
+    "handler_type": "*inbox.Handler"
+  },
+  {
+    "method": "POST",
+    "path": "/api/inbox/decide",
+    "handler_type": "*inbox.Handler"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/inbox/pause",
+    "handler_type": "*inbox.Handler"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/inbox/pause",
+    "handler_type": "*inbox.Handler"
+  },
+  {
+    "method": "GET",
     "path": "/api/memory/{slug}",
     "handler_type": "*memory.Handler"
+  },
+  {
+    "method": "GET",
+    "path": "/api/planner",
+    "handler_type": "*dashplanner.Handler"
+  },
+  {
+    "method": "POST",
+    "path": "/api/planner/send",
+    "handler_type": "*dashplanner.Handler"
+  },
+  {
+    "method": "POST",
+    "path": "/api/planner/state",
+    "handler_type": "*dashplanner.Handler"
   },
   {
     "method": "GET",
@@ -297,6 +337,11 @@
   {
     "method": "GET",
     "path": "/api/system/daemons",
+    "handler_type": "*system.Handlers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/system/health",
     "handler_type": "*system.Handlers"
   },
   {

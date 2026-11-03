@@ -84,12 +84,13 @@ type SpawnOverlay struct {
 	// sessions see in ListAgents.
 	Name            string `json:"name,omitempty"`
 	StrictMCPConfig bool   `json:"strict_mcp_config,omitempty"`
-	// CrossSessionInbound and PermissionsDeny are settings keys, not flags:
-	// the CLI takes one --settings, so a session carrying either spawns on a
-	// per-session settings file (base settings plus these) at a path derived
-	// from its key.
+	// CrossSessionInbound and the permission rules are settings keys, not
+	// flags: the CLI takes one --settings, so a session carrying any spawns on
+	// a per-session settings file (base settings plus these) at a path
+	// derived from its key.
 	CrossSessionInbound string   `json:"cross_session_inbound,omitempty"`
 	PermissionsDeny     []string `json:"permissions_deny,omitempty"`
+	PermissionsAllow    []string `json:"permissions_allow,omitempty"`
 }
 
 // EncodeSpawnOverlay serialises ov for the --spawn-overlay flag. Nil encodes

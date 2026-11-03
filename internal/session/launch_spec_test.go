@@ -68,7 +68,7 @@ func TestLaunchSpecDrift(t *testing.T) {
 
 			bare := *state.SpawnOverlay
 			bare.Tools, bare.PermissionMode, bare.Name, bare.StrictMCPConfig = nil, "", "", false
-			bare.CrossSessionInbound, bare.PermissionsDeny = "", nil
+			bare.CrossSessionInbound, bare.PermissionsDeny, bare.PermissionsAllow = "", nil, nil
 			state.SpawnOverlay = &bare
 			if drift, _, _ := driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, s); !drift {
 				t.Fatal("overlay without the launch fields still matched: the drift rebuild is not reading them")
@@ -109,6 +109,7 @@ func TestSessionSettingsFile_WrittenOnSpawn(t *testing.T) {
 	}
 	if _, _, err := r.GetOrCreate(context.Background(), "feishu:direct:held:general", AgentOpts{
 		CrossSessionInbound: "hold", PermissionsDeny: []string{"Read(~/.aws/**)", "Bash"},
+		PermissionsAllow: []string{"Read(//srv/state/**)"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -130,14 +131,16 @@ func TestSessionSettingsFile_WrittenOnSpawn(t *testing.T) {
 		Model               string `json:"model"`
 		CrossSessionInbound string `json:"crossSessionInbound"`
 		Permissions         struct {
-			Deny []string `json:"deny"`
+			Deny  []string `json:"deny"`
+			Allow []string `json:"allow"`
 		} `json:"permissions"`
 	}
 	if err := json.Unmarshal(data, &doc); err != nil {
 		t.Fatal(err)
 	}
 	if doc.Model != "opus" || doc.CrossSessionInbound != "hold" ||
-		!slices.Equal(doc.Permissions.Deny, []string{"Read(~/.aws/**)", "Bash"}) {
+		!slices.Equal(doc.Permissions.Deny, []string{"Read(~/.aws/**)", "Bash"}) ||
+		!slices.Equal(doc.Permissions.Allow, []string{"Read(//srv/state/**)"}) {
 		t.Errorf("session settings = %s", data)
 	}
 	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {

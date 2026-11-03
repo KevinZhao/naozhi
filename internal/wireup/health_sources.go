@@ -89,9 +89,9 @@ func sessionFact(snap session.SessionSnapshot, s *session.ManagedSession, logDir
 		Source:   "router",
 		Coverage: health.CoverageFull,
 		Dir:      snap.Workspace,
-		// A daemon's session runs in naozhi's own sys-sessions directory,
-		// which is not a body of work.
-		Register:   !sessionkey.IsSysKey(snap.Key),
+		// A daemon's and the Planner's sessions run in naozhi's own state
+		// directories, which are not a body of work.
+		Register:   !sessionkey.IsSysKey(snap.Key) && !sessionkey.IsPlannerNSKey(snap.Key),
 		LastActive: unixMilli(snap.LastActive),
 	}
 	if b := snap.Backend; b != "" && b != "claude" {

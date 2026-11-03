@@ -365,6 +365,12 @@ projects:
   # an authenticated dashboard user can read.
   # include_root: false
 
+# Planner preview (docs/rfc/planner.md §15.1): one global planning session,
+# key planner:main, that answers "what is everything doing" read-only. Off by
+# default; the dashboard can stop a running Planner without a restart.
+#planner:
+#  enabled: false
+
 # Auto-update: polls GitHub Releases and reuses the verified `naozhi upgrade`
 # flow (download → SHA-256 → atomic swap). Enabled by default in "download"
 # mode.

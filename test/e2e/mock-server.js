@@ -838,6 +838,15 @@ function startMockServer(overrides = {}) {
       return;
     }
 
+    // GET /api/system/health: opt-in via overrides.systemHealth (the
+    // body); unset, the route 404s like a backend without it.
+    if (pathname === NZ_CONTRACT.API.system_health && req.method === 'GET' && overrides.systemHealth) {
+      if (!checkAuth()) return;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(overrides.systemHealth));
+      return;
+    }
+
     // Transcribe route
     if (pathname === NZ_CONTRACT.API.transcribe && req.method === 'POST') {
       if (!checkAuth()) return;

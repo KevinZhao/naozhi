@@ -28,6 +28,8 @@ const (
 	// RoleSys is a naozhi-internal background daemon session
 	// (AutoTitler etc.). Key shape "sys:{daemon-name}".
 	RoleSys
+	// RolePlanner is the global Planner. Key shape "planner:main".
+	RolePlanner
 )
 
 // String returns the lower-case role label used in metrics / logs.
@@ -43,6 +45,8 @@ func (r SessionRole) String() string {
 		return "scratch"
 	case RoleSys:
 		return "sys"
+	case RolePlanner:
+		return "planner"
 	default:
 		return "unknown"
 	}
@@ -63,6 +67,8 @@ func classifyKey(key string) SessionRole {
 		return RoleScratch
 	case sessionkey.IsSysKey(key):
 		return RoleSys
+	case sessionkey.IsPlannerNSKey(key):
+		return RolePlanner
 	case isPlannerKey(key):
 		return RoleProject
 	default:

@@ -13,7 +13,9 @@ import (
 	"github.com/naozhi/naozhi/internal/monitor/beat"
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/activity"
+	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
@@ -98,11 +100,18 @@ type ServerOptions struct {
 	// Outputs is the outputs index /api/sessions/outputs lists; nil lists
 	// none.
 	Outputs *activity.Recorder
-	// Health and Workspaces fill /api/sessions/detail. Health is called
-	// only while serving requests, so it may read a monitor built after the
-	// server; nil leaves the health unit (or the workspace) out.
+	// Planner is the global Planner behind /api/planner; nil answers those
+	// routes as planner.enabled off.
+	Planner *agent.Agent
+	// Health is the session health table /api/system/health serves and
+	// /api/sessions/detail reads, called per request; nil serves an empty
+	// one (and leaves the detail's health unit out). Workspaces names their
+	// workspaces.
 	Health     func() health.Snapshot
 	Workspaces *workspace.Registry
+	// Notify is the "等你" inbox /api/inbox serves; the server binds the
+	// Hub to it as its dashboard push exit. nil serves an empty inbox.
+	Notify *notify.Notifier
 
 	// Logger is the component logger the Server derives its structured logging
 	// from. nil falls back to slog.Default() (#620).
