@@ -282,7 +282,7 @@ func (n *Notifier) HandleHealth(ev health.Event) {
 			names = append(names, n.name(id))
 		}
 		n.Add(Item{Kind: KindError, Level: LevelUrgent, Source: "systemic:" + string(f.Class),
-			Title: "系统性故障：" + classLabel(f.Class),
+			Title: "系统性故障：" + ClassLabel(f.Class),
 			Why:   fmt.Sprintf("%d 个单元出现同一类错误：%s", len(f.Units), strings.Join(names, "、"))})
 	case ev.Transition != nil && ev.Transition.Unit.State == health.Failed:
 		u := ev.Transition.Unit
@@ -291,7 +291,7 @@ func (n *Notifier) HandleHealth(ev health.Event) {
 		}
 		why := "失败"
 		if u.ErrClass != health.ErrNone {
-			why += " · " + classLabel(u.ErrClass)
+			why += " · " + ClassLabel(u.ErrClass)
 		}
 		n.Add(Item{Kind: KindError, Level: LevelTimely, Unit: u.ID, WS: u.Workspace, Source: "failed:" + u.ID,
 			Title: n.name(u.ID) + " 失败", Why: why})
@@ -343,8 +343,8 @@ func (n *Notifier) name(unit string) string {
 	return unit
 }
 
-// classLabel is an error class as the user reads it.
-func classLabel(c health.ErrorClass) string {
+// ClassLabel is an error class as the user reads it.
+func ClassLabel(c health.ErrorClass) string {
 	switch c {
 	case health.ErrAuth:
 		return "凭证 / 权限拒绝"

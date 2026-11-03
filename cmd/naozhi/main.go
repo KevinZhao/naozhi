@@ -25,6 +25,7 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/planner/activity"
 	"github.com/naozhi/naozhi/internal/planner/agent"
+	"github.com/naozhi/naozhi/internal/planner/brief"
 	"github.com/naozhi/naozhi/internal/planner/promise"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/routerrelay"
@@ -436,10 +437,25 @@ func main() {
 		Link:    wireup.DashboardLink(cfg.Server.Addr),
 	})
 
+	// Morning brief (早报, §15.1): judged after the first health reconcile
+	// past 08:30 on a weekday, pushed once through the notifier. Only the
+	// health machine's Watch pokes it, so healthMon is set by then.
+	var healthMon *health.Machine
+	briefer := brief.New(brief.Config{
+		Journal: plannerState.Journal,
+		Health:  func() health.Snapshot { return healthMon.Snapshot() },
+		Inbox: func() []notify.Item {
+			open, _ := notifier.List(0)
+			return open
+		},
+		Push:       notifier.Announce,
+		Name:       wireup.UnitNames(router, scheduler),
+		Workspaces: plannerState.Workspaces,
+	})
+
 	routing := buildRouting(cfg, agents, projectMgr, scheduler)
 	// The health monitor reads srv's node and discovery caches, so it is built
 	// after srv; srv only reads it once it serves.
-	var healthMon *health.Machine
 	srv := server.NewWithOptions(server.ServerOptions{
 		Addr:             cfg.Server.Addr,
 		Router:           router,
@@ -450,6 +466,7 @@ func main() {
 		Beats:            beats,
 		Outputs:          activities,
 		Planner:          plannerAgent,
+		Briefs:           briefer,
 		Health:           func() health.Snapshot { return healthMon.Snapshot() },
 		Workspaces:       plannerState.Workspaces,
 		Notify:           notifier,
@@ -539,7 +556,10 @@ func main() {
 		Workspaces: plannerState.Workspaces,
 		IndexPath:  plannerState.IndexPath,
 		Beats:      beats,
-		Watch:      notifier.WatchPeer,
+		Watch: func() {
+			notifier.WatchPeer()
+			briefer.Poke()
+		},
 	})
 	routerEvents.BindMonitor(healthMon.Poke)
 	go healthMon.Run(ctx)
@@ -548,6 +568,7 @@ func main() {
 	go notifier.Run(ctx)
 	promises.SetReminder(wireup.PromiseReminder{Notify: notifier, Dialog: srv.PlannerNote})
 	go promises.Run(ctx)
+	go briefer.Run(ctx)
 
 	// Upstream connector: this node connects to a primary.
 	if cfg.Upstream != nil {

@@ -7,11 +7,16 @@
 // re-dispatched on nzBus as 'inbox:count' for the Planner page's badge. The
 // frames only come on a change: the page takes the first counts from
 // GET /api/inbox (its `counts`) and passes them to onInboxCount.
+//
+// The morning brief (早报, GET /api/planner/briefs) links its sessions in
+// page: #session=<key>[&node=<id>]. Such a hash opens the session, at load
+// once the first sessions list is in, or on hashchange, and is then cleared.
 import { NZ_CONTRACT } from './contract.js';
 import { wsm } from './ws_manager.js';
 import { nzBus } from './nz_util.js';
 import { shell } from './shell.js';
 import { sessionList } from './state.js';
+import { onSessionsApplied } from './session_list.js';
 import { sid } from './session_ident.js';
 
 export const inbox = { open: null, badge: null };
@@ -35,12 +40,36 @@ export async function requestNotifyPermission() {
   }
 }
 
+function openSession(key, node) {
+  if (!key || !sessionList.sessionsData[sid(key, node)]) return;
+  if (shell.setActivityView) shell.setActivityView('chat');
+  if (shell.selectSession) shell.selectSession(key, node);
+}
+
 function openFromNotification(key) {
   window.focus();
-  if (!key || !sessionList.sessionsData[sid(key, 'local')]) return;
-  if (shell.setActivityView) shell.setActivityView('chat');
-  if (shell.selectSession) shell.selectSession(key, 'local');
+  openSession(key, 'local');
 }
+
+// sessionFromHash reads and clears a #session= link; null for any other hash.
+function sessionFromHash() {
+  const params = new URLSearchParams(location.hash.slice(1));
+  const key = params.get('session');
+  if (!key) return null;
+  history.replaceState(history.state, '', location.pathname + location.search);
+  return { key, node: params.get('node') || 'local' };
+}
+
+let hashLink = sessionFromHash();
+onSessionsApplied(() => {
+  if (!hashLink) return;
+  openSession(hashLink.key, hashLink.node);
+  hashLink = null;
+});
+window.addEventListener('hashchange', () => {
+  const link = sessionFromHash();
+  if (link) openSession(link.key, link.node);
+});
 
 export function onNotify(msg) {
   if (!document.hidden || !notifySupported() || Notification.permission !== 'granted') return;

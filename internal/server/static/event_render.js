@@ -110,11 +110,11 @@ function stripLeakedToolCalls(text) {
 // the Planner, a naozhi session (a link to it; peer_key was resolved when the
 // message arrived, the title is the session's current one) or a CC session
 // naozhi does not manage.
-function peerSourceHtml(e) {
+function peerSourceHtml(e, node) {
   const name = e.peer || '';
   if (name === 'planner') return '来自 Planner';
   if (e.peer_key) {
-    const node = selection.node || 'local';
+    node = node || 'local';
     const s = sessionList.sessionsData[sid(e.peer_key, node)] || {};
     const title = s.user_label || s.summary || s.last_prompt || name;
     return '<button type="button" class="peer-link" data-key="' + escAttr(e.peer_key) + '" data-node="' + escAttr(node) +
@@ -125,8 +125,8 @@ function peerSourceHtml(e) {
 
 // peerMessageHtml: an inbound cross-session message, its sender above the
 // body, in a bubble of its own so it never reads as something you typed.
-function peerMessageHtml(e, cleanRaw) {
-  return '<div class="peer-source">' + peerSourceHtml(e) + '</div>' + renderMd(cleanRaw || '');
+function peerMessageHtml(e, cleanRaw, sk) {
+  return '<div class="peer-source">' + peerSourceHtml(e, sk.node) + '</div>' + renderMd(cleanRaw || '');
 }
 
 // PEER_HOLD_CAUSES words the causes CC reports for holding a message, and
@@ -144,10 +144,11 @@ const PEER_DROP_OUTCOMES = new Map([
 
 // peerHoldHtml: the side note for a message the CLI held instead of
 // delivering (status "held"), or one it then dropped (status "dropped").
-function peerHoldHtml(e) {
+function peerHoldHtml(e, _cleanRaw, sk) {
   const dropped = e.status === 'dropped';
   const why = (dropped ? PEER_DROP_OUTCOMES : PEER_HOLD_CAUSES).get(e.reason) || e.reason || '';
-  const note = dropped ? peerSourceHtml(e) + ' 的消息未送达' : '已扣住' + peerSourceHtml(e) + ' 的消息';
+  const src = peerSourceHtml(e, sk.node);
+  const note = dropped ? src + ' 的消息未送达' : '已扣住' + src + ' 的消息';
   return note + (why ? '（' + esc(why) + '）' : '');
 }
 
@@ -214,11 +215,11 @@ function shouldHideEvent(e, includeInternal) {
 
 // eventIconHtml: EVENT_ICONS, plus the clawd mascot for a claude-backend
 // assistant turn in place of the default glyph (other backends keep theirs).
-function eventIconHtml(e) {
+function eventIconHtml(e, sk) {
   let icon = EVENT_ICONS.get(e.type) || '';
   if (e.type === 'text') {
-    const sess = sessionList.sessionsData[sid(selection.key, selection.node)] || {};
-    const backendID = sess.backend || pendingBackendID(selection.key, selection.node) || (serverInfo.cliBackends && serverInfo.cliBackends.default) || '';
+    const sess = sessionList.sessionsData[sid(sk.key, sk.node)] || {};
+    const backendID = sess.backend || pendingBackendID(sk.key, sk.node) || (serverInfo.cliBackends && serverInfo.cliBackends.default) || '';
     if (backendID === 'claude' || backendID === '') icon = CLAWD_SVG;
   }
   return icon;
@@ -294,7 +295,7 @@ function toolUseHtml(e) {
 // field of "persisted:tool-results/<id>.ext" gets a fetch-full button. The
 // images a tool returned (a screenshot) carry no detail to fold: their text
 // is a caption above the thumbnails eventHtml appends.
-function toolResultHtml(e) {
+function toolResultHtml(e, _cleanRaw, sk) {
   if (e.images && e.images.length > 0 && !e.detail) {
     return e.summary ? '<div class="tr-caption">' + esc(e.summary) + '</div>' : '';
   }
@@ -306,9 +307,9 @@ function toolResultHtml(e) {
   }
   const detailHtml = detail ? '<pre class="tr-detail">' + esc(detail) + '</pre>' : '';
   let persistedBtn = '';
-  if (persistedPath && selection.key) {
-    const toolURL = NZ_CONTRACT.API.sessions_tool_result + '?key=' + encodeURIComponent(selection.key) +
-      '&node=' + encodeURIComponent(selection.node || 'local') +
+  if (persistedPath && sk.key) {
+    const toolURL = NZ_CONTRACT.API.sessions_tool_result + '?key=' + encodeURIComponent(sk.key) +
+      '&node=' + encodeURIComponent(sk.node || 'local') +
       '&path=' + encodeURIComponent(persistedPath);
     persistedBtn = '<a class="tr-persisted" href="' + escAttr(toolURL) +
       '" target="_blank" rel="noopener noreferrer" title="查看完整输出">📎 打开完整输出</a>';
@@ -321,15 +322,15 @@ function toolResultHtml(e) {
 // full-size attachment URL when image_paths is populated, else the data URI;
 // `?v=<time>` cache-busts a GC'd attachment. Click handling is delegated
 // (lightbox.js), so it survives innerHTML re-renders.
-function eventImagesHtml(e) {
+function eventImagesHtml(e, sk) {
   if (!e.images || e.images.length === 0) return '';
   const paths = e.image_paths || [];
   const cacheBust = e.time ? ('&v=' + e.time) : '';
   return '<div class="event-images">' + e.images.map((src, i) => {
     const p = paths[i] || '';
     let full = src;
-    if (p && selection.key) {
-      full = NZ_CONTRACT.API.sessions_attachment + '?key=' + encodeURIComponent(selection.key) +
+    if (p && sk.key) {
+      full = NZ_CONTRACT.API.sessions_attachment + '?key=' + encodeURIComponent(sk.key) +
         '&path=' + encodeURIComponent(p) + cacheBust;
     }
     return '<img src="' + escAttr(src) + '" loading="lazy" ' +
@@ -339,13 +340,14 @@ function eventImagesHtml(e) {
 }
 
 // eventActionsHtml: copy / ask-aside buttons, one shared >500-char gate so
-// they cannot drift apart (both hover-revealed via .hover-only).
-function eventActionsHtml(e, cleanRaw) {
+// they cannot drift apart (both hover-revealed via .hover-only). noAsk drops
+// 追问, which always asks about the selected session.
+function eventActionsHtml(e, cleanRaw, noAsk) {
   const isLong = !!cleanRaw && cleanRaw.length > 500;
   const copyBtn = isLong && (e.type === 'text' || e.type === 'user')
     ? '<button class="event-copy-btn hover-only" type="button" data-raw="' + escAttr(cleanRaw) + '" data-action="event-copy" title="复制" aria-label="复制消息">复制</button>'
     : '';
-  const askBtn = isLong && e.type === 'text'
+  const askBtn = isLong && !noAsk && e.type === 'text'
     ? '<button class="event-ask-btn hover-only" type="button" data-raw="' + escAttr(cleanRaw) + '" data-msg-time="' + (e.time || 0) + '" data-action="ask-aside" title="基于此内容追问">' + ICONS.preview + ' 追问</button>'
     : '';
   return { copyBtn, askBtn };
@@ -354,20 +356,23 @@ function eventActionsHtml(e, cleanRaw) {
 // eventHtml renders one EventEntry bubble via EVENT_WHOLE or EVENT_CONTENT.
 // opts.includeInternal=true keeps tool_use/task_*/agent/result events the
 // parent view hides — agent_view.js's sub-agent panel needs them, since a
-// team member's work is almost entirely tool_use.
+// team member's work is almost entirely tool_use. opts.key renders a local
+// session other than the selection (the Planner page's planner:main): its
+// URLs name that key, and there is no 追问 button.
 export function eventHtml(e, opts) {
   const includeInternal = !!(opts && opts.includeInternal);
   if (shouldHideEvent(e, includeInternal)) return '';
   if (EVENT_WHOLE.has(e.type)) return EVENT_WHOLE.get(e.type)(e);
-  const icon = eventIconHtml(e);
+  const sk = opts && opts.key ? { key: opts.key, node: 'local' } : { key: selection.key, node: selection.node };
+  const icon = eventIconHtml(e, sk);
 
   // Strip redundant "[+N image(s)]" suffix when thumbnails are present.
   let cleanRaw = e.detail || e.summary || '';
   if (e.images && e.images.length > 0) cleanRaw = cleanRaw.replace(/ \[\+\d+ image\(s\)\]$/, '');
 
-  const content = (EVENT_CONTENT.get(e.type) || defaultEventChip)(e, cleanRaw);
-  const imgHtml = eventImagesHtml(e);
-  const { copyBtn, askBtn } = eventActionsHtml(e, cleanRaw);
+  const content = (EVENT_CONTENT.get(e.type) || defaultEventChip)(e, cleanRaw, sk);
+  const imgHtml = eventImagesHtml(e, sk);
+  const { copyBtn, askBtn } = eventActionsHtml(e, cleanRaw, !!(opts && opts.key));
 
   const timeAttr = e.time ? ' data-time="' + e.time + '" title="' + escAttr(formatTimeFull(e.time)) + '"' : '';
   // data-uuid: the backend's entry identity, the dedup key for a restart's

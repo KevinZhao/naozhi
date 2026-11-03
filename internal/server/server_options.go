@@ -16,6 +16,7 @@ import (
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/activity"
 	"github.com/naozhi/naozhi/internal/planner/agent"
+	"github.com/naozhi/naozhi/internal/planner/brief"
 	"github.com/naozhi/naozhi/internal/planner/promise"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
 	"github.com/naozhi/naozhi/internal/platform"
@@ -104,6 +105,9 @@ type ServerOptions struct {
 	// Planner is the global Planner behind /api/planner; nil answers those
 	// routes as planner.enabled off.
 	Planner *agent.Agent
+	// Briefs are the morning briefs /api/planner/briefs lists; nil lists
+	// none.
+	Briefs *brief.Briefer
 	// Health is the session health table /api/system/health serves and
 	// /api/sessions/detail reads, called per request; nil serves an empty
 	// one (and leaves the detail's health unit out). Workspaces names their

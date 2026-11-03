@@ -155,6 +155,11 @@
     "handler_type": "*dashplanner.Handler"
   },
   {
+    "method": "GET",
+    "path": "/api/planner/briefs",
+    "handler_type": "*dashplanner.Handler"
+  },
+  {
     "method": "POST",
     "path": "/api/planner/send",
     "handler_type": "*dashplanner.Handler"
