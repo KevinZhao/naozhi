@@ -136,10 +136,11 @@ const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask']);
 const isStr = (v) => typeof v === 'string';
 const str = (v) => (isStr(v) ? v : '');
 
-// decisionActsHtml is a decision item's answer buttons; the left column's
-// card and the conversation's dispatch card share it.
+// decisionActsHtml is an item's answer buttons (a decision's actions, or a
+// Planner question's options, §6.2 ask); the left column's card and the
+// conversation's dispatch card share it.
 export function decisionActsHtml(it) {
-  if (!it || it.kind !== 'decision' || !it.decision || !Array.isArray(it.decision.actions)) return '';
+  if (!it || !it.decision || !Array.isArray(it.decision.actions)) return '';
   return '<div class="pl-card-acts">' + it.decision.actions.map((a, i) =>
     '<button type="button" class="pl-btn' + (i === 0 ? ' pri' : '') + '" data-action="planner-inbox-decide" data-id="' + escAttr(it.id) + '" data-act="' + escAttr(a) + '">' +
       esc(ACTION_LABEL[a] || a) + '</button>').join('') + '</div>';

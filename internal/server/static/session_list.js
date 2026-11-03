@@ -451,10 +451,20 @@ function sidebarHtml(items) {
   sessionList.projectsData.forEach(p => {
     projIndex[(p.node || 'local') + ':' + p.name] = p;
   });
+  // The sessions the Planner dispatched (purpose task, §15.1) are one group
+  // of their own, on top.
+  const dispatched = items.filter(s => s.purpose === 'task');
+  if (dispatched.length) items = items.filter(s => s.purpose !== 'task');
+  let html = dispatched.length
+    ? '<div class="section-header"><span class="sh-name">Planner 派出</span></div>' + dispatched.map(sessionCardHtml).join('')
+    : '';
   const { groups, ungrouped } = groupSidebarItems(items);
   const groupKeys = sortedGroupKeys(groups, projIndex);
-  if (groupKeys.length === 0) return items.map(sessionCardHtml).join('');
-  let html = '';
+  if (groupKeys.length === 0) {
+    // Below the dispatched group the rest needs a header of its own.
+    const rest = items.map(sessionCardHtml).join('');
+    return html + (html && rest ? '<div class="section-header"><span class="sh-name">未分组</span></div>' : '') + rest;
+  }
   groupKeys.forEach(k => {
     const g = groups[k];
     const p = projIndex[k] || {

@@ -58,11 +58,14 @@ type SessionSnapshot struct {
 	// LabelOrigin records who set UserLabel: "" / "user" (human) or "auto"
 	// (sysession daemon); drives the bot icon and "restore auto naming"
 	// action (docs/rfc/system-session.md §7.3 / §9.3).
-	LabelOrigin     string              `json:"label_origin,omitempty"`
-	Project         string              `json:"project,omitempty"`          // project name (filled by server)
-	ProjectFallback bool                `json:"project_fallback,omitempty"` // true when Project is a workspace-basename fallback, not a registered project
-	IsPlanner       bool                `json:"is_planner,omitempty"`       // true for project planner sessions
-	Subagents       []ring.SubagentInfo `json:"subagents,omitempty"`        // active sub-agent types in current turn
+	LabelOrigin     string `json:"label_origin,omitempty"`
+	Project         string `json:"project,omitempty"`          // project name (filled by server)
+	ProjectFallback bool   `json:"project_fallback,omitempty"` // true when Project is a workspace-basename fallback, not a registered project
+	IsPlanner       bool   `json:"is_planner,omitempty"`       // true for project planner sessions
+	// Purpose is the session's purpose from its Planner sidecar ("task": the
+	// Planner dispatched it); filled by server, "" without one.
+	Purpose   string              `json:"purpose,omitempty"`
+	Subagents []ring.SubagentInfo `json:"subagents,omitempty"` // active sub-agent types in current turn
 	// MessageCount is the cumulative "user" turn count: from the live Process
 	// event log since spawn, else the persistedHistory count. Not persisted;
 	// InjectHistory → EventLog.AppendBatch rebuilds it on reconnect.

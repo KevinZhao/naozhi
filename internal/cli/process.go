@@ -120,6 +120,9 @@ type Process struct {
 	// onCodeChange receives each valid system/code_change_published frame so
 	// the session can record the PR. Set via SetOnCodeChange at any time.
 	onCodeChange atomic.Pointer[func(clievent.CodeChange)]
+	// onResult receives each completed turn's reply text. Set via
+	// SetOnResult at any time.
+	onResult atomic.Pointer[func(string)]
 	// activityHook receives the activities the tool calls produce
 	// (process_activity.go); acts is the read loop's state behind it.
 	activityHook atomic.Pointer[activityHook]
@@ -442,6 +445,19 @@ func (p *Process) SetOnCodeChange(fn func(clievent.CodeChange)) {
 		return
 	}
 	p.onCodeChange.Store(&fn)
+}
+
+// SetOnResult sets the callback that receives the reply text of every turn
+// the CLI completes, whoever started it (a Send, a passthrough slot, the CLI
+// itself on a cross-session message), once per result frame: a merged
+// passthrough turn is one call. Aborted and failed turns are skipped. It runs
+// on the read loop and must not block. Lock-free; nil clears it.
+func (p *Process) SetOnResult(fn func(text string)) {
+	if fn == nil {
+		p.onResult.Store(nil)
+		return
+	}
+	p.onResult.Store(&fn)
 }
 
 // SetPeerKeyResolver sets the lookup that stamps a peer_message or peer_hold

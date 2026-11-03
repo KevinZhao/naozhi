@@ -14,7 +14,7 @@ func TestReservedNamespacePrefixes(t *testing.T) {
 	t.Parallel()
 	// Sanity: canonical constants carry their trailing colon so substring
 	// checks cannot accidentally match "cronographer:" or "projectile:".
-	for _, p := range []string{CronKeyPrefix, ProjectKeyPrefix, sessionkey.ScratchKeyPrefix, SysKeyPrefix, PlannerNSPrefix} {
+	for _, p := range []string{CronKeyPrefix, ProjectKeyPrefix, sessionkey.ScratchKeyPrefix, SysKeyPrefix, PlannerNSPrefix, sessionkey.TaskKeyPrefix} {
 		if p == "" {
 			t.Errorf("empty reserved prefix in set")
 		}
@@ -32,6 +32,7 @@ func TestReservedNamespacePrefixes(t *testing.T) {
 		sessionkey.ScratchKeyPrefix: true,
 		SysKeyPrefix:                true,
 		PlannerNSPrefix:             true,
+		sessionkey.TaskKeyPrefix:    true,
 	}
 	for _, p := range reservedKeyPrefixes {
 		if !wantSet[p] {

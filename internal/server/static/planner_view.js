@@ -127,6 +127,19 @@ function paintWaiting() {
     ((KIND_ORDER[a.kind] ?? 3) - (KIND_ORDER[b.kind] ?? 3)) || (Date.parse(a.created) - Date.parse(b.created)));
   box.innerHTML = items.length ? items.map(itemHtml).join('') : '<div class="pl-empty">没有等你的事</div>';
   paintCounts();
+  paintInlineCards(items);
+}
+
+// paintInlineCards repeats the Planner's open cards (dispatch confirmations,
+// its questions) at the end of the conversation, where they were asked; the
+// left column keeps them too, and either answers.
+function paintInlineCards(items) {
+  const box = $('pl-cards');
+  if (!box) return;
+  const mine = items.filter((it) => it.unit === PLANNER_KEY && it.decision);
+  const html = mine.length ? '<div class="pl-cards-h">待你确认 · ' + mine.length + '</div>' + mine.map(itemHtml).join('') : '';
+  if (box.innerHTML !== html) box.innerHTML = html;
+  box.hidden = !html;
 }
 
 async function fetchInbox() {
@@ -275,7 +288,13 @@ const SNAPSHOT_CUT_RE = /^<naozhi-snapshot[\s>][\s\S]*$/;
 const SESSION_REF_RE = /^<naozhi-session-ref>(\{[^\n]*?\})<\/naozhi-session-ref>\s*/;
 const SESSION_REF_CUT_RE = /^<naozhi-session-ref>[\s\S]*$/;
 const GATEWAY_HEAD_RE = /^<naozhi-(?:snapshot[\s>]|session-ref>)/;
+// RECEIPT_RE is a gateway receipt to the Planner (planner/agent Tell: a
+// dispatch's outcome, your answer to its card): not something you wrote, so
+// it shows as a gateway line rather than your bubble.
+const RECEIPT_RE = /^<naozhi-receipt>\s*([\s\S]*?)\s*(?:<\/naozhi-receipt>\s*)?$/;
 function withoutSnapshot(e) {
+  const r = e.type === 'user' && RECEIPT_RE.exec(e.detail || e.summary || '');
+  if (r) return Object.assign({}, e, { type: 'system', summary: '回执给 Planner：' + r[1], detail: '' });
   if (e.type !== 'user' || !GATEWAY_HEAD_RE.test(e.detail || e.summary || '')) return e;
   let ref = '';
   let detail = (e.detail || '').replace(SESSION_REF_RE, (_, r) => { ref = r; return ''; });

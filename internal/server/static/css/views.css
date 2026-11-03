@@ -161,7 +161,7 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .pl-card-title{margin-top:4px;color:var(--nz-text-strong);font-weight:600;word-break:break-word}
 .pl-card-why{margin-top:2px;color:var(--nz-text-mute);font-size:var(--nz-fs-xs);word-break:break-word}
 .pl-card-meta{margin-top:4px;color:var(--nz-text-dim);font-size:var(--nz-fs-xs);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pl-card-acts{display:flex;gap:6px;margin-top:8px}
+.pl-card-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .pl-link{background:none;border:0;padding:0;font:inherit;color:var(--nz-accent);cursor:pointer}
 .pl-link:hover{text-decoration:underline}
 .pl-btn{padding:3px 10px;border-radius:var(--nz-radius-ms);border:1px solid var(--nz-border);background:var(--nz-bg-0);color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-xs);cursor:pointer}
@@ -194,6 +194,10 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .pl-brief{margin:0 24px 8px}
 .pl-brief-empty{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);padding:6px 0;border-bottom:1px dashed var(--nz-border)}
 .pl-brief-empty b{color:var(--nz-text-mute)}
+/* The Planner's open cards at the end of its conversation (§10.1). */
+.pl-cards{margin:4px 24px 14px;max-width:560px;display:flex;flex-direction:column;gap:8px}
+.pl-cards[hidden]{display:none}
+.pl-cards-h{font-size:var(--nz-fs-xs);font-weight:600;color:var(--nz-text-mute)}
 .pl-composer{flex-shrink:0;border-top:1px solid var(--nz-border)}
 .pl-composer[hidden]{display:none}
 /* Workbench open: the 48px strip (展开 · 等你 · 答应你的). */

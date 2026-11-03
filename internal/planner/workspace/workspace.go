@@ -155,6 +155,35 @@ func (r *Registry) Lookup(dir string) (Workspace, bool) {
 	return Workspace{}, false
 }
 
+// Find returns the workspace ref names — its ID, else a name (any case) no
+// other workspace shares — and its first path on this node, "" when it has
+// none here.
+func (r *Registry) Find(ref string) (w Workspace, dir string, ok bool) {
+	ref = strings.TrimSpace(ref)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	found := slices.IndexFunc(r.ws, func(w Workspace) bool { return w.ID == ref })
+	for i := 0; found < 0 && i < len(r.ws); i++ {
+		if !strings.EqualFold(r.ws[i].Name, ref) {
+			continue
+		}
+		for j := i + 1; j < len(r.ws); j++ {
+			if strings.EqualFold(r.ws[j].Name, ref) {
+				return Workspace{}, "", false // a name two workspaces share
+			}
+		}
+		found = i
+	}
+	if found < 0 || ref == "" {
+		return Workspace{}, "", false
+	}
+	w = r.ws[found].clone()
+	if p := w.Paths[r.node]; len(p) > 0 {
+		dir = p[0]
+	}
+	return w, dir, true
+}
+
 // Ensure returns the workspace containing dir, registering dir as a new
 // workspace named after its base name when no registered path contains it.
 // ok is false when dir is not absolute, or is a container (or an ancestor of

@@ -97,6 +97,10 @@ func (e *sendEngine) prepareSend(p sendParams) (cmd turn.Cmd, reset bool, err er
 	if sessionkey.IsPlannerNSKey(key) {
 		return cmd, false, errPlannerNamespace
 	}
+	// task: keys are the Planner's to create; you talk to one it dispatched.
+	if sessionkey.IsTaskKey(key) && e.router.SessionFor(key) == nil {
+		return cmd, false, errTaskNamespace
+	}
 
 	// /clear and /new without an argument reset (the CLI built-in does not
 	// work in stream-json); "/new <arg>" is sent as text. The workspace
@@ -184,13 +188,20 @@ func (e *sendEngine) submit(p sendParams, cmd turn.Cmd, origin turn.Origin) turn
 
 // sessionOptsFor returns the AgentOpts to use when spawning (or resuming)
 // the session for key: scratch keys via the pool (inherited config + the
-// --append-system-prompt quote shim), everything else via buildSessionOpts.
+// --append-system-prompt quote shim), task: keys from their dispatch spec (so
+// a respawn keeps the Planner's model, backend and reporting prompt),
+// everything else via buildSessionOpts.
 // The pool lookup touches the scratch's lastUsed — that "Touch on lookup" is
 // the only thing preventing the sweeper from evicting a scratch about to
 // receive its first send. Do not remove it.
 func (e *sendEngine) sessionOptsFor(key string) session.AgentOpts {
 	if e.scratchPool != nil && sessionkey.IsScratchKey(key) {
 		if opts, ok := e.scratchPool.OptsForKey(key); ok {
+			return opts
+		}
+	}
+	if e.taskOpts != nil && sessionkey.IsTaskKey(key) {
+		if opts, ok := e.taskOpts(key); ok {
 			return opts
 		}
 	}

@@ -20,6 +20,10 @@ const (
 	// PlannerNSPrefix is the namespace of the one global Planner
 	// (docs/rfc/planner.md §15.1), unrelated to the project planners above.
 	PlannerNSPrefix = "planner:"
+	// TaskKeyPrefix is the namespace of the sessions the Planner dispatches,
+	// "task:<random ID>" (§3.2): the key says nothing else; purpose,
+	// lineage and workspace live in the sidecar file.
+	TaskKeyPrefix = "task:"
 )
 
 // PlannerMainKey is the global Planner's session key.
@@ -52,6 +56,9 @@ func IsSysKey(s string) bool { return strings.HasPrefix(s, SysKeyPrefix) }
 
 // IsPlannerNSKey reports whether s belongs to the global Planner's namespace.
 func IsPlannerNSKey(s string) bool { return strings.HasPrefix(s, PlannerNSPrefix) }
+
+// IsTaskKey reports whether s belongs to the Planner's dispatched sessions.
+func IsTaskKey(s string) bool { return strings.HasPrefix(s, TaskKeyPrefix) }
 
 // IsScratchKey reports whether s belongs to the dashboard scratch namespace.
 func IsScratchKey(s string) bool { return strings.HasPrefix(s, ScratchKeyPrefix) }
