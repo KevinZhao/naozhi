@@ -1195,7 +1195,7 @@ v8 复核时确认已删除、RFC 不再依赖的：Prometheus / `/metrics`、Ag
 **前置验证中发现的两个现有问题**（与 Planner 无关，待 owner 决定）：
 
 1. **naozhi 拉起的会话读不到项目 CLAUDE.md**：开启 `naozhi_settings` 时用 `--setting-sources ""`，连带排除了项目级 CLAUDE.md（实测：`""` 时模型回答"没有项目说明"，`user,project` 时能读到并照做）。naozhi 仓库自己的 191 行 CLAUDE.md 与 `~/Workspace` 下十几个仓库的 CLAUDE.md 目前对 naozhi 会话都不生效。
-2. **正式实例 :8180 在局域网上没有鉴权**：监听 `*:8180`，`dashboard_token` 为空，macOS 防火墙关闭；从本机局域网 IP 请求 `/api/sessions` 返回 200。同一网络里的人可以往 bypass 模式的会话里发消息。
+2. ~~正式实例 :8180 在局域网上没有鉴权~~（**已修 2026-11-03**：配置了 `dashboard_token`，局域网与本机无令牌请求均返回 401）：监听 `*:8180`，`dashboard_token` 为空，macOS 防火墙关闭；从本机局域网 IP 请求 `/api/sessions` 返回 200。同一网络里的人可以往 bypass 模式的会话里发消息。
 
 **历史**：v7 的重审问题 ①–⑫ 已全部定稿（D60–D77），讨论过程见 git 历史与 `planner-landscape.md`。
 
