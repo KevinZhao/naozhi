@@ -546,7 +546,7 @@ func main() {
 	plannerAgent.Start(ctx, srv, healthMon.Snapshot)
 	notifier.SetHealth(healthMon)
 	go notifier.Run(ctx)
-	promises.SetReminder(wireup.PromiseReminder{Notify: notifier, Dialog: srv.PlannerReceipt})
+	promises.SetReminder(wireup.PromiseReminder{Notify: notifier, Dialog: srv.PlannerNote})
 	go promises.Run(ctx)
 
 	// Upstream connector: this node connects to a primary.

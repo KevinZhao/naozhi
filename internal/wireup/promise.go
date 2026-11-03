@@ -15,8 +15,8 @@ const promiseTitleRunes = 60
 // conversation; closing the promise closes its item.
 type PromiseReminder struct {
 	Notify *notify.Notifier
-	// Dialog shows text in a session's conversation as a gateway event
-	// (Server.PlannerReceipt); nil skips it.
+	// Dialog writes text into a session's conversation history as a gateway
+	// event (Server.PlannerNote); nil skips it.
 	Dialog func(key, text string)
 }
 

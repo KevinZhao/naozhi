@@ -11,6 +11,7 @@ import (
 	"fmt"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/turn"
 )
@@ -51,6 +52,25 @@ func (s *Server) PlannerReceipt(key, text string) {
 		s.hub.bcast.broadcastSessionSystemEvent(key, text)
 	}
 }
+
+// PlannerNote writes text into key's conversation history as a system event,
+// so a page opened later still shows it; subscribers see it at once. Unlike
+// PlannerReceipt it is part of the conversation the dashboard replays, though
+// it still never reaches the CLI. The history is in memory: a gateway restart
+// drops it. With no session for key it falls back to a broadcast.
+func (s *Server) PlannerNote(key, text string) {
+	text = osutil.SanitizeForLog(text, plannerNoteBytes)
+	if s.router != nil {
+		if sess := s.router.SessionFor(key); sess != nil {
+			sess.LogSystemEvent(text)
+			return
+		}
+	}
+	s.PlannerReceipt(key, text)
+}
+
+// plannerNoteBytes caps a note; a promise's text is at most 500 runes.
+const plannerNoteBytes = 2048
 
 func (e *sendEngine) submitPlanner(key, text string, opts session.AgentOpts, done func(string, error)) (bool, error) {
 	o := &plannerOrigin{key: key, opts: opts, notify: e.notify, done: done}
