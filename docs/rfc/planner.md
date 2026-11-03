@@ -637,7 +637,7 @@ runtelemetry 扩展普通会话类别（`SubsystemSession` 已预留但未发出
 
 - `-p --input-format stream-json` 的进程会绑定收件 socket（`/tmp/cc-socks/<pid>.sock`），出现在 `ListAgents` 里；naozhi 现有会话也已在其中，名字由 CC 自动起（如 `naozhi-44`、按工作目录名起的 `ws-07`）。`ListAgents` 不显示这类会话的工作目录，所以**拉起时必须给 `--name`**。
 - 空闲会话收到消息，CC 会自己开一轮处理；回信同样会唤醒发送方。naozhi 能正确记录这类"CC 自发的回合"（后台任务完成时本来就会出现），之后的正常回合不受影响。
-- 收到的消息在流里是一个 user 事件，外层是 `<cross-session-message from="uds:…" from-name="…" from-mode="bypass">…</cross-session-message>`，并附"不是你的用户打的、不算授权"的提示。**naozhi 目前没有记录这个入站事件**，界面上看不出这一轮是谁触发的——需要补（下表）。
+- 收到的消息在模型上下文里外层是 `<cross-session-message from="uds:…" from-name="…" from-mode="bypass">…</cross-session-message>`，并附"不是你的用户打的、不算授权"的提示；在 stdout 流里（`--replay-user-messages` 下）是一条 `isReplay` 的 user 帧，带结构化的 `origin{kind:"peer", name, fromMode, body}`（PR #3803 实测更正；naozhi 以 `origin` 识别，不解析标签）。`system/peer_message_hold` 只出现在流里，不写进 Claude JSONL。v0.2.0 已记录这两类事件并在界面标出来源。
 - 文档：同机消息走本地 socket、不经 Anthropic，Bedrock 可用（≥ 2.1.248）；`crossSessionInbound: accept / hold / refuse` 控制收件；发送方可以用 deny 规则禁掉 `SendMessage` / `ListAgents`；`notify_when_idle` 可订阅"对方下次空闲或退出时通知我"；权限模式不同的会话之间默认被 hold（实测原因 `mode-mismatch`），**显式设 `crossSessionInbound: accept` 可覆盖**（实测 `dontAsk` 的 Planner 与 bypass 的执行会话双向送达）；被 hold 时接收方流里有 `system/peer_message_hold` 事件（含发送方名字与原因），可据此在界面上显示为旁注；`notify_when_idle` 实测可用（一次性通知，接收时 CC 自开一轮）；`--resume` 时再给一次 `--name`，名字保持。
 
 **通道分工**：

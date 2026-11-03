@@ -26,6 +26,7 @@ import (
 	"github.com/naozhi/naozhi/internal/monitor/wake"
 	"github.com/naozhi/naozhi/internal/planner/journal"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // Timing rules (§15.1).
@@ -419,7 +420,8 @@ func (m *Machine) Reconcile() {
 	snap := Snapshot{At: now, Units: make([]Unit, 0, len(m.units))}
 	for _, u := range m.units {
 		snap.Units = append(snap.Units, u.Unit)
-		if u.Workspace == "" {
+		// The Planner answers to no workspace by design (RFC §6.3).
+		if u.Workspace == "" && u.ID != sessionkey.PlannerMainKey {
 			snap.Unowned++
 		}
 	}
@@ -434,7 +436,10 @@ func (m *Machine) Reconcile() {
 
 	for _, ev := range events {
 		m.record(ev)
-		if ev.Transition != nil && ev.Transition.Unit.Workspace == "" {
+		// A snapshot-only unit with no workspace (a remote node's or a
+		// terminal's session) is only journaled; an unowned cron job,
+		// daemon or the Planner still fails loudly (RFC §15.1).
+		if t := ev.Transition; t != nil && t.Unit.Workspace == "" && (t.Unit.Kind == KindRemote || t.Unit.Kind == KindExternal) {
 			continue
 		}
 		for _, fn := range subs {
