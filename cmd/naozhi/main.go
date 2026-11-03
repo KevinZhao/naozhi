@@ -21,6 +21,7 @@ import (
 	"github.com/naozhi/naozhi/internal/monitor/wake"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/planner/activity"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/routerrelay"
 	"github.com/naozhi/naozhi/internal/selfupdate"
@@ -269,9 +270,16 @@ func main() {
 		os.Exit(1)
 	}
 	// After the project scan so the first start can register projects as
-	// workspaces. Nothing consumes the state yet; opening it here runs the
-	// journal retention and the first-start seed once per process.
-	_ = wireup.OpenPlannerState(sessionLayout, cfg.Workspace.ID, projectMgr)
+	// workspaces. Opening it here runs the journal retention and the
+	// first-start seed once per process.
+	plannerState := wireup.OpenPlannerState(sessionLayout, cfg.Workspace.ID, projectMgr)
+	// Sessions' activities go to the journal from here on, those reconnected
+	// above included; the outputs index is rebuilt from it first.
+	activities := activity.NewRecorder(plannerState.Journal, plannerState.Workspaces)
+	if err := activities.Load(time.Now()); err != nil {
+		slog.Warn("planner outputs index partly rebuilt", "err", err)
+	}
+	router.SetActivitySink(activities)
 	// Attachments live under each workspace root, usually outside the state dir
 	// checked above; walking every root must not hold up startup.
 	go warnIfAttachmentsLarge(workspaceRootLister{router: router, projectMgr: projectMgr}, attachmentGCMode(cfg))
@@ -406,6 +414,7 @@ func main() {
 		Scheduler:        scheduler,
 		Backend:          defaultBackend,
 		Beats:            beats,
+		Outputs:          activities,
 		AllowedRoot:      workspace,
 		IMAccess:         cfg.IMAccessPolicy(),
 		IMRateLimit:      dispatch.RateLimit{MsgsPerMin: cfg.IMRateLimit.MsgsPerMin, Burst: cfg.IMRateLimit.Burst},

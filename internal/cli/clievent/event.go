@@ -121,6 +121,11 @@ type Event struct {
 	// readLoop drops it once the frame is logged.
 	ToolResultImages []ToolResultImages `json:"-"`
 
+	// ToolResultPRs maps the tool_use id of each tool_result block of a user
+	// frame to the GitHub PR URLs its text mentions (ClaudeProtocol.
+	// ReadEventInto); nil when none does.
+	ToolResultPRs map[string][]string `json:"-"`
+
 	// ToolCall is populated for ACP tool_call / tool_call_update events
 	// (dashboard progress row with collapsible rawOutput). nil on stream-json,
 	// where tool use flows through Message.Content[].Type=="tool_use".
@@ -252,6 +257,8 @@ type ContentBlock struct {
 	Input json.RawMessage `json:"input,omitempty"` // tool_use input
 	// ToolUseID is the tool_use a tool_result block (in a user event) answers.
 	ToolUseID string `json:"tool_use_id,omitempty"`
+	// IsError marks a tool_result block whose call failed.
+	IsError bool `json:"is_error,omitempty"`
 }
 
 // ToolResultImages is what one tool_result block returned besides text: the

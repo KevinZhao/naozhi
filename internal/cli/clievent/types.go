@@ -40,6 +40,13 @@ type EventEntry struct {
 	Tokens     int      `json:"tokens,omitempty"`      // total tokens consumed by agent task
 	DurationMS int64    `json:"duration_ms,omitempty"` // elapsed ms for agent task
 	Status     string   `json:"status,omitempty"`      // agent task status (completed, error, etc.)
+	// Path is a Write / Edit class tool call's target relative to the
+	// session's file root (the path= of a root=session:<key> file-API
+	// request); "" outside that root.
+	Path string `json:"path,omitempty"`
+	// Activity is the planner/activity type a state-changing tool call is
+	// classified as (git_push, output, ...); the call itself may still fail.
+	Activity string `json:"activity,omitempty"`
 	// RunID is the run id (ctxutil.RunID) of the Send behind a "user" or
 	// "result" entry, the key that joins the transcript with runhistory and
 	// the cost ledger. A merged turn's result names its head run, which

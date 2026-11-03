@@ -19,6 +19,7 @@ func (h *Handlers) Routes() []httputil.Route {
 		{Pattern: "GET /api/sessions/events", Handler: h.HandleEvents},
 		{Pattern: "GET /api/sessions/runs", Handler: h.HandleRuns},
 		{Pattern: "GET /api/sessions/git", Handler: h.HandleGit},
+		{Pattern: "GET /api/sessions/outputs", Handler: h.HandleOutputs},
 		{Pattern: "DELETE /api/sessions", Handler: h.HandleDelete},
 		{Pattern: "POST /api/sessions/resume", Handler: h.HandleResume},
 		{Pattern: "POST /api/sessions/interrupt", Handler: h.HandleInterrupt},

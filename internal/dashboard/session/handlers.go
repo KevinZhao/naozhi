@@ -295,6 +295,8 @@ type Deps struct {
 	RetiredStore RetiredReader
 	// ValidateWS injects the server-package helper without a reverse import.
 	ValidateWS func(ws, root string) (string, error)
+	// Outputs serves /api/sessions/outputs; nil lists none.
+	Outputs OutputSource
 }
 
 // New constructs a Handlers from injected deps. Deps is stored as-is; the

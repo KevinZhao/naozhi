@@ -212,6 +212,10 @@ type Router struct {
 	// raise; nil drops them. Fixed at construction.
 	observer Observer
 
+	// activity receives sessions' activities (SetActivitySink); read at
+	// report time, so processes bound before it is set report too.
+	activity atomic.Pointer[ActivitySink]
+
 	// shutdownOnce guards Shutdown against re-entry: a double call would race
 	// the broadcast timer, re-cancel the history ctx and double-detach shim processes.
 	shutdownOnce sync.Once

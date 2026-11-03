@@ -836,6 +836,7 @@ func (r *Router) installFreshSession(tx sessTx,
 	s.workflows.Store(board)
 	bookUnownedResults(s, proc)
 	bookCodeChanges(s, proc, func() { r.ss.Update(markChanged); r.notifyChange() })
+	r.bookActivity(s, proc)
 	bookWorkflows(s, proc, r.hist.projectsRoot, func() { r.ss.Update(markChanged); r.notifyChange() }, r.BumpVersion)
 	bookProcessEnd(s, proc, r.hist.claudeDir)
 	if len(snapshot) > 0 {

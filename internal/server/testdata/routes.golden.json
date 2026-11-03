@@ -235,6 +235,11 @@
     "handler_type": "*SendHandler"
   },
   {
+    "method": "GET",
+    "path": "/api/sessions/outputs",
+    "handler_type": "*dashsession.Handlers"
+  },
+  {
     "method": "POST",
     "path": "/api/sessions/override",
     "handler_type": "*dashsession.Handlers"

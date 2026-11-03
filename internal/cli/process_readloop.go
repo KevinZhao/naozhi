@@ -521,6 +521,7 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 	}
 	nowMS := now.UnixMilli()
 	p.tools.observe(ev, now)
+	p.observeActivity(&ev, now)
 	orphaned, orphanRun := false, ""
 	if ev.Type == "result" {
 		ev.Aborted, orphaned, orphanRun = p.turn.abortRequested.take()

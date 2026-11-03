@@ -17,6 +17,12 @@ import (
 // known content block of an assistant message (thinking / tool_use / text)
 // yields its own entry so downstream consumers don't drop blocks after the first.
 func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEntry {
+	return eventEntriesAt(ev, nowMS, "")
+}
+
+// eventEntriesAt is EventEntriesFromEventAt with the root a Write / Edit
+// entry's Path is relative to ("" leaves Path empty).
+func eventEntriesAt(ev clievent.Event, nowMS int64, root string) []clievent.EventEntry {
 	// Replay events are the CLI's ack for a message already shown via the
 	// optimistic bubble; logging them double-displays. readLoop skips them too.
 	if ev.Type == "user" && ev.IsReplay {
@@ -185,6 +191,7 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 					}
 				default:
 					entry.Detail = formatToolDetail(block)
+					tagToolEntry(&entry, block, root)
 				}
 				// ACP tool_call events carry a progress payload (kind / status / rawOutput)
 				// the dashboard renders as a folded row; forward it. Stream-json leaves
@@ -295,7 +302,7 @@ func (p *Process) logEventAt(ev clievent.Event, nowMS int64, runID string) {
 	p.meter.TrackShadow(ev, nowMS)
 	// Before formatting: the entries carry the paths storeToolImages records.
 	p.storeToolImages(ev.ToolResultImages)
-	entries := EventEntriesFromEventAt(ev, nowMS)
+	entries := eventEntriesAt(ev, nowMS, p.activityRoot())
 	if len(entries) == 0 {
 		return
 	}
