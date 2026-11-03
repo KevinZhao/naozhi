@@ -96,6 +96,11 @@ func (l Layout) SessionRunsRoot() string { return l.Join("session-runs") }
 // EnsureDir hardening as the other state roots.
 func (l Layout) CLIDebugRoot() string { return l.Join("cli-debug") }
 
+// SessionSettingsRoot holds the per-session Claude settings files
+// (<root>/session-settings/<keyhash>.json): the naozhi-owned settings plus a
+// session's crossSessionInbound / permissions.deny overrides.
+func (l Layout) SessionSettingsRoot() string { return l.Join("session-settings") }
+
 // AccessProfileSecretsRoot holds per-profile secret material.
 func (l Layout) AccessProfileSecretsRoot() string { return l.Join("access-profile-secrets") }
 

@@ -36,6 +36,9 @@ type spawnConfig struct {
 	// permissionMode mirrors RouterConfig.PermissionMode. Immutable after
 	// NewRouter, and read only through argvSpawnOptions like the paths above.
 	permissionMode cli.PermissionMode
+	// sessionSettingsDir is where per-session settings files live
+	// (launchSpecFor); "" when there is no session store to anchor under.
+	sessionSettingsDir string
 
 	// hook, when set, replaces the CLI spawn in spawnProcess, so tests
 	// can hand back a process of their own at a moment of their choosing.

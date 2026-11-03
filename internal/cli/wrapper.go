@@ -92,6 +92,21 @@ type SpawnOptions struct {
 	// exceed MaxAppendSystemPromptBytes; a failing value is dropped with a Warn,
 	// never truncated — callers truncate at their own layer. Claude-only.
 	AppendSystemPrompt string
+
+	// Per-session launch spec (shim.SpawnOverlay). Each flag is denylisted in
+	// ExtraArgs, so these fields are its only argv site. Claude-only.
+	//
+	// Tools renders `--tools a,b,c`; empty keeps the CLI's default set.
+	Tools []string
+	// Name renders `--name`, the display name other CC sessions see in
+	// ListAgents. A leading '-' or a NUL drops it.
+	Name            string
+	StrictMCPConfig bool
+	// SessionSettingsFile, when usable, goes to `--settings` in place of
+	// SettingsFile: the CLI takes one --settings, so this per-session file
+	// already holds SettingsFile's content plus the session's overrides.
+	// SettingsFile still picks the setting sources and the model manifest.
+	SessionSettingsFile string
 }
 
 // MaxAppendSystemPromptBytes is cliinfo.MaxAppendSystemPromptBytes.
@@ -113,7 +128,26 @@ const (
 	// human prompt is needed. The classifier reads `autoMode.environment` from
 	// the settings the CLI loads to decide which repos and domains are trusted.
 	PermissionModeAuto PermissionMode = 2
+	// PermissionModeDontAsk renders `--permission-mode dontAsk`: a tool call
+	// the settings do not pre-allow is denied instead of prompting.
+	PermissionModeDontAsk PermissionMode = 3
 )
+
+// PermissionModeByName maps a per-session mode name
+// (shim.SpawnOverlay.PermissionMode) to its PermissionMode. An unknown name
+// maps to PermissionModeStandard — no skip flag — so a typo fails closed on
+// the CLI's own prompts instead of open on bypass.
+func PermissionModeByName(name string) PermissionMode {
+	switch name {
+	case "bypass":
+		return PermissionModeDefault
+	case "auto":
+		return PermissionModeAuto
+	case "dontAsk":
+		return PermissionModeDontAsk
+	}
+	return PermissionModeStandard
+}
 
 // Wrapper manages spawning CLI processes via shim.
 //

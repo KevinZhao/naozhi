@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"maps"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -609,6 +610,12 @@ func NewRouter(cfg RouterConfig) *Router {
 	r.spawn.naozhiSettingsFile = cfg.NaozhiSettingsFile
 	r.spawn.mcpConfigFile = cfg.MCPConfigFile
 	r.spawn.permissionMode = cfg.PermissionMode
+	// Absolute: BuildArgs drops a relative --settings path.
+	if dir := datadir.ForStore(cfg.StorePath).SessionSettingsRoot(); dir != "" {
+		if abs, err := filepath.Abs(dir); err == nil {
+			r.spawn.sessionSettingsDir = abs
+		}
+	}
 	// The history ctx is cancelled only by Shutdown so startup history loads and
 	// reconnect-time JSONL parses abort promptly on slow filesystems.
 	r.hist.ctx, r.hist.cancel = context.WithCancel(context.Background())

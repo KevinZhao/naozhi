@@ -227,6 +227,8 @@ type spawnParams struct {
 	// re-merge it against current config (#2494). Always populated: a spawn
 	// with no overrides yields the zero value ("known and empty").
 	Overlay shim.SpawnOverlay
+	// Launch is Overlay's per-session launch spec as argv input (launchSpecFor).
+	Launch LaunchSpec
 }
 
 // resolveSpawnParams computes the merged spawn parameters for a new
@@ -304,7 +306,13 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 		ExtraArgs:     slices.Clone(opts.ExtraArgs),
 		AccessProfile: accessProfileID,
 		// Argv-bearing and per-session, so it must ride in the overlay (#2493).
-		AppendSystemPrompt: opts.SystemPrompt,
+		AppendSystemPrompt:  opts.SystemPrompt,
+		Tools:               slices.Clone(opts.Tools),
+		PermissionMode:      opts.PermissionMode,
+		Name:                opts.Name,
+		StrictMCPConfig:     opts.StrictMCPConfig,
+		CrossSessionInbound: opts.CrossSessionInbound,
+		PermissionsDeny:     slices.Clone(opts.PermissionsDeny),
 	}
 
 	// mergeArgvLayers is shared verbatim with driftCompareArgs so the two argv
@@ -371,6 +379,18 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 		workspace = osutil.CanonicalCase(workspace)
 	}
 
+	// Every Claude spawn carries --name: the caller's, else the session label,
+	// else a key-derived placeholder. A resume re-passes the name its
+	// transcript holds instead (completeSpawn, resumedCLIName). Recorded in the
+	// overlay, so a later relabel is not drift.
+	if overlay.Name == "" {
+		var label string
+		if old := tx.Get(key); old != nil {
+			label = old.UserLabel()
+		}
+		overlay.Name = cliSessionName(key, label, workspace)
+	}
+
 	return spawnParams{
 		BackendID:        backendID,
 		Wrapper:          wrapper,
@@ -383,6 +403,7 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 		AccessProfileID:  accessProfileID,
 		AccessProfileEnv: accessProfileEnv,
 		Overlay:          overlay,
+		Launch:           r.spawn.launchSpecFor(key, overlay),
 	}
 }
 
@@ -542,7 +563,7 @@ func (r *Router) reserveSpawn(tx sessTx, res *spawnReservation, key, resumeID st
 	// the arg-drift comparison cannot diverge. DebugFile uses the
 	// side-effecting cliDebugFileFor (log pre-created 0600) where drift uses
 	// the read-only cliDebugPathFor.
-	res.spawnOpts = r.spawn.argvSpawnOptions(sp.Model, sp.Effort, r.spawn.cliDebugFileFor(key), sp.SystemPrompt, sp.Args)
+	res.spawnOpts = r.spawn.argvSpawnOptions(sp.Model, sp.Effort, r.spawn.cliDebugFileFor(key), sp.SystemPrompt, sp.Args, sp.Launch)
 	// ResumeID is session state, not config: the drift side strips it
 	// (stripResumeArgs) so a resumed session is not read as drift.
 	res.spawnOpts.ResumeID = res.resumeID
@@ -605,6 +626,17 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (_ *M
 		}
 		res.spawnOpts.EnvOverlay = overlay
 	}
+	// Settings overrides restrict the session (inbound policy, deny rules), so
+	// a spawn that cannot write them fails rather than running without them.
+	if ov := res.spawnOpts.SpawnOverlay; ov != nil && hasSettingsOverrides(*ov) {
+		if res.spawnOpts.SessionSettingsFile == "" {
+			return nil, errors.New("session settings overrides need a session store directory")
+		}
+		if err := writeSessionSettings(res.spawnOpts.SessionSettingsFile, r.spawn.naozhiSettingsFile, *ov); err != nil {
+			return nil, fmt.Errorf("session settings: %w", err)
+		}
+	}
+	r.settleResumedCLIName(res)
 	// Before the spawn, so every line the new process writes lies past it.
 	mark := markTranscript(r.hist.claudeDir, r.hist.backendDirs, res.backendID, res.workspace, res.resumeID)
 	proc, err := r.spawn.spawnProcess(ctx, res.wrapper, res.spawnOpts, key, res.backendID)
@@ -668,6 +700,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (_ *M
 			oldHistory, respawnChain(prevIDs, res.rejectedResumeID, ""), snap.cost, snap.spent.USD, snap.createdAt, res.opts.Exempt, snap.sid,
 			hist.userTurns, overrides, snap.workflows,
 		)
+		s.setCLISessionName(res.spawnOpts.Name)
 		s.startupFails.Store(max(snap.startupFails, failedSpawns.Streak))
 		s.setCodeChanges(snap.codeChanges)
 		s.costMu.Lock()
