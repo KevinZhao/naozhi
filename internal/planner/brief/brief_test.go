@@ -196,22 +196,26 @@ func TestRender(t *testing.T) {
 			Title: "夜间构建 失败", Why: "失败 · 凭证过期", Created: at(3, 2, 1)},
 		{Kind: notify.KindError, State: notify.StateOpen, Source: "systemic:rate_limit",
 			Title: "系统性故障：限流", Why: "2 个单元出现同一类错误：a、b", Created: at(1, 9, 0)},
+		{Kind: notify.KindNotice, State: notify.StateOpen, Source: "disk",
+			Title: "磁盘剩余不足", Why: "剩余 8%", Created: at(3, 7, 0)},
 	}
 	f.now = at(3, 9, 0)
 	b := f.briefer(names, reg)
 	b.Check()
 
 	want := "## 早报 · 11月3日 周二\n\n" +
-		"自 11-02 08:30 以来：完成 2 · 失败 1 · 等你 1 · 未关闭的错误 1\n" +
+		"自 11-02 08:30 以来：完成 2 · 失败 1 · 等你 1 · 未关闭的错误 1 · 通知 1\n" +
 		"\n### 完成的（2）\n" +
 		"- [node2/dashboard:direct:x:general](#node=node2&session=dashboard%3Adirect%3Ax%3Ageneral) · 工作区 naozhi · 11-03 03:00\n" +
 		"- [修复 ［登录］ ＊重试＊](#session=dashboard%3Apj%3Aabc%3Ageneral) · 工作区 naozhi · 11-02 21:00 · 产出 1 个文件、[PR #12](https://github.com/o/r/pull/12)\n" +
 		"\n### 失败的（1）\n" +
-		"- [夜间构建](#session=cron%3Anightly) · 工作区 naozhi · 11-03 02:00 · 凭证过期 · 已恢复\n" +
+		"- 夜间构建 · 工作区 naozhi · 11-03 02:00 · 凭证过期 · 已恢复\n" +
 		"\n### 仍在等你的（1）\n" +
 		"- 提问 · [周报 在等你回复](#session=feishu%3Adirect%3Abob%3Ageneral) · 有提问等你回答超过 10 分钟 · 工作区 naozhi · 已等 2 小时\n" +
 		"\n### 未关闭的错误（1）\n" +
-		"- 错误 · 系统性故障：限流 · 2 个单元出现同一类错误：a、b · 已等 2 天\n"
+		"- 错误 · 系统性故障：限流 · 2 个单元出现同一类错误：a、b · 已等 2 天\n" +
+		"\n### 通知（1）\n" +
+		"- 通知 · 磁盘剩余不足 · 剩余 8% · 已等 2 小时\n"
 	got := b.Recent(1)
 	if len(got) != 1 {
 		t.Fatalf("no brief")
@@ -219,7 +223,7 @@ func TestRender(t *testing.T) {
 	if got[0].Markdown != want {
 		t.Errorf("markdown:\n%s\nwant:\n%s", got[0].Markdown, want)
 	}
-	if len(f.pushes) != 1 || f.pushes[0].Title != "早报" || f.pushes[0].Body != "完成 2 · 失败 1 · 等你 1 · 错误 1" {
+	if len(f.pushes) != 1 || f.pushes[0].Title != "早报" || f.pushes[0].Body != "完成 2 · 失败 1 · 等你 1 · 错误 1 · 通知 1" {
 		t.Errorf("pushes = %+v", f.pushes)
 	}
 }

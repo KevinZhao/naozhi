@@ -1,8 +1,9 @@
 // Package brief is the morning brief, 早报 (docs/rfc/planner.md §10.1,
 // §15.1): on each weekday, at the first reconcile after 08:30 local, the
 // gateway lists what finished and what failed since the last brief and what
-// still waits on the user — the open "等你" items and the unclosed errors —
-// as short Chinese Markdown, journals it (kind=brief) and pushes it once.
+// is still open in the inbox — the "等你" items (questions and decisions,
+// as the badge counts them), the unclosed errors and the notices — as short
+// Chinese Markdown, journals it (kind=brief) and pushes it once.
 // It is rendered by fixed rules from the journal, the inbox and the health
 // snapshot; nothing here calls a model.
 //
@@ -48,9 +49,10 @@ type Counts struct {
 	Failed  int `json:"failed"`
 	Waiting int `json:"waiting"`
 	Errors  int `json:"errors"`
+	Notices int `json:"notices"`
 }
 
-func (c Counts) total() int { return c.Done + c.Failed + c.Waiting + c.Errors }
+func (c Counts) total() int { return c.Done + c.Failed + c.Waiting + c.Errors + c.Notices }
 
 // Brief is one day's judgment, the data of a kind=brief journal entry.
 type Brief struct {
@@ -71,7 +73,7 @@ type Config struct {
 	Now     func() time.Time
 	Journal *journal.Journal
 	Health  func() health.Snapshot
-	// Inbox returns the open "等你" items.
+	// Inbox returns the inbox's items (only the open ones are read).
 	Inbox func() []notify.Item
 	// Push sends the brief's notification (notify.Notifier.Announce).
 	Push func(notify.Push) bool
@@ -218,7 +220,7 @@ func (b *Briefer) Check() {
 		return
 	}
 	slog.Info("brief: sent", "day", br.Day, "done", br.Counts.Done, "failed", br.Counts.Failed,
-		"waiting", br.Counts.Waiting, "errors", br.Counts.Errors)
+		"waiting", br.Counts.Waiting, "errors", br.Counts.Errors, "notices", br.Counts.Notices)
 	if b.cfg.Push != nil {
 		b.cfg.Push(notify.Push{ID: "brief:" + br.Day, Kind: notify.KindNotice, Level: notify.LevelTimely,
 			Title: "早报", Body: pushBody(br.Counts)})

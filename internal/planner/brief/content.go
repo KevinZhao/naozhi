@@ -64,10 +64,12 @@ type input struct {
 	Failed     []failedItem
 	Waiting    []inboxItem
 	Errors     []inboxItem
+	Notices    []inboxItem
 }
 
 func (in input) counts() Counts {
-	return Counts{Done: len(in.Done), Failed: len(in.Failed), Waiting: len(in.Waiting), Errors: len(in.Errors)}
+	return Counts{Done: len(in.Done), Failed: len(in.Failed), Waiting: len(in.Waiting), Errors: len(in.Errors),
+		Notices: len(in.Notices)}
 }
 
 // healthData is the part of a health journal entry's data the brief reads
@@ -202,8 +204,10 @@ func (b *Briefer) gather(since, now time.Time) input {
 			}
 			item := inboxItem{ref: r, Kind: it.Kind, Title: it.Title, Why: it.Why, Created: it.Created}
 			switch {
-			case it.Kind != notify.KindError:
+			case it.Kind.WaitsOnUser():
 				in.Waiting = append(in.Waiting, item)
+			case it.Kind != notify.KindError:
+				in.Notices = append(in.Notices, item)
 			case it.Unit != "" && failedUnits[it.Unit] && it.Source == "failed:"+it.Unit:
 				// Already listed under 失败的.
 			default:
@@ -220,6 +224,7 @@ func (b *Briefer) gather(since, now time.Time) input {
 	oldest := func(x, y inboxItem) int { return cmp.Or(x.Created.Compare(y.Created), cmp.Compare(x.Title, y.Title)) }
 	slices.SortFunc(in.Waiting, oldest)
 	slices.SortFunc(in.Errors, oldest)
+	slices.SortFunc(in.Notices, oldest)
 	return in
 }
 
@@ -257,7 +262,8 @@ func kindOf(id string) health.Kind {
 }
 
 // ref names unit id and links the sessions the dashboard can open: a local
-// session (cron runs included) or a remote node's, whose ID is node/key.
+// session or a remote node's, whose ID is node/key. Cron runs are not in the
+// dashboard's sessions list, so they get no link.
 func (b *Briefer) ref(id string, kind health.Kind, ws string) ref {
 	name := ""
 	if b.cfg.Name != nil {
@@ -266,7 +272,7 @@ func (b *Briefer) ref(id string, kind health.Kind, ws string) ref {
 	r := ref{Name: cmp.Or(name, id), WS: ws}
 	q := url.Values{}
 	switch kind {
-	case health.KindSession, health.KindCron:
+	case health.KindSession:
 		q.Set("session", id)
 	case health.KindRemote:
 		node, key, ok := strings.Cut(id, "/")
@@ -336,6 +342,7 @@ func render(in input) string {
 	}
 	section(&b, "仍在等你的", in.Waiting, item)
 	section(&b, "未关闭的错误", in.Errors, item)
+	section(&b, "通知", in.Notices, item)
 	return b.String()
 }
 
@@ -360,7 +367,7 @@ func summary(c Counts, errors string) string {
 	for _, p := range []struct {
 		label string
 		n     int
-	}{{"完成", c.Done}, {"失败", c.Failed}, {"等你", c.Waiting}, {errors, c.Errors}} {
+	}{{"完成", c.Done}, {"失败", c.Failed}, {"等你", c.Waiting}, {errors, c.Errors}, {"通知", c.Notices}} {
 		if p.n > 0 {
 			parts = append(parts, fmt.Sprintf("%s %d", p.label, p.n))
 		}
