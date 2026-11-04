@@ -15,7 +15,7 @@ import { NZ_CONTRACT } from './contract.js';
 import { selection, sessionList, ui } from './state.js';
 import { esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
 import { REMOTE_FILES_UNSUPPORTED, isDiscoveredKey, nodeServesFiles, sid } from './session_ident.js';
-import { openFilePreview, resolveProjectForAbsPath } from './file_refs.js';
+import { notePreviewEvent, openFilePreview, resolveProjectForAbsPath } from './file_refs.js';
 import { crumbsHtml, fileRowsHtml, isPreviewableOutput, mimeForPath, outputId, outputRowsHtml } from './file_rows.js';
 import { formatAbsTime, formatTimeShort } from './utilities.js';
 import { workbench } from './workbench.js';
@@ -233,9 +233,12 @@ function paintTab(tab) {
 
 nzBus.addEventListener('workbench:tab', (e) => paintTab(e.detail.tab));
 
-// noteWorkbenchEvent takes a live event of the subject.
+// noteWorkbenchEvent takes a live event of the subject; the previews follow
+// the files it writes (file_refs.js).
 export function noteWorkbenchEvent(ev) {
   if (ev.activity || ev.type === 'result') scheduleRefresh();
+  const s = subject();
+  if (s) notePreviewEvent(s.key, s.node, ev);
 }
 
 // session:event is a live event of the selected session (event_stream.js);

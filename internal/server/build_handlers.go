@@ -187,6 +187,7 @@ func buildProjectHandlers(
 		UploadQuotaBytes: defaultUploadQuotaBytes,
 		AllowedRoot:      opts.AllowedRoot,
 		ValidateWS:       validateWorkspace,
+		TrustedProxy:     opts.TrustedProxy,
 	})
 }
 

@@ -66,6 +66,8 @@ export const NZ_CONTRACT = Object.freeze({
     planner_notes: '/api/planner/notes',
     planner_send: '/api/planner/send',
     planner_state: '/api/planner/state',
+    preview: '/api/preview',
+    preview_token_path___: '/api/preview/{token}/{path...}',
     projects: '/api/projects',
     projects_config: '/api/projects/config',
     projects_favorite: '/api/projects/favorite',

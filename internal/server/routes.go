@@ -107,6 +107,11 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	// schema (recon surface); the login page loads no /static/ JS (#1328).
 	// Modules, stylesheets and vendored libraries, all from the embedded table.
 	s.mux.HandleFunc("GET /static/{file...}", auth(handleStaticAsset))
+	// A directory-level HTML preview's reads: the signed token in the path is
+	// the credential, because a sandboxed preview page's subresource requests
+	// carry no dashboard auth. Minted by POST /api/preview behind the API
+	// chain; dashproject.HandlePreviewAsset verifies it before anything else.
+	s.mux.HandleFunc("GET /api/preview/{token}/{path...}", hs.projectH.HandlePreviewAsset)
 	s.mux.HandleFunc("GET /ws", s.hub.HandleUpgrade)
 	if s.reverseNodeServer != nil {
 		s.mux.Handle("GET /ws-node", s.reverseNodeServer)
