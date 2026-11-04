@@ -1,8 +1,9 @@
 // E2E: the gateway's side notes in the session view (session_notes.js,
 // planner RFC §15.3 ③): GET /api/sessions/notes places them among the
 // bubbles by time, a session_note frame adds one live, neither starts a turn,
-// a note's 查看 opens its 等你 item on the Planner page, and a closed item's
-// note loses the link.
+// a note's 查看 opens its 等你 item on the Planner page, a closed item's note
+// loses the link, and a new socket lists the notes pushed while it was down.
+// data-inbox-item anchors a note to its item for a notification's click.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
 const { waitForWs } = require('./shim_wait');
@@ -53,6 +54,7 @@ test('side notes sit among the bubbles by time, arrive live and start no turn', 
     await expect(pane.locator('[data-note-id="h1"]')).toContainText('进入「失败」（限流）');
     await expect(pane.locator('[data-note-id="h2"]')).toContainText('已从「失败」恢复');
     await expect(pane.locator('[data-note-id="open-in_1"]')).toContainText('等你 · 错误 · 会话失败：myproject');
+    await expect(pane.locator('[data-inbox-item="in_1"]')).toHaveAttribute('data-note-id', 'open-in_1');
     // Notes are not bubbles: the transcript's own bookkeeping never sees them.
     await expect(pane.locator('.event.gw-note')).toHaveCount(0);
 
@@ -68,7 +70,8 @@ test('side notes sit among the bubbles by time, arrive live and start no turn', 
 
     // 查看 opens the item on the Planner page.
     await pane.locator('[data-note-id="open-in_1"] .gw-note-link').click();
-    await expect(page.locator('#pl-wait .pl-card[data-id="in_1"]')).toHaveClass(/pl-focus/);
+    await expect(page.locator('body')).toHaveClass(/nz-view-planner/);
+    await expect(page.locator('#pl-wait .pl-card[data-id="in_1"]')).toBeVisible();
 
     // Back on the session, a close note drops the link; the notes survive the repaint.
     await page.click('#abnav-chat');
@@ -78,6 +81,14 @@ test('side notes sit among the bubbles by time, arrive live and start no turn', 
     await expect(pane.locator('[data-note-id="close-in_1"]')).toContainText('等你 · 已关闭 · 会话失败：myproject');
     await expect(pane.locator('.gw-note-link')).toHaveCount(0);
     await expect(pane.locator('[data-note-id="x1"]')).toHaveCount(0);
+    await expect(page.locator('#running-banner')).toHaveClass(/nz-hidden/);
+
+    // A note pushed while the socket is down comes with the next one's list.
+    NOTES.push({ id: 'h4', key: A, time: iso(Date.now()), kind: 'health', from: 'waiting', to: 'stalled' });
+    const conns = mock.wsConnections.length;
+    conn.close();
+    await expect.poll(() => mock.wsConnections.length).toBeGreaterThan(conns);
+    await expect(pane.locator('[data-note-id="h4"]')).toContainText('进入「停滞」');
     await expect(page.locator('#running-banner')).toHaveClass(/nz-hidden/);
   } finally {
     mock.server.close();

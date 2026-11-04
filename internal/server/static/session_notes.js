@@ -12,21 +12,21 @@
 // on #events-scroll places the notes again after a repaint, a page of earlier
 // events or a trim; a note older than the first bubble waits while earlier
 // events are still to load. data-note-id is a note's stable anchor and
-// data-item-id its 等你 item, for focusSessionNote.
+// data-inbox-item its 等你 item: a notification's click scrolls to
+// #main [data-inbox-item="<id>"] (notify.js, §15.3 ④).
 import { NZ_CONTRACT } from './contract.js';
 import { selection } from './state.js';
 import { esc, escAttr, fetchJSON, nzBus, nzViews, registerActions } from './nz_util.js';
 import { wsm } from './ws_manager.js';
+import { shell } from './shell.js';
+import { inbox } from './notify.js';
 import { HEALTH_ERROR_CLASSES, HEALTH_STATES } from './system_view.js';
-import { focusInboxItem } from './planner_view.js';
 import { formatTimeFull, formatTimeShort } from './utilities.js';
 
 // REPORT_REFETCH_MS: a turn's report reaches the Planner after the turn
 // ends, and reports are not pushed, so the list is fetched again this long
 // after a result.
 const REPORT_REFETCH_MS = 3000;
-// FOCUS_MS is how long a focused note stays highlighted.
-const FOCUS_MS = 2000;
 
 const ITEM_KINDS = { decision: '决定', question: '提问', error: '错误', notice: '通知' };
 const BAD = new Set(['waiting', 'stalled', 'failed']);
@@ -37,7 +37,6 @@ const notes = {
   gen: 0,
   el: null, // the #events-scroll observed
   observer: null,
-  focus: '', // an item to focus once its note is placed
   refetch: 0,
 };
 
@@ -75,7 +74,7 @@ function noteHtml(n, closed) {
     ? ' <button type="button" class="gw-note-link" data-action="session-note-item" data-id="' + escAttr(n.item) + '">查看</button>'
     : '';
   return '<div class="gw-note gw-' + b.tone + '" role="note" data-note-id="' + escAttr(n.id) + '" data-note-time="' + n.ms + '"' +
-    (n.item ? ' data-item-id="' + escAttr(n.item) + '"' : '') +
+    (n.item ? ' data-inbox-item="' + escAttr(n.item) + '"' : '') +
     ' title="' + escAttr(formatTimeFull(n.ms) + (n.evidence ? ' · ' + n.evidence : '')) + '">' +
     '<span class="gw-note-icon" aria-hidden="true">' + esc(b.icon) + '</span>' +
     '<span class="gw-note-text">' + esc(b.text) + '</span>' + link +
@@ -113,7 +112,6 @@ function placeNotes() {
     else el.insertAdjacentHTML('beforeend', html);
     shown.add(n.id);
   }
-  applyFocus();
 }
 
 // relink drops the 查看 link of the notes whose item a close note closed.
@@ -153,7 +151,7 @@ export function startSessionNotes() {
   notes.observer?.disconnect();
   notes.el = el;
   const key = selection.node === 'local' || !selection.node ? selection.key || '' : '';
-  if (key !== notes.key) { notes.list = []; notes.focus = ''; }
+  if (key !== notes.key) notes.list = [];
   notes.key = key;
   if (!key) { notes.observer = null; return; }
   // Our own inserts call back too; the second pass finds nothing to add.
@@ -161,24 +159,6 @@ export function startSessionNotes() {
   notes.observer.observe(el, { childList: true });
   placeNotes();
   fetchNotes();
-}
-
-// focusSessionNote scrolls to the note of 等你 item id on the session shown
-// and highlights it, once it is placed if it is not yet.
-export function focusSessionNote(id) {
-  notes.focus = id || '';
-  applyFocus();
-}
-
-function applyFocus() {
-  if (!notes.focus || !notes.el) return;
-  const sel = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(notes.focus) : notes.focus;
-  const node = notes.el.querySelector(':scope > .gw-note[data-item-id="' + sel + '"]');
-  if (!node) return;
-  notes.focus = '';
-  node.scrollIntoView({ block: 'center' });
-  node.classList.add('gw-focus');
-  setTimeout(() => node.classList.remove('gw-focus'), FOCUS_MS);
 }
 
 wsm.on(NZ_CONTRACT.WS.session_note, (msg) => {
@@ -191,6 +171,11 @@ wsm.on(NZ_CONTRACT.WS.session_note, (msg) => {
   if (wasBottom) el.scrollTop = el.scrollHeight;
 });
 
+// Frames pushed while the socket was down are lost: list again on a new one.
+wsm.onReady(() => {
+  if (notes.key && notes.el?.isConnected) fetchNotes();
+});
+
 // A turn's end may carry a report to the Planner; fetch again shortly after.
 nzBus.addEventListener('session:event', (e) => {
   if (e.detail?.ev?.type !== 'result' || !notes.key || notes.key !== selection.key) return;
@@ -198,6 +183,13 @@ nzBus.addEventListener('session:event', (e) => {
   notes.refetch = setTimeout(fetchNotes, REPORT_REFETCH_MS);
 });
 
+// 查看 opens the Planner page on the item through the hand-off a
+// notification without a session takes (§15.3 ④): inbox.focus names the
+// item, 'inbox:focus' tells a list already painted.
 registerActions({
-  'session-note-item': (el) => focusInboxItem(el.dataset.id),
+  'session-note-item': (el) => {
+    inbox.focus = el.dataset.id || '';
+    shell.setActivityView('planner');
+    nzBus.dispatchEvent(new CustomEvent('inbox:focus'));
+  },
 });
