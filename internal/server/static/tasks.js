@@ -22,7 +22,7 @@ const mounts = new Map();
 
 const STATE_LABEL = { doing: '进行中', waiting: '等你', failed: '失败', done: '已完成', remind: '待提醒' };
 const KIND_LABEL = { session: '派出的会话', promise: '承诺' };
-const BY_LABEL = { planner: 'Planner 判断', user: '你标记', auto: '提醒后自动完成', health: '按健康状态' };
+const BY_LABEL = { planner: 'Planner 判断', user: '你标记', auto: '提醒后自动完成', health: '按健康状态', ended: '会话已结束' };
 const SECTIONS = [
   { id: 'doing', label: '进行中', states: ['waiting', 'failed', 'doing'] },
   { id: 'remind', label: '待提醒', states: ['remind'] },

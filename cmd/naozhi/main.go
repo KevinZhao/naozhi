@@ -588,6 +588,7 @@ func main() {
 		},
 	})
 	routerEvents.BindMonitor(healthMon.Poke)
+	healthMon.Subscribe(tasks.Observe)
 	go healthMon.Run(ctx)
 	plannerAgent.Start(ctx, srv, healthMon.Snapshot)
 	notifier.SetHealth(healthMon)

@@ -73,6 +73,11 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
       expect(mock.tasksCalls[1]).toEqual({ id: 'task:done1', state: 'doing' });
       await expect(group.locator('.tk-sec-doing .tk-card[data-id="task:done1"]')).toBeVisible();
       await expect(page.locator('#pl-task-n')).toHaveText('3');
+      // The session waiting on you, marked back in progress from its menu.
+      await group.locator('.tk-card[data-id="' + TASK + '"] .tk-menu').selectOption('doing');
+      await expect.poll(() => mock.tasksCalls.length).toBe(3);
+      expect(mock.tasksCalls[2]).toEqual({ id: TASK, state: 'doing' });
+      await expect(group.locator('.tk-card[data-id="' + TASK + '"] .tk-state')).toHaveText('进行中');
 
       // A dispatched session's title opens it in the middle column.
       await group.locator('.tk-card[data-id="' + TASK + '"] .tk-open').click();

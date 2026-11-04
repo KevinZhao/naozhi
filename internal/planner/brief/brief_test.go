@@ -207,6 +207,12 @@ func TestRender(t *testing.T) {
 		{ID: "pr_1", Kind: task.KindPromise, Title: "CI 绿了告诉你", State: task.Doing, Due: at(3, 8, 0), Created: at(1, 9, 0)},
 		{ID: "pr_2", Kind: task.KindPromise, Title: "明早提醒你", State: task.Remind, Created: at(3, 8, 0)},
 		{ID: "task:cd34", Kind: task.KindSession, Title: "iso 跑测试", State: task.Done, Created: at(2, 9, 0)},
+		// Not news: an undated promise, one not due yet, a session at work
+		// and one that failed and retired.
+		{ID: "pr_3", Kind: task.KindPromise, Title: "盯着 CI", State: task.Doing, CloseWhen: "CI 绿", Created: at(1, 9, 0)},
+		{ID: "pr_4", Kind: task.KindPromise, Title: "下午看看", State: task.Doing, Due: at(3, 15, 0), Created: at(1, 9, 0)},
+		{ID: "task:ef56", Kind: task.KindSession, Title: "iso 在跑", State: task.Doing, Created: at(2, 9, 0)},
+		{ID: "task:gh78", Kind: task.KindSession, Title: "iso 挂了", State: task.Failed, Retired: at(2, 10, 0), Created: at(1, 9, 0)},
 	}
 	f.now = at(3, 9, 0)
 	b := f.briefer(names, reg)

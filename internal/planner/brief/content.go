@@ -226,11 +226,17 @@ func (b *Briefer) gather(since, now time.Time) input {
 		}
 	}
 
-	// 未完成的任务: what 任务 shows in progress (a promise before its due
-	// reminder is not due yet), in its order.
+	// 未完成的任务, in 任务's order: the promises past due and not done
+	// (§15.4), and the live dispatched sessions waiting on the user or
+	// failed; one only in progress is not news.
 	if b.cfg.Tasks != nil {
 		for _, t := range b.cfg.Tasks() {
-			if t.State == task.Done || t.State == task.Remind {
+			switch {
+			case t.State == task.Done || t.State == task.Remind:
+				continue
+			case t.Kind == task.KindPromise && (t.Due.IsZero() || t.Due.After(now)):
+				continue
+			case t.Kind == task.KindSession && (t.State == task.Doing || !t.Retired.IsZero()):
 				continue
 			}
 			r := ref{Name: t.Title}

@@ -3,8 +3,9 @@
 // the promises, in one list with one state model. A dispatched session's
 // 等你 and 失败 follow its health state, so they come and go with it; 已完成
 // is the Planner's judgment (its status action block) or the user's, kept in
-// the sidecar. A promise is 待提醒 before its due reminder, done once
-// closed. Every state someone sets is journaled with who and why; a done
+// the sidecar. A retired session (gone from the router) keeps the failure
+// it had, else it ended: 已完成 by itself. A promise is 待提醒 before its
+// due reminder, done once closed. Every state someone sets is journaled with who and why; a done
 // task leaves the list Archive after it was done, its data kept.
 package task
 
@@ -50,6 +51,7 @@ const (
 	ByUser    By = "user"    // 你标记
 	ByAuto    By = "auto"    // a pure reminder done once it reminded
 	ByHealth  By = "health"  // the session's health state
+	ByEnded   By = "ended"   // a retired session that had not failed
 )
 
 // Kind is where a task comes from.
@@ -75,8 +77,10 @@ type Task struct {
 	// Due and CloseWhen are a promise's.
 	Due       time.Time `json:"due,omitzero"`
 	CloseWhen string    `json:"close_when,omitempty"`
-	// Health is a dispatched session's health state, when the table has it.
-	Health health.State `json:"health,omitempty"`
+	// Health is a dispatched session's health state, when the table has it;
+	// Retired is when the session was first seen gone from the router.
+	Health  health.State `json:"health,omitempty"`
+	Retired time.Time    `json:"retired,omitzero"`
 }
 
 // Errors Set returns.
@@ -108,22 +112,27 @@ func New(cfg Config) *Board {
 	return &Board{cfg: cfg}
 }
 
-// sessionState is a dispatched session's task state: done or failed as
-// someone marked it, else what its health says, else 进行中.
-func sessionState(m *sidecar.Mark, h health.Unit, created time.Time) (State, By, string, time.Time) {
-	if m != nil && (State(m.State) == Done || State(m.State) == Failed) {
-		return State(m.State), By(m.By), m.Why, m.At
+// sessionState is a dispatched session's task state. Its own course comes
+// first: while live, 等你 or 失败 as its health says, else 进行中; once
+// retired, the failure it had, else 已完成 as ended. A mark holds over that:
+// done or failed always, doing (reopened) unless the session entered its
+// state after it.
+func sessionState(m sidecar.Meta, h health.Unit) (State, By, string, time.Time) {
+	st, by, why, at := Doing, By(""), "", m.Created
+	switch {
+	case !m.Retired.IsZero() && m.Failure != nil:
+		st, by, why, at = Failed, ByHealth, m.Failure.Why, m.Failure.At
+	case !m.Retired.IsZero():
+		st, by, at = Done, ByEnded, m.Retired
+	case h.State == health.Waiting:
+		st, by, at = Waiting, ByHealth, h.Since
+	case h.State == health.Failed:
+		st, by, why, at = Failed, ByHealth, h.Evidence, h.Since
 	}
-	switch h.State {
-	case health.Waiting:
-		return Waiting, ByHealth, "", h.Since
-	case health.Failed:
-		return Failed, ByHealth, h.Evidence, h.Since
+	if mk := m.Mark; mk != nil && (State(mk.State) != Doing || by == "" || !mk.At.Before(at)) {
+		return State(mk.State), By(mk.By), mk.Why, mk.At
 	}
-	if m != nil {
-		return Doing, By(m.By), m.Why, m.At
-	}
-	return Doing, "", "", created
+	return st, by, why, at
 }
 
 // promiseState is a promise's task state.
@@ -159,8 +168,8 @@ func (b *Board) List() []Task {
 				continue
 			}
 			u := units[m.Key]
-			t := Task{ID: m.Key, Kind: KindSession, Title: cmp.Or(m.Title, m.Key), Created: m.Created, Health: u.State}
-			t.State, t.By, t.Why, t.At = sessionState(m.Mark, u, m.Created)
+			t := Task{ID: m.Key, Kind: KindSession, Title: cmp.Or(m.Title, m.Key), Created: m.Created, Health: u.State, Retired: m.Retired}
+			t.State, t.By, t.Why, t.At = sessionState(m, u)
 			out = append(out, t)
 		}
 	}
@@ -257,6 +266,23 @@ func (b *Board) Set(id string, state State, by By, why string) error {
 	}
 	b.record(unit, id, state, by, why)
 	return nil
+}
+
+// Observe is a health.Machine subscriber: it keeps on a dispatched session's
+// sidecar the failure health judged it in, cleared when it leaves it, so a
+// session that failed still shows 失败 once retired from the router.
+func (b *Board) Observe(ev health.Event) {
+	t := ev.Transition
+	if t == nil || b.cfg.Sessions == nil || !sessionkey.IsTaskKey(t.Unit.ID) {
+		return
+	}
+	var f *sidecar.Mark
+	if t.Unit.State == health.Failed {
+		f = &sidecar.Mark{State: string(Failed), By: string(ByHealth), Why: textutil.TruncateRunes(t.Unit.Evidence, whyRunes), At: t.Unit.Since}
+	}
+	if _, err := b.cfg.Sessions.SetFailure(t.Unit.ID, f); err != nil {
+		slog.Warn("task: failure not saved", "key", t.Unit.ID, "err", err)
+	}
 }
 
 // journalData is a task state's notify journal entry.

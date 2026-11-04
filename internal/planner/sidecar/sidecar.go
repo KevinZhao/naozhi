@@ -5,7 +5,7 @@
 //
 // v0.2.0 records the sessions the Planner dispatches (purpose "task", parent
 // planner:main), and v0.2.1 their task state as the Planner or the user set
-// it (§15.4). A file outlives its session by Retention, counted from when
+// it and the failure health last judged them in (§15.4). A file outlives its session by Retention, counted from when
 // the session was first seen gone, so a retired session's lineage is still
 // there to read for a while.
 package sidecar
@@ -66,6 +66,9 @@ type Meta struct {
 	// Mark is the task state the Planner or the user last set; nil leaves
 	// it to the session's health (planner/task).
 	Mark *Mark `json:"mark,omitempty"`
+	// Failure is the failure health last judged the session in, nil once it
+	// recovered: a retired session keeps it (planner/task).
+	Failure *Mark `json:"failure,omitempty"`
 }
 
 // Mark is a task state set by someone: planner/task's State and By values.
@@ -215,6 +218,23 @@ func (s *Store) List() []Meta {
 
 // SetMark records key's task state; false when key has no sidecar.
 func (s *Store) SetMark(key string, mark Mark) (bool, error) {
+	return s.update(key, func(m *Meta) bool { m.Mark = &mark; return true })
+}
+
+// SetFailure records the failure health judged key in, or that it has none
+// (nil); false when key has no sidecar.
+func (s *Store) SetFailure(key string, f *Mark) (bool, error) {
+	return s.update(key, func(m *Meta) bool {
+		if f == nil && m.Failure == nil {
+			return false
+		}
+		m.Failure = f
+		return true
+	})
+}
+
+// update applies fn to key's sidecar and saves it when fn reports a change.
+func (s *Store) update(key string, fn func(*Meta) bool) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m, ok := s.m[key]
@@ -224,7 +244,9 @@ func (s *Store) SetMark(key string, mark Mark) (bool, error) {
 	if s.newer[key] {
 		return true, errors.New("sidecar: written by a newer naozhi")
 	}
-	m.Mark = &mark
+	if !fn(&m) {
+		return true, nil
+	}
 	if err := s.writeLocked(m); err != nil {
 		return true, err
 	}

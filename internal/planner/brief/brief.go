@@ -78,8 +78,8 @@ type Config struct {
 	Health  func() health.Snapshot
 	// Inbox returns the inbox's items (only the open ones are read).
 	Inbox func() []notify.Item
-	// Tasks returns the 任务 list (task.Board.List); those in progress are
-	// listed.
+	// Tasks returns the 任务 list (task.Board.List); the promises past due
+	// and the sessions waiting or failed are listed.
 	Tasks func() []task.Task
 	// Push sends the brief's notification (notify.Notifier.Announce).
 	Push func(notify.Push) bool

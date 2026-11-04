@@ -16,29 +16,42 @@ import (
 var t0 = time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)
 
 func TestSessionState(t *testing.T) {
-	mark := func(s State, by By) *sidecar.Mark {
-		return &sidecar.Mark{State: string(s), By: string(by), Why: "why", At: t0.Add(time.Hour)}
+	// Health entered its state at t0; a mark set at t0+1h is newer, one set
+	// at t0-1h older.
+	mark := func(s State, by By, d time.Duration) *sidecar.Mark {
+		return &sidecar.Mark{State: string(s), By: string(by), Why: "why", At: t0.Add(d)}
 	}
+	failure := &sidecar.Mark{State: string(Failed), By: string(ByHealth), Why: "exit 1", At: t0.Add(-2 * time.Hour)}
+	retired := t0.Add(-time.Hour)
 	cases := []struct {
-		name   string
-		mark   *sidecar.Mark
-		health health.State
-		want   State
-		by     By
+		name    string
+		mark    *sidecar.Mark
+		failure *sidecar.Mark
+		retired time.Time
+		health  health.State
+		want    State
+		by      By
 	}{
-		{"new", nil, health.Unknown, Doing, ""},
-		{"running", nil, health.Active, Doing, ""},
-		{"asking", nil, health.Waiting, Waiting, ByHealth},
-		{"failed", nil, health.Failed, Failed, ByHealth},
-		{"stalled is still doing", nil, health.Stalled, Doing, ""},
-		{"recovered", nil, health.Idle, Doing, ""},
-		{"done by the Planner holds over health", mark(Done, ByPlanner), health.Waiting, Done, ByPlanner},
-		{"failed by the Planner", mark(Failed, ByPlanner), health.Idle, Failed, ByPlanner},
-		{"reopened follows health", mark(Doing, ByUser), health.Failed, Failed, ByHealth},
-		{"reopened", mark(Doing, ByUser), health.Idle, Doing, ByUser},
+		{"new", nil, nil, time.Time{}, health.Unknown, Doing, ""},
+		{"running", nil, nil, time.Time{}, health.Active, Doing, ""},
+		{"asking", nil, nil, time.Time{}, health.Waiting, Waiting, ByHealth},
+		{"failed", nil, nil, time.Time{}, health.Failed, Failed, ByHealth},
+		{"stalled is still doing", nil, nil, time.Time{}, health.Stalled, Doing, ""},
+		{"recovered", nil, failure, time.Time{}, health.Idle, Doing, ""},
+		{"done by the Planner holds over health", mark(Done, ByPlanner, time.Hour), nil, time.Time{}, health.Waiting, Done, ByPlanner},
+		{"failed by the Planner", mark(Failed, ByPlanner, time.Hour), nil, time.Time{}, health.Idle, Failed, ByPlanner},
+		{"reopened after it failed", mark(Doing, ByUser, time.Hour), nil, time.Time{}, health.Failed, Doing, ByUser},
+		{"failed again after the reopen", mark(Doing, ByUser, -time.Hour), nil, time.Time{}, health.Failed, Failed, ByHealth},
+		{"reopened", mark(Doing, ByUser, -time.Hour), nil, time.Time{}, health.Idle, Doing, ByUser},
+		{"retired", nil, nil, retired, health.Unknown, Done, ByEnded},
+		{"retired after it failed", nil, failure, retired, health.Unknown, Failed, ByHealth},
+		{"retired, reopened before", mark(Doing, ByUser, -2*time.Hour), nil, retired, health.Unknown, Done, ByEnded},
+		{"retired, reopened since", mark(Doing, ByUser, time.Hour), nil, retired, health.Unknown, Doing, ByUser},
+		{"retired, done by the Planner", mark(Done, ByPlanner, -2*time.Hour), failure, retired, health.Unknown, Done, ByPlanner},
 	}
 	for _, c := range cases {
-		got, by, _, _ := sessionState(c.mark, health.Unit{State: c.health, Since: t0}, t0)
+		m := sidecar.Meta{Created: t0.Add(-3 * time.Hour), Mark: c.mark, Failure: c.failure, Retired: c.retired}
+		got, by, _, _ := sessionState(m, health.Unit{State: c.health, Since: t0})
 		if got != c.want || by != c.by {
 			t.Errorf("%s: %s by %q, want %s by %q", c.name, got, by, c.want, c.by)
 		}
@@ -180,5 +193,15 @@ func TestBoard(t *testing.T) {
 	}
 	if _, ok := side.Get("task:a"); !ok {
 		t.Error("archived task's sidecar dropped")
+	}
+
+	// task:b fails and then leaves the router: it stays failed once
+	// retired, with health's evidence.
+	b.Observe(health.Event{Transition: &health.Transition{From: health.Waiting,
+		Unit: health.Unit{ID: "task:b", State: health.Failed, Evidence: "exit 1", Since: now}}})
+	b.cfg.Health = func() health.Snapshot { return health.Snapshot{} }
+	side.Sweep(func(string) bool { return false })
+	if l := b.List(); len(l) == 0 || l[0].ID != "task:b" || l[0].State != Failed || l[0].Why != "exit 1" || l[0].Retired.IsZero() {
+		t.Errorf("retired after it failed: %+v", l)
 	}
 }

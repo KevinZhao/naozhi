@@ -301,6 +301,11 @@ func TestRenderSnapshot(t *testing.T) {
 	if got := renderSnapshot(withPromises); !strings.Contains(got, "未完成的承诺（0）：") || strings.Contains(got, "等你") {
 		t.Errorf("wired-but-empty promises, unwired waiting:\n%s", got)
 	}
+	// A long promise is cut in its text, never its ID.
+	withPromises.Promises = []Promise{{ID: "pr_abcdefghij", Text: strings.Repeat("长", 200), Due: base.Now.Add(time.Hour)}}
+	if got := renderSnapshot(withPromises); !strings.Contains(got, "- [pr_abcdefghij] 长长") {
+		t.Errorf("long promise lost its ID:\n%s", got)
+	}
 
 	big := base
 	big.Waiting = nil

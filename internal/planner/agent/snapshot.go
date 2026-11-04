@@ -110,11 +110,11 @@ func renderSnapshot(in snapshotInput) string {
 				lines = append(lines, fmt.Sprintf("- …另有 %d 条", len(items)-i))
 				break
 			}
-			line := "- " + p.Text + "（"
+			// The ID leads, so truncating a long line cuts the text only.
+			line := "- [" + p.ID + "] " + p.Text
 			if !p.Due.IsZero() {
-				line += "到期 " + p.Due.In(in.Now.Location()).Format("01-02 15:04") + "，"
+				line += "（到期 " + p.Due.In(in.Now.Location()).Format("01-02 15:04") + "）"
 			}
-			line += p.ID + "）"
 			lines = append(lines, line)
 		}
 	}
