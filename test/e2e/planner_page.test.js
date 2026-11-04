@@ -8,7 +8,7 @@
 // left column to its strip; the phone layout's collapsible left block; the
 // planner.enabled=false explanation.
 const { test, expect } = require('@playwright/test');
-const { startMockServer } = require('./mock-server');
+const { startMockServer, defaultSessions } = require('./mock-server');
 const { waitForWs } = require('./shim_wait');
 
 const SESSION = 'dashboard:direct:2026-01-01-120000-1:myproject';
@@ -194,6 +194,44 @@ test('phone: the left column is a collapsible block above the stream', async ({ 
   } finally {
     await ctx.close();
     mock.server.close();
+  }
+});
+
+// A remote node's session that failed in a workspace is an item whose unit
+// is "<node>/<key>": its card names the session and opens it on that node.
+test('a remote session item opens the session on its node', async ({ browser }) => {
+  const REMOTE_KEY = 'dashboard:direct:2026-01-01-120009-9:app';
+  const data = defaultSessions();
+  data.sessions.push({ ...data.sessions[2], key: REMOTE_KEY, node: 'mini', session_id: 'sess-remote', user_label: 'iso 远程修 CI', project: 'app' });
+  data.nodes = { local: { display_name: 'Local', status: 'ok' }, mini: { display_name: 'Mini', status: 'ok' } };
+  const box = { open: [
+    { id: 'in_rf', kind: 'error', level: 'timely', unit: 'mini/' + REMOTE_KEY, ws: 'ws_app00001', title: 'iso 远程修 CI 失败', why: '失败', created: iso(now - 60000), state: 'open', source: 'failed:mini/' + REMOTE_KEY },
+  ], closed: [], counts: { open: 1, badge: 0 } };
+  for (const [name, viewport, extra] of [['desktop', { width: 1280, height: 800 }, {}], ['mobile', { width: 390, height: 844 }, { isMobile: true, hasTouch: true }]]) {
+    const ctx = await browser.newContext({ viewport, ...extra });
+    const page = await ctx.newPage();
+    const mock = await startMockServer({
+      ws: true, sessions: data, plannerEvents: plannerEvents(), inbox: box, tasks: { tasks: [] },
+      planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
+    });
+    try {
+      await page.goto(mock.url + '/dashboard');
+      await waitForWs(page, 'CONNECTED');
+      await page.click('#abnav-planner');
+      if (name === 'mobile') await page.click('#pl-left-toggle');
+      const card = page.locator('.pl-card[data-id="in_rf"]');
+      await expect(card.locator('.pl-card-meta')).toContainText('app · iso 远程修 CI');
+      const open = card.locator('.pl-link');
+      await expect(open).toHaveAttribute('data-node', 'mini');
+      await expect(open).toHaveAttribute('data-key', REMOTE_KEY);
+      await page.screenshot({ path: test.info().outputPath('planner-remote-item-' + name + '.png') });
+      await open.click();
+      await page.waitForFunction((key) => window.nz.test.selectedKey === key, REMOTE_KEY);
+      await expect(page.locator('body')).not.toHaveClass(/nz-view-planner/);
+    } finally {
+      await ctx.close();
+      mock.server.close();
+    }
   }
 });
 

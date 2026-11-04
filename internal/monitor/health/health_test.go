@@ -512,6 +512,25 @@ func TestRemoteWorkspace(t *testing.T) {
 	if row := f.Sessions[1]; row.Node != "mini" || row.Key != "a" || row.Workspace != "ws_app00001" {
 		t.Errorf("index row = %+v, want mini/a in ws_app00001", row)
 	}
+
+	// mini goes down and its sessions are purged: mini/a stays in app, in
+	// the snapshot and in index.json, also after an index refresh.
+	r.run([]step{{tick: Interval, facts: []Fact{{Node: "mini", NodeDown: true}}}})
+	r.m.RefreshIndex()
+	snap = r.m.Snapshot()
+	if len(snap.Units) != 2 || snap.Units[0].ID != "mini/a" || snap.Units[0].Workspace != "ws_app00001" || snap.Unowned != 1 {
+		t.Errorf("after mini went down: units %+v, unowned %d", snap.Units, snap.Unowned)
+	}
+	if raw, err = os.ReadFile(idx); err != nil {
+		t.Fatal(err)
+	}
+	f = indexFile{}
+	if err := json.Unmarshal(raw, &f); err != nil || len(f.Sessions) != 2 {
+		t.Fatalf("index after mini went down = %s (err %v)", raw, err)
+	}
+	if row := f.Sessions[0]; row.Node != "mini" || row.Key != "a" || row.Workspace != "ws_app00001" {
+		t.Errorf("index row after mini went down = %+v, want mini/a in ws_app00001", row)
+	}
 }
 
 func TestClassify(t *testing.T) {

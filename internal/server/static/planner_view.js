@@ -105,10 +105,19 @@ function waitedText(ms) {
   return Math.floor(h / 24) + ' 天';
 }
 
-// unitTarget is the listed local session an item is about, or null.
+// unitTarget is the listed session an item is about, or null: a local one,
+// or a remote node's, whose unit is "<node>/<key>".
 function unitTarget(unit) {
-  const s = unit ? sessionList.sessionsData[sid(unit, 'local')] : null;
-  return s ? { key: unit, title: s.user_label || s.summary || s.last_prompt || unit, project: s.project || '' } : null;
+  if (!unit) return null;
+  let key = unit, node = 'local';
+  let s = sessionList.sessionsData[sid(key, node)];
+  const i = unit.indexOf('/');
+  if (!s && i > 0) {
+    node = unit.slice(0, i);
+    key = unit.slice(i + 1);
+    s = sessionList.sessionsData[sid(key, node)];
+  }
+  return s ? { key, node, title: s.user_label || s.summary || s.last_prompt || key, project: s.project || '' } : null;
 }
 
 function itemHtml(it) {
@@ -117,7 +126,7 @@ function itemHtml(it) {
   const target = unitTarget(it.unit);
   const meta = target
     ? [target.project, target.title].filter(Boolean).map(esc).join(' · ') +
-      ' <button type="button" class="pl-link" data-action="session-select" data-key="' + escAttr(target.key) + '" data-node="local">打开</button>'
+      ' <button type="button" class="pl-link" data-action="session-select" data-key="' + escAttr(target.key) + '" data-node="' + escAttr(target.node) + '">打开</button>'
     : (it.unit ? esc(it.unit === PLANNER_KEY ? 'Planner' : it.unit) : '');
   const acts = decisionActsHtml(it);
   return '<div class="pl-card pl-k-' + kind + (isLit(it.id) ? ' inbox-lit' : '') + '" role="listitem" data-id="' + escAttr(it.id) + '">' +
