@@ -4,10 +4,9 @@
 // the inbox itself shows it. A click brings the tab forward and goes to what
 // the item is about (§15.3 ④): its session, scrolled to the item's note
 // (an element under #main with data-inbox-item="<id>"; without one the
-// session just opens), or with no listed session the Planner (its drawer
-// when the shell has openPlannerDrawer, else the page) with the item's card
-// brought into view (inbox.focus, taken by revealFocus once a list paints
-// it). inbox_count frames carry the open "等你" counts (open: every open
+// session just opens), or with no listed session the Planner page with the
+// item's card brought into view (inbox.focus, taken by revealFocus once a
+// list paints it; see openPlanner for the drawer). inbox_count frames carry the open "等你" counts (open: every open
 // item; badge: decisions and questions, the §10.1 badge), re-dispatched on
 // nzBus as 'inbox:count' for the Planner page's badge. The frames only come
 // on a change: the page takes the first counts from GET /api/inbox (its
@@ -105,10 +104,13 @@ function scrollToNote(id) {
 }
 
 // openPlanner opens the Planner on item id; 'inbox:focus' lets a list
-// already painted reveal it.
+// already painted reveal it. An item goes to the page, whose left column
+// lists every open one: the drawer (shell.openPlannerDrawer, §15.3 ②) holds
+// the conversation, which shows only the Planner's own decisions. The
+// drawer takes an open with no item.
 function openPlanner(id) {
   inbox.focus = id || '';
-  if (typeof shell.openPlannerDrawer === 'function') shell.openPlannerDrawer();
+  if (!id && typeof shell.openPlannerDrawer === 'function') shell.openPlannerDrawer();
   else if (shell.setActivityView) shell.setActivityView('planner');
   nzBus.dispatchEvent(new CustomEvent('inbox:focus'));
 }

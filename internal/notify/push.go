@@ -36,6 +36,9 @@ const systemTimeout = 10 * time.Second
 const (
 	titleRunes = 80
 	bodyRunes  = 240
+	// linkRunes caps the link the body ends with, leaving the rest of
+	// bodyRunes for what happened.
+	linkRunes = 160
 )
 
 // admitLocked decides whether an item of level is pushed now, counting a
@@ -123,19 +126,25 @@ func (n *Notifier) deliver(p Push) {
 // linkFor is base deep-linked to p (§15.3 ④), read by notify.js at load: a
 // push about a session opens it at the item's note
 // (#session=<key>&item=<id>); one about no session or the Planner opens the
-// Planner on the item (#planner&item=<id>). A link that would take over
-// half the body falls back to base.
+// Planner on the item (#planner&item=<id>). A session link over linkRunes
+// falls back to the Planner on the item, whose card opens the session.
 func linkFor(base string, p Push) string {
 	if base == "" {
 		return ""
 	}
-	frag := "planner"
-	if p.Unit != "" && p.Unit != sessionkey.PlannerMainKey {
-		frag = url.Values{"session": {p.Unit}, "item": {p.ID}}.Encode()
-	} else if p.ID != "" {
-		frag += "&" + url.Values{"item": {p.ID}}.Encode()
+	item := ""
+	if p.ID != "" {
+		item = "&item=" + url.QueryEscape(p.ID)
 	}
-	if link := base + "#" + frag; utf8.RuneCountInString(link) <= bodyRunes/2 {
+	if p.Unit != "" && p.Unit != sessionkey.PlannerMainKey {
+		// ':' stays as is: a fragment may hold it, URLSearchParams reads it,
+		// and session keys are full of them.
+		key := strings.ReplaceAll(url.QueryEscape(p.Unit), "%3A", ":")
+		if link := base + "#session=" + key + item; utf8.RuneCountInString(link) <= linkRunes {
+			return link
+		}
+	}
+	if link := base + "#planner" + item; utf8.RuneCountInString(link) <= linkRunes {
 		return link
 	}
 	return base

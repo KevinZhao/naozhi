@@ -101,8 +101,9 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
         expect(await page.evaluate(() => location.hash)).toBe('');
         await page.screenshot({ path: test.info().outputPath(`deep-link-planner-${name}.png`) });
 
-        // #session=&item=: the session, scrolled to the item's note.
-        await page.evaluate((key) => { location.hash = 'session=' + encodeURIComponent(key) + '&item=in_q'; }, SESSION);
+        // #session=&item=: the session, scrolled to the item's note. The key's
+        // ':' left as is, as notify.linkFor writes it.
+        await page.evaluate((key) => { location.hash = 'session=' + key + '&item=in_q'; }, SESSION);
         await page.waitForFunction((key) => window.nz.test.selectedKey === key, SESSION);
         await page.evaluate(() => {
           const note = document.createElement('div');

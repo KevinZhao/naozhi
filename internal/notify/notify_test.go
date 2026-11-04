@@ -373,18 +373,28 @@ func TestDecideOnce(t *testing.T) {
 
 func TestLinkFor(t *testing.T) {
 	const base = "http://127.0.0.1:8180/dashboard"
-	key := "dashboard:direct:alice:general"
+	const id = "in_abcdefghij"
+	hex := strings.Repeat("0123456789abcdef", 2)
 	for _, tc := range []struct {
 		name, base string
 		p          Push
 		want       string
 	}{
-		{"session", base, Push{ID: "in_1", Unit: key}, base + "#item=in_1&session=dashboard%3Adirect%3Aalice%3Ageneral"},
+		{"session", base, Push{ID: id, Unit: "dashboard:direct:alice:general"}, base + "#session=dashboard:direct:alice:general&item=" + id},
+		{"dashboard project", base, Push{ID: id, Unit: "dashboard:direct:2026-11-04-101530-naozhi-planner:general"},
+			base + "#session=dashboard:direct:2026-11-04-101530-naozhi-planner:general&item=" + id},
+		{"dashboard chinese", base, Push{ID: id, Unit: "dashboard:direct:2026-11-04-101530-周报:general"},
+			base + "#session=dashboard:direct:2026-11-04-101530-%E5%91%A8%E6%8A%A5:general&item=" + id},
+		{"dashboard resume", base, Push{ID: id, Unit: "dashboard:direct:r" + hex + ":general"},
+			base + "#session=dashboard:direct:r" + hex + ":general&item=" + id},
+		{"feishu", base, Push{ID: id, Unit: "feishu:group:oc_" + hex + ":general"},
+			base + "#session=feishu:group:oc_" + hex + ":general&item=" + id},
 		{"no session", base, Push{ID: "in_2"}, base + "#planner&item=in_2"},
 		{"planner", base, Push{ID: "in_3", Unit: "planner:main"}, base + "#planner&item=in_3"},
 		{"no id", base, Push{}, base + "#planner"},
-		{"too long", base, Push{ID: "in_4", Unit: strings.Repeat("k", 200)}, base},
-		{"no base", "", Push{ID: "in_5", Unit: key}, ""},
+		{"too long", base, Push{ID: "in_4", Unit: strings.Repeat("k", 200)}, base + "#planner&item=in_4"},
+		{"base too long", base + "/" + strings.Repeat("b", 200), Push{ID: "in_4"}, base + "/" + strings.Repeat("b", 200)},
+		{"no base", "", Push{ID: "in_5", Unit: "dashboard:direct:alice:general"}, ""},
 	} {
 		if got := linkFor(tc.base, tc.p); got != tc.want {
 			t.Errorf("%s: linkFor = %q, want %q", tc.name, got, tc.want)
