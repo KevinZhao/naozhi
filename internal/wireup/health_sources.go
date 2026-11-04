@@ -226,25 +226,34 @@ func daemonFact(d sysession.DaemonStatus) health.Fact {
 }
 
 // remoteFact reads one session row of a remote node's cached /api/sessions.
+// Its workspace is a directory on that node's machine.
 func remoteFact(nodeID string, down bool, m map[string]any) (health.Fact, bool) {
 	key, _ := m["key"].(string)
 	if key == "" {
 		return health.Fact{}, false
 	}
+	str := func(k string) string { s, _ := m[k].(string); return s }
 	f := health.Fact{
 		ID:       nodeID + "/" + key,
 		Kind:     health.KindRemote,
 		Source:   "node:" + nodeID,
 		Coverage: health.CoverageSnapshot,
+		Dir:      str("workspace"),
 		Node:     nodeID,
 		NodeDown: down,
 	}
-	state, _ := m["state"].(string)
-	setProcState(&f, state)
-	if r, _ := m["death_reason"].(string); failedDeath(r) {
+	setProcState(&f, str("state"))
+	if r := str("death_reason"); failedDeath(r) {
 		f.Failed = "death_reason=" + r
 	}
 	f.LastActive = unixMilli(jsonInt(m["last_active"]))
+	f.Index = &health.IndexEntry{
+		Key:        key,
+		Node:       nodeID,
+		Title:      cmp.Or(str("user_label"), str("summary")),
+		LastActive: f.LastActive,
+		Result:     str("last_response"),
+	}
 	return f, true
 }
 

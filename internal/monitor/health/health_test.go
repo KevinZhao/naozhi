@@ -461,6 +461,59 @@ func TestIndex(t *testing.T) {
 	}
 }
 
+// TestRemoteWorkspace: a remote session belongs to the workspace registered
+// for its directory on its node; the same path on another node, or here, is
+// someone else's, and an unregistered remote directory stays unowned.
+func TestRemoteWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "workspaces.json")
+	data, _ := json.Marshal(map[string]any{"v": workspace.Version, "workspaces": []workspace.Workspace{
+		{ID: "ws_app00001", Name: "app", Paths: map[string][]string{"mini": {"/srv/app"}}},
+	}})
+	if err := os.WriteFile(regPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reg := workspace.Load(regPath, "mac")
+	idx := filepath.Join(dir, "index.json")
+	r := newRig(t, Config{Workspaces: reg, IndexPath: idx})
+	remote := func(node, key, dir string) Fact {
+		return Fact{ID: node + "/" + key, Kind: KindRemote, Node: node, Dir: dir,
+			Index: &IndexEntry{Key: key, Node: node}}
+	}
+	facts := []Fact{
+		remote("mini", "a", "/srv/app/x"),
+		remote("box", "a", "/srv/app/x"), // after mini's hit is cached
+		remote("mini", "b", "/elsewhere"),
+		{ID: "s", Kind: KindSession, Dir: "/srv/app/x"},
+	}
+	r.run([]step{{facts: facts}, {tick: Interval, facts: facts}})
+
+	want := map[string]string{"mini/a": "ws_app00001", "box/a": "", "mini/b": "", "s": ""}
+	snap := r.m.Snapshot()
+	for _, u := range snap.Units {
+		if u.Workspace != want[u.ID] {
+			t.Errorf("unit %s workspace = %q, want %q", u.ID, u.Workspace, want[u.ID])
+		}
+	}
+	if snap.Unowned != 3 {
+		t.Errorf("unowned = %d, want 3", snap.Unowned)
+	}
+	if n := len(reg.List()); n != 1 {
+		t.Errorf("registry has %d workspaces, want 1 (remote paths are not registered)", n)
+	}
+	raw, err := os.ReadFile(idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f indexFile
+	if err := json.Unmarshal(raw, &f); err != nil || len(f.Sessions) != 3 {
+		t.Fatalf("index = %s (err %v)", raw, err)
+	}
+	if row := f.Sessions[1]; row.Node != "mini" || row.Key != "a" || row.Workspace != "ws_app00001" {
+		t.Errorf("index row = %+v, want mini/a in ws_app00001", row)
+	}
+}
+
 func TestClassify(t *testing.T) {
 	tests := []struct {
 		text string

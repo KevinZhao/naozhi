@@ -198,6 +198,53 @@ func TestLookupOtherNode(t *testing.T) {
 	}
 }
 
+// TestLookupOn: a remote node's paths are matched per node and lexically,
+// never through this machine's file system.
+func TestLookupOn(t *testing.T) {
+	root := tempRoot(t, "real")
+	real, link := filepath.Join(root, "real"), filepath.Join(root, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "workspaces.json")
+	data, _ := json.Marshal(file{V: Version, Workspaces: []Workspace{
+		{ID: "ws_app00001", Name: "app", Paths: map[string][]string{"mini": {"/srv/app"}}},
+		{ID: "ws_app00002", Name: "app-box", Paths: map[string][]string{"box": {"/srv/app"}}},
+		{ID: "ws_sub00001", Name: "sub", Paths: map[string][]string{"mini": {"/srv/app/sub"}}},
+		{ID: "ws_data0001", Name: "data", Paths: map[string][]string{"mini": {"/data/x/"}}},
+		{ID: "ws_real0001", Name: "real", Paths: map[string][]string{"mini": {real}}},
+		{ID: "ws_local001", Name: "local", Paths: map[string][]string{node: {"/srv/app"}}},
+	}})
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := Load(path, node)
+	cases := []struct {
+		node, dir string
+		want      string // workspace name, "" for no match
+	}{
+		{"mini", "/srv/app", "app"},
+		{"box", "/srv/app/x", "app-box"},
+		{"mini", "/srv/app/sub/deep", "sub"},
+		{"mini", "/srv/app/../app/sub/", "sub"},
+		{"mini", "/srv/application", ""},
+		{"mini", "/data/x/y", "data"},
+		{"mini", link, ""}, // the link exists here, not on mini
+		{"other", "/srv/app", ""},
+		{"", "/srv/app", ""},
+		{"mini", "srv/app", ""},
+	}
+	for _, c := range cases {
+		w, ok := r.LookupOn(c.node, c.dir)
+		if got := map[bool]string{true: w.Name}[ok]; got != c.want {
+			t.Errorf("LookupOn(%s, %s) = %q, want %q", c.node, c.dir, got, c.want)
+		}
+	}
+	if w, ok := r.Lookup("/srv/app"); !ok || w.Name != "local" {
+		t.Errorf("Lookup(/srv/app) = %+v, %v; want this node's workspace", w, ok)
+	}
+}
+
 func TestLoadNewerVersionNotOverwritten(t *testing.T) {
 	root := tempRoot(t, "repo")
 	path := filepath.Join(root, "workspaces.json")

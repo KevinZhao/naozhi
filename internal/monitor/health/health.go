@@ -99,8 +99,9 @@ type Fact struct {
 	Kind     Kind
 	Source   string
 	Coverage Coverage
-	// Dir is the unit's working directory ("" when it has none); Register
-	// lets it be registered as a new workspace when no workspace holds it.
+	// Dir is the unit's working directory ("" when it has none), on Node's
+	// machine for a remote unit; Register lets it be registered as a new
+	// workspace when no workspace holds it.
 	Dir      string
 	Register bool
 	// Node is a remote unit's node; NodeDown is set while its polls fail.
@@ -130,8 +131,8 @@ type Fact struct {
 	WorkflowSeen time.Time
 	LastActive   time.Time
 
-	// Index is the unit's index.json row, set for local sessions only; the
-	// machine fills in Workspace and Health.
+	// Index is the unit's index.json row, set for local and remote
+	// sessions; the machine fills in Workspace and Health.
 	Index *IndexEntry
 }
 
@@ -662,25 +663,34 @@ func (m *Machine) record(ev Event) {
 }
 
 // workspaceFor returns the ID of the workspace holding f's directory,
-// registering the directory when f allows it.
+// registering the directory when f allows it. A remote unit's directory is
+// looked up among its node's paths only, and never registered.
 func (m *Machine) workspaceFor(f *Fact) string {
 	if f.Dir == "" || m.cfg.Workspaces == nil {
 		return ""
 	}
-	if id, ok := m.wsCache[f.Dir]; ok {
+	// Two machines may each have the same path, holding different work.
+	ck := f.Dir
+	if f.Node != "" {
+		ck = f.Node + " " + f.Dir
+	}
+	if id, ok := m.wsCache[ck]; ok {
 		return id
 	}
 	var w workspace.Workspace
 	var ok bool
-	if f.Register {
+	switch {
+	case f.Node != "":
+		w, ok = m.cfg.Workspaces.LookupOn(f.Node, f.Dir)
+	case f.Register:
 		w, ok = m.cfg.Workspaces.Ensure(f.Dir)
-	} else {
+	default:
 		w, ok = m.cfg.Workspaces.Lookup(f.Dir)
 	}
 	if !ok {
 		return ""
 	}
-	m.wsCache[f.Dir] = w.ID
+	m.wsCache[ck] = w.ID
 	return w.ID
 }
 

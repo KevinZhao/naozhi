@@ -24,8 +24,10 @@ const indexResultRunes = 280
 // instead of asking every session how it is doing (docs/rfc/planner.md §6.2).
 type IndexEntry struct {
 	Key string `json:"key"`
+	// Node is a remote session's node, "" for this one's.
+	Node string `json:"node,omitempty"`
 	// Name is the cross-session name the CLI was started with (--name);
-	// "" for backends that take none.
+	// "" for backends that take none and for remote sessions.
 	Name       string    `json:"name"`
 	Title      string    `json:"title"`
 	Workspace  string    `json:"workspace"`
@@ -65,7 +67,9 @@ func (m *Machine) writeIndex(facts []Fact) {
 		row.Result = textutil.TruncateRunes(row.Result, indexResultRunes)
 		f.Sessions = append(f.Sessions, row)
 	}
-	slices.SortFunc(f.Sessions, func(a, b IndexEntry) int { return cmp.Compare(a.Key, b.Key) })
+	slices.SortFunc(f.Sessions, func(a, b IndexEntry) int {
+		return cmp.Or(cmp.Compare(a.Node, b.Node), cmp.Compare(a.Key, b.Key))
+	})
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		slog.Warn("health: encode index.json", "err", err)
