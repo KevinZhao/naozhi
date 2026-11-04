@@ -167,6 +167,7 @@ func Run(cfg Config) error {
 
 	go s.readStdout()
 	go s.readStderr()
+	go cli.watchChild()
 	// Socket self-watch: if something outside this process unlinks our socket
 	// file, the kernel keeps the listener fd alive but no client can ever
 	// reach it — an orphan holding a CLI seat. Defense-in-depth behind

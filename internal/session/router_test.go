@@ -2056,6 +2056,28 @@ func TestResolveResumeID(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// A workspace spelled through a symlink (/tmp → /private/tmp): the CLI
+	// writes under the slug of the realpath.
+	linkBase, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	realWS := filepath.Join(linkBase, "real")
+	linkWS := filepath.Join(linkBase, "link")
+	if err := os.Mkdir(realWS, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realWS, linkWS); err != nil {
+		t.Fatal(err)
+	}
+	projReal := claudefs.ProjectDir(claudeDir, realWS)
+	if err := os.MkdirAll(projReal, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projReal, okID+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	// Scratch kiroSessionsDir with a single UUID-keyed session state file
 	// (kiro layout: <dir>/<sid>.json, no workspace slug component).
 	kiroDir := t.TempDir()
@@ -2081,6 +2103,8 @@ func TestResolveResumeID(t *testing.T) {
 		{"jsonl missing in same workspace downgrades", "claude", claudeDir, kiroDir, workspaceA, missingID, ""},
 		{"jsonl in wrong workspace downgrades (work_dir edit regression)",
 			"claude", claudeDir, kiroDir, workspaceB, okID, ""},
+		{"symlinked workspace finds the realpath's jsonl", "claude", claudeDir, kiroDir, linkWS, okID, okID},
+		{"symlinked workspace, jsonl missing downgrades", "claude", claudeDir, kiroDir, linkWS, missingID, ""},
 		{"legacy empty backend uses claude layout", "", claudeDir, kiroDir, workspaceA, okID, okID},
 		{"legacy empty backend downgrades a missing claude jsonl", "", claudeDir, kiroDir, workspaceA, missingID, ""},
 

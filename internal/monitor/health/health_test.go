@@ -385,6 +385,50 @@ func TestFailureAcrossRestart(t *testing.T) {
 	}
 }
 
+// TestFirstSightAfterRestart: a unit first seen in the state the journal
+// last recorded for it takes it at once; any other state still needs two
+// agreeing reconciles.
+func TestFirstSightAfterRestart(t *testing.T) {
+	failedAt := time.Date(2026, 11, 4, 9, 1, 0, 0, time.UTC)
+	failed := Fact{Failed: "death_reason=cli_exited_code_1", LastActive: failedAt.Add(-time.Minute)}
+	tests := []struct {
+		name     string
+		recorded State
+		fact     Fact
+		want     []State // after each of two reconciles
+		trans    []string
+	}{
+		{"failed, held across the restart", Failed, Fact{LastActive: failedAt.Add(-time.Minute)}, []State{Failed, Failed}, nil},
+		{"failed, still failing", Failed, failed, []State{Failed, Failed}, nil},
+		{"waiting, still waiting", Waiting, Fact{Asking: true}, []State{Waiting, Waiting}, nil},
+		{"waiting, now failed", Waiting, failed, []State{Unknown, Failed}, []string{"s:waiting>failed"}},
+		{"stalled, now waiting", Stalled, Fact{Asking: true}, []State{Unknown, Waiting}, []string{"s:stalled>waiting"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			j, err := journal.Open(filepath.Join(dir, "log"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, _ := json.Marshal(journalData{From: Idle, To: tt.recorded, Kind: KindSession, Evidence: "recorded"})
+			if err := j.Append(journal.Entry{TS: failedAt, Kind: journal.KindHealth, Unit: "s", Data: data}); err != nil {
+				t.Fatal(err)
+			}
+			r := newRig(t, Config{Journal: j, Workspaces: workspace.Load("", "node")}, failedAt.Add(time.Hour))
+			for i, want := range tt.want {
+				r.run([]step{{tick: Interval, facts: []Fact{owned(dir, tt.fact)}}})
+				if got := r.state("s"); got != want {
+					t.Errorf("reconcile %d: state = %s, want %s", i+1, got, want)
+				}
+			}
+			if got := r.transitions(); !slices.Equal(got, tt.trans) {
+				t.Errorf("transitions = %q, want %q", got, tt.trans)
+			}
+		})
+	}
+}
+
 func TestFaultAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
 	j, err := journal.Open(filepath.Join(dir, "log"))

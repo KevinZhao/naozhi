@@ -517,9 +517,9 @@ func (m *Machine) collect() ([]Fact, map[string]bool) {
 // step applies one judged state to u and returns the transition it causes.
 // Healthy states take effect at once; the others once two reconciles in a
 // row agree, except Lost, which is judged only once two reconciles LostAfter
-// apart saw the node down. A unit's first state counts from the one the
-// journal last recorded for it, so a restart reports only what changed
-// meanwhile; with no record, settling into a healthy state is not news. A
+// apart saw the node down, and a unit's first state when it is the one the
+// journal last recorded for it. A unit's first state counts from that
+// record, so a restart reports only what changed meanwhile; with no record, settling into a healthy state is not news. A
 // failure a unit already had when first seen is dated by its last activity,
 // so old failures do not merge into a systemic fault.
 func (m *Machine) step(u *unit, state State, evidence string, class ErrorClass, now time.Time) (Event, bool) {
@@ -531,7 +531,10 @@ func (m *Machine) step(u *unit, state State, evidence string, class ErrorClass, 
 		}
 		return Event{}, false
 	}
-	if !state.healthy() && state != Lost {
+	// A unit first seen in the state the journal last recorded for it is
+	// not news: it was confirmed before the restart.
+	settled := u.first && m.last[u.ID].State == state
+	if !state.healthy() && state != Lost && !settled {
 		if u.pending != state {
 			u.pending, u.pendingN = state, 0
 		}
