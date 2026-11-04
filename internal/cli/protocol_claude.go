@@ -118,12 +118,15 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 	// A per-session settings file takes the --settings slot in either branch
 	// without moving settingsPath: it carries the base file's model manifest,
 	// and the drift check re-runs BuildArgs on the shared wrapper protocol.
+	// ProjectSettings adds the sources a terminal claude reads from its
+	// working directory (CLAUDE.md, .claude/settings*.json, skills, .mcp.json);
+	// --settings outranks them, so the model and credentials stay naozhi's.
 	sessionSettings := usableSettingsFile(opts.SessionSettingsFile)
 	if f := usableSettingsFile(opts.SettingsFile); f != "" {
-		args = append(args, "--setting-sources", "", "--settings", cmp.Or(sessionSettings, f))
+		args = append(args, "--setting-sources", settingSources("", opts.ProjectSettings), "--settings", cmp.Or(sessionSettings, f))
 		p.settingsPath.Store(&f)
 	} else {
-		args = append(args, "--setting-sources", "user")
+		args = append(args, "--setting-sources", settingSources("user", opts.ProjectSettings))
 		if sessionSettings != "" {
 			args = append(args, "--settings", sessionSettings)
 		}
@@ -204,6 +207,27 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 	}
 	args = append(args, capExtraArgsBytes(opts.ExtraArgs)...)
 	return args
+}
+
+// projectSettingSources is what ProjectSettings appends to --setting-sources:
+// the two sources a terminal claude adds to user.
+const projectSettingSources = "project,local"
+
+// settingSources is the --setting-sources value: base, plus the project
+// sources when project is set.
+func settingSources(base string, project bool) string {
+	if !project {
+		return base
+	}
+	return strings.TrimPrefix(base+","+projectSettingSources, ",")
+}
+
+// AddsProjectSettingSources reports whether cur is old with the project
+// sources added — a shim spawned before ProjectSettings existed, compared
+// against today's argv. The drift check accepts that pair, so the change
+// reaches a live session on its next spawn instead of killing it.
+func AddsProjectSettingSources(old, cur string) bool {
+	return old != cur && settingSources(old, true) == cur
 }
 
 // invalidAppendSystemPrompt returns "" when p may be emitted as the value of
