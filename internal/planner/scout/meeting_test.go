@@ -32,6 +32,10 @@ func TestBriefDue(t *testing.T) {
 		{"woken after the start", at(2, 10, 0), []Event{ten}, nil, ""},
 		{"no one else", at(2, 9, 50), []Event{meeting("m2", at(2, 10, 0)), meeting("m3", at(2, 10, 0), " ME@x")}, nil, ""},
 		{"invited by someone", at(2, 9, 50), []Event{{ID: "m4", Start: at(2, 10, 0), End: at(2, 11, 0), Organizer: "bob@x", Attendees: []string{"me@x"}}}, nil, "m4"},
+		// The calendar tool lists no attendees: the scout writes the user as
+		// "me" on an invitation, and nothing on a meeting of their own.
+		{"invited, no attendee list", at(2, 9, 50), []Event{{ID: "m7", Start: at(2, 10, 0), End: at(2, 11, 0), Organizer: "bob@x", Attendees: []string{"me"}}}, nil, "m7"},
+		{"their own, no attendee list", at(2, 9, 50), []Event{{ID: "m8", Start: at(2, 10, 0), End: at(2, 11, 0), Organizer: "me"}}, nil, ""},
 		{"already briefed", at(2, 9, 50), []Event{ten}, []briefed{{ID: "m1", Start: at(2, 10, 0)}}, ""},
 		{"moved after its brief", at(2, 13, 50), []Event{meeting("m1", at(2, 14, 0), "bob@x")}, []briefed{{ID: "m1", Start: at(2, 10, 0)}}, "m1"},
 		{"the first with others", at(2, 9, 50), []Event{meeting("m2", at(2, 10, 0)), ten}, nil, "m1"},

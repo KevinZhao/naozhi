@@ -192,6 +192,7 @@ func prompt(now time.Time, servers []string, c Cursors) string {
 - source 是 email、calendar、slack 或 asana；id 用来源里的稳定 ID（邮件的 message id、Slack 的频道 ID 加消息 ts、Asana 任务的 gid、会议的 id），同一件事每次给同一个 id。
 - title 不超过 60 字，why 用一句话说明为什么要用户处理；不要抄录正文。
 - 时间一律写带时区的 RFC 3339（如 2026-11-05T10:00:00+08:00）；没有截止时间 due 留空。
+- calendar 的 organizer 与 attendees 里用户本人写 "me"；attendees 写全部参会人，包括用户本人。日历工具没给参会人名单时，别人组织、邀请了用户的会议 attendees 写 ["me"]，用户自己组织的（响应状态是 Organizer）写 []。
 - cursors 写这次看到的最新位置：email 与 slack 写最新一条的时间，asana 写这次查看的时间；没看成的来源原样写回旧游标。
 - 某个来源调用失败就跳过它，继续看其他来源。
 
