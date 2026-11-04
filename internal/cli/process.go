@@ -59,8 +59,9 @@ const (
 const maxPendingSlots = 16
 
 // processCloseTimeout bounds Close() while the shim tears down its listener +
-// socket (closeStdin + waitOrKill(5s) + listener.Close + os.Remove, so 8s is
-// headroom); on expiry Close falls through to Kill. Var so tests can shorten it.
+// socket (closeStdin + waitOrKill(5s, then 2s after a SIGTERM) + listener.Close
+// + os.Remove, so 8s is headroom); on expiry Close falls through to Kill. Var so
+// tests can shorten it.
 var processCloseTimeout = 8 * time.Second
 
 // Process manages a CLI subprocess via a shim connection.

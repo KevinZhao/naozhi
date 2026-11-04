@@ -90,6 +90,10 @@ func (s *shimServer) readStdout() {
 // stdout EOF before reaping the CLI.
 const stderrDrainTimeout = 500 * time.Millisecond
 
+// cliTermGrace is how long waitOrKill gives the CLI to exit on SIGTERM before
+// the SIGKILL. A var so tests can shorten it.
+var cliTermGrace = 2 * time.Second
+
 // tryExtractSessionID search keys, hoisted to avoid a per-line []byte alloc.
 // snake = claude stream-json frames, camel = ACP/kiro frames.
 var (
@@ -318,6 +322,18 @@ func (c *cliProc) waitOrKill(timeout time.Duration) {
 	// parked timer for the full timeout.
 	t := time.NewTimer(timeout)
 	defer t.Stop()
+	select {
+	case <-c.exited:
+		return
+	case <-t.C:
+	}
+	// A CLI mid-turn does not exit on EOF. SIGTERM lets it end its tools'
+	// processes, which run in process groups of their own: the SIGKILL of the
+	// CLI's group alone left a stopped session's running command behind.
+	if c.cmd.Process != nil {
+		_ = sendProcGroupSIGTERM(c.cmd.Process.Pid)
+	}
+	t.Reset(cliTermGrace)
 	select {
 	case <-c.exited:
 	case <-t.C:

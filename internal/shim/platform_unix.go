@@ -51,6 +51,11 @@ func sendProcGroupSIGINT(pid int) error {
 	return syscall.Kill(-pid, syscall.SIGINT)
 }
 
+// sendProcGroupSIGTERM sends SIGTERM to the entire process group of pid.
+func sendProcGroupSIGTERM(pid int) error {
+	return syscall.Kill(-pid, syscall.SIGTERM)
+}
+
 // sendProcGroupSIGKILL sends SIGKILL to the entire process group of pid.
 func sendProcGroupSIGKILL(pid int) error {
 	return syscall.Kill(-pid, syscall.SIGKILL)

@@ -860,23 +860,41 @@ func TestCLIProc_WaitOrKill_ExitsCleanly(t *testing.T) {
 	}
 }
 
-func TestCLIProc_WaitOrKill_KillsIfTimeout(t *testing.T) {
-	// Use "sleep 60" which will never exit on its own
-	cli, err := startCLI("sh", []string{"-c", "sleep 60"}, "")
-	if err != nil {
-		t.Fatalf("startCLI: %v", err)
-	}
-
-	// Very short timeout forces kill
-	start := time.Now()
-	cli.waitOrKill(100 * time.Millisecond)
-	elapsed := time.Since(start)
-
-	if cli.alive() {
-		t.Error("cli.alive() = true after waitOrKill with short timeout")
-	}
-	if elapsed > 3*time.Second {
-		t.Errorf("waitOrKill took %v, expected ~100ms", elapsed)
+// A CLI still running at the timeout gets SIGTERM, so it can end its tools'
+// processes, and SIGKILL only if it outlives cliTermGrace.
+func TestCLIProc_WaitOrKill_Timeout(t *testing.T) {
+	old := cliTermGrace
+	cliTermGrace = 500 * time.Millisecond
+	t.Cleanup(func() { cliTermGrace = old })
+	for _, tc := range []struct {
+		name     string
+		trap     string // the CLI's SIGTERM trap
+		wantTerm bool   // exits on SIGTERM, within the grace
+	}{
+		{"exits on SIGTERM", `touch "$0.term"; exit 0`, true},
+		{"ignores SIGTERM", ``, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mark := filepath.Join(t.TempDir(), "cli")
+			cli, err := startCLI("sh", []string{"-c", "trap '" + tc.trap + "' TERM; while :; do sleep 0.05; done", mark}, "")
+			if err != nil {
+				t.Fatalf("startCLI: %v", err)
+			}
+			go cli.wait() // readStdout reaps it in the shim
+			start := time.Now()
+			cli.waitOrKill(100 * time.Millisecond)
+			elapsed := time.Since(start)
+			if cli.alive() {
+				t.Fatal("cli.alive() = true after waitOrKill")
+			}
+			_, statErr := os.Stat(mark + ".term")
+			if got := statErr == nil; got != tc.wantTerm {
+				t.Errorf("trap ran = %v, want %v", got, tc.wantTerm)
+			}
+			if got := elapsed < cliTermGrace; got != tc.wantTerm {
+				t.Errorf("waitOrKill took %v (grace %v), want exit on SIGTERM = %v", elapsed, cliTermGrace, tc.wantTerm)
+			}
+		})
 	}
 }
 
