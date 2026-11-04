@@ -100,6 +100,52 @@ func TestStateGoldenCompat_V0082(t *testing.T) {
 	}
 }
 
+// TestStateGoldenCompat_V032 pins the per-session launch spec shape (RFC
+// planner §15.1): every field, the overlay's included, must survive a read.
+func TestStateGoldenCompat_V032(t *testing.T) {
+	t.Parallel()
+	st := loadGolden(t, "state_v0.3.2.json")
+
+	want := State{
+		Version:       1,
+		SchemaVersion: 1,
+		ShimPID:       60001,
+		CLIPID:        60002,
+		Socket:        "/run/user/1000/naozhi/fixture0302.sock",
+		AuthToken:     "FIXTURE-NOT-A-REAL-TOKEN-v0.3.2",
+		Key:           "task:fixture-0302",
+		SessionID:     "2a34b7c6-9d3a-4e9d-b165-5c7c3d4e5f60",
+		Workspace:     "/home/fixture/workspace/myproject",
+		Backend:       "claude",
+		CLIArgs: []string{
+			"-p", "--output-format", "stream-json", "--model", "fixture-model",
+			"--tools", "Read,Grep", "--name", "iso-fixture-task", "--strict-mcp-config",
+			"--resume", "2a34b7c6-9d3a-4e9d-b165-5c7c3d4e5f60",
+		},
+		CLIAlive:        true,
+		StartedAt:       "2026-11-04T09:00:00Z",
+		LastConnectedAt: "2026-11-04T10:30:00Z",
+		BufferCount:     2,
+		SpawnOverlay: &SpawnOverlay{
+			Model:               "fixture-model",
+			Effort:              "high",
+			ExtraArgs:           []string{"--debug"},
+			AccessProfile:       "fixture-profile",
+			AppendSystemPrompt:  "FIXTURE system prompt.",
+			Tools:               []string{"Read", "Grep"},
+			PermissionMode:      "dontAsk",
+			Name:                "iso-fixture-task",
+			StrictMCPConfig:     true,
+			CrossSessionInbound: "FIXTURE-inbound",
+			PermissionsDeny:     []string{"Bash(rm:*)"},
+			PermissionsAllow:    []string{"Read(./**)"},
+		},
+	}
+	if !reflect.DeepEqual(st, want) {
+		t.Errorf("v0.3.2 state fields did not survive:\n got  %+v\n overlay %+v\n want %+v\n overlay %+v", st, st.SpawnOverlay, want, want.SpawnOverlay)
+	}
+}
+
 // TestStateGoldenCompat_AllFixturesLoad walks the whole matrix so a new
 // release's archived golden is picked up without touching this file.
 func TestStateGoldenCompat_AllFixturesLoad(t *testing.T) {

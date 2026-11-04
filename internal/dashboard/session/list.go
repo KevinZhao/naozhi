@@ -66,6 +66,9 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 		multi.Stats.Uptime = ""
 		hashed = multi
 	}
+	// A primary polling this node learns here, before its first send, that
+	// /api/sessions/send runs an Idempotency-Key once (dashboard_send.go).
+	w.Header().Set(node.CapsHeader, node.CapSendIdempotent)
 	if etag := sessionsBodyETag(hashed); etag != "" {
 		w.Header().Set("ETag", etag)
 		if etagListMatches(r.Header.Get("If-None-Match"), etag) {

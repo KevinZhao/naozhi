@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -196,6 +197,89 @@ func TestHTTPClient_SendRequest(t *testing.T) {
 			}
 			if err != nil || res != (SendResult{Status: "queued", Dup: true}) {
 				t.Fatalf("Send = (%+v, %v), want queued dup", res, err)
+			}
+		})
+	}
+}
+
+// The sessions poll a primary runs from startup tells it whether a direct node
+// dedups, so the first send after a restart that times out is already
+// ErrSendUnknown. A node that does not declare it stays conservative, and one
+// that accepts a send without the echo (downgraded) goes back to it. A send
+// refused before the node's handler (auth, a proxy's 502) never echoes and
+// changes nothing.
+func TestHTTPClient_SessionsPollTeachesIdempotency(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		caps        string // CapsHeader on /api/sessions
+		notModified bool   // the declaring answer is the second poll's 304
+		prior       []int  // statuses of the sends answered before the checked one
+		echo        bool   // the node echoes IdempotencyKeyHeader on an accepted send
+		wantUnknown bool
+	}{
+		{"node declares", CapSendIdempotent, false, nil, false, true},
+		{"declared among others", "x-future," + CapSendIdempotent, false, nil, false, true},
+		{"declared on a 304", CapSendIdempotent, true, nil, false, true},
+		{"node predates the header", "", false, nil, false, false},
+		{"other caps only", "x-future", false, nil, false, false},
+		{"declared, then a send accepted without the echo", CapSendIdempotent, false, []int{http.StatusAccepted}, false, false},
+		{"declared, then a 401", CapSendIdempotent, false, []int{http.StatusUnauthorized}, false, true},
+		{"declared, then a proxy's 502", CapSendIdempotent, false, []int{http.StatusBadGateway}, false, true},
+		{"learned from an echo, then a 401", "", false, []int{http.StatusAccepted, http.StatusUnauthorized}, true, true},
+		{"never learned, then a 503", "", false, []int{http.StatusServiceUnavailable}, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var sends atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/sessions" {
+					conditional := r.Header.Get("If-None-Match") != ""
+					if tc.caps != "" && conditional == tc.notModified {
+						w.Header().Set(CapsHeader, tc.caps)
+					}
+					w.Header().Set("ETag", SessionsContentETagPrefix+`1"`)
+					if conditional {
+						w.WriteHeader(http.StatusNotModified)
+						return
+					}
+					w.Write([]byte(`{"sessions":[]}`))
+					return
+				}
+				if i := int(sends.Add(1)) - 1; i < len(tc.prior) {
+					if tc.echo && tc.prior[i] == http.StatusAccepted {
+						w.Header().Set(IdempotencyKeyHeader, r.Header.Get(IdempotencyKeyHeader))
+					}
+					w.WriteHeader(tc.prior[i])
+					w.Write([]byte(`{"status":"accepted"}`))
+					return
+				}
+				// Read the body first: only then does the server notice the
+				// client hanging up and cancel r.Context().
+				io.Copy(io.Discard, r.Body)
+				<-r.Context().Done()
+			}))
+			defer srv.Close()
+
+			nc := newTestHTTPClient(t, srv, "")
+			polls := 1
+			if tc.notModified {
+				polls = 2
+			}
+			for range polls {
+				if _, err := nc.FetchSessions(context.Background()); err != nil {
+					t.Fatalf("FetchSessions: %v", err)
+				}
+			}
+			for i, status := range tc.prior {
+				_, err := nc.Send(context.Background(), SendRequest{Key: "k", Text: "hi", TurnID: "s0-" + strconv.Itoa(i)})
+				if ok := status == http.StatusAccepted; (err == nil) != ok {
+					t.Fatalf("answered Send %d: err = %v, want ok %v", status, err, ok)
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			_, err := nc.Send(ctx, SendRequest{Key: "k", Text: "hi", TurnID: "s1"})
+			if err == nil || errors.Is(err, ErrSendUnknown) != tc.wantUnknown {
+				t.Fatalf("first timed-out send: err = %v, want unknown %v", err, tc.wantUnknown)
 			}
 		})
 	}

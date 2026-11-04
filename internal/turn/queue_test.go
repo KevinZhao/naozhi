@@ -2,6 +2,7 @@ package turn
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -577,23 +578,29 @@ func TestQueue_CleanupWithoutDiscardStopsLiveOwner(t *testing.T) {
 	}
 }
 
-// TestConcurrent_EnqueueDrain verifies no races under concurrent access.
+// TestConcurrent_EnqueueDrain verifies no races under concurrent access, and
+// that the drainers, acting as the owner, release the key. They run until the
+// enqueuers are done rather than a fixed count: a scheduler that runs every
+// drainer before any enqueuer starts, or while the queue never empties, must
+// not leave the drain side unexercised.
 func TestConcurrent_EnqueueDrain(t *testing.T) {
 	t.Parallel()
 	q := newTestQueue(50, 0)
 	const goroutines = 20
 	const msgsPerGoroutine = 100
 
-	var wg sync.WaitGroup
-	// ownerGen is the gen of a recent Enqueue that took ownership; drainers
+	var enqWG, drainWG sync.WaitGroup
+	// ownerGen is the gen of the latest Enqueue that took ownership; drainers
 	// act as that owner, so each release makes the next Enqueue recreate the
-	// entry with a fresh gen while other enqueuers race it.
-	var ownerGen, drains atomic.Uint64
+	// entry with a fresh gen while other enqueuers race it. A gen is stored
+	// before its entry can be released, so the stores never go backwards.
+	var ownerGen atomic.Uint64
+	var enqDone atomic.Bool
 
 	for i := 0; i < goroutines; i++ {
-		wg.Add(1)
+		enqWG.Add(1)
 		go func() {
-			defer wg.Done()
+			defer enqWG.Done()
 			for j := 0; j < msgsPerGoroutine; j++ {
 				if res := q.Enqueue("shared", Msg{Text: "msg"}); res.isOwner {
 					ownerGen.Store(res.gen)
@@ -603,46 +610,33 @@ func TestConcurrent_EnqueueDrain(t *testing.T) {
 	}
 
 	for i := 0; i < 5; i++ {
-		wg.Add(1)
+		drainWG.Add(1)
 		go func() {
-			defer wg.Done()
-			for j := 0; j < msgsPerGoroutine; j++ {
-				q.mu.Lock()
-				_, present := q.queues["shared"]
-				q.mu.Unlock()
+			defer drainWG.Done()
+			for j := 0; ; j++ {
+				// Read before the call, so every drainer makes at least one
+				// call after the last Enqueue, with the last owner's gen.
+				done := enqDone.Load()
 				q.DoneOrDrain("shared", ownerGen.Load())
-				q.mu.Lock()
-				_, after := q.queues["shared"]
-				q.mu.Unlock()
-				if present && !after {
-					drains.Add(1)
-				}
 				q.depth("shared")
+				if done && j >= msgsPerGoroutine {
+					return
+				}
+				runtime.Gosched() // let the enqueuers run on one P
 			}
 		}()
 	}
 
-	wg.Wait()
-	if drains.Load() == 0 {
-		t.Fatal("no drainer ever released the key: the drain side never ran")
-	}
-	// Whichever entry is left, the owner holding its gen drains and releases it.
+	enqWG.Wait()
+	enqDone.Store(true)
+	drainWG.Wait()
+	// Past the last Enqueue only drainers touch the entry: one call drains
+	// what is queued, the next releases it, and five drainers made one each.
 	q.mu.Lock()
-	sq := q.queues["shared"]
-	var gen uint64
-	if sq != nil {
-		gen = sq.gen
-	}
+	_, present := q.queues["shared"]
 	q.mu.Unlock()
-	if sq != nil {
-		for q.DoneOrDrain("shared", gen) != nil {
-		}
-		q.mu.Lock()
-		_, present := q.queues["shared"]
-		q.mu.Unlock()
-		if present {
-			t.Fatal("entry still present after its owner released it")
-		}
+	if present {
+		t.Fatal("no drainer released the last owner's key: the drain side never ran")
 	}
 }
 

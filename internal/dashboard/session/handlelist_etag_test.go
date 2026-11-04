@@ -123,6 +123,17 @@ func TestHandleList_IdenticalBodyReturns304(t *testing.T) {
 	wantNotModified(t, doList(h, etag), etag)
 }
 
+// A primary's poll learns the send dedup from the 200 and the 304 alike.
+func TestHandleList_DeclaresSendIdempotent(t *testing.T) {
+	h := newETagTestHandlers(t, newListRouter("feishu:direct:a:general"), noNodeAccessor{})
+	first := doList(h, "")
+	for name, rec := range map[string]*httptest.ResponseRecorder{"200": first, "304": doList(h, first.Header().Get("ETag"))} {
+		if got := rec.Header().Get(node.CapsHeader); got != node.CapSendIdempotent {
+			t.Errorf("%s %s = %q, want %q", name, node.CapsHeader, got, node.CapSendIdempotent)
+		}
+	}
+}
+
 // TestHandleList_StateChangeAtSameVersionRebuilds is the regression the old
 // storeGen validator failed: running/ready, effort and spawn diagnostics move
 // without a version bump, and each must change the ETag.
