@@ -1171,6 +1171,49 @@ func TestMaxProcs_EvictFailsWhenAllRunning(t *testing.T) {
 // evictOldest (called with the table lock held)
 // ---------------------------------------------------------------------------
 
+// StopSession closes a live process, running or idle, and keeps the session
+// with the slot freed; with no live process there is nothing to stop.
+func TestStopSession(t *testing.T) {
+	cases := []struct {
+		name string
+		proc *fakeProcess // nil: no session
+		want bool
+	}{
+		{"running", newRunningProc(), true},
+		{"idle", newIdleProc(), true},
+		{"dead", newDeadProc(), false},
+		{"no session", nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := newTestRouter(2)
+			if c.proc != nil {
+				injectSession(r, "task:ab12", c.proc)
+				setActiveT(r, 1)
+			}
+			if got := r.StopSession("task:ab12"); got != c.want {
+				t.Fatalf("StopSession = %v, want %v", got, c.want)
+			}
+			if c.proc == nil {
+				return
+			}
+			if c.proc.Alive() {
+				t.Error("process still alive")
+			}
+			s := r.SessionFor("task:ab12")
+			if s == nil {
+				t.Fatal("session removed")
+			}
+			if c.want && s.DeathReason() != DeathReasonStopped {
+				t.Errorf("death reason = %q", s.DeathReason())
+			}
+			if active, _ := r.Stats(); c.want && active != 0 {
+				t.Errorf("active = %d, want 0", active)
+			}
+		})
+	}
+}
+
 func TestEvictOldestSkipsRunning(t *testing.T) {
 	r := &Router{ss: newSessionTable()}
 	proc := newRunningProc()

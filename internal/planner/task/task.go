@@ -95,8 +95,8 @@ type Config struct {
 	Promises *promise.Store
 	Health   func() health.Snapshot
 	Journal  *journal.Journal
-	// Stop stops dispatched session key's work (its turn) for Board.Stop;
-	// nil only marks it.
+	// Stop stops dispatched session key's work (its process) for
+	// Board.Stop; nil only marks it.
 	Stop func(key, title string)
 	// Now is the wall clock; nil is time.Now.
 	Now func() time.Time
@@ -276,9 +276,9 @@ func (b *Board) Set(id string, state State, by By, why string) error {
 
 // Stop stops dispatched session id for the user (D88: what the Planner
 // dispatches runs at once, so stopping it is the user's control): the task
-// is marked 失败 as theirs, StoppedWhy, then Config.Stop stops its turn. The
-// session stays, its history readable; a mark holds over whatever it does
-// later, until someone sets another state.
+// is marked 失败 as theirs, StoppedWhy, then Config.Stop stops its process.
+// The session stays, its history readable; a mark holds over whatever it
+// does later, until someone sets another state.
 func (b *Board) Stop(id string) error {
 	if !sessionkey.IsTaskKey(id) {
 		return ErrNotFound

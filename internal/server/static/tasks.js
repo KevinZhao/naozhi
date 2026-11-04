@@ -6,7 +6,7 @@
 // state, who set it and why, and when; its state menu (进行中 / 已完成) posts
 // /api/tasks/state as yours, and a done one reopens. A dispatched session
 // runs as soon as the Planner dispatches it (D88), so its card has 停止
-// (POST /api/tasks/stop: its turn is interrupted, the task 失败 as yours);
+// (POST /api/tasks/stop: its process is closed, the task 失败 as yours);
 // its title opens it: in the Planner page's middle column, or in the chat
 // view from the sidebar (mountTasks(el, { open: 'chat' })).
 //
@@ -53,10 +53,10 @@ function menuHtml(t) {
     '<option value="done">已完成</option></select>';
 }
 
-// stopHtml is a dispatched session's 停止, while it is still there and
-// neither done nor stopped.
+// stopHtml is a dispatched session's 停止, while it is in progress (进行中 or
+// 等你) and still there.
 function stopHtml(t) {
-  if (t.kind !== 'session' || t.retired || t.state === 'done' || (t.state === 'failed' && t.by === 'user')) return '';
+  if (t.kind !== 'session' || t.retired || (t.state !== 'doing' && t.state !== 'waiting')) return '';
   return '<button type="button" class="pl-btn tk-stop" data-action="task-stop" data-id="' + escAttr(t.id) + '" title="停止这个会话正在做的事">停止</button>';
 }
 

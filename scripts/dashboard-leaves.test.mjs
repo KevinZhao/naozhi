@@ -178,7 +178,7 @@ test('sessionExit is null for a live session and names every contract death_reas
   for (const st of NZ_CONTRACT.ENUMS.SESSION_STATE.filter((s) => s !== 'dead')) {
     assert.equal(nzu.sessionExit(st, 'cli_exited'), null, st);
   }
-  const reclaimed = ['evicted', 'idle_timeout', 'released'];
+  const reclaimed = ['evicted', 'idle_timeout', 'released', 'stopped'];
   for (const r of NZ_CONTRACT.ENUMS.DEATH_REASON) {
     const x = nzu.sessionExit('dead', r);
     assert.ok(!x.text.startsWith('进程已退出'), `death_reason ${r} has no wording`);

@@ -212,6 +212,7 @@ const DEATH_REASONS = {
   idle_timeout: { crashed: false, text: '空闲超时，进程已回收' },
   evicted: { crashed: false, text: '为腾出容量，进程已回收' },
   released: { crashed: false, text: '本次执行结束，进程已释放' },
+  stopped: { crashed: false, text: '你停止了它，进程已关闭' },
   cli_exited: { crashed: true, text: 'CLI 进程退出' },
   shim_eof: { crashed: true, text: '与 CLI 的连接断开' },
   shim_read_error: { crashed: true, text: '读取 CLI 输出出错' },

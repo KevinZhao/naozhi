@@ -3,9 +3,9 @@
 //
 //	GET  /api/tasks        the dispatched sessions and the promises not archived, by section
 //	POST /api/tasks/state  set a task's state ({"id","state":"doing"|"done"}) as the user
-//	POST /api/tasks/stop   stop a dispatched session ({"id"}): its turn, and 失败 as the user's
+//	POST /api/tasks/stop   stop a dispatched session ({"id"}): its process, and 失败 as the user's
 //
-// Both sit behind the /api/* auth middleware: a request here is the user.
+// All sit behind the /api/* auth middleware: a request here is the user.
 package tasks
 
 import (

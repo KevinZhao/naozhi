@@ -62,11 +62,12 @@ func (t TaskOpts) ForKey(key string) (session.AgentOpts, bool) {
 	return t.For(m.Dir, m.Title, m.Model), true
 }
 
-// StopTask is task.Config.Stop: it interrupts the dispatched session's turn
-// and tells the Planner, which would otherwise wait on it or send it on.
+// StopTask is task.Config.Stop: it closes the dispatched session's process
+// (its background work too; the session stays) and tells the Planner, which
+// would otherwise wait on it or send it on.
 func StopTask(router *session.Router, tell func(string) error) func(key, title string) {
 	return func(key, title string) {
-		router.InterruptSessionSafe(key)
+		router.StopSession(key)
 		if err := tell("用户在「任务」里停止了「" + title + "」（" + key + "）。不要再给它发消息，也不要重新派出同一件事，除非用户再要求。"); err != nil {
 			slog.Info("task stop: the Planner not told", "key", key, "err", err)
 		}
