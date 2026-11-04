@@ -102,6 +102,17 @@ export function getNodeDisplayName(id) {
   return id;
 }
 
+// nodeServesFiles reports whether the dashboard can browse a node's files:
+// always for local, for a remote node when it advertises the files
+// capability (an older node does not, and its files are never read here).
+export function nodeServesFiles(id) {
+  if (!id || id === 'local') return true;
+  const nd = sessionList.nodesData[id];
+  return !!(nd && Array.isArray(nd.caps) && nd.caps.includes('files'));
+}
+
+export const REMOTE_FILES_UNSUPPORTED = '该节点版本不支持远程文件';
+
 // getNodeStatus returns a normalized status key (ok/connecting/offline/
 // unreachable/error) for a node. 'local' tracks the WS state machine; remotes
 // read from the server-side node health snapshot. Falls back to 'offline' when

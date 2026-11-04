@@ -405,6 +405,14 @@ test('node name and status: local follows the WS state, a remote its snapshot', 
   assert.equal(si.statusLabelForNode('weird'), 'weird');
 });
 
+test('nodeServesFiles: local always, a remote node only with the files capability', () => {
+  sessionList.nodesData = { n1: { caps: ['files', 'gemini'] }, n2: { caps: ['gemini'] }, n3: {} };
+  for (const [id, want] of [[undefined, true], ['local', true], ['n1', true], ['n2', false], ['n3', false], ['n4', false]]) {
+    assert.equal(si.nodeServesFiles(id), want, String(id));
+  }
+  sessionList.nodesData = {};
+});
+
 test('isInternalEvent hides exactly the contract\'s internal event types', () => {
   const internal = new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL);
   for (const t of NZ_CONTRACT.ENUMS.EVENT_TYPE) assert.equal(si.isInternalEvent({ type: t }), internal.has(t), t);

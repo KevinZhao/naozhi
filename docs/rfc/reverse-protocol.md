@@ -3,8 +3,8 @@
 > **Status: 已实现**
 >
 > 反向连接 (NAT 穿越) 的 WebSocket 帧格式。实现位于 `internal/node/protocol.go`
-> (`ReverseMsg`)，服务端 dispatcher 位于 `internal/node/reverseserver.go`，
-> 子节点 (发起方) 位于 `internal/node/reverseconn.go`。
+> (`ReverseMsg`)，主节点侧位于 `internal/node/reverseserver.go` 与
+> `internal/node/reverseconn.go`，子节点 (发起方) 位于 `internal/upstream`。
 >
 > 架构层面的设计动机见 [../design/multi-node-design.md](../design/multi-node-design.md)。
 > 本文档只描述 wire 层约定，供想新增 reverse-only 能力的实现者参考。
@@ -37,6 +37,7 @@
 | `acp`      | 节点侧支持 ACP (JSON-RPC) 后端，可以处理 kiro / gemini-cli session |
 | `gemini`   | 节点侧配置了 gemini-cli 可执行文件                               |
 | `askuser`  | 节点侧会生成 `AskUserQuestion` 富事件 (Round 208+)              |
+| `files`    | 节点侧应答 `files_list` / `file_read` / `files_exists` / `fetch_outputs`，按自己的根目录与规则提供自己的文件（planner RFC §15.5 ④）；没有它时主节点对该节点的文件请求一律 501，不读本机 |
 
 新增 tag 只需同步更新本表和服务端的 known-set。
 

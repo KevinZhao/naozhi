@@ -1,10 +1,13 @@
 // NodeMeta carries per-connection metadata so server-side routing can answer
 // "does this node support backend X?". Reverse nodes self-report Capabilities
-// at register time; HTTPClient nodes carry an empty set. Unknown tags are
+// at register time; HTTPClient nodes carry CapFiles only. Unknown tags are
 // stored verbatim (forward-compat, see caps.go).
 package node
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 // NodeMeta describes a connected reverse node; immutable for the life of the
 // connection. Capabilities is the O(1) lookup form consulted via HasCap.
@@ -45,5 +48,21 @@ func capsFromSlice(caps []string) map[string]bool {
 	if len(out) == 0 {
 		return nil
 	}
+	return out
+}
+
+// CapList returns the advertised capabilities sorted; nil for none.
+// nil-receiver safe.
+func (m *NodeMeta) CapList() []string {
+	if m == nil || len(m.Capabilities) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m.Capabilities))
+	for c, on := range m.Capabilities {
+		if on {
+			out = append(out, c)
+		}
+	}
+	sort.Strings(out)
 	return out
 }

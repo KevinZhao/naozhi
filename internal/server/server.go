@@ -13,6 +13,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/dashboard/discovery"
+	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
@@ -64,6 +65,8 @@ type Server struct {
 	auth       *auth.Handlers
 	discoveryH *discovery.Handlers
 	sessionH   *dashsession.Handlers
+	// projectFiles serves a primary's file RPCs (NodeFiles).
+	projectFiles *dashproject.Handlers
 
 	// ── send / dispatch wiring ─────────────────────────
 	dispatcher      *dispatch.Dispatcher // ctor builds; Start only calls BuildHandler

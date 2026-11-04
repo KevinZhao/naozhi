@@ -84,6 +84,7 @@ type Connector struct {
 	hostname         string
 	defaultWorkspace string // used as allowedRoot for incoming workspace overrides
 	discovery        Discovery
+	files            Files
 	// turns runs the "send" RPC; nil refuses every send.
 	turns TurnSubmitter
 	// hubSendStatus: the primary of the current link advertised
@@ -237,7 +238,7 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 		Token:        c.cfg.Token,
 		DisplayName:  c.cfg.DisplayName,
 		Hostname:     c.hostname,
-		Capabilities: derivedCaps(),
+		Capabilities: c.registerCaps(),
 	}
 	if err := conn.WriteJSON(reg); err != nil {
 		return false, fmt.Errorf("register write: %w", err)

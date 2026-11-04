@@ -7,6 +7,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/gitinfo"
+	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
@@ -37,52 +38,73 @@ type browseRoot struct {
 	session bool
 }
 
+// fileRefusal is a file request refused with an HTTP status; the reverse
+// RPCs carry the same value to the primary (node.FileRefusal).
+type fileRefusal = node.FileRefusal
+
+func refuse(status int, msg string) *fileRefusal { return &fileRefusal{Status: status, Error: msg} }
+
+func writeRefusal(w http.ResponseWriter, rf *fileRefusal) {
+	httputil.WriteJSONStatus(w, rf.Status, map[string]string{"error": rf.Error})
+}
+
 // resolveBrowseRoot picks the root of a file read or listing: root=session:<key>
 // when given, else project=<name>. On failure it has already written the
 // response and returns false.
 func (h *Handlers) resolveBrowseRoot(w http.ResponseWriter, q url.Values) (browseRoot, bool) {
-	if root := q.Get("root"); root != "" {
+	root, rf := h.browseRootOf(q.Get("root"), q.Get("project"))
+	if rf != nil {
+		writeRefusal(w, rf)
+		return browseRoot{}, false
+	}
+	return root, true
+}
+
+// browseRootOf resolves a root=session:<key> root when root is set, else the
+// project name.
+func (h *Handlers) browseRootOf(root, name string) (browseRoot, *fileRefusal) {
+	if root != "" {
 		key, ok := strings.CutPrefix(root, sessionRootPrefix)
 		if !ok {
-			httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid root"})
-			return browseRoot{}, false
+			return browseRoot{}, refuse(http.StatusBadRequest, "invalid root")
 		}
 		if err := sessionkey.ValidateSessionKey(key); err != nil {
-			httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid session key"})
-			return browseRoot{}, false
+			return browseRoot{}, refuse(http.StatusBadRequest, "invalid session key")
 		}
 		path := h.sessionRootPath(key)
 		if path == "" {
 			// Unknown key, no workspace and a workspace outside allowed_root
 			// collapse to one 404 so probing yields no oracle.
-			httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "session not found"})
-			return browseRoot{}, false
+			return browseRoot{}, refuse(http.StatusNotFound, "session not found")
 		}
-		return browseRoot{path: path, restricted: true, label: key, session: true}, true
+		return browseRoot{path: path, restricted: true, label: key, session: true}, nil
 	}
 
 	if h.deps.ProjectMgr == nil {
-		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "projects not configured"})
-		return browseRoot{}, false
+		return browseRoot{}, refuse(http.StatusBadRequest, "projects not configured")
 	}
-	name := q.Get("project")
 	if name == "" {
-		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "project is required"})
-		return browseRoot{}, false
+		return browseRoot{}, refuse(http.StatusBadRequest, "project is required")
 	}
 	// Same trust-boundary gate as HandleFilesExists.
 	if err := validateProjectName(name); err != nil {
-		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
-		return browseRoot{}, false
+		return browseRoot{}, refuse(http.StatusBadRequest, "invalid project name")
 	}
 	p := h.deps.ProjectMgr.Get(name)
 	if p == nil {
-		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
-		return browseRoot{}, false
+		return browseRoot{}, refuse(http.StatusNotFound, "project not found")
 	}
 	// A registered subdirectory project is readable by definition; only the
 	// include_root whole-workspace project is restricted.
-	return browseRoot{path: p.Path, restricted: p.IsRoot, label: name}, true
+	return browseRoot{path: p.Path, restricted: p.IsRoot, label: name}, nil
+}
+
+// rootOfRPC is browseRootOf for a primary's file RPC.
+func (h *Handlers) rootOfRPC(r node.FileRoot) (browseRoot, *fileRefusal) {
+	if r.Key != "" {
+		return h.browseRootOf(sessionRootPrefix+r.Key, "")
+	}
+	return h.browseRootOf("", r.Project)
 }
 
 // sessionRootPath returns the directory a session's files are browsed from:

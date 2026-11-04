@@ -36,6 +36,7 @@ var knownServerCaps = map[string]struct{}{
 	"scratch":          {},
 
 	CapSubscribeHistory: {},
+	CapFiles:            {},
 }
 
 // HubCaps is what the hub advertises about itself on the registered ack: the

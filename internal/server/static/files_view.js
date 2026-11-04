@@ -16,7 +16,7 @@
 // the click handler navigated to the wrong path.
 import { NZ_CONTRACT } from './contract.js';
 import { selection, sessionList } from './state.js';
-import { sid } from './session_ident.js';
+import { REMOTE_FILES_UNSUPPORTED, nodeServesFiles, sid } from './session_ident.js';
 import { esc, escAttr, showToast, fetchJSON, nzViews } from './nz_util.js';
 import { fileApiUrl, renderSandboxedBlob } from './file_refs.js';
 import { crumbsHtml, fileRowsHtml, isPreviewableOutput, outputRowsHtml } from './file_rows.js';
@@ -39,22 +39,25 @@ import { renderRich, runPendingAsync } from './render_md.js';
   // of the is_root project, used to exclude the root from the quick-jump chips.
   // state.root: a "session:<key>" root when browsing a session's working tree
   // (the 本会话 chip), '' when browsing state.project; state.rootLabel names it
-  // in the breadcrumb. state.library: the 成品库 list is showing instead of a
-  // directory; state.outputs holds its rows.
-  var state = { roots: [], project: '', rootName: '', root: '', rootLabel: '', dir: '', library: false, outputs: [], loaded: false, wired: false };
+  // in the breadcrumb, state.rootNode the node it lives on (a remote
+  // session's tree is read from that node). state.library: the 成品库 list is
+  // showing instead of a directory; state.outputs holds its rows.
+  var state = { roots: [], project: '', rootName: '', root: '', rootLabel: '', rootNode: 'local', dir: '', library: false, outputs: [], loaded: false, wired: false };
 
   // cur is the browse root the file API calls take: the session root when
   // set, else the project name (fileApiUrl maps "session:" to root=).
   function cur() { return state.root || state.project; }
+  // curNode is the node cur() lives on; projects are local only.
+  function curNode() { return state.root ? state.rootNode : 'local'; }
 
-  // activeSessionRoot returns the selected local session's root ref and label,
-  // or null when no local session with a workspace is selected — remote nodes
-  // have no readable FS here.
+  // activeSessionRoot returns the selected session's root ref, label and
+  // node, or null when no session with a workspace is selected.
   function activeSessionRoot() {
-    if (!selection.key || (selection.node && selection.node !== 'local')) return null;
-    var sd = sessionList.sessionsData[sid(selection.key, selection.node)];
+    if (!selection.key) return null;
+    var node = selection.node || 'local';
+    var sd = sessionList.sessionsData[sid(selection.key, node)];
     if (!sd || !sd.workspace) return null;
-    return { ref: 'session:' + selection.key, label: sd.workspace.split('/').filter(Boolean).pop() || sd.workspace, path: sd.workspace };
+    return { ref: 'session:' + selection.key, node: node, label: sd.workspace.split('/').filter(Boolean).pop() || sd.workspace, path: sd.workspace };
   }
 
   // Recent browse roots (favorite/recent quick-jump panel). master had no
@@ -152,7 +155,7 @@ import { renderRich, runPendingAsync } from './render_md.js';
     // 本会话 leads: the selected session's working tree (its git root when
     // the workspace is in a repo, resolved server-side).
     var sessChip = sess ? '<button type="button" class="files-qj" data-root="' + escAttr(sess.ref) +
-      '" data-label="' + escAttr(sess.label) + '" title="' + escAttr(sess.path) + '">本会话 · ' + esc(sess.label) + '</button>' : '';
+      '" data-node="' + escAttr(sess.node) + '" data-label="' + escAttr(sess.label) + '" title="' + escAttr(sess.path) + '">本会话 · ' + esc(sess.label) + '</button>' : '';
     wrap.innerHTML = '<span class="files-qj-label">快速跳转</span>' + libChip + sessChip + chips.map(function (c) {
       return '<button type="button" class="files-qj" data-project="' + escAttr(c.name) + '" title="' +
         escAttr(byName[c.name].path || c.name) + '">' + (c.fav ? '★ ' : '') + esc(c.name) + '</button>';
@@ -186,9 +189,10 @@ import { renderRich, runPendingAsync } from './render_md.js';
 
   // jumpToSession switches the browse root to a session's working tree.
   // Upload stays project-only, so its button hides while a session root is open.
-  function jumpToSession(ref, label) {
+  function jumpToSession(ref, label, node) {
     if (!ref) return;
     state.root = ref;
+    state.rootNode = node || 'local';
     state.rootLabel = label || '';
     syncUploadBtn();
     buildQuickJump();
@@ -202,8 +206,9 @@ import { renderRich, runPendingAsync } from './render_md.js';
   function syncSessionRoot() {
     if (!state.root) return;
     var sess = activeSessionRoot();
-    if (sess && sess.ref === state.root) return;
+    if (sess && sess.ref === state.root && sess.node === state.rootNode) return;
     state.root = sess ? sess.ref : '';
+    state.rootNode = sess ? sess.node : 'local';
     state.rootLabel = sess ? sess.label : '';
     state.dir = '';
     syncUploadBtn();
@@ -224,7 +229,7 @@ import { renderRich, runPendingAsync } from './render_md.js';
     var known = state.roots.some(function (p) { return p.name === name; });
     if (!known) { buildQuickJump(); return; }
     var leavingSession = !!state.root;
-    state.root = ''; state.rootLabel = '';
+    state.root = ''; state.rootLabel = ''; state.rootNode = 'local';
     syncUploadBtn();
     if (name === state.project) {
       if (leavingSession) buildQuickJump();
@@ -242,10 +247,13 @@ import { renderRich, runPendingAsync } from './render_md.js';
     if (state.library) { state.library = false; syncUploadBtn(); buildQuickJump(); }
     if (!cur()) { renderEmpty('没有可浏览的工作区'); return; }
     state.dir = dir || '';
+    var node = curNode();
+    if (!nodeServesFiles(node)) { renderEmpty(REMOTE_FILES_UNSUPPORTED); return; }
     var box = $('files-list');
     if (box) box.innerHTML = '<div class="files-empty">加载中…</div>';
     var qs = (state.root ? 'root=' : 'project=') + encodeURIComponent(cur()) +
-      (state.dir ? '&dir=' + encodeURIComponent(state.dir) : '');
+      (state.dir ? '&dir=' + encodeURIComponent(state.dir) : '') +
+      (node !== 'local' ? '&node=' + encodeURIComponent(node) : '');
     fetchJSON(NZ_CONTRACT.API.projects_files_list + '?' + qs).then(function (res) {
       state.loaded = true;
       // The server names the tree a session root resolved to (its git root
@@ -254,7 +262,7 @@ import { renderRich, runPendingAsync } from './render_md.js';
       renderCrumbs();
       renderList(res);
     }).catch(function (e) {
-      renderEmpty('加载失败：' + e.message);
+      renderEmpty(e.status === 501 ? REMOTE_FILES_UNSUPPORTED : '加载失败：' + e.message);
     });
   }
 
@@ -294,10 +302,10 @@ import { renderRich, runPendingAsync } from './render_md.js';
   // regardless of the current dir). When called with one arg it downloads the
   // currently-previewed file.
   function download(rel, name) {
-    var root = cur();
-    if (rel == null) { rel = state.previewRel; name = state.previewName; root = state.previewRoot; }
+    var root = cur(), node = curNode();
+    if (rel == null) { rel = state.previewRel; name = state.previewName; root = state.previewRoot; node = state.previewNode; }
     if (!rel) return;
-    var url = fileApiUrl(root, 'local', rel, 'download');
+    var url = fileApiUrl(root, node, rel, 'download');
     var a = document.createElement('a');
     a.href = url; a.download = name || (rel.split('/').pop() || 'file'); a.rel = 'noopener';
     document.body.appendChild(a); a.click(); a.remove();
@@ -321,12 +329,13 @@ import { renderRich, runPendingAsync } from './render_md.js';
   }
 
   function preview(name) {
-    previewAt(cur(), relOf(name), name);
+    previewAt(cur(), relOf(name), name, curNode());
   }
 
-  // previewAt previews rel under root (a project name or a session: root).
-  function previewAt(root, rel, name) {
-    state.previewRoot = root; state.previewRel = rel; state.previewName = name;
+  // previewAt previews rel under root (a project name or a session: root)
+  // on node.
+  function previewAt(root, rel, name, node) {
+    state.previewRoot = root; state.previewRel = rel; state.previewName = name; state.previewNode = node;
     state.md = null;
     $('files-md-toggle').hidden = true;
     document.body.classList.add('files-reading');
@@ -341,13 +350,13 @@ import { renderRich, runPendingAsync } from './render_md.js';
     var imgExt = { png: 1, jpg: 1, jpeg: 1, gif: 1, webp: 1, bmp: 1, ico: 1 };
     if (ext === 'svg') {
       body.innerHTML = '';
-      renderSandboxedBlob(root, 'local', rel, body, 'image/svg+xml');
+      renderSandboxedBlob(root, node, rel, body, 'image/svg+xml');
       return;
     }
     if (imgExt[ext]) {
       body.innerHTML = '';
       var img = document.createElement('img');
-      img.src = fileApiUrl(root, 'local', rel, 'raw');
+      img.src = fileApiUrl(root, node, rel, 'raw');
       img.alt = name; img.loading = 'lazy';
       body.appendChild(img);
       return;
@@ -362,20 +371,20 @@ import { renderRich, runPendingAsync } from './render_md.js';
       // JS same-origin. sandbox="" grants zero capabilities — no scripts, no
       // plugins — while still allowing the browser's native PDF viewer.
       frame.setAttribute('sandbox', '');
-      frame.src = fileApiUrl(root, 'local', rel, 'raw');
+      frame.src = fileApiUrl(root, node, rel, 'raw');
       frame.title = name;
       body.appendChild(frame);
       return;
     }
     if (ext === 'html' || ext === 'htm' || ext === 'xhtml') {
       body.innerHTML = '';
-      renderSandboxedBlob(root, 'local', rel, body, 'text/html');
+      renderSandboxedBlob(root, node, rel, body, 'text/html');
       return;
     }
     // Text / unknown → preview JSON {content, truncated, size, mime}.
-    fetchJSON(fileApiUrl(root, 'local', rel, 'preview')).then(function (res) {
+    fetchJSON(fileApiUrl(root, node, rel, 'preview')).then(function (res) {
       // A slower fetch for a file the operator already left must not paint.
-      if (state.previewRel !== rel || state.previewRoot !== root) return;
+      if (state.previewRel !== rel || state.previewRoot !== root || state.previewNode !== node) return;
       // Server shape for non-text files is {content:"", binary:true}.
       if (res && res.binary) {
         body.innerHTML = '<div class="files-empty">该文件不可预览，请下载查看。</div>';
@@ -390,7 +399,7 @@ import { renderRich, runPendingAsync } from './render_md.js';
       }
       body.innerHTML = note + '<pre class="files-raw">' + esc((res && res.content) || '') + '</pre>';
     }).catch(function (e) {
-      body.innerHTML = '<div class="files-empty">不可预览（' + esc(e.message) + '），可尝试下载。</div>';
+      body.innerHTML = '<div class="files-empty">' + (e.status === 501 ? REMOTE_FILES_UNSUPPORTED : '不可预览（' + esc(e.message) + '），可尝试下载。') + '</div>';
     });
   }
 
@@ -469,7 +478,7 @@ import { renderRich, runPendingAsync } from './render_md.js';
     if (!o || !isPreviewableOutput(o)) return;
     var ref = previewRef(o);
     if (!ref) { toast('这个产出所在的目录已不在可浏览范围，无法预览'); return; }
-    previewAt(ref.project, ref.path, o.path.split('/').pop() || o.path);
+    previewAt(ref.project, ref.path, o.path.split('/').pop() || o.path, 'local');
   }
 
   function backToList() {
@@ -485,7 +494,7 @@ import { renderRich, runPendingAsync } from './render_md.js';
     if (qj) qj.addEventListener('click', function (e) {
       var b = e.target.closest('.files-qj'); if (!b) return;
       if (b.dataset.library) { openLibrary(); return; }
-      if (b.dataset.root) { jumpToSession(b.dataset.root, b.dataset.label); return; }
+      if (b.dataset.root) { jumpToSession(b.dataset.root, b.dataset.label, b.dataset.node); return; }
       jumpToProject(b.dataset.project || '');
     });
 

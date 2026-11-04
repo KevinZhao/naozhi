@@ -231,6 +231,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	// handler_set.go for why each one does).
 	s.sessionH = hs.sessionH
 	s.discoveryH = hs.discoveryH
+	s.projectFiles = hs.projectH
 
 	// Routes are registered HERE, not in Start (#2553): hs can only be a local
 	// if nothing after construction needs it. Start keeps the goroutine starts

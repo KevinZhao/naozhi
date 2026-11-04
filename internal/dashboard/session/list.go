@@ -261,6 +261,7 @@ func (h *Handlers) buildMultiNodeResp(snapshots []sessionpkg.SessionSnapshot, st
 			DisplayName: nc.DisplayName(),
 			Status:      status,
 			RemoteAddr:  nc.RemoteAddr(),
+			Caps:        nc.Meta().CapList(),
 		}
 		for _, rs := range cachedSessions[id] {
 			allSessions = append(allSessions, rs)
