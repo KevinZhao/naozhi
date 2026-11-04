@@ -30,6 +30,9 @@ func (c *spawnConfig) launchSpecFor(key string, ov shim.SpawnOverlay) LaunchSpec
 		PermissionMode:  ov.PermissionMode,
 		Name:            ov.Name,
 		StrictMCPConfig: ov.StrictMCPConfig,
+		// planner:main works in the state root and must stay read-only with
+		// no MCP (RFC planner §4.1), so it gets no project sources.
+		ProjectSettings: key != sessionkey.PlannerMainKey,
 	}
 	if hasSettingsOverrides(ov) && c.sessionSettingsDir != "" {
 		ls.SettingsFile = filepath.Join(c.sessionSettingsDir, persist.KeyHash(key)+".json")

@@ -77,6 +77,71 @@ func TestLaunchSpecDrift(t *testing.T) {
 	}
 }
 
+// settingSourcesIndex is the index of argv's --setting-sources value.
+func settingSourcesIndex(t *testing.T, argv []string) int {
+	t.Helper()
+	i := slices.Index(argv, "--setting-sources")
+	if i < 0 || i+1 >= len(argv) {
+		t.Fatalf("argv lacks --setting-sources: %v", argv)
+	}
+	return i + 1
+}
+
+// TestSettingSources: every session but planner:main loads its workspace's
+// project sources on top of the base the settings mode picks.
+func TestSettingSources(t *testing.T) {
+	cases := []struct {
+		key, settingsFile, want string
+	}{
+		{"dashboard:direct:ss:general", "/data/naozhi-settings.json", "project,local"},
+		{"cron:job1", "/data/naozhi-settings.json", "project,local"},
+		{"task:abc", "/data/naozhi-settings.json", "project,local"},
+		{"planner:main", "/data/naozhi-settings.json", ""},
+		{"dashboard:direct:ss:general", "", "user,project,local"},
+		{"planner:main", "", "user"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.key+"/"+tc.settingsFile, func(t *testing.T) {
+			r := mkOverlayRouter(t)
+			r.spawn.naozhiSettingsFile = tc.settingsFile
+			state, _ := spawnShimState(t, r, tc.key, "", AgentOpts{Backend: "claude", Workspace: "/ws"})
+			if got := state.CLIArgs[settingSourcesIndex(t, state.CLIArgs)]; got != tc.want {
+				t.Errorf("--setting-sources = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestShimArgsDrift_ProjectSettingSources: a shim spawned before sessions
+// loaded project settings is kept, not shut down as drifted; any other
+// --setting-sources change still drifts.
+func TestShimArgsDrift_ProjectSettingSources(t *testing.T) {
+	cases := []struct {
+		name, key, settingsFile, stored string
+		drift                           bool
+	}{
+		{"naozhi settings, legacy", "dashboard:direct:ss:general", "/data/naozhi-settings.json", "", false},
+		{"user settings, legacy", "dashboard:direct:ss:general", "", "user", false},
+		{"settings mode changed", "dashboard:direct:ss:general", "/data/naozhi-settings.json", "user", true},
+		{"planner gained project sources", "planner:main", "/data/naozhi-settings.json", "project,local", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := mkOverlayRouter(t)
+			r.spawn.naozhiSettingsFile = tc.settingsFile
+			s := newSessionWithID(tc.key, "sess-sources")
+			s.SetBackend("claude")
+			putT(r, tc.key, s)
+			state, _ := spawnShimState(t, r, tc.key, "", AgentOpts{Backend: "claude", Workspace: "/ws"})
+			state.CLIArgs[settingSourcesIndex(t, state.CLIArgs)] = tc.stored
+			wrapper, backendID := r.backends.wrapperFor("claude")
+			if drift, stored, current := driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, s); drift != tc.drift {
+				t.Errorf("drift = %v, want %v\n  stored:  %v\n  current: %v", drift, tc.drift, stored, current)
+			}
+		})
+	}
+}
+
 // TestSessionSettingsFile_WrittenOnSpawn: a session with settings overrides
 // spawns on its own settings file holding the naozhi-owned settings plus the
 // overrides; a session without them (a cron one, which the inbound policy

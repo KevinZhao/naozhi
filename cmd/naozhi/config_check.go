@@ -157,6 +157,9 @@ func configCheck(args []string, stdout io.Writer) int {
 	// half, so a check never creates a debug directory.
 	debugFile := session.CLIDebugPath(
 		session.CLIDebugDir(datadir.ForStore(storePath).EventsRoot()), effectiveSessionKey)
+	// The report describes an ordinary session, which loads its workspace's
+	// project settings (only planner:main does not).
+	execLaunch := session.LaunchSpec{ProjectSettings: true}
 
 	// The same session-layer view NewRouter receives, so default_model resolves
 	// through the same lookup the spawn path uses.
@@ -190,9 +193,9 @@ func configCheck(args []string, stdout io.Writer) int {
 		// replacing the backend's and ignored default_model (#2969).
 		bd := session.BackendDefaults{Model: b.Model, Args: b.Args, Effort: effort}
 		baseModel, baseEffort, baseArgs, _ := session.EffectiveArgvLayers(bd, accessProfiles, cfg.DefaultAccessProfile, session.AgentOpts{})
-		opts := session.ArgvSpawnOptions(baseModel, baseEffort, debugFile, "", baseArgs, session.LaunchSpec{}, settingsFile, mcpConfigFile, permissionMode)
+		opts := session.ArgvSpawnOptions(baseModel, baseEffort, debugFile, "", baseArgs, execLaunch, settingsFile, mcpConfigFile, permissionMode)
 		for _, d := range cli.SpawnDiagsFor(
-			session.ArgvSpawnOptions(b.Model, b.Effort, debugFile, "", b.Args, session.LaunchSpec{}, settingsFile, mcpConfigFile, permissionMode),
+			session.ArgvSpawnOptions(b.Model, b.Effort, debugFile, "", b.Args, execLaunch, settingsFile, mcpConfigFile, permissionMode),
 			caps,
 		) {
 			result.Diags = append(result.Diags, backendDiag{Backend: id, SpawnDiag: d})
@@ -226,7 +229,7 @@ func configCheck(args []string, stdout io.Writer) int {
 					eff.Agents = map[string][]string{}
 				}
 				eff.Agents[agentID] = proto.BuildArgs(session.ArgvSpawnOptions(
-					model, agentEffort, debugFile, prompt, args, session.LaunchSpec{}, settingsFile, mcpConfigFile, permissionMode))
+					model, agentEffort, debugFile, prompt, args, execLaunch, settingsFile, mcpConfigFile, permissionMode))
 			}
 			for apID, ap := range cfg.AccessProfiles {
 				if len(ap.Env) == 0 {

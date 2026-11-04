@@ -70,7 +70,23 @@ func (d driftArgs) shimArgsDrift(recWrapper *cli.Wrapper, backendID string, stat
 			"key", state.Key, "pid", state.ShimPID)
 	}
 	currentArgs = d.driftCompareArgs(recWrapper, backendID, state.Key, sess, state.SpawnOverlay)
+	storedBase = acceptProjectSettingSources(storedBase, currentArgs)
 	return !slices.Equal(storedBase, currentArgs), storedBase, currentArgs
+}
+
+// acceptProjectSettingSources returns stored with its --setting-sources value
+// replaced by current's when current only adds the project sources: a shim
+// spawned before sessions loaded project settings keeps running and picks
+// them up on its next spawn. Returns stored itself otherwise.
+func acceptProjectSettingSources(stored, current []string) []string {
+	i := slices.Index(stored, "--setting-sources")
+	if i < 0 || i+1 >= len(stored) || i+1 >= len(current) || current[i] != "--setting-sources" ||
+		!cli.AddsProjectSettingSources(stored[i+1], current[i+1]) {
+		return stored
+	}
+	out := slices.Clone(stored)
+	out[i+1] = current[i+1]
+	return out
 }
 
 // stripResumeArgs removes --resume <id> pairs from a CLI arg slice for the

@@ -176,6 +176,8 @@ func TestClaudeAvailableModels_ReattachSeedsFromArgv(t *testing.T) {
 		"user settings":                   {SpawnOptions{}, []ModelInfo{{ID: "claude-opus-5"}}},
 		"owned file, per-session file":    {SpawnOptions{SettingsFile: owned, SessionSettingsFile: perSession}, ownedModels},
 		"user settings, per-session file": {SpawnOptions{SessionSettingsFile: perSession}, []ModelInfo{{ID: "claude-opus-5"}}},
+		"owned file, project settings":    {SpawnOptions{SettingsFile: owned, SessionSettingsFile: perSession, ProjectSettings: true}, ownedModels},
+		"user settings, project settings": {SpawnOptions{ProjectSettings: true}, []ModelInfo{{ID: "claude-opus-5"}}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -220,6 +222,8 @@ func TestSettingsSourceFromArgs(t *testing.T) {
 		{"per-session file over base", []string{"--setting-sources", "", "--settings", "/store/session-settings/abc.json"}, "/abs/s.json", "/abs/s.json", true},
 		{"user", []string{"--setting-sources", "user"}, "", localSettingsMarker, true},
 		{"per-session file over user", []string{"--setting-sources", "user", "--settings", "/store/session-settings/abc.json"}, "/abs/s.json", localSettingsMarker, true},
+		{"project sources over base", []string{"--setting-sources", "project,local", "--settings", "/store/session-settings/abc.json"}, "/abs/s.json", "/abs/s.json", true},
+		{"project sources over user", []string{"--setting-sources", "user,project,local"}, "/abs/s.json", localSettingsMarker, true},
 		{"absent", []string{"-p", "--verbose"}, "", "", false},
 		{"dangling", []string{"--settings"}, "", "", false},
 		{"relative file ignored", []string{"--settings", "rel.json"}, "", "", false},
