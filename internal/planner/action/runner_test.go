@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/promise"
@@ -205,5 +206,61 @@ func TestStatus(t *testing.T) {
 	}
 	if got, _ := proms.Get(p.ID); got.State != promise.StateClosed || got.ClosedBy != promise.SourcePlanner {
 		t.Errorf("promise = %+v", got)
+	}
+}
+
+// A dispatched session that reported to the Planner during a turn and is
+// still 进行中, with no status block for it in the reply, gets the Planner
+// one receipt naming it and the promises that cite it; the next turn, with
+// no new report, gets none.
+func TestReportWithoutStatusGetsReceipt(t *testing.T) {
+	cases := []struct {
+		name   string
+		sender string
+		reply  string
+		want   bool
+	}{
+		{"no status", "task:ab12", "做完了，hello.md 已写好。", true},
+		{"status", "task:ab12", "还没完。\n" + block(`{"type":"status","task":"task:ab12","state":"doing","why":"它说还在等 CI"}`), false},
+		{"not dispatched", "dashboard:direct:x:general", "收到。", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r, g, _, side, _ := newRunner(t)
+			proms := promise.New(promise.Config{})
+			cited, _ := proms.Add(promise.Promise{Text: "task:ab12 做完后告诉用户结果"})
+			other, _ := proms.Add(promise.Promise{Text: "明早提醒你看 CI"})
+			if err := side.Put(sidecar.Meta{Key: "task:ab12", Purpose: sidecar.PurposeTask, Title: "iso 写 hello"}); err != nil {
+				t.Fatal(err)
+			}
+			r.cfg.Promises, r.cfg.Tasks = proms, task.New(task.Config{Sessions: side, Promises: proms})
+			now := r.last
+			r.cfg.Now = func() time.Time { return now }
+			reportAt := now.Add(time.Second)
+			r.cfg.Reports = func(from, to time.Time) []string {
+				if reportAt.After(from) && !reportAt.After(to) {
+					return []string{c.sender, c.sender}
+				}
+				return nil
+			}
+			for range 2 {
+				now = now.Add(2 * time.Second)
+				r.Result(sessionkey.PlannerMainKey, c.reply)
+				r.handle(<-r.ch)
+			}
+			if !c.want {
+				if len(g.told) != 0 {
+					t.Fatalf("told = %q, want no receipt", g.told)
+				}
+				return
+			}
+			if len(g.told) != 1 {
+				t.Fatalf("told = %q, want one receipt", g.told)
+			}
+			want := "task:ab12（iso 写 hello）刚向你汇报，它在任务里仍是进行中；完成了就用 status 标 done，没完成用 doing 并说明原因；相关的承诺 " + cited.ID + " 也一并处理。"
+			if g.told[0] != want || strings.Contains(g.told[0], other.ID) {
+				t.Errorf("receipt = %q, want %q", g.told[0], want)
+			}
+		})
 	}
 }

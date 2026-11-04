@@ -98,6 +98,9 @@ func TestReminderOnlyAutoCloses(t *testing.T) {
 		{"", true, true},
 		{"已提醒", true, true},
 		{"提醒即可。", true, true},
+		{"已提醒用户", true, true},
+		{"提醒你即可。", true, true},
+		{"已提醒用户复查 X", true, false},
 		{"你看过 CI", true, false},
 		{"", false, false}, // no due: nothing reminds it
 	}

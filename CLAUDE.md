@@ -149,7 +149,7 @@ On SIGTERM/SIGINT: `sd_notify STOPPING=1`, cancel the root context (stops connec
 1. **sysMgr.Stop** first -- daemon Tick paths call into the router; leaving them running while downstream state tears down would race
 2. **scheduler.Stop** (cron) -- in-flight cron jobs still call GetOrCreate/Send on the router
 3. **HTTP drain barrier** -- no handler may observe a half-cleaned session map
-4. **router.Shutdown** last -- waits for running sessions (30s via shutdownCond), saves the session store, closes all processes concurrently (via stdin close)
+4. **router.Shutdown** last -- waits up to 2s for running turns a shim does not hold (a shim-held turn finishes on the reattached CLI), saves the session store, detaches shim-held processes and closes the rest concurrently
 
 Each phase emits a `phase=` timing log line. A new subsystem MUST be inserted at the correct slot.
 

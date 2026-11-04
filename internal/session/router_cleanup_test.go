@@ -3,8 +3,10 @@ package session
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
 )
@@ -84,5 +86,58 @@ func TestShutdown_SetsStoppedBeforeSnapshot(t *testing.T) {
 	_, _, err := r.GetOrCreate(context.Background(), "feishu:p2p:late", AgentOpts{})
 	if !errors.Is(err, ErrRouterStopped) {
 		t.Fatalf("post-Shutdown GetOrCreate err = %v, want ErrRouterStopped", err)
+	}
+}
+
+// shimHeldProc is a fakeProcess held by a shim; Detach records whether the
+// store held its session by then.
+type shimHeldProc struct {
+	*fakeProcess
+	onDetach func()
+}
+
+func (p *shimHeldProc) Detach() { p.onDetach() }
+
+// Shutdown does not wait for a shim-held turn, which finishes on the
+// reattached CLI after the restart: it saves the store and then detaches,
+// well inside the service manager's 5s stop budget. A turn that would die
+// with naozhi still gets up to shutdownTurnWait.
+func TestShutdown_DoesNotWaitForShimHeldTurns(t *testing.T) {
+	cases := []struct {
+		name     string
+		shim     bool
+		min, max time.Duration
+	}{
+		{"shim-held", true, 0, time.Second},
+		{"not shim-held", false, shutdownTurnWait, shutdownTurnWait + 2*time.Second},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			const key = "dashboard:direct:long-turn:general"
+			storePath := filepath.Join(t.TempDir(), "sessions.json")
+			r := newTestRouter(3)
+			r.storePath = storePath
+			var proc processIface = newRunningProc()
+			savedFirst := false
+			if c.shim {
+				proc = &shimHeldProc{fakeProcess: newRunningProc(), onDetach: func() {
+					_, savedFirst = loadStore(storePath)[key]
+				}}
+			}
+			injectSession(r, key, proc).setSessionID("sid-long")
+
+			start := time.Now()
+			r.Shutdown()
+			if d := time.Since(start); d < c.min || d > c.max {
+				t.Errorf("Shutdown took %v, want %v..%v", d, c.min, c.max)
+			}
+			if _, ok := loadStore(storePath)[key]; !ok {
+				t.Error("the running session is not in the saved store")
+			}
+			if c.shim && !savedFirst {
+				t.Error("the process was detached before the store save")
+			}
+		})
 	}
 }

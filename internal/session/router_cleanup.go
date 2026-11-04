@@ -611,6 +611,20 @@ func (r *Router) Shutdown() {
 	r.shutdownOnce.Do(r.shutdown)
 }
 
+// shutdownTurnWait bounds shutdown's wait for running turns. launchd and the
+// systemd unit allow 5s from SIGTERM to SIGKILL, and the store save and run
+// marker come after the wait.
+const shutdownTurnWait = 2 * time.Second
+
+// detacher is a process held by a shim: Detach lets go of it and its CLI
+// keeps running for the next start to reattach.
+type detacher interface{ Detach() }
+
+func detachable(p processIface) bool {
+	_, ok := p.(detacher)
+	return ok
+}
+
 func (r *Router) shutdown() {
 	// Cancel the history ctx so in-flight LoadHistory*Ctx calls abort instead
 	// of blocking on slow reads; the bounded wait below is the hard deadline.
@@ -626,7 +640,7 @@ func (r *Router) shutdown() {
 	// Deadline timer: broadcast to unblock the wait on timeout. The broadcast
 	// is a transaction so it cannot slip between the wait predicate below and
 	// the wait itself and be lost (same contract as NotifyIdle).
-	timer := time.AfterFunc(ShutdownTimeout, func() {
+	timer := time.AfterFunc(shutdownTurnWait, func() {
 		r.ss.Update(func(tx sessTx) { tx.Broadcast() })
 	})
 	defer timer.Stop()
@@ -638,12 +652,15 @@ func (r *Router) shutdown() {
 	)
 	storePath := r.storePath
 	r.ss.Update(func(tx sessTx) {
-		// Wait for running sessions to complete (up to ShutdownTimeout).
-		deadline := time.Now().Add(ShutdownTimeout)
+		// Wait for the running turns that would die with naozhi (up to
+		// shutdownTurnWait). A shim-held CLI keeps running across the
+		// restart and its turn finishes on the reattached process, so
+		// waiting for it would only spend the service manager's stop budget.
+		deadline := time.Now().Add(shutdownTurnWait)
 		for {
 			running := false
 			for _, s := range tx.All() {
-				if p := s.loadProcess(); p != nil && p.IsRunning() {
+				if p := s.loadProcess(); p != nil && p.IsRunning() && !detachable(p) {
 					running = true
 					break
 				}
@@ -719,7 +736,7 @@ func (r *Router) shutdown() {
 						"panic", r, "stack", string(debug.Stack()))
 				}
 			}()
-			if dp, ok := p.(interface{ Detach() }); ok {
+			if dp, ok := p.(detacher); ok {
 				dp.Detach()
 			} else {
 				p.Close()

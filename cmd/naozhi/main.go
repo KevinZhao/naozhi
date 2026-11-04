@@ -596,7 +596,8 @@ func main() {
 	promises.SetReminder(wireup.PromiseReminder{Notify: notifier, Note: plannerAgent.Note})
 	go promises.Run(ctx)
 	// The Planner's action blocks (§6.2): parsed from planner:main's turn
-	// results; an approved dispatch starts a task: session.
+	// results; an approved dispatch starts a task: session, and a task left
+	// 进行中 after it reported gets the Planner a receipt.
 	actions := action.New(action.Config{
 		Planner:    agent.Key,
 		Inbox:      notifier,
@@ -607,6 +608,7 @@ func main() {
 		Spawn:      wireup.TaskSpawner{Router: router, Opts: taskOpts, Submit: srv.SubmitPlanner}.Spawn,
 		Note:       plannerAgent.Note,
 		Tell:       plannerAgent.Tell,
+		Reports:    wireup.PlannerReports(router),
 		Ctx:        ctx,
 	})
 	router.SetResultSink(actions.Result)
@@ -641,6 +643,10 @@ func main() {
 			// journalctl alone (grep `phase=`).
 			shutdownT0 := time.Now()
 			slog.Info("shutdown starting", "reason", reason)
+			// The run is stopping normally from here: a service manager that
+			// cuts the teardown short is not a crash for the next start to
+			// report. Only a run that never got here leaves its marker.
+			notifier.Close()
 			if err := osutil.SdNotify("STOPPING=1"); err != nil {
 				slog.Warn("sd_notify STOPPING failed", "err", err)
 			}
@@ -691,9 +697,6 @@ func main() {
 				{name: "http-drain", run: func() { <-srv.ShutdownComplete() }},
 				{name: "router", run: router.Shutdown},
 			})
-			// Last: a run marker left behind tells the next start this
-			// shutdown did not finish.
-			notifier.Close()
 			slog.Info("shutdown complete", "reason", reason, "total_ms", time.Since(shutdownT0).Milliseconds())
 		})
 	}

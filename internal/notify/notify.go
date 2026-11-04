@@ -294,8 +294,9 @@ func unixNano(t time.Time) int64 {
 	return t.UnixNano()
 }
 
-// Close removes the run marker: the run ended cleanly. Call it once the
-// rest of shutdown is done.
+// Close removes the run marker: the run is stopping normally. Call it as
+// graceful shutdown starts, so a teardown the service manager cuts short
+// still reads as a clean exit; only a run that never got there is a crash.
 func (n *Notifier) Close() {
 	if p := n.cfg.Layout.PlannerRunMarkerPath(); p != "" {
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {

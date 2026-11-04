@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -290,16 +291,28 @@ func (s *Store) Reopen(id string) error {
 }
 
 // reminderOnly reports whether p is a pure reminder: a due time and no
-// condition beyond having reminded.
+// condition beyond having reminded. The Planner words it freely ("已提醒用户",
+// "提醒你即可。"), so who is reminded and the punctuation are dropped before
+// matching; anything else left over is a condition.
 func reminderOnly(p Promise) bool {
 	if p.Due.IsZero() {
 		return false
 	}
-	switch strings.TrimRight(p.CloseWhen, "。. ") {
+	switch reminderWords.Replace(strings.Map(dropPunct, p.CloseWhen)) {
 	case "", "已提醒", "提醒过", "提醒后", "提醒即可", "提醒到", "到点提醒":
 		return true
 	}
 	return false
+}
+
+// reminderWords are who a reminder goes to, dropped by reminderOnly.
+var reminderWords = strings.NewReplacer("用户", "", "你", "", "我", "")
+
+func dropPunct(r rune) rune {
+	if unicode.IsPunct(r) || unicode.IsSpace(r) || unicode.IsSymbol(r) {
+		return -1
+	}
+	return r
 }
 
 // Run checks due times every interval until ctx ends.
