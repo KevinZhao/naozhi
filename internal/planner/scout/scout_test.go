@@ -138,7 +138,7 @@ func TestSessionOpts(t *testing.T) {
 			t.Errorf("tool %s: not an MCP tool, or denied", tool)
 		}
 	}
-	for _, want := range []string{"mcp__slack-mcp__post_message", "mcp__slack-mcp__set_last_read", "mcp__aws-outlook-mcp__enable_write_tools",
+	for _, want := range []string{"mcp__slack-mcp__post_message", "mcp__slack-mcp__set_last_read", "mcp__aws-outlook-mcp__enable_write_tools", "mcp__aws-outlook-mcp__email_send",
 		"mcp__enterprise-asana-mcp__asana___UpdateTask", "mcp__enterprise-asana-mcp__asana___CreateTask", "mcp__enterprise-asana-mcp__asana___DeleteTask"} {
 		if !slices.Contains(opts.PermissionsDeny, want) {
 			t.Errorf("deny lacks %s", want)
