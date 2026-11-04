@@ -65,6 +65,11 @@ type taskItem struct {
 	Since time.Time
 }
 
+type heldItem struct {
+	Mention
+	At time.Time
+}
+
 // input is what one brief is rendered from: the same input gives the same
 // bytes.
 type input struct {
@@ -72,19 +77,19 @@ type input struct {
 	Meetings   []meetingItem
 	Replies    []replyItem
 	Deadlines  []deadlineItem
-	Noted      []Note
 	Done       []doneItem
 	Failed     []failedItem
 	Waiting    []inboxItem
 	Errors     []inboxItem
 	Notices    []inboxItem
 	Tasks      []taskItem
+	Held       []heldItem
 }
 
 func (in input) counts() Counts {
-	return Counts{Meetings: len(in.Meetings), Replies: len(in.Replies), Deadlines: len(in.Deadlines), Noted: len(in.Noted),
+	return Counts{Meetings: len(in.Meetings), Replies: len(in.Replies), Deadlines: len(in.Deadlines),
 		Done: len(in.Done), Failed: len(in.Failed), Waiting: len(in.Waiting), Errors: len(in.Errors),
-		Notices: len(in.Notices), Tasks: len(in.Tasks)}
+		Notices: len(in.Notices), Tasks: len(in.Tasks), Planner: len(in.Held)}
 }
 
 // healthData is the part of a health journal entry's data the brief reads
@@ -135,6 +140,7 @@ func (b *Briefer) gather(since, now time.Time) input {
 		s.ws, s.kind = cmp.Or(ws, s.ws), cmp.Or(string(kind), s.kind)
 		return s
 	}
+	held := map[string]heldItem{} // by key: the latest hold of a thing
 	if b.cfg.Journal != nil {
 		entries, err := b.cfg.Journal.Read(since, now.Add(time.Second))
 		if err != nil {
@@ -142,11 +148,12 @@ func (b *Briefer) gather(since, now time.Time) input {
 		}
 		for _, e := range entries {
 			switch e.Kind {
-			case journal.KindBrief:
-				var d noteData
-				if json.Unmarshal(e.Data, &d) == nil && d.Note != nil {
-					in.Noted = append(in.Noted, *d.Note)
+			case journal.KindNotify:
+				var d holdData
+				if json.Unmarshal(e.Data, &d) != nil || d.Event != eventHold || d.Title == "" {
+					continue
 				}
+				held[cmp.Or(d.Key, d.Title)] = heldItem{Mention: d.Mention, At: e.TS}
 			case journal.KindHealth:
 				var d healthData
 				if json.Unmarshal(e.Data, &d) != nil || d.Systemic {
@@ -257,6 +264,11 @@ func (b *Briefer) gather(since, now time.Time) input {
 			in.Tasks = append(in.Tasks, taskItem{ref: r, Kind: t.Kind, State: t.State, Due: t.Due, Since: t.Created})
 		}
 	}
+
+	for _, h := range held {
+		in.Held = append(in.Held, h)
+	}
+	slices.SortFunc(in.Held, func(x, y heldItem) int { return cmp.Or(x.At.Compare(y.At), cmp.Compare(x.Key, y.Key)) })
 
 	b.gatherScout(&in)
 
@@ -378,13 +390,6 @@ func render(in input) string {
 	section(&b, "今天到期或已过期的 Asana 任务", in.Deadlines, func(d deadlineItem) string {
 		return plain(textutil.TruncateRunes(d.Title, titleRunes)) + " · " + dueLabel(d.Due, in.Now)
 	})
-	section(&b, "Planner 记下的", in.Noted, func(n Note) string {
-		line := link(textutil.TruncateRunes(n.Title, titleRunes), external(n.Link))
-		if n.Why != "" {
-			line += " · " + plain(n.Why)
-		}
-		return line
-	})
 
 	section(&b, "完成的", in.Done, func(d doneItem) string {
 		line := link(d.Name, d.Link) + wsPart(d.WS) + " · " + d.At.In(loc).Format(stamp)
@@ -427,6 +432,13 @@ func render(in input) string {
 		}
 		return line + " · 已 " + ago(in.Now.Sub(t.Since))
 	})
+	section(&b, "Planner 记下的", in.Held, func(h heldItem) string {
+		line := link(textutil.TruncateRunes(h.Title, titleRunes), escapeHref(h.Link))
+		if h.Why != "" {
+			line += " · " + plain(h.Why)
+		}
+		return line + " · " + h.At.In(loc).Format(stamp)
+	})
 	return b.String()
 }
 
@@ -451,8 +463,8 @@ func summary(c Counts, errors string) string {
 	for _, p := range []struct {
 		label string
 		n     int
-	}{{"今天日程", c.Meetings}, {"等你回复", c.Replies}, {"Asana 到期", c.Deadlines}, {"Planner 记下", c.Noted},
-		{"完成", c.Done}, {"失败", c.Failed}, {"等你", c.Waiting}, {errors, c.Errors}, {"通知", c.Notices}, {"未完成的任务", c.Tasks}} {
+	}{{"今天日程", c.Meetings}, {"等你回复", c.Replies}, {"Asana 到期", c.Deadlines},
+		{"完成", c.Done}, {"失败", c.Failed}, {"等你", c.Waiting}, {errors, c.Errors}, {"通知", c.Notices}, {"未完成的任务", c.Tasks}, {"Planner 记下", c.Planner}} {
 		if p.n > 0 {
 			parts = append(parts, fmt.Sprintf("%s %d", p.label, p.n))
 		}
@@ -477,6 +489,11 @@ func wsPart(ws string) string {
 	}
 	return " · 工作区 " + plain(ws)
 }
+
+// hrefEscapes keep a link's URL inside the Markdown link's parentheses.
+var hrefEscapes = strings.NewReplacer("(", "%28", ")", "%29", " ", "%20", "<", "%3C", ">", "%3E")
+
+func escapeHref(u string) string { return hrefEscapes.Replace(u) }
 
 var prNumber = regexp.MustCompile(`/pull/(\d+)`)
 

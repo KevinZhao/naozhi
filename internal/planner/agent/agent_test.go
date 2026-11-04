@@ -86,9 +86,10 @@ const refKey = "dashboard:direct:a:general"
 
 // fakeTurns answers every turn at once with reply.
 type fakeTurns struct {
-	reply string
-	sent  []string
-	notes []string
+	reply   string
+	sent    []string
+	notes   []string
+	sources []Source
 }
 
 func (f *fakeTurns) SubmitPlanner(_ string, _ Source, text string, _ sessionview.AgentOpts, done func(string, error)) (bool, error) {
@@ -99,10 +100,10 @@ func (f *fakeTurns) SubmitPlanner(_ string, _ Source, text string, _ sessionview
 	return false, nil
 }
 
-func (*fakeTurns) PlannerTurnSources(string) []Source { return nil }
-func (*fakeTurns) PlannerReceipt(string, string)      {}
-func (f *fakeTurns) PlannerNote(_, text string)       { f.notes = append(f.notes, text) }
-func (*fakeTurns) DropPlannerQueue(string)            {}
+func (f *fakeTurns) PlannerTurnSources(string) []Source { return f.sources }
+func (*fakeTurns) PlannerReceipt(string, string)        {}
+func (f *fakeTurns) PlannerNote(_, text string)         { f.notes = append(f.notes, text) }
+func (*fakeTurns) DropPlannerQueue(string)              {}
 
 func newTestAgent(t *testing.T, sess *fakeSessions, now *time.Time) (*Agent, datadir.Layout) {
 	t.Helper()
@@ -426,6 +427,30 @@ func TestSendRef(t *testing.T) {
 		}
 		if len(turns.sent) != 1 || !strings.HasPrefix(turns.sent[0], tc.head) || !strings.HasSuffix(turns.sent[0], tc.tail) {
 			t.Errorf("Send(%q, %q) sent %q, want %q … %q", tc.text, tc.ref, turns.sent, tc.head, tc.tail)
+		}
+	}
+}
+
+// TestTurnSourceJudgement: the turn in flight is judged by every source of
+// its requests: outside content names it, and only a receipt of blocks not
+// run (outside or not) makes it that receipt's own turn.
+func TestTurnSourceJudgement(t *testing.T) {
+	for _, tc := range []struct {
+		sources []Source
+		outside string
+		unrun   bool
+	}{
+		{},
+		{sources: []Source{SourceReceipt, SourceUser}},
+		{sources: []Source{SourceUnrun, SourceUser}, unrun: true},
+		{sources: []Source{SourceRefusal}, outside: "被拒动作的回执", unrun: true},
+		{sources: []Source{SourceBriefing, SourceScout}, outside: "会前简报、巡检"},
+	} {
+		now := time.Now()
+		a, _ := newTestAgent(t, &fakeSessions{}, &now)
+		a.turns = &fakeTurns{sources: tc.sources}
+		if got, unrun := a.OutsideTurn(), a.UnrunTurn(); got != tc.outside || unrun != tc.unrun {
+			t.Errorf("%v: outside %q, unrun %v; want %q, %v", tc.sources, got, unrun, tc.outside, tc.unrun)
 		}
 	}
 }

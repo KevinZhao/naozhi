@@ -2,9 +2,7 @@ package brief
 
 import (
 	"fmt"
-	"net/url"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/planner/scout"
@@ -134,14 +132,4 @@ func dueLabel(due, now time.Time) string {
 		return "今天到期"
 	}
 	return fmt.Sprintf("已过期 %d 天", days)
-}
-
-// external is href when it is an https URL the brief's Markdown can carry
-// as a link, "" otherwise.
-func external(href string) string {
-	u, err := url.Parse(href)
-	if err != nil || u.Scheme != "https" || u.Host == "" || strings.ContainsAny(href, " ()<>[]`\\") {
-		return ""
-	}
-	return href
 }

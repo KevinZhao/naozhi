@@ -524,3 +524,34 @@ func TestUncapped(t *testing.T) {
 		t.Error("DismissSource left the item open")
 	}
 }
+
+// AddDaily opens a source once a day: not again the same day, open or
+// closed by the user, and again the next day once the first is closed.
+func TestAddDaily(t *testing.T) {
+	n, clock, b := newTest(t, local(9, 0), datadir.Layout{})
+	steps := []struct {
+		advance time.Duration
+		close   bool // close the open item first
+		opened  bool
+	}{
+		{opened: true},
+		{advance: time.Hour},
+		{advance: time.Hour, close: true},
+		{advance: 24 * time.Hour, opened: true},
+	}
+	for i, st := range steps {
+		clock.advance(st.advance)
+		if st.close {
+			open, _ := n.List(0)
+			if err := n.Dismiss(open[0].ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, opened := n.AddDaily(Item{Kind: KindNotice, Source: "planner:k", Title: "有人等你回复"}); opened != st.opened {
+			t.Errorf("step %d: opened = %v, want %v", i, opened, st.opened)
+		}
+	}
+	if got := b.titles(); len(got) != 2 {
+		t.Errorf("pushes = %q, want two", got)
+	}
+}

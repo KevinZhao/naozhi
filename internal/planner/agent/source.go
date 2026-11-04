@@ -29,6 +29,9 @@ const (
 	// SourceRefusal is the receipt of action blocks refused in a scout or
 	// briefing turn (TellRefused).
 	SourceRefusal Source = "refusal"
+	// SourceUnrun is the receipt of the action blocks a reply's turn did not
+	// run, in a turn no outside content brought in (TellUnrun).
+	SourceUnrun Source = "unrun"
 )
 
 // outsideLabels names the sources whose turns carry outside content (mail,
@@ -69,6 +72,20 @@ func (a *Agent) OutsideTurn() string {
 		}
 	}
 	return strings.Join(labels, "、")
+}
+
+// UnrunTurn reports whether the turn in flight answers a receipt of action
+// blocks not run (TellUnrun, TellRefused). The action runner reads it as a
+// turn's result arrives: such a turn's own blocks not run get no receipt, so
+// the two do not go round, while any other turn's do, however the turns
+// queued up between.
+func (a *Agent) UnrunTurn() bool {
+	for _, src := range a.TurnSources() {
+		if src == SourceUnrun || src == SourceRefusal {
+			return true
+		}
+	}
+	return false
 }
 
 // Wake starts a Planner turn from src with block, the gateway's data for

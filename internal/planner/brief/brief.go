@@ -5,10 +5,10 @@
 // as the badge counts them), the unclosed errors, the notices and the 任务
 // not done (§15.4) — and, from the scout (§15.6 早报增强), today's
 // calendar, the people waiting on a reply and the Asana tasks due, with
-// what the Planner kept for the brief, as short Chinese Markdown, journals
-// it (kind=brief) and pushes it once. It is rendered by fixed rules from
-// the journal, the inbox, the health snapshot and the scout's state;
-// nothing here calls a model.
+// what the Planner held for it (notify blocks of level brief), as short
+// Chinese Markdown, journals it (kind=brief) and pushes it once. It is
+// rendered by fixed rules from the journal, the inbox, the health snapshot
+// and the scout's state; nothing here calls a model.
 //
 // A day with nothing to report sends nothing. Its judgment is journaled all
 // the same, so a restart later that day does not judge it again, and the
@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +29,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // Timing (§15.1).
@@ -55,17 +55,46 @@ type Counts struct {
 	Meetings  int `json:"meetings"`
 	Replies   int `json:"replies"`
 	Deadlines int `json:"deadlines"`
-	Noted     int `json:"noted"`
 	Done      int `json:"done"`
 	Failed    int `json:"failed"`
 	Waiting   int `json:"waiting"`
 	Errors    int `json:"errors"`
 	Notices   int `json:"notices"`
 	Tasks     int `json:"tasks"`
+	Planner   int `json:"planner"`
 }
 
 func (c Counts) total() int {
-	return c.Meetings + c.Replies + c.Deadlines + c.Noted + c.Done + c.Failed + c.Waiting + c.Errors + c.Notices + c.Tasks
+	return c.Meetings + c.Replies + c.Deadlines + c.Done + c.Failed + c.Waiting + c.Errors + c.Notices + c.Tasks + c.Planner
+}
+
+// Mention is something the Planner holds for the next brief (a notify block
+// of level brief): Key names the thing, so a brief lists it once.
+type Mention struct {
+	Key   string `json:"key"`
+	Title string `json:"title"`
+	Why   string `json:"why,omitempty"`
+	Link  string `json:"link,omitempty"`
+}
+
+// eventHold is the notify journal event of a held Mention.
+const eventHold = "brief_hold"
+
+type holdData struct {
+	Event string `json:"event"`
+	Mention
+}
+
+// Hold journals m for the next brief, whose window it falls in.
+func (b *Briefer) Hold(m Mention) error {
+	if b.cfg.Journal == nil {
+		return errors.New("brief: no journal")
+	}
+	data, err := json.Marshal(holdData{Event: eventHold, Mention: m})
+	if err != nil {
+		return err
+	}
+	return b.cfg.Journal.Append(journal.Entry{TS: b.cfg.Now(), Kind: journal.KindNotify, Unit: sessionkey.PlannerMainKey, Data: data})
 }
 
 // Brief is one day's judgment, the data of a kind=brief journal entry.
@@ -106,21 +135,6 @@ type Config struct {
 	Patrol func(since time.Time) []scout.Run
 }
 
-// Note is an item the Planner kept for the next brief (a notify block of
-// level brief, §15.6).
-type Note struct {
-	Title string `json:"title"`
-	Why   string `json:"why,omitempty"`
-	// Link is shown only as an https URL.
-	Link string `json:"link,omitempty"`
-}
-
-// noteData is a kept note's journal data (kind=brief, beside the
-// judgments, which have a day).
-type noteData struct {
-	Note *Note `json:"note"`
-}
-
 // Briefer judges the day's brief. Check runs on Run's goroutine; Recent is
 // safe from any goroutine.
 type Briefer struct {
@@ -154,26 +168,6 @@ func New(cfg Config) *Briefer {
 		b.keep(br)
 	}
 	return b
-}
-
-// ErrNoJournal answers Keep without a journal to keep the note in.
-var ErrNoJournal = errors.New("早报没有日志，记不下")
-
-// Keep records n for the next brief, in the journal, so it outlasts a
-// restart. Notes kept after today's brief go into tomorrow's.
-func (b *Briefer) Keep(n Note) error {
-	if b.cfg.Journal == nil {
-		return ErrNoJournal
-	}
-	n = Note{Title: strings.TrimSpace(n.Title), Why: strings.TrimSpace(n.Why), Link: strings.TrimSpace(n.Link)}
-	if n.Title == "" {
-		return errors.New("早报条目没有标题")
-	}
-	data, err := json.Marshal(noteData{Note: &n})
-	if err != nil {
-		return err
-	}
-	return b.cfg.Journal.Append(journal.Entry{TS: b.cfg.Now(), Kind: journal.KindBrief, Unit: journalUnit, Data: data})
 }
 
 // keep records br as the latest judgment.
@@ -279,8 +273,9 @@ func (b *Briefer) Check() {
 		return
 	}
 	slog.Info("brief: sent", "day", br.Day, "meetings", br.Counts.Meetings, "replies", br.Counts.Replies,
-		"deadlines", br.Counts.Deadlines, "noted", br.Counts.Noted, "done", br.Counts.Done, "failed", br.Counts.Failed,
-		"waiting", br.Counts.Waiting, "errors", br.Counts.Errors, "notices", br.Counts.Notices, "tasks", br.Counts.Tasks)
+		"deadlines", br.Counts.Deadlines, "done", br.Counts.Done, "failed", br.Counts.Failed,
+		"waiting", br.Counts.Waiting, "errors", br.Counts.Errors, "notices", br.Counts.Notices, "tasks", br.Counts.Tasks,
+		"planner", br.Counts.Planner)
 	if b.cfg.Push != nil {
 		b.cfg.Push(notify.Push{ID: "brief:" + br.Day, Kind: notify.KindNotice, Level: notify.LevelTimely,
 			Title: "早报", Body: pushBody(br.Counts)})

@@ -1,18 +1,20 @@
 // Package action is the Planner's way to ask the gateway for something
 // (docs/rfc/planner.md §6.2): the ```naozhi-action blocks at the end of a
-// planner:main reply. There are four: dispatch (a task: session, started at
+// planner:main reply. There are five: dispatch (a task: session, started at
 // once, D88), promise (a promise among the 任务), ask (a
-// question in "通知" whose answer goes back to the Planner) and status (the
-// Planner's judgment of a task's state, §15.4). A block that does not parse,
-// or names an unknown type, a bad field or a task that does not exist, is
-// not run: the Planner conversation shows it as it was written, with the
-// reason.
+// question in "通知" whose answer goes back to the Planner), status (the
+// Planner's judgment of a task's state, §15.4) and notify (something to tell
+// the user, pushed now or held for the morning brief, §15.6). A block that
+// does not parse, or names an unknown type, a bad field or a task that does
+// not exist, is not run: the Planner conversation shows it as it was
+// written, with the reason, and the Planner gets a receipt naming it.
 package action
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -28,8 +30,10 @@ const Fence = "naozhi-action"
 
 // Limits on what a block may carry.
 const (
-	// maxBlocks is how many blocks one reply may run; the rest are refused.
-	maxBlocks = 5
+	// maxBlocks is how many blocks one reply may run; the rest are refused,
+	// and the receipt asks for them in another reply. A scout turn may carry
+	// several reminders.
+	maxBlocks = 10
 	// maxBlockBytes caps one block's body.
 	maxBlockBytes = 64 << 10
 	// titleRunes is the CLI's --name cap.
@@ -40,6 +44,11 @@ const (
 	optionRunes       = 40
 	workspaceRefRunes = 128
 	taskRefRunes      = 128
+	// notifyTitleRunes is what the inbox shows of a title.
+	notifyTitleRunes = 120
+	// notifyIDRunes matches the scout's finding IDs.
+	notifyIDRunes = 512
+	linkBytes     = 2048
 )
 
 // Type is a block's "type".
@@ -50,6 +59,7 @@ const (
 	TypePromise  Type = "promise"
 	TypeAsk      Type = "ask"
 	TypeStatus   Type = "status"
+	TypeNotify   Type = "notify"
 )
 
 // Dispatch asks for a session in a workspace.
@@ -84,8 +94,27 @@ type Status struct {
 	Why   string `json:"why"`
 }
 
+// Levels of a notify block.
+const (
+	// LevelTimely is pushed now, within the daily cap and quiet hours.
+	LevelTimely = "timely"
+	// LevelBrief waits for the next morning brief.
+	LevelBrief = "brief"
+)
+
+// Notify tells the user something: Level timely pushes it, brief holds it
+// for the next morning brief. ID is the scout finding it is about, "" when
+// none; with Title and Link it names the thing, so it is pushed once a day.
+type Notify struct {
+	Title string `json:"title"`
+	Why   string `json:"why"`
+	Level string `json:"level"`
+	Link  string `json:"link"`
+	ID    string `json:"id"`
+}
+
 // Block is one action block of a reply: exactly one of Dispatch, Promise,
-// Ask and Status is set, or Err says why it is not run.
+// Ask, Status and Notify is set, or Err says why it is not run.
 type Block struct {
 	// Raw is the block's body as written.
 	Raw      string
@@ -94,8 +123,12 @@ type Block struct {
 	Promise  *Promise
 	Ask      *Ask
 	Status   *Status
+	Notify   *Notify
 	Err      error
 }
+
+// errTooMany refuses the blocks past maxBlocks.
+var errTooMany = fmt.Errorf("一次回复最多 %d 个动作块", maxBlocks)
 
 // Parse returns text's action blocks in order.
 func Parse(text string) []Block {
@@ -119,7 +152,7 @@ func Parse(text string) []Block {
 		case !closed:
 			b.Err = errors.New("代码块没有结束（缺少结尾的 ```）")
 		case len(out) >= maxBlocks:
-			b.Err = fmt.Errorf("一次回复最多 %d 个动作块", maxBlocks)
+			b.Err = errTooMany
 		default:
 			b.decode()
 		}
@@ -193,13 +226,22 @@ func (b *Block) decode() {
 			err = st.validate()
 			b.Status = &st.Status
 		}
+	case TypeNotify:
+		var n struct {
+			Type Type `json:"type"`
+			Notify
+		}
+		if err = strict(b.Raw, &n); err == nil {
+			err = n.validate()
+			b.Notify = &n.Notify
+		}
 	case "":
 		err = errors.New("缺少 type")
 	default:
-		err = fmt.Errorf("未知类型 %q（只有 dispatch、promise、ask、status）", head.Type)
+		err = fmt.Errorf("未知类型 %q（只有 dispatch、promise、ask、status、notify）", head.Type)
 	}
 	if err != nil {
-		b.Dispatch, b.Promise, b.Ask, b.Status, b.Err = nil, nil, nil, nil, err
+		b.Dispatch, b.Promise, b.Ask, b.Status, b.Notify, b.Err = nil, nil, nil, nil, nil, err
 	}
 }
 
@@ -291,4 +333,34 @@ func (s *Status) validate() error {
 		return fmt.Errorf("why 超过 %d 字", textRunes)
 	}
 	return nil
+}
+
+func (n *Notify) validate() error {
+	n.Title = strings.Join(strings.Fields(n.Title), " ")
+	n.Why, n.Level, n.Link, n.ID = strings.TrimSpace(n.Why), strings.TrimSpace(n.Level), strings.TrimSpace(n.Link), strings.TrimSpace(n.ID)
+	switch {
+	case n.Title == "":
+		return errors.New("notify 缺少 title")
+	case utf8.RuneCountInString(n.Title) > notifyTitleRunes:
+		return fmt.Errorf("title 超过 %d 字", notifyTitleRunes)
+	case utf8.RuneCountInString(n.Why) > textRunes:
+		return fmt.Errorf("why 超过 %d 字", textRunes)
+	case n.Level != LevelTimely && n.Level != LevelBrief:
+		return fmt.Errorf("level 只能是 timely 或 brief，不是 %q", n.Level)
+	case utf8.RuneCountInString(n.ID) > notifyIDRunes:
+		return errors.New("id 太长")
+	case n.Link != "" && !webLink(n.Link):
+		return errors.New("link 要是 http(s) 链接或空")
+	}
+	return nil
+}
+
+// webLink reports whether s is an absolute http(s) URL the dashboard may
+// open.
+func webLink(s string) bool {
+	if len(s) > linkBytes || strings.IndexFunc(s, unicode.IsSpace) >= 0 || strings.IndexFunc(s, unicode.IsControl) >= 0 {
+		return false
+	}
+	u, err := url.Parse(s)
+	return err == nil && (u.Scheme == "https" || u.Scheme == "http") && u.Host != ""
 }

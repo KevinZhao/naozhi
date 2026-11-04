@@ -28,13 +28,13 @@ func finding(source, kind, id, title, from, at, due string) scout.RunFinding {
 // The brief's scout sections: today's meetings not over, conflicts marked;
 // who waits on a reply and the Asana tasks due today or overdue, from all
 // the runs since the last brief (the overnight ones are in the morning's
-// first run, not the newest); what the Planner kept since the last brief.
+// first run, not the newest); what the Planner held since the last brief.
 func TestRenderScout(t *testing.T) {
 	f := newFixture(t)
 	f.now = at(2, 8, 30)
 	f.briefer(nil, nil).Check() // Monday: nothing yet
 	b := f.briefer(nil, nil)
-	if err := b.Keep(Note{Title: "iso 周报 [草稿]", Why: "周五前要交", Link: "https://example.com/a"}); err != nil {
+	if err := b.Hold(Mention{Key: "k1", Title: "iso 周报 [草稿]", Why: "周五前要交", Link: "https://example.com/a"}); err != nil {
 		t.Fatal(err)
 	}
 	f.now = at(3, 8, 31)
@@ -82,32 +82,29 @@ func TestRenderScout(t *testing.T) {
 		"- iso 上周的 · 已过期 2 天\n" +
 		"- iso 今天交 · 今天到期\n" +
 		"\n### Planner 记下的（1）\n" +
-		"- [iso 周报 ［草稿］](https://example.com/a) · 周五前要交\n"
+		"- [iso 周报 ［草稿］](https://example.com/a) · 周五前要交 · 11-02 08:30\n"
 	got := b.Recent(1)
 	if len(got) != 1 || got[0].Markdown != want {
 		t.Fatalf("markdown:\n%v\nwant:\n%s", got, want)
 	}
-	if c := got[0].Counts; c != (Counts{Meetings: 4, Replies: 2, Deadlines: 2, Noted: 1}) {
+	if c := got[0].Counts; c != (Counts{Meetings: 4, Replies: 2, Deadlines: 2, Planner: 1}) {
 		t.Errorf("counts = %+v", c)
 	}
 }
 
 // Nothing from the scout to report sends nothing: the meetings over or
-// tomorrow's, a run from before the last brief, a note kept before it.
+// tomorrow's, a run from before the last brief, a mention held before it.
 func TestScoutNothingToReport(t *testing.T) {
 	f := newFixture(t)
 	f.now = at(2, 8, 30)
 	b := f.briefer(nil, nil)
-	if err := b.Keep(Note{Title: "  "}); err == nil {
-		t.Error("a note without a title was kept")
-	}
 	f.now = at(2, 8, 29)
-	if err := b.Keep(Note{Title: "iso 昨天记的"}); err != nil {
+	if err := b.Hold(Mention{Key: "k1", Title: "iso 昨天记的"}); err != nil {
 		t.Fatal(err)
 	}
 	f.now = at(2, 8, 30)
 	b.Check() // Monday's brief takes the note
-	if len(f.pushes) != 1 || b.Recent(1)[0].Counts != (Counts{Noted: 1}) {
+	if len(f.pushes) != 1 || b.Recent(1)[0].Counts != (Counts{Planner: 1}) {
 		t.Fatalf("Monday: pushes %d, %+v", len(f.pushes), b.Recent(1))
 	}
 	f.pushes = nil

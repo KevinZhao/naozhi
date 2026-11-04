@@ -1,6 +1,7 @@
 package action
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -41,7 +42,16 @@ func TestParse(t *testing.T) {
 		{"status no task", block(`{"type":"status","task":" ","state":"done","why":"w"}`), []string{"!缺少 task"}},
 		{"status no why", block(`{"type":"status","task":"task:ab12","state":"failed","why":""}`), []string{"!缺少 why"}},
 		{"status unknown field", block(`{"type":"status","task":"task:ab12","state":"done","why":"w","by":"user"}`), []string{"!字段不对"}},
-		{"too many", strings.Repeat(block(`{"type":"ask","question":"q","options":[]}`)+"\n", 6), []string{"ask", "ask", "ask", "ask", "ask", "!最多 5 个"}},
+		{"too many", strings.Repeat(block(`{"type":"ask","question":"q","options":[]}`)+"\n", 11), append(slices.Repeat([]string{"ask"}, 10), "!最多 10 个")},
+		{"notify timely", block(`{"type":"notify","title":"有人等你回复","why":"超过 4 小时","level":"timely","link":"https://example.com/m/1"}`), []string{"notify"}},
+		{"notify brief with id", block(`{"type":"notify","title":"周报","why":"","level":"brief","link":"","id":"msg-1"}`), []string{"notify"}},
+		{"notify only title and level", block(`{"type":"notify","title":"t","level":"brief"}`), []string{"notify"}},
+		{"notify no title", block(`{"type":"notify","title":" ","why":"w","level":"timely","link":""}`), []string{"!缺少 title"}},
+		{"notify bad level", block(`{"type":"notify","title":"t","why":"w","level":"urgent","link":""}`), []string{"!level 只能是"}},
+		{"notify no level", block(`{"type":"notify","title":"t","why":"w","link":""}`), []string{"!level 只能是"}},
+		{"notify unknown field", block(`{"type":"notify","title":"t","why":"w","level":"timely","link":"","kind":"reply_needed"}`), []string{"!字段不对"}},
+		{"notify script link", block(`{"type":"notify","title":"t","why":"w","level":"timely","link":"javascript:alert(1)"}`), []string{"!link 要是"}},
+		{"notify relative link", block(`{"type":"notify","title":"t","why":"w","level":"timely","link":"/inbox/1"}`), []string{"!link 要是"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -55,7 +65,7 @@ func TestParse(t *testing.T) {
 					if b.Err == nil || !strings.Contains(b.Err.Error(), msg) {
 						t.Errorf("block %d: err = %v, want one containing %q", i, b.Err, msg)
 					}
-					if b.Dispatch != nil || b.Promise != nil || b.Ask != nil || b.Status != nil {
+					if b.Dispatch != nil || b.Promise != nil || b.Ask != nil || b.Status != nil || b.Notify != nil {
 						t.Errorf("block %d: refused block still carries an action", i)
 					}
 					continue
@@ -74,5 +84,9 @@ func TestParse(t *testing.T) {
 	d := Parse(block(`{"type":"dispatch","workspace":"ws_1","title":"写 hello","model":"claude-sonnet-5-5","message":"写一个 hello.md"}`))[0].Dispatch
 	if d == nil || *d != (Dispatch{Workspace: "ws_1", Title: "写 hello", Model: "claude-sonnet-5-5", Message: "写一个 hello.md"}) {
 		t.Errorf("dispatch = %+v", d)
+	}
+	n := Parse(block(`{"type":"notify","title":" 有人\n等你 ","why":" 超过 4 小时 ","level":"timely","link":"https://example.com/m/1","id":" msg-1 "}`))[0].Notify
+	if n == nil || *n != (Notify{Title: "有人 等你", Why: "超过 4 小时", Level: LevelTimely, Link: "https://example.com/m/1", ID: "msg-1"}) {
+		t.Errorf("notify = %+v", n)
 	}
 }

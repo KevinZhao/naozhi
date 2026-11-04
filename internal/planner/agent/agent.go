@@ -672,6 +672,10 @@ func (a *Agent) Tell(text string) error { return a.tell(SourceReceipt, text) }
 // content, so it is from SourceRefusal and is held to the same limits.
 func (a *Agent) TellRefused(text string) error { return a.tell(SourceRefusal, text) }
 
+// TellUnrun is Tell for the receipt of the action blocks a reply's turn did
+// not run, from SourceUnrun so the receipt's own turn is known (UnrunTurn).
+func (a *Agent) TellUnrun(text string) error { return a.tell(SourceUnrun, text) }
+
 func (a *Agent) tell(src Source, text string) error {
 	if !a.cfg.Enabled {
 		return ErrOff
