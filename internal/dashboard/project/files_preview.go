@@ -28,7 +28,7 @@ import (
 // dashboard credentials, and the token in the path is the credential: an
 // HMAC over (root, dir, expiry) with a per-process key, minted by POST
 // /api/preview behind the dashboard's own auth. A token reads only below its
-// dir, only the web types in previewTypes, under every gate HandleFileGet
+// dir, only the web types in previewTypes, no dot entries, under every gate HandleFileGet
 // applies (path containment, symlink escape, restricted roots, sensitive
 // names, size), and never as a top-level document.
 
@@ -235,9 +235,13 @@ func (h *Handlers) HandlePreviewLink(w http.ResponseWriter, r *http.Request) {
 		writeRefusal(w, refuse(http.StatusNotFound, "file not found"))
 		return
 	}
+	// Both the name and the bytes must say HTML: HandlePreviewAsset serves by
+	// extension only, so HTML under another name (a bare "report", index.php)
+	// would mint a link whose page answers 404; a 415 sends the dashboard to
+	// the single-file render, which goes by the sniffed type.
 	head := make([]byte, 512)
 	n, _ := io.ReadFull(of.f, head)
-	if mime := detectMime(of.resolved, head[:n]); !strings.HasPrefix(mime, "text/html") && !strings.HasPrefix(mime, "application/xhtml") {
+	if mime := detectMime(of.resolved, head[:n]); !isHTMLType(previewTypes[strings.ToLower(path.Ext(req.Path))]) || !isHTMLType(mime) {
 		writeRefusal(w, refuse(http.StatusUnsupportedMediaType, "only HTML files have a directory preview"))
 		return
 	}
@@ -307,12 +311,23 @@ func (h *Handlers) HandlePreviewAsset(w http.ResponseWriter, r *http.Request) {
 	defer of.f.Close()
 	// openFile kept the file below the root; a symlink inside the directory
 	// may still point elsewhere in the root, outside what the token grants.
+	base := of.rootResolved
 	if dir != "" {
 		dirResolved, err := filepath.EvalSymlinks(filepath.Join(of.rootResolved, dir))
 		if err != nil || !strings.HasPrefix(of.resolved, dirResolved+string(filepath.Separator)) {
 			writeRefusal(w, notFound)
 			return
 		}
+		base = dirResolved
+	}
+	// No dot entries, by name or by symlink target: the page's script is
+	// untrusted, and dot files are where credentials sit that the sensitive
+	// names miss (.mcp.json, .claude/settings.local.json, .codex/auth.json),
+	// while a web page has no use for them. A dashboard user still reads them
+	// through the authenticated file API.
+	if resolvedRel, err := filepath.Rel(base, of.resolved); err != nil || hasDotSegment(cleaned) || hasDotSegment(resolvedRel) {
+		writeRefusal(w, notFound)
+		return
 	}
 	if isSensitiveDownloadPath(workspaceScanPath(of.rootResolved, of.resolved)) || of.info.Size() > maxRawBytes {
 		writeRefusal(w, notFound)
@@ -331,4 +346,19 @@ func (h *Handlers) HandlePreviewAsset(w http.ResponseWriter, r *http.Request) {
 	// credential, so a wildcard grants nothing a holder of the URL lacks.
 	hd.Set("Access-Control-Allow-Origin", "*")
 	http.ServeContent(w, r, "", of.info.ModTime(), of.f)
+}
+
+func isHTMLType(mime string) bool {
+	return strings.HasPrefix(mime, "text/html") || strings.HasPrefix(mime, "application/xhtml")
+}
+
+// hasDotSegment reports whether an element of the clean relative path p
+// starts with a dot.
+func hasDotSegment(p string) bool {
+	for _, seg := range strings.Split(p, string(filepath.Separator)) {
+		if strings.HasPrefix(seg, ".") {
+			return true
+		}
+	}
+	return false
 }

@@ -108,7 +108,8 @@ func TestPreviewLink(t *testing.T) {
 		"site/report-token.html":  "<!doctype html>",
 		"site/nested/page.html":   "<!doctype html>",
 		"site/Weird Name #1.html": "<!doctype html>",
-	})
+		"site/report":             "<!doctype html><title>x</title>",
+		"site/index.php":          "<!doctype html><title>x</title>"})
 	cases := []struct {
 		name, body string
 		status     int
@@ -118,7 +119,9 @@ func TestPreviewLink(t *testing.T) {
 		{"nested html", `{"project":"` + name + `","path":"site/nested/page.html"}`, 200, "/page.html"},
 		{"escaped name", `{"project":"` + name + `","path":"site/Weird Name #1.html"}`, 200, "/Weird%20Name%20%231.html"},
 		{"not html", `{"project":"` + name + `","path":"site/app.js"}`, 415, ""},
-		{"sensitive dir", `{"project":"` + name + `","path":"secrets/index.html"}`, 404, ""},
+		// HTML bytes under a name the asset route does not serve as HTML.
+		{"html without extension", `{"project":"` + name + `","path":"site/report"}`, 415, ""},
+		{"html as php", `{"project":"` + name + `","path":"site/index.php"}`, 415, ""}, {"sensitive dir", `{"project":"` + name + `","path":"secrets/index.html"}`, 404, ""},
 		{"sensitive name", `{"project":"` + name + `","path":"site/report-token.html"}`, 404, ""},
 		{"missing", `{"project":"` + name + `","path":"site/nope.html"}`, 404, ""},
 		{"escape", `{"project":"` + name + `","path":"../demo/site/index.html"}`, 404, ""},
@@ -154,6 +157,11 @@ func TestPreviewAsset(t *testing.T) {
 		"site/Secrets/up.json": `{"k":2}`,
 		"top.css":              "outside the dir",
 		"other/x.css":          "sibling dir",
+		// Credentials the sensitive names miss: no dot entry is served.
+		".mcp.json":                        `{"k":"mcp"}`,
+		"site/.claude/settings.local.json": `{"k":"cc"}`,
+		"site/.well/x.css":                 "a{}",
+		"site/.env.json":                   `{"k":"e"}`,
 	})
 	outside := t.TempDir()
 	if err := os.WriteFile(filepath.Join(outside, "o.css"), []byte("outside the root"), 0o644); err != nil {
@@ -164,6 +172,7 @@ func TestPreviewAsset(t *testing.T) {
 		"site/to-other":     filepath.Join(projDir, "other"),
 		"site/escape.css":   filepath.Join(outside, "o.css"),
 		"site/self-link.js": filepath.Join(projDir, "site", "js", "app.js"),
+		"site/mcp.json":     filepath.Join(projDir, ".mcp.json"),
 	} {
 		if err := os.Symlink(target, filepath.Join(projDir, link)); err != nil {
 			t.Fatal(err)
@@ -269,6 +278,14 @@ func TestPreviewAsset(t *testing.T) {
 	}
 	if w := get("/api/preview/"+rootTok+"/site/escape.css", "style"); w.Code != 404 {
 		t.Errorf("root token, symlink out of the root: %d", w.Code)
+	}
+	for _, p := range []string{".mcp.json", "site/mcp.json", "site/.claude/settings.local.json", "site/.well/x.css", "site/.env.json"} {
+		if w := get("/api/preview/"+rootTok+"/"+p, "empty"); w.Code != 404 {
+			t.Errorf("root token, dot entry %s: %d, want 404", p, w.Code)
+		}
+	}
+	if w := get(prefix+".claude/settings.local.json", "empty"); w.Code != 404 {
+		t.Errorf("dot dir below the token's dir: %d, want 404", w.Code)
 	}
 	// Forged, retargeted and expired tokens are refused before any read.
 	forged := signPreview(previewGrant{root: name, dir: "site", exp: now.Add(time.Hour).Unix()})

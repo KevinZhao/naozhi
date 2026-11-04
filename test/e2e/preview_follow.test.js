@@ -90,6 +90,24 @@ test('a previewed file follows the session: a write refreshes it, a growing log 
     event({ type: 'tool_use', tool: 'Edit', summary: 'notes.md', path: 'notes.md' });
     await expect(body).toContainText('second draft');
 
+    // The event comes before the call runs: a write that lands after the
+    // refresh (the Edit queued behind a slow Bash) shows on the session's
+    // next event, and at its turn end.
+    event({ type: 'tool_use', tool: 'Bash', summary: 'Bash sleep 30' });
+    event({ type: 'tool_use', tool: 'Edit', summary: 'notes.md', path: 'notes.md' });
+    await page.waitForTimeout(1500);
+    content['notes.md'] = 'third draft';
+    event({ type: 'text', summary: 'edited' });
+    await expect(body).toContainText('third draft');
+    content['notes.md'] = 'final draft';
+    event({ type: 'result', summary: 'done' });
+    await expect(body).toContainText('final draft');
+    const settled = reads['notes.md'];
+    content['notes.md'] = 'after the turn';
+    event({ type: 'text', summary: 'next turn' });
+    await page.waitForTimeout(1500);
+    expect(reads['notes.md']).toBe(settled);
+
     // A log written by Bash (no path on the event) follows the session's
     // tool calls and lands at its end while it grows.
     await page.locator('#fv-drawer .wb-tab[data-wb-tab="outputs"]').click();

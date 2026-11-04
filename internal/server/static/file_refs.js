@@ -559,11 +559,12 @@ function renderSandboxedBlob(project, node, path, body, blobType) {
  * file root). A Bash command writing a log names no path, so a log-like
  * text (.log / .txt) under the session's tree is also refreshed on its other
  * tool calls and at turn end. One refresh FOLLOW_MS after the first matching
- * event, so a burst coalesces. Events are only read, never appended, so a
+ * event, so a burst coalesces, and again on that session's later events up to
+ * its turn end (notePreviewEvent). Events are only read, never appended, so a
  * refresh cannot pass for a new turn. */
 
 const FOLLOW_MS = 1000;
-// surface ('workbench' | 'files') → { ref: {root, node, path}, refresh, timer }
+// surface ('workbench' | 'files') → { ref: {root, node, path}, refresh, timer, armed }
 const _follows = new Map();
 
 // followPreview makes surface follow ref, re-rendering through refresh;
@@ -572,7 +573,7 @@ function followPreview(surface, ref, refresh) {
   const cur = _follows.get(surface);
   if (cur && cur.timer) clearTimeout(cur.timer);
   if (!ref || !ref.path) { _follows.delete(surface); return; }
-  _follows.set(surface, { ref, refresh, timer: 0 });
+  _follows.set(surface, { ref, refresh, timer: 0, armed: '' });
 }
 
 function isLogLike(path) { return /\.(log|txt)$/i.test(path || ''); }
@@ -602,11 +603,19 @@ function previewHit(key, node, ev, ref) {
   return own || (!!abs && !!ws && abs.startsWith(ws + '/'));
 }
 
-// notePreviewEvent takes a live event of session key on node.
+// notePreviewEvent takes a live event of session key on node. A tool_use
+// is sent before its call runs, and a call queued behind a slow one lands
+// long after FOLLOW_MS, so a hit also arms the follow for that session:
+// its later events refresh again (at most one per FOLLOW_MS) and its turn
+// end refreshes a last time and disarms.
 function notePreviewEvent(key, node, ev) {
   if (!key || !ev) return;
+  const who = (node || 'local') + '\n' + key;
   for (const [surface, f] of _follows) {
-    if (f.timer || !previewHit(key, node, ev, f.ref)) continue;
+    if (previewHit(key, node, ev, f.ref)) f.armed = who;
+    else if (f.armed !== who) continue;
+    if (ev.type === 'result') f.armed = '';
+    if (f.timer) continue;
     f.timer = setTimeout(() => {
       f.timer = 0;
       if (_follows.get(surface) === f) f.refresh();
