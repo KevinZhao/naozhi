@@ -73,6 +73,13 @@ func TestParseOutput(t *testing.T) {
 		{"no id", strings.Replace(good, `"id":"m1"`, `"id":""`, 1), "no id or title"},
 		{"event without a zone", strings.Replace(good, "14:00:00+08:00", "14:00:00", 1), "cannot parse"},
 	}
+	// A conflict names its pair in any order; parsed, both orders are one.
+	for _, id := range []string{"e2+e1", "e1 + e2"} {
+		out, err := parseOutput(strings.Replace(strings.Replace(good, "reply_needed", "conflict", 1), `"id":"m1"`, `"id":"`+id+`"`, 1))
+		if err != nil || out.Findings[0].ID != "e1+e2" {
+			t.Errorf("conflict %q: id %+v, err %v; want e1+e2", id, out.Findings, err)
+		}
+	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			out, err := parseOutput(c.reply)

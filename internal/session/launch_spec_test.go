@@ -305,3 +305,18 @@ func TestTakeoverKeepsTranscriptName(t *testing.T) {
 		}
 	}
 }
+
+// The Planner and the scout sessions load no project settings: their rules
+// are the gateway's alone.
+func TestLaunchSpecProjectSettings(t *testing.T) {
+	for key, want := range map[string]bool{
+		"planner:main":               false,
+		"scout:20261105T100000-ab12": false,
+		"dashboard:direct:x:general": true,
+		"task:0a1b2c3d4e5f":          true,
+	} {
+		if got := (&spawnConfig{}).launchSpecFor(key, shim.SpawnOverlay{}).ProjectSettings; got != want {
+			t.Errorf("%s: ProjectSettings = %v, want %v", key, got, want)
+		}
+	}
+}

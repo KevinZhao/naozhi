@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -147,7 +148,18 @@ func parseOutput(reply string) (Output, error) {
 		case strings.TrimSpace(f.ID) == "" || strings.TrimSpace(f.Title) == "":
 			return Output{}, fmt.Errorf("finding %d: no id or title", i)
 		}
-		f.ID = textutil.TruncateRunes(strings.TrimSpace(f.ID), idRunes)
+		f.ID = strings.TrimSpace(f.ID)
+		if f.Kind == KindConflict {
+			// A conflict's ID joins its meetings' IDs, in whatever order the
+			// session listed them; sorted, the pair dedups as one.
+			parts := strings.Split(f.ID, "+")
+			for j := range parts {
+				parts[j] = strings.TrimSpace(parts[j])
+			}
+			slices.Sort(parts)
+			f.ID = strings.Join(parts, "+")
+		}
+		f.ID = textutil.TruncateRunes(f.ID, idRunes)
 		for _, s := range []*string{&f.Title, &f.From, &f.At, &f.Due, &f.Link, &f.Why} {
 			*s = textutil.TruncateRunes(strings.TrimSpace(*s), fieldRunes)
 		}
