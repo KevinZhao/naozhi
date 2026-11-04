@@ -44,7 +44,7 @@
 
 新增 tag 只需同步更新本表和服务端的 known-set。
 
-直连节点没有握手：节点在 `/api/sessions` 的应答（200 与 304）里用响应头 `X-Naozhi-Caps`（逗号分隔，`node.CapsHeader`）声明 `send-idempotent`，主节点轮询时就学到，启动后第一次发送超时即回 `unknown`。v0.3.0 / v0.3.1 节点不带这个头，主节点仍从 `/api/sessions/send` 对 `Idempotency-Key` 的回显学到；一次应答没有回显（节点降级）就退回保守路径。
+直连节点没有握手：节点在 `/api/sessions` 的应答（200 与 304）里用响应头 `X-Naozhi-Caps`（逗号分隔，`node.CapsHeader`）声明 `send-idempotent`，主节点轮询时就学到，启动后第一次发送超时即回 `unknown`。v0.3.0 / v0.3.1 节点不带这个头，主节点仍从 `/api/sessions/send` 对 `Idempotency-Key` 的回显学到；一次被接住（200 / 202）的应答没有回显（节点降级）就退回保守路径；鉴权失败、代理的 502 之类到不了节点处理器的拒绝不改变判断。
 
 ## 3. Unknown capability 处理 (RNEW-ARCH-402 consumer, Round 213)
 

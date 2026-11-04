@@ -318,13 +318,18 @@ func (n *HTTPClient) Send(ctx context.Context, req SendRequest) (SendResult, err
 		return SendResult{}, fmt.Errorf("send to %s: %w", n.ID, err)
 	}
 	defer resp.Body.Close()
+	accepted := resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusAccepted
 	if req.TurnID != "" {
-		// An answer without the echo is a node that ignores the header,
-		// e.g. one downgraded behind the same URL.
-		n.idempotent.Store(resp.Header.Get(IdempotencyKeyHeader) == req.TurnID)
+		// An accepted send without the echo is a node that ignores the
+		// header, e.g. one downgraded behind the same URL. A refusal says
+		// nothing: auth, a bad body or a proxy's 502 answer before the
+		// node's handler would echo.
+		if echoed := resp.Header.Get(IdempotencyKeyHeader) == req.TurnID; echoed || accepted {
+			n.idempotent.Store(echoed)
+		}
 	}
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+	if !accepted {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 		return SendResult{}, fmt.Errorf("send to %s: status %d", n.ID, resp.StatusCode)
 	}
