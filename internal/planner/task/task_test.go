@@ -206,35 +206,80 @@ func TestBoard(t *testing.T) {
 	}
 }
 
-// Stop marks a dispatched session 失败 as the user's, then stops its turn;
-// anything else is not a session to stop.
+// Stop marks a dispatched session 失败 as the user's, closes the open
+// promises citing it (its key in the text or the close condition) as theirs
+// and stops its turn, naming those promises; anything else is not a session
+// to stop and closes nothing.
 func TestStop(t *testing.T) {
-	side := sidecar.Open(t.TempDir(), func() time.Time { return t0 })
-	if err := side.Put(sidecar.Meta{Key: "task:a", Purpose: sidecar.PurposeTask, Title: "iso sleep"}); err != nil {
-		t.Fatal(err)
-	}
-	proms := promise.New(promise.Config{})
-	p, _ := proms.Add(promise.Promise{Text: "明早提醒你"})
-	var stopped []string
-	b := New(Config{Sessions: side, Promises: proms, Now: func() time.Time { return t0 },
-		Stop: func(key, title string) { stopped = append(stopped, key+"="+title) }})
 	cases := []struct {
-		id   string
-		want error
+		name   string
+		id     string // "{P}" is the unrelated promise's ID
+		want   error
+		closed []string // the promises the stop closes, by name
 	}{
-		{"task:a", nil},
-		{"task:nope", ErrNotFound},
-		{p.ID, ErrNotFound},
+		{"citing promises closed", "task:a", nil, []string{"text", "close_when"}},
+		{"no such task", "task:nope", ErrNotFound, nil},
+		{"a promise", "{P}", ErrNotFound, nil},
 	}
 	for _, c := range cases {
-		if err := b.Stop(c.id); !errors.Is(err, c.want) {
-			t.Errorf("Stop(%s) = %v, want %v", c.id, err, c.want)
-		}
-	}
-	if !slices.Equal(stopped, []string{"task:a=iso sleep"}) {
-		t.Errorf("stopped %q", stopped)
-	}
-	if l := b.List(); len(l) != 2 || l[0].ID != "task:a" || l[0].State != Failed || l[0].By != ByUser || l[0].Why != StoppedWhy {
-		t.Errorf("list = %+v", l)
+		t.Run(c.name, func(t *testing.T) {
+			side := sidecar.Open(t.TempDir(), func() time.Time { return t0 })
+			if err := side.Put(sidecar.Meta{Key: "task:a", Purpose: sidecar.PurposeTask, Title: "iso sleep"}); err != nil {
+				t.Fatal(err)
+			}
+			proms := promise.New(promise.Config{Now: func() time.Time { return t0 }})
+			byName := map[string]promise.Promise{}
+			for name, p := range map[string]promise.Promise{
+				"text":       {Text: "task:a 做完后告诉用户结果"},
+				"close_when": {Text: "告诉用户 sleep 的结果", CloseWhen: "task:a 汇报做完"},
+				"unrelated":  {Text: "明早提醒你", Due: t0.Add(time.Hour)},
+				"closed":     {Text: "task:a 开始后告诉用户"},
+			} {
+				byName[name], _ = proms.Add(p)
+			}
+			if err := proms.Close(byName["closed"].ID, promise.SourcePlanner, "已告诉"); err != nil {
+				t.Fatal(err)
+			}
+			var stopped []string
+			b := New(Config{Sessions: side, Promises: proms, Now: func() time.Time { return t0 },
+				Stop: func(key, title string, closed []string) {
+					stopped = append(stopped, key+"="+title+" "+strings.Join(closed, ","))
+				}})
+
+			if err := b.Stop(strings.ReplaceAll(c.id, "{P}", byName["unrelated"].ID)); !errors.Is(err, c.want) {
+				t.Fatalf("Stop(%s) = %v, want %v", c.id, err, c.want)
+			}
+			var ids []string
+			for name := range byName {
+				p, _ := proms.Get(byName[name].ID)
+				done := slices.Contains(c.closed, name)
+				if done != (p.State == promise.StateClosed && p.ClosedBy == promise.SourceUser) {
+					t.Errorf("promise %s = %+v, want closed by the stop %v", name, p, done)
+				}
+				if done {
+					ids = append(ids, p.ID)
+					if p.Why != StoppedPromiseWhy {
+						t.Errorf("promise %s why = %q", name, p.Why)
+					}
+				}
+			}
+			if c.want != nil {
+				if len(stopped) != 0 {
+					t.Errorf("stopped %q", stopped)
+				}
+				return
+			}
+			if len(stopped) != 1 || !strings.HasPrefix(stopped[0], "task:a=iso sleep ") {
+				t.Fatalf("stopped %q", stopped)
+			}
+			got := strings.Split(strings.TrimPrefix(stopped[0], "task:a=iso sleep "), ",")
+			slices.Sort(got)
+			if slices.Sort(ids); !slices.Equal(got, ids) {
+				t.Errorf("stop named %q, want %q", got, ids)
+			}
+			if l := b.List(); l[0].ID != "task:a" || l[0].State != Failed || l[0].By != ByUser || l[0].Why != StoppedWhy {
+				t.Errorf("list = %+v", l)
+			}
+		})
 	}
 }

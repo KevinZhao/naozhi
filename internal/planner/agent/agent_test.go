@@ -337,6 +337,63 @@ func TestRenderSnapshot(t *testing.T) {
 	}
 }
 
+// TestSnapshotListsEveryPromise: the Planner closes a promise by the ID it
+// reads in the snapshot, so however many there are and whatever else fills
+// the budget, every open promise is listed with its ID; only texts are cut.
+func TestSnapshotListsEveryPromise(t *testing.T) {
+	now := time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name     string
+		promises int
+		text     string
+		crowded  bool // waiting and sessions fill the budget too
+		cutText  bool // the texts are cut
+	}{
+		{"few short", 3, "盯着 CI", false, false},
+		{"past the old cap", 30, "盯着 CI", false, false},
+		{"long texts", 20, strings.Repeat("长", 120), false, true},
+		{"crowded", 60, strings.Repeat("长", 120), true, true},
+		{"the open limit", 200, strings.Repeat("长", 500), true, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			in := snapshotInput{Now: now, Promises: []Promise{}}
+			for i := range c.promises {
+				p := Promise{ID: fmt.Sprintf("pr_%010d", i), Text: c.text}
+				if i%2 == 0 {
+					p.Due = now.Add(time.Duration(i) * time.Minute)
+				}
+				in.Promises = append(in.Promises, p)
+			}
+			if c.crowded {
+				in.Waiting = []Waiting{}
+				for i := range 15 {
+					in.Waiting = append(in.Waiting, Waiting{Kind: "提问", Title: strings.Repeat("问", 150), Created: now.Add(time.Duration(i) * time.Second)})
+				}
+				for i := range 50 {
+					in.Units = append(in.Units, health.Unit{ID: fmt.Sprintf("dashboard:direct:%03d:general", i), Kind: health.KindSession, State: health.Active, LastActive: now})
+				}
+			}
+			got := renderSnapshot(in)
+			head := string([]rune(c.text)[:min(6, utf8.RuneCountInString(c.text))])
+			for _, p := range in.Promises {
+				if !strings.Contains(got, "- ["+p.ID+"] "+head) {
+					t.Fatalf("promise %s missing or its text dropped:\n%s", p.ID, got)
+				}
+			}
+			if full := strings.Contains(got, "] "+c.text); full == c.cutText {
+				t.Errorf("texts kept whole = %v, want %v", full, !c.cutText)
+			}
+			if !strings.Contains(got, "（到期 11-04 10:00）") {
+				t.Errorf("due time dropped:\n%s", got)
+			}
+			if !c.crowded && !strings.Contains(got, "会话（在跑 0") {
+				t.Errorf("sessions header cut with room left:\n%s", got)
+			}
+		})
+	}
+}
+
 // TestSendRef: a handed-over session leads the message, ahead of the
 // snapshot (the logged bubble keeps only the message's head), its fields
 // JSON-escaped; it allows an empty text, and an unknown session (or the

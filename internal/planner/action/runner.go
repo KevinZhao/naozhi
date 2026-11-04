@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -85,6 +87,10 @@ type Runner struct {
 	// after it.
 	mu   sync.Mutex
 	last time.Time
+
+	// doneTold is the tasks whose done block got the reminder of the
+	// promises citing them; only the handling goroutine touches it.
+	doneTold map[string]bool
 }
 
 // reply is one Planner turn's result text and the span its turn ran in.
@@ -107,7 +113,7 @@ func New(cfg Config) *Runner {
 	}
 	// Reports older than the runner (history restored at startup) were the
 	// previous run's to check.
-	r := &Runner{cfg: cfg, ch: make(chan reply, queueLen), last: cfg.Now()}
+	r := &Runner{cfg: cfg, ch: make(chan reply, queueLen), last: cfg.Now(), doneTold: map[string]bool{}}
 	if cfg.Inbox != nil {
 		cfg.Inbox.HandleDecisions(HandlerAsk, r.decideAsk)
 		open, _ := cfg.Inbox.List(0)
@@ -192,16 +198,27 @@ func (r *Runner) handle(rep reply) {
 // with no status block for it, or the reply marking it done while a promise
 // citing it (its key in the text or close_when) stays open with none
 // (docs/rfc/planner.md §15.4; D61: the gateway keeps the list honest when the
-// model forgets). A doing or failed block is the Planner's answer, so the
-// promises waiting on the task are left alone. It runs after
-// the reply's blocks, so what they closed is not asked about. The receipt's
-// own turn takes no report, so a report gets at most one.
+// model forgets). A done block with no report in the turn reminds of the
+// citing promises too, once per task, so they do not wait on another
+// report. A doing or failed block is the Planner's answer, so the promises
+// waiting on the task are left alone. It runs after the reply's blocks, so
+// what they closed is not asked about. The receipt's own turn takes no
+// report, so a report gets at most one.
 func (r *Runner) checkReports(rep reply, statused map[string]string) {
-	if r.cfg.Reports == nil || r.cfg.Tasks == nil || rep.to.IsZero() {
+	if r.cfg.Tasks == nil {
 		return
 	}
-	reported := r.cfg.Reports(rep.from, rep.to)
-	if len(reported) == 0 {
+	var reported []string
+	if r.cfg.Reports != nil && !rep.to.IsZero() {
+		reported = r.cfg.Reports(rep.from, rep.to)
+	}
+	keys := slices.Clone(reported)
+	for _, k := range slices.Sorted(maps.Keys(statused)) {
+		if statused[k] == string(task.Done) && !r.doneTold[k] && !slices.Contains(reported, k) {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
 		return
 	}
 	sessions := map[string]task.Task{}
@@ -216,7 +233,7 @@ func (r *Runner) checkReports(rep reply, statused map[string]string) {
 	}
 	var lines []string
 	seen := map[string]bool{}
-	for _, key := range reported {
+	for _, key := range keys {
 		t, ok := sessions[key]
 		if !ok || seen[key] {
 			continue
@@ -224,7 +241,7 @@ func (r *Runner) checkReports(rep reply, statused map[string]string) {
 		seen[key] = true
 		var ids []string
 		for _, p := range open {
-			if statused[p.ID] == "" && (strings.Contains(p.Text, key) || strings.Contains(p.CloseWhen, key)) {
+			if statused[p.ID] == "" && p.Cites(key) {
 				ids = append(ids, p.ID)
 			}
 		}
@@ -236,7 +253,12 @@ func (r *Runner) checkReports(rep reply, statused map[string]string) {
 				line += "；相关的承诺 " + strings.Join(ids, "、") + " 也一并处理，task 填承诺 ID"
 			}
 		case statused[key] == string(task.Done) && len(ids) > 0:
-			line = key + "（" + t.Title + "）刚向你汇报；相关的承诺 " + strings.Join(ids, "、") + " 还没完成，条件满足了就用 status 标 done（" + statusFormat(ids[0]) + "）"
+			line = key + "（" + t.Title + "）刚向你汇报"
+			if !slices.Contains(reported, key) {
+				line = "你刚把 " + key + "（" + t.Title + "）标为已完成"
+			}
+			r.doneTold[key] = true
+			line += "；相关的承诺 " + strings.Join(ids, "、") + " 还没完成，条件满足了就用 status 标 done（" + statusFormat(ids[0]) + "）"
 		default:
 			continue
 		}

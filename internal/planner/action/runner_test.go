@@ -219,6 +219,11 @@ func TestReportWithoutStatusGetsReceipt(t *testing.T) {
 			"task:ab12（iso 写 hello）刚向你汇报；相关的承诺 {P} 还没完成，条件满足了就用 status 标 done（" + statusFormat("{P}") + "）。"},
 		{"doing only", "task:ab12", "还在等 CI。\n" + block(taskDoing), ""},
 		{"not dispatched", "dashboard:direct:x:general", "收到。", ""},
+		// Marked done with no report in the turn: reminded once, though
+		// the next reply marks it done again.
+		{"done without report", "", "它做完了。\n" + block(taskDone),
+			"你刚把 task:ab12（iso 写 hello）标为已完成；相关的承诺 {P} 还没完成，条件满足了就用 status 标 done（" + statusFormat("{P}") + "）。"},
+		{"done and promise without report", "", "它做完了。\n" + block(taskDone) + "\n" + block(promiseDone), ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -234,7 +239,7 @@ func TestReportWithoutStatusGetsReceipt(t *testing.T) {
 			r.cfg.Now = func() time.Time { return now }
 			reportAt := now.Add(time.Second)
 			r.cfg.Reports = func(from, to time.Time) []string {
-				if reportAt.After(from) && !reportAt.After(to) {
+				if c.sender != "" && reportAt.After(from) && !reportAt.After(to) {
 					return []string{c.sender, c.sender}
 				}
 				return nil

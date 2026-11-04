@@ -96,14 +96,19 @@ type Config struct {
 	Health   func() health.Snapshot
 	Journal  *journal.Journal
 	// Stop stops dispatched session key's work (its process) for
-	// Board.Stop; nil only marks it.
-	Stop func(key, title string)
+	// Board.Stop; promises are the IDs of the promises citing it that the
+	// stop closed. nil only marks it.
+	Stop func(key, title string, promises []string)
 	// Now is the wall clock; nil is time.Now.
 	Now func() time.Time
 }
 
 // StoppedWhy is the reason a task the user stopped is 失败 with.
 const StoppedWhy = "已停止"
+
+// StoppedPromiseWhy is the reason a promise citing a stopped task is closed
+// with.
+const StoppedPromiseWhy = "任务已停止"
 
 // Board reads and sets the tasks. Safe for concurrent use.
 type Board struct {
@@ -276,9 +281,11 @@ func (b *Board) Set(id string, state State, by By, why string) error {
 
 // Stop stops dispatched session id for the user (D88: what the Planner
 // dispatches runs at once, so stopping it is the user's control): the task
-// is marked 失败 as theirs, StoppedWhy, then Config.Stop stops its process.
-// The session stays, its history readable; a mark holds over whatever it
-// does later, until someone sets another state.
+// is marked 失败 as theirs, StoppedWhy, the open promises citing it ("X 做完后
+// 告诉用户结果") are done as theirs, StoppedPromiseWhy, since nothing will
+// meet them now, then Config.Stop stops its process. The session stays, its
+// history readable; a mark holds over whatever it does later, until someone
+// sets another state.
 func (b *Board) Stop(id string) error {
 	if !sessionkey.IsTaskKey(id) {
 		return ErrNotFound
@@ -290,8 +297,22 @@ func (b *Board) Stop(id string) error {
 	if err := b.Set(id, Failed, ByUser, StoppedWhy); err != nil {
 		return err
 	}
+	var closed []string
+	if b.cfg.Promises != nil {
+		open, _ := b.cfg.Promises.List(0)
+		for _, p := range open {
+			if !p.Cites(id) {
+				continue
+			}
+			if err := b.Set(p.ID, Done, ByUser, StoppedPromiseWhy); err != nil {
+				slog.Warn("task stop: citing promise not closed", "key", id, "promise", p.ID, "err", err)
+				continue
+			}
+			closed = append(closed, p.ID)
+		}
+	}
 	if b.cfg.Stop != nil {
-		b.cfg.Stop(id, title)
+		b.cfg.Stop(id, title, closed)
 	}
 	return nil
 }
