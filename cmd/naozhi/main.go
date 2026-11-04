@@ -28,6 +28,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/brief"
 	"github.com/naozhi/naozhi/internal/planner/promise"
+	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/project"
@@ -308,6 +309,17 @@ func main() {
 		Journal:    plannerState.Journal,
 		Promises:   wireup.PlannerPromises(promises),
 	})
+	// The Planner's patrol (§15.6): weekday scout runs over the mail, Slack
+	// and Asana MCP servers, read tools only; new findings wake the Planner.
+	// It runs whether or not the Planner does, keeping them on disk.
+	scouter := scout.New(scout.Config{
+		Layout:    sessionLayout,
+		MCPConfig: mcpConfigFile,
+		Session:   wireup.ScoutSession(router),
+		Wake:      func(block string) error { return plannerAgent.Wake(agent.SourceScout, block) },
+		Journal:   plannerState.Journal,
+		Beats:     beats,
+	})
 	// Attachments live under each workspace root, usually outside the state dir
 	// checked above; walking every root must not hold up startup.
 	go warnIfAttachmentsLarge(workspaceRootLister{router: router, projectMgr: projectMgr}, attachmentGCMode(cfg))
@@ -497,6 +509,7 @@ func main() {
 		Outputs:          activities,
 		Notes:            notes,
 		Planner:          plannerAgent,
+		Scout:            scouter,
 		Briefs:           briefer,
 		Health:           func() health.Snapshot { return healthMon.Snapshot() },
 		Workspaces:       plannerState.Workspaces,
@@ -585,6 +598,7 @@ func main() {
 			Discovered:  srv.DiscoveredSessions,
 			EventLogDir: eventLogDir,
 			Sidecars:    sidecars,
+			Scout:       scouter,
 		}.Collect,
 		Journal:    plannerState.Journal,
 		Workspaces: plannerState.Workspaces,
@@ -617,12 +631,14 @@ func main() {
 		Note:       plannerAgent.Note,
 		Tell:       plannerAgent.Tell,
 		Reports:    wireup.PlannerReports(router),
+		Outside:    plannerAgent.OutsideTurn,
 		Ctx:        ctx,
 	})
 	router.SetResultSink(actions.Result)
 	go actions.Run(ctx)
 	go sidecars.Run(ctx, func(key string) bool { return router.SessionFor(key) != nil })
 	go briefer.Run(ctx)
+	go scouter.Run(ctx)
 
 	// Upstream connector: this node connects to a primary.
 	if cfg.Upstream != nil {

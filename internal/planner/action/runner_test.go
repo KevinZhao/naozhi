@@ -272,3 +272,42 @@ func TestStatusFormatParses(t *testing.T) {
 		t.Errorf("status = %+v", st)
 	}
 }
+
+// A turn outside content brought in (a scout run, a pre-meeting brief) may
+// not dispatch: the block is refused with a line in the conversation and a
+// receipt to the Planner, read from the turn's source as its result arrives;
+// its other blocks run as usual.
+func TestOutsideTurnRefusesDispatch(t *testing.T) {
+	cases := []struct {
+		outside string
+		spawned bool
+	}{
+		{outside: "", spawned: true},
+		{outside: "巡检"},
+		{outside: "会前简报"},
+	}
+	for _, c := range cases {
+		t.Run(c.outside, func(t *testing.T) {
+			r, g, inbox, _, dir := newRunner(t)
+			r.cfg.Outside = func() string { return c.outside }
+			r.Result(r.cfg.Planner, block(`{"type":"dispatch","workspace":"`+filepath.Base(dir)+`","title":"iso 写 hello","model":"","message":"写一个 hello.md"}`)+"\n"+
+				block(`{"type":"ask","question":"今天发版吗？","options":[]}`))
+			r.handle(<-r.ch)
+			if got := len(g.spawned) == 1; got != c.spawned {
+				t.Fatalf("spawned = %q, want spawned %v", g.spawned, c.spawned)
+			}
+			if open, _ := inbox.List(0); len(open) != 1 || open[0].Kind != notify.KindQuestion {
+				t.Errorf("inbox = %+v, want the question", open)
+			}
+			if c.spawned {
+				return
+			}
+			if len(g.notes) != 1 || g.notes[0] != c.outside+"触发的回合不能派活：「iso 写 hello」没有派出" {
+				t.Errorf("notes = %q", g.notes)
+			}
+			if len(g.told) != 1 || !strings.Contains(g.told[0], "这一轮由"+c.outside+"触发") {
+				t.Errorf("told = %q", g.told)
+			}
+		})
+	}
+}

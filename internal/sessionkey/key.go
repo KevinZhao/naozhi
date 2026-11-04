@@ -24,6 +24,9 @@ const (
 	// "task:<random ID>" (§3.2): the key says nothing else; purpose,
 	// lineage and workspace live in the sidecar file.
 	TaskKeyPrefix = "task:"
+	// ScoutKeyPrefix is the namespace of the one-shot scout sessions,
+	// "scout:<run ID>" (docs/rfc/planner.md §15.6).
+	ScoutKeyPrefix = "scout:"
 )
 
 // PlannerMainKey is the global Planner's session key.
@@ -59,6 +62,9 @@ func IsPlannerNSKey(s string) bool { return strings.HasPrefix(s, PlannerNSPrefix
 
 // IsTaskKey reports whether s belongs to the Planner's dispatched sessions.
 func IsTaskKey(s string) bool { return strings.HasPrefix(s, TaskKeyPrefix) }
+
+// IsScoutKey reports whether s belongs to the scout sessions' namespace.
+func IsScoutKey(s string) bool { return strings.HasPrefix(s, ScoutKeyPrefix) }
 
 // IsScratchKey reports whether s belongs to the dashboard scratch namespace.
 func IsScratchKey(s string) bool { return strings.HasPrefix(s, ScratchKeyPrefix) }

@@ -9,9 +9,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"sync"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/turn"
 )
@@ -23,6 +26,10 @@ var errPlannerNamespace = sendUsageError("Planner 的消息请从 Planner 页面
 // block does.
 var errTaskNamespace = sendUsageError("task: 会话只能由 Planner 派出")
 
+// errScoutNamespace answers a send to a scout: key: only a scout run talks
+// to one.
+var errScoutNamespace = sendUsageError("巡检会话不接收消息")
+
 var (
 	errPlannerBusy     = errors.New("服务忙：Planner 消息未送达，请稍后重试")
 	errPlannerClosing  = errors.New("服务正在关闭，消息未送达")
@@ -30,16 +37,63 @@ var (
 	errPlannerNoEngine = errors.New("planner turn entry not wired")
 )
 
-// SubmitPlanner runs text as a turn on key, spawning it with opts; done (nil
-// for none) gets the reply text or the turn's error. queued is text waiting
-// behind a running turn. It is the agent's Turns.SubmitPlanner, and sends
-// the first message of a session the Planner dispatched (task:), which also
-// spawns with options the gateway set.
-func (s *Server) SubmitPlanner(key, text string, opts session.AgentOpts, done func(reply string, err error)) (queued bool, err error) {
+// SubmitPlanner runs text from src as a turn on key, spawning it with opts;
+// done (nil for none) gets the reply text or the turn's error. queued is
+// text waiting behind a running turn. It is the agent's Turns.SubmitPlanner,
+// and sends the first message of a session the Planner dispatched (task:,
+// src ""), which also spawns with options the gateway set.
+func (s *Server) SubmitPlanner(key string, src agent.Source, text string, opts session.AgentOpts, done func(reply string, err error)) (queued bool, err error) {
 	if s.hub == nil || s.hub.engine == nil {
 		return false, errPlannerNoEngine
 	}
-	return s.hub.engine.submitPlanner(key, text, opts, done)
+	return s.hub.engine.submitPlanner(key, src, text, opts, done)
+}
+
+// PlannerTurnSources is the sources of the requests key's turn in flight
+// took, sorted; none between turns. It is the agent's
+// Turns.PlannerTurnSources.
+func (s *Server) PlannerTurnSources(key string) []agent.Source {
+	if s.hub == nil || s.hub.engine == nil {
+		return nil
+	}
+	return s.hub.engine.plannerTurns.sources(key)
+}
+
+// plannerTurns is the sources of the requests each key's turn in flight
+// took. A turn begins every request it takes before it finishes any (the
+// turn package's runTurn and deliver), and the next turn begins after, so
+// the first finish ends the turn.
+type plannerTurns struct {
+	mu   sync.Mutex
+	srcs map[string][]agent.Source
+}
+
+func (t *plannerTurns) begin(key string, src agent.Source) {
+	if src == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.srcs == nil {
+		t.srcs = map[string][]agent.Source{}
+	}
+	if !slices.Contains(t.srcs[key], src) {
+		t.srcs[key] = append(t.srcs[key], src)
+	}
+}
+
+func (t *plannerTurns) finish(key string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.srcs, key)
+}
+
+func (t *plannerTurns) sources(key string) []agent.Source {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := slices.Clone(t.srcs[key])
+	slices.Sort(out)
+	return out
 }
 
 // DropPlannerQueue discards the messages queued for key's next turn; their
@@ -79,8 +133,8 @@ func (s *Server) PlannerNote(key, text string) {
 // plannerNoteBytes caps a note; a promise's text is at most 500 runes.
 const plannerNoteBytes = 2048
 
-func (e *sendEngine) submitPlanner(key, text string, opts session.AgentOpts, done func(string, error)) (bool, error) {
-	o := &plannerOrigin{key: key, opts: opts, notify: e.notify, done: done}
+func (e *sendEngine) submitPlanner(key string, src agent.Source, text string, opts session.AgentOpts, done func(string, error)) (bool, error) {
+	o := &plannerOrigin{key: key, src: src, turns: &e.plannerTurns, opts: opts, notify: e.notify, done: done}
 	switch e.turns.Submit(e.ctx, turn.Request{Key: key, Text: text, Origin: o}, dashAdmission{track: e.TrackSend, ctx: e.ctx}) {
 	case turn.AckOwner, turn.AckDetached:
 		return false, nil
@@ -98,7 +152,11 @@ func (e *sendEngine) submitPlanner(key, text string, opts session.AgentOpts, don
 // when it merges with a user message. A failure is broadcast like an HTTP
 // send's.
 type plannerOrigin struct {
-	key    string
+	key string
+	// src is what the request came from, recorded in turns while its turn
+	// is in flight.
+	src    agent.Source
+	turns  *plannerTurns
 	opts   session.AgentOpts
 	notify sendNotifier
 	done   func(string, error)
@@ -117,10 +175,12 @@ func (o *plannerOrigin) Begin(_ context.Context, t turn.TurnInfo) turn.Delivery 
 	if t.Role == turn.RoleObserver {
 		return nil
 	}
+	o.turns.begin(o.key, o.src)
 	return o
 }
 
 func (o *plannerOrigin) Finish(_ context.Context, out turn.Outcome) {
+	o.turns.finish(o.key)
 	msg, failed, err := dashOrigin{key: o.key}.failure(out)
 	if failed && !informationalSendErr(err) {
 		o.notify.broadcastSendError(o.key, msg)

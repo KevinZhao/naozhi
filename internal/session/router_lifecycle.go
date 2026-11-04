@@ -311,6 +311,7 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 		PermissionMode:      opts.PermissionMode,
 		Name:                opts.Name,
 		StrictMCPConfig:     opts.StrictMCPConfig,
+		MCPConfig:           opts.MCPConfig,
 		CrossSessionInbound: opts.CrossSessionInbound,
 		PermissionsDeny:     slices.Clone(opts.PermissionsDeny),
 		PermissionsAllow:    slices.Clone(opts.PermissionsAllow),

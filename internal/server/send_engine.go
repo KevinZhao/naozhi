@@ -54,6 +54,8 @@ type sendEngine struct {
 	// dedup answers a repeated turn ID from a primary (relayed or direct
 	// sends) with the first answer.
 	dedup *sendDedup
+	// plannerTurns is the sources of the Planner turns in flight.
+	plannerTurns plannerTurns
 
 	// ── shared dependencies ──
 	// INVARIANT: read-only after construction. Hub keeps its own reference to

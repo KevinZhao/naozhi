@@ -35,6 +35,8 @@ func TestLaunchSpecDrift(t *testing.T) {
 		{"auto", AgentOpts{PermissionMode: "auto"}, []string{"--permission-mode", "auto"}},
 		{"name", AgentOpts{Name: "planner"}, []string{"--name", "planner"}},
 		{"strict mcp", AgentOpts{StrictMCPConfig: true}, []string{"--strict-mcp-config"}},
+		{"own mcp config", AgentOpts{StrictMCPConfig: true, MCPConfig: "/data/scout-mcp.json"},
+			[]string{"--strict-mcp-config", "--mcp-config", "/data/scout-mcp.json"}},
 		{"settings overrides", AgentOpts{CrossSessionInbound: "hold", PermissionsDeny: []string{"Bash"}}, []string{"--settings"}},
 		{"planner shape", AgentOpts{
 			Tools: []string{"Read", "Grep", "Glob", "ListAgents", "SendMessage"}, PermissionMode: "dontAsk",
@@ -67,7 +69,7 @@ func TestLaunchSpecDrift(t *testing.T) {
 			}
 
 			bare := *state.SpawnOverlay
-			bare.Tools, bare.PermissionMode, bare.Name, bare.StrictMCPConfig = nil, "", "", false
+			bare.Tools, bare.PermissionMode, bare.Name, bare.StrictMCPConfig, bare.MCPConfig = nil, "", "", false, ""
 			bare.CrossSessionInbound, bare.PermissionsDeny, bare.PermissionsAllow = "", nil, nil
 			state.SpawnOverlay = &bare
 			if drift, _, _ := driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, s); !drift {

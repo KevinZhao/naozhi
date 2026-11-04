@@ -103,10 +103,13 @@ type Sessions interface {
 
 // Turns is the gateway's turn entry for the Planner.
 type Turns interface {
-	// SubmitPlanner runs text as a turn on key, spawning it with opts;
-	// done (nil for none) gets the reply, or the error the turn ended with.
-	// queued is text waiting behind a turn already running.
-	SubmitPlanner(key, text string, opts sessionview.AgentOpts, done func(reply string, err error)) (queued bool, err error)
+	// SubmitPlanner runs text from src as a turn on key, spawning it with
+	// opts; done (nil for none) gets the reply, or the error the turn ended
+	// with. queued is text waiting behind a turn already running.
+	SubmitPlanner(key string, src Source, text string, opts sessionview.AgentOpts, done func(reply string, err error)) (queued bool, err error)
+	// PlannerTurnSources is the sources of the requests key's turn in
+	// flight took, sorted; none between turns.
+	PlannerTurnSources(key string) []Source
 	// PlannerReceipt shows text in key's conversation as a system event,
 	// never sent to the CLI.
 	PlannerReceipt(key, text string)
@@ -565,7 +568,7 @@ func (a *Agent) sendHandoff(day string, summary []byte, opts sessionview.AgentOp
 		a.mu.Lock()
 		turns := a.turns
 		a.mu.Unlock()
-		if _, err := turns.SubmitPlanner(Key, handoffMessage(day, string(summary)), opts, nil); err != nil {
+		if _, err := turns.SubmitPlanner(Key, SourceShift, handoffMessage(day, string(summary)), opts, nil); err != nil {
 			slog.Warn("planner: send handoff to new session", "err", err)
 			return
 		}
@@ -592,7 +595,7 @@ func (a *Agent) askHandoff(ctx context.Context) string {
 		err  error
 	}
 	ch := make(chan reply, 1)
-	queued, err := turns.SubmitPlanner(Key, handoffPrompt, opts, func(text string, err error) {
+	queued, err := turns.SubmitPlanner(Key, SourceShift, handoffPrompt, opts, func(text string, err error) {
 		ch <- reply{text, err}
 	})
 	if err != nil {
@@ -644,14 +647,15 @@ func (a *Agent) Send(text, ref string) error {
 	// A handed-over session leads: the logged user bubble keeps only the
 	// first EventDetailMaxRunes of the message, which the snapshot alone may
 	// fill.
-	head := ""
+	head, src := "", SourceUser
 	if ref != "" {
+		src = SourceHandover
 		if ref == Key || !a.cfg.Sessions.State(ref).Exists {
 			return ErrNoRef
 		}
 		head = sessionRef(ref, a.cfg.Sessions.Name(ref), a.cfg.Sessions.Label(ref)) + "\n"
 	}
-	if _, err := turns.SubmitPlanner(Key, strings.TrimSpace(head+a.Snapshot()+"\n\n"+text), opts, nil); err != nil {
+	if _, err := turns.SubmitPlanner(Key, src, strings.TrimSpace(head+a.Snapshot()+"\n\n"+text), opts, nil); err != nil {
 		return err
 	}
 	turns.PlannerReceipt(Key, ReceiptText)
@@ -674,7 +678,7 @@ func (a *Agent) Tell(text string) error {
 	case turns == nil:
 		return ErrNotReady
 	}
-	_, err := turns.SubmitPlanner(Key, "<naozhi-receipt>\n"+strings.TrimSpace(text)+"\n</naozhi-receipt>", opts, nil)
+	_, err := turns.SubmitPlanner(Key, SourceReceipt, "<naozhi-receipt>\n"+strings.TrimSpace(text)+"\n</naozhi-receipt>", opts, nil)
 	return err
 }
 

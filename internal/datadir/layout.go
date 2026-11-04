@@ -175,6 +175,16 @@ func (l Layout) PlannerPromisesPath() string { return l.Join("planner", "promise
 // (<root>/planner/notify.json).
 func (l Layout) PlannerPushStatePath() string { return l.Join("planner", "notify.json") }
 
+// PlannerScoutRoot holds the scout's state: its cursors, the findings
+// already seen, the next day's calendar and each run's record
+// (<root>/planner/scout, docs/rfc/planner.md §15.6).
+func (l Layout) PlannerScoutRoot() string { return l.Join("planner", "scout") }
+
+// ScoutMCPConfigPath is the scout session's --mcp-config, cli.mcp_config
+// cut down to the scout's servers. It sits with the per-session settings,
+// out of the Planner's reach (<root>/session-settings/scout-mcp.json).
+func (l Layout) ScoutMCPConfigPath() string { return l.Join("session-settings", "scout-mcp.json") }
+
 // PlannerRunMarkerPath is written at start and removed on a clean shutdown
 // (<root>/planner/running); finding it at start means the last run did not
 // end cleanly.

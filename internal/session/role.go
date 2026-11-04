@@ -32,6 +32,8 @@ const (
 	RolePlanner
 	// RoleTask is a session the Planner dispatched. Key shape "task:<id>".
 	RoleTask
+	// RoleScout is a one-shot scout session. Key shape "scout:<run>".
+	RoleScout
 )
 
 // String returns the lower-case role label used in metrics / logs.
@@ -51,6 +53,8 @@ func (r SessionRole) String() string {
 		return "planner"
 	case RoleTask:
 		return "task"
+	case RoleScout:
+		return "scout"
 	default:
 		return "unknown"
 	}
@@ -75,6 +79,8 @@ func classifyKey(key string) SessionRole {
 		return RolePlanner
 	case sessionkey.IsTaskKey(key):
 		return RoleTask
+	case sessionkey.IsScoutKey(key):
+		return RoleScout
 	case isPlannerKey(key):
 		return RoleProject
 	default:

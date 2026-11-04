@@ -158,7 +158,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		accessProfilesH: accessprofile.New(router.Backends(), opts.Config.Path, opts.Config.AccessProfileSecretsDir),
 		cronH:           buildCronHandlers(opts, claudeDir),
 		transcribeH:     buildTranscribeHandler(opts),
-		plannerH:        dashplanner.New(opts.Planner, opts.Briefs),
+		plannerH:        dashplanner.New(opts.Planner, opts.Briefs, opts.Scout),
 		inboxH:          buildInboxHandler(opts),
 		tasksH:          buildTasksHandler(opts),
 	}

@@ -391,9 +391,14 @@ const GATEWAY_HEAD_RE = /^<naozhi-(?:snapshot[\s>]|session-ref>)/;
 // something you wrote, so
 // it shows as a gateway line rather than your bubble.
 const RECEIPT_RE = /^<naozhi-receipt>\s*([\s\S]*?)\s*(?:<\/naozhi-receipt>\s*)?$/;
+// SCOUT_RE is a scout run waking the Planner with what it found
+// (planner/scout): the turn is marked 来自巡检 rather than shown as your bubble.
+const SCOUT_RE = /^<naozhi-scout findings="(\d+)"/;
 function withoutSnapshot(e) {
   const r = e.type === 'user' && RECEIPT_RE.exec(e.detail || e.summary || '');
   if (r) return Object.assign({}, e, { type: 'system', summary: '回执给 Planner：' + r[1], detail: '' });
+  const sc = e.type === 'user' && SCOUT_RE.exec(e.detail || e.summary || '');
+  if (sc) return Object.assign({}, e, { type: 'system', summary: '来自巡检：' + sc[1] + ' 条新发现', detail: '' });
   if (e.type !== 'user' || !GATEWAY_HEAD_RE.test(e.detail || e.summary || '')) return e;
   let ref = '';
   let detail = (e.detail || '').replace(SESSION_REF_RE, (_, r) => { ref = r; return ''; });

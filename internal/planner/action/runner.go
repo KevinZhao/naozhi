@@ -71,6 +71,11 @@ type Config struct {
 	// Reports are the senders (session keys) of the cross-session messages
 	// that reached the Planner in (from, to]; nil checks none.
 	Reports func(from, to time.Time) []string
+	// Outside names what brought outside content into the Planner turn in
+	// flight ("巡检", "会前简报"; agent.Agent.OutsideTurn), "" for nothing;
+	// that turn's dispatches are refused (docs/rfc/planner.md §15.6 安全).
+	// nil refuses none.
+	Outside func() string
 	// Ctx bounds dispatches' spawns; nil is Background.
 	Ctx context.Context
 	// Now is the wall clock; nil is time.Now.
@@ -94,9 +99,11 @@ type Runner struct {
 }
 
 // reply is one Planner turn's result text and the span its turn ran in.
+// outside names what brought outside content into the turn, "" for nothing.
 type reply struct {
 	text     string
 	from, to time.Time
+	outside  string
 }
 
 type askCard struct {
@@ -133,8 +140,13 @@ func (r *Runner) Result(key, text string) {
 	if key != r.cfg.Planner {
 		return
 	}
+	// Read now: the turn is still in flight while its result arrives.
+	outside := ""
+	if r.cfg.Outside != nil {
+		outside = r.cfg.Outside()
+	}
 	r.mu.Lock()
-	rep := reply{text: text, from: r.last, to: r.cfg.Now()}
+	rep := reply{text: text, from: r.last, to: r.cfg.Now(), outside: outside}
 	r.last = rep.to
 	r.mu.Unlock()
 	if r.cfg.Reports == nil && !strings.Contains(text, Fence) {
@@ -176,6 +188,8 @@ func (r *Runner) handle(rep reply) {
 		}
 		var err error
 		switch {
+		case b.Dispatch != nil && rep.outside != "":
+			r.refuseDispatch(*b.Dispatch, rep.outside)
 		case b.Dispatch != nil:
 			r.dispatch(*b.Dispatch)
 		case b.Promise != nil:
@@ -320,6 +334,15 @@ func (r *Runner) dispatch(d Dispatch) {
 	}
 	r.note("已派出：" + d.Title + "（" + key + "）")
 	r.tell("已派出：" + d.Title + "（" + key + "），工作区 " + wsName + "。它的跨会话名字是「" + d.Title + "」（重名时 CC 会加短 ID，以 ListAgents 为准）。用 notify_when_idle 订阅它，做完后在对话里告诉用户结果。")
+}
+
+// refuseDispatch answers a dispatch from a turn outside content brought in
+// (by): a line in a mail could pose as the user asking for work, so the
+// gateway refuses it by the turn's source, not by judging the text. The
+// user asking in the conversation is a turn of their own.
+func (r *Runner) refuseDispatch(d Dispatch, by string) {
+	r.note(by + "触发的回合不能派活：「" + d.Title + "」没有派出")
+	r.tell("这一轮由" + by + "触发，网关不执行 dispatch：「" + d.Title + "」没有派出。需要派活就在对话里向用户说明，等用户发消息让你派。")
 }
 
 // spawn records a new task: session's sidecar and starts it in the

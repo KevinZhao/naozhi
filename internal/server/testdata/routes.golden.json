@@ -226,6 +226,11 @@
   },
   {
     "method": "POST",
+    "path": "/api/scout/run",
+    "handler_type": "*dashplanner.Handler"
+  },
+  {
+    "method": "POST",
     "path": "/api/scratch/open",
     "handler_type": "*scratch.Handler"
   },

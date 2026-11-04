@@ -9,6 +9,9 @@
 //	GET  /api/planner/briefs the latest morning briefs, newest first (?limit=)
 //	GET  /api/planner/notes  the gateway's journaled notes in the conversation
 //	                         (due reminders, dispatch outcomes), oldest first
+//	POST /api/scout/run      a scout run now, outside the schedule (§15.6);
+//	                         202 with the run ID, the record lands in
+//	                         <state root>/planner/scout/runs
 //
 // All sit behind the /api/* auth middleware.
 package planner
@@ -22,6 +25,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/brief"
+	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
@@ -31,10 +35,13 @@ import (
 type Handler struct {
 	agent  *agent.Agent
 	briefs *brief.Briefer
+	scout  *scout.Scout
 }
 
-// New returns a Handler for a and b (either nil when not built).
-func New(a *agent.Agent, b *brief.Briefer) *Handler { return &Handler{agent: a, briefs: b} }
+// New returns a Handler for a, b and sc (any nil when not built).
+func New(a *agent.Agent, b *brief.Briefer, sc *scout.Scout) *Handler {
+	return &Handler{agent: a, briefs: b, scout: sc}
+}
 
 // Brief list sizes: the default and the most one request returns.
 const (
@@ -129,6 +136,21 @@ func (h *Handler) HandleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httputil.WriteJSONStatus(w, http.StatusAccepted, map[string]string{"status": "accepted", "key": agent.Key})
+}
+
+// HandleScoutRun starts a scout run now. 409 while one runs or when the
+// scout is off.
+func (h *Handler) HandleScoutRun(w http.ResponseWriter, _ *http.Request) {
+	if h.scout == nil {
+		httputil.WriteJSONStatus(w, http.StatusConflict, map[string]string{"error": scout.ErrOff.Error()})
+		return
+	}
+	id, err := h.scout.Trigger()
+	if err != nil {
+		httputil.WriteJSONStatus(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
+	httputil.WriteJSONStatus(w, http.StatusAccepted, map[string]string{"status": "accepted", "run": id})
 }
 
 // writeErr maps the agent's errors to statuses; their text is user-facing.

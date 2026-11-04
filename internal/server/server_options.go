@@ -18,6 +18,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/brief"
 	"github.com/naozhi/naozhi/internal/planner/note"
+	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
 	"github.com/naozhi/naozhi/internal/platform"
@@ -109,6 +110,9 @@ type ServerOptions struct {
 	// Planner is the global Planner behind /api/planner; nil answers those
 	// routes as planner.enabled off.
 	Planner *agent.Agent
+	// Scout is the Planner's patrol behind POST /api/scout/run; nil answers
+	// it as off.
+	Scout *scout.Scout
 	// Briefs are the morning briefs /api/planner/briefs lists; nil lists
 	// none.
 	Briefs *brief.Briefer

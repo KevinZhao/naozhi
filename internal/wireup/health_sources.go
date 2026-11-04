@@ -15,6 +15,7 @@ import (
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/monitor/health"
+	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -41,6 +42,9 @@ type HealthSources struct {
 	EventLogDir string
 	// Sidecars fill index.json's purpose and dispatched_by_planner.
 	Sidecars *sidecar.Store
+	// Scout is the patrol's unit; its run sessions are not units of their
+	// own.
+	Scout *scout.Scout
 }
 
 // Collect is health.Config.Collect. Cron jobs and daemons come before the
@@ -60,8 +64,14 @@ func (h HealthSources) Collect(since time.Time) []health.Fact {
 			out = append(out, daemonFact(d))
 		}
 	}
+	if st := h.Scout.Status(); st.Enabled {
+		out = append(out, scoutFact(st))
+	}
 	if h.Router != nil {
 		for _, snap := range h.Router.ListSessions() {
+			if sessionkey.IsScoutKey(snap.Key) {
+				continue
+			}
 			f := sessionFact(snap, h.Router.SessionFor(snap.Key), h.EventLogDir)
 			if h.Sidecars != nil {
 				if m, ok := h.Sidecars.Get(snap.Key); ok {
