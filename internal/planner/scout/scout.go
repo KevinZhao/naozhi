@@ -330,6 +330,11 @@ func (s *Scout) run(ctx context.Context, id, trig string, started time.Time) (r 
 		// deny list needs a look.
 		slog.Warn("scout: session tried tools outside its read list", "run", id, "tools", extra)
 	}
+	if marked := markedRead(tools); len(marked) > 0 {
+		// Read tools only, yet email_read can flip a message's read state
+		// through an argument the permission rules cannot see.
+		return fail(fmt.Errorf("巡检读邮件时带了 markAs，可能改了邮件的已读状态：%s", strings.Join(marked, "、")))
+	}
 	out, err := parseOutput(reply)
 	if err != nil {
 		return fail(fmt.Errorf("scout output: %w", err))
@@ -337,6 +342,11 @@ func (s *Scout) run(ctx context.Context, id, trig string, started time.Time) (r 
 	if !slices.Contains(servers, ServerOutlook) {
 		out.Calendar = nil // not read, whatever the reply says
 	}
+	// Overlaps are arithmetic on the calendar the session returned, not a
+	// judgment: the gateway works them out and drops any the model listed,
+	// whose recall varied run to run.
+	out.Findings = slices.DeleteFunc(out.Findings, func(f Finding) bool { return f.Kind == KindConflict })
+	out.Findings = append(out.Findings, conflicts(out.events())...)
 	now := s.cfg.Now()
 	if r.Events, err = s.st.saveCalendar(out.Calendar, now); err != nil {
 		return fail(fmt.Errorf("save calendar: %w", err))
@@ -438,7 +448,7 @@ func unlisted(tools, servers []string) []string {
 	read := toolNames(readTools, servers)
 	var out []string
 	for _, t := range tools {
-		if !slices.Contains(read, t) {
+		if t = strings.TrimSuffix(t, MarkAsSuffix); !slices.Contains(read, t) && !slices.Contains(out, t) {
 			out = append(out, t)
 		}
 	}
@@ -460,4 +470,67 @@ func block(id string, fresh []Finding) string {
 	}
 	b.WriteString("</naozhi-scout>")
 	return b.String()
+}
+
+// MarkAsSuffix tags a called tool name in a Session's tool list when the
+// call passed email_read's markAs argument.
+const MarkAsSuffix = "+markAs"
+
+// markedRead is the tools a session called with markAs.
+func markedRead(tools []string) []string {
+	var out []string
+	for _, t := range tools {
+		if strings.HasSuffix(t, MarkAsSuffix) {
+			out = append(out, strings.TrimSuffix(t, MarkAsSuffix))
+		}
+	}
+	return out
+}
+
+// allDay is how long an event must last to count as an all-day block,
+// which overlaps everything and conflicts with nothing.
+const allDay = 20 * time.Hour
+
+// conflicts is each pair of timed events in events that overlap, as a
+// finding keyed by the overlap's start (conflictID).
+func conflicts(events []Event) []Finding {
+	var timed []Event
+	for _, e := range events {
+		if d := e.End.Sub(e.Start); d > 0 && d < allDay {
+			timed = append(timed, e)
+		}
+	}
+	slices.SortFunc(timed, func(a, b Event) int { return a.Start.Compare(b.Start) })
+	var out []Finding
+	for i, a := range timed {
+		for _, b := range timed[i+1:] {
+			if !b.Start.Before(a.End) {
+				break // sorted by start: no later event overlaps a either
+			}
+			if a.ID == b.ID {
+				continue
+			}
+			end := a.End
+			if b.End.Before(end) {
+				end = b.End
+			}
+			// Keyed by when the overlap starts, as parseOutput keys a
+			// conflict: the model copies the long Outlook IDs unevenly from
+			// run to run, so they make no stable key.
+			id := conflictID("", b.Start.Format(time.RFC3339))
+			if slices.ContainsFunc(out, func(f Finding) bool { return f.ID == id }) {
+				continue // one alert per overlap start
+			}
+			out = append(out, Finding{
+				Source: SourceCalendar,
+				Kind:   KindConflict,
+				ID:     id,
+				Title:  textutil.TruncateRunes("「"+a.Title+"」与「"+b.Title+"」时间重叠", fieldRunes),
+				At:     b.Start.Format(time.RFC3339),
+				Link:   b.Link,
+				Why:    b.Start.Format("15:04") + "–" + end.Format("15:04") + " 两场会议重叠",
+			})
+		}
+	}
+	return out
 }

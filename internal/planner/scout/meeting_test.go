@@ -15,7 +15,7 @@ import (
 func TestBriefDue(t *testing.T) {
 	at := func(day, h, m int) time.Time { return time.Date(2026, 11, day, h, m, 0, 0, time.Local) } // 11-02 is a Monday
 	meeting := func(id string, start time.Time, people ...string) Event {
-		return Event{ID: id, Title: "iso 会", Start: start, End: start.Add(time.Hour), Organizer: "me@x", Attendees: people}
+		return Event{ID: id, Title: "iso 会", Start: start, End: start.Add(time.Hour), Organizer: "me@x", Attendees: people, Prep: true}
 	}
 	ten := meeting("m1", at(2, 10, 0), "bob@x")
 	cases := []struct {
@@ -31,11 +31,13 @@ func TestBriefDue(t *testing.T) {
 		// Asleep through 09:45: woken after the start, the meeting is skipped.
 		{"woken after the start", at(2, 10, 0), []Event{ten}, nil, ""},
 		{"no one else", at(2, 9, 50), []Event{meeting("m2", at(2, 10, 0)), meeting("m3", at(2, 10, 0), " ME@x")}, nil, ""},
-		{"invited by someone", at(2, 9, 50), []Event{{ID: "m4", Start: at(2, 10, 0), End: at(2, 11, 0), Organizer: "bob@x", Attendees: []string{"me@x"}}}, nil, "m4"},
+		{"invited by someone", at(2, 9, 50), []Event{{ID: "m4", Start: at(2, 10, 0), End: at(2, 11, 0), Organizer: "bob@x", Attendees: []string{"me@x"}, Prep: true}}, nil, "m4"},
 		// The calendar tool lists no attendees: the scout writes the user as
 		// "me" on an invitation, and nothing on a meeting of their own.
-		{"invited, no attendee list", at(2, 9, 50), []Event{{ID: "m7", Start: at(2, 10, 0), End: at(2, 11, 0), Organizer: "bob@x", Attendees: []string{"me"}}}, nil, "m7"},
-		{"their own, no attendee list", at(2, 9, 50), []Event{{ID: "m8", Start: at(2, 10, 0), End: at(2, 11, 0), Organizer: "me"}}, nil, ""},
+		{"invited, no attendee list", at(2, 9, 50), []Event{{ID: "m7", Start: at(2, 10, 0), End: at(2, 11, 0), Organizer: "bob@x", Attendees: []string{"me"}, Prep: true}}, nil, "m7"},
+		{"their own, no attendee list", at(2, 9, 50), []Event{{ID: "m8", Start: at(2, 10, 0), End: at(2, 11, 0), Organizer: "me", Prep: true}}, nil, ""},
+		// Office hours or a broadcast: nothing to prepare, no brief.
+		{"nothing to prepare", at(2, 9, 50), []Event{{ID: "m9", Start: at(2, 10, 0), End: at(2, 11, 0), Organizer: "bob@x", Attendees: []string{"me"}}}, nil, ""},
 		{"already briefed", at(2, 9, 50), []Event{ten}, []briefed{{ID: "m1", Start: at(2, 10, 0)}}, ""},
 		{"moved after its brief", at(2, 13, 50), []Event{meeting("m1", at(2, 14, 0), "bob@x")}, []briefed{{ID: "m1", Start: at(2, 10, 0)}}, "m1"},
 		{"the first with others", at(2, 9, 50), []Event{meeting("m2", at(2, 10, 0)), ten}, nil, "m1"},
@@ -66,7 +68,7 @@ func TestBriefRun(t *testing.T) {
 	now := time.Date(2026, 11, 2, 9, 46, 0, 0, time.Local)
 	start := time.Date(2026, 11, 2, 10, 0, 0, 0, time.Local)
 	st := store{dir: datadir.FromRoot(root).PlannerScoutRoot()}
-	cal := []Event{{ID: "m1", Title: "iso 预算评审", Start: start, End: start.Add(time.Hour), Organizer: "a@x", Attendees: []string{"b@x"}}}
+	cal := []Event{{ID: "m1", Title: "iso 预算评审", Start: start, End: start.Add(time.Hour), Organizer: "a@x", Attendees: []string{"b@x"}, Prep: true}}
 	if _, err := st.saveCalendar(&cal, now); err != nil {
 		t.Fatal(err)
 	}
