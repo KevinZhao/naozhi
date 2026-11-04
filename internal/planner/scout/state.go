@@ -182,7 +182,11 @@ func (st store) saveRun(r Run) error {
 }
 
 // lastRun is the newest run record; run IDs sort by start time.
-func (st store) lastRun() (Run, bool) {
+func (st store) lastRun() (Run, bool) { return st.newestRun(false) }
+
+// newestRun is the newest run record, only among the runs that went
+// through when ok.
+func (st store) newestRun(ok bool) (Run, bool) {
 	ents, _ := os.ReadDir(st.runsDir())
 	for i := len(ents) - 1; i >= 0; i-- {
 		name := ents[i].Name()
@@ -191,7 +195,7 @@ func (st store) lastRun() (Run, bool) {
 		}
 		var r Run
 		st.read(filepath.Join("runs", name), &r)
-		if r.ID != "" {
+		if r.ID != "" && (!ok || r.State == StateOK) {
 			return r, true
 		}
 	}

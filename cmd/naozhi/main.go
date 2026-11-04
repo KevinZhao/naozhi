@@ -311,12 +311,15 @@ func main() {
 	})
 	// The Planner's patrol (§15.6): weekday scout runs over the mail, Slack
 	// and Asana MCP servers, read tools only; new findings wake the Planner.
-	// It runs whether or not the Planner does, keeping them on disk.
+	// It runs whether or not the Planner does, keeping them on disk; the
+	// pre-meeting briefs run only for the Planner.
 	scouter := scout.New(scout.Config{
 		Layout:    sessionLayout,
 		MCPConfig: mcpConfigFile,
 		Session:   wireup.ScoutSession(router),
-		Wake:      wireup.ScoutWake(plannerAgent),
+		Wake:      wireup.ScoutWake(plannerAgent, agent.SourceScout),
+		Brief:     wireup.ScoutWake(plannerAgent, agent.SourceBriefing),
+		PlannerOn: wireup.PlannerOn(plannerAgent),
 		Journal:   plannerState.Journal,
 		Beats:     beats,
 	})
@@ -490,6 +493,8 @@ func main() {
 		Push:       notifier.Announce,
 		Name:       unitNames,
 		Workspaces: plannerState.Workspaces,
+		Calendar:   scouter.Calendar,
+		Patrol:     scouter.Latest,
 	})
 
 	routing := buildRouting(cfg, agents, projectMgr, scheduler)

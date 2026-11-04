@@ -51,7 +51,7 @@ func (n *Notifier) admitLocked(level Level, uncapped bool, now time.Time) (bool,
 	if level == LevelUrgent {
 		return true, ""
 	}
-	if quiet(now) {
+	if Quiet(now) {
 		return false, "quiet_hours"
 	}
 	if uncapped {
@@ -68,8 +68,8 @@ func (n *Notifier) admitLocked(level Level, uncapped bool, now time.Time) (bool,
 	return true, ""
 }
 
-// quiet reports whether now falls in the local quiet hours.
-func quiet(now time.Time) bool {
+// Quiet reports whether now falls in the local quiet hours.
+func Quiet(now time.Time) bool {
 	h, m, _ := now.Clock()
 	t := time.Duration(h)*time.Hour + time.Duration(m)*time.Minute
 	return t >= QuietStart || t < QuietEnd
