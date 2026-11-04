@@ -362,7 +362,11 @@ func (r *Runner) checkReports(rep reply, statused map[string]string) {
 // refuse shows a block that is not run, with why.
 func (r *Runner) refuse(b Block, why error) {
 	// A note is one line: the block's whitespace folds to spaces.
-	r.note("动作块格式不对，没有执行：" + why.Error() + "。原文：" + textutil.TruncateRunes(strings.Join(strings.Fields(b.Raw), " "), rawRunes))
+	lead := "动作块格式不对，没有执行："
+	if errors.Is(why, errTooMany) {
+		lead = "动作块没有执行："
+	}
+	r.note(lead + why.Error() + "。原文：" + textutil.TruncateRunes(strings.Join(strings.Fields(b.Raw), " "), rawRunes))
 }
 
 func (r *Runner) note(text string) {
