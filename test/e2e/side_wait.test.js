@@ -2,9 +2,9 @@
 // RFC §15.3 ①) — the Planner page's counts, its cards unfolded in place and
 // closed there, one thin line with nothing open — and the deep links of
 // §15.3 ④ (notify.js): #planner&item=<id> and a notification without a
-// session open the Planner on the item; #session=<key>&item=<id> opens the
-// session and scrolls to the item's note, or the Planner when the session is
-// not listed.
+// session open the Planner on the item, the brief's #planner the drawer;
+// #session=<key>&item=<id> opens the session and scrolls to the item's note,
+// or the Planner when the session is not listed.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
 const { waitForWs } = require('./shim_wait');
@@ -131,6 +131,12 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
         });
         await expect(page.locator('body')).toHaveClass(/nz-view-planner/);
         await expect(page.locator('#pl-wait .pl-card[data-id="in_d"]')).toHaveClass(/inbox-lit/);
+
+        // The morning brief's #planner, from the chat view: the drawer.
+        await page.click('#abnav-chat');
+        await page.evaluate(() => { location.hash = 'planner'; });
+        await expect(page.locator('#planner-drawer')).toBeVisible();
+        await expect(page.locator('body')).not.toHaveClass(/nz-view-planner/);
       } finally {
         await ctx.close();
         mock.server.close();

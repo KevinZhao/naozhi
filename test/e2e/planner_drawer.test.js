@@ -155,7 +155,9 @@ test('planner.enabled off: the drawer explains it', async ({ page }) => {
 test('phone: the session header\'s Planner button opens it full screen', async ({ browser }) => {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
   const page = await ctx.newPage();
-  const mock = await startMockServer({ ws: true, plannerEvents: plannerEvents(), inbox: inbox(), planner: planner() });
+  // A gateway line longer than the phone is wide wraps inside it.
+  const events = plannerEvents().concat({ type: 'system', time: now - 100000, summary: '待你确认：派出「iso 列出 work 目录文件」（工作区 work，模型 默认）。卡片 in_ab09wrmgkl 在「等你」里，批准后才会拉起。' });
+  const mock = await startMockServer({ ws: true, plannerEvents: events, inbox: inbox(), planner: planner() });
   try {
     await openChat(page, mock);
     const btn = page.locator('#btn-pld');
@@ -167,7 +169,9 @@ test('phone: the session header\'s Planner button opens it full screen', async (
     const box = await drawer.boundingBox();
     expect(Math.round(box.width)).toBe(390);
     await expect(page.locator('#pl-input')).toBeInViewport();
-    await expect(drawer.locator('#pl-stream .event')).toHaveCount(2);
+    await expect(drawer.locator('#pl-stream .event')).toHaveCount(3);
+    const line = drawer.locator('#pl-stream .event.system .event-content');
+    await expect.poll(async () => { const b = await line.boundingBox(); return b.x >= 0 && b.x + b.width <= 390; }).toBe(true);
     await page.screenshot({ path: test.info().outputPath('planner-drawer-mobile.png'), animations: 'disabled' });
     await drawer.locator('[data-action="planner-drawer-close"]').tap();
     await expect(drawer).toBeHidden();

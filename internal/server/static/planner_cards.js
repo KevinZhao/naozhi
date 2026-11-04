@@ -278,6 +278,9 @@ function foldKeys(ev, keys) {
       next.data = next.data.slice(1);
     }
     if (prev?.nodeType === Node.TEXT_NODE) prev.data = prev.data.trimEnd();
+    // The separator before a key that closes a bracket or the line has
+    // nothing left to separate: "（名字 work，`key`）" reads "（名字 work）".
+    if (!next || next.nodeType === Node.TEXT_NODE && /^\s*[）)]/.test(next.data)) prev.data = prev.data.replace(/[，,、；;]$/, '');
     code.remove();
   });
 }
