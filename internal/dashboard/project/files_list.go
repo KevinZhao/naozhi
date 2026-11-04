@@ -41,10 +41,8 @@ type listEntry struct {
 // so a probing client gets no oracle; credential-named children are never
 // enumerated.
 func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
-	// Remote-node filesystems are not readable from this process; reject rather
-	// than silently listing the local dir under the same name.
-	if node := r.URL.Query().Get("node"); node != "" && node != "local" {
-		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "file listing is not supported for remote nodes"})
+	if isRemoteNode(r.URL.Query().Get("node")) {
+		httputil.WriteJSONStatus(w, http.StatusNotImplemented, map[string]string{"error": errRemoteFilesUnsupported})
 		return
 	}
 

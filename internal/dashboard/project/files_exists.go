@@ -43,6 +43,10 @@ func (h *Handlers) HandleFilesExists(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if isRemoteNode(req.Node) {
+		httputil.WriteJSONStatus(w, http.StatusNotImplemented, map[string]string{"error": errRemoteFilesUnsupported})
+		return
+	}
 	if req.Project == "" {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "project is required"})
 		return

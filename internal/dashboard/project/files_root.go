@@ -15,6 +15,15 @@ import (
 // names cannot contain ':', so the two namespaces never collide.
 const sessionRootPrefix = "session:"
 
+// isRemoteNode reports whether a file request names another node: such a
+// request is never served from this host's disk, even when a local project or
+// session carries the same name.
+func isRemoteNode(nodeID string) bool { return nodeID != "" && nodeID != "local" }
+
+// errRemoteFilesUnsupported answers a file request for a node that cannot
+// serve its files.
+const errRemoteFilesUnsupported = "remote node does not support file access"
+
 // browseRoot is the directory a file read or listing is served from.
 type browseRoot struct {
 	path string

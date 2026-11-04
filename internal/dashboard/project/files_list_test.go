@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -195,11 +196,33 @@ func TestHandleFilesList_FileNotDir(t *testing.T) {
 	}
 }
 
-func TestHandleFilesList_RemoteNodeRejected(t *testing.T) {
-	h, proj, _ := newProjectHandlersForTest(t, nil)
-	w, _ := doList(t, h, "project="+proj+"&node=worker-1")
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("remote node: want 400, got %d", w.Code)
+// TestFileAPI_RemoteNodeNeverReadsLocalDisk: a request naming another node is
+// never answered from this host, even when a local project shares the name.
+func TestFileAPI_RemoteNodeNeverReadsLocalDisk(t *testing.T) {
+	h, proj, _ := newProjectHandlersForTest(t, map[string]string{"same.txt": "LOCAL CONTENT"})
+	existsBody := `{"project":"` + proj + `","node":"worker-1","paths":["same.txt"]}`
+	cases := []struct {
+		name string
+		req  *http.Request
+		run  func(http.ResponseWriter, *http.Request)
+	}{
+		{"list", httptest.NewRequest(http.MethodGet, "/api/projects/files/list?project="+proj+"&node=worker-1", nil), h.HandleFilesList},
+		{"get", httptest.NewRequest(http.MethodGet, "/api/projects/file?project="+proj+"&path=same.txt&node=worker-1", nil), h.HandleFileGet},
+		{"get raw", httptest.NewRequest(http.MethodGet, "/api/projects/file?project="+proj+"&path=same.txt&mode=raw&node=worker-1", nil), h.HandleFileGet},
+		{"exists", httptest.NewRequest(http.MethodPost, "/api/projects/files/exists", strings.NewReader(existsBody)), h.HandleFilesExists},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			tc.run(w, tc.req)
+			if w.Code != http.StatusNotImplemented {
+				t.Errorf("status = %d, want 501 (body %s)", w.Code, w.Body.String())
+			}
+			if body := w.Body.String(); strings.Contains(body, "LOCAL CONTENT") || strings.Contains(body, "same.txt") {
+				t.Errorf("remote request answered from the local disk: %s", body)
+			}
+		})
 	}
 }
 

@@ -143,6 +143,10 @@ func resolveProjectFileWithRoot(rootResolved, rel string) (string, error) {
 //
 // ETag is sha256(size||mtime||FileETagSalt)[:12] in all modes; 304 on If-None-Match.
 func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
+	if isRemoteNode(r.URL.Query().Get("node")) {
+		httputil.WriteJSONStatus(w, http.StatusNotImplemented, map[string]string{"error": errRemoteFilesUnsupported})
+		return
+	}
 	path := r.URL.Query().Get("path")
 	mode := r.URL.Query().Get("mode")
 	if mode == "" {
