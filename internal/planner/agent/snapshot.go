@@ -15,12 +15,18 @@ import (
 
 // Snapshot budget: the whole block stays near 2k tokens, so the Planner's
 // context grows by a bounded amount per message whatever the fleet size.
+// Every open promise's ID is listed past it all the same: the Planner closes
+// a promise by its ID, and has no other place to read it from.
 const (
 	snapshotMaxRunes  = 2000
 	snapshotLineRunes = 160
-	snapshotMaxItems  = 10 // per waiting / promise section
+	snapshotMaxItems  = 10 // in the waiting section
 	snapshotMaxUnits  = 20
 	cutNoticeRunes    = 32
+	// promiseRunes is what the promise lines take before their texts are
+	// cut, to no less than promiseTextRunes each.
+	promiseRunes     = snapshotMaxRunes / 2
+	promiseTextRunes = 12
 	// recentWindow is how long an ended unit still counts as "recently ended".
 	recentWindow = 24 * time.Hour
 )
@@ -73,9 +79,11 @@ func running(s health.State) bool {
 
 // renderSnapshot renders the deterministic <naozhi-snapshot> block the
 // gateway puts before each user message: the same input gives the same
-// bytes. Over the budget, trailing lines give way to a count.
+// bytes. Over the budget, trailing lines give way to a count, save the
+// promise lines, which are always kept.
 func renderSnapshot(in snapshotInput) string {
 	var lines []string
+	keepFrom, keepTo := 0, 0 // the promise section, lines[keepFrom:keepTo]
 	if in.Waiting != nil {
 		items := slices.Clone(in.Waiting)
 		slices.SortStableFunc(items, func(a, b Waiting) int { return a.Created.Compare(b.Created) })
@@ -104,19 +112,10 @@ func renderSnapshot(in snapshotInput) string {
 			}
 			return a.Due.Compare(b.Due)
 		})
+		keepFrom = len(lines)
 		lines = append(lines, fmt.Sprintf("未完成的承诺（%d）：", len(items)))
-		for i, p := range items {
-			if i == snapshotMaxItems {
-				lines = append(lines, fmt.Sprintf("- …另有 %d 条", len(items)-i))
-				break
-			}
-			// The ID leads, so truncating a long line cuts the text only.
-			line := "- [" + p.ID + "] " + p.Text
-			if !p.Due.IsZero() {
-				line += "（到期 " + p.Due.In(in.Now.Location()).Format("01-02 15:04") + "）"
-			}
-			lines = append(lines, line)
-		}
+		lines = append(lines, promiseLines(items, in.Now.Location())...)
+		keepTo = len(lines)
 	}
 
 	var units []health.Unit
@@ -157,25 +156,70 @@ func renderSnapshot(in snapshotInput) string {
 	head := "<naozhi-snapshot at=\"" + in.Now.Format("2006-01-02 15:04 MST") + "\">"
 	const tail = "</naozhi-snapshot>"
 	budget := snapshotMaxRunes - utf8.RuneCountInString(head) - utf8.RuneCountInString(tail) - 2
+	// The promise lines are kept, the rest share what they leave.
+	for _, line := range lines[keepFrom:keepTo] {
+		budget -= utf8.RuneCountInString(line) + 1
+	}
+	// The session lines come last, so the last line is one that may be cut.
+	last := len(lines) - 1
 	var b strings.Builder
 	b.WriteString(head + "\n")
+	cut := 0
 	for i, line := range lines {
+		if i >= keepFrom && i < keepTo {
+			b.WriteString(line + "\n")
+			continue
+		}
+		if cut > 0 {
+			cut++
+			continue
+		}
 		line = textutil.TruncateRunes(line, snapshotLineRunes)
 		n := utf8.RuneCountInString(line) + 1
 		// A line with more after it leaves room for the cut notice.
 		reserve := cutNoticeRunes
-		if i == len(lines)-1 {
+		if i == last {
 			reserve = 0
 		}
 		if n > budget-reserve {
-			fmt.Fprintf(&b, "…（截断，另有 %d 行，见 index.json）\n", len(lines)-i)
-			break
+			cut = 1
+			continue
 		}
 		budget -= n
 		b.WriteString(line + "\n")
 	}
+	if cut > 0 {
+		fmt.Fprintf(&b, "…（截断，另有 %d 行，见 index.json）\n", cut)
+	}
 	b.WriteString(tail)
 	return b.String()
+}
+
+// promiseLines lists every promise by its ID, the due time after its text:
+// the texts are cut so the lines fit promiseRunes, each to no less than
+// promiseTextRunes, and each line to snapshotLineRunes.
+func promiseLines(items []Promise, loc *time.Location) []string {
+	heads, tails := make([]string, len(items)), make([]string, len(items))
+	fixed, full := 0, 0
+	for i, p := range items {
+		heads[i] = "- [" + p.ID + "] "
+		if !p.Due.IsZero() {
+			tails[i] = "（到期 " + p.Due.In(loc).Format("01-02 15:04") + "）"
+		}
+		n := utf8.RuneCountInString(heads[i]) + utf8.RuneCountInString(tails[i]) + 1
+		fixed += n
+		full += min(n+utf8.RuneCountInString(p.Text), snapshotLineRunes+1)
+	}
+	text := snapshotLineRunes
+	if full > promiseRunes {
+		text = max(promiseTextRunes, (promiseRunes-fixed)/len(items))
+	}
+	out := make([]string, len(items))
+	for i, p := range items {
+		room := min(text, snapshotLineRunes-utf8.RuneCountInString(heads[i])-utf8.RuneCountInString(tails[i]))
+		out[i] = heads[i] + textutil.TruncateRunes(p.Text, max(room, promiseTextRunes)) + tails[i]
+	}
+	return out
 }
 
 func unitLine(in snapshotInput, u health.Unit) string {

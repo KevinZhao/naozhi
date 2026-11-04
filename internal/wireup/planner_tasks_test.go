@@ -55,3 +55,27 @@ func TestSpawnError(t *testing.T) {
 		})
 	}
 }
+
+// The Planner is told a stopped task's promises the stop closed, so it does
+// not close them again.
+func TestStopReceipt(t *testing.T) {
+	cases := []struct {
+		name     string
+		promises []string
+		want     string // "" for no mention of promises
+	}{
+		{"none", nil, ""},
+		{"two", []string{"pr_a", "pr_b"}, "相关的承诺 pr_a、pr_b 已一并标为已完成（任务已停止），不用再处理。"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := stopReceipt("task:ab12", "iso 写 hello", c.promises)
+			if !strings.HasPrefix(got, "用户在「任务」里停止了「iso 写 hello」（task:ab12）") || !strings.HasSuffix(got, "除非用户再要求。") {
+				t.Errorf("receipt = %q", got)
+			}
+			if c.want == "" && strings.Contains(got, "承诺") || c.want != "" && !strings.Contains(got, c.want) {
+				t.Errorf("receipt = %q, want it to say %q", got, c.want)
+			}
+		})
+	}
+}

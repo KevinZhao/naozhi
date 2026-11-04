@@ -72,6 +72,12 @@ type Promise struct {
 	RemindedAt time.Time `json:"reminded_at,omitzero"`
 }
 
+// Cites reports whether p waits on dispatched session key: the key in its
+// text or close condition ("task:ab12 做完后告诉用户结果").
+func (p Promise) Cites(key string) bool {
+	return strings.Contains(p.Text, key) || strings.Contains(p.CloseWhen, key)
+}
+
 // Reminder takes promises to the user: the "等你" push and the Planner
 // conversation.
 type Reminder interface {

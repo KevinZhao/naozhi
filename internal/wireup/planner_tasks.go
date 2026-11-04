@@ -68,14 +68,25 @@ func (t TaskOpts) ForKey(key string) (session.AgentOpts, bool) {
 // otherwise resume it once the cut turn ends, closes its process (its
 // background work too; the session stays) and tells the Planner, which would
 // otherwise wait on it, send it on, or mark it again as its own judgement.
-func StopTask(router *session.Router, drop func(key string), tell func(string) error) func(key, title string) {
-	return func(key, title string) {
+// The receipt names the promises the stop closed, so the Planner does not
+// close them again.
+func StopTask(router *session.Router, drop func(key string), tell func(string) error) func(key, title string, promises []string) {
+	return func(key, title string, promises []string) {
 		drop(key)
 		router.StopSession(key)
-		if err := tell("用户在「任务」里停止了「" + title + "」（" + key + "），它已记为失败（已停止），不用再改它的状态。不要再给它发消息，也不要重新派出同一件事，除非用户再要求。"); err != nil {
+		if err := tell(stopReceipt(key, title, promises)); err != nil {
 			slog.Info("task stop: the Planner not told", "key", key, "err", err)
 		}
 	}
+}
+
+// stopReceipt is what the Planner is told of a task the user stopped.
+func stopReceipt(key, title string, promises []string) string {
+	text := "用户在「任务」里停止了「" + title + "」（" + key + "），它已记为失败（已停止），不用再改它的状态。"
+	if len(promises) > 0 {
+		text += "相关的承诺 " + strings.Join(promises, "、") + " 已一并标为已完成（任务已停止），不用再处理。"
+	}
+	return text + "不要再给它发消息，也不要重新派出同一件事，除非用户再要求。"
 }
 
 // TaskSpawner starts the sessions the Planner dispatches.
