@@ -94,7 +94,10 @@ type Item struct {
 	WS    string `json:"ws,omitempty"`
 	Title string `json:"title"`
 	// Why says why it reached the user: state and names, never tool output.
-	Why     string    `json:"why"`
+	Why string `json:"why"`
+	// Link is a web page the item is about (the mail, the Slack message), ""
+	// for none.
+	Link    string    `json:"link,omitempty"`
 	Created time.Time `json:"created"`
 	State   State     `json:"state"`
 	// ClosedBy and ClosedAt are set once the item is closed.
@@ -358,6 +361,25 @@ func (n *Notifier) Counts() Counts {
 // item for the source and whether this call opened it.
 func (n *Notifier) Add(it Item) (Item, bool) {
 	n.mu.Lock()
+	it, opened, fx := n.addLocked(it)
+	n.mu.Unlock()
+	n.apply(fx)
+	return it, opened
+}
+
+// AddDaily is Add for something the user hears about once a day: when an
+// item with its Source was opened today (local), open or closed since, it
+// returns that one and opens none.
+func (n *Notifier) AddDaily(it Item) (Item, bool) {
+	n.mu.Lock()
+	now := n.cfg.Clock.Now()
+	day := now.Format(time.DateOnly)
+	for i := len(n.items) - 1; i >= 0; i-- {
+		if o := n.items[i]; o.Source == it.Source && o.Created.In(now.Location()).Format(time.DateOnly) == day {
+			n.mu.Unlock()
+			return o, false
+		}
+	}
 	it, opened, fx := n.addLocked(it)
 	n.mu.Unlock()
 	n.apply(fx)
