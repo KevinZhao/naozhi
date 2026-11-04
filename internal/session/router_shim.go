@@ -213,11 +213,11 @@ func firstArgvDivergence(oldArgs, newArgs []string) (string, string) {
 
 // adoptableShimKey reports whether a live shim whose key is absent from
 // sessions.json may be rebuilt + reconnected rather than killed (#1875). It
-// rejects sys:/scratch: keys (never persisted, so a live shim there is an
+// rejects sys:/scratch:/scout: keys (never persisted, so a live shim there is an
 // anomaly) and keys failing validation, mirroring validateKeyForShim: a
 // malformed key on a shim state file is evidence of tampering, not a session.
 func adoptableShimKey(key string) bool {
-	if sessionkey.IsSysKey(key) || sessionkey.IsScratchKey(key) {
+	if sessionkey.IsSysKey(key) || sessionkey.IsScratchKey(key) || sessionkey.IsScoutKey(key) {
 		return false
 	}
 	return sessionkey.ValidateSessionKey(key) == nil

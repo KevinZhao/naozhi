@@ -91,7 +91,7 @@ type fakeTurns struct {
 	notes []string
 }
 
-func (f *fakeTurns) SubmitPlanner(_, text string, _ sessionview.AgentOpts, done func(string, error)) (bool, error) {
+func (f *fakeTurns) SubmitPlanner(_ string, _ Source, text string, _ sessionview.AgentOpts, done func(string, error)) (bool, error) {
 	f.sent = append(f.sent, text)
 	if done != nil {
 		done(f.reply, nil)
@@ -99,9 +99,10 @@ func (f *fakeTurns) SubmitPlanner(_, text string, _ sessionview.AgentOpts, done 
 	return false, nil
 }
 
-func (*fakeTurns) PlannerReceipt(string, string) {}
-func (f *fakeTurns) PlannerNote(_, text string)  { f.notes = append(f.notes, text) }
-func (*fakeTurns) DropPlannerQueue(string)       {}
+func (*fakeTurns) PlannerTurnSources(string) []Source { return nil }
+func (*fakeTurns) PlannerReceipt(string, string)      {}
+func (f *fakeTurns) PlannerNote(_, text string)       { f.notes = append(f.notes, text) }
+func (*fakeTurns) DropPlannerQueue(string)            {}
 
 func newTestAgent(t *testing.T, sess *fakeSessions, now *time.Time) (*Agent, datadir.Layout) {
 	t.Helper()

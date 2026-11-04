@@ -71,6 +71,16 @@ type Config struct {
 	// Reports are the senders (session keys) of the cross-session messages
 	// that reached the Planner in (from, to]; nil checks none.
 	Reports func(from, to time.Time) []string
+	// Outside names what brought outside content into the Planner turn in
+	// flight ("巡检", "会前简报"; agent.Agent.OutsideTurn), "" for nothing;
+	// that turn runs only its promise and ask blocks, its dispatch and
+	// status blocks are refused (docs/rfc/planner.md §15.6 安全). nil
+	// refuses none.
+	Outside func() string
+	// TellRefused sends the receipt of the blocks refused that way, as a
+	// turn held to the same limits (agent.Agent.TellRefused); nil sends
+	// none.
+	TellRefused func(text string) error
 	// Ctx bounds dispatches' spawns; nil is Background.
 	Ctx context.Context
 	// Now is the wall clock; nil is time.Now.
@@ -91,12 +101,19 @@ type Runner struct {
 	// doneTold is the tasks whose done block got the reminder of the
 	// promises citing them; only the handling goroutine touches it.
 	doneTold map[string]bool
+	// refusalTold is set once the Planner got a refusal receipt, until a
+	// reply from a turn of its own: a refusal receipt's turn refused again
+	// is not told again, or the two would go round. Only the handling
+	// goroutine touches it.
+	refusalTold bool
 }
 
 // reply is one Planner turn's result text and the span its turn ran in.
+// outside names what brought outside content into the turn, "" for nothing.
 type reply struct {
 	text     string
 	from, to time.Time
+	outside  string
 }
 
 type askCard struct {
@@ -133,8 +150,13 @@ func (r *Runner) Result(key, text string) {
 	if key != r.cfg.Planner {
 		return
 	}
+	// Read now: the turn is still in flight while its result arrives.
+	outside := ""
+	if r.cfg.Outside != nil {
+		outside = r.cfg.Outside()
+	}
 	r.mu.Lock()
-	rep := reply{text: text, from: r.last, to: r.cfg.Now()}
+	rep := reply{text: text, from: r.last, to: r.cfg.Now(), outside: outside}
 	r.last = rep.to
 	r.mu.Unlock()
 	if r.cfg.Reports == nil && !strings.Contains(text, Fence) {
@@ -169,6 +191,7 @@ func (r *Runner) handle(rep reply) {
 		}
 	}()
 	statused := map[string]string{} // task or promise → the state a block set
+	var refused []string            // the blocks an outside turn may not run
 	for _, b := range Parse(rep.text) {
 		if b.Err != nil {
 			r.refuse(b, b.Err)
@@ -176,6 +199,8 @@ func (r *Runner) handle(rep reply) {
 		}
 		var err error
 		switch {
+		case rep.outside != "" && (b.Dispatch != nil || b.Status != nil):
+			refused = append(refused, r.refuseOutside(b, rep.outside))
 		case b.Dispatch != nil:
 			r.dispatch(*b.Dispatch)
 		case b.Promise != nil:
@@ -190,6 +215,7 @@ func (r *Runner) handle(rep reply) {
 			r.note("动作块没有执行：" + err.Error())
 		}
 	}
+	r.tellRefused(rep.outside, refused)
 	r.checkReports(rep, statused)
 }
 
@@ -320,6 +346,46 @@ func (r *Runner) dispatch(d Dispatch) {
 	}
 	r.note("已派出：" + d.Title + "（" + key + "）")
 	r.tell("已派出：" + d.Title + "（" + key + "），工作区 " + wsName + "。它的跨会话名字是「" + d.Title + "」（重名时 CC 会加短 ID，以 ListAgents 为准）。用 notify_when_idle 订阅它，做完后在对话里告诉用户结果。")
+}
+
+// refuseOutside answers a dispatch or status block from a turn outside
+// content brought in (by): a line in a mail could pose as the user asking
+// for work, or saying a task is done, so the gateway refuses it by the
+// turn's source, not by judging the text. The user asking in the
+// conversation is a turn of their own. It returns the block as the
+// receipt names it.
+func (r *Runner) refuseOutside(b Block, by string) string {
+	if d := b.Dispatch; d != nil {
+		r.note(by + "触发的回合不能派活：「" + d.Title + "」没有派出")
+		return "dispatch「" + d.Title + "」没有派出"
+	}
+	s := *b.Status
+	name := s.Task
+	if r.cfg.Tasks != nil {
+		if title, ok := r.cfg.Tasks.Title(s.Task); ok {
+			name = textutil.TruncateRunes(title, 60)
+		}
+	}
+	r.note(by + "触发的回合不能改任务状态：「" + name + "」没有标为 " + s.State)
+	return "status「" + s.Task + " → " + s.State + "」没有执行"
+}
+
+// tellRefused sends the Planner the receipt of what an outside turn's
+// reply was refused, once for a run of such turns (refusalTold).
+func (r *Runner) tellRefused(by string, refused []string) {
+	if by == "" {
+		r.refusalTold = false
+		return
+	}
+	if len(refused) == 0 || r.refusalTold || r.cfg.TellRefused == nil {
+		return
+	}
+	r.refusalTold = true
+	text := "这一轮由" + by + "触发，网关只执行 promise 与 ask：" + strings.Join(refused, "；") +
+		"。需要派活或改任务状态，就在对话里向用户说明，等用户发消息让你做。"
+	if err := r.cfg.TellRefused(text); err != nil {
+		slog.Warn("planner actions: refusal receipt not sent to the Planner", "err", err)
+	}
 }
 
 // spawn records a new task: session's sidecar and starts it in the

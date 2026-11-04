@@ -28,6 +28,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/brief"
 	"github.com/naozhi/naozhi/internal/planner/promise"
+	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/project"
@@ -308,6 +309,17 @@ func main() {
 		Journal:    plannerState.Journal,
 		Promises:   wireup.PlannerPromises(promises),
 	})
+	// The Planner's patrol (§15.6): weekday scout runs over the mail, Slack
+	// and Asana MCP servers, read tools only; new findings wake the Planner.
+	// It runs whether or not the Planner does, keeping them on disk.
+	scouter := scout.New(scout.Config{
+		Layout:    sessionLayout,
+		MCPConfig: mcpConfigFile,
+		Session:   wireup.ScoutSession(router),
+		Wake:      wireup.ScoutWake(plannerAgent),
+		Journal:   plannerState.Journal,
+		Beats:     beats,
+	})
 	// Attachments live under each workspace root, usually outside the state dir
 	// checked above; walking every root must not hold up startup.
 	go warnIfAttachmentsLarge(workspaceRootLister{router: router, projectMgr: projectMgr}, attachmentGCMode(cfg))
@@ -497,6 +509,7 @@ func main() {
 		Outputs:          activities,
 		Notes:            notes,
 		Planner:          plannerAgent,
+		Scout:            scouter,
 		Briefs:           briefer,
 		Health:           func() health.Snapshot { return healthMon.Snapshot() },
 		Workspaces:       plannerState.Workspaces,
@@ -585,6 +598,7 @@ func main() {
 			Discovered:  srv.DiscoveredSessions,
 			EventLogDir: eventLogDir,
 			Sidecars:    sidecars,
+			Scout:       scouter,
 		}.Collect,
 		Journal:    plannerState.Journal,
 		Workspaces: plannerState.Workspaces,
@@ -607,22 +621,30 @@ func main() {
 	// results; a dispatch starts a task: session at once (D88), and a task left
 	// 进行中 after it reported gets the Planner a receipt.
 	actions := action.New(action.Config{
-		Planner:    agent.Key,
-		Inbox:      notifier,
-		Promises:   promises,
-		Workspaces: plannerState.Workspaces,
-		Sessions:   sidecars,
-		Tasks:      tasks,
-		Spawn:      wireup.TaskSpawner{Router: router, Opts: taskOpts, Submit: srv.SubmitPlanner}.Spawn,
-		Note:       plannerAgent.Note,
-		Tell:       plannerAgent.Tell,
-		Reports:    wireup.PlannerReports(router),
-		Ctx:        ctx,
+		Planner:     agent.Key,
+		Inbox:       notifier,
+		Promises:    promises,
+		Workspaces:  plannerState.Workspaces,
+		Sessions:    sidecars,
+		Tasks:       tasks,
+		Spawn:       wireup.TaskSpawner{Router: router, Opts: taskOpts, Submit: srv.SubmitPlanner}.Spawn,
+		Note:        plannerAgent.Note,
+		Tell:        plannerAgent.Tell,
+		Reports:     wireup.PlannerReports(router),
+		Outside:     plannerAgent.OutsideTurn,
+		TellRefused: plannerAgent.TellRefused,
+		Ctx:         ctx,
 	})
-	router.SetResultSink(actions.Result)
+	// The result is judged by the turn's sources before the ledger lets go
+	// of a request carried over from the last run.
+	router.SetResultSink(func(key, text string) {
+		actions.Result(key, text)
+		srv.PlannerResult(key)
+	})
 	go actions.Run(ctx)
 	go sidecars.Run(ctx, func(key string) bool { return router.SessionFor(key) != nil })
 	go briefer.Run(ctx)
+	go scouter.Run(ctx)
 
 	// Upstream connector: this node connects to a primary.
 	if cfg.Upstream != nil {
@@ -693,6 +715,9 @@ func main() {
 					scheduler.StopContext(schedStopCtx)
 					schedStopCancel()
 				}},
+				// The scout beside the scheduler, for the same reason: its run's
+				// session calls into the router. A run cut short leaves no record.
+				{name: "scout", run: scouter.Stop},
 				// ShutdownComplete closes after srv.Shutdown's 30s drain, i.e. after
 				// every in-flight handler finished, so router.Shutdown never races a
 				// half-cleaned session map. Already closed on server-exit paths.

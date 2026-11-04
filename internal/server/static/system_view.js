@@ -214,6 +214,7 @@ function healthTarget(u) {
 // dashboard knows it, else a readable form of the unit ID.
 function healthUnitName(u, target) {
   if (u.id === 'planner:main') return 'Planner';
+  if (u.id === 'sys:scout') return '巡检';
   if (target && target.title) return target.title;
   if (u.kind === 'remote') return u.id.slice(u.id.indexOf('/') + 1);
   if (u.kind === 'sysession') return u.id.replace(/^sys:/, '');

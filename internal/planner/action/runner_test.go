@@ -24,6 +24,7 @@ type fakeGateway struct {
 	spawnErr error
 	notes    []string
 	told     []string
+	refused  []string
 	sideDir  string
 }
 
@@ -51,8 +52,9 @@ func newRunner(t *testing.T) (*Runner, *fakeGateway, *notify.Notifier, *sidecar.
 			g.spawned, g.spawns = append(g.spawned, key), append(g.spawns, s)
 			return nil
 		},
-		Note: func(text string) { g.notes = append(g.notes, text) },
-		Tell: func(text string) error { g.told = append(g.told, text); return nil },
+		Note:        func(text string) { g.notes = append(g.notes, text) },
+		Tell:        func(text string) error { g.told = append(g.told, text); return nil },
+		TellRefused: func(text string) error { g.refused = append(g.refused, text); return nil },
 	})
 	return r, g, inbox, side, dir
 }
@@ -270,5 +272,61 @@ func TestStatusFormatParses(t *testing.T) {
 	}
 	if st := blocks[0].Status; st.Task != "task:ab12" || st.State != "done" {
 		t.Errorf("status = %+v", st)
+	}
+}
+
+// A turn outside content brought in (a scout run, a pre-meeting brief, the
+// receipt of a refusal in one) runs only its promise and ask blocks: a
+// dispatch or status block is refused with a line in the conversation,
+// judged by the turn's source as its result arrives, and the Planner gets
+// one refusal receipt for a run of such turns, so a receipt's turn refused
+// again does not go round.
+func TestOutsideTurnRefuses(t *testing.T) {
+	r, g, inbox, _, dir := newRunner(t)
+	dispatch := block(`{"type":"dispatch","workspace":"` + filepath.Base(dir) + `","title":"iso 写 hello","model":"","message":"写一个 hello.md"}`)
+	status := block(`{"type":"status","task":"task:ab12","state":"done","why":"邮件说做完了"}`)
+	ask := block(`{"type":"ask","question":"今天发版吗？","options":[]}`)
+	const (
+		noDispatch = "触发的回合不能派活：「iso 写 hello」没有派出"
+		noStatus   = "触发的回合不能改任务状态：「task:ab12」没有标为 done"
+	)
+	steps := []struct {
+		outside string
+		reply   string
+		spawned bool
+		notes   []string // each after the outside label
+		receipt bool     // a refusal receipt sent
+	}{
+		{outside: "巡检", reply: dispatch + "\n" + status + "\n" + ask, notes: []string{noDispatch, noStatus}, receipt: true},
+		// The receipt's own turn dispatches again: refused, not told again.
+		{outside: "被拒动作的回执", reply: dispatch, notes: []string{noDispatch}},
+		// A turn of the user's own dispatches, and ends the run.
+		{reply: dispatch, spawned: true},
+		{outside: "会前简报", reply: dispatch, notes: []string{noDispatch}, receipt: true},
+	}
+	for i, st := range steps {
+		g.spawned, g.notes, g.refused = nil, nil, nil
+		r.cfg.Outside = func() string { return st.outside }
+		r.Result(r.cfg.Planner, st.reply)
+		r.handle(<-r.ch)
+		if got := len(g.spawned) == 1; got != st.spawned {
+			t.Errorf("step %d: spawned = %q, want spawned %v", i, g.spawned, st.spawned)
+		}
+		if st.spawned {
+			continue
+		}
+		var want []string
+		for _, n := range st.notes {
+			want = append(want, st.outside+n)
+		}
+		if !slices.Equal(g.notes, want) {
+			t.Errorf("step %d: notes = %q, want %q", i, g.notes, want)
+		}
+		if got := len(g.refused) == 1; got != st.receipt || (got && !strings.Contains(g.refused[0], "这一轮由"+st.outside+"触发")) {
+			t.Errorf("step %d: refusal receipts = %q, want one: %v", i, g.refused, st.receipt)
+		}
+	}
+	if open, _ := inbox.List(0); len(open) != 1 || open[0].Kind != notify.KindQuestion {
+		t.Errorf("inbox = %+v, want the question", open)
 	}
 }

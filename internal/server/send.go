@@ -131,6 +131,9 @@ func (e *sendEngine) prepareSend(p sendParams) (cmd turn.Cmd, reset bool, err er
 	if sessionkey.IsTaskKey(key) && e.router.SessionFor(key) == nil {
 		return cmd, false, errTaskNamespace
 	}
+	if sessionkey.IsScoutKey(key) {
+		return cmd, false, errScoutNamespace
+	}
 
 	// /clear and /new without an argument reset (the CLI built-in does not
 	// work in stream-json); "/new <arg>" is sent as text. The workspace

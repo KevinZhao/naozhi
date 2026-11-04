@@ -84,6 +84,9 @@ type SpawnOverlay struct {
 	// sessions see in ListAgents.
 	Name            string `json:"name,omitempty"`
 	StrictMCPConfig bool   `json:"strict_mcp_config,omitempty"`
+	// MCPConfig is the session's own --mcp-config file, in place of
+	// cli.mcp_config.
+	MCPConfig string `json:"mcp_config,omitempty"`
 	// CrossSessionInbound and the permission rules are settings keys, not
 	// flags: the CLI takes one --settings, so a session carrying any spawns on
 	// a per-session settings file (base settings plus these) at a path

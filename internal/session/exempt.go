@@ -71,6 +71,8 @@ func exemptCapFor(kind string) int {
 		return maxSysExempt
 	case "planner":
 		return maxPlannerExempt
+	case "scout":
+		return maxScoutExempt
 	default:
 		return maxExemptSessions
 	}

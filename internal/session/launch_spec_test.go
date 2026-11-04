@@ -35,6 +35,8 @@ func TestLaunchSpecDrift(t *testing.T) {
 		{"auto", AgentOpts{PermissionMode: "auto"}, []string{"--permission-mode", "auto"}},
 		{"name", AgentOpts{Name: "planner"}, []string{"--name", "planner"}},
 		{"strict mcp", AgentOpts{StrictMCPConfig: true}, []string{"--strict-mcp-config"}},
+		{"own mcp config", AgentOpts{StrictMCPConfig: true, MCPConfig: "/data/scout-mcp.json"},
+			[]string{"--strict-mcp-config", "--mcp-config", "/data/scout-mcp.json"}},
 		{"settings overrides", AgentOpts{CrossSessionInbound: "hold", PermissionsDeny: []string{"Bash"}}, []string{"--settings"}},
 		{"planner shape", AgentOpts{
 			Tools: []string{"Read", "Grep", "Glob", "ListAgents", "SendMessage"}, PermissionMode: "dontAsk",
@@ -67,7 +69,7 @@ func TestLaunchSpecDrift(t *testing.T) {
 			}
 
 			bare := *state.SpawnOverlay
-			bare.Tools, bare.PermissionMode, bare.Name, bare.StrictMCPConfig = nil, "", "", false
+			bare.Tools, bare.PermissionMode, bare.Name, bare.StrictMCPConfig, bare.MCPConfig = nil, "", "", false, ""
 			bare.CrossSessionInbound, bare.PermissionsDeny, bare.PermissionsAllow = "", nil, nil
 			state.SpawnOverlay = &bare
 			if drift, _, _ := driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, s); !drift {
@@ -300,6 +302,21 @@ func TestTakeoverKeepsTranscriptName(t *testing.T) {
 		if got.ResumeID != sid || got.Name != tc.want || got.SpawnOverlay.Name != tc.want || s.CLISessionName() != tc.want {
 			t.Errorf("%s: resume %q, name %q, overlay %q, session %q; want %q", tc.name,
 				got.ResumeID, got.Name, got.SpawnOverlay.Name, s.CLISessionName(), tc.want)
+		}
+	}
+}
+
+// The Planner and the scout sessions load no project settings: their rules
+// are the gateway's alone.
+func TestLaunchSpecProjectSettings(t *testing.T) {
+	for key, want := range map[string]bool{
+		"planner:main":               false,
+		"scout:20261105T100000-ab12": false,
+		"dashboard:direct:x:general": true,
+		"task:0a1b2c3d4e5f":          true,
+	} {
+		if got := (&spawnConfig{}).launchSpecFor(key, shim.SpawnOverlay{}).ProjectSettings; got != want {
+			t.Errorf("%s: ProjectSettings = %v, want %v", key, got, want)
 		}
 	}
 }

@@ -30,9 +30,11 @@ func (c *spawnConfig) launchSpecFor(key string, ov shim.SpawnOverlay) LaunchSpec
 		PermissionMode:  ov.PermissionMode,
 		Name:            ov.Name,
 		StrictMCPConfig: ov.StrictMCPConfig,
+		MCPConfigFile:   ov.MCPConfig,
 		// planner:main works in the state root and must stay read-only with
-		// no MCP (RFC planner §4.1), so it gets no project sources.
-		ProjectSettings: key != sessionkey.PlannerMainKey,
+		// no MCP (RFC planner §4.1), so it gets no project sources; nor does
+		// a scout session, whose rules are its own settings alone (§15.6).
+		ProjectSettings: key != sessionkey.PlannerMainKey && !sessionkey.IsScoutKey(key),
 	}
 	if hasSettingsOverrides(ov) && c.sessionSettingsDir != "" {
 		ls.SettingsFile = filepath.Join(c.sessionSettingsDir, persist.KeyHash(key)+".json")

@@ -225,7 +225,7 @@ func (h *Handlers) loadHistorySessionsCtx(ctx context.Context) []discovery.Recen
 	// Hide cron-spawned and sys-session JSONLs (both have their own UI; the sys
 	// workdir lives under ~/.claude/projects and would leak AutoTitler prompts).
 	// KnownSessionIDs is O(jobs × 200), so snapshot it once per scan.
-	filter := historyFilter{skipWorkspace: h.deps.SysWorkDir}
+	filter := historyFilter{skipWorkspaces: []string{h.deps.SysWorkDir, h.deps.ScoutWorkDir}}
 	if h.deps.CronSessions != nil {
 		filter.skipSessions = h.deps.CronSessions.KnownSessionIDs()
 	}

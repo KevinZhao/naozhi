@@ -17,6 +17,9 @@ func (h *Handlers) SetClaudeDirForTest(dir string) { h.deps.ClaudeDir = dir }
 // SetSysWorkDirForTest swaps the sysWorkDir.
 func (h *Handlers) SetSysWorkDirForTest(dir string) { h.deps.SysWorkDir = dir }
 
+// SetScoutWorkDirForTest swaps the scoutWorkDir.
+func (h *Handlers) SetScoutWorkDirForTest(dir string) { h.deps.ScoutWorkDir = dir }
+
 // SetAllowedRootForTest swaps the allowedRoot the workspace validator gates
 // against. internal/server's route-level tests point it at a temp dir so
 // validateWorkspace admits a fixture workspace.

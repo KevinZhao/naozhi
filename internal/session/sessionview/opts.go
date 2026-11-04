@@ -39,10 +39,14 @@ type AgentOpts struct {
 	// same-named fields there); zero values keep today's spawn. Name "" gets
 	// the session label, else a key-derived short name; a resume keeps the
 	// name its transcript holds.
-	Tools               []string
-	PermissionMode      string
-	Name                string
-	StrictMCPConfig     bool
+	Tools           []string
+	PermissionMode  string
+	Name            string
+	StrictMCPConfig bool
+	// MCPConfig is an absolute path passed as --mcp-config in place of the
+	// router-wide cli.mcp_config, also under StrictMCPConfig: a session that
+	// gets only the servers in it (the scout, docs/rfc/planner.md §15.6).
+	MCPConfig           string
 	CrossSessionInbound string
 	PermissionsDeny     []string
 	PermissionsAllow    []string

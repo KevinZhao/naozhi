@@ -34,7 +34,7 @@ func TestMergePartialHistory(t *testing.T) {
 		{SessionID: "new", LastActive: now - 60, LastPrompt: "fresh", Workspace: "/w"},
 	}
 	exclude := map[string]bool{"now-live": true}
-	filter := historyFilter{skipWorkspace: "/sys", skipSessions: map[string]struct{}{"cron": {}}}
+	filter := historyFilter{skipWorkspaces: []string{"/sys"}, skipSessions: map[string]struct{}{"cron": {}}}
 
 	got := mergePartialHistory(partial, prev, exclude, filter, cutoff, 0)
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/planner/action"
+	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/usermsg"
@@ -93,8 +94,9 @@ func stopReceipt(key, title string, promises []string) string {
 type TaskSpawner struct {
 	Router *session.Router
 	Opts   TaskOpts
-	// Submit runs the first message as a turn (Server.SubmitPlanner).
-	Submit func(key, text string, opts session.AgentOpts, done func(string, error)) (bool, error)
+	// Submit runs the first message as a turn (Server.SubmitPlanner); a
+	// task: turn has no source.
+	Submit func(key string, src agent.Source, text string, opts session.AgentOpts, done func(string, error)) (bool, error)
 }
 
 // Spawn is action.Config.Spawn. A start that fails is said in the user's
@@ -106,7 +108,7 @@ func (t TaskSpawner) Spawn(ctx context.Context, key string, s action.Spawn) erro
 		return spawnError(err, key, t.Router.MaxProcs())
 	}
 	t.Router.SetUserLabel(key, s.Title)
-	_, err := t.Submit(key, s.Message, opts, nil)
+	_, err := t.Submit(key, "", s.Message, opts, nil)
 	return err
 }
 

@@ -1,11 +1,16 @@
 package server
 
 import (
+	"context"
 	"errors"
+	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // TestPrepareSend_RefusesPlannerNamespace: a dashboard or relayed send must
@@ -26,6 +31,83 @@ func TestPrepareSend_RefusesPlannerNamespace(t *testing.T) {
 		if _, _, err := e.prepareSend(sendParams{Key: "task:0a1b2c3d4e5f", Text: "hi"}); !errors.Is(err, tc.want) {
 			t.Errorf("prepareSend(task:, existing=%v) err = %v, want %v", tc.existing, err, tc.want)
 		}
+	}
+}
+
+// TestPrepareSend_RefusesScoutNamespace: only a scout run talks to its
+// session.
+func TestPrepareSend_RefusesScoutNamespace(t *testing.T) {
+	e := &sendEngine{router: taskSendRouter{existing: true}}
+	if _, _, err := e.prepareSend(sendParams{Key: "scout:20261105T100000-ab12", Text: "hi"}); !errors.Is(err, errScoutNamespace) {
+		t.Errorf("prepareSend(scout:) err = %v, want errScoutNamespace", err)
+	}
+}
+
+// TestPlannerTurnSources: each request counts from its Begin to its own
+// Finish, so requests running side by side (passthrough's detached turns)
+// are all counted until each finishes; an observer took none.
+func TestPlannerTurnSources(t *testing.T) {
+	ctx := context.Background()
+	s := &Server{hub: &Hub{engine: &sendEngine{}}}
+	turns := &s.hub.engine.plannerTurns
+	origin := func(src agent.Source) *plannerOrigin {
+		return &plannerOrigin{key: agent.Key, src: src, turns: turns, notify: nopNotifier{}}
+	}
+	user, scout, receipt := origin(agent.SourceUser), origin(agent.SourceScout), origin(agent.SourceReceipt)
+	steps := []struct {
+		name string
+		do   func()
+		want []agent.Source
+	}{
+		{"user's turn begins", func() { user.Begin(ctx, turn.TurnInfo{Role: turn.RoleHead}) }, []agent.Source{agent.SourceUser}},
+		{"a scout wake runs beside it", func() { scout.Begin(ctx, turn.TurnInfo{Role: turn.RoleHead}) },
+			[]agent.Source{agent.SourceScout, agent.SourceUser}},
+		{"an observer takes none", func() { receipt.Begin(ctx, turn.TurnInfo{Role: turn.RoleObserver}) },
+			[]agent.Source{agent.SourceScout, agent.SourceUser}},
+		// The user's turn ends first; the scout's still runs on the CLI.
+		{"user's turn finishes", func() { user.Finish(ctx, turn.Outcome{Stage: turn.StageDone}) }, []agent.Source{agent.SourceScout}},
+		{"scout's turn finishes", func() { scout.Finish(ctx, turn.Outcome{Stage: turn.StageDone}) }, nil},
+	}
+	for _, st := range steps {
+		st.do()
+		if got := s.PlannerTurnSources(agent.Key); !slices.Equal(got, st.want) {
+			t.Errorf("%s: sources = %q, want %q", st.name, got, st.want)
+		}
+		if got := s.PlannerTurnSources("task:0a1b2c3d4e5f"); len(got) != 0 {
+			t.Errorf("%s: other key = %q, want none", st.name, got)
+		}
+	}
+}
+
+// TestPlannerTurnsCarriedOver: a request in flight when the engine shut
+// down stays on disk, and the next run counts it until a result answers it.
+func TestPlannerTurnsCarriedOver(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "planner", "turns.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	var before plannerTurns
+	before.load(ctx, path)
+	o := &plannerOrigin{key: agent.Key, src: agent.SourceScout, turns: &before, notify: nopNotifier{}}
+	o.Begin(ctx, turn.TurnInfo{Role: turn.RoleHead})
+	cancel() // shutdown: the shim keeps the turn, the Send gives up
+	o.Finish(ctx, turn.Outcome{Err: context.Canceled})
+
+	var after plannerTurns
+	after.load(context.Background(), path)
+	if got := after.sources(agent.Key); !slices.Equal(got, []agent.Source{agent.SourceScout}) {
+		t.Fatalf("carried over = %q, want [scout]", got)
+	}
+	after.resulted("task:0a1b2c3d4e5f")
+	if got := after.sources(agent.Key); len(got) != 1 {
+		t.Errorf("another key's result answered it: %q", got)
+	}
+	after.resulted(agent.Key)
+	if got := after.sources(agent.Key); len(got) != 0 {
+		t.Errorf("after its result = %q, want none", got)
+	}
+	var again plannerTurns
+	again.load(context.Background(), path)
+	if got := again.sources(agent.Key); len(got) != 0 {
+		t.Errorf("answered request carried over again: %q", got)
 	}
 }
 

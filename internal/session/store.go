@@ -86,6 +86,10 @@ func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 	if sessionkey.IsSysKey(s.key) {
 		return storeEntry{}, false
 	}
+	// A scout session lives for one run and is reset when it ends.
+	if sessionkey.IsScoutKey(s.key) {
+		return storeEntry{}, false
+	}
 	// getSessionID avoids a data race with concurrent Send; fall back to the
 	// process's SessionID (set on system/init, before Send propagates it).
 	// Snapshot loadProcess() once: a second call could observe a fresh process

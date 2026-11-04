@@ -12,6 +12,9 @@ type LaunchSpec struct {
 	PermissionMode  string
 	Name            string
 	StrictMCPConfig bool
+	// MCPConfigFile is the session's own --mcp-config, in place of the
+	// router-wide one; "" keeps that.
+	MCPConfigFile string
 	// SettingsFile is the per-session settings path, "" when the session has
 	// no settings overrides.
 	SettingsFile string
@@ -39,6 +42,9 @@ func ArgvSpawnOptions(model, effort, debugFile, systemPrompt string, extraArgs [
 	// session gets none: it is meant to have no MCP servers at all.
 	if launch.StrictMCPConfig {
 		mcpConfigFile = ""
+	}
+	if launch.MCPConfigFile != "" {
+		mcpConfigFile = launch.MCPConfigFile
 	}
 	return cli.SpawnOptions{
 		Model:              model,

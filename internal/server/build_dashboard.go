@@ -9,6 +9,7 @@ package server
 import (
 	"github.com/naozhi/naozhi/internal/dashboard/ext/memory"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/scratch"
+	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/turn"
 )
 
@@ -89,16 +90,17 @@ func (s *Server) buildWSStack(w *wiring) *Hub {
 	w.bcast = newWSBroadcaster(newSubscriberRegistry())
 	w.turns = turn.New(w.queue, turnSender{router: w.router, notify: w.bcast, prompts: w.scheduler})
 	w.engine = newSendEngine(sendEngineOpts{
-		Turns:       w.turns,
-		Ctx:         s.appCtx,
-		Router:      w.router,
-		Resolver:    w.resolver,
-		Agents:      w.agents,
-		ProjectMgr:  s.projectMgr,
-		ScratchPool: s.scratchPool,
-		AllowedRoot: w.allowedRoot,
-		TaskOpts:    w.taskOpts,
-		Notify:      w.bcast,
+		Turns:            w.turns,
+		Ctx:              s.appCtx,
+		Router:           w.router,
+		Resolver:         w.resolver,
+		Agents:           w.agents,
+		ProjectMgr:       s.projectMgr,
+		ScratchPool:      s.scratchPool,
+		AllowedRoot:      w.allowedRoot,
+		TaskOpts:         w.taskOpts,
+		Notify:           w.bcast,
+		PlannerTurnsPath: datadir.FromRoot(w.stateDir).PlannerTurnsPath(),
 	})
 	return NewHub(HubOptions{
 		Router:    w.router,
