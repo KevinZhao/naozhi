@@ -99,7 +99,16 @@ type Event struct {
 type Output struct {
 	Findings []Finding `json:"findings"`
 	Cursors  Cursors   `json:"cursors"`
-	Calendar []Event   `json:"calendar"`
+	// Calendar is nil when the session did not read it (the key left out).
+	Calendar *[]Event `json:"calendar"`
+}
+
+// events is the calendar read, none when it was not.
+func (o Output) events() []Event {
+	if o.Calendar == nil {
+		return nil
+	}
+	return *o.Calendar
 }
 
 // errNoOutput is a reply with no JSON object in it.
@@ -108,7 +117,8 @@ var errNoOutput = errors.New("reply holds no JSON object")
 // parseOutput reads a scout session's reply strictly: one JSON object,
 // optionally inside a single ```json fence, with no unknown field and no
 // trailing data; every finding names a known source and kind, an ID and a
-// title, and every event an ID and its start and end. Anything else fails
+// title, and every event an ID and its start and end; the calendar key is
+// left out when the session did not read it. Anything else fails
 // the run, which then leaves the cursors where they were.
 func parseOutput(reply string) (Output, error) {
 	text := strings.TrimSpace(reply)
@@ -135,8 +145,8 @@ func parseOutput(reply string) (Output, error) {
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return Output{}, errors.New("data after the JSON object")
 	}
-	if len(out.Findings) > maxFindings || len(out.Calendar) > maxEvents {
-		return Output{}, fmt.Errorf("%d findings, %d events: over %d / %d", len(out.Findings), len(out.Calendar), maxFindings, maxEvents)
+	if len(out.Findings) > maxFindings || len(out.events()) > maxEvents {
+		return Output{}, fmt.Errorf("%d findings, %d events: over %d / %d", len(out.Findings), len(out.events()), maxFindings, maxEvents)
 	}
 	for i := range out.Findings {
 		f := &out.Findings[i]
@@ -164,8 +174,8 @@ func parseOutput(reply string) (Output, error) {
 			*s = textutil.TruncateRunes(strings.TrimSpace(*s), fieldRunes)
 		}
 	}
-	for i := range out.Calendar {
-		e := &out.Calendar[i]
+	for i := range out.events() {
+		e := &(*out.Calendar)[i]
 		if strings.TrimSpace(e.ID) == "" || e.Start.IsZero() || e.End.IsZero() {
 			return Output{}, fmt.Errorf("event %d: no id, start or end", i)
 		}

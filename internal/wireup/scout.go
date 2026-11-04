@@ -4,10 +4,12 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/monitor/health"
+	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -32,6 +34,21 @@ func ScoutSession(router *session.Router) scout.Session {
 			err = errors.New("empty reply")
 		}
 		return res.Text, tools, err
+	}
+}
+
+// ScoutWake is scout.Config.Wake over the Planner: a scout run's findings
+// as a turn from agent.SourceScout. The Planner off or stopped, or a block
+// it will never take, is scout.ErrPlannerOff, so the findings count as
+// seen; anything else (not started yet, busy, closing) is worth another
+// try at the next run.
+func ScoutWake(a *agent.Agent) func(block string) error {
+	return func(block string) error {
+		err := a.Wake(agent.SourceScout, block)
+		if errors.Is(err, agent.ErrOff) || errors.Is(err, agent.ErrStopped) || errors.Is(err, agent.ErrTooLong) {
+			return fmt.Errorf("%w: %w", scout.ErrPlannerOff, err)
+		}
+		return err
 	}
 }
 

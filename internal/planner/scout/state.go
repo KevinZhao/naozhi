@@ -79,7 +79,8 @@ type seenFile struct {
 }
 
 type calendarFile struct {
-	V      int       `json:"v"`
+	V int `json:"v"`
+	// At is when the calendar was read.
 	At     time.Time `json:"at"`
 	Events []Event   `json:"events"`
 }
@@ -119,9 +120,10 @@ func (st store) saveCursors(c Cursors, now time.Time) error {
 	return st.write("cursors.json", cursorsFile{V: 1, Cursors: c, Updated: now})
 }
 
-// markSeen records findings as seen at now and returns those not seen in
-// the last seenRetention, in order; older entries are dropped.
-func (st store) markSeen(findings []Finding, now time.Time) ([]Finding, error) {
+// fresh returns the findings not seen in the last seenRetention, in order,
+// and the seen table with them added at now and older entries dropped, for
+// saveSeen once they reached the Planner.
+func (st store) fresh(findings []Finding, now time.Time) ([]Finding, seenFile) {
 	var f seenFile
 	st.read("seen.json", &f)
 	seen := map[string]bool{}
@@ -141,23 +143,34 @@ func (st store) markSeen(findings []Finding, now time.Time) ([]Finding, error) {
 		fresh = append(fresh, x)
 		kept = append(kept, seenEntry{Source: x.Source, ID: x.ID, Kind: x.Kind, At: now})
 	}
-	return fresh, st.write("seen.json", seenFile{V: 1, Seen: kept})
+	return fresh, seenFile{V: 1, Seen: kept}
 }
 
-// saveCalendar keeps the events of the next calendarWindow, by start.
-func (st store) saveCalendar(events []Event, now time.Time) (int, error) {
+func (st store) saveSeen(f seenFile) error { return st.write("seen.json", f) }
+
+// saveCalendar keeps the events of the next calendarWindow, by start. nil
+// events is a run that did not read the calendar: the cache keeps what it
+// had, less the events already over.
+func (st store) saveCalendar(events *[]Event, now time.Time) (int, error) {
+	var f calendarFile
+	if events == nil {
+		st.read("calendar.json", &f)
+		events = &f.Events
+	} else {
+		f.At = now
+	}
 	var keep []Event
-	for _, e := range events {
+	for _, e := range *events {
 		if e.End.After(now) && e.Start.Before(now.Add(calendarWindow)) {
 			keep = append(keep, e)
 		}
 	}
 	slices.SortStableFunc(keep, func(a, b Event) int { return a.Start.Compare(b.Start) })
-	return len(keep), st.write("calendar.json", calendarFile{V: 1, At: now, Events: keep})
+	return len(keep), st.write("calendar.json", calendarFile{V: 1, At: f.At, Events: keep})
 }
 
-// Calendar is the cached calendar of the next 24 hours as of the last
-// good run.
+// Calendar is the cached calendar of the next 24 hours as of the last run
+// that read it.
 func (st store) Calendar() []Event {
 	var f calendarFile
 	st.read("calendar.json", &f)

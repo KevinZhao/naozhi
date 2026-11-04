@@ -2,6 +2,7 @@ package session
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -163,15 +164,15 @@ type sessionListMultiResp struct {
 type CronView = cronview.CronView
 
 // historyFilter is the discovery.RecentSessionsFilter loadHistorySessions
-// constructs each scan.  Snapshots the cron-known set + sys workspace
+// constructs each scan.  Snapshots the cron-known set + sys workspaces
 // once per call so the in-loop predicate is O(1) per session.
 type historyFilter struct {
-	skipWorkspace string              // sys-sessions absolute path; "" disables
-	skipSessions  map[string]struct{} // cron known IDs; nil disables. READ-ONLY.
+	skipWorkspaces []string            // sys-sessions and scout absolute paths; "" entries skip nothing
+	skipSessions   map[string]struct{} // cron known IDs; nil disables. READ-ONLY.
 }
 
 func (f historyFilter) SkipWorkspace(ws string) bool {
-	return f.skipWorkspace != "" && ws == f.skipWorkspace
+	return ws != "" && slices.Contains(f.skipWorkspaces, ws)
 }
 
 func (f historyFilter) SkipSessionID(sid string) bool {
@@ -273,10 +274,14 @@ type Deps struct {
 	// SysWorkDir is sysession's transient Runner workspace; when non-empty its
 	// JSONLs are hidden from the history panel (AutoTitler otherwise leaks
 	// prompt fragments into "recent sessions").
-	SysWorkDir  string
-	ClaudeDir   string
-	AllowedRoot string
-	Agents      map[string]sessionpkg.AgentOpts
+	SysWorkDir string
+	// ScoutWorkDir is the scout sessions' workspace, hidden the same way:
+	// their transcripts hold mail and Slack text, and resumed they would be
+	// ordinary sessions with every tool.
+	ScoutWorkDir string
+	ClaudeDir    string
+	AllowedRoot  string
+	Agents       map[string]sessionpkg.AgentOpts
 	// AgentIDs is precomputed once by the wiring side (Agents is immutable
 	// after startup).
 	AgentIDs   []string

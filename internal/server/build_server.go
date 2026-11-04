@@ -17,6 +17,7 @@ import (
 	dashplanner "github.com/naozhi/naozhi/internal/dashboard/ext/planner"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/uisettings"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/workflows"
+	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
@@ -298,6 +299,7 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 		Scheduler:        w.scheduler,
 		CronSessions:     w.scheduler,
 		SysWorkDir:       opts.Sysession.WorkDir,
+		ScoutWorkDir:     datadir.FromRoot(opts.StateDir).PlannerScoutWorkDir(),
 		ClaudeDir:        s.claudeDir,
 		AllowedRoot:      opts.AllowedRoot,
 		Agents:           w.agents,

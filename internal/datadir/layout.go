@@ -154,6 +154,11 @@ func (l Layout) PlannerWorkDir() string { return l.Join("planner", "main") }
 // and the day of its last shift change (<root>/planner/agent.json).
 func (l Layout) PlannerAgentPath() string { return l.Join("planner", "agent.json") }
 
+// PlannerTurnsPath is the sources of the Planner requests in flight, kept
+// so a turn a shim carries over a restart is judged by them
+// (<root>/planner/turns.json, docs/rfc/planner.md §15.6 安全).
+func (l Layout) PlannerTurnsPath() string { return l.Join("planner", "turns.json") }
+
 // PlannerHandoffRoot holds the daily handoff summaries, one
 // <YYYY-MM-DD>.md per shift change (<root>/planner/handoff).
 func (l Layout) PlannerHandoffRoot() string { return l.Join("planner", "handoff") }
@@ -179,6 +184,10 @@ func (l Layout) PlannerPushStatePath() string { return l.Join("planner", "notify
 // already seen, the next day's calendar and each run's record
 // (<root>/planner/scout, docs/rfc/planner.md §15.6).
 func (l Layout) PlannerScoutRoot() string { return l.Join("planner", "scout") }
+
+// PlannerScoutWorkDir is the scout sessions' working directory; the history
+// popover hides the CLI transcripts it leaves (<root>/planner/scout/work).
+func (l Layout) PlannerScoutWorkDir() string { return l.Join("planner", "scout", "work") }
 
 // ScoutMCPConfigPath is the scout session's --mcp-config, cli.mcp_config
 // cut down to the scout's servers. It sits with the per-session settings,

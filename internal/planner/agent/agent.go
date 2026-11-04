@@ -107,8 +107,8 @@ type Turns interface {
 	// opts; done (nil for none) gets the reply, or the error the turn ended
 	// with. queued is text waiting behind a turn already running.
 	SubmitPlanner(key string, src Source, text string, opts sessionview.AgentOpts, done func(reply string, err error)) (queued bool, err error)
-	// PlannerTurnSources is the sources of the requests key's turn in
-	// flight took, sorted; none between turns.
+	// PlannerTurnSources is the sources of key's requests in flight,
+	// sorted (TurnSources); none between turns.
 	PlannerTurnSources(key string) []Source
 	// PlannerReceipt shows text in key's conversation as a system event,
 	// never sent to the CLI.
@@ -665,7 +665,14 @@ func (a *Agent) Send(text, ref string) error {
 // Tell sends the gateway's own message to the Planner: the outcome of an
 // action block (a dispatch, the user's answer). It carries no snapshot and
 // gets no receipt.
-func (a *Agent) Tell(text string) error {
+func (a *Agent) Tell(text string) error { return a.tell(SourceReceipt, text) }
+
+// TellRefused is Tell for the receipt of action blocks the gateway refused
+// in a turn outside content brought in: the receipt's own turn answers that
+// content, so it is from SourceRefusal and is held to the same limits.
+func (a *Agent) TellRefused(text string) error { return a.tell(SourceRefusal, text) }
+
+func (a *Agent) tell(src Source, text string) error {
 	if !a.cfg.Enabled {
 		return ErrOff
 	}
@@ -678,7 +685,7 @@ func (a *Agent) Tell(text string) error {
 	case turns == nil:
 		return ErrNotReady
 	}
-	_, err := turns.SubmitPlanner(Key, SourceReceipt, "<naozhi-receipt>\n"+strings.TrimSpace(text)+"\n</naozhi-receipt>", opts, nil)
+	_, err := turns.SubmitPlanner(Key, src, "<naozhi-receipt>\n"+strings.TrimSpace(text)+"\n</naozhi-receipt>", opts, nil)
 	return err
 }
 

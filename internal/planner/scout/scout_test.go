@@ -3,6 +3,8 @@ package scout
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -89,7 +91,7 @@ func TestParseOutput(t *testing.T) {
 			case c.err != "" && (err == nil || !strings.Contains(err.Error(), c.err)):
 				t.Fatalf("err = %v, want %q", err, c.err)
 			case c.err == "" && c.name == "valid":
-				if len(out.Findings) != 1 || out.Cursors.Email == "" || len(out.Calendar) != 1 || !out.Calendar[0].Online {
+				if len(out.Findings) != 1 || out.Cursors.Email == "" || len(out.events()) != 1 || !out.events()[0].Online {
 					t.Errorf("out = %+v", out)
 				}
 			}
@@ -116,8 +118,8 @@ func TestMarkSeen(t *testing.T) {
 		{day0.Add(15 * 24 * time.Hour), []Finding{a}, []Finding{a}},
 	}
 	for i, s := range steps {
-		fresh, err := st.markSeen(s.in, s.at)
-		if err != nil {
+		fresh, seen := st.fresh(s.in, s.at)
+		if err := st.saveSeen(seen); err != nil {
 			t.Fatal(err)
 		}
 		if !slices.Equal(fresh, s.fresh) {
@@ -210,7 +212,7 @@ func TestRun(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	r := s.run(ctx, runID(now), TriggerManual, now)
+	r, _ := s.run(ctx, runID(now), TriggerManual, now)
 	if r.State != StateOK || r.New != 1 || !r.Woke || r.Events != 1 || len(woken) != 1 {
 		t.Fatalf("first run = %+v, woken %d", r, len(woken))
 	}
@@ -227,7 +229,7 @@ func TestRun(t *testing.T) {
 		t.Errorf("calendar = %+v", cal)
 	}
 
-	r = s.run(ctx, runID(now.Add(time.Minute)), TriggerManual, now.Add(time.Minute))
+	r, _ = s.run(ctx, runID(now.Add(time.Minute)), TriggerManual, now.Add(time.Minute))
 	if r.State != StateOK || r.New != 0 || r.Woke || len(woken) != 1 {
 		t.Errorf("second run = %+v, woken %d", r, len(woken))
 	}
@@ -236,7 +238,7 @@ func TestRun(t *testing.T) {
 	}
 
 	reply = `{"findings":[],"cursors":{"email":"e2","slack":"s2","asana":""}}` + "\n好的"
-	r = s.run(ctx, runID(now.Add(2*time.Minute)), TriggerManual, now.Add(2*time.Minute))
+	r, _ = s.run(ctx, runID(now.Add(2*time.Minute)), TriggerManual, now.Add(2*time.Minute))
 	if r.State != StateFailed || !strings.Contains(r.Error, "after the JSON") {
 		t.Errorf("bad run = %+v", r)
 	}
@@ -251,5 +253,93 @@ func TestRun(t *testing.T) {
 	data, _ := os.ReadFile(datadir.FromRoot(root).ScoutMCPConfigPath())
 	if json.Unmarshal(data, &f) != nil || len(f["mcpServers"].(map[string]any)) != 2 {
 		t.Errorf("scout mcp config = %s", data)
+	}
+}
+
+// A run's findings count as seen, and its cursors move, only once the
+// Planner took them or will never take them (ErrPlannerOff); a wake that
+// failed otherwise leaves both, so the next run wakes with them again. A
+// reply without the calendar key keeps the cached calendar, less what is
+// over. A run shutdown cut short leaves no record.
+func TestRunWakeAndCalendar(t *testing.T) {
+	root := t.TempDir()
+	mcp := filepath.Join(root, "mcp.json")
+	if err := os.WriteFile(mcp, []byte(`{"mcpServers":{"aws-outlook-mcp":{"command":"o"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 2, 10, 0, 0, 0, time.Local)
+	event := func(id string, start, end time.Duration) string {
+		return `{"id":"` + id + `","title":"iso 会","start":"` + now.Add(start).Format(time.RFC3339) + `","end":"` +
+			now.Add(end).Format(time.RFC3339) + `","organizer":"","attendees":[],"online":false,"link":""}`
+	}
+	const finding = `{"source":"email","kind":"reply_needed","id":"m1","title":"iso 预算","from":"","at":"","due":"","link":"","why":"等你回"}`
+	var wakeErr, sessErr error
+	var reply string
+	woken := 0
+	s := New(Config{
+		Layout:    datadir.FromRoot(root),
+		MCPConfig: mcp,
+		Session: func(context.Context, string, sessionview.AgentOpts, string) (string, []string, error) {
+			return reply, nil, sessErr
+		},
+		Wake: func(string) error { woken++; return wakeErr },
+		Now:  func() time.Time { return now },
+	})
+	steps := []struct {
+		name     string
+		calendar string // "" leaves the key out
+		wakeErr  error
+		woken    int
+		email    string // the cursor after the run
+		cached   []string
+	}{
+		{name: "Planner busy", calendar: `[` + event("a", time.Hour, 2*time.Hour) + `,` + event("b", 3*time.Hour, 4*time.Hour) + `]`,
+			wakeErr: errors.New("服务忙"), woken: 1, cached: []string{"a", "b"}},
+		{name: "woken on the next run", calendar: "", woken: 2, email: "e1", cached: []string{"a", "b"}},
+		{name: "seen", calendar: "[]", woken: 2, email: "e1"},
+	}
+	for _, st := range steps {
+		reply = `{"findings":[` + finding + `],"cursors":{"email":"e1","slack":"","asana":""}`
+		if st.calendar != "" {
+			reply += `,"calendar":` + st.calendar
+		}
+		reply += "}"
+		wakeErr = st.wakeErr
+		r, kept := s.run(context.Background(), runID(now), TriggerManual, now)
+		if r.State != StateOK || !kept || woken != st.woken {
+			t.Errorf("%s: run %+v kept %v, woken %d; want %d", st.name, r, kept, woken, st.woken)
+		}
+		if c := s.st.cursors(); c.Email != st.email {
+			t.Errorf("%s: email cursor %q, want %q", st.name, c.Email, st.email)
+		}
+		var ids []string
+		for _, e := range s.Calendar() {
+			ids = append(ids, e.ID)
+		}
+		if !slices.Equal(ids, st.cached) {
+			t.Errorf("%s: calendar %q, want %q", st.name, ids, st.calendar)
+		}
+		now = now.Add(90 * time.Minute)
+	}
+
+	// The Planner off: kept on disk, as seen.
+	reply = `{"findings":[` + strings.Replace(finding, `"m1"`, `"m2"`, 1) + `],"cursors":{"email":"e2","slack":"","asana":""}}`
+	wakeErr = fmt.Errorf("%w: off", ErrPlannerOff)
+	if r, _ := s.run(context.Background(), runID(now), TriggerManual, now); r.State != StateOK || r.Woke || s.st.cursors().Email != "e2" {
+		t.Errorf("Planner off: run %+v, cursors %+v", r, s.st.cursors())
+	}
+	if fresh, _ := s.st.fresh([]Finding{{Source: SourceEmail, Kind: KindReplyNeeded, ID: "m2"}}, now); len(fresh) != 0 {
+		t.Errorf("Planner off: m2 not marked seen")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	sessErr = context.Canceled
+	before, _ := s.st.lastRun()
+	if _, kept := s.run(ctx, runID(now.Add(time.Hour)), TriggerSchedule, now.Add(time.Hour)); kept {
+		t.Error("a run shutdown cut short was kept")
+	}
+	if after, _ := s.st.lastRun(); after.ID != before.ID {
+		t.Errorf("a run shutdown cut short left a record: %+v", after)
 	}
 }

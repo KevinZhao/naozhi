@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -42,8 +43,9 @@ func TestPrepareSend_RefusesScoutNamespace(t *testing.T) {
 	}
 }
 
-// TestPlannerTurnSources: a turn's sources are those of the requests it
-// took, from the first Begin to the first Finish; an observer took none.
+// TestPlannerTurnSources: each request counts from its Begin to its own
+// Finish, so requests running side by side (passthrough's detached turns)
+// are all counted until each finishes; an observer took none.
 func TestPlannerTurnSources(t *testing.T) {
 	ctx := context.Background()
 	s := &Server{hub: &Hub{engine: &sendEngine{}}}
@@ -52,20 +54,61 @@ func TestPlannerTurnSources(t *testing.T) {
 		return &plannerOrigin{key: agent.Key, src: src, turns: turns, notify: nopNotifier{}}
 	}
 	user, scout, receipt := origin(agent.SourceUser), origin(agent.SourceScout), origin(agent.SourceReceipt)
-	user.Begin(ctx, turn.TurnInfo{Role: turn.RoleHead})
-	scout.Begin(ctx, turn.TurnInfo{Role: turn.RoleHead})
-	receipt.Begin(ctx, turn.TurnInfo{Role: turn.RoleObserver})
-	if got := s.PlannerTurnSources(agent.Key); !slices.Equal(got, []agent.Source{agent.SourceScout, agent.SourceUser}) {
-		t.Errorf("in flight = %q, want [scout user]", got)
+	steps := []struct {
+		name string
+		do   func()
+		want []agent.Source
+	}{
+		{"user's turn begins", func() { user.Begin(ctx, turn.TurnInfo{Role: turn.RoleHead}) }, []agent.Source{agent.SourceUser}},
+		{"a scout wake runs beside it", func() { scout.Begin(ctx, turn.TurnInfo{Role: turn.RoleHead}) },
+			[]agent.Source{agent.SourceScout, agent.SourceUser}},
+		{"an observer takes none", func() { receipt.Begin(ctx, turn.TurnInfo{Role: turn.RoleObserver}) },
+			[]agent.Source{agent.SourceScout, agent.SourceUser}},
+		// The user's turn ends first; the scout's still runs on the CLI.
+		{"user's turn finishes", func() { user.Finish(ctx, turn.Outcome{Stage: turn.StageDone}) }, []agent.Source{agent.SourceScout}},
+		{"scout's turn finishes", func() { scout.Finish(ctx, turn.Outcome{Stage: turn.StageDone}) }, nil},
 	}
-	if got := s.PlannerTurnSources("task:0a1b2c3d4e5f"); len(got) != 0 {
-		t.Errorf("other key = %q, want none", got)
+	for _, st := range steps {
+		st.do()
+		if got := s.PlannerTurnSources(agent.Key); !slices.Equal(got, st.want) {
+			t.Errorf("%s: sources = %q, want %q", st.name, got, st.want)
+		}
+		if got := s.PlannerTurnSources("task:0a1b2c3d4e5f"); len(got) != 0 {
+			t.Errorf("%s: other key = %q, want none", st.name, got)
+		}
 	}
-	user.Finish(ctx, turn.Outcome{Stage: turn.StageDone})
-	if got := s.PlannerTurnSources(agent.Key); len(got) != 0 {
-		t.Errorf("after the turn = %q, want none", got)
+}
+
+// TestPlannerTurnsCarriedOver: a request in flight when the engine shut
+// down stays on disk, and the next run counts it until a result answers it.
+func TestPlannerTurnsCarriedOver(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "planner", "turns.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	var before plannerTurns
+	before.load(path, ctx)
+	o := &plannerOrigin{key: agent.Key, src: agent.SourceScout, turns: &before, notify: nopNotifier{}}
+	o.Begin(ctx, turn.TurnInfo{Role: turn.RoleHead})
+	cancel() // shutdown: the shim keeps the turn, the Send gives up
+	o.Finish(ctx, turn.Outcome{Err: context.Canceled})
+
+	var after plannerTurns
+	after.load(path, context.Background())
+	if got := after.sources(agent.Key); !slices.Equal(got, []agent.Source{agent.SourceScout}) {
+		t.Fatalf("carried over = %q, want [scout]", got)
 	}
-	scout.Finish(ctx, turn.Outcome{Stage: turn.StageDone})
+	after.resulted("task:0a1b2c3d4e5f")
+	if got := after.sources(agent.Key); len(got) != 1 {
+		t.Errorf("another key's result answered it: %q", got)
+	}
+	after.resulted(agent.Key)
+	if got := after.sources(agent.Key); len(got) != 0 {
+		t.Errorf("after its result = %q, want none", got)
+	}
+	var again plannerTurns
+	again.load(path, context.Background())
+	if got := again.sources(agent.Key); len(got) != 0 {
+		t.Errorf("answered request carried over again: %q", got)
+	}
 }
 
 // taskSendRouter reports whether a session exists; prepareSend reaches no

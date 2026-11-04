@@ -108,29 +108,40 @@ func TestLoadHistorySessions_HidesCronSessionIDs(t *testing.T) {
 
 // TestLoadHistorySessions_HidesSysWorkspace verifies that a session
 // whose workspace matches sysWorkDir (= sysession Runner cwd) is
-// hidden — AutoTitler's transient claude -p subprocesses live there.
+// hidden — AutoTitler's transient claude -p subprocesses live there — and
+// so is one in the scout sessions' workspace, whose transcripts hold mail
+// and Slack text.
 func TestLoadHistorySessions_HidesSysWorkspace(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
-	srv.sessionH.WaitWarmHistory()
-
-	claudeDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(claudeDir, "projects"), 0o755); err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name string
+		set  func(srv *Server, dir string)
+	}{
+		{"sys-sessions", func(srv *Server, dir string) { srv.sessionH.SetSysWorkDirForTest(dir) }},
+		{"scout", func(srv *Server, dir string) { srv.sessionH.SetScoutWorkDirForTest(dir) }},
 	}
-	srv.sessionH.SetClaudeDirForTest(claudeDir)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := newTestServer(&mockPlatform{})
+			srv.sessionH.WaitWarmHistory()
 
-	sysSID := "ffffffff-1111-2222-3333-000000000099"
-	sysWS, _ := makeProjectDir(t, claudeDir, sysSID)
+			claudeDir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(claudeDir, "projects"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			srv.sessionH.SetClaudeDirForTest(claudeDir)
 
-	srv.sessionH.SetSysWorkDirForTest(sysWS)
+			sysSID := "ffffffff-1111-2222-3333-000000000099"
+			sysWS, _ := makeProjectDir(t, claudeDir, sysSID)
+			c.set(srv, sysWS)
+			srv.sessionH.ResetHistoryCacheForTest()
 
-	srv.sessionH.ResetHistoryCacheForTest()
-
-	got := srv.sessionH.LoadHistorySessionsForTest()
-	for _, rs := range got {
-		if rs.SessionID == sysSID {
-			t.Errorf("sys-sessions JSONL leaked into history (workspace=%s): %+v", sysWS, rs)
-		}
+			got := srv.sessionH.LoadHistorySessionsForTest()
+			for _, rs := range got {
+				if rs.SessionID == sysSID {
+					t.Errorf("%s JSONL leaked into history (workspace=%s): %+v", c.name, sysWS, rs)
+				}
+			}
+		})
 	}
 }
 

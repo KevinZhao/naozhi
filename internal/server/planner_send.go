@@ -7,12 +7,20 @@ package server
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"maps"
+	"os"
+	"path/filepath"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/cliinfo"
+	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/session"
@@ -49,9 +57,8 @@ func (s *Server) SubmitPlanner(key string, src agent.Source, text string, opts s
 	return s.hub.engine.submitPlanner(key, src, text, opts, done)
 }
 
-// PlannerTurnSources is the sources of the requests key's turn in flight
-// took, sorted; none between turns. It is the agent's
-// Turns.PlannerTurnSources.
+// PlannerTurnSources is the sources of key's requests in flight, sorted;
+// none between turns. It is the agent's Turns.PlannerTurnSources.
 func (s *Server) PlannerTurnSources(key string) []agent.Source {
 	if s.hub == nil || s.hub.engine == nil {
 		return nil
@@ -59,41 +66,152 @@ func (s *Server) PlannerTurnSources(key string) []agent.Source {
 	return s.hub.engine.plannerTurns.sources(key)
 }
 
-// plannerTurns is the sources of the requests each key's turn in flight
-// took. A turn begins every request it takes before it finishes any (the
-// turn package's runTurn and deliver), and the next turn begins after, so
-// the first finish ends the turn.
-type plannerTurns struct {
-	mu   sync.Mutex
-	srcs map[string][]agent.Source
+// PlannerResult tells the turn ledger a result of key's arrived and was
+// judged: it answers the oldest request carried over from the last run, if
+// any. The router's result sink calls it after the action runner.
+func (s *Server) PlannerResult(key string) {
+	if s.hub != nil && s.hub.engine != nil {
+		s.hub.engine.plannerTurns.resulted(key)
+	}
 }
 
-func (t *plannerTurns) begin(key string, src agent.Source) {
+// plannerTurnMaxAge bounds a request carried over from the last run: no
+// turn outlives the watchdog's total timeout.
+const plannerTurnMaxAge = cliinfo.DefaultTotalTimeout
+
+// plannerTurns is the sources of the requests in flight, by which a turn's
+// result is judged (agent.Agent.TurnSources). A request counts from its
+// Begin to its own Finish. Requests on one key may run side by side
+// (passthrough's detached turns, a PriorityNow send) and the CLI may answer
+// them in one result, so a result is judged by all of them: never by fewer
+// sources than its own. The list is kept on disk (path) as well: a
+// shim-held turn finishes on the CLI the next run reattaches, so the
+// requests in flight when a run ended are carried over (restored), each
+// until a result answers it or it is older than any turn runs.
+type plannerTurns struct {
+	path string
+	// ctx is the engine's. Once it is done (shutdown) a finish no longer
+	// reaches the file: the turns a shim carries over stay on it.
+	ctx context.Context
+
+	mu       sync.Mutex
+	next     uint64
+	live     map[uint64]plannerTurn
+	restored []plannerTurn
+}
+
+type plannerTurn struct {
+	Key   string       `json:"key"`
+	Src   agent.Source `json:"source"`
+	Began time.Time    `json:"began"`
+}
+
+type plannerTurnsFile struct {
+	V     int           `json:"v"`
+	Turns []plannerTurn `json:"turns"`
+}
+
+// load sets the file and the engine's ctx and carries over the requests
+// the file holds.
+func (t *plannerTurns) load(path string, ctx context.Context) {
+	t.path, t.ctx = path, ctx
+	if path == "" {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	var f plannerTurnsFile
+	if err == nil {
+		err = json.Unmarshal(data, &f)
+	}
+	if err != nil {
+		slog.Warn("planner turns: ledger unreadable; no request carried over", "path", path, "err", err)
+		return
+	}
+	for _, e := range f.Turns {
+		if e.Src != "" && time.Since(e.Began) < plannerTurnMaxAge {
+			t.restored = append(t.restored, e)
+		}
+	}
+	if len(t.restored) > 0 {
+		slog.Info("planner turns: requests carried over from the last run", "count", len(t.restored))
+	}
+}
+
+// begin records a request from src on key and returns its ID; a request
+// with no source (a task: session's first message) is not recorded, 0.
+func (t *plannerTurns) begin(key string, src agent.Source) uint64 {
 	if src == "" {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.live == nil {
+		t.live = map[uint64]plannerTurn{}
+	}
+	t.next++
+	t.live[t.next] = plannerTurn{Key: key, Src: src, Began: time.Now()}
+	t.saveLocked()
+	return t.next
+}
+
+func (t *plannerTurns) finish(id uint64) {
+	if id == 0 {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.srcs == nil {
-		t.srcs = map[string][]agent.Source{}
-	}
-	if !slices.Contains(t.srcs[key], src) {
-		t.srcs[key] = append(t.srcs[key], src)
-	}
+	delete(t.live, id)
+	t.saveLocked()
 }
 
-func (t *plannerTurns) finish(key string) {
+// resulted drops key's oldest carried-over request.
+func (t *plannerTurns) resulted(key string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	delete(t.srcs, key)
+	i := slices.IndexFunc(t.restored, func(e plannerTurn) bool { return e.Key == key })
+	if i < 0 {
+		return
+	}
+	t.restored = slices.Delete(t.restored, i, i+1)
+	t.saveLocked()
 }
 
 func (t *plannerTurns) sources(key string) []agent.Source {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	out := slices.Clone(t.srcs[key])
+	var out []agent.Source
+	for _, e := range slices.Concat(t.restored, slices.Collect(maps.Values(t.live))) {
+		if e.Key == key {
+			out = append(out, e.Src)
+		}
+	}
 	slices.Sort(out)
-	return out
+	return slices.Compact(out)
+}
+
+// saveLocked writes the requests in flight; it fails open to a warning,
+// the list in memory still holding.
+func (t *plannerTurns) saveLocked() {
+	if t.path == "" || (t.ctx != nil && t.ctx.Err() != nil) {
+		return
+	}
+	f := plannerTurnsFile{V: 1, Turns: slices.Clone(t.restored)}
+	for _, id := range slices.Sorted(maps.Keys(t.live)) {
+		f.Turns = append(f.Turns, t.live[id])
+	}
+	data, err := json.Marshal(f)
+	if err == nil {
+		err = datadir.EnsureDir(filepath.Dir(t.path))
+	}
+	if err == nil {
+		err = osutil.WriteFileAtomic(t.path, data, 0o600)
+	}
+	if err != nil {
+		slog.Warn("planner turns: save the ledger", "path", t.path, "err", err)
+	}
 }
 
 // DropPlannerQueue discards the messages queued for key's next turn; their
@@ -153,9 +271,10 @@ func (e *sendEngine) submitPlanner(key string, src agent.Source, text string, op
 // send's.
 type plannerOrigin struct {
 	key string
-	// src is what the request came from, recorded in turns while its turn
-	// is in flight.
+	// src is what the request came from, recorded in turns from its Begin
+	// to its Finish under id.
 	src    agent.Source
+	id     uint64
 	turns  *plannerTurns
 	opts   session.AgentOpts
 	notify sendNotifier
@@ -175,12 +294,15 @@ func (o *plannerOrigin) Begin(_ context.Context, t turn.TurnInfo) turn.Delivery 
 	if t.Role == turn.RoleObserver {
 		return nil
 	}
-	o.turns.begin(o.key, o.src)
+	if o.id == 0 {
+		o.id = o.turns.begin(o.key, o.src)
+	}
 	return o
 }
 
 func (o *plannerOrigin) Finish(_ context.Context, out turn.Outcome) {
-	o.turns.finish(o.key)
+	o.turns.finish(o.id)
+	o.id = 0
 	msg, failed, err := dashOrigin{key: o.key}.failure(out)
 	if failed && !informationalSendErr(err) {
 		o.notify.broadcastSendError(o.key, msg)

@@ -92,6 +92,9 @@ type sendEngineOpts struct {
 	AllowedRoot string
 	TaskOpts    func(key string) (session.AgentOpts, bool)
 	Notify      sendNotifier
+	// PlannerTurnsPath is the Planner turn ledger's file; "" keeps it in
+	// memory only.
+	PlannerTurnsPath string
 }
 
 // newSendEngine is the only constructor. It does not reject a nil Router or
@@ -116,7 +119,7 @@ func newSendEngine(o sendEngineOpts) *sendEngine {
 	if notify == nil {
 		notify = nopNotifier{}
 	}
-	return &sendEngine{
+	e := &sendEngine{
 		turns:       o.Turns,
 		ctx:         ctx,
 		cancel:      cancel,
@@ -130,6 +133,8 @@ func newSendEngine(o sendEngineOpts) *sendEngine {
 		taskOpts:    o.TaskOpts,
 		notify:      notify,
 	}
+	e.plannerTurns.load(o.PlannerTurnsPath, ctx)
+	return e
 }
 
 // TrackSend reserves a wg slot for a background send goroutine and returns a

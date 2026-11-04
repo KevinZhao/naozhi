@@ -197,6 +197,6 @@ func prompt(now time.Time, servers []string, c Cursors) string {
 
 只输出一个 JSON 对象，不要任何其他文字，不要代码块：
 {"findings":[{"source":"…","kind":"…","id":"…","title":"…","from":"…","at":"…","due":"…","link":"…","why":"…"}],"cursors":{"email":"…","slack":"…","asana":"…"},"calendar":[{"id":"…","title":"…","start":"…","end":"…","organizer":"…","attendees":["…"],"online":true,"link":"…"}]}
-没有发现时 findings 写 []，未来 24 小时没有日程时 calendar 写 []。`,
+没有发现时 findings 写 []，看了日历但未来 24 小时没有日程时 calendar 写 []；日历没看成（调用失败）就不要写 calendar 这个键。`,
 		now.Format(time.RFC3339), weekdays[now.Weekday()], strings.Join(have, "、"), cur)
 }

@@ -26,20 +26,28 @@ const (
 	SourceScout Source = "scout"
 	// SourceBriefing is a pre-meeting brief's material.
 	SourceBriefing Source = "briefing"
+	// SourceRefusal is the receipt of action blocks refused in a scout or
+	// briefing turn (TellRefused).
+	SourceRefusal Source = "refusal"
 )
 
 // outsideLabels names the sources whose turns carry outside content (mail,
-// Slack messages, tasks other people wrote): a line in one could pose as
-// a request, so their turns may not dispatch.
-var outsideLabels = map[Source]string{SourceScout: "巡检", SourceBriefing: "会前简报"}
+// Slack messages, tasks other people wrote), or answer a turn that did: a
+// line in one could pose as a request, so their turns may only promise and
+// ask.
+var outsideLabels = map[Source]string{SourceScout: "巡检", SourceBriefing: "会前简报", SourceRefusal: "被拒动作的回执"}
 
 // ErrNoBlock answers a Wake with nothing to say.
 var ErrNoBlock = errors.New("唤醒 Planner 的内容为空")
 
-// TurnSources is the sources of the Planner turn in flight, sorted; none
-// between turns or before Start. A turn the CLI runs on its own (a
-// cross-session message) has none, unless it ran while one of the
-// gateway's was in flight.
+// TurnSources is the sources of the Planner requests in flight, sorted:
+// those the gateway submitted and that have not finished, and those in
+// flight when the last run ended (a shim-held turn finishes on the
+// reattached CLI), each until a result answers it. Requests running side
+// by side (queue.mode passthrough) all count, so a turn is never judged by
+// fewer sources than its own. None between turns or before Start; a turn
+// the CLI runs on its own (a cross-session message) has none, unless one
+// of the gateway's was in flight.
 func (a *Agent) TurnSources() []Source {
 	a.mu.Lock()
 	turns := a.turns
