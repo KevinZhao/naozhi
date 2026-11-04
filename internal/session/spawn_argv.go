@@ -15,9 +15,6 @@ type LaunchSpec struct {
 	// SettingsFile is the per-session settings path, "" when the session has
 	// no settings overrides.
 	SettingsFile string
-	// ProjectSettings loads the workspace's project settings (CLAUDE.md,
-	// .claude/); every session but planner:main.
-	ProjectSettings bool
 }
 
 // ArgvSpawnOptions builds the SpawnOptions subset that Protocol.BuildArgs turns
@@ -58,7 +55,6 @@ func ArgvSpawnOptions(model, effort, debugFile, systemPrompt string, extraArgs [
 		Name:                launch.Name,
 		StrictMCPConfig:     launch.StrictMCPConfig,
 		SessionSettingsFile: launch.SettingsFile,
-		ProjectSettings:     launch.ProjectSettings,
 	}
 }
 

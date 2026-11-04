@@ -42,11 +42,6 @@ func TestClaudeProtocol_BuildArgs_LaunchSpec(t *testing.T) {
 		{"relative session settings ignored", SpawnOptions{
 			SettingsFile: "/data/naozhi-settings.json", SessionSettingsFile: "k.json",
 		}, slices.Concat(head, []string{"--setting-sources", "", "--settings", "/data/naozhi-settings.json"}, skip)},
-		{"project settings over user sources", SpawnOptions{ProjectSettings: true},
-			slices.Concat(head, []string{"--setting-sources", "user,project,local"}, skip)},
-		{"project settings with naozhi settings", SpawnOptions{
-			SettingsFile: "/data/naozhi-settings.json", ProjectSettings: true,
-		}, slices.Concat(head, []string{"--setting-sources", "project,local", "--settings", "/data/naozhi-settings.json"}, skip)},
 		{"planner shape", SpawnOptions{
 			PermissionMode: PermissionModeDontAsk, Tools: []string{"Read", "Grep", "Glob", "ListAgents", "SendMessage"},
 			StrictMCPConfig: true, Name: "planner", Model: "opus",
