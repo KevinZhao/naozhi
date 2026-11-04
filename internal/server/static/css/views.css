@@ -718,7 +718,7 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .peer-link:hover{text-decoration:underline}
 .event.peer_hold,.event.permission_denied,.event.model_refusal{justify-content:center;padding-top:8px;padding-bottom:8px}
 .event.peer_hold .event-icon,.event.permission_denied .event-icon,.event.model_refusal .event-icon{display:none}
-.event.peer_hold .event-content,.event.permission_denied .event-content,.event.model_refusal .event-content{flex:none;color:var(--nz-text-dim);font-size:var(--nz-fs-sm);text-align:center}
+.event.peer_hold .event-content,.event.permission_denied .event-content,.event.model_refusal .event-content{flex:0 1 auto;min-width:0;overflow-wrap:anywhere;color:var(--nz-text-dim);font-size:var(--nz-fs-sm);text-align:center}
 /* Gateway side notes (RFC planner §15.3 ③): centered like a held message,
    not session events; the icon carries the tone. */
 .gw-note{display:flex;justify-content:center;align-items:baseline;flex-wrap:wrap;gap:6px;padding:6px 16px;color:var(--nz-text-dim);font-size:var(--nz-fs-sm);text-align:center;border-radius:var(--nz-radius-md)}
