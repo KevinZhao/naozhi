@@ -386,7 +386,10 @@ async function loadEvents(reset) {
   // An unreadable journal leaves the page as the history has it.
   const notes = reset ? fetchJSON(NZ_CONTRACT.API.planner_notes, { timeoutMs: 8000 }).catch(() => null) : null;
   try {
-    const res = await fetchJSON(NZ_CONTRACT.API.sessions_events + '?key=' + encodeURIComponent(PLANNER_KEY) + q, { timeoutMs: 8000 });
+    // No planner:main session yet (it never had a turn) is no history, and
+    // the notes still show.
+    const res = await fetchJSON(NZ_CONTRACT.API.sessions_events + '?key=' + encodeURIComponent(PLANNER_KEY) + q, { timeoutMs: 8000 })
+      .catch((e) => { if (reset && e && e.status === 404) return []; throw e; });
     let events = Array.isArray(res) ? res : [];
     const n = notes && await notes;
     if (n && Array.isArray(n.notes) && n.notes.length) events = withNotes(events, n.notes, events.length >= EVENTS_LIMIT);
