@@ -75,11 +75,22 @@ func TestParseOutput(t *testing.T) {
 		{"no id", strings.Replace(good, `"id":"m1"`, `"id":""`, 1), "no id or title"},
 		{"event without a zone", strings.Replace(good, "14:00:00+08:00", "14:00:00", 1), "cannot parse"},
 	}
-	// A conflict names its pair in any order; parsed, both orders are one.
-	for _, id := range []string{"e2+e1", "e1 + e2"} {
-		out, err := parseOutput(strings.Replace(strings.Replace(good, "reply_needed", "conflict", 1), `"id":"m1"`, `"id":"`+id+`"`, 1))
-		if err != nil || out.Findings[0].ID != "e1+e2" {
-			t.Errorf("conflict %q: id %+v, err %v; want e1+e2", id, out.Findings, err)
+	// A conflict is known by its start, however its meetings' IDs were
+	// copied; with no start, by its pair in any order.
+	conflict := strings.Replace(good, "reply_needed", "conflict", 1)
+	for _, c := range []struct{ id, at, want string }{
+		{"e2+e1", "", "e1+e2"},
+		{"e1 + e2", "", "e1+e2"},
+		{"e1+e2", "2026-11-05T15:00:00+08:00", "at:2026-11-05T07:00:00Z"},
+		// The same meeting under another ID, a '+' in one: still one.
+		{"e1x+e2", "2026-11-05T07:00:00Z", "at:2026-11-05T07:00:00Z"},
+		{"+e1+e2", "2026-11-05T15:00:00+08:00", "at:2026-11-05T07:00:00Z"},
+	} {
+		in := strings.Replace(conflict, `"id":"m1"`, `"id":"`+c.id+`"`, 1)
+		in = strings.Replace(in, `"at":"2026-11-05T09:00:00+08:00"`, `"at":"`+c.at+`"`, 1)
+		out, err := parseOutput(in)
+		if err != nil || out.Findings[0].ID != c.want {
+			t.Errorf("conflict %q at %q: id %+v, err %v; want %s", c.id, c.at, out.Findings, err, c.want)
 		}
 	}
 	for _, c := range cases {
