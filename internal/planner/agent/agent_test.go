@@ -160,6 +160,18 @@ func TestLaunchArgv(t *testing.T) {
 	}
 }
 
+func TestAllowRulesWorkspaces(t *testing.T) {
+	got := allowRules("/s/planner", "/s/events", []string{"/w/a", "/w/b", "/w/a"})
+	for _, want := range []string{"Read(//s/planner/**)", "Read(//w/a/**)", "Read(//w/b/**)"} {
+		if !slices.Contains(got, want) {
+			t.Errorf("allow lacks %s: %v", want, got)
+		}
+	}
+	if n := len(got); n != 6 {
+		t.Errorf("len = %d, want 6 (duplicate workspace collapsed): %v", n, got)
+	}
+}
+
 // TestShiftChange drives reconcile on a fake clock: no change before 08:30,
 // one at 08:30 that stores the outgoing session's summary and hands it to
 // the new one, none again the same day.

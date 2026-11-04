@@ -245,7 +245,7 @@ func (a *Agent) buildOpts() sessionview.AgentOpts {
 		Name:                Name,
 		StrictMCPConfig:     true,
 		CrossSessionInbound: "accept",
-		PermissionsAllow:    allowRules(root, a.cfg.Layout.EventsRoot()),
+		PermissionsAllow:    allowRules(root, a.cfg.Layout.EventsRoot(), a.cfg.Workspaces.LocalPaths()),
 		PermissionsDeny:     denyRules(a.cfg.Layout.Root(), a.cfg.DenyPaths),
 	}
 }
@@ -260,15 +260,24 @@ func absRule(tool, path string) string {
 }
 
 // allowRules are what the Planner may read outside its working directory:
-// its state root, the event logs index.json points at, and the "懂你"
-// sources. Under dontAsk anything else is refused.
-func allowRules(root, events string) []string {
-	return []string{
+// its state root, the event logs index.json points at, the "懂你" sources and
+// the registered workspaces on this node, so it can check a claim against
+// the files (RFC §4.1; Read rules also cover Grep and Glob). Under dontAsk
+// anything else is refused; denyRules still win inside these trees. A
+// workspace registered later is picked up at the next shift change.
+func allowRules(root, events string, workspaces []string) []string {
+	rules := []string{
 		absRule("Read", filepath.Join(root, "**")),
 		absRule("Read", filepath.Join(events, "**")),
 		"Read(~/.claude/CLAUDE.md)",
 		"Read(~/.claude/projects/*/memory/**)",
 	}
+	for _, ws := range workspaces {
+		if r := absRule("Read", filepath.Join(ws, "**")); !slices.Contains(rules, r) {
+			rules = append(rules, r)
+		}
+	}
+	return rules
 }
 
 // denyRules keep credentials out of reach even inside an allowed tree: the
