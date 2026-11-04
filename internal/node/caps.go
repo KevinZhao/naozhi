@@ -45,6 +45,7 @@ var knownServerCaps = map[string]struct{}{
 	"scratch":          {},
 
 	CapSubscribeHistory: {},
+	CapFiles:            {},
 	CapSendBackend:      {},
 	CapSendIdempotent:   {},
 }

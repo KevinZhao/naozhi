@@ -38,6 +38,7 @@
 | `acp`      | 节点侧支持 ACP (JSON-RPC) 后端，可以处理 kiro / gemini-cli session |
 | `gemini`   | 节点侧配置了 gemini-cli 可执行文件                               |
 | `askuser`  | 节点侧会生成 `AskUserQuestion` 富事件 (Round 208+)              |
+| `files`    | 节点侧应答 `files_list` / `file_read` / `files_exists` / `fetch_outputs`，按自己的根目录与规则提供自己的文件（planner RFC §15.5 ④）；`file_read` 每个应答至多 256 KiB（`node.ReverseFileChunk`），原文与预览都按 offset 分段，免得一个大帧在慢上行上写超时拖断整条反连；没有它时主节点对该节点的文件请求一律 501，不读本机 |
 | `send-backend` | `send` RPC 读 `backend` / `resume_id`；缺它时主节点拒绝带这两项的发送 |
 | `send-idempotent` | `send` RPC 读 `turn_id`，同 (key, turn_id) 的重复返回首次结果并带 `dup: true`；主节点只对它在超时 / 断线后回 `unknown` |
 

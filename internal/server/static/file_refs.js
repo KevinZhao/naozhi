@@ -6,7 +6,7 @@ import { NZ_CONTRACT } from './contract.js';
 import { selection, sessionList } from './state.js';
 import { esc, fetchJSON, nzBus, showToast } from './nz_util.js';
 import { workbench } from './workbench.js';
-import { isInternalEvent, matchProject, sid } from './session_ident.js';
+import { REMOTE_FILES_UNSUPPORTED, isInternalEvent, matchProject, sid } from './session_ident.js';
 import { AVATAR_GROUP_GAP_MS, copyText, formatFileSize } from './utilities.js';
 import { ICONS } from './icons.js';
 import { isFileRefCandidate, splitPathLine } from './file_ref_parse.js';
@@ -480,7 +480,7 @@ async function openFilePreview(wrapEl) {
     const headers = {};
     const r = await fetch(fileApiUrl(project, node, path, 'preview'), { headers });
     if (!r.ok) {
-      body.innerHTML = '<div class="fv-error">preview failed (' + r.status + ')</div>';
+      body.innerHTML = '<div class="fv-error">' + (r.status === 501 ? REMOTE_FILES_UNSUPPORTED : 'preview failed (' + r.status + ')') + '</div>';
       return;
     }
     renderPreviewText(project, node, path, body, await r.json(), line);

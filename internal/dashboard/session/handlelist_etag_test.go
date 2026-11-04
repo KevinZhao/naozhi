@@ -265,9 +265,10 @@ type fakePeer struct {
 	id string
 }
 
-func (p fakePeer) NodeID() string      { return p.id }
-func (p fakePeer) DisplayName() string { return "Peer " + p.id }
-func (p fakePeer) RemoteAddr() string  { return "" }
+func (p fakePeer) NodeID() string       { return p.id }
+func (p fakePeer) DisplayName() string  { return "Peer " + p.id }
+func (p fakePeer) RemoteAddr() string   { return "" }
+func (p fakePeer) Meta() *node.NodeMeta { return &node.NodeMeta{} }
 func (p fakePeer) FetchSessions(context.Context) ([]map[string]any, error) {
 	return []map[string]any{{"key": "feishu:direct:" + p.id + ":general"}}, nil
 }

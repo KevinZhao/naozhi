@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
+	"github.com/naozhi/naozhi/internal/node"
 )
 
 // existsReq is the batch payload for POST /api/projects/files/exists.
@@ -18,28 +19,26 @@ type existsReq struct {
 	Node    string   `json:"node,omitempty"`
 	Paths   []string `json:"paths"`
 }
-type existsEntry struct {
-	Exists bool   `json:"exists"`
-	Size   int64  `json:"size,omitempty"`
-	Mime   string `json:"mime,omitempty"`
-	IsDir  bool   `json:"is_dir,omitempty"`
-}
+
+// existsEntry is one batch result (node.FileStat, the shape a node's
+// files_exists answers too).
+type existsEntry = node.FileStat
 
 // HandleFilesExists serves POST /api/projects/files/exists: batch-stat up to
 // maxExistsPaths paths under the project workspace so the dashboard can decide
 // whether a path mentioned in a bubble gets preview/download buttons. Paths
 // that don't resolve or fall outside the workspace come back as {exists:false}.
+// node=<id> asks that node about its project (files_remote.go).
 func (h *Handlers) HandleFilesExists(w http.ResponseWriter, r *http.Request) {
-	if h.deps.ProjectMgr == nil {
-		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "projects not configured"})
-		return
-	}
-
 	r = httputil.WithMaxBytes(w, r, maxExistsBody)
 	var req existsReq
 	if err := httputil.DecodeJSONBody(r, &req); err != nil {
 		slog.Debug("files exists: decode failed", "err", err)
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	if !isRemoteNode(req.Node) && h.deps.ProjectMgr == nil {
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "projects not configured"})
 		return
 	}
 
@@ -54,19 +53,46 @@ func (h *Handlers) HandleFilesExists(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
 		return
 	}
-	if len(req.Paths) == 0 {
-		httputil.WriteJSON(w, map[string]any{"results": map[string]existsEntry{}})
-		return
-	}
 	if len(req.Paths) > maxExistsPaths {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("too many paths (max %d)", maxExistsPaths)})
 		return
 	}
-
-	p := h.deps.ProjectMgr.Get(req.Project)
-	if p == nil {
-		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+	if isRemoteNode(req.Node) {
+		h.remoteExists(w, r, req)
 		return
+	}
+	res := h.existsIn(r.Context(), req.Project, req.Paths)
+	if res.Status != 0 {
+		writeRefusal(w, &res.FileRefusal)
+		return
+	}
+	httputil.WriteJSON(w, res)
+}
+
+// FilesExistFor answers a primary's files_exists RPC with the batch
+// HandleFilesExists serves, under this node's projects and rules.
+func (h *Handlers) FilesExistFor(p node.FilesExistsParams) node.FilesExists {
+	if err := validateProjectName(p.Project); err != nil {
+		return node.FilesExists{FileRefusal: fileRefusal{Status: http.StatusBadRequest, Error: "invalid project name"}}
+	}
+	if len(p.Paths) > maxExistsPaths {
+		return node.FilesExists{FileRefusal: fileRefusal{Status: http.StatusBadRequest, Error: fmt.Sprintf("too many paths (max %d)", maxExistsPaths)}}
+	}
+	return h.existsIn(context.Background(), p.Project, p.Paths)
+}
+
+// existsIn stats paths under the named project.
+func (h *Handlers) existsIn(ctx context.Context, project string, paths []string) node.FilesExists {
+	results := make(map[string]existsEntry, len(paths))
+	if h.deps.ProjectMgr == nil {
+		return node.FilesExists{FileRefusal: fileRefusal{Status: http.StatusBadRequest, Error: "projects not configured"}}
+	}
+	if len(paths) == 0 {
+		return node.FilesExists{Results: results}
+	}
+	p := h.deps.ProjectMgr.Get(project)
+	if p == nil {
+		return node.FilesExists{FileRefusal: fileRefusal{Status: http.StatusNotFound, Error: "project not found"}}
 	}
 	rootPath := p.Path
 	// restrictedRoot mirrors HandleFileGet: include_root projects get the
@@ -74,25 +100,22 @@ func (h *Handlers) HandleFilesExists(w http.ResponseWriter, r *http.Request) {
 	// credential-name filter so batch-exists cannot enumerate what GET refuses.
 	restrictedRoot := p.IsRoot
 
-	ctx, cancel := context.WithTimeout(r.Context(), fileStatTimeout)
+	ctx, cancel := context.WithTimeout(ctx, fileStatTimeout)
 	defer cancel()
 
 	// Resolve the project root once so each path costs a single EvalSymlinks.
 	// Check empty BEFORE EvalSymlinks: EvalSymlinks("") returns (".", nil)
 	// and would bind resolution to the process CWD.
 	if rootPath == "" {
-		httputil.WriteJSON(w, map[string]any{"results": map[string]existsEntry{}})
-		return
+		return node.FilesExists{Results: results}
 	}
 	rootResolved, err := filepath.EvalSymlinks(rootPath)
 	if err != nil {
 		// Unresolvable root collapses to {exists:false}, matching the contract.
-		httputil.WriteJSON(w, map[string]any{"results": map[string]existsEntry{}})
-		return
+		return node.FilesExists{Results: results}
 	}
 
-	results := make(map[string]existsEntry, len(req.Paths))
-	for _, rel := range req.Paths {
+	for _, rel := range paths {
 		if err := ctx.Err(); err != nil {
 			// Timeout: return what we have; the frontend treats unknowns as
 			// "no button", preserving the text-only fallback.
@@ -105,7 +128,7 @@ func (h *Handlers) HandleFilesExists(w http.ResponseWriter, r *http.Request) {
 		// Re-Lstat so owner/mode are evaluated on the same inode.
 		if entry.Exists && restrictedRoot {
 			if abs, rerr := resolveProjectFileWithRoot(rootResolved, rel); rerr == nil {
-				// Credential-name parity with servePreview/serveDownload so a root
+				// Credential-name parity with preview/download so a root
 				// spanning sibling projects cannot leak {exists,size,mime} for
 				// credential files. Scan the resolved `abs`, not the raw `rel`: a
 				// symlink `pub -> secrets` would otherwise evade the segment match.
@@ -124,8 +147,7 @@ func (h *Handlers) HandleFilesExists(w http.ResponseWriter, r *http.Request) {
 		}
 		results[rel] = entry
 	}
-
-	httputil.WriteJSON(w, map[string]any{"results": results})
+	return node.FilesExists{Results: results}
 }
 
 // statRelWithRoot stats a single project-relative path and returns the

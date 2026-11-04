@@ -552,13 +552,15 @@ func (n *HTTPClient) DisplayName() string { return n.displayName }
 func (n *HTTPClient) Status() string      { return "ok" }
 func (n *HTTPClient) RemoteAddr() string  { return n.URL }
 
-// Meta returns a NodeMeta advertising no capabilities: pull-mode peers have
-// no negotiation surface, so backends with RequiredNodeCaps are denied while
-// claude (nil caps) still dispatches. Allocated per call (cold path).
+// Meta returns a NodeMeta advertising only CapFiles, which the peer's own HTTP
+// file API provides: pull-mode peers have no negotiation surface, so backends
+// with RequiredNodeCaps are denied while claude (nil caps) still dispatches.
+// Allocated per call (cold path).
 func (n *HTTPClient) Meta() *NodeMeta {
 	return &NodeMeta{
-		NodeID:      n.ID,
-		DisplayName: n.displayName,
+		NodeID:       n.ID,
+		DisplayName:  n.displayName,
+		Capabilities: map[string]bool{CapFiles: true},
 	}
 }
 

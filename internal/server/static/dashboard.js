@@ -1070,9 +1070,10 @@ function mainHeaderHtml(s) {
     ? '<button type="button" class="btn-rename btn-download" data-action="session-download-md" title="导出会话为 Markdown" aria-label="导出会话为 Markdown">' + ICONS.download + '</button>'
     : '';
 
-  // The workbench (预览 · 产出 · 文件 · 详情) for local sessions; its panes
-  // have nothing to show for a remote or discovered one.
-  const workbenchBtn = selection.key && !isDiscoveredKey(selection.key) && (!selection.node || selection.node === 'local')
+  // The workbench (预览 · 产出 · 文件 · 详情) for managed sessions, a remote
+  // one's read from its node; its panes have nothing to show for a
+  // discovered one.
+  const workbenchBtn = selection.key && !isDiscoveredKey(selection.key)
     ? '<button type="button" class="fv-btn btn-workbench" data-action="workbench-toggle" title="工作台：预览 · 产出 · 文件 · 详情" aria-label="打开或关闭工作台">工作台</button>'
     : '';
   // The Planner drawer's entry on phone, where Alt+P is out of reach

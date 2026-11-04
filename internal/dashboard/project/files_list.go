@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
+	"github.com/naozhi/naozhi/internal/node"
 )
 
 // maxListEntries caps how many children one GET /api/projects/files/list
@@ -20,17 +21,9 @@ import (
 // the cap the reply carries truncated:true so the UI can ask to narrow down.
 const maxListEntries = 2000
 
-// listEntry is one child in a directory listing. Absolute paths are NEVER
-// serialised; the frontend joins the name onto its breadcrumb dir.
-type listEntry struct {
-	Name    string `json:"name"`
-	IsDir   bool   `json:"is_dir"`
-	Size    int64  `json:"size"`
-	MtimeMs int64  `json:"mtime_ms"`
-	// Symlink children are surfaced but flagged so the UI renders them
-	// non-navigable: the read and write paths refuse final-component symlinks.
-	Symlink bool `json:"symlink,omitempty"`
-}
+// listEntry is one child in a directory listing (node.FileEntry, the shape
+// a node's files_list answers too).
+type listEntry = node.FileEntry
 
 // HandleFilesList serves GET /api/projects/files/list?project=X&node=&dir=Y:
 // the immediate children of a workspace directory for the dashboard "文件"
@@ -39,35 +32,54 @@ type listEntry struct {
 // validation, symlink-escape / traversal guards). dir is
 // workspace-relative; "" or "." is the root. All errors collapse to one 404
 // so a probing client gets no oracle; credential-named children are never
-// enumerated.
+// enumerated. node=<id> lists the tree on that node instead (files_remote.go).
 func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
-	// Remote-node filesystems are not readable from this process; reject rather
-	// than silently listing the local dir under the same name.
-	if node := r.URL.Query().Get("node"); node != "" && node != "local" {
-		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "file listing is not supported for remote nodes"})
+	q := r.URL.Query()
+	// show_hidden=1 surfaces dotfiles and noise directories (node_modules,
+	// dist, …) that the files view hides by default.
+	showHidden := q.Get("show_hidden") == "1"
+	if nodeID := q.Get("node"); isRemoteNode(nodeID) {
+		h.remoteList(w, r, nodeID, showHidden)
 		return
 	}
 
-	dir := r.URL.Query().Get("dir")
-	// show_hidden=1 surfaces dotfiles and noise directories (node_modules,
-	// dist, …) that the files view hides by default.
-	showHidden := r.URL.Query().Get("show_hidden") == "1"
-
-	root, ok := h.resolveBrowseRoot(w, r.URL.Query())
+	root, ok := h.resolveBrowseRoot(w, q)
 	if !ok {
 		return
+	}
+	list := listDir(root, q.Get("dir"), showHidden)
+	if list.Status != 0 {
+		writeRefusal(w, &list.FileRefusal)
+		return
+	}
+	httputil.WriteJSON(w, list)
+}
+
+// ListFilesFor answers a primary's files_list RPC with the listing
+// HandleFilesList serves, under this node's roots and rules.
+func (h *Handlers) ListFilesFor(p node.FilesListParams) node.FileList {
+	root, rf := h.rootOfRPC(p.FileRoot)
+	if rf != nil {
+		return node.FileList{FileRefusal: *rf}
+	}
+	return listDir(root, p.Dir, p.ShowHidden)
+}
+
+// listDir lists dir under root; a refusal comes back in the list's
+// FileRefusal.
+func listDir(root browseRoot, dir string, showHidden bool) node.FileList {
+	notFound := func(msg string) node.FileList {
+		return node.FileList{FileRefusal: fileRefusal{Status: http.StatusNotFound, Error: msg}}
 	}
 	rootPath := root.path
 	// Empty BEFORE EvalSymlinks: EvalSymlinks("") returns (".", nil), which
 	// would bind resolution to the process CWD.
 	if rootPath == "" {
-		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
-		return
+		return notFound("project not found")
 	}
 	rootResolved, err := filepath.EvalSymlinks(rootPath)
 	if err != nil {
-		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "directory not found"})
-		return
+		return notFound("directory not found")
 	}
 
 	// resolveProjectFileWithRoot rejects rel=="" and cleaned==".", so the
@@ -80,8 +92,7 @@ func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
 			if !errors.Is(rerr, fs.ErrNotExist) && !isClientPathRejection(rerr) {
 				slog.Warn("project files/list: resolve IO failure", "err", rerr, "root", root.label)
 			}
-			httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "directory not found"})
-			return
+			return notFound("directory not found")
 		}
 		dirResolved = resolved
 		cleanDir = filepath.ToSlash(filepath.Clean(dir))
@@ -94,15 +105,13 @@ func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
 		if !errors.Is(err, fs.ErrNotExist) {
 			slog.Warn("project files/list: open dir IO failure", "err", err, "root", root.label)
 		}
-		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "directory not found"})
-		return
+		return notFound("directory not found")
 	}
 	defer f.Close()
 
 	info, err := f.Stat()
 	if err != nil || !info.IsDir() {
-		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "directory not found"})
-		return
+		return notFound("directory not found")
 	}
 
 	// ReadDir(maxListEntries+1) bounds the read at the syscall level; the +1
@@ -165,17 +174,13 @@ func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
 	// of readdir order.
 	sortEntries(entries)
 
-	resp := map[string]any{
-		"dir":       cleanDir,
-		"entries":   entries,
-		"truncated": truncated,
-	}
+	list := node.FileList{Dir: cleanDir, Entries: entries, Truncated: truncated}
 	// A session root has no project name for the breadcrumb; name the tree it
 	// resolved to (the git root can sit above the session's cwd).
 	if root.session {
-		resp["root_name"] = filepath.Base(rootResolved)
+		list.RootName = filepath.Base(rootResolved)
 	}
-	httputil.WriteJSON(w, resp)
+	return list
 }
 
 // noiseBrowseDirs are non-dot directory names hidden from the files view by

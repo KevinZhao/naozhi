@@ -7,12 +7,14 @@
 // Outputs come from GET /api/sessions/outputs?key= (planner/activity), which
 // is refetched shortly after a tool event the backend tagged with an
 // activity and after a turn ends (the turn-end scan reports files written by
-// Bash). The tabs follow the selected local session, and planner:main on
-// the Planner page (planner_view.js feeds its events to noteWorkbenchEvent).
+// Bash). The tabs follow the selected session — a remote one's outputs and
+// tree are read from its node, when the node serves its files — and
+// planner:main on the Planner page (planner_view.js feeds its events to
+// noteWorkbenchEvent).
 import { NZ_CONTRACT } from './contract.js';
 import { selection, sessionList, ui } from './state.js';
 import { esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
-import { isDiscoveredKey, sid } from './session_ident.js';
+import { REMOTE_FILES_UNSUPPORTED, isDiscoveredKey, nodeServesFiles, sid } from './session_ident.js';
 import { openFilePreview, resolveProjectForAbsPath } from './file_refs.js';
 import { crumbsHtml, fileRowsHtml, isPreviewableOutput, mimeForPath, outputId, outputRowsHtml } from './file_rows.js';
 import { formatAbsTime, formatTimeShort } from './utilities.js';
@@ -31,7 +33,7 @@ const st = {
   // this page loaded) never auto-open.
   seen: new Map(),
   timer: 0,
-  files: { root: '', dir: '', label: '' },
+  files: { root: '', node: 'local', dir: '', label: '' },
 };
 
 const PLANNER_KEY = 'planner:main';
@@ -39,24 +41,28 @@ const PLANNER_KEY = 'planner:main';
 // or the session opened in its middle column (planner_chat.js).
 let plannerSubject = PLANNER_KEY;
 
-// subject is the local session the tabs describe, or null: remote and
-// discovered sessions have no outputs index or readable tree here.
+// subject is the session the tabs describe and the node it runs on, or
+// null: discovered sessions have no outputs index or readable tree.
 function subject() {
   if (ui.activeView === 'planner') {
     const key = plannerSubject;
-    return { key, sid: sid(key, 'local'), sd: key === PLANNER_KEY ? null : sessionList.sessionsData[sid(key, 'local')] || null };
+    return { key, node: 'local', sid: sid(key, 'local'), sd: key === PLANNER_KEY ? null : sessionList.sessionsData[sid(key, 'local')] || null };
   }
   const key = selection.key;
-  if (!key || isDiscoveredKey(key) || (selection.node && selection.node !== 'local')) return null;
-  return { key, sid: sid(key, 'local'), sd: sessionList.sessionsData[sid(key, 'local')] || null };
+  if (!key || isDiscoveredKey(key)) return null;
+  const node = selection.node || 'local';
+  return { key, node, sid: sid(key, node), sd: sessionList.sessionsData[sid(key, node)] || null };
 }
+
+// nodeQuery is the &node= of a file API call about s.
+function nodeQuery(s) { return s.node !== 'local' ? '&node=' + encodeURIComponent(s.node) : ''; }
 
 // ---- outputs ----
 
 function refreshOutputs(auto) {
   const s = subject();
-  if (!s) { st.outputs = []; st.outputsFor = ''; paintOutputs(); return Promise.resolve(); }
-  return fetchJSON(NZ_CONTRACT.API.sessions_outputs + '?key=' + encodeURIComponent(s.key)).then((res) => {
+  if (!s || !nodeServesFiles(s.node)) { st.outputs = []; st.outputsFor = ''; paintOutputs(); return Promise.resolve(); }
+  return fetchJSON(NZ_CONTRACT.API.sessions_outputs + '?key=' + encodeURIComponent(s.key) + nodeQuery(s)).then((res) => {
     const cur = subject();
     if (!cur || cur.sid !== s.sid) return;
     const outs = (res && Array.isArray(res.outputs)) ? res.outputs : [];
@@ -89,27 +95,29 @@ function paintOutputs() {
   if (count) count.textContent = n ? String(n) : '';
   const box = document.getElementById('wb-outputs');
   if (!box) return;
+  const s = subject();
   box.innerHTML = n
     ? outputRowsHtml(st.outputs)
-    : '<div class="files-empty">' + (subject() ? '这个会话还没有产出' : '选择一个会话查看它的产出') + '</div>';
+    : '<div class="files-empty">' + (!s ? '选择一个会话查看它的产出' : nodeServesFiles(s.node) ? '这个会话还没有产出' : REMOTE_FILES_UNSUPPORTED) + '</div>';
 }
 
 // previewRef maps an output to the file API's root + path: its own session
 // root while the session still works where it was written, else the project
 // holding the directory it was written in (the path is relative to the
 // session's tree root, which is that directory unless it sat below a git
-// root). null when neither resolves.
-export function previewRef(o) {
+// root). null when neither resolves. node is where the output was made.
+export function previewRef(o, node = 'local') {
   if (o.root) return { project: o.root, path: o.path };
-  const p = o.dir ? resolveProjectForAbsPath(o.dir.replace(/\/$/, '') + '/' + o.path, 'local') : null;
+  const p = o.dir ? resolveProjectForAbsPath(o.dir.replace(/\/$/, '') + '/' + o.path, node) : null;
   return p ? { project: p.name, path: p.relPath } : null;
 }
 
-// openOutput shows output o on the 预览 tab.
+// openOutput shows output o of the subject on the 预览 tab.
 export function openOutput(o) {
-  const ref = previewRef(o);
+  const node = subject()?.node || 'local';
+  const ref = previewRef(o, node);
   if (!ref) { showToast('这个产出所在的目录已不在可浏览范围，无法预览', 'warning'); return; }
-  openFilePreview({ dataset: { project: ref.project, node: 'local', path: ref.path, mime: mimeForPath(ref.path), displayPath: o.path } });
+  openFilePreview({ dataset: { project: ref.project, node, path: ref.path, mime: mimeForPath(ref.path), displayPath: o.path } });
 }
 
 // ---- files ----
@@ -125,14 +133,21 @@ function loadFiles(dir) {
     st.files.root = '';
     return;
   }
+  if (!nodeServesFiles(s.node)) {
+    crumbs.innerHTML = '';
+    box.innerHTML = '<div class="files-empty">' + REMOTE_FILES_UNSUPPORTED + '</div>';
+    st.files.root = '';
+    return;
+  }
   const root = 'session:' + s.key;
-  if (st.files.root !== root) st.files.label = s.sd.workspace.split('/').filter(Boolean).pop() || s.sd.workspace;
+  if (st.files.root !== root || st.files.node !== s.node) st.files.label = s.sd.workspace.split('/').filter(Boolean).pop() || s.sd.workspace;
   st.files.root = root;
+  st.files.node = s.node;
   st.files.dir = dir || '';
   box.innerHTML = '<div class="files-empty">加载中…</div>';
-  const qs = 'root=' + encodeURIComponent(root) + (st.files.dir ? '&dir=' + encodeURIComponent(st.files.dir) : '');
+  const qs = 'root=' + encodeURIComponent(root) + (st.files.dir ? '&dir=' + encodeURIComponent(st.files.dir) : '') + nodeQuery(s);
   fetchJSON(NZ_CONTRACT.API.projects_files_list + '?' + qs).then((res) => {
-    if (st.files.root !== root || st.files.dir !== (dir || '')) return;
+    if (st.files.root !== root || st.files.node !== s.node || st.files.dir !== (dir || '')) return;
     // The server names the tree the session root resolved to (its git root
     // can sit above the session's cwd).
     if (res && res.root_name) st.files.label = res.root_name;
@@ -140,7 +155,7 @@ function loadFiles(dir) {
     box.innerHTML = fileRowsHtml(res, st.files.dir);
   }).catch((e) => {
     crumbs.innerHTML = crumbsHtml('会话 · ' + st.files.label, st.files.dir);
-    box.innerHTML = '<div class="files-empty">加载失败：' + esc(e.message) + '</div>';
+    box.innerHTML = '<div class="files-empty">' + (e.status === 501 ? REMOTE_FILES_UNSUPPORTED : '加载失败：' + esc(e.message)) + '</div>';
   });
 }
 
@@ -155,7 +170,7 @@ function onFilesClick(e) {
   if (row.dataset.kind === 'dir') { loadFiles(rel(row.dataset.name)); return; }
   if (row.dataset.kind === 'file') {
     const path = rel(row.dataset.name);
-    openFilePreview({ dataset: { project: st.files.root, node: 'local', path, mime: mimeForPath(path) } });
+    openFilePreview({ dataset: { project: st.files.root, node: st.files.node, path, mime: mimeForPath(path) } });
   }
 }
 
@@ -184,6 +199,8 @@ function loadDetails() {
     ['最后活动', formatTimeShort(sd.last_active), formatAbsTime(sd.last_active)],
   ];
   box.innerHTML = detailRows(base);
+  // The detail endpoint describes local sessions only.
+  if (s.node !== 'local') return;
   fetchJSON(NZ_CONTRACT.API.sessions_detail + '?key=' + encodeURIComponent(s.key)).then((d) => {
     const cur = subject();
     if (!cur || cur.sid !== s.sid || !d) return;
@@ -207,7 +224,10 @@ function paintTab(tab) {
   if (tab === 'preview' && body && !body.childElementCount) {
     body.innerHTML = '<div class="fv-loading">还没有打开的文件：在「产出」或「文件」里点一个</div>';
   } else if (tab === 'outputs') { paintOutputs(); refreshOutputs(false); }
-  else if (tab === 'files') loadFiles(st.files.root === 'session:' + (subject()?.key || '') ? st.files.dir : '');
+  else if (tab === 'files') {
+    const s = subject();
+    loadFiles(s && st.files.root === 'session:' + s.key && st.files.node === s.node ? st.files.dir : '');
+  }
   else if (tab === 'details') loadDetails();
 }
 

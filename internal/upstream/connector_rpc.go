@@ -445,6 +445,9 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		return marshalResult(map[string]any{"status": "ok", "favorite": p.Favorite})
 
 	default:
+		if res, ok, err := c.handleFileRequest(req); ok {
+			return res, err
+		}
 		// %q so bidi/C1/newline bytes in a primary-injected method name are
 		// escaped before the remote logs the error string.
 		return nil, fmt.Errorf("unknown method: %q", req.Method)

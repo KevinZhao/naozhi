@@ -125,10 +125,13 @@ type sessionStats struct {
 
 // nodeStatusEntry is the per-node element in /api/sessions "nodes"; omitempty
 // on remote_addr keeps offline / "local" rows byte-identical to the old map.
+// Caps are a connected node's capability tags (node.CapFiles: the dashboard
+// may browse its files).
 type nodeStatusEntry struct {
-	DisplayName string `json:"display_name"`
-	Status      string `json:"status"`
-	RemoteAddr  string `json:"remote_addr,omitempty"`
+	DisplayName string   `json:"display_name"`
+	Status      string   `json:"status"`
+	RemoteAddr  string   `json:"remote_addr,omitempty"`
+	Caps        []string `json:"caps,omitempty"`
 }
 
 // sessionListLocalResp is the /api/sessions response shape for single-node
