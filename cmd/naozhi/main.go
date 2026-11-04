@@ -29,6 +29,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/brief"
 	"github.com/naozhi/naozhi/internal/planner/promise"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
+	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/routerrelay"
 	"github.com/naozhi/naozhi/internal/selfupdate"
@@ -287,8 +288,8 @@ func main() {
 		slog.Warn("planner outputs index partly rebuilt", "err", err)
 	}
 	router.SetActivitySink(activities)
-	// The Planner's promises ("答应你的"); their reminder exits are bound
-	// once the inbox and the server exist.
+	// The Planner's promises (among the 任务); their reminder exits are
+	// bound once the inbox and the server exist.
 	promises := promise.New(promise.Config{Path: sessionLayout.PlannerPromisesPath(), Journal: plannerState.Journal})
 	// Sidecar files of the sessions the Planner dispatches (lineage and
 	// purpose, §3.7); swept below once the router has its sessions.
@@ -450,6 +451,14 @@ func main() {
 	// past 08:30 on a weekday, pushed once through the notifier. Only the
 	// health machine's Watch pokes it, so healthMon is set by then.
 	var healthMon *health.Machine
+	// The 任务 (§15.4): the dispatched sessions and the promises, their
+	// states by health, the Planner's status blocks and the user.
+	tasks := task.New(task.Config{
+		Sessions: sidecars,
+		Promises: promises,
+		Health:   func() health.Snapshot { return healthMon.Snapshot() },
+		Journal:  plannerState.Journal,
+	})
 	briefer := brief.New(brief.Config{
 		Journal: plannerState.Journal,
 		Health:  func() health.Snapshot { return healthMon.Snapshot() },
@@ -457,6 +466,7 @@ func main() {
 			open, _ := notifier.List(0)
 			return open
 		},
+		Tasks:      tasks.List,
 		Push:       notifier.Announce,
 		Name:       wireup.UnitNames(router, scheduler),
 		Workspaces: plannerState.Workspaces,
@@ -483,7 +493,7 @@ func main() {
 		Health:           func() health.Snapshot { return healthMon.Snapshot() },
 		Workspaces:       plannerState.Workspaces,
 		Notify:           notifier,
-		Promises:         promises,
+		Tasks:            tasks,
 		Purpose:          sidecars.Purpose,
 		TaskOpts:         taskOpts.ForKey,
 		AllowedRoot:      workspace,
@@ -578,6 +588,7 @@ func main() {
 		},
 	})
 	routerEvents.BindMonitor(healthMon.Poke)
+	healthMon.Subscribe(tasks.Observe)
 	go healthMon.Run(ctx)
 	plannerAgent.Start(ctx, srv, healthMon.Snapshot)
 	notifier.SetHealth(healthMon)
@@ -592,6 +603,7 @@ func main() {
 		Promises:   promises,
 		Workspaces: plannerState.Workspaces,
 		Sessions:   sidecars,
+		Tasks:      tasks,
 		Spawn:      wireup.TaskSpawner{Router: router, Opts: taskOpts, Submit: srv.SubmitPlanner}.Spawn,
 		Note:       plannerAgent.Note,
 		Tell:       plannerAgent.Tell,

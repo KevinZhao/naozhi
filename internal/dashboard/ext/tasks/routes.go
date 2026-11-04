@@ -1,4 +1,4 @@
-package promises
+package tasks
 
 import "github.com/naozhi/naozhi/internal/dashboard/httputil"
 
@@ -8,7 +8,7 @@ import "github.com/naozhi/naozhi/internal/dashboard/httputil"
 // the AST as the anti-drift gate.
 func (h *Handler) Routes() []httputil.Route {
 	return []httputil.Route{
-		{Pattern: "GET /api/promises", Handler: h.HandleList},
-		{Pattern: "POST /api/promises/close", Handler: h.HandleClose},
+		{Pattern: "GET /api/tasks", Handler: h.HandleList},
+		{Pattern: "POST /api/tasks/state", Handler: h.HandleState},
 	}
 }

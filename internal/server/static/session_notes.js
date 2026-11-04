@@ -1,6 +1,6 @@
 // session_notes.js — the gateway's side notes in the session view
 // (docs/rfc/planner.md §15.3 ③): the session's health entering 待你回复 /
-// 停滞 / 失败 and recovering, its 等你 items opening and closing, the Planner
+// 停滞 / 失败 and recovering, its 通知 items opening and closing, the Planner
 // dispatching it and its reports to the Planner. GET /api/sessions/notes
 // lists them (read back from the Planner journal, so a restart keeps them)
 // and session_note frames add the new ones. Shown to you only: nothing here
@@ -12,7 +12,7 @@
 // on #events-scroll places the notes again after a repaint, a page of earlier
 // events or a trim; a note older than the first bubble waits while earlier
 // events are still to load. data-note-id is a note's stable anchor and
-// data-inbox-item its 等你 item: a notification's click scrolls to
+// data-inbox-item its 通知 item: a notification's click scrolls to
 // #main [data-inbox-item="<id>"] (notify.js, §15.3 ④).
 import { NZ_CONTRACT } from './contract.js';
 import { selection } from './state.js';
@@ -28,7 +28,7 @@ import { formatTimeFull, formatTimeShort } from './utilities.js';
 // after a result.
 const REPORT_REFETCH_MS = 3000;
 
-const ITEM_KINDS = { decision: '决定', question: '提问', error: '错误', notice: '通知' };
+const ITEM_KINDS = { decision: '待你决定', question: '提问', error: '错误', notice: '' };
 const BAD = new Set(['waiting', 'stalled', 'failed']);
 
 const notes = {
@@ -52,8 +52,8 @@ function noteBody(n) {
     }
     case 'inbox': {
       // The title is gone once the inbox no longer keeps the item.
-      if (n.event === 'open') return { icon: '◆', tone: 'inbox', text: ['等你', ITEM_KINDS[n.item_kind] || '一条', n.title].filter(Boolean).join(' · ') };
-      return { icon: '◇', tone: 'ok', text: ['等你 · 已关闭' + (n.closed_by === 'auto' ? '（条件已消失）' : ''), n.title].filter(Boolean).join(' · ') };
+      if (n.event === 'open') return { icon: '◆', tone: 'inbox', text: ['通知', ITEM_KINDS[n.item_kind] ?? '一条', n.title].filter(Boolean).join(' · ') };
+      return { icon: '◇', tone: 'ok', text: ['通知 · 已关闭' + (n.closed_by === 'auto' ? '（条件已消失）' : ''), n.title].filter(Boolean).join(' · ') };
     }
     case 'dispatch': return { icon: '↗', tone: 'planner', text: 'Planner 派出' };
     case 'report': return { icon: '↩', tone: 'planner', text: '已向 Planner 汇报' };

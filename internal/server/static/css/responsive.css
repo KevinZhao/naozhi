@@ -65,7 +65,7 @@
   body.nz-view-cron .cron-main,body.nz-view-settings .settings-main,body.nz-view-system .system-main{position:fixed;inset:var(--vv-top,0) 0 0 0;width:100%!important;height:var(--vv-height,100%);z-index:10;padding-bottom:var(--nz-tabbar-h)}
   body.nz-view-cron .cron-list-head .btn-mobile-back{display:none}
   .settings-head,.system-head{padding-top:max(14px,env(safe-area-inset-top))}
-  /* Planner page: the stream is the page; 等你 · 答应你的 fold into a
+  /* Planner page: the stream is the page; 通知 · 任务 fold into a
      block above it that the toggle opens. The workbench is the full-screen
      drawer, so the 48px strip never shows here. */
   body.nz-view-planner .planner-main{position:fixed;inset:var(--vv-top,0) 0 0 0;width:100%;height:var(--vv-height,100%);z-index:10;padding-bottom:var(--nz-tabbar-h);flex-direction:column}

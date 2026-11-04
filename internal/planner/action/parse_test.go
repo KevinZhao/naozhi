@@ -35,6 +35,12 @@ func TestParse(t *testing.T) {
 		{"ask duplicate options", block(`{"type":"ask","question":"q","options":["是"," 是"]}`), []string{"!重复"}},
 		{"unterminated", "```naozhi-action\n{\"type\":\"ask\",\"question\":\"q\",\"options\":[]}", []string{"!没有结束"}},
 		{"bad block does not stop the next", block(`{"type":"nope"}`) + "\n" + block(`{"type":"ask","question":"q","options":[]}`), []string{"!未知类型", "ask"}},
+		{"status", block(`{"type":"status","task":"task:ab12","state":"done","why":"它汇报 PR 已合并"}`), []string{"status"}},
+		{"status of a promise", block(`{"type":"status","task":"pr_x","state":"doing","why":"条件还没满足"}`), []string{"status"}},
+		{"status bad state", block(`{"type":"status","task":"task:ab12","state":"closed","why":"w"}`), []string{"!state 只能是"}},
+		{"status no task", block(`{"type":"status","task":" ","state":"done","why":"w"}`), []string{"!缺少 task"}},
+		{"status no why", block(`{"type":"status","task":"task:ab12","state":"failed","why":""}`), []string{"!缺少 why"}},
+		{"status unknown field", block(`{"type":"status","task":"task:ab12","state":"done","why":"w","by":"user"}`), []string{"!字段不对"}},
 		{"too many", strings.Repeat(block(`{"type":"ask","question":"q","options":[]}`)+"\n", 6), []string{"ask", "ask", "ask", "ask", "ask", "!最多 5 个"}},
 	}
 	for _, tc := range cases {
@@ -49,7 +55,7 @@ func TestParse(t *testing.T) {
 					if b.Err == nil || !strings.Contains(b.Err.Error(), msg) {
 						t.Errorf("block %d: err = %v, want one containing %q", i, b.Err, msg)
 					}
-					if b.Dispatch != nil || b.Promise != nil || b.Ask != nil {
+					if b.Dispatch != nil || b.Promise != nil || b.Ask != nil || b.Status != nil {
 						t.Errorf("block %d: refused block still carries an action", i)
 					}
 					continue

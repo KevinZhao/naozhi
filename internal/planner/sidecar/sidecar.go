@@ -4,7 +4,8 @@
 // older naozhi reading and rewriting it cannot drop these fields.
 //
 // v0.2.0 records the sessions the Planner dispatches (purpose "task", parent
-// planner:main). A file outlives its session by Retention, counted from when
+// planner:main), and v0.2.1 their task state as the Planner or the user set
+// it and the failure health last judged them in (§15.4). A file outlives its session by Retention, counted from when
 // the session was first seen gone, so a retired session's lineage is still
 // there to read for a while.
 package sidecar
@@ -62,6 +63,20 @@ type Meta struct {
 	// Retired is when the session was first seen gone from the router; the
 	// file is removed Retention later.
 	Retired time.Time `json:"retired,omitzero"`
+	// Mark is the task state the Planner or the user last set; nil leaves
+	// it to the session's health (planner/task).
+	Mark *Mark `json:"mark,omitempty"`
+	// Failure is the failure health last judged the session in, nil once it
+	// recovered: a retired session keeps it (planner/task).
+	Failure *Mark `json:"failure,omitempty"`
+}
+
+// Mark is a task state set by someone: planner/task's State and By values.
+type Mark struct {
+	State string    `json:"state"`
+	By    string    `json:"by"`
+	Why   string    `json:"why,omitempty"`
+	At    time.Time `json:"at"`
 }
 
 // DispatchedByPlanner reports whether the global Planner dispatched the
@@ -188,6 +203,55 @@ func (s *Store) Get(key string) (Meta, bool) {
 	defer s.mu.Unlock()
 	m, ok := s.m[key]
 	return m, ok
+}
+
+// List returns every sidecar, in no order.
+func (s *Store) List() []Meta {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Meta, 0, len(s.m))
+	for _, m := range s.m {
+		out = append(out, m)
+	}
+	return out
+}
+
+// SetMark records key's task state; false when key has no sidecar.
+func (s *Store) SetMark(key string, mark Mark) (bool, error) {
+	return s.update(key, func(m *Meta) bool { m.Mark = &mark; return true })
+}
+
+// SetFailure records the failure health judged key in, or that it has none
+// (nil); false when key has no sidecar.
+func (s *Store) SetFailure(key string, f *Mark) (bool, error) {
+	return s.update(key, func(m *Meta) bool {
+		if f == nil && m.Failure == nil {
+			return false
+		}
+		m.Failure = f
+		return true
+	})
+}
+
+// update applies fn to key's sidecar and saves it when fn reports a change.
+func (s *Store) update(key string, fn func(*Meta) bool) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, ok := s.m[key]
+	if !ok {
+		return false, nil
+	}
+	if s.newer[key] {
+		return true, errors.New("sidecar: written by a newer naozhi")
+	}
+	if !fn(&m) {
+		return true, nil
+	}
+	if err := s.writeLocked(m); err != nil {
+		return true, err
+	}
+	s.m[key] = m
+	return true, nil
 }
 
 // Purpose is key's purpose ("" without a sidecar).

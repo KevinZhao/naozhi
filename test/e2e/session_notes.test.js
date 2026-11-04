@@ -53,7 +53,7 @@ test('side notes sit among the bubbles by time, arrive live and start no turn', 
     expect(order).toEqual(['u1', 't1', 'h1', 'open-in_1', 'u2', 't2', 'h2']);
     await expect(pane.locator('[data-note-id="h1"]')).toContainText('进入「失败」（限流）');
     await expect(pane.locator('[data-note-id="h2"]')).toContainText('已从「失败」恢复');
-    await expect(pane.locator('[data-note-id="open-in_1"]')).toContainText('等你 · 错误 · 会话失败：myproject');
+    await expect(pane.locator('[data-note-id="open-in_1"]')).toContainText('通知 · 错误 · 会话失败：myproject');
     await expect(pane.locator('[data-inbox-item="in_1"]')).toHaveAttribute('data-note-id', 'open-in_1');
     // Notes are not bubbles: the transcript's own bookkeeping never sees them.
     await expect(pane.locator('.event.gw-note')).toHaveCount(0);
@@ -78,7 +78,7 @@ test('side notes sit among the bubbles by time, arrive live and start no turn', 
     await page.click(`.session-card[data-key="${A}"]`);
     await expect(pane.locator('.gw-note')).toHaveCount(4);
     conn.send({ type: 'session_note', key: A, note: { id: 'close-in_1', key: A, time: iso(Date.now()), kind: 'inbox', event: 'close', item: 'in_1', item_kind: 'error', closed_by: 'user', title: '会话失败：myproject' } });
-    await expect(pane.locator('[data-note-id="close-in_1"]')).toContainText('等你 · 已关闭 · 会话失败：myproject');
+    await expect(pane.locator('[data-note-id="close-in_1"]')).toContainText('通知 · 已关闭 · 会话失败：myproject');
     await expect(pane.locator('.gw-note-link')).toHaveCount(0);
     await expect(pane.locator('[data-note-id="x1"]')).toHaveCount(0);
     await expect(page.locator('#running-banner')).toHaveClass(/nz-hidden/);

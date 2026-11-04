@@ -124,20 +124,32 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .hl-state.run{color:var(--nz-accent)}
 .hl-state.idle{color:var(--nz-text-mute)}
 .hl-state.off{color:var(--nz-text-dim)}
-/* "答应你的" (promises.js): the Planner page's left-column promise group */
-.pm-group{display:flex;flex-direction:column;gap:6px}
-.pm-head{font-size:var(--nz-fs-sm);font-weight:600;color:var(--nz-text-mute);padding:2px 2px 0}
-.pm-card{position:relative;padding:8px 10px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1)}
-.pm-card.closed{opacity:.65}
-.pm-text{font-size:var(--nz-fs-base);color:var(--nz-text);overflow-wrap:anywhere;padding-right:52px}
-.pm-meta{margin-top:3px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);overflow-wrap:anywhere}
-.pm-due.today{color:var(--nz-amber)}
-.pm-due.overdue{color:var(--nz-red)}
-.pm-close{position:absolute;top:6px;right:8px;height:22px;padding:0 8px}
-.pm-empty{font-size:var(--nz-fs-sm);color:var(--nz-text-dim);padding:2px}
-.pm-closed>summary{cursor:pointer;font-size:var(--nz-fs-xs);color:var(--nz-text-dim);padding:2px}
-.pm-closed>.pm-card{margin-top:6px}
-/* 等你 / 答应你的 bar atop the 会话 sidebar (side_wait.js): one thin dim
+/* "任务" (tasks.js, D85): the dispatched sessions and the promises, in
+   进行中 · 待提醒 · 已完成 (folded). */
+.tk-group{display:flex;flex-direction:column;gap:8px}
+.tk-head{margin-bottom:0}
+.tk-sec{display:flex;flex-direction:column;gap:6px}
+.tk-sec-h{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);padding:0 2px}
+.tk-sec-done>summary{cursor:pointer}
+.tk-sec-done>.tk-list{margin-top:6px}
+.tk-list{display:flex;flex-direction:column;gap:6px}
+.tk-card{padding:8px 10px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-0);font-size:var(--nz-fs-sm2);color:var(--nz-text)}
+.tk-card.done{opacity:.7}
+.tk-top{display:flex;align-items:center;gap:8px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.tk-state{font-weight:600}
+.tk-s-doing .tk-state{color:var(--nz-accent)}
+.tk-s-waiting .tk-state{color:var(--nz-amber)}
+.tk-s-failed .tk-state{color:var(--nz-red)}
+.tk-s-done .tk-state{color:var(--nz-green)}
+.tk-time{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--nz-text-dim)}
+.tk-title{margin-top:4px;color:var(--nz-text-strong);font-weight:600;overflow-wrap:anywhere}
+.tk-open{font-weight:600;text-align:left;overflow-wrap:anywhere}
+.tk-foot{display:flex;align-items:flex-end;gap:8px;margin-top:2px}
+.tk-meta{flex:1;min-width:0;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);overflow-wrap:anywhere}
+.tk-menu,.tk-reopen{flex-shrink:0}
+.tk-menu{padding:2px 6px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);background:var(--nz-bg-0);color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-xs);cursor:pointer}
+.tk-menu:disabled{opacity:.55;cursor:default}
+/* 通知 / 任务 bar atop the 会话 sidebar (side_wait.js): one thin dim
    line while both are 0; unfolded, the Planner left column's cards, capped
    so the session list keeps the rest of the column. */
 .side-wait{flex-shrink:0;border-bottom:1px solid var(--nz-border);background:var(--nz-bg-1)}
@@ -154,7 +166,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .inbox-lit{box-shadow:0 0 0 2px var(--nz-focus);transition:box-shadow .4s var(--nz-ease)}
 
 /* ===== Planner page (planner_view.js, docs/rfc/planner.md §10 D77) =====
-   Left 等你 / 答应你的 + controls, middle the Planner conversation; the
+   Left 通知 / 任务 + controls, middle the Planner conversation; the
    workbench docks on the right through the split (split_view.css), and while
    it is open (.pl-wb-open) the left column folds to a 48px strip. */
 .planner-main{display:none}
@@ -215,7 +227,7 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .pl-cards-h{font-size:var(--nz-fs-xs);font-weight:600;color:var(--nz-text-mute)}
 .pl-composer{flex-shrink:0;border-top:1px solid var(--nz-border)}
 .pl-composer[hidden]{display:none}
-/* Workbench open: the 48px strip (展开 · 等你 · 答应你的). */
+/* Workbench open: the 48px strip (展开 · 通知 · 任务). */
 .planner-main.pl-wb-open:not(.pl-left-peek) .pl-left{width:48px}
 .planner-main.pl-wb-open:not(.pl-left-peek) .pl-left-body{display:none}
 .planner-main.pl-wb-open:not(.pl-left-peek) .pl-strip{display:flex;flex-direction:column;align-items:center;gap:14px;padding:12px 0}
@@ -257,7 +269,7 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .pl-act-state .pl-card-acts{margin-top:0}
 .pl-act-state .pl-scard{margin-top:2px}
 .pl-act-note{font-size:var(--nz-fs-xs);color:var(--nz-text-dim)}
-.pl-act-promise .pl-act-note,.pl-act-ask .pl-act-note{display:block;margin-top:6px}
+.pl-act-promise .pl-act-note,.pl-act-ask .pl-act-note,.pl-act-status .pl-act-note{display:block;margin-top:6px}
 .pl-act-done{font-size:var(--nz-fs-xs);font-weight:600;color:var(--nz-text-mute)}
 .pl-act-done.ok{color:var(--nz-green)}
 .pl-act-q{word-break:break-word}
@@ -280,7 +292,7 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .btn-handoff:disabled{opacity:.5;cursor:default}
 .btn-handoff[hidden],.input-area.voice-mode .btn-handoff{display:none}
 .handoff-note{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
-/* The rail's Planner "等你" count. */
+/* The rail's Planner count (decisions and questions). */
 .ab-count{position:absolute;top:2px;right:0;min-width:16px;height:16px;padding:0 4px;border-radius:var(--nz-radius-pill);background:var(--nz-red);color:#fff;font-size:var(--nz-fs-2xs);font-weight:700;line-height:16px;text-align:center;font-variant-numeric:tabular-nums}
 .ab-count[hidden]{display:none}
 /* The Planner drawer (planner_drawer.js, §15.3 ②): the page's middle column
@@ -292,7 +304,7 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .pl-head .pl-drawer-only,.pld .pl-head .pl-page-only{display:none}
 .pld .pl-head .pl-drawer-only{display:inline-flex}
 .pld .pl-head .btn-close{font-size:var(--nz-fs-lg);padding:0 2px}
-/* The 等你 item a push points at, marked above the conversation. */
+/* The 通知 item a push points at, marked above the conversation. */
 .pl-focus{flex-shrink:0;display:flex;flex-direction:column;gap:6px;margin:12px 18px 0;max-width:560px}
 .pl-focus[hidden]{display:none}
 .pl-focus .pl-card{border-color:var(--nz-accent);box-shadow:0 0 0 2px var(--nz-selected-bg)}

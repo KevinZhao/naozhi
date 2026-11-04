@@ -124,7 +124,7 @@ test('desktop: Alt+P and Esc, the workbench, a send with its receipt, a card, th
     await expect(page.locator('#pl-input')).toBeFocused();
     await expect(drawer).toBeHidden();
 
-    // openPlannerDrawer marks a 等你 item above the conversation.
+    // openPlannerDrawer marks a 通知 item above the conversation.
     await page.click('#abnav-chat');
     await page.evaluate(() => import('/static/planner_drawer.js').then((m) => m.openPlannerDrawer({ item: 'in_n' })));
     await expect(drawer).toBeVisible();
@@ -145,7 +145,7 @@ test('planner.enabled off: the drawer explains it', async ({ page }) => {
     await expect(page.locator('#btn-pld')).toBeHidden();
     await page.keyboard.press('Alt+KeyP');
     await expect(page.locator('#planner-drawer #pl-note')).toContainText('Planner 没有开启');
-    await expect(page.locator('#planner-drawer #pl-note')).toContainText('Planner 页面左栏的"等你"');
+    await expect(page.locator('#planner-drawer #pl-note')).toContainText('Planner 页面左栏的"通知"');
     await expect(page.locator('#pl-input')).toBeDisabled();
   } finally {
     mock.server.close();
@@ -156,7 +156,7 @@ test('phone: the session header\'s Planner button opens it full screen', async (
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
   const page = await ctx.newPage();
   // A gateway line longer than the phone is wide wraps inside it.
-  const events = plannerEvents().concat({ type: 'system', time: now - 100000, summary: '待你确认：派出「iso 列出 work 目录文件」（工作区 work，模型 默认）。卡片 in_ab09wrmgkl 在「等你」里，批准后才会拉起。' });
+  const events = plannerEvents().concat({ type: 'system', time: now - 100000, summary: '待你确认：派出「iso 列出 work 目录文件」（工作区 work，模型 默认）。卡片 in_ab09wrmgkl 在「通知」里，批准后才会拉起。' });
   const mock = await startMockServer({ ws: true, plannerEvents: events, inbox: inbox(), planner: planner() });
   try {
     await openChat(page, mock);

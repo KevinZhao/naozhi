@@ -160,7 +160,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		transcribeH:     buildTranscribeHandler(opts),
 		plannerH:        dashplanner.New(opts.Planner, opts.Briefs),
 		inboxH:          buildInboxHandler(opts),
-		promisesH:       buildPromisesHandler(opts),
+		tasksH:          buildTasksHandler(opts),
 	}
 
 	// The process-lifetime context is created HERE, not in Start (#2552).

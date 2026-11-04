@@ -215,16 +215,6 @@
     "handler_type": "*dashproject.Handlers"
   },
   {
-    "method": "GET",
-    "path": "/api/promises",
-    "handler_type": "*promises.Handler"
-  },
-  {
-    "method": "POST",
-    "path": "/api/promises/close",
-    "handler_type": "*promises.Handler"
-  },
-  {
     "method": "POST",
     "path": "/api/scratch/open",
     "handler_type": "*scratch.Handler"
@@ -378,6 +368,16 @@
     "method": "POST",
     "path": "/api/system/update/apply",
     "handler_type": "*system.Handlers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/tasks",
+    "handler_type": "*tasks.Handler"
+  },
+  {
+    "method": "POST",
+    "path": "/api/tasks/state",
+    "handler_type": "*tasks.Handler"
   },
   {
     "method": "POST",

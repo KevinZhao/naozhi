@@ -10,7 +10,9 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/notify"
+	"github.com/naozhi/naozhi/internal/planner/promise"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
+	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
@@ -95,6 +97,11 @@ func TestDispatchApproveSpawns(t *testing.T) {
 		t.Fatalf("spawned = %q", g.spawned)
 	}
 	key := g.spawned[0]
+	// The card's payload names the session it started, for the
+	// conversation's card to open.
+	if !strings.Contains(string(it.Decision.Payload), `"key":"`+key+`"`) {
+		t.Errorf("payload %s does not name %s", it.Decision.Payload, key)
+	}
 	if s := g.spawns[0]; s.Dir != dir || s.Title != "iso 写 hello" || s.Message != "在工作区里写一个 hello.md" || s.Model != "" {
 		t.Errorf("spawn = %+v", s)
 	}
@@ -164,5 +171,39 @@ func TestAskAndRefused(t *testing.T) {
 	}
 	if len(g.told) != 1 || !strings.Contains(g.told[0], "今天发版吗？") || !strings.HasSuffix(g.told[0], "不发") {
 		t.Errorf("told = %q", g.told)
+	}
+}
+
+// A status block sets a task's state as the Planner's judgment and says so
+// in the conversation; a task that does not exist, or a state the task
+// cannot take, is refused like a malformed block.
+func TestStatus(t *testing.T) {
+	r, g, _, side, _ := newRunner(t)
+	proms := promise.New(promise.Config{})
+	p, _ := proms.Add(promise.Promise{Text: "CI 绿了告诉你", CloseWhen: "master CI 绿"})
+	if err := side.Put(sidecar.Meta{Key: "task:ab12", Purpose: sidecar.PurposeTask, Title: "iso 写 hello"}); err != nil {
+		t.Fatal(err)
+	}
+	r.cfg.Tasks = task.New(task.Config{Sessions: side, Promises: proms})
+	cases := []struct {
+		body string
+		note string
+	}{
+		{`{"type":"status","task":"task:ab12","state":"done","why":"它汇报 hello.md 写好了"}`, "Planner 判断任务「iso 写 hello」已完成：它汇报 hello.md 写好了"},
+		{`{"type":"status","task":"` + p.ID + `","state":"done","why":"CI 绿了"}`, "Planner 判断任务「CI 绿了告诉你」已完成：CI 绿了"},
+		{`{"type":"status","task":"task:nope","state":"done","why":"w"}`, `格式不对，没有执行：找不到任务 "task:nope"`},
+		{`{"type":"status","task":"` + p.ID + `","state":"failed","why":"w"}`, "格式不对，没有执行：承诺没有失败状态"},
+	}
+	for _, c := range cases {
+		r.Handle(block(c.body))
+		if last := g.notes[len(g.notes)-1]; !strings.Contains(last, c.note) {
+			t.Errorf("%s: note %q, want %q", c.body, last, c.note)
+		}
+	}
+	if m, _ := side.Get("task:ab12"); m.Mark == nil || m.Mark.State != "done" || m.Mark.By != "planner" || m.Mark.Why != "它汇报 hello.md 写好了" {
+		t.Errorf("mark = %+v", m.Mark)
+	}
+	if got, _ := proms.Get(p.ID); got.State != promise.StateClosed || got.ClosedBy != promise.SourcePlanner {
+		t.Errorf("promise = %+v", got)
 	}
 }

@@ -1,9 +1,11 @@
-// Package promise keeps what the Planner promised the user ("答应你的",
-// docs/rfc/planner.md §3.6, §4.2): "明早提醒你", "CI 绿了告诉你". A promise is
-// registered by the Planner's promise action block or by the user, reminds
-// once when its due time arrives, and stays open until the user closes it —
-// the Planner may say it looks done, but only the user closes one (D67).
-// Overdue open promises are what the morning brief lists as not yet closed.
+// Package promise keeps what the Planner promised the user (a "任务" of the
+// Planner page, docs/rfc/planner.md §3.6, §4.2, §15.4): "明早提醒你", "CI 绿了
+// 告诉你". A promise is registered by the Planner's promise action block or
+// by the user and reminds once when its due time arrives. A pure reminder
+// (only a due time) is done once it reminded; any other stays open until the
+// Planner judges its condition met (its status action block) or the user
+// closes it, and a closed one can be reopened (D85: marked automatically,
+// undoable, recorded).
 //
 // State is promises.json in the Planner state root, written atomically.
 package promise
@@ -24,6 +26,7 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/osutil/jsonfile"
 	"github.com/naozhi/naozhi/internal/planner/journal"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // Version is the promises.json format this build reads and writes.
@@ -35,6 +38,9 @@ type Source string
 const (
 	SourcePlanner Source = "planner"
 	SourceUser    Source = "user" // 你
+	// SourceAuto closes a pure reminder once it reminded; it never
+	// registers one.
+	SourceAuto Source = "auto"
 )
 
 // State is a promise's lifecycle.
@@ -51,20 +57,18 @@ type Promise struct {
 	Text string `json:"text"`
 	// Due is when to remind; zero for a promise with only a close condition.
 	Due time.Time `json:"due,omitzero"`
-	// CloseWhen is the condition the user closes it on, in words.
+	// CloseWhen is the condition it is done on, in words.
 	CloseWhen string    `json:"close_when,omitempty"`
 	State     State     `json:"state"`
 	Created   time.Time `json:"created"`
 	ClosedAt  time.Time `json:"closed_at,omitzero"`
-	Source    Source    `json:"source"`
+	// ClosedBy is who closed it ("" reads as the user), Why their reason.
+	ClosedBy Source `json:"closed_by,omitempty"`
+	Why      string `json:"why,omitempty"`
+	Source   Source `json:"source"`
 	// RemindedAt is when the due reminder went out, so it goes out once
 	// across restarts.
 	RemindedAt time.Time `json:"reminded_at,omitzero"`
-}
-
-// Overdue reports whether p is open past its due time.
-func (p Promise) Overdue(now time.Time) bool {
-	return p.State == StateOpen && !p.Due.IsZero() && now.After(p.Due)
 }
 
 // Reminder takes promises to the user: the "等你" push and the Planner
@@ -72,7 +76,8 @@ func (p Promise) Overdue(now time.Time) bool {
 type Reminder interface {
 	// Due is called once when p's due time arrives.
 	Due(p Promise)
-	// Closed is called when the user closes p.
+	// Closed is called when the Planner or the user closes p; a pure
+	// reminder done by its reminder keeps what the reminder opened.
 	Closed(p Promise)
 }
 
@@ -80,7 +85,6 @@ type Reminder interface {
 var (
 	ErrNotFound = errors.New("promise: no such promise")
 	ErrClosed   = errors.New("promise: already closed")
-	ErrUserOnly = errors.New("promise: only the user closes a promise")
 	ErrInvalid  = errors.New("promise: text is empty or too long")
 	ErrFull     = errors.New("promise: too many open promises")
 )
@@ -180,7 +184,7 @@ func (s *Store) Add(p Promise) (Promise, error) {
 		return Promise{}, ErrFull
 	}
 	p.ID, p.State, p.Created = newID(), StateOpen, now
-	p.ClosedAt, p.RemindedAt = time.Time{}, time.Time{}
+	p.ClosedAt, p.RemindedAt, p.ClosedBy, p.Why = time.Time{}, time.Time{}, "", ""
 	s.items = append(s.items, p)
 	s.saveLocked(now)
 	s.mu.Unlock()
@@ -208,13 +212,6 @@ func (s *Store) List(limit int) (open, closed []Promise) {
 	return open, closed
 }
 
-// Overdue returns the open promises past their due time, earliest first:
-// what the morning brief reports as not closed yet.
-func (s *Store) Overdue(now time.Time) []Promise {
-	open, _ := s.List(0)
-	return slices.DeleteFunc(open, func(p Promise) bool { return !p.Overdue(now) })
-}
-
 func byDue(a, b Promise) int {
 	if a.Due.IsZero() != b.Due.IsZero() {
 		if a.Due.IsZero() {
@@ -225,11 +222,22 @@ func byDue(a, b Promise) int {
 	return cmp.Or(a.Due.Compare(b.Due), a.Created.Compare(b.Created))
 }
 
-// Close closes an open promise. Only the user closes promises: by is who
-// asks, and anyone else gets ErrUserOnly.
-func (s *Store) Close(id string, by Source) error {
-	if by != SourceUser {
-		return ErrUserOnly
+// Get returns the promise id.
+func (s *Store) Get(id string) (Promise, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := slices.IndexFunc(s.items, func(p Promise) bool { return p.ID == id })
+	if i < 0 {
+		return Promise{}, false
+	}
+	return s.items[i], true
+}
+
+// Close closes an open promise: by is the Planner (its condition is met) or
+// the user, why the reason recorded with it.
+func (s *Store) Close(id string, by Source, why string) error {
+	if by != SourceUser && by != SourcePlanner {
+		return ErrInvalid
 	}
 	now := s.cfg.Now()
 	s.mu.Lock()
@@ -243,6 +251,7 @@ func (s *Store) Close(id string, by Source) error {
 		return ErrClosed
 	}
 	s.items[i].State, s.items[i].ClosedAt = StateClosed, now
+	s.items[i].ClosedBy, s.items[i].Why = by, textutil.TruncateRunes(strings.TrimSpace(why), textRunes)
 	p, r := s.items[i], s.reminder
 	s.saveLocked(now)
 	s.mu.Unlock()
@@ -251,6 +260,46 @@ func (s *Store) Close(id string, by Source) error {
 		r.Closed(p)
 	}
 	return nil
+}
+
+// Reopen opens a closed promise again; it is not reminded of again. An open
+// one is left as it is.
+func (s *Store) Reopen(id string) error {
+	now := s.cfg.Now()
+	s.mu.Lock()
+	i := slices.IndexFunc(s.items, func(p Promise) bool { return p.ID == id })
+	if i < 0 {
+		s.mu.Unlock()
+		return ErrNotFound
+	}
+	if s.items[i].State == StateOpen {
+		s.mu.Unlock()
+		return nil
+	}
+	if s.openLocked() >= maxOpen {
+		s.mu.Unlock()
+		return ErrFull
+	}
+	p := &s.items[i]
+	p.State, p.ClosedAt, p.ClosedBy, p.Why = StateOpen, time.Time{}, "", ""
+	reopened := *p
+	s.saveLocked(now)
+	s.mu.Unlock()
+	s.record(reopened, "promise_reopen")
+	return nil
+}
+
+// reminderOnly reports whether p is a pure reminder: a due time and no
+// condition beyond having reminded.
+func reminderOnly(p Promise) bool {
+	if p.Due.IsZero() {
+		return false
+	}
+	switch strings.TrimRight(p.CloseWhen, "。. ") {
+	case "", "已提醒", "提醒过", "提醒后", "提醒即可", "提醒到", "到点提醒":
+		return true
+	}
+	return false
 }
 
 // Run checks due times every interval until ctx ends.
@@ -302,18 +351,28 @@ func (s *Store) Check() {
 		r.Due(p)
 		s.record(p, "promise_due")
 	}
-	var closed []Promise
+	var closed, done []Promise
 	s.mu.Lock()
 	for _, d := range due {
-		if i := slices.IndexFunc(s.items, func(p Promise) bool { return p.ID == d.ID }); i >= 0 {
-			s.items[i].RemindedAt = now
-			if s.items[i].State == StateClosed {
-				closed = append(closed, s.items[i])
-			}
+		i := slices.IndexFunc(s.items, func(p Promise) bool { return p.ID == d.ID })
+		if i < 0 {
+			continue
+		}
+		p := &s.items[i]
+		p.RemindedAt = now
+		switch {
+		case p.State == StateClosed:
+			closed = append(closed, *p)
+		case reminderOnly(*p):
+			p.State, p.ClosedAt, p.ClosedBy, p.Why = StateClosed, now, SourceAuto, "到点提醒后自动完成"
+			done = append(done, *p)
 		}
 	}
 	s.saveLocked(now)
 	s.mu.Unlock()
+	for _, p := range done {
+		s.record(p, "promise_close")
+	}
 	// Closed while being reminded of: settle the reminder it just got.
 	for _, p := range closed {
 		r.Closed(p)
@@ -358,17 +417,19 @@ func (s *Store) saveLocked(now time.Time) {
 
 // journalData is a promise's notify journal entry.
 type journalData struct {
-	Event  string    `json:"event"` // promise_open | promise_close | promise_due
+	Event  string    `json:"event"` // promise_open | promise_close | promise_reopen | promise_due
 	ID     string    `json:"id"`
 	Source Source    `json:"source,omitempty"`
 	Due    time.Time `json:"due,omitzero"`
+	By     Source    `json:"by,omitempty"` // who closed it
+	Why    string    `json:"why,omitempty"`
 }
 
 func (s *Store) record(p Promise, event string) {
 	if s.cfg.Journal == nil {
 		return
 	}
-	data, err := json.Marshal(journalData{Event: event, ID: p.ID, Source: p.Source, Due: p.Due})
+	data, err := json.Marshal(journalData{Event: event, ID: p.ID, Source: p.Source, Due: p.Due, By: p.ClosedBy, Why: p.Why})
 	if err == nil {
 		err = s.cfg.Journal.Append(journal.Entry{TS: s.cfg.Now(), Kind: journal.KindNotify, Unit: "promise:" + p.ID, Data: data})
 	}

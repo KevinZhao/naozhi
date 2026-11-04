@@ -3,12 +3,13 @@
 //
 //   - action blocks (```naozhi-action fences) become readable cards. A
 //     dispatch card shows the state of its confirmation, the inbox decision
-//     item the left column's 等你 lists, and answers it with the same
-//     /api/inbox/decide action. The item is the one whose source is
-//     `dispatch:<event uuid>#<n>`, n counting the event's naozhi-action
-//     blocks from 0 — the identity the gateway gives the confirmation. A
-//     block that is not JSON of a known type shows as 看不懂; whether a
-//     block runs is the gateway's call, not this reading's.
+//     item the left column's 通知 lists, and answers it with the same
+//     /api/inbox/decide action. The item is the dispatch decision whose
+//     payload carries the block's title and message (the gateway's request
+//     as proposed), the newest when one was proposed twice; once approved,
+//     its payload's key is the session it started. A block that is not
+//     JSON of a known type shows as 看不懂; whether a block runs is the
+//     gateway's call, not this reading's.
 //   - sessions the conversation names — a handed-over session
 //     (<naozhi-session-ref>, rewritten to a fence by planner_view.js), a
 //     `task:` key or a listed session's key in the Planner's text, the sender
@@ -131,7 +132,8 @@ function mentionedKeys(ev) {
 // ---- action blocks (§6.2) ----
 
 const ACTION_LABEL = { approve: '批准', reject: '驳回' };
-const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask']);
+const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask', 'status']);
+const STATUS_LABEL = { done: '已完成', doing: '进行中', failed: '失败' };
 
 const isStr = (v) => typeof v === 'string';
 const str = (v) => (isStr(v) ? v : '');
@@ -167,9 +169,8 @@ function dueText(due) {
   return isNaN(t) ? due : formatAbsTime(t);
 }
 
-// actionCardHtml renders one block; source is the inbox source of its
-// dispatch confirmation, "" when the bubble has no uuid.
-function actionCardHtml(raw, source) {
+// actionCardHtml renders one block.
+function actionCardHtml(raw) {
   const { action: a, error } = parseAction(raw);
   if (!a) {
     return '<div class="pl-act pl-act-bad"><div class="pl-act-h">看不懂的动作块</div>' +
@@ -177,7 +178,7 @@ function actionCardHtml(raw, source) {
   }
   if (a.type === 'dispatch') {
     const title = str(a.title);
-    return '<div class="pl-act pl-act-dispatch" data-source="' + escAttr(source) + '">' +
+    return '<div class="pl-act pl-act-dispatch" data-title="' + escAttr(title.trim()) + '" data-message="' + escAttr(str(a.message).trim()) + '">' +
       '<div class="pl-act-h">派活提议' + (title ? ' · ' + esc(title) : '') + '</div>' +
       rowsHtml([['工作区', str(a.workspace)], ['模型', str(a.model)], ['第一条消息', str(a.message)]]) +
       '<div class="pl-act-state"></div></div>';
@@ -185,13 +186,20 @@ function actionCardHtml(raw, source) {
   if (a.type === 'promise') {
     return '<div class="pl-act pl-act-promise"><div class="pl-act-h">登记承诺</div>' +
       rowsHtml([['内容', str(a.text)], ['到期', dueText(str(a.due))], ['完成条件', str(a.close_when)]]) +
-      '<div class="pl-act-note">登记后列在"答应你的"</div></div>';
+      '<div class="pl-act-note">登记后列在"任务"</div></div>';
+  }
+  if (a.type === 'status') {
+    const task = str(a.task);
+    const name = task.startsWith('task:') ? sessionTitle(task) : task;
+    return '<div class="pl-act pl-act-status"><div class="pl-act-h">Planner 判断 · ' + esc(STATUS_LABEL[a.state] || str(a.state)) + '</div>' +
+      rowsHtml([['任务', name], ['依据', str(a.why)]]) +
+      '<div class="pl-act-note">"任务"里的状态随之改，你可以改回</div></div>';
   }
   const opts = (Array.isArray(a.options) ? a.options : []).filter(isStr).map((o) => '<span class="pl-act-opt">' + esc(o) + '</span>').join('');
   return '<div class="pl-act pl-act-ask"><div class="pl-act-h">问你</div>' +
     '<div class="pl-act-q">' + esc(str(a.question)) + '</div>' +
     (opts ? '<div class="pl-act-opts">' + opts + '</div>' : '') +
-    '<div class="pl-act-note">在"等你"里回答</div></div>';
+    '<div class="pl-act-note">在"通知"里回答</div></div>';
 }
 
 // setInboxItems takes the inbox the left column shows (open and recently
@@ -202,17 +210,19 @@ export function setInboxItems(open, closed, root) {
   paintDispatchCards(root);
 }
 
-// dispatchItem is the decision item the dispatch block with this source
-// opened, open or recently closed.
-function dispatchItem(source) {
-  if (!source) return null;
-  const is = (it) => it.source === source && it.kind === 'decision' && it.decision;
-  return pc.inboxOpen.find(is) || pc.inboxClosed.find(is) || null;
+// dispatchItem is the decision item a dispatch block with this title and
+// message opened, open or recently closed: the newest, an open one first.
+function dispatchItem(title, message) {
+  if (!title) return null;
+  const is = (it) => it.kind === 'decision' && it.decision && it.decision.handler === 'dispatch' &&
+    it.decision.payload && it.decision.payload.title === title && it.decision.payload.message === message;
+  const newest = (list) => list.filter(is).sort((a, b) => Date.parse(b.created) - Date.parse(a.created))[0];
+  return newest(pc.inboxOpen) || newest(pc.inboxClosed) || null;
 }
 
 function dispatchStateHtml(it) {
-  if (!it) return '<span class="pl-act-note">状态未知：确认卡片不在"等你"里（还没生成，或已归档）</span>';
-  if (it.state === 'open') return decisionActsHtml(it) + '<span class="pl-act-note">"等你"里是同一张</span>';
+  if (!it) return '<span class="pl-act-note">状态未知：确认卡片不在"通知"里（还没生成，或已归档）</span>';
+  if (it.state === 'open') return decisionActsHtml(it) + '<span class="pl-act-note">"通知"里是同一张</span>';
   const answer = it.decision.answer;
   const label = answer === 'approve' ? '已批准' : answer === 'reject' ? '已驳回' : '已关闭';
   const key = it.decision.payload && it.decision.payload.key;
@@ -225,7 +235,7 @@ function paintDispatchCards(root) {
   root.querySelectorAll('.pl-act-dispatch').forEach((card) => {
     const box = card.querySelector('.pl-act-state');
     // Answering disables the buttons; their state repaints from the refetch.
-    if (box) box.innerHTML = dispatchStateHtml(dispatchItem(card.dataset.source));
+    if (box) box.innerHTML = dispatchStateHtml(dispatchItem(card.dataset.title, card.dataset.message));
   });
 }
 
@@ -244,10 +254,9 @@ export function decorateEvents(root) {
       if (!wrap || !ref || !isStr(ref.key) || !ref.key) return;
       wrap.outerHTML = '<div class="pl-handoff"><span class="pl-handoff-l">交给 Planner</span>' + sessionCardHtml(ref.key) + '</div>';
     });
-    const uuid = ev.dataset.uuid || '';
-    ev.querySelectorAll('code[data-lang="naozhi-action"]').forEach((code, n) => {
+    ev.querySelectorAll('code[data-lang="naozhi-action"]').forEach((code) => {
       const wrap = code.closest('.md-code-wrap');
-      if (wrap) wrap.outerHTML = actionCardHtml(code.textContent, uuid ? 'dispatch:' + uuid + '#' + n : '');
+      if (wrap) wrap.outerHTML = actionCardHtml(code.textContent);
     });
     if (!ev.matches('.text, .peer_message, .system')) return;
     const carded = new Set([...ev.querySelectorAll('.pl-scard[data-key]')].map((b) => b.dataset.key));

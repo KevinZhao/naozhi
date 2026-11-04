@@ -649,7 +649,7 @@ runtelemetry 扩展普通会话类别（`SubsystemSession` 已预留但未发出
 | Planner → 网关（派活、承诺、问你） | 回复末尾的**动作块**，网关在回合结束时解析；原生通信造不出会话、也弹不了你的卡片 |
 | 看状态 | 被动：读网关维护的 `index.json` 与事件日志；主动：直接问那个会话（会花它一轮） |
 
-**动作块**（v0.2.0 只有三种，格式严格，解析失败不执行并原样显示"格式不对"）：
+**动作块**（v0.2.0 三种，v0.2.1 加 `status` 共四种，格式严格，解析失败不执行并原样显示"格式不对"）：
 
 ````
 ```naozhi-action
@@ -660,6 +660,7 @@ runtelemetry 扩展普通会话类别（`SubsystemSession` 已预留但未发出
 - `dispatch`：生成确认卡片（工作区、模型、第一条消息），你批准后网关拉起 `task:<随机 ID>` 会话并带 `--name <title>`；Planner 收到"已派出 + 名字"的回执，再用 `notify_when_idle` 订阅。
 - `promise`：`{"type":"promise","text":"…","due":"<RFC3339 或空>","close_when":"…"}`，直接登记。
 - `ask`：`{"type":"ask","question":"…","options":["…"]}`，进"等你"。
+- `status`（D85）：`{"type":"status","task":"<task: key 或承诺 ID>","state":"done | doing | failed","why":"…"}`，改"任务"的状态并记"Planner 判断"与依据；找不到任务按格式不对处理。
 
 **`index.json`**（网关每次对账与每个回合结束时刷新，放在状态根目录）：每个会话的 key、跨会话名字、标题、工作区、`purpose`、健康状态、最后活动、事件日志路径、最近一次结果摘要、是否由 Planner 派出。
 
