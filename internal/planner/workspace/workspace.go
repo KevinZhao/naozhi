@@ -42,8 +42,9 @@ const (
 	idAlphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
 )
 
-// Workspace is one registry entry. Paths maps a node ID (config workspace.id)
-// to the absolute directories the workspace covers on that node.
+// Workspace is one registry entry. Paths maps a node ID (config workspace.id
+// for this node, the workspaces / reverse_nodes key for a remote one) to the
+// absolute directories the workspace covers on that node.
 type Workspace struct {
 	ID      string              `json:"id"`
 	Name    string              `json:"name"`
@@ -169,6 +170,24 @@ func (r *Registry) Lookup(dir string) (Workspace, bool) {
 	return Workspace{}, false
 }
 
+// LookupOn returns the workspace whose path on another node most deeply
+// contains dir. That node's paths are on another machine's file system, so
+// they and dir are compared only after filepath.Clean: resolving symlinks or
+// inodes here would read this machine's directories that happen to share the
+// spelling. A remote directory is never registered by naozhi; the owner adds
+// it to a workspace's paths.
+func (r *Registry) LookupOn(node, dir string) (Workspace, bool) {
+	if node == "" || dir == "" || !filepath.IsAbs(dir) {
+		return Workspace{}, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if i, _ := r.prefixLocked(node, filepath.Clean(dir)); i >= 0 {
+		return r.ws[i].clone(), true
+	}
+	return Workspace{}, false
+}
+
 // Find returns the workspace ref names — its ID, else a name (any case) no
 // other workspace shares — and its first path on this node, "" when it has
 // none here.
@@ -251,14 +270,7 @@ func (r *Registry) SeedIfEmpty(seeds []Seed) int {
 // (~/Workspace vs ~/workspace) on macOS, only for paths longer than the
 // byte-wise best so a shallow exact match cannot hide a deeper folded one.
 func (r *Registry) lookupLocked(dir string) int {
-	best, bestLen := -1, 0
-	for i, w := range r.ws {
-		for _, p := range w.Paths[r.node] {
-			if len(p) > bestLen && (dir == p || strings.HasPrefix(dir, p+string(filepath.Separator))) {
-				best, bestLen = i, len(p)
-			}
-		}
-	}
+	best, bestLen := r.prefixLocked(r.node, dir)
 	for i, w := range r.ws {
 		for _, p := range w.Paths[r.node] {
 			if len(p) > bestLen && osutil.PathContainedInRoot(dir, p) {
@@ -267,6 +279,23 @@ func (r *Registry) lookupLocked(dir string) int {
 		}
 	}
 	return best
+}
+
+// prefixLocked returns the index of the workspace with the longest path on
+// node that is dir or a byte-wise parent of it, and that path's length; -1
+// when none is. Paths are cleaned first: a hand-edited one may end in a
+// slash.
+func (r *Registry) prefixLocked(node, dir string) (best, bestLen int) {
+	best = -1
+	for i, w := range r.ws {
+		for _, p := range w.Paths[node] {
+			p = filepath.Clean(p)
+			if len(p) > bestLen && (dir == p || strings.HasPrefix(dir, p+string(filepath.Separator))) {
+				best, bestLen = i, len(p)
+			}
+		}
+	}
+	return best, bestLen
 }
 
 // isContainer reports whether dir is a container or an ancestor of one.

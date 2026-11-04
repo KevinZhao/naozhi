@@ -1,6 +1,7 @@
 package wireup
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -38,6 +39,21 @@ func TestSessionFactFailure(t *testing.T) {
 				t.Errorf("failed = %v (%q), want %v", got, f.Failed, tt.failed)
 			}
 		})
+	}
+}
+
+func TestRemoteFact(t *testing.T) {
+	var row map[string]any
+	if err := json.Unmarshal([]byte(`{"key":"dashboard:direct:x:general","state":"ready","workspace":"/srv/app",
+		"summary":"Fix CI","last_response":"done","last_active":1762246800000}`), &row); err != nil {
+		t.Fatal(err)
+	}
+	f, ok := remoteFact("mini", false, row)
+	if !ok || f.ID != "mini/dashboard:direct:x:general" || f.Node != "mini" || f.Dir != "/srv/app" || f.Register {
+		t.Fatalf("fact = %+v, %v", f, ok)
+	}
+	if e := f.Index; e == nil || e.Key != "dashboard:direct:x:general" || e.Node != "mini" || e.Title != "Fix CI" || e.Result != "done" || !e.LastActive.Equal(f.LastActive) {
+		t.Errorf("index = %+v", f.Index)
 	}
 }
 

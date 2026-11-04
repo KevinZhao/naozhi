@@ -99,8 +99,9 @@ type Fact struct {
 	Kind     Kind
 	Source   string
 	Coverage Coverage
-	// Dir is the unit's working directory ("" when it has none); Register
-	// lets it be registered as a new workspace when no workspace holds it.
+	// Dir is the unit's working directory ("" when it has none), on Node's
+	// machine for a remote unit; Register lets it be registered as a new
+	// workspace when no workspace holds it.
 	Dir      string
 	Register bool
 	// Node is a remote unit's node; NodeDown is set while its polls fail.
@@ -130,8 +131,8 @@ type Fact struct {
 	WorkflowSeen time.Time
 	LastActive   time.Time
 
-	// Index is the unit's index.json row, set for local sessions only; the
-	// machine fills in Workspace and Health.
+	// Index is the unit's index.json row, set for local and remote
+	// sessions; the machine fills in Workspace and Health.
 	Index *IndexEntry
 }
 
@@ -227,6 +228,10 @@ type unit struct {
 	pendingClass ErrorClass
 	failedAt     time.Time // when ErrClass was confirmed, for fault merging
 	node         string
+	// dir and index are a remote unit's last listed directory and
+	// index.json row, kept for when its node is down and lists it no more.
+	dir   string
+	index *IndexEntry
 	// held is when a session failed before a restart, while it is still
 	// held failed (holdFailure); zero otherwise.
 	held         time.Time
@@ -400,15 +405,6 @@ func (m *Machine) Reconcile() {
 	for _, f := range facts {
 		seen[f.ID] = true
 	}
-	// A down node's sessions that are no longer listed are still its
-	// sessions: keep judging them, as unreachable.
-	for id, u := range m.units {
-		if !seen[id] && u.Kind == KindRemote && down[u.node] {
-			facts = append(facts, Fact{ID: id, Kind: KindRemote, Source: u.Source, Coverage: u.Coverage,
-				Node: u.node, NodeDown: true, Running: u.State == Active, LastActive: u.LastActive})
-			seen[id] = true
-		}
-	}
 	for i := range facts {
 		f := &facts[i]
 		u := m.units[f.ID]
@@ -420,6 +416,9 @@ func (m *Machine) Reconcile() {
 			m.units[f.ID] = u
 		}
 		u.Kind, u.Source, u.Coverage, u.node = f.Kind, f.Source, f.Coverage, f.Node
+		if f.Kind == KindRemote {
+			u.dir, u.index = f.Dir, f.Index
+		}
 		u.Workspace = m.workspaceFor(f)
 		u.LastActive = f.LastActive
 		state, evidence, class := m.judge(f, now, mono)
@@ -477,7 +476,28 @@ func (m *Machine) RefreshIndex() {
 	m.writeIndex(facts)
 }
 
-// collect gathers the units' facts, merged, and the nodes reported down.
+// unlisted returns facts for a down node's sessions that it no longer lists
+// (its sessions are purged once it deregisters): they are still its
+// sessions, judged as unreachable, in the workspace and index.json row they
+// were last listed with.
+func (m *Machine) unlisted(facts []Fact, down map[string]bool) []Fact {
+	listed := make(map[string]bool, len(facts))
+	for _, f := range facts {
+		listed[f.ID] = true
+	}
+	var out []Fact
+	for id, u := range m.units {
+		if !listed[id] && u.Kind == KindRemote && down[u.node] {
+			out = append(out, Fact{ID: id, Kind: KindRemote, Source: u.Source, Coverage: u.Coverage,
+				Dir: u.dir, Node: u.node, NodeDown: true, Running: u.State == Active,
+				LastActive: u.LastActive, Index: u.index})
+		}
+	}
+	return out
+}
+
+// collect gathers the units' facts, merged, with those of the down nodes'
+// unlisted sessions, and the nodes reported down.
 func (m *Machine) collect() ([]Fact, map[string]bool) {
 	all := m.cfg.Collect(m.baseline)
 	facts := make([]Fact, 0, len(all))
@@ -490,7 +510,8 @@ func (m *Machine) collect() ([]Fact, map[string]bool) {
 			facts = append(facts, f)
 		}
 	}
-	return mergeFacts(facts), down
+	facts = mergeFacts(facts)
+	return append(facts, m.unlisted(facts, down)...), down
 }
 
 // step applies one judged state to u and returns the transition it causes.
@@ -662,25 +683,34 @@ func (m *Machine) record(ev Event) {
 }
 
 // workspaceFor returns the ID of the workspace holding f's directory,
-// registering the directory when f allows it.
+// registering the directory when f allows it. A remote unit's directory is
+// looked up among its node's paths only, and never registered.
 func (m *Machine) workspaceFor(f *Fact) string {
 	if f.Dir == "" || m.cfg.Workspaces == nil {
 		return ""
 	}
-	if id, ok := m.wsCache[f.Dir]; ok {
+	// Two machines may each have the same path, holding different work.
+	ck := f.Dir
+	if f.Node != "" {
+		ck = f.Node + " " + f.Dir
+	}
+	if id, ok := m.wsCache[ck]; ok {
 		return id
 	}
 	var w workspace.Workspace
 	var ok bool
-	if f.Register {
+	switch {
+	case f.Node != "":
+		w, ok = m.cfg.Workspaces.LookupOn(f.Node, f.Dir)
+	case f.Register:
 		w, ok = m.cfg.Workspaces.Ensure(f.Dir)
-	} else {
+	default:
 		w, ok = m.cfg.Workspaces.Lookup(f.Dir)
 	}
 	if !ok {
 		return ""
 	}
-	m.wsCache[f.Dir] = w.ID
+	m.wsCache[ck] = w.ID
 	return w.ID
 }
 

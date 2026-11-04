@@ -433,6 +433,12 @@ func main() {
 	}
 	updateDashboardInstall := cfg.UpdateDashboardInstall()
 
+	// Units are named once the health machine runs, so srv (whose node
+	// cache names remote sessions) is set by then.
+	var srv *server.Server
+	unitNames := wireup.UnitNames(router, scheduler, func() (map[string][]map[string]any, map[string]string) {
+		return srv.RemoteSessions()
+	})
 	// "等你" inbox and push pipeline (docs/rfc/planner.md §15.1); its
 	// sources are bound once the health machine exists, below.
 	notifier := notify.New(notify.Config{
@@ -440,7 +446,7 @@ func main() {
 		Layout:  sessionLayout,
 		Journal: plannerState.Journal,
 		Beats:   beats,
-		Name:    wireup.UnitNames(router, scheduler),
+		Name:    unitNames,
 		Link:    wireup.DashboardLink(cfg.Server.Addr),
 	})
 	// Side notes in the session view (§15.3 ③), read back from the journal
@@ -468,7 +474,7 @@ func main() {
 		},
 		Tasks:      tasks.List,
 		Push:       notifier.Announce,
-		Name:       wireup.UnitNames(router, scheduler),
+		Name:       unitNames,
 		Workspaces: plannerState.Workspaces,
 	})
 
@@ -478,7 +484,7 @@ func main() {
 	taskOpts := wireup.TaskOpts{Base: agents["general"], Sessions: sidecars}
 	// The health monitor reads srv's node and discovery caches, so it is built
 	// after srv; srv only reads it once it serves.
-	srv := server.NewWithOptions(server.ServerOptions{
+	srv = server.NewWithOptions(server.ServerOptions{
 		Addr:             cfg.Server.Addr,
 		Router:           router,
 		Platforms:        platforms,
