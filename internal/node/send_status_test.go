@@ -49,12 +49,12 @@ func TestReverseConn_SendPassesOnTheNodesStatus(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
-			status, err := rc.Send(ctx, "key", "/new", "")
+			res, err := rc.Send(ctx, SendRequest{Key: "key", Text: "/new"})
 			if err != nil {
 				t.Fatalf("Send: %v", err)
 			}
-			if status != tc.want {
-				t.Errorf("status = %q, want %q", status, tc.want)
+			if res.Status != tc.want {
+				t.Errorf("status = %q, want %q", res.Status, tc.want)
 			}
 		})
 	}
@@ -74,12 +74,12 @@ func TestHTTPClient_SendPassesOnTheNodesStatus(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			status, err := newTestHTTPClient(t, srv, "").Send(context.Background(), "k", "/new", "")
+			res, err := newTestHTTPClient(t, srv, "").Send(context.Background(), SendRequest{Key: "k", Text: "/new"})
 			if err != nil {
 				t.Fatalf("Send: %v", err)
 			}
-			if status != tc.want {
-				t.Errorf("status = %q, want %q", status, tc.want)
+			if res.Status != tc.want {
+				t.Errorf("status = %q, want %q", res.Status, tc.want)
 			}
 		})
 	}
@@ -101,9 +101,9 @@ func TestSend_RefusalIsAnErrorWithNoStatus(t *testing.T) {
 		}()
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		status, err := rc.Send(ctx, "key", "hi", "")
-		if err == nil || status != "" {
-			t.Errorf("Send = (%q, %v), want (\"\", error)", status, err)
+		res, err := rc.Send(ctx, SendRequest{Key: "key", Text: "hi"})
+		if err == nil || res.Status != "" {
+			t.Errorf("Send = (%q, %v), want (\"\", error)", res.Status, err)
 		}
 	})
 	t.Run("http", func(t *testing.T) {
@@ -112,9 +112,9 @@ func TestSend_RefusalIsAnErrorWithNoStatus(t *testing.T) {
 			w.Write([]byte(`{"status":"accepted"}`))
 		}))
 		defer srv.Close()
-		status, err := newTestHTTPClient(t, srv, "").Send(context.Background(), "k", "hi", "")
-		if err == nil || status != "" {
-			t.Errorf("Send = (%q, %v), want (\"\", error)", status, err)
+		res, err := newTestHTTPClient(t, srv, "").Send(context.Background(), SendRequest{Key: "k", Text: "hi"})
+		if err == nil || res.Status != "" {
+			t.Errorf("Send = (%q, %v), want (\"\", error)", res.Status, err)
 		}
 	})
 }

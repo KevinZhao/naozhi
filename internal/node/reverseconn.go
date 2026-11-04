@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -207,9 +208,13 @@ func (c *ReverseConn) rpc(ctx context.Context, method string, params any) (json.
 		c.pendingMu.Lock()
 		delete(c.pending, reqID)
 		c.pendingMu.Unlock()
-		return nil, fmt.Errorf("node %s disconnected", c.id)
+		return nil, fmt.Errorf("node %s %w", c.id, errNodeDisconnected)
 	}
 }
+
+// errNodeDisconnected is an RPC whose request went out and whose link
+// dropped before the answer.
+var errNodeDisconnected = errors.New("disconnected")
 
 func marshalParams(v any) (json.RawMessage, error) {
 	if v == nil {
@@ -294,16 +299,39 @@ func (c *ReverseConn) FetchBackends(ctx context.Context) (json.RawMessage, error
 	return c.rpc(ctx, "fetch_backends", nil)
 }
 
-func (c *ReverseConn) Send(ctx context.Context, key, text, workspace string) (string, error) {
-	params := map[string]string{"key": key, "text": text}
-	if workspace != "" {
-		params["workspace"] = workspace
+// Send relays req as the "send" RPC. An older node parses the params with a
+// plain Unmarshal and would drop a field it does not know, so backend and
+// resume_id go only to a node advertising CapSendBackend (else the send is
+// refused) and turn_id only to one advertising CapSendIdempotent (else it is
+// a send as before, with no retry safety and no "unknown" answer).
+func (c *ReverseConn) Send(ctx context.Context, req SendRequest) (SendResult, error) {
+	params := map[string]string{"key": req.Key, "text": req.Text}
+	if req.Workspace != "" {
+		params["workspace"] = req.Workspace
+	}
+	if req.Backend != "" || req.ResumeID != "" {
+		if !c.meta.HasCap(CapSendBackend) {
+			return SendResult{}, ErrSendBackendUnsupported
+		}
+		if req.Backend != "" {
+			params["backend"] = req.Backend
+		}
+		if req.ResumeID != "" {
+			params["resume_id"] = req.ResumeID
+		}
+	}
+	idempotent := req.TurnID != "" && c.meta.HasCap(CapSendIdempotent)
+	if idempotent {
+		params["turn_id"] = req.TurnID
 	}
 	raw, err := c.rpc(ctx, "send", params)
 	if err != nil {
-		return "", err
+		if idempotent && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, errNodeDisconnected)) {
+			return SendResult{}, fmt.Errorf("%w: %w", ErrSendUnknown, err)
+		}
+		return SendResult{}, err
 	}
-	return sendStatusFrom(raw), nil
+	return sendResultFrom(raw), nil
 }
 
 func (c *ReverseConn) ProxyTakeover(ctx context.Context, pid int, sessionID, cwd string, procStart uint64) (string, error) {

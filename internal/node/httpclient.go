@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -255,28 +256,50 @@ func (n *HTTPClient) getEvents(ctx context.Context, path string) ([]clievent.Eve
 	return entries, resp.Header, nil
 }
 
-// Send sends a message to a session on the remote node via POST /api/sessions/send.
-func (n *HTTPClient) Send(ctx context.Context, key, text, workspace string) (string, error) {
-	payload := map[string]string{"key": key, "text": text}
-	if workspace != "" {
-		payload["workspace"] = workspace
+// IdempotencyKeyHeader carries a direct send's TurnID. A header, not a body
+// field: a node predating it decodes /api/sessions/send with
+// DisallowUnknownFields and would refuse the send.
+const IdempotencyKeyHeader = "Idempotency-Key"
+
+// Send sends a message to a session on the remote node via POST
+// /api/sessions/send, whose body has always taken backend and resume_id.
+func (n *HTTPClient) Send(ctx context.Context, req SendRequest) (SendResult, error) {
+	payload := map[string]string{"key": req.Key, "text": req.Text}
+	if req.Workspace != "" {
+		payload["workspace"] = req.Workspace
+	}
+	if req.Backend != "" {
+		payload["backend"] = req.Backend
+	}
+	if req.ResumeID != "" {
+		payload["resume_id"] = req.ResumeID
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return "", fmt.Errorf("marshal send payload: %w", err)
+		return SendResult{}, fmt.Errorf("marshal send payload: %w", err)
 	}
-	resp, err := n.doRequest(ctx, http.MethodPost, "/api/sessions/send", bytes.NewReader(data))
+	var hdr http.Header
+	if req.TurnID != "" {
+		hdr = http.Header{IdempotencyKeyHeader: {req.TurnID}}
+	}
+	resp, err := n.doRequestHdr(ctx, http.MethodPost, "/api/sessions/send", bytes.NewReader(data), hdr)
 	if err != nil {
-		return "", fmt.Errorf("send to %s: %w", n.ID, err)
+		// A timeout may have reached the node; anything else (refused,
+		// unresolvable, rejected locally) did not.
+		var te interface{ Timeout() bool }
+		if req.TurnID != "" && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || (errors.As(err, &te) && te.Timeout())) {
+			return SendResult{}, fmt.Errorf("%w: send to %s: %w", ErrSendUnknown, n.ID, err)
+		}
+		return SendResult{}, fmt.Errorf("send to %s: %w", n.ID, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
-		return "", fmt.Errorf("send to %s: status %d", n.ID, resp.StatusCode)
+		return SendResult{}, fmt.Errorf("send to %s: status %d", n.ID, resp.StatusCode)
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-	return sendStatusFrom(body), nil
+	return sendResultFrom(body), nil
 }
 
 // FetchProjects fetches projects from the remote node via GET /api/projects.

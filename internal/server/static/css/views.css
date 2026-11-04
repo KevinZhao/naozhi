@@ -678,6 +678,10 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
    toast so the signal stays bound to its message (and vanishes naturally
    when the real "user" event replaces the optimistic bubble). */
 .event.user.optimistic-msg .msg-queued-chip{display:inline-block;margin-top:4px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);opacity:.85}
+/* A remote send whose answer was lost (send_ack status=unknown): the bubble
+   stays and offers a retry of the same send_id. */
+.event.user.optimistic-msg .msg-unknown-chip{display:block;margin-top:4px;font-size:var(--nz-fs-xs);color:var(--nz-warn)}
+.msg-unknown-chip .msg-retry-btn{margin-left:4px;padding:1px 8px;font:inherit;color:var(--nz-accent);background:transparent;border:1px solid currentColor;border-radius:var(--nz-radius-sm);cursor:pointer}
 /* AI text: left-aligned, clean markdown */
 .event.text .event-icon{background:rgba(163,118,255,.15);color:#a376ff;font-size:var(--nz-fs-md)}
 /* Clawd mascot for claude-backend assistant turns. Drop the .event-icon

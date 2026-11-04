@@ -175,6 +175,8 @@ type SendAck struct {
 	Status string  `json:"status,omitempty"`
 	Error  string  `json:"error,omitempty"`
 	Node   string  `json:"node,omitempty"`
+	// TurnID is the send_id an "unknown" ack's retry must reuse.
+	TurnID string `json:"turn_id,omitempty"`
 }
 
 func NewSendAck(f SendAck) SendAck { f.Type = TypeSendAck; return f }

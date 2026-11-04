@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/wsproto"
@@ -44,9 +45,58 @@ type NodeFetcher interface {
 	// raw JSON so the primary need not track a newer peer's manifest shape;
 	// peers predating the RPC error and the picker collapses to single-backend.
 	FetchBackends(ctx context.Context) (json.RawMessage, error)
-	// Send returns how the node took the message: "accepted", "queued",
-	// "reset" or "busy" (see sendStatus).
-	Send(ctx context.Context, key, text, workspace string) (string, error)
+	// Send returns how the node took the message (see SendResult). A pick the
+	// link cannot carry is an error, never dropped; ErrSendUnknown means the
+	// request went out with a TurnID and no answer came back.
+	Send(ctx context.Context, req SendRequest) (SendResult, error)
+}
+
+// SendRequest is one message the primary forwards to a node's session.
+// Backend and ResumeID are the spawn-time picks the node records for Key, as
+// a local send does. TurnID is the browser's send ID: a node that knows it
+// answers a repeat with the first answer instead of running a second turn.
+type SendRequest struct {
+	Key       string
+	Text      string
+	Workspace string
+	Backend   string
+	ResumeID  string
+	TurnID    string
+}
+
+// SendResult is the node's answer to a send. Status is "accepted", "queued",
+// "reset" or "busy" (see sendStatus); Dup marks a TurnID the node had already
+// taken, Status then being the first send's.
+type SendResult struct {
+	Status string
+	Dup    bool
+}
+
+// ErrSendUnknown is a send that went out with a TurnID and got no answer
+// (timeout or a dropped link): the node may be running it. Retrying with the
+// same TurnID is safe.
+var ErrSendUnknown = errors.New("远程节点未及时回应，消息状态未知")
+
+// ErrSendBackendUnsupported refuses a send whose backend or resume pick the
+// node cannot read; dropping it would start the session on the wrong backend.
+var ErrSendBackendUnsupported = errors.New("远程节点版本过旧，不支持指定后端或续接会话，请升级该节点")
+
+// MaxTurnIDLen bounds a turn ID; the browser's are 33 bytes.
+const MaxTurnIDLen = 64
+
+// ValidTurnID reports whether id is a usable turn ID: 1..MaxTurnIDLen bytes
+// of [A-Za-z0-9._-], so it is safe in logs, headers and dedup keys.
+func ValidTurnID(id string) bool {
+	if id == "" || len(id) > MaxTurnIDLen {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 // sendStatus is the admission status a node answered a send with, limited to
@@ -62,14 +112,15 @@ func sendStatus(answer string) string {
 	}
 }
 
-// sendStatusFrom decodes a node's {"status": …} send answer; a body that is
-// absent or does not decode reads as "accepted".
-func sendStatusFrom(body []byte) string {
+// sendResultFrom decodes a node's {"status": …, "dup": …} send answer; a
+// body that is absent or does not decode reads as "accepted".
+func sendResultFrom(body []byte) SendResult {
 	var v struct {
 		Status string `json:"status"`
+		Dup    bool   `json:"dup"`
 	}
 	_ = json.Unmarshal(body, &v)
-	return sendStatus(v.Status)
+	return SendResult{Status: sendStatus(v.Status), Dup: v.Dup}
 }
 
 // EventsQuery selects a history page: Before > 0 asks for the newest Limit

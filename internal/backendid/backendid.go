@@ -8,7 +8,7 @@ package backendid
 const MaxLen = 64
 
 // IsValid reports whether s passes the per-request charset + length gate.
-// Empty is allowed (treated as "router default" by selectNodeForBackend).
+// Empty is allowed (treated as "router default").
 // The charset is [A-Za-z0-9._-]; length must be <= MaxLen bytes.
 func IsValid(s string) bool {
 	if len(s) > MaxLen {

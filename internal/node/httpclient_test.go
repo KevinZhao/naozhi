@@ -158,15 +158,21 @@ func httpRPCCases() []httpRPCCase {
 			// A 200 with no body is a node that took the send.
 			name: "Send", method: http.MethodPost, path: "/api/sessions/send",
 			body: map[string]any{"key": "feishu:group:123", "text": "hi"},
-			call: func(c *HTTPClient) (any, error) { return c.Send(ctx, "feishu:group:123", "hi", "") },
+			call: func(c *HTTPClient) (any, error) {
+				r, err := c.Send(ctx, SendRequest{Key: "feishu:group:123", Text: "hi"})
+				return r.Status, err
+			},
 			want: "accepted",
 		},
 		{
 			name: "Send workspace", method: http.MethodPost, path: "/api/sessions/send",
 			body:   map[string]any{"key": "k", "text": "text", "workspace": "/home/user/project"},
 			status: http.StatusAccepted,
-			call:   func(c *HTTPClient) (any, error) { return c.Send(ctx, "k", "text", "/home/user/project") },
-			want:   "accepted",
+			call: func(c *HTTPClient) (any, error) {
+				r, err := c.Send(ctx, SendRequest{Key: "k", Text: "text", Workspace: "/home/user/project"})
+				return r.Status, err
+			},
+			want: "accepted",
 		},
 		{
 			name: "FetchProjects", method: http.MethodGet, path: "/api/projects",

@@ -15,6 +15,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
@@ -87,7 +88,9 @@ type SessionRouter interface {
 // turn.Orchestrator, like an IM or dashboard send, so slash commands, the
 // queue and agent options apply. It creates the session before returning;
 // status is "accepted", "queued", "reset" or "busy" (not buffered; the user
-// retries). server.Server implements it.
+// retries), and a repeat of a TurnID it took answers the first status with
+// Dup set. req.Workspace has passed the connector's checks. server.Server
+// implements it.
 type TurnSubmitter interface {
-	SubmitRelayed(ctx context.Context, key, text, workspace string) (status string, err error)
+	SubmitRelayed(ctx context.Context, req node.SendRequest) (node.SendResult, error)
 }

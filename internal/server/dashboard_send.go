@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/naozhi/naozhi/internal/ctxutil"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/limits"
+	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
@@ -76,7 +78,7 @@ type SendHandler struct {
 }
 
 func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
-	var key, text, node, workspace, resumeID, backend, accessProfile string
+	var key, text, targetNode, workspace, resumeID, backend, accessProfile, sendID string
 	var images []clievent.Attachment
 	var fileIDs []string
 
@@ -97,11 +99,12 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		}
 		key = r.FormValue("key")
 		text = r.FormValue("text")
-		node = r.FormValue("node")
+		targetNode = r.FormValue("node")
 		workspace = r.FormValue("workspace")
 		resumeID = r.FormValue("resume_id")
 		backend = r.FormValue("backend")
 		accessProfile = r.FormValue("access_profile")
+		sendID = r.FormValue("send_id")
 		fileIDs = r.MultipartForm.Value["file_ids"]
 
 		files := r.MultipartForm.File["files"]
@@ -132,6 +135,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 			Backend       string   `json:"backend"`
 			AccessProfile string   `json:"access_profile"`
 			FileIDs       []string `json:"file_ids"`
+			SendID        string   `json:"send_id"`
 		}
 		if err := decodeJSONBody(r, &req); err != nil {
 			slog.Debug("dashboard send: invalid JSON", "err", err)
@@ -140,12 +144,22 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		}
 		key = req.Key
 		text = req.Text
-		node = req.Node
+		targetNode = req.Node
 		workspace = req.Workspace
 		resumeID = req.ResumeID
 		backend = req.Backend
 		accessProfile = req.AccessProfile
 		fileIDs = req.FileIDs
+		sendID = req.SendID
+	}
+	// The dashboard's send_id is the turn ID of a send this host forwards to
+	// a node; a primary forwarding a send here names it in the header
+	// (node.IdempotencyKeyHeader), and only that makes a local send run once
+	// per ID. A browser's send to a local session is unchanged.
+	idemKey := r.Header.Get(node.IdempotencyKeyHeader)
+	if (sendID != "" && !node.ValidTurnID(sendID)) || (idemKey != "" && !node.ValidTurnID(idemKey)) {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid send_id"})
+		return
 	}
 
 	if len(fileIDs) > maxFilesPerSend {
@@ -205,7 +219,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	// host the workspace file locally). Reject BEFORE persisting so we
 	// don't leave files on disk that will never be read. The deeper
 	// remote-node branch below repeats this check for defence in depth.
-	if node != "" && node != "local" && len(images) > 0 {
+	if targetNode != "" && targetNode != "local" && len(images) > 0 {
 		writeSendError(w, http.StatusBadRequest, "files not supported for remote nodes", filesConsumed)
 		return
 	}
@@ -246,10 +260,16 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Remote node proxy
-	if node != "" && node != "local" {
+	if targetNode != "" && targetNode != "local" {
 		if len(images) > 0 {
 			cleanup()
-			writeSendError(w, http.StatusBadRequest, "files not supported for remote nodes", filesConsumed)
+			writeSendError(w, http.StatusBadRequest, errRemoteFiles, filesConsumed)
+			return
+		}
+		// An access profile is a host-local overlay no link carries; refuse
+		// the pick rather than drop it.
+		if accessProfile != "" {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": ErrAccessProfileRemote.Error()})
 			return
 		}
 		// Syntactic workspace gate (same as WS handleRemoteSend): the remote
@@ -265,25 +285,35 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		// a tightening — the profile check is a no-op for a nil resolver
 		// by design, which is exactly what the old `h.hub != nil`
 		// guard produced for test harnesses.
-		// selectNodeForBackend below is the single node + cap authority (one
-		// GetNode; no TOCTOU between lookup and cap check).
-		if err := h.engine.gateRemoteAccess(node, key); err != nil {
+		if err := h.engine.gateRemoteAccess(targetNode, key); err != nil {
 			cleanup()
 			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		nc, err := selectNodeForBackend(h.nodeAccess, node, backend)
+		nc, err := selectNode(h.nodeAccess, targetNode)
 		if err != nil {
 			cleanup()
 			// 400 across the board (TestHandleAPISend_UnknownNode pins this);
-			// the message is one of the structured sentinels (ErrUnknownBackend
-			// / ErrNodeNotConnected / ErrNodeMissingCap).
+			// the message is the ErrNodeNotConnected sentinel.
 			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
 		if nc == nil {
 			// Unreachable given the node gate above; kept to match
-			// selectNodeForBackend's documented nil-return contract.
+			// selectNode's documented nil-return contract.
+			return
+		}
+		// The backend pick is checked here, before the 202, so a node that
+		// does not run it is this request's 400 rather than a later toast.
+		if !isValidBackendID(backend) {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid backend identifier"})
+			return
+		}
+		bctx, bcancel := context.WithTimeout(r.Context(), remoteNodeProxyTimeout)
+		err = remoteBackend(bctx, nc, backend)
+		bcancel()
+		if err != nil {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": remoteSendErrorText(err, "remote send failed")})
 			return
 		}
 		// remoteSend tracks the goroutine so drain waits for the in-flight
@@ -291,7 +321,10 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		// closed nc.conn); a late arrival during shutdown gets 503 instead of
 		// a goroutine. Error fan-out to the key's subscribers is the
 		// engine's job — there is no ack channel on HTTP.
-		if !h.engine.remoteSend(nc, node, key, text, workspace) {
+		if !h.engine.remoteSend(nc, targetNode, node.SendRequest{
+			Key: key, Text: text, Workspace: workspace,
+			Backend: backend, ResumeID: resumeID, TurnID: sendID,
+		}) {
 			writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "server shutting down"})
 			return
 		}
@@ -299,12 +332,40 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reset, status, err := h.engine.sessionSend(sendParams{
+	p := sendParams{
 		Key: key, Text: text, Images: images,
 		Workspace: workspace, ResumeID: resumeID, Backend: backend,
 		AccessProfile: accessProfile,
 		TraceID:       osutil.SanitizeForLog(ctxutil.TraceID(r.Context()), 128),
-	}, h.engine.httpOrigin(key))
+	}
+	var reset, dup bool
+	var status sendAckStatus
+	var err error
+	if idemKey == "" {
+		reset, status, err = h.engine.sessionSend(p, h.engine.httpOrigin(key))
+	} else {
+		p.TraceID = idemKey
+		var res node.SendResult
+		res, err = h.engine.dedup.do(r.Context(), key, idemKey, func() (string, error) {
+			reset, st, err := h.engine.sessionSend(p, h.engine.httpOrigin(key))
+			if reset {
+				return string(sendAckReset), err
+			}
+			return string(st), err
+		})
+		status, dup = sendAckStatus(res.Status), res.Dup
+		reset = status == sendAckReset
+	}
+	if dup {
+		// The first send of this ID took its own copy of any attachment.
+		cleanup()
+		code := http.StatusAccepted
+		if reset {
+			code = http.StatusOK
+		}
+		writeJSONStatus(w, code, map[string]any{"status": string(status), "key": key, "dup": true})
+		return
+	}
 	if err != nil {
 		cleanup()
 		// Forward only the localised label: the raw error may embed workspace

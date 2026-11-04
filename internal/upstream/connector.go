@@ -230,7 +230,8 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 
 	// Register. Capabilities are derived from the locally-registered
 	// backend.Profile set (union of RequiredNodeCaps, sorted for deterministic
-	// wire output) so the primary's selectNodeForBackend needs no operator caps.
+	// wire output) plus the always-advertised tags (caps.go), so no operator
+	// has to list them.
 	reg := node.ReverseMsg{
 		Type:         "register",
 		NodeID:       c.cfg.NodeID,

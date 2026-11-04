@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"runtime/debug"
@@ -270,6 +271,20 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Key: msg.Key, Error: "invalid backend id"}))
 		return
 	}
+	if msg.SendID != "" && !node.ValidTurnID(msg.SendID) {
+		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Key: msg.Key, Error: "invalid send_id"}))
+		return
+	}
+	// The picks no link carries are refused, not dropped: attachments live in
+	// this host's upload store, and an access profile is a host-local overlay.
+	if len(msg.FileIDs) > 0 {
+		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Key: msg.Key, Error: errRemoteFiles}))
+		return
+	}
+	if msg.AccessProfile != "" {
+		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Key: msg.Key, Error: ErrAccessProfileRemote.Error()}))
+		return
+	}
 	// A scratch: session or one bound to a non-default access profile must not
 	// be dispatched remotely: the env overlay is host-local and never crosses
 	// the wire, so the remote would spawn on the wrong account. Fail loud.
@@ -278,17 +293,17 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Key: msg.Key, Error: err.Error()}))
 		return
 	}
-	nc, err := selectNodeForBackend(hubNodeLookup{h}, nodeID, msg.Backend)
+	nc, err := selectNode(hubNodeLookup{h}, nodeID)
 	if err != nil {
-		slog.Debug("ws send: backend route rejected", "node", nodeID, "backend", msg.Backend, "err", err)
-		// ErrNodeMissingCap / ErrUnknownBackend / ErrNodeNotConnected are
-		// surfaced verbatim: fixed constants (no host paths, no token bytes).
+		slog.Debug("ws send: node route rejected", "node", nodeID, "err", err)
+		// ErrNodeNotConnected is surfaced verbatim: a fixed constant plus
+		// the validated node ID (no host paths, no token bytes).
 		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Key: msg.Key, Error: err.Error()}))
 		return
 	}
 	if nc == nil {
 		// Defensive: msg.Node passed isValidNodeID + non-empty above,
-		// so selectNodeForBackend should not return (nil, nil) here.
+		// so selectNode should not return (nil, nil) here.
 		// Treat as unknown node to keep the existing 400-ish surface.
 		slog.Debug("ws send: unknown node", "node", nodeID)
 		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Error: "unknown node"}))
@@ -326,28 +341,46 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 		}()
 		ctx, cancel := context.WithTimeout(h.ctx, remoteNodeProxyTimeout)
 		defer cancel()
-		status, err := nc.Send(ctx, capturedKey, msg.Text, msg.Workspace)
-		if err != nil {
+		req := node.SendRequest{
+			Key: capturedKey, Text: msg.Text, Workspace: msg.Workspace,
+			Backend: msg.Backend, ResumeID: msg.ResumeID, TurnID: msg.SendID,
+		}
+		var res node.SendResult
+		err := remoteBackend(ctx, nc, req.Backend)
+		if err == nil {
+			res, err = nc.Send(ctx, req)
+		}
+		switch {
+		case errors.Is(err, node.ErrSendUnknown):
+			// The frame went out and the answer did not come back: the node
+			// may be running it. The tab keeps the bubble and retries with
+			// the same send_id, which the node answers from its dedup table.
+			slog.Warn("remote ws send unanswered", "node", nodeID, "key", capturedKey, "turn_id", req.TurnID, "err", osutil.SanitizeForLog(err.Error(), 512))
+			c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: capturedID, Status: string(sendAckUnknown), Key: capturedKey, Node: nodeID, TurnID: req.TurnID}))
+		case err != nil:
 			// err originates from the remote transport and may carry control
 			// bytes / bidi overrides; sanitise before logging (#641).
 			slog.Error("remote ws send failed", "node", nodeID, "key", capturedKey, "err", osutil.SanitizeForLog(err.Error(), 512))
 			// Do not surface the raw err: transport-level messages can leak
 			// internal host/port/auth details back to authenticated browser
 			// clients. Operators still see the detail in the slog above.
-			c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: capturedID, Status: "error", Key: capturedKey, Node: nodeID, Error: "remote send failed"}))
+			c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: capturedID, Status: "error", Key: capturedKey, Node: nodeID, Error: remoteSendErrorText(err, "remote send failed")}))
 			// send_ack reaches only the originating tab; fan the failure out to
 			// every dashboard subscribed to this remote session (whose EventLog
 			// lives on the node). Summary is re-sanitised: broadcast verbatim (#433).
 			h.bcast.broadcastSessionSystemEvent(capturedKey, "发送失败："+osutil.SanitizeForLog(err.Error(), 512))
-		} else {
+		default:
+			if res.Dup {
+				slog.Info("remote ws send answered as a repeat", "node", nodeID, "key", capturedKey, "turn_id", req.TurnID, "status", res.Status)
+			}
 			// The node's own status, so a remote /new rolls the tab back
 			// and a busy node is a toast, as they are for a local send.
-			c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: capturedID, Status: status, Key: capturedKey, Node: nodeID}))
+			c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: capturedID, Status: res.Status, Key: capturedKey, Node: nodeID}))
 			// Refresh the remote subscription so the connector re-creates
 			// its streamEvents goroutine if the previous one exited (e.g.
 			// process died between the last subscribe and this send). A
 			// reset key has no session to subscribe to until the next send.
-			if status != string(sendAckReset) {
+			if res.Status != string(sendAckReset) {
 				nc.RefreshSubscription(capturedKey)
 			}
 		}
@@ -357,6 +390,6 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 
 // submitRelayed is how Server.SubmitRelayed reaches the engine: the Hub holds
 // it at run time, and the engine stays off Server (send_engine_sibling C2/C4).
-func (h *Hub) submitRelayed(ctx context.Context, key, text, workspace string) (string, error) {
-	return h.engine.relaySend(ctx, key, text, workspace)
+func (h *Hub) submitRelayed(ctx context.Context, req node.SendRequest) (node.SendResult, error) {
+	return h.engine.relaySend(ctx, req)
 }

@@ -49,6 +49,9 @@ type sendEngine struct {
 	// ctx is the engine's own child of sendEngineOpts.Ctx; drain cancels it.
 	ctx    context.Context
 	cancel context.CancelFunc
+	// dedup answers a repeated turn ID from a primary (relayed or direct
+	// sends) with the first answer.
+	dedup *sendDedup
 
 	// ── shared dependencies ──
 	// INVARIANT: read-only after construction. Hub keeps its own reference to
@@ -113,6 +116,7 @@ func newSendEngine(o sendEngineOpts) *sendEngine {
 		turns:       o.Turns,
 		ctx:         ctx,
 		cancel:      cancel,
+		dedup:       newSendDedup(),
 		router:      o.Router,
 		resolver:    o.Resolver,
 		agents:      o.Agents,
@@ -178,7 +182,7 @@ const remoteSendTimeout = 60 * time.Second
 // remote transport errors are never informational, so unlike httpOrigin
 // nothing is filtered. Neither is a node that answers busy: the message was
 // not buffered.
-func (e *sendEngine) remoteSend(nc node.Conn, nodeID, key, text, workspace string) (accepted bool) {
+func (e *sendEngine) remoteSend(nc node.Conn, nodeID string, req node.SendRequest) (accepted bool) {
 	release, shuttingDown := e.TrackSend()
 	if shuttingDown {
 		return false
@@ -187,15 +191,16 @@ func (e *sendEngine) remoteSend(nc node.Conn, nodeID, key, text, workspace strin
 		defer release()
 		ctx, cancel := context.WithTimeout(e.ctx, remoteSendTimeout)
 		defer cancel()
-		status, err := nc.Send(ctx, key, text, workspace)
+		key := req.Key
+		res, err := nc.Send(ctx, req)
 		if err != nil {
 			slog.Error("remote send",
 				"node", osutil.SanitizeForLog(nodeID, 128),
 				"key", sessionkey.SanitizeLogAttr(key), "err", err)
-			e.notify.broadcastSendError(key, asyncErrorMessage(err))
-		} else if status == string(sendAckBusy) {
+			e.notify.broadcastSendError(key, remoteSendErrorText(err, asyncErrorMessage(err)))
+		} else if res.Status == string(sendAckBusy) {
 			e.notify.broadcastSendError(key, errSendBusy.Error())
-		} else if status != string(sendAckReset) {
+		} else if res.Status != string(sendAckReset) {
 			nc.RefreshSubscription(key)
 		}
 		e.notify.BroadcastSessionsUpdate()

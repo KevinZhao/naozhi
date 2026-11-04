@@ -70,8 +70,8 @@ type statusNode struct {
 	status string
 }
 
-func (n *statusNode) Send(context.Context, string, string, string) (string, error) {
-	return n.status, nil
+func (n *statusNode) Send(context.Context, node.SendRequest) (node.SendResult, error) {
+	return node.SendResult{Status: n.status}, nil
 }
 
 // TestRemoteSend_ABusyNodeIsASendError: the HTTP path answered 202 before
@@ -93,7 +93,7 @@ func TestRemoteSend_ABusyNodeIsASendError(t *testing.T) {
 			e := newSendEngine(sendEngineOpts{Notify: rec})
 			defer e.drain()
 
-			if !e.remoteSend(&statusNode{fakeCapNode: fakeCapNode{id: "remote"}, status: tc.status}, "remote", key, "hi", "") {
+			if !e.remoteSend(&statusNode{fakeCapNode: fakeCapNode{id: "remote"}, status: tc.status}, "remote", node.SendRequest{Key: key, Text: "hi"}) {
 				t.Fatal("remoteSend refused a send on a live engine")
 			}
 			e.wg.Wait()
@@ -147,7 +147,7 @@ func TestRemoteSend_NoRefreshAfterAReset(t *testing.T) {
 			e := newSendEngine(sendEngineOpts{Notify: &recordingNotifier{}})
 			defer e.drain()
 
-			if !e.remoteSend(nc, "remote", key, "/new", "") {
+			if !e.remoteSend(nc, "remote", node.SendRequest{Key: key, Text: "/new"}) {
 				t.Fatal("remoteSend refused a send on a live engine")
 			}
 			e.wg.Wait()

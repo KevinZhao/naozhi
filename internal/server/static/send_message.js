@@ -209,6 +209,68 @@ function composerSendBlocked() {
   return false;
 }
 
+// newSendID returns a fresh send ID ('s' + 32 hex). getRandomValues, not
+// randomUUID: the dashboard is also served over plain-HTTP LAN addresses,
+// where randomUUID does not exist.
+function newSendID() {
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  return 's' + Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+}
+
+// sentRemoteFrames holds each remote WS send frame until its send_ack
+// settles it, so a send_ack "unknown" (the node may or may not have it) can
+// be retried as the very same frame — same send_id, same spawn picks.
+const sentRemoteFrames = new Map();
+
+// settleSend forgets send id's frame and the unknown chip on its bubble; the
+// ack for it said how the node took it.
+export function settleSend(id) {
+  if (!id) return;
+  sentRemoteFrames.delete(id);
+  const chip = bubbleFor(id)?.querySelector('.msg-unknown-chip');
+  if (chip) chip.remove();
+}
+
+function bubbleFor(id) {
+  const sel = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(id) : id;
+  return document.querySelector('#events-scroll .optimistic-msg[data-send-id="' + sel + '"]');
+}
+
+// markSendUnknown keeps send id's bubble and puts "状态未知，可重试" with a retry
+// button on it.
+export function markSendUnknown(id) {
+  const content = bubbleFor(id)?.querySelector('.event-content');
+  if (!content) return;
+  let chip = content.querySelector('.msg-unknown-chip');
+  if (!chip) {
+    chip = document.createElement('div');
+    chip.className = 'msg-unknown-chip';
+    content.appendChild(chip);
+  }
+  chip.textContent = '状态未知，可重试 ';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'msg-retry-btn';
+  btn.textContent = '重试';
+  btn.addEventListener('click', () => retryUnknownSend(id));
+  chip.appendChild(btn);
+}
+
+// retryUnknownSend sends id's frame again. The node answers a send_id it has
+// taken with that first answer, so the retry cannot start a second turn.
+function retryUnknownSend(id) {
+  const frame = sentRemoteFrames.get(id);
+  if (!frame) { settleSend(id); return; }
+  if (!wsm.isConnected() || !wsm.send(frame)) {
+    showToast('连接已断开，恢复后再重试', 'warning');
+    return;
+  }
+  const chip = bubbleFor(id)?.querySelector('.msg-unknown-chip');
+  if (chip) chip.textContent = '重试中…';
+  markSessionOptimisticRunning(frame.key, frame.node);
+}
+
 // trySendViaWS is the preferred path for TEXT-ONLY sends. File-bearing sends
 // MUST go over HTTP instead: a WS send's uploadStore owner is frozen at
 // WebSocket-upgrade time (wsDeriveUploadOwner → setUploadOwner), while
@@ -220,11 +282,15 @@ function composerSendBlocked() {
 // carries files, or wsm.send itself failed).
 function trySendViaWS(text, fileIDs, input) {
   if (!wsm.isConnected() || fileIDs.length > 0) return false;
-  const id = 'r' + (++wsm.sendCounter);
-  const sendMsg = { type: 'send', key: selection.key, text: text, id: id };
-  if (selection.node && selection.node !== 'local') sendMsg.node = selection.node;
+  // One ID names the frame (send_ack echoes it), its bubble and, as send_id,
+  // the message across retries: a remote node runs it once per ID.
+  const id = newSendID();
+  const sendMsg = { type: 'send', key: selection.key, text: text, id: id, send_id: id };
+  const remote = selection.node && selection.node !== 'local';
+  if (remote) sendMsg.node = selection.node;
   const spawn = spawnFields(selection.key);
   if (!wsm.send(Object.assign(sendMsg, spawn))) return false;
+  if (remote) sentRemoteFrames.set(id, sendMsg);
   // Consume only now that the frame is out: a failed wsm.send above falls
   // through to HTTP, which must still see them.
   consumeSpawnFields(selection.key, spawn, id);
@@ -277,7 +343,7 @@ export function restoreSpawnFields(key, sendId) {
 
 // buildSendPayload builds the HTTP POST body, consuming the spawn fields.
 function buildSendPayload(text, fileIDs, sendId) {
-  const payload = { key: selection.key, text: text };
+  const payload = { key: selection.key, text: text, send_id: sendId };
   if (fileIDs.length > 0) payload.file_ids = fileIDs;
   if (selection.node && selection.node !== 'local') payload.node = selection.node;
   const spawn = spawnFields(selection.key);
@@ -389,7 +455,7 @@ async function sendComposerTurn(targetKey, targetNode) {
   // HTTP POST fallback — JSON only; files already on server.
   try {
     const headers = { 'Content-Type': 'application/json' };
-    const sendId = 'h' + (++wsm.sendCounter);
+    const sendId = newSendID();
     const payload = buildSendPayload(text, fileIDs, sendId);
 
     // Mark this tab as the originator BEFORE the request leaves (text or
