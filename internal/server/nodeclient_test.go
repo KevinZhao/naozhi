@@ -168,7 +168,7 @@ func TestNodeClient_Send(t *testing.T) {
 	defer ts.Close()
 
 	nc := node.NewHTTPClient("test", ts.URL, "my-token", "Test")
-	_, err := nc.Send(context.Background(), "test:d:u:general", "hello world", "")
+	_, err := nc.Send(context.Background(), node.SendRequest{Key: "test:d:u:general", Text: "hello world"})
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestNodeClient_Send(t *testing.T) {
 
 func TestNodeClient_Send_Unreachable(t *testing.T) {
 	nc := node.NewHTTPClient("test", "http://127.0.0.1:1", "", "Test")
-	_, err := nc.Send(context.Background(), "key", "text", "")
+	_, err := nc.Send(context.Background(), node.SendRequest{Key: "key", Text: "text"})
 	if err == nil {
 		t.Fatal("expected error for unreachable server")
 	}

@@ -209,6 +209,85 @@ function composerSendBlocked() {
   return false;
 }
 
+// newSendID returns a fresh send ID ('s' + 32 hex). getRandomValues, not
+// randomUUID: the dashboard is also served over plain-HTTP LAN addresses,
+// where randomUUID does not exist.
+function newSendID() {
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  return 's' + Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+}
+
+// sentRemoteFrames holds each remote send as a WS frame until its answer
+// settles it, so an "unknown" answer (the node may or may not have it) can be
+// retried as the very same frame — same send_id, same spawn picks. An HTTP
+// fallback send is held as the frame it would have been; nothing settles an
+// accepted one, hence the cap (oldest first).
+const sentRemoteFrames = new Map();
+const MAX_SENT_REMOTE_FRAMES = 64;
+
+function holdRemoteFrame(id, frame) {
+  sentRemoteFrames.set(id, frame);
+  if (sentRemoteFrames.size > MAX_SENT_REMOTE_FRAMES) sentRemoteFrames.delete(sentRemoteFrames.keys().next().value);
+}
+
+// settleSend forgets send id's frame and the unknown chip on its bubble; the
+// ack for it said how the node took it.
+export function settleSend(id) {
+  if (!id) return;
+  sentRemoteFrames.delete(id);
+  const chip = bubbleFor(id)?.querySelector('.msg-unknown-chip');
+  if (chip) chip.remove();
+}
+
+function bubbleFor(id) {
+  const sel = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(id) : id;
+  return document.querySelector('#events-scroll .optimistic-msg[data-send-id="' + sel + '"]');
+}
+
+// markSendUnknown keeps send id's bubble and puts "状态未知，可重试" with a retry
+// button on it. An HTTP fallback send made while the socket was down has no
+// bubble yet; it gets one when its session is on screen.
+export function markSendUnknown(id) {
+  const frame = sentRemoteFrames.get(id);
+  if (!bubbleFor(id) && frame && frame.key === selection.key && frame.node === selection.node) {
+    renderOptimisticUserMsg(frame.text, id);
+  }
+  const content = bubbleFor(id)?.querySelector('.event-content');
+  if (!content) return;
+  let chip = content.querySelector('.msg-unknown-chip');
+  if (!chip) {
+    chip = document.createElement('div');
+    chip.className = 'msg-unknown-chip';
+    content.appendChild(chip);
+  }
+  chip.textContent = '状态未知，可重试 ';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'msg-retry-btn';
+  btn.textContent = '重试';
+  btn.addEventListener('click', () => retryUnknownSend(id));
+  chip.appendChild(btn);
+}
+
+// retryUnknownSend sends id's frame again. The node answers a send_id it has
+// taken with that first answer, so the retry cannot start a second turn.
+function retryUnknownSend(id) {
+  const frame = sentRemoteFrames.get(id);
+  if (!frame) { settleSend(id); return; }
+  if (!wsm.isConnected() || !wsm.send(frame)) {
+    showToast('连接已断开，恢复后再重试', 'warning');
+    return;
+  }
+  // The unknown answer gave the picks back (restoreSpawnFields); the retry
+  // carries them again, so it takes them again.
+  consumeSpawnFields(frame.key, spawnFields(frame.key), id);
+  persistPending();
+  const chip = bubbleFor(id)?.querySelector('.msg-unknown-chip');
+  if (chip) chip.textContent = '重试中…';
+  markSessionOptimisticRunning(frame.key, frame.node);
+}
+
 // trySendViaWS is the preferred path for TEXT-ONLY sends. File-bearing sends
 // MUST go over HTTP instead: a WS send's uploadStore owner is frozen at
 // WebSocket-upgrade time (wsDeriveUploadOwner → setUploadOwner), while
@@ -220,11 +299,15 @@ function composerSendBlocked() {
 // carries files, or wsm.send itself failed).
 function trySendViaWS(text, fileIDs, input) {
   if (!wsm.isConnected() || fileIDs.length > 0) return false;
-  const id = 'r' + (++wsm.sendCounter);
-  const sendMsg = { type: 'send', key: selection.key, text: text, id: id };
-  if (selection.node && selection.node !== 'local') sendMsg.node = selection.node;
+  // One ID names the frame (send_ack echoes it), its bubble and, as send_id,
+  // the message across retries: a remote node runs it once per ID.
+  const id = newSendID();
+  const sendMsg = { type: 'send', key: selection.key, text: text, id: id, send_id: id };
+  const remote = selection.node && selection.node !== 'local';
+  if (remote) sendMsg.node = selection.node;
   const spawn = spawnFields(selection.key);
   if (!wsm.send(Object.assign(sendMsg, spawn))) return false;
+  if (remote) holdRemoteFrame(id, sendMsg);
   // Consume only now that the frame is out: a failed wsm.send above falls
   // through to HTTP, which must still see them.
   consumeSpawnFields(selection.key, spawn, id);
@@ -277,11 +360,14 @@ export function restoreSpawnFields(key, sendId) {
 
 // buildSendPayload builds the HTTP POST body, consuming the spawn fields.
 function buildSendPayload(text, fileIDs, sendId) {
-  const payload = { key: selection.key, text: text };
+  const payload = { key: selection.key, text: text, send_id: sendId };
   if (fileIDs.length > 0) payload.file_ids = fileIDs;
   if (selection.node && selection.node !== 'local') payload.node = selection.node;
   const spawn = spawnFields(selection.key);
   consumeSpawnFields(selection.key, spawn, sendId);
+  if (payload.node && fileIDs.length === 0) {
+    holdRemoteFrame(sendId, Object.assign({ type: 'send', key: payload.key, text: text, id: sendId, send_id: sendId, node: payload.node }, spawn));
+  }
   return Object.assign(payload, spawn);
 }
 
@@ -319,7 +405,7 @@ async function handleSendRejected(r, sentSid, text, input) {
 // pre-send optimistic flip back on ack:"reset" (/clear, /new — no turn
 // spawned) and otherwise mirrors the WS path's optimistic bubble while WS
 // is live (the WS-down fallback keeps its legacy no-bubble behaviour).
-async function finishHttpSend(r, sentSid, text, input) {
+async function finishHttpSend(r, sentSid, text, input, sendId) {
   // Record the sent text BEFORE awaiting the body (interrupt re-fill
   // source; also a secondary onSendError gate).
   if (text) perSession.lastSent[sentSid] = text;
@@ -337,7 +423,7 @@ async function finishHttpSend(r, sentSid, text, input) {
     delete perSession.lastSent[sentSid]; // no turn ran, nothing to re-fill on interrupt
     perSession.httpSendPending.delete(sentSid);
   } else if (wsm.isConnected()) {
-    renderOptimisticUserMsg(text);
+    renderOptimisticUserMsg(text, sendId);
   }
   armFallbackEventPoll();
 }
@@ -389,7 +475,7 @@ async function sendComposerTurn(targetKey, targetNode) {
   // HTTP POST fallback — JSON only; files already on server.
   try {
     const headers = { 'Content-Type': 'application/json' };
-    const sendId = 'h' + (++wsm.sendCounter);
+    const sendId = newSendID();
     const payload = buildSendPayload(text, fileIDs, sendId);
 
     // Mark this tab as the originator BEFORE the request leaves (text or
@@ -403,7 +489,7 @@ async function sendComposerTurn(targetKey, targetNode) {
       await handleSendRejected(r, sentSid, text, input);
       return;
     }
-    await finishHttpSend(r, sentSid, text, input);
+    await finishHttpSend(r, sentSid, text, input, sendId);
   } catch (e) {
     perSession.httpSendPending.delete(sid(selection.key, selection.node));
     if (input) setMsgValue(input, text);

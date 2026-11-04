@@ -14,7 +14,7 @@ import (
 
 // derivedCaps returns the sorted union of RequiredNodeCaps across every
 // registered backend.Profile, plus the always-advertised EventEntry schema
-// tag (#2496) and subscribe-history — so the result is never empty and every
+// tag (#2496), subscribe-history and the send tags — so the result is never empty and every
 // register frame carries Capabilities. Primaries predating capability
 // negotiation ignore unknown tags (WARN only), so this stays wire-compatible.
 func derivedCaps() []string { return capsOf(backend.All()) }
@@ -41,6 +41,9 @@ func capsOf(profiles []backend.Profile) []string {
 	seen[clievent.SchemaCap] = struct{}{}
 	// The connector answers want_history subscribes (connector_subscribe.go).
 	seen[node.CapSubscribeHistory] = struct{}{}
+	// The "send" RPC reads backend / resume_id and dedups on turn_id.
+	seen[node.CapSendBackend] = struct{}{}
+	seen[node.CapSendIdempotent] = struct{}{}
 	out := make([]string, 0, len(seen))
 	for c := range seen {
 		out = append(out, c)

@@ -9,7 +9,7 @@ import (
 )
 
 // TestNodeMeta_HasCap covers the three relevant cases for the routing
-// gate consumers (selectNodeForBackend in package server) need:
+// gate consumers (ReverseConn.Send, ReverseConn.Subscribe) need:
 //   - Empty cap query: always satisfied. Backends with nil/empty
 //     RequiredNodeCaps (claude) iterate zero times; an "" string
 //     should never reject. Defensive in case a future caller passes
@@ -66,7 +66,7 @@ func TestNodeMeta_HasCap(t *testing.T) {
 //   - empty strings are dropped (not stored as "" → true).
 //   - all-empty input collapses to nil.
 //
-// Coverage is centralised here so the public selectNodeForBackend
+// Coverage is centralised here so the cap-gated callers'
 // tests can rely on capsFromSlice without re-asserting its invariants.
 func TestCapsFromSlice(t *testing.T) {
 	t.Parallel()

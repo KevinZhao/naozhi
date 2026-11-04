@@ -10,6 +10,7 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 	"github.com/naozhi/naozhi/internal/turn"
+	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
 // recordingNotifier records every sendNotifier call in order.
@@ -30,6 +31,9 @@ func (n *recordingNotifier) broadcastState(key, state, _ string) {
 	n.add("state " + key + " " + state)
 }
 func (n *recordingNotifier) broadcastSendError(key, msg string) { n.add("error " + key + " " + msg) }
+func (n *recordingNotifier) broadcastRemoteSendError(f wsproto.SendError) {
+	n.add("remote-error " + f.Node + " " + f.Key + " " + f.Status + " " + f.TurnID + " " + f.Error)
+}
 
 func (n *recordingNotifier) snapshot() string {
 	n.mu.Lock()

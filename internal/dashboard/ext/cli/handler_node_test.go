@@ -51,7 +51,9 @@ func (f *fakeConn) FetchEvents(_ context.Context, _ string, _ int64) ([]clievent
 func (f *fakeConn) FetchEventsPage(_ context.Context, _ string, _ node.EventsQuery) (node.EventsPage, error) {
 	return node.EventsPage{}, nil
 }
-func (f *fakeConn) Send(_ context.Context, _, _, _ string) (string, error) { return "accepted", nil }
+func (f *fakeConn) Send(_ context.Context, _ node.SendRequest) (node.SendResult, error) {
+	return node.SendResult{Status: "accepted"}, nil
+}
 func (f *fakeConn) ProxyTakeover(_ context.Context, _ int, _, _ string, _ uint64) (string, error) {
 	return "", nil
 }

@@ -23,6 +23,19 @@ func (b *wsBroadcaster) broadcastSendError(key, errMsg string) {
 	})
 }
 
+// broadcastRemoteSendError is broadcastSendError for a remote session. Its
+// subscribers are held by the node conn, not this registry, so the frame goes
+// to every authenticated tab; only the one whose send it names (by key and
+// node) acts on it. f.Error follows broadcastSendError's rule.
+func (b *wsBroadcaster) broadcastRemoteSendError(f wsproto.SendError) {
+	if f.Key == "" || f.Error == "" {
+		return
+	}
+	if data, err := marshalPooled(wsproto.NewSendError(f)); err == nil {
+		b.broadcastToAuthenticated(data)
+	}
+}
+
 // informationalSendErr reports whether err is a passthrough outcome the user
 // already knows about: a /clear-/new reset or a reconnect with unknown state.
 // session_state corrects the UI for both.

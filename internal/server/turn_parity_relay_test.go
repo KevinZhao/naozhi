@@ -14,17 +14,18 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/turn"
 )
 
 func (h *parityHarness) relay(t *testing.T, text string) string {
 	t.Helper()
-	status, err := h.srv.SubmitRelayed(context.Background(), parityKey, text, "")
+	res, err := h.srv.SubmitRelayed(context.Background(), node.SendRequest{Key: parityKey, Text: text})
 	if err != nil {
 		t.Fatalf("relayed %q: %v", text, err)
 	}
-	return status
+	return res.Status
 }
 
 // systemEvents returns the summaries of key's system events.
@@ -123,7 +124,7 @@ func TestRelay_UrgentPreempts(t *testing.T) {
 		t.Fatalf("turn = %+v, want text hi at priority now", c)
 	}
 	h.waitEngineIdle()
-	if _, err := h.srv.SubmitRelayed(context.Background(), parityKey, "/urgent", ""); !errors.Is(err, errUrgentUsage) {
+	if _, err := h.srv.SubmitRelayed(context.Background(), node.SendRequest{Key: parityKey, Text: "/urgent"}); !errors.Is(err, errUrgentUsage) {
 		t.Fatalf("bare /urgent: err = %v, want the usage error", err)
 	}
 	turns.noMoreTurns(t)
@@ -231,9 +232,9 @@ func TestRelay_BusyWithTheQueueDisabledAnswersBusy(t *testing.T) {
 	turns := h.session(parityKey, false)
 	h.relay(t, "first")
 	turns.next(t, "owner turn")
-	status, err := h.srv.SubmitRelayed(context.Background(), parityKey, "second", "")
-	if err != nil || status != string(sendAckBusy) {
-		t.Fatalf("SubmitRelayed = (%q, %v), want (busy, nil)", status, err)
+	res, err := h.srv.SubmitRelayed(context.Background(), node.SendRequest{Key: parityKey, Text: "second"})
+	if err != nil || res.Status != string(sendAckBusy) {
+		t.Fatalf("SubmitRelayed = (%q, %v), want (busy, nil)", res.Status, err)
 	}
 	if got := h.systemEvents(parityKey); len(got) != 0 {
 		t.Fatalf("system events = %q, want none", got)
@@ -247,7 +248,7 @@ func TestRelay_ShuttingDownIsAnError(t *testing.T) {
 	h := newParityHarness(t, parityOpts{})
 	turns := h.session(parityKey, false)
 	h.engine().drain()
-	if _, err := h.srv.SubmitRelayed(context.Background(), parityKey, "hi", ""); !errors.Is(err, errRelayShuttingDown) {
+	if _, err := h.srv.SubmitRelayed(context.Background(), node.SendRequest{Key: parityKey, Text: "hi"}); !errors.Is(err, errRelayShuttingDown) {
 		t.Fatalf("err = %v, want errRelayShuttingDown", err)
 	}
 	turns.noMoreTurns(t)
@@ -258,7 +259,7 @@ func TestRelay_ShuttingDownIsAnError(t *testing.T) {
 func TestRelay_SpawnFailureIsTheError(t *testing.T) {
 	t.Run("no session can be spawned", func(t *testing.T) {
 		h := newParityHarness(t, parityOpts{})
-		_, err := h.srv.SubmitRelayed(context.Background(), parityKey, "hi", "")
+		_, err := h.srv.SubmitRelayed(context.Background(), node.SendRequest{Key: parityKey, Text: "hi"})
 		if err == nil || !strings.Contains(err.Error(), "get session") {
 			t.Fatalf("err = %v, want the spawn failure", err)
 		}
@@ -267,7 +268,7 @@ func TestRelay_SpawnFailureIsTheError(t *testing.T) {
 	t.Run("agent options apply", func(t *testing.T) {
 		h := newParityHarness(t, parityOpts{agents: map[string]session.AgentOpts{"general": {Model: "not a model"}}})
 		turns := h.session(parityKey, false)
-		_, err := h.srv.SubmitRelayed(context.Background(), parityKey, "hi", "")
+		_, err := h.srv.SubmitRelayed(context.Background(), node.SendRequest{Key: parityKey, Text: "hi"})
 		if err == nil || !strings.Contains(err.Error(), "get session") {
 			t.Fatalf("err = %v, want GetOrCreate to reject the agent's model", err)
 		}
@@ -306,7 +307,7 @@ func TestRelay_PreflightRunsOnTheCallersCtx(t *testing.T) {
 	})
 	t.Cleanup(e.drain)
 	ctx := context.WithValue(context.Background(), relayCtxKey{}, "conn")
-	if _, err := e.relaySend(ctx, parityKey, "hi", ""); err != nil {
+	if _, err := e.relaySend(ctx, node.SendRequest{Key: parityKey, Text: "hi"}); err != nil {
 		t.Fatal(err)
 	}
 	preflight := <-rec.got
@@ -325,7 +326,7 @@ func TestRelay_WorkspaceIsTheChatOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.srv.SubmitRelayed(context.Background(), parityKey, "hi", dir); err != nil {
+	if _, err := h.srv.SubmitRelayed(context.Background(), node.SendRequest{Key: parityKey, Text: "hi", Workspace: dir}); err != nil {
 		t.Fatal(err)
 	}
 	turns.turn(t, "turn", okTurn("R"))

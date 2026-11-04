@@ -122,8 +122,11 @@ func TestReverseConn_RPCs(t *testing.T) {
 			// A response with no result is a node that took the send.
 			name: "Send", method: "send",
 			params: map[string]any{"key": "key", "text": "hello"},
-			call:   func(ctx context.Context) (any, error) { return rc.Send(ctx, "key", "hello", "") },
-			want:   "accepted",
+			call: func(ctx context.Context) (any, error) {
+				r, err := rc.Send(ctx, SendRequest{Key: "key", Text: "hello"})
+				return r.Status, err
+			},
+			want: "accepted",
 		},
 		{
 			name: "ProxyTakeover", method: "takeover",

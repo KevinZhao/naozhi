@@ -150,10 +150,20 @@ function renderBackendFetchFailed(node) {
 
 // getSelectedAccessProfile reads the modal's access-profile <select>. Empty
 // string ("" = global default) when the picker isn't rendered or the default
-// option is chosen.
+// option is chosen, and always for a remote connection: the overlay is
+// host-local, no link carries it, and the server refuses a remote pick.
 function getSelectedAccessProfile() {
+  if (getSelectedNode() !== 'local') return '';
   const el = document.getElementById('new-access-profile');
   return el && el.value ? el.value : '';
+}
+
+// syncAccessProfilePicker hides the access-profile picker while the connection
+// picker targets a remote node, which runs on its own credentials.
+function syncAccessProfilePicker() {
+  const el = document.getElementById('new-access-profile');
+  const box = el && (el.closest('.nz-flex-fill') || el.closest('.nz-field'));
+  if (box) box.style.display = getSelectedNode() === 'local' ? '' : 'none';
 }
 
 // accessProfileChipHtml renders the per-session access-profile chip next to the
@@ -258,11 +268,13 @@ function getSelectedNode() {
 // caller's onChange so a palette can re-filter its project list to the newly
 // chosen node. No-op when the picker isn't present (single-node setups).
 function wireNodePicker(onChange) {
+  syncAccessProfilePicker();
   const el = document.getElementById('new-node');
   if (!el) return;
   el.addEventListener('change', function () {
     selection.node = el.value || 'local';
     try { localStorage.setItem('nz_selectedNode', selection.node); } catch (_) { /* noop */ }
+    syncAccessProfilePicker();
     if (typeof onChange === 'function') onChange();
   });
 }
@@ -988,7 +1000,7 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   perSession.workspaces[key] = projectPath;
   if (nodeId && nodeId !== 'local') perSession.nodes[key] = nodeId;
   if (backend) perSession.backends[key] = backend;
-  if (accessProfile) perSession.accessProfiles[key] = accessProfile;
+  if (accessProfile && (!nodeId || nodeId === 'local')) perSession.accessProfiles[key] = accessProfile;
   delete perSession.sentPicks[key]; // a continued stable key must not inherit an earlier send's
   // Durably persist the pending workspace and eagerly bind it server-side so a
   // reload-before-first-send keeps the workspace.
@@ -1033,7 +1045,7 @@ function doCreateSession() {
 
   if (workspace) perSession.workspaces[key] = workspace;
   if (backend) perSession.backends[key] = backend;
-  if (accessProfile) perSession.accessProfiles[key] = accessProfile;
+  if (accessProfile && targetNode === 'local') perSession.accessProfiles[key] = accessProfile;
   if (targetNode !== 'local') perSession.nodes[key] = targetNode;
   // Persist + eager-bind so the custom workspace survives a reload-before-send.
   persistPending();

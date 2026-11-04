@@ -8,7 +8,9 @@ package server
 
 import (
 	"context"
+
 	"github.com/naozhi/naozhi/internal/runtelemetry"
+	"github.com/naozhi/naozhi/internal/wsproto"
 
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -66,6 +68,7 @@ type sendNotifier interface {
 	BroadcastSessionsUpdate()
 	broadcastState(key, state, deathReason string)
 	broadcastSendError(key, msg string)
+	broadcastRemoteSendError(f wsproto.SendError)
 }
 
 // ScratchRouter is the *ScratchHandler-only subset of *session.Router

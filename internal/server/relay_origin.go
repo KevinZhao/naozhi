@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/turn"
@@ -22,20 +23,35 @@ const relayFailPrefix = "发送失败："
 var errRelayShuttingDown = errors.New("节点正在关闭，消息未送达")
 
 // SubmitRelayed runs a send a primary relayed over the reverse link; it is
-// the upstream connector's TurnSubmitter. workspace has already passed the
-// connector's own checks. Returns "reset", "accepted", "queued" or "busy".
-func (s *Server) SubmitRelayed(ctx context.Context, key, text, workspace string) (string, error) {
-	return s.hub.submitRelayed(ctx, key, text, workspace)
+// the upstream connector's TurnSubmitter. req.Workspace has already passed
+// the connector's own checks. Status is "reset", "accepted", "queued" or
+// "busy".
+func (s *Server) SubmitRelayed(ctx context.Context, req node.SendRequest) (node.SendResult, error) {
+	return s.hub.submitRelayed(ctx, req)
 }
 
-// relaySend is sessionSend for a relayed send. The session is created on ctx
-// before Submit, so it exists when the RPC answers and the primary's
+// relaySend runs a relayed send, once per turn ID (sendDedup): a primary
+// retrying a send whose answer it lost gets the first answer back.
+func (e *sendEngine) relaySend(ctx context.Context, req node.SendRequest) (node.SendResult, error) {
+	p := sendParams{
+		Key: req.Key, Text: req.Text, Workspace: req.Workspace,
+		Backend: req.Backend, ResumeID: req.ResumeID, TraceID: req.TurnID,
+	}
+	if req.TurnID == "" {
+		status, err := e.relaySendOnce(ctx, p)
+		return node.SendResult{Status: status}, err
+	}
+	return e.dedup.do(ctx, req.Key, req.TurnID, func() (string, error) { return e.relaySendOnce(ctx, p) })
+}
+
+// relaySendOnce is sessionSend for a relayed send. The session is created on
+// ctx before Submit, so it exists when the RPC answers and the primary's
 // follow-up subscribe finds it; a spawn failure is the RPC's error. A send
 // the queue cannot take answers "busy", as sessionSend does: the primary
 // forwards the status, so the tab shows the busy toast and rolls back. A
 // send during shutdown is an error, which tells the user the node is going.
-func (e *sendEngine) relaySend(ctx context.Context, key, text, workspace string) (string, error) {
-	p := sendParams{Key: key, Text: text, Workspace: workspace}
+func (e *sendEngine) relaySendOnce(ctx context.Context, p sendParams) (string, error) {
+	key := p.Key
 	cmd, reset, err := e.prepareSend(p)
 	if err != nil {
 		return "", err
