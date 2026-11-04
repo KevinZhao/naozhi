@@ -358,11 +358,12 @@ function unsubscribe() {
 const NOTE_SAME_MS = 5000;
 
 // withNotes merges the journaled notes into a first page, as the system
-// lines they were: those the history no longer holds, and on a full page
-// only from its first event on (older ones belong to pages not loaded).
-function withNotes(events, notes, full) {
-  const floor = full && events.length ? (events[0].time || 0) : 0;
-  const logged = events.filter((e) => e && e.type === 'system' && !e.uuid);
+// lines they were: those the history no longer holds, and only from the
+// page's first event on (older ones belong to pages not loaded). An empty
+// page (a restart left no history) takes them all.
+function withNotes(events, notes) {
+  const floor = events.length ? (events[0].time || 0) : 0;
+  const logged = events.filter((e) => e && e.type === 'system');
   const extra = [];
   for (const n of notes) {
     const t = Date.parse(n && n.time);
@@ -392,7 +393,7 @@ async function loadEvents(reset) {
       .catch((e) => { if (reset && e && e.status === 404) return []; throw e; });
     let events = Array.isArray(res) ? res : [];
     const n = notes && await notes;
-    if (n && Array.isArray(n.notes) && n.notes.length) events = withNotes(events, n.notes, events.length >= EVENTS_LIMIT);
+    if (n && Array.isArray(n.notes) && n.notes.length) events = withNotes(events, n.notes);
     if (gen === pl.gen && ui.activeView === 'planner') appendEvents(events, reset);
   } catch { /* the next tick retries */ } finally {
     if (gen === pl.gen) pl.loading = false;

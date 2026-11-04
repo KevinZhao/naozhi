@@ -131,7 +131,7 @@ func sessionFact(snap session.SessionSnapshot, s *session.ManagedSession, logDir
 	} else if s != nil && snap.State != "dead" {
 		// A dead process's background tasks died with it.
 		if at := s.ProcessAttachedAt(); !at.IsZero() {
-			if name, seen := openTask(s.EventLastN(taskScan), at); name != "" {
+			if name, seen := openTask(s.EventLastN(taskScan), at, f.Running); name != "" {
 				f.Workflow, f.WorkflowSeen = name, seen
 			}
 		}
@@ -305,14 +305,17 @@ func runningWorkflow(sums []workflow.Summary) string {
 // time. A task that started before (replayed history, maybe of a process
 // gone since) or further back than entries is not seen: an unknown task is
 // not judged stalled. Workflows are the board's.
-func openTask(entries []clievent.EventEntry, attached time.Time) (name string, seen time.Time) {
+// A background Bash has no frames between its start and its end, so in an
+// idle session its quiet is how a long-lived server or watch runs: it counts
+// only while a turn is in progress (running), waiting on it.
+func openTask(entries []clievent.EventEntry, attached time.Time, running bool) (name string, seen time.Time) {
 	open := map[string]string{}
 	var order []string
 	for _, e := range entries {
 		switch {
 		case e.TaskID == "":
 		case e.Type == clievent.KindTaskStart:
-			if e.TaskType != clievent.TaskTypeWorkflow && e.Time >= attached.UnixMilli() {
+			if e.TaskType != clievent.TaskTypeWorkflow && (running || e.TaskType != "local_bash") && e.Time >= attached.UnixMilli() {
 				if _, ok := open[e.TaskID]; !ok {
 					order = append(order, e.TaskID)
 				}

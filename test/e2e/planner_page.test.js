@@ -200,12 +200,15 @@ test('journaled notes: the ones a restart dropped come back in time order, once'
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   const page = await ctx.newPage();
   const events = plannerEvents();
-  // The history still holds this one (no restart since it was written).
-  events.push({ type: 'system', summary: '已派出：iso 周报（task:abc）', time: now - 50000 });
+  // The history still holds this one (no restart since it was written); the
+  // ring stamps every line it holds with a uuid.
+  events.push({ type: 'system', summary: '已派出：iso 周报（task:abc）', time: now - 50000, uuid: 'pl-s1' });
   const mock = await startMockServer({
     ws: true, plannerEvents: events, inbox: inbox(),
     planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
     plannerNotes: [
+      // Older than the page: it belongs to history not loaded.
+      { time: iso(now - 70000), text: '驳回：iso 更早的一条' },
       { time: iso(now - 57000), text: '到点提醒（答应你的，到期 09:01）：iso 交周报' },
       { time: iso(now - 50000 + 40), text: '已派出：iso 周报（task:abc）' },
     ],

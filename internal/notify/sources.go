@@ -122,8 +122,14 @@ func (n *Notifier) Check() {
 		}
 	}
 	// Loops stalled together (a frozen gateway stops them all) are one item,
-	// closed once every loop beats again.
-	if stale := slices.DeleteFunc(n.cfg.Beats.Stale(), func(name string) bool { return name == loopName }); len(stale) > 0 {
+	// closed once every loop beats again. A loop stalling that was not
+	// before begins the condition anew: an item the user closed opens again.
+	stale := slices.DeleteFunc(n.cfg.Beats.Stale(), func(name string) bool { return name == loopName })
+	if slices.ContainsFunc(stale, func(name string) bool { return !slices.Contains(n.staleLoops, name) }) {
+		delete(n.condSince, beatSource)
+	}
+	n.staleLoops = stale
+	if len(stale) > 0 {
 		conds = append(conds, n.gatewayCondition(now, Item{Kind: KindError, Level: LevelUrgent, Source: beatSource,
 			Title: "关键循环停了：" + strings.Join(stale, "、"), Why: "心跳超时，/health 已降级"}))
 	}
@@ -152,8 +158,9 @@ func (n *Notifier) Check() {
 }
 
 // settle closes the open auto-close items whose condition cleared, opens
-// the conditions not open yet, nor closed by the user since they began, and
-// pushes the held items that may go out now.
+// the conditions not open yet, nor closed by the user since they began,
+// retitles the open ones whose title changed (more loops stale), and pushes
+// the held items that may go out now.
 func (n *Notifier) settle(conds []condition, active map[string]bool, judged []string) effects {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -173,8 +180,11 @@ func (n *Notifier) settle(conds []condition, active map[string]bool, judged []st
 			continue
 		}
 		c.item.AutoClose = true
-		if _, opened, f := n.addLocked(c.item); opened {
+		if it, opened, f := n.addLocked(c.item); opened {
 			fx.merge(f)
+		} else if it.Title != c.item.Title {
+			n.items[n.indexLocked(it.ID)].Title = c.item.Title
+			fx.merge(n.changedLocked())
 		}
 	}
 	return fx
