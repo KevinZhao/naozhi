@@ -211,8 +211,9 @@ func TestStatus(t *testing.T) {
 
 // A dispatched session that reported to the Planner during a turn gets the
 // Planner one receipt when the reply leaves the task 进行中 with no status
-// block, or a promise citing it open; the next turn, with no new report, gets
-// none. {P} is the citing promise's ID.
+// block, or marks it done with a promise citing it open; a doing block is an
+// answer. The next turn, with no new report, gets none. {P} is the citing
+// promise's ID.
 func TestReportWithoutStatusGetsReceipt(t *testing.T) {
 	const (
 		taskDoing   = `{"type":"status","task":"task:ab12","state":"doing","why":"它说还在等 CI"}`
@@ -230,6 +231,7 @@ func TestReportWithoutStatusGetsReceipt(t *testing.T) {
 		{"task and promise", "task:ab12", "还没完。\n" + block(taskDoing) + "\n" + block(promiseDone), ""},
 		{"task only", "task:ab12", "做完了。\n" + block(taskDone),
 			"task:ab12（iso 写 hello）刚向你汇报；相关的承诺 {P} 还没完成，条件满足了就用 status 标 done。"},
+		{"doing only", "task:ab12", "还在等 CI。\n" + block(taskDoing), ""},
 		{"not dispatched", "dashboard:direct:x:general", "收到。", ""},
 	}
 	for _, c := range cases {

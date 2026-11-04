@@ -172,7 +172,7 @@ func (r *Runner) handle(rep reply) {
 			slog.Error("planner actions: panicked", "panic", p)
 		}
 	}()
-	statused := map[string]bool{}
+	statused := map[string]string{} // task or promise → the state a block set
 	for _, b := range Parse(rep.text) {
 		if b.Err != nil {
 			r.refuse(b, b.Err)
@@ -187,7 +187,7 @@ func (r *Runner) handle(rep reply) {
 		case b.Ask != nil:
 			err = r.ask(*b.Ask)
 		case b.Status != nil:
-			statused[b.Status.Task] = true
+			statused[b.Status.Task] = b.Status.State
 			err = r.status(b)
 		}
 		if err != nil {
@@ -199,12 +199,14 @@ func (r *Runner) handle(rep reply) {
 
 // checkReports reminds the Planner of the dispatched sessions that reported
 // to it during the turn and that its reply left open: the task still 进行中
-// with no status block for it, or a promise citing the task (its key in the
-// text or close_when) still open with none (docs/rfc/planner.md §15.4; D61:
-// the gateway keeps the list honest when the model forgets). It runs after
+// with no status block for it, or the reply marking it done while a promise
+// citing it (its key in the text or close_when) stays open with none
+// (docs/rfc/planner.md §15.4; D61: the gateway keeps the list honest when the
+// model forgets). A doing or failed block is the Planner's answer, so the
+// promises waiting on the task are left alone. It runs after
 // the reply's blocks, so what they closed is not asked about. The receipt's
 // own turn takes no report, so a report gets at most one.
-func (r *Runner) checkReports(rep reply, statused map[string]bool) {
+func (r *Runner) checkReports(rep reply, statused map[string]string) {
 	if r.cfg.Reports == nil || r.cfg.Tasks == nil || rep.to.IsZero() {
 		return
 	}
@@ -232,18 +234,18 @@ func (r *Runner) checkReports(rep reply, statused map[string]bool) {
 		seen[key] = true
 		var ids []string
 		for _, p := range open {
-			if !statused[p.ID] && (strings.Contains(p.Text, key) || strings.Contains(p.CloseWhen, key)) {
+			if statused[p.ID] == "" && (strings.Contains(p.Text, key) || strings.Contains(p.CloseWhen, key)) {
 				ids = append(ids, p.ID)
 			}
 		}
 		var line string
 		switch {
-		case t.State == task.Doing && !statused[key]:
+		case t.State == task.Doing && statused[key] == "":
 			line = key + "（" + t.Title + "）刚向你汇报，它在任务里仍是进行中；完成了就用 status 标 done，没完成用 doing 并说明原因"
 			if len(ids) > 0 {
 				line += "；相关的承诺 " + strings.Join(ids, "、") + " 也一并处理"
 			}
-		case len(ids) > 0:
+		case statused[key] == string(task.Done) && len(ids) > 0:
 			line = key + "（" + t.Title + "）刚向你汇报；相关的承诺 " + strings.Join(ids, "、") + " 还没完成，条件满足了就用 status 标 done"
 		default:
 			continue

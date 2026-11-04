@@ -612,8 +612,8 @@ func (r *Router) Shutdown() {
 }
 
 // shutdownTurnWait bounds shutdown's wait for running turns. launchd and the
-// systemd unit allow 5s from SIGTERM to SIGKILL, and the store save and run
-// marker come after the wait.
+// systemd unit allow 5s from SIGTERM to SIGKILL, and the store save and the
+// shims' Detach come after the wait.
 const shutdownTurnWait = 2 * time.Second
 
 // detacher is a process held by a shim: Detach lets go of it and its CLI
