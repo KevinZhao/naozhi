@@ -100,10 +100,10 @@ type Config struct {
 	// Calendar returns the scout's calendar cache (scout.Scout.Calendar);
 	// today's meetings not over yet are listed.
 	Calendar func() []scout.Event
-	// Patrol returns the newest scout run that went through
-	// (scout.Scout.Latest); its reply_needed findings and the Asana tasks
-	// due are listed when it ran since the last brief.
-	Patrol func() (scout.Run, bool)
+	// Patrol returns the scout runs that went through and ended at or
+	// after a time (scout.Scout.Since); the reply_needed findings and the
+	// Asana tasks due of those since the last brief are listed.
+	Patrol func(since time.Time) []scout.Run
 }
 
 // Note is an item the Planner kept for the next brief (a notify block of

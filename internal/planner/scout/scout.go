@@ -169,12 +169,13 @@ func (s *Scout) Calendar() []Event {
 	return s.st.Calendar()
 }
 
-// Latest is the newest run that went through, as recorded.
-func (s *Scout) Latest() (Run, bool) {
+// Since is the runs that went through and ended at or after since, as
+// recorded, oldest first.
+func (s *Scout) Since(since time.Time) []Run {
 	if s == nil || s.st.dir == "" {
-		return Run{}, false
+		return nil
 	}
-	return s.st.newestRun(true)
+	return s.st.runsSince(since)
 }
 
 // Run runs the schedule until ctx ends: once a minute it beats, starts

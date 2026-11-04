@@ -7,13 +7,16 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/scout"
 )
 
-func (f *fixture) withScout(b *Briefer, cal []scout.Event, run *scout.Run) *Briefer {
+func (f *fixture) withScout(b *Briefer, cal []scout.Event, runs ...scout.Run) *Briefer {
 	b.cfg.Calendar = func() []scout.Event { return cal }
-	b.cfg.Patrol = func() (scout.Run, bool) {
-		if run == nil {
-			return scout.Run{}, false
+	b.cfg.Patrol = func(since time.Time) []scout.Run {
+		var out []scout.Run
+		for _, r := range runs {
+			if !r.Ended.Before(since) {
+				out = append(out, r)
+			}
 		}
-		return *run, true
+		return out
 	}
 	return b
 }
@@ -23,8 +26,9 @@ func finding(source, kind, id, title, from, at, due string) scout.RunFinding {
 }
 
 // The brief's scout sections: today's meetings not over, conflicts marked;
-// who waits on a reply, from the newest run; the Asana tasks due today or
-// overdue; what the Planner kept since the last brief.
+// who waits on a reply and the Asana tasks due today or overdue, from all
+// the runs since the last brief (the overnight ones are in the morning's
+// first run, not the newest); what the Planner kept since the last brief.
 func TestRenderScout(t *testing.T) {
 	f := newFixture(t)
 	f.now = at(2, 8, 30)
@@ -45,17 +49,24 @@ func TestRenderScout(t *testing.T) {
 		meeting("午餐", at(3, 12, 0), at(3, 13, 0)),
 		meeting("明天的会", at(4, 9, 0), at(4, 10, 0)),
 	}
-	run := &scout.Run{ID: "r1", State: scout.StateOK, Started: at(3, 8, 15), Ended: at(3, 8, 20), Findings: []scout.RunFinding{
-		finding("slack", "reply_needed", "D1/1", "iso 问进度", "Bob", at(2, 20, 0).Format(time.RFC3339), ""),
-		finding("slack", "reply_needed", "D1/1", "iso 问进度", "Bob", at(2, 20, 0).Format(time.RFC3339), ""),
-		finding("email", "reply_needed", "m1", "iso 预算确认", "", at(3, 6, 0).Format(time.RFC3339), ""),
-		finding("asana", "deadline", "t1", "iso 今天交", "", "", "2026-11-03"),
-		finding("asana", "deadline", "t2", "iso 上周的", "", "", at(1, 17, 0).Format(time.RFC3339)),
-		finding("asana", "deadline", "t3", "iso 明天的", "", "", "2026-11-04"),
-		finding("email", "deadline", "m2", "iso 邮件里的截止", "", "", "2026-11-03"),
-		finding("email", "fyi", "m3", "iso 知道就好", "", "", ""),
-	}}
-	b = f.withScout(f.briefer(nil, nil), cal, run)
+	runs := []scout.Run{
+		{ID: "r0", State: scout.StateOK, Started: at(2, 16, 0), Ended: at(2, 16, 5), Findings: []scout.RunFinding{
+			finding("slack", "reply_needed", "D1/1", "iso 问", "Bob", at(2, 12, 0).Format(time.RFC3339), ""),
+		}},
+		{ID: "r1", State: scout.StateOK, Started: at(3, 8, 0), Ended: at(3, 8, 5), Findings: []scout.RunFinding{
+			finding("slack", "reply_needed", "D1/1", "iso 问进度", "Bob", at(2, 20, 0).Format(time.RFC3339), ""),
+			finding("slack", "reply_needed", "D1/1", "iso 问进度", "Bob", at(2, 20, 0).Format(time.RFC3339), ""),
+			finding("email", "reply_needed", "m1", "iso 预算确认", "", at(3, 6, 0).Format(time.RFC3339), ""),
+			finding("asana", "deadline", "t1", "iso 今天交", "", "", "2026-11-03"),
+			finding("asana", "deadline", "t2", "iso 上周的", "", "", at(1, 17, 0).Format(time.RFC3339)),
+			finding("asana", "deadline", "t3", "iso 明天的", "", "", "2026-11-04"),
+			finding("email", "deadline", "m2", "iso 邮件里的截止", "", "", "2026-11-03"),
+			finding("email", "fyi", "m3", "iso 知道就好", "", "", ""),
+		}},
+		// The newest run: nothing new since 08:00.
+		{ID: "r2", State: scout.StateOK, Started: at(3, 8, 15), Ended: at(3, 8, 20)},
+	}
+	b = f.withScout(f.briefer(nil, nil), cal, runs...)
 	b.Check()
 	want := "## 早报 · 11月3日 周二\n\n" +
 		"自 11-02 08:30 以来：今天日程 4 · 等你回复 2 · Asana 到期 2 · Planner 记下 1\n" +
@@ -106,7 +117,7 @@ func TestScoutNothingToReport(t *testing.T) {
 		{ID: "a", Title: "iso 早会", Start: at(3, 7, 0), End: at(3, 8, 0)},
 		{ID: "b", Title: "iso 明天", Start: at(4, 9, 0), End: at(4, 10, 0)},
 	}
-	stale := &scout.Run{ID: "r0", State: scout.StateOK, Started: at(2, 8, 0), Ended: at(2, 8, 5), Findings: []scout.RunFinding{
+	stale := scout.Run{ID: "r0", State: scout.StateOK, Started: at(2, 8, 0), Ended: at(2, 8, 5), Findings: []scout.RunFinding{
 		finding("email", "reply_needed", "m1", "iso 旧的", "", "", ""),
 	}}
 	b = f.withScout(f.briefer(nil, nil), cal, stale)

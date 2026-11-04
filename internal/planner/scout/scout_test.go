@@ -128,6 +128,30 @@ func TestMarkSeen(t *testing.T) {
 	}
 }
 
+// The brief reads the runs that went through and ended since its last
+// one, oldest first.
+func TestRunsSince(t *testing.T) {
+	st := store{dir: t.TempDir()}
+	since := time.Date(2026, 11, 2, 8, 30, 0, 0, time.Local)
+	for _, r := range []Run{
+		{ID: "20261102-080000-a", State: StateOK, Ended: since.Add(-time.Minute)},
+		{ID: "20261102-100000-b", State: StateOK, Ended: since.Add(2 * time.Hour)},
+		{ID: "20261102-120000-c", State: StateFailed, Ended: since.Add(4 * time.Hour)},
+		{ID: "20261103-080000-d", State: StateOK, Ended: since.Add(24 * time.Hour)},
+	} {
+		if err := st.saveRun(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var got []string
+	for _, r := range st.runsSince(since) {
+		got = append(got, r.ID)
+	}
+	if want := []string{"20261102-100000-b", "20261103-080000-d"}; !slices.Equal(got, want) {
+		t.Errorf("runsSince = %v, want %v", got, want)
+	}
+}
+
 func TestSessionOpts(t *testing.T) {
 	opts := sessionOpts("/w", "/s/scout-mcp.json", []string{ServerOutlook, ServerSlack, ServerAsana})
 	if opts.PermissionMode != "dontAsk" || !opts.StrictMCPConfig || opts.MCPConfig != "/s/scout-mcp.json" || opts.Model != Model {

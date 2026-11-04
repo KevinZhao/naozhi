@@ -182,11 +182,7 @@ func (st store) saveRun(r Run) error {
 }
 
 // lastRun is the newest run record; run IDs sort by start time.
-func (st store) lastRun() (Run, bool) { return st.newestRun(false) }
-
-// newestRun is the newest run record, only among the runs that went
-// through when ok.
-func (st store) newestRun(ok bool) (Run, bool) {
+func (st store) lastRun() (Run, bool) {
 	ents, _ := os.ReadDir(st.runsDir())
 	for i := len(ents) - 1; i >= 0; i-- {
 		name := ents[i].Name()
@@ -195,11 +191,30 @@ func (st store) newestRun(ok bool) (Run, bool) {
 		}
 		var r Run
 		st.read(filepath.Join("runs", name), &r)
-		if r.ID != "" && (!ok || r.State == StateOK) {
+		if r.ID != "" {
 			return r, true
 		}
 	}
 	return Run{}, false
+}
+
+// runsSince is the run records that went through and ended at or after
+// since, oldest first.
+func (st store) runsSince(since time.Time) []Run {
+	ents, _ := os.ReadDir(st.runsDir())
+	var out []Run
+	for _, e := range ents {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".json") || osutil.IsAtomicTempName(name) {
+			continue
+		}
+		var r Run
+		st.read(filepath.Join("runs", name), &r)
+		if r.ID != "" && r.State == StateOK && !r.Ended.Before(since) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // pruneRuns removes the run records older than runsRetention.

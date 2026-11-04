@@ -35,10 +35,11 @@ type deadlineItem struct {
 }
 
 // gatherScout adds what the scout knows: today's meetings not over, from
-// the calendar cache; and, from the newest run that went through when it
-// ran in the window, the people waiting on a reply and the Asana tasks
-// due today or overdue. The newest run's reply_needed findings are the
-// ones still open: a reply sent, the scout stops reporting it.
+// the calendar cache; and, from every run that went through in the window,
+// the people waiting on a reply and the Asana tasks due today or overdue.
+// A run reports only what came after its cursor, so the replies waiting
+// overnight are in the morning's first run, not the newest; and nothing
+// tells a reply sent: these are the ones reported since the last brief.
 func (b *Briefer) gatherScout(in *input) {
 	now := in.Now
 	if b.cfg.Calendar != nil {
@@ -63,17 +64,25 @@ func (b *Briefer) gatherScout(in *input) {
 	if b.cfg.Patrol == nil {
 		return
 	}
-	r, ok := b.cfg.Patrol()
-	if !ok || r.Ended.Before(in.Since) || r.Ended.After(now) {
-		return
-	}
-	seen := map[string]bool{}
-	for _, f := range r.Findings {
-		k := f.Source + "\x00" + f.ID + "\x00" + f.Kind
-		if seen[k] {
+	// The same finding from several runs is listed once, as the newest run
+	// reported it.
+	index := map[string]int{}
+	var findings []scout.Finding
+	for _, r := range b.cfg.Patrol(in.Since) {
+		if r.Ended.After(now) {
 			continue
 		}
-		seen[k] = true
+		for _, f := range r.Findings {
+			k := f.Source + "\x00" + f.ID + "\x00" + f.Kind
+			if i, ok := index[k]; ok {
+				findings[i] = f.Finding
+				continue
+			}
+			index[k] = len(findings)
+			findings = append(findings, f.Finding)
+		}
+	}
+	for _, f := range findings {
 		switch {
 		case f.Kind == scout.KindReplyNeeded:
 			at, _ := time.Parse(time.RFC3339, f.At)
