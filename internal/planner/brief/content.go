@@ -74,6 +74,9 @@ type heldItem struct {
 // bytes.
 type input struct {
 	Now, Since time.Time
+	Meetings   []meetingItem
+	Replies    []replyItem
+	Deadlines  []deadlineItem
 	Done       []doneItem
 	Failed     []failedItem
 	Waiting    []inboxItem
@@ -84,7 +87,8 @@ type input struct {
 }
 
 func (in input) counts() Counts {
-	return Counts{Done: len(in.Done), Failed: len(in.Failed), Waiting: len(in.Waiting), Errors: len(in.Errors),
+	return Counts{Meetings: len(in.Meetings), Replies: len(in.Replies), Deadlines: len(in.Deadlines),
+		Done: len(in.Done), Failed: len(in.Failed), Waiting: len(in.Waiting), Errors: len(in.Errors),
 		Notices: len(in.Notices), Tasks: len(in.Tasks), Planner: len(in.Held)}
 }
 
@@ -266,6 +270,8 @@ func (b *Briefer) gather(since, now time.Time) input {
 	}
 	slices.SortFunc(in.Held, func(x, y heldItem) int { return cmp.Or(x.At.Compare(y.At), cmp.Compare(x.Key, y.Key)) })
 
+	b.gatherScout(&in)
+
 	newest := func(t1, t2 time.Time, n1, n2 string) int {
 		return cmp.Or(t2.Compare(t1), cmp.Compare(n1, n2))
 	}
@@ -363,6 +369,28 @@ func render(in input) string {
 	fmt.Fprintf(&b, "## 早报 · %d月%d日 %s\n\n", in.Now.Month(), in.Now.Day(), weekdays[in.Now.Weekday()])
 	fmt.Fprintf(&b, "自 %s 以来：%s\n", in.Since.In(loc).Format(stamp), summary(c, "未关闭的错误"))
 
+	section(&b, "今天的日程", in.Meetings, func(m meetingItem) string {
+		line := "全天"
+		if !m.AllDay {
+			line = m.Start.In(loc).Format("15:04") + "–" + m.End.In(loc).Format("15:04")
+		}
+		line += " · " + plain(textutil.TruncateRunes(m.Title, titleRunes))
+		if m.Conflict {
+			line += " · 冲突"
+		}
+		return line
+	})
+	section(&b, "在等你回复的", in.Replies, func(r replyItem) string {
+		line := cmp.Or(plain(r.From), "某人") + " · " + plain(textutil.TruncateRunes(r.Title, titleRunes))
+		if !r.At.IsZero() && r.At.Before(in.Now) {
+			line += " · 已等 " + ago(in.Now.Sub(r.At))
+		}
+		return line
+	})
+	section(&b, "今天到期或已过期的 Asana 任务", in.Deadlines, func(d deadlineItem) string {
+		return plain(textutil.TruncateRunes(d.Title, titleRunes)) + " · " + dueLabel(d.Due, in.Now)
+	})
+
 	section(&b, "完成的", in.Done, func(d doneItem) string {
 		line := link(d.Name, d.Link) + wsPart(d.WS) + " · " + d.At.In(loc).Format(stamp)
 		var outs []string
@@ -435,7 +463,8 @@ func summary(c Counts, errors string) string {
 	for _, p := range []struct {
 		label string
 		n     int
-	}{{"完成", c.Done}, {"失败", c.Failed}, {"等你", c.Waiting}, {errors, c.Errors}, {"通知", c.Notices}, {"未完成的任务", c.Tasks}, {"Planner 记下", c.Planner}} {
+	}{{"今天日程", c.Meetings}, {"等你回复", c.Replies}, {"Asana 到期", c.Deadlines},
+		{"完成", c.Done}, {"失败", c.Failed}, {"等你", c.Waiting}, {errors, c.Errors}, {"通知", c.Notices}, {"未完成的任务", c.Tasks}, {"Planner 记下", c.Planner}} {
 		if p.n > 0 {
 			parts = append(parts, fmt.Sprintf("%s %d", p.label, p.n))
 		}

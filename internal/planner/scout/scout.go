@@ -79,9 +79,16 @@ type Config struct {
 	// not take them: they are kept on disk only, as seen. Any other error
 	// leaves the cursors and the seen table as they were, so the next run
 	// finds the same findings and wakes the Planner with them.
-	Wake    func(block string) error
-	Journal *journal.Journal
-	Beats   *beat.Registry
+	Wake func(block string) error
+	// Brief hands a pre-meeting brief's material to the Planner
+	// (agent.Agent.Wake from agent.SourceBriefing), with Wake's errors;
+	// nil runs no brief.
+	Brief func(block string) error
+	// PlannerOn reports whether the Planner is on and not stopped: a brief
+	// is only for it, so none starts while it is off. nil is always on.
+	PlannerOn func() bool
+	Journal   *journal.Journal
+	Beats     *beat.Registry
 	// Now is the wall clock; nil is time.Now.
 	Now func() time.Time
 }
@@ -105,7 +112,9 @@ type Scout struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	running bool
-	// runs is the run in flight, for Stop to wait on.
+	// briefing is set while a pre-meeting brief runs, beside a run.
+	briefing bool
+	// runs is the runs and the brief in flight, for Stop to wait on.
 	runs sync.WaitGroup
 	last *Run
 	// started is the last run's start, scheduled or manual.
@@ -160,8 +169,18 @@ func (s *Scout) Calendar() []Event {
 	return s.st.Calendar()
 }
 
-// Run runs the schedule until ctx ends: once a minute it beats and starts
-// the run a due slot asks for (due).
+// Since is the runs that went through and ended at or after since, as
+// recorded, oldest first.
+func (s *Scout) Since(since time.Time) []Run {
+	if s == nil || s.st.dir == "" {
+		return nil
+	}
+	return s.st.runsSince(since)
+}
+
+// Run runs the schedule until ctx ends: once a minute it beats, starts
+// the run a due slot asks for (due) and the pre-meeting brief due
+// (briefDue).
 func (s *Scout) Run(ctx context.Context) {
 	if !s.Enabled() {
 		slog.Info("scout: off (no state root, or no mail / Slack / Asana MCP server in cli.mcp_config)")
@@ -177,12 +196,14 @@ func (s *Scout) Run(ctx context.Context) {
 	defer t.Stop()
 	for {
 		hb.Beat()
+		now := s.cfg.Now()
 		s.mu.Lock()
-		_, ok := due(s.cfg.Now(), s.started)
+		_, ok := due(now, s.started)
 		s.mu.Unlock()
 		if ok {
 			s.start(TriggerSchedule)
 		}
+		s.checkBrief(now)
 		select {
 		case <-ctx.Done():
 			return
@@ -292,23 +313,14 @@ func (s *Scout) run(ctx context.Context, id, trig string, started time.Time) (r 
 		r.State, r.Error = StateFailed, textutil.TruncateRunes(err.Error(), errRunes)
 		return r, true
 	}
-	mcp, servers, err := scoutMCPConfig(s.cfg.MCPConfig)
+	opts, servers, err := s.prepare()
 	if err != nil {
-		return fail(err)
-	}
-	mcpPath := s.cfg.Layout.ScoutMCPConfigPath()
-	if err := (store{dir: filepath.Dir(mcpPath)}).write(filepath.Base(mcpPath), json.RawMessage(mcp)); err != nil {
-		return fail(fmt.Errorf("write the scout's MCP config: %w", err))
-	}
-	workDir := s.cfg.Layout.PlannerScoutWorkDir()
-	if err := datadir.EnsureDir(workDir); err != nil {
 		return fail(err)
 	}
 	cursors := s.st.cursors()
 	sctx, cancel := context.WithTimeout(ctx, runTimeout)
 	defer cancel()
-	reply, tools, err := s.cfg.Session(sctx, sessionkey.ScoutKeyPrefix+id, sessionOpts(workDir, mcpPath, servers),
-		prompt(started, servers, cursors))
+	reply, tools, err := s.cfg.Session(sctx, sessionkey.ScoutKeyPrefix+id, opts, prompt(started, servers, cursors))
 	r.Tools = tools
 	if err != nil {
 		return fail(fmt.Errorf("scout session: %w", err))
@@ -361,6 +373,25 @@ func (s *Scout) run(ctx context.Context, id, trig string, started time.Time) (r 
 	return r, true
 }
 
+// prepare writes the run's MCP config, cli.mcp_config cut down to the
+// scout's servers, and makes the work directory: a scout session's launch
+// spec, and the servers it has.
+func (s *Scout) prepare() (sessionview.AgentOpts, []string, error) {
+	mcp, servers, err := scoutMCPConfig(s.cfg.MCPConfig)
+	if err != nil {
+		return sessionview.AgentOpts{}, nil, err
+	}
+	mcpPath := s.cfg.Layout.ScoutMCPConfigPath()
+	if err := (store{dir: filepath.Dir(mcpPath)}).write(filepath.Base(mcpPath), json.RawMessage(mcp)); err != nil {
+		return sessionview.AgentOpts{}, nil, fmt.Errorf("write the scout's MCP config: %w", err)
+	}
+	workDir := s.cfg.Layout.PlannerScoutWorkDir()
+	if err := datadir.EnsureDir(workDir); err != nil {
+		return sessionview.AgentOpts{}, nil, err
+	}
+	return sessionOpts(workDir, mcpPath, servers), servers, nil
+}
+
 // finish records a run: its file, a journal line, the old records pruned.
 func (s *Scout) finish(r Run) {
 	if err := s.st.saveRun(r); err != nil {
@@ -388,6 +419,7 @@ type activity struct {
 	Type     string `json:"type"`
 	Summary  string `json:"summary"`
 	Run      string `json:"run"`
+	Trigger  string `json:"trigger,omitempty"`
 	State    string `json:"state"`
 	Findings int    `json:"findings"`
 	New      int    `json:"new"`

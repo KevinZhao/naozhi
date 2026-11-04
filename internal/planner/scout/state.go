@@ -198,6 +198,25 @@ func (st store) lastRun() (Run, bool) {
 	return Run{}, false
 }
 
+// runsSince is the run records that went through and ended at or after
+// since, oldest first.
+func (st store) runsSince(since time.Time) []Run {
+	ents, _ := os.ReadDir(st.runsDir())
+	var out []Run
+	for _, e := range ents {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".json") || osutil.IsAtomicTempName(name) {
+			continue
+		}
+		var r Run
+		st.read(filepath.Join("runs", name), &r)
+		if r.ID != "" && r.State == StateOK && !r.Ended.Before(since) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // pruneRuns removes the run records older than runsRetention.
 func (st store) pruneRuns(now time.Time) {
 	ents, _ := os.ReadDir(st.runsDir())

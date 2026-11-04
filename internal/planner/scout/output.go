@@ -114,6 +114,36 @@ func (o Output) events() []Event {
 // errNoOutput is a reply with no JSON object in it.
 var errNoOutput = errors.New("reply holds no JSON object")
 
+// decodeReply decodes a scout session's reply into v strictly: one JSON
+// object, optionally inside a single ```json fence, with no unknown field
+// and no trailing data.
+func decodeReply(reply string, v any) error {
+	text := strings.TrimSpace(reply)
+	if rest, ok := strings.CutPrefix(text, "```"); ok {
+		rest = strings.TrimPrefix(rest, "json")
+		body, ok := strings.CutSuffix(strings.TrimSpace(rest), "```")
+		if !ok {
+			return errors.New("unterminated code fence")
+		}
+		text = strings.TrimSpace(body)
+	}
+	if !strings.HasPrefix(text, "{") {
+		return errNoOutput
+	}
+	if len(text) > maxOutputBytes {
+		return fmt.Errorf("reply is %d bytes, over %d", len(text), maxOutputBytes)
+	}
+	dec := json.NewDecoder(bytes.NewReader([]byte(text)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return errors.New("data after the JSON object")
+	}
+	return nil
+}
+
 // parseOutput reads a scout session's reply strictly: one JSON object,
 // optionally inside a single ```json fence, with no unknown field and no
 // trailing data; every finding names a known source and kind, an ID and a
@@ -121,29 +151,9 @@ var errNoOutput = errors.New("reply holds no JSON object")
 // left out when the session did not read it. Anything else fails
 // the run, which then leaves the cursors where they were.
 func parseOutput(reply string) (Output, error) {
-	text := strings.TrimSpace(reply)
-	if rest, ok := strings.CutPrefix(text, "```"); ok {
-		rest = strings.TrimPrefix(rest, "json")
-		body, ok := strings.CutSuffix(strings.TrimSpace(rest), "```")
-		if !ok {
-			return Output{}, errors.New("unterminated code fence")
-		}
-		text = strings.TrimSpace(body)
-	}
-	if !strings.HasPrefix(text, "{") {
-		return Output{}, errNoOutput
-	}
-	if len(text) > maxOutputBytes {
-		return Output{}, fmt.Errorf("reply is %d bytes, over %d", len(text), maxOutputBytes)
-	}
-	dec := json.NewDecoder(bytes.NewReader([]byte(text)))
-	dec.DisallowUnknownFields()
 	var out Output
-	if err := dec.Decode(&out); err != nil {
+	if err := decodeReply(reply, &out); err != nil {
 		return Output{}, err
-	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return Output{}, errors.New("data after the JSON object")
 	}
 	if len(out.Findings) > maxFindings || len(out.events()) > maxEvents {
 		return Output{}, fmt.Errorf("%d findings, %d events: over %d / %d", len(out.Findings), len(out.events()), maxFindings, maxEvents)

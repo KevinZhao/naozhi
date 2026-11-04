@@ -3,11 +3,12 @@
 // gateway lists what finished and what failed since the last brief and what
 // is still open in the inbox — the "等你" items (questions and decisions,
 // as the badge counts them), the unclosed errors, the notices and the 任务
-// not done (§15.4) — and what the Planner held for it (notify blocks of
-// level brief, §15.6), as short
-// Chinese Markdown, journals it (kind=brief) and pushes it once.
-// It is rendered by fixed rules from the journal, the inbox and the health
-// snapshot; nothing here calls a model.
+// not done (§15.4) — and, from the scout (§15.6 早报增强), today's
+// calendar, the people waiting on a reply and the Asana tasks due, with
+// what the Planner held for it (notify blocks of level brief), as short
+// Chinese Markdown, journals it (kind=brief) and pushes it once. It is
+// rendered by fixed rules from the journal, the inbox, the health snapshot
+// and the scout's state; nothing here calls a model.
 //
 // A day with nothing to report sends nothing. Its judgment is journaled all
 // the same, so a restart later that day does not judge it again, and the
@@ -25,6 +26,7 @@ import (
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/journal"
+	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -50,17 +52,20 @@ const journalUnit = "brief"
 
 // Counts are a brief's items per section.
 type Counts struct {
-	Done    int `json:"done"`
-	Failed  int `json:"failed"`
-	Waiting int `json:"waiting"`
-	Errors  int `json:"errors"`
-	Notices int `json:"notices"`
-	Tasks   int `json:"tasks"`
-	Planner int `json:"planner"`
+	Meetings  int `json:"meetings"`
+	Replies   int `json:"replies"`
+	Deadlines int `json:"deadlines"`
+	Done      int `json:"done"`
+	Failed    int `json:"failed"`
+	Waiting   int `json:"waiting"`
+	Errors    int `json:"errors"`
+	Notices   int `json:"notices"`
+	Tasks     int `json:"tasks"`
+	Planner   int `json:"planner"`
 }
 
 func (c Counts) total() int {
-	return c.Done + c.Failed + c.Waiting + c.Errors + c.Notices + c.Tasks + c.Planner
+	return c.Meetings + c.Replies + c.Deadlines + c.Done + c.Failed + c.Waiting + c.Errors + c.Notices + c.Tasks + c.Planner
 }
 
 // Mention is something the Planner holds for the next brief (a notify block
@@ -121,6 +126,13 @@ type Config struct {
 	// Name returns a unit's display name ("" falls back to the unit ID).
 	Name       func(unit string) string
 	Workspaces *workspace.Registry
+	// Calendar returns the scout's calendar cache (scout.Scout.Calendar);
+	// today's meetings not over yet are listed.
+	Calendar func() []scout.Event
+	// Patrol returns the scout runs that went through and ended at or
+	// after a time (scout.Scout.Since); the reply_needed findings and the
+	// Asana tasks due of those since the last brief are listed.
+	Patrol func(since time.Time) []scout.Run
 }
 
 // Briefer judges the day's brief. Check runs on Run's goroutine; Recent is
@@ -260,7 +272,8 @@ func (b *Briefer) Check() {
 		slog.Info("brief: nothing to report", "day", br.Day)
 		return
 	}
-	slog.Info("brief: sent", "day", br.Day, "done", br.Counts.Done, "failed", br.Counts.Failed,
+	slog.Info("brief: sent", "day", br.Day, "meetings", br.Counts.Meetings, "replies", br.Counts.Replies,
+		"deadlines", br.Counts.Deadlines, "done", br.Counts.Done, "failed", br.Counts.Failed,
 		"waiting", br.Counts.Waiting, "errors", br.Counts.Errors, "notices", br.Counts.Notices, "tasks", br.Counts.Tasks,
 		"planner", br.Counts.Planner)
 	if b.cfg.Push != nil {
