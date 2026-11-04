@@ -1,8 +1,10 @@
 package action
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/notify"
+	"github.com/naozhi/naozhi/internal/planner/brief"
 	"github.com/naozhi/naozhi/internal/planner/promise"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/planner/task"
@@ -39,7 +42,13 @@ const (
 	spawnTimeout = time.Minute
 	// rawRunes caps a refused block as shown in the conversation.
 	rawRunes = 600
+	// labelRunes caps the name a receipt gives a block not run.
+	labelRunes = 40
 )
+
+// SourcePrefix opens the inbox source of a timely notify block; the rest is
+// the thing's key (notifyKey).
+const SourcePrefix = "planner:"
 
 // Spawn is a dispatch as the gateway starts it.
 type Spawn struct {
@@ -60,6 +69,9 @@ type Config struct {
 	Sessions   *sidecar.Store
 	// Tasks applies status blocks; nil refuses them.
 	Tasks *task.Board
+	// Brief holds a notify block of level brief for the next morning brief
+	// (brief.Briefer.Hold); nil refuses them.
+	Brief func(brief.Mention) error
 	// Spawn starts the dispatched session key and sends it the first
 	// message.
 	Spawn func(ctx context.Context, key string, s Spawn) error
@@ -73,12 +85,12 @@ type Config struct {
 	Reports func(from, to time.Time) []string
 	// Outside names what brought outside content into the Planner turn in
 	// flight ("巡检", "会前简报"; agent.Agent.OutsideTurn), "" for nothing;
-	// that turn runs only its promise and ask blocks, its dispatch and
-	// status blocks are refused (docs/rfc/planner.md §15.6 安全). nil
+	// that turn runs only its notify, promise and ask blocks, its dispatch
+	// and status blocks are refused (docs/rfc/planner.md §15.6 安全). nil
 	// refuses none.
 	Outside func() string
-	// TellRefused sends the receipt of the blocks refused that way, as a
-	// turn held to the same limits (agent.Agent.TellRefused); nil sends
+	// TellRefused sends the receipt of the blocks not run in such a turn, as
+	// a turn held to the same limits (agent.Agent.TellRefused); nil sends
 	// none.
 	TellRefused func(text string) error
 	// Ctx bounds dispatches' spawns; nil is Background.
@@ -101,11 +113,11 @@ type Runner struct {
 	// doneTold is the tasks whose done block got the reminder of the
 	// promises citing them; only the handling goroutine touches it.
 	doneTold map[string]bool
-	// refusalTold is set once the Planner got a refusal receipt, until a
-	// reply from a turn of its own: a refusal receipt's turn refused again
-	// is not told again, or the two would go round. Only the handling
+	// unrunTold is set when the last reply's blocks not run got the Planner
+	// a receipt: the next reply, most likely the receipt's own, is not told
+	// of its own again, or the two would go round. Only the handling
 	// goroutine touches it.
-	refusalTold bool
+	unrunTold bool
 }
 
 // reply is one Planner turn's result text and the span its turn ran in.
@@ -191,16 +203,23 @@ func (r *Runner) handle(rep reply) {
 		}
 	}()
 	statused := map[string]string{} // task or promise → the state a block set
-	var refused []string            // the blocks an outside turn may not run
-	for _, b := range Parse(rep.text) {
+	var un unrun
+	for i, b := range Parse(rep.text) {
 		if b.Err != nil {
 			r.refuse(b, b.Err)
+			un.add(i, b, b.Err.Error())
+			if errors.Is(b.Err, errTooMany) {
+				un.tooMany = true
+			} else {
+				un.malformed = true
+			}
 			continue
 		}
 		var err error
 		switch {
 		case rep.outside != "" && (b.Dispatch != nil || b.Status != nil):
-			refused = append(refused, r.refuseOutside(b, rep.outside))
+			un.add(i, b, r.refuseOutside(b, rep.outside))
+			un.outside = true
 		case b.Dispatch != nil:
 			r.dispatch(*b.Dispatch)
 		case b.Promise != nil:
@@ -210,13 +229,58 @@ func (r *Runner) handle(rep reply) {
 		case b.Status != nil:
 			statused[b.Status.Task] = b.Status.State
 			err = r.status(b)
+		case b.Notify != nil:
+			err = r.notify(*b.Notify)
 		}
-		if err != nil {
+		var bad blockError
+		switch {
+		case errors.As(err, &bad):
+			r.refuse(b, bad.error)
+			un.add(i, b, bad.Error())
+			un.malformed = true
+		case err != nil:
 			r.note("动作块没有执行：" + err.Error())
+			un.add(i, b, err.Error())
 		}
 	}
-	r.tellRefused(rep.outside, refused)
+	r.tellUnrun(rep.outside, un)
 	r.checkReports(rep, statused)
+}
+
+// blockError is a block refused for what it says (a task that does not
+// exist), shown like a malformed one.
+type blockError struct{ error }
+
+// unrun is a reply's blocks not run, as the receipt lists them, and which
+// kinds of reason they had.
+type unrun struct {
+	lines                       []string
+	tooMany, malformed, outside bool
+}
+
+// add lists block i (0-based) of a reply, not run for why.
+func (u *unrun) add(i int, b Block, why string) {
+	u.lines = append(u.lines, fmt.Sprintf("第 %d 块%s：%s", i+1, blockLabel(b), why))
+}
+
+// blockLabel names a block as the receipt does: its type and title, read
+// loosely so a block refused for its fields still has a name.
+func blockLabel(b Block) string {
+	var head struct {
+		Type     string `json:"type"`
+		Title    string `json:"title"`
+		Task     string `json:"task"`
+		Question string `json:"question"`
+		Text     string `json:"text"`
+	}
+	if json.Unmarshal([]byte(b.Raw), &head) != nil || head.Type == "" {
+		return ""
+	}
+	label := textutil.TruncateRunes(strings.Join(strings.Fields(head.Type), " "), labelRunes)
+	if name := cmp.Or(head.Title, head.Task, head.Question, head.Text); name != "" {
+		label += "「" + textutil.TruncateRunes(strings.Join(strings.Fields(name), " "), labelRunes) + "」"
+	}
+	return "（" + label + "）"
 }
 
 // checkReports reminds the Planner of the dispatched sessions that reported
@@ -352,12 +416,12 @@ func (r *Runner) dispatch(d Dispatch) {
 // content brought in (by): a line in a mail could pose as the user asking
 // for work, or saying a task is done, so the gateway refuses it by the
 // turn's source, not by judging the text. The user asking in the
-// conversation is a turn of their own. It returns the block as the
-// receipt names it.
+// conversation is a turn of their own. It returns why, as the receipt
+// says it.
 func (r *Runner) refuseOutside(b Block, by string) string {
 	if d := b.Dispatch; d != nil {
 		r.note(by + "触发的回合不能派活：「" + d.Title + "」没有派出")
-		return "dispatch「" + d.Title + "」没有派出"
+		return "这一轮不能派活，没有派出"
 	}
 	s := *b.Status
 	name := s.Task
@@ -367,24 +431,42 @@ func (r *Runner) refuseOutside(b Block, by string) string {
 		}
 	}
 	r.note(by + "触发的回合不能改任务状态：「" + name + "」没有标为 " + s.State)
-	return "status「" + s.Task + " → " + s.State + "」没有执行"
+	return "这一轮不能改任务状态，没有标为 " + s.State
 }
 
-// tellRefused sends the Planner the receipt of what an outside turn's
-// reply was refused, once for a run of such turns (refusalTold).
-func (r *Runner) tellRefused(by string, refused []string) {
-	if by == "" {
-		r.refusalTold = false
+// tellUnrun sends the Planner one receipt naming each block of the reply
+// that was not run, why, and what to do about it; an outside turn's goes
+// through TellRefused, held to the same limits. A reply right after one
+// that got such a receipt gets none (unrunTold).
+func (r *Runner) tellUnrun(by string, u unrun) {
+	if len(u.lines) == 0 || r.unrunTold {
+		r.unrunTold = false
 		return
 	}
-	if len(refused) == 0 || r.refusalTold || r.cfg.TellRefused == nil {
+	send := r.cfg.Tell
+	if by != "" {
+		send = r.cfg.TellRefused
+	}
+	if send == nil {
 		return
 	}
-	r.refusalTold = true
-	text := "这一轮由" + by + "触发，网关只执行 promise 与 ask：" + strings.Join(refused, "；") +
-		"。需要派活或改任务状态，就在对话里向用户说明，等用户发消息让你做。"
-	if err := r.cfg.TellRefused(text); err != nil {
-		slog.Warn("planner actions: refusal receipt not sent to the Planner", "err", err)
+	r.unrunTold = true
+	var b strings.Builder
+	fmt.Fprintf(&b, "你上一条回复里有 %d 个动作块没有执行，其余的照常执行了：\n", len(u.lines))
+	for _, l := range u.lines {
+		b.WriteString("- " + l + "\n")
+	}
+	if u.tooMany {
+		fmt.Fprintf(&b, "超出上限的块要用的话，在下一条回复里重发（一次最多 %d 个）。\n", maxBlocks)
+	}
+	if u.malformed {
+		b.WriteString("格式不对的块按系统提示词里的格式改正后重发。\n")
+	}
+	if u.outside {
+		b.WriteString("这一轮由" + by + "触发，网关只执行 notify、promise 与 ask；需要派活或改任务状态，就在对话里向用户说明，等用户发消息让你做。\n")
+	}
+	if err := send(strings.TrimSpace(b.String())); err != nil {
+		slog.Warn("planner actions: receipt of the blocks not run not sent to the Planner", "err", err)
 	}
 }
 
@@ -441,19 +523,63 @@ func (r *Runner) status(b Block) error {
 	s := *b.Status
 	title, ok := r.cfg.Tasks.Title(s.Task)
 	if !ok {
-		r.refuse(b, fmt.Errorf("找不到任务 %q（填 task: key 或承诺 ID）", s.Task))
-		return nil
+		return blockError{fmt.Errorf("找不到任务 %q（填 task: key 或承诺 ID）", s.Task)}
 	}
 	state := task.State(s.State)
 	switch err := r.cfg.Tasks.Set(s.Task, state, task.ByPlanner, s.Why); {
 	case errors.Is(err, task.ErrState):
-		r.refuse(b, errors.New("承诺没有失败状态，只能标 done 或 doing"))
-		return nil
+		return blockError{errors.New("承诺没有失败状态，只能标 done 或 doing")}
 	case err != nil:
 		return fmt.Errorf("改任务状态失败（%v）", err)
 	}
 	r.note("Planner 判断任务「" + textutil.TruncateRunes(title, 60) + "」" + stateLabels[state] + "：" + s.Why)
 	return nil
+}
+
+// notify tells the user what the Planner judged worth it: a timely block
+// opens a notice in "通知" and pushes it, within the daily cap and quiet
+// hours; a brief block waits for the next morning brief. A thing is pushed
+// once a day (notify.Notifier.AddDaily).
+func (r *Runner) notify(n Notify) error {
+	key := notifyKey(n)
+	if n.Level == LevelBrief {
+		if r.cfg.Brief == nil {
+			return errors.New("早报没有接通")
+		}
+		if err := r.cfg.Brief(brief.Mention{Key: key, Title: n.Title, Why: n.Why, Link: n.Link}); err != nil {
+			return fmt.Errorf("记入早报失败（%v）", err)
+		}
+		r.note("记入早报：" + n.Title)
+		return nil
+	}
+	if r.cfg.Inbox == nil {
+		return errors.New("通知没有接通")
+	}
+	if _, opened := r.cfg.Inbox.AddDaily(notify.Item{
+		Kind:   notify.KindNotice,
+		Level:  notify.LevelTimely,
+		Unit:   r.cfg.Planner,
+		Title:  n.Title,
+		Why:    cmp.Or(n.Why, "Planner 提醒你"),
+		Link:   n.Link,
+		Source: SourcePrefix + key,
+	}); !opened {
+		r.note("这件事今天提醒过或还开着，不再推送：" + n.Title)
+		return nil
+	}
+	r.note("已提醒你：" + n.Title)
+	return nil
+}
+
+// notifyKey names the thing a notify block is about: the scout finding's ID
+// when it has one, else its title, case and spacing folded, and link.
+func notifyKey(n Notify) string {
+	k := "id\x00" + n.ID
+	if n.ID == "" {
+		k = "title\x00" + strings.ToLower(strings.Join(strings.Fields(n.Title), " ")) + "\x00" + n.Link
+	}
+	sum := sha256.Sum256([]byte(k))
+	return hex.EncodeToString(sum[:8])
 }
 
 // ask puts the Planner's question into "通知".

@@ -38,7 +38,7 @@ import { renderEventsWithDividers } from './event_render.js';
 import { runPendingAsync } from './render_md.js';
 import { inbox, isLit, notifySupported, onInboxCount, requestNotifyPermission, revealFocus } from './notify.js';
 import { followWorkbenchSubject, noteWorkbenchEvent } from './workbench_panes.js';
-import { decisionActsHtml, decorateEvents, paintSessionCards, refreshHealth } from './planner_cards.js';
+import { decisionActsHtml, decorateEvents, paintSessionCards, refreshHealth, webLinkHtml } from './planner_cards.js';
 import { clearPending, closePlannerSession, mountComposer, notePlannerStatus } from './planner_chat.js';
 import { mountTasks, refreshTasks } from './tasks.js';
 import { workbench } from './workbench.js';
@@ -128,6 +128,7 @@ function itemHtml(it) {
     ? [target.project, target.title].filter(Boolean).map(esc).join(' · ') +
       ' <button type="button" class="pl-link" data-action="session-select" data-key="' + escAttr(target.key) + '" data-node="' + escAttr(target.node) + '">打开</button>'
     : (it.unit ? esc(it.unit === PLANNER_KEY ? 'Planner' : it.unit) : '');
+  const link = webLinkHtml(it.link);
   const acts = decisionActsHtml(it);
   return '<div class="pl-card pl-k-' + kind + (isLit(it.id) ? ' inbox-lit' : '') + '" role="listitem" data-id="' + escAttr(it.id) + '">' +
       '<div class="pl-card-top">' +
@@ -137,7 +138,7 @@ function itemHtml(it) {
       '</div>' +
       '<div class="pl-card-title">' + esc(it.title || '') + '</div>' +
       (it.why ? '<div class="pl-card-why">' + esc(it.why) + '</div>' : '') +
-      (meta ? '<div class="pl-card-meta">' + meta + '</div>' : '') +
+      (meta || link ? '<div class="pl-card-meta">' + [meta, link].filter(Boolean).join(' · ') + '</div>' : '') +
       acts +
     '</div>';
 }

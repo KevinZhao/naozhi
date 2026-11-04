@@ -3,7 +3,8 @@
 // gateway lists what finished and what failed since the last brief and what
 // is still open in the inbox — the "等你" items (questions and decisions,
 // as the badge counts them), the unclosed errors, the notices and the 任务
-// not done (§15.4) — as short
+// not done (§15.4) — and what the Planner held for it (notify blocks of
+// level brief, §15.6), as short
 // Chinese Markdown, journals it (kind=brief) and pushes it once.
 // It is rendered by fixed rules from the journal, the inbox and the health
 // snapshot; nothing here calls a model.
@@ -16,6 +17,7 @@ package brief
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -25,6 +27,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/journal"
 	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // Timing (§15.1).
@@ -53,9 +56,41 @@ type Counts struct {
 	Errors  int `json:"errors"`
 	Notices int `json:"notices"`
 	Tasks   int `json:"tasks"`
+	Planner int `json:"planner"`
 }
 
-func (c Counts) total() int { return c.Done + c.Failed + c.Waiting + c.Errors + c.Notices + c.Tasks }
+func (c Counts) total() int {
+	return c.Done + c.Failed + c.Waiting + c.Errors + c.Notices + c.Tasks + c.Planner
+}
+
+// Mention is something the Planner holds for the next brief (a notify block
+// of level brief): Key names the thing, so a brief lists it once.
+type Mention struct {
+	Key   string `json:"key"`
+	Title string `json:"title"`
+	Why   string `json:"why,omitempty"`
+	Link  string `json:"link,omitempty"`
+}
+
+// eventHold is the notify journal event of a held Mention.
+const eventHold = "brief_hold"
+
+type holdData struct {
+	Event string `json:"event"`
+	Mention
+}
+
+// Hold journals m for the next brief, whose window it falls in.
+func (b *Briefer) Hold(m Mention) error {
+	if b.cfg.Journal == nil {
+		return errors.New("brief: no journal")
+	}
+	data, err := json.Marshal(holdData{Event: eventHold, Mention: m})
+	if err != nil {
+		return err
+	}
+	return b.cfg.Journal.Append(journal.Entry{TS: b.cfg.Now(), Kind: journal.KindNotify, Unit: sessionkey.PlannerMainKey, Data: data})
+}
 
 // Brief is one day's judgment, the data of a kind=brief journal entry.
 type Brief struct {
@@ -226,7 +261,8 @@ func (b *Briefer) Check() {
 		return
 	}
 	slog.Info("brief: sent", "day", br.Day, "done", br.Counts.Done, "failed", br.Counts.Failed,
-		"waiting", br.Counts.Waiting, "errors", br.Counts.Errors, "notices", br.Counts.Notices, "tasks", br.Counts.Tasks)
+		"waiting", br.Counts.Waiting, "errors", br.Counts.Errors, "notices", br.Counts.Notices, "tasks", br.Counts.Tasks,
+		"planner", br.Counts.Planner)
 	if b.cfg.Push != nil {
 		b.cfg.Push(notify.Push{ID: "brief:" + br.Day, Kind: notify.KindNotice, Level: notify.LevelTimely,
 			Title: "早报", Body: pushBody(br.Counts)})

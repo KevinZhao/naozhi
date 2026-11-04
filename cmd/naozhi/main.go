@@ -627,6 +627,7 @@ func main() {
 		Workspaces:  plannerState.Workspaces,
 		Sessions:    sidecars,
 		Tasks:       tasks,
+		Brief:       briefer.Hold,
 		Spawn:       wireup.TaskSpawner{Router: router, Opts: taskOpts, Submit: srv.SubmitPlanner}.Spawn,
 		Note:        plannerAgent.Note,
 		Tell:        plannerAgent.Tell,

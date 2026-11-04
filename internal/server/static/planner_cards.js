@@ -125,11 +125,18 @@ function mentionedKeys(ev) {
 
 // ---- action blocks (§6.2) ----
 
-const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask', 'status']);
+const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask', 'status', 'notify']);
 const STATUS_LABEL = { done: '已完成', doing: '进行中', failed: '失败' };
 
 const isStr = (v) => typeof v === 'string';
 const str = (v) => (isStr(v) ? v : '');
+
+// webLinkHtml opens an http(s) page the Planner names (a mail, a Slack
+// message) in a new tab; anything else is no link.
+export function webLinkHtml(href, cls) {
+  if (!isStr(href) || !/^https?:\/\//i.test(href)) return '';
+  return '<a class="pl-link' + (cls ? ' ' + cls : '') + '" href="' + escAttr(href) + '" target="_blank" rel="noopener noreferrer">打开原文</a>';
+}
 
 // decisionActsHtml is an item's answer buttons (a decision's actions, or a
 // Planner question's options, §6.2 ask): the left column's card and the
@@ -186,6 +193,15 @@ function actionCardHtml(raw) {
     return '<div class="pl-act pl-act-status"><div class="pl-act-h">Planner 判断 · ' + esc(STATUS_LABEL[a.state] || str(a.state)) + '</div>' +
       rowsHtml([['任务', name], ['依据', str(a.why)]]) +
       '<div class="pl-act-note">"任务"里的状态随之改，你可以改回</div></div>';
+  }
+  if (a.type === 'notify') {
+    const brief = a.level === 'brief';
+    const link = webLinkHtml(a.link);
+    return '<div class="pl-act pl-act-notify"><div class="pl-act-h">' + (brief ? '记入早报' : '提醒你') + '</div>' +
+      '<div class="pl-act-q">' + esc(str(a.title)) + '</div>' +
+      (a.why ? '<div class="pl-act-why">' + esc(str(a.why)) + '</div>' : '') +
+      (link ? '<div class="pl-act-link">' + link + '</div>' : '') +
+      '<div class="pl-act-note">' + (brief ? '列在下一份早报里，不推送' : '进"通知"并推送，同一件事当天只推一次') + '</div></div>';
   }
   const opts = (Array.isArray(a.options) ? a.options : []).filter(isStr).map((o) => '<span class="pl-act-opt">' + esc(o) + '</span>').join('');
   return '<div class="pl-act pl-act-ask"><div class="pl-act-h">问你</div>' +
