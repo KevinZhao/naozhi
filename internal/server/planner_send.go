@@ -113,7 +113,7 @@ type plannerTurnsFile struct {
 
 // load sets the file and the engine's ctx and carries over the requests
 // the file holds.
-func (t *plannerTurns) load(path string, ctx context.Context) {
+func (t *plannerTurns) load(ctx context.Context, path string) {
 	t.path, t.ctx = path, ctx
 	if path == "" {
 		return

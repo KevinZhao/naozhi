@@ -85,14 +85,14 @@ func TestPlannerTurnsCarriedOver(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "planner", "turns.json")
 	ctx, cancel := context.WithCancel(context.Background())
 	var before plannerTurns
-	before.load(path, ctx)
+	before.load(ctx, path)
 	o := &plannerOrigin{key: agent.Key, src: agent.SourceScout, turns: &before, notify: nopNotifier{}}
 	o.Begin(ctx, turn.TurnInfo{Role: turn.RoleHead})
 	cancel() // shutdown: the shim keeps the turn, the Send gives up
 	o.Finish(ctx, turn.Outcome{Err: context.Canceled})
 
 	var after plannerTurns
-	after.load(path, context.Background())
+	after.load(context.Background(), path)
 	if got := after.sources(agent.Key); !slices.Equal(got, []agent.Source{agent.SourceScout}) {
 		t.Fatalf("carried over = %q, want [scout]", got)
 	}
@@ -105,7 +105,7 @@ func TestPlannerTurnsCarriedOver(t *testing.T) {
 		t.Errorf("after its result = %q, want none", got)
 	}
 	var again plannerTurns
-	again.load(path, context.Background())
+	again.load(context.Background(), path)
 	if got := again.sources(agent.Key); len(got) != 0 {
 		t.Errorf("answered request carried over again: %q", got)
 	}

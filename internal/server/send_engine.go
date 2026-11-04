@@ -133,7 +133,7 @@ func newSendEngine(o sendEngineOpts) *sendEngine {
 		taskOpts:    o.TaskOpts,
 		notify:      notify,
 	}
-	e.plannerTurns.load(o.PlannerTurnsPath, ctx)
+	e.plannerTurns.load(ctx, o.PlannerTurnsPath)
 	return e
 }
 

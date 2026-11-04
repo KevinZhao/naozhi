@@ -57,7 +57,7 @@ var (
 	ErrBusy = errors.New("巡检正在进行")
 	// ErrPlannerOff is Config.Wake's answer when the Planner is off or
 	// stopped, or will never take the block.
-	ErrPlannerOff = errors.New("Planner 没有开启或已停用")
+	ErrPlannerOff = errors.New("没有开启 Planner，或已停用")
 )
 
 // Session runs one scout session: key's session started with opts and sent
