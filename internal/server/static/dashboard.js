@@ -563,6 +563,7 @@ const CHEATSHEET_ENTRIES = [
   { keys: ['Cmd/Ctrl', '↑'], alt: ['Cmd/Ctrl', '↓'], desc: '上/下一会话（同项目组内）' },
   { keys: ['Cmd/Ctrl', 'K'], desc: '打开新建会话面板（最近使用置顶）' },
   { keys: ['Alt', 'N'], desc: '新建会话' },
+  { keys: ['Alt', 'P'], desc: '打开 / 收起 Planner 抽屉' },
   { section: '消息' },
   { keys: ['Enter'], desc: '发送消息' },
   { keys: ['Shift', 'Enter'], desc: '输入框内换行' },
@@ -1073,6 +1074,9 @@ function mainHeaderHtml(s) {
   const workbenchBtn = selection.key && !isDiscoveredKey(selection.key) && (!selection.node || selection.node === 'local')
     ? '<button type="button" class="fv-btn btn-workbench" data-action="workbench-toggle" title="工作台：预览 · 产出 · 文件 · 详情" aria-label="打开或关闭工作台">工作台</button>'
     : '';
+  // The Planner drawer's entry on phone, where Alt+P is out of reach
+  // (planner_drawer.js); paintHandoffButton shows it while planner.enabled is on.
+  const plannerBtn = '<button type="button" class="fv-btn btn-pld" id="btn-pld" data-action="planner-drawer-toggle" title="Planner（Alt+P）" aria-label="打开或收起 Planner 抽屉" hidden>Planner</button>';
 
   return '<div class="main-header">' +
       '<button type="button" class="btn-mobile-back" data-action="mobile-back" title="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868" aria-label="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868">' + ICONS.back + '</button>' +
@@ -1106,6 +1110,7 @@ function mainHeaderHtml(s) {
         '<span class="detail-runstats" id="header-runstats"></span>' +
       '</div>' +
       '</div>' +
+      plannerBtn +
       workbenchBtn +
     '</div>';
 }
@@ -1126,6 +1131,7 @@ function renderMainHeader() {
   setHeaderSpawnDiagChip();
   setHeaderOverlayDriftChip();
   setHeaderPRChip();
+  paintHandoffButton();
   fetchSessionRuns(selection.key, selection.node);
 }
 

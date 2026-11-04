@@ -185,13 +185,13 @@ function actionCardHtml(raw, source) {
   if (a.type === 'promise') {
     return '<div class="pl-act pl-act-promise"><div class="pl-act-h">登记承诺</div>' +
       rowsHtml([['内容', str(a.text)], ['到期', dueText(str(a.due))], ['完成条件', str(a.close_when)]]) +
-      '<div class="pl-act-note">登记后列在左栏"答应你的"</div></div>';
+      '<div class="pl-act-note">登记后列在"答应你的"</div></div>';
   }
   const opts = (Array.isArray(a.options) ? a.options : []).filter(isStr).map((o) => '<span class="pl-act-opt">' + esc(o) + '</span>').join('');
   return '<div class="pl-act pl-act-ask"><div class="pl-act-h">问你</div>' +
     '<div class="pl-act-q">' + esc(str(a.question)) + '</div>' +
     (opts ? '<div class="pl-act-opts">' + opts + '</div>' : '') +
-    '<div class="pl-act-note">在左栏"等你"里回答</div></div>';
+    '<div class="pl-act-note">在"等你"里回答</div></div>';
 }
 
 // setInboxItems takes the inbox the left column shows (open and recently
@@ -212,7 +212,7 @@ function dispatchItem(source) {
 
 function dispatchStateHtml(it) {
   if (!it) return '<span class="pl-act-note">状态未知：确认卡片不在"等你"里（还没生成，或已归档）</span>';
-  if (it.state === 'open') return decisionActsHtml(it) + '<span class="pl-act-note">左栏"等你"里是同一张</span>';
+  if (it.state === 'open') return decisionActsHtml(it) + '<span class="pl-act-note">"等你"里是同一张</span>';
   const answer = it.decision.answer;
   const label = answer === 'approve' ? '已批准' : answer === 'reject' ? '已驳回' : '已关闭';
   const key = it.decision.payload && it.decision.payload.key;
