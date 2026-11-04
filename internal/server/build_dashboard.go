@@ -74,6 +74,9 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 	if hs.wiring.notify != nil {
 		hs.wiring.notify.SetBrowser(hubNotifier{b: hs.wiring.bcast})
 	}
+	if hs.wiring.notes != nil {
+		hs.wiring.notes.SetPush(hubNotifier{b: hs.wiring.bcast}.SessionNote)
+	}
 }
 
 // buildWSStack builds the WebSocket stack in dependency order: the

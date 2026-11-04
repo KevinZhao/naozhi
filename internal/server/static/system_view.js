@@ -176,7 +176,7 @@ export const HEALTH_STATES = {
   idle: { label: '空闲', cls: 'idle' },
 };
 // HEALTH_ERROR_CLASSES labels health.Classify's error classes (§15.1).
-const HEALTH_ERROR_CLASSES = {
+export const HEALTH_ERROR_CLASSES = {
   auth: '凭证 / 权限拒绝',
   region: '地区限制',
   rate_limit: '限流',

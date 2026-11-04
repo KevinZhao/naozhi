@@ -41,6 +41,7 @@ import { closePlannerPanel, openPlannerPanel } from './planner_view.js';
 import { paintHandoffButton } from './planner_chat.js';
 import { interruptSession, resetTurnState, saveScrollPos, updateSendButton } from './running_banner.js';
 import { closeFilePreview, startFileRefObserver } from './file_refs.js';
+import { startSessionNotes } from './session_notes.js';
 import {
   applyFeatureGates,
   closeHistoryPopover,
@@ -1197,6 +1198,8 @@ function renderMainShell() {
   // references. Safe to call on every renderMainShell: dataset.frObserver
   // gates re-entry so we don't stack duplicate observers.
   startFileRefObserver();
+  // The gateway's side notes on this session, placed among its bubbles.
+  startSessionNotes();
   renderWorkflowPanel();
   // Double-tap events feed → focus input (mobile)
   let lastTapMs = 0;

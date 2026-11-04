@@ -121,6 +121,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		routerEvents:  opts.Relays.Router,
 		runTelemetry:  opts.Relays.RunTelemetry,
 		notify:        opts.Notify,
+		notes:         opts.Notes,
 		stateDir:      opts.StateDir,
 	}
 
@@ -280,6 +281,10 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 	if opts.Outputs != nil {
 		outputs = opts.Outputs
 	}
+	var notes dashsession.NoteSource
+	if opts.Notes != nil {
+		notes = opts.Notes
+	}
 	var workspaces dashsession.WorkspaceLookup
 	if opts.Workspaces != nil {
 		workspaces = opts.Workspaces
@@ -308,6 +313,7 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 		RetiredStore:     retiredReader,
 		ValidateWS:       validateWorkspace,
 		Outputs:          outputs,
+		Notes:            notes,
 		Health:           opts.Health,
 		Workspaces:       workspaces,
 		Purpose:          opts.Purpose,

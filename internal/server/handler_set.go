@@ -52,6 +52,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/imauth"
 	"github.com/naozhi/naozhi/internal/notify"
+	"github.com/naozhi/naozhi/internal/planner/note"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/routerrelay"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
@@ -126,6 +127,8 @@ type wiring struct {
 	runTelemetry *runtelemetry.Relay
 	// notify is opts.Notify; buildDashboard binds the hub to it.
 	notify *notify.Notifier
+	// notes is opts.Notes; buildDashboard binds the hub to it.
+	notes *note.Notes
 	// watchdog holds the no-output / total watchdog-kill counters; the
 	// dispatcher, the session handlers and /health each get pointers into it.
 	watchdog watchdogCounters

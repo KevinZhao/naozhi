@@ -1,6 +1,8 @@
 package wsproto
 
 import (
+	"encoding/json"
+
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cli/workflow"
 )
@@ -67,7 +69,8 @@ var Frames = map[MsgType]any{
 	TypeNotify: NewNotify(Notify{
 		ID: "i", Kind: "error", Level: "urgent", Title: "t", Body: "b", Key: "k",
 	}),
-	TypeInboxCount: NewInboxCount(2, 1),
+	TypeInboxCount:  NewInboxCount(2, 1),
+	TypeSessionNote: NewSessionNote("k", json.RawMessage(`{"id":"i"}`)),
 }
 
 // exemplarWorkflow is a WireView with every field set.

@@ -47,6 +47,8 @@ const SLOW_TICKS = 10;
 // PROMISE_REFRESH_MS is how long after a Planner turn ends 答应你的 is
 // refetched: the turn's promise blocks are registered off the read loop.
 const PROMISE_REFRESH_MS = 1500;
+// FOCUS_MS is how long an item a side note opened stays highlighted.
+const FOCUS_MS = 2000;
 
 const KIND_LABEL = { decision: '决定', question: '提问', error: '错误', notice: '通知' };
 const KIND_ORDER = { decision: 0, question: 1, error: 2, notice: 3 };
@@ -70,6 +72,10 @@ const pl = {
   // seeding: onInboxCount runs from our own fetch, so its inbox:count must
   // not refetch.
   seeding: false,
+  // focus is an item to scroll to and highlight once the list shows it;
+  // flash the one highlighted until `until`.
+  focus: '',
+  flash: { id: '', until: 0 },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -132,6 +138,24 @@ function paintWaiting() {
   box.innerHTML = items.length ? items.map(itemHtml).join('') : '<div class="pl-empty">没有等你的事</div>';
   paintCounts();
   paintInlineCards(items);
+  // A repaint inside the highlight keeps it.
+  const id = pl.focus || (Date.now() < pl.flash.until ? pl.flash.id : '');
+  const card = id && [...box.querySelectorAll('.pl-card')].find((c) => c.dataset.id === id);
+  if (!card) return;
+  card.classList.add('pl-focus');
+  if (!pl.focus) return;
+  pl.focus = '';
+  pl.flash = { id, until: Date.now() + FOCUS_MS };
+  card.scrollIntoView({ block: 'center' });
+  setTimeout(() => $('pl-wait')?.querySelectorAll('.pl-focus').forEach((c) => c.classList.remove('pl-focus')), FOCUS_MS);
+}
+
+// focusInboxItem opens the Planner page on 等你 item id, highlighted; the
+// page's first inbox fetch decides whether it is still open.
+export function focusInboxItem(id) {
+  pl.focus = id || '';
+  if (ui.activeView !== 'planner') { shell.setActivityView('planner'); return; }
+  fetchInbox();
 }
 
 // paintInlineCards repeats the Planner's open cards (dispatch confirmations,
@@ -158,6 +182,7 @@ async function fetchInbox() {
     }
   } catch { return; }
   if (ui.activeView === 'planner') { paintWaiting(); paintTools(); }
+  if (pl.focus) { pl.focus = ''; showToast('这一条已经关闭了', 'info'); }
 }
 
 // ---- controls ----

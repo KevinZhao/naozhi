@@ -17,6 +17,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/activity"
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/brief"
+	"github.com/naozhi/naozhi/internal/planner/note"
 	"github.com/naozhi/naozhi/internal/planner/promise"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
 	"github.com/naozhi/naozhi/internal/platform"
@@ -102,6 +103,9 @@ type ServerOptions struct {
 	// Outputs is the outputs index /api/sessions/outputs lists; nil lists
 	// none.
 	Outputs *activity.Recorder
+	// Notes are the session side notes /api/sessions/notes lists; the
+	// server binds the Hub to them for the new ones. nil lists none.
+	Notes *note.Notes
 	// Planner is the global Planner behind /api/planner; nil answers those
 	// routes as planner.enabled off.
 	Planner *agent.Agent

@@ -678,6 +678,18 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .event.peer_hold,.event.permission_denied,.event.model_refusal{justify-content:center;padding-top:8px;padding-bottom:8px}
 .event.peer_hold .event-icon,.event.permission_denied .event-icon,.event.model_refusal .event-icon{display:none}
 .event.peer_hold .event-content,.event.permission_denied .event-content,.event.model_refusal .event-content{flex:none;color:var(--nz-text-dim);font-size:var(--nz-fs-sm);text-align:center}
+/* Gateway side notes (RFC planner §15.3 ③): centered like a held message,
+   not session events; the icon carries the tone. */
+.gw-note{display:flex;justify-content:center;align-items:baseline;flex-wrap:wrap;gap:6px;padding:6px 16px;color:var(--nz-text-dim);font-size:var(--nz-fs-sm);text-align:center;border-radius:var(--nz-radius-md);transition:background var(--nz-dur) var(--nz-ease)}
+.gw-note-icon{font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.gw-bad .gw-note-icon{color:var(--nz-red)}
+.gw-warn .gw-note-icon,.gw-inbox .gw-note-icon{color:var(--nz-amber)}
+.gw-ok .gw-note-icon{color:var(--nz-green)}
+.gw-planner .gw-note-icon{color:var(--nz-accent)}
+.gw-note-time{font-size:var(--nz-fs-xs);color:var(--nz-text-faint)}
+.gw-note-link{background:none;border:none;padding:0;font:inherit;color:var(--nz-accent);cursor:pointer}
+.gw-note-link:hover{text-decoration:underline}
+.gw-note.gw-focus,.pl-card.pl-focus{background:var(--nz-selected-bg)}
 .refusal-tag{display:inline-block;font-size:var(--nz-fs-2xs);padding:1px 8px;border-radius:var(--nz-radius-pill);border:1px solid var(--nz-warn);color:var(--nz-warn)}
 /* Hidden types (kept for safety) */
 .event.thinking .event-content{color:var(--nz-event-agent-fg);font-style:italic}
