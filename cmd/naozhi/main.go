@@ -465,7 +465,7 @@ func main() {
 		Promises: promises,
 		Health:   func() health.Snapshot { return healthMon.Snapshot() },
 		Journal:  plannerState.Journal,
-		Stop:     wireup.StopTask(router, plannerAgent.Tell),
+		Stop:     wireup.StopTask(router, func(key string) { srv.DropPlannerQueue(key) }, plannerAgent.Tell),
 	})
 	briefer := brief.New(brief.Config{
 		Journal: plannerState.Journal,

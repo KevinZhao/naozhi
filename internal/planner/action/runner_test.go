@@ -82,7 +82,9 @@ func TestDispatch(t *testing.T) {
 	}{
 		{name: "spawned", want: "已派出：iso 写 hello（task:", spawned: true},
 		{name: "unknown workspace", workspace: "nowhere", want: "派出「iso 写 hello」失败"},
-		{name: "max_procs full", spawnErr: errors.New("同时运行的会话已满（max_procs 3）"), want: "同时运行的会话已满"},
+		// The start failing (max_procs full, ...) is relayed as said; spawnError
+		// in wireup says it.
+		{name: "start fails", spawnErr: errors.New("max_procs full"), want: "max_procs full"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

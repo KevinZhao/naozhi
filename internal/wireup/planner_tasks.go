@@ -10,6 +10,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/action"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/usermsg"
 )
 
 // taskPrompt is appended to a dispatched session's system prompt: how it
@@ -62,11 +63,14 @@ func (t TaskOpts) ForKey(key string) (session.AgentOpts, bool) {
 	return t.For(m.Dir, m.Title, m.Model), true
 }
 
-// StopTask is task.Config.Stop: it closes the dispatched session's process
-// (its background work too; the session stays) and tells the Planner, which
-// would otherwise wait on it or send it on.
-func StopTask(router *session.Router, tell func(string) error) func(key, title string) {
+// StopTask is task.Config.Stop: it drops the messages queued for the
+// dispatched session's next turn (Server.DropPlannerQueue), which would
+// otherwise resume it once the cut turn ends, closes its process (its
+// background work too; the session stays) and tells the Planner, which would
+// otherwise wait on it or send it on.
+func StopTask(router *session.Router, drop func(key string), tell func(string) error) func(key, title string) {
 	return func(key, title string) {
+		drop(key)
 		router.StopSession(key)
 		if err := tell("用户在「任务」里停止了「" + title + "」（" + key + "）。不要再给它发消息，也不要重新派出同一件事，除非用户再要求。"); err != nil {
 			slog.Info("task stop: the Planner not told", "key", key, "err", err)
@@ -82,17 +86,25 @@ type TaskSpawner struct {
 	Submit func(key, text string, opts session.AgentOpts, done func(string, error)) (bool, error)
 }
 
-// Spawn is action.Config.Spawn. A full max_procs is said in the Planner's
-// language: the Planner relays it to the user.
+// Spawn is action.Config.Spawn. A start that fails is said in the user's
+// words (spawnError): the Planner relays it.
 func (t TaskSpawner) Spawn(ctx context.Context, key string, s action.Spawn) error {
 	opts := t.Opts.For(s.Dir, s.Title, s.Model)
 	if _, _, err := t.Router.GetOrCreate(ctx, key, opts); err != nil {
-		if errors.Is(err, session.ErrMaxProcs) {
-			return fmt.Errorf("同时运行的会话已满（max_procs %d），等有会话结束再派", t.Router.MaxProcs())
-		}
-		return err
+		slog.Warn("planner dispatch: session not started", "key", key, "err", err)
+		return spawnError(err, key, t.Router.MaxProcs())
 	}
 	t.Router.SetUserLabel(key, s.Title)
 	_, err := t.Submit(key, s.Message, opts, nil)
 	return err
+}
+
+// spawnError is err of a dispatched session's start as usermsg says it, a
+// full max_procs with the limit.
+func spawnError(err error, key string, maxProcs int) error {
+	msg := usermsg.ForSendError(err, key)
+	if errors.Is(err, session.ErrMaxProcs) {
+		msg += fmt.Sprintf("（max_procs %d）", maxProcs)
+	}
+	return errors.New(msg)
 }

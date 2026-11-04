@@ -1,12 +1,14 @@
 package wireup
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sessionkey"
+	"github.com/naozhi/naozhi/internal/usermsg"
 )
 
 // A dispatched session runs on Claude whatever the general agent's backend,
@@ -32,4 +34,24 @@ func TestTaskOptsForKey(t *testing.T) {
 			t.Error("ForKey answered a key without a sidecar")
 		}
 	})
+}
+
+// A dispatched session's start that fails reaches the Planner as usermsg
+// says it, a full max_procs with the limit.
+func TestSpawnError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"max_procs full", fmt.Errorf("spawn: %w", session.ErrMaxProcs), usermsg.ForSendError(session.ErrMaxProcs, "") + "（max_procs 3）"},
+		{"no CLI", session.ErrNoCLIWrapper, usermsg.ForSendError(session.ErrNoCLIWrapper, "")},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := spawnError(c.err, sidecar.TaskKey(), 3).Error(); got != c.want {
+				t.Errorf("spawnError = %q, want %q", got, c.want)
+			}
+		})
+	}
 }

@@ -169,8 +169,11 @@ func (r *Router) RemoveAsync(key string) bool {
 // history stays and the next message resumes it. Unlike an interrupt it also
 // ends what the CLI runs in the background (a Bash run_in_background, whose
 // completion would otherwise start a turn). False when key has no live
-// process. Its death reason says it was stopped, not that it failed. The
-// close runs outside the lock and the count is recounted, as in evictOldest.
+// process. Its death reason says it was stopped, not that it failed, also
+// for a turn the close cuts short (mapSendError keeps it). The close runs
+// outside the lock and the count is recounted, as in evictOldest; the
+// bounded socket wait keeps a resume right after off the shim's "refusing
+// to clobber" guard, as in ReleaseIdleProcess.
 func (r *Router) StopSession(key string) bool {
 	stopped := false
 	r.ss.Update(func(tx sessTx) {
@@ -186,6 +189,9 @@ func (r *Router) StopSession(key string) bool {
 		stopped = true
 	})
 	if stopped {
+		if !waitSocketGoneForKey(key) {
+			slog.Warn("session stop: shim socket still bound after close; the next spawn may be refused", "key", key)
+		}
 		logSessionLifecycle("stopped", key)
 		r.notifyChange()
 	}
