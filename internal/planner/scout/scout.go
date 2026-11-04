@@ -492,7 +492,7 @@ func markedRead(tools []string) []string {
 const allDay = 20 * time.Hour
 
 // conflicts is each pair of timed events in events that overlap, as a
-// finding whose ID joins the two event IDs, sorted, so a pair dedups as one.
+// finding keyed by the overlap's start (conflictID).
 func conflicts(events []Event) []Finding {
 	var timed []Event
 	for _, e := range events {
@@ -510,16 +510,21 @@ func conflicts(events []Event) []Finding {
 			if a.ID == b.ID {
 				continue
 			}
-			ids := []string{a.ID, b.ID}
-			slices.Sort(ids)
 			end := a.End
 			if b.End.Before(end) {
 				end = b.End
 			}
+			// Keyed by when the overlap starts, as parseOutput keys a
+			// conflict: the model copies the long Outlook IDs unevenly from
+			// run to run, so they make no stable key.
+			id := conflictID("", b.Start.Format(time.RFC3339))
+			if slices.ContainsFunc(out, func(f Finding) bool { return f.ID == id }) {
+				continue // one alert per overlap start
+			}
 			out = append(out, Finding{
 				Source: SourceCalendar,
 				Kind:   KindConflict,
-				ID:     textutil.TruncateRunes(strings.Join(ids, "+"), idRunes),
+				ID:     id,
 				Title:  textutil.TruncateRunes("「"+a.Title+"」与「"+b.Title+"」时间重叠", fieldRunes),
 				At:     b.Start.Format(time.RFC3339),
 				Link:   b.Link,

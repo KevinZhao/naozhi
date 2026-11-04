@@ -75,11 +75,22 @@ func TestParseOutput(t *testing.T) {
 		{"no id", strings.Replace(good, `"id":"m1"`, `"id":""`, 1), "no id or title"},
 		{"event without a zone", strings.Replace(good, "14:00:00+08:00", "14:00:00", 1), "cannot parse"},
 	}
-	// A conflict names its pair in any order; parsed, both orders are one.
-	for _, id := range []string{"e2+e1", "e1 + e2"} {
-		out, err := parseOutput(strings.Replace(strings.Replace(good, "reply_needed", "conflict", 1), `"id":"m1"`, `"id":"`+id+`"`, 1))
-		if err != nil || out.Findings[0].ID != "e1+e2" {
-			t.Errorf("conflict %q: id %+v, err %v; want e1+e2", id, out.Findings, err)
+	// A conflict is known by its start, however its meetings' IDs were
+	// copied; with no start, by its pair in any order.
+	conflict := strings.Replace(good, "reply_needed", "conflict", 1)
+	for _, c := range []struct{ id, at, want string }{
+		{"e2+e1", "", "e1+e2"},
+		{"e1 + e2", "", "e1+e2"},
+		{"e1+e2", "2026-11-05T15:00:00+08:00", "at:2026-11-05T07:00:00Z"},
+		// The same meeting under another ID, a '+' in one: still one.
+		{"e1x+e2", "2026-11-05T07:00:00Z", "at:2026-11-05T07:00:00Z"},
+		{"+e1+e2", "2026-11-05T15:00:00+08:00", "at:2026-11-05T07:00:00Z"},
+	} {
+		in := strings.Replace(conflict, `"id":"m1"`, `"id":"`+c.id+`"`, 1)
+		in = strings.Replace(in, `"at":"2026-11-05T09:00:00+08:00"`, `"at":"`+c.at+`"`, 1)
+		out, err := parseOutput(in)
+		if err != nil || out.Findings[0].ID != c.want {
+			t.Errorf("conflict %q at %q: id %+v, err %v; want %s", c.id, c.at, out.Findings, err, c.want)
 		}
 	}
 	for _, c := range cases {
@@ -376,6 +387,7 @@ func TestConflicts(t *testing.T) {
 		return Event{ID: id, Title: "iso " + id, Start: at.Add(start), End: at.Add(end)}
 	}
 	h := time.Hour
+	key := func(d time.Duration) string { return "at:" + at.Add(d).UTC().Format(time.RFC3339) }
 	for _, tc := range []struct {
 		name   string
 		events []Event
@@ -383,8 +395,9 @@ func TestConflicts(t *testing.T) {
 	}{
 		{"none", []Event{ev("a", 0, h), ev("b", 2*h, 3*h)}, nil},
 		{"touching", []Event{ev("a", 0, h), ev("b", h, 2*h)}, nil},
-		{"overlap, listed out of order", []Event{ev("z", 30*time.Minute, 2*h), ev("a", 0, h)}, []string{"a+z"}},
-		{"three-way", []Event{ev("a", 0, 3*h), ev("b", h, 2*h), ev("c", 90*time.Minute, 4*h)}, []string{"a+b", "a+c", "b+c"}},
+		{"overlap, listed out of order", []Event{ev("z", 30*time.Minute, 2*h), ev("a", 0, h)}, []string{key(30 * time.Minute)}},
+		// a+c and b+c both start at 1:30: one alert.
+		{"three-way", []Event{ev("a", 0, 3*h), ev("b", h, 2*h), ev("c", 90*time.Minute, 4*h)}, []string{key(h), key(90 * time.Minute)}},
 		{"all-day and zero-length", []Event{ev("day", 0, 24*h), ev("dot", h, h), ev("a", 30*time.Minute, 2*h)}, nil},
 	} {
 		var got []string
@@ -426,12 +439,21 @@ func TestRunConflictsAndMarkAs(t *testing.T) {
 		Wake: func(b string) error { woken = append(woken, b); return nil },
 		Now:  func() time.Time { return now },
 	})
+	want := "at:" + now.Add(90*time.Minute).UTC().Format(time.RFC3339)
 	r, _ := s.run(context.Background(), runID(now), TriggerManual, now)
-	if r.State != StateOK || r.New != 1 || len(r.Findings) != 1 || r.Findings[0].ID != "a+b" {
+	if r.State != StateOK || r.New != 1 || len(r.Findings) != 1 || r.Findings[0].ID != want {
 		t.Fatalf("run = %+v", r)
 	}
-	if len(woken) != 1 || strings.Contains(woken[0], "q+r") || !strings.Contains(woken[0], "a+b") {
+	if len(woken) != 1 || strings.Contains(woken[0], "q+r") || !strings.Contains(woken[0], want) {
 		t.Errorf("woken with %q", woken)
+	}
+
+	// The model copies the meeting IDs differently next time: same overlap,
+	// nothing new, no wake.
+	reply = strings.ReplaceAll(strings.ReplaceAll(reply, `"id":"a"`, `"id":"a2"`), `"id":"b"`, `"id":"b+x"`)
+	r, _ = s.run(context.Background(), runID(now.Add(30*time.Second)), TriggerManual, now.Add(30*time.Second))
+	if r.State != StateOK || r.New != 0 || len(woken) != 1 {
+		t.Errorf("rerun with recopied IDs = %+v, woken %d", r, len(woken))
 	}
 
 	tools = append(tools, "mcp__aws-outlook-mcp__email_read"+MarkAsSuffix)

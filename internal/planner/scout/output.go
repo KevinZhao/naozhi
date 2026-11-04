@@ -170,14 +170,7 @@ func parseOutput(reply string) (Output, error) {
 		}
 		f.ID = strings.TrimSpace(f.ID)
 		if f.Kind == KindConflict {
-			// A conflict's ID joins its meetings' IDs, in whatever order the
-			// session listed them; sorted, the pair dedups as one.
-			parts := strings.Split(f.ID, "+")
-			for j := range parts {
-				parts[j] = strings.TrimSpace(parts[j])
-			}
-			slices.Sort(parts)
-			f.ID = strings.Join(parts, "+")
+			f.ID = conflictID(f.ID, f.At)
 		}
 		f.ID = textutil.TruncateRunes(f.ID, idRunes)
 		for _, s := range []*string{&f.Title, &f.From, &f.At, &f.Due, &f.Link, &f.Why} {
@@ -201,4 +194,21 @@ func parseOutput(reply string) (Output, error) {
 		*c = textutil.TruncateRunes(strings.TrimSpace(*c), idRunes)
 	}
 	return out, nil
+}
+
+// conflictID is a conflict's dedup ID. A session copies the long Outlook
+// meeting IDs it joins unreliably from run to run (a character dropped,
+// another ID of the same meeting, a '+' inside the base64), so a conflict
+// with a parseable start is known by that time; without one, by its
+// meetings' IDs sorted, so either order dedups as one.
+func conflictID(id, at string) string {
+	if t, err := time.Parse(time.RFC3339, strings.TrimSpace(at)); err == nil {
+		return "at:" + t.UTC().Format(time.RFC3339)
+	}
+	parts := strings.Split(id, "+")
+	for j := range parts {
+		parts[j] = strings.TrimSpace(parts[j])
+	}
+	slices.Sort(parts)
+	return strings.Join(parts, "+")
 }
