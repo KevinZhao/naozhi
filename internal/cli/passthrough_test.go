@@ -208,6 +208,25 @@ func TestPassthrough_Independent_OneMessageOneResult(t *testing.T) {
 	}
 }
 
+// The init's session ID is the process's before the turn's result: the store
+// persists a session only with one, and a first turn may outlast a restart.
+func TestPassthrough_InitSessionIDBeforeResult(t *testing.T) {
+	sh := newPassthroughShim(t)
+	defer sh.close()
+	go sh.proc.readLoop()
+	go func() { _, _ = sh.proc.SendPassthrough(context.Background(), "hello", nil, nil, "") }()
+
+	sh.expectWrite(t, 2*time.Second)
+	sh.emitInit("s1")
+	deadline := time.Now().Add(2 * time.Second)
+	for sh.proc.SessionID() != "s1" {
+		if time.Now().After(deadline) {
+			t.Fatalf("SessionID() = %q after init, want s1", sh.proc.SessionID())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // TestPassthrough_Merged_FanoutHeadFollower verifies that two concurrent sends
 // whose replays come back as a single merged replay event get result fan-out
 // with head/follower semantics.
