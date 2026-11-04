@@ -16,6 +16,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/monitor/health"
+	"github.com/naozhi/naozhi/internal/planner/journal"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
@@ -57,7 +58,15 @@ func (f *fakeSessions) Recreate(context.Context, string, sessionview.AgentOpts) 
 	return nil
 }
 
-func (*fakeSessions) Release(string) bool { return true }
+func (f *fakeSessions) Release(string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.st.Running {
+		return false
+	}
+	f.st.Alive = false
+	return true
+}
 func (*fakeSessions) Label(key string) string {
 	if key == refKey {
 		return "修 <登录>"
@@ -79,6 +88,7 @@ const refKey = "dashboard:direct:a:general"
 type fakeTurns struct {
 	reply string
 	sent  []string
+	notes []string
 }
 
 func (f *fakeTurns) SubmitPlanner(_, text string, _ sessionview.AgentOpts, done func(string, error)) (bool, error) {
@@ -90,6 +100,7 @@ func (f *fakeTurns) SubmitPlanner(_, text string, _ sessionview.AgentOpts, done 
 }
 
 func (*fakeTurns) PlannerReceipt(string, string) {}
+func (f *fakeTurns) PlannerNote(_, text string)  { f.notes = append(f.notes, text) }
 func (*fakeTurns) DropPlannerQueue(string)       {}
 
 func newTestAgent(t *testing.T, sess *fakeSessions, now *time.Time) (*Agent, datadir.Layout) {
@@ -270,13 +281,16 @@ func TestRenderSnapshot(t *testing.T) {
 			}
 			return ""
 		},
+		Name: func(id string) string {
+			return map[string]string{"dashboard:direct:a:general": "iso-login", "dashboard:direct:b:general": "iso-b"}[id]
+		},
 	}
 
 	got := renderSnapshot(base)
 	want := "<naozhi-snapshot at=\"2026-11-04 10:00 UTC\">\n" +
 		"会话（在跑 1，最近 24 小时结束 1）：\n" +
-		"- 修登录（dashboard:direct:a:general） [活跃] · 最后活动 11-04 09:59\n" +
-		"- dashboard:direct:b:general [失败·rate_limit] · 最后活动 11-04 09:00\n" +
+		"- 修登录（名字 iso-login，dashboard:direct:a:general） [活跃] · 最后活动 11-04 09:59\n" +
+		"- iso-b（dashboard:direct:b:general） [失败·rate_limit] · 最后活动 11-04 09:00\n" +
 		"</naozhi-snapshot>"
 	if got != want {
 		t.Fatalf("snapshot =\n%s\nwant\n%s", got, want)
@@ -338,5 +352,62 @@ func TestSendRef(t *testing.T) {
 		if len(turns.sent) != 1 || !strings.HasPrefix(turns.sent[0], tc.head) || !strings.HasSuffix(turns.sent[0], tc.tail) {
 			t.Errorf("Send(%q, %q) sent %q, want %q … %q", tc.text, tc.ref, turns.sent, tc.head, tc.tail)
 		}
+	}
+}
+
+// TestSetStoppedAlive: the switch answers with the outcome, so stopping an
+// idle Planner reports it no longer alive; a busy one stays alive until its
+// turn is over.
+func TestSetStoppedAlive(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		running bool
+		alive   bool
+	}{
+		{"idle", false, false},
+		{"mid-turn", true, true},
+	} {
+		now := time.Now()
+		sess := &fakeSessions{st: SessionState{Exists: true, Alive: true, Running: tc.running}}
+		a, _ := newTestAgent(t, sess, &now)
+		if err := a.SetStopped(true); err != nil {
+			t.Fatal(err)
+		}
+		if st := a.Status(); !st.Stopped || st.Alive != tc.alive {
+			t.Errorf("%s: status after stop = %+v, want alive %v", tc.name, st, tc.alive)
+		}
+	}
+}
+
+// TestNotesAcrossRestart: a note shows in the conversation and is journaled,
+// so an agent started later lists it; other journal lines are not notes.
+func TestNotesAcrossRestart(t *testing.T) {
+	now := time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)
+	j, err := journal.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := New(Config{Enabled: true, Layout: datadir.FromRoot(t.TempDir()), Sessions: &fakeSessions{}, Journal: j,
+		Now: func() time.Time { return now }})
+	turns := &fakeTurns{}
+	a.turns = turns
+	a.Note("已派出：修登录（task:abc）")
+	if err := j.Append(journal.Entry{TS: now, Kind: journal.KindHealth, Unit: Key}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	a.Note("到点提醒（答应你的，到期 11-04 10:01）：交周报")
+	if !slices.Equal(turns.notes, []string{"已派出：修登录（task:abc）", "到点提醒（答应你的，到期 11-04 10:01）：交周报"}) {
+		t.Errorf("shown = %q", turns.notes)
+	}
+
+	restarted := New(Config{Enabled: true, Layout: datadir.FromRoot(t.TempDir()), Sessions: &fakeSessions{}, Journal: j,
+		Now: func() time.Time { return now.Add(time.Hour) }})
+	notes, err := restarted.Notes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notes) != 2 || notes[0].Text != "已派出：修登录（task:abc）" || !notes[1].Time.Equal(now) {
+		t.Errorf("notes after restart = %+v", notes)
 	}
 }

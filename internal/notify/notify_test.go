@@ -231,16 +231,23 @@ func TestSources(t *testing.T) {
 	free = 0.5
 	check()
 
-	// A stale loop is urgent, closes on recovery; notify's own is the
-	// health loop's to report.
+	// Stale loops are one urgent item naming them all, closed once every
+	// one beats again; notify's own is the health loop's to report.
 	beats := beat.New(clock)
 	n.cfg.Beats = beats
-	beats.Register("health", time.Minute)
-	beats.Register(loopName, time.Minute)
+	for _, name := range []string{"health", "cron", loopName} {
+		beats.Register(name, time.Minute)
+	}
 	clock.advance(beat.StartupGrace)
 	h.snap.At = clock.Now()
-	check("beat:health")
+	b.pushes = nil
+	check(beatSource)
+	if got := b.titles(); !slices.Equal(got, []string{"关键循环停了：cron、health"}) {
+		t.Errorf("pushes = %v, want one naming both loops", got)
+	}
 	beats.Register("health", time.Minute)
+	check(beatSource)
+	beats.Register("cron", time.Minute)
 	check()
 
 	// Failures: one unit is its own error; units failing together are one

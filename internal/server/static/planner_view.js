@@ -12,12 +12,15 @@
 //
 // The stream follows a WS subscription to planner:main (receipts are pushed
 // to subscribers only, never logged); GET /api/sessions/events loads the
-// first page and polls while the subscription is not live.
+// first page and polls while the subscription is not live. The gateway's
+// notes in the conversation (due reminders, dispatch outcomes) live in its
+// in-memory history, which a restart drops: the first page merges in the
+// journaled ones from GET /api/planner/notes by time.
 //
-// The "等你" count, on the rail badge and in the left column alike, is the
-// inbox's `badge` (notify.js: decisions and questions, §10.1), seeded from
-// GET /api/inbox on every WS auth_ok and kept by inbox_count frames; the
-// list also shows the open errors and notices.
+// The rail badge counts the inbox's `badge` (notify.js: decisions and
+// questions, §10.1); the left column's "等你" heading counts what its list
+// shows, every open item (`open`). Both are seeded from GET /api/inbox on
+// every WS auth_ok and kept by inbox_count frames.
 // Layering: never import dashboard.js back; setActivityView is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
 import { sessionList, ui } from './state.js';
@@ -113,11 +116,11 @@ function itemHtml(it) {
     '</div>';
 }
 
-// paintCounts: 答应你的 counts the open cards mounted in #pl-promise. A
-// write only on change: #pl-promise-count sits under the observer that
-// calls this.
+// paintCounts: 等你 counts the open items its list shows, 答应你的 the open
+// cards mounted in #pl-promise. A write only on change: #pl-promise-count
+// sits under the observer that calls this.
 function paintCounts() {
-  const w = String(inbox.badge || 0);
+  const w = String(inbox.open || 0);
   const p = String(document.querySelectorAll('#pl-promise .pm-card:not(.closed)').length);
   const put = (ids, v) => ids.forEach((id) => { const el = $(id); if (el && el.textContent !== v) el.textContent = v; });
   put(['pl-wait-count', 'pl-wait-n', 'pl-strip-wait'], w);
@@ -350,17 +353,44 @@ function unsubscribe() {
   pl.sub = '';
 }
 
-// loadEvents fetches the first page (reset) or what came after the last
-// event taken. A reset supersedes a poll still in flight.
+// NOTE_SAME_MS: a note the history still holds (no restart since it was
+// written) was logged within this of its journal line.
+const NOTE_SAME_MS = 5000;
+
+// withNotes merges the journaled notes into a first page, as the system
+// lines they were: those the history no longer holds, and on a full page
+// only from its first event on (older ones belong to pages not loaded).
+function withNotes(events, notes, full) {
+  const floor = full && events.length ? (events[0].time || 0) : 0;
+  const logged = events.filter((e) => e && e.type === 'system' && !e.uuid);
+  const extra = [];
+  for (const n of notes) {
+    const t = Date.parse(n && n.time);
+    if (!n || !n.text || isNaN(t) || t < floor) continue;
+    if (logged.some((e) => Math.abs((e.time || 0) - t) <= NOTE_SAME_MS && e.summary && n.text.startsWith(e.summary))) continue;
+    extra.push({ type: 'system', time: t, summary: n.text });
+  }
+  if (!extra.length) return events;
+  return events.concat(extra).sort((a, b) => (a.time || 0) - (b.time || 0));
+}
+
+// loadEvents fetches the first page (reset), with the journaled notes, or
+// what came after the last event taken. A reset supersedes a poll still in
+// flight.
 async function loadEvents(reset) {
   if (reset) pl.gen++;
   else if (pl.loading) return;
   const gen = pl.gen;
   pl.loading = true;
   const q = reset || !pl.lastTime ? '&limit=' + EVENTS_LIMIT : '&after=' + pl.lastTime;
+  // An unreadable journal leaves the page as the history has it.
+  const notes = reset ? fetchJSON(NZ_CONTRACT.API.planner_notes, { timeoutMs: 8000 }).catch(() => null) : null;
   try {
-    const events = await fetchJSON(NZ_CONTRACT.API.sessions_events + '?key=' + encodeURIComponent(PLANNER_KEY) + q, { timeoutMs: 8000 });
-    if (gen === pl.gen && ui.activeView === 'planner') appendEvents(Array.isArray(events) ? events : [], reset);
+    const res = await fetchJSON(NZ_CONTRACT.API.sessions_events + '?key=' + encodeURIComponent(PLANNER_KEY) + q, { timeoutMs: 8000 });
+    let events = Array.isArray(res) ? res : [];
+    const n = notes && await notes;
+    if (n && Array.isArray(n.notes) && n.notes.length) events = withNotes(events, n.notes, events.length >= EVENTS_LIMIT);
+    if (gen === pl.gen && ui.activeView === 'planner') appendEvents(events, reset);
   } catch { /* the next tick retries */ } finally {
     if (gen === pl.gen) pl.loading = false;
   }

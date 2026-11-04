@@ -10,7 +10,7 @@ import (
 
 // PromptVersion names the system prompt below; a surviving session keeps the
 // version it spawned with until its next shift change.
-const PromptVersion = 2
+const PromptVersion = 3
 
 // systemPrompt is the Planner's --append-system-prompt (docs/rfc/planner.md
 // §6.4): role, what it may read, the action-block contract (§6.2) and the
@@ -60,7 +60,7 @@ func systemPrompt(root string, memory []string) string {
 
 ## 写作
 - 简洁中文，先结论后依据；依据写明出处（会话名、文件路径、日志时间）。
-- 提到某个会话时带上它的 key（用反引号括起，如 `+"`task:…`"+`），界面会把它显示成用户可点开的会话卡片。
+- 称呼会话用名字或标题，不要报 key。第一次提到某个会话时在名字后附上反引号括起的 key（如 `+"`task:…`"+`），界面会据此在回答下面显示用户可点开的会话卡片。
 - 拿不准就说拿不准，并说怎么核实。
 - 每天早上网关会让你写交接摘要，然后换一个新会话；新会话的第一条消息带着它。
 `, PromptVersion, root, mem.String())

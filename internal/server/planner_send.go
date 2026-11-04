@@ -63,7 +63,8 @@ func (s *Server) PlannerReceipt(key, text string) {
 // so a page opened later still shows it; subscribers see it at once. Unlike
 // PlannerReceipt it is part of the conversation the dashboard replays, though
 // it still never reaches the CLI. The history is in memory: a gateway restart
-// drops it. With no session for key it falls back to a broadcast.
+// drops it, so the agent journals its notes too (agent.Agent.Note). With no
+// session for key it falls back to a broadcast.
 func (s *Server) PlannerNote(key, text string) {
 	text = osutil.SanitizeForLog(text, plannerNoteBytes)
 	if s.router != nil {

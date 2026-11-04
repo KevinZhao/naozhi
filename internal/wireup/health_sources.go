@@ -25,6 +25,10 @@ import (
 // the user has not answered yet; a card further back is not counted.
 const askScan = 64
 
+// taskScan is how many trailing events are searched for background tasks
+// still running; one started further back is not watched.
+const taskScan = 256
+
 // HealthSources are the existing state the health monitor derives its units
 // from (docs/rfc/planner.md §3.8); nil fields are skipped. Remote and
 // Discovered read the server's node and terminal-discovery caches.
@@ -124,6 +128,13 @@ func sessionFact(snap session.SessionSnapshot, s *session.ManagedSession, logDir
 	}
 	if name := runningWorkflow(snap.Workflows); name != "" && s != nil {
 		f.Workflow, f.WorkflowSeen = name, unixMilli(s.WorkflowBoard().LastObservedAt())
+	} else if s != nil && snap.State != "dead" {
+		// A dead process's background tasks died with it.
+		if at := s.ProcessAttachedAt(); !at.IsZero() {
+			if name, seen := openTask(s.EventLastN(taskScan), at); name != "" {
+				f.Workflow, f.WorkflowSeen = name, seen
+			}
+		}
 	}
 	if !f.Running && f.Failed == "" && s != nil {
 		f.Asking = askPending(s.EventLastN(askScan))
@@ -286,6 +297,39 @@ func runningWorkflow(sums []workflow.Summary) string {
 		}
 	}
 	return ""
+}
+
+// openTask names the first background task (a Bash run_in_background, an
+// Agent subtask) in entries that started after attached, when naozhi
+// attached to the process, and has not ended; seen is the latest entry's
+// time. A task that started before (replayed history, maybe of a process
+// gone since) or further back than entries is not seen: an unknown task is
+// not judged stalled. Workflows are the board's.
+func openTask(entries []clievent.EventEntry, attached time.Time) (name string, seen time.Time) {
+	open := map[string]string{}
+	var order []string
+	for _, e := range entries {
+		switch {
+		case e.TaskID == "":
+		case e.Type == clievent.KindTaskStart:
+			if e.TaskType != clievent.TaskTypeWorkflow && e.Time >= attached.UnixMilli() {
+				if _, ok := open[e.TaskID]; !ok {
+					order = append(order, e.TaskID)
+				}
+				open[e.TaskID] = cmp.Or(e.Summary, e.TaskID)
+			}
+		case e.Type == clievent.KindTaskDone,
+			// A task_updated patch with any status but running ends it.
+			e.Type == clievent.KindTaskProgress && e.Status != "" && e.Status != "running":
+			delete(open, e.TaskID)
+		}
+	}
+	for _, id := range order {
+		if n, ok := open[id]; ok {
+			return n, unixMilli(entries[len(entries)-1].Time)
+		}
+	}
+	return "", time.Time{}
 }
 
 // askPending reports whether the latest AskUserQuestion card has no user

@@ -7,6 +7,8 @@
 //	                         to the Planner (ref: a session handed over with
 //	                         it), the gateway's snapshot before it and a receipt
 //	GET  /api/planner/briefs the latest morning briefs, newest first (?limit=)
+//	GET  /api/planner/notes  the gateway's journaled notes in the conversation
+//	                         (due reminders, dispatch outcomes), oldest first
 //
 // All sit behind the /api/* auth middleware.
 package planner
@@ -56,6 +58,19 @@ func (h *Handler) HandleBriefs(w http.ResponseWriter, r *http.Request) {
 		out = h.briefs.Recent(limit)
 	}
 	httputil.WriteJSON(w, map[string]any{"briefs": out})
+}
+
+// HandleNotes lists the gateway's notes in the Planner conversation; the
+// page merges them into the event stream, whose history a restart drops.
+func (h *Handler) HandleNotes(w http.ResponseWriter, _ *http.Request) {
+	out := []agent.Note{}
+	if h.agent != nil {
+		var err error
+		if out, err = h.agent.Notes(); err != nil {
+			slog.Warn("planner notes: journal read incomplete", "err", err)
+		}
+	}
+	httputil.WriteJSON(w, map[string]any{"notes": out})
 }
 
 // HandleStatus reports the Planner's switch and session.

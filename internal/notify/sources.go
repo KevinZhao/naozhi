@@ -27,6 +27,9 @@ const (
 // loopName is this pipeline's heartbeat; the health loop watches it.
 const loopName = "notify"
 
+// beatSource is the one item for every stale loop but this one.
+const beatSource = "beat:loops"
+
 // gatewaySources are the gateway's own level-triggered source prefixes, judged
 // at every check; unitSources those judged once the health machine has
 // reconciled. Check dates all of them itself (condSince), since a restart
@@ -118,12 +121,11 @@ func (n *Notifier) Check() {
 			conds = append(conds, c...)
 		}
 	}
-	for _, name := range n.cfg.Beats.Stale() {
-		if name == loopName {
-			continue
-		}
-		conds = append(conds, n.gatewayCondition(now, Item{Kind: KindError, Level: LevelUrgent, Source: "beat:" + name,
-			Title: "关键循环停了：" + name, Why: "心跳超时，/health 已降级"}))
+	// Loops stalled together (a frozen gateway stops them all) are one item,
+	// closed once every loop beats again.
+	if stale := slices.DeleteFunc(n.cfg.Beats.Stale(), func(name string) bool { return name == loopName }); len(stale) > 0 {
+		conds = append(conds, n.gatewayCondition(now, Item{Kind: KindError, Level: LevelUrgent, Source: beatSource,
+			Title: "关键循环停了：" + strings.Join(stale, "、"), Why: "心跳超时，/health 已降级"}))
 	}
 	if n.cfg.DiskFree != nil {
 		if free, err := n.cfg.DiskFree(); err != nil {
@@ -179,7 +181,8 @@ func (n *Notifier) settle(conds []condition, active map[string]bool, judged []st
 }
 
 // unitConditions are the sessions waiting on the user past AskAfter and the
-// stalled workflows. Units without a workspace are only counted (§3.8).
+// stalled workflows and background tasks. Units without a workspace are only
+// counted (§3.8).
 // keep are the sources whose items stay open without being conditions: a
 // session still waiting (its question stays open until answered, even when
 // a restart dated its wait anew) and units whose state is Unknown, as right
@@ -203,7 +206,7 @@ func (n *Notifier) unitConditions(snap health.Snapshot, now time.Time) (out []co
 			src := "stalled:" + u.ID
 			out = append(out, condition{since: n.unitSince(src, u.Since), item: Item{Kind: KindNotice, Level: LevelTimely,
 				Unit: u.ID, WS: u.Workspace, Source: src,
-				Title: name + " 停滞", Why: fmt.Sprintf("工作流 %d 分钟没有新进展", int(health.StallAfter/time.Minute))}})
+				Title: name + " 停滞", Why: fmt.Sprintf("工作流或后台任务 %d 分钟没有新进展", int(health.StallAfter/time.Minute))}})
 		case health.Unknown:
 			keep = append(keep, "waiting:"+u.ID, "stalled:"+u.ID)
 		}

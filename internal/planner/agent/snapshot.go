@@ -47,9 +47,10 @@ type snapshotInput struct {
 	Waiting  []Waiting
 	Promises []Promise
 	Units    []health.Unit
-	// Label is a unit's title, Workspace a workspace ID's name; either may
-	// return "".
+	// Label is a unit's title, Name its cross-session name, Workspace a
+	// workspace ID's name; any may return "".
 	Label     func(id string) string
+	Name      func(id string) string
 	Workspace func(id string) string
 }
 
@@ -175,11 +176,21 @@ func renderSnapshot(in snapshotInput) string {
 }
 
 func unitLine(in snapshotInput, u health.Unit) string {
-	name := u.ID
+	// The Planner calls a session by its title or name; the key is for
+	// looking it up.
+	var label, cross string
 	if in.Label != nil {
-		if l := in.Label(u.ID); l != "" {
-			name = l + "（" + u.ID + "）"
-		}
+		label = in.Label(u.ID)
+	}
+	if in.Name != nil {
+		cross = in.Name(u.ID)
+	}
+	name := u.ID
+	switch {
+	case label != "" && cross != "":
+		name = label + "（名字 " + cross + "，" + u.ID + "）"
+	case label != "" || cross != "":
+		name = label + cross + "（" + u.ID + "）"
 	}
 	line := "- " + name + " [" + cmp.Or(stateNames[u.State], string(u.State))
 	if u.ErrClass != "" {
