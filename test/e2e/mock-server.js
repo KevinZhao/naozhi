@@ -249,6 +249,8 @@ function defaultGitStates() {
  * @param {object[]} [overrides.outputs] - GET /api/sessions/outputs entries (activity.Output wire
  *   shape, newest first); ?key= filters them. A test may edit the array in place.
  * @param {object} [overrides.sessionDetails] - key → GET /api/sessions/detail payload.
+ * @param {object} [overrides.notes] - key → GET /api/sessions/notes entries (note.Note wire shape,
+ *   oldest first); other keys list none. A test may edit the arrays in place.
  * @param {object} [overrides.inbox] - GET /api/inbox body ({open, closed, counts, paused_until});
  *   POST /api/inbox/close drops the item from open, /decide moves it to closed with its answer,
  *   PUT / DELETE /api/inbox/pause set
@@ -315,6 +317,7 @@ function startMockServer(overrides = {}) {
   const workflows = overrides.workflows || {};
   const outputs = overrides.outputs || [];
   const sessionDetails = overrides.sessionDetails || {};
+  const notesData = overrides.notes || {};
   const outputsCalls = [];
   const inboxData = overrides.inbox || null;
   const inboxCalls = [];
@@ -580,6 +583,15 @@ function startMockServer(overrides = {}) {
       const outs = outputs.filter((o) => !key || o.key === key);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ outputs: outs }));
+      return;
+    }
+
+    // Session side notes: overrides.notes[key], as the backend lists them.
+    if (pathname === NZ_CONTRACT.API.sessions_notes && req.method === 'GET') {
+      if (!checkAuth()) return;
+      const key = url.searchParams.get('key') || '';
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ notes: notesData[key] || [] }));
       return;
     }
 

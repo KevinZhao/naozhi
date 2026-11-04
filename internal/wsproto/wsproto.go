@@ -15,6 +15,8 @@
 package wsproto
 
 import (
+	"encoding/json"
+
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cli/workflow"
 )
@@ -47,6 +49,7 @@ const (
 	TypeWorkflowSet            MsgType = "workflow_set"
 	TypeNotify                 MsgType = "notify"
 	TypeInboxCount             MsgType = "inbox_count"
+	TypeSessionNote            MsgType = "session_note"
 )
 
 // Inbound (browser → server) message types, parsed out of node.ClientMsg.
@@ -365,4 +368,17 @@ type InboxCount struct {
 
 func NewInboxCount(open, badge int) InboxCount {
 	return InboxCount{Type: TypeInboxCount, Open: open, Badge: badge}
+}
+
+// SessionNote carries one new gateway side note on session Key
+// (docs/rfc/planner.md §15.3 ③), as GET /api/sessions/notes lists it. It is
+// not a session event: it starts no turn and never reaches the CLI.
+type SessionNote struct {
+	Type MsgType         `json:"type"`
+	Key  string          `json:"key"`
+	Note json.RawMessage `json:"note"`
+}
+
+func NewSessionNote(key string, note json.RawMessage) SessionNote {
+	return SessionNote{Type: TypeSessionNote, Key: key, Note: note}
 }

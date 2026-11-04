@@ -20,7 +20,14 @@
 // The rail badge counts the inbox's `badge` (notify.js: decisions and
 // questions, §10.1); the left column's "等你" heading counts what its list
 // shows, every open item (`open`). Both are seeded from GET /api/inbox on
-// every WS auth_ok and kept by inbox_count frames.
+// every WS auth_ok and kept by inbox_count frames. The 会话 view's sidebar
+// bar (side_wait.js) shows the same list and counts: waitCount, waitListHtml
+// and fetchInbox, with 'inbox:items' on nzBus after the list changes.
+//
+// The middle column (#pl-center) is one component with two hosts: the page
+// and the Planner drawer (planner_drawer.js, §15.3 ②), which gets the very
+// nodes moved in. pl.host says which one runs it, so every id and handler
+// here serves both; opening the page takes it back from the drawer.
 // Layering: never import dashboard.js back; setActivityView is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
 import { sessionList, ui } from './state.js';
@@ -28,7 +35,7 @@ import { esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz
 import { sid } from './session_ident.js';
 import { renderEventsWithDividers } from './event_render.js';
 import { runPendingAsync } from './render_md.js';
-import { inbox, notifySupported, onInboxCount, requestNotifyPermission } from './notify.js';
+import { inbox, isLit, notifySupported, onInboxCount, requestNotifyPermission, revealFocus } from './notify.js';
 import { followWorkbenchSubject, noteWorkbenchEvent } from './workbench_panes.js';
 import { decisionActsHtml, decorateEvents, paintSessionCards, refreshHealth, setInboxItems } from './planner_cards.js';
 import { clearPending, closePlannerSession, mountComposer, notePlannerStatus } from './planner_chat.js';
@@ -73,6 +80,15 @@ const pl = {
   // seeding: onInboxCount runs from our own fetch, so its inbox:count must
   // not refetch.
   seeding: false,
+  // host runs the conversation: 'page', 'drawer', or '' (not shown).
+  host: '',
+  // focusId is the 等你 item marked above the conversation; focusAt when it
+  // was asked for, inboxAt when pl.open was last read (an older list cannot
+  // tell it is gone), focusSeen once it showed.
+  focusId: '',
+  focusAt: 0,
+  inboxAt: 0,
+  focusSeen: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -103,7 +119,7 @@ function itemHtml(it) {
       ' <button type="button" class="pl-link" data-action="session-select" data-key="' + escAttr(target.key) + '" data-node="local">打开</button>'
     : (it.unit ? esc(it.unit === PLANNER_KEY ? 'Planner' : it.unit) : '');
   const acts = decisionActsHtml(it);
-  return '<div class="pl-card pl-k-' + kind + '" role="listitem" data-id="' + escAttr(it.id) + '">' +
+  return '<div class="pl-card pl-k-' + kind + (isLit(it.id) ? ' inbox-lit' : '') + '" role="listitem" data-id="' + escAttr(it.id) + '">' +
       '<div class="pl-card-top">' +
         '<span class="pl-kind">' + esc(KIND_LABEL[kind]) + '</span>' +
         (!isNaN(created) ? '<span class="pl-wait" title="' + escAttr(formatAbsTime(created)) + '">等了 ' + esc(waitedText(Date.now() - created)) + '</span>' : '') +
@@ -116,11 +132,33 @@ function itemHtml(it) {
     '</div>';
 }
 
+// waitCount is the "等你" count the left column shows: every open item.
+export function waitCount() {
+  return inbox.open || 0;
+}
+
+// sortedOpen orders the open items: decisions first, then questions,
+// errors and notices, the oldest first within a kind.
+function sortedOpen() {
+  return pl.open.slice().sort((a, b) =>
+    ((KIND_ORDER[a.kind] ?? 3) - (KIND_ORDER[b.kind] ?? 3)) || (Date.parse(a.created) - Date.parse(b.created)));
+}
+
+// waitListHtml is the open items' cards, as the left column lists them.
+export function waitListHtml() {
+  const items = sortedOpen();
+  return items.length ? items.map(itemHtml).join('') : '<div class="pl-empty">没有等你的事</div>';
+}
+
+function noteItems() {
+  nzBus.dispatchEvent(new CustomEvent('inbox:items'));
+}
+
 // paintCounts: 等你 counts the open items its list shows, 答应你的 the open
 // cards mounted in #pl-promise. A write only on change: #pl-promise-count
 // sits under the observer that calls this.
 function paintCounts() {
-  const w = String(inbox.open || 0);
+  const w = String(waitCount());
   const p = String(document.querySelectorAll('#pl-promise .pm-card:not(.closed)').length);
   const put = (ids, v) => ids.forEach((id) => { const el = $(id); if (el && el.textContent !== v) el.textContent = v; });
   put(['pl-wait-count', 'pl-wait-n', 'pl-strip-wait'], w);
@@ -130,11 +168,24 @@ function paintCounts() {
 function paintWaiting() {
   const box = $('pl-wait');
   if (!box) return;
-  const items = pl.open.slice().sort((a, b) =>
-    ((KIND_ORDER[a.kind] ?? 3) - (KIND_ORDER[b.kind] ?? 3)) || (Date.parse(a.created) - Date.parse(b.created)));
-  box.innerHTML = items.length ? items.map(itemHtml).join('') : '<div class="pl-empty">没有等你的事</div>';
+  box.innerHTML = waitListHtml();
   paintCounts();
-  paintInlineCards(items);
+  paintInlineCards(sortedOpen());
+  paintFocus();
+  revealWaiting();
+}
+
+// revealWaiting brings the focused item into view (notify.js), unfolding
+// the phone's left block or the workbench's strip when it is folded.
+function revealWaiting() {
+  if (!inbox.focus || ui.activeView !== 'planner' || !$('pl-wait')?.querySelector('.pl-card[data-id="' + CSS.escape(inbox.focus) + '"]')) return;
+  const main = $('planner-main');
+  if (main?.classList.contains('pl-wb-open')) main.classList.add('pl-left-peek');
+  if (main && !main.classList.contains('pl-left-open')) {
+    main.classList.add('pl-left-open');
+    $('pl-left-toggle')?.setAttribute('aria-expanded', 'true');
+  }
+  revealFocus($('pl-wait'));
 }
 
 // paintInlineCards repeats the Planner's open cards (dispatch confirmations,
@@ -143,16 +194,44 @@ function paintWaiting() {
 function paintInlineCards(items) {
   const box = $('pl-cards');
   if (!box) return;
-  const mine = items.filter((it) => it.unit === PLANNER_KEY && it.decision);
+  const mine = items.filter((it) => it.unit === PLANNER_KEY && it.decision && it.id !== pl.focusId);
   const html = mine.length ? '<div class="pl-cards-h">待你确认 · ' + mine.length + '</div>' + mine.map(itemHtml).join('') : '';
   if (box.innerHTML !== html) box.innerHTML = html;
   box.hidden = !html;
 }
 
-async function fetchInbox() {
+// paintFocus shows the marked item, until it closes.
+function paintFocus() {
+  const box = $('pl-focus');
+  if (!box) return;
+  const it = pl.focusId ? pl.open.find((x) => x.id === pl.focusId) : null;
+  if (it) pl.focusSeen = true;
+  else if (pl.focusSeen) pl.focusId = '';
+  let html = '';
+  if (it) html = '<div class="pl-cards-h">等你</div>' + itemHtml(it);
+  else if (pl.focusId && pl.inboxAt >= pl.focusAt) html = '<div class="pl-empty">这一条已经不在"等你"里了</div>';
+  if (box.innerHTML !== html) box.innerHTML = html;
+  box.hidden = !html;
+}
+
+// focusInboxItem marks the open 等你 item id above the conversation (a push
+// leads to it, §15.3 ④); '' clears the mark. A session open in the middle
+// column hides the mark and takes the input box, so it goes back to the
+// Planner conversation first.
+export function focusInboxItem(id) {
+  if (id) closePlannerSession(false);
+  pl.focusId = id || '';
+  pl.focusAt = Date.now();
+  pl.focusSeen = false;
+  paintWaiting();
+  if (pl.focusId) fetchInbox();
+}
+
+export async function fetchInbox() {
   try {
     const res = await fetchJSON(NZ_CONTRACT.API.inbox, { timeoutMs: 8000 });
     pl.open = (res && Array.isArray(res.open)) ? res.open : [];
+    pl.inboxAt = Date.now();
     setInboxItems(pl.open, (res && Array.isArray(res.closed)) ? res.closed : [], $('pl-stream'));
     pl.pausedUntil = res && res.paused_until ? Date.parse(res.paused_until) || 0 : 0;
     if (res && res.counts) {
@@ -160,7 +239,8 @@ async function fetchInbox() {
       try { onInboxCount(res.counts); } finally { pl.seeding = false; }
     }
   } catch { return; }
-  if (ui.activeView === 'planner') { paintWaiting(); paintTools(); }
+  if (pl.host) { paintWaiting(); paintTools(); }
+  noteItems();
 }
 
 // ---- controls ----
@@ -239,11 +319,13 @@ function paintStatus() {
   }
   if (chip) { chip.textContent = text; chip.className = 'pl-status' + (cls ? ' ' + cls : ''); }
   if (note) {
+    // The drawer has no left column: point at the page instead.
+    const left = pl.host === 'drawer' ? 'Planner 页面左栏' : '左栏';
     let html = '';
     if (s && !s.enabled) {
-      html = '<b>Planner 没有开启。</b>在配置里设 <code>planner.enabled: true</code> 并重启 naozhi 后，这里是你和 Planner 的对话：早报、回执、它派出的会话与汇报。左栏的"等你"照常可用。';
+      html = '<b>Planner 没有开启。</b>在配置里设 <code>planner.enabled: true</code> 并重启 naozhi 后，这里是你和 Planner 的对话：早报、回执、它派出的会话与汇报。' + left + '的"等你"照常可用。';
     } else if (s && s.stopped) {
-      html = '<b>Planner 已停用。</b>它不再运行，也不收消息；关掉左栏的"停用 Planner"即可恢复。';
+      html = '<b>Planner 已停用。</b>它不再运行，也不收消息；关掉' + left + '的"停用 Planner"即可恢复。';
     }
     note.innerHTML = html;
     note.hidden = !html;
@@ -259,7 +341,7 @@ async function fetchStatus() {
     pl.status = await fetchJSON(NZ_CONTRACT.API.planner, { timeoutMs: 8000 });
   } catch { return; }
   notePlannerStatus(pl.status);
-  if (ui.activeView === 'planner') { paintStatus(); paintTools(); paintStreamEmpty(); }
+  if (pl.host) { paintStatus(); paintTools(); paintStreamEmpty(); }
 }
 
 function paintStreamEmpty() {
@@ -332,7 +414,9 @@ function appendEvents(events, reset) {
     if (fresh.some((e) => e.type === 'user')) clearPending(box);
     if (fresh.some((e) => e.type === 'result')) setTimeout(refreshPromises, PROMISE_REFRESH_MS);
     box.insertAdjacentHTML('beforeend', html);
-    fresh.forEach(noteWorkbenchEvent);
+    // The workbench follows planner:main on the page only; beside the
+    // drawer it shows the chat view's session.
+    if (pl.host === 'page') fresh.forEach(noteWorkbenchEvent);
   }
   decorateEvents(box);
   paintStreamEmpty();
@@ -394,48 +478,87 @@ async function loadEvents(reset) {
     let events = Array.isArray(res) ? res : [];
     const n = notes && await notes;
     if (n && Array.isArray(n.notes) && n.notes.length) events = withNotes(events, n.notes);
-    if (gen === pl.gen && ui.activeView === 'planner') appendEvents(events, reset);
+    if (gen === pl.gen && pl.host) appendEvents(events, reset);
   } catch { /* the next tick retries */ } finally {
     if (gen === pl.gen) pl.loading = false;
   }
 }
 
-// ---- page lifecycle ----
+// ---- the conversation and its hosts ----
 
-export function openPlannerPanel() {
-  if (ui.activeView !== 'planner') { shell.setActivityView('planner'); return; }
+function startConversation() {
   mountComposer();
-  mountPromises($('pl-promise'));
   paintStatus();
   paintWaiting();
-  paintTools();
-  refreshHealth($('planner-main'), false);
+  refreshHealth($('pl-center'), false);
   // The subscription follows the first page: its `after` is the page's end.
-  loadEvents(true).then(() => { if (ui.activeView === 'planner' && !pl.sub) subscribe(); });
+  loadEvents(true).then(() => { if (pl.host && !pl.sub) subscribe(); });
   fetchStatus();
   fetchInbox();
-  followWorkbenchSubject();
   if (!pl.timer) {
     pl.timer = setInterval(() => {
-      if (document.hidden || ui.activeView !== 'planner') return;
+      if (document.hidden || !pl.host) return;
       if (!(pl.sub === 'live' && wsm.isConnected())) loadEvents(false);
       if (++pl.ticks % SLOW_TICKS === 0) {
         paintWaiting();
         fetchStatus();
-        refreshHealth($('planner-main'), false);
-        paintSessionCards($('planner-main'));
+        refreshHealth($('pl-center'), false);
+        paintSessionCards($('pl-center'));
         if (!pl.sub) subscribe();
       }
     }, POLL_MS);
   }
 }
 
-// closePlannerPanel runs on leaving the page (ui.activeView already moved):
-// the workbench was showing planner:main, so it closes and re-points.
-export function closePlannerPanel() {
+function stopConversation() {
   if (pl.timer) { clearInterval(pl.timer); pl.timer = 0; }
   unsubscribe();
   closePlannerSession(false);
+  pl.host = '';
+  pl.focusId = '';
+  paintFocus();
+}
+
+// hostConversation moves #pl-center into box and runs it there for host;
+// the host it leaves hears it on nzBus 'planner:host' (detail.host).
+function hostConversation(host, box) {
+  const center = $('pl-center');
+  if (!center || !box) return;
+  const prev = pl.host;
+  if (prev) stopConversation();
+  if (center.parentElement !== box) box.appendChild(center);
+  pl.host = host;
+  if (prev && prev !== host) nzBus.dispatchEvent(new CustomEvent('planner:host', { detail: { host } }));
+  startConversation();
+}
+
+// attachPlannerConversation runs the conversation in the drawer's box.
+export function attachPlannerConversation(box) {
+  hostConversation('drawer', box);
+}
+
+// detachPlannerConversation stops it there and puts it back on the page.
+export function detachPlannerConversation() {
+  if (pl.host !== 'drawer') return;
+  stopConversation();
+  const center = $('pl-center');
+  if (center) $('planner-main')?.appendChild(center);
+}
+
+// ---- page lifecycle ----
+
+export function openPlannerPanel() {
+  if (ui.activeView !== 'planner') { shell.setActivityView('planner'); return; }
+  hostConversation('page', $('planner-main'));
+  mountPromises($('pl-promise'));
+  paintTools();
+  followWorkbenchSubject();
+}
+
+// closePlannerPanel runs on leaving the page (ui.activeView already moved):
+// the workbench was showing planner:main, so it closes and re-points.
+export function closePlannerPanel() {
+  if (pl.host === 'page') stopConversation();
   pl.customPause = false;
   if (workbench.isOpen()) workbench.close();
   $('planner-main')?.classList.remove('pl-wb-open', 'pl-left-peek');
@@ -454,8 +577,9 @@ nzBus.addEventListener('inbox:count', (e) => {
   const badge = $('abnav-planner-count');
   if (badge) { badge.textContent = n > 99 ? '99+' : String(n); badge.hidden = !n; }
   paintCounts();
-  if (!pl.seeding && ui.activeView === 'planner') fetchInbox();
+  if (!pl.seeding && pl.host) fetchInbox();
 });
+nzBus.addEventListener('inbox:focus', revealWaiting);
 // A new socket holds no subscriptions: re-subscribe after the last event
 // taken, the history frame fills the gap.
 wsm.onReady(() => {
@@ -492,6 +616,7 @@ registerActions({
       await fetchJSON(NZ_CONTRACT.API.inbox_close, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }), timeoutMs: 8000 });
       pl.open = pl.open.filter((it) => it.id !== id);
       paintWaiting();
+      noteItems();
     } catch (e) {
       el.disabled = false;
       showToast('关闭失败：' + e.message, 'error');

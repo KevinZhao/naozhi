@@ -1,7 +1,10 @@
 package server
 
 import (
+	"encoding/json"
+
 	"github.com/naozhi/naozhi/internal/notify"
+	"github.com/naozhi/naozhi/internal/planner/note"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/wsproto"
 )
@@ -54,4 +57,15 @@ func (hn hubNotifier) Notify(p notify.Push) {
 
 func (hn hubNotifier) InboxCount(c notify.Counts) {
 	hn.b.marshalBroadcastAuth(wsproto.NewInboxCount(c.Open, c.Badge))
+}
+
+// SessionNote is the dashboard exit of the session side notes: every
+// authenticated client gets the frame, and the page showing the session
+// places it.
+func (hn hubNotifier) SessionNote(n note.Note) {
+	data, err := json.Marshal(n)
+	if err != nil {
+		return
+	}
+	hn.b.marshalBroadcastAuth(wsproto.NewSessionNote(n.Key, data))
 }

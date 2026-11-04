@@ -335,6 +335,16 @@ func (n *Notifier) List(limit int) (open, closed []Item) {
 	return open, closed
 }
 
+// Item returns the item id, open or still kept closed.
+func (n *Notifier) Item(id string) (Item, bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if i := n.indexLocked(id); i >= 0 {
+		return n.items[i], true
+	}
+	return Item{}, false
+}
+
 // Counts returns the open counts the inbox_count frame carries.
 func (n *Notifier) Counts() Counts {
 	n.mu.Lock()

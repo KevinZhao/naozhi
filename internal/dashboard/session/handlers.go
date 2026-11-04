@@ -298,6 +298,8 @@ type Deps struct {
 	ValidateWS func(ws, root string) (string, error)
 	// Outputs serves /api/sessions/outputs; nil lists none.
 	Outputs OutputSource
+	// Notes serves /api/sessions/notes; nil lists none.
+	Notes NoteSource
 	// Health and Workspaces fill /api/sessions/detail's health unit and
 	// workspace; nil leaves them out.
 	Health     func() health.Snapshot

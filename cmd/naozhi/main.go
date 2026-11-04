@@ -442,6 +442,9 @@ func main() {
 		Name:    wireup.UnitNames(router, scheduler),
 		Link:    wireup.DashboardLink(cfg.Server.Addr),
 	})
+	// Side notes in the session view (§15.3 ③), read back from the journal
+	// and pushed as the health machine and the inbox write it.
+	notes := wireup.SessionNotes(plannerState.Journal, notifier, sidecars, router)
 
 	// Morning brief (早报, §15.1): judged after the first health reconcile
 	// past 08:30 on a weekday, pushed once through the notifier. Only the
@@ -474,6 +477,7 @@ func main() {
 		Backend:          defaultBackend,
 		Beats:            beats,
 		Outputs:          activities,
+		Notes:            notes,
 		Planner:          plannerAgent,
 		Briefs:           briefer,
 		Health:           func() health.Snapshot { return healthMon.Snapshot() },

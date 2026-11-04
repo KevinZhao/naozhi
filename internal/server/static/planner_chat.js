@@ -349,8 +349,11 @@ function handoffKey() {
 }
 
 // paintHandoffButton shows #btn-handoff (renderMainShell's input row) for
-// the selected session.
+// the selected session, and the header's #btn-pld (the Planner drawer's
+// entry on phone) while planner.enabled is on.
 export function paintHandoffButton() {
+  const entry = $('btn-pld');
+  if (entry) entry.hidden = !(st.status && st.status.enabled);
   const btn = $('btn-handoff');
   if (!btn) return;
   if (!st.status) { fetchPlannerStatus(); btn.hidden = true; return; }
