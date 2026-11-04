@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/monitor/health"
@@ -60,12 +61,21 @@ func PlannerOn(a *agent.Agent) func() bool {
 	}
 }
 
-// calledTools is the tools entries called, in first-call order.
+// calledTools is the tools entries called, in first-call order; an
+// email_read call that passed markAs is listed again with
+// scout.MarkAsSuffix, so the run fails loudly.
 func calledTools(entries []clievent.EventEntry) []string {
 	var out []string
 	for _, e := range entries {
-		if e.Type == clievent.KindToolUse && e.Tool != "" && !slices.Contains(out, e.Tool) {
-			out = append(out, e.Tool)
+		if e.Type != clievent.KindToolUse || e.Tool == "" {
+			continue
+		}
+		name := e.Tool
+		if strings.HasSuffix(name, "email_read") && strings.Contains(e.Detail, `"markAs"`) {
+			name += scout.MarkAsSuffix
+		}
+		if !slices.Contains(out, name) {
+			out = append(out, name)
 		}
 	}
 	return out

@@ -367,3 +367,76 @@ func TestRunWakeAndCalendar(t *testing.T) {
 		t.Errorf("a run shutdown cut short left a record: %+v", after)
 	}
 }
+
+// TestConflicts: the gateway's overlaps — a pair once, its ID sorted;
+// touching, all-day and zero-length events conflict with nothing.
+func TestConflicts(t *testing.T) {
+	at := time.Date(2026, 11, 5, 9, 0, 0, 0, time.Local)
+	ev := func(id string, start, end time.Duration) Event {
+		return Event{ID: id, Title: "iso " + id, Start: at.Add(start), End: at.Add(end)}
+	}
+	h := time.Hour
+	for _, tc := range []struct {
+		name   string
+		events []Event
+		want   []string
+	}{
+		{"none", []Event{ev("a", 0, h), ev("b", 2*h, 3*h)}, nil},
+		{"touching", []Event{ev("a", 0, h), ev("b", h, 2*h)}, nil},
+		{"overlap, listed out of order", []Event{ev("z", 30*time.Minute, 2*h), ev("a", 0, h)}, []string{"a+z"}},
+		{"three-way", []Event{ev("a", 0, 3*h), ev("b", h, 2*h), ev("c", 90*time.Minute, 4*h)}, []string{"a+b", "a+c", "b+c"}},
+		{"all-day and zero-length", []Event{ev("day", 0, 24*h), ev("dot", h, h), ev("a", 30*time.Minute, 2*h)}, nil},
+	} {
+		var got []string
+		for _, f := range conflicts(tc.events) {
+			if f.Kind != KindConflict || f.Source != SourceCalendar || f.Title == "" {
+				t.Errorf("%s: finding %+v", tc.name, f)
+			}
+			got = append(got, f.ID)
+		}
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("%s: conflicts %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestRunConflictsAndMarkAs: the model's own conflict findings are dropped
+// for the gateway's; a session that read mail with markAs fails the run and
+// leaves the cursors.
+func TestRunConflictsAndMarkAs(t *testing.T) {
+	root := t.TempDir()
+	mcp := filepath.Join(root, "mcp.json")
+	if err := os.WriteFile(mcp, []byte(`{"mcpServers":{"aws-outlook-mcp":{"command":"o"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 2, 10, 0, 0, 0, time.Local)
+	ts := func(d time.Duration) string { return now.Add(d).Format(time.RFC3339) }
+	reply := `{"findings":[{"source":"calendar","kind":"conflict","id":"q+r","title":"iso 模型说冲突","from":"","at":"","due":"","link":"","why":""}],` +
+		`"cursors":{"email":"e1","slack":"","asana":""},"calendar":[` +
+		`{"id":"b","title":"iso 乙","start":"` + ts(90*time.Minute) + `","end":"` + ts(3*time.Hour) + `","organizer":"","attendees":[],"online":false,"link":""},` +
+		`{"id":"a","title":"iso 甲","start":"` + ts(time.Hour) + `","end":"` + ts(2*time.Hour) + `","organizer":"","attendees":[],"online":false,"link":""}]}`
+	tools := []string{"mcp__aws-outlook-mcp__calendar_view"}
+	var woken []string
+	s := New(Config{
+		Layout:    datadir.FromRoot(root),
+		MCPConfig: mcp,
+		Session: func(context.Context, string, sessionview.AgentOpts, string) (string, []string, error) {
+			return reply, tools, nil
+		},
+		Wake: func(b string) error { woken = append(woken, b); return nil },
+		Now:  func() time.Time { return now },
+	})
+	r, _ := s.run(context.Background(), runID(now), TriggerManual, now)
+	if r.State != StateOK || r.New != 1 || len(r.Findings) != 1 || r.Findings[0].ID != "a+b" {
+		t.Fatalf("run = %+v", r)
+	}
+	if len(woken) != 1 || strings.Contains(woken[0], "q+r") || !strings.Contains(woken[0], "a+b") {
+		t.Errorf("woken with %q", woken)
+	}
+
+	tools = append(tools, "mcp__aws-outlook-mcp__email_read"+MarkAsSuffix)
+	r, _ = s.run(context.Background(), runID(now.Add(time.Minute)), TriggerManual, now.Add(time.Minute))
+	if r.State != StateFailed || !strings.Contains(r.Error, "markAs") {
+		t.Errorf("markAs run = %+v", r)
+	}
+}
