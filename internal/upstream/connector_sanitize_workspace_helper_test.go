@@ -15,12 +15,6 @@ import (
 // send/takeover/close_discovered. The helper must accept canonical
 // in-root paths verbatim.
 func TestSanitizeWorkspacePath_AcceptsExistingPathInsideRoot(t *testing.T) {
-	// Resolve t.TempDir() through the same EvalSymlinks the helper applies
-	// to its input — on macOS /var/folders/... is a symlink to
-	// /private/var/folders/..., so feeding the raw t.TempDir() to
-	// defaultWorkspace would make the prefix gate compare resolved-vs-raw
-	// and reject every in-root path. Production wires defaultWorkspace
-	// from a path that has already cleared this resolution.
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatalf("EvalSymlinks(root): %v", err)
@@ -29,13 +23,26 @@ func TestSanitizeWorkspacePath_AcceptsExistingPathInsideRoot(t *testing.T) {
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	c := &Connector{cfg: &Config{}, defaultWorkspace: root}
-	got, err := c.sanitizeWorkspacePath(sub, "workspace", false)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	// session.cwd is the raw config path; a symlinked one (macOS /tmp →
+	// /private/tmp) must still admit its own subdirectories, whichever
+	// spelling the primary sends.
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatalf("symlink: %v", err)
 	}
-	if got != sub {
-		t.Errorf("got %q, want %q", got, sub)
+	for _, tc := range []struct{ name, root, in string }{
+		{"canonical root", root, sub},
+		{"symlinked root, canonical input", link, sub},
+		{"symlinked root, symlinked input", link, filepath.Join(link, "proj")},
+	} {
+		c := &Connector{cfg: &Config{}, defaultWorkspace: tc.root}
+		got, err := c.sanitizeWorkspacePath(tc.in, "workspace", false)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", tc.name, err)
+		}
+		if got != sub {
+			t.Errorf("%s: got %q, want %q", tc.name, got, sub)
+		}
 	}
 }
 

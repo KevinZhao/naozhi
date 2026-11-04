@@ -330,9 +330,16 @@ func (c *Connector) sanitizeWorkspacePath(raw, kind string, tolerateMissing bool
 	if !filepath.IsAbs(resolved) {
 		return "", fmt.Errorf("%s must be absolute path", kind)
 	}
-	if resolved != c.defaultWorkspace &&
-		!strings.HasPrefix(resolved, c.defaultWorkspace+string(filepath.Separator)) {
-		return "", fmt.Errorf("%s %q outside allowed root %q", kind, resolved, c.defaultWorkspace)
+	// The input is symlink-resolved, so the root must be too: session.cwd is
+	// the raw config path, and a symlinked one (macOS /tmp → /private/tmp)
+	// would reject every in-root path. An unresolvable root stays raw, as in
+	// server.validateWorkspace.
+	root := c.defaultWorkspace
+	if r, err := filepath.EvalSymlinks(root); err == nil {
+		root = r
+	}
+	if resolved != root && !strings.HasPrefix(resolved, root+string(filepath.Separator)) {
+		return "", fmt.Errorf("%s %q outside allowed root %q", kind, resolved, root)
 	}
 	return resolved, nil
 }
