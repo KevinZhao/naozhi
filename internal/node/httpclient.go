@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -48,6 +49,10 @@ type HTTPClient struct {
 	sessMu    sync.Mutex
 	sessETag  string
 	sessCache []map[string]any
+
+	// idempotent is set once the node echoed a send's IdempotencyKeyHeader,
+	// i.e. it runs a TurnID once; only then is a lost answer ErrSendUnknown.
+	idempotent atomic.Bool
 }
 
 // maxLocalPeerBodyBytes caps request bodies to loopback/private peers; real
@@ -258,7 +263,8 @@ func (n *HTTPClient) getEvents(ctx context.Context, path string) ([]clievent.Eve
 
 // IdempotencyKeyHeader carries a direct send's TurnID. A header, not a body
 // field: a node predating it decodes /api/sessions/send with
-// DisallowUnknownFields and would refuse the send.
+// DisallowUnknownFields and would refuse the send. A node that honours it
+// echoes it on the response; one predating it does not.
 const IdempotencyKeyHeader = "Idempotency-Key"
 
 // Send sends a message to a session on the remote node via POST
@@ -285,14 +291,18 @@ func (n *HTTPClient) Send(ctx context.Context, req SendRequest) (SendResult, err
 	resp, err := n.doRequestHdr(ctx, http.MethodPost, "/api/sessions/send", bytes.NewReader(data), hdr)
 	if err != nil {
 		// A timeout may have reached the node; anything else (refused,
-		// unresolvable, rejected locally) did not.
+		// unresolvable, rejected locally) did not. Unknown only for a node
+		// known to dedup: a retry to one that ignores the header runs twice.
 		var te interface{ Timeout() bool }
-		if req.TurnID != "" && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || (errors.As(err, &te) && te.Timeout())) {
+		if req.TurnID != "" && n.idempotent.Load() && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || (errors.As(err, &te) && te.Timeout())) {
 			return SendResult{}, fmt.Errorf("%w: send to %s: %w", ErrSendUnknown, n.ID, err)
 		}
 		return SendResult{}, fmt.Errorf("send to %s: %w", n.ID, err)
 	}
 	defer resp.Body.Close()
+	if req.TurnID != "" && resp.Header.Get(IdempotencyKeyHeader) == req.TurnID {
+		n.idempotent.Store(true)
+	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))

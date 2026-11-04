@@ -282,7 +282,7 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 		return
 	}
 	if msg.AccessProfile != "" {
-		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Key: msg.Key, Error: ErrAccessProfileRemote.Error()}))
+		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Key: msg.Key, Error: errRemoteAccessProfile}))
 		return
 	}
 	// A scratch: session or one bound to a non-default access profile must not

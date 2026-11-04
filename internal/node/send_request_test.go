@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -122,8 +123,9 @@ func TestReverseConn_UnansweredSendIsUnknown(t *testing.T) {
 }
 
 // A direct send carries the picks in the body old nodes already read, and
-// the turn ID in a header they ignore; a node that times out with the turn
-// ID out is ErrSendUnknown.
+// the turn ID in a header they ignore. A send that times out with the turn ID
+// out is ErrSendUnknown only once the node has echoed that header, i.e. runs
+// a turn ID once; for a node predating it a retry would run twice.
 func TestHTTPClient_SendRequest(t *testing.T) {
 	type seen struct {
 		body map[string]string
@@ -132,36 +134,56 @@ func TestHTTPClient_SendRequest(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		req         SendRequest
-		hang        bool
+		echo        bool // the node echoes IdempotencyKeyHeader
+		warm        bool // one answered send before the checked one
+		hang        bool // the checked send gets no answer
 		wantBody    map[string]string
 		wantIdem    string
 		wantUnknown bool
 	}{
-		{"picks and turn id", SendRequest{Key: "k", Text: "hi", Backend: "kiro", ResumeID: "r1", TurnID: "s1"}, false,
+		{"picks and turn id", SendRequest{Key: "k", Text: "hi", Backend: "kiro", ResumeID: "r1", TurnID: "s1"}, true, false, false,
 			map[string]string{"key": "k", "text": "hi", "backend": "kiro", "resume_id": "r1"}, "s1", false},
-		{"plain", SendRequest{Key: "k", Text: "hi"}, false, map[string]string{"key": "k", "text": "hi"}, "", false},
-		{"timeout with turn id", SendRequest{Key: "k", Text: "hi", TurnID: "s1"}, true, map[string]string{"key": "k", "text": "hi"}, "s1", true},
-		{"timeout without turn id", SendRequest{Key: "k", Text: "hi"}, true, map[string]string{"key": "k", "text": "hi"}, "", false},
+		{"plain", SendRequest{Key: "k", Text: "hi"}, true, false, false, map[string]string{"key": "k", "text": "hi"}, "", false},
+		{"timeout, node echoed before", SendRequest{Key: "k", Text: "hi", TurnID: "s1"}, true, true, true, map[string]string{"key": "k", "text": "hi"}, "s1", true},
+		{"timeout, node predates the header", SendRequest{Key: "k", Text: "hi", TurnID: "s1"}, false, true, true, map[string]string{"key": "k", "text": "hi"}, "s1", false},
+		{"timeout before any answer", SendRequest{Key: "k", Text: "hi", TurnID: "s1"}, true, false, true, map[string]string{"key": "k", "text": "hi"}, "s1", false},
+		{"timeout without turn id", SendRequest{Key: "k", Text: "hi"}, true, true, true, map[string]string{"key": "k", "text": "hi"}, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := make(chan seen, 1)
+			got := make(chan seen, 2)
+			var calls atomic.Int32
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				raw, _ := io.ReadAll(r.Body)
 				var b map[string]string
 				_ = json.Unmarshal(raw, &b)
 				got <- seen{body: b, idem: r.Header.Get(IdempotencyKeyHeader)}
-				if tc.hang {
+				last := calls.Add(1) == 2 || !tc.warm
+				if tc.hang && last {
 					<-r.Context().Done()
 					return
+				}
+				if k := r.Header.Get(IdempotencyKeyHeader); tc.echo && k != "" {
+					w.Header().Set(IdempotencyKeyHeader, k)
 				}
 				w.WriteHeader(http.StatusAccepted)
 				w.Write([]byte(`{"status":"queued","dup":true}`))
 			}))
 			defer srv.Close()
 
+			nc := newTestHTTPClient(t, srv, "")
+			if tc.warm {
+				warm := tc.req
+				if warm.TurnID != "" {
+					warm.TurnID = "s0"
+				}
+				if _, err := nc.Send(context.Background(), warm); err != nil {
+					t.Fatalf("warm-up Send: %v", err)
+				}
+				<-got
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 			defer cancel()
-			res, err := newTestHTTPClient(t, srv, "").Send(ctx, tc.req)
+			res, err := nc.Send(ctx, tc.req)
 			s := <-got
 			if !reflect.DeepEqual(s.body, tc.wantBody) || s.idem != tc.wantIdem {
 				t.Errorf("node saw body %v, %s %q; want %v, %q", s.body, IdempotencyKeyHeader, s.idem, tc.wantBody, tc.wantIdem)

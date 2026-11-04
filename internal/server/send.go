@@ -66,6 +66,10 @@ var errSendBusy = node.ErrSendBusy
 // host's upload store.
 const errRemoteFiles = "files not supported for remote nodes"
 
+// errRemoteAccessProfile refuses an access-profile pick on a remote send: the
+// overlay is host-local and no link carries it.
+const errRemoteAccessProfile = "远程节点不支持访问档"
+
 // remoteSendErrorText is what a tab sees for a failed remote send: the
 // node-link refusals are written for it, anything else from the transport
 // may carry host details and reads as fallback.

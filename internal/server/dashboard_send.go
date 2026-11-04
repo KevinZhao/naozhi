@@ -161,6 +161,10 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid send_id"})
 		return
 	}
+	if idemKey != "" {
+		// The echo tells the primary this node runs the ID once.
+		w.Header().Set(node.IdempotencyKeyHeader, idemKey)
+	}
 
 	if len(fileIDs) > maxFilesPerSend {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": errTooManyFiles})
@@ -269,7 +273,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		// An access profile is a host-local overlay no link carries; refuse
 		// the pick rather than drop it.
 		if accessProfile != "" {
-			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": ErrAccessProfileRemote.Error()})
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": errRemoteAccessProfile})
 			return
 		}
 		// Syntactic workspace gate (same as WS handleRemoteSend): the remote

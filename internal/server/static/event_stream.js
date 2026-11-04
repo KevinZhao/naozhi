@@ -781,9 +781,11 @@ const sessionFrames = {
     // "unknown" = a remote send went out and its answer was lost; the node
     // may be running it. Keep the bubble and offer a retry with the same
     // send_id, which the node answers from its dedup table rather than run
-    // twice. Any other status settles the send.
+    // twice. Any other status settles the send. The spawn picks come back:
+    // if the frame never reached the node, the next send must carry them.
     if (msg.status === 'unknown') {
       markSendUnknown(msg.id);
+      restoreSpawnFields(msg.key || selection.key, msg.id);
       rollbackOptimisticRunning(msg.key || selection.key, msg.node || selection.node);
       return;
     }
@@ -882,6 +884,12 @@ const sessionFrames = {
     const sKey = sid(msg.key, node);
     if (!perSession.lastSent[sKey] && !perSession.httpSendPending.has(sKey)) return;
     perSession.httpSendPending.delete(sKey);
+    // "unknown" = a remote send's answer was lost: the same handling as the
+    // WS ack, keyed by the send's turn_id.
+    if (msg.status === 'unknown' && msg.turn_id) {
+      sessionFrames.onSendAck({ status: 'unknown', id: msg.turn_id, key: msg.key, node: msg.node });
+      return;
+    }
     if (msg.key === selection.key && node === (selection.node || 'local')) {
       sessionFrames.onSendAck({ status: 'error', key: msg.key, node: msg.node, error: msg.error });
       return;

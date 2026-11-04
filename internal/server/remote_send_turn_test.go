@@ -169,6 +169,10 @@ func TestRemoteSend_RetryAfterALostAnswerRunsOneTurn(t *testing.T) {
 				if rec.Code >= 400 || json.Unmarshal(rec.Body.Bytes(), &res) != nil {
 					return node.SendResult{}, fmt.Errorf("node answered %d %s", rec.Code, rec.Body)
 				}
+				// The echo is what lets HTTPClient call a lost answer unknown.
+				if got := rec.Header().Get(node.IdempotencyKeyHeader); got != req.TurnID {
+					return node.SendResult{}, fmt.Errorf("node echoed %s %q, want %q", node.IdempotencyKeyHeader, got, req.TurnID)
+				}
 				return node.SendResult{Status: res.Status, Dup: res.Dup}, nil
 			}
 		}},
@@ -230,7 +234,7 @@ func TestHub_RemoteSendPicks(t *testing.T) {
 		{"no picks", node.ClientMsg{}, &node.SendRequest{}, ""},
 		{"backend the node lacks", node.ClientMsg{Backend: "codex"}, nil, "远程节点未启用所选后端：codex"},
 		{"attachments", node.ClientMsg{FileIDs: []string{"f1"}}, nil, errRemoteFiles},
-		{"access profile", node.ClientMsg{AccessProfile: "work"}, nil, ErrAccessProfileRemote.Error()},
+		{"access profile", node.ClientMsg{AccessProfile: "work"}, nil, errRemoteAccessProfile},
 		{"bad send_id", node.ClientMsg{SendID: "a b"}, nil, "invalid send_id"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
