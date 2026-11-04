@@ -34,7 +34,7 @@ function plannerEvents() {
     },
     {
       type: 'text', time: now - 110000, uuid: 'pc-t1',
-      detail: 'hello world（`' + SESSION + '`）在等你回复，iso 周报 `' + TASK + '` 还没开始。我建议派一个会话整理周报：\n\n' + fence('naozhi-action', JSON.stringify(DISPATCH)) +
+      detail: 'hello world（`' + SESSION + '`）在等你回复，iso 周报 `' + TASK + '` 还没开始，hello world（名字 hw，`' + SESSION + '`）先等等。我建议派一个会话整理周报：\n\n' + fence('naozhi-action', JSON.stringify(DISPATCH)) +
         '\n\n' + fence('naozhi-action', '{"type":"dispatch","title":') + '\n\n' +
         fence('naozhi-action', JSON.stringify({ type: 'promise', text: 'iso 周五前提醒你看周报', due: '', close_when: '你看过周报' })) + '\n\n' +
         fence('naozhi-action', JSON.stringify(DISPATCH)),
@@ -118,7 +118,7 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     await expect(card.locator('.pl-scard-time')).toContainText('分钟前');
     // The keys after the names fold into the cards (§6.4: names, not keys).
     await expect(reply.locator('.pl-scards .pl-scard')).toHaveCount(2);
-    await expect(reply).toContainText('hello world在等你回复，iso 周报 还没开始。');
+    await expect(reply).toContainText('hello world在等你回复，iso 周报 还没开始，hello world（名字 hw）先等等。');
     await expect(reply).not.toContainText(SESSION);
     const dispatch = reply.locator('.pl-act-dispatch').first();
     await expect(dispatch.locator('.pl-act-h')).toHaveText('派活提议 · iso 整理周报');

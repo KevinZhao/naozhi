@@ -695,7 +695,7 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 /* System/init: centered label */
 .event.system,.event.init{justify-content:center;padding-top:12px;padding-bottom:12px}
 .event.system .event-icon,.event.init .event-icon{display:none}
-.event.system .event-content,.event.init .event-content{flex:none;color:var(--nz-text-dim);font-size:var(--nz-fs-sm);text-align:center}
+.event.system .event-content,.event.init .event-content{flex:0 1 auto;color:var(--nz-text-dim);font-size:var(--nz-fs-sm);text-align:center}
 /* Cross-session messages (RFC planner §6.2): an inbound one is a bubble of
    its own, neither yours nor the assistant's; a held one and the refusal
    frames are centered notes like system rows. */

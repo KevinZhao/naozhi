@@ -20,7 +20,7 @@ import { sid } from './session_ident.js';
 import { attachPlannerConversation, detachPlannerConversation, focusInboxItem } from './planner_view.js';
 import { openPlannerSession } from './planner_chat.js';
 import { workbench } from './workbench.js';
-import { shell } from './shell.js';
+import { registerShell, shell } from './shell.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -116,6 +116,10 @@ document.addEventListener('keydown', (e) => {
   e.stopPropagation();
   closePlannerDrawer();
 }, true);
+
+// notify.js reaches the drawer through the shell: importing this module
+// back would close a cycle through planner_view.js.
+registerShell({ openPlannerDrawer });
 
 registerActions({
   'planner-drawer-toggle': () => togglePlannerDrawer(),
