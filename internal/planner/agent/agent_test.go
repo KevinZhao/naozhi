@@ -428,3 +428,46 @@ func TestNotesAcrossRestart(t *testing.T) {
 		t.Errorf("notes after restart = %+v", notes)
 	}
 }
+
+// TestPromptUpgradeChangesShift: a conversation started on an older system
+// prompt changes shift at once (a resumed one keeps its first prompt), under
+// its own handoff name, and only once; a dead Planner just records the new
+// version when its fresh conversation starts.
+func TestPromptUpgradeChangesShift(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+	now := time.Date(2026, 11, 4, 21, 0, 0, 0, loc)
+	sess := &fakeSessions{st: SessionState{Exists: true, Alive: true, SessionID: "s1", Running: true}}
+	a, lay := newTestAgent(t, sess, &now)
+	turns := &fakeTurns{reply: "## 进行中\n统计任务"}
+	a.turns = turns
+	a.mu.Lock()
+	a.state.Shift, a.state.Prompt = shiftDay(now), PromptVersion-1
+	a.mu.Unlock()
+	ctx := context.Background()
+
+	a.reconcile(ctx) // waits out a running turn
+	if sess.recreated != 0 {
+		t.Fatalf("changed shift during a turn")
+	}
+	sess.mu.Lock()
+	sess.st.Running = false
+	sess.mu.Unlock()
+	a.reconcile(ctx)
+	if sess.recreated != 1 {
+		t.Fatalf("recreated %d, want 1", sess.recreated)
+	}
+	name := fmt.Sprintf("%s-v%d.md", shiftDay(now), PromptVersion)
+	if saved, err := os.ReadFile(filepath.Join(lay.PlannerHandoffRoot(), name)); err != nil || string(saved) != turns.reply {
+		t.Fatalf("handoff %s = %q, %v", name, saved, err)
+	}
+	a.reconcile(ctx)
+	if sess.recreated != 1 {
+		t.Fatalf("changed shift again: recreated %d", sess.recreated)
+	}
+	a.mu.Lock()
+	got := a.state.Prompt
+	a.mu.Unlock()
+	if got != PromptVersion {
+		t.Errorf("prompt = %d, want %d", got, PromptVersion)
+	}
+}
