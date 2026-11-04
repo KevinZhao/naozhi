@@ -93,6 +93,10 @@ type Event struct {
 	Attendees []string  `json:"attendees"`
 	Online    bool      `json:"online"`
 	Link      string    `json:"link"`
+	// Prep marks a meeting the user should prepare for (speaks, brings
+	// material, decides); only those get a pre-meeting brief. Broadcast
+	// sessions and office hours do not.
+	Prep bool `json:"prep,omitempty"`
 }
 
 // Output is a scout session's whole reply.

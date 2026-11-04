@@ -62,15 +62,15 @@ func (st store) saveBriefed(b briefed, now time.Time) error {
 }
 
 // briefDue is the meeting a brief is due for at now: the first of events
-// with someone besides the user that starts within briefLead and has had
-// no brief, on a weekday outside quiet hours. A machine that wakes after a
+// the user should prepare for, with someone besides them, that starts
+// within briefLead and has had no brief, on a weekday outside quiet hours. A machine that wakes after a
 // meeting started skips it.
 func briefDue(now time.Time, events []Event, done []briefed) (Event, bool) {
 	if wd := now.Weekday(); wd == time.Saturday || wd == time.Sunday || notify.Quiet(now) {
 		return Event{}, false
 	}
 	for _, e := range events {
-		if !now.Before(e.Start) || e.Start.Sub(now) > briefLead || !withOthers(e) {
+		if !e.Prep || !now.Before(e.Start) || e.Start.Sub(now) > briefLead || !withOthers(e) {
 			continue
 		}
 		if !slices.ContainsFunc(done, func(b briefed) bool { return b.ID == e.ID && b.Start.Equal(e.Start) }) {
