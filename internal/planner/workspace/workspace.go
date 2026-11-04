@@ -140,6 +140,20 @@ func (r *Registry) List() []Workspace {
 	return out
 }
 
+// LocalPaths returns every directory a workspace covers on this node.
+func (r *Registry) LocalPaths() []string {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []string
+	for _, w := range r.ws {
+		out = append(out, w.Paths[r.node]...)
+	}
+	return out
+}
+
 // Lookup returns the workspace whose path on this node most deeply contains
 // dir (an absolute path).
 func (r *Registry) Lookup(dir string) (Workspace, bool) {
