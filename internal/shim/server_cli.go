@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"runtime/debug"
 	"sync"
@@ -90,9 +91,14 @@ func (s *shimServer) readStdout() {
 // stdout EOF before reaping the CLI.
 const stderrDrainTimeout = 500 * time.Millisecond
 
-// cliTermGrace is how long waitOrKill gives the CLI to exit on SIGTERM before
+// cliTermGrace is how long terminate gives the CLI to exit on SIGTERM before
 // the SIGKILL. A var so tests can shorten it.
 var cliTermGrace = 2 * time.Second
+
+// cliOrphanGrace is how long stdout may stay open after the CLI's direct
+// child exited before watchChild ends its process group; a CLI that exits
+// closes stdout at once. A var so tests can shorten it.
+var cliOrphanGrace = 3 * time.Second
 
 // tryExtractSessionID search keys, hoisted to avoid a per-line []byte alloc.
 // snake = claude stream-json frames, camel = ACP/kiro frames.
@@ -211,14 +217,22 @@ type cliProc struct {
 	stdin   io.WriteCloser
 	stdout  *bufio.Reader
 	stderrR io.ReadCloser
+	// stdoutR is stdout's read end, closed once the CLI is reaped.
+	stdoutR io.Closer
 	// stderrDone is closed by readStderr at stderr EOF.
 	stderrDone chan struct{}
-	exited     chan struct{}
-	exitCode   int
-	exitOnce   sync.Once
-	killOnce   sync.Once
+	// exited is closed once stdout reached EOF (or the CLI was killed) and
+	// the direct child was reaped.
+	exited   chan struct{}
+	exitCode int
+	reapOnce sync.Once
+	exitOnce sync.Once
+	killOnce sync.Once
 }
 
+// startCLI starts the CLI with stdout and stderr on pipes of its own: Wait
+// closes the pipes it creates, so reaping the direct child the moment it
+// exits (watchChild) would drop output the CLI wrote last.
 func startCLI(cliPath string, args []string, cwd string) (*cliProc, error) {
 	cmd := exec.Command(cliPath, args...)
 	setSetsid(cmd)
@@ -230,28 +244,37 @@ func startCLI(cliPath string, args []string, cwd string) (*cliProc, error) {
 	if err != nil {
 		return nil, fmt.Errorf("stdin pipe: %w", err)
 	}
-	stdout, err := cmd.StdoutPipe()
+	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
 		stdin.Close()
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
-	stderrPipe, err := cmd.StderrPipe()
+	stderrR, stderrW, err := os.Pipe()
 	if err != nil {
 		stdin.Close()
-		stdout.Close()
+		stdoutR.Close()
+		stdoutW.Close()
 		return nil, fmt.Errorf("stderr pipe: %w", err)
 	}
+	cmd.Stdout, cmd.Stderr = stdoutW, stderrW
 
-	if err := cmd.Start(); err != nil {
+	err = cmd.Start()
+	// The child holds its own copies; ours would keep EOF from ever coming.
+	stdoutW.Close()
+	stderrW.Close()
+	if err != nil {
 		stdin.Close()
+		stdoutR.Close()
+		stderrR.Close()
 		return nil, fmt.Errorf("start: %w", err)
 	}
 
 	return &cliProc{
 		cmd:        cmd,
 		stdin:      stdin,
-		stdout:     bufio.NewReaderSize(stdout, 64*1024),
-		stderrR:    stderrPipe,
+		stdout:     bufio.NewReaderSize(stdoutR, 64*1024),
+		stdoutR:    stdoutR,
+		stderrR:    stderrR,
 		stderrDone: make(chan struct{}),
 		exited:     make(chan struct{}),
 	}, nil
@@ -283,14 +306,50 @@ func (c *cliProc) alive() bool {
 	}
 }
 
-func (c *cliProc) wait() {
-	c.exitOnce.Do(func() {
+// reap waits for the direct child to exit and records its exit code.
+func (c *cliProc) reap() {
+	c.reapOnce.Do(func() {
 		_ = c.cmd.Wait()
 		if c.cmd.ProcessState != nil {
 			c.exitCode = c.cmd.ProcessState.ExitCode()
 		}
+	})
+}
+
+// wait reaps the CLI, closes its output pipes (unblocking a reader a
+// descendant still holds them open for) and closes exited.
+func (c *cliProc) wait() {
+	c.exitOnce.Do(func() {
+		c.reap()
+		if c.stdoutR != nil {
+			_ = c.stdoutR.Close()
+		}
+		if c.stderrR != nil {
+			_ = c.stderrR.Close()
+		}
 		close(c.exited)
 	})
+}
+
+// watchChild ends what the direct child leaves behind when it dies alone. A
+// wrapper script that runs the real CLI as its child (~/.local/bin/claude)
+// can be killed without it: the CLI keeps stdout open, readStdout never sees
+// EOF and the session reads ready forever. Once the child has exited and
+// stdout is still open after cliOrphanGrace, its process group, the CLI in
+// it, is terminated as waitOrKill does, and exited follows with the child's
+// exit code.
+func (c *cliProc) watchChild() {
+	c.reap()
+	t := time.NewTimer(cliOrphanGrace)
+	defer t.Stop()
+	select {
+	case <-c.exited:
+		return
+	case <-t.C:
+	}
+	slog.Warn("CLI child exited but its output is still open; ending its process group",
+		"pid", c.pid(), "code", c.exitCode)
+	c.terminate()
 }
 
 func (c *cliProc) interrupt() {
@@ -327,13 +386,20 @@ func (c *cliProc) waitOrKill(timeout time.Duration) {
 		return
 	case <-t.C:
 	}
-	// A CLI mid-turn does not exit on EOF. SIGTERM lets it end its tools'
-	// processes, which run in process groups of their own: the SIGKILL of the
-	// CLI's group alone left a stopped session's running command behind.
+	// A CLI mid-turn does not exit on EOF.
+	c.terminate()
+}
+
+// terminate sends the CLI's process group SIGTERM, and SIGKILL if it is
+// still there after cliTermGrace. SIGTERM lets the CLI end its tools'
+// processes, which run in process groups of their own: the SIGKILL of the
+// CLI's group alone left a stopped session's running command behind.
+func (c *cliProc) terminate() {
 	if c.cmd.Process != nil {
 		_ = sendProcGroupSIGTERM(c.cmd.Process.Pid)
 	}
-	t.Reset(cliTermGrace)
+	t := time.NewTimer(cliTermGrace)
+	defer t.Stop()
 	select {
 	case <-c.exited:
 	case <-t.C:

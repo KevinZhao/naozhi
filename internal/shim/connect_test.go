@@ -830,6 +830,59 @@ func TestCLIProc_Wait_Idempotent(t *testing.T) {
 	}
 }
 
+// A wrapper script killed alone leaves the real CLI, its child, holding
+// stdout: watchChild ends the CLI's process group, so the death reaches the
+// client as cli_exited. A live wrapper is left alone.
+func TestCLIProc_WatchChild_EndsOrphanedCLI(t *testing.T) {
+	oldOrphan, oldTerm := cliOrphanGrace, cliTermGrace
+	cliOrphanGrace, cliTermGrace = 200*time.Millisecond, 300*time.Millisecond
+	t.Cleanup(func() { cliOrphanGrace, cliTermGrace = oldOrphan, oldTerm })
+	for _, tc := range []struct {
+		name        string
+		cli         string // the CLI the wrapper runs as its child
+		killWrapper bool
+	}{
+		{"CLI ends on SIGTERM", `echo ready; while :; do sleep 0.05; done`, true},
+		{"CLI ignores SIGTERM", `trap "" TERM; echo ready; while :; do sleep 0.05; done`, true},
+		{"wrapper alive", `echo ready; while :; do sleep 0.05; done`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// "; :" keeps the wrapper from exec'ing the CLI in its place.
+			s, ln, tok := stderrTestShim(t, `sh -c '`+tc.cli+`'; :`)
+			watched := make(chan struct{})
+			go func() {
+				s.cli.watchChild()
+				close(watched)
+			}()
+			defer func() {
+				s.cli.kill()
+				<-watched
+			}()
+			deadline := time.Now().Add(5 * time.Second)
+			for s.buffer.Count() == 0 {
+				if time.Now().After(deadline) {
+					t.Fatal("the CLI never wrote its first line")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if !tc.killWrapper {
+				time.Sleep(cliOrphanGrace + cliTermGrace + 200*time.Millisecond)
+				if !s.cli.alive() {
+					t.Fatal("a live wrapper's CLI was ended")
+				}
+				return
+			}
+			if err := s.cli.cmd.Process.Kill(); err != nil { // the wrapper only, not its group
+				t.Fatal(err)
+			}
+			msg := attachForExit(t, s, ln, tok, "")
+			if msg.Code == nil || *msg.Code != -1 {
+				t.Errorf("cli_exited code = %v, want -1 (the wrapper's SIGKILL)", msg.Code)
+			}
+		})
+	}
+}
+
 func TestCLIProc_CloseStdin(t *testing.T) {
 	// "sh -c exit" exits immediately once started; just verify closeStdin doesn't panic.
 	cli, err := startCLI("sh", []string{"-c", "sleep 60"}, "")

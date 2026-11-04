@@ -131,7 +131,7 @@ func (r *Router) settleResumedCLIName(res *spawnReservation) {
 		cmp.Or(res.backendID, "claude") != "claude" || res.spawnOpts.SpawnOverlay == nil {
 		return
 	}
-	held, aiTitle, err := claudefs.TranscriptTitles(claudefs.SessionJSONL(r.hist.claudeDir, res.workspace, res.resumeID))
+	held, aiTitle, err := claudefs.TranscriptTitles(claudefs.LocateSessionJSONL(r.hist.claudeDir, res.workspace, res.resumeID))
 	if err != nil {
 		slog.Debug("cli name: transcript titles unreadable", "key", res.key, "err", err)
 	}

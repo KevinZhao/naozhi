@@ -3,6 +3,7 @@ package backend
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/claudefs"
@@ -32,12 +33,12 @@ func claudeProfile() Profile {
 		RequiredNodeCaps: nil,
 		// Session JSONL under ~/.claude/projects/ ("~/" kept for doctor display).
 		HistoryDir: "~/.claude/projects/",
-		// claude --resume reads <claudeDir>/projects/<slug(workspace)>/<sid>.jsonl.
+		// claude --resume reads <claudeDir>/projects/<slug(realpath(workspace))>/<sid>.jsonl.
 		ResumeTarget: func(_, claudeDir, workspace, sessionID string) string {
 			if claudeDir == "" || workspace == "" {
 				return ""
 			}
-			return claudefs.SessionJSONL(claudeDir, workspace, sessionID)
+			return claudefs.LocateSessionJSONL(claudeDir, workspace, sessionID)
 		},
 		// claude --resume restores the transcript's last cost-state line.
 		ResumedCost: claudeResumedCost,
@@ -84,7 +85,7 @@ func claudeTranscriptUsage(claudeDir, workspace, sessionID string, w claudefs.Us
 	if claudeDir == "" || workspace == "" {
 		return clievent.ShadowUsage{}, false, nil
 	}
-	rows, found, err := claudefs.SessionUsage(claudefs.ProjectDir(claudeDir, workspace), sessionID, w)
+	rows, found, err := claudefs.SessionUsage(filepath.Dir(claudefs.LocateSessionJSONL(claudeDir, workspace, sessionID)), sessionID, w)
 	u := clievent.ShadowUsage{Models: make([]clievent.ShadowModel, 0, len(rows))}
 	for _, r := range rows {
 		u.Models = append(u.Models, clievent.ShadowModel{Model: r.Model, Input: r.Input, Output: r.Output, CacheRead: r.CacheRead, CacheWrite: r.CacheWrite})

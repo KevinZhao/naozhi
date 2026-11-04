@@ -106,6 +106,28 @@ func SessionJSONL(claudeDir, cwd, sessionID string) string {
 	return TranscriptIn(ProjectDir(claudeDir, cwd), sessionID)
 }
 
+// LocateSessionJSONL is the transcript of a session the CLI ran in cwd: the
+// first of WorkspaceProjectDirs holding it, else the realpath's, where the
+// CLI writes. SessionJSONL slugs cwd as given, which misses a cwd spelled
+// through a symlink (/tmp → /private/tmp). It does I/O.
+func LocateSessionJSONL(claudeDir, cwd, sessionID string) string {
+	dirs := WorkspaceProjectDirs(ProjectsRoot(claudeDir), cwd)
+	if len(dirs) == 0 {
+		return ""
+	}
+	for _, d := range dirs {
+		if p := TranscriptIn(d, sessionID); fileExists(p) {
+			return p
+		}
+	}
+	return TranscriptIn(dirs[0], sessionID)
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
 // TranscriptIn is a session's transcript inside an already-resolved project
 // directory (a caller walking projects/ by directory name has no cwd to slug).
 func TranscriptIn(projectDir, sessionID string) string {
