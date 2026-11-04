@@ -213,10 +213,10 @@ func TestReportWithoutStatusGetsReceipt(t *testing.T) {
 		want   string // "" for no receipt
 	}{
 		{"no status", "task:ab12", "做完了，hello.md 已写好。",
-			"task:ab12（iso 写 hello）刚向你汇报，它在任务里仍是进行中；完成了就用 status 标 done，没完成用 doing 并说明原因；相关的承诺 {P} 也一并处理。"},
+			"task:ab12（iso 写 hello）刚向你汇报，它在任务里仍是进行中；完成了就用 status 标 done，没完成用 doing 并说明原因（" + statusFormat("task:ab12") + "）；相关的承诺 {P} 也一并处理，task 填承诺 ID。"},
 		{"task and promise", "task:ab12", "还没完。\n" + block(taskDoing) + "\n" + block(promiseDone), ""},
 		{"task only", "task:ab12", "做完了。\n" + block(taskDone),
-			"task:ab12（iso 写 hello）刚向你汇报；相关的承诺 {P} 还没完成，条件满足了就用 status 标 done。"},
+			"task:ab12（iso 写 hello）刚向你汇报；相关的承诺 {P} 还没完成，条件满足了就用 status 标 done（" + statusFormat("{P}") + "）。"},
 		{"doing only", "task:ab12", "还在等 CI。\n" + block(taskDoing), ""},
 		{"not dispatched", "dashboard:direct:x:general", "收到。", ""},
 	}
@@ -252,5 +252,18 @@ func TestReportWithoutStatusGetsReceipt(t *testing.T) {
 				t.Errorf("told = %q, want %q", g.told, want)
 			}
 		})
+	}
+}
+
+// TestStatusFormatParses: the format a receipt spells out is a block Parse
+// accepts as written, with only why to fill in.
+func TestStatusFormatParses(t *testing.T) {
+	text := strings.ReplaceAll(strings.TrimPrefix(statusFormat("task:ab12"), "格式："), "…", "汇报说已写完")
+	blocks := Parse(text)
+	if len(blocks) != 1 || blocks[0].Err != nil || blocks[0].Status == nil {
+		t.Fatalf("Parse(%q) = %+v", text, blocks)
+	}
+	if st := blocks[0].Status; st.Task != "task:ab12" || st.State != "done" {
+		t.Errorf("status = %+v", st)
 	}
 }

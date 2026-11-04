@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -156,8 +157,13 @@ type persisted struct {
 	V       int    `json:"v"`
 	Stopped bool   `json:"stopped"`
 	Shift   string `json:"shift,omitempty"`
-	// Handoff is the day of a stored summary not yet handed to a new
-	// conversation (its restart failed, or the send did).
+	// Prompt is the PromptVersion the current conversation started with. A
+	// resumed conversation keeps its first system prompt, so after an
+	// upgrade the shift changes at once instead of at the next 08:30.
+	Prompt int `json:"prompt,omitempty"`
+	// Handoff names a stored summary not yet handed to a new conversation
+	// (its restart failed, or the send did): the shift day, or the day and
+	// prompt version for a change forced by an upgrade.
 	Handoff string `json:"handoff,omitempty"`
 }
 
@@ -420,7 +426,7 @@ func (a *Agent) reconcile(ctx context.Context) {
 		}
 	}
 	a.mu.Lock()
-	shift, pending := a.state.Shift, a.state.Handoff
+	shift, pending, prompt := a.state.Shift, a.state.Handoff, a.state.Prompt
 	a.mu.Unlock()
 	switch {
 	case shift == "":
@@ -429,8 +435,16 @@ func (a *Agent) reconcile(ctx context.Context) {
 		// A busy Planner changes at a later reconcile, so the handoff
 		// request runs at once rather than queued behind a turn.
 		if !st.Running {
-			a.changeShift(ctx, now)
+			a.changeShift(ctx, now, shiftDay(now))
 		}
+	case prompt != PromptVersion && st.SessionID != "":
+		// An upgrade changed the system prompt; the resumed conversation
+		// would keep the old one until tomorrow.
+		if !st.Running {
+			a.changeShift(ctx, now, fmt.Sprintf("%s-v%d", shiftDay(now), PromptVersion))
+		}
+	case prompt != PromptVersion:
+		a.markShift(now)
 	case pending != "":
 		a.sendHandoff(pending, nil, opts)
 	}
@@ -477,10 +491,13 @@ func shiftDay(t time.Time) string {
 	return t.Format(time.DateOnly)
 }
 
+// markShift records that the current conversation is now's shift and runs
+// on the current system prompt.
 func (a *Agent) markShift(now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.state.Shift = shiftDay(now)
+	a.state.Prompt = PromptVersion
 	a.saveLocked()
 }
 
@@ -490,11 +507,11 @@ func (a *Agent) handoffPath(day string) string {
 
 // changeShift has the outgoing session write a handoff summary, retires it,
 // and starts a fresh conversation whose first message carries the summary.
-// A summary already stored for this shift is reused rather than asked for
-// again. It stays pending until sent, so after a failed restart the
-// conversation revival starts still gets it.
-func (a *Agent) changeShift(ctx context.Context, now time.Time) {
-	day := shiftDay(now)
+// day names the summary: the shift day, or day and prompt version for a
+// change an upgrade forces. A summary already stored under that name is
+// reused rather than asked for again. It stays pending until sent, so after
+// a failed restart the conversation revival starts still gets it.
+func (a *Agent) changeShift(ctx context.Context, now time.Time, day string) {
 	path := a.handoffPath(day)
 	summary, err := os.ReadFile(path)
 	if err != nil {

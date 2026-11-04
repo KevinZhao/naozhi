@@ -231,12 +231,12 @@ func (r *Runner) checkReports(rep reply, statused map[string]string) {
 		var line string
 		switch {
 		case t.State == task.Doing && statused[key] == "":
-			line = key + "（" + t.Title + "）刚向你汇报，它在任务里仍是进行中；完成了就用 status 标 done，没完成用 doing 并说明原因"
+			line = key + "（" + t.Title + "）刚向你汇报，它在任务里仍是进行中；完成了就用 status 标 done，没完成用 doing 并说明原因（" + statusFormat(key) + "）"
 			if len(ids) > 0 {
-				line += "；相关的承诺 " + strings.Join(ids, "、") + " 也一并处理"
+				line += "；相关的承诺 " + strings.Join(ids, "、") + " 也一并处理，task 填承诺 ID"
 			}
 		case statused[key] == string(task.Done) && len(ids) > 0:
-			line = key + "（" + t.Title + "）刚向你汇报；相关的承诺 " + strings.Join(ids, "、") + " 还没完成，条件满足了就用 status 标 done"
+			line = key + "（" + t.Title + "）刚向你汇报；相关的承诺 " + strings.Join(ids, "、") + " 还没完成，条件满足了就用 status 标 done（" + statusFormat(ids[0]) + "）"
 		default:
 			continue
 		}
@@ -415,4 +415,10 @@ func requestID() string {
 	var b [6]byte
 	_, _ = rand.Read(b[:]) // never fails (crypto/rand)
 	return hex.EncodeToString(b[:])
+}
+
+// statusFormat spells out the status block for id, so a conversation started
+// on an older system prompt still writes it right.
+func statusFormat(id string) string {
+	return "格式：```naozhi-action\n{\"type\":\"status\",\"task\":\"" + id + "\",\"state\":\"done\",\"why\":\"…\"}\n```"
 }
