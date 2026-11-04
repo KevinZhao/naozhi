@@ -80,6 +80,7 @@ type Journal struct {
 	mu    sync.Mutex
 	f     *os.File // open month file, nil until the first Append
 	month string   // month f was opened for
+	obs   []func(Entry)
 }
 
 // Open creates dir (0700) and returns a Journal over it.
@@ -118,17 +119,38 @@ func (j *Journal) Append(e Entry) error {
 	line = append(line, '\n')
 	month := e.TS.In(j.loc).Format(monthLayout)
 
+	obs, err := j.write(line, month)
+	if err != nil {
+		return err
+	}
+	for _, fn := range obs {
+		fn(e)
+	}
+	return nil
+}
+
+// write appends line to month's file and returns the observers to tell.
+func (j *Journal) write(line []byte, month string) ([]func(Entry), error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.f == nil || j.month != month {
 		if err := j.openLocked(month); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if _, err := j.f.Write(line); err != nil {
-		return fmt.Errorf("journal: append: %w", err)
+		return nil, fmt.Errorf("journal: append: %w", err)
 	}
-	return nil
+	return j.obs, nil
+}
+
+// Observe registers fn for every entry appended from now on, as written.
+// fn runs on the appender's goroutine once the line is written; it must not
+// block.
+func (j *Journal) Observe(fn func(Entry)) {
+	j.mu.Lock()
+	j.obs = append(j.obs, fn)
+	j.mu.Unlock()
 }
 
 func (j *Journal) openLocked(month string) error {
