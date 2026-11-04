@@ -63,6 +63,11 @@ func TestAPIUnauthenticatedRejected(t *testing.T) {
 		if strings.HasPrefix(rt.Path, "/api/auth/") {
 			continue
 		}
+		// A preview page's reads carry the signed token in the path instead
+		// of dashboard auth; TestPreviewAsset (dashboard/project) covers it.
+		if rt.Method == http.MethodGet && strings.HasPrefix(rt.Path, "/api/preview/{token}/") {
+			continue
+		}
 		want++
 		method := rt.Method
 		if method == "" {

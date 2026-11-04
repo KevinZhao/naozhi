@@ -354,8 +354,8 @@ function triggerFileDownload(wrapEl) {
 
 // renderPreviewByMime renders the types that never go through the preview
 // JSON (SVG, images, PDF, HTML) straight from the raw / render endpoints, and
-// reports whether it did.
-function renderPreviewByMime(project, node, path, body, mime) {
+// reports whether it did. fresh (a follow refresh) bypasses the image cache.
+function renderPreviewByMime(project, node, path, body, mime, fresh) {
   // SVG must be checked BEFORE the generic image/ branch: image/svg+xml starts
   // with "image/" but cannot flow through <img src=...mode=raw>. The server
   // refuses inline SVG via raw (project_files.go: serveRaw rejects svg+xml)
@@ -369,7 +369,7 @@ function renderPreviewByMime(project, node, path, body, mime) {
   if (mime.startsWith('image/')) {
     body.innerHTML = '';
     const img = document.createElement('img');
-    img.src = fileApiUrl(project, node, path, 'raw');
+    img.src = fileApiUrl(project, node, path, 'raw') + (fresh ? '&t=' + Date.now() : '');
     img.alt = path;
     img.loading = 'lazy';
     body.appendChild(img);
@@ -389,11 +389,11 @@ function renderPreviewByMime(project, node, path, body, mime) {
     body.appendChild(frame);
     return true;
   }
-  // HTML / XHTML: render in a sandboxed iframe pointed at the server's inline
-  // render form; renderSandboxedBlob below lists the layers. Opened as a
-  // top-level page the same URL would run workspace HTML same-origin to the
-  // dashboard (stored XSS via the CLI's Write tool), which is why the server
-  // answers that form only inside an iframe.
+  // HTML / XHTML: render in a sandboxed iframe under its directory's preview
+  // link (or the server's inline render form); renderSandboxedBlob below
+  // lists the layers. Opened as a top-level page either URL would run
+  // workspace HTML same-origin to the dashboard (stored XSS via the CLI's
+  // Write tool), which is why the server answers both only inside a frame.
   if (mime.startsWith('text/html') || mime.startsWith('application/xhtml')) {
     renderSandboxedBlob(project, node, path, body, 'text/html');
     return true;
@@ -444,7 +444,10 @@ function renderPreviewText(project, node, path, body, data, line) {
   if (line) scrollToPreviewLine(body, parseInt(line, 10));
 }
 
-async function openFilePreview(wrapEl) {
+// openFilePreview shows wrapEl's file on the workbench's 预览 tab and follows
+// it; follow (a follow refresh) re-renders in place: no tab switch, no
+// loading placeholder, the scroll kept or, for a growing log, at its end.
+async function openFilePreview(wrapEl, follow) {
   const drawer = document.getElementById('fv-drawer');
   const body = document.getElementById('fv-body');
   const title = document.getElementById('fv-title');
@@ -460,6 +463,19 @@ async function openFilePreview(wrapEl) {
   const line = wrapEl.dataset.line || '';
   const mime = wrapEl.dataset.mime || '';
   const size = +wrapEl.dataset.size || 0;
+  if (follow) {
+    if (drawer.dataset.path !== path || drawer.dataset.project !== project || drawer.dataset.node !== node) return;
+    if (renderPreviewByMime(project, node, path, body, mime, true)) return;
+    try {
+      const r = await fetch(fileApiUrl(project, node, path, 'preview'), { cache: 'no-cache' });
+      if (!r.ok || drawer.dataset.path !== path) return;
+      const data = await r.json();
+      const keep = followScrollState(body, data.size);
+      renderPreviewText(project, node, path, body, data, '');
+      keep(path);
+    } catch (_) { /* keep what is shown */ }
+    return;
+  }
 
   // The preview is the workbench's 预览 tab.
   workbench.open('preview');
@@ -473,6 +489,9 @@ async function openFilePreview(wrapEl) {
   title.textContent = headerPath + (line ? ':' + line : '');
   meta.textContent = [mime, formatFileSize(size)].filter(Boolean).join(' \u00b7 ');
   body.innerHTML = '<div class="fv-loading">loading\u2026</div>';
+  resetFollowScroll(body);
+  const again = { dataset: { project, node, path, mime } };
+  followPreview('workbench', { root: project, node, path }, () => openFilePreview(again, true));
   if (renderPreviewByMime(project, node, path, body, mime)) return;
 
   // Text / unknown: go through preview endpoint which returns structured JSON.
@@ -483,14 +502,19 @@ async function openFilePreview(wrapEl) {
       body.innerHTML = '<div class="fv-error">' + (r.status === 501 ? REMOTE_FILES_UNSUPPORTED : 'preview failed (' + r.status + ')') + '</div>';
       return;
     }
-    renderPreviewText(project, node, path, body, await r.json(), line);
+    const data = await r.json();
+    followScrollState(body, data.size);
+    renderPreviewText(project, node, path, body, data, line);
   } catch (e) {
     body.innerHTML = '<div class="fv-error">' + esc(String(e && e.message || e)) + '</div>';
   }
 }
 
-// renderSandboxedBlob points a sandboxed iframe at the server's inline render
-// endpoint (mode=render&inline=1). The iframe document takes its CSP from that
+// renderSandboxedBlob points a sandboxed iframe at the server. HTML on this
+// node is framed under its directory's preview link (POST /api/preview →
+// /api/preview/<token>/<name>), so its relative CSS, JS and images load; a
+// remote node's HTML, an SVG, or a failed mint use the single-file inline
+// render (mode=render&inline=1). The iframe document takes its CSP from the
 // response, not from the dashboard page, whose script-src has no
 // 'unsafe-inline'. A document built client-side (a blob: URL or an inline
 // document) inherits the parent policy in current engines
@@ -498,29 +522,139 @@ async function openFilePreview(wrapEl) {
 // KaTeX / Mermaid would not run in one.
 //
 // Defense layers:
-//   (1) The inline form answers only requests stamped Sec-Fetch-Dest: iframe,
+//   (1) Both forms answer only frame and subresource requests (Sec-Fetch-Dest),
 //       so a direct URL hit gets 403 (Firefox ignores a CSP sandbox on
 //       top-level navigation); the plain render form is octet-stream +
 //       attachment.
 //   (2) The response carries `Content-Security-Policy: sandbox
-//       allow-scripts …`, an opaque origin however it is embedded.
+//       allow-scripts …`, an opaque origin however it is embedded; a
+//       preview link's policy admits scripts, styles and fetches from its
+//       own prefix only and lets only the dashboard frame it.
 //   (3) sandbox='allow-scripts' on the iframe withholds the same-origin
 //       token, so the document cannot read dashboard cookies, storage or
-//       DOM. Scripts stay on so math and diagram libraries render.
-//       TestDashboardJS_SandboxedPreviewViaEndpoint rejects client-side
-//       document construction in this file by substring, so comments here
-//       must not spell those APIs out.
-// The body param is the container element. blobType is unused (the server's
-// detected MIME drives parsing); the call sites still pass it.
+//       DOM, and its subresource requests carry no dashboard credentials
+//       (the preview link's token is theirs). Scripts stay on so math and
+//       diagram libraries render.
+// The body param is the container element; blobType is the document type
+// the call site expects (the server's detected MIME drives parsing).
 function renderSandboxedBlob(project, node, path, body, blobType) {
-  void blobType;
   body.innerHTML = '';
   const frame = document.createElement('iframe');
   frame.title = path;
   frame.setAttribute('sandbox', 'allow-scripts');
   frame.referrerPolicy = 'no-referrer';
-  frame.src = fileApiUrl(project, node, path, 'render') + '&inline=1';
   body.appendChild(frame);
+  const inline = fileApiUrl(project, node, path, 'render') + '&inline=1';
+  if (blobType !== 'text/html' || (node && node !== 'local')) { frame.src = inline; return; }
+  const req = (project && project.startsWith('session:')) ? { root: project, path } : { project, path };
+  fetchJSON(NZ_CONTRACT.API.preview, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req) })
+    .then((res) => { frame.src = (res && res.url) || inline; })
+    .catch(() => { frame.src = inline; });
+}
+
+/* ===== Follow refresh (跟随刷新) ======================================= */
+/* A preview showing a file the session is writing re-renders off the
+ * session's live events, never on a timer (docs/rfc/planner.md §10.2 ⑤): a
+ * Write / Edit event names its target (ev.path, relative to the session's
+ * file root). A Bash command writing a log names no path, so a log-like
+ * text (.log / .txt) under the session's tree is also refreshed on its other
+ * tool calls and at turn end. One refresh FOLLOW_MS after the first matching
+ * event, so a burst coalesces, and again on that session's later events up to
+ * its turn end (notePreviewEvent). Events are only read, never appended, so a
+ * refresh cannot pass for a new turn. */
+
+const FOLLOW_MS = 1000;
+// surface ('workbench' | 'files') → { ref: {root, node, path}, refresh, timer, armed }
+const _follows = new Map();
+
+// followPreview makes surface follow ref, re-rendering through refresh;
+// a null ref stops it.
+function followPreview(surface, ref, refresh) {
+  const cur = _follows.get(surface);
+  if (cur && cur.timer) clearTimeout(cur.timer);
+  if (!ref || !ref.path) { _follows.delete(surface); return; }
+  _follows.set(surface, { ref, refresh, timer: 0, armed: '' });
+}
+
+function isLogLike(path) { return /\.(log|txt)$/i.test(path || ''); }
+
+// projectFileAbs is the absolute path of a project-rooted ref, or ''.
+function projectFileAbs(ref) {
+  const p = (sessionList.projectsData || []).find((x) => x.name === ref.root && (x.node || 'local') === (ref.node || 'local'));
+  return p && p.path ? p.path.replace(/\/$/, '') + '/' + ref.path : '';
+}
+
+// previewHit reports whether ev, a live event of session key on node, may
+// have written the file ref shows. ev.path is relative to the session's file
+// root: its git tree root, which holds its workspace.
+function previewHit(key, node, ev, ref) {
+  if ((ref.node || 'local') !== (node || 'local')) return false;
+  const own = ref.root === 'session:' + key;
+  const sd = sessionList.sessionsData[sid(key, node || 'local')];
+  const ws = sd && sd.workspace ? sd.workspace.replace(/\/$/, '') : '';
+  const abs = own ? '' : projectFileAbs(ref);
+  if (ev.type === 'tool_use' && ev.path) {
+    if (own) return ev.path === ref.path;
+    if (!abs || !ws || !abs.endsWith('/' + ev.path)) return false;
+    const tree = abs.slice(0, abs.length - ev.path.length - 1);
+    return ws === tree || ws.startsWith(tree + '/');
+  }
+  if (!isLogLike(ref.path) || (ev.type !== 'tool_use' && ev.type !== 'result')) return false;
+  return own || (!!abs && !!ws && abs.startsWith(ws + '/'));
+}
+
+// notePreviewEvent takes a live event of session key on node. A tool_use
+// is sent before its call runs, and a call queued behind a slow one lands
+// long after FOLLOW_MS, so a hit also arms the follow for that session:
+// its later events refresh again (at most one per FOLLOW_MS) and its turn
+// end refreshes a last time and disarms.
+function notePreviewEvent(key, node, ev) {
+  if (!key || !ev) return;
+  const who = (node || 'local') + '\n' + key;
+  for (const [surface, f] of _follows) {
+    if (previewHit(key, node, ev, f.ref)) f.armed = who;
+    else if (f.armed !== who) continue;
+    if (ev.type === 'result') f.armed = '';
+    if (f.timer) continue;
+    f.timer = setTimeout(() => {
+      f.timer = 0;
+      if (_follows.get(surface) === f) f.refresh();
+    }, FOLLOW_MS);
+  }
+}
+
+// Scroll of a followed preview: body._nzMoved marks a user scroll away from
+// the end since the last render, body._nzTop where the last render left it
+// (so its own scroll events are not taken for the user's), body._nzSize the
+// size it rendered (-1 before the first).
+function trackFollowScroll(body) {
+  if (body._nzTrack) return;
+  body._nzTrack = true;
+  body.addEventListener('scroll', () => {
+    if (Math.abs(body.scrollTop - (body._nzTop || 0)) <= 2) return;
+    body._nzMoved = body.scrollTop + body.clientHeight < body.scrollHeight - 24;
+  }, { passive: true });
+}
+
+function resetFollowScroll(body) {
+  trackFollowScroll(body);
+  body._nzMoved = false;
+  body._nzTop = 0;
+  body._nzSize = -1;
+}
+
+// followScrollState notes a render of a file now size bytes long and returns
+// what to call after it: a log-like file that grew lands at its end unless
+// the user scrolled up from there; anything else keeps its place.
+function followScrollState(body, size) {
+  trackFollowScroll(body);
+  const top = body.scrollTop;
+  const grew = body._nzSize >= 0 && size > body._nzSize;
+  body._nzSize = size;
+  return (path) => {
+    body.scrollTop = (isLogLike(path) && grew && !body._nzMoved) ? body.scrollHeight : top;
+    body._nzTop = body.scrollTop;
+  };
 }
 
 function scrollToPreviewLine(body, line) {
@@ -556,6 +690,7 @@ nzBus.addEventListener('workbench:close', () => {
   delete drawer.dataset.snippetName;
   delete drawer.dataset.path;
   _pendingSnippet = null;
+  followPreview('workbench', null);
   const body = document.getElementById('fv-body');
   if (body) body.innerHTML = '';
   const title = document.getElementById('fv-title');
@@ -689,10 +824,14 @@ function processEventsForDisplay(events) {
 export {
   closeFilePreview,
   fileApiUrl,
+  followPreview,
+  followScrollState,
+  notePreviewEvent,
   openFilePreview,
   processEventsForDisplay,
   regroupAvatars,
   renderSandboxedBlob,
+  resetFollowScroll,
   resolveProjectForAbsPath,
   startFileRefObserver,
 };

@@ -24,5 +24,9 @@ func (h *Handlers) Routes() []httputil.Route {
 		// upload is the only write in the file API.
 		{Pattern: "GET /api/projects/files/list", Handler: h.HandleFilesList},
 		{Pattern: "POST /api/projects/files/upload", Handler: h.HandleFilesUpload},
+		// Mints a directory-level HTML preview's token; the token's reads
+		// (GET /api/preview/{token}/...) are mounted by the server outside
+		// this chain (files_preview.go).
+		{Pattern: "POST /api/preview", Handler: h.HandlePreviewLink},
 	}
 }

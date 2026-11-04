@@ -18,7 +18,7 @@ import { NZ_CONTRACT } from './contract.js';
 import { selection, sessionList } from './state.js';
 import { REMOTE_FILES_UNSUPPORTED, nodeServesFiles, sid } from './session_ident.js';
 import { esc, escAttr, showToast, fetchJSON, nzViews } from './nz_util.js';
-import { fileApiUrl, renderSandboxedBlob } from './file_refs.js';
+import { fileApiUrl, followPreview, followScrollState, renderSandboxedBlob, resetFollowScroll } from './file_refs.js';
 import { crumbsHtml, fileRowsHtml, isPreviewableOutput, outputRowsHtml } from './file_rows.js';
 import { previewRef } from './workbench_panes.js';
 import { renderRich, runPendingAsync } from './render_md.js';
@@ -333,17 +333,24 @@ import { renderRich, runPendingAsync } from './render_md.js';
   }
 
   // previewAt previews rel under root (a project name or a session: root)
-  // on node.
-  function previewAt(root, rel, name, node) {
-    state.previewRoot = root; state.previewRel = rel; state.previewName = name; state.previewNode = node;
-    state.md = null;
-    $('files-md-toggle').hidden = true;
-    document.body.classList.add('files-reading');
-    $('files-main-head').hidden = false;
-    $('files-main-title').textContent = name;
-    $('files-main-sub').textContent = rel;
+  // on node and follows it (file_refs.js); follow (a follow refresh)
+  // re-renders in place, keeping the scroll or, for a growing log, its end.
+  function previewAt(root, rel, name, node, follow) {
     var body = $('files-main-body');
-    body.innerHTML = '<div class="files-empty">加载中…</div>';
+    if (follow) {
+      if (state.previewRel !== rel || state.previewRoot !== root || state.previewNode !== node || !document.body.classList.contains('files-reading')) return;
+    } else {
+      state.previewRoot = root; state.previewRel = rel; state.previewName = name; state.previewNode = node;
+      state.md = null;
+      $('files-md-toggle').hidden = true;
+      document.body.classList.add('files-reading');
+      $('files-main-head').hidden = false;
+      $('files-main-title').textContent = name;
+      $('files-main-sub').textContent = rel;
+      body.innerHTML = '<div class="files-empty">加载中…</div>';
+      resetFollowScroll(body);
+      followPreview('files', { root: root, node: node, path: rel }, function () { previewAt(root, rel, name, node, true); });
+    }
 
     // Decide render mode by extension; the server re-validates and pins MIME.
     var ext = (name.split('.').pop() || '').toLowerCase();
@@ -356,7 +363,7 @@ import { renderRich, runPendingAsync } from './render_md.js';
     if (imgExt[ext]) {
       body.innerHTML = '';
       var img = document.createElement('img');
-      img.src = fileApiUrl(root, node, rel, 'raw');
+      img.src = fileApiUrl(root, node, rel, 'raw') + (follow ? '&t=' + Date.now() : '');
       img.alt = name; img.loading = 'lazy';
       body.appendChild(img);
       return;
@@ -381,8 +388,9 @@ import { renderRich, runPendingAsync } from './render_md.js';
       renderSandboxedBlob(root, node, rel, body, 'text/html');
       return;
     }
-    // Text / unknown → preview JSON {content, truncated, size, mime}.
-    fetchJSON(fileApiUrl(root, node, rel, 'preview')).then(function (res) {
+    // Text / unknown → preview JSON {content, truncated, size, mime}. A
+    // follow refresh revalidates past the response's max-age.
+    fetchJSON(fileApiUrl(root, node, rel, 'preview'), follow ? { cache: 'no-cache' } : {}).then(function (res) {
       // A slower fetch for a file the operator already left must not paint.
       if (state.previewRel !== rel || state.previewRoot !== root || state.previewNode !== node) return;
       // Server shape for non-text files is {content:"", binary:true}.
@@ -390,15 +398,18 @@ import { renderRich, runPendingAsync } from './render_md.js';
         body.innerHTML = '<div class="files-empty">该文件不可预览，请下载查看。</div>';
         return;
       }
+      var keep = followScrollState(body, (res && res.size) || 0);
       var note = (res && res.truncated) ? '<div class="files-note">文件过大，仅显示前一部分。</div>' : '';
       if (ext === 'md' || ext === 'markdown') {
-        state.md = { content: (res && res.content) || '', note: note, raw: false };
+        state.md = { content: (res && res.content) || '', note: note, raw: !!(follow && state.md && state.md.raw) };
         $('files-md-toggle').hidden = false;
         renderMarkdown();
-        return;
+      } else {
+        body.innerHTML = note + '<pre class="files-raw">' + esc((res && res.content) || '') + '</pre>';
       }
-      body.innerHTML = note + '<pre class="files-raw">' + esc((res && res.content) || '') + '</pre>';
+      if (follow) keep(rel);
     }).catch(function (e) {
+      if (follow) return; // keep what is shown
       body.innerHTML = '<div class="files-empty">' + (e.status === 501 ? REMOTE_FILES_UNSUPPORTED : '不可预览（' + esc(e.message) + '），可尝试下载。') + '</div>';
     });
   }
@@ -483,6 +494,7 @@ import { renderRich, runPendingAsync } from './render_md.js';
 
   function backToList() {
     document.body.classList.remove('files-reading');
+    followPreview('files', null);
   }
 
   // ---- wiring ----
@@ -561,6 +573,7 @@ import { renderRich, runPendingAsync } from './render_md.js';
   function hide() {
     document.body.classList.remove('nz-view-files');
     document.body.classList.remove('files-reading');
+    followPreview('files', null);
   }
 
   nzViews.files = { show: show, hide: hide };

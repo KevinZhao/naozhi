@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/project"
@@ -60,6 +61,8 @@ type Handlers struct {
 	// uploadQuota bounds cumulative upload bytes per project within this
 	// process (#2311). Nil disables enforcement (single-operator model / tests).
 	uploadQuota *uploadQuota
+	// now is the preview tokens' clock; nil is time.Now (tests set it).
+	now func() time.Time
 }
 
 // Deps bundles all wiring for New so internal/server can construct Handlers
@@ -77,6 +80,9 @@ type Deps struct {
 	// ValidateWS disables session roots.
 	AllowedRoot string
 	ValidateWS  func(ws, root string) (string, error)
+	// TrustedProxy takes the request host from X-Forwarded-Host, as the
+	// same-origin gate does, for the preview CSP's source.
+	TrustedProxy bool
 }
 
 // New constructs a Handlers from injected deps.
