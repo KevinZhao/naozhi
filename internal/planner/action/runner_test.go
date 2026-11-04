@@ -25,6 +25,7 @@ type fakeGateway struct {
 	spawnErr error
 	notes    []string
 	told     []string
+	unrun    []string
 	refused  []string
 	sideDir  string
 }
@@ -56,6 +57,7 @@ func newRunner(t *testing.T) (*Runner, *fakeGateway, *notify.Notifier, *sidecar.
 		Note:        func(text string) { g.notes = append(g.notes, text) },
 		Tell:        func(text string) error { g.told = append(g.told, text); return nil },
 		TellRefused: func(text string) error { g.refused = append(g.refused, text); return nil },
+		TellUnrun:   func(text string) error { g.unrun = append(g.unrun, text); return nil },
 	})
 	return r, g, inbox, side, dir
 }
@@ -156,13 +158,13 @@ func TestAskAndRefused(t *testing.T) {
 	if len(g.notes) != 1 || !strings.Contains(g.notes[0], "格式不对") || !strings.Contains(g.notes[0], `{"type":"halt"}`) {
 		t.Errorf("notes = %q", g.notes)
 	}
-	if len(g.told) != 1 || !strings.Contains(g.told[0], "第 2 块（halt）：未知类型") {
-		t.Errorf("told = %q, want the receipt of the refused block", g.told)
+	if len(g.unrun) != 1 || !strings.Contains(g.unrun[0], "第 2 块（halt）：未知类型") {
+		t.Errorf("unrun = %q, want the receipt of the refused block", g.unrun)
 	}
 	if err := inbox.Decide(it.ID, "不发"); err != nil {
 		t.Fatal(err)
 	}
-	if len(g.told) != 2 || !strings.Contains(g.told[1], "今天发版吗？") || !strings.HasSuffix(g.told[1], "不发") {
+	if len(g.told) != 1 || !strings.Contains(g.told[0], "今天发版吗？") || !strings.HasSuffix(g.told[0], "不发") {
 		t.Errorf("told = %q", g.told)
 	}
 }
@@ -215,8 +217,8 @@ func TestNotify(t *testing.T) {
 			t.Errorf("step %d: %d pushes, want %d", i, len(pushes), st.pushed)
 		}
 	}
-	if len(g.told) != 0 {
-		t.Errorf("told = %q, want none", g.told)
+	if len(g.told)+len(g.unrun) != 0 {
+		t.Errorf("told = %q, unrun = %q, want none", g.told, g.unrun)
 	}
 	_, closed := inbox.List(10)
 	if len(closed) != 1 {
@@ -243,41 +245,51 @@ func (browserFunc) InboxCount(c notify.Counts) {}
 
 // Every block a reply did not run (past the cap, malformed, refused for
 // what it names, or refused in an outside turn) is named in one receipt
-// with what to do about it, while the rest run; the reply right after a
-// receipt is not told of its own, so the two do not go round.
+// with what to do about it, while the rest run. Only the turn answering
+// such a receipt, judged by its source, is not told of its own, so the two
+// do not go round; a turn queued ahead of the receipt still is.
 func TestUnrunReceipt(t *testing.T) {
 	r, g, inbox, _, _ := newRunner(t)
 	ask := block(`{"type":"ask","question":"q","options":[]}`)
+	bad := block(`{"type":"notify","title":"t","level":"soon"}`)
 	steps := []struct {
-		reply string
-		want  []string // substrings of the one receipt; nil for none
+		reply     string
+		unrunTurn bool     // the turn answers a receipt of blocks not run
+		want      []string // substrings of the one receipt; nil for none
 	}{
 		{reply: strings.Repeat(ask+"\n", 12), want: []string{"有 2 个动作块没有执行", "- 第 11 块（ask「q」）：一次回复最多 10 个动作块", "- 第 12 块", "在下一条回复里重发（一次最多 10 个）"}},
-		// The receipt's own turn gets it wrong again: shown, not told.
-		{reply: block(`{"type":"notify","title":"t","level":"soon"}`)},
-		{reply: ask + "\n" + block(`{"type":"notify","title":"t","level":"soon"}`) + "\n" + block(`{"type":"status","task":"task:nope","state":"done","why":"w"}`),
+		// A message the user sent mid-turn runs ahead of the receipt: told.
+		{reply: bad, want: []string{"有 1 个动作块没有执行", "- 第 1 块（notify「t」）：level 只能是"}},
+		// The receipts' own turns get it wrong again: shown, not told.
+		{reply: bad, unrunTurn: true},
+		{reply: bad, unrunTurn: true},
+		{reply: ask + "\n" + bad + "\n" + block(`{"type":"status","task":"task:nope","state":"done","why":"w"}`),
 			want: []string{"有 2 个动作块没有执行", "- 第 2 块（notify「t」）：level 只能是", "- 第 3 块（status「task:nope」）：", "按系统提示词里的格式改正后重发"}},
 		{reply: ask},
 	}
 	r.cfg.Tasks = task.New(task.Config{})
 	for i, st := range steps {
-		g.told = nil
+		g.unrun, g.notes = nil, nil
+		r.cfg.UnrunTurn = func() bool { return st.unrunTurn }
 		r.Result(r.cfg.Planner, st.reply)
 		r.handle(<-r.ch)
 		if st.want == nil {
-			if len(g.told) != 0 {
-				t.Errorf("step %d: told = %q, want none", i, g.told)
+			if len(g.unrun) != 0 || (st.unrunTurn && len(g.notes) == 0) {
+				t.Errorf("step %d: unrun = %q, notes = %q, want none told, the block shown", i, g.unrun, g.notes)
 			}
 			continue
 		}
-		if len(g.told) != 1 {
-			t.Fatalf("step %d: told = %q, want one receipt", i, g.told)
+		if len(g.unrun) != 1 {
+			t.Fatalf("step %d: unrun = %q, want one receipt", i, g.unrun)
 		}
 		for _, w := range st.want {
-			if !strings.Contains(g.told[0], w) {
-				t.Errorf("step %d: receipt %q, want %q in it", i, g.told[0], w)
+			if !strings.Contains(g.unrun[0], w) {
+				t.Errorf("step %d: receipt %q, want %q in it", i, g.unrun[0], w)
 			}
 		}
+	}
+	if len(g.told) != 0 {
+		t.Errorf("told = %q, want the receipts through TellUnrun only", g.told)
 	}
 	if open, _ := inbox.List(0); len(open) != 10+1+1 {
 		t.Errorf("%d questions open, want the blocks within the cap", len(open))
@@ -399,9 +411,9 @@ func TestStatusFormatParses(t *testing.T) {
 // A turn outside content brought in (a scout run, a pre-meeting brief, the
 // receipt of a refusal in one) runs only its notify, promise and ask blocks: a
 // dispatch or status block is refused with a line in the conversation,
-// judged by the turn's source as its result arrives, and the Planner gets
-// one refusal receipt for a run of such turns, so a receipt's turn refused
-// again does not go round.
+// judged by the turn's source as its result arrives, and the Planner gets a
+// refusal receipt, but not for the receipt's own turn, so the two do not go
+// round.
 func TestOutsideTurnRefuses(t *testing.T) {
 	r, g, inbox, _, dir := newRunner(t)
 	dispatch := block(`{"type":"dispatch","workspace":"` + filepath.Base(dir) + `","title":"iso 写 hello","model":"","message":"写一个 hello.md"}`)
@@ -422,13 +434,14 @@ func TestOutsideTurnRefuses(t *testing.T) {
 		{outside: "巡检", reply: dispatch + "\n" + status + "\n" + ask + "\n" + tell, notes: []string{noDispatch, noStatus, "已提醒你：有人等你回复"}, receipt: true},
 		// The receipt's own turn dispatches again: refused, not told again.
 		{outside: "被拒动作的回执", reply: dispatch, notes: []string{noDispatch}},
-		// A turn of the user's own dispatches, and ends the run.
+		// A turn of the user's own dispatches.
 		{reply: dispatch, spawned: true},
 		{outside: "会前简报", reply: dispatch, notes: []string{noDispatch}, receipt: true},
 	}
 	for i, st := range steps {
 		g.spawned, g.notes, g.refused = nil, nil, nil
 		r.cfg.Outside = func() string { return st.outside }
+		r.cfg.UnrunTurn = func() bool { return st.outside == "被拒动作的回执" }
 		r.Result(r.cfg.Planner, st.reply)
 		r.handle(<-r.ch)
 		if got := len(g.spawned) == 1; got != st.spawned {

@@ -93,6 +93,13 @@ type Config struct {
 	// a turn held to the same limits (agent.Agent.TellRefused); nil sends
 	// none.
 	TellRefused func(text string) error
+	// TellUnrun sends the receipt of the blocks not run in any other turn
+	// (agent.Agent.TellUnrun); nil sends none.
+	TellUnrun func(text string) error
+	// UnrunTurn reports whether the Planner turn in flight answers a receipt
+	// of blocks not run (agent.Agent.UnrunTurn): its own blocks not run get
+	// none, so the two do not go round. nil reports none.
+	UnrunTurn func() bool
 	// Ctx bounds dispatches' spawns; nil is Background.
 	Ctx context.Context
 	// Now is the wall clock; nil is time.Now.
@@ -113,19 +120,16 @@ type Runner struct {
 	// doneTold is the tasks whose done block got the reminder of the
 	// promises citing them; only the handling goroutine touches it.
 	doneTold map[string]bool
-	// unrunTold is set when the last reply's blocks not run got the Planner
-	// a receipt: the next reply, most likely the receipt's own, is not told
-	// of its own again, or the two would go round. Only the handling
-	// goroutine touches it.
-	unrunTold bool
 }
 
 // reply is one Planner turn's result text and the span its turn ran in.
-// outside names what brought outside content into the turn, "" for nothing.
+// outside names what brought outside content into the turn, "" for nothing;
+// unrunTurn is set when the turn answers a receipt of blocks not run.
 type reply struct {
-	text     string
-	from, to time.Time
-	outside  string
+	text      string
+	from, to  time.Time
+	outside   string
+	unrunTurn bool
 }
 
 type askCard struct {
@@ -163,12 +167,15 @@ func (r *Runner) Result(key, text string) {
 		return
 	}
 	// Read now: the turn is still in flight while its result arrives.
-	outside := ""
+	outside, unrunTurn := "", false
 	if r.cfg.Outside != nil {
 		outside = r.cfg.Outside()
 	}
+	if r.cfg.UnrunTurn != nil {
+		unrunTurn = r.cfg.UnrunTurn()
+	}
 	r.mu.Lock()
-	rep := reply{text: text, from: r.last, to: r.cfg.Now(), outside: outside}
+	rep := reply{text: text, from: r.last, to: r.cfg.Now(), outside: outside, unrunTurn: unrunTurn}
 	r.last = rep.to
 	r.mu.Unlock()
 	if r.cfg.Reports == nil && !strings.Contains(text, Fence) {
@@ -243,7 +250,7 @@ func (r *Runner) handle(rep reply) {
 			un.add(i, b, err.Error())
 		}
 	}
-	r.tellUnrun(rep.outside, un)
+	r.tellUnrun(rep, un)
 	r.checkReports(rep, statused)
 }
 
@@ -440,21 +447,22 @@ func (r *Runner) refuseOutside(b Block, by string) string {
 
 // tellUnrun sends the Planner one receipt naming each block of the reply
 // that was not run, why, and what to do about it; an outside turn's goes
-// through TellRefused, held to the same limits. A reply right after one
-// that got such a receipt gets none (unrunTold).
-func (r *Runner) tellUnrun(by string, u unrun) {
-	if len(u.lines) == 0 || r.unrunTold {
-		r.unrunTold = false
+// through TellRefused, held to the same limits. The turn answering such a
+// receipt gets none of its own (the blocks still show in the conversation),
+// judged by its source, so a turn queued ahead of the receipt still gets
+// its own.
+func (r *Runner) tellUnrun(rep reply, u unrun) {
+	if len(u.lines) == 0 || rep.unrunTurn {
 		return
 	}
-	send := r.cfg.Tell
+	by := rep.outside
+	send := r.cfg.TellUnrun
 	if by != "" {
 		send = r.cfg.TellRefused
 	}
 	if send == nil {
 		return
 	}
-	r.unrunTold = true
 	var b strings.Builder
 	fmt.Fprintf(&b, "你上一条回复里有 %d 个动作块没有执行，其余的照常执行了：\n", len(u.lines))
 	for _, l := range u.lines {

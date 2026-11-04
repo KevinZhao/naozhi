@@ -634,6 +634,8 @@ func main() {
 		Reports:     wireup.PlannerReports(router),
 		Outside:     plannerAgent.OutsideTurn,
 		TellRefused: plannerAgent.TellRefused,
+		TellUnrun:   plannerAgent.TellUnrun,
+		UnrunTurn:   plannerAgent.UnrunTurn,
 		Ctx:         ctx,
 	})
 	// The result is judged by the turn's sources before the ledger lets go
