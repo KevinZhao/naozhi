@@ -288,3 +288,32 @@ test('phone: input box, an opened session card and 交给 Planner fit', async ({
     mock.server.close();
   }
 });
+
+// A denied tool call carries the CLI's whole explanation (hundreds of
+// characters); the centered row wraps inside the column instead of running
+// off both edges of it.
+for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['phone', { width: 390, height: 844 }]]) {
+  test(`${name}: a long permission denial wraps inside the Planner column`, async ({ browser }) => {
+    const ctx = await browser.newContext({ viewport });
+    const page = await ctx.newPage();
+    const denied = { type: 'permission_denied', tool: 'Read', detail: 'Permission to use Read has been denied because Claude Code is running in don\'t ask mode. '.repeat(8), time: now - 60000, uuid: 'pc-d1' };
+    const mock = await startMockServer({
+      ws: true, plannerEvents: [denied], tasks: { tasks: [] }, inbox: { open: [], closed: [], counts: { open: 0, badge: 0 } }, systemHealth: health(),
+      planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
+    });
+    try {
+      await page.goto(mock.url + '/dashboard');
+      await waitForWs(page, 'CONNECTED');
+      await page.click('#abnav-planner');
+      const row = page.locator('#pl-stream .event.permission_denied .event-content');
+      await expect(row).toContainText('权限拒绝');
+      const [r, col] = await Promise.all([row.boundingBox(), page.locator('#pl-stream').boundingBox()]);
+      expect(r.x).toBeGreaterThanOrEqual(col.x);
+      expect(r.x + r.width).toBeLessThanOrEqual(col.x + col.width + 1);
+      await page.screenshot({ path: test.info().outputPath(`planner-denied-${name}.png`) });
+    } finally {
+      await ctx.close();
+      mock.server.close();
+    }
+  });
+}
