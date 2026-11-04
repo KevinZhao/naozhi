@@ -255,6 +255,9 @@ function defaultGitStates() {
  *   POST /api/inbox/close drops the item from open, /decide moves it to closed with its answer,
  *   PUT / DELETE /api/inbox/pause set
  *   paused_until. Every write lands in inboxCalls. Unset, the routes 404.
+ * @param {object} [overrides.tasks] - GET /api/tasks body ({tasks}, task.Task wire shape); POST
+ *   /api/tasks/state sets the task's state as the user's and lands in tasksCalls. Unset, the
+ *   routes 404.
  * @param {object} [overrides.planner] - GET /api/planner body ({enabled, stopped, key, alive});
  *   POST /api/planner/state sets `stopped` and lands in plannerStateCalls. Unset, the routes 404.
  * @param {object[]} [overrides.plannerEvents] - GET /api/sessions/events answer for key=planner:main
@@ -321,6 +324,7 @@ function startMockServer(overrides = {}) {
   const outputsCalls = [];
   const inboxData = overrides.inbox || null;
   const inboxCalls = [];
+  const tasksCalls = [];
   const plannerData = overrides.planner || null;
   const plannerStateCalls = [];
   const plannerEvents = overrides.plannerEvents || null;
@@ -960,30 +964,25 @@ function startMockServer(overrides = {}) {
       return;
     }
 
-    // GET /api/promises and POST /api/promises/close: opt-in via
-    // overrides.promises ({open, closed}); a close moves the promise from
-    // open to closed in place, so the test's object shows it.
-    if (pathname === NZ_CONTRACT.API.promises && req.method === 'GET' && overrides.promises) {
+    // GET /api/tasks and POST /api/tasks/state: opt-in via overrides.tasks
+    // ({tasks}); a state change sets the task's state, by and at in place,
+    // so the test's object shows it, and lands in tasksCalls.
+    if (pathname === NZ_CONTRACT.API.tasks && req.method === 'GET' && overrides.tasks) {
       if (!checkAuth()) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(overrides.promises));
+      res.end(JSON.stringify(overrides.tasks));
       return;
     }
-    if (pathname === NZ_CONTRACT.API.promises_close && req.method === 'POST' && overrides.promises) {
+    if (pathname === NZ_CONTRACT.API.tasks_state && req.method === 'POST' && overrides.tasks) {
       if (!checkAuth()) return;
       let body = '';
       req.on('data', c => (body += c));
       req.on('end', () => {
-        const { id } = JSON.parse(body || '{}');
-        const pm = overrides.promises;
-        const i = pm.open.findIndex(p => p.id === id);
-        if (i < 0) {
-          res.writeHead(pm.closed.some(p => p.id === id) ? 409 : 404);
-          res.end();
-          return;
-        }
-        const [p] = pm.open.splice(i, 1);
-        pm.closed.unshift({ ...p, state: 'closed', closed_at: new Date().toISOString() });
+        const req2 = JSON.parse(body || '{}');
+        tasksCalls.push(req2);
+        const t = overrides.tasks.tasks.find(x => x.id === req2.id);
+        if (!t) { res.writeHead(404); res.end(); return; }
+        Object.assign(t, { state: req2.state, by: 'user', why: '', at: new Date().toISOString() });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ok' }));
       });
@@ -1106,6 +1105,7 @@ function startMockServer(overrides = {}) {
         get workflowCalls() { return workflowCalls; },
         get outputsCalls() { return outputsCalls; },
         get inboxCalls() { return inboxCalls; },
+        get tasksCalls() { return tasksCalls; },
         get plannerStateCalls() { return plannerStateCalls; },
         get plannerSendCalls() { return plannerSendCalls; },
         resetCalls() { sendCalls = []; bindCalls = []; loginCalls = []; favoriteCalls = []; },

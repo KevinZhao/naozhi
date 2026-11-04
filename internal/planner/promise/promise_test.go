@@ -51,24 +51,23 @@ func mustAdd(t *testing.T, s *Store, p Promise) Promise {
 
 func TestDueReminder(t *testing.T) {
 	s, clock, r := newTest(t, "")
-	mustAdd(t, s, Promise{Text: "later", Due: t0.Add(2 * time.Hour)})
-	mustAdd(t, s, Promise{Text: "soon", Due: t0.Add(10 * time.Minute)})
+	mustAdd(t, s, Promise{Text: "later", Due: t0.Add(2 * time.Hour), CloseWhen: "压测跑完"})
+	mustAdd(t, s, Promise{Text: "soon", Due: t0.Add(10 * time.Minute), CloseWhen: "你看过 CI"})
 	mustAdd(t, s, Promise{Text: "undated", CloseWhen: "CI 绿了"})
 	closed := mustAdd(t, s, Promise{Text: "closed first", Due: t0.Add(5 * time.Minute)})
-	if err := s.Close(closed.ID, SourceUser); err != nil {
+	if err := s.Close(closed.ID, SourceUser, ""); err != nil {
 		t.Fatal(err)
 	}
 
 	steps := []struct {
 		advance time.Duration
 		due     []string // reminders so far
-		overdue []string
 	}{
-		{0, nil, nil},
-		{9 * time.Minute, nil, nil},
-		{time.Minute, []string{"soon"}, nil},              // due exactly now
-		{time.Minute, []string{"soon"}, []string{"soon"}}, // once only
-		{2 * time.Hour, []string{"soon", "later"}, []string{"soon", "later"}},
+		{0, nil},
+		{9 * time.Minute, nil},
+		{time.Minute, []string{"soon"}}, // due exactly now
+		{time.Minute, []string{"soon"}}, // once only
+		{2 * time.Hour, []string{"soon", "later"}},
 	}
 	for i, st := range steps {
 		clock.advance(st.advance)
@@ -76,28 +75,52 @@ func TestDueReminder(t *testing.T) {
 		if !slices.Equal(r.due, st.due) {
 			t.Errorf("step %d: reminded %q, want %q", i, r.due, st.due)
 		}
-		var overdue []string
-		for _, p := range s.Overdue(clock.Now()) {
-			overdue = append(overdue, p.Text)
-		}
-		if !slices.Equal(overdue, st.overdue) {
-			t.Errorf("step %d: overdue %q, want %q", i, overdue, st.overdue)
-		}
 	}
 	open, _ := s.List(10)
 	var order []string
 	for _, p := range open {
 		order = append(order, p.Text)
-		if p.State != StateOpen {
-			t.Errorf("%q closed by its reminder", p.Text)
-		}
 	}
 	if want := []string{"soon", "later", "undated"}; !slices.Equal(order, want) {
-		t.Errorf("open order %q, want %q (due first, undated last)", order, want)
+		t.Errorf("open order %q, want %q (due first, undated last; a condition keeps them open)", order, want)
 	}
 }
 
-func TestOnlyUserCloses(t *testing.T) {
+// A pure reminder (a due time, no condition beyond reminding) is done once
+// it reminded, by the gateway, and keeps the reminder's inbox item: the
+// reminder is told of no close.
+func TestReminderOnlyAutoCloses(t *testing.T) {
+	cases := []struct {
+		closeWhen string
+		due       bool
+		done      bool
+	}{
+		{"", true, true},
+		{"已提醒", true, true},
+		{"提醒即可。", true, true},
+		{"你看过 CI", true, false},
+		{"", false, false}, // no due: nothing reminds it
+	}
+	for _, c := range cases {
+		s, clock, r := newTest(t, "")
+		p := Promise{Text: "提醒", CloseWhen: c.closeWhen}
+		if c.due {
+			p.Due = t0.Add(time.Minute)
+		}
+		p = mustAdd(t, s, p)
+		clock.advance(time.Minute)
+		s.Check()
+		got, _ := s.Get(p.ID)
+		if done := got.State == StateClosed; done != c.done {
+			t.Errorf("close_when %q due %v: done = %v, want %v", c.closeWhen, c.due, done, c.done)
+		}
+		if c.done && (got.ClosedBy != SourceAuto || got.ClosedAt.IsZero() || len(r.closed) != 0) {
+			t.Errorf("close_when %q: closed %+v, reminder told of closes %q", c.closeWhen, got, r.closed)
+		}
+	}
+}
+
+func TestCloseAndReopen(t *testing.T) {
 	s, _, r := newTest(t, "")
 	p := mustAdd(t, s, Promise{Text: "周五前整理好", Due: t0.Add(time.Hour)})
 	cases := []struct {
@@ -106,33 +129,42 @@ func TestOnlyUserCloses(t *testing.T) {
 		by   Source
 		want error
 	}{
-		{"planner refused", p.ID, SourcePlanner, ErrUserOnly},
-		{"empty closer refused", p.ID, "", ErrUserOnly},
+		{"auto refused", p.ID, SourceAuto, ErrInvalid},
+		{"empty closer refused", p.ID, "", ErrInvalid},
 		{"unknown id", "pr_nope", SourceUser, ErrNotFound},
-		{"user closes", p.ID, SourceUser, nil},
+		{"planner closes", p.ID, SourcePlanner, nil},
 		{"closed twice", p.ID, SourceUser, ErrClosed},
 	}
 	for _, c := range cases {
-		if err := s.Close(c.id, c.by); !errors.Is(err, c.want) {
+		if err := s.Close(c.id, c.by, "整理好了"); !errors.Is(err, c.want) {
 			t.Errorf("%s: Close = %v, want %v", c.name, err, c.want)
 		}
 	}
 	open, closed := s.List(10)
-	if len(open) != 0 || len(closed) != 1 || closed[0].ClosedAt.IsZero() {
+	if len(open) != 0 || len(closed) != 1 || closed[0].ClosedAt.IsZero() || closed[0].ClosedBy != SourcePlanner || closed[0].Why != "整理好了" {
 		t.Errorf("after close: open %d, closed %+v", len(open), closed)
 	}
 	if !slices.Equal(r.closed, []string{"周五前整理好"}) {
 		t.Errorf("reminder told of closes %q, want the one", r.closed)
+	}
+	if err := s.Reopen(p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Get(p.ID); got.State != StateOpen || !got.ClosedAt.IsZero() || got.ClosedBy != "" || got.Why != "" {
+		t.Errorf("reopened %+v", got)
+	}
+	if err := s.Reopen("pr_nope"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Reopen(unknown) = %v", err)
 	}
 }
 
 func TestPersisted(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "promises.json")
 	s, clock, r := newTest(t, path)
-	due := mustAdd(t, s, Promise{Text: "明早提醒你", Due: t0.Add(time.Minute), Source: SourceUser})
+	due := mustAdd(t, s, Promise{Text: "明早提醒你", Due: t0.Add(time.Minute), CloseWhen: "你看过", Source: SourceUser})
 	mustAdd(t, s, Promise{Text: "CI 绿了告诉你", CloseWhen: "master CI 绿"})
 	gone := mustAdd(t, s, Promise{Text: "done"})
-	if err := s.Close(gone.ID, SourceUser); err != nil {
+	if err := s.Close(gone.ID, SourceUser, ""); err != nil {
 		t.Fatal(err)
 	}
 	clock.advance(time.Minute)

@@ -47,13 +47,14 @@
          setActivityView(data-view) in dashboard.js (no inline onclick —
          R236-SEC-02 inline-handler cap is 0). -->
     <div class="ab-top">
-      <!-- Planner page (docs/rfc/planner.md §10, D77): 等你 · 答应你的 on the
+      <!-- Planner page (docs/rfc/planner.md §10, D77, D85): 通知 · 任务 on the
            left, the Planner conversation in the middle, the workbench on the
-           right. The count is the "等你" badge (inbox_count frames). -->
+           right. The count is the badge: decisions and questions
+           (inbox_count frames). -->
       <button type="button" class="ab-nav" id="abnav-planner" data-view="planner" title="Planner" aria-label="Planner 页面" aria-pressed="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><polygon points="15.5 8.5 10.5 10.5 8.5 15.5 13.5 13.5 15.5 8.5"/></svg>
         <span class="ab-nav-label">Planner</span>
-        <span class="ab-count" id="abnav-planner-count" hidden aria-label="等你的条目数"></span>
+        <span class="ab-count" id="abnav-planner-count" hidden aria-label="待你决定与提问的条目数"></span>
       </button>
       <button type="button" class="ab-nav active" id="abnav-chat" data-view="chat" title="会话" aria-label="会话视图" aria-pressed="true">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
@@ -108,19 +109,19 @@
         </div>
       </div>
     </div>
-    <!-- 等你 / 答应你的 bar (side_wait.js, planner RFC §15.3 ①): the Planner
-         page's left column, unfolded in place. -->
+    <!-- 通知 / 任务 bar (side_wait.js, planner RFC §15.3 ①, §15.4): the
+         Planner page's left column, unfolded in place. -->
     <div class="side-wait" id="side-wait">
       <button type="button" class="sw-toggle" id="sw-toggle" aria-expanded="false" aria-controls="sw-body">
-        <span class="sw-sum">等你 <b id="sw-wait-n">0</b> · 答应你的 <b id="sw-promise-n">0</b></span>
+        <span class="sw-sum">通知 <b id="sw-wait-n">0</b> · 任务 <b id="sw-task-n">0</b></span>
         <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><polyline points="6 9 12 15 18 9"/></svg>
       </button>
       <div class="sw-body" id="sw-body" hidden>
         <section class="pl-group" aria-labelledby="sw-wait-h">
-          <h2 class="pl-group-h" id="sw-wait-h">等你 · <span id="sw-wait-count">0</span></h2>
+          <h2 class="pl-group-h" id="sw-wait-h">通知 · <span id="sw-wait-count">0</span></h2>
           <div class="pl-list" id="sw-wait" role="list"></div>
         </section>
-        <section class="pl-group" aria-label="答应你的"><div id="sw-promise"></div></section>
+        <section class="pl-group" aria-label="任务"><div id="sw-task"></div></section>
       </div>
     </div>
     <!-- Node/connection picker moved into the New Session modal (renderNodePicker).
@@ -222,31 +223,31 @@
        shown under body.nz-view-system. renderSystemView() in dashboard.js
        paints the read-only daemon status list (GET /api/system/daemons). -->
   <main class="system-main" id="system-main" aria-label="系统任务" hidden></main>
-  <!-- Planner page (planner_view.js): left 等你 / 答应你的 (a 48px strip
+  <!-- Planner page (planner_view.js): left 通知 / 任务 (a 48px strip
        while the workbench is open), the Planner conversation in the middle.
        The workbench (#fv-drawer) docks on the right as in the chat view. -->
   <main class="planner-main" id="planner-main" aria-label="Planner" hidden>
-    <aside class="pl-left" id="pl-left" aria-label="等你与答应你的">
+    <aside class="pl-left" id="pl-left" aria-label="通知与任务">
       <button type="button" class="pl-left-toggle" id="pl-left-toggle" aria-expanded="false" aria-controls="pl-left-body">
-        <span>等你 <b id="pl-wait-n">0</b> · 答应你的 <b id="pl-promise-n">0</b></span>
+        <span>通知 <b id="pl-wait-n">0</b> · 任务 <b id="pl-task-n">0</b></span>
         <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
       </button>
       <div class="pl-strip" id="pl-strip">
         <button type="button" class="pl-strip-btn" id="pl-strip-expand" title="展开左栏" aria-label="展开左栏"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg></button>
-        <span class="pl-strip-item" title="等你"><span>等你</span><b class="pl-strip-n" id="pl-strip-wait">0</b></span>
-        <span class="pl-strip-item" title="答应你的"><span>答应</span><b class="pl-strip-n" id="pl-strip-promise">0</b></span>
+        <span class="pl-strip-item" title="通知"><span>通知</span><b class="pl-strip-n" id="pl-strip-wait">0</b></span>
+        <span class="pl-strip-item" title="任务"><span>任务</span><b class="pl-strip-n" id="pl-strip-task">0</b></span>
       </div>
       <div class="pl-left-body" id="pl-left-body">
         <section class="pl-group" aria-labelledby="pl-wait-h">
-          <h2 class="pl-group-h" id="pl-wait-h">等你 · <span id="pl-wait-count">0</span></h2>
+          <h2 class="pl-group-h" id="pl-wait-h">通知 · <span id="pl-wait-count">0</span></h2>
           <div class="pl-list" id="pl-wait" role="list"></div>
         </section>
-        <!-- 答应你的: promises.js (§15.1 PR ⑫) mountPromises(#pl-promise)
-             replaces this heading and empty state with its own group. -->
-        <section class="pl-group" aria-label="答应你的">
-          <div id="pl-promise">
-            <h2 class="pl-group-h">答应你的 · <span id="pl-promise-count">0</span></h2>
-            <div class="pl-empty">还没有答应你的事<span>你交代给 Planner 的承诺会列在这里</span></div>
+        <!-- 任务: tasks.js (§15.4) mountTasks(#pl-task) replaces this
+             heading and empty state with its own group. -->
+        <section class="pl-group" aria-label="任务">
+          <div id="pl-task">
+            <h2 class="pl-group-h">任务 · 0</h2>
+            <div class="pl-empty">还没有任务<span>Planner 派出的会话和它答应你的事会列在这里</span></div>
           </div>
         </section>
         <div class="pl-tools" id="pl-tools"></div>
@@ -265,7 +266,7 @@
         <button type="button" class="btn-close pl-drawer-only" data-action="planner-drawer-close" title="收起（Esc 或 Alt+P）" aria-label="收起 Planner 抽屉">&times;</button>
       </header>
       <div class="pl-note" id="pl-note" hidden></div>
-      <!-- The 等你 item a push points at (planner_view.js focusInboxItem). -->
+      <!-- The 通知 item a push points at (planner_view.js focusInboxItem). -->
       <div class="pl-focus" id="pl-focus" hidden></div>
       <div class="events pl-events" id="pl-events" role="log" aria-live="off">
         <div class="pl-brief" id="pl-brief"></div>

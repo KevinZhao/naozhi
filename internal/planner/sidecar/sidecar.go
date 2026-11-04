@@ -4,7 +4,8 @@
 // older naozhi reading and rewriting it cannot drop these fields.
 //
 // v0.2.0 records the sessions the Planner dispatches (purpose "task", parent
-// planner:main). A file outlives its session by Retention, counted from when
+// planner:main), and v0.2.1 their task state as the Planner or the user set
+// it (§15.4). A file outlives its session by Retention, counted from when
 // the session was first seen gone, so a retired session's lineage is still
 // there to read for a while.
 package sidecar
@@ -62,6 +63,17 @@ type Meta struct {
 	// Retired is when the session was first seen gone from the router; the
 	// file is removed Retention later.
 	Retired time.Time `json:"retired,omitzero"`
+	// Mark is the task state the Planner or the user last set; nil leaves
+	// it to the session's health (planner/task).
+	Mark *Mark `json:"mark,omitempty"`
+}
+
+// Mark is a task state set by someone: planner/task's State and By values.
+type Mark struct {
+	State string    `json:"state"`
+	By    string    `json:"by"`
+	Why   string    `json:"why,omitempty"`
+	At    time.Time `json:"at"`
 }
 
 // DispatchedByPlanner reports whether the global Planner dispatched the
@@ -188,6 +200,36 @@ func (s *Store) Get(key string) (Meta, bool) {
 	defer s.mu.Unlock()
 	m, ok := s.m[key]
 	return m, ok
+}
+
+// List returns every sidecar, in no order.
+func (s *Store) List() []Meta {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Meta, 0, len(s.m))
+	for _, m := range s.m {
+		out = append(out, m)
+	}
+	return out
+}
+
+// SetMark records key's task state; false when key has no sidecar.
+func (s *Store) SetMark(key string, mark Mark) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, ok := s.m[key]
+	if !ok {
+		return false, nil
+	}
+	if s.newer[key] {
+		return true, errors.New("sidecar: written by a newer naozhi")
+	}
+	m.Mark = &mark
+	if err := s.writeLocked(m); err != nil {
+		return true, err
+	}
+	s.m[key] = m
+	return true, nil
 }
 
 // Purpose is key's purpose ("" without a sidecar).

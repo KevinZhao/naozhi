@@ -33,8 +33,10 @@ type Waiting struct {
 	Created time.Time
 }
 
-// Promise is one open promise the Planner made (PR ⑫).
+// Promise is one open promise the Planner made (PR ⑫); ID is what its
+// status block names.
 type Promise struct {
+	ID   string
 	Text string
 	Due  time.Time // zero when it has no due time
 }
@@ -102,16 +104,17 @@ func renderSnapshot(in snapshotInput) string {
 			}
 			return a.Due.Compare(b.Due)
 		})
-		lines = append(lines, fmt.Sprintf("答应你的（%d）：", len(items)))
+		lines = append(lines, fmt.Sprintf("未完成的承诺（%d）：", len(items)))
 		for i, p := range items {
 			if i == snapshotMaxItems {
 				lines = append(lines, fmt.Sprintf("- …另有 %d 条", len(items)-i))
 				break
 			}
-			line := "- " + p.Text
+			line := "- " + p.Text + "（"
 			if !p.Due.IsZero() {
-				line += "（到期 " + p.Due.In(in.Now.Location()).Format("01-02 15:04") + "）"
+				line += "到期 " + p.Due.In(in.Now.Location()).Format("01-02 15:04") + "，"
 			}
+			line += p.ID + "）"
 			lines = append(lines, line)
 		}
 	}

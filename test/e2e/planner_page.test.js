@@ -1,6 +1,7 @@
 // E2E: the Planner page (planner_view.js, planner RFC §10 D77, §15.1 PR ⑥):
-// the rail entry and its "等你" badge, the left column's 等你 cards (closing
-// one) and 答应你的 (refetched after a Planner turn), the read-only planner:main stream (no
+// the rail entry and its badge (decisions and questions), the left column's
+// 通知 cards (closing one; decisions and questions first and labelled) and
+// 任务 (refetched after a Planner turn), the read-only planner:main stream (no
 // snapshot block, no 追问, receipts over the subscription, no idle refetch
 // on the inclusive `after` replay), the push pause and 停用 Planner
 // controls, the workbench opening by itself on a new output and folding the
@@ -44,16 +45,16 @@ async function routePreview(page) {
   });
 }
 
-test('desktop: badge, 等你 cards, stream, controls, and the workbench folds the left column', async ({ browser }) => {
+test('desktop: badge, 通知 cards, stream, controls, and the workbench folds the left column', async ({ browser }) => {
   test.setTimeout(60000);
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   const page = await ctx.newPage();
   const outputs = [];
   const events = plannerEvents();
   const box = inbox();
-  const promises = { open: [{ id: 'pr_1', text: 'iso 两分钟后提醒你看 hello.md', due: iso(now + 120000), state: 'open', created: iso(now - 60000), source: 'planner' }], closed: [] };
+  const tasks = { tasks: [{ id: 'pr_1', kind: 'promise', title: 'iso 两分钟后提醒你看 hello.md', due: iso(now + 120000), state: 'remind', at: iso(now - 60000), created: iso(now - 60000) }] };
   const mock = await startMockServer({
-    ws: true, outputs, plannerEvents: events, inbox: box, promises,
+    ws: true, outputs, plannerEvents: events, inbox: box, tasks,
     planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
   });
   await routePreview(page);
@@ -76,14 +77,14 @@ test('desktop: badge, 等你 cards, stream, controls, and the workbench folds th
     // The column counts what it lists; the badge only decisions and questions.
     await expect(page.locator('#pl-wait-count')).toHaveText('3');
     // Decisions first, then questions, then errors.
-    await expect(cards.nth(0).locator('.pl-kind')).toHaveText('决定');
+    await expect(cards.nth(0).locator('.pl-kind')).toHaveText('待你决定');
     await expect(cards.nth(0).locator('.pl-card-acts button')).toHaveText(['批准', '驳回']);
     const q = page.locator('.pl-card[data-id="in_q"]');
     await expect(q.locator('.pl-kind')).toHaveText('提问');
     await expect(q.locator('.pl-wait')).toHaveText('等了 12 分钟');
     await expect(q.locator('.pl-link')).toHaveText('打开');
-    await expect(page.locator('#pl-promise .pm-card')).toHaveText(/iso 两分钟后提醒你看 hello\.md/);
-    await expect(page.locator('#pl-strip-promise')).toHaveText('1');
+    await expect(page.locator('#pl-task .tk-card')).toHaveText(/iso 两分钟后提醒你看 hello\.md/);
+    await expect(page.locator('#pl-strip-task')).toHaveText('1');
     await expect(page.locator('#pl-status')).toHaveText('在线');
     await expect(page.locator('#pl-brief')).toContainText('早报');
     await expect(page.locator('#pl-stream .event')).toHaveCount(3);
@@ -121,14 +122,14 @@ test('desktop: badge, 等你 cards, stream, controls, and the workbench folds th
     await expect.poll(() => mock.outputsCalls.filter((k) => k === PLANNER).length).toBeGreaterThan(0);
     await expect(page.locator('.pl-left')).toHaveCSS('width', '280px');
     outputs.unshift(output('handoff/2026-11-04.md'));
-    promises.open.push({ id: 'pr_2', text: 'iso 明早告诉你结果', state: 'open', created: iso(now), source: 'planner' });
+    tasks.tasks.push({ id: 'pr_2', kind: 'promise', title: 'iso 明早告诉你结果', state: 'doing', at: iso(now), created: iso(now) });
     events.push({ type: 'result', summary: 'done', time: Date.now(), uuid: 'pl-r1' });
     await expect(page.locator('#fv-drawer')).toHaveClass(/fv-open/, { timeout: 10000 });
     await expect(page.locator('#fv-title')).toHaveText('handoff/2026-11-04.md');
     await expect(page.locator('#planner-main')).toHaveClass(/pl-wb-open/);
     await expect(page.locator('.pl-left')).toHaveCSS('width', '48px');
-    // The turn's end refetches 答应你的: a promise it registered shows.
-    await expect(page.locator('#pl-strip-promise')).toHaveText('2');
+    // The turn's end refetches 任务: a promise it registered shows.
+    await expect(page.locator('#pl-strip-task')).toHaveText('2');
     await expect(page.locator('#pl-strip-wait')).toHaveText('1');
     await page.screenshot({ path: test.info().outputPath('planner-desktop-workbench.png') });
     await page.click('#fv-btn-close');
@@ -181,7 +182,7 @@ test('phone: the left column is a collapsible block above the stream', async ({ 
     await page.click('#abnav-planner');
     const toggle = page.locator('#pl-left-toggle');
     await expect(toggle).toBeVisible();
-    await expect(toggle).toContainText('等你 3');
+    await expect(toggle).toContainText('通知 3');
     await expect(page.locator('#pl-wait')).toBeHidden();
     await expect(page.locator('#pl-stream')).toContainText('两个会话在跑');
     await page.screenshot({ path: test.info().outputPath('planner-mobile.png') });
@@ -209,7 +210,7 @@ test('journaled notes: the ones a restart dropped come back in time order, once'
     plannerNotes: [
       // Older than the page: it belongs to history not loaded.
       { time: iso(now - 70000), text: '驳回：iso 更早的一条' },
-      { time: iso(now - 57000), text: '到点提醒（答应你的，到期 09:01）：iso 交周报' },
+      { time: iso(now - 57000), text: '到点提醒（承诺，到期 09:01）：iso 交周报' },
       { time: iso(now - 50000 + 40), text: '已派出：iso 周报（task:abc）' },
     ],
   });
@@ -240,7 +241,7 @@ test('planner.enabled off: the page explains it and the stop switch is off', asy
     await expect(page.locator('#pl-note')).toContainText('Planner 没有开启');
     await expect(page.locator('#pl-status')).toHaveText('未开启');
     await expect(page.locator('#pl-stop')).toBeDisabled();
-    await expect(page.locator('#pl-wait')).toContainText('没有等你的事');
+    await expect(page.locator('#pl-wait')).toContainText('没有通知');
     await expect(page.locator('#abnav-planner-count')).toBeHidden();
   } finally {
     mock.server.close();

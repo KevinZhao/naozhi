@@ -10,9 +10,9 @@ import (
 // promiseTitleRunes caps a promise's text in an inbox title.
 const promiseTitleRunes = 60
 
-// PromiseReminder is promise.Reminder: a due promise opens a "等你" item
+// PromiseReminder is promise.Reminder: a due promise opens a "通知" item
 // pushed past the daily cap (§3.6) and shows a reminder in the Planner
-// conversation; closing the promise closes its item.
+// conversation; the Planner or the user closing the promise closes its item.
 type PromiseReminder struct {
 	Notify *notify.Notifier
 	// Note writes text into the Planner conversation as a gateway event
@@ -26,7 +26,7 @@ func promiseSource(p promise.Promise) string { return "promise:" + p.ID }
 func (r PromiseReminder) Due(p promise.Promise) {
 	at := p.Due.Local().Format("01-02 15:04")
 	if r.Notify != nil {
-		why := "答应你的，到期 " + at
+		why := "承诺到期 " + at
 		if p.CloseWhen != "" {
 			why += "；完成条件：" + p.CloseWhen
 		}
@@ -34,7 +34,7 @@ func (r PromiseReminder) Due(p promise.Promise) {
 			Source: promiseSource(p), Title: "到点提醒：" + textutil.TruncateRunes(p.Text, promiseTitleRunes), Why: why})
 	}
 	if r.Note != nil {
-		r.Note("到点提醒（答应你的，到期 " + at + "）：" + p.Text)
+		r.Note("到点提醒（承诺，到期 " + at + "）：" + p.Text)
 	}
 }
 
@@ -51,7 +51,7 @@ func PlannerPromises(s *promise.Store) func() []agent.Promise {
 		open, _ := s.List(0)
 		out := make([]agent.Promise, 0, len(open))
 		for _, p := range open {
-			out = append(out, agent.Promise{Text: p.Text, Due: p.Due})
+			out = append(out, agent.Promise{ID: p.ID, Text: p.Text, Due: p.Due})
 		}
 		return out
 	}

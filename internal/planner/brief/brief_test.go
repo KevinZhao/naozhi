@@ -11,6 +11,7 @@ import (
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/activity"
 	"github.com/naozhi/naozhi/internal/planner/journal"
+	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
 )
 
@@ -23,6 +24,7 @@ type fixture struct {
 	now    time.Time
 	snap   health.Snapshot
 	inbox  []notify.Item
+	tasks  []task.Task
 	pushes []notify.Push
 }
 
@@ -42,6 +44,7 @@ func (f *fixture) briefer(names map[string]string, reg *workspace.Registry) *Bri
 		Journal:    f.j,
 		Health:     func() health.Snapshot { return f.snap },
 		Inbox:      func() []notify.Item { return f.inbox },
+		Tasks:      func() []task.Task { return f.tasks },
 		Push:       func(p notify.Push) bool { f.pushes = append(f.pushes, p); return true },
 		Name:       func(u string) string { return names[u] },
 		Workspaces: reg,
@@ -199,12 +202,18 @@ func TestRender(t *testing.T) {
 		{Kind: notify.KindNotice, State: notify.StateOpen, Source: "disk",
 			Title: "磁盘剩余不足", Why: "剩余 8%", Created: at(3, 7, 0)},
 	}
+	f.tasks = []task.Task{
+		{ID: "task:ab12", Kind: task.KindSession, Title: "iso 写 hello", State: task.Waiting, Created: at(2, 9, 0)},
+		{ID: "pr_1", Kind: task.KindPromise, Title: "CI 绿了告诉你", State: task.Doing, Due: at(3, 8, 0), Created: at(1, 9, 0)},
+		{ID: "pr_2", Kind: task.KindPromise, Title: "明早提醒你", State: task.Remind, Created: at(3, 8, 0)},
+		{ID: "task:cd34", Kind: task.KindSession, Title: "iso 跑测试", State: task.Done, Created: at(2, 9, 0)},
+	}
 	f.now = at(3, 9, 0)
 	b := f.briefer(names, reg)
 	b.Check()
 
 	want := "## 早报 · 11月3日 周二\n\n" +
-		"自 11-02 08:30 以来：完成 2 · 失败 1 · 等你 1 · 未关闭的错误 1 · 通知 1\n" +
+		"自 11-02 08:30 以来：完成 2 · 失败 1 · 等你 1 · 未关闭的错误 1 · 通知 1 · 未完成的任务 2\n" +
 		"\n### 完成的（2）\n" +
 		"- [node2/dashboard:direct:x:general](#node=node2&session=dashboard%3Adirect%3Ax%3Ageneral) · 工作区 naozhi · 11-03 03:00\n" +
 		"- [修复 ［登录］ ＊重试＊](#session=dashboard%3Apj%3Aabc%3Ageneral) · 工作区 naozhi · 11-02 21:00 · 产出 1 个文件、[PR #12](https://github.com/o/r/pull/12)\n" +
@@ -215,7 +224,10 @@ func TestRender(t *testing.T) {
 		"\n### 未关闭的错误（1）\n" +
 		"- 错误 · 系统性故障：限流 · 2 个单元出现同一类错误：a、b · 已等 2 天\n" +
 		"\n### 通知（1）\n" +
-		"- 通知 · 磁盘剩余不足 · 剩余 8% · 已等 2 小时\n"
+		"- 通知 · 磁盘剩余不足 · 剩余 8% · 已等 2 小时\n" +
+		"\n### 未完成的任务（2）\n" +
+		"- [iso 写 hello](#session=task%3Aab12) · 派出的会话 · 等你 · 已 24 小时\n" +
+		"- CI 绿了告诉你 · 承诺 · 进行中 · 到期 11-03 08:00 · 已 2 天\n"
 	got := b.Recent(1)
 	if len(got) != 1 {
 		t.Fatalf("no brief")
@@ -223,7 +235,7 @@ func TestRender(t *testing.T) {
 	if got[0].Markdown != want {
 		t.Errorf("markdown:\n%s\nwant:\n%s", got[0].Markdown, want)
 	}
-	if len(f.pushes) != 1 || f.pushes[0].Title != "早报" || f.pushes[0].Body != "完成 2 · 失败 1 · 等你 1 · 错误 1 · 通知 1" {
+	if len(f.pushes) != 1 || f.pushes[0].Title != "早报" || f.pushes[0].Body != "完成 2 · 失败 1 · 等你 1 · 错误 1 · 通知 1 · 未完成的任务 2" {
 		t.Errorf("pushes = %+v", f.pushes)
 	}
 }

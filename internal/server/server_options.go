@@ -18,7 +18,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/brief"
 	"github.com/naozhi/naozhi/internal/planner/note"
-	"github.com/naozhi/naozhi/internal/planner/promise"
+	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
@@ -121,9 +121,8 @@ type ServerOptions struct {
 	// Notify is the "等你" inbox /api/inbox serves; the server binds the
 	// Hub to it as its dashboard push exit. nil serves an empty inbox.
 	Notify *notify.Notifier
-	// Promises are the Planner's promises /api/promises serves; nil lists
-	// none.
-	Promises *promise.Store
+	// Tasks are the Planner page's 任务 /api/tasks serves; nil lists none.
+	Tasks *task.Board
 	// Purpose is a session's purpose from its sidecar file (task: a session
 	// the Planner dispatched), stamped on /api/sessions; nil stamps none.
 	Purpose func(key string) string

@@ -6,7 +6,7 @@
 // (an element under #main with data-inbox-item="<id>"; without one the
 // session just opens), or with no listed session the Planner page with the
 // item's card brought into view (inbox.focus, taken by revealFocus once a
-// list paints it; see openPlanner for the drawer). inbox_count frames carry the open "等你" counts (open: every open
+// list paints it; see openPlanner for the drawer). inbox_count frames carry the open "通知" counts (open: every open
 // item; badge: decisions and questions, the §10.1 badge), re-dispatched on
 // nzBus as 'inbox:count' for the Planner page's badge. The frames only come
 // on a change: the page takes the first counts from GET /api/inbox (its
@@ -148,7 +148,7 @@ export function onNotify(msg) {
   try {
     // tag: a second frame for the same item (another tab's socket) replaces
     // rather than stacks.
-    n = new Notification(msg.title || '等你', { body: msg.body || '', tag: msg.id || undefined });
+    n = new Notification(msg.title || '通知', { body: msg.body || '', tag: msg.id || undefined });
   } catch {
     return; // Android Chrome only allows notifications from a service worker
   }

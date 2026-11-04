@@ -1,10 +1,12 @@
 // Package action is the Planner's way to ask the gateway for something
 // (docs/rfc/planner.md §6.2): the ```naozhi-action blocks at the end of a
-// planner:main reply. v0.2.0 has three: dispatch (a confirmation card; once
-// approved, a task: session), promise (登记答应你的) and ask (a question
-// in "等你" whose answer goes back to the Planner). A block that does not
-// parse, or names an unknown type or a bad field, is not run: the Planner
-// conversation shows it as it was written, with the reason.
+// planner:main reply. There are four: dispatch (a confirmation card; once
+// approved, a task: session), promise (a promise among the 任务), ask (a
+// question in "通知" whose answer goes back to the Planner) and status (the
+// Planner's judgment of a task's state, §15.4). A block that does not parse,
+// or names an unknown type, a bad field or a task that does not exist, is
+// not run: the Planner conversation shows it as it was written, with the
+// reason.
 package action
 
 import (
@@ -37,6 +39,7 @@ const (
 	maxOptions        = 6
 	optionRunes       = 40
 	workspaceRefRunes = 128
+	taskRefRunes      = 128
 )
 
 // Type is a block's "type".
@@ -46,6 +49,7 @@ const (
 	TypeDispatch Type = "dispatch"
 	TypePromise  Type = "promise"
 	TypeAsk      Type = "ask"
+	TypeStatus   Type = "status"
 )
 
 // Dispatch asks for a session in a workspace, once the user approves.
@@ -72,8 +76,16 @@ type Ask struct {
 	Options  []string `json:"options"`
 }
 
-// Block is one action block of a reply: exactly one of Dispatch, Promise
-// and Ask is set, or Err says why it is not run.
+// Status sets a task's state: Task is a task: key or a promise ID, State
+// done, doing or failed, Why the evidence.
+type Status struct {
+	Task  string `json:"task"`
+	State string `json:"state"`
+	Why   string `json:"why"`
+}
+
+// Block is one action block of a reply: exactly one of Dispatch, Promise,
+// Ask and Status is set, or Err says why it is not run.
 type Block struct {
 	// Raw is the block's body as written.
 	Raw      string
@@ -81,6 +93,7 @@ type Block struct {
 	Dispatch *Dispatch
 	Promise  *Promise
 	Ask      *Ask
+	Status   *Status
 	Err      error
 }
 
@@ -171,13 +184,22 @@ func (b *Block) decode() {
 			err = a.validate()
 			b.Ask = &a.Ask
 		}
+	case TypeStatus:
+		var st struct {
+			Type Type `json:"type"`
+			Status
+		}
+		if err = strict(b.Raw, &st); err == nil {
+			err = st.validate()
+			b.Status = &st.Status
+		}
 	case "":
 		err = errors.New("缺少 type")
 	default:
-		err = fmt.Errorf("未知类型 %q（只有 dispatch、promise、ask）", head.Type)
+		err = fmt.Errorf("未知类型 %q（只有 dispatch、promise、ask、status）", head.Type)
 	}
 	if err != nil {
-		b.Dispatch, b.Promise, b.Ask, b.Err = nil, nil, nil, err
+		b.Dispatch, b.Promise, b.Ask, b.Status, b.Err = nil, nil, nil, nil, err
 	}
 }
 
@@ -250,6 +272,23 @@ func (a *Ask) validate() error {
 			return fmt.Errorf("选项 %q 重复", o)
 		}
 		a.Options[i] = o
+	}
+	return nil
+}
+
+func (s *Status) validate() error {
+	s.Task, s.State, s.Why = strings.TrimSpace(s.Task), strings.TrimSpace(s.State), strings.TrimSpace(s.Why)
+	switch {
+	case s.Task == "":
+		return errors.New("status 缺少 task")
+	case utf8.RuneCountInString(s.Task) > taskRefRunes:
+		return errors.New("task 太长")
+	case s.State != "done" && s.State != "doing" && s.State != "failed":
+		return fmt.Errorf("state 只能是 done、doing 或 failed，不是 %q", s.State)
+	case s.Why == "":
+		return errors.New("status 缺少 why（判断的依据）")
+	case utf8.RuneCountInString(s.Why) > textRunes:
+		return fmt.Errorf("why 超过 %d 字", textRunes)
 	}
 	return nil
 }

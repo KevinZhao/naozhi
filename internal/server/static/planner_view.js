@@ -1,7 +1,8 @@
 // planner_view.js — the Planner page (docs/rfc/planner.md §10, §10.1, D77;
-// §15.1 PR ⑥). Left: 等你 (the open inbox items of GET /api/inbox, each
-// closable; decision cards answer through /api/inbox/decide) and the
-// #pl-promise container 答应你的 mounts into, then the browser-notification,
+// §15.1 PR ⑥, §15.4 D85). Left: 通知 (the open inbox items of GET
+// /api/inbox, decisions and questions first and labelled, each closable;
+// decision cards answer through /api/inbox/decide) and the #pl-task
+// container 任务 (tasks.js) mounts into, then the browser-notification,
 // push-pause and 停用 Planner controls. Middle: the 早报 slot and the
 // planner:main event stream, its action blocks and the sessions it names as
 // cards (planner_cards.js), and the input box and the opened session card
@@ -18,7 +19,7 @@
 // journaled ones from GET /api/planner/notes by time.
 //
 // The rail badge counts the inbox's `badge` (notify.js: decisions and
-// questions, §10.1); the left column's "等你" heading counts what its list
+// questions, §10.1); the left column's "通知" heading counts what its list
 // shows, every open item (`open`). Both are seeded from GET /api/inbox on
 // every WS auth_ok and kept by inbox_count frames. The 会话 view's sidebar
 // bar (side_wait.js) shows the same list and counts: waitCount, waitListHtml
@@ -39,7 +40,7 @@ import { inbox, isLit, notifySupported, onInboxCount, requestNotifyPermission, r
 import { followWorkbenchSubject, noteWorkbenchEvent } from './workbench_panes.js';
 import { decisionActsHtml, decorateEvents, paintSessionCards, refreshHealth, setInboxItems } from './planner_cards.js';
 import { clearPending, closePlannerSession, mountComposer, notePlannerStatus } from './planner_chat.js';
-import { mountPromises, refreshPromises } from './promises.js';
+import { mountTasks, refreshTasks } from './tasks.js';
 import { workbench } from './workbench.js';
 import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
@@ -54,16 +55,16 @@ const EVENTS_LIMIT = 200;
 // the status, and retries a subscription that is not up.
 const POLL_MS = 3000;
 const SLOW_TICKS = 10;
-// PROMISE_REFRESH_MS is how long after a Planner turn ends 答应你的 is
-// refetched: the turn's promise blocks are registered off the read loop.
-const PROMISE_REFRESH_MS = 1500;
+// TASK_REFRESH_MS is how long after a Planner turn ends 任务 is refetched:
+// the turn's promise and status blocks are run off the read loop.
+const TASK_REFRESH_MS = 1500;
 
-const KIND_LABEL = { decision: '决定', question: '提问', error: '错误', notice: '通知' };
+const KIND_LABEL = { decision: '待你决定', question: '提问', error: '错误', notice: '通知' };
 const KIND_ORDER = { decision: 0, question: 1, error: 2, notice: 3 };
 
 const pl = {
   status: null, // GET /api/planner
-  open: [], // open 等你 items
+  open: [], // open 通知 items
   pausedUntil: 0,
   customPause: false,
   // lastTime is the newest logged event time taken; seenAtWM the uuids taken
@@ -82,7 +83,7 @@ const pl = {
   seeding: false,
   // host runs the conversation: 'page', 'drawer', or '' (not shown).
   host: '',
-  // focusId is the 等你 item marked above the conversation; focusAt when it
+  // focusId is the 通知 item marked above the conversation; focusAt when it
   // was asked for, inboxAt when pl.open was last read (an older list cannot
   // tell it is gone), focusSeen once it showed.
   focusId: '',
@@ -93,7 +94,7 @@ const pl = {
 
 const $ = (id) => document.getElementById(id);
 
-// ---- 等你 ----
+// ---- 通知 ----
 
 function waitedText(ms) {
   const m = Math.floor(ms / 60000);
@@ -132,7 +133,7 @@ function itemHtml(it) {
     '</div>';
 }
 
-// waitCount is the "等你" count the left column shows: every open item.
+// waitCount is the "通知" count the left column shows: every open item.
 export function waitCount() {
   return inbox.open || 0;
 }
@@ -147,22 +148,21 @@ function sortedOpen() {
 // waitListHtml is the open items' cards, as the left column lists them.
 export function waitListHtml() {
   const items = sortedOpen();
-  return items.length ? items.map(itemHtml).join('') : '<div class="pl-empty">没有等你的事</div>';
+  return items.length ? items.map(itemHtml).join('') : '<div class="pl-empty">没有通知</div>';
 }
 
 function noteItems() {
   nzBus.dispatchEvent(new CustomEvent('inbox:items'));
 }
 
-// paintCounts: 等你 counts the open items its list shows, 答应你的 the open
-// cards mounted in #pl-promise. A write only on change: #pl-promise-count
-// sits under the observer that calls this.
+// paintCounts: 通知 counts the open items its list shows, 任务 the cards
+// not done mounted in #pl-task. A write only on change.
 function paintCounts() {
   const w = String(waitCount());
-  const p = String(document.querySelectorAll('#pl-promise .pm-card:not(.closed)').length);
+  const p = String(document.querySelectorAll('#pl-task .tk-card:not(.done)').length);
   const put = (ids, v) => ids.forEach((id) => { const el = $(id); if (el && el.textContent !== v) el.textContent = v; });
   put(['pl-wait-count', 'pl-wait-n', 'pl-strip-wait'], w);
-  put(['pl-promise-count', 'pl-promise-n', 'pl-strip-promise'], p);
+  put(['pl-task-n', 'pl-strip-task'], p);
 }
 
 function paintWaiting() {
@@ -208,13 +208,13 @@ function paintFocus() {
   if (it) pl.focusSeen = true;
   else if (pl.focusSeen) pl.focusId = '';
   let html = '';
-  if (it) html = '<div class="pl-cards-h">等你</div>' + itemHtml(it);
-  else if (pl.focusId && pl.inboxAt >= pl.focusAt) html = '<div class="pl-empty">这一条已经不在"等你"里了</div>';
+  if (it) html = '<div class="pl-cards-h">通知</div>' + itemHtml(it);
+  else if (pl.focusId && pl.inboxAt >= pl.focusAt) html = '<div class="pl-empty">这一条已经不在"通知"里了</div>';
   if (box.innerHTML !== html) box.innerHTML = html;
   box.hidden = !html;
 }
 
-// focusInboxItem marks the open 等你 item id above the conversation (a push
+// focusInboxItem marks the open 通知 item id above the conversation (a push
 // leads to it, §15.3 ④); '' clears the mark. A session open in the middle
 // column hides the mark and takes the input box, so it goes back to the
 // Planner conversation first.
@@ -259,7 +259,7 @@ function pauseToolHtml() {
     const same = d.toDateString() === new Date().toDateString();
     const at = (same ? '' : (d.getMonth() + 1) + '/' + d.getDate() + ' ') +
       String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
-    return '<span class="pl-tool-note" title="' + escAttr(formatAbsTime(pl.pausedUntil)) + '">已暂停到 ' + esc(at) + '，期间只进"等你"</span>' +
+    return '<span class="pl-tool-note" title="' + escAttr(formatAbsTime(pl.pausedUntil)) + '">已暂停到 ' + esc(at) + '，期间只进"通知"</span>' +
       '<button type="button" class="pl-btn" data-action="planner-pause-resume">恢复推送</button>';
   }
   if (pl.customPause) {
@@ -320,12 +320,13 @@ function paintStatus() {
   if (chip) { chip.textContent = text; chip.className = 'pl-status' + (cls ? ' ' + cls : ''); }
   if (note) {
     // The drawer has no left column: point at the page instead.
-    const left = pl.host === 'drawer' ? 'Planner 页面左栏' : '左栏';
+    const drawer = pl.host === 'drawer';
+    const left = drawer ? 'Planner 页面左栏' : '左栏';
     let html = '';
     if (s && !s.enabled) {
-      html = '<b>Planner 没有开启。</b>在配置里设 <code>planner.enabled: true</code> 并重启 naozhi 后，这里是你和 Planner 的对话：早报、回执、它派出的会话与汇报。' + left + '的"等你"照常可用。';
+      html = '<b>Planner 没有开启。</b>在配置里设 <code>planner.enabled: true</code> 并重启 naozhi 后，这里是你和 Planner 的对话：早报、回执、它派出的会话与汇报。' + left + '的"通知"照常可用。';
     } else if (s && s.stopped) {
-      html = '<b>Planner 已停用。</b>它不再运行，也不收消息；关掉' + left + '的"停用 Planner"即可恢复。';
+      html = '<b>Planner 已停用。</b>它不再运行，也不收消息；关掉' + (drawer ? ' ' : '') + left + '的"停用 Planner"即可恢复。';
     }
     note.innerHTML = html;
     note.hidden = !html;
@@ -412,7 +413,7 @@ function appendEvents(events, reset) {
   else if (fresh.length) {
     box.querySelector(':scope > .pl-empty')?.remove();
     if (fresh.some((e) => e.type === 'user')) clearPending(box);
-    if (fresh.some((e) => e.type === 'result')) setTimeout(refreshPromises, PROMISE_REFRESH_MS);
+    if (fresh.some((e) => e.type === 'result')) setTimeout(refreshTasks, TASK_REFRESH_MS);
     box.insertAdjacentHTML('beforeend', html);
     // The workbench follows planner:main on the page only; beside the
     // drawer it shows the chat view's session.
@@ -504,6 +505,8 @@ function startConversation() {
         fetchStatus();
         refreshHealth($('pl-center'), false);
         paintSessionCards($('pl-center'));
+        // A task's 等你 / 失败 follow health, which pushes no frame.
+        if (pl.host === 'page') refreshTasks();
         if (!pl.sub) subscribe();
       }
     }, POLL_MS);
@@ -550,7 +553,7 @@ export function detachPlannerConversation() {
 export function openPlannerPanel() {
   if (ui.activeView !== 'planner') { shell.setActivityView('planner'); return; }
   hostConversation('page', $('planner-main'));
-  mountPromises($('pl-promise'));
+  mountTasks($('pl-task'));
   paintTools();
   followWorkbenchSubject();
 }
@@ -683,7 +686,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const open = main.classList.toggle('pl-left-open');
     e.currentTarget.setAttribute('aria-expanded', open ? 'true' : 'false');
   });
-  // The strip and the phone heading count what 答应你的 renders.
-  const promises = $('pl-promise');
-  if (promises) new MutationObserver(paintCounts).observe(promises, { childList: true, subtree: true });
+  // The strip and the phone heading count what 任务 renders.
+  const tasks = $('pl-task');
+  if (tasks) new MutationObserver(paintCounts).observe(tasks, { childList: true, subtree: true });
 });

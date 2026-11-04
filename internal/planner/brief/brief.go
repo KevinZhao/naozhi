@@ -2,7 +2,8 @@
 // §15.1): on each weekday, at the first reconcile after 08:30 local, the
 // gateway lists what finished and what failed since the last brief and what
 // is still open in the inbox — the "等你" items (questions and decisions,
-// as the badge counts them), the unclosed errors and the notices — as short
+// as the badge counts them), the unclosed errors, the notices and the 任务
+// not done (§15.4) — as short
 // Chinese Markdown, journals it (kind=brief) and pushes it once.
 // It is rendered by fixed rules from the journal, the inbox and the health
 // snapshot; nothing here calls a model.
@@ -22,6 +23,7 @@ import (
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/journal"
+	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
 )
 
@@ -50,9 +52,10 @@ type Counts struct {
 	Waiting int `json:"waiting"`
 	Errors  int `json:"errors"`
 	Notices int `json:"notices"`
+	Tasks   int `json:"tasks"`
 }
 
-func (c Counts) total() int { return c.Done + c.Failed + c.Waiting + c.Errors + c.Notices }
+func (c Counts) total() int { return c.Done + c.Failed + c.Waiting + c.Errors + c.Notices + c.Tasks }
 
 // Brief is one day's judgment, the data of a kind=brief journal entry.
 type Brief struct {
@@ -75,6 +78,9 @@ type Config struct {
 	Health  func() health.Snapshot
 	// Inbox returns the inbox's items (only the open ones are read).
 	Inbox func() []notify.Item
+	// Tasks returns the 任务 list (task.Board.List); those in progress are
+	// listed.
+	Tasks func() []task.Task
 	// Push sends the brief's notification (notify.Notifier.Announce).
 	Push func(notify.Push) bool
 	// Name returns a unit's display name ("" falls back to the unit ID).
@@ -220,7 +226,7 @@ func (b *Briefer) Check() {
 		return
 	}
 	slog.Info("brief: sent", "day", br.Day, "done", br.Counts.Done, "failed", br.Counts.Failed,
-		"waiting", br.Counts.Waiting, "errors", br.Counts.Errors, "notices", br.Counts.Notices)
+		"waiting", br.Counts.Waiting, "errors", br.Counts.Errors, "notices", br.Counts.Notices, "tasks", br.Counts.Tasks)
 	if b.cfg.Push != nil {
 		b.cfg.Push(notify.Push{ID: "brief:" + br.Day, Kind: notify.KindNotice, Level: notify.LevelTimely,
 			Title: "早报", Body: pushBody(br.Counts)})

@@ -12,7 +12,7 @@
 // conversation back. The drawer and the workbench never show together:
 // opening one puts the other away.
 //
-// openPlannerDrawer({ item }) is the entry for a push that leads to a 等你
+// openPlannerDrawer({ item }) is the entry for a push that leads to a 通知
 // item without a session (§15.3 ④).
 import { sessionList, ui } from './state.js';
 import { nzBus, registerActions } from './nz_util.js';
@@ -42,7 +42,7 @@ function hide() {
   document.body.classList.remove('nz-pld-open');
 }
 
-// openPlannerDrawer opens the drawer; opts.item marks that open 等你 item
+// openPlannerDrawer opens the drawer; opts.item marks that open 通知 item
 // above the conversation. On the Planner page the conversation is already
 // in view, so the item is marked there.
 export function openPlannerDrawer(opts) {

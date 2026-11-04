@@ -15,6 +15,7 @@ import (
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/activity"
 	"github.com/naozhi/naozhi/internal/planner/journal"
+	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -56,6 +57,14 @@ type inboxItem struct {
 	Created time.Time
 }
 
+type taskItem struct {
+	ref
+	Kind  task.Kind
+	State task.State
+	Due   time.Time
+	Since time.Time
+}
+
 // input is what one brief is rendered from: the same input gives the same
 // bytes.
 type input struct {
@@ -65,11 +74,12 @@ type input struct {
 	Waiting    []inboxItem
 	Errors     []inboxItem
 	Notices    []inboxItem
+	Tasks      []taskItem
 }
 
 func (in input) counts() Counts {
 	return Counts{Done: len(in.Done), Failed: len(in.Failed), Waiting: len(in.Waiting), Errors: len(in.Errors),
-		Notices: len(in.Notices)}
+		Notices: len(in.Notices), Tasks: len(in.Tasks)}
 }
 
 // healthData is the part of a health journal entry's data the brief reads
@@ -216,6 +226,22 @@ func (b *Briefer) gather(since, now time.Time) input {
 		}
 	}
 
+	// 未完成的任务: what 任务 shows in progress (a promise before its due
+	// reminder is not due yet), in its order.
+	if b.cfg.Tasks != nil {
+		for _, t := range b.cfg.Tasks() {
+			if t.State == task.Done || t.State == task.Remind {
+				continue
+			}
+			r := ref{Name: t.Title}
+			if t.Kind == task.KindSession {
+				r = b.ref(t.ID, health.KindSession, "")
+				r.Name = t.Title
+			}
+			in.Tasks = append(in.Tasks, taskItem{ref: r, Kind: t.Kind, State: t.State, Due: t.Due, Since: t.Created})
+		}
+	}
+
 	newest := func(t1, t2 time.Time, n1, n2 string) int {
 		return cmp.Or(t2.Compare(t1), cmp.Compare(n1, n2))
 	}
@@ -297,6 +323,10 @@ var kindLabels = map[notify.Kind]string{
 	notify.KindDecision: "决定",
 }
 
+var taskKinds = map[task.Kind]string{task.KindSession: "派出的会话", task.KindPromise: "承诺"}
+
+var taskStates = map[task.State]string{task.Doing: "进行中", task.Waiting: "等你", task.Failed: "失败"}
+
 var weekdays = [...]string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}
 
 const stamp = "01-02 15:04"
@@ -343,6 +373,13 @@ func render(in input) string {
 	section(&b, "仍在等你的", in.Waiting, item)
 	section(&b, "未关闭的错误", in.Errors, item)
 	section(&b, "通知", in.Notices, item)
+	section(&b, "未完成的任务", in.Tasks, func(t taskItem) string {
+		line := link(textutil.TruncateRunes(t.Name, titleRunes), t.Link) + " · " + taskKinds[t.Kind] + " · " + taskStates[t.State]
+		if !t.Due.IsZero() {
+			line += " · 到期 " + t.Due.In(loc).Format(stamp)
+		}
+		return line + " · 已 " + ago(in.Now.Sub(t.Since))
+	})
 	return b.String()
 }
 
@@ -367,7 +404,7 @@ func summary(c Counts, errors string) string {
 	for _, p := range []struct {
 		label string
 		n     int
-	}{{"完成", c.Done}, {"失败", c.Failed}, {"等你", c.Waiting}, {errors, c.Errors}, {"通知", c.Notices}} {
+	}{{"完成", c.Done}, {"失败", c.Failed}, {"等你", c.Waiting}, {errors, c.Errors}, {"通知", c.Notices}, {"未完成的任务", c.Tasks}} {
 		if p.n > 0 {
 			parts = append(parts, fmt.Sprintf("%s %d", p.label, p.n))
 		}

@@ -16,7 +16,9 @@ import (
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/promise"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
+	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -55,6 +57,8 @@ type Config struct {
 	Promises   *promise.Store
 	Workspaces *workspace.Registry
 	Sessions   *sidecar.Store
+	// Tasks applies status blocks; nil refuses them.
+	Tasks *task.Board
 	// Spawn starts the dispatched session key and sends it the first
 	// message.
 	Spawn func(ctx context.Context, key string, s Spawn) error
@@ -75,8 +79,11 @@ type Runner struct {
 }
 
 // dispatchCard is a dispatch card's decision payload: the request as
-// resolved when it was proposed.
+// resolved when it was proposed. Key is the task: key it starts once
+// approved; the conversation's card finds its confirmation by Title and
+// Message, and opens Key.
 type dispatchCard struct {
+	Key           string `json:"key,omitempty"`
 	Workspace     string `json:"workspace"`
 	WorkspaceName string `json:"workspace_name"`
 	Title         string `json:"title"`
@@ -135,8 +142,7 @@ func (r *Runner) Handle(text string) {
 	}()
 	for _, b := range Parse(text) {
 		if b.Err != nil {
-			// A note is one line: the block's whitespace folds to spaces.
-			r.note("动作块格式不对，没有执行：" + b.Err.Error() + "。原文：" + textutil.TruncateRunes(strings.Join(strings.Fields(b.Raw), " "), rawRunes))
+			r.refuse(b, b.Err)
 			continue
 		}
 		var err error
@@ -147,11 +153,19 @@ func (r *Runner) Handle(text string) {
 			err = r.promise(*b.Promise)
 		case b.Ask != nil:
 			err = r.ask(*b.Ask)
+		case b.Status != nil:
+			err = r.status(b)
 		}
 		if err != nil {
 			r.note("动作块没有执行：" + err.Error())
 		}
 	}
+}
+
+// refuse shows a block that is not run, with why.
+func (r *Runner) refuse(b Block, why error) {
+	// A note is one line: the block's whitespace folds to spaces.
+	r.note("动作块格式不对，没有执行：" + why.Error() + "。原文：" + textutil.TruncateRunes(strings.Join(strings.Fields(b.Raw), " "), rawRunes))
 }
 
 func (r *Runner) note(text string) {
@@ -196,7 +210,7 @@ func (r *Runner) propose(d Dispatch) error {
 	if err != nil {
 		return err
 	}
-	card := dispatchCard{Workspace: w.ID, WorkspaceName: w.Name, Title: d.Title, Model: d.Model, Message: d.Message}
+	card := dispatchCard{Key: sidecar.TaskKey(), Workspace: w.ID, WorkspaceName: w.Name, Title: d.Title, Model: d.Model, Message: d.Message}
 	payload, err := json.Marshal(card)
 	if err != nil {
 		return err
@@ -210,7 +224,7 @@ func (r *Runner) propose(d Dispatch) error {
 		Source:   "dispatch:" + requestID(),
 		Decision: &notify.Decision{Handler: HandlerDispatch, Payload: payload, Actions: []notify.Action{notify.ActionApprove, notify.ActionReject}},
 	})
-	r.note("待你确认：派出「" + d.Title + "」（工作区 " + w.Name + "，模型 " + modelLabel(d.Model) + "）。卡片 " + it.ID + " 在「等你」里，批准后才会拉起。")
+	r.note("待你确认：派出「" + d.Title + "」（工作区 " + w.Name + "，模型 " + modelLabel(d.Model) + "）。卡片 " + it.ID + " 在「通知」里，批准后才会拉起。")
 	return nil
 }
 
@@ -238,7 +252,10 @@ func (r *Runner) decideDispatch(it notify.Item, a notify.Action) error {
 		r.note("派出「" + c.Title + "」失败：" + err.Error())
 		return err
 	}
-	key := sidecar.TaskKey()
+	key := c.Key
+	if !sessionkey.IsTaskKey(key) {
+		key = sidecar.TaskKey()
+	}
 	if err := r.cfg.Sessions.Put(sidecar.Meta{
 		Key: key, Purpose: sidecar.PurposeTask, Parent: r.cfg.Planner, Title: c.Title, Workspace: c.Workspace,
 		Dir: dir, Model: c.Model,
@@ -274,10 +291,36 @@ func (r *Runner) promise(p Promise) error {
 	return nil
 }
 
-// ask puts the Planner's question into "等你".
+var stateLabels = map[task.State]string{task.Done: "已完成", task.Doing: "进行中", task.Failed: "失败"}
+
+// status sets a task's state as the Planner judged it. A task that does not
+// exist is the block's fault, refused like a malformed one.
+func (r *Runner) status(b Block) error {
+	if r.cfg.Tasks == nil {
+		return errors.New("任务没有接通")
+	}
+	s := *b.Status
+	title, ok := r.cfg.Tasks.Title(s.Task)
+	if !ok {
+		r.refuse(b, fmt.Errorf("找不到任务 %q（填 task: key 或承诺 ID）", s.Task))
+		return nil
+	}
+	state := task.State(s.State)
+	switch err := r.cfg.Tasks.Set(s.Task, state, task.ByPlanner, s.Why); {
+	case errors.Is(err, task.ErrState):
+		r.refuse(b, errors.New("承诺没有失败状态，只能标 done 或 doing"))
+		return nil
+	case err != nil:
+		return fmt.Errorf("改任务状态失败（%v）", err)
+	}
+	r.note("Planner 判断任务「" + textutil.TruncateRunes(title, 60) + "」" + stateLabels[state] + "：" + s.Why)
+	return nil
+}
+
+// ask puts the Planner's question into "通知".
 func (r *Runner) ask(q Ask) error {
 	if r.cfg.Inbox == nil {
-		return errors.New("等你没有接通")
+		return errors.New("通知没有接通")
 	}
 	it := notify.Item{
 		Kind:   notify.KindQuestion,

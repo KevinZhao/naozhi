@@ -298,7 +298,7 @@ func TestRenderSnapshot(t *testing.T) {
 
 	withPromises := base
 	withPromises.Promises = []Promise{}
-	if got := renderSnapshot(withPromises); !strings.Contains(got, "答应你的（0）：") || strings.Contains(got, "等你") {
+	if got := renderSnapshot(withPromises); !strings.Contains(got, "未完成的承诺（0）：") || strings.Contains(got, "等你") {
 		t.Errorf("wired-but-empty promises, unwired waiting:\n%s", got)
 	}
 
