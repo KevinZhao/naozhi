@@ -86,10 +86,12 @@
   .btn-handoff{width:46px;height:40px;padding:0 2px;white-space:normal;line-height:1.15;font-size:var(--nz-fs-2xs)}
   .pl-cards{margin:4px 16px 12px}
   .pl-focus{margin:10px 12px 0}
-  /* The Planner drawer covers the screen, tab bar included; the session
-     header's Planner button opens it. */
+  /* The Planner drawer covers the screen, tab bar included (the tab bar's
+     safe area too, so the composer keeps it); the session header's Planner
+     button opens it. */
   .pld{top:var(--vv-top,0);bottom:auto;height:var(--vv-height,100%);width:100%;border-left:0;box-shadow:none}
   .pld .pl-head{height:auto;min-height:44px;padding:env(safe-area-inset-top) 12px 0 16px}
+  .pld .pl-composer{padding-bottom:max(10px,env(safe-area-inset-bottom))}
   .main-header .btn-pld:not([hidden]){display:inline-block;margin-right:6px}
   .ab-count{right:calc(50% - 26px)}
   /* 全会话健康: fold the workspace under the name so the state column stays

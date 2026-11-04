@@ -176,8 +176,11 @@ function paintFocus() {
 }
 
 // focusInboxItem marks the open 等你 item id above the conversation (a push
-// leads to it, §15.3 ④); '' clears the mark.
+// leads to it, §15.3 ④); '' clears the mark. A session open in the middle
+// column hides the mark and takes the input box, so it goes back to the
+// Planner conversation first.
 export function focusInboxItem(id) {
+  if (id) closePlannerSession(false);
   pl.focusId = id || '';
   pl.focusAt = Date.now();
   pl.focusSeen = false;
@@ -276,11 +279,13 @@ function paintStatus() {
   }
   if (chip) { chip.textContent = text; chip.className = 'pl-status' + (cls ? ' ' + cls : ''); }
   if (note) {
+    // The drawer has no left column: point at the page instead.
+    const left = pl.host === 'drawer' ? 'Planner 页面左栏' : '左栏';
     let html = '';
     if (s && !s.enabled) {
-      html = '<b>Planner 没有开启。</b>在配置里设 <code>planner.enabled: true</code> 并重启 naozhi 后，这里是你和 Planner 的对话：早报、回执、它派出的会话与汇报。左栏的"等你"照常可用。';
+      html = '<b>Planner 没有开启。</b>在配置里设 <code>planner.enabled: true</code> 并重启 naozhi 后，这里是你和 Planner 的对话：早报、回执、它派出的会话与汇报。' + left + '的"等你"照常可用。';
     } else if (s && s.stopped) {
-      html = '<b>Planner 已停用。</b>它不再运行，也不收消息；关掉左栏的"停用 Planner"即可恢复。';
+      html = '<b>Planner 已停用。</b>它不再运行，也不收消息；关掉' + left + '的"停用 Planner"即可恢复。';
     }
     note.innerHTML = html;
     note.hidden = !html;

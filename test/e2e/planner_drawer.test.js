@@ -113,6 +113,16 @@ test('desktop: Alt+P and Esc, the workbench, a send with its receipt, a card, th
     await page.keyboard.press('Alt+KeyP');
     await expect(drawer).toBeHidden();
     await expect(page.locator('#pl-input')).toBeFocused();
+    // With a session open in the middle column, openPlannerDrawer({ item })
+    // goes back to the Planner conversation to mark it.
+    await page.locator('#pl-stream .pl-scard[data-key="' + SESSION + '"]').click();
+    await expect(page.locator('#planner-main')).toHaveClass(/pl-sess-open/);
+    await page.evaluate(() => import('/static/planner_drawer.js').then((m) => m.openPlannerDrawer({ item: 'in_n' })));
+    await expect(page.locator('#planner-main')).not.toHaveClass(/pl-sess-open/);
+    await expect(page.locator('#planner-main #pl-focus .pl-card[data-id="in_n"]')).toBeVisible();
+    await expect(page.locator('#pl-target-to')).toHaveText('→ Planner');
+    await expect(page.locator('#pl-input')).toBeFocused();
+    await expect(drawer).toBeHidden();
 
     // openPlannerDrawer marks a 等你 item above the conversation.
     await page.click('#abnav-chat');
@@ -135,6 +145,7 @@ test('planner.enabled off: the drawer explains it', async ({ page }) => {
     await expect(page.locator('#btn-pld')).toBeHidden();
     await page.keyboard.press('Alt+KeyP');
     await expect(page.locator('#planner-drawer #pl-note')).toContainText('Planner 没有开启');
+    await expect(page.locator('#planner-drawer #pl-note')).toContainText('Planner 页面左栏的"等你"');
     await expect(page.locator('#pl-input')).toBeDisabled();
   } finally {
     mock.server.close();
