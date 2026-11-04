@@ -17,7 +17,9 @@
 // The "等你" count, on the rail badge and in the left column alike, is the
 // inbox's `badge` (notify.js: decisions and questions, §10.1), seeded from
 // GET /api/inbox on every WS auth_ok and kept by inbox_count frames; the
-// list also shows the open errors and notices.
+// list also shows the open errors and notices. The 会话 view's sidebar bar
+// (side_wait.js) shows the same list and counts: waitCount, waitListHtml and
+// fetchInbox, with 'inbox:items' on nzBus after the list changes.
 // Layering: never import dashboard.js back; setActivityView is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
 import { sessionList, ui } from './state.js';
@@ -25,7 +27,7 @@ import { esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz
 import { sid } from './session_ident.js';
 import { renderEventsWithDividers } from './event_render.js';
 import { runPendingAsync } from './render_md.js';
-import { inbox, notifySupported, onInboxCount, requestNotifyPermission } from './notify.js';
+import { inbox, isLit, notifySupported, onInboxCount, requestNotifyPermission, revealFocus } from './notify.js';
 import { followWorkbenchSubject, noteWorkbenchEvent } from './workbench_panes.js';
 import { decisionActsHtml, decorateEvents, paintSessionCards, refreshHealth, setInboxItems } from './planner_cards.js';
 import { clearPending, closePlannerSession, mountComposer, notePlannerStatus } from './planner_chat.js';
@@ -100,7 +102,7 @@ function itemHtml(it) {
       ' <button type="button" class="pl-link" data-action="session-select" data-key="' + escAttr(target.key) + '" data-node="local">打开</button>'
     : (it.unit ? esc(it.unit === PLANNER_KEY ? 'Planner' : it.unit) : '');
   const acts = decisionActsHtml(it);
-  return '<div class="pl-card pl-k-' + kind + '" role="listitem" data-id="' + escAttr(it.id) + '">' +
+  return '<div class="pl-card pl-k-' + kind + (isLit(it.id) ? ' inbox-lit' : '') + '" role="listitem" data-id="' + escAttr(it.id) + '">' +
       '<div class="pl-card-top">' +
         '<span class="pl-kind">' + esc(KIND_LABEL[kind]) + '</span>' +
         (!isNaN(created) ? '<span class="pl-wait" title="' + escAttr(formatAbsTime(created)) + '">等了 ' + esc(waitedText(Date.now() - created)) + '</span>' : '') +
@@ -113,11 +115,33 @@ function itemHtml(it) {
     '</div>';
 }
 
+// waitCount is the "等你" count the left column shows.
+export function waitCount() {
+  return inbox.badge || 0;
+}
+
+// sortedOpen orders the open items: decisions first, then questions,
+// errors and notices, the oldest first within a kind.
+function sortedOpen() {
+  return pl.open.slice().sort((a, b) =>
+    ((KIND_ORDER[a.kind] ?? 3) - (KIND_ORDER[b.kind] ?? 3)) || (Date.parse(a.created) - Date.parse(b.created)));
+}
+
+// waitListHtml is the open items' cards, as the left column lists them.
+export function waitListHtml() {
+  const items = sortedOpen();
+  return items.length ? items.map(itemHtml).join('') : '<div class="pl-empty">没有等你的事</div>';
+}
+
+function noteItems() {
+  nzBus.dispatchEvent(new CustomEvent('inbox:items'));
+}
+
 // paintCounts: 答应你的 counts the open cards mounted in #pl-promise. A
 // write only on change: #pl-promise-count sits under the observer that
 // calls this.
 function paintCounts() {
-  const w = String(inbox.badge || 0);
+  const w = String(waitCount());
   const p = String(document.querySelectorAll('#pl-promise .pm-card:not(.closed)').length);
   const put = (ids, v) => ids.forEach((id) => { const el = $(id); if (el && el.textContent !== v) el.textContent = v; });
   put(['pl-wait-count', 'pl-wait-n', 'pl-strip-wait'], w);
@@ -127,11 +151,23 @@ function paintCounts() {
 function paintWaiting() {
   const box = $('pl-wait');
   if (!box) return;
-  const items = pl.open.slice().sort((a, b) =>
-    ((KIND_ORDER[a.kind] ?? 3) - (KIND_ORDER[b.kind] ?? 3)) || (Date.parse(a.created) - Date.parse(b.created)));
-  box.innerHTML = items.length ? items.map(itemHtml).join('') : '<div class="pl-empty">没有等你的事</div>';
+  box.innerHTML = waitListHtml();
   paintCounts();
-  paintInlineCards(items);
+  paintInlineCards(sortedOpen());
+  revealWaiting();
+}
+
+// revealWaiting brings the focused item into view (notify.js), unfolding
+// the phone's left block or the workbench's strip when it is folded.
+function revealWaiting() {
+  if (!inbox.focus || ui.activeView !== 'planner' || !$('pl-wait')?.querySelector('.pl-card[data-id="' + CSS.escape(inbox.focus) + '"]')) return;
+  const main = $('planner-main');
+  if (main?.classList.contains('pl-wb-open')) main.classList.add('pl-left-peek');
+  if (main && !main.classList.contains('pl-left-open')) {
+    main.classList.add('pl-left-open');
+    $('pl-left-toggle')?.setAttribute('aria-expanded', 'true');
+  }
+  revealFocus($('pl-wait'));
 }
 
 // paintInlineCards repeats the Planner's open cards (dispatch confirmations,
@@ -146,7 +182,7 @@ function paintInlineCards(items) {
   box.hidden = !html;
 }
 
-async function fetchInbox() {
+export async function fetchInbox() {
   try {
     const res = await fetchJSON(NZ_CONTRACT.API.inbox, { timeoutMs: 8000 });
     pl.open = (res && Array.isArray(res.open)) ? res.open : [];
@@ -158,6 +194,7 @@ async function fetchInbox() {
     }
   } catch { return; }
   if (ui.activeView === 'planner') { paintWaiting(); paintTools(); }
+  noteItems();
 }
 
 // ---- controls ----
@@ -422,6 +459,7 @@ nzBus.addEventListener('inbox:count', (e) => {
   paintCounts();
   if (!pl.seeding && ui.activeView === 'planner') fetchInbox();
 });
+nzBus.addEventListener('inbox:focus', revealWaiting);
 // A new socket holds no subscriptions: re-subscribe after the last event
 // taken, the history frame fills the gap.
 wsm.onReady(() => {
@@ -458,6 +496,7 @@ registerActions({
       await fetchJSON(NZ_CONTRACT.API.inbox_close, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }), timeoutMs: 8000 });
       pl.open = pl.open.filter((it) => it.id !== id);
       paintWaiting();
+      noteItems();
     } catch (e) {
       el.disabled = false;
       showToast('关闭失败：' + e.message, 'error');

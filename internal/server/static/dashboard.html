@@ -108,6 +108,21 @@
         </div>
       </div>
     </div>
+    <!-- 等你 / 答应你的 bar (side_wait.js, planner RFC §15.3 ①): the Planner
+         page's left column, unfolded in place. -->
+    <div class="side-wait" id="side-wait">
+      <button type="button" class="sw-toggle" id="sw-toggle" aria-expanded="false" aria-controls="sw-body">
+        <span class="sw-sum">等你 <b id="sw-wait-n">0</b> · 答应你的 <b id="sw-promise-n">0</b></span>
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>
+      <div class="sw-body" id="sw-body" hidden>
+        <section class="pl-group" aria-labelledby="sw-wait-h">
+          <h2 class="pl-group-h" id="sw-wait-h">等你 · <span id="sw-wait-count">0</span></h2>
+          <div class="pl-list" id="sw-wait" role="list"></div>
+        </section>
+        <section class="pl-group" aria-label="答应你的"><div id="sw-promise"></div></section>
+      </div>
+    </div>
     <!-- Node/connection picker moved into the New Session modal (renderNodePicker).
          The sidebar no longer filters by node; every connected node's sessions
          are listed together and each card carries a .sc-node badge to
@@ -395,5 +410,6 @@
 <script type="module" src="/static/files_view.js"></script>
 <script type="module" src="/static/notify.js"></script>
 <script type="module" src="/static/planner_view.js"></script>
+<script type="module" src="/static/side_wait.js"></script>
 </body>
 </html>

@@ -4,13 +4,16 @@ import (
 	"cmp"
 	"context"
 	"log/slog"
+	"net/url"
 	"os/exec"
 	"runtime"
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -96,8 +99,8 @@ func (n *Notifier) Announce(p Push) bool {
 
 // deliver sends p to both exits. The hub only queues frames; the system
 // notification runs a process, on its own goroutine so a hung one holds up
-// nothing. It carries the dashboard link, since it cannot open a session
-// itself.
+// nothing. It has no click callback, so its body ends with the dashboard
+// link to what it is about (linkFor), kept whole under the body cap.
 func (n *Notifier) deliver(p Push) {
 	if b := n.browser.Load(); b != nil {
 		(*b).Notify(p)
@@ -106,14 +109,36 @@ func (n *Notifier) deliver(p Push) {
 		return
 	}
 	body := p.Body
-	if n.cfg.Link != "" {
-		body += " " + n.cfg.Link
+	if link := linkFor(n.cfg.Link, p); link != "" {
+		// 4: the space and the "..." TruncateRunes appends.
+		body = textutil.TruncateRunes(body, bodyRunes-4-utf8.RuneCountInString(link)) + " " + link
 	}
 	go func() {
 		if err := n.cfg.System(p.Title, body); err != nil {
 			slog.Warn("notify: system notification failed", "id", p.ID, "err", err)
 		}
 	}()
+}
+
+// linkFor is base deep-linked to p (§15.3 ④), read by notify.js at load: a
+// push about a session opens it at the item's note
+// (#session=<key>&item=<id>); one about no session or the Planner opens the
+// Planner on the item (#planner&item=<id>). A link that would take over
+// half the body falls back to base.
+func linkFor(base string, p Push) string {
+	if base == "" {
+		return ""
+	}
+	frag := "planner"
+	if p.Unit != "" && p.Unit != sessionkey.PlannerMainKey {
+		frag = url.Values{"session": {p.Unit}, "item": {p.ID}}.Encode()
+	} else if p.ID != "" {
+		frag += "&" + url.Values{"item": {p.ID}}.Encode()
+	}
+	if link := base + "#" + frag; utf8.RuneCountInString(link) <= bodyRunes/2 {
+		return link
+	}
+	return base
 }
 
 // systemExit is the macOS notification centre on darwin, nil elsewhere.

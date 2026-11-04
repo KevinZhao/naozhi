@@ -371,6 +371,40 @@ func TestDecideOnce(t *testing.T) {
 	}
 }
 
+func TestLinkFor(t *testing.T) {
+	const base = "http://127.0.0.1:8180/dashboard"
+	key := "dashboard:direct:alice:general"
+	for _, tc := range []struct {
+		name, base string
+		p          Push
+		want       string
+	}{
+		{"session", base, Push{ID: "in_1", Unit: key}, base + "#item=in_1&session=dashboard%3Adirect%3Aalice%3Ageneral"},
+		{"no session", base, Push{ID: "in_2"}, base + "#planner&item=in_2"},
+		{"planner", base, Push{ID: "in_3", Unit: "planner:main"}, base + "#planner&item=in_3"},
+		{"no id", base, Push{}, base + "#planner"},
+		{"too long", base, Push{ID: "in_4", Unit: strings.Repeat("k", 200)}, base},
+		{"no base", "", Push{ID: "in_5", Unit: key}, ""},
+	} {
+		if got := linkFor(tc.base, tc.p); got != tc.want {
+			t.Errorf("%s: linkFor = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// The system notification's body keeps the whole link under the cap.
+func TestDeliverKeepsLink(t *testing.T) {
+	var body string
+	done := make(chan struct{})
+	n := New(Config{Link: "http://127.0.0.1:8180/dashboard", System: func(_, b string) error { body = b; close(done); return nil }})
+	n.deliver(Push{ID: "in_1", Unit: "dashboard:direct:alice:general", Title: "t", Body: strings.Repeat("长", 300)})
+	<-done
+	got := osascriptArgs("t", body)[8]
+	if want := linkFor(n.cfg.Link, Push{ID: "in_1", Unit: "dashboard:direct:alice:general"}); !strings.HasSuffix(got, " "+want) {
+		t.Errorf("body = %q, want it to end with %q", got, want)
+	}
+}
+
 func TestOsascriptArgs(t *testing.T) {
 	title := `x" & (do shell script "touch /tmp/pwned") & "`
 	body := "line1\nline2\x00\u202etail"
