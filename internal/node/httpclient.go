@@ -12,6 +12,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,7 +51,8 @@ type HTTPClient struct {
 	sessETag  string
 	sessCache []map[string]any
 
-	// idempotent is set once the node echoed a send's IdempotencyKeyHeader,
+	// idempotent is set once the node declared CapSendIdempotent on a
+	// /api/sessions poll (CapsHeader) or echoed a send's IdempotencyKeyHeader,
 	// i.e. it runs a TurnID once; only then is a lost answer ErrSendUnknown.
 	idempotent atomic.Bool
 }
@@ -162,12 +164,14 @@ func (n *HTTPClient) fetchSessions(ctx context.Context, hdr http.Header, cached 
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotModified && hdr != nil {
+		n.learnCaps(resp.Header)
 		return cached, nil
 	}
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 		return nil, fmt.Errorf("fetch sessions from %s: status %d", n.ID, resp.StatusCode)
 	}
+	n.learnCaps(resp.Header)
 
 	var result struct {
 		Sessions []map[string]any `json:"sessions"`
@@ -177,6 +181,20 @@ func (n *HTTPClient) fetchSessions(ctx context.Context, hdr http.Header, cached 
 	}
 	n.storeSessions(resp.Header.Get("ETag"), result.Sessions)
 	return result.Sessions, nil
+}
+
+// CapsHeader lists, comma-separated, the capabilities a node declares on its
+// /api/sessions answers, so a primary polling it knows them before the first
+// send. A node predating it sends none.
+const CapsHeader = "X-Naozhi-Caps"
+
+// learnCaps reads a /api/sessions answer's CapsHeader. It only ever sets:
+// a v0.3.0/v0.3.1 node dedups without declaring it, and what its echo taught
+// must survive the next poll. A node that stops deduping is caught by Send.
+func (n *HTTPClient) learnCaps(h http.Header) {
+	if slices.Contains(strings.Split(h.Get(CapsHeader), ","), CapSendIdempotent) {
+		n.idempotent.Store(true)
+	}
 }
 
 // SessionsContentETagPrefix opens every /api/sessions ETag that hashes the
@@ -300,8 +318,10 @@ func (n *HTTPClient) Send(ctx context.Context, req SendRequest) (SendResult, err
 		return SendResult{}, fmt.Errorf("send to %s: %w", n.ID, err)
 	}
 	defer resp.Body.Close()
-	if req.TurnID != "" && resp.Header.Get(IdempotencyKeyHeader) == req.TurnID {
-		n.idempotent.Store(true)
+	if req.TurnID != "" {
+		// An answer without the echo is a node that ignores the header,
+		// e.g. one downgraded behind the same URL.
+		n.idempotent.Store(resp.Header.Get(IdempotencyKeyHeader) == req.TurnID)
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {

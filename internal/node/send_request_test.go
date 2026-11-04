@@ -201,6 +201,78 @@ func TestHTTPClient_SendRequest(t *testing.T) {
 	}
 }
 
+// The sessions poll a primary runs from startup tells it whether a direct node
+// dedups, so the first send after a restart that times out is already
+// ErrSendUnknown. A node that does not declare it stays conservative, and one
+// that answers a send without the echo (downgraded) goes back to it.
+func TestHTTPClient_SessionsPollTeachesIdempotency(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		caps        string // CapsHeader on /api/sessions
+		notModified bool   // the declaring answer is the second poll's 304
+		downgrade   bool   // one answered send without the echo before the checked one
+		wantUnknown bool
+	}{
+		{"node declares", CapSendIdempotent, false, false, true},
+		{"declared among others", "x-future," + CapSendIdempotent, false, false, true},
+		{"declared on a 304", CapSendIdempotent, true, false, true},
+		{"node predates the header", "", false, false, false},
+		{"other caps only", "x-future", false, false, false},
+		{"declared, then a send without the echo", CapSendIdempotent, false, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var sends atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/sessions" {
+					conditional := r.Header.Get("If-None-Match") != ""
+					if tc.caps != "" && conditional == tc.notModified {
+						w.Header().Set(CapsHeader, tc.caps)
+					}
+					w.Header().Set("ETag", SessionsContentETagPrefix+`1"`)
+					if conditional {
+						w.WriteHeader(http.StatusNotModified)
+						return
+					}
+					w.Write([]byte(`{"sessions":[]}`))
+					return
+				}
+				if tc.downgrade && sends.Add(1) == 1 {
+					w.WriteHeader(http.StatusAccepted)
+					w.Write([]byte(`{"status":"accepted"}`))
+					return
+				}
+				// Read the body first: only then does the server notice the
+				// client hanging up and cancel r.Context().
+				io.Copy(io.Discard, r.Body)
+				<-r.Context().Done()
+			}))
+			defer srv.Close()
+
+			nc := newTestHTTPClient(t, srv, "")
+			polls := 1
+			if tc.notModified {
+				polls = 2
+			}
+			for range polls {
+				if _, err := nc.FetchSessions(context.Background()); err != nil {
+					t.Fatalf("FetchSessions: %v", err)
+				}
+			}
+			if tc.downgrade {
+				if _, err := nc.Send(context.Background(), SendRequest{Key: "k", Text: "hi", TurnID: "s0"}); err != nil {
+					t.Fatalf("answered Send: %v", err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			_, err := nc.Send(ctx, SendRequest{Key: "k", Text: "hi", TurnID: "s1"})
+			if err == nil || errors.Is(err, ErrSendUnknown) != tc.wantUnknown {
+				t.Fatalf("first timed-out send: err = %v, want unknown %v", err, tc.wantUnknown)
+			}
+		})
+	}
+}
+
 func TestValidTurnID(t *testing.T) {
 	for id, want := range map[string]bool{
 		"":                                  false,
