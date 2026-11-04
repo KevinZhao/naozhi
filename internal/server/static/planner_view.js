@@ -18,6 +18,11 @@
 // inbox's `badge` (notify.js: decisions and questions, §10.1), seeded from
 // GET /api/inbox on every WS auth_ok and kept by inbox_count frames; the
 // list also shows the open errors and notices.
+//
+// The middle column (#pl-center) is one component with two hosts: the page
+// and the Planner drawer (planner_drawer.js, §15.3 ②), which gets the very
+// nodes moved in. pl.host says which one runs it, so every id and handler
+// here serves both; opening the page takes it back from the drawer.
 // Layering: never import dashboard.js back; setActivityView is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
 import { sessionList, ui } from './state.js';
@@ -70,6 +75,15 @@ const pl = {
   // seeding: onInboxCount runs from our own fetch, so its inbox:count must
   // not refetch.
   seeding: false,
+  // host runs the conversation: 'page', 'drawer', or '' (not shown).
+  host: '',
+  // focusId is the 等你 item marked above the conversation; focusAt when it
+  // was asked for, inboxAt when pl.open was last read (an older list cannot
+  // tell it is gone), focusSeen once it showed.
+  focusId: '',
+  focusAt: 0,
+  inboxAt: 0,
+  focusSeen: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -132,6 +146,7 @@ function paintWaiting() {
   box.innerHTML = items.length ? items.map(itemHtml).join('') : '<div class="pl-empty">没有等你的事</div>';
   paintCounts();
   paintInlineCards(items);
+  paintFocus();
 }
 
 // paintInlineCards repeats the Planner's open cards (dispatch confirmations,
@@ -140,16 +155,41 @@ function paintWaiting() {
 function paintInlineCards(items) {
   const box = $('pl-cards');
   if (!box) return;
-  const mine = items.filter((it) => it.unit === PLANNER_KEY && it.decision);
+  const mine = items.filter((it) => it.unit === PLANNER_KEY && it.decision && it.id !== pl.focusId);
   const html = mine.length ? '<div class="pl-cards-h">待你确认 · ' + mine.length + '</div>' + mine.map(itemHtml).join('') : '';
   if (box.innerHTML !== html) box.innerHTML = html;
   box.hidden = !html;
+}
+
+// paintFocus shows the marked item, until it closes.
+function paintFocus() {
+  const box = $('pl-focus');
+  if (!box) return;
+  const it = pl.focusId ? pl.open.find((x) => x.id === pl.focusId) : null;
+  if (it) pl.focusSeen = true;
+  else if (pl.focusSeen) pl.focusId = '';
+  let html = '';
+  if (it) html = '<div class="pl-cards-h">等你</div>' + itemHtml(it);
+  else if (pl.focusId && pl.inboxAt >= pl.focusAt) html = '<div class="pl-empty">这一条已经不在"等你"里了</div>';
+  if (box.innerHTML !== html) box.innerHTML = html;
+  box.hidden = !html;
+}
+
+// focusInboxItem marks the open 等你 item id above the conversation (a push
+// leads to it, §15.3 ④); '' clears the mark.
+export function focusInboxItem(id) {
+  pl.focusId = id || '';
+  pl.focusAt = Date.now();
+  pl.focusSeen = false;
+  paintWaiting();
+  if (pl.focusId) fetchInbox();
 }
 
 async function fetchInbox() {
   try {
     const res = await fetchJSON(NZ_CONTRACT.API.inbox, { timeoutMs: 8000 });
     pl.open = (res && Array.isArray(res.open)) ? res.open : [];
+    pl.inboxAt = Date.now();
     setInboxItems(pl.open, (res && Array.isArray(res.closed)) ? res.closed : [], $('pl-stream'));
     pl.pausedUntil = res && res.paused_until ? Date.parse(res.paused_until) || 0 : 0;
     if (res && res.counts) {
@@ -157,7 +197,7 @@ async function fetchInbox() {
       try { onInboxCount(res.counts); } finally { pl.seeding = false; }
     }
   } catch { return; }
-  if (ui.activeView === 'planner') { paintWaiting(); paintTools(); }
+  if (pl.host) { paintWaiting(); paintTools(); }
 }
 
 // ---- controls ----
@@ -256,7 +296,7 @@ async function fetchStatus() {
     pl.status = await fetchJSON(NZ_CONTRACT.API.planner, { timeoutMs: 8000 });
   } catch { return; }
   notePlannerStatus(pl.status);
-  if (ui.activeView === 'planner') { paintStatus(); paintTools(); paintStreamEmpty(); }
+  if (pl.host) { paintStatus(); paintTools(); paintStreamEmpty(); }
 }
 
 function paintStreamEmpty() {
@@ -329,7 +369,9 @@ function appendEvents(events, reset) {
     if (fresh.some((e) => e.type === 'user')) clearPending(box);
     if (fresh.some((e) => e.type === 'result')) setTimeout(refreshPromises, PROMISE_REFRESH_MS);
     box.insertAdjacentHTML('beforeend', html);
-    fresh.forEach(noteWorkbenchEvent);
+    // The workbench follows planner:main on the page only; beside the
+    // drawer it shows the chat view's session.
+    if (pl.host === 'page') fresh.forEach(noteWorkbenchEvent);
   }
   decorateEvents(box);
   paintStreamEmpty();
@@ -360,48 +402,87 @@ async function loadEvents(reset) {
   const q = reset || !pl.lastTime ? '&limit=' + EVENTS_LIMIT : '&after=' + pl.lastTime;
   try {
     const events = await fetchJSON(NZ_CONTRACT.API.sessions_events + '?key=' + encodeURIComponent(PLANNER_KEY) + q, { timeoutMs: 8000 });
-    if (gen === pl.gen && ui.activeView === 'planner') appendEvents(Array.isArray(events) ? events : [], reset);
+    if (gen === pl.gen && pl.host) appendEvents(Array.isArray(events) ? events : [], reset);
   } catch { /* the next tick retries */ } finally {
     if (gen === pl.gen) pl.loading = false;
   }
 }
 
-// ---- page lifecycle ----
+// ---- the conversation and its hosts ----
 
-export function openPlannerPanel() {
-  if (ui.activeView !== 'planner') { shell.setActivityView('planner'); return; }
+function startConversation() {
   mountComposer();
-  mountPromises($('pl-promise'));
   paintStatus();
   paintWaiting();
-  paintTools();
-  refreshHealth($('planner-main'), false);
+  refreshHealth($('pl-center'), false);
   // The subscription follows the first page: its `after` is the page's end.
-  loadEvents(true).then(() => { if (ui.activeView === 'planner' && !pl.sub) subscribe(); });
+  loadEvents(true).then(() => { if (pl.host && !pl.sub) subscribe(); });
   fetchStatus();
   fetchInbox();
-  followWorkbenchSubject();
   if (!pl.timer) {
     pl.timer = setInterval(() => {
-      if (document.hidden || ui.activeView !== 'planner') return;
+      if (document.hidden || !pl.host) return;
       if (!(pl.sub === 'live' && wsm.isConnected())) loadEvents(false);
       if (++pl.ticks % SLOW_TICKS === 0) {
         paintWaiting();
         fetchStatus();
-        refreshHealth($('planner-main'), false);
-        paintSessionCards($('planner-main'));
+        refreshHealth($('pl-center'), false);
+        paintSessionCards($('pl-center'));
         if (!pl.sub) subscribe();
       }
     }, POLL_MS);
   }
 }
 
-// closePlannerPanel runs on leaving the page (ui.activeView already moved):
-// the workbench was showing planner:main, so it closes and re-points.
-export function closePlannerPanel() {
+function stopConversation() {
   if (pl.timer) { clearInterval(pl.timer); pl.timer = 0; }
   unsubscribe();
   closePlannerSession(false);
+  pl.host = '';
+  pl.focusId = '';
+  paintFocus();
+}
+
+// hostConversation moves #pl-center into box and runs it there for host;
+// the host it leaves hears it on nzBus 'planner:host' (detail.host).
+function hostConversation(host, box) {
+  const center = $('pl-center');
+  if (!center || !box) return;
+  const prev = pl.host;
+  if (prev) stopConversation();
+  if (center.parentElement !== box) box.appendChild(center);
+  pl.host = host;
+  if (prev && prev !== host) nzBus.dispatchEvent(new CustomEvent('planner:host', { detail: { host } }));
+  startConversation();
+}
+
+// attachPlannerConversation runs the conversation in the drawer's box.
+export function attachPlannerConversation(box) {
+  hostConversation('drawer', box);
+}
+
+// detachPlannerConversation stops it there and puts it back on the page.
+export function detachPlannerConversation() {
+  if (pl.host !== 'drawer') return;
+  stopConversation();
+  const center = $('pl-center');
+  if (center) $('planner-main')?.appendChild(center);
+}
+
+// ---- page lifecycle ----
+
+export function openPlannerPanel() {
+  if (ui.activeView !== 'planner') { shell.setActivityView('planner'); return; }
+  hostConversation('page', $('planner-main'));
+  mountPromises($('pl-promise'));
+  paintTools();
+  followWorkbenchSubject();
+}
+
+// closePlannerPanel runs on leaving the page (ui.activeView already moved):
+// the workbench was showing planner:main, so it closes and re-points.
+export function closePlannerPanel() {
+  if (pl.host === 'page') stopConversation();
   pl.customPause = false;
   if (workbench.isOpen()) workbench.close();
   $('planner-main')?.classList.remove('pl-wb-open', 'pl-left-peek');
@@ -420,7 +501,7 @@ nzBus.addEventListener('inbox:count', (e) => {
   const badge = $('abnav-planner-count');
   if (badge) { badge.textContent = n > 99 ? '99+' : String(n); badge.hidden = !n; }
   paintCounts();
-  if (!pl.seeding && ui.activeView === 'planner') fetchInbox();
+  if (!pl.seeding && pl.host) fetchInbox();
 });
 // A new socket holds no subscriptions: re-subscribe after the last event
 // taken, the history frame fills the gap.

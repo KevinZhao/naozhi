@@ -69,9 +69,10 @@ function refreshOutputs(auto) {
     // Newest first: the first fresh previewable one is the latest. Only the
     // chat view and the Planner page dock the workbench; elsewhere (or on a
     // phone back on the session list, which keeps the selection) it would
-    // cover the view.
-    const docks = ui.activeView === 'planner' ||
-      (ui.activeView === 'chat' && !document.body.classList.contains('mobile-list-view'));
+    // cover the view. Nor over the Planner drawer: opening it would put the
+    // drawer away mid-sentence.
+    const docks = !document.body.classList.contains('nz-pld-open') && (ui.activeView === 'planner' ||
+      (ui.activeView === 'chat' && !document.body.classList.contains('mobile-list-view')));
     const show = auto && docks && fresh.find(isPreviewableOutput);
     if (show) openOutput(show);
   }).catch(() => {});

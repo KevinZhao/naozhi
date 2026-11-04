@@ -253,7 +253,7 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .pl-act-why{font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
 .pl-act-raw{max-height:200px;overflow:auto;margin:6px 0 0;padding:6px 8px;border-radius:var(--nz-radius-sm);background:var(--nz-bg-0);font-family:var(--nz-font-mono);font-size:var(--nz-fs-xs);white-space:pre-wrap;word-break:break-all}
 .pl-sess{flex:1;min-height:0;display:flex;flex-direction:column}
-.pl-sess[hidden],.planner-main.pl-sess-open .pl-center>.pl-head,.planner-main.pl-sess-open #pl-note,.planner-main.pl-sess-open #pl-events{display:none}
+.pl-sess[hidden],.planner-main.pl-sess-open .pl-center>.pl-head,.planner-main.pl-sess-open #pl-note,.planner-main.pl-sess-open #pl-focus,.planner-main.pl-sess-open #pl-events{display:none}
 .pl-crumb{display:flex;align-items:center;gap:6px;min-width:0;font-size:var(--nz-fs-sm2);color:var(--nz-text-mute)}
 .pl-crumb b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--nz-text-strong)}
 .pl-sess-status{flex-shrink:0;display:flex;align-items:center;gap:12px;margin:10px 18px 0;padding:8px 12px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1);font-size:var(--nz-fs-sm2)}
@@ -268,6 +268,20 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 /* The rail's Planner "等你" count. */
 .ab-count{position:absolute;top:2px;right:0;min-width:16px;height:16px;padding:0 4px;border-radius:var(--nz-radius-pill);background:var(--nz-red);color:#fff;font-size:var(--nz-fs-2xs);font-weight:700;line-height:16px;text-align:center;font-variant-numeric:tabular-nums}
 .ab-count[hidden]{display:none}
+/* The Planner drawer (planner_drawer.js, §15.3 ②): the page's middle column
+   moved over the right side, above a docked pane and its seam, under the
+   dialogs; a full-screen panel on phone (responsive.css). */
+.pld{position:fixed;top:0;right:0;bottom:0;width:min(520px,92vw);z-index:calc(var(--nz-z-split-resizer) + 1);display:flex;flex-direction:column;background:var(--nz-bg-0);border-left:1px solid var(--nz-border);box-shadow:var(--nz-shadow-drawer);animation:pld-in .18s var(--nz-ease-out)}
+.pld[hidden]{display:none}
+@keyframes pld-in{from{transform:translateX(100%)}}
+.pl-head .pl-drawer-only,.pld .pl-head .pl-page-only{display:none}
+.pld .pl-head .pl-drawer-only{display:inline-flex}
+.pld .pl-head .btn-close{font-size:var(--nz-fs-lg);padding:0 2px}
+/* The 等你 item a push points at, marked above the conversation. */
+.pl-focus{flex-shrink:0;display:flex;flex-direction:column;gap:6px;margin:12px 18px 0;max-width:560px}
+.pl-focus[hidden]{display:none}
+.pl-focus .pl-card{border-color:var(--nz-accent);box-shadow:0 0 0 2px var(--nz-selected-bg)}
+.main-header .btn-pld{flex-shrink:0;display:none}
 
 .asset-sidebar{width:340px;min-width:240px;max-width:60vw;flex-shrink:0;border-right:1px solid var(--nz-border);flex-direction:column;background:var(--nz-bg-0);min-height:0}
 .asset-sb-head{flex-shrink:0;display:flex;align-items:center;gap:8px;padding:14px 16px 8px}
