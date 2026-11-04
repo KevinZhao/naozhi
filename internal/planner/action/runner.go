@@ -198,10 +198,12 @@ func (r *Runner) handle(rep reply) {
 }
 
 // checkReports reminds the Planner of the dispatched sessions that reported
-// to it during the turn and are still 进行中 with no status block for them in
-// its reply (docs/rfc/planner.md §15.4; D61: the gateway keeps the list
-// honest when the model forgets). The receipt's own turn takes no report, so
-// a report gets at most one.
+// to it during the turn and that its reply left open: the task still 进行中
+// with no status block for it, or a promise citing the task (its key in the
+// text or close_when) still open with none (docs/rfc/planner.md §15.4; D61:
+// the gateway keeps the list honest when the model forgets). It runs after
+// the reply's blocks, so what they closed is not asked about. The receipt's
+// own turn takes no report, so a report gets at most one.
 func (r *Runner) checkReports(rep reply, statused map[string]bool) {
 	if r.cfg.Reports == nil || r.cfg.Tasks == nil || rep.to.IsZero() {
 		return
@@ -210,10 +212,10 @@ func (r *Runner) checkReports(rep reply, statused map[string]bool) {
 	if len(reported) == 0 {
 		return
 	}
-	doing := map[string]string{}
+	sessions := map[string]task.Task{}
 	for _, t := range r.cfg.Tasks.List() {
-		if t.Kind == task.KindSession && t.State == task.Doing {
-			doing[t.ID] = t.Title
+		if t.Kind == task.KindSession {
+			sessions[t.ID] = t
 		}
 	}
 	var open []promise.Promise
@@ -223,20 +225,28 @@ func (r *Runner) checkReports(rep reply, statused map[string]bool) {
 	var lines []string
 	seen := map[string]bool{}
 	for _, key := range reported {
-		title, ok := doing[key]
-		if !ok || statused[key] || seen[key] {
+		t, ok := sessions[key]
+		if !ok || seen[key] {
 			continue
 		}
 		seen[key] = true
-		line := key + "（" + title + "）刚向你汇报，它在任务里仍是进行中；完成了就用 status 标 done，没完成用 doing 并说明原因"
 		var ids []string
 		for _, p := range open {
-			if strings.Contains(p.Text, key) || strings.Contains(p.CloseWhen, key) {
+			if !statused[p.ID] && (strings.Contains(p.Text, key) || strings.Contains(p.CloseWhen, key)) {
 				ids = append(ids, p.ID)
 			}
 		}
-		if len(ids) > 0 {
-			line += "；相关的承诺 " + strings.Join(ids, "、") + " 也一并处理"
+		var line string
+		switch {
+		case t.State == task.Doing && !statused[key]:
+			line = key + "（" + t.Title + "）刚向你汇报，它在任务里仍是进行中；完成了就用 status 标 done，没完成用 doing 并说明原因"
+			if len(ids) > 0 {
+				line += "；相关的承诺 " + strings.Join(ids, "、") + " 也一并处理"
+			}
+		case len(ids) > 0:
+			line = key + "（" + t.Title + "）刚向你汇报；相关的承诺 " + strings.Join(ids, "、") + " 还没完成，条件满足了就用 status 标 done"
+		default:
+			continue
 		}
 		lines = append(lines, line+"。")
 	}
