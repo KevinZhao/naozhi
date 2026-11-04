@@ -4,13 +4,16 @@ import (
 	"cmp"
 	"context"
 	"log/slog"
+	"net/url"
 	"os/exec"
 	"runtime"
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -33,6 +36,9 @@ const systemTimeout = 10 * time.Second
 const (
 	titleRunes = 80
 	bodyRunes  = 240
+	// linkRunes caps the link the body ends with, leaving the rest of
+	// bodyRunes for what happened.
+	linkRunes = 160
 )
 
 // admitLocked decides whether an item of level is pushed now, counting a
@@ -96,8 +102,8 @@ func (n *Notifier) Announce(p Push) bool {
 
 // deliver sends p to both exits. The hub only queues frames; the system
 // notification runs a process, on its own goroutine so a hung one holds up
-// nothing. It carries the dashboard link, since it cannot open a session
-// itself.
+// nothing. It has no click callback, so its body ends with the dashboard
+// link to what it is about (linkFor), kept whole under the body cap.
 func (n *Notifier) deliver(p Push) {
 	if b := n.browser.Load(); b != nil {
 		(*b).Notify(p)
@@ -106,14 +112,42 @@ func (n *Notifier) deliver(p Push) {
 		return
 	}
 	body := p.Body
-	if n.cfg.Link != "" {
-		body += " " + n.cfg.Link
+	if link := linkFor(n.cfg.Link, p); link != "" {
+		// 4: the space and the "..." TruncateRunes appends.
+		body = textutil.TruncateRunes(body, bodyRunes-4-utf8.RuneCountInString(link)) + " " + link
 	}
 	go func() {
 		if err := n.cfg.System(p.Title, body); err != nil {
 			slog.Warn("notify: system notification failed", "id", p.ID, "err", err)
 		}
 	}()
+}
+
+// linkFor is base deep-linked to p (§15.3 ④), read by notify.js at load: a
+// push about a session opens it at the item's note
+// (#session=<key>&item=<id>); one about no session or the Planner opens the
+// Planner on the item (#planner&item=<id>). A session link over linkRunes
+// falls back to the Planner on the item, whose card opens the session.
+func linkFor(base string, p Push) string {
+	if base == "" {
+		return ""
+	}
+	item := ""
+	if p.ID != "" {
+		item = "&item=" + url.QueryEscape(p.ID)
+	}
+	if p.Unit != "" && p.Unit != sessionkey.PlannerMainKey {
+		// ':' stays as is: a fragment may hold it, URLSearchParams reads it,
+		// and session keys are full of them.
+		key := strings.ReplaceAll(url.QueryEscape(p.Unit), "%3A", ":")
+		if link := base + "#session=" + key + item; utf8.RuneCountInString(link) <= linkRunes {
+			return link
+		}
+	}
+	if link := base + "#planner" + item; utf8.RuneCountInString(link) <= linkRunes {
+		return link
+	}
+	return base
 }
 
 // systemExit is the macOS notification centre on darwin, nil elsewhere.
