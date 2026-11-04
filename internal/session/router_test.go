@@ -1171,6 +1171,87 @@ func TestMaxProcs_EvictFailsWhenAllRunning(t *testing.T) {
 // evictOldest (called with the table lock held)
 // ---------------------------------------------------------------------------
 
+// StopSession closes a live process, running, idle or under a turn the close
+// cuts short, and keeps the session with the slot freed and stopped as its
+// death reason; with no live process there is nothing to stop.
+func TestStopSession(t *testing.T) {
+	cases := []struct {
+		name   string
+		proc   processIface // nil: no session
+		inTurn bool         // a Send runs when StopSession closes
+		want   bool
+	}{
+		{name: "running", proc: newRunningProc(), want: true},
+		{name: "idle", proc: newIdleProc(), want: true},
+		{name: "in a turn", proc: &cutTurnProc{fakeProcess: newRunningProc(), closed: make(chan struct{})}, inTurn: true, want: true},
+		{name: "dead", proc: newDeadProc(), want: false},
+		{name: "no session", want: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := newTestRouter(2)
+			sent := make(chan error, 1)
+			if c.proc != nil {
+				s := injectSession(r, "task:ab12", c.proc)
+				setActiveT(r, 1)
+				if c.inTurn {
+					go func() {
+						_, err := s.Send(context.Background(), "hi", nil, nil)
+						sent <- err
+					}()
+					for s.turnWaiters.Load() == 0 {
+						time.Sleep(time.Millisecond)
+					}
+				}
+			}
+			if got := r.StopSession("task:ab12"); got != c.want {
+				t.Fatalf("StopSession = %v, want %v", got, c.want)
+			}
+			if c.proc == nil {
+				return
+			}
+			if c.inTurn {
+				if err := <-sent; !errors.Is(err, clierr.ErrProcessExited) {
+					t.Fatalf("Send = %v, want ErrProcessExited", err)
+				}
+			}
+			if c.proc.Alive() {
+				t.Error("process still alive")
+			}
+			s := r.SessionFor("task:ab12")
+			if s == nil {
+				t.Fatal("session removed")
+			}
+			if c.want && s.DeathReason() != DeathReasonStopped {
+				t.Errorf("death reason = %q", s.DeathReason())
+			}
+			if active, _ := r.Stats(); c.want && active != 0 {
+				t.Errorf("active = %d, want 0", active)
+			}
+		})
+	}
+}
+
+// cutTurnProc runs a turn until it is closed, which ends the turn the way
+// the CLI exiting under it does.
+type cutTurnProc struct {
+	*fakeProcess
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (p *cutTurnProc) Send(context.Context, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
+	<-p.closed
+	return nil, clierr.ErrProcessExited
+}
+
+func (p *cutTurnProc) Close() {
+	p.once.Do(func() { close(p.closed) })
+	p.fakeProcess.Close()
+}
+
+func (p *cutTurnProc) DeathReason() string { return "cli_exited code=-1" }
+
 func TestEvictOldestSkipsRunning(t *testing.T) {
 	r := &Router{ss: newSessionTable()}
 	proc := newRunningProc()

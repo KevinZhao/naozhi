@@ -156,7 +156,7 @@ test('phone: the session header\'s Planner button opens it full screen', async (
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
   const page = await ctx.newPage();
   // A gateway line longer than the phone is wide wraps inside it.
-  const events = plannerEvents().concat({ type: 'system', time: now - 100000, summary: '待你确认：派出「iso 列出 work 目录文件」（工作区 work，模型 默认）。卡片 in_ab09wrmgkl 在「通知」里，批准后才会拉起。' });
+  const events = plannerEvents().concat({ type: 'system', time: now - 100000, summary: '派出「iso 列出 work 目录文件」失败：同时运行的会话已满（max_procs 3），等有会话结束再派' });
   const mock = await startMockServer({ ws: true, plannerEvents: events, inbox: inbox(), planner: planner() });
   try {
     await openChat(page, mock);

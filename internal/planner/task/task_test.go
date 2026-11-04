@@ -205,3 +205,36 @@ func TestBoard(t *testing.T) {
 		t.Errorf("retired after it failed: %+v", l)
 	}
 }
+
+// Stop marks a dispatched session 失败 as the user's, then stops its turn;
+// anything else is not a session to stop.
+func TestStop(t *testing.T) {
+	side := sidecar.Open(t.TempDir(), func() time.Time { return t0 })
+	if err := side.Put(sidecar.Meta{Key: "task:a", Purpose: sidecar.PurposeTask, Title: "iso sleep"}); err != nil {
+		t.Fatal(err)
+	}
+	proms := promise.New(promise.Config{})
+	p, _ := proms.Add(promise.Promise{Text: "明早提醒你"})
+	var stopped []string
+	b := New(Config{Sessions: side, Promises: proms, Now: func() time.Time { return t0 },
+		Stop: func(key, title string) { stopped = append(stopped, key+"="+title) }})
+	cases := []struct {
+		id   string
+		want error
+	}{
+		{"task:a", nil},
+		{"task:nope", ErrNotFound},
+		{p.ID, ErrNotFound},
+	}
+	for _, c := range cases {
+		if err := b.Stop(c.id); !errors.Is(err, c.want) {
+			t.Errorf("Stop(%s) = %v, want %v", c.id, err, c.want)
+		}
+	}
+	if !slices.Equal(stopped, []string{"task:a=iso sleep"}) {
+		t.Errorf("stopped %q", stopped)
+	}
+	if l := b.List(); len(l) != 2 || l[0].ID != "task:a" || l[0].State != Failed || l[0].By != ByUser || l[0].Why != StoppedWhy {
+		t.Errorf("list = %+v", l)
+	}
+}

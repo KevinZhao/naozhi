@@ -19,8 +19,8 @@ import (
 // errPlannerNamespace answers a dashboard or relayed send to a planner: key.
 var errPlannerNamespace = sendUsageError("Planner 的消息请从 Planner 页面发送")
 
-// errTaskNamespace answers a send creating a task: session: only an approved
-// dispatch does.
+// errTaskNamespace answers a send creating a task: session: only a dispatch
+// block does.
 var errTaskNamespace = sendUsageError("task: 会话只能由 Planner 派出")
 
 var (

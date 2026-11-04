@@ -3,8 +3,9 @@
 //
 //	GET  /api/tasks        the dispatched sessions and the promises not archived, by section
 //	POST /api/tasks/state  set a task's state ({"id","state":"doing"|"done"}) as the user
+//	POST /api/tasks/stop   stop a dispatched session ({"id"}): its process, and 失败 as the user's
 //
-// Both sit behind the /api/* auth middleware: a request here is the user.
+// All sit behind the /api/* auth middleware: a request here is the user.
 package tasks
 
 import (
@@ -19,6 +20,7 @@ import (
 type Source interface {
 	List() []task.Task
 	Set(id string, state task.State, by task.By, why string) error
+	Stop(id string) error
 }
 
 // Handler serves the endpoints. A nil source lists nothing and refuses
@@ -65,7 +67,28 @@ func (h *Handler) HandleState(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "tasks not available", http.StatusServiceUnavailable)
 		return
 	}
-	switch err := h.src.Set(req.ID, req.State, task.ByUser, ""); {
+	reply(w, h.src.Set(req.ID, req.State, task.ByUser, ""))
+}
+
+// HandleStop serves POST /api/tasks/stop: the 停止 of a dispatched session.
+func (h *Handler) HandleStop(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, httputil.MaxRequestBodyBytes)
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := httputil.DecodeJSONBody(r, &req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if h.src == nil {
+		http.Error(w, "tasks not available", http.StatusServiceUnavailable)
+		return
+	}
+	reply(w, h.src.Stop(req.ID))
+}
+
+func reply(w http.ResponseWriter, err error) {
+	switch {
 	case err == nil:
 		httputil.WriteOK(w)
 	case errors.Is(err, task.ErrNotFound):

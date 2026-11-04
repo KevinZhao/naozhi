@@ -165,6 +165,39 @@ func (r *Router) RemoveAsync(key string) bool {
 	return true
 }
 
+// StopSession closes key's CLI process and keeps the session, dead: its
+// history stays and the next message resumes it. Unlike an interrupt it also
+// ends what the CLI runs in the background (a Bash run_in_background, whose
+// completion would otherwise start a turn). False when key has no live
+// process. Its death reason says it was stopped, not that it failed, also
+// for a turn the close cuts short (mapSendError keeps it). The close runs
+// outside the lock and the count is recounted, as in evictOldest; the
+// bounded socket wait keeps a resume right after off the shim's "refusing
+// to clobber" guard, as in ReleaseIdleProcess.
+func (r *Router) StopSession(key string) bool {
+	stopped := false
+	r.ss.Update(func(tx sessTx) {
+		s := tx.Get(key)
+		if s == nil || !s.isAlive() {
+			return
+		}
+		storeAtomicString(&s.deathReason, DeathReasonStopped)
+		tx.Unlocked(s.loadProcess().Close)
+		tx.Broadcast()
+		r.countActive(tx)
+		tx.MarkChanged()
+		stopped = true
+	})
+	if stopped {
+		if !waitSocketGoneForKey(key) {
+			slog.Warn("session stop: shim socket still bound after close; the next spawn may be refused", "key", key)
+		}
+		logSessionLifecycle("stopped", key)
+		r.notifyChange()
+	}
+	return stopped
+}
+
 // dropEventLogForKey removes a session's persisted event log files (.log +
 // .idx) so a future session reusing the key starts empty; best-effort, a
 // failed drop only leaves stale bytes. Safe with no persister or

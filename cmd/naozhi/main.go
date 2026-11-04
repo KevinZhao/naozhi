@@ -458,12 +458,14 @@ func main() {
 	// health machine's Watch pokes it, so healthMon is set by then.
 	var healthMon *health.Machine
 	// The 任务 (§15.4): the dispatched sessions and the promises, their
-	// states by health, the Planner's status blocks and the user.
+	// states by health, the Planner's status blocks and the user, who can
+	// stop a dispatched session.
 	tasks := task.New(task.Config{
 		Sessions: sidecars,
 		Promises: promises,
 		Health:   func() health.Snapshot { return healthMon.Snapshot() },
 		Journal:  plannerState.Journal,
+		Stop:     wireup.StopTask(router, func(key string) { srv.DropPlannerQueue(key) }, plannerAgent.Tell),
 	})
 	briefer := brief.New(brief.Config{
 		Journal: plannerState.Journal,
@@ -602,7 +604,7 @@ func main() {
 	promises.SetReminder(wireup.PromiseReminder{Notify: notifier, Note: plannerAgent.Note})
 	go promises.Run(ctx)
 	// The Planner's action blocks (§6.2): parsed from planner:main's turn
-	// results; an approved dispatch starts a task: session, and a task left
+	// results; a dispatch starts a task: session at once (D88), and a task left
 	// 进行中 after it reported gets the Planner a receipt.
 	actions := action.New(action.Config{
 		Planner:    agent.Key,

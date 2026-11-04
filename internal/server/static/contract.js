@@ -104,10 +104,11 @@ export const NZ_CONTRACT = Object.freeze({
     system_update_apply: '/api/system/update/apply',
     tasks: '/api/tasks',
     tasks_state: '/api/tasks/state',
+    tasks_stop: '/api/tasks/stop',
     transcribe: '/api/transcribe',
   },
   ENUMS: {
-    DEATH_REASON: ['cli_exited', 'evicted', 'idle_timeout', 'killed', 'no_output_timeout', 'readloop_panic', 'released', 'shim_eof', 'shim_oversize_then_eof', 'shim_oversize_then_read_error', 'shim_read_error', 'total_timeout'],
+    DEATH_REASON: ['cli_exited', 'evicted', 'idle_timeout', 'killed', 'no_output_timeout', 'readloop_panic', 'released', 'shim_eof', 'shim_oversize_then_eof', 'shim_oversize_then_read_error', 'shim_read_error', 'stopped', 'total_timeout'],
     SESSION_STATE: ['dead', 'ready', 'running'],
     EVENT_TYPE: ['user', 'text', 'thinking', 'tool_use', 'tool_result', 'agent', 'todo', 'ask_question', 'task_start', 'task_progress', 'task_done', 'result', 'system', 'persist_gap', 'peer_message', 'peer_hold', 'permission_denied', 'model_refusal'],
     EVENT_TYPE_INTERNAL: ['tool_use', 'agent', 'task_start', 'task_progress', 'task_done', 'result'],

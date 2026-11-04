@@ -15,4 +15,7 @@ const (
 	// DeathReasonReleased marks an exempt session whose idle process was
 	// closed after its run (ReleaseIdleProcess); the next run resumes it.
 	DeathReasonReleased = "released"
+	// DeathReasonStopped marks a session the user stopped (StopSession); the
+	// next message resumes it.
+	DeathReasonStopped = "stopped"
 )

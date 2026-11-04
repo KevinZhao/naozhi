@@ -2,12 +2,8 @@
 // raw text (docs/rfc/planner.md §6.2, §10 D77, §10.1; §15.1 PR ⑬):
 //
 //   - action blocks (```naozhi-action fences) become readable cards. A
-//     dispatch card shows the state of its confirmation, the inbox decision
-//     item the left column's 通知 lists, and answers it with the same
-//     /api/inbox/decide action. The item is the dispatch decision whose
-//     payload carries the block's title and message (the gateway's request
-//     as proposed), the newest when one was proposed twice; once approved,
-//     its payload's key is the session it started. A block that is not
+//     dispatch runs at once (D88): the gateway's line after the reply says
+//     已派出 with the session's card, or why it failed. A block that is not
 //     JSON of a known type shows as 看不懂; whether a block runs is the
 //     gateway's call, not this reading's.
 //   - sessions the conversation names — a handed-over session
@@ -36,8 +32,6 @@ const pc = {
   health: new Map(), // unit id → health.Unit
   healthAt: 0,
   healthLoading: false,
-  inboxOpen: [],
-  inboxClosed: [],
 };
 
 // ---- session cards ----
@@ -131,7 +125,6 @@ function mentionedKeys(ev) {
 
 // ---- action blocks (§6.2) ----
 
-const ACTION_LABEL = { approve: '批准', reject: '驳回' };
 const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask', 'status']);
 const STATUS_LABEL = { done: '已完成', doing: '进行中', failed: '失败' };
 
@@ -139,13 +132,13 @@ const isStr = (v) => typeof v === 'string';
 const str = (v) => (isStr(v) ? v : '');
 
 // decisionActsHtml is an item's answer buttons (a decision's actions, or a
-// Planner question's options, §6.2 ask); the left column's card and the
-// conversation's dispatch card share it.
+// Planner question's options, §6.2 ask): the left column's card and the
+// conversation's repeat of it share it.
 export function decisionActsHtml(it) {
   if (!it || !it.decision || !Array.isArray(it.decision.actions)) return '';
   return '<div class="pl-card-acts">' + it.decision.actions.map((a, i) =>
     '<button type="button" class="pl-btn' + (i === 0 ? ' pri' : '') + '" data-action="planner-inbox-decide" data-id="' + escAttr(it.id) + '" data-act="' + escAttr(a) + '">' +
-      esc(ACTION_LABEL[a] || a) + '</button>').join('') + '</div>';
+      esc(a) + '</button>').join('') + '</div>';
 }
 
 // parseAction reads a block for display only: one JSON object of a known
@@ -178,10 +171,9 @@ function actionCardHtml(raw) {
   }
   if (a.type === 'dispatch') {
     const title = str(a.title);
-    return '<div class="pl-act pl-act-dispatch" data-title="' + escAttr(title.trim()) + '" data-message="' + escAttr(str(a.message).trim()) + '">' +
-      '<div class="pl-act-h">派活提议' + (title ? ' · ' + esc(title) : '') + '</div>' +
+    return '<div class="pl-act pl-act-dispatch"><div class="pl-act-h">派出会话' + (title ? ' · ' + esc(title) : '') + '</div>' +
       rowsHtml([['工作区', str(a.workspace)], ['模型', str(a.model)], ['第一条消息', str(a.message)]]) +
-      '<div class="pl-act-state"></div></div>';
+      '<div class="pl-act-note">派出后直接执行，可在"任务"里停止</div></div>';
   }
   if (a.type === 'promise') {
     return '<div class="pl-act pl-act-promise"><div class="pl-act-h">登记承诺</div>' +
@@ -200,43 +192,6 @@ function actionCardHtml(raw) {
     '<div class="pl-act-q">' + esc(str(a.question)) + '</div>' +
     (opts ? '<div class="pl-act-opts">' + opts + '</div>' : '') +
     '<div class="pl-act-note">在"通知"里回答</div></div>';
-}
-
-// setInboxItems takes the inbox the left column shows (open and recently
-// closed) and repaints the dispatch cards under root from it.
-export function setInboxItems(open, closed, root) {
-  pc.inboxOpen = open || [];
-  pc.inboxClosed = closed || [];
-  paintDispatchCards(root);
-}
-
-// dispatchItem is the decision item a dispatch block with this title and
-// message opened, open or recently closed: the newest, an open one first.
-function dispatchItem(title, message) {
-  if (!title) return null;
-  const is = (it) => it.kind === 'decision' && it.decision && it.decision.handler === 'dispatch' &&
-    it.decision.payload && it.decision.payload.title === title && it.decision.payload.message === message;
-  const newest = (list) => list.filter(is).sort((a, b) => Date.parse(b.created) - Date.parse(a.created))[0];
-  return newest(pc.inboxOpen) || newest(pc.inboxClosed) || null;
-}
-
-function dispatchStateHtml(it) {
-  if (!it) return '<span class="pl-act-note">状态未知：确认卡片不在"通知"里（还没生成，或已归档）</span>';
-  if (it.state === 'open') return decisionActsHtml(it) + '<span class="pl-act-note">"通知"里是同一张</span>';
-  const answer = it.decision.answer;
-  const label = answer === 'approve' ? '已批准' : answer === 'reject' ? '已驳回' : '已关闭';
-  const key = it.decision.payload && it.decision.payload.key;
-  return '<span class="pl-act-done' + (answer === 'approve' ? ' ok' : '') + '">' + label + '</span>' +
-    (answer === 'approve' && isStr(key) && key ? sessionCardHtml(key) : '');
-}
-
-function paintDispatchCards(root) {
-  if (!root) return;
-  root.querySelectorAll('.pl-act-dispatch').forEach((card) => {
-    const box = card.querySelector('.pl-act-state');
-    // Answering disables the buttons; their state repaints from the refetch.
-    if (box) box.innerHTML = dispatchStateHtml(dispatchItem(card.dataset.title, card.dataset.message));
-  });
 }
 
 // ---- decoration ----
@@ -266,7 +221,6 @@ export function decorateEvents(root) {
     }
     if (ev.matches('.text')) foldKeys(ev, new Set([...carded, ...keys]));
   });
-  paintDispatchCards(root);
 }
 
 // foldKeys drops from a reply the backticked keys it names sessions by

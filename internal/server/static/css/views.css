@@ -146,7 +146,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .tk-open{font-weight:600;text-align:left;overflow-wrap:anywhere}
 .tk-foot{display:flex;align-items:flex-end;gap:8px;margin-top:2px}
 .tk-meta{flex:1;min-width:0;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);overflow-wrap:anywhere}
-.tk-menu,.tk-reopen{flex-shrink:0}
+.tk-menu,.tk-reopen,.tk-stop{flex-shrink:0}
 .tk-menu{padding:2px 6px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);background:var(--nz-bg-0);color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-xs);cursor:pointer}
 .tk-menu:disabled{opacity:.55;cursor:default}
 /* 通知 / 任务 bar atop the 会话 sidebar (side_wait.js): one thin dim
@@ -265,13 +265,7 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .pl-act-rows{display:grid;grid-template-columns:auto 1fr;gap:3px 10px;margin:0}
 .pl-act-rows dt{font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
 .pl-act-rows dd{margin:0;white-space:pre-wrap;word-break:break-word}
-.pl-act-state{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:8px}
-.pl-act-state .pl-card-acts{margin-top:0}
-.pl-act-state .pl-scard{margin-top:2px}
-.pl-act-note{font-size:var(--nz-fs-xs);color:var(--nz-text-dim)}
-.pl-act-promise .pl-act-note,.pl-act-ask .pl-act-note,.pl-act-status .pl-act-note{display:block;margin-top:6px}
-.pl-act-done{font-size:var(--nz-fs-xs);font-weight:600;color:var(--nz-text-mute)}
-.pl-act-done.ok{color:var(--nz-green)}
+.pl-act-note{display:block;margin-top:6px;font-size:var(--nz-fs-xs);color:var(--nz-text-dim)}
 .pl-act-q{word-break:break-word}
 .pl-act-opts{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
 .pl-act-opt{padding:2px 8px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);font-size:var(--nz-fs-xs)}

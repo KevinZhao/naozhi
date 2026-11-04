@@ -92,8 +92,13 @@ func (s *ManagedSession) PassthroughDepth() int {
 }
 
 // mapSendError translates Process-level errors into ManagedSession
-// deathReason bookkeeping. Shared between Send and SendPassthrough.
+// deathReason bookkeeping. Shared between Send and SendPassthrough. A
+// session the user stopped keeps DeathReasonStopped: StopSession closes the
+// process under a running turn, whose error is that close, not a failure.
 func (s *ManagedSession) mapSendError(proc processIface, err error) {
+	if loadAtomicString(&s.deathReason) == DeathReasonStopped {
+		return
+	}
 	switch {
 	case errors.Is(err, clierr.ErrNoOutputTimeout):
 		storeAtomicString(&s.deathReason, "no_output_timeout")

@@ -19,29 +19,27 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
-	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// Decision handlers the runner registers with the inbox.
-const (
-	HandlerDispatch = "dispatch"
-	HandlerAsk      = "ask"
-)
+// HandlerAsk is the decision handler the runner registers with the inbox.
+const HandlerAsk = "ask"
+
+// handlerDispatch named the dispatch confirmation cards before D88; New
+// closes the ones a previous run left open, nothing answers them now.
+const handlerDispatch = "dispatch"
 
 const (
 	// queueLen bounds the replies waiting to be run; past it a reply's
 	// blocks are dropped (logged), never the read loop blocked.
 	queueLen = 16
-	// spawnTimeout bounds an approved dispatch's spawn.
+	// spawnTimeout bounds a dispatch's spawn.
 	spawnTimeout = time.Minute
 	// rawRunes caps a refused block as shown in the conversation.
 	rawRunes = 600
-	// messagePreviewRunes caps the first message on a confirmation card.
-	messagePreviewRunes = 300
 )
 
-// Spawn is an approved dispatch as the gateway starts it.
+// Spawn is a dispatch as the gateway starts it.
 type Spawn struct {
 	// Dir is the workspace's directory on this node.
 	Dir     string
@@ -71,14 +69,14 @@ type Config struct {
 	// Reports are the senders (session keys) of the cross-session messages
 	// that reached the Planner in (from, to]; nil checks none.
 	Reports func(from, to time.Time) []string
-	// Ctx bounds approved dispatches' spawns; nil is Background.
+	// Ctx bounds dispatches' spawns; nil is Background.
 	Ctx context.Context
 	// Now is the wall clock; nil is time.Now.
 	Now func() time.Time
 }
 
 // Runner runs the action blocks of the Planner's replies and applies the
-// user's answers to the cards they open.
+// user's answers to the questions they ask.
 type Runner struct {
 	cfg Config
 	ch  chan reply
@@ -95,24 +93,11 @@ type reply struct {
 	from, to time.Time
 }
 
-// dispatchCard is a dispatch card's decision payload: the request as
-// resolved when it was proposed. Key is the task: key it starts once
-// approved; the conversation's card finds its confirmation by Title and
-// Message, and opens Key.
-type dispatchCard struct {
-	Key           string `json:"key,omitempty"`
-	Workspace     string `json:"workspace"`
-	WorkspaceName string `json:"workspace_name"`
-	Title         string `json:"title"`
-	Model         string `json:"model,omitempty"`
-	Message       string `json:"message"`
-}
-
 type askCard struct {
 	Question string `json:"question"`
 }
 
-// New returns a Runner and registers its decision handlers with cfg.Inbox.
+// New returns a Runner and registers its decision handler with cfg.Inbox.
 func New(cfg Config) *Runner {
 	if cfg.Ctx == nil {
 		cfg.Ctx = context.Background()
@@ -124,8 +109,13 @@ func New(cfg Config) *Runner {
 	// previous run's to check.
 	r := &Runner{cfg: cfg, ch: make(chan reply, queueLen), last: cfg.Now()}
 	if cfg.Inbox != nil {
-		cfg.Inbox.HandleDecisions(HandlerDispatch, r.decideDispatch)
 		cfg.Inbox.HandleDecisions(HandlerAsk, r.decideAsk)
+		open, _ := cfg.Inbox.List(0)
+		for _, it := range open {
+			if it.Decision != nil && it.Decision.Handler == handlerDispatch {
+				_ = cfg.Inbox.Dismiss(it.ID)
+			}
+		}
 	}
 	return r
 }
@@ -181,7 +171,7 @@ func (r *Runner) handle(rep reply) {
 		var err error
 		switch {
 		case b.Dispatch != nil:
-			err = r.propose(*b.Dispatch)
+			r.dispatch(*b.Dispatch)
 		case b.Promise != nil:
 			err = r.promise(*b.Promise)
 		case b.Ask != nil:
@@ -296,78 +286,44 @@ func (r *Runner) resolve(ref string) (workspace.Workspace, string, error) {
 	return w, dir, nil
 }
 
-// propose opens the confirmation card of a dispatch.
-func (r *Runner) propose(d Dispatch) error {
-	if r.cfg.Inbox == nil || r.cfg.Spawn == nil {
-		return errors.New("派活没有接通")
-	}
-	w, _, err := r.resolve(d.Workspace)
+// dispatch starts a dispatch's task: session at once (D88): no card waits
+// on the user, who can stop it from 任务. Either way the Planner gets a
+// receipt and the conversation a line.
+func (r *Runner) dispatch(d Dispatch) {
+	key, wsName, err := r.spawn(d)
 	if err != nil {
-		return err
+		r.note("派出「" + d.Title + "」失败：" + err.Error())
+		r.tell("派出「" + d.Title + "」失败，没有拉起会话：" + err.Error())
+		return
 	}
-	card := dispatchCard{Key: sidecar.TaskKey(), Workspace: w.ID, WorkspaceName: w.Name, Title: d.Title, Model: d.Model, Message: d.Message}
-	payload, err := json.Marshal(card)
-	if err != nil {
-		return err
-	}
-	it, _ := r.cfg.Inbox.Add(notify.Item{
-		Kind:     notify.KindDecision,
-		Unit:     r.cfg.Planner,
-		WS:       w.ID,
-		Title:    "派出会话：" + d.Title,
-		Why:      "工作区 " + w.Name + " · 模型 " + modelLabel(d.Model) + " · 第一条消息：" + textutil.TruncateRunes(d.Message, messagePreviewRunes),
-		Source:   "dispatch:" + requestID(),
-		Decision: &notify.Decision{Handler: HandlerDispatch, Payload: payload, Actions: []notify.Action{notify.ActionApprove, notify.ActionReject}},
-	})
-	r.note("待你确认：派出「" + d.Title + "」（工作区 " + w.Name + "，模型 " + modelLabel(d.Model) + "）。卡片 " + it.ID + " 在「通知」里，批准后才会拉起。")
-	return nil
+	r.note("已派出：" + d.Title + "（" + key + "）")
+	r.tell("已派出：" + d.Title + "（" + key + "），工作区 " + wsName + "。它的跨会话名字是「" + d.Title + "」（重名时 CC 会加短 ID，以 ListAgents 为准）。用 notify_when_idle 订阅它，做完后在对话里告诉用户结果。")
 }
 
-func modelLabel(m string) string {
-	if m == "" {
-		return "默认"
+// spawn records a new task: session's sidecar and starts it in the
+// workspace's directory; a start that fails leaves no sidecar behind.
+func (r *Runner) spawn(d Dispatch) (key, wsName string, err error) {
+	if r.cfg.Spawn == nil || r.cfg.Sessions == nil {
+		return "", "", errors.New("派活没有接通")
 	}
-	return m
-}
-
-// decideDispatch applies the user's answer to a dispatch card. The card's
-// workspace is resolved again: it may have moved since the proposal.
-func (r *Runner) decideDispatch(it notify.Item, a notify.Action) error {
-	var c dispatchCard
-	if it.Decision == nil || json.Unmarshal(it.Decision.Payload, &c) != nil || c.Title == "" {
-		return errors.New("dispatch card: unreadable payload")
-	}
-	if a == notify.ActionReject {
-		r.note("你驳回了派出「" + c.Title + "」。")
-		r.tell("用户驳回了你提议派出的「" + c.Title + "」（卡片 " + it.ID + "），没有拉起会话。")
-		return nil
-	}
-	_, dir, err := r.resolve(c.Workspace)
+	w, dir, err := r.resolve(d.Workspace)
 	if err != nil {
-		r.note("派出「" + c.Title + "」失败：" + err.Error())
-		return err
+		return "", "", err
 	}
-	key := c.Key
-	if !sessionkey.IsTaskKey(key) {
-		key = sidecar.TaskKey()
-	}
+	key = sidecar.TaskKey()
 	if err := r.cfg.Sessions.Put(sidecar.Meta{
-		Key: key, Purpose: sidecar.PurposeTask, Parent: r.cfg.Planner, Title: c.Title, Workspace: c.Workspace,
-		Dir: dir, Model: c.Model,
+		Key: key, Purpose: sidecar.PurposeTask, Parent: r.cfg.Planner, Title: d.Title, Workspace: w.ID,
+		Dir: dir, Model: d.Model,
 	}); err != nil {
-		r.note("派出「" + c.Title + "」失败：记不下会话信息（" + err.Error() + "）")
-		return err
+		return "", "", fmt.Errorf("记不下会话信息（%v）", err)
 	}
 	ctx, cancel := context.WithTimeout(r.cfg.Ctx, spawnTimeout)
 	defer cancel()
-	if err := r.cfg.Spawn(ctx, key, Spawn{Dir: dir, Title: c.Title, Model: c.Model, Message: c.Message}); err != nil {
+	if err := r.cfg.Spawn(ctx, key, Spawn{Dir: dir, Title: d.Title, Model: d.Model, Message: d.Message}); err != nil {
 		r.cfg.Sessions.Remove(key)
-		r.note("派出「" + c.Title + "」失败：" + err.Error())
-		return err
+		return "", "", err
 	}
-	r.note("已派出：" + c.Title + "（" + key + "）")
-	r.tell("已派出：" + c.Title + "（" + key + "），工作区 " + c.WorkspaceName + "。它的跨会话名字是「" + c.Title + "」（重名时 CC 会加短 ID，以 ListAgents 为准）。用 notify_when_idle 订阅它，做完后在对话里告诉用户结果。")
-	return nil
+	return key, w.Name, nil
 }
 
 // promise registers a promise the Planner made.
