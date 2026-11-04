@@ -15,9 +15,9 @@ const promiseTitleRunes = 60
 // conversation; closing the promise closes its item.
 type PromiseReminder struct {
 	Notify *notify.Notifier
-	// Dialog writes text into a session's conversation history as a gateway
-	// event (Server.PlannerNote); nil skips it.
-	Dialog func(key, text string)
+	// Note writes text into the Planner conversation as a gateway event
+	// (agent.Agent.Note); nil skips it.
+	Note func(text string)
 }
 
 func promiseSource(p promise.Promise) string { return "promise:" + p.ID }
@@ -33,8 +33,8 @@ func (r PromiseReminder) Due(p promise.Promise) {
 		r.Notify.Add(notify.Item{Kind: notify.KindNotice, Level: notify.LevelTimely, Uncapped: true,
 			Source: promiseSource(p), Title: "到点提醒：" + textutil.TruncateRunes(p.Text, promiseTitleRunes), Why: why})
 	}
-	if r.Dialog != nil {
-		r.Dialog(agent.Key, "到点提醒（答应你的，到期 "+at+"）："+p.Text)
+	if r.Note != nil {
+		r.Note("到点提醒（答应你的，到期 " + at + "）：" + p.Text)
 	}
 }
 

@@ -21,6 +21,7 @@ import (
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/planner/journal"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -108,6 +109,9 @@ type Turns interface {
 	// PlannerReceipt shows text in key's conversation as a system event,
 	// never sent to the CLI.
 	PlannerReceipt(key, text string)
+	// PlannerNote writes text into key's conversation history as a system
+	// event, never sent to the CLI; the history is in memory.
+	PlannerNote(key, text string)
 	// DropPlannerQueue discards the messages queued for key's next turn.
 	DropPlannerQueue(key string)
 }
@@ -127,6 +131,9 @@ type Config struct {
 	Sessions  Sessions
 	// Workspaces names a workspace ID in the snapshot; nil leaves the ID.
 	Workspaces *workspace.Registry
+	// Journal keeps the gateway's notes in the conversation (Note) across
+	// restarts; nil keeps them in memory only.
+	Journal *journal.Journal
 	// Waiting and Promises feed the snapshot; nil leaves their section out.
 	Waiting  func() []Waiting
 	Promises func() []Promise
@@ -650,7 +657,7 @@ func (a *Agent) Snapshot() string {
 	a.mu.Lock()
 	snap := a.health
 	a.mu.Unlock()
-	in := snapshotInput{Now: a.cfg.Now(), Label: a.cfg.Sessions.Label}
+	in := snapshotInput{Now: a.cfg.Now(), Label: a.cfg.Sessions.Label, Name: a.cfg.Sessions.Name}
 	if snap != nil {
 		in.Units = snap().Units
 	}
@@ -688,8 +695,8 @@ func (a *Agent) Status() Status {
 }
 
 // SetStopped is the runtime switch, persisted in the state root. Stopping
-// ends the process once its turn is over and keeps the conversation;
-// resuming revives it at once.
+// ends an idle process at once, a busy one once its turn is over, and keeps
+// the conversation; resuming revives it at once.
 func (a *Agent) SetStopped(stopped bool) error {
 	if !a.cfg.Enabled {
 		return ErrOff
@@ -700,6 +707,76 @@ func (a *Agent) SetStopped(stopped bool) error {
 	a.saveLocked()
 	a.mu.Unlock()
 	slog.Info("planner: switched", "stopped", stopped)
+	// Released here so the Status the switch answers with is its outcome.
+	if stopped && a.cfg.Sessions.State(Key).Alive {
+		a.cfg.Sessions.Release(Key)
+	}
 	a.poke()
 	return nil
+}
+
+// Note sizes: a note's cap (a promise's text is at most 500 runes), and how
+// far back and how many Notes returns.
+const (
+	noteBytes     = 2048
+	notesLookback = 7 * 24 * time.Hour
+	notesMax      = 200
+)
+
+// Note is a line the gateway wrote into the Planner conversation for the
+// user: a due reminder, a dispatch's outcome, a refused action block.
+type Note struct {
+	Time time.Time `json:"time"`
+	Text string    `json:"text"`
+}
+
+type noteData struct {
+	Text string `json:"text"`
+}
+
+// Note shows text in the conversation, never sent to the CLI, and journals
+// it: the conversation's history is in memory, so the Planner page merges
+// the journaled notes back in (Notes) after a restart.
+func (a *Agent) Note(text string) {
+	text = osutil.SanitizeForLog(text, noteBytes)
+	if text == "" {
+		return
+	}
+	if j := a.cfg.Journal; j != nil {
+		data, err := json.Marshal(noteData{Text: text})
+		if err == nil {
+			err = j.Append(journal.Entry{TS: a.cfg.Now(), Kind: journal.KindDialog, Unit: Key, Data: data})
+		}
+		if err != nil {
+			slog.Warn("planner: journal a note", "err", err)
+		}
+	}
+	a.mu.Lock()
+	turns := a.turns
+	a.mu.Unlock()
+	if turns != nil {
+		turns.PlannerNote(Key, text)
+	}
+}
+
+// Notes returns the journaled notes of the last notesLookback, oldest first,
+// at most notesMax.
+func (a *Agent) Notes() ([]Note, error) {
+	out := []Note{}
+	if a.cfg.Journal == nil {
+		return out, nil
+	}
+	now := a.cfg.Now()
+	entries, err := a.cfg.Journal.Read(now.Add(-notesLookback), now.Add(time.Minute))
+	for _, e := range entries {
+		var d noteData
+		if e.Kind != journal.KindDialog || e.Unit != Key || json.Unmarshal(e.Data, &d) != nil || d.Text == "" {
+			continue
+		}
+		out = append(out, Note{Time: e.TS, Text: d.Text})
+	}
+	if len(out) > notesMax {
+		out = out[len(out)-notesMax:]
+	}
+	return out, err
 }

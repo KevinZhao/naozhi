@@ -73,8 +73,8 @@ test('desktop: badge, 等你 cards, stream, controls, and the workbench folds th
     await expect(page.locator('#abnav-planner')).toHaveAttribute('aria-pressed', 'true');
     const cards = page.locator('#pl-wait .pl-card');
     await expect(cards).toHaveCount(3);
-    // The column counts what the badge counts (decisions and questions).
-    await expect(page.locator('#pl-wait-count')).toHaveText('2');
+    // The column counts what it lists; the badge only decisions and questions.
+    await expect(page.locator('#pl-wait-count')).toHaveText('3');
     // Decisions first, then questions, then errors.
     await expect(cards.nth(0).locator('.pl-kind')).toHaveText('决定');
     await expect(cards.nth(0).locator('.pl-card-acts button')).toHaveText(['批准', '驳回']);
@@ -101,6 +101,7 @@ test('desktop: badge, 等你 cards, stream, controls, and the workbench folds th
     await expect(cards).toHaveCount(2);
     expect(mock.inboxCalls[0]).toEqual({ path: '/api/inbox/close', method: 'POST', body: { id: 'in_err' } });
     await expect(page.locator('#abnav-planner-count')).toHaveText('2');
+    await expect(page.locator('#pl-wait-count')).toHaveText('2');
     // Another tab answered the decision: the count frame refetches the list.
     box.open = box.open.filter((it) => it.id !== 'in_d');
     box.counts = { open: 1, badge: 1 };
@@ -180,7 +181,7 @@ test('phone: the left column is a collapsible block above the stream', async ({ 
     await page.click('#abnav-planner');
     const toggle = page.locator('#pl-left-toggle');
     await expect(toggle).toBeVisible();
-    await expect(toggle).toContainText('等你 2');
+    await expect(toggle).toContainText('等你 3');
     await expect(page.locator('#pl-wait')).toBeHidden();
     await expect(page.locator('#pl-stream')).toContainText('两个会话在跑');
     await page.screenshot({ path: test.info().outputPath('planner-mobile.png') });
@@ -189,6 +190,41 @@ test('phone: the left column is a collapsible block above the stream', async ({ 
     await expect(page.locator('#pl-wait .pl-card')).toHaveCount(3);
     await expect(page.locator('#pl-wait .pl-card').first()).toBeInViewport();
     await page.screenshot({ path: test.info().outputPath('planner-mobile-open.png') });
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+test('journaled notes: the ones a restart dropped come back in time order, once', async ({ browser }) => {
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const page = await ctx.newPage();
+  const events = plannerEvents();
+  // The history still holds this one (no restart since it was written); the
+  // ring stamps every line it holds with a uuid.
+  events.push({ type: 'system', summary: '已派出：iso 周报（task:abc）', time: now - 50000, uuid: 'pl-s1' });
+  const mock = await startMockServer({
+    ws: true, plannerEvents: events, inbox: inbox(),
+    planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
+    plannerNotes: [
+      // Older than the page: it belongs to history not loaded.
+      { time: iso(now - 70000), text: '驳回：iso 更早的一条' },
+      { time: iso(now - 57000), text: '到点提醒（答应你的，到期 09:01）：iso 交周报' },
+      { time: iso(now - 50000 + 40), text: '已派出：iso 周报（task:abc）' },
+    ],
+  });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await page.click('#abnav-planner');
+    const system = page.locator('#pl-stream .event.system');
+    await expect(system).toHaveText([/到点提醒.*iso 交周报/, /已派出：iso 周报/]);
+    // The reminder sits between the replies it was written between.
+    const order = await page.locator('#pl-stream .event').evaluateAll((els) => els.map((e) => e.textContent));
+    const at = (re) => order.findIndex((t) => re.test(t));
+    expect(at(/到点提醒/)).toBeGreaterThan(at(/早报/));
+    expect(at(/到点提醒/)).toBeLessThan(at(/两个会话在跑/));
+    await page.screenshot({ path: test.info().outputPath('planner-notes.png') });
   } finally {
     await ctx.close();
     mock.server.close();

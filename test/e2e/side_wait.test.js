@@ -40,8 +40,8 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
         await page.goto(mock.url + '/dashboard');
         await waitForWs(page, 'CONNECTED');
         const bar = page.locator('#side-wait');
-        // The Planner page's count (decisions and questions) and its open promises.
-        await expect(page.locator('#sw-wait-n')).toHaveText('2');
+        // The Planner page's count (every open item) and its open promises.
+        await expect(page.locator('#sw-wait-n')).toHaveText('3');
         await expect(page.locator('#sw-promise-n')).toHaveText('1');
         await expect(bar).not.toHaveClass(/sw-zero/);
         await expect(page.locator('#sw-body')).toBeHidden();

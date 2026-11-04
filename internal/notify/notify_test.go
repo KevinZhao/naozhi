@@ -231,16 +231,53 @@ func TestSources(t *testing.T) {
 	free = 0.5
 	check()
 
-	// A stale loop is urgent, closes on recovery; notify's own is the
-	// health loop's to report.
+	// Stale loops are one urgent item naming them all, closed once every
+	// one beats again; notify's own is the health loop's to report.
 	beats := beat.New(clock)
 	n.cfg.Beats = beats
-	beats.Register("health", time.Minute)
-	beats.Register(loopName, time.Minute)
+	for _, name := range []string{"health", "cron", loopName} {
+		beats.Register(name, time.Minute)
+	}
 	clock.advance(beat.StartupGrace)
 	h.snap.At = clock.Now()
-	check("beat:health")
+	b.pushes = nil
+	check(beatSource)
+	if got := b.titles(); !slices.Equal(got, []string{"关键循环停了：cron、health"}) {
+		t.Errorf("pushes = %v, want one naming both loops", got)
+	}
 	beats.Register("health", time.Minute)
+	check(beatSource)
+	beats.Register("cron", time.Minute)
+	check()
+
+	// Loops stalling one after another: the open item is retitled without a
+	// push, and a loop stalling after the user closed it opens it again.
+	beats.Register("relay", time.Minute)
+	clock.advance(90 * time.Second)
+	beats.Register("health", time.Minute)
+	beats.Register("relay", time.Minute)
+	clock.advance(40 * time.Second)
+	b.pushes = nil
+	beats.Register("relay", time.Minute)
+	check(beatSource)
+	clock.advance(90 * time.Second)
+	check(beatSource)
+	open, _ = n.List(0)
+	if open[0].Title != "关键循环停了：cron、health" {
+		t.Errorf("title = %q, want both loops", open[0].Title)
+	}
+	if err := n.Dismiss(open[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	check()
+	clock.advance(40 * time.Second)
+	check(beatSource)
+	if got := b.titles(); !slices.Equal(got, []string{"关键循环停了：cron", "关键循环停了：cron、health、relay"}) {
+		t.Errorf("pushes = %v, want the first loop, then all three once the closed item missed one", got)
+	}
+	for _, name := range []string{"health", "cron", "relay"} {
+		beats.Register(name, time.Minute)
+	}
 	check()
 
 	// Failures: one unit is its own error; units failing together are one

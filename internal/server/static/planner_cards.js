@@ -255,6 +255,29 @@ export function decorateEvents(root) {
     if (keys.length) {
       ev.querySelector('.event-content')?.insertAdjacentHTML('beforeend', '<div class="pl-scards">' + keys.map(sessionCardHtml).join('') + '</div>');
     }
+    if (ev.matches('.text')) foldKeys(ev, new Set([...carded, ...keys]));
   });
   paintDispatchCards(root);
+}
+
+// foldKeys drops from a reply the backticked keys it names sessions by
+// after their names (§6.4): the cards under it carry them, and the user
+// reads names, not keys. A key with no text before it stands for the name.
+function foldKeys(ev, keys) {
+  ev.querySelectorAll('.event-content code').forEach((code) => {
+    const key = code.textContent.trim();
+    if (code.closest('pre, .pl-scards') || !keys.has(key)) return;
+    const prev = code.previousSibling;
+    const next = code.nextSibling;
+    if (prev?.nodeType !== Node.TEXT_NODE || !prev.data.trim()) {
+      code.replaceWith(sessionTitle(key));
+      return;
+    }
+    if (prev?.nodeType === Node.TEXT_NODE && next?.nodeType === Node.TEXT_NODE && /[（(]$/.test(prev.data) && /^[）)]/.test(next.data)) {
+      prev.data = prev.data.slice(0, -1);
+      next.data = next.data.slice(1);
+    }
+    if (prev?.nodeType === Node.TEXT_NODE) prev.data = prev.data.trimEnd();
+    code.remove();
+  });
 }

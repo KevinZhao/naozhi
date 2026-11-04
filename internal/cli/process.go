@@ -570,6 +570,10 @@ func (p *Process) setSpawnDiags(diags []SpawnDiag) {
 	p.spawnDiags.Store(&diags)
 }
 
+// StartedAt is when naozhi attached to the process: its spawn, or the
+// reconnect to its shim after a restart.
+func (p *Process) StartedAt() time.Time { return p.startedAt }
+
 // SpawnDiags returns the gate decisions of this spawn (nil when every
 // configured input took effect). Lock-free; callers must not mutate.
 func (p *Process) SpawnDiags() []SpawnDiag {

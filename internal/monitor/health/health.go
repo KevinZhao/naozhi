@@ -33,8 +33,8 @@ import (
 const (
 	// Interval is the reconcile period and the "health" loop's beat period.
 	Interval = time.Minute
-	// StallAfter is how long a running workflow may go unobserved before its
-	// unit is Stalled.
+	// StallAfter is how long a running workflow or background task may go
+	// unobserved before its unit is Stalled.
 	StallAfter = 60 * time.Minute
 	// WakeGrace is how long after a wake nothing is judged Stalled.
 	WakeGrace = 5 * time.Minute
@@ -123,7 +123,8 @@ type Fact struct {
 	// and did not; a miss before the last wake or start is the machine's
 	// sleep, not the job's failure, and a job still running has not missed.
 	Missed time.Time
-	// Workflow names a running workflow; WorkflowSeen is its latest
+	// Workflow names a running workflow or background task (a Bash
+	// run_in_background, an Agent subtask); WorkflowSeen is its latest
 	// observation.
 	Workflow     string
 	WorkflowSeen time.Time
@@ -202,7 +203,7 @@ type Machine struct {
 
 	// Run-goroutine state.
 	units    map[string]*unit
-	last     map[string]State         // the journal's last state per unit, consumed on first sight
+	last     map[string]journaled     // the journal's last transition per unit, consumed on first sight
 	nodeDown map[string]time.Duration // Mono when a node's polls began failing
 	baseline time.Time                // wall time timers restart from (start, last wake)
 	wokeAt   time.Duration            // Mono at the last wake
@@ -226,6 +227,19 @@ type unit struct {
 	pendingClass ErrorClass
 	failedAt     time.Time // when ErrClass was confirmed, for fault merging
 	node         string
+	// held is when a session failed before a restart, while it is still
+	// held failed (holdFailure); zero otherwise.
+	held         time.Time
+	heldEvidence string
+	heldClass    ErrorClass
+}
+
+// journaled is a unit's last journaled transition.
+type journaled struct {
+	State    State
+	At       time.Time
+	Evidence string
+	ErrClass ErrorClass
 }
 
 // New returns a Machine whose timers start now, seeded with each unit's last
@@ -240,7 +254,7 @@ func New(cfg Config) *Machine {
 		detector: wake.NewDetector(cfg.Clock),
 		poke:     make(chan struct{}, 1),
 		units:    map[string]*unit{},
-		last:     map[string]State{},
+		last:     map[string]journaled{},
 		nodeDown: map[string]time.Duration{},
 		baseline: now,
 		faults:   map[ErrorClass]bool{},
@@ -281,7 +295,7 @@ func (m *Machine) seed(now time.Time) {
 		case d.Systemic && d.ErrClass != "":
 			m.faults[d.ErrClass] = !d.Resolved
 		case !d.Systemic && d.To != "":
-			m.last[e.Unit] = d.To
+			m.last[e.Unit] = journaled{State: d.To, At: e.TS, Evidence: d.Evidence, ErrClass: d.ErrClass}
 		}
 	}
 	maps.DeleteFunc(m.faults, func(_ ErrorClass, open bool) bool { return !open })
@@ -400,12 +414,16 @@ func (m *Machine) Reconcile() {
 		u := m.units[f.ID]
 		if u == nil {
 			u = &unit{Unit: Unit{ID: f.ID, State: Unknown, Since: now}, first: true}
+			if j := m.last[f.ID]; j.State == Failed && f.Kind == KindSession {
+				u.held, u.heldEvidence, u.heldClass = j.At, j.Evidence, j.ErrClass
+			}
 			m.units[f.ID] = u
 		}
 		u.Kind, u.Source, u.Coverage, u.node = f.Kind, f.Source, f.Coverage, f.Node
 		u.Workspace = m.workspaceFor(f)
 		u.LastActive = f.LastActive
 		state, evidence, class := m.judge(f, now, mono)
+		state, evidence, class = u.holdFailure(f, state, evidence, class)
 		if ev, ok := m.step(u, state, evidence, class, now); ok {
 			events = append(events, ev)
 		}
@@ -506,12 +524,15 @@ func (m *Machine) step(u *unit, state State, evidence string, class ErrorClass, 
 	from, first := u.State, u.first
 	u.failedAt = now
 	if first {
-		from = cmp.Or(m.last[u.ID], Unknown)
+		from = cmp.Or(m.last[u.ID].State, Unknown)
 		delete(m.last, u.ID)
 		u.first = false
 		u.failedAt = u.LastActive
 	}
 	u.State, u.Evidence, u.ErrClass, u.Since = state, evidence, class, now
+	if first && from == state && !u.held.IsZero() {
+		u.Since = u.held // the failure the journal recorded, not a new one
+	}
 	if from == state || first && from == Unknown && state.healthy() {
 		return Event{}, false
 	}
@@ -536,15 +557,30 @@ func (m *Machine) judge(f *Fact, now time.Time, mono time.Duration) (State, stri
 		}
 		quiet := now.Sub(seen)
 		if quiet >= StallAfter && !(m.woke && mono-m.wokeAt < WakeGrace) {
-			return Stalled, fmt.Sprintf("workflow %q: no observation for %s", f.Workflow, quiet.Round(time.Minute)), ErrNone
+			return Stalled, fmt.Sprintf("task %q: no observation for %s", f.Workflow, quiet.Round(time.Minute)), ErrNone
 		}
-		return Active, fmt.Sprintf("workflow %q running", f.Workflow), ErrNone
+		return Active, fmt.Sprintf("task %q running", f.Workflow), ErrNone
 	case f.Running:
 		return Active, "turn in progress", ErrNone
 	case f.NoData:
 		return Unknown, "no data", ErrNone
 	}
 	return Idle, "", ErrNone
+}
+
+// holdFailure keeps a session that failed before a restart failed while
+// nothing happened to it since: its death reason does not survive the
+// restart, so it would read idle. Anything else judged, or any activity
+// after the failure, lets it go for good.
+func (u *unit) holdFailure(f *Fact, state State, evidence string, class ErrorClass) (State, string, ErrorClass) {
+	if u.held.IsZero() {
+		return state, evidence, class
+	}
+	if state == Idle && !f.LastActive.After(u.held) {
+		return Failed, u.heldEvidence, u.heldClass
+	}
+	u.held = time.Time{}
+	return state, evidence, class
 }
 
 // trackNodes records when each down node's polls began failing.

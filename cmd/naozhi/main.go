@@ -304,6 +304,7 @@ func main() {
 		DenyPaths:  []string{absConfigPath(*configPath), shimMgr.StateDir()},
 		Sessions:   wireup.PlannerSessions{Router: router},
 		Workspaces: plannerState.Workspaces,
+		Journal:    plannerState.Journal,
 		Promises:   wireup.PlannerPromises(promises),
 	})
 	// Attachments live under each workspace root, usually outside the state dir
@@ -581,7 +582,7 @@ func main() {
 	plannerAgent.Start(ctx, srv, healthMon.Snapshot)
 	notifier.SetHealth(healthMon)
 	go notifier.Run(ctx)
-	promises.SetReminder(wireup.PromiseReminder{Notify: notifier, Dialog: srv.PlannerNote})
+	promises.SetReminder(wireup.PromiseReminder{Notify: notifier, Note: plannerAgent.Note})
 	go promises.Run(ctx)
 	// The Planner's action blocks (§6.2): parsed from planner:main's turn
 	// results; an approved dispatch starts a task: session.
@@ -592,7 +593,7 @@ func main() {
 		Workspaces: plannerState.Workspaces,
 		Sessions:   sidecars,
 		Spawn:      wireup.TaskSpawner{Router: router, Opts: taskOpts, Submit: srv.SubmitPlanner}.Spawn,
-		Note:       func(text string) { srv.PlannerNote(agent.Key, text) },
+		Note:       plannerAgent.Note,
 		Tell:       plannerAgent.Tell,
 		Ctx:        ctx,
 	})

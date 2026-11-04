@@ -326,11 +326,62 @@ func TestJournal(t *testing.T) {
 	// A restart reports only what changed since the journal's last record.
 	r2 := newRig(t, Config{Journal: j, Workspaces: workspace.Load("", "node")}, r.clock.wall.Add(time.Hour))
 	r2.run([]step{
-		{facts: []Fact{failed, owned(dir, Fact{ID: "sys:x"})}},
-		{tick: Interval, facts: []Fact{failed, owned(dir, Fact{ID: "sys:x"})}},
+		{facts: []Fact{failed, {ID: "sys:x", Kind: KindSysession}}},
+		{tick: Interval, facts: []Fact{failed, {ID: "sys:x", Kind: KindSysession}}},
 	})
 	if got, want := r2.transitions(), []string{"sys:x:failed>idle"}; !slices.Equal(got, want) {
 		t.Errorf("after restart = %q, want %q", got, want)
+	}
+}
+
+// TestFailureAcrossRestart: a session's death reason does not survive a
+// restart, so a session that failed reads idle after it; it stays failed
+// until something happens to it.
+func TestFailureAcrossRestart(t *testing.T) {
+	failedAt := time.Date(2026, 11, 4, 9, 1, 0, 0, time.UTC)
+	before, after := failedAt.Add(-time.Minute), failedAt.Add(30*time.Minute)
+	tests := []struct {
+		name  string
+		steps []Fact // one reconcile each, a minute apart
+		want  State
+		trans []string
+	}{
+		{"still idle, nothing since", []Fact{{LastActive: before}, {LastActive: before}, {LastActive: before}}, Failed, nil},
+		{"resumed since", []Fact{{LastActive: after}}, Idle, []string{"s:failed>idle"}},
+		{"running", []Fact{{Running: true, LastActive: after}}, Active, []string{"s:failed>active"}},
+		{"held, then resumed", []Fact{{LastActive: before}, {LastActive: before}, {LastActive: after}}, Idle, []string{"s:failed>idle"}},
+		{"held, then active, then idle again", []Fact{{LastActive: before}, {LastActive: before}, {Running: true}, {LastActive: before}}, Idle,
+			[]string{"s:failed>active", "s:active>idle"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			j, err := journal.Open(filepath.Join(dir, "log"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, _ := json.Marshal(journalData{From: Idle, To: Failed, Kind: KindSession, Evidence: "death_reason=no_output_timeout"})
+			if err := j.Append(journal.Entry{TS: failedAt, Kind: journal.KindHealth, Unit: "s", Data: data}); err != nil {
+				t.Fatal(err)
+			}
+			r := newRig(t, Config{Journal: j, Workspaces: workspace.Load("", "node")}, failedAt.Add(time.Hour))
+			steps := make([]step, len(tt.steps))
+			for i, f := range tt.steps {
+				steps[i] = step{tick: Interval, facts: []Fact{owned(dir, f)}}
+			}
+			r.run(steps)
+			if got := r.state("s"); got != tt.want {
+				t.Errorf("state = %s, want %s", got, tt.want)
+			}
+			if got := r.transitions(); !slices.Equal(got, tt.trans) {
+				t.Errorf("transitions = %q, want %q", got, tt.trans)
+			}
+			if tt.want == Failed {
+				if u := r.m.Snapshot().Units[0]; !u.Since.Equal(failedAt) || u.Evidence == "" {
+					t.Errorf("held unit = %+v, want the journaled failure", u)
+				}
+			}
+		})
 	}
 }
 

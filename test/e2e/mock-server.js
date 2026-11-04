@@ -260,6 +260,8 @@ function defaultGitStates() {
  * @param {object[]} [overrides.plannerEvents] - GET /api/sessions/events answer for key=planner:main
  *   (the other keys keep the default events). A test may push to it. POST /api/planner/send
  *   (with overrides.planner) lands in plannerSendCalls and answers 202, or 409 while stopped.
+ * @param {object[]} [overrides.plannerNotes] - GET /api/planner/notes answer ({time, text}, the
+ *   gateway's journaled notes in the Planner conversation). Unset, the route 404s.
  * @param {object} [overrides.keyEvents] - key → GET /api/sessions/events answer for that key.
  * @param {object[]} [overrides.cronJobs] - Custom cron jobs response.
  * @param {object} [overrides.cronListMeta] - Extra top-level fields merged into GET /api/cron
@@ -322,6 +324,7 @@ function startMockServer(overrides = {}) {
   const plannerData = overrides.planner || null;
   const plannerStateCalls = [];
   const plannerEvents = overrides.plannerEvents || null;
+  const plannerNotes = overrides.plannerNotes || null;
   const plannerSendCalls = [];
   const keyEvents = overrides.keyEvents || {};
   const workflowDelayMs = overrides.workflowDelayMs || 0;
@@ -649,6 +652,13 @@ function startMockServer(overrides = {}) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(plannerData));
       });
+      return;
+    }
+
+    if (plannerNotes && pathname === NZ_CONTRACT.API.planner_notes && req.method === 'GET') {
+      if (!checkAuth()) return;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ notes: plannerNotes }));
       return;
     }
 

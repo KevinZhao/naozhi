@@ -219,6 +219,8 @@ type Notifier struct {
 	deciders  map[string]DecisionFunc
 	deciding  map[string]bool      // decision items whose answer is being applied
 	condSince map[string]time.Time // Run goroutine: when a level-triggered condition began
+	// staleLoops (Run goroutine) are the loops the last check found stale.
+	staleLoops []string
 }
 
 // pushState is notify.json.

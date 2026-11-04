@@ -104,6 +104,15 @@ func (s *ManagedSession) ProcessDeathReason() string {
 	return ""
 }
 
+// ProcessAttachedAt is when naozhi attached to the session's process; zero
+// without one. Its event entries older than that were replayed from history.
+func (s *ManagedSession) ProcessAttachedAt() time.Time {
+	if p, ok := s.loadProcess().(interface{ StartedAt() time.Time }); ok {
+		return p.StartedAt()
+	}
+	return time.Time{}
+}
+
 // Snapshot returns a point-in-time view of this session.
 //
 // Side effect: a live process Model() that differs from the persisted

@@ -34,7 +34,7 @@ function plannerEvents() {
     },
     {
       type: 'text', time: now - 110000, uuid: 'pc-t1',
-      detail: '`' + SESSION + '` 在等你回复，`' + TASK + '` 还没开始。我建议派一个会话整理周报：\n\n' + fence('naozhi-action', JSON.stringify(DISPATCH)) +
+      detail: 'hello world（`' + SESSION + '`）在等你回复，iso 周报 `' + TASK + '` 还没开始。我建议派一个会话整理周报：\n\n' + fence('naozhi-action', JSON.stringify(DISPATCH)) +
         '\n\n' + fence('naozhi-action', '{"type":"dispatch","title":') + '\n\n' +
         fence('naozhi-action', JSON.stringify({ type: 'promise', text: 'iso 周五前提醒你看周报', due: '', close_when: '你看过周报' })) + '\n\n' +
         fence('naozhi-action', JSON.stringify(DISPATCH)),
@@ -116,6 +116,10 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     await expect(card.locator('.pl-scard-name')).toHaveText('hello world');
     await expect(card.locator('.hl-state')).toHaveText('待你回复');
     await expect(card.locator('.pl-scard-time')).toContainText('分钟前');
+    // The keys after the names fold into the cards (§6.4: names, not keys).
+    await expect(reply.locator('.pl-scards .pl-scard')).toHaveCount(2);
+    await expect(reply).toContainText('hello world在等你回复，iso 周报 还没开始。');
+    await expect(reply).not.toContainText(SESSION);
     const dispatch = reply.locator('.pl-act-dispatch').first();
     await expect(dispatch.locator('.pl-act-h')).toHaveText('派活提议 · iso 整理周报');
     await expect(dispatch).toContainText('把本周合并的 PR 整理成周报');
@@ -146,10 +150,12 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     await expect(page.locator('#pl-stream .event.system')).toHaveText(/收到，正在看/);
     const t = Date.now();
     conn.send({ type: 'event', key: PLANNER, event: { type: 'user', detail: '<naozhi-snapshot at="x">\n</naozhi-snapshot>\n\niso 现在都在干什么？', time: t, uuid: 'pc-u2' } });
-    conn.send({ type: 'event', key: PLANNER, event: { type: 'text', detail: '只有 `' + SESSION + '` 在等你。', time: t + 1, uuid: 'pc-t2' } });
+    conn.send({ type: 'event', key: PLANNER, event: { type: 'text', detail: '`' + SESSION + '` 在等你。', time: t + 1, uuid: 'pc-t2' } });
     await expect(page.locator('#pl-stream .pl-pending')).toHaveCount(0);
     await expect(page.locator('#pl-stream .event.user').last()).toHaveText(/iso 现在都在干什么？/);
     await expect(page.locator('#pl-stream .event.text').last().locator('.pl-scard')).toHaveCount(1);
+    // A key with nothing before it reads as the session's name.
+    await expect(page.locator('#pl-stream .event.text').last()).toContainText('hello world 在等你。');
     await page.screenshot({ path: test.info().outputPath('planner-chat-desktop.png') });
 
     // Open the session card in the middle column.
@@ -187,7 +193,7 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     await page.click('.pl-sess .pl-btn[data-action="planner-close-session"]');
     await expect(page.locator('#planner-main')).not.toHaveClass(/pl-sess-open/);
     await expect(page.locator('#pl-sess')).toBeHidden();
-    await expect(page.locator('#pl-stream')).toContainText('只有');
+    await expect(page.locator('#pl-stream')).toContainText('hello world 在等你。');
     await expect(page.locator('#pl-target-to')).toHaveText('→ Planner');
 
     // A card naming a session that is not listed opens read-only: a send
