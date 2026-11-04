@@ -20,7 +20,7 @@ function inbox() {
     open: [
       { id: 'in_err', kind: 'error', level: 'timely', unit: 'cron:nightly', title: 'iso nightly 失败', why: '定时任务运行失败', created: iso(now - 3 * 3600000), state: 'open', source: 'health:cron:nightly' },
       { id: 'in_q', kind: 'question', level: 'timely', unit: SESSION, title: 'iso 会话在等你回复', why: '有提问等你回答超过 10 分钟', created: iso(now - 12 * 60000), state: 'open', source: 'waiting:' + SESSION, auto_close: true },
-      { id: 'in_d', kind: 'decision', level: 'timely', title: 'iso 派出一个会话整理周报？', why: 'Planner 提议', created: iso(now - 5 * 60000), state: 'open', source: 'planner:d1', decision: { handler: 'dispatch', actions: ['approve', 'reject'] } },
+      { id: 'in_d', kind: 'decision', level: 'timely', title: 'iso 周报用哪个模板？', why: 'Planner 问你', created: iso(now - 5 * 60000), state: 'open', source: 'planner:d1', decision: { handler: 'ask', actions: ['模板 A', '模板 B'] } },
     ],
     closed: [],
     counts: { open: 3, badge: 2 },
@@ -36,7 +36,7 @@ const planner = { enabled: true, stopped: false, key: PLANNER, alive: true };
 
 for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mobile', { width: 390, height: 844 }]]) {
   test.describe(`sidebar 通知 bar (${name})`, () => {
-    test('counts, unfolds in place, closes and approves there', async ({ browser }) => {
+    test('counts, unfolds in place, closes and answers there', async ({ browser }) => {
       const ctx = await browser.newContext({ viewport });
       const page = await ctx.newPage();
       const box = inbox();
@@ -70,9 +70,9 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
         await expect(cards).toHaveCount(2);
         expect(mock.inboxCalls[0]).toEqual({ path: '/api/inbox/close', method: 'POST', body: { id: 'in_err' } });
 
-        await page.click('#sw-wait .pl-card[data-id="in_d"] [data-act="approve"]');
+        await page.click('#sw-wait .pl-card[data-id="in_d"] [data-act="模板 A"]');
         await expect(cards).toHaveCount(1);
-        expect(mock.inboxCalls[1]).toMatchObject({ path: '/api/inbox/decide', body: { id: 'in_d', action: 'approve' } });
+        expect(mock.inboxCalls[1]).toMatchObject({ path: '/api/inbox/decide', body: { id: 'in_d', action: '模板 A' } });
         await expect(page.locator('#sw-wait-n')).toHaveText('1');
         await expect(page.locator('#abnav-planner-count')).toHaveText('1');
 

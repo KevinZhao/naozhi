@@ -3,7 +3,7 @@
 // the promises, in one list with one state model. A dispatched session's
 // 等你 and 失败 follow its health state, so they come and go with it; 已完成
 // is the Planner's judgment (its status action block) or the user's, kept in
-// the sidecar. A retired session (gone from the router) keeps the failure
+// the sidecar, as is the 失败 of a session the user stopped. A retired session (gone from the router) keeps the failure
 // it had, else it ended: 已完成 by itself. A promise is 待提醒 before its
 // due reminder, done once closed. Every state someone sets is journaled with who and why; a done
 // task leaves the list Archive after it was done, its data kept.
@@ -95,9 +95,15 @@ type Config struct {
 	Promises *promise.Store
 	Health   func() health.Snapshot
 	Journal  *journal.Journal
+	// Stop stops dispatched session key's work (its turn) for Board.Stop;
+	// nil only marks it.
+	Stop func(key, title string)
 	// Now is the wall clock; nil is time.Now.
 	Now func() time.Time
 }
+
+// StoppedWhy is the reason a task the user stopped is 失败 with.
+const StoppedWhy = "已停止"
 
 // Board reads and sets the tasks. Safe for concurrent use.
 type Board struct {
@@ -265,6 +271,28 @@ func (b *Board) Set(id string, state State, by By, why string) error {
 		unit = "promise:" + id
 	}
 	b.record(unit, id, state, by, why)
+	return nil
+}
+
+// Stop stops dispatched session id for the user (D88: what the Planner
+// dispatches runs at once, so stopping it is the user's control): the task
+// is marked 失败 as theirs, StoppedWhy, then Config.Stop stops its turn. The
+// session stays, its history readable; a mark holds over whatever it does
+// later, until someone sets another state.
+func (b *Board) Stop(id string) error {
+	if !sessionkey.IsTaskKey(id) {
+		return ErrNotFound
+	}
+	title, ok := b.Title(id)
+	if !ok {
+		return ErrNotFound
+	}
+	if err := b.Set(id, Failed, ByUser, StoppedWhy); err != nil {
+		return err
+	}
+	if b.cfg.Stop != nil {
+		b.cfg.Stop(id, title)
+	}
 	return nil
 }
 

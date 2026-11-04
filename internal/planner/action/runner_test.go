@@ -69,89 +69,73 @@ func openDecision(t *testing.T, inbox *notify.Notifier, handler string) notify.I
 	return notify.Item{}
 }
 
-// A dispatch block opens a card; approving it starts one task: session in
-// the workspace's directory, records its lineage and tells the Planner; the
-// first answer wins.
-func TestDispatchApproveSpawns(t *testing.T) {
-	r, g, inbox, side, dir := newRunner(t)
-	name := dir[strings.LastIndex(dir, "/")+1:]
-	r.Result("dashboard:direct:x:general", block(`{"type":"ask","question":"not the Planner","options":[]}`))
-	if len(r.ch) != 0 {
-		t.Fatal("another session's reply was queued")
+// A dispatch block starts one task: session in the workspace's directory at
+// once, records its lineage and tells the Planner; a start that fails tells
+// the Planner why and leaves no sidecar. No card is opened either way.
+func TestDispatch(t *testing.T) {
+	cases := []struct {
+		name      string
+		workspace string // "" is the registered workspace's name
+		spawnErr  error
+		want      string // in both the note and the receipt
+		spawned   bool
+	}{
+		{name: "spawned", want: "已派出：iso 写 hello（task:", spawned: true},
+		{name: "unknown workspace", workspace: "nowhere", want: "派出「iso 写 hello」失败"},
+		{name: "max_procs full", spawnErr: errors.New("同时运行的会话已满（max_procs 3）"), want: "同时运行的会话已满"},
 	}
-	r.Handle(block(`{"type":"dispatch","workspace":"` + name + `","title":"iso 写 hello","model":"","message":"在工作区里写一个 hello.md"}`))
-	if len(g.spawned) != 0 {
-		t.Fatal("spawned before approval")
-	}
-	it := openDecision(t, inbox, HandlerDispatch)
-	if it.Kind != notify.KindDecision || it.Unit != sessionkey.PlannerMainKey || !strings.Contains(it.Why, "hello.md") {
-		t.Errorf("card = %+v", it)
-	}
-	if len(g.notes) != 1 || !strings.Contains(g.notes[0], "待你确认") {
-		t.Errorf("notes = %q", g.notes)
-	}
-
-	if err := inbox.Decide(it.ID, notify.ActionApprove); err != nil {
-		t.Fatalf("approve: %v", err)
-	}
-	if len(g.spawned) != 1 || !sessionkey.IsTaskKey(g.spawned[0]) {
-		t.Fatalf("spawned = %q", g.spawned)
-	}
-	key := g.spawned[0]
-	// The card's payload names the session it started, for the
-	// conversation's card to open.
-	if !strings.Contains(string(it.Decision.Payload), `"key":"`+key+`"`) {
-		t.Errorf("payload %s does not name %s", it.Decision.Payload, key)
-	}
-	if s := g.spawns[0]; s.Dir != dir || s.Title != "iso 写 hello" || s.Message != "在工作区里写一个 hello.md" || s.Model != "" {
-		t.Errorf("spawn = %+v", s)
-	}
-	m, ok := side.Get(key)
-	if !ok || m.Purpose != sidecar.PurposeTask || m.Parent != sessionkey.PlannerMainKey || m.Title != "iso 写 hello" || m.Dir != dir || !m.DispatchedByPlanner() || m.Created.IsZero() {
-		t.Errorf("sidecar = %+v, %v", m, ok)
-	}
-	if len(g.told) != 1 || !strings.Contains(g.told[0], "已派出") || !strings.Contains(g.told[0], key) {
-		t.Errorf("told = %q", g.told)
-	}
-	if err := inbox.Decide(it.ID, notify.ActionApprove); !errors.Is(err, notify.ErrClosed) {
-		t.Errorf("second answer: %v, want ErrClosed", err)
-	}
-	if len(g.spawned) != 1 {
-		t.Errorf("second answer spawned again: %q", g.spawned)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r, g, inbox, side, dir := newRunner(t)
+			g.spawnErr = c.spawnErr
+			ws := c.workspace
+			if ws == "" {
+				ws = filepath.Base(dir)
+			}
+			r.Handle(block(`{"type":"dispatch","workspace":"` + ws + `","title":"iso 写 hello","model":"","message":"在工作区里写一个 hello.md"}`))
+			if len(g.notes) != 1 || !strings.Contains(g.notes[0], c.want) {
+				t.Errorf("notes = %q, want %q", g.notes, c.want)
+			}
+			if len(g.told) != 1 || !strings.Contains(g.told[0], c.want) {
+				t.Errorf("told = %q, want %q", g.told, c.want)
+			}
+			if open, _ := inbox.List(0); len(open) != 0 {
+				t.Errorf("inbox = %+v, want no card", open)
+			}
+			if !c.spawned {
+				if left, _ := os.ReadDir(g.sideDir); len(g.spawned) != 0 || len(left) != 0 {
+					t.Errorf("spawned %q, %d sidecars left", g.spawned, len(left))
+				}
+				return
+			}
+			if len(g.spawned) != 1 || !sessionkey.IsTaskKey(g.spawned[0]) {
+				t.Fatalf("spawned = %q", g.spawned)
+			}
+			key := g.spawned[0]
+			if s := g.spawns[0]; s.Dir != dir || s.Title != "iso 写 hello" || s.Message != "在工作区里写一个 hello.md" || s.Model != "" {
+				t.Errorf("spawn = %+v", s)
+			}
+			m, ok := side.Get(key)
+			if !ok || m.Purpose != sidecar.PurposeTask || m.Parent != sessionkey.PlannerMainKey || m.Title != "iso 写 hello" || m.Dir != dir || !m.DispatchedByPlanner() || m.Created.IsZero() {
+				t.Errorf("sidecar = %+v, %v", m, ok)
+			}
+			if !strings.Contains(g.told[0], key) || !strings.Contains(g.told[0], "notify_when_idle") {
+				t.Errorf("told = %q", g.told)
+			}
+		})
 	}
 }
 
-func TestDispatchRejectAndFailure(t *testing.T) {
-	r, g, inbox, _, dir := newRunner(t)
-	name := dir[strings.LastIndex(dir, "/")+1:]
-	d := block(`{"type":"dispatch","workspace":"` + name + `","title":"t","model":"","message":"m"}`)
-
-	r.Handle(d)
-	if err := inbox.Decide(openDecision(t, inbox, HandlerDispatch).ID, notify.ActionReject); err != nil {
-		t.Fatal(err)
-	}
-	if len(g.spawned) != 0 || len(g.told) != 1 || !strings.Contains(g.told[0], "驳回") {
-		t.Errorf("reject: spawned %q told %q", g.spawned, g.told)
-	}
-
-	// A failed spawn leaves the card open and no sidecar behind.
-	r.Handle(d)
-	it := openDecision(t, inbox, HandlerDispatch)
-	g.spawnErr = errors.New("max_procs")
-	if err := inbox.Decide(it.ID, notify.ActionApprove); err == nil {
-		t.Fatal("approve with a failing spawn succeeded")
-	}
-	if open := openDecision(t, inbox, HandlerDispatch); open.ID != it.ID {
-		t.Errorf("card closed after a failed spawn")
-	}
-	if left, _ := os.ReadDir(g.sideDir); len(left) != 0 {
-		t.Errorf("%d sidecars left after a failed spawn", len(left))
-	}
-
-	// An unknown workspace opens no card.
-	r.Handle(block(`{"type":"dispatch","workspace":"nowhere","title":"t","model":"","message":"m"}`))
-	if last := g.notes[len(g.notes)-1]; !strings.Contains(last, "找不到工作区") {
-		t.Errorf("note = %q", last)
+// A dispatch card a run before D88 left open is closed: nothing answers it.
+func TestOldDispatchCardClosed(t *testing.T) {
+	inbox := notify.New(notify.Config{System: func(string, string) error { return nil }})
+	inbox.Add(notify.Item{Kind: notify.KindDecision, Source: "dispatch:1", Title: "派出会话：t",
+		Decision: &notify.Decision{Handler: handlerDispatch, Actions: []notify.Action{"approve", "reject"}}})
+	ask, _ := inbox.Add(notify.Item{Kind: notify.KindQuestion, Source: "ask:1", Title: "q",
+		Decision: &notify.Decision{Handler: HandlerAsk, Actions: []notify.Action{"是"}}})
+	New(Config{Inbox: inbox})
+	if open, _ := inbox.List(0); len(open) != 1 || open[0].ID != ask.ID {
+		t.Errorf("open = %+v, want only the question", open)
 	}
 }
 

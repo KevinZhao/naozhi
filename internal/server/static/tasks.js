@@ -4,9 +4,11 @@
 // (等你 and 失败 first), 待提醒, and 已完成 under a fold (the gateway archives
 // a done task 24 hours on). A card shows its title, where it comes from, its
 // state, who set it and why, and when; its state menu (进行中 / 已完成) posts
-// /api/tasks/state as yours, and a done one reopens. A dispatched session's
-// title opens it: in the Planner page's middle column, or in the chat view
-// from the sidebar (mountTasks(el, { open: 'chat' })).
+// /api/tasks/state as yours, and a done one reopens. A dispatched session
+// runs as soon as the Planner dispatches it (D88), so its card has 停止
+// (POST /api/tasks/stop: its turn is interrupted, the task 失败 as yours);
+// its title opens it: in the Planner page's middle column, or in the chat
+// view from the sidebar (mountTasks(el, { open: 'chat' })).
 //
 // It refetches on inbox_count frames (nzBus 'inbox:count': the health
 // changes that mark 等你 / 失败 open and close items too) and on
@@ -51,6 +53,13 @@ function menuHtml(t) {
     '<option value="done">已完成</option></select>';
 }
 
+// stopHtml is a dispatched session's 停止, while it is still there and
+// neither done nor stopped.
+function stopHtml(t) {
+  if (t.kind !== 'session' || t.retired || t.state === 'done' || (t.state === 'failed' && t.by === 'user')) return '';
+  return '<button type="button" class="pl-btn tk-stop" data-action="task-stop" data-id="' + escAttr(t.id) + '" title="停止这个会话正在做的事">停止</button>';
+}
+
 function cardHtml(t, open) {
   const state = STATE_LABEL[t.state] ? t.state : 'doing';
   const at = Date.parse(t.at);
@@ -68,7 +77,7 @@ function cardHtml(t, open) {
         (!isNaN(at) ? '<span class="tk-time" title="' + escAttr(formatAbsTime(at)) + '">' + esc(agoText(at)) + '</span>' : '') +
       '</div>' +
       '<div class="tk-title">' + titleHtml(t, open) + '</div>' +
-      '<div class="tk-foot"><div class="tk-meta">' + meta.join('<span aria-hidden="true"> · </span>') + '</div>' + menuHtml(t) + '</div>' +
+      '<div class="tk-foot"><div class="tk-meta">' + meta.join('<span aria-hidden="true"> · </span>') + '</div>' + stopHtml(t) + menuHtml(t) + '</div>' +
     '</div>';
 }
 
@@ -126,18 +135,22 @@ export function refreshTasks() {
   return Promise.all(out);
 }
 
-async function setState(el, id, state) {
-  if (!id || !state) return;
+// post sends a task change from control el, then refreshes every group.
+async function post(el, url, body, failed) {
   el.disabled = true;
   try {
-    await fetchJSON(NZ_CONTRACT.API.tasks_state, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, state }), timeoutMs: 8000,
+    await fetchJSON(url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), timeoutMs: 8000,
     });
   } catch (e) {
-    showToast('没有改成：' + e.message, 'error');
+    showToast(failed + e.message, 'error');
   }
   el.blur();
   await refreshTasks();
+}
+
+function setState(el, id, state) {
+  if (id && state) return post(el, NZ_CONTRACT.API.tasks_state, { id, state }, '没有改成：');
 }
 
 nzBus.addEventListener('inbox:count', () => { refreshTasks(); });
@@ -145,4 +158,5 @@ nzBus.addEventListener('inbox:count', () => { refreshTasks(); });
 registerActions({
   'task-state': (el) => setState(el, el.dataset.id, el.value),
   'task-reopen': (el) => setState(el, el.dataset.id, 'doing'),
+  'task-stop': (el) => el.dataset.id && post(el, NZ_CONTRACT.API.tasks_stop, { id: el.dataset.id }, '没有停下：'),
 });

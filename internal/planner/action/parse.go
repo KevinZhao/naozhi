@@ -1,7 +1,7 @@
 // Package action is the Planner's way to ask the gateway for something
 // (docs/rfc/planner.md §6.2): the ```naozhi-action blocks at the end of a
-// planner:main reply. There are four: dispatch (a confirmation card; once
-// approved, a task: session), promise (a promise among the 任务), ask (a
+// planner:main reply. There are four: dispatch (a task: session, started at
+// once, D88), promise (a promise among the 任务), ask (a
 // question in "通知" whose answer goes back to the Planner) and status (the
 // Planner's judgment of a task's state, §15.4). A block that does not parse,
 // or names an unknown type, a bad field or a task that does not exist, is
@@ -52,7 +52,7 @@ const (
 	TypeStatus   Type = "status"
 )
 
-// Dispatch asks for a session in a workspace, once the user approves.
+// Dispatch asks for a session in a workspace.
 type Dispatch struct {
 	// Workspace is a workspace ID or name (workspaces.json).
 	Workspace string `json:"workspace"`

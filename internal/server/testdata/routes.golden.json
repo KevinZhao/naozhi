@@ -381,6 +381,11 @@
   },
   {
     "method": "POST",
+    "path": "/api/tasks/stop",
+    "handler_type": "*tasks.Handler"
+  },
+  {
+    "method": "POST",
     "path": "/api/transcribe",
     "handler_type": "*transcribe.Handler"
   },

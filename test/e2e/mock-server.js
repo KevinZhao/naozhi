@@ -256,8 +256,9 @@ function defaultGitStates() {
  *   PUT / DELETE /api/inbox/pause set
  *   paused_until. Every write lands in inboxCalls. Unset, the routes 404.
  * @param {object} [overrides.tasks] - GET /api/tasks body ({tasks}, task.Task wire shape); POST
- *   /api/tasks/state sets the task's state as the user's and lands in tasksCalls. Unset, the
- *   routes 404.
+ *   /api/tasks/state sets the task's state as the user's and lands in tasksCalls; POST
+ *   /api/tasks/stop marks the task failed as the user's ('已停止') and lands in taskStopCalls.
+ *   Unset, the routes 404.
  * @param {object} [overrides.planner] - GET /api/planner body ({enabled, stopped, key, alive});
  *   POST /api/planner/state sets `stopped` and lands in plannerStateCalls. Unset, the routes 404.
  * @param {object[]} [overrides.plannerEvents] - GET /api/sessions/events answer for key=planner:main
@@ -325,6 +326,7 @@ function startMockServer(overrides = {}) {
   const inboxData = overrides.inbox || null;
   const inboxCalls = [];
   const tasksCalls = [];
+  const taskStopCalls = [];
   const plannerData = overrides.planner || null;
   const plannerStateCalls = [];
   const plannerEvents = overrides.plannerEvents || null;
@@ -989,6 +991,22 @@ function startMockServer(overrides = {}) {
       return;
     }
 
+    if (pathname === NZ_CONTRACT.API.tasks_stop && req.method === 'POST' && overrides.tasks) {
+      if (!checkAuth()) return;
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        const req2 = JSON.parse(body || '{}');
+        taskStopCalls.push(req2);
+        const t = overrides.tasks.tasks.find(x => x.id === req2.id && x.kind === 'session');
+        if (!t) { res.writeHead(404); res.end(); return; }
+        Object.assign(t, { state: 'failed', by: 'user', why: '已停止', at: new Date().toISOString() });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok' }));
+      });
+      return;
+    }
+
     // Transcribe route
     if (pathname === NZ_CONTRACT.API.transcribe && req.method === 'POST') {
       if (!checkAuth()) return;
@@ -1106,6 +1124,7 @@ function startMockServer(overrides = {}) {
         get outputsCalls() { return outputsCalls; },
         get inboxCalls() { return inboxCalls; },
         get tasksCalls() { return tasksCalls; },
+        get taskStopCalls() { return taskStopCalls; },
         get plannerStateCalls() { return plannerStateCalls; },
         get plannerSendCalls() { return plannerSendCalls; },
         resetCalls() { sendCalls = []; bindCalls = []; loginCalls = []; favoriteCalls = []; },

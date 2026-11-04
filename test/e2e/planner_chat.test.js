@@ -2,8 +2,8 @@
 // planner_cards.js; planner RFC §10 D77, §10.1, §15.1 PR ⑬): the input box
 // sends to the Planner, the pushed receipt and the reply render and replace
 // the pending bubble; a handed-over session, a named session and the action
-// blocks render as cards (the dispatch card answers the left column's
-// decision, matched by source); a session card opens in the middle column
+// blocks render as cards (a dispatch runs at once, D88: its card has no
+// answer to give); a session card opens in the middle column
 // under the breadcrumb, shows its milestones and then its raw record, answers
 // its questions and sends to that session, and goes back; an unlisted
 // session's card is read-only; the chat view's 交给 Planner sends the session's reference with
@@ -34,7 +34,7 @@ function plannerEvents() {
     },
     {
       type: 'text', time: now - 110000, uuid: 'pc-t1',
-      detail: 'hello world（`' + SESSION + '`）在等你回复，iso 周报 `' + TASK + '` 还没开始，hello world（名字 hw，`' + SESSION + '`）先等等。我建议派一个会话整理周报：\n\n' + fence('naozhi-action', JSON.stringify(DISPATCH)) +
+      detail: 'hello world（`' + SESSION + '`）在等你回复，iso 周报 `' + TASK + '` 还没开始，hello world（名字 hw，`' + SESSION + '`）先等等。我派一个会话整理周报：\n\n' + fence('naozhi-action', JSON.stringify(DISPATCH)) +
         '\n\n' + fence('naozhi-action', '{"type":"dispatch","title":') + '\n\n' +
         fence('naozhi-action', JSON.stringify({ type: 'promise', text: 'iso 周五前提醒你看周报', due: '', close_when: '你看过周报' })) + '\n\n' +
         fence('naozhi-action', JSON.stringify(DISPATCH)) + '\n\n' +
@@ -47,25 +47,9 @@ function plannerEvents() {
   ];
 }
 
-// inbox holds the confirmation of pc-t1's dispatch, found by its payload's
-// title and message (the gateway names the source with a random ID): block 3
-// proposes the same dispatch and shows the same one, the open item winning
-// over an older closed one with the same payload.
+// inbox is empty: a dispatch opens no card in 通知.
 function inbox() {
-  const payload = { title: DISPATCH.title, message: DISPATCH.message, workspace: 'naozhi' };
-  return {
-    open: [{
-      id: 'in_d', kind: 'decision', level: 'timely', unit: PLANNER, title: '派出：iso 整理周报', why: 'Planner 提议',
-      created: iso(now - 100000), state: 'open', source: 'dispatch:3f9a0c21d4e7',
-      decision: { handler: 'dispatch', payload, actions: ['approve', 'reject'] },
-    }],
-    closed: [{
-      id: 'in_old', kind: 'decision', level: 'timely', unit: PLANNER, title: '派出：iso 整理周报', why: 'Planner 提议',
-      created: iso(now - 86400000), state: 'closed', source: 'dispatch:a71b2c3d4e5f',
-      decision: { handler: 'dispatch', payload, actions: ['approve', 'reject'], answer: 'reject' },
-    }],
-    counts: { open: 1, badge: 1 },
-  };
+  return { open: [], closed: [], counts: { open: 0, badge: 0 } };
 }
 
 const health = () => ({ at: iso(now), unowned: 0, units: [{ id: SESSION, kind: 'session', source: 'dashboard', coverage: 'covered', state: 'waiting', since: iso(now - 600000), last_active: iso(now - 300000) }] });
@@ -110,9 +94,8 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     await expect(cutUser).toContainText('消息过长');
     await expect(cutUser).not.toContainText('naozhi-snapshot');
 
-    // The named session's card carries its health; the dispatch card answers
-    // its decision, as the left column does; the same proposal in another
-    // block shows the same one.
+    // The named session's card carries its health; the dispatch card says
+    // what was dispatched, with nothing to approve.
     const reply = page.locator('#pl-stream .event.text').first();
     const card = reply.locator('.pl-scards .pl-scard[data-key="' + SESSION + '"]');
     await expect(card.locator('.pl-scard-name')).toHaveText('hello world');
@@ -123,22 +106,17 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     await expect(reply).toContainText('hello world在等你回复，iso 周报 还没开始，hello world（名字 hw）先等等。');
     await expect(reply).not.toContainText(SESSION);
     const dispatch = reply.locator('.pl-act-dispatch').first();
-    await expect(dispatch.locator('.pl-act-h')).toHaveText('派活提议 · iso 整理周报');
+    await expect(dispatch.locator('.pl-act-h')).toHaveText('派出会话 · iso 整理周报');
     await expect(dispatch).toContainText('把本周合并的 PR 整理成周报');
-    await expect(dispatch.locator('.pl-act-state button')).toHaveText(['批准', '驳回']);
-    const again = reply.locator('.pl-act-dispatch').nth(1);
-    await expect(again.locator('.pl-act-state button')).toHaveText(['批准', '驳回']);
+    await expect(dispatch.locator('.pl-act-note')).toHaveText('派出后直接执行，可在"任务"里停止');
+    await expect(reply.locator('.pl-act-dispatch button')).toHaveCount(0);
     await expect(reply.locator('.pl-act-bad .pl-act-h')).toHaveText('看不懂的动作块');
     await expect(reply.locator('.pl-act-promise')).toContainText('iso 周五前提醒你看周报');
     // The Planner's judgment of a task (§15.4 status).
     await expect(reply.locator('.pl-act-status .pl-act-h')).toHaveText('Planner 判断 · 已完成');
     await expect(reply.locator('.pl-act-status')).toContainText('iso 它汇报周报写好了');
     await expect(reply.locator('code[data-lang="naozhi-action"]')).toHaveCount(0);
-    await dispatch.locator('.pl-act-state button', { hasText: '批准' }).click();
-    await expect(dispatch.locator('.pl-act-done')).toHaveText('已批准');
-    await expect(again.locator('.pl-act-done')).toHaveText('已批准');
-    expect(mock.inboxCalls).toContainEqual({ path: '/api/inbox/decide', method: 'POST', body: { id: 'in_d', action: 'approve' } });
-    await expect(page.locator('#pl-wait .pl-card')).toHaveCount(0);
+    await expect(page.locator('#pl-cards')).toBeHidden();
 
     // Send to the Planner: a pending bubble, then the receipt and the reply.
     const conn = mock.wsConnections[mock.wsConnections.length - 1];

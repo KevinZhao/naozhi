@@ -21,7 +21,7 @@ function inbox() {
     open: [
       { id: 'in_err', kind: 'error', level: 'timely', unit: 'cron:nightly', title: 'iso nightly 失败', why: '定时任务运行失败', created: iso(now - 3 * 3600000), state: 'open', source: 'health:cron:nightly' },
       { id: 'in_q', kind: 'question', level: 'timely', unit: SESSION, title: 'iso 会话在等你回复', why: '有提问等你回答超过 10 分钟', created: iso(now - 12 * 60000), state: 'open', source: 'waiting:' + SESSION, auto_close: true },
-      { id: 'in_d', kind: 'decision', level: 'timely', title: '派出一个会话整理周报？', why: 'Planner 提议', created: iso(now - 5 * 60000), state: 'open', source: 'planner:d1', decision: { handler: 'dispatch', actions: ['approve', 'reject'] } },
+      { id: 'in_d', kind: 'decision', level: 'timely', title: '周报用哪个模板？', why: 'Planner 问你', created: iso(now - 5 * 60000), state: 'open', source: 'planner:d1', decision: { handler: 'ask', actions: ['模板 A', '模板 B'] } },
     ],
     closed: [],
     counts: { open: 3, badge: 2 },
@@ -78,7 +78,7 @@ test('desktop: badge, 通知 cards, stream, controls, and the workbench folds th
     await expect(page.locator('#pl-wait-count')).toHaveText('3');
     // Decisions first, then questions, then errors.
     await expect(cards.nth(0).locator('.pl-kind')).toHaveText('待你决定');
-    await expect(cards.nth(0).locator('.pl-card-acts button')).toHaveText(['批准', '驳回']);
+    await expect(cards.nth(0).locator('.pl-card-acts button')).toHaveText(['模板 A', '模板 B']);
     const q = page.locator('.pl-card[data-id="in_q"]');
     await expect(q.locator('.pl-kind')).toHaveText('提问');
     await expect(q.locator('.pl-wait')).toHaveText('等了 12 分钟');

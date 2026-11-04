@@ -38,7 +38,7 @@ import { renderEventsWithDividers } from './event_render.js';
 import { runPendingAsync } from './render_md.js';
 import { inbox, isLit, notifySupported, onInboxCount, requestNotifyPermission, revealFocus } from './notify.js';
 import { followWorkbenchSubject, noteWorkbenchEvent } from './workbench_panes.js';
-import { decisionActsHtml, decorateEvents, paintSessionCards, refreshHealth, setInboxItems } from './planner_cards.js';
+import { decisionActsHtml, decorateEvents, paintSessionCards, refreshHealth } from './planner_cards.js';
 import { clearPending, closePlannerSession, mountComposer, notePlannerStatus } from './planner_chat.js';
 import { mountTasks, refreshTasks } from './tasks.js';
 import { workbench } from './workbench.js';
@@ -197,14 +197,14 @@ function revealWaiting() {
   revealFocus($('pl-wait'));
 }
 
-// paintInlineCards repeats the Planner's open cards (dispatch confirmations,
-// its questions) at the end of the conversation, where they were asked; the
-// left column keeps them too, and either answers.
+// paintInlineCards repeats the Planner's open questions with options at the
+// end of the conversation, where they were asked; the left column keeps them
+// too, and either answers.
 function paintInlineCards(items) {
   const box = $('pl-cards');
   if (!box) return;
   const mine = items.filter((it) => it.unit === PLANNER_KEY && it.decision && it.id !== pl.focusId);
-  const html = mine.length ? '<div class="pl-cards-h">待你确认 · ' + mine.length + '</div>' + mine.map(itemHtml).join('') : '';
+  const html = mine.length ? '<div class="pl-cards-h">待你回答 · ' + mine.length + '</div>' + mine.map(itemHtml).join('') : '';
   if (box.innerHTML !== html) box.innerHTML = html;
   box.hidden = !html;
 }
@@ -241,7 +241,6 @@ export async function fetchInbox() {
     const res = await fetchJSON(NZ_CONTRACT.API.inbox, { timeoutMs: 8000 });
     pl.open = (res && Array.isArray(res.open)) ? res.open : [];
     pl.inboxAt = Date.now();
-    setInboxItems(pl.open, (res && Array.isArray(res.closed)) ? res.closed : [], $('pl-stream'));
     pl.pausedUntil = res && res.paused_until ? Date.parse(res.paused_until) || 0 : 0;
     if (res && res.counts) {
       pl.seeding = true;
@@ -388,7 +387,8 @@ const SESSION_REF_RE = /^<naozhi-session-ref>(\{[^\n]*?\})<\/naozhi-session-ref>
 const SESSION_REF_CUT_RE = /^<naozhi-session-ref>[\s\S]*$/;
 const GATEWAY_HEAD_RE = /^<naozhi-(?:snapshot[\s>]|session-ref>)/;
 // RECEIPT_RE is a gateway receipt to the Planner (planner/agent Tell: a
-// dispatch's outcome, your answer to its card): not something you wrote, so
+// dispatch's outcome, your answer to its question, a task you stopped): not
+// something you wrote, so
 // it shows as a gateway line rather than your bubble.
 const RECEIPT_RE = /^<naozhi-receipt>\s*([\s\S]*?)\s*(?:<\/naozhi-receipt>\s*)?$/;
 function withoutSnapshot(e) {
@@ -636,9 +636,9 @@ registerActions({
     fetchInbox();
   },
   'planner-inbox-decide': async (el) => {
-    // The left column's card and the conversation's dispatch card answer
+    // The left column's card and the conversation's repeat of it answer
     // the same item.
-    const card = el.closest('.pl-card, .pl-act');
+    const card = el.closest('.pl-card');
     card?.querySelectorAll('.pl-card-acts button').forEach((b) => { b.disabled = true; });
     try {
       await fetchJSON(NZ_CONTRACT.API.inbox_decide, {

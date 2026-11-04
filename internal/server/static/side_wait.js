@@ -2,9 +2,9 @@
 // (planner RFC §15.3 ①, §15.4): the Planner page's left column where you
 // already are. Its counts and cards are the left column's (planner_view.js
 // waitCount / waitListHtml, the tasks not done tasks.js renders); a click
-// unfolds them in place, where the cards' own buttons close, approve /
-// reject, answer and change a task's state, a dispatched session opening in
-// the chat view, and with nothing open it is one thin line.
+// unfolds them in place, where the cards' own buttons close, answer, change
+// a task's state and stop a dispatched session, which opens in the chat
+// view, and with nothing open it is one thin line.
 //
 // The counts follow inbox_count frames (nzBus 'inbox:count'); the list is
 // fetched when the bar unfolds, refetched on a count change while it is

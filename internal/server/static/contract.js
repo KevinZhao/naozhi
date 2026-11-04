@@ -104,6 +104,7 @@ export const NZ_CONTRACT = Object.freeze({
     system_update_apply: '/api/system/update/apply',
     tasks: '/api/tasks',
     tasks_state: '/api/tasks/state',
+    tasks_stop: '/api/tasks/stop',
     transcribe: '/api/transcribe',
   },
   ENUMS: {
