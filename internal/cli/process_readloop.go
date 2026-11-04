@@ -541,7 +541,7 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 	// replayed slot claims it.
 	isSystemInit := ev.Type == "system" && ev.SubType == "init"
 	if isSystemInit && p.caps.Replay {
-		p.onSystemInit()
+		p.onSystemInit(ev.SessionID)
 	}
 
 	// user replay: claim slots into currentTurnSlots. Filter out of

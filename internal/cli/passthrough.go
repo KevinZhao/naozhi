@@ -496,7 +496,15 @@ func (p *Process) DiscardPassthroughPending(reason error) {
 // onTurnResult zeroes them after delivery. Also flips State → Running so
 // InterruptViaControl and the dashboard see the passthrough turn as active
 // (Send does this itself; passthrough callers block on resultCh instead).
-func (p *Process) onSystemInit() {
+// Records sessionID as Send does: until the first result it is the only one a
+// new session has, and the store skips a session without one, so a restart
+// mid-first-turn lost its label.
+func (p *Process) onSystemInit(sessionID string) {
+	if sessionID != "" {
+		p.turn.mu.Lock()
+		p.turn.sessionID = sessionID
+		p.turn.mu.Unlock()
+	}
 	p.transition(evTurnStarted)
 }
 
