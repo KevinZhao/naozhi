@@ -33,6 +33,25 @@ func SessionNotes(j *journal.Journal, inbox *notify.Notifier, sidecars *sidecar.
 	})
 }
 
+// PlannerReports is action.Config.Reports over the router: the senders of
+// the peer_message entries planner:main's history took in (from, to].
+func PlannerReports(router *session.Router) func(from, to time.Time) []string {
+	return func(from, to time.Time) []string {
+		s := router.SessionFor(sessionkey.PlannerMainKey)
+		if s == nil {
+			return nil
+		}
+		lo, hi := from.UnixMilli(), to.UnixMilli()
+		var out []string
+		for _, e := range s.EventEntriesSince(lo) {
+			if e.Type == clievent.KindPeerMessage && e.PeerKey != "" && e.Time <= hi {
+				out = append(out, e.PeerKey)
+			}
+		}
+		return out
+	}
+}
+
 // plannerReports are the times key's cross-session messages reached
 // planner:main: the peer_message entries of its history whose sender
 // resolved to key on arrival.

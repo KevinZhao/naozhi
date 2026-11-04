@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/promise"
@@ -205,5 +206,65 @@ func TestStatus(t *testing.T) {
 	}
 	if got, _ := proms.Get(p.ID); got.State != promise.StateClosed || got.ClosedBy != promise.SourcePlanner {
 		t.Errorf("promise = %+v", got)
+	}
+}
+
+// A dispatched session that reported to the Planner during a turn gets the
+// Planner one receipt when the reply leaves the task 进行中 with no status
+// block, or marks it done with a promise citing it open; a doing block is an
+// answer. The next turn, with no new report, gets none. {P} is the citing
+// promise's ID.
+func TestReportWithoutStatusGetsReceipt(t *testing.T) {
+	const (
+		taskDoing   = `{"type":"status","task":"task:ab12","state":"doing","why":"它说还在等 CI"}`
+		taskDone    = `{"type":"status","task":"task:ab12","state":"done","why":"它汇报写好了"}`
+		promiseDone = `{"type":"status","task":"{P}","state":"done","why":"已告诉用户"}`
+	)
+	cases := []struct {
+		name   string
+		sender string
+		reply  string
+		want   string // "" for no receipt
+	}{
+		{"no status", "task:ab12", "做完了，hello.md 已写好。",
+			"task:ab12（iso 写 hello）刚向你汇报，它在任务里仍是进行中；完成了就用 status 标 done，没完成用 doing 并说明原因；相关的承诺 {P} 也一并处理。"},
+		{"task and promise", "task:ab12", "还没完。\n" + block(taskDoing) + "\n" + block(promiseDone), ""},
+		{"task only", "task:ab12", "做完了。\n" + block(taskDone),
+			"task:ab12（iso 写 hello）刚向你汇报；相关的承诺 {P} 还没完成，条件满足了就用 status 标 done。"},
+		{"doing only", "task:ab12", "还在等 CI。\n" + block(taskDoing), ""},
+		{"not dispatched", "dashboard:direct:x:general", "收到。", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r, g, _, side, _ := newRunner(t)
+			proms := promise.New(promise.Config{})
+			cited, _ := proms.Add(promise.Promise{Text: "task:ab12 做完后告诉用户结果"})
+			proms.Add(promise.Promise{Text: "明早提醒你看 CI"})
+			if err := side.Put(sidecar.Meta{Key: "task:ab12", Purpose: sidecar.PurposeTask, Title: "iso 写 hello"}); err != nil {
+				t.Fatal(err)
+			}
+			r.cfg.Promises, r.cfg.Tasks = proms, task.New(task.Config{Sessions: side, Promises: proms})
+			now := r.last
+			r.cfg.Now = func() time.Time { return now }
+			reportAt := now.Add(time.Second)
+			r.cfg.Reports = func(from, to time.Time) []string {
+				if reportAt.After(from) && !reportAt.After(to) {
+					return []string{c.sender, c.sender}
+				}
+				return nil
+			}
+			for range 2 {
+				now = now.Add(2 * time.Second)
+				r.Result(sessionkey.PlannerMainKey, strings.ReplaceAll(c.reply, "{P}", cited.ID))
+				r.handle(<-r.ch)
+			}
+			var want []string
+			if c.want != "" {
+				want = []string{strings.ReplaceAll(c.want, "{P}", cited.ID)}
+			}
+			if !slices.Equal(g.told, want) {
+				t.Errorf("told = %q, want %q", g.told, want)
+			}
+		})
 	}
 }

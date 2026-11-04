@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/notify"
@@ -67,15 +68,31 @@ type Config struct {
 	Note func(text string)
 	// Tell sends text to the Planner as the gateway's receipt.
 	Tell func(text string) error
+	// Reports are the senders (session keys) of the cross-session messages
+	// that reached the Planner in (from, to]; nil checks none.
+	Reports func(from, to time.Time) []string
 	// Ctx bounds approved dispatches' spawns; nil is Background.
 	Ctx context.Context
+	// Now is the wall clock; nil is time.Now.
+	Now func() time.Time
 }
 
 // Runner runs the action blocks of the Planner's replies and applies the
 // user's answers to the cards they open.
 type Runner struct {
 	cfg Config
-	ch  chan string
+	ch  chan reply
+
+	// last is when the previous Planner reply came: the next one's turn ran
+	// after it.
+	mu   sync.Mutex
+	last time.Time
+}
+
+// reply is one Planner turn's result text and the span its turn ran in.
+type reply struct {
+	text     string
+	from, to time.Time
 }
 
 // dispatchCard is a dispatch card's decision payload: the request as
@@ -100,7 +117,12 @@ func New(cfg Config) *Runner {
 	if cfg.Ctx == nil {
 		cfg.Ctx = context.Background()
 	}
-	r := &Runner{cfg: cfg, ch: make(chan string, queueLen)}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	// Reports older than the runner (history restored at startup) were the
+	// previous run's to check.
+	r := &Runner{cfg: cfg, ch: make(chan reply, queueLen), last: cfg.Now()}
 	if cfg.Inbox != nil {
 		cfg.Inbox.HandleDecisions(HandlerDispatch, r.decideDispatch)
 		cfg.Inbox.HandleDecisions(HandlerAsk, r.decideAsk)
@@ -109,13 +131,21 @@ func New(cfg Config) *Runner {
 }
 
 // Result is the router's result sink: it queues key's reply when key is the
-// Planner and the reply holds an action block. It never blocks.
+// Planner, for its action blocks and the reports its turn took. It never
+// blocks.
 func (r *Runner) Result(key, text string) {
-	if key != r.cfg.Planner || !strings.Contains(text, Fence) {
+	if key != r.cfg.Planner {
+		return
+	}
+	r.mu.Lock()
+	rep := reply{text: text, from: r.last, to: r.cfg.Now()}
+	r.last = rep.to
+	r.mu.Unlock()
+	if r.cfg.Reports == nil && !strings.Contains(text, Fence) {
 		return
 	}
 	select {
-	case r.ch <- text:
+	case r.ch <- rep:
 	default:
 		slog.Warn("planner actions: queue full; reply's action blocks dropped")
 	}
@@ -127,20 +157,23 @@ func (r *Runner) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case text := <-r.ch:
-			r.Handle(text)
+		case rep := <-r.ch:
+			r.handle(rep)
 		}
 	}
 }
 
 // Handle runs text's action blocks in order.
-func (r *Runner) Handle(text string) {
+func (r *Runner) Handle(text string) { r.handle(reply{text: text}) }
+
+func (r *Runner) handle(rep reply) {
 	defer func() {
 		if p := recover(); p != nil {
 			slog.Error("planner actions: panicked", "panic", p)
 		}
 	}()
-	for _, b := range Parse(text) {
+	statused := map[string]string{} // task or promise → the state a block set
+	for _, b := range Parse(rep.text) {
 		if b.Err != nil {
 			r.refuse(b, b.Err)
 			continue
@@ -154,11 +187,73 @@ func (r *Runner) Handle(text string) {
 		case b.Ask != nil:
 			err = r.ask(*b.Ask)
 		case b.Status != nil:
+			statused[b.Status.Task] = b.Status.State
 			err = r.status(b)
 		}
 		if err != nil {
 			r.note("动作块没有执行：" + err.Error())
 		}
+	}
+	r.checkReports(rep, statused)
+}
+
+// checkReports reminds the Planner of the dispatched sessions that reported
+// to it during the turn and that its reply left open: the task still 进行中
+// with no status block for it, or the reply marking it done while a promise
+// citing it (its key in the text or close_when) stays open with none
+// (docs/rfc/planner.md §15.4; D61: the gateway keeps the list honest when the
+// model forgets). A doing or failed block is the Planner's answer, so the
+// promises waiting on the task are left alone. It runs after
+// the reply's blocks, so what they closed is not asked about. The receipt's
+// own turn takes no report, so a report gets at most one.
+func (r *Runner) checkReports(rep reply, statused map[string]string) {
+	if r.cfg.Reports == nil || r.cfg.Tasks == nil || rep.to.IsZero() {
+		return
+	}
+	reported := r.cfg.Reports(rep.from, rep.to)
+	if len(reported) == 0 {
+		return
+	}
+	sessions := map[string]task.Task{}
+	for _, t := range r.cfg.Tasks.List() {
+		if t.Kind == task.KindSession {
+			sessions[t.ID] = t
+		}
+	}
+	var open []promise.Promise
+	if r.cfg.Promises != nil {
+		open, _ = r.cfg.Promises.List(0)
+	}
+	var lines []string
+	seen := map[string]bool{}
+	for _, key := range reported {
+		t, ok := sessions[key]
+		if !ok || seen[key] {
+			continue
+		}
+		seen[key] = true
+		var ids []string
+		for _, p := range open {
+			if statused[p.ID] == "" && (strings.Contains(p.Text, key) || strings.Contains(p.CloseWhen, key)) {
+				ids = append(ids, p.ID)
+			}
+		}
+		var line string
+		switch {
+		case t.State == task.Doing && statused[key] == "":
+			line = key + "（" + t.Title + "）刚向你汇报，它在任务里仍是进行中；完成了就用 status 标 done，没完成用 doing 并说明原因"
+			if len(ids) > 0 {
+				line += "；相关的承诺 " + strings.Join(ids, "、") + " 也一并处理"
+			}
+		case statused[key] == string(task.Done) && len(ids) > 0:
+			line = key + "（" + t.Title + "）刚向你汇报；相关的承诺 " + strings.Join(ids, "、") + " 还没完成，条件满足了就用 status 标 done"
+		default:
+			continue
+		}
+		lines = append(lines, line+"。")
+	}
+	if len(lines) > 0 {
+		r.tell(strings.Join(lines, "\n"))
 	}
 }
 

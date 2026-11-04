@@ -31,9 +31,9 @@ import (
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
-// ShutdownTimeout is the maximum time to wait for graceful shutdown
-// of running sessions (Router) and HTTP connections (Server).
-// Exported so both session and server packages use a single value.
+// ShutdownTimeout is the maximum time to wait for graceful shutdown of HTTP
+// connections (Server); the Router's wait for running turns is
+// shutdownTurnWait. Exported so the server and cron packages share it.
 const ShutdownTimeout = 30 * time.Second
 
 // ErrMaxProcs is returned when all process slots are occupied.
