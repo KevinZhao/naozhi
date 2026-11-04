@@ -1149,7 +1149,7 @@ v8 复核时确认已删除、RFC 不再依赖的：Prometheus / `/metrics`、Ag
 | ③ 会话视图旁注 | 网关的确定性提示插在会话对话流里（只给你看，不进会话上下文）：该会话的健康状态转到"待你回复 / 停滞 / 失败"、恢复、它在"等你"里的条目开启或关闭、它被 Planner 派出或汇报。来源是 ③ 健康状态机与 ④ 等你，写进 journal，按时间插入事件流；不用模型（Planner 主动写旁注随信任阶梯 L1 之后再做） |
 | ④ 推送直达 | 浏览器通知与 macOS 通知点开即到对应会话或卡片（条目有会话就打开会话并滚到旁注，没有就打开 Planner 抽屉并高亮条目）；早报推送打开 Planner 抽屉 |
 | ⑤ #3818 | 冻结后多个心跳超时合并成一条紧急通知；"停滞"也覆盖后台 Bash / Agent 任务；死亡原因持久化，重启后仍为"失败"；网关写进 Planner 对话的事件（到点提醒、已派出、驳回、格式不对）持久化到 journal，重启后可见；`POST /api/planner/state` stop 返回真实的 alive；`index.json` 与 Planner 快照带跨会话名字与标题，Planner 用名字称呼会话；Planner 页面左栏"等你 · N"用 open 数，角标仍用 badge。"上次异常退出"维持"有时效"级别 |
-| ⑥ 项目 CLAUDE.md | naozhi 拉起的执行会话（不含 `planner:main`）加载项目级设置来源（`--setting-sources project`，与终端一致：项目 CLAUDE.md、`.claude/settings.json`、项目 skills）。先在隔离实例实测副作用（项目 hooks、权限规则、`.mcp.json` 是否被带入、与 naozhi-settings 的合并顺序、drift 比较）；只有副作用都符合"与终端一致"才合入，否则停下并汇报给 owner |
+| ⑥ 项目 CLAUDE.md | naozhi 拉起的执行会话（不含 `planner:main`）加载项目级设置来源（`--setting-sources project`，与终端一致：项目 CLAUDE.md、`.claude/settings.json`、项目 skills）。先在隔离实例实测副作用（项目 hooks、权限规则、`.mcp.json` 是否被带入、与 naozhi-settings 的合并顺序、drift 比较）；只有副作用都符合"与终端一致"才合入，否则停下并汇报给 owner。**结论（D87）**：owner 选与终端一致：项目 env 可改凭证与端点，信任边界等同在该目录跑 `claude -p`（项目 hooks 本就能执行任意命令）。开启 naozhi_settings 时为 `project,local`（`--settings` 仍是 naozhi-settings），未开启时为 `user,project,local`（实测只用 `user` 也读不到项目 CLAUDE.md） |
 
 验收：隔离实例上按 ①–⑥ 逐项实测（桌面与手机宽度截图、控制台 0 报错、release gate），重启后旁注与 Planner 对话事件仍在；然后发 v0.2.1、升级本机、在 :8180 做 e2e。
 
@@ -1246,7 +1246,7 @@ P7 提前的第一段（owner 11-04 定），不依赖 Planner；配对、EC2 �
 
 **前置验证中发现的两个现有问题**（与 Planner 无关，待 owner 决定）：
 
-1. **naozhi 拉起的会话读不到项目 CLAUDE.md**：开启 `naozhi_settings` 时用 `--setting-sources ""`，连带排除了项目级 CLAUDE.md（实测：`""` 时模型回答"没有项目说明"，`user,project` 时能读到并照做）。naozhi 仓库自己的 191 行 CLAUDE.md 与 `~/Workspace` 下十几个仓库的 CLAUDE.md 目前对 naozhi 会话都不生效。
+1. ~~naozhi 拉起的会话读不到项目 CLAUDE.md~~（**已解决 2026-11-04，D87**：执行会话加载 project / local 来源，`planner:main` 不变）：开启 `naozhi_settings` 时用 `--setting-sources ""`，连带排除了项目级 CLAUDE.md（实测：`""` 时模型回答"没有项目说明"，`user,project` 时能读到并照做）。naozhi 仓库自己的 191 行 CLAUDE.md 与 `~/Workspace` 下十几个仓库的 CLAUDE.md 目前对 naozhi 会话都不生效。
 2. ~~正式实例 :8180 在局域网上没有鉴权~~（**已修 2026-11-03**：配置了 `dashboard_token`，局域网与本机无令牌请求均返回 401）：监听 `*:8180`，`dashboard_token` 为空，macOS 防火墙关闭；从本机局域网 IP 请求 `/api/sessions` 返回 200。同一网络里的人可以往 bypass 模式的会话里发消息。
 
 **历史**：v7 的重审问题 ①–⑫ 已全部定稿（D60–D77），讨论过程见 git 历史与 `planner-landscape.md`。
@@ -1356,6 +1356,7 @@ P7 提前的第一段（owner 11-04 定），不依赖 Planner；配对、EC2 �
 | D84 | 11-04 | v0.2.1：Planner 坐到你旁边——会话视图侧栏"等你"条、Alt+P Planner 抽屉、会话视图确定性旁注、推送直达、清 #3818、执行会话加载项目设置来源（§15.3） | owner 试用 v0.2.0 后反馈"不太习惯切换到 Planner"；快捷键、旁注只用确定性来源、CLAUDE.md 修法按建议执行 |
 | D85 | 11-04 | Planner 页面左栏两组改名"通知"与"任务"；"任务"合并承诺与 Planner 派出的会话，状态自动标记（网关确定性 + Planner 用新增的 `status` 动作块判"已完成"）、你随时可改、已完成 24 小时后归档；放宽 D67"只有你能关"（§15.4） | owner 试用反馈：名称更直白，任务希望能自动关闭或标状态 |
 | D86 | 11-04 | P7 拆两段，第一段提前为 v0.3.0：修远程文件串到本机、`send` 带后端、发送幂等与 turn id、远程文件浏览、远程会话工作区归属，全部按节点能力位兼容旧版本；配对 / EC2 控制面 / dispatch-v1 / 离线状态机仍在 P2 之后（§15.5） | owner 决定提前；代码核实见 §15.5 |
+| D87 | 11-04 | 执行会话加载项目设置来源（§15.3 ⑥），owner 选与终端一致：项目 env 可改凭证与端点，信任边界等同在该目录跑 `claude -p`（项目 hooks 本就能执行任意命令）；`planner:main` 不变 | #3822 实测 |
 
 ## 附录 A. auto mode 实测（2026-10-16）
 

@@ -72,10 +72,11 @@ naozhi_settings:
 	if !argvPair(eff.Argv, "--mcp-config", mcp) {
 		t.Errorf("argv must carry the resolved mcp config: %v", eff.Argv)
 	}
-	// The isolated-settings path suppresses external sources; reporting `user`
-	// here is the misread this test exists to prevent.
-	if !argvPair(eff.Argv, "--setting-sources", "") {
-		t.Errorf("argv must show settings sources suppressed, got %v", eff.Argv)
+	// The isolated-settings path drops the user source and keeps the
+	// workspace's project sources; reporting `user` here is the misread this
+	// test exists to prevent.
+	if !argvPair(eff.Argv, "--setting-sources", "project,local") {
+		t.Errorf("argv must show the user source dropped, got %v", eff.Argv)
 	}
 	// A check reports the path; creating the file is the startup's job. A file
 	// the check wrote would be unseeded, and startup only seeds a missing one.

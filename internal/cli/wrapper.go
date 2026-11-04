@@ -107,6 +107,10 @@ type SpawnOptions struct {
 	// already holds SettingsFile's content plus the session's overrides.
 	// SettingsFile still picks the setting sources and the model manifest.
 	SessionSettingsFile string
+	// ProjectSettings adds the project and local setting sources, so the
+	// session reads its workspace's CLAUDE.md and .claude/ as a terminal
+	// claude does.
+	ProjectSettings bool
 }
 
 // MaxAppendSystemPromptBytes is cliinfo.MaxAppendSystemPromptBytes.

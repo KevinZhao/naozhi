@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -71,12 +72,12 @@ func (p *ClaudeProtocol) seedSettingsFromArgs(args []string, base string) {
 }
 
 // settingsSourceFromArgs inverts BuildArgs' settings flags into the source it
-// recorded: `--setting-sources user` yields localSettingsMarker and
-// `--setting-sources ""` yields base, whatever `--settings` names, since a
-// per-session settings file may hold that slot (SessionSettingsFile). An argv
-// with no `--setting-sources`, or "" with no usable base, yields its
-// `--settings` file. Last occurrence wins; a file usableSettingsFile rejects
-// is ignored.
+// recorded: a `--setting-sources` list naming user yields localSettingsMarker
+// and one without it ("" or "project,local") yields base, whatever `--settings`
+// names, since a per-session settings file may hold that slot
+// (SessionSettingsFile). An argv with no `--setting-sources`, or a list without
+// user and no usable base, yields its `--settings` file. Last occurrence wins;
+// a file usableSettingsFile rejects is ignored.
 func settingsSourceFromArgs(args []string, base string) (src string, ok bool) {
 	var file, sources string
 	sourcesSet := false
@@ -93,9 +94,9 @@ func settingsSourceFromArgs(args []string, base string) (src string, ok bool) {
 		}
 	}
 	switch {
-	case sourcesSet && sources == "user":
+	case sourcesSet && slices.Contains(strings.Split(sources, ","), "user"):
 		return localSettingsMarker, true
-	case sourcesSet && sources == "" && usableSettingsFile(base) != "":
+	case sourcesSet && usableSettingsFile(base) != "":
 		return base, true
 	case file != "":
 		return file, true
