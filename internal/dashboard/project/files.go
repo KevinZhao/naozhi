@@ -208,7 +208,7 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 }
 
 // ReadFileFor answers a primary's file_read RPC under this node's roots and
-// rules: the preview HandleFileGet serves, or one raw segment.
+// rules: one segment of the preview HandleFileGet serves, or of the file.
 func (h *Handlers) ReadFileFor(p node.FileReadParams) node.FileRead {
 	root, rf := h.rootOfRPC(p.FileRoot)
 	if rf == nil && p.Path == "" {
@@ -228,6 +228,9 @@ func (h *Handlers) ReadFileFor(p node.FileReadParams) node.FileRead {
 	var rd node.FileRead
 	if p.Mode == "preview" {
 		rd, rf = previewOf(of)
+		if rf == nil {
+			rd, rf = previewSegment(rd, p.Offset, p.Limit)
+		}
 	} else {
 		rd, rf = readSegment(of, p.Offset, p.Limit)
 	}

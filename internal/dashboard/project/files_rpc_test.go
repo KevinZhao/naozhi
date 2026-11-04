@@ -53,7 +53,9 @@ func TestReadFileFor(t *testing.T) {
 	}{
 		{name: "preview", p: node.FileReadParams{FileRoot: repo, Path: "README.md", Mode: "preview"}, data: "hello", size: 5},
 		{name: "project root", p: node.FileReadParams{FileRoot: node.FileRoot{Project: "demo"}, Path: "sub/a.txt", Mode: "preview"}, data: "in sub", size: 6},
-		{name: "preview cap", p: node.FileReadParams{FileRoot: repo, Path: "long.txt", Mode: "preview"}, size: maxPreviewBytes + 10, truncated: true, wantLength: maxPreviewBytes},
+		{name: "preview first segment", p: node.FileReadParams{FileRoot: repo, Path: "long.txt", Mode: "preview"}, size: maxPreviewBytes + 10, truncated: true, wantLength: node.ReverseFileChunk},
+		{name: "preview cap", p: node.FileReadParams{FileRoot: repo, Path: "long.txt", Mode: "preview", Offset: maxPreviewBytes - 100}, size: maxPreviewBytes + 10, truncated: true, wantLength: 100},
+		{name: "preview offset past end", p: node.FileReadParams{FileRoot: repo, Path: "README.md", Mode: "preview", Offset: 6}, status: http.StatusBadRequest},
 		{name: "binary preview", p: node.FileReadParams{FileRoot: repo, Path: "big.bin", Mode: "preview"}, size: int64(len(big)), binary: true},
 		{name: "sensitive preview", p: node.FileReadParams{FileRoot: repo, Path: ".env", Mode: "preview"}, size: 8, binary: true},
 		{name: "sensitive raw", p: node.FileReadParams{FileRoot: repo, Path: ".env", Mode: "raw"}, status: http.StatusForbidden},
@@ -64,9 +66,9 @@ func TestReadFileFor(t *testing.T) {
 		{name: "outside allowed root", p: node.FileReadParams{FileRoot: node.FileRoot{Key: "dashboard:direct:out:general"}, Path: "x.txt", Mode: "raw"}, status: http.StatusNotFound},
 		{name: "unknown session", p: node.FileReadParams{FileRoot: node.FileRoot{Key: "dashboard:direct:nope:general"}, Path: "README.md", Mode: "raw"}, status: http.StatusNotFound},
 		{name: "invalid mode", p: node.FileReadParams{FileRoot: repo, Path: "README.md", Mode: "render"}, status: http.StatusBadRequest},
-		{name: "first segment", p: node.FileReadParams{FileRoot: repo, Path: "big.bin", Mode: "raw"}, size: int64(len(big)), wantLength: node.MaxFileChunk},
-		{name: "oversized limit clamps", p: node.FileReadParams{FileRoot: repo, Path: "big.bin", Mode: "raw", Limit: 8 << 20}, size: int64(len(big)), wantLength: node.MaxFileChunk},
-		{name: "last segment", p: node.FileReadParams{FileRoot: repo, Path: "big.bin", Mode: "raw", Offset: 2 * node.MaxFileChunk}, size: int64(len(big)), wantLength: len(big) - 2*node.MaxFileChunk},
+		{name: "first segment", p: node.FileReadParams{FileRoot: repo, Path: "big.bin", Mode: "raw"}, size: int64(len(big)), wantLength: node.ReverseFileChunk},
+		{name: "oversized limit clamps", p: node.FileReadParams{FileRoot: repo, Path: "big.bin", Mode: "raw", Limit: node.MaxFileChunk}, size: int64(len(big)), wantLength: node.ReverseFileChunk},
+		{name: "last segment", p: node.FileReadParams{FileRoot: repo, Path: "big.bin", Mode: "raw", Offset: int64(len(big) - 100)}, size: int64(len(big)), wantLength: 100},
 		{name: "small limit", p: node.FileReadParams{FileRoot: repo, Path: "README.md", Mode: "raw", Offset: 1, Limit: 3}, size: 5, data: "ell"},
 		{name: "offset past end", p: node.FileReadParams{FileRoot: repo, Path: "README.md", Mode: "raw", Offset: 6}, status: http.StatusBadRequest},
 	}
@@ -99,8 +101,8 @@ func TestReadFileFor(t *testing.T) {
 			if tc.binary && len(got.Data) != 0 {
 				t.Errorf("binary or sensitive preview carries %d bytes", len(got.Data))
 			}
-			if len(raw) > 2<<20 {
-				t.Errorf("answer is %d bytes, over the reverse RPC cap", len(raw))
+			if len(raw) > node.ReverseFileChunk*4/3+1024 {
+				t.Errorf("answer is %d bytes, over one reverse file chunk", len(raw))
 			}
 		})
 	}

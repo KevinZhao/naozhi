@@ -12,10 +12,17 @@ import (
 // §15.5 ④). A direct node serves them over its own HTTP file API.
 const CapFiles = "files"
 
-// MaxFileChunk caps the bytes one file_read answers: base64 keeps a full
-// chunk under maxReverseRPCResponseBytes, so a raw read or a download goes in
-// offset segments of at most this size.
+// MaxFileChunk caps one raw segment a primary reads from a node, so a raw
+// read or a download goes in offset segments of at most this size; it also
+// bounds a preview, whose cap is 1 MB.
 const MaxFileChunk = 1 << 20
+
+// ReverseFileChunk caps the bytes one file_read answer carries over a reverse
+// conn, raw or preview. The node writes every frame under one lock with a
+// 10 s deadline: a full MaxFileChunk (~1.4 MB as base64) would time out on a
+// slow uplink and drop the conn, and on a fast one still hold up the event
+// stream behind it.
+const ReverseFileChunk = 256 << 10
 
 // ErrFilesUnsupported is the error a file request to a node that cannot serve
 // its files gets (a reverse node predating CapFiles); the dashboard answers 501.
@@ -65,9 +72,9 @@ type FileList struct {
 	FileRefusal
 }
 
-// FileReadParams is file_read's request. Mode "preview" answers the text
-// preview (capped like the dashboard's); "raw" answers up to Limit bytes
-// (at most MaxFileChunk) from Offset.
+// FileReadParams is file_read's request: up to Limit bytes (at most
+// ReverseFileChunk) from Offset of the text preview (Mode "preview", capped
+// like the dashboard's) or of the file (Mode "raw").
 type FileReadParams struct {
 	FileRoot
 	Path   string `json:"path"`
@@ -149,10 +156,36 @@ func (c *ReverseConn) ListFiles(ctx context.Context, p FilesListParams) (FileLis
 	return out, err
 }
 
+// ReadFile reads a raw segment of at most ReverseFileChunk, or the whole
+// preview in segments of that size; a short segment ends the preview.
 func (c *ReverseConn) ReadFile(ctx context.Context, p FileReadParams) (FileRead, error) {
+	if p.Mode != "preview" {
+		if p.Limit <= 0 || p.Limit > ReverseFileChunk {
+			p.Limit = ReverseFileChunk
+		}
+		var out FileRead
+		err := c.fileRPC(ctx, "file_read", p, &out)
+		return out, err
+	}
+	p.Offset, p.Limit = 0, ReverseFileChunk
 	var out FileRead
-	err := c.fileRPC(ctx, "file_read", p, &out)
-	return out, err
+	for {
+		var seg FileRead
+		if err := c.fileRPC(ctx, "file_read", p, &seg); err != nil {
+			return FileRead{}, err
+		}
+		if p.Offset == 0 {
+			out = seg
+		} else if seg.Status != 0 || seg.Binary || seg.Size != out.Size || seg.MtimeMs != out.MtimeMs || seg.Offset != p.Offset {
+			return FileRead{}, errors.New("file changed during preview")
+		} else {
+			out.Data = append(out.Data, seg.Data...)
+		}
+		if out.Status != 0 || out.Binary || len(seg.Data) < p.Limit || len(out.Data) >= MaxFileChunk {
+			return out, nil
+		}
+		p.Offset += int64(len(seg.Data))
+	}
 }
 
 func (c *ReverseConn) FilesExist(ctx context.Context, p FilesExistsParams) (FilesExists, error) {

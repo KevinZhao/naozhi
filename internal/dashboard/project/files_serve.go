@@ -96,9 +96,28 @@ func previewOf(of openedFile) (node.FileRead, *fileRefusal) {
 	return node.FileRead{Size: size, Mime: mime, Truncated: truncated, Data: buf[:read]}, nil
 }
 
-// readSegment reads up to limit bytes (at most node.MaxFileChunk) from offset
-// for a primary streaming the file in raw, render or download mode; the
-// primary sniffs the MIME and applies those modes' gates itself.
+// segmentLimit is a file_read limit clamped to node.ReverseFileChunk.
+func segmentLimit(limit int) int {
+	if limit <= 0 || limit > node.ReverseFileChunk {
+		return node.ReverseFileChunk
+	}
+	return limit
+}
+
+// previewSegment cuts rd's preview to the limit bytes from offset; the
+// primary reassembles it.
+func previewSegment(rd node.FileRead, offset int64, limit int) (node.FileRead, *fileRefusal) {
+	if offset < 0 || offset > int64(len(rd.Data)) {
+		return node.FileRead{}, refuse(http.StatusBadRequest, "invalid offset")
+	}
+	rd.Offset = offset
+	rd.Data = rd.Data[offset:min(offset+int64(segmentLimit(limit)), int64(len(rd.Data)))]
+	return rd, nil
+}
+
+// readSegment reads up to limit bytes (at most node.ReverseFileChunk) from
+// offset for a primary streaming the file in raw, render or download mode;
+// the primary sniffs the MIME and applies those modes' gates itself.
 func readSegment(of openedFile, offset int64, limit int) (node.FileRead, *fileRefusal) {
 	// Every streaming mode refuses credential-bearing names.
 	if isSensitiveDownloadPath(workspaceScanPath(of.rootResolved, of.resolved)) {
@@ -108,10 +127,7 @@ func readSegment(of openedFile, offset int64, limit int) (node.FileRead, *fileRe
 	if offset < 0 || offset > size {
 		return node.FileRead{}, refuse(http.StatusBadRequest, "invalid offset")
 	}
-	if limit <= 0 || limit > node.MaxFileChunk {
-		limit = node.MaxFileChunk
-	}
-	buf := make([]byte, min(int64(limit), size-offset))
+	buf := make([]byte, min(int64(segmentLimit(limit)), size-offset))
 	n, err := of.f.ReadAt(buf, offset)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return node.FileRead{}, refuse(http.StatusInternalServerError, "read failed")
