@@ -6,6 +6,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -51,11 +52,40 @@ const (
 	// sendAckReset: the text was a bare /new or /clear; the key has no
 	// session until the next send.
 	sendAckReset sendAckStatus = "reset"
+	// sendAckUnknown: a remote send went out and its answer was lost
+	// (node.ErrSendUnknown); the tab keeps the bubble and may retry it with
+	// the same send_id.
+	sendAckUnknown sendAckStatus = "unknown"
 )
 
 // errSendBusy is the error a primary reports for a remote send its node
 // answered "busy".
 var errSendBusy = node.ErrSendBusy
+
+// errRemoteFiles refuses attachments on a remote send: they live in this
+// host's upload store.
+const errRemoteFiles = "files not supported for remote nodes"
+
+// errRemoteAccessProfile refuses an access-profile pick on a remote send: the
+// overlay is host-local and no link carries it.
+const errRemoteAccessProfile = "远程节点不支持访问档"
+
+// remoteSendErrorText is what a tab sees for a failed remote send: the
+// node-link refusals are written for it, anything else from the transport
+// may carry host details and reads as fallback.
+func remoteSendErrorText(err error, fallback string) string {
+	switch {
+	case errors.Is(err, node.ErrSendUnknown):
+		return node.ErrSendUnknown.Error()
+	case errors.Is(err, node.ErrSendBackendUnsupported):
+		return node.ErrSendBackendUnsupported.Error()
+	case errors.Is(err, ErrNodeLacksBackend):
+		// Built by remoteBackend from a validated backend ID only.
+		return err.Error()
+	default:
+		return fallback
+	}
+}
 
 // errUrgentUsage rejects a bare /urgent (#3004 分叉 6); asyncErrorMessage
 // passes its text through to the client.

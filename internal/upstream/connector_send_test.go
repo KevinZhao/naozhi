@@ -18,19 +18,24 @@ type fakeSubmitter struct {
 	mu     sync.Mutex
 	calls  []fakeSubmit
 	status string
+	dup    bool
 	err    error
 }
 
 type fakeSubmit struct {
 	ctx                  context.Context
 	key, text, workspace string
+	req                  node.SendRequest
 }
 
-func (f *fakeSubmitter) SubmitRelayed(ctx context.Context, key, text, workspace string) (string, error) {
+func (f *fakeSubmitter) SubmitRelayed(ctx context.Context, req node.SendRequest) (node.SendResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, fakeSubmit{ctx: ctx, key: key, text: text, workspace: workspace})
-	return f.status, f.err
+	f.calls = append(f.calls, fakeSubmit{ctx: ctx, key: req.Key, text: req.Text, workspace: req.Workspace, req: req})
+	if f.err != nil {
+		return node.SendResult{}, f.err
+	}
+	return node.SendResult{Status: f.status, Dup: f.dup}, nil
 }
 
 func (f *fakeSubmitter) called() []fakeSubmit {
@@ -75,6 +80,44 @@ func TestHandleRequest_Send_SubmitsToTheTurnPipeline(t *testing.T) {
 	}
 	if calls[0].ctx.Value(connCtxMarker{}) != "conn" {
 		t.Error("submitter did not get connCtx")
+	}
+}
+
+// The send-backend and send-idempotent fields reach the pipeline, and a
+// repeat the pipeline recognised answers with dup. An older primary sends
+// none of them, and its send is the plain one it always was.
+func TestHandleRequest_Send_PassesBackendAndTurnID(t *testing.T) {
+	const key = "feishu:direct:alice:general"
+	for _, tc := range []struct {
+		name   string
+		params map[string]string
+		dup    bool
+		want   node.SendRequest
+	}{
+		{"new primary", map[string]string{"key": key, "text": "hi", "backend": "kiro", "resume_id": "r-1", "turn_id": "s0123"}, false,
+			node.SendRequest{Key: key, Text: "hi", Backend: "kiro", ResumeID: "r-1", TurnID: "s0123"}},
+		{"new primary, repeat", map[string]string{"key": key, "text": "hi", "turn_id": "s0123"}, true,
+			node.SendRequest{Key: key, Text: "hi", TurnID: "s0123"}},
+		{"old primary", map[string]string{"key": key, "text": "hi"}, false, node.SendRequest{Key: key, Text: "hi"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sub := &fakeSubmitter{status: "accepted", dup: tc.dup}
+			c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(makeRouter()), nil, Discovery{}, sub)
+			result, err := c.handleRequest(context.Background(), context.Background(), sendReq(t, tc.params), &sync.WaitGroup{})
+			if err != nil {
+				t.Fatalf("send: %v", err)
+			}
+			if calls := sub.called(); len(calls) != 1 || calls[0].req != tc.want {
+				t.Fatalf("submitted %+v, want %+v", calls, tc.want)
+			}
+			var got struct {
+				Status string `json:"status"`
+				Dup    bool   `json:"dup"`
+			}
+			if err := json.Unmarshal(result, &got); err != nil || got.Status != "accepted" || got.Dup != tc.dup {
+				t.Errorf("result = %s, want accepted with dup=%v", result, tc.dup)
+			}
+		})
 	}
 }
 
@@ -131,6 +174,9 @@ func TestHandleRequest_Send_RejectsBeforeThePipeline(t *testing.T) {
 		"workspace traversal":    {"key": "feishu:direct:alice:general", "text": "hi", "workspace": "/home/../etc"},
 		"workspace control byte": {"key": "feishu:direct:alice:general", "text": "hi", "workspace": "/home/user\nproj"},
 		"workspace with no root": {"key": "feishu:direct:alice:general", "text": "hi", "workspace": "/etc"},
+		"backend control byte":   {"key": "feishu:direct:alice:general", "text": "hi", "backend": "kiro\n"},
+		"turn_id control byte":   {"key": "feishu:direct:alice:general", "text": "hi", "turn_id": "s1\x00"},
+		"turn_id too long":       {"key": "feishu:direct:alice:general", "text": "hi", "turn_id": strings.Repeat("a", node.MaxTurnIDLen+1)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			sub := &fakeSubmitter{status: "accepted"}

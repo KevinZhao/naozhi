@@ -72,6 +72,9 @@ type ClientMsg struct {
 	// dispatch of a non-default profile is refused (the overlay is host-local).
 	AccessProfile string   `json:"access_profile,omitempty"`
 	FileIDs       []string `json:"file_ids,omitempty"` // pre-uploaded image IDs from /api/sessions/upload
+	// SendID names one composed message across retries; a remote send
+	// forwards it as the node's turn ID (SendRequest.TurnID).
+	SendID string `json:"send_id,omitempty"`
 	// TaskID is the agent-team subscribe target (agent_subscribe / agent_unsubscribe).
 	TaskID string `json:"task_id,omitempty"`
 }

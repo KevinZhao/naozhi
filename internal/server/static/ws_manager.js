@@ -15,7 +15,6 @@ export const wsm = {
   maxBackoff: 30000,
   reconnectTimer: null,
   pingTimer: null,
-  sendCounter: 0,
   // _everConnected tells the first handshake from a reconnect; setState sets
   // it after the CONNECTED listeners ran, so they see the old value.
   _everConnected: false,

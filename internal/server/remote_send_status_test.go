@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -64,44 +65,53 @@ func TestHub_RemoteSendAckCarriesTheNodesStatus(t *testing.T) {
 	}
 }
 
-// statusNode is a node.Conn whose Send answers a fixed status.
+// statusNode is a node.Conn whose Send answers a fixed status, or err.
 type statusNode struct {
 	fakeCapNode
 	status string
+	err    error
 }
 
-func (n *statusNode) Send(context.Context, string, string, string) (string, error) {
-	return n.status, nil
+func (n *statusNode) Send(context.Context, node.SendRequest) (node.SendResult, error) {
+	return node.SendResult{Status: n.status}, n.err
 }
 
 // TestRemoteSend_ABusyNodeIsASendError: the HTTP path answered 202 before
 // the RPC, so a node that did not buffer the message is reported to the
-// key's subscribers like a failed send; an admitted one is not.
+// sending tab like a failed send, and a lost answer as "unknown" under the
+// send's turn ID; an admitted one is not reported.
 func TestRemoteSend_ABusyNodeIsASendError(t *testing.T) {
 	const key = "test:d:u:general"
+	unknown := fmt.Errorf("%w: timeout", node.ErrSendUnknown)
 	for _, tc := range []struct {
-		status    string
-		wantError bool
+		name    string
+		status  string
+		err     error
+		wantErr string // "" = none reported
 	}{
-		{"busy", true},
-		{"accepted", false},
-		{"queued", false},
-		{"reset", false},
+		{"busy", "busy", nil, "remote-error remote " + key + "   " + errSendBusy.Error()},
+		{"unknown", "", unknown, "remote-error remote " + key + " unknown s1 " + node.ErrSendUnknown.Error()},
+		{"accepted", "accepted", nil, ""},
+		{"queued", "queued", nil, ""},
+		{"reset", "reset", nil, ""},
 	} {
-		t.Run(tc.status, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			rec := &recordingNotifier{}
 			e := newSendEngine(sendEngineOpts{Notify: rec})
 			defer e.drain()
 
-			if !e.remoteSend(&statusNode{fakeCapNode: fakeCapNode{id: "remote"}, status: tc.status}, "remote", key, "hi", "") {
+			nc := &statusNode{fakeCapNode: fakeCapNode{id: "remote"}, status: tc.status, err: tc.err}
+			if !e.remoteSend(nc, "remote", node.SendRequest{Key: key, Text: "hi", TurnID: "s1"}) {
 				t.Fatal("remoteSend refused a send on a live engine")
 			}
 			e.wg.Wait()
 
 			got := rec.snapshot()
-			wantErr := "error " + key + " " + errSendBusy.Error()
-			if tc.wantError != strings.Contains(got, wantErr) {
-				t.Errorf("notifier calls = %q; busy send error reported = %v, want %v", got, !tc.wantError, tc.wantError)
+			if tc.wantErr == "" && strings.Contains(got, "error") {
+				t.Errorf("notifier calls = %q, want no send error", got)
+			}
+			if tc.wantErr != "" && !strings.Contains(got, tc.wantErr) {
+				t.Errorf("notifier calls = %q, want %q", got, tc.wantErr)
 			}
 			if !strings.HasSuffix(got, "sessions") {
 				t.Errorf("notifier calls = %q, want a sessions update last", got)
@@ -147,7 +157,7 @@ func TestRemoteSend_NoRefreshAfterAReset(t *testing.T) {
 			e := newSendEngine(sendEngineOpts{Notify: &recordingNotifier{}})
 			defer e.drain()
 
-			if !e.remoteSend(nc, "remote", key, "/new", "") {
+			if !e.remoteSend(nc, "remote", node.SendRequest{Key: key, Text: "/new"}) {
 				t.Fatal("remoteSend refused a send on a live engine")
 			}
 			e.wg.Wait()

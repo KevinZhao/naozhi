@@ -19,6 +19,15 @@ const CapSubscribeHistory = "subscribe-history"
 // instead of a "busy" status.
 const CapSendStatus = "send-status"
 
+// CapSendBackend is the node tag for reading backend and resume_id in the
+// "send" RPC's params. A node without it ignores them, so the primary refuses
+// such a send rather than start the session on the node's default backend.
+const CapSendBackend = "send-backend"
+
+// CapSendIdempotent is the node tag for reading the "send" RPC's turn_id: a
+// repeat of a turn_id it took answers the first answer, marked dup.
+const CapSendIdempotent = "send-idempotent"
+
 // ErrSendBusy is the refusal for a send that was not buffered: the session is
 // busy and its queue is disabled, or the node is shutting down.
 var ErrSendBusy = errors.New("会话正忙，消息未送达，请稍后重试")
@@ -37,6 +46,8 @@ var knownServerCaps = map[string]struct{}{
 
 	CapSubscribeHistory: {},
 	CapFiles:            {},
+	CapSendBackend:      {},
+	CapSendIdempotent:   {},
 }
 
 // HubCaps is what the hub advertises about itself on the registered ack: the

@@ -175,6 +175,8 @@ type SendAck struct {
 	Status string  `json:"status,omitempty"`
 	Error  string  `json:"error,omitempty"`
 	Node   string  `json:"node,omitempty"`
+	// TurnID is the send_id an "unknown" ack's retry must reuse.
+	TurnID string `json:"turn_id,omitempty"`
 }
 
 func NewSendAck(f SendAck) SendAck { f.Type = TypeSendAck; return f }
@@ -184,6 +186,10 @@ type SendError struct {
 	Key   string  `json:"key,omitempty"`
 	Error string  `json:"error,omitempty"`
 	Node  string  `json:"node,omitempty"`
+	// Status "unknown" with TurnID: a remote send's answer was lost, and the
+	// retry must reuse TurnID (as send_ack "unknown").
+	Status string `json:"status,omitempty"`
+	TurnID string `json:"turn_id,omitempty"`
 }
 
 func NewSendError(f SendError) SendError { f.Type = TypeSendError; return f }

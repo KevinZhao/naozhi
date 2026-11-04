@@ -14,6 +14,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/naozhi/naozhi/internal/backendid"
 	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/discovery"
@@ -109,12 +110,21 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			Key       string `json:"key"`
 			Text      string `json:"text"`
 			Workspace string `json:"workspace"`
+			Backend   string `json:"backend"`   // node.CapSendBackend
+			ResumeID  string `json:"resume_id"` // node.CapSendBackend
+			TurnID    string `json:"turn_id"`   // node.CapSendIdempotent
 		}
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("send params: %w", err)
 		}
 		if err := sessionkey.ValidateSessionKey(p.Key); err != nil {
 			return nil, fmt.Errorf("send key: %w", err)
+		}
+		if !backendid.IsValid(p.Backend) {
+			return nil, errors.New("send backend: invalid identifier")
+		}
+		if p.TurnID != "" && !node.ValidTurnID(p.TurnID) {
+			return nil, errors.New("send turn_id: invalid identifier")
 		}
 		// Reject oversized text at the trust boundary before it reaches CLI
 		// stdin; a compromised primary could otherwise push up to the WS read
@@ -149,17 +159,23 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if c.turns == nil {
 			return nil, errors.New("send unavailable: turn pipeline not wired")
 		}
-		status, err := c.turns.SubmitRelayed(connCtx, p.Key, p.Text, ws)
+		res, err := c.turns.SubmitRelayed(connCtx, node.SendRequest{
+			Key: p.Key, Text: p.Text, Workspace: ws,
+			Backend: p.Backend, ResumeID: p.ResumeID, TurnID: p.TurnID,
+		})
 		if err != nil {
 			return nil, err
 		}
 		// A primary that does not read the status shows a busy send, which was
 		// dropped, as accepted; an error is what it reports as a failure.
 		// Queued and reset only change the wording there, so they pass.
-		if status == "busy" && !c.hubSendStatus.Load() {
+		if res.Status == "busy" && !c.hubSendStatus.Load() {
 			return nil, node.ErrSendBusy
 		}
-		return marshalResult(map[string]string{"status": status})
+		if res.Dup {
+			return marshalResult(map[string]any{"status": res.Status, "dup": true})
+		}
+		return marshalResult(map[string]string{"status": res.Status})
 
 	case "takeover":
 		var p struct {

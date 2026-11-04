@@ -101,9 +101,9 @@ func TestReverseLink_BusySendIsAStatus(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	status, err := rc.Send(ctx, sendStatusKey, "hi", "")
-	if err != nil || status != "busy" {
-		t.Fatalf("Send = (%q, %v), want (busy, nil)", status, err)
+	res, err := rc.Send(ctx, node.SendRequest{Key: sendStatusKey, Text: "hi"})
+	if err != nil || res.Status != "busy" {
+		t.Fatalf("Send = (%q, %v), want (busy, nil)", res.Status, err)
 	}
 }
 

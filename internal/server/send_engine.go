@@ -12,6 +12,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/turn"
+	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
 // sendEngine is the validate → Submit → TrackSend chain that both transports
@@ -49,6 +51,9 @@ type sendEngine struct {
 	// ctx is the engine's own child of sendEngineOpts.Ctx; drain cancels it.
 	ctx    context.Context
 	cancel context.CancelFunc
+	// dedup answers a repeated turn ID from a primary (relayed or direct
+	// sends) with the first answer.
+	dedup *sendDedup
 
 	// ── shared dependencies ──
 	// INVARIANT: read-only after construction. Hub keeps its own reference to
@@ -113,6 +118,7 @@ func newSendEngine(o sendEngineOpts) *sendEngine {
 		turns:       o.Turns,
 		ctx:         ctx,
 		cancel:      cancel,
+		dedup:       newSendDedup(),
 		router:      o.Router,
 		resolver:    o.Resolver,
 		agents:      o.Agents,
@@ -174,11 +180,11 @@ const remoteSendTimeout = 60 * time.Second
 // The goroutine inherits e.ctx so drain cancels an in-flight RPC, and
 // caps it at remoteSendTimeout so a hung node cannot hold a drain slot for the
 // process lifetime. There is no ack channel on the HTTP path, so a transport
-// error fans out to the key's subscribers via broadcastSendError (F1);
+// error fans out via broadcastRemoteSendError (F1);
 // remote transport errors are never informational, so unlike httpOrigin
 // nothing is filtered. Neither is a node that answers busy: the message was
 // not buffered.
-func (e *sendEngine) remoteSend(nc node.Conn, nodeID, key, text, workspace string) (accepted bool) {
+func (e *sendEngine) remoteSend(nc node.Conn, nodeID string, req node.SendRequest) (accepted bool) {
 	release, shuttingDown := e.TrackSend()
 	if shuttingDown {
 		return false
@@ -187,15 +193,22 @@ func (e *sendEngine) remoteSend(nc node.Conn, nodeID, key, text, workspace strin
 		defer release()
 		ctx, cancel := context.WithTimeout(e.ctx, remoteSendTimeout)
 		defer cancel()
-		status, err := nc.Send(ctx, key, text, workspace)
+		key := req.Key
+		res, err := nc.Send(ctx, req)
 		if err != nil {
 			slog.Error("remote send",
 				"node", osutil.SanitizeForLog(nodeID, 128),
 				"key", sessionkey.SanitizeLogAttr(key), "err", err)
-			e.notify.broadcastSendError(key, asyncErrorMessage(err))
-		} else if status == string(sendAckBusy) {
-			e.notify.broadcastSendError(key, errSendBusy.Error())
-		} else if status != string(sendAckReset) {
+			f := wsproto.SendError{Key: key, Node: nodeID, Error: remoteSendErrorText(err, asyncErrorMessage(err))}
+			if errors.Is(err, node.ErrSendUnknown) {
+				// As the WS path's send_ack "unknown": the tab keeps the
+				// message and retries it under the same turn ID.
+				f.Status, f.TurnID = string(sendAckUnknown), req.TurnID
+			}
+			e.notify.broadcastRemoteSendError(f)
+		} else if res.Status == string(sendAckBusy) {
+			e.notify.broadcastRemoteSendError(wsproto.SendError{Key: key, Node: nodeID, Error: errSendBusy.Error()})
+		} else if res.Status != string(sendAckReset) {
 			nc.RefreshSubscription(key)
 		}
 		e.notify.BroadcastSessionsUpdate()
@@ -271,7 +284,8 @@ func (e *sendEngine) resolveAttachmentWorkspace(key, reqWorkspace string) (strin
 // engine itself carries no nil checks on the send hot path.
 type nopNotifier struct{}
 
-func (nopNotifier) BroadcastSessionReady(string)          {}
-func (nopNotifier) BroadcastSessionsUpdate()              {}
-func (nopNotifier) broadcastState(string, string, string) {}
-func (nopNotifier) broadcastSendError(string, string)     {}
+func (nopNotifier) BroadcastSessionReady(string)               {}
+func (nopNotifier) BroadcastSessionsUpdate()                   {}
+func (nopNotifier) broadcastState(string, string, string)      {}
+func (nopNotifier) broadcastSendError(string, string)          {}
+func (nopNotifier) broadcastRemoteSendError(wsproto.SendError) {}

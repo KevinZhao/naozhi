@@ -3,8 +3,9 @@
 > **Status: 已实现**
 >
 > 反向连接 (NAT 穿越) 的 WebSocket 帧格式。实现位于 `internal/node/protocol.go`
-> (`ReverseMsg`)，主节点侧位于 `internal/node/reverseserver.go` 与
-> `internal/node/reverseconn.go`，子节点 (发起方) 位于 `internal/upstream`。
+> (`ReverseMsg`)，服务端 dispatcher 位于 `internal/node/reverseserver.go`，
+> 主节点对每个已连入节点的表示位于 `internal/node/reverseconn.go`，
+> 子节点 (发起方) 位于 `internal/upstream`。
 >
 > 架构层面的设计动机见 [../design/multi-node-design.md](../design/multi-node-design.md)。
 > 本文档只描述 wire 层约定，供想新增 reverse-only 能力的实现者参考。
@@ -38,6 +39,8 @@
 | `gemini`   | 节点侧配置了 gemini-cli 可执行文件                               |
 | `askuser`  | 节点侧会生成 `AskUserQuestion` 富事件 (Round 208+)              |
 | `files`    | 节点侧应答 `files_list` / `file_read` / `files_exists` / `fetch_outputs`，按自己的根目录与规则提供自己的文件（planner RFC §15.5 ④）；`file_read` 每个应答至多 256 KiB（`node.ReverseFileChunk`），原文与预览都按 offset 分段，免得一个大帧在慢上行上写超时拖断整条反连；没有它时主节点对该节点的文件请求一律 501，不读本机 |
+| `send-backend` | `send` RPC 读 `backend` / `resume_id`；缺它时主节点拒绝带这两项的发送 |
+| `send-idempotent` | `send` RPC 读 `turn_id`，同 (key, turn_id) 的重复返回首次结果并带 `dup: true`；主节点只对它在超时 / 断线后回 `unknown` |
 
 新增 tag 只需同步更新本表和服务端的 known-set。
 
