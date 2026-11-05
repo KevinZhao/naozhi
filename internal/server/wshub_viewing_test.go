@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/planner/custody"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -87,6 +88,30 @@ func TestWS_Viewing(t *testing.T) {
 					t.Fatalf("closed connection not dropped: %s", strings.Join(sink.snapshot(), " "))
 				}
 				time.Sleep(10 * time.Millisecond)
+			}
+		})
+	}
+}
+
+// TestHub_ViewingWiring: the Hub takes the viewing frames to the server's
+// custody, and without custody holds no sink, not one wrapping a nil
+// *custody.Engine (whose SetViewing would panic).
+func TestHub_ViewingWiring(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		custody *custody.Engine
+	}{
+		{name: "custody", custody: custody.New(custody.Config{})},
+		{name: "no custody"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			srv := NewWithOptions(ServerOptions{Addr: ":0", Router: session.NewRouter(session.RouterConfig{}), Custody: c.custody})
+			t.Cleanup(srv.appCancel)
+			if got, want := srv.hub.viewing != nil, c.custody != nil; got != want {
+				t.Fatalf("hub has a viewing sink = %v, want %v", got, want)
+			}
+			if c.custody != nil && srv.hub.viewing.(*custody.Engine) != c.custody {
+				t.Fatal("hub's viewing sink is not the server's custody")
 			}
 		})
 	}
