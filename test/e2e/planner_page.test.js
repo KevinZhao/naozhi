@@ -290,7 +290,7 @@ test('planner.enabled off: the page explains it and the stop switch is off', asy
 
 // The morning briefs of GET /api/planner/briefs are messages in the
 // conversation, by the time they were made (D91): the day's open, an older
-// one folded; the brief's push link (#planner&item=brief:<day>) opens and
+// one folded, a fold the user chose kept; the brief's push link (#planner&item=brief:<day>) opens and
 // scrolls to it.
 test('briefs sit in the conversation by time, and a push link scrolls to one', async ({ browser }) => {
   const day = (ms) => { const d = new Date(ms); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
@@ -333,6 +333,16 @@ test('briefs sit in the conversation by time, and a push link scrolls to one', a
       // Opened at the end of the conversation, today's brief is far above.
       await expect(today).not.toBeInViewport();
       await page.screenshot({ path: test.info().outputPath('planner-brief-end-' + name + '.png') });
+
+      // Folded by the user, today's brief stays folded when the Planner page
+      // is opened again and its stream repainted.
+      await today.locator('summary').evaluate((el) => el.click());
+      await expect(today).not.toHaveAttribute('open', '');
+      await page.locator('#abnav-chat').click();
+      await page.locator('#abnav-planner').click();
+      await expect(page.locator('body')).toHaveClass(/nz-view-planner/);
+      await expect(all).toHaveCount(2);
+      await expect(today).not.toHaveAttribute('open', '');
 
       // The brief's push link: back on the chat view, then the link.
       await page.locator('#abnav-chat').click();

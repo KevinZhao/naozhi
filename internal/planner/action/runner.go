@@ -415,9 +415,9 @@ func (r *Runner) resolve(ref string) (workspace.Workspace, string, error) {
 
 // dispatch starts a dispatch's task: session at once (D88): no card waits
 // on the user, who can stop it from 任务. Either way the Planner gets a
-// receipt and the conversation a line, which names the session by its title:
-// the key is for the Planner. It returns the session's key, "" when it did
-// not start.
+// receipt; the conversation gets a line only when the start failed, the
+// block's card says it was dispatched (D91). It returns the session's key,
+// "" when it did not start.
 func (r *Runner) dispatch(d Dispatch) string {
 	key, wsName, err := r.spawn(d)
 	if err != nil {
@@ -425,7 +425,6 @@ func (r *Runner) dispatch(d Dispatch) string {
 		r.tell("派出「" + d.Title + "」失败，没有拉起会话：" + err.Error())
 		return ""
 	}
-	r.note("已派出：" + d.Title)
 	r.tell("已派出：" + d.Title + "（" + key + "），工作区 " + wsName + "。它的跨会话名字是「" + d.Title + "」（重名时 CC 会加短 ID，以 ListAgents 为准）。用 notify_when_idle 订阅它，做完后在对话里告诉用户结果。")
 	return key
 }

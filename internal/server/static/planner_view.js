@@ -68,6 +68,9 @@ const KIND_ORDER = { decision: 0, question: 1, error: 2, notice: 3 };
 const pl = {
   status: null, // GET /api/planner
   briefs: [], // the sent morning briefs, newest first, GET /api/planner/briefs
+  // briefOpen is the fold the user chose per brief day: a first page
+  // repaints the stream, and a brief folded stays folded.
+  briefOpen: new Map(),
   open: [], // open 通知 items
   pausedUntil: 0,
   customPause: false,
@@ -75,6 +78,9 @@ const pl = {
   // at it (`after` and a re-subscribe both re-deliver that millisecond).
   lastTime: 0,
   seenAtWM: new Set(),
+  // ack follows the "收到，正在看" by the input box (followAck), null when
+  // none is shown.
+  ack: null,
   // sub is the planner:main subscription: '' none, 'pending' sent,
   // 'suspended' acked without a process (no live events), 'live'.
   sub: '',
@@ -355,15 +361,16 @@ const BRIEF_FOCUS = 'brief:';
 function briefHtml(b, t) {
   const d = new Date(t);
   const pad = (n) => String(n).padStart(2, '0');
-  const today = d.toDateString() === new Date().toDateString();
+  const day = b.day || '';
+  const open = pl.briefOpen.has(day) ? pl.briefOpen.get(day) : d.toDateString() === new Date().toDateString();
   const when = ' · ' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-  return '<details class="pl-brief" data-day="' + escAttr(b.day || '') + '" data-time="' + t + '"' + (today ? ' open' : '') + '>' +
+  return '<details class="pl-brief" data-day="' + escAttr(day) + '" data-time="' + t + '"' + (open ? ' open' : '') + '>' +
     '<summary><b>早报</b>' + esc(when) + '</summary><div class="md">' + renderMd(b.markdown) + '</div></details>';
 }
 
 // placeBriefs puts each brief not yet shown into the stream by the time it
 // was made (D91): a message among the others, the day's open and the older
-// ones folded. One shown is left alone, so a fold the user chose stays.
+// ones folded unless the user chose otherwise (pl.briefOpen).
 function placeBriefs() {
   const box = $('pl-stream');
   const scroller = $('pl-events');
@@ -516,6 +523,34 @@ const RENDER_OPTS = { key: PLANNER_KEY };
 // the answer comes, not as a line above your bubble (D91).
 const ACK_TEXT = '收到，正在看';
 const isAck = (e) => !!e && !e.uuid && e.type === 'system' && e.summary === ACK_TEXT;
+// ACK_SLACK_MS is how far before an ack from another tab its message's user
+// bubble may be logged: the turn can start before the gateway pushes it.
+const ACK_SLACK_MS = 2000;
+
+// followAck takes the ack away once the answer to your message starts: the
+// first reply after the user bubble logged past pl.ack.after, your message
+// taken into a turn. A turn already running when you sent (a scout run, an
+// earlier message) answers something else and leaves it.
+function followAck(shown) {
+  const a = pl.ack;
+  if (!a) return;
+  for (const e of shown) {
+    const t = e.time || 0;
+    if (!a.mine) {
+      if (e.type === 'user' && t > a.after) a.mine = t;
+    } else if ((e.type === 'text' || e.type === 'result') && t >= a.mine) {
+      pl.ack = null;
+      clearAck();
+      return;
+    }
+  }
+}
+
+// dropAck takes the ack away when no answer will come.
+function dropAck() {
+  pl.ack = null;
+  clearAck();
+}
 
 function appendEvents(events, reset) {
   const box = $('pl-stream');
@@ -523,10 +558,15 @@ function appendEvents(events, reset) {
   if (!box || !scroller) return;
   const atBottom = reset || scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 40;
   if (reset) { pl.lastTime = 0; pl.seenAtWM.clear(); }
-  if (events.some(isAck)) noteAck();
+  const ack = events.find(isAck);
+  if (ack) {
+    if (!pl.ack) pl.ack = { after: (ack.time || 0) - ACK_SLACK_MS, mine: 0 };
+    noteAck();
+  }
   const fresh = events.filter((e) => admitEvent(e) && !isAck(e));
-  const html = renderEventsWithDividers(fresh.flatMap(plannerEvents), reset ? 0 : lastDividerTime(box), RENDER_OPTS);
-  if (fresh.some((e) => e.type === 'text' || e.type === 'result')) clearAck();
+  const shown = fresh.flatMap(plannerEvents);
+  const html = renderEventsWithDividers(shown, reset ? 0 : lastDividerTime(box), RENDER_OPTS);
+  followAck(shown);
   if (reset) box.innerHTML = html;
   else if (fresh.length) {
     box.querySelector(':scope > .pl-empty')?.remove();
@@ -709,6 +749,14 @@ nzBus.addEventListener('inbox:count', (e) => {
   if (!pl.seeding && pl.host) fetchInbox();
 });
 nzBus.addEventListener('inbox:focus', () => { revealWaiting(); revealBrief(); });
+// toggle does not bubble: a brief's fold is taken on the way down.
+document.addEventListener('toggle', (e) => {
+  const el = e.target;
+  if (el.matches?.('#pl-stream > .pl-brief')) pl.briefOpen.set(el.dataset.day || '', el.open);
+}, true);
+// A message to the Planner is going out: its ack waits for a user bubble
+// logged past what the stream has taken so far.
+nzBus.addEventListener('planner:sent', () => { pl.ack = { after: pl.lastTime, mine: 0 }; });
 // A session listed since a card named it gets its name and state.
 onSessionsApplied(() => { if (pl.host) paintSessionCards($('pl-stream')); });
 // A new socket holds no subscriptions: re-subscribe after the last event
@@ -730,12 +778,13 @@ wsm.on(NZ_CONTRACT.WS.error, () => { pl.sub = ''; }, ours);
 wsm.on(NZ_CONTRACT.WS.history, (msg) => { if (pl.sub) appendEvents(msg.events || [], false); }, ours);
 wsm.on(NZ_CONTRACT.WS.event, (msg) => { if (pl.sub && msg.event) appendEvents([msg.event], false); }, ours);
 wsm.on(NZ_CONTRACT.WS.send_error, (msg) => {
-  clearAck();
+  dropAck();
   if (pl.sub) appendEvents([{ type: 'system', time: Date.now(), summary: '没有发出：' + (msg.error || '') }], false);
 }, ours);
 // A process appearing upgrades a suspended subscription; a dead process or
 // a timed-out push loop ends it, and polling covers until the next one.
 wsm.on(NZ_CONTRACT.WS.session_state, (msg) => {
+  if (msg.state === 'dead') dropAck();
   if (msg.state === 'running' && pl.sub === 'suspended') subscribe();
   else if (pl.sub && (msg.state === 'dead' || msg.reason === 'subscription_timeout')) pl.sub = '';
 }, ours);

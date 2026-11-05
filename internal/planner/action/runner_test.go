@@ -77,18 +77,19 @@ func openDecision(t *testing.T, inbox *notify.Notifier, handler string) notify.I
 
 // A dispatch block starts one task: session in the workspace's directory at
 // once, records its lineage and tells the Planner; a start that fails tells
-// the Planner why and leaves no sidecar. No card is opened either way. The
-// conversation's line names the session by its title, never its key.
+// the Planner why and leaves no sidecar. No card is opened either way. Only
+// a failed start gets a line in the conversation, and it names the session
+// by its title, never its key.
 func TestDispatch(t *testing.T) {
 	cases := []struct {
 		name      string
 		workspace string // "" is the registered workspace's name
 		spawnErr  error
-		want      string // in both the note and the receipt
+		want      string // in the note and the receipt; "" is no note
 		told      string // in the receipt only; "" is want
 		spawned   bool
 	}{
-		{name: "spawned", want: "已派出：iso 写 hello", told: "已派出：iso 写 hello（task:", spawned: true},
+		{name: "spawned", told: "已派出：iso 写 hello（task:", spawned: true},
 		{name: "unknown workspace", workspace: "nowhere", want: "派出「iso 写 hello」失败"},
 		// The start failing (max_procs full, ...) is relayed as said; spawnError
 		// in wireup says it.
@@ -103,7 +104,11 @@ func TestDispatch(t *testing.T) {
 				ws = filepath.Base(dir)
 			}
 			r.Handle(block(`{"type":"dispatch","workspace":"` + ws + `","title":"iso 写 hello","model":"","message":"在工作区里写一个 hello.md"}`))
-			if len(g.notes) != 1 || !strings.Contains(g.notes[0], c.want) || strings.Contains(g.notes[0], sessionkey.TaskKeyPrefix) {
+			if c.want == "" {
+				if len(g.notes) != 0 {
+					t.Errorf("notes = %q, want none", g.notes)
+				}
+			} else if len(g.notes) != 1 || !strings.Contains(g.notes[0], c.want) || strings.Contains(g.notes[0], sessionkey.TaskKeyPrefix) {
 				t.Errorf("notes = %q, want %q and no key", g.notes, c.want)
 			}
 			told := cmp.Or(c.told, c.want)

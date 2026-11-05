@@ -95,6 +95,8 @@ async function fetchPlannerStatus() {
 async function sendToPlanner(text, ref) {
   const body = { text };
   if (ref) body.ref = ref;
+  // Before the POST: the stream's watermark now is what the answer follows.
+  nzBus.dispatchEvent(new CustomEvent('planner:sent'));
   await fetchJSON(NZ_CONTRACT.API.planner_send, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), timeoutMs: 15000,
   });
@@ -118,7 +120,8 @@ export function clearPending(box) {
 }
 
 // noteAck shows the gateway's receipt for a message to the Planner by the
-// input box; clearAck takes it away once the answer (or a failure) comes.
+// input box; clearAck takes it away once the answer to that message (or a
+// failure) comes, which planner_view.js tells from the stream.
 export function noteAck() {
   st.acked = true;
   paintComposer();

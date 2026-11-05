@@ -1,7 +1,7 @@
 // E2E: talking on the Planner page and handing work to it (planner_chat.js,
 // planner_cards.js; planner RFC §10 D77, §10.1, §15.1 PR ⑬): the input box
 // sends to the Planner, the gateway's "收到，正在看" shows by the box until
-// the reply replaces the pending bubble (D91); a handed-over session, a named
+// the reply to that message comes (D91), not another turn's; a handed-over session, a named
 // session and the action blocks render as cards (a dispatch runs at once,
 // D88: its card has no answer to give; a task with no name yet shows no
 // key); a session card opens in the middle column
@@ -116,8 +116,10 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     // The Planner's judgment of a task (§15.4 status).
     await expect(reply.locator('.pl-act-status .pl-act-h')).toHaveText('Planner 判断 · 已完成');
     await expect(reply.locator('.pl-act-status')).toContainText('iso 它汇报周报写好了');
-    // Its task is neither listed nor in 任务 yet: no 任务 row, never the key.
+    // Its task is neither listed nor in 任务 yet: no 任务 row, never the key;
+    // its session card reads 会话.
     await expect(reply.locator('.pl-act-status dt')).toHaveText(['依据']);
+    await expect(reply.locator('.pl-scard[data-key="' + TASK + '"] .pl-scard-name')).toHaveText('会话');
     await expect(reply.locator('code[data-lang="naozhi-action"]')).toHaveCount(0);
     await expect(page.locator('#pl-cards')).toBeHidden();
 
@@ -134,6 +136,15 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     await expect(page.locator('#pl-target-note')).toHaveText('收到，正在看');
     conn.send({ type: 'event', key: PLANNER, event: { type: 'system', summary: '收到，正在看', time: Date.now() } });
     await expect(page.locator('#pl-stream .event.system')).toHaveCount(0);
+    // A turn already running answers something else: its reply leaves the
+    // ack, and so does the page's first page read again on coming back.
+    conn.send({ type: 'event', key: PLANNER, event: { type: 'text', detail: 'iso 上一件事的进展', time: Date.now(), uuid: 'pc-t-other' } });
+    await expect(page.locator('#pl-stream .event.text').last()).toHaveText(/iso 上一件事的进展/);
+    await expect(page.locator('#pl-target-note')).toHaveText('收到，正在看');
+    await page.click('#abnav-chat');
+    await page.click('#abnav-planner');
+    await expect(page.locator('#pl-stream .event')).toHaveCount(3);
+    await expect(page.locator('#pl-target-note')).toHaveText('收到，正在看');
     const t = Date.now();
     conn.send({ type: 'event', key: PLANNER, event: { type: 'user', detail: '<naozhi-snapshot at="x">\n</naozhi-snapshot>\n\niso 现在都在干什么？', time: t, uuid: 'pc-u2' } });
     conn.send({ type: 'event', key: PLANNER, event: { type: 'text', detail: '`' + SESSION + '` 在等你。', time: t + 1, uuid: 'pc-t2' } });

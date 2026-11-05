@@ -3,10 +3,10 @@
 //
 //   - action blocks (```naozhi-action fences) become readable cards. A card
 //     is what was done (D91): the gateway adds a line only when a block did
-//     not run or was held back, and a dispatch's 已派出. A block that is not
-//     JSON of a known type shows as 看不懂; whether a block runs is the
-//     gateway's call, not this reading's. Cards name tasks and workspaces,
-//     never their IDs: a name not known yet leaves the row out.
+//     not run or was held back. A block that is not JSON of a known type
+//     shows as 看不懂; whether a block runs is the gateway's call, not this
+//     reading's. Cards name tasks and workspaces, never their IDs: a name
+//     not known yet leaves the row out.
 //   - sessions the conversation names — a handed-over session
 //     (<naozhi-session-ref>, rewritten to a fence by planner_view.js), a
 //     `task:` key or a listed session's key in the Planner's text, the sender
@@ -61,8 +61,10 @@ function listedTitle(key) {
   return (s && (s.user_label || s.summary || s.last_prompt)) || '';
 }
 
+// sessionTitle is a session's name: listed, else its 任务 title; one known
+// to neither is 会话, never its key (D91).
 export function sessionTitle(key) {
-  return listedTitle(key) || key;
+  return listedTitle(key) || pc.tasks.get(key) || '会话';
 }
 
 // taskName is a task's title (a dispatched session's name, a promise's
