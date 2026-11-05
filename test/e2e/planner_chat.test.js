@@ -11,7 +11,7 @@
 // session's card is read-only; the chat view's 交给 Planner sends the session's reference with
 // the typed text, and is hidden while planner.enabled is off.
 const { test, expect } = require('@playwright/test');
-const { startMockServer } = require('./mock-server');
+const { startMockServer, defaultSessions } = require('./mock-server');
 const { waitForWs } = require('./shim_wait');
 
 const SESSION = 'dashboard:direct:2026-01-01-120000-1:myproject';
@@ -225,20 +225,59 @@ test('chat view: 交给 Planner sends the session with the typed text', async ({
     await page.click('.session-card[data-key="' + SESSION + '"]');
     const btn = page.locator('#btn-handoff');
     await expect(btn).toBeVisible();
-    await expect(btn).toBeEnabled();
+    await expect(page.locator('#msg-input')).toHaveAttribute('data-placeholder', '发消息…');
+    // Nothing typed: nothing to hand over (it once sent an empty card).
+    await expect(btn).toBeDisabled();
     await page.click('#msg-input');
+    await page.keyboard.type('   ');
+    await expect(btn).toBeDisabled();
     await page.keyboard.type('iso 这个交给你');
+    await expect(btn).toBeEnabled();
     await btn.click();
     await expect.poll(() => mock.plannerSendCalls).toEqual([{ text: 'iso 这个交给你', ref: SESSION }]);
     await expect(page.locator('#msg-input')).toHaveText('');
+    // Cleared by the hand-off, not by typing: disabled again.
+    await expect(btn).toBeDisabled();
     await expect(page.locator('#handoff-note')).toContainText('已交给 Planner');
     expect(mock.sendCalls).toHaveLength(0);
     await page.click('#handoff-note [data-action="planner-goto"]');
     await expect(page.locator('body')).toHaveClass(/nz-view-planner/);
+    // An empty conversation says how to start one.
+    await expect(page.locator('#pl-stream > .pl-empty')).toContainText('直接说要做的事，或在会话里点"交给 Planner"');
   } finally {
     mock.server.close();
   }
 });
+
+// A session card's name gives way before its state: a long name ends in an
+// ellipsis and the state stays on the card.
+for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['phone', { width: 390, height: 844 }]]) {
+  test(`${name}: a long session name leaves the card its state`, async ({ browser }) => {
+    const ctx = await browser.newContext({ viewport });
+    const page = await ctx.newPage();
+    const sessions = defaultSessions();
+    sessions.sessions[0].last_prompt = '把登录页的样式改成和设置页一致，顺便检查一下手机上的输入框和按钮会不会被挤出屏幕';
+    const mock = await startMockServer({
+      ws: true, sessions, inbox: inbox(), systemHealth: health(),
+      plannerEvents: [{ type: 'text', detail: '它在等你：`' + SESSION + '`', time: now - 60000, uuid: 'pc-long' }],
+      planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
+    });
+    try {
+      await page.goto(mock.url + '/dashboard');
+      await waitForWs(page, 'CONNECTED');
+      await page.locator('#abnav-planner').click();
+      const card = page.locator('#pl-stream .pl-scard[data-key="' + SESSION + '"]');
+      await expect(card.locator('.hl-state')).toHaveText('待你回复');
+      const line = await card.locator('.pl-scard-line').boundingBox();
+      const state = await card.locator('.hl-state').boundingBox();
+      expect(state.x + state.width).toBeLessThanOrEqual(line.x + line.width + 0.5);
+      await page.screenshot({ path: test.info().outputPath(`planner-long-name-${name}.png`) });
+    } finally {
+      await ctx.close();
+      mock.server.close();
+    }
+  });
+}
 
 test('chat view: no 交给 Planner while planner.enabled is off', async ({ page }) => {
   const mock = await startMockServer({ ws: true, planner: { enabled: false, stopped: false, key: PLANNER, alive: false } });
@@ -278,6 +317,16 @@ test('phone: input box, an opened session card and 交给 Planner fit', async ({
     await page.locator('#abnav-chat').click();
     await page.click('.session-card[data-key="' + SESSION + '"]');
     await expect(page.locator('.sidebar')).not.toBeInViewport(); // slid away
+    // Empty, the row keeps its four controls and the placeholder one line;
+    // typing brings 交给 Planner in. The header leaves the backend name out.
+    await expect(page.locator('#btn-handoff')).toBeHidden();
+    await expect(page.locator('#header-cli')).toBeHidden();
+    const input = page.locator('#msg-input');
+    expect((await input.boundingBox()).height).toBeLessThan(60);
+    await expect(page.locator('#btn-send')).toBeInViewport();
+    await page.screenshot({ path: test.info().outputPath('planner-chat-empty-mobile.png') });
+    await input.click();
+    await page.keyboard.type('iso 交给你');
     await expect(page.locator('#btn-handoff')).toBeInViewport();
     await expect(page.locator('#btn-send')).toBeInViewport();
     await page.screenshot({ path: test.info().outputPath('planner-chat-handoff-mobile.png') });

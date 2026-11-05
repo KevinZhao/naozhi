@@ -2,7 +2,8 @@
 // 文件 · 详情 over the #fv-drawer, docked as the desktop split and a
 // full-screen panel on phone (docs/rfc/planner.md §10, §10.2, §15.1 W1).
 // This module is only the shell: open / close / tab / 放大. file_refs.js
-// fills the 预览 tab, workbench_panes.js the other three and the auto-open.
+// fills the 预览 tab, workbench_panes.js the other three; the pane never
+// opens by itself (D91).
 // Layering: a leaf over split_view / mobile_nav, so any view can reuse it.
 //
 // Events on nzBus: 'workbench:open' and 'workbench:close' when the pane
@@ -10,7 +11,7 @@
 // including on open.
 import { nzBus, typingOutside } from './nz_util.js';
 import { splitDock } from './split_view.js';
-import { collapseSidebarForDrawer, restoreSidebarAfterDrawer } from './mobile_nav.js';
+import { restoreSidebarAfterDrawer } from './mobile_nav.js';
 
 const TABS = ['preview', 'outputs', 'files', 'details'];
 
@@ -49,7 +50,7 @@ function open(name) {
   splitDock.enter();
   // Opened last → stack on top of the 追问 pane if both are docked.
   splitDock.bringToFront('preview');
-  collapseSidebarForDrawer();
+  // The session sidebar stays where it is (D91 S6).
   if (!was) nzBus.dispatchEvent(new CustomEvent('workbench:open'));
   showTab(name || tab());
 }
@@ -62,8 +63,9 @@ function close() {
   syncMaxBtn();
   // Undock the split (no-op if the 追问 drawer is still open).
   splitDock.exit();
-  // Re-expand the sidebar if the open path auto-collapsed it (no-op if the
-  // 追问 drawer is still open or the user collapsed it themselves).
+  // The 追问 drawer collapses the sidebar and restores it only once no
+  // drawer is docked, so the last one to close here re-expands it (no-op if
+  // the 追问 drawer is still open or the user collapsed it themselves).
   restoreSidebarAfterDrawer();
   nzBus.dispatchEvent(new CustomEvent('workbench:close'));
 }

@@ -37,6 +37,9 @@ export const selection = {
   // Router key of the open 追问 scratch session ('' when none), written by
   // aside_drawer.js; ask_card sends answers given inside the drawer there.
   scratchKey: '',
+  // fromPlanner: the open session was picked on the Planner page, where the
+  // phone's ← goes back to (mobile_nav.js mobileBack).
+  fromPlanner: false,
 };
 
 // composer: the message being written.

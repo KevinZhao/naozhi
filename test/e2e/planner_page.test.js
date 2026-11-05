@@ -6,10 +6,12 @@
 // pushed "收到，正在看" by the input box, no idle refetch on the inclusive
 // `after` replay), the morning briefs in it by time (D91), the header's "⋯"
 // menu (push pause, 停用 Planner, browser notifications only while not yet
-// asked) and its 推送暂停到 line, the workbench opening by itself on a new
-// output and folding the left column to its strip; the phone layout's
-// collapsible left block; the
-// planner.enabled=false explanation.
+// asked) and its 推送暂停到 line, a new output only counting on the 工作台
+// button (D91: the workbench never opens by itself nor folds the left
+// column); the phone layout's left block, which unfolded takes the stream's
+// place and folds for a session or #planner, and ← or the system back from a
+// session opened there going back to the page; the planner.enabled=false
+// explanation.
 const { test, expect } = require('@playwright/test');
 const { startMockServer, defaultSessions } = require('./mock-server');
 const { waitForWs } = require('./shim_wait');
@@ -48,7 +50,7 @@ async function routePreview(page) {
   });
 }
 
-test('desktop: badge, 通知 cards, stream, controls, and the workbench folds the left column', async ({ browser }) => {
+test('desktop: badge, 通知 cards, stream, controls, and the workbench counts outputs', async ({ browser }) => {
   test.setTimeout(60000);
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   const page = await ctx.newPage();
@@ -142,23 +144,26 @@ test('desktop: badge, 通知 cards, stream, controls, and the workbench folds th
     await page.click('#pl-stream');
     await expect(page.locator('#pl-tools')).toBeHidden();
 
-    // A new output of planner:main opens the workbench; the left column folds.
+    // A new output of planner:main only counts on the 工作台 button.
+    const wbBtn = page.locator('.pl-head [data-action="workbench-toggle"]').first();
     await expect.poll(() => mock.outputsCalls.filter((k) => k === PLANNER).length).toBeGreaterThan(0);
-    await expect(page.locator('.pl-left')).toHaveCSS('width', '280px');
+    await expect(wbBtn).toHaveText('工作台');
     outputs.unshift(output('handoff/2026-11-04.md'));
     tasks.tasks.push({ id: 'pr_2', kind: 'promise', title: 'iso 明早告诉你结果', state: 'doing', at: iso(now), created: iso(now) });
     events.push({ type: 'result', summary: 'done', time: Date.now(), uuid: 'pl-r1' });
-    await expect(page.locator('#fv-drawer')).toHaveClass(/fv-open/, { timeout: 10000 });
-    await expect(page.locator('#fv-title')).toHaveText('handoff/2026-11-04.md');
-    await expect(page.locator('#planner-main')).toHaveClass(/pl-wb-open/);
-    await expect(page.locator('.pl-left')).toHaveCSS('width', '48px');
+    await expect(wbBtn).toHaveText('工作台产出 1', { timeout: 10000 });
+    await expect(page.locator('#fv-drawer')).not.toHaveClass(/fv-open/);
     // The turn's end refetches 任务: a promise it registered shows.
     await expect(page.locator('#pl-task .tk-card')).toHaveCount(2);
-    await expect(page.locator('#pl-strip-wait')).toHaveText('1');
+    // Opened from the button, it leaves the left column as it is.
+    await wbBtn.click();
+    await expect(page.locator('#fv-drawer')).toHaveClass(/fv-open/);
+    await expect(page.locator('#wb-outputs .files-row')).toHaveCount(1);
+    await expect(page.locator('.pl-left')).toHaveCSS('width', '280px');
+    await expect(page.locator('#pl-wait .pl-card').first()).toBeVisible();
     await page.screenshot({ path: test.info().outputPath('planner-desktop-workbench.png') });
     await page.click('#fv-btn-close');
-    await expect(page.locator('#planner-main')).not.toHaveClass(/pl-wb-open/);
-    await expect(page.locator('.pl-left')).toHaveCSS('width', '280px');
+    await expect(page.locator('#fv-drawer')).not.toHaveClass(/fv-open/);
 
     // Idle: every poll replays the trailing result (inclusive `after`), which
     // must not refetch the outputs again.
@@ -198,8 +203,9 @@ test('desktop: badge, 通知 cards, stream, controls, and the workbench folds th
 test('phone: the left column is a collapsible block above the stream', async ({ browser }) => {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
   const page = await ctx.newPage();
+  const tasks = { tasks: [{ id: SESSION, kind: 'session', title: 'iso 修登录页', state: 'doing', at: iso(now - 60000), created: iso(now - 60000) }] };
   const mock = await startMockServer({
-    ws: true, plannerEvents: plannerEvents(), inbox: inbox(),
+    ws: true, plannerEvents: plannerEvents(), inbox: inbox(), tasks,
     planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
   });
   try {
@@ -217,7 +223,38 @@ test('phone: the left column is a collapsible block above the stream', async ({ 
     await expect(toggle).toHaveAttribute('aria-expanded', 'true');
     await expect(page.locator('#pl-wait .pl-card')).toHaveCount(3);
     await expect(page.locator('#pl-wait .pl-card').first()).toBeInViewport();
+    // Unfolded, the cards take the stream's place rather than squeezing it.
+    await expect(page.locator('#pl-center')).toBeHidden();
     await page.screenshot({ path: test.info().outputPath('planner-mobile-open.png') });
+    // A 任务 title opens its session in the middle column: the block folds.
+    await page.locator('#pl-task .tk-open').tap();
+    await expect(page.locator('#pl-sess')).toBeVisible();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await page.screenshot({ path: test.info().outputPath('planner-mobile-task-session.png') });
+    await page.locator('.pl-crumb .pl-link').tap();
+    await expect(page.locator('#pl-events')).toBeVisible();
+    // A session opened from a card: ← and the system back both go back to
+    // the Planner page, not to the session list.
+    await toggle.click();
+    for (const back of [() => page.locator('.main-header .btn-mobile-back').tap(), () => page.goBack()]) {
+      await page.locator('.pl-card[data-id="in_q"] .pl-link').tap();
+      await page.waitForFunction((key) => window.nz.test.selectedKey === key, SESSION);
+      await expect(page.locator('body')).not.toHaveClass(/nz-view-planner/);
+      await back();
+      await expect(page.locator('body')).toHaveClass(/nz-view-planner/);
+      await expect(page.locator('#planner-main')).toBeVisible();
+    }
+    // The brief's #planner lands on the conversation, the block left unfolded.
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await page.evaluate(() => { location.hash = 'planner'; });
+    await expect(page.locator('#pl-stream')).toBeVisible();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    // Opened from the session list, ← is the list's again.
+    await page.locator('#abnav-chat').click();
+    await page.locator('.session-card[data-key="' + SESSION + '"]').tap();
+    await page.locator('.main-header .btn-mobile-back').tap();
+    await expect(page.locator('body')).toHaveClass(/mobile-list-view/);
+    await expect(page.locator('body')).not.toHaveClass(/nz-view-planner/);
   } finally {
     await ctx.close();
     mock.server.close();
@@ -504,6 +541,8 @@ test('通知 cards and the "⋯" menu say only what is needed', async ({ browser
       // Nothing else lives under the column's lists.
       await expect(page.locator('#pl-left .pl-tool')).toHaveCount(0);
       await page.screenshot({ path: test.info().outputPath('planner-cards-' + name + '.png') });
+      // The phone's unfolded left block takes the header's place.
+      if (name === 'mobile') await page.click('#pl-left-toggle');
       await page.click('#pl-more > summary');
       await expect(page.locator('#pl-tools')).toBeVisible();
       if (permission === 'default') {

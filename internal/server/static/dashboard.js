@@ -41,6 +41,7 @@ import { closePlannerPanel, openPlannerPanel } from './planner_view.js';
 import { paintHandoffButton } from './planner_chat.js';
 import { interruptSession, resetTurnState, saveScrollPos, updateSendButton } from './running_banner.js';
 import { closeFilePreview, startFileRefObserver } from './file_refs.js';
+import { workbenchButtonHtml } from './workbench_panes.js';
 import { startSessionNotes } from './session_notes.js';
 import {
   applyFeatureGates,
@@ -243,6 +244,8 @@ function setActivityView(view) {
   if (view === ui.activeView) return;
   const prev = ui.activeView;
   ui.activeView = view;
+  // A session picked on the Planner page sets it again (selectSession).
+  selection.fromPlanner = false;
   // Rail button active / aria-pressed state.
   [['abnav-planner', 'planner'], ['abnav-chat', 'chat'], ['abnav-assets', 'assets'], ['abnav-files', 'files'], ['abnav-cron', 'cron'], ['abnav-system', 'system'], ['abnav-settings', 'settings']]
     .forEach(function (pair) {
@@ -719,7 +722,9 @@ function selectSession(key, node) {
   // (assets / cron / settings). This restores the chat sidebar+main, hides the
   // other view's panels, and flips activeView back to 'chat' so renderMainShell
   // (which writes #main) is visible and any in-flight cron repaint is suppressed.
+  const fromPlanner = ui.activeView === 'planner';
   if (ui.activeView !== 'chat') setActivityView('chat');
+  selection.fromPlanner = fromPlanner;
   const prevKey = selection.key;
   const prevNode = selection.node;
   selection.key = key;
@@ -1072,14 +1077,10 @@ function mainHeaderHtml(s) {
 
   // The workbench (预览 · 产出 · 文件 · 详情) for managed sessions, a remote
   // one's read from its node; its panes have nothing to show for a
-  // discovered one.
+  // discovered one. It never opens by itself: its label counts the outputs.
   const workbenchBtn = selection.key && !isDiscoveredKey(selection.key)
-    ? '<button type="button" class="fv-btn btn-workbench" data-action="workbench-toggle" title="工作台：预览 · 产出 · 文件 · 详情" aria-label="打开或关闭工作台">工作台</button>'
+    ? '<button type="button" class="fv-btn btn-workbench" data-action="workbench-toggle" title="工作台：预览 · 产出 · 文件 · 详情" aria-label="打开或关闭工作台">' + workbenchButtonHtml() + '</button>'
     : '';
-  // The Planner drawer's entry on phone, where Alt+P is out of reach
-  // (planner_drawer.js); paintHandoffButton shows it while planner.enabled is on.
-  const plannerBtn = '<button type="button" class="fv-btn btn-pld" id="btn-pld" data-action="planner-drawer-toggle" title="Planner（Alt+P）" aria-label="打开或收起 Planner 抽屉" hidden>Planner</button>';
-
   return '<div class="main-header">' +
       '<button type="button" class="btn-mobile-back" data-action="mobile-back" title="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868" aria-label="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868">' + ICONS.back + '</button>' +
       '<div class="main-header-content">' +
@@ -1112,7 +1113,6 @@ function mainHeaderHtml(s) {
         '<span class="detail-runstats" id="header-runstats"></span>' +
       '</div>' +
       '</div>' +
-      plannerBtn +
       workbenchBtn +
     '</div>';
 }
@@ -1176,7 +1176,7 @@ function renderMainShell() {
       '<div class="input-row">' +
         '<button type="button" class="btn-icon" data-action="file-picker" title="上传图片或 PDF" aria-label="上传图片或 PDF">' + ICONS.attach + '</button>' +
         '<button type="button" class="btn-icon btn-mic" id="btn-mic" data-action="input-mode-toggle" title="' + (composer.voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3') + '" aria-label="' + (composer.voiceInputMode ? '\u5207\u6362\u5230\u952e\u76d8\u8f93\u5165' : '\u5207\u6362\u5230\u8bed\u97f3\u8f93\u5165') + '">' + (composer.voiceInputMode ? ICONS.keyboard : ICONS.mic) + '</button>' +
-        '<div id="msg-input" contenteditable="true" role="textbox" aria-label="消息输入框" aria-multiline="true" data-placeholder="send a message..." data-action-keydown="msg-input-key" data-action-compositionend="msg-input-compend"></div>' +
+        '<div id="msg-input" contenteditable="true" role="textbox" aria-label="消息输入框" aria-multiline="true" data-placeholder="发消息…" data-action-keydown="msg-input-key" data-action-compositionend="msg-input-compend"></div>' +
         '<button type="button" class="btn-hold-talk" id="btn-hold-talk" title="\u6309\u4f4f\u8bf4\u8bdd\u6539\u5f55\u97f3" aria-label="\u6309\u4f4f\u8bf4\u8bdd\u5f00\u59cb\u5f55\u97f3">\u6309\u4f4f\u8bf4\u8bdd</button>' +
         '<button type="button" class="btn-handoff" id="btn-handoff" data-action="planner-handoff" hidden>交给 Planner</button>' +
         '<button type="button" class="btn-icon btn-send" id="btn-send" data-action="msg-send" title="发送" aria-label="发送消息">' + ICONS.send + '</button>' +
@@ -1399,72 +1399,6 @@ function updateHeaderCLI() {
   });
 })();
 
-/* ===== Onboarding ===== */
-
-// Show a one-time intro for first-time visitors. Dismissal is sticky per
-// browser profile (localStorage). Suppressed when auth is unresolved, when
-// the user already has sessions/projects, or on mobile viewports where the
-// sidebar is a modal-style drawer and the intro would stack awkwardly.
-const ONBOARDING_LS_KEY = 'nz-onboarding-dismissed';
-
-function maybeShowOnboarding(authResolved) {
-  // fetchSessions returns falsy when a 401/403 triggered the auth modal.
-  // Suppress onboarding in that case — otherwise the onboarding overlay
-  // would stack on top of the auth modal on first visit.
-  if (authResolved === false) return;
-  try {
-    if (localStorage.getItem(ONBOARDING_LS_KEY)) return;
-  } catch (_) { return; }
-  if (document.querySelector('.modal-overlay, .cmd-palette-overlay')) return;
-  // Suppress on narrow viewports — the sidebar drawer UX differs enough that
-  // the "pick one from the sidebar" guidance is misleading.
-  if (window.innerWidth && window.innerWidth < 768) return;
-  const hasSessions = (Object.keys(sessionList.sessionsData || {}).length > 0) ||
-    (Object.keys(perSession.workspaces || {}).length > 0);
-  const hasProjects = (sessionList.projectsData && sessionList.projectsData.length > 0);
-  if (hasSessions || hasProjects) {
-    try { localStorage.setItem(ONBOARDING_LS_KEY, '1'); } catch (_) {}
-    return;
-  }
-  showOnboarding();
-}
-
-function dismissOnboarding() {
-  try { localStorage.setItem(ONBOARDING_LS_KEY, '1'); } catch (_) {}
-  const ov = document.querySelector('.modal-overlay.onboarding-overlay');
-  if (ov) ov.remove();
-}
-
-function showOnboarding() {
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay onboarding-overlay';
-  overlay.innerHTML =
-    '<div class="modal onboarding" role="dialog" aria-modal="true" aria-label="Welcome to Naozhi">' +
-      '<h3>欢迎使用 naozhi Dashboard</h3>' +
-      '<div class="ob-sub">几秒钟了解核心用法</div>' +
-      '<ul>' +
-        '<li><span class="ob-icon">+</span><div><b>新建会话</b> — 点击左上角 <b>+</b> 或 <b>New session</b>，选择工作目录即可开始对话</div></li>' +
-        '<li><span class="ob-icon">⌘</span><div><b>快捷键</b> — <b>Cmd/Ctrl+1..9</b> 切换会话，<b>Alt+↑/↓</b> 跳转消息，<b>Esc</b> 关闭弹窗</div></li>' +
-        '<li><span class="ob-icon">⏱</span><div><b>定时任务</b> — 侧边栏 Cron 图标，可按自然语言频率设置定期执行</div></li>' +
-        '<li><span class="ob-icon">IM</span><div><b>IM 渠道</b> — 同一会话可在飞书等平台接入，发送 <b>/help</b> 查看命令</div></li>' +
-      '</ul>' +
-      '<div class="modal-btns">' +
-        '<button type="button" data-action="onboarding-dismiss">稍后再说</button>' +
-        '<button type="button" class="primary" data-action="onboarding-create">立即创建会话</button>' +
-      '</div>' +
-    '</div>';
-  overlay.addEventListener('click', function(e) {
-    if (e.target === overlay) dismissOnboarding();
-  });
-  // Dismissal is also persisted when Esc is pressed inside trapFocus — the
-  // trap's teardown removes the overlay, and the next maybeShowOnboarding
-  // call checks localStorage first. Eagerly set the key here so an Esc
-  // removal does not leave the flag unwritten.
-  try { localStorage.setItem(ONBOARDING_LS_KEY, '1'); } catch (_) {}
-  document.body.appendChild(overlay);
-  trapFocus(overlay);
-}
-
 /* ===== Initialization ===== */
 
 // Fill dashboard's shell slots before the bootstrap below: the pollers and
@@ -1483,7 +1417,7 @@ fetchCLIBackends();
 // single-auth deployments still work — the chip helpers return '' when
 // accessProfiles is null.
 fetchAccessProfiles();
-fetchSessions().then(maybeShowOnboarding);
+fetchSessions();
 timers.sessionPoll = setInterval(fetchSessions, 5000);
 scanDiscovered();
 timers.discoveredPoll = setInterval(scanDiscovered, 30000);
@@ -1662,8 +1596,6 @@ registerActions({
   'modal-close': (el) => { const o = el.closest('.modal-overlay'); if (o) o.remove(); },
   'session-create': () => doCreateSession(),
   'code-copy': (el) => copyCodeBlock(el),
-  'onboarding-dismiss': () => dismissOnboarding(),
-  'onboarding-create': () => { dismissOnboarding(); createNewSession(); },
   // absorbed: project-header buttons (ex SIDEBAR_PROJECT_ACTIONS)
   'project-collapse': (el) => toggleProjectCollapsed(el.dataset.key),
   'project-favorite': (el) => toggleFavorite(el.dataset.name, el.dataset.node),
@@ -1675,6 +1607,6 @@ registerActions({
   ...workflowActions,
 });
 
-// maybeShowOnboarding, selectSession and toggleHistory are read by the e2e
-// suite through test/e2e/e2e-shim.js; the other names have no outside importer.
-export { maybeShowOnboarding, renderMainShell, selectSession, sessionCardKey, toggleHistory, updateHeaderCLI };
+// selectSession and toggleHistory are read by the e2e suite through
+// test/e2e/e2e-shim.js; the other names have no outside importer.
+export { renderMainShell, selectSession, sessionCardKey, toggleHistory, updateHeaderCLI };

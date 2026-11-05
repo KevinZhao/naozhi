@@ -44,7 +44,7 @@ function stateField(name, obj, key) {
 
 expose(authModal, ['createNewSession', 'doCreateInProject', 'highlight', 'openProjectPalette', 'pickPaletteCustom', 'renderNodePicker']);
 expose(composerFiles, ['handleFiles']);
-expose(dashboard, ['maybeShowOnboarding', 'selectSession', 'toggleHistory']);
+expose(dashboard, ['selectSession', 'toggleHistory']);
 expose(msgNav, ['navDismissPopover']);
 expose(nzUtil, ['showToast']);
 expose(runningBanner, ['interruptSession']);

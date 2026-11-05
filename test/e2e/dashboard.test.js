@@ -735,14 +735,8 @@ test.describe('New session creation', () => {
     const page = await ctx.newPage();
     await page.goto(noProjectMock.url + '/dashboard');
     await page.waitForLoadState('networkidle');
-
-    // First visit with no sessions/projects shows the one-time onboarding
-    // overlay (maybeShowOnboarding, present since squash a274e0cc). Dismiss
-    // it before reaching the header button it would otherwise intercept.
-    const onboarding = page.locator('.modal-overlay.onboarding-overlay');
-    await expect(onboarding).toBeVisible();
-    await onboarding.locator('.modal-btns button:not(.primary)').click();
-    await expect(onboarding).toHaveCount(0);
+    // No first-visit overlay stands in front of the header.
+    await expect(page.locator('.modal-overlay')).toHaveCount(0);
 
     await page.click('.hdr-btn[title="New Session"]');
     await page.waitForSelector('.modal-overlay');

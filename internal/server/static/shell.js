@@ -14,7 +14,6 @@ export const shell = Object.seal({
   renderSidebar: null,
   updateStatusBar: null,
   fetchEvents: null,
-  openPlannerDrawer: null,
 });
 
 export function registerShell(impl) {

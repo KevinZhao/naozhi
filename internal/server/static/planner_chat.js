@@ -334,9 +334,20 @@ async function loadSession(reset) {
   }
 }
 
-// openPlannerSession opens key in the middle column.
+// showPlannerLeft unfolds (open) or folds the phone's left block, which
+// unfolded hides the middle column.
+export function showPlannerLeft(open) {
+  const main = $('planner-main');
+  if (!main || main.classList.contains('pl-left-open') === open) return;
+  main.classList.toggle('pl-left-open', open);
+  $('pl-left-toggle')?.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+// openPlannerSession opens key in the middle column, folding the phone's left
+// block a 任务 title was tapped in.
 export function openPlannerSession(key) {
   if (!key || key === PLANNER_KEY) return;
+  showPlannerLeft(false);
   if (st.sess && st.sess.key === key) return;
   closePlannerSession(true);
   st.sess = { key, events: [], uuids: new Set(), lastTime: 0, raw: false, loading: false, gen: 0, timer: 0 };
@@ -384,21 +395,33 @@ function handoffKey() {
   return key;
 }
 
+// watchedInput is the #msg-input whose edits repaint #btn-handoff: typing,
+// and the draft restores, sends and dictation that set it without an input
+// event.
+let watchedInput = null;
+
 // paintHandoffButton shows #btn-handoff (renderMainShell's input row) for
-// the selected session, and the header's #btn-pld (the Planner drawer's
-// entry on phone) while planner.enabled is on.
+// the selected session while planner.enabled is on; with nothing typed there
+// is nothing to hand over, so it is disabled (and hidden on phone, by CSS on
+// data-empty).
 export function paintHandoffButton() {
-  const entry = $('btn-pld');
-  if (entry) entry.hidden = !(st.status && st.status.enabled);
   const btn = $('btn-handoff');
   if (!btn) return;
+  const input = $('msg-input');
+  if (input && input !== watchedInput) {
+    watchedInput = input;
+    new MutationObserver(paintHandoffButton).observe(input, { childList: true, characterData: true, subtree: true });
+  }
   if (!st.status) { fetchPlannerStatus(); btn.hidden = true; return; }
   btn.hidden = !st.status.enabled;
   const key = handoffKey();
-  btn.disabled = st.sending || !plannerUsable() || !key;
+  const empty = !getMsgValue(input);
+  btn.disabled = st.sending || !plannerUsable() || !key || empty;
+  btn.toggleAttribute('data-empty', empty);
   btn.title = st.status.stopped ? '已停用 Planner（在 Planner 页面恢复）'
     : !key ? '只能交出本机由 naozhi 运行的会话'
-      : '把这个会话和输入框里的话一起交给 Planner';
+      : empty ? '先在输入框里写要交给 Planner 的事'
+        : '把这个会话和输入框里的话一起交给 Planner';
 }
 
 function showHandoffNote() {

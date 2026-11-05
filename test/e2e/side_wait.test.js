@@ -3,7 +3,7 @@
 // their cards unfolded in place without an inner scroll and closed or
 // answered there, no 任务, and not rendered with none — and the deep links of
 // §15.3 ④ (notify.js): #planner&item=<id> and a notification without a
-// session open the Planner on the item, the brief's #planner the drawer;
+// session open the Planner on the item, the brief's #planner the page too;
 // #session=<key>&item=<id> opens the session and scrolls to the item's note,
 // or the Planner when the session is not listed.
 const { test, expect } = require('@playwright/test');
@@ -36,6 +36,28 @@ const planner = { enabled: true, stopped: false, key: PLANNER, alive: true };
 
 for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mobile', { width: 390, height: 844 }]]) {
   test.describe(`sidebar 通知 bar (${name})`, () => {
+    test('a long bar leaves the session list its rows', async ({ browser }) => {
+      const ctx = await browser.newContext({ viewport });
+      const page = await ctx.newPage();
+      const open = Array.from({ length: 12 }, (_, i) => ({ id: 'in_' + i, kind: 'question', level: 'timely', unit: SESSION, title: 'iso 提问 ' + i, why: '有提问等你回答', created: iso(now - i * 60000), state: 'open', source: 'waiting:' + i }));
+      const mock = await startMockServer({ ws: true, inbox: { open, closed: [], counts: { open: 12, badge: 12 } }, tasks: { tasks: [] }, plannerEvents: [], planner });
+      try {
+        await page.goto(mock.url + '/dashboard');
+        await waitForWs(page, 'CONNECTED');
+        await page.click('#sw-toggle');
+        await expect(page.locator('#sw-wait .pl-card')).toHaveCount(12);
+        expect((await page.locator('#session-list').boundingBox()).height).toBeGreaterThan(viewport.height * 0.3);
+        await expect(page.locator('#session-list .session-card').first()).toBeInViewport();
+        // The bar scrolls as a whole to its last card.
+        await page.locator('#sw-wait .pl-card[data-id="in_11"]').scrollIntoViewIfNeeded();
+        await expect(page.locator('#sw-wait .pl-card[data-id="in_11"]')).toBeInViewport();
+        await page.screenshot({ path: test.info().outputPath(`side-wait-long-${name}.png`) });
+      } finally {
+        await ctx.close();
+        mock.server.close();
+      }
+    });
+
     test('counts what waits on you, unfolds in place, closes and answers there', async ({ browser }) => {
       const ctx = await browser.newContext({ viewport });
       const page = await ctx.newPage();
@@ -143,11 +165,13 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
         await expect(page.locator('body')).toHaveClass(/nz-view-planner/);
         await expect(page.locator('#pl-wait .pl-card[data-id="in_d"]')).toHaveClass(/inbox-lit/);
 
-        // The morning brief's #planner, from the chat view: the drawer.
+        // The morning brief's #planner, from the chat view: the page too,
+        // never the drawer (D91).
         await page.click('#abnav-chat');
         await page.evaluate(() => { location.hash = 'planner'; });
-        await expect(page.locator('#planner-drawer')).toBeVisible();
-        await expect(page.locator('body')).not.toHaveClass(/nz-view-planner/);
+        await expect(page.locator('body')).toHaveClass(/nz-view-planner/);
+        await expect(page.locator('#planner-drawer')).toBeHidden();
+        await expect(page.locator('#pl-stream')).toBeVisible();
       } finally {
         await ctx.close();
         mock.server.close();
