@@ -312,7 +312,12 @@ const plannerNoteBytes = 2048
 
 func (e *sendEngine) submitPlanner(key string, src agent.Source, text string, images []clievent.Attachment, opts session.AgentOpts, done func(string, error)) (bool, error) {
 	o := &plannerOrigin{key: key, src: src, turns: &e.plannerTurns, opts: opts, notify: e.notify, done: done, mark: e.turnWatermark}
-	switch e.turns.Submit(e.ctx, turn.Request{Key: key, Text: text, Images: images, Origin: o}, dashAdmission{track: e.TrackSend, ctx: e.ctx}) {
+	r := turn.Request{Key: key, Text: text, Images: images, Origin: o}
+	if src == "" {
+		// A dispatch's first message is the Planner's, not the user's.
+		r.Source = clievent.SourcePlanner
+	}
+	switch e.turns.Submit(e.ctx, r, dashAdmission{track: e.TrackSend, ctx: e.ctx}) {
 	case turn.AckOwner, turn.AckDetached:
 		return false, nil
 	case turn.AckQueued:

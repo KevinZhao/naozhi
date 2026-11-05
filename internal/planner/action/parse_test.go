@@ -52,6 +52,15 @@ func TestParse(t *testing.T) {
 		{"notify unknown field", block(`{"type":"notify","title":"t","why":"w","level":"timely","link":"","kind":"reply_needed"}`), []string{"!字段不对"}},
 		{"notify script link", block(`{"type":"notify","title":"t","why":"w","level":"timely","link":"javascript:alert(1)"}`), []string{"!link 要是"}},
 		{"notify relative link", block(`{"type":"notify","title":"t","why":"w","level":"timely","link":"/inbox/1"}`), []string{"!link 要是"}},
+		{"custody on", block(`{"type":"custody","key":"dashboard:direct:u:general","on":true}`), []string{"custody"}},
+		{"custody off", block(`{"type":"custody","key":"task:ab12","on":false}`), []string{"custody"}},
+		{"custody text", block(`{"type":"custody","key":"task:ab12","text":"继续跑完剩下的测试"}`), []string{"custody"}},
+		{"custody both", block(`{"type":"custody","key":"task:ab12","on":true,"text":"继续"}`), []string{"!二选一"}},
+		{"custody neither", block(`{"type":"custody","key":"task:ab12"}`), []string{"!二选一"}},
+		{"custody blank text", block(`{"type":"custody","key":"task:ab12","text":"  "}`), []string{"!二选一"}},
+		{"custody no key", block(`{"type":"custody","key":"","on":true}`), []string{"!缺少 key"}},
+		{"custody control key", block(`{"type":"custody","key":"a\nb","on":true}`), []string{"!会话 key"}},
+		{"custody long text", block(`{"type":"custody","key":"task:ab12","text":"` + strings.Repeat("字", custodyTextRunes+1) + `"}`), []string{"!text 超过"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -65,7 +74,7 @@ func TestParse(t *testing.T) {
 					if b.Err == nil || !strings.Contains(b.Err.Error(), msg) {
 						t.Errorf("block %d: err = %v, want one containing %q", i, b.Err, msg)
 					}
-					if b.Dispatch != nil || b.Promise != nil || b.Ask != nil || b.Status != nil || b.Notify != nil {
+					if b.Dispatch != nil || b.Promise != nil || b.Ask != nil || b.Status != nil || b.Notify != nil || b.Custody != nil {
 						t.Errorf("block %d: refused block still carries an action", i)
 					}
 					continue
@@ -84,6 +93,10 @@ func TestParse(t *testing.T) {
 	d := Parse(block(`{"type":"dispatch","workspace":"ws_1","title":"写 hello","model":"claude-sonnet-5-5","message":"写一个 hello.md"}`))[0].Dispatch
 	if d == nil || *d != (Dispatch{Workspace: "ws_1", Title: "写 hello", Model: "claude-sonnet-5-5", Message: "写一个 hello.md"}) {
 		t.Errorf("dispatch = %+v", d)
+	}
+	c := Parse(block(`{"type":"custody","key":" task:ab12 ","text":" 继续 "}`))[0].Custody
+	if c == nil || c.Key != "task:ab12" || c.Text != "继续" || c.On != nil {
+		t.Errorf("custody = %+v", c)
 	}
 	n := Parse(block(`{"type":"notify","title":" 有人\n等你 ","why":" 超过 4 小时 ","level":"timely","link":"https://example.com/m/1","id":" msg-1 "}`))[0].Notify
 	if n == nil || *n != (Notify{Title: "有人 等你", Why: "超过 4 小时", Level: LevelTimely, Link: "https://example.com/m/1", ID: "msg-1"}) {

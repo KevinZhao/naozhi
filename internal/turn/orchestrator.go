@@ -41,7 +41,7 @@ func (o *Orchestrator) Submit(ctx context.Context, r Request, a Admission) Ack {
 		return AckDetached
 	}
 
-	m := Msg{Text: r.Text, Images: r.Images, EnqueueAt: time.Now(), Origin: r.Origin, TraceID: r.TraceID}
+	m := Msg{Text: r.Text, Images: r.Images, EnqueueAt: time.Now(), Origin: r.Origin, TraceID: r.TraceID, Source: r.Source}
 	res := o.q.Enqueue(r.Key, m)
 	if !res.isOwner {
 		if res.evicted {

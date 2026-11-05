@@ -614,3 +614,18 @@ func TestFailuresFirstSeenFailing(t *testing.T) {
 		t.Errorf("open items = %q, want %q", got, want)
 	}
 }
+
+// A failure custody will retry is not the user's yet: it opens no item, the
+// others still do.
+func TestHandleHealthCustody(t *testing.T) {
+	n := New(Config{System: func(string, string) error { return nil }})
+	n.SetCustody(func(u health.Unit) bool { return u.ID == "task:a" })
+	for _, id := range []string{"task:a", "task:b"} {
+		n.HandleHealth(health.Event{Transition: &health.Transition{From: health.Idle,
+			Unit: health.Unit{ID: id, Workspace: "ws_1", State: health.Failed, ErrClass: health.ErrNetwork}}})
+	}
+	open, _ := n.List(0)
+	if len(open) != 1 || open[0].Source != "failed:task:b" {
+		t.Errorf("open = %+v, want task:b's failure only", open)
+	}
+}

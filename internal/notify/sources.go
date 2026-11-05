@@ -45,10 +45,19 @@ type Health interface {
 	Subscribe(fn func(health.Event)) (cancel func())
 }
 
-type healthEvent = health.Event
+type (
+	healthEvent = health.Event
+	healthUnit  = health.Unit
+)
 
 // SetHealth binds the health state machine. Call it before Run.
 func (n *Notifier) SetHealth(h Health) { n.health = h }
+
+// SetCustody binds custody's claim on failures
+// (planner/custody.Engine.Covers): a failure custody will retry is not the
+// user's yet and opens no item; custody opens one when it gives up. Call it
+// before Run.
+func (n *Notifier) SetCustody(covers func(health.Unit) bool) { n.covers = covers }
 
 // Run evaluates the sources every Interval until ctx ends, beating the
 // "notify" loop, and turns the health machine's transitions and systemic
@@ -299,7 +308,7 @@ func (n *Notifier) HandleHealth(ev health.Event) {
 			Why:   fmt.Sprintf("%d 个单元出现同一类错误：%s", len(f.Units), strings.Join(names, "、"))})
 	case ev.Transition != nil && ev.Transition.Unit.State == health.Failed:
 		u := ev.Transition.Unit
-		if ev.Transition.InFault {
+		if ev.Transition.InFault || n.covers != nil && n.covers(u) {
 			return
 		}
 		n.Add(Item{Kind: KindError, Level: LevelTimely, Unit: u.ID, WS: u.Workspace, Source: "failed:" + u.ID,

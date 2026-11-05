@@ -275,8 +275,10 @@ const maxLoggedTraces = 8
 
 // startTurn derives the turn's ctx from the loop's: the head message's
 // trace id (a later batch must not inherit the first message's), a fresh
-// run id the session's run record adopts, and the session key. It logs one
-// "turn: start" line naming every merged message's trace.
+// run id the session's run record adopts, the session key, and the source
+// the batch's messages share (a merge with one of the user's is the
+// user's). It logs one "turn: start" line naming every merged message's
+// trace.
 func startTurn(ctx context.Context, key string, t *inflight) context.Context {
 	traces := make([]string, 0, min(len(t.batch), maxLoggedTraces))
 	for _, m := range t.batch[:min(len(t.batch), maxLoggedTraces)] {
@@ -284,6 +286,13 @@ func startTurn(ctx context.Context, key string, t *inflight) context.Context {
 	}
 	if len(t.batch) > 0 {
 		ctx = ctxutil.WithTraceID(ctx, t.batch[0].TraceID)
+		src := t.batch[0].Source
+		for _, m := range t.batch[1:] {
+			if m.Source != src {
+				src = ""
+			}
+		}
+		ctx = ctxutil.WithSource(ctx, src)
 	}
 	ctx = ctxutil.WithSessionKey(ctxutil.WithRunID(ctx, ctxutil.NewTraceID()), key)
 	t.ctx = ctx

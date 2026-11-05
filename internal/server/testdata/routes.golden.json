@@ -96,6 +96,26 @@
   },
   {
     "method": "GET",
+    "path": "/api/custody",
+    "handler_type": "*dashcustody.Handler"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/custody",
+    "handler_type": "*dashcustody.Handler"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/custody/pause",
+    "handler_type": "*dashcustody.Handler"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/custody/pause",
+    "handler_type": "*dashcustody.Handler"
+  },
+  {
+    "method": "GET",
     "path": "/api/discovered",
     "handler_type": "*discovery.Handlers"
   },

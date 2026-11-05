@@ -359,3 +359,86 @@ func cutPrefix(s, prefix string) (string, bool) {
 	}
 	return s[len(prefix):], true
 }
+
+// maxPackedRefsBytes caps the packed-refs scan Commit falls back to.
+const maxPackedRefsBytes = 4 << 20
+
+// Commit returns the full commit id dir's checkout has checked out (HEAD
+// resolved through a loose ref or packed-refs), "" when there is none to
+// read: outside a working tree, an unborn branch, a malformed layout. dir
+// must be absolute.
+func Commit(dir string) string {
+	if dir == "" || !filepath.IsAbs(dir) {
+		return ""
+	}
+	cur := filepath.Clean(dir)
+	for i := 0; i < maxWalkUp; i++ {
+		if gitDir, ok := gitDirAt(cur); ok {
+			return headCommit(gitDir)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			break
+		}
+		cur = parent
+	}
+	return ""
+}
+
+// gitDirAt is treeRoot's git dir: its .git directory, or where a .git file
+// points.
+func gitDirAt(treeRoot string) (string, bool) {
+	dotGit := filepath.Join(treeRoot, ".git")
+	info, err := os.Lstat(dotGit)
+	switch {
+	case err != nil:
+		return "", false
+	case info.IsDir():
+		return dotGit, true
+	case info.Mode().IsRegular():
+		p, err := readGitDirPointer(dotGit, treeRoot)
+		return p, err == nil
+	}
+	return "", false
+}
+
+// headCommit resolves gitDir's HEAD to a full object id; the ref lives in
+// gitDir itself or, for a linked worktree, in its common dir.
+func headCommit(gitDir string) string {
+	data, err := readFileCapped(filepath.Join(gitDir, "HEAD"), maxHeadBytes)
+	if err != nil {
+		return ""
+	}
+	line := strings.TrimSpace(firstLine(data))
+	if isHexObjectID(line) {
+		return strings.ToLower(line)
+	}
+	rest, ok := cutPrefix(line, "ref:")
+	ref := strings.TrimSpace(rest)
+	if !ok || !strings.HasPrefix(ref, "refs/") || len(ref) > maxRefNameBytes || strings.Contains(ref, "..") {
+		return ""
+	}
+	dirs := []string{gitDir}
+	if common, ok := readCommonDir(gitDir); ok {
+		dirs = append(dirs, common)
+	}
+	for _, d := range dirs {
+		if b, err := readFileCapped(filepath.Join(d, filepath.FromSlash(ref)), maxHeadBytes); err == nil {
+			if id := strings.TrimSpace(firstLine(b)); isHexObjectID(id) {
+				return strings.ToLower(id)
+			}
+		}
+	}
+	for _, d := range dirs {
+		b, err := readFileCapped(filepath.Join(d, "packed-refs"), maxPackedRefsBytes)
+		if err != nil {
+			continue
+		}
+		for _, l := range strings.Split(string(b), "\n") {
+			if id, name, ok := strings.Cut(strings.TrimSpace(l), " "); ok && name == ref && isHexObjectID(id) {
+				return strings.ToLower(id)
+			}
+		}
+	}
+	return ""
+}

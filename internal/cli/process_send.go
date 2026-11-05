@@ -21,15 +21,16 @@ import (
 )
 
 // buildUserEntry renders the ring.EventLog entry for a single user message of
-// run runID. Shared by Send and SendPassthrough: readLoop filters the CLI's
+// run runID, sent by source ("" for the user). Shared by Send and SendPassthrough: readLoop filters the CLI's
 // replay echo out of ring.EventLog, so both paths must append the bubble explicitly.
-func buildUserEntry(text string, images []clievent.Attachment, runID string) clievent.EventEntry {
+func buildUserEntry(text string, images []clievent.Attachment, runID, source string) clievent.EventEntry {
 	entry := clievent.EventEntry{
 		Time:    time.Now().UnixMilli(),
 		Type:    clievent.KindUser,
 		Summary: textutil.TruncateRunes(text, 120),
 		Detail:  textutil.TruncateRunes(text, clievent.EventDetailMaxRunes),
 		RunID:   runID,
+		Source:  source,
 	}
 	if len(images) > 0 {
 		entry.Summary += clievent.AttachmentSuffix(images)
@@ -136,7 +137,7 @@ func (p *Process) Send(ctx context.Context, text string, images []clievent.Attac
 
 	// Log the user message AFTER a successful write so a rejected write leaves
 	// no ghost entry; passthrough.go orders the same way.
-	p.eventLog.Append(buildUserEntry(text, images, ctxutil.RunID(ctx)))
+	p.eventLog.Append(buildUserEntry(text, images, ctxutil.RunID(ctx), ctxutil.Source(ctx)))
 
 	noOutputDur, totalDur := p.turnBudgets()
 

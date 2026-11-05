@@ -210,6 +210,8 @@ type Config struct {
 type Notifier struct {
 	cfg    Config
 	health Health
+	// covers is custody's claim on a failure (SetCustody).
+	covers func(healthUnit) bool
 	events chan healthEvent
 	// crashed is set when the previous run left its marker behind.
 	crashed bool

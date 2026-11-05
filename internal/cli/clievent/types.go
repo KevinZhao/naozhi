@@ -60,6 +60,10 @@ type EventEntry struct {
 	Peer     string `json:"peer,omitempty"`
 	PeerMode string `json:"peer_mode,omitempty"`
 	PeerKey  string `json:"peer_key,omitempty"`
+	// Source is who sent a "user" entry when it was not the user: the
+	// gateway under custody (SourceCustody) or the Planner's dispatch
+	// (SourcePlanner); "" is the user.
+	Source string `json:"source,omitempty"`
 	// Reason is why: a peer_hold's cause (explicit-setting, mode-mismatch;
 	// Status "held") or outcome (expired, refused, ...; Status "dropped"),
 	// a permission_denied's decision reason, a model_refusal's category.
@@ -90,6 +94,15 @@ type EventEntry struct {
 	// (Claude) leaves nil and uses Type=="tool_use" with Tool + Detail.
 	ToolCall *ToolCall `json:"tool_call,omitempty"`
 }
+
+// Sources of a "user" entry not sent by the user (EventEntry.Source).
+const (
+	// SourceCustody is a message the gateway sent while it watches the
+	// session for the user (docs/rfc/planner.md §5.4).
+	SourceCustody = "custody"
+	// SourcePlanner is the first message of a session the Planner dispatched.
+	SourcePlanner = "planner"
+)
 
 // ToolCall is the per-event payload for ACP tool_call / tool_call_update
 // session/update notifications. The same struct serves the initial

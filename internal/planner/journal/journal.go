@@ -51,11 +51,13 @@ const (
 	KindActivity  Kind = "activity"
 	// KindDialog is a line the gateway wrote into the Planner conversation.
 	KindDialog Kind = "dialog"
+	// KindCustody is what custody did on a session (planner/custody).
+	KindCustody Kind = "custody"
 )
 
 func (k Kind) known() bool {
 	switch k {
-	case KindHealth, KindNotify, KindBrief, KindHeartbeat, KindActivity, KindDialog:
+	case KindHealth, KindNotify, KindBrief, KindHeartbeat, KindActivity, KindDialog, KindCustody:
 		return true
 	}
 	return false

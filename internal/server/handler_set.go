@@ -38,6 +38,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/ext/agentevents"
 	extccassets "github.com/naozhi/naozhi/internal/dashboard/ext/ccassets"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/cli"
+	dashcustody "github.com/naozhi/naozhi/internal/dashboard/ext/custody"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/inbox"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/memory"
 	dashplanner "github.com/naozhi/naozhi/internal/dashboard/ext/planner"
@@ -84,6 +85,7 @@ type handlerSet struct {
 	plannerH        *dashplanner.Handler
 	inboxH          *inbox.Handler
 	tasksH          *tasks.Handler
+	custodyH        *dashcustody.Handler
 	// healthH serves the server-owned probes (/health, /livez, /readyz).
 	healthH *HealthHandler
 

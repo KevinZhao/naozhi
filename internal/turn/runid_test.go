@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -251,5 +252,64 @@ func TestTurnIDs_PanicRecoveredOnTheTurnCtx(t *testing.T) {
 	p := logs.lines("turn: panic recovered")
 	if len(p) != 1 || p[0]["run_id"] != send.run || p[0]["trace_id"] != "t2" || p[0]["session_key"] != "k" {
 		t.Fatalf("turn: panic recovered = %v, want run_id %s trace_id t2", p, send.run)
+	}
+}
+
+// srcSender records the message source each Send's ctx carried.
+type srcSender struct {
+	*fakeSender
+	mu   sync.Mutex
+	seen []string
+}
+
+func (s *srcSender) Send(ctx context.Context, key string, sess Session, text string, imgs []clievent.Attachment, spec SendSpec, cb clievent.EventCallback) (*clievent.SendResult, error) {
+	s.mu.Lock()
+	s.seen = append(s.seen, text+"="+ctxutil.Source(ctx))
+	s.mu.Unlock()
+	return s.fakeSender.Send(ctx, key, sess, text, imgs, spec, cb)
+}
+
+// A turn carries the source its messages share: a detached custody message
+// keeps it, a merge of two custody messages keeps it, and a merge with one
+// of the user's is the user's.
+func TestTurnSource(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		sources []string // the second and third messages, merged behind the first
+		want    string
+	}{
+		{"both custody", []string{clievent.SourceCustody, clievent.SourceCustody}, clievent.SourceCustody},
+		{"custody and the user", []string{clievent.SourceCustody, ""}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := newRecorder()
+			fs := newSender(rec)
+			ss := &srcSender{fakeSender: fs}
+			o := New(QueueOptions{MaxDepth: 8, CollectDelay: time.Millisecond, Mode: ModeCollect}, ss)
+			gate := make(chan struct{})
+			fs.gate = gate
+			adm := &fakeAdmission{rec: rec, async: true, ctx: context.Background()}
+			o.Submit(context.Background(), Request{Key: "k", Text: "m1", Origin: newOrigin(rec, "a", "ws:a"), Source: clievent.SourceCustody}, adm)
+			rec.waitFor(t, "send:k:m1", 1)
+			o.Submit(context.Background(), Request{Key: "k", Text: "m2", Origin: newOrigin(rec, "b", "ws:b"), Source: tc.sources[0]}, adm)
+			o.Submit(context.Background(), Request{Key: "k", Text: "m3", Origin: newOrigin(rec, "c", "ws:c"), Source: tc.sources[1]}, adm)
+			gate <- struct{}{}
+			rec.waitFor(t, "begin:c:head", 1)
+			gate <- struct{}{}
+			rec.waitFor(t, "idle", 1)
+			adm.wg.Wait()
+			ss.mu.Lock()
+			defer ss.mu.Unlock()
+			if len(ss.seen) != 2 || ss.seen[0] != "m1="+clievent.SourceCustody || !strings.HasSuffix(ss.seen[1], "="+tc.want) {
+				t.Fatalf("sends = %q, want m1=custody then the merge =%q", ss.seen, tc.want)
+			}
+		})
+	}
+	rec := newRecorder()
+	ss := &srcSender{fakeSender: newSender(rec)}
+	o := New(QueueOptions{MaxDepth: 8, CollectDelay: time.Millisecond, Mode: ModePassthrough}, ss)
+	o.Submit(context.Background(), Request{Key: "k", Text: "p", Origin: newOrigin(rec, "a", "ws:a"), Source: clievent.SourceCustody}, &fakeAdmission{rec: rec})
+	if len(ss.seen) != 1 || ss.seen[0] != "p="+clievent.SourceCustody {
+		t.Fatalf("detached send = %q", ss.seen)
 	}
 }

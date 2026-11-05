@@ -35,6 +35,8 @@ type sendParams struct {
 	// TraceID names the send in the turn's logs: the HTTP request's
 	// X-Request-ID trace; "" lets turn mint one (WebSocket, relay).
 	TraceID string
+	// Source is who sent it when not the user (turn.Request.Source).
+	Source string
 }
 
 // sendAckStatus describes the immediate ack status for a queued send.
@@ -212,7 +214,7 @@ func (e *sendEngine) prepareSend(p sendParams) (cmd turn.Cmd, reset bool, err er
 // submit hands a prepared send to the Orchestrator on the engine's ctx and
 // TrackSend; /urgent's text loses its prefix and preempts.
 func (e *sendEngine) submit(p sendParams, cmd turn.Cmd, origin turn.Origin) turn.Ack {
-	r := turn.Request{Key: p.Key, Text: p.Text, Images: p.Images, Origin: origin, TraceID: p.TraceID}
+	r := turn.Request{Key: p.Key, Text: p.Text, Images: p.Images, Origin: origin, TraceID: p.TraceID, Source: p.Source}
 	if cmd.Kind == turn.CmdUrgent {
 		r.Text, r.Priority = cmd.Arg, turn.PriorityNow
 	}
