@@ -30,6 +30,13 @@ func ScoutSession(router *session.Router) scout.Session {
 		}
 		defer router.Reset(key)
 		res, err := cronSessionAdapter{sess}.Send(ctx, text)
+		if ctx.Err() != nil {
+			// Cut short (shutdown, or the run's timeout) mid-turn: the
+			// Reset's graceful close waits seconds for a CLI that does
+			// not exit on EOF mid-turn, past Scout.Stop's wait, so end
+			// the CLI first; the turn's reply is not wanted either way.
+			sess.Interrupt()
+		}
 		tools := calledTools(sess.EventLastN(scoutEventScan))
 		if err == nil && res.Text == "" {
 			err = errors.New("empty reply")
