@@ -4,8 +4,11 @@
 // open another view; again after a reconnect). The session header's chip
 // says custody's state — held back while you look — and switches it as
 // yours; custody's messages name custody as their sender with the prefix
-// faint, and an answer given by its recommended option is taken back with
-// 撤回 (a message to the session in the user's name). The Planner page's
+// faint, and the latest answer given by its recommended option is taken
+// back with 撤回 (POST /api/custody/undo: the gateway finds it and tells the
+// session in the user's name). The chip follows the gateway, which holds
+// back while a tab is at the session: leaving it reads the list again, so
+// the chip, the task card and the health table say 开 once more. The Planner page's
 // task card carries the same mark, its "⋯" menu pauses custody next to the
 // push pause, and the system view's health table has a 托管 column.
 const { test, expect } = require('@playwright/test');
@@ -18,11 +21,12 @@ const TASK = 'task:0a1b2c3d4e5f';
 const now = Date.now();
 const iso = (ms) => new Date(ms).toISOString();
 const CHOICE = '方案: 先补测试 (Recommended)';
-const UNDO = '撤回刚才按建议选的 ' + CHOICE + '，先停下等我决定';
+const EARLIER = '分支: 新开分支 (Recommended)';
 
 const EVENTS = [
   { type: 'user', detail: 'iso 修一下登录页', time: now - 600000, uuid: 'cu-u1' },
   { type: 'text', detail: '接口超时，先停下了', time: now - 590000, uuid: 'cu-t1' },
+  { type: 'user', source: 'custody', detail: '⚙ 托管 · 按建议执行 · 第 1/8 次\n' + EARLIER + '.', time: now - 550000, uuid: 'cu-c0' },
   { type: 'user', source: 'custody', detail: '⚙ 托管 · 出错重试 · 第 1/8 次\n继续', time: now - 500000, uuid: 'cu-c1' },
   { type: 'text', detail: '要先补测试还是先改代码？', time: now - 400000, uuid: 'cu-t2' },
   { type: 'user', source: 'custody', detail: '⚙ 托管 · 按建议执行 · 第 2/8 次\n' + CHOICE + '.', time: now - 300000, uuid: 'cu-c2' },
@@ -49,7 +53,7 @@ function fixture() {
     plannerEvents: [],
     inbox: { open: [], closed: [], counts: { open: 0, badge: 0 } },
     tasks: { tasks: [{ id: TASK, kind: 'session', title: 'iso 修登录页', state: 'doing', by: 'planner', at: iso(now - 60000), created: iso(now - 3600000) }] },
-    custody: { paused: false, sessions: [{ key: TASK, on: true, state: 'on', sent: 2, max: 8 }] },
+    custody: { paused: false, sessions: [{ key: TASK, on: true, state: 'on', sent: 2, max: 8 }], undo: CHOICE + '.' },
     systemHealth: {
       at: iso(now - 20000), unowned: 0,
       units: [
@@ -93,17 +97,24 @@ for (const [name, vp] of [['desktop', { viewport: { width: 1440, height: 900 } }
       const chip = page.locator('#header-custody .custody-chip');
       await expect(chip).toHaveClass(/custody-deferred/);
       await expect(chip).toContainText('已暂缓');
+      await expect(chip).toContainText('你在看');
       await expect(chip).toHaveAttribute('aria-pressed', 'true');
 
       // Custody's messages: custody is the sender, the prefix a faint line.
       const pane = page.locator('#events-scroll');
-      const msgs = pane.locator('.event.user.custody-msg');
-      await expect(msgs).toHaveCount(2);
+      const all = pane.locator('.event.user.custody-msg');
+      await expect(all).toHaveCount(3);
+      const earlier = all.nth(0);
+      const msgs = pane.locator('.event.user.custody-msg:not([data-uuid="cu-c0"])');
       await expect(msgs.nth(0).locator('.custody-source')).toHaveText('⚙ 托管 · 出错重试 · 第 1/8 次');
       // The prefix once, as the source line; the body after it.
       await expect(msgs.nth(0).locator('.event-content')).toHaveText('⚙ 托管 · 出错重试 · 第 1/8 次继续');
       await expect(msgs.nth(0).locator('.event-icon')).toHaveText('⚙');
       await expect(msgs.nth(1).locator('.custody-suggested')).toContainText('已按建议执行：' + CHOICE);
+      // 撤回 only on the latest: the gateway takes back that one.
+      await expect(earlier.locator('.custody-suggested')).toContainText('已按建议执行：' + EARLIER);
+      await expect(earlier.locator('[data-action="custody-undo"]')).toBeHidden();
+      await expect(msgs.nth(1).locator('[data-action="custody-undo"]')).toBeVisible();
       await expect(pane.locator('.event.user:not(.custody-msg)')).toHaveCount(1);
       // What custody did is said among the bubbles; its messages are not notes.
       await expect(pane.locator('.gw-note[data-note-id="cn1"]')).toContainText('托管：出错（网络），稍后自动重试 · 第 1 次');
@@ -112,12 +123,13 @@ for (const [name, vp] of [['desktop', { viewport: { width: 1440, height: 900 } }
       await msgs.nth(1).scrollIntoViewIfNeeded();
       await page.screenshot({ path: test.info().outputPath('custody-session-' + name + '.png') });
 
-      // 撤回 tells the session, in your name, to take the choice back.
+      // 撤回 asks the gateway to take the answer back; nothing goes out as a
+      // plain send.
       const sends = mock.sendCalls.length;
       await msgs.nth(1).locator('[data-action="custody-undo"]').click();
-      await expect.poll(() => mock.sendCalls.length).toBe(sends + 1);
-      expect(JSON.parse(mock.sendCalls[sends])).toEqual({ key: TASK, text: UNDO });
+      await expect.poll(() => mock.custodyCalls.at(-1)).toEqual({ undo: TASK });
       await expect(msgs.nth(1).locator('.custody-undone')).toHaveText('已发撤回');
+      expect(mock.sendCalls.length).toBe(sends);
 
       // One click switches it as yours, and another back on.
       await chip.click();
@@ -206,7 +218,7 @@ test('no custody chip with the Planner off', async ({ page }) => {
     await page.goto(mock.url + '/dashboard');
     await waitForWs(page, 'CONNECTED');
     await openSession(page, mock, TASK, EVENTS);
-    await expect(page.locator('#events-scroll .event.user.custody-msg')).toHaveCount(2);
+    await expect(page.locator('#events-scroll .event.user.custody-msg')).toHaveCount(3);
     await expect(page.locator('#header-custody')).toBeEmpty();
   } finally {
     mock.server.close();

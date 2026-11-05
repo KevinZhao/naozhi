@@ -740,6 +740,9 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .custody-choice{font-weight:600;overflow-wrap:anywhere}
 .custody-sep{opacity:.45;padding:0 2px}
 .custody-undone{color:var(--nz-text-mute);font-size:var(--nz-fs-xs)}
+/* 撤回 takes back the session's latest answer by the recommended option only
+   (Engine.Undo): an earlier one's button would undo the latest. */
+.custody-suggested-msg:has(~ .custody-suggested-msg) :is(.custody-undo,.custody-sep){display:none}
 .custody-chip{display:inline-flex;align-items:center;gap:4px;max-width:260px;padding:1px 6px;border-radius:var(--nz-radius-xs);font-family:inherit;font-size:var(--nz-fs-2xs);font-weight:600;letter-spacing:.2px;white-space:nowrap;line-height:1.3;color:var(--nz-text-mute);background:var(--nz-bg-2);border:1px solid var(--nz-border)}
 button.custody-chip{cursor:pointer}
 button.custody-chip:hover:not(:disabled){border-color:var(--nz-accent)}

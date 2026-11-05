@@ -10,7 +10,7 @@ import { renderAskQuestionCard } from './ask_card.js';
 import { CLAWD_SVG, ICONS } from './icons.js';
 import { pendingBackendID } from './features.js';
 import { isInternalEvent, sid } from './session_ident.js';
-import { custodyBubbleHtml } from './custody.js';
+import { custodyBubbleHtml, isSuggestedMessage } from './custody.js';
 
 // renderTodoList parses the JSON todos payload stored on EventEntry.detail and
 // emits a checklist block. Falls back to the summary line when detail is
@@ -274,6 +274,13 @@ function userContentHtml(e, cleanRaw, sk) {
   return custodyBubbleHtml(cleanRaw, sk, e.uuid || String(e.time || ''), (t) => textOrUserContentHtml(e, t));
 }
 
+// custodyEventClass marks a message custody sent, and among them an answer
+// given by the recommended option (its 撤回 stays on the latest only).
+function custodyEventClass(e) {
+  if (e.type !== 'user' || e.source !== 'custody') return '';
+  return isSuggestedMessage(e.detail || e.summary || '') ? ' custody-msg custody-suggested-msg' : ' custody-msg';
+}
+
 // toolUseHtml: the ACP rich tool progress row (kiro, includeInternal-only).
 // Output extraction tries the kiro {items:[{Json:{stdout}}]} shape first,
 // then falls back to pretty-printed JSON.
@@ -400,7 +407,7 @@ export function eventHtml(e, opts) {
   // data-uuid: the backend's entry identity, the dedup key for a restart's
   // history replay (docs/rfc/dashboard-event-uuid-idempotent-render.md).
   const uuidAttr = e.uuid ? ' data-uuid="' + escAttr(e.uuid) + '"' : '';
-  return '<div class="event ' + escAttr(e.type || '') + (e.type === 'user' && e.source === 'custody' ? ' custody-msg' : '') + '"' + timeAttr + uuidAttr + '>' +
+  return '<div class="event ' + escAttr(e.type || '') + custodyEventClass(e) + '"' + timeAttr + uuidAttr + '>' +
     '<span class="event-icon">' + icon + '</span>' +
     '<div class="event-content">' + content + imgHtml + copyBtn + askBtn + '</div></div>';
 }

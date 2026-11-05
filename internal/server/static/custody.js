@@ -13,8 +13,9 @@
 //
 // A message custody sent carries the prefix "⚙ 托管 · <原因> · 第 n/8 次"
 // (custody.Prefix): custodyMessage splits it off so the bubble names custody
-// as its sender, and an answer it gave on your behalf (按建议执行) can be
-// taken back with one click, which sends the session the words of SPEC D93.
+// as its sender, and the latest answer it gave on your behalf (按建议执行)
+// can be taken back with one click: POST /api/custody/undo finds that answer
+// on the gateway and sends the session the words of SPEC D93 in your name.
 // Layering: never import dashboard.js back.
 import { NZ_CONTRACT } from './contract.js';
 import { selection, sessionList, ui } from './state.js';
@@ -27,6 +28,9 @@ import { wsm } from './ws_manager.js';
 // minute (custody.ViewFor). VIEW_CHECK_MS is how often the tab looks again
 // at what it shows, for the changes no event announces.
 const VIEW_RENEW_MS = 30000;
+// UNDO_URL is custody's 撤回; the route ships with the suggested answers
+// (Engine.Undo), so the contract may not name it yet.
+const UNDO_URL = NZ_CONTRACT.API.custody_undo || NZ_CONTRACT.API.custody + '/undo';
 const VIEW_CHECK_MS = 2000;
 
 // REASON_SUGGESTED is custody.ReasonSuggested: an answer to a question,
@@ -43,6 +47,7 @@ export const custody = {
   pausedAt: 0,
   byKey: new Map(), // key → custody.Status of the sessions in custody
   loading: null,
+  readAt: 0, // when GET /api/custody was last read
 };
 
 // The session this tab last reported it is at, and when.
@@ -62,9 +67,11 @@ export function coverable(key, node) {
 
 // statusOf is key's custody as this tab shows it: in custody but at the
 // session (this tab reports it) reads as held back, as the gateway holds it.
+// The gateway's own 已暂缓 comes from any tab at the session or a message
+// you sent; this tab reads the list again when it moves (reportViewing).
 export function statusOf(key) {
   const st = custody.byKey.get(key) || { key, on: false, state: 'off', sent: 0, max: 8 };
-  if (st.state === 'on' && view.key === key) return { ...st, state: 'deferred', why: '你在看' };
+  if ((st.state === 'on' || (st.state === 'deferred' && !st.why)) && view.key === key) return { ...st, state: 'deferred', why: '你在看' };
   return st;
 }
 
@@ -134,7 +141,7 @@ export function refreshCustody() {
       if (!(await plannerEnabled())) return;
       noteList(await fetchJSON(NZ_CONTRACT.API.custody, { timeoutMs: 8000 }));
     } catch { /* the next refresh tries again */ }
-    finally { custody.loading = null; changed(); reportViewing(); }
+    finally { custody.loading = null; custody.readAt = Date.now(); changed(); reportViewing(); }
   })();
   return custody.loading;
 }
@@ -192,7 +199,9 @@ function viewedKey() {
 }
 
 // reportViewing sends a viewing frame when what this tab shows changed, or
-// to renew it.
+// to renew it. A move changes the gateway's 已暂缓 of the sessions left and
+// entered, so the list is read again; so is a 已暂缓 older than a renewal,
+// which lapses on the gateway (ViewFor, NearbyFor) with nothing announcing it.
 function reportViewing() {
   if (!wsm.isConnected()) {
     // The gateway forgot this tab with its socket.
@@ -201,12 +210,15 @@ function reportViewing() {
   }
   const key = viewedKey();
   const now = Date.now();
-  if (key === view.key && (!key || now - view.at < VIEW_RENEW_MS)) return;
+  if (key === view.key && (!key || now - view.at < VIEW_RENEW_MS)) {
+    if (now - custody.readAt >= VIEW_RENEW_MS && [...custody.byKey.values()].some((st) => st.state === 'deferred')) refreshCustody();
+    return;
+  }
   if (!wsm.send({ type: NZ_CONTRACT.WS.viewing, key })) return;
   const moved = key !== view.key;
   view.key = key;
   view.at = now;
-  if (moved) changed();
+  if (moved) { changed(); refreshCustody(); }
 }
 
 // ---- custody's messages ----
@@ -219,13 +231,15 @@ export function custodyMessage(text) {
   return { reason: m[1], n: Number(m[2]), max: Number(m[3]), body: text.slice(m[0].length).trim() };
 }
 
-// undoText is what taking back custody's answer choice says (SPEC D93).
-export const undoText = (choice) => '撤回刚才按建议选的 ' + choice + '，先停下等我决定';
+// isSuggestedMessage reports whether text is an answer custody gave by the
+// recommended option: the bubbles 撤回 can apply to.
+export const isSuggestedMessage = (text) => custodyMessage(text)?.reason === REASON_SUGGESTED;
 
 // custodyBubbleHtml is a custody message's bubble content: who sent it and
 // why, faint, then its body; an answer given by the recommended option
-// says so, with 撤回. renderBody renders the body text. sk is the session
-// the bubble is in, id the bubble's.
+// says so, with 撤回 (shown on the session's latest one only, the one the
+// gateway takes back: .custody-suggested-msg in the CSS). renderBody renders
+// the body text. sk is the session the bubble is in, id the bubble's.
 export function custodyBubbleHtml(text, sk, id, renderBody) {
   const m = custodyMessage(text);
   if (!m) return '<div class="custody-source">⚙ 托管</div>' + renderBody(text);
@@ -236,26 +250,33 @@ export function custodyBubbleHtml(text, sk, id, renderBody) {
   const btn = done
     ? '<span class="custody-undone">已发撤回</span>'
     : '<button type="button" class="pl-link custody-undo" data-action="custody-undo" data-key="' + escAttr(sk.key) + '" data-node="' + escAttr(sk.node || 'local') +
-      '" data-choice="' + escAttr(choice) + '" data-id="' + escAttr(id) + '" title="' + escAttr('给会话发：' + undoText(choice)) + '">撤回</button>';
+      '" data-id="' + escAttr(id) + '" title="以你的名义让会话撤回这次按建议选的选项，先停下等你决定">撤回</button>';
   return src + '<div class="custody-suggested">已按建议执行：<span class="custody-choice">' + esc(choice) + '</span>' +
     '<span class="custody-sep" aria-hidden="true">·</span>' + btn + '</div>';
 }
 
+// UNDO_FAIL says why the gateway took nothing back, by HTTP status.
+const UNDO_FAIL = {
+  404: '这个会话里没有可撤回的按建议执行',
+  400: '这个会话不归托管管',
+  503: 'Planner 没开，托管没有运行',
+};
+
 async function undo(el) {
-  const { key, node, choice, id } = el.dataset;
-  if (!key || !choice) return;
+  const { key, node, id } = el.dataset;
+  if (!key) return;
   el.disabled = true;
-  const payload = { key, text: undoText(choice) };
+  const payload = { key };
   if (node && node !== 'local') payload.node = node;
   try {
-    await fetchJSON(NZ_CONTRACT.API.sessions_send, {
+    const res = await fetchJSON(UNDO_URL, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), timeoutMs: 15000,
     });
     if (id) undone.add(id);
-    el.outerHTML = '<span class="custody-undone">已发撤回</span>';
+    el.outerHTML = '<span class="custody-undone" title="' + escAttr('已撤回：' + (res?.answer || '')) + '">已发撤回</span>';
   } catch (e) {
     el.disabled = false;
-    showToast('没有发出撤回：' + failText(e), 'error');
+    showToast('没有发出撤回：' + (UNDO_FAIL[e.status] || failText(e)), 'error');
   }
 }
 
