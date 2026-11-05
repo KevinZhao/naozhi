@@ -361,8 +361,9 @@ async function openScratch(quote, agentId, sourceKey, sourceMsgTime) {
     ad.elQuoteChip.dataset.full = quote;
     clearMessages();
     ad.elSave.classList.remove('visible');
-    showDrawer();
+    // Collapse first: the split sizes itself against the sidebar it sees.
     collapseSidebarForDrawer();
+    showDrawer();
     setTimeout(() => ad.elInput.focus(), 60);
     startPolling();
   } catch (e) {

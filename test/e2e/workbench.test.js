@@ -115,9 +115,12 @@ test('tabs: 产出 previews and links PRs, 文件 browses the session tree, 详�
     await page.click(`.session-card[data-key="${A}"]`);
     await page.click('.main-header .btn-workbench');
     await expect(drawer(page)).toHaveClass(/fv-open/);
-    // The session sidebar stays (D91 S6).
+    // The session sidebar stays (D91 S6), and the transcript beside it keeps
+    // room for its composer.
     await expect(page.locator('body')).not.toHaveClass(/sidebar-collapsed/);
     await expect(page.locator('#sidebar')).toBeVisible();
+    expect((await page.locator('#main').boundingBox()).width).toBeGreaterThanOrEqual(420);
+    expect((await page.locator('#msg-input').boundingBox()).width).toBeGreaterThanOrEqual(120);
     // Nothing previewed yet: it opens on 产出.
     await expect(tab(page, 'outputs')).toHaveAttribute('aria-selected', 'true');
     const rows = page.locator('#wb-outputs .files-row');
