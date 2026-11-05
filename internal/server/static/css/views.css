@@ -221,6 +221,10 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .pl-brief{margin:0 24px 8px}
 .pl-brief-empty{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);padding:6px 0;border-bottom:1px dashed var(--nz-border)}
 .pl-brief-empty b{color:var(--nz-text-mute)}
+.pl-brief-card{border-bottom:1px dashed var(--nz-border);padding:6px 0}
+.pl-brief-card>summary{cursor:pointer;font-size:var(--nz-fs-xs);color:var(--nz-text-dim)}
+.pl-brief-card>summary b{color:var(--nz-text-mute)}
+.pl-brief-card>.md{margin-top:6px;font-size:var(--nz-fs-sm2)}
 /* The Planner's open cards at the end of its conversation (§10.1). */
 .pl-cards{margin:4px 24px 14px;max-width:560px;display:flex;flex-direction:column;gap:8px}
 .pl-cards[hidden]{display:none}

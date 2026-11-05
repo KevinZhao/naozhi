@@ -15,7 +15,7 @@
 // openPlannerDrawer({ item }) is the entry for a push that leads to a 通知
 // item without a session (§15.3 ④).
 import { sessionList, ui } from './state.js';
-import { nzBus, registerActions } from './nz_util.js';
+import { nzBus, registerActions, typingOutside } from './nz_util.js';
 import { sid } from './session_ident.js';
 import { attachPlannerConversation, detachPlannerConversation, focusInboxItem } from './planner_view.js';
 import { openPlannerSession } from './planner_chat.js';
@@ -101,7 +101,8 @@ nzBus.addEventListener('workbench:open', closePlannerDrawer);
 
 // Capture phase: Alt+P works from inside an input too, where it types
 // nothing anyone wants (Option+P is "π" on a Mac, hence e.code). Esc is
-// taken only when no dialog or lightbox above the drawer wants it.
+// taken only when no dialog or lightbox above the drawer wants it, and not
+// from an input outside the drawer (the chat input's Esc interrupts a turn).
 document.addEventListener('keydown', (e) => {
   if (e.isComposing) return;
   if (e.code === 'KeyP' && e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
@@ -112,6 +113,7 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key !== 'Escape' || !isOpen()) return;
   if (document.querySelector('.modal-overlay, .cmd-palette-overlay, .lightbox-overlay.active')) return;
+  if (typingOutside(e, $('planner-drawer'))) return;
   e.preventDefault();
   e.stopPropagation();
   closePlannerDrawer();

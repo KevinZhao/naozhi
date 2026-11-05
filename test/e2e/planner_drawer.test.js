@@ -138,6 +138,47 @@ test('desktop: Alt+P and Esc, the workbench, a send with its receipt, a card, th
   }
 });
 
+// The drawer and the workbench are not modal: Esc in the chat input stays
+// the input's (it arms an interrupt of the running turn), while Esc from
+// elsewhere still closes the panel.
+test('Esc in the chat input is the input\'s while the drawer or the workbench is open', async ({ page }) => {
+  const RUNNING = 'dashboard:direct:2026-01-01-120001-2:otherproject';
+  const mock = await startMockServer({ ws: true, plannerEvents: plannerEvents(), inbox: inbox(), planner: planner() });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await page.click('.session-card[data-key="' + RUNNING + '"]');
+    const drawer = page.locator('#planner-drawer');
+    const wb = page.locator('#fv-drawer');
+    for (const panel of ['drawer', 'workbench']) {
+      // Past the 600ms an armed Esc waits for its second press.
+      await page.waitForTimeout(700);
+      if (panel === 'drawer') {
+        await page.keyboard.press('Alt+KeyP');
+        await expect(drawer).toBeVisible();
+      } else {
+        await page.click('.main-header .btn-workbench');
+        await expect(wb).toHaveClass(/fv-open/);
+      }
+      // The drawer may cover the input's middle: focus it as a click on its
+      // visible part would.
+      await page.focus('#msg-input');
+      await page.evaluate(() => { document.getElementById('toast').textContent = ''; });
+      await page.keyboard.press('Escape');
+      await expect(page.locator('#toast')).toHaveText('再按一次 Esc 发送中断');
+      if (panel === 'drawer') await expect(drawer).toBeVisible();
+      else await expect(wb).toHaveClass(/fv-open/);
+      // Esc from outside an input closes it.
+      await page.locator('#msg-input').blur();
+      await page.keyboard.press('Escape');
+      if (panel === 'drawer') await expect(drawer).toBeHidden();
+      else await expect(wb).not.toHaveClass(/fv-open/);
+    }
+  } finally {
+    mock.server.close();
+  }
+});
+
 test('planner.enabled off: the drawer explains it', async ({ page }) => {
   const mock = await startMockServer({ ws: true, plannerEvents: [], inbox: { open: [], closed: [], counts: { open: 0, badge: 0 } }, planner: planner({ enabled: false, alive: false }) });
   try {

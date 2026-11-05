@@ -3,7 +3,8 @@
 // /api/inbox, decisions and questions first and labelled, each closable;
 // decision cards answer through /api/inbox/decide) and the #pl-task
 // container 任务 (tasks.js) mounts into, then the browser-notification,
-// push-pause and 停用 Planner controls. Middle: the 早报 slot and the
+// push-pause and 停用 Planner controls. Middle: the 早报 slot (the newest
+// brief of GET /api/planner/briefs) and the
 // planner:main event stream, its action blocks and the sessions it names as
 // cards (planner_cards.js), and the input box and the opened session card
 // (planner_chat.js). Right: the workbench, on planner:main or the opened
@@ -35,7 +36,7 @@ import { sessionList, ui } from './state.js';
 import { esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
 import { sid } from './session_ident.js';
 import { renderEventsWithDividers } from './event_render.js';
-import { runPendingAsync } from './render_md.js';
+import { renderMd, runPendingAsync } from './render_md.js';
 import { inbox, isLit, notifySupported, onInboxCount, requestNotifyPermission, revealFocus } from './notify.js';
 import { followWorkbenchSubject, noteWorkbenchEvent } from './workbench_panes.js';
 import { decisionActsHtml, decorateEvents, paintSessionCards, refreshHealth, webLinkHtml } from './planner_cards.js';
@@ -64,6 +65,7 @@ const KIND_ORDER = { decision: 0, question: 1, error: 2, notice: 3 };
 
 const pl = {
   status: null, // GET /api/planner
+  brief: null, // the newest sent morning brief, GET /api/planner/briefs
   open: [], // open 通知 items
   pausedUntil: 0,
   customPause: false,
@@ -340,10 +342,42 @@ function paintStatus() {
     note.innerHTML = html;
     note.hidden = !html;
   }
-  const brief = $('pl-brief');
-  if (brief && !brief.childElementCount) {
-    brief.innerHTML = '<div class="pl-brief-empty"><b>早报</b> · 还没有（工作日 08:30 之后生成）</div>';
+  paintBrief();
+}
+
+// paintBrief shows the latest morning brief (GET /api/planner/briefs) in the
+// 早报 slot, open on the day it was made; the same brief is not repainted, so
+// a fold the user chose stays.
+function paintBrief() {
+  const box = $('pl-brief');
+  if (!box) return;
+  const b = pl.brief;
+  const at = b ? b.at : '';
+  if (box.childElementCount && box.dataset.at === at) return;
+  box.dataset.at = at;
+  if (!b) {
+    box.innerHTML = '<div class="pl-brief-empty"><b>早报</b> · 还没有（工作日 08:30 之后生成）</div>';
+    return;
   }
+  const d = new Date(b.at);
+  const pad = (n) => String(n).padStart(2, '0');
+  const today = d.toDateString() === new Date().toDateString();
+  const when = isNaN(d.getTime()) ? '' : ' · ' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  box.innerHTML = '<details class="pl-brief-card"' + (today ? ' open' : '') + '><summary><b>早报</b>' + esc(when) + '</summary>' +
+    '<div class="md">' + renderMd(b.markdown) + '</div></details>';
+  runPendingAsync();
+}
+
+// fetchBrief takes the newest sent brief; an unreadable list leaves the slot
+// as it was.
+async function fetchBrief() {
+  let res;
+  try {
+    res = await fetchJSON(NZ_CONTRACT.API.planner_briefs + '?limit=1', { timeoutMs: 8000 });
+  } catch { return; }
+  const list = res && Array.isArray(res.briefs) ? res.briefs : [];
+  pl.brief = list.find((b) => b && b.sent && b.markdown) || null;
+  if (pl.host) paintBrief();
 }
 
 async function fetchStatus() {
@@ -397,6 +431,29 @@ const RECEIPT_RE = /^<naozhi-receipt>\s*([\s\S]*?)\s*(?:<\/naozhi-receipt>\s*)?$
 // MEETING_RE is a pre-meeting brief's material, marked 来自会前简报.
 const SCOUT_RE = /^<naozhi-scout findings="(\d+)"/;
 const MEETING_RE = /^<naozhi-scout kind="meeting" start="(\d\d:\d\d)"/;
+// COALESCE_HEAD leads requests that queued while the Planner was busy and
+// were merged into one turn (turn.Coalesce): each follows as "\n[HH:MM] ".
+// Every part gets the rules above, the gateway's as their lines and yours
+// joined into one bubble.
+const COALESCE_HEAD = '[以下是用户在你处理上一条消息期间追加发送的内容]\n';
+const COALESCE_SPLIT_RE = /\n\[\d\d:\d\d\] /;
+function plannerEvents(e) {
+  const text = e.type === 'user' ? e.detail || e.summary || '' : '';
+  if (!text.startsWith(COALESCE_HEAD)) return [withoutSnapshot(e)];
+  const out = [];
+  let mine = null;
+  for (const part of text.slice(COALESCE_HEAD.length).split(COALESCE_SPLIT_RE)) {
+    const t = part.trim();
+    if (!t) continue;
+    const p = withoutSnapshot(Object.assign({}, e, { detail: t, summary: t }));
+    if (p.type !== 'user') { delete p.uuid; out.push(p); continue; }
+    if (!mine) { mine = p; out.push(mine); continue; }
+    mine.detail = [mine.detail, p.detail].filter(Boolean).join('\n\n');
+    mine.summary = [mine.summary, p.summary].filter(Boolean).join(' ');
+  }
+  return out;
+}
+
 function withoutSnapshot(e) {
   const r = e.type === 'user' && RECEIPT_RE.exec(e.detail || e.summary || '');
   if (r) return Object.assign({}, e, { type: 'system', summary: '回执给 Planner：' + r[1], detail: '' });
@@ -427,7 +484,7 @@ function appendEvents(events, reset) {
   const atBottom = reset || scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 40;
   if (reset) { pl.lastTime = 0; pl.seenAtWM.clear(); }
   const fresh = events.filter(admitEvent);
-  const html = renderEventsWithDividers(fresh.map(withoutSnapshot), reset ? 0 : lastDividerTime(box), RENDER_OPTS);
+  const html = renderEventsWithDividers(fresh.flatMap(plannerEvents), reset ? 0 : lastDividerTime(box), RENDER_OPTS);
   if (reset) box.innerHTML = html;
   else if (fresh.length) {
     box.querySelector(':scope > .pl-empty')?.remove();
@@ -514,6 +571,7 @@ function startConversation() {
   // The subscription follows the first page: its `after` is the page's end.
   loadEvents(true).then(() => { if (pl.host && !pl.sub) subscribe(); });
   fetchStatus();
+  fetchBrief();
   fetchInbox();
   if (!pl.timer) {
     pl.timer = setInterval(() => {
@@ -522,6 +580,7 @@ function startConversation() {
       if (++pl.ticks % SLOW_TICKS === 0) {
         paintWaiting();
         fetchStatus();
+        fetchBrief();
         refreshHealth($('pl-center'), false);
         paintSessionCards($('pl-center'));
         // A task's 等你 / 失败 follow health, which pushes no frame.
