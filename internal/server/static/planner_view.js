@@ -4,8 +4,9 @@
 // decision cards answer through /api/inbox/decide) and the #pl-task
 // container 任务 (tasks.js) mounts into. The header's "⋯" menu holds the
 // seldom used controls — browser notifications (only while the browser has
-// not asked yet), push pause and 停用 Planner — and while pushes are paused
-// the header says until when, with 恢复. Middle: the planner:main event
+// not asked yet), push pause, custody pause (custody.js: no session is
+// replied for while it holds) and 停用 Planner — and while pushes or custody
+// are paused the header says so, with 恢复. Middle: the planner:main event
 // stream with the morning briefs of GET /api/planner/briefs placed in it by
 // the time they were made (D91), its action blocks and the sessions it names
 // as cards (planner_cards.js), and the input box and the opened session card
@@ -48,6 +49,7 @@ import { decisionActsHtml, decorateEvents, noteWorkspaces, paintSessionCards, re
 import { clearAck, clearPending, closePlannerSession, mountComposer, noteAck, notePlannerStatus, showPlannerLeft } from './planner_chat.js';
 import { onSessionsApplied } from './session_list.js';
 import { mountTasks, refreshTasks } from './tasks.js';
+import { custody, setCustodyPaused } from './custody.js';
 import { workbench } from './workbench.js';
 import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
@@ -286,6 +288,17 @@ function pauseToolHtml() {
     '<button type="button" class="pl-btn" data-action="planner-pause-custom">自定义</button>';
 }
 
+// custodyToolHtml pauses custody for every session, or resumes it; custody
+// runs only with the Planner on.
+function custodyToolHtml() {
+  if (!pl.status?.enabled) return '';
+  const btn = custody.paused
+    ? '<button type="button" class="pl-btn" data-action="planner-custody-resume">恢复托管</button>'
+    : '<button type="button" class="pl-btn" data-action="planner-custody-pause">暂停</button>';
+  return '<div class="pl-tool"><span class="pl-tool-l">暂停托管</span><div class="pl-tool-btns">' + btn + '</div>' +
+    '<span class="pl-tool-hint">暂停期间不替任何会话回话，正在跑的回合不受影响</span></div>';
+}
+
 function stopToolHtml() {
   const s = pl.status;
   const on = !!(s && s.enabled);
@@ -301,8 +314,16 @@ function closeMenu() {
 }
 
 // paintTools fills the header's "⋯" menu and, while pushes are paused, its
-// 推送暂停到 line.
+// 推送暂停到 line, and while custody is, its 托管已暂停 line.
 function paintTools() {
+  const cpaused = $('pl-custody-paused');
+  if (cpaused) {
+    const on = custody.paused && !!pl.status?.enabled;
+    const html = on ? '<span>托管已暂停</span><span aria-hidden="true">·</span><button type="button" class="pl-link" data-action="planner-custody-resume">恢复</button>' : '';
+    if (cpaused.innerHTML !== html) cpaused.innerHTML = html;
+    cpaused.title = on && custody.pausedAt ? '暂停于 ' + formatAbsTime(custody.pausedAt) : '';
+    cpaused.hidden = !on;
+  }
   const paused = $('pl-paused');
   if (paused) {
     const on = pl.pausedUntil > Date.now();
@@ -319,6 +340,7 @@ function paintTools() {
   if (pl.customPause && document.activeElement?.id === 'pl-pause-hours') return;
   box.innerHTML = notifyToolHtml() +
     '<div class="pl-tool"><span class="pl-tool-l">暂停推送</span><div class="pl-tool-btns">' + pauseToolHtml() + '</div></div>' +
+    custodyToolHtml() +
     '<div class="pl-tool">' + stopToolHtml() + '</div>';
 }
 
@@ -875,6 +897,7 @@ nzBus.addEventListener('inbox:count', (e) => {
 });
 // The health table names the units no list holds.
 nzBus.addEventListener('planner:health', () => { if (pl.host) paintWaiting(); });
+nzBus.addEventListener('custody:changed', () => { if (pl.host) paintTools(); });
 // A push or link without an item lands on the conversation, even where the
 // phone's left block was left unfolded or a session opened in its place.
 nzBus.addEventListener('inbox:focus', () => {
@@ -976,6 +999,8 @@ registerActions({
     }
     paintTools();
   },
+  'planner-custody-pause': async () => { await setCustodyPaused(true); closeMenu(); },
+  'planner-custody-resume': async () => { await setCustodyPaused(false); closeMenu(); },
   'planner-stop': async (el) => {
     const stopped = el.checked;
     el.disabled = true;

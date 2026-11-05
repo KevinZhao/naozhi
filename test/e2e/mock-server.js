@@ -259,6 +259,13 @@ function defaultGitStates() {
  *   /api/tasks/state sets the task's state as the user's and lands in tasksCalls; POST
  *   /api/tasks/stop marks the task done as the user's ('已停止') and lands in taskStopCalls.
  *   Unset, the routes 404.
+ * @param {object} [overrides.custody] - GET /api/custody body ({paused, paused_at, sessions}, the
+ *   custody.Status wire shape of the sessions in custody); ?key= answers {paused, session}. PUT
+ *   /api/custody ({key, on}) sets the session's switch as the user's and lands in custodyCalls;
+ *   PUT / DELETE /api/custody/pause set paused. A session in custody the tab last said it views
+ *   (a viewing frame on the latest socket) reads as deferred, as the gateway holds it. POST
+ *   /api/custody/undo ({key}) lands in custodyCalls as {undo: key} and answers {answer: undo}, or
+ *   404 without overrides.custody.undo. Unset, the routes 404.
  * @param {object} [overrides.planner] - GET /api/planner body ({enabled, stopped, key, alive});
  *   POST /api/planner/state sets `stopped` and lands in plannerStateCalls. Unset, the routes 404.
  * @param {object[]} [overrides.plannerEvents] - GET /api/sessions/events answer for key=planner:main
@@ -332,6 +339,16 @@ function startMockServer(overrides = {}) {
   const inboxCalls = [];
   const tasksCalls = [];
   const taskStopCalls = [];
+  const custodyData = overrides.custody || null;
+  const custodyCalls = [];
+  // custodyShown is a session's custody as the gateway reports it: held back
+  // while the tab's latest viewing frame names it (custody.Engine.Status).
+  const custodyShown = (st) => {
+    const conn = wsConnections[wsConnections.length - 1];
+    const frames = conn ? conn.messages.filter(m => m.type === NZ_CONTRACT.WS.viewing) : [];
+    const viewed = frames.length ? frames[frames.length - 1].key : '';
+    return st.state === 'on' && viewed && st.key === viewed ? { ...st, state: 'deferred' } : st;
+  };
   const plannerData = overrides.planner || null;
   const plannerStateCalls = [];
   const plannerEvents = overrides.plannerEvents || null;
@@ -1036,6 +1053,54 @@ function startMockServer(overrides = {}) {
       return;
     }
 
+    // GET / PUT /api/custody and PUT / DELETE /api/custody/pause: opt-in via
+    // overrides.custody; changes edit the object in place.
+    if (pathname === NZ_CONTRACT.API.custody && custodyData && (req.method === 'GET' || req.method === 'PUT')) {
+      if (!checkAuth()) return;
+      const pause = { paused: !!custodyData.paused, ...(custodyData.paused_at ? { paused_at: custodyData.paused_at } : {}) };
+      const statusOf = (key) => custodyShown(custodyData.sessions.find(x => x.key === key) || { key, on: false, state: 'off', sent: 0, max: 8 });
+      if (req.method === 'GET') {
+        const key = url.searchParams.get('key');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(key ? { ...pause, session: statusOf(key) } : { ...pause, sessions: custodyData.sessions.map(custodyShown) }));
+        return;
+      }
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        const req2 = JSON.parse(body || '{}');
+        custodyCalls.push(req2);
+        custodyData.sessions = custodyData.sessions.filter(x => x.key !== req2.key);
+        const st = { key: req2.key, on: !!req2.on, by: 'user', at: new Date().toISOString(), state: req2.on ? (custodyData.paused ? 'paused' : 'on') : 'off', sent: 0, max: 8 };
+        if (st.on) custodyData.sessions.push(st);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(custodyShown(st)));
+      });
+      return;
+    }
+    if (pathname === (NZ_CONTRACT.API.custody_undo || NZ_CONTRACT.API.custody + '/undo') && custodyData && req.method === 'POST') {
+      if (!checkAuth()) return;
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        custodyCalls.push({ undo: JSON.parse(body || '{}').key });
+        if (!custodyData.undo) { res.writeHead(404); res.end('no answer custody gave to take back'); return; }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ answer: custodyData.undo }));
+      });
+      return;
+    }
+    if (pathname === NZ_CONTRACT.API.custody_pause && custodyData && (req.method === 'PUT' || req.method === 'DELETE')) {
+      if (!checkAuth()) return;
+      custodyData.paused = req.method === 'PUT';
+      custodyData.paused_at = custodyData.paused ? new Date().toISOString() : undefined;
+      for (const st of custodyData.sessions) if (st.state === 'on' || st.state === 'paused') st.state = custodyData.paused ? 'paused' : 'on';
+      custodyCalls.push({ pause: custodyData.paused });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ paused: custodyData.paused, ...(custodyData.paused_at ? { paused_at: custodyData.paused_at } : {}) }));
+      return;
+    }
+
     // Transcribe route
     if (pathname === NZ_CONTRACT.API.transcribe && req.method === 'POST') {
       if (!checkAuth()) return;
@@ -1154,6 +1219,7 @@ function startMockServer(overrides = {}) {
         get inboxCalls() { return inboxCalls; },
         get tasksCalls() { return tasksCalls; },
         get taskStopCalls() { return taskStopCalls; },
+        get custodyCalls() { return custodyCalls; },
         get plannerStateCalls() { return plannerStateCalls; },
         get plannerSendCalls() { return plannerSendCalls; },
         get uploadCalls() { return uploadCalls; },

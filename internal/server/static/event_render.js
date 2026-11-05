@@ -10,6 +10,7 @@ import { renderAskQuestionCard } from './ask_card.js';
 import { CLAWD_SVG, ICONS } from './icons.js';
 import { pendingBackendID } from './features.js';
 import { isInternalEvent, sid } from './session_ident.js';
+import { custodyBubbleHtml, isSuggestedMessage } from './custody.js';
 
 // renderTodoList parses the JSON todos payload stored on EventEntry.detail and
 // emits a checklist block. Falls back to the summary line when detail is
@@ -184,7 +185,7 @@ const SYSTEM_SUMMARY = new Map([['api_retry', '接口重试']]);
 const EVENT_CONTENT = new Map([
   ['system', (e) => esc(SYSTEM_SUMMARY.get(e.summary) || e.summary || e.type)],
   ['text', textOrUserContentHtml],
-  ['user', textOrUserContentHtml],
+  ['user', userContentHtml],
   ['todo', (e) => renderTodoList(e.detail, e.summary)],
   ['tool_use', (e) => (e.tool_call ? toolUseHtml(e) : defaultTextContentHtml(e))],
   ['tool_result', toolResultHtml],
@@ -228,6 +229,7 @@ function shouldHideEvent(e, includeInternal) {
 // assistant turn in place of the default glyph (other backends keep theirs).
 function eventIconHtml(e, sk) {
   let icon = EVENT_ICONS.get(e.type) || '';
+  if (e.type === 'user' && e.source === 'custody') icon = ICONS.gear;
   if (e.type === 'text') {
     const sess = sessionList.sessionsData[sid(sk.key, sk.node)] || {};
     const backendID = sess.backend || pendingBackendID(sk.key, sk.node) || (serverInfo.cliBackends && serverInfo.cliBackends.default) || '';
@@ -263,6 +265,20 @@ function textOrUserContentHtml(e, cleanRaw) {
     '<details class="leaked-toolcall"><summary class="leaked-toolcall-summary">' +
     '⚠ 模型输出了未执行的工具调用（已折叠）</summary>' +
     '<pre class="leaked-toolcall-body">' + esc(leak.leaked) + '</pre></details>';
+}
+
+// userContentHtml: a message custody sent (source "custody") names custody
+// as its sender, its prefix faint; any other is textOrUserContentHtml.
+function userContentHtml(e, cleanRaw, sk) {
+  if (e.source !== 'custody') return textOrUserContentHtml(e, cleanRaw);
+  return custodyBubbleHtml(cleanRaw, sk, e.uuid || String(e.time || ''), (t) => textOrUserContentHtml(e, t));
+}
+
+// custodyEventClass marks a message custody sent, and among them an answer
+// given by the recommended option (its 撤回 stays on the latest only).
+function custodyEventClass(e) {
+  if (e.type !== 'user' || e.source !== 'custody') return '';
+  return isSuggestedMessage(e.detail || e.summary || '') ? ' custody-msg custody-suggested-msg' : ' custody-msg';
 }
 
 // toolUseHtml: the ACP rich tool progress row (kiro, includeInternal-only).
@@ -391,7 +407,7 @@ export function eventHtml(e, opts) {
   // data-uuid: the backend's entry identity, the dedup key for a restart's
   // history replay (docs/rfc/dashboard-event-uuid-idempotent-render.md).
   const uuidAttr = e.uuid ? ' data-uuid="' + escAttr(e.uuid) + '"' : '';
-  return '<div class="event ' + escAttr(e.type || '') + '"' + timeAttr + uuidAttr + '>' +
+  return '<div class="event ' + escAttr(e.type || '') + custodyEventClass(e) + '"' + timeAttr + uuidAttr + '>' +
     '<span class="event-icon">' + icon + '</span>' +
     '<div class="event-content">' + content + imgHtml + copyBtn + askBtn + '</div></div>';
 }

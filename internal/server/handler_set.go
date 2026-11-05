@@ -131,6 +131,9 @@ type wiring struct {
 	notify *notify.Notifier
 	// notes is opts.Notes; buildDashboard binds the hub to it.
 	notes *note.Notes
+	// viewing is opts.Custody, nil without it; the Hub hands it the
+	// viewing frames.
+	viewing ViewingSink
 	// watchdog holds the no-output / total watchdog-kill counters; the
 	// dispatcher, the session handlers and /health each get pointers into it.
 	watchdog watchdogCounters

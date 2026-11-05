@@ -730,6 +730,42 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .gw-warn .gw-note-icon,.gw-inbox .gw-note-icon{color:var(--nz-amber)}
 .gw-ok .gw-note-icon{color:var(--nz-green)}
 .gw-planner .gw-note-icon{color:var(--nz-accent)}
+/* Custody (custody.js, RFC planner §5.4 D93). A message custody sent sits on
+   your side but is not yours: dashed and neutral, its prefix a faint source
+   line. The chip is the session header's switch and, as plain text, the mark
+   on a task card and in the health table. */
+.event.user.custody-msg .event-content{background:var(--nz-bg-2);border:1px dashed var(--nz-border);color:var(--nz-text)}
+.custody-source{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-bottom:4px}
+.custody-suggested{display:flex;flex-wrap:wrap;align-items:baseline;gap:0 4px}
+.custody-choice{font-weight:600;overflow-wrap:anywhere}
+.custody-sep{opacity:.45;padding:0 2px}
+.custody-undone{color:var(--nz-text-mute);font-size:var(--nz-fs-xs)}
+/* 撤回 takes back the session's latest answer by the recommended option only
+   (Engine.Undo): an earlier one's button would undo the latest. */
+.custody-suggested-msg:has(~ .custody-suggested-msg) :is(.custody-undo,.custody-sep){display:none}
+.custody-chip{display:inline-flex;align-items:center;gap:4px;max-width:260px;padding:1px 6px;border-radius:var(--nz-radius-xs);font-family:inherit;font-size:var(--nz-fs-2xs);font-weight:600;letter-spacing:.2px;white-space:nowrap;line-height:1.3;color:var(--nz-text-mute);background:var(--nz-bg-2);border:1px solid var(--nz-border)}
+button.custody-chip{cursor:pointer}
+button.custody-chip:hover:not(:disabled){border-color:var(--nz-accent)}
+button.custody-chip:focus-visible{outline:2px solid var(--nz-focus);outline-offset:1px}
+button.custody-chip:disabled{opacity:.6;cursor:default}
+.custody-chip-l{font-weight:400;opacity:.8}
+.custody-chip-why{font-weight:400;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.custody-on{color:var(--nz-chip-info-fg);background:var(--nz-chip-info-bg);border-color:rgba(0,122,255,.35)}
+.custody-deferred{color:var(--nz-chip-info-fg);border-style:dashed;border-color:rgba(0,122,255,.35)}
+.custody-stopped{color:var(--nz-warn);background:color-mix(in srgb, var(--nz-warn) 12%, transparent);border-color:color-mix(in srgb, var(--nz-warn) 35%, transparent)}
+.custody-paused{color:var(--nz-amber);border-style:dashed}
+/* Next to the cli/model group: it holds the row's auto margin until a chip
+   after it (git, PR, effort) takes it over, as those hand it on. */
+.main-header .detail-custody{display:inline-flex;align-items:center;flex-shrink:1;min-width:0;margin-right:auto}
+.main-header .detail-custody:empty{display:none}
+.main-header .detail:has(.detail-git:not(:empty)) .detail-custody,
+.main-header .detail:has(.detail-pr:not(:empty)) .detail-custody,
+.main-header .detail:has(.detail-effort:not(:empty)) .detail-custody{margin-right:0}
+.main-header .detail-custody .custody-chip{min-width:0}
+.tk-top .custody-chip{flex-shrink:0;align-self:center}
+/* Under its 托管 heading the cell needs only the state. */
+.hl-custody .custody-chip-l{display:none}
+.pl-tool-hint{font-size:var(--nz-fs-2xs);color:var(--nz-text-faint)}
 .gw-note-time{font-size:var(--nz-fs-xs);color:var(--nz-text-faint)}
 .refusal-tag{display:inline-block;font-size:var(--nz-fs-2xs);padding:1px 8px;border-radius:var(--nz-radius-pill);border:1px solid var(--nz-warn);color:var(--nz-warn)}
 /* Hidden types (kept for safety) */

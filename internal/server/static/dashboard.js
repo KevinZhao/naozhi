@@ -8,6 +8,7 @@ import { esc, escAttr, fetchJSON, showToast, trapFocus, nzBus, nzViews, register
 import { onAskOptionToggle, onAskSubmit } from './ask_card.js';
 import { eventIdentityKey, fetchEvents, hasMoreHeader, memoryOnlyHeader, renderEvents } from './event_stream.js';
 import { fetchSessionRuns, setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderPRChip, setHeaderSpawnDiagChip } from './session_header.js';
+import { paintCustodyChip } from './custody.js';
 import {
   handleFiles,
   onThumbDragEnd,
@@ -329,6 +330,8 @@ function reconcileMainStateAfterPoll(wsConnected) {
 onSessionsApplied(reconcileMainStateAfterPoll);
 onSessionsApplied(() => { if (selection.key) updateHeaderCLI(); });
 onSessionsApplied(onSessionsRefreshed);
+// The chip shows for a session the list holds (custody.coverable).
+onSessionsApplied(paintCustodyChip);
 
 // --- History Popover ---
 
@@ -1090,6 +1093,10 @@ function mainHeaderHtml(s) {
         '<span class="detail-left">' + cliLabel + modelLabel + '</span>' +
         headerOriginBadge +
         '<span class="detail-exit" id="header-exit">' + sessionExitChipHtml(s) + '</span>' +
+        // Custody's switch (custody.js), built empty and filled by
+        // paintCustodyChip; :empty collapses it where custody does not
+        // apply (the Planner off, a remote or discovered session).
+        '<span class="detail-custody" id="header-custody"></span>' +
         // Git branch / worktree chip. Built empty here and filled
         // asynchronously by renderGitChip once /api/sessions/git resolves;
         // stays empty (collapses via :empty) for non-repo workspaces and
@@ -1134,6 +1141,7 @@ function renderMainHeader() {
   setHeaderSpawnDiagChip();
   setHeaderOverlayDriftChip();
   setHeaderPRChip();
+  paintCustodyChip();
   paintHandoffButton();
   fetchSessionRuns(selection.key, selection.node);
 }
@@ -1233,6 +1241,7 @@ function renderMainShell() {
   setHeaderSpawnDiagChip();
   setHeaderOverlayDriftChip();
   setHeaderPRChip();
+  paintCustodyChip();
 }
 
 // renderSettingsView paints the standalone settings top-level view into

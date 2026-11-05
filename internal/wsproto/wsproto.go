@@ -62,6 +62,10 @@ const (
 	TypePing             MsgType = "ping"
 	TypeAgentSubscribe   MsgType = "agent_subscribe"
 	TypeAgentUnsubscribe MsgType = "agent_unsubscribe"
+	// TypeViewing names the session this connection has open in a visible,
+	// focused tab, "" for none; the dashboard renews it while the session
+	// stays open (custody's "you are at it", internal/planner/custody).
+	TypeViewing MsgType = "viewing"
 )
 
 // AgentMetaPatch carries aggregator counters pushed out-of-band so the

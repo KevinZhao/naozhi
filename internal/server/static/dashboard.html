@@ -245,12 +245,13 @@
     <!-- The conversation: also the Planner drawer's body, moved there while
          it is open (planner_drawer.js); the .pl-drawer-only buttons show only
          in the drawer, the 工作台 button and the "⋯" menu (#pl-tools: push
-         pause, 停用 Planner) only on the page. -->
+         pause, custody pause, 停用 Planner) only on the page. -->
     <section class="pl-center" id="pl-center" aria-label="Planner 对话">
       <header class="pl-head">
         <span class="pl-title">Planner</span>
         <span class="pl-status" id="pl-status"></span>
         <span class="pl-paused" id="pl-paused" hidden></span>
+        <span class="pl-paused" id="pl-custody-paused" hidden></span>
         <span class="pl-head-sp"></span>
         <button type="button" class="files-dl-btn pl-page-only" data-action="workbench-toggle" title="工作台（预览 · 产出 · 文件 · 详情）">工作台</button>
         <details class="pl-more pl-page-only" id="pl-more">
