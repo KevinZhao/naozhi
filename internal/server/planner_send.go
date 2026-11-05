@@ -46,16 +46,17 @@ var (
 	errPlannerNoEngine = errors.New("planner turn entry not wired")
 )
 
-// SubmitPlanner runs text from src as a turn on key, spawning it with opts;
-// done (nil for none) gets the reply text or the turn's error. queued is
-// text waiting behind a running turn. It is the agent's Turns.SubmitPlanner,
-// and sends the first message of a session the Planner dispatched (task:,
-// src ""), which also spawns with options the gateway set.
-func (s *Server) SubmitPlanner(key string, src agent.Source, text string, opts session.AgentOpts, done func(reply string, err error)) (queued bool, err error) {
+// SubmitPlanner runs text and images (nil for none) from src as a turn on
+// key, spawning it with opts; done (nil for none) gets the reply text or the
+// turn's error. queued is text waiting behind a running turn. It is the
+// agent's Turns.SubmitPlanner, and sends the first message of a session the
+// Planner dispatched (task:, src ""), which also spawns with options the
+// gateway set.
+func (s *Server) SubmitPlanner(key string, src agent.Source, text string, images []clievent.Attachment, opts session.AgentOpts, done func(reply string, err error)) (queued bool, err error) {
 	if s.hub == nil || s.hub.engine == nil {
 		return false, errPlannerNoEngine
 	}
-	return s.hub.engine.submitPlanner(key, src, text, opts, done)
+	return s.hub.engine.submitPlanner(key, src, text, images, opts, done)
 }
 
 // PlannerTurnSources is the sources of key's requests in flight, sorted;
@@ -309,9 +310,9 @@ func (s *Server) PlannerNote(key, text string) {
 // plannerNoteBytes caps a note; a promise's text is at most 500 runes.
 const plannerNoteBytes = 2048
 
-func (e *sendEngine) submitPlanner(key string, src agent.Source, text string, opts session.AgentOpts, done func(string, error)) (bool, error) {
+func (e *sendEngine) submitPlanner(key string, src agent.Source, text string, images []clievent.Attachment, opts session.AgentOpts, done func(string, error)) (bool, error) {
 	o := &plannerOrigin{key: key, src: src, turns: &e.plannerTurns, opts: opts, notify: e.notify, done: done, mark: e.turnWatermark}
-	switch e.turns.Submit(e.ctx, turn.Request{Key: key, Text: text, Origin: o}, dashAdmission{track: e.TrackSend, ctx: e.ctx}) {
+	switch e.turns.Submit(e.ctx, turn.Request{Key: key, Text: text, Images: images, Origin: o}, dashAdmission{track: e.TrackSend, ctx: e.ctx}) {
 	case turn.AckOwner, turn.AckDetached:
 		return false, nil
 	case turn.AckQueued:

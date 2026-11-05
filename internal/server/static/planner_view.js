@@ -478,6 +478,7 @@ const SNAPSHOT_CUT_RE = /^<naozhi-snapshot[\s>][\s\S]*$/;
 const SESSION_REF_RE = /^<naozhi-session-ref>(\{[^\n]*?\})<\/naozhi-session-ref>\s*/;
 const SESSION_REF_CUT_RE = /^<naozhi-session-ref>[\s\S]*$/;
 const GATEWAY_HEAD_RE = /^<naozhi-(?:snapshot[\s>]|session-ref>)/;
+const IMAGES_ONLY_RE = /^\[\+\d+ image\(s\)\]$/;
 // RECEIPT_RE is a gateway receipt to the Planner (planner/agent Tell: a
 // dispatch's outcome, your answer to its question, a task you stopped):
 // written for the model, with keys and block formats in it, so it is not
@@ -507,7 +508,8 @@ function plannerEvents(e) {
     if (!t) continue;
     const p = withoutSnapshot(Object.assign({}, e, { detail: t, summary: t }));
     if (!p) continue;
-    if (p.type !== 'user') { delete p.uuid; out.push(p); continue; }
+    // The turn's images are yours: they stay on your bubble.
+    if (p.type !== 'user') { delete p.uuid; delete p.images; delete p.image_paths; out.push(p); continue; }
     if (!mine) { mine = p; out.push(mine); continue; }
     mine.detail = [mine.detail, p.detail].filter(Boolean).join('\n\n');
     mine.summary = [mine.summary, p.summary].filter(Boolean).join(' ');
@@ -538,6 +540,9 @@ function withoutSnapshot(e) {
   const handed = /^<naozhi-session-ref>/.test(e.summary || '');
   let summary = (e.summary || '').replace(SESSION_REF_RE, '').replace(SESSION_REF_CUT_RE, '');
   summary = summary.replace(SNAPSHOT_RE, '').replace(SNAPSHOT_CUT_RE, '');
+  // Pictures with no text: the snapshot took the space before the summary's
+  // " [+N image(s)]", which the bubble drops only after one.
+  if (IMAGES_ONLY_RE.test(summary)) summary = '';
   if (handed) summary = '交给 Planner' + (summary ? '：' + summary : '');
   return Object.assign({}, e, { detail, summary });
 }

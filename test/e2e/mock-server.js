@@ -268,6 +268,9 @@ function defaultGitStates() {
  *   gateway's journaled notes in the Planner conversation). Unset, the route 404s.
  * @param {object[]} [overrides.plannerBriefs] - GET /api/planner/briefs answer (the morning
  *   briefs, newest first: {day, at, sent, counts, markdown}). Unset, the route 404s.
+ * @param {boolean} [overrides.uploads] - If true, POST /api/sessions/upload takes the file and
+ *   answers {id: 'up-<n>', kind, size, name} (image_inline, file_ref for a PDF); each lands in
+ *   uploadCalls ({id, bytes}). Unset, the route 404s and an upload fails.
  * @param {object} [overrides.keyEvents] - key → GET /api/sessions/events answer for that key.
  * @param {object[]} [overrides.cronJobs] - Custom cron jobs response.
  * @param {object} [overrides.cronListMeta] - Extra top-level fields merged into GET /api/cron
@@ -335,6 +338,7 @@ function startMockServer(overrides = {}) {
   const plannerNotes = overrides.plannerNotes || null;
   const plannerBriefs = overrides.plannerBriefs || null;
   const plannerSendCalls = [];
+  const uploadCalls = [];
   const keyEvents = overrides.keyEvents || {};
   const workflowDelayMs = overrides.workflowDelayMs || 0;
   // Every GET /api/sessions/workflow, as its query parameters.
@@ -687,6 +691,21 @@ function startMockServer(overrides = {}) {
         const off = !plannerData.enabled || plannerData.stopped;
         res.writeHead(off ? 409 : 202, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(off ? { error: '已停用 Planner' } : { status: 'accepted', key: 'planner:main' }));
+      });
+      return;
+    }
+
+    if (overrides.uploads && pathname === NZ_CONTRACT.API.sessions_upload && req.method === 'POST') {
+      if (!checkAuth()) return;
+      const chunks = [];
+      req.on('data', c => chunks.push(c));
+      req.on('end', () => {
+        const raw = Buffer.concat(chunks);
+        const pdf = raw.includes('application/pdf');
+        const id = 'up-' + (uploadCalls.length + 1);
+        uploadCalls.push({ id, bytes: raw.length });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id, kind: pdf ? 'file_ref' : 'image_inline', size: raw.length, name: pdf ? 'doc.pdf' : 'image.jpg' }));
       });
       return;
     }
@@ -1137,6 +1156,7 @@ function startMockServer(overrides = {}) {
         get taskStopCalls() { return taskStopCalls; },
         get plannerStateCalls() { return plannerStateCalls; },
         get plannerSendCalls() { return plannerSendCalls; },
+        get uploadCalls() { return uploadCalls; },
         resetCalls() { sendCalls = []; bindCalls = []; loginCalls = []; favoriteCalls = []; },
       });
     }));
