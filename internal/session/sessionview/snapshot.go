@@ -65,6 +65,9 @@ type SessionSnapshot struct {
 	// Purpose is the session's purpose from its Planner sidecar ("task": the
 	// Planner dispatched it); filled by server, "" without one.
 	Purpose string `json:"purpose,omitempty"`
+	// PurposeTitle is what the sidecar says the session was dispatched for
+	// (the dispatch's title), the sidebar's second line for it.
+	PurposeTitle string `json:"purpose_title,omitempty"`
 	// Health is the health machine's verdict on the session (filled by
 	// server); nil before its first reconcile.
 	Health    *SessionHealth      `json:"health,omitempty"`

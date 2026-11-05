@@ -74,7 +74,6 @@
   .planner-main.pl-left-open .pl-left{flex:1}
   .planner-main.pl-left-open .pl-center{display:none}
   .pl-left-toggle{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:max(12px,env(safe-area-inset-top)) 16px 10px;border:0;background:none;color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-sm2);cursor:pointer}
-  .pl-left-toggle b{color:var(--nz-text-strong);font-variant-numeric:tabular-nums}
   .pl-left-toggle svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2;transition:transform var(--nz-dur) var(--nz-ease)}
   .planner-main.pl-left-open .pl-left-toggle svg{transform:rotate(180deg)}
   .pl-left .pl-left-body{display:none}

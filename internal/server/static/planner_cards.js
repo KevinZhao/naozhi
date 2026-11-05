@@ -27,8 +27,8 @@ const HEALTH_MIN_MS = 20000;
 // MAX_CARDS bounds the session cards under one bubble.
 const MAX_CARDS = 6;
 const TASK_KEY_RE = /\btask:[A-Za-z0-9_-]+/g;
-// WORKSPACE_ID_RE is a workspace registry ID (planner/workspace): the page
-// has no registry to name it by.
+// WORKSPACE_ID_RE is a workspace registry ID (planner/workspace), named by
+// GET /api/planner's workspaces.
 const WORKSPACE_ID_RE = /^ws_[a-z0-9]{8}$/;
 // TURN_START opens a turn: your bubble, a session's report, or a time
 // divider. A session is carded where the turn's replies and lines (a report
@@ -41,6 +41,7 @@ const pc = {
   healthAt: 0,
   healthLoading: false,
   tasks: new Map(), // task id → title, as 任务 last listed them
+  workspaces: {}, // workspace ID → name, GET /api/planner's
 };
 
 // ---- session cards ----
@@ -51,10 +52,41 @@ function listedTitle(key) {
   return (s && (s.user_label || s.summary || s.last_prompt)) || '';
 }
 
-// sessionTitle is a session's name: listed, else its 任务 title; one known
-// to neither is 会话, never its key (D91).
+// KIND_NAMES name a unit nothing else names by its kind (D92): never its key.
+const KIND_NAMES = [['task:', '派出的任务'], ['cron:', '定时任务'], ['sys:', '系统任务'], ['external:', '终端里的会话'], ['systemic:', '系统']];
+
+function kindName(key) {
+  const k = KIND_NAMES.find(([prefix]) => key.startsWith(prefix));
+  return k ? k[1] : '会话';
+}
+
+// sessionTitle is a session's name: listed, else its 任务 title or the
+// health table's name (a cron job's title); one known to none is named by
+// its kind, never its key (D91, D92).
 export function sessionTitle(key) {
-  return listedTitle(key) || pc.tasks.get(key) || '会话';
+  return listedTitle(key) || pc.tasks.get(key) || pc.health.get(key)?.name || kindName(key);
+}
+
+// unitName is an inbox item's unit as sessionTitle names it; a remote
+// node's unit is "<node>/<key>".
+export function unitName(unit) {
+  const i = unit.indexOf('/');
+  return pc.health.get(unit)?.name || sessionTitle(i > 0 ? unit.slice(i + 1) : unit);
+}
+
+// workspaceName is a registered workspace's name, '' for an ID not known.
+export function workspaceName(id) {
+  return (id && pc.workspaces[id]) || '';
+}
+
+// noteWorkspaces takes the registry's names from GET /api/planner and names
+// the dispatch cards that were waiting for them; true when they changed.
+export function noteWorkspaces(names) {
+  const next = names && typeof names === 'object' ? names : {};
+  if (JSON.stringify(next) === JSON.stringify(pc.workspaces)) return false;
+  pc.workspaces = next;
+  paintSessionCards(document);
+  return true;
 }
 
 // taskName is a task's title (a dispatched session's name, a promise's
@@ -107,6 +139,12 @@ export function paintSessionCards(root) {
     el.dataset.named = '1';
     el.querySelector('.pl-act-rows')?.insertAdjacentHTML('afterbegin', '<dt>任务</dt><dd>' + esc(name) + '</dd>');
   });
+  root.querySelectorAll('.pl-act-dispatch[data-ws]').forEach((el) => {
+    const name = workspaceName(el.dataset.ws);
+    if (!name) return;
+    delete el.dataset.ws;
+    el.querySelector('.pl-act-rows')?.insertAdjacentHTML('afterbegin', '<dt>工作区</dt><dd>' + esc(name) + '</dd>');
+  });
 }
 
 nzBus.addEventListener('tasks:list', (e) => {
@@ -128,6 +166,8 @@ export async function refreshHealth(root, force) {
     pc.healthLoading = false;
   }
   paintSessionCards(root);
+  // The names it carries (a cron job's title) are the inbox cards' too.
+  nzBus.dispatchEvent(new CustomEvent('planner:health'));
 }
 
 // mentionedKeys lists the sessions a bubble names: the sender of a report,
@@ -202,8 +242,10 @@ function actionCardHtml(raw) {
   if (a.type === 'dispatch') {
     const title = str(a.title);
     const ws = str(a.workspace);
-    return '<div class="pl-act pl-act-dispatch"><div class="pl-act-h">派出会话' + (title ? ' · ' + esc(title) : '') + '</div>' +
-      rowsHtml([['工作区', WORKSPACE_ID_RE.test(ws) ? '' : ws], ['模型', str(a.model)], ['第一条消息', str(a.message)]]) + '</div>';
+    // A workspace written by its ID is named once the registry is in.
+    const name = WORKSPACE_ID_RE.test(ws) ? workspaceName(ws) : ws;
+    return '<div class="pl-act pl-act-dispatch"' + (name || !ws ? '' : ' data-ws="' + escAttr(ws) + '"') + '><div class="pl-act-h">派出会话' + (title ? ' · ' + esc(title) : '') + '</div>' +
+      rowsHtml([['工作区', name], ['模型', str(a.model)], ['第一条消息', str(a.message)]]) + '</div>';
   }
   if (a.type === 'promise') {
     return '<div class="pl-act pl-act-promise"><div class="pl-act-h">登记承诺</div>' +

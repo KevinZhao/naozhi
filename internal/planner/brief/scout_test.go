@@ -68,7 +68,7 @@ func TestRenderScout(t *testing.T) {
 	}
 	b = f.withScout(f.briefer(nil, nil), cal, runs...)
 	b.Check()
-	want := "自 11-02 08:30 以来：今天日程 4 · 等你回复 2 · Asana 到期 2 · Planner 记下 1\n" +
+	want := "自 11/2 08:30 以来：今天日程 4 · 等你回复 2 · Asana 到期 2 · Planner 记下 1\n" +
 		"\n### 今天的日程（4）\n" +
 		"- 全天 · iso 全天培训\n" +
 		"- 10:00–11:00 · iso 评审 · 冲突\n" +
@@ -81,7 +81,7 @@ func TestRenderScout(t *testing.T) {
 		"- iso 上周的 · 已过期 2 天\n" +
 		"- iso 今天交 · 今天到期\n" +
 		"\n### Planner 记下的（1）\n" +
-		"- [iso 周报 ［草稿］](https://example.com/a) · 周五前要交 · 11-02 08:30\n"
+		"- [iso 周报 ［草稿］](https://example.com/a) · 周五前要交 · 11/2 08:30\n"
 	got := b.Recent(1)
 	if len(got) != 1 || got[0].Markdown != want {
 		t.Fatalf("markdown:\n%v\nwant:\n%s", got, want)
@@ -145,7 +145,7 @@ func TestRenderAsanaOnce(t *testing.T) {
 				asana("t0", "2026-11-03"), asana("t7", "2026-10-27"), asana("t8", "2026-10-26"),
 				asana("t401", "2025-09-28"), asana("tomorrow", "2026-11-04"),
 			},
-			want: "自 11-02 08:30 以来：Asana 到期 2\n" +
+			want: "自 11/2 08:30 以来：Asana 到期 2\n" +
 				"\n### 今天到期或已过期的 Asana 任务（2）\n" +
 				"- iso t7 · 已过期 7 天\n" +
 				"- iso t0 · 今天到期\n" +
@@ -156,11 +156,11 @@ func TestRenderAsanaOnce(t *testing.T) {
 			name:     "only stale ones",
 			findings: []scout.RunFinding{asana("t8", "2026-10-26")},
 			held:     []Mention{{Key: "k1", Title: "iso 周报"}},
-			want: "自 11-02 08:30 以来：Planner 记下 1\n" +
+			want: "自 11/2 08:30 以来：Planner 记下 1\n" +
 				"\n### 今天到期或已过期的 Asana 任务\n" +
 				"- 1 条过期超过 7 天\n" +
 				"\n### Planner 记下的（1）\n" +
-				"- iso 周报 · 11-02 08:30\n",
+				"- iso 周报 · 11/2 08:30\n",
 			counts: Counts{Planner: 1},
 		},
 		{
@@ -171,12 +171,12 @@ func TestRenderAsanaOnce(t *testing.T) {
 				{Key: "k2", Title: "iso t8 很久了", Link: "https://app.asana.com/0/1/t8"},
 				{Key: "k3", Title: "iso 别的", Link: "https://example.com/x"},
 			},
-			want: "自 11-02 08:30 以来：Asana 到期 1 · Planner 记下 1\n" +
+			want: "自 11/2 08:30 以来：Asana 到期 1 · Planner 记下 1\n" +
 				"\n### 今天到期或已过期的 Asana 任务（1）\n" +
 				"- iso t0 · 今天到期\n" +
 				"- 另有 1 条过期超过 7 天\n" +
 				"\n### Planner 记下的（1）\n" +
-				"- [iso 别的](https://example.com/x) · 11-02 08:30\n",
+				"- [iso 别的](https://example.com/x) · 11/2 08:30\n",
 			counts: Counts{Deadlines: 1, Planner: 1},
 		},
 	}

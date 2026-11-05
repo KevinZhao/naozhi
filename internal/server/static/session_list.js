@@ -637,7 +637,11 @@ function sessionCardHtml(s) {
   // truncates to 120 runes via textutil.TruncateRunes in
   // EventEntriesFromEventAt; the 30-cap here is a sidebar-specific second
   // truncation to keep the line tight on narrow widths.
-  const responseRaw = s.last_response || '';
+  // A session the Planner dispatched says what it was dispatched for there
+  // instead (its sidecar's title, D92), left out where the title says it.
+  const responseRaw = s.purpose === 'task'
+    ? (s.purpose_title && s.purpose_title !== prompt ? s.purpose_title : '')
+    : s.last_response || '';
   const responseTrunc = truncateForSidebar(responseRaw, 30);
   const responseHtml = responseTrunc
     ? '<div class="sc-response" title="' + escAttr(responseRaw) + '">' + esc(responseTrunc) + '</div>'
