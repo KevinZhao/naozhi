@@ -53,6 +53,7 @@ export const NZ_CONTRACT = Object.freeze({
     cron_trigger: '/api/cron/trigger',
     custody: '/api/custody',
     custody_pause: '/api/custody/pause',
+    custody_undo: '/api/custody/undo',
     discovered: '/api/discovered',
     discovered_close: '/api/discovered/close',
     discovered_preview: '/api/discovered/preview',

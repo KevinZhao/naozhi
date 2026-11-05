@@ -253,6 +253,13 @@ func TestCustodyTaskReceiptAndHandOff(t *testing.T) {
 	if err := r.HandOff(key, "在问用户：现在 push 吗？选项：push / 先不"); !errors.Is(err, custody.ErrIrreversible) || len(g.told) != 1 {
 		t.Errorf("HandOff of an irreversible choice: err=%v told=%q", err, g.told)
 	}
+	// A receipt the Planner never got (it is stopped) is not handed over:
+	// the caller leaves the choice to the user.
+	stopped := errors.New("planner stopped")
+	r.cfg.Tell = func(string) error { return stopped }
+	if err := r.HandOff(key, "在问用户：先修哪个？选项：A / B"); !errors.Is(err, stopped) {
+		t.Errorf("HandOff to a stopped Planner = %v, want its error", err)
+	}
 }
 
 // The format a receipt spells out parses as written, with only text to

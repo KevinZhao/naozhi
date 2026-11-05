@@ -116,3 +116,12 @@ func (c CustodySources) Settled(key string) bool {
 	}
 	return true
 }
+
+// Events is custody.Config.Events: the session's latest n events.
+func (c CustodySources) Events(key string, n int) []clievent.EventEntry {
+	s := c.Router.SessionFor(key)
+	if s == nil {
+		return nil
+	}
+	return s.EventLastN(n)
+}

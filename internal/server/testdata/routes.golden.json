@@ -115,6 +115,11 @@
     "handler_type": "*dashcustody.Handler"
   },
   {
+    "method": "POST",
+    "path": "/api/custody/undo",
+    "handler_type": "*dashcustody.Handler"
+  },
+  {
     "method": "GET",
     "path": "/api/discovered",
     "handler_type": "*discovery.Handlers"

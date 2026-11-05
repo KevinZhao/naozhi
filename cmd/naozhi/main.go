@@ -503,6 +503,9 @@ func main() {
 	// sends through srv's own send path and reads the health machine, both
 	// set before Run below. It runs only with the Planner on.
 	sources := wireup.CustodySources{Router: router, Outputs: activities}
+	// actions, built below, takes the cards with no recommended option to
+	// the Planner; custody runs only after it is set.
+	var actions *action.Runner
 	custodian := custody.New(custody.Config{
 		Sessions:  sidecars,
 		Send:      func(key, text string) error { return srv.SubmitCustody(key, text) },
@@ -516,6 +519,9 @@ func main() {
 		FailText:  sources.FailText,
 		Settled:   sources.Settled,
 		Name:      unitNames,
+		Events:    sources.Events,
+		HandOff:   func(key, what string) error { return actions.HandOff(key, what) },
+		SendUser:  func(key, text string) error { return srv.SubmitUser(key, text) },
 		Path:      sessionLayout.PlannerCustodyPath(),
 		Disabled:  !cfg.Planner.Enabled,
 	})
@@ -653,7 +659,7 @@ func main() {
 	// results; a dispatch starts a task: session at once (D88), and a task left
 	// 进行中 after it reported, or that ended a turn without reporting, gets
 	// the Planner a receipt.
-	actions := action.New(action.Config{
+	actions = action.New(action.Config{
 		Planner:     agent.Key,
 		Inbox:       notifier,
 		Promises:    promises,

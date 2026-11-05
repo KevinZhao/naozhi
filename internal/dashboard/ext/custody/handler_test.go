@@ -2,6 +2,7 @@ package custody
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +17,7 @@ type fakeSource struct {
 	setErr error
 	paused bool
 	by     []string
+	undone []string
 }
 
 func (f *fakeSource) Status(key string) custody.Status {
@@ -35,6 +37,13 @@ func (f *fakeSource) Set(key string, on bool, by string) error {
 }
 func (f *fakeSource) Paused() (bool, time.Time) { return f.paused, time.Time{} }
 func (f *fakeSource) SetPaused(p bool) error    { f.paused = p; return nil }
+func (f *fakeSource) Undo(key string) (string, error) {
+	if f.setErr != nil {
+		return "", f.setErr
+	}
+	f.undone = append(f.undone, key)
+	return "方案: 先跑测试 (Recommended).", nil
+}
 
 func TestHandler(t *testing.T) {
 	for _, c := range []struct {
@@ -58,6 +67,13 @@ func TestHandler(t *testing.T) {
 		{name: "resume", method: "DELETE", path: "/api/custody/pause", code: 200, want: `"paused":false`},
 		{name: "unwired", method: "PUT", path: "/api/custody", body: `{"key":"k","on":true}`, nilSource: true, code: 503},
 		{name: "unwired list", method: "GET", path: "/api/custody", nilSource: true, code: 200, want: `"paused":false`},
+		{name: "undo", method: "POST", path: "/api/custody/undo", body: `{"key":"k"}`, code: 200, want: `"answer":"方案: 先跑测试 (Recommended)."`},
+		{name: "undo no key", method: "POST", path: "/api/custody/undo", body: `{}`, code: 400},
+		{name: "undo remote", method: "POST", path: "/api/custody/undo", body: `{"key":"k","node":"mini"}`, code: 400, want: "远程节点"},
+		{name: "undo nothing", method: "POST", path: "/api/custody/undo", body: `{"key":"k"}`, setErr: custody.ErrNoSuggested, code: 404, want: "撤回"},
+		{name: "undo unknown session", method: "POST", path: "/api/custody/undo", body: `{"key":"k"}`, setErr: custody.ErrNoSession, code: 404},
+		{name: "undo not sent", method: "POST", path: "/api/custody/undo", body: `{"key":"k"}`, setErr: errors.New("busy"), code: 500},
+		{name: "undo unwired", method: "POST", path: "/api/custody/undo", body: `{"key":"k"}`, nilSource: true, code: 503},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			src := &fakeSource{on: map[string]bool{}, setErr: c.setErr}
@@ -78,6 +94,9 @@ func TestHandler(t *testing.T) {
 			}
 			if c.code == 200 && c.method == "PUT" && c.path == "/api/custody" && (len(src.by) != 1 || src.by[0] != custody.ByUser) {
 				t.Errorf("set by %q, want the user", src.by)
+			}
+			if c.name == "undo" && (len(src.undone) != 1 || src.undone[0] != "k") {
+				t.Errorf("undone %q, want k", src.undone)
 			}
 			if c.name == "on" {
 				var st custody.Status

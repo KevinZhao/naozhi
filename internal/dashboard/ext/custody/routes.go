@@ -12,5 +12,6 @@ func (h *Handler) Routes() []httputil.Route {
 		{Pattern: "PUT /api/custody", Handler: h.HandleSet},
 		{Pattern: "PUT /api/custody/pause", Handler: h.HandlePause},
 		{Pattern: "DELETE /api/custody/pause", Handler: h.HandleResume},
+		{Pattern: "POST /api/custody/undo", Handler: h.HandleUndo},
 	}
 }

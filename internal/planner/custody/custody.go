@@ -14,13 +14,15 @@
 // Planner is in none), and the Planner is told not to dispatch around a
 // stopped one. Custody runs only with the Planner on.
 //
-// One trigger lives here (L0, deterministic): a session whose health turned
+// Two triggers live here (L0, deterministic): a session whose health turned
 // failed with a retryable error class gets "继续" after a backoff, and is left
-// to the user after MaxErrors failures of a class. A turn that ended normally
-// goes to the Planner (planner/action's receipts); nothing here reads a
-// reply's text or calls a model. State lives in the sidecars (the switch, and
-// on a lineage's root what custody did) and in custody.json in the Planner
-// state root (the pause), so a restart keeps it.
+// to the user after MaxErrors failures of a class; an AskUserQuestion card
+// left SuggestAfter is answered with its recommended options, handed to the
+// Planner when it has none, or left to the user (suggest.go). A turn that
+// ended normally goes to the Planner (planner/action's receipts); nothing
+// here reads a reply's text or calls a model. State lives in the sidecars
+// (the switch, and on a lineage's root what custody did) and in custody.json
+// in the Planner state root (the pause), so a restart keeps it.
 package custody
 
 import (
@@ -38,6 +40,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/apierr"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cliinfo"
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/monitor/health"
@@ -179,6 +182,15 @@ type Config struct {
 	Settled func(key string) bool
 	// Name is how the user reads key.
 	Name func(key string) string
+	// Events are key's latest events, at most n: its AskUserQuestion cards
+	// and the messages after them (suggest.go).
+	Events func(key string, n int) []clievent.EventEntry
+	// HandOff gives the Planner a card with no recommended option
+	// (planner/action.Runner.HandOff); nil leaves such a card to the user.
+	HandOff func(key, what string) error
+	// SendUser sends text to key as the user's own message: the undo of an
+	// answer custody gave, which the user clicked (Undo).
+	SendUser func(key, text string) error
 	// Path is custody.json; "" keeps the pause in memory.
 	Path string
 	Now  func() time.Time
@@ -203,6 +215,11 @@ type Engine struct {
 	// deferred are the sessions whose holding back is noted, until custody
 	// sends or the user leaves.
 	deferred map[string]bool
+
+	// askMu serializes answerAsks; asks are the cards it waits on, by
+	// session.
+	askMu sync.Mutex
+	asks  map[string]*askWait
 }
 
 // state is custody.json.
@@ -217,7 +234,8 @@ func New(cfg Config) *Engine {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	e := &Engine{cfg: cfg, poke: make(chan struct{}, 1), viewing: map[string]map[string]time.Time{}, deferred: map[string]bool{}}
+	e := &Engine{cfg: cfg, poke: make(chan struct{}, 1), viewing: map[string]map[string]time.Time{}, deferred: map[string]bool{},
+		asks: map[string]*askWait{}}
 	if cfg.Path != "" {
 		st, out, err := jsonfile.Load[state](cfg.Path, jsonfile.Options{MaxBytes: stateBytes, Label: "custody state", Corrupt: jsonfile.LeaveCorrupt})
 		switch {
@@ -613,10 +631,7 @@ func (e *Engine) deliverLocked(key string, reason Reason, text, class string) (i
 		return 0, err
 	}
 	if e.nearbyLocked(key) {
-		if !e.deferred[key] {
-			e.deferred[key] = true
-			e.record(key, note.CustodyData{Event: "deferred", Reason: "你在看"})
-		}
+		e.deferLocked(key)
 		return 0, ErrNearby
 	}
 	root := e.root(key)
@@ -640,6 +655,15 @@ func (e *Engine) deliverLocked(key string, reason Reason, text, class string) (i
 	delete(e.deferred, key)
 	e.record(key, note.CustodyData{Event: "sent", Reason: string(reason), N: n})
 	return n, nil
+}
+
+// deferLocked notes in key, once until custody sends or the user leaves,
+// that custody holds back for the user.
+func (e *Engine) deferLocked(key string) {
+	if !e.deferred[key] {
+		e.deferred[key] = true
+		e.record(key, note.CustodyData{Event: "deferred", Reason: "你在看"})
+	}
 }
 
 // progress is key's progress (Config.Progress).
@@ -710,7 +734,8 @@ func notRetried(err error) string {
 // running and no switch set, back to the default once its workflows are
 // over), and answers the failures: a new one is classified and gets a retry
 // scheduled (or is left to the user), a due retry is sent, and one whose
-// session recovered meanwhile is dropped.
+// session recovered meanwhile is dropped; and the cards waiting on the user
+// are acted on once due (answerAsks).
 func (e *Engine) Tick() {
 	if e.cfg.Sessions == nil || e.cfg.Disabled {
 		return
@@ -733,11 +758,13 @@ func (e *Engine) Tick() {
 	if e.cfg.Health == nil {
 		return
 	}
-	for _, u := range e.cfg.Health().Units {
+	units := e.cfg.Health().Units
+	for _, u := range units {
 		if u.Kind == health.KindSession && e.eligible(u.ID) == nil {
 			e.answer(u)
 		}
 	}
+	e.answerAsks(units)
 }
 
 // autoOn turns custody on for key's running workflow unless someone set its
