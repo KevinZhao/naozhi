@@ -12,7 +12,7 @@ import (
 // The system prompt renders whole, and every block format it spells out is
 // one the gateway parses once its placeholders are filled in.
 func TestSystemPrompt(t *testing.T) {
-	p := systemPrompt("/state/planner", []string{"~/.claude/projects/x/memory/MEMORY.md"})
+	p := systemPrompt("/state/planner", "planner-abc123", []string{"~/.claude/projects/x/memory/MEMORY.md"})
 	for _, want := range []string{
 		fmt.Sprintf("提示词版本 %d", PromptVersion),
 		"/state/planner/index.json",
@@ -20,6 +20,8 @@ func TestSystemPrompt(t *testing.T) {
 		"<naozhi-scout>",
 		"超过 4 小时没回",
 		"巡检触发的回合只能用 notify、promise、ask",
+		"你的跨会话名字是 planner-abc123",
+		`不要写成"提醒用户提交周报"`,
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt lacks %q", want)
@@ -27,6 +29,11 @@ func TestSystemPrompt(t *testing.T) {
 	}
 	if strings.Contains(p, "%!") {
 		t.Error("prompt has a bad format verb")
+	}
+	// The subscription a dispatch once asked for died with the conversation
+	// at a shift change; the gateway's receipt replaces it.
+	if strings.Contains(p, "notify_when_idle") {
+		t.Error("prompt still asks for notify_when_idle")
 	}
 	fill := strings.NewReplacer(
 		"<工作区 ID 或名字>", "naozhi", "<RFC3339 或空>", "", "<task: key 或承诺 ID>", "task:ab12",

@@ -45,13 +45,13 @@ func ScoutSession(router *session.Router) scout.Session {
 }
 
 // ScoutWake is scout.Config.Wake (src agent.SourceScout) or Brief
-// (agent.SourceBriefing) over the Planner: the block as a turn from src.
+// (agent.SourceBriefing) over the Planner: each block as a turn from src.
 // The Planner off or stopped, or a block it will never take, is
 // scout.ErrPlannerOff, so the findings count as seen; anything else (not
 // started yet, busy, closing) is worth another try at the next run.
-func ScoutWake(a *agent.Agent, src agent.Source) func(block string) error {
-	return func(block string) error {
-		err := a.Wake(src, block)
+func ScoutWake(a *agent.Agent, src agent.Source) func(blocks ...string) error {
+	return func(blocks ...string) error {
+		err := a.Wake(src, blocks...)
 		if errors.Is(err, agent.ErrOff) || errors.Is(err, agent.ErrStopped) || errors.Is(err, agent.ErrTooLong) {
 			return fmt.Errorf("%w: %w", scout.ErrPlannerOff, err)
 		}

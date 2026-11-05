@@ -86,7 +86,7 @@ func TestBriefRun(t *testing.T) {
 			prompts = append(prompts, text)
 			return reply, tools, nil
 		},
-		Brief:     func(b string) error { blocks = append(blocks, b); return nil },
+		Brief:     func(b ...string) error { blocks = append(blocks, b...); return nil },
 		PlannerOn: func() bool { return on },
 		Now:       func() time.Time { return now },
 	})

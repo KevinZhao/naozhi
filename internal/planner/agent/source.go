@@ -1,8 +1,12 @@
 package agent
 
 import (
+	"cmp"
 	"errors"
+	"fmt"
+	"log/slog"
 	"strings"
+	"sync"
 )
 
 // Source is what started a Planner turn. The gateway records it for every
@@ -88,29 +92,61 @@ func (a *Agent) UnrunTurn() bool {
 	return false
 }
 
-// Wake starts a Planner turn from src with block, the gateway's data for
-// it (a scout run's findings), followed by the snapshot. It gets no
+// Wake starts a Planner turn from src with each block, the gateway's data
+// for it (a scout run's findings, in batches a reply's action blocks can
+// answer), followed by the snapshot. A block goes once the previous one's
+// turn ended, so queued blocks never merge into one turn. It gets no
 // receipt. ErrOff, ErrStopped or ErrNotReady when the Planner cannot take
-// it: the caller keeps what it found.
-func (a *Agent) Wake(src Source, block string) error {
+// the first: the caller keeps what it found. A later block it cannot take
+// is said in the conversation, so no finding goes unseen.
+func (a *Agent) Wake(src Source, blocks ...string) error {
 	if !a.cfg.Enabled {
 		return ErrOff
 	}
 	a.mu.Lock()
-	turns, stopped, opts := a.turns, a.state.Stopped, a.opts
+	turns, stopped := a.turns, a.state.Stopped
 	a.mu.Unlock()
-	switch block = strings.TrimSpace(block); {
+	switch {
 	case stopped:
 		return ErrStopped
 	case turns == nil:
 		return ErrNotReady
-	case block == "":
+	case len(blocks) == 0:
 		return ErrNoBlock
-	case len(block) > maxMessageBytes:
-		return ErrTooLong
+	}
+	for i, b := range blocks {
+		switch blocks[i] = strings.TrimSpace(b); {
+		case blocks[i] == "":
+			return ErrNoBlock
+		case len(blocks[i]) > maxMessageBytes:
+			return ErrTooLong
+		}
+	}
+	return a.wakeChain(src, blocks)
+}
+
+// wakeChain submits blocks[0] and chains the rest on its turn's end.
+func (a *Agent) wakeChain(src Source, blocks []string) error {
+	a.mu.Lock()
+	turns, stopped, opts := a.turns, a.state.Stopped, a.opts
+	a.mu.Unlock()
+	if stopped {
+		return ErrStopped
+	}
+	var done func(string, error)
+	if rest := blocks[1:]; len(rest) > 0 {
+		var once sync.Once
+		done = func(string, error) {
+			once.Do(func() {
+				if err := a.wakeChain(src, rest); err != nil {
+					slog.Warn("planner: later wake blocks not sent", "source", src, "blocks", len(rest), "err", err)
+					a.Note(fmt.Sprintf("%s还有 %d 批内容没有交给 Planner：%v", cmp.Or(outsideLabels[src], "网关"), len(rest), err))
+				}
+			})
+		}
 	}
 	// The block leads: the logged bubble keeps only the message's head, and
 	// the page marks the turn by it.
-	_, err := turns.SubmitPlanner(Key, src, block+"\n\n"+a.Snapshot(), opts, nil)
+	_, err := turns.SubmitPlanner(Key, src, blocks[0]+"\n\n"+a.Snapshot(), opts, done)
 	return err
 }

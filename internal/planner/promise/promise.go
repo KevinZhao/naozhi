@@ -81,6 +81,29 @@ func (p Promise) Cites(key string) bool {
 	return p.Task == key || strings.Contains(p.Text, key) || strings.Contains(p.CloseWhen, key)
 }
 
+// titleLeads are the leads the Planner words a promise with as if about the
+// user ("提醒用户提交周报"); Title drops them.
+var titleLeads = []string{"提醒用户", "提醒您", "提醒你", "帮用户", "替用户", "告诉用户", "通知用户"}
+
+// Title is p's text as the user reads it in 任务 and in its reminder: the
+// thing itself ("提交周报"), with a lead in titleLeads and the punctuation
+// after it dropped. The prompt asks for that wording; this holds when the
+// model does not. A text that is only a lead stays as it is.
+func (p Promise) Title() string {
+	text := strings.TrimSpace(p.Text)
+	for _, lead := range titleLeads {
+		if rest, ok := strings.CutPrefix(text, lead); ok {
+			if rest = strings.TrimLeftFunc(rest, dropsAfterLead); rest != "" {
+				return rest
+			}
+			break
+		}
+	}
+	return text
+}
+
+func dropsAfterLead(r rune) bool { return unicode.IsSpace(r) || unicode.IsPunct(r) }
+
 // Reminder takes promises to the user: the "等你" push and the Planner
 // conversation.
 type Reminder interface {

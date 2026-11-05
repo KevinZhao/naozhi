@@ -205,3 +205,20 @@ func TestPersisted(t *testing.T) {
 		t.Errorf("a newer file was overwritten: %s", data)
 	}
 }
+
+// A promise's title is the thing itself, with the lead the Planner words it
+// as about the user dropped.
+func TestTitle(t *testing.T) {
+	for _, tc := range []struct{ text, want string }{
+		{"提醒用户提交周报", "提交周报"},
+		{"提醒你：明早 9 点评审", "明早 9 点评审"},
+		{" 帮用户 盯着 CI ", "盯着 CI"},
+		{"提交周报", "提交周报"},
+		{"提醒用户", "提醒用户"},
+		{"用户提醒的事", "用户提醒的事"},
+	} {
+		if got := (Promise{Text: tc.text}).Title(); got != tc.want {
+			t.Errorf("Title(%q) = %q, want %q", tc.text, got, tc.want)
+		}
+	}
+}

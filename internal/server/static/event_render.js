@@ -107,12 +107,13 @@ function stripLeakedToolCalls(text) {
 }
 
 // peerSourceHtml names a cross-session message's sender (RFC planner §6.2):
-// the Planner, a naozhi session (a link to it; peer_key was resolved when the
-// message arrived, the title is the session's current one) or a CC session
-// naozhi does not manage.
+// the Planner (known by its key: its --name is per instance), a naozhi
+// session (a link to it; peer_key was resolved when the message arrived, the
+// title is the session's current one) or a CC session naozhi does not
+// manage.
 function peerSourceHtml(e, node) {
   const name = e.peer || '';
-  if (name === 'planner') return '来自 Planner';
+  if (e.peer_key === 'planner:main') return '来自 Planner';
   if (e.peer_key) {
     node = node || 'local';
     const s = sessionList.sessionsData[sid(e.peer_key, node)] || {};

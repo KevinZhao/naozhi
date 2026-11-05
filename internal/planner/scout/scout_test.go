@@ -242,7 +242,7 @@ func TestRun(t *testing.T) {
 			keys, prompts, gotOpts = append(keys, key), append(prompts, text), opts
 			return reply, []string{"mcp__slack-mcp__get_unreads"}, nil
 		},
-		Wake: func(b string) error { woken = append(woken, b); return nil },
+		Wake: func(b ...string) error { woken = append(woken, b...); return nil },
 		Now:  func() time.Time { return now },
 	})
 	ctx := context.Background()
@@ -317,7 +317,7 @@ func TestRunWakeAndCalendar(t *testing.T) {
 		Session: func(context.Context, string, sessionview.AgentOpts, string) (string, []string, error) {
 			return reply, nil, sessErr
 		},
-		Wake: func(string) error { woken++; return wakeErr },
+		Wake: func(...string) error { woken++; return wakeErr },
 		Now:  func() time.Time { return now },
 	})
 	steps := []struct {
@@ -436,7 +436,7 @@ func TestRunConflictsAndMarkAs(t *testing.T) {
 		Session: func(context.Context, string, sessionview.AgentOpts, string) (string, []string, error) {
 			return reply, tools, nil
 		},
-		Wake: func(b string) error { woken = append(woken, b); return nil },
+		Wake: func(b ...string) error { woken = append(woken, b...); return nil },
 		Now:  func() time.Time { return now },
 	})
 	want := "at:" + now.Add(90*time.Minute).UTC().Format(time.RFC3339)
@@ -460,5 +460,46 @@ func TestRunConflictsAndMarkAs(t *testing.T) {
 	r, _ = s.run(context.Background(), runID(now.Add(time.Minute)), TriggerManual, now.Add(time.Minute))
 	if r.State != StateFailed || !strings.Contains(r.Error, "markAs") {
 		t.Errorf("markAs run = %+v", r)
+	}
+}
+
+// More new findings than one reply's action blocks can answer go to the
+// Planner in batches, one turn each, and every finding is in exactly one.
+func TestRunBatches(t *testing.T) {
+	root := t.TempDir()
+	mcp := filepath.Join(root, "mcp.json")
+	if err := os.WriteFile(mcp, []byte(`{"mcpServers":{"slack-mcp":{"command":"s"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 2, 10, 0, 0, 0, time.Local)
+	var items []string
+	for i := range 11 {
+		items = append(items, fmt.Sprintf(`{"source":"slack","kind":"fyi","id":"iso-%02d","title":"iso 消息 %d","from":"","at":"","due":"","link":"","why":""}`, i, i))
+	}
+	reply := `{"findings":[` + strings.Join(items, ",") + `],"cursors":{"email":"","slack":"s1","asana":""}}`
+	var calls [][]string
+	s := New(Config{
+		Layout:    datadir.FromRoot(root),
+		MCPConfig: mcp,
+		Session: func(context.Context, string, sessionview.AgentOpts, string) (string, []string, error) {
+			return reply, nil, nil
+		},
+		Wake: func(b ...string) error { calls = append(calls, b); return nil },
+		Now:  func() time.Time { return now },
+	})
+	r, _ := s.run(context.Background(), runID(now), TriggerManual, now)
+	if r.State != StateOK || r.New != 11 || !r.Woke || len(calls) != 1 {
+		t.Fatalf("run = %+v, wakes %d", r, len(calls))
+	}
+	b := calls[0]
+	if len(b) != 2 || !strings.HasPrefix(b[0], `<naozhi-scout findings="10"`) || !strings.HasPrefix(b[1], `<naozhi-scout findings="1"`) ||
+		!strings.Contains(b[0], `batch="1/2"`) || !strings.Contains(b[1], `batch="2/2"`) {
+		t.Fatalf("blocks = %q", b)
+	}
+	for i := range 11 {
+		id := fmt.Sprintf(`"id":"iso-%02d"`, i)
+		if n := strings.Count(b[0], id) + strings.Count(b[1], id); n != 1 {
+			t.Errorf("%s is in %d blocks", id, n)
+		}
 	}
 }

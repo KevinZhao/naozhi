@@ -135,7 +135,7 @@ func TestDispatch(t *testing.T) {
 			if !ok || m.Purpose != sidecar.PurposeTask || m.Parent != sessionkey.PlannerMainKey || m.Title != "iso 写 hello" || m.Dir != dir || !m.DispatchedByPlanner() || m.Created.IsZero() {
 				t.Errorf("sidecar = %+v, %v", m, ok)
 			}
-			if !strings.Contains(g.told[0], key) || !strings.Contains(g.told[0], "notify_when_idle") {
+			if !strings.Contains(g.told[0], key) || strings.Contains(g.told[0], "notify_when_idle") || !strings.Contains(g.told[0], "汇报") {
 				t.Errorf("told = %q", g.told)
 			}
 		})
@@ -439,6 +439,75 @@ func TestReportWithoutStatusGetsReceipt(t *testing.T) {
 				t.Errorf("told = %q, want %q", g.told, want)
 			}
 		})
+	}
+}
+
+// TestTaskEndedAcrossShiftChange: dispatched, then the shift changes (the new
+// conversation holds no subscription and none of the old one's reports),
+// then the session ends its turn without reporting. The gateway tells the
+// Planner once a busy turn is over, and the status block it answers with
+// marks the task done. A session whose report came gets no receipt.
+func TestTaskEndedAcrossShiftChange(t *testing.T) {
+	for _, reported := range []bool{false, true} {
+		r, g, _, side, dir := newRunner(t)
+		r.grace = 0
+		r.cfg.Tasks = task.New(task.Config{Sessions: side})
+		now := time.Now()
+		r.cfg.Now = func() time.Time { return now }
+		busy := true
+		r.cfg.PlannerBusy = func() bool { return busy }
+		var reports []string
+		r.cfg.Reports = func(time.Time, time.Time) []string { return reports }
+		next := func() ended {
+			t.Helper()
+			select {
+			case e := <-r.endCh:
+				return e
+			case <-time.After(5 * time.Second):
+				t.Fatal("turn end never queued for a check")
+				return ended{}
+			}
+		}
+
+		r.Handle(block(`{"type":"dispatch","workspace":"` + filepath.Base(dir) + `","title":"iso 写 hello","model":"","message":"写一个 hello.md"}`))
+		if len(g.spawned) != 1 {
+			t.Fatalf("spawned = %q", g.spawned)
+		}
+		key := g.spawned[0]
+		g.told = nil
+		// The shift change: nothing the runner holds goes with it.
+		now = now.Add(time.Hour)
+		if reported {
+			reports = []string{key}
+		}
+		r.Result(key, "hello.md 写好了")
+		r.checkEnded(next()) // the Planner is busy: checked again later
+		if len(g.told) != 0 {
+			t.Fatalf("told while the Planner was busy: %q", g.told)
+		}
+		if reported {
+			select {
+			case e := <-r.endCh:
+				t.Errorf("reported: checked again: %+v", e)
+			case <-time.After(50 * time.Millisecond):
+			}
+			continue
+		}
+		busy = false
+		r.checkEnded(next())
+		if len(g.told) != 1 || !strings.Contains(g.told[0], key) || !strings.Contains(g.told[0], "hello.md 写好了") ||
+			!strings.Contains(g.told[0], statusFormat(key)) {
+			t.Fatalf("told = %q", g.told)
+		}
+		r.Result(key, "又一轮") // one receipt until it reports
+		r.checkEnded(next())
+		if len(g.told) != 1 {
+			t.Errorf("a second receipt: %q", g.told)
+		}
+		r.Handle(block(`{"type":"status","task":"` + key + `","state":"done","why":"它说 hello.md 写好了"}`))
+		if st := r.cfg.Tasks.List()[0]; st.ID != key || st.State != task.Done {
+			t.Errorf("task = %+v, want done", st)
+		}
 	}
 }
 
