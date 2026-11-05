@@ -118,7 +118,7 @@ func TestBoard(t *testing.T) {
 	proms := promise.New(promise.Config{Now: clock})
 	// Distinct creation times keep the order of the two in progress fixed.
 	now = t0.Add(-time.Minute)
-	later, _ := proms.Add(promise.Promise{Text: "明早提醒你", Due: t0.Add(time.Hour)})
+	later, _ := proms.Add(promise.Promise{Text: "提醒用户明早交周报", Due: t0.Add(time.Hour)})
 	now = t0
 	cond, _ := proms.Add(promise.Promise{Text: "CI 绿了告诉你", CloseWhen: "master CI 绿"})
 	j, err := journal.Open(t.TempDir())
@@ -170,6 +170,9 @@ func TestBoard(t *testing.T) {
 	}
 	if c := list[2]; c.By != ByUser {
 		t.Errorf("promise = %+v", c)
+	}
+	if l := list[1]; l.Title != "明早交周报" {
+		t.Errorf("promise title = %q, want the lead dropped", l.Title)
 	}
 	entries, _ := j.Read(t0.Add(-time.Minute), t0.Add(time.Minute))
 	var logged []string

@@ -805,7 +805,7 @@ function sessionMarkdownFilename(title, whenMS) {
 // peer_hold, the export's copy of event_render.js's peerSourceHtml.
 function markdownPeerSource(e) {
   const name = e.peer || '';
-  if (name === 'planner') return '来自 Planner';
+  if (e.peer_key === 'planner:main') return '来自 Planner';
   return (e.peer_key ? '来自会话 ' : '来自终端会话 ') + name;
 }
 

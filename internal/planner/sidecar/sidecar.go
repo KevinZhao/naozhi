@@ -69,6 +69,19 @@ type Meta struct {
 	// Failure is the failure health last judged the session in, nil once it
 	// recovered: a retired session keeps it (planner/task).
 	Failure *Mark `json:"failure,omitempty"`
+	// Turn is the session's last turn end as planner/action saw it, kept
+	// on disk so a check a restart cut short runs again.
+	Turn *Turn `json:"turn,omitempty"`
+}
+
+// Turn is a dispatched session's turn end. While Check is set the turn is
+// still to be checked for a report to the Planner, one reaching it after
+// From (the previous turn's end); Text is its reply, cut short.
+type Turn struct {
+	Ended time.Time `json:"ended"`
+	Check bool      `json:"check,omitempty"`
+	From  time.Time `json:"from,omitzero"`
+	Text  string    `json:"text,omitempty"`
 }
 
 // Mark is a task state set by someone: planner/task's State and By values.
@@ -231,6 +244,24 @@ func (s *Store) SetFailure(key string, f *Mark) (bool, error) {
 		m.Failure = f
 		return true
 	})
+}
+
+// SetTurn records key's last turn end; false when key has no sidecar.
+func (s *Store) SetTurn(key string, t Turn) (bool, error) {
+	return s.update(key, func(m *Meta) bool { m.Turn = &t; return true })
+}
+
+// Checked clears the check of key's turn that ended at ended, unless a
+// later turn ended since.
+func (s *Store) Checked(key string, ended time.Time) error {
+	_, err := s.update(key, func(m *Meta) bool {
+		if m.Turn == nil || !m.Turn.Check || !m.Turn.Ended.Equal(ended) {
+			return false
+		}
+		m.Turn = &Turn{Ended: m.Turn.Ended}
+		return true
+	})
+	return err
 }
 
 // update applies fn to key's sidecar and saves it when fn reports a change.

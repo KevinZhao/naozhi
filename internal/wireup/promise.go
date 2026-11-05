@@ -31,10 +31,10 @@ func (r PromiseReminder) Due(p promise.Promise) {
 			why += "；完成条件：" + p.CloseWhen
 		}
 		r.Notify.Add(notify.Item{Kind: notify.KindNotice, Level: notify.LevelTimely, Uncapped: true,
-			Source: promiseSource(p), Title: "到点提醒：" + textutil.TruncateRunes(p.Text, promiseTitleRunes), Why: why})
+			Source: promiseSource(p), Title: "到点提醒：" + textutil.TruncateRunes(p.Title(), promiseTitleRunes), Why: why})
 	}
 	if r.Note != nil {
-		r.Note("到点提醒（承诺，到期 " + at + "）：" + p.Text)
+		r.Note("到点提醒（承诺，到期 " + at + "）：" + p.Title())
 	}
 }
 
