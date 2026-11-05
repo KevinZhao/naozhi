@@ -40,7 +40,7 @@ import { renderMd, runPendingAsync } from './render_md.js';
 import { inbox, isLit, notifySupported, onInboxCount, requestNotifyPermission, revealFocus } from './notify.js';
 import { followWorkbenchSubject, noteWorkbenchEvent } from './workbench_panes.js';
 import { decisionActsHtml, decorateEvents, paintSessionCards, refreshHealth, webLinkHtml } from './planner_cards.js';
-import { clearPending, closePlannerSession, mountComposer, notePlannerStatus } from './planner_chat.js';
+import { clearPending, closePlannerSession, mountComposer, notePlannerStatus, showPlannerLeft } from './planner_chat.js';
 import { mountTasks, refreshTasks } from './tasks.js';
 import { workbench } from './workbench.js';
 import { wsm } from './ws_manager.js';
@@ -183,11 +183,7 @@ function paintWaiting() {
 // the phone's left block when it is folded.
 function revealWaiting() {
   if (!inbox.focus || ui.activeView !== 'planner' || !$('pl-wait')?.querySelector('.pl-card[data-id="' + CSS.escape(inbox.focus) + '"]')) return;
-  const main = $('planner-main');
-  if (main && !main.classList.contains('pl-left-open')) {
-    main.classList.add('pl-left-open');
-    $('pl-left-toggle')?.setAttribute('aria-expanded', 'true');
-  }
+  showPlannerLeft(true);
   revealFocus($('pl-wait'));
 }
 
@@ -614,7 +610,15 @@ nzBus.addEventListener('inbox:count', (e) => {
   paintCounts();
   if (!pl.seeding && pl.host) fetchInbox();
 });
-nzBus.addEventListener('inbox:focus', revealWaiting);
+// A push or link without an item lands on the conversation, even where the
+// phone's left block was left unfolded or a session opened in its place.
+nzBus.addEventListener('inbox:focus', () => {
+  if (!inbox.focus && ui.activeView === 'planner') {
+    showPlannerLeft(false);
+    closePlannerSession(false);
+  }
+  revealWaiting();
+});
 // A new socket holds no subscriptions: re-subscribe after the last event
 // taken, the history frame fills the gap.
 wsm.onReady(() => {
@@ -711,11 +715,8 @@ registerActions({
 });
 
 document.addEventListener('DOMContentLoaded', () => {
-  $('pl-left-toggle')?.addEventListener('click', (e) => {
-    const main = $('planner-main');
-    if (!main) return;
-    const open = main.classList.toggle('pl-left-open');
-    e.currentTarget.setAttribute('aria-expanded', open ? 'true' : 'false');
+  $('pl-left-toggle')?.addEventListener('click', () => {
+    showPlannerLeft(!$('planner-main')?.classList.contains('pl-left-open'));
   });
   // The phone heading counts what 任务 renders.
   const tasks = $('pl-task');

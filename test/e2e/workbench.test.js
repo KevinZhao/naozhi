@@ -1,6 +1,7 @@
 // E2E: the workbench (workbench.js / workbench_panes.js) — it never opens by
-// itself (D91): a session's new output raises the "产出 N" on its 工作台
-// button; its 产出 · 文件 · 详情 tabs; and the files view's 成品库.
+// itself nor collapses the session sidebar (D91): a session's new output
+// raises the "产出 N" on its 工作台 button; its 产出 · 文件 · 详情 tabs; and
+// the files view's 成品库.
 const { test, expect, devices } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
 const { waitForWs } = require('./shim_wait');
@@ -114,6 +115,9 @@ test('tabs: 产出 previews and links PRs, 文件 browses the session tree, 详�
     await page.click(`.session-card[data-key="${A}"]`);
     await page.click('.main-header .btn-workbench');
     await expect(drawer(page)).toHaveClass(/fv-open/);
+    // The session sidebar stays (D91 S6).
+    await expect(page.locator('body')).not.toHaveClass(/sidebar-collapsed/);
+    await expect(page.locator('#sidebar')).toBeVisible();
     // Nothing previewed yet: it opens on 产出.
     await expect(tab(page, 'outputs')).toHaveAttribute('aria-selected', 'true');
     const rows = page.locator('#wb-outputs .files-row');
@@ -152,9 +156,8 @@ test('tabs: 产出 previews and links PRs, 文件 browses the session tree, 详�
     await page.click('#wb-btn-max');
     await expect(drawer(page)).not.toHaveClass(/wb-max/);
 
-    // Another session's tabs follow the selection (the open workbench has
-    // collapsed the sidebar).
-    await page.evaluate((k) => window.selectSession(k, 'local'), B);
+    // Another session's tabs follow the selection.
+    await page.locator(`.session-card[data-key="${B}"]`).click();
     await tab(page, 'outputs').click();
     await expect(page.locator('#wb-outputs')).toContainText('这个会话还没有产出');
   } finally {

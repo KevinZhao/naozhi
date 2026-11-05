@@ -89,7 +89,7 @@
   /* Nothing typed, nothing to hand over: the input row keeps its width. */
   .btn-handoff[data-empty]{display:none}
   .pl-cards{margin:4px 16px 12px}
-  /* A session card keeps its name whole; the state says what it is doing. */
+  /* A session card drops its time: the name and the state take the width. */
   .pl-scard-time{display:none}
   /* One backend names every session the same: the model and the branch
      take the width. */

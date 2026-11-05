@@ -36,6 +36,28 @@ const planner = { enabled: true, stopped: false, key: PLANNER, alive: true };
 
 for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mobile', { width: 390, height: 844 }]]) {
   test.describe(`sidebar 通知 bar (${name})`, () => {
+    test('a long bar leaves the session list its rows', async ({ browser }) => {
+      const ctx = await browser.newContext({ viewport });
+      const page = await ctx.newPage();
+      const open = Array.from({ length: 12 }, (_, i) => ({ id: 'in_' + i, kind: 'question', level: 'timely', unit: SESSION, title: 'iso 提问 ' + i, why: '有提问等你回答', created: iso(now - i * 60000), state: 'open', source: 'waiting:' + i }));
+      const mock = await startMockServer({ ws: true, inbox: { open, closed: [], counts: { open: 12, badge: 12 } }, tasks: { tasks: [] }, plannerEvents: [], planner });
+      try {
+        await page.goto(mock.url + '/dashboard');
+        await waitForWs(page, 'CONNECTED');
+        await page.click('#sw-toggle');
+        await expect(page.locator('#sw-wait .pl-card')).toHaveCount(12);
+        expect((await page.locator('#session-list').boundingBox()).height).toBeGreaterThan(viewport.height * 0.3);
+        await expect(page.locator('#session-list .session-card').first()).toBeInViewport();
+        // The bar scrolls as a whole to its last card.
+        await page.locator('#sw-wait .pl-card[data-id="in_11"]').scrollIntoViewIfNeeded();
+        await expect(page.locator('#sw-wait .pl-card[data-id="in_11"]')).toBeInViewport();
+        await page.screenshot({ path: test.info().outputPath(`side-wait-long-${name}.png`) });
+      } finally {
+        await ctx.close();
+        mock.server.close();
+      }
+    });
+
     test('counts, unfolds in place, closes and answers there', async ({ browser }) => {
       const ctx = await browser.newContext({ viewport });
       const page = await ctx.newPage();
@@ -150,6 +172,7 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
         await page.evaluate(() => { location.hash = 'planner'; });
         await expect(page.locator('body')).toHaveClass(/nz-view-planner/);
         await expect(page.locator('#planner-drawer')).toBeHidden();
+        await expect(page.locator('#pl-stream')).toBeVisible();
       } finally {
         await ctx.close();
         mock.server.close();

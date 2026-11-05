@@ -299,9 +299,20 @@ async function loadSession(reset) {
   }
 }
 
-// openPlannerSession opens key in the middle column.
+// showPlannerLeft unfolds (open) or folds the phone's left block, which
+// unfolded hides the middle column.
+export function showPlannerLeft(open) {
+  const main = $('planner-main');
+  if (!main || main.classList.contains('pl-left-open') === open) return;
+  main.classList.toggle('pl-left-open', open);
+  $('pl-left-toggle')?.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+// openPlannerSession opens key in the middle column, folding the phone's left
+// block a 任务 title was tapped in.
 export function openPlannerSession(key) {
   if (!key || key === PLANNER_KEY) return;
+  showPlannerLeft(false);
   if (st.sess && st.sess.key === key) return;
   closePlannerSession(true);
   st.sess = { key, events: [], uuids: new Set(), lastTime: 0, raw: false, loading: false, gen: 0, timer: 0 };

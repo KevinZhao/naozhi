@@ -151,8 +151,8 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .tk-menu:disabled{opacity:.55;cursor:default}
 /* 通知 / 任务 bar atop the 会话 sidebar (side_wait.js): one thin dim
    line while both are 0; unfolded, the Planner left column's cards at their
-   full height above the session list. Only a bar taller than the whole
-   column scrolls, so no card is ever out of reach. */
+   full height above the session list. Only a bar taller than what the
+   session list leaves it scrolls, as a whole. */
 .side-wait{flex-shrink:1;min-height:0;overflow-y:auto;border-bottom:1px solid var(--nz-border);background:var(--nz-bg-1)}
 .sw-toggle{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:8px 16px;border:0;background:none;color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-sm2);cursor:pointer;text-align:left}
 .sw-toggle:hover{background:var(--nz-bg-2)}
@@ -249,7 +249,7 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .pl-scard{display:flex;align-items:center;gap:10px;width:100%;max-width:560px;padding:7px 10px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1);color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-sm2);text-align:left;cursor:pointer}
 .pl-scard:hover{border-color:var(--nz-accent)}
 .pl-scard-line,.pl-sess-line{flex:1;min-width:0;display:flex;align-items:center;gap:8px;overflow:hidden;white-space:nowrap}
-.pl-scard-name{flex-shrink:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;font-weight:600;color:var(--nz-text-strong)}
+.pl-scard-name{min-width:0;overflow:hidden;text-overflow:ellipsis;font-weight:600;color:var(--nz-text-strong)}
 .pl-scard-line .hl-state,.pl-sess-line .hl-state{flex-shrink:0;font-size:var(--nz-fs-xs)}
 .pl-scard-time{min-width:0;overflow:hidden;text-overflow:ellipsis;font-size:var(--nz-fs-xs);color:var(--nz-text-dim)}
 .pl-scard-open{flex-shrink:0;font-size:var(--nz-fs-xs);color:var(--nz-accent)}
@@ -439,7 +439,8 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
    brand. */
 .sidebar-header h1{font-size:var(--nz-fs-md);color:var(--nz-rust);font-weight:600;font-style:italic;font-family:var(--nz-font-mono);letter-spacing:-.01em}
 .sidebar-header h1::before{content:">_";color:var(--nz-rust);margin-right:6px;font-weight:700}
-.session-list{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent}
+/* An unfolded 通知 bar above (.side-wait) leaves the list this much. */
+.session-list{flex:1;min-height:40%;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent}
 
 .sidebar-status{padding:6px 16px;border-top:1px solid var(--nz-border);font-size:var(--nz-fs-sm);color:var(--nz-text-mute);flex-shrink:0;max-height:40%;overflow-y:auto}
 .sidebar-status .status-row{display:flex;align-items:center;gap:8px;padding:4px 0}

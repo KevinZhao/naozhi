@@ -28,24 +28,29 @@ function mobileShowList() {
   if (document.activeElement) document.activeElement.blur();
 }
 
-// In-app back button / swipe-back. Flips the view synchronously, then pops
-// the history entry mobileEnterChat pushed so the browser stack stays in
-// step; the popstate below sees list view already and no-ops. A session
-// picked on the Planner page goes back there.
-function mobileBack() {
-  const ownsEntry = isMobile() && history.state && history.state.view === 'chat';
+// leaveChat shows the list a session was picked from: the Planner page for
+// one picked there, else the session list.
+function leaveChat() {
   mobileShowList();
-  if (ownsEntry) history.back();
   if (selection.fromPlanner) {
     selection.fromPlanner = false;
     if (shell.setActivityView) shell.setActivityView('planner');
   }
 }
 
+// In-app back button / swipe-back. Flips the view synchronously, then pops
+// the history entry mobileEnterChat pushed so the browser stack stays in
+// step; the popstate below sees list view already and no-ops.
+function mobileBack() {
+  const ownsEntry = isMobile() && history.state && history.state.view === 'chat';
+  if (ownsEntry) history.back();
+  leaveChat();
+}
+
 // Handle Android back button and iOS swipe-back gesture
 window.addEventListener('popstate', () => {
   if (isMobile() && document.body.classList.contains('mobile-chat-view')) {
-    mobileShowList();
+    leaveChat();
   }
 });
 

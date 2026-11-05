@@ -9,7 +9,7 @@
 // session's card is read-only; the chat view's 交给 Planner sends the session's reference with
 // the typed text, and is hidden while planner.enabled is off.
 const { test, expect } = require('@playwright/test');
-const { startMockServer } = require('./mock-server');
+const { startMockServer, defaultSessions } = require('./mock-server');
 const { waitForWs } = require('./shim_wait');
 
 const SESSION = 'dashboard:direct:2026-01-01-120000-1:myproject';
@@ -228,6 +228,36 @@ test('chat view: 交给 Planner sends the session with the typed text', async ({
     mock.server.close();
   }
 });
+
+// A session card's name gives way before its state: a long name ends in an
+// ellipsis and the state stays on the card.
+for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['phone', { width: 390, height: 844 }]]) {
+  test(`${name}: a long session name leaves the card its state`, async ({ browser }) => {
+    const ctx = await browser.newContext({ viewport });
+    const page = await ctx.newPage();
+    const sessions = defaultSessions();
+    sessions.sessions[0].last_prompt = '把登录页的样式改成和设置页一致，顺便检查一下手机上的输入框和按钮会不会被挤出屏幕';
+    const mock = await startMockServer({
+      ws: true, sessions, inbox: inbox(), systemHealth: health(),
+      plannerEvents: [{ type: 'text', detail: '它在等你：`' + SESSION + '`', time: now - 60000, uuid: 'pc-long' }],
+      planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
+    });
+    try {
+      await page.goto(mock.url + '/dashboard');
+      await waitForWs(page, 'CONNECTED');
+      await page.locator('#abnav-planner').click();
+      const card = page.locator('#pl-stream .pl-scard[data-key="' + SESSION + '"]');
+      await expect(card.locator('.hl-state')).toHaveText('待你回复');
+      const line = await card.locator('.pl-scard-line').boundingBox();
+      const state = await card.locator('.hl-state').boundingBox();
+      expect(state.x + state.width).toBeLessThanOrEqual(line.x + line.width + 0.5);
+      await page.screenshot({ path: test.info().outputPath(`planner-long-name-${name}.png`) });
+    } finally {
+      await ctx.close();
+      mock.server.close();
+    }
+  });
+}
 
 test('chat view: no 交给 Planner while planner.enabled is off', async ({ page }) => {
   const mock = await startMockServer({ ws: true, planner: { enabled: false, stopped: false, key: PLANNER, alive: false } });

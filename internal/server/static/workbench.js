@@ -11,7 +11,7 @@
 // including on open.
 import { nzBus, typingOutside } from './nz_util.js';
 import { splitDock } from './split_view.js';
-import { collapseSidebarForDrawer, restoreSidebarAfterDrawer } from './mobile_nav.js';
+import { restoreSidebarAfterDrawer } from './mobile_nav.js';
 
 const TABS = ['preview', 'outputs', 'files', 'details'];
 
@@ -50,7 +50,7 @@ function open(name) {
   splitDock.enter();
   // Opened last → stack on top of the 追问 pane if both are docked.
   splitDock.bringToFront('preview');
-  collapseSidebarForDrawer();
+  // The session sidebar stays where it is (D91 S6).
   if (!was) nzBus.dispatchEvent(new CustomEvent('workbench:open'));
   showTab(name || tab());
 }
@@ -63,8 +63,9 @@ function close() {
   syncMaxBtn();
   // Undock the split (no-op if the 追问 drawer is still open).
   splitDock.exit();
-  // Re-expand the sidebar if the open path auto-collapsed it (no-op if the
-  // 追问 drawer is still open or the user collapsed it themselves).
+  // The 追问 drawer collapses the sidebar and restores it only once no
+  // drawer is docked, so the last one to close here re-expands it (no-op if
+  // the 追问 drawer is still open or the user collapsed it themselves).
   restoreSidebarAfterDrawer();
   nzBus.dispatchEvent(new CustomEvent('workbench:close'));
 }
