@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -27,8 +28,7 @@ func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, image
 	s.touchLastActive()
 	ctx = sendRunCtx(ctx)
 
-	prompt := textutil.TruncateRunes(text, 120) + clievent.AttachmentSuffix(images)
-	storeAtomicString(&s.lastPrompt, prompt)
+	s.cachePrompt(text, images)
 
 	proc := s.loadProcess()
 	if proc == nil {
@@ -136,8 +136,7 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []clieven
 	s.touchLastActive()
 
 	// Cache the user prompt for Snapshot.
-	prompt := textutil.TruncateRunes(text, 120) + clievent.AttachmentSuffix(images)
-	storeAtomicString(&s.lastPrompt, prompt)
+	s.cachePrompt(text, images)
 
 	proc := s.loadProcess()
 	if proc == nil {
@@ -253,4 +252,13 @@ func (s *ManagedSession) InterruptViaControlDetail() (InterruptOutcome, error) {
 			"key", s.key, "err", err)
 		return InterruptError, err
 	}
+}
+
+// cachePrompt caches the user prompt for Snapshot. A custody message is not
+// the user's: the title keeps the last prompt the user wrote.
+func (s *ManagedSession) cachePrompt(text string, images []clievent.Attachment) {
+	if strings.HasPrefix(text, clievent.CustodyLead) {
+		return
+	}
+	storeAtomicString(&s.lastPrompt, textutil.TruncateRunes(text, 120)+clievent.AttachmentSuffix(images))
 }

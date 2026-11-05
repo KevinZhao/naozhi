@@ -100,6 +100,9 @@ const (
 	// SourceCustody is a message the gateway sent while it watches the
 	// session for the user (docs/rfc/planner.md §5.4).
 	SourceCustody = "custody"
+	// CustodyLead starts the text of every custody message; a session's
+	// title skips such messages, or it would read as the custody line.
+	CustodyLead = "⚙ 托管 · "
 	// SourcePlanner is the first message of a session the Planner dispatched.
 	SourcePlanner = "planner"
 )
