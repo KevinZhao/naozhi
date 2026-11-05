@@ -72,6 +72,16 @@ export function showToast(msg, type, duration) {
   el._tid = setTimeout(() => { el.className = 'toast'; }, duration || 3000);
 }
 
+// typingOutside reports whether a key event comes from an input, textarea
+// or editable element outside panel: a non-modal panel's Esc leaves such a
+// key to that element (the chat input's Esc arms an interrupt).
+export function typingOutside(e, panel) {
+  const t = e.target;
+  if (!t || (panel && panel.contains(t))) return false;
+  const tag = (t.tagName || '').toLowerCase();
+  return tag === 'input' || tag === 'textarea' || !!t.isContentEditable;
+}
+
 /* Focus trap: confine Tab within an overlay, restore focus on dismissal.
    Called after an overlay is appended to the DOM. Returns nothing — the
    overlay's MutationObserver tears down listeners when it's removed. */

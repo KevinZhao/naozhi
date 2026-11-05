@@ -8,7 +8,7 @@
 // Events on nzBus: 'workbench:open' and 'workbench:close' when the pane
 // opens or closes, 'workbench:tab' (detail.tab) whenever a tab is shown,
 // including on open.
-import { nzBus } from './nz_util.js';
+import { nzBus, typingOutside } from './nz_util.js';
 import { splitDock } from './split_view.js';
 import { collapseSidebarForDrawer, restoreSidebarAfterDrawer } from './mobile_nav.js';
 
@@ -94,9 +94,12 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.getElementById('wb-btn-max')?.addEventListener('click', toggleMax);
   document.getElementById('fv-btn-close')?.addEventListener('click', close);
-  // Esc closes the pane (but only when nothing else is handling Esc).
+  // Esc closes the pane, unless a dialog or lightbox above it or an input
+  // outside it (the chat input's Esc interrupts a turn) wants the key.
   document.addEventListener('keydown', (evt) => {
     if (evt.key !== 'Escape' || !isOpen()) return;
+    if (document.querySelector('.modal-overlay, .cmd-palette-overlay, .lightbox-overlay.active')) return;
+    if (typingOutside(evt, d)) return;
     evt.stopPropagation();
     close();
   }, true);

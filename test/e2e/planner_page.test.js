@@ -285,3 +285,69 @@ test('planner.enabled off: the page explains it and the stop switch is off', asy
     mock.server.close();
   }
 });
+
+// The 早报 slot shows the newest sent brief of GET /api/planner/briefs,
+// open on the day it was made.
+test('the 早报 slot shows the latest brief', async ({ browser }) => {
+  const at = new Date();
+  at.setHours(8, 30, 0, 0);
+  const md = '## 早报 · iso\n\n自 11-04 08:30 以来：完成 1 · 等你 1\n\n### 完成的（1）\n- iso 周报会话 · 11-04 18:00\n';
+  for (const [name, viewport, extra] of [['desktop', { width: 1280, height: 800 }, {}], ['mobile', { width: 390, height: 844 }, { isMobile: true, hasTouch: true }]]) {
+    const ctx = await browser.newContext({ viewport, ...extra });
+    const page = await ctx.newPage();
+    const mock = await startMockServer({
+      ws: true, plannerEvents: plannerEvents(), inbox: inbox(),
+      planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
+      plannerBriefs: [{ day: 'x', at: at.toISOString(), sent: true, counts: { done: 1, waiting: 1 }, markdown: md }],
+    });
+    try {
+      await page.goto(mock.url + '/dashboard');
+      await waitForWs(page, 'CONNECTED');
+      await page.click('#abnav-planner');
+      const brief = page.locator('#pl-brief');
+      await expect(brief.locator('summary')).toHaveText(/早报 · \d\d-\d\d 08:30/);
+      await expect(brief.locator('details')).toHaveAttribute('open', '');
+      await expect(brief.locator('.md .md-h3')).toHaveText('完成的（1）');
+      await expect(brief).toContainText('iso 周报会话');
+      await expect(brief).not.toContainText('还没有');
+      await brief.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: test.info().outputPath('planner-brief-' + name + '.png') });
+    } finally {
+      await ctx.close();
+      mock.server.close();
+    }
+  }
+});
+
+// Requests queued while the Planner was busy reach it as one coalesced
+// message: the gateway's parts become their lines, yours one bubble.
+test('a coalesced turn: snapshots and receipts are not your bubble', async ({ browser }) => {
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const page = await ctx.newPage();
+  const head = '[以下是用户在你处理上一条消息期间追加发送的内容]\n';
+  const events = [
+    { type: 'user', time: now - 60000, uuid: 'pl-c1', detail:
+      head + '\n[10:01] <naozhi-snapshot at="x">\n## 等你\n- iso 某条通知\n</naozhi-snapshot>\n\niso 第一条\n' +
+      '\n[10:01] <naozhi-receipt>\niso 已派出 task:abc\n</naozhi-receipt>\n' +
+      '\n[10:02] <naozhi-snapshot at="y">\n</naozhi-snapshot>\n\niso 第二条\n' },
+  ];
+  const mock = await startMockServer({
+    ws: true, plannerEvents: events, inbox: inbox(),
+    planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
+  });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await page.click('#abnav-planner');
+    const user = page.locator('#pl-stream .event.user');
+    await expect(user).toHaveCount(1);
+    await expect(user).toHaveText(/iso 第一条[\s\S]*iso 第二条/);
+    await expect(page.locator('#pl-stream .event.system')).toHaveText(/回执给 Planner：iso 已派出 task:abc/);
+    await expect(page.locator('#pl-stream')).not.toContainText('naozhi-snapshot');
+    await expect(page.locator('#pl-stream')).not.toContainText('iso 某条通知');
+    await expect(page.locator('#pl-stream')).not.toContainText('以下是用户');
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
