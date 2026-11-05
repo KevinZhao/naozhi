@@ -21,11 +21,11 @@ func TestTaskOptsForKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Run("respawn", func(t *testing.T) {
-		to := TaskOpts{Base: session.AgentOpts{Model: "opus", Backend: "kiro", DefaultBackend: "kiro", SystemPrompt: "base"}, Sessions: side}
+		to := TaskOpts{Base: session.AgentOpts{Model: "opus", Backend: "kiro", DefaultBackend: "kiro", SystemPrompt: "base"}, Sessions: side, Planner: "planner-abc123"}
 		opts, ok := to.ForKey(key)
 		if !ok || opts.Backend != "claude" || opts.DefaultBackend != "" || opts.Model != "sonnet" || opts.Workspace != "/tmp/ws" ||
 			opts.Name != "iso 写 hello" || opts.CrossSessionInbound != "accept" || opts.Exempt ||
-			!strings.HasPrefix(opts.SystemPrompt, "base\n\n") || !strings.Contains(opts.SystemPrompt, "SendMessage 发给 planner") {
+			!strings.HasPrefix(opts.SystemPrompt, "base\n\n") || !strings.Contains(opts.SystemPrompt, "SendMessage 发给 planner-abc123（") {
 			t.Errorf("ForKey = %+v, %v", opts, ok)
 		}
 	})

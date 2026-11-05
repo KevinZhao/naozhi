@@ -188,7 +188,7 @@ func (b *Board) List() []Task {
 	if b.cfg.Promises != nil {
 		open, closed := b.cfg.Promises.List(1 << 30)
 		for _, p := range append(open, closed...) {
-			t := Task{ID: p.ID, Kind: KindPromise, Title: p.Text, Created: p.Created, Due: p.Due, CloseWhen: p.CloseWhen}
+			t := Task{ID: p.ID, Kind: KindPromise, Title: p.Title(), Created: p.Created, Due: p.Due, CloseWhen: p.CloseWhen}
 			t.State, t.By, t.Why, t.At = promiseState(p, now)
 			out = append(out, t)
 		}
@@ -229,7 +229,7 @@ func (b *Board) Title(id string) (string, bool) {
 		return "", false
 	}
 	p, ok := b.cfg.Promises.Get(id)
-	return p.Text, ok
+	return p.Title(), ok
 }
 
 // Set sets task id to state (doing, done or failed; a promise is never

@@ -148,6 +148,23 @@ func (st store) fresh(findings []Finding, now time.Time) ([]Finding, seenFile) {
 
 func (st store) saveSeen(f seenFile) error { return st.write("seen.json", f) }
 
+// pendingFile is the new findings whose batch has not reached the Planner
+// yet: a run hands them over again.
+type pendingFile struct {
+	V        int       `json:"v"`
+	Findings []Finding `json:"findings"`
+}
+
+func (st store) pending() []Finding {
+	var f pendingFile
+	st.read("pending.json", &f)
+	return f.Findings
+}
+
+func (st store) savePending(findings []Finding) error {
+	return st.write("pending.json", pendingFile{V: 1, Findings: findings})
+}
+
 // saveCalendar keeps the events of the next calendarWindow, by start. nil
 // events is a run that did not read the calendar: the cache keeps what it
 // had, less the events already over.

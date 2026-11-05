@@ -501,7 +501,7 @@ func main() {
 	routing := buildRouting(cfg, agents, projectMgr, scheduler)
 	// The options of the sessions the Planner dispatches: at dispatch, and
 	// rebuilt from their sidecar when one respawns from the dashboard.
-	taskOpts := wireup.TaskOpts{Base: agents["general"], Sessions: sidecars}
+	taskOpts := wireup.TaskOpts{Base: agents["general"], Sessions: sidecars, Planner: plannerAgent.Name()}
 	// The health monitor reads srv's node and discovery caches, so it is built
 	// after srv; srv only reads it once it serves.
 	srv = server.NewWithOptions(server.ServerOptions{
@@ -626,7 +626,8 @@ func main() {
 	go promises.Run(ctx)
 	// The Planner's action blocks (§6.2): parsed from planner:main's turn
 	// results; a dispatch starts a task: session at once (D88), and a task left
-	// 进行中 after it reported gets the Planner a receipt.
+	// 进行中 after it reported, or that ended a turn without reporting, gets
+	// the Planner a receipt.
 	actions := action.New(action.Config{
 		Planner:     agent.Key,
 		Inbox:       notifier,
@@ -643,6 +644,7 @@ func main() {
 		TellRefused: plannerAgent.TellRefused,
 		TellUnrun:   plannerAgent.TellUnrun,
 		UnrunTurn:   plannerAgent.UnrunTurn,
+		PlannerBusy: plannerAgent.Busy,
 		Ctx:         ctx,
 	})
 	// The result is judged by the turn's sources before the ledger lets go

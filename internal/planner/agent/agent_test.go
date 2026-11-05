@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -29,6 +30,8 @@ type fakeSessions struct {
 	// recreateErr fails Recreate after the old session is gone, as
 	// Router.ResetAndRecreate does.
 	recreateErr error
+	// names is the --name of every Ensure and Recreate, in order.
+	names []string
 }
 
 func (f *fakeSessions) State(key string) SessionState {
@@ -40,16 +43,18 @@ func (f *fakeSessions) State(key string) SessionState {
 	return f.st
 }
 
-func (f *fakeSessions) Ensure(context.Context, string, sessionview.AgentOpts) error {
+func (f *fakeSessions) Ensure(_ context.Context, _ string, opts sessionview.AgentOpts) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.names = append(f.names, opts.Name)
 	f.st.Exists, f.st.Alive = true, true
 	return nil
 }
 
-func (f *fakeSessions) Recreate(context.Context, string, sessionview.AgentOpts) error {
+func (f *fakeSessions) Recreate(_ context.Context, _ string, opts sessionview.AgentOpts) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.names = append(f.names, opts.Name)
 	f.recreated++
 	if f.recreateErr != nil {
 		f.st = SessionState{}
@@ -120,7 +125,8 @@ func newTestAgent(t *testing.T, sess *fakeSessions, now *time.Time) (*Agent, dat
 }
 
 // TestLaunchArgv renders planner:main's spawn options through the spawn's
-// own argv builder: the five tools, dontAsk, no MCP servers, --name planner,
+// own argv builder: the five tools, dontAsk, no MCP servers, the instance's
+// --name,
 // the model and effort, the system prompt and the per-session settings.
 func TestLaunchArgv(t *testing.T) {
 	now := time.Now()
@@ -136,7 +142,7 @@ func TestLaunchArgv(t *testing.T) {
 		"--permission-mode dontAsk",
 		"--tools Read,Grep,Glob,ListAgents,SendMessage",
 		"--strict-mcp-config",
-		"--name planner",
+		"--name " + NameFor(lay.PlannerRoot()),
 		"--model claude-opus-5-5[1m]",
 		"--effort medium",
 		"--append-system-prompt",
@@ -160,6 +166,34 @@ func TestLaunchArgv(t *testing.T) {
 	}
 	if !slices.Contains(o.PermissionsAllow, absRule("Read", filepath.Join(lay.PlannerRoot(), "**"))) {
 		t.Errorf("allow lacks the state root: %v", o.PermissionsAllow)
+	}
+}
+
+// The Planner's --name is its instance's: two state roots on one machine
+// get two names, while restarts and shift changes keep one root's name, the
+// one the sessions it dispatched were told.
+func TestName(t *testing.T) {
+	if a, b := NameFor("/tmp/iso-a/planner"), NameFor("/tmp/iso-b/planner"); a == b {
+		t.Errorf("two roots share the name %s", a)
+	}
+	if !regexp.MustCompile(`^planner-[0-9a-f]{6}$`).MatchString(NameFor("/x")) {
+		t.Errorf("name = %s", NameFor("/x"))
+	}
+	loc := time.FixedZone("CST", 8*3600)
+	now := time.Date(2026, 11, 3, 20, 0, 0, 0, loc)
+	sess := &fakeSessions{}
+	a, lay := newTestAgent(t, sess, &now)
+	a.turns = &fakeTurns{reply: "## 进行中\n无"}
+	want := NameFor(lay.PlannerRoot())
+	a.reconcile(context.Background()) // spawn
+	sess.st.SessionID = "s1"
+	now = time.Date(2026, 11, 4, 8, 30, 0, 0, loc)
+	a.reconcile(context.Background()) // shift change
+	if len(sess.names) != 2 || sess.names[0] != want || sess.names[1] != want || a.Name() != want {
+		t.Errorf("names = %q, Name() = %s, want %s", sess.names, a.Name(), want)
+	}
+	if again := New(Config{Layout: lay, Sessions: sess}); again.Name() != want {
+		t.Errorf("after a restart: %s, want %s", again.Name(), want)
 	}
 }
 
@@ -472,6 +506,55 @@ func TestTurnSourceJudgement(t *testing.T) {
 		if got, unrun := a.OutsideTurn(), a.UnrunTurn(); got != tc.outside || unrun != tc.unrun {
 			t.Errorf("%v: outside %q, unrun %v; want %q, %v", tc.sources, got, unrun, tc.outside, tc.unrun)
 		}
+	}
+}
+
+// heldTurns keeps every turn open until the test ends it.
+type heldTurns struct {
+	fakeTurns
+	dones []func(string, error)
+}
+
+func (h *heldTurns) SubmitPlanner(_ string, _ Source, text string, _ sessionview.AgentOpts, done func(string, error)) (bool, error) {
+	h.sent = append(h.sent, text)
+	h.dones = append(h.dones, done)
+	return false, nil
+}
+
+// TestWakeBatches: the blocks of one wake go one turn each, the next once
+// the previous turn ended (a queued block would merge with the one before
+// it); one the Planner no longer takes is said in the conversation and
+// told to the caller, who keeps it.
+func TestWakeBatches(t *testing.T) {
+	now := time.Now()
+	a, _ := newTestAgent(t, &fakeSessions{}, &now)
+	h := &heldTurns{}
+	a.turns = h
+	var sent []string
+	told := func(i int, err error) { sent = append(sent, fmt.Sprint(i, " ", err)) }
+	if err := a.Wake(SourceScout, told, "<b1>", "<b2>", "<b3>"); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.sent) != 1 || !strings.HasPrefix(h.sent[0], "<b1>") {
+		t.Fatalf("sent before the first turn ended: %q", h.sent)
+	}
+	h.dones[0]("", errors.New("turn failed")) // a failed turn still passes on
+	if len(h.sent) != 2 || !strings.HasPrefix(h.sent[1], "<b2>") {
+		t.Fatalf("after the first turn: %q", h.sent)
+	}
+	h.dones[0]("", nil) // a second call is no second send
+	if len(h.sent) != 2 {
+		t.Fatalf("a repeated done sent again: %q", h.sent)
+	}
+	if err := a.SetStopped(true); err != nil {
+		t.Fatal(err)
+	}
+	h.dones[1]("", nil)
+	if len(h.sent) != 2 || len(h.notes) != 1 || !strings.Contains(h.notes[0], "还有 1 批") {
+		t.Errorf("stopped mid-chain: sent %d, notes %q", len(h.sent), h.notes)
+	}
+	if want := []string{"1 <nil>", "2 " + ErrStopped.Error()}; !slices.Equal(sent, want) {
+		t.Errorf("told the caller %q, want %q", sent, want)
 	}
 }
 
