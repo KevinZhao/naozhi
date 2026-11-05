@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -171,10 +172,18 @@ func TestRemoteSend_NoRefreshAfterAReset(t *testing.T) {
 	}
 }
 
-// deadlineNode is a node.Conn whose Send records how long its ctx allows.
+// deadlineNode is a node.Conn whose Send and FetchBackends record how long
+// their ctx allows.
 type deadlineNode struct {
 	fakeCapNode
-	budget chan time.Duration
+	budget       chan time.Duration
+	lookupBudget chan time.Duration
+}
+
+func (n *deadlineNode) FetchBackends(ctx context.Context) (json.RawMessage, error) {
+	dl, _ := ctx.Deadline()
+	n.lookupBudget <- time.Until(dl)
+	return n.backends, nil
 }
 
 func (n *deadlineNode) Send(ctx context.Context, _ node.SendRequest) (node.SendResult, error) {
@@ -196,6 +205,27 @@ func TestRemoteSend_WaitsOutASpawn(t *testing.T) {
 		defer hub.Shutdown()
 
 		hub.handleSend(newTestWSClient(), node.ClientMsg{Type: "send", Key: key, Text: "hi", Node: "remote", ID: "r1"})
+		if got := <-nc.budget; got < atLeast {
+			t.Errorf("WS remote send RPC budget = %v, want about %v", got, remoteSendTimeout)
+		}
+	})
+	// The backend lookup before a send keeps its own remoteNodeProxyTimeout,
+	// so a stuck node fails it in 10s and the lookup does not eat into the
+	// send's budget.
+	t.Run("ws/backend", func(t *testing.T) {
+		nc := &deadlineNode{
+			fakeCapNode:  fakeCapNode{id: "remote", backends: json.RawMessage(`{"backends":[{"id":"kiro"}]}`)},
+			budget:       make(chan time.Duration, 1),
+			lookupBudget: make(chan time.Duration, 1),
+		}
+		router := session.NewRouter(session.RouterConfig{})
+		hub := newHubForTest(t, HubOptions{Router: router, Nodes: newNodeRegistry(map[string]node.Conn{"remote": nc})}, sendEngineOpts{})
+		defer hub.Shutdown()
+
+		hub.handleSend(newTestWSClient(), node.ClientMsg{Type: "send", Key: key, Text: "hi", Node: "remote", Backend: "kiro", ID: "r1"})
+		if got := <-nc.lookupBudget; got > remoteNodeProxyTimeout {
+			t.Errorf("WS backend lookup budget = %v, want at most %v", got, remoteNodeProxyTimeout)
+		}
 		if got := <-nc.budget; got < atLeast {
 			t.Errorf("WS remote send RPC budget = %v, want about %v", got, remoteSendTimeout)
 		}

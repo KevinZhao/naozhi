@@ -341,16 +341,18 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 					Error: "internal error"}))
 			}
 		}()
-		ctx, cancel := context.WithTimeout(h.ctx, remoteSendTimeout)
-		defer cancel()
 		req := node.SendRequest{
 			Key: capturedKey, Text: msg.Text, Workspace: msg.Workspace,
 			Backend: msg.Backend, ResumeID: msg.ResumeID, TurnID: msg.SendID,
 		}
+		bctx, bcancel := context.WithTimeout(h.ctx, remoteNodeProxyTimeout)
+		err := remoteBackend(bctx, nc, req.Backend)
+		bcancel()
 		var res node.SendResult
-		err := remoteBackend(ctx, nc, req.Backend)
 		if err == nil {
+			ctx, cancel := context.WithTimeout(h.ctx, remoteSendTimeout)
 			res, err = nc.Send(ctx, req)
+			cancel()
 		}
 		switch {
 		case errors.Is(err, node.ErrSendUnknown):
