@@ -17,7 +17,7 @@
 // refreshTasks() (a Planner turn ending, the page's slow tick).
 import { NZ_CONTRACT } from './contract.js';
 import { esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
-import { formatAbsTime, timeAgo } from './utilities.js';
+import { formatAbsTime, formatMonthDayTime, timeAgo } from './utilities.js';
 
 // Mounted containers; detached ones are dropped at the next refresh.
 const mounts = new Set();
@@ -34,8 +34,6 @@ const SECTIONS = [
   { id: 'remind', label: '待提醒', states: ['remind'] },
 ];
 
-const pad = (n) => (n < 10 ? '0' + n : '' + n);
-function mdhm(d) { return pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()); }
 
 const stopped = (t) => t.state === 'done' && t.by === 'user' && t.why === STOPPED_WHY;
 
@@ -75,7 +73,7 @@ function cardHtml(t) {
   else if (t.by && BY_LABEL[t.by]) meta.push(esc(BY_LABEL[t.by]) + (t.why ? '：' + esc(t.why) : ''));
   if (t.due) {
     const d = new Date(t.due);
-    if (!isNaN(d.getTime())) meta.push((state === 'remind' ? '到点提醒 ' : '到期 ') + esc(mdhm(d)));
+    if (!isNaN(d.getTime())) meta.push((state === 'remind' ? '到点提醒 ' : '到期 ') + esc(formatMonthDayTime(d.getTime())));
   }
   if (t.close_when) meta.push('完成条件：' + esc(t.close_when));
   return '<div class="tk-card tk-s-' + state + (state === 'done' ? ' done' : '') + '" data-id="' + escAttr(t.id) + '" role="listitem">' +

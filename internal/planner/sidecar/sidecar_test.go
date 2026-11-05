@@ -30,8 +30,11 @@ func TestSidecarRetention(t *testing.T) {
 
 	s = Open(dir, clock)
 	m, ok := s.Get(key)
-	if !ok || m.V != Version || m.Purpose != PurposeTask || !m.DispatchedByPlanner() || !m.Created.Equal(now) || s.Purpose(key) != PurposeTask {
+	if !ok || m.V != Version || m.Purpose != PurposeTask || !m.DispatchedByPlanner() || !m.Created.Equal(now) {
 		t.Fatalf("reopened = %+v, %v", m, ok)
+	}
+	if p, title := s.Purpose(key); p != PurposeTask || title != "写 hello" {
+		t.Fatalf("Purpose = %q, %q", p, title)
 	}
 
 	alive := true
@@ -79,8 +82,8 @@ func TestSidecarNewerVersionKept(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := Open(dir, func() time.Time { return now })
-	if s.Purpose(key) != PurposeTask {
-		t.Fatalf("purpose = %q", s.Purpose(key))
+	if p, _ := s.Purpose(key); p != PurposeTask {
+		t.Fatalf("purpose = %q", p)
 	}
 	s.Sweep(func(string) bool { return false })
 	if err := s.Put(Meta{Key: key, Purpose: PurposeTask}); err == nil {

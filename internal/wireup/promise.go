@@ -24,7 +24,7 @@ func promiseSource(p promise.Promise) string { return "promise:" + p.ID }
 
 // Due implements promise.Reminder.
 func (r PromiseReminder) Due(p promise.Promise) {
-	at := p.Due.Local().Format("01-02 15:04")
+	at := p.Due.Local().Format("1/2 15:04")
 	if r.Notify != nil {
 		why := "承诺到期 " + at
 		if p.CloseWhen != "" {

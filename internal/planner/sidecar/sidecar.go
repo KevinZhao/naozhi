@@ -285,10 +285,11 @@ func (s *Store) update(key string, fn func(*Meta) bool) (bool, error) {
 	return true, nil
 }
 
-// Purpose is key's purpose ("" without a sidecar).
-func (s *Store) Purpose(key string) string {
+// Purpose is key's purpose and the title it was dispatched with (both ""
+// without a sidecar).
+func (s *Store) Purpose(key string) (purpose, title string) {
 	m, _ := s.Get(key)
-	return m.Purpose
+	return m.Purpose, m.Title
 }
 
 // Sweep marks the sidecars whose session live no longer reports as retired,
