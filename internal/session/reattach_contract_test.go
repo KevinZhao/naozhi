@@ -45,3 +45,20 @@ func TestTryReattachProcessNoCallback_SendMuGuard(t *testing.T) {
 		t.Error("process was not swapped after sendMu became free")
 	}
 }
+
+// TestReattachKeepsKnownSessionID: a shim that has not seen an init or
+// result frame since a --resume spawn reports no session ID; reattaching
+// must keep the stored one, or the next save drops the session.
+func TestReattachKeepsKnownSessionID(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "planner:main"}
+	s.setSessionID("e6252386")
+	s.ReattachProcessNoCallback(NewTestProcess(), "")
+	if got := s.getSessionID(); got != "e6252386" {
+		t.Fatalf("session ID = %q, want the stored one", got)
+	}
+	s.ReattachProcessNoCallback(NewTestProcess(), "f00d")
+	if got := s.getSessionID(); got != "f00d" {
+		t.Fatalf("session ID = %q, want the shim's", got)
+	}
+}

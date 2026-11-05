@@ -57,7 +57,12 @@ func (s *ManagedSession) isAlive() bool {
 // logical race even though each Store is atomic.
 func (s *ManagedSession) ReattachProcessNoCallback(proc processIface, sessionID string) {
 	snapshot := s.attachProcessAndSnapshotPersisted(proc)
-	s.setSessionID(sessionID)
+	// A shim learns the ID only from init/result frames, so one resumed with
+	// --resume that has not run a turn since knows none; the stored ID stays,
+	// or the next save would drop the session from the store.
+	if sessionID != "" {
+		s.setSessionID(sessionID)
+	}
 	storeAtomicString(&s.deathReason, "")
 	s.lastActive.Store(time.Now().UnixNano())
 	// len(snapshot) > 0 implies proc != nil (snapshot is nil for nil proc).

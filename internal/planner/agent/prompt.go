@@ -10,7 +10,7 @@ import (
 
 // PromptVersion names the system prompt below; a surviving session keeps the
 // version it spawned with until its next shift change.
-const PromptVersion = 10
+const PromptVersion = 11
 
 // systemPrompt is the Planner's --append-system-prompt (docs/rfc/planner.md
 // §6.4): role, what it may read, the action-block contract (§6.2) and the
