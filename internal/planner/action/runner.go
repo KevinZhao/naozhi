@@ -121,11 +121,10 @@ type Runner struct {
 	grace time.Duration
 
 	// last is when the previous Planner reply came: the next one's turn ran
-	// after it. turnFrom is, per dispatched session, when its previous turn
-	// ended: its next report comes after it.
-	mu       sync.Mutex
-	last     time.Time
-	turnFrom map[string]time.Time
+	// after it. mu also serializes the dispatched sessions' turn ends as
+	// their sidecars record them.
+	mu   sync.Mutex
+	last time.Time
 
 	// doneTold is the tasks whose done block got the reminder of the
 	// promises citing them; endTold the tasks told of a turn that ended
@@ -135,12 +134,12 @@ type Runner struct {
 	endTold  map[string]bool
 }
 
-// ended is a dispatched session's turn end: the reply, the span a report of
-// it may come in (from on), and how long a busy Planner can hold the check
-// off (until).
+// ended is a dispatched session's turn end: the reply, when the turn ended
+// (at), the span a report of it may come in (from on), and how long a busy
+// Planner can hold the check off (until).
 type ended struct {
-	key, text   string
-	from, until time.Time
+	key, text       string
+	at, from, until time.Time
 }
 
 const (
@@ -180,7 +179,7 @@ func New(cfg Config) *Runner {
 	// Reports older than the runner (history restored at startup) were the
 	// previous run's to check.
 	r := &Runner{cfg: cfg, ch: make(chan reply, queueLen), endCh: make(chan ended, queueLen), grace: endGrace,
-		last: cfg.Now(), turnFrom: map[string]time.Time{}, doneTold: map[string]bool{}, endTold: map[string]bool{}}
+		last: cfg.Now(), doneTold: map[string]bool{}, endTold: map[string]bool{}}
 	if cfg.Inbox != nil {
 		cfg.Inbox.HandleDecisions(HandlerAsk, r.decideAsk)
 		open, _ := cfg.Inbox.List(0)
@@ -227,8 +226,10 @@ func (r *Runner) Result(key, text string) {
 	}
 }
 
-// Run runs the queued replies until ctx ends.
+// Run runs the queued replies until ctx ends, after queuing again the turn
+// ends a restart left unchecked (recheck).
 func (r *Runner) Run(ctx context.Context) {
+	r.recheck()
 	for {
 		select {
 		case <-ctx.Done():
@@ -251,16 +252,37 @@ func (r *Runner) taskEnded(key, text string) {
 	if r.cfg.Tasks == nil || r.cfg.Reports == nil || r.cfg.Sessions == nil {
 		return
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	m, ok := r.cfg.Sessions.Get(key)
 	if !ok || !m.DispatchedByPlanner() {
 		return
 	}
 	now := r.cfg.Now()
-	r.mu.Lock()
-	from := cmp.Or(r.turnFrom[key], m.Created)
-	r.turnFrom[key] = now
-	r.mu.Unlock()
-	r.later(ended{key: key, text: text, from: from, until: now.Add(endWait)})
+	e := ended{key: key, text: textutil.TruncateRunes(text, endTextRunes), at: now, from: m.Created, until: now.Add(endWait)}
+	if m.Turn != nil {
+		e.from = m.Turn.Ended
+	}
+	// On disk until checked: a restart in between checks it again.
+	if _, err := r.cfg.Sessions.SetTurn(key, sidecar.Turn{Ended: e.at, Check: true, From: e.from, Text: e.text}); err != nil {
+		slog.Warn("planner actions: a dispatched session's turn end not saved", "key", key, "err", err)
+	}
+	r.later(e)
+}
+
+// recheck queues a check of the turn ends the previous run recorded and
+// never checked (cut short by a restart), with endWait from now: a report
+// may still be waiting behind a Planner turn the restart started.
+func (r *Runner) recheck() {
+	if r.cfg.Tasks == nil || r.cfg.Reports == nil || r.cfg.Sessions == nil {
+		return
+	}
+	now := r.cfg.Now()
+	for _, m := range r.cfg.Sessions.List() {
+		if t := m.Turn; t != nil && t.Check && m.DispatchedByPlanner() {
+			r.later(ended{key: m.Key, text: t.Text, at: t.Ended, from: t.From, until: now.Add(endWait)})
+		}
+	}
 }
 
 // later queues e for a check once grace passes.
@@ -285,22 +307,21 @@ func (r *Runner) checkEnded(e ended) {
 			slog.Error("planner actions: turn-end check panicked", "panic", p)
 		}
 	}()
-	if r.endTold[e.key] {
-		return
-	}
 	tasks := r.cfg.Tasks.List()
 	i := slices.IndexFunc(tasks, func(t task.Task) bool { return t.ID == e.key })
-	if i < 0 {
-		return
-	}
-	t, now := tasks[i], r.cfg.Now()
-	switch {
-	case t.State != task.Doing, slices.Contains(r.cfg.Reports(e.from, now), e.key):
-		return
-	case r.cfg.PlannerBusy != nil && r.cfg.PlannerBusy() && now.Before(e.until):
+	now := r.cfg.Now()
+	due := i >= 0 && !r.endTold[e.key] && tasks[i].State == task.Doing && !slices.Contains(r.cfg.Reports(e.from, now), e.key)
+	if due && r.cfg.PlannerBusy != nil && r.cfg.PlannerBusy() && now.Before(e.until) {
 		r.later(e)
 		return
 	}
+	if err := r.cfg.Sessions.Checked(e.key, e.at); err != nil {
+		slog.Warn("planner actions: a dispatched session's turn end not marked checked", "key", e.key, "err", err)
+	}
+	if !due {
+		return
+	}
+	t := tasks[i]
 	r.endTold[e.key] = true
 	text := strings.TrimSpace(textutil.TruncateRunes(e.text, endTextRunes))
 	if text == "" {

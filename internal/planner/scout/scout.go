@@ -76,15 +76,16 @@ type Config struct {
 	Session   Session
 	// Wake hands the new findings to the Planner (agent.Agent.Wake from
 	// agent.SourceScout), one block per batch, each batch a turn of its
-	// own. ErrPlannerOff (wrapped) means the Planner will not take them:
-	// they are kept on disk only, as seen. Any other error leaves the
-	// cursors and the seen table as they were, so the next run finds the
-	// same findings and wakes the Planner with them.
-	Wake func(blocks ...string) error
+	// own; sent is told how each later batch went. ErrPlannerOff (wrapped)
+	// means the Planner will not take them: they are kept on disk only, as
+	// seen. Any other error keeps them pending: the next run hands them
+	// over again. The first batch's also leaves the cursors and the seen
+	// table as they were.
+	Wake func(sent func(batch int, err error), blocks ...string) error
 	// Brief hands a pre-meeting brief's material to the Planner
 	// (agent.Agent.Wake from agent.SourceBriefing), with Wake's errors;
 	// nil runs no brief.
-	Brief func(blocks ...string) error
+	Brief func(sent func(batch int, err error), blocks ...string) error
 	// PlannerOn reports whether the Planner is on and not stopped: a brief
 	// is only for it, so none starts while it is off. nil is always on.
 	PlannerOn func() bool
@@ -120,6 +121,11 @@ type Scout struct {
 	last *Run
 	// started is the last run's start, scheduled or manual.
 	started time.Time
+
+	// pendMu guards pending.json; sending is the pending findings a wake
+	// of this process still has to submit, which a run leaves to it.
+	pendMu  sync.Mutex
+	sending map[string]bool
 }
 
 // New loads the scout's state. It starts nothing: Run does.
@@ -127,7 +133,7 @@ func New(cfg Config) *Scout {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	s := &Scout{cfg: cfg, st: store{dir: cfg.Layout.PlannerScoutRoot()}}
+	s := &Scout{cfg: cfg, st: store{dir: cfg.Layout.PlannerScoutRoot()}, sending: map[string]bool{}}
 	if s.st.dir != "" {
 		if r, ok := s.st.lastRun(); ok {
 			s.last, s.started = &r, r.Started
@@ -359,15 +365,31 @@ func (s *Scout) run(ctx context.Context, id, trig string, started time.Time) (r 
 		r.Findings = append(r.Findings, RunFinding{Finding: f, New: isNew[f.key()]})
 	}
 	r.State, r.New = StateOK, len(fresh)
-	if len(fresh) > 0 && s.cfg.Wake != nil {
-		switch err := s.cfg.Wake(blocks(id, fresh)...); {
+	var send []Finding
+	if s.cfg.Wake != nil {
+		if send, err = s.queue(fresh); err != nil {
+			return fail(fmt.Errorf("save pending findings: %w", err))
+		}
+	}
+	if len(send) > 0 {
+		if len(send) > len(fresh) {
+			slog.Info("scout: findings an earlier wake did not hand over go again", "run", id, "pending", len(send)-len(fresh))
+		}
+		batches := slices.Collect(slices.Chunk(send, batchFindings))
+		err := s.cfg.Wake(func(i int, err error) { s.settle(batches[i], err) }, blocks(id, batches)...)
+		if err == nil {
+			s.settle(batches[0], nil)
+		} else {
+			s.settle(send, err)
+		}
+		switch {
 		case err == nil:
 			r.Woke = true
 		case errors.Is(err, ErrPlannerOff):
 			slog.Info("scout: Planner off; findings kept on disk", "run", id, "new", len(fresh))
 		default:
-			// Not delivered: the next run reads the same span and finds
-			// them again.
+			// Not delivered: they stay pending, and the next run reads
+			// the same span again.
 			slog.Warn("scout: Planner not woken; the next run reports the findings again", "run", id, "new", len(fresh), "err", err)
 			r.Error = textutil.TruncateRunes("Planner 没有收到："+err.Error(), errRunes)
 			return r, true
@@ -459,15 +481,59 @@ func unlisted(tools, servers []string) []string {
 // one notify, so none is past the cap.
 const batchFindings = 10
 
-// blocks is the Planner's messages for a run's new findings, batchFindings
-// a message.
-func blocks(id string, fresh []Finding) []string {
-	n := (len(fresh) + batchFindings - 1) / batchFindings
-	out := make([]string, 0, n)
-	for batch := range slices.Chunk(fresh, batchFindings) {
-		out = append(out, block(id, batch, len(out)+1, n))
+// blocks is the Planner's messages for a run's new findings, a message a
+// batch.
+func blocks(id string, batches [][]Finding) []string {
+	out := make([]string, 0, len(batches))
+	for _, batch := range batches {
+		out = append(out, block(id, batch, len(out)+1, len(batches)))
 	}
 	return out
+}
+
+// queue adds fresh to the pending findings on disk and returns the ones to
+// hand to the Planner now: all pending but those a wake of this process
+// still has to submit.
+func (s *Scout) queue(fresh []Finding) ([]Finding, error) {
+	s.pendMu.Lock()
+	defer s.pendMu.Unlock()
+	pending := s.st.pending()
+	for _, f := range fresh {
+		if !slices.ContainsFunc(pending, func(p Finding) bool { return p.key() == f.key() }) {
+			pending = append(pending, f)
+		}
+	}
+	if err := s.st.savePending(pending); err != nil {
+		return nil, err
+	}
+	var send []Finding
+	for _, f := range pending {
+		if !s.sending[f.key()] {
+			s.sending[f.key()] = true
+			send = append(send, f)
+		}
+	}
+	return send, nil
+}
+
+// settle ends batch's wake: submitted (nil) or never to be taken
+// (ErrPlannerOff), it is no longer pending; otherwise it stays pending for
+// the next run.
+func (s *Scout) settle(batch []Finding, err error) {
+	s.pendMu.Lock()
+	defer s.pendMu.Unlock()
+	for _, f := range batch {
+		delete(s.sending, f.key())
+	}
+	if err != nil && !errors.Is(err, ErrPlannerOff) {
+		return
+	}
+	pending := slices.DeleteFunc(s.st.pending(), func(p Finding) bool {
+		return slices.ContainsFunc(batch, func(f Finding) bool { return f.key() == p.key() })
+	})
+	if err := s.st.savePending(pending); err != nil {
+		slog.Warn("scout: pending findings not saved; handed over findings may go again", "err", err)
+	}
 }
 
 // block is the Planner's message for batch i of n of a run's new findings:

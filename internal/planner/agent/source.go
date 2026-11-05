@@ -97,9 +97,11 @@ func (a *Agent) UnrunTurn() bool {
 // answer), followed by the snapshot. A block goes once the previous one's
 // turn ended, so queued blocks never merge into one turn. It gets no
 // receipt. ErrOff, ErrStopped or ErrNotReady when the Planner cannot take
-// the first: the caller keeps what it found. A later block it cannot take
-// is said in the conversation, so no finding goes unseen.
-func (a *Agent) Wake(src Source, blocks ...string) error {
+// the first: the caller keeps what it found. sent (nil for none) is told
+// how each later block went, nil once submitted: one the Planner cannot
+// take gets the error, and so does every block after it, for the caller to
+// keep; it is said in the conversation as well.
+func (a *Agent) Wake(src Source, sent func(block int, err error), blocks ...string) error {
 	if !a.cfg.Enabled {
 		return ErrOff
 	}
@@ -122,11 +124,14 @@ func (a *Agent) Wake(src Source, blocks ...string) error {
 			return ErrTooLong
 		}
 	}
-	return a.wakeChain(src, blocks)
+	if sent == nil {
+		sent = func(int, error) {}
+	}
+	return a.wakeChain(src, sent, blocks, 0)
 }
 
-// wakeChain submits blocks[0] and chains the rest on its turn's end.
-func (a *Agent) wakeChain(src Source, blocks []string) error {
+// wakeChain submits blocks[i] and chains the rest on its turn's end.
+func (a *Agent) wakeChain(src Source, sent func(int, error), blocks []string, i int) error {
 	a.mu.Lock()
 	turns, stopped, opts := a.turns, a.state.Stopped, a.opts
 	a.mu.Unlock()
@@ -134,19 +139,28 @@ func (a *Agent) wakeChain(src Source, blocks []string) error {
 		return ErrStopped
 	}
 	var done func(string, error)
-	if rest := blocks[1:]; len(rest) > 0 {
+	if next := i + 1; next < len(blocks) {
 		var once sync.Once
 		done = func(string, error) {
 			once.Do(func() {
-				if err := a.wakeChain(src, rest); err != nil {
-					slog.Warn("planner: later wake blocks not sent", "source", src, "blocks", len(rest), "err", err)
-					a.Note(fmt.Sprintf("%s还有 %d 批内容没有交给 Planner：%v", cmp.Or(outsideLabels[src], "网关"), len(rest), err))
+				err := a.wakeChain(src, sent, blocks, next)
+				if err == nil {
+					return
+				}
+				rest := len(blocks) - next
+				slog.Warn("planner: later wake blocks not sent", "source", src, "blocks", rest, "err", err)
+				a.Note(fmt.Sprintf("%s还有 %d 批内容没有交给 Planner：%v", cmp.Or(outsideLabels[src], "网关"), rest, err))
+				for j := next; j < len(blocks); j++ {
+					sent(j, err)
 				}
 			})
 		}
 	}
 	// The block leads: the logged bubble keeps only the message's head, and
 	// the page marks the turn by it.
-	_, err := turns.SubmitPlanner(Key, src, blocks[0]+"\n\n"+a.Snapshot(), opts, done)
+	_, err := turns.SubmitPlanner(Key, src, blocks[i]+"\n\n"+a.Snapshot(), opts, done)
+	if err == nil && i > 0 {
+		sent(i, nil)
+	}
 	return err
 }

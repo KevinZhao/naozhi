@@ -48,14 +48,21 @@ func ScoutSession(router *session.Router) scout.Session {
 // (agent.SourceBriefing) over the Planner: each block as a turn from src.
 // The Planner off or stopped, or a block it will never take, is
 // scout.ErrPlannerOff, so the findings count as seen; anything else (not
-// started yet, busy, closing) is worth another try at the next run.
-func ScoutWake(a *agent.Agent, src agent.Source) func(blocks ...string) error {
-	return func(blocks ...string) error {
-		err := a.Wake(src, blocks...)
+// started yet, busy, closing) is worth another try at the next run. A later
+// block's outcome reaches sent the same way.
+func ScoutWake(a *agent.Agent, src agent.Source) func(sent func(block int, err error), blocks ...string) error {
+	off := func(err error) error {
 		if errors.Is(err, agent.ErrOff) || errors.Is(err, agent.ErrStopped) || errors.Is(err, agent.ErrTooLong) {
 			return fmt.Errorf("%w: %w", scout.ErrPlannerOff, err)
 		}
 		return err
+	}
+	return func(sent func(int, error), blocks ...string) error {
+		var told func(int, error)
+		if sent != nil {
+			told = func(i int, err error) { sent(i, off(err)) }
+		}
+		return off(a.Wake(src, told, blocks...))
 	}
 }
 

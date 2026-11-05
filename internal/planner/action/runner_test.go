@@ -511,6 +511,46 @@ func TestTaskEndedAcrossShiftChange(t *testing.T) {
 	}
 }
 
+// TestTaskEndedAcrossRestart: a turn end a restart cut short of its check
+// (the grace, a busy Planner) is checked by the next run, from the sidecar,
+// and only once; a checked one is not checked again.
+func TestTaskEndedAcrossRestart(t *testing.T) {
+	r, g, _, side, dir := newRunner(t)
+	r.cfg.Tasks = task.New(task.Config{Sessions: side})
+	r.cfg.Reports = func(time.Time, time.Time) []string { return nil }
+	r.Handle(block(`{"type":"dispatch","workspace":"` + filepath.Base(dir) + `","title":"iso 写 hello","model":"","message":"写一个 hello.md"}`))
+	key := g.spawned[0]
+	g.told = nil
+	r.Result(key, "hello.md 写好了") // the restart comes before its check
+
+	cfg := r.cfg
+	cfg.Sessions = sidecar.Open(g.sideDir, nil)
+	cfg.Tasks = task.New(task.Config{Sessions: cfg.Sessions})
+	for run := range 2 {
+		r2 := New(cfg)
+		r2.grace = 0
+		r2.recheck()
+		wait := 50 * time.Millisecond
+		if run == 0 {
+			wait = 5 * time.Second
+		}
+		select {
+		case e := <-r2.endCh:
+			if run > 0 {
+				t.Fatalf("checked again after the receipt: %+v", e)
+			}
+			r2.checkEnded(e)
+		case <-time.After(wait):
+			if run == 0 {
+				t.Fatal("the turn end the restart cut short was never checked")
+			}
+		}
+		if len(g.told) != 1 || !strings.Contains(g.told[0], key) || !strings.Contains(g.told[0], "hello.md 写好了") {
+			t.Fatalf("run %d: told = %q", run, g.told)
+		}
+	}
+}
+
 // TestStatusFormatParses: the format a receipt spells out is a block Parse
 // accepts as written, with only why to fill in.
 func TestStatusFormatParses(t *testing.T) {

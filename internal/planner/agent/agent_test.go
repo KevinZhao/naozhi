@@ -503,13 +503,16 @@ func (h *heldTurns) SubmitPlanner(_ string, _ Source, text string, _ sessionview
 
 // TestWakeBatches: the blocks of one wake go one turn each, the next once
 // the previous turn ended (a queued block would merge with the one before
-// it); one the Planner no longer takes is said in the conversation.
+// it); one the Planner no longer takes is said in the conversation and
+// told to the caller, who keeps it.
 func TestWakeBatches(t *testing.T) {
 	now := time.Now()
 	a, _ := newTestAgent(t, &fakeSessions{}, &now)
 	h := &heldTurns{}
 	a.turns = h
-	if err := a.Wake(SourceScout, "<b1>", "<b2>", "<b3>"); err != nil {
+	var sent []string
+	told := func(i int, err error) { sent = append(sent, fmt.Sprint(i, " ", err)) }
+	if err := a.Wake(SourceScout, told, "<b1>", "<b2>", "<b3>"); err != nil {
 		t.Fatal(err)
 	}
 	if len(h.sent) != 1 || !strings.HasPrefix(h.sent[0], "<b1>") {
@@ -529,6 +532,9 @@ func TestWakeBatches(t *testing.T) {
 	h.dones[1]("", nil)
 	if len(h.sent) != 2 || len(h.notes) != 1 || !strings.Contains(h.notes[0], "还有 1 批") {
 		t.Errorf("stopped mid-chain: sent %d, notes %q", len(h.sent), h.notes)
+	}
+	if want := []string{"1 <nil>", "2 " + ErrStopped.Error()}; !slices.Equal(sent, want) {
+		t.Errorf("told the caller %q, want %q", sent, want)
 	}
 }
 

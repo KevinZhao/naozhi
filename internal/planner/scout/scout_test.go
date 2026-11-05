@@ -242,7 +242,7 @@ func TestRun(t *testing.T) {
 			keys, prompts, gotOpts = append(keys, key), append(prompts, text), opts
 			return reply, []string{"mcp__slack-mcp__get_unreads"}, nil
 		},
-		Wake: func(b ...string) error { woken = append(woken, b...); return nil },
+		Wake: func(_ func(int, error), b ...string) error { woken = append(woken, b...); return nil },
 		Now:  func() time.Time { return now },
 	})
 	ctx := context.Background()
@@ -317,7 +317,7 @@ func TestRunWakeAndCalendar(t *testing.T) {
 		Session: func(context.Context, string, sessionview.AgentOpts, string) (string, []string, error) {
 			return reply, nil, sessErr
 		},
-		Wake: func(...string) error { woken++; return wakeErr },
+		Wake: func(func(int, error), ...string) error { woken++; return wakeErr },
 		Now:  func() time.Time { return now },
 	})
 	steps := []struct {
@@ -436,7 +436,7 @@ func TestRunConflictsAndMarkAs(t *testing.T) {
 		Session: func(context.Context, string, sessionview.AgentOpts, string) (string, []string, error) {
 			return reply, tools, nil
 		},
-		Wake: func(b ...string) error { woken = append(woken, b...); return nil },
+		Wake: func(_ func(int, error), b ...string) error { woken = append(woken, b...); return nil },
 		Now:  func() time.Time { return now },
 	})
 	want := "at:" + now.Add(90*time.Minute).UTC().Format(time.RFC3339)
@@ -484,7 +484,7 @@ func TestRunBatches(t *testing.T) {
 		Session: func(context.Context, string, sessionview.AgentOpts, string) (string, []string, error) {
 			return reply, nil, nil
 		},
-		Wake: func(b ...string) error { calls = append(calls, b); return nil },
+		Wake: func(_ func(int, error), b ...string) error { calls = append(calls, b); return nil },
 		Now:  func() time.Time { return now },
 	})
 	r, _ := s.run(context.Background(), runID(now), TriggerManual, now)
@@ -501,5 +501,70 @@ func TestRunBatches(t *testing.T) {
 		if n := strings.Count(b[0], id) + strings.Count(b[1], id); n != 1 {
 			t.Errorf("%s is in %d blocks", id, n)
 		}
+	}
+}
+
+// TestRunLaterBatchKept: a later batch stays pending on disk until it is
+// submitted, so one a restart cut off or the Planner refused goes to the
+// next run's wake, even with the cursors moved on; one still queued in this
+// process, submitted, or never to be taken does not.
+func TestRunLaterBatchKept(t *testing.T) {
+	busy := errors.New("服务忙")
+	for _, tc := range []struct {
+		name    string
+		later   error // what sent is told of batch 2; nil with told false is nothing yet
+		told    bool
+		restart bool
+		again   bool // batch 2's finding in the next run's wake
+	}{
+		{name: "restart before batch 2", restart: true, again: true},
+		{name: "batch 2 refused", later: busy, told: true, again: true},
+		{name: "batch 2 still queued"},
+		{name: "batch 2 submitted", told: true},
+		{name: "Planner stopped", later: fmt.Errorf("%w: stopped", ErrPlannerOff), told: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			mcp := filepath.Join(root, "mcp.json")
+			if err := os.WriteFile(mcp, []byte(`{"mcpServers":{"slack-mcp":{"command":"s"}}}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Date(2026, 11, 2, 10, 0, 0, 0, time.Local)
+			var items []string
+			for i := range 11 {
+				items = append(items, fmt.Sprintf(`{"source":"slack","kind":"fyi","id":"iso-%02d","title":"iso 消息 %d","from":"","at":"","due":"","link":"","why":""}`, i, i))
+			}
+			reply := `{"findings":[` + strings.Join(items, ",") + `],"cursors":{"email":"","slack":"s1","asana":""}}`
+			var calls [][]string
+			var sent func(int, error)
+			cfg := Config{
+				Layout:    datadir.FromRoot(root),
+				MCPConfig: mcp,
+				Session: func(context.Context, string, sessionview.AgentOpts, string) (string, []string, error) {
+					return reply, nil, nil
+				},
+				Wake: func(s func(int, error), b ...string) error { calls, sent = append(calls, b), s; return nil },
+				Now:  func() time.Time { return now },
+			}
+			s := New(cfg)
+			if r, _ := s.run(context.Background(), runID(now), TriggerManual, now); !r.Woke || len(calls) != 1 || len(calls[0]) != 2 {
+				t.Fatalf("first run = %+v, wakes %q", r, calls)
+			}
+			if tc.told {
+				sent(1, tc.later)
+			}
+			if tc.restart {
+				s = New(cfg)
+			}
+			now = now.Add(2 * time.Hour)
+			reply = `{"findings":[],"cursors":{"email":"","slack":"s2","asana":""}}`
+			if r, _ := s.run(context.Background(), runID(now), TriggerManual, now); r.State != StateOK {
+				t.Fatalf("next run = %+v", r)
+			}
+			next := fmt.Sprint(calls[1:])
+			if got := strings.Contains(next, `"id":"iso-10"`); got != tc.again || strings.Contains(next, `"id":"iso-00"`) {
+				t.Errorf("next run's wake = %q; want batch 2 again: %v", next, tc.again)
+			}
+		})
 	}
 }
