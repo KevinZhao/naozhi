@@ -64,6 +64,8 @@ type adoptedTurn struct {
 	resultSeq int64
 	done      chan struct{}
 	settle    sync.Once
+	// delivered: DeliverReplayedResult handed the replayed result on.
+	delivered atomic.Bool
 
 	mu  sync.Mutex
 	out AdoptedOutcome
@@ -230,6 +232,32 @@ func (p *Process) AdoptableAfter(w TurnWatermark, known bool) bool {
 		return false
 	}
 	return w.ShimPID != p.link.shimPID || p.adopted.resultSeq > w.Seq
+}
+
+// DeliverReplayedResult hands the reply of a turn that ended while naozhi was
+// down to the SetOnResult callback: its result sat in the backlog attach
+// drained, which the read loop never dispatches. after is the watermark the
+// caller took as that turn began (known=false: none), so a backlog ending in an
+// earlier turn's result, which the last run delivered already, is not handed on
+// again (AdoptableAfter). A mid-turn latch is not this method's: its result
+// arrives live. At most once per process; true when it delivered.
+func (p *Process) DeliverReplayedResult(after TurnWatermark, known bool) bool {
+	if p.AdoptedMidTurn() || !p.AdoptableAfter(after, known) {
+		return false
+	}
+	out, err := p.AdoptedOutcome(context.Background())
+	if err != nil || out.End != AdoptedEndResult {
+		return false
+	}
+	if res := out.Result; res.Aborted || res.IsError || res.CLIAborted() {
+		return false
+	}
+	fn := p.onResult.Load()
+	if fn == nil || !p.adopted.delivered.CompareAndSwap(false, true) {
+		return false
+	}
+	(*fn)(out.Result.Text)
+	return true
 }
 
 // AdoptedOutcome hands over the outcome of the turn that was in flight at

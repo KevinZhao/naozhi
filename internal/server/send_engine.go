@@ -134,6 +134,9 @@ func newSendEngine(o sendEngineOpts) *sendEngine {
 		notify:      notify,
 	}
 	e.plannerTurns.load(ctx, o.PlannerTurnsPath)
+	// The shims reconnected before the engine was built; a result held for
+	// a sink not set yet waits for it (session.Router.SetResultSink).
+	e.plannerTurns.redeliver(e.deliverReplayed)
 	return e
 }
 

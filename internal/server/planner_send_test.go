@@ -86,7 +86,9 @@ func TestPlannerTurnsCarriedOver(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var before plannerTurns
 	before.load(ctx, path)
-	o := &plannerOrigin{key: agent.Key, src: agent.SourceScout, turns: &before, notify: nopNotifier{}}
+	const mark = "4242:5"
+	o := &plannerOrigin{key: agent.Key, src: agent.SourceScout, turns: &before, notify: nopNotifier{},
+		mark: func(string) string { return mark }}
 	o.Begin(ctx, turn.TurnInfo{Role: turn.RoleHead})
 	cancel() // shutdown: the shim keeps the turn, the Send gives up
 	o.Finish(ctx, turn.Outcome{Err: context.Canceled})
@@ -95,6 +97,9 @@ func TestPlannerTurnsCarriedOver(t *testing.T) {
 	after.load(context.Background(), path)
 	if got := after.sources(agent.Key); !slices.Equal(got, []agent.Source{agent.SourceScout}) {
 		t.Fatalf("carried over = %q, want [scout]", got)
+	}
+	if got := after.restored[0].After; got != mark {
+		t.Errorf("carried-over watermark = %q, want %q: the next run cannot tell this turn's result", got, mark)
 	}
 	after.resulted("task:0a1b2c3d4e5f")
 	if got := after.sources(agent.Key); len(got) != 1 {

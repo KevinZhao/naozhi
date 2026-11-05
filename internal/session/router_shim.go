@@ -390,10 +390,11 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 		lastSeq := int64(0) // full replay on restart
 		mark := markTranscript(r.hist.claudeDir, r.hist.backendDirs, recBackendID, sess.Workspace(), state.SessionID)
 		spawnCtx, spawnCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
+		hooks := reconnectHooks(r.hist.claudeDir, r.hist.backendDirs, recBackendID, sess.Workspace(), state.SessionID, sess.WorkflowBoard().knownTaskIDs())
+		hooks.OnResult = r.resultHook(sess)
 		proc, replays, err := recWrapper.SpawnReconnect(
 			spawnCtx, state.Key, lastSeq, recWrapper.Protocol,
-			r.spawn.noOutputTimeout, r.spawn.totalTimeout,
-			reconnectHooks(r.hist.claudeDir, r.hist.backendDirs, recBackendID, sess.Workspace(), state.SessionID, sess.WorkflowBoard().knownTaskIDs()),
+			r.spawn.noOutputTimeout, r.spawn.totalTimeout, hooks,
 		)
 		spawnCancel()
 		if err != nil {
