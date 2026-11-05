@@ -120,6 +120,8 @@ async function render(el) {
     const data = await fetchJSON(NZ_CONTRACT.API.tasks);
     byId = new Map(((data && Array.isArray(data.tasks)) ? data.tasks : []).map((t) => [t.id, t]));
     nzBus.dispatchEvent(new CustomEvent('tasks:changed'));
+    // The Planner conversation's cards name tasks by these titles.
+    nzBus.dispatchEvent(new CustomEvent('tasks:list', { detail: data }));
     // The 已完成 fold keeps its open state across refreshes, and a menu in
     // use is not repainted under the pointer.
     if (el.contains(document.activeElement) && document.activeElement.matches('.tk-menu')) return;

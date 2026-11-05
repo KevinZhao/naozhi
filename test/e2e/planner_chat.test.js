@@ -1,9 +1,10 @@
 // E2E: talking on the Planner page and handing work to it (planner_chat.js,
 // planner_cards.js; planner RFC §10 D77, §10.1, §15.1 PR ⑬): the input box
-// sends to the Planner, the pushed receipt and the reply render and replace
-// the pending bubble; a handed-over session, a named session and the action
-// blocks render as cards (a dispatch runs at once, D88: its card has no
-// answer to give); a session card opens in the middle column
+// sends to the Planner, the gateway's "收到，正在看" shows by the box until
+// the reply to that message comes (D91), not another turn's; a handed-over session, a named
+// session and the action blocks render as cards (a dispatch runs at once,
+// D88: its card has no answer to give; a task with no name yet shows no
+// key); a session card opens in the middle column
 // under the breadcrumb (§15.7 Q7: no 返回 Planner, its status line unnamed,
 // no 交给 Planner), shows its milestones and then its raw record, answers
 // its questions and sends to that session, and goes back; an unlisted
@@ -109,13 +110,17 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     const dispatch = reply.locator('.pl-act-dispatch').first();
     await expect(dispatch.locator('.pl-act-h')).toHaveText('派出会话 · iso 整理周报');
     await expect(dispatch).toContainText('把本周合并的 PR 整理成周报');
-    await expect(dispatch.locator('.pl-act-note')).toHaveText('派出后直接执行，可在"任务"里停止');
+    await expect(dispatch).not.toContainText('可在"任务"里停止');
     await expect(reply.locator('.pl-act-dispatch button')).toHaveCount(0);
     await expect(reply.locator('.pl-act-bad .pl-act-h')).toHaveText('看不懂的动作块');
     await expect(reply.locator('.pl-act-promise')).toContainText('iso 周五前提醒你看周报');
     // The Planner's judgment of a task (§15.4 status).
     await expect(reply.locator('.pl-act-status .pl-act-h')).toHaveText('Planner 判断 · 已完成');
     await expect(reply.locator('.pl-act-status')).toContainText('iso 它汇报周报写好了');
+    // Its task is neither listed nor in 任务 yet: no 任务 row, never the key;
+    // its session card reads 会话.
+    await expect(reply.locator('.pl-act-status dt')).toHaveText(['依据']);
+    await expect(reply.locator('.pl-scard[data-key="' + TASK + '"] .pl-scard-name')).toHaveText('会话');
     await expect(reply.locator('code[data-lang="naozhi-action"]')).toHaveCount(0);
     await expect(page.locator('#pl-cards')).toBeHidden();
 
@@ -129,13 +134,24 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     await expect.poll(() => mock.plannerSendCalls).toEqual([{ text: 'iso 现在都在干什么？' }]);
     await expect(page.locator('#pl-stream .pl-pending')).toHaveText(/iso 现在都在干什么？/);
     await expect(page.locator('#pl-input')).toHaveValue('');
+    await expect(page.locator('#pl-target-note')).toHaveText('收到，正在看');
     conn.send({ type: 'event', key: PLANNER, event: { type: 'system', summary: '收到，正在看', time: Date.now() } });
-    await expect(page.locator('#pl-stream .event.system')).toHaveText(/收到，正在看/);
+    await expect(page.locator('#pl-stream .event.system')).toHaveCount(0);
+    // A turn already running answers something else: its reply leaves the
+    // ack, and so does the page's first page read again on coming back.
+    conn.send({ type: 'event', key: PLANNER, event: { type: 'text', detail: 'iso 上一件事的进展', time: Date.now(), uuid: 'pc-t-other' } });
+    await expect(page.locator('#pl-stream .event.text').last()).toHaveText(/iso 上一件事的进展/);
+    await expect(page.locator('#pl-target-note')).toHaveText('收到，正在看');
+    await page.click('#abnav-chat');
+    await page.click('#abnav-planner');
+    await expect(page.locator('#pl-stream .event')).toHaveCount(3);
+    await expect(page.locator('#pl-target-note')).toHaveText('收到，正在看');
     const t = Date.now();
     conn.send({ type: 'event', key: PLANNER, event: { type: 'user', detail: '<naozhi-snapshot at="x">\n</naozhi-snapshot>\n\niso 现在都在干什么？', time: t, uuid: 'pc-u2' } });
     conn.send({ type: 'event', key: PLANNER, event: { type: 'text', detail: '`' + SESSION + '` 在等你。', time: t + 1, uuid: 'pc-t2' } });
     await expect(page.locator('#pl-stream .pl-pending')).toHaveCount(0);
     await expect(page.locator('#pl-stream .event.user').last()).toHaveText(/iso 现在都在干什么？/);
+    await expect(page.locator('#pl-target-note')).toHaveText('');
     await expect(page.locator('#pl-stream .event.text').last().locator('.pl-scard')).toHaveCount(1);
     // A key with nothing before it reads as the session's name.
     await expect(page.locator('#pl-stream .event.text').last()).toContainText('hello world 在等你。');
@@ -186,7 +202,6 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     // A card naming a session that is not listed opens read-only: a send
     // would create it as an ordinary session.
     await reply.locator('.pl-scard[data-key="' + TASK + '"]').click();
-    await expect(page.locator('#pl-sess-line')).toContainText('不在会话列表里');
     await expect(page.locator('#pl-input')).toBeDisabled();
     await expect(page.locator('#pl-send')).toBeDisabled();
     await expect(page.locator('#pl-target-note')).toHaveText('不在会话列表里，不能发消息');

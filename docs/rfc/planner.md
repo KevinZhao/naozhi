@@ -657,7 +657,7 @@ runtelemetry 扩展普通会话类别（`SubsystemSession` 已预留但未发出
 ```
 ````
 
-- `dispatch`（D88）：网关直接拉起 `task:<随机 ID>` 会话并带 `--name <title>`，不再生成确认卡片；Planner 收到"已派出 + 名字"的回执，再用 `notify_when_idle` 订阅；拉起失败（工作区找不到、`max_procs` 满等）时回执里写原因，Planner 对话里显示一行。派出的会话在"任务"里可以停止（关掉它的 CLI 进程，连同后台任务；会话保留、记录可看，再发消息会续接；任务记为你标记的失败"已停止"；文本或 `close_when` 里引用它 key 的未完成承诺一并记为你标记的已完成"任务已停止"，回执告诉 Planner 时列出这些承诺 ID）。
+- `dispatch`（D88）：网关直接拉起 `task:<随机 ID>` 会话并带 `--name <title>`，不再生成确认卡片；Planner 收到"已派出 + 名字"的回执，再用 `notify_when_idle` 订阅；拉起失败（工作区找不到、`max_procs` 满等）时回执里写原因，Planner 对话里显示一行。派出的会话在"任务"里可以停止（关掉它的 CLI 进程，连同后台任务；会话保留、记录可看，再发消息会续接；任务记为你标记的失败"已停止"；文本或 `close_when` 里引用它 key 的未完成承诺一并记为你标记的已完成"任务已停止"，回执告诉 Planner 时列出这些承诺 ID；D91 起提示词不再让 Planner 为派出的会话另登记承诺，这条只照顾旧对话留下的承诺）。派出成功时对话里只有派出卡，不另加一行；key 只在给 Planner 的回执里（D91）。
 - `promise`：`{"type":"promise","text":"…","due":"<RFC3339 或空>","close_when":"…"}`，直接登记。
 - `ask`：`{"type":"ask","question":"…","options":["…"]}`，进"等你"。
 - `status`（D85）：`{"type":"status","task":"<task: key 或承诺 ID>","state":"done | doing | failed","why":"…"}`，改"任务"的状态并记"Planner 判断"与依据；找不到任务按格式不对处理。
@@ -1166,7 +1166,7 @@ owner 试用后定：Planner 页面左栏（及会话视图侧栏那一条、手
 
 | 来源 | 状态 | 谁标 |
 |---|---|---|
-| 派出的会话 | 进行中 → 等你 / 失败 / 已完成 | "等你""失败"由网关按健康状态确定性标；"已完成"由 Planner 判断——会话向它汇报完成后输出 `{"type":"status","task":"<task: key 或承诺 ID>","state":"done | doing | failed","why":"…"}` 动作块（§6.2 新增第四种），网关据此改状态并注明"Planner 判断"与依据 |
+| 派出的会话 | 进行中 → 等你 / 失败 / 已完成 | "等你""失败"由网关按健康状态确定性标；"已完成"由 Planner 判断——会话向它汇报完成后输出 `{"type":"status","task":"<task: key 或承诺 ID>","state":"done | doing | failed","why":"…"}` 动作块（§6.2 新增第四种），网关据此改状态并注明"Planner 判断"与依据；D91 起派出的会话不再另配承诺，只标会话本身 |
 | 纯提醒类承诺（只有时间） | 待提醒 → 已完成 | 到点提醒后自动完成 |
 | 带完成条件的承诺 | 待提醒 / 进行中 → 已完成 | Planner 判断条件满足后用同一个 `status` 动作块标完成；到期未满足的进早报 |
 

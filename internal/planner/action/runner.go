@@ -415,8 +415,9 @@ func (r *Runner) resolve(ref string) (workspace.Workspace, string, error) {
 
 // dispatch starts a dispatch's task: session at once (D88): no card waits
 // on the user, who can stop it from 任务. Either way the Planner gets a
-// receipt and the conversation a line. It returns the session's key, "" when
-// it did not start.
+// receipt; the conversation gets a line only when the start failed, the
+// block's card says it was dispatched (D91). It returns the session's key,
+// "" when it did not start.
 func (r *Runner) dispatch(d Dispatch) string {
 	key, wsName, err := r.spawn(d)
 	if err != nil {
@@ -424,7 +425,6 @@ func (r *Runner) dispatch(d Dispatch) string {
 		r.tell("派出「" + d.Title + "」失败，没有拉起会话：" + err.Error())
 		return ""
 	}
-	r.note("已派出：" + d.Title + "（" + key + "）")
 	r.tell("已派出：" + d.Title + "（" + key + "），工作区 " + wsName + "。它的跨会话名字是「" + d.Title + "」（重名时 CC 会加短 ID，以 ListAgents 为准）。用 notify_when_idle 订阅它，做完后在对话里告诉用户结果。")
 	return key
 }
@@ -546,17 +546,15 @@ func (r *Runner) promise(p Promise, dispatched map[string]string) error {
 	return nil
 }
 
-var stateLabels = map[task.State]string{task.Done: "已完成", task.Doing: "进行中", task.Failed: "失败"}
-
-// status sets a task's state as the Planner judged it. A task that does not
+// status sets a task's state as the Planner judged it; the block's card in
+// the conversation says so, so a set gets no line. A task that does not
 // exist is the block's fault, refused like a malformed one.
 func (r *Runner) status(b Block) error {
 	if r.cfg.Tasks == nil {
 		return errors.New("任务没有接通")
 	}
 	s := *b.Status
-	title, ok := r.cfg.Tasks.Title(s.Task)
-	if !ok {
+	if _, ok := r.cfg.Tasks.Title(s.Task); !ok {
 		return blockError{fmt.Errorf("找不到任务 %q（填 task: key 或承诺 ID）", s.Task)}
 	}
 	state := task.State(s.State)
@@ -566,14 +564,14 @@ func (r *Runner) status(b Block) error {
 	case err != nil:
 		return fmt.Errorf("改任务状态失败（%v）", err)
 	}
-	r.note("Planner 判断任务「" + textutil.TruncateRunes(title, 60) + "」" + stateLabels[state] + "：" + s.Why)
 	return nil
 }
 
 // notify tells the user what the Planner judged worth it: a timely block
 // opens a notice in "通知" and pushes it, within the daily cap and quiet
 // hours; a brief block waits for the next morning brief. A thing is pushed
-// once a day (notify.Notifier.AddDaily).
+// once a day (notify.Notifier.AddDaily). The block's card says what was
+// done; only a push held back gets a line in the conversation.
 func (r *Runner) notify(n Notify) error {
 	key := notifyKey(n)
 	if n.Level == LevelBrief {
@@ -583,7 +581,6 @@ func (r *Runner) notify(n Notify) error {
 		if err := r.cfg.Brief(brief.Mention{Key: key, Title: n.Title, Why: n.Why, Link: n.Link}); err != nil {
 			return fmt.Errorf("记入早报失败（%v）", err)
 		}
-		r.note("记入早报：" + n.Title)
 		return nil
 	}
 	if r.cfg.Inbox == nil {
@@ -599,9 +596,7 @@ func (r *Runner) notify(n Notify) error {
 		Source: SourcePrefix + key,
 	}); !opened {
 		r.note("这件事今天提醒过或还开着，不再推送：" + n.Title)
-		return nil
 	}
-	r.note("已提醒你：" + n.Title)
 	return nil
 }
 
