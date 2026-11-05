@@ -1,6 +1,7 @@
 package action
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"os"
@@ -76,16 +77,18 @@ func openDecision(t *testing.T, inbox *notify.Notifier, handler string) notify.I
 
 // A dispatch block starts one task: session in the workspace's directory at
 // once, records its lineage and tells the Planner; a start that fails tells
-// the Planner why and leaves no sidecar. No card is opened either way.
+// the Planner why and leaves no sidecar. No card is opened either way. The
+// conversation's line names the session by its title, never its key.
 func TestDispatch(t *testing.T) {
 	cases := []struct {
 		name      string
 		workspace string // "" is the registered workspace's name
 		spawnErr  error
 		want      string // in both the note and the receipt
+		told      string // in the receipt only; "" is want
 		spawned   bool
 	}{
-		{name: "spawned", want: "已派出：iso 写 hello（task:", spawned: true},
+		{name: "spawned", want: "已派出：iso 写 hello", told: "已派出：iso 写 hello（task:", spawned: true},
 		{name: "unknown workspace", workspace: "nowhere", want: "派出「iso 写 hello」失败"},
 		// The start failing (max_procs full, ...) is relayed as said; spawnError
 		// in wireup says it.
@@ -100,11 +103,12 @@ func TestDispatch(t *testing.T) {
 				ws = filepath.Base(dir)
 			}
 			r.Handle(block(`{"type":"dispatch","workspace":"` + ws + `","title":"iso 写 hello","model":"","message":"在工作区里写一个 hello.md"}`))
-			if len(g.notes) != 1 || !strings.Contains(g.notes[0], c.want) {
-				t.Errorf("notes = %q, want %q", g.notes, c.want)
+			if len(g.notes) != 1 || !strings.Contains(g.notes[0], c.want) || strings.Contains(g.notes[0], sessionkey.TaskKeyPrefix) {
+				t.Errorf("notes = %q, want %q and no key", g.notes, c.want)
 			}
-			if len(g.told) != 1 || !strings.Contains(g.told[0], c.want) {
-				t.Errorf("told = %q, want %q", g.told, c.want)
+			told := cmp.Or(c.told, c.want)
+			if len(g.told) != 1 || !strings.Contains(g.told[0], told) {
+				t.Errorf("told = %q, want %q", g.told, told)
 			}
 			if open, _ := inbox.List(0); len(open) != 0 {
 				t.Errorf("inbox = %+v, want no card", open)
@@ -206,8 +210,9 @@ func TestAskAndRefused(t *testing.T) {
 
 // A timely notify block opens a notice in "通知" and pushes it, once a day
 // for the same thing (its scout ID, else its title and link), closed or
-// not; a brief one goes to the next brief and is not pushed. Each says so
-// in the conversation; neither gets a receipt.
+// not; a brief one goes to the next brief and is not pushed. Neither gets a
+// receipt; only a push held back gets a line in the conversation (the card
+// says the rest).
 func TestNotify(t *testing.T) {
 	r, g, _, _, _ := newRunner(t)
 	// Outside quiet hours, so a timely item is pushed.
@@ -226,16 +231,16 @@ func TestNotify(t *testing.T) {
 	)
 	steps := []struct {
 		body   string
-		close  bool // close the open notices first
-		note   string
-		pushed int // pushes so far
+		close  bool   // close the open notices first
+		note   string // the step's line; "" is none
+		pushed int    // pushes so far
 	}{
-		{body: reply, note: "已提醒你：有人等你回复", pushed: 1},
+		{body: reply, pushed: 1},
 		{body: retitle, note: "不再推送：还在等你回复", pushed: 1},
 		{body: retitle, close: true, note: "不再推送", pushed: 1},
-		{body: byTitle, note: "已提醒你：Asana 任务今天到期", pushed: 2},
+		{body: byTitle, pushed: 2},
 		{body: again, note: "不再推送", pushed: 2},
-		{body: later, note: "记入早报：周报已发布", pushed: 2},
+		{body: later, pushed: 2},
 	}
 	for i, st := range steps {
 		if st.close {
@@ -244,9 +249,10 @@ func TestNotify(t *testing.T) {
 				_ = inbox.Dismiss(it.ID)
 			}
 		}
+		g.notes = nil
 		r.Handle(block(st.body))
-		if last := g.notes[len(g.notes)-1]; !strings.Contains(last, st.note) {
-			t.Errorf("step %d: note %q, want %q", i, last, st.note)
+		if got := strings.Join(g.notes, "\n"); (st.note == "") != (got == "") || !strings.Contains(got, st.note) {
+			t.Errorf("step %d: notes %q, want %q", i, g.notes, st.note)
 		}
 		if len(pushes) != st.pushed {
 			t.Errorf("step %d: %d pushes, want %d", i, len(pushes), st.pushed)
@@ -331,9 +337,9 @@ func TestUnrunReceipt(t *testing.T) {
 	}
 }
 
-// A status block sets a task's state as the Planner's judgment and says so
-// in the conversation; a task that does not exist, or a state the task
-// cannot take, is refused like a malformed block.
+// A status block sets a task's state as the Planner's judgment, with no line
+// in the conversation (its card says so); a task that does not exist, or a
+// state the task cannot take, is refused like a malformed block.
 func TestStatus(t *testing.T) {
 	r, g, _, side, _ := newRunner(t)
 	proms := promise.New(promise.Config{})
@@ -344,17 +350,18 @@ func TestStatus(t *testing.T) {
 	r.cfg.Tasks = task.New(task.Config{Sessions: side, Promises: proms})
 	cases := []struct {
 		body string
-		note string
+		note string // "" is none
 	}{
-		{`{"type":"status","task":"task:ab12","state":"done","why":"它汇报 hello.md 写好了"}`, "Planner 判断任务「iso 写 hello」已完成：它汇报 hello.md 写好了"},
-		{`{"type":"status","task":"` + p.ID + `","state":"done","why":"CI 绿了"}`, "Planner 判断任务「CI 绿了告诉你」已完成：CI 绿了"},
+		{`{"type":"status","task":"task:ab12","state":"done","why":"它汇报 hello.md 写好了"}`, ""},
+		{`{"type":"status","task":"` + p.ID + `","state":"done","why":"CI 绿了"}`, ""},
 		{`{"type":"status","task":"task:nope","state":"done","why":"w"}`, `格式不对，没有执行：找不到任务 "task:nope"`},
 		{`{"type":"status","task":"` + p.ID + `","state":"failed","why":"w"}`, "格式不对，没有执行：承诺没有失败状态"},
 	}
 	for _, c := range cases {
+		g.notes = nil
 		r.Handle(block(c.body))
-		if last := g.notes[len(g.notes)-1]; !strings.Contains(last, c.note) {
-			t.Errorf("%s: note %q, want %q", c.body, last, c.note)
+		if got := strings.Join(g.notes, "\n"); (c.note == "") != (got == "") || !strings.Contains(got, c.note) {
+			t.Errorf("%s: notes %q, want %q", c.body, g.notes, c.note)
 		}
 	}
 	if m, _ := side.Get("task:ab12"); m.Mark == nil || m.Mark.State != "done" || m.Mark.By != "planner" || m.Mark.Why != "它汇报 hello.md 写好了" {
@@ -466,7 +473,7 @@ func TestOutsideTurnRefuses(t *testing.T) {
 		notes   []string // in order; one starting 触发 after the outside label
 		receipt bool     // a refusal receipt sent
 	}{
-		{outside: "巡检", reply: dispatch + "\n" + status + "\n" + ask + "\n" + tell, notes: []string{noDispatch, noStatus, "已提醒你：有人等你回复"}, receipt: true},
+		{outside: "巡检", reply: dispatch + "\n" + status + "\n" + ask + "\n" + tell, notes: []string{noDispatch, noStatus}, receipt: true},
 		// The receipt's own turn dispatches again: refused, not told again.
 		{outside: "被拒动作的回执", reply: dispatch, notes: []string{noDispatch}},
 		// A turn of the user's own dispatches.

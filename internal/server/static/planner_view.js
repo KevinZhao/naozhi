@@ -3,21 +3,22 @@
 // /api/inbox, decisions and questions first and labelled, each closable;
 // decision cards answer through /api/inbox/decide) and the #pl-task
 // container 任务 (tasks.js) mounts into, then the browser-notification,
-// push-pause and 停用 Planner controls. Middle: the 早报 slot (the newest
-// brief of GET /api/planner/briefs) and the
-// planner:main event stream, its action blocks and the sessions it names as
-// cards (planner_cards.js), and the input box and the opened session card
+// push-pause and 停用 Planner controls. Middle: the planner:main event
+// stream with the morning briefs of GET /api/planner/briefs placed in it by
+// the time they were made (D91), its action blocks and the sessions it names
+// as cards (planner_cards.js), and the input box and the opened session card
 // (planner_chat.js). Right: the workbench, on planner:main or the opened
 // session (workbench_panes.js); while it is open the left column folds to a
 // 48px strip. On a phone the left column is a collapsible block above the
 // stream.
 //
-// The stream follows a WS subscription to planner:main (receipts are pushed
-// to subscribers only, never logged); GET /api/sessions/events loads the
-// first page and polls while the subscription is not live. The gateway's
-// notes in the conversation (due reminders, dispatch outcomes) live in its
-// in-memory history, which a restart drops: the first page merges in the
-// journaled ones from GET /api/planner/notes by time.
+// The stream follows a WS subscription to planner:main; GET
+// /api/sessions/events loads the first page and polls while the subscription
+// is not live. What the gateway writes for the Planner (its receipts) is not
+// shown, and its "收到，正在看" to subscribers is the input box's note
+// (D91). The gateway's notes in the conversation (due reminders, dispatch
+// outcomes) live in its in-memory history, which a restart drops: the first
+// page merges in the journaled ones from GET /api/planner/notes by time.
 //
 // The rail badge counts the inbox's `badge` (notify.js: decisions and
 // questions, §10.1); the left column's "通知" heading counts what its list
@@ -40,7 +41,8 @@ import { renderMd, runPendingAsync } from './render_md.js';
 import { inbox, isLit, notifySupported, onInboxCount, requestNotifyPermission, revealFocus } from './notify.js';
 import { followWorkbenchSubject, noteWorkbenchEvent } from './workbench_panes.js';
 import { decisionActsHtml, decorateEvents, paintSessionCards, refreshHealth, webLinkHtml } from './planner_cards.js';
-import { clearPending, closePlannerSession, mountComposer, notePlannerStatus } from './planner_chat.js';
+import { clearAck, clearPending, closePlannerSession, mountComposer, noteAck, notePlannerStatus } from './planner_chat.js';
+import { onSessionsApplied } from './session_list.js';
 import { mountTasks, refreshTasks } from './tasks.js';
 import { workbench } from './workbench.js';
 import { wsm } from './ws_manager.js';
@@ -65,7 +67,7 @@ const KIND_ORDER = { decision: 0, question: 1, error: 2, notice: 3 };
 
 const pl = {
   status: null, // GET /api/planner
-  brief: null, // the newest sent morning brief, GET /api/planner/briefs
+  briefs: [], // the sent morning briefs, newest first, GET /api/planner/briefs
   open: [], // open 通知 items
   pausedUntil: 0,
   customPause: false,
@@ -335,49 +337,77 @@ function paintStatus() {
     const left = drawer ? 'Planner 页面左栏' : '左栏';
     let html = '';
     if (s && !s.enabled) {
-      html = '<b>Planner 没有开启。</b>在配置里设 <code>planner.enabled: true</code> 并重启 naozhi 后，这里是你和 Planner 的对话：早报、回执、它派出的会话与汇报。' + left + '的"通知"照常可用。';
+      html = '<b>Planner 没有开启。</b>在配置里设 <code>planner.enabled: true</code> 并重启 naozhi 后，这里是你和 Planner 的对话：早报、它派出的会话与汇报。' + left + '的"通知"照常可用。';
     } else if (s && s.stopped) {
       html = '<b>Planner 已停用。</b>它不再运行，也不收消息；关掉' + (drawer ? ' ' : '') + left + '的"停用 Planner"即可恢复。';
     }
     note.innerHTML = html;
     note.hidden = !html;
   }
-  paintBrief();
 }
 
-// paintBrief shows the latest morning brief (GET /api/planner/briefs) in the
-// 早报 slot, open on the day it was made; the same brief is not repainted, so
-// a fold the user chose stays.
-function paintBrief() {
-  const box = $('pl-brief');
-  if (!box) return;
-  const b = pl.brief;
-  const at = b ? b.at : '';
-  if (box.childElementCount && box.dataset.at === at) return;
-  box.dataset.at = at;
-  if (!b) {
-    box.innerHTML = '<div class="pl-brief-empty"><b>早报</b> · 还没有（工作日 08:30 之后生成）</div>';
-    return;
-  }
-  const d = new Date(b.at);
+// ---- 早报 ----
+
+// BRIEF_FOCUS leads the push ID of a morning brief (planner/brief:
+// "brief:<day>"), which a notification or #planner link brings into view.
+const BRIEF_FOCUS = 'brief:';
+
+function briefHtml(b, t) {
+  const d = new Date(t);
   const pad = (n) => String(n).padStart(2, '0');
   const today = d.toDateString() === new Date().toDateString();
-  const when = isNaN(d.getTime()) ? '' : ' · ' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-  box.innerHTML = '<details class="pl-brief-card"' + (today ? ' open' : '') + '><summary><b>早报</b>' + esc(when) + '</summary>' +
-    '<div class="md">' + renderMd(b.markdown) + '</div></details>';
-  runPendingAsync();
+  const when = ' · ' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  return '<details class="pl-brief" data-day="' + escAttr(b.day || '') + '" data-time="' + t + '"' + (today ? ' open' : '') + '>' +
+    '<summary><b>早报</b>' + esc(when) + '</summary><div class="md">' + renderMd(b.markdown) + '</div></details>';
 }
 
-// fetchBrief takes the newest sent brief; an unreadable list leaves the slot
+// placeBriefs puts each brief not yet shown into the stream by the time it
+// was made (D91): a message among the others, the day's open and the older
+// ones folded. One shown is left alone, so a fold the user chose stays.
+function placeBriefs() {
+  const box = $('pl-stream');
+  const scroller = $('pl-events');
+  if (!box || !scroller) return;
+  const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 40;
+  let placed = false;
+  for (const b of pl.briefs.slice().reverse()) {
+    const t = Date.parse(b.at);
+    if (isNaN(t) || box.querySelector(':scope > .pl-brief[data-day="' + CSS.escape(b.day || '') + '"]')) continue;
+    const next = [...box.children].find((c) => Number(c.dataset.time || 0) > t);
+    if (next) next.insertAdjacentHTML('beforebegin', briefHtml(b, t));
+    else box.insertAdjacentHTML('beforeend', briefHtml(b, t));
+    placed = true;
+  }
+  if (!placed) return;
+  paintStreamEmpty();
+  runPendingAsync();
+  if (atBottom) scroller.scrollTop = scroller.scrollHeight;
+  revealBrief();
+}
+
+// revealBrief opens and scrolls to the brief a push or link asked for
+// (inbox.focus "brief:<day>"), once the stream shows it: a first page in
+// flight is about to repaint the stream, placeBriefs reveals it then.
+function revealBrief() {
+  if (!inbox.focus.startsWith(BRIEF_FOCUS) || pl.host !== 'page' || pl.loading) return;
+  const day = inbox.focus.slice(BRIEF_FOCUS.length);
+  const el = $('pl-stream')?.querySelector(':scope > .pl-brief[data-day="' + CSS.escape(day) + '"]');
+  if (!el) return;
+  inbox.focus = '';
+  el.open = true;
+  el.scrollIntoView({ block: 'start' });
+}
+
+// fetchBriefs takes the sent briefs; an unreadable list leaves the stream
 // as it was.
-async function fetchBrief() {
+async function fetchBriefs() {
   let res;
   try {
-    res = await fetchJSON(NZ_CONTRACT.API.planner_briefs + '?limit=1', { timeoutMs: 8000 });
+    res = await fetchJSON(NZ_CONTRACT.API.planner_briefs, { timeoutMs: 8000 });
   } catch { return; }
   const list = res && Array.isArray(res.briefs) ? res.briefs : [];
-  pl.brief = list.find((b) => b && b.sent && b.markdown) || null;
-  if (pl.host) paintBrief();
+  pl.briefs = list.filter((b) => b && b.sent && b.markdown);
+  if (pl.host) placeBriefs();
 }
 
 async function fetchStatus() {
@@ -392,15 +422,15 @@ function paintStreamEmpty() {
   const box = $('pl-stream');
   if (!box) return;
   const empty = box.querySelector(':scope > .pl-empty');
-  const hasEvents = !!box.querySelector('.event');
+  const hasEvents = !!box.querySelector('.event, .pl-brief');
   if (hasEvents || !(pl.status && pl.status.enabled)) { if (empty) empty.remove(); return; }
   if (!empty) box.insertAdjacentHTML('beforeend', '<div class="pl-empty">还没有对话</div>');
 }
 
 // admitEvent is the same-ms replay gate (scratchAdmitEvent's rule): false
 // for a logged event already taken. A uuid-less event is a pushed system
-// line (a receipt, stamped with the push's wall clock) that is never
-// replayed: it is taken and leaves the watermark to the log.
+// line (stamped with the push's wall clock) that is never replayed: it is
+// taken and leaves the watermark to the log.
 function admitEvent(e) {
   if (!e || !e.uuid) return !!e;
   const t = e.time || 0;
@@ -422,10 +452,10 @@ const SESSION_REF_RE = /^<naozhi-session-ref>(\{[^\n]*?\})<\/naozhi-session-ref>
 const SESSION_REF_CUT_RE = /^<naozhi-session-ref>[\s\S]*$/;
 const GATEWAY_HEAD_RE = /^<naozhi-(?:snapshot[\s>]|session-ref>)/;
 // RECEIPT_RE is a gateway receipt to the Planner (planner/agent Tell: a
-// dispatch's outcome, your answer to its question, a task you stopped): not
-// something you wrote, so
-// it shows as a gateway line rather than your bubble.
-const RECEIPT_RE = /^<naozhi-receipt>\s*([\s\S]*?)\s*(?:<\/naozhi-receipt>\s*)?$/;
+// dispatch's outcome, your answer to its question, a task you stopped):
+// written for the model, with keys and block formats in it, so it is not
+// shown (D91); what it reports has its own line or card already.
+const RECEIPT_RE = /^<naozhi-receipt>/;
 // SCOUT_RE is a scout run waking the Planner with what it found
 // (planner/scout): the turn is marked 来自巡检 rather than shown as your bubble.
 // MEETING_RE is a pre-meeting brief's material, marked 来自会前简报.
@@ -439,13 +469,17 @@ const COALESCE_HEAD = '[以下是用户在你处理上一条消息期间追加�
 const COALESCE_SPLIT_RE = /\n\[\d\d:\d\d\] /;
 function plannerEvents(e) {
   const text = e.type === 'user' ? e.detail || e.summary || '' : '';
-  if (!text.startsWith(COALESCE_HEAD)) return [withoutSnapshot(e)];
+  if (!text.startsWith(COALESCE_HEAD)) {
+    const p = withoutSnapshot(e);
+    return p ? [p] : [];
+  }
   const out = [];
   let mine = null;
   for (const part of text.slice(COALESCE_HEAD.length).split(COALESCE_SPLIT_RE)) {
     const t = part.trim();
     if (!t) continue;
     const p = withoutSnapshot(Object.assign({}, e, { detail: t, summary: t }));
+    if (!p) continue;
     if (p.type !== 'user') { delete p.uuid; out.push(p); continue; }
     if (!mine) { mine = p; out.push(mine); continue; }
     mine.detail = [mine.detail, p.detail].filter(Boolean).join('\n\n');
@@ -454,9 +488,9 @@ function plannerEvents(e) {
   return out;
 }
 
+// withoutSnapshot is e as the conversation shows it, null for a receipt.
 function withoutSnapshot(e) {
-  const r = e.type === 'user' && RECEIPT_RE.exec(e.detail || e.summary || '');
-  if (r) return Object.assign({}, e, { type: 'system', summary: '回执给 Planner：' + r[1], detail: '' });
+  if (e.type === 'user' && RECEIPT_RE.test(e.detail || e.summary || '')) return null;
   const sc = e.type === 'user' && SCOUT_RE.exec(e.detail || e.summary || '');
   if (sc) return Object.assign({}, e, { type: 'system', summary: '来自巡检：' + sc[1] + ' 条新发现', detail: '' });
   const mt = e.type === 'user' && MEETING_RE.exec(e.detail || e.summary || '');
@@ -477,14 +511,22 @@ function withoutSnapshot(e) {
 
 const RENDER_OPTS = { key: PLANNER_KEY };
 
+// ACK_TEXT is the gateway's "got it" for a message you sent (planner/agent
+// ReceiptText), pushed to subscribers only: it shows by the input box until
+// the answer comes, not as a line above your bubble (D91).
+const ACK_TEXT = '收到，正在看';
+const isAck = (e) => !!e && !e.uuid && e.type === 'system' && e.summary === ACK_TEXT;
+
 function appendEvents(events, reset) {
   const box = $('pl-stream');
   const scroller = $('pl-events');
   if (!box || !scroller) return;
   const atBottom = reset || scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 40;
   if (reset) { pl.lastTime = 0; pl.seenAtWM.clear(); }
-  const fresh = events.filter(admitEvent);
+  if (events.some(isAck)) noteAck();
+  const fresh = events.filter((e) => admitEvent(e) && !isAck(e));
   const html = renderEventsWithDividers(fresh.flatMap(plannerEvents), reset ? 0 : lastDividerTime(box), RENDER_OPTS);
+  if (fresh.some((e) => e.type === 'text' || e.type === 'result')) clearAck();
   if (reset) box.innerHTML = html;
   else if (fresh.length) {
     box.querySelector(':scope > .pl-empty')?.remove();
@@ -499,6 +541,8 @@ function appendEvents(events, reset) {
   paintStreamEmpty();
   runPendingAsync();
   if (atBottom) scroller.scrollTop = scroller.scrollHeight;
+  // After the scroll: a brief a push asked for scrolls to itself.
+  if (reset) placeBriefs();
 }
 
 // subscribe asks for planner:main's live events after the last one taken.
@@ -555,7 +599,11 @@ async function loadEvents(reset) {
     let events = Array.isArray(res) ? res : [];
     const n = notes && await notes;
     if (n && Array.isArray(n.notes) && n.notes.length) events = withNotes(events, n.notes);
-    if (gen === pl.gen && pl.host) appendEvents(events, reset);
+    if (gen === pl.gen && pl.host) {
+      // The page is in: what it paints is no longer about to be replaced.
+      pl.loading = false;
+      appendEvents(events, reset);
+    }
   } catch { /* the next tick retries */ } finally {
     if (gen === pl.gen) pl.loading = false;
   }
@@ -571,7 +619,7 @@ function startConversation() {
   // The subscription follows the first page: its `after` is the page's end.
   loadEvents(true).then(() => { if (pl.host && !pl.sub) subscribe(); });
   fetchStatus();
-  fetchBrief();
+  fetchBriefs();
   fetchInbox();
   if (!pl.timer) {
     pl.timer = setInterval(() => {
@@ -580,7 +628,7 @@ function startConversation() {
       if (++pl.ticks % SLOW_TICKS === 0) {
         paintWaiting();
         fetchStatus();
-        fetchBrief();
+        fetchBriefs();
         refreshHealth($('pl-center'), false);
         paintSessionCards($('pl-center'));
         // A task's 等你 / 失败 follow health, which pushes no frame.
@@ -660,7 +708,9 @@ nzBus.addEventListener('inbox:count', (e) => {
   paintCounts();
   if (!pl.seeding && pl.host) fetchInbox();
 });
-nzBus.addEventListener('inbox:focus', revealWaiting);
+nzBus.addEventListener('inbox:focus', () => { revealWaiting(); revealBrief(); });
+// A session listed since a card named it gets its name and state.
+onSessionsApplied(() => { if (pl.host) paintSessionCards($('pl-stream')); });
 // A new socket holds no subscriptions: re-subscribe after the last event
 // taken, the history frame fills the gap.
 wsm.onReady(() => {
@@ -680,6 +730,7 @@ wsm.on(NZ_CONTRACT.WS.error, () => { pl.sub = ''; }, ours);
 wsm.on(NZ_CONTRACT.WS.history, (msg) => { if (pl.sub) appendEvents(msg.events || [], false); }, ours);
 wsm.on(NZ_CONTRACT.WS.event, (msg) => { if (pl.sub && msg.event) appendEvents([msg.event], false); }, ours);
 wsm.on(NZ_CONTRACT.WS.send_error, (msg) => {
+  clearAck();
   if (pl.sub) appendEvents([{ type: 'system', time: Date.now(), summary: '没有发出：' + (msg.error || '') }], false);
 }, ours);
 // A process appearing upgrades a suspended subscription; a dead process or

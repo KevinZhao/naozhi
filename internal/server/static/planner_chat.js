@@ -2,9 +2,11 @@
 // (docs/rfc/planner.md §10 D77, §10.1 输入 / 先回执 / 状态三层; §15.1 PR ⑬):
 //
 //   - the page's input box (#pl-composer) sends to the Planner through
-//     POST /api/planner/send (the gateway adds the snapshot and pushes the
-//     receipt to the planner:main stream); with a session card opened in the
-//     middle column it sends to that session (POST /api/sessions/send).
+//     POST /api/planner/send (the gateway adds the snapshot and pushes its
+//     "收到，正在看" to the planner:main stream); that receipt (D63) shows as
+//     the box's note until the answer comes (D91). With a session card
+//     opened in the middle column it sends to that session (POST
+//     /api/sessions/send).
 //   - a session card opens in the middle column under the breadcrumb
 //     "Planner › 会话名": its status line, then its milestones (the bubbles
 //     the chat view shows), and 原始记录 adds the tool calls. Its events are
@@ -43,6 +45,9 @@ const st = {
   status: null, // GET /api/planner; null until read
   statusLoading: false,
   sending: false,
+  // acked: the gateway took a message to the Planner whose answer has not
+  // come yet.
+  acked: false,
   // sess is the session opened in the middle column, or null.
   sess: null,
   noteTimer: 0,
@@ -112,6 +117,19 @@ export function clearPending(box) {
   box?.querySelector('.pl-pending')?.remove();
 }
 
+// noteAck shows the gateway's receipt for a message to the Planner by the
+// input box; clearAck takes it away once the answer (or a failure) comes.
+export function noteAck() {
+  st.acked = true;
+  paintComposer();
+}
+
+export function clearAck() {
+  if (!st.acked) return;
+  st.acked = false;
+  paintComposer();
+}
+
 // ---- the Planner page's input box ----
 
 function composerTarget() {
@@ -171,7 +189,7 @@ function paintComposer() {
   to.textContent = '→ Planner';
   if (handoff) handoff.hidden = true;
   const usable = plannerUsable();
-  if (note) note.textContent = !st.status ? '' : !st.status.enabled ? '未开启 Planner' : st.status.stopped ? '已停用 Planner' : st.sending ? '发送中…' : '';
+  if (note) note.textContent = !st.status ? '' : !st.status.enabled ? '未开启 Planner' : st.status.stopped ? '已停用 Planner' : st.sending ? '发送中…' : st.acked ? '收到，正在看' : '';
   input.placeholder = usable || !st.status ? '交代、追问…' : '';
   input.disabled = !!st.status && !usable;
   send.disabled = st.sending || (!!st.status && !usable);
@@ -193,6 +211,7 @@ async function sendFromComposer() {
   try {
     if (key === PLANNER_KEY) {
       await sendToPlanner(text);
+      st.acked = true;
     } else {
       await fetchJSON(NZ_CONTRACT.API.sessions_send, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, text }), timeoutMs: 15000,

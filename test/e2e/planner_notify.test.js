@@ -50,7 +50,8 @@ for (const vp of [{ name: 'desktop', width: 1280, height: 800 }, { name: 'phone'
       await expect(cards).toHaveCount(2);
       await expect(page.locator('#pl-stream .pl-act-bad')).toHaveCount(0);
       await expect(cards.nth(0).locator('.pl-act-h')).toHaveText('提醒你');
-      await expect(cards.nth(0)).toContainText('同一件事当天只推一次');
+      // A card is what was done: no fixed note under it (D91).
+      await expect(cards.nth(0)).not.toContainText('同一件事当天只推一次');
       const open = cards.nth(0).locator('a.pl-link');
       await expect(open).toHaveAttribute('href', LINK);
       await expect(open).toHaveAttribute('target', '_blank');

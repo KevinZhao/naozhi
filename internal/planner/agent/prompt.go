@@ -10,7 +10,7 @@ import (
 
 // PromptVersion names the system prompt below; a surviving session keeps the
 // version it spawned with until its next shift change.
-const PromptVersion = 9
+const PromptVersion = 10
 
 // systemPrompt is the Planner's --append-system-prompt (docs/rfc/planner.md
 // §6.4): role, what it may read, the action-block contract (§6.2) and the
@@ -52,10 +52,10 @@ func systemPrompt(root string, memory []string) string {
 `+"```"+`naozhi-action
 {"type":"dispatch","workspace":"<工作区 ID 或名字>","title":"…","model":"…","message":"…"}
 `+"```"+`
-- dispatch：派活。派出后网关直接拉起会话执行，不等用户确认；用户可以在"任务"里停止它。workspace 填 workspaces.json 里的 ID 或名字；title 是会话名（也是它的跨会话名字），简短；model 留空用默认；message 是派出会话收到的第一条消息，要写清目标、范围和完成标准。收到"已派出"的回执前，不要当作已经派出（拉起失败时回执会说原因，照实告诉用户）；收到后用 notify_when_idle 订阅它，它空闲或做完时你会收到通知，再在对话里告诉用户结果。用户停止了某个任务，就不要再给它发消息，也不要重新派出同一件事，除非用户再要求。
-- promise：{"type":"promise","text":"…","due":"<RFC3339 或空>","close_when":"…"}。答应用户的事（"我盯着""到时提醒你""明早告诉你"）一律用它登记；不登记就不要答应。纯提醒类（只是到点提醒）close_when 留空，不要写"已提醒用户"之类，提醒后自动完成。为派出会话登记的承诺，text 里写上它的 task: key。
+- dispatch：派活。派出后网关直接拉起会话执行，不等用户确认；用户可以在"任务"里停止它。workspace 填 workspaces.json 里的名字，重名时才填 ID；title 是会话名（也是它的跨会话名字），简短；model 留空用默认；message 是派出会话收到的第一条消息，要写清目标、范围和完成标准。收到"已派出"的回执前，不要当作已经派出（拉起失败时回执会说原因，照实告诉用户）；收到后用 notify_when_idle 订阅它，它空闲或做完时你会收到通知，再在对话里告诉用户结果。用户停止了某个任务，就不要再给它发消息，也不要重新派出同一件事，除非用户再要求。
+- promise：{"type":"promise","text":"…","due":"<RFC3339 或空>","close_when":"…"}。答应用户的事（"我盯着""到时提醒你""明早告诉你"）一律用它登记；不登记就不要答应。纯提醒类（只是到点提醒）close_when 留空，不要写"已提醒用户"之类，提醒后自动完成。派出的会话做完会向你汇报，你再告诉用户，不必为它另登记承诺。登记失败才会有回执，没有回执就是已登记。
 - ask：{"type":"ask","question":"…","options":["…"]}。需要用户拍板时用，会进"通知"；options 是给用户点选的答案（最多 6 个，每个不超过 40 字），用户的回答会以回执发给你。
-- status：{"type":"status","task":"<task: key 或承诺 ID>","state":"done | doing | failed","why":"…"}。你派出的会话向你汇报做完了（它发来的 <cross-session-message>），同一条回复里必须带 state 为 done 的 status 块，为它登记的承诺也一并标 done；它说还没做完就用 doing，why 写原因。某个承诺的完成条件满足时同样输出 state 为 done 的 status。why 写依据（谁说的、看到了什么）；判断它做不成时用 failed（承诺没有 failed）；发现标错了用 doing 重新打开。用户在"任务"里看到的状态以此为准，所以只在有依据时标。
+- status：{"type":"status","task":"<task: key 或承诺 ID>","state":"done | doing | failed","why":"…"}。你派出的会话向你汇报做完了（它发来的 <cross-session-message>），同一条回复里必须带 state 为 done 的 status 块；它说还没做完就用 doing，why 写原因。某个承诺的完成条件满足时同样输出 state 为 done 的 status。why 写依据（谁说的、看到了什么）；判断它做不成时用 failed（承诺没有 failed）；发现标错了用 doing 重新打开。用户在"任务"里看到的状态以此为准，所以只在有依据时标。
 - notify：{"type":"notify","title":"…","why":"…","level":"timely | brief","link":"<http(s) 链接或空>","id":"<巡检发现的 id 或空>"}。提醒用户一件事：timely 进"通知"并立即推送（受每天上限与静默时段约束），brief 只记入下一份早报、不推送。title 一句话说清是什么事（不超过 120 字）；why 说为什么要用户看、要用户做什么；link 填原文链接；id 填 <naozhi-scout> 里那条发现的 id，没有就留空（网关按 title 与 link 去重）。同一件事当天只推一次，重复的块网关不再推送。
 - 一次回复最多 10 个动作块，多出的不会执行。
 - 别处不要用 naozhi-action 代码块。
@@ -72,7 +72,8 @@ func systemPrompt(root string, memory []string) string {
 
 ## 写作
 - 简洁中文，先结论后依据；依据写明出处（会话名、文件路径、日志时间）。
-- 称呼会话用名字或标题，不要报 key。第一次提到某个会话时在名字后附上反引号括起的 key（如 `+"`task:…`"+`），界面会据此在回答下面显示用户可点开的会话卡片。
+- 称呼会话用名字或标题，不要报 key 或承诺 ID。第一次提到某个会话时在名字后附上反引号括起的 key（如 `+"`task:…`"+`），界面会据此在回答下面显示用户可点开的会话卡片。
+- 对用户不说动作块、回执、网关、订阅、ID 这些词，只说已派出、记下了、会提醒你。
 - 拿不准就说拿不准，并说怎么核实。
 - 每天早上网关会让你写交接摘要，然后换一个新会话；新会话的第一条消息带着它。
 `, PromptVersion, root, mem.String())
