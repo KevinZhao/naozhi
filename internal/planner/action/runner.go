@@ -24,6 +24,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -209,7 +210,8 @@ func (r *Runner) handle(rep reply) {
 			slog.Error("planner actions: panicked", "panic", p)
 		}
 	}()
-	statused := map[string]string{} // task or promise → the state a block set
+	statused := map[string]string{}   // task or promise → the state a block set
+	dispatched := map[string]string{} // title → task: key, of this reply's dispatches
 	var un unrun
 	for i, b := range Parse(rep.text) {
 		if b.Err != nil {
@@ -228,9 +230,11 @@ func (r *Runner) handle(rep reply) {
 			un.add(i, b, r.refuseOutside(b, rep.outside))
 			un.outside = true
 		case b.Dispatch != nil:
-			r.dispatch(*b.Dispatch)
+			if key := r.dispatch(*b.Dispatch); key != "" {
+				dispatched[b.Dispatch.Title] = key
+			}
 		case b.Promise != nil:
-			err = r.promise(*b.Promise)
+			err = r.promise(*b.Promise, dispatched)
 		case b.Ask != nil:
 			err = r.ask(*b.Ask)
 		case b.Status != nil:
@@ -411,16 +415,18 @@ func (r *Runner) resolve(ref string) (workspace.Workspace, string, error) {
 
 // dispatch starts a dispatch's task: session at once (D88): no card waits
 // on the user, who can stop it from 任务. Either way the Planner gets a
-// receipt and the conversation a line.
-func (r *Runner) dispatch(d Dispatch) {
+// receipt and the conversation a line. It returns the session's key, "" when
+// it did not start.
+func (r *Runner) dispatch(d Dispatch) string {
 	key, wsName, err := r.spawn(d)
 	if err != nil {
 		r.note("派出「" + d.Title + "」失败：" + err.Error())
 		r.tell("派出「" + d.Title + "」失败，没有拉起会话：" + err.Error())
-		return
+		return ""
 	}
 	r.note("已派出：" + d.Title + "（" + key + "）")
 	r.tell("已派出：" + d.Title + "（" + key + "），工作区 " + wsName + "。它的跨会话名字是「" + d.Title + "」（重名时 CC 会加短 ID，以 ListAgents 为准）。用 notify_when_idle 订阅它，做完后在对话里告诉用户结果。")
+	return key
 }
 
 // refuseOutside answers a dispatch or status block from a turn outside
@@ -508,12 +514,28 @@ func (r *Runner) spawn(d Dispatch) (key, wsName string, err error) {
 	return key, w.Name, nil
 }
 
-// promise registers a promise the Planner made.
-func (r *Runner) promise(p Promise) error {
+// promise registers a promise the Planner made. Made in the reply that
+// dispatched the session it waits on, it can only name the session by its
+// title (the key comes in the dispatch's receipt), so a promise naming no
+// task: key and one of the reply's dispatches by title is that session's:
+// stopping it or its report then finds the promise (Promise.Cites).
+func (r *Runner) promise(p Promise, dispatched map[string]string) error {
 	if r.cfg.Promises == nil {
 		return errors.New("承诺没有接通")
 	}
-	if _, err := r.cfg.Promises.Add(promise.Promise{Text: p.Text, Due: p.Due, CloseWhen: p.CloseWhen}); err != nil {
+	var bound []string
+	if text := p.Text + "\n" + p.CloseWhen; !strings.Contains(text, sessionkey.TaskKeyPrefix) {
+		for title, key := range dispatched {
+			if strings.Contains(text, title) {
+				bound = append(bound, key)
+			}
+		}
+	}
+	var task string
+	if len(bound) == 1 {
+		task = bound[0]
+	}
+	if _, err := r.cfg.Promises.Add(promise.Promise{Text: p.Text, Due: p.Due, CloseWhen: p.CloseWhen, Task: task}); err != nil {
 		switch {
 		case errors.Is(err, promise.ErrFull):
 			return errors.New("未完成的承诺太多了")
