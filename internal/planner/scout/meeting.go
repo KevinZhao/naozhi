@@ -32,8 +32,8 @@ const (
 // TriggerMeeting is a pre-meeting brief's trigger in its journal line.
 const TriggerMeeting = "meeting"
 
-// briefed is a pre-meeting brief's record: the meeting by ID and start (a
-// meeting moved is another one), and how its run went.
+// briefed is a pre-meeting brief's record: the meeting by start (a meeting
+// moved is another one; its ID is for reading only), and how its run went.
 type briefed struct {
 	ID    string    `json:"id"`
 	Start time.Time `json:"start"`
@@ -73,7 +73,10 @@ func briefDue(now time.Time, events []Event, done []briefed) (Event, bool) {
 		if !e.Prep || !now.Before(e.Start) || e.Start.Sub(now) > briefLead || !withOthers(e) {
 			continue
 		}
-		if !slices.ContainsFunc(done, func(b briefed) bool { return b.ID == e.ID && b.Start.Equal(e.Start) }) {
+		// Keyed by start alone, like conflicts: the model copies the long
+		// Outlook IDs unevenly from run to run, and a calendar rewritten
+		// between a brief and its meeting would brief it again.
+		if !slices.ContainsFunc(done, func(b briefed) bool { return b.Start.Equal(e.Start) }) {
 			return e, true
 		}
 	}
@@ -151,6 +154,10 @@ func (s *Scout) brief(ctx context.Context, id string, e Event, started time.Time
 	}
 	if err != nil {
 		fail(fmt.Errorf("scout session: %w", err))
+		return
+	}
+	if err := markedRead(tools); err != nil {
+		fail(err)
 		return
 	}
 	m, err := parseMeeting(reply)

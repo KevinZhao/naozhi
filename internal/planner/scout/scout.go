@@ -330,10 +330,8 @@ func (s *Scout) run(ctx context.Context, id, trig string, started time.Time) (r 
 		// deny list needs a look.
 		slog.Warn("scout: session tried tools outside its read list", "run", id, "tools", extra)
 	}
-	if marked := markedRead(tools); len(marked) > 0 {
-		// Read tools only, yet email_read can flip a message's read state
-		// through an argument the permission rules cannot see.
-		return fail(fmt.Errorf("巡检读邮件时带了 markAs，可能改了邮件的已读状态：%s", strings.Join(marked, "、")))
+	if err := markedRead(tools); err != nil {
+		return fail(err)
 	}
 	out, err := parseOutput(reply)
 	if err != nil {
@@ -476,15 +474,20 @@ func block(id string, fresh []Finding) string {
 // call passed email_read's markAs argument.
 const MarkAsSuffix = "+markAs"
 
-// markedRead is the tools a session called with markAs.
-func markedRead(tools []string) []string {
-	var out []string
+// markedRead fails a scout session, a run's or a brief's, that called a
+// tool with markAs: read tools only, yet email_read can flip a message's
+// read state through an argument the permission rules cannot see.
+func markedRead(tools []string) error {
+	var marked []string
 	for _, t := range tools {
 		if strings.HasSuffix(t, MarkAsSuffix) {
-			out = append(out, strings.TrimSuffix(t, MarkAsSuffix))
+			marked = append(marked, strings.TrimSuffix(t, MarkAsSuffix))
 		}
 	}
-	return out
+	if len(marked) == 0 {
+		return nil
+	}
+	return fmt.Errorf("巡检读邮件时带了 markAs，可能改了邮件的已读状态：%s", strings.Join(marked, "、"))
 }
 
 // allDay is how long an event must last to count as an all-day block,

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/monitor/health"
@@ -71,7 +70,7 @@ func calledTools(entries []clievent.EventEntry) []string {
 			continue
 		}
 		name := e.Tool
-		if strings.HasSuffix(name, "email_read") && strings.Contains(e.Detail, `"markAs"`) {
+		if e.MarkAs {
 			name += scout.MarkAsSuffix
 		}
 		if !slices.Contains(out, name) {
