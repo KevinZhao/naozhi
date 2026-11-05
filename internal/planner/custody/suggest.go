@@ -258,7 +258,7 @@ func (e *Engine) leaveAsk(u health.Unit, why string) {
 }
 
 // suggestedLead opens the message custody sent for a recommended option.
-const suggestedLead = "⚙ 托管 · " + string(ReasonSuggested) + " · "
+const suggestedLead = clievent.CustodyLead + string(ReasonSuggested) + " · "
 
 // UndoText is the message that takes back answer, an answer custody gave on
 // the user's behalf.

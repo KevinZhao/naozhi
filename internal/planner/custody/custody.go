@@ -120,7 +120,7 @@ var (
 
 // Prefix opens the n-th message custody sends over a lineage for reason.
 func Prefix(reason Reason, n int) string {
-	return fmt.Sprintf("⚙ 托管 · %s · 第 %d/%d 次", reason, n, MaxSends)
+	return fmt.Sprintf("%s%s · 第 %d/%d 次", clievent.CustodyLead, reason, n, MaxSends)
 }
 
 // State is a session's custody as the header chip shows it.
