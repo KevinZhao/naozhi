@@ -1,10 +1,12 @@
 // E2E: talking on the Planner page and handing work to it (planner_chat.js,
 // planner_cards.js; planner RFC §10 D77, §10.1, §15.1 PR ⑬): the input box
-// sends to the Planner, the pushed receipt and the reply render and replace
-// the pending bubble; a handed-over session, a named session and the action
-// blocks render as cards (a dispatch runs at once, D88: its card has no
-// answer to give); a session card opens in the middle column
-// under the breadcrumb, shows its milestones and then its raw record, answers
+// sends to the Planner, the gateway's "收到，正在看" shows by the box until
+// the reply to that message comes (D91), not another turn's; a handed-over session, a named
+// session and the action blocks render as cards (a dispatch runs at once,
+// D88: its card has no answer to give; a task with no name yet shows no
+// key); a session card opens in the middle column
+// under the breadcrumb (§15.7 Q7: no 返回 Planner, its status line unnamed,
+// no 交给 Planner), shows its milestones and then its raw record, answers
 // its questions and sends to that session, and goes back; an unlisted
 // session's card is read-only; the chat view's 交给 Planner sends the session's reference with
 // the typed text, and is hidden while planner.enabled is off.
@@ -108,13 +110,17 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     const dispatch = reply.locator('.pl-act-dispatch').first();
     await expect(dispatch.locator('.pl-act-h')).toHaveText('派出会话 · iso 整理周报');
     await expect(dispatch).toContainText('把本周合并的 PR 整理成周报');
-    await expect(dispatch.locator('.pl-act-note')).toHaveText('派出后直接执行，可在"任务"里停止');
+    await expect(dispatch).not.toContainText('可在"任务"里停止');
     await expect(reply.locator('.pl-act-dispatch button')).toHaveCount(0);
     await expect(reply.locator('.pl-act-bad .pl-act-h')).toHaveText('看不懂的动作块');
     await expect(reply.locator('.pl-act-promise')).toContainText('iso 周五前提醒你看周报');
     // The Planner's judgment of a task (§15.4 status).
     await expect(reply.locator('.pl-act-status .pl-act-h')).toHaveText('Planner 判断 · 已完成');
     await expect(reply.locator('.pl-act-status')).toContainText('iso 它汇报周报写好了');
+    // Its task is neither listed nor in 任务 yet: no 任务 row, never the key;
+    // its session card reads 会话.
+    await expect(reply.locator('.pl-act-status dt')).toHaveText(['依据']);
+    await expect(reply.locator('.pl-scard[data-key="' + TASK + '"] .pl-scard-name')).toHaveText('会话');
     await expect(reply.locator('code[data-lang="naozhi-action"]')).toHaveCount(0);
     await expect(page.locator('#pl-cards')).toBeHidden();
 
@@ -122,19 +128,30 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     const conn = mock.wsConnections[mock.wsConnections.length - 1];
     await expect.poll(() => conn.messages.some((m) => m.type === 'subscribe' && m.key === PLANNER)).toBe(true);
     conn.send({ type: 'subscribed', key: PLANNER, state: 'ready' });
-    await expect(page.locator('#pl-target-to')).toHaveText('→ Planner');
+    await expect(page.locator('#pl-target-to')).toHaveText('');
     await page.fill('#pl-input', 'iso 现在都在干什么？');
     await page.press('#pl-input', 'Enter');
     await expect.poll(() => mock.plannerSendCalls).toEqual([{ text: 'iso 现在都在干什么？' }]);
     await expect(page.locator('#pl-stream .pl-pending')).toHaveText(/iso 现在都在干什么？/);
     await expect(page.locator('#pl-input')).toHaveValue('');
+    await expect(page.locator('#pl-target-note')).toHaveText('收到，正在看');
     conn.send({ type: 'event', key: PLANNER, event: { type: 'system', summary: '收到，正在看', time: Date.now() } });
-    await expect(page.locator('#pl-stream .event.system')).toHaveText(/收到，正在看/);
+    await expect(page.locator('#pl-stream .event.system')).toHaveCount(0);
+    // A turn already running answers something else: its reply leaves the
+    // ack, and so does the page's first page read again on coming back.
+    conn.send({ type: 'event', key: PLANNER, event: { type: 'text', detail: 'iso 上一件事的进展', time: Date.now(), uuid: 'pc-t-other' } });
+    await expect(page.locator('#pl-stream .event.text').last()).toHaveText(/iso 上一件事的进展/);
+    await expect(page.locator('#pl-target-note')).toHaveText('收到，正在看');
+    await page.click('#abnav-chat');
+    await page.click('#abnav-planner');
+    await expect(page.locator('#pl-stream .event')).toHaveCount(3);
+    await expect(page.locator('#pl-target-note')).toHaveText('收到，正在看');
     const t = Date.now();
     conn.send({ type: 'event', key: PLANNER, event: { type: 'user', detail: '<naozhi-snapshot at="x">\n</naozhi-snapshot>\n\niso 现在都在干什么？', time: t, uuid: 'pc-u2' } });
     conn.send({ type: 'event', key: PLANNER, event: { type: 'text', detail: '`' + SESSION + '` 在等你。', time: t + 1, uuid: 'pc-t2' } });
     await expect(page.locator('#pl-stream .pl-pending')).toHaveCount(0);
     await expect(page.locator('#pl-stream .event.user').last()).toHaveText(/iso 现在都在干什么？/);
+    await expect(page.locator('#pl-target-note')).toHaveText('');
     await expect(page.locator('#pl-stream .event.text').last().locator('.pl-scard')).toHaveCount(1);
     // A key with nothing before it reads as the session's name.
     await expect(page.locator('#pl-stream .event.text').last()).toContainText('hello world 在等你。');
@@ -146,6 +163,10 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     await expect(page.locator('#pl-events')).toBeHidden();
     await expect(page.locator('.pl-crumb')).toHaveText(/Planner›hello world/);
     await expect(page.locator('#pl-sess-line .hl-state')).toHaveText('待你回复');
+    await expect(page.locator('#pl-sess-line .pl-scard-name')).toHaveCount(0);
+    await expect(page.locator('#pl-sess .pl-btn', { hasText: '返回 Planner' })).toHaveCount(0);
+    // Not a dispatched session: no 停止.
+    await expect(page.locator('#pl-sess-stop')).toBeHidden();
     const sess = page.locator('#pl-sess-stream');
     await expect(sess).toContainText('登录页改好了');
     await expect(sess.locator('.event.tool_use')).toHaveCount(0);
@@ -153,7 +174,7 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     await expect(sess.locator('.event.tool_use')).toHaveCount(1);
     await expect(page.locator('#pl-sess-raw')).toHaveText('只看里程碑');
     await expect(page.locator('#pl-target-to')).toHaveText('→ hello world');
-    await expect(page.locator('#pl-sess-handoff')).toBeVisible();
+    await expect(page.locator('#pl-composer')).not.toContainText('交给 Planner');
     await page.screenshot({ path: test.info().outputPath('planner-chat-session-desktop.png') });
 
     // Its AskUserQuestion cards: the one a user event followed is locked,
@@ -172,20 +193,19 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     expect(mock.plannerSendCalls).toHaveLength(1);
 
     // Back to the conversation.
-    await page.click('.pl-sess .pl-btn[data-action="planner-close-session"]');
+    await page.click('.pl-crumb [data-action="planner-close-session"]');
     await expect(page.locator('#planner-main')).not.toHaveClass(/pl-sess-open/);
     await expect(page.locator('#pl-sess')).toBeHidden();
     await expect(page.locator('#pl-stream')).toContainText('hello world 在等你。');
-    await expect(page.locator('#pl-target-to')).toHaveText('→ Planner');
+    await expect(page.locator('#pl-target-to')).toHaveText('');
 
     // A card naming a session that is not listed opens read-only: a send
     // would create it as an ordinary session.
     await reply.locator('.pl-scard[data-key="' + TASK + '"]').click();
-    await expect(page.locator('#pl-sess-line')).toContainText('不在会话列表里');
     await expect(page.locator('#pl-input')).toBeDisabled();
     await expect(page.locator('#pl-send')).toBeDisabled();
     await expect(page.locator('#pl-target-note')).toHaveText('不在会话列表里，不能发消息');
-    await page.click('.pl-sess .pl-btn[data-action="planner-close-session"]');
+    await page.click('.pl-crumb [data-action="planner-close-session"]');
     await expect(page.locator('#pl-input')).toBeEnabled();
     expect(mock.sendCalls.map((b) => JSON.parse(b).key)).not.toContain(TASK);
   } finally {

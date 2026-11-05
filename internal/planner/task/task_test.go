@@ -206,7 +206,7 @@ func TestBoard(t *testing.T) {
 	}
 }
 
-// Stop marks a dispatched session 失败 as the user's, closes the open
+// Stop marks a dispatched session 已完成 as the user's (D91), closes the open
 // promises citing it (its key in the text or the close condition) as theirs
 // and stops its turn, naming those promises; anything else is not a session
 // to stop and closes nothing.
@@ -277,8 +277,9 @@ func TestStop(t *testing.T) {
 			if slices.Sort(ids); !slices.Equal(got, ids) {
 				t.Errorf("stop named %q, want %q", got, ids)
 			}
-			if l := b.List(); l[0].ID != "task:a" || l[0].State != Failed || l[0].By != ByUser || l[0].Why != StoppedWhy {
-				t.Errorf("list = %+v", l)
+			l := b.List()
+			if i := slices.IndexFunc(l, func(t Task) bool { return t.ID == "task:a" }); i < 0 || l[i].State != Done || l[i].By != ByUser || l[i].Why != StoppedWhy {
+				t.Errorf("list = %+v, want task:a done as the user's", l)
 			}
 		})
 	}

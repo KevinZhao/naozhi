@@ -73,6 +73,10 @@ func TestStopReceipt(t *testing.T) {
 			if !strings.HasPrefix(got, "用户在「任务」里停止了「iso 写 hello」（task:ab12）") || !strings.HasSuffix(got, "除非用户再要求。") {
 				t.Errorf("receipt = %q", got)
 			}
+			// The Planner reads the receipt; "你" is the Planner there.
+			if !strings.Contains(got, "已记为已完成（用户停止）") || strings.Contains(got, "你") {
+				t.Errorf("receipt = %q, want it to say the user stopped it, without 你", got)
+			}
 			if c.want == "" && strings.Contains(got, "承诺") || c.want != "" && !strings.Contains(got, c.want) {
 				t.Errorf("receipt = %q, want it to say %q", got, c.want)
 			}

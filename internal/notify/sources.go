@@ -302,14 +302,8 @@ func (n *Notifier) HandleHealth(ev health.Event) {
 		if ev.Transition.InFault {
 			return
 		}
-		// The title already says it failed; the why names the class only
-		// when there is one to name (the dashboard adds the death reason).
-		why := ""
-		if u.ErrClass != health.ErrNone && u.ErrClass != health.ErrOther {
-			why = ClassLabel(u.ErrClass)
-		}
 		n.Add(Item{Kind: KindError, Level: LevelTimely, Unit: u.ID, WS: u.Workspace, Source: "failed:" + u.ID,
-			Title: n.name(u.ID) + " 失败", Why: why})
+			Title: n.name(u.ID) + " 失败", Why: failedWhy(u.ErrClass)})
 	}
 }
 
@@ -341,6 +335,15 @@ func (n *Notifier) name(unit string) string {
 		}
 	}
 	return unit
+}
+
+// failedWhy is a failed unit's reason: its error class, or none when the
+// class says nothing (the title already says it failed).
+func failedWhy(c health.ErrorClass) string {
+	if c == health.ErrNone || c == health.ErrOther {
+		return ""
+	}
+	return ClassLabel(c)
 }
 
 // ClassLabel is an error class as the user reads it.

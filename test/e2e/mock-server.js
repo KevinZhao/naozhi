@@ -257,7 +257,7 @@ function defaultGitStates() {
  *   paused_until. Every write lands in inboxCalls. Unset, the routes 404.
  * @param {object} [overrides.tasks] - GET /api/tasks body ({tasks}, task.Task wire shape); POST
  *   /api/tasks/state sets the task's state as the user's and lands in tasksCalls; POST
- *   /api/tasks/stop marks the task failed as the user's ('已停止') and lands in taskStopCalls.
+ *   /api/tasks/stop marks the task done as the user's ('已停止') and lands in taskStopCalls.
  *   Unset, the routes 404.
  * @param {object} [overrides.planner] - GET /api/planner body ({enabled, stopped, key, alive});
  *   POST /api/planner/state sets `stopped` and lands in plannerStateCalls. Unset, the routes 404.
@@ -628,7 +628,7 @@ function startMockServer(overrides = {}) {
             inboxData.closed = [it].concat(inboxData.closed || []);
           }
           inboxData.open = (inboxData.open || []).filter(it => it.id !== b.id);
-          inboxData.counts = { open: inboxData.open.length, badge: inboxData.open.filter(it => it.kind === 'decision' || it.kind === 'question').length };
+          inboxData.counts = { open: inboxData.open.length, badge: inboxData.open.filter(it => it.kind === 'decision' || it.kind === 'question' || it.kind === 'error').length };
         } else if (req.method === 'PUT') {
           const ms = b.for === 'today' ? 6 * 3600000 : parseInt(b.for, 10) * 3600000;
           inboxData.paused_until = new Date(Date.now() + ms).toISOString();
@@ -1010,7 +1010,7 @@ function startMockServer(overrides = {}) {
         taskStopCalls.push(req2);
         const t = overrides.tasks.tasks.find(x => x.id === req2.id && x.kind === 'session');
         if (!t) { res.writeHead(404); res.end(); return; }
-        Object.assign(t, { state: 'failed', by: 'user', why: '已停止', at: new Date().toISOString() });
+        Object.assign(t, { state: 'done', by: 'user', why: '已停止', at: new Date().toISOString() });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ok' }));
       });

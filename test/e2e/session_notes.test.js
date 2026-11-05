@@ -33,7 +33,7 @@ test('side notes sit among the bubbles by time, arrive live and start no turn', 
   const mock = await startMockServer({
     ws: true,
     notes: { [A]: NOTES },
-    inbox: { open: [ITEM], closed: [], counts: { open: 1, badge: 0 } },
+    inbox: { open: [ITEM], closed: [], counts: { open: 1, badge: 1 } },
     planner: { enabled: true, stopped: false, key: 'planner:main', alive: true },
   });
   try {

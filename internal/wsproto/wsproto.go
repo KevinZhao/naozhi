@@ -365,7 +365,8 @@ func NewNotify(f Notify) Notify { f.Type = TypeNotify; return f }
 
 // InboxCount counts the open "等你" items, sent when they change (a page
 // takes its first count from GET /api/inbox). Open is every open item,
-// Badge those the §10.1 count shows: decisions and questions.
+// Badge those that wait on the user to act: questions, decisions and errors
+// (§15.7 S1).
 type InboxCount struct {
 	Type  MsgType `json:"type"`
 	Open  int     `json:"open"`
