@@ -25,6 +25,9 @@ const MIN_W = 320;
 // Reserve at least this much for the activity-bar + sidebar + transcript so
 // the split can never swallow the whole window.
 const MIN_LEFT = 420;
+// MIN_MAIN is the narrowest the transcript beside the pane may get: its
+// composer (attach, mic, input, 交给 Planner, send) still leaves room to type.
+const MIN_MAIN = 420;
 // dock.hasCustomW: the user has dragged the seam, so we stop auto-tracking the
 // half-width on resize and honour their saved value instead. Seeded by
 // initSplitWidth(), which dashboard's module body runs.
@@ -34,13 +37,23 @@ function isMobileVp() {
   return window.matchMedia && window.matchMedia('(max-width: 768px)').matches;
 }
 // The pane defaults to HALF the dashboard width on PC. clampW still caps it
-// so a tiny window can't drop the transcript below MIN_LEFT — on a narrow
-// desktop the "half" yields to the MIN_LEFT floor.
+// so the transcript keeps MIN_MAIN beside what sits left of it — on a narrow
+// desktop the "half" yields to that floor.
 function splitDefaultW() {
   return Math.round(window.innerWidth / 2);
 }
+// chromeW is what stays left of the transcript while a pane is docked: the
+// activity bar and the session sidebar, or the Planner page's left column,
+// which the workbench no longer collapses (D91 S6).
+function chromeW() {
+  for (const el of document.querySelectorAll('#main, #planner-main .pl-center')) {
+    const r = el.getBoundingClientRect();
+    if (r.width > 0) return Math.max(0, r.left);
+  }
+  return 0;
+}
 function clampW(w) {
-  const max = Math.max(MIN_W, window.innerWidth - MIN_LEFT);
+  const max = Math.max(MIN_W, window.innerWidth - Math.max(MIN_LEFT, chromeW() + MIN_MAIN));
   return Math.min(Math.max(w, MIN_W), max);
 }
 function applyW(w) {
@@ -83,8 +96,9 @@ function enter() {
   if (document.body.classList.contains('nz-split-open')) return;
   const wasBottom = eventsAtBottom();
   // Refresh to half-width on open unless the user set a custom width — the
-  // window may have been resized while the split was closed.
-  if (!dock.hasCustomW) applyW(splitDefaultW());
+  // window may have been resized, or the sidebar opened, while the split was
+  // closed, so a custom width is re-clamped.
+  applyW(dock.hasCustomW ? currentW() : splitDefaultW());
   document.body.classList.add('nz-split-open');
   preserveBottom(wasBottom);
 }
