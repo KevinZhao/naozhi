@@ -92,6 +92,7 @@ type HubOptions struct {
 	AllowedRoot      string // agent tailer's JSONL root: the resolved Claude projects root
 	TrustedProxy     bool
 	WSAuthLimiter    func(ip string) bool
+	WSAuthPeek       func(ip string) bool // reads WSAuthLimiter's bucket without spending it
 	WSUpgradeLimiter func(ip string) bool
 	// Auth, when non-nil, lets HandleUpgrade mint a per-browser nz_anon
 	// cookie in no-token mode so WS upload-owner derivation mirrors HTTP (#1326).

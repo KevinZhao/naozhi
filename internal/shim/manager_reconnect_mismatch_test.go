@@ -103,3 +103,60 @@ func TestSignalAfterFailedReconnect_SkipsBinaryMismatch(t *testing.T) {
 		})
 	}
 }
+
+// TestBinaryMismatch_RetiresTheListeningShim: a shim started by a naozhi
+// binary at another path cannot be reattached, so discovery and the pre-spawn
+// step ask it to exit over its socket (its PID is never signalled) instead of
+// only dropping its state file and leaving it bound, which refused the key's
+// respawn. A shim that stays bound keeps its state file for the next try.
+func TestBinaryMismatch_RetiresTheListeningShim(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		spawn     bool // the pre-spawn step instead of Discover
+		keepBound bool
+	}{
+		{"discover", false, false},
+		{"pre-spawn", true, false},
+		{"discover/still bound", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const key = "feishu:direct:moved-binary:general"
+			f := newRetireFake(t, key, boolPtr(true))
+			f.keepBound = tc.keepBound
+			f.serve()
+			m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
+			m.naozhiBin = "/nonexistent/old-path/naozhi"
+			// The state's PID is this test process, so a signal would land here.
+			writeRetireState(t, m, key, f, f.token, 0)
+			sigCh := make(chan os.Signal, 2)
+			signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGUSR2)
+			defer signal.Stop(sigCh)
+
+			if tc.spawn {
+				if err := m.prepareSocketForSpawn(context.Background(), key, f.path); err != nil {
+					t.Fatalf("prepareSocketForSpawn = %v, want the socket freed", err)
+				}
+			} else {
+				states, _, err := m.Discover()
+				if err != nil || len(states) != 0 {
+					t.Fatalf("Discover = (%v, %v), want no live shim", states, err)
+				}
+			}
+			if bound := socketExists(f.path); bound != tc.keepBound {
+				t.Errorf("socket present = %v, want %v", bound, tc.keepBound)
+			}
+			_, statErr := os.Stat(StateFilePath(m.stateDir, KeyHash(key)))
+			if kept := statErr == nil; kept != tc.keepBound {
+				t.Errorf("state file kept = %v, want %v", kept, tc.keepBound)
+			}
+			if msgs := f.messages(); len(msgs) != 1 || msgs[0].Type != "shutdown" {
+				t.Errorf("fake received %+v, want exactly one shutdown", msgs)
+			}
+			select {
+			case sig := <-sigCh:
+				t.Errorf("the mismatched PID was sent %v", sig)
+			default:
+			}
+		})
+	}
+}
