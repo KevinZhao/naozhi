@@ -326,15 +326,17 @@ function paintTools() {
   const paused = $('pl-paused');
   if (paused) {
     const on = pl.pausedUntil > Date.now();
-    const html = on ? '<span title="' + escAttr(formatAbsTime(pl.pausedUntil)) + '">推送暂停到 ' + esc(pausedAt()) + '</span>' +
-      '<span aria-hidden="true"> · </span><button type="button" class="pl-link" data-action="planner-pause-resume">恢复</button>' : '';
+    const html = on ? '<span class="pl-paused-l">推送</span><span>暂停到 ' + esc(pausedAt()) + '</span>' +
+      '<span aria-hidden="true">·</span><button type="button" class="pl-link" data-action="planner-pause-resume">恢复</button>' : '';
     if (paused.innerHTML !== html) paused.innerHTML = html;
+    paused.title = on ? formatAbsTime(pl.pausedUntil) : '';
     paused.hidden = !on;
   }
   const box = $('pl-tools');
   if (!box) return;
-  // Repainting under an open custom-pause input would drop what is typed.
-  if (pl.customPause && box.contains(document.activeElement)) return;
+  // Repainting under the custom-pause input would drop what is typed; only
+  // the input holding focus counts (Chromium focuses the clicked 自定义).
+  if (pl.customPause && document.activeElement?.id === 'pl-pause-hours') return;
   box.innerHTML = notifyToolHtml() +
     '<div class="pl-tool"><span class="pl-tool-l">暂停推送</span><div class="pl-tool-btns">' + pauseToolHtml() + '</div></div>' +
     '<div class="pl-tool">' + stopToolHtml() + '</div>';
@@ -808,9 +810,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const open = main.classList.toggle('pl-left-open');
     e.currentTarget.setAttribute('aria-expanded', open ? 'true' : 'false');
   });
-  // The "⋯" menu closes on a click outside it.
+  // The "⋯" menu closes on a click outside it. The path is the one at
+  // dispatch: a menu button repaints itself away before this runs.
   document.addEventListener('click', (e) => {
     const more = $('pl-more');
-    if (more?.open && !more.contains(e.target)) more.open = false;
+    if (more?.open && !e.composedPath().includes(more)) more.open = false;
   });
 });

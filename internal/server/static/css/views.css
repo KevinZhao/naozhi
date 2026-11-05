@@ -198,7 +198,13 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .pl-more>summary{list-style:none}
 .pl-more>summary::-webkit-details-marker{display:none}
 .pl-tools{position:absolute;right:0;top:calc(100% + 4px);z-index:20;display:flex;flex-direction:column;gap:10px;width:max-content;max-width:min(300px,calc(100vw - 24px));padding:12px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-0);box-shadow:var(--nz-shadow-2)}
-.pl-paused{font-size:var(--nz-fs-xs);color:var(--nz-amber);white-space:nowrap}
+/* The pause line gives way on a narrow header so "⋯" stays on screen: the
+   phone keeps only 暂停到 <time> (恢复 is in "⋯" too), then the time is cut. */
+.pl-paused{display:flex;align-items:center;min-width:0;font-size:var(--nz-fs-xs);color:var(--nz-amber);white-space:nowrap}
+.pl-paused[hidden]{display:none}
+.pl-paused>span:not([aria-hidden]){min-width:0;overflow:hidden;text-overflow:ellipsis}
+.pl-paused>[aria-hidden]{flex-shrink:0;padding:0 4px}
+.pl-paused>button{flex-shrink:0}
 .pl-tool{display:flex;flex-direction:column;gap:6px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
 .pl-tool-l{font-weight:600}
 .pl-tool-btns{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
@@ -210,7 +216,7 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .pl-center{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column}
 .pl-head{flex-shrink:0;height:48px;display:flex;align-items:center;gap:10px;padding:0 18px;border-bottom:1px solid var(--nz-border)}
 .pl-title{font-size:var(--nz-fs-md);font-weight:600;color:var(--nz-text-strong)}
-.pl-status{font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.pl-status{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);white-space:nowrap}
 .pl-status.wait{color:var(--nz-amber)}
 .pl-head-sp{flex:1}
 .pl-note{flex-shrink:0;margin:12px 18px 0;padding:10px 12px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1);color:var(--nz-text-mute);font-size:var(--nz-fs-sm2);line-height:1.6}

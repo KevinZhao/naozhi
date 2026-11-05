@@ -123,6 +123,17 @@ test('desktop: badge, 通知 cards, stream, controls, and the workbench folds th
     await expect(page.locator('#pl-paused')).toContainText('推送暂停到');
     await expect(page.locator('#pl-tools')).toBeHidden();
     expect(mock.inboxCalls[1]).toMatchObject({ path: '/api/inbox/pause', method: 'PUT', body: { for: '1h' } });
+    await page.locator('.pl-center > .pl-head').first().screenshot({ path: test.info().outputPath('planner-desktop-paused.png') });
+    await page.click('#pl-paused [data-action="planner-pause-resume"]');
+    await expect(page.locator('#pl-paused')).toBeHidden();
+    // 自定义: the hours input shows in the still open menu.
+    await page.click('#pl-more > summary');
+    await page.click('[data-action="planner-pause-custom"]');
+    await expect(page.locator('#pl-pause-hours')).toBeVisible();
+    await page.fill('#pl-pause-hours', '2');
+    await page.click('[data-action="planner-pause-custom-ok"]');
+    await expect(page.locator('#pl-paused')).toContainText('推送暂停到');
+    expect(mock.inboxCalls[3]).toMatchObject({ path: '/api/inbox/pause', method: 'PUT', body: { for: '2h' } });
     await page.click('#pl-paused [data-action="planner-pause-resume"]');
     await expect(page.locator('#pl-paused')).toBeHidden();
     await page.click('#pl-more > summary');
@@ -208,6 +219,48 @@ test('phone: the left column is a collapsible block above the stream', async ({ 
   } finally {
     await ctx.close();
     mock.server.close();
+  }
+});
+
+// On a narrow phone a pause until tomorrow and a status chip still leave
+// the "⋯" menu on screen, and the time whole.
+test('phone: the 推送暂停到 line leaves "⋯" on screen', async ({ browser }) => {
+  for (const [width, planner] of [[360, { alive: false }], [375, { stopped: true }]]) {
+    const ctx = await browser.newContext({ viewport: { width, height: 760 }, isMobile: true, hasTouch: true });
+    const page = await ctx.newPage();
+    const box = inbox();
+    const until = new Date(now + 86400000);
+    until.setHours(9, 0, 0, 0);
+    box.paused_until = until.toISOString();
+    const mock = await startMockServer({
+      ws: true, plannerEvents: plannerEvents(), inbox: box,
+      planner: { enabled: true, stopped: false, key: PLANNER, alive: true, ...planner },
+    });
+    try {
+      await page.goto(mock.url + '/dashboard');
+      await waitForWs(page, 'CONNECTED');
+      await page.click('#abnav-planner');
+      await expect(page.locator('#pl-paused')).toContainText('推送暂停到');
+      await expect(page.locator('#pl-status')).toHaveText(planner.stopped ? '已停用' : '启动中');
+      const head = page.locator('#planner-main .pl-center > .pl-head');
+      const [sw, cw] = await head.evaluate((el) => [el.scrollWidth, el.clientWidth]);
+      expect(sw).toBeLessThanOrEqual(cw);
+      const more = await page.locator('#pl-more > summary').boundingBox();
+      expect(more.x + more.width).toBeLessThanOrEqual(width);
+      // The chip stays on one line.
+      const lines = await page.locator('#pl-status').evaluate((el) => Math.round(el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight)));
+      expect(lines).toBe(1);
+      // The time is whole; 恢复 is in "⋯".
+      const time = page.locator('#pl-paused > span:not([aria-hidden]):visible');
+      await expect(time).toHaveText(/^暂停到 \d+\/\d+ 09:00$/);
+      expect(await time.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+      await page.click('#pl-more > summary');
+      await expect(page.locator('#pl-tools [data-action="planner-pause-resume"]')).toBeVisible();
+      await page.screenshot({ path: test.info().outputPath('planner-paused-' + width + '.png') });
+    } finally {
+      await ctx.close();
+      mock.server.close();
+    }
   }
 });
 

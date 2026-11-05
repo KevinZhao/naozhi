@@ -83,7 +83,7 @@ func StopTask(router *session.Router, drop func(key string), tell func(string) e
 
 // stopReceipt is what the Planner is told of a task the user stopped.
 func stopReceipt(key, title string, promises []string) string {
-	text := "用户在「任务」里停止了「" + title + "」（" + key + "），它已记为已完成（你停的），不用再改它的状态。"
+	text := "用户在「任务」里停止了「" + title + "」（" + key + "），它已记为已完成（用户停止），不用再改它的状态。"
 	if len(promises) > 0 {
 		text += "相关的承诺 " + strings.Join(promises, "、") + " 已一并标为已完成（任务已停止），不用再处理。"
 	}
