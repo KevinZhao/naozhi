@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -258,6 +259,54 @@ func TestHub_RemoteSendPicks(t *testing.T) {
 			want.Key, want.Text = msg.Key, msg.Text
 			if ack.Status != "accepted" || len(nc.got) != 1 || nc.got[0] != want {
 				t.Fatalf("ack = %+v, node got %+v; want accepted and %+v", ack, nc.got, want)
+			}
+		})
+	}
+}
+
+// oldReverseNode is a recordingNode whose link, like a ReverseConn to a node
+// predating CapSendBackend, cannot carry a backend or resume pick.
+type oldReverseNode struct{ recordingNode }
+
+func (n *oldReverseNode) CheckSendPicks(req node.SendRequest) error {
+	if req.Backend != "" || req.ResumeID != "" {
+		return node.ErrSendBackendUnsupported
+	}
+	return nil
+}
+
+// The HTTP remote send refuses a pick the link cannot carry with the 400,
+// before the 202: a tab sends over HTTP when its WS is down, so a later
+// send_error would never reach it and the picks it consumed would be lost.
+func TestHandleSend_RemotePicksTheLinkCannotCarry(t *testing.T) {
+	manifest := json.RawMessage(`{"backends":[{"id":"claude"},{"id":"kiro"}],"default":"claude"}`)
+	for _, tc := range []struct {
+		name     string
+		body     string
+		wantCode int
+	}{
+		{"backend pick", `"backend":"kiro"`, http.StatusBadRequest},
+		{"resume pick", `"resume_id":"r1"`, http.StatusBadRequest},
+		{"no picks", `"send_id":"s1"`, http.StatusAccepted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, hs := newTestServerHS(&mockPlatform{})
+			nc := &oldReverseNode{recordingNode{fakeCapNode: fakeCapNode{id: "oldnode", backends: manifest}}}
+			srv.nodes.Add("oldnode", nc)
+			r := httptest.NewRequest(http.MethodPost, "/api/sessions/send", strings.NewReader(
+				`{"key":"test:d:u:general","text":"hi","node":"oldnode",`+tc.body+`}`))
+			r.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			hs.sendH.handleSend(w, r)
+			hs.sendH.engine.wg.Wait()
+			if w.Code != tc.wantCode {
+				t.Fatalf("status = %d body = %s, want %d", w.Code, w.Body, tc.wantCode)
+			}
+			nc.mu.Lock()
+			sent := len(nc.got)
+			nc.mu.Unlock()
+			if tc.wantCode == http.StatusBadRequest && (sent != 0 || !strings.Contains(w.Body.String(), node.ErrSendBackendUnsupported.Error())) {
+				t.Errorf("body = %s, node got %d sends; want %q and nothing sent", w.Body, sent, node.ErrSendBackendUnsupported)
 			}
 		})
 	}

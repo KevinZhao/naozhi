@@ -307,8 +307,10 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 			// selectNode's documented nil-return contract.
 			return
 		}
-		// The backend pick is checked here, before the 202, so a node that
-		// does not run it is this request's 400 rather than a later toast.
+		// The backend and resume picks are checked here, before the 202, so
+		// a node that does not run the backend, or a link that cannot carry
+		// the picks, is this request's 400 rather than a later toast (a tab
+		// on HTTP because its WS is down would never see the toast).
 		if !isValidBackendID(backend) {
 			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid backend identifier"})
 			return
@@ -320,15 +322,22 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": remoteSendErrorText(err, "remote send failed")})
 			return
 		}
+		req := node.SendRequest{
+			Key: key, Text: text, Workspace: workspace,
+			Backend: backend, ResumeID: resumeID, TurnID: sendID,
+		}
+		if pc, ok := nc.(sendPicksChecker); ok {
+			if err := pc.CheckSendPicks(req); err != nil {
+				writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": remoteSendErrorText(err, "remote send failed")})
+				return
+			}
+		}
 		// remoteSend tracks the goroutine so drain waits for the in-flight
 		// RPC before closing node connections (else it could write to a
 		// closed nc.conn); a late arrival during shutdown gets 503 instead of
 		// a goroutine. Error fan-out to the key's subscribers is the
 		// engine's job — there is no ack channel on HTTP.
-		if !h.engine.remoteSend(nc, targetNode, node.SendRequest{
-			Key: key, Text: text, Workspace: workspace,
-			Backend: backend, ResumeID: resumeID, TurnID: sendID,
-		}) {
+		if !h.engine.remoteSend(nc, targetNode, req) {
 			writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "server shutting down"})
 			return
 		}
