@@ -64,7 +64,7 @@ for (const vp of [{ name: 'desktop', width: 1280, height: 800 }, { name: 'phone'
       const notice = page.locator('#pl-wait .pl-card[data-id="in_n"]');
       await expect(notice).toBeVisible();
       await expect(notice.locator('.pl-card-meta a.pl-link')).toHaveAttribute('href', LINK);
-      await expect(notice.locator('.pl-card-meta')).toContainText('Planner · 打开原文');
+      await expect(notice.locator('.pl-card-meta')).toHaveText('打开原文');
     } finally {
       await ctx.close();
       await new Promise((r) => mock.server.close(r));

@@ -4,7 +4,8 @@
 // the pending bubble; a handed-over session, a named session and the action
 // blocks render as cards (a dispatch runs at once, D88: its card has no
 // answer to give); a session card opens in the middle column
-// under the breadcrumb, shows its milestones and then its raw record, answers
+// under the breadcrumb (§15.7 Q7: no 返回 Planner, its status line unnamed,
+// no 交给 Planner), shows its milestones and then its raw record, answers
 // its questions and sends to that session, and goes back; an unlisted
 // session's card is read-only; the chat view's 交给 Planner sends the session's reference with
 // the typed text, and is hidden while planner.enabled is off.
@@ -122,7 +123,7 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     const conn = mock.wsConnections[mock.wsConnections.length - 1];
     await expect.poll(() => conn.messages.some((m) => m.type === 'subscribe' && m.key === PLANNER)).toBe(true);
     conn.send({ type: 'subscribed', key: PLANNER, state: 'ready' });
-    await expect(page.locator('#pl-target-to')).toHaveText('→ Planner');
+    await expect(page.locator('#pl-target-to')).toHaveText('');
     await page.fill('#pl-input', 'iso 现在都在干什么？');
     await page.press('#pl-input', 'Enter');
     await expect.poll(() => mock.plannerSendCalls).toEqual([{ text: 'iso 现在都在干什么？' }]);
@@ -146,6 +147,10 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     await expect(page.locator('#pl-events')).toBeHidden();
     await expect(page.locator('.pl-crumb')).toHaveText(/Planner›hello world/);
     await expect(page.locator('#pl-sess-line .hl-state')).toHaveText('待你回复');
+    await expect(page.locator('#pl-sess-line .pl-scard-name')).toHaveCount(0);
+    await expect(page.locator('#pl-sess .pl-btn', { hasText: '返回 Planner' })).toHaveCount(0);
+    // Not a dispatched session: no 停止.
+    await expect(page.locator('#pl-sess-stop')).toBeHidden();
     const sess = page.locator('#pl-sess-stream');
     await expect(sess).toContainText('登录页改好了');
     await expect(sess.locator('.event.tool_use')).toHaveCount(0);
@@ -153,7 +158,7 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     await expect(sess.locator('.event.tool_use')).toHaveCount(1);
     await expect(page.locator('#pl-sess-raw')).toHaveText('只看里程碑');
     await expect(page.locator('#pl-target-to')).toHaveText('→ hello world');
-    await expect(page.locator('#pl-sess-handoff')).toBeVisible();
+    await expect(page.locator('#pl-composer')).not.toContainText('交给 Planner');
     await page.screenshot({ path: test.info().outputPath('planner-chat-session-desktop.png') });
 
     // Its AskUserQuestion cards: the one a user event followed is locked,
@@ -172,11 +177,11 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     expect(mock.plannerSendCalls).toHaveLength(1);
 
     // Back to the conversation.
-    await page.click('.pl-sess .pl-btn[data-action="planner-close-session"]');
+    await page.click('.pl-crumb [data-action="planner-close-session"]');
     await expect(page.locator('#planner-main')).not.toHaveClass(/pl-sess-open/);
     await expect(page.locator('#pl-sess')).toBeHidden();
     await expect(page.locator('#pl-stream')).toContainText('hello world 在等你。');
-    await expect(page.locator('#pl-target-to')).toHaveText('→ Planner');
+    await expect(page.locator('#pl-target-to')).toHaveText('');
 
     // A card naming a session that is not listed opens read-only: a send
     // would create it as an ordinary session.
@@ -185,7 +190,7 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     await expect(page.locator('#pl-input')).toBeDisabled();
     await expect(page.locator('#pl-send')).toBeDisabled();
     await expect(page.locator('#pl-target-note')).toHaveText('不在会话列表里，不能发消息');
-    await page.click('.pl-sess .pl-btn[data-action="planner-close-session"]');
+    await page.click('.pl-crumb [data-action="planner-close-session"]');
     await expect(page.locator('#pl-input')).toBeEnabled();
     expect(mock.sendCalls.map((b) => JSON.parse(b).key)).not.toContain(TASK);
   } finally {

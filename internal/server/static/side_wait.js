@@ -1,17 +1,17 @@
-// side_wait.js — the "通知 N · 任务 N" bar atop the 会话 view's sidebar
-// (planner RFC §15.3 ①, §15.4): the Planner page's left column where you
-// already are. Its counts and cards are the left column's (planner_view.js
-// waitCount / waitListHtml, the tasks not done tasks.js renders); a click
-// unfolds them in place, where the cards' own buttons close, answer, change
-// a task's state and stop a dispatched session, which opens in the chat
-// view, and with nothing open it is one thin line.
+// side_wait.js — the "等你 N" bar atop the 会话 view's sidebar (planner RFC
+// §15.3 ①, §15.7 S1): only what waits on you to act — questions, decisions
+// and errors, the inbox's badge, the same count as the rail's Planner badge
+// and the phone's bottom bar. A click unfolds their cards in place, where
+// their own buttons close and answer them; with none the bar is not
+// rendered. 任务 is not here: the sidebar's "Planner 派出" group lists the
+// dispatched sessions, and the Planner page all of it.
 //
-// The counts follow inbox_count frames (nzBus 'inbox:count'); the list is
+// The count follows inbox_count frames (nzBus 'inbox:count'); the list is
 // fetched when the bar unfolds, refetched on a count change while it is
 // unfolded, and repainted on 'inbox:items'.
 import { nzBus } from './nz_util.js';
-import { fetchInbox, waitCount, waitListHtml } from './planner_view.js';
-import { mountTasks } from './tasks.js';
+import { inbox } from './notify.js';
+import { actionListHtml, fetchInbox } from './planner_view.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -20,40 +20,40 @@ const sw = {
   counts: '', // the last inbox_count seen, "open/badge"
 };
 
-function put(id, v) {
-  const el = $(id);
-  if (el && el.textContent !== v) el.textContent = v;
+function setOpen(open) {
+  sw.open = open;
+  $('sw-toggle')?.setAttribute('aria-expanded', open ? 'true' : 'false');
+  $('side-wait')?.classList.toggle('sw-open', open);
+  const list = $('sw-wait');
+  if (list) list.hidden = !open;
 }
 
-function paintCounts() {
+function paintCount() {
   const bar = $('side-wait');
   if (!bar) return;
-  const w = waitCount();
-  const p = document.querySelectorAll('#sw-task .tk-card:not(.done)').length;
-  put('sw-wait-n', String(w));
-  put('sw-task-n', String(p));
-  put('sw-wait-count', String(w));
-  bar.classList.toggle('sw-zero', !w && !p);
+  const n = inbox.badge || 0;
+  const v = String(n);
+  const el = $('sw-n');
+  if (el && el.textContent !== v) el.textContent = v;
+  bar.hidden = !n;
+  // Gone empty, it unfolds afresh when something comes in again.
+  if (!n && sw.open) setOpen(false);
 }
 
 function paintList() {
   const box = $('sw-wait');
   if (!box || !sw.open) return;
-  const html = waitListHtml();
+  const html = actionListHtml();
   if (box.innerHTML !== html) box.innerHTML = html;
 }
 
 function toggle() {
-  sw.open = !sw.open;
-  $('side-wait')?.classList.toggle('sw-open', sw.open);
-  $('sw-toggle')?.setAttribute('aria-expanded', sw.open ? 'true' : 'false');
-  const body = $('sw-body');
-  if (body) body.hidden = !sw.open;
+  setOpen(!sw.open);
   if (sw.open) { paintList(); fetchInbox(); }
 }
 
 nzBus.addEventListener('inbox:count', (e) => {
-  paintCounts();
+  paintCount();
   // fetchInbox seeds the counts it fetched: the same counts do not refetch.
   const c = e.detail.open + '/' + e.detail.badge;
   if (c === sw.counts) return;
@@ -64,10 +64,5 @@ nzBus.addEventListener('inbox:items', paintList);
 
 document.addEventListener('DOMContentLoaded', () => {
   $('sw-toggle')?.addEventListener('click', toggle);
-  const tasks = $('sw-task');
-  if (tasks) {
-    mountTasks(tasks, { open: 'chat' });
-    new MutationObserver(paintCounts).observe(tasks, { childList: true, subtree: true });
-  }
-  paintCounts();
+  paintCount();
 });

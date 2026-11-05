@@ -3,8 +3,9 @@
 // the promises, in one list with one state model. A dispatched session's
 // 等你 and 失败 follow its health state, so they come and go with it; 已完成
 // is the Planner's judgment (its status action block) or the user's, kept in
-// the sidecar, as is the 失败 of a session the user stopped. A retired session (gone from the router) keeps the failure
-// it had, else it ended: 已完成 by itself. A promise is 待提醒 before its
+// the sidecar; a session the user stopped is 已完成 as theirs (D91: 失败 is
+// left to a process that died by itself). A retired session (gone from the
+// router) keeps the failure it had, else it ended: 已完成 by itself. A promise is 待提醒 before its
 // due reminder, done once closed. Every state someone sets is journaled with who and why; a done
 // task leaves the list Archive after it was done, its data kept.
 package task
@@ -103,7 +104,7 @@ type Config struct {
 	Now func() time.Time
 }
 
-// StoppedWhy is the reason a task the user stopped is 失败 with.
+// StoppedWhy is the reason a task the user stopped is 已完成 with.
 const StoppedWhy = "已停止"
 
 // StoppedPromiseWhy is the reason a promise citing a stopped task is closed
@@ -281,7 +282,8 @@ func (b *Board) Set(id string, state State, by By, why string) error {
 
 // Stop stops dispatched session id for the user (D88: what the Planner
 // dispatches runs at once, so stopping it is the user's control): the task
-// is marked 失败 as theirs, StoppedWhy, the open promises citing it ("X 做完后
+// is marked 已完成 as theirs, StoppedWhy (D91: stopping is the user's
+// decision, not a failure), the open promises citing it ("X 做完后
 // 告诉用户结果") are done as theirs, StoppedPromiseWhy, since nothing will
 // meet them now, then Config.Stop stops its process. The session stays, its
 // history readable; a mark holds over whatever it does later, until someone
@@ -294,7 +296,7 @@ func (b *Board) Stop(id string) error {
 	if !ok {
 		return ErrNotFound
 	}
-	if err := b.Set(id, Failed, ByUser, StoppedWhy); err != nil {
+	if err := b.Set(id, Done, ByUser, StoppedWhy); err != nil {
 		return err
 	}
 	var closed []string

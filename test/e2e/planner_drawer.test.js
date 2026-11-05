@@ -52,10 +52,10 @@ test('desktop: Alt+P and Esc, the workbench, a send with its receipt, a card, th
     await expect(drawer).toBeVisible();
     await expect(drawer.locator('#pl-center')).toHaveCount(1);
     await expect(drawer.locator('#pl-stream .event')).toHaveCount(2);
-    await expect(drawer.locator('#pl-status')).toHaveText('在线');
+    await expect(drawer.locator('#pl-status')).toHaveText('');
     await expect(page.locator('#pl-input')).toBeFocused();
     await expect(page.locator('#msg-input')).toHaveText('');
-    await expect(drawer.locator('.pl-page-only')).toBeHidden();
+    await expect(drawer.locator('.pl-page-only:visible')).toHaveCount(0);
     await expect(drawer.locator('[data-action="planner-drawer-close"]')).toBeVisible();
 
     // Esc puts it away and gives the focus back; Alt+P toggles.
@@ -85,7 +85,7 @@ test('desktop: Alt+P and Esc, the workbench, a send with its receipt, a card, th
     const conn = mock.wsConnections[mock.wsConnections.length - 1];
     await expect.poll(() => conn.messages.filter((m) => m.type === 'subscribe' && m.key === PLANNER).length).toBeGreaterThan(0);
     conn.send({ type: 'subscribed', key: PLANNER, state: 'ready' });
-    await expect(page.locator('#pl-target-to')).toHaveText('→ Planner');
+    await expect(page.locator('#pl-target-to')).toHaveText('');
     await page.fill('#pl-input', 'iso 现在都在干什么？');
     await page.press('#pl-input', 'Enter');
     await expect.poll(() => mock.plannerSendCalls).toEqual([{ text: 'iso 现在都在干什么？' }]);
@@ -120,7 +120,7 @@ test('desktop: Alt+P and Esc, the workbench, a send with its receipt, a card, th
     await page.evaluate(() => import('/static/planner_drawer.js').then((m) => m.openPlannerDrawer({ item: 'in_n' })));
     await expect(page.locator('#planner-main')).not.toHaveClass(/pl-sess-open/);
     await expect(page.locator('#planner-main #pl-focus .pl-card[data-id="in_n"]')).toBeVisible();
-    await expect(page.locator('#pl-target-to')).toHaveText('→ Planner');
+    await expect(page.locator('#pl-target-to')).toHaveText('');
     await expect(page.locator('#pl-input')).toBeFocused();
     await expect(drawer).toBeHidden();
 
