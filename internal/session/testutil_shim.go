@@ -4,10 +4,11 @@ package session
 
 import (
 	"bufio"
-	"io"
+	"encoding/json"
 	"net"
 	"os"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,7 +21,8 @@ import (
 const FakeShimPID = 1 << 30
 
 // FakeShim serves one key's shim socket: it replays a backlog, numbered from
-// a first seq, to the client that attaches and then holds the connection open.
+// a first seq, to the client that attaches and then holds the connection open
+// until the client sends shutdown, which ends it as a real shim's exit does.
 // A router built from Config finds it on ReconnectShimsCtx and reattaches the
 // key to a real *cli.Process, which tests outside this package need to reach
 // the adoption gate.
@@ -29,6 +31,9 @@ type FakeShim struct {
 	next     int64
 	attached chan net.Conn
 	conn     net.Conn
+
+	mu   sync.Mutex
+	sent []string // the types of the client's messages after the attach
 }
 
 // StartFakeShimForTest starts the shim for key and records it in a state file
@@ -89,7 +94,28 @@ func StartFakeShimForTest(t testing.TB, key string, firstSeq int64, backlog []st
 			}
 		}
 		f.attached <- conn
-		io.Copy(io.Discard, rd) //nolint:errcheck // nothing the client writes needs an answer
+		// Nothing the client writes needs an answer; shutdown closes the
+		// connection and the socket.
+		for {
+			line, err := rd.ReadBytes('\n')
+			if err != nil {
+				return
+			}
+			var m struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(line, &m) != nil {
+				continue
+			}
+			f.mu.Lock()
+			f.sent = append(f.sent, m.Type)
+			f.mu.Unlock()
+			if m.Type == "shutdown" {
+				conn.Close()
+				ln.Close()
+				return
+			}
+		}
 	}()
 	// ShimPID is this test process: it passes the liveness and binary-identity
 	// gates. The socket must exist before ReconnectShimsCtx runs, or Discover
@@ -111,6 +137,14 @@ func (f *FakeShim) Attached(t testing.TB) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("fake shim never finished the attach handshake")
 	}
+}
+
+// Sent returns the types of the messages the client sent after the attach,
+// in order.
+func (f *FakeShim) Sent() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.sent...)
 }
 
 // Emit sends a live stdout line, numbered after the backlog and any earlier
