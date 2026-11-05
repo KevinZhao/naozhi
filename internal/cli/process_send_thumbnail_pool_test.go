@@ -43,7 +43,7 @@ func TestBuildUserEntry_OrderPreserved(t *testing.T) {
 		}
 	}
 
-	entry := buildUserEntry("hi", images, "")
+	entry := buildUserEntry("hi", images, "", "")
 	if len(entry.ImagePaths) != len(entry.Images) {
 		t.Fatalf("ImagePaths length %d != Images length %d",
 			len(entry.ImagePaths), len(entry.Images))

@@ -11,6 +11,7 @@ import "context"
 
 type runIDKey struct{}
 type sessionKeyKey struct{}
+type sourceKey struct{}
 
 // WithRunID derives a context carrying the turn's run id; "" is a no-op.
 func WithRunID(ctx context.Context, id string) context.Context {
@@ -43,5 +44,23 @@ func SessionKey(ctx context.Context) string {
 		return ""
 	}
 	v, _ := ctx.Value(sessionKeyKey{}).(string)
+	return v
+}
+
+// WithSource derives a context carrying who sent the turn's message when it
+// was not the user (clievent.EventEntry.Source); "" is a no-op.
+func WithSource(ctx context.Context, src string) context.Context {
+	if src == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, sourceKey{}, src)
+}
+
+// Source returns the message source in ctx, or "" for the user.
+func Source(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(sourceKey{}).(string)
 	return v
 }

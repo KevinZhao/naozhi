@@ -17,6 +17,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/activity"
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/brief"
+	"github.com/naozhi/naozhi/internal/planner/custody"
 	"github.com/naozhi/naozhi/internal/planner/note"
 	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/planner/task"
@@ -128,6 +129,8 @@ type ServerOptions struct {
 	Notify *notify.Notifier
 	// Tasks are the Planner page's 任务 /api/tasks serves; nil lists none.
 	Tasks *task.Board
+	// Custody is what /api/custody serves (planner/custody); nil lists none.
+	Custody *custody.Engine
 	// Purpose is a session's purpose from its sidecar file (task: a session
 	// the Planner dispatched) and the dispatch's title, stamped on
 	// /api/sessions; nil stamps none.

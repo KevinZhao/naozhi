@@ -24,6 +24,8 @@ type Msg struct {
 	Origin Origin
 	// TraceID is the request's trace id (Request.TraceID, resolved).
 	TraceID string
+	// Source is Request.Source.
+	Source string
 }
 
 // Mode selects how new messages that arrive while a session is busy are

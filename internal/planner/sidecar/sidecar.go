@@ -5,7 +5,9 @@
 //
 // v0.2.0 records the sessions the Planner dispatches (purpose "task", parent
 // planner:main), and v0.2.1 their task state as the Planner or the user set
-// it and the failure health last judged them in (§15.4). A file outlives its session by Retention, counted from when
+// it and the failure health last judged them in (§15.4). v0.5.0 adds custody
+// (planner/custody): its switch on any session, and on a lineage's root what
+// custody sent and why it stopped. A file outlives its session by Retention, counted from when
 // the session was first seen gone, so a retired session's lineage is still
 // there to read for a while.
 package sidecar
@@ -72,6 +74,43 @@ type Meta struct {
 	// Turn is the session's last turn end as planner/action saw it, kept
 	// on disk so a check a restart cut short runs again.
 	Turn *Turn `json:"turn,omitempty"`
+	// Custody is the session's custody switch; nil leaves it to the default
+	// (planner/custody).
+	Custody *Custody `json:"custody,omitempty"`
+	// Chain is custody's count over the lineage this session is the root of.
+	Chain *Chain `json:"chain,omitempty"`
+	// Retry is custody's answer to the session's last failure.
+	Retry *Retry `json:"retry,omitempty"`
+}
+
+// Custody is a session's custody switch: on or off, set by whom (auto, user
+// or planner) and when.
+type Custody struct {
+	On bool      `json:"on"`
+	By string    `json:"by"`
+	At time.Time `json:"at"`
+}
+
+// Chain is what custody did over one lineage: the messages it sent, those
+// in a row with no progress after them, the failures per error class, the
+// progress seen when it last sent, and why it stopped ("" while it runs).
+type Chain struct {
+	Sent      int            `json:"sent,omitempty"`
+	Idle      int            `json:"idle,omitempty"`
+	Errors    map[string]int `json:"errors,omitempty"`
+	Progress  string         `json:"progress,omitempty"`
+	Stopped   string         `json:"stopped,omitempty"`
+	StoppedAt time.Time      `json:"stopped_at,omitzero"`
+}
+
+// Retry is custody's answer to one failure, named by when it happened
+// (Failed): the "continue" due At for its error Class, or Done once sent or
+// left to the user.
+type Retry struct {
+	Failed time.Time `json:"failed"`
+	Class  string    `json:"class,omitempty"`
+	At     time.Time `json:"at,omitzero"`
+	Done   bool      `json:"done,omitempty"`
 }
 
 // Turn is a dispatched session's turn end. While Check is set the turn is
@@ -231,13 +270,13 @@ func (s *Store) List() []Meta {
 
 // SetMark records key's task state; false when key has no sidecar.
 func (s *Store) SetMark(key string, mark Mark) (bool, error) {
-	return s.update(key, func(m *Meta) bool { m.Mark = &mark; return true })
+	return s.Update(key, func(m *Meta) bool { m.Mark = &mark; return true })
 }
 
 // SetFailure records the failure health judged key in, or that it has none
 // (nil); false when key has no sidecar.
 func (s *Store) SetFailure(key string, f *Mark) (bool, error) {
-	return s.update(key, func(m *Meta) bool {
+	return s.Update(key, func(m *Meta) bool {
 		if f == nil && m.Failure == nil {
 			return false
 		}
@@ -248,13 +287,13 @@ func (s *Store) SetFailure(key string, f *Mark) (bool, error) {
 
 // SetTurn records key's last turn end; false when key has no sidecar.
 func (s *Store) SetTurn(key string, t Turn) (bool, error) {
-	return s.update(key, func(m *Meta) bool { m.Turn = &t; return true })
+	return s.Update(key, func(m *Meta) bool { m.Turn = &t; return true })
 }
 
 // Checked clears the check of key's turn that ended at ended, unless a
 // later turn ended since.
 func (s *Store) Checked(key string, ended time.Time) error {
-	_, err := s.update(key, func(m *Meta) bool {
+	_, err := s.Update(key, func(m *Meta) bool {
 		if m.Turn == nil || !m.Turn.Check || !m.Turn.Ended.Equal(ended) {
 			return false
 		}
@@ -264,8 +303,9 @@ func (s *Store) Checked(key string, ended time.Time) error {
 	return err
 }
 
-// update applies fn to key's sidecar and saves it when fn reports a change.
-func (s *Store) update(key string, fn func(*Meta) bool) (bool, error) {
+// Update applies fn to key's sidecar and saves it when fn reports a change;
+// false when key has no sidecar. fn runs under the store's lock.
+func (s *Store) Update(key string, fn func(*Meta) bool) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m, ok := s.m[key]

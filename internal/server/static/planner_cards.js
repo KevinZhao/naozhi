@@ -188,7 +188,7 @@ function mentionedKeys(ev) {
 
 // ---- action blocks (§6.2) ----
 
-const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask', 'status', 'notify']);
+const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask', 'status', 'notify', 'custody']);
 const STATUS_LABEL = { done: '已完成', doing: '进行中', failed: '失败' };
 
 const isStr = (v) => typeof v === 'string';
@@ -258,6 +258,16 @@ function actionCardHtml(raw) {
     return '<div class="pl-act pl-act-status" data-task="' + escAttr(task) + '"' + (name || !task ? ' data-named="1"' : '') + '>' +
       '<div class="pl-act-h">Planner 判断 · ' + esc(STATUS_LABEL[a.state] || str(a.state)) + '</div>' +
       rowsHtml([['任务', name], ['依据', str(a.why)]]) + '</div>';
+  }
+  if (a.type === 'custody') {
+    // The session by its card (its name, never the key); a go-ahead also
+    // says what it was told.
+    const key = str(a.key);
+    const text = str(a.text);
+    const head = text ? '托管 · 让它继续' : (a.on === false ? '关掉托管' : '打开托管');
+    return '<div class="pl-act pl-act-custody"><div class="pl-act-h">' + head + '</div>' +
+      (text ? '<div class="pl-act-q">' + esc(text) + '</div>' : '') +
+      (key ? '<div class="pl-scards">' + sessionCardHtml(key) + '</div>' : '') + '</div>';
   }
   if (a.type === 'notify') {
     const brief = a.level === 'brief';

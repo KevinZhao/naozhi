@@ -9,6 +9,7 @@ import (
 	dashcost "github.com/naozhi/naozhi/internal/dashboard/cost"
 	dashcron "github.com/naozhi/naozhi/internal/dashboard/cron"
 	dashdiscovery "github.com/naozhi/naozhi/internal/dashboard/discovery"
+	dashcustody "github.com/naozhi/naozhi/internal/dashboard/ext/custody"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/inbox"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/system"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/tasks"
@@ -85,6 +86,14 @@ func buildInboxHandler(opts ServerOptions) *inbox.Handler {
 		return inbox.New(nil)
 	}
 	return inbox.New(opts.Notify)
+}
+
+// buildCustodyHandler unwraps a nil *custody.Engine the same way.
+func buildCustodyHandler(opts ServerOptions) *dashcustody.Handler {
+	if opts.Custody == nil {
+		return dashcustody.New(nil)
+	}
+	return dashcustody.New(opts.Custody)
 }
 
 // buildTasksHandler unwraps a nil *task.Board the same way.

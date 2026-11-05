@@ -31,6 +31,10 @@ type Request struct {
 	// TraceID names the inbound message in logs; "" takes Submit's ctx
 	// trace id, else a fresh one.
 	TraceID string
+	// Source is who sent the message when it was not the user
+	// (clievent.SourceCustody, clievent.SourcePlanner); its transcript entry
+	// carries it.
+	Source string
 }
 
 // Ack is Submit's immediate answer, also passed to Origin.Admitted.

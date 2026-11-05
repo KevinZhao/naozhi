@@ -1,7 +1,8 @@
 // Package note derives the gateway's side notes on a session
 // (docs/rfc/planner.md §15.3 ③): its health entering "waiting for you",
 // "stalled" or "failed" and recovering, its "等你" items opening and closing,
-// the Planner dispatching it and it reporting to the Planner. The notes are
+// the Planner dispatching it, it reporting to the Planner, and what custody
+// did on it. The notes are
 // shown in the session view only; they never reach the CLI and are not
 // events of the session's own log.
 //
@@ -37,6 +38,7 @@ const (
 	KindInbox    Kind = "inbox"    // a "等你" item opened or closed
 	KindDispatch Kind = "dispatch" // the Planner dispatched the session
 	KindReport   Kind = "report"   // the session's message reached the Planner
+	KindCustody  Kind = "custody"  // custody switched, sent, held back or stopped
 )
 
 // Note is one side note on session Key. ID is stable across reads and
@@ -53,12 +55,16 @@ type Note struct {
 	ErrClass string `json:"error_class,omitempty"`
 	Evidence string `json:"evidence,omitempty"`
 	// Inbox notes: open or close, the item and its kind, who closed it and
-	// its title.
+	// its title. Custody notes: Event (on, off, sent, deferred, stopped),
+	// Evidence the reason, By who switched it and N the count of a message
+	// sent.
 	Event    string `json:"event,omitempty"`
 	Item     string `json:"item,omitempty"`
 	ItemKind string `json:"item_kind,omitempty"`
 	ClosedBy string `json:"closed_by,omitempty"`
 	Title    string `json:"title,omitempty"`
+	By       string `json:"by,omitempty"`
+	N        int    `json:"n,omitempty"`
 }
 
 // Health states a note is written for: entering one, or leaving one for a
@@ -83,6 +89,14 @@ type notifyData struct {
 	ID       string `json:"id"`
 	Kind     string `json:"kind"`
 	ClosedBy string `json:"closed_by"`
+}
+
+// CustodyData is a custody journal entry's data (planner/custody writes it).
+type CustodyData struct {
+	Event  string `json:"event"`
+	Reason string `json:"reason,omitempty"`
+	By     string `json:"by,omitempty"`
+	N      int    `json:"n,omitempty"`
 }
 
 // FromEntry is the note a journal entry makes, if any.
@@ -112,6 +126,13 @@ func FromEntry(e journal.Entry) (Note, bool) {
 		}
 		n.Kind, n.ID = KindInbox, d.Event+"-"+d.ID
 		n.Event, n.Item, n.ItemKind, n.ClosedBy = d.Event, d.ID, d.Kind, d.ClosedBy
+	case journal.KindCustody:
+		var d CustodyData
+		if json.Unmarshal(e.Data, &d) != nil || d.Event == "" {
+			return Note{}, false
+		}
+		n.Kind, n.ID = KindCustody, fmt.Sprintf("c%d", e.TS.UnixNano())
+		n.Event, n.Evidence, n.By, n.N = d.Event, d.Reason, d.By, d.N
 	default:
 		return Note{}, false
 	}

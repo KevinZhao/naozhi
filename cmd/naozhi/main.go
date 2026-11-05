@@ -27,6 +27,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/activity"
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/brief"
+	"github.com/naozhi/naozhi/internal/planner/custody"
 	"github.com/naozhi/naozhi/internal/planner/promise"
 	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
@@ -498,6 +499,27 @@ func main() {
 		Patrol:     scouter.Since,
 	})
 
+	// Custody (§5.4, D93): the gateway watching sessions for the user. It
+	// sends through srv's own send path and reads the health machine, both
+	// set before Run below. It runs only with the Planner on.
+	sources := wireup.CustodySources{Router: router, Outputs: activities}
+	custodian := custody.New(custody.Config{
+		Sessions:  sidecars,
+		Send:      func(key, text string) error { return srv.SubmitCustody(key, text) },
+		Inbox:     notifier,
+		Journal:   plannerState.Journal,
+		Health:    func() health.Snapshot { return healthMon.Snapshot() },
+		Local:     sources.Local,
+		Workflows: sources.Workflows,
+		LastUser:  sources.LastUser,
+		Progress:  sources.Progress,
+		FailText:  sources.FailText,
+		Settled:   sources.Settled,
+		Name:      unitNames,
+		Path:      sessionLayout.PlannerCustodyPath(),
+		Disabled:  !cfg.Planner.Enabled,
+	})
+
 	routing := buildRouting(cfg, agents, projectMgr, scheduler)
 	// The options of the sessions the Planner dispatches: at dispatch, and
 	// rebuilt from their sidecar when one respawns from the dashboard.
@@ -522,6 +544,7 @@ func main() {
 		UnitName:         unitNames,
 		Notify:           notifier,
 		Tasks:            tasks,
+		Custody:          custodian,
 		Purpose:          sidecars.Purpose,
 		TaskOpts:         taskOpts.ForKey,
 		AllowedRoot:      workspace,
@@ -618,9 +641,11 @@ func main() {
 	})
 	routerEvents.BindMonitor(healthMon.Poke)
 	healthMon.Subscribe(tasks.Observe)
+	healthMon.Subscribe(custodian.HandleHealth)
 	go healthMon.Run(ctx)
 	plannerAgent.Start(ctx, srv, healthMon.Snapshot)
 	notifier.SetHealth(healthMon)
+	notifier.SetCustody(custodian.Covers)
 	go notifier.Run(ctx)
 	promises.SetReminder(wireup.PromiseReminder{Notify: notifier, Note: plannerAgent.Note})
 	go promises.Run(ctx)
@@ -645,6 +670,7 @@ func main() {
 		TellUnrun:   plannerAgent.TellUnrun,
 		UnrunTurn:   plannerAgent.UnrunTurn,
 		PlannerBusy: plannerAgent.Busy,
+		Custody:     custodian,
 		Ctx:         ctx,
 	})
 	// The result is judged by the turn's sources before the ledger lets go
@@ -659,6 +685,7 @@ func main() {
 	// longer judge the next turn.
 	srv.SettlePlannerTurns(router.ReattachedTurn, resultSink)
 	go actions.Run(ctx)
+	go custodian.Run(ctx)
 	go sidecars.Run(ctx, func(key string) bool { return router.SessionFor(key) != nil })
 	go briefer.Run(ctx)
 	go scouter.Run(ctx)

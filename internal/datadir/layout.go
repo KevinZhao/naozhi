@@ -180,6 +180,10 @@ func (l Layout) PlannerPromisesPath() string { return l.Join("planner", "promise
 // (<root>/planner/notify.json).
 func (l Layout) PlannerPushStatePath() string { return l.Join("planner", "notify.json") }
 
+// PlannerCustodyPath is custody's global state (the pause), beside the
+// push pause (planner/custody).
+func (l Layout) PlannerCustodyPath() string { return l.Join("planner", "custody.json") }
+
 // PlannerScoutRoot holds the scout's state: its cursors, the findings
 // already seen, the next day's calendar and each run's record
 // (<root>/planner/scout, docs/rfc/planner.md §15.6).

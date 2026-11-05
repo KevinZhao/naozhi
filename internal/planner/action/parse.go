@@ -1,10 +1,12 @@
 // Package action is the Planner's way to ask the gateway for something
 // (docs/rfc/planner.md §6.2): the ```naozhi-action blocks at the end of a
-// planner:main reply. There are five: dispatch (a task: session, started at
+// planner:main reply. There are six: dispatch (a task: session, started at
 // once, D88), promise (a promise among the 任务), ask (a
 // question in "通知" whose answer goes back to the Planner), status (the
-// Planner's judgment of a task's state, §15.4) and notify (something to tell
-// the user, pushed now or held for the morning brief, §15.6). A block that
+// Planner's judgment of a task's state, §15.4), notify (something to tell
+// the user, pushed now or held for the morning brief, §15.6) and custody (a
+// session's custody switched, or a message sent to a session in custody,
+// planner/custody). A block that
 // does not parse, or names an unknown type, a bad field or a task that does
 // not exist, is not run: the Planner conversation shows it as it was
 // written, with the reason, and the Planner gets a receipt naming it.
@@ -49,6 +51,10 @@ const (
 	// notifyIDRunes matches the scout's finding IDs.
 	notifyIDRunes = 512
 	linkBytes     = 2048
+	// keyRunes bounds a session key (sessionkey's cap).
+	keyRunes = 512
+	// custodyTextRunes caps what the Planner tells a session in custody.
+	custodyTextRunes = 2000
 )
 
 // Type is a block's "type".
@@ -60,6 +66,7 @@ const (
 	TypeAsk      Type = "ask"
 	TypeStatus   Type = "status"
 	TypeNotify   Type = "notify"
+	TypeCustody  Type = "custody"
 )
 
 // Dispatch asks for a session in a workspace.
@@ -113,8 +120,16 @@ type Notify struct {
 	ID    string `json:"id"`
 }
 
+// Custody switches session Key's custody (On), or sends it Text through
+// custody as the Planner's go-ahead; exactly one of the two.
+type Custody struct {
+	Key  string `json:"key"`
+	On   *bool  `json:"on"`
+	Text string `json:"text"`
+}
+
 // Block is one action block of a reply: exactly one of Dispatch, Promise,
-// Ask, Status and Notify is set, or Err says why it is not run.
+// Ask, Status, Notify and Custody is set, or Err says why it is not run.
 type Block struct {
 	// Raw is the block's body as written.
 	Raw      string
@@ -124,6 +139,7 @@ type Block struct {
 	Ask      *Ask
 	Status   *Status
 	Notify   *Notify
+	Custody  *Custody
 	Err      error
 }
 
@@ -235,13 +251,22 @@ func (b *Block) decode() {
 			err = n.validate()
 			b.Notify = &n.Notify
 		}
+	case TypeCustody:
+		var c struct {
+			Type Type `json:"type"`
+			Custody
+		}
+		if err = strict(b.Raw, &c); err == nil {
+			err = c.validate()
+			b.Custody = &c.Custody
+		}
 	case "":
 		err = errors.New("缺少 type")
 	default:
-		err = fmt.Errorf("未知类型 %q（只有 dispatch、promise、ask、status、notify）", head.Type)
+		err = fmt.Errorf("未知类型 %q（只有 dispatch、promise、ask、status、notify、custody）", head.Type)
 	}
 	if err != nil {
-		b.Dispatch, b.Promise, b.Ask, b.Status, b.Notify, b.Err = nil, nil, nil, nil, nil, err
+		b.Dispatch, b.Promise, b.Ask, b.Status, b.Notify, b.Custody, b.Err = nil, nil, nil, nil, nil, nil, err
 	}
 }
 
@@ -351,6 +376,21 @@ func (n *Notify) validate() error {
 		return errors.New("id 太长")
 	case n.Link != "" && !webLink(n.Link):
 		return errors.New("link 要是 http(s) 链接或空")
+	}
+	return nil
+}
+
+func (c *Custody) validate() error {
+	c.Key, c.Text = strings.TrimSpace(c.Key), strings.TrimSpace(c.Text)
+	switch {
+	case c.Key == "":
+		return errors.New("custody 缺少 key")
+	case utf8.RuneCountInString(c.Key) > keyRunes || strings.IndexFunc(c.Key, unicode.IsControl) >= 0:
+		return errors.New("key 不是合法的会话 key")
+	case (c.On == nil) == (c.Text == ""):
+		return errors.New("custody 要么带 on（开关托管），要么带 text（让它继续），只能二选一")
+	case utf8.RuneCountInString(c.Text) > custodyTextRunes:
+		return fmt.Errorf("text 超过 %d 字", custodyTextRunes)
 	}
 	return nil
 }

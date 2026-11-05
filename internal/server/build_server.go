@@ -161,6 +161,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		transcribeH:     buildTranscribeHandler(opts),
 		inboxH:          buildInboxHandler(opts),
 		tasksH:          buildTasksHandler(opts),
+		custodyH:        buildCustodyHandler(opts),
 	}
 
 	// The process-lifetime context is created HERE, not in Start (#2552).

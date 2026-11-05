@@ -98,7 +98,7 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []cli
 		// ring.EventLog). Inside the write lock so two quick sends land in
 		// the log in the order they hit the shim; after the write so a
 		// rejected write leaves no ghost entry.
-		p.eventLog.Append(buildUserEntry(text, images, slot.runID))
+		p.eventLog.Append(buildUserEntry(text, images, slot.runID, ctxutil.Source(ctx)))
 		return nil
 	})
 	if !queued {
