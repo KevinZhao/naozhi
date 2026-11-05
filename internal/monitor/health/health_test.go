@@ -230,35 +230,36 @@ func TestSystemicFault(t *testing.T) {
 		resolved bool
 	}
 	tests := []struct {
-		name  string
-		steps []step
-		want  []fault
+		name   string
+		steps  []step
+		want   []fault
+		merged int // failed transitions marked InFault
 	}{
 		{"one unit is no fault", []step{
 			{facts: []Fact{auth("a"), idle("b")}},
 			{tick: Interval, facts: []Fact{auth("a"), idle("b")}},
-		}, nil},
+		}, nil, 0},
 		{"failures older than the first sight do not merge", []step{
 			{facts: []Fact{auth("a"), auth("b")}},
 			{tick: Interval, facts: []Fact{auth("a"), auth("b")}},
-		}, nil},
+		}, nil, 0},
 		{"two units with one class merge once", []step{
 			{facts: []Fact{idle("a"), idle("b")}},
 			{tick: Interval, facts: []Fact{auth("a"), auth("b")}},
 			{tick: Interval, facts: []Fact{auth("a"), auth("b")}},
 			{tick: Interval, facts: []Fact{auth("a"), auth("b"), auth("c")}},
 			{tick: Interval, facts: []Fact{auth("a"), auth("b"), auth("c")}},
-		}, []fault{{ErrAuth, 2, false}}},
+		}, []fault{{ErrAuth, 2, false}}, 2},
 		{"failures further apart than the window do not merge", []step{
 			{facts: []Fact{auth("a"), idle("b")}},
 			{tick: Interval, facts: []Fact{auth("a"), idle("b")}},
 			{tick: FaultWindow, facts: []Fact{auth("a"), auth("b")}},
 			{tick: Interval, facts: []Fact{auth("a"), auth("b")}},
-		}, nil},
+		}, nil, 0},
 		{"unclassified failures never merge", []step{
 			{facts: []Fact{other("a"), other("b")}},
 			{tick: Interval, facts: []Fact{other("a"), other("b")}},
-		}, nil},
+		}, nil, 0},
 		{"resolves once every unit recovered", []step{
 			{facts: []Fact{idle("a"), idle("b")}},
 			{tick: Interval, facts: []Fact{auth("a"), auth("b")}},
@@ -267,20 +268,27 @@ func TestSystemicFault(t *testing.T) {
 			{tick: Interval, facts: []Fact{idle("a"), idle("b")}},
 			{tick: Interval, facts: []Fact{auth("a"), auth("b")}},
 			{tick: Interval, facts: []Fact{auth("a"), auth("b")}},
-		}, []fault{{ErrAuth, 2, false}, {ErrAuth, 0, true}, {ErrAuth, 2, false}}},
+		}, []fault{{ErrAuth, 2, false}, {ErrAuth, 0, true}, {ErrAuth, 2, false}}, 4},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newRig(t, Config{Workspaces: workspace.Load("", "node")})
 			r.run(tt.steps)
 			var got []fault
+			merged := 0
 			for _, ev := range r.events {
 				if f := ev.Fault; f != nil {
 					got = append(got, fault{f.Class, len(f.Units), f.Resolved})
 				}
+				if tr := ev.Transition; tr != nil && tr.InFault {
+					merged++
+				}
 			}
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("faults = %v, want %v", got, tt.want)
+			}
+			if merged != tt.merged {
+				t.Errorf("merged failures = %d, want %d", merged, tt.merged)
 			}
 		})
 	}
@@ -403,6 +411,9 @@ func TestFirstSightAfterRestart(t *testing.T) {
 		{"waiting, still waiting", Waiting, Fact{Asking: true}, []State{Waiting, Waiting}, nil},
 		{"waiting, now failed", Waiting, failed, []State{Unknown, Failed}, []string{"s:waiting>failed"}},
 		{"stalled, now waiting", Stalled, Fact{Asking: true}, []State{Unknown, Waiting}, []string{"s:stalled>waiting"}},
+		{"stalled, workflow unseen since", Stalled, Fact{Workflow: "build", WorkflowSeen: failedAt.Add(-time.Hour)}, []State{Stalled, Stalled}, nil},
+		{"stalled, workflow seen since", Stalled, Fact{Workflow: "build", WorkflowSeen: failedAt.Add(30 * time.Minute)}, []State{Active, Active},
+			[]string{"s:stalled>active"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

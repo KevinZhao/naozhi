@@ -12,6 +12,7 @@ import (
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/monitor/beat"
 	"github.com/naozhi/naozhi/internal/monitor/health"
+	"github.com/naozhi/naozhi/internal/planner/workspace"
 )
 
 type fakeClock struct {
@@ -286,12 +287,8 @@ func TestSources(t *testing.T) {
 	b.pushes = nil
 	n.HandleHealth(health.Event{At: now, Transition: &health.Transition{From: health.Idle,
 		Unit: health.Unit{ID: "a", Workspace: "ws_1", State: health.Failed, ErrClass: health.ErrOther, Since: now}}})
-	h.snap.Units = []health.Unit{
-		{ID: "b", State: health.Failed, ErrClass: health.ErrAuth, Since: now},
-		{ID: "c", State: health.Failed, ErrClass: health.ErrAuth, Since: now},
-	}
 	for _, id := range []string{"b", "c"} {
-		n.HandleHealth(health.Event{At: now, Transition: &health.Transition{From: health.Idle,
+		n.HandleHealth(health.Event{At: now, Transition: &health.Transition{From: health.Idle, InFault: true,
 			Unit: health.Unit{ID: id, Workspace: "ws_1", State: health.Failed, ErrClass: health.ErrAuth, Since: now}}})
 	}
 	n.HandleHealth(health.Event{At: now, Fault: &health.Fault{Class: health.ErrAuth, Units: []string{"b", "c"}}})
@@ -553,5 +550,45 @@ func TestAddDaily(t *testing.T) {
 	}
 	if got := b.titles(); len(got) != 2 {
 		t.Errorf("pushes = %q, want two", got)
+	}
+}
+
+// TestFailuresFirstSeenFailing: units already failed when the health machine
+// first sees them are dated by their last activity and merge into no fault,
+// so each is an item of its own.
+func TestFailuresFirstSeenFailing(t *testing.T) {
+	lay := datadir.FromRoot(t.TempDir())
+	if err := datadir.EnsureDir(lay.PlannerRoot()); err != nil {
+		t.Fatal(err)
+	}
+	n, clock, _ := newTest(t, local(10, 0), lay)
+	dir := t.TempDir()
+	facts := make([]health.Fact, 0, 2)
+	for _, id := range []string{"cron:a", "cron:b"} {
+		facts = append(facts, health.Fact{ID: id, Kind: health.KindCron, Dir: dir, Register: true,
+			Failed: "last run failed", ErrText: "API Error: 403 permission_error", LastActive: clock.Now().Add(-2 * time.Hour)})
+	}
+	m := health.New(health.Config{Clock: clock, Workspaces: workspace.Load("", "node"),
+		Collect: func(time.Time) []health.Fact { return facts }})
+	n.SetHealth(m)
+	var events []health.Event
+	m.Subscribe(func(ev health.Event) { events = append(events, ev) })
+	m.Reconcile()
+	clock.advance(time.Minute)
+	m.Reconcile()
+	for _, ev := range events {
+		if ev.Fault != nil {
+			t.Errorf("fault %+v, want none", ev.Fault)
+		}
+		n.HandleHealth(ev)
+	}
+	open, _ := n.List(0)
+	var got []string
+	for _, it := range open {
+		got = append(got, it.Source)
+	}
+	slices.Sort(got)
+	if want := []string{"failed:cron:a", "failed:cron:b"}; !slices.Equal(got, want) {
+		t.Errorf("open items = %q, want %q", got, want)
 	}
 }
