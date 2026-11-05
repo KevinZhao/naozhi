@@ -235,6 +235,13 @@ func (h *Handlers) HandlePreviewLink(w http.ResponseWriter, r *http.Request) {
 		writeRefusal(w, refuse(http.StatusNotFound, "file not found"))
 		return
 	}
+	// HandlePreviewAsset serves no dot entry below the root, so a page in a
+	// dot directory (by name or by symlink) gets no link; the 415 sends the
+	// dashboard to the single-file render.
+	if resolvedRel, err := filepath.Rel(of.rootResolved, of.resolved); err != nil || hasDotSegment(filepath.Clean(req.Path)) || hasDotSegment(resolvedRel) {
+		writeRefusal(w, refuse(http.StatusUnsupportedMediaType, "a file under a dot directory has no directory preview"))
+		return
+	}
 	// Both the name and the bytes must say HTML: HandlePreviewAsset serves by
 	// extension only, so HTML under another name (a bare "report", index.php)
 	// would mint a link whose page answers 404; a 415 sends the dashboard to
@@ -311,21 +318,21 @@ func (h *Handlers) HandlePreviewAsset(w http.ResponseWriter, r *http.Request) {
 	defer of.f.Close()
 	// openFile kept the file below the root; a symlink inside the directory
 	// may still point elsewhere in the root, outside what the token grants.
-	base := of.rootResolved
 	if dir != "" {
 		dirResolved, err := filepath.EvalSymlinks(filepath.Join(of.rootResolved, dir))
 		if err != nil || !strings.HasPrefix(of.resolved, dirResolved+string(filepath.Separator)) {
 			writeRefusal(w, notFound)
 			return
 		}
-		base = dirResolved
 	}
 	// No dot entries, by name or by symlink target: the page's script is
 	// untrusted, and dot files are where credentials sit that the sensitive
 	// names miss (.mcp.json, .claude/settings.local.json, .codex/auth.json),
 	// while a web page has no use for them. A dashboard user still reads them
-	// through the authenticated file API.
-	if resolvedRel, err := filepath.Rel(base, of.resolved); err != nil || hasDotSegment(cleaned) || hasDotSegment(resolvedRel) {
+	// through the authenticated file API. The rule covers the whole path from
+	// the root, the token's dir included: a dir that is or resolves into a
+	// dot directory grants none of its siblings.
+	if resolvedRel, err := filepath.Rel(of.rootResolved, of.resolved); err != nil || hasDotSegment(filepath.Join(dir, cleaned)) || hasDotSegment(resolvedRel) {
 		writeRefusal(w, notFound)
 		return
 	}

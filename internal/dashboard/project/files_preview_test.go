@@ -101,7 +101,7 @@ func previewLink(t *testing.T, h *Handlers, body string) (int, string) {
 
 func TestPreviewLink(t *testing.T) {
 	t.Parallel()
-	h, name, _ := newProjectHandlersForTest(t, map[string]string{
+	h, name, projDir := newProjectHandlersForTest(t, map[string]string{
 		"site/index.html":         "<!doctype html><title>x</title>",
 		"site/app.js":             "1",
 		"secrets/index.html":      "<!doctype html>",
@@ -109,7 +109,12 @@ func TestPreviewLink(t *testing.T) {
 		"site/nested/page.html":   "<!doctype html>",
 		"site/Weird Name #1.html": "<!doctype html>",
 		"site/report":             "<!doctype html><title>x</title>",
-		"site/index.php":          "<!doctype html><title>x</title>"})
+		"site/index.php":          "<!doctype html><title>x</title>",
+		".claude/report.html":     "<!doctype html>",
+		"site/.cache/page.html":   "<!doctype html>"})
+	if err := os.Symlink(filepath.Join(projDir, ".claude"), filepath.Join(projDir, "pub")); err != nil {
+		t.Fatal(err)
+	}
 	cases := []struct {
 		name, body string
 		status     int
@@ -121,7 +126,13 @@ func TestPreviewLink(t *testing.T) {
 		{"not html", `{"project":"` + name + `","path":"site/app.js"}`, 415, ""},
 		// HTML bytes under a name the asset route does not serve as HTML.
 		{"html without extension", `{"project":"` + name + `","path":"site/report"}`, 415, ""},
-		{"html as php", `{"project":"` + name + `","path":"site/index.php"}`, 415, ""}, {"sensitive dir", `{"project":"` + name + `","path":"secrets/index.html"}`, 404, ""},
+		{"html as php", `{"project":"` + name + `","path":"site/index.php"}`, 415, ""},
+		// The asset route serves no dot entry, so a page in a dot dir gets
+		// the single-file render instead.
+		{"dot dir", `{"project":"` + name + `","path":".claude/report.html"}`, 415, ""},
+		{"nested dot dir", `{"project":"` + name + `","path":"site/.cache/page.html"}`, 415, ""},
+		{"symlinked dot dir", `{"project":"` + name + `","path":"pub/report.html"}`, 415, ""},
+		{"sensitive dir", `{"project":"` + name + `","path":"secrets/index.html"}`, 404, ""},
 		{"sensitive name", `{"project":"` + name + `","path":"site/report-token.html"}`, 404, ""},
 		{"missing", `{"project":"` + name + `","path":"site/nope.html"}`, 404, ""},
 		{"escape", `{"project":"` + name + `","path":"../demo/site/index.html"}`, 404, ""},
@@ -162,6 +173,8 @@ func TestPreviewAsset(t *testing.T) {
 		"site/.claude/settings.local.json": `{"k":"cc"}`,
 		"site/.well/x.css":                 "a{}",
 		"site/.env.json":                   `{"k":"e"}`,
+		".claude/report.html":              "<!doctype html>",
+		".claude/settings.local.json":      `{"k":"cc"}`,
 	})
 	outside := t.TempDir()
 	if err := os.WriteFile(filepath.Join(outside, "o.css"), []byte("outside the root"), 0o644); err != nil {
@@ -173,6 +186,7 @@ func TestPreviewAsset(t *testing.T) {
 		"site/escape.css":   filepath.Join(outside, "o.css"),
 		"site/self-link.js": filepath.Join(projDir, "site", "js", "app.js"),
 		"site/mcp.json":     filepath.Join(projDir, ".mcp.json"),
+		"pub":               filepath.Join(projDir, ".claude"),
 	} {
 		if err := os.Symlink(target, filepath.Join(projDir, link)); err != nil {
 			t.Fatal(err)
@@ -286,6 +300,15 @@ func TestPreviewAsset(t *testing.T) {
 	}
 	if w := get(prefix+".claude/settings.local.json", "empty"); w.Code != 404 {
 		t.Errorf("dot dir below the token's dir: %d, want 404", w.Code)
+	}
+	// A token whose dir is, or resolves into, a dot dir grants nothing in it.
+	for _, dir := range []string{".claude", "pub"} {
+		dirTok := signPreview(previewGrant{root: name, dir: dir, exp: now.Add(time.Hour).Unix()})
+		for _, p := range []string{"settings.local.json", "report.html"} {
+			if w := get("/api/preview/"+dirTok+"/"+p, "empty"); w.Code != 404 {
+				t.Errorf("token dir %s, %s: %d, want 404", dir, p, w.Code)
+			}
+		}
 	}
 	// Forged, retargeted and expired tokens are refused before any read.
 	forged := signPreview(previewGrant{root: name, dir: "site", exp: now.Add(time.Hour).Unix()})
