@@ -224,7 +224,7 @@ type Router struct {
 	activity atomic.Pointer[ActivitySink]
 	// results receives sessions' turn results (SetResultSink), read the
 	// same way.
-	results atomic.Pointer[ResultSink]
+	results resultRoute
 
 	// shutdownOnce guards Shutdown against re-entry: a double call would race
 	// the broadcast timer, re-cancel the history ctx and double-detach shim processes.

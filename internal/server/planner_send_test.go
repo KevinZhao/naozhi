@@ -111,6 +111,67 @@ func TestPlannerTurnsCarriedOver(t *testing.T) {
 	}
 }
 
+// TestSettlePlannerTurns: at startup the requests carried over from the
+// last run are settled by the turn the reattached CLI holds. A reply that
+// came while naozhi was down is delivered, judged by those requests; once
+// nothing runs, none of them judges the next turn.
+func TestSettlePlannerTurns(t *testing.T) {
+	type reattached struct {
+		text           string
+		ended, running bool
+	}
+	tests := []struct {
+		name        string
+		turn        reattached
+		wantReplay  string // "" for no delivery
+		wantJudged  []agent.Source
+		wantSources []agent.Source // a user turn's sources after settling
+	}{
+		{"ended while down", reattached{text: "reply", ended: true}, "reply",
+			[]agent.Source{agent.SourceScout}, []agent.Source{agent.SourceUser}},
+		{"nothing in flight", reattached{}, "", nil, []agent.Source{agent.SourceUser}},
+		{"still running", reattached{running: true}, "", nil,
+			[]agent.Source{agent.SourceScout, agent.SourceUser}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "turns.json")
+			var before plannerTurns
+			before.load(context.Background(), path)
+			// Two requests side by side, cut across by the restart.
+			before.begin(agent.Key, agent.SourceScout)
+			before.begin(agent.Key, agent.SourceScout)
+
+			s := &Server{hub: &Hub{engine: &sendEngine{}}}
+			turns := &s.hub.engine.plannerTurns
+			turns.load(context.Background(), path)
+			var replayed string
+			var judged []agent.Source
+			s.SettlePlannerTurns(func(key string) (string, bool, bool) {
+				if key != agent.Key {
+					t.Errorf("asked about %q", key)
+				}
+				return tc.turn.text, tc.turn.ended, tc.turn.running
+			}, func(key, text string) {
+				replayed, judged = text, s.PlannerTurnSources(key)
+				s.PlannerResult(key)
+			})
+			if replayed != tc.wantReplay || !slices.Equal(judged, tc.wantJudged) {
+				t.Errorf("delivered %q judged by %q, want %q by %q", replayed, judged, tc.wantReplay, tc.wantJudged)
+			}
+			turns.begin(agent.Key, agent.SourceUser)
+			if got := s.PlannerTurnSources(agent.Key); !slices.Equal(got, tc.wantSources) {
+				t.Errorf("user turn's sources = %q, want %q", got, tc.wantSources)
+			}
+			var again plannerTurns
+			again.load(context.Background(), path)
+			if got := again.sources(agent.Key); !tc.turn.running && !slices.Equal(got, []agent.Source{agent.SourceUser}) {
+				t.Errorf("ledger after settling = %q, want the user turn only", got)
+			}
+		})
+	}
+}
+
 // taskSendRouter reports whether a session exists; prepareSend reaches no
 // other method for a task: key without a workspace.
 type taskSendRouter struct {

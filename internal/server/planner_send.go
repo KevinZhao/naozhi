@@ -75,6 +75,15 @@ func (s *Server) PlannerResult(key string) {
 	}
 }
 
+// SettlePlannerTurns settles the Planner requests carried over from the
+// last run (plannerTurns.settle). Called once at startup, after the shims
+// are reattached and the router's result sink is set; deliver is that sink.
+func (s *Server) SettlePlannerTurns(reattached func(key string) (text string, ended, running bool), deliver func(key, text string)) {
+	if s.hub != nil && s.hub.engine != nil {
+		s.hub.engine.plannerTurns.settle(reattached, deliver)
+	}
+}
+
 // plannerTurnMaxAge bounds a request carried over from the last run: no
 // turn outlives the watchdog's total timeout.
 const plannerTurnMaxAge = cliinfo.DefaultTotalTimeout
@@ -177,6 +186,41 @@ func (t *plannerTurns) resulted(key string) {
 	}
 	t.restored = slices.Delete(t.restored, i, i+1)
 	t.saveLocked()
+}
+
+// settle answers the requests carried over from the last run by the turn
+// key's reattached CLI holds (reattached, the router's ReattachedTurn). One
+// still running is answered by its result as that comes. One that ended
+// while naozhi was down never reached the result sink, so its reply goes to
+// deliver now, judged by the requests it answers. Either way, with nothing
+// running the requests are answered: what is left of them is dropped, or it
+// would judge the next turn.
+func (t *plannerTurns) settle(reattached func(key string) (text string, ended, running bool), deliver func(key, text string)) {
+	t.mu.Lock()
+	var keys []string
+	for _, e := range t.restored {
+		if !slices.Contains(keys, e.Key) {
+			keys = append(keys, e.Key)
+		}
+	}
+	t.mu.Unlock()
+	for _, key := range keys {
+		text, ended, running := reattached(key)
+		if running {
+			continue
+		}
+		if ended {
+			deliver(key, text)
+		}
+		t.mu.Lock()
+		n := len(t.restored)
+		t.restored = slices.DeleteFunc(t.restored, func(e plannerTurn) bool { return e.Key == key })
+		if n > len(t.restored) {
+			t.saveLocked()
+		}
+		t.mu.Unlock()
+		slog.Info("planner turns: carried-over requests settled", "key", key, "replayed", ended)
+	}
 }
 
 func (t *plannerTurns) sources(key string) []agent.Source {

@@ -1,6 +1,10 @@
 package session
 
-import "github.com/naozhi/naozhi/internal/cli"
+import (
+	"sync"
+
+	"github.com/naozhi/naozhi/internal/cli"
+)
 
 // ResultSink receives the reply text of every turn a session's CLI completes,
 // whoever started it: the Planner's action blocks are parsed from it
@@ -15,26 +19,70 @@ type resultNotifier interface {
 
 var _ resultNotifier = (*cli.Process)(nil)
 
-// SetResultSink routes every session's turn results to sink, including those
-// of processes bound before the call. nil drops them.
-func (r *Router) SetResultSink(sink ResultSink) {
-	if sink == nil {
-		r.results.Store(nil)
+// heldResultsMax bounds the results held before the first sink; a router
+// whose sink is never set (tests, a tool) must not grow without end.
+const heldResultsMax = 64
+
+// resultRoute is where turn results go. Until the first SetResultSink they
+// are held: startup reattaches shims and their read loops run long before
+// the sink's consumers exist, and a turn finishing in that window is still
+// the Planner's to act on.
+type resultRoute struct {
+	mu   sync.Mutex
+	set  bool
+	sink ResultSink
+	held []heldResult
+}
+
+type heldResult struct{ key, text string }
+
+func (rr *resultRoute) deliver(key, text string) {
+	rr.mu.Lock()
+	if !rr.set {
+		if len(rr.held) < heldResultsMax {
+			rr.held = append(rr.held, heldResult{key, text})
+		}
+		rr.mu.Unlock()
 		return
 	}
-	r.results.Store(&sink)
+	sink := rr.sink
+	rr.mu.Unlock()
+	if sink != nil {
+		sink(key, text)
+	}
+}
+
+// SetResultSink routes every session's turn results to sink, including those
+// of processes bound before the call; the results that came before the first
+// call are handed to sink first, in order. nil drops them.
+func (r *Router) SetResultSink(sink ResultSink) {
+	rr := &r.results
+	rr.mu.Lock()
+	// Drained before set, so a result arriving meanwhile queues behind them.
+	for len(rr.held) > 0 {
+		h := rr.held[0]
+		rr.held = rr.held[1:]
+		rr.mu.Unlock()
+		if sink != nil {
+			sink(h.key, h.text)
+		}
+		rr.mu.Lock()
+	}
+	rr.held = nil
+	rr.set, rr.sink = true, sink
+	rr.mu.Unlock()
 }
 
 // bookResults reports proc's turn results as s's. Bound wherever
-// bookActivity is; the sink runs on the read loop and must not block.
+// bookActivity is (a reattach binds resultFor through SpawnReconnect's
+// hooks instead); the sink runs on the read loop and must not block.
 func (r *Router) bookResults(s *ManagedSession, proc processIface) {
-	n, ok := proc.(resultNotifier)
-	if !ok {
-		return
+	if n, ok := proc.(resultNotifier); ok {
+		n.SetOnResult(r.resultFor(s))
 	}
-	n.SetOnResult(func(text string) {
-		if sink := r.results.Load(); sink != nil {
-			(*sink)(s.key, text)
-		}
-	})
+}
+
+// resultFor is the result callback of s's process.
+func (r *Router) resultFor(s *ManagedSession) func(text string) {
+	return func(text string) { r.results.deliver(s.key, text) }
 }

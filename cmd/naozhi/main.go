@@ -646,10 +646,15 @@ func main() {
 	})
 	// The result is judged by the turn's sources before the ledger lets go
 	// of a request carried over from the last run.
-	router.SetResultSink(func(key, text string) {
+	resultSink := func(key, text string) {
 		actions.Result(key, text)
 		srv.PlannerResult(key)
-	})
+	}
+	router.SetResultSink(resultSink)
+	// A Planner turn the restart cut across: its reply, if it came while
+	// naozhi was down, is acted on now, and the requests nothing answers no
+	// longer judge the next turn.
+	srv.SettlePlannerTurns(router.ReattachedTurn, resultSink)
 	go actions.Run(ctx)
 	go sidecars.Run(ctx, func(key string) bool { return router.SessionFor(key) != nil })
 	go briefer.Run(ctx)
