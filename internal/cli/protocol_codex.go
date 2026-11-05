@@ -54,6 +54,8 @@ func (p *CodexProtocol) Clone() Protocol { return &CodexProtocol{BackendID: p.Ba
 
 func (p *CodexProtocol) storeThreadID(id string) { p.threadID.Store(&id) }
 
+func (p *CodexProtocol) reattachSession(id string) { p.storeThreadID(id) }
+
 func (p *CodexProtocol) loadThreadID() string {
 	if s := p.threadID.Load(); s != nil {
 		return *s

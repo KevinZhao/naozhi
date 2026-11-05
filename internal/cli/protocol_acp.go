@@ -192,6 +192,8 @@ func (p *ACPProtocol) loadSessionID() string {
 // Clone returns a fresh ACPProtocol retaining BackendID so metric labelling survives proto.Clone().
 func (p *ACPProtocol) Clone() Protocol { return &ACPProtocol{BackendID: p.BackendID} }
 
+func (p *ACPProtocol) reattachSession(id string) { p.storeSessionID(id) }
+
 func (p *ACPProtocol) BuildArgs(opts SpawnOptions) []string {
 	args := []string{"acp"}
 	// kiro-cli acp accepts `--model <ID>` to seed the session's model (verified

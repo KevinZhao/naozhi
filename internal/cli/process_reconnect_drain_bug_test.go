@@ -2,9 +2,11 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -582,5 +584,36 @@ func TestAttachReconnected_LiveResultRightAfterReadLoopStarts(t *testing.T) {
 	defer cancel()
 	if out, err := p.AdoptedOutcome(ctx); err != nil || out.Result.Text != "ok" {
 		t.Errorf("adopted outcome = %+v, %v; want the live result", out, err)
+	}
+}
+
+// TestAttachReconnected_PromptNamesTheShimsSession: an ACP or Codex prompt
+// names the CLI's session, which Init recorded before naozhi restarted; the
+// reattached process must carry the shim's session ID into it, or the CLI
+// answers every prompt "No session found".
+func TestAttachReconnected_PromptNamesTheShimsSession(t *testing.T) {
+	for name, tc := range map[string]struct {
+		proto Protocol
+		want  string
+	}{
+		"acp":   {&ACPProtocol{}, `"sessionId":"sess-1"`},
+		"codex": {&CodexProtocol{}, `"threadId":"sess-1"`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newReconnectFixture(t, "sess-1", rvReplays(1, rvProgress))
+			p, _, err := (&Wrapper{}).attachReconnected(context.Background(), f.handle, "k", 0, tc.proto, 0, 0, ReconnectHooks{})
+			if err != nil {
+				t.Fatalf("attachReconnected: %v", err)
+			}
+			f.drainWrites()
+			defer p.Kill()
+			var buf bytes.Buffer
+			if err := p.protocol.WriteMessage(&buf, "hi", nil); err != nil {
+				t.Fatalf("WriteMessage: %v", err)
+			}
+			if !strings.Contains(buf.String(), tc.want) {
+				t.Errorf("prompt = %s, want it to carry %s", buf.String(), tc.want)
+			}
+		})
 	}
 }

@@ -551,6 +551,14 @@ func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64,
 	return w.attachReconnected(ctx, handle, key, lastSeq, proto, noOutputTimeout, totalTimeout, hooks)
 }
 
+// sessionReattacher is a Protocol whose requests name the CLI's session (ACP's
+// sessionId, Codex's threadId). Init records it on a spawn; a process
+// reattached through its shim skips Init, so the ID comes from the shim's
+// hello, or every prompt names no session and the CLI refuses it.
+type sessionReattacher interface {
+	reattachSession(id string)
+}
+
 // attachReconnected is SpawnReconnect past the dial: drain the backlog, build
 // the Process, arm the turn verdict, start the read loop.
 func (w *Wrapper) attachReconnected(ctx context.Context, handle *shim.ShimHandle, key string, lastSeq int64, proto Protocol, noOutputTimeout, totalTimeout time.Duration, hooks ReconnectHooks) (*Process, []shim.ServerMsg, error) {
@@ -570,9 +578,13 @@ func (w *Wrapper) attachReconnected(ctx context.Context, handle *shim.ShimHandle
 		shimPID = handle.Hello.ShimPID
 	}
 
+	reproto := proto.Clone()
+	if r, ok := reproto.(sessionReattacher); ok && handle.Hello.SessionID != "" {
+		r.reattachSession(handle.Hello.SessionID)
+	}
 	proc := newShimProcess(
 		handle.Conn, handle.Reader, handle.Writer,
-		proto.Clone(), cliPID, shimPID,
+		reproto, cliPID, shimPID,
 		noOutputTimeout, totalTimeout,
 	)
 	proc.SetSlogKey(key)
