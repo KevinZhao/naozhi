@@ -15,20 +15,20 @@
 // the stream that, unfolded, takes the stream's place.
 //
 // The stream follows a WS subscription to planner:main; GET
-// /api/sessions/events loads the first page and polls while the subscription
-// is not live. What the gateway writes for the Planner (its receipts) is not
+// /api/sessions/events loads the first page, the older ones as the stream is
+// scrolled to its top, and polls while the subscription is not live. What the gateway writes for the Planner (its receipts) is not
 // shown, and its "收到，正在看" to subscribers is the input box's note
 // (D91). The gateway's notes in the conversation (due reminders, dispatch
 // outcomes) live in its in-memory history, which a restart drops: the first
 // page merges in the journaled ones from GET /api/planner/notes by time.
 //
 // The rail badge counts the inbox's `badge` (notify.js: what waits on you to
-// act — questions, decisions and errors, §15.7 S1); the left column's "通知"
-// heading counts what its list shows, every open item (`open`). Both are
-// seeded from GET /api/inbox on every WS auth_ok and kept by inbox_count
-// frames. The 会话 view's sidebar bar (side_wait.js) shows the badge's items
-// and count: actionListHtml and fetchInbox, with 'inbox:items' on nzBus
-// after the list changes.
+// act — questions, decisions and errors, §15.7 S1), the one count of what is
+// yours to handle; the left column's "通知" lists every open item and counts
+// none (D92). It is seeded from GET /api/inbox on every WS auth_ok and kept
+// by inbox_count frames. The 会话 view's sidebar bar (side_wait.js) shows the
+// badge's items and count: actionListHtml and fetchInbox, with 'inbox:items'
+// on nzBus after the list changes.
 //
 // The middle column (#pl-center) is one component with two hosts: the page
 // and the Planner drawer (planner_drawer.js, §15.3 ②), which gets the very
@@ -39,18 +39,19 @@ import { NZ_CONTRACT } from './contract.js';
 import { sessionList, ui } from './state.js';
 import { esc, escAttr, fetchJSON, nzBus, registerActions, sessionFailureText, showToast } from './nz_util.js';
 import { sid } from './session_ident.js';
-import { renderEventsWithDividers } from './event_render.js';
+import { leadingTimeDivider, renderEventsWithDividers } from './event_render.js';
+import { dedupEarlierPage, hasMoreHeader } from './event_stream.js';
 import { renderMd, runPendingAsync } from './render_md.js';
-import { inbox, isLit, notifySupported, onInboxCount, requestNotifyPermission, revealFocus } from './notify.js';
+import { inbox, isLit, light, notifySupported, onInboxCount, requestNotifyPermission, revealFocus } from './notify.js';
 import { followWorkbenchSubject, noteWorkbenchEvent } from './workbench_panes.js';
-import { decisionActsHtml, decorateEvents, paintSessionCards, refreshHealth, webLinkHtml } from './planner_cards.js';
+import { decisionActsHtml, decorateEvents, noteWorkspaces, paintSessionCards, refreshHealth, unitName, webLinkHtml, workspaceName } from './planner_cards.js';
 import { clearAck, clearPending, closePlannerSession, mountComposer, noteAck, notePlannerStatus, showPlannerLeft } from './planner_chat.js';
 import { onSessionsApplied } from './session_list.js';
 import { mountTasks, refreshTasks } from './tasks.js';
 import { workbench } from './workbench.js';
 import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
-import { formatAbsTime, lastDividerTime, timeAgo } from './utilities.js';
+import { EARLIER_PAGE_LIMIT, EVENT_DIVIDER_GAP_MS, formatAbsTime, formatMonthDayTime, lastDividerTime, timeAgo } from './utilities.js';
 
 const PLANNER_KEY = 'planner:main';
 // EVENTS_LIMIT is the first page of the conversation; later events come in
@@ -98,6 +99,13 @@ const pl = {
   seeding: false,
   // host runs the conversation: 'page', 'drawer', or '' (not shown).
   host: '',
+  // older is the cursor for the pages before the first (seedOlder); notes
+  // the journaled notes the first page fetched, for the older pages too.
+  older: { ms: 0, keys: [], more: false, loading: false },
+  notes: [],
+  // revealed is the day of the brief a push or link scrolled to: an older
+  // page that moves it from the stream's top keeps it in view.
+  revealed: '',
 };
 
 const $ = (id) => document.getElementById(id);
@@ -139,16 +147,20 @@ function unitTarget(unit) {
 }
 
 // metaHtml is where an item comes from: its session's workspace and name
-// (the name left out when the title says it) with 打开, else a unit that is
-// not listed; the Planner's own items need no source.
+// (the name left out when the title says it) with 打开, else the workspace
+// and name of a unit that is not listed, never its ID (D92); the Planner's
+// own items need no source.
 function metaHtml(it) {
+  const title = it.title || '';
   const target = unitTarget(it.unit);
   if (target) {
-    const name = (it.title || '').includes(target.title) ? '' : target.title;
+    const name = title.includes(target.title) ? '' : target.title;
     return [target.project, name].filter(Boolean).map(esc).join(' · ') +
       ' <button type="button" class="pl-link" data-action="session-select" data-key="' + escAttr(target.key) + '" data-node="' + escAttr(target.node) + '">打开</button>';
   }
-  return it.unit && it.unit !== PLANNER_KEY ? esc(it.unit) : '';
+  if (!it.unit || it.unit === PLANNER_KEY) return '';
+  const name = unitName(it.unit);
+  return [workspaceName(it.ws), title.includes(name) ? '' : name].filter(Boolean).map(esc).join(' · ');
 }
 
 // timeHtml is how long a question or a decision has waited on you, or how
@@ -203,18 +215,10 @@ function noteItems() {
   nzBus.dispatchEvent(new CustomEvent('inbox:items'));
 }
 
-// paintCounts: 通知 counts the open items its list shows. A write only on
-// change.
-function paintCounts() {
-  const w = String(inbox.open || 0);
-  ['pl-wait-count', 'pl-wait-n'].forEach((id) => { const el = $(id); if (el && el.textContent !== w) el.textContent = w; });
-}
-
 function paintWaiting() {
   const box = $('pl-wait');
   if (!box) return;
   box.innerHTML = waitListHtml();
-  paintCounts();
   paintInlineCards(sortedOpen());
   revealWaiting();
 }
@@ -262,12 +266,10 @@ function notifyToolHtml() {
   return '<div class="pl-tool"><button type="button" class="pl-btn" data-action="planner-notify-perm">允许浏览器通知</button></div>';
 }
 
-// pausedAt is the pause's end as HH:mm, with the date when not today.
+// pausedAt is the pause's end as HH:mm, with the date (M/D) when not today.
 function pausedAt() {
-  const d = new Date(pl.pausedUntil);
-  const same = d.toDateString() === new Date().toDateString();
-  return (same ? '' : (d.getMonth() + 1) + '/' + d.getDate() + ' ') +
-    String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  const at = formatMonthDayTime(pl.pausedUntil);
+  return new Date(pl.pausedUntil).toDateString() === new Date().toDateString() ? at.slice(at.indexOf(' ') + 1) : at;
 }
 
 function pauseToolHtml() {
@@ -373,12 +375,10 @@ function paintStatus() {
 const BRIEF_FOCUS = 'brief:';
 
 function briefHtml(b, t) {
-  const d = new Date(t);
-  const pad = (n) => String(n).padStart(2, '0');
   const day = b.day || '';
-  const open = pl.briefOpen.has(day) ? pl.briefOpen.get(day) : d.toDateString() === new Date().toDateString();
-  const when = ' · ' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-  return '<details class="pl-brief" data-day="' + escAttr(day) + '" data-time="' + t + '"' + (open ? ' open' : '') + '>' +
+  const open = pl.briefOpen.has(day) ? pl.briefOpen.get(day) : new Date(t).toDateString() === new Date().toDateString();
+  const when = ' · ' + formatMonthDayTime(t);
+  return '<details class="pl-brief' + (isLit(BRIEF_FOCUS + day) ? ' inbox-lit' : '') + '" data-day="' + escAttr(day) + '" data-time="' + t + '"' + (open ? ' open' : '') + '>' +
     '<summary><b>早报</b>' + esc(when) + '</summary><div class="md">' + renderMd(b.markdown) + '</div></details>';
 }
 
@@ -406,17 +406,22 @@ function placeBriefs() {
   revealBrief();
 }
 
-// revealBrief opens and scrolls to the brief a push or link asked for
-// (inbox.focus "brief:<day>"), once the stream shows it: a first page in
-// flight is about to repaint the stream, placeBriefs reveals it then.
+// revealBrief opens, scrolls to and highlights the brief a push or link
+// asked for (inbox.focus "brief:<day>"), once the stream shows it: a first
+// page in flight is about to repaint the stream, placeBriefs reveals it then.
 function revealBrief() {
   if (!inbox.focus.startsWith(BRIEF_FOCUS) || pl.host !== 'page' || pl.loading) return;
-  const day = inbox.focus.slice(BRIEF_FOCUS.length);
-  const el = $('pl-stream')?.querySelector(':scope > .pl-brief[data-day="' + CSS.escape(day) + '"]');
+  const id = inbox.focus;
+  const day = id.slice(BRIEF_FOCUS.length);
+  const sel = '#pl-stream > .pl-brief[data-day="' + CSS.escape(day) + '"]';
+  const el = document.querySelector(sel);
   if (!el) return;
   inbox.focus = '';
   el.open = true;
+  pl.briefOpen.set(day, true);
+  pl.revealed = day;
   el.scrollIntoView({ block: 'start' });
+  light(el, sel, id);
 }
 
 // fetchBriefs takes the sent briefs; an unreadable list leaves the stream
@@ -436,7 +441,8 @@ async function fetchStatus() {
     pl.status = await fetchJSON(NZ_CONTRACT.API.planner, { timeoutMs: 8000 });
   } catch { return; }
   notePlannerStatus(pl.status);
-  if (pl.host) { paintStatus(); paintTools(); paintStreamEmpty(); }
+  const named = noteWorkspaces(pl.status && pl.status.workspaces);
+  if (pl.host) { paintStatus(); paintTools(); paintStreamEmpty(); if (named) paintWaiting(); }
 }
 
 function paintStreamEmpty() {
@@ -511,9 +517,15 @@ function plannerEvents(e) {
   return out;
 }
 
-// withoutSnapshot is e as the conversation shows it, null for a receipt.
+// CLI_NOISE are the CLI's own system lines (its API retries), which say
+// nothing to you about the Planner's work.
+const CLI_NOISE = new Set(['api_retry']);
+
+// withoutSnapshot is e as the conversation shows it, null for a receipt or
+// CLI noise.
 function withoutSnapshot(e) {
   if (e.type === 'user' && RECEIPT_RE.test(e.detail || e.summary || '')) return null;
+  if (e.type === 'system' && CLI_NOISE.has(e.summary)) return null;
   const sc = e.type === 'user' && SCOUT_RE.exec(e.detail || e.summary || '');
   if (sc) return Object.assign({}, e, { type: 'system', summary: '来自巡检：' + sc[1] + ' 条新发现', detail: '' });
   const mt = e.type === 'user' && MEETING_RE.exec(e.detail || e.summary || '');
@@ -602,6 +614,8 @@ function appendEvents(events, reset) {
   if (atBottom) scroller.scrollTop = scroller.scrollHeight;
   // After the scroll: a brief a push asked for scrolls to itself.
   if (reset) placeBriefs();
+  // A first page shorter than the stream leaves nothing to scroll up by.
+  if (reset && nearTop()) loadOlder();
 }
 
 // subscribe asks for planner:main's live events after the last one taken.
@@ -621,17 +635,17 @@ function unsubscribe() {
 // written) was logged within this of its journal line.
 const NOTE_SAME_MS = 5000;
 
-// withNotes merges the journaled notes into a first page, as the system
-// lines they were: those the history no longer holds, and only from the
-// page's first event on (older ones belong to pages not loaded). An empty
-// page (a restart left no history) takes them all.
-function withNotes(events, notes) {
-  const floor = events.length ? (events[0].time || 0) : 0;
+// withNotes merges the journaled notes into a page, as the system lines they
+// were: those the history no longer holds, timed in [floor, ceil) (ceil 0:
+// no end). A page's floor is its first event, older notes belonging to the
+// pages before it, and 0 for the oldest page or an empty one (a restart left
+// no history).
+function withNotes(events, notes, floor, ceil) {
   const logged = events.filter((e) => e && e.type === 'system');
   const extra = [];
   for (const n of notes) {
     const t = Date.parse(n && n.time);
-    if (!n || !n.text || isNaN(t) || t < floor) continue;
+    if (!n || !n.text || isNaN(t) || t < floor || (ceil && t >= ceil)) continue;
     if (logged.some((e) => Math.abs((e.time || 0) - t) <= NOTE_SAME_MS && e.summary && n.text.startsWith(e.summary))) continue;
     extra.push({ type: 'system', time: t, summary: n.text });
   }
@@ -650,15 +664,22 @@ async function loadEvents(reset) {
   const q = reset || !pl.lastTime ? '&limit=' + EVENTS_LIMIT : '&after=' + pl.lastTime;
   // An unreadable journal leaves the page as the history has it.
   const notes = reset ? fetchJSON(NZ_CONTRACT.API.planner_notes, { timeoutMs: 8000 }).catch(() => null) : null;
+  let more = null;
   try {
     // No planner:main session yet (it never had a turn) is no history, and
     // the notes still show.
-    const res = await fetchJSON(NZ_CONTRACT.API.sessions_events + '?key=' + encodeURIComponent(PLANNER_KEY) + q, { timeoutMs: 8000 })
+    const res = await fetchJSON(NZ_CONTRACT.API.sessions_events + '?key=' + encodeURIComponent(PLANNER_KEY) + q,
+      { timeoutMs: 8000, onResponse: (r) => { more = hasMoreHeader(r); } })
       .catch((e) => { if (reset && e && e.status === 404) return []; throw e; });
     let events = Array.isArray(res) ? res : [];
     const n = notes && await notes;
-    if (n && Array.isArray(n.notes) && n.notes.length) events = withNotes(events, n.notes);
     if (gen === pl.gen && pl.host) {
+      if (reset) {
+        more = more ?? events.length >= EVENTS_LIMIT;
+        pl.notes = n && Array.isArray(n.notes) ? n.notes : [];
+        seedOlder(events, more);
+        events = withNotes(events, pl.notes, more && events.length ? (events[0].time || 0) : 0, 0);
+      }
       // The page is in: what it paints is no longer about to be replaced.
       pl.loading = false;
       appendEvents(events, reset);
@@ -666,6 +687,100 @@ async function loadEvents(reset) {
   } catch { /* the next tick retries */ } finally {
     if (gen === pl.gen) pl.loading = false;
   }
+}
+
+// ---- older pages ----
+
+// OLDER_EDGE_PX: the stream scrolled to within this of its top loads the
+// page before the oldest one shown, through the session view's load-earlier
+// paging (GET /api/sessions/events?before=, event_stream.js's cursor).
+const OLDER_EDGE_PX = 80;
+const OLDER_RETRY_MS = 5000;
+
+// seedOlder starts the cursor at a first page's head; more is whether the
+// server holds older events.
+function seedOlder(events, more) {
+  const c = dedupEarlierPage(events, 0, []);
+  pl.older = { ms: c.oldestMS, keys: c.seenKeys, more: !!(more && c.oldestMS), loading: false };
+}
+
+// nearTop reports whether the stream shows its top, or does not scroll.
+function nearTop() {
+  const scroller = $('pl-events');
+  return !!scroller && scroller.offsetParent !== null && scroller.scrollTop < OLDER_EDGE_PX;
+}
+
+// loadOlder prepends the page before the cursor, with the journaled notes
+// of its span, and goes on while the stream still shows its top.
+async function loadOlder() {
+  const o = pl.older;
+  if (!o.more || o.loading || !pl.host || pl.loading || Date.now() < (o.retryAt || 0)) return;
+  o.loading = true;
+  const gen = pl.gen;
+  const limit = EARLIER_PAGE_LIMIT + o.keys.length;
+  let more = null;
+  try {
+    const res = await fetchJSON(NZ_CONTRACT.API.sessions_events + '?key=' + encodeURIComponent(PLANNER_KEY) +
+      '&before=' + (o.ms + 1) + '&limit=' + limit, { timeoutMs: 8000, onResponse: (r) => { more = hasMoreHeader(r); } });
+    if (gen !== pl.gen || pl.older !== o || !pl.host) return;
+    const raw = Array.isArray(res) ? res : [];
+    const page = dedupEarlierPage(raw, o.ms, o.keys);
+    const ceil = o.ms;
+    o.ms = page.oldestMS;
+    o.keys = page.seenKeys;
+    // A page that brought nothing new ends the paging rather than asking
+    // for the same one again.
+    o.more = !!page.events.length && (more ?? raw.length >= limit);
+    prependEvents(withNotes(page.events, pl.notes, o.more ? o.ms : 0, ceil));
+  } catch {
+    // Scrolling up again retries, not before OLDER_RETRY_MS.
+    o.retryAt = Date.now() + OLDER_RETRY_MS;
+    return;
+  } finally { o.loading = false; }
+  if (nearTop()) loadOlder();
+}
+
+// prependEvents puts an older page above the stream, the reader kept on
+// what they were reading. The briefs placed at the top go back in by time,
+// and a revealed one still in view is what the reader is reading.
+function prependEvents(events) {
+  const box = $('pl-stream');
+  const scroller = $('pl-events');
+  if (!box || !scroller || !events.length) return;
+  const html = renderEventsWithDividers(events.flatMap(plannerEvents), 0, RENDER_OPTS);
+  if (!html) return;
+  const fromBottom = scroller.scrollHeight - scroller.scrollTop;
+  const anchor = revealedTop();
+  for (const c of [...box.children]) {
+    if (c.matches('.event')) break;
+    if (c.matches('.pl-brief')) c.remove();
+  }
+  const lead = leadingTimeDivider(box);
+  const frag = document.createElement('div');
+  frag.innerHTML = html;
+  const newest = lastDividerTime(frag);
+  box.prepend(...frag.childNodes);
+  if (lead && newest && Number(lead.dataset.time || 0) - newest < EVENT_DIVIDER_GAP_MS) lead.remove();
+  decorateEvents(box);
+  placeBriefs();
+  runPendingAsync();
+  const moved = anchor !== null && revealedEl();
+  if (moved) scroller.scrollTop += moved.getBoundingClientRect().top - anchor;
+  else scroller.scrollTop = scroller.scrollHeight - fromBottom;
+}
+
+function revealedEl() {
+  return pl.revealed ? $('pl-stream')?.querySelector(':scope > .pl-brief[data-day="' + CSS.escape(pl.revealed) + '"]') : null;
+}
+
+// revealedTop is where the revealed brief shows in the stream's viewport,
+// null once it is out of view, which forgets it.
+function revealedTop() {
+  const r = revealedEl()?.getBoundingClientRect();
+  const view = $('pl-events')?.getBoundingClientRect();
+  if (r && view && r.bottom > view.top && r.top < view.bottom) return r.top;
+  pl.revealed = '';
+  return null;
 }
 
 // ---- the conversation and its hosts ----
@@ -756,9 +871,10 @@ nzBus.addEventListener('inbox:count', (e) => {
   const n = e.detail.badge;
   const badge = $('abnav-planner-count');
   if (badge) { badge.textContent = n > 99 ? '99+' : String(n); badge.hidden = !n; }
-  paintCounts();
   if (!pl.seeding && pl.host) fetchInbox();
 });
+// The health table names the units no list holds.
+nzBus.addEventListener('planner:health', () => { if (pl.host) paintWaiting(); });
 // A push or link without an item lands on the conversation, even where the
 // phone's left block was left unfolded or a session opened in its place.
 nzBus.addEventListener('inbox:focus', () => {
@@ -878,6 +994,10 @@ registerActions({
 });
 
 document.addEventListener('DOMContentLoaded', () => {
+  $('pl-events')?.addEventListener('scroll', () => {
+    if (pl.revealed) revealedTop();
+    if (nearTop()) loadOlder();
+  }, { passive: true });
   $('pl-left-toggle')?.addEventListener('click', () => {
     showPlannerLeft(!$('planner-main')?.classList.contains('pl-left-open'));
   });

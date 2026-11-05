@@ -107,12 +107,13 @@ function stripLeakedToolCalls(text) {
 }
 
 // peerSourceHtml names a cross-session message's sender (RFC planner §6.2):
-// the Planner, a naozhi session (a link to it; peer_key was resolved when the
-// message arrived, the title is the session's current one) or a CC session
-// naozhi does not manage.
+// the Planner (known by its key: its --name is per instance), a naozhi
+// session (a link to it; peer_key was resolved when the message arrived, the
+// title is the session's current one) or a CC session naozhi does not
+// manage.
 function peerSourceHtml(e, node) {
   const name = e.peer || '';
-  if (name === 'planner') return '来自 Planner';
+  if (e.peer_key === 'planner:main') return '来自 Planner';
   if (e.peer_key) {
     node = node || 'local';
     const s = sessionList.sessionsData[sid(e.peer_key, node)] || {};
@@ -173,11 +174,15 @@ function refusalHtml(e) {
 // reason for EVENT_CONTENT/EVENT_ICONS).
 const EVENT_WHOLE = new Map([['ask_question', renderAskQuestionCard]]);
 
+// SYSTEM_SUMMARY words the CLI system frames logged under their bare subtype
+// (process_event_format.go): the CLI retrying a failed API call.
+const SYSTEM_SUMMARY = new Map([['api_retry', '接口重试']]);
+
 // EVENT_CONTENT fills div.event-content for a type still using the generic
 // wrapper. agent/result/task_* are plain escaped text (defaultTextContentHtml);
 // persist_gap shares the unrecognised-type chip (defaultEventChip).
 const EVENT_CONTENT = new Map([
-  ['system', (e) => esc(e.summary || e.type)],
+  ['system', (e) => esc(SYSTEM_SUMMARY.get(e.summary) || e.summary || e.type)],
   ['text', textOrUserContentHtml],
   ['user', textOrUserContentHtml],
   ['todo', (e) => renderTodoList(e.detail, e.summary)],

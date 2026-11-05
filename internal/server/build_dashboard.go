@@ -114,6 +114,7 @@ func (s *Server) buildWSStack(w *wiring) *Hub {
 		AllowedRoot:      tailerAllowedRoot(w.projectsRoot),
 		TrustedProxy:     s.auth.TrustedProxy,
 		WSAuthLimiter:    s.auth.LoginAllow,
+		WSAuthPeek:       s.auth.LoginPeek,
 		WSUpgradeLimiter: s.auth.WSUpgradeAllow,
 		// HandleUpgrade mints nz_anon for uploadOwner and refuses the
 		// upgrade if minting fails; never falls back to clientIP (#1326).

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/node"
 )
 
@@ -23,6 +24,7 @@ func TestHandleAuth_RateLimitEmitsRetryAfter(t *testing.T) {
 	// this is the structural branch the UI relies on; the limiter policy
 	// itself is orthogonal and covered by TestHandleLogin_Sets429AndRetryAfterOnRateLimit.
 	hub.admit.authLimiter = func(ip string) bool { return false }
+	hub.admit.authPeek = func(ip string) bool { return false }
 	defer hub.Shutdown()
 
 	c := &wsClient{
@@ -97,6 +99,50 @@ func TestHandleAuth_InvalidTokenOmitsRetryAfter(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("no auth_fail emitted within 2s")
+	}
+}
+
+// TestHandleAuth_OnlyFailuresSpendLoginBucket: valid WS auths (reloads, extra
+// tabs) must not drain the login bucket shared with POST /api/auth/login,
+// while failed guesses still run it dry and then lock out valid ones too.
+func TestHandleAuth_OnlyFailuresSpendLoginBucket(t *testing.T) {
+	t.Parallel()
+
+	hub, _ := newTestHub(t, "secret")
+	defer hub.Shutdown()
+	lim := auth.NewLoginLimiter()
+	hub.admit.authLimiter = lim.Allow
+	hub.admit.authPeek = lim.Peek
+
+	authOnce := func(tok string, cookie bool) node.ServerMsg {
+		t.Helper()
+		c := &wsClient{send: make(chan []byte, 4), done: make(chan struct{}), hub: hub, remoteIP: "203.0.113.7"}
+		c.authenticated.Store(cookie)
+		hub.handleAuth(c, node.ClientMsg{Type: "auth", Token: tok})
+		var msg node.ServerMsg
+		if err := json.Unmarshal(<-c.send, &msg); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		return msg
+	}
+
+	for i := 0; i < 20; i++ {
+		if msg := authOnce("secret", false); msg.Type != "auth_ok" {
+			t.Fatalf("valid token auth #%d = %s %q, want auth_ok", i+1, msg.Type, msg.Error)
+		}
+		if msg := authOnce("", true); msg.Type != "auth_ok" {
+			t.Fatalf("cookie auth #%d = %s %q, want auth_ok", i+1, msg.Type, msg.Error)
+		}
+	}
+	for i := 0; i < 5; i++ {
+		if msg := authOnce("WRONG", false); msg.Type != "auth_fail" || msg.RetryAfter != 0 {
+			t.Fatalf("bad token #%d = %s retry_after=%d, want a plain auth_fail", i+1, msg.Type, msg.RetryAfter)
+		}
+	}
+	for _, tok := range []string{"WRONG", "secret"} {
+		if msg := authOnce(tok, false); msg.RetryAfter != wsAuthRetryAfterSeconds {
+			t.Errorf("after 5 failures, token %q = %s retry_after=%d, want the rate-limit answer", tok, msg.Type, msg.RetryAfter)
+		}
 	}
 }
 

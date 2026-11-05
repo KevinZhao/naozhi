@@ -358,7 +358,8 @@ var taskKinds = map[task.Kind]string{task.KindSession: "派出的会话", task.K
 
 var taskStates = map[task.State]string{task.Doing: "进行中", task.Waiting: "等你", task.Failed: "失败"}
 
-const stamp = "01-02 15:04"
+// stamp is M/D HH:mm, as the dashboard writes a point in time.
+const stamp = "1/2 15:04"
 
 // render renders in as the brief's Markdown.
 func render(in input) string {

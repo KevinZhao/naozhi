@@ -41,7 +41,7 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
       await waitForWs(page, 'CONNECTED');
       await page.click('#abnav-planner');
       if (name === 'mobile') {
-        await expect(page.locator('#pl-left-toggle')).toHaveText('通知 0 · 任务');
+        await expect(page.locator('#pl-left-toggle')).toHaveText('通知 · 任务');
         await page.click('#pl-left-toggle');
       }
       const group = page.locator('#pl-task');
@@ -56,7 +56,8 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
       await expect(doing.nth(0)).toContainText('按健康状态');
       await expect(doing.nth(1).locator('.tk-open')).toHaveCount(0);
       await expect(doing.nth(1)).toContainText('完成条件：master CI 绿');
-      await expect(group.locator('.tk-sec-remind .tk-card')).toContainText('到点提醒');
+      // A point in time reads M/D HH:mm, as everywhere on the page (D92).
+      await expect(group.locator('.tk-sec-remind .tk-card')).toContainText(/到点提醒 \d{1,2}\/\d{1,2} \d\d:\d\d/);
       // 已完成 is folded; unfolded, the Planner's judgment and its reason.
       await expect(group.locator('.tk-sec-done .tk-card')).toBeHidden();
       await group.locator('.tk-sec-done summary').click();

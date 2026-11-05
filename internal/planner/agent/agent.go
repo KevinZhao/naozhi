@@ -8,6 +8,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,10 +35,22 @@ import (
 // Launch spec (§15.1, §4.1).
 const (
 	Key    = sessionkey.PlannerMainKey
-	Name   = "planner"
 	Model  = "claude-opus-5-5[1m]"
 	Effort = "medium"
 )
+
+// NameFor is the Planner's --name for the state root root: "planner-" and a
+// short hash of the root's absolute path. Every naozhi on a machine shares
+// CC's cross-session channel, so a fixed name would take another instance's
+// reports; the hash keeps the name the same across restarts and shift
+// changes, which is what the sessions it dispatched were told (D92).
+func NameFor(root string) string {
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	}
+	sum := sha256.Sum256([]byte(root))
+	return "planner-" + hex.EncodeToString(sum[:3])
+}
 
 // Tools is the Planner's whole built-in tool set: read-only tools to check a
 // claim, and CC's own cross-session channel.
@@ -155,6 +169,9 @@ type Status struct {
 	Alive   bool   `json:"alive"`
 	// Shift is the day of the current conversation's shift (YYYY-MM-DD).
 	Shift string `json:"shift,omitempty"`
+	// Workspaces names the registered workspaces by ID, for the page to
+	// show a workspace the Planner wrote by its ID by name.
+	Workspaces map[string]string `json:"workspaces,omitempty"`
 }
 
 // persisted is agent.json.
@@ -176,6 +193,8 @@ type persisted struct {
 type Agent struct {
 	cfg  Config
 	wake chan struct{}
+	// name is the Planner's --name (NameFor).
+	name string
 
 	mu     sync.Mutex
 	state  persisted
@@ -197,7 +216,7 @@ func New(cfg Config) *Agent {
 		slog.Warn("planner: no state root (session.store_path); planner.enabled ignored")
 		cfg.Enabled = false
 	}
-	a := &Agent{cfg: cfg, wake: make(chan struct{}, 1)}
+	a := &Agent{cfg: cfg, wake: make(chan struct{}, 1), name: NameFor(cfg.Layout.PlannerRoot())}
 	a.state = loadState(cfg.Layout.PlannerAgentPath())
 	a.opts = a.buildOpts()
 	return a
@@ -233,6 +252,13 @@ func (a *Agent) saveLocked() {
 	}
 }
 
+// Name is the Planner's cross-session name, the one the sessions it
+// dispatches report to.
+func (a *Agent) Name() string { return a.name }
+
+// Busy reports whether a Planner turn is running.
+func (a *Agent) Busy() bool { return a.cfg.Sessions.State(Key).Running }
+
 // Opts is planner:main's spawn options. Every argv-bearing field rides in
 // the shim's SpawnOverlay, so a restart rebuilds the same argv.
 func (a *Agent) Opts() sessionview.AgentOpts {
@@ -250,10 +276,10 @@ func (a *Agent) buildOpts() sessionview.AgentOpts {
 		Workspace: a.cfg.Layout.PlannerWorkDir(),
 		Exempt:    true,
 		// Rendered as --append-system-prompt.
-		SystemPrompt:        systemPrompt(root, memoryIndexes(a.cfg.Home)),
+		SystemPrompt:        systemPrompt(root, a.name, memoryIndexes(a.cfg.Home)),
 		Tools:               slices.Clone(Tools),
 		PermissionMode:      "dontAsk",
-		Name:                Name,
+		Name:                a.name,
 		StrictMCPConfig:     true,
 		CrossSessionInbound: "accept",
 		PermissionsAllow:    allowRules(root, a.cfg.Layout.EventsRoot(), a.cfg.Workspaces.LocalPaths()),
@@ -712,14 +738,24 @@ func (a *Agent) Snapshot() string {
 	if a.cfg.Promises != nil {
 		in.Promises = orEmpty(a.cfg.Promises())
 	}
-	if reg := a.cfg.Workspaces; reg != nil {
-		names := map[string]string{}
-		for _, w := range reg.List() {
-			names[w.ID] = w.Name
-		}
+	if names := a.workspaceNames(); names != nil {
 		in.Workspace = func(id string) string { return names[id] }
 	}
 	return renderSnapshot(in)
+}
+
+// workspaceNames maps the registered workspaces' IDs to their names, nil
+// without a registry.
+func (a *Agent) workspaceNames() map[string]string {
+	reg := a.cfg.Workspaces
+	if reg == nil {
+		return nil
+	}
+	names := map[string]string{}
+	for _, w := range reg.List() {
+		names[w.ID] = w.Name
+	}
+	return names
 }
 
 // orEmpty keeps a wired source's empty answer distinct from an unwired one.
@@ -736,6 +772,7 @@ func (a *Agent) Status() Status {
 	st := Status{Enabled: a.cfg.Enabled, Stopped: a.state.Stopped, Key: Key, Shift: a.state.Shift}
 	a.mu.Unlock()
 	st.Alive = a.cfg.Sessions.State(Key).Alive
+	st.Workspaces = a.workspaceNames()
 	return st
 }
 

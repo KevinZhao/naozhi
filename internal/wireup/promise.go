@@ -24,17 +24,17 @@ func promiseSource(p promise.Promise) string { return "promise:" + p.ID }
 
 // Due implements promise.Reminder.
 func (r PromiseReminder) Due(p promise.Promise) {
-	at := p.Due.Local().Format("01-02 15:04")
+	at := p.Due.Local().Format("1/2 15:04")
 	if r.Notify != nil {
 		why := "承诺到期 " + at
 		if p.CloseWhen != "" {
 			why += "；完成条件：" + p.CloseWhen
 		}
 		r.Notify.Add(notify.Item{Kind: notify.KindNotice, Level: notify.LevelTimely, Uncapped: true,
-			Source: promiseSource(p), Title: "到点提醒：" + textutil.TruncateRunes(p.Text, promiseTitleRunes), Why: why})
+			Source: promiseSource(p), Title: "到点提醒：" + textutil.TruncateRunes(p.Title(), promiseTitleRunes), Why: why})
 	}
 	if r.Note != nil {
-		r.Note("到点提醒（承诺，到期 " + at + "）：" + p.Text)
+		r.Note("到点提醒（承诺，到期 " + at + "）：" + p.Title())
 	}
 }
 

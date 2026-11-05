@@ -313,8 +313,8 @@ type Deps struct {
 	Health     func() health.Snapshot
 	Workspaces WorkspaceLookup
 	// Purpose stamps each /api/sessions snapshot's purpose (the sidebar's
-	// "Planner 派出" group); nil stamps none.
-	Purpose func(key string) string
+	// "Planner 派出" group) and what it was dispatched for; nil stamps none.
+	Purpose func(key string) (purpose, title string)
 }
 
 // New constructs a Handlers from injected deps. Deps is stored as-is; the

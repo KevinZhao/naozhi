@@ -160,7 +160,8 @@ func (m *Manager) Inspect() ([]StateEntry, error) {
 
 // Discover scans the state directory for existing shim state files and
 // returns the live ones, deleting every other state file and stranded temp
-// file and SIGTERMing socketless shims. changed reports whether the live set
+// file, SIGTERMing socketless shims and shutting down, over their sockets,
+// shims another naozhi binary started. changed reports whether the live set
 // differs from the previous Discover's (always true on the first). Only the
 // service should call it: the binary check is against the caller's own
 // executable.
@@ -193,8 +194,13 @@ func (m *Manager) Discover() (states []State, changed bool, err error) {
 			slog.Info("removing stale shim state file", "path", path, "pid", state.ShimPID)
 			RemoveStateFile(path)
 		case StateBinaryMismatch:
-			slog.Info("removing stale shim state file (binary mismatch)", "path", path, "pid", state.ShimPID)
-			RemoveStateFile(path)
+			// Not reattachable, so retire the shim (as an argv drift does) or
+			// it keeps the socket and refuses its key's respawn; the file stays
+			// while the shim still listens, so the next Discover retries.
+			if m.retireMismatchedShim(context.Background(), state) {
+				slog.Info("removing stale shim state file (binary mismatch)", "path", path, "pid", state.ShimPID)
+				RemoveStateFile(path)
+			}
 		case StateSocketMissing:
 			// Live PID + missing socket is the zombie signature: the listener fd
 			// exists but its path is gone (external rm, /run cleaner, XDG_RUNTIME_DIR

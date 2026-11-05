@@ -118,9 +118,9 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     await expect(reply.locator('.pl-act-status .pl-act-h')).toHaveText('Planner 判断 · 已完成');
     await expect(reply.locator('.pl-act-status')).toContainText('iso 它汇报周报写好了');
     // Its task is neither listed nor in 任务 yet: no 任务 row, never the key;
-    // its session card reads 会话.
+    // its session card names its kind (D92).
     await expect(reply.locator('.pl-act-status dt')).toHaveText(['依据']);
-    await expect(reply.locator('.pl-scard[data-key="' + TASK + '"] .pl-scard-name')).toHaveText('会话');
+    await expect(reply.locator('.pl-scard[data-key="' + TASK + '"] .pl-scard-name')).toHaveText('派出的任务');
     await expect(reply.locator('code[data-lang="naozhi-action"]')).toHaveCount(0);
     await expect(page.locator('#pl-cards')).toBeHidden();
 

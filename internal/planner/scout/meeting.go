@@ -166,7 +166,7 @@ func (s *Scout) brief(ctx context.Context, id string, e Event, started time.Time
 		return
 	}
 	b.State = StateOK
-	switch err := s.cfg.Brief(meetingBlock(id, e, m)); {
+	switch err := s.cfg.Brief(nil, meetingBlock(id, e, m)); {
 	case err == nil:
 		b.Woke = true
 	case errors.Is(err, ErrPlannerOff):

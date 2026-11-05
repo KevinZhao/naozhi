@@ -101,9 +101,12 @@ func (m *Manager) dialFromStateFile(ctx context.Context, key string, lastSeq int
 	// rebuild); Darwin falls back to ps -o comm= — weaker, but still catches
 	// PID reuse by an unrelated process. Neither this nor SignalAfterFailedReconnect
 	// signals a mismatched PID (same rule as isOurShimPID): it is an unrelated
-	// process or a shim from another naozhi binary, which exits on idle timeout.
+	// process or a shim from another naozhi binary, which retireMismatchedShim
+	// shuts down over its socket.
 	if mismatch, err := shimPIDBinaryMismatch(state.ShimPID, m.naozhiBin); err == nil && mismatch {
-		RemoveStateFile(stateFile)
+		if m.retireMismatchedShim(ctx, state) {
+			RemoveStateFile(stateFile)
+		}
 		return nil, fmt.Errorf("shim PID %d %w", state.ShimPID, ErrBinaryMismatch)
 	} else if err != nil {
 		slog.Warn("binary identity check skipped", "pid", state.ShimPID, "err", err)

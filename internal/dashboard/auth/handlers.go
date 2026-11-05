@@ -104,6 +104,15 @@ func (a *Handlers) LoginAllow(ip string) bool {
 	return a.loginLimiter.Allow(ip)
 }
 
+// LoginPeek reports whether LoginAllow would pass for ip, without spending an
+// attempt.
+func (a *Handlers) LoginPeek(ip string) bool {
+	if ip == "" {
+		ip = unknownIPKey
+	}
+	return a.loginLimiter.Peek(ip)
+}
+
 // WSUpgradeAllow reports whether the given IP is allowed one more WS upgrade.
 // Separate from LoginAllow to prevent cross-endpoint lockouts.
 func (a *Handlers) WSUpgradeAllow(ip string) bool {

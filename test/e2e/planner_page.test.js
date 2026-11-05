@@ -79,8 +79,9 @@ test('desktop: badge, 通知 cards, stream, controls, and the workbench counts o
     await expect(page.locator('#abnav-planner')).toHaveAttribute('aria-pressed', 'true');
     const cards = page.locator('#pl-wait .pl-card');
     await expect(cards).toHaveCount(3);
-    // The column counts what it lists.
-    await expect(page.locator('#pl-wait-count')).toHaveText('3');
+    // The column lists every open item and counts none: the badge is the
+    // one count of what is yours to handle (D92).
+    await expect(page.locator('#pl-wait-h')).toHaveText('通知');
     // Decisions first, then questions, then errors.
     await expect(cards.nth(0).locator('.pl-kind')).toHaveText('待你决定');
     await expect(cards.nth(0).locator('.pl-card-acts button')).toHaveText(['模板 A', '模板 B']);
@@ -108,7 +109,6 @@ test('desktop: badge, 通知 cards, stream, controls, and the workbench counts o
     await expect(cards).toHaveCount(2);
     expect(mock.inboxCalls[0]).toEqual({ path: '/api/inbox/close', method: 'POST', body: { id: 'in_err' } });
     await expect(page.locator('#abnav-planner-count')).toHaveText('2');
-    await expect(page.locator('#pl-wait-count')).toHaveText('2');
     // Another tab answered the decision: the count frame refetches the list.
     box.open = box.open.filter((it) => it.id !== 'in_d');
     box.counts = { open: 1, badge: 1 };
@@ -215,7 +215,7 @@ test('phone: the left column is a collapsible block above the stream', async ({ 
     await page.click('#abnav-planner');
     const toggle = page.locator('#pl-left-toggle');
     await expect(toggle).toBeVisible();
-    await expect(toggle).toContainText('通知 3');
+    await expect(toggle).toHaveText('通知 · 任务');
     await expect(page.locator('#pl-wait')).toBeHidden();
     await expect(page.locator('#pl-stream')).toContainText('两个会话在跑');
     await page.screenshot({ path: test.info().outputPath('planner-mobile.png') });
@@ -353,7 +353,7 @@ test('journaled notes: the ones a restart dropped come back in time order, once'
     ws: true, plannerEvents: events, inbox: inbox(),
     planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
     plannerNotes: [
-      // Older than the page: it belongs to history not loaded.
+      // Older than the page, which is the whole history: it shows first.
       { time: iso(now - 70000), text: '驳回：iso 更早的一条' },
       { time: iso(now - 57000), text: '到点提醒（承诺，到期 09:01）：iso 交周报' },
       { time: iso(now - 50000 + 40), text: '已派出：iso 周报（task:abc）' },
@@ -364,7 +364,7 @@ test('journaled notes: the ones a restart dropped come back in time order, once'
     await waitForWs(page, 'CONNECTED');
     await page.click('#abnav-planner');
     const system = page.locator('#pl-stream .event.system');
-    await expect(system).toHaveText([/到点提醒.*iso 交周报/, /已派出：iso 周报/]);
+    await expect(system).toHaveText([/驳回：iso 更早的一条/, /到点提醒.*iso 交周报/, /已派出：iso 周报/]);
     // The reminder sits between the replies it was written between.
     const order = await page.locator('#pl-stream .event').evaluateAll((els) => els.map((e) => e.textContent));
     const at = (re) => order.findIndex((t) => re.test(t));
@@ -395,8 +395,8 @@ test('planner.enabled off: the page explains it and the stop switch is off', asy
 
 // The morning briefs of GET /api/planner/briefs are messages in the
 // conversation, by the time they were made (D91): the day's open, an older
-// one folded, a fold the user chose kept; the brief's push link (#planner&item=brief:<day>) opens and
-// scrolls to it.
+// one folded, a fold the user chose kept; the brief's push link (#planner&item=brief:<day>) opens,
+// scrolls to and highlights it.
 test('briefs sit in the conversation by time, and a push link scrolls to one', async ({ browser }) => {
   const day = (ms) => { const d = new Date(ms); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
   const md = (n) => '## 早报 · iso\n\n完成 ' + n + '\n\n### 完成的（' + n + '）\n- iso 周报会话 · 11-04 18:00\n';
@@ -433,7 +433,7 @@ test('briefs sit in the conversation by time, and a push link scrolls to one', a
       const today = all.nth(1);
       await expect(old).not.toHaveAttribute('open', '');
       await expect(today).toHaveAttribute('open', '');
-      await expect(today.locator('summary')).toHaveText(/早报 · \d\d-\d\d \d\d:\d\d/);
+      await expect(today.locator('summary')).toHaveText(/^早报 · \d{1,2}\/\d{1,2} \d\d:\d\d$/);
       await expect(today.locator('.md .md-h3')).toHaveText('完成的（2）');
       // Opened at the end of the conversation, today's brief is far above.
       await expect(today).not.toBeInViewport();
@@ -456,6 +456,7 @@ test('briefs sit in the conversation by time, and a push link scrolls to one', a
       await expect(page.locator('body')).toHaveClass(/nz-view-planner/);
       await expect(old).toHaveAttribute('open', '');
       await expect(old.locator('summary')).toBeInViewport();
+      await expect(old).toHaveClass(/inbox-lit/);
       await page.screenshot({ path: test.info().outputPath('planner-brief-link-' + name + '.png') });
     } finally {
       await ctx.close();

@@ -47,8 +47,12 @@ type connAdmission struct {
 	// tab-reload / mobile-wake; authLimiter gates the inner `auth` message
 	// (a credential test). Separate buckets so reloads cannot lock out a
 	// login. Either may be nil (no limit); both return true when allowed.
+	// authPeek reads the auth bucket without spending it: a valid credential
+	// is only checked against it, so reloads and extra tabs never drain the
+	// quota a failed guess spends. nil allows.
 	upgradeLimiter func(ip string) bool
 	authLimiter    func(ip string) bool
+	authPeek       func(ip string) bool
 	upgrader       websocket.Upgrader
 
 	// conns counts open connections for maxWSConns. Reserved with an Add
@@ -81,6 +85,7 @@ func newConnAdmission(opts HubOptions) *connAdmission {
 		trustedProxy:   opts.TrustedProxy,
 		upgradeLimiter: opts.WSUpgradeLimiter,
 		authLimiter:    opts.WSAuthLimiter,
+		authPeek:       opts.WSAuthPeek,
 		owners:         make(map[string]int),
 	}
 	if opts.DashToken != "" {
@@ -115,8 +120,14 @@ func (a *connAdmission) allowUpgrade(r *http.Request) bool {
 	return a.upgradeLimiter(a.clientIP(r))
 }
 
-// allowAuthAttempt applies the per-IP limit on the inner `auth` message.
-func (a *connAdmission) allowAuthAttempt(ip string) bool {
+// allowAuthAttempt applies the per-IP limit on the inner `auth` message once
+// the credential was checked. Only a failed attempt spends the bucket; a valid
+// one is refused only while the bucket is empty, so an exhausted bucket
+// answers every attempt alike and does not reveal which guess was right.
+func (a *connAdmission) allowAuthAttempt(ip string, valid bool) bool {
+	if valid {
+		return a.authPeek == nil || a.authPeek(ip)
+	}
 	return a.authLimiter == nil || a.authLimiter(ip)
 }
 

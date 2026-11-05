@@ -176,9 +176,10 @@ func (e *sendEngine) drain() {
 // dependency of dashboard_send.go arrives as a method here, not as an
 // `engine.<lowercase>` field read.
 
-// remoteSendTimeout caps one HTTP-initiated remote-node Send RPC. Longer than
-// the WS path's remoteNodeProxyTimeout because the HTTP caller has already
-// received 202 and nothing is waiting on the result except drain.
+// remoteSendTimeout caps one remote-node Send RPC, from either path. A node
+// answers once the session is up, so the first send to a new session waits
+// out its spawn (~12s for an ACP backend); a shorter cap reports a send the
+// node took as "unknown".
 const remoteSendTimeout = 60 * time.Second
 
 // remoteSend forwards an HTTP send to a remote node in a tracked goroutine and
@@ -211,6 +212,7 @@ func (e *sendEngine) remoteSend(nc node.Conn, nodeID string, req node.SendReques
 				// As the WS path's send_ack "unknown": the tab keeps the
 				// message and retries it under the same turn ID.
 				f.Status, f.TurnID = string(sendAckUnknown), req.TurnID
+				nc.RefreshSubscription(key)
 			}
 			e.notify.broadcastRemoteSendError(f)
 		} else if res.Status == string(sendAckBusy) {

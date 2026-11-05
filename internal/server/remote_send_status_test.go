@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -129,17 +130,20 @@ type refreshCountingNode struct {
 func (n *refreshCountingNode) RefreshSubscription(string) { n.refreshes.Add(1) }
 
 // TestRemoteSend_NoRefreshAfterAReset: both remote send paths refresh the
-// key's subscription after an admitted send, but not after a reset: the key
-// has no session on the node until the next send, and a reverse node answers
-// that subscribe with an error that drops the key's browsers.
+// key's subscription after an admitted send, and after one whose answer was
+// lost (the node may be running it), but not after a reset: the key has no
+// session on the node until the next send, and a reverse node answers that
+// subscribe with an error that drops the key's browsers.
 func TestRemoteSend_NoRefreshAfterAReset(t *testing.T) {
 	const key = "test:d:u:general"
+	unknown := fmt.Errorf("%w: timeout", node.ErrSendUnknown)
 	for _, tc := range []struct {
 		status string
+		err    error
 		want   int32
-	}{{"reset", 0}, {"accepted", 1}, {"queued", 1}} {
+	}{{"reset", nil, 0}, {"accepted", nil, 1}, {"queued", nil, 1}, {"unknown", unknown, 1}} {
 		t.Run("ws/"+tc.status, func(t *testing.T) {
-			nc := &refreshCountingNode{statusNode: statusNode{fakeCapNode: fakeCapNode{id: "remote"}, status: tc.status}}
+			nc := &refreshCountingNode{statusNode: statusNode{fakeCapNode: fakeCapNode{id: "remote"}, status: tc.status, err: tc.err}}
 			router := session.NewRouter(session.RouterConfig{})
 			hub := newHubForTest(t, HubOptions{Router: router, Nodes: newNodeRegistry(map[string]node.Conn{"remote": nc})}, sendEngineOpts{})
 			defer hub.Shutdown()
@@ -153,11 +157,11 @@ func TestRemoteSend_NoRefreshAfterAReset(t *testing.T) {
 			}
 		})
 		t.Run("http/"+tc.status, func(t *testing.T) {
-			nc := &refreshCountingNode{statusNode: statusNode{fakeCapNode: fakeCapNode{id: "remote"}, status: tc.status}}
+			nc := &refreshCountingNode{statusNode: statusNode{fakeCapNode: fakeCapNode{id: "remote"}, status: tc.status, err: tc.err}}
 			e := newSendEngine(sendEngineOpts{Notify: &recordingNotifier{}})
 			defer e.drain()
 
-			if !e.remoteSend(nc, "remote", node.SendRequest{Key: key, Text: "/new"}) {
+			if !e.remoteSend(nc, "remote", node.SendRequest{Key: key, Text: "/new", TurnID: "s1"}) {
 				t.Fatal("remoteSend refused a send on a live engine")
 			}
 			e.wg.Wait()
@@ -166,4 +170,76 @@ func TestRemoteSend_NoRefreshAfterAReset(t *testing.T) {
 			}
 		})
 	}
+}
+
+// deadlineNode is a node.Conn whose Send and FetchBackends record how long
+// their ctx allows.
+type deadlineNode struct {
+	fakeCapNode
+	budget       chan time.Duration
+	lookupBudget chan time.Duration
+}
+
+func (n *deadlineNode) FetchBackends(ctx context.Context) (json.RawMessage, error) {
+	dl, _ := ctx.Deadline()
+	n.lookupBudget <- time.Until(dl)
+	return n.backends, nil
+}
+
+func (n *deadlineNode) Send(ctx context.Context, _ node.SendRequest) (node.SendResult, error) {
+	dl, _ := ctx.Deadline()
+	n.budget <- time.Until(dl)
+	return node.SendResult{Status: "accepted"}, nil
+}
+
+// TestRemoteSend_WaitsOutASpawn: a node answers a send once the session is
+// up, and an ACP backend takes ~12s to start, so neither path gives up on the
+// first send to a new remote session before remoteSendTimeout.
+func TestRemoteSend_WaitsOutASpawn(t *testing.T) {
+	const key = "test:d:u:general"
+	const atLeast = remoteSendTimeout - 5*time.Second
+	t.Run("ws", func(t *testing.T) {
+		nc := &deadlineNode{fakeCapNode: fakeCapNode{id: "remote"}, budget: make(chan time.Duration, 1)}
+		router := session.NewRouter(session.RouterConfig{})
+		hub := newHubForTest(t, HubOptions{Router: router, Nodes: newNodeRegistry(map[string]node.Conn{"remote": nc})}, sendEngineOpts{})
+		defer hub.Shutdown()
+
+		hub.handleSend(newTestWSClient(), node.ClientMsg{Type: "send", Key: key, Text: "hi", Node: "remote", ID: "r1"})
+		if got := <-nc.budget; got < atLeast {
+			t.Errorf("WS remote send RPC budget = %v, want about %v", got, remoteSendTimeout)
+		}
+	})
+	// The backend lookup before a send keeps its own remoteNodeProxyTimeout,
+	// so a stuck node fails it in 10s and the lookup does not eat into the
+	// send's budget.
+	t.Run("ws/backend", func(t *testing.T) {
+		nc := &deadlineNode{
+			fakeCapNode:  fakeCapNode{id: "remote", backends: json.RawMessage(`{"backends":[{"id":"kiro"}]}`)},
+			budget:       make(chan time.Duration, 1),
+			lookupBudget: make(chan time.Duration, 1),
+		}
+		router := session.NewRouter(session.RouterConfig{})
+		hub := newHubForTest(t, HubOptions{Router: router, Nodes: newNodeRegistry(map[string]node.Conn{"remote": nc})}, sendEngineOpts{})
+		defer hub.Shutdown()
+
+		hub.handleSend(newTestWSClient(), node.ClientMsg{Type: "send", Key: key, Text: "hi", Node: "remote", Backend: "kiro", ID: "r1"})
+		if got := <-nc.lookupBudget; got > remoteNodeProxyTimeout {
+			t.Errorf("WS backend lookup budget = %v, want at most %v", got, remoteNodeProxyTimeout)
+		}
+		if got := <-nc.budget; got < atLeast {
+			t.Errorf("WS remote send RPC budget = %v, want about %v", got, remoteSendTimeout)
+		}
+	})
+	t.Run("http", func(t *testing.T) {
+		nc := &deadlineNode{fakeCapNode: fakeCapNode{id: "remote"}, budget: make(chan time.Duration, 1)}
+		e := newSendEngine(sendEngineOpts{Notify: &recordingNotifier{}})
+		defer e.drain()
+
+		if !e.remoteSend(nc, "remote", node.SendRequest{Key: key, Text: "hi"}) {
+			t.Fatal("remoteSend refused a send on a live engine")
+		}
+		if got := <-nc.budget; got < atLeast {
+			t.Errorf("HTTP remote send RPC budget = %v, want about %v", got, remoteSendTimeout)
+		}
+	})
 }
