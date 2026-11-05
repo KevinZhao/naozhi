@@ -50,9 +50,11 @@ type Deps struct {
 	ConfigReload ConfigReloader
 	// Health is the health state machine's Snapshot; nil serves an empty
 	// table. Workspaces names its workspaces (nil interface when there is
-	// no registry).
+	// no registry), UnitName its units ("" when it knows none; nil names
+	// none).
 	Health     func() health.Snapshot
 	Workspaces WorkspaceLister
+	UnitName   func(unit string) string
 }
 
 // Handlers serves the /api/system/* endpoint family.
@@ -72,6 +74,7 @@ type Handlers struct {
 	reloadLimiter *ratelimit.Limiter
 	health        func() health.Snapshot
 	workspaces    WorkspaceLister
+	unitName      func(unit string) string
 }
 
 // New returns Handlers wired from d.
@@ -96,6 +99,7 @@ func New(d Deps) *Handlers {
 		reloadLimiter:  newConfigReloadLimiter(),
 		health:         d.Health,
 		workspaces:     d.Workspaces,
+		unitName:       d.UnitName,
 	}
 }
 

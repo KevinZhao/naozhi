@@ -40,13 +40,14 @@ test.describe('Sidebar & session list', () => {
     // Running session has dot-running
     const runningCard = page.locator('.session-card', { hasText: 'review this code' });
     await expect(runningCard.locator('.sc-dot')).toHaveClass(/dot-running/);
-    await expect(runningCard.locator('.sc-meta')).toContainText('running');
+    await expect(runningCard.locator('.sc-dot')).toHaveAttribute('title', '活跃');
+    await expect(runningCard.locator('.sc-meta')).not.toContainText('running');
 
     // Ready session has dot-ready
     const readyCard = page.locator('.session-card', { hasText: 'hello world' });
     await expect(readyCard.locator('.sc-dot')).toHaveClass(/dot-ready/);
 
-    // Previously-suspended session now shows as ready
+    // Previously-suspended session now shows as idle
     const resumableCard = page.locator('.session-card', { hasText: 'fix the bug' });
     await expect(resumableCard.locator('.sc-dot')).toHaveClass(/dot-ready/);
 
@@ -81,9 +82,9 @@ test.describe('Sidebar & session list', () => {
         return cards;
       }
     );
-    // Both cards should show ready
-    expect(myprojectCards[0]).toContain('ready');
-    expect(myprojectCards[1]).toContain('ready');
+    // Both cards are idle: the state is the dot's, not a word on the row
+    expect(myprojectCards[0]).not.toContain('ready');
+    expect(myprojectCards[1]).not.toContain('ready');
 
     await ctx.close();
   });

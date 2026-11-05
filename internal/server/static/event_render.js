@@ -153,11 +153,17 @@ function peerHoldHtml(e, _cleanRaw, sk) {
 }
 
 // refusalHtml: permission_denied / model_refusal, tagged so they stand apart
-// from generic system rows.
+// from generic system rows. A permission denial names the tool and what was
+// refused (the classifier's reason); the CLI's explanation to the model,
+// hundreds of English characters, is only the title.
 function refusalHtml(e) {
-  const tag = e.type === 'model_refusal' ? '模型拒答' : '权限拒绝';
-  const what = [e.tool, e.detail || e.summary].filter(Boolean).join('：');
-  return '<span class="refusal-tag">' + tag + '</span>' + (what ? ' ' + esc(what) : '');
+  if (e.type === 'model_refusal') {
+    const what = [e.tool, e.detail || e.summary].filter(Boolean).join('：');
+    return '<span class="refusal-tag">模型拒答</span>' + (what ? ' ' + esc(what) : '');
+  }
+  const what = [e.tool, e.reason].filter(Boolean).join('：');
+  const text = e.detail || e.summary || '';
+  return '<span' + (text ? ' title="' + escAttr(text) + '"' : '') + '><span class="refusal-tag">权限拒绝</span>' + (what ? ' ' + esc(what) : '') + '</span>';
 }
 
 // EVENT_WHOLE renders a type's entire bubble, bypassing the generic

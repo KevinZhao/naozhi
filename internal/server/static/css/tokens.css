@@ -19,17 +19,18 @@
      fill stays consistent with any future Anthropic-tinted accents. */
   --nz-clawd-rust:#d97757;
   --nz-focus:#58a6ff;
-  /* status-dot palette: side-bar session cards render three
-     states via .dot-running / .dot-ready / .dot-new. Running maps to
-     --nz-amber (the .sidebar-status .connecting convention) plus the
-     global @keyframes pulse so it draws attention; ready stays a
-     steady green; new stays dashed blue. Both animations degrade to
-     static under `prefers-reduced-motion` via the site-wide guard
-     at the top of this stylesheet. Future states (error/idle) get
-     new tokens here, never ad-hoc hex in rules. */
-  --nz-status-running:var(--nz-amber);
-  --nz-status-ready:var(--nz-green);
+  /* status-dot palette: a session card's dot is its health
+     (nz_util.js sessionDot): .dot-running active, blue, plus the global
+     @keyframes pulse; .dot-failed red; .dot-warn amber for the states
+     that may need you; .dot-ready idle, grey; .dot-new dashed blue. The
+     animation degrades to static under `prefers-reduced-motion` via the
+     site-wide guard at the top of this stylesheet. New states get new
+     tokens here, never ad-hoc hex in rules. */
+  --nz-status-running:var(--nz-blue);
+  --nz-status-ready:var(--nz-text-mute);
   --nz-status-new:var(--nz-blue);
+  --nz-status-failed:var(--nz-red);
+  --nz-status-warn:var(--nz-amber);
   /* font stack: the body stack above (system-ui + PingFang / Noto CJK
      + sans-serif) handles CJK well. For tabular / code-ish surfaces we
      canonicalize here so future code can use var(--nz-font-mono) instead of
@@ -251,8 +252,8 @@
   --nz-red:#cf222e;--nz-amber:#9a6700;
   --nz-purple:#8250df;
   --nz-focus:#0969da;
-  --nz-status-running:var(--nz-amber);
-  --nz-status-ready:var(--nz-green);
+  --nz-status-running:var(--nz-blue);
+  --nz-status-ready:var(--nz-text-mute);
   --nz-status-new:var(--nz-blue);
   --nz-rust-fg:#bc4c2e;--nz-rust:#d97757;--nz-rust-emphasis:#a8421f;
   --nz-rust-subtle:rgba(217,119,87,.12);
@@ -298,8 +299,8 @@
     --nz-accent:#0969da;--nz-blue:#0969da;--nz-green:#1a7f37;
     --nz-red:#cf222e;--nz-amber:#9a6700;
     --nz-focus:#0969da;
-    --nz-status-running:var(--nz-amber);
-    --nz-status-ready:var(--nz-green);
+    --nz-status-running:var(--nz-blue);
+    --nz-status-ready:var(--nz-text-mute);
     --nz-status-new:var(--nz-blue);
     --nz-rust-fg:#bc4c2e;--nz-rust:#d97757;--nz-rust-emphasis:#a8421f;
     --nz-rust-subtle:rgba(217,119,87,.12);

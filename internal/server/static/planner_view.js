@@ -33,7 +33,7 @@
 // Layering: never import dashboard.js back; setActivityView is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
 import { sessionList, ui } from './state.js';
-import { esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
+import { esc, escAttr, fetchJSON, nzBus, registerActions, sessionFailureText, showToast } from './nz_util.js';
 import { sid } from './session_ident.js';
 import { renderEventsWithDividers } from './event_render.js';
 import { renderMd, runPendingAsync } from './render_md.js';
@@ -45,7 +45,7 @@ import { mountTasks, refreshTasks } from './tasks.js';
 import { workbench } from './workbench.js';
 import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
-import { formatAbsTime, lastDividerTime } from './utilities.js';
+import { formatAbsTime, formatMonthDayTime, lastDividerTime, timeAgo } from './utilities.js';
 
 const PLANNER_KEY = 'planner:main';
 // EVENTS_LIMIT is the first page of the conversation; later events come in
@@ -98,13 +98,13 @@ const $ = (id) => document.getElementById(id);
 
 // ---- 通知 ----
 
-function waitedText(ms) {
-  const m = Math.floor(ms / 60000);
-  if (m < 1) return '不到 1 分钟';
-  if (m < 60) return m + ' 分钟';
-  const h = Math.floor(m / 60);
-  if (h < 24) return h + ' 小时';
-  return Math.floor(h / 24) + ' 天';
+// itemWhy is a card's subtitle: for a failed session the cause in words
+// (its death reason, else its error class), else the item's own why. Items
+// opened before v0.4.1 wrote "失败 · 其他", which says nothing the title
+// does not.
+function itemWhy(it, target) {
+  const cause = it.kind === 'error' && target ? sessionFailureText(target.s) : '';
+  return cause || (it.why === '失败' || it.why === '失败 · 其他' ? '' : it.why || '');
 }
 
 // unitTarget is the listed session an item is about, or null: a local one,
@@ -119,7 +119,7 @@ function unitTarget(unit) {
     key = unit.slice(i + 1);
     s = sessionList.sessionsData[sid(key, node)];
   }
-  return s ? { key, node, title: s.user_label || s.summary || s.last_prompt || key, project: s.project || '' } : null;
+  return s ? { key, node, s, title: s.user_label || s.summary || s.last_prompt || key, project: s.project || '' } : null;
 }
 
 function itemHtml(it) {
@@ -132,14 +132,15 @@ function itemHtml(it) {
     : (it.unit ? esc(it.unit === PLANNER_KEY ? 'Planner' : it.unit) : '');
   const link = webLinkHtml(it.link);
   const acts = decisionActsHtml(it);
+  const why = itemWhy(it, target);
   return '<div class="pl-card pl-k-' + kind + (isLit(it.id) ? ' inbox-lit' : '') + '" role="listitem" data-id="' + escAttr(it.id) + '">' +
       '<div class="pl-card-top">' +
         '<span class="pl-kind">' + esc(KIND_LABEL[kind]) + '</span>' +
-        (!isNaN(created) ? '<span class="pl-wait" title="' + escAttr(formatAbsTime(created)) + '">等了 ' + esc(waitedText(Date.now() - created)) + '</span>' : '') +
+        (!isNaN(created) ? '<span class="pl-wait" title="' + escAttr(formatAbsTime(created)) + '">' + esc(timeAgo(created)) + '</span>' : '') +
         '<button type="button" class="pl-close btn-close" data-action="planner-inbox-close" data-id="' + escAttr(it.id) + '" title="关闭" aria-label="关闭这一条">&times;</button>' +
       '</div>' +
       '<div class="pl-card-title">' + esc(it.title || '') + '</div>' +
-      (it.why ? '<div class="pl-card-why">' + esc(it.why) + '</div>' : '') +
+      (why ? '<div class="pl-card-why">' + esc(why) + '</div>' : '') +
       (meta || link ? '<div class="pl-card-meta">' + [meta, link].filter(Boolean).join(' · ') + '</div>' : '') +
       acts +
     '</div>';
@@ -266,11 +267,7 @@ function notifyToolHtml() {
 
 function pauseToolHtml() {
   if (pl.pausedUntil > Date.now()) {
-    const d = new Date(pl.pausedUntil);
-    const same = d.toDateString() === new Date().toDateString();
-    const at = (same ? '' : (d.getMonth() + 1) + '/' + d.getDate() + ' ') +
-      String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
-    return '<span class="pl-tool-note" title="' + escAttr(formatAbsTime(pl.pausedUntil)) + '">已暂停到 ' + esc(at) + '，期间只进"通知"</span>' +
+    return '<span class="pl-tool-note" title="' + escAttr(formatAbsTime(pl.pausedUntil)) + '">已暂停到 ' + esc(formatMonthDayTime(pl.pausedUntil)) + '，期间只进"通知"</span>' +
       '<button type="button" class="pl-btn" data-action="planner-pause-resume">恢复推送</button>';
   }
   if (pl.customPause) {

@@ -18,10 +18,12 @@ type WorkspaceLister interface {
 }
 
 // healthUnit is one row of GET /api/system/health: the unit plus its
-// workspace's name.
+// workspace's name and, for a unit the dashboard's session list does not
+// hold (a cron job, a daemon), its own name.
 type healthUnit struct {
 	health.Unit
 	WorkspaceName string `json:"workspace_name,omitempty"`
+	Name          string `json:"name,omitempty"`
 }
 
 type healthResp struct {
@@ -61,7 +63,11 @@ func (h *Handlers) HandleHealth(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 	for _, u := range snap.Units {
-		resp.Units = append(resp.Units, healthUnit{Unit: u, WorkspaceName: names[u.Workspace]})
+		row := healthUnit{Unit: u, WorkspaceName: names[u.Workspace]}
+		if h.unitName != nil && (u.Kind == health.KindCron || u.Kind == health.KindSysession) {
+			row.Name = h.unitName(u.ID)
+		}
+		resp.Units = append(resp.Units, row)
 	}
 	slices.SortStableFunc(resp.Units, func(a, b healthUnit) int {
 		return cmp.Or(

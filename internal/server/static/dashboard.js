@@ -1265,12 +1265,12 @@ function renderSettingsView() {
         return '<div class="settings-about-line"><span class="settings-about-key">' + esc(r[0]) + '</span><span>' + esc(r[1]) + '</span></div>';
       }).join('') +
     '</section>';
-  // 系统任务 entry: the mobile tab bar has no 系统 tab, so this row is its
+  // 系统 entry: the mobile tab bar has no 系统 tab, so this row is its
   // entry point. Hidden on desktop via CSS (.settings-syslink) where the rail
   // tab remains.
   const sysLinkHtml =
-    '<section class="settings-sec settings-syslink"><h2>系统任务</h2>' +
-      '<button type="button" class="settings-syslink-btn" id="settings-open-system">查看内置后台守护运行状态 ›</button>' +
+    '<section class="settings-sec settings-syslink">' +
+      '<button type="button" class="settings-syslink-btn" id="settings-open-system">系统 · 全会话健康 ›</button>' +
     '</section>';
   root.innerHTML =
     '<div class="settings-head"><h1>设置</h1></div>' +

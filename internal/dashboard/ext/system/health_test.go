@@ -21,10 +21,10 @@ func TestHandleHealth(t *testing.T) {
 	at := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
 	snap := health.Snapshot{At: at, Unowned: 2, Units: []health.Unit{
 		{ID: "a", State: health.Idle, Workspace: "ws_1", LastActive: at.Add(-time.Minute)},
-		{ID: "b", State: health.Active, LastActive: at},
+		{ID: "b", Kind: health.KindCron, State: health.Active, LastActive: at},
 		{ID: "c", State: health.Failed, ErrClass: health.ErrAuth, Workspace: "ws_1"},
 		{ID: "d", State: health.Idle, Workspace: "ws_2", LastActive: at},
-		{ID: "e", State: health.Lost},
+		{ID: "e", Kind: health.KindSysession, State: health.Lost},
 		{ID: "f", State: "later"},
 		{ID: "g", State: health.Waiting},
 	}}
@@ -33,6 +33,7 @@ func TestHandleHealth(t *testing.T) {
 		deps      Deps
 		wantIDs   []string
 		wantNames map[string]string
+		wantUnit  map[string]string
 		wantAt    time.Time
 		unowned   int
 	}{
@@ -42,9 +43,12 @@ func TestHandleHealth(t *testing.T) {
 			deps: Deps{
 				Health:     func() health.Snapshot { return snap },
 				Workspaces: fakeWorkspaces{{ID: "ws_1", Name: "naozhi"}},
+				// Only the units the session list does not hold are named.
+				UnitName: func(unit string) string { return "名字 " + unit },
 			},
 			wantIDs:   []string{"c", "e", "g", "f", "b", "d", "a"},
 			wantNames: map[string]string{"a": "naozhi", "c": "naozhi"},
+			wantUnit:  map[string]string{"b": "名字 b", "e": "名字 e"},
 			wantAt:    at,
 			unowned:   2,
 		},
@@ -70,6 +74,7 @@ func TestHandleHealth(t *testing.T) {
 				Units   []struct {
 					ID            string `json:"id"`
 					WorkspaceName string `json:"workspace_name"`
+					Name          string `json:"name"`
 				} `json:"units"`
 			}
 			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
@@ -83,6 +88,9 @@ func TestHandleHealth(t *testing.T) {
 				ids = append(ids, u.ID)
 				if want := tt.wantNames[u.ID]; u.WorkspaceName != want {
 					t.Errorf("unit %s workspace_name = %q, want %q", u.ID, u.WorkspaceName, want)
+				}
+				if want := tt.wantUnit[u.ID]; u.Name != want {
+					t.Errorf("unit %s name = %q, want %q", u.ID, u.Name, want)
 				}
 			}
 			if !slices.Equal(ids, tt.wantIDs) {

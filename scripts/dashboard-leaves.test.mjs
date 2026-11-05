@@ -176,11 +176,11 @@ test('every backend RunState and running has its own dot and label', () => {
 
 test('sessionExit is null for a live session and names every contract death_reason', () => {
   for (const st of NZ_CONTRACT.ENUMS.SESSION_STATE.filter((s) => s !== 'dead')) {
-    assert.equal(nzu.sessionExit(st, 'cli_exited'), null, st);
+    assert.equal(nzu.sessionExit({ state: st, death_reason: 'cli_exited' }), null, st);
   }
   const reclaimed = ['evicted', 'idle_timeout', 'released', 'stopped'];
   for (const r of NZ_CONTRACT.ENUMS.DEATH_REASON) {
-    const x = nzu.sessionExit('dead', r);
+    const x = nzu.sessionExit({ state: 'dead', death_reason: r });
     assert.ok(!x.text.startsWith('进程已退出'), `death_reason ${r} has no wording`);
     assert.equal(x.crashed, !reclaimed.includes(r), r);
   }
@@ -188,7 +188,7 @@ test('sessionExit is null for a live session and names every contract death_reas
 
 test('sessionExit reads an exit code or signal off cli_exited and falls back to the raw reason', () => {
   const { CODE, SIGNAL } = NZ_CONTRACT.DEATH_REASON_PREFIX;
-  const text = (r) => nzu.sessionExit('dead', r).text;
+  const text = (r) => nzu.sessionExit({ state: 'dead', death_reason: r }).text;
   assert.equal(text(CODE + '-1'), 'CLI 进程被信号终止');
   assert.equal(text(CODE + '2'), 'CLI 进程异常退出（退出码 2）');
   assert.equal(text(SIGNAL + 'SIGKILL'), 'CLI 进程被信号 SIGKILL 终止');
@@ -197,11 +197,11 @@ test('sessionExit reads an exit code or signal off cli_exited and falls back to 
   assert.equal(text('__proto__'), '进程已退出（__proto__）');
   assert.equal(text('toString'), '进程已退出（toString）');
   assert.equal(text(''), '进程已退出');
-  assert.equal(nzu.sessionExit('dead', CODE + '137').crashed, true);
+  assert.equal(nzu.sessionExit({ state: 'dead', death_reason: CODE + '137' }).crashed, true);
 });
 
 test('sessionExit\'s title says what the next send does for each startup_failure class', () => {
-  const title = (f, detail) => nzu.sessionExit('dead', 'cli_exited', detail, f).title;
+  const title = (f, detail) => nzu.sessionExit({ state: 'dead', death_reason: 'cli_exited', death_detail: detail, startup_failure: f }).title;
   const head = 'CLI 进程退出，';
   const operator = { auth: '后端认证失败', mcp_config: 'CLI 配置错误', missing_runtime: 'CLI 运行环境缺失' };
   const automatic = ['unknown', 'resume_not_found'];
@@ -218,12 +218,45 @@ test('sessionExit\'s title says what the next send does for each startup_failure
   assert.equal(title({ ...retry, retry_at: Date.now() }), head + '后端认证失败，需管理员修复后重试');
 });
 
-test('sessionExitChipHtml marks a crash, mutes a reclaim and escapes the title', () => {
-  assert.equal(nzu.sessionExitChipHtml('ready', 'killed'), '');
-  assert.equal(nzu.sessionExitChipHtml('dead', 'killed', '"<x>'),
-    '<span class="sc-exit sc-exit-crashed" title="进程被终止，下次发送时自动恢复\n&quot;&lt;x&gt;">⚠ 异常退出</span>');
-  assert.equal(nzu.sessionExitChipHtml('dead', 'evicted'),
-    '<span class="sc-exit sc-exit-reclaimed" title="为腾出容量，进程已回收，下次发送时自动恢复">已回收</span>');
+test('sessionExitChipHtml marks a crash only and escapes the title', () => {
+  assert.equal(nzu.sessionExitChipHtml({ state: 'ready', death_reason: 'killed' }), '');
+  assert.equal(nzu.sessionExitChipHtml({ state: 'dead', death_reason: 'killed', death_detail: '"<x>' }),
+    '<span class="sc-exit" title="进程被终止，下次发送时自动恢复\n&quot;&lt;x&gt;">⚠ 异常退出</span>');
+  assert.equal(nzu.sessionExitChipHtml({ state: 'dead', death_reason: 'evicted' }), '');
+});
+
+// Q19: a session that failed before a restart comes back reading ready with
+// no death_reason; its health still says failed, and the dot and the chip
+// keep saying so until a send moves past the verdict.
+test('sessionDot and the exit chip read a failure off the health verdict', () => {
+  const CODE = NZ_CONTRACT.DEATH_REASON_PREFIX.CODE;
+  const failed = { state: 'failed', since: 2000, death_reason: CODE + '-1', error_class: 'other' };
+  const cases = [
+    ['failed before a restart', { state: 'ready', last_active: 1000, health: failed }, 'dot-failed', '失败：CLI 进程被信号终止', true],
+    ['a send since the verdict', { state: 'ready', last_active: 3000, health: failed }, 'dot-ready', '空闲', false],
+    ['running', { state: 'running', last_active: 1000, health: failed }, 'dot-running', '活跃', false],
+    ['dead, crashed', { state: 'dead', death_reason: 'killed' }, 'dot-failed', '失败：进程被终止', true],
+    ['dead, reclaimed', { state: 'dead', death_reason: 'idle_timeout' }, 'dot-ready', '空闲', false],
+    ['failed without a death', { state: 'ready', last_active: 1000, health: { state: 'failed', since: 2000, error_class: 'auth' } }, 'dot-failed', '失败', false],
+    ['waiting', { state: 'ready', last_active: 1000, health: { state: 'waiting', since: 2000 } }, 'dot-warn', '待你回复', false],
+    ['unknown', { state: 'ready', health: { state: 'unknown', since: 2000 } }, 'dot-ready', '空闲', false],
+    ['new', { state: 'new' }, 'dot-new', '新会话', false],
+  ];
+  for (const [name, s, cls, title, chip] of cases) {
+    assert.deepEqual(nzu.sessionDot(s), { cls, title }, name);
+    assert.equal(nzu.sessionExitChipHtml(s) !== '', chip, name);
+  }
+});
+
+test('failureText names a death reason or an error class, never "other"', () => {
+  const CODE = NZ_CONTRACT.DEATH_REASON_PREFIX.CODE;
+  for (const [reason, cls, want] of [
+    [CODE + '-1', 'other', 'CLI 进程被信号终止'],
+    ['weird', 'auth', '凭证 / 权限拒绝'],
+    ['weird', 'other', ''],
+    ['', '', ''],
+    ['', '__proto__', ''],
+  ]) assert.equal(nzu.failureText(reason, cls), want, reason + '/' + cls);
 });
 
 // --- cron_format.js ---

@@ -519,6 +519,7 @@ func main() {
 		Briefs:           briefer,
 		Health:           func() health.Snapshot { return healthMon.Snapshot() },
 		Workspaces:       plannerState.Workspaces,
+		UnitName:         unitNames,
 		Notify:           notifier,
 		Tasks:            tasks,
 		Purpose:          sidecars.Purpose,

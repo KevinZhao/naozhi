@@ -11,9 +11,11 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
+	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
 	sessionpkg "github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/session/sessionview"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
@@ -49,6 +51,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.fillProjectAndSummary(snapshots)
+	h.fillHealth(snapshots)
 
 	stats := h.buildSessionStats(now, version, running, ready)
 
@@ -188,6 +191,33 @@ func (h *Handlers) fillProjectAndSummary(snapshots []sessionpkg.SessionSnapshot)
 				snapshots[i].Summary = summary
 			}
 		}
+	}
+}
+
+// fillHealth stamps each snapshot with its unit of the health machine's last
+// reconcile. The machine holds a failure across a restart (from the
+// journal) while the session itself comes back reading "ready" with no
+// death reason, so the list's status dot and exit chip read the failure from
+// here.
+func (h *Handlers) fillHealth(snapshots []sessionpkg.SessionSnapshot) {
+	if h.deps.Health == nil {
+		return
+	}
+	units := h.deps.Health().Units
+	byID := make(map[string]*health.Unit, len(units))
+	for i := range units {
+		byID[units[i].ID] = &units[i]
+	}
+	for i := range snapshots {
+		u := byID[snapshots[i].Key]
+		if u == nil {
+			continue
+		}
+		sh := &sessionview.SessionHealth{State: string(u.State), Since: u.Since.UnixMilli(), ErrClass: string(u.ErrClass)}
+		if r, ok := strings.CutPrefix(u.Evidence, health.DeathEvidence); ok && u.State == health.Failed {
+			sh.DeathReason = r
+		}
+		snapshots[i].Health = sh
 	}
 }
 

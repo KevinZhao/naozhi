@@ -6,7 +6,7 @@
 import { NZ_CONTRACT } from './contract.js';
 import { composer, perSession, selection, sessionList, timers } from './state.js';
 import { interruptSession, startTurnTimer, turnState, updateSendButton } from './running_banner.js';
-import { fetchJSON, showToast, patchCardExitChip } from './nz_util.js';
+import { fetchJSON, showToast, patchCardHealth } from './nz_util.js';
 import { wsm } from './ws_manager.js';
 import { featureForCurrent } from './features.js';
 import { EVENT_DIVIDER_GAP_MS, getMsgValue, lastDividerTime, persistPending, removeSidebarCard, setMsgValue, showAPIError, showAuthModal, showNetworkError, stickEventsBottom, timeDividerHtml } from './utilities.js';
@@ -539,7 +539,7 @@ function clearPendingFiles() {
 // keeping the banner stuck forever.
 const _optimisticRunningTimers = {};
 
-// patchSidebarCardState updates the sidebar card's status dot + label text in
+// patchSidebarCardState updates the sidebar card's status dot and exit chip in
 // place so an optimistic running flip is reflected on the left list at the
 // same instant as the main conversation, instead of lagging behind the
 // server's session_state push (which can be several hundred ms when a CLI
@@ -547,23 +547,12 @@ const _optimisticRunningTimers = {};
 // branch in onSessionState. No-op if the card isn't currently rendered.
 function patchSidebarCardState(key, node, state) {
   const msgNode = node || 'local';
-  const displayState = state === 'dead' ? 'ready' : state;
   let card = null;
   document.querySelectorAll('.session-card').forEach(c => {
     if (c.dataset.key === key && (c.dataset.node || 'local') === msgNode) card = c;
   });
   if (!card) return;
-  const dot = card.querySelector('.sc-dot');
-  if (dot) {
-    dot.className = 'sc-dot ' + (displayState === 'running' ? 'dot-running' : (displayState === 'ready' ? 'dot-ready' : 'dot-new'));
-  }
-  const meta = card.querySelector('.sc-meta');
-  if (meta) {
-    const stateSpan = meta.querySelectorAll('span')[1]; // [0]=dot, [1]=state text
-    if (stateSpan && !stateSpan.classList.contains('sc-node')) stateSpan.textContent = displayState;
-  }
-  const sd = sessionList.sessionsData[sid(key, msgNode)];
-  patchCardExitChip(card, state, sd ? sd.death_reason : '', sd ? sd.death_detail : '', sd ? sd.startup_failure : null);
+  patchCardHealth(card, Object.assign({}, sessionList.sessionsData[sid(key, msgNode)], { state }));
 }
 
 function markSessionOptimisticRunning(key, node) {

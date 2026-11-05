@@ -234,13 +234,99 @@ const DEATH_REASONS = {
   total_timeout: { crashed: true, text: '超过单轮时长上限，进程已终止' },
 };
 
-// sessionExit describes why a session has no process, or null when it is not
-// dead (a timeout can leave death_reason on a live session). The title adds
-// what the next send does (startup: startup_failure) and detail (death_detail).
-export function sessionExit(state, reason, detail, startup) {
-  if (state !== 'dead') return null;
+// HEALTH_STATES maps a health state (monitor/health, wire-stable) to its
+// label and colour class, in the server's order: abnormal first.
+export const HEALTH_STATES = {
+  failed: { label: '失败', cls: 'fail' },
+  lost: { label: '失联', cls: 'warn' },
+  stalled: { label: '停滞', cls: 'warn' },
+  waiting: { label: '待你回复', cls: 'ask' },
+  unknown: { label: '未知', cls: 'off' },
+  active: { label: '活跃', cls: 'run' },
+  idle: { label: '空闲', cls: 'idle' },
+};
+// HEALTH_ERROR_CLASSES labels health.Classify's error classes (§15.1);
+// "other" names nothing and has no label.
+export const HEALTH_ERROR_CLASSES = {
+  auth: '凭证 / 权限拒绝',
+  region: '地区限制',
+  rate_limit: '限流',
+  network: '网络 / DNS',
+  credential_expired: '凭证过期',
+  disk_full: '磁盘满',
+  refusal: '模型拒答',
+};
+
+// currentHealth is the health verdict on a /api/sessions row (s.health), or
+// null when there is none or it predates the session's last activity: a
+// send since then has moved past it while the next reconcile is due.
+function currentHealth(s) {
+  const h = s && s.health;
+  if (!h || !HEALTH_STATES[h.state]) return null;
+  return s.last_active > h.since ? null : h;
+}
+
+// sessionExit describes why a /api/sessions row s has no process, or null
+// when it has one. A dead session reads its own death_reason (a timeout can
+// leave death_reason on a live session); one that failed before a restart
+// reads ready again, and only its health, which the health machine holds
+// from the journal, still names the death. The title adds what the next
+// send does (startup_failure) and death_detail.
+export function sessionExit(s) {
+  if (!s) return null;
+  let reason = s.death_reason;
+  if (s.state !== 'dead') {
+    const h = s.state === 'ready' && currentHealth(s);
+    if (!h || h.state !== 'failed' || !h.death_reason) return null;
+    reason = h.death_reason;
+  }
   const info = deathReasonInfo(reason);
-  return { crashed: info.crashed, text: info.text, title: info.text + '，' + nextSendText(startup) + (detail ? '\n' + detail : '') };
+  return { crashed: info.crashed, text: info.text, title: info.text + '，' + nextSendText(s.startup_failure) + (s.death_detail ? '\n' + s.death_detail : '') };
+}
+
+// DEATH_EVIDENCE prefixes a health failure's evidence when a process death
+// caused it (health.DeathEvidence); the death reason follows.
+export const DEATH_EVIDENCE = 'death_reason=';
+
+// failureText is a failure's cause as the user reads it: its death reason
+// in words, else its error class; '' when neither names one, which is left
+// unwritten rather than written as "other".
+export function failureText(reason, errClass) {
+  const info = reason ? deathReasonInfo(reason) : null;
+  if (info && !info.raw) return info.text;
+  return Object.hasOwn(HEALTH_ERROR_CLASSES, errClass || '') ? HEALTH_ERROR_CLASSES[errClass] : '';
+}
+
+// sessionFailureText is why /api/sessions row s failed, in words; '' when
+// nothing names it.
+export function sessionFailureText(s) {
+  const h = currentHealth(s);
+  return failureText(s && s.state === 'dead' ? s.death_reason : h && h.death_reason, h && h.error_class);
+}
+
+// sessionHealthState is the state a session's status dot shows: the live
+// process first (a turn running, an abnormal death), then the health
+// verdict; 'new' for a session not spawned yet, else idle.
+export function sessionHealthState(s) {
+  if (!s || s.state === 'new') return 'new';
+  if (s.state === 'running') return 'active';
+  const x = sessionExit(s);
+  if (x && x.crashed) return 'failed';
+  const h = currentHealth(s);
+  return h && h.state !== 'unknown' ? h.state : 'idle';
+}
+
+// HEALTH_DOTS are the status dot classes: failed red, active blue, the
+// states that may need you amber, the rest grey.
+const HEALTH_DOTS = { active: 'dot-running', failed: 'dot-failed', waiting: 'dot-warn', stalled: 'dot-warn', lost: 'dot-warn', new: 'dot-new' };
+
+// sessionDot is a session's status dot: its class and the state in words
+// (with a failure's cause) for the title.
+export function sessionDot(s) {
+  const st = sessionHealthState(s);
+  const x = st === 'failed' ? sessionExit(s) : null;
+  const label = st === 'new' ? '新会话' : HEALTH_STATES[st].label;
+  return { cls: HEALTH_DOTS[st] || 'dot-ready', title: label + (x ? '：' + x.text : '') };
 }
 
 // STARTUP_FAILURE_TEXT names the startup_failure classes an operator must fix.
@@ -262,39 +348,37 @@ function nextSendText(f) {
 
 // deathReasonInfo is DEATH_REASONS' entry for reason, else the wording for a
 // cli_exited reason that carries an exit code (-1: a signal killed the CLI)
-// or a signal name, else an abnormal exit naming the raw value.
+// or a signal name, else an abnormal exit naming the raw value (raw set).
 const { CODE: EXIT_CODE, SIGNAL: EXIT_SIGNAL } = NZ_CONTRACT.DEATH_REASON_PREFIX;
 function deathReasonInfo(reason) {
   if (Object.prototype.hasOwnProperty.call(DEATH_REASONS, reason)) return DEATH_REASONS[reason];
   const r = String(reason || ''), code = r.startsWith(EXIT_CODE) ? r.slice(EXIT_CODE.length) : '';
   if (/^-?\d+$/.test(code)) return { crashed: true, text: code === '-1' ? 'CLI 进程被信号终止' : 'CLI 进程异常退出（退出码 ' + code + '）' };
   if (r.startsWith(EXIT_SIGNAL) && r.length > EXIT_SIGNAL.length) return { crashed: true, text: 'CLI 进程被信号 ' + r.slice(EXIT_SIGNAL.length) + ' 终止' };
-  return { crashed: true, text: reason ? '进程已退出（' + reason + '）' : '进程已退出' };
+  return { crashed: true, raw: true, text: reason ? '进程已退出（' + reason + '）' : '进程已退出' };
 }
 
 // sessionExitChipHtml is the chip sidebar cards and the session header show
-// for a dead session: a warning for an abnormal exit, a muted note for a
-// reclaim. '' when the session is not dead.
-export function sessionExitChipHtml(state, reason, detail, startup) {
-  const x = sessionExit(state, reason, detail, startup);
-  if (!x) return '';
-  const cls = x.crashed ? 'sc-exit sc-exit-crashed' : 'sc-exit sc-exit-reclaimed';
-  const label = x.crashed ? '⚠ 异常退出' : '已回收';
-  return '<span class="' + cls + '" title="' + escAttr(x.title) + '">' + label + '</span>';
+// for a session whose process died abnormally; '' otherwise (a reclaimed
+// process resumes on the next send and is not news).
+export function sessionExitChipHtml(s) {
+  const x = sessionExit(s);
+  if (!x || !x.crashed) return '';
+  return '<span class="sc-exit" title="' + escAttr(x.title) + '">⚠ 异常退出</span>';
 }
 
-// patchCardExitChip brings a rendered session card's exit chip in line with
-// state / reason, for the paths that patch a card in place between renders;
-// it produces the markup sessionCardHtml renders, right after the state text.
-export function patchCardExitChip(card, state, reason, detail, startup) {
-  const meta = card && card.querySelector('.sc-meta');
-  if (!meta) return;
-  const old = meta.querySelector('.sc-exit');
-  if (old) old.remove();
-  const html = sessionExitChipHtml(state, reason, detail, startup);
-  if (!html) return;
-  const stateSpan = meta.querySelectorAll('span')[1]; // [0]=dot, [1]=state text
-  if (stateSpan) stateSpan.insertAdjacentHTML('afterend', html);
+// patchCardHealth brings a rendered session card's status dot and exit chip
+// in line with its row s, for the paths that patch a card in place between
+// renders; it produces the markup sessionCardHtml renders.
+export function patchCardHealth(card, s) {
+  const dot = card && card.querySelector('.sc-meta .sc-dot');
+  if (!dot) return;
+  const d = sessionDot(s);
+  dot.className = 'sc-dot ' + d.cls;
+  dot.title = d.title;
+  dot.parentElement.querySelector('.sc-exit')?.remove();
+  const html = sessionExitChipHtml(s);
+  if (html) dot.insertAdjacentHTML('afterend', html);
 }
 
 // data-nz-bg: the only styling JS computes per element is a node /

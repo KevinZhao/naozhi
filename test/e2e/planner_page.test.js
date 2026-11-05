@@ -81,7 +81,7 @@ test('desktop: badge, 通知 cards, stream, controls, and the workbench folds th
     await expect(cards.nth(0).locator('.pl-card-acts button')).toHaveText(['模板 A', '模板 B']);
     const q = page.locator('.pl-card[data-id="in_q"]');
     await expect(q.locator('.pl-kind')).toHaveText('提问');
-    await expect(q.locator('.pl-wait')).toHaveText('等了 12 分钟');
+    await expect(q.locator('.pl-wait')).toHaveText('12 分钟前');
     await expect(q.locator('.pl-link')).toHaveText('打开');
     await expect(page.locator('#pl-task .tk-card')).toHaveText(/iso 两分钟后提醒你看 hello\.md/);
     await expect(page.locator('#pl-strip-task')).toHaveText('1');

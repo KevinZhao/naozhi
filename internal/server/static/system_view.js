@@ -2,7 +2,7 @@
 // Layering: never import dashboard.js back; setActivityView is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, sessionList, ui } from './state.js';
-import { esc, escAttr, fetchJSON, formatBytes, formatDurationShort, showToast } from './nz_util.js';
+import { DEATH_EVIDENCE, HEALTH_STATES, esc, escAttr, failureText, fetchJSON, formatBytes, formatDurationShort, showToast } from './nz_util.js';
 import { discoveredKey, getNodeDisplayName, sid } from './session_ident.js';
 import { wireQuickAskInput } from './auth_modal.js';
 import { shell } from './shell.js';
@@ -164,30 +164,9 @@ function daemonCostHtml(name) {
   return '<span class="sys-cost" title="' + escAttr(costCardTitle(c, '仅 ' + name)) + '">近 30 天花费 <b>' + esc(formatHomeCost(c.usd)) + '</b></span>';
 }
 
-// HEALTH_STATES maps a health state (monitor/health, wire-stable) to its
-// label and colour class, in the server's order: abnormal first.
-export const HEALTH_STATES = {
-  failed: { label: '失败', cls: 'fail' },
-  lost: { label: '失联', cls: 'warn' },
-  stalled: { label: '停滞', cls: 'warn' },
-  waiting: { label: '待你回复', cls: 'ask' },
-  unknown: { label: '未知', cls: 'off' },
-  active: { label: '活跃', cls: 'run' },
-  idle: { label: '空闲', cls: 'idle' },
-};
-// HEALTH_ERROR_CLASSES labels health.Classify's error classes (§15.1).
-export const HEALTH_ERROR_CLASSES = {
-  auth: '凭证 / 权限拒绝',
-  region: '地区限制',
-  rate_limit: '限流',
-  network: '网络 / DNS',
-  credential_expired: '凭证过期',
-  disk_full: '磁盘满',
-  refusal: '模型拒答',
-  other: '其他',
-};
 // HEALTH_KIND_TAGS tags the units that are not plain local sessions.
 const HEALTH_KIND_TAGS = { cron: '定时', sysession: '系统', external: '终端', remote: '远程' };
+const GATEWAY_OWNED = /^(planner|sys|scout):/;
 
 // healthTarget resolves a unit to the session the row opens, or null when
 // the dashboard has nothing to open for it (a cron job between runs, a
@@ -216,6 +195,7 @@ function healthUnitName(u, target) {
   if (u.id === 'planner:main') return 'Planner';
   if (u.id === 'sys:scout') return '巡检';
   if (target && target.title) return target.title;
+  if (u.name) return u.name;
   if (u.kind === 'remote') return u.id.slice(u.id.indexOf('/') + 1);
   if (u.kind === 'sysession') return u.id.replace(/^sys:/, '');
   if (u.kind === 'cron') return u.id.replace(/^cron:/, '');
@@ -234,13 +214,16 @@ function healthRowHtml(u) {
     : '<span class="hl-name" title="' + escAttr(u.id) + '">' + esc(name) + '</span>') +
     (tag ? '<span class="hl-tag">' + esc(tag) + '</span>' : '');
   const since = Date.parse(u.since);
-  const stTitle = [u.evidence || '', !isNaN(since) ? '始于 ' + formatAbsTime(since) : ''].filter(Boolean).join(' · ');
+  const cause = failureText(u.evidence?.startsWith(DEATH_EVIDENCE) ? u.evidence.slice(DEATH_EVIDENCE.length) : '', u.error_class);
+  const stTitle = [cause, u.evidence || '', !isNaN(since) ? '始于 ' + formatAbsTime(since) : ''].filter(Boolean).join(' · ');
   const last = u.last_active ? Date.parse(u.last_active) : NaN;
   const lastHtml = !isNaN(last)
     ? '<span title="' + escAttr(formatAbsTime(last)) + '">' + esc(timeAgo(last)) + '</span>'
     : '—';
-  const errHtml = u.error_class ? esc(HEALTH_ERROR_CLASSES[u.error_class] || u.error_class) : '—';
-  const ws = u.workspace ? esc(u.workspace_name || u.workspace) : '<span class="hl-dim">无人负责</span>';
+  // naozhi's own units (the Planner, the daemons, the scout) belong to no
+  // workspace and are not counted unowned (health.gatewayOwned).
+  const ws = u.workspace ? esc(u.workspace_name || u.workspace)
+    : GATEWAY_OWNED.test(u.id) ? '—' : '<span class="hl-dim">无人负责</span>';
   // On a phone the workspace folds under the name (.hl-sub) instead of
   // taking a column.
   return '<tr data-unit="' + escAttr(u.id) + '">' +
@@ -248,7 +231,6 @@ function healthRowHtml(u) {
       '<td class="hl-col-ws">' + ws + '</td>' +
       '<td><span class="hl-state ' + st.cls + '"' + (stTitle ? ' title="' + escAttr(stTitle) + '"' : '') + '>' + esc(st.label) + '</span></td>' +
       '<td class="hl-num">' + lastHtml + '</td>' +
-      '<td>' + errHtml + '</td>' +
     '</tr>';
 }
 
@@ -264,10 +246,10 @@ function renderSystemHealthHtml() {
   );
   chips.push('<span class="hl-count" data-count="unowned">无人负责 <b>' + (systemHealth.unowned || 0) + '</b></span>');
   const at = systemHealth.at ? Date.parse(systemHealth.at) : NaN;
-  const atHtml = !isNaN(at) ? '<span class="hl-at" title="' + escAttr(formatAbsTime(at)) + '">对账于 ' + esc(timeAgo(at)) + '</span>' : '';
+  const atHtml = !isNaN(at) ? '<span class="hl-at" title="' + escAttr(formatAbsTime(at)) + '">更新于 ' + esc(timeAgo(at)) + '</span>' : '';
   const table = units.length
     ? '<div class="hl-scroll"><table class="hl-table">' +
-        '<thead><tr><th>会话</th><th class="hl-col-ws">工作区</th><th>健康状态</th><th>最后活动</th><th>错误类别</th></tr></thead>' +
+        '<thead><tr><th>会话</th><th class="hl-col-ws">工作区</th><th>健康状态</th><th>最后活动</th></tr></thead>' +
         '<tbody>' + units.map(healthRowHtml).join('') + '</tbody>' +
       '</table></div>'
     : '<div class="system-empty">' + (isNaN(at) ? '健康状态机尚未完成首次对账。' : '暂无会话。') + '</div>';
@@ -341,8 +323,11 @@ function renderSystemView() {
         warnBlock +
       '</div>';
   }).join('');
-  const body = cards ||
-    '<div class="system-empty">暂无系统任务。<br>内置后台守护（如自动化改名）需在配置中启用 <code>sysession</code> 后重启生效。</div>';
+  // Without sysession there are no daemons: neither they nor their
+  // introduction take room above the health table.
+  const daemonsHtml = cards
+    ? '<div class="system-intro">naozhi 内置的后台守护进程。它们由系统自动调度，只读展示运行状态，配置通过 YAML 调整后重启生效。</div>' + cards
+    : '';
   // The poll repaints every 5s: keep the reader where they scrolled to.
   const prevBody = root.querySelector('.system-body');
   const prevTable = root.querySelector('.hl-scroll');
@@ -352,8 +337,7 @@ function renderSystemView() {
     '<div class="system-head"><h1>系统任务</h1></div>' +
     '<div class="system-body">' +
       renderServiceOverviewHtml() +
-      '<div class="system-intro">naozhi 内置的后台守护进程。它们由系统自动调度，只读展示运行状态，配置通过 YAML 调整后重启生效。</div>' +
-      body +
+      daemonsHtml +
       renderSystemHealthHtml() +
     '</div>';
   const nextBody = root.querySelector('.system-body');

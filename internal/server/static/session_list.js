@@ -6,7 +6,7 @@ import { lsGet } from './platform.js';
 import { sessionStream } from './session_stream.js';
 import { WS_STATES, wsm } from './ws_manager.js';
 import { perSession, selection, serverInfo, sessionList, timers, transcript } from './state.js';
-import { esc, escAttr, fetchJSON, patchCardExitChip, reconcileChildren, sessionExitChipHtml } from './nz_util.js';
+import { esc, escAttr, fetchJSON, patchCardHealth, reconcileChildren, sessionDot, sessionExitChipHtml } from './nz_util.js';
 import { setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderPRChip, setHeaderSpawnDiagChip } from './session_header.js';
 import { deselectNodeSession, reconcileSelectedNode } from './system_view.js';
 import { turnState, updateSendButton } from './running_banner.js';
@@ -94,12 +94,17 @@ async function fetchSessionsPayload() {
 // never advance it: over a live socket session_state covers them, but under
 // WS-fallback polling REST is the only state source, so the short-circuit
 // applies only while connected; idempotent renderSidebar runs every 5 s.
+// Health verdicts (the status dot) arrive only by poll, so they are compared
+// too.
+let lastHealthSig = '';
 function sessionsUnchanged(data, wsConnected) {
   const version = (data.stats && data.stats.version) || 0;
   const nodesHash = JSON.stringify(data.nodes || {});
-  if (wsConnected && version === sessionList.lastVersion && version > 0 && nodesHash === sessionList.lastNodesJSON) return true;
+  const healthSig = (data.sessions || []).map(s => s.health ? s.key + '\t' + s.health.state + '\t' + s.health.since : '').join('\n');
+  if (wsConnected && version === sessionList.lastVersion && version > 0 && nodesHash === sessionList.lastNodesJSON && healthSig === lastHealthSig) return true;
   sessionList.lastVersion = version;
   sessionList.lastNodesJSON = nodesHash;
+  lastHealthSig = healthSig;
   return false;
 }
 
@@ -580,11 +585,9 @@ function sessionCardHtml(s) {
   const prompt = s.user_label || s.summary || s.last_prompt || (isNew ? '新会话' : '未命名');
   const icon = cliIcon(s.cli_name || 'cli');
 
-  // Line 2: status dot + meta. Dead sessions are presented as "ready" to
-  // operators — the underlying state is retained in sessionsData for the
-  // resubscribe logic in onSessionState.
-  const displayState = s.state === 'dead' ? 'ready' : s.state;
-  const dotCls = displayState === 'running' ? 'dot-running' : (displayState === 'ready' ? 'dot-ready' : 'dot-new');
+  // Line 2: status dot + meta. The dot is the session's health (sessionDot),
+  // its state in words only in the title.
+  const dot = sessionDot(s);
   const ago = s.last_active ? timeAgo(s.last_active) : '';
   const absTime = s.last_active ? formatAbsTime(s.last_active) : '';
   // Chat-style unread chip: rendered only when the session has completed
@@ -620,8 +623,7 @@ function sessionCardHtml(s) {
   const accessProfileChip = accessProfileChipHtml(s.access_profile);
   // The cli icon rides inside the meta line at 18px so the title owns line 1.
   const metaHtml = icon +
-    '<span class="sc-dot ' + dotCls + '"></span>' +
-    '<span>' + esc(displayState) + '</span>' + sessionExitChipHtml(s.state, s.death_reason, s.death_detail, s.startup_failure) +
+    '<span class="sc-dot ' + dot.cls + '" title="' + escAttr(dot.title) + '"></span>' + sessionExitChipHtml(s) +
     nodeBadge +
     originBadge +
     accessProfileChip +
@@ -641,7 +643,7 @@ function sessionCardHtml(s) {
     ? '<div class="sc-response" title="' + escAttr(responseRaw) + '">' + esc(responseTrunc) + '</div>'
     : '';
 
-  return '<div class="' + cls + '" role="listitem" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" tabindex="0" aria-label="' + escAttr(prompt + ' · ' + displayState) + '" data-action="session-select" data-action-keydown="session-card-key">' +
+  return '<div class="' + cls + '" role="listitem" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" tabindex="0" aria-label="' + escAttr(prompt + ' · ' + dot.title) + '" data-action="session-select" data-action-keydown="session-card-key">' +
     dismissBtn +
     '<div class="sc-body">' +
       '<div class="sc-header">' +
@@ -941,32 +943,15 @@ function settleTurnBoundary(msg, msgNode, sKey, prevState) {
   if (turnCompleted) invalidateGitState(msg.key, msgNode);
 }
 
-// paintSessionCardState patches the session's sidebar card in place: badge,
-// dot, state text, exit chip and unread chip.
+// paintSessionCardState patches the session's sidebar card in place: dot,
+// exit chip and unread chip.
 function paintSessionCardState(msg, msgNode, sKey) {
   let card = null;
   document.querySelectorAll('.session-card').forEach(c => {
     if (c.dataset.key === msg.key && (c.dataset.node || 'local') === msgNode) card = c;
   });
   if (!card) return;
-  // Surface dead sessions as "ready" in the UI — the backend state is
-  // retained on sessionsData so the resubscribe logic below still fires
-  // when a dead→running transition occurs.
-  const displayState = msg.state === 'dead' ? 'ready' : msg.state;
-  const badge = card.querySelector('.badge');
-  if (badge) { badge.className = 'badge ' + displayState; badge.textContent = displayState; }
-  // Sidebar cards carry .sc-dot (dot-running/dot-ready/dot-new) and the state
-  // text, not .badge; patch both so the card follows the push immediately.
-  const dot = card.querySelector('.sc-dot');
-  if (dot) {
-    dot.className = 'sc-dot ' + (displayState === 'running' ? 'dot-running' : (displayState === 'ready' ? 'dot-ready' : 'dot-new'));
-  }
-  const meta = card.querySelector('.sc-meta');
-  if (meta) {
-    const stateSpan = meta.querySelectorAll('span')[1]; // [0]=dot, [1]=state text
-    if (stateSpan && !stateSpan.classList.contains('sc-node')) stateSpan.textContent = displayState;
-  }
-  patchCardExitChip(card, msg.state, msg.reason);
+  patchCardHealth(card, sessionList.sessionsData[sKey] || { state: msg.state, death_reason: msg.reason });
   // Sync the unread chip in place. fetchSessions re-renders from template
   // and reads sessionUnread directly; this path keeps the bubble fresh
   // between polls (WS state arrives faster than the sessions poll tick).
@@ -1112,12 +1097,12 @@ export function updateMainState(state) {
 }
 
 // refreshHeaderExitChip repaints only the header's exit chip, from the
-// session's own death_reason, death_detail and startup_failure: the reason a
+// session's own death_reason, death_detail, startup_failure and health: the reason a
 // caller has in hand may be a subscription status ('suspended'), not a death.
 export function refreshHeaderExitChip(state) {
   const exitEl = document.getElementById('header-exit');
   if (!exitEl) return;
   const sd = sessionList.sessionsData[sid(selection.key, selection.node)];
-  const html = sessionExitChipHtml(state, sd ? sd.death_reason : '', sd ? sd.death_detail : '', sd ? sd.startup_failure : null);
+  const html = sessionExitChipHtml(Object.assign({}, sd, { state }));
   if (exitEl.innerHTML !== html) exitEl.innerHTML = html;
 }

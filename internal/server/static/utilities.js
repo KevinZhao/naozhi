@@ -3,7 +3,7 @@
 // without forming a cycle. Shared state is read from the state.js objects.
 import { NZ_CONTRACT } from './contract.js';
 import { composer, perSession, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
-import { esc, escAttr, showToast, trapFocus, sessionExitChipHtml } from './nz_util.js';
+import { esc, escAttr, showToast, trapFocus, sessionDot, sessionExitChipHtml } from './nz_util.js';
 import { wsm } from './ws_manager.js';
 import { lsSet } from './platform.js';
 import { sid } from './session_ident.js';
@@ -92,7 +92,7 @@ function formatHomeCost(cost) {
 // the snapshot is missing entirely — caller suppresses the strip.
 //
 // Line shape:
-//   Line 1: running/ready/total counts + uptime (always when stats present)
+//   Line 1: uptime (the session counts are the 全会话健康 table's)
 //   Line 2: CLI name + version (when defaultCLIName is set)
 //   Line 3 (gated): watchdog kills — only when > 0; signals prod trouble
 //
@@ -103,13 +103,8 @@ function formatHomeCost(cost) {
 function buildHomeHealthLines(stats) {
   if (!stats || typeof stats !== 'object') return [];
   const lines = [];
-  // Line 1: session breakdown + uptime.
   const running = typeof stats.running === 'number' ? stats.running : 0;
-  const ready = typeof stats.ready === 'number' ? stats.ready : 0;
-  const total = typeof stats.total === 'number' ? stats.total : 0;
-  let line1 = '运行中 ' + running + ' · 就绪 ' + ready + ' · 总 ' + total;
-  if (stats.uptime) line1 += ' · 已运行 ' + stats.uptime;
-  lines.push({ text: line1, kind: 'info' });
+  if (stats.uptime) lines.push({ text: '已运行 ' + stats.uptime, kind: 'info' });
   // claude 子进程容量: live vs max_procs from the /api/sessions stats block.
   // Only when max_procs > 0
   // (a 0/missing cap means "uncapped" — no ratio to show). Warn when the
@@ -183,15 +178,14 @@ function renderRecentSessionsPanel() {
   const rows = top.map(s => {
     const sNode = s.node || 'local';
     const label = s.user_label || s.summary || s.last_prompt || '未命名';
-    const state = s.state === 'dead' ? 'ready' : (s.state || 'ready');
-    const dotCls = state === 'running' ? 'dot-running' : (state === 'ready' ? 'dot-ready' : 'dot-new');
+    const dot = sessionDot(s);
     const ago = s.last_active ? timeAgo(s.last_active) : '';
     return '<button type="button" class="recent-row" ' +
       'data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" ' +
       'data-action="session-select">' +
-      '<span class="recent-dot ' + dotCls + '" aria-hidden="true"></span>' +
+      '<span class="recent-dot ' + dot.cls + '" title="' + escAttr(dot.title) + '"></span>' +
       '<span class="recent-label" title="' + escAttr(label) + '">' + esc(label) + '</span>' +
-      sessionExitChipHtml(s.state, s.death_reason, s.death_detail, s.startup_failure) +
+      sessionExitChipHtml(s) +
       (ago ? '<span class="recent-time">' + esc(ago) + '</span>' : '') +
       '</button>';
   }).join('');
@@ -656,16 +650,15 @@ function stopSidebarTimeTick() {
   if (sidebarTimeTimer) { clearInterval(sidebarTimeTimer); sidebarTimeTimer = null; }
 }
 
-function timeAgo(ms, future) {
+// timeAgo is the one relative-time wording: \u521a\u521a / N \u5206\u949f\u524d / N \u5c0f\u65f6\u524d / N \u5929\u524d.
+function timeAgo(ms) {
   if (!ms) return '\u2014';
-  const d = future ? ms - Date.now() : Date.now() - ms;
-  if (d < 0) return future ? 'now' : 'just now';
-  const suffix = future ? '' : ' ago';
-  if (d < 5000) return future ? 'now' : 'just now';
-  if (d < 60000) return Math.floor(d/1000) + 's' + suffix;
-  if (d < 3600000) return Math.floor(d/60000) + 'm' + suffix;
-  if (d < 86400000) return Math.floor(d/3600000) + 'h' + suffix;
-  return Math.floor(d/86400000) + 'd' + suffix;
+  const m = Math.floor((Date.now() - ms) / 60000);
+  if (m < 1) return '\u521a\u521a';
+  if (m < 60) return m + ' \u5206\u949f\u524d';
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + ' \u5c0f\u65f6\u524d';
+  return Math.floor(h / 24) + ' \u5929\u524d';
 }
 
 // formatAbsTime renders an epoch-ms timestamp in local time as
@@ -1021,6 +1014,15 @@ function formatTimeFull(ms) {
     pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
 }
 
+// formatMonthDayTime is a point in time as the Planner page writes one:
+// MM-DD HH:mm, local.
+function formatMonthDayTime(ms) {
+  const d = new Date(ms);
+  if (!ms || isNaN(d.getTime())) return '';
+  const pad = n => String(n).padStart(2, '0');
+  return pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+
 function timeDividerHtml(ms) {
   return '<div class="event-time-divider" data-time="' + (ms || 0) + '">' + esc(formatTimeShort(ms)) + '</div>';
 }
@@ -1328,6 +1330,7 @@ export {
   fetchCostSummary,
   formatAbsTime,
   formatHomeCost,
+  formatMonthDayTime,
   formatTimeFull,
   formatTimeShort,
   historyDayLabel,

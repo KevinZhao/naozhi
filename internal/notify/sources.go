@@ -302,9 +302,11 @@ func (n *Notifier) HandleHealth(ev health.Event) {
 		if ev.Transition.InFault {
 			return
 		}
-		why := "失败"
-		if u.ErrClass != health.ErrNone {
-			why += " · " + ClassLabel(u.ErrClass)
+		// The title already says it failed; the why names the class only
+		// when there is one to name (the dashboard adds the death reason).
+		why := ""
+		if u.ErrClass != health.ErrNone && u.ErrClass != health.ErrOther {
+			why = ClassLabel(u.ErrClass)
 		}
 		n.Add(Item{Kind: KindError, Level: LevelTimely, Unit: u.ID, WS: u.Workspace, Source: "failed:" + u.ID,
 			Title: n.name(u.ID) + " 失败", Why: why})
