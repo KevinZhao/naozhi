@@ -39,6 +39,9 @@ func TestBriefDue(t *testing.T) {
 		// Office hours or a broadcast: nothing to prepare, no brief.
 		{"nothing to prepare", at(2, 9, 50), []Event{{ID: "m9", Start: at(2, 10, 0), End: at(2, 11, 0), Organizer: "bob@x", Attendees: []string{"me"}}}, nil, ""},
 		{"already briefed", at(2, 9, 50), []Event{ten}, []briefed{{ID: "m1", Start: at(2, 10, 0)}}, ""},
+		// A later run copied the meeting's ID differently.
+		{"briefed under another ID", at(2, 10, 1), []Event{meeting("AAMkADAwATM3ZmYAZS1kNg==", at(2, 10, 5), "bob@x")},
+			[]briefed{{ID: "AAMkADAwATM3ZmYAZS1k+Ng==", Start: at(2, 10, 5)}}, ""},
 		{"moved after its brief", at(2, 13, 50), []Event{meeting("m1", at(2, 14, 0), "bob@x")}, []briefed{{ID: "m1", Start: at(2, 10, 0)}}, "m1"},
 		{"the first with others", at(2, 9, 50), []Event{meeting("m2", at(2, 10, 0)), ten}, nil, "m1"},
 		{"quiet hours", at(2, 7, 50), []Event{meeting("m5", at(2, 8, 0), "bob@x")}, nil, ""},
@@ -74,14 +77,14 @@ func TestBriefRun(t *testing.T) {
 	}
 	reply := `{"why":"定预算","last":"","waiting":"等你的数字","prepare":"带上表",` +
 		`"related":[{"source":"email","id":"e1","title":"iso 预算草稿","from":"a","at":"","link":"","note":"上周发的"}]}`
-	var prompts, blocks []string
+	var prompts, blocks, tools []string
 	on := false
 	s := New(Config{
 		Layout:    datadir.FromRoot(root),
 		MCPConfig: mcp,
 		Session: func(_ context.Context, _ string, _ sessionview.AgentOpts, text string) (string, []string, error) {
 			prompts = append(prompts, text)
-			return reply, nil, nil
+			return reply, tools, nil
 		},
 		Brief:     func(b string) error { blocks = append(blocks, b); return nil },
 		PlannerOn: func() bool { return on },
@@ -112,7 +115,7 @@ func TestBriefRun(t *testing.T) {
 	}
 
 	// A reply that does not parse fails the brief, still only once.
-	cal[0].ID = "m2"
+	cal[0].ID, cal[0].Start = "m2", now.Add(10*time.Minute)
 	if _, err := st.saveCalendar(&cal, now); err != nil {
 		t.Fatal(err)
 	}
@@ -122,5 +125,18 @@ func TestBriefRun(t *testing.T) {
 	b := st.briefed()
 	if len(prompts) != 2 || len(blocks) != 1 || len(b) != 2 || b[1].State != StateFailed || !strings.Contains(b[1].Error, "unknown field") {
 		t.Errorf("sessions %d, blocks %d, briefed %+v", len(prompts), len(blocks), b)
+	}
+
+	// A session that read mail with markAs fails the brief and wakes no one.
+	cal[0].ID, cal[0].Start = "m3", now.Add(5*time.Minute)
+	if _, err := st.saveCalendar(&cal, now); err != nil {
+		t.Fatal(err)
+	}
+	reply = `{"why":"定预算","last":"","waiting":"","prepare":"","related":[]}`
+	tools = []string{"mcp__aws-outlook-mcp__email_read" + MarkAsSuffix}
+	check()
+	b = st.briefed()
+	if len(prompts) != 3 || len(blocks) != 1 || len(b) != 3 || b[2].State != StateFailed || !strings.Contains(b[2].Error, "markAs") {
+		t.Errorf("markAs: sessions %d, blocks %d, briefed %+v", len(prompts), len(blocks), b)
 	}
 }

@@ -49,6 +49,10 @@ type EventEntry struct {
 	// call runs, so it may still fail. The journal holds the activities that
 	// happened, the turn-end scan's outputs and result-linked PRs included.
 	Activity string `json:"activity,omitempty"`
+	// MarkAs is an email_read call that passed markAs, which can flip a
+	// message's read state; judged from the whole input, as Detail keeps
+	// only its head.
+	MarkAs bool `json:"mark_as,omitempty"`
 	// Peer and PeerMode are the sender of a peer_message (its --name and
 	// permission mode) and Peer the sender of a peer_hold. PeerKey is the
 	// naozhi session key that name belonged to when the message arrived

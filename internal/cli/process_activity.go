@@ -262,6 +262,12 @@ func tagToolEntry(entry *clievent.EventEntry, b clievent.ContentBlock, root stri
 		}
 	}
 	entry.Activity = strings.Join(types, ",")
+	if strings.HasSuffix(b.Name, "email_read") {
+		var in struct {
+			MarkAs json.RawMessage `json:"markAs"`
+		}
+		entry.MarkAs = json.Unmarshal(b.Input, &in) == nil && len(in.MarkAs) > 0 && string(in.MarkAs) != "null"
+	}
 }
 
 // parseToolResultPRs returns the PR URLs each tool_result block of a user
