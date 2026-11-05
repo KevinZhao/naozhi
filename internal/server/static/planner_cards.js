@@ -239,10 +239,15 @@ export function decorateEvents(root) {
   });
 }
 
+// emptyBracketRE is a bracket the folded keys emptied: "（`a` 和 `b`）".
+const emptyBracketRE = /\s*[（(]\s*(?:[和与及、，,；;]\s*)*[）)]/g;
+
 // foldKeys drops from a reply the backticked keys it names sessions by
 // after their names (§6.4): the cards under it carry them, and the user
-// reads names, not keys. A key with no text before it stands for the name.
+// reads names, not keys. A key with no text before it stands for the name;
+// a bracket of keys alone goes with them.
 function foldKeys(ev, keys) {
+  const emptied = new Set();
   ev.querySelectorAll('.event-content code').forEach((code) => {
     const key = code.textContent.trim();
     if (code.closest('pre, .pl-scards') || !keys.has(key)) return;
@@ -260,6 +265,13 @@ function foldKeys(ev, keys) {
     // The separator before a key that closes a bracket or the line has
     // nothing left to separate: "（名字 work，`key`）" reads "（名字 work）".
     if (!next || next.nodeType === Node.TEXT_NODE && /^\s*[）)]/.test(next.data)) prev.data = prev.data.replace(/[，,、；;]$/, '');
+    emptied.add(code.parentNode);
     code.remove();
+  });
+  emptied.forEach((parent) => {
+    parent.normalize();
+    parent.childNodes.forEach((n) => {
+      if (n.nodeType === Node.TEXT_NODE) n.data = n.data.replace(emptyBracketRE, '');
+    });
   });
 }
