@@ -16,20 +16,24 @@
 // #main [data-inbox-item="<id>"] (notify.js, §15.3 ④).
 import { NZ_CONTRACT } from './contract.js';
 import { selection } from './state.js';
-import { esc, escAttr, fetchJSON, nzBus, nzViews, registerActions } from './nz_util.js';
+import { HEALTH_STATES, esc, escAttr, evidenceCause, evidenceText, fetchJSON, nzBus, nzViews } from './nz_util.js';
 import { wsm } from './ws_manager.js';
-import { shell } from './shell.js';
-import { inbox } from './notify.js';
-import { HEALTH_ERROR_CLASSES, HEALTH_STATES } from './system_view.js';
 import { formatTimeFull, formatTimeShort } from './utilities.js';
 
 // REPORT_REFETCH_MS: a turn's report reaches the Planner after the turn
 // ends, and reports are not pushed, so the list is fetched again this long
 // after a result.
 const REPORT_REFETCH_MS = 3000;
+// PAIR_MS: a health transition and the 通知 item it opened are journaled in
+// one reconcile; within this of each other they are one event, one note.
+const PAIR_MS = 2 * 60000;
 
 const ITEM_KINDS = { decision: '待你决定', question: '提问', error: '错误', notice: '' };
 const BAD = new Set(['waiting', 'stalled', 'failed']);
+// ITEM_STATE is the health state whose entry opens an item of a kind
+// (notify.HandleHealth); only those pair. The waiting and stalled items open
+// minutes after their transition, so they stay notes of their own.
+const ITEM_STATE = { error: 'failed' };
 
 const notes = {
   key: '', // the session the list is for
@@ -42,15 +46,21 @@ const notes = {
 
 const stateLabel = (s) => (HEALTH_STATES[s] || {}).label || s;
 
-// noteBody is a note's icon, tone and text.
-function noteBody(n) {
+// healthBody is a health note's icon, tone and text: the state entered and
+// its cause, or the recovery.
+function healthBody(n) {
+  if (!BAD.has(n.to)) return { icon: '✓', tone: 'ok', text: '已从「' + stateLabel(n.from) + '」恢复' };
+  const cause = evidenceCause(n.evidence, n.error_class);
+  return { icon: n.to === 'waiting' ? '?' : '⚠', tone: n.to === 'failed' ? 'bad' : 'warn', text: '进入「' + stateLabel(n.to) + '」' + (cause ? '：' + cause : '') };
+}
+
+// noteBody is a note's icon, tone and text; an item's open note that pairs
+// with the health note of the same event reads as that health note.
+function noteBody(n, paired) {
   switch (n.kind) {
-    case 'health': {
-      if (!BAD.has(n.to)) return { icon: '✓', tone: 'ok', text: '已从「' + stateLabel(n.from) + '」恢复' };
-      const cls = HEALTH_ERROR_CLASSES[n.error_class];
-      return { icon: n.to === 'waiting' ? '?' : '⚠', tone: n.to === 'failed' ? 'bad' : 'warn', text: '进入「' + stateLabel(n.to) + '」' + (cls ? '（' + cls + '）' : '') };
-    }
+    case 'health': return healthBody(n);
     case 'inbox': {
+      if (paired) return healthBody(paired);
       // The title is gone once the inbox no longer keeps the item.
       if (n.event === 'open') return { icon: '◆', tone: 'inbox', text: ['通知', ITEM_KINDS[n.item_kind] ?? '一条', n.title].filter(Boolean).join(' · ') };
       return { icon: '◇', tone: 'ok', text: ['通知 · 已关闭' + (n.closed_by === 'auto' ? '（条件已消失）' : ''), n.title].filter(Boolean).join(' · ') };
@@ -61,23 +71,38 @@ function noteBody(n) {
   return null;
 }
 
-// closedItems are the items a close note in the list shows closed: an open
-// note pushed before its close keeps no stale link.
-function closedItems() {
-  return new Set(notes.list.filter((n) => n.kind === 'inbox' && n.event === 'close').map((n) => n.item));
+// pairs matches each item's open note with the health note of the same
+// event (the health machine opens the item as it journals the transition):
+// skip holds the health notes not shown on their own, paired maps an open
+// note to its health note.
+function pairs() {
+  const skip = new Set(), paired = new Map();
+  for (const n of notes.list) {
+    const to = n.kind === 'inbox' && n.event === 'open' && ITEM_STATE[n.item_kind];
+    if (!to) continue;
+    let h = null;
+    for (const x of notes.list) {
+      if (x.kind !== 'health' || x.to !== to || skip.has(x.id) || Math.abs(x.ms - n.ms) > PAIR_MS) continue;
+      if (!h || Math.abs(x.ms - n.ms) < Math.abs(h.ms - n.ms)) h = x;
+    }
+    if (h) { skip.add(h.id); paired.set(n.id, h); }
+  }
+  return { skip, paired };
 }
 
-function noteHtml(n, closed) {
-  const b = noteBody(n);
+// noteHtml is a note's element. It links nowhere: the note sits in the very
+// session its item is about, which the item's card on the Planner page only
+// opens again. data-inbox-item keeps a notification's deep link landing here.
+function noteHtml(n, paired) {
+  const b = noteBody(n, paired);
   if (!b) return '';
-  const link = n.kind === 'inbox' && n.event === 'open' && n.open && !closed.has(n.item)
-    ? ' <button type="button" class="gw-note-link" data-action="session-note-item" data-id="' + escAttr(n.item) + '">查看</button>'
-    : '';
+  const h = paired || n;
+  const ev = evidenceText(h.evidence, h.error_class);
   return '<div class="gw-note gw-' + b.tone + '" role="note" data-note-id="' + escAttr(n.id) + '" data-note-time="' + n.ms + '"' +
-    (n.item ? ' data-inbox-item="' + escAttr(n.item) + '"' : '') +
-    ' title="' + escAttr(formatTimeFull(n.ms) + (n.evidence ? ' · ' + n.evidence : '')) + '">' +
+    (n.item ? ' data-inbox-item="' + escAttr(n.item) + '"' : '') + (paired ? ' data-paired="1"' : '') +
+    ' title="' + escAttr(formatTimeFull(n.ms) + (ev ? ' · ' + ev : '')) + '">' +
     '<span class="gw-note-icon" aria-hidden="true">' + esc(b.icon) + '</span>' +
-    '<span class="gw-note-text">' + esc(b.text) + '</span>' + link +
+    '<span class="gw-note-text">' + esc(b.text) + '</span>' +
     '<span class="gw-note-time">' + esc(formatTimeShort(n.ms)) + '</span></div>';
 }
 
@@ -91,15 +116,22 @@ function placeNotes() {
   if (!el || !el.isConnected || notes.key !== selection.key || !notes.list.length) return;
   // An agent drill-in owns the pane.
   if (nzViews.agent?.activeTaskID()) return;
+  const { skip, paired } = pairs();
+  // A pair can complete after either half was placed (the open note follows
+  // its health note by a frame): drop the health note, and an open note
+  // placed unpaired, which is placed again below as the pair.
+  for (const node of el.querySelectorAll(':scope > .gw-note')) {
+    const id = node.dataset.noteId;
+    if (skip.has(id) || (paired.has(id) && !node.dataset.paired)) node.remove();
+  }
   const shown = new Set([...el.querySelectorAll(':scope > .gw-note')].map((n) => n.dataset.noteId));
   const bubbles = [...el.querySelectorAll(':scope > .event[data-time]')];
   const first = bubbles.length ? Number(bubbles[0].dataset.time) : 0;
   const btn = document.getElementById('earlier-events-btn');
   const more = !!btn && el.contains(btn) && btn.dataset.state !== 'done';
-  const closed = closedItems();
   for (const n of notes.list) {
-    if (shown.has(n.id) || (more && (!first || n.ms < first))) continue;
-    const html = noteHtml(n, closed);
+    if (skip.has(n.id) || shown.has(n.id) || (more && (!first || n.ms < first))) continue;
+    const html = noteHtml(n, paired.get(n.id));
     if (!html) continue;
     let ref = bubbles.find((b) => Number(b.dataset.time) > n.ms) || null;
     // Step back over the divider heading that bubble and the notes after n.
@@ -112,12 +144,6 @@ function placeNotes() {
     else el.insertAdjacentHTML('beforeend', html);
     shown.add(n.id);
   }
-}
-
-// relink drops the 查看 link of the notes whose item a close note closed.
-function relink() {
-  const closed = closedItems();
-  notes.el?.querySelectorAll('.gw-note-link').forEach((a) => { if (closed.has(a.dataset.id)) a.remove(); });
 }
 
 function addNotes(list) {
@@ -140,7 +166,6 @@ async function fetchNotes() {
     addNotes(Array.isArray(res?.notes) ? res.notes : []);
   } catch { return; }
   placeNotes();
-  relink();
 }
 
 // startSessionNotes follows the session view's freshly built #events-scroll
@@ -167,7 +192,6 @@ wsm.on(NZ_CONTRACT.WS.session_note, (msg) => {
   const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
   addNotes([msg.note]);
   placeNotes();
-  relink();
   if (wasBottom) el.scrollTop = el.scrollHeight;
 });
 
@@ -181,15 +205,4 @@ nzBus.addEventListener('session:event', (e) => {
   if (e.detail?.ev?.type !== 'result' || !notes.key || notes.key !== selection.key) return;
   clearTimeout(notes.refetch);
   notes.refetch = setTimeout(fetchNotes, REPORT_REFETCH_MS);
-});
-
-// 查看 opens the Planner page on the item through the hand-off a
-// notification without a session takes (§15.3 ④): inbox.focus names the
-// item, 'inbox:focus' tells a list already painted.
-registerActions({
-  'session-note-item': (el) => {
-    inbox.focus = el.dataset.id || '';
-    shell.setActivityView('planner');
-    nzBus.dispatchEvent(new CustomEvent('inbox:focus'));
-  },
 });

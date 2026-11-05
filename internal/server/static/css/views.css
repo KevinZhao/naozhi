@@ -99,6 +99,8 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    the daemon cards: 活跃 uses --nz-accent like .sys-state-dot.running, and
    待你回复 shares 失败's red because both need the user. */
 .sys-health{margin-top:var(--nz-space-5);padding-top:var(--nz-space-4);border-top:1px solid var(--nz-border)}
+/* Without daemons the overview's own bottom rule already separates it. */
+.svc-overview + .sys-health{margin-top:0;border-top:0}
 .hl-head{display:flex;align-items:baseline;gap:10px}
 .hl-head .svc-overview-title{flex:1}
 .hl-at{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);font-variant-numeric:tabular-nums}
@@ -135,23 +137,21 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .tk-list{display:flex;flex-direction:column;gap:6px}
 .tk-card{padding:8px 10px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-0);font-size:var(--nz-fs-sm2);color:var(--nz-text)}
 .tk-card.done{opacity:.7}
-.tk-top{display:flex;align-items:center;gap:8px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
-.tk-state{font-weight:600}
-.tk-s-doing .tk-state{color:var(--nz-accent)}
-.tk-s-waiting .tk-state{color:var(--nz-amber)}
-.tk-s-failed .tk-state{color:var(--nz-red)}
-.tk-s-done .tk-state{color:var(--nz-green)}
-.tk-time{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--nz-text-dim)}
-.tk-title{margin-top:4px;color:var(--nz-text-strong);font-weight:600;overflow-wrap:anywhere}
+.tk-top{display:flex;align-items:baseline;gap:8px}
+.tk-state{flex-shrink:0;font-size:var(--nz-fs-xs);font-weight:600;color:var(--nz-green)}
+.tk-time{flex-shrink:0;margin-left:auto;font-size:var(--nz-fs-xs);font-variant-numeric:tabular-nums;color:var(--nz-text-dim)}
+.tk-title{flex:1;min-width:0;color:var(--nz-text-strong);font-weight:600;overflow-wrap:anywhere}
 .tk-open{font-weight:600;text-align:left;overflow-wrap:anywhere}
 .tk-foot{display:flex;align-items:flex-end;gap:8px;margin-top:2px}
 .tk-meta{flex:1;min-width:0;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);overflow-wrap:anywhere}
 .tk-menu,.tk-reopen,.tk-stop{flex-shrink:0}
 .tk-menu{padding:2px 6px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);background:var(--nz-bg-0);color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-xs);cursor:pointer}
 .tk-menu:disabled{opacity:.55;cursor:default}
-/* 通知 / 任务 bar atop the 会话 sidebar (side_wait.js): one thin dim
-   line while both are 0; unfolded, the Planner left column's cards at their
-   full height above the session list. Only a bar taller than what the
+.tk-s-waiting .tk-menu{color:var(--nz-amber)}
+.tk-s-failed .tk-menu{color:var(--nz-red)}
+/* 等你 bar atop the 会话 sidebar (side_wait.js), not rendered with none;
+   unfolded, the Planner left column's cards at their full height above the
+   session list. Only a bar taller than what the
    session list leaves it scrolls, as a whole. */
 .side-wait{flex-shrink:1;min-height:0;overflow-y:auto;border-bottom:1px solid var(--nz-border);background:var(--nz-bg-1)}
 .sw-toggle{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:8px 16px;border:0;background:none;color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-sm2);cursor:pointer;text-align:left}
@@ -159,9 +159,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .sw-toggle b{color:var(--nz-text-strong);font-variant-numeric:tabular-nums}
 .sw-toggle svg{width:14px;height:14px;flex-shrink:0;stroke:currentColor;fill:none;stroke-width:2;transition:transform var(--nz-dur) var(--nz-ease)}
 .side-wait.sw-open .sw-toggle svg{transform:rotate(180deg)}
-.side-wait.sw-zero .sw-toggle{padding-top:3px;padding-bottom:3px;font-size:var(--nz-fs-xs);color:var(--nz-text-dim)}
-.side-wait.sw-zero .sw-toggle b{color:inherit;font-weight:400}
-.sw-body{display:flex;flex-direction:column;gap:var(--nz-space-4);padding:4px 12px 12px}
+.sw-body{padding:4px 12px 12px}
 .sw-body[hidden]{display:none}
 /* An item a notification or link opened (notify.js), for a few seconds. */
 .inbox-lit{box-shadow:0 0 0 2px var(--nz-focus);transition:box-shadow .4s var(--nz-ease)}
@@ -186,7 +184,7 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .pl-close{margin-left:auto;font-size:var(--nz-fs-md);padding:0 2px}
 .pl-close:hover{color:var(--nz-text)}
 .pl-card-title{margin-top:4px;color:var(--nz-text-strong);font-weight:600;word-break:break-word}
-.pl-card-why{margin-top:2px;color:var(--nz-text-mute);font-size:var(--nz-fs-xs);word-break:break-word}
+.pl-card-why{margin-top:2px;color:var(--nz-text-mute);font-size:var(--nz-fs-xs);word-break:break-word;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden}
 .pl-card-meta{margin-top:4px;color:var(--nz-text-dim);font-size:var(--nz-fs-xs);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pl-card-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .pl-link{background:none;border:0;padding:0;font:inherit;color:var(--nz-accent);cursor:pointer}
@@ -198,11 +196,20 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .pl-empty{color:var(--nz-text-faint);font-size:var(--nz-fs-sm);padding:6px 2px}
 .pl-empty span{display:block;font-size:var(--nz-fs-xs);margin-top:2px}
 .pl-events>#pl-stream>.pl-empty{text-align:center;padding:40px 20px}
-.pl-tools{margin-top:auto;display:flex;flex-direction:column;gap:10px;padding-top:12px;border-top:1px solid var(--nz-border)}
+.pl-more{position:relative}
+.pl-more>summary{list-style:none}
+.pl-more>summary::-webkit-details-marker{display:none}
+.pl-tools{position:absolute;right:0;top:calc(100% + 4px);z-index:20;display:flex;flex-direction:column;gap:10px;width:max-content;max-width:min(300px,calc(100vw - 24px));padding:12px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-0);box-shadow:var(--nz-shadow-2)}
+/* The pause line gives way on a narrow header so "⋯" stays on screen: the
+   phone keeps only 暂停到 <time> (恢复 is in "⋯" too), then the time is cut. */
+.pl-paused{display:flex;align-items:center;min-width:0;font-size:var(--nz-fs-xs);color:var(--nz-amber);white-space:nowrap}
+.pl-paused[hidden]{display:none}
+.pl-paused>span:not([aria-hidden]){min-width:0;overflow:hidden;text-overflow:ellipsis}
+.pl-paused>[aria-hidden]{flex-shrink:0;padding:0 4px}
+.pl-paused>button{flex-shrink:0}
 .pl-tool{display:flex;flex-direction:column;gap:6px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
 .pl-tool-l{font-weight:600}
 .pl-tool-btns{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
-.pl-tool-note{color:var(--nz-text-mute)}
 .pl-pause-custom{display:inline-flex;align-items:center;gap:4px}
 .pl-pause-custom input{width:56px;padding:2px 6px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);background:var(--nz-bg-0);color:var(--nz-text);font:inherit}
 .pl-switch{display:inline-flex;align-items:center;gap:6px;cursor:pointer;color:var(--nz-text)}
@@ -211,20 +218,17 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .pl-center{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column}
 .pl-head{flex-shrink:0;height:48px;display:flex;align-items:center;gap:10px;padding:0 18px;border-bottom:1px solid var(--nz-border)}
 .pl-title{font-size:var(--nz-fs-md);font-weight:600;color:var(--nz-text-strong)}
-.pl-status{font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
-.pl-status.on{color:var(--nz-green)}
+.pl-status{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);white-space:nowrap}
 .pl-status.wait{color:var(--nz-amber)}
 .pl-head-sp{flex:1}
 .pl-note{flex-shrink:0;margin:12px 18px 0;padding:10px 12px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1);color:var(--nz-text-mute);font-size:var(--nz-fs-sm2);line-height:1.6}
 .pl-note b{color:var(--nz-text-strong)}
 .pl-note code{font-family:var(--nz-font-mono);font-size:var(--nz-fs-xs)}
-.pl-brief{margin:0 24px 8px}
-.pl-brief-empty{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);padding:6px 0;border-bottom:1px dashed var(--nz-border)}
-.pl-brief-empty b{color:var(--nz-text-mute)}
-.pl-brief-card{border-bottom:1px dashed var(--nz-border);padding:6px 0}
-.pl-brief-card>summary{cursor:pointer;font-size:var(--nz-fs-xs);color:var(--nz-text-dim)}
-.pl-brief-card>summary b{color:var(--nz-text-mute)}
-.pl-brief-card>.md{margin-top:6px;font-size:var(--nz-fs-sm2)}
+/* A morning brief, a message in the conversation's column (D91). */
+.pl-brief{display:block;width:100%;max-width:clamp(760px,65vw,1200px);margin:6px auto;padding:0 24px;box-sizing:border-box}
+.pl-brief>summary{cursor:pointer;font-size:var(--nz-fs-xs);color:var(--nz-text-dim)}
+.pl-brief>summary b{color:var(--nz-text-mute)}
+.pl-brief>.md{margin-top:6px;padding:10px 12px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1);font-size:var(--nz-fs-sm2);overflow-wrap:anywhere}
 /* The Planner's open cards at the end of its conversation (§10.1). */
 .pl-cards{margin:4px 24px 14px;max-width:560px;display:flex;flex-direction:column;gap:8px}
 .pl-cards[hidden]{display:none}
@@ -260,7 +264,6 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .pl-act-rows{display:grid;grid-template-columns:auto 1fr;gap:3px 10px;margin:0}
 .pl-act-rows dt{font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
 .pl-act-rows dd{margin:0;white-space:pre-wrap;word-break:break-word}
-.pl-act-note{display:block;margin-top:6px;font-size:var(--nz-fs-xs);color:var(--nz-text-dim)}
 .pl-act-q{word-break:break-word}
 .pl-act-opts{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
 .pl-act-opt{padding:2px 8px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);font-size:var(--nz-fs-xs)}
@@ -722,8 +725,6 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .gw-ok .gw-note-icon{color:var(--nz-green)}
 .gw-planner .gw-note-icon{color:var(--nz-accent)}
 .gw-note-time{font-size:var(--nz-fs-xs);color:var(--nz-text-faint)}
-.gw-note-link{background:none;border:none;padding:0;font:inherit;color:var(--nz-accent);cursor:pointer}
-.gw-note-link:hover{text-decoration:underline}
 .refusal-tag{display:inline-block;font-size:var(--nz-fs-2xs);padding:1px 8px;border-radius:var(--nz-radius-pill);border:1px solid var(--nz-warn);color:var(--nz-warn)}
 /* Hidden types (kept for safety) */
 .event.thinking .event-content{color:var(--nz-event-agent-fg);font-style:italic}

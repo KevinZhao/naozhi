@@ -1,8 +1,9 @@
 // E2E: the gateway's side notes in the session view (session_notes.js,
 // planner RFC §15.3 ③): GET /api/sessions/notes places them among the
 // bubbles by time, a session_note frame adds one live, neither starts a turn,
-// a note's 查看 opens its 等你 item on the Planner page, a closed item's note
-// loses the link, and a new socket lists the notes pushed while it was down.
+// a health transition and the item it opened are one note naming the cause,
+// no note links back to the Planner page (its card only opens this session
+// again), and a new socket lists the notes pushed while it was down.
 // data-inbox-item anchors a note to its item for a notification's click.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
@@ -23,7 +24,7 @@ const EVENTS = [
 ];
 const NOTES = [
   { id: 'h1', key: A, time: iso(T(20)), kind: 'health', from: 'active', to: 'failed', error_class: 'rate_limit', evidence: 'last turn ended in an API error' },
-  { id: 'open-in_1', key: A, time: iso(T(20)), kind: 'inbox', event: 'open', item: 'in_1', item_kind: 'error', title: '会话失败：myproject', open: true },
+  { id: 'open-in_1', key: A, time: iso(T(20)), kind: 'inbox', event: 'open', item: 'in_1', item_kind: 'error', title: '会话失败：myproject' },
   { id: 'h2', key: A, time: iso(T(5)), kind: 'health', from: 'failed', to: 'idle' },
 ];
 const ITEM = { id: 'in_1', kind: 'error', level: 'timely', unit: A, title: '会话失败：myproject', why: '失败', created: iso(T(20)), state: 'open', source: 'health:' + A };
@@ -32,7 +33,7 @@ test('side notes sit among the bubbles by time, arrive live and start no turn', 
   const mock = await startMockServer({
     ws: true,
     notes: { [A]: NOTES },
-    inbox: { open: [ITEM], closed: [], counts: { open: 1, badge: 0 } },
+    inbox: { open: [ITEM], closed: [], counts: { open: 1, badge: 1 } },
     planner: { enabled: true, stopped: false, key: 'planner:main', alive: true },
   });
   try {
@@ -45,16 +46,18 @@ test('side notes sit among the bubbles by time, arrive live and start no turn', 
     conn.send({ type: 'history', key: A, initial: true, events: EVENTS });
 
     const pane = page.locator('#events-scroll');
-    await expect(pane.locator('.gw-note')).toHaveCount(3);
-    // Between the first exchange and the second, and after the last.
+    await expect(pane.locator('.gw-note')).toHaveCount(2);
+    // Between the first exchange and the second, and after the last. The
+    // failure and the item it opened are one note, the item's.
     const order = await pane.evaluate((el) => [...el.children]
       .filter((c) => c.matches('.event.user, .event.text, .gw-note'))
       .map((c) => c.dataset.noteId || c.dataset.uuid));
-    expect(order).toEqual(['u1', 't1', 'h1', 'open-in_1', 'u2', 't2', 'h2']);
-    await expect(pane.locator('[data-note-id="h1"]')).toContainText('进入「失败」（限流）');
+    expect(order).toEqual(['u1', 't1', 'open-in_1', 'u2', 't2', 'h2']);
+    await expect(pane.locator('[data-note-id="open-in_1"]')).toHaveText(/进入「失败」：限流/);
     await expect(pane.locator('[data-note-id="h2"]')).toContainText('已从「失败」恢复');
-    await expect(pane.locator('[data-note-id="open-in_1"]')).toContainText('通知 · 错误 · 会话失败：myproject');
     await expect(pane.locator('[data-inbox-item="in_1"]')).toHaveAttribute('data-note-id', 'open-in_1');
+    // It sits in the session the item is about: no link to the Planner page.
+    await expect(pane.locator('.gw-note button')).toHaveCount(0);
     // Notes are not bubbles: the transcript's own bookkeeping never sees them.
     await expect(pane.locator('.event.gw-note')).toHaveCount(0);
 
@@ -68,18 +71,24 @@ test('side notes sit among the bubbles by time, arrive live and start no turn', 
     // A note for another session is not placed here.
     conn.send({ type: 'session_note', key: 'dashboard:direct:other:general', note: { id: 'x1', key: 'dashboard:direct:other:general', time: iso(Date.now()), kind: 'dispatch' } });
 
-    // 查看 opens the item on the Planner page.
-    await pane.locator('[data-note-id="open-in_1"] .gw-note-link').click();
-    await expect(page.locator('body')).toHaveClass(/nz-view-planner/);
-    await expect(page.locator('#pl-wait .pl-card[data-id="in_1"]')).toBeVisible();
+    // Live, the failure's note comes first and its item a frame later: the
+    // two still end as one note, the item's, naming the death in words.
+    const at = Date.now();
+    conn.send({ type: 'session_note', key: A, note: { id: 'h5', key: A, time: iso(at), kind: 'health', from: 'idle', to: 'failed', error_class: 'other', evidence: 'death_reason=cli_exited_code_-1' } });
+    await expect(pane.locator('[data-note-id="h5"]')).toHaveText(/进入「失败」：CLI 进程被信号终止/);
+    conn.send({ type: 'session_note', key: A, note: { id: 'open-in_2', key: A, time: iso(at + 5), kind: 'inbox', event: 'open', item: 'in_2', item_kind: 'error', title: 'myproject 失败' } });
+    await expect(pane.locator('[data-note-id="h5"]')).toHaveCount(0);
+    await expect(pane.locator('[data-note-id="open-in_2"]')).toHaveText(/进入「失败」：CLI 进程被信号终止/);
+    await expect(pane.locator('[data-note-id="open-in_2"]')).not.toContainText('其他');
+    await expect(pane.locator('[data-note-id="open-in_2"]')).toHaveAttribute('title', / · CLI 进程被信号终止$/);
 
-    // Back on the session, a close note drops the link; the notes survive the repaint.
+    // The notes survive a repaint, and a close note is its own.
+    await page.click('#abnav-planner');
     await page.click('#abnav-chat');
     await page.click(`.session-card[data-key="${A}"]`);
     await expect(pane.locator('.gw-note')).toHaveCount(4);
     conn.send({ type: 'session_note', key: A, note: { id: 'close-in_1', key: A, time: iso(Date.now()), kind: 'inbox', event: 'close', item: 'in_1', item_kind: 'error', closed_by: 'user', title: '会话失败：myproject' } });
     await expect(pane.locator('[data-note-id="close-in_1"]')).toContainText('通知 · 已关闭 · 会话失败：myproject');
-    await expect(pane.locator('.gw-note-link')).toHaveCount(0);
     await expect(pane.locator('[data-note-id="x1"]')).toHaveCount(0);
     await expect(page.locator('#running-banner')).toHaveClass(/nz-hidden/);
 

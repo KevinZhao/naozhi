@@ -49,6 +49,10 @@ const (
 // decisions and questions; P2 adds reviews).
 func (k Kind) WaitsOnUser() bool { return k == KindDecision || k == KindQuestion }
 
+// Actionable reports whether items of kind k wait on the user to act: the
+// "等你" ones and errors (§15.7 S1).
+func (k Kind) Actionable() bool { return k.WaitsOnUser() || k == KindError }
+
 // Level is how an item may be pushed.
 type Level string
 
@@ -163,8 +167,9 @@ type Push struct {
 	Unit string
 }
 
-// Counts are the open items: Open all of them, Badge those the "等你" count
-// shows (§10.1: decisions and questions; P2 adds reviews).
+// Counts are the open items: Open all of them, Badge those that wait on the
+// user to act (Kind.Actionable), the one count the rail badge, the 会话
+// sidebar's bar and the phone's bottom bar show (§15.7 S1).
 type Counts struct {
 	Open  int `json:"open"`
 	Badge int `json:"badge"`
@@ -625,7 +630,7 @@ func (n *Notifier) countsLocked() Counts {
 			continue
 		}
 		c.Open++
-		if it.Kind.WaitsOnUser() {
+		if it.Kind.Actionable() {
 			c.Badge++
 		}
 	}

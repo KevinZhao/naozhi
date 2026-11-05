@@ -18,9 +18,9 @@ import (
 func SessionNotes(j *journal.Journal, inbox *notify.Notifier, sidecars *sidecar.Store, router *session.Router) *note.Notes {
 	return note.New(note.Config{
 		Journal: j,
-		Item: func(id string) (string, bool, bool) {
+		Item: func(id string) (string, bool) {
 			it, ok := inbox.Item(id)
-			return it.Title, it.State == notify.StateOpen, ok
+			return it.Title, ok
 		},
 		Dispatched: func(key string) time.Time {
 			m, ok := sidecars.Get(key)

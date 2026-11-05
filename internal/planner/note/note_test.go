@@ -23,11 +23,9 @@ func TestList(t *testing.T) {
 	}
 	now := time.Now().Truncate(time.Second)
 	at := func(min int) time.Time { return now.Add(time.Duration(min) * time.Minute) }
-	items := map[string]bool{"in_open": true, "in_shut": false}
 	cfg := Config{
-		Item: func(id string) (string, bool, bool) {
-			open, ok := items[id]
-			return "title " + id, open, ok
+		Item: func(id string) (string, bool) {
+			return "title " + id, id == "in_open" || id == "in_shut"
 		},
 		Dispatched: func(key string) time.Time {
 			if key == "task:a" {
@@ -73,13 +71,12 @@ func TestList(t *testing.T) {
 		Event, Item        string
 		ItemKind, ClosedBy string
 		Title              string
-		Open               bool
 		Time               time.Time
 	}
 	rows := func(ns []Note) []row {
 		out := make([]row, len(ns))
 		for i, nt := range ns {
-			out[i] = row{nt.Kind, nt.From, nt.To, nt.ErrClass, nt.Event, nt.Item, nt.ItemKind, nt.ClosedBy, nt.Title, nt.Open, nt.Time.UTC()}
+			out[i] = row{nt.Kind, nt.From, nt.To, nt.ErrClass, nt.Event, nt.Item, nt.ItemKind, nt.ClosedBy, nt.Title, nt.Time.UTC()}
 		}
 		return out
 	}
@@ -90,7 +87,7 @@ func TestList(t *testing.T) {
 		{Kind: KindHealth, From: "waiting", To: "idle", Time: at(-50).UTC()},
 		{Kind: KindInbox, Event: "close", Item: "in_shut", ItemKind: "question", ClosedBy: "auto", Title: "title in_shut", Time: at(-50).UTC()},
 		{Kind: KindHealth, From: "idle", To: "failed", ErrClass: "rate_limit", Time: at(-40).UTC()},
-		{Kind: KindInbox, Event: "open", Item: "in_open", ItemKind: "error", Title: "title in_open", Open: true, Time: at(-40).UTC()},
+		{Kind: KindInbox, Event: "open", Item: "in_open", ItemKind: "error", Title: "title in_open", Time: at(-40).UTC()},
 		{Kind: KindReport, Time: at(-5).UTC()},
 	}
 	got := n.List("task:a", now)

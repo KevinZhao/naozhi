@@ -1,7 +1,7 @@
-// E2E: the 会话 sidebar's "通知 N · 任务 N" bar (side_wait.js, planner RFC
-// §15.3 ①, §15.4) — the Planner page's counts, its cards unfolded in place
-// and closed there (a task marked done there, a dispatched session opening
-// in the chat view), one thin line with nothing open — and the deep links of
+// E2E: the 会话 sidebar's "等你 N" bar (side_wait.js, planner RFC §15.3 ①,
+// §15.7 S1) — the questions, decisions and errors, the rail badge's count,
+// their cards unfolded in place without an inner scroll and closed or
+// answered there, no 任务, and not rendered with none — and the deep links of
 // §15.3 ④ (notify.js): #planner&item=<id> and a notification without a
 // session open the Planner on the item, the brief's #planner the page too;
 // #session=<key>&item=<id> opens the session and scrolls to the item's note,
@@ -23,7 +23,7 @@ function inbox() {
       { id: 'in_d', kind: 'decision', level: 'timely', title: 'iso 周报用哪个模板？', why: 'Planner 问你', created: iso(now - 5 * 60000), state: 'open', source: 'planner:d1', decision: { handler: 'ask', actions: ['模板 A', '模板 B'] } },
     ],
     closed: [],
-    counts: { open: 3, badge: 2 },
+    counts: { open: 3, badge: 3 },
   };
 }
 
@@ -58,21 +58,23 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
       }
     });
 
-    test('counts, unfolds in place, closes and answers there', async ({ browser }) => {
+    test('counts what waits on you, unfolds in place, closes and answers there', async ({ browser }) => {
       const ctx = await browser.newContext({ viewport });
       const page = await ctx.newPage();
       const box = inbox();
+      // A notice is the Planner page's, not the bar's.
+      box.open.push({ id: 'in_n', kind: 'notice', level: 'timely', unit: PLANNER, title: 'iso 日程冲突', why: '两个会议重叠', created: iso(now - 60000), state: 'open', source: 'planner:n1' });
+      box.counts = { open: 4, badge: 3 };
       const mock = await startMockServer({ ws: true, inbox: box, tasks: tasks(), plannerEvents: [], planner });
       try {
         await page.goto(mock.url + '/dashboard');
         await waitForWs(page, 'CONNECTED');
         const bar = page.locator('#side-wait');
-        // The Planner page's count (every open item) and its tasks not done.
-        await expect(page.locator('#sw-toggle')).toHaveText(/通知 3 · 任务 2/);
-        await expect(page.locator('#sw-wait-n')).toHaveText('3');
-        await expect(page.locator('#sw-task-n')).toHaveText('2');
-        await expect(bar).not.toHaveClass(/sw-zero/);
-        await expect(page.locator('#sw-body')).toBeHidden();
+        // One count: the questions, decisions and errors, as the rail badge.
+        await expect(page.locator('#sw-toggle')).toHaveText('等你 3');
+        await expect(page.locator('#abnav-planner-count')).toHaveText('3');
+        await expect(bar).not.toContainText('任务');
+        await expect(page.locator('#sw-wait')).toBeHidden();
         // The sidebar's own groups are untouched below it.
         await expect(page.locator('#session-list .session-card').first()).toBeVisible();
         await page.screenshot({ path: test.info().outputPath(`side-wait-${name}.png`) });
@@ -81,8 +83,10 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
         await expect(page.locator('#sw-toggle')).toHaveAttribute('aria-expanded', 'true');
         const cards = page.locator('#sw-wait .pl-card');
         await expect(cards).toHaveCount(3);
-        await expect(cards.nth(0).locator('.pl-kind')).toHaveText('待你决定');
-        await expect(page.locator('#sw-task .tk-card')).toHaveText([/iso 写 hello/, /iso 明早提醒你看压测结果/]);
+        await expect(cards.locator('.pl-kind')).toHaveText(['待你决定', '提问', '错误']);
+        await expect(page.locator('#side-wait .tk-card')).toHaveCount(0);
+        // Unfolded in place, not scrolled inside.
+        expect(await page.locator('#sw-wait').evaluate((el) => getComputedStyle(el).overflowY)).toBe('visible');
         await expect(page.locator('body')).not.toHaveClass(/nz-view-planner/);
         await page.mouse.move(viewport.width - 1, viewport.height - 1);
         await page.waitForTimeout(250); // the chevron's turn
@@ -91,31 +95,26 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
         await page.click('#sw-wait .pl-card[data-id="in_err"] .pl-close');
         await expect(cards).toHaveCount(2);
         expect(mock.inboxCalls[0]).toEqual({ path: '/api/inbox/close', method: 'POST', body: { id: 'in_err' } });
+        await expect(page.locator('#sw-n')).toHaveText('2');
 
         await page.click('#sw-wait .pl-card[data-id="in_d"] [data-act="模板 A"]');
         await expect(cards).toHaveCount(1);
         expect(mock.inboxCalls[1]).toMatchObject({ path: '/api/inbox/decide', body: { id: 'in_d', action: '模板 A' } });
-        await expect(page.locator('#sw-wait-n')).toHaveText('1');
+        await expect(page.locator('#sw-n')).toHaveText('1');
         await expect(page.locator('#abnav-planner-count')).toHaveText('1');
 
-        // Another tab answered the last one: the count frame refetches the list.
-        box.open = [];
-        box.counts = { open: 0, badge: 0 };
-        mock.wsConnections[mock.wsConnections.length - 1].send({ type: 'inbox_count', open: 0, badge: 0 });
-        await expect(page.locator('#sw-wait')).toContainText('没有通知');
-        await page.locator('#sw-task .tk-card[data-id="pr_1"] .tk-menu').selectOption('done');
-        await expect.poll(() => mock.tasksCalls).toEqual([{ id: 'pr_1', state: 'done' }]);
-        await expect(page.locator('#sw-task-n')).toHaveText('1');
-        // A dispatched session opens in the chat view, not on the Planner page.
-        const open = page.locator('#sw-task .tk-card[data-id="' + TASK + '"] .tk-open');
-        await expect(open).toHaveAttribute('data-action', 'session-select');
-        await page.locator('#sw-task .tk-card[data-id="' + TASK + '"] .tk-menu').selectOption('done');
-        await expect(bar).toHaveClass(/sw-zero/);
-        await page.click('#sw-toggle');
-        await expect(page.locator('#sw-body')).toBeHidden();
-        await page.mouse.move(viewport.width - 1, viewport.height - 1);
-        await page.waitForTimeout(250);
+        // Another tab answered the last one: with only a notice left the bar
+        // is not rendered.
+        box.open = box.open.filter((it) => it.kind === 'notice');
+        box.counts = { open: 1, badge: 0 };
+        mock.wsConnections[mock.wsConnections.length - 1].send({ type: 'inbox_count', open: 1, badge: 0 });
+        await expect(bar).toBeHidden();
+        await expect(page.locator('#abnav-planner-count')).toBeHidden();
         await page.screenshot({ path: test.info().outputPath(`side-wait-zero-${name}.png`) });
+        // Something new comes in: the bar is back, folded.
+        mock.wsConnections[mock.wsConnections.length - 1].send({ type: 'inbox_count', open: 2, badge: 1 });
+        await expect(page.locator('#sw-toggle')).toHaveText('等你 1');
+        await expect(page.locator('#sw-toggle')).toHaveAttribute('aria-expanded', 'false');
       } finally {
         await ctx.close();
         mock.server.close();

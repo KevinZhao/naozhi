@@ -235,5 +235,6 @@ func buildSystemHandlers(opts ServerOptions, router *session.Router) *system.Han
 		ConfigReload:   system.ConfigReloader(opts.Config.Reload),
 		Health:         opts.Health,
 		Workspaces:     workspaces,
+		UnitName:       opts.UnitName,
 	})
 }

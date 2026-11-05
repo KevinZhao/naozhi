@@ -52,14 +52,13 @@ type Note struct {
 	To       string `json:"to,omitempty"`
 	ErrClass string `json:"error_class,omitempty"`
 	Evidence string `json:"evidence,omitempty"`
-	// Inbox notes: open or close, the item and its kind, who closed it, its
-	// title, and whether it is still open (an open note only).
+	// Inbox notes: open or close, the item and its kind, who closed it and
+	// its title.
 	Event    string `json:"event,omitempty"`
 	Item     string `json:"item,omitempty"`
 	ItemKind string `json:"item_kind,omitempty"`
 	ClosedBy string `json:"closed_by,omitempty"`
 	Title    string `json:"title,omitempty"`
-	Open     bool   `json:"open,omitempty"`
 }
 
 // Health states a note is written for: entering one, or leaving one for a
@@ -122,9 +121,9 @@ func FromEntry(e journal.Entry) (Note, bool) {
 // Config wires a Notes. Every field may be nil: that source adds nothing.
 type Config struct {
 	Journal *journal.Journal
-	// Item returns an inbox item's title and whether it is open; ok is
-	// false once the inbox no longer keeps it.
-	Item func(id string) (title string, open, ok bool)
+	// Item returns an inbox item's title; ok is false once the inbox no
+	// longer keeps it.
+	Item func(id string) (title string, ok bool)
 	// Dispatched returns when the Planner dispatched key; zero when it did
 	// not.
 	Dispatched func(key string) time.Time
@@ -162,16 +161,13 @@ func (n *Notes) observe(e journal.Entry) {
 	}
 }
 
-// fill adds an inbox note's title and, for an open note, whether the item
-// is still open.
+// fill adds an inbox note's title.
 func (n *Notes) fill(nt Note) Note {
 	if nt.Kind != KindInbox || n.cfg.Item == nil {
 		return nt
 	}
-	title, open, ok := n.cfg.Item(nt.Item)
-	if ok {
+	if title, ok := n.cfg.Item(nt.Item); ok {
 		nt.Title = title
-		nt.Open = open && nt.Event == "open"
 	}
 	return nt
 }
