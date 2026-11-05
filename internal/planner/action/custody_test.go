@@ -244,8 +244,14 @@ func TestCustodyTaskReceiptAndHandOff(t *testing.T) {
 	if err := r.HandOff(key, "在问用户：先修哪个？选项：A / B"); err != nil || len(g.told) != 1 || !strings.Contains(g.told[0], "先修哪个") {
 		t.Errorf("HandOff: err=%v told=%q", err, g.told)
 	}
+	if !strings.Contains(g.told[0], "一律用 ask 问用户") {
+		t.Errorf("HandOff receipt lacks the irreversible rule: %q", g.told[0])
+	}
 	if err := r.HandOff(dashKey, "x"); !errors.Is(err, custody.ErrOff) || len(g.told) != 1 {
 		t.Errorf("HandOff out of custody: err=%v told=%q", err, g.told)
+	}
+	if err := r.HandOff(key, "在问用户：现在 push 吗？选项：push / 先不"); !errors.Is(err, custody.ErrIrreversible) || len(g.told) != 1 {
+		t.Errorf("HandOff of an irreversible choice: err=%v told=%q", err, g.told)
 	}
 }
 

@@ -101,6 +101,8 @@ func (h *Handler) HandleSet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, custody.ErrRefused):
 		http.Error(w, err.Error(), http.StatusBadRequest)
+	case errors.Is(err, custody.ErrDisabled):
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 	case err != nil:
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	default:

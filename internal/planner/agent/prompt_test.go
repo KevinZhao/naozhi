@@ -23,6 +23,8 @@ func TestSystemPrompt(t *testing.T) {
 		"你的跨会话名字是 planner-abc123",
 		`不要写成"提醒用户提交周报"`,
 		"不要改用 SendMessage 绕开",
+		"也不要另派会话接着做同一件事",
+		"一律用 ask 问用户，不替用户答",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt lacks %q", want)

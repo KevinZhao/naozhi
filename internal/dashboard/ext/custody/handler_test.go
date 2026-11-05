@@ -53,6 +53,7 @@ func TestHandler(t *testing.T) {
 		{name: "local node", method: "PUT", path: "/api/custody", body: `{"key":"k","node":"local","on":true}`, code: 200},
 		{name: "unknown session", method: "PUT", path: "/api/custody", body: `{"key":"k","on":true}`, setErr: custody.ErrNoSession, code: 404},
 		{name: "refused", method: "PUT", path: "/api/custody", body: `{"key":"planner:main","on":true}`, setErr: custody.ErrRefused, code: 400},
+		{name: "planner off", method: "PUT", path: "/api/custody", body: `{"key":"k","on":true}`, setErr: custody.ErrDisabled, code: 503, want: "Planner 没有开"},
 		{name: "pause", method: "PUT", path: "/api/custody/pause", code: 200, want: `"paused":true`},
 		{name: "resume", method: "DELETE", path: "/api/custody/pause", code: 200, want: `"paused":false`},
 		{name: "unwired", method: "PUT", path: "/api/custody", body: `{"key":"k","on":true}`, nilSource: true, code: 503},

@@ -501,7 +501,7 @@ func main() {
 
 	// Custody (§5.4, D93): the gateway watching sessions for the user. It
 	// sends through srv's own send path and reads the health machine, both
-	// set before Run below.
+	// set before Run below. It runs only with the Planner on.
 	sources := wireup.CustodySources{Router: router, Outputs: activities}
 	custodian := custody.New(custody.Config{
 		Sessions:  sidecars,
@@ -517,6 +517,7 @@ func main() {
 		Settled:   sources.Settled,
 		Name:      unitNames,
 		Path:      sessionLayout.PlannerCustodyPath(),
+		Disabled:  !cfg.Planner.Enabled,
 	})
 
 	routing := buildRouting(cfg, agents, projectMgr, scheduler)

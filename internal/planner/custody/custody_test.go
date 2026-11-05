@@ -246,7 +246,7 @@ func TestDeliverLimits(t *testing.T) {
 func TestNearbyAndPause(t *testing.T) {
 	r := newRig(t)
 	r.dispatch("task:a")
-	r.e.SetViewing("task:a", true)
+	r.e.SetViewing("task:a", "tab1", true)
 	for range 2 {
 		if _, err := r.e.Deliver("task:a", ReasonRetry, RetryText); !errors.Is(err, ErrNearby) {
 			t.Fatalf("viewing: %v", err)
@@ -258,7 +258,7 @@ func TestNearbyAndPause(t *testing.T) {
 	if got := r.custodyEvents("task:a"); len(got) != 1 || !strings.Contains(got[0], `"deferred"`) || !strings.Contains(got[0], "你在看") {
 		t.Errorf("notes = %v, want one deferred", got)
 	}
-	r.e.SetViewing("task:a", false)
+	r.e.SetViewing("task:a", "tab1", false)
 	r.lastUser["task:a"] = r.now.Add(-NearbyFor + time.Second)
 	if _, err := r.e.Deliver("task:a", ReasonRetry, RetryText); !errors.Is(err, ErrNearby) {
 		t.Fatalf("a message %s ago: %v", NearbyFor-time.Second, err)
@@ -422,10 +422,14 @@ func TestRetry(t *testing.T) {
 }
 
 // A session with a workflow running is put in custody unless someone set
-// its switch; a cron run is not.
+// its switch, and goes back to the default once its workflows are over
+// (a failure's retry still due holding it); a cron run is not, and a
+// dispatched session or a switch the user set stays.
 func TestWorkflowAutoOn(t *testing.T) {
 	r := newRig(t)
-	r.running = []string{dash, "cron:nightly", "dashboard:direct:u:off"}
+	const user, failing = "dashboard:direct:u:mine", "dashboard:direct:u:failing"
+	r.dispatch("task:a")
+	r.running = []string{dash, "cron:nightly", "dashboard:direct:u:off", user, failing, "task:a"}
 	if err := r.e.Set("dashboard:direct:u:off", false, ByUser); err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +441,179 @@ func TestWorkflowAutoOn(t *testing.T) {
 	if st := r.e.Status(dash); st.By != ByAuto || st.State != StateOn {
 		t.Errorf("status = %+v", st)
 	}
-	if l := r.e.List(); len(l) != 1 || l[0].Key != dash {
+	if l := r.e.List(); len(l) != 4 || !slices.ContainsFunc(l, func(s Status) bool { return s.Key == dash }) {
 		t.Errorf("List = %+v", l)
+	}
+	if err := r.e.Set(user, true, ByUser); err != nil {
+		t.Fatal(err)
+	}
+	r.units = []health.Unit{{ID: failing, Kind: health.KindSession, State: health.Failed, ErrClass: health.ErrNetwork, LastActive: r.now}}
+	r.e.Tick()
+	r.running = nil
+	r.e.Tick()
+	got = []bool{r.e.On(dash), r.e.On(user), r.e.On("task:a"), r.e.On(failing)}
+	if !slices.Equal(got, []bool{false, true, true, true}) {
+		t.Errorf("after the workflows: On = %v, want [false true true true]", got)
+	}
+	r.now = r.now.Add(Backoff[0])
+	r.e.Tick() // the retry goes out
+	r.e.Tick()
+	if len(r.sent) != 1 || r.e.On(failing) {
+		t.Errorf("after its retry: sent %q, on %v", r.sent, r.e.On(failing))
+	}
+	if got := r.custodyEvents(dash); len(got) != 2 || !strings.Contains(got[1], `"event":"off"`) {
+		t.Errorf("journal = %v", got)
+	}
+}
+
+// Viewing holds per viewer: one of two tabs leaving keeps the user at the
+// session, a report lapses after ViewFor, and a closed connection is
+// forgotten everywhere.
+func TestViewers(t *testing.T) {
+	r := newRig(t)
+	r.dispatch("task:a")
+	r.e.SetViewing("task:a", "tab1", true)
+	r.e.SetViewing("task:a", "tab2", true)
+	r.e.SetViewing("task:a", "tab1", false)
+	if _, err := r.e.Deliver("task:a", ReasonPlanner, "x"); !errors.Is(err, ErrNearby) {
+		t.Fatalf("tab2 still viewing: %v", err)
+	}
+	r.now = r.now.Add(ViewFor - time.Second)
+	r.e.SetViewing("task:a", "tab2", true) // renewed
+	r.now = r.now.Add(ViewFor - time.Second)
+	if r.e.Allowed("task:a") {
+		t.Fatal("a renewed report lapsed")
+	}
+	r.now = r.now.Add(time.Second)
+	if !r.e.Allowed("task:a") {
+		t.Fatal("a report older than ViewFor still holds")
+	}
+	r.e.SetViewing("task:a", "tab3", true)
+	r.e.DropViewer("tab3")
+	if n, err := r.e.Deliver("task:a", ReasonPlanner, "x"); err != nil || n != 1 {
+		t.Errorf("after the connection closed: n=%d err=%v", n, err)
+	}
+}
+
+// A failure custody took is left to the user, as the failure it is, as soon
+// as custody gives it up: turned off, paused, a retry that failed again with
+// a class it does not retry (no health transition), or a lineage that would
+// stop at the retry for want of progress.
+func TestRetryLeftToUser(t *testing.T) {
+	failed := func(key string, class health.ErrorClass, since, active time.Time) health.Unit {
+		return health.Unit{ID: key, Kind: health.KindSession, State: health.Failed, ErrClass: class, Since: since, LastActive: active}
+	}
+	for _, tc := range []struct {
+		name string
+		then func(r *rig)
+		why  string
+		sent int
+	}{
+		{"off by the user", func(r *rig) { r.e.Set("task:a", false, ByUser) }, "托管已关", 0},
+		{"off by the Planner", func(r *rig) { r.e.Set("task:a", false, ByPlanner) }, "托管已关", 0},
+		{"paused", func(r *rig) { r.e.SetPaused(true) }, "托管已暂停", 0},
+		{"failed again, not retryable", func(r *rig) {
+			r.now = r.now.Add(time.Minute)
+			r.e.Tick() // the retry goes out
+			r.units = []health.Unit{failed("task:a", health.ErrAuth, r.units[0].Since, r.now)}
+		}, "凭证 / 权限拒绝", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			r.dispatch("task:a")
+			r.units = []health.Unit{failed("task:a", health.ErrNetwork, r.now, r.now)}
+			if !r.e.Covers(r.units[0]) {
+				t.Fatal("not covered")
+			}
+			r.e.Tick()
+			tc.then(r)
+			for range 3 {
+				r.e.Tick()
+				r.now = r.now.Add(10 * time.Minute)
+			}
+			if len(r.sent) != tc.sent {
+				t.Errorf("sent %q, want %d", r.sent, tc.sent)
+			}
+			it := r.inbox.items
+			if len(it) != 1 || it[0].Kind != notify.KindError || it[0].Source != "failed:task:a" || !strings.Contains(it[0].Why, tc.why) {
+				t.Fatalf("inbox = %+v, want one failure saying %q", it, tc.why)
+			}
+		})
+	}
+	t.Run("no progress", func(t *testing.T) {
+		r := newRig(t)
+		r.dispatch("task:a")
+		r.progress["task:a"] = "same"
+		for i := range MaxIdle {
+			r.units = []health.Unit{failed("task:a", health.ErrNetwork, r.now, r.now)}
+			if !r.e.Covers(r.units[0]) {
+				t.Fatalf("failure %d not covered", i+1)
+			}
+			r.e.Tick()
+			r.now = r.now.Add(Backoff[i])
+			r.e.Tick()
+			r.now = r.now.Add(time.Minute)
+		}
+		u := failed("task:a", health.ErrNetwork, r.now, r.now)
+		r.units = []health.Unit{u}
+		if r.e.Covers(u) {
+			t.Error("a failure the lineage would stop at is covered")
+		}
+		r.e.Tick() // stops now, not after an 8-minute backoff
+		if len(r.sent) != MaxIdle {
+			t.Errorf("sent %d, want %d", len(r.sent), MaxIdle)
+		}
+		it := r.inbox.items
+		if len(it) != 1 || it[0].Kind != notify.KindError || it[0].Source != "failed:task:a" ||
+			!strings.Contains(it[0].Why, "连续 3 次没有进展（最近一次出错：网络 / DNS）") {
+			t.Errorf("inbox = %+v", it)
+		}
+		if st := r.e.Status("task:a"); st.State != StateStopped {
+			t.Errorf("status = %+v", st)
+		}
+	})
+}
+
+// With the Planner off no session is in custody, a dispatched one included,
+// and none can be put in it.
+func TestDisabled(t *testing.T) {
+	r := newRig(t)
+	r.e.cfg.Disabled = true
+	r.dispatch("task:a")
+	r.running = []string{dash}
+	u := health.Unit{ID: "task:a", Kind: health.KindSession, State: health.Failed, ErrClass: health.ErrNetwork, LastActive: r.now}
+	r.units = []health.Unit{u}
+	r.e.Tick()
+	r.now = r.now.Add(time.Hour)
+	r.e.Tick()
+	if r.e.On("task:a") || r.e.On(dash) || r.e.Covers(u) || len(r.sent) != 0 {
+		t.Errorf("custody ran: on=%v/%v covers=%v sent=%v", r.e.On("task:a"), r.e.On(dash), r.e.Covers(u), r.sent)
+	}
+	if err := r.e.Set(dash, true, ByUser); !errors.Is(err, ErrDisabled) {
+		t.Errorf("Set = %v", err)
+	}
+}
+
+func TestIrreversible(t *testing.T) {
+	for _, tc := range []struct {
+		text string
+		want bool
+	}{
+		{"要 push 到远端吗？", true},
+		{"Merge the PR (Recommended)", true},
+		{"合并到 master", true},
+		{"现在发版吗", true},
+		{"打 tag v1.2.0", true},
+		{"Deploy to prod", true},
+		{"部署到测试环境", true},
+		{"给客户发邮件", true},
+		{"删除远程分支 feat/x", true},
+		{"去支付", true},
+		{"先跑测试（推荐）", false},
+		{"改用表驱动测试", false},
+	} {
+		if got := Irreversible(tc.text); got != tc.want {
+			t.Errorf("Irreversible(%q) = %v, want %v", tc.text, got, tc.want)
+		}
 	}
 }
