@@ -1003,8 +1003,11 @@ func Classify(u health.Unit, text string) (string, bool) {
 
 // irreversibleRe names what cannot be undone once custody answers for the
 // user (D93): pushing, merging, releasing or tagging, sending outside,
-// deleting a remote, a branch or a resource, deploying and paying.
-var irreversibleRe = regexp.MustCompile(`(?i)\b(push|merge|release|deploy)|合并|发版|打\s*tag|git\s+tag|发邮件|发消息|对外发送|删除远程|删除分支|删除资源|部署|付款|支付`)
+// deleting a remote, a branch or a resource, deploying and paying. It also
+// takes the everyday ways of saying them (推送, 发布, 上线, 合入, 删掉分支,
+// publish): a word too many leaves a card to the user, a word too few lets
+// custody answer what cannot be undone.
+var irreversibleRe = regexp.MustCompile(`(?i)\b(push|merge|release|deploy|publish)|推送|强推|合并|合入|发版|发布|上线|打\s*tag|git\s+tag|打标签|发.{0,6}(邮件|消息)|对外发送|删[除掉].{0,6}(远程|远端|分支|资源)|部署|付款|支付`)
 
 // Irreversible reports whether text (a question, an option, what a session
 // asks for) touches what cannot be undone: custody never answers that for
