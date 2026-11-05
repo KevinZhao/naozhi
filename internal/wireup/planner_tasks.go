@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/planner/action"
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
@@ -96,7 +97,7 @@ type TaskSpawner struct {
 	Opts   TaskOpts
 	// Submit runs the first message as a turn (Server.SubmitPlanner); a
 	// task: turn has no source.
-	Submit func(key string, src agent.Source, text string, opts session.AgentOpts, done func(string, error)) (bool, error)
+	Submit func(key string, src agent.Source, text string, images []clievent.Attachment, opts session.AgentOpts, done func(string, error)) (bool, error)
 }
 
 // Spawn is action.Config.Spawn. A start that fails is said in the user's
@@ -108,7 +109,7 @@ func (t TaskSpawner) Spawn(ctx context.Context, key string, s action.Spawn) erro
 		return spawnError(err, key, t.Router.MaxProcs())
 	}
 	t.Router.SetUserLabel(key, s.Title)
-	_, err := t.Submit(key, "", s.Message, opts, nil)
+	_, err := t.Submit(key, "", s.Message, nil, opts, nil)
 	return err
 }
 

@@ -2,8 +2,10 @@
 // (docs/rfc/planner.md §10 D77, §10.1 输入 / 先回执 / 状态三层; §15.1 PR ⑬):
 //
 //   - the page's input box (#pl-composer) sends to the Planner through
-//     POST /api/planner/send (the gateway adds the snapshot and pushes its
-//     "收到，正在看" to the planner:main stream); that receipt (D63) shows as
+//     POST /api/planner/send, the images and PDFs pasted, dropped or picked
+//     into it going along as file_ids (composer_files.js's upload tray, with
+//     the chat view's limits). The gateway adds the snapshot and pushes its
+//     "收到，正在看" to the planner:main stream; that receipt (D63) shows as
 //     the box's note until the answer comes (D91). With a session card
 //     opened in the middle column it sends to that session (POST
 //     /api/sessions/send).
@@ -14,15 +16,16 @@
 //     bubbles the chat view shows), and 原始记录 adds the tool calls. Its
 //     events are polled while the page is visible; the workbench follows it.
 //   - 交给 Planner, beside the chat view's input, sends the session's
-//     reference with what is typed. A session opened here is already in
-//     front of the Planner, so its input box has no 交给 Planner.
+//     reference with what is typed and the attachments in that input. A
+//     session opened here is already in front of the Planner, so its input
+//     box has no 交给 Planner.
 //
 // The switch (GET /api/planner) is read once the socket is up and whenever
 // the Planner page reads it; with planner.enabled off the chat view's button
 // is hidden, and stopped it is disabled.
 // Layering: never import dashboard.js back; setActivityView is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
-import { selection, sessionList, ui } from './state.js';
+import { composer, selection, sessionList, ui } from './state.js';
 import { esc, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
 import { isDiscoveredKey, sid } from './session_ident.js';
 import { eventHtml } from './event_render.js';
@@ -35,6 +38,7 @@ import { followPlannerSubject, noteWorkbenchEvent } from './workbench_panes.js';
 import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
 import { getMsgValue, setMsgValue } from './utilities.js';
+import { awaitPendingOrients, clearFiles, createFileTray, filesBlockSend, handleFiles } from './composer_files.js';
 
 const PLANNER_KEY = 'planner:main';
 // SESS_LIMIT is the opened session's first page; SESS_KEEP the events kept
@@ -59,6 +63,11 @@ const st = {
 
 const $ = (id) => document.getElementById(id);
 
+// tray is the input box's attachments; the box carries data-file-tray so
+// the shared file actions (dashboard.js) reach it.
+const TRAY = 'planner';
+const tray = createFileTray(TRAY, 'pl-file-preview', 'pl-file-input');
+
 // apiError is the user-facing text of a failed fetchJSON: the JSON error a
 // handler wrote, else the status line.
 function apiError(e) {
@@ -66,6 +75,13 @@ function apiError(e) {
   if (!m) return (e && e.message) || '';
   try { const j = JSON.parse(m[1]); if (j && j.error) return j.error; } catch { /* plain text */ }
   return m[1].trim() || e.message;
+}
+
+// filesConsumed is a refusal that took the uploads already (files_consumed):
+// their IDs are gone, so the attachments must be added again.
+function filesConsumed(e) {
+  const m = /^HTTP \d+: ([\s\S]*)$/.exec(e && e.message || '');
+  try { return !!(m && JSON.parse(m[1]).files_consumed); } catch { return false; }
 }
 
 function plannerUsable() {
@@ -96,9 +112,10 @@ async function fetchPlannerStatus() {
   notePlannerStatus();
 }
 
-async function sendToPlanner(text, ref) {
+async function sendToPlanner(text, ref, fileIDs) {
   const body = { text };
   if (ref) body.ref = ref;
+  if (fileIDs && fileIDs.length) body.file_ids = fileIDs;
   // Before the POST: the stream's watermark now is what the answer follows.
   nzBus.dispatchEvent(new CustomEvent('planner:sent'));
   await fetchJSON(NZ_CONTRACT.API.planner_send, {
@@ -152,10 +169,14 @@ export function mountComposer() {
   const box = $('pl-composer');
   if (!box || box.dataset.mounted) return;
   box.dataset.mounted = '1';
+  box.dataset.fileTray = TRAY;
   box.innerHTML =
     '<div class="pl-target"><span class="pl-target-to" id="pl-target-to"></span>' +
       '<span class="pl-target-note" id="pl-target-note"></span></div>' +
+    '<div class="file-preview" id="pl-file-preview"></div>' +
+    '<input type="file" id="pl-file-input" accept="image/*,application/pdf" multiple class="nz-hidden" data-action-change="file-input-change">' +
     '<div class="pl-input-row">' +
+      '<button type="button" class="btn-icon" id="pl-attach" data-action="file-picker" title="上传图片或 PDF" aria-label="上传图片或 PDF">' + ICONS.attach + '</button>' +
       '<textarea id="pl-input" rows="1" aria-label="消息输入框"></textarea>' +
       '<button type="button" class="btn-icon btn-send" id="pl-send" data-action="planner-composer-send" title="发送" aria-label="发送消息">' + ICONS.send + '</button>' +
     '</div>';
@@ -165,6 +186,14 @@ export function mountComposer() {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendFromComposer(); }
   });
   input.addEventListener('input', () => fitInput(input));
+  // Dropped files join the box's attachments, as in the chat view's input.
+  box.addEventListener('dragover', (e) => { e.preventDefault(); box.classList.add('pl-drop'); });
+  box.addEventListener('dragleave', () => box.classList.remove('pl-drop'));
+  box.addEventListener('drop', (e) => {
+    e.preventDefault();
+    box.classList.remove('pl-drop');
+    if (!input.disabled) handleFiles(e.dataTransfer.files, tray);
+  });
   paintComposer();
 }
 
@@ -187,6 +216,7 @@ function paintComposer() {
     if (note) note.textContent = listed ? '' : '不在会话列表里，不能发消息';
     input.placeholder = listed ? '追问或调整方向…' : '';
     input.disabled = !listed;
+    $('pl-attach').disabled = input.disabled;
     send.disabled = st.sending || !listed;
     return;
   }
@@ -196,6 +226,7 @@ function paintComposer() {
   if (note) note.textContent = !st.status ? '' : !st.status.enabled ? '未开启 Planner' : st.status.stopped ? '已停用 Planner' : st.sending ? '发送中…' : st.acked ? '收到，正在看' : '';
   input.placeholder = usable || !st.status ? '交代、追问…' : '';
   input.disabled = !!st.status && !usable;
+  $('pl-attach').disabled = input.disabled;
   send.disabled = st.sending || (!!st.status && !usable);
 }
 
@@ -203,9 +234,10 @@ async function sendFromComposer() {
   const input = $('pl-input');
   if (!input || st.sending) return;
   const text = input.value.trim();
-  if (!text) return;
+  if (!text && !tray.files.length) return;
   const key = composerTarget();
   if (key !== PLANNER_KEY && !sessionListed(key)) return;
+  if (filesBlockSend(tray)) return;
   st.sending = true;
   paintComposer();
   const box = key === PLANNER_KEY ? $('pl-stream') : $('pl-sess-stream');
@@ -213,14 +245,29 @@ async function sendFromComposer() {
   input.value = '';
   fitInput(input);
   try {
-    if (key === PLANNER_KEY) {
-      await sendToPlanner(text);
-      st.acked = true;
-    } else {
-      await fetchJSON(NZ_CONTRACT.API.sessions_send, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, text }), timeoutMs: 15000,
-      });
-      if (st.sess && st.sess.key === key) loadSession(false);
+    // An auto-orient still running lands before the send takes the upload.
+    await awaitPendingOrients(tray);
+    const files = tray.files.slice();
+    const fileIDs = files.map((f) => f.id).filter(Boolean);
+    try {
+      if (key === PLANNER_KEY) {
+        await sendToPlanner(text, '', fileIDs);
+        st.acked = true;
+      } else {
+        const body = { key, text };
+        if (fileIDs.length) body.file_ids = fileIDs;
+        await fetchJSON(NZ_CONTRACT.API.sessions_send, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), timeoutMs: 15000,
+        });
+        if (st.sess && st.sess.key === key) loadSession(false);
+      }
+      clearFiles(tray, files);
+    } catch (e) {
+      if (filesConsumed(e)) {
+        clearFiles(tray, files);
+        showToast('附件已失效，请重新添加后再发送', 'warning');
+      }
+      throw e;
     }
   } catch (e) {
     clearPending(box);
@@ -437,15 +484,25 @@ function showHandoffNote() {
   st.noteTimer = setTimeout(() => $('handoff-note')?.remove(), NOTE_MS);
 }
 
+// handoff sends key with text and the chat view's input's attachments.
 async function handoff(key, text, done) {
   if (st.sending) return;
+  if (filesBlockSend()) return;
   st.sending = true;
   paintHandoffButton();
   paintComposer();
+  let files = [];
   try {
-    await sendToPlanner(text, key);
+    await awaitPendingOrients();
+    files = composer.pendingFiles.slice();
+    await sendToPlanner(text, key, files.map((f) => f.id).filter(Boolean));
+    clearFiles(undefined, files);
     done();
   } catch (e) {
+    if (filesConsumed(e)) {
+      clearFiles(undefined, files);
+      showToast('附件已失效，请重新添加后再发送', 'warning');
+    }
     showToast('没有交给 Planner：' + apiError(e), 'error');
   } finally {
     st.sending = false;

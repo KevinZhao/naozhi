@@ -16,16 +16,47 @@ import { formatFileSize, showAuthModal } from './utilities.js';
 //   file id is in `id` and can be referenced later via file_ids on send.
 // This decouples image transfer from /send, avoids the 105 MB multipart body
 // and 15s ReadTimeout, and lets one bad file fail without blocking the rest.
+//
+// A tray is one composer's attachments: its list, its preview box and its
+// hidden file input. The chat view's composer is mainTray (composer.pendingFiles,
+// #file-preview, #file-input; every function defaults to it); another
+// composer (the Planner's) makes its own with createFileTray and marks its
+// box data-file-tray=<name>, so the shared actions find it (trayOf).
+const mainTray = {
+  name: '',
+  previewId: 'file-preview',
+  inputId: 'file-input',
+  // gate: the selected session's backend decides whether images go out.
+  gate: true,
+  get files() { return composer.pendingFiles; },
+  set files(v) { composer.pendingFiles = v; },
+};
+const trays = new Map();
 
-function openFilePicker() {
+// createFileTray registers and returns the tray called name, whose preview
+// box and file input have the ids given. Its target (the Planner) always
+// takes images, so it has no backend gate.
+function createFileTray(name, previewId, inputId) {
+  const tray = { name, previewId, inputId, gate: false, files: [] };
+  trays.set(name, tray);
+  return tray;
+}
+
+// trayOf is the tray of the composer el sits in.
+function trayOf(el) {
+  const box = el && el.closest ? el.closest('[data-file-tray]') : null;
+  return (box && trays.get(box.dataset.fileTray)) || mainTray;
+}
+
+function openFilePicker(tray = mainTray) {
   // Multi-Backend RFC §8.3 D14: respect feature gate. Toast instead of
   // silently no-op so the user understands why the click did nothing —
   // the .feat-disabled class is the visual cue, this is the audible cue.
-  if (!featureForCurrent('image_input')) {
+  if (tray.gate && !featureForCurrent('image_input')) {
     showToast('当前后端不支持图片上传', 'warn');
     return;
   }
-  document.getElementById('file-input').click();
+  document.getElementById(tray.inputId)?.click();
 }
 
 // Downscale any image to JPEG with max edge 1600 and quality 0.8.
@@ -115,7 +146,7 @@ function fileKind(f) {
   return '';
 }
 
-function handleFiles(fileList) {
+function handleFiles(fileList, tray = mainTray) {
   const toUpload = [];
   // Image source ceiling is kept at 40 MB so iPhone HEIC/JPEG straight from
   // Photos (~6–12 MB) still fits; normalizeImage downscales before upload,
@@ -134,7 +165,7 @@ function handleFiles(fileList) {
       showToast('图片过大（上限 40 MB）', 'warning');
       continue;
     }
-    if (composer.pendingFiles.length >= 20) { showToast('最多上传 20 个文件', 'warning'); break; }
+    if (tray.files.length >= 20) { showToast('最多上传 20 个文件', 'warning'); break; }
     const entry = {
       file: raw,
       kind,
@@ -146,20 +177,22 @@ function handleFiles(fileList) {
       id: '',
       status: 'uploading',
       error: '',
+      tray,
     };
-    composer.pendingFiles.push(entry);
+    tray.files.push(entry);
     toUpload.push(entry);
   }
-  const fi = document.getElementById('file-input');
+  const fi = document.getElementById(tray.inputId);
   if (fi) fi.value = '';
-  renderFilePreviews();
+  renderFilePreviews(tray);
   toUpload.forEach(enqueueUpload);
 }
 
 async function uploadEntry(entry) {
+  const tray = entry.tray || mainTray;
   entry.status = 'uploading';
   entry.error = '';
-  renderFilePreviews();
+  renderFilePreviews(tray);
   try {
     // PDFs skip normalizeImage: they travel to the server as-is and end up
     // persisted to the session workspace (see
@@ -184,7 +217,7 @@ async function uploadEntry(entry) {
       const upright = URL.createObjectURL(file);
       if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl);
       entry.blobUrl = upright;
-      renderFilePreviews();
+      renderFilePreviews(tray);
     }
     const fd = new FormData();
     fd.append('file', file);
@@ -217,7 +250,7 @@ async function uploadEntry(entry) {
     entry.status = 'error';
     entry.error = e.message || 'upload failed';
   }
-  renderFilePreviews();
+  renderFilePreviews(tray);
 }
 
 // ORIENT_MAX_WAIT_MS bounds how long send() will block on an in-flight
@@ -245,8 +278,9 @@ const ORIENT_MAX_WAIT_MS = 8000;
 // in finally so a thrown/aborted call can never leave send permanently gated.
 async function maybeAutoOrient(entry) {
   if (!entry || !entry.id || entry.kind !== 'image') return;
+  const tray = entry.tray || mainTray;
   entry.orienting = true;
-  renderFilePreviews();
+  renderFilePreviews(tray);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ORIENT_MAX_WAIT_MS);
   try {
@@ -261,7 +295,7 @@ async function maybeAutoOrient(entry) {
     // the corrected JPEG inline as a data URL. Swap the preview to it so the
     // thumbnail matches what gets sent. The entry may have been removed while
     // the orient call was in flight — guard before touching it.
-    if (!composer.pendingFiles.includes(entry)) return;
+    if (!tray.files.includes(entry)) return;
     if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl);
     entry.blobUrl = j.image; // data: URL, no object URL to revoke later
   } catch (_) {
@@ -270,7 +304,7 @@ async function maybeAutoOrient(entry) {
   } finally {
     clearTimeout(timer);
     entry.orienting = false;
-    renderFilePreviews();
+    renderFilePreviews(tray);
   }
 }
 
@@ -278,42 +312,80 @@ async function maybeAutoOrient(entry) {
 // or after ORIENT_MAX_WAIT_MS as a hard ceiling. send() awaits this so an
 // in-flight rotation lands (server Replace) BEFORE TakeAll consumes the
 // upload. Polling (rather than tracking promises) keeps it robust to entries
-// added/removed mid-wait — it simply re-reads the live composer.pendingFiles each tick.
-function awaitPendingOrients() {
-  if (!composer.pendingFiles.some(f => f.orienting)) return Promise.resolve();
+// added/removed mid-wait — it simply re-reads the tray's live list each tick.
+function awaitPendingOrients(tray = mainTray) {
+  if (!tray.files.some(f => f.orienting)) return Promise.resolve();
   return new Promise((resolve) => {
     const deadline = Date.now() + ORIENT_MAX_WAIT_MS;
     const tick = () => {
-      if (!composer.pendingFiles.some(f => f.orienting) || Date.now() >= deadline) { resolve(); return; }
+      if (!tray.files.some(f => f.orienting) || Date.now() >= deadline) { resolve(); return; }
       setTimeout(tick, 120);
     };
     setTimeout(tick, 120);
   });
 }
 
-function retryUpload(idx) {
-  const entry = composer.pendingFiles[idx];
+function retryUpload(idx, tray = mainTray) {
+  const entry = tray.files[idx];
   if (entry && entry.status === 'error') enqueueUpload(entry);
 }
 
-function removeFile(idx) {
-  const [removed] = composer.pendingFiles.splice(idx, 1);
+function removeFile(idx, tray = mainTray) {
+  const [removed] = tray.files.splice(idx, 1);
   if (removed && removed.blobUrl) URL.revokeObjectURL(removed.blobUrl);
-  renderFilePreviews();
+  renderFilePreviews(tray);
 }
 
-// reorderPendingFile moves composer.pendingFiles[from] to position `to`. Pure array
+// clearFiles drops the attachments a send took from tray: entries, or all of
+// them. One added while the send was out stays.
+function clearFiles(tray = mainTray, entries) {
+  const gone = entries || tray.files;
+  gone.forEach(f => { if (f.blobUrl) URL.revokeObjectURL(f.blobUrl); });
+  tray.files = entries ? tray.files.filter(f => !entries.includes(f)) : [];
+  renderFilePreviews(tray);
+}
+
+// filesBlockSend is the attachment half of a send's checks, toasting why it
+// must wait: an upload still running (a send carries file_ids only, so it
+// would drop the image), a failed one to remove or retry, and the shim's
+// 12 MB NDJSON line cap (base64 inflates ~1.33×, so raw image bytes must
+// stay under ~9 MB). PDFs travel as file_ref and do not count.
+function filesBlockSend(tray = mainTray) {
+  if (tray.files.some(f => f.status === 'uploading')) {
+    showToast('图片上传中，请稍候…', 'warning');
+    return true;
+  }
+  const failed = tray.files.filter(f => f.status === 'error');
+  if (failed.length > 0) {
+    const detail = failed[0].error || '';
+    const tail = detail ? '（' + detail.slice(0, 120) + '）' : '';
+    showToast('图片上传失败' + tail + '，请移除或重试', 'error');
+    return true;
+  }
+  const totalBytes = tray.files.reduce((n, f) => {
+    if (f.kind === 'pdf' || f.serverKind === 'file_ref') return n;
+    return n + (f.normalizedSize || f.file.size || 0);
+  }, 0);
+  if (totalBytes > 9 * 1024 * 1024) {
+    showToast('图片总大小 ' + Math.ceil(totalBytes / 1024 / 1024) + ' MB 超过 9 MB 上限，请分批发送或减少图片', 'warning');
+    return true;
+  }
+  return false;
+}
+
+// reorderPendingFile moves tray.files[from] to position `to`. Pure array
 // operation extracted so the drag-drop handler and a keyboard a11y fallback
 // can share one code path and so contract tests can assert the move semantics
 // without touching the DOM. Returns true when the array actually changed.
-function reorderPendingFile(from, to) {
+function reorderPendingFile(from, to, tray = mainTray) {
+  const files = tray.files;
   if (!Number.isInteger(from) || !Number.isInteger(to)) return false;
-  if (from < 0 || from >= composer.pendingFiles.length) return false;
+  if (from < 0 || from >= files.length) return false;
   if (to < 0) to = 0;
-  if (to > composer.pendingFiles.length - 1) to = composer.pendingFiles.length - 1;
+  if (to > files.length - 1) to = files.length - 1;
   if (from === to) return false;
-  const [moved] = composer.pendingFiles.splice(from, 1);
-  composer.pendingFiles.splice(to, 0, moved);
+  const [moved] = files.splice(from, 1);
+  files.splice(to, 0, moved);
   return true;
 }
 
@@ -321,14 +393,18 @@ function reorderPendingFile(from, to) {
 // safer than dataTransfer because the latter is sometimes empty on drop in
 // Safari when the drag never left the origin element.
 let _dragReorderFrom = -1;
+// _dragTray is the tray the drag started in: a drop on another composer's
+// thumb is no reorder.
+let _dragTray = null;
 
-function onThumbDragStart(ev, idx) {
+function onThumbDragStart(ev, idx, tray = mainTray) {
   // Only 'ready' files are reorderable; uploading/error thumbs are pinned to
   // their current slot because their index may still be referenced by the
   // in-flight upload completion path.
-  const entry = composer.pendingFiles[idx];
+  const entry = tray.files[idx];
   if (!entry || entry.status !== 'ready') { ev.preventDefault(); return; }
   _dragReorderFrom = idx;
+  _dragTray = tray;
   try {
     ev.dataTransfer.effectAllowed = 'move';
     // Firefox requires some data to be set or dragstart is cancelled.
@@ -348,19 +424,22 @@ function onThumbDragLeave(ev) {
   ev.currentTarget.classList.remove('drop-target');
 }
 
-function onThumbDrop(ev, idx) {
+function onThumbDrop(ev, idx, tray = mainTray) {
   ev.preventDefault();
   ev.currentTarget.classList.remove('drop-target');
   const from = _dragReorderFrom;
+  const sameTray = _dragTray === tray;
   _dragReorderFrom = -1;
-  if (from < 0 || from === idx) { renderFilePreviews(); return; }
-  reorderPendingFile(from, idx);
-  renderFilePreviews();
+  _dragTray = null;
+  if (from < 0 || from === idx || !sameTray) { renderFilePreviews(tray); return; }
+  reorderPendingFile(from, idx, tray);
+  renderFilePreviews(tray);
 }
 
-function onThumbDragEnd() {
+function onThumbDragEnd(tray = mainTray) {
   _dragReorderFrom = -1;
-  const el = document.getElementById('file-preview');
+  _dragTray = null;
+  const el = document.getElementById(tray.previewId);
   if (!el) return;
   el.querySelectorAll('.file-thumb.dragging, .file-thumb.drop-target').forEach(n => {
     n.classList.remove('dragging');
@@ -370,26 +449,26 @@ function onThumbDragEnd() {
 
 // Keyboard a11y: when a .file-thumb is focused, Left/Right arrow keys move it
 // left/right by one slot. Mirrors the drag gesture for keyboard-only users.
-function onThumbKeyDown(ev, idx) {
+function onThumbKeyDown(ev, idx, tray = mainTray) {
   if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
-  const entry = composer.pendingFiles[idx];
+  const entry = tray.files[idx];
   if (!entry || entry.status !== 'ready') return;
   const to = idx + (ev.key === 'ArrowLeft' ? -1 : 1);
-  if (!reorderPendingFile(idx, to)) return;
+  if (!reorderPendingFile(idx, to, tray)) return;
   ev.preventDefault();
-  renderFilePreviews();
+  renderFilePreviews(tray);
   // After re-render, restore focus to the moved thumb's new slot so rapid
   // arrow presses keep working.
-  const el = document.getElementById('file-preview');
+  const el = document.getElementById(tray.previewId);
   if (!el) return;
   const next = el.querySelector('.file-thumb[data-idx="' + to + '"]');
   if (next) next.focus();
 }
 
-function renderFilePreviews() {
-  const el = document.getElementById('file-preview');
+function renderFilePreviews(tray = mainTray) {
+  const el = document.getElementById(tray.previewId);
   if (!el) return;
-  el.innerHTML = composer.pendingFiles.map((entry, i) => {
+  el.innerHTML = tray.files.map((entry, i) => {
     const overlay =
       entry.status === 'uploading' ? '<div class="upload-status uploading"></div>' :
       entry.status === 'error' ? '<div class="upload-status error" title="' + escAttr(entry.error || 'upload failed') + '" data-action="upload-retry">\u21bb</div>' :
@@ -434,6 +513,9 @@ function renderFilePreviews() {
 export {
   ORIENT_MAX_WAIT_MS,
   awaitPendingOrients,
+  clearFiles,
+  createFileTray,
+  filesBlockSend,
   handleFiles,
   maybeAutoOrient,
   onThumbDragEnd,
@@ -446,5 +528,6 @@ export {
   removeFile,
   renderFilePreviews,
   retryUpload,
+  trayOf,
 };
 

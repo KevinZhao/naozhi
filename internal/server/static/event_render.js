@@ -250,6 +250,8 @@ function defaultTextContentHtml(e) {
 // <invoke …> into a text turn) behind a collapsed warning instead of
 // breaking the bubble; esc() keeps it inert.
 function textOrUserContentHtml(e, cleanRaw) {
+  // Pictures sent with no text: the thumbnails are the whole bubble.
+  if (!cleanRaw && e.images && e.images.length > 0) return '';
   const leak = stripLeakedToolCalls(cleanRaw);
   if (!leak) return renderMd(cleanRaw || e.type);
   return renderMd(leak.prose || e.type) +

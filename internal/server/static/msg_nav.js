@@ -4,7 +4,7 @@
 import { selection, sessionList } from './state.js';
 import { esc } from './nz_util.js';
 import { shell } from './shell.js';
-import { handleFiles } from './composer_files.js';
+import { handleFiles, trayOf } from './composer_files.js';
 
 // --- Message navigation ---
 let navPopoverCloseHandler = null;
@@ -200,19 +200,22 @@ function navShowList() {
   attachNavScroll();
 })();
 
-// Paste handler for #msg-input:
+// Paste handler for #msg-input and the Planner's #pl-input:
 //   1. Image files on the clipboard (screenshot Cmd/Ctrl+V, "copy image" from
-//      another app) are routed to handleFiles so they land in pendingFiles and
-//      ride the same upload / file_ids path as the paperclip button. Without
-//      this branch the browser's default paste embeds the image as
-//      `<img src="data:...">` inside the contenteditable — `innerText.trim()`
-//      drops it silently so the send ends up carrying neither text nor
-//      file_ids, and Claude never sees the image the user thought they sent.
+//      another app) are routed to handleFiles so they land in that input's
+//      attachments and ride the same upload / file_ids path as the paperclip
+//      button. Without this branch the browser's default paste embeds the
+//      image as `<img src="data:...">` inside the contenteditable —
+//      `innerText.trim()` drops it silently so the send ends up carrying
+//      neither text nor file_ids, and Claude never sees the image the user
+//      thought they sent (a textarea drops it outright).
 //   2. Plain text is forced in via execCommand('insertText') so rich
-//      formatting from Word / web pages doesn't leak into the contenteditable.
+//      formatting from Word / web pages doesn't leak into the contenteditable;
+//      a textarea takes plain text by itself.
 document.addEventListener('paste', function(e) {
   const t = e.target;
-  if (!t || !t.closest || !t.closest('#msg-input')) return;
+  const box = t && t.closest ? t.closest('#msg-input, #pl-input') : null;
+  if (!box) return;
   const cd = e.clipboardData || window.clipboardData;
   if (!cd) return;
 
@@ -236,9 +239,10 @@ document.addEventListener('paste', function(e) {
   }
   if (imageFiles.length > 0) {
     e.preventDefault();
-    handleFiles(imageFiles);
+    handleFiles(imageFiles, trayOf(box));
     return;
   }
+  if (box.id !== 'msg-input') return;
 
   const text = cd.getData('text/plain');
   if (!text) return;

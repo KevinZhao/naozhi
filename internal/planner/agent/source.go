@@ -111,6 +111,6 @@ func (a *Agent) Wake(src Source, block string) error {
 	}
 	// The block leads: the logged bubble keeps only the message's head, and
 	// the page marks the turn by it.
-	_, err := turns.SubmitPlanner(Key, src, block+"\n\n"+a.Snapshot(), opts, nil)
+	_, err := turns.SubmitPlanner(Key, src, block+"\n\n"+a.Snapshot(), nil, opts, nil)
 	return err
 }

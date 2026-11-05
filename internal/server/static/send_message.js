@@ -12,7 +12,7 @@ import { featureForCurrent } from './features.js';
 import { EVENT_DIVIDER_GAP_MS, getMsgValue, lastDividerTime, persistPending, removeSidebarCard, setMsgValue, showAPIError, showAuthModal, showNetworkError, stickEventsBottom, timeDividerHtml } from './utilities.js';
 import { discoveredKey, dropDiscovered, sid } from './session_ident.js';
 import { eventHtml } from './event_render.js';
-import { awaitPendingOrients, renderFilePreviews } from './composer_files.js';
+import { awaitPendingOrients, filesBlockSend, renderFilePreviews } from './composer_files.js';
 import { navSync } from './msg_nav.js';
 import { shell } from './shell.js';
 
@@ -184,29 +184,12 @@ async function sendMessage() {
   }
 }
 
-// composerSendBlocked runs the two checks sendComposerTurn still needs after
+// composerSendBlocked runs the checks sendComposerTurn still needs after
 // validateComposerForSend: a failed upload must be removed/retried, and the
-// shim's 12 MB NDJSON line cap (base64 inflates ~1.33×, so raw image bytes
-// must stay under ~9 MB) needs a clear toast. PDFs are excluded — they
-// travel as file_ref, so a mixed image+PDF send must not trip the cap on
-// the PDF's own 20 MB limit.
+// image batch must fit the shim's line cap (filesBlockSend, shared with the
+// Planner's composer).
 function composerSendBlocked() {
-  const failed = composer.pendingFiles.filter(f => f.status === 'error');
-  if (failed.length > 0) {
-    const detail = failed[0].error || '';
-    const tail = detail ? '（' + detail.slice(0, 120) + '）' : '';
-    showToast('图片上传失败' + tail + '，请移除或重试', 'error');
-    return true;
-  }
-  const totalBytes = composer.pendingFiles.reduce((n, f) => {
-    if (f.kind === 'pdf' || f.serverKind === 'file_ref') return n;
-    return n + (f.normalizedSize || f.file.size || 0);
-  }, 0);
-  if (totalBytes > 9 * 1024 * 1024) {
-    showToast('图片总大小 ' + Math.ceil(totalBytes / 1024 / 1024) + ' MB 超过 9 MB 上限，请分批发送或减少图片', 'warning');
-    return true;
-  }
-  return false;
+  return filesBlockSend();
 }
 
 // newSendID returns a fresh send ID ('s' + 32 hex). getRandomValues, not

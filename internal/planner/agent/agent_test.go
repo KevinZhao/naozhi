@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/planner/journal"
@@ -88,12 +89,16 @@ const refKey = "dashboard:direct:a:general"
 type fakeTurns struct {
 	reply   string
 	sent    []string
+	images  [][]clievent.Attachment
+	srcs    []Source
 	notes   []string
 	sources []Source
 }
 
-func (f *fakeTurns) SubmitPlanner(_ string, _ Source, text string, _ sessionview.AgentOpts, done func(string, error)) (bool, error) {
+func (f *fakeTurns) SubmitPlanner(_ string, src Source, text string, images []clievent.Attachment, _ sessionview.AgentOpts, done func(string, error)) (bool, error) {
 	f.sent = append(f.sent, text)
+	f.images = append(f.images, images)
+	f.srcs = append(f.srcs, src)
 	if done != nil {
 		done(f.reply, nil)
 	}
@@ -418,7 +423,7 @@ func TestSendRef(t *testing.T) {
 		a, _ := newTestAgent(t, &fakeSessions{}, &now)
 		turns := &fakeTurns{}
 		a.turns = turns
-		err := a.Send(tc.text, tc.ref)
+		err := a.Send(tc.text, tc.ref, nil)
 		if !errors.Is(err, tc.err) {
 			t.Fatalf("Send(%q, %q) = %v, want %v", tc.text, tc.ref, err, tc.err)
 		}
@@ -428,6 +433,56 @@ func TestSendRef(t *testing.T) {
 		if len(turns.sent) != 1 || !strings.HasPrefix(turns.sent[0], tc.head) || !strings.HasSuffix(turns.sent[0], tc.tail) {
 			t.Errorf("Send(%q, %q) sent %q, want %q … %q", tc.text, tc.ref, turns.sent, tc.head, tc.tail)
 		}
+	}
+}
+
+// TestSendImages: the pictures sent with a message reach the turn with the
+// snapshot-led text, in order and untouched; with them an empty text is a
+// message, and a handed-over session carries them.
+func TestSendImages(t *testing.T) {
+	now := time.Now()
+	imgs := []clievent.Attachment{
+		{Kind: clievent.KindImageInline, MimeType: "image/png", Data: []byte("png-1")},
+		{Kind: clievent.KindImageInline, MimeType: "image/jpeg", Data: []byte("jpg-2")},
+	}
+	for _, tc := range []struct {
+		name, text, ref string
+		src             Source
+		tail            string
+	}{
+		{name: "text and images", text: "看图", src: SourceUser, tail: "</naozhi-snapshot>\n\n看图"},
+		{name: "images only", src: SourceUser, tail: "</naozhi-snapshot>"},
+		{name: "handed over", text: "这个页面", ref: refKey, src: SourceHandover, tail: "</naozhi-snapshot>\n\n这个页面"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := newTestAgent(t, &fakeSessions{}, &now)
+			turns := &fakeTurns{}
+			a.turns = turns
+			if err := a.Send(tc.text, tc.ref, imgs); err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			if len(turns.sent) != 1 || !strings.HasSuffix(turns.sent[0], tc.tail) {
+				t.Fatalf("sent %q, want … %q", turns.sent, tc.tail)
+			}
+			if turns.srcs[0] != tc.src {
+				t.Errorf("source %q, want %q", turns.srcs[0], tc.src)
+			}
+			got := turns.images[0]
+			if len(got) != len(imgs) {
+				t.Fatalf("turn got %d images, want %d", len(got), len(imgs))
+			}
+			for i := range imgs {
+				if got[i].MimeType != imgs[i].MimeType || string(got[i].Data) != string(imgs[i].Data) {
+					t.Errorf("image %d = %s %q, want %s %q", i, got[i].MimeType, got[i].Data, imgs[i].MimeType, imgs[i].Data)
+				}
+			}
+		})
+	}
+	// Without images an empty text is still nothing to send.
+	a, _ := newTestAgent(t, &fakeSessions{}, &now)
+	a.turns = &fakeTurns{}
+	if err := a.Send(" ", "", nil); !errors.Is(err, ErrEmpty) {
+		t.Fatalf("Send of nothing = %v, want ErrEmpty", err)
 	}
 }
 

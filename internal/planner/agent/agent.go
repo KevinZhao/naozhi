@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -103,10 +104,11 @@ type Sessions interface {
 
 // Turns is the gateway's turn entry for the Planner.
 type Turns interface {
-	// SubmitPlanner runs text from src as a turn on key, spawning it with
-	// opts; done (nil for none) gets the reply, or the error the turn ended
-	// with. queued is text waiting behind a turn already running.
-	SubmitPlanner(key string, src Source, text string, opts sessionview.AgentOpts, done func(reply string, err error)) (queued bool, err error)
+	// SubmitPlanner runs text and images (nil for none) from src as a turn
+	// on key, spawning it with opts; done (nil for none) gets the reply, or
+	// the error the turn ended with. queued is text waiting behind a turn
+	// already running.
+	SubmitPlanner(key string, src Source, text string, images []clievent.Attachment, opts sessionview.AgentOpts, done func(reply string, err error)) (queued bool, err error)
 	// PlannerTurnSources is the sources of key's requests in flight,
 	// sorted (TurnSources); none between turns.
 	PlannerTurnSources(key string) []Source
@@ -568,7 +570,7 @@ func (a *Agent) sendHandoff(day string, summary []byte, opts sessionview.AgentOp
 		a.mu.Lock()
 		turns := a.turns
 		a.mu.Unlock()
-		if _, err := turns.SubmitPlanner(Key, SourceShift, handoffMessage(day, string(summary)), opts, nil); err != nil {
+		if _, err := turns.SubmitPlanner(Key, SourceShift, handoffMessage(day, string(summary)), nil, opts, nil); err != nil {
 			slog.Warn("planner: send handoff to new session", "err", err)
 			return
 		}
@@ -595,7 +597,7 @@ func (a *Agent) askHandoff(ctx context.Context) string {
 		err  error
 	}
 	ch := make(chan reply, 1)
-	queued, err := turns.SubmitPlanner(Key, SourceShift, handoffPrompt, opts, func(text string, err error) {
+	queued, err := turns.SubmitPlanner(Key, SourceShift, handoffPrompt, nil, opts, func(text string, err error) {
 		ch <- reply{text, err}
 	})
 	if err != nil {
@@ -626,8 +628,10 @@ func (a *Agent) askHandoff(ctx context.Context) string {
 // Send takes a user message to the Planner: it puts the snapshot before the
 // text, submits the turn and shows the receipt. ref is a session the user
 // hands over with it (交给 Planner), "" for none; its block goes before the
-// snapshot, and with one the text may be empty.
-func (a *Agent) Send(text, ref string) error {
+// snapshot, and with one the text may be empty. images are the pictures
+// sent with it, which also make an empty text a message; they ride the turn
+// as the CLI's content blocks, so the Planner sees them without a tool.
+func (a *Agent) Send(text, ref string, images []clievent.Attachment) error {
 	if !a.cfg.Enabled {
 		return ErrOff
 	}
@@ -639,7 +643,7 @@ func (a *Agent) Send(text, ref string) error {
 		return ErrStopped
 	case turns == nil:
 		return ErrNotReady
-	case text == "" && ref == "":
+	case text == "" && ref == "" && len(images) == 0:
 		return ErrEmpty
 	case len(text) > maxMessageBytes:
 		return ErrTooLong
@@ -655,7 +659,7 @@ func (a *Agent) Send(text, ref string) error {
 		}
 		head = sessionRef(ref, a.cfg.Sessions.Name(ref), a.cfg.Sessions.Label(ref)) + "\n"
 	}
-	if _, err := turns.SubmitPlanner(Key, src, strings.TrimSpace(head+a.Snapshot()+"\n\n"+text), opts, nil); err != nil {
+	if _, err := turns.SubmitPlanner(Key, src, strings.TrimSpace(head+a.Snapshot()+"\n\n"+text), images, opts, nil); err != nil {
 		return err
 	}
 	turns.PlannerReceipt(Key, ReceiptText)
@@ -689,7 +693,7 @@ func (a *Agent) tell(src Source, text string) error {
 	case turns == nil:
 		return ErrNotReady
 	}
-	_, err := turns.SubmitPlanner(Key, src, "<naozhi-receipt>\n"+strings.TrimSpace(text)+"\n</naozhi-receipt>", opts, nil)
+	_, err := turns.SubmitPlanner(Key, src, "<naozhi-receipt>\n"+strings.TrimSpace(text)+"\n</naozhi-receipt>", nil, opts, nil)
 	return err
 }
 

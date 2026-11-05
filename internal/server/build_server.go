@@ -159,7 +159,6 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		accessProfilesH: accessprofile.New(router.Backends(), opts.Config.Path, opts.Config.AccessProfileSecretsDir),
 		cronH:           buildCronHandlers(opts, claudeDir),
 		transcribeH:     buildTranscribeHandler(opts),
-		plannerH:        dashplanner.New(opts.Planner, opts.Briefs, opts.Scout),
 		inboxH:          buildInboxHandler(opts),
 		tasksH:          buildTasksHandler(opts),
 	}
@@ -180,6 +179,21 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	// line s.hub is non-nil for the Server's whole life, which is what lets the
 	// call sites below drop their `if s.hub != nil` guards.
 	s.buildDashboard(hs)
+
+	// After buildDashboard: a message to the Planner takes its uploads from
+	// the store the session send uses.
+	hs.plannerH = dashplanner.New(opts.Planner, opts.Briefs, opts.Scout, plannerFiles{
+		store:        s.uploadStore,
+		auth:         s.auth,
+		trustedProxy: s.auth.TrustedProxy,
+		workspace: func() string {
+			if opts.Planner == nil {
+				return ""
+			}
+			return opts.Planner.Opts().Workspace
+		},
+		imageDir: plannerImageDir(opts.StateDir),
+	})
 
 	// Retired-store load is best-effort (parse error ⇒ empty store); it is
 	// persisted only when StateDir is configured.
