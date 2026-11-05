@@ -299,7 +299,7 @@ func (n *Notifier) HandleHealth(ev health.Event) {
 			Why:   fmt.Sprintf("%d 个单元出现同一类错误：%s", len(f.Units), strings.Join(names, "、"))})
 	case ev.Transition != nil && ev.Transition.Unit.State == health.Failed:
 		u := ev.Transition.Unit
-		if n.inFault(u, ev.At) {
+		if ev.Transition.InFault {
 			return
 		}
 		why := "失败"
@@ -309,21 +309,6 @@ func (n *Notifier) HandleHealth(ev health.Event) {
 		n.Add(Item{Kind: KindError, Level: LevelTimely, Unit: u.ID, WS: u.Workspace, Source: "failed:" + u.ID,
 			Title: n.name(u.ID) + " 失败", Why: why})
 	}
-}
-
-// inFault reports whether u's failure merges into a systemic fault: at least
-// health.FaultMin units failed with its class within health.FaultWindow.
-func (n *Notifier) inFault(u health.Unit, at time.Time) bool {
-	if u.ErrClass == health.ErrNone || u.ErrClass == health.ErrOther || n.health == nil {
-		return false
-	}
-	c := 0
-	for _, o := range n.health.Snapshot().Units {
-		if o.State == health.Failed && o.ErrClass == u.ErrClass && at.Sub(o.Since) <= health.FaultWindow {
-			c++
-		}
-	}
-	return c >= health.FaultMin
 }
 
 // WatchPeer is the health loop's check on this pipeline (§3.8: a stopped

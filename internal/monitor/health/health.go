@@ -166,9 +166,12 @@ type Event struct {
 }
 
 // Transition is a unit entering a new state; Unit is the unit after it.
+// InFault is set on a failure that merges into a systemic fault: FaultMin or
+// more units, this one among them, failed with its class within FaultWindow.
 type Transition struct {
-	From State
-	Unit Unit
+	From    State
+	Unit    Unit
+	InFault bool
 }
 
 // Fault is FaultMin or more units failing with one error class within
@@ -232,9 +235,10 @@ type unit struct {
 	// index.json row, kept for when its node is down and lists it no more.
 	dir   string
 	index *IndexEntry
-	// held is when a session failed before a restart, while it is still
-	// held failed (holdFailure); zero otherwise.
+	// held is when a unit failed or stalled before a restart, while it is
+	// still held in heldState (hold); zero otherwise.
 	held         time.Time
+	heldState    State
 	heldEvidence string
 	heldClass    ErrorClass
 }
@@ -410,8 +414,8 @@ func (m *Machine) Reconcile() {
 		u := m.units[f.ID]
 		if u == nil {
 			u = &unit{Unit: Unit{ID: f.ID, State: Unknown, Since: now}, first: true}
-			if j := m.last[f.ID]; j.State == Failed && f.Kind == KindSession {
-				u.held, u.heldEvidence, u.heldClass = j.At, j.Evidence, j.ErrClass
+			if j := m.last[f.ID]; j.State == Failed && f.Kind == KindSession || j.State == Stalled {
+				u.held, u.heldState, u.heldEvidence, u.heldClass = j.At, j.State, j.Evidence, j.ErrClass
 			}
 			m.units[f.ID] = u
 		}
@@ -422,7 +426,7 @@ func (m *Machine) Reconcile() {
 		u.Workspace = m.workspaceFor(f)
 		u.LastActive = f.LastActive
 		state, evidence, class := m.judge(f, now, mono)
-		state, evidence, class = u.holdFailure(f, state, evidence, class)
+		state, evidence, class = u.hold(f, state, evidence, class)
 		if ev, ok := m.step(u, state, evidence, class, now); ok {
 			events = append(events, ev)
 		}
@@ -432,7 +436,14 @@ func (m *Machine) Reconcile() {
 			delete(m.units, id)
 		}
 	}
-	events = append(events, m.faultEvents(now)...)
+	faults, recent := m.faultEvents(now)
+	for _, ev := range events {
+		if t := ev.Transition; t != nil && t.Unit.State == Failed {
+			ids := recent[t.Unit.ErrClass]
+			t.InFault = len(ids) >= FaultMin && slices.Contains(ids, t.Unit.ID)
+		}
+	}
+	events = append(events, faults...)
 
 	snap := Snapshot{At: now, Units: make([]Unit, 0, len(m.units))}
 	for _, u := range m.units {
@@ -555,7 +566,7 @@ func (m *Machine) step(u *unit, state State, evidence string, class ErrorClass, 
 	}
 	u.State, u.Evidence, u.ErrClass, u.Since = state, evidence, class, now
 	if first && from == state && !u.held.IsZero() {
-		u.Since = u.held // the failure the journal recorded, not a new one
+		u.Since = u.held // the state the journal recorded, not a new one
 	}
 	if from == state || first && from == Unknown && state.healthy() {
 		return Event{}, false
@@ -592,16 +603,19 @@ func (m *Machine) judge(f *Fact, now time.Time, mono time.Duration) (State, stri
 	return Idle, "", ErrNone
 }
 
-// holdFailure keeps a session that failed before a restart failed while
-// nothing happened to it since: its death reason does not survive the
-// restart, so it would read idle. Anything else judged, or any activity
-// after the failure, lets it go for good.
-func (u *unit) holdFailure(f *Fact, state State, evidence string, class ErrorClass) (State, string, ErrorClass) {
+// hold keeps a unit in the state it failed or stalled in before a restart
+// while nothing happened to it since. A session's death reason does not
+// survive the restart, so it would read idle; a workflow's quiet restarts
+// from the baseline, so it would read active. Anything else judged, or any
+// activity or observation after the record, lets it go for good.
+func (u *unit) hold(f *Fact, state State, evidence string, class ErrorClass) (State, string, ErrorClass) {
 	if u.held.IsZero() {
 		return state, evidence, class
 	}
-	if state == Idle && !f.LastActive.After(u.held) {
-		return Failed, u.heldEvidence, u.heldClass
+	switch {
+	case u.heldState == Failed && state == Idle && !f.LastActive.After(u.held),
+		u.heldState == Stalled && state == Active && f.Workflow != "" && !f.WorkflowSeen.After(u.held):
+		return u.heldState, u.heldEvidence, u.heldClass
 	}
 	u.held = time.Time{}
 	return state, evidence, class
@@ -624,9 +638,10 @@ func (m *Machine) trackNodes(down map[string]bool, mono time.Duration) {
 // faultEvents opens a systemic fault for each error class FaultMin units
 // entered within FaultWindow, and resolves an open one once no unit has or
 // is about to confirm its class. ErrOther never merges: two unrelated
-// failures share it.
-func (m *Machine) faultEvents(now time.Time) []Event {
-	recent := map[ErrorClass][]string{}
+// failures share it. recent are the units per class that failed within
+// FaultWindow.
+func (m *Machine) faultEvents(now time.Time) (out []Event, recent map[ErrorClass][]string) {
+	recent = map[ErrorClass][]string{}
 	current := map[ErrorClass]bool{}
 	for _, u := range m.units {
 		if u.State != Failed {
@@ -643,7 +658,6 @@ func (m *Machine) faultEvents(now time.Time) []Event {
 			recent[u.ErrClass] = append(recent[u.ErrClass], u.ID)
 		}
 	}
-	var out []Event
 	for c, ids := range recent {
 		if len(ids) >= FaultMin && !m.faults[c] {
 			m.faults[c] = true
@@ -658,7 +672,7 @@ func (m *Machine) faultEvents(now time.Time) []Event {
 		}
 	}
 	slices.SortFunc(out, func(a, b Event) int { return cmp.Compare(a.Fault.Class, b.Fault.Class) })
-	return out
+	return out, recent
 }
 
 // record writes ev to the journal.
