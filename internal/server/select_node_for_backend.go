@@ -88,6 +88,15 @@ func remoteBackend(ctx context.Context, nc node.NodeFetcher, backendID string) e
 	return fmt.Errorf("%w：%s", ErrNodeLacksBackend, backendID)
 }
 
+// sendPicksChecker is a Conn whose link may not carry a send's backend or
+// resume pick (a ReverseConn to a node predating CapSendBackend); a direct
+// HTTP node always carries them.
+type sendPicksChecker interface {
+	CheckSendPicks(node.SendRequest) error
+}
+
+var _ sendPicksChecker = (*node.ReverseConn)(nil)
+
 // ErrAccessProfileRemote is returned when a session bound to a non-default
 // access profile is dispatched to a remote node. The access-profile env
 // overlay (and any *_FILE secret) is host-local and never crosses the

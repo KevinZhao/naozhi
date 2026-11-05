@@ -299,6 +299,15 @@ func (c *ReverseConn) FetchBackends(ctx context.Context) (json.RawMessage, error
 	return c.rpc(ctx, "fetch_backends", nil)
 }
 
+// CheckSendPicks is Send's refusal of a backend or resume pick this link
+// cannot carry, for a caller that must answer before the RPC goes out.
+func (c *ReverseConn) CheckSendPicks(req SendRequest) error {
+	if (req.Backend != "" || req.ResumeID != "") && !c.meta.HasCap(CapSendBackend) {
+		return ErrSendBackendUnsupported
+	}
+	return nil
+}
+
 // Send relays req as the "send" RPC. An older node parses the params with a
 // plain Unmarshal and would drop a field it does not know, so backend and
 // resume_id go only to a node advertising CapSendBackend (else the send is
@@ -310,8 +319,8 @@ func (c *ReverseConn) Send(ctx context.Context, req SendRequest) (SendResult, er
 		params["workspace"] = req.Workspace
 	}
 	if req.Backend != "" || req.ResumeID != "" {
-		if !c.meta.HasCap(CapSendBackend) {
-			return SendResult{}, ErrSendBackendUnsupported
+		if err := c.CheckSendPicks(req); err != nil {
+			return SendResult{}, err
 		}
 		if req.Backend != "" {
 			params["backend"] = req.Backend
