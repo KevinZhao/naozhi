@@ -128,8 +128,8 @@ type Runner struct {
 
 	// doneTold is the tasks whose done block got the reminder of the
 	// promises citing them; endTold the tasks told of a turn that ended
-	// without a report, until the next report. Only the handling goroutine
-	// touches them.
+	// without a report, until the next report or the Planner's doing block.
+	// Only the handling goroutine touches them.
 	doneTold map[string]bool
 	endTold  map[string]bool
 }
@@ -300,7 +300,8 @@ func (r *Runner) later(e ended) {
 // turn ended with no report reaching the Planner since its previous turn
 // ended: its last reply, and how to mark it. A busy Planner may still be
 // holding the report, so the check waits for its turn to end, up to endWait.
-// A task gets one such receipt until it reports again.
+// A task gets one such receipt until it reports again or the Planner marks
+// it doing.
 func (r *Runner) checkEnded(e ended) {
 	defer func() {
 		if p := recover(); p != nil {
@@ -445,6 +446,14 @@ func (r *Runner) checkReports(rep reply, statused map[string]string) {
 	}
 	for _, k := range reported {
 		delete(r.endTold, k)
+	}
+	// A doing block answers the turn-end receipt: the task's next turn
+	// that ends unreported is told again, so a session that backgrounded
+	// its work and finished in a later turn is not left 进行中.
+	for k, s := range statused {
+		if s == string(task.Doing) {
+			delete(r.endTold, k)
+		}
 	}
 	keys := slices.Clone(reported)
 	for _, k := range slices.Sorted(maps.Keys(statused)) {

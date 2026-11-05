@@ -511,6 +511,45 @@ func TestTaskEndedAcrossShiftChange(t *testing.T) {
 	}
 }
 
+// TestTaskEndedAfterDoing: a session that backgrounds its work ends a turn
+// unreported, the Planner marks it doing, and the turn that finishes the
+// work, unreported too, gets the Planner a second receipt: the task does
+// not stay 进行中.
+func TestTaskEndedAfterDoing(t *testing.T) {
+	r, g, _, side, dir := newRunner(t)
+	r.grace = 0
+	r.cfg.Tasks = task.New(task.Config{Sessions: side})
+	r.cfg.Reports = func(time.Time, time.Time) []string { return nil }
+	end := func(text string) {
+		t.Helper()
+		r.Result(g.spawned[0], text)
+		select {
+		case e := <-r.endCh:
+			r.checkEnded(e)
+		case <-time.After(5 * time.Second):
+			t.Fatal("turn end never queued for a check")
+		}
+	}
+	r.Handle(block(`{"type":"dispatch","workspace":"` + filepath.Base(dir) + `","title":"iso 跑测试","model":"","message":"跑一遍测试"}`))
+	key := g.spawned[0]
+	g.told = nil
+
+	end("测试已在后台运行，跑完再看")
+	if len(g.told) != 1 {
+		t.Fatalf("told = %q", g.told)
+	}
+	r.Handle(block(`{"type":"status","task":"` + key + `","state":"doing","why":"测试还在后台跑"}`))
+	g.told = nil
+	end("测试全部通过")
+	if len(g.told) != 1 || !strings.Contains(g.told[0], "测试全部通过") {
+		t.Fatalf("after doing: told = %q", g.told)
+	}
+	r.Handle(block(`{"type":"status","task":"` + key + `","state":"done","why":"它说测试全部通过"}`))
+	if st := r.cfg.Tasks.List()[0]; st.ID != key || st.State != task.Done {
+		t.Errorf("task = %+v, want done", st)
+	}
+}
+
 // TestTaskEndedAcrossRestart: a turn end a restart cut short of its check
 // (the grace, a busy Planner) is checked by the next run, from the sidecar,
 // and only once; a checked one is not checked again.
