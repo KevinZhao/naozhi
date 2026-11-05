@@ -541,6 +541,8 @@ test('通知 cards and the "⋯" menu say only what is needed', async ({ browser
       // Nothing else lives under the column's lists.
       await expect(page.locator('#pl-left .pl-tool')).toHaveCount(0);
       await page.screenshot({ path: test.info().outputPath('planner-cards-' + name + '.png') });
+      // The phone's unfolded left block takes the header's place.
+      if (name === 'mobile') await page.click('#pl-left-toggle');
       await page.click('#pl-more > summary');
       await expect(page.locator('#pl-tools')).toBeVisible();
       if (permission === 'default') {
