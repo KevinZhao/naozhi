@@ -556,12 +556,14 @@ function renderSandboxedBlob(project, node, path, body, blobType) {
 /* A preview showing a file the session is writing re-renders off the
  * session's live events, never on a timer (docs/rfc/planner.md §10.2 ⑤): a
  * Write / Edit event names its target (ev.path, relative to the session's
- * file root). A Bash command writing a log names no path, so a log-like
- * text (.log / .txt) under the session's tree is also refreshed on its other
- * tool calls and at turn end. One refresh FOLLOW_MS after the first matching
- * event, so a burst coalesces, and again on that session's later events up to
- * its turn end (notePreviewEvent). Events are only read, never appended, so a
- * refresh cannot pass for a new turn. */
+ * file root); an HTML preview of a session's file also follows the writes
+ * to the directory it serves (its CSS / JS). A Bash command writing a log
+ * names no path, so a log-like text (.log / .txt) under the session's tree
+ * is also refreshed on its other tool calls and at turn end. One refresh
+ * FOLLOW_MS after the first matching event, so a burst coalesces, and again
+ * on that session's later events up to its turn end (notePreviewEvent).
+ * Events are only read, never appended, so a refresh cannot pass for a new
+ * turn. */
 
 const FOLLOW_MS = 1000;
 // surface ('workbench' | 'files') → { ref: {root, node, path}, refresh, timer, armed }
@@ -577,6 +579,14 @@ function followPreview(surface, ref, refresh) {
 }
 
 function isLogLike(path) { return /\.(log|txt)$/i.test(path || ''); }
+
+// htmlDirOf is the directory an HTML preview serves, its relative CSS, JS
+// and images included, as a path prefix ('' at the root); null for any
+// other file.
+function htmlDirOf(path) {
+  if (!/\.html?$/i.test(path || '')) return null;
+  return path.slice(0, path.lastIndexOf('/') + 1);
+}
 
 // projectFileAbs is the absolute path of a project-rooted ref, or ''.
 function projectFileAbs(ref) {
@@ -594,7 +604,10 @@ function previewHit(key, node, ev, ref) {
   const ws = sd && sd.workspace ? sd.workspace.replace(/\/$/, '') : '';
   const abs = own ? '' : projectFileAbs(ref);
   if (ev.type === 'tool_use' && ev.path) {
-    if (own) return ev.path === ref.path;
+    if (own) {
+      const dir = htmlDirOf(ref.path);
+      return ev.path === ref.path || (dir !== null && ev.path.startsWith(dir));
+    }
     if (!abs || !ws || !abs.endsWith('/' + ev.path)) return false;
     const tree = abs.slice(0, abs.length - ev.path.length - 1);
     return ws === tree || ws.startsWith(tree + '/');

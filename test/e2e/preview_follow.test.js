@@ -59,6 +59,47 @@ test('an HTML output previews with its directory: relative CSS, JS and images lo
   }
 });
 
+test('an HTML preview follows writes to the directory it serves, not to the rest of the tree', async ({ page }) => {
+  const mock = await startMockServer({ ws: true, outputs: [file('site/index.html')] });
+  const site = { ...SITE };
+  let minted = 0;
+  await page.route('**/api/preview', (route) => {
+    minted++;
+    route.fulfill({ contentType: 'application/json', body: JSON.stringify({ url: '/api/preview/tok1/index.html' }) });
+  });
+  await page.route('**/api/preview/tok1/**', (route) => {
+    const u = new URL(route.request().url());
+    const f = site[u.pathname.slice('/api/preview/tok1/'.length)];
+    if (!f) return route.fulfill({ status: 404, body: '' });
+    return route.fulfill({ contentType: f[0], body: f[1], headers: { 'Content-Security-Policy': previewCSP(u.host, 'tok1'), 'Cache-Control': 'no-store' } });
+  });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await page.click(`.session-card[data-key="${A}"]`);
+    const conn = mock.wsConnections[mock.wsConnections.length - 1];
+    await expect.poll(() => conn.messages.filter((m) => m.type === 'subscribe' && m.key === A).length).toBe(1);
+    const event = (ev) => conn.send({ type: 'history', key: A, events: [{ time: Date.now(), uuid: 'pd-' + Math.random(), ...ev }] });
+    await page.click('.main-header .btn-workbench');
+    await page.locator('#wb-outputs .files-row').first().click();
+    const doc = page.frameLocator('#fv-body iframe');
+    await expect(doc.locator('#x')).toHaveCSS('color', 'rgb(255, 0, 0)');
+    expect(minted).toBe(1);
+
+    // A stylesheet outside the served directory leaves it alone.
+    event({ type: 'tool_use', tool: 'Write', summary: 'other/style.css', path: 'other/style.css' });
+    await page.waitForTimeout(1500);
+    expect(minted).toBe(1);
+    // Its own stylesheet changing reloads it.
+    site['css/style.css'] = ['text/css; charset=utf-8', '#x{color:rgb(0,128,0)}'];
+    event({ type: 'tool_use', tool: 'Edit', summary: 'site/css/style.css', path: 'site/css/style.css' });
+    await expect(doc.locator('#x')).toHaveCSS('color', 'rgb(0, 128, 0)');
+    expect(minted).toBe(2);
+  } finally {
+    mock.server.close();
+  }
+});
+
 test('a previewed file follows the session: a write refreshes it, a growing log stays at its end until scrolled up', async ({ page }) => {
   const outputs = [file('notes.md'), file('build.log')];
   const mock = await startMockServer({ ws: true, outputs });
