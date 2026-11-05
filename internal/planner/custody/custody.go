@@ -109,7 +109,7 @@ var (
 	// in custody).
 	ErrNoSession = errors.New("找不到这个会话")
 	// ErrDisabled: custody runs only with the Planner on (Config.Disabled).
-	ErrDisabled = errors.New("Planner 没有开，托管不可用")
+	ErrDisabled = errors.New("托管不可用：Planner 没有开")
 	// ErrIrreversible: what custody would answer for the user cannot be
 	// undone (Irreversible), so it is the user's.
 	ErrIrreversible = errors.New("涉及不可逆的操作，不替你回答")
