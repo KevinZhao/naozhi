@@ -68,6 +68,9 @@ type Hub struct {
 	// tailers is the agentTailer registry behind agent_subscribe /
 	// agent_unsubscribe; initialised by NewHub, torn down in Shutdown.
 	tailers *tailerRegistry
+
+	// viewing takes the viewing frames (handleViewing); nil drops them.
+	viewing ViewingSink
 }
 
 // HubOptions holds configuration for a Hub.
@@ -110,6 +113,9 @@ type HubOptions struct {
 	// are required: NewHub panics on either being nil.
 	Engine      *sendEngine
 	Broadcaster *wsBroadcaster
+	// Viewing is where the viewing frames go (custody.Engine); nil drops
+	// them.
+	Viewing ViewingSink
 }
 
 // NewHub creates a new WebSocket hub around the engine and broadcaster
@@ -139,6 +145,7 @@ func NewHub(opts HubOptions) *Hub {
 		scheduler:   opts.Scheduler,
 		admit:       newConnAdmission(opts),
 		uploadStore: opts.UploadStore,
+		viewing:     opts.Viewing,
 		ctx:         ctx,
 		cancel:      cancel,
 
@@ -160,6 +167,11 @@ func (h *Hub) unregister(c *wsClient) {
 	unsubs, removed := h.subs.remove(c)
 	for _, unsub := range unsubs {
 		unsub()
+	}
+	// Not guarded on removed: readPump's own unregister runs after the last
+	// viewing frame it took, and a closed tab must not stay "at" a session.
+	if h.viewing != nil {
+		h.viewing.DropViewer(c.viewer)
 	}
 	if removed {
 		// Guarded on `removed` so a double-unregister cannot drive the

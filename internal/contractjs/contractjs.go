@@ -44,7 +44,7 @@ export const NZ_CONTRACT = Object.freeze({
 	for _, typ := range []wsproto.MsgType{
 		wsproto.TypeAuth, wsproto.TypeSubscribe, wsproto.TypeUnsubscribe,
 		wsproto.TypeSend, wsproto.TypeInterrupt, wsproto.TypePing,
-		wsproto.TypeAgentSubscribe, wsproto.TypeAgentUnsubscribe,
+		wsproto.TypeAgentSubscribe, wsproto.TypeAgentUnsubscribe, wsproto.TypeViewing,
 	} {
 		types = append(types, string(typ))
 	}

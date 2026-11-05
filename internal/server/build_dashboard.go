@@ -124,5 +124,6 @@ func (s *Server) buildWSStack(w *wiring) *Hub {
 		ParentCtx:   s.appCtx,
 		Engine:      w.engine,
 		Broadcaster: w.bcast,
+		Viewing:     w.viewing,
 	})
 }

@@ -77,6 +77,10 @@ type wsClient struct {
 	// path (releaseOwnerFor) and readPump's send path, hence the atomic
 	// pointer. nil reads as "" via uploadOwnerKey.
 	uploadOwner atomic.Pointer[string]
+	// viewer names this connection to Hub.viewing; viewing is the session
+	// it last reported open, touched by readPump only (handleViewing).
+	viewer  string
+	viewing string
 }
 
 // uploadOwnerKey returns the current upload-store owner key, "" when unset.
@@ -279,6 +283,11 @@ func (c *wsClient) readPump() {
 				continue
 			}
 			c.hub.handleAgentUnsubscribe(c, msg)
+		case string(wsproto.TypeViewing):
+			if !c.authenticated.Load() {
+				continue
+			}
+			c.hub.handleViewing(c, msg)
 		}
 	}
 }

@@ -1,7 +1,9 @@
 // session_notes.js — the gateway's side notes in the session view
 // (docs/rfc/planner.md §15.3 ③): the session's health entering 待你回复 /
 // 停滞 / 失败 and recovering, its 通知 items opening and closing, the Planner
-// dispatching it and its reports to the Planner. GET /api/sessions/notes
+// dispatching it, its reports to the Planner and what custody did on it
+// (switched, held back, stopped, a retry coming; a message it sent is its
+// own bubble). GET /api/sessions/notes
 // lists them (read back from the Planner journal, so a restart keeps them)
 // and session_note frames add the new ones. Shown to you only: nothing here
 // reaches the CLI.
@@ -46,6 +48,23 @@ const notes = {
 
 const stateLabel = (s) => (HEALTH_STATES[s] || {}).label || s;
 
+// CUSTODY_BY says who switched custody (custody.By*); the user's goes unsaid.
+const CUSTODY_BY = { planner: '（Planner）', auto: '（自动）' };
+
+// custodyBody is a custody note's icon, tone and text; a message custody
+// sent shows as its bubble, not a note.
+function custodyBody(n) {
+  const icon = '⚙';
+  switch (n.event) {
+    case 'on': return { icon, tone: 'planner', text: '托管：已打开' + (CUSTODY_BY[n.by] || '') };
+    case 'off': return { icon, tone: 'planner', text: '托管：已关闭' + (CUSTODY_BY[n.by] || '') };
+    case 'deferred': return { icon, tone: 'planner', text: '托管：已暂缓（' + (n.evidence || '你在看') + '）' };
+    case 'stopped': return { icon, tone: 'warn', text: '托管：已停' + (n.evidence ? ' · ' + n.evidence : '') + '，等你接手' };
+    case 'retry': return { icon, tone: 'planner', text: '托管：出错' + (n.evidence ? '（' + n.evidence + '）' : '') + '，稍后自动重试' + (n.n ? ' · 第 ' + n.n + ' 次' : '') };
+  }
+  return null;
+}
+
 // healthBody is a health note's icon, tone and text: the state entered and
 // its cause, or the recovery.
 function healthBody(n) {
@@ -67,6 +86,7 @@ function noteBody(n, paired) {
     }
     case 'dispatch': return { icon: '↗', tone: 'planner', text: 'Planner 派出' };
     case 'report': return { icon: '↩', tone: 'planner', text: '已向 Planner 汇报' };
+    case 'custody': return custodyBody(n);
   }
   return null;
 }
@@ -97,7 +117,8 @@ function noteHtml(n, paired) {
   const b = noteBody(n, paired);
   if (!b) return '';
   const h = paired || n;
-  const ev = evidenceText(h.evidence, h.error_class);
+  // A custody note's evidence is its reason, already in its text.
+  const ev = n.kind === 'custody' ? '' : evidenceText(h.evidence, h.error_class);
   return '<div class="gw-note gw-' + b.tone + '" role="note" data-note-id="' + escAttr(n.id) + '" data-note-time="' + n.ms + '"' +
     (n.item ? ' data-inbox-item="' + escAttr(n.item) + '"' : '') + (paired ? ' data-paired="1"' : '') +
     ' title="' + escAttr(formatTimeFull(n.ms) + (ev ? ' · ' + ev : '')) + '">' +
@@ -187,6 +208,8 @@ export function startSessionNotes() {
 }
 
 wsm.on(NZ_CONTRACT.WS.session_note, (msg) => {
+  // Custody's notes, on any session, also change what custody.js shows.
+  if (msg.note?.kind === 'custody') nzBus.dispatchEvent(new CustomEvent('custody:note', { detail: msg }));
   if (!msg.note || msg.key !== notes.key || !notes.el) return;
   const el = notes.el;
   const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;

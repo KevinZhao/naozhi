@@ -32,6 +32,7 @@ export const NZ_CONTRACT = Object.freeze({
     subscribed: 'subscribed',
     unsubscribe: 'unsubscribe',
     unsubscribed: 'unsubscribed',
+    viewing: 'viewing',
     workflow_set: 'workflow_set',
     workflow_state: 'workflow_state',
   },

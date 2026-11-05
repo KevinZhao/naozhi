@@ -82,6 +82,7 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		// ~0.5/s sustained, burst 2 covers double-clicks.
 		interruptLimiter: rate.NewLimiter(rate.Every(2*time.Second), 2),
 		done:             make(chan struct{}),
+		viewer:           nextViewer(),
 	}
 	// Apply the owner / initial-auth results resolved before Upgrade (#1326).
 	c.setUploadOwner(uploadOwnerKey)

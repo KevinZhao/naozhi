@@ -2,10 +2,11 @@
 // Layering: never import dashboard.js back; setActivityView is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, sessionList, ui } from './state.js';
-import { HEALTH_STATES, esc, escAttr, evidenceText, fetchJSON, formatBytes, formatDurationShort, showToast } from './nz_util.js';
+import { HEALTH_STATES, esc, escAttr, evidenceText, fetchJSON, formatBytes, formatDurationShort, nzBus, showToast } from './nz_util.js';
 import { discoveredKey, getNodeDisplayName, sid } from './session_ident.js';
 import { wireQuickAskInput } from './auth_modal.js';
 import { shell } from './shell.js';
+import { coverable, custody, custodyChipHtml, refreshCustody } from './custody.js';
 import { cachedCostSummary, costCardTitle, formatAbsTime, formatHomeCost, getMsgValue, mainEmptyHtml, refreshCostSummary, renderServiceOverviewHtml, shortPath, timeAgo } from './utilities.js';
 
 // ===== System view (sysession daemons) =====
@@ -33,6 +34,7 @@ let systemPollTimer = null;
 function fetchSystemAll() {
   fetchSystemDaemons().then(renderSystemView).catch(function () {});
   fetchSystemHealth().then(renderSystemView).catch(function () {});
+  refreshCustody();
 }
 
 function openSystemPanel() {
@@ -203,6 +205,15 @@ function healthUnitName(u, target) {
   return u.id;
 }
 
+// custodyCellHtml is a unit's 托管 cell: the session header's mark for one
+// custody can cover, 关 dimmed when it is off, — for the rest (the Planner,
+// a daemon, a remote or terminal session).
+function custodyCellHtml(u) {
+  if (u.kind !== 'session' && u.kind !== 'cron') return '—';
+  if (!coverable(u.id, 'local')) return '—';
+  return custody.byKey.get(u.id)?.on ? custodyChipHtml(u.id, false) : '<span class="hl-dim">关</span>';
+}
+
 function healthRowHtml(u) {
   const st = HEALTH_STATES[u.state] || { label: u.state || '—', cls: 'off' };
   const target = healthTarget(u);
@@ -230,6 +241,7 @@ function healthRowHtml(u) {
       '<td class="hl-col-ws">' + ws + '</td>' +
       '<td><span class="hl-state ' + st.cls + '"' + (stTitle ? ' title="' + escAttr(stTitle) + '"' : '') + '>' + esc(st.label) + '</span></td>' +
       '<td class="hl-num">' + lastHtml + '</td>' +
+      '<td class="hl-custody">' + custodyCellHtml(u) + '</td>' +
     '</tr>';
 }
 
@@ -248,7 +260,7 @@ function renderSystemHealthHtml() {
   const atHtml = !isNaN(at) ? '<span class="hl-at" title="' + escAttr(formatAbsTime(at)) + '">更新于 ' + esc(timeAgo(at)) + '</span>' : '';
   const table = units.length
     ? '<div class="hl-scroll"><table class="hl-table">' +
-        '<thead><tr><th>会话</th><th class="hl-col-ws">工作区</th><th>健康状态</th><th>最后活动</th></tr></thead>' +
+        '<thead><tr><th>会话</th><th class="hl-col-ws">工作区</th><th>健康状态</th><th>最后活动</th><th class="hl-custody">托管</th></tr></thead>' +
         '<tbody>' + units.map(healthRowHtml).join('') + '</tbody>' +
       '</table></div>'
     : '<div class="system-empty">' + (isNaN(at) ? '健康状态机尚未完成首次对账。' : '暂无会话。') + '</div>';
@@ -372,6 +384,10 @@ function reconcileSelectedNode() {
     try { localStorage.setItem('nz_selectedNode', selection.node); } catch(_) {}
   }
 }
+
+nzBus.addEventListener('custody:changed', function () {
+  if (ui.activeView === 'system') renderSystemView();
+});
 
 export {
   deselectNodeSession,

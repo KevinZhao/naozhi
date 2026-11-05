@@ -12,17 +12,23 @@
 // shown as 已停止); the Planner page's header offers the same 停止 for the
 // session opened in the middle column (isRunningTask, nzBus 'tasks:changed').
 //
+// A dispatched session in custody carries the session header's custody mark
+// (custody.js), not a switch: the header has that.
+//
 // It refetches on inbox_count frames (nzBus 'inbox:count': the health
 // changes that mark 等你 / 失败 open and close items too) and on
 // refreshTasks() (a Planner turn ending, the page's slow tick).
 import { NZ_CONTRACT } from './contract.js';
 import { esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
 import { formatAbsTime, formatMonthDayTime, timeAgo } from './utilities.js';
+import { custody, custodyChipHtml, refreshCustody } from './custody.js';
 
 // Mounted containers; detached ones are dropped at the next refresh.
 const mounts = new Set();
-// byId is the last list read, for isRunningTask.
+// byId is the last list read, for isRunningTask; last is its answer, for a
+// repaint when custody changes.
 let byId = new Map();
+let last = null;
 
 const STATE_LABEL = { doing: '进行中', waiting: '等你', failed: '失败', done: '已完成', remind: '待提醒' };
 const BY_LABEL = { planner: 'Planner 判断', user: '你标记', auto: '自动完成', health: '按健康状态', ended: '会话已结束' };
@@ -76,10 +82,11 @@ function cardHtml(t) {
     if (!isNaN(d.getTime())) meta.push((state === 'remind' ? '到点提醒 ' : '到期 ') + esc(formatMonthDayTime(d.getTime())));
   }
   if (t.close_when) meta.push('完成条件：' + esc(t.close_when));
+  const mark = t.kind === 'session' && !t.retired && state !== 'done' && custody.byKey.get(t.id)?.on ? custodyChipHtml(t.id, false) : '';
   return '<div class="tk-card tk-s-' + state + (state === 'done' ? ' done' : '') + '" data-id="' + escAttr(t.id) + '" role="listitem">' +
       '<div class="tk-top">' +
         (state === 'done' ? '<span class="tk-state">' + (stopped(t) ? STOPPED_WHY : STATE_LABEL.done) + '</span>' : '') +
-        '<div class="tk-title">' + titleHtml(t) + '</div>' +
+        '<div class="tk-title">' + titleHtml(t) + '</div>' + mark +
         (!isNaN(at) ? '<span class="tk-time" title="' + escAttr(formatAbsTime(at)) + '">' + esc(timeAgo(at)) + '</span>' : '') +
       '</div>' +
       '<div class="tk-foot"><div class="tk-meta">' + meta.join('<span aria-hidden="true"> · </span>') + '</div>' + stopHtml(t) + menuHtml(t) + '</div>' +
@@ -112,20 +119,25 @@ export function isRunningTask(id) {
   return !!t && running(t);
 }
 
+// paint puts data in el. The 已完成 fold keeps its open state across
+// refreshes, and a menu in use is not repainted under the pointer.
+function paint(el, data) {
+  if (el.contains(document.activeElement) && document.activeElement.matches('.tk-menu')) return;
+  const wasOpen = !!el.querySelector('.tk-sec-done')?.open;
+  el.innerHTML = tasksHtml(data);
+  const fold = el.querySelector('.tk-sec-done');
+  if (fold && wasOpen) fold.open = true;
+}
+
 async function render(el) {
   try {
     const data = await fetchJSON(NZ_CONTRACT.API.tasks);
     byId = new Map(((data && Array.isArray(data.tasks)) ? data.tasks : []).map((t) => [t.id, t]));
+    last = data;
     nzBus.dispatchEvent(new CustomEvent('tasks:changed'));
     // The Planner conversation's cards name tasks by these titles.
     nzBus.dispatchEvent(new CustomEvent('tasks:list', { detail: data }));
-    // The 已完成 fold keeps its open state across refreshes, and a menu in
-    // use is not repainted under the pointer.
-    if (el.contains(document.activeElement) && document.activeElement.matches('.tk-menu')) return;
-    const wasOpen = !!el.querySelector('.tk-sec-done')?.open;
-    el.innerHTML = tasksHtml(data);
-    const fold = el.querySelector('.tk-sec-done');
-    if (fold && wasOpen) fold.open = true;
+    paint(el, data);
   } catch {
     el.innerHTML = '<h2 class="pl-group-h tk-head">任务</h2><div class="pl-empty">加载失败</div>';
   }
@@ -135,11 +147,13 @@ async function render(el) {
 export function mountTasks(el) {
   el.classList.add('tk-group');
   mounts.add(el);
+  refreshCustody();
   return render(el);
 }
 
 // refreshTasks re-renders every mounted group.
 export function refreshTasks() {
+  refreshCustody();
   const out = [];
   for (const el of mounts) {
     if (!el.isConnected) { mounts.delete(el); continue; }
@@ -168,6 +182,10 @@ function setState(el, id, state) {
 }
 
 nzBus.addEventListener('inbox:count', () => { refreshTasks(); });
+nzBus.addEventListener('custody:changed', () => {
+  if (!last) return;
+  for (const el of mounts) if (el.isConnected) paint(el, last);
+});
 
 registerActions({
   'task-state': (el) => setState(el, el.dataset.id, el.value),

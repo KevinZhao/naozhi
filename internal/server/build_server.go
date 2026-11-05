@@ -125,6 +125,10 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		notes:         opts.Notes,
 		stateDir:      opts.StateDir,
 	}
+	// A nil *custody.Engine must not become a non-nil interface.
+	if opts.Custody != nil {
+		w.viewing = opts.Custody
+	}
 
 	s := &Server{
 		addr:             addr,
