@@ -381,7 +381,10 @@ func TestRetry(t *testing.T) {
 		{"throttled", failed("task:a", health.ErrRateLimit, "", time.Time{}), "API Error: 429", "rate_limit", false},
 		{"refusal", failed("task:a", health.ErrRefusal, "", time.Time{}), "", "refusal", false},
 		{"disk", failed("task:a", health.ErrDiskFull, "", time.Time{}), "", "disk_full", false},
-		{"crash", failed("task:a", health.ErrOther, health.DeathEvidence+"cli_exited code=1", time.Time{}), "", "other", false},
+		{"crash", failed("task:a", health.ErrOther, health.DeathEvidence+cliinfo.DeathReasonCLIExitedCodePrefix+"1", time.Time{}), "", ClassCrash, true},
+		{"killed", failed("task:a", health.ErrNone, health.DeathEvidence+cliinfo.DeathReasonCLIExitedSignalPrefix+"killed", time.Time{}), "", ClassCrash, true},
+		{"crash naming a denial", failed("task:a", health.ErrAuth, health.DeathEvidence+cliinfo.DeathReasonShimEOF, time.Time{}), "AccessDenied", "auth", false},
+		{"startup failure", failed("task:a", health.ErrOther, "startup failed 3 times (other)", time.Time{}), "", "other", false},
 		{"a number in plain text", failed("task:a", health.ErrOther, "", time.Time{}), "wrote 500 lines", "other", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

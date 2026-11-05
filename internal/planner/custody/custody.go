@@ -952,10 +952,12 @@ func (e *Engine) Covers(u health.Unit) bool {
 }
 
 // Error classes custody tells apart beyond health's: a server-side error
-// (5xx, overloaded) and a timeout (an API timeout, the watchdog's kill).
+// (5xx, overloaded), a timeout (an API timeout, the watchdog's kill) and a
+// crash (the process exited abnormally with nothing naming why).
 const (
 	ClassServer  = "server"
 	ClassTimeout = "timeout"
+	ClassCrash   = "crash"
 )
 
 // serverRe finds a 5xx status in an API error.
@@ -966,10 +968,11 @@ var serverPhrases = []string{"internal server error", "internalserverexception",
 	"bad gateway", "gateway timeout", "overloaded"}
 
 // Classify returns u's failure's error class and whether custody retries it:
-// network, region, a server error or a timeout are retried; auth, an
-// expired credential, throttling (429), a refusal, a full disk, an explicit
-// denial and anything unrecognised are the user's. text is the failure's
-// text, read for what health does not classify.
+// network, region, a server error, a timeout or a crash (§5.4 D93: an
+// abnormal exit goes on with --resume) are retried; auth, an expired
+// credential, throttling (429), a refusal, a full disk, an explicit denial
+// and anything else unrecognised are the user's. text is the failure's text,
+// read for what health does not classify.
 func Classify(u health.Unit, text string) (string, bool) {
 	switch u.ErrClass {
 	case health.ErrNetwork, health.ErrRegion:
@@ -998,6 +1001,9 @@ func Classify(u health.Unit, text string) (string, bool) {
 	if apierr.IsEnvelope(text) && serverRe.MatchString(lower) {
 		return ClassServer, true
 	}
+	if strings.HasPrefix(u.Evidence, health.DeathEvidence) {
+		return ClassCrash, true
+	}
 	return cmp.Or(string(u.ErrClass), string(health.ErrOther)), false
 }
 
@@ -1021,6 +1027,8 @@ func ClassLabel(class string) string {
 		return "服务端错误"
 	case ClassTimeout:
 		return "超时"
+	case ClassCrash:
+		return "进程异常退出"
 	}
 	return notify.ClassLabel(health.ErrorClass(class))
 }
