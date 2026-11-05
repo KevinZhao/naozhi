@@ -1,6 +1,7 @@
 package session
 
 import (
+	"github.com/naozhi/naozhi/internal/cli"
 	"testing"
 	"time"
 
@@ -14,25 +15,37 @@ func TestReattachedTurn(t *testing.T) {
 	result := func(text string) string {
 		return `{"type":"result","subtype":"success","result":"` + text + `","session_id":"s1"}`
 	}
+	// after is the request's watermark seq (backlog lines are seqs 1, 2, …);
+	// -1 records none.
 	for _, tc := range []struct {
 		name           string
 		backlog        []string
+		after          int64
 		text           string
 		ended, running bool
 	}{
-		{"ended while down", []string{adoptAssistantLine, result("down")}, "down", true, false},
-		{"still running", []string{result("earlier"), adoptAssistantLine}, "", false, true},
+		{"ended while down", []string{adoptAssistantLine, result("down")}, 1, "down", true, false},
+		// The request's own turn never started: the backlog's result is the
+		// previous turn's, which the last run already acted on.
+		{"previous turn's result", []string{adoptAssistantLine, result("earlier")}, 2, "", false, false},
+		{"no watermark", []string{adoptAssistantLine, result("down")}, -1, "", false, false},
+		{"still running", []string{result("earlier"), adoptAssistantLine}, 1, "", false, true},
 		{"failed while down", []string{adoptAssistantLine,
-			`{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"s1"}`}, "", false, false},
+			`{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"s1"}`}, 1, "", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const key = "planner:main"
-			r, _, _ := reconnectToFakeShim(t, key, 1, tc.backlog)
-			text, ended, running := r.ReattachedTurn(key)
+			r, proc, _ := reconnectToFakeShim(t, key, 1, tc.backlog)
+			now, ok := proc.TurnWatermark()
+			if !ok {
+				t.Fatal("no watermark on the reattached process")
+			}
+			after, known := cli.TurnWatermark{ShimPID: now.ShimPID, Seq: tc.after}, tc.after >= 0
+			text, ended, running := r.ReattachedTurn(key, after, known)
 			if text != tc.text || ended != tc.ended || running != tc.running {
 				t.Errorf("ReattachedTurn = (%q, %v, %v), want (%q, %v, %v)", text, ended, running, tc.text, tc.ended, tc.running)
 			}
-			if _, ended, running := r.ReattachedTurn("planner:none"); ended || running {
+			if _, ended, running := r.ReattachedTurn("planner:none", after, known); ended || running {
 				t.Error("a key with no session reports a turn")
 			}
 		})
