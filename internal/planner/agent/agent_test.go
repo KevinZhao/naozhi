@@ -554,3 +554,21 @@ func TestPromptUpgradeChangesShift(t *testing.T) {
 		t.Errorf("prompt = %d, want %d", got, PromptVersion)
 	}
 }
+
+// TestPromptUpgradeChangesShiftWithUnknownSessionID: a live Planner adopted
+// from a shim before its first turn has no session ID yet but still runs on
+// the old prompt, so it changes shift too.
+func TestPromptUpgradeChangesShiftWithUnknownSessionID(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+	now := time.Date(2026, 11, 5, 19, 22, 0, 0, loc)
+	sess := &fakeSessions{st: SessionState{Exists: true, Alive: true}}
+	a, _ := newTestAgent(t, sess, &now)
+	a.turns = &fakeTurns{reply: "## 进行中\n无"}
+	a.mu.Lock()
+	a.state.Shift, a.state.Prompt = shiftDay(now), PromptVersion-1
+	a.mu.Unlock()
+	a.reconcile(context.Background())
+	if sess.recreated != 1 {
+		t.Fatalf("recreated %d, want 1", sess.recreated)
+	}
+}

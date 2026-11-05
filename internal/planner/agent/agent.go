@@ -440,14 +440,14 @@ func (a *Agent) reconcile(ctx context.Context) {
 		if !st.Running {
 			a.changeShift(ctx, now, shiftDay(now))
 		}
-	case prompt != PromptVersion && st.SessionID != "":
+	case prompt != PromptVersion:
 		// An upgrade changed the system prompt; the resumed conversation
-		// would keep the old one until tomorrow.
+		// would keep the old one until tomorrow. A fresh conversation was
+		// marked above, so this is one started on the old prompt, even when
+		// its session ID is unknown (a shim adopted before its first turn).
 		if !st.Running {
 			a.changeShift(ctx, now, fmt.Sprintf("%s-v%d", shiftDay(now), PromptVersion))
 		}
-	case prompt != PromptVersion:
-		a.markShift(now)
 	case pending != "":
 		a.sendHandoff(pending, nil, opts)
 	}
