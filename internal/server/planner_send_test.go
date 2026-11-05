@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"github.com/naozhi/naozhi/internal/cli"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -139,15 +140,15 @@ func TestSettlePlannerTurns(t *testing.T) {
 			var before plannerTurns
 			before.load(context.Background(), path)
 			// Two requests side by side, cut across by the restart.
-			before.begin(agent.Key, agent.SourceScout)
-			before.begin(agent.Key, agent.SourceScout)
+			before.begin(agent.Key, agent.SourceScout, "")
+			before.begin(agent.Key, agent.SourceScout, "")
 
 			s := &Server{hub: &Hub{engine: &sendEngine{}}}
 			turns := &s.hub.engine.plannerTurns
 			turns.load(context.Background(), path)
 			var replayed string
 			var judged []agent.Source
-			s.SettlePlannerTurns(func(key string) (string, bool, bool) {
+			s.SettlePlannerTurns(func(key string, _ cli.TurnWatermark, _ bool) (string, bool, bool) {
 				if key != agent.Key {
 					t.Errorf("asked about %q", key)
 				}
@@ -159,7 +160,7 @@ func TestSettlePlannerTurns(t *testing.T) {
 			if replayed != tc.wantReplay || !slices.Equal(judged, tc.wantJudged) {
 				t.Errorf("delivered %q judged by %q, want %q by %q", replayed, judged, tc.wantReplay, tc.wantJudged)
 			}
-			turns.begin(agent.Key, agent.SourceUser)
+			turns.begin(agent.Key, agent.SourceUser, "")
 			if got := s.PlannerTurnSources(agent.Key); !slices.Equal(got, tc.wantSources) {
 				t.Errorf("user turn's sources = %q, want %q", got, tc.wantSources)
 			}

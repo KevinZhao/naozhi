@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cliinfo"
 	"github.com/naozhi/naozhi/internal/datadir"
@@ -78,7 +79,12 @@ func (s *Server) PlannerResult(key string) {
 // SettlePlannerTurns settles the Planner requests carried over from the
 // last run (plannerTurns.settle). Called once at startup, after the shims
 // are reattached and the router's result sink is set; deliver is that sink.
-func (s *Server) SettlePlannerTurns(reattached func(key string) (text string, ended, running bool), deliver func(key, text string)) {
+// ReattachedTurn is session.Router.ReattachedTurn: how the turn in flight
+// when the last run ended stands on key's reattached CLI, ended only for a
+// result past after.
+type ReattachedTurn func(key string, after cli.TurnWatermark, known bool) (text string, ended, running bool)
+
+func (s *Server) SettlePlannerTurns(reattached ReattachedTurn, deliver func(key, text string)) {
 	if s.hub != nil && s.hub.engine != nil {
 		s.hub.engine.plannerTurns.settle(reattached, deliver)
 	}
@@ -113,6 +119,11 @@ type plannerTurn struct {
 	Key   string       `json:"key"`
 	Src   agent.Source `json:"source"`
 	Began time.Time    `json:"began"`
+	// After is where the session's shim stream stood at Begin
+	// (cli.TurnWatermark); "" when none was known. A result replayed after
+	// a restart answers the request only when it sits past this, so the
+	// previous turn's result is never taken for it.
+	After string `json:"after,omitempty"`
 }
 
 type plannerTurnsFile struct {
@@ -151,7 +162,7 @@ func (t *plannerTurns) load(ctx context.Context, path string) {
 
 // begin records a request from src on key and returns its ID; a request
 // with no source (a task: session's first message) is not recorded, 0.
-func (t *plannerTurns) begin(key string, src agent.Source) uint64 {
+func (t *plannerTurns) begin(key string, src agent.Source, after string) uint64 {
 	if src == "" {
 		return 0
 	}
@@ -161,7 +172,7 @@ func (t *plannerTurns) begin(key string, src agent.Source) uint64 {
 		t.live = map[uint64]plannerTurn{}
 	}
 	t.next++
-	t.live[t.next] = plannerTurn{Key: key, Src: src, Began: time.Now()}
+	t.live[t.next] = plannerTurn{Key: key, Src: src, Began: time.Now(), After: after}
 	t.saveLocked()
 	return t.next
 }
@@ -195,17 +206,20 @@ func (t *plannerTurns) resulted(key string) {
 // deliver now, judged by the requests it answers. Either way, with nothing
 // running the requests are answered: what is left of them is dropped, or it
 // would judge the next turn.
-func (t *plannerTurns) settle(reattached func(key string) (text string, ended, running bool), deliver func(key, text string)) {
+func (t *plannerTurns) settle(reattached ReattachedTurn, deliver func(key, text string)) {
 	t.mu.Lock()
 	var keys []string
+	after := map[string]string{} // the oldest carried-over request's
 	for _, e := range t.restored {
 		if !slices.Contains(keys, e.Key) {
 			keys = append(keys, e.Key)
+			after[e.Key] = e.After
 		}
 	}
 	t.mu.Unlock()
 	for _, key := range keys {
-		text, ended, running := reattached(key)
+		w, known := cli.ParseTurnWatermark(after[key])
+		text, ended, running := reattached(key, w, known)
 		if running {
 			continue
 		}
@@ -296,7 +310,7 @@ func (s *Server) PlannerNote(key, text string) {
 const plannerNoteBytes = 2048
 
 func (e *sendEngine) submitPlanner(key string, src agent.Source, text string, opts session.AgentOpts, done func(string, error)) (bool, error) {
-	o := &plannerOrigin{key: key, src: src, turns: &e.plannerTurns, opts: opts, notify: e.notify, done: done}
+	o := &plannerOrigin{key: key, src: src, turns: &e.plannerTurns, opts: opts, notify: e.notify, done: done, mark: e.turnWatermark}
 	switch e.turns.Submit(e.ctx, turn.Request{Key: key, Text: text, Origin: o}, dashAdmission{track: e.TrackSend, ctx: e.ctx}) {
 	case turn.AckOwner, turn.AckDetached:
 		return false, nil
@@ -315,6 +329,9 @@ func (e *sendEngine) submitPlanner(key string, src agent.Source, text string, op
 // send's.
 type plannerOrigin struct {
 	key string
+	// mark is where key's shim stream stands now (the session's
+	// TurnWatermark), recorded at Begin; nil records none.
+	mark func(key string) (cli.TurnWatermark, bool)
 	// src is what the request came from, recorded in turns from its Begin
 	// to its Finish under id.
 	src    agent.Source
@@ -339,7 +356,13 @@ func (o *plannerOrigin) Begin(_ context.Context, t turn.TurnInfo) turn.Delivery 
 		return nil
 	}
 	if o.id == 0 {
-		o.id = o.turns.begin(o.key, o.src)
+		var after string
+		if o.mark != nil {
+			if w, ok := o.mark(o.key); ok {
+				after = w.String()
+			}
+		}
+		o.id = o.turns.begin(o.key, o.src, after)
 	}
 	return o
 }
@@ -368,4 +391,17 @@ func (o *plannerOrigin) Dropped(context.Context, turn.DropReason) {
 	if o.done != nil {
 		o.done("", errPlannerDropped)
 	}
+}
+
+// turnWatermark is where key's shim stream stands now; ok=false without a
+// session or a shim.
+func (e *sendEngine) turnWatermark(key string) (cli.TurnWatermark, bool) {
+	if e.router == nil {
+		return cli.TurnWatermark{}, false
+	}
+	sess := e.router.SessionFor(key)
+	if sess == nil {
+		return cli.TurnWatermark{}, false
+	}
+	return sess.TurnWatermark()
 }

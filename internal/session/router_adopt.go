@@ -101,9 +101,11 @@ func (s *ManagedSession) TurnWatermark() (cli.TurnWatermark, bool) {
 // still to come, live through the result sink. ended: it finished while
 // naozhi was down, text its reply, which no sink ever saw. Neither: no
 // reattached process, nothing was in flight, or the turn already ended
-// live. A reconnect replays the shim's whole backlog, so an ended reply may
-// be one the last run acted on; the caller tells.
-func (r *Router) ReattachedTurn(key string) (text string, ended, running bool) {
+// live. A reconnect replays the shim's whole backlog: ended only for a
+// result past after, the watermark the request recorded when its turn
+// began (none known: never), so a previous turn's reply is never taken for
+// a request whose own turn had not started.
+func (r *Router) ReattachedTurn(key string, after cli.TurnWatermark, known bool) (text string, ended, running bool) {
 	sess := r.ss.Load(key)
 	if sess == nil {
 		return "", false, false
@@ -114,6 +116,11 @@ func (r *Router) ReattachedTurn(key string) (text string, ended, running bool) {
 	}
 	if p.AdoptedTurnPending() {
 		return "", false, true
+	}
+	// A replayed result not past the request's watermark is the previous
+	// turn's (the request's own never started): not this request's answer.
+	if !p.AdoptableAfter(after, known) {
+		return "", false, false
 	}
 	text, ended = p.ReplayedResult()
 	return text, ended, false
