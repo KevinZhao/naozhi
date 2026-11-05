@@ -99,6 +99,8 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    the daemon cards: 活跃 uses --nz-accent like .sys-state-dot.running, and
    待你回复 shares 失败's red because both need the user. */
 .sys-health{margin-top:var(--nz-space-5);padding-top:var(--nz-space-4);border-top:1px solid var(--nz-border)}
+/* Without daemons the overview's own bottom rule already separates it. */
+.svc-overview + .sys-health{margin-top:0;border-top:0}
 .hl-head{display:flex;align-items:baseline;gap:10px}
 .hl-head .svc-overview-title{flex:1}
 .hl-at{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);font-variant-numeric:tabular-nums}

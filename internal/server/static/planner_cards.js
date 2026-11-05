@@ -17,7 +17,7 @@
 // listed state.
 import { NZ_CONTRACT } from './contract.js';
 import { sessionList } from './state.js';
-import { HEALTH_STATES, esc, escAttr, fetchJSON, sessionHealthState } from './nz_util.js';
+import { HEALTH_STATES, esc, escAttr, evidenceText, fetchJSON, sessionHealthState } from './nz_util.js';
 import { sid } from './session_ident.js';
 import { formatAbsTime, formatMonthDayTime, timeAgo } from './utilities.js';
 
@@ -59,7 +59,7 @@ export function sessionStatusHtml(key) {
   else if (s && s.state === 'running' && s.last_activity) tail = s.last_activity;
   else if (last) tail = '最后活动 ' + timeAgo(last);
   return '<span class="pl-scard-name">' + esc(sessionTitle(key)) + '</span>' +
-    (st ? '<span class="hl-state ' + st.cls + '"' + (u && u.evidence ? ' title="' + escAttr(u.evidence) + '"' : '') + '>' + esc(st.label) + '</span>' : '') +
+    (st ? '<span class="hl-state ' + st.cls + '"' + (u && u.evidence ? ' title="' + escAttr(evidenceText(u.evidence, u.error_class)) + '"' : '') + '>' + esc(st.label) + '</span>' : '') +
     (tail ? '<span class="pl-scard-time"' + (last ? ' title="' + escAttr(formatAbsTime(last)) + '"' : '') + '>' + esc(tail) + '</span>' : '');
 }
 

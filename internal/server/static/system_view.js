@@ -2,7 +2,7 @@
 // Layering: never import dashboard.js back; setActivityView is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, sessionList, ui } from './state.js';
-import { DEATH_EVIDENCE, HEALTH_STATES, esc, escAttr, failureText, fetchJSON, formatBytes, formatDurationShort, showToast } from './nz_util.js';
+import { HEALTH_STATES, esc, escAttr, evidenceText, fetchJSON, formatBytes, formatDurationShort, showToast } from './nz_util.js';
 import { discoveredKey, getNodeDisplayName, sid } from './session_ident.js';
 import { wireQuickAskInput } from './auth_modal.js';
 import { shell } from './shell.js';
@@ -214,8 +214,7 @@ function healthRowHtml(u) {
     : '<span class="hl-name" title="' + escAttr(u.id) + '">' + esc(name) + '</span>') +
     (tag ? '<span class="hl-tag">' + esc(tag) + '</span>' : '');
   const since = Date.parse(u.since);
-  const cause = failureText(u.evidence?.startsWith(DEATH_EVIDENCE) ? u.evidence.slice(DEATH_EVIDENCE.length) : '', u.error_class);
-  const stTitle = [cause, u.evidence || '', !isNaN(since) ? '始于 ' + formatAbsTime(since) : ''].filter(Boolean).join(' · ');
+  const stTitle = [evidenceText(u.evidence, u.error_class), !isNaN(since) ? '始于 ' + formatAbsTime(since) : ''].filter(Boolean).join(' · ');
   const last = u.last_active ? Date.parse(u.last_active) : NaN;
   const lastHtml = !isNaN(last)
     ? '<span title="' + escAttr(formatAbsTime(last)) + '">' + esc(timeAgo(last)) + '</span>'
@@ -334,7 +333,7 @@ function renderSystemView() {
   const top = prevBody ? prevBody.scrollTop : 0;
   const left = prevTable ? prevTable.scrollLeft : 0;
   root.innerHTML =
-    '<div class="system-head"><h1>系统任务</h1></div>' +
+    '<div class="system-head"><h1>系统</h1></div>' +
     '<div class="system-body">' +
       renderServiceOverviewHtml() +
       daemonsHtml +

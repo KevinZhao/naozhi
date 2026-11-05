@@ -16,7 +16,7 @@
 // #main [data-inbox-item="<id>"] (notify.js, §15.3 ④).
 import { NZ_CONTRACT } from './contract.js';
 import { selection } from './state.js';
-import { DEATH_EVIDENCE, HEALTH_STATES, esc, escAttr, failureText, fetchJSON, nzBus, nzViews } from './nz_util.js';
+import { HEALTH_STATES, esc, escAttr, evidenceCause, evidenceText, fetchJSON, nzBus, nzViews } from './nz_util.js';
 import { wsm } from './ws_manager.js';
 import { formatTimeFull, formatTimeShort } from './utilities.js';
 
@@ -50,8 +50,7 @@ const stateLabel = (s) => (HEALTH_STATES[s] || {}).label || s;
 // its cause, or the recovery.
 function healthBody(n) {
   if (!BAD.has(n.to)) return { icon: '✓', tone: 'ok', text: '已从「' + stateLabel(n.from) + '」恢复' };
-  const ev = n.evidence || '';
-  const cause = failureText(ev.startsWith(DEATH_EVIDENCE) ? ev.slice(DEATH_EVIDENCE.length) : '', n.error_class);
+  const cause = evidenceCause(n.evidence, n.error_class);
   return { icon: n.to === 'waiting' ? '?' : '⚠', tone: n.to === 'failed' ? 'bad' : 'warn', text: '进入「' + stateLabel(n.to) + '」' + (cause ? '：' + cause : '') };
 }
 
@@ -97,7 +96,8 @@ function pairs() {
 function noteHtml(n, paired) {
   const b = noteBody(n, paired);
   if (!b) return '';
-  const ev = (paired || n).evidence;
+  const h = paired || n;
+  const ev = evidenceText(h.evidence, h.error_class);
   return '<div class="gw-note gw-' + b.tone + '" role="note" data-note-id="' + escAttr(n.id) + '" data-note-time="' + n.ms + '"' +
     (n.item ? ' data-inbox-item="' + escAttr(n.item) + '"' : '') + (paired ? ' data-paired="1"' : '') +
     ' title="' + escAttr(formatTimeFull(n.ms) + (ev ? ' · ' + ev : '')) + '">' +

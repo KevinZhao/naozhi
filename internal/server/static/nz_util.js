@@ -297,23 +297,44 @@ export function failureText(reason, errClass) {
   return Object.hasOwn(HEALTH_ERROR_CLASSES, errClass || '') ? HEALTH_ERROR_CLASSES[errClass] : '';
 }
 
+// evidenceCause is a health unit's or note's cause in words, from its
+// evidence and error class; '' when neither names one.
+export function evidenceCause(evidence, errClass) {
+  const ev = evidence || '';
+  return failureText(ev.startsWith(DEATH_EVIDENCE) ? ev.slice(DEATH_EVIDENCE.length) : '', errClass);
+}
+
+// evidenceText is a health unit's or note's evidence for a tooltip: a death
+// in words alone, else the error class in words beside the raw evidence,
+// which then is all that says what happened.
+export function evidenceText(evidence, errClass) {
+  const ev = evidence || '';
+  const death = ev.startsWith(DEATH_EVIDENCE) && failureText(ev.slice(DEATH_EVIDENCE.length), '');
+  return death || [failureText('', errClass), ev].filter(Boolean).join(' · ');
+}
+
 // sessionFailureText is why /api/sessions row s failed, in words; '' when
-// nothing names it.
+// nothing names it. A dead session's own death reason names it only when
+// the death was abnormal: one reclaimed after a failed turn (idle_timeout)
+// still failed for the reason its health verdict holds.
 export function sessionFailureText(s) {
   const h = currentHealth(s);
-  return failureText(s && s.state === 'dead' ? s.death_reason : h && h.death_reason, h && h.error_class);
+  const own = s && s.state === 'dead' && deathReasonInfo(s.death_reason).crashed;
+  return failureText(own ? s.death_reason : h && h.death_reason, h && h.error_class);
 }
 
 // sessionHealthState is the state a session's status dot shows: the live
 // process first (a turn running, an abnormal death), then the health
-// verdict; 'new' for a session not spawned yet, else idle.
+// verdict; 'new' for a session not spawned yet, else idle. Without a turn
+// running an "active" verdict is one the turn's end has outrun (the next
+// reconcile is due), so it reads idle.
 export function sessionHealthState(s) {
   if (!s || s.state === 'new') return 'new';
   if (s.state === 'running') return 'active';
   const x = sessionExit(s);
   if (x && x.crashed) return 'failed';
   const h = currentHealth(s);
-  return h && h.state !== 'unknown' ? h.state : 'idle';
+  return h && h.state !== 'unknown' && h.state !== 'active' ? h.state : 'idle';
 }
 
 // HEALTH_DOTS are the status dot classes: failed red, active blue, the
@@ -325,8 +346,9 @@ const HEALTH_DOTS = { active: 'dot-running', failed: 'dot-failed', waiting: 'dot
 export function sessionDot(s) {
   const st = sessionHealthState(s);
   const x = st === 'failed' ? sessionExit(s) : null;
+  const cause = st === 'failed' ? sessionFailureText(s) || (x && x.crashed ? x.text : '') : '';
   const label = st === 'new' ? '新会话' : HEALTH_STATES[st].label;
-  return { cls: HEALTH_DOTS[st] || 'dot-ready', title: label + (x ? '：' + x.text : '') };
+  return { cls: HEALTH_DOTS[st] || 'dot-ready', title: label + (cause ? '：' + cause : '') };
 }
 
 // STARTUP_FAILURE_TEXT names the startup_failure classes an operator must fix.

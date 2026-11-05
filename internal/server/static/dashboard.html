@@ -80,7 +80,7 @@
            AutoTitler. Peer of 自动化 but read-only — naozhi owns these, so the
            panel surfaces run状态/last-run/失败计数 without create/edit/delete.
            Routes through setActivityView('system') → renderSystemView(). -->
-      <button type="button" class="ab-nav" id="abnav-system" data-view="system" title="系统任务（内置后台守护）" aria-label="系统任务视图" aria-pressed="false">
+      <button type="button" class="ab-nav" id="abnav-system" data-view="system" title="系统" aria-label="系统视图" aria-pressed="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
         <span class="ab-nav-label">系统</span>
         <span class="ab-badge" id="abnav-system-badge" hidden aria-label="需关注的系统任务数"></span>
@@ -222,7 +222,7 @@
   <!-- System view: independent top-level view (peer of chat/assets/cron),
        shown under body.nz-view-system. renderSystemView() in dashboard.js
        paints the read-only daemon status list (GET /api/system/daemons). -->
-  <main class="system-main" id="system-main" aria-label="系统任务" hidden></main>
+  <main class="system-main" id="system-main" aria-label="系统" hidden></main>
   <!-- Planner page (planner_view.js): left 通知 / 任务 (a 48px strip
        while the workbench is open), the Planner conversation in the middle.
        The workbench (#fv-drawer) docks on the right as in the chat view. -->

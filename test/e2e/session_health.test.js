@@ -60,3 +60,26 @@ for (const [name, viewport] of [['desktop', { width: 1440, height: 900 }], ['pho
     }
   });
 }
+
+// The session header is built with its 异常退出 chip on switching to a
+// failed session from another one, with and without a socket: read as the
+// header first shows the session, before a later poll or push can paint it.
+for (const ws of [false, true]) {
+  test(`header: the 异常退出 chip shows on switching to a failed session (ws: ${ws})`, async ({ page }) => {
+    const mock = await startMockServer({ ws, sessions: SESSIONS });
+    try {
+      await page.goto(mock.url + '/dashboard');
+      await page.locator(`.session-card[data-key="${IDLE}"]`).click();
+      await expect(page.locator('.main-header h2')).toContainText('iso 销售数据');
+      await expect(page.locator('#header-exit')).toHaveText('');
+      await page.locator(`.session-card[data-key="${FAILED}"]`).click();
+      const built = await page.waitForFunction(() => {
+        const h = document.querySelector('.main-header h2');
+        return h && h.textContent.includes('iso 失败演示') && { chip: document.getElementById('header-exit').textContent };
+      });
+      expect(await built.jsonValue()).toEqual({ chip: '⚠ 异常退出' });
+    } finally {
+      mock.server.close();
+    }
+  });
+}

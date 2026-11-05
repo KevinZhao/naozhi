@@ -237,7 +237,9 @@ test('sessionDot and the exit chip read a failure off the health verdict', () =>
     ['running', { state: 'running', last_active: 1000, health: failed }, 'dot-running', '活跃', false],
     ['dead, crashed', { state: 'dead', death_reason: 'killed' }, 'dot-failed', '失败：进程被终止', true],
     ['dead, reclaimed', { state: 'dead', death_reason: 'idle_timeout' }, 'dot-ready', '空闲', false],
-    ['failed without a death', { state: 'ready', last_active: 1000, health: { state: 'failed', since: 2000, error_class: 'auth' } }, 'dot-failed', '失败', false],
+    ['failed without a death', { state: 'ready', last_active: 1000, health: { state: 'failed', since: 2000, error_class: 'auth' } }, 'dot-failed', '失败：凭证 / 权限拒绝', false],
+    ['failed, then reclaimed', { state: 'dead', death_reason: 'idle_timeout', last_active: 1000, health: { state: 'failed', since: 2000, error_class: 'auth' } }, 'dot-failed', '失败：凭证 / 权限拒绝', false],
+    ['active past its turn', { state: 'ready', last_active: 1000, health: { state: 'active', since: 2000 } }, 'dot-ready', '空闲', false],
     ['waiting', { state: 'ready', last_active: 1000, health: { state: 'waiting', since: 2000 } }, 'dot-warn', '待你回复', false],
     ['unknown', { state: 'ready', health: { state: 'unknown', since: 2000 } }, 'dot-ready', '空闲', false],
     ['new', { state: 'new' }, 'dot-new', '新会话', false],
@@ -257,6 +259,21 @@ test('failureText names a death reason or an error class, never "other"', () => 
     ['', '', ''],
     ['', '__proto__', ''],
   ]) assert.equal(nzu.failureText(reason, cls), want, reason + '/' + cls);
+});
+
+// Q11: a tooltip says a death in words, never as death_reason=….
+test('evidenceCause and evidenceText put a health evidence in words', () => {
+  const CODE = NZ_CONTRACT.DEATH_REASON_PREFIX.CODE;
+  for (const [ev, cls, cause, text] of [
+    [nzu.DEATH_EVIDENCE + CODE + '-1', 'other', 'CLI 进程被信号终止', 'CLI 进程被信号终止'],
+    [nzu.DEATH_EVIDENCE + 'weird', '', '', nzu.DEATH_EVIDENCE + 'weird'],
+    ['api error 403', 'auth', '凭证 / 权限拒绝', '凭证 / 权限拒绝 · api error 403'],
+    ['turn in progress', '', '', 'turn in progress'],
+    [undefined, undefined, '', ''],
+  ]) {
+    assert.equal(nzu.evidenceCause(ev, cls), cause, ev + '/' + cls);
+    assert.equal(nzu.evidenceText(ev, cls), text, ev + '/' + cls);
+  }
 });
 
 // --- cron_format.js ---

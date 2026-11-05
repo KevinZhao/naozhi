@@ -80,6 +80,7 @@ test('side notes sit among the bubbles by time, arrive live and start no turn', 
     await expect(pane.locator('[data-note-id="h5"]')).toHaveCount(0);
     await expect(pane.locator('[data-note-id="open-in_2"]')).toHaveText(/进入「失败」：CLI 进程被信号终止/);
     await expect(pane.locator('[data-note-id="open-in_2"]')).not.toContainText('其他');
+    await expect(pane.locator('[data-note-id="open-in_2"]')).toHaveAttribute('title', / · CLI 进程被信号终止$/);
 
     // The notes survive a repaint, and a close note is its own.
     await page.click('#abnav-planner');

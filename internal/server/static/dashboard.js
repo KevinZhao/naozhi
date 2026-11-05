@@ -1087,7 +1087,7 @@ function mainHeaderHtml(s) {
       '<div class="detail">' +
         '<span class="detail-left">' + cliLabel + modelLabel + '</span>' +
         headerOriginBadge +
-        '<span class="detail-exit" id="header-exit">' + sessionExitChipHtml(s.state, s.death_reason, s.death_detail, s.startup_failure) + '</span>' +
+        '<span class="detail-exit" id="header-exit">' + sessionExitChipHtml(s) + '</span>' +
         // Git branch / worktree chip. Built empty here and filled
         // asynchronously by renderGitChip once /api/sessions/git resolves;
         // stays empty (collapses via :empty) for non-repo workspaces and
