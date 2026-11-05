@@ -2,8 +2,9 @@
 // the rail entry and its badge (decisions and questions), the left column's
 // 通知 cards (closing one; decisions and questions first and labelled) and
 // 任务 (refetched after a Planner turn), the read-only planner:main stream (no
-// snapshot block, no 追问, receipts over the subscription, no idle refetch
-// on the inclusive `after` replay), the push pause and 停用 Planner
+// snapshot block, no 追问, the pushed "收到，正在看" by the input box, no idle
+// refetch on the inclusive `after` replay), the morning briefs in it by time
+// (D91), the push pause and 停用 Planner
 // controls, the workbench opening by itself on a new output and folding the
 // left column to its strip; the phone layout's collapsible left block; the
 // planner.enabled=false explanation.
@@ -86,7 +87,6 @@ test('desktop: badge, 通知 cards, stream, controls, and the workbench folds th
     await expect(page.locator('#pl-task .tk-card')).toHaveText(/iso 两分钟后提醒你看 hello\.md/);
     await expect(page.locator('#pl-strip-task')).toHaveText('1');
     await expect(page.locator('#pl-status')).toHaveText('在线');
-    await expect(page.locator('#pl-brief')).toContainText('早报');
     await expect(page.locator('#pl-stream .event')).toHaveCount(3);
     await expect(page.locator('#pl-stream')).toContainText('两个会话在跑');
     // The user bubble shows what was typed, not the gateway's snapshot; a
@@ -143,12 +143,14 @@ test('desktop: badge, 通知 cards, stream, controls, and the workbench folds th
     expect(mock.outputsCalls.length).toBe(idle);
 
     // The subscription: subscribed after the last event, a pushed receipt
-    // (never logged) shows up, and polling stops once it is live.
+    // (never logged) shows by the input box, not in the stream (D91), and
+    // polling stops once it is live.
     const sub = conn.messages.find((m) => m.type === 'subscribe' && m.key === PLANNER);
     expect(sub).toMatchObject({ after: now - 55000 });
     conn.send({ type: 'subscribed', key: PLANNER, state: 'ready' });
     conn.send({ type: 'event', key: PLANNER, event: { type: 'system', summary: '收到，正在看', time: Date.now() } });
-    await expect(page.locator('#pl-stream .event.system')).toHaveText(/收到，正在看/);
+    await expect(page.locator('#pl-target-note')).toHaveText('收到，正在看');
+    await expect(page.locator('#pl-stream .event.system')).toHaveCount(0);
 
     await page.check('#pl-stop');
     await expect(page.locator('#pl-status')).toHaveText('已停用');
@@ -286,32 +288,70 @@ test('planner.enabled off: the page explains it and the stop switch is off', asy
   }
 });
 
-// The 早报 slot shows the newest sent brief of GET /api/planner/briefs,
-// open on the day it was made.
-test('the 早报 slot shows the latest brief', async ({ browser }) => {
-  const at = new Date();
-  at.setHours(8, 30, 0, 0);
-  const md = '## 早报 · iso\n\n自 11-04 08:30 以来：完成 1 · 等你 1\n\n### 完成的（1）\n- iso 周报会话 · 11-04 18:00\n';
-  for (const [name, viewport, extra] of [['desktop', { width: 1280, height: 800 }, {}], ['mobile', { width: 390, height: 844 }, { isMobile: true, hasTouch: true }]]) {
+// The morning briefs of GET /api/planner/briefs are messages in the
+// conversation, by the time they were made (D91): the day's open, an older
+// one folded, a fold the user chose kept; the brief's push link (#planner&item=brief:<day>) opens and
+// scrolls to it.
+test('briefs sit in the conversation by time, and a push link scrolls to one', async ({ browser }) => {
+  const day = (ms) => { const d = new Date(ms); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
+  const md = (n) => '## 早报 · iso\n\n完成 ' + n + '\n\n### 完成的（' + n + '）\n- iso 周报会话 · 11-04 18:00\n';
+  const yesterday = now - 86400000;
+  // A long conversation after today's brief, so the link has to scroll.
+  const events = plannerEvents();
+  for (let i = 0; i < 30; i++) events.push({ type: 'text', detail: 'iso 后来的消息 ' + i + '\n\n' + '一段话。'.repeat(20), time: now - 50000 + i * 100, uuid: 'pl-l' + i });
+  const briefs = [
+    { day: day(now - 57000), at: iso(now - 57000), sent: true, counts: { done: 2 }, markdown: md(2) },
+    { day: day(yesterday), at: iso(yesterday), sent: true, counts: { done: 1 }, markdown: md(1) },
+  ];
+  for (const [name, viewport, extra] of [['desktop', { width: 1440, height: 900 }, {}], ['mobile', { width: 390, height: 844 }, { isMobile: true, hasTouch: true }]]) {
     const ctx = await browser.newContext({ viewport, ...extra });
     const page = await ctx.newPage();
     const mock = await startMockServer({
-      ws: true, plannerEvents: plannerEvents(), inbox: inbox(),
+      ws: true, plannerEvents: events, inbox: inbox(),
       planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
-      plannerBriefs: [{ day: 'x', at: at.toISOString(), sent: true, counts: { done: 1, waiting: 1 }, markdown: md }],
+      plannerBriefs: briefs,
     });
     try {
       await page.goto(mock.url + '/dashboard');
       await waitForWs(page, 'CONNECTED');
       await page.click('#abnav-planner');
-      const brief = page.locator('#pl-brief');
-      await expect(brief.locator('summary')).toHaveText(/早报 · \d\d-\d\d 08:30/);
-      await expect(brief.locator('details')).toHaveAttribute('open', '');
-      await expect(brief.locator('.md .md-h3')).toHaveText('完成的（1）');
-      await expect(brief).toContainText('iso 周报会话');
-      await expect(brief).not.toContainText('还没有');
-      await brief.scrollIntoViewIfNeeded();
-      await page.screenshot({ path: test.info().outputPath('planner-brief-' + name + '.png') });
+      const all = page.locator('#pl-stream > .pl-brief');
+      await expect(all).toHaveCount(2);
+      // Yesterday's first, folded; today's between the replies it was made
+      // between, open.
+      const order = await page.locator('#pl-stream > .event, #pl-stream > .pl-brief').evaluateAll((els) => els.map((e) => e.classList.contains('pl-brief') ? 'brief:' + e.dataset.day : e.textContent.slice(0, 12)));
+      expect(order[0]).toBe('brief:' + day(yesterday));
+      const at = order.indexOf('brief:' + day(now - 57000));
+      expect(order[at - 1]).toMatch(/早报：计划/);
+      expect(order[at + 1]).toMatch(/两个会话在跑/);
+      const old = all.nth(0);
+      const today = all.nth(1);
+      await expect(old).not.toHaveAttribute('open', '');
+      await expect(today).toHaveAttribute('open', '');
+      await expect(today.locator('summary')).toHaveText(/早报 · \d\d-\d\d \d\d:\d\d/);
+      await expect(today.locator('.md .md-h3')).toHaveText('完成的（2）');
+      // Opened at the end of the conversation, today's brief is far above.
+      await expect(today).not.toBeInViewport();
+      await page.screenshot({ path: test.info().outputPath('planner-brief-end-' + name + '.png') });
+
+      // Folded by the user, today's brief stays folded when the Planner page
+      // is opened again and its stream repainted.
+      await today.locator('summary').evaluate((el) => el.click());
+      await expect(today).not.toHaveAttribute('open', '');
+      await page.locator('#abnav-chat').click();
+      await page.locator('#abnav-planner').click();
+      await expect(page.locator('body')).toHaveClass(/nz-view-planner/);
+      await expect(all).toHaveCount(2);
+      await expect(today).not.toHaveAttribute('open', '');
+
+      // The brief's push link: back on the chat view, then the link.
+      await page.locator('#abnav-chat').click();
+      await old.evaluate((el) => { el.open = false; });
+      await page.evaluate((d) => { location.hash = 'planner&item=brief:' + d; }, day(yesterday));
+      await expect(page.locator('body')).toHaveClass(/nz-view-planner/);
+      await expect(old).toHaveAttribute('open', '');
+      await expect(old.locator('summary')).toBeInViewport();
+      await page.screenshot({ path: test.info().outputPath('planner-brief-link-' + name + '.png') });
     } finally {
       await ctx.close();
       mock.server.close();
@@ -320,7 +360,7 @@ test('the 早报 slot shows the latest brief', async ({ browser }) => {
 });
 
 // Requests queued while the Planner was busy reach it as one coalesced
-// message: the gateway's parts become their lines, yours one bubble.
+// message: yours join into one bubble, the gateway's receipts are not shown.
 test('a coalesced turn: snapshots and receipts are not your bubble', async ({ browser }) => {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   const page = await ctx.newPage();
@@ -342,7 +382,8 @@ test('a coalesced turn: snapshots and receipts are not your bubble', async ({ br
     const user = page.locator('#pl-stream .event.user');
     await expect(user).toHaveCount(1);
     await expect(user).toHaveText(/iso 第一条[\s\S]*iso 第二条/);
-    await expect(page.locator('#pl-stream .event.system')).toHaveText(/回执给 Planner：iso 已派出 task:abc/);
+    await expect(page.locator('#pl-stream .event.system')).toHaveCount(0);
+    await expect(page.locator('#pl-stream')).not.toContainText('task:abc');
     await expect(page.locator('#pl-stream')).not.toContainText('naozhi-snapshot');
     await expect(page.locator('#pl-stream')).not.toContainText('iso 某条通知');
     await expect(page.locator('#pl-stream')).not.toContainText('以下是用户');

@@ -1,23 +1,24 @@
 // planner_cards.js — the cards the Planner conversation renders in place of
 // raw text (docs/rfc/planner.md §6.2, §10 D77, §10.1; §15.1 PR ⑬):
 //
-//   - action blocks (```naozhi-action fences) become readable cards. A
-//     dispatch runs at once (D88): the gateway's line after the reply says
-//     已派出 with the session's card, or why it failed. A block that is not
-//     JSON of a known type shows as 看不懂; whether a block runs is the
-//     gateway's call, not this reading's.
+//   - action blocks (```naozhi-action fences) become readable cards. A card
+//     is what was done (D91): the gateway adds a line only when a block did
+//     not run or was held back. A block that is not JSON of a known type
+//     shows as 看不懂; whether a block runs is the gateway's call, not this
+//     reading's. Cards name tasks and workspaces, never their IDs: a name
+//     not known yet leaves the row out.
 //   - sessions the conversation names — a handed-over session
 //     (<naozhi-session-ref>, rewritten to a fence by planner_view.js), a
 //     `task:` key or a listed session's key in the Planner's text, the sender
 //     of a report — become one-line cards (名字 · 健康状态 · 最后活动) that
-//     open the session in the page's middle column.
+//     open the session in the page's middle column, once per turn.
 //
 // Health comes from GET /api/system/health, refetched at most every
 // HEALTH_MIN_MS; a session the table does not hold yet falls back to its
-// listed state.
+// listed state. Task titles come from the 任务 list (tasks.js 'tasks:list').
 import { NZ_CONTRACT } from './contract.js';
 import { sessionList } from './state.js';
-import { esc, escAttr, fetchJSON } from './nz_util.js';
+import { esc, escAttr, fetchJSON, nzBus } from './nz_util.js';
 import { sid } from './session_ident.js';
 import { HEALTH_STATES } from './system_view.js';
 import { formatAbsTime } from './utilities.js';
@@ -27,11 +28,20 @@ const HEALTH_MIN_MS = 20000;
 // MAX_CARDS bounds the session cards under one bubble.
 const MAX_CARDS = 6;
 const TASK_KEY_RE = /\btask:[A-Za-z0-9_-]+/g;
+// WORKSPACE_ID_RE is a workspace registry ID (planner/workspace): the page
+// has no registry to name it by.
+const WORKSPACE_ID_RE = /^ws_[a-z0-9]{8}$/;
+// TURN_START opens a turn: your bubble, a session's report, or a time
+// divider. A session is carded where the turn's replies and lines (a report
+// among them) first name it, and after that only named; a session you hand
+// over keeps its card in your bubble too.
+const TURN_START = '.user, .peer_message, .event-time-divider';
 
 const pc = {
   health: new Map(), // unit id → health.Unit
   healthAt: 0,
   healthLoading: false,
+  tasks: new Map(), // task id → title, as 任务 last listed them
 };
 
 // ---- session cards ----
@@ -45,9 +55,22 @@ export function agoText(ms) {
   return Math.floor(h / 24) + ' 天前';
 }
 
-export function sessionTitle(key) {
+// listedTitle is a listed local session's name, '' for one not listed.
+function listedTitle(key) {
   const s = sessionList.sessionsData[sid(key, 'local')];
-  return (s && (s.user_label || s.summary || s.last_prompt)) || key;
+  return (s && (s.user_label || s.summary || s.last_prompt)) || '';
+}
+
+// sessionTitle is a session's name: listed, else its 任务 title; one known
+// to neither is 会话, never its key (D91).
+export function sessionTitle(key) {
+  return listedTitle(key) || pc.tasks.get(key) || '会话';
+}
+
+// taskName is a task's title (a dispatched session's name, a promise's
+// text), '' while neither the session list nor 任务 has it.
+function taskName(id) {
+  return (id.startsWith('task:') && listedTitle(id)) || pc.tasks.get(id) || '';
 }
 
 // healthOf is the unit's state, else one read off the listed session.
@@ -68,8 +91,7 @@ export function sessionStatusHtml(key) {
   const u = pc.health.get(key);
   const last = (u && u.last_active && Date.parse(u.last_active)) || (s && s.last_active) || 0;
   let tail = '';
-  if (!s && !u) tail = '不在会话列表里';
-  else if (s && s.state === 'running' && s.last_activity) tail = s.last_activity;
+  if (s && s.state === 'running' && s.last_activity) tail = s.last_activity;
   else if (last) tail = '最后活动 ' + agoText(last);
   return '<span class="pl-scard-name">' + esc(sessionTitle(key)) + '</span>' +
     (st ? '<span class="hl-state ' + st.cls + '"' + (u && u.evidence ? ' title="' + escAttr(u.evidence) + '"' : '') + '>' + esc(st.label) + '</span>' : '') +
@@ -82,7 +104,8 @@ export function sessionCardHtml(key) {
     '<span class="pl-scard-open" aria-hidden="true">打开 ›</span></button>';
 }
 
-// paintSessionCards refreshes the status lines of the cards under root.
+// paintSessionCards refreshes the status lines of the cards under root, and
+// adds the 任务 row to the status cards whose task got a name since.
 export function paintSessionCards(root) {
   if (!root) return;
   root.querySelectorAll('.pl-scard[data-key]').forEach((el) => {
@@ -90,7 +113,19 @@ export function paintSessionCards(root) {
     const html = sessionStatusHtml(el.dataset.key);
     if (line && line.innerHTML !== html) line.innerHTML = html;
   });
+  root.querySelectorAll('.pl-act-status[data-task]:not([data-named])').forEach((el) => {
+    const name = taskName(el.dataset.task);
+    if (!name) return;
+    el.dataset.named = '1';
+    el.querySelector('.pl-act-rows')?.insertAdjacentHTML('afterbegin', '<dt>任务</dt><dd>' + esc(name) + '</dd>');
+  });
 }
+
+nzBus.addEventListener('tasks:list', (e) => {
+  const tasks = (e.detail && Array.isArray(e.detail.tasks)) ? e.detail.tasks : [];
+  for (const t of tasks) if (t && t.id && t.title) pc.tasks.set(t.id, t.title);
+  paintSessionCards(document);
+});
 
 // refreshHealth refetches the health table (at most every HEALTH_MIN_MS
 // unless forced) and repaints the cards under root.
@@ -178,21 +213,21 @@ function actionCardHtml(raw) {
   }
   if (a.type === 'dispatch') {
     const title = str(a.title);
+    const ws = str(a.workspace);
     return '<div class="pl-act pl-act-dispatch"><div class="pl-act-h">派出会话' + (title ? ' · ' + esc(title) : '') + '</div>' +
-      rowsHtml([['工作区', str(a.workspace)], ['模型', str(a.model)], ['第一条消息', str(a.message)]]) +
-      '<div class="pl-act-note">派出后直接执行，可在"任务"里停止</div></div>';
+      rowsHtml([['工作区', WORKSPACE_ID_RE.test(ws) ? '' : ws], ['模型', str(a.model)], ['第一条消息', str(a.message)]]) + '</div>';
   }
   if (a.type === 'promise') {
     return '<div class="pl-act pl-act-promise"><div class="pl-act-h">登记承诺</div>' +
-      rowsHtml([['内容', str(a.text)], ['到期', dueText(str(a.due))], ['完成条件', str(a.close_when)]]) +
-      '<div class="pl-act-note">登记后列在"任务"</div></div>';
+      rowsHtml([['内容', str(a.text)], ['到期', dueText(str(a.due))], ['完成条件', str(a.close_when)]]) + '</div>';
   }
   if (a.type === 'status') {
+    // A task with no name yet gets its row from paintSessionCards.
     const task = str(a.task);
-    const name = task.startsWith('task:') ? sessionTitle(task) : task;
-    return '<div class="pl-act pl-act-status"><div class="pl-act-h">Planner 判断 · ' + esc(STATUS_LABEL[a.state] || str(a.state)) + '</div>' +
-      rowsHtml([['任务', name], ['依据', str(a.why)]]) +
-      '<div class="pl-act-note">"任务"里的状态随之改，你可以改回</div></div>';
+    const name = task ? taskName(task) : '';
+    return '<div class="pl-act pl-act-status" data-task="' + escAttr(task) + '"' + (name || !task ? ' data-named="1"' : '') + '>' +
+      '<div class="pl-act-h">Planner 判断 · ' + esc(STATUS_LABEL[a.state] || str(a.state)) + '</div>' +
+      rowsHtml([['任务', name], ['依据', str(a.why)]]) + '</div>';
   }
   if (a.type === 'notify') {
     const brief = a.level === 'brief';
@@ -200,43 +235,50 @@ function actionCardHtml(raw) {
     return '<div class="pl-act pl-act-notify"><div class="pl-act-h">' + (brief ? '记入早报' : '提醒你') + '</div>' +
       '<div class="pl-act-q">' + esc(str(a.title)) + '</div>' +
       (a.why ? '<div class="pl-act-why">' + esc(str(a.why)) + '</div>' : '') +
-      (link ? '<div class="pl-act-link">' + link + '</div>' : '') +
-      '<div class="pl-act-note">' + (brief ? '列在下一份早报里，不推送' : '进"通知"并推送，同一件事当天只推一次') + '</div></div>';
+      (link ? '<div class="pl-act-link">' + link + '</div>' : '') + '</div>';
   }
   const opts = (Array.isArray(a.options) ? a.options : []).filter(isStr).map((o) => '<span class="pl-act-opt">' + esc(o) + '</span>').join('');
   return '<div class="pl-act pl-act-ask"><div class="pl-act-h">问你</div>' +
     '<div class="pl-act-q">' + esc(str(a.question)) + '</div>' +
-    (opts ? '<div class="pl-act-opts">' + opts + '</div>' : '') +
-    '<div class="pl-act-note">在"通知"里回答</div></div>';
+    (opts ? '<div class="pl-act-opts">' + opts + '</div>' : '') + '</div>';
 }
 
 // ---- decoration ----
 
 // decorateEvents turns the fences and the session mentions of the bubbles
-// under root not yet seen into cards.
+// under root not yet seen into cards: a session named again within its turn
+// (TURN_START) gets no second card, its key folds to its name.
 export function decorateEvents(root) {
   if (!root) return;
-  root.querySelectorAll('.event:not([data-pl-dec])').forEach((ev) => {
-    ev.dataset.plDec = '1';
-    ev.querySelectorAll('code[data-lang="naozhi-session-ref"]').forEach((code) => {
-      let ref = null;
-      try { ref = JSON.parse(code.textContent); } catch { /* left as code */ }
-      const wrap = code.closest('.md-code-wrap');
-      if (!wrap || !ref || !isStr(ref.key) || !ref.key) return;
-      wrap.outerHTML = '<div class="pl-handoff"><span class="pl-handoff-l">交给 Planner</span>' + sessionCardHtml(ref.key) + '</div>';
-    });
-    ev.querySelectorAll('code[data-lang="naozhi-action"]').forEach((code) => {
-      const wrap = code.closest('.md-code-wrap');
-      if (wrap) wrap.outerHTML = actionCardHtml(code.textContent);
-    });
-    if (!ev.matches('.text, .peer_message, .system')) return;
-    const carded = new Set([...ev.querySelectorAll('.pl-scard[data-key]')].map((b) => b.dataset.key));
-    const keys = mentionedKeys(ev).filter((k) => !carded.has(k)).slice(0, MAX_CARDS);
-    if (keys.length) {
-      ev.querySelector('.event-content')?.insertAdjacentHTML('beforeend', '<div class="pl-scards">' + keys.map(sessionCardHtml).join('') + '</div>');
-    }
-    if (ev.matches('.text')) foldKeys(ev, new Set([...carded, ...keys]));
+  let turn = new Set(); // the keys carded in the turn so far
+  root.querySelectorAll('.event, .event-time-divider').forEach((ev) => {
+    if (ev.matches(TURN_START)) turn = new Set();
+    if (ev.matches('.event:not([data-pl-dec])')) decorateEvent(ev, turn);
+    if (!ev.matches('.user')) ev.querySelectorAll('.pl-scard[data-key]').forEach((b) => turn.add(b.dataset.key));
   });
+}
+
+function decorateEvent(ev, turn) {
+  ev.dataset.plDec = '1';
+  ev.querySelectorAll('code[data-lang="naozhi-session-ref"]').forEach((code) => {
+    let ref = null;
+    try { ref = JSON.parse(code.textContent); } catch { /* left as code */ }
+    const wrap = code.closest('.md-code-wrap');
+    if (!wrap || !ref || !isStr(ref.key) || !ref.key) return;
+    wrap.outerHTML = '<div class="pl-handoff"><span class="pl-handoff-l">交给 Planner</span>' + sessionCardHtml(ref.key) + '</div>';
+  });
+  ev.querySelectorAll('code[data-lang="naozhi-action"]').forEach((code) => {
+    const wrap = code.closest('.md-code-wrap');
+    if (wrap) wrap.outerHTML = actionCardHtml(code.textContent);
+  });
+  if (!ev.matches('.text, .peer_message, .system')) return;
+  const carded = new Set([...ev.querySelectorAll('.pl-scard[data-key]')].map((b) => b.dataset.key));
+  const named = mentionedKeys(ev);
+  const keys = named.filter((k) => !carded.has(k) && !turn.has(k)).slice(0, MAX_CARDS);
+  if (keys.length) {
+    ev.querySelector('.event-content')?.insertAdjacentHTML('beforeend', '<div class="pl-scards">' + keys.map(sessionCardHtml).join('') + '</div>');
+  }
+  if (ev.matches('.text')) foldKeys(ev, new Set([...carded, ...keys, ...named.filter((k) => turn.has(k))]));
 }
 
 // emptyBracketRE is a bracket the folded keys emptied: "（`a` 和 `b`）".

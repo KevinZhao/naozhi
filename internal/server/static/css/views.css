@@ -218,13 +218,11 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .pl-note{flex-shrink:0;margin:12px 18px 0;padding:10px 12px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1);color:var(--nz-text-mute);font-size:var(--nz-fs-sm2);line-height:1.6}
 .pl-note b{color:var(--nz-text-strong)}
 .pl-note code{font-family:var(--nz-font-mono);font-size:var(--nz-fs-xs)}
-.pl-brief{margin:0 24px 8px}
-.pl-brief-empty{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);padding:6px 0;border-bottom:1px dashed var(--nz-border)}
-.pl-brief-empty b{color:var(--nz-text-mute)}
-.pl-brief-card{border-bottom:1px dashed var(--nz-border);padding:6px 0}
-.pl-brief-card>summary{cursor:pointer;font-size:var(--nz-fs-xs);color:var(--nz-text-dim)}
-.pl-brief-card>summary b{color:var(--nz-text-mute)}
-.pl-brief-card>.md{margin-top:6px;font-size:var(--nz-fs-sm2)}
+/* A morning brief, a message in the conversation's column (D91). */
+.pl-brief{display:block;width:100%;max-width:clamp(760px,65vw,1200px);margin:6px auto;padding:0 24px;box-sizing:border-box}
+.pl-brief>summary{cursor:pointer;font-size:var(--nz-fs-xs);color:var(--nz-text-dim)}
+.pl-brief>summary b{color:var(--nz-text-mute)}
+.pl-brief>.md{margin-top:6px;padding:10px 12px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1);font-size:var(--nz-fs-sm2);overflow-wrap:anywhere}
 /* The Planner's open cards at the end of its conversation (§10.1). */
 .pl-cards{margin:4px 24px 14px;max-width:560px;display:flex;flex-direction:column;gap:8px}
 .pl-cards[hidden]{display:none}
@@ -269,7 +267,6 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .pl-act-rows{display:grid;grid-template-columns:auto 1fr;gap:3px 10px;margin:0}
 .pl-act-rows dt{font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
 .pl-act-rows dd{margin:0;white-space:pre-wrap;word-break:break-word}
-.pl-act-note{display:block;margin-top:6px;font-size:var(--nz-fs-xs);color:var(--nz-text-dim)}
 .pl-act-q{word-break:break-word}
 .pl-act-opts{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
 .pl-act-opt{padding:2px 8px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);font-size:var(--nz-fs-xs)}

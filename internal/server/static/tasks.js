@@ -104,6 +104,8 @@ export function tasksHtml(data, open = 'planner') {
 async function render(el, open) {
   try {
     const data = await fetchJSON(NZ_CONTRACT.API.tasks);
+    // The Planner conversation's cards name tasks by these titles.
+    nzBus.dispatchEvent(new CustomEvent('tasks:list', { detail: data }));
     // The 已完成 fold keeps its open state across refreshes, and a menu in
     // use is not repainted under the pointer.
     if (el.contains(document.activeElement) && document.activeElement.matches('.tk-menu')) return;
