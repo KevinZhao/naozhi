@@ -84,8 +84,9 @@ function healthOf(key, s) {
 }
 
 // sessionStatusHtml is a session's one status line: 名字 · 健康状态 · 最后活动
-// (and what it is doing while it runs).
-export function sessionStatusHtml(key) {
+// (and what it is doing while it runs); withName false leaves the name to a
+// heading that already says it.
+export function sessionStatusHtml(key, withName = true) {
   const s = sessionList.sessionsData[sid(key, 'local')];
   const st = healthOf(key, s);
   const u = pc.health.get(key);
@@ -93,7 +94,7 @@ export function sessionStatusHtml(key) {
   let tail = '';
   if (s && s.state === 'running' && s.last_activity) tail = s.last_activity;
   else if (last) tail = '最后活动 ' + agoText(last);
-  return '<span class="pl-scard-name">' + esc(sessionTitle(key)) + '</span>' +
+  return (withName ? '<span class="pl-scard-name">' + esc(sessionTitle(key)) + '</span>' : '') +
     (st ? '<span class="hl-state ' + st.cls + '"' + (u && u.evidence ? ' title="' + escAttr(u.evidence) + '"' : '') + '>' + esc(st.label) + '</span>' : '') +
     (tail ? '<span class="pl-scard-time"' + (last ? ' title="' + escAttr(formatAbsTime(last)) + '"' : '') + '>' + esc(tail) + '</span>' : '');
 }

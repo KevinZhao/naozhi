@@ -109,20 +109,15 @@
         </div>
       </div>
     </div>
-    <!-- 通知 / 任务 bar (side_wait.js, planner RFC §15.3 ①, §15.4): the
-         Planner page's left column, unfolded in place. -->
-    <div class="side-wait" id="side-wait">
-      <button type="button" class="sw-toggle" id="sw-toggle" aria-expanded="false" aria-controls="sw-body">
-        <span class="sw-sum">通知 <b id="sw-wait-n">0</b> · 任务 <b id="sw-task-n">0</b></span>
+    <!-- 等你 bar (side_wait.js, planner RFC §15.3 ①, §15.7 S1): the
+         questions, decisions and errors, unfolded in place; not rendered
+         without any. -->
+    <div class="side-wait" id="side-wait" hidden>
+      <button type="button" class="sw-toggle" id="sw-toggle" aria-expanded="false" aria-controls="sw-wait">
+        <span class="sw-sum">等你 <b id="sw-n">0</b></span>
         <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><polyline points="6 9 12 15 18 9"/></svg>
       </button>
-      <div class="sw-body" id="sw-body" hidden>
-        <section class="pl-group" aria-labelledby="sw-wait-h">
-          <h2 class="pl-group-h" id="sw-wait-h">通知 · <span id="sw-wait-count">0</span></h2>
-          <div class="pl-list" id="sw-wait" role="list"></div>
-        </section>
-        <section class="pl-group" aria-label="任务"><div id="sw-task"></div></section>
-      </div>
+      <div class="pl-list sw-body" id="sw-wait" role="list" aria-label="等你" hidden></div>
     </div>
     <!-- Node/connection picker moved into the New Session modal (renderNodePicker).
          The sidebar no longer filters by node; every connected node's sessions
@@ -229,13 +224,12 @@
   <main class="planner-main" id="planner-main" aria-label="Planner" hidden>
     <aside class="pl-left" id="pl-left" aria-label="通知与任务">
       <button type="button" class="pl-left-toggle" id="pl-left-toggle" aria-expanded="false" aria-controls="pl-left-body">
-        <span>通知 <b id="pl-wait-n">0</b> · 任务 <b id="pl-task-n">0</b></span>
+        <span>通知 <b id="pl-wait-n">0</b> · 任务</span>
         <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
       </button>
       <div class="pl-strip" id="pl-strip">
         <button type="button" class="pl-strip-btn" id="pl-strip-expand" title="展开左栏" aria-label="展开左栏"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg></button>
         <span class="pl-strip-item" title="通知"><span>通知</span><b class="pl-strip-n" id="pl-strip-wait">0</b></span>
-        <span class="pl-strip-item" title="任务"><span>任务</span><b class="pl-strip-n" id="pl-strip-task">0</b></span>
       </div>
       <div class="pl-left-body" id="pl-left-body">
         <section class="pl-group" aria-labelledby="pl-wait-h">
@@ -246,22 +240,27 @@
              heading and empty state with its own group. -->
         <section class="pl-group" aria-label="任务">
           <div id="pl-task">
-            <h2 class="pl-group-h">任务 · 0</h2>
+            <h2 class="pl-group-h">任务</h2>
             <div class="pl-empty">还没有任务<span>Planner 派出的会话和它答应你的事会列在这里</span></div>
           </div>
         </section>
-        <div class="pl-tools" id="pl-tools"></div>
       </div>
     </aside>
     <!-- The conversation: also the Planner drawer's body, moved there while
          it is open (planner_drawer.js); the .pl-drawer-only buttons show only
-         in the drawer, the 工作台 button only on the page. -->
+         in the drawer, the 工作台 button and the "⋯" menu (#pl-tools: push
+         pause, 停用 Planner) only on the page. -->
     <section class="pl-center" id="pl-center" aria-label="Planner 对话">
       <header class="pl-head">
         <span class="pl-title">Planner</span>
         <span class="pl-status" id="pl-status"></span>
+        <span class="pl-paused" id="pl-paused" hidden></span>
         <span class="pl-head-sp"></span>
         <button type="button" class="files-dl-btn pl-page-only" data-action="workbench-toggle" title="工作台（预览 · 产出 · 文件 · 详情）">工作台</button>
+        <details class="pl-more pl-page-only" id="pl-more">
+          <summary class="files-dl-btn" title="更多" aria-label="更多">⋯</summary>
+          <div class="pl-tools" id="pl-tools"></div>
+        </details>
         <button type="button" class="files-dl-btn pl-drawer-only" data-action="planner-drawer-page" title="打开 Planner 页面">完整页面</button>
         <button type="button" class="btn-close pl-drawer-only" data-action="planner-drawer-close" title="收起（Esc 或 Alt+P）" aria-label="收起 Planner 抽屉">&times;</button>
       </header>
@@ -274,13 +273,14 @@
         <div class="pl-cards" id="pl-cards" role="list" aria-label="待你回答" hidden></div>
       </div>
       <!-- A session card opened in the middle column (planner_chat.js): the
-           breadcrumb back to the conversation, its status line, its events. -->
+           breadcrumb back to the conversation, 停止 while it is a dispatched
+           session in progress, its status line, its events. -->
       <div class="pl-sess" id="pl-sess" hidden>
         <header class="pl-head">
           <nav class="pl-crumb" aria-label="位置"><button type="button" class="pl-link" data-action="planner-close-session">Planner</button><span aria-hidden="true">›</span><b id="pl-sess-name"></b></nav>
           <span class="pl-head-sp"></span>
           <button type="button" class="files-dl-btn" data-action="workbench-toggle" title="工作台（预览 · 产出 · 文件 · 详情）">工作台</button>
-          <button type="button" class="pl-btn" data-action="planner-close-session">‹ 返回 Planner</button>
+          <button type="button" class="files-dl-btn" id="pl-sess-stop" data-action="task-stop" title="停止这个会话正在做的事" hidden>停止</button>
         </header>
         <div class="pl-sess-status"><span class="pl-sess-line" id="pl-sess-line"></span><button type="button" class="pl-link" id="pl-sess-raw" data-action="planner-sess-raw" aria-pressed="false">原始记录</button></div>
         <div class="events pl-events" id="pl-sess-events" role="log" aria-live="off"><div id="pl-sess-stream"></div></div>

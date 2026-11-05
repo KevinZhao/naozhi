@@ -1,9 +1,11 @@
 // planner_view.js — the Planner page (docs/rfc/planner.md §10, §10.1, D77;
-// §15.1 PR ⑥, §15.4 D85). Left: 通知 (the open inbox items of GET
+// §15.1 PR ⑥, §15.4 D85, §15.7). Left: 通知 (the open inbox items of GET
 // /api/inbox, decisions and questions first and labelled, each closable;
 // decision cards answer through /api/inbox/decide) and the #pl-task
-// container 任务 (tasks.js) mounts into, then the browser-notification,
-// push-pause and 停用 Planner controls. Middle: the planner:main event
+// container 任务 (tasks.js) mounts into. The header's "⋯" menu holds the
+// seldom used controls — browser notifications (only while the browser has
+// not asked yet), push pause and 停用 Planner — and while pushes are paused
+// the header says until when, with 恢复. Middle: the planner:main event
 // stream with the morning briefs of GET /api/planner/briefs placed in it by
 // the time they were made (D91), its action blocks and the sessions it names
 // as cards (planner_cards.js), and the input box and the opened session card
@@ -20,12 +22,13 @@
 // outcomes) live in its in-memory history, which a restart drops: the first
 // page merges in the journaled ones from GET /api/planner/notes by time.
 //
-// The rail badge counts the inbox's `badge` (notify.js: decisions and
-// questions, §10.1); the left column's "通知" heading counts what its list
-// shows, every open item (`open`). Both are seeded from GET /api/inbox on
-// every WS auth_ok and kept by inbox_count frames. The 会话 view's sidebar
-// bar (side_wait.js) shows the same list and counts: waitCount, waitListHtml
-// and fetchInbox, with 'inbox:items' on nzBus after the list changes.
+// The rail badge counts the inbox's `badge` (notify.js: what waits on you to
+// act — questions, decisions and errors, §15.7 S1); the left column's "通知"
+// heading counts what its list shows, every open item (`open`). Both are
+// seeded from GET /api/inbox on every WS auth_ok and kept by inbox_count
+// frames. The 会话 view's sidebar bar (side_wait.js) shows the badge's items
+// and count: actionListHtml and fetchInbox, with 'inbox:items' on nzBus
+// after the list changes.
 //
 // The middle column (#pl-center) is one component with two hosts: the page
 // and the Planner drawer (planner_drawer.js, §15.3 ②), which gets the very
@@ -40,7 +43,7 @@ import { renderEventsWithDividers } from './event_render.js';
 import { renderMd, runPendingAsync } from './render_md.js';
 import { inbox, isLit, notifySupported, onInboxCount, requestNotifyPermission, revealFocus } from './notify.js';
 import { followWorkbenchSubject, noteWorkbenchEvent } from './workbench_panes.js';
-import { decisionActsHtml, decorateEvents, paintSessionCards, refreshHealth, webLinkHtml } from './planner_cards.js';
+import { agoText, decisionActsHtml, decorateEvents, paintSessionCards, refreshHealth, webLinkHtml } from './planner_cards.js';
 import { clearAck, clearPending, closePlannerSession, mountComposer, noteAck, notePlannerStatus } from './planner_chat.js';
 import { onSessionsApplied } from './session_list.js';
 import { mountTasks, refreshTasks } from './tasks.js';
@@ -62,7 +65,9 @@ const SLOW_TICKS = 10;
 // the turn's promise and status blocks are run off the read loop.
 const TASK_REFRESH_MS = 1500;
 
-const KIND_LABEL = { decision: '待你决定', question: '提问', error: '错误', notice: '通知' };
+// KIND_LABEL labels a card by kind: the kinds that wait on you to act. A
+// notice, the 通知 group's own kind, is not labelled.
+const KIND_LABEL = { decision: '待你决定', question: '提问', error: '错误' };
 const KIND_ORDER = { decision: 0, question: 1, error: 2, notice: 3 };
 
 const pl = {
@@ -130,32 +135,45 @@ function unitTarget(unit) {
   return s ? { key, node, title: s.user_label || s.summary || s.last_prompt || key, project: s.project || '' } : null;
 }
 
-function itemHtml(it) {
-  const created = Date.parse(it.created);
-  const kind = KIND_LABEL[it.kind] ? it.kind : 'notice';
+// metaHtml is where an item comes from: its session's workspace and name
+// (the name left out when the title says it) with 打开, else a unit that is
+// not listed; the Planner's own items need no source.
+function metaHtml(it) {
   const target = unitTarget(it.unit);
-  const meta = target
-    ? [target.project, target.title].filter(Boolean).map(esc).join(' · ') +
-      ' <button type="button" class="pl-link" data-action="session-select" data-key="' + escAttr(target.key) + '" data-node="' + escAttr(target.node) + '">打开</button>'
-    : (it.unit ? esc(it.unit === PLANNER_KEY ? 'Planner' : it.unit) : '');
+  if (target) {
+    const name = (it.title || '').includes(target.title) ? '' : target.title;
+    return [target.project, name].filter(Boolean).map(esc).join(' · ') +
+      ' <button type="button" class="pl-link" data-action="session-select" data-key="' + escAttr(target.key) + '" data-node="' + escAttr(target.node) + '">打开</button>';
+  }
+  return it.unit && it.unit !== PLANNER_KEY ? esc(it.unit) : '';
+}
+
+// timeHtml is how long a question or a decision has waited on you, or how
+// long ago anything else came in.
+function timeHtml(it, kind) {
+  const created = Date.parse(it.created);
+  if (isNaN(created)) return '';
+  const waits = kind === 'decision' || kind === 'question';
+  return '<span class="pl-wait" title="' + escAttr(formatAbsTime(created)) + '">' +
+    esc(waits ? '等了 ' + waitedText(Date.now() - created) : agoText(created)) + '</span>';
+}
+
+function itemHtml(it) {
+  const kind = KIND_LABEL[it.kind] ? it.kind : 'notice';
+  const meta = metaHtml(it);
   const link = webLinkHtml(it.link);
   const acts = decisionActsHtml(it);
   return '<div class="pl-card pl-k-' + kind + (isLit(it.id) ? ' inbox-lit' : '') + '" role="listitem" data-id="' + escAttr(it.id) + '">' +
       '<div class="pl-card-top">' +
-        '<span class="pl-kind">' + esc(KIND_LABEL[kind]) + '</span>' +
-        (!isNaN(created) ? '<span class="pl-wait" title="' + escAttr(formatAbsTime(created)) + '">等了 ' + esc(waitedText(Date.now() - created)) + '</span>' : '') +
+        (KIND_LABEL[kind] ? '<span class="pl-kind">' + esc(KIND_LABEL[kind]) + '</span>' : '') +
+        timeHtml(it, kind) +
         '<button type="button" class="pl-close btn-close" data-action="planner-inbox-close" data-id="' + escAttr(it.id) + '" title="关闭" aria-label="关闭这一条">&times;</button>' +
       '</div>' +
       '<div class="pl-card-title">' + esc(it.title || '') + '</div>' +
-      (it.why ? '<div class="pl-card-why">' + esc(it.why) + '</div>' : '') +
+      (it.why ? '<div class="pl-card-why" title="' + escAttr(it.why) + '">' + esc(it.why) + '</div>' : '') +
       (meta || link ? '<div class="pl-card-meta">' + [meta, link].filter(Boolean).join(' · ') + '</div>' : '') +
       acts +
     '</div>';
-}
-
-// waitCount is the "通知" count the left column shows: every open item.
-export function waitCount() {
-  return inbox.open || 0;
 }
 
 // sortedOpen orders the open items: decisions first, then questions,
@@ -166,23 +184,26 @@ function sortedOpen() {
 }
 
 // waitListHtml is the open items' cards, as the left column lists them.
-export function waitListHtml() {
+function waitListHtml() {
   const items = sortedOpen();
   return items.length ? items.map(itemHtml).join('') : '<div class="pl-empty">没有通知</div>';
+}
+
+// actionListHtml is the cards of the open items that wait on you to act
+// (KIND_LABEL's kinds, the badge's), for the 会话 sidebar's bar.
+export function actionListHtml() {
+  return sortedOpen().filter((it) => KIND_LABEL[it.kind]).map(itemHtml).join('');
 }
 
 function noteItems() {
   nzBus.dispatchEvent(new CustomEvent('inbox:items'));
 }
 
-// paintCounts: 通知 counts the open items its list shows, 任务 the cards
-// not done mounted in #pl-task. A write only on change.
+// paintCounts: 通知 counts the open items its list shows. A write only on
+// change.
 function paintCounts() {
-  const w = String(waitCount());
-  const p = String(document.querySelectorAll('#pl-task .tk-card:not(.done)').length);
-  const put = (ids, v) => ids.forEach((id) => { const el = $(id); if (el && el.textContent !== v) el.textContent = v; });
-  put(['pl-wait-count', 'pl-wait-n', 'pl-strip-wait'], w);
-  put(['pl-task-n', 'pl-strip-task'], p);
+  const w = String(inbox.open || 0);
+  ['pl-wait-count', 'pl-wait-n', 'pl-strip-wait'].forEach((id) => { const el = $(id); if (el && el.textContent !== w) el.textContent = w; });
 }
 
 function paintWaiting() {
@@ -264,22 +285,24 @@ export async function fetchInbox() {
 
 // ---- controls ----
 
+// notifyToolHtml is 允许浏览器通知 while the browser has not asked yet; once
+// allowed or refused there is nothing to do here.
 function notifyToolHtml() {
-  if (!notifySupported()) return '<span class="pl-tool-note">这个浏览器不支持通知</span>';
-  const p = Notification.permission;
-  if (p === 'granted') return '<span class="pl-tool-note">浏览器通知已允许</span>';
-  if (p === 'denied') return '<span class="pl-tool-note" title="在浏览器的网站设置里改为允许">浏览器通知已被拒绝</span>';
-  return '<button type="button" class="pl-btn" data-action="planner-notify-perm">允许浏览器通知</button>';
+  if (!notifySupported() || Notification.permission !== 'default') return '';
+  return '<div class="pl-tool"><button type="button" class="pl-btn" data-action="planner-notify-perm">允许浏览器通知</button></div>';
+}
+
+// pausedAt is the pause's end as HH:mm, with the date when not today.
+function pausedAt() {
+  const d = new Date(pl.pausedUntil);
+  const same = d.toDateString() === new Date().toDateString();
+  return (same ? '' : (d.getMonth() + 1) + '/' + d.getDate() + ' ') +
+    String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
 }
 
 function pauseToolHtml() {
   if (pl.pausedUntil > Date.now()) {
-    const d = new Date(pl.pausedUntil);
-    const same = d.toDateString() === new Date().toDateString();
-    const at = (same ? '' : (d.getMonth() + 1) + '/' + d.getDate() + ' ') +
-      String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
-    return '<span class="pl-tool-note" title="' + escAttr(formatAbsTime(pl.pausedUntil)) + '">已暂停到 ' + esc(at) + '，期间只进"通知"</span>' +
-      '<button type="button" class="pl-btn" data-action="planner-pause-resume">恢复推送</button>';
+    return '<button type="button" class="pl-btn" data-action="planner-pause-resume">恢复推送</button>';
   }
   if (pl.customPause) {
     return '<label class="pl-pause-custom"><input type="number" id="pl-pause-hours" min="1" max="168" value="3" aria-label="暂停小时数"> 小时</label>' +
@@ -299,13 +322,30 @@ function stopToolHtml() {
     '<span>停用 Planner</span></label>';
 }
 
+// closeMenu folds the header's "⋯" menu.
+function closeMenu() {
+  const more = $('pl-more');
+  if (more) more.open = false;
+}
+
+// paintTools fills the header's "⋯" menu and, while pushes are paused, its
+// 推送暂停到 line.
 function paintTools() {
+  const paused = $('pl-paused');
+  if (paused) {
+    const on = pl.pausedUntil > Date.now();
+    const html = on ? '<span class="pl-paused-l">推送</span><span>暂停到 ' + esc(pausedAt()) + '</span>' +
+      '<span aria-hidden="true">·</span><button type="button" class="pl-link" data-action="planner-pause-resume">恢复</button>' : '';
+    if (paused.innerHTML !== html) paused.innerHTML = html;
+    paused.title = on ? formatAbsTime(pl.pausedUntil) : '';
+    paused.hidden = !on;
+  }
   const box = $('pl-tools');
   if (!box) return;
-  // Repainting under an open custom-pause input would drop what is typed.
-  if (pl.customPause && box.contains(document.activeElement)) return;
-  box.innerHTML =
-    '<div class="pl-tool">' + notifyToolHtml() + '</div>' +
+  // Repainting under the custom-pause input would drop what is typed; only
+  // the input holding focus counts (Chromium focuses the clicked 自定义).
+  if (pl.customPause && document.activeElement?.id === 'pl-pause-hours') return;
+  box.innerHTML = notifyToolHtml() +
     '<div class="pl-tool"><span class="pl-tool-l">暂停推送</span><div class="pl-tool-btns">' + pauseToolHtml() + '</div></div>' +
     '<div class="pl-tool">' + stopToolHtml() + '</div>';
 }
@@ -317,6 +357,7 @@ async function pause(forVal) {
     });
     pl.pausedUntil = res && res.paused_until ? Date.parse(res.paused_until) || 0 : 0;
     pl.customPause = false;
+    closeMenu();
   } catch (e) {
     showToast('暂停推送失败：' + e.message, 'error');
   }
@@ -333,19 +374,22 @@ function paintStatus() {
   if (s) {
     if (!s.enabled) { text = '未开启'; cls = 'off'; }
     else if (s.stopped) { text = '已停用'; cls = 'off'; }
-    else if (s.alive) { text = '在线'; cls = 'on'; }
+    // Running is the normal case and goes unsaid.
+    else if (s.alive) { text = ''; }
     else { text = '启动中'; cls = 'wait'; }
   }
   if (chip) { chip.textContent = text; chip.className = 'pl-status' + (cls ? ' ' + cls : ''); }
   if (note) {
-    // The drawer has no left column: point at the page instead.
+    // The drawer has neither the left column nor the "⋯" menu: point at the
+    // page instead.
     const drawer = pl.host === 'drawer';
     const left = drawer ? 'Planner 页面左栏' : '左栏';
+    const menu = drawer ? 'Planner 页面头部的"⋯"' : '头部的"⋯"';
     let html = '';
     if (s && !s.enabled) {
       html = '<b>Planner 没有开启。</b>在配置里设 <code>planner.enabled: true</code> 并重启 naozhi 后，这里是你和 Planner 的对话：早报、它派出的会话与汇报。' + left + '的"通知"照常可用。';
     } else if (s && s.stopped) {
-      html = '<b>Planner 已停用。</b>它不再运行，也不收消息；关掉' + (drawer ? ' ' : '') + left + '的"停用 Planner"即可恢复。';
+      html = '<b>Planner 已停用。</b>它不再运行，也不收消息；关掉' + menu + '里的"停用 Planner"即可恢复。';
     }
     note.innerHTML = html;
     note.hidden = !html;
@@ -729,6 +773,7 @@ export function openPlannerPanel() {
 export function closePlannerPanel() {
   if (pl.host === 'page') stopConversation();
   pl.customPause = false;
+  closeMenu();
   if (workbench.isOpen()) workbench.close();
   $('planner-main')?.classList.remove('pl-wb-open', 'pl-left-peek');
   followWorkbenchSubject();
@@ -834,6 +879,7 @@ registerActions({
     try {
       await fetchJSON(NZ_CONTRACT.API.inbox_pause, { method: 'DELETE', timeoutMs: 8000 });
       pl.pausedUntil = 0;
+      closeMenu();
     } catch (e) {
       showToast('恢复推送失败：' + e.message, 'error');
     }
@@ -864,7 +910,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const open = main.classList.toggle('pl-left-open');
     e.currentTarget.setAttribute('aria-expanded', open ? 'true' : 'false');
   });
-  // The strip and the phone heading count what 任务 renders.
-  const tasks = $('pl-task');
-  if (tasks) new MutationObserver(paintCounts).observe(tasks, { childList: true, subtree: true });
+  // The "⋯" menu closes on a click outside it. The path is the one at
+  // dispatch: a menu button repaints itself away before this runs.
+  document.addEventListener('click', (e) => {
+    const more = $('pl-more');
+    if (more?.open && !e.composedPath().includes(more)) more.open = false;
+  });
 });

@@ -6,9 +6,9 @@
 // (D91); only the Planner's
 // questions with options stand at the end of the conversation; the
 // dispatched session is a 任务 with 停止, which posts /api/tasks/stop and
-// leaves it 失败 as yours; the sessions it dispatched (purpose task) are
-// their own "Planner 派出" group on top of the session list. Desktop and
-// phone.
+// leaves it 已完成 as yours (已停止); the sessions it dispatched (purpose
+// task) are their own "Planner 派出" group on top of the session list.
+// Desktop and phone.
 const { test, expect } = require('@playwright/test');
 const { startMockServer, defaultSessions } = require('./mock-server');
 const { waitForWs } = require('./shim_wait');
@@ -31,7 +31,7 @@ function inbox() {
       { id: 'in_err', kind: 'error', level: 'timely', unit: 'cron:nightly', title: 'iso nightly 失败', why: '定时任务运行失败', created: iso(now - 3600000), state: 'open', source: 'health:cron:nightly' },
     ],
     closed: [],
-    counts: { open: 2, badge: 1 },
+    counts: { open: 2, badge: 2 },
   };
 }
 
@@ -123,15 +123,21 @@ for (const vp of [{ name: 'desktop', width: 1280, height: 800 }, { name: 'phone'
       // 任务: the dispatched session runs, with 停止.
       if (vp.isMobile) await page.click('#pl-left-toggle');
       const task = page.locator('#pl-task .tk-card[data-id="' + TASK + '"]');
-      await expect(task.locator('.tk-state')).toHaveText('进行中');
+      await expect(task.locator('.tk-menu option:checked')).toHaveText('进行中');
       await expect(task.locator('.tk-stop')).toHaveText('停止');
       await task.scrollIntoViewIfNeeded();
       await page.screenshot({ path: test.info().outputPath('dispatch-task-' + vp.name + '.png') });
       await task.locator('.tk-stop').click();
       await expect.poll(() => mock.taskStopCalls).toEqual([{ id: TASK }]);
-      await expect(task.locator('.tk-state')).toHaveText('失败');
-      await expect(task).toContainText('你标记：已停止');
-      await expect(task.locator('.tk-stop')).toHaveCount(0);
+      // Stopping is your decision (§15.7 S2): 已完成, said as 已停止 · 你停的.
+      const stopped = page.locator('#pl-task .tk-sec-done .tk-card[data-id="' + TASK + '"]');
+      await expect(stopped.locator('.tk-state')).toHaveText('已停止');
+      await expect(stopped.locator('.tk-meta')).toHaveText('你停的');
+      await expect(stopped).not.toContainText('失败');
+      await expect(stopped.locator('.tk-stop')).toHaveCount(0);
+      await expect(stopped.locator('.tk-reopen')).toHaveText('重新打开');
+      await page.locator('#pl-task .tk-sec-done summary').click();
+      await stopped.scrollIntoViewIfNeeded();
       await page.screenshot({ path: test.info().outputPath('dispatch-stopped-' + vp.name + '.png') });
 
       // A question's option is its answer.

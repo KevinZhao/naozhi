@@ -1,12 +1,14 @@
-// E2E: the Planner page (planner_view.js, planner RFC §10 D77, §15.1 PR ⑥):
-// the rail entry and its badge (decisions and questions), the left column's
-// 通知 cards (closing one; decisions and questions first and labelled) and
-// 任务 (refetched after a Planner turn), the read-only planner:main stream (no
-// snapshot block, no 追问, the pushed "收到，正在看" by the input box, no idle
-// refetch on the inclusive `after` replay), the morning briefs in it by time
-// (D91), the push pause and 停用 Planner
-// controls, the workbench opening by itself on a new output and folding the
-// left column to its strip; the phone layout's collapsible left block; the
+// E2E: the Planner page (planner_view.js, planner RFC §10 D77, §15.1 PR ⑥,
+// §15.7): the rail entry and its badge (questions, decisions and errors),
+// the left column's 通知 cards (closing one; decisions and questions first
+// and labelled, each thing said once) and 任务 (refetched after a Planner
+// turn), the read-only planner:main stream (no snapshot block, no 追问, the
+// pushed "收到，正在看" by the input box, no idle refetch on the inclusive
+// `after` replay), the morning briefs in it by time (D91), the header's "⋯"
+// menu (push pause, 停用 Planner, browser notifications only while not yet
+// asked) and its 推送暂停到 line, the workbench opening by itself on a new
+// output and folding the left column to its strip; the phone layout's
+// collapsible left block; the
 // planner.enabled=false explanation.
 const { test, expect } = require('@playwright/test');
 const { startMockServer, defaultSessions } = require('./mock-server');
@@ -25,7 +27,7 @@ function inbox() {
       { id: 'in_d', kind: 'decision', level: 'timely', title: '周报用哪个模板？', why: 'Planner 问你', created: iso(now - 5 * 60000), state: 'open', source: 'planner:d1', decision: { handler: 'ask', actions: ['模板 A', '模板 B'] } },
     ],
     closed: [],
-    counts: { open: 3, badge: 2 },
+    counts: { open: 3, badge: 3 },
   };
 }
 
@@ -64,7 +66,7 @@ test('desktop: badge, 通知 cards, stream, controls, and the workbench folds th
     await waitForWs(page, 'CONNECTED');
     // The badge is seeded from GET /api/inbox once the socket is up; the
     // existing rail stays as it was.
-    await expect(page.locator('#abnav-planner-count')).toHaveText('2');
+    await expect(page.locator('#abnav-planner-count')).toHaveText('3');
     for (const id of ['chat', 'assets', 'files', 'cron', 'system', 'settings']) {
       await expect(page.locator('#abnav-' + id)).toBeVisible();
     }
@@ -75,7 +77,7 @@ test('desktop: badge, 通知 cards, stream, controls, and the workbench folds th
     await expect(page.locator('#abnav-planner')).toHaveAttribute('aria-pressed', 'true');
     const cards = page.locator('#pl-wait .pl-card');
     await expect(cards).toHaveCount(3);
-    // The column counts what it lists; the badge only decisions and questions.
+    // The column counts what it lists.
     await expect(page.locator('#pl-wait-count')).toHaveText('3');
     // Decisions first, then questions, then errors.
     await expect(cards.nth(0).locator('.pl-kind')).toHaveText('待你决定');
@@ -85,8 +87,10 @@ test('desktop: badge, 通知 cards, stream, controls, and the workbench folds th
     await expect(q.locator('.pl-wait')).toHaveText('等了 12 分钟');
     await expect(q.locator('.pl-link')).toHaveText('打开');
     await expect(page.locator('#pl-task .tk-card')).toHaveText(/iso 两分钟后提醒你看 hello\.md/);
-    await expect(page.locator('#pl-strip-task')).toHaveText('1');
-    await expect(page.locator('#pl-status')).toHaveText('在线');
+    // Running goes unsaid; the seldom used controls are folded in "⋯".
+    await expect(page.locator('#pl-status')).toHaveText('');
+    await expect(page.locator('#pl-tools')).toBeHidden();
+    await expect(page.locator('#pl-paused')).toBeHidden();
     await expect(page.locator('#pl-stream .event')).toHaveCount(3);
     await expect(page.locator('#pl-stream')).toContainText('两个会话在跑');
     // The user bubble shows what was typed, not the gateway's snapshot; a
@@ -111,12 +115,32 @@ test('desktop: badge, 通知 cards, stream, controls, and the workbench folds th
     await expect(page.locator('#abnav-planner-count')).toHaveText('1');
     await expect(cards).toHaveCount(1);
 
-    // Pause pushes for an hour, then the stop switch.
+    // Pause pushes for an hour from "⋯": the header says until when.
+    await page.click('#pl-more > summary');
+    await expect(page.locator('#pl-tools')).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath('planner-desktop-menu.png') });
     await page.click('[data-action="planner-pause"][data-for="1h"]');
-    await expect(page.locator('#pl-tools')).toContainText('已暂停到');
+    await expect(page.locator('#pl-paused')).toContainText('推送暂停到');
+    await expect(page.locator('#pl-tools')).toBeHidden();
     expect(mock.inboxCalls[1]).toMatchObject({ path: '/api/inbox/pause', method: 'PUT', body: { for: '1h' } });
-    await page.click('[data-action="planner-pause-resume"]');
+    await page.locator('.pl-center > .pl-head').first().screenshot({ path: test.info().outputPath('planner-desktop-paused.png') });
+    await page.click('#pl-paused [data-action="planner-pause-resume"]');
+    await expect(page.locator('#pl-paused')).toBeHidden();
+    // 自定义: the hours input shows in the still open menu.
+    await page.click('#pl-more > summary');
+    await page.click('[data-action="planner-pause-custom"]');
+    await expect(page.locator('#pl-pause-hours')).toBeVisible();
+    await page.fill('#pl-pause-hours', '2');
+    await page.click('[data-action="planner-pause-custom-ok"]');
+    await expect(page.locator('#pl-paused')).toContainText('推送暂停到');
+    expect(mock.inboxCalls[3]).toMatchObject({ path: '/api/inbox/pause', method: 'PUT', body: { for: '2h' } });
+    await page.click('#pl-paused [data-action="planner-pause-resume"]');
+    await expect(page.locator('#pl-paused')).toBeHidden();
+    await page.click('#pl-more > summary');
     await expect(page.locator('[data-action="planner-pause"][data-for="today"]')).toBeVisible();
+    // A click elsewhere folds the menu.
+    await page.click('#pl-stream');
+    await expect(page.locator('#pl-tools')).toBeHidden();
 
     // A new output of planner:main opens the workbench; the left column folds.
     await expect.poll(() => mock.outputsCalls.filter((k) => k === PLANNER).length).toBeGreaterThan(0);
@@ -129,7 +153,7 @@ test('desktop: badge, 通知 cards, stream, controls, and the workbench folds th
     await expect(page.locator('#planner-main')).toHaveClass(/pl-wb-open/);
     await expect(page.locator('.pl-left')).toHaveCSS('width', '48px');
     // The turn's end refetches 任务: a promise it registered shows.
-    await expect(page.locator('#pl-strip-task')).toHaveText('2');
+    await expect(page.locator('#pl-task .tk-card')).toHaveCount(2);
     await expect(page.locator('#pl-strip-wait')).toHaveText('1');
     await page.screenshot({ path: test.info().outputPath('planner-desktop-workbench.png') });
     await page.click('#fv-btn-close');
@@ -152,6 +176,7 @@ test('desktop: badge, 通知 cards, stream, controls, and the workbench folds th
     await expect(page.locator('#pl-target-note')).toHaveText('收到，正在看');
     await expect(page.locator('#pl-stream .event.system')).toHaveCount(0);
 
+    await page.click('#pl-more > summary');
     await page.check('#pl-stop');
     await expect(page.locator('#pl-status')).toHaveText('已停用');
     await expect(page.locator('#pl-note')).toContainText('Planner 已停用');
@@ -180,7 +205,7 @@ test('phone: the left column is a collapsible block above the stream', async ({ 
   try {
     await page.goto(mock.url + '/dashboard');
     await waitForWs(page, 'CONNECTED');
-    await expect(page.locator('#abnav-planner-count')).toHaveText('2');
+    await expect(page.locator('#abnav-planner-count')).toHaveText('3');
     await page.click('#abnav-planner');
     const toggle = page.locator('#pl-left-toggle');
     await expect(toggle).toBeVisible();
@@ -199,6 +224,48 @@ test('phone: the left column is a collapsible block above the stream', async ({ 
   }
 });
 
+// On a narrow phone a pause until tomorrow and a status chip still leave
+// the "⋯" menu on screen, and the time whole.
+test('phone: the 推送暂停到 line leaves "⋯" on screen', async ({ browser }) => {
+  for (const [width, planner] of [[360, { alive: false }], [375, { stopped: true }]]) {
+    const ctx = await browser.newContext({ viewport: { width, height: 760 }, isMobile: true, hasTouch: true });
+    const page = await ctx.newPage();
+    const box = inbox();
+    const until = new Date(now + 86400000);
+    until.setHours(9, 0, 0, 0);
+    box.paused_until = until.toISOString();
+    const mock = await startMockServer({
+      ws: true, plannerEvents: plannerEvents(), inbox: box,
+      planner: { enabled: true, stopped: false, key: PLANNER, alive: true, ...planner },
+    });
+    try {
+      await page.goto(mock.url + '/dashboard');
+      await waitForWs(page, 'CONNECTED');
+      await page.click('#abnav-planner');
+      await expect(page.locator('#pl-paused')).toContainText('推送暂停到');
+      await expect(page.locator('#pl-status')).toHaveText(planner.stopped ? '已停用' : '启动中');
+      const head = page.locator('#planner-main .pl-center > .pl-head');
+      const [sw, cw] = await head.evaluate((el) => [el.scrollWidth, el.clientWidth]);
+      expect(sw).toBeLessThanOrEqual(cw);
+      const more = await page.locator('#pl-more > summary').boundingBox();
+      expect(more.x + more.width).toBeLessThanOrEqual(width);
+      // The chip stays on one line.
+      const lines = await page.locator('#pl-status').evaluate((el) => Math.round(el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight)));
+      expect(lines).toBe(1);
+      // The time is whole; 恢复 is in "⋯".
+      const time = page.locator('#pl-paused > span:not([aria-hidden]):visible');
+      await expect(time).toHaveText(/^暂停到 \d+\/\d+ 09:00$/);
+      expect(await time.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+      await page.click('#pl-more > summary');
+      await expect(page.locator('#pl-tools [data-action="planner-pause-resume"]')).toBeVisible();
+      await page.screenshot({ path: test.info().outputPath('planner-paused-' + width + '.png') });
+    } finally {
+      await ctx.close();
+      mock.server.close();
+    }
+  }
+});
+
 // A remote node's session that failed in a workspace is an item whose unit
 // is "<node>/<key>": its card names the session and opens it on that node.
 test('a remote session item opens the session on its node', async ({ browser }) => {
@@ -207,8 +274,8 @@ test('a remote session item opens the session on its node', async ({ browser }) 
   data.sessions.push({ ...data.sessions[2], key: REMOTE_KEY, node: 'mini', session_id: 'sess-remote', user_label: 'iso 远程修 CI', project: 'app' });
   data.nodes = { local: { display_name: 'Local', status: 'ok' }, mini: { display_name: 'Mini', status: 'ok' } };
   const box = { open: [
-    { id: 'in_rf', kind: 'error', level: 'timely', unit: 'mini/' + REMOTE_KEY, ws: 'ws_app00001', title: 'iso 远程修 CI 失败', why: '失败', created: iso(now - 60000), state: 'open', source: 'failed:mini/' + REMOTE_KEY },
-  ], closed: [], counts: { open: 1, badge: 0 } };
+    { id: 'in_rf', kind: 'error', level: 'timely', unit: 'mini/' + REMOTE_KEY, ws: 'ws_app00001', title: 'iso 远程修 CI 失败', created: iso(now - 60000), state: 'open', source: 'failed:mini/' + REMOTE_KEY },
+  ], closed: [], counts: { open: 1, badge: 1 } };
   for (const [name, viewport, extra] of [['desktop', { width: 1280, height: 800 }, {}], ['mobile', { width: 390, height: 844 }, { isMobile: true, hasTouch: true }]]) {
     const ctx = await browser.newContext({ viewport, ...extra });
     const page = await ctx.newPage();
@@ -222,7 +289,8 @@ test('a remote session item opens the session on its node', async ({ browser }) 
       await page.click('#abnav-planner');
       if (name === 'mobile') await page.click('#pl-left-toggle');
       const card = page.locator('.pl-card[data-id="in_rf"]');
-      await expect(card.locator('.pl-card-meta')).toContainText('app · iso 远程修 CI');
+      // The title names the session: the meta only its workspace.
+      await expect(card.locator('.pl-card-meta')).toHaveText(/^app\s*打开$/);
       const open = card.locator('.pl-link');
       await expect(open).toHaveAttribute('data-node', 'mini');
       await expect(open).toHaveAttribute('data-key', REMOTE_KEY);
@@ -390,5 +458,63 @@ test('a coalesced turn: snapshots and receipts are not your bubble', async ({ br
   } finally {
     await ctx.close();
     mock.server.close();
+  }
+});
+
+// 通知 cards say each thing once (§15.7 Q10): a notice has neither a kind
+// label nor "等了", the Planner's own item no source, a session's error whose
+// title names it only its workspace; a long reason shows two lines, the
+// whole of it in the tooltip. The "⋯" menu offers 允许浏览器通知 only while
+// the browser has not asked yet (Q15).
+test('通知 cards and the "⋯" menu say only what is needed', async ({ browser }) => {
+  const why = 'iso 两个会议在同一时段，'.repeat(20);
+  const box = { open: [
+    { id: 'in_n', kind: 'notice', level: 'timely', unit: PLANNER, title: 'iso 日程冲突', why, link: 'https://example.com/x', created: iso(now - 7 * 60000), state: 'open', source: 'planner:n1' },
+    { id: 'in_e', kind: 'error', level: 'timely', unit: SESSION, title: 'hello world 失败', created: iso(now - 3 * 60000), state: 'open', source: 'failed:' + SESSION },
+  ], closed: [], counts: { open: 2, badge: 1 } };
+  for (const [name, viewport, extra, permission] of [
+    ['desktop', { width: 1440, height: 900 }, {}, 'default'],
+    ['mobile', { width: 390, height: 844 }, { isMobile: true, hasTouch: true }, 'granted'],
+  ]) {
+    const ctx = await browser.newContext({ viewport, ...extra });
+    await ctx.addInitScript((p) => { if (window.Notification) Object.defineProperty(Notification, 'permission', { get: () => p }); }, permission);
+    const page = await ctx.newPage();
+    const mock = await startMockServer({
+      ws: true, plannerEvents: plannerEvents(), inbox: box, tasks: { tasks: [] },
+      planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
+    });
+    try {
+      await page.goto(mock.url + '/dashboard');
+      await waitForWs(page, 'CONNECTED');
+      await page.click('#abnav-planner');
+      if (name === 'mobile') await page.click('#pl-left-toggle');
+      const notice = page.locator('.pl-card[data-id="in_n"]');
+      await expect(notice.locator('.pl-kind')).toHaveCount(0);
+      await expect(notice.locator('.pl-wait')).toHaveText('7 分钟前');
+      await expect(notice.locator('.pl-card-meta')).toHaveText('打开原文');
+      const reason = notice.locator('.pl-card-why');
+      await expect(reason).toHaveAttribute('title', why);
+      const lines = await reason.evaluate((el) => Math.round(el.clientHeight / parseFloat(getComputedStyle(el).lineHeight)));
+      expect(lines).toBe(2);
+      const err = page.locator('.pl-card[data-id="in_e"]');
+      await expect(err.locator('.pl-kind')).toHaveText('错误');
+      await expect(err.locator('.pl-wait')).toHaveText('3 分钟前');
+      await expect(err.locator('.pl-card-why')).toHaveCount(0);
+      await expect(err.locator('.pl-card-meta')).toHaveText(/^myproject\s*打开$/);
+      // Nothing else lives under the column's lists.
+      await expect(page.locator('#pl-left .pl-tool')).toHaveCount(0);
+      await page.screenshot({ path: test.info().outputPath('planner-cards-' + name + '.png') });
+      await page.click('#pl-more > summary');
+      await expect(page.locator('#pl-tools')).toBeVisible();
+      if (permission === 'default') {
+        await expect(page.locator('#pl-tools [data-action="planner-notify-perm"]')).toHaveText('允许浏览器通知');
+      } else {
+        await expect(page.locator('#pl-tools')).not.toContainText('浏览器通知');
+      }
+      await page.screenshot({ path: test.info().outputPath('planner-menu-' + name + '.png') });
+    } finally {
+      await ctx.close();
+      mock.server.close();
+    }
   }
 });

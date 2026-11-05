@@ -297,8 +297,26 @@ func TestSources(t *testing.T) {
 	if got := b.titles(); !slices.Equal(got, []string{"a 失败", "系统性故障：凭证 / 权限拒绝"}) {
 		t.Errorf("pushes = %v", got)
 	}
-	if b.count != (Counts{Open: 2}) {
-		t.Errorf("inbox counts = %+v, want 2 open errors and no badge", b.count)
+	if b.count != (Counts{Open: 2, Badge: 2}) {
+		t.Errorf("inbox counts = %+v, want 2 open errors, both on the badge", b.count)
+	}
+}
+
+// A failed unit's reason is its error class, or none when the class says
+// nothing: never "失败 · 其他".
+func TestFailedWhy(t *testing.T) {
+	for _, c := range []struct {
+		class health.ErrorClass
+		want  string
+	}{
+		{health.ErrNone, ""},
+		{health.ErrOther, ""},
+		{health.ErrAuth, "凭证 / 权限拒绝"},
+		{health.ErrRateLimit, "限流"},
+	} {
+		if got := failedWhy(c.class); got != c.want {
+			t.Errorf("failedWhy(%q) = %q, want %q", c.class, got, c.want)
+		}
 	}
 }
 

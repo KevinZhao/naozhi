@@ -8,11 +8,14 @@
 //     opened in the middle column it sends to that session (POST
 //     /api/sessions/send).
 //   - a session card opens in the middle column under the breadcrumb
-//     "Planner › 会话名": its status line, then its milestones (the bubbles
-//     the chat view shows), and 原始记录 adds the tool calls. Its events are
-//     polled while the page is visible; the workbench follows it.
-//   - 交给 Planner, beside the chat view's input and in an opened session's
-//     input box, sends the session's reference with what is typed.
+//     "Planner › 会话名" (the only place it is named, besides the input box's
+//     "→ 会话名"), with 停止 while it is a dispatched session in progress
+//     (tasks.js's task-stop): its status line, then its milestones (the
+//     bubbles the chat view shows), and 原始记录 adds the tool calls. Its
+//     events are polled while the page is visible; the workbench follows it.
+//   - 交给 Planner, beside the chat view's input, sends the session's
+//     reference with what is typed. A session opened here is already in
+//     front of the Planner, so its input box has no 交给 Planner.
 //
 // The switch (GET /api/planner) is read once the socket is up and whenever
 // the Planner page reads it; with planner.enabled off the chat view's button
@@ -27,6 +30,7 @@ import { hydrateAskAnsweredFromHistory, lockRenderedAskCards } from './ask_card.
 import { runPendingAsync } from './render_md.js';
 import { ICONS } from './icons.js';
 import { refreshHealth, sessionStatusHtml, sessionTitle } from './planner_cards.js';
+import { isRunningTask } from './tasks.js';
 import { followPlannerSubject, noteWorkbenchEvent } from './workbench_panes.js';
 import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
@@ -150,8 +154,7 @@ export function mountComposer() {
   box.dataset.mounted = '1';
   box.innerHTML =
     '<div class="pl-target"><span class="pl-target-to" id="pl-target-to"></span>' +
-      '<span class="pl-target-note" id="pl-target-note"></span>' +
-      '<button type="button" class="pl-link" id="pl-sess-handoff" data-action="planner-sess-handoff" hidden>交给 Planner</button></div>' +
+      '<span class="pl-target-note" id="pl-target-note"></span></div>' +
     '<div class="pl-input-row">' +
       '<textarea id="pl-input" rows="1" aria-label="消息输入框"></textarea>' +
       '<button type="button" class="btn-icon btn-send" id="pl-send" data-action="planner-composer-send" title="发送" aria-label="发送消息">' + ICONS.send + '</button>' +
@@ -176,7 +179,6 @@ function paintComposer() {
   const send = $('pl-send');
   if (!to || !input || !send) return;
   const note = $('pl-target-note');
-  const handoff = $('pl-sess-handoff');
   if (st.sess) {
     // A card may name a session that does not exist (yet): a send would
     // create it as an ordinary session under that key.
@@ -186,11 +188,10 @@ function paintComposer() {
     input.placeholder = listed ? '追问或调整方向…' : '';
     input.disabled = !listed;
     send.disabled = st.sending || !listed;
-    if (handoff) { handoff.hidden = !(st.status && st.status.enabled); handoff.disabled = !plannerUsable() || !listed; }
     return;
   }
-  to.textContent = '→ Planner';
-  if (handoff) handoff.hidden = true;
+  // The Planner's own page needs no "→ Planner".
+  to.textContent = '';
   const usable = plannerUsable();
   if (note) note.textContent = !st.status ? '' : !st.status.enabled ? '未开启 Planner' : st.status.stopped ? '已停用 Planner' : st.sending ? '发送中…' : st.acked ? '收到，正在看' : '';
   input.placeholder = usable || !st.status ? '交代、追问…' : '';
@@ -293,15 +294,27 @@ function paintSessionStatus() {
   if (name) name.textContent = sessionTitle(p.key);
   const line = $('pl-sess-line');
   if (line) {
-    const html = sessionStatusHtml(p.key);
+    // The breadcrumb names it.
+    const html = sessionStatusHtml(p.key, false);
     if (line.innerHTML !== html) line.innerHTML = html;
   }
+  paintStop();
   const raw = $('pl-sess-raw');
   if (raw) {
     raw.setAttribute('aria-pressed', p.raw ? 'true' : 'false');
     raw.textContent = p.raw ? '只看里程碑' : '原始记录';
   }
   paintComposer();
+}
+
+// paintStop shows the header's 停止 while the opened session is a dispatched
+// one in progress, as 任务 last read it.
+function paintStop() {
+  const btn = $('pl-sess-stop');
+  if (!btn) return;
+  const key = st.sess ? st.sess.key : '';
+  btn.dataset.id = key;
+  btn.hidden = !key || !isRunningTask(key);
 }
 
 async function loadSession(reset) {
@@ -354,6 +367,7 @@ export function closePlannerSession(quiet) {
   if (pane) { pane.hidden = true; delete pane.dataset.key; }
   const box = $('pl-sess-stream');
   if (box) box.innerHTML = '';
+  paintStop();
   if (!quiet) {
     paintComposer();
     followPlannerSubject(PLANNER_KEY);
@@ -437,17 +451,6 @@ registerActions({
       showHandoffNote();
     });
   },
-  'planner-sess-handoff': () => {
-    const p = st.sess;
-    const input = $('pl-input');
-    if (!p || !input) return;
-    const text = input.value.trim();
-    handoff(p.key, text, () => {
-      if (input.value.trim() === text) { input.value = ''; fitInput(input); }
-      showToast('已交给 Planner', 'success');
-      closePlannerSession(false);
-    });
-  },
   'planner-goto': () => {
     $('handoff-note')?.remove();
     shell.setActivityView('planner');
@@ -457,3 +460,4 @@ registerActions({
 // A new socket may follow a restart that flipped planner.enabled.
 wsm.onReady(fetchPlannerStatus);
 nzBus.addEventListener('session:select', () => paintHandoffButton());
+nzBus.addEventListener('tasks:changed', paintStop);

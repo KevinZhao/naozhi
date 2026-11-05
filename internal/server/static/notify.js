@@ -7,7 +7,7 @@
 // session just opens), or with no listed session the Planner page with the
 // item's card brought into view (inbox.focus, taken by revealFocus once a
 // list paints it; see openPlanner for the drawer). inbox_count frames carry the open "通知" counts (open: every open
-// item; badge: decisions and questions, the §10.1 badge), re-dispatched on
+// item; badge: questions, decisions and errors, §15.7 S1), re-dispatched on
 // nzBus as 'inbox:count' for the Planner page's badge. The frames only come
 // on a change: the page takes the first counts from GET /api/inbox (its
 // `counts`) and passes them to onInboxCount.
