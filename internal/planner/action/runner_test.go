@@ -133,6 +133,41 @@ func TestDispatch(t *testing.T) {
 	}
 }
 
+// TestPromiseOfTheDispatchingReply: a promise made in the reply that
+// dispatched a session names it by title, the only name it has yet; it is
+// that session's, so stopping the session closes it. One naming no
+// dispatch of the reply, or naming a key of its own, is left as written.
+func TestPromiseOfTheDispatchingReply(t *testing.T) {
+	cases := []struct {
+		name, promise string
+		closed        bool
+	}{
+		{"by title", `{"type":"promise","text":"盯着「iso 写 hello」，它写完后告诉用户结果","due":"","close_when":"它汇报写好了"}`, true},
+		{"title in close_when", `{"type":"promise","text":"盯着它，做完告诉用户","due":"","close_when":"iso 写 hello 汇报写好了"}`, true},
+		{"another key", `{"type":"promise","text":"task:zz99 和 iso 写 hello 都做完后告诉用户","due":"","close_when":""}`, false},
+		{"unrelated", `{"type":"promise","text":"明早提醒你看周报","due":"","close_when":""}`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r, g, _, side, dir := newRunner(t)
+			proms := promise.New(promise.Config{})
+			r.cfg.Promises = proms
+			board := task.New(task.Config{Sessions: side, Promises: proms})
+			r.Handle(block(`{"type":"dispatch","workspace":"`+filepath.Base(dir)+`","title":"iso 写 hello","model":"","message":"写一个 hello.md"}`) + "\n" + block(c.promise))
+			if len(g.spawned) != 1 {
+				t.Fatalf("spawned = %q", g.spawned)
+			}
+			if err := board.Stop(g.spawned[0]); err != nil {
+				t.Fatal(err)
+			}
+			open, closed := proms.List(10)
+			if got := len(closed) == 1; got != c.closed || len(open)+len(closed) != 1 {
+				t.Errorf("open %+v, closed %+v; want closed %v", open, closed, c.closed)
+			}
+		})
+	}
+}
+
 // A dispatch card a run before D88 left open is closed: nothing answers it.
 func TestOldDispatchCardClosed(t *testing.T) {
 	inbox := notify.New(notify.Config{System: func(string, string) error { return nil }})

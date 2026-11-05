@@ -70,12 +70,15 @@ type Promise struct {
 	// RemindedAt is when the due reminder went out, so it goes out once
 	// across restarts.
 	RemindedAt time.Time `json:"reminded_at,omitzero"`
+	// Task is the dispatched session the Planner made it for in the reply
+	// that dispatched it, before it could know the session's key.
+	Task string `json:"task,omitempty"`
 }
 
-// Cites reports whether p waits on dispatched session key: the key in its
-// text or close condition ("task:ab12 做完后告诉用户结果").
+// Cites reports whether p waits on dispatched session key: its Task, or the
+// key in its text or close condition ("task:ab12 做完后告诉用户结果").
 func (p Promise) Cites(key string) bool {
-	return strings.Contains(p.Text, key) || strings.Contains(p.CloseWhen, key)
+	return p.Task == key || strings.Contains(p.Text, key) || strings.Contains(p.CloseWhen, key)
 }
 
 // Reminder takes promises to the user: the "等你" push and the Planner
