@@ -127,7 +127,7 @@ func sessionFact(snap session.SessionSnapshot, s *session.ManagedSession, logDir
 	}
 	switch sf := snap.StartupFailure; {
 	case failedDeath(reason):
-		f.Failed, f.ErrText = "death_reason="+reason, snap.DeathDetail
+		f.Failed, f.ErrText = health.DeathEvidence+reason, snap.DeathDetail
 	case sf != nil && sf.Streak > 0:
 		f.Failed, f.ErrText = fmt.Sprintf("startup failed %d times (%s)", sf.Streak, sf.Class), snap.DeathDetail
 		if sf.Class == "auth" {
@@ -254,7 +254,7 @@ func remoteFact(nodeID string, down bool, m map[string]any) (health.Fact, bool) 
 	}
 	setProcState(&f, str("state"))
 	if r := str("death_reason"); failedDeath(r) {
-		f.Failed = "death_reason=" + r
+		f.Failed = health.DeathEvidence + r
 	}
 	f.LastActive = unixMilli(jsonInt(m["last_active"]))
 	f.Index = &health.IndexEntry{

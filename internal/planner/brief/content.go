@@ -77,19 +77,21 @@ type input struct {
 	Meetings   []meetingItem
 	Replies    []replyItem
 	Deadlines  []deadlineItem
-	Done       []doneItem
-	Failed     []failedItem
-	Waiting    []inboxItem
-	Errors     []inboxItem
-	Notices    []inboxItem
-	Tasks      []taskItem
-	Held       []heldItem
+	// StaleDeadlines counts the Asana tasks overdue past staleDays, folded
+	// into one line.
+	StaleDeadlines int
+	Done           []doneItem
+	Failed         []failedItem
+	Waiting        []inboxItem
+	Errors         []inboxItem
+	Tasks          []taskItem
+	Held           []heldItem
 }
 
 func (in input) counts() Counts {
 	return Counts{Meetings: len(in.Meetings), Replies: len(in.Replies), Deadlines: len(in.Deadlines),
 		Done: len(in.Done), Failed: len(in.Failed), Waiting: len(in.Waiting), Errors: len(in.Errors),
-		Notices: len(in.Notices), Tasks: len(in.Tasks), Planner: len(in.Held)}
+		Tasks: len(in.Tasks), Planner: len(in.Held)}
 }
 
 // healthData is the part of a health journal entry's data the brief reads
@@ -218,7 +220,9 @@ func (b *Briefer) gather(since, now time.Time) input {
 
 	if b.cfg.Inbox != nil {
 		for _, it := range b.cfg.Inbox() {
-			if it.State != notify.StateOpen {
+			// A notice is already a card on the Planner page; the brief
+			// repeats only what waits on the user and the errors.
+			if it.State != notify.StateOpen || !it.Kind.WaitsOnUser() && it.Kind != notify.KindError {
 				continue
 			}
 			kind := kindOf(it.Unit)
@@ -233,8 +237,6 @@ func (b *Briefer) gather(since, now time.Time) input {
 			switch {
 			case it.Kind.WaitsOnUser():
 				in.Waiting = append(in.Waiting, item)
-			case it.Kind != notify.KindError:
-				in.Notices = append(in.Notices, item)
 			case it.Unit != "" && failedUnits[it.Unit] && it.Source == "failed:"+it.Unit:
 				// Already listed under 失败的.
 			default:
@@ -280,7 +282,6 @@ func (b *Briefer) gather(since, now time.Time) input {
 	oldest := func(x, y inboxItem) int { return cmp.Or(x.Created.Compare(y.Created), cmp.Compare(x.Title, y.Title)) }
 	slices.SortFunc(in.Waiting, oldest)
 	slices.SortFunc(in.Errors, oldest)
-	slices.SortFunc(in.Notices, oldest)
 	return in
 }
 
@@ -357,8 +358,6 @@ var taskKinds = map[task.Kind]string{task.KindSession: "派出的会话", task.K
 
 var taskStates = map[task.State]string{task.Doing: "进行中", task.Waiting: "等你", task.Failed: "失败"}
 
-var weekdays = [...]string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}
-
 const stamp = "01-02 15:04"
 
 // render renders in as the brief's Markdown.
@@ -366,7 +365,8 @@ func render(in input) string {
 	loc := in.Now.Location()
 	c := in.counts()
 	var b strings.Builder
-	fmt.Fprintf(&b, "## 早报 · %d月%d日 %s\n\n", in.Now.Month(), in.Now.Day(), weekdays[in.Now.Weekday()])
+	// No title: the card the dashboard shows it in already names the brief
+	// and its day.
 	fmt.Fprintf(&b, "自 %s 以来：%s\n", in.Since.In(loc).Format(stamp), summary(c, "未关闭的错误"))
 
 	section(&b, "今天的日程", in.Meetings, func(m meetingItem) string {
@@ -387,9 +387,15 @@ func render(in input) string {
 		}
 		return line
 	})
-	section(&b, "今天到期或已过期的 Asana 任务", in.Deadlines, func(d deadlineItem) string {
+	const asana = "今天到期或已过期的 Asana 任务"
+	section(&b, asana, in.Deadlines, func(d deadlineItem) string {
 		return plain(textutil.TruncateRunes(d.Title, titleRunes)) + " · " + dueLabel(d.Due, in.Now)
 	})
+	if n := in.StaleDeadlines; n > 0 && len(in.Deadlines) > 0 {
+		fmt.Fprintf(&b, "- 另有 %d 条过期超过 %d 天\n", n, staleDays)
+	} else if n > 0 {
+		fmt.Fprintf(&b, "\n### %s\n- %d 条过期超过 %d 天\n", asana, n, staleDays)
+	}
 
 	section(&b, "完成的", in.Done, func(d doneItem) string {
 		line := link(d.Name, d.Link) + wsPart(d.WS) + " · " + d.At.In(loc).Format(stamp)
@@ -407,7 +413,7 @@ func render(in input) string {
 	})
 	section(&b, "失败的", in.Failed, func(f failedItem) string {
 		line := link(f.Name, f.Link) + wsPart(f.WS) + " · " + f.At.In(loc).Format(stamp)
-		if f.Class != "" && f.Class != health.ErrNone {
+		if f.Class != health.ErrNone && f.Class != health.ErrOther {
 			line += " · " + notify.ClassLabel(f.Class)
 		}
 		if f.Recovered {
@@ -424,7 +430,6 @@ func render(in input) string {
 	}
 	section(&b, "仍在等你的", in.Waiting, item)
 	section(&b, "未关闭的错误", in.Errors, item)
-	section(&b, "通知", in.Notices, item)
 	section(&b, "未完成的任务", in.Tasks, func(t taskItem) string {
 		line := link(textutil.TruncateRunes(t.Name, titleRunes), t.Link) + " · " + taskKinds[t.Kind] + " · " + taskStates[t.State]
 		if !t.Due.IsZero() {
@@ -464,7 +469,7 @@ func summary(c Counts, errors string) string {
 		label string
 		n     int
 	}{{"今天日程", c.Meetings}, {"等你回复", c.Replies}, {"Asana 到期", c.Deadlines},
-		{"完成", c.Done}, {"失败", c.Failed}, {"等你", c.Waiting}, {errors, c.Errors}, {"通知", c.Notices}, {"未完成的任务", c.Tasks}, {"Planner 记下", c.Planner}} {
+		{"完成", c.Done}, {"失败", c.Failed}, {"等你", c.Waiting}, {errors, c.Errors}, {"未完成的任务", c.Tasks}, {"Planner 记下", c.Planner}} {
 		if p.n > 0 {
 			parts = append(parts, fmt.Sprintf("%s %d", p.label, p.n))
 		}

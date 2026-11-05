@@ -37,20 +37,20 @@
 // Layering: never import dashboard.js back; setActivityView is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
 import { sessionList, ui } from './state.js';
-import { esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
+import { esc, escAttr, fetchJSON, nzBus, registerActions, sessionFailureText, showToast } from './nz_util.js';
 import { sid } from './session_ident.js';
 import { renderEventsWithDividers } from './event_render.js';
 import { renderMd, runPendingAsync } from './render_md.js';
 import { inbox, isLit, notifySupported, onInboxCount, requestNotifyPermission, revealFocus } from './notify.js';
 import { followWorkbenchSubject, noteWorkbenchEvent } from './workbench_panes.js';
-import { agoText, decisionActsHtml, decorateEvents, paintSessionCards, refreshHealth, webLinkHtml } from './planner_cards.js';
+import { decisionActsHtml, decorateEvents, paintSessionCards, refreshHealth, webLinkHtml } from './planner_cards.js';
 import { clearAck, clearPending, closePlannerSession, mountComposer, noteAck, notePlannerStatus } from './planner_chat.js';
 import { onSessionsApplied } from './session_list.js';
 import { mountTasks, refreshTasks } from './tasks.js';
 import { workbench } from './workbench.js';
 import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
-import { formatAbsTime, lastDividerTime } from './utilities.js';
+import { formatAbsTime, lastDividerTime, timeAgo } from './utilities.js';
 
 const PLANNER_KEY = 'planner:main';
 // EVENTS_LIMIT is the first page of the conversation; later events come in
@@ -111,6 +111,7 @@ const $ = (id) => document.getElementById(id);
 
 // ---- 通知 ----
 
+// waitedText is how long a question or a decision has waited on you.
 function waitedText(ms) {
   const m = Math.floor(ms / 60000);
   if (m < 1) return '不到 1 分钟';
@@ -118,6 +119,15 @@ function waitedText(ms) {
   const h = Math.floor(m / 60);
   if (h < 24) return h + ' 小时';
   return Math.floor(h / 24) + ' 天';
+}
+
+// itemWhy is a card's subtitle: for a failed session the cause in words
+// (its death reason, else its error class), else the item's own why. Items
+// opened before v0.4.1 wrote "失败 · 其他", which says nothing the title
+// does not.
+function itemWhy(it, target) {
+  const cause = it.kind === 'error' && target ? sessionFailureText(target.s) : '';
+  return cause || (it.why === '失败' || it.why === '失败 · 其他' ? '' : it.why || '');
 }
 
 // unitTarget is the listed session an item is about, or null: a local one,
@@ -132,7 +142,7 @@ function unitTarget(unit) {
     key = unit.slice(i + 1);
     s = sessionList.sessionsData[sid(key, node)];
   }
-  return s ? { key, node, title: s.user_label || s.summary || s.last_prompt || key, project: s.project || '' } : null;
+  return s ? { key, node, s, title: s.user_label || s.summary || s.last_prompt || key, project: s.project || '' } : null;
 }
 
 // metaHtml is where an item comes from: its session's workspace and name
@@ -155,7 +165,7 @@ function timeHtml(it, kind) {
   if (isNaN(created)) return '';
   const waits = kind === 'decision' || kind === 'question';
   return '<span class="pl-wait" title="' + escAttr(formatAbsTime(created)) + '">' +
-    esc(waits ? '等了 ' + waitedText(Date.now() - created) : agoText(created)) + '</span>';
+    esc(waits ? '等了 ' + waitedText(Date.now() - created) : timeAgo(created)) + '</span>';
 }
 
 function itemHtml(it) {
@@ -163,6 +173,7 @@ function itemHtml(it) {
   const meta = metaHtml(it);
   const link = webLinkHtml(it.link);
   const acts = decisionActsHtml(it);
+  const why = itemWhy(it, unitTarget(it.unit));
   return '<div class="pl-card pl-k-' + kind + (isLit(it.id) ? ' inbox-lit' : '') + '" role="listitem" data-id="' + escAttr(it.id) + '">' +
       '<div class="pl-card-top">' +
         (KIND_LABEL[kind] ? '<span class="pl-kind">' + esc(KIND_LABEL[kind]) + '</span>' : '') +
@@ -170,7 +181,7 @@ function itemHtml(it) {
         '<button type="button" class="pl-close btn-close" data-action="planner-inbox-close" data-id="' + escAttr(it.id) + '" title="关闭" aria-label="关闭这一条">&times;</button>' +
       '</div>' +
       '<div class="pl-card-title">' + esc(it.title || '') + '</div>' +
-      (it.why ? '<div class="pl-card-why" title="' + escAttr(it.why) + '">' + esc(it.why) + '</div>' : '') +
+      (why ? '<div class="pl-card-why" title="' + escAttr(why) + '">' + esc(why) + '</div>' : '') +
       (meta || link ? '<div class="pl-card-meta">' + [meta, link].filter(Boolean).join(' · ') + '</div>' : '') +
       acts +
     '</div>';

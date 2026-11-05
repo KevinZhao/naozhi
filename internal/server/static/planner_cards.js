@@ -18,10 +18,9 @@
 // listed state. Task titles come from the 任务 list (tasks.js 'tasks:list').
 import { NZ_CONTRACT } from './contract.js';
 import { sessionList } from './state.js';
-import { esc, escAttr, fetchJSON, nzBus } from './nz_util.js';
+import { HEALTH_STATES, esc, escAttr, evidenceText, fetchJSON, nzBus, sessionHealthState } from './nz_util.js';
 import { sid } from './session_ident.js';
-import { HEALTH_STATES } from './system_view.js';
-import { formatAbsTime } from './utilities.js';
+import { formatAbsTime, formatMonthDayTime, timeAgo } from './utilities.js';
 
 const PLANNER_KEY = 'planner:main';
 const HEALTH_MIN_MS = 20000;
@@ -46,15 +45,6 @@ const pc = {
 
 // ---- session cards ----
 
-export function agoText(ms) {
-  const m = Math.floor((Date.now() - ms) / 60000);
-  if (m < 1) return '刚刚';
-  if (m < 60) return m + ' 分钟前';
-  const h = Math.floor(m / 60);
-  if (h < 24) return h + ' 小时前';
-  return Math.floor(h / 24) + ' 天前';
-}
-
 // listedTitle is a listed local session's name, '' for one not listed.
 function listedTitle(key) {
   const s = sessionList.sessionsData[sid(key, 'local')];
@@ -77,10 +67,7 @@ function taskName(id) {
 function healthOf(key, s) {
   const u = pc.health.get(key);
   if (u && HEALTH_STATES[u.state]) return HEALTH_STATES[u.state];
-  if (!s) return null;
-  if (s.state === 'running') return HEALTH_STATES.active;
-  if (s.state === 'dead') return { label: '已结束', cls: 'off' };
-  return HEALTH_STATES.idle;
+  return s ? HEALTH_STATES[sessionHealthState(s)] || HEALTH_STATES.idle : null;
 }
 
 // sessionStatusHtml is a session's one status line: 名字 · 健康状态 · 最后活动
@@ -93,9 +80,9 @@ export function sessionStatusHtml(key, withName = true) {
   const last = (u && u.last_active && Date.parse(u.last_active)) || (s && s.last_active) || 0;
   let tail = '';
   if (s && s.state === 'running' && s.last_activity) tail = s.last_activity;
-  else if (last) tail = '最后活动 ' + agoText(last);
+  else if (last) tail = '最后活动 ' + timeAgo(last);
   return (withName ? '<span class="pl-scard-name">' + esc(sessionTitle(key)) + '</span>' : '') +
-    (st ? '<span class="hl-state ' + st.cls + '"' + (u && u.evidence ? ' title="' + escAttr(u.evidence) + '"' : '') + '>' + esc(st.label) + '</span>' : '') +
+    (st ? '<span class="hl-state ' + st.cls + '"' + (u && u.evidence ? ' title="' + escAttr(evidenceText(u.evidence, u.error_class)) + '"' : '') + '>' + esc(st.label) + '</span>' : '') +
     (tail ? '<span class="pl-scard-time"' + (last ? ' title="' + escAttr(formatAbsTime(last)) + '"' : '') + '>' + esc(tail) + '</span>' : '');
 }
 
@@ -202,7 +189,7 @@ function rowsHtml(rows) {
 // dueText is a due time the browser reads, in local time; else as written.
 function dueText(due) {
   const t = due ? Date.parse(due) : NaN;
-  return isNaN(t) ? due : formatAbsTime(t);
+  return isNaN(t) ? due : formatMonthDayTime(t);
 }
 
 // actionCardHtml renders one block.

@@ -27,9 +27,14 @@ type replyItem struct {
 	At          time.Time
 }
 
+// staleDays is how many days overdue an Asana task may be to be listed; the
+// older ones are only counted (D90).
+const staleDays = 7
+
 type deadlineItem struct {
 	Title string
 	Due   time.Time // zero when the scout gave none it could parse
+	Link  string
 }
 
 // gatherScout adds what the scout knows: today's meetings not over, from
@@ -80,6 +85,7 @@ func (b *Briefer) gatherScout(in *input) {
 			findings = append(findings, f.Finding)
 		}
 	}
+	asana := map[string]bool{} // the links of the Asana tasks reported due
 	for _, f := range findings {
 		switch {
 		case f.Kind == scout.KindReplyNeeded:
@@ -87,11 +93,23 @@ func (b *Briefer) gatherScout(in *input) {
 			in.Replies = append(in.Replies, replyItem{From: f.From, Title: f.Title, At: at})
 		case f.Kind == scout.KindDeadline && f.Source == scout.SourceAsana:
 			due := parseDue(f.Due, now.Location())
-			if due.IsZero() || due.Format(time.DateOnly) <= now.Format(time.DateOnly) {
-				in.Deadlines = append(in.Deadlines, deadlineItem{Title: f.Title, Due: due})
+			days := overdueDays(due, now)
+			switch {
+			case days < 0:
+				continue
+			case days > staleDays:
+				in.StaleDeadlines++
+			default:
+				in.Deadlines = append(in.Deadlines, deadlineItem{Title: f.Title, Due: due, Link: f.Link})
+			}
+			if f.Link != "" {
+				asana[f.Link] = true
 			}
 		}
 	}
+	// What the Planner held about an Asana task the section already
+	// reports is not listed twice.
+	in.Held = slices.DeleteFunc(in.Held, func(h heldItem) bool { return h.Link != "" && asana[h.Link] })
 	// The longest wait first; the most overdue first; the undated last.
 	slices.SortStableFunc(in.Replies, func(x, y replyItem) int { return earliest(x.At, y.At) })
 	slices.SortStableFunc(in.Deadlines, func(x, y deadlineItem) int { return earliest(x.Due, y.Due) })
@@ -120,14 +138,23 @@ func parseDue(s string, loc *time.Location) time.Time {
 	return time.Time{}
 }
 
+// overdueDays is how many calendar days before now's a task fell due: 0
+// today or with no due time, negative when it is not due yet.
+func overdueDays(due, now time.Time) int {
+	if due.IsZero() {
+		return 0
+	}
+	y, m, d := due.Date()
+	ny, nm, nd := now.Date()
+	return int(time.Date(ny, nm, nd, 0, 0, 0, 0, time.UTC).Sub(time.Date(y, m, d, 0, 0, 0, 0, time.UTC)) / (24 * time.Hour))
+}
+
 // dueLabel says when a task fell due, by calendar day.
 func dueLabel(due, now time.Time) string {
 	if due.IsZero() {
 		return "到期"
 	}
-	y, m, d := due.Date()
-	ny, nm, nd := now.Date()
-	days := int(time.Date(ny, nm, nd, 0, 0, 0, 0, time.UTC).Sub(time.Date(y, m, d, 0, 0, 0, 0, time.UTC)) / (24 * time.Hour))
+	days := overdueDays(due, now)
 	if days <= 0 {
 		return "今天到期"
 	}

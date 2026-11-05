@@ -235,8 +235,7 @@ func TestRender(t *testing.T) {
 	b := f.briefer(names, reg)
 	b.Check()
 
-	want := "## 早报 · 11月3日 周二\n\n" +
-		"自 11-02 08:30 以来：完成 2 · 失败 1 · 等你 1 · 未关闭的错误 1 · 通知 1 · 未完成的任务 2 · Planner 记下 2\n" +
+	want := "自 11-02 08:30 以来：完成 2 · 失败 1 · 等你 1 · 未关闭的错误 1 · 未完成的任务 2 · Planner 记下 2\n" +
 		"\n### 完成的（2）\n" +
 		"- [node2/dashboard:direct:x:general](#node=node2&session=dashboard%3Adirect%3Ax%3Ageneral) · 工作区 naozhi · 11-03 03:00\n" +
 		"- [修复 ［登录］ ＊重试＊](#session=dashboard%3Apj%3Aabc%3Ageneral) · 工作区 naozhi · 11-02 21:00 · 产出 1 个文件、[PR #12](https://github.com/o/r/pull/12)\n" +
@@ -246,8 +245,6 @@ func TestRender(t *testing.T) {
 		"- 提问 · [周报 在等你回复](#session=feishu%3Adirect%3Abob%3Ageneral) · 有提问等你回答超过 10 分钟 · 工作区 naozhi · 已等 2 小时\n" +
 		"\n### 未关闭的错误（1）\n" +
 		"- 错误 · 系统性故障：限流 · 2 个单元出现同一类错误：a、b · 已等 2 天\n" +
-		"\n### 通知（1）\n" +
-		"- 通知 · 磁盘剩余不足 · 剩余 8% · 已等 2 小时\n" +
 		"\n### 未完成的任务（2）\n" +
 		"- [iso 写 hello](#session=task%3Aab12) · 派出的会话 · 等你 · 已 24 小时\n" +
 		"- CI 绿了告诉你 · 承诺 · 进行中 · 到期 11-03 08:00 · 已 2 天\n" +
@@ -261,7 +258,7 @@ func TestRender(t *testing.T) {
 	if got[0].Markdown != want {
 		t.Errorf("markdown:\n%s\nwant:\n%s", got[0].Markdown, want)
 	}
-	if len(f.pushes) != 1 || f.pushes[0].Title != "早报" || f.pushes[0].Body != "完成 2 · 失败 1 · 等你 1 · 错误 1 · 通知 1 · 未完成的任务 2 · Planner 记下 2" {
+	if len(f.pushes) != 1 || f.pushes[0].Title != "早报" || f.pushes[0].Body != "完成 2 · 失败 1 · 等你 1 · 错误 1 · 未完成的任务 2 · Planner 记下 2" {
 		t.Errorf("pushes = %+v", f.pushes)
 	}
 }

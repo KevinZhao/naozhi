@@ -99,6 +99,8 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    the daemon cards: 活跃 uses --nz-accent like .sys-state-dot.running, and
    待你回复 shares 失败's red because both need the user. */
 .sys-health{margin-top:var(--nz-space-5);padding-top:var(--nz-space-4);border-top:1px solid var(--nz-border)}
+/* Without daemons the overview's own bottom rule already separates it. */
+.svc-overview + .sys-health{margin-top:0;border-top:0}
 .hl-head{display:flex;align-items:baseline;gap:10px}
 .hl-head .svc-overview-title{flex:1}
 .hl-at{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);font-variant-numeric:tabular-nums}
@@ -732,8 +734,6 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .gw-ok .gw-note-icon{color:var(--nz-green)}
 .gw-planner .gw-note-icon{color:var(--nz-accent)}
 .gw-note-time{font-size:var(--nz-fs-xs);color:var(--nz-text-faint)}
-.gw-note-link{background:none;border:none;padding:0;font:inherit;color:var(--nz-accent);cursor:pointer}
-.gw-note-link:hover{text-decoration:underline}
 .refusal-tag{display:inline-block;font-size:var(--nz-fs-2xs);padding:1px 8px;border-radius:var(--nz-radius-pill);border:1px solid var(--nz-warn);color:var(--nz-warn)}
 /* Hidden types (kept for safety) */
 .event.thinking .event-content{color:var(--nz-event-agent-fg);font-style:italic}

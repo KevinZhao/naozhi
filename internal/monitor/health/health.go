@@ -68,6 +68,11 @@ const (
 	Unknown State = "unknown"
 )
 
+// DeathEvidence prefixes the evidence of a unit failed by its process's
+// death; the death reason follows it (wireup/health_sources.go writes it,
+// the session list reads it back).
+const DeathEvidence = "death_reason="
+
 // healthy states are entered at once; the others need two agreeing
 // reconciles.
 func (s State) healthy() bool { return s == Active || s == Idle }
@@ -448,8 +453,7 @@ func (m *Machine) Reconcile() {
 	snap := Snapshot{At: now, Units: make([]Unit, 0, len(m.units))}
 	for _, u := range m.units {
 		snap.Units = append(snap.Units, u.Unit)
-		// The Planner answers to no workspace by design (RFC §6.3).
-		if u.Workspace == "" && u.ID != sessionkey.PlannerMainKey {
+		if u.Workspace == "" && !gatewayOwned(u.ID) {
 			snap.Unowned++
 		}
 	}
@@ -475,6 +479,13 @@ func (m *Machine) Reconcile() {
 		}
 	}
 	m.writeIndex(facts)
+}
+
+// gatewayOwned reports whether unit id is naozhi's own: the Planner answers
+// to no workspace by design (RFC §6.3), and the daemons and the scout run in
+// naozhi's state directories, so none of them counts as unowned.
+func gatewayOwned(id string) bool {
+	return sessionkey.IsPlannerNSKey(id) || sessionkey.IsSysKey(id) || sessionkey.IsScoutKey(id)
 }
 
 // RefreshIndex rewrites index.json from fresh facts with the health of the

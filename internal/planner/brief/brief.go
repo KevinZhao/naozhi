@@ -59,13 +59,12 @@ type Counts struct {
 	Failed    int `json:"failed"`
 	Waiting   int `json:"waiting"`
 	Errors    int `json:"errors"`
-	Notices   int `json:"notices"`
 	Tasks     int `json:"tasks"`
 	Planner   int `json:"planner"`
 }
 
 func (c Counts) total() int {
-	return c.Meetings + c.Replies + c.Deadlines + c.Done + c.Failed + c.Waiting + c.Errors + c.Notices + c.Tasks + c.Planner
+	return c.Meetings + c.Replies + c.Deadlines + c.Done + c.Failed + c.Waiting + c.Errors + c.Tasks + c.Planner
 }
 
 // Mention is something the Planner holds for the next brief (a notify block
@@ -274,7 +273,7 @@ func (b *Briefer) Check() {
 	}
 	slog.Info("brief: sent", "day", br.Day, "meetings", br.Counts.Meetings, "replies", br.Counts.Replies,
 		"deadlines", br.Counts.Deadlines, "done", br.Counts.Done, "failed", br.Counts.Failed,
-		"waiting", br.Counts.Waiting, "errors", br.Counts.Errors, "notices", br.Counts.Notices, "tasks", br.Counts.Tasks,
+		"waiting", br.Counts.Waiting, "errors", br.Counts.Errors, "tasks", br.Counts.Tasks,
 		"planner", br.Counts.Planner)
 	if b.cfg.Push != nil {
 		b.cfg.Push(notify.Push{ID: "brief:" + br.Day, Kind: notify.KindNotice, Level: notify.LevelTimely,

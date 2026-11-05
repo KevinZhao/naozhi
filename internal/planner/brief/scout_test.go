@@ -68,8 +68,7 @@ func TestRenderScout(t *testing.T) {
 	}
 	b = f.withScout(f.briefer(nil, nil), cal, runs...)
 	b.Check()
-	want := "## 早报 · 11月3日 周二\n\n" +
-		"自 11-02 08:30 以来：今天日程 4 · 等你回复 2 · Asana 到期 2 · Planner 记下 1\n" +
+	want := "自 11-02 08:30 以来：今天日程 4 · 等你回复 2 · Asana 到期 2 · Planner 记下 1\n" +
 		"\n### 今天的日程（4）\n" +
 		"- 全天 · iso 全天培训\n" +
 		"- 10:00–11:00 · iso 评审 · 冲突\n" +
@@ -121,5 +120,88 @@ func TestScoutNothingToReport(t *testing.T) {
 	b.Check()
 	if len(f.pushes) != 0 || len(b.Recent(10)) != 1 {
 		t.Fatalf("Tuesday: pushes %v, recent %d; want none", f.pushes, len(b.Recent(10)))
+	}
+}
+
+// The brief says each thing once (§15.7): an Asana task overdue past
+// staleDays is only counted, one line for all of them; what the Planner
+// held about a task the Asana section reports is left out.
+func TestRenderAsanaOnce(t *testing.T) {
+	asana := func(id, due string) scout.RunFinding {
+		f := finding("asana", "deadline", id, "iso "+id, "", "", due)
+		f.Link = "https://app.asana.com/0/1/" + id
+		return f
+	}
+	tests := []struct {
+		name     string
+		findings []scout.RunFinding
+		held     []Mention
+		want     string
+		counts   Counts
+	}{
+		{
+			name: "past seven days folds into one line",
+			findings: []scout.RunFinding{
+				asana("t0", "2026-11-03"), asana("t7", "2026-10-27"), asana("t8", "2026-10-26"),
+				asana("t401", "2025-09-28"), asana("tomorrow", "2026-11-04"),
+			},
+			want: "自 11-02 08:30 以来：Asana 到期 2\n" +
+				"\n### 今天到期或已过期的 Asana 任务（2）\n" +
+				"- iso t7 · 已过期 7 天\n" +
+				"- iso t0 · 今天到期\n" +
+				"- 另有 2 条过期超过 7 天\n",
+			counts: Counts{Deadlines: 2},
+		},
+		{
+			name:     "only stale ones",
+			findings: []scout.RunFinding{asana("t8", "2026-10-26")},
+			held:     []Mention{{Key: "k1", Title: "iso 周报"}},
+			want: "自 11-02 08:30 以来：Planner 记下 1\n" +
+				"\n### 今天到期或已过期的 Asana 任务\n" +
+				"- 1 条过期超过 7 天\n" +
+				"\n### Planner 记下的（1）\n" +
+				"- iso 周报 · 11-02 08:30\n",
+			counts: Counts{Planner: 1},
+		},
+		{
+			name:     "a held Asana task is listed once",
+			findings: []scout.RunFinding{asana("t0", "2026-11-03"), asana("t8", "2026-10-26")},
+			held: []Mention{
+				{Key: "k1", Title: "iso t0 要催", Link: "https://app.asana.com/0/1/t0"},
+				{Key: "k2", Title: "iso t8 很久了", Link: "https://app.asana.com/0/1/t8"},
+				{Key: "k3", Title: "iso 别的", Link: "https://example.com/x"},
+			},
+			want: "自 11-02 08:30 以来：Asana 到期 1 · Planner 记下 1\n" +
+				"\n### 今天到期或已过期的 Asana 任务（1）\n" +
+				"- iso t0 · 今天到期\n" +
+				"- 另有 1 条过期超过 7 天\n" +
+				"\n### Planner 记下的（1）\n" +
+				"- [iso 别的](https://example.com/x) · 11-02 08:30\n",
+			counts: Counts{Deadlines: 1, Planner: 1},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.now = at(2, 8, 30)
+			f.briefer(nil, nil).Check() // Monday: nothing yet
+			b := f.briefer(nil, nil)
+			for _, m := range tt.held {
+				if err := b.Hold(m); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.now = at(3, 8, 31)
+			run := scout.Run{ID: "r1", State: scout.StateOK, Started: at(3, 8, 0), Ended: at(3, 8, 5), Findings: tt.findings}
+			b = f.withScout(f.briefer(nil, nil), nil, run)
+			b.Check()
+			got := b.Recent(1)
+			if len(got) != 1 || got[0].Markdown != tt.want {
+				t.Fatalf("markdown:\n%v\nwant:\n%s", got, tt.want)
+			}
+			if got[0].Counts != tt.counts {
+				t.Errorf("counts = %+v, want %+v", got[0].Counts, tt.counts)
+			}
+		})
 	}
 }

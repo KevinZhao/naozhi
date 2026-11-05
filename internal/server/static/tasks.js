@@ -17,8 +17,7 @@
 // refreshTasks() (a Planner turn ending, the page's slow tick).
 import { NZ_CONTRACT } from './contract.js';
 import { esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
-import { agoText } from './planner_cards.js';
-import { formatAbsTime } from './utilities.js';
+import { formatAbsTime, timeAgo } from './utilities.js';
 
 // Mounted containers; detached ones are dropped at the next refresh.
 const mounts = new Set();
@@ -83,7 +82,7 @@ function cardHtml(t) {
       '<div class="tk-top">' +
         (state === 'done' ? '<span class="tk-state">' + (stopped(t) ? STOPPED_WHY : STATE_LABEL.done) + '</span>' : '') +
         '<div class="tk-title">' + titleHtml(t) + '</div>' +
-        (!isNaN(at) ? '<span class="tk-time" title="' + escAttr(formatAbsTime(at)) + '">' + esc(agoText(at)) + '</span>' : '') +
+        (!isNaN(at) ? '<span class="tk-time" title="' + escAttr(formatAbsTime(at)) + '">' + esc(timeAgo(at)) + '</span>' : '') +
       '</div>' +
       '<div class="tk-foot"><div class="tk-meta">' + meta.join('<span aria-hidden="true"> · </span>') + '</div>' + stopHtml(t) + menuHtml(t) + '</div>' +
     '</div>';

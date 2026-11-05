@@ -540,10 +540,13 @@ func TestRemoteWorkspace(t *testing.T) {
 		remote("box", "a", "/srv/app/x"), // after mini's hit is cached
 		remote("mini", "b", "/elsewhere"),
 		{ID: "s", Kind: KindSession, Dir: "/srv/app/x"},
+		// naozhi's own units belong to no workspace and are not unowned.
+		{ID: "planner:main", Kind: KindSession},
+		{ID: "sys:scout", Kind: KindSysession},
 	}
 	r.run([]step{{facts: facts}, {tick: Interval, facts: facts}})
 
-	want := map[string]string{"mini/a": "ws_app00001", "box/a": "", "mini/b": "", "s": ""}
+	want := map[string]string{"mini/a": "ws_app00001", "box/a": "", "mini/b": "", "s": "", "planner:main": "", "sys:scout": ""}
 	snap := r.m.Snapshot()
 	for _, u := range snap.Units {
 		if u.Workspace != want[u.ID] {

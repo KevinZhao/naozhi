@@ -297,6 +297,10 @@ func TestSources(t *testing.T) {
 	if got := b.titles(); !slices.Equal(got, []string{"a 失败", "系统性故障：凭证 / 权限拒绝"}) {
 		t.Errorf("pushes = %v", got)
 	}
+	// A failure of no named class says nothing beyond its title.
+	if len(b.pushes) > 0 && b.pushes[0].Body != "" {
+		t.Errorf("unclassified failure body = %q, want none", b.pushes[0].Body)
+	}
 	if b.count != (Counts{Open: 2, Badge: 2}) {
 		t.Errorf("inbox counts = %+v, want 2 open errors, both on the badge", b.count)
 	}

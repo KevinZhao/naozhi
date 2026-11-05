@@ -119,9 +119,10 @@ type ServerOptions struct {
 	// Health is the session health table /api/system/health serves and
 	// /api/sessions/detail reads, called per request; nil serves an empty
 	// one (and leaves the detail's health unit out). Workspaces names their
-	// workspaces.
+	// workspaces, UnitName their units (a cron job's title).
 	Health     func() health.Snapshot
 	Workspaces *workspace.Registry
+	UnitName   func(unit string) string
 	// Notify is the "等你" inbox /api/inbox serves; the server binds the
 	// Hub to it as its dashboard push exit. nil serves an empty inbox.
 	Notify *notify.Notifier

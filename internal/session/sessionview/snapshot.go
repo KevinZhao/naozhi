@@ -64,7 +64,10 @@ type SessionSnapshot struct {
 	IsPlanner       bool   `json:"is_planner,omitempty"`       // true for project planner sessions
 	// Purpose is the session's purpose from its Planner sidecar ("task": the
 	// Planner dispatched it); filled by server, "" without one.
-	Purpose   string              `json:"purpose,omitempty"`
+	Purpose string `json:"purpose,omitempty"`
+	// Health is the health machine's verdict on the session (filled by
+	// server); nil before its first reconcile.
+	Health    *SessionHealth      `json:"health,omitempty"`
 	Subagents []ring.SubagentInfo `json:"subagents,omitempty"` // active sub-agent types in current turn
 	// MessageCount is the cumulative "user" turn count: from the live Process
 	// event log since spawn, else the persistedHistory count. Not persisted;
@@ -113,6 +116,18 @@ type SessionSnapshot struct {
 	// remedy is restarting the session. Same always-an-array contract as
 	// SpawnDiags.
 	OverlayDrift []OverlayFieldDrift `json:"overlay_drift"`
+}
+
+// SessionHealth is a session's health unit (monitor/health) as the session
+// list shows it. A failure keeps its death reason here across a restart,
+// which the session's own DeathReason does not survive.
+type SessionHealth struct {
+	State string `json:"state"`
+	// Since is when the unit entered State (unix ms): a verdict older than
+	// the session's last activity is one a later send has moved past.
+	Since       int64  `json:"since"`
+	DeathReason string `json:"death_reason,omitempty"`
+	ErrClass    string `json:"error_class,omitempty"`
 }
 
 // StartupFailureView is a dead session's run of CLI startup failures, for the
