@@ -2,7 +2,8 @@
 // 文件 · 详情 over the #fv-drawer, docked as the desktop split and a
 // full-screen panel on phone (docs/rfc/planner.md §10, §10.2, §15.1 W1).
 // This module is only the shell: open / close / tab / 放大. file_refs.js
-// fills the 预览 tab, workbench_panes.js the other three and the auto-open.
+// fills the 预览 tab, workbench_panes.js the other three; the pane never
+// opens by itself (D91).
 // Layering: a leaf over split_view / mobile_nav, so any view can reuse it.
 //
 // Events on nzBus: 'workbench:open' and 'workbench:close' when the pane

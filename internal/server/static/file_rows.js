@@ -70,11 +70,6 @@ export function isPreviewableOutput(o) {
   return !UNPREVIEWABLE[(o.path.split('.').pop() || '').toLowerCase()];
 }
 
-// outputId names one product across fetches: a file of a session, or a PR.
-export function outputId(o) {
-  return o.path ? 'f\t' + o.key + '\t' + (o.dir || '') + '\t' + o.path : 'p\t' + (o.url || '');
-}
-
 // outputRowsHtml renders outputs newest first, grouped by calendar day
 // (historyDayLabel). A file row is data-kind="output" with data-i its index
 // in outputs; a PR row is a link that opens GitHub. sessionLabel(o), when
@@ -102,11 +97,13 @@ export function outputRowsHtml(outputs, sessionLabel) {
       return;
     }
     const name = o.path.split('/').pop() || o.path;
+    // The directory only: the full path is the row's title already.
+    const dir = o.path.slice(0, o.path.length - name.length).replace(/\/$/, '');
     const ok = isPreviewableOutput(o);
     html += '<div class="files-row wb-out' + (ok ? '' : ' wb-out-off') + '" role="listitem" data-kind="output" data-i="' + i +
       '" title="' + escAttr(o.path + (ok ? '' : '（不支持预览，可在文件里下载）')) + '">' +
       '<span class="files-ic">' + (IMG_EXT[(name.split('.').pop() || '').toLowerCase()] ? '🖼' : '📄') + '</span>' +
-      '<span class="files-name">' + esc(name) + '<span class="wb-out-path">' + esc(o.path) + '</span></span>' +
+      '<span class="files-name">' + esc(name) + (dir ? '<span class="wb-out-path">' + esc(dir) + '</span>' : '') + '</span>' +
       '<span class="files-meta">' + meta + '</span></div>';
   });
   return html;

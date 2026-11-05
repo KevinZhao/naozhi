@@ -31,12 +31,15 @@
   .file-ref .fr-btn{min-width:32px;min-height:32px;padding:4px 8px}
   /* "Load earlier" pagination button in event stream. */
   .earlier-events-btn{min-height:36px}
+  /* The Planner's cards: × closes an item, 停止 and the task state menu. */
+  .pl-close,.pl-btn,.tk-menu{min-width:44px;min-height:44px}
 }
 
 /* ---- Track B: font-size floors to prevent iOS Safari auto-zoom on focus ---- */
 /* Any editable control needs >=16px computed font-size or Safari zooms in. */
 @media(max-width:768px){
   .freq-num,.freq-time,.freq-select{font-size:var(--nz-fs-md)}
+  .tk-menu{font-size:var(--nz-fs-md)}
   /* Todo chips / task metadata shouldn't overpower the message body on narrow screens. */
   .md-task-chip,.todo-chip{font-size:var(--nz-fs-sm);line-height:1.35}
 }

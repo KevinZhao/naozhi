@@ -1,7 +1,8 @@
-// planner_drawer.js — the Planner drawer (docs/rfc/planner.md §15.3 ②):
-// Alt+P from any view pulls the Planner conversation over the right side, a
-// full-screen panel on phone (opened by the session header's Planner
-// button, there being no keyboard); Esc or Alt+P again puts it away.
+// planner_drawer.js — the Planner drawer (docs/rfc/planner.md §15.3 ②,
+// D91): on desktop Alt+P from any view pulls the Planner conversation over
+// the right side; Esc or Alt+P again puts it away. A phone has no drawer: it
+// reaches the Planner page from the tab bar, and pushes and links always land
+// on the page (notify.js).
 //
 // It is the Planner page's own middle column moved in
 // (planner_view.js attachPlannerConversation): the same stream, cards and
@@ -11,16 +12,14 @@
 // view. The rail's Planner icon still opens the full page, which takes the
 // conversation back. The drawer and the workbench never show together:
 // opening one puts the other away.
-//
-// openPlannerDrawer({ item }) is the entry for a push that leads to a 通知
-// item without a session (§15.3 ④).
 import { sessionList, ui } from './state.js';
 import { nzBus, registerActions, typingOutside } from './nz_util.js';
 import { sid } from './session_ident.js';
-import { attachPlannerConversation, detachPlannerConversation, focusInboxItem } from './planner_view.js';
+import { attachPlannerConversation, detachPlannerConversation } from './planner_view.js';
 import { openPlannerSession } from './planner_chat.js';
 import { workbench } from './workbench.js';
-import { registerShell, shell } from './shell.js';
+import { shell } from './shell.js';
+import { isMobile, mobileQuery } from './utilities.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -32,8 +31,6 @@ function isOpen() {
   return !!d && !d.hidden;
 }
 
-const phone = () => !!(window.matchMedia && window.matchMedia('(max-width: 768px)').matches);
-
 // hide puts the drawer shell away; the conversation is the caller's.
 function hide() {
   const d = $('planner-drawer');
@@ -42,14 +39,12 @@ function hide() {
   document.body.classList.remove('nz-pld-open');
 }
 
-// openPlannerDrawer opens the drawer; opts.item marks that open 通知 item
-// above the conversation. On the Planner page the conversation is already
-// in view, so the item is marked there.
-export function openPlannerDrawer(opts) {
-  const item = (opts && opts.item) || '';
+// openPlannerDrawer opens the drawer. On the Planner page the conversation
+// is already in view and only takes the focus; a phone has no drawer.
+export function openPlannerDrawer() {
+  if (isMobile()) return;
   if (ui.activeView === 'planner') {
-    focusInboxItem(item);
-    if (!phone()) $('pl-input')?.focus();
+    $('pl-input')?.focus();
     return;
   }
   const d = $('planner-drawer');
@@ -62,8 +57,7 @@ export function openPlannerDrawer(opts) {
     document.body.classList.add('nz-pld-open');
     attachPlannerConversation(d);
   }
-  focusInboxItem(item);
-  if (!phone()) $('pl-input')?.focus();
+  $('pl-input')?.focus();
 }
 
 export function closePlannerDrawer() {
@@ -98,6 +92,7 @@ nzBus.addEventListener('planner:host', (e) => {
   if (e.detail.host !== 'drawer') { hide(); returnFocus = null; }
 });
 nzBus.addEventListener('workbench:open', closePlannerDrawer);
+mobileQuery().addEventListener('change', (e) => { if (e.matches) closePlannerDrawer(); });
 
 // Capture phase: Alt+P works from inside an input too, where it types
 // nothing anyone wants (Option+P is "π" on a Mac, hence e.code). Esc is
@@ -119,12 +114,7 @@ document.addEventListener('keydown', (e) => {
   closePlannerDrawer();
 }, true);
 
-// notify.js reaches the drawer through the shell: importing this module
-// back would close a cycle through planner_view.js.
-registerShell({ openPlannerDrawer });
-
 registerActions({
-  'planner-drawer-toggle': () => togglePlannerDrawer(),
   'planner-drawer-close': () => closePlannerDrawer(),
   'planner-drawer-page': () => shell.setActivityView('planner'),
 });

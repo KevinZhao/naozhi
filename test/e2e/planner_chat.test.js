@@ -205,16 +205,25 @@ test('chat view: 交给 Planner sends the session with the typed text', async ({
     await page.click('.session-card[data-key="' + SESSION + '"]');
     const btn = page.locator('#btn-handoff');
     await expect(btn).toBeVisible();
-    await expect(btn).toBeEnabled();
+    await expect(page.locator('#msg-input')).toHaveAttribute('data-placeholder', '发消息…');
+    // Nothing typed: nothing to hand over (it once sent an empty card).
+    await expect(btn).toBeDisabled();
     await page.click('#msg-input');
+    await page.keyboard.type('   ');
+    await expect(btn).toBeDisabled();
     await page.keyboard.type('iso 这个交给你');
+    await expect(btn).toBeEnabled();
     await btn.click();
     await expect.poll(() => mock.plannerSendCalls).toEqual([{ text: 'iso 这个交给你', ref: SESSION }]);
     await expect(page.locator('#msg-input')).toHaveText('');
+    // Cleared by the hand-off, not by typing: disabled again.
+    await expect(btn).toBeDisabled();
     await expect(page.locator('#handoff-note')).toContainText('已交给 Planner');
     expect(mock.sendCalls).toHaveLength(0);
     await page.click('#handoff-note [data-action="planner-goto"]');
     await expect(page.locator('body')).toHaveClass(/nz-view-planner/);
+    // An empty conversation says how to start one.
+    await expect(page.locator('#pl-stream > .pl-empty')).toContainText('直接说要做的事，或在会话里点"交给 Planner"');
   } finally {
     mock.server.close();
   }
@@ -258,6 +267,16 @@ test('phone: input box, an opened session card and 交给 Planner fit', async ({
     await page.locator('#abnav-chat').click();
     await page.click('.session-card[data-key="' + SESSION + '"]');
     await expect(page.locator('.sidebar')).not.toBeInViewport(); // slid away
+    // Empty, the row keeps its four controls and the placeholder one line;
+    // typing brings 交给 Planner in. The header leaves the backend name out.
+    await expect(page.locator('#btn-handoff')).toBeHidden();
+    await expect(page.locator('#header-cli')).toBeHidden();
+    const input = page.locator('#msg-input');
+    expect((await input.boundingBox()).height).toBeLessThan(60);
+    await expect(page.locator('#btn-send')).toBeInViewport();
+    await page.screenshot({ path: test.info().outputPath('planner-chat-empty-mobile.png') });
+    await input.click();
+    await page.keyboard.type('iso 交给你');
     await expect(page.locator('#btn-handoff')).toBeInViewport();
     await expect(page.locator('#btn-send')).toBeInViewport();
     await page.screenshot({ path: test.info().outputPath('planner-chat-handoff-mobile.png') });

@@ -223,20 +223,15 @@
        shown under body.nz-view-system. renderSystemView() in dashboard.js
        paints the read-only daemon status list (GET /api/system/daemons). -->
   <main class="system-main" id="system-main" aria-label="系统任务" hidden></main>
-  <!-- Planner page (planner_view.js): left 通知 / 任务 (a 48px strip
-       while the workbench is open), the Planner conversation in the middle.
-       The workbench (#fv-drawer) docks on the right as in the chat view. -->
+  <!-- Planner page (planner_view.js): left 通知 / 任务, the Planner
+       conversation in the middle. The workbench (#fv-drawer) docks on the
+       right as in the chat view. -->
   <main class="planner-main" id="planner-main" aria-label="Planner" hidden>
     <aside class="pl-left" id="pl-left" aria-label="通知与任务">
       <button type="button" class="pl-left-toggle" id="pl-left-toggle" aria-expanded="false" aria-controls="pl-left-body">
         <span>通知 <b id="pl-wait-n">0</b> · 任务 <b id="pl-task-n">0</b></span>
         <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
       </button>
-      <div class="pl-strip" id="pl-strip">
-        <button type="button" class="pl-strip-btn" id="pl-strip-expand" title="展开左栏" aria-label="展开左栏"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg></button>
-        <span class="pl-strip-item" title="通知"><span>通知</span><b class="pl-strip-n" id="pl-strip-wait">0</b></span>
-        <span class="pl-strip-item" title="任务"><span>任务</span><b class="pl-strip-n" id="pl-strip-task">0</b></span>
-      </div>
       <div class="pl-left-body" id="pl-left-body">
         <section class="pl-group" aria-labelledby="pl-wait-h">
           <h2 class="pl-group-h" id="pl-wait-h">通知 · <span id="pl-wait-count">0</span></h2>
@@ -266,8 +261,6 @@
         <button type="button" class="btn-close pl-drawer-only" data-action="planner-drawer-close" title="收起（Esc 或 Alt+P）" aria-label="收起 Planner 抽屉">&times;</button>
       </header>
       <div class="pl-note" id="pl-note" hidden></div>
-      <!-- The 通知 item a push points at (planner_view.js focusInboxItem). -->
-      <div class="pl-focus" id="pl-focus" hidden></div>
       <div class="events pl-events" id="pl-events" role="log" aria-live="off">
         <div class="pl-brief" id="pl-brief"></div>
         <div id="pl-stream"></div>
@@ -290,8 +283,8 @@
       <div class="pl-composer" id="pl-composer" hidden></div>
     </section>
   </main>
-  <!-- Planner drawer (planner_drawer.js, docs/rfc/planner.md §15.3 ②): Alt+P
-       from any view; holds #pl-center while open. -->
+  <!-- Planner drawer (planner_drawer.js, docs/rfc/planner.md §15.3 ②):
+       desktop Alt+P from any view; holds #pl-center while open. -->
   <aside class="pld" id="planner-drawer" role="dialog" aria-modal="false" aria-label="Planner 抽屉" hidden></aside>
   <!-- Settings view: shown under body.nz-view-settings. renderSettingsView()
        fills it (theme switch + connection info). -->

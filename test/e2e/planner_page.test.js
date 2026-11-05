@@ -4,9 +4,11 @@
 // 任务 (refetched after a Planner turn), the read-only planner:main stream (no
 // snapshot block, no 追问, receipts over the subscription, no idle refetch
 // on the inclusive `after` replay), the push pause and 停用 Planner
-// controls, the workbench opening by itself on a new output and folding the
-// left column to its strip; the phone layout's collapsible left block; the
-// planner.enabled=false explanation.
+// controls, a new output only counting on the 工作台 button (D91: the
+// workbench never opens by itself nor folds the left column); the phone
+// layout's left block, which unfolded takes the stream's place, and ← from a
+// session opened there going back to the page; the planner.enabled=false
+// explanation.
 const { test, expect } = require('@playwright/test');
 const { startMockServer, defaultSessions } = require('./mock-server');
 const { waitForWs } = require('./shim_wait');
@@ -45,7 +47,7 @@ async function routePreview(page) {
   });
 }
 
-test('desktop: badge, 通知 cards, stream, controls, and the workbench folds the left column', async ({ browser }) => {
+test('desktop: badge, 通知 cards, stream, controls, and the workbench counts outputs', async ({ browser }) => {
   test.setTimeout(60000);
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   const page = await ctx.newPage();
@@ -84,7 +86,6 @@ test('desktop: badge, 通知 cards, stream, controls, and the workbench folds th
     await expect(q.locator('.pl-wait')).toHaveText('等了 12 分钟');
     await expect(q.locator('.pl-link')).toHaveText('打开');
     await expect(page.locator('#pl-task .tk-card')).toHaveText(/iso 两分钟后提醒你看 hello\.md/);
-    await expect(page.locator('#pl-strip-task')).toHaveText('1');
     await expect(page.locator('#pl-status')).toHaveText('在线');
     await expect(page.locator('#pl-brief')).toContainText('早报');
     await expect(page.locator('#pl-stream .event')).toHaveCount(3);
@@ -118,23 +119,26 @@ test('desktop: badge, 通知 cards, stream, controls, and the workbench folds th
     await page.click('[data-action="planner-pause-resume"]');
     await expect(page.locator('[data-action="planner-pause"][data-for="today"]')).toBeVisible();
 
-    // A new output of planner:main opens the workbench; the left column folds.
+    // A new output of planner:main only counts on the 工作台 button.
+    const wbBtn = page.locator('.pl-head [data-action="workbench-toggle"]').first();
     await expect.poll(() => mock.outputsCalls.filter((k) => k === PLANNER).length).toBeGreaterThan(0);
-    await expect(page.locator('.pl-left')).toHaveCSS('width', '280px');
+    await expect(wbBtn).toHaveText('工作台');
     outputs.unshift(output('handoff/2026-11-04.md'));
     tasks.tasks.push({ id: 'pr_2', kind: 'promise', title: 'iso 明早告诉你结果', state: 'doing', at: iso(now), created: iso(now) });
     events.push({ type: 'result', summary: 'done', time: Date.now(), uuid: 'pl-r1' });
-    await expect(page.locator('#fv-drawer')).toHaveClass(/fv-open/, { timeout: 10000 });
-    await expect(page.locator('#fv-title')).toHaveText('handoff/2026-11-04.md');
-    await expect(page.locator('#planner-main')).toHaveClass(/pl-wb-open/);
-    await expect(page.locator('.pl-left')).toHaveCSS('width', '48px');
+    await expect(wbBtn).toHaveText('工作台产出 1', { timeout: 10000 });
+    await expect(page.locator('#fv-drawer')).not.toHaveClass(/fv-open/);
     // The turn's end refetches 任务: a promise it registered shows.
-    await expect(page.locator('#pl-strip-task')).toHaveText('2');
-    await expect(page.locator('#pl-strip-wait')).toHaveText('1');
+    await expect(page.locator('#pl-task .tk-card')).toHaveCount(2);
+    // Opened from the button, it leaves the left column as it is.
+    await wbBtn.click();
+    await expect(page.locator('#fv-drawer')).toHaveClass(/fv-open/);
+    await expect(page.locator('#wb-outputs .files-row')).toHaveCount(1);
+    await expect(page.locator('.pl-left')).toHaveCSS('width', '280px');
+    await expect(page.locator('#pl-wait .pl-card').first()).toBeVisible();
     await page.screenshot({ path: test.info().outputPath('planner-desktop-workbench.png') });
     await page.click('#fv-btn-close');
-    await expect(page.locator('#planner-main')).not.toHaveClass(/pl-wb-open/);
-    await expect(page.locator('.pl-left')).toHaveCSS('width', '280px');
+    await expect(page.locator('#fv-drawer')).not.toHaveClass(/fv-open/);
 
     // Idle: every poll replays the trailing result (inclusive `after`), which
     // must not refetch the outputs again.
@@ -190,7 +194,23 @@ test('phone: the left column is a collapsible block above the stream', async ({ 
     await expect(toggle).toHaveAttribute('aria-expanded', 'true');
     await expect(page.locator('#pl-wait .pl-card')).toHaveCount(3);
     await expect(page.locator('#pl-wait .pl-card').first()).toBeInViewport();
+    // Unfolded, the cards take the stream's place rather than squeezing it.
+    await expect(page.locator('#pl-center')).toBeHidden();
     await page.screenshot({ path: test.info().outputPath('planner-mobile-open.png') });
+    // A session opened from a card: ← goes back to the Planner page, not to
+    // the session list.
+    await page.locator('.pl-card[data-id="in_q"] .pl-link').tap();
+    await page.waitForFunction((key) => window.nz.test.selectedKey === key, SESSION);
+    await expect(page.locator('body')).not.toHaveClass(/nz-view-planner/);
+    await page.locator('.main-header .btn-mobile-back').tap();
+    await expect(page.locator('body')).toHaveClass(/nz-view-planner/);
+    await expect(page.locator('#planner-main')).toBeVisible();
+    // Opened from the session list, ← is the list's again.
+    await page.locator('#abnav-chat').click();
+    await page.locator('.session-card[data-key="' + SESSION + '"]').tap();
+    await page.locator('.main-header .btn-mobile-back').tap();
+    await expect(page.locator('body')).toHaveClass(/mobile-list-view/);
+    await expect(page.locator('body')).not.toHaveClass(/nz-view-planner/);
   } finally {
     await ctx.close();
     mock.server.close();

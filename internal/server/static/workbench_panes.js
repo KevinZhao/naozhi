@@ -1,8 +1,6 @@
-// workbench_panes.js — the workbench's 产出, 文件 and 详情 tabs, and its
-// auto-open: when the selected session makes a new previewable output the
-// workbench opens on 预览 and shows it (docs/rfc/planner.md §10, §15.1 W1).
-// Each new output opens it once, so a workbench the operator closed stays
-// closed until the next one.
+// workbench_panes.js — the workbench's 产出, 文件 and 详情 tabs, and the
+// "产出 N" on every 工作台 button (docs/rfc/planner.md §10, §15.1 W1). The
+// workbench never opens by itself (D91): a new output only raises the count.
 //
 // Outputs come from GET /api/sessions/outputs?key= (planner/activity), which
 // is refetched shortly after a tool event the backend tagged with an
@@ -16,7 +14,7 @@ import { selection, sessionList, ui } from './state.js';
 import { esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
 import { REMOTE_FILES_UNSUPPORTED, isDiscoveredKey, nodeServesFiles, sid } from './session_ident.js';
 import { notePreviewEvent, openFilePreview, resolveProjectForAbsPath } from './file_refs.js';
-import { crumbsHtml, fileRowsHtml, isPreviewableOutput, mimeForPath, outputId, outputRowsHtml } from './file_rows.js';
+import { crumbsHtml, fileRowsHtml, isPreviewableOutput, mimeForPath, outputRowsHtml } from './file_rows.js';
 import { formatAbsTime, formatTimeShort } from './utilities.js';
 import { workbench } from './workbench.js';
 
@@ -28,10 +26,6 @@ const REFRESH_MS = 1500;
 const st = {
   outputs: [],
   outputsFor: '', // sid st.outputs belongs to
-  // seen maps a session's sid to the outputIds it already had; a session
-  // first fetched seeds it, so outputs made before it was opened (or before
-  // this page loaded) never auto-open.
-  seen: new Map(),
   timer: 0,
   files: { root: '', node: 'local', dir: '', label: '' },
 };
@@ -59,40 +53,39 @@ function nodeQuery(s) { return s.node !== 'local' ? '&node=' + encodeURIComponen
 
 // ---- outputs ----
 
-function refreshOutputs(auto) {
+function refreshOutputs() {
   const s = subject();
   if (!s || !nodeServesFiles(s.node)) { st.outputs = []; st.outputsFor = ''; paintOutputs(); return Promise.resolve(); }
+  // Another subject's count must not stand on the buttons while its own loads.
+  if (st.outputsFor !== s.sid) { st.outputs = []; st.outputsFor = ''; paintOutputs(); }
   return fetchJSON(NZ_CONTRACT.API.sessions_outputs + '?key=' + encodeURIComponent(s.key) + nodeQuery(s)).then((res) => {
     const cur = subject();
     if (!cur || cur.sid !== s.sid) return;
-    const outs = (res && Array.isArray(res.outputs)) ? res.outputs : [];
-    const seen = st.seen.get(s.sid);
-    const fresh = seen ? outs.filter((o) => !seen.has(outputId(o))) : [];
-    st.seen.set(s.sid, new Set(outs.map(outputId)));
-    st.outputs = outs;
+    st.outputs = (res && Array.isArray(res.outputs)) ? res.outputs : [];
     st.outputsFor = s.sid;
     paintOutputs();
-    // Newest first: the first fresh previewable one is the latest. Only the
-    // chat view and the Planner page dock the workbench; elsewhere (or on a
-    // phone back on the session list, which keeps the selection) it would
-    // cover the view. Nor over the Planner drawer: opening it would put the
-    // drawer away mid-sentence.
-    const docks = !document.body.classList.contains('nz-pld-open') && (ui.activeView === 'planner' ||
-      (ui.activeView === 'chat' && !document.body.classList.contains('mobile-list-view')));
-    const show = auto && docks && fresh.find(isPreviewableOutput);
-    if (show) openOutput(show);
   }).catch(() => {});
 }
 
 function scheduleRefresh() {
   if (st.timer) return;
-  st.timer = setTimeout(() => { st.timer = 0; refreshOutputs(true); }, REFRESH_MS);
+  st.timer = setTimeout(() => { st.timer = 0; refreshOutputs(); }, REFRESH_MS);
+}
+
+// workbenchButtonHtml is a 工作台 button's label: "产出 N" beside it while the
+// subject has outputs. dashboard.js builds the session header's button with
+// it; paintOutputs repaints every button in place.
+export function workbenchButtonHtml() {
+  const n = st.outputs.length;
+  return '工作台' + (n ? '<span class="wb-btn-n">产出 ' + n + '</span>' : '');
 }
 
 function paintOutputs() {
   const n = st.outputs.length;
   const count = document.getElementById('wb-outputs-count');
   if (count) count.textContent = n ? String(n) : '';
+  const label = workbenchButtonHtml();
+  document.querySelectorAll('[data-action="workbench-toggle"]').forEach((b) => { if (b.innerHTML !== label) b.innerHTML = label; });
   const box = document.getElementById('wb-outputs');
   if (!box) return;
   const s = subject();
@@ -223,7 +216,7 @@ function paintTab(tab) {
   const body = document.getElementById('fv-body');
   if (tab === 'preview' && body && !body.childElementCount) {
     body.innerHTML = '<div class="fv-loading">还没有打开的文件：在「产出」或「文件」里点一个</div>';
-  } else if (tab === 'outputs') { paintOutputs(); refreshOutputs(false); }
+  } else if (tab === 'outputs') { paintOutputs(); refreshOutputs(); }
   else if (tab === 'files') {
     const s = subject();
     loadFiles(s && st.files.root === 'session:' + s.key && st.files.node === s.node ? st.files.dir : '');
@@ -248,10 +241,11 @@ nzBus.addEventListener('session:event', (e) => {
 });
 
 // followWorkbenchSubject re-points the tabs after the subject changed: the
-// session's outputs seed its seen set, and an open tab repaints for it.
+// session's outputs are fetched for the buttons' count, and an open tab
+// repaints for it.
 export function followWorkbenchSubject() {
   st.files.root = '';
-  refreshOutputs(false);
+  refreshOutputs();
   if (workbench.isOpen() && workbench.tab() !== 'preview') paintTab(workbench.tab());
 }
 

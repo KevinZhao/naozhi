@@ -607,7 +607,7 @@
   /* Bottom-sheet modal: cap height so textarea/lists stay scrollable above keyboard.
      overflow-y:auto is the fallback for modals WITHOUT a .modal-body (every
      dashboard.js modal: 新建会话 / 项目设置 / API token / confirm / prompt /
-     onboarding / cheatsheet …): their content would otherwise spill past the
+     cheatsheet …): their content would otherwise spill past the
      85dvh cap with no scroll container, leaving .modal-btns unreachable.
      Cron modals keep a .modal-body scroller: it shrinks to fit (a
      scroll container's min-height:auto resolves to 0), so the outer box never
@@ -620,17 +620,6 @@
   /* Keep trailing space above iOS home indicator while keyboard open */
   body.kbd-open .modal{max-height:calc(100dvh - 16px)}
 }
-
-/* Onboarding modal — first-run introduction. Wider than auth/create modals
-   to fit the feature list; dismiss persists in localStorage so it only
-   appears once per browser profile. */
-.modal.onboarding{width:480px;max-width:calc(100vw - 32px)}
-.modal.onboarding h3{font-size:18px;margin-bottom:6px}
-.modal.onboarding .ob-sub{font-size:var(--nz-fs-sm2);color:var(--nz-text-mute);margin-bottom:16px}
-.modal.onboarding ul{list-style:none;margin:0 0 16px 0;padding:0;display:flex;flex-direction:column;gap:10px}
-.modal.onboarding li{display:flex;gap:10px;align-items:flex-start;font-size:var(--nz-fs-sm2);color:var(--nz-text);line-height:1.5}
-.modal.onboarding li .ob-icon{flex-shrink:0;width:22px;height:22px;border-radius:var(--nz-radius-ms);background:rgba(31,111,235,.15);color:var(--nz-accent);display:flex;align-items:center;justify-content:center;font-size:var(--nz-fs-sm2);margin-top:1px}
-.modal.onboarding li b{color:var(--nz-text-strong);font-weight:600}
 
 /* Keyboard cheatsheet — opened via "?" when no input is focused. Reuses
    the standard .modal scaffold so trapFocus / Esc / backdrop-dismiss all

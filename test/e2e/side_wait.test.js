@@ -3,7 +3,7 @@
 // and closed there (a task marked done there, a dispatched session opening
 // in the chat view), one thin line with nothing open — and the deep links of
 // §15.3 ④ (notify.js): #planner&item=<id> and a notification without a
-// session open the Planner on the item, the brief's #planner the drawer;
+// session open the Planner on the item, the brief's #planner the page too;
 // #session=<key>&item=<id> opens the session and scrolls to the item's note,
 // or the Planner when the session is not listed.
 const { test, expect } = require('@playwright/test');
@@ -144,11 +144,12 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
         await expect(page.locator('body')).toHaveClass(/nz-view-planner/);
         await expect(page.locator('#pl-wait .pl-card[data-id="in_d"]')).toHaveClass(/inbox-lit/);
 
-        // The morning brief's #planner, from the chat view: the drawer.
+        // The morning brief's #planner, from the chat view: the page too,
+        // never the drawer (D91).
         await page.click('#abnav-chat');
         await page.evaluate(() => { location.hash = 'planner'; });
-        await expect(page.locator('#planner-drawer')).toBeVisible();
-        await expect(page.locator('body')).not.toHaveClass(/nz-view-planner/);
+        await expect(page.locator('body')).toHaveClass(/nz-view-planner/);
+        await expect(page.locator('#planner-drawer')).toBeHidden();
       } finally {
         await ctx.close();
         mock.server.close();

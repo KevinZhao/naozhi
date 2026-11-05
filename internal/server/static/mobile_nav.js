@@ -30,11 +30,16 @@ function mobileShowList() {
 
 // In-app back button / swipe-back. Flips the view synchronously, then pops
 // the history entry mobileEnterChat pushed so the browser stack stays in
-// step; the popstate below sees list view already and no-ops.
+// step; the popstate below sees list view already and no-ops. A session
+// picked on the Planner page goes back there.
 function mobileBack() {
   const ownsEntry = isMobile() && history.state && history.state.view === 'chat';
   mobileShowList();
   if (ownsEntry) history.back();
+  if (selection.fromPlanner) {
+    selection.fromPlanner = false;
+    if (shell.setActivityView) shell.setActivityView('planner');
+  }
 }
 
 // Handle Android back button and iOS swipe-back gesture

@@ -1,11 +1,11 @@
-// E2E: the Planner drawer (planner_drawer.js, planner RFC §15.3 ②): Alt+P
-// from any view, an input included, pulls the Planner conversation over the
-// right side and Alt+P or Esc puts it away; it and the workbench never show
-// together; a send in it goes through /api/planner/send and its receipt
-// renders there; a session card leaves it for that session; the rail's
-// Planner icon takes the conversation back to the page; openPlannerDrawer
-// marks a 等你 item; planner.enabled off shows the explanation; on phone the
-// session header's Planner button opens it full screen.
+// E2E: the Planner drawer (planner_drawer.js, planner RFC §15.3 ②, D91):
+// on desktop Alt+P from any view, an input included, pulls the Planner
+// conversation over the right side and Alt+P or Esc puts it away; it and the
+// workbench never show together; a send in it goes through
+// /api/planner/send and its receipt renders there; a session card leaves it
+// for that session; the rail's Planner icon takes the conversation back to
+// the page; planner.enabled off shows the explanation. A phone has no
+// drawer: no header button, and Alt+P opens nothing.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
 const { waitForWs } = require('./shim_wait');
@@ -113,25 +113,6 @@ test('desktop: Alt+P and Esc, the workbench, a send with its receipt, a card, th
     await page.keyboard.press('Alt+KeyP');
     await expect(drawer).toBeHidden();
     await expect(page.locator('#pl-input')).toBeFocused();
-    // With a session open in the middle column, openPlannerDrawer({ item })
-    // goes back to the Planner conversation to mark it.
-    await page.locator('#pl-stream .pl-scard[data-key="' + SESSION + '"]').click();
-    await expect(page.locator('#planner-main')).toHaveClass(/pl-sess-open/);
-    await page.evaluate(() => import('/static/planner_drawer.js').then((m) => m.openPlannerDrawer({ item: 'in_n' })));
-    await expect(page.locator('#planner-main')).not.toHaveClass(/pl-sess-open/);
-    await expect(page.locator('#planner-main #pl-focus .pl-card[data-id="in_n"]')).toBeVisible();
-    await expect(page.locator('#pl-target-to')).toHaveText('→ Planner');
-    await expect(page.locator('#pl-input')).toBeFocused();
-    await expect(drawer).toBeHidden();
-
-    // openPlannerDrawer marks a 通知 item above the conversation.
-    await page.click('#abnav-chat');
-    await page.evaluate(() => import('/static/planner_drawer.js').then((m) => m.openPlannerDrawer({ item: 'in_n' })));
-    await expect(drawer).toBeVisible();
-    const marked = drawer.locator('#pl-focus .pl-card[data-id="in_n"]');
-    await expect(marked).toContainText('iso 磁盘快满了');
-    await marked.locator('[data-action="planner-inbox-close"]').click();
-    await expect.poll(() => mock.inboxCalls.map((c) => c.path)).toContain('/api/inbox/close');
   } finally {
     await ctx.close();
     mock.server.close();
@@ -193,30 +174,21 @@ test('planner.enabled off: the drawer explains it', async ({ page }) => {
   }
 });
 
-test('phone: the session header\'s Planner button opens it full screen', async ({ browser }) => {
+test('phone: no drawer, no header button; the tab bar leads to the Planner page', async ({ browser }) => {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
   const page = await ctx.newPage();
-  // A gateway line longer than the phone is wide wraps inside it.
-  const events = plannerEvents().concat({ type: 'system', time: now - 100000, summary: '派出「iso 列出 work 目录文件」失败：同时运行的会话已满（max_procs 3），等有会话结束再派' });
-  const mock = await startMockServer({ ws: true, plannerEvents: events, inbox: inbox(), planner: planner() });
+  const mock = await startMockServer({ ws: true, plannerEvents: plannerEvents(), inbox: inbox(), planner: planner() });
   try {
     await openChat(page, mock);
-    const btn = page.locator('#btn-pld');
-    await expect(btn).toBeInViewport();
-    await page.screenshot({ path: test.info().outputPath('planner-drawer-entry-mobile.png'), animations: 'disabled' });
-    await btn.tap();
-    const drawer = page.locator('#planner-drawer');
-    await expect(drawer).toBeVisible();
-    const box = await drawer.boundingBox();
-    expect(Math.round(box.width)).toBe(390);
-    await expect(page.locator('#pl-input')).toBeInViewport();
-    await expect(drawer.locator('#pl-stream .event')).toHaveCount(3);
-    const line = drawer.locator('#pl-stream .event.system .event-content');
-    await expect.poll(async () => { const b = await line.boundingBox(); return b.x >= 0 && b.x + b.width <= 390; }).toBe(true);
-    await page.screenshot({ path: test.info().outputPath('planner-drawer-mobile.png'), animations: 'disabled' });
-    await drawer.locator('[data-action="planner-drawer-close"]').tap();
-    await expect(drawer).toBeHidden();
-    await expect(page.locator('#msg-input')).toBeVisible();
+    await expect(page.locator('.main-header .btn-workbench')).toBeInViewport();
+    await expect(page.locator('#btn-pld')).toHaveCount(0);
+    await page.keyboard.press('Alt+KeyP');
+    await expect(page.locator('#planner-drawer')).toBeHidden();
+    await page.screenshot({ path: test.info().outputPath('planner-drawer-none-mobile.png'), animations: 'disabled' });
+    await page.locator('.main-header .btn-mobile-back').tap();
+    await page.locator('#abnav-planner').tap();
+    await expect(page.locator('body')).toHaveClass(/nz-view-planner/);
+    await expect(page.locator('#planner-main #pl-stream .event')).toHaveCount(2);
   } finally {
     await ctx.close();
     mock.server.close();

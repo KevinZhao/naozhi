@@ -8,9 +8,9 @@
 // planner:main event stream, its action blocks and the sessions it names as
 // cards (planner_cards.js), and the input box and the opened session card
 // (planner_chat.js). Right: the workbench, on planner:main or the opened
-// session (workbench_panes.js); while it is open the left column folds to a
-// 48px strip. On a phone the left column is a collapsible block above the
-// stream.
+// session (workbench_panes.js); it opens only from its button and leaves the
+// left column as it is (D91). On a phone the left column is a block above
+// the stream that, unfolded, takes the stream's place.
 //
 // The stream follows a WS subscription to planner:main (receipts are pushed
 // to subscribers only, never logged); GET /api/sessions/events loads the
@@ -85,13 +85,6 @@ const pl = {
   seeding: false,
   // host runs the conversation: 'page', 'drawer', or '' (not shown).
   host: '',
-  // focusId is the 通知 item marked above the conversation; focusAt when it
-  // was asked for, inboxAt when pl.open was last read (an older list cannot
-  // tell it is gone), focusSeen once it showed.
-  focusId: '',
-  focusAt: 0,
-  inboxAt: 0,
-  focusSeen: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -173,8 +166,8 @@ function paintCounts() {
   const w = String(waitCount());
   const p = String(document.querySelectorAll('#pl-task .tk-card:not(.done)').length);
   const put = (ids, v) => ids.forEach((id) => { const el = $(id); if (el && el.textContent !== v) el.textContent = v; });
-  put(['pl-wait-count', 'pl-wait-n', 'pl-strip-wait'], w);
-  put(['pl-task-n', 'pl-strip-task'], p);
+  put(['pl-wait-count', 'pl-wait-n'], w);
+  put(['pl-task-n'], p);
 }
 
 function paintWaiting() {
@@ -183,16 +176,14 @@ function paintWaiting() {
   box.innerHTML = waitListHtml();
   paintCounts();
   paintInlineCards(sortedOpen());
-  paintFocus();
   revealWaiting();
 }
 
 // revealWaiting brings the focused item into view (notify.js), unfolding
-// the phone's left block or the workbench's strip when it is folded.
+// the phone's left block when it is folded.
 function revealWaiting() {
   if (!inbox.focus || ui.activeView !== 'planner' || !$('pl-wait')?.querySelector('.pl-card[data-id="' + CSS.escape(inbox.focus) + '"]')) return;
   const main = $('planner-main');
-  if (main?.classList.contains('pl-wb-open')) main.classList.add('pl-left-peek');
   if (main && !main.classList.contains('pl-left-open')) {
     main.classList.add('pl-left-open');
     $('pl-left-toggle')?.setAttribute('aria-expanded', 'true');
@@ -206,44 +197,16 @@ function revealWaiting() {
 function paintInlineCards(items) {
   const box = $('pl-cards');
   if (!box) return;
-  const mine = items.filter((it) => it.unit === PLANNER_KEY && it.decision && it.id !== pl.focusId);
+  const mine = items.filter((it) => it.unit === PLANNER_KEY && it.decision);
   const html = mine.length ? '<div class="pl-cards-h">待你回答 · ' + mine.length + '</div>' + mine.map(itemHtml).join('') : '';
   if (box.innerHTML !== html) box.innerHTML = html;
   box.hidden = !html;
-}
-
-// paintFocus shows the marked item, until it closes.
-function paintFocus() {
-  const box = $('pl-focus');
-  if (!box) return;
-  const it = pl.focusId ? pl.open.find((x) => x.id === pl.focusId) : null;
-  if (it) pl.focusSeen = true;
-  else if (pl.focusSeen) pl.focusId = '';
-  let html = '';
-  if (it) html = '<div class="pl-cards-h">通知</div>' + itemHtml(it);
-  else if (pl.focusId && pl.inboxAt >= pl.focusAt) html = '<div class="pl-empty">这一条已经不在"通知"里了</div>';
-  if (box.innerHTML !== html) box.innerHTML = html;
-  box.hidden = !html;
-}
-
-// focusInboxItem marks the open 通知 item id above the conversation (a push
-// leads to it, §15.3 ④); '' clears the mark. A session open in the middle
-// column hides the mark and takes the input box, so it goes back to the
-// Planner conversation first.
-export function focusInboxItem(id) {
-  if (id) closePlannerSession(false);
-  pl.focusId = id || '';
-  pl.focusAt = Date.now();
-  pl.focusSeen = false;
-  paintWaiting();
-  if (pl.focusId) fetchInbox();
 }
 
 export async function fetchInbox() {
   try {
     const res = await fetchJSON(NZ_CONTRACT.API.inbox, { timeoutMs: 8000 });
     pl.open = (res && Array.isArray(res.open)) ? res.open : [];
-    pl.inboxAt = Date.now();
     pl.pausedUntil = res && res.paused_until ? Date.parse(res.paused_until) || 0 : 0;
     if (res && res.counts) {
       pl.seeding = true;
@@ -394,7 +357,7 @@ function paintStreamEmpty() {
   const empty = box.querySelector(':scope > .pl-empty');
   const hasEvents = !!box.querySelector('.event');
   if (hasEvents || !(pl.status && pl.status.enabled)) { if (empty) empty.remove(); return; }
-  if (!empty) box.insertAdjacentHTML('beforeend', '<div class="pl-empty">还没有对话</div>');
+  if (!empty) box.insertAdjacentHTML('beforeend', '<div class="pl-empty">这里是你和 Planner 的对话：早报、它派出的会话与汇报。<span>直接说要做的事，或在会话里点"交给 Planner"。</span></div>');
 }
 
 // admitEvent is the same-ms replay gate (scratchAdmitEvent's rule): false
@@ -596,8 +559,6 @@ function stopConversation() {
   unsubscribe();
   closePlannerSession(false);
   pl.host = '';
-  pl.focusId = '';
-  paintFocus();
 }
 
 // hostConversation moves #pl-center into box and runs it there for host;
@@ -642,16 +603,9 @@ export function closePlannerPanel() {
   if (pl.host === 'page') stopConversation();
   pl.customPause = false;
   if (workbench.isOpen()) workbench.close();
-  $('planner-main')?.classList.remove('pl-wb-open', 'pl-left-peek');
   followWorkbenchSubject();
 }
 
-nzBus.addEventListener('workbench:open', () => {
-  if (ui.activeView === 'planner') $('planner-main')?.classList.add('pl-wb-open');
-});
-nzBus.addEventListener('workbench:close', () => {
-  $('planner-main')?.classList.remove('pl-wb-open', 'pl-left-peek');
-});
 // A changed count means an item opened or closed: refetch the list shown.
 nzBus.addEventListener('inbox:count', (e) => {
   const n = e.detail.badge;
@@ -757,14 +711,13 @@ registerActions({
 });
 
 document.addEventListener('DOMContentLoaded', () => {
-  $('pl-strip-expand')?.addEventListener('click', () => $('planner-main')?.classList.toggle('pl-left-peek'));
   $('pl-left-toggle')?.addEventListener('click', (e) => {
     const main = $('planner-main');
     if (!main) return;
     const open = main.classList.toggle('pl-left-open');
     e.currentTarget.setAttribute('aria-expanded', open ? 'true' : 'false');
   });
-  // The strip and the phone heading count what 任务 renders.
+  // The phone heading counts what 任务 renders.
   const tasks = $('pl-task');
   if (tasks) new MutationObserver(paintCounts).observe(tasks, { childList: true, subtree: true });
 });
