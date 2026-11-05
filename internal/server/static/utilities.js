@@ -978,8 +978,8 @@ const CRON_LIVE_AGENT_ONLY_HTML =
   '<div class="empty-state cdl-agent-only">本轮仅有 agent / 工具活动，正文消息请在任务结束后查看历史详情</div>';
 
 // formatTimeShort returns a chat-style label for a divider: today -> HH:MM,
-// yesterday -> "昨天 HH:MM", within a week -> "周三 HH:MM", older -> "M-D HH:MM",
-// different year -> "YYYY-M-D HH:MM".
+// yesterday -> "昨天 HH:MM", within a week -> "周三 HH:MM", older -> "M/D HH:MM",
+// different year -> "YYYY/M/D HH:MM".
 function formatTimeShort(ms) {
   if (!ms) return '';
   const d = new Date(ms);
@@ -1000,8 +1000,8 @@ function formatTimeShort(ms) {
     const wk = ['周日','周一','周二','周三','周四','周五','周六'][d.getDay()];
     return wk + ' ' + hm;
   }
-  const md = (d.getMonth() + 1) + '-' + d.getDate();
-  if (d.getFullYear() !== now.getFullYear()) return d.getFullYear() + '-' + md + ' ' + hm;
+  const md = (d.getMonth() + 1) + '/' + d.getDate();
+  if (d.getFullYear() !== now.getFullYear()) return d.getFullYear() + '/' + md + ' ' + hm;
   return md + ' ' + hm;
 }
 
@@ -1015,12 +1015,12 @@ function formatTimeFull(ms) {
 }
 
 // formatMonthDayTime is a point in time as the Planner page writes one:
-// MM-DD HH:mm, local.
+// M/D HH:mm, local, as the gateway's texts (brief, promise) write it too.
 function formatMonthDayTime(ms) {
   const d = new Date(ms);
   if (!ms || isNaN(d.getTime())) return '';
   const pad = n => String(n).padStart(2, '0');
-  return pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
 }
 
 function timeDividerHtml(ms) {

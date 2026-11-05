@@ -235,22 +235,22 @@ func TestRender(t *testing.T) {
 	b := f.briefer(names, reg)
 	b.Check()
 
-	want := "自 11-02 08:30 以来：完成 2 · 失败 1 · 等你 1 · 未关闭的错误 1 · 未完成的任务 2 · Planner 记下 2\n" +
+	want := "自 11/2 08:30 以来：完成 2 · 失败 1 · 等你 1 · 未关闭的错误 1 · 未完成的任务 2 · Planner 记下 2\n" +
 		"\n### 完成的（2）\n" +
-		"- [node2/dashboard:direct:x:general](#node=node2&session=dashboard%3Adirect%3Ax%3Ageneral) · 工作区 naozhi · 11-03 03:00\n" +
-		"- [修复 ［登录］ ＊重试＊](#session=dashboard%3Apj%3Aabc%3Ageneral) · 工作区 naozhi · 11-02 21:00 · 产出 1 个文件、[PR #12](https://github.com/o/r/pull/12)\n" +
+		"- [node2/dashboard:direct:x:general](#node=node2&session=dashboard%3Adirect%3Ax%3Ageneral) · 工作区 naozhi · 11/3 03:00\n" +
+		"- [修复 ［登录］ ＊重试＊](#session=dashboard%3Apj%3Aabc%3Ageneral) · 工作区 naozhi · 11/2 21:00 · 产出 1 个文件、[PR #12](https://github.com/o/r/pull/12)\n" +
 		"\n### 失败的（1）\n" +
-		"- 夜间构建 · 工作区 naozhi · 11-03 02:00 · 凭证过期 · 已恢复\n" +
+		"- 夜间构建 · 工作区 naozhi · 11/3 02:00 · 凭证过期 · 已恢复\n" +
 		"\n### 仍在等你的（1）\n" +
 		"- 提问 · [周报 在等你回复](#session=feishu%3Adirect%3Abob%3Ageneral) · 有提问等你回答超过 10 分钟 · 工作区 naozhi · 已等 2 小时\n" +
 		"\n### 未关闭的错误（1）\n" +
 		"- 错误 · 系统性故障：限流 · 2 个单元出现同一类错误：a、b · 已等 2 天\n" +
 		"\n### 未完成的任务（2）\n" +
 		"- [iso 写 hello](#session=task%3Aab12) · 派出的会话 · 等你 · 已 24 小时\n" +
-		"- CI 绿了告诉你 · 承诺 · 进行中 · 到期 11-03 08:00 · 已 2 天\n" +
+		"- CI 绿了告诉你 · 承诺 · 进行中 · 到期 11/3 08:00 · 已 2 天\n" +
 		"\n### Planner 记下的（2）\n" +
-		"- [［设计］ 评审](https://example.com/d%281%29) · 11-02 19:00\n" +
-		"- 周报已发布 · 下午再看 · 11-02 19:30\n"
+		"- [［设计］ 评审](https://example.com/d%281%29) · 11/2 19:00\n" +
+		"- 周报已发布 · 下午再看 · 11/2 19:30\n"
 	got := b.Recent(1)
 	if len(got) != 1 {
 		t.Fatalf("no brief")

@@ -46,7 +46,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.deps.Purpose != nil {
 		for i := range snapshots {
-			snapshots[i].Purpose = h.deps.Purpose(snapshots[i].Key)
+			snapshots[i].Purpose, snapshots[i].PurposeTitle = h.deps.Purpose(snapshots[i].Key)
 		}
 	}
 

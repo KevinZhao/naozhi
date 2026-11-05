@@ -153,6 +153,9 @@ type Status struct {
 	Alive   bool   `json:"alive"`
 	// Shift is the day of the current conversation's shift (YYYY-MM-DD).
 	Shift string `json:"shift,omitempty"`
+	// Workspaces names the registered workspaces by ID, for the page to
+	// show a workspace the Planner wrote by its ID by name.
+	Workspaces map[string]string `json:"workspaces,omitempty"`
 }
 
 // persisted is agent.json.
@@ -708,14 +711,24 @@ func (a *Agent) Snapshot() string {
 	if a.cfg.Promises != nil {
 		in.Promises = orEmpty(a.cfg.Promises())
 	}
-	if reg := a.cfg.Workspaces; reg != nil {
-		names := map[string]string{}
-		for _, w := range reg.List() {
-			names[w.ID] = w.Name
-		}
+	if names := a.workspaceNames(); names != nil {
 		in.Workspace = func(id string) string { return names[id] }
 	}
 	return renderSnapshot(in)
+}
+
+// workspaceNames maps the registered workspaces' IDs to their names, nil
+// without a registry.
+func (a *Agent) workspaceNames() map[string]string {
+	reg := a.cfg.Workspaces
+	if reg == nil {
+		return nil
+	}
+	names := map[string]string{}
+	for _, w := range reg.List() {
+		names[w.ID] = w.Name
+	}
+	return names
 }
 
 // orEmpty keeps a wired source's empty answer distinct from an unwired one.
@@ -732,6 +745,7 @@ func (a *Agent) Status() Status {
 	st := Status{Enabled: a.cfg.Enabled, Stopped: a.state.Stopped, Key: Key, Shift: a.state.Shift}
 	a.mu.Unlock()
 	st.Alive = a.cfg.Sessions.State(Key).Alive
+	st.Workspaces = a.workspaceNames()
 	return st
 }
 

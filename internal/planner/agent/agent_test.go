@@ -17,6 +17,7 @@ import (
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/planner/journal"
+	"github.com/naozhi/naozhi/internal/planner/workspace"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
@@ -171,6 +172,25 @@ func TestAllowRulesWorkspaces(t *testing.T) {
 	}
 	if n := len(got); n != 6 {
 		t.Errorf("len = %d, want 6 (duplicate workspace collapsed): %v", n, got)
+	}
+}
+
+// TestStatusWorkspaces: the status names the registered workspaces by ID,
+// for the page to show a dispatch's workspace by name.
+func TestStatusWorkspaces(t *testing.T) {
+	now := time.Now()
+	a, _ := newTestAgent(t, &fakeSessions{}, &now)
+	if st := a.Status(); st.Workspaces != nil {
+		t.Fatalf("no registry: workspaces = %v", st.Workspaces)
+	}
+	reg := workspace.Load("", "local")
+	w, ok := reg.Ensure(t.TempDir())
+	if !ok {
+		t.Fatal("workspace not registered")
+	}
+	a.cfg.Workspaces = reg
+	if got := a.Status().Workspaces; got[w.ID] != w.Name || len(got) != 1 {
+		t.Fatalf("workspaces = %v, want %s: %s", got, w.ID, w.Name)
 	}
 }
 

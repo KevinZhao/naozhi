@@ -40,7 +40,8 @@ const lit = { id: '', until: 0 };
 
 const cssEsc = (s) => (window.CSS && CSS.escape ? CSS.escape(s) : s);
 
-function light(el, sel) {
+// light highlights el for LIT_MS; sel finds it again should it repaint.
+export function light(el, sel) {
   el.classList.add('inbox-lit');
   setTimeout(() => document.querySelectorAll(sel).forEach((e) => e.classList.remove('inbox-lit')), LIT_MS);
 }
