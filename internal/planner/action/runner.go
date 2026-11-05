@@ -418,9 +418,11 @@ func (r *Runner) checkCustody(e ended) {
 // when the answer is obvious, else asks the user. It returns why it was not
 // handed over: custody not allowed for key now, or custody.ErrIrreversible
 // when what touches what cannot be undone (custody.Irreversible), which the
-// caller leaves to the user as it does an irreversible recommended option.
+// caller leaves to the user as it does an irreversible recommended option,
+// or the receipt's error when it did not reach the Planner (stopped), so
+// the choice does not wait on a Planner that never reads it.
 func (r *Runner) HandOff(key, what string) error {
-	if r.cfg.Custody == nil {
+	if r.cfg.Custody == nil || r.cfg.Tell == nil {
 		return custody.ErrOff
 	}
 	if err := r.cfg.Custody.Check(key); err != nil {
@@ -429,9 +431,8 @@ func (r *Runner) HandOff(key, what string) error {
 	if custody.Irreversible(what) {
 		return custody.ErrIrreversible
 	}
-	r.tell(key + "（" + r.cfg.Custody.Name(key) + "，托管中）" + strings.TrimSpace(what) +
+	return r.cfg.Tell(key + "（" + r.cfg.Custody.Name(key) + "，托管中）" + strings.TrimSpace(what) +
 		"\n替用户看一下：答案显而易见就替用户回答（" + custodyFormat(key) + "，text 写回答）；否则用 ask 问用户。" + irreversibleRule)
-	return nil
 }
 
 // irreversibleRule closes the receipts that invite a custody block: the

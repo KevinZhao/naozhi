@@ -5,6 +5,7 @@
 //	PUT    /api/custody         turn a session's custody on or off as the user ({"key","on"})
 //	PUT    /api/custody/pause   pause custody for every session
 //	DELETE /api/custody/pause   resume it
+//	POST   /api/custody/undo    take back the answer custody gave on the user's behalf ({"key"})
 //
 // All sit behind the /api/* auth middleware: a request here is the user.
 // Only this node's sessions are in custody; a remote node's ("node" set to
@@ -27,6 +28,7 @@ type Source interface {
 	Set(key string, on bool, by string) error
 	Paused() (bool, time.Time)
 	SetPaused(paused bool) error
+	Undo(key string) (string, error)
 }
 
 // Handler serves the endpoints. A nil source lists nothing and refuses
@@ -127,4 +129,42 @@ func (h *Handler) pause(w http.ResponseWriter, paused bool) {
 	}
 	p, at := h.src.Paused()
 	httputil.WriteJSON(w, pauseResp{Paused: p, PausedAt: at})
+}
+
+// HandleUndo serves POST /api/custody/undo: the 撤回 of a session's latest
+// answer custody gave for a recommended option. It answers the answer taken
+// back.
+func (h *Handler) HandleUndo(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, httputil.MaxRequestBodyBytes)
+	var req struct {
+		Key  string `json:"key"`
+		Node string `json:"node"`
+	}
+	if err := httputil.DecodeJSONBody(r, &req); err != nil || req.Key == "" {
+		http.Error(w, `body must be {"key"}`, http.StatusBadRequest)
+		return
+	}
+	if req.Node != "" && req.Node != "local" {
+		http.Error(w, "远程节点的会话不在托管中", http.StatusBadRequest)
+		return
+	}
+	if h.src == nil {
+		http.Error(w, "custody not available", http.StatusServiceUnavailable)
+		return
+	}
+	answer, err := h.src.Undo(req.Key)
+	switch {
+	case errors.Is(err, custody.ErrNoSession), errors.Is(err, custody.ErrNoSuggested):
+		http.Error(w, err.Error(), http.StatusNotFound)
+	case errors.Is(err, custody.ErrRefused):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	case errors.Is(err, custody.ErrDisabled):
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+	case err != nil:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	default:
+		httputil.WriteJSON(w, struct {
+			Answer string `json:"answer"`
+		}{answer})
+	}
 }
