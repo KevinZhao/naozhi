@@ -167,3 +167,42 @@ test('the Planner conversation loads older pages at its top', async ({ browser }
     }
   }
 });
+
+// A brief older than the first page, opened by its push link: the pages
+// loaded above it as it sits at the stream's top keep it in view and lit.
+test('a brief link to before the first page keeps the brief in view as older pages load', async ({ browser }) => {
+  const t0 = now - 260 * 600000;
+  const at = (i) => t0 + i * 600000;
+  const day = (ms) => { const d = new Date(ms); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
+  for (const vp of VIEWPORTS) {
+    const ctx = await browser.newContext({ viewport: vp.viewport, isMobile: !!vp.isMobile, hasTouch: !!vp.hasTouch });
+    const page = await ctx.newPage();
+    const events = [];
+    for (let i = 0; i < 260; i++) events.push({ type: 'text', detail: 'iso 第 ' + i + ' 条', time: at(i), uuid: 'pl-' + i });
+    const d = day(at(10) + 500);
+    const mock = await startMockServer({
+      ws: true, inbox: { open: [], closed: [], counts: { open: 0, badge: 0 } },
+      planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
+      plannerEvents: events,
+      plannerBriefs: [{ day: d, at: iso(at(10) + 500), sent: true, counts: {}, markdown: '自 iso 以来：完成 1\n' }],
+    });
+    try {
+      await page.goto(mock.url + '/dashboard');
+      await waitForWs(page, 'CONNECTED');
+      await page.evaluate((x) => { location.hash = 'planner&item=brief:' + x; }, d);
+      const stream = page.locator('#pl-stream');
+      await expect(stream.locator('.event.text')).toHaveCount(260);
+      const brief = stream.locator(':scope > .pl-brief');
+      const order = await stream.locator(':scope > .event, :scope > .pl-brief').evaluateAll((els) => els.map((e) =>
+        e.classList.contains('pl-brief') ? 'brief' : (e.querySelector('.event-content')?.textContent || '').trim()));
+      expect(order.indexOf('brief')).toBe(order.indexOf('iso 第 10 条') + 1);
+      await expect(brief).toHaveAttribute('open', '');
+      await expect(brief.locator('summary')).toBeInViewport();
+      await expect(brief).toHaveClass(/inbox-lit/);
+      await page.screenshot({ path: test.info().outputPath('leftovers-brief-link-' + vp.name + '.png') });
+    } finally {
+      await ctx.close();
+      mock.server.close();
+    }
+  }
+});

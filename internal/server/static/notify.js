@@ -40,8 +40,10 @@ const lit = { id: '', until: 0 };
 
 const cssEsc = (s) => (window.CSS && CSS.escape ? CSS.escape(s) : s);
 
-// light highlights el for LIT_MS; sel finds it again should it repaint.
-export function light(el, sel) {
+// light highlights el for LIT_MS; sel finds it again should it repaint, and
+// isLit(id) tells a repaint to keep the class.
+export function light(el, sel, id) {
+  if (id) { lit.id = id; lit.until = Date.now() + LIT_MS; }
   el.classList.add('inbox-lit');
   setTimeout(() => document.querySelectorAll(sel).forEach((e) => e.classList.remove('inbox-lit')), LIT_MS);
 }
@@ -58,11 +60,10 @@ export function revealFocus(root) {
   const sel = '.pl-card[data-id="' + cssEsc(inbox.focus) + '"]';
   const el = inbox.focus && root ? root.querySelector(sel) : null;
   if (!el) return false;
-  lit.id = inbox.focus;
-  lit.until = Date.now() + LIT_MS;
+  const id = inbox.focus;
   inbox.focus = '';
   el.scrollIntoView({ block: 'nearest' });
-  light(el, sel);
+  light(el, sel, id);
   return true;
 }
 

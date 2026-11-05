@@ -522,7 +522,7 @@ func main() {
 		UnitName:         unitNames,
 		Notify:           notifier,
 		Tasks:            tasks,
-		Purpose:          func(key string) (string, string) { m, _ := sidecars.Get(key); return m.Purpose, m.Title },
+		Purpose:          sidecars.Purpose,
 		TaskOpts:         taskOpts.ForKey,
 		AllowedRoot:      workspace,
 		IMAccess:         cfg.IMAccessPolicy(),

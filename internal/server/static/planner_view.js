@@ -103,6 +103,9 @@ const pl = {
   // the journaled notes the first page fetched, for the older pages too.
   older: { ms: 0, keys: [], more: false, loading: false },
   notes: [],
+  // revealed is the day of the brief a push or link scrolled to: an older
+  // page that moves it from the stream's top keeps it in view.
+  revealed: '',
 };
 
 const $ = (id) => document.getElementById(id);
@@ -375,7 +378,7 @@ function briefHtml(b, t) {
   const day = b.day || '';
   const open = pl.briefOpen.has(day) ? pl.briefOpen.get(day) : new Date(t).toDateString() === new Date().toDateString();
   const when = ' · ' + formatMonthDayTime(t);
-  return '<details class="pl-brief" data-day="' + escAttr(day) + '" data-time="' + t + '"' + (open ? ' open' : '') + '>' +
+  return '<details class="pl-brief' + (isLit(BRIEF_FOCUS + day) ? ' inbox-lit' : '') + '" data-day="' + escAttr(day) + '" data-time="' + t + '"' + (open ? ' open' : '') + '>' +
     '<summary><b>早报</b>' + esc(when) + '</summary><div class="md">' + renderMd(b.markdown) + '</div></details>';
 }
 
@@ -408,13 +411,17 @@ function placeBriefs() {
 // page in flight is about to repaint the stream, placeBriefs reveals it then.
 function revealBrief() {
   if (!inbox.focus.startsWith(BRIEF_FOCUS) || pl.host !== 'page' || pl.loading) return;
-  const sel = '#pl-stream > .pl-brief[data-day="' + CSS.escape(inbox.focus.slice(BRIEF_FOCUS.length)) + '"]';
+  const id = inbox.focus;
+  const day = id.slice(BRIEF_FOCUS.length);
+  const sel = '#pl-stream > .pl-brief[data-day="' + CSS.escape(day) + '"]';
   const el = document.querySelector(sel);
   if (!el) return;
   inbox.focus = '';
   el.open = true;
+  pl.briefOpen.set(day, true);
+  pl.revealed = day;
   el.scrollIntoView({ block: 'start' });
-  light(el, sel);
+  light(el, sel, id);
 }
 
 // fetchBriefs takes the sent briefs; an unreadable list leaves the stream
@@ -729,7 +736,8 @@ async function loadOlder() {
 }
 
 // prependEvents puts an older page above the stream, the reader kept on
-// what they were reading. The briefs placed at the top go back in by time.
+// what they were reading. The briefs placed at the top go back in by time,
+// and a revealed one still in view is what the reader is reading.
 function prependEvents(events) {
   const box = $('pl-stream');
   const scroller = $('pl-events');
@@ -737,6 +745,7 @@ function prependEvents(events) {
   const html = renderEventsWithDividers(events.flatMap(plannerEvents), 0, RENDER_OPTS);
   if (!html) return;
   const fromBottom = scroller.scrollHeight - scroller.scrollTop;
+  const anchor = revealedTop();
   for (const c of [...box.children]) {
     if (c.matches('.event')) break;
     if (c.matches('.pl-brief')) c.remove();
@@ -750,7 +759,23 @@ function prependEvents(events) {
   decorateEvents(box);
   placeBriefs();
   runPendingAsync();
-  scroller.scrollTop = scroller.scrollHeight - fromBottom;
+  const moved = anchor !== null && revealedEl();
+  if (moved) scroller.scrollTop += moved.getBoundingClientRect().top - anchor;
+  else scroller.scrollTop = scroller.scrollHeight - fromBottom;
+}
+
+function revealedEl() {
+  return pl.revealed ? $('pl-stream')?.querySelector(':scope > .pl-brief[data-day="' + CSS.escape(pl.revealed) + '"]') : null;
+}
+
+// revealedTop is where the revealed brief shows in the stream's viewport,
+// null once it is out of view, which forgets it.
+function revealedTop() {
+  const r = revealedEl()?.getBoundingClientRect();
+  const view = $('pl-events')?.getBoundingClientRect();
+  if (r && view && r.bottom > view.top && r.top < view.bottom) return r.top;
+  pl.revealed = '';
+  return null;
 }
 
 // ---- the conversation and its hosts ----
@@ -964,7 +989,10 @@ registerActions({
 });
 
 document.addEventListener('DOMContentLoaded', () => {
-  $('pl-events')?.addEventListener('scroll', () => { if (nearTop()) loadOlder(); }, { passive: true });
+  $('pl-events')?.addEventListener('scroll', () => {
+    if (pl.revealed) revealedTop();
+    if (nearTop()) loadOlder();
+  }, { passive: true });
   $('pl-left-toggle')?.addEventListener('click', () => {
     showPlannerLeft(!$('planner-main')?.classList.contains('pl-left-open'));
   });
