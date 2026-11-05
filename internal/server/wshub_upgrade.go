@@ -119,8 +119,17 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
-	// Per-IP rate limit to prevent brute-force via rapid connect/auth/disconnect cycles.
-	if !h.admit.allowAuthAttempt(c.remoteIP) {
+	// A connection the upgrade already authenticated by cookie tests no
+	// credential here: answer without touching msg.Token or the auth bucket,
+	// so tab reloads and extra tabs cannot lock out a login.
+	if c.authenticated.Load() {
+		c.SendRaw([]byte(rawAuthOK))
+		return
+	}
+	valid := !h.admit.tokenMode() || h.admit.tokenMatches(msg.Token)
+	// Per-IP rate limit against brute force via rapid connect/auth/disconnect
+	// cycles; only a failed attempt spends it.
+	if !h.admit.allowAuthAttempt(c.remoteIP, valid) {
 		// Advisory RetryAfter matches the HTTP /api/auth/login 429 branch so WS
 		// and HTTP lockouts surface identical countdowns.
 		c.SendJSON(wsproto.NewAuthFail(wsproto.AuthFail{
@@ -130,14 +139,7 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 		}))
 		return
 	}
-	// Short-circuit when the connection is already authenticated via cookie —
-	// do not touch msg.Token or run the ConstantTimeCompare so the
-	// cookie-authed and token-authed paths are cleanly separated.
-	if c.authenticated.Load() {
-		c.SendRaw([]byte(rawAuthOK))
-		return
-	}
-	if !h.admit.tokenMode() || h.admit.tokenMatches(msg.Token) {
+	if valid {
 		// Distinguish "no token configured" from "valid token" in logs.
 		if !h.admit.tokenMode() {
 			slog.Debug("ws auth: no-token mode, authenticating unconditionally")

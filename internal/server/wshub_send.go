@@ -23,8 +23,10 @@ import (
 // plus a recovery hint, because the WS upload owner may simply be stale (#2418).
 const wsFileNotFoundMsg = "file not found or expired，请重新添加附件后再发送"
 
-// remoteNodeProxyTimeout bounds a single proxied interrupt/send RPC to an
-// owning peer node before the dashboard goroutine gives up.
+// remoteNodeProxyTimeout bounds a single proxied interrupt RPC (and the
+// backend lookup before a send) to an owning peer node before the dashboard
+// goroutine gives up. A send waits remoteSendTimeout instead: a node answers
+// it once the session is up, and an ACP backend takes ~12s to start.
 const remoteNodeProxyTimeout = 10 * time.Second
 
 func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
@@ -339,7 +341,7 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 					Error: "internal error"}))
 			}
 		}()
-		ctx, cancel := context.WithTimeout(h.ctx, remoteNodeProxyTimeout)
+		ctx, cancel := context.WithTimeout(h.ctx, remoteSendTimeout)
 		defer cancel()
 		req := node.SendRequest{
 			Key: capturedKey, Text: msg.Text, Workspace: msg.Workspace,
@@ -357,6 +359,9 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 			// the same send_id, which the node answers from its dedup table.
 			slog.Warn("remote ws send unanswered", "node", nodeID, "key", capturedKey, "turn_id", req.TurnID, "err", osutil.SanitizeForLog(err.Error(), 512))
 			c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: capturedID, Status: string(sendAckUnknown), Key: capturedKey, Node: nodeID, TurnID: req.TurnID}))
+			// If it is running, its reply streams in without waiting for the
+			// retry.
+			nc.RefreshSubscription(capturedKey)
 		case err != nil:
 			// err originates from the remote transport and may carry control
 			// bytes / bidi overrides; sanitise before logging (#641).

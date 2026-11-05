@@ -52,7 +52,7 @@ func TestConnAdmission_UpgradeAndAuthUseSeparateBuckets(t *testing.T) {
 	if len(upgradeIPs) != 1 || upgradeIPs[0] != "203.0.113.5" {
 		t.Errorf("upgrade limiter saw %q, want the client IP once", upgradeIPs)
 	}
-	if a.allowAuthAttempt("203.0.113.5") {
+	if a.allowAuthAttempt("203.0.113.5", false) {
 		t.Error("the auth bucket was bypassed")
 	}
 
@@ -62,7 +62,7 @@ func TestConnAdmission_UpgradeAndAuthUseSeparateBuckets(t *testing.T) {
 	if !b.allowUpgrade(r) {
 		t.Error("with no upgrade limiter the handshake fell back to the auth bucket")
 	}
-	if !newConnAdmission(HubOptions{}).allowAuthAttempt("203.0.113.5") {
+	if !newConnAdmission(HubOptions{}).allowAuthAttempt("203.0.113.5", false) {
 		t.Error("with no auth limiter an auth attempt was refused")
 	}
 }
