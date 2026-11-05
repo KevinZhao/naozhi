@@ -218,6 +218,25 @@ func (p *Process) AdoptedMidTurn() bool {
 	return p.adopted.armed.Load() && p.adopted.midTurn.Load()
 }
 
+// ReplayedResult is the reply of the turn that ended while naozhi was down,
+// latched from the backlog at reconnect; such a result never reaches the read
+// loop, so SetOnResult's callback never sees it. ok=false for none, and for
+// one the callback would have skipped (failed or aborted). A reconnect
+// replays the shim's whole backlog: the caller decides whether the result is
+// one it has not acted on yet.
+func (p *Process) ReplayedResult() (text string, ok bool) {
+	if !p.adopted.armed.Load() || p.adopted.midTurn.Load() {
+		return "", false
+	}
+	p.adopted.mu.Lock()
+	res := p.adopted.out.Result
+	p.adopted.mu.Unlock()
+	if res.IsError || res.CLIAborted() {
+		return "", false
+	}
+	return res.Text, true
+}
+
 // AdoptableAfter reports whether the latched turn is the one a Send issued at
 // watermark w started (known=false: none was recorded). A mid-turn latch always
 // is. A replayed result is only when it sits past w on the same shim, or came

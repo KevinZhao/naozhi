@@ -536,6 +536,9 @@ type ReconnectHooks struct {
 	// workflows; the replay seed builds their entries even when the ring no
 	// longer holds their task_started or launch frame.
 	KnownWorkflowTasks []string
+	// OnResult is SetOnResult's callback, bound before the read loop starts:
+	// the turn in flight at reconnect may answer with the loop's first frame.
+	OnResult func(text string)
 }
 
 // SpawnReconnect creates a Process by reconnecting to an existing shim after a naozhi restart.
@@ -614,6 +617,9 @@ func (w *Wrapper) attachReconnected(ctx context.Context, handle *shim.ShimHandle
 	// here on: seed it now, or LastSeq reads 0 until the first live frame and a
 	// TurnWatermark taken then places every replayed result after it.
 	proc.link.lastSeq.Store(max(lastSeq, lastReplayedSeq(replays)))
+	if hooks.OnResult != nil {
+		proc.SetOnResult(hooks.OnResult)
+	}
 
 	proc.startReadLoop()
 

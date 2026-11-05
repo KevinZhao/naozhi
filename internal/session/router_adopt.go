@@ -95,3 +95,26 @@ func (s *ManagedSession) TurnWatermark() (cli.TurnWatermark, bool) {
 	}
 	return p.TurnWatermark()
 }
+
+// ReattachedTurn reports how the turn in flight when the last run ended
+// stands on key's process, reattached at startup. running: its result is
+// still to come, live through the result sink. ended: it finished while
+// naozhi was down, text its reply, which no sink ever saw. Neither: no
+// reattached process, nothing was in flight, or the turn already ended
+// live. A reconnect replays the shim's whole backlog, so an ended reply may
+// be one the last run acted on; the caller tells.
+func (r *Router) ReattachedTurn(key string) (text string, ended, running bool) {
+	sess := r.ss.Load(key)
+	if sess == nil {
+		return "", false, false
+	}
+	p, ok := sess.loadProcess().(*cli.Process)
+	if !ok || p == nil {
+		return "", false, false
+	}
+	if p.AdoptedTurnPending() {
+		return "", false, true
+	}
+	text, ended = p.ReplayedResult()
+	return text, ended, false
+}
