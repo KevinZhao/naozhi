@@ -96,10 +96,12 @@ test('desktop: badge, 等你 cards, stream, controls, and the workbench counts o
     await expect(page.locator('#pl-stream .event')).toHaveCount(3);
     await expect(page.locator('#pl-stream')).toContainText('两个会话在跑');
     // The user bubble shows what was typed, not the gateway's snapshot; a
-    // reply has 复制 but no 追问 (that asks about the selected session).
+    // long reply has 复制 and a short one none (only a long passage does);
+    // neither has 追问 (that asks about the selected session).
     await expect(page.locator('#pl-stream .event.user')).toHaveText(/现在都在干什么？/);
     await expect(page.locator('#pl-stream')).not.toContainText('naozhi-snapshot');
-    await expect(page.locator('#pl-stream .event-copy-btn')).toHaveCount(await page.locator('#pl-stream .event.text').count());
+    await expect(page.locator('#pl-stream .event.text[data-uuid="pl-t0"] .event-copy-btn')).toHaveCount(1);
+    await expect(page.locator('#pl-stream .event-copy-btn')).toHaveCount(1);
     await expect(page.locator('#pl-stream .event-ask-btn')).toHaveCount(0);
     await expect(page.locator('#pl-note')).toBeHidden();
 

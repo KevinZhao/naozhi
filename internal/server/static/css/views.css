@@ -696,10 +696,8 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .event.text .event-icon:has(.cc-clawd){background:transparent;padding:0;width:28px;height:28px;overflow:visible}
 .event.text .event-icon .cc-clawd{width:28px;height:28px;display:block;color:var(--nz-clawd-rust)}
 .event.text .event-content{color:var(--nz-text);max-width:clamp(720px,60vw,1100px)}
-/* Copy button: permanent for long AI messages; hover-revealed via
-   .hover-only for short bubbles so every text/user message stays
-   copyable without cluttering the default view. The .copied green
-   takes precedence on both variants via visibility:visible override. */
+/* Copy button: only on a long (>500-char) bubble, hover-revealed via
+   .hover-only; the .copied green overrides the hidden state. */
 .event-copy-btn{display:inline-flex;align-items:center;gap:4px;background:none;border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);color:var(--nz-text-faint);font-size:var(--nz-fs-xs);padding:1px 8px;cursor:pointer;transition:color .15s,border-color .15s,opacity .12s;line-height:1.6;margin-top:8px}
 .event-copy-btn:hover{color:var(--nz-text);border-color:var(--nz-text-faint)}
 .event-copy-btn.copied{color:var(--nz-green);border-color:var(--nz-green);opacity:1}
@@ -713,9 +711,6 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .event.text:not(:has(~ .event.text)) .event-copy-btn.hover-only{opacity:1}
 @media (hover:none){
   .event-copy-btn.hover-only{opacity:1}
-  /* No hover to reveal it: a short answer's 复制 shows on the latest only. */
-  .event-copy-btn.copy-short{display:none}
-  .event.text:not(:has(~ .event.text)) .event-copy-btn.copy-short{display:inline-flex}
 }
 /* System/init: centered label */
 .event.system,.event.init{justify-content:center;padding-top:12px;padding-bottom:12px}

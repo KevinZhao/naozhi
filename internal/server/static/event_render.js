@@ -376,15 +376,14 @@ function eventImagesHtml(e, sk) {
   }).join('') + '</div>';
 }
 
-// eventActionsHtml: copy / ask-aside buttons (both hover-revealed via
-// .hover-only; the latest answer's 复制 always shows). An answer is copyable
-// whatever its length, being what is taken elsewhere; a message of yours and
-// 追问 need the >500-char gate. noAsk drops 追问, which always asks about the
-// selected session.
+// eventActionsHtml: copy / ask-aside buttons, one shared >500-char gate:
+// a short bubble is selected by hand, so only a long passage gets 复制 (both
+// hover-revealed via .hover-only; the latest answer's 复制 always shows).
+// noAsk drops 追问, which always asks about the selected session.
 function eventActionsHtml(e, cleanRaw, noAsk) {
   const isLong = !!cleanRaw && cleanRaw.length > 500;
-  const copyBtn = cleanRaw && (e.type === 'text' || (isLong && e.type === 'user'))
-    ? '<button class="event-copy-btn hover-only' + (isLong ? '' : ' copy-short') + '" type="button" data-raw="' + escAttr(cleanRaw) + '" data-action="event-copy" title="复制" aria-label="复制消息">复制</button>'
+  const copyBtn = isLong && (e.type === 'text' || e.type === 'user')
+    ? '<button class="event-copy-btn hover-only" type="button" data-raw="' + escAttr(cleanRaw) + '" data-action="event-copy" title="复制" aria-label="复制消息">复制</button>'
     : '';
   const askBtn = isLong && !noAsk && e.type === 'text'
     ? '<button class="event-ask-btn hover-only" type="button" data-raw="' + escAttr(cleanRaw) + '" data-msg-time="' + (e.time || 0) + '" data-action="ask-aside" title="基于此内容追问">' + ICONS.preview + ' 追问</button>'
