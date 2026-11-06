@@ -64,7 +64,9 @@ func (s *ManagedSession) ReattachProcessNoCallback(proc processIface, sessionID 
 		s.setSessionID(sessionID)
 	}
 	storeAtomicString(&s.deathReason, "")
-	s.lastActive.Store(time.Now().UnixNano())
+	// Taking the process back is not activity: the time restored from the
+	// store stands, so a restart does not make every session look just used.
+	s.lastActive.CompareAndSwap(0, time.Now().UnixNano())
 	// len(snapshot) > 0 implies proc != nil (snapshot is nil for nil proc).
 	if len(snapshot) > 0 {
 		proc.InjectHistory(snapshot)

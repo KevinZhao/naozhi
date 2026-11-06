@@ -312,6 +312,12 @@ func (r *Router) Cleanup() {
 		if le := c.proc.LastEventAt(); le.After(effective) {
 			effective = le
 		}
+		// A reattached shim keeps the stored lastActive and replays its
+		// events without stamping LastEventAt, so the attach time is the
+		// floor: a restart must not reap the sessions it just took back.
+		if p, ok := c.proc.(interface{ StartedAt() time.Time }); ok && p.StartedAt().After(effective) {
+			effective = p.StartedAt()
+		}
 
 		// Stuck running: watchdog failed, reclaim slot.
 		if running {

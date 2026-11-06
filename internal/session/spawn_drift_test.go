@@ -82,7 +82,11 @@ func TestReconnectShims_DriftCheckUsesTheRoutersFacets(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			r.ReconnectShimsCtx(context.Background())
+			// Nothing answers on the socket, so the session is not taken back
+			// either way; it counts as one the restart should have.
+			if n, of := r.ReconnectShimsCtx(context.Background()); n != 0 || of != 1 {
+				t.Errorf("reconnected %d of %d, want 0 of 1", n, of)
+			}
 
 			if got := r.drift.has(key); got != tc.drift {
 				t.Errorf("drift shutdown marked = %v, want %v", got, tc.drift)
@@ -163,7 +167,9 @@ func TestReconnectShims_ReconnectCarriesTheRoutersSpawnTimeouts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r.ReconnectShimsCtx(context.Background())
+	if n, of := r.ReconnectShimsCtx(context.Background()); n != 1 || of != 1 {
+		t.Errorf("reconnected %d of %d, want 1 of 1", n, of)
+	}
 
 	proc, ok := sess.loadProcess().(*cli.Process)
 	if !ok || proc == nil {

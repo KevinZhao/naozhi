@@ -20,6 +20,7 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/sysession"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // askScan is how many trailing events are searched for an AskUserQuestion
@@ -136,15 +137,25 @@ func sessionFact(snap session.SessionSnapshot, s *session.ManagedSession, logDir
 	case snap.State != "running" && apierr.IsEnvelope(snap.LastResponse):
 		f.Failed, f.ErrText = "last turn ended in an API error", snap.LastResponse
 	}
+	// A dead process's background tasks died with it.
+	var entries []clievent.EventEntry
+	var attached time.Time
+	if s != nil && snap.State != "dead" {
+		if attached = s.ProcessAttachedAt(); !attached.IsZero() {
+			entries = s.EventLastN(taskScan)
+		}
+	}
 	if name := runningWorkflow(snap.Workflows); name != "" && s != nil {
 		f.Workflow, f.WorkflowSeen = name, unixMilli(s.WorkflowBoard().LastObservedAt())
-	} else if s != nil && snap.State != "dead" {
-		// A dead process's background tasks died with it.
-		if at := s.ProcessAttachedAt(); !at.IsZero() {
-			if name, seen := openTask(s.EventLastN(taskScan), at, f.Running); name != "" {
-				f.Workflow, f.WorkflowSeen = name, seen
-			}
+		f.Background = workflowTask(snap.Workflows)
+	} else if len(entries) > 0 {
+		if t, seen := openTask(entries, attached, f.Running); t != nil {
+			f.Workflow, f.WorkflowSeen = t.Name, seen
 		}
+		f.Background, _ = openTask(entries, attached, true)
+	}
+	if len(entries) > 0 {
+		f.Finished, f.Reply = finishedTask(entries)
 	}
 	if !f.Running && f.Failed == "" && s != nil {
 		f.Asking = askPending(s.EventLastN(askScan))
@@ -310,15 +321,23 @@ func failedDeath(reason string) bool {
 // runningWorkflow names the first running workflow; a paused one waits on
 // purpose and is not watched for stalls.
 func runningWorkflow(sums []workflow.Summary) string {
-	for _, s := range sums {
-		if s.Status == workflow.StatusRunning {
-			return cmp.Or(s.Name, s.TaskID)
-		}
+	if t := workflowTask(sums); t != nil {
+		return t.Name
 	}
 	return ""
 }
 
-// openTask names the first background task (a Bash run_in_background, an
+// workflowTask is the first running workflow as a background task.
+func workflowTask(sums []workflow.Summary) *health.Task {
+	for _, s := range sums {
+		if s.Status == workflow.StatusRunning {
+			return &health.Task{ID: s.TaskID, Name: cmp.Or(s.Name, s.TaskID), Start: unixMilli(s.StartedAt)}
+		}
+	}
+	return nil
+}
+
+// openTask is the first background task (a Bash run_in_background, an
 // Agent subtask) in entries that started after attached, when naozhi
 // attached to the process, and has not ended; seen is the latest entry's
 // time. A task that started before (replayed history, maybe of a process
@@ -327,8 +346,8 @@ func runningWorkflow(sums []workflow.Summary) string {
 // A background Bash has no frames between its start and its end, so in an
 // idle session its quiet is how a long-lived server or watch runs: it counts
 // only while a turn is in progress (running), waiting on it.
-func openTask(entries []clievent.EventEntry, attached time.Time, running bool) (name string, seen time.Time) {
-	open := map[string]string{}
+func openTask(entries []clievent.EventEntry, attached time.Time, running bool) (t *health.Task, seen time.Time) {
+	open := map[string]*health.Task{}
 	var order []string
 	for _, e := range entries {
 		switch {
@@ -337,21 +356,72 @@ func openTask(entries []clievent.EventEntry, attached time.Time, running bool) (
 			if e.TaskType != clievent.TaskTypeWorkflow && (running || e.TaskType != "local_bash") && e.Time >= attached.UnixMilli() {
 				if _, ok := open[e.TaskID]; !ok {
 					order = append(order, e.TaskID)
+					open[e.TaskID] = &health.Task{ID: e.TaskID, Start: unixMilli(e.Time)}
 				}
-				open[e.TaskID] = cmp.Or(e.Summary, e.TaskID)
+				open[e.TaskID].Name = cmp.Or(e.Summary, e.TaskID)
 			}
-		case e.Type == clievent.KindTaskDone,
-			// A task_updated patch with any status but running ends it.
-			e.Type == clievent.KindTaskProgress && e.Status != "" && e.Status != "running":
+		case taskEnded(e):
 			delete(open, e.TaskID)
 		}
 	}
 	for _, id := range order {
-		if n, ok := open[id]; ok {
-			return n, unixMilli(entries[len(entries)-1].Time)
+		if t, ok := open[id]; ok {
+			return t, unixMilli(entries[len(entries)-1].Time)
 		}
 	}
-	return "", time.Time{}
+	return nil, time.Time{}
+}
+
+// taskEnded reports whether e ends its background task: its done
+// notification, or a task_updated patch with any status but running.
+func taskEnded(e clievent.EventEntry) bool {
+	return e.TaskID != "" && (e.Type == clievent.KindTaskDone ||
+		e.Type == clievent.KindTaskProgress && e.Status != "" && e.Status != "running")
+}
+
+// replyRunes caps the first line of the reply a background task's end got.
+const replyRunes = 120
+
+// finishedTask is the latest background task in entries that ended with a
+// turn's result after its end, and the first line of that turn's reply;
+// nil when none. A message from the user after the task started means they
+// took it over: they already have the reply.
+func finishedTask(entries []clievent.EventEntry) (*health.Task, string) {
+	names := map[string]string{}
+	started := map[string]int{}
+	lastUser := -1
+	var ended, done *health.Task
+	text, reply := "", ""
+	for i, e := range entries {
+		switch {
+		case e.Type == clievent.KindTaskStart && e.TaskID != "":
+			names[e.TaskID], started[e.TaskID] = e.Summary, i
+		case e.Type == clievent.KindUser && e.Source != clievent.SourceCustody:
+			lastUser, ended, done, reply = i, nil, nil, ""
+		case taskEnded(e):
+			ended, text = nil, ""
+			// A task whose start is out of the window ran during any
+			// message before its end.
+			if at, ok := started[e.TaskID]; lastUser < 0 || ok && lastUser < at {
+				ended = &health.Task{ID: e.TaskID, Name: cmp.Or(names[e.TaskID], e.Summary, e.TaskID)}
+			}
+		case e.Type == clievent.KindText && ended != nil:
+			text = cmp.Or(e.Detail, e.Summary)
+		case e.Type == clievent.KindResult && ended != nil:
+			done, reply, ended = ended, firstLine(text), nil
+		}
+	}
+	return done, reply
+}
+
+// firstLine is s's first non-blank line, capped at replyRunes.
+func firstLine(s string) string {
+	for line := range strings.Lines(s) {
+		if line = strings.TrimSpace(line); line != "" {
+			return textutil.TruncateRunes(line, replyRunes)
+		}
+	}
+	return ""
 }
 
 // askPending reports whether the latest AskUserQuestion card has no user

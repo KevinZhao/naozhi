@@ -8,11 +8,13 @@ package turn
 
 import (
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/ctxutil"
 )
 
 // Msg holds a single message waiting to be processed.
@@ -26,6 +28,9 @@ type Msg struct {
 	TraceID string
 	// Source is Request.Source.
 	Source string
+	// Custody and Alone are Request.Custody and Request.Alone.
+	Custody ctxutil.Custody
+	Alone   bool
 }
 
 // Mode selects how new messages that arrive while a session is busy are
@@ -249,10 +254,29 @@ func (q *queue) DoneOrDrain(key string, gen uint64) []Msg {
 		return nil
 	}
 
-	// Drain all; keep ownership. Clearing interruptRequested makes the next
-	// in-flight turn a fresh interrupt target.
+	// Drain the next batch; keep ownership. Clearing interruptRequested
+	// makes the next in-flight turn a fresh interrupt target.
 	sq.interruptRequested = false
-	return takeMsgs(sq)
+	return takeBatch(sq)
+}
+
+// takeBatch returns the next turn's messages FIFO and leaves the rest
+// queued: an Alone message by itself, else every message up to the next
+// Alone one.
+func takeBatch(sq *sessionQueue) []Msg {
+	n := 1
+	if !sq.msgs[0].Alone {
+		for n < len(sq.msgs) && !sq.msgs[n].Alone {
+			n++
+		}
+	}
+	if n == len(sq.msgs) {
+		return takeMsgs(sq)
+	}
+	out := slices.Clone(sq.msgs[:n])
+	clear(sq.msgs[:n])
+	sq.msgs = sq.msgs[n:]
+	return out
 }
 
 // takeMsgs returns sq's queued messages FIFO and empties the queue; nil when

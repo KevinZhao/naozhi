@@ -618,3 +618,88 @@ func TestClassify(t *testing.T) {
 		}
 	}
 }
+
+// TestIdleSinceAcrossRestart: a unit first seen in the healthy state the
+// journal last recorded keeps that record's time as its Since, so a
+// restart does not date every idle session anew.
+func TestIdleSinceAcrossRestart(t *testing.T) {
+	idleAt := time.Date(2026, 11, 4, 9, 1, 0, 0, time.UTC)
+	tests := []struct {
+		name      string
+		journaled State
+		fact      Fact
+		wantSince time.Time
+	}{
+		{"idle as recorded", Idle, Fact{}, idleAt},
+		{"active as recorded", Active, Fact{Running: true}, idleAt},
+		{"another state is new", Active, Fact{}, idleAt.Add(time.Hour + Interval)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			j, err := journal.Open(filepath.Join(dir, "log"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, _ := json.Marshal(journalData{From: Unknown, To: tt.journaled, Kind: KindSession})
+			if err := j.Append(journal.Entry{TS: idleAt, Kind: journal.KindHealth, Unit: "s", Data: data}); err != nil {
+				t.Fatal(err)
+			}
+			r := newRig(t, Config{Journal: j, Workspaces: workspace.Load("", "node")}, idleAt.Add(time.Hour))
+			r.run([]step{{tick: Interval, facts: []Fact{owned(dir, tt.fact)}}})
+			if u := r.m.Snapshot().Units[0]; !u.Since.Equal(tt.wantSince) {
+				t.Errorf("since = %v, want %v", u.Since, tt.wantSince)
+			}
+		})
+	}
+}
+
+// TestTaskDone: a background task this run saw open that finished is
+// reported once its turn is over; one the run never saw open, or whose
+// unit failed meanwhile, is not.
+func TestTaskDone(t *testing.T) {
+	dir := t.TempDir()
+	bg := &Task{ID: "b1", Name: "sleep 300", Start: time.Date(2026, 11, 4, 8, 0, 0, 0, time.UTC)}
+	open := owned(dir, Fact{Background: bg})
+	ended := owned(dir, Fact{})
+	answered := owned(dir, Fact{Finished: bg, Reply: "跑完了"})
+	replying := owned(dir, Fact{Running: true, Finished: bg})
+	failed := owned(dir, Fact{Failed: "death_reason=cli_exited_code_1", Finished: bg})
+	inTurn := owned(dir, Fact{Running: true, Background: bg})
+	tests := []struct {
+		name  string
+		steps [][]Fact
+		want  []string
+	}{
+		{"finished and answered", [][]Fact{{open}, {ended}, {answered}}, []string{"s:sleep 300:跑完了"}},
+		{"answered while running is reported once idle", [][]Fact{{open}, {replying}, {answered}, {answered}}, []string{"s:sleep 300:跑完了"}},
+		{"seen only finished", [][]Fact{{answered}, {answered}}, nil},
+		{"failed meanwhile", [][]Fact{{open}, {failed}, {failed}, {answered}}, nil},
+		// A task the turn waited on, as a subagent, is not one left running.
+		{"only ever seen within a turn", [][]Fact{{inTurn}, {inTurn}, {answered}}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newRig(t, Config{Workspaces: workspace.Load("", "node")})
+			for _, facts := range tt.steps {
+				r.run([]step{{tick: Interval, facts: facts}})
+			}
+			var got []string
+			for _, ev := range r.events {
+				if d := ev.TaskDone; d != nil {
+					got = append(got, d.Unit.ID+":"+d.Task+":"+d.Reply)
+				}
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("task done = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	// The open task is in the snapshot with when it started.
+	r := newRig(t, Config{Workspaces: workspace.Load("", "node")})
+	r.run([]step{{facts: []Fact{open}}})
+	if u := r.m.Snapshot().Units[0]; u.Background != "sleep 300" || !u.BackgroundSince.Equal(bg.Start) {
+		t.Errorf("unit = %+v, want its background task", u)
+	}
+}

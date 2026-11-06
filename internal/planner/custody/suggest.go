@@ -166,7 +166,7 @@ func (e *Engine) answerAsks(units []health.Unit) {
 		err := e.Check(u.ID)
 		if errors.Is(err, ErrNearby) {
 			e.mu.Lock()
-			e.deferLocked(u.ID)
+			e.deferred[u.ID] = true
 			e.mu.Unlock()
 		}
 		if err != nil {
@@ -257,7 +257,8 @@ func (e *Engine) leaveAsk(u health.Unit, why string) {
 		Source: "waiting:" + u.ID, AutoClose: u.Workspace != "", Title: e.Name(u.ID) + " 在等你回复", Why: why})
 }
 
-// suggestedLead opens the message custody sent for a recommended option.
+// suggestedLead opened the message custody sent for a recommended option
+// before its entry carried the reason.
 const suggestedLead = clievent.CustodyLead + string(ReasonSuggested) + " · "
 
 // UndoText is the message that takes back answer, an answer custody gave on
@@ -280,10 +281,18 @@ func (e *Engine) Undo(key string) (string, error) {
 	entries := e.cfg.Events(key, undoScan)
 	for i := len(entries) - 1; i >= 0; i-- {
 		en := entries[i]
-		if en.Type != clievent.KindUser || en.Source != clievent.SourceCustody || !strings.HasPrefix(en.Detail, suggestedLead) {
+		if en.Type != clievent.KindUser || en.Source != clievent.SourceCustody {
 			continue
 		}
-		_, answer, _ := strings.Cut(en.Detail, "\n")
+		var answer string
+		switch {
+		case en.CustodyReason == string(ReasonSuggested):
+			answer = en.Detail
+		case en.CustodyReason == "" && strings.HasPrefix(en.Detail, suggestedLead):
+			_, answer, _ = strings.Cut(en.Detail, "\n")
+		default:
+			continue
+		}
 		if answer = strings.TrimSpace(answer); answer == "" {
 			break
 		}

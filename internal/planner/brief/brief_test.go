@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -26,6 +27,11 @@ type fixture struct {
 	inbox  []notify.Item
 	tasks  []task.Task
 	pushes []notify.Push
+	// routines and midway feed Config.Routines and Config.Midway; carried
+	// collects Config.Carried's IDs.
+	routines []Routine
+	midway   time.Time
+	carried  []string
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -48,6 +54,9 @@ func (f *fixture) briefer(names map[string]string, reg *workspace.Registry) *Bri
 		Push:       func(p notify.Push) bool { f.pushes = append(f.pushes, p); return true },
 		Name:       func(u string) string { return names[u] },
 		Workspaces: reg,
+		Routines:   func(time.Time, time.Time) []Routine { return f.routines },
+		Midway:     func() time.Time { return f.midway },
+		Carried:    func(ids []string) { f.carried = append(f.carried, ids...) },
 	})
 }
 
@@ -216,8 +225,13 @@ func TestRender(t *testing.T) {
 			Title: "夜间构建 失败", Why: "失败 · 凭证过期", Created: at(3, 2, 1)},
 		{Kind: notify.KindError, State: notify.StateOpen, Source: "systemic:rate_limit",
 			Title: "系统性故障：限流", Why: "2 个单元出现同一类错误：a、b", Created: at(1, 9, 0)},
-		{Kind: notify.KindNotice, State: notify.StateOpen, Source: "disk",
+		// A condition closes itself: the brief does not carry it.
+		{Kind: notify.KindNotice, State: notify.StateOpen, Source: "disk", AutoClose: true,
 			Title: "磁盘剩余不足", Why: "剩余 8%", Created: at(3, 7, 0)},
+		{ID: "in_n1", Kind: notify.KindNotice, State: notify.StateOpen, Unit: "planner:main", Source: "planner:k3",
+			Title: "Asana 有 2 条过期", Why: "Planner 提醒你", Created: at(2, 22, 0)},
+		{Kind: notify.KindNotice, State: notify.StateOpen, Source: "promise:pr_1",
+			Title: "到点提醒：CI 绿了告诉你", Created: at(3, 8, 0)},
 	}
 	f.tasks = []task.Task{
 		{ID: "task:ab12", Kind: task.KindSession, Title: "iso 写 hello", State: task.Waiting, Created: at(2, 9, 0)},
@@ -235,16 +249,17 @@ func TestRender(t *testing.T) {
 	b := f.briefer(names, reg)
 	b.Check()
 
-	want := "自 11/2 08:30 以来：完成 2 · 失败 1 · 等你 1 · 未关闭的错误 1 · 未完成的任务 2 · Planner 记下 2\n" +
+	// The cron job recovered: no longer 失败的, its failure's item still
+	// open. 等你 is one line, counted as the badge (the question and both
+	// errors); the Planner's notice is carried, the condition and the
+	// promise's reminder are not.
+	want := "自 11/2 08:30 以来：完成 2 · 通知 1 · 未完成的任务 2 · Planner 记下 2\n" +
+		"\n等你 3 条（提问 1 · 错误 2），见「等你」\n" +
 		"\n### 完成的（2）\n" +
 		"- [node2/dashboard:direct:x:general](#node=node2&session=dashboard%3Adirect%3Ax%3Ageneral) · 工作区 naozhi · 11/3 03:00\n" +
 		"- [修复 ［登录］ ＊重试＊](#session=dashboard%3Apj%3Aabc%3Ageneral) · 工作区 naozhi · 11/2 21:00 · 产出 1 个文件、[PR #12](https://github.com/o/r/pull/12)\n" +
-		"\n### 失败的（1）\n" +
-		"- 夜间构建 · 工作区 naozhi · 11/3 02:00 · 凭证过期 · 已恢复\n" +
-		"\n### 仍在等你的（1）\n" +
-		"- 提问 · [周报 在等你回复](#session=feishu%3Adirect%3Abob%3Ageneral) · 有提问等你回答超过 10 分钟 · 工作区 naozhi · 已等 2 小时\n" +
-		"\n### 未关闭的错误（1）\n" +
-		"- 错误 · 系统性故障：限流 · 2 个单元出现同一类错误：a、b · 已等 2 天\n" +
+		"\n### 通知（1）\n" +
+		"- Asana 有 2 条过期 · Planner 提醒你 · 11/2 22:00\n" +
 		"\n### 未完成的任务（2）\n" +
 		"- [iso 写 hello](#session=task%3Aab12) · 派出的会话 · 等你 · 已 24 小时\n" +
 		"- CI 绿了告诉你 · 承诺 · 进行中 · 到期 11/3 08:00 · 已 2 天\n" +
@@ -258,7 +273,10 @@ func TestRender(t *testing.T) {
 	if got[0].Markdown != want {
 		t.Errorf("markdown:\n%s\nwant:\n%s", got[0].Markdown, want)
 	}
-	if len(f.pushes) != 1 || f.pushes[0].Title != "早报" || f.pushes[0].Body != "完成 2 · 失败 1 · 等你 1 · 错误 1 · 未完成的任务 2 · Planner 记下 2" {
+	if len(f.pushes) != 1 || f.pushes[0].Title != "早报" || f.pushes[0].Body != "完成 2 · 等你 3 · 通知 1 · 未完成的任务 2 · Planner 记下 2" {
 		t.Errorf("pushes = %+v", f.pushes)
+	}
+	if !slices.Equal(f.carried, []string{"in_n1"}) {
+		t.Errorf("carried = %v, want the notice the brief listed", f.carried)
 	}
 }

@@ -22,6 +22,9 @@ const (
 	// DiskLow is the free fraction of the state root's volume below which
 	// the disk is a notice.
 	DiskLow = 0.10
+	// MidwayWarn is how long before the Midway session expires it becomes a
+	// notice, closed once mwinit renews it.
+	MidwayWarn = 30 * time.Minute
 )
 
 // loopName is this pipeline's heartbeat; the health loop watches it.
@@ -30,12 +33,15 @@ const loopName = "notify"
 // beatSource is the one item for every stale loop but this one.
 const beatSource = "beat:loops"
 
+// midwaySource is the item for the Midway session about to expire.
+const midwaySource = "midway"
+
 // gatewaySources are the gateway's own level-triggered source prefixes, judged
 // at every check; unitSources those judged once the health machine has
 // reconciled. Check dates all of them itself (condSince), since a restart
 // restarts the health machine's Since.
 var (
-	gatewaySources = []string{"beat:", "disk"}
+	gatewaySources = []string{"beat:", "disk", midwaySource}
 	unitSources    = []string{"waiting:", "stalled:"}
 )
 
@@ -79,6 +85,9 @@ func (n *Notifier) Run(ctx context.Context) {
 		n.Add(Item{Kind: KindNotice, Level: LevelTimely, Source: "crash:" + n.cfg.Clock.Now().Format(time.RFC3339),
 			Title: "naozhi 上次异常退出", Why: "上次运行没有正常结束，已重新启动"})
 	}
+	if n.upgraded != nil {
+		n.Add(*n.upgraded)
+	}
 	n.safely("check", n.Check)
 	tick := time.NewTicker(Interval)
 	defer tick.Stop()
@@ -114,7 +123,8 @@ type condition struct {
 
 // Check evaluates the level-triggered sources: sessions waiting on the user,
 // stalled workflows, stale loops and a low disk. Items whose condition
-// cleared close themselves, and held uncapped items go out once allowed.
+// cleared close themselves, as do the ones that no longer need saying
+// (settledLocked), and held uncapped items go out once allowed.
 func (n *Notifier) Check() {
 	now := n.cfg.Clock.Now()
 	var conds []condition
@@ -122,8 +132,9 @@ func (n *Notifier) Check() {
 	// Prefixes this check judged; an open auto-close item under one whose
 	// source is not among conds has cleared.
 	judged := slices.Clone(gatewaySources)
+	var snap health.Snapshot
 	if n.health != nil {
-		if snap := n.health.Snapshot(); !snap.At.IsZero() {
+		if snap = n.health.Snapshot(); !snap.At.IsZero() {
 			judged = append(judged, unitSources...)
 			var c []condition
 			c, keep = n.unitConditions(snap, now)
@@ -151,6 +162,11 @@ func (n *Notifier) Check() {
 				Title: "磁盘空间不足", Why: fmt.Sprintf("状态目录所在磁盘只剩 %.0f%%", free*100)}))
 		}
 	}
+	if n.cfg.Midway != nil {
+		if exp := n.cfg.Midway(); !exp.IsZero() && exp.Sub(now) <= MidwayWarn {
+			conds = append(conds, n.gatewayCondition(now, midwayItem(exp, now)))
+		}
+	}
 	active := make(map[string]bool, len(conds)+len(keep))
 	for _, c := range conds {
 		active[c.item.Source] = true
@@ -163,18 +179,20 @@ func (n *Notifier) Check() {
 			delete(n.condSince, src)
 		}
 	}
-	n.apply(n.settle(conds, active, judged))
+	n.apply(n.settle(snap, conds, active, judged))
 }
 
-// settle closes the open auto-close items whose condition cleared, opens
-// the conditions not open yet, nor closed by the user since they began,
-// retitles the open ones whose title changed (more loops stale), and pushes
-// the held items that may go out now.
-func (n *Notifier) settle(conds []condition, active map[string]bool, judged []string) effects {
+// settle closes the open auto-close items whose condition cleared and those
+// settledLocked finds no longer need saying, opens the conditions not open
+// yet, nor closed by the user since they began, retitles the open ones whose
+// title changed (more loops stale), and pushes the held items that may go
+// out now.
+func (n *Notifier) settle(snap health.Snapshot, conds []condition, active map[string]bool, judged []string) effects {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	fx := n.releaseLocked(n.cfg.Clock.Now())
-	var closed []journalLine
+	now := n.cfg.Clock.Now()
+	fx := n.releaseLocked(now)
+	closed := n.settledLocked(snap, now)
 	for i := range n.items {
 		it := &n.items[i]
 		if it.State == StateOpen && it.AutoClose && !active[it.Source] && underAny(it.Source, judged) {
@@ -197,6 +215,18 @@ func (n *Notifier) settle(conds []condition, active map[string]bool, judged []st
 		}
 	}
 	return fx
+}
+
+// midwayItem is the notice of the Midway session expiring at exp: what
+// fails without it, and the one command that renews it.
+func midwayItem(exp, now time.Time) Item {
+	it := Item{Kind: KindNotice, Level: LevelTimely, Source: midwaySource,
+		Title: "Midway 凭证 " + exp.In(now.Location()).Format("15:04") + " 到期",
+		Why:   "到期后要访问内部服务的会话会失败；运行 mwinit 续期，因凭证失败的会话会在续期后自动续上"}
+	if !exp.After(now) {
+		it.Title = "Midway 凭证已过期"
+	}
+	return it
 }
 
 // unitConditions are the sessions waiting on the user past AskAfter and the
@@ -292,18 +322,22 @@ func underAny(source string, prefixes []string) bool {
 }
 
 // HandleHealth turns a health event into an item: a unit that failed is an
-// error, and a systemic fault an urgent one; the user closes both. A failure
-// that is part of a systemic fault gets no item of its own, so the fault is
-// pushed once.
+// error, and a systemic fault an urgent one; both close themselves once it
+// recovered (the fault resolved, the unit idle again after a turn:
+// settledLocked). A failure that is part of a systemic fault gets no item of
+// its own, so the fault is pushed once. A background task done is a notice
+// (taskDone).
 func (n *Notifier) HandleHealth(ev health.Event) {
 	switch {
-	case ev.Fault != nil && !ev.Fault.Resolved:
+	case ev.Fault != nil && ev.Fault.Resolved:
+		n.closeSource(systemicPrefix + string(ev.Fault.Class))
+	case ev.Fault != nil:
 		f := ev.Fault
 		names := make([]string, 0, len(f.Units))
 		for _, id := range f.Units {
 			names = append(names, n.name(id))
 		}
-		n.Add(Item{Kind: KindError, Level: LevelUrgent, Source: "systemic:" + string(f.Class),
+		n.Add(Item{Kind: KindError, Level: LevelUrgent, Source: systemicPrefix + string(f.Class), AutoClose: true,
 			Title: "系统性故障：" + ClassLabel(f.Class),
 			Why:   fmt.Sprintf("%d 个单元出现同一类错误：%s", len(f.Units), strings.Join(names, "、"))})
 	case ev.Transition != nil && ev.Transition.Unit.State == health.Failed:
@@ -311,9 +345,28 @@ func (n *Notifier) HandleHealth(ev health.Event) {
 		if ev.Transition.InFault || n.covers != nil && n.covers(u) {
 			return
 		}
-		n.Add(Item{Kind: KindError, Level: LevelTimely, Unit: u.ID, WS: u.Workspace, Source: "failed:" + u.ID,
-			Title: n.name(u.ID) + " 失败", Why: failedWhy(u.ErrClass)})
+		why := failedWhy(u.ErrClass)
+		if h := FailHint(u.ErrClass); h != "" && u.Kind == health.KindSession {
+			why += "；" + h
+		}
+		n.Add(Item{Kind: KindError, Level: LevelTimely, Unit: u.ID, WS: u.Workspace, Source: failedPrefix + u.ID, AutoClose: true,
+			Title: n.name(u.ID) + " 失败", Why: why})
+	case ev.TaskDone != nil:
+		n.taskDone(*ev.TaskDone)
 	}
+}
+
+// FailHint is what the user does about a session's failure of class c that
+// is not retried for them (§15.9 ③), "" for a class custody retries or says
+// nothing about.
+func FailHint(c health.ErrorClass) string {
+	switch c {
+	case health.ErrRateLimit:
+		return "托管不自动重试；过几分钟发「继续」"
+	case health.ErrAuth, health.ErrCredentialExpired, health.ErrRegion:
+		return "需要你处理凭证后发「继续」"
+	}
+	return ""
 }
 
 // WatchPeer is the health loop's check on this pipeline (§3.8: a stopped
