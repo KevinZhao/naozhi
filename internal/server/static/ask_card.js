@@ -49,6 +49,22 @@ function answerText(a) {
   return a.header && t.startsWith(a.header + ': ') ? t.slice(a.header.length + 2) : t;
 }
 
+// SHORT_QUESTION is how many characters of a question an answered card's
+// line keeps.
+const SHORT_QUESTION = 40;
+
+// shortQuestion is what an answered card's line keeps of what it asked, the
+// whole in its title: a single question cut short, or several's headers. On
+// a phone, with no hover for the title, it is what says what custody's
+// answer answered.
+function shortQuestion(items) {
+  const qs = (items || []).filter(Boolean);
+  const text = qs.length === 1 ? (qs[0].question || qs[0].header || '')
+    : qs.map((it) => it.header || it.question || '').filter(Boolean).join('、');
+  const cps = Array.from(String(text).replace(/\s+/g, ' ').trim());
+  return cps.length > SHORT_QUESTION ? cps.slice(0, SHORT_QUESTION).join('') + '…' : cps.join('');
+}
+
 // singleHeader is the header of a card's only question, '' otherwise.
 const singleHeader = (items) => (Array.isArray(items) && items.length === 1 && items[0] && items[0].header) || '';
 
@@ -220,7 +236,8 @@ export function renderAskQuestionCard(e, sk) {
     ' data-tool-use-id="' + escAttr(tuid) + '">' +
     '<span class="event-icon">?</span>' +
     '<div class="event-content ask-card">' +
-      '<div class="ask-title">' + (aq.items.length > 1 ? '提问 · 全部作答后提交' : '提问') + '</div>' +
+      '<div class="ask-title">提问' + (aq.items.length > 1 ? '<span class="ask-title-hint"> · 全部作答后提交</span>' : '') + '</div>' +
+      '<span class="ask-q-short">' + esc(shortQuestion(aq.items)) + '</span>' +
       groups +
       '<div class="ask-submit-row">' + submitBtn + '</div>' +
       status +

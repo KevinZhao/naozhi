@@ -48,7 +48,7 @@ import { followWorkbenchSubject, noteWorkbenchEvent } from './workbench_panes.js
 import { decisionActsHtml, decorateEvents, noteWorkspaces, paintSessionCards, refreshHealth, unitName, webLinkHtml, workspaceName } from './planner_cards.js';
 import { clearAck, clearPending, closePlannerSession, mountComposer, noteAck, notePlannerStatus, showPlannerLeft } from './planner_chat.js';
 import { onSessionsApplied } from './session_list.js';
-import { mountTasks, refreshTasks } from './tasks.js';
+import { inProgress, mountTasks, refreshTasks } from './tasks.js';
 import { custody, refreshCustody, setCustodyPaused } from './custody.js';
 import { workbench } from './workbench.js';
 import { wsm } from './ws_manager.js';
@@ -81,6 +81,7 @@ const pl = {
   briefOpen: new Map(),
   open: [], // the open inbox items
   tasksActive: 0, // the tasks 进行中, as 任务 last listed them
+  notice: '', // the notice a push or link opened, shown in 等你 (waitListHtml)
   pausedUntil: 0,
   customPause: false,
   // lastTime is the newest logged event time taken; seenAtWM the uuids taken
@@ -207,9 +208,14 @@ function sortedOpen() {
 // badge's count. A notice is the morning brief's (D94): no list holds it.
 const actionItems = () => sortedOpen().filter((it) => KIND_LABEL[it.kind]);
 
-// waitListHtml is the left column's 等你: the cards actionListHtml lists.
+// waitListHtml is the left column's 等你: the cards actionListHtml lists,
+// and the notice a push or link opened (inbox.focus), which no list holds
+// otherwise: it stays at the end, uncounted, until it closes.
 function waitListHtml() {
-  const html = actionListHtml();
+  if (inbox.focus && pl.open.some((it) => it.id === inbox.focus && !KIND_LABEL[it.kind])) pl.notice = inbox.focus;
+  const notice = pl.notice ? pl.open.find((it) => it.id === pl.notice) : null;
+  if (!notice) pl.notice = '';
+  const html = actionListHtml() + (notice ? itemHtml(notice) : '');
   return html || '<div class="pl-empty">没有等你的事</div>';
 }
 
@@ -925,7 +931,7 @@ nzBus.addEventListener('inbox:count', (e) => {
 // The phone's folded left block counts the tasks in progress.
 nzBus.addEventListener('tasks:list', (e) => {
   const tasks = (e.detail && Array.isArray(e.detail.tasks)) ? e.detail.tasks : [];
-  pl.tasksActive = tasks.filter((t) => t && t.state === 'doing').length;
+  pl.tasksActive = tasks.filter(inProgress).length;
   paintLeftToggle();
 });
 // The health table names the units no list holds.
@@ -938,7 +944,9 @@ nzBus.addEventListener('inbox:focus', () => {
     showPlannerLeft(false);
     closePlannerSession(false);
   }
-  revealWaiting();
+  // A notice the focus names is listed only once it is (waitListHtml).
+  if (inbox.focus) paintWaiting();
+  else revealWaiting();
   revealBrief();
 });
 // toggle does not bubble: a brief's fold is taken on the way down.

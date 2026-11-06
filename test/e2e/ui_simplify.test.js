@@ -2,9 +2,10 @@
 // whether custody gave up on it, a background task that runs a while says
 // so, a title is its prompt's first sentence, and on a phone a group of one
 // session shows no header (Q7, Q19, D6, A1). A turn no session_state ends
-// (the CLI woke on its own) still counts unread, refreshes its row and, in a
-// background tab, notifies once (Q14). An answered question folds to one
-// line, custody's answer by the recommended option on it with 撤回 (Q9). The
+// (the CLI woke on its own) still counts unread and refreshes its row, the
+// gateway's push left to say it (Q14). An answered question folds to one
+// line that keeps what it asked, custody's answer by the recommended option
+// on it with 撤回 (Q9). The
 // header keeps the session's name, a dispatched session's first message
 // drops the gateway's note (Q10, Q11), the latest answer's 复制 shows and
 // copies formatted text (Q16). The idle Home leaves 最近会话 to the sidebar,
@@ -63,7 +64,7 @@ for (const [name, vp] of [['desktop', DESKTOP], ['phone', PHONE]]) {
     a.health = { state: 'failed', since: now - 30000, error_class: 'network' };
     a.last_active = now - 60000;
     b.state = 'ready';
-    b.health = { state: 'active', since: now - 45 * 60000 - 5000, background_task: true };
+    b.health = { state: 'idle', since: now - 50 * 60000, background: 'sleep 3600', background_since: now - 45 * 60000 - 5000 };
     b.last_active = now - 50 * 60000;
     c.last_prompt = '修一下登录页的样式，跑 `go test ./...`。然后再看看手机上的布局';
     const D = 'dashboard:direct:2026-01-01-120003-4:thirdproject';
@@ -116,7 +117,33 @@ for (const [name, vp] of [['desktop', DESKTOP], ['phone', PHONE]]) {
   });
 }
 
-test('a turn no session_state ends counts unread, refreshes its row and notifies once in the background', async ({ browser }) => {
+// No list push comes while a background task runs past its turn: the row
+// says so once it has run 30 minutes, and counts on, by the minute.
+test('a background task\'s row shows past 30 minutes and counts on with no push', async ({ browser }) => {
+  const ctx = await browser.newContext(DESKTOP);
+  const page = await ctx.newPage();
+  await page.clock.install({ time: now });
+  const s = defaultSessions();
+  s.sessions[1].state = 'ready';
+  s.sessions[1].health = { state: 'idle', since: now - 40 * 60000, background: 'sleep 3600', background_since: now - 29 * 60000 - 20000 };
+  const mock = await startMockServer({ ws: true, sessions: s });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    const row = page.locator('.session-card[data-key="' + B + '"]');
+    await expect(row).toBeVisible();
+    await expect(row).not.toContainText('后台任务');
+    await page.clock.fastForward('01:00');
+    await expect(row.locator('.sc-response')).toHaveText('后台任务 · 已跑 30 分钟');
+    await page.clock.fastForward('01:00');
+    await expect(row.locator('.sc-response')).toHaveText('后台任务 · 已跑 31 分钟');
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+test('a turn no session_state ends counts unread and refreshes its row; the session read live counts none', async ({ browser }) => {
   const ctx = await browser.newContext(DESKTOP);
   await ctx.addInitScript(stubNotification);
   const page = await ctx.newPage();
@@ -131,84 +158,98 @@ test('a turn no session_state ends counts unread, refreshes its row and notifies
     const row = page.locator('.session-card[data-key="' + A + '"]');
     await expect(row.locator('.sc-response')).toHaveText('iso 已在后台跑起来了');
 
-    // Another session's reply moves with no turn pushed: the tab is in the
-    // background, so one notification, and the row's count and preview move.
+    // Another session's reply moves with no turn pushed: its count and
+    // preview move. The tab is in the background, yet the page notifies
+    // nothing itself: the gateway's push for the task's end does, under
+    // the push pause.
     await page.evaluate(() => { window.__hidden = true; });
     s.sessions[0].last_response = 'iso 后台任务跑完了：结果 42';
     await page.evaluate(() => window.nz.test.fetchSessions());
     await expect(row.locator('.sc-unread')).toHaveText('1');
     await expect(row.locator('.sc-response')).toHaveText('iso 后台任务跑完了：结果 42');
-    await expect.poll(() => page.evaluate(() => window.__notes)).toEqual([{ title: 'hello world 跑完了', body: 'iso 后台任务跑完了：结果 42', tag: 'turn-end:local:' + A }]);
     // The same poll again is no news.
     await page.evaluate(() => window.nz.test.fetchSessions());
     await expect(row.locator('.sc-unread')).toHaveText('1');
 
-    // The open session: a result with no turn running ends a turn the CLI
-    // started; one ending the turn a send started is not news.
+    // The open session: a result with no turn running refetches its row; it
+    // is read live, hidden tab or not, so leaving it shows no stale count.
+    const polled = page.waitForRequest((r) => new URL(r.url()).pathname === '/api/sessions');
     push(mock, C, [{ type: 'result', detail: 'iso 后台的 sleep 结束了', time: Date.now(), uuid: 'bg-r1' }]);
-    await expect.poll(() => page.evaluate(() => window.__notes.length)).toBe(2);
-    expect((await page.evaluate(() => window.__notes))[1]).toMatchObject({ title: 'fix the bug 跑完了', body: 'iso 后台的 sleep 结束了' });
-    await page.evaluate((k) => { const d = window.nz.test.sessionsData; for (const v of Object.values(d)) if (v.key === k) v.state = 'running'; }, C);
-    push(mock, C, [{ type: 'result', detail: 'iso 回合结束', time: Date.now() + 1, uuid: 'bg-r2' }]);
-    await page.waitForTimeout(500);
-    expect(await page.evaluate(() => window.__notes.length)).toBe(2);
+    await polled;
+    await page.evaluate(() => { window.__hidden = false; });
+    await page.evaluate((k) => window.nz.test.selectSession(k, 'local'), A);
+    await expect(row.locator('.sc-unread')).toHaveCount(0);
+    // The next list change repaints the rows.
+    s.sessions[1].last_active = Date.now();
+    s.stats.version++;
+    await page.evaluate(() => window.nz.test.fetchSessions());
+    await expect(page.locator('.session-card[data-key="' + B + '"] .sc-time')).toHaveText('刚刚');
+    await expect(page.locator('.session-card[data-key="' + C + '"] .sc-unread')).toHaveCount(0);
+    expect(await page.evaluate(() => window.__notes)).toEqual([]);
   } finally {
     await ctx.close();
     mock.server.close();
   }
 });
 
-test('an answered question folds to one line; custody\'s answer is that line, with 撤回', async ({ browser }) => {
-  const ctx = await browser.newContext(DESKTOP);
-  const page = await ctx.newPage();
-  const ask = (id, t, question, labels) => ({ type: 'ask_question', time: t, uuid: 'aq-' + id,
-    ask_question: { tool_use_id: id, items: [{ header: '格式', question, options: labels.map((label) => ({ label })) }] } });
-  const events = [
-    { type: 'user', detail: 'iso 导出一下', time: now - 600000, uuid: 'q-u1' },
-    ask('t1', now - 500000, '导出成什么格式？', ['CSV (Recommended)', 'JSON']),
-    { type: 'user', source: 'custody', custody_reason: '按建议执行', custody_n: 1, detail: '格式: CSV (Recommended).', time: now - 400000, uuid: 'q-c1' },
-    { type: 'text', detail: '好，导出 CSV', time: now - 390000, uuid: 'q-t1' },
-    ask('t2', now - 300000, '要不要压缩？', ['压缩 (Recommended)', '不压缩']),
-  ];
-  const mock = await startMockServer({
-    ws: true, planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
-    custody: { paused: false, sessions: [{ key: A, on: true, state: 'on', sent: 1, max: 8 }], undo: '格式: CSV.' },
+for (const [name, vp] of [['desktop', DESKTOP], ['phone', PHONE]]) {
+  test(`an answered question folds to one line; custody's answer is that line, with 撤回 (${name})`, async ({ browser }) => {
+    const ctx = await browser.newContext(vp);
+    const page = await ctx.newPage();
+    const ask = (id, t, question, labels) => ({ type: 'ask_question', time: t, uuid: 'aq-' + id,
+      ask_question: { tool_use_id: id, items: [{ header: '格式', question, options: labels.map((label) => ({ label })) }] } });
+    const events = [
+      { type: 'user', detail: 'iso 导出一下', time: now - 600000, uuid: 'q-u1' },
+      ask('t1', now - 500000, '导出成什么格式？', ['CSV (Recommended)', 'JSON']),
+      { type: 'user', source: 'custody', custody_reason: '按建议执行', custody_n: 1, detail: '格式: CSV (Recommended).', time: now - 400000, uuid: 'q-c1' },
+      { type: 'text', detail: '好，导出 CSV', time: now - 390000, uuid: 'q-t1' },
+      ask('t2', now - 300000, '要不要压缩？', ['压缩 (Recommended)', '不压缩']),
+    ];
+    const mock = await startMockServer({
+      ws: true, planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
+      custody: { paused: false, sessions: [{ key: A, on: true, state: 'on', sent: 1, max: 8 }], undo: '格式: CSV.' },
+    });
+    try {
+      await page.goto(mock.url + '/dashboard');
+      await waitForWs(page, 'CONNECTED');
+      await openSession(page, mock, A, events);
+      const pane = page.locator('#events-scroll');
+      const first = pane.locator('.event.ask_question[data-tool-use-id="t1"]');
+      await expect(first).toHaveClass(/ask-done/);
+      await expect(first.locator('.ask-title')).toHaveText('提问');
+      await expect(first.locator('.ask-status')).toHaveText('已按建议选：CSV·撤回');
+      await expect(first.locator('.ask-opt').first()).toBeHidden();
+      await expect(first).toHaveAttribute('title', /导出成什么格式？/);
+      // The line keeps what was asked: no hover for the title on a phone.
+      await expect(first.locator('.ask-q-short')).toBeVisible();
+      await expect(first.locator('.ask-q-short')).toHaveText('导出成什么格式？');
+      // Custody's answer has no bubble of its own: the card says it.
+      await expect(pane.locator('.event.user.custody-msg')).toHaveCount(0);
+      await expect(pane).not.toContainText('Recommended');
+
+      // The open one: 提问, one question's 提交, the labels without the marker.
+      const second = pane.locator('.event.ask_question[data-tool-use-id="t2"]');
+      await expect(second.locator('.ask-title')).toHaveText('提问');
+      await expect(second.locator('.ask-opt-label')).toHaveText(['压缩', '不压缩']);
+      await expect(second.locator('.ask-submit')).toHaveText('提交');
+      await expect(second.locator('.ask-q-short')).toBeHidden();
+      await page.screenshot({ path: test.info().outputPath('ask-' + name + '.png') });
+      // Custody answers it live: the card folds, its 撤回 the latest's.
+      push(mock, A, [{ type: 'user', source: 'custody', custody_reason: '按建议执行', custody_n: 2, detail: '格式: 压缩 (Recommended).', time: Date.now(), uuid: 'q-c2' }]);
+      await expect(second).toHaveClass(/ask-done/);
+      await expect(second.locator('.ask-status')).toHaveText('已按建议选：压缩·撤回');
+      await expect(second.locator('.ask-q-short')).toHaveText('要不要压缩？');
+      await expect(pane.locator('.event.user.custody-msg')).toHaveCount(0);
+      await expect(first.locator('[data-action="custody-undo"]')).toBeHidden();
+      await second.locator('[data-action="custody-undo"]').click();
+      await expect.poll(() => mock.custodyCalls.at(-1)).toEqual({ undo: A });
+      await expect(second.locator('.custody-undone')).toHaveText('已发撤回');
+    } finally {
+      await ctx.close();
+      mock.server.close();
+    }
   });
-  try {
-    await page.goto(mock.url + '/dashboard');
-    await waitForWs(page, 'CONNECTED');
-    await openSession(page, mock, A, events);
-    const pane = page.locator('#events-scroll');
-    const first = pane.locator('.event.ask_question[data-tool-use-id="t1"]');
-    await expect(first).toHaveClass(/ask-done/);
-    await expect(first.locator('.ask-title')).toHaveText('提问');
-    await expect(first.locator('.ask-status')).toHaveText('已按建议选：CSV·撤回');
-    await expect(first.locator('.ask-opt').first()).toBeHidden();
-    await expect(first).toHaveAttribute('title', /导出成什么格式？/);
-    // Custody's answer has no bubble of its own: the card says it.
-    await expect(pane.locator('.event.user.custody-msg')).toHaveCount(0);
-    await expect(pane).not.toContainText('Recommended');
-
-    // The open one: 提问, one question's 提交, the labels without the marker.
-    const second = pane.locator('.event.ask_question[data-tool-use-id="t2"]');
-    await expect(second.locator('.ask-title')).toHaveText('提问');
-    await expect(second.locator('.ask-opt-label')).toHaveText(['压缩', '不压缩']);
-    await expect(second.locator('.ask-submit')).toHaveText('提交');
-    await page.screenshot({ path: test.info().outputPath('ask-desktop.png') });
-    // Custody answers it live: the card folds, its 撤回 the latest's.
-    push(mock, A, [{ type: 'user', source: 'custody', custody_reason: '按建议执行', custody_n: 2, detail: '格式: 压缩 (Recommended).', time: Date.now(), uuid: 'q-c2' }]);
-    await expect(second).toHaveClass(/ask-done/);
-    await expect(second.locator('.ask-status')).toHaveText('已按建议选：压缩·撤回');
-    await expect(pane.locator('.event.user.custody-msg')).toHaveCount(0);
-    await expect(first.locator('[data-action="custody-undo"]')).toBeHidden();
-    await second.locator('[data-action="custody-undo"]').click();
-    await expect.poll(() => mock.custodyCalls.at(-1)).toEqual({ undo: A });
-    await expect(second.locator('.custody-undone')).toHaveText('已发撤回');
-  } finally {
-    await ctx.close();
-    mock.server.close();
-  }
-});
+}
 
 test('the header keeps the name; the gateway\'s note and Markdown stay out of what you read and copy', async ({ browser }) => {
   const ctx = await browser.newContext(DESKTOP);

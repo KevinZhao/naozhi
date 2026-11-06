@@ -331,7 +331,7 @@ func TestRetry(t *testing.T) {
 		if len(r.sent) != len(Backoff) {
 			t.Errorf("sent %d, want %d", len(r.sent), len(Backoff))
 		}
-		if len(r.inbox.items) != 1 || r.inbox.items[0].Source != "failed:task:a" || !strings.Contains(r.inbox.items[0].Why, "同一类错误累计 5 次（网络 / DNS）") {
+		if len(r.inbox.items) != 1 || r.inbox.items[0].Source != "failed:task:a" || !strings.Contains(r.inbox.items[0].Why, "同一类错误累计 5 次（网络断了）") {
 			t.Errorf("inbox = %+v", r.inbox.items)
 		}
 	})
@@ -568,7 +568,7 @@ func TestRetryLeftToUser(t *testing.T) {
 		}
 		it := r.inbox.items
 		if len(it) != 1 || it[0].Kind != notify.KindError || it[0].Source != "failed:task:a" ||
-			!strings.Contains(it[0].Why, "连续 3 次没有进展（最近一次出错：网络 / DNS）") {
+			!strings.Contains(it[0].Why, "连续 3 次没有进展（最近一次出错：网络断了）") {
 			t.Errorf("inbox = %+v", it)
 		}
 		if st := r.e.Status("task:a"); st.State != StateStopped {

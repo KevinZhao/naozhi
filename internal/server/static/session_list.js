@@ -102,7 +102,7 @@ let lastHealthSig = '';
 function sessionsUnchanged(data, wsConnected) {
   const version = (data.stats && data.stats.version) || 0;
   const nodesHash = JSON.stringify(data.nodes || {});
-  const healthSig = (data.sessions || []).map(s => s.key + '\t' + (s.health ? s.health.state + '\t' + s.health.since : '') + '\t' + (s.last_response || '')).join('\n');
+  const healthSig = (data.sessions || []).map(s => s.key + '\t' + (s.health ? s.health.state + '\t' + s.health.since + '\t' + (s.health.background_since || '') : '') + '\t' + (s.last_response || '')).join('\n');
   if (wsConnected && version === sessionList.lastVersion && version > 0 && nodesHash === sessionList.lastNodesJSON && healthSig === lastHealthSig) return true;
   sessionList.lastVersion = version;
   sessionList.lastNodesJSON = nodesHash;
@@ -327,6 +327,7 @@ export function renderSidebar(data) {
   if (st.default_workspace) serverInfo.defaultWorkspace = st.default_workspace;
   if (st.projects) sessionList.projectsData = st.projects;
 
+  bgRowsSig = bgRowsSignature(data, Date.now());
   const list = document.getElementById('session-list');
   // Empty state: the "no sessions" text + the header `+` action.
   const html = sidebarHtml(buildSidebarItems(data)) || '<div class="no-sessions">no sessions<br><button type="button" class="no-sessions-cta" data-action="session-new">+ 开启你的第一个会话</button></div>';
@@ -595,12 +596,28 @@ export function rowStatusText(s, now = Date.now()) {
     const why = sessionFailureText(s);
     return '失败' + (why ? ' · ' + why : '') + (statusOf(s.key).state === 'stopped' ? ' · 托管已停' : '');
   }
-  const h = s.health;
-  if (h && h.background_task && h.state === 'active' && s.state !== 'running' && now - h.since >= BG_TASK_SHOW_MS) {
-    return '后台任务 · 已跑 ' + Math.floor((now - h.since) / 60000) + ' 分钟';
+  const since = s.health && s.health.background_since;
+  if (since && s.state !== 'running' && now - since >= BG_TASK_SHOW_MS) {
+    return '后台任务 · 已跑 ' + Math.floor((now - since) / 60000) + ' 分钟';
   }
   return '';
 }
+
+// No list push comes while a background task runs past its turn, so the
+// rows' 后台任务 · 已跑 N 分钟 is recomputed once a minute and the sidebar
+// repainted when one of them changed (it crossed BG_TASK_SHOW_MS, or a
+// minute went by).
+let bgRowsSig = '';
+function bgRowsSignature(data, now) {
+  return ((data && data.sessions) || []).filter((s) => s.health && s.health.background_since)
+    .map((s) => s.key + '\t' + (s.node || '') + '\t' + rowStatusText(s, now)).join('\n');
+}
+setInterval(() => {
+  const data = sessionList.lastSidebarData;
+  if (document.hidden || !data) return;
+  const sig = bgRowsSignature(data, Date.now());
+  if (sig !== bgRowsSig) renderSidebar(data);
+}, 60000);
 
 // sessionCardHtml is s's sidebar row; group names its group on a phone,
 // where a single-session group shows no header.
@@ -989,34 +1006,31 @@ function repliedSince(polled) {
   });
 }
 
-// noteUnseenTurnEnd is the unread count and, with the tab in the background,
-// one browser notification (notify.js) for a turn no session_state ended. A
-// session the Planner dispatched reports to the Planner instead: no
-// notification for it.
-export function noteUnseenTurnEnd(s) {
+// noteUnseenTurnEnd counts a turn no session_state ended as unread, as
+// settleTurnBoundary counts one it ended: not for the session in view, read
+// live. A background task's end reaches you through the gateway's push
+// (notify), which keeps the push pause and quiet hours: no notification of
+// its own here.
+function noteUnseenTurnEnd(s) {
   const node = s.node || 'local';
   const sKey = sid(s.key, node);
   turnSettledAt.set(sKey, Date.now());
-  const isActive = s.key === selection.key && node === selection.node;
-  if (!isActive || document.hidden) perSession.unread[sKey] = (perSession.unread[sKey] || 0) + 1;
-  const name = sessionTitleText(sessionList.sessionsData[sKey] || s) || '会话';
-  if (s.purpose !== 'task') nzBus.dispatchEvent(new CustomEvent('session:turn-end', { detail: { key: s.key, node, title: name + ' 跑完了', body: firstLine(s.last_response || '') } }));
+  if (s.key === selection.key && node === selection.node) return;
+  perSession.unread[sKey] = (perSession.unread[sKey] || 0) + 1;
   document.querySelectorAll('.session-card').forEach((c) => {
-    if (c.dataset.key === s.key && (c.dataset.node || 'local') === node) updateCardUnreadChip(c, perSession.unread[sKey] || 0);
+    if (c.dataset.key === s.key && (c.dataset.node || 'local') === node) updateCardUnreadChip(c, perSession.unread[sKey]);
   });
 }
 
-// A result on the open session's stream (event_stream.js): one with a turn
-// running settles it; one without ends a turn no session_state will, and the
-// list's row is fetched again.
+// A result on the open session's stream (event_stream.js) settles its turn;
+// one no turn was running for ends a turn no session_state will, and the
+// list's row is fetched again (read live, it counts no unread).
 nzBus.addEventListener('session:result', (e) => {
-  const { key, node, text, owned } = e.detail;
+  const { key, node, owned } = e.detail;
   const sKey = sid(key, node);
-  const s = sessionList.sessionsData[sKey];
-  if (owned) { turnSettledAt.set(sKey, Date.now()); return; }
-  if (!s || Date.now() - (turnSettledAt.get(sKey) || 0) < SETTLED_RESULT_MS) return;
-  noteUnseenTurnEnd(Object.assign({}, s, { last_response: text || s.last_response }));
-  debouncedFetchSessions();
+  const settled = Date.now() - (turnSettledAt.get(sKey) || 0) < SETTLED_RESULT_MS;
+  turnSettledAt.set(sKey, Date.now());
+  if (!owned && !settled) debouncedFetchSessions();
 });
 
 // A failed row says 托管已停 once custody gives up on it: the rows repaint
@@ -1028,8 +1042,6 @@ nzBus.addEventListener('custody:changed', () => {
   stoppedSig = sig;
   if (sessionList.lastSidebarData) renderSidebar(sessionList.lastSidebarData);
 });
-
-const firstLine = (t) => String(t).trim().split('\n')[0].slice(0, 120);
 
 // settleTurnBoundary is what a session_state owes the turn it ends: the unread
 // count, the sent-text cache, the HTTP send mark and the git chip.

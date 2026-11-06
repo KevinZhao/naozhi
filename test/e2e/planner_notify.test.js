@@ -1,6 +1,7 @@
 // E2E: the notify action block (planner RFC §15.6 提醒你): a reply's notify
-// blocks render as 提醒你 / 记入早报 cards, and a Planner notice in 通知
-// links to the page it is about. Desktop and phone width.
+// blocks render as 提醒你 / 记入早报 cards, and a Planner notice, in no
+// list, shows in 等你 with its link to the page it is about when a push
+// opens it. Desktop and phone width.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
 const { waitForWs } = require('./shim_wait');
@@ -66,6 +67,17 @@ for (const vp of [{ name: 'desktop', width: 1280, height: 800 }, { name: 'phone'
       if (vp.name === 'phone') await page.click('#pl-left-toggle');
       await expect(page.locator('#pl-wait')).toHaveText('没有等你的事');
       await expect(page.locator('#pl-wait .pl-card[data-id="in_n"]')).toHaveCount(0);
+
+      // A push's link to the notice (#planner&item=) still shows it, its
+      // 打开原文 with it, uncounted, until it closes.
+      await page.evaluate(() => { location.hash = 'planner&item=in_n'; });
+      const notice = page.locator('#pl-wait .pl-card[data-id="in_n"]');
+      await expect(notice).toBeVisible();
+      await expect(notice.locator('.pl-card-meta a.pl-link')).toHaveAttribute('href', LINK);
+      await expect(notice.locator('.pl-card-meta')).toHaveText('打开原文');
+      if (vp.name === 'phone') await expect(page.locator('#pl-left-toggle')).toHaveText('等你 0 · 任务 0');
+      await notice.locator('[data-action="planner-inbox-close"]').click();
+      await expect(page.locator('#pl-wait')).toHaveText('没有等你的事');
     } finally {
       await ctx.close();
       await new Promise((r) => mock.server.close(r));

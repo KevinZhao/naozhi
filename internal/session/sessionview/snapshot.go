@@ -131,9 +131,6 @@ type SessionHealth struct {
 	Since       int64  `json:"since"`
 	DeathReason string `json:"death_reason,omitempty"`
 	ErrClass    string `json:"error_class,omitempty"`
-	// BackgroundTask: the unit is active on a background task (a Bash
-	// run_in_background, a workflow) rather than a turn; Since is when.
-	BackgroundTask bool `json:"background_task,omitempty"`
 }
 
 // StartupFailureView is a dead session's run of CLI startup failures, for the

@@ -41,7 +41,8 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
       await waitForWs(page, 'CONNECTED');
       await page.click('#abnav-planner');
       if (name === 'mobile') {
-        await expect(page.locator('#pl-left-toggle')).toHaveText('等你 0 · 任务 1');
+        // 任务 counts what 进行中 lists: the one waiting on you too.
+        await expect(page.locator('#pl-left-toggle')).toHaveText('等你 0 · 任务 2');
         await page.click('#pl-left-toggle');
         // Unfolded, a task in progress comes before what waits on you (Q15).
         await expect(page.locator('#pl-task .tk-sec-doing')).toBeVisible();

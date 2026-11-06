@@ -667,7 +667,7 @@ function noteResult(ev, owned) {
   const t = ev.time || 0;
   if (!t || t <= (lastResultAt.get(sKey) || 0) || Date.now() - t > RESULT_FRESH_MS) return;
   lastResultAt.set(sKey, t);
-  nzBus.dispatchEvent(new CustomEvent('session:result', { detail: { key: selection.key, node: selection.node, owned, text: ev.detail || ev.summary || '' } }));
+  nzBus.dispatchEvent(new CustomEvent('session:result', { detail: { key: selection.key, node: selection.node, owned } }));
 }
 
 // patchHeaderTitle keeps the open session's header title on the name the

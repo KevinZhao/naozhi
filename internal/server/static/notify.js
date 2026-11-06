@@ -166,13 +166,5 @@ export function onInboxCount(msg) {
   nzBus.dispatchEvent(new CustomEvent('inbox:count', { detail: { open: inbox.open, badge: inbox.badge } }));
 }
 
-// A turn no session_state ended (session_list.js: the CLI woke on its own,
-// say for a background task's end) notifies once while the tab is in the
-// background; the tag makes another tab's the same one.
-nzBus.addEventListener('session:turn-end', (e) => {
-  const d = e.detail;
-  onNotify({ id: 'turn-end:' + d.node + ':' + d.key, title: d.title, body: d.body, key: d.key });
-});
-
 wsm.on(NZ_CONTRACT.WS.notify, (msg) => onNotify(msg));
 wsm.on(NZ_CONTRACT.WS.inbox_count, (msg) => onInboxCount(msg));

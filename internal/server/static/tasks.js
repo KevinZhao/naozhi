@@ -40,6 +40,9 @@ const SECTIONS = [
   { id: 'remind', label: '待提醒', states: ['remind'] },
 ];
 
+// inProgress reports whether task t is listed under 进行中: the count the
+// phone's folded left block gives.
+export const inProgress = (t) => !!t && SECTIONS[0].states.includes(t.state);
 
 const stopped = (t) => t.state === 'done' && t.by === 'user' && t.why === STOPPED_WHY;
 
