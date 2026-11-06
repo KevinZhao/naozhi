@@ -55,33 +55,38 @@ func truncateLabelUTF8(s string, max int) string {
 	return b.String()
 }
 
-// reverseUpgrader upgrades reverse-node connections. The first-frame bearer
-// token is the primary auth; as defence in depth any Origin header is rejected
+// checkReverseOrigin gates reverse-node upgrades. The first-frame bearer token
+// is the primary auth; as defence in depth any Origin header is rejected
 // (browsers always send one, m2m clients never do), and a plain-HTTP upgrade
 // is accepted only from loopback or a private-LAN Host — a proxy that strips
-// Origin could otherwise let a browser-driven sender look m2m.
-var reverseUpgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		if r.Header.Get("Origin") != "" {
-			return false
-		}
-		if r.TLS != nil {
-			return true
-		}
-		if isLoopbackHost(r.Host) {
-			return true
-		}
-		// Private LAN: cleartext token is exposed only to that segment (the
-		// documented no-TLS sidecar topology) — allow with a one-time warn.
-		// Public/routable Host: the token would cross the open internet, so
-		// HARD-REJECT (403 before any frame is read) (#1824).
-		if isPrivateHost(r.Host) {
-			warnInsecureReversePrivateOnce(r.Host)
-			return true
-		}
-		warnInsecureReverseUpgradeOnce(r.Host)
+// Origin could otherwise let a browser-driven sender look m2m. Behind a
+// declared TLS-terminating proxy (ALB/CloudFront, trustedProxy) the client hop
+// counts as TLS when the proxy says so: there r.TLS is always nil and the Host
+// is the public name, so without this the documented CloudFront topology could
+// never reach /ws-node.
+func checkReverseOrigin(r *http.Request, trustedProxy bool) bool {
+	if r.Header.Get("Origin") != "" {
 		return false
-	},
+	}
+	if r.TLS != nil {
+		return true
+	}
+	if trustedProxy && netutil.ForwardedHTTPS(r) {
+		return true
+	}
+	if isLoopbackHost(r.Host) {
+		return true
+	}
+	// Private LAN: cleartext token is exposed only to that segment (the
+	// documented no-TLS sidecar topology) — allow with a one-time warn.
+	// Public/routable Host: the token would cross the open internet, so
+	// HARD-REJECT (403 before any frame is read) (#1824).
+	if isPrivateHost(r.Host) {
+		warnInsecureReversePrivateOnce(r.Host)
+		return true
+	}
+	warnInsecureReverseUpgradeOnce(r.Host)
+	return false
 }
 
 // insecureReverseWarnOnce bounds the public-host warning to once per process
@@ -90,7 +95,7 @@ var insecureReverseWarnOnce sync.Once
 
 func warnInsecureReverseUpgradeOnce(host string) {
 	insecureReverseWarnOnce.Do(func() {
-		slog.Warn("reverse upgrade over plain HTTP from a public/routable host REJECTED; the bearer token would ride the first frame in cleartext over the open network — deploy TLS in front of /ws-node (loopback/private-LAN topologies are unaffected)",
+		slog.Warn("reverse upgrade over plain HTTP from a public/routable host REJECTED; the bearer token would ride the first frame in cleartext over the open network — terminate TLS in front of /ws-node and set server.trusted_proxy=true so X-Forwarded-Proto is honoured (loopback/private-LAN topologies are unaffected)",
 			"host", truncateLabelUTF8(host, 128))
 	})
 }
@@ -253,7 +258,10 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := reverseUpgrader.Upgrade(w, r, nil)
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool {
+		return checkReverseOrigin(r, s.trustedProxy)
+	}}
+	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Debug("ws-node upgrade failed", "err", err)
 		return

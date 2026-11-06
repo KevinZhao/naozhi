@@ -6,29 +6,36 @@ import (
 	"testing"
 )
 
-// TestReverseUpgrader_CheckOrigin: a plain-HTTP reverse upgrade from a
-// public/routable Host is HARD-REJECTED (R20260606-SEC-4, #1824) so the bearer
-// token never rides the first frame in cleartext over the open internet;
-// private-LAN plain HTTP, TLS and loopback are accepted; an Origin header is
-// always rejected.
-func TestReverseUpgrader_CheckOrigin(t *testing.T) {
-	check := reverseUpgrader.CheckOrigin
+// TestCheckReverseOrigin: a plain-HTTP reverse upgrade from a public/routable
+// Host is HARD-REJECTED (R20260606-SEC-4, #1824) so the bearer token never
+// rides the first frame in cleartext over the open internet; private-LAN plain
+// HTTP, TLS and loopback are accepted; an Origin header is always rejected.
+// X-Forwarded-Proto: https counts as TLS only behind a declared trusted proxy
+// (CloudFront → ALB → naozhi, where r.TLS is nil and Host is public).
+func TestCheckReverseOrigin(t *testing.T) {
+	xfp := func(v string) http.Header { return http.Header{"X-Forwarded-Proto": {v}} }
 	cases := []struct {
-		name   string
-		req    *http.Request
-		wantOK bool
+		name         string
+		req          *http.Request
+		trustedProxy bool
+		wantOK       bool
 	}{
-		{"plain http public hostname", &http.Request{Host: "worker.internal:8080", Header: http.Header{}}, false},
-		{"plain http public IPv4", &http.Request{Host: "8.8.8.8:8080", Header: http.Header{}}, false},
-		{"plain http public IPv6", &http.Request{Host: "[2606:4700::1111]:80", Header: http.Header{}}, false},
-		{"plain http public hostname no port", &http.Request{Host: "hub.example.com", Header: http.Header{}}, false},
-		{"plain http private-LAN host", &http.Request{Host: "192.168.10.10:8080", Header: http.Header{}}, true},
-		{"tls public host", &http.Request{Host: "hub.example.com", Header: http.Header{}, TLS: &tls.ConnectionState{}}, true},
-		{"loopback", &http.Request{Host: "127.0.0.1:8080", Header: http.Header{}}, true},
-		{"origin header", &http.Request{Host: "worker.internal:8080", Header: http.Header{"Origin": {"https://evil.example"}}}, false},
+		{"plain http public hostname", &http.Request{Host: "worker.internal:8080", Header: http.Header{}}, false, false},
+		{"plain http public IPv4", &http.Request{Host: "8.8.8.8:8080", Header: http.Header{}}, false, false},
+		{"plain http public IPv6", &http.Request{Host: "[2606:4700::1111]:80", Header: http.Header{}}, false, false},
+		{"plain http public hostname no port", &http.Request{Host: "hub.example.com", Header: http.Header{}}, false, false},
+		{"plain http private-LAN host", &http.Request{Host: "192.168.10.10:8080", Header: http.Header{}}, false, true},
+		{"tls public host", &http.Request{Host: "hub.example.com", Header: http.Header{}, TLS: &tls.ConnectionState{}}, false, true},
+		{"loopback", &http.Request{Host: "127.0.0.1:8080", Header: http.Header{}}, false, true},
+		{"origin header", &http.Request{Host: "worker.internal:8080", Header: http.Header{"Origin": {"https://evil.example"}}}, false, false},
+		{"forwarded https behind trusted proxy", &http.Request{Host: "hub.example.com", Header: xfp("https")}, true, true},
+		{"forwarded https without trusted proxy", &http.Request{Host: "hub.example.com", Header: xfp("https")}, false, false},
+		{"forwarded http behind trusted proxy", &http.Request{Host: "hub.example.com", Header: xfp("http")}, true, false},
+		{"client-injected https before proxy's http", &http.Request{Host: "hub.example.com", Header: xfp("https, http")}, true, false},
+		{"forwarded https still rejects origin", &http.Request{Host: "hub.example.com", Header: http.Header{"X-Forwarded-Proto": {"https"}, "Origin": {"https://evil.example"}}}, true, false},
 	}
 	for _, tc := range cases {
-		if got := check(tc.req); got != tc.wantOK {
+		if got := checkReverseOrigin(tc.req, tc.trustedProxy); got != tc.wantOK {
 			t.Errorf("%s: CheckOrigin = %v, want %v", tc.name, got, tc.wantOK)
 		}
 	}

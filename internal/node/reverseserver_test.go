@@ -533,3 +533,40 @@ func TestReverseServer_TrustedProxy_rateLimit(t *testing.T) {
 		t.Fatalf("expected registered with trustedProxy, got %q", resp.Type)
 	}
 }
+
+// ---- Behind a TLS-terminating proxy (CloudFront → ALB → naozhi) ----
+
+// The proxy hop arrives as plain HTTP with the public Host, so only a declared
+// trusted proxy's X-Forwarded-Proto: https lets the upgrade through.
+func TestReverseServer_Upgrade_forwardedHTTPS(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		trustedProxy bool
+		wantUpgrade  bool
+	}{
+		{"trusted proxy", true, true},
+		{"no trusted proxy", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rs := newTestReverseServer("node-1", "tok", tc.trustedProxy)
+			mux := http.NewServeMux()
+			mux.Handle("/ws-node", rs)
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			u := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws-node"
+			hdr := http.Header{"Host": {"naozhi.example.com"}, "X-Forwarded-Proto": {"https"}}
+			conn, resp, err := websocket.DefaultDialer.Dial(u, hdr)
+			if conn != nil {
+				conn.Close()
+			}
+			if got := err == nil; got != tc.wantUpgrade {
+				status := 0
+				if resp != nil {
+					status = resp.StatusCode
+				}
+				t.Fatalf("upgrade = %v (status %d, err %v), want %v", got, status, err, tc.wantUpgrade)
+			}
+		})
+	}
+}
