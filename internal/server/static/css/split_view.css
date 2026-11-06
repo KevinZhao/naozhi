@@ -303,6 +303,9 @@
 .history-popover-item:last-child{border-bottom:none}
 .history-popover-item:hover{background:var(--nz-hover-bg)}
 .history-popover-item .hp-prompt{font-size:var(--nz-fs-sm2);color:var(--nz-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* A reply-search hit's sentence: two lines at most, the query marked. */
+.history-popover-item .hp-snippet{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-top:3px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
+.history-popover-item .hp-snippet mark{background:transparent;color:var(--nz-accent);font-weight:600}
 .history-popover-item .hp-meta{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);margin-top:3px;display:flex;align-items:center;gap:6px}
 .history-popover-item .hp-meta .hp-project{color:var(--nz-project-label-fg);font-weight:500}
 .history-popover-item .hp-meta .hp-dot{color:var(--nz-border)}

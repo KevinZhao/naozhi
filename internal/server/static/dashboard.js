@@ -373,7 +373,7 @@ function toggleHistory() {
     '</div>' +
     (merged.length > 0
       ? '<div class="history-popover-search">' +
-          '<input type="text" id="hp-search" class="hp-search-input" placeholder="搜索提示词或项目…" autocomplete="off" spellcheck="false" />' +
+          '<input type="text" id="hp-search" class="hp-search-input" placeholder="搜索提示词、项目或回复…" autocomplete="off" spellcheck="false" />' +
         '</div>'
       : '') +
     '<div class="history-popover-items" id="hp-items"></div>';
@@ -411,7 +411,17 @@ function toggleHistory() {
   // might disable inline event handlers on the items HTML.
   const searchInput = document.getElementById('hp-search');
   if (searchInput) {
-    searchInput.addEventListener('input', e => applyHistoryFilter(merged, e.target.value));
+    replySearch.q = '';
+    replySearch.hits = [];
+    searchInput.addEventListener('input', e => {
+      applyHistoryFilter(merged, e.target.value);
+      scheduleReplySearch(merged, e.target.value);
+    });
+    // The global Esc handler skips a focused input, and this one has the
+    // focus from the moment the popover opens.
+    searchInput.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { e.preventDefault(); closeHistoryPopover(); }
+    });
     // Auto-focus on desktop only; mobile focus pops the keyboard and
     // pushes the sheet up, which is annoying if the user just wanted to
     // eyeball the list.
@@ -421,12 +431,118 @@ function toggleHistory() {
   }
 }
 
+// Reply search (A9): the gateway searches the replies of every session's
+// last turns (GET /api/sessions/history?q=). Prompt and project are still
+// matched here, so a keystroke paints at once and the reply hits join when
+// they arrive.
+const REPLY_SEARCH_MIN = 2;
+const REPLY_SEARCH_DELAY_MS = 250;
+const replySearch = { q: '', hits: [], timer: 0 };
+
+function scheduleReplySearch(merged, query) {
+  clearTimeout(replySearch.timer);
+  const q = (query || '').trim();
+  if ([...q].length < REPLY_SEARCH_MIN) return;
+  replySearch.timer = setTimeout(async () => {
+    let resp;
+    try {
+      resp = await fetchJSON(NZ_CONTRACT.API.sessions_history + '?q=' + encodeURIComponent(q), { timeoutMs: 5000 });
+    } catch {
+      return; // the prompt / project matches stay as painted
+    }
+    const input = document.getElementById('hp-search');
+    if (!ui.activePopover || !input || input.value.trim() !== q) return;
+    replySearch.q = q;
+    replySearch.hits = (resp && resp.hits) || [];
+    applyHistoryFilter(merged, q);
+  }, REPLY_SEARCH_DELAY_MS);
+}
+
+// replyHits splits the hits of query's reply search into the sidebar
+// sessions still listed and a history session_id → hit map.
+function replyHits(query) {
+  const live = [];
+  const byHistory = new Map();
+  const q = (query || '').trim();
+  if (!q || q !== replySearch.q) return { live, byHistory };
+  for (const h of replySearch.hits) {
+    if (h.key) {
+      if (sessionList.sessionsData[sid(h.key, 'local')]) live.push(h);
+    } else if (h.session_id) {
+      byHistory.set(h.session_id, h);
+    }
+  }
+  return { live, byHistory };
+}
+
+// snippetHtml is a hit's sentence with the query marked.
+function snippetHtml(text, query) {
+  const q = query.trim().toLowerCase();
+  const lower = text.toLowerCase();
+  let out = '';
+  let at = 0;
+  for (let i = q ? lower.indexOf(q) : -1; i !== -1; i = lower.indexOf(q, at)) {
+    out += esc(text.slice(at, i)) + '<mark>' + esc(text.slice(i, i + q.length)) + '</mark>';
+    at = i + q.length;
+  }
+  return '<div class="hp-snippet">' + out + esc(text.slice(at)) + '</div>';
+}
+
+// hitAttrs carries the reply a hit names onto its row; hitTarget reads it back.
+function hitAttrs(h) {
+  return h ? ' data-time="' + escAttr(String(h.time || 0)) + '" data-uuid="' + escAttr(h.uuid || '') + '"' : '';
+}
+function hitTarget(el) {
+  return el.dataset.time ? { time: el.dataset.time, uuid: el.dataset.uuid || '' } : null;
+}
+
+function liveHitHtml(h, query) {
+  const s = sessionList.sessionsData[sid(h.key, 'local')];
+  const title = s.user_label || s.summary || s.last_prompt || '';
+  return '<div class="history-popover-item" data-action="history-jump" data-key="' + escAttr(h.key) + '"' + hitAttrs(h) + '>' +
+    (title ? '<div class="hp-prompt" title="' + escAttr(title) + '">' + esc(title) + '</div>' : '<div class="hp-prompt nz-dim">未命名</div>') +
+    snippetHtml(h.snippet, query) +
+    (h.time ? '<div class="hp-meta"><span title="' + escAttr(formatAbsTime(h.time)) + '">' + timeAgo(h.time) + '</span></div>' : '') +
+    '</div>';
+}
+
+// revealEvent scrolls the opened session to the reply a hit names once its
+// events paint (by data-uuid, else data-time) and flashes it; the session
+// keeps its own scroll when the reply never shows.
+const REVEAL_TRIES = 20;
+const REVEAL_MS = 250;
+function revealEvent(target) {
+  if (!target) return;
+  const byUuid = target.uuid ? '#events-scroll .event[data-uuid="' + CSS.escape(target.uuid) + '"]' : '';
+  const byTime = '#events-scroll .event[data-time="' + CSS.escape(String(target.time)) + '"]';
+  let tries = 0;
+  const look = () => {
+    const el = (byUuid && document.querySelector(byUuid)) || document.querySelector(byTime);
+    if (!el) {
+      if (++tries < REVEAL_TRIES) setTimeout(look, REVEAL_MS);
+      return;
+    }
+    el.scrollIntoView({ block: 'center' });
+    el.classList.add('nav-highlight');
+    setTimeout(() => el.classList.remove('nav-highlight'), 1600);
+  };
+  look();
+}
+
+function jumpToHit(key, target) {
+  if (ui.activeView !== 'chat') setActivityView('chat');
+  selectSession(key, 'local');
+  revealEvent(target);
+}
+
 // filterHistoryEntries: case-insensitive substring match against (prompt,
-// project). Empty query returns the full list.
-function filterHistoryEntries(merged, query) {
+// project), plus the sessions whose replies matched (byHistory). Empty query
+// returns the full list.
+function filterHistoryEntries(merged, query, byHistory) {
   const q = (query || '').trim().toLowerCase();
   if (!q) return merged;
   return merged.filter(s => {
+    if (byHistory && byHistory.has(s.session_id)) return true;
     const p = (s.prompt || '').toLowerCase();
     if (p.indexOf(q) !== -1) return true;
     const proj = (s.project || '').toLowerCase();
@@ -443,30 +559,36 @@ function applyHistoryFilter(merged, query) {
   const itemsEl = document.getElementById('hp-items');
   const countEl = document.getElementById('hp-count');
   if (!itemsEl) return;
-  const filtered = filterHistoryEntries(merged, query);
+  const { live, byHistory } = replyHits(query);
+  const filtered = filterHistoryEntries(merged, query, byHistory);
   if (countEl) {
     // "Filtered" count uses the x/total shape so the user knows the
     // denominator hasn't shrunk — e.g. "(3 / 47)" after typing. When
     // the query is empty keep the compact "(47)" form. Decide on the same
     // trimmed query filterHistoryEntries matches on (whitespace-only input is
-    // not a filter, so no "(N / N)").
+    // not a filter, so no "(N / N)"). The 当前会话 hits are not history and
+    // are not counted.
     countEl.textContent = (query || '').trim()
       ? '(' + filtered.length + ' / ' + merged.length + ')'
       : '(' + merged.length + ')';
   }
-  if (merged.length === 0) {
+  if (merged.length === 0 && live.length === 0) {
     itemsEl.innerHTML = '<div class="history-popover-empty">no history<br><span class="hp-empty-hint">发起对话后，历史记录会出现在这里</span></div>';
     return;
   }
-  if (filtered.length === 0) {
+  if (filtered.length === 0 && live.length === 0) {
     itemsEl.innerHTML = '<div class="history-popover-empty">没有匹配的历史<br><span class="hp-empty-hint">调整关键词，或清空搜索框查看全部</span></div>';
     return;
   }
+  // The sidebar's sessions whose replies matched lead, under their own header.
+  const liveHtml = live.length
+    ? '<div class="hp-day-header">当前会话</div>' + live.map(h => liveHitHtml(h, query)).join('')
+    : '';
   // Group by day ("今天" / "昨天" / locale date), recomputed on filter, and by
   // the SAME key the list is sorted on (retired_at || last_active) so days
   // never interleave.
   let currentDay = '';
-  itemsEl.innerHTML = filtered.map(s => {
+  itemsEl.innerHTML = liveHtml + filtered.map(s => {
     let dayHeader = '';
     const groupTs = s.retired_at || s.last_active;
     if (groupTs) {
@@ -479,9 +601,11 @@ function applyHistoryFilter(merged, query) {
     }
     const ago = s.last_active ? timeAgo(s.last_active) : '';
     const abs = s.last_active ? formatAbsTime(s.last_active) : '';
+    const hit = byHistory.get(s.session_id);
     return dayHeader +
-      '<div class="history-popover-item" data-sid="' + escAttr(s.session_id) + '" data-action="history-resume">' +
+      '<div class="history-popover-item" data-sid="' + escAttr(s.session_id) + '" data-action="history-resume"' + hitAttrs(hit) + '>' +
       (s.prompt ? '<div class="hp-prompt" title="' + escAttr(s.prompt) + '">' + esc(s.prompt) + '</div>' : '<div class="hp-prompt nz-dim">未命名</div>') +
+      (hit ? snippetHtml(hit.snippet, query) : '') +
       '<div class="hp-meta">' +
         (s.project ? '<span class="hp-project">' + esc(s.project) + '</span><span class="hp-dot">&middot;</span>' : '') +
         (ago ? '<span' + (abs ? ' title="' + escAttr(abs) + '"' : '') + '>' + ago + '</span>' : '') +
@@ -499,15 +623,17 @@ function sessionCardKey(e) {
   selectSession(card.dataset.key, card.dataset.node || 'local');
 }
 
-function resumeRecentSession(sessionId) {
+// resumeRecentSession resumes a history session and, for a reply-search
+// hit, scrolls to the reply (target: {time, uuid}).
+function resumeRecentSession(sessionId, target) {
   const found = sessionList.historySessionsData.find(r => r.session_id === sessionId);
-  resumeRecentById(sessionId, found ? found.workspace : '', found ? (found.last_prompt || found.summary || '') : '');
+  resumeRecentById(sessionId, found ? found.workspace : '', found ? (found.last_prompt || found.summary || '') : '', target);
 }
 
-async function resumeRecentById(sessionId, workspace, lastPrompt) {
+async function resumeRecentById(sessionId, workspace, lastPrompt, target) {
   // Guard: if already resuming this session, find the managed key and select it
   for (const s of sessionList.allSessionsCache) {
-    if (s.session_id === sessionId) { selectSession(s.key, s.node || 'local'); return; }
+    if (s.session_id === sessionId) { selectSession(s.key, s.node || 'local'); revealEvent(target); return; }
   }
 
   try {
@@ -531,6 +657,7 @@ async function resumeRecentById(sessionId, workspace, lastPrompt) {
 
     selectSession(key, 'local');
     previewRecentSession(key, sessionId, workspace);
+    revealEvent(target);
   } catch (e) {
     showNetworkError('恢复会话', e);
   }
@@ -1568,7 +1695,8 @@ const dashActivate = (fn) => (el, e) => {
 };
 registerActions({
   'session-new': () => createNewSession(),
-  'history-resume': (el) => { resumeRecentSession(el.dataset.sid); closeHistoryPopover(); },
+  'history-resume': (el) => { resumeRecentSession(el.dataset.sid, hitTarget(el)); closeHistoryPopover(); },
+  'history-jump': (el) => { closeHistoryPopover(); jumpToHit(el.dataset.key, hitTarget(el)); },
   'session-dismiss': (el) => dismissSession(el.dataset.key, el.dataset.node),
   'session-select': (el) => selectSession(el.dataset.key, el.dataset.node),
   'session-card-key': (el, e) => sessionCardKey(e),

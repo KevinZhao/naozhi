@@ -241,6 +241,10 @@ type Handlers struct {
 	// summaryFlight collapses concurrent misses at the TTL boundary into one
 	// LookupSummaries (N×os.Stat) invocation; mirrors historyFlight.
 	summaryFlight singleflight.Group
+
+	// replies caches the history sessions' recent replies for the reply
+	// search (search.go).
+	replies replyCache
 }
 
 // maxEventsPageLimit caps the per-request history slice so a malicious or
