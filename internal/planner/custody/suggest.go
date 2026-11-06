@@ -262,8 +262,13 @@ func (e *Engine) leaveAsk(u health.Unit, why string) {
 const suggestedLead = clievent.CustodyLead + string(ReasonSuggested) + " · "
 
 // UndoText is the message that takes back answer, an answer custody gave on
-// the user's behalf.
+// the user's behalf, without the options' recommended marks: the user reads
+// it as their own message.
 func UndoText(answer string) string {
+	for _, m := range recommendedMarks {
+		answer = strings.ReplaceAll(answer, " "+m, "")
+		answer = strings.ReplaceAll(answer, m, "")
+	}
 	return "撤回刚才按建议选的 " + strings.TrimSuffix(strings.TrimSpace(answer), ".") + "，先停下等我决定"
 }
 

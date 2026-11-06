@@ -58,6 +58,12 @@ func TestBriefLines(t *testing.T) {
 			f.snap = snap(health.Idle)
 		}, []string{"### 完成的（1）\n- [" + s + "](#session=dashboard%3Adirect%3Aa%3Ageneral) · 工作区 ws1 · 11/2 23:06 · 托管重试 2 次后恢复\n",
 			"\n托管：重试 2 次（恢复 1、停下 0）\n"}, []string{"失败的"}},
+		{"recovered by a retry too short to be seen active", func(f *fixture) {
+			f.health(at(2, 23, 0), s, "ws1", health.Active, health.Failed, health.KindSession, health.ErrNetwork)
+			f.custody(at(2, 23, 1), s, "sent", custody.ReasonRetry)
+			f.health(at(2, 23, 2), s, "ws1", health.Failed, health.Idle, health.KindSession, "")
+			f.snap = snap(health.Idle)
+		}, []string{"### 完成的（1）\n- [" + s + "](#session=dashboard%3Adirect%3Aa%3Ageneral) · 工作区 ws1 · 11/2 23:02 · 托管重试 1 次后恢复\n"}, []string{"失败的"}},
 		{"recovered by itself, not finished since", func(f *fixture) {
 			f.health(at(2, 23, 0), s, "ws1", health.Active, health.Failed, health.KindSession, health.ErrNetwork)
 			f.health(at(2, 23, 6), s, "ws1", health.Failed, health.Idle, health.KindSession, "")
