@@ -7,7 +7,8 @@
 // rest; the user flips it from the session header, the Planner with its
 // custody action block. The switch only decides whether custody replies for
 // the user (a recommended option, the Planner's go-ahead); a failure's retry
-// is every local session's (D94), the user's own chats included. Every
+// is every local dashboard session's (D94), the user's own chats included,
+// and a failure's count ends once it recovered. Every
 // message custody sends goes through Deliver: its text is the message
 // alone, its transcript entry carries the source custody, the reason and
 // the count; it is counted against the lineage's limits (3 in a row with no
@@ -78,6 +79,11 @@ const (
 	// tickInterval is how often due retries and running workflows are
 	// looked at.
 	tickInterval = 15 * time.Second
+	// staleAfter is how old a failure custody first sees may be and still
+	// get a retry: one older failed while custody was not watching (before a
+	// restart, or an upgrade that brought the user's own chats in), and no
+	// one is waiting on its "继续" now.
+	staleAfter = 30 * time.Minute
 	// maxLineage bounds the walk up a lineage.
 	maxLineage = 32
 	// stateBytes caps custody.json.
@@ -352,7 +358,10 @@ func (e *Engine) eligible(key string) error {
 }
 
 // retryEligible refuses, beyond eligible, the keys whose failures custody
-// does not retry: a cron run and a scratch session are one-shot.
+// does not retry: a cron run and a scratch session are one-shot; and a
+// retry goes the dashboard's way (Config.Send), so a session whose replies
+// go elsewhere (an IM chat, a project planner one may be bound to) is
+// retried only with its switch on.
 func (e *Engine) retryEligible(key string) error {
 	if err := e.eligible(key); err != nil {
 		return err
@@ -360,7 +369,16 @@ func (e *Engine) retryEligible(key string) error {
 	if sessionkey.IsCronKey(key) || sessionkey.IsScratchKey(key) {
 		return ErrRefused
 	}
+	if !dashboardSession(key) && !e.On(key) {
+		return ErrRefused
+	}
 	return nil
+}
+
+// dashboardSession reports whether key's replies are the dashboard's: a
+// dashboard chat, a session the Planner dispatched, a taken-over CLI.
+func dashboardSession(key string) bool {
+	return strings.HasPrefix(key, sessionkey.DashboardPlatform+":") || sessionkey.IsTaskKey(key) || strings.HasPrefix(key, "local:")
 }
 
 // on is a session's switch: as the user or the Planner set it, else off for
@@ -937,15 +955,30 @@ func (e *Engine) autoOff(key string) {
 // that failed again is a new one even when health saw no transition.
 func failedAt(u health.Unit) time.Time { return cmp.Or(u.LastActive, u.Since) }
 
+// stale reports whether u's failure is older than staleAfter.
+func (e *Engine) stale(u health.Unit) bool {
+	at := failedAt(u)
+	return !at.IsZero() && e.now().Sub(at) > staleAfter
+}
+
+// settled reports whether u's turn ended normally: idle, or waiting on the
+// user's answer.
+func settled(u health.Unit) bool { return u.State == health.Idle || u.State == health.Waiting }
+
 // answer handles unit u's failure, if any. A failure custody does not retry
 // is left to the user here when the inbox may not have it: it sees only
-// health's transitions, and a retry that failed again may be none.
+// health's transitions, and a retry that failed again may be none. One
+// older than staleAfter is left as it stands. A turn that ended normally
+// since ends the failure (recovered).
 func (e *Engine) answer(u health.Unit) {
 	key := u.ID
 	m, _ := e.cfg.Sessions.Get(key)
 	r := m.Retry
 	if u.State != health.Failed {
-		if r != nil && !r.Done {
+		switch {
+		case r != nil && settled(u):
+			e.recovered(key, *r)
+		case r != nil && !r.Done:
 			e.setRetry(key, nil)
 		}
 		return
@@ -955,6 +988,10 @@ func (e *Engine) answer(u health.Unit) {
 		if !r.Done {
 			e.retryDue(key, *r)
 		}
+		return
+	}
+	if e.stale(u) {
+		e.setRetry(key, &sidecar.Retry{Failed: id, Done: true})
 		return
 	}
 	class, retry := Classify(u, e.failText(key))
@@ -1006,6 +1043,28 @@ func (e *Engine) answer(u health.Unit) {
 	next.At, next.Done = e.now().Add(Backoff[n-1]), false
 }
 
+// recovered ends key's failure r, its turn having ended normally since: the
+// retries of its class start afresh, so failures days apart, each recovered,
+// never add up to a stop. A session out of custody had nothing sent but
+// retries, so its whole count starts afresh too. A stopped lineage stays
+// stopped: the user lifts that.
+func (e *Engine) recovered(key string, r sidecar.Retry) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.setRetryLocked(key, nil)
+	root := e.root(key)
+	c := e.chain(root)
+	if c.Stopped != "" || (c.Errors[r.Class] == 0 && c.Sent == 0) {
+		return
+	}
+	if root == key && !e.On(key) {
+		c = sidecar.Chain{}
+	} else {
+		delete(c.Errors, r.Class)
+	}
+	e.saveChainLocked(root, c)
+}
+
 // credExpiry is when the credential expires, for a failure of class that
 // waits for its refresh: zero for any other class, or with no credential
 // to watch.
@@ -1030,14 +1089,16 @@ func (e *Engine) due(r sidecar.Retry) bool {
 
 // retryDue sends key's retry r once due. Custody paused or stopped since it
 // took the failure leaves the failure to the user at once, not when custody
-// may send again.
+// may send again; one waiting for a credential waits on, as the item it
+// opened says, its "继续" due once custody may send again.
 func (e *Engine) retryDue(key string, r sidecar.Retry) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if err := e.retryCheckLocked(key); err != nil {
-		if r.Cred.IsZero() { // one waiting for a credential was left already
-			e.leaveLocked(key, r.Class, notRetried(err))
+		if !r.Cred.IsZero() {
+			return
 		}
+		e.leaveLocked(key, r.Class, notRetried(err))
 		r.Done = true
 		e.setRetryLocked(key, &r)
 		return
@@ -1101,6 +1162,9 @@ func (e *Engine) Covers(u health.Unit) bool {
 	}
 	if m, _ := e.cfg.Sessions.Get(u.ID); m.Retry != nil && m.Retry.Failed.Equal(failedAt(u)) {
 		return !m.Retry.Done
+	}
+	if e.stale(u) {
+		return false
 	}
 	if !retry {
 		return true

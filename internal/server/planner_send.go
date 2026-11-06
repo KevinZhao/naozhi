@@ -314,8 +314,10 @@ func (e *sendEngine) submitPlanner(key string, src agent.Source, text string, im
 	o := &plannerOrigin{key: key, src: src, turns: &e.plannerTurns, opts: opts, notify: e.notify, done: done, mark: e.turnWatermark}
 	// A turn bringing outside content in may only promise and ask (§15.6):
 	// merged with the user's message it would refuse what they asked, so
-	// it runs by itself.
-	r := turn.Request{Key: key, Text: text, Images: images, Origin: o, Alone: src.Outside()}
+	// it runs by itself; and the Planner's turns are judged by the sources
+	// of the requests in flight, so none runs beside another (passthrough
+	// would hand the CLI both at once).
+	r := turn.Request{Key: key, Text: text, Images: images, Origin: o, Alone: src.Outside(), Serial: key == agent.Key}
 	if src == "" {
 		// A dispatch's first message is the Planner's, not the user's.
 		r.Source = clievent.SourcePlanner

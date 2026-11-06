@@ -42,6 +42,10 @@ type Request struct {
 	// Alone keeps a queued request out of every merge: it runs as a turn of
 	// its own, and the messages queued around it merge without it.
 	Alone bool
+	// Serial keeps a request out of ModePassthrough's detached turns: it
+	// waits behind the key's running turn as in ModeCollect, so the CLI
+	// never holds it and another request's turn at once.
+	Serial bool
 }
 
 // Ack is Submit's immediate answer, also passed to Origin.Admitted.

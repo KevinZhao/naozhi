@@ -16,11 +16,15 @@ import (
 // the user's own chat included, not held back while they are at it (the
 // failure is the reply to their own message), and noted nowhere but the
 // message itself; a cron run and a scratch session are one-shot and left
-// alone. Turning the switch off keeps a retry due.
+// alone. Turning the switch off keeps a retry due. An IM chat's reply would
+// not reach the chat, so it is retried only in custody; and a failure from
+// long before custody saw it (one held across an upgrade) is left as it is.
 func TestRetryEveryLocalSession(t *testing.T) {
+	const im = "feishu:direct:alice:general"
 	for _, tc := range []struct {
 		name  string
 		key   string
+		age   time.Duration // of the failure when custody first sees it
 		setup func(r *rig)
 		want  bool
 	}{
@@ -30,13 +34,19 @@ func TestRetryEveryLocalSession(t *testing.T) {
 		{name: "cron", key: "cron:nightly"},
 		{name: "scratch", key: sessionkey.ScratchKeyPrefix + "x"},
 		{name: "remote", key: "remote/" + dash},
+		{name: "IM chat", key: im},
+		{name: "IM chat in custody", key: im, setup: func(r *rig) { r.e.Set(im, true, ByUser) }, want: true},
+		{name: "project planner", key: "project:x:planner"},
+		{name: "a fresh failure", key: dash, age: staleAfter, want: true},
+		{name: "ten days old", key: dash, age: 10 * 24 * time.Hour},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newRig(t)
 			if tc.setup != nil {
 				tc.setup(r)
 			}
-			u := health.Unit{ID: tc.key, Kind: health.KindSession, State: health.Failed, ErrClass: health.ErrNetwork, LastActive: r.now}
+			u := health.Unit{ID: tc.key, Kind: health.KindSession, State: health.Failed, ErrClass: health.ErrNetwork,
+				LastActive: r.now.Add(-tc.age), Since: r.now.Add(-tc.age)}
 			r.units = []health.Unit{u}
 			if got := r.e.Covers(u); got != tc.want {
 				t.Errorf("Covers = %v, want %v", got, tc.want)
@@ -183,6 +193,21 @@ func TestCredentialRefresh(t *testing.T) {
 			t.Errorf("after the refresh: sent %q %q", r.sent, r.marks)
 		}
 	})
+	t.Run("paused meanwhile", func(t *testing.T) {
+		r := newRig(t)
+		r.cred = r.now.Add(-time.Minute)
+		r.units = []health.Unit{expired(r)}
+		r.e.Tick()
+		r.until = r.now.Add(30 * time.Minute)
+		r.e.Tick()
+		r.now = r.until.Add(time.Minute)
+		r.cred = r.now.Add(20 * time.Hour) // mwinit
+		r.e.Tick()
+		r.e.Tick()
+		if len(r.sent) != 1 || len(r.inbox.items) != 1 || r.inbox.items[0].Why != "凭证过期；"+credWhy {
+			t.Errorf("after a pause and the refresh: sent %q, inbox %+v", r.sent, r.inbox.items)
+		}
+	})
 	t.Run("in a systemic fault", func(t *testing.T) {
 		r := newRig(t)
 		r.cred = r.now
@@ -200,4 +225,38 @@ func TestCredentialRefresh(t *testing.T) {
 			t.Error("covered with no credential to watch")
 		}
 	})
+}
+
+// A failure that recovered (a turn ended normally since) ends its count: a
+// direct chat's failures days apart, each recovered, get a retry each and
+// never stop custody; failures in a row still do.
+func TestRetryCountEndsWithRecovery(t *testing.T) {
+	r := newRig(t)
+	for day := range MaxErrors + 2 {
+		r.units = []health.Unit{{ID: dash, Kind: health.KindSession, State: health.Failed, ErrClass: health.ErrNetwork, LastActive: r.now}}
+		r.e.Tick()
+		r.now = r.now.Add(Backoff[0])
+		r.e.Tick()
+		if len(r.sent) != day+1 || r.marks[day] != "出错重试 1" {
+			t.Fatalf("blip %d: sent %q %q, want one retry each, counted afresh", day+1, r.sent, r.marks)
+		}
+		r.units[0].State, r.units[0].LastActive = health.Idle, r.now
+		r.e.Tick()
+		r.now = r.now.Add(24 * time.Hour)
+	}
+	if st := r.e.Status(dash); st.State != StateOff || len(r.inbox.items) != 0 {
+		t.Errorf("after recovered blips: %+v, inbox %+v", st, r.inbox.items)
+	}
+
+	// A dispatched session's sends still add up over its lineage.
+	r.dispatch("task:a")
+	r.units = []health.Unit{{ID: "task:a", Kind: health.KindSession, State: health.Failed, ErrClass: health.ErrNetwork, LastActive: r.now}}
+	r.e.Tick()
+	r.now = r.now.Add(Backoff[0])
+	r.e.Tick()
+	r.units[0].State, r.units[0].LastActive = health.Idle, r.now
+	r.e.Tick()
+	if st := r.e.Status("task:a"); st.Sent != 1 {
+		t.Errorf("dispatched session after a recovered failure: %+v, want its send still counted", st)
+	}
 }

@@ -24,13 +24,13 @@ func New(qo QueueOptions, s Sender) *Orchestrator {
 	return &Orchestrator{q: newQueue(qo), s: s}
 }
 
-// Submit admits r. A PriorityNow request, or any request in ModePassthrough,
-// runs as a detached turn; otherwise r is enqueued, and if the key was idle
-// the caller's Admission runs the owner loop. r.Origin.Admitted sees the
+// Submit admits r. A PriorityNow request, or any request but a Serial one
+// in ModePassthrough, runs as a detached turn; otherwise r is enqueued, and
+// if the key was idle the caller's Admission runs the owner loop. r.Origin.Admitted sees the
 // returned Ack before any turn of r starts.
 func (o *Orchestrator) Submit(ctx context.Context, r Request, a Admission) Ack {
 	r.TraceID = requestTrace(ctx, r.TraceID)
-	if r.Priority == PriorityNow || o.q.Mode() == ModePassthrough {
+	if r.Priority == PriorityNow || (o.q.Mode() == ModePassthrough && !r.Serial) {
 		start, ok := a.Admit(RunDetached)
 		if !ok {
 			admitted(ctx, r.Origin, AckShuttingDown)
