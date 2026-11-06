@@ -146,7 +146,7 @@ func TestAnswerAsksRecommended(t *testing.T) {
 		t.Fatalf("answered before %s: %v", SuggestAfter, a.sent)
 	}
 	a.tick(time.Second)
-	want := "task:a|" + Prefix(ReasonSuggested, 1) + "\n方案: 先跑测试 (Recommended)."
+	want := "task:a|方案: 先跑测试 (Recommended)."
 	if len(a.sent) != 1 || a.sent[0] != want {
 		t.Fatalf("sent = %q, want %q", a.sent, want)
 	}
@@ -160,7 +160,7 @@ func TestAnswerAsksRecommended(t *testing.T) {
 }
 
 // The window counts only while the user is away: at the session it stops
-// (noted once as held back) and resumes after; the user's own answer
+// (unnoted: the chip says it) and resumes after; the user's own answer
 // cancels it, and a new card starts afresh.
 func TestAnswerAsksWindow(t *testing.T) {
 	a := newAskRig(t)
@@ -175,8 +175,8 @@ func TestAnswerAsksWindow(t *testing.T) {
 	if len(a.sent) != 0 {
 		t.Fatalf("answered with the user nearby: %v", a.sent)
 	}
-	if got := a.custodyEvents("task:a"); len(got) != 1 || !strings.Contains(got[0], `"deferred"`) {
-		t.Errorf("notes = %v, want one deferred", got)
+	if got := a.custodyEvents("task:a"); len(got) != 0 {
+		t.Errorf("notes = %v, want none for holding back", got)
 	}
 	a.tick(time.Minute) // the user left: counting again from here
 	a.tick(time.Minute - time.Second)
@@ -221,7 +221,7 @@ func TestAnswerAsksOffAndPaused(t *testing.T) {
 	a.dispatch("task:a")
 	a.ask("task:a", "t1", item("方案", "先做哪个？", "先跑测试 (Recommended)"))
 	a.tick(0)
-	if err := a.e.SetPaused(true); err != nil {
+	if err := a.e.Pause(a.now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	a.tick(time.Minute)
@@ -229,7 +229,7 @@ func TestAnswerAsksOffAndPaused(t *testing.T) {
 	if len(a.sent) != 0 {
 		t.Fatalf("answered while paused: %v", a.sent)
 	}
-	if err := a.e.SetPaused(false); err != nil {
+	if err := a.e.Pause(time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	a.tick(0)
@@ -308,9 +308,9 @@ func TestUndo(t *testing.T) {
 		t.Errorf("Undo with nothing answered = %v", err)
 	}
 	a.events["task:a"] = []clievent.EventEntry{
-		{Type: clievent.KindUser, Source: clievent.SourceCustody, Detail: Prefix(ReasonSuggested, 1) + "\n方案: 先跑测试 (Recommended)."},
-		{Type: clievent.KindUser, Source: clievent.SourceCustody, Detail: Prefix(ReasonPlanner, 2) + "\n继续"},
-		{Type: clievent.KindUser, Detail: Prefix(ReasonSuggested, 3) + "\n用户自己贴的"},
+		{Type: clievent.KindUser, Source: clievent.SourceCustody, CustodyReason: string(ReasonSuggested), CustodyN: 1, Detail: "方案: 先跑测试 (Recommended)."},
+		{Type: clievent.KindUser, Source: clievent.SourceCustody, CustodyReason: string(ReasonPlanner), CustodyN: 2, Detail: "继续"},
+		{Type: clievent.KindUser, Detail: "用户自己贴的"},
 	}
 	got, err := a.e.Undo("task:a")
 	if err != nil || got != "方案: 先跑测试 (Recommended)." {
@@ -319,6 +319,15 @@ func TestUndo(t *testing.T) {
 	want := "task:a|撤回刚才按建议选的 方案: 先跑测试 (Recommended)，先停下等我决定"
 	if len(a.user) != 1 || a.user[0] != want || len(a.sent) != 0 {
 		t.Errorf("sent as the user %q, as custody %q; want %q", a.user, a.sent, want)
+	}
+	// An answer from before the entry carried the reason leads with it.
+	a.user = nil
+	a.events["task:a"] = []clievent.EventEntry{
+		{Type: clievent.KindUser, Source: clievent.SourceCustody, Detail: clievent.CustodyLead + "按建议执行 · 第 1/8 次\n方案: 先改文档."},
+		{Type: clievent.KindUser, Source: clievent.SourceCustody, Detail: clievent.CustodyLead + "Planner 继续 · 第 2/8 次\n继续"},
+	}
+	if got, err := a.e.Undo("task:a"); err != nil || got != "方案: 先改文档." {
+		t.Errorf("Undo of an older answer = %q, %v", got, err)
 	}
 	if _, err := a.e.Undo("remote/x"); !errors.Is(err, ErrNoSession) {
 		t.Errorf("Undo of a remote session = %v", err)

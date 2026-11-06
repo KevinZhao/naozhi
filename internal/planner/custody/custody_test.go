@@ -2,6 +2,8 @@ package custody
 
 import (
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -35,6 +37,7 @@ type rig struct {
 	dir      string
 	now      time.Time
 	sent     []string
+	marks    []string // each sent message's reason and count
 	sendErr  error
 	inbox    *fakeInbox
 	journal  *journal.Journal
@@ -43,6 +46,9 @@ type rig struct {
 	progress map[string]string
 	failText map[string]string
 	running  []string
+	until    time.Time // the one pause (the inbox's)
+	cred     time.Time // the credential's expiry
+	woke     bool
 	sessions *sidecar.Store
 	e        *Engine
 }
@@ -67,18 +73,26 @@ func newRig(t *testing.T) *rig {
 func (r *rig) open() {
 	r.sessions = sidecar.Open(filepath.Join(r.dir, "sessions"), func() time.Time { return r.now })
 	r.e = New(Config{
-		Sessions:  r.sessions,
-		Send:      func(key, text string) error { r.sent = append(r.sent, key+"|"+text); return r.sendErr },
-		Inbox:     r.inbox,
-		Journal:   r.journal,
-		Health:    func() health.Snapshot { return health.Snapshot{At: r.now, Units: r.units} },
-		Local:     func(key string) bool { return !strings.HasPrefix(key, "remote/") },
-		Workflows: func() []string { return r.running },
-		LastUser:  func(key string) time.Time { return r.lastUser[key] },
-		Progress:  func(key string) string { return r.progress[key] },
-		FailText:  func(key string) string { return r.failText[key] },
-		Path:      filepath.Join(r.dir, "custody.json"),
-		Now:       func() time.Time { return r.now },
+		Sessions: r.sessions,
+		Send: func(key, text string, reason Reason, n int) error {
+			r.sent = append(r.sent, key+"|"+text)
+			r.marks = append(r.marks, fmt.Sprintf("%s %d", reason, n))
+			return r.sendErr
+		},
+		Inbox:       r.inbox,
+		Journal:     r.journal,
+		Health:      func() health.Snapshot { return health.Snapshot{At: r.now, Units: r.units} },
+		Local:       func(key string) bool { return !strings.HasPrefix(key, "remote/") },
+		Workflows:   func() []string { return r.running },
+		LastUser:    func(key string) time.Time { return r.lastUser[key] },
+		Progress:    func(key string) string { return r.progress[key] },
+		FailText:    func(key string) string { return r.failText[key] },
+		PausedUntil: func() time.Time { return r.until },
+		Pause:       func(until time.Time) { r.until = until },
+		CredExpiry:  func() time.Time { return r.cred },
+		Woke:        func() bool { w := r.woke; r.woke = false; return w },
+		Path:        filepath.Join(r.dir, "custody.json"),
+		Now:         func() time.Time { return r.now },
 	})
 }
 
@@ -142,8 +156,9 @@ func TestOnAndSet(t *testing.T) {
 	if m, _ := r.sessions.Get(dash); m.Custody == nil || m.Custody.By != ByUser || !m.Custody.At.Equal(r.now) {
 		t.Errorf("dash sidecar custody = %+v", m.Custody)
 	}
-	if got := r.custodyEvents(dash); len(got) != 1 || !strings.Contains(got[0], `"event":"on"`) {
-		t.Errorf("journal = %v", got)
+	// The user's own switch is the chip they clicked: no note.
+	if got := r.custodyEvents(dash); len(got) != 0 {
+		t.Errorf("journal = %v, want none for the user's switch", got)
 	}
 	r.open()
 	if !r.e.On(dash) || r.e.On("task:a") {
@@ -151,7 +166,8 @@ func TestOnAndSet(t *testing.T) {
 	}
 }
 
-// Deliver prefixes and counts each message over the lineage; three in a row
+// Deliver sends the text alone and counts each message over the lineage,
+// the reason and count going with it for the transcript; three in a row
 // with no progress, or eight in all, stop the lineage and leave it to the
 // user, and the user turning custody back on starts it afresh while the
 // Planner's cannot.
@@ -165,17 +181,18 @@ func TestDeliverLimits(t *testing.T) {
 				t.Fatalf("send %d: n=%d err=%v", i, n, err)
 			}
 		}
-		if want := "task:a|⚙ 托管 · Planner 继续 · 第 1/8 次\n接着做"; r.sent[0] != want {
-			t.Errorf("first message = %q, want %q", r.sent[0], want)
+		if r.sent[0] != "task:a|接着做" || r.marks[0] != "Planner 继续 1" {
+			t.Errorf("first message = %q (%s), want the text alone, marked Planner 继续 1", r.sent[0], r.marks[0])
 		}
 		_, err := r.e.Deliver("task:a", ReasonPlanner, "接着做")
 		if !errors.Is(err, ErrStopped) || len(r.sent) != MaxIdle {
 			t.Fatalf("fourth with no progress: err=%v sent=%d", err, len(r.sent))
 		}
-		if len(r.inbox.items) != 1 || r.inbox.items[0].Kind != notify.KindQuestion || r.inbox.items[0].Source != "custody:task:a" {
+		if it := r.inbox.items; len(it) != 1 || it[0].Kind != notify.KindQuestion || it[0].Source != "custody:task:a" ||
+			it[0].Title != "修 bug 托管已停" || it[0].Why != "托管连续替你发了 3 次都没推进，交还给你" {
 			t.Errorf("inbox = %+v", r.inbox.items)
 		}
-		if st := r.e.Status("task:a"); st.State != StateStopped || st.Why != "连续 3 次没有进展" || st.Sent != 3 {
+		if st := r.e.Status("task:a"); st.State != StateStopped || st.Why != "托管连续替你发了 3 次都没推进，交还给你" || st.Sent != 3 {
 			t.Errorf("status = %+v", st)
 		}
 		if err := r.e.Set("task:a", true, ByPlanner); err != nil || r.e.Allowed("task:a") {
@@ -205,8 +222,8 @@ func TestDeliverLimits(t *testing.T) {
 		if _, err := r.e.Deliver("task:a", ReasonRetry, RetryText); !errors.Is(err, ErrStopped) || !strings.Contains(err.Error(), "8 次") {
 			t.Fatalf("ninth: %v", err)
 		}
-		if !strings.HasPrefix(strings.TrimPrefix(r.sent[7], "task:a|"), "⚙ 托管 · 出错重试 · 第 8/8 次") {
-			t.Errorf("eighth = %q", r.sent[7])
+		if r.sent[7] != "task:a|"+RetryText || r.marks[7] != "出错重试 8" {
+			t.Errorf("eighth = %q (%s)", r.sent[7], r.marks[7])
 		}
 	})
 	t.Run("a lineage counts together", func(t *testing.T) {
@@ -241,8 +258,8 @@ func TestDeliverLimits(t *testing.T) {
 }
 
 // While the user is at a session (viewing it, or sent it a message within
-// NearbyFor) custody sends nothing and notes it once; once they leave it
-// sends again. The pause holds everything and survives a restart.
+// NearbyFor) custody replies nothing for them, and notes nothing (the chip
+// says it); once they leave it sends again. The one pause holds everything.
 func TestNearbyAndPause(t *testing.T) {
 	r := newRig(t)
 	r.dispatch("task:a")
@@ -255,8 +272,8 @@ func TestNearbyAndPause(t *testing.T) {
 	if st := r.e.Status("task:a"); st.State != StateDeferred {
 		t.Errorf("status while viewing = %+v", st)
 	}
-	if got := r.custodyEvents("task:a"); len(got) != 1 || !strings.Contains(got[0], `"deferred"`) || !strings.Contains(got[0], "你在看") {
-		t.Errorf("notes = %v, want one deferred", got)
+	if got := r.custodyEvents("task:a"); len(got) != 0 {
+		t.Errorf("notes = %v, want none", got)
 	}
 	r.e.SetViewing("task:a", "tab1", false)
 	r.lastUser["task:a"] = r.now.Add(-NearbyFor + time.Second)
@@ -268,12 +285,11 @@ func TestNearbyAndPause(t *testing.T) {
 		t.Fatalf("after leaving: err=%v sent=%v", err, r.sent)
 	}
 
-	if err := r.e.SetPaused(true); err != nil {
+	if err := r.e.Pause(r.now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	r.open()
-	if p, _ := r.e.Paused(); !p {
-		t.Fatal("pause lost on restart")
+	if p, until := r.e.Paused(); !p || !until.Equal(r.now.Add(time.Hour)) || !r.until.Equal(until) {
+		t.Fatalf("Paused = %v %v, the inbox's pause %v", p, until, r.until)
 	}
 	if _, err := r.e.Deliver("task:a", ReasonRetry, RetryText); !errors.Is(err, ErrPaused) {
 		t.Errorf("paused: %v", err)
@@ -281,11 +297,35 @@ func TestNearbyAndPause(t *testing.T) {
 	if st := r.e.Status("task:a"); st.State != StatePaused {
 		t.Errorf("status while paused = %+v", st)
 	}
-	if err := r.e.SetPaused(false); err != nil {
-		t.Fatal(err)
+	r.now = r.now.Add(time.Hour) // the pause ran out
+	if p, _ := r.e.Paused(); p || !r.e.Allowed("task:a") {
+		t.Error("still paused after the pause ended")
 	}
-	if !r.e.Allowed("task:a") {
-		t.Error("not allowed after resume")
+	r.until = r.now.Add(time.Hour) // paused from the inbox
+	if !errors.Is(r.e.Check("task:a"), ErrPaused) {
+		t.Error("the inbox's pause did not pause custody")
+	}
+	if err := r.e.Pause(time.Time{}); err != nil || !r.e.Allowed("task:a") {
+		t.Errorf("not allowed after resume: %v", err)
+	}
+}
+
+// v0.5.0 kept its own pause in custody.json: one found paused carries over
+// to the one pause until the end of today, and the file goes.
+func TestLegacyPause(t *testing.T) {
+	for _, paused := range []bool{true, false} {
+		r := newRig(t)
+		path := filepath.Join(r.dir, "custody.json")
+		if err := os.WriteFile(path, []byte(fmt.Sprintf(`{"v":1,"paused":%v}`, paused)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		r.open()
+		if want := map[bool]time.Time{true: notify.EndOfToday(r.now)}[paused]; !r.until.Equal(want) {
+			t.Errorf("paused=%v: the one pause until %v, want %v", paused, r.until, want)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("paused=%v: custody.json kept: %v", paused, err)
+		}
 	}
 }
 
@@ -316,7 +356,7 @@ func TestRetry(t *testing.T) {
 			r.now = r.now.Add(time.Second)
 			r.e.Tick()
 			r.e.Tick()
-			if len(r.sent) != i+1 || !strings.HasSuffix(r.sent[i], "\n"+RetryText) || !strings.Contains(r.sent[i], "出错重试") {
+			if len(r.sent) != i+1 || r.sent[i] != "task:a|"+RetryText || r.marks[i] != fmt.Sprintf("出错重试 %d", i+1) {
 				t.Fatalf("failure %d: sent %q", i+1, r.sent)
 			}
 			r.now = r.now.Add(time.Minute)
@@ -331,7 +371,8 @@ func TestRetry(t *testing.T) {
 		if len(r.sent) != len(Backoff) {
 			t.Errorf("sent %d, want %d", len(r.sent), len(Backoff))
 		}
-		if len(r.inbox.items) != 1 || r.inbox.items[0].Source != "failed:task:a" || !strings.Contains(r.inbox.items[0].Why, "同一类错误累计 5 次（网络 / DNS）") {
+		if it := r.inbox.items; len(it) != 1 || it[0].Source != "failed:task:a" || it[0].Title != "修 bug 托管已停" ||
+			it[0].Why != "托管重试了 4 次还是出错（网络 / DNS）。发「继续」再试，或换个说法" {
 			t.Errorf("inbox = %+v", r.inbox.items)
 		}
 	})
@@ -408,17 +449,11 @@ func TestRetry(t *testing.T) {
 			}
 		})
 	}
-	t.Run("off or paused", func(t *testing.T) {
+	t.Run("paused", func(t *testing.T) {
 		r := newRig(t)
-		u := failed(dash, health.ErrNetwork, "", r.now)
-		r.units = []health.Unit{u}
-		if r.e.Covers(u) {
-			t.Error("a session out of custody is covered")
-		}
 		r.dispatch("task:a")
-		r.e.SetPaused(true)
-		u.ID = "task:a"
-		if r.e.Covers(u) {
+		r.e.Pause(r.now.Add(time.Hour))
+		if u := failed("task:a", health.ErrNetwork, "", r.now); r.e.Covers(u) {
 			t.Error("covered while paused")
 		}
 	})
@@ -512,14 +547,17 @@ func TestRetryLeftToUser(t *testing.T) {
 		why  string
 		sent int
 	}{
-		{"off by the user", func(r *rig) { r.e.Set("task:a", false, ByUser) }, "托管已关", 0},
-		{"off by the Planner", func(r *rig) { r.e.Set("task:a", false, ByPlanner) }, "托管已关", 0},
-		{"paused", func(r *rig) { r.e.SetPaused(true) }, "托管已暂停", 0},
+		{"paused", func(r *rig) { r.e.Pause(r.now.Add(time.Hour)) }, "托管已暂停", 0},
 		{"failed again, not retryable", func(r *rig) {
 			r.now = r.now.Add(time.Minute)
 			r.e.Tick() // the retry goes out
 			r.units = []health.Unit{failed("task:a", health.ErrAuth, r.units[0].Since, r.now)}
-		}, "凭证 / 权限拒绝", 1},
+		}, "凭证 / 权限拒绝；需要你处理凭证后发「继续」", 1},
+		{"failed again, throttled", func(r *rig) {
+			r.now = r.now.Add(time.Minute)
+			r.e.Tick()
+			r.units = []health.Unit{failed("task:a", health.ErrRateLimit, r.units[0].Since, r.now)}
+		}, "限流；托管不自动重试；过几分钟发「继续」", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newRig(t)
@@ -568,7 +606,7 @@ func TestRetryLeftToUser(t *testing.T) {
 		}
 		it := r.inbox.items
 		if len(it) != 1 || it[0].Kind != notify.KindError || it[0].Source != "failed:task:a" ||
-			!strings.Contains(it[0].Why, "连续 3 次没有进展（最近一次出错：网络 / DNS）") {
+			it[0].Why != "托管重试了 3 次还是出错（网络 / DNS）。发「继续」再试，或换个说法" {
 			t.Errorf("inbox = %+v", it)
 		}
 		if st := r.e.Status("task:a"); st.State != StateStopped {

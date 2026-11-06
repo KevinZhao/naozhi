@@ -44,6 +44,11 @@ const (
 // ask.
 var outsideLabels = map[Source]string{SourceScout: "巡检", SourceBriefing: "会前简报", SourceRefusal: "被拒动作的回执"}
 
+// Outside reports whether a turn from s carries outside content (or answers
+// a turn that did): the gateway runs such a request as a turn of its own,
+// never merged with the user's message.
+func (s Source) Outside() bool { return outsideLabels[s] != "" }
+
 // ErrNoBlock answers a Wake with nothing to say.
 var ErrNoBlock = errors.New("唤醒 Planner 的内容为空")
 

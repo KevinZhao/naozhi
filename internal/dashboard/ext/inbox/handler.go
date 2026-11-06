@@ -4,8 +4,8 @@
 //	GET    /api/inbox         open items and the recently closed, with the pause
 //	POST   /api/inbox/close   close an open item ({"id"})
 //	POST   /api/inbox/decide  answer a decision item ({"id","action"})
-//	PUT    /api/inbox/pause   pause pushes ({"for":"1h"|"today"|<duration>})
-//	DELETE /api/inbox/pause   resume pushes
+//	PUT    /api/inbox/pause   pause pushes and custody ({"for":"1h"|"today"|<duration>})
+//	DELETE /api/inbox/pause   resume both
 //
 // All sit behind the /api/* auth middleware.
 package inbox
@@ -22,9 +22,6 @@ import (
 
 // recentClosed is how many closed items GET /api/inbox lists.
 const recentClosed = 50
-
-// maxPause bounds a custom pause.
-const maxPause = 7 * 24 * time.Hour
 
 // Source is the inbox (notify.Notifier).
 type Source interface {
@@ -103,17 +100,10 @@ func (h *Handler) HandlePause(w http.ResponseWriter, r *http.Request) {
 	if !h.decode(w, r, &req) {
 		return
 	}
-	now := h.now()
-	var until time.Time
-	if req.For == "today" {
-		until = notify.EndOfToday(now)
-	} else {
-		d, err := time.ParseDuration(req.For)
-		if err != nil || d <= 0 || d > maxPause {
-			http.Error(w, `"for" must be "today" or a duration up to 168h`, http.StatusBadRequest)
-			return
-		}
-		until = now.Add(d)
+	until, err := notify.ParsePause(req.For, h.now())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 	h.src.Pause(until)
 	httputil.WriteJSON(w, map[string]any{"paused_until": until})

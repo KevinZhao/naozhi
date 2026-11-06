@@ -105,11 +105,13 @@ type Chain struct {
 
 // Retry is custody's answer to one failure, named by when it happened
 // (Failed): the "continue" due At for its error Class, or Done once sent or
-// left to the user.
+// left to the user. A failure for an expired credential waits instead for
+// the credential to expire later than Cred, its expiry then: refreshed.
 type Retry struct {
 	Failed time.Time `json:"failed"`
 	Class  string    `json:"class,omitempty"`
 	At     time.Time `json:"at,omitzero"`
+	Cred   time.Time `json:"cred,omitzero"`
 	Done   bool      `json:"done,omitempty"`
 }
 
