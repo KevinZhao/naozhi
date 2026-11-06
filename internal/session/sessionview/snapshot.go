@@ -126,9 +126,12 @@ type SessionSnapshot struct {
 // which the session's own DeathReason does not survive.
 type SessionHealth struct {
 	State string `json:"state"`
-	// Since is when the unit entered State (unix ms): a verdict older than
-	// the session's last activity is one a later send has moved past.
+	// Since is when the unit entered State (unix ms) and Seen the
+	// session's last activity the verdict took in: a verdict that saw
+	// neither the session's last activity is one a later send has moved
+	// past. A failure custody retried in vain keeps its Since.
 	Since       int64  `json:"since"`
+	Seen        int64  `json:"seen,omitempty"`
 	DeathReason string `json:"death_reason,omitempty"`
 	ErrClass    string `json:"error_class,omitempty"`
 	// Background names a background task that has run past

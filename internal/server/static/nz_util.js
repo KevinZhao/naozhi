@@ -285,12 +285,13 @@ export function sessionTitleText(s) {
 }
 
 // currentHealth is the health verdict on a /api/sessions row (s.health), or
-// null when there is none or it predates the session's last activity: a
-// send since then has moved past it while the next reconcile is due.
+// null when there is none or it did not take in the session's last activity:
+// a send since then has moved past it while the next reconcile is due. A
+// failure custody retried in vain keeps its since; seen is what it took in.
 function currentHealth(s) {
   const h = s && s.health;
   if (!h || !HEALTH_STATES[h.state]) return null;
-  return s.last_active > h.since ? null : h;
+  return s.last_active > Math.max(h.since, h.seen || 0) ? null : h;
 }
 
 // sessionExit describes why a /api/sessions row s has no process, or null

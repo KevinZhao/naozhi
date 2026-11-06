@@ -429,7 +429,9 @@ test('custody given up shows on the health table and the task card; custody on g
     await page.goto(mock.url + '/dashboard');
     await waitForWs(page, 'CONNECTED');
     await page.click('#abnav-planner');
-    await expect(page.locator('#pl-task .tk-card[data-id="' + TASK + '"] .custody-chip')).toHaveText('托管已停托管重试了 3 次还是出错');
+    // The mark says 已停; why is in its title (Q4).
+    await expect(page.locator('#pl-task .tk-card[data-id="' + TASK + '"] .custody-chip')).toHaveText('托管已停');
+    await expect(page.locator('#pl-task .tk-card[data-id="' + TASK + '"] .custody-chip')).toHaveAttribute('title', /托管重试了 3 次还是出错/);
     await expect(page.locator('#pl-task .tk-card[data-id="' + task2 + '"]')).toBeVisible();
     await expect(page.locator('#pl-task .tk-card[data-id="' + task2 + '"] .custody-chip')).toHaveCount(0);
     await page.click('#abnav-system');

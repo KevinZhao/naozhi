@@ -92,7 +92,7 @@ function chipTitle(st, toggle) {
       lines.push('托管开着：有推荐选项的提问按建议回答，回合停下交给 Planner 判断');
       lines.push('你在看或刚给它发过消息时，先不替你回话');
       break;
-    case 'stopped': lines.push('托管已停' + (st.why ? '：' + st.why : '') + '，等你接手'); break;
+    case 'stopped': lines.push('托管已停' + (st.why ? '：' + st.why : '，等你接手')); break;
     case 'paused': lines.push('推送与托管已暂停（在 Planner 页面的"⋯"里恢复）'); break;
     default: lines.push('托管关着：这个会话停下时等你处理');
   }
@@ -104,14 +104,13 @@ function chipTitle(st, toggle) {
 // the same mark as plain text (a task card, a table cell).
 export function custodyChipHtml(key, toggle) {
   const st = statusOf(key);
-  const why = st.state === 'stopped' && st.why ? st.why : '';
-  const inner = '<span class="custody-chip-l">托管</span><span class="custody-chip-s">' + esc(stateText(st)) + '</span>' +
-    (why ? '<span class="custody-chip-why">' + esc(why) + '</span>' : '');
+  // A stop's reason is in the title only (§15.10 Q4): the chip says 已停.
+  const inner = '<span class="custody-chip-l">托管</span><span class="custody-chip-s">' + esc(stateText(st)) + '</span>';
   const cls = 'custody-chip custody-' + escAttr(st.state === 'deferred' ? 'on' : st.state);
   const title = escAttr(chipTitle(st, toggle));
   if (!toggle) return '<span class="' + cls + '" title="' + title + '">' + inner + '</span>';
   return '<button type="button" class="' + cls + '" data-action="custody-toggle" data-key="' + escAttr(key) + '" aria-pressed="' + (st.on ? 'true' : 'false') +
-    '" title="' + title + '" aria-label="' + escAttr('托管：' + stateText(st) + (why ? '，' + why : '')) + '">' + inner + '</button>';
+    '" title="' + title + '" aria-label="' + escAttr('托管：' + stateText(st) + (st.state === 'stopped' && st.why ? '，' + st.why : '')) + '">' + inner + '</button>';
 }
 
 // paintCustodyChip fills the session header's #header-custody for the
@@ -189,7 +188,7 @@ async function toggle(el) {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, on }), timeoutMs: 8000,
     });
     if (res && res.key) custody.byKey.set(res.key, res);
-    showToast(toggleToast(st.state, on), 'info', 4000);
+    showToast(toggleToast(st.state, on), 'success', 4000);
   } catch (e) {
     showToast((on ? '没有打开托管：' : '没有关掉托管：') + failText(e), 'error');
   }
