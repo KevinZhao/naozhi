@@ -264,19 +264,30 @@ func TestRetryCountEndsWithRecovery(t *testing.T) {
 // A retry due while custody is paused waits for the pause to end and goes
 // out then, at once if due by then, as its backoff has it otherwise; the
 // failure opens no item meanwhile. One the pause kept past staleAfter is
-// left to the user instead, as a failure that old is.
+// left to the user instead, as a failure that old is, a tick or not while
+// the pause held (asleep from the pause on, or restarted, to the wake).
 func TestRetryAcrossPause(t *testing.T) {
 	const never = time.Duration(-1)
 	for _, tc := range []struct {
 		name               string
-		pauseAt, pauseFor  time.Duration // from the failure; pauseFor 0: no pause
-		wantSent, wantLeft time.Duration // when the retry went out, the failure was left; never
+		pauseAt, pauseFor  time.Duration    // from the failure; pauseFor 0: no pause
+		asleep             [2]time.Duration // no tick from [0] until [1], woken then
+		restart            bool             // restarted as it fell asleep
+		wantSent, wantLeft time.Duration    // when the retry went out, the failure was left; never
 	}{
 		{name: "no pause", wantSent: Backoff[0], wantLeft: never},
 		{name: "paused a minute", pauseAt: 30 * time.Second, pauseFor: time.Minute, wantSent: 90 * time.Second, wantLeft: never},
 		{name: "pause over before the retry is due", pauseFor: 30 * time.Second, wantSent: Backoff[0], wantLeft: never},
 		{name: "failed while paused, 29 minutes", pauseFor: 29 * time.Minute, wantSent: 29 * time.Minute, wantLeft: never},
 		{name: "paused past staleAfter", pauseAt: 30 * time.Second, pauseFor: time.Hour, wantSent: never, wantLeft: staleAfter + tickInterval},
+		{name: "asleep from the pause past its end", pauseAt: 30 * time.Second, pauseFor: time.Hour,
+			asleep: [2]time.Duration{30 * time.Second, 2 * time.Hour}, wantSent: never, wantLeft: 2 * time.Hour},
+		{name: "restarted at the pause, back past its end", pauseAt: 30 * time.Second, pauseFor: time.Hour,
+			asleep: [2]time.Duration{30 * time.Second, 2 * time.Hour}, restart: true, wantSent: never, wantLeft: 2 * time.Hour},
+		{name: "failed while paused, asleep past staleAfter", pauseFor: 40 * time.Minute,
+			asleep: [2]time.Duration{tickInterval, 50 * time.Minute}, wantSent: never, wantLeft: 50 * time.Minute},
+		{name: "asleep from the pause, woken fresh", pauseAt: 30 * time.Second, pauseFor: time.Minute,
+			asleep: [2]time.Duration{30 * time.Second, 10 * time.Minute}, wantSent: 10 * time.Minute, wantLeft: never},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newRig(t)
@@ -284,7 +295,7 @@ func TestRetryAcrossPause(t *testing.T) {
 			u := health.Unit{ID: dash, Kind: health.KindSession, State: health.Failed, ErrClass: health.ErrNetwork, Since: start, LastActive: start}
 			r.units = []health.Unit{u}
 			sent, left := never, never
-			for d := time.Duration(0); d <= 70*time.Minute; d += tickInterval {
+			for d := time.Duration(0); d <= 130*time.Minute; d += tickInterval {
 				r.now = start.Add(d)
 				if tc.pauseFor > 0 && d == tc.pauseAt {
 					r.e.Pause(r.now.Add(tc.pauseFor))
@@ -292,6 +303,13 @@ func TestRetryAcrossPause(t *testing.T) {
 				if d == 0 && !r.e.Covers(u) {
 					t.Fatal("not covered")
 				}
+				if d == tc.asleep[0] && tc.restart {
+					r.open()
+				}
+				if d >= tc.asleep[0] && d < tc.asleep[1] {
+					continue
+				}
+				r.woke = tc.asleep[1] > 0 && d == tc.asleep[1]
 				r.e.Tick()
 				if sent == never && len(r.sent) > 0 {
 					sent = d

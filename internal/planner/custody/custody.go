@@ -614,9 +614,31 @@ func (e *Engine) paused() bool {
 // to end (retryDue). It is kept across restarts.
 func (e *Engine) Pause(until time.Time) error {
 	e.pause(until)
-	// Resumed, the retries due go out.
+	// Paused, the retries pending are held from now, with no tick before
+	// the machine sleeps or naozhi stops; resumed, the ones due go out.
+	e.holdRetries()
 	e.Poke()
 	return nil
+}
+
+// holdRetries marks each retry pending held while the pause holds; one
+// waiting for a credential waits on as it is.
+func (e *Engine) holdRetries() {
+	if e.cfg.Sessions == nil || e.cfg.Disabled {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.paused() {
+		return
+	}
+	for _, m := range e.cfg.Sessions.List() {
+		if r := m.Retry; r != nil && !r.Done && r.Cred.IsZero() && !r.Held {
+			next := *r
+			next.Held = true
+			e.setRetryLocked(m.Key, &next)
+		}
+	}
 }
 
 func (e *Engine) pause(until time.Time) {
@@ -1050,7 +1072,7 @@ func (e *Engine) answer(u health.Unit) {
 		return
 	}
 	e.saveChainLocked(root, c)
-	next.At, next.Done = e.now().Add(Backoff[n-1]), false
+	next.At, next.Done, next.Held = e.now().Add(Backoff[n-1]), false, e.paused()
 }
 
 // recovered ends key's failure r, its turn having ended normally since: the
@@ -1099,19 +1121,32 @@ func (e *Engine) due(r sidecar.Retry) bool {
 
 // retryDue sends key's retry r once due. A lineage stopped since custody
 // took the failure leaves it to the user at once. While custody is paused
-// the retry waits, its backoff running on, and goes out once the pause ends
-// (at once if due by then); a failure grown older than staleAfter is left
-// to the user instead, as one custody first sees that old is: no one waits
-// on its "继续" now. One waiting for a credential waits on, as the item it
-// opened says, its "继续" due once custody may send again.
+// the retry waits, held, its backoff running on, and goes out once the
+// pause ends (at once if due by then); a failure the pause held grown older
+// than staleAfter is left to the user instead, during the pause or past it
+// (no tick may have run at its end: the machine slept, naozhi stopped), as
+// one custody first sees that old is: no one waits on its "继续" now. One
+// waiting for a credential waits on, as the item it opened says, its
+// "继续" due once custody may send again.
 func (e *Engine) retryDue(key string, r sidecar.Retry) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	err := e.stoppedLocked(key)
-	if err == nil && e.paused() {
-		if !r.Cred.IsZero() || !e.staleSince(r.Failed) {
+	switch stale := e.staleSince(r.Failed); {
+	case err != nil:
+	case e.paused():
+		if !r.Cred.IsZero() {
 			return
 		}
+		if !stale {
+			if !r.Held {
+				r.Held = true
+				e.setRetryLocked(key, &r)
+			}
+			return
+		}
+		err = ErrPaused
+	case r.Held && stale:
 		err = ErrPaused
 	}
 	if err != nil {

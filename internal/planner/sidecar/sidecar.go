@@ -107,11 +107,14 @@ type Chain struct {
 // (Failed): the "continue" due At for its error Class, or Done once sent or
 // left to the user. A failure for an expired credential waits instead for
 // the credential to expire later than Cred, its expiry then: refreshed.
+// Held is set once the pause held the retry back: past the pause, one
+// grown stale (custody's staleAfter) is left to the user, not sent.
 type Retry struct {
 	Failed time.Time `json:"failed"`
 	Class  string    `json:"class,omitempty"`
 	At     time.Time `json:"at,omitzero"`
 	Cred   time.Time `json:"cred,omitzero"`
+	Held   bool      `json:"held,omitempty"`
 	Done   bool      `json:"done,omitempty"`
 }
 
