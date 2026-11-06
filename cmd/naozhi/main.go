@@ -220,7 +220,8 @@ func main() {
 		EventLogGenerator: "naozhi",
 	})
 
-	router.ReconnectShimsCtx(ctx)
+	// What the start took back is announced with an upgrade (notify.Start).
+	reattached, shimSessions := router.ReconnectShimsCtx(ctx)
 
 	// Critical-loop heartbeats; /health degrades when one goes stale. Its
 	// startup grace starts here, before the first loop registers.
@@ -465,6 +466,7 @@ func main() {
 		Beats:   beats,
 		Name:    unitNames,
 		Link:    wireup.DashboardLink(cfg.Server.Addr),
+		Start:   notify.Start{Version: version, Shims: shimSessions, Reattached: reattached},
 	})
 	// Side notes in the session view (§15.3 ③), read back from the journal
 	// and pushed as the health machine and the inbox write it.
@@ -497,6 +499,8 @@ func main() {
 		Workspaces: plannerState.Workspaces,
 		Calendar:   scouter.Calendar,
 		Patrol:     scouter.Since,
+		Routines:   wireup.RoutineResults(scheduler),
+		Carried:    notifier.Carried,
 	})
 
 	// Custody (§5.4, D93): the gateway watching sessions for the user. It

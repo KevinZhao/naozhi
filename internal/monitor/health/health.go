@@ -41,6 +41,9 @@ const (
 	// LostAfter is how long a remote node's polls must fail before its
 	// sessions are Lost.
 	LostAfter = time.Minute
+	// LongTask is how long a background task runs before the session list
+	// shows how long it has been running.
+	LongTask = 30 * time.Minute
 	// FaultWindow is the window in which units failing with one error class
 	// merge into a systemic fault; FaultMin is how many it takes.
 	FaultWindow = 5 * time.Minute
@@ -134,11 +137,26 @@ type Fact struct {
 	// observation.
 	Workflow     string
 	WorkflowSeen time.Time
-	LastActive   time.Time
+	// Background is the background task the unit has open (a workflow, a
+	// Bash run_in_background, an Agent subtask) whatever its turn does,
+	// unlike Workflow, which counts one only while it is watched for
+	// stalls; nil when none. Finished is the latest one that ended with a
+	// turn's result after it, Reply the first line of that turn's reply.
+	Background *Task
+	Finished   *Task
+	Reply      string
+	LastActive time.Time
 
 	// Index is the unit's index.json row, set for local and remote
 	// sessions; the machine fills in Workspace and Health.
 	Index *IndexEntry
+}
+
+// Task is a unit's background task.
+type Task struct {
+	ID    string
+	Name  string
+	Start time.Time
 }
 
 // Unit is one unit's current health.
@@ -153,6 +171,10 @@ type Unit struct {
 	ErrClass   ErrorClass `json:"error_class,omitempty"`
 	Since      time.Time  `json:"since"`
 	LastActive time.Time  `json:"last_active,omitzero"`
+	// Background names the background task the unit has open and
+	// BackgroundSince is when it started; empty when none.
+	Background      string    `json:"background,omitempty"`
+	BackgroundSince time.Time `json:"background_since,omitzero"`
 }
 
 // Snapshot is the whole table at the last reconcile. Unowned counts the
@@ -163,11 +185,22 @@ type Snapshot struct {
 	Unowned int       `json:"unowned"`
 }
 
-// Event is one report to subscribers: a transition or a systemic fault.
+// Event is one report to subscribers: a transition, a systemic fault or a
+// background task done.
 type Event struct {
 	At         time.Time
 	Transition *Transition
 	Fault      *Fault
+	TaskDone   *TaskDone
+}
+
+// TaskDone is a background task this run saw open that ended, its turn
+// over: the unit is idle with no other task open. Unit is the unit then,
+// Reply the first line of the turn's reply.
+type TaskDone struct {
+	Unit  Unit
+	Task  string
+	Reply string
 }
 
 // Transition is a unit entering a new state; Unit is the unit after it.
@@ -246,6 +279,9 @@ type unit struct {
 	heldState    State
 	heldEvidence string
 	heldClass    ErrorClass
+	// open are the background tasks this run saw open, names by ID, until
+	// one is reported done or the unit stops being healthy.
+	open map[string]string
 }
 
 // journaled is a unit's last journaled transition.
@@ -435,6 +471,9 @@ func (m *Machine) Reconcile() {
 		if ev, ok := m.step(u, state, evidence, class, now); ok {
 			events = append(events, ev)
 		}
+		if d := u.taskDone(f, state); d != nil {
+			events = append(events, Event{At: now, TaskDone: d})
+		}
 	}
 	for id := range m.units {
 		if !seen[id] {
@@ -467,6 +506,16 @@ func (m *Machine) Reconcile() {
 	m.mu.Unlock()
 
 	for _, ev := range events {
+		if d := ev.TaskDone; d != nil {
+			// Not a state: only subscribers hear of it, and only of a
+			// unit that belongs to a workspace.
+			if d.Unit.Workspace != "" {
+				for _, fn := range subs {
+					fn(ev)
+				}
+			}
+			continue
+		}
 		m.record(ev)
 		// A snapshot-only unit with no workspace (a remote node's or a
 		// terminal's session) is only journaled; an unowned cron job,
@@ -569,15 +618,17 @@ func (m *Machine) step(u *unit, state State, evidence string, class ErrorClass, 
 	u.pending, u.pendingN = "", 0
 	from, first := u.State, u.first
 	u.failedAt = now
+	var recorded time.Time
 	if first {
-		from = cmp.Or(m.last[u.ID].State, Unknown)
+		j := m.last[u.ID]
+		from, recorded = cmp.Or(j.State, Unknown), j.At
 		delete(m.last, u.ID)
 		u.first = false
 		u.failedAt = u.LastActive
 	}
 	u.State, u.Evidence, u.ErrClass, u.Since = state, evidence, class, now
-	if first && from == state && !u.held.IsZero() {
-		u.Since = u.held // the state the journal recorded, not a new one
+	if first && from == state && !recorded.IsZero() {
+		u.Since = recorded // the state the journal recorded, not a new one
 	}
 	if from == state || first && from == Unknown && state.healthy() {
 		return Event{}, false
@@ -630,6 +681,41 @@ func (u *unit) hold(f *Fact, state State, evidence string, class ErrorClass) (St
 	}
 	u.held = time.Time{}
 	return state, evidence, class
+}
+
+// taskDone keeps u's background task from f and reports one this run saw
+// open with no turn in progress (it outlived the turn that started it, so
+// the user may have moved on) that finished, once the unit is idle with no
+// task open: the turn its end started is over. A unit judged anything but
+// active or idle (judged, before two reconciles confirm it) forgets what it
+// saw; a task that ended with no result yet is waited for.
+func (u *unit) taskDone(f *Fact, judged State) *TaskDone {
+	u.Background, u.BackgroundSince = "", time.Time{}
+	if t := f.Background; t != nil {
+		u.Background, u.BackgroundSince = t.Name, t.Start
+		if !f.Running {
+			if u.open == nil {
+				u.open = map[string]string{}
+			}
+			u.open[t.ID] = t.Name
+		}
+		return nil
+	}
+	switch {
+	case len(u.open) == 0 || judged == Active:
+		return nil
+	case judged != Idle || u.State != Idle:
+		u.open = nil
+		return nil
+	case f.Finished == nil:
+		return nil
+	}
+	name, ok := u.open[f.Finished.ID]
+	if !ok {
+		return nil
+	}
+	u.open = nil
+	return &TaskDone{Unit: u.Unit, Task: name, Reply: f.Reply}
 }
 
 // trackNodes records when each down node's polls began failing.
@@ -768,6 +854,12 @@ func mergeFacts(in []Fact) []Fact {
 		}
 		if o.Workflow == "" {
 			o.Workflow, o.WorkflowSeen = f.Workflow, f.WorkflowSeen
+		}
+		if o.Background == nil {
+			o.Background = f.Background
+		}
+		if o.Finished == nil {
+			o.Finished, o.Reply = f.Finished, f.Reply
 		}
 		if f.LastActive.After(o.LastActive) {
 			o.LastActive = f.LastActive

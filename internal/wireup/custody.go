@@ -110,7 +110,7 @@ func (c CustodySources) Settled(key string) bool {
 		return false
 	}
 	if at := s.ProcessAttachedAt(); !at.IsZero() && snap.State != "dead" {
-		if name, _ := openTask(s.EventLastN(taskScan), at, true); name != "" {
+		if t, _ := openTask(s.EventLastN(taskScan), at, true); t != nil {
 			return false
 		}
 	}

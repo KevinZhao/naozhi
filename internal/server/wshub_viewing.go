@@ -10,10 +10,26 @@ import (
 
 // ViewingSink takes the dashboard's "the user has this session open"
 // reports: custody holds back while the user is at a session
-// (custody.Engine).
+// (custody.Engine), and opening one closes its "后台任务跑完了"
+// (notify.Notifier).
 type ViewingSink interface {
 	SetViewing(key, viewer string, viewing bool)
 	DropViewer(viewer string)
+}
+
+// viewingSinks hands each report to every sink.
+type viewingSinks []ViewingSink
+
+func (s viewingSinks) SetViewing(key, viewer string, viewing bool) {
+	for _, v := range s {
+		v.SetViewing(key, viewer, viewing)
+	}
+}
+
+func (s viewingSinks) DropViewer(viewer string) {
+	for _, v := range s {
+		v.DropViewer(viewer)
+	}
 }
 
 // viewerSeq names each connection as a viewer.

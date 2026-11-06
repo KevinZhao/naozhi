@@ -252,11 +252,13 @@ func (r *Router) adoptLiveShim(tx sessTx, state shim.State, backendID string) *M
 // ReconnectShimsCtx discovers surviving shim processes and reconnects their
 // sessions. main calls it once after NewRouter and the reconcile loop calls it
 // on every tick; parentCtx bounds the per-shim handshakes so SIGTERM aborts
-// them promptly instead of waiting per session.
-func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
+// them promptly instead of waiting per session. sessions counts the shims
+// found holding a session this tick did not already have attached, and
+// reconnected those it took back (the startup's "会话接回 n/n").
+func (r *Router) ReconnectShimsCtx(parentCtx context.Context) (reconnected, sessions int) {
 	managers := r.backends.shimManagers()
 	if len(managers) == 0 {
-		return
+		return 0, 0
 	}
 
 	// Aggregate states across all managers and dedupe on key, as each shim
@@ -284,7 +286,6 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 	}
 	slog.Log(parentCtx, level, "shim discovery complete", "found", len(states))
 
-	reconnected := 0
 	driftCheck := driftArgs{backends: &r.backends, spawn: &r.spawn}
 	for _, state := range states {
 		var tgt shimTarget
@@ -331,7 +332,11 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 		}
 		sess, sessPrevIDs := tgt.sess, tgt.prevIDs
 
-		switch classifyShimState(tgt.spawning, tgt.found, tgt.live, recWrapper == nil, argsDrift) {
+		st := classifyShimState(tgt.spawning, tgt.found, tgt.live, recWrapper == nil, argsDrift)
+		if st != shimStateSkip && st != shimStateOrphan {
+			sessions++
+		}
+		switch st {
 		case shimStateSkip:
 			// Next tick re-evaluates if anything changed.
 			continue
@@ -509,6 +514,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 	if reconnected > 0 {
 		r.settleReconnected(reconnected)
 	}
+	return reconnected, sessions
 }
 
 // settleReconnected finishes a reconcile tick that reattached n sessions.

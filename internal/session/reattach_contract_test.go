@@ -2,6 +2,7 @@ package session
 
 import (
 	"testing"
+	"time"
 )
 
 // TestTryReattachProcessNoCallback_SendMuGuard pins the R51-CONCUR-002 (#750)
@@ -60,5 +61,28 @@ func TestReattachKeepsKnownSessionID(t *testing.T) {
 	s.ReattachProcessNoCallback(NewTestProcess(), "f00d")
 	if got := s.getSessionID(); got != "f00d" {
 		t.Fatalf("session ID = %q, want the shim's", got)
+	}
+}
+
+// Reattaching a shim after a restart is not activity: the last activity
+// restored from the store stands; a session with none gets the attach time.
+func TestReattachKeepsLastActive(t *testing.T) {
+	t.Parallel()
+	stored := time.Now().Add(-3 * time.Hour).UnixNano()
+	tests := []struct {
+		name   string
+		stored int64
+		keep   bool
+	}{
+		{"restored from the store", stored, true},
+		{"none stored", 0, false},
+	}
+	for _, tt := range tests {
+		s := &ManagedSession{key: "dashboard:direct:a:general"}
+		s.lastActive.Store(tt.stored)
+		s.ReattachProcessNoCallback(NewTestProcess(), "")
+		if got := s.lastActive.Load(); (got == tt.stored) != tt.keep || got == 0 {
+			t.Errorf("%s: last active = %d, stored %d", tt.name, got, tt.stored)
+		}
 	}
 }

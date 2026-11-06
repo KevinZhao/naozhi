@@ -51,7 +51,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.fillProjectAndSummary(snapshots)
-	h.fillHealth(snapshots)
+	h.fillHealth(snapshots, now)
 
 	stats := h.buildSessionStats(now, version, running, ready)
 
@@ -198,8 +198,9 @@ func (h *Handlers) fillProjectAndSummary(snapshots []sessionpkg.SessionSnapshot)
 // reconcile. The machine holds a failure across a restart (from the
 // journal) while the session itself comes back reading "ready" with no
 // death reason, so the list's status dot and exit chip read the failure from
-// here.
-func (h *Handlers) fillHealth(snapshots []sessionpkg.SessionSnapshot) {
+// here. A background task running past health.LongTask is named with when
+// it started.
+func (h *Handlers) fillHealth(snapshots []sessionpkg.SessionSnapshot, now time.Time) {
 	if h.deps.Health == nil {
 		return
 	}
@@ -216,6 +217,9 @@ func (h *Handlers) fillHealth(snapshots []sessionpkg.SessionSnapshot) {
 		sh := &sessionview.SessionHealth{State: string(u.State), Since: u.Since.UnixMilli(), ErrClass: string(u.ErrClass)}
 		if r, ok := strings.CutPrefix(u.Evidence, health.DeathEvidence); ok && u.State == health.Failed {
 			sh.DeathReason = r
+		}
+		if u.Background != "" && !u.BackgroundSince.IsZero() && now.Sub(u.BackgroundSince) >= health.LongTask {
+			sh.Background, sh.BackgroundSince = u.Background, u.BackgroundSince.UnixMilli()
 		}
 		snapshots[i].Health = sh
 	}

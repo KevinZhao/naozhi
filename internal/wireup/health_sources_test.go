@@ -108,9 +108,43 @@ func TestOpenTask(t *testing.T) {
 		{"a workflow is the board's", []clievent.EventEntry{start("w1", clievent.TaskTypeWorkflow, 2000)}, true, "", 0},
 	}
 	for _, tt := range tests {
-		name, seen := openTask(tt.entries, attached, tt.running)
+		task, seen := openTask(tt.entries, attached, tt.running)
+		name := ""
+		if task != nil {
+			name = task.Name
+		}
 		if name != tt.want || (tt.want != "" && seen.UnixMilli() != tt.seen) {
 			t.Errorf("%s: openTask = %q at %d, want %q at %d", tt.name, name, seen.UnixMilli(), tt.want, tt.seen)
+		}
+	}
+}
+
+func TestFinishedTask(t *testing.T) {
+	start := clievent.EventEntry{Type: clievent.KindTaskStart, TaskID: "b1", TaskType: "local_bash", Summary: "sleep 300", Time: 2000}
+	done := clievent.EventEntry{Type: clievent.KindTaskDone, TaskID: "b1", Status: "completed", Time: 3000}
+	text := func(s string) clievent.EventEntry {
+		return clievent.EventEntry{Type: clievent.KindText, Detail: s, Time: 3100}
+	}
+	result := clievent.EventEntry{Type: clievent.KindResult, Time: 3200}
+	tests := []struct {
+		name      string
+		entries   []clievent.EventEntry
+		want      string
+		wantReply string
+	}{
+		{"still running", []clievent.EventEntry{start, text("在后台跑"), result}, "", ""},
+		{"ended, its turn not over", []clievent.EventEntry{start, result, done, text("跑完了")}, "", ""},
+		{"ended and answered", []clievent.EventEntry{start, result, done, text("\n  跑完了：3 个文件  \n细节"), result}, "sleep 300", "跑完了：3 个文件"},
+		{"a turn before the end does not count", []clievent.EventEntry{start, text("在跑"), result, done}, "", ""},
+	}
+	for _, tt := range tests {
+		task, reply := finishedTask(tt.entries)
+		name := ""
+		if task != nil {
+			name = task.Name
+		}
+		if name != tt.want || reply != tt.wantReply {
+			t.Errorf("%s: finishedTask = %q, %q; want %q, %q", tt.name, name, reply, tt.want, tt.wantReply)
 		}
 	}
 }
