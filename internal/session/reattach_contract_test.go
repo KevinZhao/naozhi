@@ -86,3 +86,33 @@ func TestReattachKeepsLastActive(t *testing.T) {
 		}
 	}
 }
+
+// The idle TTL counts from the reattach at the latest: the stored last
+// activity can be past the TTL while the CLI only just got taken back.
+func TestReattachedNotReapedByIdleTTL(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		attachedAt time.Duration // before now
+		reaped     bool
+	}{
+		{"just reattached", 0, false},
+		{"reattached past the TTL", 40 * time.Minute, true},
+	}
+	for _, tt := range tests {
+		r := wfRouter(t)
+		r.ttl = 30 * time.Minute
+		s := injectSession(r, "dashboard:direct:a:general", nil)
+		s.lastActive.Store(time.Now().Add(-40 * time.Minute).UnixNano())
+		proc := newIdleProc()
+		proc.startedAt = time.Now().Add(-tt.attachedAt)
+		r.ss.Update(func(tx sessTx) {
+			s.ReattachProcessNoCallback(proc, "")
+			tx.AddActive(1)
+		})
+		r.Cleanup()
+		if got := !proc.Alive(); got != tt.reaped {
+			t.Errorf("%s: reaped = %v, want %v", tt.name, got, tt.reaped)
+		}
+	}
+}

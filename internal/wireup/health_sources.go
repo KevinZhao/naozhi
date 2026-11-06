@@ -384,17 +384,27 @@ const replyRunes = 120
 
 // finishedTask is the latest background task in entries that ended with a
 // turn's result after its end, and the first line of that turn's reply;
-// nil when none.
+// nil when none. A message from the user after the task started means they
+// took it over: they already have the reply.
 func finishedTask(entries []clievent.EventEntry) (*health.Task, string) {
 	names := map[string]string{}
+	started := map[string]int{}
+	lastUser := -1
 	var ended, done *health.Task
 	text, reply := "", ""
-	for _, e := range entries {
+	for i, e := range entries {
 		switch {
 		case e.Type == clievent.KindTaskStart && e.TaskID != "":
-			names[e.TaskID] = e.Summary
+			names[e.TaskID], started[e.TaskID] = e.Summary, i
+		case e.Type == clievent.KindUser && e.Source != clievent.SourceCustody:
+			lastUser, ended, done, reply = i, nil, nil, ""
 		case taskEnded(e):
-			ended, text = &health.Task{ID: e.TaskID, Name: cmp.Or(names[e.TaskID], e.Summary, e.TaskID)}, ""
+			ended, text = nil, ""
+			// A task whose start is out of the window ran during any
+			// message before its end.
+			if at, ok := started[e.TaskID]; lastUser < 0 || ok && lastUser < at {
+				ended = &health.Task{ID: e.TaskID, Name: cmp.Or(names[e.TaskID], e.Summary, e.TaskID)}
+			}
 		case e.Type == clievent.KindText && ended != nil:
 			text = cmp.Or(e.Detail, e.Summary)
 		case e.Type == clievent.KindResult && ended != nil:

@@ -113,8 +113,10 @@ type input struct {
 	// Unchanged counts the ones whose did not.
 	Routines  []routineItem
 	Unchanged int
-	Waiting   []inboxItem
-	Errors    []inboxItem
+	// Waiting (questions, decisions) and Errors are the open items the
+	// badge counts; the brief only counts them (D5).
+	Waiting []inboxItem
+	Errors  []inboxItem
 	// Notices are the open notices the brief carries (§15.1, D5), closed
 	// once it is sent.
 	Notices []inboxItem
@@ -260,7 +262,6 @@ func (b *Briefer) gather(since, now time.Time) input {
 	}
 
 	wsNames := b.workspaceNames()
-	failedUnits := map[string]bool{}
 	for id, s := range units {
 		u, live := cur[id]
 		ws, kind := s.ws, cmp.Or(health.Kind(s.kind), kindOf(id))
@@ -276,7 +277,6 @@ func (b *Briefer) gather(since, now time.Time) input {
 			in.Custody.Recovered++
 		}
 		if s.failed != nil && !recovered {
-			failedUnits[id] = true
 			in.Failed = append(in.Failed, failedItem{ref: r, At: s.failedAt, Class: s.failed.ErrClass, Stopped: s.stopped})
 			continue
 		}
@@ -314,8 +314,6 @@ func (b *Briefer) gather(since, now time.Time) input {
 				in.Waiting = append(in.Waiting, item)
 			case it.Kind == notify.KindNotice:
 				in.Notices = append(in.Notices, item)
-			case it.Unit != "" && failedUnits[it.Unit] && it.Source == "failed:"+it.Unit:
-				// Already listed under 失败的.
 			default:
 				in.Errors = append(in.Errors, item)
 			}
@@ -464,18 +462,36 @@ func render(in input) string {
 	var b strings.Builder
 	// No title: the card the dashboard shows it in already names the brief
 	// and its day.
-	fmt.Fprintf(&b, "自 %s 以来：%s\n", in.Since.In(loc).Format(stamp), summary(c, "未关闭的错误"))
+	// 等你 is one line, counted as the badge counts (D5): the items are in
+	// 等你, the brief only says how many of each kind there are.
+	waits := ""
+	if n := c.Waiting + c.Errors; n > 0 {
+		per := map[notify.Kind]int{notify.KindError: c.Errors}
+		for _, it := range in.Waiting {
+			per[it.Kind]++
+		}
+		var kinds []string
+		for _, k := range []notify.Kind{notify.KindQuestion, notify.KindDecision, notify.KindError} {
+			if per[k] > 0 {
+				kinds = append(kinds, fmt.Sprintf("%s %d", kindLabels[k], per[k]))
+			}
+		}
+		waits = fmt.Sprintf("等你 %d 条（%s），见「等你」", n, strings.Join(kinds, " · "))
+	}
+	if sum := summary(c, false); sum != "" {
+		fmt.Fprintf(&b, "自 %s 以来：%s\n", in.Since.In(loc).Format(stamp), sum)
+		if waits != "" {
+			b.WriteString("\n" + waits + "\n")
+		}
+	} else {
+		fmt.Fprintf(&b, "自 %s 以来：%s\n", in.Since.In(loc).Format(stamp), waits)
+	}
 	if !in.Midway.IsZero() {
 		if exp := in.Midway.In(loc); exp.After(in.Now) {
 			fmt.Fprintf(&b, "\nMidway 凭证 %s 到期，先 mwinit 再开始\n", exp.Format("15:04"))
 		} else {
 			fmt.Fprintf(&b, "\nMidway 凭证已于 %s 过期，先 mwinit 再开始\n", exp.Format(stamp))
 		}
-	}
-	if n := len(in.Waiting); n > 0 {
-		// The items themselves are the left column's; the brief only says
-		// how many there are.
-		fmt.Fprintf(&b, "\n等你 %d 条（见左栏）\n", n)
 	}
 
 	section(&b, "今天的日程", in.Meetings, func(m meetingItem) string {
@@ -563,14 +579,6 @@ func render(in input) string {
 	} else if n > 0 {
 		fmt.Fprintf(&b, "\n例行任务 %d 个，结果都没变\n", n)
 	}
-	item := func(it inboxItem) string {
-		line := cmp.Or(kindLabels[it.Kind], string(it.Kind)) + " · " + link(textutil.TruncateRunes(it.Title, titleRunes), it.Link)
-		if it.Why != "" {
-			line += " · " + plain(it.Why)
-		}
-		return line + wsPart(it.WS) + " · 已等 " + ago(in.Now.Sub(it.Created))
-	}
-	section(&b, "未关闭的错误", in.Errors, item)
 	section(&b, "通知", in.Notices, func(it inboxItem) string {
 		line := link(textutil.TruncateRunes(it.Title, titleRunes), it.Link)
 		if it.Why != "" {
@@ -609,16 +617,21 @@ func section[T any](b *strings.Builder, title string, items []T, line func(T) st
 	}
 }
 
-// summary is the counts as one line, the zero ones left out; errors names
-// the error count.
-func summary(c Counts, errors string) string {
+// summary is the counts as one line, the zero ones left out. The brief
+// gives 等你 a line of its own; the push, its text only this line, counts it
+// here (questions, decisions and errors, as the badge does).
+func summary(c Counts, push bool) string {
+	waits := 0
+	if push {
+		waits = c.Waiting + c.Errors
+	}
 	var parts []string
 	for _, p := range []struct {
 		label string
 		n     int
 	}{{"今天日程", c.Meetings}, {"等你回复", c.Replies}, {"Asana 到期", c.Deadlines},
-		{"完成", c.Done}, {"失败", c.Failed}, {"例行任务有变化", c.Routines}, {"等你", c.Waiting},
-		{errors, c.Errors}, {"通知", c.Notices}, {"未完成的任务", c.Tasks}, {"Planner 记下", c.Planner}} {
+		{"完成", c.Done}, {"失败", c.Failed}, {"例行任务有变化", c.Routines}, {"等你", waits},
+		{"通知", c.Notices}, {"未完成的任务", c.Tasks}, {"Planner 记下", c.Planner}} {
 		if p.n > 0 {
 			parts = append(parts, fmt.Sprintf("%s %d", p.label, p.n))
 		}
@@ -627,7 +640,7 @@ func summary(c Counts, errors string) string {
 }
 
 // pushBody is the notification's text: the counts, nothing from the items.
-func pushBody(c Counts) string { return summary(c, "错误") }
+func pushBody(c Counts) string { return summary(c, true) }
 
 func link(text, href string) string {
 	text = plain(text)

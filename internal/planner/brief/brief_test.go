@@ -250,16 +250,14 @@ func TestRender(t *testing.T) {
 	b.Check()
 
 	// The cron job recovered: no longer 失败的, its failure's item still
-	// open among the errors. The waits are one line; the Planner's notice is
-	// carried, the condition and the promise's reminder are not.
-	want := "自 11/2 08:30 以来：完成 2 · 等你 1 · 未关闭的错误 2 · 通知 1 · 未完成的任务 2 · Planner 记下 2\n" +
-		"\n等你 1 条（见左栏）\n" +
+	// open. 等你 is one line, counted as the badge (the question and both
+	// errors); the Planner's notice is carried, the condition and the
+	// promise's reminder are not.
+	want := "自 11/2 08:30 以来：完成 2 · 通知 1 · 未完成的任务 2 · Planner 记下 2\n" +
+		"\n等你 3 条（提问 1 · 错误 2），见「等你」\n" +
 		"\n### 完成的（2）\n" +
 		"- [node2/dashboard:direct:x:general](#node=node2&session=dashboard%3Adirect%3Ax%3Ageneral) · 工作区 naozhi · 11/3 03:00\n" +
 		"- [修复 ［登录］ ＊重试＊](#session=dashboard%3Apj%3Aabc%3Ageneral) · 工作区 naozhi · 11/2 21:00 · 产出 1 个文件、[PR #12](https://github.com/o/r/pull/12)\n" +
-		"\n### 未关闭的错误（2）\n" +
-		"- 错误 · 系统性故障：限流 · 2 个单元出现同一类错误：a、b · 已等 2 天\n" +
-		"- 错误 · 夜间构建 失败 · 失败 · 凭证过期 · 工作区 naozhi · 已等 6 小时\n" +
 		"\n### 通知（1）\n" +
 		"- Asana 有 2 条过期 · Planner 提醒你 · 11/2 22:00\n" +
 		"\n### 未完成的任务（2）\n" +
@@ -275,7 +273,7 @@ func TestRender(t *testing.T) {
 	if got[0].Markdown != want {
 		t.Errorf("markdown:\n%s\nwant:\n%s", got[0].Markdown, want)
 	}
-	if len(f.pushes) != 1 || f.pushes[0].Title != "早报" || f.pushes[0].Body != "完成 2 · 等你 1 · 错误 2 · 通知 1 · 未完成的任务 2 · Planner 记下 2" {
+	if len(f.pushes) != 1 || f.pushes[0].Title != "早报" || f.pushes[0].Body != "完成 2 · 等你 3 · 通知 1 · 未完成的任务 2 · Planner 记下 2" {
 		t.Errorf("pushes = %+v", f.pushes)
 	}
 	if !slices.Equal(f.carried, []string{"in_n1"}) {

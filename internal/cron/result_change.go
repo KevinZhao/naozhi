@@ -9,16 +9,16 @@ import (
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// resultScan is how many of a job's latest runs are read for its two latest
-// successful ones.
+// resultScan is how many of a job's runs are read at a time for its latest
+// successful one in a window and the one the user saw before it.
 const resultScan = 20
 
 // firstLineRunes caps a result's first line.
 const firstLineRunes = 80
 
 // ResultChange is a job's latest successful run that ended in a window:
-// whether its result differs from the successful run before it, and its
-// first line.
+// whether its result differs from the one the user saw before the window,
+// and its first line.
 type ResultChange struct {
 	JobID     string
 	RunID     string
@@ -28,46 +28,53 @@ type ResultChange struct {
 }
 
 // LatestResultChange reports jobID's latest successful run that ended in
-// [since, until), compared with the successful run before it by the hash of
-// its normalized result (whitespace folded); a first one is a change. It
-// only reads the run history. false when no successful run ended in the
-// window.
+// [since, until), compared by the hash of its normalized result (whitespace
+// folded) with the latest successful run that ended before since, the one
+// the previous brief saw; with none, it is a first run, a change. It only
+// reads the run history. false when no successful run ended in the window.
 func (s *Scheduler) LatestResultChange(jobID string, since, until time.Time) (ResultChange, bool) {
-	return latestResultChange(jobID, s.ListRuns(jobID, resultScan, time.Time{}), s.Run, since, until)
+	list := func(before time.Time) []CronRunSummary { return s.ListRuns(jobID, resultScan, before) }
+	return latestResultChange(jobID, list, s.Run, since, until)
 }
 
-// latestResultChange is LatestResultChange over runs, newest first, reading a
-// run's result through get.
-func latestResultChange(jobID string, runs []CronRunSummary, get func(jobID, runID string) (*CronRun, error), since, until time.Time) (ResultChange, bool) {
-	var latest *CronRun
-	for _, r := range runs {
-		if r.State != RunStateSucceeded {
-			continue
-		}
-		if latest == nil {
-			if r.EndedAt.Before(since) {
-				return ResultChange{}, false
-			}
-			if !r.EndedAt.Before(until) {
+// latestResultChange is LatestResultChange over list, a job's runs started
+// before a time, newest first, reading a run's result through get.
+func latestResultChange(jobID string, list func(before time.Time) []CronRunSummary, get func(jobID, runID string) (*CronRun, error), since, until time.Time) (ResultChange, bool) {
+	// newest is the newest readable successful run in runs that ended in
+	// [from, to); stop ends the search at an older one.
+	newest := func(runs []CronRunSummary, from, to time.Time, stop bool) *CronRun {
+		for _, r := range runs {
+			if r.State != RunStateSucceeded || !r.EndedAt.Before(to) {
 				continue
 			}
+			if r.EndedAt.Before(from) {
+				if stop {
+					return nil
+				}
+				continue
+			}
+			run, err := get(jobID, r.RunID)
+			if err != nil {
+				slog.Debug("cron: run unreadable for its result", "job", jobID, "run", r.RunID, "err", err)
+				continue
+			}
+			return run
 		}
-		run, err := get(jobID, r.RunID)
-		if err != nil {
-			slog.Debug("cron: run unreadable for its result", "job", jobID, "run", r.RunID, "err", err)
-			continue
-		}
-		if latest == nil {
-			latest = run
-			continue
-		}
-		return ResultChange{JobID: jobID, RunID: latest.RunID, EndedAt: latest.EndedAt,
-			Changed: resultHash(run.Result) != resultHash(latest.Result), FirstLine: firstLine(latest.Result)}, true
+		return nil
 	}
+	runs := list(until)
+	latest := newest(runs, since, until, true)
 	if latest == nil {
 		return ResultChange{}, false
 	}
-	return ResultChange{JobID: jobID, RunID: latest.RunID, EndedAt: latest.EndedAt, Changed: true, FirstLine: firstLine(latest.Result)}, true
+	seen := newest(runs, time.Time{}, since, false)
+	if seen == nil {
+		// Runs since the window opened can fill the page; the earlier
+		// ones started before since.
+		seen = newest(list(since), time.Time{}, since, false)
+	}
+	return ResultChange{JobID: jobID, RunID: latest.RunID, EndedAt: latest.EndedAt,
+		Changed: seen == nil || resultHash(seen.Result) != resultHash(latest.Result), FirstLine: firstLine(latest.Result)}, true
 }
 
 // resultHash hashes a result with its whitespace folded, so a reflowed

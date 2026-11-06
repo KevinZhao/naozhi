@@ -126,6 +126,8 @@ func TestFinishedTask(t *testing.T) {
 		return clievent.EventEntry{Type: clievent.KindText, Detail: s, Time: 3100}
 	}
 	result := clievent.EventEntry{Type: clievent.KindResult, Time: 3200}
+	user := clievent.EventEntry{Type: clievent.KindUser, Summary: "还有一件事"}
+	custody := clievent.EventEntry{Type: clievent.KindUser, Summary: "继续", Source: clievent.SourceCustody}
 	tests := []struct {
 		name      string
 		entries   []clievent.EventEntry
@@ -136,6 +138,12 @@ func TestFinishedTask(t *testing.T) {
 		{"ended, its turn not over", []clievent.EventEntry{start, result, done, text("跑完了")}, "", ""},
 		{"ended and answered", []clievent.EventEntry{start, result, done, text("\n  跑完了：3 个文件  \n细节"), result}, "sleep 300", "跑完了：3 个文件"},
 		{"a turn before the end does not count", []clievent.EventEntry{start, text("在跑"), result, done}, "", ""},
+		{"the user wrote while it ran", []clievent.EventEntry{start, result, user, done, text("跑完了"), result}, "", ""},
+		{"the user wrote after its end", []clievent.EventEntry{start, result, done, user, text("跑完了"), result}, "", ""},
+		{"the user wrote after the reply", []clievent.EventEntry{start, result, done, text("跑完了"), result, user}, "", ""},
+		{"its start out of the window", []clievent.EventEntry{user, result, done, text("跑完了"), result}, "", ""},
+		{"a message before its start", []clievent.EventEntry{user, start, result, done, text("跑完了"), result}, "sleep 300", "跑完了"},
+		{"custody is not the user", []clievent.EventEntry{start, result, custody, done, text("跑完了"), result}, "sleep 300", "跑完了"},
 	}
 	for _, tt := range tests {
 		task, reply := finishedTask(tt.entries)

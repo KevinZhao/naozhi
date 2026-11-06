@@ -36,6 +36,7 @@ type fakeProcess struct {
 	totalCost     float64               // returned by TotalCost
 	userTurnCount int64                 // returned by UserTurnCount (test-only)
 	lastEventAt   time.Time             // returned by LastEventAt (test-only)
+	startedAt     time.Time             // returned by StartedAt (test-only)
 
 	// Interrupt instrumentation (used by TestInterruptSessionSafe_*).
 	// viaControlErr is what InterruptViaControl() returns. interruptCalls is
@@ -218,6 +219,7 @@ func (f *fakeProcess) LastEventAt() time.Time {
 	defer f.mu.Unlock()
 	return f.lastEventAt
 }
+func (f *fakeProcess) StartedAt() time.Time { return f.startedAt }
 func (f *fakeProcess) UserTurnCount() int64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()

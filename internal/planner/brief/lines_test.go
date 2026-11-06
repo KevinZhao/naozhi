@@ -94,6 +94,13 @@ func TestBriefLines(t *testing.T) {
 		{"Midway good until the afternoon", func(f *fixture) {
 			f.midway = at(3, 15, 0)
 		}, nil, []string{"Midway"}},
+		{"等你 counts as the badge", func(f *fixture) {
+			f.inbox = append(f.inbox,
+				notify.Item{Kind: notify.KindQuestion, State: notify.StateOpen, Unit: s, Source: "custody:stopped:" + s, Title: "托管已停", Created: at(3, 8, 0)},
+				notify.Item{Kind: notify.KindDecision, State: notify.StateOpen, Source: "d", Title: "要不要合", Created: at(3, 8, 0)},
+				notify.Item{Kind: notify.KindNotice, State: notify.StateOpen, Source: "n", Title: "一条通知", Created: at(3, 8, 0)})
+		}, []string{"以来：通知 1\n\n等你 3 条（提问 1 · 决定 1 · 错误 1），见「等你」\n"}, []string{"未关闭的错误", "见左栏"}},
+		{"only 等你", func(f *fixture) {}, []string{"以来：等你 1 条（错误 1），见「等你」\n"}, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
