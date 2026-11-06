@@ -538,7 +538,7 @@ type ReconnectHooks struct {
 	KnownWorkflowTasks []string
 	// OnResult is SetOnResult's callback, bound before the read loop starts:
 	// the turn in flight at reconnect may answer with the loop's first frame.
-	OnResult func(text string)
+	OnResult func(clievent.SendResult)
 }
 
 // SpawnReconnect creates a Process by reconnecting to an existing shim after a naozhi restart.

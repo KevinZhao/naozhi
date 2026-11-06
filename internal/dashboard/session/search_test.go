@@ -272,16 +272,17 @@ func TestSearchHistoryWaiterAnswersFromCache(t *testing.T) {
 func TestWarmReplies(t *testing.T) {
 	sessions := []string{histSessA, histSessB, "33333333-3333-4333-8333-333333333333"}
 	cases := []struct {
-		name      string
-		maxReads  int
-		budget    time.Duration
-		readDelay time.Duration
+		name     string
+		maxReads int
+		// endInRead ends the warm-up's ctx (its deadline) inside its first
+		// read, not by the clock: a loaded machine may not start one in time.
+		endInRead bool
 		wantReads int // the warm-up's
 		wantQuery int // the reads the next query still makes
 	}{
-		{"fills the cache", searchWarmReads, time.Second, 0, 3, 0},
-		{"stops at the read cap", 2, time.Second, 0, 2, 1},
-		{"stops at the deadline", searchWarmReads, 30 * time.Millisecond, time.Second, 1, 3},
+		{"fills the cache", searchWarmReads, false, 3, 0},
+		{"stops at the read cap", 2, false, 2, 1},
+		{"stops at the deadline", searchWarmReads, true, 1, 3},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -289,37 +290,33 @@ func TestWarmReplies(t *testing.T) {
 			for _, id := range sessions {
 				writeTranscript(t, claudeDir, workspace, id, userLine("2026-01-01T00:00:00Z", "q"), asstLine("2026-01-01T00:01:00Z", "g6e 最便宜"))
 			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			var mu sync.Mutex
-			reads, delay := 0, c.readDelay
+			reads, endInRead := 0, c.endInRead
 			orig := loadHistoryTail
 			t.Cleanup(func() { loadHistoryTail = orig })
-			loadHistoryTail = func(ctx context.Context, claudeDir, sessionID, cwd string, limit int) ([]clievent.EventEntry, error) {
+			loadHistoryTail = func(rctx context.Context, claudeDir, sessionID, cwd string, limit int) ([]clievent.EventEntry, error) {
 				mu.Lock()
 				reads++
-				d := delay
+				end := endInRead
 				mu.Unlock()
-				select {
-				case <-time.After(d):
-				case <-ctx.Done():
-					return nil, ctx.Err()
+				if end {
+					cancel()
+					<-rctx.Done()
+					return nil, rctx.Err()
 				}
-				return orig(ctx, claudeDir, sessionID, cwd, limit)
+				return orig(rctx, claudeDir, sessionID, cwd, limit)
 			}
 			count := func() int {
 				mu.Lock()
 				defer mu.Unlock()
 				n := reads
-				reads, delay = 0, 0
+				reads, endInRead = 0, false
 				return n
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), c.budget)
-			defer cancel()
-			start := time.Now()
 			read, failed := h.warmReplies(ctx, c.maxReads)
-			if took := time.Since(start); took > c.budget+500*time.Millisecond {
-				t.Errorf("warm-up took %v, past its %v budget", took, c.budget)
-			}
 			if n := count(); read != c.wantReads || n != c.wantReads || failed != 0 {
 				t.Errorf("warm-up read %d (counted %d) failed %d, want %d", read, n, failed, c.wantReads)
 			}

@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // ResultSink receives the reply text of every turn a session's CLI completes,
@@ -11,10 +12,10 @@ import (
 // (docs/rfc/planner.md §6.2).
 type ResultSink func(key, text string)
 
-// resultNotifier is the optional hook a process offers for its turns' reply
-// text; see bookResults.
+// resultNotifier is the optional hook a process offers for its turns'
+// results; see bookResults.
 type resultNotifier interface {
-	SetOnResult(fn func(text string))
+	SetOnResult(fn func(clievent.SendResult))
 }
 
 var _ resultNotifier = (*cli.Process)(nil)
@@ -82,12 +83,16 @@ func (r *Router) bookResults(s *ManagedSession, proc processIface) {
 	}
 }
 
-// resultFor is the result callback of s's process. It refreshes s's last
-// activity, as every turn's end does: this is the one hook a turn a shim held
-// across a restart reaches.
-func (r *Router) resultFor(s *ManagedSession) func(text string) {
-	return func(text string) {
+// resultFor is the result callback of s's process. Every turn's end, failed
+// or not, refreshes s's last activity: this is the one hook every result
+// reaches, the turn a shim held across a restart and one the CLI started
+// itself included, and it runs before the turn's end pushes the session list.
+// Only a reply goes to the sink.
+func (r *Router) resultFor(s *ManagedSession) func(clievent.SendResult) {
+	return func(res clievent.SendResult) {
 		s.touchLastActive()
-		r.results.deliver(s.key, text)
+		if !res.Aborted && !res.IsError && !res.CLIAborted() {
+			r.results.deliver(s.key, res.Text)
+		}
 	}
 }

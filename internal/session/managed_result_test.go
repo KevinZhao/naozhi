@@ -2,6 +2,7 @@ package session
 
 import (
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"testing"
 	"time"
 
@@ -72,7 +73,7 @@ func TestResultSink_HeldUntilSet(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("a result that came before the sink was set never reached it")
 	}
-	r.resultFor(r.ss.Load(key))("next")
+	r.resultFor(r.ss.Load(key))(clievent.SendResult{Text: "next"})
 	if s := <-got; s != key+"=next" {
 		t.Errorf("result after the sink = %q, want next", s)
 	}
