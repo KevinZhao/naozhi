@@ -38,6 +38,7 @@ func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, image
 
 	rt, evCb := s.instrumentRun(onEvent)
 	result, err := proc.SendPassthrough(ctx, text, images, evCb, priority)
+	s.touchLastActive() // the turn's end, failed or not
 	s.finishRun(ctx, rt, result, err)
 	if err != nil {
 		s.mapSendError(proc, err)
@@ -151,6 +152,7 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []clieven
 	// nil-callback path; instrumentRun only wraps when runStore is set.
 	rt, evCb := s.instrumentRun(onEvent)
 	result, err := proc.Send(ctx, text, images, evCb)
+	s.touchLastActive() // the turn's end, failed or not
 	s.finishRun(ctx, rt, result, err)
 	if err != nil {
 		s.mapSendError(proc, err)

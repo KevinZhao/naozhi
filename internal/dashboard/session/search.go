@@ -3,6 +3,8 @@ package session
 import (
 	"cmp"
 	"context"
+	"log/slog"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -34,6 +36,10 @@ const (
 	// was read) and the answer says partial.
 	searchReadBudget = 2 * time.Second
 	snippetRunes     = 80
+	// searchWarmBudget and searchWarmReads bound the startup warm-up of the
+	// cache (WarmReplySearch): its total time and the transcripts it reads.
+	searchWarmBudget = 30 * time.Second
+	searchWarmReads  = historyLimit
 )
 
 // searchHit is one session whose recent replies hold the query: Key for a
@@ -189,6 +195,75 @@ func (h *Handlers) searchHistory(ctx context.Context, needle []rune) (hits []sea
 		c.mu.Unlock()
 	}
 	return hits, partial
+}
+
+// WarmReplySearch fills the reply search cache in the background, so the
+// first query after a start does not read every history transcript itself.
+// It reads at most searchWarmReads transcripts within searchWarmBudget, or
+// until ctx ends, and only logs what it could not read. It yields to queries:
+// it holds the read slot for one transcript at a time, and a query waiting
+// for the slot gets it next. Tracked by WaitWarmHistory.
+func (h *Handlers) WarmReplySearch(ctx context.Context) {
+	if h.deps.ClaudeDir == "" {
+		return
+	}
+	h.warmHistoryWg.Add(1)
+	go func() {
+		defer h.warmHistoryWg.Done()
+		ctx, cancel := context.WithTimeout(ctx, searchWarmBudget)
+		defer cancel()
+		read, failed := h.warmReplies(ctx, searchWarmReads)
+		if failed > 0 || ctx.Err() != nil {
+			slog.Info("reply search warm-up incomplete", "read", read, "failed", failed, "err", ctx.Err())
+		}
+	}()
+}
+
+// warmReplies reads into the reply cache, newest first, the history
+// sessions it does not hold at their current mtime, at most maxReads of
+// them, until ctx ends. It returns how many it read and how many of those
+// failed.
+func (h *Handlers) warmReplies(ctx context.Context, maxReads int) (read, failed int) {
+	c := &h.replies
+	slot := c.readSlot()
+	for _, rs := range h.historySessions() {
+		if read >= maxReads || ctx.Err() != nil {
+			return read, failed
+		}
+		select {
+		case slot <- struct{}{}:
+		case <-ctx.Done():
+			return read, failed
+		}
+		// Checked under the slot: a query may have read it meanwhile.
+		c.mu.Lock()
+		e, ok := c.m[rs.SessionID]
+		c.mu.Unlock()
+		if ok && e.lastActive == rs.LastActive {
+			<-slot
+			continue
+		}
+		read++
+		entries, err := loadHistoryTail(ctx, h.deps.ClaudeDir, rs.SessionID, rs.Workspace, searchTailEntries)
+		if err != nil || ctx.Err() != nil {
+			<-slot
+			if ctx.Err() == nil {
+				failed++
+			}
+			continue
+		}
+		e = replyCacheEntry{lastActive: rs.LastActive, replies: lastTurnReplies(entries, searchTurns, searchSessionBytes)}
+		// Copied, not written in place: a query whose wait ended searches the
+		// map it loaded without the slot.
+		c.mu.Lock()
+		next := make(map[string]replyCacheEntry, len(c.m)+1)
+		maps.Copy(next, c.m)
+		next[rs.SessionID] = e
+		c.m = next
+		c.mu.Unlock()
+		<-slot
+	}
+	return read, failed
 }
 
 // lastTurnReplies returns the assistant text events of the last `turns`

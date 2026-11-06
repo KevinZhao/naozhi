@@ -266,3 +266,164 @@ func TestSearchHistoryWaiterAnswersFromCache(t *testing.T) {
 		t.Errorf("query after the reader = %d hits partial=%v, want the session", n, partial)
 	}
 }
+
+// The startup warm-up fills the reply cache, so the first query reads no
+// transcript; the warm-up's reads stop at its cap and at its deadline.
+func TestWarmReplies(t *testing.T) {
+	sessions := []string{histSessA, histSessB, "33333333-3333-4333-8333-333333333333"}
+	cases := []struct {
+		name      string
+		maxReads  int
+		budget    time.Duration
+		readDelay time.Duration
+		wantReads int // the warm-up's
+		wantQuery int // the reads the next query still makes
+	}{
+		{"fills the cache", searchWarmReads, time.Second, 0, 3, 0},
+		{"stops at the read cap", 2, time.Second, 0, 2, 1},
+		{"stops at the deadline", searchWarmReads, 30 * time.Millisecond, time.Second, 1, 3},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h, claudeDir, workspace := newSearchHandlers(t)
+			for _, id := range sessions {
+				writeTranscript(t, claudeDir, workspace, id, userLine("2026-01-01T00:00:00Z", "q"), asstLine("2026-01-01T00:01:00Z", "g6e 最便宜"))
+			}
+			var mu sync.Mutex
+			reads, delay := 0, c.readDelay
+			orig := loadHistoryTail
+			t.Cleanup(func() { loadHistoryTail = orig })
+			loadHistoryTail = func(ctx context.Context, claudeDir, sessionID, cwd string, limit int) ([]clievent.EventEntry, error) {
+				mu.Lock()
+				reads++
+				d := delay
+				mu.Unlock()
+				select {
+				case <-time.After(d):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				return orig(ctx, claudeDir, sessionID, cwd, limit)
+			}
+			count := func() int {
+				mu.Lock()
+				defer mu.Unlock()
+				n := reads
+				reads, delay = 0, 0
+				return n
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), c.budget)
+			defer cancel()
+			start := time.Now()
+			read, failed := h.warmReplies(ctx, c.maxReads)
+			if took := time.Since(start); took > c.budget+500*time.Millisecond {
+				t.Errorf("warm-up took %v, past its %v budget", took, c.budget)
+			}
+			if n := count(); read != c.wantReads || n != c.wantReads || failed != 0 {
+				t.Errorf("warm-up read %d (counted %d) failed %d, want %d", read, n, failed, c.wantReads)
+			}
+			qctx, qcancel := context.WithTimeout(context.Background(), searchReadBudget)
+			defer qcancel()
+			hits, partial := h.searchHistory(qctx, foldRunes("g6e"))
+			if n := count(); n != c.wantQuery || len(hits) != len(sessions) || partial {
+				t.Errorf("query read %d transcripts, %d hits partial=%v; want %d reads and every session", n, len(hits), partial, c.wantQuery)
+			}
+		})
+	}
+}
+
+// WarmReplySearch returns at once, and the end of its ctx (shutdown) ends a
+// warm-up stuck on a read, so WaitWarmHistory does not wait out its budget.
+func TestWarmReplySearchDoesNotBlock(t *testing.T) {
+	h, claudeDir, workspace := newSearchHandlers(t)
+	writeTranscript(t, claudeDir, workspace, histSessA, userLine("2026-01-01T00:00:00Z", "q"), asstLine("2026-01-01T00:01:00Z", "g6e"))
+	entered := make(chan struct{})
+	orig := loadHistoryTail
+	t.Cleanup(func() { loadHistoryTail = orig })
+	loadHistoryTail = func(ctx context.Context, _, _, _ string, _ int) ([]clievent.EventEntry, error) {
+		close(entered)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	start := time.Now()
+	h.WarmReplySearch(ctx)
+	if took := time.Since(start); took > 100*time.Millisecond {
+		t.Errorf("WarmReplySearch took %v, want it to return at once", took)
+	}
+	<-entered
+	cancel()
+	done := make(chan struct{})
+	go func() { h.WaitWarmHistory(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("warm-up still running after its ctx ended")
+	}
+}
+
+// A query arriving while the warm-up reads waits for that one transcript,
+// not for the whole warm-up: here the warm-up's later reads would outlast
+// the query's budget.
+func TestWarmRepliesYieldsToAQuery(t *testing.T) {
+	h, claudeDir, workspace := newSearchHandlers(t)
+	writeTranscript(t, claudeDir, workspace, histSessA, userLine("2026-01-01T00:00:00Z", "q"), asstLine("2026-01-01T00:01:00Z", "g6e 最便宜"))
+	writeTranscript(t, claudeDir, workspace, histSessB, userLine("2026-01-01T00:00:01Z", "q"), asstLine("2026-01-01T00:01:01Z", "g6e 最快"))
+	type warmTag struct{}
+	var mu sync.Mutex
+	warmReads := 0
+	entered, release := make(chan struct{}), make(chan struct{})
+	orig := loadHistoryTail
+	t.Cleanup(func() { loadHistoryTail = orig })
+	loadHistoryTail = func(ctx context.Context, claudeDir, sessionID, cwd string, limit int) ([]clievent.EventEntry, error) {
+		if ctx.Value(warmTag{}) != nil {
+			mu.Lock()
+			warmReads++
+			n := warmReads
+			mu.Unlock()
+			if n == 1 {
+				close(entered)
+				<-release
+			} else {
+				select {
+				case <-time.After(2 * searchReadBudget):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+		}
+		return orig(ctx, claudeDir, sessionID, cwd, limit)
+	}
+	warmCtx, cancel := context.WithCancel(context.WithValue(context.Background(), warmTag{}, true))
+	defer cancel()
+	warmed := make(chan struct{})
+	go func() {
+		h.warmReplies(warmCtx, searchWarmReads)
+		close(warmed)
+	}()
+	<-entered
+	type result struct {
+		hits    int
+		partial bool
+	}
+	queried := make(chan result, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), searchReadBudget)
+		defer cancel()
+		hits, partial := h.searchHistory(ctx, foldRunes("g6e"))
+		queried <- result{len(hits), partial}
+	}()
+	time.Sleep(100 * time.Millisecond) // the query is waiting for the slot
+	close(release)
+	if r := <-queried; r.hits != 2 || r.partial {
+		t.Errorf("query = %+v, want both sessions, not partial", r)
+	}
+	<-warmed
+	mu.Lock()
+	defer mu.Unlock()
+	if warmReads != 1 {
+		t.Errorf("warm-up reads = %d, want 1: the query read the other one first", warmReads)
+	}
+}

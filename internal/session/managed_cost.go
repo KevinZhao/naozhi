@@ -227,10 +227,12 @@ func (s *ManagedSession) appendSessionRows(inc costledger.Increment, runID strin
 // owned result's cumulative and was lost when the process died first (#3096,
 // #3322). The cumulative differencing makes a reading booked here and again by
 // a later Send harmless. No run record shares the entry's run id, so it names
-// the CLI session (sessionRunID).
+// the CLI session (sessionRunID). Such a turn's end is the session's last
+// activity too (touchLastActive); onTurnDone pushes the list after it.
 func bookUnownedResults(s *ManagedSession, proc processIface) {
 	if n, ok := proc.(unownedResultNotifier); ok {
 		n.SetOnUnownedResult(func(res clievent.SendResult) {
+			s.touchLastActive()
 			sid := res.SessionID
 			if sid == "" {
 				sid = s.getSessionID()

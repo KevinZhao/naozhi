@@ -82,7 +82,12 @@ func (r *Router) bookResults(s *ManagedSession, proc processIface) {
 	}
 }
 
-// resultFor is the result callback of s's process.
+// resultFor is the result callback of s's process. It refreshes s's last
+// activity, as every turn's end does: this is the one hook a turn a shim held
+// across a restart reaches.
 func (r *Router) resultFor(s *ManagedSession) func(text string) {
-	return func(text string) { r.results.deliver(s.key, text) }
+	return func(text string) {
+		s.touchLastActive()
+		r.results.deliver(s.key, text)
+	}
 }

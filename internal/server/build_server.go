@@ -350,6 +350,9 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 	})
 	sessionH.InitStaticStats()
 	sessionH.WarmHistoryCache()
+	// After the history scan it joins; appCtx ends it on shutdown, before
+	// WaitWarmHistory waits for it.
+	sessionH.WarmReplySearch(s.appCtx)
 	// Router.Reset/Remove hook, fired on the caller's goroutine as the key
 	// leaves the table (LRU eviction does not), registered once sessionH exists
 	// so the fan-out is never half-wired during WarmHistoryCache: turns.Retire

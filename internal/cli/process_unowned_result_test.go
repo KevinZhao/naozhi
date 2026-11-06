@@ -126,3 +126,16 @@ func TestUnownedTurn_ReconnectMidTurnIsLeftToTheAdoptedPath(t *testing.T) {
 		t.Errorf("state %v, onTurnDone %d; want the adopted path's Ready and exactly 1", got, f.done)
 	}
 }
+
+// The session refreshes its last activity in onUnownedResult, so the
+// session list onTurnDone pushes must come after it.
+func TestUnownedTurn_ResultHandedOverBeforeTheTurnEnds(t *testing.T) {
+	f := newUnownedFixture()
+	var atDone []int
+	f.p.SetOnTurnDone(func() { atDone = append(atDone, len(f.results)) })
+	f.feed(initEv, resultEv)
+
+	if len(atDone) != 1 || atDone[0] != 1 {
+		t.Errorf("results handed over when onTurnDone fired = %v, want [1]", atDone)
+	}
+}

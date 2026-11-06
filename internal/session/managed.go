@@ -179,7 +179,7 @@ type processIface interface {
 	// or zero when nothing has arrived yet. Router.Cleanup uses it as a
 	// fallback activity signal so a long turn streaming tool_use / thinking
 	// events is not misclassified as stuck once the session-level
-	// lastActive (refreshed only at Send entry) has aged.
+	// lastActive (refreshed only when a turn starts and ends) has aged.
 	LastEventAt() time.Time
 	// UserTurnCount returns the cumulative count of "user" entries seen
 	// since spawn. Feeds SessionSnapshot.MessageCount.
