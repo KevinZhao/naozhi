@@ -231,14 +231,15 @@ func midwayItem(exp, now time.Time) Item {
 
 // unitConditions are the sessions waiting on the user past AskAfter and the
 // stalled workflows and background tasks. Units without a workspace are only
-// counted (§3.8).
+// counted (§3.8), except that the user's own sessions ask whether or not
+// they belong to one (health.UserSession).
 // keep are the sources whose items stay open without being conditions: a
 // session still waiting (its question stays open until answered, even when
 // a restart dated its wait anew) and units whose state is Unknown, as right
 // after a restart.
 func (n *Notifier) unitConditions(snap health.Snapshot, now time.Time) (out []condition, keep []string) {
 	for _, u := range snap.Units {
-		if u.Workspace == "" {
+		if u.Workspace == "" && (u.State == health.Stalled || !health.UserSession(u.ID, u.Kind)) {
 			continue
 		}
 		name := n.name(u.ID)

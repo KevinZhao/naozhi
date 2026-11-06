@@ -17,6 +17,8 @@ import (
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/notify"
+	"github.com/naozhi/naozhi/internal/planner/custody"
 	"github.com/naozhi/naozhi/internal/session"
 	"golang.org/x/time/rate"
 )
@@ -85,8 +87,21 @@ func buildInboxHandler(opts ServerOptions) *inbox.Handler {
 	if opts.Notify == nil {
 		return inbox.New(nil)
 	}
+	if opts.Custody != nil {
+		return inbox.New(inboxPause{opts.Notify, opts.Custody})
+	}
 	return inbox.New(opts.Notify)
 }
+
+// inboxPause has the inbox's pause, the one pause, go through custody, which
+// holds the retries pending at once (custody.Engine.Pause); custody's
+// Config.Pause is the inbox's, so the pause is set once.
+type inboxPause struct {
+	*notify.Notifier
+	custody *custody.Engine
+}
+
+func (s inboxPause) Pause(until time.Time) { _ = s.custody.Pause(until) }
 
 // buildCustodyHandler unwraps a nil *custody.Engine the same way.
 func buildCustodyHandler(opts ServerOptions) *dashcustody.Handler {
