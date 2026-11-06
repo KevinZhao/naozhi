@@ -308,6 +308,58 @@ func TestSources(t *testing.T) {
 	check("failed:a")
 }
 
+// The user's own session asks and fails whether or not it belongs to a
+// workspace (a chat started in the default directory belongs to none);
+// naozhi's own units, a remote session and a stalled workflow outside every
+// workspace are only counted.
+func TestWithoutWorkspace(t *testing.T) {
+	const dd = "dashboard:direct:u:general"
+	for _, tc := range []struct {
+		name string
+		unit health.Unit
+		want []string
+	}{
+		{"asking", health.Unit{ID: dd, Kind: health.KindSession, State: health.Waiting}, []string{"waiting:" + dd}},
+		{"asking in a workspace", health.Unit{ID: dd, Kind: health.KindSession, Workspace: "ws_1", State: health.Waiting}, []string{"waiting:" + dd}},
+		{"a dispatched session", health.Unit{ID: "task:a", Kind: health.KindSession, State: health.Waiting}, []string{"waiting:task:a"}},
+		{"a cron run", health.Unit{ID: "cron:x", Kind: health.KindCron, State: health.Waiting}, nil},
+		{"the Planner", health.Unit{ID: "planner:main", Kind: health.KindSession, State: health.Waiting}, nil},
+		{"a scratch session", health.Unit{ID: "scratch:x", Kind: health.KindSession, State: health.Waiting}, nil},
+		{"a remote session", health.Unit{ID: "n1/" + dd, Kind: health.KindRemote, State: health.Waiting}, nil},
+		{"stalled", health.Unit{ID: dd, Kind: health.KindSession, State: health.Stalled}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n, clock, _ := newTest(t, local(10, 0), datadir.Layout{})
+			h := &fakeHealth{}
+			n.SetHealth(h)
+			tc.unit.Since = clock.Now()
+			clock.advance(AskAfter)
+			h.snap = health.Snapshot{At: clock.Now(), Units: []health.Unit{tc.unit}}
+			n.Check()
+			// Just restarted, the question stays open.
+			tc.unit.State = health.Unknown
+			h.snap.Units = []health.Unit{tc.unit}
+			n.Check()
+			open, _ := n.List(0)
+			var got []string
+			for _, it := range open {
+				got = append(got, it.Source)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("open = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	t.Run("failed", func(t *testing.T) {
+		n, clock, _ := newTest(t, local(10, 0), datadir.Layout{})
+		n.HandleHealth(health.Event{At: clock.Now(), Transition: &health.Transition{From: health.Active,
+			Unit: health.Unit{ID: dd, Kind: health.KindSession, State: health.Failed, ErrClass: health.ErrNetwork, Since: clock.Now()}}})
+		if open, _ := n.List(0); len(open) != 1 || open[0].Source != "failed:"+dd {
+			t.Errorf("open = %+v, want the failure", open)
+		}
+	})
+}
+
 // A failed unit's reason is its error class, or none when the class says
 // nothing: never "失败 · 其他".
 func TestFailedWhy(t *testing.T) {

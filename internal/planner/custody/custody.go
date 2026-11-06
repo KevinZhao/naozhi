@@ -610,11 +610,11 @@ func (e *Engine) paused() bool {
 
 // Pause pauses custody and pushes for every session until until (a zero or
 // past until resumes): /api/custody/pause, the inbox pause's alias. A turn
-// running goes on, and a failure whose retry was due is left to the user.
-// It is kept across restarts.
+// running goes on, and a failure's retry due meanwhile waits for the pause
+// to end (retryDue). It is kept across restarts.
 func (e *Engine) Pause(until time.Time) error {
 	e.pause(until)
-	// Resumed, the retries due go out; paused, they go to the user.
+	// Resumed, the retries due go out.
 	e.Poke()
 	return nil
 }
@@ -660,6 +660,12 @@ func (e *Engine) retryCheckLocked(key string) error {
 	if e.paused() {
 		return ErrPaused
 	}
+	return e.stoppedLocked(key)
+}
+
+// stoppedLocked returns ErrStopped, with the reason, when key's lineage
+// stopped. The caller holds mu.
+func (e *Engine) stoppedLocked(key string) error {
 	if c := e.chain(e.root(key)); c.Stopped != "" {
 		return fmt.Errorf("%w：%s", ErrStopped, c.Stopped)
 	}
@@ -956,8 +962,10 @@ func (e *Engine) autoOff(key string) {
 func failedAt(u health.Unit) time.Time { return cmp.Or(u.LastActive, u.Since) }
 
 // stale reports whether u's failure is older than staleAfter.
-func (e *Engine) stale(u health.Unit) bool {
-	at := failedAt(u)
+func (e *Engine) stale(u health.Unit) bool { return e.staleSince(failedAt(u)) }
+
+// staleSince reports whether a failure at at is older than staleAfter.
+func (e *Engine) staleSince(at time.Time) bool {
 	return !at.IsZero() && e.now().Sub(at) > staleAfter
 }
 
@@ -1000,7 +1008,7 @@ func (e *Engine) answer(u health.Unit) {
 	next := &sidecar.Retry{Failed: id, Class: class, Done: true}
 	defer func() { e.setRetryLocked(key, next) }()
 	if !retry {
-		if exp := e.credExpiry(class); !exp.IsZero() && e.retryCheckLocked(key) == nil {
+		if exp := e.credExpiry(class); !exp.IsZero() && e.stoppedLocked(key) == nil {
 			// Covers claimed it: the user hears of it here, unless the
 			// inbox reports it with the systemic fault it is part of.
 			next.Cred, next.Done = exp, false
@@ -1016,7 +1024,9 @@ func (e *Engine) answer(u health.Unit) {
 		}
 		return
 	}
-	if err := e.retryCheckLocked(key); err != nil {
+	// Paused, the retry is scheduled all the same: it waits for the pause
+	// to end (retryDue).
+	if err := e.stoppedLocked(key); err != nil {
 		e.leaveLocked(key, class, notRetried(err))
 		return
 	}
@@ -1087,14 +1097,24 @@ func (e *Engine) due(r sidecar.Retry) bool {
 	return exp.After(r.Cred) && exp.After(now)
 }
 
-// retryDue sends key's retry r once due. Custody paused or stopped since it
-// took the failure leaves the failure to the user at once, not when custody
-// may send again; one waiting for a credential waits on, as the item it
+// retryDue sends key's retry r once due. A lineage stopped since custody
+// took the failure leaves it to the user at once. While custody is paused
+// the retry waits, its backoff running on, and goes out once the pause ends
+// (at once if due by then); a failure grown older than staleAfter is left
+// to the user instead, as one custody first sees that old is: no one waits
+// on its "继续" now. One waiting for a credential waits on, as the item it
 // opened says, its "继续" due once custody may send again.
 func (e *Engine) retryDue(key string, r sidecar.Retry) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if err := e.retryCheckLocked(key); err != nil {
+	err := e.stoppedLocked(key)
+	if err == nil && e.paused() {
+		if !r.Cred.IsZero() || !e.staleSince(r.Failed) {
+			return
+		}
+		err = ErrPaused
+	}
+	if err != nil {
 		if !r.Cred.IsZero() {
 			return
 		}
@@ -1146,7 +1166,8 @@ func (e *Engine) setRetryLocked(key string, r *sidecar.Retry) {
 // no item for it: one custody will retry (custody opens the item when it
 // gives up), and one for an expired credential, which waits for its
 // refresh (custody opens the item that says so). Every local session's
-// failures are custody's, its switch on or off.
+// failures are custody's, its switch on or off, paused too: the retry waits
+// for the pause to end.
 func (e *Engine) Covers(u health.Unit) bool {
 	if e.cfg.Sessions == nil || u.Kind != health.KindSession || u.State != health.Failed || e.retryEligible(u.ID) != nil {
 		return false
@@ -1157,7 +1178,7 @@ func (e *Engine) Covers(u health.Unit) bool {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.retryCheckLocked(u.ID) != nil {
+	if e.stoppedLocked(u.ID) != nil {
 		return false
 	}
 	if m, _ := e.cfg.Sessions.Get(u.ID); m.Retry != nil && m.Retry.Failed.Equal(failedAt(u)) {

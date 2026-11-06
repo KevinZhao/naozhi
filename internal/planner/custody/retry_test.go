@@ -260,3 +260,52 @@ func TestRetryCountEndsWithRecovery(t *testing.T) {
 		t.Errorf("dispatched session after a recovered failure: %+v, want its send still counted", st)
 	}
 }
+
+// A retry due while custody is paused waits for the pause to end and goes
+// out then, at once if due by then, as its backoff has it otherwise; the
+// failure opens no item meanwhile. One the pause kept past staleAfter is
+// left to the user instead, as a failure that old is.
+func TestRetryAcrossPause(t *testing.T) {
+	const never = time.Duration(-1)
+	for _, tc := range []struct {
+		name               string
+		pauseAt, pauseFor  time.Duration // from the failure; pauseFor 0: no pause
+		wantSent, wantLeft time.Duration // when the retry went out, the failure was left; never
+	}{
+		{name: "no pause", wantSent: Backoff[0], wantLeft: never},
+		{name: "paused a minute", pauseAt: 30 * time.Second, pauseFor: time.Minute, wantSent: 90 * time.Second, wantLeft: never},
+		{name: "pause over before the retry is due", pauseFor: 30 * time.Second, wantSent: Backoff[0], wantLeft: never},
+		{name: "failed while paused, 29 minutes", pauseFor: 29 * time.Minute, wantSent: 29 * time.Minute, wantLeft: never},
+		{name: "paused past staleAfter", pauseAt: 30 * time.Second, pauseFor: time.Hour, wantSent: never, wantLeft: staleAfter + tickInterval},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			start := r.now
+			u := health.Unit{ID: dash, Kind: health.KindSession, State: health.Failed, ErrClass: health.ErrNetwork, Since: start, LastActive: start}
+			r.units = []health.Unit{u}
+			sent, left := never, never
+			for d := time.Duration(0); d <= 70*time.Minute; d += tickInterval {
+				r.now = start.Add(d)
+				if tc.pauseFor > 0 && d == tc.pauseAt {
+					r.e.Pause(r.now.Add(tc.pauseFor))
+				}
+				if d == 0 && !r.e.Covers(u) {
+					t.Fatal("not covered")
+				}
+				r.e.Tick()
+				if sent == never && len(r.sent) > 0 {
+					sent = d
+				}
+				if left == never && len(r.inbox.items) > 0 {
+					left = d
+				}
+			}
+			if sent != tc.wantSent || left != tc.wantLeft || len(r.sent) > 1 {
+				t.Errorf("sent %q at %v, left at %v (%+v); want sent at %v, left at %v", r.sent, sent, left, r.inbox.items, tc.wantSent, tc.wantLeft)
+			}
+			if left != never && (r.inbox.items[0].Source != "failed:"+dash || !strings.Contains(r.inbox.items[0].Why, "托管已暂停")) {
+				t.Errorf("left as %+v", r.inbox.items[0])
+			}
+		})
+	}
+}

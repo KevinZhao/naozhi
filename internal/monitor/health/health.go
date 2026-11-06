@@ -538,6 +538,16 @@ func gatewayOwned(id string) bool {
 	return sessionkey.IsPlannerNSKey(id) || sessionkey.IsSysKey(id) || sessionkey.IsScoutKey(id)
 }
 
+// UserSession reports whether unit id of kind is one of the user's own
+// local sessions: a dashboard, IM or project chat, or one the Planner
+// dispatched. Such a session's failures, turns and questions are the user's
+// whether or not it belongs to a workspace (a chat started in the default
+// directory belongs to none); the Planner's, cron runs, daemons, scratch and
+// scout sessions are not.
+func UserSession(id string, kind Kind) bool {
+	return kind == KindSession && !gatewayOwned(id) && !sessionkey.IsCronKey(id) && !sessionkey.IsScratchKey(id)
+}
+
 // RefreshIndex rewrites index.json from fresh facts with the health of the
 // last reconcile.
 func (m *Machine) RefreshIndex() {

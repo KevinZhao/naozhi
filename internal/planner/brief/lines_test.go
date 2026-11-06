@@ -12,6 +12,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/journal"
 	"github.com/naozhi/naozhi/internal/planner/note"
 	"github.com/naozhi/naozhi/internal/planner/task"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 func (f *fixture) custody(ts time.Time, unit, event string, reason custody.Reason) {
@@ -26,7 +27,7 @@ func (f *fixture) custody(ts time.Time, unit, event string, reason custody.Reaso
 // recorded, failed with what custody did, recovered as finished; the cron
 // jobs whose result changed; a Midway credential running out before 09:00.
 func TestBriefLines(t *testing.T) {
-	const s = "dashboard:direct:a:general"
+	const s, dd = "dashboard:direct:a:general", "dashboard:direct:d:general"
 	snap := func(state health.State) health.Snapshot {
 		return health.Snapshot{At: at(3, 9, 0), Units: []health.Unit{{ID: s, Kind: health.KindSession, Workspace: "ws1", State: state, LastActive: at(3, 1, 0)}}}
 	}
@@ -75,6 +76,23 @@ func TestBriefLines(t *testing.T) {
 			f.custody(at(2, 23, 9), s, "stopped", "")
 			f.snap = snap(health.Failed)
 		}, []string{"· 11/2 23:00 · 网络断了 · 托管已停\n", "\n托管：重试 1 次（恢复 0、停下 1）\n"}, nil},
+		// A chat started in the default directory belongs to no workspace:
+		// still the user's, listed by name; naozhi's own units are not.
+		{"no workspace, failed", func(f *fixture) {
+			f.health(at(2, 23, 0), dd, "", health.Active, health.Failed, health.KindSession, health.ErrNetwork)
+			f.snap = health.Snapshot{At: at(3, 9, 0), Units: []health.Unit{{ID: dd, Kind: health.KindSession, State: health.Failed}}}
+		}, []string{"### 失败的（1）\n- [" + dd + "](#session=dashboard%3Adirect%3Ad%3Ageneral) · 11/2 23:00 · 网络断了\n"}, nil},
+		{"no workspace, finished", func(f *fixture) {
+			f.health(at(2, 22, 0), dd, "", health.Active, health.Idle, health.KindSession, "")
+		}, []string{"### 完成的（1）\n- [" + dd + "](#session=dashboard%3Adirect%3Ad%3Ageneral) · 11/2 22:00\n"}, nil},
+		{"no workspace, naozhi's own", func(f *fixture) {
+			f.health(at(2, 22, 0), "cron:orphan", "", health.Active, health.Failed, health.KindCron, health.ErrNetwork)
+			f.health(at(2, 22, 0), "cron:orphan", "", health.Active, health.Idle, health.KindCron, "")
+			for _, id := range []string{sessionkey.PlannerMainKey, sessionkey.ScratchKeyPrefix + "x", sessionkey.SysKeyPrefix + "gc"} {
+				f.health(at(2, 22, 0), id, "", health.Active, health.Failed, health.KindSession, health.ErrNetwork)
+				f.health(at(2, 23, 0), id+"2", "", health.Active, health.Idle, health.KindSession, "")
+			}
+		}, nil, []string{"失败的", "完成的"}},
 		{"rate limited", func(f *fixture) {
 			f.health(at(2, 23, 0), s, "ws1", health.Active, health.Failed, health.KindSession, health.ErrRateLimit)
 			f.snap = snap(health.Failed)

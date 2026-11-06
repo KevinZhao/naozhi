@@ -254,7 +254,7 @@ func (e *Engine) leaveAsk(u health.Unit, why string) {
 		return
 	}
 	e.cfg.Inbox.Add(notify.Item{Kind: notify.KindQuestion, Level: notify.LevelTimely, Unit: u.ID, WS: u.Workspace,
-		Source: "waiting:" + u.ID, AutoClose: u.Workspace != "", Title: e.Name(u.ID) + " 在等你回复", Why: why})
+		Source: "waiting:" + u.ID, AutoClose: u.Workspace != "" || health.UserSession(u.ID, u.Kind), Title: e.Name(u.ID) + " 在等你回复", Why: why})
 }
 
 // suggestedLead opened the message custody sent for a recommended option
