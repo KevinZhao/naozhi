@@ -172,7 +172,7 @@ function domHeadCursor(el) {
 
 // loadEarlierEvents pages backward from the cursor, up to maxPages requests
 // (default EARLIER_SKIP_MAX_PAGES), until a page shows a visible bubble.
-async function loadEarlierEvents(maxPages) {
+export async function loadEarlierEvents(maxPages) {
   if (transcript.earlierLoading || !selection.key) return;
   const el = document.getElementById('events-scroll');
   if (!el) return;

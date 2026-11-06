@@ -246,6 +246,9 @@ function defaultGitStates() {
  *   the route applies rows=none / since=&epoch= to it and 404s task ids not listed. A test may edit
  *   the object in place; each request reads it then.
  * @param {number} [overrides.workflowDelayMs] - Hold GET /api/sessions/workflow answers this long.
+ * @param {object[]} [overrides.replyHits] - GET /api/sessions/history?q= hits ({key | session_id,
+ *   time, uuid, snippet}); the route answers those whose snippet holds q and records q in
+ *   historySearchCalls.
  * @param {object[]} [overrides.outputs] - GET /api/sessions/outputs entries (activity.Output wire
  *   shape, newest first); ?key= filters them. A test may edit the array in place.
  * @param {object} [overrides.sessionDetails] - key → GET /api/sessions/detail payload.
@@ -335,6 +338,7 @@ function startMockServer(overrides = {}) {
   const sessionDetails = overrides.sessionDetails || {};
   const notesData = overrides.notes || {};
   const outputsCalls = [];
+  const historySearchCalls = [];
   const inboxData = overrides.inbox || null;
   const inboxCalls = [];
   const tasksCalls = [];
@@ -523,6 +527,15 @@ function startMockServer(overrides = {}) {
 
     if (pathname === NZ_CONTRACT.API.sessions_history && req.method === 'GET') {
       if (!checkAuth()) return;
+      if (url.searchParams.has('q')) {
+        // The reply search: overrides.replyHits whose snippet holds q.
+        const q = url.searchParams.get('q').trim().toLowerCase();
+        historySearchCalls.push(q);
+        const hits = (overrides.replyHits || []).filter(h => q && h.snippet.toLowerCase().includes(q));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ hits }));
+        return;
+      }
       const list = historyData;
       const tag = tagOf(list);
       const headers = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' };
@@ -1223,6 +1236,7 @@ function startMockServer(overrides = {}) {
         get plannerStateCalls() { return plannerStateCalls; },
         get plannerSendCalls() { return plannerSendCalls; },
         get uploadCalls() { return uploadCalls; },
+        get historySearchCalls() { return historySearchCalls; },
         resetCalls() { sendCalls = []; bindCalls = []; loginCalls = []; favoriteCalls = []; },
       });
     }));

@@ -18,7 +18,12 @@ type historyListResp struct {
 // history popover lists. /api/sessions carries only their tag, so a poll pays
 // for this list only when it moved. A non-empty list is served under the
 // strong ETag "h<tag>", and an If-None-Match naming it gets a bodyless 304.
+// With ?q= it answers the reply search instead (handleSearch).
 func (h *Handlers) HandleHistory(w http.ResponseWriter, r *http.Request) {
+	if q := r.URL.Query(); q.Has("q") {
+		h.handleSearch(w, r, q.Get("q"))
+		return
+	}
 	list, tag := h.historyWithTag()
 	if list == nil {
 		list = []discovery.RecentSession{}
