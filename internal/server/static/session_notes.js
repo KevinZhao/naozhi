@@ -59,7 +59,7 @@ function custodyBody(n) {
     case 'on': return { icon, tone: 'planner', text: '托管：已打开' + (CUSTODY_BY[n.by] || '') };
     case 'off': return { icon, tone: 'planner', text: '托管：已关闭' + (CUSTODY_BY[n.by] || '') };
     case 'deferred': return { icon, tone: 'planner', text: '托管：已暂缓（' + (n.evidence || '你在看') + '）' };
-    case 'stopped': return { icon, tone: 'warn', text: '托管：已停' + (n.evidence ? ' · ' + n.evidence : '') + '，等你接手' };
+    case 'stopped': return { icon, tone: 'warn', text: '托管：已停' + (n.evidence ? ' · ' + n.evidence : '，等你接手') };
     case 'retry': return { icon, tone: 'planner', text: '托管：出错' + (n.evidence ? '（' + n.evidence + '）' : '') + '，稍后自动重试' + (n.n ? ' · 第 ' + n.n + ' 次' : '') };
   }
   return null;
@@ -92,13 +92,19 @@ function noteBody(n, paired) {
 }
 
 // pairs matches each item's open note with the health note of the same
-// event (the health machine opens the item as it journals the transition):
-// skip holds the health notes not shown on their own, paired maps an open
-// note to its health note.
+// event (the health machine opens the item as it journals the transition),
+// and custody's stop with the error item it opened as it stopped (one event,
+// said by the stop): skip holds the notes not shown on their own, paired maps
+// an open note to its health note and a stop to its item's open note.
 function pairs() {
   const skip = new Set(), paired = new Map();
   for (const n of notes.list) {
-    const to = n.kind === 'inbox' && n.event === 'open' && ITEM_STATE[n.item_kind];
+    if (n.kind !== 'custody' || n.event !== 'stopped') continue;
+    const o = notes.list.find((x) => x.kind === 'inbox' && x.event === 'open' && x.item_kind === 'error' && !skip.has(x.id) && Math.abs(x.ms - n.ms) <= PAIR_MS);
+    if (o) { skip.add(o.id); paired.set(n.id, o); }
+  }
+  for (const n of notes.list) {
+    const to = n.kind === 'inbox' && n.event === 'open' && !skip.has(n.id) && ITEM_STATE[n.item_kind];
     if (!to) continue;
     let h = null;
     for (const x of notes.list) {
@@ -119,8 +125,10 @@ function noteHtml(n, paired) {
   const h = paired || n;
   // A custody note's evidence is its reason, already in its text.
   const ev = n.kind === 'custody' ? '' : evidenceText(h.evidence, h.error_class);
+  // A stop stands for its item's open note: the item's deep link lands here.
+  const item = n.item || (paired && paired.item);
   return '<div class="gw-note gw-' + b.tone + '" role="note" data-note-id="' + escAttr(n.id) + '" data-note-time="' + n.ms + '"' +
-    (n.item ? ' data-inbox-item="' + escAttr(n.item) + '"' : '') + (paired ? ' data-paired="1"' : '') +
+    (item ? ' data-inbox-item="' + escAttr(item) + '"' : '') + (paired ? ' data-paired="1"' : '') +
     ' title="' + escAttr(formatTimeFull(n.ms) + (ev ? ' · ' + ev : '')) + '">' +
     '<span class="gw-note-icon" aria-hidden="true">' + esc(b.icon) + '</span>' +
     '<span class="gw-note-text">' + esc(b.text) + '</span>' +

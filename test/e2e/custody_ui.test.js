@@ -155,6 +155,8 @@ for (const [name, vp] of [['desktop', { viewport: { width: 1440, height: 900 } }
       await expect.poll(() => mock.custodyCalls.at(-1)).toEqual({ key: TASK, on: true });
       await expect(chip).toHaveClass(/custody-on/);
       await expect(page.locator('#toast')).toHaveText(/^托管已打开：.*再点一下关掉$/);
+      // A confirmation, not an error.
+      await expect(page.locator('#toast')).toHaveClass(/success/);
 
       // Leaving the tab ends it; coming back says it again.
       await page.evaluate(() => {
@@ -223,6 +225,63 @@ for (const [name, vp] of [['desktop', { viewport: { width: 1440, height: 900 } }
         await expect(table).not.toContainText('托管');
         await page.locator('.sys-health').screenshot({ path: test.info().outputPath('custody-health-' + name + '.png') });
       }
+    } finally {
+      await ctx.close();
+      mock.server.close();
+    }
+  });
+}
+
+// A session custody retried in vain and stopped on: its row still says the
+// failure though the retries came after the verdict (the verdict saw them),
+// the header's chip says 已停 with why in its title, and the stop is one
+// note, which the error item it opened deep-links to (Q4, Q7).
+for (const [name, vp] of [['desktop', { viewport: { width: 1440, height: 900 } }], ['phone', { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true }]]) {
+  test(`a stop is said once: the row, the chip and one note (${name})`, async ({ browser }) => {
+    const S = 'dashboard:direct:2026-01-01-120009-1:myproject';
+    const WHY = '托管重试了 3 次还是出错（服务端错误）。发「继续」再试，或换个说法';
+    const failedAt = now - 15 * 60000, stoppedAt = now - 3 * 60000;
+    const s = defaultSessions();
+    s.sessions.push({ key: S, state: 'ready', platform: 'dashboard', agent: 'general', cli_name: 'claude', user_label: 'iso 汇总数据',
+      workspace: '/home/user/workspace/myproject', project: 'myproject', node: 'local', last_active: stoppedAt - 20000,
+      last_response: 'API Error: 500 {"type":"error","error":{"type":"api_error"}}',
+      health: { state: 'failed', since: failedAt, seen: stoppedAt - 20000, error_class: 'other' } });
+    const notes = [
+      { id: 'sn1', key: S, time: iso(failedAt), kind: 'health', from: 'active', to: 'failed', evidence: 'last turn ended in an API error', error_class: 'other' },
+      { id: 'sn2', key: S, time: iso(stoppedAt), kind: 'custody', event: 'stopped', evidence: WHY },
+      { id: 'sn3', key: S, time: iso(stoppedAt + 1000), kind: 'inbox', event: 'open', item: 'it-stop', item_kind: 'error', title: 'iso 汇总数据 托管已停' },
+    ];
+    const ctx = await browser.newContext(vp);
+    const page = await ctx.newPage();
+    const mock = await startMockServer({
+      ws: true, sessions: s, notes: { [S]: notes },
+      planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
+      custody: { paused: false, sessions: [{ key: S, on: true, state: 'stopped', why: WHY, sent: 3, max: 8 }] },
+    });
+    try {
+      await page.goto(mock.url + '/dashboard#session=' + encodeURIComponent(S) + '&item=it-stop');
+      await waitForWs(page, 'CONNECTED');
+      const card = page.locator('.session-card[data-key="' + S + '"]');
+      await expect(card.locator('.sc-response')).toHaveText('失败 · 托管已停');
+      await expect(card.locator('.sc-response')).toHaveAttribute('title', /API Error: 500/);
+      await expect.poll(() => mock.wsConnections.at(-1).messages.some((m) => m.type === 'subscribe' && m.key === S)).toBe(true);
+      const conn = mock.wsConnections.at(-1);
+      conn.send({ type: 'subscribed', key: S, state: 'ready' });
+      conn.send({ type: 'history', key: S, initial: true, events: [
+        { type: 'user', detail: 'iso 把数据汇总一下', time: failedAt - 5000, uuid: 'sx-u1' },
+        { type: 'text', detail: 'API Error: 500', time: failedAt - 4000, uuid: 'sx-t1' },
+        { type: 'user', source: 'custody', custody_reason: '出错重试', custody_n: 3, detail: '继续', time: stoppedAt - 20000, uuid: 'sx-c3' },
+        { type: 'text', detail: 'API Error: 500', time: stoppedAt - 19000, uuid: 'sx-t2' },
+      ] });
+      const chip = page.locator('#header-custody .custody-chip');
+      await expect(chip).toHaveText('托管已停');
+      await expect(chip).toHaveAttribute('title', new RegExp('托管已停：' + WHY.replace(/[（）。「」]/g, '.')));
+      const pane = page.locator('#events-scroll');
+      await expect(pane.locator('.gw-note[data-note-id="sn2"]')).toHaveText(new RegExp('^⚙托管：已停 · ' + WHY.replace(/[（）。「」]/g, '.')));
+      await expect(pane.locator('.gw-note[data-note-id="sn2"]')).toHaveAttribute('data-inbox-item', 'it-stop');
+      await expect(pane.locator('.gw-note[data-note-id="sn3"]')).toHaveCount(0);
+      await expect(pane.locator('.gw-note')).toHaveCount(2);
+      await page.screenshot({ path: test.info().outputPath('custody-stopped-' + name + '.png') });
     } finally {
       await ctx.close();
       mock.server.close();

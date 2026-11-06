@@ -219,6 +219,9 @@ func (h *Handlers) fillHealth(snapshots []sessionpkg.SessionSnapshot, now time.T
 			continue
 		}
 		sh := &sessionview.SessionHealth{State: string(u.State), Since: u.Since.UnixMilli(), ErrClass: string(u.ErrClass)}
+		if !u.LastActive.IsZero() {
+			sh.Seen = u.LastActive.UnixMilli()
+		}
 		if r, ok := strings.CutPrefix(u.Evidence, health.DeathEvidence); ok && u.State == health.Failed {
 			sh.DeathReason = r
 		}

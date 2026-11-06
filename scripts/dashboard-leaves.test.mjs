@@ -283,6 +283,16 @@ test('failureText names a death reason or an error class, never "other"', () => 
   ]) assert.equal(nzu.failureText(reason, cls), want, reason + '/' + cls);
 });
 
+// A failure custody retried in vain keeps its since; the verdict that saw
+// the retry still holds, one older than a send does not.
+test('sessionHealthState keeps a verdict that took in the last activity', () => {
+  const row = (seen) => ({ state: 'ready', last_active: 3000, health: { state: 'failed', since: 1000, seen } });
+  for (const [seen, want] of [[3000, 'failed'], [2000, 'idle'], [undefined, 'idle']]) {
+    assert.equal(nzu.sessionHealthState(row(seen)), want, String(seen));
+  }
+  assert.equal(nzu.sessionHealthState({ state: 'ready', last_active: 1000, health: { state: 'failed', since: 1000 } }), 'failed');
+});
+
 // Q11: a tooltip says a death in words, never as death_reason=….
 test('evidenceCause and evidenceText put a health evidence in words', () => {
   const CODE = NZ_CONTRACT.DEATH_REASON_PREFIX.CODE;
