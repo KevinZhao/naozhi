@@ -27,6 +27,7 @@ import { shell } from './shell.js';
 import { sessionList } from './state.js';
 import { onSessionsApplied } from './session_list.js';
 import { sid } from './session_ident.js';
+import { hostRemote } from './planner_host.js';
 
 // focus: the item id a notification or link asked to bring into view.
 export const inbox = { open: null, badge: null, focus: '' };
@@ -160,15 +161,14 @@ export function onNotify(msg) {
   };
 }
 
-// far is the counts of the Planner's node's inbox when the Planner runs on
-// another node (planner_view.js fetchInbox; null: none, undefined: not
-// read), added to this node's; a frame, which carries this node's alone,
-// leaves them.
+// The counts are those of the Planner shown (planner_host.js): this node's
+// (msg; a frame carries these) or, with the Planner of another node shown,
+// that node's (farCounts, planner_view.js fetchInbox; null: none, undefined:
+// not read). Each node's Planner has its own 等你, never added together.
 const far = { open: 0, badge: 0 };
 const local = { open: 0, badge: 0 };
 const num = (v) => (typeof v === 'number' ? v : 0);
 export function onInboxCount(msg, farCounts) {
-  // No counts of this node's (its list failed) keep the last ones.
   if (msg) {
     local.open = num(msg.open);
     local.badge = num(msg.badge);
@@ -177,8 +177,9 @@ export function onInboxCount(msg, farCounts) {
     far.open = num(farCounts && farCounts.open);
     far.badge = num(farCounts && farCounts.badge);
   }
-  inbox.open = local.open + far.open;
-  inbox.badge = local.badge + far.badge;
+  const shown = hostRemote() ? far : local;
+  inbox.open = shown.open;
+  inbox.badge = shown.badge;
   nzBus.dispatchEvent(new CustomEvent('inbox:count', { detail: { open: inbox.open, badge: inbox.badge } }));
 }
 

@@ -90,3 +90,36 @@ func TestHandleRemoteAPI(t *testing.T) {
 		})
 	}
 }
+
+// listedNode is a node listing one session.
+type listedNode struct {
+	fakeCapNode
+	key string
+}
+
+func (n *listedNode) FetchSessions(context.Context) ([]map[string]any, error) {
+	return []map[string]any{{"key": n.key, "state": "ready"}}, nil
+}
+
+// TestRemoteSessionsLeaveNodesWithAPlanner: this node's health ledger (and
+// so its inbox, brief and index.json) leaves out the sessions of a node
+// running its own Planner, which covers them; a node without one stays in.
+func TestRemoteSessionsLeaveNodesWithAPlanner(t *testing.T) {
+	conns := map[string]node.Conn{
+		"pc":     &listedNode{fakeCapNode: fakeCapNode{id: "pc", caps: map[string]bool{node.CapPlanner: true}}, key: "task:a"},
+		"worker": &listedNode{fakeCapNode: fakeCapNode{id: "worker"}, key: "dashboard:direct:x:general"},
+	}
+	cache := node.NewCacheManager(func() map[string]node.Conn { return conns }, func() {})
+	cache.RefreshAll()
+	s := &Server{nodes: newNodeRegistry(conns), nodeCache: cache}
+	sessions, status := s.RemoteSessions()
+	if _, ok := sessions["pc"]; ok || status["pc"] != "" {
+		t.Fatalf("pc kept: %v %v", sessions, status)
+	}
+	if len(sessions["worker"]) != 1 || status["worker"] != "ok" {
+		t.Fatalf("worker: %v %v", sessions, status)
+	}
+	if all, _ := cache.Sessions(); len(all["pc"]) != 1 {
+		t.Fatal("the cache itself lost pc")
+	}
+}

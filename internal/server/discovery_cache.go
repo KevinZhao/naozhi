@@ -9,6 +9,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
 )
@@ -299,10 +300,40 @@ func (s *Server) DiscoveredSessions() []discovery.DiscoveredSession {
 	return s.discoveryCache.snapshot()
 }
 
-// RemoteSessions returns the remote node cache's sessions and node statuses;
-// read-only, see node.CacheManager.Sessions.
+// RemoteSessions returns the remote node cache's sessions and node statuses
+// for this node's health ledger and the names of its units; read-only, see
+// node.CacheManager.Sessions. A node running its own Planner (node.CapPlanner)
+// is left out: its own ledger, inbox and morning brief cover its sessions,
+// and covering them here too would push the same failure twice
+// (docs/rfc/remote-planner.md §4).
 func (s *Server) RemoteSessions() (map[string][]map[string]any, map[string]string) {
-	return s.nodeCache.Sessions()
+	sessions, status := s.nodeCache.Sessions()
+	for id, nc := range s.nodes.NodesSnapshot() {
+		if nc.Meta().HasCap(node.CapPlanner) {
+			if _, ok := sessions[id]; ok || status[id] != "" {
+				sessions, status = withoutNode(sessions, status, id)
+			}
+		}
+	}
+	return sessions, status
+}
+
+// withoutNode copies the cache's maps without node id: they are the cache's
+// own, shared with every reader.
+func withoutNode(sessions map[string][]map[string]any, status map[string]string, id string) (map[string][]map[string]any, map[string]string) {
+	s2 := make(map[string][]map[string]any, len(sessions))
+	for k, v := range sessions {
+		if k != id {
+			s2[k] = v
+		}
+	}
+	st2 := make(map[string]string, len(status))
+	for k, v := range status {
+		if k != id {
+			st2[k] = v
+		}
+	}
+	return s2, st2
 }
 
 // Snapshot is the exported alias used by internal/dashboard/discovery via the

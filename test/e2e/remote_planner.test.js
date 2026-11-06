@@ -193,3 +193,92 @@ test('a node gone offline says so and takes no message', async ({ browser }) => 
     mock.server.close();
   }
 });
+
+// Both nodes run a Planner (remote-planner.md §2: each manages its own
+// node). The page opens on this node's; the header switches to the other,
+// and the conversation, the message sent, 任务, 等你 and its count follow
+// the Planner shown, never mixing the two; switching back returns them.
+for (const vp of VIEWPORTS) {
+  test(vp.name + ': with a Planner on each node the header switches between them, nothing crossing', async ({ browser }) => {
+    test.setTimeout(60000);
+    const ctx = await browser.newContext({ viewport: { width: vp.width, height: vp.height }, isMobile: !!vp.isMobile, hasTouch: !!vp.hasTouch });
+    const page = await ctx.newPage();
+    const node = remote();
+    const LOCAL_TASK = 'task:cccccccccccc';
+    const s = sessions();
+    s.sessions.push({ key: LOCAL_TASK, node: 'local', state: 'ready', platform: 'task', agent: 'general', cli_name: 'claude', purpose: 'task', purpose_title: 'iso EC2 清日志', user_label: 'iso EC2 清日志', workspace: '/home/ec2-user/workspace/naozhi', last_active: now - 30000 });
+    const mock = await startMockServer({
+      ws: true, sessions: s, remote: { [NODE]: node },
+      planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
+      plannerEvents: [{ type: 'text', detail: 'iso 这里是 EC2 的 Planner。', time: now - 40000, uuid: 'l-t0' }],
+      tasks: { tasks: [{ id: LOCAL_TASK, kind: 'session', title: 'iso EC2 清日志', state: 'doing', at: iso(now - 30000), created: iso(now - 30000) }] },
+      inbox: {
+        open: [
+          { id: 'in_l1', kind: 'error', level: 'timely', unit: LOCAL_TASK, title: 'iso EC2 清日志 失败', why: '', created: iso(now - 60000), state: 'open', source: 'health:failed:' + LOCAL_TASK },
+          { id: 'in_l2', kind: 'question', level: 'timely', unit: PLANNER, title: 'iso EC2 要重启吗？', why: 'Planner 问你', created: iso(now - 50000), state: 'open', source: 'ask:1', decision: { handler: 'ask', actions: ['重启', '不重启'] } },
+        ],
+        closed: [], counts: { open: 2, badge: 2 },
+      },
+    });
+    const wsSubs = () => mock.wsConnections.flatMap((c) => c.messages).filter((m) => m.type === 'subscribe' && m.key === PLANNER);
+    try {
+      await page.goto(mock.url + '/dashboard');
+      await waitForWs(page, 'CONNECTED');
+      // Both nodes are tagged in the list; this one (the Planner shown) leads.
+      await expect(page.locator('#session-list .node-header .node-tag')).toHaveCount(2);
+      await expect(page.locator('#session-list .node-header').first()).toHaveAttribute('data-node', 'local');
+
+      await page.click('#abnav-planner');
+      const pick = page.locator('#pl-host select');
+      await expect(pick).toHaveValue('local');
+      await expect(pick.locator('option')).toHaveText(['本机 · EC2', 'MBP']);
+      const stream = page.locator('#pl-stream');
+      await expect(stream).toContainText('iso 这里是 EC2 的 Planner。');
+      await expect(page.locator('#abnav-planner-count')).toHaveText('2');
+      if (vp.isMobile) await page.click('#pl-left-toggle');
+      await expect(page.locator('#pl-wait .pl-card')).toHaveCount(2);
+      await expect(page.locator('#pl-task .tk-card[data-id="' + LOCAL_TASK + '"]')).toHaveCount(1);
+      if (vp.isMobile) await page.click('#pl-left-toggle');
+      await page.screenshot({ path: test.info().outputPath('switch-local-' + vp.name + '.png') });
+
+      // To MBP's: its conversation, its subscription, its 任务 and 等你 alone.
+      await pick.selectOption(NODE);
+      await expect(stream).toContainText('iso 早上好');
+      await expect(stream).not.toContainText('iso 这里是 EC2 的 Planner。');
+      await expect.poll(() => wsSubs().map((m) => m.node || 'local')).toEqual(['local', NODE]);
+      await expect.poll(() => mock.wsConnections.flatMap((c) => c.messages).some((m) => m.type === 'unsubscribe' && m.key === PLANNER && !m.node)).toBe(true);
+      await expect(page.locator('#abnav-planner-count')).toHaveText('1');
+      if (vp.isMobile) await page.click('#pl-left-toggle');
+      await expect(page.locator('#pl-wait .pl-card')).toHaveCount(1);
+      await expect(page.locator('#pl-wait .pl-card[data-id="' + NODE + '|in_q1"]')).toHaveCount(1);
+      await expect(page.locator('#pl-task .tk-card[data-id="' + OLD_TASK + '"]')).toHaveCount(1);
+      await expect(page.locator('#pl-task .tk-card[data-id="' + LOCAL_TASK + '"]')).toHaveCount(0);
+      if (vp.isMobile) await page.click('#pl-left-toggle');
+      await page.screenshot({ path: test.info().outputPath('switch-remote-' + vp.name + '.png') });
+      await page.fill('#pl-input', 'iso 给 MBP 的话');
+      await page.click('#pl-send');
+      await expect.poll(() => mock.remoteCalls.filter((c) => c.path === '/api/planner/send').map((c) => c.body.text)).toEqual(['iso 给 MBP 的话']);
+      expect(mock.plannerSendCalls).toEqual([]);
+      await expect(stream).toContainText('go vet 没有报错', { timeout: 15000 });
+
+      // The pick holds across a reload; switching back returns this node's.
+      await page.reload();
+      await waitForWs(page, 'CONNECTED');
+      await page.click('#abnav-planner');
+      await expect(page.locator('#pl-host select')).toHaveValue(NODE);
+      await page.locator('#pl-host select').selectOption('local');
+      await expect(stream).toContainText('iso 这里是 EC2 的 Planner。');
+      await expect(stream).not.toContainText('iso 早上好');
+      await expect(page.locator('#abnav-planner-count')).toHaveText('2');
+      await page.fill('#pl-input', 'iso 给 EC2 的话');
+      await page.click('#pl-send');
+      await expect.poll(() => mock.plannerSendCalls.map((b) => b.text)).toEqual(['iso 给 EC2 的话']);
+      expect(mock.remoteCalls.filter((c) => c.path === '/api/planner/send')).toHaveLength(1);
+      // Each node's inbox was written only through its own route.
+      expect(mock.remoteCalls.filter((c) => c.method !== 'GET' && c.path !== '/api/planner/send')).toEqual([]);
+    } finally {
+      await ctx.close();
+      mock.server.close();
+    }
+  });
+}

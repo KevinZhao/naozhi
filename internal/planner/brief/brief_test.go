@@ -280,3 +280,25 @@ func TestRender(t *testing.T) {
 		t.Errorf("carried = %v, want the notice the brief listed", f.carried)
 	}
 }
+
+// TestElsewhereSendsNothing: a node whose brief another node sends (several
+// nodes, the scout not here) neither sends one nor holds a mention for one.
+func TestElsewhereSendsNothing(t *testing.T) {
+	f := newFixture(t)
+	f.now = at(2, 8, 30)
+	f.inbox = []notify.Item{{Kind: notify.KindQuestion, State: notify.StateOpen, Title: "a 在等你回复", Unit: "a", WS: "ws1", Created: at(2, 8, 0)}}
+	b := f.briefer(nil, nil)
+	b.cfg.Elsewhere = func() bool { return true }
+	b.Check()
+	if len(f.pushes) != 0 || len(b.Recent(10)) != 0 {
+		t.Fatalf("pushes %v, recent %d; want none", f.pushes, len(b.Recent(10)))
+	}
+	if err := b.Hold(Mention{Title: "x"}); err != ErrElsewhere {
+		t.Fatalf("Hold: %v, want ErrElsewhere", err)
+	}
+	b.cfg.Elsewhere = func() bool { return false }
+	b.Check()
+	if len(f.pushes) != 1 {
+		t.Fatalf("on the scout's node: %d pushes, want 1", len(f.pushes))
+	}
+}

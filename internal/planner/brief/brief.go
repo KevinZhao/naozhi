@@ -109,6 +109,9 @@ type holdData struct {
 
 // Hold journals m for the next brief, whose window it falls in.
 func (b *Briefer) Hold(m Mention) error {
+	if b.elsewhere() {
+		return ErrElsewhere
+	}
 	if b.cfg.Journal == nil {
 		return errors.New("brief: no journal")
 	}
@@ -164,7 +167,14 @@ type Config struct {
 	// Carried closes the notices a sent brief listed
 	// (notify.Notifier.Carried).
 	Carried func(ids []string)
+	// Elsewhere reports that the brief is another node's to send: with
+	// several nodes, only the one running the scout sends one, so a day is
+	// not briefed twice (docs/rfc/remote-planner.md §2.1). nil is never.
+	Elsewhere func() bool
 }
+
+// ErrElsewhere refuses a mention held for a brief this node does not send.
+var ErrElsewhere = errors.New("早报只在跑巡检的那台机器上发，这台不发早报")
 
 // Briefer judges the day's brief. Check runs on Run's goroutine; Recent is
 // safe from any goroutine.
@@ -232,6 +242,8 @@ func (b *Briefer) Poke() {
 	}
 }
 
+func (b *Briefer) elsewhere() bool { return b.cfg.Elsewhere != nil && b.cfg.Elsewhere() }
+
 // Run checks after each Poke until ctx ends.
 func (b *Briefer) Run(ctx context.Context) {
 	for {
@@ -282,6 +294,9 @@ func windowStart(now, last time.Time) time.Time {
 // Check judges today's brief once it is due: journals the judgment and, when
 // there is something to report, pushes it.
 func (b *Briefer) Check() {
+	if b.elsewhere() {
+		return
+	}
 	now := b.cfg.Now()
 	b.mu.Lock()
 	last := b.last

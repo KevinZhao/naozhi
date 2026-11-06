@@ -115,7 +115,7 @@ Command routing: `/review xxx` -> `code-reviewer` agent, `/research xxx` -> `res
 
 ### Multi-Node
 
-The primary polls `workspaces` nodes over HTTP (`node.CacheManager`, never blocking the dashboard on an unreachable node); nodes behind NAT dial in via `upstream` to `/ws-node` (`node.ReverseServer`, protocol in `internal/node/protocol.go`). A primary whose own Planner is off shows a node's Planner: the page calls `/api/remote/{node}/…`, forwarded by the `api` RPC to the node's own Planner routes (`node.APIRoutes`, `docs/rfc/remote-planner.md`). Design: `docs/design/multi-node-design.md`, `docs/rfc/reverse-protocol.md`.
+The primary polls `workspaces` nodes over HTTP (`node.CacheManager`, never blocking the dashboard on an unreachable node); nodes behind NAT dial in via `upstream` to `/ws-node` (`node.ReverseServer`, protocol in `internal/node/protocol.go`). Each node runs its own Planner over its own sessions (D96); the Planner page switches to a node's, then calling `/api/remote/{node}/…`, forwarded by the `api` RPC to the node's own Planner routes (`node.APIRoutes`, `docs/rfc/remote-planner.md`), and a node running a Planner stays out of the primary's health ledger. Design: `docs/design/multi-node-design.md`, `docs/rfc/reverse-protocol.md`.
 
 ### Project Management
 

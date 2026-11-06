@@ -285,31 +285,26 @@ function paintInlineCards(items) {
   box.hidden = !html;
 }
 
-// fetchInbox lists this node's inbox and, with the Planner on another node,
-// that node's too (remote-planner.md §5): one 等你, each item tagged with the
-// node that holds it. The pause shown is the Planner's node's.
+// fetchInbox lists the inbox of the node the Planner shown runs on: each
+// node's Planner has its own 等你 (remote-planner.md §2), so another node's
+// never mixes in. Items carry their node; a node offline keeps what it
+// listed last.
 export async function fetchInbox() {
   const host = plannerHost.node;
+  const local = isLocalNode(host);
+  if (!local && !hostOnline()) return;
+  let res;
   try {
-    const [res, far] = await Promise.all([
-      // This node's inbox failing leaves the Planner's node's to show.
-      isLocalNode(host) ? fetchJSON(NZ_CONTRACT.API.inbox, { timeoutMs: 8000 }) : fetchJSON(NZ_CONTRACT.API.inbox, { timeoutMs: 8000 }).catch(() => null),
-      // An offline node keeps what it listed last (undefined).
-      isLocalNode(host) ? null : !hostOnline() ? undefined : fetchJSON(nodeAPI(host, NZ_CONTRACT.API.inbox), { timeoutMs: 8000 }).catch(() => undefined),
-    ]);
-    if (host !== plannerHost.node) return;
-    const tag = (r, node) => ((r && Array.isArray(r.open)) ? r.open : []).map((it) => Object.assign({}, it, { node }));
-    // A node that did not answer keeps what it listed last.
-    const kept = far === undefined ? pl.open.filter((it) => it.node === host) : tag(far, host);
-    pl.open = tag(res, 'local').concat(isLocalNode(host) ? [] : kept);
-    if (far) notifyNewRemote(host, pl.open.filter((it) => it.node === host));
-    const pausedFrom = isLocalNode(host) ? res : far;
-    if (pausedFrom !== undefined) pl.pausedUntil = pausedFrom && pausedFrom.paused_until ? Date.parse(pausedFrom.paused_until) || 0 : 0;
-    if ((res && res.counts) || far !== undefined) {
-      pl.seeding = true;
-      try { onInboxCount(res && res.counts, far && far.counts); } finally { pl.seeding = false; }
-    }
+    res = await fetchJSON(plannerAPI(NZ_CONTRACT.API.inbox), { timeoutMs: 8000 });
   } catch { return; }
+  if (host !== plannerHost.node) return;
+  pl.open = ((res && Array.isArray(res.open)) ? res.open : []).map((it) => Object.assign({}, it, { node: host }));
+  if (!local) notifyNewRemote(host, pl.open);
+  pl.pausedUntil = res && res.paused_until ? Date.parse(res.paused_until) || 0 : 0;
+  if (res && res.counts) {
+    pl.seeding = true;
+    try { onInboxCount(local ? res.counts : null, local ? null : res.counts); } finally { pl.seeding = false; }
+  }
   if (pl.host) { paintWaiting(); paintTools(); }
   noteItems();
 }
@@ -338,7 +333,8 @@ const REMOTE_INBOX_MS = 15000;
 // ---- the Planner's node ----
 
 // paintHost names the node the Planner runs on in the header, a switch
-// when more than one runs one (remote-planner.md §5).
+// when more than one runs one (remote-planner.md §2, §5): each node's Planner
+// manages that node only, and the switch picks which one this page works.
 function paintHost() {
   const el = $('pl-host');
   if (!el) return;
@@ -347,7 +343,7 @@ function paintHost() {
   if (nodes.length > 1) {
     html = '<select class="pl-host-pick" data-action-change="planner-host" aria-label="看哪台机器的 Planner">' +
       nodes.map((n) => '<option value="' + escAttr(n) + '"' + (n === plannerHost.node ? ' selected' : '') + '>' +
-        esc(n === 'local' ? '本机' : (sessionList.nodesData[n]?.display_name || n)) + '</option>').join('') + '</select>';
+        esc(n === 'local' ? '本机' + (sessionList.nodesData.local?.display_name && sessionList.nodesData.local.display_name !== 'Local' ? ' · ' + sessionList.nodesData.local.display_name : '') : (sessionList.nodesData[n]?.display_name || n)) + '</option>').join('') + '</select>';
   } else if (hostRemote()) {
     html = '<span class="pl-host-name" title="Planner 运行在这台机器上">' + esc(hostName()) + '</span>';
   }
@@ -364,7 +360,7 @@ function onHostChanged() {
   pl.status = null;
   pl.briefs = [];
   pl.notes = [];
-  pl.open = pl.open.filter((it) => isLocalNode(it.node));
+  pl.open = [];
   remoteSeen = null;
   hostWasOnline = hostOnline();
   paintHost();
@@ -457,8 +453,6 @@ async function pause(forVal) {
     const put = (url) => fetchJSON(url, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ for: forVal }), timeoutMs: 8000,
     });
-    // With the Planner on another node this node's pushes pause too.
-    if (hostRemote()) put(NZ_CONTRACT.API.inbox_pause).catch(() => {});
     const res = await put(plannerAPI(NZ_CONTRACT.API.inbox_pause));
     pl.pausedUntil = res && res.paused_until ? Date.parse(res.paused_until) || 0 : 0;
     pl.customPause = false;
@@ -475,7 +469,6 @@ async function pause(forVal) {
 // the two were one is ended too.
 async function resume() {
   try {
-    if (hostRemote()) fetchJSON(NZ_CONTRACT.API.inbox_pause, { method: 'DELETE', timeoutMs: 8000 }).catch(() => {});
     await fetchJSON(plannerAPI(NZ_CONTRACT.API.inbox_pause), { method: 'DELETE', timeoutMs: 8000 });
     pl.pausedUntil = 0;
     closeMenu();
