@@ -254,7 +254,8 @@ function defaultGitStates() {
  * @param {object} [overrides.inbox] - GET /api/inbox body ({open, closed, counts, paused_until});
  *   POST /api/inbox/close drops the item from open, /decide moves it to closed with its answer,
  *   PUT / DELETE /api/inbox/pause set
- *   paused_until. Every write lands in inboxCalls. Unset, the routes 404.
+ *   paused_until, and pause or resume custody with it (D94: one pause). Every write lands in
+ *   inboxCalls. Unset, the routes 404.
  * @param {object} [overrides.tasks] - GET /api/tasks body ({tasks}, task.Task wire shape); POST
  *   /api/tasks/state sets the task's state as the user's and lands in tasksCalls; POST
  *   /api/tasks/stop marks the task done as the user's ('已停止') and lands in taskStopCalls.
@@ -348,6 +349,14 @@ function startMockServer(overrides = {}) {
     const frames = conn ? conn.messages.filter(m => m.type === NZ_CONTRACT.WS.viewing) : [];
     const viewed = frames.length ? frames[frames.length - 1].key : '';
     return st.state === 'on' && viewed && st.key === viewed ? { ...st, state: 'deferred' } : st;
+  };
+  // pauseCustody is custody's side of a pause (/api/custody/pause, or the
+  // inbox's that pauses both).
+  const pauseCustody = (paused) => {
+    if (!custodyData) return;
+    custodyData.paused = paused;
+    custodyData.paused_at = paused ? new Date().toISOString() : undefined;
+    for (const st of custodyData.sessions) if (st.state === 'on' || st.state === 'paused') st.state = paused ? 'paused' : 'on';
   };
   const plannerData = overrides.planner || null;
   const plannerStateCalls = [];
@@ -654,8 +663,10 @@ function startMockServer(overrides = {}) {
           const ms = b.for === 'today' ? 6 * 3600000 : parseInt(b.for, 10) * 3600000;
           inboxData.paused_until = new Date(Date.now() + ms).toISOString();
           out = { paused_until: inboxData.paused_until };
+          pauseCustody(true);
         } else {
           delete inboxData.paused_until;
+          pauseCustody(false);
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(out));
@@ -1092,9 +1103,7 @@ function startMockServer(overrides = {}) {
     }
     if (pathname === NZ_CONTRACT.API.custody_pause && custodyData && (req.method === 'PUT' || req.method === 'DELETE')) {
       if (!checkAuth()) return;
-      custodyData.paused = req.method === 'PUT';
-      custodyData.paused_at = custodyData.paused ? new Date().toISOString() : undefined;
-      for (const st of custodyData.sessions) if (st.state === 'on' || st.state === 'paused') st.state = custodyData.paused ? 'paused' : 'on';
+      pauseCustody(req.method === 'PUT');
       custodyCalls.push({ pause: custodyData.paused });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ paused: custodyData.paused, ...(custodyData.paused_at ? { paused_at: custodyData.paused_at } : {}) }));

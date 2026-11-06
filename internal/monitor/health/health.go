@@ -73,6 +73,11 @@ const (
 // the session list reads it back).
 const DeathEvidence = "death_reason="
 
+// TaskEvidence leads the evidence of a unit active on a running workflow or
+// background task, which can outlive the turn that started it (the session
+// list reads it back).
+const TaskEvidence = "task "
+
 // healthy states are entered at once; the others need two agreeing
 // reconciles.
 func (s State) healthy() bool { return s == Active || s == Idle }
@@ -605,7 +610,7 @@ func (m *Machine) judge(f *Fact, now time.Time, mono time.Duration) (State, stri
 		if quiet >= StallAfter && !(m.woke && mono-m.wokeAt < WakeGrace) {
 			return Stalled, fmt.Sprintf("task %q: no observation for %s", f.Workflow, quiet.Round(time.Minute)), ErrNone
 		}
-		return Active, fmt.Sprintf("task %q running", f.Workflow), ErrNone
+		return Active, TaskEvidence + fmt.Sprintf("%q running", f.Workflow), ErrNone
 	case f.Running:
 		return Active, "turn in progress", ErrNone
 	case f.NoData:

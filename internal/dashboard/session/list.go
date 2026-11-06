@@ -217,6 +217,7 @@ func (h *Handlers) fillHealth(snapshots []sessionpkg.SessionSnapshot) {
 		if r, ok := strings.CutPrefix(u.Evidence, health.DeathEvidence); ok && u.State == health.Failed {
 			sh.DeathReason = r
 		}
+		sh.BackgroundTask = u.State == health.Active && strings.HasPrefix(u.Evidence, health.TaskEvidence)
 		snapshots[i].Health = sh
 	}
 }

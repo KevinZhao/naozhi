@@ -34,7 +34,7 @@ function inbox() {
 }
 
 for (const vp of [{ name: 'desktop', width: 1280, height: 800 }, { name: 'phone', width: 390, height: 844 }]) {
-  test(`${vp.name}: notify blocks are cards and a Planner notice links to its page`, async ({ browser }) => {
+  test(`${vp.name}: notify blocks are cards and a Planner notice is not in 等你`, async ({ browser }) => {
     const ctx = await browser.newContext({ viewport: { width: vp.width, height: vp.height } });
     const page = await ctx.newPage();
     const mock = await startMockServer({
@@ -61,11 +61,11 @@ for (const vp of [{ name: 'desktop', width: 1280, height: 800 }, { name: 'phone'
       await cards.nth(0).scrollIntoViewIfNeeded();
       await page.screenshot({ path: test.info().outputPath(`planner-notify-${vp.name}.png`) });
 
+      // A notice is the morning brief's (D5): the left column lists only
+      // what waits on you to act, the badge's count.
       if (vp.name === 'phone') await page.click('#pl-left-toggle');
-      const notice = page.locator('#pl-wait .pl-card[data-id="in_n"]');
-      await expect(notice).toBeVisible();
-      await expect(notice.locator('.pl-card-meta a.pl-link')).toHaveAttribute('href', LINK);
-      await expect(notice.locator('.pl-card-meta')).toHaveText('打开原文');
+      await expect(page.locator('#pl-wait')).toHaveText('没有等你的事');
+      await expect(page.locator('#pl-wait .pl-card[data-id="in_n"]')).toHaveCount(0);
     } finally {
       await ctx.close();
       await new Promise((r) => mock.server.close(r));

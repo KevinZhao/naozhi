@@ -1,21 +1,24 @@
 // custody.js — custody in the dashboard (planner RFC §5.4, D93): the gateway
 // replying for you on a session you are not at. It keeps GET /api/custody
 // (the pause and every session in custody) for the session header's chip,
-// the Planner page's task cards and the system view's health table; the chip
-// switches a session through PUT /api/custody, the Planner page's "⋯" menu
-// pauses every session through /api/custody/pause. Shown only with the
-// Planner on (custody runs only then) and for this node's sessions.
+// the one place custody shows as a switch (D94); a task card marks it only
+// when off or stopped, a failed row and the health table say 托管已停. The
+// chip switches a session through PUT /api/custody; the Planner page's one
+// pause (PUT /api/inbox/pause) pauses custody with the pushes. Shown only
+// with the Planner on (custody runs only then) and for this node's sessions.
 //
 // It also tells the gateway which session you are at: a viewing frame names
 // the session this tab has open while the tab is visible and focused ('' for
 // none), renewed well within custody.ViewFor; a closed socket ends it on the
 // server. Custody holds back on a session while any tab is at it.
 //
-// A message custody sent carries the prefix "⚙ 托管 · <原因> · 第 n/8 次"
-// (custody.Prefix): custodyMessage splits it off so the bubble names custody
-// as its sender, and the latest answer it gave on your behalf (按建议执行)
-// can be taken back with one click: POST /api/custody/undo finds that answer
-// on the gateway and sends the session the words of SPEC D93 in your name.
+// A message custody sent is its body alone, the event marked source
+// "custody" with custody_reason and custody_n (D94); before that the text
+// led with "⚙ 托管 · <原因> · 第 n/8 次", which custodyMessage still splits
+// off. The bubble names custody as its sender, and the latest answer it gave
+// on your behalf (按建议执行) can be taken back with one click: POST
+// /api/custody/undo finds that answer on the gateway and sends the session
+// the words of SPEC D93 in your name.
 // Layering: never import dashboard.js back.
 import { NZ_CONTRACT } from './contract.js';
 import { selection, sessionList, ui } from './state.js';
@@ -39,7 +42,15 @@ const REASON_SUGGESTED = '按建议执行';
 const PREFIX_RE = /^⚙ 托管 · (.+?) · 第 (\d+)\/(\d+) 次[ \t]*(?:\n|$)/;
 const NOT_IN_CUSTODY = /^(planner|sys|scout):/;
 
-const STATE_TEXT = { off: '关', on: '开', deferred: '已暂缓', stopped: '已停', paused: '已暂停' };
+// A session custody holds back on (you are at it, or just sent it a message)
+// is still in custody: it reads 开, the hold is in the chip's title.
+const STATE_TEXT = { off: '关', on: '开', deferred: '开', stopped: '已停', paused: '已暂停' };
+// RECOMMENDED_RE is the recommended option's marker, read by custody on the
+// raw label and left out wherever the label is shown.
+const RECOMMENDED_RE = /\s*(?:\((?:Recommended|recommended)\)|（推荐）)/g;
+
+// optionText is an option's label as shown: without the recommended marker.
+export const optionText = (label) => String(label || '').replace(RECOMMENDED_RE, '').trim();
 
 export const custody = {
   enabled: null, // the Planner on (GET /api/planner), null until known
@@ -65,29 +76,26 @@ export function coverable(key, node) {
   return !!sessionList.sessionsData[sid(key, 'local')];
 }
 
-// statusOf is key's custody as this tab shows it: in custody but at the
-// session (this tab reports it) reads as held back, as the gateway holds it.
-// The gateway's own 已暂缓 comes from any tab at the session or a message
-// you sent; this tab reads the list again when it moves (reportViewing).
+// statusOf is key's custody as GET /api/custody last said it.
 export function statusOf(key) {
-  const st = custody.byKey.get(key) || { key, on: false, state: 'off', sent: 0, max: 8 };
-  if ((st.state === 'on' || (st.state === 'deferred' && !st.why)) && view.key === key) return { ...st, state: 'deferred', why: '你在看' };
-  return st;
+  return custody.byKey.get(key) || { key, on: false, state: 'off', sent: 0, max: 8 };
 }
 
-// stateText is a status in a word or two: 开 / 关 / 已暂缓 / 已停 / 已暂停.
+// stateText is a status in a word or two: 开 / 关 / 已停 / 已暂停.
 export const stateText = (st) => STATE_TEXT[st.state] || STATE_TEXT.off;
 
 function chipTitle(st, toggle) {
   const lines = [];
   switch (st.state) {
-    case 'on': lines.push('托管开着：出错时自动重试，有推荐选项的提问按建议回答，回合停下交给 Planner 判断'); break;
-    case 'deferred': lines.push('托管暂缓：你在看这个会话，或 5 分钟内给它发过消息，托管先不替你回话；你离开后恢复'); break;
-    case 'stopped': lines.push('托管已停：' + (st.why || '') + '，等你接手'); break;
-    case 'paused': lines.push('托管已全部暂停（在 Planner 页面的"⋯"里恢复）'); break;
-    default: lines.push('托管关着：这个会话出错或停下时等你处理');
+    case 'on':
+    case 'deferred':
+      lines.push('托管开着：有推荐选项的提问按建议回答，回合停下交给 Planner 判断');
+      lines.push('你在看或刚给它发过消息时，先不替你回话');
+      break;
+    case 'stopped': lines.push('托管已停' + (st.why ? '：' + st.why : '') + '，等你接手'); break;
+    case 'paused': lines.push('推送与托管已暂停（在 Planner 页面的"⋯"里恢复）'); break;
+    default: lines.push('托管关着：这个会话停下时等你处理');
   }
-  if (st.on && st.max) lines.push('这条任务链已自动发了 ' + (st.sent || 0) + '/' + st.max + ' 次');
   if (toggle) lines.push(st.state === 'stopped' ? '点一下重新开始托管（重新计数）' : st.on ? '点一下关掉托管' : '点一下打开托管');
   return lines.join('\n');
 }
@@ -96,10 +104,10 @@ function chipTitle(st, toggle) {
 // the same mark as plain text (a task card, a table cell).
 export function custodyChipHtml(key, toggle) {
   const st = statusOf(key);
-  const why = st.state === 'stopped' && st.why ? st.why : st.state === 'deferred' ? st.why : '';
+  const why = st.state === 'stopped' && st.why ? st.why : '';
   const inner = '<span class="custody-chip-l">托管</span><span class="custody-chip-s">' + esc(stateText(st)) + '</span>' +
     (why ? '<span class="custody-chip-why">' + esc(why) + '</span>' : '');
-  const cls = 'custody-chip custody-' + escAttr(st.state);
+  const cls = 'custody-chip custody-' + escAttr(st.state === 'deferred' ? 'on' : st.state);
   const title = escAttr(chipTitle(st, toggle));
   if (!toggle) return '<span class="' + cls + '" title="' + title + '">' + inner + '</span>';
   return '<button type="button" class="' + cls + '" data-action="custody-toggle" data-key="' + escAttr(key) + '" aria-pressed="' + (st.on ? 'true' : 'false') +
@@ -148,8 +156,9 @@ export function refreshCustody() {
 
 const failText = (e) => String(e?.message || e).replace(/^HTTP \d+: /, '').trim();
 
-// setCustodyPaused pauses or resumes custody for every session, then reads
-// every session's custody again: each one's state follows the pause.
+// setCustodyPaused pauses or resumes custody alone (/api/custody/pause, the
+// one pause's alias since D94: the Planner page ends a pause from before the
+// two were one with it), then reads every session's custody again.
 export async function setCustodyPaused(paused) {
   try {
     noteList(await fetchJSON(NZ_CONTRACT.API.custody_pause, { method: paused ? 'PUT' : 'DELETE', timeoutMs: 8000 }));
@@ -158,6 +167,14 @@ export async function setCustodyPaused(paused) {
   }
   changed();
   await refreshCustody();
+}
+
+// toggleToast says what a click on the chip just did: on a phone there is
+// no title to hover, and the switch takes effect at once (D88).
+export function toggleToast(was, on) {
+  if (was === 'stopped') return '已重新开始托管，重新计数';
+  // Retrying after an error is every session's (D94), not the switch's.
+  return on ? '托管已打开：有推荐选项的提问按建议回答，停下时交给 Planner；再点一下关掉' : '托管已关：停下时等你处理（出错照样自动重试）';
 }
 
 async function toggle(el) {
@@ -172,6 +189,7 @@ async function toggle(el) {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, on }), timeoutMs: 8000,
     });
     if (res && res.key) custody.byKey.set(res.key, res);
+    showToast(toggleToast(st.state, on), 'info', 4000);
   } catch (e) {
     showToast((on ? '没有打开托管：' : '没有关掉托管：') + failText(e), 'error');
   }
@@ -223,36 +241,54 @@ function reportViewing() {
 
 // ---- custody's messages ----
 
-// custodyMessage splits a custody message's prefix off its text: the
-// reason, its count of max, and the body; null for any other text.
-export function custodyMessage(text) {
-  const m = PREFIX_RE.exec(text || '');
+// custodyMessage is a custody message e (or its text) as the bubble shows
+// it: the reason, its count (0 when not known) and the body. The event's own
+// custody_reason / custody_n come first; a text from before them leads with
+// the prefix, split off here. null for a text with neither.
+export function custodyMessage(e) {
+  const ev = typeof e === 'string' ? { detail: e } : (e || {});
+  const text = ev.detail || ev.summary || '';
+  if (ev.custody_reason) return { reason: ev.custody_reason, n: Number(ev.custody_n) || 0, body: text.trim() };
+  const m = PREFIX_RE.exec(text);
   if (!m) return null;
-  return { reason: m[1], n: Number(m[2]), max: Number(m[3]), body: text.slice(m[0].length).trim() };
+  return { reason: m[1], n: Number(m[2]), body: text.slice(m[0].length).trim() };
 }
 
-// isSuggestedMessage reports whether text is an answer custody gave by the
-// recommended option: the bubbles 撤回 can apply to.
-export const isSuggestedMessage = (text) => custodyMessage(text)?.reason === REASON_SUGGESTED;
+// isSuggestedMessage reports whether e (or its text) is an answer custody
+// gave by the recommended option: the bubbles 撤回 can apply to.
+export const isSuggestedMessage = (e) => custodyMessage(e)?.reason === REASON_SUGGESTED;
 
-// custodyBubbleHtml is a custody message's bubble content: who sent it and
-// why, faint, then its body; an answer given by the recommended option
-// says so, with 撤回 (shown on the session's latest one only, the one the
-// gateway takes back: .custody-suggested-msg in the CSS). renderBody renders
-// the body text. sk is the session the bubble is in, id the bubble's.
-export function custodyBubbleHtml(text, sk, id, renderBody) {
-  const m = custodyMessage(text);
-  if (!m) return '<div class="custody-source">⚙ 托管</div>' + renderBody(text);
-  const src = '<div class="custody-source">⚙ 托管 · ' + esc(m.reason) + ' · 第 ' + m.n + '/' + m.max + ' 次</div>';
+// custodySourceText is the faint line naming custody on its message: 托管 ·
+// 原因 · 第 n 次 (the avatar is the ⚙ already; the cap stays the gateway's).
+export function custodySourceText(m) {
+  return m ? '托管 · ' + m.reason + (m.n ? ' · 第 ' + m.n + ' 次' : '') : '托管';
+}
+
+// suggestedChoice is the option an answer by the recommended option chose,
+// as shown: the trailing period and the recommended marker left out.
+export const suggestedChoice = (body) => optionText(String(body || '').replace(/[.。]\s*$/, ''));
+
+// undoHtml is 撤回 for custody's answer id in session sk (the line it ends:
+// a bubble's or an answered question card's), or its done mark.
+export function undoHtml(sk, id) {
+  if (undone.has(id)) return '<span class="custody-undone">已发撤回</span>';
+  return '<button type="button" class="pl-link custody-undo" data-action="custody-undo" data-key="' + escAttr(sk.key) + '" data-node="' + escAttr(sk.node || 'local') +
+    '" data-id="' + escAttr(id) + '" title="以你的名义让会话撤回这次按建议选的选项，先停下等你决定">撤回</button>';
+}
+
+// custodyBubbleHtml is custody message e's bubble content: who sent it and
+// why, faint, then its body (text, the event's shown text); an answer given
+// by the recommended option says so, with 撤回 (shown on the session's
+// latest one only, the one the gateway takes back: .custody-suggested-msg in
+// the CSS). renderBody renders the body text. sk is the session the bubble
+// is in, id the bubble's.
+export function custodyBubbleHtml(e, text, sk, id, renderBody) {
+  const m = custodyMessage(Object.assign({}, e, { detail: text, summary: text }));
+  if (!m) return '<div class="custody-source">托管</div>' + renderBody(text);
+  const src = '<div class="custody-source">' + esc(custodySourceText(m)) + '</div>';
   if (m.reason !== REASON_SUGGESTED || !m.body) return src + renderBody(m.body);
-  const choice = m.body.replace(/[.。]\s*$/, '');
-  const done = undone.has(id);
-  const btn = done
-    ? '<span class="custody-undone">已发撤回</span>'
-    : '<button type="button" class="pl-link custody-undo" data-action="custody-undo" data-key="' + escAttr(sk.key) + '" data-node="' + escAttr(sk.node || 'local') +
-      '" data-id="' + escAttr(id) + '" title="以你的名义让会话撤回这次按建议选的选项，先停下等你决定">撤回</button>';
-  return src + '<div class="custody-suggested">已按建议执行：<span class="custody-choice">' + esc(choice) + '</span>' +
-    '<span class="custody-sep" aria-hidden="true">·</span>' + btn + '</div>';
+  return src + '<div class="custody-suggested">已按建议执行：<span class="custody-choice">' + esc(suggestedChoice(m.body)) + '</span>' +
+    '<span class="custody-sep" aria-hidden="true">·</span>' + undoHtml(sk, id) + '</div>';
 }
 
 // UNDO_FAIL says why the gateway took nothing back, by HTTP status.

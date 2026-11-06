@@ -12,8 +12,8 @@
 // shown as 已停止); the Planner page's header offers the same 停止 for the
 // session opened in the middle column (isRunningTask, nzBus 'tasks:changed').
 //
-// A dispatched session in custody carries the session header's custody mark
-// (custody.js), not a switch: the header has that.
+// A dispatched session runs in custody; its card marks custody only when it
+// is off or stopped (custody.js's mark, not a switch: the header has that).
 //
 // It refetches on inbox_count frames (nzBus 'inbox:count': the health
 // changes that mark 等你 / 失败 open and close items too) and on
@@ -21,7 +21,7 @@
 import { NZ_CONTRACT } from './contract.js';
 import { esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
 import { formatAbsTime, formatMonthDayTime, timeAgo } from './utilities.js';
-import { custody, custodyChipHtml, refreshCustody } from './custody.js';
+import { custody, custodyChipHtml, refreshCustody, statusOf } from './custody.js';
 
 // Mounted containers; detached ones are dropped at the next refresh.
 const mounts = new Set();
@@ -71,6 +71,15 @@ function stopHtml(t) {
   return '<button type="button" class="pl-btn tk-stop" data-action="task-stop" data-id="' + escAttr(t.id) + '" title="停止这个会话正在做的事">停止</button>';
 }
 
+// custodyException reports whether a task's card marks its custody: only
+// when it is not what a dispatched session runs under (off, or stopped);
+// custody on goes unsaid. A list not read yet says nothing.
+function custodyException(t, state) {
+  if (t.kind !== 'session' || t.retired || state === 'done' || !custody.readAt || custody.enabled !== true) return false;
+  const st = statusOf(t.id).state;
+  return st === 'off' || st === 'stopped';
+}
+
 function cardHtml(t) {
   const state = STATE_LABEL[t.state] ? t.state : 'doing';
   const at = Date.parse(t.at);
@@ -82,7 +91,7 @@ function cardHtml(t) {
     if (!isNaN(d.getTime())) meta.push((state === 'remind' ? '到点提醒 ' : '到期 ') + esc(formatMonthDayTime(d.getTime())));
   }
   if (t.close_when) meta.push('完成条件：' + esc(t.close_when));
-  const mark = t.kind === 'session' && !t.retired && state !== 'done' && custody.byKey.get(t.id)?.on ? custodyChipHtml(t.id, false) : '';
+  const mark = custodyException(t, state) ? custodyChipHtml(t.id, false) : '';
   return '<div class="tk-card tk-s-' + state + (state === 'done' ? ' done' : '') + '" data-id="' + escAttr(t.id) + '" role="listitem">' +
       '<div class="tk-top">' +
         (state === 'done' ? '<span class="tk-state">' + (stopped(t) ? STOPPED_WHY : STATE_LABEL.done) + '</span>' : '') +

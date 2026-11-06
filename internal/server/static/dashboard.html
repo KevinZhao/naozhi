@@ -218,18 +218,18 @@
        shown under body.nz-view-system. renderSystemView() in dashboard.js
        paints the read-only daemon status list (GET /api/system/daemons). -->
   <main class="system-main" id="system-main" aria-label="系统" hidden></main>
-  <!-- Planner page (planner_view.js): left 通知 / 任务, the Planner
+  <!-- Planner page (planner_view.js): left 等你 / 任务, the Planner
        conversation in the middle. The workbench (#fv-drawer) docks on the
        right as in the chat view. -->
   <main class="planner-main" id="planner-main" aria-label="Planner" hidden>
-    <aside class="pl-left" id="pl-left" aria-label="通知与任务">
+    <aside class="pl-left" id="pl-left" aria-label="等你与任务">
       <button type="button" class="pl-left-toggle" id="pl-left-toggle" aria-expanded="false" aria-controls="pl-left-body">
-        <span>通知 · 任务</span>
+        <span>等你 0 · 任务 0</span>
         <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
       </button>
       <div class="pl-left-body" id="pl-left-body">
         <section class="pl-group" aria-labelledby="pl-wait-h">
-          <h2 class="pl-group-h" id="pl-wait-h">通知</h2>
+          <h2 class="pl-group-h" id="pl-wait-h">等你</h2>
           <div class="pl-list" id="pl-wait" role="list"></div>
         </section>
         <!-- 任务: tasks.js (§15.4) mountTasks(#pl-task) replaces this
@@ -251,7 +251,6 @@
         <span class="pl-title">Planner</span>
         <span class="pl-status" id="pl-status"></span>
         <span class="pl-paused" id="pl-paused" hidden></span>
-        <span class="pl-paused" id="pl-custody-paused" hidden></span>
         <span class="pl-head-sp"></span>
         <button type="button" class="files-dl-btn pl-page-only" data-action="workbench-toggle" title="工作台（预览 · 产出 · 文件 · 详情）">工作台</button>
         <details class="pl-more pl-page-only" id="pl-more">

@@ -1,5 +1,5 @@
 // E2E: the 系统 view's 全会话健康 table renders GET /api/system/health
-// (counts, unowned, state labels, error classes) and a row opens its session.
+// (counts, state labels, error classes) and a row opens its session.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
 
@@ -47,7 +47,8 @@ test('health table lists units and a row opens its session', async ({ page }) =>
   await expect(page.locator('#system-main .system-intro')).toHaveCount(0);
   await expect(page.locator('#system-main .system-body > .system-empty')).toHaveCount(0);
   await expect(page.locator('#system-main .svc-overview')).not.toContainText('就绪');
-  await expect(section.locator('[data-count="unowned"] b')).toHaveText('2');
+  // A unit with no workspace is not counted as a problem (Q22).
+  await expect(section.locator('[data-count="unowned"]')).toHaveCount(0);
   await expect(section.locator('.hl-counts')).toContainText('失败 1');
   await expect(section.locator('.hl-counts')).toContainText('空闲 3');
 
@@ -63,7 +64,8 @@ test('health table lists units and a row opens its session', async ({ page }) =>
 
   const lost = section.locator(`tr[data-unit="gpu-box/dashboard:direct:x:general"]`);
   await expect(lost.locator('.hl-state')).toHaveText('失联');
-  await expect(lost).toContainText('无人负责');
+  await expect(lost).toContainText('无工作区');
+  await expect(section).not.toContainText('无人负责');
   // Nothing on the dashboard to open for these: plain text, no button.
   await expect(lost.locator('.hl-open')).toHaveCount(0);
   // A cron job reads by its title; naozhi's own units belong to no workspace.

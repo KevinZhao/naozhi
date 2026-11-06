@@ -3,10 +3,10 @@
 // dedup helpers the transcript, cron and agent views share.
 import { NZ_CONTRACT } from './contract.js';
 import { selection, serverInfo, sessionList } from './state.js';
-import { esc, escAttr } from './nz_util.js';
+import { esc, escAttr, sessionTitleText } from './nz_util.js';
 import { renderMd } from './render_md.js';
 import { EVENT_DIVIDER_GAP_MS, formatTimeFull, timeDividerHtml } from './utilities.js';
-import { renderAskQuestionCard } from './ask_card.js';
+import { isFoldedAnswer, renderAskQuestionCard } from './ask_card.js';
 import { CLAWD_SVG, ICONS } from './icons.js';
 import { pendingBackendID } from './features.js';
 import { isInternalEvent, sid } from './session_ident.js';
@@ -118,7 +118,7 @@ function peerSourceHtml(e, node) {
   if (e.peer_key) {
     node = node || 'local';
     const s = sessionList.sessionsData[sid(e.peer_key, node)] || {};
-    const title = s.user_label || s.summary || s.last_prompt || name;
+    const title = sessionTitleText(s) || name;
     return '<button type="button" class="peer-link" data-key="' + escAttr(e.peer_key) + '" data-node="' + escAttr(node) +
       '" data-action="session-select">来自会话 ' + esc(title) + '</button>';
   }
@@ -267,18 +267,26 @@ function textOrUserContentHtml(e, cleanRaw) {
     '<pre class="leaked-toolcall-body">' + esc(leak.leaked) + '</pre></details>';
 }
 
+// GATEWAY_NOTE_RE is the gateway's note that ends a dispatched session's
+// first message (wireup reportLine: whom to report to). The CLI reads it;
+// the bubble shows what the Planner asked for.
+const GATEWAY_NOTE_RE = /\n*（网关附注：[^）]*）\s*$/;
+
+// withoutGatewayNote is a user message's text without that note.
+export const withoutGatewayNote = (text) => String(text || '').replace(GATEWAY_NOTE_RE, '');
+
 // userContentHtml: a message custody sent (source "custody") names custody
-// as its sender, its prefix faint; any other is textOrUserContentHtml.
+// as its sender, faint; any other is textOrUserContentHtml.
 function userContentHtml(e, cleanRaw, sk) {
-  if (e.source !== 'custody') return textOrUserContentHtml(e, cleanRaw);
-  return custodyBubbleHtml(cleanRaw, sk, e.uuid || String(e.time || ''), (t) => textOrUserContentHtml(e, t));
+  if (e.source !== 'custody') return textOrUserContentHtml(e, withoutGatewayNote(cleanRaw));
+  return custodyBubbleHtml(e, cleanRaw, sk, e.uuid || String(e.time || ''), (t) => textOrUserContentHtml(e, t));
 }
 
 // custodyEventClass marks a message custody sent, and among them an answer
 // given by the recommended option (its 撤回 stays on the latest only).
 function custodyEventClass(e) {
   if (e.type !== 'user' || e.source !== 'custody') return '';
-  return isSuggestedMessage(e.detail || e.summary || '') ? ' custody-msg custody-suggested-msg' : ' custody-msg';
+  return isSuggestedMessage(e) ? ' custody-msg custody-suggested-msg' : ' custody-msg';
 }
 
 // toolUseHtml: the ACP rich tool progress row (kiro, includeInternal-only).
@@ -368,12 +376,14 @@ function eventImagesHtml(e, sk) {
   }).join('') + '</div>';
 }
 
-// eventActionsHtml: copy / ask-aside buttons, one shared >500-char gate so
-// they cannot drift apart (both hover-revealed via .hover-only). noAsk drops
-// 追问, which always asks about the selected session.
+// eventActionsHtml: copy / ask-aside buttons (both hover-revealed via
+// .hover-only; the latest answer's 复制 always shows). An answer is copyable
+// whatever its length, being what is taken elsewhere; a message of yours and
+// 追问 need the >500-char gate. noAsk drops 追问, which always asks about the
+// selected session.
 function eventActionsHtml(e, cleanRaw, noAsk) {
   const isLong = !!cleanRaw && cleanRaw.length > 500;
-  const copyBtn = isLong && (e.type === 'text' || e.type === 'user')
+  const copyBtn = cleanRaw && (e.type === 'text' || (isLong && e.type === 'user'))
     ? '<button class="event-copy-btn hover-only" type="button" data-raw="' + escAttr(cleanRaw) + '" data-action="event-copy" title="复制" aria-label="复制消息">复制</button>'
     : '';
   const askBtn = isLong && !noAsk && e.type === 'text'
@@ -391,8 +401,10 @@ function eventActionsHtml(e, cleanRaw, noAsk) {
 export function eventHtml(e, opts) {
   const includeInternal = !!(opts && opts.includeInternal);
   if (shouldHideEvent(e, includeInternal)) return '';
-  if (EVENT_WHOLE.has(e.type)) return EVENT_WHOLE.get(e.type)(e);
+  // custody's answer to a question card is the card's own line (ask_card.js).
+  if (isFoldedAnswer(e)) return '';
   const sk = opts && opts.key ? { key: opts.key, node: 'local' } : { key: selection.key, node: selection.node };
+  if (EVENT_WHOLE.has(e.type)) return EVENT_WHOLE.get(e.type)(e, sk);
   const icon = eventIconHtml(e, sk);
 
   // Strip redundant "[+N image(s)]" suffix when thumbnails are present.

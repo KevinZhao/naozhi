@@ -177,11 +177,13 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     await expect(page.locator('#pl-composer')).not.toContainText('交给 Planner');
     await page.screenshot({ path: test.info().outputPath('planner-chat-session-desktop.png') });
 
-    // Its AskUserQuestion cards: the one a user event followed is locked,
-    // the open one answers this session, not the chat view's selection.
+    // Its AskUserQuestion cards: the one a user event followed is locked and
+    // folded to its answer, the open one answers this session, not the chat
+    // view's selection.
     const oldAsk = sess.locator('.event.ask_question[data-tool-use-id="aq-old"]');
-    await expect(oldAsk.locator('.ask-status')).toHaveText('已回答');
+    await expect(oldAsk.locator('.ask-status')).toHaveText('已回答：修一下登录页');
     await expect(oldAsk.locator('.ask-opt').first()).toBeDisabled();
+    await expect(oldAsk.locator('.ask-opt').first()).toBeHidden();
     const newAsk = sess.locator('.event.ask_question[data-tool-use-id="aq-new"]');
     await newAsk.locator('.ask-opt', { hasText: '先别发' }).click();
     await newAsk.locator('.ask-submit').click();
@@ -336,27 +338,25 @@ test('phone: input box, an opened session card and 交给 Planner fit', async ({
   }
 });
 
-// A denied tool call carries the CLI's whole explanation (hundreds of
-// characters); the centered row wraps inside the column instead of running
-// off both edges of it.
+// A permission the Planner's own tool was refused is nothing for you to do:
+// the Planner conversation leaves it out (Q12); a session's view keeps its own.
 for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['phone', { width: 390, height: 844 }]]) {
-  test(`${name}: a long permission denial wraps inside the Planner column`, async ({ browser }) => {
+  test(`${name}: the Planner's own permission denials are not in its conversation`, async ({ browser }) => {
     const ctx = await browser.newContext({ viewport });
     const page = await ctx.newPage();
     const denied = { type: 'permission_denied', tool: 'Read', detail: 'Permission to use Read has been denied because Claude Code is running in don\'t ask mode. '.repeat(8), time: now - 60000, uuid: 'pc-d1' };
+    const answer = { type: 'text', detail: 'iso 看过了', time: now - 50000, uuid: 'pc-t1' };
     const mock = await startMockServer({
-      ws: true, plannerEvents: [denied], tasks: { tasks: [] }, inbox: { open: [], closed: [], counts: { open: 0, badge: 0 } }, systemHealth: health(),
+      ws: true, plannerEvents: [denied, answer], tasks: { tasks: [] }, inbox: { open: [], closed: [], counts: { open: 0, badge: 0 } }, systemHealth: health(),
       planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
     });
     try {
       await page.goto(mock.url + '/dashboard');
       await waitForWs(page, 'CONNECTED');
       await page.click('#abnav-planner');
-      const row = page.locator('#pl-stream .event.permission_denied .event-content');
-      await expect(row).toContainText('权限拒绝');
-      const [r, col] = await Promise.all([row.boundingBox(), page.locator('#pl-stream').boundingBox()]);
-      expect(r.x).toBeGreaterThanOrEqual(col.x);
-      expect(r.x + r.width).toBeLessThanOrEqual(col.x + col.width + 1);
+      await expect(page.locator('#pl-stream .event.text')).toContainText('iso 看过了');
+      await expect(page.locator('#pl-stream .event.permission_denied')).toHaveCount(0);
+      await expect(page.locator('#pl-stream')).not.toContainText('权限拒绝');
       await page.screenshot({ path: test.info().outputPath(`planner-denied-${name}.png`) });
     } finally {
       await ctx.close();

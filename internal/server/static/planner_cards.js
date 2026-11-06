@@ -18,7 +18,7 @@
 // listed state. Task titles come from the 任务 list (tasks.js 'tasks:list').
 import { NZ_CONTRACT } from './contract.js';
 import { sessionList } from './state.js';
-import { HEALTH_STATES, esc, escAttr, evidenceText, fetchJSON, nzBus, sessionHealthState } from './nz_util.js';
+import { HEALTH_STATES, esc, escAttr, evidenceText, fetchJSON, nzBus, sessionHealthState, sessionTitleText } from './nz_util.js';
 import { sid } from './session_ident.js';
 import { formatAbsTime, formatMonthDayTime, timeAgo } from './utilities.js';
 
@@ -27,6 +27,9 @@ const HEALTH_MIN_MS = 20000;
 // MAX_CARDS bounds the session cards under one bubble.
 const MAX_CARDS = 6;
 const TASK_KEY_RE = /\btask:[A-Za-z0-9_-]+/g;
+// SESSION_KEY_RE is a dashboard or IM session's key ({platform}:{chatType}:
+// {chatID}:{agentId}) the Planner wrote out: it becomes the session's card.
+const SESSION_KEY_RE = /\b(?:dashboard|feishu|slack|discord|weixin):[a-z]+:[\w.#@-]+:[\w-]+/g;
 // WORKSPACE_ID_RE is a workspace registry ID (planner/workspace), named by
 // GET /api/planner's workspaces.
 const WORKSPACE_ID_RE = /^ws_[a-z0-9]{8}$/;
@@ -49,7 +52,7 @@ const pc = {
 // listedTitle is a listed local session's name, '' for one not listed.
 function listedTitle(key) {
   const s = sessionList.sessionsData[sid(key, 'local')];
-  return (s && (s.user_label || s.summary || s.last_prompt)) || '';
+  return sessionTitleText(s);
 }
 
 // KIND_NAMES name a unit nothing else names by its kind (D92): never its key.
@@ -103,16 +106,14 @@ function healthOf(key, s) {
 }
 
 // sessionStatusHtml is a session's one status line: 名字 · 健康状态 · 最后活动
-// (and what it is doing while it runs); withName false leaves the name to a
-// heading that already says it.
+// (none while it runs: the state says it, and the tool it is in is not
+// news here); withName false leaves the name to a heading that already says it.
 export function sessionStatusHtml(key, withName = true) {
   const s = sessionList.sessionsData[sid(key, 'local')];
   const st = healthOf(key, s);
   const u = pc.health.get(key);
   const last = (u && u.last_active && Date.parse(u.last_active)) || (s && s.last_active) || 0;
-  let tail = '';
-  if (s && s.state === 'running' && s.last_activity) tail = s.last_activity;
-  else if (last) tail = '最后活动 ' + timeAgo(last);
+  const tail = last && !(s && s.state === 'running') ? '最后活动 ' + timeAgo(last) : '';
   return (withName ? '<span class="pl-scard-name">' + esc(sessionTitle(key)) + '</span>' : '') +
     (st ? '<span class="hl-state ' + st.cls + '"' + (u && u.evidence ? ' title="' + escAttr(evidenceText(u.evidence, u.error_class)) + '"' : '') + '>' + esc(st.label) + '</span>' : '') +
     (tail ? '<span class="pl-scard-time"' + (last ? ' title="' + escAttr(formatAbsTime(last)) + '"' : '') + '>' + esc(tail) + '</span>' : '');
@@ -171,7 +172,8 @@ export async function refreshHealth(root, force) {
 }
 
 // mentionedKeys lists the sessions a bubble names: the sender of a report,
-// then `task:` keys and listed local sessions' keys in its text.
+// then `task:` keys, other session keys (SESSION_KEY_RE) and listed local
+// sessions' keys in its text.
 function mentionedKeys(ev) {
   const keys = [];
   const add = (k) => { if (k && k !== PLANNER_KEY && !keys.includes(k)) keys.push(k); };
@@ -180,6 +182,7 @@ function mentionedKeys(ev) {
   const text = content ? content.textContent : '';
   if (!text) return keys;
   for (const m of text.matchAll(TASK_KEY_RE)) add(m[0]);
+  for (const m of text.matchAll(SESSION_KEY_RE)) add(m[0]);
   for (const s of Object.values(sessionList.sessionsData)) {
     if (s && s.key && (s.node || 'local') === 'local' && text.includes(s.key)) add(s.key);
   }
@@ -318,7 +321,28 @@ function decorateEvent(ev, turn) {
   if (keys.length) {
     ev.querySelector('.event-content')?.insertAdjacentHTML('beforeend', '<div class="pl-scards">' + keys.map(sessionCardHtml).join('') + '</div>');
   }
-  if (ev.matches('.text')) foldKeys(ev, new Set([...carded, ...keys, ...named.filter((k) => turn.has(k))]));
+  if (ev.matches('.text')) {
+    const folded = new Set([...carded, ...keys, ...named.filter((k) => turn.has(k))]);
+    foldKeys(ev, folded);
+    foldTextKeys(ev, folded);
+  }
+}
+
+// foldTextKeys puts a session's name where a reply wrote its key out as
+// plain text (not in code): the card under the reply opens it.
+function foldTextKeys(ev, keys) {
+  const content = ev.querySelector('.event-content');
+  if (!content || !keys.size) return;
+  const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => (n.parentElement?.closest('pre, code, .pl-scards, .pl-handoff, .pl-act') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+  });
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const n of nodes) {
+    let t = n.data;
+    for (const k of keys) if (t.includes(k)) t = t.split(k).join(sessionTitle(k));
+    if (t !== n.data) n.data = t;
+  }
 }
 
 // emptyBracketRE is a bracket the folded keys emptied: "（`a` 和 `b`）".

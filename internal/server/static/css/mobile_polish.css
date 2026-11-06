@@ -33,6 +33,9 @@
   .earlier-events-btn{min-height:36px}
   /* The Planner's cards: × closes an item, 停止 and the task state menu. */
   .pl-close,.pl-btn,.tk-menu{min-width:44px;min-height:44px}
+  /* The session header's custody switch and custody's 撤回. */
+  button.custody-chip{min-height:32px}
+  .custody-undo{min-height:44px;padding:0 8px}
 }
 
 /* ---- Track B: font-size floors to prevent iOS Safari auto-zoom on focus ---- */
@@ -233,6 +236,12 @@
 .ask-submit{background:var(--nz-accent);color:var(--nz-bg-0);border:none;border-radius:var(--nz-radius-ms);padding:8px 18px;font-size:var(--nz-fs-sm2);font-weight:500;cursor:pointer;font:inherit;transition:opacity .15s}
 .ask-submit[disabled]{opacity:.4;cursor:not-allowed}
 .ask-status{margin-top:10px;font-size:var(--nz-fs-sm);color:var(--nz-text-faint);padding-top:8px;border-top:1px dashed var(--nz-bg-2);word-break:break-word;overflow-wrap:anywhere}
+/* An answered card is one line: 提问 · 已回答：<选择> (the question in its title). */
+.event.ask_question.ask-done .ask-card{display:flex;flex-wrap:wrap;align-items:baseline;gap:0 8px;padding:6px 12px}
+.event.ask_question.ask-done :is(.ask-q-group,.ask-submit-row){display:none}
+.event.ask_question.ask-done .ask-title{margin:0}
+.event.ask_question.ask-done .ask-status{margin:0;padding:0;border:0;display:flex;flex-wrap:wrap;align-items:baseline;gap:0 4px}
+.ask-choice{font-weight:600;color:var(--nz-text)}
 @media (pointer: coarse){
   .ask-opt{padding:10px 12px}
   .ask-submit{min-height:36px;padding:8px 16px}

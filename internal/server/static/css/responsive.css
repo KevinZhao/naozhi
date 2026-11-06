@@ -29,12 +29,19 @@
      a bare display:block would override the UA's [hidden]{display:none}. */
   #abnav-settings-badge:not([hidden]){display:block}
   .ab-top,.ab-bottom{display:contents}
-  /* In an open conversation, hide the bottom tab bar and reclaim its space so
-     the chat history gets full height. The ← back button in the main header
-     returns to the session list, where the tab bar reappears. Cron/settings
-     views do NOT set mobile-chat-view, so the bar stays visible for nav. */
-  body.mobile-chat-view .activity-bar{display:none}
-  body.mobile-chat-view .main{padding-bottom:0}
+  /* An open conversation keeps the bottom tab bar, so another view is one
+     tap away; it gives way to the on-screen keyboard. */
+  body.kbd-open .activity-bar{display:none}
+  body.kbd-open .main{padding-bottom:0}
+  /* The ▲▼ jump pill sits over the latest messages on a phone. */
+  .nav-pill{display:none!important}
+  /* The header's branch chip: the name and the state take the width. */
+  .main-header .detail-git{display:none}
+  /* A group of one session shows no header: the card names the group. */
+  .section-header.sh-single{display:none}
+  .session-card .sc-group{display:inline;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--nz-fs-xs);color:var(--nz-text-faint)}
+  /* Unfolded, the tasks in progress come before what waits on you. */
+  .pl-left-body > .pl-group:has(#pl-task){order:-1}
   .ab-nav{width:auto;flex:1;max-width:120px;height:46px}
   /* "自动化" is 3 chars — keep the label on one line in a 4-tab bar. */
   .ab-nav-label{white-space:nowrap}
@@ -78,8 +85,9 @@
   .planner-main.pl-left-open .pl-left-toggle svg{transform:rotate(180deg)}
   .pl-left .pl-left-body{display:none}
   .planner-main.pl-left-open .pl-left .pl-left-body{display:flex;padding-top:4px}
-  .pl-head{height:44px;gap:8px;padding:0 16px}
-  .pl-paused-l,.pl-paused>[aria-hidden],.pl-paused>button{display:none}
+  .pl-head{height:44px;gap:6px;padding:0 12px}
+  /* The header says 已暂停到 …; 恢复 is in "⋯". */
+  .pl-paused>[aria-hidden],.pl-paused>button{display:none}
   .pl-note{margin:10px 12px 0}
   .pl-brief{max-width:100%;padding:0 12px}
   .pl-composer{padding:6px 12px 10px}
@@ -196,7 +204,7 @@
   .main-header .detail-runstats{display:none}
   /* The custody chip keeps its state; why it stopped is in its title. */
   .main-header .detail-custody .custody-chip-why{display:none}
-  .main-header .detail-custody .custody-chip{padding:2px 8px;min-height:24px}
+  .main-header .detail-custody .custody-chip{padding:2px 8px}
   .session-card .btn-dismiss{top:6px;right:8px;min-width:32px;min-height:32px;font-size:var(--nz-fs-lg);display:flex;align-items:center;justify-content:center;opacity:.75}
   .btn-icon{width:40px;height:40px}
   .input-row #msg-input{font-size:var(--nz-fs-md)} /* prevents iOS zoom on focus */

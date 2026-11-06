@@ -41,7 +41,7 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
       await waitForWs(page, 'CONNECTED');
       await page.click('#abnav-planner');
       if (name === 'mobile') {
-        await expect(page.locator('#pl-left-toggle')).toHaveText('通知 · 任务');
+        await expect(page.locator('#pl-left-toggle')).toHaveText('等你 0 · 任务 1');
         await page.click('#pl-left-toggle');
       }
       const group = page.locator('#pl-task');

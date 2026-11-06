@@ -4,7 +4,7 @@ import { registerShell } from './shell.js';
 import { sessionStream } from './session_stream.js';
 import { WS_STATES, wsm } from './ws_manager.js';
 import { composer, perSession, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
-import { esc, escAttr, fetchJSON, showToast, trapFocus, nzBus, nzViews, registerActions, sessionExitChipHtml } from './nz_util.js';
+import { esc, escAttr, fetchJSON, showToast, trapFocus, nzBus, nzViews, registerActions, sessionExitChipHtml, sessionTitleText } from './nz_util.js';
 import { onAskOptionToggle, onAskSubmit } from './ask_card.js';
 import { eventIdentityKey, fetchEvents, hasMoreHeader, memoryOnlyHeader, renderEvents } from './event_stream.js';
 import { fetchSessionRuns, setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderPRChip, setHeaderSpawnDiagChip } from './session_header.js';
@@ -682,7 +682,9 @@ document.addEventListener('keydown', function(e) {
   // Overlays with their own Esc trapFocus handling take precedence.
   if (document.querySelector('.modal-overlay, .cmd-palette-overlay')) return;
   const tag = (e.target.tagName || '').toLowerCase();
-  if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+  // The history popover's own search box closes it too, as a drawer's would.
+  const inPopover = !!(ui.activePopover && ui.activePopover.contains(e.target));
+  if (!inPopover && (tag === 'input' || tag === 'textarea' || e.target.isContentEditable)) return;
   let closed = false;
   if (escCloseVoiceOverlay()) closed = true;
   if (ui.activePopover) { closeHistoryPopover(); closed = true; }
@@ -1029,7 +1031,7 @@ function mainHeaderHtml(s) {
   const agentIsGeneric = !s.agent || s.agent === 'general';
   // Primary title: user_label (operator-set rename) > summary > latest prompt
   // > agent name > key tail.
-  const displayName = s.user_label || s.summary || s.last_prompt || (agentIsGeneric ? '' : s.agent) || keyTailDisplay(keyParts) || selection.key || '';
+  const displayName = sessionTitleText(s) || (agentIsGeneric ? '' : s.agent) || keyTailDisplay(keyParts) || selection.key || '';
 
   // Detail line: CLI label + model on the left, then the IM origin chip (real
   // IM threads only), exit chip, git/PR mounts, effort/diag mounts, turn timer

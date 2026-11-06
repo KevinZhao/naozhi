@@ -14,13 +14,16 @@ import (
 // it so the dashboard keeps showing the failure and its reason.
 func TestHandleList_Health(t *testing.T) {
 	since := time.UnixMilli(1_700_000_000_000)
-	r := newListRouter("dashboard:direct:a:general", "dashboard:direct:b:general", "dashboard:direct:c:general", "dashboard:direct:d:general")
+	r := newListRouter("dashboard:direct:a:general", "dashboard:direct:b:general", "dashboard:direct:c:general", "dashboard:direct:d:general",
+		"dashboard:direct:e:general", "dashboard:direct:f:general")
 	h := newETagTestHandlers(t, r, noNodeAccessor{})
 	h.deps.Health = func() health.Snapshot {
 		return health.Snapshot{Units: []health.Unit{
 			{ID: "dashboard:direct:a:general", State: health.Failed, Evidence: health.DeathEvidence + "cli_exited_code_-1", ErrClass: health.ErrOther, Since: since},
 			{ID: "dashboard:direct:b:general", State: health.Failed, Evidence: "last turn ended in an API error", ErrClass: health.ErrAuth, Since: since},
 			{ID: "dashboard:direct:c:general", State: health.Idle, Since: since},
+			{ID: "dashboard:direct:e:general", State: health.Active, Evidence: health.TaskEvidence + `"sleep 300" running`, Since: since},
+			{ID: "dashboard:direct:f:general", State: health.Active, Evidence: "turn in progress", Since: since},
 		}}
 	}
 	rec := doList(h, "")
@@ -40,6 +43,9 @@ func TestHandleList_Health(t *testing.T) {
 		"dashboard:direct:b:general": {State: "failed", Since: ms, ErrClass: "auth"},
 		"dashboard:direct:c:general": {State: "idle", Since: ms},
 		"dashboard:direct:d:general": nil,
+		// A background task outlives its turn: the row says it runs.
+		"dashboard:direct:e:general": {State: "active", Since: ms, BackgroundTask: true},
+		"dashboard:direct:f:general": {State: "active", Since: ms},
 	}
 	if len(body.Sessions) != len(want) {
 		t.Fatalf("got %d sessions, want %d", len(body.Sessions), len(want))
