@@ -14,7 +14,9 @@ import (
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/activity"
+	"github.com/naozhi/naozhi/internal/planner/custody"
 	"github.com/naozhi/naozhi/internal/planner/journal"
+	"github.com/naozhi/naozhi/internal/planner/note"
 	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/textutil"
@@ -40,17 +42,38 @@ type doneItem struct {
 	At    time.Time
 	Files int
 	PRs   []string // PR URLs, in the order first seen
+	// Recovered is set when the unit failed in the window and finished
+	// after it; Retries are the retries custody sent it.
+	Recovered bool
+	Retries   int
 }
 
 type failedItem struct {
 	ref
-	At        time.Time
-	Class     health.ErrorClass
-	Recovered bool // the unit is active or idle again
+	At    time.Time
+	Class health.ErrorClass
+	// Stopped is set when custody gave up on the unit in the window.
+	Stopped bool
 }
+
+type routineItem struct {
+	ref
+	At        time.Time
+	FirstLine string
+}
+
+// custodyTally is what custody did in the window (its journal): Retries
+// sent and the units they brought back (Recovered) or that it stopped on
+// (Stopped), and the cards it answered as recommended.
+type custodyTally struct {
+	Retries, Recovered, Stopped, Answered int
+}
+
+func (c custodyTally) any() bool { return c.Retries+c.Stopped+c.Answered > 0 }
 
 type inboxItem struct {
 	ref
+	ID      string
 	Kind    notify.Kind
 	Title   string
 	Why     string
@@ -80,18 +103,36 @@ type input struct {
 	// StaleDeadlines counts the Asana tasks overdue past staleDays, folded
 	// into one line.
 	StaleDeadlines int
-	Done           []doneItem
-	Failed         []failedItem
-	Waiting        []inboxItem
-	Errors         []inboxItem
-	Tasks          []taskItem
-	Held           []heldItem
+	// Midway is when the Midway credential expires, set only when that is
+	// before 09:00 today (or past).
+	Midway  time.Time
+	Done    []doneItem
+	Failed  []failedItem
+	Custody custodyTally
+	// Routines are the cron jobs whose latest successful result changed;
+	// Unchanged counts the ones whose did not.
+	Routines  []routineItem
+	Unchanged int
+	// Waiting (questions, decisions) and Errors are the open items the
+	// badge counts; the brief only counts them (D5).
+	Waiting []inboxItem
+	Errors  []inboxItem
+	// Notices are the open notices the brief carries (§15.1, D5), closed
+	// once it is sent.
+	Notices []inboxItem
+	Tasks   []taskItem
+	Held    []heldItem
 }
 
 func (in input) counts() Counts {
-	return Counts{Meetings: len(in.Meetings), Replies: len(in.Replies), Deadlines: len(in.Deadlines),
+	c := Counts{Meetings: len(in.Meetings), Replies: len(in.Replies), Deadlines: len(in.Deadlines),
 		Done: len(in.Done), Failed: len(in.Failed), Waiting: len(in.Waiting), Errors: len(in.Errors),
-		Tasks: len(in.Tasks), Planner: len(in.Held)}
+		Tasks: len(in.Tasks), Planner: len(in.Held), Routines: len(in.Routines), Notices: len(in.Notices),
+		Custody: in.Custody.Retries + in.Custody.Stopped + in.Custody.Answered}
+	if !in.Midway.IsZero() {
+		c.Midway = 1
+	}
+	return c
 }
 
 // healthData is the part of a health journal entry's data the brief reads
@@ -112,16 +153,21 @@ type seen struct {
 	prs      []string
 	failed   *healthData
 	failedAt time.Time
+	// What custody did to the unit: retries sent, and whether it stopped.
+	retries int
+	stopped bool
 }
 
 // gather collects the brief's items for the window since..now. Units
 // without a workspace are left out, as everywhere the gateway reports
 // (§3.8), and so is the Planner's own namespace. Finished means a turn
-// ended (a health transition from active to idle, an output, or an idle
-// unit last active in the window) and the unit is not running, waiting or
-// failed now; routine units (cron, daemons) and terminal sessions only
-// count when they fail. A unit that failed in the window is listed as
-// failed only.
+// ended (a health transition from active to idle, or an output: a restart
+// dates no turn) and the unit is not running, waiting or failed now;
+// routine units (cron, daemons) and terminal sessions only count when they
+// fail, and a dispatched session that failed or that the user stopped does
+// not count. A unit that failed in the window is listed as failed while it
+// is not healthy again; once it is, as finished if it finished after the
+// failure, with what custody did for it.
 func (b *Briefer) gather(since, now time.Time) input {
 	in := input{Now: now, Since: since}
 	var snap health.Snapshot
@@ -181,18 +227,41 @@ func (b *Briefer) gather(since, now time.Time) input {
 				} else if !slices.Contains(s.prs, a.URL) {
 					s.prs = append(s.prs, a.URL)
 				}
+			case journal.KindCustody:
+				var d note.CustodyData
+				if json.Unmarshal(e.Data, &d) != nil {
+					continue
+				}
+				switch {
+				case d.Event == "sent" && d.Reason == string(custody.ReasonRetry):
+					at(e.Unit, e.WS, "").retries++
+					in.Custody.Retries++
+				case d.Event == "sent" && d.Reason == string(custody.ReasonSuggested):
+					in.Custody.Answered++
+				case d.Event == "stopped":
+					if s := at(e.Unit, e.WS, ""); !s.stopped {
+						s.stopped = true
+						in.Custody.Stopped++
+					}
+				}
 			}
 		}
 	}
-	for _, u := range snap.Units {
-		if u.State == health.Idle && !u.LastActive.Before(since) && !u.LastActive.After(now) {
-			s := at(u.ID, u.Workspace, u.Kind)
-			s.doneAt = later(s.doneAt, u.LastActive)
+
+	var tasks []task.Task
+	if b.cfg.Tasks != nil {
+		tasks = b.cfg.Tasks()
+	}
+	// The dispatched sessions that failed or that the user stopped did not
+	// finish, whatever their turns did.
+	unfinished := map[string]bool{}
+	for _, t := range tasks {
+		if t.Kind == task.KindSession && (t.State == task.Failed || t.State == task.Done && t.By == task.ByUser && t.Why == task.StoppedWhy) {
+			unfinished[t.ID] = true
 		}
 	}
 
 	wsNames := b.workspaceNames()
-	failedUnits := map[string]bool{}
 	for id, s := range units {
 		u, live := cur[id]
 		ws, kind := s.ws, cmp.Or(health.Kind(s.kind), kindOf(id))
@@ -203,26 +272,31 @@ func (b *Briefer) gather(since, now time.Time) input {
 			continue
 		}
 		r := b.ref(id, kind, cmp.Or(wsNames[ws], ws))
-		if s.failed != nil {
-			failedUnits[id] = true
-			in.Failed = append(in.Failed, failedItem{ref: r, At: s.failedAt, Class: s.failed.ErrClass,
-				Recovered: live && (u.State == health.Active || u.State == health.Idle)})
+		recovered := s.failed != nil && live && (u.State == health.Active || u.State == health.Idle)
+		if recovered && s.retries > 0 {
+			in.Custody.Recovered++
+		}
+		if s.failed != nil && !recovered {
+			in.Failed = append(in.Failed, failedItem{ref: r, At: s.failedAt, Class: s.failed.ErrClass, Stopped: s.stopped})
 			continue
 		}
-		if s.doneAt.IsZero() || kind == health.KindCron || kind == health.KindSysession || kind == health.KindExternal {
+		if s.doneAt.IsZero() || recovered && !s.doneAt.After(s.failedAt) || unfinished[id] ||
+			kind == health.KindCron || kind == health.KindSysession || kind == health.KindExternal {
 			continue
 		}
 		if live && u.State != health.Idle && u.State != health.Unknown {
 			continue
 		}
-		in.Done = append(in.Done, doneItem{ref: r, At: s.doneAt, Files: len(s.files), PRs: s.prs})
+		in.Done = append(in.Done, doneItem{ref: r, At: s.doneAt, Files: len(s.files), PRs: s.prs, Recovered: recovered, Retries: s.retries})
 	}
 
 	if b.cfg.Inbox != nil {
 		for _, it := range b.cfg.Inbox() {
-			// A notice is already a card on the Planner page; the brief
-			// repeats only what waits on the user and the errors.
-			if it.State != notify.StateOpen || !it.Kind.WaitsOnUser() && it.Kind != notify.KindError {
+			// What waits on the user, the errors and the notices the brief
+			// carries: not the ones that close themselves (a condition, a
+			// task done until the session is opened) nor a promise's
+			// reminder, which 未完成的任务 lists.
+			if it.State != notify.StateOpen || it.Kind == notify.KindNotice && (it.AutoClose || strings.HasPrefix(it.Source, "promise:")) {
 				continue
 			}
 			kind := kindOf(it.Unit)
@@ -230,18 +304,36 @@ func (b *Briefer) gather(since, now time.Time) input {
 				kind = u.Kind
 			}
 			r := ref{WS: cmp.Or(wsNames[it.WS], it.WS)}
-			if it.Unit != "" {
+			// The Planner's own items need no link: the brief is on its page.
+			if it.Unit != "" && !sessionkey.IsPlannerNSKey(it.Unit) {
 				r = b.ref(it.Unit, kind, r.WS)
 			}
-			item := inboxItem{ref: r, Kind: it.Kind, Title: it.Title, Why: it.Why, Created: it.Created}
+			item := inboxItem{ref: r, ID: it.ID, Kind: it.Kind, Title: it.Title, Why: it.Why, Created: it.Created}
 			switch {
 			case it.Kind.WaitsOnUser():
 				in.Waiting = append(in.Waiting, item)
-			case it.Unit != "" && failedUnits[it.Unit] && it.Source == "failed:"+it.Unit:
-				// Already listed under 失败的.
+			case it.Kind == notify.KindNotice:
+				in.Notices = append(in.Notices, item)
 			default:
 				in.Errors = append(in.Errors, item)
 			}
+		}
+	}
+
+	if b.cfg.Routines != nil {
+		for _, rt := range b.cfg.Routines(since, now) {
+			if !rt.Changed {
+				in.Unchanged++
+				continue
+			}
+			in.Routines = append(in.Routines, routineItem{ref: b.ref(rt.Unit, health.KindCron, ""), At: rt.At, FirstLine: rt.FirstLine})
+		}
+	}
+
+	if b.cfg.Midway != nil {
+		y, m, d := now.Date()
+		if exp := b.cfg.Midway(); !exp.IsZero() && exp.Before(time.Date(y, m, d, midwayBy, 0, 0, 0, now.Location())) {
+			in.Midway = exp
 		}
 	}
 
@@ -249,7 +341,7 @@ func (b *Briefer) gather(since, now time.Time) input {
 	// (§15.4), and the live dispatched sessions waiting on the user or
 	// failed; one only in progress is not news.
 	if b.cfg.Tasks != nil {
-		for _, t := range b.cfg.Tasks() {
+		for _, t := range tasks {
 			switch {
 			case t.State == task.Done || t.State == task.Remind:
 				continue
@@ -282,6 +374,8 @@ func (b *Briefer) gather(since, now time.Time) input {
 	oldest := func(x, y inboxItem) int { return cmp.Or(x.Created.Compare(y.Created), cmp.Compare(x.Title, y.Title)) }
 	slices.SortFunc(in.Waiting, oldest)
 	slices.SortFunc(in.Errors, oldest)
+	slices.SortFunc(in.Notices, oldest)
+	slices.SortFunc(in.Routines, func(x, y routineItem) int { return newest(x.At, y.At, x.Name, y.Name) })
 	return in
 }
 
@@ -368,7 +462,37 @@ func render(in input) string {
 	var b strings.Builder
 	// No title: the card the dashboard shows it in already names the brief
 	// and its day.
-	fmt.Fprintf(&b, "自 %s 以来：%s\n", in.Since.In(loc).Format(stamp), summary(c, "未关闭的错误"))
+	// 等你 is one line, counted as the badge counts (D5): the items are in
+	// 等你, the brief only says how many of each kind there are.
+	waits := ""
+	if n := c.Waiting + c.Errors; n > 0 {
+		per := map[notify.Kind]int{notify.KindError: c.Errors}
+		for _, it := range in.Waiting {
+			per[it.Kind]++
+		}
+		var kinds []string
+		for _, k := range []notify.Kind{notify.KindQuestion, notify.KindDecision, notify.KindError} {
+			if per[k] > 0 {
+				kinds = append(kinds, fmt.Sprintf("%s %d", kindLabels[k], per[k]))
+			}
+		}
+		waits = fmt.Sprintf("等你 %d 条（%s），见「等你」", n, strings.Join(kinds, " · "))
+	}
+	if sum := summary(c, false); sum != "" {
+		fmt.Fprintf(&b, "自 %s 以来：%s\n", in.Since.In(loc).Format(stamp), sum)
+		if waits != "" {
+			b.WriteString("\n" + waits + "\n")
+		}
+	} else {
+		fmt.Fprintf(&b, "自 %s 以来：%s\n", in.Since.In(loc).Format(stamp), waits)
+	}
+	if !in.Midway.IsZero() {
+		if exp := in.Midway.In(loc); exp.After(in.Now) {
+			fmt.Fprintf(&b, "\nMidway 凭证 %s 到期，先 mwinit 再开始\n", exp.Format("15:04"))
+		} else {
+			fmt.Fprintf(&b, "\nMidway 凭证已于 %s 过期，先 mwinit 再开始\n", exp.Format(stamp))
+		}
+	}
 
 	section(&b, "今天的日程", in.Meetings, func(m meetingItem) string {
 		line := "全天"
@@ -410,27 +534,58 @@ func render(in input) string {
 		if len(outs) > 0 {
 			line += " · 产出 " + strings.Join(outs, "、")
 		}
+		switch {
+		case d.Recovered && d.Retries > 0:
+			line += fmt.Sprintf(" · 托管重试 %d 次后恢复", d.Retries)
+		case d.Recovered:
+			line += " · 出错后已恢复"
+		}
 		return line
 	})
 	section(&b, "失败的", in.Failed, func(f failedItem) string {
 		line := link(f.Name, f.Link) + wsPart(f.WS) + " · " + f.At.In(loc).Format(stamp)
-		if f.Class != health.ErrNone && f.Class != health.ErrOther {
+		switch {
+		case f.Class == health.ErrRateLimit:
+			line += " · 限流，托管不重试"
+		case f.Class != health.ErrNone && f.Class != health.ErrOther:
 			line += " · " + notify.ClassLabel(f.Class)
 		}
-		if f.Recovered {
-			line += " · 已恢复"
+		if f.Stopped {
+			line += " · 托管已停"
 		}
 		return line
 	})
-	item := func(it inboxItem) string {
-		line := cmp.Or(kindLabels[it.Kind], string(it.Kind)) + " · " + link(textutil.TruncateRunes(it.Title, titleRunes), it.Link)
+	if c := in.Custody; c.any() {
+		var parts []string
+		if c.Retries > 0 {
+			parts = append(parts, fmt.Sprintf("重试 %d 次（恢复 %d、停下 %d）", c.Retries, c.Recovered, c.Stopped))
+		} else if c.Stopped > 0 {
+			parts = append(parts, fmt.Sprintf("停下 %d 个", c.Stopped))
+		}
+		if c.Answered > 0 {
+			parts = append(parts, fmt.Sprintf("代答 %d 次", c.Answered))
+		}
+		fmt.Fprintf(&b, "\n托管：%s\n", strings.Join(parts, "、"))
+	}
+	section(&b, "例行任务有变化", in.Routines, func(r routineItem) string {
+		line := link(r.Name, r.Link) + " · " + r.At.In(loc).Format(stamp)
+		if r.FirstLine != "" {
+			line += " · " + plain(r.FirstLine)
+		}
+		return line
+	})
+	if n := in.Unchanged; n > 0 && len(in.Routines) > 0 {
+		fmt.Fprintf(&b, "- 另有 %d 个例行任务结果没变\n", n)
+	} else if n > 0 {
+		fmt.Fprintf(&b, "\n例行任务 %d 个，结果都没变\n", n)
+	}
+	section(&b, "通知", in.Notices, func(it inboxItem) string {
+		line := link(textutil.TruncateRunes(it.Title, titleRunes), it.Link)
 		if it.Why != "" {
 			line += " · " + plain(it.Why)
 		}
-		return line + wsPart(it.WS) + " · 已等 " + ago(in.Now.Sub(it.Created))
-	}
-	section(&b, "仍在等你的", in.Waiting, item)
-	section(&b, "未关闭的错误", in.Errors, item)
+		return line + wsPart(it.WS) + " · " + it.Created.In(loc).Format(stamp)
+	})
 	section(&b, "未完成的任务", in.Tasks, func(t taskItem) string {
 		line := link(textutil.TruncateRunes(t.Name, titleRunes), t.Link) + " · " + taskKinds[t.Kind] + " · " + taskStates[t.State]
 		if !t.Due.IsZero() {
@@ -462,15 +617,21 @@ func section[T any](b *strings.Builder, title string, items []T, line func(T) st
 	}
 }
 
-// summary is the counts as one line, the zero ones left out; errors names
-// the error count.
-func summary(c Counts, errors string) string {
+// summary is the counts as one line, the zero ones left out. The brief
+// gives 等你 a line of its own; the push, its text only this line, counts it
+// here (questions, decisions and errors, as the badge does).
+func summary(c Counts, push bool) string {
+	waits := 0
+	if push {
+		waits = c.Waiting + c.Errors
+	}
 	var parts []string
 	for _, p := range []struct {
 		label string
 		n     int
 	}{{"今天日程", c.Meetings}, {"等你回复", c.Replies}, {"Asana 到期", c.Deadlines},
-		{"完成", c.Done}, {"失败", c.Failed}, {"等你", c.Waiting}, {errors, c.Errors}, {"未完成的任务", c.Tasks}, {"Planner 记下", c.Planner}} {
+		{"完成", c.Done}, {"失败", c.Failed}, {"例行任务有变化", c.Routines}, {"等你", waits},
+		{"通知", c.Notices}, {"未完成的任务", c.Tasks}, {"Planner 记下", c.Planner}} {
 		if p.n > 0 {
 			parts = append(parts, fmt.Sprintf("%s %d", p.label, p.n))
 		}
@@ -479,7 +640,7 @@ func summary(c Counts, errors string) string {
 }
 
 // pushBody is the notification's text: the counts, nothing from the items.
-func pushBody(c Counts) string { return summary(c, "错误") }
+func pushBody(c Counts) string { return summary(c, true) }
 
 func link(text, href string) string {
 	text = plain(text)

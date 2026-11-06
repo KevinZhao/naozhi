@@ -292,7 +292,6 @@ func TestSources(t *testing.T) {
 			Unit: health.Unit{ID: id, Workspace: "ws_1", State: health.Failed, ErrClass: health.ErrAuth, Since: now}}})
 	}
 	n.HandleHealth(health.Event{At: now, Fault: &health.Fault{Class: health.ErrAuth, Units: []string{"b", "c"}}})
-	n.HandleHealth(health.Event{At: now, Fault: &health.Fault{Class: health.ErrAuth, Resolved: true}})
 	check("failed:a", "systemic:auth")
 	if got := b.titles(); !slices.Equal(got, []string{"a 失败", "系统性故障：凭证 / 权限拒绝"}) {
 		t.Errorf("pushes = %v", got)
@@ -304,6 +303,9 @@ func TestSources(t *testing.T) {
 	if b.count != (Counts{Open: 2, Badge: 2}) {
 		t.Errorf("inbox counts = %+v, want 2 open errors, both on the badge", b.count)
 	}
+	// The fault resolved closes its item; the unit's failure stays.
+	n.HandleHealth(health.Event{At: now, Fault: &health.Fault{Class: health.ErrAuth, Resolved: true}})
+	check("failed:a")
 }
 
 // A failed unit's reason is its error class, or none when the class says

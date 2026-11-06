@@ -85,6 +85,9 @@ func (n *Notifier) Run(ctx context.Context) {
 		n.Add(Item{Kind: KindNotice, Level: LevelTimely, Source: "crash:" + n.cfg.Clock.Now().Format(time.RFC3339),
 			Title: "naozhi 上次异常退出", Why: "上次运行没有正常结束，已重新启动"})
 	}
+	if n.upgraded != nil {
+		n.Add(*n.upgraded)
+	}
 	n.safely("check", n.Check)
 	tick := time.NewTicker(Interval)
 	defer tick.Stop()
@@ -120,7 +123,8 @@ type condition struct {
 
 // Check evaluates the level-triggered sources: sessions waiting on the user,
 // stalled workflows, stale loops and a low disk. Items whose condition
-// cleared close themselves, and held uncapped items go out once allowed.
+// cleared close themselves, as do the ones that no longer need saying
+// (settledLocked), and held uncapped items go out once allowed.
 func (n *Notifier) Check() {
 	now := n.cfg.Clock.Now()
 	var conds []condition
@@ -128,8 +132,9 @@ func (n *Notifier) Check() {
 	// Prefixes this check judged; an open auto-close item under one whose
 	// source is not among conds has cleared.
 	judged := slices.Clone(gatewaySources)
+	var snap health.Snapshot
 	if n.health != nil {
-		if snap := n.health.Snapshot(); !snap.At.IsZero() {
+		if snap = n.health.Snapshot(); !snap.At.IsZero() {
 			judged = append(judged, unitSources...)
 			var c []condition
 			c, keep = n.unitConditions(snap, now)
@@ -174,18 +179,20 @@ func (n *Notifier) Check() {
 			delete(n.condSince, src)
 		}
 	}
-	n.apply(n.settle(conds, active, judged))
+	n.apply(n.settle(snap, conds, active, judged))
 }
 
-// settle closes the open auto-close items whose condition cleared, opens
-// the conditions not open yet, nor closed by the user since they began,
-// retitles the open ones whose title changed (more loops stale), and pushes
-// the held items that may go out now.
-func (n *Notifier) settle(conds []condition, active map[string]bool, judged []string) effects {
+// settle closes the open auto-close items whose condition cleared and those
+// settledLocked finds no longer need saying, opens the conditions not open
+// yet, nor closed by the user since they began, retitles the open ones whose
+// title changed (more loops stale), and pushes the held items that may go
+// out now.
+func (n *Notifier) settle(snap health.Snapshot, conds []condition, active map[string]bool, judged []string) effects {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	fx := n.releaseLocked(n.cfg.Clock.Now())
-	var closed []journalLine
+	now := n.cfg.Clock.Now()
+	fx := n.releaseLocked(now)
+	closed := n.settledLocked(snap, now)
 	for i := range n.items {
 		it := &n.items[i]
 		if it.State == StateOpen && it.AutoClose && !active[it.Source] && underAny(it.Source, judged) {
@@ -315,18 +322,22 @@ func underAny(source string, prefixes []string) bool {
 }
 
 // HandleHealth turns a health event into an item: a unit that failed is an
-// error, and a systemic fault an urgent one; the user closes both. A failure
-// that is part of a systemic fault gets no item of its own, so the fault is
-// pushed once.
+// error, and a systemic fault an urgent one; both close themselves once it
+// recovered (the fault resolved, the unit idle again after a turn:
+// settledLocked). A failure that is part of a systemic fault gets no item of
+// its own, so the fault is pushed once. A background task done is a notice
+// (taskDone).
 func (n *Notifier) HandleHealth(ev health.Event) {
 	switch {
-	case ev.Fault != nil && !ev.Fault.Resolved:
+	case ev.Fault != nil && ev.Fault.Resolved:
+		n.closeSource(systemicPrefix + string(ev.Fault.Class))
+	case ev.Fault != nil:
 		f := ev.Fault
 		names := make([]string, 0, len(f.Units))
 		for _, id := range f.Units {
 			names = append(names, n.name(id))
 		}
-		n.Add(Item{Kind: KindError, Level: LevelUrgent, Source: "systemic:" + string(f.Class),
+		n.Add(Item{Kind: KindError, Level: LevelUrgent, Source: systemicPrefix + string(f.Class), AutoClose: true,
 			Title: "系统性故障：" + ClassLabel(f.Class),
 			Why:   fmt.Sprintf("%d 个单元出现同一类错误：%s", len(f.Units), strings.Join(names, "、"))})
 	case ev.Transition != nil && ev.Transition.Unit.State == health.Failed:
@@ -338,8 +349,10 @@ func (n *Notifier) HandleHealth(ev health.Event) {
 		if h := FailHint(u.ErrClass); h != "" && u.Kind == health.KindSession {
 			why += "；" + h
 		}
-		n.Add(Item{Kind: KindError, Level: LevelTimely, Unit: u.ID, WS: u.Workspace, Source: "failed:" + u.ID,
+		n.Add(Item{Kind: KindError, Level: LevelTimely, Unit: u.ID, WS: u.Workspace, Source: failedPrefix + u.ID, AutoClose: true,
 			Title: n.name(u.ID) + " 失败", Why: why})
+	case ev.TaskDone != nil:
+		n.taskDone(*ev.TaskDone)
 	}
 }
 

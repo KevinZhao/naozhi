@@ -1,14 +1,17 @@
 // Package brief is the morning brief, 早报 (docs/rfc/planner.md §10.1,
 // §15.1): on each weekday, at the first reconcile after 08:30 local, the
-// gateway lists what finished and what failed since the last brief and what
-// is still open in the inbox — the "等你" items (questions and decisions,
-// as the badge counts them), the unclosed errors, the notices and the 任务
-// not done (§15.4) — and, from the scout (§15.6 早报增强), today's
-// calendar, the people waiting on a reply and the Asana tasks due, with
-// what the Planner held for it (notify blocks of level brief), as short
-// Chinese Markdown, journals it (kind=brief) and pushes it once. It is
-// rendered by fixed rules from the journal, the inbox, the health snapshot
-// and the scout's state; nothing here calls a model.
+// gateway lists what finished and what failed since the last brief (with
+// what custody did about it), the cron jobs whose result changed, and what
+// is still open in the inbox — how many "等你" items wait (the left column
+// lists them), the unclosed errors, the notices (D5: the brief is where a
+// notice is read, and it closes the ones it carried) and the 任务 not done
+// (§15.4) — and, from the scout (§15.6 早报增强), today's calendar, the
+// people waiting on a reply and the Asana tasks due, with what the Planner
+// held for it (notify blocks of level brief) and a Midway credential that
+// runs out before 09:00, as short Chinese Markdown, journals it
+// (kind=brief) and pushes it once. It is rendered by fixed rules from the
+// journal, the inbox, the health snapshot, the cron run history and the
+// scout's state; nothing here calls a model.
 //
 // A day with nothing to report sends nothing. Its judgment is journaled all
 // the same, so a restart later that day does not judge it again, and the
@@ -45,6 +48,9 @@ const (
 	// journal span New reads them back from.
 	keepRecent   = 14
 	seedLookback = 21 * 24 * time.Hour
+	// midwayBy is the local hour a Midway credential expiring before it is
+	// in the brief: the morning's work would hit it.
+	midwayBy = 9
 )
 
 // journalUnit is the unit of the brief's journal entries.
@@ -61,10 +67,27 @@ type Counts struct {
 	Errors    int `json:"errors"`
 	Tasks     int `json:"tasks"`
 	Planner   int `json:"planner"`
+	// Routines are the cron jobs whose result changed, Notices the notices
+	// carried, Custody what custody sent or stopped on, and Midway 1 when
+	// the Midway credential runs out before 09:00.
+	Routines int `json:"routines,omitempty"`
+	Notices  int `json:"notices,omitempty"`
+	Custody  int `json:"custody,omitempty"`
+	Midway   int `json:"midway,omitempty"`
 }
 
 func (c Counts) total() int {
-	return c.Meetings + c.Replies + c.Deadlines + c.Done + c.Failed + c.Waiting + c.Errors + c.Tasks + c.Planner
+	return c.Meetings + c.Replies + c.Deadlines + c.Done + c.Failed + c.Waiting + c.Errors + c.Tasks + c.Planner +
+		c.Routines + c.Notices + c.Custody + c.Midway
+}
+
+// Routine is a cron job's latest successful run in the window and whether
+// its result changed from the run before (cron.Scheduler.LatestResultChange).
+type Routine struct {
+	Unit      string // cron:<job ID>
+	At        time.Time
+	Changed   bool
+	FirstLine string
 }
 
 // Mention is something the Planner holds for the next brief (a notify block
@@ -132,6 +155,15 @@ type Config struct {
 	// after a time (scout.Scout.Since); the reply_needed findings and the
 	// Asana tasks due of those since the last brief are listed.
 	Patrol func(since time.Time) []scout.Run
+	// Routines returns the cron jobs' latest successful runs in the window;
+	// the changed ones are listed, the others counted.
+	Routines func(since, until time.Time) []Routine
+	// Midway returns when the local Midway credential expires, zero when
+	// unknown; one expiring before 09:00 today is in the brief.
+	Midway func() time.Time
+	// Carried closes the notices a sent brief listed
+	// (notify.Notifier.Carried).
+	Carried func(ids []string)
 }
 
 // Briefer judges the day's brief. Check runs on Run's goroutine; Recent is
@@ -274,7 +306,15 @@ func (b *Briefer) Check() {
 	slog.Info("brief: sent", "day", br.Day, "meetings", br.Counts.Meetings, "replies", br.Counts.Replies,
 		"deadlines", br.Counts.Deadlines, "done", br.Counts.Done, "failed", br.Counts.Failed,
 		"waiting", br.Counts.Waiting, "errors", br.Counts.Errors, "tasks", br.Counts.Tasks,
-		"planner", br.Counts.Planner)
+		"planner", br.Counts.Planner, "routines", br.Counts.Routines, "notices", br.Counts.Notices,
+		"custody", br.Counts.Custody, "midway", br.Counts.Midway)
+	if b.cfg.Carried != nil && len(in.Notices) > 0 {
+		ids := make([]string, 0, len(in.Notices))
+		for _, it := range in.Notices {
+			ids = append(ids, it.ID)
+		}
+		b.cfg.Carried(ids)
+	}
 	if b.cfg.Push != nil {
 		b.cfg.Push(notify.Push{ID: "brief:" + br.Day, Kind: notify.KindNotice, Level: notify.LevelTimely,
 			Title: "早报", Body: pushBody(br.Counts)})

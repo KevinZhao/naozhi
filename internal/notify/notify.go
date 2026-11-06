@@ -203,6 +203,9 @@ type Config struct {
 	// DiskFree returns the free fraction of the Planner root's volume; nil
 	// uses statfs.
 	DiskFree func() (float64, error)
+	// Start is what this start found; a version other than the one the
+	// last start recorded is announced once Run starts (upgradeItem).
+	Start Start
 	// Midway is when this machine's Midway session expires (midway.Expiry),
 	// zero for none; nil skips the check.
 	Midway func() time.Time
@@ -218,6 +221,8 @@ type Notifier struct {
 	events chan healthEvent
 	// crashed is set when the previous run left its marker behind.
 	crashed bool
+	// upgraded is the upgrade this start made, added once Run starts.
+	upgraded *Item
 
 	browser atomic.Pointer[Browser]
 	// pausedUntil mirrors pushState.PausedUntil (Unix nanoseconds, 0 when
@@ -234,6 +239,9 @@ type Notifier struct {
 	condSince map[string]time.Time // Run goroutine: when a level-triggered condition began
 	// staleLoops (Run goroutine) are the loops the last check found stale.
 	staleLoops []string
+	// viewers are each session's viewers (dashboard connections), by when
+	// they last reported it.
+	viewers map[string]map[string]time.Time
 }
 
 // pushState is notify.json.
@@ -243,6 +251,8 @@ type pushState struct {
 	// Day (local YYYY-MM-DD) and Pushed count today's timely pushes.
 	Day    string `json:"day,omitempty"`
 	Pushed int    `json:"pushed,omitempty"`
+	// Build is the version of the last start.
+	Build string `json:"build,omitempty"`
 }
 
 type inboxFile struct {
@@ -270,6 +280,7 @@ func New(cfg Config) *Notifier {
 		deciders:  map[string]DecisionFunc{},
 		deciding:  map[string]bool{},
 		condSince: map[string]time.Time{},
+		viewers:   map[string]map[string]time.Time{},
 	}
 	if lay.Root() == "" {
 		return n
@@ -289,6 +300,12 @@ func New(cfg Config) *Notifier {
 	if st, out, err := jsonfile.Load[pushState](lay.PlannerPushStatePath(), jsonfile.Options{MaxBytes: maxBytes, Label: "push state"}); err == nil && out == jsonfile.Parsed && st.V <= Version {
 		n.st = st
 		n.pausedUntil.Store(unixNano(st.PausedUntil))
+	}
+	// A dev build is no release: it neither records nor announces one.
+	if v := cfg.Start.Version; v != "" && v != "dev" && v != n.st.Build {
+		n.upgraded = upgradeItem(n.st.Build, cfg.Start)
+		n.st.Build = v
+		n.saveStateLocked()
 	}
 	marker := lay.PlannerRunMarkerPath()
 	if _, err := os.Lstat(marker); err == nil {

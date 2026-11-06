@@ -131,6 +131,11 @@ type SessionHealth struct {
 	Since       int64  `json:"since"`
 	DeathReason string `json:"death_reason,omitempty"`
 	ErrClass    string `json:"error_class,omitempty"`
+	// Background names a background task that has run past
+	// health.LongTask and BackgroundSince is when it started (unix ms), for
+	// "后台任务 · 已跑 N 分钟"; both empty before that.
+	Background      string `json:"background,omitempty"`
+	BackgroundSince int64  `json:"background_since,omitempty"`
 }
 
 // StartupFailureView is a dead session's run of CLI startup failures, for the
