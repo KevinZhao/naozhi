@@ -316,7 +316,7 @@ func TestUndo(t *testing.T) {
 	if err != nil || got != "方案: 先跑测试 (Recommended)." {
 		t.Fatalf("Undo = %q, %v", got, err)
 	}
-	want := "task:a|撤回刚才按建议选的 方案: 先跑测试 (Recommended)，先停下等我决定"
+	want := "task:a|撤回刚才按建议选的 方案: 先跑测试，先停下等我决定"
 	if len(a.user) != 1 || a.user[0] != want || len(a.sent) != 0 {
 		t.Errorf("sent as the user %q, as custody %q; want %q", a.user, a.sent, want)
 	}

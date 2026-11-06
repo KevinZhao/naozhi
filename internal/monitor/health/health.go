@@ -508,8 +508,9 @@ func (m *Machine) Reconcile() {
 	for _, ev := range events {
 		if d := ev.TaskDone; d != nil {
 			// Not a state: only subscribers hear of it, and only of a
-			// unit that belongs to a workspace.
-			if d.Unit.Workspace != "" {
+			// local session or a unit that belongs to a workspace (a chat
+			// started in the default directory belongs to none).
+			if d.Unit.Workspace != "" || d.Unit.Kind == KindSession {
 				for _, fn := range subs {
 					fn(ev)
 				}

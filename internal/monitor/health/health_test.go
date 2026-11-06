@@ -657,6 +657,12 @@ func TestIdleSinceAcrossRestart(t *testing.T) {
 // TestTaskDone: a background task this run saw open that finished is
 // reported once its turn is over; one the run never saw open, or whose
 // unit failed meanwhile, is not.
+// unowned is f as a local session outside every workspace.
+func unowned(f Fact) Fact {
+	f.Dir, f.Register = "", false
+	return f
+}
+
 func TestTaskDone(t *testing.T) {
 	dir := t.TempDir()
 	bg := &Task{ID: "b1", Name: "sleep 300", Start: time.Date(2026, 11, 4, 8, 0, 0, 0, time.UTC)}
@@ -677,6 +683,8 @@ func TestTaskDone(t *testing.T) {
 		{"failed meanwhile", [][]Fact{{open}, {failed}, {failed}, {answered}}, nil},
 		// A task the turn waited on, as a subagent, is not one left running.
 		{"only ever seen within a turn", [][]Fact{{inTurn}, {inTurn}, {answered}}, nil},
+		// A chat started in the default directory belongs to no workspace.
+		{"no workspace", [][]Fact{{unowned(open)}, {unowned(ended)}, {unowned(answered)}}, []string{"s:sleep 300:跑完了"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

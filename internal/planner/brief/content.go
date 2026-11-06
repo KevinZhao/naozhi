@@ -153,6 +153,10 @@ type seen struct {
 	prs      []string
 	failed   *healthData
 	failedAt time.Time
+	// healedAt is the latest Failed→Idle: after custody's retry, the
+	// retried turn ending, which a turn too short for a reconcile to see
+	// active records with no Active→Idle.
+	healedAt time.Time
 	// What custody did to the unit: retries sent, and whether it stopped.
 	retries int
 	stopped bool
@@ -214,6 +218,9 @@ func (b *Briefer) gather(since, now time.Time) input {
 				case d.From == health.Active && d.To == health.Idle:
 					s := at(e.Unit, e.WS, d.Kind)
 					s.doneAt = later(s.doneAt, e.TS)
+				case d.From == health.Failed && d.To == health.Idle:
+					s := at(e.Unit, e.WS, d.Kind)
+					s.healedAt = later(s.healedAt, e.TS)
 				}
 			case journal.KindActivity:
 				var a activity.Activity
@@ -279,6 +286,9 @@ func (b *Briefer) gather(since, now time.Time) input {
 		if s.failed != nil && !recovered {
 			in.Failed = append(in.Failed, failedItem{ref: r, At: s.failedAt, Class: s.failed.ErrClass, Stopped: s.stopped})
 			continue
+		}
+		if recovered && s.retries > 0 && s.healedAt.After(s.failedAt) {
+			s.doneAt = later(s.doneAt, s.healedAt)
 		}
 		if s.doneAt.IsZero() || recovered && !s.doneAt.After(s.failedAt) || unfinished[id] ||
 			kind == health.KindCron || kind == health.KindSysession || kind == health.KindExternal {
