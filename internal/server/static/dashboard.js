@@ -6,7 +6,7 @@ import { WS_STATES, wsm } from './ws_manager.js';
 import { composer, perSession, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
 import { esc, escAttr, fetchJSON, showToast, trapFocus, nzBus, nzViews, registerActions, sessionExitChipHtml } from './nz_util.js';
 import { onAskOptionToggle, onAskSubmit } from './ask_card.js';
-import { eventIdentityKey, fetchEvents, hasMoreHeader, memoryOnlyHeader, renderEvents } from './event_stream.js';
+import { eventIdentityKey, fetchEvents, hasMoreHeader, loadEarlierEvents, memoryOnlyHeader, renderEvents } from './event_stream.js';
 import { fetchSessionRuns, setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderPRChip, setHeaderSpawnDiagChip } from './session_header.js';
 import { paintCustodyChip } from './custody.js';
 import {
@@ -437,16 +437,21 @@ function toggleHistory() {
 // they arrive.
 const REPLY_SEARCH_MIN = 2;
 const REPLY_SEARCH_DELAY_MS = 250;
-const replySearch = { q: '', hits: [], timer: 0 };
+const replySearch = { q: '', hits: [], timer: 0, ctrl: null };
 
 function scheduleReplySearch(merged, query) {
   clearTimeout(replySearch.timer);
+  // A newer query supersedes the one in flight: aborting it ends its
+  // transcript reads on the gateway too.
+  if (replySearch.ctrl) { replySearch.ctrl.abort(); replySearch.ctrl = null; }
   const q = (query || '').trim();
   if ([...q].length < REPLY_SEARCH_MIN) return;
   replySearch.timer = setTimeout(async () => {
+    const ctrl = new AbortController();
+    replySearch.ctrl = ctrl;
     let resp;
     try {
-      resp = await fetchJSON(NZ_CONTRACT.API.sessions_history + '?q=' + encodeURIComponent(q), { timeoutMs: 5000 });
+      resp = await fetchJSON(NZ_CONTRACT.API.sessions_history + '?q=' + encodeURIComponent(q), { timeoutMs: 5000, signal: ctrl.signal });
     } catch {
       return; // the prompt / project matches stay as painted
     }
@@ -507,19 +512,32 @@ function liveHitHtml(h, query) {
 }
 
 // revealEvent scrolls the opened session to the reply a hit names once its
-// events paint (by data-uuid, else data-time) and flashes it; the session
-// keeps its own scroll when the reply never shows.
+// events paint (by data-uuid, else data-time) and flashes it. The opening page
+// holds only the last few dozen bubbles, so a reply older than its head is
+// paged in with "load earlier" (at most REVEAL_PAGES pages); a reply that
+// never shows leaves the session at its own scroll, with a toast.
 const REVEAL_TRIES = 20;
 const REVEAL_MS = 250;
+const REVEAL_PAGES = 10;
 function revealEvent(target) {
   if (!target) return;
+  const key = selection.key;
+  const time = Number(target.time) || 0;
   const byUuid = target.uuid ? '#events-scroll .event[data-uuid="' + CSS.escape(target.uuid) + '"]' : '';
   const byTime = '#events-scroll .event[data-time="' + CSS.escape(String(target.time)) + '"]';
-  let tries = 0;
-  const look = () => {
+  let tries = 0, pages = 0;
+  const look = async () => {
+    if (selection.key !== key) return;
     const el = (byUuid && document.querySelector(byUuid)) || document.querySelector(byTime);
     if (!el) {
+      if (pages < REVEAL_PAGES && olderThanHead(time)) {
+        pages++;
+        const cursor = transcript.oldestFetchedEventTime;
+        await loadEarlierEvents(1);
+        if (transcript.oldestFetchedEventTime !== cursor) { look(); return; }
+      }
       if (++tries < REVEAL_TRIES) setTimeout(look, REVEAL_MS);
+      else showToast('没找到那条回复，它可能已不在这个会话的记录里');
       return;
     }
     el.scrollIntoView({ block: 'center' });
@@ -527,6 +545,14 @@ function revealEvent(target) {
     setTimeout(() => el.classList.remove('nav-highlight'), 1600);
   };
   look();
+}
+
+// olderThanHead reports a time before the first rendered bubble of a pane
+// that can still load earlier events.
+function olderThanHead(time) {
+  const btn = document.getElementById('earlier-events-btn');
+  const head = Number(document.querySelector('#events-scroll > .event')?.getAttribute('data-time') || 0);
+  return !!btn && btn.dataset.state === 'ready' && head > 0 && time > 0 && time < head;
 }
 
 function jumpToHit(key, target) {

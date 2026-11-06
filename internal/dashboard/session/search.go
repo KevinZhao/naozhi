@@ -73,7 +73,24 @@ type replyCacheEntry struct {
 type replyCache struct {
 	mu sync.Mutex
 	m  map[string]replyCacheEntry
+
+	// reading is held by the one query reading transcripts. A query arriving
+	// meanwhile (the next keystroke, another tab) waits for it within its own
+	// budget and then finds the cache filled, rather than reading the same
+	// tails again.
+	readingOnce sync.Once
+	reading     chan struct{}
 }
+
+// readSlot is the reading semaphore, made on first use so a zero Handlers
+// works.
+func (c *replyCache) readSlot() chan struct{} {
+	c.readingOnce.Do(func() { c.reading = make(chan struct{}, 1) })
+	return c.reading
+}
+
+// loadHistoryTail is the transcript tail read; tests count the reads.
+var loadHistoryTail = discovery.LoadHistoryTailCtx
 
 // handleSearch answers GET /api/sessions/history?q=: the sidebar sessions
 // (in-memory event log) and the history sessions (transcript tail) whose last
@@ -125,13 +142,22 @@ func (h *Handlers) searchLive(needle []rune) []searchHit {
 
 // searchHistory searches the history list's sessions, reading the transcript
 // tail of each one the cache does not hold at its current mtime. partial is
-// true when ctx ended before every session was read.
+// true when ctx ended before every session was read. One query reads at a
+// time; one whose ctx ends while it waits searches the cache alone.
 func (h *Handlers) searchHistory(ctx context.Context, needle []rune) (hits []searchHit, partial bool) {
 	list := h.historySessions()
 	if len(list) == 0 || h.deps.ClaudeDir == "" {
 		return nil, false
 	}
 	c := &h.replies
+	slot := c.readSlot()
+	reader := false
+	select {
+	case slot <- struct{}{}:
+		reader = true
+		defer func() { <-slot }()
+	case <-ctx.Done():
+	}
 	c.mu.Lock()
 	cached := c.m
 	c.mu.Unlock()
@@ -139,11 +165,11 @@ func (h *Handlers) searchHistory(ctx context.Context, needle []rune) (hits []sea
 	for _, rs := range list {
 		e, ok := cached[rs.SessionID]
 		if !ok || e.lastActive != rs.LastActive {
-			if ctx.Err() != nil {
+			if !reader || ctx.Err() != nil {
 				partial = true
 				continue
 			}
-			entries, err := discovery.LoadHistoryTailCtx(ctx, h.deps.ClaudeDir, rs.SessionID, rs.Workspace, searchTailEntries)
+			entries, err := loadHistoryTail(ctx, h.deps.ClaudeDir, rs.SessionID, rs.Workspace, searchTailEntries)
 			if err != nil || ctx.Err() != nil {
 				// A read cut short is not cached: the next query retries it.
 				partial = partial || ctx.Err() != nil
@@ -157,9 +183,11 @@ func (h *Handlers) searchHistory(ctx context.Context, needle []rune) (hits []sea
 			hits = append(hits, hit)
 		}
 	}
-	c.mu.Lock()
-	c.m = next
-	c.mu.Unlock()
+	if reader {
+		c.mu.Lock()
+		c.m = next
+		c.mu.Unlock()
+	}
 	return hits, partial
 }
 

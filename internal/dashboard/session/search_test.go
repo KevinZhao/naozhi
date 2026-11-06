@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -173,5 +175,94 @@ func TestHandleSearch(t *testing.T) {
 		if got := search(t, q); len(got.Hits) != 0 {
 			t.Errorf("q=%q hits = %+v, want none", q, got.Hits)
 		}
+	}
+}
+
+// newSearchHandlers serves the history sessions of a fresh Claude dir; the
+// router holds none.
+func newSearchHandlers(t *testing.T) (h *Handlers, claudeDir, workspace string) {
+	t.Helper()
+	r := sessionpkg.NewRouter(sessionpkg.RouterConfig{MaxProcs: 4, StorePath: filepath.Join(t.TempDir(), "sessions.json")})
+	t.Cleanup(r.Shutdown)
+	h = New(Deps{Router: realRouter{r}})
+	claudeDir, workspace = t.TempDir(), filepath.Join(t.TempDir(), "wsproj")
+	h.deps.ClaudeDir = claudeDir
+	return h, claudeDir, workspace
+}
+
+// Queries that overlap while the cache is cold read each transcript once:
+// the later one waits for the reading one and searches what it cached.
+func TestSearchHistoryReadsOnceAcrossConcurrentQueries(t *testing.T) {
+	h, claudeDir, workspace := newSearchHandlers(t)
+	writeTranscript(t, claudeDir, workspace, histSessA, userLine("2026-01-01T00:00:00Z", "q"), asstLine("2026-01-01T00:01:00Z", "g6e 最便宜"))
+	writeTranscript(t, claudeDir, workspace, histSessB, userLine("2026-01-01T00:00:00Z", "q"), asstLine("2026-01-01T00:01:00Z", "g6e 最快"))
+
+	var mu sync.Mutex
+	reads := 0
+	entered, release := make(chan struct{}), make(chan struct{})
+	orig := loadHistoryTail
+	t.Cleanup(func() { loadHistoryTail = orig })
+	loadHistoryTail = func(ctx context.Context, claudeDir, sessionID, cwd string, limit int) ([]clievent.EventEntry, error) {
+		mu.Lock()
+		reads++
+		first := reads == 1
+		mu.Unlock()
+		if first {
+			close(entered)
+			<-release
+		}
+		return orig(ctx, claudeDir, sessionID, cwd, limit)
+	}
+
+	type result struct {
+		hits    int
+		partial bool
+	}
+	search := func(out chan<- result) {
+		ctx, cancel := context.WithTimeout(context.Background(), searchReadBudget)
+		defer cancel()
+		hits, partial := h.searchHistory(ctx, foldRunes("g6e"))
+		out <- result{len(hits), partial}
+	}
+	first, second := make(chan result, 1), make(chan result, 1)
+	go search(first)
+	<-entered
+	go search(second)
+	// Time for the second query to read on its own, as it would unserialized.
+	time.Sleep(200 * time.Millisecond)
+	close(release)
+
+	for _, ch := range []chan result{first, second} {
+		if r := <-ch; r.hits != 2 || r.partial {
+			t.Errorf("query = %+v, want both sessions, not partial", r)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if reads != 2 {
+		t.Errorf("transcript reads = %d, want 2 (one per session)", reads)
+	}
+}
+
+// A query whose budget ends while another one reads answers from the cache
+// alone, marked partial.
+func TestSearchHistoryWaiterAnswersFromCache(t *testing.T) {
+	h, claudeDir, workspace := newSearchHandlers(t)
+	writeTranscript(t, claudeDir, workspace, histSessA, userLine("2026-01-01T00:00:00Z", "q"), asstLine("2026-01-01T00:01:00Z", "g6e 最便宜"))
+
+	search := func(budget time.Duration) (int, bool) {
+		ctx, cancel := context.WithTimeout(context.Background(), budget)
+		defer cancel()
+		hits, partial := h.searchHistory(ctx, foldRunes("g6e"))
+		return len(hits), partial
+	}
+	slot := h.replies.readSlot()
+	slot <- struct{}{} // another query is reading
+	if n, partial := search(50 * time.Millisecond); n != 0 || !partial {
+		t.Errorf("waiting query = %d hits partial=%v, want none and partial", n, partial)
+	}
+	<-slot
+	if n, partial := search(searchReadBudget); n != 1 || partial {
+		t.Errorf("query after the reader = %d hits partial=%v, want the session", n, partial)
 	}
 }

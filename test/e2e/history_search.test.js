@@ -8,14 +8,19 @@ const { startMockServer } = require('./mock-server');
 const KEY = 'dashboard:direct:2026-01-01-120001-2:otherproject';
 const SHOTS = process.env.NZ_SHOTS_DIR || '';
 
-// A long conversation whose matching reply sits far above the newest one.
+// The last three turns of a tool-heavy session. The matching reply opens the
+// oldest of them, two "load earlier" pages above the opening page.
+const HIT_TEXT = '结论：g6e 适合中小模型推理，p5 适合大规模训练。';
 function longEvents(now) {
   const out = [];
-  for (let i = 0; i < 30; i++) {
-    const t = now - (30 - i) * 60000;
-    out.push({ type: 'user', detail: 'question ' + i, time: t, uuid: 'u-' + i });
-    const text = i === 3 ? '结论：g6e 适合中小模型推理，p5 适合大规模训练。' : ('answer ' + i + '\n\n' + 'filler line\n\n'.repeat(4));
-    out.push({ type: 'text', detail: text, time: t + 1000, uuid: 'r-' + i });
+  let t = now - 3600000;
+  for (let turn = 0; turn < 3; turn++) {
+    out.push({ type: 'user', detail: 'question ' + turn, time: t += 1000, uuid: 'u-' + turn });
+    for (let i = 0; i < 40; i++) {
+      const hit = turn === 0 && i === 0;
+      out.push({ type: 'text', detail: hit ? HIT_TEXT : 'step ' + turn + '.' + i, time: t += 1000, uuid: hit ? 'r-3' : 'r-' + turn + '-' + i });
+      out.push({ type: 'tool_use', tool: 'Bash', summary: 'ls', time: t += 1000, uuid: 't-' + turn + '-' + i });
+    }
   }
   return out;
 }
@@ -24,12 +29,13 @@ for (const [name, viewport] of [['desktop', { width: 1440, height: 900 }], ['mob
   test.describe(`history reply search (${name})`, () => {
     let mock;
     const now = Date.now();
+    const events = longEvents(now);
 
     test.beforeAll(async () => {
       mock = await startMockServer({
-        keyEvents: { [KEY]: longEvents(now) },
+        keyEvents: { [KEY]: events },
         replyHits: [
-          { key: KEY, time: now - 27 * 60000 + 1000, uuid: 'r-3', snippet: '结论：g6e 适合中小模型推理，p5 适合大规模训练。' },
+          { key: KEY, time: events.find(e => e.uuid === 'r-3').time, uuid: 'r-3', snippet: HIT_TEXT },
           { session_id: 'hist-001', time: now - 86400000, uuid: 'h-1', snippet: 'g6e.12xlarge 的 SPS 分数最高。' },
         ],
       });
