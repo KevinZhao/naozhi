@@ -5,24 +5,31 @@
 // A session's custody is a switch in its sidecar: on by default for a session
 // the Planner dispatched and for one with a workflow running, off for the
 // rest; the user flips it from the session header, the Planner with its
-// custody action block. Every message custody sends goes through Deliver: it
-// carries the prefix "⚙ 托管 · <reason> · 第 n/8 次", is counted against the
-// lineage's limits (3 in a row with no progress, 8 in all), is held back while
-// the user is at the session (viewing it, or sent it a message in the last
-// NearbyFor), and none goes out while custody is paused. A lineage is a
-// session and its sidecar descendants; each dispatch starts its own (the
-// Planner is in none), and the Planner is told not to dispatch around a
-// stopped one. Custody runs only with the Planner on.
+// custody action block. The switch only decides whether custody replies for
+// the user (a recommended option, the Planner's go-ahead); a failure's retry
+// is every local session's (D94), the user's own chats included. Every
+// message custody sends goes through Deliver: its text is the message
+// alone, its transcript entry carries the source custody, the reason and
+// the count; it is counted against the lineage's limits (3 in a row with no
+// progress, 8 in all), a reply for the user is held back while the user is
+// at the session (viewing it, or sent it a message in the last NearbyFor),
+// and none goes out while the one pause (暂停推送与托管, the inbox's) holds.
+// A lineage is a session and its sidecar descendants; each dispatch starts
+// its own (the Planner is in none), and the Planner is told not to dispatch
+// around a stopped one; the user's message to a stopped one starts it
+// afresh. Custody runs only with the Planner on.
 //
 // Two triggers live here (L0, deterministic): a session whose health turned
-// failed with a retryable error class gets "继续" after a backoff, and is left
-// to the user after MaxErrors failures of a class; an AskUserQuestion card
+// failed with a retryable error class gets "继续" after a backoff (at once
+// for a network error after the machine woke), and is left to the user
+// after MaxErrors failures of a class; one whose credential expired gets it
+// once the credential is refreshed (CredExpiry); an AskUserQuestion card
 // left SuggestAfter is answered with its recommended options, handed to the
 // Planner when it has none, or left to the user (suggest.go). A turn that
 // ended normally goes to the Planner (planner/action's receipts); nothing
 // here reads a reply's text or calls a model. State lives in the sidecars
-// (the switch, and on a lineage's root what custody did) and in custody.json
-// in the Planner state root (the pause), so a restart keeps it.
+// (the switch, and on a lineage's root what custody did), so a restart
+// keeps it.
 package custody
 
 import (
@@ -33,7 +40,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"path/filepath"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -42,14 +49,13 @@ import (
 	"github.com/naozhi/naozhi/internal/apierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cliinfo"
-	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/notify"
-	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/osutil/jsonfile"
 	"github.com/naozhi/naozhi/internal/planner/journal"
 	"github.com/naozhi/naozhi/internal/planner/note"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
+	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
@@ -81,16 +87,20 @@ const (
 // Backoff is the wait before the retry of a class's n-th failure.
 var Backoff = [MaxErrors - 1]time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute}
 
-// RetryText is what a retry says after its prefix.
+// RetryText is what a retry says.
 const RetryText = "继续"
 
-// Reason is why custody sends a message, as its prefix says it.
+// Reason is why custody sends a message, as its transcript entry shows it
+// (clievent.EventEntry.CustodyReason).
 type Reason string
 
 const (
 	ReasonRetry     Reason = "出错重试"
 	ReasonSuggested Reason = "按建议执行"
 	ReasonPlanner   Reason = "Planner 继续"
+	// ReasonCredential is the retry of a failure for an expired credential,
+	// once it was refreshed.
+	ReasonCredential Reason = "凭证刷新后继续"
 )
 
 // Who set a session's switch (sidecar.Custody.By).
@@ -117,11 +127,6 @@ var (
 	// undone (Irreversible), so it is the user's.
 	ErrIrreversible = errors.New("涉及不可逆的操作，不替你回答")
 )
-
-// Prefix opens the n-th message custody sends over a lineage for reason.
-func Prefix(reason Reason, n int) string {
-	return fmt.Sprintf("%s%s · 第 %d/%d 次", clievent.CustodyLead, reason, n, MaxSends)
-}
 
 // State is a session's custody as the header chip shows it.
 type State string
@@ -159,8 +164,9 @@ type Inbox interface {
 type Config struct {
 	Sessions *sidecar.Store
 	// Send sends text to key the way the user's own message goes, so a
-	// session whose process went away resumes (server.Server.SubmitCustody).
-	Send    func(key, text string) error
+	// session whose process went away resumes, as custody's n-th message
+	// over the lineage for reason (server.Server.SubmitCustody).
+	Send    func(key, text string, reason Reason, n int) error
 	Inbox   Inbox
 	Journal *journal.Journal
 	Health  func() health.Snapshot
@@ -191,7 +197,23 @@ type Config struct {
 	// SendUser sends text to key as the user's own message: the undo of an
 	// answer custody gave, which the user clicked (Undo).
 	SendUser func(key, text string) error
-	// Path is custody.json; "" keeps the pause in memory.
+	// PausedUntil is when the one pause ends (notify.Notifier.PausedUntil:
+	// 暂停推送与托管), zero when not paused; Pause sets it
+	// (notify.Notifier.Pause), so /api/custody/pause is the inbox pause's
+	// alias. Without them the pause is kept in memory.
+	PausedUntil func() time.Time
+	Pause       func(until time.Time)
+	// CredExpiry is when the credential sessions fail on expires
+	// (midway.Expiry), zero for none: a failure for an expired credential
+	// waits for it to expire later, refreshed, then gets one "继续". nil
+	// leaves such failures to the user.
+	CredExpiry func() time.Time
+	// Woke reports whether the machine woke from sleep since the previous
+	// call (monitor/wake.Detector.Woke); a network error's retry is due at
+	// once then. Called from Tick only.
+	Woke func() bool
+	// Path is custody.json, where v0.5.0 kept its own pause: one found
+	// paused is carried over to the one pause until the end of today.
 	Path string
 	Now  func() time.Time
 	// Disabled leaves every session out of custody: with the Planner off
@@ -206,9 +228,9 @@ type Engine struct {
 	poke chan struct{}
 
 	// mu serializes custody's decisions and its sidecar writes.
-	mu       sync.Mutex
-	paused   bool
-	pausedAt time.Time
+	mu sync.Mutex
+	// pausedUntil is the pause without Config.PausedUntil.
+	pausedUntil time.Time
 	// viewing are each session's viewers (dashboard connections), by when
 	// they last reported it.
 	viewing map[string]map[string]time.Time
@@ -220,30 +242,39 @@ type Engine struct {
 	// session.
 	askMu sync.Mutex
 	asks  map[string]*askWait
+
+	// faultMu guards faulted: the sessions whose failure health merged into
+	// a systemic fault, which the inbox reports once for all of them.
+	faultMu sync.Mutex
+	faulted map[string]bool
 }
 
-// state is custody.json.
+// state is v0.5.0's custody.json.
 type state struct {
-	V      int       `json:"v"`
-	Paused bool      `json:"paused"`
-	At     time.Time `json:"at,omitzero"`
+	V      int  `json:"v"`
+	Paused bool `json:"paused"`
 }
 
-// New returns an Engine with the pause custody.json kept.
+// New returns an Engine. A pause v0.5.0 kept in custody.json is carried
+// over to the one pause, until the end of today, and the file removed.
 func New(cfg Config) *Engine {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
 	e := &Engine{cfg: cfg, poke: make(chan struct{}, 1), viewing: map[string]map[string]time.Time{}, deferred: map[string]bool{},
-		asks: map[string]*askWait{}}
+		asks: map[string]*askWait{}, faulted: map[string]bool{}}
 	if cfg.Path != "" {
 		st, out, err := jsonfile.Load[state](cfg.Path, jsonfile.Options{MaxBytes: stateBytes, Label: "custody state", Corrupt: jsonfile.LeaveCorrupt})
 		switch {
 		case err != nil:
-			slog.Warn("custody state unreadable; custody paused until it is fixed", "err", err)
-			e.paused = true
+			slog.Warn("custody state unreadable; its pause not carried over", "err", err)
 		case out == jsonfile.Parsed:
-			e.paused, e.pausedAt = st.Paused, st.At
+			if st.Paused {
+				e.pause(notify.EndOfToday(e.now()))
+			}
+			if err := os.Remove(cfg.Path); err != nil {
+				slog.Warn("custody state not removed", "err", err)
+			}
 		}
 	}
 	return e
@@ -260,8 +291,26 @@ func (e *Engine) Poke() {
 }
 
 // HandleHealth is a health.Machine subscriber: a transition may be a failure
-// to answer.
-func (e *Engine) HandleHealth(health.Event) { e.Poke() }
+// to answer, and one that merged into a systemic fault is not reported on
+// its own.
+func (e *Engine) HandleHealth(ev health.Event) {
+	if t := ev.Transition; t != nil {
+		e.faultMu.Lock()
+		if t.Unit.State == health.Failed && t.InFault {
+			e.faulted[t.Unit.ID] = true
+		} else {
+			delete(e.faulted, t.Unit.ID)
+		}
+		e.faultMu.Unlock()
+	}
+	e.Poke()
+}
+
+func (e *Engine) inFault(key string) bool {
+	e.faultMu.Lock()
+	defer e.faultMu.Unlock()
+	return e.faulted[key]
+}
 
 // Run ticks until ctx ends.
 func (e *Engine) Run(ctx context.Context) {
@@ -302,16 +351,35 @@ func (e *Engine) eligible(key string) error {
 	return nil
 }
 
-// on is a session's switch: as set, else on for a session the Planner
-// dispatched (a dispatch before custody existed included), else off.
-func on(key string, m sidecar.Meta, ok bool) bool {
-	switch {
-	case ok && m.Custody != nil:
-		return m.Custody.On
-	case ok && sessionkey.IsTaskKey(key) && m.DispatchedByPlanner():
-		return true
+// retryEligible refuses, beyond eligible, the keys whose failures custody
+// does not retry: a cron run and a scratch session are one-shot.
+func (e *Engine) retryEligible(key string) error {
+	if err := e.eligible(key); err != nil {
+		return err
 	}
-	return false
+	if sessionkey.IsCronKey(key) || sessionkey.IsScratchKey(key) {
+		return ErrRefused
+	}
+	return nil
+}
+
+// on is a session's switch: as the user or the Planner set it, else off for
+// a dispatched session whose task is over (done, or stopped by the user),
+// else as custody set it, else on for a session the Planner dispatched (a
+// dispatch before custody existed included), else off.
+func on(key string, m sidecar.Meta, ok bool) bool {
+	dispatched := ok && sessionkey.IsTaskKey(key) && m.DispatchedByPlanner()
+	switch {
+	case !ok:
+		return false
+	case m.Custody != nil && m.Custody.By != ByAuto:
+		return m.Custody.On
+	case dispatched && m.Mark != nil && task.State(m.Mark.State) == task.Done:
+		return false
+	case m.Custody != nil:
+		return m.Custody.On
+	}
+	return dispatched
 }
 
 // On reports whether key is in custody.
@@ -344,20 +412,15 @@ func (e *Engine) setLocked(key string, enable bool, by string) error {
 		return err
 	}
 	changed := false
-	var dropped *sidecar.Retry
 	if _, err := e.cfg.Sessions.Update(key, func(m *sidecar.Meta) bool {
 		if m.Custody != nil && m.Custody.On == enable && by == ByAuto {
 			return false
 		}
 		changed = m.Custody == nil || m.Custody.On != enable
 		m.Custody = &sidecar.Custody{On: enable, By: by, At: now}
-		m.Retry, dropped = switchRetry(m.Retry, enable, changed)
 		return true
 	}); err != nil {
 		return err
-	}
-	if dropped != nil {
-		e.leaveLocked(key, dropped.Class, "托管已关，没有自动重试")
 	}
 	if enable && by == ByUser {
 		root := e.root(key)
@@ -374,7 +437,9 @@ func (e *Engine) setLocked(key string, enable bool, by string) error {
 			return err
 		}
 	}
-	if changed || by == ByUser {
+	// The user's own switch is the chip they clicked: only the Planner's and
+	// custody's are noted in the session.
+	if changed && by != ByUser {
 		event := "off"
 		if enable {
 			event = "on"
@@ -382,24 +447,6 @@ func (e *Engine) setLocked(key string, enable bool, by string) error {
 		e.record(key, note.CustodyData{Event: event, By: by})
 	}
 	return nil
-}
-
-// switchRetry is a session's retry r after its custody was switched:
-// turning it off drops a retry still due (returned, for the failure to go to
-// the user); turning it on from off forgets one already answered, so the
-// failure is looked at afresh. A retry due stays when custody stays on.
-func switchRetry(r *sidecar.Retry, enable, changed bool) (kept, dropped *sidecar.Retry) {
-	switch {
-	case r == nil:
-		return nil, nil
-	case !enable && !r.Done:
-		done := *r
-		done.Done = true
-		return &done, r
-	case enable && changed && r.Done:
-		return nil, nil
-	}
-	return r, nil
 }
 
 // ensureLocked gives key a sidecar to hold custody's fields.
@@ -516,44 +563,52 @@ func (e *Engine) nearbyLocked(key string) bool {
 	return !at.IsZero() && now.Sub(at) < NearbyFor
 }
 
-// Paused reports whether custody is paused, and since when.
+// Paused reports whether custody is paused, and until when: the one pause,
+// the inbox's (暂停推送与托管).
 func (e *Engine) Paused() (bool, time.Time) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.paused, e.pausedAt
+	until := e.until()
+	if !e.now().Before(until) {
+		return false, time.Time{}
+	}
+	return true, until
 }
 
-// SetPaused pauses or resumes custody for every session; a turn running
-// goes on, and a failure whose retry was due is left to the user. It is
-// kept across restarts.
-func (e *Engine) SetPaused(paused bool) error {
+func (e *Engine) until() time.Time {
+	if e.cfg.PausedUntil != nil {
+		return e.cfg.PausedUntil()
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	at := time.Time{}
-	if paused {
-		at = e.now()
+	return e.pausedUntil
+}
+
+// paused reports whether the pause holds now. The caller holds mu.
+func (e *Engine) paused() bool {
+	if e.cfg.PausedUntil != nil {
+		return e.now().Before(e.cfg.PausedUntil())
 	}
-	if e.cfg.Path != "" {
-		data, err := json.Marshal(state{V: 1, Paused: paused, At: at})
-		if err != nil {
-			return err
-		}
-		if err := datadir.EnsureDir(filepath.Dir(e.cfg.Path)); err != nil {
-			return err
-		}
-		if err := osutil.WriteFileAtomic(e.cfg.Path, data, 0o600); err != nil {
-			return err
-		}
-	}
-	e.paused, e.pausedAt = paused, at
-	event := "resume"
-	if paused {
-		event = "pause"
-	}
-	e.record("", note.CustodyData{Event: event})
+	return e.now().Before(e.pausedUntil)
+}
+
+// Pause pauses custody and pushes for every session until until (a zero or
+// past until resumes): /api/custody/pause, the inbox pause's alias. A turn
+// running goes on, and a failure whose retry was due is left to the user.
+// It is kept across restarts.
+func (e *Engine) Pause(until time.Time) error {
+	e.pause(until)
 	// Resumed, the retries due go out; paused, they go to the user.
 	e.Poke()
 	return nil
+}
+
+func (e *Engine) pause(until time.Time) {
+	if e.cfg.Pause != nil {
+		e.cfg.Pause(until)
+		return
+	}
+	e.mu.Lock()
+	e.pausedUntil = until
+	e.mu.Unlock()
 }
 
 // Check returns nil when custody may send to key now, else why not: off,
@@ -578,7 +633,13 @@ func (e *Engine) checkLocked(key string) error {
 	if !e.On(key) {
 		return ErrOff
 	}
-	if e.paused {
+	return e.retryCheckLocked(key)
+}
+
+// retryCheckLocked is checkLocked for a failure's retry, which does not
+// need the switch on: paused or stopped.
+func (e *Engine) retryCheckLocked(key string) error {
+	if e.paused() {
 		return ErrPaused
 	}
 	if c := e.chain(e.root(key)); c.Stopped != "" {
@@ -606,12 +667,12 @@ func (e *Engine) Name(key string) string {
 	return key
 }
 
-// Deliver sends text to key as custody's message for reason, after the
-// prefix, and returns its count over the lineage. It sends nothing while
-// custody is off, paused or stopped, or while the user is at the session
-// (ErrNearby, noted in the session once); and it stops the lineage, leaving
-// it to the user, at MaxIdle messages in a row with no progress or MaxSends
-// in all.
+// Deliver sends text to key as custody's message for reason (the text
+// alone: the transcript entry carries the reason and the count) and returns
+// its count over the lineage. It sends nothing while custody is off, paused
+// or stopped, or while the user is at the session (ErrNearby; the header
+// chip's title says so); and it stops the lineage, leaving it to the user,
+// at MaxIdle messages in a row with no progress or MaxSends in all.
 func (e *Engine) Deliver(key string, reason Reason, text string) (int, error) {
 	if e.cfg.Sessions == nil || e.cfg.Send == nil {
 		return 0, ErrOff
@@ -625,21 +686,29 @@ func (e *Engine) Deliver(key string, reason Reason, text string) (int, error) {
 }
 
 // deliverLocked is Deliver; class names the error class of the failure a
-// retry answers, so a stop leaves that failure to the user.
+// retry answers. A retry needs no switch on and is not held back for the
+// user nearby: the failure is most likely the reply to their own last
+// message. A stop leaves that failure to the user.
 func (e *Engine) deliverLocked(key string, reason Reason, text, class string) (int, error) {
-	if err := e.checkLocked(key); err != nil {
-		return 0, err
-	}
-	if e.nearbyLocked(key) {
-		e.deferLocked(key)
-		return 0, ErrNearby
+	if class != "" {
+		if err := e.retryCheckLocked(key); err != nil {
+			return 0, err
+		}
+	} else {
+		if err := e.checkLocked(key); err != nil {
+			return 0, err
+		}
+		if e.nearbyLocked(key) {
+			e.deferred[key] = true
+			return 0, ErrNearby
+		}
 	}
 	root := e.root(key)
 	c := e.chain(root)
 	progress := e.progress(key)
 	if why := limit(c, progress); why != "" {
 		if class != "" {
-			why += "（最近一次出错：" + ClassLabel(class) + "）"
+			why = errStop(c, class, why)
 		}
 		return 0, e.stopLocked(root, key, c, why, class != "")
 	}
@@ -647,7 +716,7 @@ func (e *Engine) deliverLocked(key string, reason Reason, text, class string) (i
 		c.Idle = 0
 	}
 	n := c.Sent + 1
-	if err := e.cfg.Send(key, Prefix(reason, n)+"\n"+strings.TrimSpace(text)); err != nil {
+	if err := e.cfg.Send(key, strings.TrimSpace(text), reason, n); err != nil {
 		return 0, err
 	}
 	c.Sent, c.Idle, c.Progress = n, c.Idle+1, progress
@@ -655,15 +724,6 @@ func (e *Engine) deliverLocked(key string, reason Reason, text, class string) (i
 	delete(e.deferred, key)
 	e.record(key, note.CustodyData{Event: "sent", Reason: string(reason), N: n})
 	return n, nil
-}
-
-// deferLocked notes in key, once until custody sends or the user leaves,
-// that custody holds back for the user.
-func (e *Engine) deferLocked(key string) {
-	if !e.deferred[key] {
-		e.deferred[key] = true
-		e.record(key, note.CustodyData{Event: "deferred", Reason: "你在看"})
-	}
 }
 
 // progress is key's progress (Config.Progress).
@@ -679,37 +739,52 @@ func (e *Engine) progress(key string) string {
 func limit(c sidecar.Chain, progress string) string {
 	switch {
 	case c.Sent >= MaxSends:
-		return fmt.Sprintf("这条任务链已自动发了 %d 次", MaxSends)
+		return fmt.Sprintf("托管已替你发了 %d 次，交还给你", MaxSends)
 	case progress == c.Progress && c.Idle >= MaxIdle:
-		return fmt.Sprintf("连续 %d 次没有进展", MaxIdle)
+		return fmt.Sprintf("托管连续替你发了 %d 次都没推进，交还给你", MaxIdle)
 	}
 	return ""
 }
 
+// errStop is why lineage c stops at a failure of class, given limit's why:
+// how many retries the class already got, or the limit when it got none.
+func errStop(c sidecar.Chain, class, why string) string {
+	if n := c.Errors[class] - 1; n > 0 {
+		return fmt.Sprintf("托管重试了 %d 次还是出错（%s）。发「继续」再试，或换个说法", n, ClassLabel(class))
+	}
+	return why + "（出错：" + ClassLabel(class) + "）"
+}
+
 // stopLocked stops the lineage at root for why and leaves key to the user,
-// so they know it is theirs again: as the failure custody gave up on when
-// failed (the item the inbox opens for a failure), else as a "托管已停"
-// question under custody:<root>.
+// once, so they know it is theirs again: as the failure custody gave up on
+// when failed (the item the inbox opens for a failure), else as a question
+// under custody:<root>.
 func (e *Engine) stopLocked(root, key string, c sidecar.Chain, why string, failed bool) error {
 	c.Stopped, c.StoppedAt = why, e.now()
 	e.saveChainLocked(root, c)
 	e.record(key, note.CustodyData{Event: "stopped", Reason: why})
-	switch {
-	case failed:
-		e.leaveLocked(key, "", why+"，等你接手")
-	case e.cfg.Inbox != nil:
-		e.cfg.Inbox.Add(notify.Item{Kind: notify.KindQuestion, Level: notify.LevelTimely, Unit: key,
-			Source: "custody:" + root, Title: e.Name(key) + " 托管已停", Why: why + "，等你接手"})
+	if e.cfg.Inbox != nil {
+		it := notify.Item{Kind: notify.KindQuestion, Level: notify.LevelTimely, Unit: key,
+			Source: "custody:" + root, Title: e.Name(key) + " 托管已停", Why: why}
+		if failed {
+			m, _ := e.cfg.Sessions.Get(key)
+			it.Kind, it.Source, it.WS = notify.KindError, "failed:"+key, m.Workspace
+		}
+		e.cfg.Inbox.Add(it)
 	}
 	return fmt.Errorf("%w：%s", ErrStopped, why)
 }
 
 // leaveLocked leaves key's failure to the user: the item the inbox opens for
 // a failure custody does not take (the same source, so one already open
-// stands), why being the class's label and then why custody did not retry.
+// stands), why being the class's label and then why custody did not retry,
+// or what the user does about the class (notify.FailHint).
 func (e *Engine) leaveLocked(key, class, why string) {
 	if e.cfg.Inbox == nil {
 		return
+	}
+	if why == "" {
+		why = notify.FailHint(health.ErrorClass(class))
 	}
 	if class != "" && class != string(health.ErrOther) {
 		why = strings.TrimSuffix(ClassLabel(class)+"；"+why, "；")
@@ -721,21 +796,24 @@ func (e *Engine) leaveLocked(key, class, why string) {
 
 // notRetried says why custody does not retry a failure it may not send for.
 func notRetried(err error) string {
-	switch {
-	case errors.Is(err, ErrPaused):
+	if errors.Is(err, ErrPaused) {
 		return "托管已暂停，没有自动重试"
-	case errors.Is(err, ErrStopped):
-		return "托管已停，没有自动重试"
 	}
-	return "托管已关，没有自动重试"
+	return "托管已停，没有自动重试"
 }
+
+// credWhy is what a failure for an expired credential tells the user while
+// it waits for the credential to be refreshed.
+const credWhy = "刷新凭证（mwinit）后托管会替你发「继续」"
 
 // Tick keeps the workflow switches (on for a session with a workflow
 // running and no switch set, back to the default once its workflows are
 // over), and answers the failures: a new one is classified and gets a retry
 // scheduled (or is left to the user), a due retry is sent, and one whose
 // session recovered meanwhile is dropped; and the cards waiting on the user
-// are acted on once due (answerAsks).
+// are acted on once due (answerAsks). After the machine woke, the network
+// errors' retries are due at once; a lineage the user sent a message to
+// since it stopped starts afresh.
 func (e *Engine) Tick() {
 	if e.cfg.Sessions == nil || e.cfg.Disabled {
 		return
@@ -752,6 +830,10 @@ func (e *Engine) Tick() {
 			}
 		}
 	}
+	if e.cfg.Woke != nil && e.cfg.Woke() {
+		e.woke()
+	}
+	e.takenOver()
 	e.mu.Lock()
 	e.pruneLocked()
 	e.mu.Unlock()
@@ -760,11 +842,50 @@ func (e *Engine) Tick() {
 	}
 	units := e.cfg.Health().Units
 	for _, u := range units {
-		if u.Kind == health.KindSession && e.eligible(u.ID) == nil {
+		if u.Kind == health.KindSession && e.retryEligible(u.ID) == nil {
 			e.answer(u)
 		}
 	}
 	e.answerAsks(units)
+}
+
+// woke makes the network errors' retries due now: the machine woke from
+// sleep, and the network it lost with it is likely back.
+func (e *Engine) woke() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	now := e.now()
+	for _, m := range e.cfg.Sessions.List() {
+		if r := m.Retry; r != nil && !r.Done && r.Class == string(health.ErrNetwork) && r.At.After(now) {
+			next := *r
+			next.At = now
+			e.setRetryLocked(m.Key, &next)
+		}
+	}
+}
+
+// takenOver starts afresh each stopped lineage the user sent a message to
+// since it stopped: their message is progress (§15.9 ④), so the stop and
+// the count go, the switch stays as it was.
+func (e *Engine) takenOver() {
+	if e.cfg.LastUser == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, m := range e.cfg.Sessions.List() {
+		if e.eligible(m.Key) != nil {
+			continue
+		}
+		root := e.root(m.Key)
+		c := e.chain(root)
+		if c.Stopped == "" || !e.cfg.LastUser(m.Key).After(c.StoppedAt) {
+			continue
+		}
+		if _, err := e.cfg.Sessions.Update(root, func(m *sidecar.Meta) bool { m.Chain = nil; return true }); err != nil {
+			slog.Warn("custody: a lineage the user took over not started afresh", "key", root, "err", err)
+		}
+	}
 }
 
 // autoOn turns custody on for key's running workflow unless someone set its
@@ -816,10 +937,9 @@ func (e *Engine) autoOff(key string) {
 // that failed again is a new one even when health saw no transition.
 func failedAt(u health.Unit) time.Time { return cmp.Or(u.LastActive, u.Since) }
 
-// answer handles unit u's failure, if any. A failure of a session in
-// custody that custody does not retry is left to the user here when the
-// inbox may not have it: it sees only health's transitions, and a retry
-// that failed again may be none.
+// answer handles unit u's failure, if any. A failure custody does not retry
+// is left to the user here when the inbox may not have it: it sees only
+// health's transitions, and a retry that failed again may be none.
 func (e *Engine) answer(u health.Unit) {
 	key := u.ID
 	m, _ := e.cfg.Sessions.Get(key)
@@ -837,15 +957,21 @@ func (e *Engine) answer(u health.Unit) {
 		}
 		return
 	}
-	if !e.On(key) {
-		return // not custody's: Covers did not claim it, the inbox has it
-	}
 	class, retry := Classify(u, e.failText(key))
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	next := &sidecar.Retry{Failed: id, Class: class, Done: true}
 	defer func() { e.setRetryLocked(key, next) }()
 	if !retry {
+		if exp := e.credExpiry(class); !exp.IsZero() && e.retryCheckLocked(key) == nil {
+			// Covers claimed it: the user hears of it here, unless the
+			// inbox reports it with the systemic fault it is part of.
+			next.Cred, next.Done = exp, false
+			if !e.inFault(key) {
+				e.leaveLocked(key, class, credWhy)
+			}
+			return
+		}
 		if u.Since.Before(u.LastActive) {
 			// Active again since health judged it failed (a retry ran):
 			// no transition took this failure to the inbox.
@@ -853,7 +979,7 @@ func (e *Engine) answer(u health.Unit) {
 		}
 		return
 	}
-	if err := e.checkLocked(key); err != nil {
+	if err := e.retryCheckLocked(key); err != nil {
 		e.leaveLocked(key, class, notRetried(err))
 		return
 	}
@@ -866,11 +992,11 @@ func (e *Engine) answer(u health.Unit) {
 	n := c.Errors[class]
 	why := ""
 	if n >= MaxErrors {
-		why = fmt.Sprintf("同一类错误累计 %d 次（%s）", n, ClassLabel(class))
+		why = errStop(c, class, "")
 	} else if l := limit(c, e.progress(key)); l != "" {
 		// The retry would be stopped when due: stop now, not after the
 		// backoff, and as the failure it is.
-		why = l + "（最近一次出错：" + ClassLabel(class) + "）"
+		why = errStop(c, class, l)
 	}
 	if why != "" {
 		_ = e.stopLocked(root, key, c, why, true)
@@ -878,30 +1004,57 @@ func (e *Engine) answer(u health.Unit) {
 	}
 	e.saveChainLocked(root, c)
 	next.At, next.Done = e.now().Add(Backoff[n-1]), false
-	e.record(key, note.CustodyData{Event: "retry", Reason: ClassLabel(class), N: n})
 }
 
-// retryDue sends key's retry r once due. Custody turned off, paused or
-// stopped since it took the failure leaves the failure to the user at once,
-// not when custody may send again.
+// credExpiry is when the credential expires, for a failure of class that
+// waits for its refresh: zero for any other class, or with no credential
+// to watch.
+func (e *Engine) credExpiry(class string) time.Time {
+	if class != string(health.ErrCredentialExpired) || e.cfg.CredExpiry == nil {
+		return time.Time{}
+	}
+	return e.cfg.CredExpiry()
+}
+
+// due reports whether retry r may go out now: past its backoff, or, for an
+// expired credential, once the credential expires later than it did then,
+// and not yet.
+func (e *Engine) due(r sidecar.Retry) bool {
+	now := e.now()
+	if r.Cred.IsZero() {
+		return !now.Before(r.At)
+	}
+	exp := e.credExpiry(r.Class)
+	return exp.After(r.Cred) && exp.After(now)
+}
+
+// retryDue sends key's retry r once due. Custody paused or stopped since it
+// took the failure leaves the failure to the user at once, not when custody
+// may send again.
 func (e *Engine) retryDue(key string, r sidecar.Retry) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if err := e.checkLocked(key); err != nil {
-		e.leaveLocked(key, r.Class, notRetried(err))
+	if err := e.retryCheckLocked(key); err != nil {
+		if r.Cred.IsZero() { // one waiting for a credential was left already
+			e.leaveLocked(key, r.Class, notRetried(err))
+		}
 		r.Done = true
 		e.setRetryLocked(key, &r)
 		return
 	}
-	if e.now().Before(r.At) {
+	if !e.due(r) {
 		return
 	}
-	switch _, err := e.deliverLocked(key, ReasonRetry, RetryText, r.Class); {
+	reason := ReasonRetry
+	if !r.Cred.IsZero() {
+		reason = ReasonCredential
+	}
+	switch _, err := e.deliverLocked(key, reason, RetryText, r.Class); {
 	case err == nil, errors.Is(err, ErrStopped):
 		r.Done = true
 		e.setRetryLocked(key, &r)
 	default:
-		// The user nearby, or the send refused: tried again next tick.
+		// The send refused: tried again next tick.
 	}
 }
 
@@ -928,24 +1081,29 @@ func (e *Engine) setRetryLocked(key string, r *sidecar.Retry) {
 	}
 }
 
-// Covers reports whether custody will retry unit u's failure, so it is not
-// the user's yet: the inbox opens no item for it (custody opens one when it
-// gives up).
+// Covers reports whether custody takes unit u's failure, so the inbox opens
+// no item for it: one custody will retry (custody opens the item when it
+// gives up), and one for an expired credential, which waits for its
+// refresh (custody opens the item that says so). Every local session's
+// failures are custody's, its switch on or off.
 func (e *Engine) Covers(u health.Unit) bool {
-	if e.cfg.Sessions == nil || u.Kind != health.KindSession || u.State != health.Failed || e.eligible(u.ID) != nil {
+	if e.cfg.Sessions == nil || u.Kind != health.KindSession || u.State != health.Failed || e.retryEligible(u.ID) != nil {
 		return false
 	}
 	class, retry := Classify(u, e.failText(u.ID))
-	if !retry {
+	if !retry && e.credExpiry(class).IsZero() {
 		return false
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.checkLocked(u.ID) != nil {
+	if e.retryCheckLocked(u.ID) != nil {
 		return false
 	}
 	if m, _ := e.cfg.Sessions.Get(u.ID); m.Retry != nil && m.Retry.Failed.Equal(failedAt(u)) {
 		return !m.Retry.Done
+	}
+	if !retry {
+		return true
 	}
 	c := e.chain(e.root(u.ID))
 	return c.Errors[class]+1 < MaxErrors && limit(c, e.progress(u.ID)) == ""
@@ -1033,7 +1191,8 @@ func ClassLabel(class string) string {
 	return notify.ClassLabel(health.ErrorClass(class))
 }
 
-// Status is key's custody.
+// Status is key's custody. A lineage stopped by failures that kept coming
+// reads stopped with the switch off too: custody retried for the user.
 func (e *Engine) Status(key string) Status {
 	st := Status{Key: key, State: StateOff, Max: MaxSends}
 	if e.cfg.Sessions == nil || e.eligible(key) != nil {
@@ -1049,10 +1208,10 @@ func (e *Engine) Status(key string) Status {
 	c := e.chain(e.root(key))
 	st.Sent = c.Sent
 	switch {
-	case !st.On:
 	case c.Stopped != "":
 		st.State, st.Why = StateStopped, c.Stopped
-	case e.paused:
+	case !st.On:
+	case e.paused():
 		st.State = StatePaused
 	case e.nearbyLocked(key):
 		st.State = StateDeferred
@@ -1072,7 +1231,7 @@ func (e *Engine) List() []Status {
 		if e.eligible(m.Key) != nil {
 			continue
 		}
-		if st := e.Status(m.Key); st.On {
+		if st := e.Status(m.Key); st.On || st.State == StateStopped {
 			out = append(out, st)
 		}
 	}

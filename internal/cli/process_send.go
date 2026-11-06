@@ -137,7 +137,10 @@ func (p *Process) Send(ctx context.Context, text string, images []clievent.Attac
 
 	// Log the user message AFTER a successful write so a rejected write leaves
 	// no ghost entry; passthrough.go orders the same way.
-	p.eventLog.Append(buildUserEntry(text, images, ctxutil.RunID(ctx), ctxutil.Source(ctx)))
+	entry := buildUserEntry(text, images, ctxutil.RunID(ctx), ctxutil.Source(ctx))
+	c := ctxutil.CustodyOf(ctx)
+	entry.CustodyReason, entry.CustodyN = c.Reason, c.N
+	p.eventLog.Append(entry)
 
 	noOutputDur, totalDur := p.turnBudgets()
 

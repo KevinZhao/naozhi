@@ -13,6 +13,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/ctxutil"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
@@ -37,6 +38,8 @@ type sendParams struct {
 	TraceID string
 	// Source is who sent it when not the user (turn.Request.Source).
 	Source string
+	// Custody is why custody sent it and its count (turn.Request.Custody).
+	Custody ctxutil.Custody
 }
 
 // sendAckStatus describes the immediate ack status for a queued send.
@@ -214,7 +217,7 @@ func (e *sendEngine) prepareSend(p sendParams) (cmd turn.Cmd, reset bool, err er
 // submit hands a prepared send to the Orchestrator on the engine's ctx and
 // TrackSend; /urgent's text loses its prefix and preempts.
 func (e *sendEngine) submit(p sendParams, cmd turn.Cmd, origin turn.Origin) turn.Ack {
-	r := turn.Request{Key: p.Key, Text: p.Text, Images: p.Images, Origin: origin, TraceID: p.TraceID, Source: p.Source}
+	r := turn.Request{Key: p.Key, Text: p.Text, Images: p.Images, Origin: origin, TraceID: p.TraceID, Source: p.Source, Custody: p.Custody}
 	if cmd.Kind == turn.CmdUrgent {
 		r.Text, r.Priority = cmd.Arg, turn.PriorityNow
 	}

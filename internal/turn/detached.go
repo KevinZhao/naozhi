@@ -8,7 +8,7 @@ import "context"
 // discards key's queue, and it does not call NotifyIdle, since it never held
 // the key.
 func (o *Orchestrator) runDetached(ctx context.Context, r Request) {
-	t := &inflight{first: r.Priority == PriorityNormal, batch: []Msg{{Text: r.Text, Images: r.Images, Origin: r.Origin, TraceID: r.TraceID, Source: r.Source}}}
+	t := &inflight{first: r.Priority == PriorityNormal, batch: []Msg{{Text: r.Text, Images: r.Images, Origin: r.Origin, TraceID: r.TraceID, Source: r.Source, Custody: r.Custody}}}
 	if r.Origin != nil {
 		t.receivers = []*receiver{{origin: r.Origin, info: TurnInfo{Role: RoleHead, First: t.first, Merged: 1, Primary: true}}}
 	}

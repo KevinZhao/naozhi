@@ -312,7 +312,10 @@ const plannerNoteBytes = 2048
 
 func (e *sendEngine) submitPlanner(key string, src agent.Source, text string, images []clievent.Attachment, opts session.AgentOpts, done func(string, error)) (bool, error) {
 	o := &plannerOrigin{key: key, src: src, turns: &e.plannerTurns, opts: opts, notify: e.notify, done: done, mark: e.turnWatermark}
-	r := turn.Request{Key: key, Text: text, Images: images, Origin: o}
+	// A turn bringing outside content in may only promise and ask (§15.6):
+	// merged with the user's message it would refuse what they asked, so
+	// it runs by itself.
+	r := turn.Request{Key: key, Text: text, Images: images, Origin: o, Alone: src.Outside()}
 	if src == "" {
 		// A dispatch's first message is the Planner's, not the user's.
 		r.Source = clievent.SourcePlanner

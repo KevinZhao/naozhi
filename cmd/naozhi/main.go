@@ -465,6 +465,7 @@ func main() {
 		Beats:   beats,
 		Name:    unitNames,
 		Link:    wireup.DashboardLink(cfg.Server.Addr),
+		Midway:  wireup.MidwayExpiry,
 	})
 	// Side notes in the session view (§15.3 ③), read back from the journal
 	// and pushed as the health machine and the inbox write it.
@@ -507,8 +508,10 @@ func main() {
 	// the Planner; custody runs only after it is set.
 	var actions *action.Runner
 	custodian := custody.New(custody.Config{
-		Sessions:  sidecars,
-		Send:      func(key, text string) error { return srv.SubmitCustody(key, text) },
+		Sessions: sidecars,
+		Send: func(key, text string, reason custody.Reason, n int) error {
+			return srv.SubmitCustody(key, text, string(reason), n)
+		},
 		Inbox:     notifier,
 		Journal:   plannerState.Journal,
 		Health:    func() health.Snapshot { return healthMon.Snapshot() },
@@ -522,8 +525,13 @@ func main() {
 		Events:    sources.Events,
 		HandOff:   func(key, what string) error { return actions.HandOff(key, what) },
 		SendUser:  func(key, text string) error { return srv.SubmitUser(key, text) },
-		Path:      sessionLayout.PlannerCustodyPath(),
-		Disabled:  !cfg.Planner.Enabled,
+		// The one pause (D94): the inbox's holds custody too.
+		PausedUntil: notifier.PausedUntil,
+		Pause:       notifier.Pause,
+		CredExpiry:  wireup.MidwayExpiry,
+		Woke:        wake.NewDetector(wake.SystemClock()).Woke,
+		Path:        sessionLayout.PlannerCustodyPath(),
+		Disabled:    !cfg.Planner.Enabled,
 	})
 
 	routing := buildRouting(cfg, agents, projectMgr, scheduler)

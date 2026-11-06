@@ -293,6 +293,10 @@ func startTurn(ctx context.Context, key string, t *inflight) context.Context {
 			}
 		}
 		ctx = ctxutil.WithSource(ctx, src)
+		if src == clievent.SourceCustody {
+			// Custody's messages merged: the latest names the count.
+			ctx = ctxutil.WithCustody(ctx, t.batch[len(t.batch)-1].Custody)
+		}
 	}
 	ctx = ctxutil.WithSessionKey(ctxutil.WithRunID(ctx, ctxutil.NewTraceID()), key)
 	t.ctx = ctx

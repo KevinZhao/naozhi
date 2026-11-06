@@ -3,8 +3,8 @@
 //
 //	GET    /api/custody         the pause and every session in custody; ?key= one session's custody
 //	PUT    /api/custody         turn a session's custody on or off as the user ({"key","on"})
-//	PUT    /api/custody/pause   pause custody for every session
-//	DELETE /api/custody/pause   resume it
+//	PUT    /api/custody/pause   the inbox pause's alias: pause custody and pushes ({"for"}, default "today")
+//	DELETE /api/custody/pause   resume both
 //	POST   /api/custody/undo    take back the answer custody gave on the user's behalf ({"key"})
 //
 // All sit behind the /api/* auth middleware: a request here is the user.
@@ -13,11 +13,13 @@
 package custody
 
 import (
+	"cmp"
 	"errors"
 	"net/http"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
+	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/custody"
 )
 
@@ -26,8 +28,9 @@ type Source interface {
 	Status(key string) custody.Status
 	List() []custody.Status
 	Set(key string, on bool, by string) error
+	// Paused is the one pause (暂停推送与托管) and when it ends.
 	Paused() (bool, time.Time)
-	SetPaused(paused bool) error
+	Pause(until time.Time) error
 	Undo(key string) (string, error)
 }
 
@@ -41,8 +44,8 @@ type Handler struct {
 func New(src Source) *Handler { return &Handler{src: src} }
 
 type pauseResp struct {
-	Paused   bool      `json:"paused"`
-	PausedAt time.Time `json:"paused_at,omitzero"`
+	Paused      bool      `json:"paused"`
+	PausedUntil time.Time `json:"paused_until,omitzero"`
 }
 
 type listResp struct {
@@ -59,7 +62,7 @@ type oneResp struct {
 func (h *Handler) HandleList(w http.ResponseWriter, r *http.Request) {
 	var p pauseResp
 	if h.src != nil {
-		p.Paused, p.PausedAt = h.src.Paused()
+		p.Paused, p.PausedUntil = h.src.Paused()
 	}
 	key := r.URL.Query().Get("key")
 	switch {
@@ -112,23 +115,41 @@ func (h *Handler) HandleSet(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// HandlePause serves PUT /api/custody/pause.
-func (h *Handler) HandlePause(w http.ResponseWriter, _ *http.Request) { h.pause(w, true) }
+// HandlePause serves PUT /api/custody/pause: the same pause as PUT
+// /api/inbox/pause, for as long as its body's "for" says, today without one.
+func (h *Handler) HandlePause(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, httputil.MaxRequestBodyBytes)
+	var req struct {
+		For string `json:"for"`
+	}
+	if r.ContentLength != 0 {
+		if err := httputil.DecodeJSONBody(r, &req); err != nil {
+			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			return
+		}
+	}
+	until, err := notify.ParsePause(cmp.Or(req.For, "today"), time.Now())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	h.pause(w, until)
+}
 
 // HandleResume serves DELETE /api/custody/pause.
-func (h *Handler) HandleResume(w http.ResponseWriter, _ *http.Request) { h.pause(w, false) }
+func (h *Handler) HandleResume(w http.ResponseWriter, _ *http.Request) { h.pause(w, time.Time{}) }
 
-func (h *Handler) pause(w http.ResponseWriter, paused bool) {
+func (h *Handler) pause(w http.ResponseWriter, until time.Time) {
 	if h.src == nil {
 		http.Error(w, "custody not available", http.StatusServiceUnavailable)
 		return
 	}
-	if err := h.src.SetPaused(paused); err != nil {
+	if err := h.src.Pause(until); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	p, at := h.src.Paused()
-	httputil.WriteJSON(w, pauseResp{Paused: p, PausedAt: at})
+	p, end := h.src.Paused()
+	httputil.WriteJSON(w, pauseResp{Paused: p, PausedUntil: end})
 }
 
 // HandleUndo serves POST /api/custody/undo: the 撤回 of a session's latest

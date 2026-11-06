@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/ctxutil"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
@@ -35,6 +36,12 @@ type Request struct {
 	// (clievent.SourceCustody, clievent.SourcePlanner); its transcript entry
 	// carries it.
 	Source string
+	// Custody is why custody sent it and its count, for the transcript
+	// entry; zero for any other message.
+	Custody ctxutil.Custody
+	// Alone keeps a queued request out of every merge: it runs as a turn of
+	// its own, and the messages queued around it merge without it.
+	Alone bool
 }
 
 // Ack is Submit's immediate answer, also passed to Origin.Admitted.

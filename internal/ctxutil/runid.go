@@ -12,6 +12,7 @@ import "context"
 type runIDKey struct{}
 type sessionKeyKey struct{}
 type sourceKey struct{}
+type custodyKey struct{}
 
 // WithRunID derives a context carrying the turn's run id; "" is a no-op.
 func WithRunID(ctx context.Context, id string) context.Context {
@@ -62,5 +63,30 @@ func Source(ctx context.Context) string {
 		return ""
 	}
 	v, _ := ctx.Value(sourceKey{}).(string)
+	return v
+}
+
+// Custody is why custody sent a turn's message and its count over the
+// lineage (clievent.EventEntry.CustodyReason / CustodyN): the transcript
+// shows them, the text sent to the CLI carries neither.
+type Custody struct {
+	Reason string
+	N      int
+}
+
+// WithCustody derives a context carrying c; a zero c is a no-op.
+func WithCustody(ctx context.Context, c Custody) context.Context {
+	if c == (Custody{}) {
+		return ctx
+	}
+	return context.WithValue(ctx, custodyKey{}, c)
+}
+
+// CustodyOf returns the Custody in ctx, zero for none.
+func CustodyOf(ctx context.Context) Custody {
+	if ctx == nil {
+		return Custody{}
+	}
+	v, _ := ctx.Value(custodyKey{}).(Custody)
 	return v
 }
