@@ -288,7 +288,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 	driftCheck := driftArgs{backends: &r.backends, spawn: &r.spawn}
 	for _, state := range states {
 		var tgt shimTarget
-		r.ss.View(func(v sessView) { tgt = lookupShimTarget(v, state.Key) })
+		r.ss.View(func(v sessView) { tgt = lookupShimTarget(v, state) })
 
 		// Resolve the wrapper recorded at shim startup so reconnect uses the
 		// matching Protocol and binary; an empty Backend falls back to the
@@ -546,15 +546,40 @@ type shimTarget struct {
 	prevIDs []string
 }
 
-func lookupShimTarget(v sessView, key string) shimTarget {
+func lookupShimTarget(v sessView, state shim.State) shimTarget {
 	var t shimTarget
-	t.sess, t.found = v.Lookup(key)
+	t.sess, t.found = v.Lookup(state.Key)
 	if t.found {
 		t.live = t.sess.isAlive()
 		t.prevIDs = slices.Clone(t.sess.prevSessionIDs)
 	}
-	_, t.spawning = v.Ext().SpawnInFlight(key)
+	_, t.spawning = v.Ext().SpawnInFlight(state.Key)
+	if !t.found && !t.spawning {
+		if s := sessionRidingShim(v, state.CLIPID); s != nil {
+			// RenameSession (scratch promote) moves the live process to a new
+			// key while the shim keeps the key it was started under, so the
+			// shim's key no longer names a session yet the shim is in use.
+			// Reporting it found+live classifies it Skip instead of Orphan,
+			// which would shut down the CLI under the renamed session.
+			t.sess, t.found, t.live = s, true, true
+		}
+	}
 	return t
+}
+
+// sessionRidingShim returns the session whose live process is the CLI a shim
+// runs, matched by CLI PID: the shim state's session_id is often empty, and
+// a live CLI PID belongs to exactly one shim. nil when no session holds it.
+func sessionRidingShim(v sessView, cliPID int) *ManagedSession {
+	if cliPID <= 0 {
+		return nil
+	}
+	for _, s := range v.All() {
+		if p := s.loadProcess(); p != nil && p.Alive() && p.PID() == cliPID {
+			return s
+		}
+	}
+	return nil
 }
 
 // adoptShimTarget adopts a live shim whose key had no session and no spawn
@@ -565,13 +590,13 @@ func lookupShimTarget(v sessView, key string) shimTarget {
 // copy. adopted reports whether the shim state was published as a session.
 func (r *Router) adoptShimTarget(state shim.State, backendID string) (t shimTarget, adopted bool) {
 	r.ss.Update(func(tx sessTx) {
-		if t = lookupShimTarget(tx.View, state.Key); t.found || t.spawning {
+		if t = lookupShimTarget(tx.View, state); t.found || t.spawning {
 			return
 		}
 		// Genuinely absent + no spawn in flight: rebuild from the shim state
 		// file so classifyShimState sees sessFound and reconnects.
 		r.adoptLiveShim(tx, state, backendID)
-		t, adopted = lookupShimTarget(tx.View, state.Key), true
+		t, adopted = lookupShimTarget(tx.View, state), true
 	})
 	return t, adopted
 }
