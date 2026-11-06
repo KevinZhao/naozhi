@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
@@ -15,7 +16,7 @@ func TestAttachReconnected_OnResultBeforeReadLoop(t *testing.T) {
 	f := newReconnectFixture(t, "s1", rvReplays(1, rvInit, rvAgentToolUse),
 		shim.ServerMsg{Type: "stdout", Seq: 3, Line: rvResult})
 	got := make(chan string, 1)
-	hooks := ReconnectHooks{OnResult: func(text string) { got <- text }}
+	hooks := ReconnectHooks{OnResult: func(res clievent.SendResult) { got <- res.Text }}
 	p, _, err := (&Wrapper{}).attachReconnected(context.Background(), f.handle, "k", 0, &ClaudeProtocol{}, 0, 0, hooks)
 	if err != nil {
 		t.Fatalf("attachReconnected: %v", err)

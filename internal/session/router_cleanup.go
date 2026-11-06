@@ -306,7 +306,7 @@ func (r *Router) Cleanup() {
 		running := c.state == cli.StateRunning
 
 		// Effective activity = max(session.lastActive, process.LastEventAt):
-		// lastActive is only refreshed at Send entry, so a single long turn would
+		// lastActive is only refreshed when a turn starts and ends, so a long turn would
 		// age past any threshold while the CLI is still streaming events.
 		effective := c.lastActive
 		if le := c.proc.LastEventAt(); le.After(effective) {

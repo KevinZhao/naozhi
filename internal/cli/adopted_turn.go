@@ -221,9 +221,9 @@ func (p *Process) AdoptedMidTurn() bool {
 // ReplayedResult is the reply of the turn that ended while naozhi was down,
 // latched from the backlog at reconnect; such a result never reaches the read
 // loop, so SetOnResult's callback never sees it. ok=false for none, and for
-// one the callback would have skipped (failed or aborted). A reconnect
-// replays the shim's whole backlog: the caller decides whether the result is
-// one it has not acted on yet.
+// one that failed or was aborted. A reconnect replays the shim's whole
+// backlog: the caller decides whether the result is one it has not acted on
+// yet.
 func (p *Process) ReplayedResult() (text string, ok bool) {
 	if !p.adopted.armed.Load() || p.adopted.midTurn.Load() {
 		return "", false

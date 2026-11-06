@@ -145,7 +145,10 @@ func (s *ManagedSession) LastActive() time.Time {
 	return time.Unix(0, s.lastActive.Load())
 }
 
-// touchLastActive updates the last active timestamp.
+// touchLastActive updates the last active timestamp: when a turn starts and
+// when one ends, whoever started it. It is not the user's message: custody's
+// "you are nearby" and its loop guard read the user's entries in the event
+// log, which this does not write.
 func (s *ManagedSession) touchLastActive() {
 	s.lastActive.Store(time.Now().UnixNano())
 }

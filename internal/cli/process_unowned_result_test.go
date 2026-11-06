@@ -126,3 +126,35 @@ func TestUnownedTurn_ReconnectMidTurnIsLeftToTheAdoptedPath(t *testing.T) {
 		t.Errorf("state %v, onTurnDone %d; want the adopted path's Ready and exactly 1", got, f.done)
 	}
 }
+
+// The session refreshes its last activity in SetOnResult's callback, so every
+// turn's end reaches it, failed and aborted ones and the turn a reconnect
+// found in flight included, before the session list onTurnDone pushes.
+func TestTurnEnd_ResultHookBeforeTheTurnEnds(t *testing.T) {
+	failed := clievent.Event{Type: "result", SubType: "error_during_execution", IsError: true, SessionID: "s1"}
+	for _, tc := range []struct {
+		name  string
+		setup func(p *Process)
+		ev    clievent.Event
+	}{
+		{"a turn the CLI started itself", func(p *Process) {}, resultEv},
+		{"one that failed", func(p *Process) {}, failed},
+		{"one naozhi interrupted", func(p *Process) { p.turn.abortRequested.arm() }, resultEv},
+		{"the turn a reconnect found in flight", func(p *Process) { p.turn.reconnectedMidTurn.Store(true) }, resultEv},
+		{"that turn, failed", func(p *Process) { p.turn.reconnectedMidTurn.Store(true) }, failed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newUnownedFixture()
+			var results, atDone []int
+			f.p.SetOnResult(func(clievent.SendResult) { results = append(results, 1) })
+			f.p.SetOnTurnDone(func() { atDone = append(atDone, len(results)) })
+			f.feed(initEv)
+			tc.setup(f.p)
+			f.feed(tc.ev)
+
+			if len(results) != 1 || len(atDone) != 1 || atDone[0] != 1 {
+				t.Errorf("result hook calls %d, results seen when onTurnDone fired %v; want 1 and [1]", len(results), atDone)
+			}
+		})
+	}
+}
