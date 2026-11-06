@@ -26,6 +26,7 @@ const TASK = 'task:0a1b2c3d4e5f';
 const now = Date.now();
 const iso = (ms) => new Date(ms).toISOString();
 const DESKTOP = { viewport: { width: 1440, height: 900 } };
+const LONG = '细节'.repeat(260);
 const PHONE = { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true };
 
 const lastConn = (mock) => mock.wsConnections[mock.wsConnections.length - 1];
@@ -272,8 +273,9 @@ test('the header keeps the name; the gateway\'s note and Markdown stay out of wh
     await waitForWs(page, 'CONNECTED');
     await openSession(page, mock, A, [
       { type: 'user', detail: 'iso 把周报整理一下' + note, time: now - 600000, uuid: 'h-u1' },
-      { type: 'text', detail: '第一版', time: now - 590000, uuid: 'h-t1' },
-      { type: 'text', detail: '整理好了：**三件事** 和 `make test`', time: now - 580000, uuid: 'h-t2' },
+      { type: 'text', detail: '好的', time: now - 595000, uuid: 'h-t0' },
+      { type: 'text', detail: '第一版\n\n' + LONG, time: now - 590000, uuid: 'h-t1' },
+      { type: 'text', detail: '整理好了：**三件事** 和 `make test`\n\n' + LONG, time: now - 580000, uuid: 'h-t2' },
     ]);
     const pane = page.locator('#events-scroll');
     await expect(pane.locator('.event.user .event-content')).toHaveText('iso 把周报整理一下');
@@ -288,15 +290,19 @@ test('the header keeps the name; the gateway\'s note and Markdown stay out of wh
     await expect.poll(title).toBe('iso 命名会话');
     await expect(h2.locator('.btn-rename').first()).toBeAttached();
 
-    // The latest answer's 复制 shows without a hover; it copies the answer
+    // Only a long passage has 复制: a short answer is selected by hand. The
+    // latest answer's 复制 shows without a hover; it copies the answer
     // formatted, and as text without Markdown marks.
+    await expect(pane.locator('.event.text[data-uuid="h-t0"]')).toBeVisible();
+    await expect(pane.locator('.event.text[data-uuid="h-t0"] .event-copy-btn')).toHaveCount(0);
     const copy = pane.locator('.event.text[data-uuid="h-t2"] .event-copy-btn');
     await expect(copy).toHaveCSS('opacity', '1');
     await expect(pane.locator('.event.text[data-uuid="h-t1"] .event-copy-btn')).toHaveCSS('opacity', '0');
     await copy.click();
     await expect.poll(() => page.evaluate(() => window.__copied)).not.toBeNull();
     const copied = await page.evaluate(() => window.__copied);
-    expect(copied['text/plain']).toBe('整理好了：三件事 和 make test');
+    expect(copied['text/plain']).toMatch(/^整理好了：三件事 和 make test\s+细节/);
+    expect(copied['text/plain']).not.toContain('**');
     expect(copied['text/html']).toContain('<strong>三件事</strong>');
     expect(copied['text/html']).not.toContain('复制');
 
