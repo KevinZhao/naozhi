@@ -331,11 +331,7 @@ func (a *Handlers) IsSecure(r *http.Request) bool {
 	if !a.TrustedProxy {
 		return false
 	}
-	proto := r.Header.Get("X-Forwarded-Proto")
-	if i := strings.LastIndexByte(proto, ','); i >= 0 {
-		proto = proto[i+1:]
-	}
-	return strings.EqualFold(strings.TrimSpace(proto), "https")
+	return netutil.ForwardedHTTPS(r)
 }
 
 // HandleLoginNoScript is the form-action target for the login page's

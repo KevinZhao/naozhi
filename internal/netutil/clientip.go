@@ -70,3 +70,16 @@ func isLoopbackIPString(host string) bool {
 	}
 	return ip.IsLoopback()
 }
+
+// ForwardedHTTPS reports whether the trusted proxy in front of us says the
+// client hop was TLS (X-Forwarded-Proto: https). Only the last entry of a
+// comma-separated chain counts — it is the one the trusted proxy appended, so a
+// client-injected leading value is never honoured. Callers must only consult it
+// when the operator declared a trusted proxy (server.trusted_proxy).
+func ForwardedHTTPS(r *http.Request) bool {
+	proto := r.Header.Get("X-Forwarded-Proto")
+	if i := strings.LastIndexByte(proto, ','); i >= 0 {
+		proto = proto[i+1:]
+	}
+	return strings.EqualFold(strings.TrimSpace(proto), "https")
+}
