@@ -169,7 +169,7 @@ test('planner.enabled off: the drawer explains it', async ({ page }) => {
     await expect(page.locator('#btn-pld')).toBeHidden();
     await page.keyboard.press('Alt+KeyP');
     await expect(page.locator('#planner-drawer #pl-note')).toContainText('Planner 没有开启');
-    await expect(page.locator('#planner-drawer #pl-note')).toContainText('Planner 页面左栏的"通知"');
+    await expect(page.locator('#planner-drawer #pl-note')).toContainText('Planner 页面左栏的"等你"');
     await expect(page.locator('#pl-input')).toBeDisabled();
   } finally {
     mock.server.close();

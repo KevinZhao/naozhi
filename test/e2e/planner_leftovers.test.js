@@ -145,7 +145,8 @@ test('the Planner conversation loads older pages at its top', async ({ browser }
       await expect(stream.locator('.event.text').first()).toHaveText(/iso 第 60 条/);
       // Neither the older note nor the brief belongs to this page yet.
       await expect(stream).not.toContainText('iso 更早的提醒');
-      const content = (i) => stream.locator('.event.text .event-content', { hasText: new RegExp('^iso 第 ' + i + ' 条$') });
+      // An answer's text, its 复制 button after it.
+      const content = (i) => stream.locator('.event.text .event-content', { hasText: new RegExp('^iso 第 ' + i + ' 条(复制)?$') });
       const head = content(60);
 
       await page.locator('#pl-events').evaluate((el) => { el.scrollTop = 0; });
@@ -155,7 +156,7 @@ test('the Planner conversation loads older pages at its top', async ({ browser }
       await expect(head).toBeInViewport();
       // The older span's note and brief sit where they were made.
       const order = await stream.locator(':scope > .event, :scope > .pl-brief').evaluateAll((els) => els.map((e) =>
-        e.classList.contains('pl-brief') ? 'brief' : e.classList.contains('system') ? 'note' : (e.querySelector('.event-content')?.textContent || '').trim()));
+        e.classList.contains('pl-brief') ? 'brief' : e.classList.contains('system') ? 'note' : (e.querySelector('.event-content')?.textContent || '').replace(/复制$/, '').trim()));
       expect(order.indexOf('note')).toBe(order.indexOf('iso 第 5 条') + 1);
       expect(order.indexOf('brief')).toBe(order.indexOf('iso 第 10 条') + 1);
       await expect(stream.locator('.event.system')).toHaveText(/iso 更早的提醒/);
@@ -194,7 +195,7 @@ test('a brief link to before the first page keeps the brief in view as older pag
       await expect(stream.locator('.event.text')).toHaveCount(260);
       const brief = stream.locator(':scope > .pl-brief');
       const order = await stream.locator(':scope > .event, :scope > .pl-brief').evaluateAll((els) => els.map((e) =>
-        e.classList.contains('pl-brief') ? 'brief' : (e.querySelector('.event-content')?.textContent || '').trim()));
+        e.classList.contains('pl-brief') ? 'brief' : (e.querySelector('.event-content')?.textContent || '').replace(/复制$/, '').trim()));
       expect(order.indexOf('brief')).toBe(order.indexOf('iso 第 10 条') + 1);
       await expect(brief).toHaveAttribute('open', '');
       await expect(brief.locator('summary')).toBeInViewport();

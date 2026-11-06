@@ -1,16 +1,17 @@
-// E2E: custody in the dashboard (custody.js, planner RFC §5.4, D93). The tab
-// tells the gateway which session you are at (viewing frames: the session
-// open in a visible, focused tab; '' once you switch away, leave the tab or
-// open another view; again after a reconnect). The session header's chip
-// says custody's state — held back while you look — and switches it as
-// yours; custody's messages name custody as their sender with the prefix
-// faint, and the latest answer given by its recommended option is taken
+// E2E: custody in the dashboard (custody.js, planner RFC §5.4, D93, D94).
+// The tab tells the gateway which session you are at (viewing frames: the
+// session open in a visible, focused tab; '' once you switch away, leave the
+// tab or open another view; again after a reconnect). The session header's
+// chip is the one place custody shows as a switch: it says 开 while custody
+// holds back on a session you look at (the hold is in its title), and a
+// click switches it as yours with a toast saying what it did. Custody's
+// messages name custody as their sender in a faint line (托管 · 原因 · 第 n
+// 次: from the event's custody_reason / custody_n, or an older text's
+// prefix), and the latest answer given by its recommended option is taken
 // back with 撤回 (POST /api/custody/undo: the gateway finds it and tells the
-// session in the user's name). The chip follows the gateway, which holds
-// back while a tab is at the session: leaving it reads the list again, so
-// the chip, the task card and the health table say 开 once more. The Planner page's
-// task card carries the same mark, its "⋯" menu pauses custody next to the
-// push pause, and the system view's health table has a 托管 column.
+// session in the user's name). A task card marks custody only when it is off
+// or stopped, the "⋯" menu has one pause for pushes and custody, and the
+// system view's health table has no 托管 column.
 const { test, expect } = require('@playwright/test');
 const { startMockServer, defaultSessions } = require('./mock-server');
 const { waitForWs } = require('./shim_wait');
@@ -22,6 +23,9 @@ const now = Date.now();
 const iso = (ms) => new Date(ms).toISOString();
 const CHOICE = '方案: 先补测试 (Recommended)';
 const EARLIER = '分支: 新开分支 (Recommended)';
+// The choices as shown: without the recommended marker.
+const CHOICE_SHOWN = '方案: 先补测试';
+const EARLIER_SHOWN = '分支: 新开分支';
 
 const EVENTS = [
   { type: 'user', detail: 'iso 修一下登录页', time: now - 600000, uuid: 'cu-u1' },
@@ -31,6 +35,8 @@ const EVENTS = [
   { type: 'text', detail: '要先补测试还是先改代码？', time: now - 400000, uuid: 'cu-t2' },
   { type: 'user', source: 'custody', detail: '⚙ 托管 · 按建议执行 · 第 2/8 次\n' + CHOICE + '.', time: now - 300000, uuid: 'cu-c2' },
   { type: 'text', detail: '好，先补测试', time: now - 290000, uuid: 'cu-t3' },
+  // Since D94 the text is the body alone; the event says the reason and the count.
+  { type: 'user', source: 'custody', custody_reason: '出错重试', custody_n: 2, detail: '继续', time: now - 280000, uuid: 'cu-c3' },
 ];
 const NOTES = [
   { id: 'cn1', key: TASK, time: iso(now - 520000), kind: 'custody', event: 'retry', evidence: '网络', n: 1 },
@@ -90,29 +96,36 @@ for (const [name, vp] of [['desktop', { viewport: { width: 1440, height: 900 } }
       await page.goto(mock.url + '/dashboard');
       await waitForWs(page, 'CONNECTED');
 
-      // At the session: the gateway is told, and the chip says custody holds
-      // back while you look.
+      // At the session: the gateway is told, and the chip says 开 though
+      // custody holds back while you look (Q2): the hold is in its title.
       await openSession(page, mock, TASK, EVENTS);
       await expect.poll(() => viewed(mock)).toBe(TASK);
       const chip = page.locator('#header-custody .custody-chip');
-      await expect(chip).toHaveClass(/custody-deferred/);
-      await expect(chip).toContainText('已暂缓');
-      await expect(chip).toContainText('你在看');
+      await expect(chip).toHaveClass(/custody-on/);
+      await expect(chip).toHaveText('托管开');
+      await expect(chip).toHaveAttribute('title', /你在看或刚给它发过消息时，先不替你回话/);
+      await expect(chip).not.toHaveAttribute('title', /\/8/);
       await expect(chip).toHaveAttribute('aria-pressed', 'true');
 
-      // Custody's messages: custody is the sender, the prefix a faint line.
+      // Custody's messages: custody is the sender, a faint line with the
+      // reason and the count, no cap and no second ⚙ (Q5).
       const pane = page.locator('#events-scroll');
       const all = pane.locator('.event.user.custody-msg');
-      await expect(all).toHaveCount(3);
+      await expect(all).toHaveCount(4);
       const earlier = all.nth(0);
       const msgs = pane.locator('.event.user.custody-msg:not([data-uuid="cu-c0"])');
-      await expect(msgs.nth(0).locator('.custody-source')).toHaveText('⚙ 托管 · 出错重试 · 第 1/8 次');
-      // The prefix once, as the source line; the body after it.
-      await expect(msgs.nth(0).locator('.event-content')).toHaveText('⚙ 托管 · 出错重试 · 第 1/8 次继续');
+      await expect(msgs.nth(0).locator('.custody-source')).toHaveText('托管 · 出错重试 · 第 1 次');
+      // An older text's prefix once, as the source line; the body after it.
+      await expect(msgs.nth(0).locator('.event-content')).toHaveText('托管 · 出错重试 · 第 1 次继续');
       await expect(msgs.nth(0).locator('.event-icon')).toHaveText('⚙');
-      await expect(msgs.nth(1).locator('.custody-suggested')).toContainText('已按建议执行：' + CHOICE);
+      // A message from since D94: the event's fields, the text the body alone.
+      const fielded = pane.locator('.event.user.custody-msg[data-uuid="cu-c3"]');
+      await expect(fielded.locator('.custody-source')).toHaveText('托管 · 出错重试 · 第 2 次');
+      await expect(fielded.locator('.event-content')).toHaveText('托管 · 出错重试 · 第 2 次继续');
+      await expect(msgs.nth(1).locator('.custody-suggested')).toHaveText(/^已按建议执行：方案: 先补测试·撤回$/);
+      await expect(msgs.nth(1).locator('.custody-suggested')).not.toContainText('Recommended');
       // 撤回 only on the latest: the gateway takes back that one.
-      await expect(earlier.locator('.custody-suggested')).toContainText('已按建议执行：' + EARLIER);
+      await expect(earlier.locator('.custody-suggested')).toContainText('已按建议执行：' + EARLIER_SHOWN);
       await expect(earlier.locator('[data-action="custody-undo"]')).toBeHidden();
       await expect(msgs.nth(1).locator('[data-action="custody-undo"]')).toBeVisible();
       await expect(pane.locator('.event.user:not(.custody-msg)')).toHaveCount(1);
@@ -131,14 +144,17 @@ for (const [name, vp] of [['desktop', { viewport: { width: 1440, height: 900 } }
       await expect(msgs.nth(1).locator('.custody-undone')).toHaveText('已发撤回');
       expect(mock.sendCalls.length).toBe(sends);
 
-      // One click switches it as yours, and another back on.
+      // One click switches it as yours, and another back on; a toast says
+      // what each click did (Q3: a phone has no title to hover).
       await chip.click();
       await expect.poll(() => mock.custodyCalls.at(-1)).toEqual({ key: TASK, on: false });
       await expect(chip).toHaveClass(/custody-off/);
       await expect(chip).toHaveAttribute('aria-pressed', 'false');
+      await expect(page.locator('#toast')).toHaveText(/^托管已关/);
       await chip.click();
       await expect.poll(() => mock.custodyCalls.at(-1)).toEqual({ key: TASK, on: true });
-      await expect(chip).toHaveClass(/custody-deferred/);
+      await expect(chip).toHaveClass(/custody-on/);
+      await expect(page.locator('#toast')).toHaveText(/^托管已打开：.*再点一下关掉$/);
 
       // Leaving the tab ends it; coming back says it again.
       await page.evaluate(() => {
@@ -170,38 +186,41 @@ for (const [name, vp] of [['desktop', { viewport: { width: 1440, height: 900 } }
       await page.click('#abnav-planner');
       await expect.poll(() => viewed(mock)).toBe('');
       if (name === 'phone') await page.click('#pl-left-toggle');
-      const mark = page.locator('#pl-task .tk-card[data-id="' + TASK + '"] .custody-chip');
-      await expect(mark).toContainText('开');
-      await expect(page.locator('#pl-task .custody-chip[data-action]')).toHaveCount(0);
+      // A dispatched session in custody, as it runs: its card says nothing of it (D2).
+      await expect(page.locator('#pl-task .tk-card[data-id="' + TASK + '"]')).toBeVisible();
+      await expect(page.locator('#pl-task .custody-chip')).toHaveCount(0);
       await page.locator('#pl-task').screenshot({ path: test.info().outputPath('custody-tasks-' + name + '.png') });
 
-      // Pause, next to the push pause, said in the header; then resume.
+      // One pause for pushes and custody (D4), said in the header; then resume.
       if (name === 'phone') await page.click('#pl-left-toggle');
       await page.click('#pl-more > summary');
       const tools = page.locator('#pl-tools');
-      await expect(tools.locator('.pl-tool-l')).toContainText(['暂停推送', '暂停托管']);
+      await expect(tools.locator('.pl-tool-l')).toHaveText(['暂停推送与托管']);
       await tools.screenshot({ path: test.info().outputPath('custody-menu-' + name + '.png') });
-      await tools.locator('[data-action="planner-custody-pause"]').click();
-      await expect.poll(() => mock.custodyCalls.at(-1)).toEqual({ pause: true });
-      await expect(page.locator('#pl-custody-paused')).toBeVisible();
-      await expect(page.locator('#pl-custody-paused')).toContainText('托管已暂停');
+      await tools.locator('[data-action="planner-pause"][data-for="1h"]').click();
+      await expect.poll(() => mock.inboxCalls.at(-1)).toMatchObject({ method: 'PUT', body: { for: '1h' } });
+      await expect(page.locator('#pl-paused')).toBeVisible();
+      await expect(page.locator('#pl-paused')).toContainText(/已暂停到 \d\d:\d\d/);
+      await expect.poll(() => page.evaluate(() => window.nz.test.custody.paused)).toBe(true);
       await page.locator('#pl-center > .pl-head').screenshot({ path: test.info().outputPath('custody-paused-' + name + '.png') });
-      if (name === 'phone') await page.click('#pl-left-toggle');
-      await expect(mark).toContainText('已暂停');
-      if (name === 'phone') await page.click('#pl-left-toggle');
-      await page.click('#pl-more > summary');
-      await tools.locator('[data-action="planner-custody-resume"]').click();
-      await expect.poll(() => mock.custodyCalls.at(-1)).toEqual({ pause: false });
-      await expect(page.locator('#pl-custody-paused')).toBeHidden();
+      // A phone's header says until when; 恢复 is in "⋯" there.
+      if (name === 'phone') {
+        await page.click('#pl-more > summary');
+        await tools.locator('[data-action="planner-pause-resume"]').click();
+      } else {
+        await page.locator('#pl-paused [data-action="planner-pause-resume"]').click();
+      }
+      await expect.poll(() => mock.inboxCalls.at(-1)).toMatchObject({ method: 'DELETE' });
+      await expect(page.locator('#pl-paused')).toBeHidden();
+      await expect.poll(() => page.evaluate(() => window.nz.test.custody.paused)).toBe(false);
 
-      // The health table's 托管 column (the system view is desktop only).
+      // The health table has no 托管 column (the system view is desktop only).
       if (name === 'desktop') {
         await page.click('#abnav-system');
         const table = page.locator('.hl-table');
-        await expect(table.locator('thead th.hl-custody')).toHaveText('托管');
-        await expect(table.locator('tr[data-unit="' + TASK + '"] .hl-custody')).toContainText('开');
-        await expect(table.locator('tr[data-unit="' + A + '"] .hl-custody')).toHaveText('关');
-        await expect(table.locator('tr[data-unit="' + PLANNER + '"] .hl-custody')).toHaveText('—');
+        await expect(table.locator('tr[data-unit="' + TASK + '"]')).toBeVisible();
+        await expect(table.locator('thead th')).toHaveText(['会话', '工作区', '健康状态', '最后活动']);
+        await expect(table).not.toContainText('托管');
         await page.locator('.sys-health').screenshot({ path: test.info().outputPath('custody-health-' + name + '.png') });
       }
     } finally {
@@ -218,7 +237,7 @@ test('no custody chip with the Planner off', async ({ page }) => {
     await page.goto(mock.url + '/dashboard');
     await waitForWs(page, 'CONNECTED');
     await openSession(page, mock, TASK, EVENTS);
-    await expect(page.locator('#events-scroll .event.user.custody-msg')).toHaveCount(3);
+    await expect(page.locator('#events-scroll .event.user.custody-msg')).toHaveCount(4);
     await expect(page.locator('#header-custody')).toBeEmpty();
   } finally {
     mock.server.close();

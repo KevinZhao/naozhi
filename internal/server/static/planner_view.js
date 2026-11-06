@@ -1,12 +1,12 @@
 // planner_view.js — the Planner page (docs/rfc/planner.md §10, §10.1, D77;
-// §15.1 PR ⑥, §15.4 D85, §15.7). Left: 通知 (the open inbox items of GET
-// /api/inbox, decisions and questions first and labelled, each closable;
-// decision cards answer through /api/inbox/decide) and the #pl-task
-// container 任务 (tasks.js) mounts into. The header's "⋯" menu holds the
-// seldom used controls — browser notifications (only while the browser has
-// not asked yet), push pause, custody pause (custody.js: no session is
-// replied for while it holds) and 停用 Planner — and while pushes or custody
-// are paused the header says so, with 恢复. Middle: the planner:main event
+// §15.1 PR ⑥, §15.4 D85, §15.7). Left: 等你 (the open inbox items of GET
+// /api/inbox that wait on you to act, decisions and questions first and
+// labelled, each closable; decision cards answer through /api/inbox/decide)
+// and the #pl-task container 任务 (tasks.js) mounts into. The header's "⋯"
+// menu holds the seldom used controls — browser notifications (only while
+// the browser has not asked yet), the one pause of pushes and custody (D94:
+// no push goes out and no session is replied for while it holds) and 停用
+// Planner — and while paused the header says so, with 恢复. Middle: the planner:main event
 // stream with the morning briefs of GET /api/planner/briefs placed in it by
 // the time they were made (D91), its action blocks and the sessions it names
 // as cards (planner_cards.js), and the input box and the opened session card
@@ -25,8 +25,8 @@
 //
 // The rail badge counts the inbox's `badge` (notify.js: what waits on you to
 // act — questions, decisions and errors, §15.7 S1), the one count of what is
-// yours to handle; the left column's "通知" lists every open item and counts
-// none (D92). It is seeded from GET /api/inbox on every WS auth_ok and kept
+// yours to handle, and the left column's 等你 lists those items alone (D94:
+// a notice goes to the morning brief). It is seeded from GET /api/inbox on every WS auth_ok and kept
 // by inbox_count frames. The 会话 view's sidebar bar (side_wait.js) shows the
 // badge's items and count: actionListHtml and fetchInbox, with 'inbox:items'
 // on nzBus after the list changes.
@@ -38,7 +38,7 @@
 // Layering: never import dashboard.js back; setActivityView is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
 import { sessionList, ui } from './state.js';
-import { esc, escAttr, fetchJSON, nzBus, registerActions, sessionFailureText, showToast } from './nz_util.js';
+import { esc, escAttr, fetchJSON, nzBus, registerActions, sessionFailureText, sessionTitleText, showToast } from './nz_util.js';
 import { sid } from './session_ident.js';
 import { leadingTimeDivider, renderEventsWithDividers } from './event_render.js';
 import { dedupEarlierPage, hasMoreHeader } from './event_stream.js';
@@ -48,8 +48,8 @@ import { followWorkbenchSubject, noteWorkbenchEvent } from './workbench_panes.js
 import { decisionActsHtml, decorateEvents, noteWorkspaces, paintSessionCards, refreshHealth, unitName, webLinkHtml, workspaceName } from './planner_cards.js';
 import { clearAck, clearPending, closePlannerSession, mountComposer, noteAck, notePlannerStatus, showPlannerLeft } from './planner_chat.js';
 import { onSessionsApplied } from './session_list.js';
-import { mountTasks, refreshTasks } from './tasks.js';
-import { custody, setCustodyPaused } from './custody.js';
+import { inProgress, mountTasks, refreshTasks } from './tasks.js';
+import { custody, refreshCustody, setCustodyPaused } from './custody.js';
 import { workbench } from './workbench.js';
 import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
@@ -68,8 +68,8 @@ const SLOW_TICKS = 10;
 // the turn's promise and status blocks are run off the read loop.
 const TASK_REFRESH_MS = 1500;
 
-// KIND_LABEL labels a card by kind: the kinds that wait on you to act. A
-// notice, the 通知 group's own kind, is not labelled.
+// KIND_LABEL labels a card by kind: the kinds that wait on you to act, the
+// only ones listed. A notice is not labelled.
 const KIND_LABEL = { decision: '待你决定', question: '提问', error: '错误' };
 const KIND_ORDER = { decision: 0, question: 1, error: 2, notice: 3 };
 
@@ -79,7 +79,9 @@ const pl = {
   // briefOpen is the fold the user chose per brief day: a first page
   // repaints the stream, and a brief folded stays folded.
   briefOpen: new Map(),
-  open: [], // open 通知 items
+  open: [], // the open inbox items
+  tasksActive: 0, // the tasks 进行中, as 任务 last listed them
+  notice: '', // the notice a push or link opened, shown in 等你 (waitListHtml)
   pausedUntil: 0,
   customPause: false,
   // lastTime is the newest logged event time taken; seenAtWM the uuids taken
@@ -112,7 +114,7 @@ const pl = {
 
 const $ = (id) => document.getElementById(id);
 
-// ---- 通知 ----
+// ---- 等你 ----
 
 // waitedText is how long a question or a decision has waited on you.
 function waitedText(ms) {
@@ -145,7 +147,7 @@ function unitTarget(unit) {
     key = unit.slice(i + 1);
     s = sessionList.sessionsData[sid(key, node)];
   }
-  return s ? { key, node, s, title: s.user_label || s.summary || s.last_prompt || key, project: s.project || '' } : null;
+  return s ? { key, node, s, title: sessionTitleText(s) || key, project: s.project || '' } : null;
 }
 
 // metaHtml is where an item comes from: its session's workspace and name
@@ -201,16 +203,35 @@ function sortedOpen() {
     ((KIND_ORDER[a.kind] ?? 3) - (KIND_ORDER[b.kind] ?? 3)) || (Date.parse(a.created) - Date.parse(b.created)));
 }
 
-// waitListHtml is the open items' cards, as the left column lists them.
+// actionItems are the open items that wait on you to act (KIND_LABEL's
+// kinds: questions — custody's stops among them —, decisions and errors), the
+// badge's count. A notice is the morning brief's (D94): no list holds it.
+const actionItems = () => sortedOpen().filter((it) => KIND_LABEL[it.kind]);
+
+// waitListHtml is the left column's 等你: the cards actionListHtml lists,
+// and the notice a push or link opened (inbox.focus), which no list holds
+// otherwise: it stays at the end, uncounted, until it closes.
 function waitListHtml() {
-  const items = sortedOpen();
-  return items.length ? items.map(itemHtml).join('') : '<div class="pl-empty">没有通知</div>';
+  if (inbox.focus && pl.open.some((it) => it.id === inbox.focus && !KIND_LABEL[it.kind])) pl.notice = inbox.focus;
+  const notice = pl.notice ? pl.open.find((it) => it.id === pl.notice) : null;
+  if (!notice) pl.notice = '';
+  const html = actionListHtml() + (notice ? itemHtml(notice) : '');
+  return html || '<div class="pl-empty">没有等你的事</div>';
 }
 
-// actionListHtml is the cards of the open items that wait on you to act
-// (KIND_LABEL's kinds, the badge's), for the 会话 sidebar's bar.
+// actionListHtml is the cards of the items that wait on you to act, for the
+// left column and the 会话 sidebar's bar.
 export function actionListHtml() {
-  return sortedOpen().filter((it) => KIND_LABEL[it.kind]).map(itemHtml).join('');
+  return actionItems().map(itemHtml).join('');
+}
+
+// paintLeftToggle writes the phone's folded left block: 等你 N · 任务 M,
+// the counts of what it holds (the badge's, and the tasks in progress).
+function paintLeftToggle() {
+  const el = $('pl-left-toggle')?.querySelector('span');
+  if (!el) return;
+  const text = '等你 ' + actionItems().length + ' · 任务 ' + pl.tasksActive;
+  if (el.textContent !== text) el.textContent = text;
 }
 
 function noteItems() {
@@ -222,6 +243,7 @@ function paintWaiting() {
   if (!box) return;
   box.innerHTML = waitListHtml();
   paintInlineCards(sortedOpen());
+  paintLeftToggle();
   revealWaiting();
 }
 
@@ -274,9 +296,11 @@ function pausedAt() {
   return new Date(pl.pausedUntil).toDateString() === new Date().toDateString() ? at.slice(at.indexOf(' ') + 1) : at;
 }
 
+// pauseToolHtml is the one pause (D94): pushes and custody together, for
+// a while or until resumed.
 function pauseToolHtml() {
-  if (pl.pausedUntil > Date.now()) {
-    return '<button type="button" class="pl-btn" data-action="planner-pause-resume">恢复推送</button>';
+  if (paused()) {
+    return '<button type="button" class="pl-btn" data-action="planner-pause-resume">恢复</button>';
   }
   if (pl.customPause) {
     return '<label class="pl-pause-custom"><input type="number" id="pl-pause-hours" min="1" max="168" value="3" aria-label="暂停小时数"> 小时</label>' +
@@ -288,16 +312,9 @@ function pauseToolHtml() {
     '<button type="button" class="pl-btn" data-action="planner-pause-custom">自定义</button>';
 }
 
-// custodyToolHtml pauses custody for every session, or resumes it; custody
-// runs only with the Planner on.
-function custodyToolHtml() {
-  if (!pl.status?.enabled) return '';
-  const btn = custody.paused
-    ? '<button type="button" class="pl-btn" data-action="planner-custody-resume">恢复托管</button>'
-    : '<button type="button" class="pl-btn" data-action="planner-custody-pause">暂停</button>';
-  return '<div class="pl-tool"><span class="pl-tool-l">暂停托管</span><div class="pl-tool-btns">' + btn + '</div>' +
-    '<span class="pl-tool-hint">暂停期间不替任何会话回话，正在跑的回合不受影响</span></div>';
-}
+// paused reports whether pushes and custody are paused: PUT /api/inbox/pause
+// pauses both; a custody pause from before they were one also counts.
+const paused = () => pl.pausedUntil > Date.now() || (custody.paused && !!pl.status?.enabled);
 
 function stopToolHtml() {
   const s = pl.status;
@@ -313,25 +330,23 @@ function closeMenu() {
   if (more) more.open = false;
 }
 
-// paintTools fills the header's "⋯" menu and, while pushes are paused, its
-// 推送暂停到 line, and while custody is, its 托管已暂停 line.
+// pausedText is the header's line while paused: until when, or (a custody
+// pause from before the two were one) with no end.
+function pausedText() {
+  return pl.pausedUntil > Date.now() ? '已暂停到 ' + pausedAt() : '已暂停';
+}
+
+// paintTools fills the header's "⋯" menu and, while pushes and custody are
+// paused, its 已暂停到 … · 恢复 line.
 function paintTools() {
-  const cpaused = $('pl-custody-paused');
-  if (cpaused) {
-    const on = custody.paused && !!pl.status?.enabled;
-    const html = on ? '<span>托管已暂停</span><span aria-hidden="true">·</span><button type="button" class="pl-link" data-action="planner-custody-resume">恢复</button>' : '';
-    if (cpaused.innerHTML !== html) cpaused.innerHTML = html;
-    cpaused.title = on && custody.pausedAt ? '暂停于 ' + formatAbsTime(custody.pausedAt) : '';
-    cpaused.hidden = !on;
-  }
-  const paused = $('pl-paused');
-  if (paused) {
-    const on = pl.pausedUntil > Date.now();
-    const html = on ? '<span class="pl-paused-l">推送</span><span>暂停到 ' + esc(pausedAt()) + '</span>' +
+  const line = $('pl-paused');
+  if (line) {
+    const on = paused();
+    const html = on ? '<span>' + esc(pausedText()) + '</span>' +
       '<span aria-hidden="true">·</span><button type="button" class="pl-link" data-action="planner-pause-resume">恢复</button>' : '';
-    if (paused.innerHTML !== html) paused.innerHTML = html;
-    paused.title = on ? formatAbsTime(pl.pausedUntil) : '';
-    paused.hidden = !on;
+    if (line.innerHTML !== html) line.innerHTML = html;
+    line.title = on ? '推送与托管已暂停' + (pl.pausedUntil > Date.now() ? '，到 ' + formatAbsTime(pl.pausedUntil) : '') : '';
+    line.hidden = !on;
   }
   const box = $('pl-tools');
   if (!box) return;
@@ -339,8 +354,7 @@ function paintTools() {
   // the input holding focus counts (Chromium focuses the clicked 自定义).
   if (pl.customPause && document.activeElement?.id === 'pl-pause-hours') return;
   box.innerHTML = notifyToolHtml() +
-    '<div class="pl-tool"><span class="pl-tool-l">暂停推送</span><div class="pl-tool-btns">' + pauseToolHtml() + '</div></div>' +
-    custodyToolHtml() +
+    '<div class="pl-tool" title="暂停期间不推送，也不替任何会话回话；正在跑的回合不受影响"><span class="pl-tool-l">暂停推送与托管</span><div class="pl-tool-btns">' + pauseToolHtml() + '</div></div>' +
     '<div class="pl-tool">' + stopToolHtml() + '</div>';
 }
 
@@ -353,8 +367,25 @@ async function pause(forVal) {
     pl.customPause = false;
     closeMenu();
   } catch (e) {
-    showToast('暂停推送失败：' + e.message, 'error');
+    showToast('暂停失败：' + e.message, 'error');
   }
+  paintTools();
+  // The gateway paused custody with the pushes: the chips follow.
+  refreshCustody();
+}
+
+// resume ends the pause of pushes and custody; a custody pause from before
+// the two were one is ended too.
+async function resume() {
+  try {
+    await fetchJSON(NZ_CONTRACT.API.inbox_pause, { method: 'DELETE', timeoutMs: 8000 });
+    pl.pausedUntil = 0;
+    closeMenu();
+  } catch (e) {
+    showToast('恢复失败：' + e.message, 'error');
+  }
+  await refreshCustody();
+  if (custody.paused) await setCustodyPaused(false);
   paintTools();
 }
 
@@ -381,7 +412,7 @@ function paintStatus() {
     const menu = drawer ? 'Planner 页面头部的"⋯"' : '头部的"⋯"';
     let html = '';
     if (s && !s.enabled) {
-      html = '<b>Planner 没有开启。</b>在配置里设 <code>planner.enabled: true</code> 并重启 naozhi 后，这里是你和 Planner 的对话：早报、它派出的会话与汇报。' + left + '的"通知"照常可用。';
+      html = '<b>Planner 没有开启。</b>在配置里设 <code>planner.enabled: true</code> 并重启 naozhi 后，这里是你和 Planner 的对话：早报、它派出的会话与汇报。' + left + '的"等你"照常可用。';
     } else if (s && s.stopped) {
       html = '<b>Planner 已停用。</b>它不再运行，也不收消息；关掉' + menu + '里的"停用 Planner"即可恢复。';
     }
@@ -543,11 +574,13 @@ function plannerEvents(e) {
 // nothing to you about the Planner's work.
 const CLI_NOISE = new Set(['api_retry']);
 
-// withoutSnapshot is e as the conversation shows it, null for a receipt or
-// CLI noise.
+// withoutSnapshot is e as the conversation shows it, null for a receipt, CLI
+// noise or a permission the Planner's own tool was refused (nothing for you
+// to do; a session's view still shows its own).
 function withoutSnapshot(e) {
   if (e.type === 'user' && RECEIPT_RE.test(e.detail || e.summary || '')) return null;
   if (e.type === 'system' && CLI_NOISE.has(e.summary)) return null;
+  if (e.type === 'permission_denied') return null;
   const sc = e.type === 'user' && SCOUT_RE.exec(e.detail || e.summary || '');
   if (sc) return Object.assign({}, e, { type: 'system', summary: '来自巡检：' + sc[1] + ' 条新发现', detail: '' });
   const mt = e.type === 'user' && MEETING_RE.exec(e.detail || e.summary || '');
@@ -895,6 +928,12 @@ nzBus.addEventListener('inbox:count', (e) => {
   if (badge) { badge.textContent = n > 99 ? '99+' : String(n); badge.hidden = !n; }
   if (!pl.seeding && pl.host) fetchInbox();
 });
+// The phone's folded left block counts the tasks in progress.
+nzBus.addEventListener('tasks:list', (e) => {
+  const tasks = (e.detail && Array.isArray(e.detail.tasks)) ? e.detail.tasks : [];
+  pl.tasksActive = tasks.filter(inProgress).length;
+  paintLeftToggle();
+});
 // The health table names the units no list holds.
 nzBus.addEventListener('planner:health', () => { if (pl.host) paintWaiting(); });
 nzBus.addEventListener('custody:changed', () => { if (pl.host) paintTools(); });
@@ -905,7 +944,9 @@ nzBus.addEventListener('inbox:focus', () => {
     showPlannerLeft(false);
     closePlannerSession(false);
   }
-  revealWaiting();
+  // A notice the focus names is listed only once it is (waitListHtml).
+  if (inbox.focus) paintWaiting();
+  else revealWaiting();
   revealBrief();
 });
 // toggle does not bubble: a brief's fold is taken on the way down.
@@ -989,18 +1030,7 @@ registerActions({
     if (!(h >= 1 && h <= 168)) { showToast('填 1 到 168 小时', 'warning'); return; }
     pause(Math.round(h) + 'h');
   },
-  'planner-pause-resume': async () => {
-    try {
-      await fetchJSON(NZ_CONTRACT.API.inbox_pause, { method: 'DELETE', timeoutMs: 8000 });
-      pl.pausedUntil = 0;
-      closeMenu();
-    } catch (e) {
-      showToast('恢复推送失败：' + e.message, 'error');
-    }
-    paintTools();
-  },
-  'planner-custody-pause': async () => { await setCustodyPaused(true); closeMenu(); },
-  'planner-custody-resume': async () => { await setCustodyPaused(false); closeMenu(); },
+  'planner-pause-resume': () => resume(),
   'planner-stop': async (el) => {
     const stopped = el.checked;
     el.disabled = true;

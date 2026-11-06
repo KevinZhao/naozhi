@@ -1,12 +1,104 @@
-// ask_card.js — the AskUserQuestion card: its renderer, the option-toggle and
-// submit handlers, and the answered-lock that history and live user events
-// apply. event_render.js imports the renderer; dashboard.js registers the two
-// data-action handlers.
+// ask_card.js — the AskUserQuestion card (提问): its renderer, the
+// option-toggle and submit handlers, and the answered-lock that history and
+// live user events apply. An answered card folds to one line — 已回答：<选择>,
+// or 已按建议选：<选择> · 撤回 when custody answered it by the recommended
+// option, whose message then shows no bubble of its own. event_render.js
+// imports the renderer; dashboard.js registers the two data-action handlers.
 import { NZ_CONTRACT } from './contract.js';
 import { selection, transcript } from './state.js';
 import { esc, escAttr } from './nz_util.js';
 import { featureForCurrent } from './features.js';
 import { formatTimeFull } from './utilities.js';
+import { custodyMessage, isSuggestedMessage, optionText, suggestedChoice, undoHtml } from './custody.js';
+
+// answers holds what answered each card (tool_use_id → {text, custody, id,
+// header: a single question's header, which its line leaves out}),
+// folded the custody answers shown on their card instead of a bubble (by
+// the bubble id custody.js's 撤回 names).
+const answers = new Map();
+const folded = new Set();
+
+const bubbleID = (e) => e.uuid || String(e.time || '');
+
+// answerOf is what user event e answered a card with.
+function answerOf(e) {
+  const custody = e.source === 'custody' && isSuggestedMessage(e);
+  const text = custody ? custodyMessage(e).body : (e.detail || e.summary || '');
+  return { text, custody, id: bubbleID(e) };
+}
+
+// noteAnswer records e as the answer to card tuid; header is the card's
+// single question's header ('' for several).
+function noteAnswer(tuid, e, header) {
+  if (!e) return;
+  const a = Object.assign(answerOf(e), { header: header || '' });
+  answers.set(tuid, a);
+  if (a.custody) folded.add(a.id);
+}
+
+// isFoldedAnswer reports whether user event e is custody's answer a card
+// shows on its own line: no bubble renders for it.
+export function isFoldedAnswer(e) {
+  return !!e && e.type === 'user' && e.source === 'custody' && folded.has(bubbleID(e));
+}
+
+// answerText is an answer as the card line shows it: the trailing period,
+// the recommended markers and a single question's "<header>: " left out.
+function answerText(a) {
+  const t = suggestedChoice(a.text);
+  return a.header && t.startsWith(a.header + ': ') ? t.slice(a.header.length + 2) : t;
+}
+
+// SHORT_QUESTION is how many characters of a question an answered card's
+// line keeps.
+const SHORT_QUESTION = 40;
+
+// shortQuestion is what an answered card's line keeps of what it asked, the
+// whole in its title: a single question cut short, or several's headers. On
+// a phone, with no hover for the title, it is what says what custody's
+// answer answered.
+function shortQuestion(items) {
+  const qs = (items || []).filter(Boolean);
+  const text = qs.length === 1 ? (qs[0].question || qs[0].header || '')
+    : qs.map((it) => it.header || it.question || '').filter(Boolean).join('、');
+  const cps = Array.from(String(text).replace(/\s+/g, ' ').trim());
+  return cps.length > SHORT_QUESTION ? cps.slice(0, SHORT_QUESTION).join('') + '…' : cps.join('');
+}
+
+// singleHeader is the header of a card's only question, '' otherwise.
+const singleHeader = (items) => (Array.isArray(items) && items.length === 1 && items[0] && items[0].header) || '';
+
+// answeredHtml is an answered card's line; sk is the card's session.
+function answeredHtml(tuid, sk) {
+  const a = answers.get(tuid);
+  if (!a || !a.text) return '已回答';
+  if (!a.custody) return '已回答：<span class="ask-choice">' + esc(answerText(a)) + '</span>';
+  return '已按建议选：<span class="ask-choice">' + esc(answerText(a)) + '</span>' +
+    '<span class="custody-sep" aria-hidden="true">·</span>' + undoHtml(sk, a.id);
+}
+
+// cardSession is the session a card belongs to, from its DOM ancestry: the
+// scratch drawer's, the Planner page's opened session, else the selection.
+function cardSession(card) {
+  if (card && card.closest && card.closest('#aside-drawer')) return { key: selection.scratchKey || '', node: 'local' };
+  if (card && card.closest && card.closest('#pl-sess')) return { key: card.closest('#pl-sess').dataset.key || '', node: 'local' };
+  return { key: selection.key, node: selection.node };
+}
+
+// foldCard folds a card on screen to its answered line.
+function foldCard(card, tuid) {
+  card.classList.add('ask-done');
+  if (answers.get(tuid)?.custody) card.classList.add('custody-suggested-msg');
+  const content = card.querySelector('.event-content');
+  if (!content) return;
+  let status = content.querySelector('.ask-status');
+  if (!status) {
+    status = document.createElement('div');
+    status.className = 'ask-status';
+    content.appendChild(status);
+  }
+  status.innerHTML = answeredHtml(tuid, cardSession(card));
+}
 
 // hydrateAskAnsweredFromHistory walks a time-sorted event list and marks
 // every ask_question whose tool_use_id is followed by at least one user
@@ -22,6 +114,7 @@ export function hydrateAskAnsweredFromHistory(events) {
     for (let j = i + 1; j < events.length; j++) {
       if (events[j] && events[j].type === 'user') {
         transcript.askAnswered.add(tuid);
+        noteAnswer(tuid, events[j], singleHeader(e.ask_question.items));
         break;
       }
     }
@@ -35,32 +128,26 @@ export function hydrateAskAnsweredFromHistory(events) {
 // it must lock now — not only after a reload replays history. Without this the
 // stale card stayed submittable and pushed an out-of-date answer into the
 // next turn. Idempotent: cards onAskSubmit already locked are skipped
-// via the existing .ask-status marker.
-export function lockRenderedAskCards(scrollEl) {
+// via the existing .ask-status marker. ev is the user event answering them,
+// when the caller has it: a card it answers folds to its line.
+export function lockRenderedAskCards(scrollEl, ev) {
   if (!scrollEl) return;
   scrollEl.querySelectorAll('.event.ask_question[data-tool-use-id]').forEach(card => {
     const tuid = card.getAttribute('data-tool-use-id') || '';
     if (!tuid) return;
+    const fresh = !card.classList.contains('ask-done');
     transcript.askAnswered.add(tuid);
-    card.querySelectorAll('button').forEach(b => { b.disabled = true; });
-    const content = card.querySelector('.event-content');
-    if (!content) return;
-    const status = content.querySelector('.ask-status');
-    if (!status) {
-      const div = document.createElement('div');
-      div.className = 'ask-status';
-      div.textContent = '已回答';
-      content.appendChild(div);
-    } else if (status.textContent.indexOf('发送失败') === 0) {
-      // onAskSubmit's failure rollback left the card actionable; a user event
-      // from another surface has since answered it, so the failure copy is
-      // stale — replace it rather than leave a locked card saying "failed".
-      status.textContent = '已回答';
-    }
+    const heads = card.querySelectorAll('.ask-q-group');
+    if (fresh && !answers.has(tuid)) noteAnswer(tuid, ev, heads.length === 1 ? (heads[0].querySelector('.ask-q-header')?.textContent || '') : '');
+    card.querySelectorAll('.ask-opt, .ask-submit').forEach(b => { b.disabled = true; });
+    // onAskSubmit's failure rollback left a card actionable; a user event
+    // from another surface has since answered it, so its failure copy goes.
+    if (fresh) foldCard(card, tuid);
   });
 }
 
-export function renderAskQuestionCard(e) {
+// renderAskQuestionCard renders card e of session sk (for 撤回 on its line).
+export function renderAskQuestionCard(e, sk) {
   const aq = e.ask_question;
   if (!aq || !Array.isArray(aq.items) || aq.items.length === 0) {
     // Defensive: if payload missing, fall back to a plain status bubble.
@@ -118,7 +205,7 @@ export function renderAskQuestionCard(e) {
         ' data-label="' + escAttr(opt.label || '') + '"' +
         (locked ? ' disabled' : '') +
         ' data-action="ask-option-toggle">' +
-        '<span class="ask-opt-label">' + esc(opt.label || '') + '</span>' +
+        '<span class="ask-opt-label">' + esc(optionText(opt.label)) + '</span>' +
         (opt.description ? '<span class="ask-opt-desc">' + esc(opt.description) + '</span>' : '') +
         '</button>';
     }).join('');
@@ -138,16 +225,19 @@ export function renderAskQuestionCard(e) {
     '<button class="ask-submit" type="button"' +
     ' data-tuid="' + escAttr(tuid) + '"' +
     ' disabled' +
-    ' data-action="ask-submit">提交全部回答</button>';
+    ' data-action="ask-submit">' + (aq.items.length > 1 ? '提交全部回答' : '提交') + '</button>';
   const status = locked
-    ? '<div class="ask-status">已回答</div>'
+    ? '<div class="ask-status">' + answeredHtml(tuid, sk || { key: selection.key, node: selection.node }) + '</div>'
     : '';
-  const timeAttr = e.time ? ' data-time="' + e.time + '" title="' + escAttr(formatTimeFull(e.time)) + '"' : '';
-  return '<div class="event ask_question"' + timeAttr +
+  const done = locked ? ' ask-done' + (answers.get(tuid)?.custody ? ' custody-suggested-msg' : '') : '';
+  const questions = aq.items.map((it) => (it && it.question) || '').filter(Boolean).join('\n');
+  const timeAttr = e.time ? ' data-time="' + e.time + '" title="' + escAttr([formatTimeFull(e.time), questions].filter(Boolean).join('\n')) + '"' : '';
+  return '<div class="event ask_question' + done + '"' + timeAttr +
     ' data-tool-use-id="' + escAttr(tuid) + '">' +
     '<span class="event-icon">?</span>' +
     '<div class="event-content ask-card">' +
-      '<div class="ask-title">AskUserQuestion · 全部作答后提交</div>' +
+      '<div class="ask-title">提问' + (aq.items.length > 1 ? '<span class="ask-title-hint"> · 全部作答后提交</span>' : '') + '</div>' +
+      '<span class="ask-q-short">' + esc(shortQuestion(aq.items)) + '</span>' +
       groups +
       '<div class="ask-submit-row">' + submitBtn + '</div>' +
       status +
@@ -222,20 +312,17 @@ export function onAskSubmit(btn) {
   if (!answer) return;
   // Lock the card so re-clicks or slow network can't duplicate the send.
   transcript.askAnswered.add(tuid);
+  answers.set(tuid, { text: answer, custody: false, id: '', header: groups.length === 1 ? groups[0].header : '' });
   card.querySelectorAll('button').forEach(b => { b.disabled = true; });
-  const content = card.querySelector('.event-content');
-  if (content && !content.querySelector('.ask-status')) {
-    const div = document.createElement('div');
-    div.className = 'ask-status';
-    div.textContent = '已回答：' + answer;
-    content.appendChild(div);
-  }
+  foldCard(card, tuid);
   // Route through the regular session send endpoint so queue / passthrough /
   // broadcast semantics all apply; we do NOT call sendMessage() because that
   // path reads from the input box and manages optimistic rendering — the card
   // already shows "已回答", so duplicating would clash.
   sendAskAnswerViaAPI(answer, card).catch(err => {
     transcript.askAnswered.delete(tuid);
+    answers.delete(tuid);
+    card.classList.remove('ask-done');
     card.querySelectorAll('button').forEach(b => { b.disabled = false; });
     updateAskSubmitState(card);
     const status = card.querySelector('.ask-status');

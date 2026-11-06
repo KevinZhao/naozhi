@@ -68,7 +68,7 @@ func TestBriefLines(t *testing.T) {
 			f.custody(at(2, 23, 1), s, "sent", custody.ReasonRetry)
 			f.custody(at(2, 23, 9), s, "stopped", "")
 			f.snap = snap(health.Failed)
-		}, []string{"· 11/2 23:00 · 网络 / DNS · 托管已停\n", "\n托管：重试 1 次（恢复 0、停下 1）\n"}, nil},
+		}, []string{"· 11/2 23:00 · 网络断了 · 托管已停\n", "\n托管：重试 1 次（恢复 0、停下 1）\n"}, nil},
 		{"rate limited", func(f *fixture) {
 			f.health(at(2, 23, 0), s, "ws1", health.Active, health.Failed, health.KindSession, health.ErrRateLimit)
 			f.snap = snap(health.Failed)

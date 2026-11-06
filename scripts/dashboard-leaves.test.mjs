@@ -250,11 +250,33 @@ test('sessionDot and the exit chip read a failure off the health verdict', () =>
   }
 });
 
+// Q19: a name made from a prompt is its first sentence, without code, about
+// 20 characters; the name you gave a session wins.
+test('autoTitle takes the first sentence without code; sessionTitleText prefers your name', () => {
+  for (const [text, want] of [
+    ['修一下登录页的样式。然后跑测试', '修一下登录页的样式'],
+    ['第一行\n第二行', '第一行'],
+    ['  \n  第二行才有字', '第二行才有字'],
+    ['跑 `go test ./...` 看看', '跑 看看'],
+    ['先看这段：\n```\nls -la\n```', '先看这段：'],
+    ['```\nls -la\n```', 'ls -la'],
+    ['这是一个非常非常长的提示词需要被截断因为超过二十个字了吧', '这是一个非常非常长的提示词需要被截断因为…'],
+    ['Run the tests and fix the failures in internal/cli please', 'Run the tests and fix the failures in in…'],
+    ['短', '短'],
+    ['', ''],
+  ]) assert.equal(nzu.autoTitle(text), want, JSON.stringify(text));
+  assert.equal(nzu.sessionTitleText({ user_label: 'iso 我起的名。', last_prompt: '继续' }), 'iso 我起的名。');
+  assert.equal(nzu.sessionTitleText({ summary: 'Fix login', last_prompt: '继续' }), 'Fix login');
+  assert.equal(nzu.sessionTitleText({ last_prompt: '继续。再看看' }), '继续');
+  assert.equal(nzu.sessionTitleText(null), '');
+});
+
 test('failureText names a death reason or an error class, never "other"', () => {
   const CODE = NZ_CONTRACT.DEATH_REASON_PREFIX.CODE;
   for (const [reason, cls, want] of [
     [CODE + '-1', 'other', 'CLI 进程被信号终止'],
     ['weird', 'auth', '凭证 / 权限拒绝'],
+    ['', 'network', '网络断了'],
     ['weird', 'other', ''],
     ['', '', ''],
     ['', '__proto__', ''],

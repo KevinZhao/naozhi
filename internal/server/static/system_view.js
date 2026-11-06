@@ -2,11 +2,11 @@
 // Layering: never import dashboard.js back; setActivityView is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, sessionList, ui } from './state.js';
-import { HEALTH_STATES, esc, escAttr, evidenceText, fetchJSON, formatBytes, formatDurationShort, nzBus, showToast } from './nz_util.js';
+import { HEALTH_STATES, esc, escAttr, evidenceText, fetchJSON, formatBytes, formatDurationShort, nzBus, sessionTitleText, showToast } from './nz_util.js';
 import { discoveredKey, getNodeDisplayName, sid } from './session_ident.js';
 import { wireQuickAskInput } from './auth_modal.js';
 import { shell } from './shell.js';
-import { coverable, custody, custodyChipHtml, refreshCustody } from './custody.js';
+import { coverable, custody, refreshCustody } from './custody.js';
 import { cachedCostSummary, costCardTitle, formatAbsTime, formatHomeCost, getMsgValue, mainEmptyHtml, refreshCostSummary, renderServiceOverviewHtml, shortPath, timeAgo } from './utilities.js';
 
 // ===== System view (sysession daemons) =====
@@ -188,7 +188,7 @@ function healthTarget(u) {
     key = id.slice(i + 1);
   }
   const s = sessionList.sessionsData[sid(key, node)];
-  return s ? { key, node, title: s.user_label || s.summary || s.last_prompt || '' } : null;
+  return s ? { key, node, title: sessionTitleText(s) } : null;
 }
 
 // healthUnitName is the row's first line: the session's title when the
@@ -205,13 +205,11 @@ function healthUnitName(u, target) {
   return u.id;
 }
 
-// custodyCellHtml is a unit's 托管 cell: the session header's mark for one
-// custody can cover, 关 dimmed when it is off, — for the rest (the Planner,
-// a daemon, a remote or terminal session).
-function custodyCellHtml(u) {
-  if (u.kind !== 'session' && u.kind !== 'cron') return '—';
-  if (!coverable(u.id, 'local')) return '—';
-  return custody.byKey.get(u.id)?.on ? custodyChipHtml(u.id, false) : '<span class="hl-dim">关</span>';
+// custodyStopped reports whether custody gave up on unit u: its state cell
+// says so, the one place this table names custody (the session header's
+// chip is the switch).
+function custodyStopped(u) {
+  return u.kind === 'session' && coverable(u.id, 'local') && custody.byKey.get(u.id)?.state === 'stopped';
 }
 
 function healthRowHtml(u) {
@@ -231,22 +229,22 @@ function healthRowHtml(u) {
     ? '<span title="' + escAttr(formatAbsTime(last)) + '">' + esc(timeAgo(last)) + '</span>'
     : '—';
   // naozhi's own units (the Planner, the daemons, the scout) belong to no
-  // workspace and are not counted unowned (health.gatewayOwned).
+  // workspace (health.gatewayOwned).
   const ws = u.workspace ? esc(u.workspace_name || u.workspace)
-    : GATEWAY_OWNED.test(u.id) ? '—' : '<span class="hl-dim">无人负责</span>';
+    : GATEWAY_OWNED.test(u.id) ? '—' : '<span class="hl-dim">无工作区</span>';
+  const label = st.label + (custodyStopped(u) ? ' · 托管已停' : '');
   // On a phone the workspace folds under the name (.hl-sub) instead of
   // taking a column.
   return '<tr data-unit="' + escAttr(u.id) + '">' +
       '<td>' + cell + '<div class="hl-sub">' + ws + '</div></td>' +
       '<td class="hl-col-ws">' + ws + '</td>' +
-      '<td><span class="hl-state ' + st.cls + '"' + (stTitle ? ' title="' + escAttr(stTitle) + '"' : '') + '>' + esc(st.label) + '</span></td>' +
+      '<td><span class="hl-state ' + st.cls + '"' + (stTitle ? ' title="' + escAttr(stTitle) + '"' : '') + '>' + esc(label) + '</span></td>' +
       '<td class="hl-num">' + lastHtml + '</td>' +
-      '<td class="hl-custody">' + custodyCellHtml(u) + '</td>' +
     '</tr>';
 }
 
-// renderSystemHealthHtml is the 全会话健康 section: per-state counts and
-// the unowned count above the health state machine's table.
+// renderSystemHealthHtml is the 全会话健康 section: per-state counts above
+// the health state machine's table.
 function renderSystemHealthHtml() {
   if (!systemHealth) return '';
   const units = systemHealth.units;
@@ -255,12 +253,11 @@ function renderSystemHealthHtml() {
   const chips = Object.keys(HEALTH_STATES).filter(k => counts[k]).map(k =>
     '<span class="hl-count"><span class="hl-state ' + HEALTH_STATES[k].cls + '">' + esc(HEALTH_STATES[k].label) + '</span> <b>' + counts[k] + '</b></span>'
   );
-  chips.push('<span class="hl-count" data-count="unowned">无人负责 <b>' + (systemHealth.unowned || 0) + '</b></span>');
   const at = systemHealth.at ? Date.parse(systemHealth.at) : NaN;
   const atHtml = !isNaN(at) ? '<span class="hl-at" title="' + escAttr(formatAbsTime(at)) + '">更新于 ' + esc(timeAgo(at)) + '</span>' : '';
   const table = units.length
     ? '<div class="hl-scroll"><table class="hl-table">' +
-        '<thead><tr><th>会话</th><th class="hl-col-ws">工作区</th><th>健康状态</th><th>最后活动</th><th class="hl-custody">托管</th></tr></thead>' +
+        '<thead><tr><th>会话</th><th class="hl-col-ws">工作区</th><th>健康状态</th><th>最后活动</th></tr></thead>' +
         '<tbody>' + units.map(healthRowHtml).join('') + '</tbody>' +
       '</table></div>'
     : '<div class="system-empty">' + (isNaN(at) ? '健康状态机尚未完成首次对账。' : '暂无会话。') + '</div>';

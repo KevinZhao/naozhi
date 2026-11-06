@@ -251,11 +251,38 @@ export const HEALTH_ERROR_CLASSES = {
   auth: '凭证 / 权限拒绝',
   region: '地区限制',
   rate_limit: '限流',
-  network: '网络 / DNS',
+  network: '网络断了',
   credential_expired: '凭证过期',
   disk_full: '磁盘满',
   refusal: '模型拒答',
 };
+
+// TITLE_WIDTH is how wide an automatic title may run, a CJK character
+// counting 1 and any other 0.5: about 20 characters.
+const TITLE_WIDTH = 20;
+
+// autoTitle is a session's name made from its prompt (or the CLI's summary):
+// the first sentence — up to the first 。 or line break — without code, cut
+// to TITLE_WIDTH. A prompt that is all code keeps its first line.
+export function autoTitle(text) {
+  const raw = String(text || '').replace(/```[\s\S]*?(?:```|$)/g, ' ').replace(/`[^`\n]*`/g, ' ');
+  const first = (s) => s.split(/[。\n]/).map((x) => x.replace(/\s+/g, ' ').trim()).find(Boolean) || '';
+  const line = first(raw) || first(String(text || '').replace(/`/g, ''));
+  let w = 0, out = '';
+  for (const ch of line) {
+    w += /[\u2E80-\u9FFF\uF900-\uFAFF\uFF00-\uFFEF]/.test(ch) ? 1 : 0.5;
+    if (w > TITLE_WIDTH) return out.trimEnd() + '…';
+    out += ch;
+  }
+  return out;
+}
+
+// sessionTitleText is a /api/sessions row's name: the one you gave it, else
+// autoTitle of the CLI's summary or the latest prompt; '' for none.
+export function sessionTitleText(s) {
+  if (!s) return '';
+  return s.user_label || autoTitle(s.summary || s.last_prompt || '');
+}
 
 // currentHealth is the health verdict on a /api/sessions row (s.health), or
 // null when there is none or it predates the session's last activity: a

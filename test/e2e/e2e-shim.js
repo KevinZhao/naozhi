@@ -10,6 +10,7 @@
 // first-class assertions.
 import * as authModal from '/static/auth_modal.js';
 import * as composerFiles from '/static/composer_files.js';
+import * as custodyModule from '/static/custody.js';
 import * as dashboard from '/static/dashboard.js';
 import * as msgNav from '/static/msg_nav.js';
 import * as nzUtil from '/static/nz_util.js';
@@ -44,6 +45,7 @@ function stateField(name, obj, key) {
 
 expose(authModal, ['createNewSession', 'doCreateInProject', 'highlight', 'openProjectPalette', 'pickPaletteCustom', 'renderNodePicker']);
 expose(composerFiles, ['handleFiles']);
+expose(custodyModule, ['custody']);
 expose(dashboard, ['selectSession', 'toggleHistory']);
 expose(msgNav, ['navDismissPopover']);
 expose(nzUtil, ['showToast']);

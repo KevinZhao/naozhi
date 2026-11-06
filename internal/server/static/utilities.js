@@ -3,7 +3,7 @@
 // without forming a cycle. Shared state is read from the state.js objects.
 import { NZ_CONTRACT } from './contract.js';
 import { composer, perSession, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
-import { esc, escAttr, showToast, trapFocus, sessionDot, sessionExitChipHtml } from './nz_util.js';
+import { esc, escAttr, showToast, trapFocus, sessionDot, sessionExitChipHtml, sessionTitleText } from './nz_util.js';
 import { wsm } from './ws_manager.js';
 import { lsSet } from './platform.js';
 import { sid } from './session_ident.js';
@@ -177,7 +177,7 @@ function renderRecentSessionsPanel() {
   const top = items.slice().sort((a, b) => (b.last_active || 0) - (a.last_active || 0)).slice(0, 5);
   const rows = top.map(s => {
     const sNode = s.node || 'local';
-    const label = s.user_label || s.summary || s.last_prompt || '未命名';
+    const label = sessionTitleText(s) || '未命名';
     const dot = sessionDot(s);
     const ago = s.last_active ? timeAgo(s.last_active) : '';
     return '<button type="button" class="recent-row" ' +
@@ -589,9 +589,36 @@ function _codeBlockInfo(btn) {
 // Snippet payload for preview drawer. Storing in a module variable instead of
 // drawer.dataset avoids the multi-MB attribute truncation and DOM-serialize cost.
 
+// copyEventContent copies a bubble as it reads: the rendered HTML (a mail
+// or a doc pastes it formatted) and its text without Markdown marks, falling
+// back to the raw text where ClipboardItem is missing.
 function copyEventContent(btn) {
-  const text = btn.dataset.raw || btn.closest('.event').querySelector('.event-content').textContent;
-  copyWithFeedback(btn, text);
+  const content = btn.closest('.event')?.querySelector('.event-content');
+  const raw = btn.dataset.raw || (content ? content.textContent : '');
+  const rich = content && richCopy(content);
+  if (!rich || !navigator.clipboard || !navigator.clipboard.write || typeof ClipboardItem !== 'function') {
+    copyWithFeedback(btn, raw);
+    return;
+  }
+  const item = new ClipboardItem({
+    'text/html': new Blob([rich.html], { type: 'text/html' }),
+    'text/plain': new Blob([rich.text], { type: 'text/plain' }),
+  });
+  navigator.clipboard.write([item]).then(() => flashCopyButton(btn), () => copyWithFeedback(btn, raw));
+}
+
+// richCopy is a bubble's content without its buttons: {html, text}.
+function richCopy(content) {
+  const clone = content.cloneNode(true);
+  clone.querySelectorAll('button, .custody-source, .leaked-toolcall').forEach((el) => el.remove());
+  // innerText needs layout: the clone is measured off screen.
+  clone.style.cssText = 'position:fixed;left:-9999px;top:0;white-space:normal';
+  document.body.appendChild(clone);
+  try {
+    return { html: clone.innerHTML, text: clone.innerText.replace(/\n{3,}/g, '\n\n').trim() };
+  } finally {
+    clone.remove();
+  }
 }
 
 function shortPath(p) {

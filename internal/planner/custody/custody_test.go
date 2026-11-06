@@ -372,7 +372,7 @@ func TestRetry(t *testing.T) {
 			t.Errorf("sent %d, want %d", len(r.sent), len(Backoff))
 		}
 		if it := r.inbox.items; len(it) != 1 || it[0].Source != "failed:task:a" || it[0].Title != "修 bug 托管已停" ||
-			it[0].Why != "托管重试了 4 次还是出错（网络 / DNS）。发「继续」再试，或换个说法" {
+			it[0].Why != "托管重试了 4 次还是出错（网络断了）。发「继续」再试，或换个说法" {
 			t.Errorf("inbox = %+v", r.inbox.items)
 		}
 	})
@@ -606,7 +606,7 @@ func TestRetryLeftToUser(t *testing.T) {
 		}
 		it := r.inbox.items
 		if len(it) != 1 || it[0].Kind != notify.KindError || it[0].Source != "failed:task:a" ||
-			it[0].Why != "托管重试了 3 次还是出错（网络 / DNS）。发「继续」再试，或换个说法" {
+			it[0].Why != "托管重试了 3 次还是出错（网络断了）。发「继续」再试，或换个说法" {
 			t.Errorf("inbox = %+v", it)
 		}
 		if st := r.e.Status("task:a"); st.State != StateStopped {

@@ -5,7 +5,7 @@ import { NZ_CONTRACT } from './contract.js';
 import { INITIAL_HISTORY_LIMIT, sessionStream } from './session_stream.js';
 import { wsm } from './ws_manager.js';
 import { perSession, selection, sessionList, transcript } from './state.js';
-import { fetchJSON, nzBus, nzViews, showToast } from './nz_util.js';
+import { fetchJSON, nzBus, nzViews, sessionTitleText, showToast } from './nz_util.js';
 import { eventAlreadyRendered, eventHtml, leadingTimeDivider, removeOptimisticMsg, renderEventsWithDividers } from './event_render.js';
 import { hydrateAskAnsweredFromHistory, lockRenderedAskCards } from './ask_card.js';
 import { runPendingAsync } from './render_md.js';
@@ -499,7 +499,7 @@ export function appendEvents(events) {
       }
       echo = removeOptimisticMsg();
       // Lock cards already on screen before this user bubble is appended.
-      lockRenderedAskCards(el);
+      lockRenderedAskCards(el, e);
     }
     const h = eventHtml(e); if (!h) return;
     const t = e.time || 0;
@@ -563,7 +563,7 @@ function appendHistoryBackfill(el, display) {
         return;
       }
       if (!removeOptimisticMsg()) sawUser = true;
-      lockRenderedAskCards(el);
+      lockRenderedAskCards(el, e);
     }
     const h = eventHtml(e);
     if (h) {
@@ -617,11 +617,7 @@ function applyBackfillToTurn(events) {
     const ev = events[i];
     if (ev.type === 'user') {
       resetTurnStateForUserEcho();
-      const text = ev.detail || ev.summary || '';
-      if (text) {
-        const h2 = document.querySelector('.main-header h2');
-        if (h2) h2.textContent = text;
-      }
+      patchHeaderTitle(ev);
       continue;
     }
     if (ev.type === 'result') {
@@ -647,13 +643,47 @@ function applyTurnResult(ev) {
   }
   // The result ends the turn ahead of its 'ready' push, and counts as a push:
   // a poll requested before it holds a running snapshot it must not reapply.
-  if (sessionList.sessionsData[sKey] && sessionList.sessionsData[sKey].state === 'running') {
+  const owned = !!sessionList.sessionsData[sKey] && sessionList.sessionsData[sKey].state === 'running';
+  if (owned) {
     sessionList.statePushes.at.set(sKey, ++sessionList.statePushes.n);
     sessionList.sessionsData[sKey].state = 'ready';
     updateSendButton('ready');
   } else {
     resetTurnState();
   }
+  noteResult(ev, owned);
+}
+
+// RESULT_FRESH_MS bounds how old a result may be and still be news: a
+// backfill after a reconnect replays older ones.
+const RESULT_FRESH_MS = 120000;
+const lastResultAt = new Map();
+
+// noteResult tells session_list.js a turn of the open session ended; owned
+// false is one no turn was running for (the CLI woke on its own), whose end
+// no session_state will announce.
+function noteResult(ev, owned) {
+  const sKey = sid(selection.key, selection.node);
+  const t = ev.time || 0;
+  if (!t || t <= (lastResultAt.get(sKey) || 0) || Date.now() - t > RESULT_FRESH_MS) return;
+  lastResultAt.set(sKey, t);
+  nzBus.dispatchEvent(new CustomEvent('session:result', { detail: { key: selection.key, node: selection.node, owned } }));
+}
+
+// patchHeaderTitle keeps the open session's header title on the name the
+// list gives it (sessionTitleText: your name for it first) as user message
+// ev goes out; a message custody sent never names it.
+function patchHeaderTitle(ev) {
+  const sKey = sid(selection.key, selection.node);
+  const s = sessionList.sessionsData[sKey];
+  const text = ev.detail || ev.summary || '';
+  if (!s || !text || ev.source === 'custody') return;
+  const h2 = document.querySelector('.main-header h2');
+  const name = sessionTitleText(Object.assign({}, s, { last_prompt: text }));
+  if (!h2 || !name) return;
+  // The name is the heading's text node; its rename and export buttons stay.
+  const t = h2.firstChild;
+  if (t && t.nodeType === Node.TEXT_NODE) { if (t.data !== name) t.data = name; } else h2.prepend(name);
 }
 
 // appendLiveEvent appends a pushed event's bubble: a user replay is dropped by
@@ -758,15 +788,11 @@ const sessionFrames = {
     nzBus.dispatchEvent(new CustomEvent('session:event', { detail: { ev } }));
     // Turn boundaries: reset state, don't feed into applyEventToTurnState
     if (ev.type === 'user') {
-      const text = ev.detail || ev.summary || '';
-      if (text) {
-        const h2 = document.querySelector('.main-header h2');
-        if (h2) h2.textContent = text;
-      }
+      patchHeaderTitle(ev);
       resetTurnStateForUserEcho();
       // A user message after an AskUserQuestion means it was answered on some
       // surface — lock the card before the bubble lands.
-      lockRenderedAskCards(document.getElementById('events-scroll'));
+      lockRenderedAskCards(document.getElementById('events-scroll'), ev);
     } else if (ev.type === 'result') {
       applyTurnResult(ev);
     } else {

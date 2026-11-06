@@ -418,7 +418,7 @@ func ClassLabel(c health.ErrorClass) string {
 	case health.ErrRateLimit:
 		return "限流"
 	case health.ErrNetwork:
-		return "网络 / DNS"
+		return "网络断了"
 	case health.ErrCredentialExpired:
 		return "凭证过期"
 	case health.ErrDiskFull:
