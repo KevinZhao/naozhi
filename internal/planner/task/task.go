@@ -82,6 +82,11 @@ type Task struct {
 	// Retired is when the session was first seen gone from the router.
 	Health  health.State `json:"health,omitempty"`
 	Retired time.Time    `json:"retired,omitzero"`
+	// Reap is a done dispatched session put away (planner/reap): its
+	// worktrees and what became of them; reopening puts it back. ReapWait
+	// is why a done one is not put away yet ("" when nothing holds it).
+	Reap     *sidecar.Reap `json:"reap,omitempty"`
+	ReapWait string        `json:"reap_wait,omitempty"`
 }
 
 // Errors Set returns.
@@ -100,6 +105,13 @@ type Config struct {
 	// Board.Stop; promises are the IDs of the promises citing it that the
 	// stop closed. nil only marks it.
 	Stop func(key, title string, promises []string)
+	// OnState is told of each state set on a dispatched session, after it
+	// was saved (planner/reap: done puts it away, doing puts it back); nil
+	// tells no one.
+	OnState func(key string, state State)
+	// ReapWait is why done dispatched session key is not put away yet; nil
+	// says nothing.
+	ReapWait func(key string) string
 	// Now is the wall clock; nil is time.Now.
 	Now func() time.Time
 }
@@ -180,8 +192,11 @@ func (b *Board) List() []Task {
 				continue
 			}
 			u := units[m.Key]
-			t := Task{ID: m.Key, Kind: KindSession, Title: cmp.Or(m.Title, m.Key), Created: m.Created, Health: u.State, Retired: m.Retired}
+			t := Task{ID: m.Key, Kind: KindSession, Title: cmp.Or(m.Title, m.Key), Created: m.Created, Health: u.State, Retired: m.Retired, Reap: m.Reap}
 			t.State, t.By, t.Why, t.At = sessionState(m, u)
+			if t.State == Done && m.Reap == nil && b.cfg.ReapWait != nil {
+				t.ReapWait = b.cfg.ReapWait(m.Key)
+			}
 			out = append(out, t)
 		}
 	}
@@ -277,6 +292,9 @@ func (b *Board) Set(id string, state State, by By, why string) error {
 		unit = "promise:" + id
 	}
 	b.record(unit, id, state, by, why)
+	if unit == id && b.cfg.OnState != nil {
+		b.cfg.OnState(id, state)
+	}
 	return nil
 }
 

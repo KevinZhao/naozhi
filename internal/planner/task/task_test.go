@@ -287,3 +287,40 @@ func TestStop(t *testing.T) {
 		})
 	}
 }
+
+// A state set on a dispatched session is told to OnState once saved (the
+// reaper's trigger), a promise's is not; a done one not put away yet lists
+// why, one put away lists its reap.
+func TestOnStateAndReap(t *testing.T) {
+	now := t0
+	sc := sidecar.Open(t.TempDir(), func() time.Time { return now })
+	const key = "task:aaaaaaaaaaaa"
+	if err := sc.Put(sidecar.Meta{Key: key, Purpose: sidecar.PurposeTask, Title: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	var told []string
+	b := New(Config{Sessions: sc, Now: func() time.Time { return now },
+		OnState:  func(k string, s State) { told = append(told, k+" "+string(s)) },
+		ReapWait: func(string) string { return "有提问没回答" }})
+	if err := b.Set(key, Done, ByPlanner, "完成"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Set(key, Doing, ByUser, ""); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(told, []string{key + " done", key + " doing"}) {
+		t.Fatalf("OnState = %v", told)
+	}
+	if err := b.Set(key, Done, ByUser, ""); err != nil {
+		t.Fatal(err)
+	}
+	if l := b.List(); len(l) != 1 || l[0].ReapWait != "有提问没回答" || l[0].Reap != nil {
+		t.Fatalf("List = %+v", l)
+	}
+	if _, err := sc.Update(key, func(m *sidecar.Meta) bool { m.Reap = &sidecar.Reap{At: now, SessionID: "s"}; return true }); err != nil {
+		t.Fatal(err)
+	}
+	if l := b.List(); len(l) != 1 || l[0].ReapWait != "" || l[0].Reap == nil || l[0].Reap.SessionID != "s" {
+		t.Fatalf("List = %+v", l)
+	}
+}

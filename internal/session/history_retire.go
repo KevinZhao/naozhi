@@ -108,7 +108,8 @@ func (h *HistoryIO) bindUnlessRetired(s *ManagedSession, log *ring.EventLog, key
 	h.bindPersistSink(log, key)
 }
 
-// retireKeyHistory drops a removed session's event log and attachment refs,
+// retireKeyHistory drops a removed session's event log and attachment refs
+// (an Archive keeps both, keepHistory),
 // first detaching its process's persist sink so the dying process cannot
 // write the log back. It runs before the process closes, and ends the
 // barrier the removal raised, so a same-key session binds its sink only
@@ -122,6 +123,9 @@ func (h *HistoryIO) retireKeyHistory(key string, snap removeSnapshot) {
 		if log := holder.EventLog(); log != nil {
 			log.SetPersistSinkPair(nil, nil)
 		}
+	}
+	if snap.keepHistory {
+		return
 	}
 	h.dropEventLogForKey(key)
 	h.clearAttachmentTrackerRefs(key, snap.workspace)
