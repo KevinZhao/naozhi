@@ -713,6 +713,9 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .event.text:not(:has(~ .event.text)) .event-copy-btn.hover-only{opacity:1}
 @media (hover:none){
   .event-copy-btn.hover-only{opacity:1}
+  /* No hover to reveal it: a short answer's 复制 shows on the latest only. */
+  .event-copy-btn.copy-short{display:none}
+  .event.text:not(:has(~ .event.text)) .event-copy-btn.copy-short{display:inline-flex}
 }
 /* System/init: centered label */
 .event.system,.event.init{justify-content:center;padding-top:12px;padding-bottom:12px}

@@ -66,6 +66,9 @@ for (const [name, vp] of [['desktop', DESKTOP], ['phone', PHONE]]) {
     b.health = { state: 'active', since: now - 45 * 60000 - 5000, background_task: true };
     b.last_active = now - 50 * 60000;
     c.last_prompt = '修一下登录页的样式，跑 `go test ./...`。然后再看看手机上的布局';
+    const D = 'dashboard:direct:2026-01-01-120003-4:thirdproject';
+    s.sessions.push({ key: D, state: 'ready', platform: 'dashboard', agent: 'general', cli_name: 'claude', workspace: '/home/user/workspace/thirdproject',
+      last_active: now - 10000, last_prompt: 'iso 第三个项目', node: 'local', project: 'thirdproject' });
     const mock = await startMockServer({
       ws: true, sessions: s,
       planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
@@ -91,15 +94,19 @@ for (const [name, vp] of [['desktop', DESKTOP], ['phone', PHONE]]) {
         window.nz.bus.dispatchEvent(new CustomEvent('custody:changed'));
       });
       await expect(row(A).locator('.sc-response')).toHaveText('失败 · 网络断了 · 托管已停');
-      // A group of one session: a phone shows its card alone, the group on it (D6).
+      // A group of one session: a phone shows its card alone, the group on it
+      // (D6); not right under an empty group's header (pinned-empty), where
+      // the card would read as that group's.
       const single = page.locator('.section-header.sh-single');
       await expect(single).toHaveCount(1);
+      await expect(single).toHaveAttribute('aria-label', 'thirdproject');
+      await expect(page.locator('.section-header[aria-label="otherproject"]')).toBeVisible();
       if (name === 'phone') {
         await expect(single).toBeHidden();
-        await expect(row(B).locator('.sc-group')).toHaveText('otherproject');
+        await expect(row(D).locator('.sc-group')).toHaveText('thirdproject');
       } else {
         await expect(single).toBeVisible();
-        await expect(row(B).locator('.sc-group')).toBeHidden();
+        await expect(row(D).locator('.sc-group')).toBeHidden();
       }
       await page.screenshot({ path: test.info().outputPath('rows-' + name + '.png') });
     } finally {
@@ -345,6 +352,8 @@ test('a phone\'s session view keeps the bottom bar and drops the ▲▼ pill and
     expect(input.y + input.height).toBeLessThanOrEqual(bar.y + 1);
     await expect(page.locator('.nav-pill')).toBeHidden();
     await expect(page.locator('.main-header .detail-git')).toBeHidden();
+    await expect(page.locator('.sidebar')).not.toBeInViewport();
+    await page.waitForTimeout(400);
     await page.screenshot({ path: test.info().outputPath('session-phone.png') });
   } finally {
     await ctx.close();

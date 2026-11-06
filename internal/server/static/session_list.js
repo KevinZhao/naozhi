@@ -474,6 +474,7 @@ function sidebarHtml(items) {
     const rest = items.map((s) => sessionCardHtml(s)).join('');
     return html + (html && rest ? '<div class="section-header"><span class="sh-name">未分组</span></div>' : '') + rest;
   }
+  let bareHeader = false; // the last row is a header with no rows under it
   groupKeys.forEach(k => {
     const g = groups[k];
     const p = projIndex[k] || {
@@ -486,10 +487,13 @@ function sidebarHtml(items) {
     p._sessionCount = g.items.length;
     const collapsed = sessionList.collapsedProjects.has(k);
     // One session under a header is a header per row on a phone: the header
-    // is hidden there (.sh-single) and the card names the group.
-    const single = !collapsed && g.items.length === 1;
+    // is hidden there (.sh-single) and the card names the group. Not right
+    // under a header with no rows (an empty or folded group), or the card
+    // would read as that group's.
+    const single = !collapsed && g.items.length === 1 && !bareHeader;
     const header = g.fallback ? sectionHeaderFallbackHtml(p) : sectionHeaderHtml(p);
     html += single ? header.replace('class="section-header', 'class="section-header sh-single') : header;
+    bareHeader = collapsed || g.items.length === 0;
     if (collapsed) return;
     html += g.items.map((s) => sessionCardHtml(s, single ? projectDisplayName(p) : '')).join('');
   });
@@ -986,7 +990,9 @@ function repliedSince(polled) {
 }
 
 // noteUnseenTurnEnd is the unread count and, with the tab in the background,
-// one browser notification (notify.js) for a turn no session_state ended.
+// one browser notification (notify.js) for a turn no session_state ended. A
+// session the Planner dispatched reports to the Planner instead: no
+// notification for it.
 export function noteUnseenTurnEnd(s) {
   const node = s.node || 'local';
   const sKey = sid(s.key, node);
@@ -994,7 +1000,7 @@ export function noteUnseenTurnEnd(s) {
   const isActive = s.key === selection.key && node === selection.node;
   if (!isActive || document.hidden) perSession.unread[sKey] = (perSession.unread[sKey] || 0) + 1;
   const name = sessionTitleText(sessionList.sessionsData[sKey] || s) || '会话';
-  nzBus.dispatchEvent(new CustomEvent('session:turn-end', { detail: { key: s.key, node, title: name + ' 跑完了', body: firstLine(s.last_response || '') } }));
+  if (s.purpose !== 'task') nzBus.dispatchEvent(new CustomEvent('session:turn-end', { detail: { key: s.key, node, title: name + ' 跑完了', body: firstLine(s.last_response || '') } }));
   document.querySelectorAll('.session-card').forEach((c) => {
     if (c.dataset.key === s.key && (c.dataset.node || 'local') === node) updateCardUnreadChip(c, perSession.unread[sKey] || 0);
   });

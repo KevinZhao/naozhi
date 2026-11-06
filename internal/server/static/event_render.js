@@ -384,7 +384,7 @@ function eventImagesHtml(e, sk) {
 function eventActionsHtml(e, cleanRaw, noAsk) {
   const isLong = !!cleanRaw && cleanRaw.length > 500;
   const copyBtn = cleanRaw && (e.type === 'text' || (isLong && e.type === 'user'))
-    ? '<button class="event-copy-btn hover-only" type="button" data-raw="' + escAttr(cleanRaw) + '" data-action="event-copy" title="复制" aria-label="复制消息">复制</button>'
+    ? '<button class="event-copy-btn hover-only' + (isLong ? '' : ' copy-short') + '" type="button" data-raw="' + escAttr(cleanRaw) + '" data-action="event-copy" title="复制" aria-label="复制消息">复制</button>'
     : '';
   const askBtn = isLong && !noAsk && e.type === 'text'
     ? '<button class="event-ask-btn hover-only" type="button" data-raw="' + escAttr(cleanRaw) + '" data-msg-time="' + (e.time || 0) + '" data-action="ask-aside" title="基于此内容追问">' + ICONS.preview + ' 追问</button>'

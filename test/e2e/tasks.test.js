@@ -43,6 +43,10 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
       if (name === 'mobile') {
         await expect(page.locator('#pl-left-toggle')).toHaveText('等你 0 · 任务 1');
         await page.click('#pl-left-toggle');
+        // Unfolded, a task in progress comes before what waits on you (Q15).
+        await expect(page.locator('#pl-task .tk-sec-doing')).toBeVisible();
+        const [tk, wait] = await Promise.all([page.locator('#pl-task').boundingBox(), page.locator('#pl-wait').boundingBox()]);
+        expect(tk.y).toBeLessThan(wait.y);
       }
       const group = page.locator('#pl-task');
       await expect(group.locator('.tk-head')).toHaveText('任务');

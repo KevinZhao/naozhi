@@ -41,7 +41,7 @@
   .section-header.sh-single{display:none}
   .session-card .sc-group{display:inline;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--nz-fs-xs);color:var(--nz-text-faint)}
   /* Unfolded, the tasks in progress come before what waits on you. */
-  .pl-left-body > .pl-group:has(#pl-task){order:-1}
+  .pl-left-body > .pl-group:has(.tk-sec-doing){order:-1}
   .ab-nav{width:auto;flex:1;max-width:120px;height:46px}
   /* "自动化" is 3 chars — keep the label on one line in a 4-tab bar. */
   .ab-nav-label{white-space:nowrap}
