@@ -453,8 +453,8 @@ func TestRetry(t *testing.T) {
 		r := newRig(t)
 		r.dispatch("task:a")
 		r.e.Pause(r.now.Add(time.Hour))
-		if u := failed("task:a", health.ErrNetwork, "", r.now); r.e.Covers(u) {
-			t.Error("covered while paused")
+		if u := failed("task:a", health.ErrNetwork, "", r.now); !r.e.Covers(u) {
+			t.Error("not covered while paused: its retry waits for the pause to end")
 		}
 	})
 }
@@ -534,7 +534,7 @@ func TestViewers(t *testing.T) {
 }
 
 // A failure custody took is left to the user, as the failure it is, as soon
-// as custody gives it up: turned off, paused, a retry that failed again with
+// as custody gives it up: turned off, a retry that failed again with
 // a class it does not retry (no health transition), or a lineage that would
 // stop at the retry for want of progress.
 func TestRetryLeftToUser(t *testing.T) {
@@ -547,7 +547,6 @@ func TestRetryLeftToUser(t *testing.T) {
 		why  string
 		sent int
 	}{
-		{"paused", func(r *rig) { r.e.Pause(r.now.Add(time.Hour)) }, "托管已暂停", 0},
 		{"failed again, not retryable", func(r *rig) {
 			r.now = r.now.Add(time.Minute)
 			r.e.Tick() // the retry goes out

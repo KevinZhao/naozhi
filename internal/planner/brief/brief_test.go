@@ -87,11 +87,11 @@ func TestNothingToReportSendsNothing(t *testing.T) {
 	}
 	f.pushes, f.inbox = nil, nil
 
-	// Noise only: a routine cron run, a failure outside every workspace,
-	// the Planner's own output, a session still running, and an item the
-	// user closed.
+	// Noise only: a routine cron run, a cron job's failure outside every
+	// workspace, the Planner's own output, a session still running, and an
+	// item the user closed.
 	f.health(at(2, 23, 0), "cron:nightly", "ws1", health.Active, health.Idle, health.KindCron, "")
-	f.health(at(2, 23, 5), "dashboard:direct:x:general", "", health.Active, health.Failed, health.KindSession, health.ErrAuth)
+	f.health(at(2, 23, 5), "cron:orphan", "", health.Active, health.Failed, health.KindCron, health.ErrAuth)
 	f.output(at(3, 1, 0), "planner:main", "ws1", activity.Activity{Type: activity.TypeOutput, Path: "a.md"})
 	f.output(at(3, 2, 0), "busy", "ws1", activity.Activity{Type: activity.TypeOutput, Path: "b.md"})
 	f.snap = health.Snapshot{At: at(3, 9, 0), Units: []health.Unit{{ID: "busy", Kind: health.KindSession, Workspace: "ws1", State: health.Active, LastActive: at(3, 8, 59)}}}

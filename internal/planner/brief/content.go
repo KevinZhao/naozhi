@@ -163,8 +163,9 @@ type seen struct {
 }
 
 // gather collects the brief's items for the window since..now. Units
-// without a workspace are left out, as everywhere the gateway reports
-// (§3.8), and so is the Planner's own namespace. Finished means a turn
+// without a workspace are left out (§3.8), but for the user's own sessions
+// (health.UserSession: a chat started in the default directory belongs to
+// none), listed by name alone; so is the Planner's own namespace. Finished means a turn
 // ended (a health transition from active to idle, or an output: a restart
 // dates no turn) and the unit is not running, waiting or failed now;
 // routine units (cron, daemons) and terminal sessions only count when they
@@ -275,7 +276,7 @@ func (b *Briefer) gather(since, now time.Time) input {
 		if live {
 			ws, kind = cmp.Or(u.Workspace, ws), u.Kind
 		}
-		if ws == "" || sessionkey.IsPlannerNSKey(id) {
+		if ws == "" && !health.UserSession(id, kind) || sessionkey.IsPlannerNSKey(id) {
 			continue
 		}
 		r := b.ref(id, kind, cmp.Or(wsNames[ws], ws))
