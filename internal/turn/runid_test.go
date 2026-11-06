@@ -258,28 +258,32 @@ func TestTurnIDs_PanicRecoveredOnTheTurnCtx(t *testing.T) {
 // srcSender records the message source each Send's ctx carried.
 type srcSender struct {
 	*fakeSender
-	mu   sync.Mutex
-	seen []string
+	mu    sync.Mutex
+	seen  []string
+	marks []ctxutil.Custody
 }
 
 func (s *srcSender) Send(ctx context.Context, key string, sess Session, text string, imgs []clievent.Attachment, spec SendSpec, cb clievent.EventCallback) (*clievent.SendResult, error) {
 	s.mu.Lock()
 	s.seen = append(s.seen, text+"="+ctxutil.Source(ctx))
+	s.marks = append(s.marks, ctxutil.CustodyOf(ctx))
 	s.mu.Unlock()
 	return s.fakeSender.Send(ctx, key, sess, text, imgs, spec, cb)
 }
 
 // A turn carries the source its messages share: a detached custody message
 // keeps it, a merge of two custody messages keeps it, and a merge with one
-// of the user's is the user's.
+// of the user's is the user's. A custody turn carries the reason and count
+// of its latest message, for the transcript.
 func TestTurnSource(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		sources []string // the second and third messages, merged behind the first
-		want    string
+		name     string
+		sources  []string // the second and third messages, merged behind the first
+		want     string
+		wantMark ctxutil.Custody
 	}{
-		{"both custody", []string{clievent.SourceCustody, clievent.SourceCustody}, clievent.SourceCustody},
-		{"custody and the user", []string{clievent.SourceCustody, ""}, ""},
+		{"both custody", []string{clievent.SourceCustody, clievent.SourceCustody}, clievent.SourceCustody, ctxutil.Custody{Reason: "出错重试", N: 3}},
+		{"custody and the user", []string{clievent.SourceCustody, ""}, "", ctxutil.Custody{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := newRecorder()
@@ -289,10 +293,16 @@ func TestTurnSource(t *testing.T) {
 			gate := make(chan struct{})
 			fs.gate = gate
 			adm := &fakeAdmission{rec: rec, async: true, ctx: context.Background()}
-			o.Submit(context.Background(), Request{Key: "k", Text: "m1", Origin: newOrigin(rec, "a", "ws:a"), Source: clievent.SourceCustody}, adm)
+			mark := func(src string, n int) ctxutil.Custody {
+				if src != clievent.SourceCustody {
+					return ctxutil.Custody{}
+				}
+				return ctxutil.Custody{Reason: "出错重试", N: n}
+			}
+			o.Submit(context.Background(), Request{Key: "k", Text: "m1", Origin: newOrigin(rec, "a", "ws:a"), Source: clievent.SourceCustody, Custody: mark(clievent.SourceCustody, 1)}, adm)
 			rec.waitFor(t, "send:k:m1", 1)
-			o.Submit(context.Background(), Request{Key: "k", Text: "m2", Origin: newOrigin(rec, "b", "ws:b"), Source: tc.sources[0]}, adm)
-			o.Submit(context.Background(), Request{Key: "k", Text: "m3", Origin: newOrigin(rec, "c", "ws:c"), Source: tc.sources[1]}, adm)
+			o.Submit(context.Background(), Request{Key: "k", Text: "m2", Origin: newOrigin(rec, "b", "ws:b"), Source: tc.sources[0], Custody: mark(tc.sources[0], 2)}, adm)
+			o.Submit(context.Background(), Request{Key: "k", Text: "m3", Origin: newOrigin(rec, "c", "ws:c"), Source: tc.sources[1], Custody: mark(tc.sources[1], 3)}, adm)
 			gate <- struct{}{}
 			rec.waitFor(t, "begin:c:head", 1)
 			gate <- struct{}{}
@@ -302,6 +312,9 @@ func TestTurnSource(t *testing.T) {
 			defer ss.mu.Unlock()
 			if len(ss.seen) != 2 || ss.seen[0] != "m1="+clievent.SourceCustody || !strings.HasSuffix(ss.seen[1], "="+tc.want) {
 				t.Fatalf("sends = %q, want m1=custody then the merge =%q", ss.seen, tc.want)
+			}
+			if want := (ctxutil.Custody{Reason: "出错重试", N: 1}); ss.marks[0] != want || ss.marks[1] != tc.wantMark {
+				t.Errorf("custody marks = %+v, want %+v then %+v", ss.marks, want, tc.wantMark)
 			}
 		})
 	}

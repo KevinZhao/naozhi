@@ -206,6 +206,9 @@ type Config struct {
 	// Start is what this start found; a version other than the one the
 	// last start recorded is announced once Run starts (upgradeItem).
 	Start Start
+	// Midway is when this machine's Midway session expires (midway.Expiry),
+	// zero for none; nil skips the check.
+	Midway func() time.Time
 }
 
 // Notifier owns the inbox and the push pipeline. Safe for concurrent use;
@@ -530,6 +533,25 @@ func (n *Notifier) Pause(until time.Time) {
 	n.saveStateLocked()
 	n.mu.Unlock()
 	n.record("", notifyData{Event: "pause", Until: until})
+}
+
+// MaxPause bounds a pause.
+const MaxPause = 7 * 24 * time.Hour
+
+// ErrPauseFor answers a pause length ParsePause cannot read.
+var ErrPauseFor = errors.New(`"for" must be "today" or a duration up to 168h`)
+
+// ParsePause is when a pause asked for as length ("today" until local
+// midnight, else a Go duration up to MaxPause) ends, from now.
+func ParsePause(length string, now time.Time) (time.Time, error) {
+	if length == "today" {
+		return EndOfToday(now), nil
+	}
+	d, err := time.ParseDuration(length)
+	if err != nil || d <= 0 || d > MaxPause {
+		return time.Time{}, ErrPauseFor
+	}
+	return now.Add(d), nil
 }
 
 // EndOfToday is the "today" pause's end: the next local midnight after now.

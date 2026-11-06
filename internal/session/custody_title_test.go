@@ -1,9 +1,11 @@
 package session
 
 import (
+	"context"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/ctxutil"
 )
 
 // TestTitleSkipsCustodyMessages: a session the gateway keeps going under
@@ -11,10 +13,14 @@ import (
 func TestTitleSkipsCustodyMessages(t *testing.T) {
 	t.Parallel()
 	custody := clievent.CustodyLead + "出错重试 · 第 1/8 次\n继续"
+	ctx := context.Background()
 
 	s := &ManagedSession{key: "dashboard:direct:a:general"}
-	s.cachePrompt("整理周报", nil)
-	s.cachePrompt(custody, nil)
+	s.cachePrompt(ctx, "整理周报", nil)
+	// A custody message is plain text now, known by its source; an older
+	// one by its lead.
+	s.cachePrompt(ctxutil.WithSource(ctx, clievent.SourceCustody), "继续", nil)
+	s.cachePrompt(ctx, custody, nil)
 	if got := loadAtomicString(&s.lastPrompt); got != "整理周报" {
 		t.Fatalf("live title = %q, want the user's prompt", got)
 	}

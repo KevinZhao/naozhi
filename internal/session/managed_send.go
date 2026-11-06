@@ -9,6 +9,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/ctxutil"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -28,7 +29,7 @@ func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, image
 	s.touchLastActive()
 	ctx = sendRunCtx(ctx)
 
-	s.cachePrompt(text, images)
+	s.cachePrompt(ctx, text, images)
 
 	proc := s.loadProcess()
 	if proc == nil {
@@ -136,7 +137,7 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []clieven
 	s.touchLastActive()
 
 	// Cache the user prompt for Snapshot.
-	s.cachePrompt(text, images)
+	s.cachePrompt(ctx, text, images)
 
 	proc := s.loadProcess()
 	if proc == nil {
@@ -255,9 +256,10 @@ func (s *ManagedSession) InterruptViaControlDetail() (InterruptOutcome, error) {
 }
 
 // cachePrompt caches the user prompt for Snapshot. A custody message is not
-// the user's: the title keeps the last prompt the user wrote.
-func (s *ManagedSession) cachePrompt(text string, images []clievent.Attachment) {
-	if strings.HasPrefix(text, clievent.CustodyLead) {
+// the user's: the title keeps the last prompt the user wrote. One from
+// before ctx carried its source still leads with the custody line.
+func (s *ManagedSession) cachePrompt(ctx context.Context, text string, images []clievent.Attachment) {
+	if ctxutil.Source(ctx) == clievent.SourceCustody || strings.HasPrefix(text, clievent.CustodyLead) {
 		return
 	}
 	storeAtomicString(&s.lastPrompt, textutil.TruncateRunes(text, 120)+clievent.AttachmentSuffix(images))

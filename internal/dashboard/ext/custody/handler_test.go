@@ -15,7 +15,7 @@ import (
 type fakeSource struct {
 	on     map[string]bool
 	setErr error
-	paused bool
+	until  time.Time
 	by     []string
 	undone []string
 }
@@ -35,8 +35,11 @@ func (f *fakeSource) Set(key string, on bool, by string) error {
 	f.on[key], f.by = on, append(f.by, by)
 	return nil
 }
-func (f *fakeSource) Paused() (bool, time.Time) { return f.paused, time.Time{} }
-func (f *fakeSource) SetPaused(p bool) error    { f.paused = p; return nil }
+func (f *fakeSource) Paused() (bool, time.Time) { return !f.until.IsZero(), f.until }
+func (f *fakeSource) Pause(until time.Time) error {
+	f.until = until
+	return nil
+}
 func (f *fakeSource) Undo(key string) (string, error) {
 	if f.setErr != nil {
 		return "", f.setErr
@@ -63,7 +66,11 @@ func TestHandler(t *testing.T) {
 		{name: "unknown session", method: "PUT", path: "/api/custody", body: `{"key":"k","on":true}`, setErr: custody.ErrNoSession, code: 404},
 		{name: "refused", method: "PUT", path: "/api/custody", body: `{"key":"planner:main","on":true}`, setErr: custody.ErrRefused, code: 400},
 		{name: "planner off", method: "PUT", path: "/api/custody", body: `{"key":"k","on":true}`, setErr: custody.ErrDisabled, code: 503, want: "Planner 没有开"},
+		// The inbox pause's alias: today without a length, else as long as
+		// the inbox's takes.
 		{name: "pause", method: "PUT", path: "/api/custody/pause", code: 200, want: `"paused":true`},
+		{name: "pause for", method: "PUT", path: "/api/custody/pause", body: `{"for":"1h"}`, code: 200, want: `"paused_until"`},
+		{name: "pause too long", method: "PUT", path: "/api/custody/pause", body: `{"for":"200h"}`, code: 400},
 		{name: "resume", method: "DELETE", path: "/api/custody/pause", code: 200, want: `"paused":false`},
 		{name: "unwired", method: "PUT", path: "/api/custody", body: `{"key":"k","on":true}`, nilSource: true, code: 503},
 		{name: "unwired list", method: "GET", path: "/api/custody", nilSource: true, code: 200, want: `"paused":false`},

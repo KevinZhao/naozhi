@@ -64,6 +64,12 @@ type EventEntry struct {
 	// gateway under custody (SourceCustody) or the Planner's dispatch
 	// (SourcePlanner); "" is the user.
 	Source string `json:"source,omitempty"`
+	// CustodyReason and CustodyN are why custody sent a SourceCustody entry
+	// (出错重试, 按建议执行, Planner 继续) and its count over the lineage;
+	// the text sent to the CLI carries neither. Entries older than the
+	// fields lead their text with CustodyLead instead.
+	CustodyReason string `json:"custody_reason,omitempty"`
+	CustodyN      int    `json:"custody_n,omitempty"`
 	// Reason is why: a peer_hold's cause (explicit-setting, mode-mismatch;
 	// Status "held") or outcome (expired, refused, ...; Status "dropped"),
 	// a permission_denied's decision reason, a model_refusal's category.
@@ -100,8 +106,8 @@ const (
 	// SourceCustody is a message the gateway sent while it watches the
 	// session for the user (docs/rfc/planner.md §5.4).
 	SourceCustody = "custody"
-	// CustodyLead starts the text of every custody message; a session's
-	// title skips such messages, or it would read as the custody line.
+	// CustodyLead started the text of a custody message before the entry
+	// carried CustodyReason; a session's title still skips such messages.
 	CustodyLead = "⚙ 托管 · "
 	// SourcePlanner is the first message of a session the Planner dispatched.
 	SourcePlanner = "planner"

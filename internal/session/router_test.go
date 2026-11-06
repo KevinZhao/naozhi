@@ -37,6 +37,7 @@ type fakeProcess struct {
 	userTurnCount int64                 // returned by UserTurnCount (test-only)
 	lastEventAt   time.Time             // returned by LastEventAt (test-only)
 	startedAt     time.Time             // returned by StartedAt (test-only)
+	pid           int                   // returned by PID (test-only)
 
 	// Interrupt instrumentation (used by TestInterruptSessionSafe_*).
 	// viaControlErr is what InterruptViaControl() returns. interruptCalls is
@@ -246,7 +247,7 @@ func (f *fakeProcess) InterruptViaControl() error {
 	f.mu.Unlock()
 	return err
 }
-func (f *fakeProcess) PID() int                              { return 0 }
+func (f *fakeProcess) PID() int                              { return f.pid }
 func (f *fakeProcess) InjectHistory(_ []clievent.EventEntry) {}
 func (f *fakeProcess) TurnAgents() []ring.SubagentInfo       { return nil }
 
