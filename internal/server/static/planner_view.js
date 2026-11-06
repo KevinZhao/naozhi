@@ -43,7 +43,7 @@ import { sid } from './session_ident.js';
 import { leadingTimeDivider, renderEventsWithDividers } from './event_render.js';
 import { dedupEarlierPage, hasMoreHeader } from './event_stream.js';
 import { renderMd, runPendingAsync } from './render_md.js';
-import { inbox, isLit, light, notifySupported, onInboxCount, requestNotifyPermission, revealFocus } from './notify.js';
+import { inbox, isLit, light, notifySupported, onInboxCount, onNotify, requestNotifyPermission, revealFocus } from './notify.js';
 import { followWorkbenchSubject, noteWorkbenchEvent } from './workbench_panes.js';
 import { decisionActsHtml, decorateEvents, noteWorkspaces, paintSessionCards, refreshHealth, unitName, webLinkHtml, workspaceName } from './planner_cards.js';
 import { clearAck, clearPending, closePlannerSession, mountComposer, noteAck, notePlannerStatus, showPlannerLeft } from './planner_chat.js';
@@ -51,6 +51,7 @@ import { onSessionsApplied } from './session_list.js';
 import { inProgress, mountTasks, refreshTasks } from './tasks.js';
 import { custody, refreshCustody, setCustodyPaused } from './custody.js';
 import { workbench } from './workbench.js';
+import { choosePlannerNode, eventsURL, hostName, hostOnline, hostRemote, isLocalNode, nodeAPI, notePlannerNodes, plannerAPI, plannerHost, plannerNodes, readLocalPlanner } from './planner_host.js';
 import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
 import { EARLIER_PAGE_LIMIT, EVENT_DIVIDER_GAP_MS, formatAbsTime, formatMonthDayTime, lastDividerTime, timeAgo } from './utilities.js';
@@ -94,6 +95,8 @@ const pl = {
   // sub is the planner:main subscription: '' none, 'pending' sent,
   // 'suspended' acked without a process (no live events), 'live'.
   sub: '',
+  // subNode is the node the subscription is on (plannerHost.node then).
+  subNode: 'local',
   loading: false,
   gen: 0, // bumped by each first-page load
   timer: 0,
@@ -136,9 +139,14 @@ function itemWhy(it, target) {
 }
 
 // unitTarget is the listed session an item is about, or null: a local one,
-// or a remote node's, whose unit is "<node>/<key>".
-function unitTarget(unit) {
+// or a remote node's, whose unit is "<node>/<key>"; an item a node's inbox
+// holds (it.node) is about that node's session.
+function unitTarget(unit, from) {
   if (!unit) return null;
+  if (!isLocalNode(from)) {
+    const s = sessionList.sessionsData[sid(unit, from)];
+    return s ? { key: unit, node: from, s, title: sessionTitleText(s) || unit, project: s.project || '' } : null;
+  }
   let key = unit, node = 'local';
   let s = sessionList.sessionsData[sid(key, node)];
   const i = unit.indexOf('/');
@@ -156,7 +164,7 @@ function unitTarget(unit) {
 // own items need no source.
 function metaHtml(it) {
   const title = it.title || '';
-  const target = unitTarget(it.unit);
+  const target = unitTarget(it.unit, it.node);
   if (target) {
     const name = title.includes(target.title) ? '' : target.title;
     return [target.project, name].filter(Boolean).map(esc).join(' · ') +
@@ -177,17 +185,27 @@ function timeHtml(it, kind) {
     esc(waits ? '等了 ' + waitedText(Date.now() - created) : timeAgo(created)) + '</span>';
 }
 
+// itemRef is an item's ID on the page: its own for this node's inbox,
+// "<node>|<id>" for the Planner's node's (the two inboxes number apart);
+// itemOf reads one back.
+const itemRef = (it) => (isLocalNode(it.node) ? it.id : it.node + '|' + it.id);
+function itemOf(ref) {
+  const i = ref.indexOf('|');
+  return i > 0 ? { node: ref.slice(0, i), id: ref.slice(i + 1) } : { node: 'local', id: ref };
+}
+
 function itemHtml(it) {
   const kind = KIND_LABEL[it.kind] ? it.kind : 'notice';
   const meta = metaHtml(it);
   const link = webLinkHtml(it.link);
-  const acts = decisionActsHtml(it);
-  const why = itemWhy(it, unitTarget(it.unit));
-  return '<div class="pl-card pl-k-' + kind + (isLit(it.id) ? ' inbox-lit' : '') + '" role="listitem" data-id="' + escAttr(it.id) + '">' +
+  const acts = decisionActsHtml(Object.assign({}, it, { id: itemRef(it) }));
+  const why = itemWhy(it, unitTarget(it.unit, it.node));
+  const ref = itemRef(it);
+  return '<div class="pl-card pl-k-' + kind + (isLit(ref) ? ' inbox-lit' : '') + '" role="listitem" data-id="' + escAttr(ref) + '">' +
       '<div class="pl-card-top">' +
         (KIND_LABEL[kind] ? '<span class="pl-kind">' + esc(KIND_LABEL[kind]) + '</span>' : '') +
         timeHtml(it, kind) +
-        '<button type="button" class="pl-close btn-close" data-action="planner-inbox-close" data-id="' + escAttr(it.id) + '" title="关闭" aria-label="关闭这一条">&times;</button>' +
+        '<button type="button" class="pl-close btn-close" data-action="planner-inbox-close" data-id="' + escAttr(ref) + '" title="关闭" aria-label="关闭这一条">&times;</button>' +
       '</div>' +
       '<div class="pl-card-title">' + esc(it.title || '') + '</div>' +
       (why ? '<div class="pl-card-why" title="' + escAttr(why) + '">' + esc(why) + '</div>' : '') +
@@ -212,8 +230,8 @@ const actionItems = () => sortedOpen().filter((it) => KIND_LABEL[it.kind]);
 // and the notice a push or link opened (inbox.focus), which no list holds
 // otherwise: it stays at the end, uncounted, until it closes.
 function waitListHtml() {
-  if (inbox.focus && pl.open.some((it) => it.id === inbox.focus && !KIND_LABEL[it.kind])) pl.notice = inbox.focus;
-  const notice = pl.notice ? pl.open.find((it) => it.id === pl.notice) : null;
+  if (inbox.focus && pl.open.some((it) => itemRef(it) === inbox.focus && !KIND_LABEL[it.kind])) pl.notice = inbox.focus;
+  const notice = pl.notice ? pl.open.find((it) => itemRef(it) === pl.notice) : null;
   if (!notice) pl.notice = '';
   const html = actionListHtml() + (notice ? itemHtml(notice) : '');
   return html || '<div class="pl-empty">没有等你的事</div>';
@@ -261,24 +279,100 @@ function revealWaiting() {
 function paintInlineCards(items) {
   const box = $('pl-cards');
   if (!box) return;
-  const mine = items.filter((it) => it.unit === PLANNER_KEY && it.decision);
+  const mine = items.filter((it) => it.unit === PLANNER_KEY && (it.node || 'local') === plannerHost.node && it.decision);
   const html = mine.length ? '<div class="pl-cards-h">待你回答 · ' + mine.length + '</div>' + mine.map(itemHtml).join('') : '';
   if (box.innerHTML !== html) box.innerHTML = html;
   box.hidden = !html;
 }
 
+// fetchInbox lists this node's inbox and, with the Planner on another node,
+// that node's too (remote-planner.md §5): one 等你, each item tagged with the
+// node that holds it. The pause shown is the Planner's node's.
 export async function fetchInbox() {
+  const host = plannerHost.node;
   try {
-    const res = await fetchJSON(NZ_CONTRACT.API.inbox, { timeoutMs: 8000 });
-    pl.open = (res && Array.isArray(res.open)) ? res.open : [];
-    pl.pausedUntil = res && res.paused_until ? Date.parse(res.paused_until) || 0 : 0;
-    if (res && res.counts) {
+    const [res, far] = await Promise.all([
+      // This node's inbox failing leaves the Planner's node's to show.
+      isLocalNode(host) ? fetchJSON(NZ_CONTRACT.API.inbox, { timeoutMs: 8000 }) : fetchJSON(NZ_CONTRACT.API.inbox, { timeoutMs: 8000 }).catch(() => null),
+      // An offline node keeps what it listed last (undefined).
+      isLocalNode(host) ? null : !hostOnline() ? undefined : fetchJSON(nodeAPI(host, NZ_CONTRACT.API.inbox), { timeoutMs: 8000 }).catch(() => undefined),
+    ]);
+    if (host !== plannerHost.node) return;
+    const tag = (r, node) => ((r && Array.isArray(r.open)) ? r.open : []).map((it) => Object.assign({}, it, { node }));
+    // A node that did not answer keeps what it listed last.
+    const kept = far === undefined ? pl.open.filter((it) => it.node === host) : tag(far, host);
+    pl.open = tag(res, 'local').concat(isLocalNode(host) ? [] : kept);
+    if (far) notifyNewRemote(host, pl.open.filter((it) => it.node === host));
+    const pausedFrom = isLocalNode(host) ? res : far;
+    if (pausedFrom !== undefined) pl.pausedUntil = pausedFrom && pausedFrom.paused_until ? Date.parse(pausedFrom.paused_until) || 0 : 0;
+    if ((res && res.counts) || far !== undefined) {
       pl.seeding = true;
-      try { onInboxCount(res.counts); } finally { pl.seeding = false; }
+      try { onInboxCount(res && res.counts, far && far.counts); } finally { pl.seeding = false; }
     }
   } catch { return; }
   if (pl.host) { paintWaiting(); paintTools(); }
   noteItems();
+}
+
+// remoteSeen is the Planner's node's open items already seen (by ref): this
+// node pushes no frame for that node's items, so a new one that waits on you
+// is notified from here (notify.js onNotify, in the background only). null
+// until the first list, which notifies nothing.
+let remoteSeen = null;
+function notifyNewRemote(node, items) {
+  const refs = new Set(items.map(itemRef));
+  if (remoteSeen) {
+    for (const it of items) {
+      if (!remoteSeen.has(itemRef(it)) && KIND_LABEL[it.kind]) {
+        onNotify({ title: it.title || '通知', body: it.why || '', id: itemRef(it), key: it.unit || '', node });
+      }
+    }
+  }
+  remoteSeen = refs;
+}
+
+// REMOTE_INBOX_MS: with the Planner on another node its inbox is polled, for
+// the badge and the notifications this node's frames do not carry.
+const REMOTE_INBOX_MS = 15000;
+
+// ---- the Planner's node ----
+
+// paintHost names the node the Planner runs on in the header, a switch
+// when more than one runs one (remote-planner.md §5).
+function paintHost() {
+  const el = $('pl-host');
+  if (!el) return;
+  const nodes = plannerNodes();
+  let html = '';
+  if (nodes.length > 1) {
+    html = '<select class="pl-host-pick" data-action-change="planner-host" aria-label="看哪台机器的 Planner">' +
+      nodes.map((n) => '<option value="' + escAttr(n) + '"' + (n === plannerHost.node ? ' selected' : '') + '>' +
+        esc(n === 'local' ? '本机' : (sessionList.nodesData[n]?.display_name || n)) + '</option>').join('') + '</select>';
+  } else if (hostRemote()) {
+    html = '<span class="pl-host-name" title="Planner 运行在这台机器上">' + esc(hostName()) + '</span>';
+  }
+  if (el.innerHTML !== html) el.innerHTML = html;
+  el.hidden = !html;
+}
+
+// hostWasOnline is the Planner's node's link as last painted: coming back
+// re-reads what the page shows.
+let hostWasOnline = true;
+
+// onHostChanged re-runs what the page shows for the Planner now shown.
+function onHostChanged() {
+  pl.status = null;
+  pl.briefs = [];
+  pl.notes = [];
+  pl.open = pl.open.filter((it) => isLocalNode(it.node));
+  remoteSeen = null;
+  hostWasOnline = hostOnline();
+  paintHost();
+  const center = $('pl-center');
+  if (pl.host && center?.parentElement) hostConversation(pl.host, center.parentElement);
+  else fetchInbox();
+  if (pl.host === 'page') refreshTasks();
+  refreshCustody();
 }
 
 // ---- controls ----
@@ -360,9 +454,12 @@ function paintTools() {
 
 async function pause(forVal) {
   try {
-    const res = await fetchJSON(NZ_CONTRACT.API.inbox_pause, {
+    const put = (url) => fetchJSON(url, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ for: forVal }), timeoutMs: 8000,
     });
+    // With the Planner on another node this node's pushes pause too.
+    if (hostRemote()) put(NZ_CONTRACT.API.inbox_pause).catch(() => {});
+    const res = await put(plannerAPI(NZ_CONTRACT.API.inbox_pause));
     pl.pausedUntil = res && res.paused_until ? Date.parse(res.paused_until) || 0 : 0;
     pl.customPause = false;
     closeMenu();
@@ -378,7 +475,8 @@ async function pause(forVal) {
 // the two were one is ended too.
 async function resume() {
   try {
-    await fetchJSON(NZ_CONTRACT.API.inbox_pause, { method: 'DELETE', timeoutMs: 8000 });
+    if (hostRemote()) fetchJSON(NZ_CONTRACT.API.inbox_pause, { method: 'DELETE', timeoutMs: 8000 }).catch(() => {});
+    await fetchJSON(plannerAPI(NZ_CONTRACT.API.inbox_pause), { method: 'DELETE', timeoutMs: 8000 });
     pl.pausedUntil = 0;
     closeMenu();
   } catch (e) {
@@ -396,7 +494,8 @@ function paintStatus() {
   const chip = $('pl-status');
   const note = $('pl-note');
   let text = '', cls = '';
-  if (s) {
+  const away = hostRemote() && !hostOnline();
+  if (away) { text = '离线'; cls = 'off'; } else if (s) {
     if (!s.enabled) { text = '未开启'; cls = 'off'; }
     else if (s.stopped) { text = '已停用'; cls = 'off'; }
     // Running is the normal case and goes unsaid.
@@ -411,7 +510,9 @@ function paintStatus() {
     const left = drawer ? 'Planner 页面左栏' : '左栏';
     const menu = drawer ? 'Planner 页面头部的"⋯"' : '头部的"⋯"';
     let html = '';
-    if (s && !s.enabled) {
+    if (away) {
+      html = '<b>' + esc(hostName()) + ' 离线。</b>Planner 和它派出的会话都在那台机器上，照常运行；连上后这里自动刷新。';
+    } else if (s && !s.enabled) {
       html = '<b>Planner 没有开启。</b>在配置里设 <code>planner.enabled: true</code> 并重启 naozhi 后，这里是你和 Planner 的对话：早报、它派出的会话与汇报。' + left + '的"等你"照常可用。';
     } else if (s && s.stopped) {
       html = '<b>Planner 已停用。</b>它不再运行，也不收消息；关掉' + menu + '里的"停用 Planner"即可恢复。';
@@ -482,7 +583,7 @@ function revealBrief() {
 async function fetchBriefs() {
   let res;
   try {
-    res = await fetchJSON(NZ_CONTRACT.API.planner_briefs, { timeoutMs: 8000 });
+    res = await fetchJSON(plannerAPI(NZ_CONTRACT.API.planner_briefs), { timeoutMs: 8000 });
   } catch { return; }
   const list = res && Array.isArray(res.briefs) ? res.briefs : [];
   pl.briefs = list.filter((b) => b && b.sent && b.markdown);
@@ -490,9 +591,15 @@ async function fetchBriefs() {
 }
 
 async function fetchStatus() {
+  const host = plannerHost.node;
   try {
-    pl.status = await fetchJSON(NZ_CONTRACT.API.planner, { timeoutMs: 8000 });
-  } catch { return; }
+    const s = await fetchJSON(plannerAPI(NZ_CONTRACT.API.planner), { timeoutMs: 8000 });
+    if (host !== plannerHost.node) return;
+    pl.status = s;
+  } catch {
+    if (hostRemote()) paintStatus();
+    return;
+  }
   notePlannerStatus(pl.status);
   const named = noteWorkspaces(pl.status && pl.status.workspaces);
   if (pl.host) { paintStatus(); paintTools(); paintStreamEmpty(); if (named) paintWaiting(); }
@@ -676,13 +783,19 @@ function appendEvents(events, reset) {
 // subscribe asks for planner:main's live events after the last one taken.
 function subscribe() {
   const msg = { type: NZ_CONTRACT.WS.subscribe, key: PLANNER_KEY };
+  if (hostRemote()) msg.node = plannerHost.node;
+  pl.subNode = plannerHost.node;
   if (pl.lastTime) msg.after = pl.lastTime;
   else msg.limit = EVENTS_LIMIT;
   pl.sub = wsm.send(msg) ? 'pending' : '';
 }
 
 function unsubscribe() {
-  if (pl.sub) wsm.send({ type: NZ_CONTRACT.WS.unsubscribe, key: PLANNER_KEY });
+  if (pl.sub) {
+    const msg = { type: NZ_CONTRACT.WS.unsubscribe, key: PLANNER_KEY };
+    if (!isLocalNode(pl.subNode)) msg.node = pl.subNode;
+    wsm.send(msg);
+  }
   pl.sub = '';
 }
 
@@ -718,12 +831,12 @@ async function loadEvents(reset) {
   pl.loading = true;
   const q = reset || !pl.lastTime ? '&limit=' + EVENTS_LIMIT : '&after=' + pl.lastTime;
   // An unreadable journal leaves the page as the history has it.
-  const notes = reset ? fetchJSON(NZ_CONTRACT.API.planner_notes, { timeoutMs: 8000 }).catch(() => null) : null;
+  const notes = reset ? fetchJSON(plannerAPI(NZ_CONTRACT.API.planner_notes), { timeoutMs: 8000 }).catch(() => null) : null;
   let more = null;
   try {
     // No planner:main session yet (it never had a turn) is no history, and
     // the notes still show.
-    const res = await fetchJSON(NZ_CONTRACT.API.sessions_events + '?key=' + encodeURIComponent(PLANNER_KEY) + q,
+    const res = await fetchJSON(eventsURL(PLANNER_KEY, plannerHost.node, q),
       { timeoutMs: 8000, onResponse: (r) => { more = hasMoreHeader(r); } })
       .catch((e) => { if (reset && e && e.status === 404) return []; throw e; });
     let events = Array.isArray(res) ? res : [];
@@ -775,8 +888,8 @@ async function loadOlder() {
   const limit = EARLIER_PAGE_LIMIT + o.keys.length;
   let more = null;
   try {
-    const res = await fetchJSON(NZ_CONTRACT.API.sessions_events + '?key=' + encodeURIComponent(PLANNER_KEY) +
-      '&before=' + (o.ms + 1) + '&limit=' + limit, { timeoutMs: 8000, onResponse: (r) => { more = hasMoreHeader(r); } });
+    const res = await fetchJSON(eventsURL(PLANNER_KEY, plannerHost.node, '&before=' + (o.ms + 1) + '&limit=' + limit),
+      { timeoutMs: 8000, onResponse: (r) => { more = hasMoreHeader(r); } });
     if (gen !== pl.gen || pl.older !== o || !pl.host) return;
     const raw = Array.isArray(res) ? res : [];
     const page = dedupEarlierPage(raw, o.ms, o.keys);
@@ -842,6 +955,7 @@ function revealedTop() {
 
 function startConversation() {
   mountComposer();
+  paintHost();
   paintStatus();
   paintWaiting();
   refreshHealth($('pl-center'), false);
@@ -957,11 +1071,27 @@ document.addEventListener('toggle', (e) => {
 // A message to the Planner is going out: its ack waits for a user bubble
 // logged past what the stream has taken so far.
 nzBus.addEventListener('planner:sent', () => { pl.ack = { after: pl.lastTime, mine: 0 }; });
-// A session listed since a card named it gets its name and state.
-onSessionsApplied(() => { if (pl.host) paintSessionCards($('pl-stream')); });
+// A session listed since a card named it gets its name and state; the
+// nodes it brings may move the Planner, or bring its node back.
+onSessionsApplied(() => {
+  notePlannerNodes();
+  paintHost();
+  const online = hostOnline();
+  if (online !== hostWasOnline) {
+    hostWasOnline = online;
+    paintStatus();
+    notePlannerStatus(pl.status);
+    if (online) onHostChanged();
+  }
+  if (pl.host) paintSessionCards($('pl-stream'));
+});
+nzBus.addEventListener('planner:node', onHostChanged);
+readLocalPlanner();
+setInterval(() => { if (hostRemote()) fetchInbox(); }, REMOTE_INBOX_MS);
 // A new socket holds no subscriptions: re-subscribe after the last event
 // taken, the history frame fills the gap.
 wsm.onReady(() => {
+  readLocalPlanner(true);
   fetchInbox();
   pl.sub = '';
   if (pl.timer) subscribe();
@@ -970,7 +1100,7 @@ wsm.onReady(() => {
 // planner:main's frames are all claimed, so the session stream's bookkeeping
 // never sees them (a late ack would pose as its subscription); they count
 // only while the page holds a subscription.
-const ours = (msg) => msg.key === PLANNER_KEY;
+const ours = (msg) => msg.key === PLANNER_KEY && (msg.node || 'local') === (pl.subNode || 'local');
 wsm.on(NZ_CONTRACT.WS.subscribed, (msg) => {
   if (pl.sub) pl.sub = msg.reason === 'suspended' ? 'suspended' : 'live';
 }, ours);
@@ -991,11 +1121,12 @@ wsm.on(NZ_CONTRACT.WS.session_state, (msg) => {
 
 registerActions({
   'planner-inbox-close': async (el) => {
-    const id = el.dataset.id;
+    const ref = el.dataset.id;
+    const { node, id } = itemOf(ref);
     el.disabled = true;
     try {
-      await fetchJSON(NZ_CONTRACT.API.inbox_close, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }), timeoutMs: 8000 });
-      pl.open = pl.open.filter((it) => it.id !== id);
+      await fetchJSON(nodeAPI(node, NZ_CONTRACT.API.inbox_close), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }), timeoutMs: 8000 });
+      pl.open = pl.open.filter((it) => itemRef(it) !== ref);
       paintWaiting();
       noteItems();
     } catch (e) {
@@ -1010,8 +1141,9 @@ registerActions({
     const card = el.closest('.pl-card');
     card?.querySelectorAll('.pl-card-acts button').forEach((b) => { b.disabled = true; });
     try {
-      await fetchJSON(NZ_CONTRACT.API.inbox_decide, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: el.dataset.id, action: el.dataset.act }), timeoutMs: 15000,
+      const { node, id } = itemOf(el.dataset.id);
+      await fetchJSON(nodeAPI(node, NZ_CONTRACT.API.inbox_decide), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action: el.dataset.act }), timeoutMs: 15000,
       });
     } catch (e) {
       showToast('没有生效：' + e.message, 'error');
@@ -1022,6 +1154,7 @@ registerActions({
     await requestNotifyPermission();
     paintTools();
   },
+  'planner-host': (el) => choosePlannerNode(el.value),
   'planner-pause': (el) => pause(el.dataset.for),
   'planner-pause-custom': () => { pl.customPause = true; paintTools(); $('pl-pause-hours')?.focus(); },
   'planner-pause-custom-cancel': () => { pl.customPause = false; paintTools(); },
@@ -1035,7 +1168,7 @@ registerActions({
     const stopped = el.checked;
     el.disabled = true;
     try {
-      pl.status = await fetchJSON(NZ_CONTRACT.API.planner_state, {
+      pl.status = await fetchJSON(plannerAPI(NZ_CONTRACT.API.planner_state), {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ stopped }), timeoutMs: 15000,
       });
       notePlannerStatus(pl.status);

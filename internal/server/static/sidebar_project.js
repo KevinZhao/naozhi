@@ -111,6 +111,32 @@ function sectionHeaderHtml(p) {
     '</div>';
 }
 
+// NODE_GROUP_PREFIX keys a node group's fold in collapsedProjects, apart
+// from the projects' "<node>:<name>" keys.
+export const NODE_GROUP_PREFIX = '@node:';
+
+const NODE_STATE_TEXT = { offline: '离线', error: '出错', disconnected: '离线', connecting: '连接中', unreachable: '连不上' };
+
+// nodeHeaderHtml is a node group's header in a multi-node list
+// (docs/rfc/remote-planner.md §5): the fold, the node's name, its link when
+// not up, a Planner tag on the node it runs on, and its sessions' count.
+export function nodeHeaderHtml(node, count, planner) {
+  const ck = NODE_GROUP_PREFIX + node;
+  const collapsed = sessionList.collapsedProjects.has(ck);
+  const nd = sessionList.nodesData[node] || {};
+  const local = node === 'local';
+  const name = local ? '本机' + (nd.display_name && nd.display_name !== 'Local' ? ' · ' + nd.display_name : '') : (nd.display_name || node);
+  const state = local ? '' : NODE_STATE_TEXT[nd.status || 'offline'] || '';
+  const cTitle = (collapsed ? '展开' : '收起') + ' ' + name;
+  return '<div class="section-header node-header' + (collapsed ? ' is-collapsed' : '') + (state ? ' node-down' : '') + '" role="group" aria-label="' + escAttr(name) + '" data-node="' + escAttr(node) + '">' +
+    '<button type="button" class="sh-btn sh-collapse' + (collapsed ? ' collapsed' : '') + '" data-action="project-collapse" data-key="' + escAttr(ck) + '" title="' + escAttr(cTitle) + '" aria-label="' + escAttr(cTitle) + '" aria-expanded="' + (collapsed ? 'false' : 'true') + '">' + CHEVRON_SVG + '</button>' +
+    '<span class="sh-name" title="' + escAttr(local ? name : name + '（' + node + '）') + '">' + esc(name) + '</span>' +
+    (planner ? '<span class="node-tag">Planner</span>' : '') +
+    (state ? '<span class="node-state">' + esc(state) + '</span>' : '') +
+    '<span class="sh-count">' + count + '</span>' +
+    '</div>';
+}
+
 // SIDEBAR_PROJECT_ACTIONS maps the `data-action` token on a project-header
 // control to the handler it invokes, reading arguments from the button's
 // own dataset. This is the data-action dispatch idiom already used by the

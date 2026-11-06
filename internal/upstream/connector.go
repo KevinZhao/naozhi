@@ -85,6 +85,7 @@ type Connector struct {
 	defaultWorkspace string // used as allowedRoot for incoming workspace overrides
 	discovery        Discovery
 	files            Files
+	planner          Planner
 	// turns runs the "send" RPC; nil refuses every send.
 	turns TurnSubmitter
 	// hubSendStatus: the primary of the current link advertised

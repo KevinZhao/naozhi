@@ -5,7 +5,9 @@
 // when off or stopped, a failed row and the health table say 托管已停. The
 // chip switches a session through PUT /api/custody; the Planner page's one
 // pause (PUT /api/inbox/pause) pauses custody with the pushes. Shown only
-// with the Planner on (custody runs only then) and for this node's sessions.
+// with the Planner on (custody runs only then) and for the sessions of the
+// node it runs on: with the Planner on another node (planner_host.js) the
+// list, the switch and 撤回 are that node's, through /api/remote/{node}/.
 //
 // It also tells the gateway which session you are at: a viewing frame names
 // the session this tab has open while the tab is visible and focused ('' for
@@ -26,6 +28,7 @@ import { esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz
 import { isDiscoveredKey, sid } from './session_ident.js';
 import { isMobile } from './utilities.js';
 import { wsm } from './ws_manager.js';
+import { nodeAPI, plannerAPI, plannerHost } from './planner_host.js';
 
 // VIEW_RENEW_MS renews a viewing report: the gateway lets one lapse after a
 // minute (custody.ViewFor). VIEW_CHECK_MS is how often the tab looks again
@@ -68,12 +71,13 @@ const undone = new Set();
 
 const changed = () => nzBus.dispatchEvent(new CustomEvent('custody:changed'));
 
-// coverable reports whether custody can cover key on node: one of this
-// node's sessions the dashboard lists, not the Planner, a daemon or a scout.
+// coverable reports whether custody can cover key on node: one of the
+// Planner's node's sessions the dashboard lists, not the Planner, a daemon
+// or a scout.
 export function coverable(key, node) {
-  if (custody.enabled !== true || !key || (node && node !== 'local')) return false;
+  if (custody.enabled !== true || !key || (node || 'local') !== plannerHost.node) return false;
   if (isDiscoveredKey(key) || NOT_IN_CUSTODY.test(key)) return false;
-  return !!sessionList.sessionsData[sid(key, 'local')];
+  return !!sessionList.sessionsData[sid(key, plannerHost.node)];
 }
 
 // statusOf is key's custody as GET /api/custody last said it.
@@ -125,7 +129,7 @@ export function paintCustodyChip() {
 async function plannerEnabled() {
   if (custody.enabled !== null) return custody.enabled;
   try {
-    const s = await fetchJSON(NZ_CONTRACT.API.planner, { timeoutMs: 8000 });
+    const s = await fetchJSON(plannerAPI(NZ_CONTRACT.API.planner), { timeoutMs: 8000 });
     custody.enabled = !!(s && s.enabled);
   } catch (e) {
     // No Planner route (404): no custody. Anything else is asked again.
@@ -146,7 +150,7 @@ export function refreshCustody() {
   custody.loading = (async () => {
     try {
       if (!(await plannerEnabled())) return;
-      noteList(await fetchJSON(NZ_CONTRACT.API.custody, { timeoutMs: 8000 }));
+      noteList(await fetchJSON(plannerAPI(NZ_CONTRACT.API.custody), { timeoutMs: 8000 }));
     } catch { /* the next refresh tries again */ }
     finally { custody.loading = null; custody.readAt = Date.now(); changed(); reportViewing(); }
   })();
@@ -160,7 +164,7 @@ const failText = (e) => String(e?.message || e).replace(/^HTTP \d+: /, '').trim(
 // two were one with it), then reads every session's custody again.
 export async function setCustodyPaused(paused) {
   try {
-    noteList(await fetchJSON(NZ_CONTRACT.API.custody_pause, { method: paused ? 'PUT' : 'DELETE', timeoutMs: 8000 }));
+    noteList(await fetchJSON(plannerAPI(NZ_CONTRACT.API.custody_pause), { method: paused ? 'PUT' : 'DELETE', timeoutMs: 8000 }));
   } catch (e) {
     showToast((paused ? '暂停托管' : '恢复托管') + '失败：' + failText(e), 'error');
   }
@@ -184,7 +188,7 @@ async function toggle(el) {
   const on = st.state === 'stopped' ? true : !st.on;
   el.disabled = true;
   try {
-    const res = await fetchJSON(NZ_CONTRACT.API.custody, {
+    const res = await fetchJSON(plannerAPI(NZ_CONTRACT.API.custody), {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, on }), timeoutMs: 8000,
     });
     if (res && res.key) custody.byKey.set(res.key, res);
@@ -302,9 +306,9 @@ async function undo(el) {
   if (!key) return;
   el.disabled = true;
   const payload = { key };
-  if (node && node !== 'local') payload.node = node;
   try {
-    const res = await fetchJSON(UNDO_URL, {
+    // A session on the Planner's node is that node's custody's to take back.
+    const res = await fetchJSON(nodeAPI(node, UNDO_URL), {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), timeoutMs: 15000,
     });
     if (id) undone.add(id);
@@ -321,6 +325,13 @@ registerActions({
 });
 
 nzBus.addEventListener('custody:changed', paintCustodyChip);
+// Another node's Planner: its custody.
+nzBus.addEventListener('planner:node', () => {
+  custody.enabled = null;
+  custody.byKey = new Map();
+  custody.paused = false;
+  refreshCustody();
+});
 // What custody did on a session (session_notes.js passes its notes on).
 nzBus.addEventListener('custody:note', () => { refreshCustody(); });
 nzBus.addEventListener('session:select', () => { reportViewing(); paintCustodyChip(); refreshCustody(); });

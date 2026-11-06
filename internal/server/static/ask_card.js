@@ -81,7 +81,7 @@ function answeredHtml(tuid, sk) {
 // scratch drawer's, the Planner page's opened session, else the selection.
 function cardSession(card) {
   if (card && card.closest && card.closest('#aside-drawer')) return { key: selection.scratchKey || '', node: 'local' };
-  if (card && card.closest && card.closest('#pl-sess')) return { key: card.closest('#pl-sess').dataset.key || '', node: 'local' };
+  if (card && card.closest && card.closest('#pl-sess')) return { key: card.closest('#pl-sess').dataset.key || '', node: card.closest('#pl-sess').dataset.node || 'local' };
   return { key: selection.key, node: selection.node };
 }
 
@@ -348,9 +348,10 @@ async function sendAskAnswerViaAPI(text, card) {
     // Scratch sessions are always local — never forward to a remote node.
     node = 'local';
   } else if (card && card.closest && card.closest('#pl-sess')) {
-    // The Planner page's opened session card (planner_chat.js), local only.
+    // The Planner page's opened session card (planner_chat.js), on the
+    // Planner's node.
     key = card.closest('#pl-sess').dataset.key || '';
-    node = 'local';
+    node = card.closest('#pl-sess').dataset.node || 'local';
   }
   if (!key) throw new Error('no active session');
   const headers = { 'Content-Type': 'application/json' };

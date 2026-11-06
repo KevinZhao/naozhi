@@ -21,6 +21,7 @@ import { sessionList } from './state.js';
 import { HEALTH_STATES, esc, escAttr, evidenceText, fetchJSON, nzBus, sessionHealthState, sessionTitleText } from './nz_util.js';
 import { sid } from './session_ident.js';
 import { formatAbsTime, formatMonthDayTime, timeAgo } from './utilities.js';
+import { plannerAPI, plannerHost } from './planner_host.js';
 
 const PLANNER_KEY = 'planner:main';
 const HEALTH_MIN_MS = 20000;
@@ -49,9 +50,10 @@ const pc = {
 
 // ---- session cards ----
 
-// listedTitle is a listed local session's name, '' for one not listed.
+// listedTitle is the name of a session listed on the Planner's node (every
+// session the conversation names runs there), '' for one not listed.
 function listedTitle(key) {
-  const s = sessionList.sessionsData[sid(key, 'local')];
+  const s = sessionList.sessionsData[sid(key, plannerHost.node)];
   return sessionTitleText(s);
 }
 
@@ -62,6 +64,9 @@ function kindName(key) {
   const k = KIND_NAMES.find(([prefix]) => key.startsWith(prefix));
   return k ? k[1] : '会话';
 }
+
+// The health table is the Planner's node's.
+nzBus.addEventListener('planner:node', () => { pc.health = new Map(); pc.healthAt = 0; pc.tasks = new Map(); });
 
 // sessionTitle is a session's name: listed, else its 任务 title or the
 // health table's name (a cron job's title); one known to none is named by
@@ -109,7 +114,7 @@ function healthOf(key, s) {
 // (none while it runs: the state says it, and the tool it is in is not
 // news here); withName false leaves the name to a heading that already says it.
 export function sessionStatusHtml(key, withName = true) {
-  const s = sessionList.sessionsData[sid(key, 'local')];
+  const s = sessionList.sessionsData[sid(key, plannerHost.node)];
   const st = healthOf(key, s);
   const u = pc.health.get(key);
   const last = (u && u.last_active && Date.parse(u.last_active)) || (s && s.last_active) || 0;
@@ -160,7 +165,7 @@ export async function refreshHealth(root, force) {
   if (pc.healthLoading || (!force && Date.now() - pc.healthAt < HEALTH_MIN_MS)) return;
   pc.healthLoading = true;
   try {
-    const res = await fetchJSON(NZ_CONTRACT.API.system_health, { timeoutMs: 8000 });
+    const res = await fetchJSON(plannerAPI(NZ_CONTRACT.API.system_health), { timeoutMs: 8000 });
     pc.health = new Map(((res && res.units) || []).map((u) => [u.id, u]));
   } catch { /* the listed state stands in */ } finally {
     pc.healthAt = Date.now();
@@ -184,7 +189,7 @@ function mentionedKeys(ev) {
   for (const m of text.matchAll(TASK_KEY_RE)) add(m[0]);
   for (const m of text.matchAll(SESSION_KEY_RE)) add(m[0]);
   for (const s of Object.values(sessionList.sessionsData)) {
-    if (s && s.key && (s.node || 'local') === 'local' && text.includes(s.key)) add(s.key);
+    if (s && s.key && (s.node || 'local') === plannerHost.node && text.includes(s.key)) add(s.key);
   }
   return keys;
 }

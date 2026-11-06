@@ -714,6 +714,7 @@ func main() {
 		conn := upstream.New(buildUpstreamConfig(cfg), wireup.UpstreamRouter(router), projectMgr,
 			upstreamDiscovery(claudeDir, router, projectMgr), srv)
 		conn.ServeFiles(srv.NodeFiles())
+		conn.ServePlanner(srv.NodePlanner())
 		go conn.Run(ctx)
 		slog.Info("upstream connector starting", "url", cfg.Upstream.URL, "node_id", cfg.Upstream.NodeID)
 	}

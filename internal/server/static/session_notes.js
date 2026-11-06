@@ -21,6 +21,7 @@ import { selection } from './state.js';
 import { HEALTH_STATES, esc, escAttr, evidenceCause, evidenceText, fetchJSON, nzBus, nzViews } from './nz_util.js';
 import { wsm } from './ws_manager.js';
 import { formatTimeFull, formatTimeShort } from './utilities.js';
+import { isLocalNode, nodeAPI, nodeRunsPlanner } from './planner_host.js';
 
 // REPORT_REFETCH_MS: a turn's report reaches the Planner after the turn
 // ends, and reports are not pushed, so the list is fetched again this long
@@ -39,6 +40,7 @@ const ITEM_STATE = { error: 'failed' };
 
 const notes = {
   key: '', // the session the list is for
+  node: 'local', // the node it runs on
   list: [], // its notes, oldest first, each with ms
   gen: 0,
   el: null, // the #events-scroll observed
@@ -190,7 +192,7 @@ async function fetchNotes() {
   const key = notes.key;
   const gen = ++notes.gen;
   try {
-    const res = await fetchJSON(NZ_CONTRACT.API.sessions_notes + '?key=' + encodeURIComponent(key), { timeoutMs: 8000 });
+    const res = await fetchJSON(nodeAPI(notes.node, NZ_CONTRACT.API.sessions_notes) + '?key=' + encodeURIComponent(key), { timeoutMs: 8000 });
     if (gen !== notes.gen || key !== notes.key) return;
     addNotes(Array.isArray(res?.notes) ? res.notes : []);
   } catch { return; }
@@ -198,15 +200,19 @@ async function fetchNotes() {
 }
 
 // startSessionNotes follows the session view's freshly built #events-scroll
-// (renderMainShell): local sessions only, remote nodes keep no journal here.
+// (renderMainShell): this node's sessions, and those of a node running a
+// Planner, whose journal it serves through /api/remote/{node}/ (read when
+// the session opens: that node's session_note frames do not reach here).
 export function startSessionNotes() {
   const el = document.getElementById('events-scroll');
   if (!el || el === notes.el) return;
   notes.observer?.disconnect();
   notes.el = el;
-  const key = selection.node === 'local' || !selection.node ? selection.key || '' : '';
-  if (key !== notes.key) notes.list = [];
+  const node = selection.node || 'local';
+  const key = isLocalNode(node) || nodeRunsPlanner(node) ? selection.key || '' : '';
+  if (key !== notes.key || node !== notes.node) notes.list = [];
   notes.key = key;
+  notes.node = node;
   if (!key) { notes.observer = null; return; }
   // Our own inserts call back too; the second pass finds nothing to add.
   notes.observer = new MutationObserver(placeNotes);
@@ -218,7 +224,7 @@ export function startSessionNotes() {
 wsm.on(NZ_CONTRACT.WS.session_note, (msg) => {
   // Custody's notes, on any session, also change what custody.js shows.
   if (msg.note?.kind === 'custody') nzBus.dispatchEvent(new CustomEvent('custody:note', { detail: msg }));
-  if (!msg.note || msg.key !== notes.key || !notes.el) return;
+  if (!msg.note || msg.key !== notes.key || !isLocalNode(notes.node) || !notes.el) return;
   const el = notes.el;
   const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
   addNotes([msg.note]);

@@ -17,6 +17,7 @@ import { notePreviewEvent, openFilePreview, resolveProjectForAbsPath } from './f
 import { crumbsHtml, fileRowsHtml, isPreviewableOutput, mimeForPath, outputRowsHtml } from './file_rows.js';
 import { formatAbsTime, formatTimeShort } from './utilities.js';
 import { workbench } from './workbench.js';
+import { plannerHost } from './planner_host.js';
 
 // REFRESH_MS is how long after a tagged tool event or a turn end the outputs
 // are refetched: the index records a file once its tool call returns, and the
@@ -39,8 +40,10 @@ let plannerSubject = PLANNER_KEY;
 // null: discovered sessions have no outputs index or readable tree.
 function subject() {
   if (ui.activeView === 'planner') {
+    // The Planner and the sessions it names run on its node (planner_host.js).
     const key = plannerSubject;
-    return { key, node: 'local', sid: sid(key, 'local'), sd: key === PLANNER_KEY ? null : sessionList.sessionsData[sid(key, 'local')] || null };
+    const node = plannerHost.node;
+    return { key, node, sid: sid(key, node), sd: key === PLANNER_KEY ? null : sessionList.sessionsData[sid(key, node)] || null };
   }
   const key = selection.key;
   if (!key || isDiscoveredKey(key)) return null;

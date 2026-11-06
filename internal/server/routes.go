@@ -7,6 +7,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
+	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -113,6 +114,12 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	// carry no dashboard auth. Minted by POST /api/preview behind the API
 	// chain; dashproject.HandlePreviewAsset verifies it before anything else.
 	s.mux.HandleFunc("GET /api/preview/{token}/{path...}", hs.projectH.HandlePreviewAsset)
+	// A node's Planner routes, run by the node's own handlers
+	// (docs/rfc/remote-planner.md §4, node_api.go).
+	s.mux.HandleFunc("GET /api/remote/{node}/{path...}", auth(s.handleRemoteAPI))
+	s.mux.HandleFunc("POST /api/remote/{node}/{path...}", auth(s.handleRemoteAPI))
+	s.mux.HandleFunc("PUT /api/remote/{node}/{path...}", auth(s.handleRemoteAPI))
+	s.mux.HandleFunc("DELETE /api/remote/{node}/{path...}", auth(s.handleRemoteAPI))
 	s.mux.HandleFunc("GET /ws", s.hub.HandleUpgrade)
 	if s.reverseNodeServer != nil {
 		s.mux.Handle("GET /ws-node", s.reverseNodeServer)
@@ -272,6 +279,9 @@ func (s *Server) mountRoutes(routes []httputil.Route) {
 	chain := s.apiChain()
 	for _, rt := range routes {
 		s.mux.HandleFunc(rt.Pattern, chain(rt.Handler))
+		if s.nodeAPI != nil && node.IsAPIRoute(rt.Pattern) {
+			s.nodeAPI.HandleFunc(rt.Pattern, rt.Handler)
+		}
 	}
 }
 

@@ -260,6 +260,10 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	s.sessionH = hs.sessionH
 	s.discoveryH = hs.discoveryH
 	s.projectFiles = hs.projectH
+	s.purpose = opts.Purpose
+	if opts.Planner.Enabled() {
+		s.nodeAPI = http.NewServeMux()
+	}
 
 	// Routes are registered HERE, not in Start (#2553): hs can only be a local
 	// if nothing after construction needs it. Start keeps the goroutine starts
@@ -347,6 +351,7 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 		Health:           opts.Health,
 		Workspaces:       workspaces,
 		Purpose:          opts.Purpose,
+		Planner:          opts.Planner.Enabled(),
 	})
 	sessionH.InitStaticStats()
 	sessionH.WarmHistoryCache()

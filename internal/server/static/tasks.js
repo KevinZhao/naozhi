@@ -22,6 +22,7 @@ import { NZ_CONTRACT } from './contract.js';
 import { esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
 import { formatAbsTime, formatMonthDayTime, timeAgo } from './utilities.js';
 import { custody, custodyChipHtml, refreshCustody, statusOf } from './custody.js';
+import { plannerAPI } from './planner_host.js';
 
 // Mounted containers; detached ones are dropped at the next refresh.
 const mounts = new Set();
@@ -143,7 +144,7 @@ function paint(el, data) {
 
 async function render(el) {
   try {
-    const data = await fetchJSON(NZ_CONTRACT.API.tasks);
+    const data = await fetchJSON(plannerAPI(NZ_CONTRACT.API.tasks));
     byId = new Map(((data && Array.isArray(data.tasks)) ? data.tasks : []).map((t) => [t.id, t]));
     last = data;
     nzBus.dispatchEvent(new CustomEvent('tasks:changed'));
@@ -190,7 +191,7 @@ async function post(el, url, body, failed) {
 }
 
 function setState(el, id, state) {
-  if (id && state) return post(el, NZ_CONTRACT.API.tasks_state, { id, state }, '没有改成：');
+  if (id && state) return post(el, plannerAPI(NZ_CONTRACT.API.tasks_state), { id, state }, '没有改成：');
 }
 
 nzBus.addEventListener('inbox:count', () => { refreshTasks(); });
@@ -202,5 +203,5 @@ nzBus.addEventListener('custody:changed', () => {
 registerActions({
   'task-state': (el) => setState(el, el.dataset.id, el.value),
   'task-reopen': (el) => setState(el, el.dataset.id, 'doing'),
-  'task-stop': (el) => el.dataset.id && post(el, NZ_CONTRACT.API.tasks_stop, { id: el.dataset.id }, '没有停下：'),
+  'task-stop': (el) => el.dataset.id && post(el, plannerAPI(NZ_CONTRACT.API.tasks_stop), { id: el.dataset.id }, '没有停下：'),
 });

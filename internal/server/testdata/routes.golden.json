@@ -250,6 +250,26 @@
     "handler_type": "*dashproject.Handlers"
   },
   {
+    "method": "DELETE",
+    "path": "/api/remote/{node}/{path...}",
+    "handler_type": "*Server"
+  },
+  {
+    "method": "GET",
+    "path": "/api/remote/{node}/{path...}",
+    "handler_type": "*Server"
+  },
+  {
+    "method": "POST",
+    "path": "/api/remote/{node}/{path...}",
+    "handler_type": "*Server"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/remote/{node}/{path...}",
+    "handler_type": "*Server"
+  },
+  {
     "method": "POST",
     "path": "/api/scout/run",
     "handler_type": "*dashplanner.Handler"

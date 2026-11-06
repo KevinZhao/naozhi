@@ -156,13 +156,29 @@ export function onNotify(msg) {
   n.onclick = () => {
     n.close();
     window.focus();
-    follow({ key: msg.key || '', node: 'local', item: msg.id || '' });
+    follow({ key: msg.key || '', node: msg.node || 'local', item: msg.id || '' });
   };
 }
 
-export function onInboxCount(msg) {
-  inbox.open = typeof msg.open === 'number' ? msg.open : 0;
-  inbox.badge = typeof msg.badge === 'number' ? msg.badge : 0;
+// far is the counts of the Planner's node's inbox when the Planner runs on
+// another node (planner_view.js fetchInbox; null: none, undefined: not
+// read), added to this node's; a frame, which carries this node's alone,
+// leaves them.
+const far = { open: 0, badge: 0 };
+const local = { open: 0, badge: 0 };
+const num = (v) => (typeof v === 'number' ? v : 0);
+export function onInboxCount(msg, farCounts) {
+  // No counts of this node's (its list failed) keep the last ones.
+  if (msg) {
+    local.open = num(msg.open);
+    local.badge = num(msg.badge);
+  }
+  if (farCounts !== undefined) {
+    far.open = num(farCounts && farCounts.open);
+    far.badge = num(farCounts && farCounts.badge);
+  }
+  inbox.open = local.open + far.open;
+  inbox.badge = local.badge + far.badge;
   nzBus.dispatchEvent(new CustomEvent('inbox:count', { detail: { open: inbox.open, badge: inbox.badge } }));
 }
 

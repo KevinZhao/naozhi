@@ -39,7 +39,10 @@ import (
 func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.ReverseMsg, wg *sync.WaitGroup) (json.RawMessage, error) {
 	switch req.Method {
 	case "fetch_sessions":
-		return marshalResult(c.router.ListSessions())
+		return marshalResult(c.listSessions())
+
+	case "api":
+		return c.handleAPI(connCtx, req.Params)
 
 	case "fetch_projects":
 		if c.projMgr == nil {

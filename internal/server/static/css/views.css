@@ -219,6 +219,9 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .pl-head{flex-shrink:0;height:48px;display:flex;align-items:center;gap:10px;padding:0 18px;border-bottom:1px solid var(--nz-border)}
 .pl-title{font-size:var(--nz-fs-md);font-weight:600;color:var(--nz-text-strong)}
 .pl-status{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);white-space:nowrap}
+.pl-host{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);white-space:nowrap;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.pl-host .pl-host-name::before{content:'· '}
+.pl-host-pick{font:inherit;color:inherit;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:1px 4px;max-width:12em}
 .pl-status.wait{color:var(--nz-amber)}
 .pl-head-sp{flex:1}
 .pl-note{flex-shrink:0;margin:12px 18px 0;padding:10px 12px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1);color:var(--nz-text-mute);font-size:var(--nz-fs-sm2);line-height:1.6}
