@@ -119,8 +119,3 @@ func hintText(h Hints) string {
 	}
 	return strings.Join(parts, "\n")
 }
-
-// Diarize is not available locally yet: the far end stays one speaker.
-func (e *LocalEngine) Diarize(context.Context, string) ([]Turn, error) {
-	return nil, errors.New("本机说话人分离未接入")
-}

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -74,6 +75,8 @@ var ErrNoHelper = errors.New("没有找到 naozhi-audio（随 macOS 发布包安
 // ExecHelper runs the naozhi-audio binary at Path.
 type ExecHelper struct {
 	Path string
+	// ModelsDir is where diarize keeps its CoreML models (fetched on first use).
+	ModelsDir string
 }
 
 // HelperPath is naozhi-audio beside the running executable.
@@ -221,6 +224,33 @@ func (h ExecHelper) Record(ctx context.Context, dir string, bundles []string, st
 		err = nil
 	}
 	return last, err
+}
+
+// Diarize runs naozhi-audio diarize on one track (FluidAudio's offline pipeline, CoreML).
+func (h ExecHelper) Diarize(ctx context.Context, wav string) ([]Turn, error) {
+	secs, _ := WAVSeconds(wav)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute+time.Duration(secs)*time.Second/2)
+	defer cancel()
+	out := strings.TrimSuffix(wav, ".wav") + ".diar.json"
+	args := []string{"diarize", wav, out}
+	if h.ModelsDir != "" {
+		args = append(args, "-models", h.ModelsDir)
+	}
+	c, err := h.cmd(ctx, args...)
+	if err != nil {
+		return nil, err
+	}
+	if b, err := c.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("naozhi-audio diarize: %w: %s", err, tail(b))
+	}
+	b, err := os.ReadFile(out)
+	if err != nil {
+		return nil, err
+	}
+	var res struct {
+		Turns []Turn `json:"turns"`
+	}
+	return res.Turns, json.Unmarshal(b, &res)
 }
 
 // Encode runs naozhi-audio encode.

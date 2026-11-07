@@ -144,7 +144,8 @@ jobs:
   # darwin-only red. -short keeps the Short-gated whale tests out.
   test-macos:
     runs-on: macos-latest
-    timeout-minutes: 10
+    # naozhi-audio's SwiftPM build (FluidAudio) takes a few minutes cold.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
 
@@ -171,11 +172,10 @@ jobs:
 
       # The meeting-audio helper (Swift, macOS only) must keep compiling; the
       # release builds and ships it the same way (release.yml build-audio).
-      - name: Build naozhi-audio (arm64 + x86_64)
+      - name: Build naozhi-audio
         run: |
-          tools/naozhi-audio/build.sh "$RUNNER_TEMP/naozhi-audio-arm64" arm64
-          tools/naozhi-audio/build.sh "$RUNNER_TEMP/naozhi-audio-x86_64" x86_64
-          "$RUNNER_TEMP/naozhi-audio-$(uname -m)" status
+          tools/naozhi-audio/build.sh "$RUNNER_TEMP/naozhi-audio" "$(uname -m)"
+          "$RUNNER_TEMP/naozhi-audio" status
 
   # Playwright smoke suite (test/e2e). Offline and deterministic: the mock
   # server stubs every API endpoint the dashboard calls. A dozen specs cover
