@@ -140,3 +140,62 @@
 | MR5 | 11-04 | 手机经 dashboard 网页录音，要求 HTTPS 与屏幕常亮；锁屏后台录音随 iOS app | iOS Safari 限制 |
 | MR6 | 11-04 | **待确认**：后端在 EC2 时识别放在哪里——推荐"转给在线的 Mac 节点本地识别（经 §15.5 的节点链路），Mac 不在线时用云端识别"；备选是在 EC2 上用 CPU 跑 Qwen3-ASR-0.6B 或开 GPU 实例 | EC2 无 GPU 时 1.7B 太慢；音频尽量不出你的设备 |
 | MR7 | 11-04 | 纪要由一次性只读会话生成，进成品库；你的待办直接进"任务"，不需要批准 | D85、D88 |
+
+## 11. M0 实测（2026-11-07）
+
+本机 Apple M4 Pro、24 GB、macOS 26.7.2。原型与基准脚本在 `~/meeting-m0/`（不进仓库）。
+
+### 11.1 授权（①）与麦克风占用（⑤）
+
+- 网关拉起的子进程，TCC 记账的"负责进程"是网关本身（tccd 日志 `AUTHREQ_ATTRIBUTION responsible=com.naozhi.agent`）：授权会落在 naozhi 头上，并被它拉起的每个会话继承（本机网关已持有麦克风授权，会话里的命令因此也能开麦）。
+- `naozhi-audio` 用 `responsibility_spawnattrs_setdisclaim` 重新拉起自己后，负责进程变成它自己（`com.naozhi.audio`，`naozhi-local` 签名，Info.plist 链接进二进制）：授权只属于这个签名的辅助程序，**裸二进制即可，不需要 `.app`**；无界面 `.app`（LSUIElement，经 LaunchServices 打开）留作后备。
+- 读进程列表与 `kAudioProcessPropertyIsRunningInput` 不需要任何授权：在一个两项都未授权的身份下照样读到全部 28 个音频进程（⑤）。
+- 待用户在场实测：系统弹窗能否由 launchd 下的网关触发；未授权时进程捕获是否全零。
+
+### 11.2 真实会议（②）
+
+- 进程结构：Teams 的音频在 helper 子进程里（`com.microsoft.teams2.modulehost`、`…teams2.helper`），主进程不在 Core Audio 的进程列表中；捕获按 bundle 前缀取整组进程，macOS 26 上用 `CATapDescription.bundleIDs` + `processRestoreEnabled`，会中新起的 helper 也在捕获里。
+- 两条音轨由同一个私有聚合设备（主设备 = 麦克风，加进程 tap，开漂移补偿）的同一个 IOProc 交付，按帧数同步切段，第 k 段两轨覆盖同一时段。
+- 待用户在场实测：真实会议非全零、拍手对齐。
+
+### 11.3 识别（③）
+
+公开数据：CAiRE/ASCEND test 全集（1315 句、0.92 h 中英混说口语）；另把前 239 句拼成 10 分钟长音频走 VAD 管线。silero-vad 切段（≤30 s，间隔 1 s 内合并），三个引擎共用同一份切分。MER = 中文按字、英文按词。
+
+| 引擎 | 模型 | 设备 | 大小 | ASCEND MER（中文 CER / 英文 WER） | 10 分钟长音频 MER | 长音频耗时 / RTF | 峰值内存 |
+|---|---|---|---|---|---|---|---|
+| Qwen3-ASR-1.7B，语言自动 | mlx-community 8-bit | MLX GPU | 2.3 GB | 10.57%（7.08 / 21.46） | **43.9%**（整段中文被翻成英文，一处循环） | 42 s / 0.069 | 1.1 GB RSS |
+| **Qwen3-ASR-1.7B，语言固定中文** | 同上 | 同上 | 同上 | 10.47%（6.85 / 25.96） | **14.0%** | 33 s / 0.054 | 3.1 GB RSS |
+| FireRedASR2-AED | fp32 | PyTorch MPS | 4.4 GB | 10.40%（7.10 / 24.12） | 16.0% | 129 s / 0.214 | 0.5 GB RSS（官方加载器约 9 GB） |
+| Whisper large-v3 | ggml f16 | whisper.cpp Metal | 2.9 GB | 20.06%（19.42 / 26.77） | 26.2%（自带 VAD 17.7%） | 71 s / 0.118 | 3.9 GB |
+
+- 产品里的引擎脚本（`internal/meeting/engine/naozhi_meeting_engine.py`，`uv run --script`）在同一长音频上复现 MER 14.0%、30 s、峰值 RSS 3.1 GB。
+- Whisper 用 `-l zh` 时英文被翻成中文（英文 WER 109%）并有循环；加中文提示词出现"请不吝点赞 订阅 转发"类幻觉。
+- **识别语言**（纯英文会议补测）：AMI ES2004a、EN2002a 各取前 10 分钟（4 人英文会议，Mix-Headset），参考为 AMI 人工逐词标注；按识别段的时间窗对齐计 WER（去语气词）。同一 VAD 切分、同一引擎脚本：
+
+  | 设置 | AMI ES2004a WER | AMI EN2002a WER | ASCEND 混说 10 分钟 MER |
+  |---|---|---|---|
+  | 固定中文 | 31.4%（输出里冒出 420 个汉字：英文被译成中文） | 33.1%（396 个汉字） | **14.0%** |
+  | 固定英文 | **24.1%** | **28.0%** | 48.8%（中文被译成英文，另有一处 "so I" ×51 循环） |
+  | 每段自动识别 | 25.1% | 28.1% | 43.9% |
+  | **每轨先判语言再固定（采用）** | **24.1%**（判为英文） | **28.0%**（判为英文） | **14.0%**（判为中文） |
+
+  三种办法：① 按会议设定——要用户会前选或会后改，作为补救保留（会议详情"按中文 / 按英文重新识别"，`POST /api/meetings/{id}/retranscribe`，沿用已做的承诺不重复建）；② 按日历标题、参会人判断——标题常是英文而会上说中文，参会人名不说明语言，没有可测的信号，不做；③ 先判语言再识别——每段各判会在混说段上整段翻译（上表"每段自动识别"），改为**每条音轨**均匀抽 16 段只判语言（`max_tokens=8`），其中两成以上判为中文就整轨固定中文，否则取多数语言。10 分钟音频多花约 3 秒，三段测试音频都判对，结果等于对应的最佳固定设置。默认即此方式（`NAOZHI_MEETING_ASR_LANGUAGE=detect`）。
+- 待用户提供的真实会议录音上复核（人工核对 3 分钟作参照）。
+
+### 11.4 说话人分离（④）
+
+AMI ES2004a（17.5 min）、EN2002a（35.7 min）、AliMeeting R8002_M8002（34.4 min，中文），均 4 人。DER 为 collar 0.25 / 0。
+
+| 引擎 | DER ES2004a · EN2002a · AliMeeting | 人数（估/真） | 耗时 RTF | 峰值内存 | 运行时 |
+|---|---|---|---|---|---|
+| pyannote community-1（MPS） | 14.4/18.8 · 17.8/21.9 · 18.0/23.3 | 5/4 · 4/4 · 4/4 | ≈0.07 | ≈0.95 GB | Python + torch 约 1.1 GB；HF 上需授权（ModelScope 有公开镜像） |
+| **FluidAudio offline（community-1 参数）** | 15.6/20.2 · 20.3/24.5 · 20.7/26.3 | 4/4 全对 | ≈0.009 | 0.46–0.69 GB | 编进 naozhi-audio 的 Swift 库 + 34 MB CoreML 模型 |
+| FluidAudio 流式 / Sortformer | 20–38 / 26 | 有误 | ≈0.01 / 0.04 | — | 不采用 |
+
+FluidAudio 命令行默认丢掉短于 1 s 的片段、步长 20%，改成 community-1 的参数（不丢短片段、步长 10%）后与 pyannote 的差距从 3–6 点缩到 1–3 点。编进 `naozhi-audio diarize` 后在 EN2002a 上复现 DER 20.3%、29 s、峰值 RSS 690 MB。
+
+### 11.5 结论
+
+- **MR3**：维持 Qwen3-ASR-1.7B（MLX）为本机默认；语言**每条音轨先判后固定**（每段自动检测在混说长段上会整段翻译，固定中文在英文会议上会把英文译成中文），会后可按中文 / 英文重新识别；FireRedASR2-AED 精度相当、慢 4 倍、不支持上下文提示，不接入；Whisper 不保留。
+- **MR4**：维持；辅助程序为签名裸二进制、自我 disclaim 责任，不需要 `.app`（待用户在场确认弹窗）。说话人分离用 FluidAudio 离线管线，编进同一个辅助程序。

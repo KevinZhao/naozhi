@@ -226,6 +226,19 @@ install_naozhi() {
         xattr -d com.apple.quarantine "$install_path" 2>/dev/null || true
     fi
 
+    # macOS: the meeting-audio helper (meeting recording) goes beside the
+    # binary when the release ships one. Optional: naozhi runs without it.
+    if [ "$os" = "darwin" ]; then
+        local helper="naozhi-audio-${os}-${arch}" hexp=""
+        hexp="$(grep "  ${helper}\$" "$tmp/checksums.txt" | awk '{print $1}')"
+        if [ -n "$hexp" ] && fetch "$base/$helper" "$tmp/$helper" 2>/dev/null &&
+            [ "$(shasum -a 256 "$tmp/$helper" | awk '{print $1}')" = "$hexp" ]; then
+            chmod +x "$tmp/$helper"
+            mv "$tmp/$helper" "$bin_dir/naozhi-audio"
+            xattr -d com.apple.quarantine "$bin_dir/naozhi-audio" 2>/dev/null || true
+        fi
+    fi
+
     log ""
     log "${GREEN}✓${RESET} $BINARY $version installed"
 

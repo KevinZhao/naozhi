@@ -17,7 +17,7 @@
 import { NZ_CONTRACT } from './contract.js';
 import { selection, sessionList } from './state.js';
 import { REMOTE_FILES_UNSUPPORTED, nodeServesFiles, sid } from './session_ident.js';
-import { esc, escAttr, showToast, fetchJSON, nzViews } from './nz_util.js';
+import { esc, escAttr, showToast, fetchJSON, nzBus, nzViews } from './nz_util.js';
 import { fileApiUrl, followPreview, followScrollState, renderSandboxedBlob, resetFollowScroll } from './file_refs.js';
 import { crumbsHtml, fileRowsHtml, isPreviewableOutput, outputRowsHtml } from './file_rows.js';
 import { previewRef } from './workbench_panes.js';
@@ -182,6 +182,8 @@ import { renderRich, runPendingAsync } from './render_md.js';
       if (!state.library) return;
       state.outputs = (res && Array.isArray(res.outputs)) ? res.outputs : [];
       if (box) box.innerHTML = outputRowsHtml(state.outputs, sessionLabel) || '<div class="files-empty">会话还没有产出：写出的文档、网页、图片和 PR 会出现在这里</div>';
+      // meetings.js puts its "会议纪要" row on top.
+      if (box) nzBus.dispatchEvent(new CustomEvent('library:rendered', { detail: { box } }));
     }).catch(function (e) {
       if (state.library && box) box.innerHTML = '<div class="files-empty">加载失败：' + esc(e.message) + '</div>';
     });

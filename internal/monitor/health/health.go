@@ -535,7 +535,7 @@ func (m *Machine) Reconcile() {
 // to no workspace by design (RFC §6.3), and the daemons and the scout run in
 // naozhi's state directories, so none of them counts as unowned.
 func gatewayOwned(id string) bool {
-	return sessionkey.IsPlannerNSKey(id) || sessionkey.IsSysKey(id) || sessionkey.IsScoutKey(id)
+	return sessionkey.IsPlannerNSKey(id) || sessionkey.IsSysKey(id) || sessionkey.IsOneShotKey(id)
 }
 
 // UserSession reports whether unit id of kind is one of the user's own

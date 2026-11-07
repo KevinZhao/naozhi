@@ -66,6 +66,37 @@ jobs:
           name: naozhi-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/
 
+  # The meeting-audio helper (tools/naozhi-audio, docs/rfc/meeting-notes.md
+  # §3.1): Swift, so it builds on a macOS runner. CI can only sign ad hoc;
+  # `naozhi upgrade` re-signs it on the host with the operator's
+  # self-signed certificate under identifier com.naozhi.audio
+  # (selfupdate.InstallHelper), which keeps its two TCC grants across
+  # upgrades. Its checksum goes into checksums.txt like the binaries'.
+  build-audio:
+    needs: check-branch
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, amd64]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build
+        run: |
+          OUTPUT="naozhi-audio-darwin-${{ matrix.arch }}"
+          SWIFT_ARCH=${{ matrix.arch }}
+          [ "$SWIFT_ARCH" = amd64 ] && SWIFT_ARCH=x86_64
+          mkdir -p dist
+          tools/naozhi-audio/build.sh "dist/${OUTPUT}" "$SWIFT_ARCH"
+          codesign -f -s - --identifier com.naozhi.audio "dist/${OUTPUT}"
+          cd dist && shasum -a 256 "${OUTPUT}" > "${OUTPUT}.sha256"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: naozhi-audio-darwin-${{ matrix.arch }}
+          path: dist/
+
   # Post-deploy screenshot gate. Boots the freshly built linux/amd64 binary in
   # dashboard-only mode (no Feishu creds, stub CLI) and drives every top-level
   # dashboard view with Playwright, asserting render + zero-console-error per
@@ -112,7 +143,7 @@ jobs:
           if-no-files-found: warn
 
   release:
-    needs: [build, e2e-gate]
+    needs: [build, build-audio, e2e-gate]
     runs-on: ubuntu-latest
     # NAOZHI_RELEASE_SIGNING_KEY is a `release` environment secret. The
     # environment has no deployment policy until the owner restricts it to

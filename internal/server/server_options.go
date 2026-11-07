@@ -10,6 +10,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/imauth"
+	"github.com/naozhi/naozhi/internal/meeting"
 	"github.com/naozhi/naozhi/internal/monitor/beat"
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/node"
@@ -127,6 +128,9 @@ type ServerOptions struct {
 	// Notify is the "等你" inbox /api/inbox serves; the server binds the
 	// Hub to it as its dashboard push exit. nil serves an empty inbox.
 	Notify *notify.Notifier
+	// Meetings is the meeting recorder /api/meetings serves
+	// (docs/rfc/meeting-notes.md); nil serves none.
+	Meetings *meeting.Manager
 	// Tasks are the Planner page's 任务 /api/tasks serves; nil lists none.
 	Tasks *task.Board
 	// Custody is what /api/custody serves (planner/custody); nil lists none.

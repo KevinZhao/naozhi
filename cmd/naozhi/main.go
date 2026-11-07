@@ -541,6 +541,18 @@ func main() {
 		Disabled:    !cfg.Planner.Enabled,
 	})
 
+	// Meeting recording (docs/rfc/meeting-notes.md), macOS with
+	// meeting.enabled; nil otherwise.
+	meetings := wireup.OpenMeetings(wireup.MeetingDeps{
+		Enabled:  cfg.Meeting.Enabled,
+		Layout:   sessionLayout,
+		Router:   router,
+		Promises: promises,
+		Notifier: notifier,
+		Journal:  plannerState.Journal,
+		Calendar: scouter.Calendar,
+	})
+
 	routing := buildRouting(cfg, agents, projectMgr, scheduler)
 	// The options of the sessions the Planner dispatches: at dispatch, and
 	// rebuilt from their sidecar when one respawns from the dashboard.
@@ -565,6 +577,7 @@ func main() {
 		UnitName:         unitNames,
 		Notify:           notifier,
 		Tasks:            tasks,
+		Meetings:         meetings,
 		Custody:          custodian,
 		Purpose:          sidecars.Purpose,
 		TaskOpts:         taskOpts.ForKey,
@@ -710,6 +723,7 @@ func main() {
 	go sidecars.Run(ctx, func(key string) bool { return router.SessionFor(key) != nil })
 	go briefer.Run(ctx)
 	go scouter.Run(ctx)
+	go meetings.Run(ctx)
 
 	// Upstream connector: this node connects to a primary.
 	if cfg.Upstream != nil {
@@ -784,6 +798,9 @@ func main() {
 				// The scout beside the scheduler, for the same reason: its run's
 				// session calls into the router. A run cut short leaves no record.
 				{name: "scout", run: scouter.Stop},
+				// The meeting recorder likewise: its summary session calls into
+				// the router, and its helper closes the segment it is writing.
+				{name: "meeting", run: meetings.Stop},
 				// ShutdownComplete closes after srv.Shutdown's 30s drain, i.e. after
 				// every in-flight handler finished, so router.Shutdown never races a
 				// half-cleaned session map. Already closed on server-exit paths.

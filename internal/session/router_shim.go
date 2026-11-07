@@ -217,7 +217,7 @@ func firstArgvDivergence(oldArgs, newArgs []string) (string, string) {
 // anomaly) and keys failing validation, mirroring validateKeyForShim: a
 // malformed key on a shim state file is evidence of tampering, not a session.
 func adoptableShimKey(key string) bool {
-	if sessionkey.IsSysKey(key) || sessionkey.IsScratchKey(key) || sessionkey.IsScoutKey(key) {
+	if sessionkey.IsSysKey(key) || sessionkey.IsScratchKey(key) || sessionkey.IsOneShotKey(key) {
 		return false
 	}
 	return sessionkey.ValidateSessionKey(key) == nil

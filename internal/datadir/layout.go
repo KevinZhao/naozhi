@@ -193,6 +193,11 @@ func (l Layout) PlannerScoutRoot() string { return l.Join("planner", "scout") }
 // popover hides the CLI transcripts it leaves (<root>/planner/scout/work).
 func (l Layout) PlannerScoutWorkDir() string { return l.Join("planner", "scout", "work") }
 
+// PlannerMeetingsRoot holds the recorded meetings, one directory each with
+// the audio, transcript and summary (<root>/planner/meetings,
+// docs/rfc/meeting-notes.md §6): under the Planner's root, so it can read them.
+func (l Layout) PlannerMeetingsRoot() string { return l.Join("planner", "meetings") }
+
 // ScoutMCPConfigPath is the scout session's --mcp-config, cli.mcp_config
 // cut down to the scout's servers. It sits with the per-session settings,
 // out of the Planner's reach (<root>/session-settings/scout-mcp.json).

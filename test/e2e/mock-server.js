@@ -259,6 +259,9 @@ function defaultGitStates() {
  *   PUT / DELETE /api/inbox/pause set
  *   paused_until, and pause or resume custody with it (D94: one pause). Every write lands in
  *   inboxCalls. Unset, the routes 404.
+ * @param {object} [overrides.meetings] - GET /api/meetings body ({status, meetings}) and
+ *   `details` (id → GET /api/meetings/{id} body); POST /api/meetings/stop clears
+ *   status.recording, every POST / DELETE lands in meetingCalls. Unset, the routes 404.
  * @param {object} [overrides.tasks] - GET /api/tasks body ({tasks}, task.Task wire shape); POST
  *   /api/tasks/state sets the task's state as the user's and lands in tasksCalls; POST
  *   /api/tasks/stop marks the task done as the user's ('已停止') and lands in taskStopCalls.
@@ -349,6 +352,8 @@ function startMockServer(overrides = {}) {
   const historySearchCalls = [];
   const inboxData = overrides.inbox || null;
   const inboxCalls = [];
+  const meetingsData = overrides.meetings || null;
+  const meetingCalls = [];
   const tasksCalls = [];
   const taskStopCalls = [];
   const custodyData = overrides.custody || null;
@@ -693,6 +698,34 @@ function startMockServer(overrides = {}) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ notes: notesData[key] || [] }));
       return;
+    }
+
+    // Meeting recording (overrides.meetings): the list, one meeting, and the actions.
+    if (meetingsData && pathname.startsWith(NZ_CONTRACT.API.meetings)) {
+      if (!checkAuth()) return;
+      const send = (code, v) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(v)); };
+      if (req.method === 'GET' && pathname === NZ_CONTRACT.API.meetings) {
+        return send(200, { status: meetingsData.status, meetings: meetingsData.meetings || [] });
+      }
+      const id = decodeURIComponent(pathname.slice(NZ_CONTRACT.API.meetings.length + 1).split('/')[0] || '');
+      if (req.method === 'GET' && (meetingsData.details || {})[id] && pathname.split('/').length === 4) {
+        return send(200, meetingsData.details[id]);
+      }
+      if (req.method === 'POST' || req.method === 'DELETE') {
+        let body = '';
+        req.on('data', c => (body += c));
+        req.on('end', () => {
+          meetingCalls.push({ path: pathname, method: req.method, body: body ? JSON.parse(body) : null });
+          if (pathname === NZ_CONTRACT.API.meetings_stop) {
+            const was = !!(meetingsData.status && meetingsData.status.recording);
+            if (meetingsData.status) delete meetingsData.status.recording;
+            return send(200, { stopped: was });
+          }
+          send(pathname === NZ_CONTRACT.API.meetings_authorize ? 202 : 200, { status: 'ok' });
+        });
+        return;
+      }
+      return send(404, { error: 'not found' });
     }
 
     // 等你 (overrides.inbox): the list, close and the push pause.
@@ -1287,6 +1320,7 @@ function startMockServer(overrides = {}) {
         get workflowCalls() { return workflowCalls; },
         get outputsCalls() { return outputsCalls; },
         get inboxCalls() { return inboxCalls; },
+        get meetingCalls() { return meetingCalls; },
         get tasksCalls() { return tasksCalls; },
         get taskStopCalls() { return taskStopCalls; },
         get custodyCalls() { return custodyCalls; },
