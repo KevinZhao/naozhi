@@ -371,6 +371,14 @@ projects:
 #planner:
 #  enabled: false
 
+# Meeting recording (macOS, docs/rfc/meeting-notes.md): records an online
+# meeting (Teams, Zoom, Chime, a browser...) while its program uses the
+# microphone, transcribes it on this Mac and writes a summary; your to-dos go
+# to the Planner's 任务. Telling the other participants is up to you. Needs
+# naozhi-audio (shipped next to naozhi) and uv for the local recognizer.
+#meeting:
+#  enabled: false
+
 # Auto-update: polls GitHub Releases and reuses the verified `naozhi upgrade`
 # flow (download → SHA-256 → atomic swap). Enabled by default in "download"
 # mode.

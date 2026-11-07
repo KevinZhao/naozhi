@@ -154,3 +154,10 @@ func validateAgentCommands(cfg *Config) error {
 type PlannerConfig struct {
 	Enabled bool `yaml:"enabled,omitempty"`
 }
+
+// MeetingConfig switches meeting recording on (macOS only): an online
+// meeting is recorded as soon as its program takes the microphone (MR1), so
+// it is off unless asked for.
+type MeetingConfig struct {
+	Enabled bool `yaml:"enabled,omitempty"`
+}

@@ -62,6 +62,8 @@ type Config struct {
 	Cost        CostConfig        `yaml:"cost,omitempty"`
 	// Planner switches on the global Planner (docs/rfc/planner.md §15.1).
 	Planner PlannerConfig `yaml:"planner,omitempty"`
+	// Meeting is meeting recording (docs/rfc/meeting-notes.md), macOS only.
+	Meeting MeetingConfig `yaml:"meeting,omitempty"`
 	// IMAccess restricts which IM senders the dispatcher serves (im_access.go).
 	IMAccess IMAccessConfig `yaml:"im_access,omitempty"`
 	// Integrations are outbound hooks (integrations.go).
