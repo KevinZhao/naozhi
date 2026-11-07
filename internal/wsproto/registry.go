@@ -69,8 +69,9 @@ var Frames = map[MsgType]any{
 	TypeNotify: NewNotify(Notify{
 		ID: "i", Kind: "error", Level: "urgent", Title: "t", Body: "b", Key: "k",
 	}),
-	TypeInboxCount:  NewInboxCount(2, 1),
-	TypeSessionNote: NewSessionNote("k", json.RawMessage(`{"id":"i"}`)),
+	TypeInboxCount:   NewInboxCount(2, 1),
+	TypeSessionNote:  NewSessionNote("k", json.RawMessage(`{"id":"i"}`)),
+	TypeMeetingState: NewMeetingState(json.RawMessage(`{"available":true}`)),
 }
 
 // exemplarWorkflow is a WireView with every field set.

@@ -217,9 +217,19 @@ func (m *Manager) Status() Status {
 	return st
 }
 
+// SetChanged sets the status exit (the dashboard's frame), bound once the server exists.
+func (m *Manager) SetChanged(fn func(Status)) {
+	m.mu.Lock()
+	m.cfg.Changed = fn
+	m.mu.Unlock()
+}
+
 func (m *Manager) changed() {
-	if m.cfg.Changed != nil {
-		m.cfg.Changed(m.Status())
+	m.mu.Lock()
+	fn := m.cfg.Changed
+	m.mu.Unlock()
+	if fn != nil {
+		fn(m.Status())
 	}
 }
 
