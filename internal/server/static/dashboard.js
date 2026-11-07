@@ -1443,6 +1443,7 @@ function renderSettingsView() {
       '<section class="settings-sec"><h2>主题</h2>' +
         '<div class="settings-theme" id="settings-theme-group" role="group" aria-label="主题">' + themeBtns + '</div>' +
       '</section>' +
+      '<section class="settings-sec" id="settings-meeting" hidden></section>' +
       aboutHtml +
       sysLinkHtml +
     '</div>';
@@ -1455,6 +1456,8 @@ function renderSettingsView() {
   });
   const sysBtn = document.getElementById('settings-open-system');
   if (sysBtn) sysBtn.addEventListener('click', function () { setActivityView('system'); });
+  // meetings.js fills #settings-meeting.
+  nzBus.dispatchEvent(new CustomEvent('settings:rendered'));
 }
 
 /* ===== WS receive: auth failures and system-daemon runs (the session frames register in event_stream.js and session_list.js) ===== */
