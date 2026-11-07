@@ -72,6 +72,7 @@ export const NZ_CONTRACT = Object.freeze({
     meetings_id_audio: '/api/meetings/{id}/audio',
     meetings_id_audio_track: '/api/meetings/{id}/audio/{track}',
     meetings_id_keep: '/api/meetings/{id}/keep',
+    meetings_id_retranscribe: '/api/meetings/{id}/retranscribe',
     meetings_id_retry: '/api/meetings/{id}/retry',
     memory_slug: '/api/memory/{slug}',
     planner: '/api/planner',

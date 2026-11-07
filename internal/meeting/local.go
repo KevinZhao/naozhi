@@ -89,6 +89,9 @@ func (e *LocalEngine) Transcribe(ctx context.Context, wav string, h Hints) ([]Se
 	}
 	cmd := exec.CommandContext(ctx, uv, args...)
 	cmd.Env = append(os.Environ(), e.Env...)
+	if h.Language != "" {
+		cmd.Env = append(cmd.Env, "NAOZHI_MEETING_ASR_LANGUAGE="+h.Language)
+	}
 	cmd.WaitDelay = 10 * time.Second
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

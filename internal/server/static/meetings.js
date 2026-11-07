@@ -184,6 +184,10 @@ async function openMeeting(id) {
     actions += '<span class="mtg-keep">音频已删除</span>';
   }
   if (m.state === 'failed' && !m.audio_deleted) actions += '<button type="button" data-retry="' + esc(m.id) + '">重试</button>';
+  if ((m.state === 'done' || m.state === 'failed') && audio.length) {
+    actions += '<button type="button" data-relang="Chinese" data-id="' + esc(m.id) + '">按中文重新识别</button>' +
+      '<button type="button" data-relang="English" data-id="' + esc(m.id) + '">按英文重新识别</button>';
+  }
   let html = '<div class="mtg-meta">' + esc(new Date(m.started).toLocaleString('zh-CN')) + ' · ' + esc(clock(m.seconds || 0)) +
     ' · ' + esc(m.app) + (m.engine ? ' · ' + esc(m.engine) : '') + '</div>';
   if (m.error) html += '<div class="mtg-err">' + esc(m.error) + '</div>';
@@ -224,6 +228,11 @@ async function onBodyClick(e) {
       if (!confirm('删除这场会议的音频？文字稿和纪要会保留。')) return;
       await fetchJSON(meetingPath(t.dataset.delaudio, '/audio'), { method: 'DELETE' });
       return openMeeting(t.dataset.delaudio);
+    }
+    if (t.dataset.relang) {
+      await fetchJSON(meetingPath(t.dataset.id, '/retranscribe'), { method: 'POST', body: JSON.stringify({ language: t.dataset.relang }) });
+      showToast('正在重新识别，好了会推送', 'info');
+      return openMeeting(t.dataset.id);
     }
     if (t.dataset.retry) {
       await fetchJSON(meetingPath(t.dataset.retry, '/retry'), { method: 'POST' });

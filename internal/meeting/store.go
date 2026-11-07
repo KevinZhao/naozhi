@@ -54,7 +54,9 @@ type Meeting struct {
 	AudioDeleted bool      `json:"audio_deleted,omitempty"`
 	AudioExpires time.Time `json:"audio_expires,omitzero"`
 	Speakers     int       `json:"speakers,omitempty"`
-	Engine       string    `json:"engine,omitempty"`
+	// Language is the recognition language the user chose ("" lets the engine pick per track).
+	Language string `json:"language,omitempty"`
+	Engine   string `json:"engine,omitempty"`
 }
 
 // Todo is one to-do the summary found. Mine are the user's own; they become promises.

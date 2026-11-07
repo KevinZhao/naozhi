@@ -97,8 +97,12 @@ func (f *fakeHelper) Record(_ context.Context, dir string, _ []string, start int
 	return Event{Event: "stopped", ExitCode: 0}, nil
 }
 
-func (f *fakeHelper) Encode(_ context.Context, wav, m4a string) error {
-	return os.WriteFile(m4a, []byte("aac"), 0o600)
+func (f *fakeHelper) Encode(_ context.Context, in, out string) error {
+	if strings.HasSuffix(out, ".wav") {
+		writeSegment(f.t, out, 3*SampleRate, 700)
+		return nil
+	}
+	return os.WriteFile(out, []byte("aac"), 0o600)
 }
 
 // fakeASR returns one segment per call, saying which track it heard.
@@ -110,7 +114,7 @@ type fakeASR struct {
 func (a *fakeASR) Name() string { return "fake" }
 func (a *fakeASR) Transcribe(_ context.Context, wav string, h Hints) ([]Segment, error) {
 	a.mu.Lock()
-	a.calls = append(a.calls, filepath.Base(wav)+"|"+h.Title)
+	a.calls = append(a.calls, filepath.Base(wav)+"|"+h.Title+"|"+h.Language)
 	a.mu.Unlock()
 	secs, err := WAVSeconds(wav)
 	if err != nil {
@@ -522,4 +526,39 @@ func TestParseSummary(t *testing.T) {
 	if d := dueOf("2026-11-08", now); !d.IsZero() {
 		t.Fatalf("past due kept: %v", d)
 	}
+}
+
+func TestRetranscribeInAnotherLanguage(t *testing.T) {
+	x := newHarness(t, nil)
+	x.snap(teams)
+	waitFor(t, "recording", func() bool { r := x.m.Status().Recording; return r != nil && r.Segments == 3 })
+	x.m.StopRecording("user")
+	waitFor(t, "done", func() bool { return x.only(t).State == StateDone })
+	id := x.only(t).ID
+	if err := x.m.Retranscribe(context.Background(), id, "Klingon"); err == nil {
+		t.Fatal("unknown language accepted")
+	}
+	if err := x.m.Retranscribe(context.Background(), id, "English"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "done again", func() bool {
+		mt := x.only(t)
+		return mt.State == StateDone && mt.Language == "English" && len(x.asrCalls()) == 4
+	})
+	calls := x.asrCalls()
+	if !strings.HasSuffix(calls[2], "|English") || !strings.HasSuffix(calls[3], "|English") {
+		t.Fatalf("calls = %q", calls)
+	}
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	// The same to-do keeps its promise; no second one is made.
+	if len(x.promises) != 1 || x.only(t).Todos[0].Promise != "p1" {
+		t.Fatalf("promises = %q todos = %+v", x.promises, x.only(t).Todos)
+	}
+}
+
+func (x *harness) asrCalls() []string {
+	x.asr.mu.Lock()
+	defer x.asr.mu.Unlock()
+	return append([]string(nil), x.asr.calls...)
 }

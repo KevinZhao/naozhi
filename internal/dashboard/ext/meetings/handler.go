@@ -9,6 +9,8 @@
 //	                                      the status follows on the meeting_state frame)
 //	POST   /api/meetings/{id}/keep        {"keep":bool}: keep the audio past 30 days
 //	POST   /api/meetings/{id}/retry       process a failed meeting again
+//	POST   /api/meetings/{id}/retranscribe  {"language":""|"Chinese"|"English"}: recognise and
+//	                                      summarise again in that language
 //	DELETE /api/meetings/{id}/audio       delete the audio now
 //
 // All sit behind the /api/* auth middleware.
@@ -190,6 +192,27 @@ func (h *Handler) HandleRetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.m.Retry(mt.ID); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	httputil.WriteOK(w)
+}
+
+// HandleRetranscribe serves POST /api/meetings/{id}/retranscribe.
+func (h *Handler) HandleRetranscribe(w http.ResponseWriter, r *http.Request) {
+	mt, ok := h.get(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Language string `json:"language"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, httputil.MaxRequestBodyBytes)
+	if err := httputil.DecodeJSONBody(r, &req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if err := h.m.Retranscribe(r.Context(), mt.ID, req.Language); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}

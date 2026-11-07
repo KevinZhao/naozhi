@@ -206,6 +206,11 @@
   },
   {
     "method": "POST",
+    "path": "/api/meetings/{id}/retranscribe",
+    "handler_type": "*meetings.Handler"
+  },
+  {
+    "method": "POST",
     "path": "/api/meetings/{id}/retry",
     "handler_type": "*meetings.Handler"
   },

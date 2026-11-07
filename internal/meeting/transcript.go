@@ -19,10 +19,15 @@ type Segment struct {
 type Hints struct {
 	Title     string
 	Attendees []string
+	// Language pins recognition ("Chinese", "English"); "" lets the engine pick per track.
+	Language string
 }
 
+// Languages a meeting can be re-recognised in; "" is the engine's own pick.
+var Languages = []string{"", "Chinese", "English"}
+
 // Recognizer turns one 16 kHz mono WAV track into segments. Implementations: the local engine
-// (LocalRecognizer) and, later, cloud ones (§3.5: a pluggable interface).
+// (LocalEngine) and, later, cloud ones (§3.5: a pluggable interface).
 type Recognizer interface {
 	Name() string
 	Transcribe(ctx context.Context, wav string, hints Hints) ([]Segment, error)

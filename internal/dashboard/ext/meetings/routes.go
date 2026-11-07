@@ -15,6 +15,7 @@ func (h *Handler) Routes() []httputil.Route {
 		{Pattern: "POST /api/meetings/authorize", Handler: h.HandleAuthorize},
 		{Pattern: "POST /api/meetings/{id}/keep", Handler: h.HandleKeep},
 		{Pattern: "POST /api/meetings/{id}/retry", Handler: h.HandleRetry},
+		{Pattern: "POST /api/meetings/{id}/retranscribe", Handler: h.HandleRetranscribe},
 		{Pattern: "DELETE /api/meetings/{id}/audio", Handler: h.HandleDeleteAudio},
 	}
 }
