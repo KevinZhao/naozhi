@@ -143,6 +143,56 @@
 | MR7 | 11-04 | 纪要由一次性只读会话生成，进成品库；你的待办直接进"任务"，不需要批准 | D85、D88 |
 | MR8 | 11-14 | 做常开录音（MR2 的例外，默认关闭，你在界面上打开后生效）：按 UID 固定麦克风（默认 USB），不在就暂停、不回落；AirPods 默认不用；音频 72 小时、文字稿长期；工作日 9–19 点之外与疑似来电时暂停；不做声纹。界面（按钮与提示）后续做，做好前不开放 | owner；§12 可行性实测 |
 
+
+## 11. M0 实测（2026-11-07）
+
+本机 Apple M4 Pro、24 GB、macOS 26.7.2。原型与基准脚本在 `~/meeting-m0/`（不进仓库）。
+
+### 11.1 授权（①）与麦克风占用（⑤）
+
+- 网关拉起的子进程，TCC 记账的"负责进程"是网关本身（tccd 日志 `AUTHREQ_ATTRIBUTION responsible=com.naozhi.agent`）：授权会落在 naozhi 头上，并被它拉起的每个会话继承（本机网关已持有麦克风授权，会话里的命令因此也能开麦）。
+- `naozhi-audio` 用 `responsibility_spawnattrs_setdisclaim` 重新拉起自己后，负责进程变成它自己（`com.naozhi.audio`，`naozhi-local` 签名，Info.plist 链接进二进制）：授权只属于这个签名的辅助程序，**裸二进制即可，不需要 `.app`**；无界面 `.app`（LSUIElement，经 LaunchServices 打开）留作后备。
+- 读进程列表与 `kAudioProcessPropertyIsRunningInput` 不需要任何授权：在一个两项都未授权的身份下照样读到全部 28 个音频进程（⑤）。
+- 待用户在场实测：系统弹窗能否由 launchd 下的网关触发；未授权时进程捕获是否全零。
+
+### 11.2 真实会议（②）
+
+- 进程结构：Teams 的音频在 helper 子进程里（`com.microsoft.teams2.modulehost`、`…teams2.helper`），主进程不在 Core Audio 的进程列表中；捕获按 bundle 前缀取整组进程，macOS 26 上用 `CATapDescription.bundleIDs` + `processRestoreEnabled`，会中新起的 helper 也在捕获里。
+- 两条音轨由同一个私有聚合设备（主设备 = 麦克风，加进程 tap，开漂移补偿）的同一个 IOProc 交付，按帧数同步切段，第 k 段两轨覆盖同一时段。
+- 待用户在场实测：真实会议非全零、拍手对齐。
+
+### 11.3 识别（③）
+
+公开数据：CAiRE/ASCEND test 全集（1315 句、0.92 h 中英混说口语）；另把前 239 句拼成 10 分钟长音频走 VAD 管线。silero-vad 切段（≤30 s，间隔 1 s 内合并），三个引擎共用同一份切分。MER = 中文按字、英文按词。
+
+| 引擎 | 模型 | 设备 | 大小 | ASCEND MER（中文 CER / 英文 WER） | 10 分钟长音频 MER | 长音频耗时 / RTF | 峰值内存 |
+|---|---|---|---|---|---|---|---|
+| Qwen3-ASR-1.7B，语言自动 | mlx-community 8-bit | MLX GPU | 2.3 GB | 10.57%（7.08 / 21.46） | **43.9%**（整段中文被翻成英文，一处循环） | 42 s / 0.069 | 1.1 GB RSS |
+| **Qwen3-ASR-1.7B，语言固定中文** | 同上 | 同上 | 同上 | 10.47%（6.85 / 25.96） | **14.0%** | 33 s / 0.054 | 3.1 GB RSS |
+| FireRedASR2-AED | fp32 | PyTorch MPS | 4.4 GB | 10.40%（7.10 / 24.12） | 16.0% | 129 s / 0.214 | 0.5 GB RSS（官方加载器约 9 GB） |
+| Whisper large-v3 | ggml f16 | whisper.cpp Metal | 2.9 GB | 20.06%（19.42 / 26.77） | 26.2%（自带 VAD 17.7%） | 71 s / 0.118 | 3.9 GB |
+
+- 产品里的引擎脚本（`internal/meeting/engine/naozhi_meeting_engine.py`，`uv run --script`）在同一长音频上复现 MER 14.0%、30 s、峰值 RSS 3.1 GB。
+- Whisper 用 `-l zh` 时英文被翻成中文（英文 WER 109%）并有循环；加中文提示词出现"请不吝点赞 订阅 转发"类幻觉。
+- 待用户提供的真实会议录音上复核（人工核对 3 分钟作参照）。
+
+### 11.4 说话人分离（④）
+
+AMI ES2004a（17.5 min）、EN2002a（35.7 min）、AliMeeting R8002_M8002（34.4 min，中文），均 4 人。DER 为 collar 0.25 / 0。
+
+| 引擎 | DER ES2004a · EN2002a · AliMeeting | 人数（估/真） | 耗时 RTF | 峰值内存 | 运行时 |
+|---|---|---|---|---|---|
+| pyannote community-1（MPS） | 14.4/18.8 · 17.8/21.9 · 18.0/23.3 | 5/4 · 4/4 · 4/4 | ≈0.07 | ≈0.95 GB | Python + torch 约 1.1 GB；HF 上需授权（ModelScope 有公开镜像） |
+| **FluidAudio offline（community-1 参数）** | 15.6/20.2 · 20.3/24.5 · 20.7/26.3 | 4/4 全对 | ≈0.009 | 0.46–0.69 GB | 编进 naozhi-audio 的 Swift 库 + 34 MB CoreML 模型 |
+| FluidAudio 流式 / Sortformer | 20–38 / 26 | 有误 | ≈0.01 / 0.04 | — | 不采用 |
+
+FluidAudio 命令行默认丢掉短于 1 s 的片段、步长 20%，改成 community-1 的参数（不丢短片段、步长 10%）后与 pyannote 的差距从 3–6 点缩到 1–3 点。编进 `naozhi-audio diarize` 后在 EN2002a 上复现 DER 20.3%、29 s、峰值 RSS 690 MB。
+
+### 11.5 结论
+
+- **MR3**：维持 Qwen3-ASR-1.7B（MLX）为本机默认，但**语言固定为中文**（自动检测在混说长段上会整段翻译）；FireRedASR2-AED 精度相当、慢 4 倍、不支持上下文提示，不接入；Whisper 不保留。
+- **MR4**：维持；辅助程序为签名裸二进制、自我 disclaim 责任，不需要 `.app`（待用户在场确认弹窗）。说话人分离用 FluidAudio 离线管线，编进同一个辅助程序。
+
 ## 12. 常开录音：可行性
 
 可行性验证（MR8 据此定做，未实现）。问题是：Mac 开着、naozhi 在跑，就持续录麦克风，只留有人说话的片段，空闲时在本机识别。测试机是 Apple M4 Pro MacBook Pro（16 英寸，24 GB，电池设计容量约 98 Wh），系统 macOS 26.7.2。探针与脚本是一次性的，验证完已按用户要求删除，不进仓库。探针 `aoprobe` 用 HAL IOProc 按设备 UID 固定一个输入设备（开麦实测用的是 AirPods Pro，以及合盖时的内置麦克风），转成 16 kHz、Opus 16 kbps 分段写盘，每分钟记一次帧数、电平、内存和 CPU，并记录睡眠 / 唤醒、设备变化事件，事后自动重开设备。识别沿用 M0 实测（Draft PR #3902）选定的 Qwen3-ASR-1.7B（MLX 8-bit）与 silero-vad。整机功率读 `ioreg` 的 `SystemPowerIn`，不用 sudo。测试期间别的会话在跑测试，空闲基线约 19.7 W，所以功率数字只能看量级。
