@@ -166,7 +166,16 @@ jobs:
             ./internal/shim/... \
             ./internal/discovery/... \
             ./internal/eventlog/persist/... \
-            ./internal/selfupdate/...
+            ./internal/selfupdate/... \
+            ./internal/meeting/...
+
+      # The meeting-audio helper (Swift, macOS only) must keep compiling; the
+      # release builds and ships it the same way (release.yml build-audio).
+      - name: Build naozhi-audio (arm64 + x86_64)
+        run: |
+          tools/naozhi-audio/build.sh "$RUNNER_TEMP/naozhi-audio-arm64" arm64
+          tools/naozhi-audio/build.sh "$RUNNER_TEMP/naozhi-audio-x86_64" x86_64
+          "$RUNNER_TEMP/naozhi-audio-$(uname -m)" status
 
   # Playwright smoke suite (test/e2e). Offline and deterministic: the mock
   # server stubs every API endpoint the dashboard calls. A dozen specs cover
