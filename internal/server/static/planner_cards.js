@@ -110,24 +110,24 @@ function healthOf(key, s) {
   return s ? HEALTH_STATES[sessionHealthState(s)] || HEALTH_STATES.idle : null;
 }
 
-// sessionStatusHtml is a session's one status line: 名字 · 健康状态 · 最后活动
-// (none while it runs: the state says it, and the tool it is in is not
+// sessionStatusHtml is a session's one status line: 名字 · 健康状态 · when it
+// was last active, its time alone (none while it runs: the state says it, and the tool it is in is not
 // news here); withName false leaves the name to a heading that already says it.
 export function sessionStatusHtml(key, withName = true) {
   const s = sessionList.sessionsData[sid(key, plannerHost.node)];
   const st = healthOf(key, s);
   const u = pc.health.get(key);
   const last = (u && u.last_active && Date.parse(u.last_active)) || (s && s.last_active) || 0;
-  const tail = last && !(s && s.state === 'running') ? '最后活动 ' + timeAgo(last) : '';
+  const tail = last && !(s && s.state === 'running') ? timeAgo(last) : '';
   return (withName ? '<span class="pl-scard-name">' + esc(sessionTitle(key)) + '</span>' : '') +
     (st ? '<span class="hl-state ' + st.cls + '"' + (u && u.evidence ? ' title="' + escAttr(evidenceText(u.evidence, u.error_class)) + '"' : '') + '>' + esc(st.label) + '</span>' : '') +
-    (tail ? '<span class="pl-scard-time"' + (last ? ' title="' + escAttr(formatAbsTime(last)) + '"' : '') + '>' + esc(tail) + '</span>' : '');
+    (tail ? '<span class="pl-scard-time" title="' + escAttr('最后活动 ' + formatAbsTime(last)) + '">' + esc(tail) + '</span>' : '');
 }
 
 export function sessionCardHtml(key) {
   return '<button type="button" class="pl-scard" data-action="planner-open-session" data-key="' + escAttr(key) + '">' +
     '<span class="pl-scard-line">' + sessionStatusHtml(key) + '</span>' +
-    '<span class="pl-scard-open" aria-hidden="true">打开 ›</span></button>';
+    '<span class="pl-scard-open" aria-hidden="true">›</span></button>';
 }
 
 // paintSessionCards refreshes the status lines of the cards under root, and
@@ -252,7 +252,7 @@ function actionCardHtml(raw) {
     const ws = str(a.workspace);
     // A workspace written by its ID is named once the registry is in.
     const name = WORKSPACE_ID_RE.test(ws) ? workspaceName(ws) : ws;
-    return '<div class="pl-act pl-act-dispatch"' + (name || !ws ? '' : ' data-ws="' + escAttr(ws) + '"') + '><div class="pl-act-h">派出会话' + (title ? ' · ' + esc(title) : '') + '</div>' +
+    return '<div class="pl-act pl-act-dispatch"' + (name || !ws ? '' : ' data-ws="' + escAttr(ws) + '"') + '><div class="pl-act-h">派出会话' + (title ? ' · <b>' + esc(title) + '</b>' : '') + '</div>' +
       rowsHtml([['工作区', name], ['模型', str(a.model)], ['第一条消息', str(a.message)]]) + '</div>';
   }
   if (a.type === 'promise') {
@@ -264,7 +264,7 @@ function actionCardHtml(raw) {
     const task = str(a.task);
     const name = task ? taskName(task) : '';
     return '<div class="pl-act pl-act-status" data-task="' + escAttr(task) + '"' + (name || !task ? ' data-named="1"' : '') + '>' +
-      '<div class="pl-act-h">Planner 判断 · ' + esc(STATUS_LABEL[a.state] || str(a.state)) + '</div>' +
+      '<div class="pl-act-h">Planner 判断 · <b>' + esc(STATUS_LABEL[a.state] || str(a.state)) + '</b></div>' +
       rowsHtml([['任务', name], ['依据', str(a.why)]]) + '</div>';
   }
   if (a.type === 'custody') {
@@ -319,18 +319,33 @@ function decorateEvent(ev, turn) {
     const wrap = code.closest('.md-code-wrap');
     if (wrap) wrap.outerHTML = actionCardHtml(code.textContent);
   });
+  ev.querySelectorAll('.pl-act, .pl-handoff').forEach(trimAround);
   if (!ev.matches('.text, .peer_message, .system')) return;
   const carded = new Set([...ev.querySelectorAll('.pl-scard[data-key]')].map((b) => b.dataset.key));
   const named = mentionedKeys(ev);
   const keys = named.filter((k) => !carded.has(k) && !turn.has(k)).slice(0, MAX_CARDS);
-  if (keys.length) {
-    ev.querySelector('.event-content')?.insertAdjacentHTML('beforeend', '<div class="pl-scards">' + keys.map(sessionCardHtml).join('') + '</div>');
+  const content = ev.querySelector('.event-content');
+  if (keys.length && content) {
+    // Above the bubble's own buttons (复制): the cards belong to its text.
+    const html = '<div class="pl-scards">' + keys.map(sessionCardHtml).join('') + '</div>';
+    const acts = content.querySelector(':scope > .event-copy-btn, :scope > .event-ask-btn');
+    if (acts) acts.insertAdjacentHTML('beforebegin', html);
+    else content.insertAdjacentHTML('beforeend', html);
   }
   if (ev.matches('.text')) {
     const folded = new Set([...carded, ...keys, ...named.filter((k) => turn.has(k))]);
     foldKeys(ev, folded);
     foldTextKeys(ev, folded);
   }
+}
+
+// trimAround drops the blank lines and line breaks the markdown left around a
+// card that took a fence's place: the card's own margin spaces it, and
+// cards in a row join into one block (views.css).
+function trimAround(card) {
+  const blank = (n) => n && (n.nodeType === Node.TEXT_NODE ? !n.data.trim() : n.matches('.md-blank, br'));
+  while (blank(card.previousSibling)) card.previousSibling.remove();
+  while (blank(card.nextSibling)) card.nextSibling.remove();
 }
 
 // foldTextKeys puts a session's name where a reply wrote its key out as

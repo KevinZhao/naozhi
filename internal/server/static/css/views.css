@@ -242,6 +242,7 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
    in the middle column (planner_chat.js, planner_cards.js; §15.1 PR ⑬). */
 .pl-composer{padding:8px 18px 12px;background:var(--nz-bg-0)}
 .pl-target{display:flex;align-items:center;gap:10px;min-height:20px;margin-bottom:6px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.pl-target[hidden]{display:none}
 .pl-target-to{font-weight:600;color:var(--nz-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .pl-target-note{color:var(--nz-text-dim)}
 #pl-sess-handoff{margin-left:auto;flex-shrink:0}
@@ -265,22 +266,40 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .pl-scard-name{min-width:0;overflow:hidden;text-overflow:ellipsis;font-weight:600;color:var(--nz-text-strong)}
 .pl-scard-line .hl-state,.pl-sess-line .hl-state{flex-shrink:0;font-size:var(--nz-fs-xs)}
 .pl-scard-time{min-width:0;overflow:hidden;text-overflow:ellipsis;font-size:var(--nz-fs-xs);color:var(--nz-text-dim)}
-.pl-scard-open{flex-shrink:0;font-size:var(--nz-fs-xs);color:var(--nz-accent)}
+.pl-scard-open{flex-shrink:0;font-size:var(--nz-fs-md);line-height:1;color:var(--nz-text-faint)}
+.pl-scard:hover .pl-scard-open{color:var(--nz-accent)}
 .pl-handoff{margin:2px 0 6px}
 .pl-handoff-l{display:block;margin-bottom:4px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
-.pl-act{max-width:560px;margin:8px 0;padding:9px 12px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1);font-size:var(--nz-fs-sm2)}
-.pl-act-h{margin-bottom:6px;font-weight:600;color:var(--nz-text-strong)}
-.pl-act-rows{display:grid;grid-template-columns:auto 1fr;gap:3px 10px;margin:0}
+/* An action card says what was done: a caption (its kind, then the title in
+   bold) over its rows. Cards in a row join into one block with hairlines
+   between them; a session card stays the only filled (clickable) card. */
+.pl-act{max-width:560px;margin:8px 0;padding:8px 12px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);font-size:var(--nz-fs-sm2);line-height:1.55}
+.pl-act:has(+ .pl-act){margin-bottom:0;border-bottom-left-radius:0;border-bottom-right-radius:0}
+.pl-act + .pl-act{margin-top:-1px;border-top-left-radius:0;border-top-right-radius:0}
+.pl-act-h{margin-bottom:4px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.pl-act-h b{font-size:var(--nz-fs-sm2);font-weight:600;color:var(--nz-text-strong)}
+/* One label column for every card, so joined cards line up. */
+.pl-act-rows{display:grid;grid-template-columns:5em 1fr;gap:2px 10px;margin:0}
 .pl-act-rows dt{font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
 .pl-act-rows dd{margin:0;white-space:pre-wrap;word-break:break-word}
 .pl-act-q{word-break:break-word}
 .pl-act-opts{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
-.pl-act-opt{padding:2px 8px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);font-size:var(--nz-fs-xs)}
+.pl-act-opt{padding:1px 8px;border-radius:var(--nz-radius-pill);background:var(--nz-bg-2);color:var(--nz-text-mute);font-size:var(--nz-fs-xs)}
 .pl-act-bad{border-color:var(--nz-red)}
+.pl-act-bad + .pl-act,.pl-act:has(+ .pl-act-bad){border-color:var(--nz-red)}
 .pl-act-bad .pl-act-h{color:var(--nz-red)}
 .pl-act-why{font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
 .pl-act-link{margin-top:4px;font-size:var(--nz-fs-xs)}
 .pl-act-raw{max-height:200px;overflow:auto;margin:6px 0 0;padding:6px 8px;border-radius:var(--nz-radius-sm);background:var(--nz-bg-0);font-family:var(--nz-font-mono);font-size:var(--nz-fs-xs);white-space:pre-wrap;word-break:break-all}
+/* The conversation's bubbles: yours stands right without the ">_" avatar,
+   and a Planner reply that follows another goes on under the same robot. A
+   table's short headers stay one line and its cells keep a few characters'
+   width (CJK breaks anywhere), the table scrolling in its wrap instead. */
+.pl-events .event.user .event-icon{display:none}
+.pl-events .event.text + .event.text .event-icon{visibility:hidden}
+.pl-events .event.text + .event.text{padding-top:0}
+.pl-events .event-content th{white-space:nowrap}
+.pl-events .event-content td{min-width:4.5em}
 .pl-sess{flex:1;min-height:0;display:flex;flex-direction:column}
 .pl-sess[hidden],.planner-main.pl-sess-open .pl-center>.pl-head,.planner-main.pl-sess-open #pl-note,.planner-main.pl-sess-open #pl-events{display:none}
 .pl-crumb{display:flex;align-items:center;gap:6px;min-width:0;font-size:var(--nz-fs-sm2);color:var(--nz-text-mute)}

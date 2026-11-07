@@ -174,7 +174,7 @@ export function mountComposer() {
   box.dataset.mounted = '1';
   box.dataset.fileTray = TRAY;
   box.innerHTML =
-    '<div class="pl-target"><span class="pl-target-to" id="pl-target-to"></span>' +
+    '<div class="pl-target" id="pl-target" hidden><span class="pl-target-to" id="pl-target-to"></span>' +
       '<span class="pl-target-note" id="pl-target-note"></span></div>' +
     '<div class="file-preview" id="pl-file-preview"></div>' +
     '<input type="file" id="pl-file-input" accept="image/*,application/pdf" multiple class="nz-hidden" data-action-change="file-input-change">' +
@@ -211,6 +211,8 @@ function paintComposer() {
   const send = $('pl-send');
   if (!to || !input || !send) return;
   const note = $('pl-target-note');
+  // The row above the input takes room only while it says something.
+  const row = () => { const r = $('pl-target'); if (r) r.hidden = !to.textContent && !(note && note.textContent); };
   if (st.sess) {
     // A card may name a session that does not exist (yet): a send would
     // create it as an ordinary session under that key.
@@ -221,6 +223,7 @@ function paintComposer() {
     input.disabled = !listed;
     $('pl-attach').disabled = input.disabled || hostRemote();
     send.disabled = st.sending || !listed;
+    row();
     return;
   }
   // The Planner's own page needs no "→ Planner".
@@ -233,6 +236,7 @@ function paintComposer() {
   // read (remote-planner.md §7).
   $('pl-attach').disabled = input.disabled || hostRemote();
   send.disabled = st.sending || (!!st.status && !usable);
+  row();
 }
 
 async function sendFromComposer() {
