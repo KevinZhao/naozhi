@@ -504,6 +504,50 @@ func (m *Manager) Retry(id string) error {
 	return nil
 }
 
+// Retranscribe recognises a finished meeting again in language (one of Languages) and writes a
+// new summary; the audio must still be there.
+func (m *Manager) Retranscribe(ctx context.Context, id, language string) error {
+	if !slices.Contains(Languages, language) {
+		return errors.New("不支持的识别语言")
+	}
+	mt, err := m.store.Get(id)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	busy := (m.rec != nil && m.rec.m.ID == id) || m.processing == id
+	m.mu.Unlock()
+	if busy || mt.State == StateRecording || mt.State == StateProcessing {
+		return errors.New("会议正在录音或处理中")
+	}
+	if mt.AudioDeleted {
+		return errors.New("音频已删除")
+	}
+	adir := filepath.Join(m.store.Dir(id), "audio")
+	for _, track := range []string{"mic", "remote"} {
+		wav, m4a := filepath.Join(adir, track+".wav"), filepath.Join(adir, track+".m4a")
+		if _, err := os.Stat(wav); err == nil || len(m.store.segments(id, track)) > 0 {
+			continue
+		}
+		if _, err := os.Stat(m4a); err != nil {
+			return errors.New("没有可识别的音频")
+		}
+		if err := m.cfg.Helper.Encode(ctx, m4a, wav); err != nil {
+			return err
+		}
+	}
+	os.Remove(filepath.Join(m.store.Dir(id), "transcript.json"))
+	if _, err := m.store.Update(id, func(x *Meeting) {
+		x.Language, x.State, x.Stage, x.Error = language, StateProcessing, "", ""
+	}); err != nil {
+		return err
+	}
+	m.journal(map[string]any{"meeting": id, "step": "retranscribe", "summary": "重新识别：" + mt.Title, "language": language})
+	m.enqueue(id)
+	m.changed()
+	return nil
+}
+
 // housekeeping processes orphans nobody resumed and deletes expired audio.
 func (m *Manager) housekeeping(ctx context.Context) {
 	t := time.NewTicker(time.Minute)
@@ -656,9 +700,20 @@ func (m *Manager) process(ctx context.Context, id string) error {
 		return err
 	}
 	now := m.cfg.Now()
+	// A re-recognised meeting keeps the promises its earlier summary made.
+	made := map[string]string{}
+	for _, t := range mt.Todos {
+		if t.Promise != "" {
+			made[t.Text] = t.Promise
+		}
+	}
 	for i := range todos {
 		t := &todos[i]
 		if !t.Mine || m.cfg.Promise == nil {
+			continue
+		}
+		if pid, ok := made[t.Text]; ok {
+			t.Promise = pid
 			continue
 		}
 		pid, err := m.cfg.Promise(fmt.Sprintf("%s（会议「%s」）", t.Text, mt.Title), dueOf(t.Due, now))
@@ -718,7 +773,7 @@ func (m *Manager) transcribe(ctx context.Context, mt Meeting) ([]Line, error) {
 	if err != nil {
 		return nil, fmt.Errorf("拼接音频：%w", err)
 	}
-	hints := Hints{Title: mt.Title, Attendees: mt.Attendees}
+	hints := Hints{Title: mt.Title, Attendees: mt.Attendees, Language: mt.Language}
 	mine, err := m.cfg.Recognizer.Transcribe(ctx, mic, hints)
 	if err != nil {
 		return nil, fmt.Errorf("识别（你）：%w", err)
@@ -771,6 +826,12 @@ func (m *Manager) joinTracks(id string) (string, string, error) {
 		}
 	}
 	if len(names) == 0 {
+		// Decoded back from the AAC copies for a re-recognition.
+		if _, err := os.Stat(mic); err == nil {
+			if _, err := os.Stat(remote); err == nil {
+				return mic, remote, nil
+			}
+		}
 		return "", "", errors.New("没有音频片段")
 	}
 	slices.Sort(names)

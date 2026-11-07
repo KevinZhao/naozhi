@@ -8,7 +8,7 @@
 //   record -out DIR -bundle B... [-segment 30] [-start-index N]
 //                                mic + a process tap of the bundles, one private aggregate
 //                                device, 16 kHz mono WAV segments in DIR/mic and DIR/remote
-//   encode IN.wav OUT.m4a        AAC copy for retention
+//   encode IN OUT.m4a|OUT.wav    AAC copy for retention, or back to 16 kHz PCM
 //   diarize IN.wav OUT.json      speaker turns of the far-end track (Diarize.swift)
 //
 // Authorisation is attributed to the "responsible process". Spawned by the gateway that is the
@@ -499,11 +499,16 @@ func runWatch(_ args: [String]) -> Never {
 }
 
 func runEncode(_ args: [String]) -> Never {
-    guard args.count >= 2 else { fail(64, "encode IN.wav OUT.m4a") }
+    guard args.count >= 2 else { fail(64, "encode IN OUT.m4a|OUT.wav") }
     do {
         let input = try AVAudioFile(forReading: URL(fileURLWithPath: args[0]))
-        let settings: [String: Any] = [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: input.fileFormat.sampleRate,
-                                       AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 32000]
+        // OUT.wav decodes back to the recorder's 16 kHz mono PCM (re-recognition after the WAVs
+        // gave way to the AAC copy); anything else is the AAC copy.
+        let settings: [String: Any] = args[1].hasSuffix(".wav")
+            ? [AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: targetRate, AVNumberOfChannelsKey: 1,
+               AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false, AVLinearPCMIsBigEndianKey: false]
+            : [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: input.fileFormat.sampleRate,
+               AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 32000]
         let output = try AVAudioFile(forWriting: URL(fileURLWithPath: args[1]), settings: settings)
         let buf = AVAudioPCMBuffer(pcmFormat: input.processingFormat, frameCapacity: 16384)!
         while input.framePosition < input.length {
