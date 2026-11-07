@@ -89,7 +89,7 @@ func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 	if sessionkey.IsSysKey(s.key) {
 		return storeEntry{}, false
 	}
-	// A scout or reader session lives for one run and is reset when it ends.
+	// A scout, reader or meeting summary session lives for one run and is reset when it ends.
 	if sessionkey.IsOneShotKey(s.key) {
 		return storeEntry{}, false
 	}
