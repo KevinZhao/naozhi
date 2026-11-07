@@ -12,6 +12,10 @@
 // shown as 已停止); the Planner page's header offers the same 停止 for the
 // session opened in the middle column (isRunningTask, nzBus 'tasks:changed').
 //
+// A done dispatched session is put away once it is idle and you are not at it
+// (planner/reap): its card says so, and which worktrees went or why one
+// stays; 重新打开 puts it back.
+//
 // A dispatched session runs in custody; its card marks custody only when it
 // is off or stopped (custody.js's mark, not a switch: the header has that).
 //
@@ -45,6 +49,23 @@ const SECTIONS = [
 // phone's folded left block gives.
 export const inProgress = (t) => !!t && SECTIONS[0].states.includes(t.state);
 
+// reapHtml says what became of a done dispatched session (planner/reap):
+// put away, with each worktree removed or why it stays, or why it is not put
+// away yet. 重新打开 puts it back.
+const WT_LABEL = { removed: '已删除 worktree', kept: 'worktree 留着', pending: 'worktree 等着删', gone: 'worktree 已不在' };
+function reapHtml(t) {
+  if (t.reap) {
+    const parts = ['会话已收起'];
+    for (const w of t.reap.worktrees || []) {
+      const name = String(w.dir || '').split('/').pop();
+      parts.push('<span title="' + escAttr(w.dir || '') + '">' + esc(WT_LABEL[w.state] || w.state) + ' ' + esc(name) +
+        (w.state === 'kept' || w.state === 'pending' ? '（' + esc(w.why || '') + '）' : '') + '</span>');
+    }
+    return parts.join('<span aria-hidden="true"> · </span>');
+  }
+  return t.reap_wait ? '等收起：' + esc(t.reap_wait) : '';
+}
+
 const stopped = (t) => t.state === 'done' && t.by === 'user' && t.why === STOPPED_WHY;
 
 // running reports whether dispatched session t is in progress (进行中 or 等你)
@@ -61,7 +82,8 @@ function titleHtml(t) {
 // instead.
 function menuHtml(t) {
   if (t.state === 'done') {
-    return '<button type="button" class="pl-btn tk-reopen" data-action="task-reopen" data-id="' + escAttr(t.id) + '">重新打开</button>';
+    const tip = t.reap ? ' title="放回会话列表，下一条消息接着上下文继续"' : '';
+    return '<button type="button" class="pl-btn tk-reopen" data-action="task-reopen" data-id="' + escAttr(t.id) + '"' + tip + '>重新打开</button>';
   }
   const cur = STATE_LABEL[t.state] || t.state;
   return '<select class="tk-menu" data-action-change="task-state" data-id="' + escAttr(t.id) + '" aria-label="改状态">' +
@@ -95,6 +117,10 @@ function cardHtml(t) {
     if (!isNaN(d.getTime())) meta.push((state === 'remind' ? '到点提醒 ' : '到期 ') + esc(formatMonthDayTime(d.getTime())));
   }
   if (t.close_when) meta.push('完成条件：' + esc(t.close_when));
+  if (state === 'done' && t.kind === 'session') {
+    const r = reapHtml(t);
+    if (r) meta.push(r);
+  }
   const mark = custodyException(t, state) ? custodyChipHtml(t.id, false) : '';
   return '<div class="tk-card tk-s-' + state + (state === 'done' ? ' done' : '') + '" data-id="' + escAttr(t.id) + '" role="listitem">' +
       '<div class="tk-top">' +

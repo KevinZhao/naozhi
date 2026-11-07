@@ -29,6 +29,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/brief"
 	"github.com/naozhi/naozhi/internal/planner/custody"
 	"github.com/naozhi/naozhi/internal/planner/promise"
+	"github.com/naozhi/naozhi/internal/planner/reap"
 	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/planner/task"
@@ -477,6 +478,9 @@ func main() {
 	// past 08:30 on a weekday, pushed once through the notifier. Only the
 	// health machine's Watch pokes it, so healthMon is set by then.
 	var healthMon *health.Machine
+	// Puts a done task's session away (§5.2, D95); built below, once custody
+	// (whose "你在旁边" it waits on) exists.
+	var reaper *reap.Reaper
 	// The 任务 (§15.4): the dispatched sessions and the promises, their
 	// states by health, the Planner's status blocks and the user, who can
 	// stop a dispatched session.
@@ -486,6 +490,8 @@ func main() {
 		Health:   func() health.Snapshot { return healthMon.Snapshot() },
 		Journal:  plannerState.Journal,
 		Stop:     wireup.StopTask(router, func(key string) { srv.DropPlannerQueue(key) }, plannerAgent.Tell),
+		OnState:  func(key string, st task.State) { reaper.OnState(key, st) },
+		ReapWait: func(key string) string { return reaper.Wait(key) },
 	})
 	briefer := brief.New(brief.Config{
 		Journal: plannerState.Journal,
@@ -539,6 +545,20 @@ func main() {
 		Woke:        wake.NewDetector(wake.SystemClock()).Woke,
 		Path:        sessionLayout.PlannerCustodyPath(),
 		Disabled:    !cfg.Planner.Enabled,
+	})
+	reapSources := wireup.ReapSources{Router: router, Health: func() health.Snapshot { return healthMon.Snapshot() }, ClaudeDir: claudeDir}
+	reaper = reap.New(reap.Config{
+		Sessions: sidecars,
+		Session:  reapSources.Session,
+		Nearby:   custodian.Nearby,
+		Archive:  reapSources.Archive,
+		Restore:  reapSources.Restore,
+		Dirs:     reapSources.Dirs,
+		InUse:    reapSources.InUse,
+		Git:      reap.Exec{},
+		Inbox:    notifier,
+		Journal:  plannerState.Journal,
+		Name:     unitNames,
 	})
 
 	routing := buildRouting(cfg, agents, projectMgr, scheduler)
@@ -663,6 +683,7 @@ func main() {
 	routerEvents.BindMonitor(healthMon.Poke)
 	healthMon.Subscribe(tasks.Observe)
 	healthMon.Subscribe(custodian.HandleHealth)
+	healthMon.Subscribe(func(health.Event) { reaper.Poke() })
 	go healthMon.Run(ctx)
 	plannerAgent.Start(ctx, srv, healthMon.Snapshot)
 	notifier.SetHealth(healthMon)
@@ -707,6 +728,9 @@ func main() {
 	srv.SettlePlannerTurns(router.ReattachedTurn, resultSink)
 	go actions.Run(ctx)
 	go custodian.Run(ctx)
+	if cfg.Planner.Enabled {
+		go reaper.Run(ctx)
+	}
 	go sidecars.Run(ctx, func(key string) bool { return router.SessionFor(key) != nil })
 	go briefer.Run(ctx)
 	go scouter.Run(ctx)
