@@ -391,6 +391,7 @@ func (p *Process) Kill()
 | 前缀 | 常量 | 所有者 | key 形状 | TTL 豁免 | 持久化 | Sidebar 可见 |
 |---|---|---|---|---|---|---|
 | `cron:` | `session.CronKeyPrefix` | `internal/cron` | `cron:{jobID}` | ✓ | ✓ | ✓（cron 面板） |
+| `meeting:` | `sessionkey.MeetingKeyPrefix` | `internal/meeting` | `meeting:{会议 ID}`（一场会议的纪要会话，写完即 Reset） | ✓ | ✗ | ✗ |
 | `planner:` | `sessionkey.PlannerNSPrefix` | `internal/planner/agent` | `planner:main` | ✓ | ✓ | ✗（Planner 页面） |
 | `project:` | `session.ProjectKeyPrefix` | `internal/project` | `project:{name}:planner` | ✓ | ✓ | ✓（planner 行） |
 | `reader:` | `sessionkey.ReaderKeyPrefix` | `internal/planner/reader` | `reader:{run ID}`（Planner 的一次 `lookup` 一个，跑完即 Reset；事件不写 `events/`，与 `scout:` 同） | ✓ | ✗ | ✗ |
