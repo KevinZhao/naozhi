@@ -72,7 +72,8 @@ func TestCustodyBlock(t *testing.T) {
 	}{
 		{name: "on", reply: on, sets: []string{dashKey + "=on/planner"}},
 		{name: "off", reply: block(`{"type":"custody","key":"` + dashKey + `","on":false}`), sets: []string{dashKey + "=off/planner"}},
-		{name: "go on", reply: say, delivered: []string{dashKey + "|Planner 继续|把剩下的两个测试也跑完"}},
+		{name: "go on", reply: say, delivered: []string{dashKey + "|Planner 继续|把剩下的两个测试也跑完" + custodyNote}},
+		{name: "irreversible", reply: block(`{"type":"custody","key":"` + dashKey + `","text":"用户同意了，合并 #12 后发版"}`), note: "托管不替用户说"},
 		{name: "on a stopped lineage", reply: on, check: errors.Join(custody.ErrStopped), sets: []string{dashKey + "=on/planner"}, note: "要用户在会话里重新打开"},
 		{name: "no such session", reply: on, setErr: custody.ErrNoSession, note: "动作块格式不对，没有执行：找不到会话"},
 		{name: "refused", reply: on, setErr: custody.ErrRefused, note: "不能托管"},

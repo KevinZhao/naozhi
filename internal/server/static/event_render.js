@@ -11,6 +11,7 @@ import { CLAWD_SVG, ICONS } from './icons.js';
 import { pendingBackendID } from './features.js';
 import { isInternalEvent, sid } from './session_ident.js';
 import { custodyBubbleHtml, isSuggestedMessage } from './custody.js';
+import { relayBubbleHtml } from './relay.js';
 
 // renderTodoList parses the JSON todos payload stored on EventEntry.detail and
 // emits a checklist block. Falls back to the summary line when detail is
@@ -278,13 +279,15 @@ export const withoutGatewayNote = (text) => String(text || '').replace(GATEWAY_N
 // userContentHtml: a message custody sent (source "custody") names custody
 // as its sender, faint; any other is textOrUserContentHtml.
 function userContentHtml(e, cleanRaw, sk) {
+  if (e.source === 'relay') return relayBubbleHtml(cleanRaw, (t) => textOrUserContentHtml(e, t));
   if (e.source !== 'custody') return textOrUserContentHtml(e, withoutGatewayNote(cleanRaw));
-  return custodyBubbleHtml(e, cleanRaw, sk, e.uuid || String(e.time || ''), (t) => textOrUserContentHtml(e, t));
+  return custodyBubbleHtml(e, withoutGatewayNote(cleanRaw), sk, e.uuid || String(e.time || ''), (t) => textOrUserContentHtml(e, t));
 }
 
 // custodyEventClass marks a message custody sent, and among them an answer
 // given by the recommended option (its 撤回 stays on the latest only).
 function custodyEventClass(e) {
+  if (e.type === 'user' && e.source === 'relay') return ' relay-msg';
   if (e.type !== 'user' || e.source !== 'custody') return '';
   return isSuggestedMessage(e) ? ' custody-msg custody-suggested-msg' : ' custody-msg';
 }

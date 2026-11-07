@@ -6,6 +6,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -140,8 +141,8 @@ func TestSettlePlannerTurns(t *testing.T) {
 			var before plannerTurns
 			before.load(context.Background(), path)
 			// Two requests side by side, cut across by the restart.
-			before.begin(agent.Key, agent.SourceScout, "")
-			before.begin(agent.Key, agent.SourceScout, "")
+			before.begin(agent.Key, agent.SourceScout, nil, "")
+			before.begin(agent.Key, agent.SourceScout, nil, "")
 
 			s := &Server{hub: &Hub{engine: &sendEngine{}}}
 			turns := &s.hub.engine.plannerTurns
@@ -160,7 +161,7 @@ func TestSettlePlannerTurns(t *testing.T) {
 			if replayed != tc.wantReplay || !slices.Equal(judged, tc.wantJudged) {
 				t.Errorf("delivered %q judged by %q, want %q by %q", replayed, judged, tc.wantReplay, tc.wantJudged)
 			}
-			turns.begin(agent.Key, agent.SourceUser, "")
+			turns.begin(agent.Key, agent.SourceUser, nil, "")
 			if got := s.PlannerTurnSources(agent.Key); !slices.Equal(got, tc.wantSources) {
 				t.Errorf("user turn's sources = %q, want %q", got, tc.wantSources)
 			}
@@ -204,5 +205,55 @@ func TestPlannerNote_LandsInHistory(t *testing.T) {
 	got := sess.EventEntries()
 	if len(got) != 1 || got[0].Type != clievent.KindSystem || got[0].Summary != "到点提醒：交周报" {
 		t.Fatalf("history = %+v, want one system event with the note", got)
+	}
+}
+
+// TestPlannerTurnWords: the user's words of the requests in flight, oldest
+// first, carried over a restart like their sources; a request with none
+// adds none (D98).
+func TestPlannerTurnWords(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "turns.json")
+	var before plannerTurns
+	before.load(context.Background(), path)
+	before.begin(agent.Key, agent.SourceUser, &agent.Words{Text: "都合并"}, "")
+	before.begin(agent.Key, agent.SourceReceipt, nil, "")
+
+	s := &Server{hub: &Hub{engine: &sendEngine{}}}
+	turns := &s.hub.engine.plannerTurns
+	turns.load(context.Background(), path)
+	id := turns.begin(agent.Key, agent.SourceAnswer, &agent.Words{Text: "发", Question: "发版吗"}, "")
+	got := s.PlannerTurnWords(agent.Key)
+	if len(got) != 2 || got[0].Text != "都合并" || got[1].Text != "发" || got[1].Question != "发版吗" {
+		t.Fatalf("words = %+v", got)
+	}
+	turns.finish(id)
+	s.PlannerResult(agent.Key)
+	if got := s.PlannerTurnWords(agent.Key); len(got) != 0 {
+		t.Errorf("words after the turns ended = %+v", got)
+	}
+}
+
+// TestRelayTarget: a relay goes to an existing local session only, never
+// the Planner's own, a scout's, a cron run's or a daemon's.
+func TestRelayTarget(t *testing.T) {
+	for _, tc := range []struct {
+		key      string
+		existing bool
+		want     string // a substring of the error; "" for none
+	}{
+		{"task:ab12", true, ""},
+		{"dashboard:direct:u:general", true, ""},
+		{"task:gone", false, "找不到会话"},
+		{agent.Key, true, "不接收转达"},
+		{"scout:r1", true, "不接收转达"},
+		{"cron:j1", true, "不接收转达"},
+		{"sys:d1", true, "不接收转达"},
+		{"bad\x00key", true, "不是合法"},
+	} {
+		s := &Server{router: &fakeServerRouter{existing: tc.existing}}
+		err := s.RelayTarget(tc.key)
+		if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+			t.Errorf("RelayTarget(%q) = %v, want %q", tc.key, err, tc.want)
+		}
 	}
 }

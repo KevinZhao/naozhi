@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Source is what started a Planner turn. The gateway records it for every
@@ -36,7 +37,21 @@ const (
 	// SourceUnrun is the receipt of the action blocks a reply's turn did not
 	// run, in a turn no outside content brought in (TellUnrun).
 	SourceUnrun Source = "unrun"
+	// SourceAnswer is the user's answer to a question the Planner asked
+	// (TellAnswer): a receipt, but one the user started, its words the
+	// answer (D98).
+	SourceAnswer Source = "answer"
 )
+
+// Words is what the user said in a Planner turn, as the gateway recorded it
+// (D98): what they typed, or the answer they picked to Question. A turn
+// carrying words is one the user started; only such a turn may pass the
+// user's decision on to a session.
+type Words struct {
+	Text     string    `json:"text"`
+	Question string    `json:"question,omitempty"`
+	At       time.Time `json:"at"`
+}
 
 // outsideLabels names the sources whose turns carry outside content (mail,
 // Slack messages, tasks other people wrote), or answer a turn that did: a
@@ -68,6 +83,19 @@ func (a *Agent) TurnSources() []Source {
 		return nil
 	}
 	return turns.PlannerTurnSources(Key)
+}
+
+// TurnWords is the user's words of the Planner requests in flight, oldest
+// first (Turns.PlannerTurnWords): none for a turn the user did not start.
+// The action runner reads it as a turn's result arrives, like OutsideTurn.
+func (a *Agent) TurnWords() []Words {
+	a.mu.Lock()
+	turns := a.turns
+	a.mu.Unlock()
+	if turns == nil {
+		return nil
+	}
+	return turns.PlannerTurnWords(Key)
 }
 
 // OutsideTurn names what brought outside content into the turn in flight
@@ -163,7 +191,7 @@ func (a *Agent) wakeChain(src Source, sent func(int, error), blocks []string, i 
 	}
 	// The block leads: the logged bubble keeps only the message's head, and
 	// the page marks the turn by it.
-	_, err := turns.SubmitPlanner(Key, src, blocks[i]+"\n\n"+a.Snapshot(), nil, opts, done)
+	_, err := turns.SubmitPlanner(Key, src, nil, blocks[i]+"\n\n"+a.Snapshot(), nil, opts, done)
 	if err == nil && i > 0 {
 		sent(i, nil)
 	}

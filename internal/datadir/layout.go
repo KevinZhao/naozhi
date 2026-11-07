@@ -198,6 +198,14 @@ func (l Layout) PlannerScoutWorkDir() string { return l.Join("planner", "scout",
 // out of the Planner's reach (<root>/session-settings/scout-mcp.json).
 func (l Layout) ScoutMCPConfigPath() string { return l.Join("session-settings", "scout-mcp.json") }
 
+// TaskMCPConfigPath is the --mcp-config of a dispatched session whose
+// dispatch set mcp_env (docs/rfc/planner.md D98): cli.mcp_config with that
+// environment, beside the scout's, named by the key's hash
+// (<root>/session-settings/task-mcp-<hash>.json).
+func (l Layout) TaskMCPConfigPath(keyHash string) string {
+	return l.Join("session-settings", "task-mcp-"+keyHash+".json")
+}
+
 // PlannerRunMarkerPath is written at start and removed on a clean shutdown
 // (<root>/planner/running); finding it at start means the last run did not
 // end cleanly.

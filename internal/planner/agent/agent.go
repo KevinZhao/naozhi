@@ -119,13 +119,17 @@ type Sessions interface {
 // Turns is the gateway's turn entry for the Planner.
 type Turns interface {
 	// SubmitPlanner runs text and images (nil for none) from src as a turn
-	// on key, spawning it with opts; done (nil for none) gets the reply, or
-	// the error the turn ended with. queued is text waiting behind a turn
-	// already running.
-	SubmitPlanner(key string, src Source, text string, images []clievent.Attachment, opts sessionview.AgentOpts, done func(reply string, err error)) (queued bool, err error)
+	// on key, spawning it with opts; said (nil for none) is the user's own
+	// words in it, recorded with the request; done (nil for none) gets the
+	// reply, or the error the turn ended with. queued is text waiting behind
+	// a turn already running.
+	SubmitPlanner(key string, src Source, said *Words, text string, images []clievent.Attachment, opts sessionview.AgentOpts, done func(reply string, err error)) (queued bool, err error)
 	// PlannerTurnSources is the sources of key's requests in flight,
 	// sorted (TurnSources); none between turns.
 	PlannerTurnSources(key string) []Source
+	// PlannerTurnWords is the user's words of key's requests in flight,
+	// oldest first (TurnWords); none between turns.
+	PlannerTurnWords(key string) []Words
 	// PlannerReceipt shows text in key's conversation as a system event,
 	// never sent to the CLI.
 	PlannerReceipt(key, text string)
@@ -596,7 +600,7 @@ func (a *Agent) sendHandoff(day string, summary []byte, opts sessionview.AgentOp
 		a.mu.Lock()
 		turns := a.turns
 		a.mu.Unlock()
-		if _, err := turns.SubmitPlanner(Key, SourceShift, handoffMessage(day, string(summary)), nil, opts, nil); err != nil {
+		if _, err := turns.SubmitPlanner(Key, SourceShift, nil, handoffMessage(day, string(summary)), nil, opts, nil); err != nil {
 			slog.Warn("planner: send handoff to new session", "err", err)
 			return
 		}
@@ -623,7 +627,7 @@ func (a *Agent) askHandoff(ctx context.Context) string {
 		err  error
 	}
 	ch := make(chan reply, 1)
-	queued, err := turns.SubmitPlanner(Key, SourceShift, handoffPrompt, nil, opts, func(text string, err error) {
+	queued, err := turns.SubmitPlanner(Key, SourceShift, nil, handoffPrompt, nil, opts, func(text string, err error) {
 		ch <- reply{text, err}
 	})
 	if err != nil {
@@ -685,7 +689,13 @@ func (a *Agent) Send(text, ref string, images []clievent.Attachment) error {
 		}
 		head = sessionRef(ref, a.cfg.Sessions.Name(ref), a.cfg.Sessions.Label(ref)) + "\n"
 	}
-	if _, err := turns.SubmitPlanner(Key, src, strings.TrimSpace(head+a.Snapshot()+"\n\n"+text), images, opts, nil); err != nil {
+	// The words are the user's own, without the snapshot or the ref: what
+	// a relay quotes (D98).
+	var said *Words
+	if text != "" {
+		said = &Words{Text: text, At: time.Now()}
+	}
+	if _, err := turns.SubmitPlanner(Key, src, said, strings.TrimSpace(head+a.Snapshot()+"\n\n"+text), images, opts, nil); err != nil {
 		return err
 	}
 	turns.PlannerReceipt(Key, ReceiptText)
@@ -706,7 +716,13 @@ func (a *Agent) TellRefused(text string) error { return a.tell(SourceRefusal, te
 // not run, from SourceUnrun so the receipt's own turn is known (UnrunTurn).
 func (a *Agent) TellUnrun(text string) error { return a.tell(SourceUnrun, text) }
 
-func (a *Agent) tell(src Source, text string) error {
+// TellAnswer is Tell for the user's answer to a question: a turn the user
+// started, w its words, so the Planner may pass the answer on (D98).
+func (a *Agent) TellAnswer(text string, w Words) error { return a.tellSaid(SourceAnswer, &w, text) }
+
+func (a *Agent) tell(src Source, text string) error { return a.tellSaid(src, nil, text) }
+
+func (a *Agent) tellSaid(src Source, said *Words, text string) error {
 	if !a.cfg.Enabled {
 		return ErrOff
 	}
@@ -719,7 +735,7 @@ func (a *Agent) tell(src Source, text string) error {
 	case turns == nil:
 		return ErrNotReady
 	}
-	_, err := turns.SubmitPlanner(Key, src, "<naozhi-receipt>\n"+strings.TrimSpace(text)+"\n</naozhi-receipt>", nil, opts, nil)
+	_, err := turns.SubmitPlanner(Key, src, said, "<naozhi-receipt>\n"+strings.TrimSpace(text)+"\n</naozhi-receipt>", nil, opts, nil)
 	return err
 }
 
