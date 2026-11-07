@@ -1,12 +1,13 @@
 // Package action is the Planner's way to ask the gateway for something
 // (docs/rfc/planner.md §6.2): the ```naozhi-action blocks at the end of a
-// planner:main reply. There are six: dispatch (a task: session, started at
+// planner:main reply. There are seven: dispatch (a task: session, started at
 // once, D88), promise (a promise among the 任务), ask (a
-// question in "通知" whose answer goes back to the Planner), status (the
-// Planner's judgment of a task's state, §15.4), notify (something to tell
-// the user, pushed now or held for the morning brief, §15.6) and custody (a
-// session's custody switched, or a message sent to a session in custody,
-// planner/custody). A block that
+// question in "通知" whose answer goes back to the Planner, or straight to a
+// session, D98), status (the Planner's judgment of a task's state, §15.4),
+// notify (something to tell the user, pushed now or held for the morning
+// brief, §15.6), custody (a session's custody switched, or a message sent to
+// a session in custody, planner/custody) and relay (the user's decision
+// passed on to a session with the user's own words, D98). A block that
 // does not parse, or names an unknown type, a bad field or a task that does
 // not exist, is not run: the Planner conversation shows it as it was
 // written, with the reason, and the Planner gets a receipt naming it.
@@ -17,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -55,6 +57,13 @@ const (
 	keyRunes = 512
 	// custodyTextRunes caps what the Planner tells a session in custody.
 	custodyTextRunes = 2000
+	// relayTextRunes caps the Planner's words that follow the user's in a
+	// relay.
+	relayTextRunes = 4000
+	// mcpEnvVars caps the variables a dispatch sets on one server, and
+	// mcpEnvValueBytes one value.
+	mcpEnvVars       = 8
+	mcpEnvValueBytes = 256
 )
 
 // Type is a block's "type".
@@ -67,6 +76,7 @@ const (
 	TypeStatus   Type = "status"
 	TypeNotify   Type = "notify"
 	TypeCustody  Type = "custody"
+	TypeRelay    Type = "relay"
 )
 
 // Dispatch asks for a session in a workspace.
@@ -77,6 +87,13 @@ type Dispatch struct {
 	// Model is "" for the default.
 	Model   string `json:"model"`
 	Message string `json:"message"`
+	// WithUserWords leads the first message with the user's words of the
+	// turn, as a relay does (D98). Only a turn the user started may set it.
+	WithUserWords bool `json:"with_user_words,omitempty"`
+	// MCPEnv sets environment variables on MCP servers of cli.mcp_config for
+	// this session only (an Outlook server's write switch, D98): server name
+	// → variable → value. Only a turn the user started may carry it.
+	MCPEnv map[string]map[string]string `json:"mcp_env,omitempty"`
 }
 
 // Promise registers something the Planner promised the user.
@@ -87,10 +104,13 @@ type Promise struct {
 }
 
 // Ask puts a question to the user; Options are the answers offered (none:
-// the user replies in the conversation).
+// the user replies in the conversation). Task, when set, is the session the
+// answer goes to straight from the gateway, with the user's words (D98); it
+// needs options.
 type Ask struct {
 	Question string   `json:"question"`
 	Options  []string `json:"options"`
+	Task     string   `json:"task,omitempty"`
 }
 
 // Status sets a task's state: Task is a task: key or a promise ID, State
@@ -128,8 +148,18 @@ type Custody struct {
 	Text string `json:"text"`
 }
 
+// Relay passes the user's decision on to session Key (D98): the gateway
+// leads Text, the Planner's words, with all the user's own words it recorded
+// for the turn, never a part the Planner picks (a cut quote can turn "先不要
+// 合并" into "合并"). Only a turn the user started may relay.
+type Relay struct {
+	Key  string `json:"key"`
+	Text string `json:"text"`
+}
+
 // Block is one action block of a reply: exactly one of Dispatch, Promise,
-// Ask, Status, Notify and Custody is set, or Err says why it is not run.
+// Ask, Status, Notify, Custody and Relay is set, or Err says why it is not
+// run.
 type Block struct {
 	// Raw is the block's body as written.
 	Raw      string
@@ -140,6 +170,7 @@ type Block struct {
 	Status   *Status
 	Notify   *Notify
 	Custody  *Custody
+	Relay    *Relay
 	Err      error
 }
 
@@ -260,13 +291,22 @@ func (b *Block) decode() {
 			err = c.validate()
 			b.Custody = &c.Custody
 		}
+	case TypeRelay:
+		var r struct {
+			Type Type `json:"type"`
+			Relay
+		}
+		if err = strict(b.Raw, &r); err == nil {
+			err = r.validate()
+			b.Relay = &r.Relay
+		}
 	case "":
 		err = errors.New("缺少 type")
 	default:
-		err = fmt.Errorf("未知类型 %q（只有 dispatch、promise、ask、status、notify、custody）", head.Type)
+		err = fmt.Errorf("未知类型 %q（只有 dispatch、promise、ask、status、notify、custody、relay）", head.Type)
 	}
 	if err != nil {
-		b.Dispatch, b.Promise, b.Ask, b.Status, b.Notify, b.Custody, b.Err = nil, nil, nil, nil, nil, nil, err
+		b.Dispatch, b.Promise, b.Ask, b.Status, b.Notify, b.Custody, b.Relay, b.Err = nil, nil, nil, nil, nil, nil, nil, err
 	}
 }
 
@@ -303,7 +343,83 @@ func (d *Dispatch) validate() error {
 	if err := tuningspec.ValidateModel("model", d.Model); err != nil {
 		return errors.New("model 不是合法的模型名")
 	}
+	if err := noEnvelope("message", d.Message); err != nil {
+		return err
+	}
+	return validMCPEnv(d.MCPEnv)
+}
+
+// envName is an environment variable a dispatch may set on an MCP server.
+var envName = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
+
+// reservedEnv are the variables that change how a server's program runs
+// rather than what it allows: a dispatch never sets them.
+var reservedEnv = regexp.MustCompile(`^(PATH|HOME|SHELL|USER|TMPDIR|PWD|IFS|LD_.*|DYLD_.*|NODE_.*|NPM_.*|PYTHON.*|PERL.*|RUBY.*|JAVA_.*|GO.*|BASH_.*|ENV|ZDOTDIR|SSL_.*|.*_PROXY|AWS_.*|.*TOKEN.*|.*SECRET.*|.*PASSWORD.*|.*KEY)$`)
+
+// validMCPEnv checks a dispatch's mcp_env: server names, variable names
+// and plain one-line values; the servers are checked against cli.mcp_config
+// at spawn.
+func validMCPEnv(env map[string]map[string]string) error {
+	for server, vars := range env {
+		switch {
+		case server == "" || utf8.RuneCountInString(server) > 64 || strings.IndexFunc(server, unicode.IsControl) >= 0:
+			return errors.New("mcp_env 的服务器名不对")
+		case len(vars) == 0:
+			return fmt.Errorf("mcp_env 里 %s 没有变量", server)
+		case len(vars) > mcpEnvVars:
+			return fmt.Errorf("mcp_env 里 %s 最多 %d 个变量", server, mcpEnvVars)
+		}
+		for k, v := range vars {
+			switch {
+			case !envName.MatchString(k):
+				return fmt.Errorf("mcp_env 的变量名 %q 要是大写字母、数字和下划线", k)
+			case reservedEnv.MatchString(k):
+				return fmt.Errorf("mcp_env 不能设 %s", k)
+			case len(v) > mcpEnvValueBytes || strings.IndexFunc(v, unicode.IsControl) >= 0:
+				return fmt.Errorf("mcp_env 里 %s 的值太长或含控制字符", k)
+			}
+		}
+	}
 	return nil
+}
+
+// envelopeTag opens and closes the gateway's relay envelope (relayEnvelope).
+const envelopeTag = "naozhi-relay"
+
+// noEnvelope refuses Planner text that names the relay envelope: only the
+// gateway writes one, so a session can take it for the user's own words. In
+// 11-07 runs a copy with the brackets swapped for ‹› still passed for the
+// real one 9 times in 13.
+func noEnvelope(field, text string) error {
+	if strings.Contains(strings.ToLower(text), envelopeTag) {
+		return fmt.Errorf("%s 里不能出现 %s（只有网关写它）", field, envelopeTag)
+	}
+	return nil
+}
+
+// validKey checks a block's session key field.
+func validKey(field, key string) error {
+	switch {
+	case key == "":
+		return fmt.Errorf("缺少 %s", field)
+	case utf8.RuneCountInString(key) > keyRunes || strings.IndexFunc(key, unicode.IsControl) >= 0:
+		return fmt.Errorf("%s 不是合法的会话 key", field)
+	}
+	return nil
+}
+
+func (r *Relay) validate() error {
+	r.Key, r.Text = strings.TrimSpace(r.Key), strings.TrimSpace(r.Text)
+	if err := validKey("key", r.Key); err != nil {
+		return errors.New("relay " + err.Error())
+	}
+	switch {
+	case r.Text == "":
+		return errors.New("relay 缺少 text（你要它做什么）")
+	case utf8.RuneCountInString(r.Text) > relayTextRunes:
+		return fmt.Errorf("text 超过 %d 字", relayTextRunes)
+	}
+	return noEnvelope("text", r.Text)
 }
 
 func (p *Promise) validate() error {
@@ -339,6 +455,16 @@ func (a *Ask) validate() error {
 			return fmt.Errorf("选项 %q 重复", o)
 		}
 		a.Options[i] = o
+	}
+	a.Task = strings.TrimSpace(a.Task)
+	if a.Task == "" {
+		return nil
+	}
+	if err := validKey("task", a.Task); err != nil {
+		return errors.New("ask 的 " + err.Error())
+	}
+	if len(a.Options) == 0 {
+		return errors.New("带 task 的 ask 要给 options（用户点选的回答直接送到那个会话）")
 	}
 	return nil
 }
@@ -392,7 +518,7 @@ func (c *Custody) validate() error {
 	case utf8.RuneCountInString(c.Text) > custodyTextRunes:
 		return fmt.Errorf("text 超过 %d 字", custodyTextRunes)
 	}
-	return nil
+	return noEnvelope("text", c.Text)
 }
 
 // webLink reports whether s is an absolute http(s) URL the dashboard may

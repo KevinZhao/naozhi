@@ -5,6 +5,8 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/notify"
+	"github.com/naozhi/naozhi/internal/planner/action"
+	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/journal"
 	"github.com/naozhi/naozhi/internal/planner/note"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
@@ -67,4 +69,22 @@ func plannerReports(router *session.Router, key string) []time.Time {
 		}
 	}
 	return out
+}
+
+// PlannerWords is action.Config.Words over the Planner: the user's words of
+// the turn in flight (agent.Agent.TurnWords) in the runner's terms.
+func PlannerWords(a *agent.Agent) func() []action.Words {
+	return func() []action.Words {
+		var out []action.Words
+		for _, w := range a.TurnWords() {
+			out = append(out, action.Words(w))
+		}
+		return out
+	}
+}
+
+// PlannerTellAnswer is action.Config.TellAnswer over the Planner
+// (agent.Agent.TellAnswer).
+func PlannerTellAnswer(a *agent.Agent) func(string, action.Words) error {
+	return func(text string, w action.Words) error { return a.TellAnswer(text, agent.Words(w)) }
 }

@@ -43,7 +43,7 @@ type plannerFileTurns struct {
 	images [][]clievent.Attachment
 }
 
-func (f *plannerFileTurns) SubmitPlanner(_ string, _ agent.Source, text string, images []clievent.Attachment, _ sessionview.AgentOpts, _ func(string, error)) (bool, error) {
+func (f *plannerFileTurns) SubmitPlanner(_ string, _ agent.Source, _ *agent.Words, text string, images []clievent.Attachment, _ sessionview.AgentOpts, _ func(string, error)) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.texts = append(f.texts, text)
@@ -51,6 +51,7 @@ func (f *plannerFileTurns) SubmitPlanner(_ string, _ agent.Source, text string, 
 	return false, nil
 }
 func (*plannerFileTurns) PlannerTurnSources(string) []agent.Source { return nil }
+func (*plannerFileTurns) PlannerTurnWords(string) []agent.Words    { return nil }
 func (*plannerFileTurns) PlannerReceipt(string, string)            {}
 func (*plannerFileTurns) PlannerNote(string, string)               {}
 func (*plannerFileTurns) DropPlannerQueue(string)                  {}

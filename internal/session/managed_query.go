@@ -865,7 +865,7 @@ func (s *ManagedSession) extractLastPromptFromProcess() {
 func scanLastSummaries(entries []clievent.EventEntry) (prompt, activity, response string) {
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]
-		if prompt == "" && e.Type == clievent.KindUser && e.Source != clievent.SourceCustody && !strings.HasPrefix(e.Summary, clievent.CustodyLead) {
+		if prompt == "" && e.Type == clievent.KindUser && !clievent.FromGateway(e.Source) && !strings.HasPrefix(e.Summary, clievent.CustodyLead) {
 			prompt = e.Summary
 		}
 		if activity == "" && clievent.IsActivityType(e.Type) {

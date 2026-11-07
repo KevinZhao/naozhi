@@ -261,7 +261,7 @@ func (s *ManagedSession) InterruptViaControlDetail() (InterruptOutcome, error) {
 // the user's: the title keeps the last prompt the user wrote. One from
 // before ctx carried its source still leads with the custody line.
 func (s *ManagedSession) cachePrompt(ctx context.Context, text string, images []clievent.Attachment) {
-	if ctxutil.Source(ctx) == clievent.SourceCustody || strings.HasPrefix(text, clievent.CustodyLead) {
+	if clievent.FromGateway(ctxutil.Source(ctx)) || strings.HasPrefix(text, clievent.CustodyLead) {
 		return
 	}
 	storeAtomicString(&s.lastPrompt, textutil.TruncateRunes(text, 120)+clievent.AttachmentSuffix(images))
