@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.naozhi.audio</string>
+	<key>CFBundleName</key>
+	<string>naozhi-audio</string>
+	<key>CFBundleExecutable</key>
+	<string>naozhi-audio</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.2</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>naozhi 录下会议软件的声音，在本机转写成会议纪要。</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>naozhi 录下你在会议中的声音，在本机转写成会议纪要。</string>
+</dict>
+</plist>
