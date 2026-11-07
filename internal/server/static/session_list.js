@@ -13,7 +13,8 @@ import { turnState, updateSendButton } from './running_banner.js';
 import { PENDING_LS_KEY, announce, formatAbsTime, persistPending, refreshSidebarTimes, renderRecentSessionsPanel, setActiveSessionCard, showAuthModal, timeAgo } from './utilities.js';
 import { scanDiscovered } from './discovery.js';
 import { invalidateGitState } from './tuning.js';
-import { sectionHeaderFallbackHtml, sectionHeaderHtml } from './sidebar_project.js';
+import { NODE_GROUP_PREFIX, nodeHeaderHtml, sectionHeaderFallbackHtml, sectionHeaderHtml } from './sidebar_project.js';
+import { nodeRunsPlanner, plannerHost } from './planner_host.js';
 import { custody, statusOf } from './custody.js';
 import { accessProfileChipHtml, backendDisplayName, backendDisplayVersion } from './auth_modal.js';
 import { _optimisticRunningTimers } from './send_message.js';
@@ -389,8 +390,8 @@ function buildSidebarItems(data) {
 // (named after the workspace basename, no registered project) adds the path
 // to its key, so /a/tmp and /b/tmp do not collapse into one mislabeled group.
 // Every favorite project gets a group, empty or not, so its header always
-// renders.
-function groupSidebarItems(items) {
+// renders; with node set only that node's favorites.
+function groupSidebarItems(items, node) {
   const groups = {};
   const ungrouped = [];
   items.forEach(s => {
@@ -414,6 +415,7 @@ function groupSidebarItems(items) {
   sessionList.projectsData.forEach(p => {
     if (!p.favorite) return;
     const pNode = p.node || 'local';
+    if (node && pNode !== node) return;
     const k = pNode + ':' + p.name;
     if (!groups[k]) groups[k] = {name: p.name, node: pNode, items: []};
   });
@@ -451,16 +453,39 @@ function sortedGroupKeys(groups, projIndex) {
   });
 }
 
-// sidebarHtml renders the rows grouped under their project headers, the
-// sessions with no project at all last under 未分组, and a collapsed project as
-// its header alone. An empty favorite group renders its header and no row:
-// the top-right `+` button is the create affordance.
+// sidebarHtml renders the rows: with more than one node, a group per node
+// (docs/rfc/remote-planner.md §5) — the node the Planner runs on first,
+// then this one, then the others by ID — each holding what a single node
+// lists; with this node alone exactly that, no node header.
 function sidebarHtml(items) {
   // Indexed by (node, name) to reach a project's favorite/github flags.
   const projIndex = {};
   sessionList.projectsData.forEach(p => {
     projIndex[(p.node || 'local') + ':' + p.name] = p;
   });
+  if (!isMultiNode()) return nodeBodyHtml(items, projIndex, '');
+  const byNode = new Map();
+  for (const id of Object.keys(sessionList.nodesData)) byNode.set(id, []);
+  for (const s of items) {
+    const n = s.node || 'local';
+    if (!byNode.has(n)) byNode.set(n, []);
+    byNode.get(n).push(s);
+  }
+  const rank = (n) => (n === plannerHost.node ? 0 : n === 'local' ? 1 : 2);
+  const order = [...byNode.keys()].sort((a, b) => (rank(a) - rank(b)) || a.localeCompare(b));
+  return order.map((n) => {
+    const rows = byNode.get(n);
+    const head = nodeHeaderHtml(n, rows.length, nodeRunsPlanner(n));
+    return sessionList.collapsedProjects.has(NODE_GROUP_PREFIX + n) ? head : head + nodeBodyHtml(rows, projIndex, n);
+  }).join('');
+}
+
+// nodeBodyHtml renders one node's rows (node '' for a single-node list)
+// grouped under their project headers, the sessions with no project at all
+// last under 未分组, and a collapsed project as its header alone. An empty
+// favorite group renders its header and no row: the top-right `+` button is
+// the create affordance.
+function nodeBodyHtml(items, projIndex, node) {
   // The sessions the Planner dispatched (purpose task, §15.1) are one group
   // of their own, on top.
   const dispatched = items.filter(s => s.purpose === 'task');
@@ -468,7 +493,7 @@ function sidebarHtml(items) {
   let html = dispatched.length
     ? '<div class="section-header"><span class="sh-name">Planner 派出</span></div>' + dispatched.map((s) => sessionCardHtml(s)).join('')
     : '';
-  const { groups, ungrouped } = groupSidebarItems(items);
+  const { groups, ungrouped } = groupSidebarItems(items, node);
   const groupKeys = sortedGroupKeys(groups, projIndex);
   if (groupKeys.length === 0) {
     // Below the dispatched group the rest needs a header of its own.
@@ -1181,6 +1206,8 @@ wsm.on(NZ_CONTRACT.WS.error, (msg) => {
   }
 });
 wsm.on(NZ_CONTRACT.WS.session_state, (msg) => onSessionState(msg));
+// The node the Planner runs on leads the node groups.
+nzBus.addEventListener('planner:node', () => { if (sessionList.lastSidebarData) renderSidebar(sessionList.lastSidebarData); });
 wsm.on(NZ_CONTRACT.WS.sessions_update, () => {
   // Snapshot the pre-update session-key set so we can spot
   // a newly-added key after the fetch completes. Comparing sizes is

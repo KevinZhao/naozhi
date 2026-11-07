@@ -431,6 +431,13 @@
    how many sessions are hidden so they don't forget what's tucked away. */
 .section-header .sh-count{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:10px;padding:0 6px;line-height:1.6;font-variant-numeric:tabular-nums;flex-shrink:0}
 .section-header.is-collapsed{border-bottom-color:var(--nz-border)}
+/* Node groups of a multi-node list (remote-planner.md §5): above the project
+   headers and not sticky, so a project header still pins under the list top. */
+.section-header.node-header{position:static;color:var(--nz-text);background:var(--nz-bg-2);font-weight:700;padding-left:8px}
+.section-header.node-header .sh-count{margin-left:auto}
+.section-header.node-header.node-down .sh-name{color:var(--nz-text-mute)}
+.node-header .node-tag{font-size:var(--nz-fs-xs);font-weight:500;color:var(--nz-accent);border:1px solid currentColor;border-radius:10px;padding:0 6px;line-height:1.5;flex-shrink:0}
+.node-header .node-state{font-size:var(--nz-fs-xs);font-weight:500;color:var(--nz-warn);flex-shrink:0}
 /* Fallback section-header: workspace-basename groups are ad-hoc (no registered
    ProjectManager project), so we drop the background emphasis and italicize
    the name to distinguish them from real project sections. The workspace

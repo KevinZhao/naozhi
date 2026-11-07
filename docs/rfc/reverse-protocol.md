@@ -40,6 +40,7 @@
 | `askuser`  | 节点侧会生成 `AskUserQuestion` 富事件 (Round 208+)              |
 | `files`    | 节点侧应答 `files_list` / `file_read` / `files_exists` / `fetch_outputs`，按自己的根目录与规则提供自己的文件（planner RFC §15.5 ④）；`file_read` 每个应答至多 256 KiB（`node.ReverseFileChunk`），原文与预览都按 offset 分段，免得一个大帧在慢上行上写超时拖断整条反连；没有它时主节点对该节点的文件请求一律 501，不读本机 |
 | `send-backend` | `send` RPC 读 `backend` / `resume_id`；缺它时主节点拒绝带这两项的发送 |
+| `planner` | 节点在跑全局 Planner（`planner.enabled`）并应答 `api` RPC：`{method, path, query, body}` → `{status, body}`，只放行 `node.APIRoutes` 里的 Planner / 等你 / 任务 / 托管 / 旁注 / 健康路由，节点侧再查一次；主节点经 `/api/remote/{node}/…` 转发，缺它时回 501（`remote-planner.md` §4）。直连节点在 `X-Naozhi-Caps` 里声明 |
 | `send-idempotent` | `send` RPC 读 `turn_id`，同 (key, turn_id) 的重复返回首次结果并带 `dup: true`；主节点只对它在超时 / 断线后回 `unknown` |
 
 新增 tag 只需同步更新本表和服务端的 known-set。

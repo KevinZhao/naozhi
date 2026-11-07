@@ -79,6 +79,7 @@ export const NZ_CONTRACT = Object.freeze({
     projects_files_exists: '/api/projects/files/exists',
     projects_files_list: '/api/projects/files/list',
     projects_files_upload: '/api/projects/files/upload',
+    remote_node_path___: '/api/remote/{node}/{path...}',
     scout_run: '/api/scout/run',
     scratch_open: '/api/scratch/open',
     scratch_id: '/api/scratch/{id}',

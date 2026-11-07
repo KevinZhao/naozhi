@@ -502,6 +502,9 @@ func main() {
 		Patrol:     scouter.Since,
 		Routines:   wireup.RoutineResults(scheduler),
 		Carried:    notifier.Carried,
+		// With several nodes the scout's node sends the brief, each node's
+		// Planner covering its own sessions (docs/rfc/remote-planner.md §2.1).
+		Elsewhere: func() bool { return multiNode(cfg) && !scouter.Enabled() },
 	})
 
 	// Custody (§5.4, D93): the gateway watching sessions for the user. It
@@ -714,6 +717,7 @@ func main() {
 		conn := upstream.New(buildUpstreamConfig(cfg), wireup.UpstreamRouter(router), projectMgr,
 			upstreamDiscovery(claudeDir, router, projectMgr), srv)
 		conn.ServeFiles(srv.NodeFiles())
+		conn.ServePlanner(srv.NodePlanner())
 		go conn.Run(ctx)
 		slog.Info("upstream connector starting", "url", cfg.Upstream.URL, "node_id", cfg.Upstream.NodeID)
 	}
@@ -855,4 +859,10 @@ func main() {
 	case <-shutdownDone:
 		<-serverErr
 	}
+}
+
+// multiNode reports whether this naozhi is one of several nodes: it polls
+// nodes, takes reverse nodes, or dials a primary.
+func multiNode(cfg *config.Config) bool {
+	return len(cfg.Workspaces) > 0 || len(cfg.ReverseNodes) > 0 || cfg.Upstream != nil
 }

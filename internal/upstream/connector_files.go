@@ -31,8 +31,11 @@ func (c *Connector) registerCaps() []string {
 	caps := derivedCaps()
 	if c.files.List != nil {
 		caps = append(caps, node.CapFiles)
-		slices.Sort(caps)
 	}
+	if c.planner.API != nil {
+		caps = append(caps, node.CapPlanner)
+	}
+	slices.Sort(caps)
 	return caps
 }
 

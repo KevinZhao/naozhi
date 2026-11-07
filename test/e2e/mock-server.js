@@ -279,6 +279,13 @@ function defaultGitStates() {
  *   gateway's journaled notes in the Planner conversation). Unset, the route 404s.
  * @param {object[]} [overrides.plannerBriefs] - GET /api/planner/briefs answer (the morning
  *   briefs, newest first: {day, at, sent, counts, markdown}). Unset, the route 404s.
+ * @param {object} [overrides.remote] - node → the Planner a node runs (docs/rfc/remote-planner.md):
+ *   {planner, tasks, inbox, custody, notes: {key: [...]}, events: {key: [...]}}. /api/remote/<node>/<route>
+ *   answers the GETs of /api/planner, /api/tasks, /api/inbox, /api/custody, /api/planner/briefs,
+ *   /api/planner/notes, /api/system/health and /api/sessions/notes from it; every write lands in
+ *   remoteCalls ({node, method, path, body}) and answers 202 — a POST /api/planner/send also
+ *   runs remote[node].onSend(body) when set; GET /api/sessions/events?node=<node> answers
+ *   events[key]. A node with `offline: true` answers 503, as the primary does. Unset, 404.
  * @param {boolean} [overrides.uploads] - If true, POST /api/sessions/upload takes the file and
  *   answers {id: 'up-<n>', kind, size, name} (image_inline, file_ref for a PDF); each lands in
  *   uploadCalls ({id, bytes}). Unset, the route 404s and an upload fails.
@@ -369,6 +376,8 @@ function startMockServer(overrides = {}) {
   const plannerBriefs = overrides.plannerBriefs || null;
   const plannerSendCalls = [];
   const uploadCalls = [];
+  const remoteData = overrides.remote || {};
+  const remoteCalls = [];
   const keyEvents = overrides.keyEvents || {};
   const workflowDelayMs = overrides.workflowDelayMs || 0;
   // Every GET /api/sessions/workflow, as its query parameters.
@@ -561,12 +570,51 @@ function startMockServer(overrides = {}) {
       return;
     }
 
+    // A node's Planner routes (overrides.remote), as the primary forwards them.
+    if (pathname.startsWith('/api/remote/')) {
+      if (!checkAuth()) return;
+      const [nodeID, ...restParts] = pathname.slice('/api/remote/'.length).split('/');
+      const r = remoteData[nodeID];
+      const route = '/api/' + restParts.join('/');
+      const answer = (status, body) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
+      if (!r) { answer(400, { error: 'unknown node', code: 'node_unknown' }); return; }
+      if (r.offline) { answer(503, { error: '节点离线', code: 'node_offline' }); return; }
+      if (req.method !== 'GET') {
+        let body = '';
+        req.on('data', c => (body += c));
+        req.on('end', () => {
+          let b = {};
+          try { b = JSON.parse(body || '{}'); } catch { /* recorded as {} */ }
+          remoteCalls.push({ node: nodeID, method: req.method, path: route, body: b });
+          if (route === NZ_CONTRACT.API.planner_send && r.onSend) r.onSend(b);
+          answer(202, route === NZ_CONTRACT.API.planner_send ? { status: 'accepted', key: 'planner:main' } : { ok: true });
+        });
+        return;
+      }
+      const gets = {
+        [NZ_CONTRACT.API.planner]: r.planner,
+        [NZ_CONTRACT.API.tasks]: r.tasks,
+        [NZ_CONTRACT.API.inbox]: r.inbox,
+        [NZ_CONTRACT.API.custody]: r.custody,
+        [NZ_CONTRACT.API.planner_briefs]: r.briefs ? { briefs: r.briefs } : undefined,
+        [NZ_CONTRACT.API.planner_notes]: { notes: r.plannerNotes || [] },
+        [NZ_CONTRACT.API.system_health]: r.health || { units: [] },
+        [NZ_CONTRACT.API.sessions_notes]: { notes: (r.notes || {})[url.searchParams.get('key')] || [] },
+      };
+      remoteCalls.push({ node: nodeID, method: 'GET', path: route });
+      if (gets[route] === undefined) { answer(404, { error: 'not found' }); return; }
+      answer(200, gets[route]);
+      return;
+    }
+
     if (pathname === NZ_CONTRACT.API.sessions_events && req.method === 'GET') {
       if (!checkAuth()) return;
       // Mirror HandleEvents: `after` is inclusive (clievent.SinceInclusive),
       // so every poll re-delivers the watermark millisecond.
       const evKey = url.searchParams.get('key');
-      const all = keyEvents[evKey] || (plannerEvents && evKey === 'planner:main' ? plannerEvents : eventsData);
+      const evNode = url.searchParams.get('node');
+      const nodeEvents = evNode && remoteData[evNode] && remoteData[evNode].events;
+      const all = nodeEvents ? (nodeEvents[evKey] || []) : keyEvents[evKey] || (plannerEvents && evKey === 'planner:main' ? plannerEvents : eventsData);
       const after = Number(url.searchParams.get('after') || 0);
       const before = Number(url.searchParams.get('before') || 0);
       const limit = Number(url.searchParams.get('limit') || 0);
@@ -1245,6 +1293,7 @@ function startMockServer(overrides = {}) {
         get plannerStateCalls() { return plannerStateCalls; },
         get plannerSendCalls() { return plannerSendCalls; },
         get uploadCalls() { return uploadCalls; },
+        get remoteCalls() { return remoteCalls; },
         get historySearchCalls() { return historySearchCalls; },
         resetCalls() { sendCalls = []; bindCalls = []; loginCalls = []; favoriteCalls = []; },
       });

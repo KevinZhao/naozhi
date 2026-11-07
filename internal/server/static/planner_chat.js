@@ -39,6 +39,7 @@ import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
 import { getMsgValue, setMsgValue } from './utilities.js';
 import { awaitPendingOrients, clearFiles, createFileTray, filesBlockSend, handleFiles } from './composer_files.js';
+import { eventsURL, hostOnline, hostRemote, isLocalNode, plannerAPI, plannerHost } from './planner_host.js';
 
 const PLANNER_KEY = 'planner:main';
 // SESS_LIMIT is the opened session's first page; SESS_KEEP the events kept
@@ -85,7 +86,7 @@ function filesConsumed(e) {
 }
 
 function plannerUsable() {
-  return !!(st.status && st.status.enabled && !st.status.stopped);
+  return !!(st.status && st.status.enabled && !st.status.stopped) && hostOnline();
 }
 
 // ---- the switch ----
@@ -102,7 +103,7 @@ async function fetchPlannerStatus() {
   if (st.statusLoading) return;
   st.statusLoading = true;
   try {
-    st.status = await fetchJSON(NZ_CONTRACT.API.planner, { timeoutMs: 8000 });
+    st.status = await fetchJSON(plannerAPI(NZ_CONTRACT.API.planner), { timeoutMs: 8000 });
   } catch {
     // An unreadable switch hides the button until the next connect.
     st.status = st.status || { enabled: false };
@@ -118,7 +119,7 @@ async function sendToPlanner(text, ref, fileIDs) {
   if (fileIDs && fileIDs.length) body.file_ids = fileIDs;
   // Before the POST: the stream's watermark now is what the answer follows.
   nzBus.dispatchEvent(new CustomEvent('planner:sent'));
-  await fetchJSON(NZ_CONTRACT.API.planner_send, {
+  await fetchJSON(plannerAPI(NZ_CONTRACT.API.planner_send), {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), timeoutMs: 15000,
   });
 }
@@ -160,8 +161,10 @@ function composerTarget() {
   return st.sess ? st.sess.key : PLANNER_KEY;
 }
 
+// sessionListed reports whether key is listed on the Planner's node, the
+// node every session it names runs on.
 function sessionListed(key) {
-  return !!sessionList.sessionsData[sid(key, 'local')];
+  return !!sessionList.sessionsData[sid(key, plannerHost.node)];
 }
 
 // mountComposer fills #pl-composer once.
@@ -216,17 +219,19 @@ function paintComposer() {
     if (note) note.textContent = listed ? '' : '不在会话列表里，不能发消息';
     input.placeholder = listed ? '追问或调整方向…' : '';
     input.disabled = !listed;
-    $('pl-attach').disabled = input.disabled;
+    $('pl-attach').disabled = input.disabled || hostRemote();
     send.disabled = st.sending || !listed;
     return;
   }
   // The Planner's own page needs no "→ Planner".
   to.textContent = '';
   const usable = plannerUsable();
-  if (note) note.textContent = !st.status ? '' : !st.status.enabled ? '未开启 Planner' : st.status.stopped ? '已停用 Planner' : st.sending ? '发送中…' : st.acked ? '收到，正在看' : '';
+  if (note) note.textContent = !hostOnline() ? '节点离线' : !st.status ? '' : !st.status.enabled ? '未开启 Planner' : st.status.stopped ? '已停用 Planner' : st.sending ? '发送中…' : st.acked ? '收到，正在看' : '';
   input.placeholder = usable || !st.status ? '交代、追问…' : '';
-  input.disabled = !!st.status && !usable;
-  $('pl-attach').disabled = input.disabled;
+  input.disabled = (!!st.status || !hostOnline()) && !usable;
+  // The uploads stay in this node's store, which the Planner's node cannot
+  // read (remote-planner.md §7).
+  $('pl-attach').disabled = input.disabled || hostRemote();
   send.disabled = st.sending || (!!st.status && !usable);
 }
 
@@ -255,6 +260,7 @@ async function sendFromComposer() {
         st.acked = true;
       } else {
         const body = { key, text };
+        if (hostRemote()) body.node = plannerHost.node;
         if (fileIDs.length) body.file_ids = fileIDs;
         await fetchJSON(NZ_CONTRACT.API.sessions_send, {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), timeoutMs: 15000,
@@ -372,7 +378,7 @@ async function loadSession(reset) {
   p.loading = true;
   const q = reset || !p.lastTime ? '&limit=' + SESS_LIMIT : '&after=' + p.lastTime;
   try {
-    const evs = await fetchJSON(NZ_CONTRACT.API.sessions_events + '?key=' + encodeURIComponent(p.key) + q, { timeoutMs: 8000 });
+    const evs = await fetchJSON(eventsURL(p.key, p.node, q), { timeoutMs: 8000 });
     if (st.sess !== p || gen !== p.gen) return;
     const fresh = sessEvents(Array.isArray(evs) ? evs : []);
     paintSessionPane(reset, fresh);
@@ -397,10 +403,10 @@ export function openPlannerSession(key) {
   showPlannerLeft(false);
   if (st.sess && st.sess.key === key) return;
   closePlannerSession(true);
-  st.sess = { key, events: [], uuids: new Set(), lastTime: 0, raw: false, loading: false, gen: 0, timer: 0 };
+  st.sess = { key, node: plannerHost.node, events: [], uuids: new Set(), lastTime: 0, raw: false, loading: false, gen: 0, timer: 0 };
   $('planner-main')?.classList.add('pl-sess-open');
   const pane = $('pl-sess');
-  if (pane) { pane.hidden = false; pane.dataset.key = key; }
+  if (pane) { pane.hidden = false; pane.dataset.key = key; pane.dataset.node = plannerHost.node; }
   const box = $('pl-sess-stream');
   if (box) box.innerHTML = '<div class="pl-empty">正在加载…</div>';
   paintSessionStatus();
@@ -422,7 +428,7 @@ export function closePlannerSession(quiet) {
   st.sess = null;
   $('planner-main')?.classList.remove('pl-sess-open');
   const pane = $('pl-sess');
-  if (pane) { pane.hidden = true; delete pane.dataset.key; }
+  if (pane) { pane.hidden = true; delete pane.dataset.key; delete pane.dataset.node; }
   const box = $('pl-sess-stream');
   if (box) box.innerHTML = '';
   paintStop();
@@ -434,11 +440,11 @@ export function closePlannerSession(quiet) {
 
 // ---- 交给 Planner ----
 
-// handoffKey is the chat view's session that can be handed over: a local
-// one naozhi runs.
+// handoffKey is the chat view's session that can be handed over: one naozhi
+// runs on the Planner's node, the only sessions it can read.
 function handoffKey() {
   const key = selection.key;
-  if (!key || isDiscoveredKey(key) || (selection.node && selection.node !== 'local') || key.startsWith('planner:')) return '';
+  if (!key || isDiscoveredKey(key) || (selection.node || 'local') !== plannerHost.node || key.startsWith('planner:')) return '';
   return key;
 }
 
@@ -466,7 +472,7 @@ export function paintHandoffButton() {
   btn.disabled = st.sending || !plannerUsable() || !key || empty;
   btn.toggleAttribute('data-empty', empty);
   btn.title = st.status.stopped ? '已停用 Planner（在 Planner 页面恢复）'
-    : !key ? '只能交出本机由 naozhi 运行的会话'
+    : !key ? (isLocalNode(plannerHost.node) ? '只能交出本机由 naozhi 运行的会话' : '只能交出 Planner 所在机器上由 naozhi 运行的会话')
       : empty ? '先在输入框里写要交给 Planner 的事'
         : '把这个会话和输入框里的话一起交给 Planner';
 }
@@ -494,7 +500,7 @@ async function handoff(key, text, done) {
   let files = [];
   try {
     await awaitPendingOrients();
-    files = composer.pendingFiles.slice();
+    files = hostRemote() ? [] : composer.pendingFiles.slice();
     await sendToPlanner(text, key, files.map((f) => f.id).filter(Boolean));
     clearFiles(undefined, files);
     done();
@@ -539,5 +545,11 @@ registerActions({
 
 // A new socket may follow a restart that flipped planner.enabled.
 wsm.onReady(fetchPlannerStatus);
+// Another node's Planner: its switch, its sessions.
+nzBus.addEventListener('planner:node', () => {
+  st.status = null;
+  closePlannerSession(false);
+  fetchPlannerStatus();
+});
 nzBus.addEventListener('session:select', () => paintHandoffButton());
 nzBus.addEventListener('tasks:changed', paintStop);

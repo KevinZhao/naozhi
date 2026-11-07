@@ -71,7 +71,11 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 	}
 	// A primary polling this node learns here, before its first send, that
 	// /api/sessions/send runs an Idempotency-Key once (dashboard_send.go).
-	w.Header().Set(node.CapsHeader, node.CapSendIdempotent)
+	caps := node.CapSendIdempotent
+	if h.deps.Planner {
+		caps += "," + node.CapPlanner
+	}
+	w.Header().Set(node.CapsHeader, caps)
 	if etag := sessionsBodyETag(hashed); etag != "" {
 		w.Header().Set("ETag", etag)
 		if etagListMatches(r.Header.Get("If-None-Match"), etag) {
@@ -308,6 +312,11 @@ func (h *Handlers) buildMultiNodeResp(snapshots []sessionpkg.SessionSnapshot, st
 			Caps:        nc.Meta().CapList(),
 		}
 		for _, rs := range cachedSessions[id] {
+			// A node lists its Planner, cron and scout keys as any session;
+			// they stay out of the list here as the local ones do.
+			if k, _ := rs["key"].(string); hiddenFromList(k) {
+				continue
+			}
 			allSessions = append(allSessions, rs)
 		}
 	}

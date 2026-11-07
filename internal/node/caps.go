@@ -48,6 +48,7 @@ var knownServerCaps = map[string]struct{}{
 	CapFiles:            {},
 	CapSendBackend:      {},
 	CapSendIdempotent:   {},
+	CapPlanner:          {},
 }
 
 // HubCaps is what the hub advertises about itself on the registered ack: the

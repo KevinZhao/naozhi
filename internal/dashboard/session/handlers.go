@@ -319,6 +319,9 @@ type Deps struct {
 	// Purpose stamps each /api/sessions snapshot's purpose (the sidebar's
 	// "Planner 派出" group) and what it was dispatched for; nil stamps none.
 	Purpose func(key string) (purpose, title string)
+	// Planner: the global Planner runs here; /api/sessions then declares
+	// node.CapPlanner to a primary polling this node.
+	Planner bool
 }
 
 // New constructs a Handlers from injected deps. Deps is stored as-is; the

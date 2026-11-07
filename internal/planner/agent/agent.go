@@ -766,6 +766,10 @@ func orEmpty[T any](s []T) []T {
 	return s
 }
 
+// Enabled reports whether planner.enabled turned the Planner on; a runtime
+// stop leaves it enabled.
+func (a *Agent) Enabled() bool { return a != nil && a.cfg.Enabled }
+
 // Status reports the switch and the session.
 func (a *Agent) Status() Status {
 	a.mu.Lock()

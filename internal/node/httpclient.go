@@ -55,6 +55,9 @@ type HTTPClient struct {
 	// /api/sessions poll (CapsHeader) or echoed a send's IdempotencyKeyHeader,
 	// i.e. it runs a TurnID once; only then is a lost answer ErrSendUnknown.
 	idempotent atomic.Bool
+	// planner follows the node's CapPlanner in CapsHeader, poll by poll: it
+	// runs a Planner only while planner.enabled.
+	planner atomic.Bool
 }
 
 // maxLocalPeerBodyBytes caps request bodies to loopback/private peers; real
@@ -188,13 +191,16 @@ func (n *HTTPClient) fetchSessions(ctx context.Context, hdr http.Header, cached 
 // send. A node predating it sends none.
 const CapsHeader = "X-Naozhi-Caps"
 
-// learnCaps reads a /api/sessions answer's CapsHeader. It only ever sets:
-// a v0.3.0/v0.3.1 node dedups without declaring it, and what its echo taught
-// must survive the next poll. A node that stops deduping is caught by Send.
+// learnCaps reads a /api/sessions answer's CapsHeader. Idempotency it only
+// ever sets: a v0.3.0/v0.3.1 node dedups without declaring it, and what its
+// echo taught must survive the next poll; a node that stops deduping is caught
+// by Send. CapPlanner follows every answer.
 func (n *HTTPClient) learnCaps(h http.Header) {
-	if slices.Contains(strings.Split(h.Get(CapsHeader), ","), CapSendIdempotent) {
+	caps := strings.Split(h.Get(CapsHeader), ",")
+	if slices.Contains(caps, CapSendIdempotent) {
 		n.idempotent.Store(true)
 	}
+	n.planner.Store(slices.Contains(caps, CapPlanner))
 }
 
 // SessionsContentETagPrefix opens every /api/sessions ETag that hashes the
@@ -577,15 +583,20 @@ func (n *HTTPClient) DisplayName() string { return n.displayName }
 func (n *HTTPClient) Status() string      { return "ok" }
 func (n *HTTPClient) RemoteAddr() string  { return n.URL }
 
-// Meta returns a NodeMeta advertising only CapFiles, which the peer's own HTTP
-// file API provides: pull-mode peers have no negotiation surface, so backends
-// with RequiredNodeCaps are denied while claude (nil caps) still dispatches.
+// Meta returns a NodeMeta advertising CapFiles, which the peer's own HTTP
+// file API provides, and CapPlanner while its CapsHeader says so: pull-mode
+// peers have no other negotiation surface, so backends with RequiredNodeCaps
+// are denied while claude (nil caps) still dispatches.
 // Allocated per call (cold path).
 func (n *HTTPClient) Meta() *NodeMeta {
+	caps := map[string]bool{CapFiles: true}
+	if n.planner.Load() {
+		caps[CapPlanner] = true
+	}
 	return &NodeMeta{
 		NodeID:       n.ID,
 		DisplayName:  n.displayName,
-		Capabilities: map[string]bool{CapFiles: true},
+		Capabilities: caps,
 	}
 }
 

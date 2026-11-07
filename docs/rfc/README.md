@@ -28,6 +28,7 @@ RFC 是落地前的设计取舍与实测记录，**不是最终规范**——架
 | [planner.md](planner.md)（+ `planner-landscape`） | Draft v8（未实施；v0.2.0 实施规格见 §15.1） | Planner 规划 agent：全局唯一 Planner + 按需工作区幕僚、设计原则（确定性放网关 / 先信任后惊喜）、三种主动、信任阶梯与治理减法、三个面与工作台面、现有 dashboard 上新增 Planner 页面；§18 决策 D1–D83；`planner-landscape.md` 是两代 agent 产品调研与对照 |
 | [project-access-profile.md](project-access-profile.md) | Draft v1 | 项目级默认访问方式 |
 | [project-stable-session-key.md](project-stable-session-key.md) | 已实装 | 项目级稳定 session key |
+| [remote-planner.md](remote-planner.md) | Draft v2（已实现，待合并） | 每个节点一个 Planner、只管本节点（D60 修订）；EC2 页面可以切换到 Mac 的 Planner，经反连 RPC `api` 转发 Planner 路由；巡检与早报只在一个节点上；会话列表按节点分组；断线降级与鉴权边界，决策 D96 |
 | [reverse-protocol.md](reverse-protocol.md) | 已实现 | reverse-connect wire format |
 | [selfupdate-signing.md](selfupdate-signing.md) | Draft v1（#1738） | 自更新二进制签名 |
 | [sysession-telemetry-and-hardfail.md](sysession-telemetry-and-hardfail.md) | Draft v1 | sysession 接 runtelemetry Broadcaster |
