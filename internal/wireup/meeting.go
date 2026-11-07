@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -35,12 +36,12 @@ func OpenMeetings(d MeetingDeps) *meeting.Manager {
 		return nil
 	}
 	root := d.Layout.PlannerMeetingsRoot()
-	engine := &meeting.LocalEngine{Dir: root}
+	helper := meeting.ExecHelper{Path: meeting.HelperPath(), ModelsDir: filepath.Join(root, ".models", "fluidaudio")}
 	cfg := meeting.Config{
 		Root:       root,
-		Helper:     meeting.ExecHelper{Path: meeting.HelperPath()},
-		Recognizer: engine,
-		Diarizer:   engine,
+		Helper:     helper,
+		Recognizer: &meeting.LocalEngine{Dir: root},
+		Diarizer:   helper,
 		Summarize:  MeetingSession(d.Router, d.Layout.PlannerScoutWorkDir()),
 	}
 	if d.Calendar != nil {

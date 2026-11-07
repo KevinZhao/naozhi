@@ -9,6 +9,7 @@
 //                                mic + a process tap of the bundles, one private aggregate
 //                                device, 16 kHz mono WAV segments in DIR/mic and DIR/remote
 //   encode IN.wav OUT.m4a        AAC copy for retention
+//   diarize IN.wav OUT.json      speaker turns of the far-end track (Diarize.swift)
 //
 // Authorisation is attributed to the "responsible process". Spawned by the gateway that is the
 // gateway itself (and every agent session under it), so the subcommands that touch TCC re-spawn
@@ -538,6 +539,8 @@ case "record":
     runRecord(rest)
 case "encode":
     runEncode(rest)
+case "diarize":
+    runDiarize(rest)
 case "version":
     emit(["event": "version", "version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] ?? "dev"])
 default:
