@@ -293,6 +293,7 @@ func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) err
 		return err
 	}
 
+	InstallHelper(ctx, rel, tmp, selfPath)
 	c.installed = rel.Tag
 	// PhaseStaged: bytes on disk, only a restart missing — the transition the
 	// dashboard exists to surface.

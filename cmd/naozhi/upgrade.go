@@ -80,6 +80,8 @@ Flags:
 	if err != nil {
 		fatalf("replace binary: %v\n", err)
 	}
+	// The meeting-audio helper beside it (macOS); best effort.
+	selfupdate.InstallHelper(ctx, rel, tmp, selfPath)
 
 	// 6. Restart service (unless skipped or not running). Deliberately NO
 	// rollback on restart error: the binary is already verified, and a restart
