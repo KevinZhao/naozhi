@@ -40,6 +40,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/ext/cli"
 	dashcustody "github.com/naozhi/naozhi/internal/dashboard/ext/custody"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/inbox"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/meetings"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/memory"
 	dashplanner "github.com/naozhi/naozhi/internal/dashboard/ext/planner"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/scratch"
@@ -52,6 +53,7 @@ import (
 	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/imauth"
+	"github.com/naozhi/naozhi/internal/meeting"
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/note"
 	"github.com/naozhi/naozhi/internal/platform"
@@ -84,6 +86,7 @@ type handlerSet struct {
 	accessProfilesH *accessprofile.Handler
 	plannerH        *dashplanner.Handler
 	inboxH          *inbox.Handler
+	meetingsH       *meetings.Handler
 	tasksH          *tasks.Handler
 	custodyH        *dashcustody.Handler
 	// healthH serves the server-owned probes (/health, /livez, /readyz).
@@ -129,6 +132,8 @@ type wiring struct {
 	runTelemetry *runtelemetry.Relay
 	// notify is opts.Notify; buildDashboard binds the hub to it.
 	notify *notify.Notifier
+	// meetings is the meeting recorder, bound to the Hub as its status exit.
+	meetings *meeting.Manager
 	// notes is opts.Notes; buildDashboard binds the hub to it.
 	notes *note.Notes
 	// viewing is opts.Custody, nil without it; the Hub hands it the

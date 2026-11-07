@@ -14,6 +14,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/ext/accessprofile"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/agentevents"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/cli"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/meetings"
 	dashplanner "github.com/naozhi/naozhi/internal/dashboard/ext/planner"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/uisettings"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/workflows"
@@ -122,6 +123,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		routerEvents:  opts.Relays.Router,
 		runTelemetry:  opts.Relays.RunTelemetry,
 		notify:        opts.Notify,
+		meetings:      opts.Meetings,
 		notes:         opts.Notes,
 		stateDir:      opts.StateDir,
 	}
@@ -172,6 +174,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		cronH:           buildCronHandlers(opts, claudeDir),
 		transcribeH:     buildTranscribeHandler(opts),
 		inboxH:          buildInboxHandler(opts),
+		meetingsH:       meetings.New(opts.Meetings, nil),
 		tasksH:          buildTasksHandler(opts),
 		custodyH:        buildCustodyHandler(opts),
 	}

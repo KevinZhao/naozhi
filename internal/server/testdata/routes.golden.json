@@ -171,6 +171,46 @@
   },
   {
     "method": "GET",
+    "path": "/api/meetings",
+    "handler_type": "*meetings.Handler"
+  },
+  {
+    "method": "POST",
+    "path": "/api/meetings/authorize",
+    "handler_type": "*meetings.Handler"
+  },
+  {
+    "method": "POST",
+    "path": "/api/meetings/stop",
+    "handler_type": "*meetings.Handler"
+  },
+  {
+    "method": "GET",
+    "path": "/api/meetings/{id}",
+    "handler_type": "*meetings.Handler"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/meetings/{id}/audio",
+    "handler_type": "*meetings.Handler"
+  },
+  {
+    "method": "GET",
+    "path": "/api/meetings/{id}/audio/{track}",
+    "handler_type": "*meetings.Handler"
+  },
+  {
+    "method": "POST",
+    "path": "/api/meetings/{id}/keep",
+    "handler_type": "*meetings.Handler"
+  },
+  {
+    "method": "POST",
+    "path": "/api/meetings/{id}/retry",
+    "handler_type": "*meetings.Handler"
+  },
+  {
+    "method": "GET",
     "path": "/api/memory/{slug}",
     "handler_type": "*memory.Handler"
   },

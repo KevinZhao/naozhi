@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 
+	"github.com/naozhi/naozhi/internal/meeting"
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/note"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
@@ -68,4 +69,15 @@ func (hn hubNotifier) SessionNote(n note.Note) {
 		return
 	}
 	hn.b.marshalBroadcastAuth(wsproto.NewSessionNote(n.Key, data))
+}
+
+// MeetingState is the dashboard exit of the meeting recorder: every
+// authenticated client gets its status, and every view shows the red
+// "录音中" strip while one records.
+func (hn hubNotifier) MeetingState(st meeting.Status) {
+	data, err := json.Marshal(st)
+	if err != nil {
+		return
+	}
+	hn.b.marshalBroadcastAuth(wsproto.NewMeetingState(data))
 }
