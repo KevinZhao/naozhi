@@ -122,7 +122,7 @@ func New(cfg Config) *Manager {
 // Store is the meetings directory.
 func (m *Manager) Store() *Store { return m.store }
 
-func (m *Manager) available() bool { return m.cfg.Helper != nil && m.cfg.Root != "" }
+func (m *Manager) available() bool { return m != nil && m.cfg.Helper != nil && m.cfg.Root != "" }
 
 // Run follows the meeting programs until ctx ends.
 func (m *Manager) Run(ctx context.Context) {
@@ -834,6 +834,9 @@ func (m *Manager) compressAudio(ctx context.Context, mt Meeting) {
 
 // Stop waits for the background work Run started; Run's ctx must be cancelled first.
 func (m *Manager) Stop() {
+	if m == nil {
+		return
+	}
 	m.StopRecording("shutdown")
 	done := make(chan struct{})
 	go func() { m.wg.Wait(); close(done) }()
