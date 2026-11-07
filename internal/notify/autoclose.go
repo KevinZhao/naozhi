@@ -121,7 +121,7 @@ func (n *Notifier) openSourceLocked(source string) int {
 func (n *Notifier) taskDone(d health.TaskDone) {
 	u := d.Unit
 	if u.Kind != health.KindSession || sessionkey.IsPlannerNSKey(u.ID) || sessionkey.IsCronKey(u.ID) ||
-		sessionkey.IsSysKey(u.ID) || sessionkey.IsScoutKey(u.ID) {
+		sessionkey.IsSysKey(u.ID) || sessionkey.IsOneShotKey(u.ID) {
 		return
 	}
 	n.mu.Lock()

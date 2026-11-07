@@ -79,7 +79,7 @@ func classifyKey(key string) SessionRole {
 		return RolePlanner
 	case sessionkey.IsTaskKey(key):
 		return RoleTask
-	case sessionkey.IsScoutKey(key):
+	case sessionkey.IsOneShotKey(key):
 		return RoleScout
 	case isPlannerKey(key):
 		return RoleProject

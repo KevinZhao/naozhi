@@ -145,7 +145,7 @@ func filterAndCountSnapshots(snapshots []sessionpkg.SessionSnapshot, now time.Ti
 // drawer, docs/rfc/system-session.md §9.2 / the Planner page).
 func hiddenFromList(key string) bool {
 	return sessionkey.IsScratchKey(key) || sessionkey.IsCronKey(key) || sessionkey.IsSysKey(key) ||
-		sessionkey.IsPlannerNSKey(key) || sessionkey.IsScoutKey(key)
+		sessionkey.IsPlannerNSKey(key) || sessionkey.IsOneShotKey(key)
 }
 
 // fillProjectAndSummary stamps each snapshot with its project name (from

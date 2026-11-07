@@ -27,6 +27,9 @@ const (
 	// ScoutKeyPrefix is the namespace of the one-shot scout sessions,
 	// "scout:<run ID>" (docs/rfc/planner.md §15.6).
 	ScoutKeyPrefix = "scout:"
+	// MeetingKeyPrefix is the namespace of the one-shot meeting summary
+	// sessions, "meeting:<meeting ID>" (docs/rfc/meeting-notes.md §4).
+	MeetingKeyPrefix = "meeting:"
 )
 
 // PlannerMainKey is the global Planner's session key.
@@ -65,6 +68,14 @@ func IsTaskKey(s string) bool { return strings.HasPrefix(s, TaskKeyPrefix) }
 
 // IsScoutKey reports whether s belongs to the scout sessions' namespace.
 func IsScoutKey(s string) bool { return strings.HasPrefix(s, ScoutKeyPrefix) }
+
+// IsMeetingKey reports whether s belongs to the meeting summary sessions.
+func IsMeetingKey(s string) bool { return strings.HasPrefix(s, MeetingKeyPrefix) }
+
+// IsOneShotKey reports whether s is a background session that lives for one
+// turn and is reset after it (scout runs, meeting summaries): never
+// persisted, listed, sent to, or watched by health.
+func IsOneShotKey(s string) bool { return IsScoutKey(s) || IsMeetingKey(s) }
 
 // IsScratchKey reports whether s belongs to the dashboard scratch namespace.
 func IsScratchKey(s string) bool { return strings.HasPrefix(s, ScratchKeyPrefix) }
