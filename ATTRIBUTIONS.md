@@ -46,3 +46,21 @@ require attribution under their respective licenses.
   `LICENSE`. The bundle includes its npm dependencies (d3, dagre-d3-es,
   cytoscape, DOMPurify, chevrotain, marked, KaTeX and others) under their own
   permissive licenses, MIT, ISC, BSD and Apache-2.0 among them.
+
+## Libraries and models fetched at build or first use
+
+### FluidAudio (meeting speaker separation)
+
+- **Used in**: `tools/naozhi-audio` (`diarize`), a SwiftPM dependency pinned in
+  `tools/naozhi-audio/Package.swift`.
+- **Source**: [FluidInference/FluidAudio](https://github.com/FluidInference/FluidAudio).
+- **License**: Apache 2.0.
+- **Models**: `FluidInference/speaker-diarization-coreml` (CoreML port of
+  pyannote `speaker-diarization-community-1`, CC BY 4.0), downloaded on first use
+  into the meetings directory; not part of the source tree.
+
+### Qwen3-ASR (meeting transcription)
+
+- **Used in**: `internal/meeting/engine/naozhi_meeting_engine.py`, run by `uv`;
+  the model `mlx-community/Qwen3-ASR-1.7B-8bit` (Apache 2.0) and the Python
+  packages are downloaded on first use, not bundled.
