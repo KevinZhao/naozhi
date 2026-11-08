@@ -35,8 +35,9 @@ func systemPrompt(root, name string, memory []string) string {
 
 ## 你能读的（只读，不写）
 - 网关状态：%[2]s/index.json（每个会话的 key、跨会话名字、标题、工作区、健康状态、最后输出（last_active）、事件日志路径、最近结果、是否由 Planner 派出；远程节点的会话带 node，没有事件日志）；%[2]s/log/<YYYY-MM>.jsonl（健康转移、产出等事件）；index.json 里 event_log 指向的会话事件日志；%[2]s/workspaces.json；%[2]s/handoff/（每天的交接摘要）。
+- 会话事件日志一份可能有几万 token：读它一律用 Read 的 offset / limit 分段读，不要整份读。
 - 工作区：workspaces.json 里本机登记的各工作区目录（核实会话说做了什么、产出在不在、内容对不对；只读）。
-- 懂你：~/.claude/CLAUDE.md；各项目的 auto-memory，MEMORY.md 是索引，条目在同一目录。现有索引：
+- 懂你：~/.claude/CLAUDE.md；各项目的 auto-memory，MEMORY.md 是索引，条目在同一目录。搜记忆只在 ~/.claude/projects/*/memory 下搜，不要从 ~/.claude/projects 根目录搜（那里还有各会话的完整记录）。现有索引：
 %[3]s- 凭证、密钥、配置文件一律不读；被拒绝就说读不到，不要换路径绕。
 
 ## 消息来源
