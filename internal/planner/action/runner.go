@@ -170,6 +170,8 @@ type Runner struct {
 	endCh chan ended
 	// grace is how long a turn end waits before it is checked (endGrace).
 	grace time.Duration
+	// after runs f once d passes (time.AfterFunc): the turn ends wait on it.
+	after func(d time.Duration, f func())
 
 	// last is when the previous Planner reply came: the next one's turn ran
 	// after it. mu also serializes the dispatched sessions' turn ends as
@@ -180,13 +182,14 @@ type Runner struct {
 	// doneTold is the tasks whose done block got the reminder of the
 	// promises citing them; endTold the tasks told of a turn that ended
 	// without a report, until the next report or the Planner's doing block.
-	// doingAt is when the Planner last marked each task doing: the receipt
-	// asks for that very block, so re-arming at once would have every
-	// unreported turn end bring another receipt and another doing block
-	// (one task got 21 in 80 minutes). For doingQuiet after it the task gets
-	// none, unless a check saw its background work running: the turn that
-	// ends once that work is done is told. Only the handling goroutine
-	// touches them.
+	// doingAt is when the Planner answered such a receipt with a doing
+	// block: the receipt asks for that very block, so re-arming at once
+	// would have every unreported turn end bring another receipt and another
+	// doing block (one task got 21 in 80 minutes). A turn end within
+	// doingQuiet of it is held to the window's end, unless a check saw the
+	// session's background work running: the turn that ends once that work
+	// is done is told. A report, or a done or failed block, clears it. Only
+	// the handling goroutine touches them.
 	doneTold map[string]bool
 	endTold  map[string]bool
 	doingAt  map[string]time.Time
@@ -198,6 +201,9 @@ type Runner struct {
 type ended struct {
 	key, text       string
 	at, from, until time.Time
+	// quiet is set on a turn end held to doingQuiet's end: a later turn
+	// end of the session supersedes it.
+	quiet bool
 }
 
 const (
@@ -246,7 +252,7 @@ func New(cfg Config) *Runner {
 	// Reports older than the runner (history restored at startup) were the
 	// previous run's to check.
 	r := &Runner{cfg: cfg, ch: make(chan reply, queueLen), endCh: make(chan ended, queueLen), grace: endGrace,
-		last: cfg.Now(), doneTold: map[string]bool{}, endTold: map[string]bool{}, doingAt: map[string]time.Time{}}
+		after: func(d time.Duration, f func()) { time.AfterFunc(d, f) }, last: cfg.Now(), doneTold: map[string]bool{}, endTold: map[string]bool{}, doingAt: map[string]time.Time{}}
 	if cfg.Inbox != nil {
 		cfg.Inbox.HandleDecisions(HandlerAsk, r.decideAsk)
 		open, _ := cfg.Inbox.List(0)
@@ -382,8 +388,11 @@ func (r *Runner) recheck() {
 }
 
 // later queues e for a check once grace passes.
-func (r *Runner) later(e ended) {
-	time.AfterFunc(r.grace, func() {
+func (r *Runner) later(e ended) { r.laterIn(r.grace, e) }
+
+// laterIn queues e for a check once d passes.
+func (r *Runner) laterIn(d time.Duration, e ended) {
+	r.after(d, func() {
 		select {
 		case r.endCh <- e:
 		default:
@@ -398,7 +407,10 @@ func (r *Runner) later(e ended) {
 // holding the report, so the check waits for its turn to end, up to endWait.
 // A session with background work still running gets none: the work's end
 // starts the turn that is checked. A task gets one such receipt until it
-// reports again, or doingQuiet after the Planner marks it doing (doingAt).
+// reports again or the Planner answers it with a doing block; a turn end
+// within doingQuiet of that block waits for the window to end and is told
+// then if it is still the session's latest and still unreported, so a task
+// whose last turn falls in the window is not left 进行中.
 func (r *Runner) checkEnded(e ended) {
 	defer func() {
 		if p := recover(); p != nil {
@@ -413,12 +425,21 @@ func (r *Runner) checkEnded(e ended) {
 	i := slices.IndexFunc(tasks, func(t task.Task) bool { return t.ID == e.key })
 	now := r.cfg.Now()
 	due := i >= 0 && !r.endTold[e.key] && tasks[i].State == task.Doing && !slices.Contains(r.cfg.Reports(e.from, now), e.key)
+	if due && e.quiet && !r.latestTurn(e) {
+		due = false
+	}
 	if due && r.cfg.Background != nil && r.cfg.Background(e.key) {
 		delete(r.doingAt, e.key)
 		due = false
 	}
 	if at, ok := r.doingAt[e.key]; ok && due {
-		if now.Sub(at) < doingQuiet {
+		if end := at.Add(doingQuiet); now.Before(end) {
+			if r.latestTurn(e) {
+				// Left unchecked on disk: a restart checks it again.
+				e.quiet, e.until = true, end.Add(endWait)
+				r.laterIn(end.Sub(now), e)
+				return
+			}
 			due = false
 		} else {
 			delete(r.doingAt, e.key)
@@ -446,6 +467,12 @@ func (r *Runner) checkEnded(e ended) {
 		receipt += "它在托管中：没做完、下一步又显而易见，就同时让它继续（" + custodyFormat(e.key) + "）。" + irreversibleRule
 	}
 	r.tell(receipt)
+}
+
+// latestTurn reports whether e is its session's latest turn end.
+func (r *Runner) latestTurn(e ended) bool {
+	m, _ := r.cfg.Sessions.Get(e.key)
+	return m.Turn == nil || m.Turn.Ended.Equal(e.at)
 }
 
 // checkCustody tells the Planner of a session in custody whose turn ended
@@ -637,18 +664,24 @@ func (r *Runner) checkReports(rep reply, statused map[string]string) {
 	if r.cfg.Reports != nil && !rep.to.IsZero() {
 		reported = r.cfg.Reports(rep.from, rep.to)
 	}
+	// A doing block re-arms the turn-end receipt, so the task is not left
+	// 进行中; one answering that receipt starts doingQuiet (doingAt), so it is
+	// not told on every turn end. One answering a report, which re-arms it
+	// anyway, starts none.
+	for k, s := range statused {
+		switch {
+		case s == string(task.Doing):
+			if r.endTold[k] {
+				r.doingAt[k] = r.cfg.Now()
+			}
+			delete(r.endTold, k)
+		default:
+			delete(r.doingAt, k)
+		}
+	}
 	for _, k := range reported {
 		delete(r.endTold, k)
 		delete(r.doingAt, k)
-	}
-	// A doing block answers the turn-end receipt: the task is told again of
-	// a turn that ends unreported, but only after doingQuiet (doingAt), so
-	// it is not left 进行中 nor told on every turn end.
-	for k, s := range statused {
-		if s == string(task.Doing) {
-			delete(r.endTold, k)
-			r.doingAt[k] = r.cfg.Now()
-		}
 	}
 	keys := slices.Clone(reported)
 	for _, k := range slices.Sorted(maps.Keys(statused)) {
