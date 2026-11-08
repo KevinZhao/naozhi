@@ -159,7 +159,7 @@ for (const vp of VIEWPORTS) {
       await page.click('#pl-send');
       await expect.poll(() => mock.remoteCalls.filter((c) => c.path === '/api/planner/send').map((c) => c.body))
         .toEqual([{ text: 'iso 在 naozhi 里跑一遍 go vet' }]);
-      await expect(stream.locator('.pl-act-dispatch .pl-act-h')).toHaveText('派出会话 · iso 跑 go vet', { timeout: 15000 });
+      await expect(stream.locator('.pl-act-dispatch .pl-act-h')).toHaveText('派出 · iso 跑 go vet · naozhi · 跑一遍 go vet', { timeout: 15000 });
       await expect(stream.locator('.pl-act-dispatch dd').first()).toHaveText('naozhi');
       await expect(stream).toContainText('go vet 没有报错', { timeout: 15000 });
       // The new task is the node's; opening it reads its events on the node.

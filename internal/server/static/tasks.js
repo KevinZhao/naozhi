@@ -67,7 +67,8 @@
 // A dispatched session's own header (the 会话 view) carries its card's
 // badge and 在 Planner 中查看 (UX review 10): paintTaskHeader fills
 // #header-task from the last list, which ensureTasks reads without the page
-// mounted; the link opens the page on the card, unfolded and lit.
+// mounted; the link opens the page on the card, unfolded and lit. A report
+// line in the Planner conversation opens it so too, its digest expanded.
 import { NZ_CONTRACT } from './contract.js';
 import { selection, ui } from './state.js';
 import { backgroundTasksText, esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
@@ -629,16 +630,32 @@ export function paintTaskHeader() {
 }
 
 // revealTask brings task id's card on the Planner page into view and lights
-// it, unfolding 已完成 when it is there; the page may still be painting the
-// list, so it looks again for a while.
-function revealTask(id) {
+// it, unfolding 已完成 when it is there, and ending "只看新结果" when that
+// leaves the card out; the page may still be painting the list, so it looks
+// again for a while. expand also expands its digest (a report line opens the
+// card on what it reported) and looks at its result, a digest not written
+// yet or open already too.
+export function revealTask(id, { expand = false } = {}) {
   const sel = '#pl-task .tk-card[data-id="' + CSS.escape(id) + '"]';
   let tries = 0;
   const look = () => {
-    const el = document.querySelector(sel);
+    if (onlyNew && byId.has(id) && !onlyNew.has(id) && !byId.get(id).new) {
+      onlyNew = null;
+      paintNews();
+      repaintAll();
+    }
+    let el = document.querySelector(sel);
     const fold = el && el.closest('details.tk-sec-done');
     if (fold && !fold.open) fold.open = true;
     if (el && el.getClientRects().length) {
+      const t = byId.get(id);
+      if (expand && t && t.kind === 'session' && t.digest && digestOpen !== id) {
+        digestOpen = id;
+        loadDigest(id);
+        repaintAll();
+        el = document.querySelector(sel) || el;
+      }
+      if (expand) seenTask(id);
       el.scrollIntoView({ block: 'center' });
       light(el, sel, id);
       return;
