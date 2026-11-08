@@ -126,7 +126,7 @@ func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 		Workspace:          s.Workspace(),
 		Backend:            s.Backend(),
 		AccessProfile:      s.AccessProfile(),
-		LastActive:         s.lastActive.Load(),
+		LastActive:         s.LastActive().UnixNano(),
 		CreatedAt:          s.createdAt.Load(),
 		UserLabel:          s.UserLabel(),
 		LabelOrigin:        s.LabelOrigin(),

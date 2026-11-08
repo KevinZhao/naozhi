@@ -176,10 +176,10 @@ type processIface interface {
 	// SessionSnapshot.LastResponse.
 	LastResponseSummary() string
 	// LastEventAt returns the wall-clock time of the most recent live event,
-	// or zero when nothing has arrived yet. Router.Cleanup uses it as a
-	// fallback activity signal so a long turn streaming tool_use / thinking
-	// events is not misclassified as stuck once the session-level
-	// lastActive (refreshed only when a turn starts and ends) has aged.
+	// or zero when nothing has arrived yet. ManagedSession.LastActive follows
+	// it a minute's step at a time; Router.Cleanup reads it as is, so a long
+	// turn streaming tool_use / thinking events is never misclassified as
+	// stuck.
 	LastEventAt() time.Time
 	// UserTurnCount returns the cumulative count of "user" entries seen
 	// since spawn. Feeds SessionSnapshot.MessageCount.

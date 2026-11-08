@@ -140,15 +140,45 @@ func (s *ManagedSession) attachProcessAndSnapshotPersisted(proc processIface) []
 	return snapshot
 }
 
-// LastActive returns the last active time.
+// lastActiveStep is how far the process's latest live event must be past
+// lastActive to move it: a turn running for hours shows its progress in the
+// session list, index.json and the Planner's snapshot within a minute, and
+// what keys on the value (the search reply cache) changes at most once a
+// minute rather than on every event.
+const lastActiveStep = time.Minute
+
+// LastActive returns the last active time: a turn's start or end, or the
+// process's latest live event, at a minute's step.
 func (s *ManagedSession) LastActive() time.Time {
+	s.catchUpLastActive()
 	return time.Unix(0, s.lastActive.Load())
+}
+
+// catchUpLastActive moves lastActive to the process's latest live event when
+// that is lastActiveStep or more past it. Live events only: a reattached
+// shim's replay and injected history do not stamp LastEventAt.
+func (s *ManagedSession) catchUpLastActive() {
+	p := s.loadProcess()
+	if p == nil {
+		return
+	}
+	at := p.LastEventAt()
+	if at.IsZero() {
+		return
+	}
+	ev := at.UnixNano()
+	for {
+		cur := s.lastActive.Load()
+		if ev-cur < int64(lastActiveStep) || s.lastActive.CompareAndSwap(cur, ev) {
+			return
+		}
+	}
 }
 
 // touchLastActive updates the last active timestamp: when a turn starts and
 // when one ends, whoever started it. It is not the user's message: custody's
 // "you are nearby" and its loop guard read the user's entries in the event
-// log, which this does not write.
+// log, which neither this nor catchUpLastActive writes.
 func (s *ManagedSession) touchLastActive() {
 	s.lastActive.Store(time.Now().UnixNano())
 }

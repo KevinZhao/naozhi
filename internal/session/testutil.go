@@ -157,7 +157,6 @@ func (p *TestProcess) EventEntriesBefore(beforeMS int64, limit int) []clievent.E
 }
 func (p *TestProcess) LastActivitySummary() string                { return p.EventLog.LastActivitySummary() }
 func (p *TestProcess) LastResponseSummary() string                { return p.EventLog.LastResponseSummary() }
-func (p *TestProcess) LastEventAt() time.Time                     { return p.EventLog.LastEventAt() }
 func (p *TestProcess) UserTurnCount() int64                       { return p.EventLog.UserTurnCount() }
 func (p *TestProcess) ProtocolName() string                       { return "test" }
 func (p *TestProcess) SubscribeEvents() (<-chan struct{}, func()) { return p.EventLog.Subscribe() }
@@ -168,6 +167,15 @@ func (p *TestProcess) InjectHistory(entries []clievent.EventEntry) {
 	}
 }
 func (p *TestProcess) TurnAgents() []ring.SubagentInfo { return p.EventLog.TurnAgents() }
+
+// LastEventAt is zero for a TestProcess built without an event log: every
+// LastActive read consults it.
+func (p *TestProcess) LastEventAt() time.Time {
+	if p.EventLog == nil {
+		return time.Time{}
+	}
+	return p.EventLog.LastEventAt()
+}
 
 // Normalize-layer stubs (docs/rfc/multi-backend.md §8.8); zero values keep
 // SessionSnapshot assertions stable.

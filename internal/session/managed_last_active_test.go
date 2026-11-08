@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
@@ -117,4 +118,57 @@ func TestReattachedTurnEndRefreshesLastActive(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A turn running for hours keeps last_active moving with its events, a
+// minute's step at a time: the list, index.json and the Planner's snapshot
+// read it, and an event inside the step leaves it where it was.
+func TestLastActiveFollowsEvents(t *testing.T) {
+	proc := NewTestProcess()
+	proc.StateVal = cli.StateRunning
+	s := &ManagedSession{key: "dashboard:direct:la:general"}
+	s.storeProcess(proc)
+
+	started := time.Now().Add(-3 * time.Hour)
+	s.lastActive.Store(started.UnixNano())
+	if got := s.LastActive(); !got.Equal(started) {
+		t.Fatalf("before any event: %v, want the turn's start %v", got, started)
+	}
+
+	proc.EventLog.Append(clievent.EventEntry{Type: "tool_use", Summary: "Bash"})
+	ev := proc.LastEventAt()
+	if got := s.LastActive(); !got.Equal(ev) {
+		t.Fatalf("after an event 3h into the turn: %v, want the event's %v", got, ev)
+	}
+	if got := s.Snapshot().LastActive; got != ev.UnixMilli() {
+		t.Errorf("snapshot last_active = %d, want %d", got, ev.UnixMilli())
+	}
+
+	// Within the step: the stored value stays.
+	within := time.Now().Add(-30 * time.Second)
+	s.lastActive.Store(within.UnixNano())
+	proc.EventLog.Append(clievent.EventEntry{Type: "text", Summary: "still going"})
+	if got := s.LastActive(); !got.Equal(within) {
+		t.Errorf("event %v after the last refresh moved it: %v", time.Since(within).Round(time.Second), got)
+	}
+	if got := toStoreEntryLastActive(t, s); got != within.UnixNano() {
+		t.Errorf("stored last_active = %d, want %d", got, within.UnixNano())
+	}
+
+	// Never backwards: a turn's end after the last event stays.
+	end := time.Now().Add(time.Minute)
+	s.lastActive.Store(end.UnixNano())
+	if got := s.LastActive(); !got.Equal(end) {
+		t.Errorf("last_active went back to an older event: %v, want %v", got, end)
+	}
+}
+
+func toStoreEntryLastActive(t *testing.T, s *ManagedSession) int64 {
+	t.Helper()
+	s.setSessionID("sid-la")
+	e, ok := sessionToStoreEntry(s)
+	if !ok {
+		t.Fatal("no store entry")
+	}
+	return e.LastActive
 }

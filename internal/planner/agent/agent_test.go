@@ -366,8 +366,8 @@ func TestRenderSnapshot(t *testing.T) {
 	got := renderSnapshot(base)
 	want := "<naozhi-snapshot at=\"2026-11-04 10:00 UTC\">\n" +
 		"会话（在跑 1，最近 24 小时结束 1）：\n" +
-		"- 修登录（名字 iso-login，dashboard:direct:a:general） [活跃] · 最后活动 11-04 09:59\n" +
-		"- iso-b（dashboard:direct:b:general） [失败·rate_limit] · 最后活动 11-04 09:00\n" +
+		"- 修登录（名字 iso-login，dashboard:direct:a:general） [活跃] · 最后输出 11-04 09:59\n" +
+		"- iso-b（dashboard:direct:b:general） [失败·rate_limit] · 最后输出 11-04 09:00\n" +
 		"</naozhi-snapshot>"
 	if got != want {
 		t.Fatalf("snapshot =\n%s\nwant\n%s", got, want)

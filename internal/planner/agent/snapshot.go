@@ -258,7 +258,7 @@ func unitLine(in snapshotInput, u health.Unit) string {
 		line += " 工作区 " + ws
 	}
 	if !u.LastActive.IsZero() {
-		line += " · 最后活动 " + u.LastActive.In(in.Now.Location()).Format("01-02 15:04")
+		line += " · 最后输出 " + u.LastActive.In(in.Now.Location()).Format("01-02 15:04")
 	}
 	return line
 }
