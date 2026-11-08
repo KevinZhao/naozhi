@@ -511,16 +511,17 @@ func TestTaskEndedAcrossShiftChange(t *testing.T) {
 	}
 }
 
-// TestTaskEndedAfterDoing: a session that backgrounds its work ends a turn
-// unreported, the Planner marks it doing, and the turn that finishes the
-// work, unreported too, gets the Planner a second receipt: the task does
-// not stay 进行中.
-func TestTaskEndedAfterDoing(t *testing.T) {
+// endedRunner is a runner with one dispatched task whose turn ends are
+// checked at once: end ends a turn with text, at the runner's clock.
+func endedRunner(t *testing.T) (r *Runner, g *fakeGateway, key string, now *time.Time, end func(text string)) {
+	t.Helper()
 	r, g, _, side, dir := newRunner(t)
 	r.grace = 0
 	r.cfg.Tasks = task.New(task.Config{Sessions: side})
 	r.cfg.Reports = func(time.Time, time.Time) []string { return nil }
-	end := func(text string) {
+	clock := time.Now()
+	r.cfg.Now = func() time.Time { return clock }
+	end = func(text string) {
 		t.Helper()
 		r.Result(g.spawned[0], text)
 		select {
@@ -531,18 +532,68 @@ func TestTaskEndedAfterDoing(t *testing.T) {
 		}
 	}
 	r.Handle(block(`{"type":"dispatch","workspace":"` + filepath.Base(dir) + `","title":"iso 跑测试","model":"","message":"跑一遍测试"}`))
-	key := g.spawned[0]
+	key = g.spawned[0]
 	g.told = nil
+	return r, g, key, &clock, end
+}
 
-	end("测试已在后台运行，跑完再看")
+// TestTaskEndedReceiptLoop: the receipt asks the Planner for a doing block,
+// so a doing block must not re-arm it at once, else every unreported turn
+// end brings another receipt and another doing (one task got 21 in 80
+// minutes). Within doingQuiet of the doing block none comes; after it the
+// task, still unreported, is told once more.
+func TestTaskEndedReceiptLoop(t *testing.T) {
+	r, g, key, now, end := endedRunner(t)
+	end("改好了一半")
 	if len(g.told) != 1 {
 		t.Fatalf("told = %q", g.told)
 	}
-	r.Handle(block(`{"type":"status","task":"` + key + `","state":"doing","why":"测试还在后台跑"}`))
-	g.told = nil
+	for n := range 3 {
+		*now = now.Add(5 * time.Minute)
+		r.Handle(block(`{"type":"status","task":"` + key + `","state":"doing","why":"还没做完"}`))
+		*now = now.Add(5 * time.Minute)
+		end("又一轮")
+		if len(g.told) != 1 {
+			t.Fatalf("round %d: a receipt within %v of the doing block: %q", n, doingQuiet, g.told)
+		}
+	}
+	*now = now.Add(doingQuiet)
+	end("还是没汇报")
+	if len(g.told) != 2 || !strings.Contains(g.told[1], "还是没汇报") {
+		t.Fatalf("after %v: told = %q", doingQuiet, g.told)
+	}
+	end("再一轮")
+	if len(g.told) != 2 {
+		t.Errorf("a second receipt before any doing block: %q", g.told)
+	}
+}
+
+// TestTaskEndedBackground: a turn that ends with a workflow or background
+// task still running is no end of the task, so it gets no receipt; the turn
+// that ends once that work is done, unreported, does, even within
+// doingQuiet of a doing block, so the task is not left 进行中.
+func TestTaskEndedBackground(t *testing.T) {
+	r, g, key, now, end := endedRunner(t)
+	running := true
+	r.cfg.Background = func(k string) bool { return k == key && running }
+	end("测试已在后台运行，跑完再看")
+	if len(g.told) != 0 {
+		t.Fatalf("told while background work ran: %q", g.told)
+	}
+	running = false
 	end("测试全部通过")
 	if len(g.told) != 1 || !strings.Contains(g.told[0], "测试全部通过") {
-		t.Fatalf("after doing: told = %q", g.told)
+		t.Fatalf("after the background work: told = %q", g.told)
+	}
+	r.Handle(block(`{"type":"status","task":"` + key + `","state":"doing","why":"还要再跑一遍"}`))
+	running = true
+	*now = now.Add(time.Minute)
+	end("第二遍在后台跑")
+	running = false
+	*now = now.Add(time.Minute)
+	end("第二遍也通过了")
+	if len(g.told) != 2 || !strings.Contains(g.told[1], "第二遍也通过了") {
+		t.Fatalf("after the doing block and the background work: told = %q", g.told)
 	}
 	r.Handle(block(`{"type":"status","task":"` + key + `","state":"done","why":"它说测试全部通过"}`))
 	if st := r.cfg.Tasks.List()[0]; st.ID != key || st.State != task.Done {

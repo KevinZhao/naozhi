@@ -115,6 +115,11 @@ type Config struct {
 	// of blocks not run (agent.Agent.UnrunTurn): its own blocks not run get
 	// none, so the two do not go round. nil reports none.
 	UnrunTurn func() bool
+	// Background reports whether key has a workflow or background task
+	// running (wireup.CustodySources.Background, the judgement custody's
+	// Settled makes): a turn that ended with work still going is no end of
+	// the task to report. nil is never.
+	Background func(key string) bool
 	// PlannerBusy reports whether a Planner turn is running
 	// (agent.Agent.Busy): a report may wait behind it. nil is never.
 	PlannerBusy func() bool
@@ -175,9 +180,16 @@ type Runner struct {
 	// doneTold is the tasks whose done block got the reminder of the
 	// promises citing them; endTold the tasks told of a turn that ended
 	// without a report, until the next report or the Planner's doing block.
-	// Only the handling goroutine touches them.
+	// doingAt is when the Planner last marked each task doing: the receipt
+	// asks for that very block, so re-arming at once would have every
+	// unreported turn end bring another receipt and another doing block
+	// (one task got 21 in 80 minutes). For doingQuiet after it the task gets
+	// none, unless a check saw its background work running: the turn that
+	// ends once that work is done is told. Only the handling goroutine
+	// touches them.
 	doneTold map[string]bool
 	endTold  map[string]bool
+	doingAt  map[string]time.Time
 }
 
 // ended is a dispatched session's turn end: the reply, when the turn ended
@@ -198,6 +210,9 @@ const (
 	endWait = 30 * time.Minute
 	// endTextRunes caps the session's last reply in the receipt.
 	endTextRunes = 600
+	// doingQuiet is how long a task the Planner marked doing gets no
+	// receipt of a turn that ended without a report (doingAt).
+	doingQuiet = time.Hour
 )
 
 // reply is one Planner turn's result text and the span its turn ran in.
@@ -231,7 +246,7 @@ func New(cfg Config) *Runner {
 	// Reports older than the runner (history restored at startup) were the
 	// previous run's to check.
 	r := &Runner{cfg: cfg, ch: make(chan reply, queueLen), endCh: make(chan ended, queueLen), grace: endGrace,
-		last: cfg.Now(), doneTold: map[string]bool{}, endTold: map[string]bool{}}
+		last: cfg.Now(), doneTold: map[string]bool{}, endTold: map[string]bool{}, doingAt: map[string]time.Time{}}
 	if cfg.Inbox != nil {
 		cfg.Inbox.HandleDecisions(HandlerAsk, r.decideAsk)
 		open, _ := cfg.Inbox.List(0)
@@ -381,8 +396,9 @@ func (r *Runner) later(e ended) {
 // turn ended with no report reaching the Planner since its previous turn
 // ended: its last reply, and how to mark it. A busy Planner may still be
 // holding the report, so the check waits for its turn to end, up to endWait.
-// A task gets one such receipt until it reports again or the Planner marks
-// it doing.
+// A session with background work still running gets none: the work's end
+// starts the turn that is checked. A task gets one such receipt until it
+// reports again, or doingQuiet after the Planner marks it doing (doingAt).
 func (r *Runner) checkEnded(e ended) {
 	defer func() {
 		if p := recover(); p != nil {
@@ -397,6 +413,17 @@ func (r *Runner) checkEnded(e ended) {
 	i := slices.IndexFunc(tasks, func(t task.Task) bool { return t.ID == e.key })
 	now := r.cfg.Now()
 	due := i >= 0 && !r.endTold[e.key] && tasks[i].State == task.Doing && !slices.Contains(r.cfg.Reports(e.from, now), e.key)
+	if due && r.cfg.Background != nil && r.cfg.Background(e.key) {
+		delete(r.doingAt, e.key)
+		due = false
+	}
+	if at, ok := r.doingAt[e.key]; ok && due {
+		if now.Sub(at) < doingQuiet {
+			due = false
+		} else {
+			delete(r.doingAt, e.key)
+		}
+	}
 	if due && r.cfg.PlannerBusy != nil && r.cfg.PlannerBusy() && now.Before(e.until) {
 		r.later(e)
 		return
@@ -600,13 +627,15 @@ func (r *Runner) checkReports(rep reply, statused map[string]string) {
 	}
 	for _, k := range reported {
 		delete(r.endTold, k)
+		delete(r.doingAt, k)
 	}
-	// A doing block answers the turn-end receipt: the task's next turn
-	// that ends unreported is told again, so a session that backgrounded
-	// its work and finished in a later turn is not left 进行中.
+	// A doing block answers the turn-end receipt: the task is told again of
+	// a turn that ends unreported, but only after doingQuiet (doingAt), so
+	// it is not left 进行中 nor told on every turn end.
 	for k, s := range statused {
 		if s == string(task.Doing) {
 			delete(r.endTold, k)
+			r.doingAt[k] = r.cfg.Now()
 		}
 	}
 	keys := slices.Clone(reported)

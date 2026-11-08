@@ -40,12 +40,7 @@ func (c ReapSources) Session(key string) (reap.Session, bool) {
 	out := reap.Session{
 		Running:    snap.State == "running",
 		Asking:     askPending(s.EventLastN(askScan)),
-		Background: runningWorkflow(snap.Workflows) != "",
-	}
-	if at := s.ProcessAttachedAt(); !out.Background && !at.IsZero() && snap.State != "dead" {
-		if t, _ := openTask(s.EventLastN(taskScan), at, true); t != nil {
-			out.Background = true
-		}
+		Background: background(s, snap),
 	}
 	if apierr.IsEnvelope(snap.LastResponse) {
 		out.Failed = snap.LastResponse
