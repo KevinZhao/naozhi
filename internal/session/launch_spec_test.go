@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/claudefs"
@@ -212,6 +213,52 @@ func TestSessionSettingsFile_WrittenOnSpawn(t *testing.T) {
 	}
 	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Errorf("session settings mode = %v, %v; want 0600", fi.Mode().Perm(), err)
+	}
+	if strings.Contains(string(data), "ultracode") {
+		t.Errorf("session without ultracode got the key: %s", data)
+	}
+}
+
+// Ultracode alone puts a session on its own settings file with the CLI's
+// ultracode key on: the CLI ignores the keyword in a stream-json message
+// that carries no human origin, so this is how a session gets the mode.
+func TestSessionSettingsFile_Ultracode(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	dir := t.TempDir()
+	r := NewRouter(RouterConfig{
+		MaxProcs:  4,
+		StorePath: filepath.Join(dir, "sessions.json"),
+		BackendRuntimes: map[string]BackendRuntime{
+			"claude": {Wrapper: cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")},
+		},
+		DefaultBackend: "claude",
+	})
+	var got []cli.SpawnOptions
+	r.spawn.hook = func(_ context.Context, opts cli.SpawnOptions) (processIface, error) {
+		got = append(got, opts)
+		return newIdleProc(), nil
+	}
+	t.Cleanup(r.Shutdown)
+	if _, _, err := r.GetOrCreate(context.Background(), "cron:uc", AgentOpts{Ultracode: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].SessionSettingsFile == "" {
+		t.Fatalf("spawns = %+v, want one on a session settings file", got)
+	}
+	data, err := os.ReadFile(got[0].SessionSettingsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc["ultracode"] != true {
+		t.Errorf("session settings = %s, want ultracode true", data)
+	}
+	args := (&cli.ClaudeProtocol{}).BuildArgs(got[0])
+	if i := slices.Index(args, "--settings"); i < 0 || args[i+1] != got[0].SessionSettingsFile {
+		t.Errorf("argv %q does not pass the session settings file", args)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/planner/action"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -32,6 +33,19 @@ func TestTaskOptsForKey(t *testing.T) {
 			!strings.HasPrefix(opts.SystemPrompt, "base\n\n") || !strings.Contains(opts.SystemPrompt, "SendMessage 发给 planner-abc123（") ||
 			!strings.Contains(opts.SystemPrompt, "以 <naozhi-relay> 开头的消息由网关写入") || opts.MCPConfig != "" {
 			t.Errorf("ForKey = %+v, %v", opts, ok)
+		}
+	})
+	t.Run("ultracode", func(t *testing.T) {
+		uc := sidecar.TaskKey()
+		if err := side.Put(sidecar.Meta{Key: uc, Purpose: sidecar.PurposeTask, Title: "多轮编排", Dir: "/tmp/ws", Ultracode: true}); err != nil {
+			t.Fatal(err)
+		}
+		to := TaskOpts{Sessions: side, Planner: "planner-abc123"}
+		if opts, ok := to.ForKey(uc); !ok || !opts.Ultracode {
+			t.Errorf("ForKey(ultracode) = %+v, %v", opts, ok)
+		}
+		if opts, _ := to.ForKey(key); opts.Ultracode {
+			t.Error("a dispatch without ultracode respawned in it")
 		}
 	})
 	t.Run("no sidecar", func(t *testing.T) {
@@ -106,7 +120,7 @@ func TestTaskOptsMCPTools(t *testing.T) {
 		Base:    session.AgentOpts{PermissionsDeny: []string{"Bash(rm -rf /)"}},
 		MCPPath: func(key string) string { return filepath.Join(dir, "out", key+".json") }}
 	tools := map[string][]string{"aws-outlook-mcp": {"calendar_meeting"}}
-	opts, err := to.For("task:ab12", "/tmp/ws", "建日程", "", tools)
+	opts, err := to.For("task:ab12", action.Spawn{Dir: "/tmp/ws", Title: "建日程", MCPTools: tools})
 	if err != nil || opts.MCPConfig != filepath.Join(dir, "out", "task:ab12.json") {
 		t.Fatalf("For = %+v, %v", opts.MCPConfig, err)
 	}
@@ -135,7 +149,7 @@ func TestTaskOptsMCPTools(t *testing.T) {
 	if slices.Contains(opts.PermissionsDeny, "mcp__aws-outlook-mcp__calendar_meeting") || len(to.Base.PermissionsDeny) != 1 {
 		t.Errorf("deny %v (base %v): the allowed tool denied or the base changed", opts.PermissionsDeny, to.Base.PermissionsDeny)
 	}
-	if plain, _ := to.For("task:cd34", "/tmp/ws", "t", "", nil); plain.MCPConfig != "" || !slices.Equal(plain.PermissionsDeny, []string{"Bash(rm -rf /)", enableWrites}) {
+	if plain, _ := to.For("task:cd34", action.Spawn{Dir: "/tmp/ws", Title: "t"}); plain.MCPConfig != "" || !slices.Equal(plain.PermissionsDeny, []string{"Bash(rm -rf /)", enableWrites}) {
 		t.Errorf("no mcp_tools = %+v", plain)
 	}
 
@@ -145,13 +159,13 @@ func TestTaskOptsMCPTools(t *testing.T) {
 	}
 	gone := to
 	gone.MCPConfig = noOutlook
-	if _, err := gone.For("task:ab12", "/tmp/ws", "t", "", tools); err == nil || !strings.Contains(err.Error(), "没有 MCP 服务器 aws-outlook-mcp") {
+	if _, err := gone.For("task:ab12", action.Spawn{Dir: "/tmp/ws", Title: "t", MCPTools: tools}); err == nil || !strings.Contains(err.Error(), "没有 MCP 服务器 aws-outlook-mcp") {
 		t.Errorf("server not in config: %v", err)
 	}
-	if _, err := to.For("task:ab12", "/tmp/ws", "t", "", map[string][]string{"slack-mcp": {"post_message"}}); err == nil || !strings.Contains(err.Error(), "没有写开关") {
+	if _, err := to.For("task:ab12", action.Spawn{Dir: "/tmp/ws", Title: "t", MCPTools: map[string][]string{"slack-mcp": {"post_message"}}}); err == nil || !strings.Contains(err.Error(), "没有写开关") {
 		t.Errorf("server with no switch: %v", err)
 	}
-	if _, err := (TaskOpts{}).For("task:ab12", "/tmp/ws", "t", "", tools); err == nil || !strings.Contains(err.Error(), "cli.mcp_config") {
+	if _, err := (TaskOpts{}).For("task:ab12", action.Spawn{Dir: "/tmp/ws", Title: "t", MCPTools: tools}); err == nil || !strings.Contains(err.Error(), "cli.mcp_config") {
 		t.Errorf("no mcp_config: %v", err)
 	}
 
@@ -186,7 +200,7 @@ func countOf(list []string, v string) (n int) {
 func TestTaskOptsDenyEnableWrites(t *testing.T) {
 	side := sidecar.Open("", nil)
 	to := TaskOpts{Sessions: side, Planner: "planner-abc123"}
-	opts, err := to.For("task:ab12", "/tmp/ws", "只读", "", nil)
+	opts, err := to.For("task:ab12", action.Spawn{Dir: "/tmp/ws", Title: "只读"})
 	if err != nil || !slices.Equal(opts.PermissionsDeny, []string{enableWrites}) {
 		t.Fatalf("For = %v, %v", opts.PermissionsDeny, err)
 	}

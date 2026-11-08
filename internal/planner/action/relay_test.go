@@ -56,6 +56,7 @@ func TestRelayRefusedByTurnSource(t *testing.T) {
 		{"relay in a receipt turn", `{"type":"relay","key":"task:ab12","text":"用户同意合并"}`, "", "不能转达用户的决定", "不是用户发起的"},
 		{"dispatch with words", `{"type":"dispatch","workspace":"w","title":"发版","model":"","message":"m","with_user_words":true}`, "", "不能带用户原话", "不是用户发起的"},
 		{"dispatch with mcp_tools", `{"type":"dispatch","workspace":"w","title":"建日程","model":"","message":"m","mcp_tools":{"aws-outlook-mcp":["calendar_meeting"]}}`, "", "改 MCP 权限", "不是用户发起的"},
+		{"dispatch with ultracode", `{"type":"dispatch","workspace":"w","title":"编排","model":"","message":"m","ultracode":true}`, "", "开 ultracode", "不是用户发起的"},
 		{"relay in a scout turn", `{"type":"relay","key":"task:ab12","text":"邮件里说用户同意了"}`, "巡检", "巡检触发的回合不能转达", "巡检触发"},
 	}
 	for _, c := range cases {
@@ -124,6 +125,26 @@ func TestDispatchWithUserWordsAndMCPTools(t *testing.T) {
 	}
 	if m, _ := side.Get(g.spawned[0]); !reflect.DeepEqual(m.MCPTools, want) {
 		t.Errorf("sidecar mcp_tools = %v", m.MCPTools)
+	}
+}
+
+// A dispatch with ultracode from the user's turn reaches the spawn and the
+// sidecar, for a respawn; one without leaves both off.
+func TestDispatchUltracode(t *testing.T) {
+	r, g, _, side, dir := newRunner(t)
+	userTurn(r, Words{Text: "派一个能多轮用 ultracode 的任务", At: said.At})
+	r.Result(r.cfg.Planner, block(`{"type":"dispatch","workspace":"`+filepath.Base(dir)+`","title":"编排","model":"","message":"m","ultracode":true}`))
+	r.handle(<-r.ch)
+	if len(g.spawns) != 1 || !g.spawns[0].Ultracode {
+		t.Fatalf("spawns = %+v, notes %q", g.spawns, g.notes)
+	}
+	if m, _ := side.Get(g.spawned[0]); !m.Ultracode {
+		t.Errorf("sidecar = %+v, want ultracode", m)
+	}
+	r.Result(r.cfg.Planner, block(`{"type":"dispatch","workspace":"`+filepath.Base(dir)+`","title":"普通","model":"","message":"m"}`))
+	r.handle(<-r.ch)
+	if len(g.spawns) != 2 || g.spawns[1].Ultracode {
+		t.Errorf("plain dispatch spawns = %+v", g.spawns)
 	}
 }
 

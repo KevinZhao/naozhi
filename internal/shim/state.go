@@ -94,6 +94,12 @@ type SpawnOverlay struct {
 	CrossSessionInbound string   `json:"cross_session_inbound,omitempty"`
 	PermissionsDeny     []string `json:"permissions_deny,omitempty"`
 	PermissionsAllow    []string `json:"permissions_allow,omitempty"`
+	// Ultracode is the CLI's `ultracode` settings key: standing workflow
+	// orchestration for every turn of the session. The CLI ignores the
+	// keyword in a message it did not get from a human (no origin on a
+	// stream-json user message), so a dispatched session gets the mode only
+	// this way.
+	Ultracode bool `json:"ultracode,omitempty"`
 }
 
 // EncodeSpawnOverlay serialises ov for the --spawn-overlay flag. Nil encodes
