@@ -349,12 +349,14 @@ function paintInlineCards(items) {
 
 // paintPin writes "要你决定 N" in the conversation's header and in the opened
 // session's (§15.12 ⑤, D103), N the questions at the conversation's end:
-// not red (the badge is the one red count, D91), none with none.
+// not red (the badge is the one red count, D91), none with none. A phone's
+// header with the machine switch or N 件新结果 says "决定 N" (responsive.css).
 function paintPin(n) {
-  const text = '要你决定 ' + n;
+  const html = '<span class="pl-pin-k">要你</span>决定 ' + n;
   for (const el of document.querySelectorAll('.pl-pin')) {
-    if (el.textContent !== text) el.textContent = text;
+    if (el.innerHTML !== html) el.innerHTML = html;
     el.hidden = !n;
+    el.title = '要你决定 ' + n + ' 件：跳到对话底部的提问';
   }
 }
 
@@ -530,10 +532,12 @@ function closeMenu() {
   if (more) more.open = false;
 }
 
-// pausedText is the header's line while paused: until when, or (a custody
-// pause from before the two were one) with no end.
-function pausedText() {
-  return pl.pausedUntil > Date.now() ? '已暂停到 ' + pausedAt() : '已暂停';
+// pausedHtml is the header's line while paused: until when, or (a custody
+// pause from before the two were one) with no end. The until part is its
+// own span, which a crowded phone header leaves out (responsive.css): the
+// line's title has it.
+function pausedHtml() {
+  return '已暂停' + (pl.pausedUntil > Date.now() ? '<span class="pl-paused-to">到 ' + esc(pausedAt()) + '</span>' : '');
 }
 
 // paintTools fills the header's "⋯" menu and, while pushes and custody are
@@ -542,7 +546,7 @@ function paintTools() {
   const line = $('pl-paused');
   if (line) {
     const on = paused();
-    const html = on ? '<span>' + esc(pausedText()) + '</span>' +
+    const html = on ? '<span>' + pausedHtml() + '</span>' +
       '<span aria-hidden="true">·</span><button type="button" class="pl-link" data-action="planner-pause-resume">恢复</button>' : '';
     if (line.innerHTML !== html) line.innerHTML = html;
     line.title = on ? '推送与托管已暂停' + (pl.pausedUntil > Date.now() ? '，到 ' + formatAbsTime(pl.pausedUntil) : '') : '';

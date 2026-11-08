@@ -90,6 +90,21 @@
   .pl-paused>[aria-hidden],.pl-paused>button{display:none}
   /* The phone keeps "N 件新结果"; its 全部已读 is in the filtered list. */
   .pl-news-sep,.pl-news-all{display:none}
+  /* A crowded header (the machine switch, 要你决定 N, N 件新结果, 已暂停 at
+     once) keeps, in this order: 要你决定 and N 件新结果 whole (the two
+     things to act on; "决定 N" beside either other), the switch (cut, its
+     machine's first letters at least), 已暂停 (its until time left to the
+     title once anything else is there, then cut). The switch names the
+     Planner shown, so it stands in for the title. */
+  .pl-head:has(.pl-host:not([hidden])) .pl-title,
+  .pl-head:has(.pl-host:not([hidden])) .pl-pin-k,
+  .pl-head:has(.pl-news:not([hidden])) .pl-pin-k{display:none}
+  .pl-head:has(.pl-host:not([hidden])) .pl-paused-to,
+  .pl-head:has(.pl-pin:not([hidden])) .pl-paused-to,
+  .pl-head:has(.pl-news:not([hidden])) .pl-paused-to{display:none}
+  .pl-news{flex-shrink:0}
+  .pl-host{min-width:56px}
+  .pl-paused{flex-shrink:4;min-width:3em}
   .pl-note{margin:10px 12px 0}
   .pl-brief{max-width:100%;padding:0 12px}
   .pl-composer{padding:6px 12px 10px}
