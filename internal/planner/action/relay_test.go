@@ -477,6 +477,24 @@ func TestRelayReopenedNotSent(t *testing.T) {
 	}
 }
 
+// An answer that reopened a session put away but did not reach it tells the
+// Planner it was reopened, its task back to 进行中.
+func TestAskReopenedNotSent(t *testing.T) {
+	r, g, inbox, key, _ := putAwayRunner(t)
+	r.cfg.Relay = func(string, string) error { return errors.New("会话忙") }
+	r.Result(r.cfg.Planner, block(`{"type":"ask","question":"拆不拆？","options":["拆","先不拆"],"task":"`+key+`"}`))
+	r.handle(<-r.ch)
+	if err := inbox.Decide(openDecision(t, inbox, HandlerAsk).ID, "拆"); err != nil {
+		t.Fatal(err)
+	}
+	if len(g.told) != 1 || !strings.Contains(g.told[0], key+" 已经收起，网关已重新打开（任务回到进行中），但没有把回答送到（会话忙）") {
+		t.Errorf("told = %q", g.told)
+	}
+	if st := taskState(t, r, key); st != task.Doing {
+		t.Errorf("task state = %s, want doing", st)
+	}
+}
+
 // liveCustody is fakeCustody delivering only to the sessions in the router.
 type liveCustody struct {
 	*fakeCustody

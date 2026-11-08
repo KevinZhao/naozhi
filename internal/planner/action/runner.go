@@ -1219,20 +1219,28 @@ func (r *Runner) decideAsk(it notify.Item, a notify.Action) error {
 	relayed := false
 	if c.Task != "" {
 		err := errors.New("转达没有接通")
-		reopened := false
+		reopened, sending := false, false
 		if r.cfg.Relay != nil {
 			if reopened, err = r.reachable(c.Task, task.ByUser, "用户回答了它的提问，网关重新打开"); err == nil {
+				sending = true
 				err = r.cfg.Relay(c.Task, relayEnvelope(w.At, []Words{w}, ""))
 			}
 		}
-		if relayed = err == nil; relayed {
+		switch relayed = err == nil; {
+		case relayed:
 			sent := "网关已把这个回答原样送到 "
 			if reopened {
 				sent = "它已经收起，网关已重新打开并把这个回答原样送到 "
 			}
 			text += "。" + sent + c.Task + "（" + r.sessionName(c.Task) + "），不用再转达；它做完会向你汇报。"
-		} else {
+		case reopened && sending:
+			// As relay says it: the task is 进行中 again whether or not the
+			// answer got there.
+			text += "。" + c.Task + " 已经收起，网关已重新打开（任务回到进行中），但没有把回答送到（" + err.Error() + "）；要转达就用 relay。"
+		default:
 			text += "。网关没能把回答送到 " + c.Task + "（" + err.Error() + "）；要转达就用 relay。"
+		}
+		if !relayed {
 			slog.Warn("planner actions: an answer not relayed", "task", c.Task, "err", err)
 		}
 	}
