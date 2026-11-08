@@ -60,8 +60,8 @@ type Spawn struct {
 	Title   string
 	Model   string
 	Message string
-	// MCPEnv is the dispatch's mcp_env (D98), nil for none.
-	MCPEnv map[string]map[string]string
+	// MCPTools is the dispatch's mcp_tools (D98), nil for none.
+	MCPTools map[string][]string
 }
 
 // Words is what the user said in a Planner turn, as the gateway recorded it
@@ -119,7 +119,7 @@ type Config struct {
 	// Words is the user's own words of the Planner turn in flight, as the
 	// gateway recorded them (agent.Agent.TurnWords). A turn with none was
 	// not started by the user (a receipt, a reminder, a scout run, custody):
-	// it may not relay, nor dispatch with the user's words or mcp_env
+	// it may not relay, nor dispatch with the user's words or mcp_tools
 	// (D98). nil is none.
 	Words func() []Words
 	// Relay sends text to session key as the user's decision passed on
@@ -801,13 +801,14 @@ func (r *Runner) tellUnrun(rep reply, u unrun) {
 }
 
 // needsUser reports whether block b needs a turn the user started (D98):
-// a relay, and a dispatch leading with the user's words or setting mcp_env.
+// a relay, and a dispatch leading with the user's words or allowing write
+// tools (mcp_tools).
 // The user's words are what a session acts on as the user's decision, so a
 // turn with none (a receipt carrying a session's reply, a reminder, custody)
 // is refused by its source, never by judging the text.
 func needsUser(b Block) bool {
 	if d := b.Dispatch; d != nil {
-		return d.WithUserWords || len(d.MCPEnv) > 0
+		return d.WithUserWords || len(d.MCPTools) > 0
 	}
 	return b.Relay != nil
 }
@@ -817,7 +818,7 @@ func needsUser(b Block) bool {
 func (r *Runner) refuseNotUser(b Block) string {
 	if d := b.Dispatch; d != nil {
 		r.note("这一轮不是用户发起的，不能带用户原话或改 MCP 权限派活：「" + d.Title + "」没有派出")
-		return "这一轮不是用户发起的，不能带用户原话或 mcp_env 派活，没有派出"
+		return "这一轮不是用户发起的，不能带用户原话或 mcp_tools 派活，没有派出"
 	}
 	r.note("这一轮不是用户发起的，不能转达用户的决定：「" + r.sessionName(b.Relay.Key) + "」没有收到")
 	return "这一轮不是用户发起的，没有可附的用户原话，没有转达"
@@ -908,13 +909,13 @@ func (r *Runner) spawn(d Dispatch) (key, wsName string, err error) {
 	key = sidecar.TaskKey()
 	if err := r.cfg.Sessions.Put(sidecar.Meta{
 		Key: key, Purpose: sidecar.PurposeTask, Parent: r.cfg.Planner, Title: d.Title, Workspace: w.ID,
-		Dir: dir, Model: d.Model, MCPEnv: d.MCPEnv, Custody: &sidecar.Custody{On: true, By: custody.ByAuto, At: r.cfg.Now()},
+		Dir: dir, Model: d.Model, MCPTools: d.MCPTools, Custody: &sidecar.Custody{On: true, By: custody.ByAuto, At: r.cfg.Now()},
 	}); err != nil {
 		return "", "", fmt.Errorf("记不下会话信息（%v）", err)
 	}
 	ctx, cancel := context.WithTimeout(r.cfg.Ctx, spawnTimeout)
 	defer cancel()
-	if err := r.cfg.Spawn(ctx, key, Spawn{Dir: dir, Title: d.Title, Model: d.Model, Message: d.Message, MCPEnv: d.MCPEnv}); err != nil {
+	if err := r.cfg.Spawn(ctx, key, Spawn{Dir: dir, Title: d.Title, Model: d.Model, Message: d.Message, MCPTools: d.MCPTools}); err != nil {
 		r.cfg.Sessions.Remove(key)
 		return "", "", err
 	}

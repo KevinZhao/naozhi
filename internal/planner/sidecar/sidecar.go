@@ -61,10 +61,10 @@ type Meta struct {
 	// Model is the model the dispatch asked for ("" = the default). Dir and
 	// Model let a session whose process went away respawn as dispatched.
 	Model string `json:"model,omitempty"`
-	// MCPEnv is the environment the dispatch set on MCP servers of
-	// cli.mcp_config for this session (D98), kept so a respawn gets it too.
-	MCPEnv  map[string]map[string]string `json:"mcp_env,omitempty"`
-	Created time.Time                    `json:"created"`
+	// MCPTools are the write tools the dispatch allowed this session, by
+	// server (D98), kept so a respawn gets them too.
+	MCPTools map[string][]string `json:"mcp_tools,omitempty"`
+	Created  time.Time           `json:"created"`
 	// Retired is when the session was first seen gone from the router; the
 	// file is removed Retention later.
 	Retired time.Time `json:"retired,omitzero"`

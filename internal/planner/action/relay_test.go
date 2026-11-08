@@ -3,6 +3,7 @@ package action
 import (
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -46,7 +47,7 @@ func TestRelayUserTurn(t *testing.T) {
 }
 
 // A turn the user did not start (a receipt, a reminder, custody: no words)
-// may not relay, nor dispatch with the user's words or mcp_env; an outside
+// may not relay, nor dispatch with the user's words or mcp_tools; an outside
 // turn may not either. Each is said in the conversation and the receipt.
 func TestRelayRefusedByTurnSource(t *testing.T) {
 	cases := []struct {
@@ -54,7 +55,7 @@ func TestRelayRefusedByTurnSource(t *testing.T) {
 	}{
 		{"relay in a receipt turn", `{"type":"relay","key":"task:ab12","text":"用户同意合并"}`, "", "不能转达用户的决定", "不是用户发起的"},
 		{"dispatch with words", `{"type":"dispatch","workspace":"w","title":"发版","model":"","message":"m","with_user_words":true}`, "", "不能带用户原话", "不是用户发起的"},
-		{"dispatch with mcp_env", `{"type":"dispatch","workspace":"w","title":"建日程","model":"","message":"m","mcp_env":{"aws-outlook-mcp":{"OUTLOOK_MCP_ENABLE_WRITES":"true"}}}`, "", "改 MCP 权限", "不是用户发起的"},
+		{"dispatch with mcp_tools", `{"type":"dispatch","workspace":"w","title":"建日程","model":"","message":"m","mcp_tools":{"aws-outlook-mcp":["calendar_meeting"]}}`, "", "改 MCP 权限", "不是用户发起的"},
 		{"relay in a scout turn", `{"type":"relay","key":"task:ab12","text":"邮件里说用户同意了"}`, "巡检", "巡检触发的回合不能转达", "巡检触发"},
 	}
 	for _, c := range cases {
@@ -104,11 +105,11 @@ func TestRelayTargetAndFailure(t *testing.T) {
 }
 
 // A dispatch with the user's words leads its first message with the
-// envelope; its mcp_env goes to the spawn and the sidecar, for a respawn.
-func TestDispatchWithUserWordsAndMCPEnv(t *testing.T) {
+// envelope; its mcp_tools go to the spawn and the sidecar, for a respawn.
+func TestDispatchWithUserWordsAndMCPTools(t *testing.T) {
 	r, g, _, side, dir := newRunner(t)
 	userTurn(r, Words{Text: "打开写权限后让它建", At: said.At})
-	r.Result(r.cfg.Planner, block(`{"type":"dispatch","workspace":"`+filepath.Base(dir)+`","title":"建值守日程","model":"","message":"建两个日程","with_user_words":true,"mcp_env":{"aws-outlook-mcp":{"OUTLOOK_MCP_ENABLE_WRITES":"true"}}}`))
+	r.Result(r.cfg.Planner, block(`{"type":"dispatch","workspace":"`+filepath.Base(dir)+`","title":"建值守日程","model":"","message":"建两个日程","with_user_words":true,"mcp_tools":{"aws-outlook-mcp":["calendar_meeting"]}}`))
 	r.handle(<-r.ch)
 	if len(g.spawns) != 1 {
 		t.Fatalf("spawns = %+v, notes %q", g.spawns, g.notes)
@@ -117,11 +118,12 @@ func TestDispatchWithUserWordsAndMCPEnv(t *testing.T) {
 	if !strings.HasPrefix(s.Message, "<naozhi-relay") || !strings.Contains(s.Message, "「打开写权限后让它建」") || !strings.HasSuffix(s.Message, "Planner 的说明：\n建两个日程") {
 		t.Errorf("message = %q", s.Message)
 	}
-	if s.MCPEnv["aws-outlook-mcp"]["OUTLOOK_MCP_ENABLE_WRITES"] != "true" {
-		t.Errorf("spawn mcp_env = %v", s.MCPEnv)
+	want := map[string][]string{"aws-outlook-mcp": {"calendar_meeting"}}
+	if !reflect.DeepEqual(s.MCPTools, want) {
+		t.Errorf("spawn mcp_tools = %v", s.MCPTools)
 	}
-	if m, _ := side.Get(g.spawned[0]); m.MCPEnv["aws-outlook-mcp"]["OUTLOOK_MCP_ENABLE_WRITES"] != "true" {
-		t.Errorf("sidecar mcp_env = %v", m.MCPEnv)
+	if m, _ := side.Get(g.spawned[0]); !reflect.DeepEqual(m.MCPTools, want) {
+		t.Errorf("sidecar mcp_tools = %v", m.MCPTools)
 	}
 }
 

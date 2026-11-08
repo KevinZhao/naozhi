@@ -5,7 +5,9 @@
 // Planner's relay end to end (docs/rfc/planner.md D98): a relay in a turn the
 // user started reaches the dispatched session with the user's words and the
 // session acts on it; one in a receipt's turn is refused and never reaches
-// it; an ask naming the task sends the user's answer straight there.
+// it; an ask naming the task sends the user's answer straight there; a
+// dispatch allowing one Outlook write tool starts its session with Outlook's
+// write switch on and the other write tools denied.
 //
 //	go test -tags relaye2e -count=1 -v ./test/relaye2e/
 package relaye2e
@@ -95,6 +97,7 @@ workspace:
   name: "e2e"
 cli:
   path: %q
+  mcp_config: %q
 session:
   cwd: %q
   store_path: %q
@@ -102,7 +105,12 @@ session:
     state_dir: %q
 planner:
   enabled: true
-`, port, token, filepath.Join(in.bin, "claude"), ws, filepath.Join(state, "sessions.json"), filepath.Join(root, "shims"))
+`, port, token, filepath.Join(in.bin, "claude"), filepath.Join(root, "mcp.json"), ws, filepath.Join(state, "sessions.json"), filepath.Join(root, "shims"))
+	// Never started: the fake claude runs no MCP server.
+	mcp := `{"mcpServers":{"aws-outlook-mcp":{"command":"/nonexistent/aws-outlook-mcp","args":[],"env":{"A":"1"}}}}`
+	if err := os.WriteFile(filepath.Join(root, "mcp.json"), []byte(mcp), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	cfgPath := filepath.Join(root, "config.yaml")
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
@@ -299,4 +307,71 @@ func TestRelayEndToEnd(t *testing.T) {
 	if gh := in.file("gh.log"); strings.Count(gh, "pr merge") != 2 || strings.Contains(gh, "merge 9") {
 		t.Errorf("gh calls = %q, want merges of #1 and #2 only", gh)
 	}
+
+	// 4. The user asks for a meeting: the dispatch allows calendar_meeting
+	// alone; the session starts with Outlook's switch on in its own
+	// --mcp-config and every other Outlook write tool denied in its settings.
+	in.send("E2E-TOOLS 帮我建个日程")
+	var argv []string
+	in.wait("the e2e-cal session started", 60*time.Second, func() bool {
+		for _, line := range strings.Split(in.file("argv.log"), "\n") {
+			if name, args, ok := strings.Cut(line, "\t"); ok && name == "e2e-cal" {
+				argv = unquoteArgs(args)
+				return true
+			}
+		}
+		return false
+	})
+	flag := func(f string) string {
+		for i, a := range argv {
+			if a == f && i+1 < len(argv) {
+				return argv[i+1]
+			}
+		}
+		t.Fatalf("argv lacks %s: %q", f, argv)
+		return ""
+	}
+	var mcpDoc struct {
+		MCPServers map[string]struct {
+			Env map[string]string `json:"env"`
+		} `json:"mcpServers"`
+	}
+	b, _ := os.ReadFile(flag("--mcp-config"))
+	if err := json.Unmarshal(b, &mcpDoc); err != nil || mcpDoc.MCPServers["aws-outlook-mcp"].Env["OUTLOOK_MCP_ENABLE_WRITES"] != "true" {
+		t.Errorf("the session's --mcp-config: %s (%v)", b, err)
+	}
+	var settings struct {
+		Permissions struct {
+			Deny []string `json:"deny"`
+		} `json:"permissions"`
+	}
+	b, _ = os.ReadFile(flag("--settings"))
+	if err := json.Unmarshal(b, &settings); err != nil {
+		t.Fatalf("the session's --settings: %s (%v)", b, err)
+	}
+	deny := strings.Join(settings.Permissions.Deny, " ")
+	for _, want := range []string{"mcp__aws-outlook-mcp__email_send", "mcp__aws-outlook-mcp__enable_write_tools"} {
+		if !strings.Contains(deny, want+" ") && !strings.HasSuffix(deny, want) {
+			t.Errorf("deny lacks %s: %v", want, settings.Permissions.Deny)
+		}
+	}
+	if strings.Contains(deny, "calendar_meeting") {
+		t.Errorf("the allowed tool is denied: %v", settings.Permissions.Deny)
+	}
+}
+
+// unquoteArgs reads back the fake claude's argv as logged (%q of a []string).
+func unquoteArgs(s string) []string {
+	s = strings.TrimSuffix(strings.TrimPrefix(s, "["), "]")
+	var out []string
+	for s = strings.TrimSpace(s); s != ""; s = strings.TrimSpace(s) {
+		q, err := strconv.QuotedPrefix(s)
+		if err != nil {
+			return out
+		}
+		v, _ := strconv.Unquote(q)
+		out = append(out, v)
+		s = s[len(q):]
+	}
+	return out
 }

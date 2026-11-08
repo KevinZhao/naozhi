@@ -17,8 +17,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -26,6 +26,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/planner/promise"
+	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/tuningspec"
 )
 
@@ -60,10 +61,6 @@ const (
 	// relayTextRunes caps the Planner's words that follow the user's in a
 	// relay.
 	relayTextRunes = 4000
-	// mcpEnvVars caps the variables a dispatch sets on one server, and
-	// mcpEnvValueBytes one value.
-	mcpEnvVars       = 8
-	mcpEnvValueBytes = 256
 )
 
 // Type is a block's "type".
@@ -90,10 +87,11 @@ type Dispatch struct {
 	// WithUserWords leads the first message with the user's words of the
 	// turn, as a relay does (D98). Only a turn the user started may set it.
 	WithUserWords bool `json:"with_user_words,omitempty"`
-	// MCPEnv sets environment variables on MCP servers of cli.mcp_config for
-	// this session only (an Outlook server's write switch, D98): server name
-	// → variable → value. Only a turn the user started may carry it.
-	MCPEnv map[string]map[string]string `json:"mcp_env,omitempty"`
+	// MCPTools are the write tools this session alone may use, by server
+	// (D98): server name → its tool names (scout.WriteTools). The gateway
+	// turns that server's write switch on for the session and denies its
+	// other write tools. Only a turn the user started may carry it.
+	MCPTools map[string][]string `json:"mcp_tools,omitempty"`
 }
 
 // Promise registers something the Planner promised the user.
@@ -346,37 +344,26 @@ func (d *Dispatch) validate() error {
 	if err := noEnvelope("message", d.Message); err != nil {
 		return err
 	}
-	return validMCPEnv(d.MCPEnv)
+	return validMCPTools(d.MCPTools)
 }
 
-// envName is an environment variable a dispatch may set on an MCP server.
-var envName = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
-
-// reservedEnv are the variables that change how a server's program runs
-// rather than what it allows: a dispatch never sets them.
-var reservedEnv = regexp.MustCompile(`^(PATH|HOME|SHELL|USER|TMPDIR|PWD|IFS|LD_.*|DYLD_.*|NODE_.*|NPM_.*|PYTHON.*|PERL.*|RUBY.*|JAVA_.*|GO.*|BASH_.*|ENV|ZDOTDIR|SSL_.*|.*_PROXY|AWS_.*|.*TOKEN.*|.*SECRET.*|.*PASSWORD.*|.*KEY)$`)
-
-// validMCPEnv checks a dispatch's mcp_env: server names, variable names
-// and plain one-line values; the servers are checked against cli.mcp_config
-// at spawn.
-func validMCPEnv(env map[string]map[string]string) error {
-	for server, vars := range env {
-		switch {
-		case server == "" || utf8.RuneCountInString(server) > 64 || strings.IndexFunc(server, unicode.IsControl) >= 0:
-			return errors.New("mcp_env 的服务器名不对")
-		case len(vars) == 0:
-			return fmt.Errorf("mcp_env 里 %s 没有变量", server)
-		case len(vars) > mcpEnvVars:
-			return fmt.Errorf("mcp_env 里 %s 最多 %d 个变量", server, mcpEnvVars)
+// validMCPTools checks a dispatch's mcp_tools: only the write tools of a
+// server with a write switch (scout.WriteSwitch), never the one that turns
+// them all on. The other servers list their write tools without a switch,
+// so naming one would give the session nothing it lacks.
+func validMCPTools(tools map[string][]string) error {
+	for _, server := range slices.Sorted(maps.Keys(tools)) {
+		if _, ok := scout.WriteSwitch[server]; !ok {
+			return fmt.Errorf("mcp_tools 只能放行 %s 的写工具，%q 不行", strings.Join(slices.Sorted(maps.Keys(scout.WriteSwitch)), "、"), server)
 		}
-		for k, v := range vars {
-			switch {
-			case !envName.MatchString(k):
-				return fmt.Errorf("mcp_env 的变量名 %q 要是大写字母、数字和下划线", k)
-			case reservedEnv.MatchString(k):
-				return fmt.Errorf("mcp_env 不能设 %s", k)
-			case len(v) > mcpEnvValueBytes || strings.IndexFunc(v, unicode.IsControl) >= 0:
-				return fmt.Errorf("mcp_env 里 %s 的值太长或含控制字符", k)
+		known := scout.WriteTools(server)
+		known = slices.DeleteFunc(known, func(t string) bool { return t == scout.EnableWrites })
+		if len(tools[server]) == 0 {
+			return fmt.Errorf("mcp_tools 里 %s 没有工具", server)
+		}
+		for _, t := range tools[server] {
+			if !slices.Contains(known, t) {
+				return fmt.Errorf("mcp_tools 里 %s 没有写工具 %q（可放行：%s）", server, t, strings.Join(known, "、"))
 			}
 		}
 	}

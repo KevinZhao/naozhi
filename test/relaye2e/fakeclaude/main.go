@@ -55,6 +55,9 @@ func plannerReply(text string) string {
 		return "好的，派出。\n" + block(map[string]string{"type": "dispatch", "workspace": "e2e-ws", "title": "e2e-task", "model": "", "message": "看一下 PR，等用户决定再合并。"})
 	case strings.Contains(text, "E2E-RELAY"):
 		return "转达。\n" + block(map[string]string{"type": "relay", "key": string(key), "text": "E2E-FROM-USER 按用户说的合并 #1"})
+	case strings.Contains(text, "E2E-TOOLS"):
+		return "派一个建日程的。\n" + block(map[string]any{"type": "dispatch", "workspace": "e2e-ws", "title": "e2e-cal", "model": "", "message": "建一个日程。",
+			"with_user_words": true, "mcp_tools": map[string][]string{"aws-outlook-mcp": {"calendar_meeting"}}})
 	case strings.Contains(text, "E2E-ASK"):
 		return "问一下。\n" + block(map[string]any{"type": "ask", "question": "合并 #2 吗？", "options": []string{"合并 #2", "先不合"}, "task": string(key)})
 	}

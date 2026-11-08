@@ -37,7 +37,7 @@ for (const [name, vp] of [['desktop', { viewport: { width: 1440, height: 900 } }
           block({ type: 'relay', key: TASK, text: 'iso 按顺序合并，每合一个等 CI 绿' }) + '\n\n' +
           block({ type: 'ask', question: 'iso 要发版吗？', options: ['发', '先不发'], task: TASK }) + '\n\n' +
           block({ type: 'dispatch', workspace: 'myproject', title: 'iso 建日程', model: '', message: 'iso 建两个日程', with_user_words: true,
-            mcp_env: { 'aws-outlook-mcp': { OUTLOOK_MCP_ENABLE_WRITES: 'true' } } }) },
+            mcp_tools: { 'aws-outlook-mcp': ['calendar_meeting'] } }) },
       ],
     });
     try {
@@ -54,7 +54,8 @@ for (const [name, vp] of [['desktop', { viewport: { width: 1440, height: 900 } }
       await expect(reply.locator('.pl-act-ask .pl-scard[data-key="' + TASK + '"]')).toHaveCount(1);
       const dispatch = reply.locator('.pl-act-dispatch');
       await expect(dispatch).toContainText('你这一轮的原话');
-      await expect(dispatch).toContainText('aws-outlook-mcp：OUTLOOK_MCP_ENABLE_WRITES=true');
+      await expect(dispatch).toContainText('放行写工具');
+      await expect(dispatch).toContainText('aws-outlook-mcp：calendar_meeting');
       await expect(reply).not.toContainText(TASK);
 
       // The session: the relayed message reads whose words are whose.

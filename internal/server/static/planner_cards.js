@@ -254,7 +254,7 @@ function actionCardHtml(raw) {
     const name = WORKSPACE_ID_RE.test(ws) ? workspaceName(ws) : ws;
     return '<div class="pl-act pl-act-dispatch"' + (name || !ws ? '' : ' data-ws="' + escAttr(ws) + '"') + '><div class="pl-act-h">派出会话' + (title ? ' · ' + esc(title) : '') + '</div>' +
       rowsHtml([['工作区', name], ['模型', str(a.model)], ['附上', a.with_user_words === true ? '你这一轮的原话' : ''],
-        ['MCP', mcpEnvText(a.mcp_env)], ['第一条消息', str(a.message)]]) + '</div>';
+        ['放行写工具', mcpToolsText(a.mcp_tools)], ['第一条消息', str(a.message)]]) + '</div>';
   }
   if (a.type === 'relay') {
     // What the session got is the user's words then this text; the card
@@ -303,12 +303,12 @@ function actionCardHtml(raw) {
     (task ? '<div class="pl-act-why">你的回答会直接送到：</div><div class="pl-scards">' + sessionCardHtml(task) + '</div>' : '') + '</div>';
 }
 
-// mcpEnvText is a dispatch's mcp_env as one line: server: VAR=value, ...
-function mcpEnvText(env) {
-  if (!env || typeof env !== 'object' || Array.isArray(env)) return '';
-  return Object.entries(env).map(([server, vars]) => {
-    const kv = vars && typeof vars === 'object' ? Object.entries(vars).map(([k, v]) => k + '=' + str(v)).join(' ') : '';
-    return server + (kv ? '：' + kv : '');
+// mcpToolsText is a dispatch's mcp_tools as one line: server: tool、tool；...
+function mcpToolsText(tools) {
+  if (!tools || typeof tools !== 'object' || Array.isArray(tools)) return '';
+  return Object.entries(tools).map(([server, names]) => {
+    const list = Array.isArray(names) ? names.map(str).filter(Boolean).join('、') : '';
+    return server + (list ? '：' + list : '');
   }).join('；');
 }
 

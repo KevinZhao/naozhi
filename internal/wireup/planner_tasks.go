@@ -17,6 +17,7 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/planner/action"
 	"github.com/naozhi/naozhi/internal/planner/agent"
+	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/usermsg"
@@ -64,24 +65,29 @@ type TaskOpts struct {
 	// Planner is the Planner's cross-session name (agent.Agent.Name), the
 	// one a dispatched session reports to.
 	Planner string
-	// MCPConfig is cli.mcp_config as resolved ("" for none): the servers a
-	// dispatch's mcp_env may set variables on (D98).
+	// MCPConfig is cli.mcp_config as resolved ("" for none): the servers
+	// whose write tools a dispatch's mcp_tools may allow (D98).
 	MCPConfig string
 	// MCPPath is where the session key's own --mcp-config goes
-	// (datadir.Layout.TaskMCPConfigPath); nil refuses mcp_env.
+	// (datadir.Layout.TaskMCPConfigPath); nil refuses mcp_tools.
 	MCPPath func(key string) string
 }
 
 // For is the options of session key dispatched into dir. A dispatch with
-// mcp_env gets its own --mcp-config: cli.mcp_config with those variables set
-// on the servers named. A server's MCP setting is fixed when its process
+// mcp_tools gets its own --mcp-config, cli.mcp_config with the write switch
+// (scout.WriteSwitch) on for the servers named, and a permissions.deny rule
+// for each of their other write tools (scout.WriteTools), so it holds the
+// tools allowed and no more. A server's switch is fixed when its process
 // starts and a session never reloads it, so this is the one place a
 // dispatched session gets more than the router-wide servers allow. The
 // flag outranks a project's .mcp.json and the local scope of
 // ~/.claude.json, and --setting-sources project,local reads no
 // ~/.claude.json top level at all (11-07 runs), so editing that file never
-// reached a dispatched session.
-func (t TaskOpts) For(key, dir, title, model string, env map[string]map[string]string) (session.AgentOpts, error) {
+// reached a dispatched session. Deny, not a PreToolUse hook: under
+// --dangerously-skip-permissions a deny rule takes the tool out of the
+// session's tool list, and a project's own permissions.allow does not bring
+// it back, while a project's disableAllHooks turned a hook off (11-08 runs).
+func (t TaskOpts) For(key, dir, title, model string, tools map[string][]string) (session.AgentOpts, error) {
 	opts := t.Base
 	opts.Backend, opts.DefaultBackend = "claude", ""
 	opts.Workspace = dir
@@ -92,17 +98,32 @@ func (t TaskOpts) For(key, dir, title, model string, env map[string]map[string]s
 	opts.CrossSessionInbound = "accept"
 	opts.Exempt = false
 	opts.SystemPrompt = strings.TrimSpace(opts.SystemPrompt + "\n\n" + taskPrompt(t.Planner))
-	if len(env) == 0 {
+	if len(tools) == 0 {
 		return opts, nil
 	}
 	if t.MCPPath == nil || t.MCPConfig == "" {
-		return opts, errors.New("没有配置 cli.mcp_config，mcp_env 无处可设")
+		return opts, errors.New("没有配置 cli.mcp_config，mcp_tools 无处可放行")
+	}
+	env := map[string]map[string]string{}
+	deny := slices.Clone(opts.PermissionsDeny)
+	for _, server := range slices.Sorted(maps.Keys(tools)) {
+		sw, ok := scout.WriteSwitch[server]
+		if !ok {
+			return opts, fmt.Errorf("%s 没有写开关，mcp_tools 放行不了它的工具", server)
+		}
+		env[server] = map[string]string{sw: "true"}
+		for _, tool := range scout.WriteTools(server) {
+			if tool == scout.EnableWrites || !slices.Contains(tools[server], tool) {
+				deny = append(deny, scout.MCPTool(server, tool))
+			}
+		}
 	}
 	path := t.MCPPath(key)
 	if err := writeTaskMCPConfig(t.MCPConfig, path, env); err != nil {
 		return opts, err
 	}
 	opts.MCPConfig = path
+	opts.PermissionsDeny = deny
 	return opts, nil
 }
 
@@ -159,9 +180,9 @@ func writeTaskMCPConfig(src, path string, env map[string]map[string]string) erro
 
 // ForKey is a dispatched session's options rebuilt from its sidecar, for a
 // respawn after its process went away (idle TTL, a crash, a shim that did not
-// survive a restart); false when key has no task sidecar. An mcp_env that no
-// longer applies (cli.mcp_config changed) is logged and dropped: the session
-// still resumes, with the router-wide servers.
+// survive a restart); false when key has no task sidecar. An mcp_tools that
+// no longer applies (cli.mcp_config changed) is logged and dropped: the
+// session still resumes, with the router-wide servers.
 func (t TaskOpts) ForKey(key string) (session.AgentOpts, bool) {
 	if t.Sessions == nil {
 		return session.AgentOpts{}, false
@@ -170,9 +191,9 @@ func (t TaskOpts) ForKey(key string) (session.AgentOpts, bool) {
 	if !ok || m.Purpose != sidecar.PurposeTask {
 		return session.AgentOpts{}, false
 	}
-	opts, err := t.For(key, m.Dir, m.Title, m.Model, m.MCPEnv)
+	opts, err := t.For(key, m.Dir, m.Title, m.Model, m.MCPTools)
 	if err != nil {
-		slog.Warn("planner task: mcp_env not applied on respawn", "key", key, "err", err)
+		slog.Warn("planner task: mcp_tools not applied on respawn", "key", key, "err", err)
 		opts, _ = t.For(key, m.Dir, m.Title, m.Model, nil)
 	}
 	return opts, true
@@ -216,7 +237,7 @@ type TaskSpawner struct {
 // Spawn is action.Config.Spawn. A start that fails is said in the user's
 // words (spawnError): the Planner relays it.
 func (t TaskSpawner) Spawn(ctx context.Context, key string, s action.Spawn) error {
-	opts, err := t.Opts.For(key, s.Dir, s.Title, s.Model, s.MCPEnv)
+	opts, err := t.Opts.For(key, s.Dir, s.Title, s.Model, s.MCPTools)
 	if err != nil {
 		return err
 	}

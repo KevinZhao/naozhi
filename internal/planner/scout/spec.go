@@ -78,15 +78,29 @@ var writeTools = map[string][]string{
 		"asana___UpdateAllocation", "asana___UpdateProject", "asana___UpdateStory", "asana___UpdateTask"},
 }
 
-// mcpTool is a tool's name as the CLI knows it.
-func mcpTool(server, tool string) string { return "mcp__" + server + "__" + tool }
+// EnableWrites is the tool a server offers to turn its write tools on at
+// runtime; never one a dispatch may allow (it would allow them all).
+const EnableWrites = "enable_write_tools"
+
+// WriteSwitch is, per server, the environment variable in its
+// cli.mcp_config entry that makes it list its write tools at start ("true"
+// turns them on). A dispatch's mcp_tools (docs/rfc/planner.md D98) names
+// write tools of these servers only: the other servers list theirs anyway.
+var WriteSwitch = map[string]string{ServerOutlook: "OUTLOOK_MCP_ENABLE_WRITES"}
+
+// WriteTools is server's write tools, a copy; nil for a server with none
+// known.
+func WriteTools(server string) []string { return slices.Clone(writeTools[server]) }
+
+// MCPTool is a tool's name as the CLI knows it.
+func MCPTool(server, tool string) string { return "mcp__" + server + "__" + tool }
 
 // toolNames renders table's tools of servers, in server order.
 func toolNames(table map[string][]string, servers []string) []string {
 	var out []string
 	for _, s := range servers {
 		for _, t := range table[s] {
-			out = append(out, mcpTool(s, t))
+			out = append(out, MCPTool(s, t))
 		}
 	}
 	return out

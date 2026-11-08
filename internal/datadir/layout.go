@@ -199,8 +199,8 @@ func (l Layout) PlannerScoutWorkDir() string { return l.Join("planner", "scout",
 func (l Layout) ScoutMCPConfigPath() string { return l.Join("session-settings", "scout-mcp.json") }
 
 // TaskMCPConfigPath is the --mcp-config of a dispatched session whose
-// dispatch set mcp_env (docs/rfc/planner.md D98): cli.mcp_config with that
-// environment, beside the scout's, named by the key's hash
+// dispatch allowed write tools (mcp_tools, docs/rfc/planner.md D98):
+// cli.mcp_config with those servers' write switch on, beside the scout's, named by the key's hash
 // (<root>/session-settings/task-mcp-<hash>.json).
 func (l Layout) TaskMCPConfigPath(keyHash string) string {
 	return l.Join("session-settings", "task-mcp-"+keyHash+".json")
