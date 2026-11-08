@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	dashplanner "github.com/naozhi/naozhi/internal/dashboard/ext/planner"
@@ -113,6 +114,10 @@ func TestPlannerSendFileIDs(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
 			a.Start(ctx, turns, nil)
+			// The loop's first reconcile marks the shift in the state root;
+			// a case refused at once would otherwise end while that write
+			// is under way, and TempDir's cleanup finds the directory busy.
+			waitFile(t, lay.PlannerAgentPath())
 			if tc.stopped {
 				if err := a.SetStopped(true); err != nil {
 					t.Fatal(err)
@@ -188,5 +193,20 @@ func TestPlannerSendFileIDs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// waitFile waits up to 5 seconds for path to exist.
+func waitFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s not written", path)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
