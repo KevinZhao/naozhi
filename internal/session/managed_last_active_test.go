@@ -122,12 +122,15 @@ func TestReattachedTurnEndRefreshesLastActive(t *testing.T) {
 
 // A turn running for hours keeps last_active moving with its events, a
 // minute's step at a time: the list, index.json and the Planner's snapshot
-// read it, and an event inside the step leaves it where it was.
+// read it, and an event inside the step leaves it where it was. The turn's
+// own time (LastTurnAt, what sessions.json keeps) stays the turn's start:
+// custody names a failure by it.
 func TestLastActiveFollowsEvents(t *testing.T) {
 	proc := NewTestProcess()
 	proc.StateVal = cli.StateRunning
 	s := &ManagedSession{key: "dashboard:direct:la:general"}
 	s.storeProcess(proc)
+	s.setSessionID("sid-la")
 
 	started := time.Now().Add(-3 * time.Hour)
 	s.lastActive.Store(started.UnixNano())
@@ -144,31 +147,30 @@ func TestLastActiveFollowsEvents(t *testing.T) {
 		t.Errorf("snapshot last_active = %d, want %d", got, ev.UnixMilli())
 	}
 
-	// Within the step: the stored value stays.
-	within := time.Now().Add(-30 * time.Second)
-	s.lastActive.Store(within.UnixNano())
+	// Within the step: it stays at the first event.
 	proc.EventLog.Append(clievent.EventEntry{Type: "text", Summary: "still going"})
-	if got := s.LastActive(); !got.Equal(within) {
-		t.Errorf("event %v after the last refresh moved it: %v", time.Since(within).Round(time.Second), got)
+	if later := proc.LastEventAt(); later.Equal(ev) {
+		t.Fatal("the second event has the first one's time")
 	}
-	if got := toStoreEntryLastActive(t, s); got != within.UnixNano() {
-		t.Errorf("stored last_active = %d, want %d", got, within.UnixNano())
+	if got := s.LastActive(); !got.Equal(ev) {
+		t.Errorf("an event within the step moved it: %v, want %v", got, ev)
 	}
 
-	// Never backwards: a turn's end after the last event stays.
-	end := time.Now().Add(time.Minute)
-	s.lastActive.Store(end.UnixNano())
-	if got := s.LastActive(); !got.Equal(end) {
-		t.Errorf("last_active went back to an older event: %v, want %v", got, end)
+	if got := s.LastTurnAt(); !got.Equal(started) {
+		t.Errorf("LastTurnAt = %v, want the turn's start %v", got, started)
 	}
-}
-
-func toStoreEntryLastActive(t *testing.T, s *ManagedSession) int64 {
-	t.Helper()
-	s.setSessionID("sid-la")
 	e, ok := sessionToStoreEntry(s)
 	if !ok {
 		t.Fatal("no store entry")
 	}
-	return e.LastActive
+	if e.LastActive != started.UnixNano() {
+		t.Errorf("stored last_active = %d, want the turn's %d", e.LastActive, started.UnixNano())
+	}
+
+	// Never backwards: a turn's end after the last event stays.
+	s.touchLastActive()
+	end := s.LastTurnAt()
+	if got := s.LastActive(); !got.Equal(end) || got.Before(ev) {
+		t.Errorf("after the turn's end: %v, want %v", got, end)
+	}
 }

@@ -474,3 +474,44 @@ func TestBlockedPutAwayLimits(t *testing.T) {
 		})
 	}
 }
+
+// A failed turn's background task keeps sending events after it, which move
+// last_active a minute at a time (D94's custody reads its own turn time):
+// it is still the one failure, retried once after its backoff rather than
+// counted again at every tick until the lineage stops; and one custody does
+// not retry is left to the user once.
+func TestFailureStaysOneWhileEventsArrive(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		class health.ErrorClass
+		since time.Duration // of health's judgement before the turn time
+		sent  int
+		inbox int
+	}{
+		{name: "retried", class: health.ErrNetwork, sent: 1},
+		{name: "not retried", class: health.ErrAuth, since: -time.Minute, inbox: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			r.dispatch("task:a")
+			turn := r.now
+			u := health.Unit{ID: "task:a", Kind: health.KindSession, State: health.Failed, ErrClass: tc.class,
+				Since: turn.Add(tc.since), LastActive: turn, TurnAt: turn}
+			for range MaxErrors + 1 {
+				r.units = []health.Unit{u}
+				r.e.Tick()
+				r.now = r.now.Add(time.Minute)
+				u.LastActive = r.now // an event of the background task
+			}
+			if len(r.sent) != tc.sent {
+				t.Errorf("sent %q, want %d", r.sent, tc.sent)
+			}
+			if st := r.e.Status("task:a"); st.State == StateStopped {
+				t.Errorf("stopped: %+v", st)
+			}
+			if n := len(r.inbox.items); n != tc.inbox {
+				t.Errorf("inbox = %+v, want %d", r.inbox.items, tc.inbox)
+			}
+		})
+	}
+}

@@ -260,8 +260,12 @@ type ManagedSession struct {
 	runStore *runhistory.Store
 
 	// lastActive stores time.UnixNano atomically to avoid data races
-	// between Send() (under sendMu) and Cleanup/evictOldest (under the table lock).
+	// between Send() (under sendMu) and Cleanup/evictOldest (under the table
+	// lock): a turn's start and end, persisted as last_active.
 	lastActive atomic.Int64
+	// lastOutput is the process's latest live event as LastActive last
+	// took it, a minute's step at a time; lastActive alone is the turns'.
+	lastOutput atomic.Int64
 
 	// createdAt anchors the session's sidebar position: set once at
 	// construction (or carried over via Rename) and never touched again.

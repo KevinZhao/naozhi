@@ -1049,9 +1049,11 @@ func (e *Engine) autoOff(key string) {
 	}
 }
 
-// failedAt names one failure: when the session was last active, so a retry
-// that failed again is a new one even when health saw no transition.
-func failedAt(u health.Unit) time.Time { return cmp.Or(u.LastActive, u.Since) }
+// failedAt names one failure: when the session's turn last started or
+// ended, so a retry that failed again is a new one even when health saw no
+// transition, while a background task's events after the failed turn
+// (which move LastActive) are not.
+func failedAt(u health.Unit) time.Time { return cmp.Or(u.TurnAt, u.LastActive, u.Since) }
 
 // stale reports whether u's failure is older than staleAfter.
 func (e *Engine) stale(u health.Unit) bool { return e.staleSince(failedAt(u)) }
@@ -1109,7 +1111,7 @@ func (e *Engine) answer(u health.Unit) {
 			}
 			return
 		}
-		if u.Since.Before(u.LastActive) {
+		if u.Since.Before(cmp.Or(u.TurnAt, u.LastActive)) {
 			// Active again since health judged it failed (a retry ran):
 			// no transition took this failure to the inbox.
 			e.leaveLocked(key, class, "")

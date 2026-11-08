@@ -118,6 +118,9 @@ func sessionFact(snap session.SessionSnapshot, s *session.ManagedSession, logDir
 		Register:   !sessionkey.IsSysKey(snap.Key) && !sessionkey.IsPlannerNSKey(snap.Key),
 		LastActive: unixMilli(snap.LastActive),
 	}
+	if s != nil {
+		f.TurnAt = s.LastTurnAt()
+	}
 	if b := snap.Backend; b != "" && b != "claude" {
 		f.Coverage = health.CoverageGateway
 	}
