@@ -1,6 +1,7 @@
 package session
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -223,8 +224,11 @@ func (h *Handlers) fillHealth(snapshots []sessionpkg.SessionSnapshot, now time.T
 			continue
 		}
 		sh := &sessionview.SessionHealth{State: string(u.State), Since: u.Since.UnixMilli(), ErrClass: string(u.ErrClass)}
-		if !u.LastActive.IsZero() {
-			sh.Seen = u.LastActive.UnixMilli()
+		// The turn time, as the row's turn_at it is compared with: a
+		// background task's events move last_active between reconciles
+		// without making the verdict old.
+		if at := cmp.Or(u.TurnAt, u.LastActive); !at.IsZero() {
+			sh.Seen = at.UnixMilli()
 		}
 		if r, ok := strings.CutPrefix(u.Evidence, health.DeathEvidence); ok && u.State == health.Failed {
 			sh.DeathReason = r

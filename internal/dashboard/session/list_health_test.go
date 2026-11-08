@@ -11,7 +11,9 @@ import (
 
 // A failed session comes back from a restart reading "ready" with no death
 // reason; the health machine still holds the failure, and the list carries
-// it so the dashboard keeps showing the failure and its reason.
+// it so the dashboard keeps showing the failure and its reason. Seen is the
+// turn time the verdict took in, not last_active, which a background task's
+// events move between reconciles.
 func TestHandleList_Health(t *testing.T) {
 	since := time.UnixMilli(1_700_000_000_000)
 	// A background task is named once it has run past health.LongTask.
@@ -22,7 +24,7 @@ func TestHandleList_Health(t *testing.T) {
 	h.deps.Health = func() health.Snapshot {
 		return health.Snapshot{Units: []health.Unit{
 			{ID: "dashboard:direct:a:general", State: health.Failed, Evidence: health.DeathEvidence + "cli_exited_code_-1", ErrClass: health.ErrOther, Since: since},
-			{ID: "dashboard:direct:b:general", State: health.Failed, Evidence: "last turn ended in an API error", ErrClass: health.ErrAuth, Since: since, LastActive: since.Add(5 * time.Minute)},
+			{ID: "dashboard:direct:b:general", State: health.Failed, Evidence: "last turn ended in an API error", ErrClass: health.ErrAuth, Since: since, LastActive: since.Add(5 * time.Minute), TurnAt: since.Add(3 * time.Minute)},
 			{ID: "dashboard:direct:c:general", State: health.Idle, Since: since, Background: "sleep 3600", BackgroundSince: long},
 			{ID: "dashboard:direct:e:general", State: health.Idle, Since: since, Background: "sleep 60", BackgroundSince: short},
 		}}
@@ -41,7 +43,7 @@ func TestHandleList_Health(t *testing.T) {
 	ms := since.UnixMilli()
 	want := map[string]*sessionview.SessionHealth{
 		"dashboard:direct:a:general": {State: "failed", Since: ms, DeathReason: "cli_exited_code_-1", ErrClass: "other"},
-		"dashboard:direct:b:general": {State: "failed", Since: ms, Seen: since.Add(5 * time.Minute).UnixMilli(), ErrClass: "auth"},
+		"dashboard:direct:b:general": {State: "failed", Since: ms, Seen: since.Add(3 * time.Minute).UnixMilli(), ErrClass: "auth"},
 		"dashboard:direct:c:general": {State: "idle", Since: ms, Background: "sleep 3600", BackgroundSince: long.UnixMilli()},
 		"dashboard:direct:d:general": nil,
 		"dashboard:direct:e:general": {State: "idle", Since: ms},

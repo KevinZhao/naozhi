@@ -36,6 +36,11 @@ type SessionSnapshot struct {
 	TuningModel  string `json:"tuning_model,omitempty"`
 	TuningEffort string `json:"tuning_effort,omitempty"`
 	LastActive   int64  `json:"last_active"` // unix ms
+	// TurnAt is when a turn last started or ended (unix ms), without the
+	// events between that move LastActive: a health verdict is older than
+	// the session's activity only past a turn, not past a background task's
+	// event. 0 when never set.
+	TurnAt int64 `json:"turn_at,omitempty"`
 	// CreatedAt anchors sidebar order (ascending, so new rows land at the
 	// bottom and rows never shift on activity). unix ms; 0 only if loadStore
 	// couldn't infer one (treated as "very old").
@@ -127,9 +132,10 @@ type SessionSnapshot struct {
 type SessionHealth struct {
 	State string `json:"state"`
 	// Since is when the unit entered State (unix ms) and Seen the
-	// session's last activity the verdict took in: a verdict that saw
-	// neither the session's last activity is one a later send has moved
-	// past. A failure custody retried in vain keeps its Since.
+	// session's turn time (SessionSnapshot.TurnAt) the verdict took in: a
+	// verdict that saw neither the session's last turn is one a later
+	// send has moved past. A failure custody retried in vain keeps its
+	// Since.
 	Since       int64  `json:"since"`
 	Seen        int64  `json:"seen,omitempty"`
 	DeathReason string `json:"death_reason,omitempty"`

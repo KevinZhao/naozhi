@@ -210,6 +210,9 @@ func (r *Router) InjectSession(key string, proc *TestProcess) *ManagedSession {
 	return s
 }
 
+// SetLastTurnAtForTest sets when the session's last turn started or ended.
+func (s *ManagedSession) SetLastTurnAtForTest(t time.Time) { s.lastActive.Store(t.UnixNano()) }
+
 // SetWorkspaceForTest stamps the session-level workspace on an injected
 // session; production sets it through the spawn / takeover paths.
 func (s *ManagedSession) SetWorkspaceForTest(ws string) { s.setWorkspace(ws) }

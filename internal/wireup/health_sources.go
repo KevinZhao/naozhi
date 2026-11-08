@@ -117,9 +117,10 @@ func sessionFact(snap session.SessionSnapshot, s *session.ManagedSession, logDir
 		// directories, which are not a body of work.
 		Register:   !sessionkey.IsSysKey(snap.Key) && !sessionkey.IsPlannerNSKey(snap.Key),
 		LastActive: unixMilli(snap.LastActive),
-	}
-	if s != nil {
-		f.TurnAt = s.LastTurnAt()
+		// At the millisecond, as LastActive: custody names a failure by it
+		// and compares it with the ID in the sidecar, which may be one
+		// LastActive gave.
+		TurnAt: unixMilli(snap.TurnAt),
 	}
 	if b := snap.Backend; b != "" && b != "claude" {
 		f.Coverage = health.CoverageGateway
