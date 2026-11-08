@@ -97,6 +97,11 @@ type Meta struct {
 	// Report is the session's latest report (§15.12 ③), its conclusion
 	// for the task card; the full text is in its digest (planner/digest).
 	Report *Report `json:"report,omitempty"`
+	// SeenAt is when the user last looked at the session's result in the
+	// dashboard (§15.12 ④): opened the session, expanded its task card or
+	// marked every new result read. A result later than it is new
+	// (planner/task).
+	SeenAt time.Time `json:"seen_at,omitzero"`
 }
 
 // Report is a session's latest report: its state (done, blocked,

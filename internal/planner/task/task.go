@@ -8,6 +8,13 @@
 // router) keeps the failure it had, else it ended: 已完成 by itself. A promise is 待提醒 before its
 // due reminder, done once closed. Every state someone sets is journaled with who and why; a done
 // task leaves the list Archive after it was done, its data kept.
+//
+// A dispatched session's result is new (§15.12 ④, D102) while it is later
+// than when the user last looked (the sidecar's SeenAt): its latest report
+// with a conclusion, or its turning done or failed. Only the user's own
+// looking marks it read — opening the session (Board.SetViewing, a viewing
+// sink), expanding its card or marking all read (Board.Seen) — never the
+// Planner mentioning it.
 package task
 
 import (
@@ -102,6 +109,11 @@ type Task struct {
 	// session has a digest the card can open (GET /api/sessions/digest).
 	Report *sidecar.Report `json:"report,omitempty"`
 	Digest bool            `json:"digest,omitempty"`
+	// ResultAt is when a dispatched session last had a result for the user
+	// (resultTime); New says the user has not looked at it since: the
+	// card's blue dot, never a count of 等你 nor a push.
+	ResultAt time.Time `json:"result_at,omitzero"`
+	New      bool      `json:"new,omitempty"`
 }
 
 // liveRunes caps Live's texts: a card shows one line of them.
@@ -228,18 +240,51 @@ func archived(t Task, now time.Time) bool {
 	return now.Sub(from) >= Archive
 }
 
+// Report states with a conclusion (§15.12 ③): the ones a new result is
+// made of. A progress report only updates the card ("知会", ④), and
+// need_user opens an item in 等你 instead.
+const (
+	reportDone    = "done"
+	reportBlocked = "blocked"
+)
+
+// resultTime is when session m last had a result for the user (§15.12 ④):
+// its latest report with a conclusion, or its entering state st, done or
+// failed, at at — unless by the user, who did it and needs no telling (a
+// stop, a mark). Zero for none. One time over every source, so another
+// source of results (a turn ending while the user is away) joins the max.
+func resultTime(m sidecar.Meta, st State, by By, at time.Time) time.Time {
+	var r time.Time
+	if p := m.Report; p != nil && (p.State == reportDone || p.State == reportBlocked) {
+		r = p.At
+	}
+	if (st == Done || st == Failed) && by != ByUser && at.After(r) {
+		r = at
+	}
+	return r
+}
+
+// isNew reports whether a result at result is one not seen at seen.
+func isNew(result, seen time.Time) bool { return !result.IsZero() && result.After(seen) }
+
+// units is the health table by unit ID; empty without one.
+func (b *Board) units() map[string]health.Unit {
+	units := map[string]health.Unit{}
+	if b.cfg.Health != nil {
+		for _, u := range b.cfg.Health().Units {
+			units[u.ID] = u
+		}
+	}
+	return units
+}
+
 // List returns the tasks not archived: 进行中 (等你 and 失败 first, newest
 // first), then 待提醒 (earliest due first), then 已完成 (latest first).
 func (b *Board) List() []Task {
 	now := b.cfg.Now()
 	var out []Task
 	if b.cfg.Sessions != nil {
-		units := map[string]health.Unit{}
-		if b.cfg.Health != nil {
-			for _, u := range b.cfg.Health().Units {
-				units[u.ID] = u
-			}
-		}
+		units := b.units()
 		var live map[string]Live
 		if b.cfg.Live != nil {
 			live = b.cfg.Live()
@@ -256,6 +301,8 @@ func (b *Board) List() []Task {
 				t.Live = &l
 			}
 			t.State, t.By, t.Why, t.At = sessionState(m, u)
+			t.ResultAt = resultTime(m, t.State, t.By, t.At)
+			t.New = isNew(t.ResultAt, m.SeenAt)
 			if t.State == Done && m.Reap == nil && b.cfg.ReapWait != nil {
 				t.ReapWait, t.ReapAt = b.cfg.ReapWait(m.Key)
 			}
@@ -398,6 +445,84 @@ func (b *Board) Stop(id string) error {
 	}
 	return nil
 }
+
+// Seen marks read for the user the results of dispatched sessions ids
+// (they expanded the card), or with all every task whose result is new in
+// the list now (全部已读), and returns how many it marked. Only a new result
+// is written, so marking one read again writes nothing; an ID that is no
+// dispatched session (a promise, an archived or unknown one) is skipped.
+func (b *Board) Seen(ids []string, all bool) (int, error) {
+	if b.cfg.Sessions == nil {
+		return 0, nil
+	}
+	if all {
+		ids = ids[:0:0]
+		for _, t := range b.List() {
+			if t.New {
+				ids = append(ids, t.ID)
+			}
+		}
+	}
+	units, now := b.units(), b.cfg.Now()
+	n := 0
+	var errs []error
+	for _, id := range ids {
+		ok, err := b.seen(id, units[id], now)
+		if err != nil {
+			errs = append(errs, err)
+		}
+		if ok {
+			n++
+		}
+	}
+	return n, errors.Join(errs...)
+}
+
+// seen sets dispatched session key's SeenAt to now when its result, by
+// health unit u, is new; true when it did.
+func (b *Board) seen(key string, u health.Unit, now time.Time) (bool, error) {
+	if !sessionkey.IsTaskKey(key) {
+		return false, nil
+	}
+	marked := false
+	_, err := b.cfg.Sessions.Update(key, func(m *sidecar.Meta) bool {
+		if m.Purpose != sidecar.PurposeTask {
+			return false
+		}
+		st, by, _, at := sessionState(*m, u)
+		if !isNew(resultTime(*m, st, by, at), m.SeenAt) {
+			return false
+		}
+		m.SeenAt, marked = now, true
+		return true
+	})
+	if err != nil {
+		return false, err
+	}
+	return marked, nil
+}
+
+// SetViewing is a viewing sink (server.ViewingSink): the user opening a
+// session in the dashboard marks its result read (§15.12 ④). The tab renews
+// the report every 30 seconds; only a new result is written, so a renewal
+// writes nothing.
+func (b *Board) SetViewing(key, _ string, viewing bool) {
+	if !viewing || b.cfg.Sessions == nil || !sessionkey.IsTaskKey(key) {
+		return
+	}
+	// The sidecar first: most sessions viewed have none, and need no
+	// health table read.
+	if m, ok := b.cfg.Sessions.Get(key); !ok || m.Purpose != sidecar.PurposeTask {
+		return
+	}
+	if _, err := b.seen(key, b.units()[key], b.cfg.Now()); err != nil {
+		slog.Warn("task: seen not saved", "key", key, "err", err)
+	}
+}
+
+// DropViewer is the viewing sink's other half; a tab closing marks
+// nothing.
+func (b *Board) DropViewer(string) {}
 
 // Observe is a health.Machine subscriber: it keeps on a dispatched session's
 // sidecar the failure health judged it in, cleared when it leaves it, so a

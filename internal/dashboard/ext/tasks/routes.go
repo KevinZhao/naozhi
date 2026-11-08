@@ -11,5 +11,6 @@ func (h *Handler) Routes() []httputil.Route {
 		{Pattern: "GET /api/tasks", Handler: h.HandleList},
 		{Pattern: "POST /api/tasks/state", Handler: h.HandleState},
 		{Pattern: "POST /api/tasks/stop", Handler: h.HandleStop},
+		{Pattern: "POST /api/tasks/seen", Handler: h.HandleSeen},
 	}
 }

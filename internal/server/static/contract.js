@@ -112,6 +112,7 @@ export const NZ_CONTRACT = Object.freeze({
     system_update: '/api/system/update',
     system_update_apply: '/api/system/update/apply',
     tasks: '/api/tasks',
+    tasks_seen: '/api/tasks/seen',
     tasks_state: '/api/tasks/state',
     tasks_stop: '/api/tasks/stop',
     transcribe: '/api/transcribe',

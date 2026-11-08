@@ -173,6 +173,36 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .tk-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid var(--nz-border)}
 .tk-act{min-height:26px}
 .tk-stop{color:var(--nz-red)}
+/* New result (§15.12 ④): a round dot before the title, apart from the left
+   edge 在跑 colours the same blue; never red (red is 等你's alone). */
+.tk-new{flex-shrink:0;width:8px;height:8px;margin:5px -1px 0 -3px;border-radius:50%;background:var(--nz-status-new);box-shadow:0 0 0 2px var(--nz-bg-0)}
+.tk-sec-done>summary .tk-new{display:inline-block;margin:0 0 1px 6px;vertical-align:middle}
+/* The chevron expanding the digest, beside "⋯". */
+.tk-expand{flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;width:24px;height:22px;margin:-2px -4px 0 0;padding:0;border:0;border-radius:var(--nz-radius-ms);background:none;color:var(--nz-text-mute);cursor:pointer}
+.tk-expand svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;transition:transform var(--nz-dur) var(--nz-ease)}
+.tk-expand[aria-expanded="true"] svg{transform:rotate(180deg)}
+.tk-expand:hover,.tk-expand[aria-expanded="true"]{background:var(--nz-bg-2);color:var(--nz-text)}
+.tk-expand:focus-visible{outline:2px solid var(--nz-focus);outline-offset:1px}
+/* 最新结论: the latest report's first sentence, one line. */
+.tk-report{display:flex;align-items:baseline;gap:6px;width:100%;min-width:0;margin-top:3px;padding:0;border:0;background:none;font:inherit;font-size:var(--nz-fs-xs);color:var(--nz-text);text-align:left}
+button.tk-report{cursor:pointer}
+button.tk-report:hover .tk-report-t{text-decoration:underline}
+.tk-report-k{flex-shrink:0;color:var(--nz-text-dim)}
+.tk-report-t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tk-card.done .tk-report-t{color:var(--nz-text-mute)}
+/* The expanded digest: the session's output, rendered as data. */
+.tk-digest{margin-top:8px;padding-top:8px;border-top:1px solid var(--nz-border);max-height:360px;overflow-y:auto;font-size:var(--nz-fs-xs);line-height:1.5;color:var(--nz-text);overflow-wrap:anywhere}
+.tk-digest .md-h2{font-size:var(--nz-fs-sm2)}
+.tk-digest .md-h3{font-size:var(--nz-fs-xs)}
+.tk-digest>.md-h2:first-child{margin-top:0}
+.tk-digest-note{color:var(--nz-text-dim)}
+/* "只看新结果" over the filtered cards. */
+.tk-filter{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;padding:0 2px;font-size:var(--nz-fs-xs);color:var(--nz-text-dim)}
+/* The header's "N 件新结果 · 全部已读". */
+.pl-news{display:flex;align-items:center;gap:6px;min-width:0;font-size:var(--nz-fs-xs);white-space:nowrap}
+.pl-news[hidden]{display:none}
+.pl-news>button[aria-pressed="true"]{text-decoration:underline}
+.pl-news-sep{color:var(--nz-text-faint)}
 /* 等你 bar atop the 会话 sidebar (side_wait.js), not rendered with none;
    unfolded, the Planner left column's cards at their full height above the
    session list. Only a bar taller than what the

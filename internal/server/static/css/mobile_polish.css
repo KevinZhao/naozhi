@@ -34,6 +34,7 @@
   /* The Planner's cards: × closes an item, a task's "⋯" and what it opens. */
   .pl-close,.pl-btn,.tk-more{min-width:44px;min-height:44px}
   .tk-more{margin:-10px -10px -10px 0}
+  .tk-expand{min-width:44px;min-height:44px;margin:-10px -10px -10px 0}
   /* The session header's custody switch and custody's 撤回. */
   button.custody-chip{min-height:32px}
   .custody-undo{min-height:44px;padding:0 8px}

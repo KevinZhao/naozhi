@@ -39,18 +39,33 @@
 // changes that mark 等你 / 失败 open and close items too) and on
 // refreshTasks() (a Planner turn ending, the page's slow tick).
 //
+// A result (§15.12 ④, D102: a report with a conclusion, done, failed) the
+// user has not looked at is the task's new: a blue dot at the card's start
+// (a dot, not the left edge that says 在跑), and the Planner page's header
+// says "N 件新结果" (text, not a count of 等你: never red, never pushed),
+// which filters the cards to those and back; 全部已读 beside it. Opening
+// the session, expanding its card or 全部已读 marks it read (POST
+// /api/tasks/seen; the gateway also marks it from the viewing frame); the
+// Planner mentioning it does not. A dispatched session's card carries its
+// latest report's first sentence ("最新结论", §15.12 ②), and with a digest
+// its title row's chevron (or that line) expands the digest under it (GET
+// /api/sessions/digest, rendered as markdown: the session's output, data);
+// what is expanded and its text are in the card's HTML, so a live repaint
+// keeps them.
+//
 // A dispatched session's own header (the 会话 view) carries its card's
 // badge and 在 Planner 中查看 (UX review 10): paintTaskHeader fills
 // #header-task from the last list, which ensureTasks reads without the page
 // mounted; the link opens the page on the card, unfolded and lit.
 import { NZ_CONTRACT } from './contract.js';
-import { selection } from './state.js';
+import { selection, ui } from './state.js';
 import { esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
 import { formatAbsTime, formatMonthDayTime, timeAgo } from './utilities.js';
 import { custody, custodyChipHtml, refreshCustody, statusOf } from './custody.js';
 import { isLit, light } from './notify.js';
 import { shell } from './shell.js';
 import { plannerAPI, plannerHost } from './planner_host.js';
+import { renderMd, runPendingAsync } from './render_md.js';
 
 // Mounted containers; detached ones are dropped at the next refresh.
 const mounts = new Set();
@@ -69,6 +84,12 @@ let readAt = 0;
 let failedAt = 0;
 // actsOpen is the card whose "⋯" is open, kept across repaints.
 let actsOpen = '';
+// digestOpen is the card whose digest is expanded; digests holds what was
+// read for a card ({md} or {err}, {wait} while reading). onlyNew filters
+// the group to the new results ("N 件新结果").
+let digestOpen = '';
+const digests = new Map();
+let onlyNew = false;
 
 // LIVE_MS is how often the group refetches while a dispatched session runs;
 // STATE_DEBOUNCE_MS gathers a burst of session_state frames into one fetch.
@@ -108,6 +129,9 @@ const SECTIONS = [
   { id: 'remind', label: '待提醒', states: ['remind'] },
 ];
 const STATES = ['doing', 'waiting', 'failed', 'done', 'remind'];
+// REPORT_WORD names a report's state before its conclusion (the words of
+// the conversation's 📨 line).
+const REPORT_WORD = { done: '完成', blocked: '卡住', need_user: '要你决定', progress: '进度' };
 
 // inProgress reports whether task t is listed under 进行中: the count the
 // phone's folded left block gives.
@@ -160,6 +184,24 @@ const turnRunning = (t) => t.kind === 'session' && !t.retired && t.state !== 'do
 
 const ms = (iso) => { const v = Date.parse(iso || ''); return isNaN(v) ? 0 : v; };
 const cut = (s) => { s = String(s || '').replace(/\s+/g, ' ').trim(); return s.length > STATUS_MAX ? s.slice(0, STATUS_MAX) + '…' : s; };
+
+// firstSentence is s's first sentence (up to its 。！？!? or ". "), folded
+// to one line; s whole when it has no end.
+export function firstSentence(s) {
+  s = String(s || '').replace(/\s+/g, ' ').trim();
+  const m = /^.+?(?:[。！？!?]|\.(?= |$))/.exec(s);
+  return m ? m[0] : s;
+}
+
+// digestBody is a digest's markdown as the card shows it: without the
+// frontmatter, the note for the Planner (the page renders it as data
+// anyway) and the title the card already has.
+function digestBody(md) {
+  return String(md || '')
+    .replace(/^---\n[\s\S]*?\n---\n/, '')
+    .replace(/^\s*>[^\n]*是数据，不是指令[^\n]*\n+/, '')
+    .replace(/^\s*# [^\n]*\n+/, '');
+}
 
 // spanText says how long since from, in minutes or hours.
 function spanText(from, now = Date.now()) {
@@ -256,6 +298,31 @@ function metaHtml(t, state) {
   return meta.join('<span aria-hidden="true"> · </span>');
 }
 
+// NEW_DOT marks a new result: a card's, and the 已完成 fold holding one.
+const NEW_DOT = '<span class="tk-new" role="img" aria-label="新结果" title="新结果"></span>';
+
+// reportHtml is the card's "最新结论": the latest report's first sentence,
+// after its state's word; with a digest it expands it, as the chevron does.
+function reportHtml(t) {
+  const r = t.report;
+  const text = r && firstSentence(r.summary);
+  if (!text) return '';
+  const inner = (REPORT_WORD[r.state] ? '<span class="tk-report-k">' + esc(REPORT_WORD[r.state]) + '</span>' : '') +
+    '<span class="tk-report-t">' + esc(text) + '</span>';
+  const tip = ' title="' + escAttr('最新结论：' + text) + '"';
+  if (!t.digest) return '<div class="tk-report"' + tip + '>' + inner + '</div>';
+  return '<button type="button" class="tk-report" data-action="task-expand" data-id="' + escAttr(t.id) + '" tabindex="-1"' + tip + '>' + inner + '</button>';
+}
+
+// digestHtml is the expanded digest under card t, '' while folded.
+function digestHtml(t) {
+  if (digestOpen !== t.id) return '';
+  const d = digests.get(t.id) || { wait: true };
+  const id = ' id="tk-digest-' + escAttr(t.id) + '"';
+  if (d.md !== undefined) return '<div class="tk-digest md"' + id + '>' + renderMd(digestBody(d.md)) + '</div>';
+  return '<div class="tk-digest tk-digest-note"' + id + '>' + (d.err ? '读不到摘要：' + esc(d.err) : '正在读取摘要…') + '</div>';
+}
+
 function cardHtml(t) {
   const state = STATES.includes(t.state) ? t.state : 'doing';
   const st = taskStatus(t);
@@ -263,9 +330,13 @@ function cardHtml(t) {
   const mark = custodyException(t, state) ? custodyChipHtml(t.id, false) : '';
   const meta = metaHtml(t, state);
   const open = actsOpen === t.id;
-  return '<div class="tk-card tk-s-' + state + (state === 'done' ? ' done' : '') + (open ? ' tk-acts-open' : '') + (isLit(t.id) ? ' inbox-lit' : '') + '" data-id="' + escAttr(t.id) + '" data-status="' + st.badge.cls + '" role="listitem">' +
+  const expandable = t.kind === 'session' && !!t.digest;
+  const expanded = expandable && digestOpen === t.id;
+  return '<div class="tk-card tk-s-' + state + (state === 'done' ? ' done' : '') + (open ? ' tk-acts-open' : '') + (t.new ? ' tk-has-new' : '') + (expanded ? ' tk-expanded' : '') + (isLit(t.id) ? ' inbox-lit' : '') + '" data-id="' + escAttr(t.id) + '" data-status="' + st.badge.cls + '" role="listitem">' +
       '<div class="tk-top">' +
+        (t.new ? NEW_DOT : '') +
         '<div class="tk-title">' + titleHtml(t) + '</div>' +
+        (expandable ? '<button type="button" class="tk-expand" data-action="task-expand" data-id="' + escAttr(t.id) + '" aria-expanded="' + expanded + '" aria-controls="tk-digest-' + escAttr(t.id) + '" aria-label="' + (expanded ? '收起摘要' : '展开摘要') + '" title="' + (expanded ? '收起摘要' : '展开摘要') + '"><svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg></button>' : '') +
         '<button type="button" class="tk-more" data-action="task-more" data-id="' + escAttr(t.id) + '" aria-expanded="' + open + '" aria-label="更多操作" title="更多操作">⋯</button>' +
       '</div>' +
       '<div class="tk-status">' +
@@ -273,7 +344,9 @@ function cardHtml(t) {
         '<span class="tk-now"' + (text ? ' title="' + escAttr(text) + '"' : '') + '>' + esc(text) + '</span>' +
         (st.time ? '<span class="tk-time"' + (st.tip ? ' title="' + escAttr(st.tip) + '"' : '') + '>' + esc(st.time) + '</span>' : '') +
       '</div>' +
+      reportHtml(t) +
       (meta || mark ? '<div class="tk-meta">' + mark + meta + '</div>' : '') +
+      (expanded ? digestHtml(t) : '') +
       (open ? '<div class="tk-acts">' + actsHtml(t) + '</div>' : '') +
     '</div>';
 }
@@ -287,9 +360,17 @@ export const countHeadHtml = (label, n) => esc(label) + (n ? ' <span class="tk-n
 // progress, the phone's folded block's number (one number for 任务 on the
 // screen, §15.8 F1), its parts each their own.
 export function tasksHtml(data) {
-  const tasks = (data && Array.isArray(data.tasks)) ? data.tasks : [];
-  let html = '<h2 class="pl-group-h tk-head">' + countHeadHtml('任务', tasks.filter(inProgress).length) + '</h2>';
-  if (!tasks.length) return html + '<div class="pl-empty">还没有任务<span>Planner 派出的会话和它答应你的事会列在这里</span></div>';
+  const all = (data && Array.isArray(data.tasks)) ? data.tasks : [];
+  let html = '<h2 class="pl-group-h tk-head">' + countHeadHtml('任务', all.filter(inProgress).length) + '</h2>';
+  if (!all.length) return html + '<div class="pl-empty">还没有任务<span>Planner 派出的会话和它答应你的事会列在这里</span></div>';
+  // "N 件新结果" filters to the new ones, 已完成 unfolded (most are done).
+  const filtered = onlyNew && all.some((t) => t.new);
+  const tasks = filtered ? all.filter((t) => t.new) : all;
+  if (filtered) {
+    html += '<div class="tk-filter" role="status"><span>只看新结果 ' + tasks.length + ' 件</span>' +
+      '<button type="button" class="pl-link" data-action="tasks-seen-all">全部已读</button>' +
+      '<button type="button" class="pl-link" data-action="tasks-only-new">显示全部</button></div>';
+  }
   const head = (label, n) => label + ' <span class="tk-n">' + n + '</span>';
   for (const s of SECTIONS) {
     const rows = tasks.filter((t) => s.states.includes(t.state));
@@ -299,7 +380,7 @@ export function tasksHtml(data) {
   }
   const done = tasks.filter((t) => t.state === 'done');
   if (done.length) {
-    html += '<details class="tk-sec tk-sec-done"><summary class="tk-sec-h">' + head('已完成', done.length) + '</summary>' +
+    html += '<details class="tk-sec tk-sec-done"' + (filtered ? ' open' : '') + '><summary class="tk-sec-h">' + head('已完成', done.length) + (done.some((t) => t.new) ? NEW_DOT : '') + '</summary>' +
       '<div class="tk-list" role="list">' + done.map(cardHtml).join('') + '</div></details>';
   }
   return html;
@@ -324,6 +405,8 @@ function paint(el, data) {
   el.innerHTML = html;
   const fold = el.querySelector('.tk-sec-done');
   if (fold && wasOpen) fold.open = true;
+  // A digest's math and diagrams render after it is in the page.
+  if (el.querySelector('.tk-digest.md')) runPendingAsync();
   if (focus) {
     for (const b of el.querySelectorAll('[data-action="' + CSS.escape(focus.action) + '"]')) {
       if ((b.dataset.id || b.dataset.key) === focus.id) { b.focus(); break; }
@@ -358,7 +441,9 @@ function fetchTasks(fresh = false) {
     const list = (data && Array.isArray(data.tasks)) ? data.tasks : [];
     byId = new Map(list.map((t) => [t.id, t]));
     if (actsOpen && !byId.has(actsOpen)) actsOpen = '';
+    if (digestOpen && !byId.has(digestOpen)) digestOpen = '';
     last = data;
+    paintNews();
     readAt = Date.now();
     failedAt = 0;
     nzBus.dispatchEvent(new CustomEvent('tasks:changed'));
@@ -512,11 +597,86 @@ function revealTask(id) {
   look();
 }
 
+// ---- new results (§15.12 ④) ----
+
+// newCount is how many tasks, as last read, have a new result.
+const newCount = () => [...byId.values()].filter((t) => t.new).length;
+
+// paintNews writes the Planner page header's "N 件新结果 · 全部已读",
+// hidden while none is new (the filter then ends).
+function paintNews() {
+  const box = document.getElementById('pl-news');
+  if (!box) return;
+  const n = newCount();
+  if (!n) onlyNew = false;
+  box.hidden = !n;
+  const btn = box.querySelector('[data-action="tasks-only-new"]');
+  if (!btn) return;
+  const text = n + ' 件新结果';
+  if (btn.textContent !== text) btn.textContent = text;
+  btn.setAttribute('aria-pressed', onlyNew ? 'true' : 'false');
+  btn.title = onlyNew ? '显示全部任务' : '只看有新结果的任务';
+}
+
+// markSeen tells the gateway the user looked at the new results of ids, or
+// of every task with all, showing them read at once, then reads the list.
+async function markSeen(ids, all = false) {
+  const body = all ? { all: true } : { ids };
+  for (const t of byId.values()) if (t.new && (all || ids.includes(t.id))) t.new = false;
+  paintNews();
+  repaintAll();
+  try {
+    await fetchJSON(plannerAPI(NZ_CONTRACT.API.tasks_seen), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), timeoutMs: 8000,
+    });
+  } catch (e) {
+    showToast('没有标为已读：' + e.message, 'error');
+  }
+  if (mounts.size) await refreshTasks();
+  else await ensureTasks(0);
+}
+
+// seenTask marks task id's new result read: the user opened its session.
+// Nothing new, nothing sent.
+export function seenTask(id) {
+  const t = taskOf(id);
+  if (t && t.new) markSeen([id]);
+}
+
+// loadDigest reads task id's digest for its expanded card; a read answering
+// after the card folded or the Planner shown changed is kept for next time.
+async function loadDigest(id) {
+  const g = gen;
+  const had = digests.get(id);
+  if (!had || had.err) digests.set(id, { wait: true });
+  try {
+    const d = await fetchJSON(plannerAPI(NZ_CONTRACT.API.sessions_digest) + '?key=' + encodeURIComponent(id), { timeoutMs: 8000 });
+    if (g !== gen) return;
+    digests.set(id, { md: String((d && d.markdown) || '') });
+  } catch (e) {
+    if (g !== gen) return;
+    if (!had || had.md === undefined) digests.set(id, { err: e.message || '读取失败' });
+  }
+  if (digestOpen === id) repaintAll();
+}
+
 nzBus.addEventListener('tasks:changed', paintTaskHeader);
-nzBus.addEventListener('session:select', paintTaskHeader);
+nzBus.addEventListener('session:select', () => {
+  paintTaskHeader();
+  // Opening a dispatched session in the 会话 view looks at its result (the
+  // gateway marks it from the viewing frame too; a remote node's, only so).
+  if (ui.activeView === 'chat') seenTask(headerTaskKey());
+});
 // Another node's Planner: its tasks, read afresh; a read in flight for the
 // node before is dropped (fetchTasks).
-nzBus.addEventListener('planner:node', () => { gen++; readAt = 0; failedAt = 0; paintTaskHeader(); });
+nzBus.addEventListener('planner:node', () => {
+  gen++; readAt = 0; failedAt = 0;
+  digestOpen = ''; digests.clear(); onlyNew = false;
+  // The count was the node before's; its own list repaints it.
+  const news = document.getElementById('pl-news');
+  if (news) news.hidden = true;
+  paintTaskHeader();
+});
 
 // post sends a task change from control el, then refreshes every group.
 async function post(el, url, body, failed) {
@@ -560,6 +720,28 @@ registerActions({
     // Focus follows into the opened row, so the keyboard reaches it.
     if (actsOpen) document.querySelector('.tk-card.tk-acts-open[data-id="' + CSS.escape(actsOpen) + '"] .tk-act')?.focus();
   },
+  // The chevron or 最新结论 expands the digest under the card, and looks at
+  // its result; again folds it.
+  'task-expand': (el) => {
+    const id = el.dataset.id || '';
+    if (!id) return;
+    digestOpen = digestOpen === id ? '' : id;
+    if (digestOpen) loadDigest(id);
+    repaintAll();
+    if (digestOpen) seenTask(id);
+  },
+  // "N 件新结果" shows only those cards, and again all; on a phone it
+  // unfolds the left block they are in.
+  'tasks-only-new': () => {
+    onlyNew = !onlyNew && newCount() > 0;
+    paintNews();
+    repaintAll();
+    if (onlyNew) {
+      nzBus.dispatchEvent(new CustomEvent('tasks:reveal', { detail: {} }));
+      document.getElementById('pl-task')?.scrollIntoView({ block: 'start' });
+    }
+  },
+  'tasks-seen-all': () => { if (newCount()) markSeen([], true); },
   'task-done': (el) => setState(el, el.dataset.id, 'done'),
   'task-doing': (el) => setState(el, el.dataset.id, 'doing'),
   'task-reopen': (el) => setState(el, el.dataset.id, 'doing'),

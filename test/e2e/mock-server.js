@@ -264,8 +264,10 @@ function defaultGitStates() {
  *   inboxCalls. Unset, the routes 404.
  * @param {object} [overrides.tasks] - GET /api/tasks body ({tasks}, task.Task wire shape); POST
  *   /api/tasks/state sets the task's state as the user's and lands in tasksCalls; POST
- *   /api/tasks/stop marks the task done as the user's ('已停止') and lands in taskStopCalls.
- *   Unset, the routes 404.
+ *   /api/tasks/stop marks the task done as the user's ('已停止') and lands in taskStopCalls;
+ *   POST /api/tasks/seen ({ids} or {all:true}) clears the tasks' `new` and lands in
+ *   tasksSeenCalls. As the gateway's viewing sink does, GET /api/tasks clears the `new` of
+ *   the task a socket's latest viewing frame names (with ws: true). Unset, the routes 404.
  * @param {object} [overrides.custody] - GET /api/custody body ({paused, paused_at, sessions}, the
  *   custody.Status wire shape of the sessions in custody); ?key= answers {paused, session}. PUT
  *   /api/custody ({key, on}) sets the session's switch as the user's and lands in custodyCalls;
@@ -356,6 +358,7 @@ function startMockServer(overrides = {}) {
   const inboxCalls = [];
   const tasksCalls = [];
   const taskStopCalls = [];
+  const tasksSeenCalls = [];
   const custodyData = overrides.custody || null;
   const custodyCalls = [];
   // custodyShown is a session's custody as the gateway reports it: held back
@@ -1115,6 +1118,14 @@ function startMockServer(overrides = {}) {
     // so the test's object shows it, and lands in tasksCalls.
     if (pathname === NZ_CONTRACT.API.tasks && req.method === 'GET' && overrides.tasks) {
       if (!checkAuth()) return;
+      // Opening a session (a viewing frame) marks its result read
+      // (task.Board.SetViewing).
+      for (const conn of wsConnections) {
+        const frames = conn.messages.filter(m => m.type === NZ_CONTRACT.WS.viewing);
+        const viewed = frames.length ? frames[frames.length - 1].key : '';
+        const t = viewed && overrides.tasks.tasks.find(x => x.id === viewed);
+        if (t && t.new) t.new = false;
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(overrides.tasks));
       return;
@@ -1131,6 +1142,24 @@ function startMockServer(overrides = {}) {
         Object.assign(t, { state: req2.state, by: 'user', why: '', at: new Date().toISOString() });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ok' }));
+      });
+      return;
+    }
+
+    if (pathname === NZ_CONTRACT.API.tasks_seen && req.method === 'POST' && overrides.tasks) {
+      if (!checkAuth()) return;
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        const req2 = JSON.parse(body || '{}');
+        tasksSeenCalls.push(req2);
+        if (!req2.all === !(Array.isArray(req2.ids) && req2.ids.length)) { res.writeHead(400); res.end('give ids or all'); return; }
+        let seen = 0;
+        for (const t of overrides.tasks.tasks) {
+          if (t.new && (req2.all || req2.ids.includes(t.id))) { t.new = false; seen++; }
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', seen }));
       });
       return;
     }
@@ -1316,6 +1345,7 @@ function startMockServer(overrides = {}) {
         get inboxCalls() { return inboxCalls; },
         get tasksCalls() { return tasksCalls; },
         get taskStopCalls() { return taskStopCalls; },
+        get tasksSeenCalls() { return tasksSeenCalls; },
         get custodyCalls() { return custodyCalls; },
         get plannerStateCalls() { return plannerStateCalls; },
         get plannerSendCalls() { return plannerSendCalls; },
