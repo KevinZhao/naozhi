@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/apierr"
+	"github.com/naozhi/naozhi/internal/bgtask"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
-	"github.com/naozhi/naozhi/internal/cli/workflow"
 	"github.com/naozhi/naozhi/internal/cliinfo"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/discovery"
@@ -28,9 +28,9 @@ import (
 // the user has not answered yet; a card further back is not counted.
 const askScan = 64
 
-// taskScan is how many trailing events are searched for background tasks
-// still running; one started further back is not watched.
-const taskScan = 256
+// finishScan is how many trailing events are searched for a background
+// task's end and the reply its turn gave.
+const finishScan = 256
 
 // HealthSources are the existing state the health monitor derives its units
 // from (docs/rfc/planner.md §3.8); nil fields are skipped. Remote and
@@ -171,25 +171,21 @@ func sessionFact(snap session.SessionSnapshot, s *session.ManagedSession, logDir
 	case snap.State != "running" && apierr.IsEnvelope(snap.LastResponse):
 		f.Failed, f.ErrText = "last turn ended in an API error", snap.LastResponse
 	}
-	// A dead process's background tasks died with it.
-	var entries []clievent.EventEntry
-	var attached time.Time
-	if s != nil && snap.State != "dead" {
-		if attached = s.ProcessAttachedAt(); !attached.IsZero() {
-			entries = s.EventLastN(taskScan)
+	if s != nil {
+		bg := background(s, snap)
+		f.Background = bg
+		if t := watchedTask(bg, f.Running); t != nil {
+			f.Workflow, f.WorkflowSeen = t.Summary, t.Last
+			if t.Kind != bgtask.KindWorkflow {
+				// Any event is an observation of the work: a turn waiting
+				// on its task goes on writing.
+				f.WorkflowSeen = later(t.Last, s.ProcessLastEventAt())
+			}
 		}
-	}
-	if name := runningWorkflow(snap.Workflows); name != "" && s != nil {
-		f.Workflow, f.WorkflowSeen = name, unixMilli(s.WorkflowBoard().LastObservedAt())
-		f.Background = workflowTask(snap.Workflows)
-	} else if len(entries) > 0 {
-		if t, seen := openTask(entries, attached, f.Running); t != nil {
-			f.Workflow, f.WorkflowSeen = t.Name, seen
+		// A dead process's tasks died with it, their ends unanswered.
+		if snap.State != "dead" && !s.ProcessAttachedAt().IsZero() {
+			f.Finished, f.Reply = finishedTask(s.EventLastN(finishScan))
 		}
-		f.Background, _ = openTask(entries, attached, true)
-	}
-	if len(entries) > 0 {
-		f.Finished, f.Reply = finishedTask(entries)
 	}
 	if !f.Running && f.Failed == "" && s != nil {
 		f.Asking = askPending(s.EventLastN(askScan))
@@ -199,6 +195,7 @@ func sessionFact(snap session.SessionSnapshot, s *session.ManagedSession, logDir
 		Title:      cmp.Or(snap.UserLabel, snap.Summary),
 		LastActive: f.LastActive,
 		Result:     snap.LastResponse,
+		Background: health.NewIndexBackground(f.Background),
 	}
 	// kiro and codex accept no --name; what the session recorded was never
 	// passed to their CLI.
@@ -352,65 +349,18 @@ func failedDeath(reason string) bool {
 		strings.HasPrefix(reason, cliinfo.DeathReasonCLIExitedSignalPrefix)
 }
 
-// runningWorkflow names the first running workflow; a paused one waits on
-// purpose and is not watched for stalls.
-func runningWorkflow(sums []workflow.Summary) string {
-	if t := workflowTask(sums); t != nil {
-		return t.Name
-	}
-	return ""
-}
-
-// workflowTask is the first running workflow as a background task.
-func workflowTask(sums []workflow.Summary) *health.Task {
-	for _, s := range sums {
-		if s.Status == workflow.StatusRunning {
-			return &health.Task{ID: s.TaskID, Name: cmp.Or(s.Name, s.TaskID), Start: unixMilli(s.StartedAt)}
+// watchedTask is the open task in bg whose quiet the health table judges
+// (health.StallAfter): the first one, while a turn runs and waits on it. A
+// Bash or a Monitor writes nothing between its start and its end, so in an
+// idle session its quiet is how a server or a watch runs: it is open
+// (后台中) but not judged stalled. nil when none is watched.
+func watchedTask(bg bgtask.State, running bool) *bgtask.Task {
+	for i, t := range bg.Tasks {
+		if running || t.Kind != bgtask.KindBash && t.Kind != bgtask.KindMonitor {
+			return &bg.Tasks[i]
 		}
 	}
 	return nil
-}
-
-// openTask is the first background task (a Bash run_in_background, an
-// Agent subtask) in entries that started after attached, when naozhi
-// attached to the process, and has not ended; seen is the latest entry's
-// time. A task that started before (replayed history, maybe of a process
-// gone since) or further back than entries is not seen: an unknown task is
-// not judged stalled. Workflows are the board's.
-// A background Bash has no frames between its start and its end, so in an
-// idle session its quiet is how a long-lived server or watch runs: it counts
-// only while a turn is in progress (running), waiting on it.
-func openTask(entries []clievent.EventEntry, attached time.Time, running bool) (t *health.Task, seen time.Time) {
-	open := map[string]*health.Task{}
-	var order []string
-	for _, e := range entries {
-		switch {
-		case e.TaskID == "":
-		case e.Type == clievent.KindTaskStart:
-			if e.TaskType != clievent.TaskTypeWorkflow && (running || e.TaskType != "local_bash") && e.Time >= attached.UnixMilli() {
-				if _, ok := open[e.TaskID]; !ok {
-					order = append(order, e.TaskID)
-					open[e.TaskID] = &health.Task{ID: e.TaskID, Start: unixMilli(e.Time)}
-				}
-				open[e.TaskID].Name = cmp.Or(e.Summary, e.TaskID)
-			}
-		case taskEnded(e):
-			delete(open, e.TaskID)
-		}
-	}
-	for _, id := range order {
-		if t, ok := open[id]; ok {
-			return t, unixMilli(entries[len(entries)-1].Time)
-		}
-	}
-	return nil, time.Time{}
-}
-
-// taskEnded reports whether e ends its background task: its done
-// notification, or a task_updated patch with any status but running.
-func taskEnded(e clievent.EventEntry) bool {
-	return e.TaskID != "" && (e.Type == clievent.KindTaskDone ||
-		e.Type == clievent.KindTaskProgress && e.Status != "" && e.Status != "running")
 }
 
 // replyRunes caps the first line of the reply a background task's end got.
@@ -432,7 +382,7 @@ func finishedTask(entries []clievent.EventEntry) (*health.Task, string) {
 			names[e.TaskID], started[e.TaskID] = e.Summary, i
 		case e.Type == clievent.KindUser && e.Source != clievent.SourceCustody:
 			lastUser, ended, done, reply = i, nil, nil, ""
-		case taskEnded(e):
+		case bgtask.Ended(e):
 			ended, text = nil, ""
 			// A task whose start is out of the window ran during any
 			// message before its end.

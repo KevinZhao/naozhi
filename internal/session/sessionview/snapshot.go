@@ -145,6 +145,13 @@ type SessionHealth struct {
 	// "后台任务 · 已跑 N 分钟"; both empty before that.
 	Background      string `json:"background,omitempty"`
 	BackgroundSince int64  `json:"background_since,omitempty"`
+	// BackgroundN is how many background tasks the session has open
+	// (bgtask, D109), BackgroundTasks the first of their summaries (the
+	// session's own text) and BackgroundProgress their latest progress
+	// (unix ms), for the row's "后台中 · N 个任务"; set from the first task.
+	BackgroundN        int      `json:"background_n,omitempty"`
+	BackgroundTasks    []string `json:"background_tasks,omitempty"`
+	BackgroundProgress int64    `json:"background_progress,omitempty"`
 }
 
 // StartupFailureView is a dead session's run of CLI startup failures, for the

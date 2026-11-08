@@ -283,7 +283,7 @@ function actionCardHtml(raw) {
     // says what it was told.
     const key = str(a.key);
     const text = str(a.text);
-    const head = text ? '托管 · 让它继续' : (a.on === false ? '关掉托管' : '打开托管');
+    const head = text ? '托管 · 让它继续' : a.watch === false ? '不再观察' : (a.on === false ? '关掉托管' : '打开托管');
     return '<div class="pl-act pl-act-custody"><div class="pl-act-h">' + head + '</div>' +
       (text ? '<div class="pl-act-q">' + esc(text) + '</div>' : '') +
       (key ? '<div class="pl-scards">' + sessionCardHtml(key) + '</div>' : '') + '</div>';

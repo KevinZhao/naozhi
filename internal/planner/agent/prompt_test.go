@@ -31,6 +31,9 @@ func TestSystemPrompt(t *testing.T) {
 		`<naozhi-snapshot unchanged since="HH:MM" at="…"/>`,
 		"at 照样是现在的时间",
 		"健康状态、最后输出（last_active）",
+		"health 为 idle 又带 background 就是后台中",
+		`{"type":"custody","key":"<会话 key>","watch":false}`,
+		"不影响托管开关；watch 只能是 false",
 		"读它一律用 Read 的 offset / limit 分段读，不要整份读",
 		"搜记忆只在 ~/.claude/projects/*/memory 下搜，不要从 ~/.claude/projects 根目录搜",
 		"在回复末尾写汇报块（naozhi-report）",
@@ -64,8 +67,8 @@ func TestSystemPrompt(t *testing.T) {
 		"<会话 key>", "dashboard:direct:u:general", "<会话 key 或空>", "",
 	)
 	formats := regexp.MustCompile(`\{"type":"[a-z]+"[^\n]*?\}`).FindAllString(p, -1)
-	if len(formats) != 8 {
-		t.Fatalf("found %d block formats, want 8: %q", len(formats), formats)
+	if len(formats) != 9 {
+		t.Fatalf("found %d block formats, want 9: %q", len(formats), formats)
 	}
 	for _, f := range formats {
 		body := strings.ReplaceAll(fill.Replace(f), `["x"]`, `["是"]`)

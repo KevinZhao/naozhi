@@ -28,8 +28,9 @@ import (
 	"github.com/naozhi/naozhi/internal/usermsg"
 )
 
-// taskPrompt is appended to a dispatched session's system prompt: how it
-// reports back, in a report block the gateway passes on to the Planner
+// taskPrompt is appended to a dispatched session's system prompt: that a
+// remote job is waited on locally (a background task or a Monitor, the only
+// work naozhi sees running once the turn ends, D109), how it reports back, in a report block the gateway passes on to the Planner
 // (docs/rfc/planner.md §15.12 ③, D101), and how it asks the Planner,
 // named planner (agent.NameFor), on the way. It rides in the spawn
 // overlay, and TaskOpts.ForKey rebuilds it for a respawn, whose first
@@ -38,6 +39,7 @@ func taskPrompt(planner string) string {
 	return `你是 Planner 派出的会话：第一条消息是 Planner 派给你的任务。
 - 下一步在任务范围内就直接做，不要停下来问；确需用户时一次把问题问全。
 - 交代以外的改动不做，包括 PR 标题、描述和分支名；你觉得该改的写进汇报的"建议"。
+- 长时间的远端任务（远端 benchmark、CI、远程机器上的作业）必须在本地挂后台等它结束（Bash 的 run_in_background 跑一个等待命令，如 gh run watch、ssh 上的 wait），或用 Monitor 盯着；只发出去就结束这一轮，naozhi 看不到它还在跑，会当你已经停下。
 - 做完、卡住或判断做不了时，在这一轮回复的末尾写汇报块，块后面不要再有文字：
 ` + "```" + `naozhi-report
 {"state":"done | blocked | need_user | progress","summary":"不超过 120 字，第一句写结论"}
@@ -319,17 +321,25 @@ func spawnError(err error, key string, maxProcs int) error {
 func TaskLive(router *session.Router) func() map[string]task.Live {
 	return func() map[string]task.Live {
 		out := map[string]task.Live{}
+		var snaps []session.SessionSnapshot
 		router.VisitSessions(func(s session.SessionSnapshot) bool {
-			if !health.UserSession(s.Key, health.KindSession) {
-				return true
+			if health.UserSession(s.Key, health.KindSession) {
+				snaps = append(snaps, s)
 			}
-			l := task.Live{Running: s.State == "running", Activity: s.LastActivity, Reply: s.LastResponse}
-			if s.LastActive > 0 {
-				l.LastActive = time.UnixMilli(s.LastActive)
-			}
-			out[s.Key] = l
 			return true
 		})
+		// The background scan reads each session's events: outside the
+		// visit, which holds the router's table.
+		for _, snap := range snaps {
+			l := task.Live{Running: snap.State == "running", Activity: snap.LastActivity, Reply: snap.LastResponse}
+			if snap.LastActive > 0 {
+				l.LastActive = time.UnixMilli(snap.LastActive)
+			}
+			if s := router.SessionFor(snap.Key); s != nil {
+				l.Background = health.NewIndexBackground(background(s, snap))
+			}
+			out[snap.Key] = l
+		}
 		return out
 	}
 }

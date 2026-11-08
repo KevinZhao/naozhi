@@ -41,7 +41,7 @@ func (c ReapSources) Session(key string) (reap.Session, bool) {
 	out := reap.Session{
 		Running:    snap.State == "running",
 		Asking:     askPending(s.EventLastN(askScan)),
-		Background: background(s, snap),
+		Background: background(s, snap).Open(),
 	}
 	if apierr.IsEnvelope(snap.LastResponse) {
 		out.Failed = snap.LastResponse

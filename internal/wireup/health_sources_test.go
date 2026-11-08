@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/bgtask"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/monitor/health"
@@ -104,40 +105,32 @@ func TestAskPending(t *testing.T) {
 	}
 }
 
-func TestOpenTask(t *testing.T) {
-	attached := time.UnixMilli(1000)
-	start := func(id, typ string, at int64) clievent.EventEntry {
-		return clievent.EventEntry{Type: clievent.KindTaskStart, TaskID: id, TaskType: typ, Summary: id + " task", Time: at}
-	}
-	ev := func(kind, id, status string, at int64) clievent.EventEntry {
-		return clievent.EventEntry{Type: kind, TaskID: id, Status: status, Time: at}
-	}
+// The task whose quiet health judges is the first open one while a turn
+// waits on it; once the turn is over a Bash or a Monitor is a server or a
+// watch running, open (后台中) but never stalled.
+func TestWatchedTask(t *testing.T) {
+	bash := bgtask.Task{ID: "b1", Kind: bgtask.KindBash, Summary: "npm run dev"}
+	mon := bgtask.Task{ID: "m1", Kind: bgtask.KindMonitor, Summary: "watch CI"}
+	agent := bgtask.Task{ID: "a1", Kind: bgtask.KindAgent, Summary: "review"}
 	tests := []struct {
 		name    string
-		entries []clievent.EventEntry
+		tasks   []bgtask.Task
 		running bool
 		want    string
-		seen    int64
 	}{
-		{"none", []clievent.EventEntry{{Type: clievent.KindText, Time: 2000}}, true, "", 0},
-		{"background bash in a turn", []clievent.EventEntry{start("b1", "local_bash", 2000), {Type: clievent.KindText, Time: 3000}}, true, "b1 task", 3000},
-		// A server left running after the turn ended is not judged.
-		{"background bash in an idle session", []clievent.EventEntry{start("b1", "local_bash", 2000), {Type: clievent.KindResult, Time: 3000}}, false, "", 0},
-		{"agent with progress", []clievent.EventEntry{start("a1", "local_agent", 2000), ev(clievent.KindTaskProgress, "a1", "", 4000)}, false, "a1 task", 4000},
-		{"ended", []clievent.EventEntry{start("b1", "local_bash", 2000), ev(clievent.KindTaskDone, "b1", "completed", 3000)}, true, "", 0},
-		{"ended by a patch", []clievent.EventEntry{start("a1", "local_agent", 2000), ev(clievent.KindTaskProgress, "a1", "killed", 3000)}, false, "", 0},
-		{"the first still running", []clievent.EventEntry{start("b1", "local_bash", 2000), start("b2", "local_bash", 2500), ev(clievent.KindTaskDone, "b1", "", 3000)}, true, "b2 task", 3000},
-		{"replayed from before the process", []clievent.EventEntry{start("b0", "local_bash", 500), {Type: clievent.KindText, Time: 2000}}, true, "", 0},
-		{"a workflow is the board's", []clievent.EventEntry{start("w1", clievent.TaskTypeWorkflow, 2000)}, true, "", 0},
+		{"none", nil, true, ""},
+		{"a Bash in a turn", []bgtask.Task{bash}, true, "b1"},
+		{"a Bash in an idle session", []bgtask.Task{bash}, false, ""},
+		{"a Monitor in an idle session", []bgtask.Task{mon}, false, ""},
+		{"an agent after a Bash", []bgtask.Task{bash, agent}, false, "a1"},
 	}
 	for _, tt := range tests {
-		task, seen := openTask(tt.entries, attached, tt.running)
-		name := ""
-		if task != nil {
-			name = task.Name
+		got := ""
+		if task := watchedTask(bgtask.State{Tasks: tt.tasks}, tt.running); task != nil {
+			got = task.ID
 		}
-		if name != tt.want || (tt.want != "" && seen.UnixMilli() != tt.seen) {
-			t.Errorf("%s: openTask = %q at %d, want %q at %d", tt.name, name, seen.UnixMilli(), tt.want, tt.seen)
+		if got != tt.want {
+			t.Errorf("%s: watchedTask = %q, want %q", tt.name, got, tt.want)
 		}
 	}
 }

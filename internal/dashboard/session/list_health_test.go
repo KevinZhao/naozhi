@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
@@ -26,7 +27,8 @@ func TestHandleList_Health(t *testing.T) {
 			{ID: "dashboard:direct:a:general", State: health.Failed, Evidence: health.DeathEvidence + "cli_exited_code_-1", ErrClass: health.ErrOther, Since: since},
 			{ID: "dashboard:direct:b:general", State: health.Failed, Evidence: "last turn ended in an API error", ErrClass: health.ErrAuth, Since: since, LastActive: since.Add(5 * time.Minute), TurnAt: since.Add(3 * time.Minute)},
 			{ID: "dashboard:direct:c:general", State: health.Idle, Since: since, Background: "sleep 3600", BackgroundSince: long},
-			{ID: "dashboard:direct:e:general", State: health.Idle, Since: since, Background: "sleep 60", BackgroundSince: short},
+			{ID: "dashboard:direct:e:general", State: health.Idle, Since: since, Background: "sleep 60", BackgroundSince: short,
+				BackgroundN: 3, BackgroundTasks: []string{"sleep 60", "bench"}, BackgroundProgress: short},
 		}}
 	}
 	rec := doList(h, "")
@@ -46,13 +48,14 @@ func TestHandleList_Health(t *testing.T) {
 		"dashboard:direct:b:general": {State: "failed", Since: ms, Seen: since.Add(3 * time.Minute).UnixMilli(), ErrClass: "auth"},
 		"dashboard:direct:c:general": {State: "idle", Since: ms, Background: "sleep 3600", BackgroundSince: long.UnixMilli()},
 		"dashboard:direct:d:general": nil,
-		"dashboard:direct:e:general": {State: "idle", Since: ms},
+		// 后台中 at once, however short its tasks have run.
+		"dashboard:direct:e:general": {State: "idle", Since: ms, BackgroundN: 3, BackgroundTasks: []string{"sleep 60", "bench"}, BackgroundProgress: short.UnixMilli()},
 	}
 	if len(body.Sessions) != len(want) {
 		t.Fatalf("got %d sessions, want %d", len(body.Sessions), len(want))
 	}
 	for _, s := range body.Sessions {
-		if w := want[s.Key]; (w == nil) != (s.Health == nil) || w != nil && *w != *s.Health {
+		if w := want[s.Key]; (w == nil) != (s.Health == nil) || w != nil && !reflect.DeepEqual(*w, *s.Health) {
 			t.Errorf("%s health = %+v, want %+v", s.Key, s.Health, w)
 		}
 		if s.State != "ready" {

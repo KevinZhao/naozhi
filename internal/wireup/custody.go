@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/apierr"
+	"github.com/naozhi/naozhi/internal/bgtask"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/gitinfo"
 	"github.com/naozhi/naozhi/internal/planner/activity"
@@ -32,7 +33,7 @@ func (c CustodySources) Local(key string) bool { return c.Router.SessionFor(key)
 func (c CustodySources) Workflows() []string {
 	var out []string
 	for _, snap := range c.Router.ListSessions() {
-		if runningWorkflow(snap.Workflows) != "" {
+		if len(runningWorkflows(snap.Workflows, time.Time{})) > 0 {
 			out = append(out, snap.Key)
 		}
 	}
@@ -113,36 +114,25 @@ func (c CustodySources) FailText(key string) string {
 }
 
 // Settled is custody.Config.Settled: no turn running, no AskUserQuestion
-// unanswered, no workflow or background task running.
+// unanswered, no background task open (bgtask, the judgment the Planner's
+// receipts and the put-away read too: 后台中 is not settled).
 func (c CustodySources) Settled(key string) bool {
 	s := c.Router.SessionFor(key)
 	if s == nil {
 		return false
 	}
 	snap := s.Snapshot()
-	return snap.State != "running" && !askPending(s.EventLastN(askScan)) && !background(s, snap)
+	return snap.State != "running" && !askPending(s.EventLastN(askScan)) && !background(s, snap).Open()
 }
 
-// Background is action.Config.Background: a workflow or a background task
-// (a task_start with no task_done yet, a Monitor) running in key.
-func (c CustodySources) Background(key string) bool {
+// Background is action.Config.Background: key's open background tasks (a
+// workflow, a task_start with no task_done yet, a Monitor).
+func (c CustodySources) Background(key string) bgtask.State {
 	s := c.Router.SessionFor(key)
-	return s != nil && background(s, s.Snapshot())
-}
-
-// background reports a workflow or background task running in s, snap its
-// snapshot. A task counts only from a live process naozhi attached to: one
-// in replayed history may belong to a process gone since.
-func background(s *session.ManagedSession, snap session.SessionSnapshot) bool {
-	if runningWorkflow(snap.Workflows) != "" {
-		return true
+	if s == nil {
+		return bgtask.State{}
 	}
-	if at := s.ProcessAttachedAt(); !at.IsZero() && snap.State != "dead" {
-		if t, _ := openTask(s.EventLastN(taskScan), at, true); t != nil {
-			return true
-		}
-	}
-	return false
+	return background(s, s.Snapshot())
 }
 
 // Asking is custody.Config.Asking: an AskUserQuestion of key unanswered.

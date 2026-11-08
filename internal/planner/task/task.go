@@ -143,6 +143,10 @@ type Live struct {
 	Activity   string    `json:"activity,omitempty"`
 	Reply      string    `json:"reply,omitempty"`
 	LastActive time.Time `json:"last_active,omitzero"`
+	// Background is its open background tasks (bgtask), as index.json
+	// says them; nil while none is open. With no turn running the card
+	// says 后台中: the turn is over, the work is not (D109).
+	Background *health.IndexBackground `json:"background,omitempty"`
 }
 
 // oneLine folds s to one line of at most liveRunes.
@@ -283,7 +287,8 @@ func archived(t Task, now time.Time) bool {
 }
 
 // archivedYours reports whether watched session t is to leave the list:
-// done Archive ago, or idle (health's) for Archive. Done counts from its
+// done Archive ago, or idle (health's, no background task open) for
+// Archive. Done counts from its
 // last activity when later: custody or a relay may keep it going after the
 // mark, which only the user's own message takes back.
 func archivedYours(t Task, now time.Time) bool {
@@ -295,7 +300,8 @@ func archivedYours(t Task, now time.Time) bool {
 		}
 		return now.Sub(from) >= Archive
 	case t.State == Doing && t.Health == health.Idle:
-		return now.Sub(t.HealthSince) >= Archive
+		// 后台中 is no idleness: the work it waits on goes on.
+		return (t.Live == nil || t.Live.Background == nil) && now.Sub(t.HealthSince) >= Archive
 	}
 	return false
 }

@@ -354,6 +354,20 @@ export function sessionFailureText(s) {
   return failureText(own ? s.death_reason : h && h.death_reason, h && h.error_class);
 }
 
+// BG_SUMMARY_MAX caps each background task's summary in backgroundTasksText.
+const BG_SUMMARY_MAX = 40;
+
+// backgroundTasksText is "N 个任务 · <summary>、<summary>" for a session
+// whose turn is over with n background tasks still running (后台中, D109):
+// summaries are the first tasks' own descriptions, raw (the caller
+// escapes), each cut to BG_SUMMARY_MAX. '' when none runs.
+export function backgroundTasksText(n, summaries) {
+  if (!(n > 0)) return '';
+  const cut = (s) => { s = String(s || '').replace(/\s+/g, ' ').trim(); return s.length > BG_SUMMARY_MAX ? s.slice(0, BG_SUMMARY_MAX) + '…' : s; };
+  const names = (summaries || []).map(cut).filter(Boolean).slice(0, 2);
+  return n + ' 个任务' + (names.length ? ' · ' + names.join('、') + (n > names.length ? ' 等' : '') : '');
+}
+
 // sessionHealthState is the state a session's status dot shows: the live
 // process first (a turn running, an abnormal death), then the health
 // verdict; 'new' for a session not spawned yet, else idle. Without a turn

@@ -208,7 +208,7 @@ func (h *Handlers) fillProjectAndSummary(snapshots []sessionpkg.SessionSnapshot)
 // journal) while the session itself comes back reading "ready" with no
 // death reason, so the list's status dot and exit chip read the failure from
 // here. A background task running past health.LongTask is named with when
-// it started.
+// it started; the open ones are counted from the first (后台中, D109).
 func (h *Handlers) fillHealth(snapshots []sessionpkg.SessionSnapshot, now time.Time) {
 	if h.deps.Health == nil {
 		return
@@ -235,6 +235,12 @@ func (h *Handlers) fillHealth(snapshots []sessionpkg.SessionSnapshot, now time.T
 		}
 		if u.Background != "" && !u.BackgroundSince.IsZero() && now.Sub(u.BackgroundSince) >= health.LongTask {
 			sh.Background, sh.BackgroundSince = u.Background, u.BackgroundSince.UnixMilli()
+		}
+		if u.BackgroundN > 0 {
+			sh.BackgroundN, sh.BackgroundTasks = u.BackgroundN, u.BackgroundTasks
+			if !u.BackgroundProgress.IsZero() {
+				sh.BackgroundProgress = u.BackgroundProgress.UnixMilli()
+			}
 		}
 		snapshots[i].Health = sh
 	}

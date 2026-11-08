@@ -153,12 +153,16 @@ type Notify struct {
 	ID    string `json:"id"`
 }
 
-// Custody switches session Key's custody (On), or sends it Text through
-// custody as the Planner's go-ahead; exactly one of the two.
+// Custody switches session Key's custody (On), sends it Text through
+// custody as the Planner's go-ahead, or turns observing it off (Watch,
+// §15.12 ⑥: the user said to leave it alone); exactly one of the three.
+// Watch takes only false: observing is on by default, and only the user
+// turns it back on.
 type Custody struct {
-	Key  string `json:"key"`
-	On   *bool  `json:"on"`
-	Text string `json:"text"`
+	Key   string `json:"key"`
+	On    *bool  `json:"on"`
+	Text  string `json:"text"`
+	Watch *bool  `json:"watch"`
 }
 
 // Relay passes the user's decision on to session Key (D98): the gateway
@@ -555,12 +559,22 @@ func (c *Custody) validate() error {
 		return errors.New("custody 缺少 key")
 	case utf8.RuneCountInString(c.Key) > keyRunes || strings.IndexFunc(c.Key, unicode.IsControl) >= 0:
 		return errors.New("key 不是合法的会话 key")
-	case (c.On == nil) == (c.Text == ""):
-		return errors.New("custody 要么带 on（开关托管），要么带 text（让它继续），只能二选一")
+	case btoi(c.On != nil)+btoi(c.Text != "")+btoi(c.Watch != nil) != 1:
+		return errors.New("custody 带 on（开关托管）、text（让它继续）、watch（关掉观察）三者之一，只能带一个")
+	case c.Watch != nil && *c.Watch:
+		return errors.New("watch 只能是 false（关掉观察）；观察要用户在会话头部重新打开")
 	case utf8.RuneCountInString(c.Text) > custodyTextRunes:
 		return fmt.Errorf("text 超过 %d 字", custodyTextRunes)
 	}
 	return noEnvelope("text", c.Text)
+}
+
+// btoi is 1 for true.
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // cut is s cut to n runes, "…" included, when it runs longer.

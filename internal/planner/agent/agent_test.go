@@ -964,6 +964,51 @@ func TestSnapshotUnchangedWhileRunning(t *testing.T) {
 	}
 }
 
+// TestSnapshotBackground: an idle session with background tasks open is
+// 后台中 · N, listed with the running ones, the tasks' latest progress after
+// its 最后输出. A change of how many are open is a change; their progress
+// alone is not, as 最后输出 is not.
+func TestSnapshotBackground(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+	now := time.Date(2026, 11, 3, 10, 0, 0, 0, loc)
+	sess := &fakeSessions{st: SessionState{Exists: true, Alive: true, SessionID: "s1"}}
+	a, _ := newTestAgent(t, sess, &now)
+	turns := &fakeTurns{reply: "ok"}
+	a.turns = turns
+	units := []health.Unit{
+		{ID: "task:aa", State: health.Idle, LastActive: now.Add(-48 * time.Hour), BackgroundN: 2, BackgroundProgress: now.Add(-time.Minute)},
+		{ID: "task:bb", State: health.Active, LastActive: now, BackgroundN: 1},
+	}
+	a.health = func() health.Snapshot { return health.Snapshot{Units: slices.Clone(units)} }
+	a.markShift(now)
+	send := func(text string) string {
+		t.Helper()
+		now = now.Add(3 * time.Minute)
+		if err := a.Send(text, "", nil); err != nil {
+			t.Fatal(err)
+		}
+		return turns.sent[len(turns.sent)-1]
+	}
+	got := send("a")
+	for _, want := range []string{"会话（在跑 2，", "task:aa [后台中 · 2] · 最后输出 11-01 10:00 · 后台最近进度 11-03 09:59", "task:bb [活跃 · 后台 1]"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("full snapshot lacks %q: %q", want, got)
+		}
+	}
+	units[0].BackgroundProgress = now
+	if got := send("b"); !strings.HasPrefix(got, "<naozhi-snapshot unchanged") {
+		t.Fatalf("only the progress moved: %q", got)
+	}
+	units[0].BackgroundN = 1
+	if got := send("c"); !strings.Contains(got, "task:aa [后台中 · 1]") {
+		t.Fatalf("a task ended: %q", got)
+	}
+	units[0].BackgroundN = 0
+	if got := send("d"); !strings.Contains(got, "task:aa [空闲]") && strings.Contains(got, "task:aa") {
+		t.Fatalf("all ended: %q", got)
+	}
+}
+
 // TestSnapshotMarkOnlyWhenSafe: the mark goes only where the last full
 // snapshot is surely in the conversation the message goes into. A full one
 // counts once its turn ran (one dropped from the queue or failed may never

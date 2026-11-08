@@ -75,9 +75,11 @@ var stateNames = map[health.State]string{
 	health.Unknown: "未知",
 }
 
-// running states are listed as "在跑"; the rest only while recent.
-func running(s health.State) bool {
-	return s == health.Active || s == health.Waiting || s == health.Stalled
+// running units are listed as "在跑": a state that is, or a turn over with
+// background tasks still open (后台中, D109); the rest only while recent.
+func running(u health.Unit) bool {
+	return u.State == health.Active || u.State == health.Waiting || u.State == health.Stalled ||
+		u.State == health.Idle && u.BackgroundN > 0
 }
 
 // renderSnapshot renders the deterministic <naozhi-snapshot> block the
@@ -141,7 +143,7 @@ func renderSnapshotKey(in snapshotInput) (full, key string) {
 			continue
 		}
 		switch {
-		case running(u.State):
+		case running(u):
 			nRunning++
 		case in.Now.Sub(cmp.Or(u.LastActive, u.Since)) > recentWindow:
 			continue
@@ -149,7 +151,7 @@ func renderSnapshotKey(in snapshotInput) (full, key string) {
 		units = append(units, u)
 	}
 	slices.SortFunc(units, func(a, b health.Unit) int {
-		if ra, rb := running(a.State), running(b.State); ra != rb {
+		if ra, rb := running(a), running(b); ra != rb {
 			if ra {
 				return -1
 			}
@@ -288,7 +290,16 @@ func unitLine(in snapshotInput, u health.Unit) (line, at, tail string) {
 	case label != "" || cross != "":
 		name = label + cross + "（" + u.ID + "）"
 	}
-	line = "- " + name + " [" + cmp.Or(stateNames[u.State], string(u.State))
+	state := cmp.Or(stateNames[u.State], string(u.State))
+	// How many tasks are open is in the line, a change the Planner hears
+	// of; their latest progress is a time, left out of the comparison.
+	switch {
+	case u.BackgroundN > 0 && u.State == health.Idle:
+		state = fmt.Sprintf("后台中 · %d", u.BackgroundN)
+	case u.BackgroundN > 0:
+		state += fmt.Sprintf(" · 后台 %d", u.BackgroundN)
+	}
+	line = "- " + name + " [" + state
 	if u.ErrClass != "" {
 		line += "·" + string(u.ErrClass)
 	}
@@ -302,6 +313,9 @@ func unitLine(in snapshotInput, u health.Unit) (line, at, tail string) {
 	}
 	if !u.LastActive.IsZero() {
 		at = " · 最后输出 " + u.LastActive.In(in.Now.Location()).Format("01-02 15:04")
+	}
+	if u.BackgroundN > 0 && !u.BackgroundProgress.IsZero() {
+		at += " · 后台最近进度 " + u.BackgroundProgress.In(in.Now.Location()).Format("01-02 15:04")
 	}
 	if in.Conclusion != nil {
 		if c := in.Conclusion(u.ID); c != "" {

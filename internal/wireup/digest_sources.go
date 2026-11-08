@@ -112,6 +112,7 @@ func (d DigestSources) Facts(key string) (digest.Facts, bool) {
 		Dir:        snap.Workspace,
 		LastOutput: unixMilli(snap.LastActive),
 		Born:       unixMilli(snap.CreatedAt),
+		Background: background(s, snap),
 	}
 	if d.Observed(key) {
 		f.Purpose = sidecar.PurposeChat

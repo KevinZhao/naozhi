@@ -2,6 +2,7 @@ package health
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/bgtask"
 	"github.com/naozhi/naozhi/internal/planner/journal"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
 )
@@ -501,7 +503,9 @@ func TestIndex(t *testing.T) {
 	r.run([]step{{facts: []Fact{
 		owned(dir, Fact{ID: "b", Running: true, Index: &IndexEntry{Key: "b", Name: "fix-ci", Title: "Fix CI", Result: strings.Repeat("x", 400)}}),
 		owned(dir, Fact{ID: "a", Index: &IndexEntry{Key: "a", EventLog: "/x/a.log", Purpose: "chat", Digest: "/x/a.md",
-			Report: &IndexReport{State: "done", Summary: "已修好。", At: time.Date(2026, 11, 8, 9, 0, 0, 0, time.UTC)}}}),
+			Report: &IndexReport{State: "done", Summary: "已修好。", At: time.Date(2026, 11, 8, 9, 0, 0, 0, time.UTC)},
+			Background: NewIndexBackground(bgtask.State{Tasks: []bgtask.Task{{ID: "b1", Kind: bgtask.KindBash, Summary: "make bench"}},
+				LastProgress: time.Date(2026, 11, 8, 9, 30, 0, 0, time.UTC)})}}),
 		{ID: "cron:j", Kind: KindCron},
 	}}})
 	data, err := os.ReadFile(path)
@@ -540,6 +544,15 @@ func TestIndex(t *testing.T) {
 	}
 	if got := rows.Sessions[0]["report"]; !reflect.DeepEqual(got, map[string]any{"state": "done", "summary": "已修好。", "at": "2026-11-08T09:00:00Z"}) {
 		t.Errorf("row a report = %v", got)
+	}
+	// Idle with a task open is 后台中: health stays idle, background says
+	// the work goes on; a row with none has no background key.
+	if got := rows.Sessions[0]["background"]; a.Health != Idle || !reflect.DeepEqual(got, map[string]any{"count": float64(1),
+		"tasks": []any{map[string]any{"id": "b1", "summary": "make bench"}}, "last_progress": "2026-11-08T09:30:00Z"}) {
+		t.Errorf("row a background = %v (health %s)", got, a.Health)
+	}
+	if _, ok := rows.Sessions[1]["background"]; ok {
+		t.Errorf("row b has a background key: %s", data)
 	}
 }
 
@@ -693,12 +706,13 @@ func unowned(f Fact) Fact {
 func TestTaskDone(t *testing.T) {
 	dir := t.TempDir()
 	bg := &Task{ID: "b1", Name: "sleep 300", Start: time.Date(2026, 11, 4, 8, 0, 0, 0, time.UTC)}
-	open := owned(dir, Fact{Background: bg})
+	running := bgtask.State{Tasks: []bgtask.Task{{ID: "b1", Kind: bgtask.KindBash, Summary: "sleep 300", Start: bg.Start, Last: bg.Start}}, LastProgress: bg.Start}
+	open := owned(dir, Fact{Background: running})
 	ended := owned(dir, Fact{})
 	answered := owned(dir, Fact{Finished: bg, Reply: "跑完了"})
 	replying := owned(dir, Fact{Running: true, Finished: bg})
 	failed := owned(dir, Fact{Failed: "death_reason=cli_exited_code_1", Finished: bg})
-	inTurn := owned(dir, Fact{Running: true, Background: bg})
+	inTurn := owned(dir, Fact{Running: true, Background: running})
 	tests := []struct {
 		name  string
 		steps [][]Fact
@@ -734,7 +748,32 @@ func TestTaskDone(t *testing.T) {
 	// The open task is in the snapshot with when it started.
 	r := newRig(t, Config{Workspaces: workspace.Load("", "node")})
 	r.run([]step{{facts: []Fact{open}}})
-	if u := r.m.Snapshot().Units[0]; u.Background != "sleep 300" || !u.BackgroundSince.Equal(bg.Start) {
+	if u := r.m.Snapshot().Units[0]; u.Background != "sleep 300" || !u.BackgroundSince.Equal(bg.Start) ||
+		u.BackgroundN != 1 || !slices.Equal(u.BackgroundTasks, []string{"sleep 300"}) || !u.BackgroundProgress.Equal(bg.Start) {
 		t.Errorf("unit = %+v, want its background task", u)
+	}
+}
+
+// TestBackgroundTasksOfAUnit: a unit names how many tasks it has open, the
+// first BackgroundShown of them and the latest progress; an idle one stays
+// idle (后台中 is idle with tasks open, not a state of its own), and two
+// tasks that end in one go are each one this run saw open.
+func TestBackgroundTasksOfAUnit(t *testing.T) {
+	dir := t.TempDir()
+	at := time.Date(2026, 11, 4, 8, 0, 0, 0, time.UTC)
+	var bg bgtask.State
+	for i, s := range []string{"bench a", "bench b", "watch ci"} {
+		bg.Tasks = append(bg.Tasks, bgtask.Task{ID: fmt.Sprint("t", i), Kind: bgtask.KindBash, Summary: s, Start: at, Last: at.Add(time.Duration(i) * time.Minute)})
+	}
+	bg.LastProgress = at.Add(2 * time.Minute)
+	r := newRig(t, Config{Workspaces: workspace.Load("", "node")})
+	r.run([]step{{facts: []Fact{owned(dir, Fact{Background: bg})}}})
+	u := r.m.Snapshot().Units[0]
+	if u.State != Idle || u.BackgroundN != 3 || !slices.Equal(u.BackgroundTasks, []string{"bench a", "bench b"}) || !u.BackgroundProgress.Equal(bg.LastProgress) {
+		t.Fatalf("unit = %+v, want idle with 3 tasks open", u)
+	}
+	r.run([]step{{tick: Interval, facts: []Fact{owned(dir, Fact{})}}})
+	if u := r.m.Snapshot().Units[0]; u.BackgroundN != 0 || u.BackgroundTasks != nil || !u.BackgroundProgress.IsZero() {
+		t.Errorf("unit = %+v, want no task open", u)
 	}
 }

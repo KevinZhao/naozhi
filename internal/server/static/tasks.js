@@ -70,7 +70,7 @@
 // mounted; the link opens the page on the card, unfolded and lit.
 import { NZ_CONTRACT } from './contract.js';
 import { selection, ui } from './state.js';
-import { esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
+import { backgroundTasksText, esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
 import { formatAbsTime, formatMonthDayTime, timeAgo } from './utilities.js';
 import { custody, custodyChipHtml, refreshCustody, selectionShown, statusOf } from './custody.js';
 import { isLit, light } from './notify.js';
@@ -124,6 +124,9 @@ const STATUS_MAX = 160;
 // sidebar dot's for the same state (run blue, warn amber, fail red).
 const BADGES = {
   run: { label: '在跑', cls: 'run' },
+  // 后台中 (D109): the turn is over, its background tasks are not; the run
+  // colour, its dot a ring.
+  bg: { label: '后台中', cls: 'bg' },
   idle: { label: '空闲', cls: 'idle' },
   stalled: { label: '停滞', cls: 'warn' },
   waiting: { label: '等你', cls: 'warn' },
@@ -265,6 +268,11 @@ export function taskStatus(t, now = Date.now()) {
   if (t.health === 'stalled') {
     const from = lastActive || since;
     return { badge: BADGES.stalled, text: (live && live.activity) || progress || (live && live.reply) || '', time: spanText(from, now) + '没有输出', tip: '最后活动 ' + formatAbsTime(from) };
+  }
+  const bg = live && live.background;
+  if (bg && bg.count > 0) {
+    const p = ms(bg.last_progress);
+    return { badge: BADGES.bg, text: backgroundTasksText(bg.count, (bg.tasks || []).map((x) => x.summary)), ...(p ? { time: '最近进度 ' + timeAgo(p), tip: formatAbsTime(p) } : {}) };
   }
   if (live) {
     const at = lastActive || ms(t.at);

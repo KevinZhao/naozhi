@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/bgtask"
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/brief"
 	"github.com/naozhi/naozhi/internal/planner/custody"
@@ -123,11 +124,11 @@ type Config struct {
 	// of blocks not run (agent.Agent.UnrunTurn): its own blocks not run get
 	// none, so the two do not go round. nil reports none.
 	UnrunTurn func() bool
-	// Background reports whether key has a workflow or background task
-	// running (wireup.CustodySources.Background, the judgement custody's
-	// Settled makes): a turn that ended with work still going is no end of
-	// the task to report. nil is never.
-	Background func(key string) bool
+	// Background is key's open background tasks (bgtask through
+	// wireup.CustodySources.Background, the judgment custody's Settled
+	// makes): a turn that ended with work still going (后台中) is no end of
+	// the task to report. nil is none open.
+	Background func(key string) bgtask.State
 	// PlannerBusy reports whether a Planner turn is running
 	// (agent.Agent.Busy): a report may wait behind it. nil is never.
 	PlannerBusy func() bool
@@ -166,6 +167,7 @@ type Custodian interface {
 	Blocked(key string) error
 	Settled(key string) bool
 	Set(key string, on bool, by string) error
+	SetWatch(key string, on bool, by string) error
 	Deliver(key string, reason custody.Reason, text string) (int, error)
 	Name(key string) string
 }
@@ -561,7 +563,7 @@ func (r *Runner) checkEnded(e ended) {
 		// (holdLatest).
 		return
 	}
-	if due && r.cfg.Background != nil && r.cfg.Background(e.key) {
+	if due && r.cfg.Background != nil && r.cfg.Background(e.key).Open() {
 		delete(r.doingAt, e.key)
 		due = false
 	}
@@ -1185,7 +1187,9 @@ func needsUser(b Block) bool {
 	if d := b.Dispatch; d != nil {
 		return d.WithUserWords || len(d.MCPTools) > 0 || d.Ultracode
 	}
-	return b.Relay != nil
+	// Leaving a session alone is the user's word: a mail asking the
+	// Planner to stop looking at one is not.
+	return b.Relay != nil || b.Custody != nil && b.Custody.Watch != nil
 }
 
 // refuseNotUser answers such a block from a turn the user did not start,
@@ -1194,6 +1198,10 @@ func (r *Runner) refuseNotUser(b Block) string {
 	if d := b.Dispatch; d != nil {
 		r.note("这一轮不是用户发起的，不能带用户原话、改 MCP 权限或开 ultracode 派活：「" + d.Title + "」没有派出")
 		return "这一轮不是用户发起的，不能带用户原话、mcp_tools 或 ultracode 派活，没有派出"
+	}
+	if c := b.Custody; c != nil {
+		r.note("这一轮不是用户发起的，不能关掉观察：「" + r.sessionName(c.Key) + "」照旧观察")
+		return "这一轮不是用户发起的，watch:false 只在用户说别管这个会话时用，没有关掉观察"
 	}
 	r.note("这一轮不是用户发起的，不能转达用户的决定：「" + r.sessionName(b.Relay.Key) + "」没有收到")
 	return "这一轮不是用户发起的，没有可附的用户原话，没有转达"
@@ -1566,6 +1574,11 @@ func (r *Runner) custody(c Custody) (reopened bool, err error) {
 	if r.cfg.Custody == nil {
 		return false, errors.New("托管没有接通")
 	}
+	if c.Watch != nil {
+		// Only observing goes off: custody, the inbox and the session are
+		// left as they are, and a session put away has nothing observed.
+		return false, watchError(c, r.cfg.Custody.SetWatch(c.Key, false, custody.ByPlanner))
+	}
 	if r.putAway(c.Key) {
 		switch {
 		case c.On != nil:
@@ -1612,6 +1625,22 @@ func (r *Runner) custodyRun(c Custody) error {
 		_, err = cu.Deliver(c.Key, custody.ReasonPlanner, c.Text+custodyNote)
 	}
 	return custodyError(c, err)
+}
+
+// watchError is err of custody block c turning observing off, as the
+// receipt says it.
+func watchError(c Custody, err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, custody.ErrNoSession):
+		return blockError{fmt.Errorf("找不到会话 %q（填 index.json 里本机会话的 key）", c.Key)}
+	case errors.Is(err, custody.ErrRefused):
+		return blockError{fmt.Errorf("会话 %q 不是用户自己开的会话，没有观察可关（你派出的会话用 status，托管用 on）", c.Key)}
+	case errors.Is(err, custody.ErrDisabled):
+		return errors.New("托管与观察没有开，不用关")
+	}
+	return fmt.Errorf("关观察失败（%v）", err)
 }
 
 // errIrreversible refuses a custody message about what cannot be undone.

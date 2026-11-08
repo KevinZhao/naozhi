@@ -239,6 +239,11 @@ func TestTaskPromptReport(t *testing.T) {
 	if rep, body, ok, err := action.ParseReport(reply); !ok || err != nil || rep.State != "done" || body != "正文" {
 		t.Errorf("ParseReport(%q) = %+v, %q, %v, %v", reply, rep, body, ok, err)
 	}
+	// A remote job is waited on locally, or naozhi sees the session idle
+	// while it runs (D109).
+	if !strings.Contains(p, "长时间的远端任务（远端 benchmark、CI、远程机器上的作业）必须在本地挂后台等它结束") || !strings.Contains(p, "或用 Monitor 盯着") {
+		t.Errorf("prompt lacks the remote-job rule: %s", p)
+	}
 	note := reportLine("planner-abc123")
 	inner := strings.TrimSuffix(strings.TrimSpace(note), "）")
 	if !strings.HasPrefix(strings.TrimSpace(note), "（网关附注：") || strings.Contains(inner, "）") ||

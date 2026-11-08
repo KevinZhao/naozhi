@@ -54,7 +54,14 @@ type TestProcess struct {
 	// InterruptViaControlFunc, when set, handles InterruptViaControl; nil
 	// reports a delivered interrupt.
 	InterruptViaControlFunc func() error
+	// StartedAtVal is when naozhi attached to the process (StartedAt);
+	// zero, as for a process naozhi never attached, judges no background
+	// task open.
+	StartedAtVal time.Time
 }
+
+// StartedAt is StartedAtVal.
+func (p *TestProcess) StartedAt() time.Time { return p.StartedAtVal }
 
 // NewTestProcess creates a TestProcess with an event log and ready state.
 func NewTestProcess() *TestProcess {
@@ -208,6 +215,12 @@ func (r *Router) InjectSession(key string, proc *TestProcess) *ManagedSession {
 		tx.AddActive(1)
 	})
 	return s
+}
+
+// SetReattachedForTest records the session's process as one a shim
+// reattach found, its CLI started at cliStart, the replay holding tasks.
+func (s *ManagedSession) SetReattachedForTest(cliStart time.Time, tasks []clievent.EventEntry) {
+	s.setReattached(s.loadProcess(), cliStart, tasks)
 }
 
 // SetLastTurnAtForTest sets when the session's last turn started or ended.

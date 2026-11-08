@@ -501,3 +501,12 @@ test('isInternalEvent hides exactly the contract\'s internal event types', () =>
   assert.equal(si.isInternalEvent(null), false);
   assert.equal(si.isInternalEvent({ type: 'brand_new' }), false);
 });
+
+test('backgroundTasksText counts the open tasks and names the first two', () => {
+  assert.equal(nzu.backgroundTasksText(0, ['x']), '');
+  assert.equal(nzu.backgroundTasksText(undefined, []), '');
+  assert.equal(nzu.backgroundTasksText(1, ['ssh bench ./run.sh']), '1 个任务 · ssh bench ./run.sh');
+  assert.equal(nzu.backgroundTasksText(3, ['a', ' b\n c ', 'd']), '3 个任务 · a、b c 等');
+  assert.equal(nzu.backgroundTasksText(2, []), '2 个任务');
+  assert.equal(nzu.backgroundTasksText(1, ['x'.repeat(50)]), '1 个任务 · ' + 'x'.repeat(40) + '…');
+});

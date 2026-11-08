@@ -296,6 +296,10 @@ type ManagedSession struct {
 	keyAgentID  string
 
 	process atomic.Pointer[processBox] // stores *processBox; use loadProcess/storeProcess
+	// reattached is what a shim reattach knew of its process that the
+	// event log does not (managed_background.go); stale once the session
+	// holds another process.
+	reattached atomic.Pointer[reattachInfo]
 	// meteringCache is Snapshot's last MeteringUsage view keyed by
 	// (process, MeteringGen); see managed_metering_cache.go (#2345).
 	meteringCache atomic.Pointer[meteringCache]

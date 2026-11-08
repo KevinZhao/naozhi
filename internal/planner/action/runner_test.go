@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/naozhi/naozhi/internal/bgtask"
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/brief"
@@ -884,7 +885,12 @@ func TestTaskEndedReportRearms(t *testing.T) {
 func TestTaskEndedBackground(t *testing.T) {
 	e := endedRunner(t)
 	running := true
-	e.r.cfg.Background = func(k string) bool { return k == e.key && running }
+	e.r.cfg.Background = func(k string) bgtask.State {
+		if k != e.key || !running {
+			return bgtask.State{}
+		}
+		return bgtask.State{Tasks: []bgtask.Task{{ID: "b1", Kind: bgtask.KindBash, Summary: "go test ./..."}}}
+	}
 	e.end("测试已在后台运行，跑完再看")
 	if len(e.g.told) != 0 {
 		t.Fatalf("told while background work ran: %q", e.g.told)

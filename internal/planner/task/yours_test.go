@@ -118,6 +118,14 @@ func TestYoursGroup(t *testing.T) {
 	if _, ok := r.yours()[yProj]; !ok {
 		t.Error("a session idle 23 hours is not listed")
 	}
+	// Idle a day with a background task open is 后台中, still listed;
+	// the card has the tasks from Live.
+	r.units[4].Since = t0.Add(-25 * time.Hour)
+	r.live[yProj] = Live{Background: &health.IndexBackground{Count: 1, Tasks: []health.IndexTask{{ID: "b1", Summary: "ssh bench ./run.sh"}}}}
+	if p, ok := r.yours()[yProj]; !ok || p.Live == nil || p.Live.Background == nil || p.Live.Background.Count != 1 {
+		t.Errorf("a session idle a day with its benchmark running = %+v, %v; want listed with it", p, ok)
+	}
+	delete(r.live, yProj)
 	// Listing one writes nothing.
 	if _, ok := r.sc.Get(yDash); ok {
 		t.Error("listing gave a watched session a sidecar")
