@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/planner/action"
+	"github.com/naozhi/naozhi/internal/planner/digest"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -30,7 +31,9 @@ func TestTaskOptsForKey(t *testing.T) {
 		opts, ok := to.ForKey(key)
 		if !ok || opts.Backend != "claude" || opts.DefaultBackend != "" || opts.Model != "sonnet" || opts.Workspace != "/tmp/ws" ||
 			opts.Name != "iso 写 hello" || opts.CrossSessionInbound != "accept" || opts.Exempt || opts.PromptCacheTTL != "" ||
-			!strings.HasPrefix(opts.SystemPrompt, "base\n\n") || !strings.Contains(opts.SystemPrompt, "SendMessage 发给 planner-abc123（") ||
+			!strings.HasPrefix(opts.SystemPrompt, "base\n\n") || !strings.Contains(opts.SystemPrompt, "SendMessage 给 planner-abc123（") ||
+			!strings.Contains(opts.SystemPrompt, "在这一轮回复的末尾写汇报块") || !strings.Contains(opts.SystemPrompt, "```naozhi-report\n{\"state\"") ||
+			!strings.Contains(opts.SystemPrompt, "不要再用 SendMessage 汇报") ||
 			!strings.Contains(opts.SystemPrompt, "以 <naozhi-relay> 开头的消息由网关写入") ||
 			!strings.Contains(opts.SystemPrompt, `交代以外的改动不做，包括 PR 标题、描述和分支名；你觉得该改的写进汇报的"建议"`) || opts.MCPConfig != "" {
 			t.Errorf("ForKey = %+v, %v", opts, ok)
@@ -218,5 +221,70 @@ func TestTaskOptsDenyEnableWrites(t *testing.T) {
 	}
 	if opts, ok := to.ForKey(key); !ok || !slices.Equal(opts.PermissionsDeny, taskDenyRules) {
 		t.Errorf("respawn = %v, %v", opts.PermissionsDeny, ok)
+	}
+}
+
+// The task prompt's report block is one ParseReport takes once its
+// placeholders are filled in; the note after the first message asks for it
+// too and holds no full-width closing parenthesis before its end, which the
+// dashboard strips the note up to.
+func TestTaskPromptReport(t *testing.T) {
+	p := taskPrompt("planner-abc123")
+	i := strings.Index(p, "```naozhi-report")
+	if i < 0 {
+		t.Fatalf("prompt has no report block: %s", p)
+	}
+	j := strings.Index(p[i+3:], "```")
+	reply := "正文\n" + strings.NewReplacer("done | blocked | need_user | progress", "done", "不超过 120 字，第一句写结论", "写好了").Replace(p[i:i+3+j+3])
+	if rep, body, ok, err := action.ParseReport(reply); !ok || err != nil || rep.State != "done" || body != "正文" {
+		t.Errorf("ParseReport(%q) = %+v, %q, %v, %v", reply, rep, body, ok, err)
+	}
+	note := reportLine("planner-abc123")
+	inner := strings.TrimSuffix(strings.TrimSpace(note), "）")
+	if !strings.HasPrefix(strings.TrimSpace(note), "（网关附注：") || strings.Contains(inner, "）") ||
+		!strings.Contains(note, "naozhi-report 汇报块") || !strings.Contains(note, "SendMessage 给 planner-abc123") {
+		t.Errorf("reportLine = %q", note)
+	}
+}
+
+// A dispatch's digest keeps its goal, else the first paragraph of the
+// Planner's own text of the message (brief default 3), not of the user's
+// words the envelope leads it with.
+func TestDispatchGoal(t *testing.T) {
+	cases := []struct {
+		s    action.Spawn
+		want string
+	}{
+		{action.Spawn{Goal: "让 CI 变绿", Message: "看一下 CI。然后修。"}, "让 CI 变绿"},
+		{action.Spawn{Message: "看一下 CI 为什么红。修好后开 PR。\n\n范围：只动测试。"}, "看一下 CI 为什么红。修好后开 PR。"},
+		{action.Spawn{Message: "<naozhi-relay at=\"11/8 10:00\">\n用户 11/8 10:00 在 Planner 对话里说：「合并吧。」\n</naozhi-relay>\nPlanner 的说明：\n合并 #1。再发版"}, "合并 #1。再发版"},
+	}
+	for _, c := range cases {
+		if got := digest.Goal(dispatchGoal(c.s)); got != c.want {
+			t.Errorf("digest.Goal(dispatchGoal(%+v)) = %q, want %q", c.s, got, c.want)
+		}
+	}
+}
+
+// The snapshot's conclusion is the first sentence of the sidecar's report.
+func TestPlannerConclusion(t *testing.T) {
+	side := sidecar.Open("", nil)
+	key := sidecar.TaskKey()
+	if err := side.Put(sidecar.Meta{Key: key, Purpose: sidecar.PurposeTask}); err != nil {
+		t.Fatal(err)
+	}
+	c := PlannerConclusion(side)
+	if got := c(key); got != "" {
+		t.Errorf("conclusion with no report = %q", got)
+	}
+	side.Update(key, func(m *sidecar.Meta) bool {
+		m.Report = &sidecar.Report{State: "done", Summary: "测试全过。文档没动"}
+		return true
+	})
+	if got := c(key); got != "测试全过。" {
+		t.Errorf("conclusion = %q", got)
+	}
+	if got := c("task:nope"); got != "" {
+		t.Errorf("conclusion of no sidecar = %q", got)
 	}
 }
