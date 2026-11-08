@@ -270,7 +270,9 @@ function defaultGitStates() {
  *   the task a socket's latest viewing frame names (with ws: true). Unset, the routes 404.
  * @param {object} [overrides.custody] - GET /api/custody body ({paused, paused_at, sessions}, the
  *   custody.Status wire shape of the sessions in custody); ?key= answers {paused, session}. PUT
- *   /api/custody ({key, on}) sets the session's switch as the user's and lands in custodyCalls;
+ *   /api/custody ({key, on}) sets the session's switch as the user's, ({key, watch}) its 观察 (a
+ *   session with it off stays listed, with watch:false, and leaves overrides.tasks' 你开的), each
+ *   landing in custodyCalls;
  *   PUT / DELETE /api/custody/pause set paused. A session in custody the tab last said it views
  *   (a viewing frame on the latest socket) reads as deferred, as the gateway holds it. POST
  *   /api/custody/undo ({key}) lands in custodyCalls as {undo: key} and answers {answer: undo}, or
@@ -1197,9 +1199,21 @@ function startMockServer(overrides = {}) {
       req.on('end', () => {
         const req2 = JSON.parse(body || '{}');
         custodyCalls.push(req2);
+        const was = custodyData.sessions.find(x => x.key === req2.key);
         custodyData.sessions = custodyData.sessions.filter(x => x.key !== req2.key);
-        const st = { key: req2.key, on: !!req2.on, by: 'user', at: new Date().toISOString(), state: req2.on ? (custodyData.paused ? 'paused' : 'on') : 'off', sent: 0, max: 8 };
-        if (st.on) custodyData.sessions.push(st);
+        // {key, watch} is the 观察 switch: custody kept as it was. A session
+        // with it off is listed (custody.Engine.List), and leaves 你开的.
+        if (req2.watch !== undefined) {
+          const st = { ...(was || { key: req2.key, on: false, state: 'off', sent: 0, max: 8 }), watch: !!req2.watch, watch_by: 'user' };
+          if (st.on || st.state === 'stopped' || !st.watch) custodyData.sessions.push(st);
+          if (!st.watch && overrides.tasks) overrides.tasks.tasks = overrides.tasks.tasks.filter(t => !(t.id === req2.key && t.group === 'yours'));
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(custodyShown(st)));
+          return;
+        }
+        const st = { key: req2.key, on: !!req2.on, by: 'user', at: new Date().toISOString(), state: req2.on ? (custodyData.paused ? 'paused' : 'on') : 'off', sent: 0, max: 8,
+          ...(was && was.watch === false ? { watch: false, watch_by: was.watch_by } : {}) };
+        if (st.on || st.watch === false) custodyData.sessions.push(st);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(custodyShown(st)));
       });

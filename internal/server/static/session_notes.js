@@ -60,6 +60,9 @@ function custodyBody(n) {
   switch (n.event) {
     case 'on': return { icon, tone: 'planner', text: '托管：已打开' + (CUSTODY_BY[n.by] || '') };
     case 'off': return { icon, tone: 'planner', text: '托管：已关闭' + (CUSTODY_BY[n.by] || '') };
+    // Observing (§15.12 ⑥): the Planner's switch, noted; the user's is the chip.
+    case 'watch_on': return { icon, tone: 'planner', text: '观察：已打开' + (CUSTODY_BY[n.by] || '') };
+    case 'watch_off': return { icon, tone: 'planner', text: '观察：已关闭' + (CUSTODY_BY[n.by] || '') + '，不进任务、不写摘要' };
     case 'deferred': return { icon, tone: 'planner', text: '托管：已暂缓（' + (n.evidence || '你在看') + '）' };
     case 'stopped': return { icon, tone: 'warn', text: '托管：已停' + (n.evidence ? ' · ' + n.evidence : '，等你接手') };
     case 'retry': return { icon, tone: 'planner', text: '托管：出错' + (n.evidence ? '（' + n.evidence + '）' : '') + '，稍后自动重试' + (n.n ? ' · 第 ' + n.n + ' 次' : '') };

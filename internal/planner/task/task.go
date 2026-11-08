@@ -9,6 +9,15 @@
 // due reminder, done once closed. Every state someone sets is journaled with who and why; a done
 // task leaves the list Archive after it was done, its data kept.
 //
+// The sessions the user opened that the gateway observes (§15.12 ⑥, D104:
+// planner/custody's Watched) are listed too, Group "yours" (你开的), from
+// the health table: 等你 and 失败 as their health says, else 进行中 (the
+// page reads 在跑 / 停滞 / 空闲 from health and live). The Planner or the
+// user can mark one done; a mark holds only while the user sent it nothing
+// since, so talking to it again brings it back. One done or idle Archive
+// long leaves the list; the session itself is left alone (never stopped,
+// never put away), and health's failures stay health's.
+//
 // A dispatched session's result is new (§15.12 ④, D102) while it is later
 // than when the user last looked (the sidecar's SeenAt): its latest report
 // with a conclusion, or its turning done or failed. Only the user's own
@@ -62,6 +71,9 @@ const (
 	ByEnded   By = "ended"   // a retired session that had not failed
 )
 
+// GroupYours is Task.Group of a session the user opened (你开的).
+const GroupYours = "yours"
+
 // Kind is where a task comes from.
 type Kind string
 
@@ -73,8 +85,11 @@ const (
 // Task is one row of the list.
 type Task struct {
 	// ID is the task: key or the promise ID.
-	ID    string `json:"id"`
-	Kind  Kind   `json:"kind"`
+	ID   string `json:"id"`
+	Kind Kind   `json:"kind"`
+	// Group is GroupYours for a session the user opened, "" for what the
+	// Planner dispatched or promised.
+	Group string `json:"group,omitempty"`
 	Title string `json:"title"`
 	State State  `json:"state"`
 	By    By     `json:"by,omitempty"`
@@ -164,6 +179,14 @@ type Config struct {
 	Live func() map[string]Live
 	// Digest reports whether session key has a digest; nil says none has.
 	Digest func(key string) bool
+	// Watched reports whether session key is one the user opened that the
+	// gateway observes (planner/custody.Engine.Watched); nil lists none.
+	Watched func(key string) bool
+	// Name is how the user reads session key, a watched one's title.
+	Name func(key string) string
+	// LastUser is when the user last sent session key a message (zero for
+	// never): a watched session's mark from before it no longer holds.
+	LastUser func(key string) time.Time
 	// Now is the wall clock; nil is time.Now.
 	Now func() time.Time
 }
@@ -211,6 +234,25 @@ func sessionState(m sidecar.Meta, h health.Unit) (State, By, string, time.Time) 
 	return st, by, why, at
 }
 
+// yoursState is a watched session's task state by its health unit u: 等你
+// or 失败 as health says, else 进行中. A mark holds over that as over a
+// dispatched session's, and only while it is no older than the user's last
+// message to it (lastUser): marked done, then talked to, it is in progress
+// again.
+func yoursState(m sidecar.Meta, u health.Unit, lastUser func() time.Time) (State, By, string, time.Time) {
+	st, by, why, at := Doing, By(""), "", u.Since
+	switch u.State {
+	case health.Waiting:
+		st, by = Waiting, ByHealth
+	case health.Failed:
+		st, by, why = Failed, ByHealth, u.Evidence
+	}
+	if mk := m.Mark; mk != nil && (State(mk.State) != Doing || by == "" || !mk.At.Before(at)) && !mk.At.Before(lastUser()) {
+		return State(mk.State), By(mk.By), mk.Why, mk.At
+	}
+	return st, by, why, at
+}
+
 // promiseState is a promise's task state.
 func promiseState(p promise.Promise, now time.Time) (State, By, string, time.Time) {
 	switch {
@@ -240,6 +282,18 @@ func archived(t Task, now time.Time) bool {
 	return now.Sub(from) >= Archive
 }
 
+// archivedYours reports whether watched session t is to leave the list:
+// done Archive ago, or idle (health's) for Archive.
+func archivedYours(t Task, now time.Time) bool {
+	switch {
+	case t.State == Done:
+		return now.Sub(t.At) >= Archive
+	case t.State == Doing && t.Health == health.Idle:
+		return now.Sub(t.HealthSince) >= Archive
+	}
+	return false
+}
+
 // Report states with a conclusion (§15.12 ③): the ones a new result is
 // made of. A progress report only updates the card ("知会", ④), and
 // need_user opens an item in 等你 instead.
@@ -249,13 +303,13 @@ const (
 )
 
 // resultTime is when session m last had a result for the user (§15.12 ④):
-// its latest report with a conclusion, or its entering state st, done or
-// failed, at at — unless by the user, who did it and needs no telling (a
-// stop, a mark). Zero for none. One time over every source, so another
-// source of results (a turn ending while the user is away) joins the max.
+// its latest report with a conclusion, a watched session's turn that ended
+// with the user away (§15.12 ⑥), or its entering state st, done or failed,
+// at at — unless by the user, who did it and needs no telling (a stop, a
+// mark). Zero for none.
 func resultTime(m sidecar.Meta, st State, by By, at time.Time) time.Time {
-	var r time.Time
-	if p := m.Report; p != nil && (p.State == reportDone || p.State == reportBlocked) {
+	r := m.ResultAt
+	if p := m.Report; p != nil && (p.State == reportDone || p.State == reportBlocked) && p.At.After(r) {
 		r = p.At
 	}
 	if (st == Done || st == Failed) && by != ByUser && at.After(r) {
@@ -310,6 +364,7 @@ func (b *Board) List() []Task {
 			}
 			out = append(out, t)
 		}
+		out = append(out, b.yours(units, live, now)...)
 	}
 	if b.cfg.Promises != nil {
 		open, closed := b.cfg.Promises.List(1 << 30)
@@ -324,6 +379,62 @@ func (b *Board) List() []Task {
 	return out
 }
 
+// yours lists the watched sessions not archived, from the health table
+// (most have no sidecar): this node's sessions, the user's own.
+func (b *Board) yours(units map[string]health.Unit, live map[string]Live, now time.Time) []Task {
+	if b.cfg.Watched == nil {
+		return nil
+	}
+	var out []Task
+	for _, u := range units {
+		if u.Kind != health.KindSession || sessionkey.IsTaskKey(u.ID) || !b.cfg.Watched(u.ID) {
+			continue
+		}
+		m, _ := b.cfg.Sessions.Get(u.ID)
+		t := Task{ID: u.ID, Kind: KindSession, Group: GroupYours, Title: cmp.Or(m.Title, b.name(u.ID)), Created: m.Created,
+			Health: u.State, HealthSince: u.Since, Report: m.Report}
+		t.Digest = b.cfg.Digest != nil && b.cfg.Digest(u.ID)
+		if l, ok := live[u.ID]; ok {
+			l.Activity, l.Reply = oneLine(l.Activity), oneLine(l.Reply)
+			t.Live = &l
+		}
+		t.State, t.By, t.Why, t.At = yoursState(m, u, b.lastUser(u.ID))
+		if archivedYours(t, now) {
+			continue
+		}
+		t.ResultAt = resultTime(m, t.State, t.By, t.At)
+		t.New = isNew(t.ResultAt, m.SeenAt) && m.V <= sidecar.Version
+		out = append(out, t)
+	}
+	return out
+}
+
+// name is how the user reads session key.
+func (b *Board) name(key string) string {
+	if b.cfg.Name != nil {
+		if n := b.cfg.Name(key); n != "" {
+			return n
+		}
+	}
+	return key
+}
+
+// lastUser is LastUser for key, read only when a mark asks.
+func (b *Board) lastUser(key string) func() time.Time {
+	return func() time.Time {
+		if b.cfg.LastUser == nil {
+			return time.Time{}
+		}
+		return b.cfg.LastUser(key)
+	}
+}
+
+// watched reports whether key is a session the user opened that the
+// gateway observes.
+func (b *Board) watched(key string) bool {
+	return b.cfg.Sessions != nil && b.cfg.Watched != nil && !sessionkey.IsTaskKey(key) && b.cfg.Watched(key)
+}
+
 var rank = map[State]int{Waiting: 0, Failed: 1, Doing: 2, Remind: 3, Done: 4}
 
 func compare(a, b Task) int {
@@ -336,7 +447,20 @@ func compare(a, b Task) int {
 	case Done:
 		return cmp.Or(b.At.Compare(a.At), cmp.Compare(a.ID, b.ID))
 	}
-	return cmp.Or(b.Created.Compare(a.Created), cmp.Compare(a.ID, b.ID))
+	return cmp.Or(activeAt(b).Compare(activeAt(a)), cmp.Compare(a.ID, b.ID))
+}
+
+// activeAt is what orders the tasks in progress, newest first: a dispatched
+// one's creation, a watched session's last activity (it has no creation
+// the list knows of; a chat is as new as its last turn).
+func activeAt(t Task) time.Time {
+	if t.Group != GroupYours {
+		return t.Created
+	}
+	if t.Live != nil && !t.Live.LastActive.IsZero() {
+		return t.Live.LastActive
+	}
+	return t.HealthSince
 }
 
 // Title is task id's title; false when there is no such task.
@@ -350,6 +474,10 @@ func (b *Board) Title(id string) (string, bool) {
 			return "", false
 		}
 		return cmp.Or(m.Title, id), true
+	}
+	if b.watched(id) {
+		m, _ := b.cfg.Sessions.Get(id)
+		return cmp.Or(m.Title, b.name(id)), true
 	}
 	if b.cfg.Promises == nil {
 		return "", false
@@ -378,6 +506,12 @@ func (b *Board) Set(id string, state State, by By, why string) error {
 		case err != nil:
 			return err
 		}
+	} else if b.watched(id) {
+		// A session the user opened has a sidecar once a mark needs one.
+		mark := sidecar.Mark{State: string(state), By: string(by), Why: why, At: b.cfg.Now()}
+		if err := b.cfg.Sessions.Upsert(id, func(m *sidecar.Meta) bool { m.Mark = &mark; return true }); err != nil {
+			return err
+		}
 	} else {
 		if b.cfg.Promises == nil {
 			return ErrNotFound
@@ -403,7 +537,8 @@ func (b *Board) Set(id string, state State, by By, why string) error {
 		unit = "promise:" + id
 	}
 	b.record(unit, id, state, by, why)
-	if unit == id && b.cfg.OnState != nil {
+	// planner/reap puts away only what the Planner dispatched.
+	if sessionkey.IsTaskKey(id) && b.cfg.OnState != nil {
 		b.cfg.OnState(id, state)
 	}
 	return nil
@@ -448,11 +583,11 @@ func (b *Board) Stop(id string) error {
 	return nil
 }
 
-// Seen marks read for the user the results of dispatched sessions ids
-// (they expanded the card), or with all every task whose result is new in
-// the list now (全部已读), and returns how many it marked. Only a new result
-// is written, so marking one read again writes nothing; an ID that is no
-// dispatched session (a promise, an archived or unknown one) is skipped.
+// Seen marks read for the user the results of sessions ids, dispatched or
+// watched (they expanded the card), or with all every task whose result is
+// new in the list now (全部已读), and returns how many it marked. Only a new
+// result is written, so marking one read again writes nothing; an ID that
+// is neither (a promise, an archived or unknown one) is skipped.
 func (b *Board) Seen(ids []string, all bool) (int, error) {
 	if b.cfg.Sessions == nil {
 		return 0, nil
@@ -480,24 +615,38 @@ func (b *Board) Seen(ids []string, all bool) (int, error) {
 	return n, errors.Join(errs...)
 }
 
-// seen sets dispatched session key's SeenAt to now when its result, by
-// health unit u, is new; true when it did.
+// seen sets session key's SeenAt to now when its result, by health unit u,
+// is new; true when it did. A watched session gets a sidecar for it (a
+// failure is a result before it has one).
 func (b *Board) seen(key string, u health.Unit, now time.Time) (bool, error) {
-	if !sessionkey.IsTaskKey(key) {
+	marked := false
+	var err error
+	switch {
+	case sessionkey.IsTaskKey(key):
+		_, err = b.cfg.Sessions.Update(key, func(m *sidecar.Meta) bool {
+			if m.Purpose != sidecar.PurposeTask {
+				return false
+			}
+			st, by, _, at := sessionState(*m, u)
+			if !isNew(resultTime(*m, st, by, at), m.SeenAt) {
+				return false
+			}
+			m.SeenAt, marked = now, true
+			return true
+		})
+	case b.watched(key):
+		last := b.lastUser(key)
+		err = b.cfg.Sessions.Upsert(key, func(m *sidecar.Meta) bool {
+			st, by, _, at := yoursState(*m, u, last)
+			if !isNew(resultTime(*m, st, by, at), m.SeenAt) {
+				return false
+			}
+			m.SeenAt, marked = now, true
+			return true
+		})
+	default:
 		return false, nil
 	}
-	marked := false
-	_, err := b.cfg.Sessions.Update(key, func(m *sidecar.Meta) bool {
-		if m.Purpose != sidecar.PurposeTask {
-			return false
-		}
-		st, by, _, at := sessionState(*m, u)
-		if !isNew(resultTime(*m, st, by, at), m.SeenAt) {
-			return false
-		}
-		m.SeenAt, marked = now, true
-		return true
-	})
 	switch {
 	case errors.Is(err, sidecar.ErrNewer):
 		// Not new in List either: nothing to mark, nothing to report.
@@ -513,12 +662,15 @@ func (b *Board) seen(key string, u health.Unit, now time.Time) (bool, error) {
 // the report every 30 seconds; only a new result is written, so a renewal
 // writes nothing.
 func (b *Board) SetViewing(key, _ string, viewing bool) {
-	if !viewing || b.cfg.Sessions == nil || !sessionkey.IsTaskKey(key) {
+	if !viewing || b.cfg.Sessions == nil {
 		return
 	}
-	// The sidecar first: most sessions viewed have none, and need no
-	// health table read.
-	if m, ok := b.cfg.Sessions.Get(key); !ok || m.Purpose != sidecar.PurposeTask {
+	if sessionkey.IsTaskKey(key) {
+		// The sidecar first: it decides with no health table read.
+		if m, ok := b.cfg.Sessions.Get(key); !ok || m.Purpose != sidecar.PurposeTask {
+			return
+		}
+	} else if !b.watched(key) {
 		return
 	}
 	if _, err := b.seen(key, b.units()[key], b.cfg.Now()); err != nil {
@@ -532,7 +684,9 @@ func (b *Board) DropViewer(string) {}
 
 // Observe is a health.Machine subscriber: it keeps on a dispatched session's
 // sidecar the failure health judged it in, cleared when it leaves it, so a
-// session that failed still shows 失败 once retired from the router.
+// session that failed still shows 失败 once retired from the router. A
+// watched session's is health's alone: it is never put away, and leaves the
+// list with the router.
 func (b *Board) Observe(ev health.Event) {
 	t := ev.Transition
 	if t == nil || b.cfg.Sessions == nil || !sessionkey.IsTaskKey(t.Unit.ID) {

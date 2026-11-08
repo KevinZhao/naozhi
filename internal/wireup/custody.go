@@ -117,6 +117,12 @@ func (c CustodySources) Settled(key string) bool {
 	return true
 }
 
+// Asking is custody.Config.Asking: an AskUserQuestion of key unanswered.
+func (c CustodySources) Asking(key string) bool {
+	s := c.Router.SessionFor(key)
+	return s != nil && askPending(s.EventLastN(askScan))
+}
+
 // Events is custody.Config.Events: the session's latest n events.
 func (c CustodySources) Events(key string, n int) []clievent.EventEntry {
 	s := c.Router.SessionFor(key)

@@ -1,8 +1,15 @@
 // tasks.js — the "任务" group of the Planner page's left column (planner RFC
 // §15.4, D85, §15.7): the sessions the Planner dispatched and its promises,
-// from GET /api/tasks, in three parts — 进行中 (等你 and 失败 first), 待提醒,
-// and 已完成 under a fold (the gateway archives a done task 24 hours on); each
-// part's heading counts its cards.
+// from GET /api/tasks, in four parts — 进行中 (等你 and 失败 first), 待提醒,
+// 你开的 and 已完成 under a fold (the gateway archives a done task 24 hours
+// on); each part's heading counts its cards.
+//
+// 你开的 (§15.12 ⑥, D104) are the sessions you opened that the gateway
+// observes (group "yours"): the same card, its state by health (等你 / 失败,
+// else 在跑 / 停滞 / 空闲 from health and live), a blue dot when a turn
+// ended with you away; "⋯" only marks it done or back in progress (no 停止,
+// nothing is put away: the session itself is left alone). The group's
+// heading counts what the Planner dispatched and promised, not these.
 //
 // Every card has one shape, the column's full width: the title (two lines at
 // most, the whole of it in the tooltip; a dispatched session's opens it in
@@ -129,10 +136,16 @@ const BY_LABEL = { planner: 'Planner 判断', user: '你标记', auto: '自动�
 // STOPPED_WHY is the reason the gateway gives a task you stopped
 // (task.StoppedWhy): done as yours, said as 已停止 · 你停的.
 const STOPPED_WHY = '已停止';
+// SECTIONS are the parts before 已完成; yours holds the sessions you opened
+// (group "yours"), the others what the Planner dispatched and promised.
 const SECTIONS = [
   { id: 'doing', label: '进行中', states: ['waiting', 'failed', 'doing'] },
   { id: 'remind', label: '待提醒', states: ['remind'] },
+  { id: 'yours', label: '你开的', states: ['waiting', 'failed', 'doing'], yours: true },
 ];
+// isYours reports whether task t is a session you opened (你开的).
+export const isYours = (t) => !!t && t.group === 'yours';
+const inSection = (s, t) => s.states.includes(t.state) && !!s.yours === isYours(t);
 const STATES = ['doing', 'waiting', 'failed', 'done', 'remind'];
 // REPORT_WORD names a report's state before its conclusion (the words of
 // the conversation's 📨 line).
@@ -140,7 +153,7 @@ const REPORT_WORD = { done: '完成', blocked: '卡住', need_user: '要你决�
 
 // inProgress reports whether task t is listed under 进行中: the count the
 // phone's folded left block gives.
-export const inProgress = (t) => !!t && SECTIONS[0].states.includes(t.state);
+export const inProgress = (t) => !!t && inSection(SECTIONS[0], t);
 
 // reapHtml says what became of a done dispatched session (planner/reap):
 // put away, with each worktree removed or why it stays, or why it is not put
@@ -182,7 +195,7 @@ const stopped = (t) => t.state === 'done' && t.by === 'user' && t.why === STOPPE
 
 // running reports whether dispatched session t is in progress (进行中 or 等你)
 // and still there: what 停止 applies to.
-const running = (t) => t.kind === 'session' && !t.retired && (t.state === 'doing' || t.state === 'waiting');
+const running = (t) => t.kind === 'session' && !isYours(t) && !t.retired && (t.state === 'doing' || t.state === 'waiting');
 
 // turnRunning reports whether dispatched session t has a turn running now.
 const turnRunning = (t) => t.kind === 'session' && !t.retired && t.state !== 'done' && !!(t.live && t.live.running);
@@ -281,6 +294,8 @@ function titleHtml(t) {
 // reopen a done one.
 function actsHtml(t) {
   const btn = (action, label, tip) => '<button type="button" class="pl-btn tk-act tk-' + action.replace('task-', '') + '" data-action="' + action + '" data-id="' + escAttr(t.id) + '"' + (tip ? ' title="' + escAttr(tip) + '"' : '') + '>' + label + '</button>';
+  // A session you opened is only marked: nothing stops or reopens it.
+  if (isYours(t)) return t.state === 'done' ? btn('task-doing', '标为进行中', '放回「你开的」') : btn('task-done', '标为已完成', '从「你开的」里拿掉（会话本身不动）');
   if (t.state === 'done') return btn('task-reopen', '重新打开', t.reap ? '放回会话列表，下一条消息接着上下文继续' : '');
   return (running(t) ? btn('task-stop', '停止', '停止这个会话正在做的事') : '') +
     (t.state === 'doing' || t.state === 'remind' ? '' : btn('task-doing', '标为进行中')) +
@@ -291,7 +306,8 @@ function actsHtml(t) {
 // when it is not what a dispatched session runs under (off, or stopped);
 // custody on goes unsaid. A list not read yet says nothing.
 function custodyException(t, state) {
-  if (t.kind !== 'session' || t.retired || state === 'done' || !custody.readAt || custody.enabled !== true) return false;
+  // Custody off is a session you opened's default: nothing to mark.
+  if (t.kind !== 'session' || isYours(t) || t.retired || state === 'done' || !custody.readAt || custody.enabled !== true) return false;
   const st = statusOf(t.id).state;
   return st === 'off' || st === 'stopped';
 }
@@ -380,7 +396,7 @@ export const countHeadHtml = (label, n) => esc(label) + (n ? ' <span class="tk-n
 export function tasksHtml(data) {
   const all = (data && Array.isArray(data.tasks)) ? data.tasks : [];
   let html = '<h2 class="pl-group-h tk-head">' + countHeadHtml('任务', all.filter(inProgress).length) + '</h2>';
-  if (!all.length) return html + '<div class="pl-empty">还没有任务<span>Planner 派出的会话和它答应你的事会列在这里</span></div>';
+  if (!all.length) return html + '<div class="pl-empty">还没有任务<span>Planner 派出的会话、它答应你的事和你开的会话会列在这里</span></div>';
   // "N 件新结果" filters to the new ones (those it was chosen for, and any
   // new since), 已完成 unfolded (most are done).
   const keep = (t) => t.new || onlyNew.has(t.id);
@@ -393,7 +409,7 @@ export function tasksHtml(data) {
   }
   const head = (label, n) => label + ' <span class="tk-n">' + n + '</span>';
   for (const s of SECTIONS) {
-    const rows = tasks.filter((t) => s.states.includes(t.state));
+    const rows = tasks.filter((t) => inSection(s, t));
     if (!rows.length) continue;
     html += '<section class="tk-sec tk-sec-' + s.id + '"><div class="tk-sec-h">' + head(s.label, rows.length) + '</div>' +
       '<div class="tk-list" role="list">' + rows.map(cardHtml).join('') + '</div></section>';
@@ -528,12 +544,13 @@ let stateTimer = 0;
 // stateHeader is whether a frame of the burst was the header's session's: a
 // later frame of another task in the same burst keeps the header's read.
 let stateHeader = false;
-// A dispatched session starting or ending a turn refetches the list, once
-// for a burst, for the page and for that session's own header; off screen
-// the next showing refetches anyway.
+// A listed or dispatched session starting or ending a turn refetches the
+// list, once for a burst, for the page and for that session's own header;
+// off screen the next showing refetches anyway. A session you opened that
+// is not listed yet comes with the next refresh.
 nzBus.addEventListener('session:state', (e) => {
   const msg = e.detail;
-  if (!msg || typeof msg.key !== 'string' || !msg.key.startsWith('task:')) return;
+  if (!msg || typeof msg.key !== 'string' || !(byId.has(msg.key) || msg.key.startsWith('task:'))) return;
   const header = headerTaskKey() === msg.key;
   if (!mounts.size && !header) return;
   stateHeader = stateHeader || header;
@@ -671,16 +688,16 @@ export function seenTask(id) {
   if (t && t.new) markSeen([id]);
 }
 
-// seenSelected marks read the dispatched session the 会话 view opened.
-// The list read for its node says whether it is new; else a node's (which
-// no viewing frame reaches, and whose list may not be read) is told
-// directly: it writes only a new result. This node's needs nothing more,
-// the gateway marks it from the viewing frame.
+// seenSelected marks read the listed session the 会话 view opened. The
+// list read for its node says whether it is new; else a node's dispatched
+// session (which no viewing frame reaches, and whose list may not be read)
+// is told directly: it writes only a new result. This node's needs nothing
+// more, the gateway marks it from the viewing frame.
 function seenSelected() {
   const key = selection.key || '';
   const node = selection.node || 'local';
-  if (!key.startsWith('task:')) return;
   if (node === plannerHost.node && byId.has(key)) { seenTask(key); return; }
+  if (!key.startsWith('task:')) return;
   if (isLocalNode(node)) return;
   fetchJSON(nodeAPI(node, NZ_CONTRACT.API.tasks_seen), {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [key] }), timeoutMs: 8000,
@@ -772,6 +789,8 @@ nzBus.addEventListener('inbox:count', () => {
   if (!mounts.size && headerTaskKey()) ensureTasks(0);
 });
 nzBus.addEventListener('custody:changed', repaintAll);
+// 观察 switched in a session's header: 你开的 gains or loses it.
+nzBus.addEventListener('watch:changed', () => { if (mounts.size) refreshTasks(); });
 
 registerActions({
   'task-more': (el) => {

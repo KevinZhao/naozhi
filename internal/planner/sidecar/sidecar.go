@@ -7,7 +7,8 @@
 // planner:main), and v0.2.1 their task state as the Planner or the user set
 // it and the failure health last judged them in (§15.4). v0.5.0 adds custody
 // (planner/custody): its switch on any session, and on a lineage's root what
-// custody sent and why it stopped. A file outlives its session by Retention, counted from when
+// custody sent and why it stopped. v0.7.0 adds a session's watch switch and
+// the last turn that ended with the user away (§15.12 ⑥). A file outlives its session by Retention, counted from when
 // the session was first seen gone, so a retired session's lineage is still
 // there to read for a while.
 package sidecar
@@ -38,8 +39,9 @@ const Version = 1
 const PurposeTask = "task"
 
 // PurposeChat is a session the user opened that the gateway observes
-// (§15.12 ⑥). Derived for index.json and the digests, never written: such
-// a session has no sidecar of its own for it.
+// (§15.12 ⑥). Derived for index.json and the digests, never written: such a
+// session's sidecar, when its watch switch, a result or a mark needs one,
+// keeps purpose "" as custody's does.
 const PurposeChat = "chat"
 
 // Retention is how long a file outlives its session.
@@ -102,6 +104,14 @@ type Meta struct {
 	// marked every new result read. A result later than it is new
 	// (planner/task).
 	SeenAt time.Time `json:"seen_at,omitzero"`
+	// Watch is the session's watch switch (§15.12 ⑥, D104: the gateway
+	// observing a session the user opened, its digest and its card in 任务);
+	// nil leaves it to the default, on (planner/custody.Engine.Watched).
+	Watch *Custody `json:"watch,omitempty"`
+	// ResultAt is when a watched session's turn last ended with the user
+	// away from it: a result for them (§15.12 ④ ⑥), new while later than
+	// SeenAt.
+	ResultAt time.Time `json:"result_at,omitzero"`
 }
 
 // Report is a session's latest report: its state (done, blocked,
@@ -387,6 +397,33 @@ func (s *Store) Update(key string, fn func(*Meta) bool) (bool, error) {
 	}
 	s.m[key] = m
 	return true, nil
+}
+
+// Upsert applies fn to key's sidecar, giving it one first (purpose "")
+// when it has none, and saves it when fn reports a change: a session the
+// user opened has no sidecar until a field of it needs one. fn runs under
+// the store's lock; one that changes nothing writes no new file.
+func (s *Store) Upsert(key string, fn func(*Meta) bool) error {
+	if key == "" {
+		return errors.New("sidecar: empty key")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.newer[key] {
+		return ErrNewer
+	}
+	m, ok := s.m[key]
+	if !ok {
+		m = Meta{V: Version, Key: key, Created: s.now()}
+	}
+	if !fn(&m) {
+		return nil
+	}
+	if err := s.writeLocked(m); err != nil {
+		return err
+	}
+	s.m[key] = m
+	return nil
 }
 
 // Purpose is key's purpose and the title it was dispatched with (both ""

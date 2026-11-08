@@ -46,6 +46,7 @@ type rig struct {
 	progress map[string]string
 	failText map[string]string
 	running  []string
+	asking   map[string]bool
 	until    time.Time // the one pause (the inbox's)
 	cred     time.Time // the credential's expiry
 	woke     bool
@@ -64,7 +65,7 @@ func newRig(t *testing.T) *rig {
 	}
 	t.Cleanup(func() { j.Close() })
 	r := &rig{t: t, dir: dir, now: time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC), inbox: &fakeInbox{}, journal: j,
-		lastUser: map[string]time.Time{}, progress: map[string]string{}, failText: map[string]string{}}
+		lastUser: map[string]time.Time{}, progress: map[string]string{}, failText: map[string]string{}, asking: map[string]bool{}}
 	r.open()
 	return r
 }
@@ -87,6 +88,7 @@ func (r *rig) open() {
 		LastUser:    func(key string) time.Time { return r.lastUser[key] },
 		Progress:    func(key string) string { return r.progress[key] },
 		FailText:    func(key string) string { return r.failText[key] },
+		Asking:      func(key string) bool { return r.asking[key] },
 		PausedUntil: func() time.Time { return r.until },
 		Pause:       func(until time.Time) { r.until = until },
 		CredExpiry:  func() time.Time { return r.cred },

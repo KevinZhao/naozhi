@@ -31,6 +31,10 @@
 // here reads a reply's text or calls a model. State lives in the sidecars
 // (the switch, and on a lineage's root what custody did), so a restart
 // keeps it.
+//
+// Beside the switch is observing (watch.go, §15.12 ⑥): the gateway keeping
+// a digest and a task card of a session the user opened, on by default,
+// sending nothing.
 package custody
 
 import (
@@ -158,6 +162,11 @@ type Status struct {
 	// Sent is how many messages custody sent over the lineage, of Max.
 	Sent int `json:"sent"`
 	Max  int `json:"max"`
+	// Watch is whether the gateway observes the session (§15.12 ⑥, its own
+	// switch: Engine.Watched); WatchBy who last set it, empty for the
+	// default.
+	Watch   bool   `json:"watch"`
+	WatchBy string `json:"watch_by,omitempty"`
 }
 
 // Inbox is where custody leaves a session to the user (notify.Notifier).
@@ -192,6 +201,10 @@ type Config struct {
 	// Settled reports whether key's turn ended with nothing pending: not
 	// running, no unanswered AskUserQuestion, no background task running.
 	Settled func(key string) bool
+	// Asking reports whether key has an AskUserQuestion unanswered: a
+	// watched session's turn that ended asking is 等你, not a result
+	// (Ended). nil reads as none.
+	Asking func(key string) bool
 	// Name is how the user reads key.
 	Name func(key string) string
 	// Events are key's latest events, at most n: its AskUserQuestion cards
@@ -1356,6 +1369,10 @@ func (e *Engine) Status(key string) Status {
 	if m.Custody != nil {
 		st.By, st.At = m.Custody.By, m.Custody.At
 	}
+	st.Watch = watchable(key) && watched(m, ok)
+	if m.Watch != nil {
+		st.WatchBy = m.Watch.By
+	}
 	c := e.chain(e.root(key))
 	st.Sent = c.Sent
 	switch {
@@ -1372,7 +1389,9 @@ func (e *Engine) Status(key string) Status {
 	return st
 }
 
-// List is the custody of every local session in custody, or stopped.
+// List is the custody of every local session in custody, or stopped, or
+// whose observing was turned off: observing is on by default, so the page
+// reads a session left out as watched.
 func (e *Engine) List() []Status {
 	if e.cfg.Sessions == nil {
 		return nil
@@ -1382,7 +1401,7 @@ func (e *Engine) List() []Status {
 		if e.eligible(m.Key) != nil {
 			continue
 		}
-		if st := e.Status(m.Key); st.On || st.State == StateStopped {
+		if st := e.Status(m.Key); st.On || st.State == StateStopped || m.Watch != nil && !m.Watch.On && watchable(m.Key) {
 			out = append(out, st)
 		}
 	}
