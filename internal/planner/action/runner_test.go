@@ -14,11 +14,13 @@ import (
 
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/brief"
+	"github.com/naozhi/naozhi/internal/planner/digest"
 	"github.com/naozhi/naozhi/internal/planner/promise"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
 	"github.com/naozhi/naozhi/internal/sessionkey"
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 type fakeGateway struct {
@@ -104,7 +106,7 @@ func TestDispatch(t *testing.T) {
 			if ws == "" {
 				ws = filepath.Base(dir)
 			}
-			r.Handle(block(`{"type":"dispatch","workspace":"` + ws + `","title":"iso 写 hello","model":"","message":"在工作区里写一个 hello.md"}`))
+			r.Handle(block(`{"type":"dispatch","workspace":"` + ws + `","title":"iso 写 hello","goal":"写好 hello.md","model":"","message":"在工作区里写一个 hello.md"}`))
 			if c.want == "" {
 				if len(g.notes) != 0 {
 					t.Errorf("notes = %q, want none", g.notes)
@@ -129,14 +131,14 @@ func TestDispatch(t *testing.T) {
 				t.Fatalf("spawned = %q", g.spawned)
 			}
 			key := g.spawned[0]
-			if s := g.spawns[0]; s.Dir != dir || s.Title != "iso 写 hello" || s.Message != "在工作区里写一个 hello.md" || s.Model != "" {
+			if s := g.spawns[0]; s.Dir != dir || s.Title != "iso 写 hello" || s.Message != "在工作区里写一个 hello.md" || s.Model != "" || s.Goal != "写好 hello.md" {
 				t.Errorf("spawn = %+v", s)
 			}
 			m, ok := side.Get(key)
 			if !ok || m.Purpose != sidecar.PurposeTask || m.Parent != sessionkey.PlannerMainKey || m.Title != "iso 写 hello" || m.Dir != dir || !m.DispatchedByPlanner() || m.Created.IsZero() {
 				t.Errorf("sidecar = %+v, %v", m, ok)
 			}
-			if !strings.Contains(g.told[0], key) || strings.Contains(g.told[0], "notify_when_idle") || !strings.Contains(g.told[0], "汇报") {
+			if !strings.Contains(g.told[0], key) || strings.Contains(g.told[0], "notify_when_idle") || !strings.Contains(g.told[0], "在回复末尾写汇报块，网关一行转给你") {
 				t.Errorf("told = %q", g.told)
 			}
 		})
@@ -550,6 +552,8 @@ type endRig struct {
 	t        *testing.T
 	r        *Runner
 	g        *fakeGateway
+	inbox    *notify.Notifier
+	side     *sidecar.Store
 	key      string
 	now      time.Time
 	held     []func()
@@ -558,9 +562,9 @@ type endRig struct {
 
 func endedRunner(t *testing.T) *endRig {
 	t.Helper()
-	r, g, _, side, dir := newRunner(t)
-	e := &endRig{t: t, r: r, g: g}
-	r.grace = 0
+	r, g, inbox, side, dir := newRunner(t)
+	e := &endRig{t: t, r: r, g: g, inbox: inbox, side: side}
+	r.grace, r.reportGrace = 0, 0
 	r.after = func(d time.Duration, f func()) {
 		if d > 0 {
 			e.held = append(e.held, f)
@@ -568,7 +572,7 @@ func endedRunner(t *testing.T) *endRig {
 		}
 		f()
 	}
-	r.cfg.Tasks = task.New(task.Config{Sessions: side})
+	r.cfg.Tasks = task.New(task.Config{Sessions: side, OnState: r.TaskState})
 	r.cfg.Reports = func(time.Time, time.Time) []string { return e.reported }
 	e.now = time.Now()
 	r.cfg.Now = func() time.Time { return e.now }
@@ -986,5 +990,253 @@ func TestOutsideTurnRefuses(t *testing.T) {
 	}
 	if slices.Sort(kinds); !slices.Equal(kinds, []notify.Kind{notify.KindNotice, notify.KindQuestion}) {
 		t.Errorf("inbox = %+v, want the question and the notice", open)
+	}
+}
+
+// reportReply is a turn's reply that ends with a report block.
+func reportReply(state, summary string) string {
+	return "做了什么：跑了测试。\n没做什么：没改文档。\n\n" + reportBlock(`{"state":"`+state+`","summary":"`+summary+`"}`)
+}
+
+// withDigests gives the rig's runner a digest writer that writes at once;
+// it returns the writer.
+func (e *endRig) withDigests() *digest.Writer {
+	e.t.Helper()
+	w := digest.New(digest.Config{Dir: e.t.TempDir(), MinGap: time.Millisecond, Facts: func(string) (digest.Facts, bool) { return digest.Facts{Title: "iso 跑测试"}, true }})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { w.Run(ctx); close(done) }()
+	// Before the directory goes: a write in flight would keep it.
+	e.t.Cleanup(func() { cancel(); <-done })
+	e.r.cfg.Digests = w
+	return w
+}
+
+// reportEnd ends a turn with text, waits for its digest to be written when
+// the runner keeps them, and runs the checks.
+func (e *endRig) reportEnd(text string) {
+	e.t.Helper()
+	e.r.Result(e.key, text)
+	if w := e.r.cfg.Digests; w != nil {
+		testhelper.Eventually(e.t, func() bool { return w.Path(e.key) != "" }, 5*time.Second, "the digest is never written")
+	}
+	e.check()
+}
+
+// questions are the open "等你" questions of the rig's inbox.
+func (e *endRig) questions() []notify.Item {
+	open, _ := e.inbox.List(0)
+	return slices.DeleteFunc(open, func(it notify.Item) bool { return it.Kind != notify.KindQuestion })
+}
+
+// TestTaskReportBlock: a turn that ends with a report block gets the
+// Planner one line, state, summary and the digest's path, whatever the
+// state, and the conversation a 📨 note; never the receipt of a turn that
+// ended without a report. The sidecar keeps it for the task card, the
+// digest its full text; need_user opens a question in "等你" on the
+// session, closed by its next turn's end. The reply to a report line that
+// leaves the task 进行中 with no status block is reminded, but not of a
+// progress report.
+func TestTaskReportBlock(t *testing.T) {
+	cases := []struct {
+		state, word string
+		reminded    bool
+	}{
+		{"done", "完成", true},
+		{"blocked", "卡住", true},
+		{"need_user", "要你决定", true},
+		{"progress", "进度", false},
+	}
+	for _, c := range cases {
+		t.Run(c.state, func(t *testing.T) {
+			e := endedRunner(t)
+			w := e.withDigests()
+			at := e.now
+			e.reportEnd(reportReply(c.state, "测试全部通过。文档没动"))
+			path := w.Path(e.key)
+			want := e.key + "（iso 跑测试）汇报：" + c.word + " · 测试全部通过。文档没动 · 全文 " + path
+			if len(e.g.told) != 1 || e.g.told[0] != want {
+				t.Fatalf("told = %q, want %q", e.g.told, want)
+			}
+			if note := "📨 " + e.key + " 汇报：" + c.word + " · 测试全部通过。文档没动"; !slices.Contains(e.g.notes, note) {
+				t.Errorf("notes = %q, want %q", e.g.notes, note)
+			}
+			m, _ := e.side.Get(e.key)
+			if m.Report == nil || m.Report.State != c.state || m.Report.Summary != "测试全部通过。文档没动" || !m.Report.At.Equal(at) {
+				t.Errorf("sidecar report = %+v", m.Report)
+			}
+			if m.Turn == nil || m.Turn.Check {
+				t.Errorf("turn = %+v, want checked", m.Turn)
+			}
+			if st, _ := w.State(e.key); st.Report == nil || st.Report.Text != "做了什么：跑了测试。\n没做什么：没改文档。" || st.Report.State != c.state {
+				t.Errorf("digest report = %+v", st.Report)
+			}
+			qs := e.questions()
+			if c.state == "need_user" {
+				if len(qs) != 1 || qs[0].Unit != e.key || qs[0].Source != ReportSource(e.key) || qs[0].Why != "派出的任务在等你决定" ||
+					!strings.Contains(qs[0].Title, "iso 跑测试 要你决定：测试全部通过") {
+					t.Errorf("questions = %+v, want one on the session", qs)
+				}
+			} else if len(qs) != 0 {
+				t.Errorf("questions = %+v, want none", qs)
+			}
+
+			// The Planner answers with no status block.
+			e.g.told = nil
+			e.wait(time.Minute)
+			e.planner("收到。")
+			if got := len(e.g.told) == 1 && strings.Contains(e.g.told[0], "刚向你汇报，它在任务里仍是进行中"); got != c.reminded || !c.reminded && len(e.g.told) != 0 {
+				t.Errorf("told after the reply = %q, want a reminder: %v", e.g.told, c.reminded)
+			}
+			e.planner("再一条。")
+			if len(e.g.told) > 1 {
+				t.Errorf("reminded again: %q", e.g.told)
+			}
+
+			// The next turn ends without one: its receipt comes, the
+			// question is closed.
+			e.wait(time.Minute)
+			e.end("又跑了一遍")
+			if got := e.receipts(); len(got) != 1 || !strings.Contains(got[0], "没有写汇报块") || strings.Contains(got[0], "格式不对") {
+				t.Errorf("receipts = %q, want one of the unreported turn", got)
+			}
+			if qs := e.questions(); len(qs) != 0 {
+				t.Errorf("questions after the next turn = %+v, want none", qs)
+			}
+		})
+	}
+
+	t.Run("busy Planner", func(t *testing.T) {
+		e := endedRunner(t)
+		busy := true
+		e.r.cfg.PlannerBusy = func() bool { return busy }
+		e.r.Result(e.key, reportReply("done", "写好了"))
+		e.r.checkEnded(<-e.r.endCh)
+		if len(e.g.told) != 0 || len(e.r.endCh) != 1 {
+			t.Fatalf("told = %q, queued %d, want the line held for the busy Planner", e.g.told, len(e.r.endCh))
+		}
+		busy = false
+		e.check()
+		// No digest writer: the line points at none.
+		if want := e.key + "（iso 跑测试）汇报：完成 · 写好了"; len(e.g.told) != 1 || e.g.told[0] != want {
+			t.Errorf("told = %q, want %q", e.g.told, want)
+		}
+	})
+
+	// A digest not written yet holds the line back, up to endGrace after
+	// the turn ended; then it is told, pointing where the digest goes.
+	t.Run("digest not written", func(t *testing.T) {
+		e := endedRunner(t)
+		w := digest.New(digest.Config{Dir: t.TempDir()})
+		e.r.cfg.Digests = w
+		e.r.Result(e.key, reportReply("done", "写好了"))
+		e.check()
+		if len(e.g.told) != 0 || len(e.held) != 1 {
+			t.Fatalf("told = %q held = %d, want the line held", e.g.told, len(e.held))
+		}
+		e.wait(endGrace / 2)
+		e.fire()
+		if len(e.g.told) != 0 || len(e.held) != 1 {
+			t.Fatalf("told = %q held = %d, want the line still held", e.g.told, len(e.held))
+		}
+		e.wait(endGrace)
+		e.fire()
+		if want := e.key + "（iso 跑测试）汇报：完成 · 写好了 · 全文 " + w.File(e.key); len(e.g.told) != 1 || e.g.told[0] != want {
+			t.Errorf("told = %q, want %q", e.g.told, want)
+		}
+	})
+
+	t.Run("done marked", func(t *testing.T) {
+		e := endedRunner(t)
+		e.reportEnd(reportReply("need_user", "选 A 还是 B"))
+		if len(e.questions()) != 1 {
+			t.Fatalf("questions = %+v", e.questions())
+		}
+		e.g.told = nil
+		e.planner("它问的我替你记下了。\n" + block(`{"type":"status","task":"`+e.key+`","state":"done","why":"用户说不做了"}`))
+		if qs := e.questions(); len(qs) != 0 {
+			t.Errorf("questions after done = %+v, want none", qs)
+		}
+		if len(e.g.told) != 0 {
+			t.Errorf("told = %q, want no reminder for a task marked done", e.g.told)
+		}
+	})
+
+	t.Run("malformed", func(t *testing.T) {
+		e := endedRunner(t)
+		e.end("做完了。\n" + reportBlock(`{"state":"finished","summary":"写好了"}`))
+		got := e.receipts()
+		if len(got) != 1 || !strings.Contains(got[0], "没有写汇报块") || !strings.Contains(got[0], "它写了汇报块但格式不对：state 只能是") {
+			t.Fatalf("receipts = %q", got)
+		}
+		if m, _ := e.side.Get(e.key); m.Report != nil {
+			t.Errorf("sidecar report = %+v, want none", m.Report)
+		}
+	})
+
+	// A report ends the quiet a doing block answering a receipt started: the
+	// next unreported turn end is told at once.
+	t.Run("ends the quiet", func(t *testing.T) {
+		e := endedRunner(t)
+		e.end("改好了一半")
+		e.wait(5 * time.Minute)
+		e.doing("还没做完")
+		e.wait(5 * time.Minute)
+		e.reportEnd(reportReply("progress", "改好了大半"))
+		if len(e.g.told) != 2 || !strings.Contains(e.g.told[1], "汇报：进度") {
+			t.Fatalf("told = %q, want the report line at once", e.g.told)
+		}
+		e.planner("收到。")
+		e.wait(5 * time.Minute)
+		e.end("又一轮没汇报")
+		if got := e.receipts(); len(got) != 2 || !strings.Contains(got[1], "又一轮没汇报") || len(e.held) != 0 {
+			t.Fatalf("receipts = %q held = %d, want the turn told at once", got, len(e.held))
+		}
+	})
+}
+
+// TestTaskReportAcrossRestart: a turn that ended with a report and that a
+// restart cut short of its check gets the report line from the next run,
+// read back from the sidecar, never the receipt of an unreported turn.
+func TestTaskReportAcrossRestart(t *testing.T) {
+	r, g, _, side, dir := newRunner(t)
+	r.cfg.Tasks = task.New(task.Config{Sessions: side})
+	r.Handle(block(`{"type":"dispatch","workspace":"` + filepath.Base(dir) + `","title":"iso 写 hello","model":"","message":"写一个 hello.md"}`))
+	key := g.spawned[0]
+	g.told = nil
+	r.Result(key, reportReply("done", "hello.md 写好了")) // the restart comes before its check
+
+	cfg := r.cfg
+	cfg.Sessions = sidecar.Open(g.sideDir, nil)
+	cfg.Tasks = task.New(task.Config{Sessions: cfg.Sessions})
+	r2 := New(cfg)
+	r2.grace = 0
+	r2.recheck()
+	select {
+	case e := <-r2.endCh:
+		r2.checkEnded(e)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the turn end the restart cut short was never checked")
+	}
+	if want := key + "（iso 写 hello）汇报：完成 · hello.md 写好了"; len(g.told) != 1 || g.told[0] != want {
+		t.Fatalf("told = %q, want %q", g.told, want)
+	}
+	if !slices.Contains(g.notes, "📨 "+key+" 汇报：完成 · hello.md 写好了") {
+		t.Errorf("notes = %q", g.notes)
+	}
+}
+
+// The status block of a report line answered in the same reply leaves
+// nothing to remind of.
+func TestReportLineAnsweredByStatus(t *testing.T) {
+	e := endedRunner(t)
+	e.reportEnd(reportReply("done", "hello.md 写好了"))
+	e.g.told = nil
+	e.planner("核实过了。\n" + block(`{"type":"status","task":"`+e.key+`","state":"done","why":"它汇报写好了，文件在"}`))
+	if len(e.g.told) != 0 {
+		t.Errorf("told = %q, want none", e.g.told)
+	}
+	if st := e.r.cfg.Tasks.List()[0]; st.State != task.Done {
+		t.Errorf("task = %+v, want done", st)
 	}
 }

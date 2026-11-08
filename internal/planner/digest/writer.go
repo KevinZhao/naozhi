@@ -252,6 +252,16 @@ func (w *Writer) Path(key string) string {
 	return filepath.Join(w.cfg.Dir, FileName(key))
 }
 
+// File is where key's digest is written, whether or not it is yet; "" when
+// the Writer writes none. A receipt names it as the digest is being
+// written.
+func (w *Writer) File(key string) string {
+	if w == nil || w.cfg.Dir == "" {
+		return ""
+	}
+	return filepath.Join(w.cfg.Dir, FileName(key))
+}
+
 // Read is key's digest as on disk and when it was written; false when it
 // has none.
 func (w *Writer) Read(key string) (updated time.Time, md []byte, ok bool) {

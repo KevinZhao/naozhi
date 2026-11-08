@@ -60,6 +60,9 @@ type snapshotInput struct {
 	Label     func(id string) string
 	Name      func(id string) string
 	Workspace func(id string) string
+	// Conclusion is the first sentence of a session's latest report
+	// (§15.12 ②), "" for none; nil is none.
+	Conclusion func(id string) string
 }
 
 var stateNames = map[health.State]string{
@@ -93,8 +96,9 @@ func renderSnapshot(in snapshotInput) string {
 // state, a session coming or going, or which sessions fit is a change.
 func renderSnapshotKey(in snapshotInput) (full, key string) {
 	var lines []string
-	// times[i] is lines[i]'s trailing time, left out of the key.
-	var times []string
+	// times[i] is lines[i]'s time, left out of the key, and tails[i] what
+	// follows it (a session's conclusion), kept in the key.
+	var times, tails []string
 	keepFrom, keepTo := 0, 0 // the promise section, lines[keepFrom:keepTo]
 	if in.Waiting != nil {
 		items := slices.Clone(in.Waiting)
@@ -159,15 +163,16 @@ func renderSnapshotKey(in snapshotInput) (full, key string) {
 	lines = append(lines, fmt.Sprintf("会话（在跑 %d，最近 24 小时结束 %d）：", nRunning, len(units)-nRunning))
 	unitsFrom := len(lines)
 	times = make([]string, len(lines), len(lines)+len(units))
+	tails = make([]string, len(lines), len(lines)+len(units))
 	for i, u := range units {
 		if i == snapshotMaxUnits {
 			lines = append(lines, fmt.Sprintf("- …另有 %d 个，见 index.json", len(units)-i))
-			times = append(times, "")
+			times, tails = append(times, ""), append(tails, "")
 			break
 		}
-		line, at := unitLine(in, u)
+		line, at, tail := unitLine(in, u)
 		lines = append(lines, line)
-		times = append(times, at)
+		times, tails = append(times, at), append(tails, tail)
 	}
 
 	head := "<naozhi-snapshot at=\"" + in.Now.Format("2006-01-02 15:04 MST") + "\">"
@@ -193,8 +198,8 @@ func renderSnapshotKey(in snapshotInput) (full, key string) {
 			cut++
 			continue
 		}
-		bare := textutil.TruncateRunes(line, snapshotLineRunes)
-		line = textutil.TruncateRunes(line+times[i], snapshotLineRunes)
+		bare := textutil.TruncateRunes(line+tails[i], snapshotLineRunes)
+		line = textutil.TruncateRunes(line+times[i]+tails[i], snapshotLineRunes)
 		n := utf8.RuneCountInString(line) + 1
 		// A line with more after it leaves room for the cut notice.
 		reserve := cutNoticeRunes
@@ -259,9 +264,14 @@ func promiseLines(items []Promise, loc *time.Location) []string {
 	return out
 }
 
-// unitLine is u's line in the snapshot, and the time that ends it ("" for
-// none).
-func unitLine(in snapshotInput, u health.Unit) (line, at string) {
+// conclusionRunes caps a session's conclusion in its snapshot line, which
+// the line's own cap may cut further.
+const conclusionRunes = 60
+
+// unitLine is u's line in the snapshot, the time that follows it ("" for
+// none) and what follows that: its latest report's conclusion ("" for
+// none), last, so the line's cap cuts it first.
+func unitLine(in snapshotInput, u health.Unit) (line, at, tail string) {
 	// The Planner calls a session by its title or name; the key is for
 	// looking it up.
 	var label, cross string
@@ -293,5 +303,10 @@ func unitLine(in snapshotInput, u health.Unit) (line, at string) {
 	if !u.LastActive.IsZero() {
 		at = " · 最后输出 " + u.LastActive.In(in.Now.Location()).Format("01-02 15:04")
 	}
-	return line, at
+	if in.Conclusion != nil {
+		if c := in.Conclusion(u.ID); c != "" {
+			tail = " · 结论 " + textutil.TruncateRunes(c, conclusionRunes)
+		}
+	}
+	return line, at, tail
 }

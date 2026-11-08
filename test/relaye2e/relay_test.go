@@ -8,7 +8,9 @@
 // it; an ask naming the task sends the user's answer straight there; a
 // dispatch allowing one Outlook write tool starts its session with Outlook's
 // write switch on and the other write tools denied; a dispatch with no
-// mcp_tools still denies enable_write_tools.
+// mcp_tools still denies enable_write_tools; a dispatched session's report
+// block reaches the Planner as one line pointing at its digest, the
+// conversation as a note, the task card and, need_user, "等你".
 //
 //	go test -tags relaye2e -count=1 -v ./test/relaye2e/
 package relaye2e
@@ -266,6 +268,14 @@ func TestRelayEndToEnd(t *testing.T) {
 		t.Fatalf("gh ran before any relay: %q", gh)
 	}
 
+	// 1b. The session's first reply ends with a need_user report block: the
+	// Planner gets one line of it, the conversation a 📨 note, "等你" a
+	// question on the session, the task card the summary, and the digest the
+	// full text.
+	key := in.file("task_key")
+	in.reported(key, "要你决定", "PR 看过了，等你决定要不要合并", "E2E-REPORT-BODY")
+	in.wait("the need_user question in the inbox", 30*time.Second, func() bool { return in.reportQuestion(key) })
+
 	// 2. The user says it; the relay in that turn reaches the session in the
 	// gateway's envelope, with the user's words, and the session acts.
 	in.send("E2E-RELAY 用户拍板：合并 #1")
@@ -275,6 +285,14 @@ func TestRelayEndToEnd(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("the session's message lacks %q:\n%s", want, got)
 		}
+	}
+	// Its done report replaces the first; its turn's end closed the question.
+	in.reported(key, "完成", "已合并 #1", "已合并 #1（merged")
+	if in.reportQuestion(key) {
+		t.Error("the need_user question is still open after the session's next turn")
+	}
+	if strings.Contains(in.file("received-planner.log"), "没有写汇报块") {
+		t.Errorf("a receipt of an unreported turn for a reported one:\n%s", in.file("received-planner.log"))
 	}
 
 	// 3. An ask naming the task: the user's answer goes straight there.
@@ -347,6 +365,73 @@ func TestRelayEndToEnd(t *testing.T) {
 }
 
 const enableWrites = "mcp__aws-outlook-mcp__enable_write_tools"
+
+// reported waits for the line of key's report (word, summary) to reach the
+// Planner, pointing at a digest that holds the full text (body), and checks
+// the 📨 note in the conversation and the summary on the task card.
+func (in *instance) reported(key, word, summary, body string) {
+	in.t.Helper()
+	lead := key + "（e2e-task）汇报：" + word + " · " + summary + " · 全文 "
+	var line string
+	// Up to endGrace: a new session's first digest waits on the health
+	// table's first look at it, once a minute.
+	in.wait("the report line told to the Planner", 150*time.Second, func() bool {
+		for _, l := range strings.Split(in.file("received-planner.log"), "\n") {
+			if strings.HasPrefix(l, lead) {
+				line = l
+				return true
+			}
+		}
+		return false
+	})
+	path := strings.TrimPrefix(line, lead)
+	if !strings.HasPrefix(path, filepath.Join(in.root, "state", "planner", "digest")+"/") {
+		in.t.Errorf("the line's digest path %q is not under the state root", path)
+	}
+	in.wait("the digest with the report's full text", 90*time.Second, func() bool {
+		b, _ := os.ReadFile(path)
+		return strings.Contains(string(b), body)
+	})
+	if note := "📨 " + key + " 汇报：" + word + " · " + summary; !strings.Contains(in.notes(), note) {
+		in.t.Errorf("no %q in the Planner conversation:\n%s", note, in.notes())
+	}
+	in.wait("the summary on the task card", 30*time.Second, func() bool {
+		var list struct {
+			Tasks []struct {
+				ID     string `json:"id"`
+				Report *struct {
+					State   string `json:"state"`
+					Summary string `json:"summary"`
+				} `json:"report"`
+			} `json:"tasks"`
+		}
+		in.get("/api/tasks", &list)
+		for _, t := range list.Tasks {
+			if t.ID == key && t.Report != nil && t.Report.Summary == summary {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// reportQuestion reports whether "等你" holds key's need_user question.
+func (in *instance) reportQuestion(key string) bool {
+	var list struct {
+		Open []struct {
+			Unit   string `json:"unit"`
+			Source string `json:"source"`
+			Kind   string `json:"kind"`
+		} `json:"open"`
+	}
+	in.get("/api/inbox", &list)
+	for _, it := range list.Open {
+		if it.Unit == key && it.Source == "report:"+key && it.Kind == "question" {
+			return true
+		}
+	}
+	return false
+}
 
 // argvOf waits for the session named name (--name) to start and returns its
 // argv as the fake claude logged it.

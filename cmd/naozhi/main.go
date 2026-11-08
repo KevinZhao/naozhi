@@ -313,6 +313,7 @@ func main() {
 		Workspaces: plannerState.Workspaces,
 		Journal:    plannerState.Journal,
 		Promises:   wireup.PlannerPromises(promises),
+		Conclusion: wireup.PlannerConclusion(sidecars),
 	})
 	// The Planner's patrol (§15.6): weekday scout runs over the mail, Slack
 	// and Asana MCP servers, read tools only; new findings wake the Planner.
@@ -513,6 +514,9 @@ func main() {
 	// Puts a done task's session away (§5.2, D95); built below, once custody
 	// (whose "你在旁边" it waits on) exists.
 	var reaper *reap.Reaper
+	// The Planner's action blocks, built below once the server and custody
+	// exist; a task's state set before then has no report to settle.
+	var actions *action.Runner
 	// The 任务 (§15.4): the dispatched sessions and the promises, their
 	// states by health, the Planner's status blocks and the user, who can
 	// stop a dispatched session.
@@ -522,7 +526,10 @@ func main() {
 		Health:   func() health.Snapshot { return healthMon.Snapshot() },
 		Journal:  plannerState.Journal,
 		Stop:     wireup.StopTask(router, func(key string) { srv.DropPlannerQueue(key) }, plannerAgent.Tell),
-		OnState:  func(key string, st task.State) { reaper.OnState(key, st) },
+		OnState: func(key string, st task.State) {
+			actions.TaskState(key, st)
+			reaper.OnState(key, st)
+		},
 		ReapWait: func(key string) (string, time.Time) { return reaper.Wait(key) },
 		Live:     wireup.TaskLive(router),
 		Digest:   func(key string) bool { return digests.Path(key) != "" },
@@ -551,9 +558,8 @@ func main() {
 	// sends through srv's own send path and reads the health machine, both
 	// set before Run below. It runs only with the Planner on.
 	sources := wireup.CustodySources{Router: router, Outputs: activities}
-	// actions, built below, takes the cards with no recommended option to
-	// the Planner; custody runs only after it is set.
-	var actions *action.Runner
+	// actions (declared above), built below, takes the cards with no
+	// recommended option to the Planner; custody runs only after it is set.
 	custodian := custody.New(custody.Config{
 		Sessions: sidecars,
 		Send: func(key, text string, reason custody.Reason, n int) error {
@@ -750,6 +756,7 @@ func main() {
 		Note:        plannerAgent.Note,
 		Tell:        plannerAgent.Tell,
 		Reports:     wireup.PlannerReports(router),
+		Digests:     digests,
 		Outside:     plannerAgent.OutsideTurn,
 		TellRefused: plannerAgent.TellRefused,
 		TellUnrun:   plannerAgent.TellUnrun,

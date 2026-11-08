@@ -33,6 +33,17 @@ func TestSystemPrompt(t *testing.T) {
 		"健康状态、最后输出（last_active）",
 		"读它一律用 Read 的 offset / limit 分段读，不要整份读",
 		"搜记忆只在 ~/.claude/projects/*/memory 下搜，不要从 ~/.claude/projects 根目录搜",
+		"在回复末尾写汇报块（naozhi-report）",
+		"naozhi-report 是派出会话写给网关的汇报块，你不要写",
+		"汇报：完成 | 卡住 | 要你决定 | 进度 · 结论 · 全文 <摘要路径>",
+		"/state/planner/digest/",
+		"摘要路径 digest、最新汇报 report",
+		"问某个会话的进展先读它的摘要",
+		`"汇报：完成"的回执，核实后`,
+		"不要再用 ask 重复问",
+		"每个任务最多 3 行",
+		"要你决定（等用户拍板的）→ 新结果",
+		`"goal":"…"`,
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt lacks %q", want)

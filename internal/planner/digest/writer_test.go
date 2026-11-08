@@ -181,6 +181,10 @@ func TestNewRebuildsPath(t *testing.T) {
 	if p := r.w.Path(key); p != "" {
 		t.Fatalf("Path before a write = %q", p)
 	}
+	// File names it before it is written, Path only after.
+	if p := r.w.File(key); p != filepath.Join(r.dir, FileName(key)) {
+		t.Fatalf("File = %q", p)
+	}
 	if err := r.w.SetGoal(key, "目标一\n\n细节"); err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +311,7 @@ func TestNilWriter(t *testing.T) {
 	w.Touch("k")
 	w.Sweep()
 	w.Run(context.Background())
-	if w.Path("k") != "" {
+	if w.Path("k") != "" || w.File("k") != "" {
 		t.Fatal("nil Path")
 	}
 	if _, ok := w.State("k"); ok {

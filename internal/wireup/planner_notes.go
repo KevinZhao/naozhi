@@ -1,6 +1,7 @@
 package wireup
 
 import (
+	"slices"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -16,7 +17,8 @@ import (
 
 // SessionNotes builds the session side notes (docs/rfc/planner.md §15.3 ③)
 // over the journal, the inbox for item titles, the sidecars for dispatches
-// and planner:main's history for reports.
+// and the latest report block, and planner:main's history for the reports
+// sent by SendMessage.
 func SessionNotes(j *journal.Journal, inbox *notify.Notifier, sidecars *sidecar.Store, router *session.Router) *note.Notes {
 	return note.New(note.Config{
 		Journal: j,
@@ -31,7 +33,15 @@ func SessionNotes(j *journal.Journal, inbox *notify.Notifier, sidecars *sidecar.
 			}
 			return m.Created
 		},
-		Reports: func(key string) []time.Time { return plannerReports(router, key) },
+		Reports: func(key string) []time.Time {
+			out := plannerReports(router, key)
+			// A report block's line reached the Planner through the
+			// gateway; the sidecar keeps the latest.
+			if m, ok := sidecars.Get(key); ok && m.Report != nil && !slices.Contains(out, m.Report.At) {
+				out = append(out, m.Report.At)
+			}
+			return out
+		},
 	})
 }
 

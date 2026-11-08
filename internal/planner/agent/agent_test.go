@@ -412,6 +412,51 @@ func TestRenderSnapshot(t *testing.T) {
 	}
 }
 
+// TestSnapshotConclusion: a session with a report ends its line with the
+// report's conclusion, after its 最后输出, so the line's cap cuts it first.
+// The conclusion is content: a new one is a change, though the time is
+// not.
+func TestSnapshotConclusion(t *testing.T) {
+	now := time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)
+	conclusion := "hello.md 写好了。"
+	in := snapshotInput{
+		Now:        now,
+		Units:      []health.Unit{{ID: "task:ab12", Kind: health.KindSession, State: health.Idle, LastActive: now.Add(-time.Minute)}},
+		Label:      func(string) string { return "iso 写 hello" },
+		Conclusion: func(id string) string { return map[string]string{"task:ab12": conclusion}[id] },
+	}
+	full, key := renderSnapshotKey(in)
+	if want := "- iso 写 hello（task:ab12） [空闲] · 最后输出 11-04 09:59 · 结论 hello.md 写好了。\n"; !strings.Contains(full, want) {
+		t.Errorf("snapshot =\n%s\nwant the line %q", full, want)
+	}
+	if !strings.Contains(key, "· 结论 hello.md 写好了。") || strings.Contains(key, "最后输出") {
+		t.Errorf("key = %q, want the conclusion and no time", key)
+	}
+	in.Units[0].LastActive = now
+	if _, k := renderSnapshotKey(in); k != key {
+		t.Errorf("a later 最后输出 changed the key: %q", k)
+	}
+	conclusion = "测试也过了。"
+	if _, k := renderSnapshotKey(in); k == key {
+		t.Error("a new conclusion left the key as it was")
+	}
+	// A long conclusion is cut, and the line to its cap.
+	conclusion = strings.Repeat("长", 300)
+	full, _ = renderSnapshotKey(in)
+	for _, line := range strings.Split(full, "\n") {
+		if strings.Contains(line, "task:ab12") && (utf8.RuneCountInString(line) > snapshotLineRunes || !strings.Contains(line, "· 结论 长")) {
+			t.Errorf("line = %q", line)
+		}
+	}
+	// The agent feeds it from its config.
+	sess := &fakeSessions{}
+	a := New(Config{Enabled: true, Layout: datadir.FromRoot(t.TempDir()), Home: t.TempDir(), Sessions: sess, Now: func() time.Time { return now },
+		Conclusion: func(string) string { return "结论一句。" }})
+	if in := a.snapshotInput(); in.Conclusion == nil || in.Conclusion("task:ab12") != "结论一句。" {
+		t.Error("snapshot input lacks the configured conclusion")
+	}
+}
+
 // TestSnapshotListsEveryPromise: the Planner closes a promise by the ID it
 // reads in the snapshot, so however many there are and whatever else fills
 // the budget, every open promise is listed with its ID; only texts are cut.

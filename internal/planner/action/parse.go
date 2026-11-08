@@ -49,7 +49,8 @@ const (
 	maxOptions        = 6
 	optionRunes       = 80
 	workspaceRefRunes = 128
-	taskRefRunes      = 128
+	// goalRunes caps a dispatch's goal (D103).
+	goalRunes = 60
 	// notifyTitleRunes is what the inbox shows of a title.
 	notifyTitleRunes = 120
 	// notifyIDRunes matches the scout's finding IDs.
@@ -85,6 +86,10 @@ type Dispatch struct {
 	// Model is "" for the default.
 	Model   string `json:"model"`
 	Message string `json:"message"`
+	// Goal is the task in one line, for its card and its digest (D103);
+	// "" takes the message's first sentence. One past goalRunes is cut,
+	// not refused: it only names the task.
+	Goal string `json:"goal,omitempty"`
 	// WithUserWords leads the first message with the user's words of the
 	// turn, as a relay does (D98). Only a turn the user started may set it.
 	WithUserWords bool `json:"with_user_words,omitempty"`
@@ -121,8 +126,9 @@ type Ask struct {
 	Trimmed int `json:"-"`
 }
 
-// Status sets a task's state: Task is a task: key or a promise ID, State
-// done, doing or failed, Why the evidence.
+// Status sets a task's state: Task is a task: key, the key of a session the
+// user opened, or a promise ID, State done, doing or failed, Why the
+// evidence.
 type Status struct {
 	Task  string `json:"task"`
 	State string `json:"state"`
@@ -185,27 +191,17 @@ type Block struct {
 // errTooMany refuses the blocks past maxBlocks.
 var errTooMany = fmt.Errorf("一次回复最多 %d 个动作块", maxBlocks)
 
+// errUnclosed is a block whose closing fence never came.
+var errUnclosed = errors.New("代码块没有结束（缺少结尾的 ```）")
+
 // Parse returns text's action blocks in order.
 func Parse(text string) []Block {
 	var out []Block
-	lines := strings.Split(text, "\n")
-	for i := 0; i < len(lines); i++ {
-		if !isOpen(lines[i]) {
-			continue
-		}
-		var body []string
-		closed := false
-		for i++; i < len(lines); i++ {
-			if strings.TrimSpace(lines[i]) == "```" {
-				closed = true
-				break
-			}
-			body = append(body, lines[i])
-		}
-		b := Block{Raw: strings.TrimSpace(strings.Join(body, "\n"))}
+	for _, f := range fences(strings.Split(text, "\n"), Fence) {
+		b := Block{Raw: f.body}
 		switch {
-		case !closed:
-			b.Err = errors.New("代码块没有结束（缺少结尾的 ```）")
+		case !f.closed:
+			b.Err = errUnclosed
 		case len(out) >= maxBlocks:
 			b.Err = errTooMany
 		default:
@@ -216,11 +212,45 @@ func Parse(text string) []Block {
 	return out
 }
 
-// isOpen reports whether line opens an action block: the fence and the info
+// fence is one fenced block of a text: its body trimmed, whether its
+// closing fence came, and the lines it spans, open being the opening
+// fence's and end the line after the closing one (len(lines) when it never
+// closed).
+type fence struct {
+	body      string
+	closed    bool
+	open, end int
+}
+
+// fences returns the blocks of lines opened by info, in order. A block runs
+// to the first bare ``` line, so one never closed takes the rest of the
+// text.
+func fences(lines []string, info string) []fence {
+	var out []fence
+	for i := 0; i < len(lines); i++ {
+		if !isOpen(lines[i], info) {
+			continue
+		}
+		f := fence{open: i}
+		var body []string
+		for i++; i < len(lines); i++ {
+			if strings.TrimSpace(lines[i]) == "```" {
+				f.closed = true
+				break
+			}
+			body = append(body, lines[i])
+		}
+		f.body, f.end = strings.TrimSpace(strings.Join(body, "\n")), min(i+1, len(lines))
+		out = append(out, f)
+	}
+	return out
+}
+
+// isOpen reports whether line opens a block of info: the fence and the info
 // string alone, indented or not.
-func isOpen(line string) bool {
+func isOpen(line, info string) bool {
 	rest, ok := strings.CutPrefix(strings.TrimSpace(line), "```")
-	return ok && strings.TrimSpace(rest) == Fence
+	return ok && strings.TrimSpace(rest) == info
 }
 
 func (b *Block) decode() {
@@ -332,6 +362,7 @@ func strict(raw string, v any) error {
 func (d *Dispatch) validate() error {
 	d.Workspace, d.Title = strings.TrimSpace(d.Workspace), strings.TrimSpace(d.Title)
 	d.Model, d.Message = strings.TrimSpace(d.Model), strings.TrimSpace(d.Message)
+	d.Goal = cut(strings.Join(strings.Fields(d.Goal), " "), goalRunes)
 	switch {
 	case d.Workspace == "":
 		return errors.New("dispatch 缺少 workspace")
@@ -486,7 +517,7 @@ func (s *Status) validate() error {
 	switch {
 	case s.Task == "":
 		return errors.New("status 缺少 task")
-	case utf8.RuneCountInString(s.Task) > taskRefRunes:
+	case utf8.RuneCountInString(s.Task) > keyRunes:
 		return errors.New("task 太长")
 	case s.State != "done" && s.State != "doing" && s.State != "failed":
 		return fmt.Errorf("state 只能是 done、doing 或 failed，不是 %q", s.State)
@@ -531,6 +562,14 @@ func (c *Custody) validate() error {
 		return fmt.Errorf("text 超过 %d 字", custodyTextRunes)
 	}
 	return noEnvelope("text", c.Text)
+}
+
+// cut is s cut to n runes, "…" included, when it runs longer.
+func cut(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	return textutil.TruncateRunesNoEllipsis(s, n-1) + "…"
 }
 
 // webLink reports whether s is an absolute http(s) URL the dashboard may

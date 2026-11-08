@@ -7,6 +7,8 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/planner/agent"
+	"github.com/naozhi/naozhi/internal/planner/digest"
+	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -89,4 +91,17 @@ func (p PlannerSessions) CompactedSince(key string, t time.Time) bool {
 		}
 	}
 	return false
+}
+
+// PlannerConclusion is agent.Config.Conclusion over the sidecars: the first
+// sentence of a dispatched session's latest report, as its task card says
+// it.
+func PlannerConclusion(sidecars *sidecar.Store) func(key string) string {
+	return func(key string) string {
+		m, ok := sidecars.Get(key)
+		if !ok || m.Report == nil {
+			return ""
+		}
+		return digest.FirstSentence(m.Report.Summary)
+	}
 }
