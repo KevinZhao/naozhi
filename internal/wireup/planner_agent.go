@@ -3,7 +3,9 @@ package wireup
 import (
 	"cmp"
 	"context"
+	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -61,4 +63,30 @@ func (p PlannerSessions) Name(key string) string {
 		return ""
 	}
 	return s.CLISessionName()
+}
+
+// compactBoundary is the system frame the Claude CLI reports a compaction
+// of the conversation with; the event log keeps it as a system entry by
+// its subtype.
+const compactBoundary = "compact_boundary"
+
+// CompactedSince reports a compaction the session's event log shows after
+// t, and also one it cannot rule out: no session, or a log that no longer
+// reaches back to t.
+func (p PlannerSessions) CompactedSince(key string, t time.Time) bool {
+	s := p.Router.SessionFor(key)
+	if s == nil {
+		return true
+	}
+	entries := s.EventEntries()
+	ms := t.UnixMilli()
+	if len(entries) == 0 || entries[0].Time > ms {
+		return true
+	}
+	for _, e := range entries {
+		if e.Time > ms && e.Type == clievent.KindSystem && e.Summary == compactBoundary {
+			return true
+		}
+	}
+	return false
 }

@@ -118,6 +118,9 @@ type Sessions interface {
 	Label(key string) string
 	// Name is a session's cross-session name, "" when unknown.
 	Name(key string) string
+	// CompactedSince reports whether key's conversation may have been
+	// compacted since t, so what it was told then may be summarised away.
+	CompactedSince(key string, t time.Time) bool
 }
 
 // Turns is the gateway's turn entry for the Planner.
@@ -212,15 +215,17 @@ type Agent struct {
 	// failures and retryAt pace revival after failed spawns.
 	failures int
 	retryAt  time.Time
-	// lastSnap is the last full snapshot a message took into the current
-	// conversation (nextSnapshot); zero once the conversation may not hold
-	// it.
+	// lastSnap is the last full snapshot a turn of the current
+	// conversation ran with (nextSnapshot); zero once the conversation may
+	// not hold it. snapGen counts the forgets: a turn submitted before one
+	// records nothing at its end.
 	lastSnap sentSnapshot
+	snapGen  uint64
 }
 
-// sentSnapshot is a full snapshot as a message carried it: its body (the
-// block without its time), when, and into which conversation ("" before
-// the CLI named it).
+// sentSnapshot is a full snapshot as a turn ran with it: its body (the
+// block without its time), when it was rendered, and in which conversation
+// ("" when the CLI had not named it).
 type sentSnapshot struct {
 	body string
 	at   time.Time
@@ -568,6 +573,8 @@ func (a *Agent) handoffPath(day string) string {
 // reused rather than asked for again. It stays pending until sent, so after
 // a failed restart the conversation revival starts still gets it.
 func (a *Agent) changeShift(ctx context.Context, now time.Time, day string) {
+	// A turn in flight from here on may end in either conversation.
+	a.forgetSnapshot()
 	path := a.handoffPath(day)
 	summary, err := os.ReadFile(path)
 	if err != nil {
@@ -593,7 +600,6 @@ func (a *Agent) changeShift(ctx context.Context, now time.Time, day string) {
 		a.state.Handoff = day
 	}
 	a.saveLocked()
-	a.lastSnap = sentSnapshot{}
 	a.mu.Unlock()
 	if err := a.cfg.Sessions.Recreate(ctx, Key, opts); err != nil {
 		// The old session is gone: revival starts the new one, and the
@@ -602,8 +608,7 @@ func (a *Agent) changeShift(ctx context.Context, now time.Time, day string) {
 		return
 	}
 	a.markShift(now)
-	// A message sent while the old session was retired carried its
-	// snapshot there.
+	// What a turn on the old session ran with is not in the new one.
 	a.forgetSnapshot()
 	slog.Info("planner: shift changed", "day", day, "handoff_bytes", len(summary))
 	if len(summary) > 0 {
@@ -720,11 +725,10 @@ func (a *Agent) Send(text, ref string, images []clievent.Attachment) error {
 	if text != "" {
 		said = &Words{Text: text, At: time.Now()}
 	}
-	snap, commit := a.nextSnapshot()
-	if _, err := turns.SubmitPlanner(Key, src, said, strings.TrimSpace(head+snap+"\n\n"+text), images, opts, nil); err != nil {
+	snap, ran := a.nextSnapshot()
+	if _, err := turns.SubmitPlanner(Key, src, said, strings.TrimSpace(head+snap+"\n\n"+text), images, opts, ran); err != nil {
 		return err
 	}
-	commit()
 	turns.PlannerReceipt(Key, ReceiptText)
 	return nil
 }
@@ -767,33 +771,47 @@ func (a *Agent) tellSaid(src Source, said *Words, text string) error {
 }
 
 // nextSnapshot is the snapshot block the next message carries: the full
-// one, or only a mark when it says what the last full one this conversation
-// got said. commit, called once the message is submitted, records a full
-// one as that.
-func (a *Agent) nextSnapshot() (text string, commit func()) {
+// one, or only a mark when what the last full one of this conversation said
+// still holds. ran, the message's turn's end (nil with the mark), records a
+// full one once its turn ran: a message dropped from the queue, or whose
+// turn failed, may never have reached the CLI.
+func (a *Agent) nextSnapshot() (text string, ran func(string, error)) {
 	full := a.Snapshot()
 	_, body, _ := strings.Cut(full, "\n")
 	st := a.cfg.Sessions.State(Key)
 	now := a.cfg.Now()
 	a.mu.Lock()
-	prev := a.lastSnap
+	prev, gen := a.lastSnap, a.snapGen
 	a.mu.Unlock()
-	// A dead process takes the message into a spawn that may not resume
-	// the conversation; another session ID is another conversation.
-	if st.Alive && prev.body == body && (prev.sid == "" || prev.sid == st.SessionID) {
-		return unchangedSnapshot(prev.at.In(now.Location())), func() {}
+	// The mark goes only to a Planner idle in the conversation the last
+	// full one went to, so the message goes in as it is decided: one queued
+	// behind a turn may reach a conversation a shift change or a revival
+	// started by then. A dead process's spawn may not resume; an unnamed
+	// conversation cannot be told from another; a compaction may have
+	// summarised the last one away.
+	if st.Alive && !st.Running && prev.body == body && prev.sid != "" && prev.sid == st.SessionID &&
+		!a.cfg.Sessions.CompactedSince(Key, prev.at) {
+		return unchangedSnapshot(prev.at.In(now.Location())), nil
 	}
-	return full, func() {
+	return full, func(_ string, err error) {
+		if err != nil {
+			return
+		}
+		sid := a.cfg.Sessions.State(Key).SessionID
 		a.mu.Lock()
-		a.lastSnap = sentSnapshot{body: body, at: now, sid: st.SessionID}
-		a.mu.Unlock()
+		defer a.mu.Unlock()
+		if a.snapGen == gen {
+			a.lastSnap = sentSnapshot{body: body, at: now, sid: sid}
+		}
 	}
 }
 
-// forgetSnapshot makes the next message carry a full snapshot.
+// forgetSnapshot makes the next message carry a full snapshot, and the
+// turns in flight record none.
 func (a *Agent) forgetSnapshot() {
 	a.mu.Lock()
 	a.lastSnap = sentSnapshot{}
+	a.snapGen++
 	a.mu.Unlock()
 }
 

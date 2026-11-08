@@ -36,6 +36,7 @@ func (plannerFileSessions) Recreate(context.Context, string, sessionview.AgentOp
 func (plannerFileSessions) Release(string) bool                                           { return true }
 func (plannerFileSessions) Label(string) string                                           { return "" }
 func (plannerFileSessions) Name(string) string                                            { return "" }
+func (plannerFileSessions) CompactedSince(string, time.Time) bool                         { return false }
 
 // plannerFileTurns records what reaches the Planner's turn.
 type plannerFileTurns struct {

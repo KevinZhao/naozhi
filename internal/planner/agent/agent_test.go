@@ -33,6 +33,14 @@ type fakeSessions struct {
 	recreateErr error
 	// names is the --name of every Ensure and Recreate, in order.
 	names []string
+	// compacted is CompactedSince's answer.
+	compacted bool
+}
+
+func (f *fakeSessions) CompactedSince(string, time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.compacted
 }
 
 func (f *fakeSessions) State(key string) SessionState {
@@ -91,9 +99,11 @@ func (*fakeSessions) Name(key string) string {
 // refKey is the one session besides planner:main fakeSessions knows.
 const refKey = "dashboard:direct:a:general"
 
-// fakeTurns answers every turn at once with reply.
+// fakeTurns answers every turn at once with reply, or ends it with
+// turnErr.
 type fakeTurns struct {
 	reply   string
+	turnErr error
 	sent    []string
 	images  [][]clievent.Attachment
 	srcs    []Source
@@ -109,7 +119,7 @@ func (f *fakeTurns) SubmitPlanner(_ string, src Source, said *Words, text string
 	f.images = append(f.images, images)
 	f.srcs = append(f.srcs, src)
 	if done != nil {
-		done(f.reply, nil)
+		done(f.reply, f.turnErr)
 	}
 	return false, nil
 }
@@ -858,4 +868,104 @@ func TestSnapshotUnchanged(t *testing.T) {
 	if got := send(at("2026-11-04 08:40"), "j"); !strings.HasPrefix(got, full) {
 		t.Fatalf("after the shift change: %q", got)
 	}
+}
+
+// TestSnapshotMarkOnlyWhenSafe: the mark goes only where the last full
+// snapshot is surely in the conversation the message goes into. A full one
+// counts once its turn ran (one dropped from the queue or failed may never
+// have reached the CLI), in the conversation named then; a message to a
+// busy Planner is queued, and may reach another conversation by its turn;
+// a compaction may have summarised the last one away.
+func TestSnapshotMarkOnlyWhenSafe(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+	const full, mark = `<naozhi-snapshot at="`, `<naozhi-snapshot unchanged since="10:05"/>`
+	setup := func(t *testing.T) (*Agent, *fakeSessions, *fakeTurns, func(string) string) {
+		now := time.Date(2026, 11, 3, 10, 0, 0, 0, loc)
+		sess := &fakeSessions{st: SessionState{Exists: true, Alive: true, SessionID: "s1"}}
+		a, _ := newTestAgent(t, sess, &now)
+		turns := &fakeTurns{reply: "ok"}
+		a.turns = turns
+		last := now
+		a.health = func() health.Snapshot {
+			return health.Snapshot{Units: []health.Unit{{ID: "dashboard:direct:x:general", State: health.Idle, LastActive: last}}}
+		}
+		a.markShift(now)
+		send := func(text string) string {
+			t.Helper()
+			now = now.Add(5 * time.Minute)
+			if err := a.Send(text, "", nil); err != nil {
+				t.Fatal(err)
+			}
+			return turns.sent[len(turns.sent)-1]
+		}
+		return a, sess, turns, send
+	}
+
+	t.Run("its turn never ran", func(t *testing.T) {
+		_, _, turns, send := setup(t)
+		turns.turnErr = errors.New("消息未被处理")
+		send("a")
+		turns.turnErr = nil
+		if got := send("b"); !strings.HasPrefix(got, full) {
+			t.Fatalf("after a dropped full one: %q", got)
+		}
+		if got := send("c"); !strings.HasPrefix(got, "<naozhi-snapshot unchanged") {
+			t.Fatalf("after one that ran: %q", got)
+		}
+	})
+	t.Run("busy Planner", func(t *testing.T) {
+		_, sess, _, send := setup(t)
+		send("a")
+		sess.st.Running = true
+		if got := send("b"); !strings.HasPrefix(got, full) {
+			t.Fatalf("queued behind a turn: %q", got)
+		}
+	})
+	t.Run("conversation unnamed when it ran", func(t *testing.T) {
+		_, sess, _, send := setup(t)
+		sess.st.SessionID = ""
+		send("a")
+		if got := send("b"); !strings.HasPrefix(got, full) {
+			t.Fatalf("still unnamed: %q", got)
+		}
+		sess.st.SessionID = "s9" // another conversation, maybe
+		if got := send("c"); !strings.HasPrefix(got, full) {
+			t.Fatalf("named since: %q", got)
+		}
+	})
+	t.Run("compacted", func(t *testing.T) {
+		_, sess, _, send := setup(t)
+		send("a")
+		if got := send("b"); got != mark+"\n\nb" {
+			t.Fatalf("not compacted: %q", got)
+		}
+		sess.compacted = true
+		if got := send("c"); !strings.HasPrefix(got, full) {
+			t.Fatalf("compacted since: %q", got)
+		}
+	})
+	t.Run("forgotten while its turn ran", func(t *testing.T) {
+		a, _, turns, send := setup(t)
+		var ran func(string, error)
+		held := &holdTurns{fakeTurns: turns, held: &ran}
+		a.turns = held
+		send("a")
+		a.forgetSnapshot() // a shift change, a revival
+		ran("ok", nil)
+		a.turns = turns
+		if got := send("b"); !strings.HasPrefix(got, full) {
+			t.Fatalf("a turn submitted before the forget recorded its snapshot: %q", got)
+		}
+	})
+}
+
+// holdTurns is fakeTurns whose turns end only when the test calls held.
+type holdTurns struct {
+	*fakeTurns
+	held *func(string, error)
+}
+
+func (h *holdTurns) SubmitPlanner(key string, src Source, said *Words, text string, images []clievent.Attachment, opts sessionview.AgentOpts, done func(string, error)) (bool, error) {
+	*h.held = done
+	return h.fakeTurns.SubmitPlanner(key, src, said, text, images, opts, nil)
 }
