@@ -6,13 +6,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
@@ -251,4 +254,46 @@ func TestEndedNewerSidecar(t *testing.T) {
 func sidecarName(key string) string {
 	sum := sha256.Sum256([]byte(key))
 	return hex.EncodeToString(sum[:]) + ".json"
+}
+
+// Flipping a switch on a session without a sidecar gives it one without
+// replacing the one a writer outside the engine's lock (a result, a seen
+// mark, the Planner's status) made at the same moment.
+func TestSwitchKeepsAConcurrentUpsert(t *testing.T) {
+	r := newRig(t)
+	at := r.now.Add(-time.Minute)
+	lost := 0
+	const n = 200
+	for i := range n {
+		key := fmt.Sprintf("dashboard:direct:u%d:general", i)
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			set := r.e.SetWatch
+			if i%2 == 1 {
+				set = r.e.Set
+			}
+			if err := set(key, i%2 == 1, ByUser); err != nil {
+				t.Error(err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			if err := r.sessions.Upsert(key, func(m *sidecar.Meta) bool { m.ResultAt = at; return true }); err != nil {
+				t.Error(err)
+			}
+		}()
+		close(start)
+		wg.Wait()
+		if m, ok := r.sessions.Get(key); !ok || !m.ResultAt.Equal(at) {
+			lost++
+		}
+	}
+	if lost > 0 {
+		t.Errorf("%d of %d sidecars lost the ResultAt written beside a switch", lost, n)
+	}
 }

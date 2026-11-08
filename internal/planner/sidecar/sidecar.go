@@ -429,6 +429,28 @@ func (s *Store) Upsert(key string, fn func(*Meta) bool) error {
 	return nil
 }
 
+// Ensure gives key a sidecar (purpose "") when it has none and leaves one it
+// has alone, in one step under the store's lock. A Get then a Put would
+// replace, with an empty one, the sidecar another writer's Upsert made in
+// between: the user's sessions get theirs from writers that do not share
+// the caller's lock (a result, a seen mark, the Planner's status).
+func (s *Store) Ensure(key string) error {
+	if key == "" {
+		return errors.New("sidecar: empty key")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.m[key]; ok {
+		return nil
+	}
+	m := Meta{V: Version, Key: key, Created: s.now()}
+	if err := s.writeLocked(m); err != nil {
+		return err
+	}
+	s.m[key] = m
+	return nil
+}
+
 // Purpose is key's purpose and the title it was dispatched with (both ""
 // without a sidecar).
 func (s *Store) Purpose(key string) (purpose, title string) {

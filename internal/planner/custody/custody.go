@@ -506,12 +506,11 @@ func (e *Engine) setLocked(key string, enable bool, by string) error {
 	return nil
 }
 
-// ensureLocked gives key a sidecar to hold custody's fields.
+// ensureLocked gives key a sidecar to hold custody's fields. e.mu does not
+// cover the sidecar's other writers (a result, a seen mark, the Planner's
+// status), so the "none yet" check is the store's own.
 func (e *Engine) ensureLocked(key string) error {
-	if _, ok := e.cfg.Sessions.Get(key); ok {
-		return nil
-	}
-	return e.cfg.Sessions.Put(sidecar.Meta{Key: key})
+	return e.cfg.Sessions.Ensure(key)
 }
 
 // root is the top of key's lineage: up its sidecars' parents, short of the
