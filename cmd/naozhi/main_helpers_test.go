@@ -142,6 +142,93 @@ func TestShimStateDir(t *testing.T) {
 	}
 }
 
+// TestShimStateDirKeepsOldShims: an install whose own store_path predates
+// the derivation keeps its shims in ~/.naozhi/shims. While the derived
+// directory holds none and one there listens in this instance's socket
+// directory, that directory stays: else the shim is orphaned and its socket
+// refuses the key's next spawn. A shim listening elsewhere (an instance
+// isolated by XDG_RUNTIME_DIR) or a derived directory in use moves on.
+func TestShimStateDirKeepsOldShims(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		socketElse  bool // the old shim's socket is in another socket directory
+		noSocket    bool // its socket file is gone
+		derivedUsed bool // the derived directory already has a state file
+		wantOld     bool
+	}{
+		{name: "old shim listening here", wantOld: true},
+		{name: "old shim of another socket directory", socketElse: true},
+		{name: "old shim without its socket", noSocket: true},
+		{name: "derived directory in use", derivedUsed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			iso := t.TempDir()
+			old := filepath.Join(home, ".naozhi", "shims")
+			sock := filepath.Join(shim.SocketDir(), "shim-a.sock")
+			if tc.socketElse {
+				sock = filepath.Join(t.TempDir(), "naozhi", "shim-a.sock")
+			}
+			if !tc.noSocket {
+				if err := os.MkdirAll(filepath.Dir(sock), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(sock, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := shim.WriteStateFile(shim.StateFilePath(old, shim.KeyHash("k")), shim.State{Key: "k", Socket: sock}); err != nil {
+				t.Fatal(err)
+			}
+			if tc.derivedUsed {
+				if err := shim.WriteStateFile(shim.StateFilePath(filepath.Join(iso, "shims"), shim.KeyHash("j")), shim.State{Key: "j"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg := loadConfigBody(t, "session:\n  store_path: "+filepath.Join(iso, "sessions.json")+"\n")
+			want := filepath.Join(iso, "shims")
+			if tc.wantOld {
+				want = old
+			}
+			if got := shimStateDir(cfg); got != want {
+				t.Errorf("shim state dir = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestCLIShimStateDir: `shim list` / `shim stop` work on the directory the
+// service run with --config uses, so for an instance with its own
+// store_path they never list or stop another instance's shims; --state-dir
+// wins, and a config that does not load leaves ~/.naozhi/shims, said so.
+func TestCLIShimStateDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	iso := t.TempDir()
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("session:\n  store_path: "+filepath.Join(iso, "sessions.json")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var errb strings.Builder
+	if got := cliShimStateDir("", cfgPath, &errb); got != filepath.Join(iso, "shims") {
+		t.Errorf("with the config: %q", got)
+	}
+	if got := cliShimStateDir("/given", cfgPath, &errb); got != "/given" {
+		t.Errorf("with --state-dir: %q", got)
+	}
+	if errb.Len() != 0 {
+		t.Errorf("stderr = %q", errb.String())
+	}
+	if got := cliShimStateDir("", filepath.Join(iso, "missing.yaml"), &errb); got != filepath.Join(home, ".naozhi", "shims") {
+		t.Errorf("without a config: %q", got)
+	}
+	if !strings.Contains(errb.String(), "config unavailable") {
+		t.Errorf("stderr = %q, want the note", errb.String())
+	}
+}
+
 // TestSysessionDaemons pins which parsed duration feeds each daemon knob.
 func TestSysessionDaemons(t *testing.T) {
 	cfg := loadConfigBody(t, "sysession:\n  daemons:\n"+

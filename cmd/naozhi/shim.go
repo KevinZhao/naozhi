@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -97,10 +98,10 @@ func runShimRun(args []string) {
 }
 
 func runShimStop(args []string) {
-	fs := newFlagSet("naozhi shim stop")
+	fs, configPath := newSubFlagSet("naozhi shim stop", "config.yaml")
 	key := fs.String("key", "", "session key to stop")
 	all := fs.Bool("all", false, "stop all shims")
-	stateDir := fs.String("state-dir", "", "shim state directory")
+	stateDir := fs.String("state-dir", "", "shim state directory (default: the service's for --config)")
 	fs.Parse(args) //nolint:errcheck
 
 	if !*all && *key == "" {
@@ -108,12 +109,7 @@ func runShimStop(args []string) {
 		os.Exit(1)
 	}
 
-	if *stateDir == "" {
-		home, _ := os.UserHomeDir()
-		*stateDir = home + "/.naozhi/shims"
-	}
-
-	mgr, err := shim.NewManager(shim.ManagerConfig{StateDir: *stateDir})
+	mgr, err := shim.NewManager(shim.ManagerConfig{StateDir: cliShimStateDir(*stateDir, *configPath, os.Stderr)})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "init shim manager: %v\n", err)
 		os.Exit(1)
@@ -121,6 +117,23 @@ func runShimStop(args []string) {
 	if code := stopShims(mgr, *key, *all, os.Stdout, os.Stderr); code != 0 {
 		os.Exit(code)
 	}
+}
+
+// cliShimStateDir is the state directory `shim stop` and `shim list` work
+// on: dir when given, else the one the service run with configPath uses
+// (shimStateDir), so an instance with its own store_path is never handed
+// another instance's shims; ~/.naozhi/shims when that config does not load.
+func cliShimStateDir(dir, configPath string, stderr io.Writer) string {
+	if dir != "" {
+		return dir
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		dir = shim.DefaultStateDir()
+		fmt.Fprintf(stderr, "note: config unavailable (%v); shim state dir %s\n", err, dir)
+		return dir
+	}
+	return cmp.Or(shimStateDir(cfg), shim.DefaultStateDir())
 }
 
 // stopShims stops the targets planShimStop picks from a read-only Inspect, so
@@ -202,15 +215,10 @@ func shimSkipReason(e shim.StateEntry) string {
 
 func runShimList(args []string) {
 	fs, configPath := newSubFlagSet("naozhi shim list", "config.yaml")
-	stateDir := fs.String("state-dir", "", "shim state directory")
+	stateDir := fs.String("state-dir", "", "shim state directory (default: the service's for --config)")
 	fs.Parse(args) //nolint:errcheck
 
-	if *stateDir == "" {
-		home, _ := os.UserHomeDir()
-		*stateDir = home + "/.naozhi/shims"
-	}
-
-	mgr, err := shim.NewManager(shim.ManagerConfig{StateDir: *stateDir})
+	mgr, err := shim.NewManager(shim.ManagerConfig{StateDir: cliShimStateDir(*stateDir, *configPath, os.Stderr)})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "init shim manager: %v\n", err)
 		os.Exit(1)

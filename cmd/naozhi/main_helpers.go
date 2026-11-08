@@ -286,6 +286,12 @@ func shimManagerConfig(cfg *config.Config) shim.ManagerConfig {
 // Planner state share), else "" for shim.NewManager's ~/.naozhi/shims. The
 // default store_path gives ~/.naozhi/shims all the same. Absolute: the shims
 // it spawns are told their state file's path.
+//
+// An install whose own store_path predates the derivation keeps its shims
+// in ~/.naozhi/shims: while the derived directory holds none and that one
+// holds a shim listening in this instance's socket directory, that one is
+// kept, or the shim would be orphaned and its socket refuse the key's next
+// spawn. An instance isolated by its own socket directory never matches.
 func shimStateDir(cfg *config.Config) string {
 	if dir := osutil.ExpandHome(cfg.Session.Shim.StateDir); dir != "" {
 		return dir
@@ -297,7 +303,45 @@ func shimStateDir(cfg *config.Config) string {
 	if abs, err := filepath.Abs(dir); err == nil {
 		dir = abs
 	}
+	if legacy := shim.DefaultStateDir(); dir != legacy && !hasShimState(dir) && listensHere(legacy) {
+		slog.Warn("shim state dir: shims of this instance are still in the old directory; set session.shim.state_dir to keep it",
+			"using", legacy, "derived", dir)
+		return legacy
+	}
 	return dir
+}
+
+// shimStateFiles lists dir's shim state files.
+func shimStateFiles(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") && !osutil.IsAtomicTempName(e.Name()) {
+			out = append(out, filepath.Join(dir, e.Name()))
+		}
+	}
+	return out
+}
+
+func hasShimState(dir string) bool { return len(shimStateFiles(dir)) > 0 }
+
+// listensHere reports whether dir holds the state of a shim whose socket
+// exists in this process's socket directory.
+func listensHere(dir string) bool {
+	sockets := shim.SocketDir()
+	for _, path := range shimStateFiles(dir) {
+		st, err := shim.ReadStateFile(path)
+		if err != nil || filepath.Dir(st.Socket) != sockets {
+			continue
+		}
+		if _, err := os.Stat(st.Socket); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // buildSysessionManager wires sysession.Manager from cfg.Sysession. Returns

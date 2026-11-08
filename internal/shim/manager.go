@@ -12,7 +12,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -107,8 +106,7 @@ type ManagerConfig struct {
 // it, and an empty value would reject every reconnect as "binary mismatch".
 func NewManager(cfg ManagerConfig) (*Manager, error) {
 	if cfg.StateDir == "" {
-		home, _ := os.UserHomeDir()
-		cfg.StateDir = filepath.Join(home, ".naozhi", "shims")
+		cfg.StateDir = DefaultStateDir()
 	}
 	if cfg.MaxShims <= 0 {
 		cfg.MaxShims = 50
