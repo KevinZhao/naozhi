@@ -84,9 +84,12 @@ type Task struct {
 	Retired time.Time    `json:"retired,omitzero"`
 	// Reap is a done dispatched session put away (planner/reap): its
 	// worktrees and what became of them; reopening puts it back. ReapWait
-	// is why a done one is not put away yet ("" when nothing holds it).
+	// is why a done one is not put away yet ("" when nothing holds it);
+	// ReapAt when it is expected to be, set only while its idleness is all
+	// that holds it.
 	Reap     *sidecar.Reap `json:"reap,omitempty"`
 	ReapWait string        `json:"reap_wait,omitempty"`
+	ReapAt   time.Time     `json:"reap_at,omitzero"`
 	// HealthSince is when the session entered Health: how long its turn
 	// has run while active, how long it has waited or stalled.
 	HealthSince time.Time `json:"health_since,omitzero"`
@@ -140,9 +143,10 @@ type Config struct {
 	// was saved (planner/reap: done puts it away, doing puts it back); nil
 	// tells no one.
 	OnState func(key string, state State)
-	// ReapWait is why done dispatched session key is not put away yet; nil
+	// ReapWait is why done dispatched session key is not put away yet, and
+	// when it is expected to be (zero unless only idleness holds it); nil
 	// says nothing.
-	ReapWait func(key string) string
+	ReapWait func(key string) (why string, at time.Time)
 	// Live is the dispatched sessions in the router by key; nil leaves
 	// Task.Live out.
 	Live func() map[string]Live
@@ -206,9 +210,22 @@ func promiseState(p promise.Promise, now time.Time) (State, By, string, time.Tim
 	return Doing, "", "", p.Created
 }
 
-// archived reports whether t is done and past Archive.
+// archived reports whether t is done and past Archive. A dispatched
+// session's Archive counts from its last activity or its putting away when
+// later than the done mark: planner/reap puts it away only after it idled
+// (D105), and a session put away is to stay listed to be reopened.
 func archived(t Task, now time.Time) bool {
-	return t.State == Done && now.Sub(t.At) >= Archive
+	if t.State != Done {
+		return false
+	}
+	from := t.At
+	if t.Live != nil && t.Live.LastActive.After(from) {
+		from = t.Live.LastActive
+	}
+	if t.Reap != nil && t.Reap.At.After(from) {
+		from = t.Reap.At
+	}
+	return now.Sub(from) >= Archive
 }
 
 // List returns the tasks not archived: 进行中 (等你 and 失败 first, newest
@@ -240,7 +257,7 @@ func (b *Board) List() []Task {
 			}
 			t.State, t.By, t.Why, t.At = sessionState(m, u)
 			if t.State == Done && m.Reap == nil && b.cfg.ReapWait != nil {
-				t.ReapWait = b.cfg.ReapWait(m.Key)
+				t.ReapWait, t.ReapAt = b.cfg.ReapWait(m.Key)
 			}
 			out = append(out, t)
 		}

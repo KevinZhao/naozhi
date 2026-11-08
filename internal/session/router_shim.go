@@ -407,7 +407,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) (reconnected, sess
 		hooks.OnResult = r.resultFor(sess)
 		proc, replays, err := recWrapper.SpawnReconnect(
 			spawnCtx, state.Key, lastSeq, recWrapper.Protocol,
-			r.spawn.noOutputTimeout, r.spawn.totalTimeout, hooks,
+			r.spawn.noOutputTimeout, r.spawn.totalTimeoutFor(state.Key), hooks,
 		)
 		spawnCancel()
 		if err != nil {

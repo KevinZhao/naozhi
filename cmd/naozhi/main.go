@@ -523,7 +523,7 @@ func main() {
 		Journal:  plannerState.Journal,
 		Stop:     wireup.StopTask(router, func(key string) { srv.DropPlannerQueue(key) }, plannerAgent.Tell),
 		OnState:  func(key string, st task.State) { reaper.OnState(key, st) },
-		ReapWait: func(key string) string { return reaper.Wait(key) },
+		ReapWait: func(key string) (string, time.Time) { return reaper.Wait(key) },
 		Live:     wireup.TaskLive(router),
 		Digest:   func(key string) bool { return digests.Path(key) != "" },
 	})
@@ -582,17 +582,18 @@ func main() {
 	})
 	reapSources := wireup.ReapSources{Router: router, Health: func() health.Snapshot { return healthMon.Snapshot() }, ClaudeDir: claudeDir}
 	reaper = reap.New(reap.Config{
-		Sessions: sidecars,
-		Session:  reapSources.Session,
-		Nearby:   custodian.Nearby,
-		Archive:  reapSources.Archive,
-		Restore:  reapSources.Restore,
-		Dirs:     reapSources.Dirs,
-		InUse:    reapSources.InUse,
-		Git:      reap.Exec{},
-		Inbox:    notifier,
-		Journal:  plannerState.Journal,
-		Name:     unitNames,
+		Sessions:   sidecars,
+		Session:    reapSources.Session,
+		LastActive: reapSources.LastActive,
+		Nearby:     custodian.Nearby,
+		Archive:    reapSources.Archive,
+		Restore:    reapSources.Restore,
+		Dirs:       reapSources.Dirs,
+		InUse:      reapSources.InUse,
+		Git:        reap.Exec{},
+		Inbox:      notifier,
+		Journal:    plannerState.Journal,
+		Name:       unitNames,
 	})
 
 	routing := buildRouting(cfg, agents, projectMgr, scheduler)
