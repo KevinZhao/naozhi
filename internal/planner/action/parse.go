@@ -27,6 +27,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/planner/promise"
 	"github.com/naozhi/naozhi/internal/planner/scout"
+	"github.com/naozhi/naozhi/internal/textutil"
 	"github.com/naozhi/naozhi/internal/tuningspec"
 )
 
@@ -46,7 +47,7 @@ const (
 	messageRunes      = 20000
 	textRunes         = 500
 	maxOptions        = 6
-	optionRunes       = 40
+	optionRunes       = 80
 	workspaceRefRunes = 128
 	taskRefRunes      = 128
 	// notifyTitleRunes is what the inbox shows of a title.
@@ -114,6 +115,10 @@ type Ask struct {
 	Question string   `json:"question"`
 	Options  []string `json:"options"`
 	Task     string   `json:"task,omitempty"`
+	// Trimmed is how many options were cut to optionRunes, "…" included: a
+	// question is worth asking even if an option ran long, so the Planner is
+	// told in the receipt instead of the block refused.
+	Trimmed int `json:"-"`
 }
 
 // Status sets a task's state: Task is a task: key or a promise ID, State
@@ -438,11 +443,13 @@ func (a *Ask) validate() error {
 	}
 	for i, o := range a.Options {
 		o = strings.TrimSpace(o)
+		if utf8.RuneCountInString(o) > optionRunes {
+			o = textutil.TruncateRunesNoEllipsis(o, optionRunes-1) + "…"
+			a.Trimmed++
+		}
 		switch {
 		case o == "":
 			return errors.New("options 里有空的选项")
-		case utf8.RuneCountInString(o) > optionRunes:
-			return fmt.Errorf("选项超过 %d 字", optionRunes)
 		case slices.Contains(a.Options[:i], o):
 			return fmt.Errorf("选项 %q 重复", o)
 		}

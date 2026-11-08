@@ -213,6 +213,36 @@ func TestAskAndRefused(t *testing.T) {
 	}
 }
 
+// TestAskLongOption: an option over optionRunes is cut to optionRunes, "…"
+// included, and the question still goes out (an option of 42 runes once
+// refused the whole block); the Planner is told in one line, and an ask
+// with options that fit gets no receipt at all.
+func TestAskLongOption(t *testing.T) {
+	r, g, inbox, _, _ := newRunner(t)
+	fits := strings.Repeat("好", optionRunes)
+	long := strings.Repeat("长", optionRunes+5)
+	r.Handle(block(`{"type":"ask","question":"选哪个？","options":["` + fits + `"]}`))
+	if len(g.unrun) != 0 {
+		t.Fatalf("a receipt for options that fit: %q", g.unrun)
+	}
+	for _, it := range func() []notify.Item { l, _ := inbox.List(0); return l }() {
+		_ = inbox.Dismiss(it.ID)
+	}
+	r.Handle(block(`{"type":"ask","question":"选哪个？","options":["` + long + `","` + fits + `"]}`))
+	it := openDecision(t, inbox, HandlerAsk)
+	want := strings.Repeat("长", optionRunes-1) + "…"
+	if !slices.Equal(it.Decision.Actions, []notify.Action{notify.Action(want), notify.Action(fits)}) {
+		t.Errorf("actions = %q, want %q and the one that fits", it.Decision.Actions, want)
+	}
+	if len(g.notes) != 0 {
+		t.Errorf("notes = %q, want none: the block ran", g.notes)
+	}
+	if len(g.unrun) != 1 || !strings.Contains(g.unrun[0], "都执行了") || !strings.Contains(g.unrun[0], "第 1 块（ask「选哪个？」）：1 个选项超过 80 字") ||
+		strings.Contains(g.unrun[0], "没有执行") {
+		t.Errorf("unrun = %q, want one line on the cut option", g.unrun)
+	}
+}
+
 // A timely notify block opens a notice in "通知" and pushes it, once a day
 // for the same thing (its scout ID, else its title and link), closed or
 // not; a brief one goes to the next brief and is not pushed. Neither gets a

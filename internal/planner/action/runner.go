@@ -546,7 +546,9 @@ func (r *Runner) handle(rep reply) {
 		case b.Promise != nil:
 			err = r.promise(*b.Promise, dispatched)
 		case b.Ask != nil:
-			err = r.ask(*b.Ask)
+			if err = r.ask(*b.Ask); err == nil && b.Ask.Trimmed > 0 {
+				un.note(i, b, fmt.Sprintf("%d 个选项超过 %d 字，截成了 %d 字（末尾是 …），用户看到的是截过的", b.Ask.Trimmed, optionRunes, optionRunes))
+			}
 		case b.Status != nil:
 			statused[b.Status.Task] = b.Status.State
 			err = r.status(b)
@@ -575,15 +577,21 @@ func (r *Runner) handle(rep reply) {
 type blockError struct{ error }
 
 // unrun is a reply's blocks not run, as the receipt lists them, and which
-// kinds of reason they had.
+// kinds of reason they had; notes are the blocks run with something the
+// Planner should know, what the gateway changed or did on the way.
 type unrun struct {
-	lines                                []string
+	lines, notes                         []string
 	tooMany, malformed, outside, notUser bool
 }
 
 // add lists block i (0-based) of a reply, not run for why.
 func (u *unrun) add(i int, b Block, why string) {
 	u.lines = append(u.lines, fmt.Sprintf("第 %d 块%s：%s", i+1, blockLabel(b), why))
+}
+
+// note lists block i (0-based) of a reply, run, with what.
+func (u *unrun) note(i int, b Block, what string) {
+	u.notes = append(u.notes, fmt.Sprintf("第 %d 块%s：%s", i+1, blockLabel(b), what))
 }
 
 // blockLabel names a block as the receipt does: its type and title, read
@@ -792,13 +800,14 @@ func (r *Runner) refuseOutside(b Block, by string) string {
 }
 
 // tellUnrun sends the Planner one receipt naming each block of the reply
-// that was not run, why, and what to do about it; an outside turn's goes
+// that was not run, why, and what to do about it, and the notes of the
+// blocks run; an outside turn's goes
 // through TellRefused, held to the same limits. The turn answering such a
 // receipt gets none of its own (the blocks still show in the conversation),
 // judged by its source, so a turn queued ahead of the receipt still gets
 // its own.
 func (r *Runner) tellUnrun(rep reply, u unrun) {
-	if len(u.lines) == 0 || rep.unrunTurn {
+	if len(u.lines)+len(u.notes) == 0 || rep.unrunTurn {
 		return
 	}
 	by := rep.outside
@@ -810,9 +819,21 @@ func (r *Runner) tellUnrun(rep reply, u unrun) {
 		return
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "你上一条回复里有 %d 个动作块没有执行，其余的照常执行了：\n", len(u.lines))
-	for _, l := range u.lines {
-		b.WriteString("- " + l + "\n")
+	if len(u.lines) > 0 {
+		fmt.Fprintf(&b, "你上一条回复里有 %d 个动作块没有执行，其余的照常执行了：\n", len(u.lines))
+		for _, l := range u.lines {
+			b.WriteString("- " + l + "\n")
+		}
+	}
+	if len(u.notes) > 0 {
+		if len(u.lines) == 0 {
+			b.WriteString("你上一条回复里的动作块都执行了，有几处要你知道：\n")
+		} else {
+			b.WriteString("执行了的块里有几处要你知道：\n")
+		}
+		for _, l := range u.notes {
+			b.WriteString("- " + l + "\n")
+		}
 	}
 	if u.tooMany {
 		fmt.Fprintf(&b, "超出上限的块要用的话，在下一条回复里重发（一次最多 %d 个）。\n", maxBlocks)

@@ -34,6 +34,8 @@ func TestParse(t *testing.T) {
 		{"dispatch no message", block(`{"type":"dispatch","workspace":"w","title":"t","model":"","message":" "}`), []string{"!缺少 message"}},
 		{"dispatch bad model", block(`{"type":"dispatch","workspace":"w","title":"t","model":"--dangerous","message":"m"}`), []string{"!model"}},
 		{"dispatch title newline", block(`{"type":"dispatch","workspace":"w","title":"a\nb","model":"","message":"m"}`), []string{"!控制字符"}},
+		{"ask long option", block(`{"type":"ask","question":"q","options":["` + strings.Repeat("长", 120) + `"]}`), []string{"ask"}},
+		{"ask options equal once cut", block(`{"type":"ask","question":"q","options":["` + strings.Repeat("长", 90) + `a","` + strings.Repeat("长", 90) + `b"]}`), []string{"!重复"}},
 		{"ask duplicate options", block(`{"type":"ask","question":"q","options":["是"," 是"]}`), []string{"!重复"}},
 		{"unterminated", "```naozhi-action\n{\"type\":\"ask\",\"question\":\"q\",\"options\":[]}", []string{"!没有结束"}},
 		{"bad block does not stop the next", block(`{"type":"nope"}`) + "\n" + block(`{"type":"ask","question":"q","options":[]}`), []string{"!未知类型", "ask"}},
