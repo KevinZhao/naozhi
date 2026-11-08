@@ -14,6 +14,7 @@ import (
 
 type fakeSource struct {
 	on     map[string]bool
+	off    map[string]bool // observing turned off
 	setErr error
 	until  time.Time
 	by     []string
@@ -21,7 +22,7 @@ type fakeSource struct {
 }
 
 func (f *fakeSource) Status(key string) custody.Status {
-	st := custody.Status{Key: key, On: f.on[key], State: custody.StateOff, Max: custody.MaxSends}
+	st := custody.Status{Key: key, On: f.on[key], State: custody.StateOff, Max: custody.MaxSends, Watch: !f.off[key]}
 	if st.On {
 		st.State = custody.StateOn
 	}
@@ -33,6 +34,13 @@ func (f *fakeSource) Set(key string, on bool, by string) error {
 		return f.setErr
 	}
 	f.on[key], f.by = on, append(f.by, by)
+	return nil
+}
+func (f *fakeSource) SetWatch(key string, on bool, by string) error {
+	if f.setErr != nil {
+		return f.setErr
+	}
+	f.off[key], f.by = !on, append(f.by, by)
 	return nil
 }
 func (f *fakeSource) Paused() (bool, time.Time) { return !f.until.IsZero(), f.until }
@@ -60,6 +68,14 @@ func TestHandler(t *testing.T) {
 		{name: "one", method: "GET", path: "/api/custody?key=k", code: 200, want: `"session":{"key":"k"`},
 		{name: "on", method: "PUT", path: "/api/custody", body: `{"key":"k","on":true}`, code: 200, want: `"state":"on"`},
 		{name: "no on", method: "PUT", path: "/api/custody", body: `{"key":"k"}`, code: 400},
+		// Observing is the header's other switch, through the same route:
+		// one switch per request.
+		{name: "watch off", method: "PUT", path: "/api/custody", body: `{"key":"k","watch":false}`, code: 200, want: `"watch":false`},
+		{name: "watch on", method: "PUT", path: "/api/custody", body: `{"key":"k","watch":true}`, code: 200, want: `"watch":true`},
+		{name: "watch and on", method: "PUT", path: "/api/custody", body: `{"key":"k","on":true,"watch":false}`, code: 400},
+		{name: "watch remote", method: "PUT", path: "/api/custody", body: `{"key":"k","node":"mini","watch":false}`, code: 400, want: "远程节点"},
+		{name: "watch refused", method: "PUT", path: "/api/custody", body: `{"key":"task:a","watch":false}`, setErr: custody.ErrRefused, code: 400},
+		{name: "watch planner off", method: "PUT", path: "/api/custody", body: `{"key":"k","watch":false}`, setErr: custody.ErrDisabled, code: 503},
 		{name: "no key", method: "PUT", path: "/api/custody", body: `{"on":true}`, code: 400},
 		{name: "remote", method: "PUT", path: "/api/custody", body: `{"key":"k","node":"mini","on":true}`, code: 400, want: "远程节点"},
 		{name: "local node", method: "PUT", path: "/api/custody", body: `{"key":"k","node":"local","on":true}`, code: 200},
@@ -83,7 +99,7 @@ func TestHandler(t *testing.T) {
 		{name: "undo unwired", method: "POST", path: "/api/custody/undo", body: `{"key":"k"}`, nilSource: true, code: 503},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			src := &fakeSource{on: map[string]bool{}, setErr: c.setErr}
+			src := &fakeSource{on: map[string]bool{}, off: map[string]bool{}, setErr: c.setErr}
 			h := New(src)
 			if c.nilSource {
 				h = New(nil)
@@ -104,6 +120,9 @@ func TestHandler(t *testing.T) {
 			}
 			if c.name == "undo" && (len(src.undone) != 1 || src.undone[0] != "k") {
 				t.Errorf("undone %q, want k", src.undone)
+			}
+			if c.name == "watch off" && (!src.off["k"] || src.on["k"]) {
+				t.Errorf("watch off: off %v on %v, want observing off and custody untouched", src.off, src.on)
 			}
 			if c.name == "on" {
 				var st custody.Status

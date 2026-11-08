@@ -15,6 +15,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/datadir"
+	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/planner/action"
 	"github.com/naozhi/naozhi/internal/planner/agent"
@@ -23,7 +24,6 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/session"
-	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/usermsg"
 )
 
@@ -294,13 +294,15 @@ func spawnError(err error, key string, maxProcs int) error {
 	return errors.New(msg)
 }
 
-// TaskLive is task.Config.Live: the dispatched sessions in router, what
-// each is doing now.
+// TaskLive is task.Config.Live: the user's own sessions in router (those
+// dispatched, and those they opened, which 你开的 lists while watched), what
+// each is doing now. Which are watched is the Board's to ask: custody's
+// switch reads the router, not to be called from inside its visit.
 func TaskLive(router *session.Router) func() map[string]task.Live {
 	return func() map[string]task.Live {
 		out := map[string]task.Live{}
 		router.VisitSessions(func(s session.SessionSnapshot) bool {
-			if !sessionkey.IsTaskKey(s.Key) {
+			if !health.UserSession(s.Key, health.KindSession) {
 				return true
 			}
 			l := task.Live{Running: s.State == "running", Activity: s.LastActivity, Reply: s.LastResponse}

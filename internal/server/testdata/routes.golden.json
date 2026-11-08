@@ -441,6 +441,11 @@
   },
   {
     "method": "POST",
+    "path": "/api/tasks/seen",
+    "handler_type": "*tasks.Handler"
+  },
+  {
+    "method": "POST",
     "path": "/api/tasks/state",
     "handler_type": "*tasks.Handler"
   },

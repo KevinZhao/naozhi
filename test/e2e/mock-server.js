@@ -264,11 +264,15 @@ function defaultGitStates() {
  *   inboxCalls. Unset, the routes 404.
  * @param {object} [overrides.tasks] - GET /api/tasks body ({tasks}, task.Task wire shape); POST
  *   /api/tasks/state sets the task's state as the user's and lands in tasksCalls; POST
- *   /api/tasks/stop marks the task done as the user's ('已停止') and lands in taskStopCalls.
- *   Unset, the routes 404.
+ *   /api/tasks/stop marks the task done as the user's ('已停止') and lands in taskStopCalls;
+ *   POST /api/tasks/seen ({ids} or {all:true}) clears the tasks' `new` and lands in
+ *   tasksSeenCalls. As the gateway's viewing sink does, GET /api/tasks clears the `new` of
+ *   the task a socket's latest viewing frame names (with ws: true). Unset, the routes 404.
  * @param {object} [overrides.custody] - GET /api/custody body ({paused, paused_at, sessions}, the
  *   custody.Status wire shape of the sessions in custody); ?key= answers {paused, session}. PUT
- *   /api/custody ({key, on}) sets the session's switch as the user's and lands in custodyCalls;
+ *   /api/custody ({key, on}) sets the session's switch as the user's, ({key, watch}) its 观察 (a
+ *   session with it off stays listed, with watch:false, and leaves overrides.tasks' 你开的), each
+ *   landing in custodyCalls;
  *   PUT / DELETE /api/custody/pause set paused. A session in custody the tab last said it views
  *   (a viewing frame on the latest socket) reads as deferred, as the gateway holds it. POST
  *   /api/custody/undo ({key}) lands in custodyCalls as {undo: key} and answers {answer: undo}, or
@@ -356,6 +360,7 @@ function startMockServer(overrides = {}) {
   const inboxCalls = [];
   const tasksCalls = [];
   const taskStopCalls = [];
+  const tasksSeenCalls = [];
   const custodyData = overrides.custody || null;
   const custodyCalls = [];
   // custodyShown is a session's custody as the gateway reports it: held back
@@ -1115,6 +1120,14 @@ function startMockServer(overrides = {}) {
     // so the test's object shows it, and lands in tasksCalls.
     if (pathname === NZ_CONTRACT.API.tasks && req.method === 'GET' && overrides.tasks) {
       if (!checkAuth()) return;
+      // Opening a session (a viewing frame) marks its result read
+      // (task.Board.SetViewing).
+      for (const conn of wsConnections) {
+        const frames = conn.messages.filter(m => m.type === NZ_CONTRACT.WS.viewing);
+        const viewed = frames.length ? frames[frames.length - 1].key : '';
+        const t = viewed && overrides.tasks.tasks.find(x => x.id === viewed);
+        if (t && t.new) t.new = false;
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(overrides.tasks));
       return;
@@ -1131,6 +1144,24 @@ function startMockServer(overrides = {}) {
         Object.assign(t, { state: req2.state, by: 'user', why: '', at: new Date().toISOString() });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ok' }));
+      });
+      return;
+    }
+
+    if (pathname === NZ_CONTRACT.API.tasks_seen && req.method === 'POST' && overrides.tasks) {
+      if (!checkAuth()) return;
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        const req2 = JSON.parse(body || '{}');
+        tasksSeenCalls.push(req2);
+        if (!req2.all === !(Array.isArray(req2.ids) && req2.ids.length)) { res.writeHead(400); res.end('give ids or all'); return; }
+        let seen = 0;
+        for (const t of overrides.tasks.tasks) {
+          if (t.new && (req2.all || req2.ids.includes(t.id))) { t.new = false; seen++; }
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', seen }));
       });
       return;
     }
@@ -1168,9 +1199,21 @@ function startMockServer(overrides = {}) {
       req.on('end', () => {
         const req2 = JSON.parse(body || '{}');
         custodyCalls.push(req2);
+        const was = custodyData.sessions.find(x => x.key === req2.key);
         custodyData.sessions = custodyData.sessions.filter(x => x.key !== req2.key);
-        const st = { key: req2.key, on: !!req2.on, by: 'user', at: new Date().toISOString(), state: req2.on ? (custodyData.paused ? 'paused' : 'on') : 'off', sent: 0, max: 8 };
-        if (st.on) custodyData.sessions.push(st);
+        // {key, watch} is the 观察 switch: custody kept as it was. A session
+        // with it off is listed (custody.Engine.List), and leaves 你开的.
+        if (req2.watch !== undefined) {
+          const st = { ...(was || { key: req2.key, on: false, state: 'off', sent: 0, max: 8 }), watch: !!req2.watch, watch_by: 'user' };
+          if (st.on || st.state === 'stopped' || !st.watch) custodyData.sessions.push(st);
+          if (!st.watch && overrides.tasks) overrides.tasks.tasks = overrides.tasks.tasks.filter(t => !(t.id === req2.key && t.group === 'yours'));
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(custodyShown(st)));
+          return;
+        }
+        const st = { key: req2.key, on: !!req2.on, by: 'user', at: new Date().toISOString(), state: req2.on ? (custodyData.paused ? 'paused' : 'on') : 'off', sent: 0, max: 8,
+          ...(was && was.watch === false ? { watch: false, watch_by: was.watch_by } : {}) };
+        if (st.on || st.watch === false) custodyData.sessions.push(st);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(custodyShown(st)));
       });
@@ -1316,6 +1359,7 @@ function startMockServer(overrides = {}) {
         get inboxCalls() { return inboxCalls; },
         get tasksCalls() { return tasksCalls; },
         get taskStopCalls() { return taskStopCalls; },
+        get tasksSeenCalls() { return tasksSeenCalls; },
         get custodyCalls() { return custodyCalls; },
         get plannerStateCalls() { return plannerStateCalls; },
         get plannerSendCalls() { return plannerSendCalls; },

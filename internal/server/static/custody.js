@@ -9,6 +9,13 @@
 // node it runs on: with the Planner on another node (planner_host.js) the
 // list, the switch and 撤回 are that node's, through /api/remote/{node}/.
 //
+// Beside the chip is 观察 (§15.12 ⑥, D104), a second switch: the gateway
+// observing a session you opened (its digest, its card in 任务's 你开的)
+// sends nothing, so it is on by default; GET /api/custody lists, besides
+// the sessions in custody, those with it turned off (so the switch shows
+// once the list is read), and PUT /api/custody {key, watch} switches it. A
+// dispatched session is a task already: no switch there.
+//
 // It also tells the gateway which session you are at: a viewing frame names
 // the session this tab has open while the tab is visible and focused ('' for
 // none), renewed well within custody.ViewFor; a closed socket ends it on the
@@ -44,6 +51,10 @@ const VIEW_CHECK_MS = 2000;
 const REASON_SUGGESTED = '按建议执行';
 const PREFIX_RE = /^⚙ 托管 · (.+?) · 第 (\d+)\/(\d+) 次[ \t]*(?:\n|$)/;
 const NOT_IN_CUSTODY = /^(planner|sys|scout):/;
+// NOT_WATCHED are the sessions coverable that are not observed (custody's
+// watchable): a dispatched one is a task already, a cron run and a scratch
+// session are one-shot.
+const NOT_WATCHED = /^(task|cron|scratch):/;
 
 // A session custody holds back on (you are at it, or just sent it a message)
 // is still in custody: it reads 开, the hold is in the chip's title.
@@ -59,9 +70,10 @@ export const custody = {
   enabled: null, // the Planner on (GET /api/planner), null until known
   paused: false,
   pausedAt: 0,
-  byKey: new Map(), // key → custody.Status of the sessions in custody
+  byKey: new Map(), // key → custody.Status of the sessions in custody or with 观察 off
   loading: null,
   readAt: 0, // when GET /api/custody was last read
+  listed: false, // byKey holds a list read (the Planner node's): 观察's state is known
 };
 
 // The session this tab last reported it is at, and when.
@@ -78,6 +90,19 @@ export function coverable(key, node) {
   if (custody.enabled !== true || !key || (node || 'local') !== plannerHost.node) return false;
   if (isDiscoveredKey(key) || NOT_IN_CUSTODY.test(key)) return false;
   return !!sessionList.sessionsData[sid(key, plannerHost.node)];
+}
+
+// watchable reports whether the gateway can observe key on node: one
+// custody covers, not dispatched, not a cron run or a scratch session.
+export function watchable(key, node) {
+  return coverable(key, node) && !NOT_WATCHED.test(key);
+}
+
+// watchOf reports whether key is observed as GET /api/custody last said
+// it: on unless listed with it off (the list holds those).
+export function watchOf(key) {
+  const st = custody.byKey.get(key);
+  return !st || st.watch !== false;
 }
 
 // statusOf is key's custody as GET /api/custody last said it.
@@ -117,12 +142,25 @@ export function custodyChipHtml(key, toggle) {
     '" title="' + title + '" aria-label="' + escAttr('托管：' + stateText(st) + (st.state === 'stopped' && st.why ? '，' + st.why : '')) + '">' + inner + '</button>';
 }
 
+// watchChipHtml is key's 观察 switch, beside the custody chip.
+export function watchChipHtml(key) {
+  const on = watchOf(key);
+  const title = on ? '观察开着：网关看着它、写摘要、放进任务的「你开的」；不发任何消息\n点一下关掉' : '观察关着：不进任务、不写摘要\n点一下打开';
+  return '<button type="button" class="watch-chip watch-' + (on ? 'on' : 'off') + '" data-action="watch-toggle" data-key="' + escAttr(key) +
+    '" aria-pressed="' + (on ? 'true' : 'false') + '" title="' + escAttr(title) + '" aria-label="' + (on ? '观察：开' : '观察：关') + '">' +
+    '<span class="custody-chip-l">观察</span><span class="custody-chip-s">' + (on ? '开' : '关') + '</span></button>';
+}
+
 // paintCustodyChip fills the session header's #header-custody for the
-// selected session; renderMainShell builds it empty.
+// selected session, custody's chip and the 观察 switch; renderMainShell
+// builds it empty.
 export function paintCustodyChip() {
   const el = document.getElementById('header-custody');
   if (!el) return;
-  const html = coverable(selection.key, selection.node) ? custodyChipHtml(selection.key, true) : '';
+  const { key, node } = selection;
+  // 观察 waits for a list read: off is told only by the list, so before
+  // it every session would read 开 and a click could only turn it off.
+  const html = (coverable(key, node) ? custodyChipHtml(key, true) : '') + (custody.listed && watchable(key, node) ? watchChipHtml(key) : '');
   if (el.innerHTML !== html) el.innerHTML = html;
 }
 
@@ -141,7 +179,10 @@ async function plannerEnabled() {
 function noteList(res) {
   custody.paused = !!res?.paused;
   custody.pausedAt = res?.paused_at ? Date.parse(res.paused_at) || 0 : 0;
-  if (Array.isArray(res?.sessions)) custody.byKey = new Map(res.sessions.filter((s) => s && s.key).map((s) => [s.key, s]));
+  if (Array.isArray(res?.sessions)) {
+    custody.byKey = new Map(res.sessions.filter((s) => s && s.key).map((s) => [s.key, s]));
+    custody.listed = true;
+  }
 }
 
 // refreshCustody reads GET /api/custody again; one read at a time.
@@ -200,6 +241,31 @@ async function toggle(el) {
   changed();
 }
 
+// watchToast says what a click on 观察 just did (no title to hover on a
+// phone).
+export const watchToast = (on) => on ? '观察已开：写摘要、放进任务的「你开的」；不发任何消息' : '观察已关：不进任务、不写摘要（托管不受影响）';
+
+async function toggleWatch(el) {
+  const key = el.dataset.key;
+  if (!key) return;
+  const watch = !watchOf(key);
+  el.disabled = true;
+  try {
+    const res = await fetchJSON(plannerAPI(NZ_CONTRACT.API.custody), {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, watch }), timeoutMs: 8000,
+    });
+    if (res && res.key) custody.byKey.set(res.key, res);
+    // The gateway's answer is what it is now.
+    showToast(watchToast(res && typeof res.watch === 'boolean' ? res.watch : watch), 'success', 4000);
+  } catch (e) {
+    showToast((watch ? '没有打开观察：' : '没有关掉观察：') + failText(e), 'error');
+  }
+  el.disabled = false;
+  changed();
+  // 任务's 你开的 gains or loses the session.
+  nzBus.dispatchEvent(new CustomEvent('watch:changed', { detail: { key, watch } }));
+}
+
 // ---- you are at the session ----
 
 // viewedKey is the session this tab shows you now, '' when it shows none or
@@ -217,6 +283,16 @@ function viewedKey() {
     key = document.getElementById('pl-sess')?.dataset.key || '';
   }
   return key && !isDiscoveredKey(key) ? key : '';
+}
+
+// selectionShown reports whether this tab shows you the 会话 view's
+// selected session now, as viewedKey judges it, whatever its node: another
+// node's gets no viewing frame, so its gateway cannot tell (tasks.js tells
+// it of the results you saw).
+export function selectionShown() {
+  if (document.visibilityState !== 'visible' || !document.hasFocus()) return false;
+  if (ui.activeView !== 'chat' || !selection.key) return false;
+  return !(isMobile() && !document.body.classList.contains('mobile-chat-view'));
 }
 
 // reportViewing sends a viewing frame when what this tab shows changed, or
@@ -321,6 +397,7 @@ async function undo(el) {
 
 registerActions({
   'custody-toggle': toggle,
+  'watch-toggle': toggleWatch,
   'custody-undo': undo,
 });
 
@@ -329,6 +406,7 @@ nzBus.addEventListener('custody:changed', paintCustodyChip);
 nzBus.addEventListener('planner:node', () => {
   custody.enabled = null;
   custody.byKey = new Map();
+  custody.listed = false;
   custody.paused = false;
   refreshCustody();
 });

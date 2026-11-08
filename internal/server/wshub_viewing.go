@@ -10,8 +10,8 @@ import (
 
 // ViewingSink takes the dashboard's "the user has this session open"
 // reports: custody holds back while the user is at a session
-// (custody.Engine), and opening one closes its "后台任务跑完了"
-// (notify.Notifier).
+// (custody.Engine), opening one closes its "后台任务跑完了"
+// (notify.Notifier) and marks its new result read (task.Board).
 type ViewingSink interface {
 	SetViewing(key, viewer string, viewing bool)
 	DropViewer(viewer string)

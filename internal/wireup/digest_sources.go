@@ -60,19 +60,21 @@ func (d DigestSources) Covered(key string) bool {
 	return d.Router != nil && d.covers(key) && d.Router.SessionFor(key) != nil
 }
 
-// Keys are the sessions the router holds that get a digest.
+// Keys are the sessions the router holds that get a digest. The keys are
+// filtered after the visit: covers asks custody's switch, which reads the
+// router (a second read lock, stuck behind any writer waiting on the
+// visit's) and the sidecars (whose sweep holds their lock while it reads
+// the router).
 func (d DigestSources) Keys() []string {
 	if d.Router == nil {
 		return nil
 	}
-	var out []string
+	var keys []string
 	d.Router.VisitSessions(func(s session.SessionSnapshot) bool {
-		if d.covers(s.Key) {
-			out = append(out, s.Key)
-		}
+		keys = append(keys, s.Key)
 		return true
 	})
-	return out
+	return slices.DeleteFunc(keys, func(k string) bool { return !d.covers(k) })
 }
 
 // Ready is digest.Config.Ready: a covered key is ready once the health

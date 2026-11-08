@@ -766,9 +766,11 @@ func (r *Runner) checkReports(rep reply, statused map[string]string) {
 	if len(keys) == 0 {
 		return
 	}
+	// A session the user opened (你开的) may message the Planner too; it is
+	// no task of the Planner's to mark, and a receipt would wake it again.
 	sessions := map[string]task.Task{}
 	for _, t := range r.cfg.Tasks.List() {
-		if t.Kind == task.KindSession {
+		if t.Kind == task.KindSession && t.Group != task.GroupYours {
 			sessions[t.ID] = t
 		}
 	}

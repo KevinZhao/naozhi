@@ -125,14 +125,17 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		notes:         opts.Notes,
 		stateDir:      opts.StateDir,
 	}
-	// A nil *custody.Engine or *notify.Notifier must not become a non-nil
-	// interface.
+	// A nil *custody.Engine, *notify.Notifier or *task.Board must not
+	// become a non-nil interface.
 	var sinks viewingSinks
 	if opts.Custody != nil {
 		sinks = append(sinks, opts.Custody)
 	}
 	if opts.Notify != nil {
 		sinks = append(sinks, opts.Notify)
+	}
+	if opts.Tasks != nil {
+		sinks = append(sinks, opts.Tasks)
 	}
 	if len(sinks) > 0 {
 		w.viewing = sinks

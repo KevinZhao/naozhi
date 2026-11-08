@@ -58,6 +58,7 @@ var apiRoutes = map[string]bool{
 	"GET /api/tasks":            true,
 	"POST /api/tasks/state":     true,
 	"POST /api/tasks/stop":      true,
+	"POST /api/tasks/seen":      true,
 	"GET /api/custody":          true,
 	"PUT /api/custody":          true,
 	"PUT /api/custody/pause":    true,

@@ -7,7 +7,8 @@
 // planner:main), and v0.2.1 their task state as the Planner or the user set
 // it and the failure health last judged them in (§15.4). v0.5.0 adds custody
 // (planner/custody): its switch on any session, and on a lineage's root what
-// custody sent and why it stopped. A file outlives its session by Retention, counted from when
+// custody sent and why it stopped. v0.7.0 adds a session's watch switch and
+// the last turn that ended with the user away (§15.12 ⑥). A file outlives its session by Retention, counted from when
 // the session was first seen gone, so a retired session's lineage is still
 // there to read for a while.
 package sidecar
@@ -38,8 +39,9 @@ const Version = 1
 const PurposeTask = "task"
 
 // PurposeChat is a session the user opened that the gateway observes
-// (§15.12 ⑥). Derived for index.json and the digests, never written: such
-// a session has no sidecar of its own for it.
+// (§15.12 ⑥). Derived for index.json and the digests, never written: such a
+// session's sidecar, when its watch switch, a result or a mark needs one,
+// keeps purpose "" as custody's does.
 const PurposeChat = "chat"
 
 // Retention is how long a file outlives its session.
@@ -97,6 +99,19 @@ type Meta struct {
 	// Report is the session's latest report (§15.12 ③), its conclusion
 	// for the task card; the full text is in its digest (planner/digest).
 	Report *Report `json:"report,omitempty"`
+	// SeenAt is when the user last looked at the session's result in the
+	// dashboard (§15.12 ④): opened the session, expanded its task card or
+	// marked every new result read. A result later than it is new
+	// (planner/task).
+	SeenAt time.Time `json:"seen_at,omitzero"`
+	// Watch is the session's watch switch (§15.12 ⑥, D104: the gateway
+	// observing a session the user opened, its digest and its card in 任务);
+	// nil leaves it to the default, on (planner/custody.Engine.Watched).
+	Watch *Custody `json:"watch,omitempty"`
+	// ResultAt is when a watched session's turn last ended with the user
+	// away from it: a result for them (§15.12 ④ ⑥), new while later than
+	// SeenAt.
+	ResultAt time.Time `json:"result_at,omitzero"`
 }
 
 // Report is a session's latest report: its state (done, blocked,
@@ -203,6 +218,10 @@ type Store struct {
 	newer map[string]bool
 }
 
+// ErrNewer refuses a write to a sidecar a newer naozhi wrote: it keeps the
+// fields this build does not know, so it is read and never rewritten.
+var ErrNewer = errors.New("sidecar: written by a newer naozhi")
+
 // Open loads every sidecar under dir. A file that cannot be read or parsed
 // is left in place and skipped; one a newer naozhi wrote is read but never
 // rewritten. An empty dir keeps the store in memory.
@@ -261,7 +280,7 @@ func (s *Store) Put(m Meta) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.newer[m.Key] {
-		return errors.New("sidecar: written by a newer naozhi")
+		return ErrNewer
 	}
 	if err := s.writeLocked(m); err != nil {
 		return err
@@ -368,7 +387,7 @@ func (s *Store) Update(key string, fn func(*Meta) bool) (bool, error) {
 		return false, nil
 	}
 	if s.newer[key] {
-		return true, errors.New("sidecar: written by a newer naozhi")
+		return true, ErrNewer
 	}
 	if !fn(&m) {
 		return true, nil
@@ -378,6 +397,33 @@ func (s *Store) Update(key string, fn func(*Meta) bool) (bool, error) {
 	}
 	s.m[key] = m
 	return true, nil
+}
+
+// Upsert applies fn to key's sidecar, giving it one first (purpose "")
+// when it has none, and saves it when fn reports a change: a session the
+// user opened has no sidecar until a field of it needs one. fn runs under
+// the store's lock; one that changes nothing writes no new file.
+func (s *Store) Upsert(key string, fn func(*Meta) bool) error {
+	if key == "" {
+		return errors.New("sidecar: empty key")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.newer[key] {
+		return ErrNewer
+	}
+	m, ok := s.m[key]
+	if !ok {
+		m = Meta{V: Version, Key: key, Created: s.now()}
+	}
+	if !fn(&m) {
+		return nil
+	}
+	if err := s.writeLocked(m); err != nil {
+		return err
+	}
+	s.m[key] = m
+	return nil
 }
 
 // Purpose is key's purpose and the title it was dispatched with (both ""

@@ -19,6 +19,8 @@ func TestCheckAPIRequest(t *testing.T) {
 		{APIRequest{Method: "POST", Path: "/api/planner/send", Body: []byte(`{"text":"hi"}`)}, true},
 		{APIRequest{Method: "GET", Path: "/api/sessions/notes", Query: "key=task%3Aabc"}, true},
 		{APIRequest{Method: "GET", Path: "/api/sessions/digest", Query: "key=task%3Aabc"}, true},
+		{APIRequest{Method: "POST", Path: "/api/tasks/seen", Body: []byte(`{"ids":["task:abc"]}`)}, true},
+		{APIRequest{Method: "GET", Path: "/api/tasks/seen"}, false},
 		{APIRequest{Method: "POST", Path: "/api/tasks"}, false},
 		{APIRequest{Method: "POST", Path: "/api/sessions/send"}, false},
 		{APIRequest{Method: "GET", Path: "/api/tasks/../config"}, false},

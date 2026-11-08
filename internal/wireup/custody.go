@@ -49,6 +49,20 @@ func (c CustodySources) LastUser(key string) time.Time {
 	return lastUserAt(s.EventLastN(userScan))
 }
 
+// UserSince is task.Config.UserSince: whether the user sent key a message
+// after t. The session's own record says it however long the turn since
+// ran; the event log answers for a message from before a restart.
+func (c CustodySources) UserSince(key string, t time.Time) bool {
+	s := c.Router.SessionFor(key)
+	if s == nil {
+		return false
+	}
+	if s.LastUserSent().After(t) {
+		return true
+	}
+	return !lastUserAt(s.EventEntriesSince(t.UnixMilli())).IsZero()
+}
+
 // lastUserAt is when the latest entry the user sent was written.
 func lastUserAt(entries []clievent.EventEntry) time.Time {
 	for i := len(entries) - 1; i >= 0; i-- {
@@ -129,6 +143,12 @@ func background(s *session.ManagedSession, snap session.SessionSnapshot) bool {
 		}
 	}
 	return false
+}
+
+// Asking is custody.Config.Asking: an AskUserQuestion of key unanswered.
+func (c CustodySources) Asking(key string) bool {
+	s := c.Router.SessionFor(key)
+	return s != nil && askPending(s.EventLastN(askScan))
 }
 
 // Events is custody.Config.Events: the session's latest n events.

@@ -1,0 +1,21 @@
+{
+  "v": 1,
+  "key": "dashboard:direct:u:general",
+  "purpose": "",
+  "created": "2026-11-08T08:00:00Z",
+  "custody": {
+    "on": true,
+    "by": "user",
+    "at": "2026-11-08T08:30:00Z"
+  },
+  "chain": {
+    "sent": 1,
+    "progress": "head=abc"
+  },
+  "retry": {
+    "failed": "2026-11-08T09:00:00Z",
+    "class": "overloaded",
+    "at": "2026-11-08T09:01:00Z",
+    "done": true
+  }
+}

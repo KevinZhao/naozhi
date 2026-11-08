@@ -103,3 +103,120 @@ func jsonEqual(t *testing.T, a, b json.RawMessage) bool {
 	}
 	return reflect.DeepEqual(x, y)
 }
+
+// TestSidecarSeenAtCompat: seen_at is a fields-only addition too. A
+// v0.6.4 sidecar reads with no SeenAt; setting it keeps every field the
+// fixture had and adds only seen_at, which a reread returns.
+func TestSidecarSeenAtCompat(t *testing.T) {
+	dir, key, raw := loadFixture(t, "sidecar_v0.6.4.json")
+	s := Open(dir, nil)
+	before, ok := s.Get(key)
+	if !ok || !before.SeenAt.IsZero() {
+		t.Fatalf("v0.6.4 sidecar: ok %v, SeenAt %v; want it read with no SeenAt", ok, before.SeenAt)
+	}
+	seen := time.Date(2026, 11, 8, 13, 0, 0, 0, time.UTC)
+	if ok, err := s.Update(key, func(m *Meta) bool { m.SeenAt = seen; return true }); !ok || err != nil {
+		t.Fatalf("Update = %v, %v", ok, err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, fileName(key)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var after map[string]json.RawMessage
+	if err := json.Unmarshal(data, &after); err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range raw {
+		if !jsonEqual(t, after[k], v) {
+			t.Errorf("field %s after Update = %s, want %s", k, after[k], v)
+		}
+	}
+	if len(after) != len(raw)+1 || string(after["seen_at"]) != `"2026-11-08T13:00:00Z"` {
+		t.Errorf("fields after Update = %d (seen_at %s), want the fixture's %d + seen_at", len(after), after["seen_at"], len(raw))
+	}
+	want := before
+	want.SeenAt = seen
+	if got, _ := Open(dir, nil).Get(key); !reflect.DeepEqual(got, want) {
+		t.Fatalf("reread after Update = %+v", got)
+	}
+}
+
+// TestSidecarWatchCompat: watch and result_at are fields-only additions. A
+// sidecar custody gave a session the user opened (purpose "", v0.6.4)
+// reads with neither; setting them keeps every field it had and adds only
+// those two, which a reread returns. Upsert on it changes it in place.
+func TestSidecarWatchCompat(t *testing.T) {
+	dir, key, raw := loadFixture(t, "sidecar_v0.6.4_chat.json")
+	s := Open(dir, nil)
+	before, ok := s.Get(key)
+	if !ok || before.Watch != nil || !before.ResultAt.IsZero() || before.Custody == nil || !before.Custody.On {
+		t.Fatalf("v0.6.4 chat sidecar read as %+v (%v)", before, ok)
+	}
+	at := time.Date(2026, 11, 8, 13, 0, 0, 0, time.UTC)
+	if err := s.Upsert(key, func(m *Meta) bool {
+		m.Watch = &Custody{On: false, By: "user", At: at}
+		m.ResultAt = at
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, fileName(key)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var after map[string]json.RawMessage
+	if err := json.Unmarshal(data, &after); err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range raw {
+		if !jsonEqual(t, after[k], v) {
+			t.Errorf("field %s after Upsert = %s, want %s", k, after[k], v)
+		}
+	}
+	if len(after) != len(raw)+2 || string(after["result_at"]) != `"2026-11-08T13:00:00Z"` ||
+		!jsonEqual(t, after["watch"], json.RawMessage(`{"on":false,"by":"user","at":"2026-11-08T13:00:00Z"}`)) {
+		t.Errorf("fields after Upsert = %d (watch %s, result_at %s), want the fixture's %d + watch + result_at",
+			len(after), after["watch"], after["result_at"], len(raw))
+	}
+	want := before
+	want.Watch, want.ResultAt = &Custody{On: false, By: "user", At: at}, at
+	if got, _ := Open(dir, nil).Get(key); !reflect.DeepEqual(got, want) {
+		t.Fatalf("reread after Upsert = %+v", got)
+	}
+}
+
+// Upsert gives a session with no sidecar one only when fn changes
+// something: purpose "", stamped; it refuses a newer naozhi's file.
+func TestUpsert(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)
+	s := Open(dir, func() time.Time { return now })
+	const key = "feishu:direct:u:general"
+	if err := s.Upsert(key, func(*Meta) bool { return false }); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.Get(key); ok {
+		t.Fatal("an Upsert changing nothing created a sidecar")
+	}
+	if _, err := os.Stat(filepath.Join(dir, fileName(key))); !os.IsNotExist(err) {
+		t.Fatalf("file written: %v", err)
+	}
+	if err := s.Upsert(key, func(m *Meta) bool { m.SeenAt = now; return true }); err != nil {
+		t.Fatal(err)
+	}
+	m, ok := Open(dir, nil).Get(key)
+	if !ok || m.V != Version || m.Purpose != "" || !m.Created.Equal(now) || !m.SeenAt.Equal(now) {
+		t.Fatalf("reread = %+v (%v)", m, ok)
+	}
+	if err := s.Upsert("", func(*Meta) bool { return true }); err == nil {
+		t.Error("Upsert with no key")
+	}
+	const newer = "slack:direct:n:general"
+	if err := os.WriteFile(filepath.Join(dir, fileName(newer)), []byte(`{"v":99,"key":"`+newer+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s = Open(dir, nil)
+	if err := s.Upsert(newer, func(m *Meta) bool { m.SeenAt = now; return true }); err != ErrNewer {
+		t.Errorf("Upsert on a newer sidecar = %v, want ErrNewer", err)
+	}
+}

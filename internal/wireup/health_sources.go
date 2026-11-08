@@ -86,10 +86,15 @@ func (h HealthSources) Collect(since time.Time) []health.Fact {
 					f.Index.Purpose, f.Index.DispatchedByPlanner = m.Purpose, m.DispatchedByPlanner()
 				}
 			}
-			if f.Index.Purpose == "" && h.Observed != nil && h.Observed(snap.Key) {
+			observed := h.Observed != nil && h.Observed(snap.Key)
+			if f.Index.Purpose == "" && observed {
 				f.Index.Purpose = sidecar.PurposeChat
 			}
-			h.indexDigest(f.Index)
+			// A session no longer observed keeps its last digest on disk
+			// a while, not pointed at: it is not kept current.
+			if observed || sessionkey.IsTaskKey(snap.Key) {
+				h.indexDigest(f.Index)
+			}
 			out = append(out, f)
 		}
 	}
