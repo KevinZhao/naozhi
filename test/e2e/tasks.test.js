@@ -1,9 +1,9 @@
 // E2E: the Planner page's "任务" group (tasks.js, planner RFC §15.4, D85,
 // §15.7) renders GET /api/tasks in three parts — 进行中 (等你 and 失败 first),
-// 待提醒, and 已完成 folded — none of them counted, each card's state said
-// once (its menu, or on a done card in words) with who set it (the
-// Planner's judgment and its reason); the state menu marks a task done as
-// yours through POST /api/tasks/state, a done one reopens, and a dispatched
+// 待提醒, and 已完成 folded — each heading counted, each card's state said
+// once (its badge) with who set it only when not the default (the Planner's
+// judgment and its reason); the card's "⋯" marks a task done as yours
+// through POST /api/tasks/state, a done one reopens, and a dispatched
 // session's title opens it in the middle column, whose header has 停止
 // while it is in progress.
 const { test, expect } = require('@playwright/test');
@@ -51,42 +51,57 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
       }
       const group = page.locator('#pl-task');
       await expect(group.locator('.tk-head')).toHaveText('任务');
-      await expect(group.locator('.tk-sec > .tk-sec-h')).toHaveText(['进行中', '待提醒', '已完成']);
+      await expect(group.locator('.tk-sec > .tk-sec-h')).toHaveText(['进行中 2', '待提醒 1', '已完成 1']);
       const doing = group.locator('.tk-sec-doing .tk-card');
       await expect(doing.locator('.tk-title')).toHaveText(['iso 写 hello', 'iso CI 绿了告诉你']);
-      // The state is the menu's; no source label (a session's title is a link).
-      await expect(doing.locator('.tk-state, .tk-src')).toHaveCount(0);
-      await expect(doing.nth(0).locator('.tk-menu option:checked')).toHaveText('等你');
+      // The state is the badge's, said once; the default source goes unsaid.
+      await expect(doing.locator('.tk-badge')).toHaveText(['等你', '进行中']);
       await expect(doing.nth(0).locator('.tk-open')).toHaveCount(1);
-      await expect(doing.nth(0)).toContainText('按健康状态');
+      await expect(doing.nth(0)).not.toContainText('按健康状态');
       await expect(doing.nth(1).locator('.tk-open')).toHaveCount(0);
-      await expect(doing.nth(1)).toContainText('完成条件：master CI 绿');
+      await expect(doing.nth(1).locator('.tk-now')).toHaveText('完成条件：master CI 绿');
+      // No control shows until "⋯" opens the card's row.
+      await expect(group.locator('.tk-act, select')).toHaveCount(0);
       // A point in time reads M/D HH:mm, as everywhere on the page (D92).
-      await expect(group.locator('.tk-sec-remind .tk-card')).toContainText(/到点提醒 \d{1,2}\/\d{1,2} \d\d:\d\d/);
+      await expect(group.locator('.tk-sec-remind .tk-card .tk-now')).toHaveText(/到点提醒 \d{1,2}\/\d{1,2} \d\d:\d\d/);
       // 已完成 is folded; unfolded, the Planner's judgment and its reason.
       await expect(group.locator('.tk-sec-done .tk-card')).toBeHidden();
       await group.locator('.tk-sec-done summary').click();
       const done = group.locator('.tk-sec-done .tk-card');
-      await expect(done).toContainText('Planner 判断：它汇报测试全部通过');
-      await expect(done.locator('.tk-state')).toHaveText('已完成');
-      await expect(done.locator('.tk-reopen')).toHaveText('重新打开');
+      await expect(done.locator('.tk-now')).toHaveText('Planner 判断：它汇报测试全部通过');
+      await expect(done.locator('.tk-badge')).toHaveText('已完成');
+      await done.locator('.tk-more').click();
+      await expect(done.locator('.tk-more')).toHaveAttribute('aria-expanded', 'true');
+      await expect(done.locator('.tk-act')).toHaveText(['重新打开']);
       await page.screenshot({ path: test.info().outputPath(`tasks-${name}.png`) });
 
-      // Marking the promise done from its menu: yours, and folded away.
-      await doing.nth(1).locator('.tk-menu').selectOption('done');
+      // Marking the promise done from its "⋯": yours, and folded away.
+      await doing.nth(1).locator('.tk-more').click();
+      // One card's row is open at a time.
+      await expect(group.locator('.tk-acts')).toHaveCount(1);
+      await expect(doing.nth(1).locator('.tk-act')).toHaveText(['标为已完成']);
+      await doing.nth(1).locator('.tk-done').click();
       await expect.poll(() => mock.tasksCalls).toEqual([{ id: 'pr_cond', state: 'done' }]);
       await expect(group.locator('.tk-sec-done')).toHaveAttribute('open', '');
-      await expect(group.locator('.tk-sec-done .tk-card[data-id="pr_cond"]')).toContainText('你标记');
+      await expect(group.locator('.tk-sec-done .tk-card[data-id="pr_cond"] .tk-now')).toHaveText('你标记');
+      await expect(group.locator('.tk-acts')).toHaveCount(0);
       // Reopening the session the Planner judged done.
-      await group.locator('.tk-card[data-id="task:done1"] .tk-reopen').click();
+      const done1 = group.locator('.tk-card[data-id="task:done1"]');
+      await done1.locator('.tk-more').click();
+      await done1.locator('.tk-reopen').click();
       await expect.poll(() => mock.tasksCalls.length).toBe(2);
       expect(mock.tasksCalls[1]).toEqual({ id: 'task:done1', state: 'doing' });
       await expect(group.locator('.tk-sec-doing .tk-card[data-id="task:done1"]')).toBeVisible();
-      // The session waiting on you, marked back in progress from its menu.
-      await group.locator('.tk-card[data-id="' + TASK + '"] .tk-menu').selectOption('doing');
+      // The session waiting on you, marked back in progress from its "⋯",
+      // which offers 停止 too while it runs.
+      const waiting = group.locator('.tk-card[data-id="' + TASK + '"]');
+      await waiting.locator('.tk-more').click();
+      await expect(waiting.locator('.tk-act')).toHaveText(['停止', '标为进行中', '标为已完成']);
+      await waiting.locator('.tk-doing').click();
       await expect.poll(() => mock.tasksCalls.length).toBe(3);
       expect(mock.tasksCalls[2]).toEqual({ id: TASK, state: 'doing' });
-      await expect(group.locator('.tk-card[data-id="' + TASK + '"] .tk-menu option:checked')).toHaveText('进行中');
+      await expect(waiting.locator('.tk-badge')).toHaveText('进行中');
+      await expect(waiting.locator('.tk-meta')).toContainText('你标记');
 
       // A dispatched session's title opens it in the middle column, whose
       // header stops it while it is in progress.

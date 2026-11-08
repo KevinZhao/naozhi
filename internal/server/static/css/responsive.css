@@ -79,6 +79,7 @@
      full-screen drawer. */
   body.nz-view-planner .planner-main{position:fixed;inset:var(--vv-top,0) 0 0 0;width:100%;height:var(--vv-height,100%);z-index:10;padding-bottom:var(--nz-tabbar-h);flex-direction:column}
   .pl-left{width:100%;flex-shrink:0;border-right:0;border-bottom:1px solid var(--nz-border)}
+  .pl-resizer{display:none}
   .planner-main.pl-left-open .pl-left{flex:1}
   .planner-main.pl-left-open .pl-center{display:none}
   .pl-left-toggle{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:max(12px,env(safe-area-inset-top)) 16px 10px;border:0;background:none;color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-sm2);cursor:pointer}

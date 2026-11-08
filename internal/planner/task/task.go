@@ -87,6 +87,31 @@ type Task struct {
 	// is why a done one is not put away yet ("" when nothing holds it).
 	Reap     *sidecar.Reap `json:"reap,omitempty"`
 	ReapWait string        `json:"reap_wait,omitempty"`
+	// HealthSince is when the session entered Health: how long its turn
+	// has run while active, how long it has waited or stalled.
+	HealthSince time.Time `json:"health_since,omitzero"`
+	// Live is what a dispatched session still in the router is doing now,
+	// for the card's status line; nil once it is gone.
+	Live *Live `json:"live,omitempty"`
+}
+
+// liveRunes caps Live's texts: a card shows one line of them.
+const liveRunes = 200
+
+// Live is a dispatched session's state in the router. Its texts are the
+// session's own output, data the page escapes.
+type Live struct {
+	Running bool `json:"running,omitempty"`
+	// Activity is the latest tool call or thinking, Reply the start of the
+	// latest reply; each one line.
+	Activity   string    `json:"activity,omitempty"`
+	Reply      string    `json:"reply,omitempty"`
+	LastActive time.Time `json:"last_active,omitzero"`
+}
+
+// oneLine folds s to one line of at most liveRunes.
+func oneLine(s string) string {
+	return textutil.TruncateRunes(strings.Join(strings.Fields(s), " "), liveRunes)
 }
 
 // Errors Set returns.
@@ -112,6 +137,9 @@ type Config struct {
 	// ReapWait is why done dispatched session key is not put away yet; nil
 	// says nothing.
 	ReapWait func(key string) string
+	// Live is the dispatched sessions in the router by key; nil leaves
+	// Task.Live out.
+	Live func() map[string]Live
 	// Now is the wall clock; nil is time.Now.
 	Now func() time.Time
 }
@@ -187,12 +215,20 @@ func (b *Board) List() []Task {
 				units[u.ID] = u
 			}
 		}
+		var live map[string]Live
+		if b.cfg.Live != nil {
+			live = b.cfg.Live()
+		}
 		for _, m := range b.cfg.Sessions.List() {
 			if m.Purpose != sidecar.PurposeTask {
 				continue
 			}
 			u := units[m.Key]
-			t := Task{ID: m.Key, Kind: KindSession, Title: cmp.Or(m.Title, m.Key), Created: m.Created, Health: u.State, Retired: m.Retired, Reap: m.Reap}
+			t := Task{ID: m.Key, Kind: KindSession, Title: cmp.Or(m.Title, m.Key), Created: m.Created, Health: u.State, HealthSince: u.Since, Retired: m.Retired, Reap: m.Reap}
+			if l, ok := live[m.Key]; ok && m.Retired.IsZero() {
+				l.Activity, l.Reply = oneLine(l.Activity), oneLine(l.Reply)
+				t.Live = &l
+			}
 			t.State, t.By, t.Why, t.At = sessionState(m, u)
 			if t.State == Done && m.Reap == nil && b.cfg.ReapWait != nil {
 				t.ReapWait = b.cfg.ReapWait(m.Key)

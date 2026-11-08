@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/datadir"
@@ -19,7 +20,9 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
+	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/usermsg"
 )
 
@@ -267,4 +270,24 @@ func spawnError(err error, key string, maxProcs int) error {
 		msg += fmt.Sprintf("（max_procs %d）", maxProcs)
 	}
 	return errors.New(msg)
+}
+
+// TaskLive is task.Config.Live: the dispatched sessions in router, what
+// each is doing now.
+func TaskLive(router *session.Router) func() map[string]task.Live {
+	return func() map[string]task.Live {
+		out := map[string]task.Live{}
+		router.VisitSessions(func(s session.SessionSnapshot) bool {
+			if !sessionkey.IsTaskKey(s.Key) {
+				return true
+			}
+			l := task.Live{Running: s.State == "running", Activity: s.LastActivity, Reply: s.LastResponse}
+			if s.LastActive > 0 {
+				l.LastActive = time.UnixMilli(s.LastActive)
+			}
+			out[s.Key] = l
+			return true
+		})
+		return out
+	}
 }

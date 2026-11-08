@@ -49,6 +49,7 @@ import { decisionActsHtml, decorateEvents, noteWorkspaces, paintSessionCards, re
 import { clearAck, clearPending, closePlannerSession, mountComposer, noteAck, notePlannerStatus, showPlannerLeft } from './planner_chat.js';
 import { onSessionsApplied } from './session_list.js';
 import { inProgress, mountTasks, refreshTasks } from './tasks.js';
+import { initPlannerResize } from './planner_resize.js';
 import { custody, refreshCustody, setCustodyPaused } from './custody.js';
 import { workbench } from './workbench.js';
 import { choosePlannerNode, eventsURL, hostName, hostOnline, hostRemote, isLocalNode, nodeAPI, notePlannerNodes, plannerAPI, plannerHost, plannerNodes, readLocalPlanner } from './planner_host.js';
@@ -1175,6 +1176,7 @@ registerActions({
 });
 
 document.addEventListener('DOMContentLoaded', () => {
+  initPlannerResize();
   $('pl-events')?.addEventListener('scroll', () => {
     if (pl.revealed) revealedTop();
     if (nearTop()) loadOlder();

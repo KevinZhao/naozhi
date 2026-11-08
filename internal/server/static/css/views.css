@@ -127,28 +127,52 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .hl-state.idle{color:var(--nz-text-mute)}
 .hl-state.off{color:var(--nz-text-dim)}
 /* "任务" (tasks.js, D85): the dispatched sessions and the promises, in
-   进行中 · 待提醒 · 已完成 (folded). */
-.tk-group{display:flex;flex-direction:column;gap:8px}
+   进行中 · 待提醒 · 已完成 (folded). Every card is the column's width and
+   one shape: the title (two lines at most), a status line (badge · what it
+   does now · how long), a muted line only when there is more to say. */
+.tk-group{display:flex;flex-direction:column;gap:8px;min-width:0}
 .tk-head{margin-bottom:0}
-.tk-sec{display:flex;flex-direction:column;gap:6px}
+.tk-sec{display:flex;flex-direction:column;gap:6px;min-width:0}
 .tk-sec-h{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);padding:0 2px}
+.tk-n{font-variant-numeric:tabular-nums;color:var(--nz-text-faint)}
 .tk-sec-done>summary{cursor:pointer}
 .tk-sec-done>.tk-list{margin-top:6px}
-.tk-list{display:flex;flex-direction:column;gap:6px}
-.tk-card{padding:8px 10px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-0);font-size:var(--nz-fs-sm2);color:var(--nz-text)}
-.tk-card.done{opacity:.7}
-.tk-top{display:flex;align-items:baseline;gap:8px}
-.tk-state{flex-shrink:0;font-size:var(--nz-fs-xs);font-weight:600;color:var(--nz-green)}
-.tk-time{flex-shrink:0;margin-left:auto;font-size:var(--nz-fs-xs);font-variant-numeric:tabular-nums;color:var(--nz-text-dim)}
-.tk-title{flex:1;min-width:0;color:var(--nz-text-strong);font-weight:600;overflow-wrap:anywhere}
-.tk-open{font-weight:600;text-align:left;overflow-wrap:anywhere}
-.tk-foot{display:flex;align-items:flex-end;gap:8px;margin-top:2px}
-.tk-meta{flex:1;min-width:0;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);overflow-wrap:anywhere}
-.tk-menu,.tk-reopen,.tk-stop{flex-shrink:0}
-.tk-menu{padding:2px 6px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);background:var(--nz-bg-0);color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-xs);cursor:pointer}
-.tk-menu:disabled{opacity:.55;cursor:default}
-.tk-s-waiting .tk-menu{color:var(--nz-amber)}
-.tk-s-failed .tk-menu{color:var(--nz-red)}
+.tk-list{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tk-card{box-sizing:border-box;width:100%;min-width:0;padding:8px 10px;border:1px solid var(--nz-border);border-left:3px solid var(--tk-c,var(--nz-border));border-radius:var(--nz-radius-md);background:var(--nz-bg-0);font-size:var(--nz-fs-sm2);color:var(--nz-text)}
+.tk-card[data-status="run"]{--tk-c:var(--nz-status-running)}
+.tk-card[data-status="warn"]{--tk-c:var(--nz-status-warn)}
+.tk-card[data-status="fail"]{--tk-c:var(--nz-status-failed)}
+.tk-card.done{--tk-c:var(--nz-border);background:var(--nz-bg-1)}
+.tk-card.done .tk-title-t{color:var(--nz-text-mute)}
+.tk-top{display:flex;align-items:flex-start;gap:6px;min-width:0}
+.tk-title{flex:1;min-width:0;line-height:1.35}
+.tk-title-t{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden;color:var(--nz-text-strong);font-weight:600;overflow-wrap:anywhere;text-align:left}
+.tk-card.done .tk-title-t{-webkit-line-clamp:1;line-clamp:1}
+.tk-card .tk-open{font:inherit;font-weight:600;color:var(--nz-text-strong)}
+.tk-card .tk-open:hover{color:var(--nz-accent);text-decoration:underline}
+.tk-more{flex-shrink:0;width:24px;height:22px;margin:-2px -4px 0 0;padding:0;border:0;border-radius:var(--nz-radius-ms);background:none;color:var(--nz-text-mute);font:inherit;font-size:var(--nz-fs-md);line-height:1;cursor:pointer}
+.tk-more:hover,.tk-more[aria-expanded="true"]{background:var(--nz-bg-2);color:var(--nz-text)}
+.tk-more:focus-visible{outline:2px solid var(--nz-focus);outline-offset:1px}
+/* With a pointer the "⋯" shows on hover or focus; touch keeps it. */
+@media (hover:hover){
+  .tk-card:not(:hover):not(:focus-within):not(.tk-acts-open) .tk-more{opacity:0}
+}
+.tk-status{display:flex;align-items:center;gap:6px;min-width:0;margin-top:4px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.tk-badge{flex-shrink:0;display:inline-flex;align-items:center;gap:4px;font-weight:600;color:var(--tk-b,var(--nz-text-mute))}
+.tk-badge::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.tk-b-run{--tk-b:var(--nz-status-running)}
+.tk-b-warn{--tk-b:var(--nz-status-warn)}
+.tk-b-fail{--tk-b:var(--nz-status-failed)}
+.tk-b-done{--tk-b:var(--nz-green)}
+.tk-b-idle{--tk-b:var(--nz-text-mute)}
+.tk-now{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--nz-text)}
+.tk-card.done .tk-now{color:var(--nz-text-mute)}
+.tk-meta .custody-chip{margin-right:6px;vertical-align:1px}
+.tk-time{flex-shrink:0;margin-left:auto;font-variant-numeric:tabular-nums;color:var(--nz-text-dim);white-space:nowrap}
+.tk-meta{margin-top:3px;min-width:0;font-size:var(--nz-fs-xs);color:var(--nz-text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tk-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid var(--nz-border)}
+.tk-act{min-height:26px}
+.tk-stop{color:var(--nz-red)}
 /* 等你 bar atop the 会话 sidebar (side_wait.js), not rendered with none;
    unfolded, the Planner left column's cards at their full height above the
    session list. Only a bar taller than what the
@@ -170,8 +194,14 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .planner-main{display:none}
 body.nz-view-planner .sidebar,body.nz-view-planner .resizer,body.nz-view-planner .main{display:none!important}
 body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
-.pl-left{width:280px;flex-shrink:0;display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--nz-border);background:var(--nz-bg-1)}
+.pl-left{width:var(--pl-left-w,340px);flex-shrink:0;display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--nz-border);background:var(--nz-bg-1)}
 .pl-left-toggle{display:none}
+/* The left column's width handle (planner_resize.js): a 7px grab zone over
+   the column's border, its line lit on hover, drag and keyboard focus. */
+.pl-resizer{position:relative;z-index:2;flex-shrink:0;width:7px;margin:0 -4px 0 -3px;cursor:col-resize;touch-action:none;outline:none}
+.pl-resizer::after{content:"";position:absolute;top:0;bottom:0;left:3px;width:1px;background:transparent;transition:background .15s,width .15s}
+.pl-resizer:hover::after,.pl-resizer.dragging::after,.pl-resizer:focus-visible::after{left:2px;width:3px;background:var(--nz-accent)}
+body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
 .pl-left-body{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:var(--nz-space-4);padding:14px 12px;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent}
 .pl-group-h{font-size:var(--nz-fs-sm);font-weight:600;color:var(--nz-text-mute);margin:0 2px 8px}
 .pl-list{display:flex;flex-direction:column;gap:8px}
@@ -181,7 +211,7 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
 .pl-k-decision .pl-kind,.pl-k-question .pl-kind{color:var(--nz-accent)}
 .pl-k-error .pl-kind{color:var(--nz-red)}
 .pl-wait{font-variant-numeric:tabular-nums}
-.pl-close{margin-left:auto;font-size:var(--nz-fs-md);padding:0 2px}
+.pl-close{margin-left:auto;min-width:24px;min-height:24px;display:inline-flex;align-items:center;justify-content:center;font-size:var(--nz-fs-md);padding:0 2px;color:var(--nz-text-mute)}
 .pl-close:hover{color:var(--nz-text)}
 .pl-card-title{margin-top:4px;color:var(--nz-text-strong);font-weight:600;word-break:break-word}
 .pl-card-why{margin-top:2px;color:var(--nz-text-mute);font-size:var(--nz-fs-xs);word-break:break-word;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden}
@@ -793,7 +823,6 @@ button.custody-chip:disabled{opacity:.6;cursor:default}
 .main-header .detail:has(.detail-pr:not(:empty)) .detail-custody,
 .main-header .detail:has(.detail-effort:not(:empty)) .detail-custody{margin-right:0}
 .main-header .detail-custody .custody-chip{min-width:0}
-.tk-top .custody-chip{flex-shrink:0;align-self:center}
 .pl-tool-hint{font-size:var(--nz-fs-2xs);color:var(--nz-text-faint)}
 .gw-note-time{font-size:var(--nz-fs-xs);color:var(--nz-text-faint)}
 .refusal-tag{display:inline-block;font-size:var(--nz-fs-2xs);padding:1px 8px;border-radius:var(--nz-radius-pill);border:1px solid var(--nz-warn);color:var(--nz-warn)}
