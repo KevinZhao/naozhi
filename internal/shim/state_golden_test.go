@@ -194,6 +194,55 @@ func TestStateGoldenCompat_V040(t *testing.T) {
 	}
 }
 
+// TestStateGoldenCompat_V064 pins SpawnOverlay.Ultracode (a dispatched task:
+// session started in ultracode mode) on top of the v0.4.0 shape.
+func TestStateGoldenCompat_V064(t *testing.T) {
+	t.Parallel()
+	st := loadGolden(t, "state_v0.6.4.json")
+
+	want := State{
+		Version:       1,
+		SchemaVersion: 1,
+		ShimPID:       60001,
+		CLIPID:        60002,
+		Socket:        "/run/user/1000/naozhi/fixture0604.sock",
+		AuthToken:     "FIXTURE-NOT-A-REAL-TOKEN-v0.6.4",
+		Key:           "task:fixture-0604",
+		SessionID:     "3b45c8d7-0e4b-4f0e-a276-6d8e9f0a1b20",
+		Workspace:     "/home/fixture/workspace/myproject",
+		Backend:       "claude",
+		CLIArgs: []string{
+			"-p", "--output-format", "stream-json", "--model", "fixture-model",
+			"--tools", "Read,Grep", "--name", "iso-fixture-task", "--strict-mcp-config",
+			"--mcp-config", "/home/fixture/.naozhi/session-settings/scout-mcp.json",
+			"--resume", "3b45c8d7-0e4b-4f0e-a276-6d8e9f0a1b20",
+		},
+		CLIAlive:        true,
+		StartedAt:       "2026-11-08T09:00:00Z",
+		LastConnectedAt: "2026-11-08T10:30:00Z",
+		BufferCount:     2,
+		SpawnOverlay: &SpawnOverlay{
+			Model:               "fixture-model",
+			Effort:              "high",
+			ExtraArgs:           []string{"--debug"},
+			AccessProfile:       "fixture-profile",
+			AppendSystemPrompt:  "FIXTURE system prompt.",
+			Tools:               []string{"Read", "Grep"},
+			PermissionMode:      "dontAsk",
+			Name:                "iso-fixture-task",
+			StrictMCPConfig:     true,
+			MCPConfig:           "/home/fixture/.naozhi/session-settings/scout-mcp.json",
+			CrossSessionInbound: "FIXTURE-inbound",
+			PermissionsDeny:     []string{"Bash(rm:*)"},
+			PermissionsAllow:    []string{"Read(./**)"},
+			Ultracode:           true,
+		},
+	}
+	if !reflect.DeepEqual(st, want) {
+		t.Errorf("v0.6.4 state fields did not survive:\n got  %+v\n overlay %+v\n want %+v\n overlay %+v", st, st.SpawnOverlay, want, want.SpawnOverlay)
+	}
+}
+
 // TestStateGoldenCompat_AllFixturesLoad walks the whole matrix so a new
 // release's archived golden is picked up without touching this file.
 func TestStateGoldenCompat_AllFixturesLoad(t *testing.T) {
