@@ -123,6 +123,14 @@ function follow(link) {
   else if (!link.key || link.item) openPlanner(link.item);
 }
 
+// followItem goes where a click on a listed item leads, as a notification's
+// does: its listed session at the item's note, else the Planner page on its
+// card (ref: the card's data-id, which differs from id for another node's).
+export function followItem(key, node, id, ref) {
+  if (openSession(key, node)) scrollToNote(id);
+  else openPlanner(ref || id);
+}
+
 // linkFromHash reads and clears a #session= or #planner link; null for any
 // other hash.
 function linkFromHash() {

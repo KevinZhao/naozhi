@@ -153,6 +153,9 @@
         <button type="submit" class="quick-ask-send" aria-label="发送"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
       </form>
       <div class="nz-empty-hint">默认目录 · general agent · 随时 <code>/cd</code> 切换目录，或用上方 <b>+</b> 开项目会话</div>
+      <!-- 等你 · 运行中 · 失败 and the latest items that wait on you
+           (home_attn.js); empty, and hidden, with nothing to say. -->
+      <div id="home-attn" class="home-attn"></div>
       <!-- R110-P1 Home panel slot: renderRecentSessionsPanel() fills this
            with up to 5 most-recently-active session cards after fetchSessions
            lands. Stays empty on cold-start (no data yet) or when there are
@@ -420,5 +423,6 @@
 <script type="module" src="/static/planner_view.js"></script>
 <script type="module" src="/static/planner_drawer.js"></script>
 <script type="module" src="/static/side_wait.js"></script>
+<script type="module" src="/static/home_attn.js"></script>
 </body>
 </html>

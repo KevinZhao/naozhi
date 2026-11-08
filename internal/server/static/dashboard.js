@@ -9,6 +9,7 @@ import { onAskOptionToggle, onAskSubmit } from './ask_card.js';
 import { eventIdentityKey, fetchEvents, hasMoreHeader, loadEarlierEvents, memoryOnlyHeader, renderEvents } from './event_stream.js';
 import { fetchSessionRuns, setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderPRChip, setHeaderSpawnDiagChip } from './session_header.js';
 import { paintCustodyChip } from './custody.js';
+import { paintTaskHeader } from './tasks.js';
 import {
   handleFiles,
   onThumbDragEnd,
@@ -336,6 +337,8 @@ onSessionsApplied(() => { if (selection.key) updateHeaderCLI(); });
 onSessionsApplied(onSessionsRefreshed);
 // The chip shows for a session the list holds (custody.coverable).
 onSessionsApplied(paintCustodyChip);
+// A dispatched session's task badge: a session listed later gets it.
+onSessionsApplied(paintTaskHeader);
 
 // --- History Popover ---
 
@@ -1204,7 +1207,9 @@ function mainHeaderHtml(s) {
   // before the first turn; kiro: cli.backends[].model, "" = kiro's auto), or a
   // pending session's tuning pick. Bedrock ids are compacted for display
   // ("global.anthropic.claude-opus-4-7[1m]" → "claude-opus-4.7 1m"); the
-  // title keeps the raw value.
+  // title keeps the raw value. No model yet says nothing (UX review 10: a
+  // "not configured" hint means nothing to the user); the switch shows once
+  // one is known.
   const rawModel = s.model ||
     (!sessionList.sessionsData[sid(selection.key, selection.node)] && perSession.pendingTuning[selection.key]
       ? (perSession.pendingTuning[selection.key].model || '') : '');
@@ -1214,7 +1219,7 @@ function mainHeaderHtml(s) {
     .replace(/\[(\d+m)\]$/i, ' $1');            // [1m] → " 1m"
   const modelLabel = rawModel
     ? '<span class="model-label nz-clickable" id="header-model" data-action="tuning-model" title="' + escAttr(rawModel + ' — 点击切换模型') + '">· ' + esc(compactModel) + '</span>'
-    : '<span class="model-label model-label-unset nz-clickable" id="header-model" data-action="tuning-model" title="model 未在 system/init 上报；可能仍在 spawn 中 — 点击可指定模型">· (模型未配置)</span>';
+    : '';
   const headerOriginBadge = originBadgeHtml(selection.key);
   // Last turn's duration; hidden when 0 or absent (claude does not report it).
   let turnTimerHtml = '';
@@ -1252,6 +1257,10 @@ function mainHeaderHtml(s) {
         '<span class="detail-left">' + cliLabel + modelLabel + '</span>' +
         headerOriginBadge +
         '<span class="detail-exit" id="header-exit">' + sessionExitChipHtml(s) + '</span>' +
+        // A dispatched session's task badge and 在 Planner 中查看 (tasks.js),
+        // built empty and filled by paintTaskHeader; :empty collapses it for
+        // every other session.
+        '<span class="detail-task" id="header-task"></span>' +
         // Custody's switch (custody.js), built empty and filled by
         // paintCustodyChip; :empty collapses it where custody does not
         // apply (the Planner off, a remote or discovered session).
@@ -1301,6 +1310,7 @@ function renderMainHeader() {
   setHeaderOverlayDriftChip();
   setHeaderPRChip();
   paintCustodyChip();
+  paintTaskHeader();
   paintHandoffButton();
   fetchSessionRuns(selection.key, selection.node);
 }
@@ -1401,6 +1411,7 @@ function renderMainShell() {
   setHeaderOverlayDriftChip();
   setHeaderPRChip();
   paintCustodyChip();
+  paintTaskHeader();
 }
 
 // renderSettingsView paints the standalone settings top-level view into

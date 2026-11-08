@@ -1,6 +1,6 @@
 // E2E: the Planner page's "任务" group (tasks.js, planner RFC §15.4, D85,
 // §15.7) renders GET /api/tasks in three parts — 进行中 (等你 and 失败 first),
-// 待提醒, and 已完成 folded — each heading counted, each card's state said
+// 待提醒, and 已完成 folded — the group's heading and each part's counted, each card's state said
 // once (its badge) with who set it only when not the default (the Planner's
 // judgment and its reason); the card's "⋯" marks a task done as yours
 // through POST /api/tasks/state, a done one reopens, and a dispatched
@@ -44,13 +44,15 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
         // 任务 counts what 进行中 lists: the one waiting on you too.
         await expect(page.locator('#pl-left-toggle')).toHaveText('等你 0 · 任务 2');
         await page.click('#pl-left-toggle');
-        // Unfolded, a task in progress comes before what waits on you (Q15).
+        // Unfolded, what waits on you comes first, as on a desktop (§15.13
+        // v0.7.0, UX review 1; Q15 put the tasks first).
         await expect(page.locator('#pl-task .tk-sec-doing')).toBeVisible();
         const [tk, wait] = await Promise.all([page.locator('#pl-task').boundingBox(), page.locator('#pl-wait').boundingBox()]);
-        expect(tk.y).toBeLessThan(wait.y);
+        expect(wait.y).toBeLessThan(tk.y);
       }
       const group = page.locator('#pl-task');
-      await expect(group.locator('.tk-head')).toHaveText('任务');
+      // The heading counts every task listed; each part its own.
+      await expect(group.locator('.tk-head')).toHaveText('任务 4');
       await expect(group.locator('.tk-sec > .tk-sec-h')).toHaveText(['进行中 2', '待提醒 1', '已完成 1']);
       const doing = group.locator('.tk-sec-doing .tk-card');
       await expect(doing.locator('.tk-title')).toHaveText(['iso 写 hello', 'iso CI 绿了告诉你']);

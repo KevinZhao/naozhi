@@ -37,6 +37,8 @@ function mainEmptyHtml() {
         '</svg></button>' +
     '</form>' +
     '<div class="nz-hint-dim">默认目录 · general agent · 随时 <code>/cd</code> 切换目录，或用上方 <b>+</b> 开项目会话</div>' +
+    // What needs you (home_attn.js fills it on 'home:shown').
+    '<div id="home-attn" class="home-attn"></div>' +
     // 空闲态 Home：renderRecentSessionsPanel()
     // 按需注入"最近会话"缩略列表；零 session 时渲染为空字符串，保留冷启动
     // 简洁空态不退化。Helper 外部调用，不嵌在本 HTML 里以保持 pure 可读。

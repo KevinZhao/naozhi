@@ -486,10 +486,8 @@
 
 /* spawn-time model label rendered inline next to the
    cli identity in the main header detail row. Mute-tone keeps cli name
-   primary; the unset variant uses the dim foreground + italic so
-   "(模型未配置)" reads as a hint, not an error. */
+   primary; with no model known there is no label. */
 .main-header .model-label{margin-left:6px;color:var(--nz-text-mute);font-size:var(--nz-fs-sm);font-variant-numeric:tabular-nums}
-.main-header .model-label-unset{color:var(--nz-text-faint);font-style:italic}
 /* kiro thinking-effort tier (low/medium/high/xhigh/max). Joins the
    .model-label / .detail-turn-timer family — bare inline text, no border or
    fill — because the .detail row already carries two bordered chips
@@ -615,6 +613,30 @@
 .recent-dot.dot-new{background:var(--nz-status-new);border:1px dashed var(--nz-accent)}
 .recent-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .recent-time{color:var(--nz-text-dim);font-size:var(--nz-fs-xs);flex-shrink:0;font-variant-numeric:tabular-nums}
+/* The idle Home's summary of what needs you (home_attn.js): one counts line
+   over the latest items that wait on you. The numbers are text, not badges:
+   the rail badge is the one red count (D91 / D94); a dot in the status
+   colours tells the three apart. */
+.home-attn{width:min(560px,92%)}
+.home-attn:empty{display:none}
+.ha-card{box-sizing:border-box;width:100%;padding:10px 12px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1);text-align:left}
+.ha-counts{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:var(--nz-fs-sm2);color:var(--nz-text-mute)}
+.ha-n{display:inline-flex;align-items:center;gap:5px}
+.ha-n::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--ha-c,var(--nz-text-faint))}
+.ha-n b{color:var(--nz-text-strong);font-variant-numeric:tabular-nums}
+.ha-n-wait{--ha-c:var(--nz-status-warn)}
+.ha-n-run{--ha-c:var(--nz-status-running)}
+.ha-n-fail{--ha-c:var(--nz-status-failed)}
+.ha-sep{color:var(--nz-text-faint)}
+.ha-list{display:flex;flex-direction:column;gap:2px;margin-top:8px}
+.ha-row{display:flex;align-items:center;gap:10px;min-height:32px;padding:6px 8px;border:1px solid transparent;border-radius:var(--nz-radius-ms);background:transparent;color:var(--nz-text);cursor:pointer;font-family:inherit;font-size:var(--nz-fs-sm2);text-align:left}
+.ha-row:hover{background:var(--nz-bg-2);border-color:var(--nz-border);color:var(--nz-text-strong)}
+.ha-row:focus-visible{outline:2px solid var(--nz-focus);outline-offset:1px}
+.ha-kind{flex-shrink:0;font-size:var(--nz-fs-xs);font-weight:600;color:var(--nz-accent)}
+.ha-k-error{color:var(--nz-red)}
+.ha-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ha-time{flex-shrink:0;color:var(--nz-text-dim);font-size:var(--nz-fs-xs);font-variant-numeric:tabular-nums}
+.ha-all{display:inline-block;margin:6px 8px 0;font-size:var(--nz-fs-xs)}
 /* IM-origin chip: shared structure, per-platform hue variants. The
    base rule stays muted so unrecognized/future platforms still render safely
    (originBadgeHtml returns '' for unknowns, but defence in depth). Platform
