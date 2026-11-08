@@ -105,7 +105,7 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     await expect(card.locator('.pl-scard-time')).toContainText('分钟前');
     // The keys after the names fold into the cards (§6.4: names, not keys).
     await expect(reply.locator('.pl-scards .pl-scard')).toHaveCount(2);
-    await expect(reply).toContainText('hello world在等你回复，iso 周报 派出的任务 还没开始，hello world（名字 hw）先等等，两个都在 myproject。');
+    await expect(reply).toContainText('hello world在等你回复，iso 周报 还没开始，hello world（名字 hw）先等等，两个都在 myproject。');
     await expect(reply).not.toContainText(SESSION);
     const dispatch = reply.locator('.pl-act-dispatch').first();
     await expect(dispatch.locator('.pl-act-h')).toHaveText('派出会话 · iso 整理周报');
@@ -236,6 +236,13 @@ const FOLD_ROWS = [
   ['已派：A（iso 周报，20 分钟）', '已派：（iso 周报，20 分钟）'],
   ['iso 周报 和 iso 评审（A、B）都在跑。', 'iso 周报 和 iso 评审都在跑。'],
   ['三个都在 naozhi（A，B，C）。', '三个都在 naozhi。'],
+  ['派出了 A（iso 周报整理）。', '派出了 iso 周报（iso 周报整理）。'],
+  // The Planner names a session by its whole summary; the dashboard by a
+  // shortened title. Either is its name.
+  ['修复 dashboard 在断线重连之后滚动跳动的问题并补上测试 {D} 在跑。', '修复 dashboard 在断线重连之后滚动跳动的问题并补上测试 在跑。'],
+  // A session no list knows (put away a day ago) is named only by its kind:
+  // the name before it stands, not "整理周报 派出的任务".
+  ['整理周报 {G} 在跑。', '整理周报 在跑。'],
 ];
 
 test('keys in a reply fold to names or away, never to bare separators', async ({ page }) => {
@@ -245,8 +252,11 @@ test('keys in a reply fold to names or away, never to bare separators', async ({
     s.sessions.push({ key, state: 'ready', platform: 'task', agent: 'general', cli_name: 'claude', purpose: 'task', user_label: label,
       workspace: '/home/user/workspace/naozhi', last_active: now - 20000, node: 'local' });
   }
+  s.sessions.push({ key: 'task:isod4', state: 'ready', platform: 'task', agent: 'general', cli_name: 'claude', purpose: 'task',
+    summary: '修复 dashboard 在断线重连之后滚动跳动的问题并补上测试', workspace: '/home/user/workspace/naozhi', last_active: now - 20000, node: 'local' });
   const tick = (key) => '`' + key + '`';
-  const reply = (line) => line.replace('A', tick(tasks[0][0])).replace('B', tick(tasks[1][0])).replace('C', tick(tasks[2][0]));
+  const reply = (line) => line.replace('A', tick(tasks[0][0])).replace('B', tick(tasks[1][0])).replace('C', tick(tasks[2][0]))
+    .replace('{D}', tick('task:isod4')).replace('{G}', tick('task:gone9'));
   const mock = await startMockServer({
     ws: true, sessions: s, inbox: inbox(), systemHealth: health(),
     plannerEvents: FOLD_ROWS.map(([line], i) => ({ type: 'text', time: now - 60000 + i, uuid: 'pc-fold' + i, detail: reply(line) })),

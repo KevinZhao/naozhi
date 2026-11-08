@@ -408,13 +408,44 @@ function lineBefore(node) {
   return line();
 }
 
+// knownNames are the names a reply may have written a session by: the
+// Planner reads a session's whole summary or the 任务 title, while the
+// dashboard shows a shortened title, so any of them counts. Empty for a
+// session known to none, which only its kind names.
+function knownNames(key) {
+  const s = sessionList.sessionsData[sid(key, plannerHost.node)];
+  const names = [s?.user_label, s?.summary, listedTitle(key), pc.tasks.get(key), pc.health.get(key)?.name];
+  const out = [];
+  names.forEach((n) => {
+    const t = String(n || '').trim();
+    if (!t) return;
+    out.push(t);
+    // An automatic title cut short ends in "…": the text before it is the name.
+    if (t.endsWith('…') && t.length > 1) out.push(t.slice(0, -1).trimEnd());
+  });
+  return out;
+}
+
 // namedBefore tells whether the line before a key already gave the
 // session's name: "名字 `key`", "名字：`key`", or the key in a bracket
-// after it, "名字（…，`key`）".
-function namedBefore(before, name) {
-  if (before.replace(/\s*[：:]?\s*$/, '').endsWith(name)) return true;
+// after it, "名字（…，`key`）". For a session known to none any text before
+// the key is taken as its name, as before: its kind name ("派出的任务") would
+// only repeat what the text said. In a list it is still named, or the
+// separator before the next key would be left bare.
+function namedBefore(before, key, inList) {
+  const names = knownNames(key);
+  const head = before.replace(/\s*[：:]?\s*$/, '');
+  if (!names.length) return !inList && /[^\s、，,；;（(：:]$/.test(head);
+  if (names.some((n) => head.endsWith(n))) return true;
   const open = Math.max(before.lastIndexOf('（'), before.lastIndexOf('('));
-  return open >= 0 && !/[）)]/.test(before.slice(open)) && before.slice(0, open).trimEnd().endsWith(name);
+  const out = open >= 0 && !/[）)]/.test(before.slice(open)) && before.slice(0, open).trimEnd();
+  return out !== false && names.some((n) => out.endsWith(n));
+}
+
+// startsWithName is whether a bracket's text opens with name as a word of
+// its own: "（iso 周报，20 分钟）", not "（iso 周报整理）".
+function startsWithName(text, name) {
+  return text.startsWith(name) && /^(?:$|[\s，,、；;：:])/.test(text.slice(name.length));
 }
 
 // foldKeys puts names in place of the backticked keys a reply names
@@ -439,7 +470,7 @@ function foldKeys(ev, keys) {
   runs.forEach((run) => {
     const bracketed = /[（(]\s*$/.test(text(run[0].previousSibling)) && /^\s*[）)]/.test(text(run[run.length - 1].nextSibling));
     run.forEach((code) => {
-      if (bracketed || namedBefore(lineBefore(code), sessionTitle(code.textContent.trim()))) drop.add(code);
+      if (bracketed || namedBefore(lineBefore(code), code.textContent.trim(), run.length > 1)) drop.add(code);
     });
   });
   codes.forEach((code) => {
@@ -450,7 +481,7 @@ function foldKeys(ev, keys) {
       // "`key`（名字…）" names it right after: the name once, not twice.
       const m = next?.nodeType === Node.TEXT_NODE && /^\s*[（(]\s*([^（）()]*?)\s*[）)]/.exec(next.data);
       if (m && m[1] === name) next.data = next.data.slice(m[0].length);
-      if (!m || !m[1].startsWith(name) || m[1] === name) {
+      if (!m || !startsWithName(m[1], name) || m[1] === name) {
         code.replaceWith(name);
         return;
       }
