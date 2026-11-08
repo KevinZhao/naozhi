@@ -102,10 +102,14 @@ func buildUserEntry(text string, images []clievent.Attachment, runID, source str
 // startupExitGrace: if the CLI then exits as a startup failure, Send returns
 // that exit's error, as a passthrough send does, instead of the result.
 func (p *Process) Send(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error) {
-	switch prev, claimed := p.turn.claimSend(ctxutil.RunID(ctx)); {
+	// A turn already running is waited out, not refused: the message stays
+	// queued behind it rather than being dropped.
+	switch prev, claimed := p.turn.claimSendWait(ctx, ctxutil.RunID(ctx), p.TotalTimeout()); {
 	case claimed:
 	case prev == StateDead:
 		return nil, fmt.Errorf("process dead: %w", p.exitErr())
+	case ctx.Err() != nil:
+		return nil, ctx.Err()
 	default:
 		return nil, fmt.Errorf("process busy (state=%s): %w", prev, clierr.ErrProcessBusy)
 	}

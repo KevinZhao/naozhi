@@ -71,19 +71,76 @@ func TestSend_OnADeadProcessFailsAndStaysDead(t *testing.T) {
 	}
 }
 
-// TestSend_WhileRunningIsBusy: a second Send during a turn is refused as
-// busy and does not end the first Send's turn.
-func TestSend_WhileRunningIsBusy(t *testing.T) {
+// TestSend_WhileRunningWaits: a Send during a turn it does not own waits for
+// that turn instead of refusing the message; it gives up only on its ctx,
+// and leaves the running turn alone.
+func TestSend_WhileRunningWaits(t *testing.T) {
 	p, srv := shimTestPair(&ClaudeProtocol{})
 	defer srv.Close()
 	p.startReadLoop()
-	p.transition(evSendBegin) // the first Send's claim
-	_, err := p.Send(context.Background(), "hello", nil, nil)
-	if !errors.Is(err, clierr.ErrProcessBusy) {
-		t.Errorf("Send during a turn = %v, want ErrProcessBusy", err)
+	p.transition(evTurnStarted) // the CLI's own turn (a background-task notification)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err := p.Send(ctx, "hello", nil, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Send during a turn = %v, want it to wait until its ctx ends", err)
 	}
 	if got := p.State(); got != StateRunning {
-		t.Errorf("state after the refused Send = %v, want Running", got)
+		t.Errorf("state after the waiting Send = %v, want Running", got)
+	}
+}
+
+// TestClaimSendWait_ClaimsWhenTheTurnEnds: the wait ends with the claim as
+// soon as the running turn ends, and with no claim when the process dies or
+// the bound passes.
+func TestClaimSendWait_ClaimsWhenTheTurnEnds(t *testing.T) {
+	var ts turnState
+	ts.state = StateReady
+	ts.transition(evTurnStarted)
+	got := make(chan bool, 1)
+	go func() {
+		_, claimed := ts.claimSendWait(context.Background(), "run-1", time.Minute)
+		got <- claimed
+	}()
+	select {
+	case <-got:
+		t.Fatal("claimSendWait returned while the turn was still running")
+	case <-time.After(50 * time.Millisecond):
+	}
+	ts.transition(evTurnEnded)
+	select {
+	case claimed := <-got:
+		if !claimed || ts.currentRunID() != "run-1" {
+			t.Fatalf("claimed=%v run=%q, want the claim for run-1", claimed, ts.currentRunID())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("claimSendWait did not wake when the turn ended")
+	}
+
+	// Running again (the claim above): a death ends the wait unclaimed.
+	go func() {
+		_, claimed := ts.claimSendWait(context.Background(), "run-2", time.Minute)
+		got <- claimed
+	}()
+	testhelper.Eventually(t, func() bool {
+		ts.mu.RLock()
+		defer ts.mu.RUnlock()
+		return ts.moved != nil
+	}, 5*time.Second, "the second Send never started waiting")
+	ts.transition(evDied)
+	select {
+	case claimed := <-got:
+		if claimed {
+			t.Fatal("claimSendWait claimed a dead process")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("claimSendWait did not wake when the process died")
+	}
+
+	var stuck turnState
+	stuck.state = StateRunning
+	if prev, claimed := stuck.claimSendWait(context.Background(), "run-3", 20*time.Millisecond); claimed || prev != StateRunning {
+		t.Fatalf("claimSendWait past its bound = (%v, %v), want (Running, false)", prev, claimed)
 	}
 }
 

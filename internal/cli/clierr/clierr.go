@@ -118,8 +118,9 @@ var ErrResumeRejected = errors.New("backend rejected the resumed session")
 // could not be brought up, unlike a shim that failed to start.
 var ErrSpawnInit = errors.New("CLI init handshake failed")
 
-// ErrProcessBusy is returned by Send when the legacy (non-passthrough) state
-// machine is already StateRunning; dispatch maps it to "正在处理中".
+// ErrProcessBusy is returned by the legacy (non-passthrough) Send when the
+// turn it waited behind was still running after a whole turn's timeout;
+// dispatch maps it to "正在处理中".
 var ErrProcessBusy = errors.New("process busy")
 
 // Passthrough-mode sentinels (separate block for targeted errors.Is switches).
