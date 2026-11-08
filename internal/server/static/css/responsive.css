@@ -9,6 +9,7 @@
 /* ===== Mobile (≤768px) ===== */
 .btn-mobile-back{display:none}
 @media(max-width:768px){
+  .sb-filter-chip{min-height:36px;padding:4px 14px}
   /* Bottom tab bar (activity-bar) height: .ab-nav 46 + 4 top + bottom safe
      area. Every panel the fixed tab bar overlays reserves this at the bottom
      so chat input / asset list are never covered (the original遮挡 bug). */

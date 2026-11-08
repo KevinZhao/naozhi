@@ -315,6 +315,7 @@ export function debouncedFetchSessions() {
 // header, the empty-state CTA) match by position.
 function sidebarRowKey(el) {
   if (el.classList.contains('session-card')) return 'c:' + (el.dataset.node || 'local') + '\n' + (el.dataset.key || '');
+  if (el.classList.contains('sb-filter')) return 'f';
   if (el.classList.contains('section-header')) {
     const btn = el.querySelector('[data-action="project-collapse"]');
     if (btn) return 'h:' + btn.dataset.key;
@@ -331,7 +332,13 @@ export function renderSidebar(data) {
   bgRowsSig = bgRowsSignature(data, Date.now());
   const list = document.getElementById('session-list');
   // Empty state: the "no sessions" text + the header `+` action.
-  const html = sidebarHtml(buildSidebarItems(data)) || '<div class="no-sessions">no sessions<br><button type="button" class="no-sessions-cta" data-action="session-new">+ 开启你的第一个会话</button></div>';
+  const items = buildSidebarItems(data);
+  const dispatched = items.filter(isDispatched).length;
+  // The filter holds only while there is something to show; with no
+  // dispatched session left the list is the whole list again.
+  const only = sessionList.onlyDispatched && dispatched > 0;
+  const rows = sidebarHtml(only ? items.filter(isDispatched) : items, only);
+  const html = (rows && dispatchFilterHtml(dispatched, only) + rows) || '<div class="no-sessions">no sessions<br><button type="button" class="no-sessions-cta" data-action="session-new">+ 开启你的第一个会话</button></div>';
   // Keyed reconcile: only rows whose markup changed are replaced, so a poll
   // with nothing new touches no DOM, in-place patches (state dot, unread chip,
   // a removed card) compare as they stand, and kept nodes keep the scroll
@@ -385,13 +392,32 @@ function buildSidebarItems(data) {
   return items;
 }
 
+// isDispatched is a session the Planner dispatched (purpose task, §15.1).
+const isDispatched = (s) => s.purpose === 'task';
+
+// dispatchFilterHtml is the chip atop the list that narrows it to the
+// dispatched sessions (only); '' while there are none.
+function dispatchFilterHtml(n, only) {
+  if (!n) return '';
+  return '<div class="sb-filter"><button type="button" class="sb-filter-chip' + (only ? ' on' : '') + '" data-action="sidebar-only-dispatched" aria-pressed="' + only + '" title="' + (only ? '显示全部会话' : '只看 Planner 派出的会话') + '">只看 Planner 派出 <b>' + n + '</b></button></div>';
+}
+
+// toggleOnlyDispatched flips the 派出 filter, kept across reloads, and
+// repaints from the last payload.
+export function toggleOnlyDispatched() {
+  sessionList.onlyDispatched = !sessionList.onlyDispatched;
+  try { localStorage.setItem('nz_sidebarOnlyDispatched', sessionList.onlyDispatched ? '1' : ''); } catch (_) {}
+  if (sessionList.lastSidebarData) renderSidebar(sessionList.lastSidebarData);
+}
+
 // groupSidebarItems buckets the rows by project, keyed by (node, name) so a
 // remote and a local project of the same name stay apart. A fallback group
 // (named after the workspace basename, no registered project) adds the path
 // to its key, so /a/tmp and /b/tmp do not collapse into one mislabeled group.
 // Every favorite project gets a group, empty or not, so its header always
-// renders; with node set only that node's favorites.
-function groupSidebarItems(items, node) {
+// renders; with node set only that node's favorites. Under the 派出 filter
+// (only) a favorite with none of its rows is left out.
+function groupSidebarItems(items, node, only) {
   const groups = {};
   const ungrouped = [];
   items.forEach(s => {
@@ -413,7 +439,7 @@ function groupSidebarItems(items, node) {
     groups[k].items.push(s);
   });
   sessionList.projectsData.forEach(p => {
-    if (!p.favorite) return;
+    if (!p.favorite || only) return;
     const pNode = p.node || 'local';
     if (node && pNode !== node) return;
     const k = pNode + ':' + p.name;
@@ -456,16 +482,17 @@ function sortedGroupKeys(groups, projIndex) {
 // sidebarHtml renders the rows: with more than one node, a group per node
 // (docs/rfc/remote-planner.md §5) — the node the Planner runs on first,
 // then this one, then the others by ID — each holding what a single node
-// lists; with this node alone exactly that, no node header.
-function sidebarHtml(items) {
+// lists; with this node alone exactly that, no node header. Under the 派出
+// filter (only) a node with no row is left out.
+function sidebarHtml(items, only) {
   // Indexed by (node, name) to reach a project's favorite/github flags.
   const projIndex = {};
   sessionList.projectsData.forEach(p => {
     projIndex[(p.node || 'local') + ':' + p.name] = p;
   });
-  if (!isMultiNode()) return nodeBodyHtml(items, projIndex, '');
+  if (!isMultiNode()) return nodeBodyHtml(items, projIndex, '', only);
   const byNode = new Map();
-  for (const id of Object.keys(sessionList.nodesData)) byNode.set(id, []);
+  if (!only) for (const id of Object.keys(sessionList.nodesData)) byNode.set(id, []);
   for (const s of items) {
     const n = s.node || 'local';
     if (!byNode.has(n)) byNode.set(n, []);
@@ -476,7 +503,7 @@ function sidebarHtml(items) {
   return order.map((n) => {
     const rows = byNode.get(n);
     const head = nodeHeaderHtml(n, rows.length, nodeRunsPlanner(n));
-    return sessionList.collapsedProjects.has(NODE_GROUP_PREFIX + n) ? head : head + nodeBodyHtml(rows, projIndex, n);
+    return sessionList.collapsedProjects.has(NODE_GROUP_PREFIX + n) ? head : head + nodeBodyHtml(rows, projIndex, n, only);
   }).join('');
 }
 
@@ -484,22 +511,13 @@ function sidebarHtml(items) {
 // grouped under their project headers, the sessions with no project at all
 // last under 未分组, and a collapsed project as its header alone. An empty
 // favorite group renders its header and no row: the top-right `+` button is
-// the create affordance.
-function nodeBodyHtml(items, projIndex, node) {
-  // The sessions the Planner dispatched (purpose task, §15.1) are one group
-  // of their own, on top.
-  const dispatched = items.filter(s => s.purpose === 'task');
-  if (dispatched.length) items = items.filter(s => s.purpose !== 'task');
-  let html = dispatched.length
-    ? '<div class="section-header"><span class="sh-name">Planner 派出</span></div>' + dispatched.map((s) => sessionCardHtml(s)).join('')
-    : '';
-  const { groups, ungrouped } = groupSidebarItems(items, node);
+// the create affordance. The sessions the Planner dispatched sit in their
+// workspace's group like any other, their card marked 派出.
+function nodeBodyHtml(items, projIndex, node, only) {
+  let html = '';
+  const { groups, ungrouped } = groupSidebarItems(items, node, only);
   const groupKeys = sortedGroupKeys(groups, projIndex);
-  if (groupKeys.length === 0) {
-    // Below the dispatched group the rest needs a header of its own.
-    const rest = items.map((s) => sessionCardHtml(s)).join('');
-    return html + (html && rest ? '<div class="section-header"><span class="sh-name">未分组</span></div>' : '') + rest;
-  }
+  if (groupKeys.length === 0) return items.map((s) => sessionCardHtml(s)).join('');
   let bareHeader = false; // the last row is a header with no rows under it
   groupKeys.forEach(k => {
     const g = groups[k];
@@ -698,12 +716,15 @@ function sessionCardHtml(s, group) {
   // personal 1P or the company Bedrock account?"). Empty for single-auth mode /
   // global default so deployments that don't use profiles see no change.
   const accessProfileChip = accessProfileChipHtml(s.access_profile);
+  // A dispatched session lists in its workspace's group; the chip tells it apart.
+  const dispatchTag = isDispatched(s) ? '<span class="sc-origin kind-planner" title="Planner 派出">派出</span>' : '';
   // The cli icon rides inside the meta line at 18px so the title owns line 1.
   const metaHtml = icon +
     '<span class="sc-dot ' + dot.cls + '" title="' + escAttr(dot.title) + '"></span>' + sessionExitChipHtml(s) +
     nodeBadge +
     originBadge +
     accessProfileChip +
+    dispatchTag +
     typeTag +
     agentBadge + workflowBadgeHtml(s, sNode);
 

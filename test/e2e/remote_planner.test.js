@@ -1,6 +1,7 @@
 // E2E: the Planner of another node (docs/rfc/remote-planner.md). A primary
 // whose own Planner is off shows the Planner of the node advertising one:
-// the session list groups by node, that node first with its "Planner 派出";
+// the session list groups by node, that node first, its dispatched session
+// in its workspace's group;
 // the Planner page reads and writes the node's routes through
 // /api/remote/<node>/, subscribes to the node's planner:main, and a message
 // sent there is dispatched and reported on the node and shown here; the
@@ -87,15 +88,19 @@ for (const vp of VIEWPORTS) {
       await expect(nodes.nth(0).locator('.node-tag')).toHaveText('Planner');
       await expect(nodes.nth(1).locator('.sh-name')).toHaveText('本机 · EC2');
       await expect(nodes.nth(1).locator('.node-tag')).toHaveCount(0);
-      // Under the node, its dispatched session is "Planner 派出".
-      const rows = await list.locator(':scope > *').evaluateAll((els) => els.map((e) =>
+      // Under the node, its dispatched session sits in its workspace's
+      // group (the remote naozhi project), marked 派出.
+      // The 只看 Planner 派出 chip leads the list, above the nodes.
+      await expect(list.locator(':scope > .sb-filter')).toHaveCount(1);
+      const rows = await list.locator(':scope > :not(.sb-filter)').evaluateAll((els) => els.map((e) =>
         e.classList.contains('node-header') ? 'N:' + e.dataset.node
           : e.classList.contains('session-card') ? 'C:' + e.dataset.node + ':' + e.dataset.key
             : 'H:' + (e.querySelector('.sh-name')?.textContent || '')));
       const firstLocal = rows.indexOf('N:local');
       expect(rows[0]).toBe('N:' + NODE);
-      expect(rows[1]).toBe('H:Planner 派出');
+      expect(rows[1]).toBe('H:naozhi');
       expect(rows[2]).toBe('C:' + NODE + ':' + OLD_TASK);
+      await expect(list.locator('.session-card[data-key="' + OLD_TASK + '"] .sc-origin.kind-planner')).toHaveText('派出');
       expect(rows.slice(1, firstLocal).every((r) => !r.startsWith('C:') || r.startsWith('C:' + NODE))).toBe(true);
       expect(rows.slice(firstLocal).every((r) => !r.startsWith('C:') || r.startsWith('C:local'))).toBe(true);
       await page.screenshot({ path: test.info().outputPath('remote-list-' + vp.name + '.png') });
