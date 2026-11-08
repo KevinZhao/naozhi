@@ -1,7 +1,10 @@
 package custody
 
 import (
+	"context"
+	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/planner/note"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
@@ -83,41 +86,81 @@ func (e *Engine) SetWatch(key string, on bool, by string) error {
 	return nil
 }
 
-// Ended is told of each session's turn end (the router's result sink). A
-// watched session's turn that ended with the user away from it (custody's
-// "你在旁边": viewing it, or sent it a message within NearbyFor) and no
-// question left for them is a result: its sidecar's ResultAt, the task
-// card's blue dot until they look. One that ended with them at it is
-// looked at already: a result pending is marked seen. A question left open
-// is 等你 (the health machine's), not a result.
+// endsQueued bounds the turn ends waiting for Run: a burst of sessions
+// ending together, far more than ever end within one sidecar write.
+const endsQueued = 256
+
+// turnEnd is a session's turn end Ended queued, and when it ended.
+type turnEnd struct {
+	key string
+	at  time.Time
+}
+
+// Ended is told of each session's turn end (the router's result sink, on
+// the CLI's read loop). It only queues it for Run: judging it takes the
+// engine's lock, which a delivery holds across its send and its writes.
 func (e *Engine) Ended(key string) {
+	if e.cfg.Sessions == nil || e.cfg.Disabled {
+		return
+	}
+	select {
+	case e.ends <- turnEnd{key: key, at: e.now()}:
+	default:
+		slog.Warn("custody: turn ends queue full; a watched session's result not marked", "key", key)
+	}
+}
+
+// runEnds judges the queued turn ends until ctx ends.
+func (e *Engine) runEnds(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case t := <-e.ends:
+			e.safely(func() { e.ended(t.key, t.at) })
+		}
+	}
+}
+
+// ended judges session key's turn that ended at at. A watched session's
+// turn that ended with the user away from it (custody's "你在旁边": viewing
+// it, or sent it a message within NearbyFor) and no question left for them
+// is a result: its sidecar's ResultAt, the task card's blue dot until they
+// look. One that ended with them at it is looked at already: a result
+// pending is marked seen. A question left open is 等你 (the health
+// machine's), not a result.
+func (e *Engine) ended(key string, at time.Time) {
 	if e.cfg.Sessions == nil || !e.Watched(key) {
 		return
 	}
 	asking := e.cfg.Asking != nil && e.cfg.Asking(key)
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	now := e.now()
+	nearby := e.nearbyLocked(key)
+	e.mu.Unlock()
 	var err error
 	switch {
-	case e.nearbyLocked(key):
+	case nearby:
 		// Most sessions the user is at have no sidecar and nothing to mark.
 		_, err = e.cfg.Sessions.Update(key, func(m *sidecar.Meta) bool {
 			if !m.ResultAt.After(m.SeenAt) {
 				return false
 			}
-			m.SeenAt = now
+			m.SeenAt = e.now()
 			return true
 		})
 	case asking:
 		return
 	default:
 		err = e.cfg.Sessions.Upsert(key, func(m *sidecar.Meta) bool {
-			m.ResultAt = now
+			m.ResultAt = at
 			return true
 		})
 	}
-	if err != nil {
+	switch {
+	case errors.Is(err, sidecar.ErrNewer):
+		// A newer naozhi's sidecar is read only, every turn alike.
+		slog.Debug("custody: watched session's result left to a newer naozhi's sidecar", "key", key)
+	case err != nil:
 		slog.Warn("custody: watched session's result not saved", "key", key, "err", err)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/brief"
 	"github.com/naozhi/naozhi/internal/planner/promise"
@@ -439,6 +440,44 @@ func TestReportWithoutStatusGetsReceipt(t *testing.T) {
 				t.Errorf("told = %q, want %q", g.told, want)
 			}
 		})
+	}
+}
+
+// A session the user opened (你开的, §15.12 ⑥) that messages the Planner
+// is listed in 任务 but is no task of the Planner's: its report gets no
+// receipt telling the Planner to mark it, which would wake it once more.
+func TestYoursReportGetsNoReceipt(t *testing.T) {
+	const chat = "dashboard:direct:u:general"
+	r, g, _, side, _ := newRunner(t)
+	proms := promise.New(promise.Config{})
+	if _, err := proms.Add(promise.Promise{Text: chat + " 聊完后提醒我"}); err != nil {
+		t.Fatal(err)
+	}
+	now := r.last
+	r.cfg.Now = func() time.Time { return now }
+	r.cfg.Promises = proms
+	r.cfg.Tasks = task.New(task.Config{
+		Sessions: side, Promises: proms, Now: func() time.Time { return now },
+		Health: func() health.Snapshot {
+			return health.Snapshot{At: now, Units: []health.Unit{{ID: chat, Kind: health.KindSession, State: health.Active, Since: now}}}
+		},
+		Watched: func(key string) bool { return key == chat },
+	})
+	if i := slices.IndexFunc(r.cfg.Tasks.List(), func(t task.Task) bool { return t.ID == chat }); i < 0 || r.cfg.Tasks.List()[i].Group != task.GroupYours {
+		t.Fatal("the fixture's session is not listed in 你开的")
+	}
+	reportAt := now.Add(time.Second)
+	r.cfg.Reports = func(from, to time.Time) []string {
+		if reportAt.After(from) && !reportAt.After(to) {
+			return []string{chat}
+		}
+		return nil
+	}
+	now = now.Add(2 * time.Second)
+	r.Result(sessionkey.PlannerMainKey, "收到。")
+	r.handle(<-r.ch)
+	if len(g.told) != 0 {
+		t.Errorf("told = %q, want no receipt for a session the user opened", g.told)
 	}
 }
 

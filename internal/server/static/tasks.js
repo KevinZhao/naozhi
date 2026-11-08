@@ -55,7 +55,8 @@
 // Opening the session, expanding its card or 全部已读 marks it read (POST
 // /api/tasks/seen with the IDs; the gateway also marks this node's from the
 // viewing frame, a node's session opened in the 会话 view is posted to its
-// node); the Planner mentioning it does not. A dispatched session's card
+// node, and again as each turn it ends there while you look at it); the
+// Planner mentioning it does not. A dispatched session's card
 // carries its latest report's first sentence ("最新结论", §15.12 ②; a
 // progress report is no conclusion and goes in the status line), and with
 // a digest its title row's chevron (or that line) expands the digest under
@@ -71,7 +72,7 @@ import { NZ_CONTRACT } from './contract.js';
 import { selection, ui } from './state.js';
 import { esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
 import { formatAbsTime, formatMonthDayTime, timeAgo } from './utilities.js';
-import { custody, custodyChipHtml, refreshCustody, statusOf } from './custody.js';
+import { custody, custodyChipHtml, refreshCustody, selectionShown, statusOf } from './custody.js';
 import { isLit, light } from './notify.js';
 import { shell } from './shell.js';
 import { isLocalNode, nodeAPI, plannerAPI, plannerHost } from './planner_host.js';
@@ -550,7 +551,11 @@ let stateHeader = false;
 // is not listed yet comes with the next refresh.
 nzBus.addEventListener('session:state', (e) => {
   const msg = e.detail;
-  if (!msg || typeof msg.key !== 'string' || !(byId.has(msg.key) || msg.key.startsWith('task:'))) return;
+  if (!msg || typeof msg.key !== 'string') return;
+  // The list may not be read (the Planner page never opened): the gateway
+  // marks only what it lists as new.
+  if (msg.state !== 'running') seenRemoteLater(msg.key, msg.node || 'local');
+  if (!(byId.has(msg.key) || msg.key.startsWith('task:'))) return;
   const header = headerTaskKey() === msg.key;
   if (!mounts.size && !header) return;
   stateHeader = stateHeader || header;
@@ -702,6 +707,26 @@ function seenSelected() {
   fetchJSON(nodeAPI(node, NZ_CONTRACT.API.tasks_seen), {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [key] }), timeoutMs: 8000,
   }).catch(() => { /* the user asked for nothing: the dot shows it next time */ });
+}
+
+// SEEN_REMOTE_MS is how long after another node's session ends a turn its
+// gateway is told you saw it: past its marking the result (custody's queue)
+// and the frame's relay; told before, it has nothing new to mark.
+const SEEN_REMOTE_MS = 1500;
+
+// seenRemoteLater tells another node's gateway, a little later, that you saw
+// the result of the turn key just ended there, the 会话 view showing it to
+// you: no viewing frame reaches it, so each turn's end would leave a dot.
+function seenRemoteLater(key, node) {
+  if (isLocalNode(node) || node !== plannerHost.node && !key.startsWith('task:')) return;
+  if (!selectionShown() || selection.key !== key || (selection.node || 'local') !== node) return;
+  setTimeout(() => {
+    if (!selectionShown() || selection.key !== key || (selection.node || 'local') !== node) return;
+    fetchJSON(nodeAPI(node, NZ_CONTRACT.API.tasks_seen), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [key] }), timeoutMs: 8000,
+    }).then(() => { if (node === plannerHost.node && mounts.size) refreshTasks(); })
+      .catch(() => { /* the dot shows it next time */ });
+  }, SEEN_REMOTE_MS);
 }
 
 // digestStamp is what an expanded digest is read again on: a new report,

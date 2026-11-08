@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/ctxutil"
@@ -39,5 +40,24 @@ func TestTitleSkipsCustodyMessages(t *testing.T) {
 		if prompt != "整理周报" {
 			t.Errorf("%s: replayed title = %q, want the user's prompt", tc.name, prompt)
 		}
+	}
+}
+
+// TestLastUserSent: only a message the user sent is theirs; custody, a
+// relay and the Planner's dispatch are not.
+func TestLastUserSent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := &ManagedSession{key: "dashboard:direct:a:general"}
+	for _, src := range []string{clievent.SourceCustody, clievent.SourceRelay, clievent.SourcePlanner} {
+		s.cachePrompt(ctxutil.WithSource(ctx, src), "继续", nil)
+	}
+	if got := s.LastUserSent(); !got.IsZero() {
+		t.Fatalf("after the gateway's messages LastUserSent = %v, want zero", got)
+	}
+	before := time.Now()
+	s.cachePrompt(ctx, "整理周报", nil)
+	if got := s.LastUserSent(); got.Before(before) {
+		t.Errorf("after the user's message LastUserSent = %v, want ≥ %v", got, before)
 	}
 }

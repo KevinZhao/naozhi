@@ -20,6 +20,7 @@ type yoursRig struct {
 	units    []health.Unit
 	off      map[string]bool
 	lastUser map[string]time.Time
+	live     map[string]Live
 	states   []string // OnState calls
 }
 
@@ -33,7 +34,8 @@ const (
 
 func newYoursRig(t *testing.T) *yoursRig {
 	t.Helper()
-	r := &yoursRig{now: t0, off: map[string]bool{yOff: true}, lastUser: map[string]time.Time{}}
+	r := &yoursRig{now: t0, off: map[string]bool{yOff: true}, lastUser: map[string]time.Time{},
+		live: map[string]Live{yDash: {Running: true, Activity: "Bash  go\ntest", LastActive: t0.Add(-time.Minute)}}}
 	clock := func() time.Time { return r.now }
 	r.sc = sidecar.Open(t.TempDir(), clock)
 	if err := r.sc.Put(sidecar.Meta{Key: "task:aaaaaaaaaaaa", Purpose: sidecar.PurposeTask, Title: "派出的", Created: t0.Add(-time.Hour)}); err != nil {
@@ -57,10 +59,14 @@ func newYoursRig(t *testing.T) *yoursRig {
 			// custody's: this node's sessions the user opened, switch on.
 			return key != "cron:nightly" && key != "dashboard:direct:r:general" && !r.off[key]
 		},
-		Name:     func(key string) string { return "名字 " + key },
-		LastUser: func(key string) time.Time { return r.lastUser[key] },
+		Name:      func(key string) string { return "名字 " + key },
+		UserSince: func(key string, at time.Time) bool { return r.lastUser[key].After(at) },
 		Live: func() map[string]Live {
-			return map[string]Live{yDash: {Running: true, Activity: "Bash  go\ntest", LastActive: t0.Add(-time.Minute)}}
+			out := map[string]Live{}
+			for k, l := range r.live {
+				out[k] = l
+			}
+			return out
 		},
 		OnState: func(key string, st State) { r.states = append(r.states, key+"="+string(st)) },
 	})
@@ -177,6 +183,25 @@ func TestYoursMarkThenTalk(t *testing.T) {
 	}
 	if len(r.states) != 0 {
 		t.Errorf("OnState = %v", r.states)
+	}
+}
+
+// A session the user opened, marked done, that custody or a relay keeps
+// going (no message of the user's, so the mark holds) stays listed a day
+// past its last activity, not the mark.
+func TestYoursDoneArchivedByActivity(t *testing.T) {
+	r := newYoursRig(t)
+	if err := r.b.Set(yDash, Done, ByPlanner, "PR 合了"); err != nil {
+		t.Fatal(err)
+	}
+	r.live[yDash] = Live{LastActive: t0.Add(20 * time.Hour)}
+	r.now = t0.Add(Archive + time.Minute)
+	if d, ok := r.yours()[yDash]; !ok || d.State != Done {
+		t.Errorf("a day after the mark, active since: %+v (%v), want still listed done", d, ok)
+	}
+	r.now = t0.Add(20*time.Hour + Archive)
+	if _, ok := r.yours()[yDash]; ok {
+		t.Error("a day after its last activity: still listed")
 	}
 }
 

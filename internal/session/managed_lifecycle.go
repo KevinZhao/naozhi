@@ -145,6 +145,15 @@ func (s *ManagedSession) LastActive() time.Time {
 	return time.Unix(0, s.lastActive.Load())
 }
 
+// LastUserSent is when the user last sent the session a message this run
+// (not custody, the Planner or a relay), zero for none.
+func (s *ManagedSession) LastUserSent() time.Time {
+	if ns := s.lastUser.Load(); ns != 0 {
+		return time.Unix(0, ns)
+	}
+	return time.Time{}
+}
+
 // touchLastActive updates the last active timestamp: when a turn starts and
 // when one ends, whoever started it. It is not the user's message: custody's
 // "you are nearby" and its loop guard read the user's entries in the event

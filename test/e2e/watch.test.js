@@ -9,7 +9,9 @@
 // session header has 观察 beside the custody chip (not on a dispatched
 // session): a click turns it off through PUT /api/custody {key, watch}, a
 // toast saying what that means, and the card leaves 你开的; the Planner
-// turning it off is a note in the session.
+// turning it off is a note in the session. 观察 shows once GET
+// /api/custody is read (only the list tells it off). Another node's
+// session you look at is told seen there as each turn ends.
 const fs = require('fs');
 const path = require('path');
 const { test, expect } = require('@playwright/test');
@@ -199,3 +201,70 @@ for (const [name, opts] of VIEWPORTS) {
     }
   });
 }
+
+// 观察's off is told only by GET /api/custody's list: before it is read
+// (or with it failing) the header has no 观察, rather than one reading 开
+// that a click could only turn off.
+test('观察 waits for the custody list', async ({ browser }) => {
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const page = await ctx.newPage();
+  const mock = await server(tasks(), { custody: undefined });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await openSession(page, mock, A, [{ type: 'text', detail: 'iso 压测跑着', time: now - 20000, uuid: 'w-l1' }]);
+    await expect(page.locator('#events-scroll')).toContainText('iso 压测跑着');
+    await expect(page.locator('#header-custody .watch-chip')).toHaveCount(0);
+  } finally {
+    await ctx.close();
+    await mock.server.close();
+  }
+});
+
+// The Planner on another node (D97): a session of that node you opened, in
+// the 会话 view, reaches its gateway with no viewing frame. Each turn it
+// ends while you look at it, the node is told you saw it, so its card gets
+// no dot that only opening it again would clear; one you are not at is not.
+test('a node: a turn ending while you look is seen there', async ({ browser }) => {
+  test.setTimeout(60000);
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const page = await ctx.newPage();
+  const NODE = 'pc';
+  const MINE = 'dashboard:direct:2026-01-01-120009-9:mbp';
+  const s = sessions();
+  s.sessions.push({ key: MINE, node: NODE, state: 'ready', platform: 'dashboard', agent: 'general', cli_name: 'claude', user_label: 'iso MBP 上聊的',
+    workspace: '/Users/me/workspace/naozhi', last_active: now - 60000, created_at: now - 90000 });
+  s.nodes = { local: { display_name: 'EC2', status: 'ok' }, [NODE]: { display_name: 'MBP', status: 'ok', caps: ['files', 'planner', 'subscribe-history'] } };
+  const remoteTasks = { tasks: [{ id: MINE, kind: 'session', group: 'yours', title: 'iso MBP 上聊的', state: 'doing', at: iso(now - 60000), health: 'active', health_since: iso(now - 60000) }] };
+  const mock = await startMockServer({
+    ws: true, sessions: s, tasks: tasks(), plannerEvents: [], inbox: { open: [], closed: [], counts: { open: 0, badge: 0 } },
+    planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
+    custody: { paused: false, sessions: [] },
+    remote: { [NODE]: { planner: { enabled: true, stopped: false, key: PLANNER, alive: true }, tasks: remoteTasks, inbox: { open: [], closed: [], counts: { open: 0, badge: 0 } }, custody: { paused: false, sessions: [] }, events: { [PLANNER]: [] } } },
+  });
+  const seenOnNode = () => mock.remoteCalls.filter((c) => c.method === 'POST' && c.path === '/api/tasks/seen').map((c) => c.body);
+  const frame = (state) => { for (const c of mock.wsConnections) c.send({ type: 'session_state', key: MINE, node: NODE, state }); };
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await page.click('#abnav-planner');
+    await page.locator('#pl-host select').selectOption(NODE);
+    await expect(card(page, MINE)).toBeVisible();
+    await page.click('#abnav-chat');
+    await page.locator('.session-card[data-key="' + MINE + '"][data-node="' + NODE + '"]').click();
+    // Nothing new when opened: nothing told.
+    frame('running');
+    frame('ready');
+    await expect.poll(seenOnNode).toEqual([{ ids: [MINE] }]);
+    expect(mock.tasksSeenCalls).toEqual([]);
+
+    // Another session shown: its turn ending is not seen.
+    await page.evaluate((k) => window.nz.test.selectSession(k, 'local'), A);
+    frame('ready');
+    await page.waitForTimeout(2500);
+    expect(seenOnNode()).toEqual([{ ids: [MINE] }]);
+  } finally {
+    await ctx.close();
+    await mock.server.close();
+  }
+});

@@ -2,6 +2,7 @@ package wireup
 
 import (
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -89,5 +90,41 @@ func TestCustodyAsking(t *testing.T) {
 	c := CustodySources{Router: r}
 	if !c.Asking("dashboard:direct:a:general") || c.Asking("dashboard:direct:b:general") || c.Asking("dashboard:direct:gone:general") {
 		t.Error("Asking: want only the session left asking")
+	}
+}
+
+// Keys asks custody's switch, which reads the router, only after its visit:
+// asked inside it, a second read lock queued behind a writer waiting on the
+// visit's would hang the router for good.
+func TestDigestKeysOutsideVisit(t *testing.T) {
+	r := newDigestRouter(t)
+	const chat = "dashboard:direct:u:general"
+	r.InjectSession(chat, session.NewTestProcess())
+	var once sync.Once
+	src := DigestSources{Router: r, Watched: func(key string) bool {
+		once.Do(func() {
+			// A writer arrives while Keys runs, as a spawn or a shim
+			// reattaching does; give it time to queue on the lock.
+			wrote := make(chan struct{})
+			go func() {
+				r.InjectSession("dashboard:direct:v:general", session.NewTestProcess())
+				close(wrote)
+			}()
+			select {
+			case <-wrote:
+			case <-time.After(50 * time.Millisecond):
+			}
+		})
+		return r.SessionFor(key) != nil // custody.Engine.Watched's Local
+	}}
+	done := make(chan []string, 1)
+	go func() { done <- src.Keys() }()
+	select {
+	case keys := <-done:
+		if !slices.Contains(keys, chat) {
+			t.Errorf("keys = %v, want %s", keys, chat)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Keys hung: the switch was asked inside the router's visit")
 	}
 }

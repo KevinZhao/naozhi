@@ -245,6 +245,8 @@ type Config struct {
 type Engine struct {
 	cfg  Config
 	poke chan struct{}
+	// ends are the turn ends Ended queued for Run (watch.go).
+	ends chan turnEnd
 
 	// mu serializes custody's decisions and its sidecar writes.
 	mu sync.Mutex
@@ -280,7 +282,7 @@ func New(cfg Config) *Engine {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	e := &Engine{cfg: cfg, poke: make(chan struct{}, 1), viewing: map[string]map[string]time.Time{}, deferred: map[string]bool{},
+	e := &Engine{cfg: cfg, poke: make(chan struct{}, 1), ends: make(chan turnEnd, endsQueued), viewing: map[string]map[string]time.Time{}, deferred: map[string]bool{},
 		asks: map[string]*askWait{}, faulted: map[string]bool{}}
 	if cfg.Path != "" {
 		st, out, err := jsonfile.Load[state](cfg.Path, jsonfile.Options{MaxBytes: stateBytes, Label: "custody state", Corrupt: jsonfile.LeaveCorrupt})
@@ -333,6 +335,7 @@ func (e *Engine) inFault(key string) bool {
 
 // Run ticks until ctx ends.
 func (e *Engine) Run(ctx context.Context) {
+	go e.runEnds(ctx)
 	t := time.NewTicker(tickInterval)
 	defer t.Stop()
 	for {

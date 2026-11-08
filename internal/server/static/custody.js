@@ -12,9 +12,9 @@
 // Beside the chip is 观察 (§15.12 ⑥, D104), a second switch: the gateway
 // observing a session you opened (its digest, its card in 任务's 你开的)
 // sends nothing, so it is on by default; GET /api/custody lists, besides
-// the sessions in custody, those with it turned off, and PUT /api/custody
-// {key, watch} switches it. A dispatched session is a task already: no
-// switch there.
+// the sessions in custody, those with it turned off (so the switch shows
+// once the list is read), and PUT /api/custody {key, watch} switches it. A
+// dispatched session is a task already: no switch there.
 //
 // It also tells the gateway which session you are at: a viewing frame names
 // the session this tab has open while the tab is visible and focused ('' for
@@ -73,6 +73,7 @@ export const custody = {
   byKey: new Map(), // key → custody.Status of the sessions in custody or with 观察 off
   loading: null,
   readAt: 0, // when GET /api/custody was last read
+  listed: false, // byKey holds a list read (the Planner node's): 观察's state is known
 };
 
 // The session this tab last reported it is at, and when.
@@ -157,7 +158,9 @@ export function paintCustodyChip() {
   const el = document.getElementById('header-custody');
   if (!el) return;
   const { key, node } = selection;
-  const html = (coverable(key, node) ? custodyChipHtml(key, true) : '') + (watchable(key, node) ? watchChipHtml(key) : '');
+  // 观察 waits for a list read: off is told only by the list, so before
+  // it every session would read 开 and a click could only turn it off.
+  const html = (coverable(key, node) ? custodyChipHtml(key, true) : '') + (custody.listed && watchable(key, node) ? watchChipHtml(key) : '');
   if (el.innerHTML !== html) el.innerHTML = html;
 }
 
@@ -176,7 +179,10 @@ async function plannerEnabled() {
 function noteList(res) {
   custody.paused = !!res?.paused;
   custody.pausedAt = res?.paused_at ? Date.parse(res.paused_at) || 0 : 0;
-  if (Array.isArray(res?.sessions)) custody.byKey = new Map(res.sessions.filter((s) => s && s.key).map((s) => [s.key, s]));
+  if (Array.isArray(res?.sessions)) {
+    custody.byKey = new Map(res.sessions.filter((s) => s && s.key).map((s) => [s.key, s]));
+    custody.listed = true;
+  }
 }
 
 // refreshCustody reads GET /api/custody again; one read at a time.
@@ -249,7 +255,8 @@ async function toggleWatch(el) {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, watch }), timeoutMs: 8000,
     });
     if (res && res.key) custody.byKey.set(res.key, res);
-    showToast(watchToast(watch), 'success', 4000);
+    // The gateway's answer is what it is now.
+    showToast(watchToast(res && typeof res.watch === 'boolean' ? res.watch : watch), 'success', 4000);
   } catch (e) {
     showToast((watch ? '没有打开观察：' : '没有关掉观察：') + failText(e), 'error');
   }
@@ -276,6 +283,16 @@ function viewedKey() {
     key = document.getElementById('pl-sess')?.dataset.key || '';
   }
   return key && !isDiscoveredKey(key) ? key : '';
+}
+
+// selectionShown reports whether this tab shows you the 会话 view's
+// selected session now, as viewedKey judges it, whatever its node: another
+// node's gets no viewing frame, so its gateway cannot tell (tasks.js tells
+// it of the results you saw).
+export function selectionShown() {
+  if (document.visibilityState !== 'visible' || !document.hasFocus()) return false;
+  if (ui.activeView !== 'chat' || !selection.key) return false;
+  return !(isMobile() && !document.body.classList.contains('mobile-chat-view'));
 }
 
 // reportViewing sends a viewing frame when what this tab shows changed, or
@@ -389,6 +406,7 @@ nzBus.addEventListener('custody:changed', paintCustodyChip);
 nzBus.addEventListener('planner:node', () => {
   custody.enabled = null;
   custody.byKey = new Map();
+  custody.listed = false;
   custody.paused = false;
   refreshCustody();
 });

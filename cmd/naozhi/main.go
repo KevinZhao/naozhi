@@ -524,18 +524,18 @@ func main() {
 	// health, the Planner's status blocks and the user, who can stop a
 	// dispatched session.
 	tasks := task.New(task.Config{
-		Sessions: sidecars,
-		Promises: promises,
-		Health:   func() health.Snapshot { return healthMon.Snapshot() },
-		Journal:  plannerState.Journal,
-		Stop:     wireup.StopTask(router, func(key string) { srv.DropPlannerQueue(key) }, plannerAgent.Tell),
-		OnState:  func(key string, st task.State) { reaper.OnState(key, st) },
-		ReapWait: func(key string) (string, time.Time) { return reaper.Wait(key) },
-		Live:     wireup.TaskLive(router),
-		Digest:   func(key string) bool { return digests.Path(key) != "" },
-		Watched:  watched,
-		Name:     unitNames,
-		LastUser: sources.LastUser,
+		Sessions:  sidecars,
+		Promises:  promises,
+		Health:    func() health.Snapshot { return healthMon.Snapshot() },
+		Journal:   plannerState.Journal,
+		Stop:      wireup.StopTask(router, func(key string) { srv.DropPlannerQueue(key) }, plannerAgent.Tell),
+		OnState:   func(key string, st task.State) { reaper.OnState(key, st) },
+		ReapWait:  func(key string) (string, time.Time) { return reaper.Wait(key) },
+		Live:      wireup.TaskLive(router),
+		Digest:    func(key string) bool { return digests.Path(key) != "" },
+		Watched:   watched,
+		Name:      unitNames,
+		UserSince: sources.UserSince,
 	})
 	briefer := brief.New(brief.Config{
 		Journal: plannerState.Journal,
@@ -777,7 +777,8 @@ func main() {
 	resultSink := func(key, text string) {
 		actions.Result(key, text)
 		// A watched session's turn ending with the user away is a result
-		// for them (§15.12 ⑥), custody's "你在旁边" judging the away.
+		// for them (§15.12 ⑥), custody's "你在旁边" judging the away; only
+		// queued here, on the read loop.
 		custodian.Ended(key)
 		srv.PlannerResult(key)
 	}

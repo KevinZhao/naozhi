@@ -271,6 +271,11 @@ type ManagedSession struct {
 	// lastPrompt caches the most recent user message summary (atomic for lock-free Snapshot reads).
 	lastPrompt atomic.Pointer[string]
 
+	// lastUser is when the user last sent a message (time.UnixNano; zero
+	// for none this run): not custody, the Planner or a relay. The event
+	// log's tail cannot say it once a long turn pushed the message out.
+	lastUser atomic.Int64
+
 	// lastActivity caches the most recent tool_use/thinking summary.
 	lastActivity atomic.Pointer[string]
 

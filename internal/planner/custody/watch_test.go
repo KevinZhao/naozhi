@@ -1,12 +1,20 @@
 package custody
 
 import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/sessionkey"
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // Observing is on by default for this node's sessions the user opened (a
@@ -115,7 +123,7 @@ func TestEndedMarksResult(t *testing.T) {
 	r.dispatch("task:a")
 
 	// The user is away: a result, and a sidecar to hold it.
-	r.e.Ended(dash)
+	r.e.ended(dash, r.now)
 	m, ok := r.sessions.Get(dash)
 	if !ok || !m.ResultAt.Equal(r.now) || m.Purpose != "" || m.Custody != nil {
 		t.Fatalf("sidecar %+v (%v), want ResultAt now, nothing else set", m, ok)
@@ -124,7 +132,7 @@ func TestEndedMarksResult(t *testing.T) {
 	// Sent it a message a minute ago: at it, the result is seen.
 	r.now = r.now.Add(10 * time.Minute)
 	r.lastUser[dash] = r.now.Add(-time.Minute)
-	r.e.Ended(dash)
+	r.e.ended(dash, r.now)
 	m, _ = r.sessions.Get(dash)
 	if !m.SeenAt.Equal(r.now) || m.ResultAt.After(m.SeenAt) {
 		t.Errorf("at it: ResultAt %v SeenAt %v, want the result seen now", m.ResultAt, m.SeenAt)
@@ -134,7 +142,7 @@ func TestEndedMarksResult(t *testing.T) {
 	// Viewing it, nothing pending: nothing written.
 	r.now = r.now.Add(10 * time.Minute)
 	r.e.SetViewing(dash, "tab1", true)
-	r.e.Ended(dash)
+	r.e.ended(dash, r.now)
 	if m, _ = r.sessions.Get(dash); !m.SeenAt.Equal(seen) {
 		t.Errorf("viewing with nothing new: SeenAt %v, want %v kept", m.SeenAt, seen)
 	}
@@ -143,7 +151,7 @@ func TestEndedMarksResult(t *testing.T) {
 	// Away, with a question left for the user: 等你, not a result.
 	r.now = r.now.Add(10 * time.Minute)
 	r.asking[dash] = true
-	r.e.Ended(dash)
+	r.e.ended(dash, r.now)
 	if m, _ = r.sessions.Get(dash); m.ResultAt.After(seen) {
 		t.Errorf("asking: ResultAt %v, want no result", m.ResultAt)
 	}
@@ -156,7 +164,7 @@ func TestEndedMarksResult(t *testing.T) {
 	}
 	for _, key := range []string{im, "task:a", sessionkey.PlannerMainKey, "cron:nightly", "remote/" + dash} {
 		before, _ := r.sessions.Get(key)
-		r.e.Ended(key)
+		r.e.ended(key, r.now)
 		if after, _ := r.sessions.Get(key); !after.ResultAt.Equal(before.ResultAt) {
 			t.Errorf("Ended(%s) wrote ResultAt %v", key, after.ResultAt)
 		}
@@ -166,7 +174,7 @@ func TestEndedMarksResult(t *testing.T) {
 	}
 
 	// Away again: a new result.
-	r.e.Ended(dash)
+	r.e.ended(dash, r.now)
 	if m, _ = r.sessions.Get(dash); !m.ResultAt.Equal(r.now) || !m.ResultAt.After(m.SeenAt) {
 		t.Errorf("away again: ResultAt %v SeenAt %v, want a new result now", m.ResultAt, m.SeenAt)
 	}
@@ -181,4 +189,66 @@ func chats(l []Status) []Status {
 		}
 	}
 	return out
+}
+
+// Ended runs on a CLI's read loop: it queues the turn end and returns while
+// a delivery holds the engine's lock, and Run's worker marks the result
+// with the time the turn ended. With the Planner off nothing is queued.
+func TestEndedQueues(t *testing.T) {
+	r := newRig(t)
+	ended := r.now
+	r.e.mu.Lock()
+	done := make(chan struct{})
+	go func() { r.e.Ended(dash); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		r.e.mu.Unlock()
+		t.Fatal("Ended waited on the engine's lock")
+	}
+	r.e.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go r.e.runEnds(ctx)
+	testhelper.Eventually(t, func() bool {
+		m, ok := r.sessions.Get(dash)
+		return ok && m.ResultAt.Equal(ended)
+	}, 5*time.Second, "the queued turn end never marked a result")
+
+	r.e.cfg.Disabled = true
+	r.e.Ended(dash)
+	if n := len(r.e.ends); n != 0 {
+		t.Errorf("Planner off: %d turn ends queued", n)
+	}
+}
+
+// A watched session whose sidecar a newer naozhi wrote is left alone, and
+// quietly: its every turn end would warn otherwise.
+func TestEndedNewerSidecar(t *testing.T) {
+	r := newRig(t)
+	if err := os.MkdirAll(filepath.Join(r.dir, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	newer := filepath.Join(r.dir, "sessions", sidecarName(dash))
+	if err := os.WriteFile(newer, []byte(`{"v":99,"key":"`+dash+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.open()
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+	r.e.ended(dash, r.now)
+	if logs.Len() != 0 {
+		t.Errorf("warned: %s", logs.String())
+	}
+	if data, _ := os.ReadFile(newer); !strings.Contains(string(data), `"v":99`) || strings.Contains(string(data), "result_at") {
+		t.Errorf("newer sidecar rewritten: %s", data)
+	}
+}
+
+// sidecarName is the sidecar file of key (planner/sidecar's naming).
+func sidecarName(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:]) + ".json"
 }

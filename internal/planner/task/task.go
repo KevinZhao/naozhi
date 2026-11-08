@@ -184,9 +184,10 @@ type Config struct {
 	Watched func(key string) bool
 	// Name is how the user reads session key, a watched one's title.
 	Name func(key string) string
-	// LastUser is when the user last sent session key a message (zero for
-	// never): a watched session's mark from before it no longer holds.
-	LastUser func(key string) time.Time
+	// UserSince reports whether the user sent session key a message after
+	// t: a watched session's mark from before it no longer holds. nil
+	// says never.
+	UserSince func(key string, t time.Time) bool
 	// Now is the wall clock; nil is time.Now.
 	Now func() time.Time
 }
@@ -236,10 +237,9 @@ func sessionState(m sidecar.Meta, h health.Unit) (State, By, string, time.Time) 
 
 // yoursState is a watched session's task state by its health unit u: 等你
 // or 失败 as health says, else 进行中. A mark holds over that as over a
-// dispatched session's, and only while it is no older than the user's last
-// message to it (lastUser): marked done, then talked to, it is in progress
-// again.
-func yoursState(m sidecar.Meta, u health.Unit, lastUser func() time.Time) (State, By, string, time.Time) {
+// dispatched session's, and only while the user sent it nothing since
+// (userSince): marked done, then talked to, it is in progress again.
+func yoursState(m sidecar.Meta, u health.Unit, userSince func(time.Time) bool) (State, By, string, time.Time) {
 	st, by, why, at := Doing, By(""), "", u.Since
 	switch u.State {
 	case health.Waiting:
@@ -247,7 +247,7 @@ func yoursState(m sidecar.Meta, u health.Unit, lastUser func() time.Time) (State
 	case health.Failed:
 		st, by, why = Failed, ByHealth, u.Evidence
 	}
-	if mk := m.Mark; mk != nil && (State(mk.State) != Doing || by == "" || !mk.At.Before(at)) && !mk.At.Before(lastUser()) {
+	if mk := m.Mark; mk != nil && (State(mk.State) != Doing || by == "" || !mk.At.Before(at)) && !userSince(mk.At) {
 		return State(mk.State), By(mk.By), mk.Why, mk.At
 	}
 	return st, by, why, at
@@ -283,11 +283,17 @@ func archived(t Task, now time.Time) bool {
 }
 
 // archivedYours reports whether watched session t is to leave the list:
-// done Archive ago, or idle (health's) for Archive.
+// done Archive ago, or idle (health's) for Archive. Done counts from its
+// last activity when later: custody or a relay may keep it going after the
+// mark, which only the user's own message takes back.
 func archivedYours(t Task, now time.Time) bool {
 	switch {
 	case t.State == Done:
-		return now.Sub(t.At) >= Archive
+		from := t.At
+		if t.Live != nil && t.Live.LastActive.After(from) {
+			from = t.Live.LastActive
+		}
+		return now.Sub(from) >= Archive
 	case t.State == Doing && t.Health == health.Idle:
 		return now.Sub(t.HealthSince) >= Archive
 	}
@@ -398,7 +404,7 @@ func (b *Board) yours(units map[string]health.Unit, live map[string]Live, now ti
 			l.Activity, l.Reply = oneLine(l.Activity), oneLine(l.Reply)
 			t.Live = &l
 		}
-		t.State, t.By, t.Why, t.At = yoursState(m, u, b.lastUser(u.ID))
+		t.State, t.By, t.Why, t.At = yoursState(m, u, b.userSince(u.ID))
 		if archivedYours(t, now) {
 			continue
 		}
@@ -419,13 +425,10 @@ func (b *Board) name(key string) string {
 	return key
 }
 
-// lastUser is LastUser for key, read only when a mark asks.
-func (b *Board) lastUser(key string) func() time.Time {
-	return func() time.Time {
-		if b.cfg.LastUser == nil {
-			return time.Time{}
-		}
-		return b.cfg.LastUser(key)
+// userSince is UserSince for key, read only when a mark asks.
+func (b *Board) userSince(key string) func(time.Time) bool {
+	return func(t time.Time) bool {
+		return b.cfg.UserSince != nil && b.cfg.UserSince(key, t)
 	}
 }
 
@@ -635,7 +638,7 @@ func (b *Board) seen(key string, u health.Unit, now time.Time) (bool, error) {
 			return true
 		})
 	case b.watched(key):
-		last := b.lastUser(key)
+		last := b.userSince(key)
 		err = b.cfg.Sessions.Upsert(key, func(m *sidecar.Meta) bool {
 			st, by, _, at := yoursState(*m, u, last)
 			if !isNew(resultTime(*m, st, by, at), m.SeenAt) {
