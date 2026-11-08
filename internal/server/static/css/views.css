@@ -247,6 +247,16 @@ body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
 .pl-card-why{margin-top:2px;color:var(--nz-text-mute);font-size:var(--nz-fs-xs);word-break:break-word;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden}
 .pl-card-meta{margin-top:4px;color:var(--nz-text-dim);font-size:var(--nz-fs-xs);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pl-card-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+/* The Planner's own question in the left column (UX review 9): one line
+   to the conversation's end, where it is answered; a phone keeps the card. */
+.pl-card-ref{display:none}
+@media(min-width:769px){
+  .pl-card-mine{padding:6px 10px}
+  .pl-card-mine>.pl-card-full{display:none}
+  .pl-card-mine>.pl-card-ref{display:flex;align-items:center;gap:8px;min-width:0}
+}
+.pl-card-ref-t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:var(--nz-text-strong)}
+.pl-card-ref .pl-link{flex-shrink:0;font-size:var(--nz-fs-xs)}
 .pl-link{background:none;border:0;padding:0;font:inherit;color:var(--nz-accent);cursor:pointer}
 .pl-link:hover{text-decoration:underline}
 .pl-btn{padding:3px 10px;border-radius:var(--nz-radius-ms);border:1px solid var(--nz-border);background:var(--nz-bg-0);color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-xs);cursor:pointer}
@@ -296,6 +306,11 @@ body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
 .pl-cards{margin:4px 24px 14px;max-width:560px;display:flex;flex-direction:column;gap:8px}
 .pl-cards[hidden]{display:none}
 .pl-cards-h{font-size:var(--nz-fs-xs);font-weight:600;color:var(--nz-text-mute)}
+/* 要你决定 N in the headers: the questions at the conversation's end. An
+   accent outline, not red (the badge is the one red count, D91). */
+.pl-pin{flex-shrink:0;padding:1px 9px;border:1px solid var(--nz-accent);border-radius:var(--nz-radius-pill);background:none;color:var(--nz-accent);font-family:inherit;font-size:var(--nz-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer}
+.pl-pin:hover{background:var(--nz-bg-2)}
+.pl-pin[hidden]{display:none}
 .pl-composer{flex-shrink:0;border-top:1px solid var(--nz-border)}
 .pl-composer[hidden]{display:none}
 /* The input box, the cards in the conversation, and a session card opened
@@ -351,6 +366,37 @@ body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
 .pl-act-why{font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
 .pl-act-link{margin-top:4px;font-size:var(--nz-fs-xs)}
 .pl-act-raw{max-height:200px;overflow:auto;margin:6px 0 0;padding:6px 8px;border-radius:var(--nz-radius-sm);background:var(--nz-bg-0);font-family:var(--nz-font-mono);font-size:var(--nz-fs-xs);white-space:pre-wrap;word-break:break-all}
+/* A dispatch is one line (派出 · 标题 · 工作区 · 目标, the goal cut to the
+   width), its rows in the fold (§15.12 ⑤). */
+.pl-act-dispatch>summary{display:block;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;list-style:none}
+.pl-act-dispatch>summary::-webkit-details-marker{display:none}
+.pl-act-dispatch>summary::before{content:"";display:inline-block;width:0;height:0;margin:0 7px 1px 1px;border-left:5px solid currentColor;border-top:4px solid transparent;border-bottom:4px solid transparent;transition:transform var(--nz-dur) var(--nz-ease)}
+.pl-act-dispatch[open]>summary::before{transform:rotate(90deg)}
+.pl-act-dispatch[open]>summary{margin-bottom:6px;white-space:normal}
+.pl-act-dispatch>summary:hover .pl-act-k{color:var(--nz-accent)}
+.pl-act-goal{color:var(--nz-text)}
+/* A task's done / failed is a line, its reason in the tooltip. */
+.pl-act-line{padding:4px 12px;font-size:var(--nz-fs-sm);color:var(--nz-text-mute)}
+.pl-act-line .pl-act-name{font-weight:600;color:var(--nz-text-strong)}
+.pl-act-mark{display:inline-block;width:1em;text-align:center;font-weight:700}
+.pl-st-done .pl-act-mark{color:var(--nz-green)}
+/* A reply that was only a status 进行中 (planner_cards.js): no empty bubble;
+   the next reply keeps the robot the hidden one would have shown. */
+.pl-events .event.pl-ev-empty{display:none}
+.pl-events .event.text.pl-ev-empty + .event.text .event-icon{visibility:visible}
+.pl-events .event.text:not(.pl-ev-empty) + .event.text.pl-ev-empty + .event.text .event-icon{visibility:hidden}
+/* A session's report (📨 名字 汇报：…) is the gateway's line that opens its
+   任务 card. */
+.pl-report{max-width:100%;padding:2px 6px;border:0;border-radius:var(--nz-radius-sm);background:none;color:inherit;font:inherit;text-align:center;cursor:pointer;overflow-wrap:anywhere}
+.pl-report:hover{background:var(--nz-bg-2);color:var(--nz-text)}
+.pl-report .pl-report-name{color:var(--nz-text-strong);font-weight:600}
+/* A session's SendMessage folds to its sender and first sentence. */
+.pl-peer>summary{list-style:none;cursor:pointer;display:flex;align-items:baseline;gap:6px;min-width:0}
+.pl-peer>summary::-webkit-details-marker{display:none}
+.pl-peer>summary .peer-source{flex-shrink:0;margin:0}
+.pl-peer-first{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pl-peer[open] .pl-peer-first{display:none}
+.pl-peer-body{margin-top:4px}
 /* The conversation's bubbles: yours stands right without the ">_" avatar,
    and a Planner reply that follows another goes on under the same robot. A
    table's short headers stay one line and its cells keep a few characters'

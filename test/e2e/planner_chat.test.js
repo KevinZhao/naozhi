@@ -107,19 +107,29 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     await expect(reply.locator('.pl-scards .pl-scard')).toHaveCount(2);
     await expect(reply).toContainText('hello world在等你回复，iso 周报 还没开始，hello world（名字 hw）先等等，两个都在 myproject。');
     await expect(reply).not.toContainText(SESSION);
+    // Folded to one line (§15.12 ⑤): 派出 · title · workspace · its message's
+    // first sentence (this block gives no goal); the rows unfold.
     const dispatch = reply.locator('.pl-act-dispatch').first();
-    await expect(dispatch.locator('.pl-act-h')).toHaveText('派出会话 · iso 整理周报');
-    await expect(dispatch).toContainText('把本周合并的 PR 整理成周报');
+    await expect(dispatch.locator('.pl-act-h')).toHaveText('派出 · iso 整理周报 · naozhi · 把本周合并的 PR 整理成周报');
+    await expect(dispatch).not.toHaveAttribute('open', '');
+    await expect(dispatch.locator('.pl-act-rows')).toBeHidden();
+    await dispatch.locator('summary').click();
+    await expect(dispatch.locator('.pl-act-rows dt')).toHaveText(['工作区', '模型', '第一条消息']);
+    await expect(dispatch.locator('.pl-act-rows dd').last()).toBeVisible();
+    await expect(dispatch.locator('.pl-act-rows dd').last()).toHaveText('把本周合并的 PR 整理成周报');
+    await dispatch.locator('summary').click();
+    await expect(dispatch.locator('.pl-act-rows')).toBeHidden();
     await expect(dispatch).not.toContainText('可在"任务"里停止');
     await expect(reply.locator('.pl-act-dispatch button')).toHaveCount(0);
     await expect(reply.locator('.pl-act-bad .pl-act-h')).toHaveText('看不懂的动作块');
     await expect(reply.locator('.pl-act-promise')).toContainText('iso 周五前提醒你看周报');
-    // The Planner's judgment of a task (§15.4 status).
-    await expect(reply.locator('.pl-act-status .pl-act-h')).toHaveText('Planner 判断 · 已完成');
-    await expect(reply.locator('.pl-act-status')).toContainText('iso 它汇报周报写好了');
-    // Its task is neither listed nor in 任务 yet: no 任务 row, never the key;
-    // its session card names its kind (D92).
-    await expect(reply.locator('.pl-act-status dt')).toHaveText(['依据']);
+    // The Planner's judgment of a task (§15.4 status): one line, its reason
+    // in the tooltip. Its task is neither listed nor in 任务 yet: named by
+    // its kind, never the key (D92).
+    const status = reply.locator('.pl-act-status');
+    await expect(status).toHaveText('✓ 派出的任务 已完成');
+    await expect(status).toHaveAttribute('title', '依据：iso 它汇报周报写好了');
+    await expect(status.locator('dt')).toHaveCount(0);
     await expect(reply.locator('.pl-scard[data-key="' + TASK + '"] .pl-scard-name')).toHaveText('派出的任务');
     await expect(reply.locator('code[data-lang="naozhi-action"]')).toHaveCount(0);
     await expect(page.locator('#pl-cards')).toBeHidden();
@@ -547,7 +557,7 @@ for (const vp of [{ name: 'desktop', width: 1280, height: 800 }, { name: 'phone'
       // ② every block is its card.
       const acts = stream.locator('.event.text').nth(1);
       await expect(acts.locator('.pl-act')).toHaveCount(4);
-      await expect(acts.locator('.pl-act-dispatch .pl-act-h')).toHaveText('派出会话 · iso 整理周报');
+      await expect(acts.locator('.pl-act-dispatch .pl-act-h')).toHaveText('派出 · iso 整理周报 · naozhi · 把本周合并的 PR 整理成周报，按模块分组');
       await expect(acts.locator('.pl-act-promise')).toContainText('iso 周五前提醒你看周报');
       await expect(acts.locator('.pl-act-notify')).toContainText('iso 登录页等你确认发版');
       await expect(acts.locator('.pl-act-ask .pl-act-opt')).toHaveText(['发', '先别发']);

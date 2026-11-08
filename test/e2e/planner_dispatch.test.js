@@ -89,7 +89,8 @@ for (const vp of [{ name: 'desktop', width: 1280, height: 800 }, { name: 'phone'
       const stream = page.locator('#pl-stream');
       // The dispatch card: what was dispatched, nothing to approve.
       const card = stream.locator('.pl-act-dispatch');
-      await expect(card.locator('.pl-act-h')).toHaveText('派出会话 · iso 写 hello');
+      await expect(card.locator('.pl-act-h')).toHaveText('派出 · iso 写 hello · iso-scratch · 在工作区里写一个 hello.md');
+      await expect(card.locator('.pl-act-rows')).toBeHidden();
       await expect(card).toContainText('在工作区里写一个 hello.md');
       await expect(card.locator('dd').first()).toHaveText('iso-scratch');
       await expect(card).not.toContainText('可在"任务"里停止');
@@ -112,8 +113,10 @@ for (const vp of [{ name: 'desktop', width: 1280, height: 800 }, { name: 'phone'
       await expect(gone.locator('.pl-scard[data-key="' + GONE + '"] .pl-scard-name')).toHaveText('iso 旧任务');
       await expect(gone).toHaveText(/iso 旧任务昨天写完了。/);
       await expect(stream).not.toContainText(GONE);
-      // A judgment names its task by the title 任务 lists, not its ID.
-      await expect(stream.locator('.pl-act-status dd')).toHaveText(['iso 周五前提醒你看周报', 'iso 你看过周报了']);
+      // A judgment names its task by the title 任务 lists, not its ID: one
+      // line, the reason in its tooltip.
+      await expect(stream.locator('.pl-act-status')).toHaveText('✓ iso 周五前提醒你看周报 已完成');
+      await expect(stream.locator('.pl-act-status')).toHaveAttribute('title', '依据：iso 你看过周报了');
       await expect(stream).not.toContainText(PROMISE);
       // Only the Planner's question stands at the end of the conversation.
       const inline = page.locator('#pl-cards');

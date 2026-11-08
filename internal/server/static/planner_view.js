@@ -23,6 +23,12 @@
 // outcomes) live in its in-memory history, which a restart drops: the first
 // page merges in the journaled ones from GET /api/planner/notes by time.
 //
+// The Planner's own questions with answers stand at the conversation's end
+// (#pl-cards); the header pins "要你决定 N" to them (also over an opened
+// session, and in the drawer, which holds the same end), and a desktop's
+// left column keeps one line each that points there (UX review 9). A report
+// line in the conversation (planner_cards.js) opens its 任务 card.
+//
 // The rail badge counts the inbox's `badge` (notify.js: what waits on you to
 // act — questions, decisions and errors, §15.7 S1), the one count of what is
 // yours to handle, and the left column's 等你 lists those items alone (D94:
@@ -46,9 +52,9 @@ import { renderMd, runPendingAsync } from './render_md.js';
 import { inbox, isLit, light, notifySupported, onInboxCount, onNotify, requestNotifyPermission, revealFocus } from './notify.js';
 import { followWorkbenchSubject, noteWorkbenchEvent } from './workbench_panes.js';
 import { decisionActsHtml, decorateEvents, noteWorkspaces, paintSessionCards, refreshHealth, unitName, webLinkHtml, workspaceName } from './planner_cards.js';
-import { clearAck, clearPending, closePlannerSession, mountComposer, noteAck, notePlannerStatus, showPlannerLeft } from './planner_chat.js';
+import { clearAck, clearPending, closePlannerSession, mountComposer, noteAck, notePlannerStatus, openPlannerSession, showPlannerLeft } from './planner_chat.js';
 import { onSessionsApplied } from './session_list.js';
-import { countHeadHtml, inProgress, mountTasks, refreshTasks } from './tasks.js';
+import { countHeadHtml, ensureTasks, inProgress, mountTasks, refreshTasks, revealTask, taskOf } from './tasks.js';
 import { initPlannerResize } from './planner_resize.js';
 import { custody, refreshCustody, setCustodyPaused } from './custody.js';
 import { workbench } from './workbench.js';
@@ -195,24 +201,37 @@ function itemOf(ref) {
   return i > 0 ? { node: ref.slice(0, i), id: ref.slice(i + 1) } : { node: 'local', id: ref };
 }
 
-function itemHtml(it) {
+// itemHtml is an item's card. ref (the left column, for the Planner's own
+// question the conversation's end repeats, UX review 9) adds the one line
+// that points there, which a desktop shows in place of the card's body; a
+// phone keeps the whole card, its left block covering the conversation.
+function itemHtml(it, ref = false) {
   const kind = KIND_LABEL[it.kind] ? it.kind : 'notice';
+  const id = itemRef(it);
+  const body = cardBodyHtml(it, kind, id);
+  return '<div class="pl-card pl-k-' + kind + (ref ? ' pl-card-mine' : '') + (isLit(id) ? ' inbox-lit' : '') + '" role="listitem" data-id="' + escAttr(id) + '">' +
+    (ref ? '<div class="pl-card-ref"><span class="pl-card-ref-t" title="' + escAttr(it.title || '') + '">' + esc(it.title || '') + '</span>' +
+      '<button type="button" class="pl-link" data-action="planner-jump-ask" data-id="' + escAttr(id) + '">在对话底部回答 ↓</button></div>' +
+      '<div class="pl-card-full">' + body + '</div>' : body) +
+    '</div>';
+}
+
+// cardBodyHtml is a card's content: its kind and age, title, reason, source
+// and answers.
+function cardBodyHtml(it, kind, ref) {
   const meta = metaHtml(it);
   const link = webLinkHtml(it.link);
-  const acts = decisionActsHtml(Object.assign({}, it, { id: itemRef(it) }));
+  const acts = decisionActsHtml(Object.assign({}, it, { id: ref }));
   const why = itemWhy(it, unitTarget(it.unit, it.node));
-  const ref = itemRef(it);
-  return '<div class="pl-card pl-k-' + kind + (isLit(ref) ? ' inbox-lit' : '') + '" role="listitem" data-id="' + escAttr(ref) + '">' +
-      '<div class="pl-card-top">' +
-        (KIND_LABEL[kind] ? '<span class="pl-kind">' + esc(KIND_LABEL[kind]) + '</span>' : '') +
-        timeHtml(it, kind) +
-        '<button type="button" class="pl-close btn-close" data-action="planner-inbox-close" data-id="' + escAttr(ref) + '" title="关闭" aria-label="关闭这一条">&times;</button>' +
-      '</div>' +
-      '<div class="pl-card-title">' + esc(it.title || '') + '</div>' +
-      (why ? '<div class="pl-card-why" title="' + escAttr(why) + '">' + esc(why) + '</div>' : '') +
-      (meta || link ? '<div class="pl-card-meta">' + [meta, link].filter(Boolean).join(' · ') + '</div>' : '') +
-      acts +
-    '</div>';
+  return '<div class="pl-card-top">' +
+      (KIND_LABEL[kind] ? '<span class="pl-kind">' + esc(KIND_LABEL[kind]) + '</span>' : '') +
+      timeHtml(it, kind) +
+      '<button type="button" class="pl-close btn-close" data-action="planner-inbox-close" data-id="' + escAttr(ref) + '" title="关闭" aria-label="关闭这一条">&times;</button>' +
+    '</div>' +
+    '<div class="pl-card-title">' + esc(it.title || '') + '</div>' +
+    (why ? '<div class="pl-card-why" title="' + escAttr(why) + '">' + esc(why) + '</div>' : '') +
+    (meta || link ? '<div class="pl-card-meta">' + [meta, link].filter(Boolean).join(' · ') + '</div>' : '') +
+    acts;
 }
 
 // sortedOpen orders the open items: decisions first, then questions,
@@ -234,9 +253,13 @@ function waitListHtml() {
   if (inbox.focus && pl.open.some((it) => itemRef(it) === inbox.focus && !KIND_LABEL[it.kind])) pl.notice = inbox.focus;
   const notice = pl.notice ? pl.open.find((it) => itemRef(it) === pl.notice) : null;
   if (!notice) pl.notice = '';
-  const html = actionListHtml() + (notice ? itemHtml(notice) : '');
+  const html = actionItems().map((it) => itemHtml(it, isPlannerAsk(it))).join('') + (notice ? itemHtml(notice) : '');
   return html || '<div class="pl-empty">没有等你的事</div>';
 }
+
+// isPlannerAsk is a question of the Planner shown with its answers, which the
+// conversation's end lists (paintInlineCards) where it was asked.
+const isPlannerAsk = (it) => it.unit === PLANNER_KEY && (it.node || 'local') === plannerHost.node && !!it.decision;
 
 // waitingItems are the items that wait on you to act, as the Home's summary
 // (home_attn.js) lists them: the left column's order, each with its ref on
@@ -253,7 +276,7 @@ export function waitingItems() {
 // actionListHtml is the cards of the items that wait on you to act, for the
 // left column and the 会话 sidebar's bar.
 export function actionListHtml() {
-  return actionItems().map(itemHtml).join('');
+  return actionItems().map((it) => itemHtml(it)).join('');
 }
 
 // paintLeftToggle writes the phone's folded left block: 等你 N · 任务 M,
@@ -296,15 +319,59 @@ function revealWaiting() {
 }
 
 // paintInlineCards repeats the Planner's open questions with options at the
-// end of the conversation, where they were asked; the left column keeps them
-// too, and either answers.
+// end of the conversation, where they were asked; the left column points
+// there (a phone's keeps the whole card), and either answers. The header's
+// pin counts them.
 function paintInlineCards(items) {
   const box = $('pl-cards');
   if (!box) return;
-  const mine = items.filter((it) => it.unit === PLANNER_KEY && (it.node || 'local') === plannerHost.node && it.decision);
-  const html = mine.length ? '<div class="pl-cards-h">待你回答 · ' + mine.length + '</div>' + mine.map(itemHtml).join('') : '';
+  const mine = items.filter(isPlannerAsk);
+  const html = mine.length ? '<div class="pl-cards-h">待你回答 · ' + mine.length + '</div>' + mine.map((it) => itemHtml(it)).join('') : '';
   if (box.innerHTML !== html) box.innerHTML = html;
   box.hidden = !html;
+  paintPin(mine.length);
+}
+
+// paintPin writes "要你决定 N" in the conversation's header and in the opened
+// session's (§15.12 ⑤, D103), N the questions at the conversation's end:
+// not red (the badge is the one red count, D91), none with none.
+function paintPin(n) {
+  const text = '要你决定 ' + n;
+  for (const el of document.querySelectorAll('.pl-pin')) {
+    if (el.textContent !== text) el.textContent = text;
+    el.hidden = !n;
+  }
+}
+
+// jumpToAsk brings the questions at the conversation's end into view and
+// lights them (one, given its ref): from the opened session's header back to
+// the conversation, from a phone's unfolded left block onto it.
+function jumpToAsk(ref) {
+  closePlannerSession(false);
+  showPlannerLeft(false);
+  const box = $('pl-cards');
+  if (!box || box.hidden) return;
+  const sel = ref ? '#pl-cards .pl-card[data-id="' + CSS.escape(ref) + '"]' : '#pl-cards';
+  const el = document.querySelector(sel) || box;
+  el.scrollIntoView({ block: 'nearest' });
+  light(el, sel, ref || '');
+}
+
+// openReport opens the 任务 card a report line is about, expanded on its
+// digest and lit (on a phone in the unfolded left block; from the drawer on
+// the page, which has the column); a session 任务 does not list (put away)
+// opens in the middle column instead.
+async function openReport(key) {
+  if (!key) return;
+  // The drawer may show the conversation with 任务 never read.
+  if (!taskOf(key)) await ensureTasks();
+  if (!taskOf(key)) {
+    openPlannerSession(key);
+    return;
+  }
+  if (pl.host !== 'page') shell.setActivityView('planner');
+  showPlannerLeft(true);
+  revealTask(key, { expand: true });
 }
 
 // fetchInbox lists the inbox of the node the Planner shown runs on: each
@@ -981,6 +1048,9 @@ function startConversation() {
   fetchStatus();
   fetchBriefs();
   fetchInbox();
+  // The drawer mounts no 任务, whose titles name the tasks in its cards
+  // (a status line, a report line): read them once.
+  if (pl.host === 'drawer') ensureTasks();
   if (!pl.timer) {
     pl.timer = setInterval(() => {
       if (document.hidden || !pl.host) return;
@@ -1140,6 +1210,8 @@ wsm.on(NZ_CONTRACT.WS.session_state, (msg) => {
 }, ours);
 
 registerActions({
+  'planner-open-task': (el) => openReport(el.dataset.key || ''),
+  'planner-jump-ask': (el) => jumpToAsk(el.dataset.id || ''),
   'planner-inbox-close': async (el) => {
     const ref = el.dataset.id;
     const { node, id } = itemOf(ref);

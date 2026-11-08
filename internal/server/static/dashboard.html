@@ -258,6 +258,9 @@
         <span class="pl-host" id="pl-host" hidden></span>
         <span class="pl-status" id="pl-status"></span>
         <span class="pl-paused" id="pl-paused" hidden></span>
+        <!-- 要你决定 N (planner_view.js paintPin, §15.12 ⑤): the Planner's
+             questions at the conversation's end, which it scrolls to. -->
+        <button type="button" class="pl-pin" id="pl-pin" data-action="planner-jump-ask" hidden></button>
         <!-- New results (tasks.js, §15.12 ④): filters the 任务 cards to
              them; page only, the drawer has no left column. -->
         <span class="pl-news pl-page-only" id="pl-news" hidden><button type="button" class="pl-link" data-action="tasks-only-new" aria-pressed="false"></button><span class="pl-news-sep" aria-hidden="true">·</span><button type="button" class="pl-link pl-news-all" data-action="tasks-seen-all">全部已读</button></span>
@@ -282,6 +285,9 @@
       <div class="pl-sess" id="pl-sess" hidden>
         <header class="pl-head">
           <nav class="pl-crumb" aria-label="位置"><button type="button" class="pl-link" data-action="planner-close-session">Planner</button><span aria-hidden="true">›</span><b id="pl-sess-name"></b></nav>
+          <!-- The conversation's header is hidden under the opened session:
+               its 要你决定 N stays here, and goes back to the questions. -->
+          <button type="button" class="pl-pin" id="pl-sess-pin" data-action="planner-jump-ask" hidden></button>
           <span class="pl-head-sp"></span>
           <button type="button" class="files-dl-btn" data-action="workbench-toggle" title="工作台（预览 · 产出 · 文件 · 详情）">工作台</button>
           <button type="button" class="files-dl-btn" id="pl-sess-stop" data-action="task-stop" title="停止这个会话正在做的事" hidden>停止</button>
