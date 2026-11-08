@@ -116,6 +116,7 @@ func TestBackgroundAcrossRestart(t *testing.T) {
 	history := []clievent.EventEntry{
 		taskStart("b1", "local_bash", "make bench", now.Add(-2*time.Hour)),
 		taskStart("b2", "local_bash", "gh run watch", now.Add(-time.Hour)),
+		{Type: clievent.KindResult, Time: now.Add(-time.Hour).UnixMilli()},
 	}
 	s, _ := bgSession(r, "task:aaaaaaaaaaaa", now, history...)
 	cs := CustodySources{Router: r}
@@ -144,11 +145,94 @@ func TestBackgroundInHealth(t *testing.T) {
 	s, _ := bgSession(r, "dashboard:direct:h:general", now.Add(-time.Hour),
 		taskStart("b1", "local_bash", "bench a", now.Add(-30*time.Minute)),
 		taskStart("b2", "local_bash", "bench b", now.Add(-20*time.Minute)),
-		taskStart("b3", "local_bash", "bench c", now.Add(-10*time.Minute)))
+		taskStart("b3", "local_bash", "bench c", now.Add(-10*time.Minute)),
+		clievent.EventEntry{Type: clievent.KindResult, Time: now.Add(-10 * time.Minute).UnixMilli()})
 	f := sessionFact(s.Snapshot(), s, "")
 	ib := f.Index.Background
 	if ib == nil || ib.Count != 3 || len(ib.Tasks) != health.BackgroundShown || ib.Tasks[0].ID != "b1" ||
 		ib.LastProgress.UnixMilli() != now.Add(-10*time.Minute).UnixMilli() {
 		t.Fatalf("index background = %+v", ib)
+	}
+}
+
+// fill appends n tool calls to p's event log, each a millisecond after the
+// one before, from at.
+func fill(p *session.TestProcess, n int, at time.Time) {
+	for i := range n {
+		p.EventLog.Append(clievent.EventEntry{Type: clievent.KindToolUse, Tool: "Read", Time: at.UnixMilli() + int64(i)})
+	}
+}
+
+// A Monitor started more than a scan's window before the latest event is
+// still open: the scans of one process carry it until its end is seen.
+func TestBackgroundBeyondTheWindow(t *testing.T) {
+	r := newDigestRouter(t)
+	now := time.Now()
+	const key = "dashboard:direct:long:general"
+	_, p := bgSession(r, key, now.Add(-2*time.Hour),
+		clievent.EventEntry{Type: clievent.KindToolUse, Tool: "Monitor", Time: now.Add(-time.Hour).UnixMilli()},
+		taskStart("m1", "local_bash", "watch CI", now.Add(-time.Hour)))
+	cs := CustodySources{Router: r}
+	if bg := cs.Background(key); bg.Count() != 1 {
+		t.Fatalf("Background = %+v, want m1", bg)
+	}
+	fill(p, taskScan+100, now.Add(-50*time.Minute))
+	if bg := cs.Background(key); bg.Count() != 1 || bg.Tasks[0].ID != "m1" {
+		t.Fatalf("after %d more events: Background = %+v, want m1 carried", taskScan+100, bg)
+	}
+	p.EventLog.Append(taskDone("m1", now.Add(-time.Minute)))
+	if cs.Background(key).Open() {
+		t.Fatal("still open after its end")
+	}
+	fill(p, taskScan+100, now.Add(-30*time.Second))
+	if cs.Background(key).Open() {
+		t.Fatal("open again once its end left the window")
+	}
+}
+
+// A task the shim's replay started and the event log ended after the
+// reattach stays ended once that end leaves the window: the replay is
+// kept for the process's life and would start it again.
+func TestBackgroundReplayEndedInTheLog(t *testing.T) {
+	r := newDigestRouter(t)
+	now := time.Now()
+	const key = "task:bbbbbbbbbbbb"
+	s, p := bgSession(r, key, now.Add(-time.Hour))
+	s.SetReattachedForTest(now.Add(-3*time.Hour), []clievent.EventEntry{{Type: clievent.KindTaskStart, TaskID: "x1", TaskType: "local_bash", Summary: "bench"}})
+	cs := CustodySources{Router: r}
+	bg := cs.Background(key)
+	if bg.Count() != 1 || bg.Tasks[0].ID != "x1" || !bg.LastProgress.Equal(now.Add(-time.Hour)) {
+		t.Fatalf("Background = %+v, want x1 from the replay, its progress the attach", bg)
+	}
+	p.EventLog.Append(taskDone("x1", now.Add(-30*time.Minute)))
+	if cs.Background(key).Open() {
+		t.Fatal("open after its end in the log")
+	}
+	fill(p, taskScan+100, now.Add(-20*time.Minute))
+	if bg := cs.Background(key); bg.Open() {
+		t.Fatalf("its end left the window and the replay started it again: %+v", bg)
+	}
+	if !cs.Settled(key) {
+		t.Error("not Settled with nothing open")
+	}
+}
+
+// A foreground Bash the turn waits on is the turn running, not background
+// work: it is not counted until the model writes after its start.
+func TestBackgroundForegroundBash(t *testing.T) {
+	r := newDigestRouter(t)
+	now := time.Now()
+	const key = "dashboard:direct:fg:general"
+	_, p := bgSession(r, key, now.Add(-time.Hour),
+		clievent.EventEntry{Type: clievent.KindToolUse, Tool: "Bash", Time: now.Add(-time.Minute).UnixMilli()},
+		taskStart("b1", "local_bash", "go test ./...", now.Add(-time.Minute)))
+	cs := CustodySources{Router: r}
+	if bg := cs.Background(key); bg.Open() {
+		t.Fatalf("a foreground Bash counted: %+v", bg)
+	}
+	p.EventLog.Append(taskDone("b1", now.Add(-30*time.Second)))
+	p.EventLog.Append(clievent.EventEntry{Type: clievent.KindText, Time: now.Add(-20 * time.Second).UnixMilli()})
+	if bg := cs.Background(key); bg.Open() {
+		t.Fatalf("an ended Bash counted: %+v", bg)
 	}
 }

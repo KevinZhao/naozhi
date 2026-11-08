@@ -35,9 +35,12 @@ const (
 // Quiet limits, from a task's last task_start or task_progress. A Bash or a
 // Monitor writes nothing between its start and its end, so its limit is
 // how long one may run: 12 hours holds every one in 196 local event logs
-// (11-08: the longest ran under 12 hours, 15 ran 1–3 hours) and a remote
+// (11-09: the longest ran under 12 hours, 15 ran 1–3 hours) and a remote
 // benchmark waited on locally; past it a session that shows 后台中 with no
-// word for half a day says less than one that shows 空闲. An agent reports
+// word for half a day says less than one that shows 空闲. A Monitor's
+// pushes are turns of the session that carry no frame of its task, so a
+// Monitor still pushing after 12 hours is dropped too: such a session is
+// busy in its turns, not 后台中. An agent reports
 // progress every few tool calls, so 2 hours without one is a lost end. A
 // workflow is the board's: its status says when it ended, and the health
 // table judges its quiet (health.StallAfter), so it has no limit here.
@@ -99,58 +102,96 @@ type Input struct {
 	// process's. A process reattached through its shim started when the
 	// shim did, before the gateway's restart.
 	Since time.Time
+	// Attached is when the gateway attached to that process. A task only
+	// the replay started was still open then, at the latest moment known
+	// of it; zero is Since.
+	Attached time.Time
 	// Entries are the session's latest events, oldest first.
 	Entries []clievent.EventEntry
 	// Replayed are the task frames a shim reattach replayed, which reach
 	// no event log: a task that ended while the gateway was down ended in
-	// them. Their order and times are not known; an end anywhere ends its
-	// task, as a task ID is never started twice.
+	// them. Their times are not known; an end anywhere ends its task, as
+	// a task ID is never started twice.
 	Replayed []clievent.EventEntry
 	// Workflows are the running workflows on the session's board.
 	Workflows []Workflow
 	Now       time.Time
 }
 
+// Carry is what a scan of one process hands its next scan (ScanFrom):
+// the tasks it found open, a foreground Bash among them, and the tasks of
+// the replay seen end. Entries are a window of the latest events: a task
+// started further back than the window is still open while no end has
+// been seen, and one the replay started and the event log ended stays
+// ended once that end leaves the window. The zero Carry is a first scan.
+type Carry struct {
+	open  []Task
+	fg    map[string]bool
+	ended map[string]bool
+}
+
 // Judge returns in's open background tasks: Scan, then At in.Now.
 func Judge(in Input) State { return Scan(in).At(in.Now) }
 
 // Scan returns in's open background tasks, the workflows first, with no
-// quiet limit applied (in.Now unread): what a cache may keep while the
-// session's events stay the same.
+// quiet limit applied (in.Now unread): ScanFrom with no earlier scan.
 func Scan(in Input) State {
+	s, _ := ScanFrom(Carry{}, in)
+	return s
+}
+
+// ScanFrom is Scan after the scan of the same process that handed it c,
+// and what it hands the next one. A cache keeps it while the session's
+// events stay the same.
+//
+// A Bash counts only once the turn moved past its start (any event of the
+// model's after it, a turn's end included): the CLI writes task frames
+// for a foreground Bash that runs a few seconds too, and its turn waits
+// on it, so its task ends before the model writes again. It is the turn
+// running, not background work.
+func ScanFrom(c Carry, in Input) (State, Carry) {
 	if !in.Alive {
-		return State{}
+		return State{}, Carry{}
 	}
 	open := map[string]*Task{}
 	ended := map[string]bool{}
+	fg := map[string]bool{}
 	var order []string
+	for _, t := range c.open {
+		open[t.ID] = &t
+		order = append(order, t.ID)
+		if c.fg[t.ID] {
+			fg[t.ID] = true
+		}
+	}
 	since := in.Since.UnixMilli()
+	attached := cmp.Or(in.Attached, in.Since)
 	// tool is the latest tool_use before an entry: a Monitor's task_start
 	// carries task_type local_bash, as a Bash's does, right after the call.
 	tool := ""
-	scan := func(e clievent.EventEntry, replay bool) {
+	for _, e := range in.Entries {
 		switch {
-		case e.Type == clievent.KindToolUse:
-			tool = e.Tool
-			return
+		case modelWrote(e.Type):
+			if e.Type == clievent.KindToolUse {
+				tool = e.Tool
+			}
+			clear(fg)
+			continue
 		case e.TaskID == "":
-			return
+			continue
 		case Ended(e):
 			ended[e.TaskID] = true
-			return
-		case !replay && e.Time < since:
-			return
+			continue
+		case e.Time < since:
+			continue
 		}
 		at := time.UnixMilli(e.Time)
-		if replay {
-			at = in.Since
-		}
 		switch e.Type {
 		case clievent.KindTaskStart:
 			// A workflow is the board's: its task frames come and go
 			// with the panel, not with its run.
 			if e.TaskType == clievent.TaskTypeWorkflow {
-				return
+				continue
 			}
 			t := open[e.TaskID]
 			if t == nil {
@@ -158,6 +199,9 @@ func Scan(in Input) State {
 				open[e.TaskID] = t
 				order = append(order, e.TaskID)
 			}
+			// Its start in sight: the turn moves past it from here, not
+			// from what an earlier window carried.
+			fg[e.TaskID] = t.Kind == KindBash
 			t.Summary = cmp.Or(e.Summary, t.Summary, e.TaskID)
 			t.Last = later(t.Last, at)
 		case clievent.KindTaskProgress:
@@ -166,20 +210,64 @@ func Scan(in Input) State {
 			}
 		}
 	}
-	for _, e := range in.Entries {
-		scan(e, false)
-	}
+	// The replay is task frames only, none of the model's: a task only it
+	// started was open at the attach, its turn long since moved on or not.
 	tool = ""
+	var replayed []string
 	for _, e := range in.Replayed {
-		scan(e, true)
+		switch {
+		case e.TaskID == "":
+		case Ended(e):
+			ended[e.TaskID] = true
+		case e.Type != clievent.KindTaskStart || e.TaskType == clievent.TaskTypeWorkflow:
+		default:
+			replayed = append(replayed, e.TaskID)
+			if c.ended[e.TaskID] {
+				ended[e.TaskID] = true
+				continue
+			}
+			t := open[e.TaskID]
+			if t == nil {
+				t = &Task{ID: e.TaskID, Kind: kindOf(e.TaskType, ""), Start: attached, Last: attached}
+				open[e.TaskID] = t
+				order = append(order, e.TaskID)
+			}
+			// The log's times are the task's; a replayed frame has none.
+			t.Summary = cmp.Or(t.Summary, e.Summary, e.TaskID)
+		}
 	}
 	out := WithWorkflows(State{}, in.Workflows)
+	next := Carry{fg: map[string]bool{}, ended: map[string]bool{}}
 	for _, id := range order {
-		if !ended[id] && !slices.ContainsFunc(out.Tasks, func(o Task) bool { return o.ID == id }) {
+		if ended[id] {
+			continue
+		}
+		next.open = append(next.open, *open[id])
+		if fg[id] {
+			next.fg[id] = true
+			continue
+		}
+		if !slices.ContainsFunc(out.Tasks, func(o Task) bool { return o.ID == id }) {
 			out.add(*open[id])
 		}
 	}
-	return out
+	for _, id := range replayed {
+		if ended[id] {
+			next.ended[id] = true
+		}
+	}
+	return out, next
+}
+
+// modelWrote reports whether an entry of kind is the model's own output:
+// one comes only once every tool call before it has returned.
+func modelWrote(kind string) bool {
+	switch kind {
+	case clievent.KindText, clievent.KindThinking, clievent.KindToolUse, clievent.KindAgent,
+		clievent.KindAskQuestion, clievent.KindTodo, clievent.KindResult:
+		return true
+	}
+	return false
 }
 
 // WithWorkflows is s with the running workflows ws before its tasks.
@@ -206,6 +294,22 @@ func (s State) At(now time.Time) State {
 		}
 	}
 	return out
+}
+
+// Expires is the first moment At no longer counts one of s's tasks, its
+// end lost: the earliest Last plus its kind's limit. false when none has a
+// limit (workflows only, or none open). A check held back while work is
+// open looks again then: the work's end starts a turn, a lost one none.
+func (s State) Expires() (time.Time, bool) {
+	var at time.Time
+	for _, t := range s.Tasks {
+		if q := Quiet(t.Kind); q > 0 {
+			if e := t.Last.Add(q + time.Nanosecond); at.IsZero() || e.Before(at) {
+				at = e
+			}
+		}
+	}
+	return at, !at.IsZero()
 }
 
 func (s *State) add(t Task) {

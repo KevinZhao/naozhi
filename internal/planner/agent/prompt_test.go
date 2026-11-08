@@ -32,6 +32,8 @@ func TestSystemPrompt(t *testing.T) {
 		"at 照样是现在的时间",
 		"健康状态、最后输出（last_active）",
 		"health 为 idle 又带 background 就是后台中",
+		"health 为 active 又带 background 是回合在跑，或子代理 / workflow 在跑",
+		"[活跃 · 后台 N]",
 		`{"type":"custody","key":"<会话 key>","watch":false}`,
 		"不影响托管开关；watch 只能是 false",
 		"读它一律用 Read 的 offset / limit 分段读，不要整份读",

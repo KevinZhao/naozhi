@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/bgtask"
 	"github.com/naozhi/naozhi/internal/planner/custody"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/planner/task"
@@ -255,6 +256,45 @@ func TestCustodyEnded(t *testing.T) {
 		r.checkEnded(second)
 		if len(g.told) != 1 || !strings.Contains(g.told[0], "第二轮") {
 			t.Errorf("told = %q, want the second turn only", g.told)
+		}
+	})
+	// A background task open: no receipt; its end lost, the turn end held
+	// back comes again once the task is no longer counted.
+	t.Run("background lost", func(t *testing.T) {
+		r, g, fc := setup(t)
+		now := time.Now()
+		r.cfg.Now = func() time.Time { return now }
+		var wakes []time.Duration
+		var wake func()
+		r.after = func(d time.Duration, f func()) {
+			if d > 0 {
+				wakes, wake = append(wakes, d), f
+				return
+			}
+			f()
+		}
+		open := bgtask.State{Tasks: []bgtask.Task{{ID: "m1", Kind: bgtask.KindMonitor, Last: now}}}
+		r.cfg.Background = func(string) bgtask.State { return open.At(now) }
+		fc.settled = false
+		r.Result(dashKey, "Monitor 在盯 CI")
+		e, _ := next(t, r)
+		r.checkEnded(e)
+		if len(g.told) != 0 || len(wakes) != 1 || wakes[0] <= bgtask.BashQuiet-time.Second {
+			t.Fatalf("told %q, wakes %v; want none told, a wake at the limit", g.told, wakes)
+		}
+		if m, _ := r.cfg.Sessions.Get(dashKey); m.Turn == nil || !m.Turn.Check {
+			t.Fatalf("turn = %+v, want left unchecked", m.Turn)
+		}
+		now = now.Add(bgtask.BashQuiet + time.Second)
+		fc.settled = true
+		wake()
+		e, ok := next(t, r)
+		if !ok {
+			t.Fatal("the wake queued nothing")
+		}
+		r.checkEnded(e)
+		if len(g.told) != 1 || !strings.Contains(g.told[0], "Monitor 在盯 CI") {
+			t.Fatalf("told = %q, want the held turn end", g.told)
 		}
 	})
 	t.Run("restart", func(t *testing.T) {

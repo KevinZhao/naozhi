@@ -919,6 +919,53 @@ func TestTaskEndedBackground(t *testing.T) {
 	}
 }
 
+// TestTaskEndedBackgroundLost: a background task whose end the CLI never
+// wrote starts no turn, so the turn end held back for it is checked again
+// once the task is no longer counted (bgtask.Quiet), and stays unchecked
+// on disk meanwhile, for a restart to check.
+func TestTaskEndedBackgroundLost(t *testing.T) {
+	e := endedRunner(t)
+	started := e.now
+	open := bgtask.State{Tasks: []bgtask.Task{{ID: "b1", Kind: bgtask.KindBash, Summary: "Wait for RS4", Start: started, Last: started}}}
+	e.r.cfg.Background = func(k string) bgtask.State {
+		if k != e.key {
+			return bgtask.State{}
+		}
+		return open.At(e.now)
+	}
+	e.end("在后台等 RS4 跑完")
+	if len(e.receipts()) != 0 || len(e.held) != 1 {
+		t.Fatalf("receipts %q, held %d; want none told and one wake", e.receipts(), len(e.held))
+	}
+	if m, _ := e.side.Get(e.key); m.Turn == nil || !m.Turn.Check {
+		t.Fatalf("turn = %+v, want left unchecked", m.Turn)
+	}
+	e.wait(time.Hour)
+	e.fire() // early (a doing window's wake): still open, held again
+	if len(e.receipts()) != 0 || len(e.held) != 1 {
+		t.Fatalf("an hour in: receipts %q, held %d", e.receipts(), len(e.held))
+	}
+	e.now = started.Add(bgtask.BashQuiet + time.Second)
+	e.fire()
+	if got := e.receipts(); len(got) != 1 || !strings.Contains(got[0], "在后台等 RS4 跑完") {
+		t.Fatalf("after the limit: receipts = %q, want the held turn end told", got)
+	}
+	if m, _ := e.side.Get(e.key); m.Turn == nil || m.Turn.Check {
+		t.Errorf("turn = %+v, want checked", m.Turn)
+	}
+}
+
+// A doing window that ends before an armed background hold's wake gets a
+// wake of its own: the turn end inside it is not told only at the hold's.
+func TestHoldEarlierThanArmed(t *testing.T) {
+	e := endedRunner(t)
+	e.r.hold(ended{key: e.key, at: e.now}, e.now.Add(12*time.Hour))
+	e.r.hold(ended{key: e.key, at: e.now.Add(time.Minute)}, e.now.Add(time.Hour))
+	if len(e.held) != 2 {
+		t.Fatalf("wakes armed = %d, want 2", len(e.held))
+	}
+}
+
 // TestTaskEndedAcrossRestart: a turn end a restart cut short of its check
 // (the grace, a busy Planner) is checked by the next run, from the sidecar,
 // and only once; a checked one is not checked again.

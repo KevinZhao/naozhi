@@ -11,10 +11,13 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// taskScan is how many trailing events are searched for background tasks
-// still running; one started further back is not seen. Cached per session
-// (backgrounds), so a long turn's tool calls do not push a Monitor started
-// at its head out of sight.
+// taskScan is how many trailing events each scan for background tasks
+// reads. A task started further back stays open through the carry the
+// scans of one process hand on (bgtask.Carry, kept per session in
+// backgrounds) until its end is seen: a long turn's tool calls do not push
+// a Monitor started at its head out of sight. A restart starts the carry
+// afresh: a task started more than taskScan events before it is seen
+// again only through the shim's replay.
 const taskScan = 1024
 
 // bgCacheFor bounds how long a cached judgment is reused while its
@@ -22,7 +25,9 @@ const taskScan = 1024
 // loads after the attach goes in before the latest event.
 const bgCacheFor = 30 * time.Second
 
-// bgSweepAfter is how long an entry no one asked for stays cached.
+// bgSweepAfter is how long an entry no one asked for stays cached: the
+// health table asks for every session each minute, so only a session gone
+// from the router loses its carry.
 const bgSweepAfter = 10 * time.Minute
 
 // backgrounds is the one entry to bgtask.Judge for the router's sessions
@@ -38,14 +43,16 @@ type bgCache struct {
 	now     func() time.Time
 }
 
-// bgEntry is one session's scan (bgtask.Scan, its events only) made at
-// at, for the process attached at attached whose latest event was last.
-// The quiet limits move with the clock alone and the board is read fresh,
-// so neither is kept.
+// bgEntry is one session's scan (bgtask.ScanFrom, its events only) made
+// at at, for the process attached at attached whose latest event was
+// last, and the carry it hands the process's next scan. The quiet limits
+// move with the clock alone and the board is read fresh, so neither is
+// kept.
 type bgEntry struct {
 	attached, at, used time.Time
 	last               clievent.EventEntry
 	scan               bgtask.State
+	carry              bgtask.Carry
 }
 
 // background is s's open background tasks, snap its snapshot.
@@ -70,16 +77,30 @@ func (c *bgCache) state(s *session.ManagedSession, snap session.SessionSnapshot)
 	e, ok := c.entries[s]
 	c.mu.Unlock()
 	if !ok || !e.attached.Equal(attached) || !sameEntry(e.last, last) || now.Sub(e.at) >= bgCacheFor {
-		e = bgEntry{attached: attached, last: last, at: now, scan: bgtask.Scan(bgtask.Input{
+		// Another process's carry is not this one's.
+		var carry bgtask.Carry
+		if ok && e.attached.Equal(attached) {
+			carry = e.carry
+		}
+		scan, next := bgtask.ScanFrom(carry, bgtask.Input{
 			Alive:    true,
 			Since:    s.ProcessStartedAt(),
+			Attached: attached,
 			Entries:  s.EventLastN(taskScan),
 			Replayed: s.ReplayedTasks(),
-		})}
+		})
+		e = bgEntry{attached: attached, last: last, at: now, scan: scan, carry: next}
 	}
 	e.used = now
 	c.mu.Lock()
-	c.entries[s] = e
+	// Two callers may scan at once: the later scan's carry is kept, so an
+	// end only it saw is not lost.
+	if cur, ok := c.entries[s]; !ok || !cur.attached.Equal(e.attached) || !cur.at.After(e.at) {
+		c.entries[s] = e
+	} else {
+		cur.used = now
+		c.entries[s] = cur
+	}
 	if now.Sub(c.swept) >= bgSweepAfter {
 		c.swept = now
 		for k, v := range c.entries {

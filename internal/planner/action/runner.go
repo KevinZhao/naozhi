@@ -212,8 +212,9 @@ type Runner struct {
 	// Neither survives a restart, which may cost a task in the window, or
 	// told and unanswered, one more receipt per restart: its turn end is
 	// still unchecked on disk, and the next run checks it afresh.
-	// quiet is the turn end each task holds to its window's end, one per
-	// task on one timer: a later turn end only replaces it.
+	// quiet is the turn end each session holds to its window's end or its
+	// background work's expiry (hold), one per session on one timer: a
+	// later turn end only replaces it.
 	// Only the handling goroutine touches them.
 	doneTold map[string]bool
 	endTold  map[string]time.Time
@@ -525,7 +526,9 @@ func (r *Runner) laterIn(d time.Duration, e ended) {
 // end is told: an earlier one's text is stale, and the later one has its
 // own check. A busy Planner may still be holding the report, so the check
 // waits for its turn to end, up to endWait. A session with background work
-// still running gets none: the work's end starts the turn that is checked.
+// still running gets none: the work's end starts the turn that is checked,
+// or, with that end lost, the check comes back when the work is no longer
+// counted (bgtask.State.Expires).
 // A task gets one such receipt until it reports again or the Planner
 // answers it with a status block; a turn end within doingQuiet of a doing
 // block that answered one waits for the window to end and is told then if
@@ -538,17 +541,15 @@ func (r *Runner) checkEnded(e ended) {
 		}
 	}()
 	if !sessionkey.IsTaskKey(e.key) {
-		r.checkCustody(e)
+		if e, ok := r.woken(e); ok {
+			r.checkCustody(e)
+		}
 		return
 	}
 	r.rearmReopened()
-	if e.wake {
-		held, ok := r.quiet[e.key]
-		delete(r.quiet, e.key)
-		if !ok {
-			return
-		}
-		e = held
+	e, ok := r.woken(e)
+	if !ok {
+		return
 	}
 	tasks := r.cfg.Tasks.List()
 	i := slices.IndexFunc(tasks, func(t task.Task) bool { return t.ID == e.key })
@@ -563,8 +564,17 @@ func (r *Runner) checkEnded(e ended) {
 		// (holdLatest).
 		return
 	}
-	if due && r.cfg.Background != nil && r.cfg.Background(e.key).Open() {
+	if bg := r.background(e.key); due && bg.Open() {
 		delete(r.doingAt, e.key)
+		// The work's end starts the turn that is checked; an end the CLI
+		// never wrote starts none, so the check comes back once the quiet
+		// limit drops the task, left unchecked on disk meanwhile. A
+		// workflow has no limit: the board has its end. An expiry passed
+		// already is a judgment not counting by the clock: no hold.
+		if end, ok := bg.Expires(); ok && end.After(now) {
+			r.hold(e, end)
+			return
+		}
 		due = false
 	}
 	if at, ok := r.doingAt[e.key]; ok && due {
@@ -678,6 +688,14 @@ func (r *Runner) digestShows(e ended) bool {
 	return !r.cfg.Digests.ReportShown(e.key).Before(e.report.At)
 }
 
+// background is Config.Background, nil-safe.
+func (r *Runner) background(key string) bgtask.State {
+	if r.cfg.Background == nil {
+		return bgtask.State{}
+	}
+	return r.cfg.Background(key)
+}
+
 // reports is Config.Reports, nil-safe.
 func (r *Runner) reports(from, to time.Time) []string {
 	if r.cfg.Reports == nil {
@@ -687,17 +705,31 @@ func (r *Runner) reports(from, to time.Time) []string {
 }
 
 // hold holds e, the session's latest turn end, to end, its quiet window's
-// end: one timer per task, so a window's turn ends cannot fill endCh at its
-// end and push out the one that counts. A held turn end whose window ended
-// with it still held lost its timer's wake (endCh full), so it is armed
+// end or when its open background work is no longer counted: one timer per
+// session, so a window's turn ends cannot fill endCh at its end and push
+// out the one that counts. A held turn end whose window ended with it
+// still held lost its timer's wake (endCh full), so it is armed again; so
+// is one held to before the armed wake (a doing window inside the hold of
+// a background task): an early wake finds the later one held and holds it
 // again.
 func (r *Runner) hold(e ended, end time.Time) {
 	now := r.cfg.Now()
-	if held, armed := r.quiet[e.key]; !armed || !now.Before(held.until.Add(-endWait)) {
+	if held, armed := r.quiet[e.key]; !armed || !now.Before(held.until.Add(-endWait)) || end.Before(held.until.Add(-endWait)) {
 		r.laterIn(end.Sub(now), ended{key: e.key, wake: true})
 	}
 	e.until = end.Add(endWait)
 	r.quiet[e.key] = e
+}
+
+// woken is e, or, for the wake of a hold, the turn end held; false when
+// none is (a later check took it).
+func (r *Runner) woken(e ended) (ended, bool) {
+	if !e.wake {
+		return e, true
+	}
+	held, ok := r.quiet[e.key]
+	delete(r.quiet, e.key)
+	return held, ok
 }
 
 // holdLatest holds key's latest turn end to its quiet window's end when it
@@ -749,8 +781,10 @@ func (r *Runner) latestTurn(e ended) bool {
 // checkCustody tells the Planner of a session in custody whose turn ended
 // with nothing pending (no question for the user, no background task): its
 // last reply, and how to have it go on. The check waits while the user is
-// at the session or a Planner turn runs, up to endWait; a later turn's end,
-// or custody no longer allowed, drops it.
+// at the session or a Planner turn runs, up to endWait, and while
+// background work is open, until it is no longer counted (its end lost:
+// no turn follows); a later turn's end, or custody no longer allowed,
+// drops it.
 func (r *Runner) checkCustody(e ended) {
 	if r.cfg.Custody == nil || r.cfg.Sessions == nil {
 		return
@@ -762,6 +796,15 @@ func (r *Runner) checkCustody(e ended) {
 	if latest && r.cfg.Now().Before(e.until) && (errors.Is(err, custody.ErrNearby) || err == nil && busy) {
 		r.later(e)
 		return
+	}
+	if bg := r.background(e.key); latest && err == nil && bg.Open() {
+		// As checkEnded: the work's end starts the turn checked, a lost
+		// end none, so look again once the task is no longer counted.
+		// Left unchecked on disk meanwhile.
+		if end, ok := bg.Expires(); ok && end.After(r.cfg.Now()) {
+			r.hold(e, end)
+			return
+		}
 	}
 	if err := r.cfg.Sessions.Checked(e.key, e.at); err != nil {
 		slog.Warn("planner actions: a turn end in custody not marked checked", "key", e.key, "err", err)
