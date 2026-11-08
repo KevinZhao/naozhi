@@ -1,7 +1,8 @@
 // Command fakeclaude stands in for the Claude CLI in the relay end-to-end
 // test (relay_test.go): it speaks enough stream-json for naozhi, plays the
 // Planner (a --name starting "planner-") from canned replies, and plays a
-// dispatched session that runs `gh pr merge` when a relay reaches it. Its
+// dispatched session that runs `gh pr merge` when a relay reaches it and
+// ends each reply with a report block. Its
 // state and logs sit beside its executable, so no environment variable has
 // to survive naozhi's env policy.
 package main
@@ -66,9 +67,16 @@ func plannerReply(text string) string {
 
 var prRe = regexp.MustCompile(`#(\d+)`)
 
+// report ends a dispatched session's reply with its report block
+// (docs/rfc/planner.md §15.12 ③).
+func report(body, state, summary string) string {
+	b, _ := json.Marshal(map[string]string{"state": state, "summary": summary})
+	return body + "\n\n```naozhi-report\n" + string(b) + "\n```"
+}
+
 func taskReply(text string) string {
 	if !strings.HasPrefix(text, "<naozhi-relay") {
-		return "收到，等用户决定。"
+		return report("看过 PR 了：E2E-REPORT-BODY 改动不大，测试是绿的。\n没做什么：没有合并。", "need_user", "PR 看过了，等你决定要不要合并")
 	}
 	words := text
 	if i := strings.Index(text, "</naozhi-relay>"); i >= 0 {
@@ -79,7 +87,7 @@ func taskReply(text string) string {
 		return "原话里没有 PR 号。"
 	}
 	out, err := exec.Command(filepath.Join(dir, "gh"), "pr", "merge", m[1]).CombinedOutput()
-	return fmt.Sprintf("已合并 #%s（%s %v）", m[1], strings.TrimSpace(string(out)), err)
+	return report(fmt.Sprintf("已合并 #%s（%s %v）", m[1], strings.TrimSpace(string(out)), err), "done", "已合并 #"+m[1])
 }
 
 func main() {

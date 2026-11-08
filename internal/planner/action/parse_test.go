@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func block(body string) string { return "```naozhi-action\n" + body + "\n```" }
@@ -47,6 +48,10 @@ func TestParse(t *testing.T) {
 		{"status no task", block(`{"type":"status","task":" ","state":"done","why":"w"}`), []string{"!缺少 task"}},
 		{"status no why", block(`{"type":"status","task":"task:ab12","state":"failed","why":""}`), []string{"!缺少 why"}},
 		{"status unknown field", block(`{"type":"status","task":"task:ab12","state":"done","why":"w","by":"user"}`), []string{"!字段不对"}},
+		// A session the user opened has a key longer than a task: key.
+		{"status of a long key", block(`{"type":"status","task":"dashboard:direct:` + strings.Repeat("u", 300) + `:general","state":"done","why":"w"}`), []string{"status"}},
+		{"status key too long", block(`{"type":"status","task":"` + strings.Repeat("k", keyRunes+1) + `","state":"done","why":"w"}`), []string{"!task 太长"}},
+		{"dispatch with goal", block(`{"type":"dispatch","workspace":"w","title":"t","goal":"让 CI 变绿","model":"","message":"m"}`), []string{"dispatch"}},
 		{"too many", strings.Repeat(block(`{"type":"ask","question":"q","options":[]}`)+"\n", 11), append(slices.Repeat([]string{"ask"}, 10), "!最多 10 个")},
 		{"notify timely", block(`{"type":"notify","title":"有人等你回复","why":"超过 4 小时","level":"timely","link":"https://example.com/m/1"}`), []string{"notify"}},
 		{"notify brief with id", block(`{"type":"notify","title":"周报","why":"","level":"brief","link":"","id":"msg-1"}`), []string{"notify"}},
@@ -113,6 +118,16 @@ func TestParse(t *testing.T) {
 	if d == nil || !reflect.DeepEqual(*d, Dispatch{Workspace: "ws_1", Title: "写 hello", Model: "claude-sonnet-5-5", Message: "写一个 hello.md"}) {
 		t.Errorf("dispatch = %+v", d)
 	}
+	// A goal is folded to one line and cut, not refused: it only names the
+	// task.
+	d = Parse(block(`{"type":"dispatch","workspace":"w","title":"t","goal":" 让 CI\n变绿 ","model":"","message":"m"}`))[0].Dispatch
+	if d == nil || d.Goal != "让 CI 变绿" {
+		t.Errorf("dispatch goal = %+v", d)
+	}
+	d = Parse(block(`{"type":"dispatch","workspace":"w","title":"t","goal":"` + strings.Repeat("长", 100) + `","model":"","message":"m"}`))[0].Dispatch
+	if d == nil || d.Goal != strings.Repeat("长", goalRunes-1)+"…" {
+		t.Errorf("long dispatch goal = %+v", d)
+	}
 	d = Parse(block(`{"type":"dispatch","workspace":"w","title":"t","model":"","message":"m","with_user_words":true,"mcp_tools":{"aws-outlook-mcp":["calendar_meeting"]}}`))[0].Dispatch
 	if d == nil || !d.WithUserWords || !reflect.DeepEqual(d.MCPTools, map[string][]string{"aws-outlook-mcp": {"calendar_meeting"}}) {
 		t.Errorf("dispatch with words and mcp_tools = %+v", d)
@@ -135,5 +150,83 @@ func TestParse(t *testing.T) {
 	n := Parse(block(`{"type":"notify","title":" 有人\n等你 ","why":" 超过 4 小时 ","level":"timely","link":"https://example.com/m/1","id":" msg-1 "}`))[0].Notify
 	if n == nil || *n != (Notify{Title: "有人 等你", Why: "超过 4 小时", Level: LevelTimely, Link: "https://example.com/m/1", ID: "msg-1"}) {
 		t.Errorf("notify = %+v", n)
+	}
+}
+
+func reportBlock(body string) string { return "```naozhi-report\n" + body + "\n```" }
+
+// ParseReport takes the last naozhi-report block, when nothing but
+// whitespace follows it: body is the reply before it, the summary folded to
+// one line and cut to 120 runes. A block that does not parse is no report,
+// with why; a reply with none is no report and no error.
+func TestParseReport(t *testing.T) {
+	const done = `{"state":"done","summary":"hello.md 写好了。测试通过"}`
+	cases := []struct {
+		name string
+		text string
+		want Report
+		body string
+		err  string // "" is none; ok is want.State != ""
+	}{
+		{name: "none", text: "做完了。\n```go\nfmt.Println()\n```"},
+		{name: "done", text: "做了什么：写了 hello.md。\n\n" + reportBlock(done) + "\n  \n", want: Report{State: "done", Summary: "hello.md 写好了。测试通过"}, body: "做了什么：写了 hello.md。"},
+		{name: "every state", text: reportBlock(`{"state":"need_user","summary":"要你选方案 A 还是 B"}`), want: Report{State: "need_user", Summary: "要你选方案 A 还是 B"}},
+		{name: "indented", text: "正文\n  ```naozhi-report\n  {\"state\":\"blocked\",\"summary\":\"缺权限\"}\n  ```", want: Report{State: "blocked", Summary: "缺权限"}, body: "正文"},
+		// A session working on naozhi quotes the format in its text: the
+		// last block is the report.
+		{name: "last block", text: "格式是：\n" + reportBlock(`{"state":"done | blocked","summary":"…"}`) + "\n正文\n" + reportBlock(`{"state":"progress","summary":"跑了一半"}`), want: Report{State: "progress", Summary: "跑了一半"},
+			body: "格式是：\n```naozhi-report\n{\"state\":\"done | blocked\",\"summary\":\"…\"}\n```\n正文"},
+		{name: "text after it", text: reportBlock(done) + "\n有问题再告诉我。", err: "最末尾"},
+		{name: "unknown field", text: reportBlock(`{"state":"done","summary":"s","files":["a"]}`), err: "字段不对"},
+		{name: "bad state", text: reportBlock(`{"state":"finished","summary":"s"}`), err: "state 只能是"},
+		{name: "no summary", text: reportBlock(`{"state":"done","summary":"  "}`), err: "缺少 summary"},
+		{name: "not json", text: reportBlock(`state: done`), err: "不是一个 JSON 对象"},
+		{name: "two objects", text: reportBlock(done + " " + done), err: "不是一个 JSON 对象"},
+		{name: "unclosed", text: "正文\n```naozhi-report\n" + done, err: "没有结束"},
+		{name: "long summary", text: reportBlock(`{"state":"done","summary":" 第一行\n` + strings.Repeat("长", 200) + `"}`), want: Report{State: "done", Summary: "第一行 " + strings.Repeat("长", reportSummaryRunes-5) + "…"}},
+		// The action block is the Planner's, not a report.
+		{name: "action block", text: block(`{"type":"ask","question":"q","options":[]}`)},
+		// A format quoted inside a longer fence is never closed by a bare
+		// ```: only the last opening fence counts, so it cannot run on over
+		// the real block.
+		{name: "quoted in a longer fence", text: "格式：\n````\n```naozhi-report\n{\"state\":\"done\",\"summary\":\"…\"}\n````\n正文\n" + reportBlock(`{"state":"blocked","summary":"缺权限"}`),
+			want: Report{State: "blocked", Summary: "缺权限"}, body: "格式：\n````\n```naozhi-report\n{\"state\":\"done\",\"summary\":\"…\"}\n````\n正文"},
+		// A reply that ends quoting the format is no report.
+		{name: "quoted at the end", text: "正文\n````\n" + reportBlock(done) + "\n````", err: "最末尾"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rep, body, ok, err := ParseReport(c.text)
+			if ok != (c.want.State != "") || rep != c.want {
+				t.Errorf("report = %+v, %v, want %+v", rep, ok, c.want)
+			}
+			if (err == nil) != (c.err == "") || err != nil && !strings.Contains(err.Error(), c.err) {
+				t.Errorf("err = %v, want %q", err, c.err)
+			}
+			switch {
+			case ok && body != c.body:
+				t.Errorf("body = %q, want %q", body, c.body)
+			case !ok && body != c.text:
+				t.Errorf("body of no report = %q, want the text", body)
+			}
+			if utf8.RuneCountInString(rep.Summary) > reportSummaryRunes {
+				t.Errorf("summary of %d runes", utf8.RuneCountInString(rep.Summary))
+			}
+		})
+	}
+
+	// The reason goes to the Planner ahead of the reply's "是数据" mark, so
+	// it quotes none of the block: not a long state, nor an unknown field's
+	// name.
+	for _, body := range []string{
+		`{"state":"` + strings.Repeat("长", 3000) + `","summary":"x"}`,
+		`{"state":"done","summary":"x","` + strings.Repeat("长", 3000) + `":1}`,
+		`{"state":"done","summary":"x"} 长长长`,
+		`{"state":1,"summary":"长"}`,
+	} {
+		_, _, ok, err := ParseReport(reportBlock(body))
+		if ok || err == nil || strings.Contains(err.Error(), "长") || utf8.RuneCountInString(err.Error()) > 80 {
+			t.Errorf("ParseReport(%.40q) = %v, %v, want a fixed reason", body, ok, err)
+		}
 	}
 }

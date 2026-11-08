@@ -168,6 +168,9 @@ type Config struct {
 	// Waiting and Promises feed the snapshot; nil leaves their section out.
 	Waiting  func() []Waiting
 	Promises func() []Promise
+	// Conclusion is the first sentence of a session's latest report, for
+	// its snapshot line; nil shows none.
+	Conclusion func(key string) string
 	// Now is the wall clock; nil is time.Now.
 	Now func() time.Time
 }
@@ -838,7 +841,7 @@ func (a *Agent) snapshotInput() snapshotInput {
 	a.mu.Lock()
 	snap := a.health
 	a.mu.Unlock()
-	in := snapshotInput{Now: a.cfg.Now(), Label: a.cfg.Sessions.Label, Name: a.cfg.Sessions.Name}
+	in := snapshotInput{Now: a.cfg.Now(), Label: a.cfg.Sessions.Label, Name: a.cfg.Sessions.Name, Conclusion: a.cfg.Conclusion}
 	if snap != nil {
 		in.Units = snap().Units
 	}
