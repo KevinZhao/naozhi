@@ -1,6 +1,7 @@
 package action
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -15,6 +16,9 @@ func TestBrief(t *testing.T) {
 	}
 	if got := Brief(relayEnvelope(now, []Words{{Text: "好", At: now}}, "")); got != "" {
 		t.Errorf("Brief(envelope only) = %q", got)
+	}
+	if got := Brief(wrapped[:strings.Index(wrapped, "</"+envelopeTag)]); got != "" {
+		t.Errorf("Brief(envelope cut short) = %q, want none of the user's words", got)
 	}
 	if got := Brief("  直接派的任务 \n"); got != "直接派的任务" {
 		t.Errorf("Brief(plain) = %q", got)

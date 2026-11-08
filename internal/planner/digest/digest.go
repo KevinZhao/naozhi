@@ -61,8 +61,8 @@ type Report struct {
 
 // Reply is the last assistant text of one turn.
 type Reply struct {
-	At   time.Time
-	Text string
+	At   time.Time `json:"at"`
+	Text string    `json:"text"`
 }
 
 // Facts are one digest's inputs, gathered by the caller (wireup); Render is
@@ -92,6 +92,11 @@ type Facts struct {
 	// message in view). Not rendered: the Writer keeps it as the goal the
 	// first time one is seen, since the message falls out of view later.
 	GoalSeen string
+	// Born is when the session under Key was created; another Born is a
+	// new conversation under the same key (/new, a delete and a new
+	// start), which the old goal and replies are not about. Zero says
+	// nothing. Not rendered.
+	Born time.Time
 	// Updated is when the digest was written; the Writer sets it.
 	Updated time.Time
 }

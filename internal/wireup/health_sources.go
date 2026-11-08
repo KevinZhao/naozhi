@@ -117,7 +117,10 @@ func (h HealthSources) Collect(since time.Time) []health.Fact {
 	return out
 }
 
-// indexDigest fills e's digest path and report from the digests.
+// indexDigest fills e's digest path and report from the digests. The task
+// card reads the report from the sidecar (sidecar.Meta.Report) instead, so
+// whatever records a report (§15.12 ③) writes both, or the Planner and the
+// page see two conclusions.
 func (h HealthSources) indexDigest(e *health.IndexEntry) {
 	if h.Digests == nil {
 		return

@@ -42,8 +42,13 @@ const midwaySource = "midway"
 // restarts the health machine's Since.
 var (
 	gatewaySources = []string{"beat:", "disk", midwaySource}
-	unitSources    = []string{"waiting:", "stalled:"}
+	unitSources    = []string{WaitingPrefix, "stalled:"}
 )
+
+// WaitingPrefix heads the Source of the item for a session waiting on the
+// user's answer to its own question card (health Waiting): the item stands
+// for the card, so a reader that lists the card's questions skips it.
+const WaitingPrefix = "waiting:"
 
 // Health is the health state machine (monitor/health.Machine).
 type Health interface {
@@ -245,7 +250,7 @@ func (n *Notifier) unitConditions(snap health.Snapshot, now time.Time) (out []co
 		name := n.name(u.ID)
 		switch u.State {
 		case health.Waiting:
-			src := "waiting:" + u.ID
+			src := WaitingPrefix + u.ID
 			keep = append(keep, src)
 			if since := n.unitSince(src, u.Since); now.Sub(since) >= AskAfter {
 				out = append(out, condition{since: since, item: Item{Kind: KindQuestion, Level: LevelTimely,
@@ -258,7 +263,7 @@ func (n *Notifier) unitConditions(snap health.Snapshot, now time.Time) (out []co
 				Unit: u.ID, WS: u.Workspace, Source: src,
 				Title: name + " 停滞", Why: fmt.Sprintf("工作流或后台任务 %d 分钟没有新进展", int(health.StallAfter/time.Minute))}})
 		case health.Unknown:
-			keep = append(keep, "waiting:"+u.ID, "stalled:"+u.ID)
+			keep = append(keep, WaitingPrefix+u.ID, "stalled:"+u.ID)
 		}
 	}
 	return out, keep

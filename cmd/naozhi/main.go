@@ -501,6 +501,7 @@ func main() {
 		digests = digest.New(digest.Config{
 			Dir:     sessionLayout.PlannerDigestRoot(),
 			Facts:   digestSrc.Facts,
+			Ready:   digestSrc.Ready,
 			Keys:    digestSrc.Keys,
 			Written: func(string) { healthMon.Poke() },
 			Live:    func(key string) bool { return router.SessionFor(key) != nil },

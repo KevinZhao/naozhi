@@ -1,10 +1,13 @@
 package wireup
 
 import (
+	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +20,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // newDigestRouter is a router for these tests. The backends are registered
@@ -78,6 +82,7 @@ func TestDigestFacts(t *testing.T) {
 	inbox := []notify.Item{
 		{Kind: notify.KindDecision, State: notify.StateOpen, Unit: plannerKey, Title: "合并吗？", Decision: &notify.Decision{Handler: action.HandlerAsk, Payload: payload}},
 		{Kind: notify.KindQuestion, State: notify.StateOpen, Unit: task, Title: "要你决定"},
+		{Kind: notify.KindQuestion, State: notify.StateOpen, Unit: task, Source: notify.WaitingPrefix + task, Title: "派出的标题 在等你回复"},
 		{Kind: notify.KindError, State: notify.StateOpen, Unit: task, Title: "出错了"},
 		{Kind: notify.KindQuestion, State: notify.StateClosed, Unit: task, Title: "已关"},
 	}
@@ -113,6 +118,10 @@ func TestDigestFacts(t *testing.T) {
 	}
 	if !slices.Equal(f.Questions, []string{"选哪个？", "合并吗？", "要你决定"}) {
 		t.Errorf("questions = %q", f.Questions)
+	}
+
+	if f.Born.IsZero() {
+		t.Error("facts carry no Born")
 	}
 
 	f, ok = src.Facts(chat)
@@ -210,4 +219,145 @@ func TestDigestSink(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("health move wrote no digest")
 	}
+}
+
+// TestDigestReady: a covered session is ready once the health table has
+// judged it and its startup history is loaded; one not covered is left to
+// Facts.
+func TestDigestReady(t *testing.T) {
+	r := newDigestRouter(t)
+	const task, cronKey = "task:rrrrrrrrrrrr", "cron:j1"
+	s := r.InjectSession(task, session.NewTestProcess())
+	r.InjectSession(cronKey, session.NewTestProcess())
+	var snap health.Snapshot
+	src := DigestSources{Router: r, Health: func() health.Snapshot { return snap }}
+	if src.Ready(task) {
+		t.Error("ready before the first reconcile")
+	}
+	snap = health.Snapshot{At: time.UnixMilli(1000)}
+	if src.Ready(task) {
+		t.Error("ready before the health table has the session")
+	}
+	snap.Units = []health.Unit{{ID: task, State: health.Idle}}
+	if !src.Ready(task) {
+		t.Error("not ready once judged")
+	}
+	s.SetHistoryLoadingForTest(true)
+	if src.Ready(task) {
+		t.Error("ready while its history loads")
+	}
+	s.SetHistoryLoadingForTest(false)
+	snap = health.Snapshot{}
+	for _, k := range []string{cronKey, "task:gone00000000"} {
+		if !src.Ready(k) {
+			t.Errorf("%s held back: Facts declines it", k)
+		}
+	}
+}
+
+// TestDigestRestart: after a restart a done task's digest is not written
+// over until the health table has judged it and its history is in, and
+// then it keeps its replies and says its health.
+func TestDigestRestart(t *testing.T) {
+	r := newDigestRouter(t)
+	const task = "task:dddddddddddd"
+	tp := session.NewTestProcess()
+	tp.EventLog.Append(ev(1000, clievent.KindText, "做完了，PR 已开"))
+	tp.EventLog.Append(ev(1100, clievent.KindResult, ""))
+	s := r.InjectSession(task, tp)
+	dir := t.TempDir()
+	idle := health.Snapshot{At: time.UnixMilli(2000), Units: []health.Unit{{ID: task, State: health.Idle, Since: time.UnixMilli(1100)}}}
+	src := DigestSources{Router: r, Health: func() health.Snapshot { return idle }}
+	w := digest.New(digest.Config{Dir: dir, Facts: src.Facts, Ready: src.Ready})
+	w.Touch(task)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { w.Run(ctx); close(done) }()
+	testhelper.Eventually(t, func() bool { return w.Path(task) != "" }, 5*time.Second, "first digest")
+	cancel()
+	<-done
+	_, before, _ := w.Read(task)
+	if !strings.Contains(string(before), "> 做完了，PR 已开") || !strings.Contains(string(before), "健康：空闲") {
+		t.Fatalf("precondition: digest = %s", before)
+	}
+
+	// Restart: the health table not judged yet, the history still loading
+	// (the restored session's events empty).
+	born := time.UnixMilli(s.Snapshot().CreatedAt)
+	r.Remove(task)
+	s = r.InjectSession(task, session.NewTestProcess())
+	s.SetCreatedAtForTest(born)
+	s.SetHistoryLoadingForTest(true)
+	var mu sync.Mutex
+	snap := health.Snapshot{}
+	src.Health = func() health.Snapshot { mu.Lock(); defer mu.Unlock(); return snap }
+	written := make(chan string, 8)
+	w = digest.New(digest.Config{Dir: dir, Facts: src.Facts, Ready: src.Ready, Keys: src.Keys,
+		RetryGap: 10 * time.Millisecond, Written: func(k string) { written <- k }})
+	ctx, cancel = context.WithCancel(t.Context())
+	defer cancel()
+	go w.Run(ctx)
+	time.Sleep(100 * time.Millisecond) // ten retries: a write that is not to happen
+	if _, md, _ := w.Read(task); string(md) != string(before) {
+		t.Fatalf("digest written over before its sources were in:\n%s", md)
+	}
+	mu.Lock()
+	snap = idle
+	mu.Unlock()
+	time.Sleep(100 * time.Millisecond) // ten retries: a write that is not to happen
+	if _, md, _ := w.Read(task); string(md) != string(before) {
+		t.Fatalf("digest written over while the history loads:\n%s", md)
+	}
+	s.SetHistoryLoadingForTest(false)
+	select {
+	case <-written:
+		t.Fatal("digest rewritten with nothing new")
+	case <-time.After(200 * time.Millisecond):
+	}
+	_, md, _ := w.Read(task)
+	if !strings.Contains(string(md), "> 做完了，PR 已开") || !strings.Contains(string(md), "健康：空闲") {
+		t.Fatalf("digest after the restart = %s", md)
+	}
+}
+
+// TestDigestIndexRefresh: a digest written pokes the health machine, and
+// index.json then carries the session's digest path.
+func TestDigestIndexRefresh(t *testing.T) {
+	r := newDigestRouter(t)
+	const chat = "dashboard:direct:u:general"
+	tp := session.NewTestProcess()
+	tp.EventLog.Append(ev(1000, clievent.KindText, "答复"))
+	tp.EventLog.Append(ev(1100, clievent.KindResult, ""))
+	r.InjectSession(chat, tp)
+	dir := t.TempDir()
+	indexPath := filepath.Join(t.TempDir(), "index.json")
+	var m *health.Machine
+	src := DigestSources{Router: r, Health: func() health.Snapshot { return m.Snapshot() }}
+	w := digest.New(digest.Config{Dir: dir, Facts: src.Facts, Ready: src.Ready, Keys: src.Keys,
+		RetryGap: 20 * time.Millisecond, Written: func(string) { m.Poke() }})
+	m = health.New(health.Config{
+		Collect:   HealthSources{Router: r, Digests: w, Observed: src.Observed}.Collect,
+		IndexPath: indexPath,
+	})
+	go w.Run(t.Context())
+	go m.Run(t.Context())
+	want := filepath.Join(dir, digest.FileName(chat))
+	testhelper.Eventually(t, func() bool {
+		data, err := os.ReadFile(indexPath)
+		if err != nil {
+			return false
+		}
+		var idx struct {
+			Sessions []health.IndexEntry `json:"sessions"`
+		}
+		if json.Unmarshal(data, &idx) != nil {
+			return false
+		}
+		for _, e := range idx.Sessions {
+			if e.Key == chat {
+				return e.Digest == want && e.Purpose == sidecar.PurposeChat
+			}
+		}
+		return false
+	}, 10*time.Second, "index.json carries the digest path")
 }

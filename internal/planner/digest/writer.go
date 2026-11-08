@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/osutil/jsonfile"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -30,6 +32,10 @@ const MinGap = time.Minute
 // session's sidecar: a done task's digest is what the Planner reads about it
 // after it was put away.
 const Retention = sidecar.Retention
+
+// RetryGap is how long a write waits for a session whose sources are not
+// all in yet (Config.Ready) before trying again.
+const RetryGap = 10 * time.Second
 
 // sweepInterval is how often Run looks for digests past Retention.
 const sweepInterval = time.Hour
@@ -47,6 +53,12 @@ type State struct {
 	Key    string  `json:"key"`
 	Goal   string  `json:"goal,omitempty"`
 	Report *Report `json:"report,omitempty"`
+	// Born is the session creation (Facts.Born) Goal and Replies are of.
+	// Replies are the latest turns' replies the digest showed, kept so a
+	// view holding fewer (a turn longer than the events in view) does not
+	// blank them.
+	Born    time.Time `json:"born,omitzero"`
+	Replies []Reply   `json:"replies,omitempty"`
 }
 
 // Config wires a Writer.
@@ -57,6 +69,12 @@ type Config struct {
 	// Facts gathers key's digest; false writes none (a session not
 	// covered: not observed, not on this node, gone).
 	Facts func(key string) (Facts, bool)
+	// Ready reports whether key's sources are all in: the health table has
+	// judged it, its history from before a restart is loaded. A key not
+	// ready is tried again RetryGap later, so a restart does not write
+	// "health unknown, no replies" over a digest that had them. nil is
+	// always ready.
+	Ready func(key string) bool
 	// Keys are the sessions to digest when Run starts, so a session that
 	// ends no turn after a restart still has one; nil starts with none.
 	Keys func() []string
@@ -70,10 +88,11 @@ type Config struct {
 	// nothing.
 	Live    func(key string) bool
 	Retired func(key string) time.Time
-	// Now is the wall clock; nil is time.Now. MinGap overrides the
-	// package's for tests (zero keeps it).
-	Now    func() time.Time
-	MinGap time.Duration
+	// Now is the wall clock; nil is time.Now. MinGap and RetryGap
+	// override the package's for tests (zero keeps them).
+	Now      func() time.Time
+	MinGap   time.Duration
+	RetryGap time.Duration
 }
 
 // file is what the Writer knows of a digest on disk: when it was written
@@ -95,6 +114,13 @@ type Writer struct {
 	dirty  map[string]struct{}
 	files  map[string]file
 	states map[string]State
+	// held are the state files New could not read (too big, misnamed, not
+	// to be moved aside): left as found, never saved over.
+	held map[string]bool
+
+	// saveMu orders the state saves, which run off mu: a Touch on a read
+	// loop must not wait on the disk.
+	saveMu sync.Mutex
 
 	// Run's own.
 	last map[string]time.Time
@@ -109,9 +135,12 @@ func New(cfg Config) *Writer {
 	if cfg.MinGap <= 0 {
 		cfg.MinGap = MinGap
 	}
+	if cfg.RetryGap <= 0 {
+		cfg.RetryGap = RetryGap
+	}
 	w := &Writer{
 		cfg: cfg, poke: make(chan struct{}, 1),
-		dirty: map[string]struct{}{}, files: map[string]file{}, states: map[string]State{},
+		dirty: map[string]struct{}{}, files: map[string]file{}, states: map[string]State{}, held: map[string]bool{},
 		last: map[string]time.Time{}, due: map[string]time.Time{},
 	}
 	w.load()
@@ -142,13 +171,17 @@ func (w *Writer) load() {
 	}
 	sts, _ := filepath.Glob(filepath.Join(w.cfg.Dir, "*.json"))
 	for _, p := range sts {
-		st, out, err := jsonfile.Load[State](p, jsonfile.Options{MaxBytes: maxStateBytes, Label: "planner digest state", Corrupt: jsonfile.LeaveCorrupt})
+		// A corrupt state is moved aside (PreserveCorrupt) and its session
+		// starts a new one; one that cannot be is held, not saved over.
+		st, out, err := jsonfile.Load[State](p, jsonfile.Options{MaxBytes: maxStateBytes, Label: "planner digest state"})
 		switch {
 		case err != nil:
-			slog.Warn("planner digest state unreadable; skipped", "path", p, "err", err)
+			slog.Warn("planner digest state unreadable; left as is", "path", p, "err", err)
+			w.held[filepath.Base(p)] = true
 		case out != jsonfile.Parsed:
 		case st.Key == "" || filepath.Base(p) != stateName(st.Key):
-			slog.Warn("planner digest state does not match its name; skipped", "path", p)
+			slog.Warn("planner digest state does not match its name; left as is", "path", p)
+			w.held[filepath.Base(p)] = true
 		default:
 			w.states[st.Key] = st
 		}
@@ -255,7 +288,7 @@ func (w *Writer) SetGoal(key, goal string) error {
 		return nil
 	}
 	goal = Goal(goal)
-	err := w.update(key, func(st *State) bool {
+	_, err := w.update(key, func(st *State) bool {
 		if st.Goal == goal {
 			return false
 		}
@@ -274,57 +307,121 @@ func (w *Writer) SetReport(key string, r Report) error {
 	}
 	r.Summary = textutil.TruncateRunes(oneLine(r.Summary), SummaryRunes)
 	r.Text = textutil.TruncateRunes(strings.TrimSpace(r.Text), ReportRunes)
-	err := w.update(key, func(st *State) bool { st.Report = &r; return true })
+	_, err := w.update(key, func(st *State) bool { st.Report = &r; return true })
 	w.Touch(key)
 	return err
 }
 
-// keepGoal records goal as key's goal unless it has one already.
-func (w *Writer) keepGoal(key, goal string) string {
-	goal = Goal(goal)
-	var kept string
-	if err := w.update(key, func(st *State) bool {
-		if st.Goal != "" || goal == "" {
-			kept = st.Goal
-			return false
+// settle folds what f shows of key into its state and returns the state.
+// Another Born is a new conversation: the old one's replies go, and its
+// goal unless key is a task (whose goal is its dispatch's). The first goal
+// seen is kept; the replies are the latest MaxReplies of those kept and
+// those in view.
+func (w *Writer) settle(key string, f Facts) State {
+	st, err := w.update(key, func(st *State) bool {
+		changed := false
+		if !f.Born.IsZero() && !st.Born.Equal(f.Born) {
+			if !st.Born.IsZero() {
+				st.Replies = nil
+				if !sessionkey.IsTaskKey(key) {
+					st.Goal = ""
+				}
+			}
+			st.Born, changed = f.Born, true
 		}
-		st.Goal, kept = goal, goal
-		return true
-	}); err != nil {
-		slog.Warn("planner digest goal not saved", "key", key, "err", err)
+		if g := Goal(f.GoalSeen); st.Goal == "" && g != "" {
+			st.Goal, changed = g, true
+		}
+		if r := mergeReplies(st.Replies, f.Replies); !sameReplies(r, st.Replies) {
+			st.Replies, changed = r, true
+		}
+		return changed
+	})
+	if err != nil {
+		slog.Warn("planner digest state not saved", "key", key, "err", err)
 	}
-	return kept
+	return st
 }
 
-// update applies fn to key's state and saves it when fn reports a change.
-func (w *Writer) update(key string, fn func(*State) bool) error {
+// mergeReplies is the latest MaxReplies of kept and seen (both oldest
+// first): seen's, after those of kept from before seen's first. A view
+// with none keeps kept whole.
+func mergeReplies(kept, seen []Reply) []Reply {
+	var out []Reply
+	for _, r := range kept {
+		if len(seen) == 0 || r.At.Before(seen[0].At) {
+			out = append(out, r)
+		}
+	}
+	for _, r := range seen {
+		out = append(out, Reply{At: r.At, Text: textutil.TruncateRunes(r.Text, ReplyRunes)})
+	}
+	if len(out) > MaxReplies {
+		out = out[len(out)-MaxReplies:]
+	}
+	return out
+}
+
+func sameReplies(a, b []Reply) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !a[i].At.Equal(b[i].At) || a[i].Text != b[i].Text {
+			return false
+		}
+	}
+	return true
+}
+
+// update applies fn to key's state and saves it when fn reports a change;
+// it returns the state after.
+func (w *Writer) update(key string, fn func(*State) bool) (State, error) {
 	if key == "" {
-		return errors.New("digest: empty key")
+		return State{}, errors.New("digest: empty key")
 	}
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	st, ok := w.states[key]
 	if !ok {
 		st = State{Key: key}
 	}
 	if !fn(&st) {
-		return nil
+		w.mu.Unlock()
+		return st, nil
 	}
 	st.V = Version
-	if w.cfg.Dir != "" {
-		data, err := json.MarshalIndent(st, "", "  ")
-		if err == nil {
-			err = datadir.EnsureDir(w.cfg.Dir)
-		}
-		if err == nil {
-			err = osutil.WriteFileAtomic(filepath.Join(w.cfg.Dir, stateName(key)), data, 0o600)
-		}
-		if err != nil {
-			return err
-		}
-	}
 	w.states[key] = st
-	return nil
+	w.mu.Unlock()
+	return st, w.save(key)
+}
+
+// save writes key's state as it is by now, so of two saves racing the
+// later one lands with the latest state.
+func (w *Writer) save(key string) error {
+	if w.cfg.Dir == "" {
+		return nil
+	}
+	w.saveMu.Lock()
+	defer w.saveMu.Unlock()
+	name := stateName(key)
+	w.mu.Lock()
+	st, ok := w.states[key]
+	held := w.held[name]
+	w.mu.Unlock()
+	if !ok {
+		return nil // swept meanwhile
+	}
+	if held {
+		return fmt.Errorf("digest: state file %s could not be read; left as is", name)
+	}
+	data, err := json.MarshalIndent(st, "", "  ")
+	if err == nil {
+		err = datadir.EnsureDir(w.cfg.Dir)
+	}
+	if err == nil {
+		err = osutil.WriteFileAtomic(filepath.Join(w.cfg.Dir, name), data, 0o600)
+	}
+	return err
 }
 
 // Run writes the digests asked for until ctx ends: at once for a session
@@ -390,6 +487,14 @@ func (w *Writer) step(now time.Time) time.Time {
 			}
 			continue
 		}
+		if w.cfg.Ready != nil && !w.cfg.Ready(key) {
+			retry := now.Add(w.cfg.RetryGap)
+			w.due[key] = retry
+			if next.IsZero() || retry.Before(next) {
+				next = retry
+			}
+			continue
+		}
 		delete(w.due, key)
 		if w.write(key, now) {
 			w.last[key] = now
@@ -408,10 +513,8 @@ func (w *Writer) write(key string, now time.Time) bool {
 		return false
 	}
 	f.Key = key
-	f.Goal = w.keepGoal(key, f.GoalSeen)
-	if st, ok := w.State(key); ok {
-		f.Report = st.Report
-	}
+	st := w.settle(key, f)
+	f.Goal, f.Replies, f.Report = st.Goal, st.Replies, st.Report
 	body := renderBody(f)
 	sum := sha256.Sum256(body)
 	w.mu.Lock()
@@ -484,11 +587,17 @@ func (w *Writer) Sweep() {
 }
 
 func (w *Writer) remove(key string) {
+	w.saveMu.Lock()
+	defer w.saveMu.Unlock()
 	w.mu.Lock()
 	delete(w.files, key)
 	delete(w.states, key)
+	names := []string{FileName(key)}
+	if !w.held[stateName(key)] {
+		names = append(names, stateName(key))
+	}
 	w.mu.Unlock()
-	for _, name := range []string{FileName(key), stateName(key)} {
+	for _, name := range names {
 		if err := os.Remove(filepath.Join(w.cfg.Dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			slog.Warn("planner digest not removed", "path", name, "err", err)
 		}

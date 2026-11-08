@@ -457,6 +457,12 @@ type ManagedSession struct {
 	// rename shares it with the new struct (publishSession, RenameSession),
 	// so a fill tier 1 stores into a replaced struct still reaches the live one.
 	gapFill atomic.Pointer[gapFillCell]
+
+	// historyLoading holds while the startup loader has not finished
+	// reading this session's history: until then its events show nothing
+	// of before the restart, which a reader that writes them down (the
+	// Planner's digest) must not take for "nothing happened".
+	historyLoading atomic.Bool
 }
 
 // historySourceBox wraps history.Source so atomic.Pointer (which requires a

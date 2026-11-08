@@ -164,8 +164,10 @@ func (r *Router) startBackgroundHistoryLoaders(shimGrace time.Duration) {
 			grace = shimGrace
 		}
 		r.hist.wg.Add(1)
+		s.historyLoading.Store(true)
 		go func() {
 			defer r.hist.wg.Done()
+			defer s.historyLoading.Store(false)
 			if r.hist.loadStartupHistory(s, historyLoadSem, jsonl, grace) {
 				r.notifyChange()
 			}

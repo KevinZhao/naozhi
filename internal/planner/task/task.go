@@ -94,8 +94,9 @@ type Task struct {
 	// for the card's status line; nil once it is gone.
 	Live *Live `json:"live,omitempty"`
 	// Report is a dispatched session's latest report (§15.12 ③), the
-	// card's "最新结论"; Digest says the session has a digest the card can
-	// open (GET /api/sessions/digest).
+	// card's "最新结论", from the sidecar; index.json reads its own from the
+	// digest's state, so a report is recorded in both. Digest says the
+	// session has a digest the card can open (GET /api/sessions/digest).
 	Report *sidecar.Report `json:"report,omitempty"`
 	Digest bool            `json:"digest,omitempty"`
 }

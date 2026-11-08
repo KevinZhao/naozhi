@@ -9,18 +9,26 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // rig is a Writer over a temp dir whose Facts return the reply set, on a
 // clock the test moves.
 type rig struct {
-	w       *Writer
-	dir     string
-	now     time.Time
-	mu      sync.Mutex
-	reply   string
-	seen    string
+	w     *Writer
+	dir   string
+	now   time.Time
+	mu    sync.Mutex
+	reply string
+	seen  string
+	born  time.Time
+	// replies, when set, are the replies in view instead of reply; none
+	// says there are none in view.
+	replies []Reply
+	none    bool
+	state   health.State
+	ready   map[string]bool
 	written []string
 	live    map[string]bool
 	retired map[string]time.Time
@@ -42,7 +50,20 @@ func (r *rig) config() Config {
 			if strings.HasPrefix(key, "cron:") {
 				return Facts{}, false
 			}
-			return Facts{Title: "t", Replies: []Reply{{At: at(9, 0), Text: r.reply}}, GoalSeen: r.seen}, true
+			f := Facts{Title: "t", Replies: []Reply{{At: at(9, 0), Text: r.reply}}, GoalSeen: r.seen, Born: r.born, Health: r.state}
+			switch {
+			case r.none:
+				f.Replies = nil
+			case r.replies != nil:
+				f.Replies = r.replies
+			}
+			return f, true
+		},
+		Ready: func(key string) bool {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			ready, ok := r.ready[key]
+			return !ok || ready
 		},
 		Written: func(key string) {
 			r.mu.Lock()
@@ -52,6 +73,12 @@ func (r *rig) config() Config {
 		Live:    func(key string) bool { return r.live[key] },
 		Retired: func(key string) time.Time { return r.retired[key] },
 	}
+}
+
+func (r *rig) set(fn func(*rig)) {
+	r.mu.Lock()
+	fn(r)
+	r.mu.Unlock()
 }
 
 func (r *rig) writes() int {
@@ -295,4 +322,192 @@ func TestNilWriter(t *testing.T) {
 	if _, _, ok := w.Read("k"); ok {
 		t.Fatal("nil Read")
 	}
+}
+
+// TestNotReadyRetried: a key whose sources are not all in is not written
+// but tried again RetryGap later, and written once ready.
+func TestNotReadyRetried(t *testing.T) {
+	r := newRig(t)
+	const key = "task:wait"
+	r.set(func(r *rig) { r.ready = map[string]bool{key: false} })
+	r.w.Touch(key)
+	if next := r.w.step(r.now); !next.Equal(r.now.Add(RetryGap)) || r.writes() != 0 {
+		t.Fatalf("not ready: next=%v writes=%d, want a retry at %v and no write", next, r.writes(), r.now.Add(RetryGap))
+	}
+	r.now = r.now.Add(RetryGap)
+	if next := r.w.step(r.now); next.IsZero() || r.writes() != 0 {
+		t.Fatalf("still not ready: next=%v writes=%d", next, r.writes())
+	}
+	r.set(func(r *rig) { r.ready[key] = true })
+	r.now = r.now.Add(RetryGap)
+	if next := r.w.step(r.now); !next.IsZero() || r.writes() != 1 {
+		t.Fatalf("ready: next=%v writes=%d, want written", next, r.writes())
+	}
+}
+
+// TestRestartKeepsDigest: after a restart, while the health table has not
+// judged the session and its history is not loaded (not ready), the digest
+// on disk is left alone; once ready with the replies still out of view, the
+// kept replies stay in it.
+func TestRestartKeepsDigest(t *testing.T) {
+	r := newRig(t)
+	const key = "task:done"
+	r.set(func(r *rig) {
+		r.state = health.Idle
+		r.replies = []Reply{{At: at(9, 0), Text: "回复一"}, {At: at(9, 10), Text: "结论在这"}}
+	})
+	r.w.Touch(key)
+	r.w.step(r.now)
+	before := r.read(t, key)
+	if !strings.Contains(before, "> 结论在这") || !strings.Contains(before, "健康：空闲") {
+		t.Fatalf("precondition: digest = %s", before)
+	}
+
+	// Restart: nothing judged, no events in view.
+	r.set(func(r *rig) {
+		r.state, r.replies, r.none = "", nil, true
+		r.ready = map[string]bool{key: false}
+	})
+	r.w = New(r.config())
+	r.now = r.now.Add(time.Hour)
+	r.w.Touch(key)
+	r.w.step(r.now)
+	if got := r.read(t, key); got != before {
+		t.Fatalf("digest rewritten before its sources were in:\n%s", got)
+	}
+	// Ready, the health judged, the history still without those turns.
+	r.set(func(r *rig) { r.state, r.ready[key] = health.Idle, true })
+	r.now = r.now.Add(RetryGap)
+	r.w.step(r.now)
+	if got := r.read(t, key); got != before {
+		t.Fatalf("digest changed with nothing new:\n%s", got)
+	}
+}
+
+// TestRepliesKept: a view with no finished turn (one turn longer than the
+// events in view) keeps the replies; a view with fewer than MaxReplies
+// fills up with the older kept ones.
+func TestRepliesKept(t *testing.T) {
+	r := newRig(t)
+	const key = "task:long"
+	r.set(func(r *rig) {
+		r.replies = []Reply{{At: at(9, 0), Text: "一"}, {At: at(9, 1), Text: "二"}, {At: at(9, 2), Text: "三"}}
+	})
+	r.w.Touch(key)
+	r.w.step(r.now)
+	r.set(func(r *rig) { r.none, r.state = true, health.Stalled })
+	r.now = r.now.Add(time.Hour)
+	r.w.Touch(key)
+	r.w.step(r.now)
+	got := r.read(t, key)
+	if !strings.Contains(got, "健康：停滞") || !strings.Contains(got, "## 最近回复（3）") || !strings.Contains(got, "> 三") {
+		t.Fatalf("replies blanked by a view with none:\n%s", got)
+	}
+	r.set(func(r *rig) { r.none, r.replies = false, []Reply{{At: at(11, 0), Text: "四"}} })
+	r.now = r.now.Add(time.Hour)
+	r.w.Touch(key)
+	r.w.step(r.now)
+	st, _ := r.w.State(key)
+	var texts []string
+	for _, rp := range st.Replies {
+		texts = append(texts, rp.Text)
+	}
+	if strings.Join(texts, ",") != "二,三,四" {
+		t.Fatalf("replies = %q, want the latest three of kept and seen", texts)
+	}
+}
+
+// TestNewConversation: a session created anew under the same key (/new, a
+// delete and a new start) drops the old goal and replies; a task keeps its
+// dispatch's goal.
+func TestNewConversation(t *testing.T) {
+	r := newRig(t)
+	const chat, task = "dashboard:direct:u:general", "task:again"
+	if err := r.w.SetGoal(task, "派活的目标"); err != nil {
+		t.Fatal(err)
+	}
+	r.set(func(r *rig) { r.seen, r.born, r.reply = "旧话题", at(8, 0), "旧回复" })
+	r.w.Touch(chat)
+	r.w.Touch(task)
+	r.w.step(r.now)
+	r.set(func(r *rig) {
+		r.seen, r.born, r.replies = "新话题", at(10, 30), []Reply{{At: at(10, 40), Text: "新回复"}}
+	})
+	r.now = r.now.Add(time.Hour)
+	r.w.Touch(chat)
+	r.w.Touch(task)
+	r.w.step(r.now)
+	got := r.read(t, chat)
+	if !strings.Contains(got, "> 新话题") || strings.Contains(got, "旧") {
+		t.Fatalf("chat after /new:\n%s", got)
+	}
+	if st, _ := r.w.State(chat); !st.Born.Equal(at(10, 30)) || len(st.Replies) != 1 {
+		t.Fatalf("chat state = %+v", st)
+	}
+	got = r.read(t, task)
+	if !strings.Contains(got, "> 派活的目标") || strings.Contains(got, "旧回复") {
+		t.Fatalf("task after a reset:\n%s", got)
+	}
+	// The same Born again, as after a restart, keeps everything.
+	r.w = New(r.config())
+	if st, _ := r.w.State(chat); st.Goal != "新话题" || !st.Born.Equal(at(10, 30)) {
+		t.Fatalf("state after a restart = %+v", st)
+	}
+}
+
+// TestCorruptState: a state file that does not parse is moved aside and the
+// session starts a new one; one that cannot be read as its own (misnamed)
+// is never saved over.
+func TestCorruptState(t *testing.T) {
+	dir := t.TempDir()
+	const key, other = "task:bad", "task:other"
+	bad := filepath.Join(dir, stateName(key))
+	if err := os.WriteFile(bad, []byte(`{"v":1,"key":"task:bad","goal":"半截`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	misnamed := filepath.Join(dir, stateName(other))
+	alien := []byte(`{"v":1,"key":"task:someone-else","goal":"别人的"}`)
+	if err := os.WriteFile(misnamed, alien, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := New(Config{Dir: dir})
+	aside, _ := filepath.Glob(bad + ".corrupt.*")
+	if len(aside) != 1 {
+		t.Fatalf("corrupt state not moved aside: %v", aside)
+	}
+	if data, _ := os.ReadFile(aside[0]); !strings.Contains(string(data), "半截") {
+		t.Fatalf("moved-aside copy = %s", data)
+	}
+	if err := w.SetGoal(key, "新目标"); err != nil {
+		t.Fatal(err)
+	}
+	if st, ok := New(Config{Dir: dir}).State(key); !ok || st.Goal != "新目标" {
+		t.Fatalf("state after the corrupt one = %+v %v", st, ok)
+	}
+	if err := w.SetGoal(other, "盖掉"); err == nil {
+		t.Fatal("a state file left unread was saved over")
+	}
+	if data, _ := os.ReadFile(misnamed); string(data) != string(alien) {
+		t.Fatalf("misnamed state changed: %s", data)
+	}
+}
+
+// TestTouchDuringSave: Touch, Path and State do not wait on a state save in
+// progress, so a turn's end on a read loop never waits on the disk.
+func TestTouchDuringSave(t *testing.T) {
+	r := newRig(t)
+	r.w.saveMu.Lock()
+	done := make(chan struct{})
+	go func() {
+		r.w.Touch("task:x")
+		r.w.Path("task:x")
+		r.w.State("task:x")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Touch waited on a save")
+	}
+	r.w.saveMu.Unlock()
 }

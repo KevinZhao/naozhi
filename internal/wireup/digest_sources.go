@@ -3,6 +3,8 @@ package wireup
 import (
 	"cmp"
 	"encoding/json"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -73,6 +75,25 @@ func (d DigestSources) Keys() []string {
 	return out
 }
 
+// Ready is digest.Config.Ready: a covered key is ready once the health
+// table has judged it and its history from before a restart is loaded.
+// Before that its digest would say "health unknown, no replies" of a
+// session that had both, and nothing would correct it: a session first
+// judged healthy makes no transition, and an idle one ends no turn.
+func (d DigestSources) Ready(key string) bool {
+	if !d.Covered(key) {
+		return true // Facts declines it
+	}
+	if d.Health != nil {
+		snap := d.Health()
+		if snap.At.IsZero() || !slices.ContainsFunc(snap.Units, func(u health.Unit) bool { return u.ID == key }) {
+			return false
+		}
+	}
+	s := d.Router.SessionFor(key)
+	return s == nil || !s.HistoryLoading()
+}
+
 // Facts is digest.Config.Facts.
 func (d DigestSources) Facts(key string) (digest.Facts, bool) {
 	if !d.Covered(key) {
@@ -88,6 +109,7 @@ func (d DigestSources) Facts(key string) (digest.Facts, bool) {
 		Title:      cmp.Or(snap.UserLabel, snap.Summary),
 		Dir:        snap.Workspace,
 		LastOutput: unixMilli(snap.LastActive),
+		Born:       unixMilli(snap.CreatedAt),
 	}
 	if d.Observed(key) {
 		f.Purpose = sidecar.PurposeChat
@@ -197,11 +219,13 @@ func pendingQuestions(entries []clievent.EventEntry) []string {
 
 // inboxQuestions are the open "等你" items about key: its own, and the
 // Planner's asks whose answer goes to it (their Unit is the Planner, the
-// task in the card's payload).
+// task in the card's payload). Not the item for a session waiting on its
+// own card: pendingQuestions has the card's questions, the item only says
+// it waits.
 func inboxQuestions(items []notify.Item, key string) []string {
 	var out []string
 	for _, it := range items {
-		if it.State != notify.StateOpen || !it.Kind.WaitsOnUser() {
+		if it.State != notify.StateOpen || !it.Kind.WaitsOnUser() || strings.HasPrefix(it.Source, notify.WaitingPrefix) {
 			continue
 		}
 		if it.Unit == key || askTask(it) == key {
