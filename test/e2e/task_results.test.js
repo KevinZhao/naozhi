@@ -337,6 +337,66 @@ test('an expanded digest follows its card', async ({ browser }) => {
   }
 });
 
+// An expanded digest is rendered once per version: the live repaints of the
+// other cards (another session running) keep its node, so where it was
+// scrolled to and what is selected in it stay, and its diagrams are not
+// drawn again; a new version of it keeps the place read to.
+test('an expanded digest keeps its scroll and selection across live repaints', async ({ browser }) => {
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const page = await ctx.newPage();
+  const data = tasks();
+  data.tasks.find((t) => t.id === OPEN).digest = true;
+  const digests = digestsOf();
+  const para = (i) => '第 ' + i + ' 段：调研了一种 ASR 方案，记下了延迟、显存与中文效果。';
+  digests[OPEN] = '# iso 调研 ASR\n\n## 最近回复\n\n' + Array.from({ length: 60 }, (_, i) => para(i + 1)).join('\n\n') + '\n';
+  const mock = await server(data, digests);
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await page.click('#abnav-planner');
+    const open = card(page, OPEN);
+    await open.locator('.tk-expand').click();
+    const dg = open.locator('.tk-digest');
+    await expect(dg).toContainText('第 60 段');
+    // Scrolled to its middle, a paragraph selected.
+    await dg.evaluate((n) => {
+      n.scrollTop = 300;
+      n.dataset.e2eKept = '1';
+      const w = document.createTreeWalker(n, NodeFilter.SHOW_TEXT);
+      let p = w.nextNode();
+      while (p && !p.data.includes('第 20 段')) p = w.nextNode();
+      const r = document.createRange();
+      r.selectNodeContents(p);
+      window.getSelection().removeAllRanges();
+      window.getSelection().addRange(r);
+    });
+    const before = await dg.evaluate((n) => n.scrollTop);
+    expect(before).toBeGreaterThan(200);
+    const ws = mock.wsConnections[mock.wsConnections.length - 1];
+    // The running session moves on to another tool: its card repaints.
+    for (const activity of ['Read: internal/x.go', 'Bash: go vet ./...']) {
+      data.tasks.find((t) => t.id === RUN).live.activity = activity;
+      ws.send({ type: 'inbox_count', open: 0, badge: 0 });
+      await expect(card(page, RUN).locator('.tk-now')).toHaveText(activity);
+      expect(await dg.evaluate((n) => n.dataset.e2eKept)).toBe('1');
+      expect(await dg.evaluate((n) => n.scrollTop)).toBe(before);
+      expect(await page.evaluate(() => String(window.getSelection()))).toContain('第 20 段');
+    }
+    expect(mock.digestCalls.filter((k) => k === OPEN)).toHaveLength(1);
+    // A new report: the digest is read and rendered again, where it was.
+    digests[OPEN] = digests[OPEN].replace('## 最近回复', '## 最新汇报（完成）\n\n申请到 GPU 了。\n\n## 最近回复');
+    Object.assign(data.tasks.find((t) => t.id === OPEN), { report: { state: 'done', summary: '申请到 GPU 了。', at: iso(Date.now()) }, result_at: iso(Date.now()), new: true });
+    ws.send({ type: 'inbox_count', open: 0, badge: 0 });
+    await expect(dg).toContainText('申请到 GPU 了。');
+    expect(await dg.evaluate((n) => n.dataset.e2eKept)).toBeUndefined();
+    expect(await dg.evaluate((n) => n.scrollTop)).toBe(before);
+    await expect(page.locator('#pl-task .tk-digest')).toHaveCount(1);
+  } finally {
+    await ctx.close();
+    await mock.server.close();
+  }
+});
+
 // A Planner on each node: the filter and the count are the Planner shown's,
 // ended by a switch; a node's dispatched session opened in the 会话 view
 // is marked read on that node (no viewing frame reaches it), with the page
@@ -384,6 +444,55 @@ test('a node: switching the Planner ends the filter, its session is marked read'
     await page.click('#abnav-chat');
     await openSessionCard(page, page.locator('.session-card[data-key="' + REMOTE + '"][data-node="' + NODE + '"]'));
     await expect.poll(() => seenOnNode().map((c) => ({ node: c.node, body: c.body }))).toEqual([{ node: NODE, body: { ids: [REMOTE] } }]);
+    expect(mock.tasksSeenCalls).toEqual([]);
+  } finally {
+    await ctx.close();
+    await mock.server.close();
+  }
+});
+
+// Another node's Planner shown, a session of yours there open beside its
+// conversation: its turn ending while you look at it is a result you saw,
+// told to that node (no viewing frame reaches it), as the 会话 view's is;
+// the pane closed, it is not.
+test('a node: the session open on its Planner page is marked read as its turn ends', async ({ browser }) => {
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const page = await ctx.newPage();
+  const NODE = 'pc';
+  const YOURS = 'dashboard:direct:u:mbp';
+  const s = defaultSessions();
+  s.sessions.push({ key: YOURS, node: NODE, state: 'ready', platform: 'dashboard', agent: 'general', cli_name: 'claude',
+    user_label: 'iso MBP 调 trn2', workspace: '/Users/me/workspace/naozhi', last_active: now - 60000, created_at: now - 90000 });
+  s.nodes = { local: { display_name: 'EC2', status: 'ok' }, [NODE]: { display_name: 'MBP', status: 'ok', caps: ['files', 'planner', 'subscribe-history'] } };
+  const remoteTasks = { tasks: [{ id: YOURS, kind: 'session', group: 'yours', title: 'iso MBP 调 trn2', state: 'doing', at: iso(now - 60000), created: iso(now - 90000),
+    health: 'idle', live: { running: false, last_active: iso(now - 60000) } }] };
+  const mock = await startMockServer({
+    ws: true, sessions: s, tasks: tasks(), plannerEvents: [], inbox: { open: [], closed: [], counts: { open: 0, badge: 0 } },
+    planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
+    custody: { paused: false, sessions: [] },
+    remote: { [NODE]: { planner: { enabled: true, stopped: false, key: PLANNER, alive: true }, tasks: remoteTasks, inbox: { open: [], closed: [], counts: { open: 0, badge: 0 } },
+      custody: { paused: false, sessions: [] }, events: { [PLANNER]: [], [YOURS]: [{ type: 'text', detail: 'iso trn2 调好了一半', time: now - 60000, uuid: 'mbp-t1' }] } } },
+  });
+  const seenOnNode = () => mock.remoteCalls.filter((c) => c.method === 'POST' && c.path === '/api/tasks/seen').map((c) => ({ node: c.node, body: c.body }));
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await page.click('#abnav-planner');
+    await page.locator('#pl-host select').selectOption(NODE);
+    await card(page, YOURS).locator('[data-action="planner-open-session"]').click();
+    await expect(page.locator('#pl-sess')).toHaveAttribute('data-key', YOURS);
+    // Nothing new when opened: nothing told.
+    expect(seenOnNode()).toEqual([]);
+    const ws = mock.wsConnections[mock.wsConnections.length - 1];
+    ws.send({ type: 'session_state', key: YOURS, node: NODE, state: 'running' });
+    ws.send({ type: 'session_state', key: YOURS, node: NODE, state: 'ready' });
+    await expect.poll(seenOnNode, { timeout: 5000 }).toEqual([{ node: NODE, body: { ids: [YOURS] } }]);
+    // Closed: a turn ending there is a result you have not seen.
+    await page.click('[data-action="planner-close-session"]');
+    await expect(page.locator('#pl-sess')).toBeHidden();
+    ws.send({ type: 'session_state', key: YOURS, node: NODE, state: 'ready' });
+    await page.waitForTimeout(2500);
+    expect(seenOnNode()).toHaveLength(1);
     expect(mock.tasksSeenCalls).toEqual([]);
   } finally {
     await ctx.close();

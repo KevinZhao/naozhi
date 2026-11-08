@@ -73,7 +73,7 @@ import { NZ_CONTRACT } from './contract.js';
 import { selection, ui } from './state.js';
 import { backgroundTasksText, esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
 import { formatAbsTime, formatMonthDayTime, timeAgo } from './utilities.js';
-import { custody, custodyChipHtml, refreshCustody, selectionShown, statusOf } from './custody.js';
+import { custody, custodyChipHtml, refreshCustody, sessionShown, statusOf } from './custody.js';
 import { isLit, light } from './notify.js';
 import { shell } from './shell.js';
 import { isLocalNode, nodeAPI, plannerAPI, plannerHost } from './planner_host.js';
@@ -97,12 +97,14 @@ let failedAt = 0;
 // actsOpen is the card whose "⋯" is open, kept across repaints.
 let actsOpen = '';
 // digestOpen is the card whose digest is expanded; digests holds what was
-// read for a card ({md} or {err}, {wait} while reading; stamp: the card's
-// digestStamp it was read at). onlyNew, while "N 件新结果" filters the
+// read for a card ({md, v} or {err}, {wait} while reading; stamp: the card's
+// digestStamp it was read at; v: digestSeq when its md last changed, what a
+// group's rendered digest is kept by, paint). onlyNew, while "N 件新结果" filters the
 // group, holds the IDs new when it was chosen: a card looked at since keeps
 // its place, only its dot goes; null while not filtering.
 let digestOpen = '';
 const digests = new Map();
+let digestSeq = 0;
 let onlyNew = null;
 
 // LIVE_MS is how often the group refetches while a dispatched session runs;
@@ -358,13 +360,38 @@ function reportHtml(t) {
   return '<button type="button" class="tk-report" data-action="task-expand" data-id="' + escAttr(t.id) + '" tabindex="-1"' + tip + '>' + inner + '</button>';
 }
 
-// digestHtml is the expanded digest under card t, '' while folded.
+// digestHtml is the expanded digest under card t, '' while folded. A digest
+// read is only a slot naming its version: paint puts the rendered digest
+// in it, the one already in the page while the version holds, so the live
+// repaints of the other cards (every LIVE_MS while one runs) neither scroll
+// it back to its top, nor drop what is selected in it, nor draw its
+// diagrams again.
 function digestHtml(t) {
   if (digestOpen !== t.id) return '';
   const d = digests.get(t.id) || { wait: true };
-  const id = ' id="tk-digest-' + escAttr(t.id) + '"';
-  if (d.md !== undefined) return '<div class="tk-digest md"' + id + '>' + renderMd(digestBody(d.md)) + '</div>';
-  return '<div class="tk-digest tk-digest-note"' + id + '>' + (d.err ? '读不到摘要：' + esc(d.err) : '正在读取摘要…') + '</div>';
+  if (d.md !== undefined) return '<div class="tk-digest-slot" data-digest="' + escAttr(t.id) + '" data-v="' + d.v + '"></div>';
+  return '<div class="tk-digest tk-digest-note" id="tk-digest-' + escAttr(t.id) + '">' + (d.err ? '读不到摘要：' + esc(d.err) : '正在读取摘要…') + '</div>';
+}
+
+// digestNode renders task id's digest as read (digests) for its slot.
+function digestNode(id) {
+  const n = document.createElement('div');
+  n.className = 'tk-digest md';
+  n.id = 'tk-digest-' + id;
+  n.innerHTML = renderMd(digestBody((digests.get(id) || {}).md));
+  return n;
+}
+
+// keepSelection notes the page's selection when it lies in node, and
+// returns what puts it back once node is in the page again (taking node
+// out collapses it); null with none there.
+function keepSelection(node) {
+  const sel = window.getSelection && window.getSelection();
+  if (!sel || !sel.rangeCount || sel.isCollapsed) return null;
+  const r = sel.getRangeAt(0);
+  if (!node.contains(r.startContainer) || !node.contains(r.endContainer)) return null;
+  const [a, ao, b, bo] = [sel.anchorNode, sel.anchorOffset, sel.focusNode, sel.focusOffset];
+  return () => { try { sel.setBaseAndExtent(a, ao, b, bo); } catch { /* the text moved on */ } };
 }
 
 function cardHtml(t) {
@@ -440,19 +467,37 @@ export function isRunningTask(id) {
 }
 
 // paint puts data in el, unless it would paint what is there. The 已完成
-// fold keeps its open state and a focused control its focus.
+// fold keeps its open state, a focused control its focus, and the expanded
+// digest, rendered once per version (el._tkDigest: {id, v, node}), its
+// node, scroll and selection.
 function paint(el, data) {
   const html = tasksHtml(data);
   if (el._tkHtml === html && el.firstChild) return;
   const wasOpen = !!el.querySelector('.tk-sec-done')?.open;
   const a = document.activeElement;
   const focus = a && el.contains(a) && a.dataset.action ? { id: a.dataset.id || a.dataset.key, action: a.dataset.action } : null;
+  const kept = el._tkDigest;
+  const inPage = kept && el.contains(kept.node);
+  const scroll = inPage ? kept.node.scrollTop : 0;
+  const reselect = inPage ? keepSelection(kept.node) : null;
   el._tkHtml = html;
   el.innerHTML = html;
   const fold = el.querySelector('.tk-sec-done');
   if (fold && wasOpen) fold.open = true;
-  // A digest's math and diagrams render after it is in the page.
-  if (el.querySelector('.tk-digest.md')) runPendingAsync();
+  const slot = el.querySelector('.tk-digest-slot');
+  el._tkDigest = null;
+  if (slot) {
+    const id = slot.dataset.digest, v = slot.dataset.v;
+    const same = kept && kept.id === id;
+    const node = same && kept.v === v ? kept.node : digestNode(id);
+    slot.replaceWith(node);
+    el._tkDigest = { id, v, node };
+    // A new version of the same digest keeps the place read to.
+    if (same && inPage) node.scrollTop = scroll;
+    if (node === kept?.node && reselect) reselect();
+    // A digest's math and diagrams render after it is in the page.
+    if (node !== kept?.node) runPendingAsync();
+  }
   if (focus) {
     for (const b of el.querySelectorAll('[data-action="' + CSS.escape(focus.action) + '"]')) {
       if ((b.dataset.id || b.dataset.key) === focus.id) { b.focus(); break; }
@@ -740,13 +785,14 @@ function seenSelected() {
 const SEEN_REMOTE_MS = 1500;
 
 // seenRemoteLater tells another node's gateway, a little later, that you saw
-// the result of the turn key just ended there, the 会话 view showing it to
-// you: no viewing frame reaches it, so each turn's end would leave a dot.
+// the result of the turn key just ended there, the 会话 view or the Planner
+// page beside that node's Planner showing it to you (sessionShown): no
+// viewing frame reaches it, so each turn's end would leave a dot.
 function seenRemoteLater(key, node) {
   if (isLocalNode(node) || node !== plannerHost.node && !key.startsWith('task:')) return;
-  if (!selectionShown() || selection.key !== key || (selection.node || 'local') !== node) return;
+  if (!sessionShown(key, node)) return;
   setTimeout(() => {
-    if (!selectionShown() || selection.key !== key || (selection.node || 'local') !== node) return;
+    if (!sessionShown(key, node)) return;
     fetchJSON(nodeAPI(node, NZ_CONTRACT.API.tasks_seen), {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [key] }), timeoutMs: 8000,
     }).then(() => { if (node === plannerHost.node && mounts.size) refreshTasks(); })
@@ -778,7 +824,8 @@ async function loadDigest(id) {
   try {
     const d = await fetchJSON(plannerAPI(NZ_CONTRACT.API.sessions_digest) + '?key=' + encodeURIComponent(id), { timeoutMs: 8000 });
     if (g !== gen) return;
-    digests.set(id, { md: String((d && d.markdown) || ''), stamp });
+    const md = String((d && d.markdown) || '');
+    digests.set(id, { md, stamp, v: had && had.md === md ? had.v : ++digestSeq });
   } catch (e) {
     if (g !== gen) return;
     // A read failing again keeps what was read; the stamp holds it off
