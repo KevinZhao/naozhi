@@ -43,13 +43,13 @@ func (c *spawnConfig) launchSpecFor(key string, ov shim.SpawnOverlay) LaunchSpec
 }
 
 func hasSettingsOverrides(ov shim.SpawnOverlay) bool {
-	return ov.CrossSessionInbound != "" || len(ov.PermissionsDeny) > 0 || len(ov.PermissionsAllow) > 0
+	return ov.CrossSessionInbound != "" || len(ov.PermissionsDeny) > 0 || len(ov.PermissionsAllow) > 0 || ov.Ultracode
 }
 
 // writeSessionSettings writes the per-session settings file at path: the
 // naozhi-owned settings file base (or {} when base is "" and the CLI loads
-// ~/.claude/settings.json itself) plus ov's crossSessionInbound and
-// permissions.deny / permissions.allow. Rewritten on every spawn, so a base
+// ~/.claude/settings.json itself) plus ov's crossSessionInbound,
+// permissions.deny / permissions.allow and ultracode. Rewritten on every spawn, so a base
 // edit reaches the session on its next spawn, not live.
 func writeSessionSettings(path, base string, ov shim.SpawnOverlay) error {
 	doc := map[string]any{}
@@ -67,6 +67,9 @@ func writeSessionSettings(path, base string, ov shim.SpawnOverlay) error {
 	}
 	if ov.CrossSessionInbound != "" {
 		doc["crossSessionInbound"] = ov.CrossSessionInbound
+	}
+	if ov.Ultracode {
+		doc["ultracode"] = true
 	}
 	addPermissionRules(doc, "deny", ov.PermissionsDeny)
 	addPermissionRules(doc, "allow", ov.PermissionsAllow)

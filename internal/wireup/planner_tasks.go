@@ -91,14 +91,17 @@ type TaskOpts struct {
 // session's tool list, and a project's own permissions.allow does not bring
 // it back, while a project's disableAllHooks turned a hook off (11-08 runs).
 // Every dispatched session, with mcp_tools or not, also denies taskDeny.
-func (t TaskOpts) For(key, dir, title, model string, tools map[string][]string) (session.AgentOpts, error) {
+// A dispatch with ultracode turns the CLI's ultracode settings key on.
+func (t TaskOpts) For(key string, s action.Spawn) (session.AgentOpts, error) {
 	opts := t.Base
 	opts.Backend, opts.DefaultBackend = "claude", ""
-	opts.Workspace = dir
-	if model != "" {
-		opts.Model = model
+	opts.Workspace = s.Dir
+	if s.Model != "" {
+		opts.Model = s.Model
 	}
-	opts.Name = title
+	opts.Name = s.Title
+	opts.Ultracode = s.Ultracode
+	tools := s.MCPTools
 	opts.CrossSessionInbound = "accept"
 	opts.Exempt = false
 	opts.SystemPrompt = strings.TrimSpace(opts.SystemPrompt + "\n\n" + taskPrompt(t.Planner))
@@ -203,10 +206,12 @@ func (t TaskOpts) ForKey(key string) (session.AgentOpts, bool) {
 	if !ok || m.Purpose != sidecar.PurposeTask {
 		return session.AgentOpts{}, false
 	}
-	opts, err := t.For(key, m.Dir, m.Title, m.Model, m.MCPTools)
+	s := action.Spawn{Dir: m.Dir, Title: m.Title, Model: m.Model, MCPTools: m.MCPTools, Ultracode: m.Ultracode}
+	opts, err := t.For(key, s)
 	if err != nil {
 		slog.Warn("planner task: mcp_tools not applied on respawn", "key", key, "err", err)
-		opts, _ = t.For(key, m.Dir, m.Title, m.Model, nil)
+		s.MCPTools = nil
+		opts, _ = t.For(key, s)
 	}
 	return opts, true
 }
@@ -249,7 +254,7 @@ type TaskSpawner struct {
 // Spawn is action.Config.Spawn. A start that fails is said in the user's
 // words (spawnError): the Planner relays it.
 func (t TaskSpawner) Spawn(ctx context.Context, key string, s action.Spawn) error {
-	opts, err := t.Opts.For(key, s.Dir, s.Title, s.Model, s.MCPTools)
+	opts, err := t.Opts.For(key, s)
 	if err != nil {
 		return err
 	}

@@ -254,7 +254,8 @@ function actionCardHtml(raw) {
     const name = WORKSPACE_ID_RE.test(ws) ? workspaceName(ws) : ws;
     return '<div class="pl-act pl-act-dispatch"' + (name || !ws ? '' : ' data-ws="' + escAttr(ws) + '"') + '><div class="pl-act-h">派出会话' + (title ? ' · <b>' + esc(title) + '</b>' : '') + '</div>' +
       rowsHtml([['工作区', name], ['模型', str(a.model)], ['附上', a.with_user_words === true ? '你这一轮的原话' : ''],
-        ['放行写工具', mcpToolsText(a.mcp_tools)], ['第一条消息', str(a.message)]]) + '</div>';
+        ['放行写工具', mcpToolsText(a.mcp_tools)], ['模式', a.ultracode === true ? 'ultracode（每一轮可多代理编排）' : ''],
+        ['第一条消息', str(a.message)]]) + '</div>';
   }
   if (a.type === 'relay') {
     // What the session got is the user's words then this text; the card

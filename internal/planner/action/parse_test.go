@@ -113,6 +113,9 @@ func TestParse(t *testing.T) {
 	if d == nil || !d.WithUserWords || !reflect.DeepEqual(d.MCPTools, map[string][]string{"aws-outlook-mcp": {"calendar_meeting"}}) {
 		t.Errorf("dispatch with words and mcp_tools = %+v", d)
 	}
+	if d = Parse(block(`{"type":"dispatch","workspace":"w","title":"t","model":"","message":"m","ultracode":true}`))[0].Dispatch; d == nil || !d.Ultracode {
+		t.Errorf("dispatch with ultracode = %+v", d)
+	}
 	rl := Parse(block(`{"type":"relay","key":" task:ab12 ","text":" 按用户说的合并 #1 "}`))[0].Relay
 	if rl == nil || *rl != (Relay{Key: "task:ab12", Text: "按用户说的合并 #1"}) {
 		t.Errorf("relay = %+v", rl)

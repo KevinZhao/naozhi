@@ -92,6 +92,11 @@ type Dispatch struct {
 	// turns that server's write switch on for the session and denies its
 	// other write tools. Only a turn the user started may carry it.
 	MCPTools map[string][]string `json:"mcp_tools,omitempty"`
+	// Ultracode starts the session in ultracode, standing workflow
+	// orchestration for every turn (the CLI's settings key). The keyword in
+	// Message does nothing: the CLI takes it only from a human's input. Only
+	// a turn the user started may set it, as the user's choice.
+	Ultracode bool `json:"ultracode,omitempty"`
 }
 
 // Promise registers something the Planner promised the user.

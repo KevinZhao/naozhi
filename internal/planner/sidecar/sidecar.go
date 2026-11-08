@@ -64,7 +64,9 @@ type Meta struct {
 	// MCPTools are the write tools the dispatch allowed this session, by
 	// server (D98), kept so a respawn gets them too.
 	MCPTools map[string][]string `json:"mcp_tools,omitempty"`
-	Created  time.Time           `json:"created"`
+	// Ultracode is the dispatch's ultracode, kept for a respawn.
+	Ultracode bool      `json:"ultracode,omitempty"`
+	Created   time.Time `json:"created"`
 	// Retired is when the session was first seen gone from the router; the
 	// file is removed Retention later.
 	Retired time.Time `json:"retired,omitzero"`

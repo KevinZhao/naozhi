@@ -1,7 +1,7 @@
 // E2E: the Planner passing the user's decision on (planner RFC D98). In its
 // conversation a relay block is a "转达你的决定" card naming the session,
 // an ask naming a task says where the answer goes, a dispatch says it
-// carries the user's words and the MCP it opens; in the session the relayed
+// carries the user's words, the MCP it opens and ultracode (D99); in the session the relayed
 // message shows the user's words as a quote, then the Planner's text, with
 // none of the envelope's tags.
 const { test, expect } = require('@playwright/test');
@@ -37,7 +37,7 @@ for (const [name, vp] of [['desktop', { viewport: { width: 1440, height: 900 } }
           block({ type: 'relay', key: TASK, text: 'iso 按顺序合并，每合一个等 CI 绿' }) + '\n\n' +
           block({ type: 'ask', question: 'iso 要发版吗？', options: ['发', '先不发'], task: TASK }) + '\n\n' +
           block({ type: 'dispatch', workspace: 'myproject', title: 'iso 建日程', model: '', message: 'iso 建两个日程', with_user_words: true,
-            mcp_tools: { 'aws-outlook-mcp': ['calendar_meeting'] } }) },
+            mcp_tools: { 'aws-outlook-mcp': ['calendar_meeting'] }, ultracode: true }) },
       ],
     });
     try {
@@ -56,6 +56,7 @@ for (const [name, vp] of [['desktop', { viewport: { width: 1440, height: 900 } }
       await expect(dispatch).toContainText('你这一轮的原话');
       await expect(dispatch).toContainText('放行写工具');
       await expect(dispatch).toContainText('aws-outlook-mcp：calendar_meeting');
+      await expect(dispatch).toContainText('ultracode（每一轮可多代理编排）');
       await expect(reply).not.toContainText(TASK);
 
       // The session: the relayed message reads whose words are whose.

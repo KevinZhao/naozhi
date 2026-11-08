@@ -50,6 +50,8 @@ type AgentOpts struct {
 	CrossSessionInbound string
 	PermissionsDeny     []string
 	PermissionsAllow    []string
+	// Ultracode turns the session's ultracode settings key on (Claude only).
+	Ultracode bool
 }
 
 // SessionStatus indicates how a session was obtained.
