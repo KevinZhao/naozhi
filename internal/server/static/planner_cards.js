@@ -390,29 +390,119 @@ function foldTextKeys(ev, keys) {
 // emptyBracketRE is a bracket the folded keys emptied: "（`a` 和 `b`）".
 const emptyBracketRE = /\s*[（(]\s*(?:[和与及、，,；;]\s*)*[）)]/g;
 
-// foldKeys drops from a reply the backticked keys it names sessions by
-// after their names (§6.4): the cards under it carry them, and the user
-// reads names, not keys. A key with no text before it stands for the name;
-// a bracket of keys alone goes with them.
+// listSepRE is the text between two items of a list: "`a`、`b`", "`a` 和 `b`".
+const listSepRE = /^\s*[、，,；;和与及]\s*$/;
+
+// lineBefore is the text of node's line up to node: its inline siblings back
+// to a line break, through the <strong>/<em> it sits in, so a bold name
+// still reads as the name before a key.
+function lineBefore(node) {
+  let s = '';
+  const line = () => s.slice(s.lastIndexOf('\n') + 1);
+  for (let n = node; n && !n.matches('li, td, th, blockquote, .event-content'); n = n.parentElement) {
+    for (let p = n.previousSibling; p; p = p.previousSibling) {
+      if (p.nodeType === Node.ELEMENT_NODE && p.matches('br, div, ul, ol, pre, table, blockquote')) return line();
+      s = p.textContent + s;
+    }
+  }
+  return line();
+}
+
+// knownNames are the names a reply may have written a session by: the
+// Planner reads a session's whole summary or the 任务 title, while the
+// dashboard shows a shortened title, so any of them counts. Empty for a
+// session known to none, which only its kind names.
+function knownNames(key) {
+  const s = sessionList.sessionsData[sid(key, plannerHost.node)];
+  const names = [s?.user_label, s?.summary, listedTitle(key), pc.tasks.get(key), pc.health.get(key)?.name];
+  const out = [];
+  names.forEach((n) => {
+    const t = String(n || '').trim();
+    if (!t) return;
+    out.push(t);
+    // An automatic title cut short ends in "…": the text before it is the name.
+    if (t.endsWith('…') && t.length > 1) out.push(t.slice(0, -1).trimEnd());
+  });
+  return out;
+}
+
+// namedBefore tells whether the line before a key already gave the
+// session's name: "名字 `key`", "名字：`key`", or the key in a bracket
+// after it, "名字（…，`key`）". For a session known to none any text before
+// the key is taken as its name, as before: its kind name ("派出的任务") would
+// only repeat what the text said. In a list it is still named, or the
+// separator before the next key would be left bare.
+function namedBefore(before, key, inList) {
+  const names = knownNames(key);
+  const head = before.replace(/\s*[：:]?\s*$/, '');
+  if (!names.length) return !inList && /[^\s、，,；;（(：:]$/.test(head);
+  if (names.some((n) => head.endsWith(n))) return true;
+  const open = Math.max(before.lastIndexOf('（'), before.lastIndexOf('('));
+  const out = open >= 0 && !/[）)]/.test(before.slice(open)) && before.slice(0, open).trimEnd();
+  return out !== false && names.some((n) => out.endsWith(n));
+}
+
+// startsWithName is whether a bracket's text opens with name as a word of
+// its own: "（iso 周报，20 分钟）", not "（iso 周报整理）".
+function startsWithName(text, name) {
+  return text.startsWith(name) && /^(?:$|[\s，,、；;：:])/.test(text.slice(name.length));
+}
+
+// foldKeys puts names in place of the backticked keys a reply names
+// sessions by (§6.4, §15.12 ①): the cards under it carry the keys, and the
+// user reads names. A key that only repeats the name the text gave right
+// before it goes, and so does a bracket holding only keys; dropping any
+// other would cut the sentence's object ("派出了。") or leave "：、、".
 function foldKeys(ev, keys) {
   const emptied = new Set();
-  ev.querySelectorAll('.event-content code').forEach((code) => {
-    const key = code.textContent.trim();
-    if (code.closest('pre, .pl-scards') || !keys.has(key)) return;
+  const codes = [...ev.querySelectorAll('.event-content code')]
+    .filter((code) => !code.closest('pre, .pl-scards') && keys.has(code.textContent.trim()));
+  // Decided before any key is folded: folding changes the siblings.
+  const runs = [];
+  codes.forEach((code) => {
+    const sep = code.previousSibling;
+    const run = runs[runs.length - 1];
+    if (run && sep?.nodeType === Node.TEXT_NODE && listSepRE.test(sep.data) && sep.previousSibling === run[run.length - 1]) run.push(code);
+    else runs.push([code]);
+  });
+  const text = (n) => (n?.nodeType === Node.TEXT_NODE ? n.data : '');
+  const drop = new Set();
+  runs.forEach((run) => {
+    const bracketed = /[（(]\s*$/.test(text(run[0].previousSibling)) && /^\s*[）)]/.test(text(run[run.length - 1].nextSibling));
+    run.forEach((code) => {
+      if (bracketed || namedBefore(lineBefore(code), code.textContent.trim(), run.length > 1)) drop.add(code);
+    });
+  });
+  codes.forEach((code) => {
+    const name = sessionTitle(code.textContent.trim());
     const prev = code.previousSibling;
     const next = code.nextSibling;
-    if (prev?.nodeType !== Node.TEXT_NODE || !prev.data.trim()) {
-      code.replaceWith(sessionTitle(key));
-      return;
+    if (!drop.has(code)) {
+      // "`key`（名字…）" names it right after: the name once, not twice.
+      const m = next?.nodeType === Node.TEXT_NODE && /^\s*[（(]\s*([^（）()]*?)\s*[）)]/.exec(next.data);
+      if (m && m[1] === name) next.data = next.data.slice(m[0].length);
+      if (!m || !startsWithName(m[1], name) || m[1] === name) {
+        code.replaceWith(name);
+        return;
+      }
     }
-    if (prev?.nodeType === Node.TEXT_NODE && next?.nodeType === Node.TEXT_NODE && /[（(]$/.test(prev.data) && /^[）)]/.test(next.data)) {
-      prev.data = prev.data.slice(0, -1);
-      next.data = next.data.slice(1);
+    if (prev?.nodeType === Node.TEXT_NODE) {
+      if (next?.nodeType === Node.TEXT_NODE && /[（(]$/.test(prev.data) && /^[）)]/.test(next.data)) {
+        prev.data = prev.data.slice(0, -1);
+        next.data = next.data.slice(1);
+      }
+      prev.data = prev.data.trimEnd();
+      if (/[：:]$/.test(prev.data)) {
+        // "名字：`key`" said the name: the colon goes when nothing is left
+        // after it, and what is left closes up to it.
+        const after = next?.nodeType === Node.TEXT_NODE ? next.data : next && !next.matches('br') ? next.textContent : '';
+        if (/^\s*(?:[，,。.、；;！!？?）)]|$)/.test(after)) prev.data = prev.data.slice(0, -1);
+        else if (next?.nodeType === Node.TEXT_NODE) next.data = next.data.trimStart();
+      }
+      // The separator before a key that closes a bracket or the line has
+      // nothing left to separate: "（名字 work，`key`）" reads "（名字 work）".
+      if (!next || next.nodeType === Node.TEXT_NODE && /^\s*[）)]/.test(next.data)) prev.data = prev.data.replace(/[，,、；;]$/, '');
     }
-    if (prev?.nodeType === Node.TEXT_NODE) prev.data = prev.data.trimEnd();
-    // The separator before a key that closes a bracket or the line has
-    // nothing left to separate: "（名字 work，`key`）" reads "（名字 work）".
-    if (!next || next.nodeType === Node.TEXT_NODE && /^\s*[）)]/.test(next.data)) prev.data = prev.data.replace(/[，,、；;]$/, '');
     emptied.add(code.parentNode);
     code.remove();
   });

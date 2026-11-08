@@ -216,6 +216,71 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
   }
 });
 
+// A key stands for its session's name: folding it away left "派出了。" or
+// "派出了 、、。" (§15.12 ①). Only a key that repeats the name right before
+// it (bold or not, its colon with it) and a bracket holding only keys go.
+const FOLD_ROWS = [
+  ['派出了 A、B、C。', '派出了 iso 周报、iso 评审、iso 部署。'],
+  ['派出了 A，B；C。', '派出了 iso 周报，iso 评审；iso 部署。'],
+  ['A, B 都在跑。', 'iso 周报, iso 评审 都在跑。'],
+  ['派出了 A 和 B。', '派出了 iso 周报 和 iso 评审。'],
+  ['名单：A。', '名单：iso 周报。'],
+  ['iso 周报：A 已完成。', 'iso 周报：已完成。'],
+  ['iso 周报 A 先等等。', 'iso 周报 先等等。'],
+  ['派出了 A，正在跑。', '派出了 iso 周报，正在跑。'],
+  ['**iso 周报**：A 在跑。', 'iso 周报：在跑。'],
+  ['- **iso 周报**：A', 'iso 周报'],
+  ['iso 周报：A；iso 评审：B。', 'iso 周报；iso 评审。'],
+  ['iso 周报 A 和 B 都在跑。', 'iso 周报 和 iso 评审 都在跑。'],
+  ['派出了 A（iso 周报）。', '派出了 iso 周报。'],
+  ['已派：A（iso 周报，20 分钟）', '已派：（iso 周报，20 分钟）'],
+  ['iso 周报 和 iso 评审（A、B）都在跑。', 'iso 周报 和 iso 评审都在跑。'],
+  ['三个都在 naozhi（A，B，C）。', '三个都在 naozhi。'],
+  ['派出了 A（iso 周报整理）。', '派出了 iso 周报（iso 周报整理）。'],
+  // The Planner names a session by its whole summary; the dashboard by a
+  // shortened title. Either is its name.
+  ['修复 dashboard 在断线重连之后滚动跳动的问题并补上测试 {D} 在跑。', '修复 dashboard 在断线重连之后滚动跳动的问题并补上测试 在跑。'],
+  // A session no list knows (put away a day ago) is named only by its kind:
+  // the name before it stands, not "整理周报 派出的任务".
+  ['整理周报 {G} 在跑。', '整理周报 在跑。'],
+];
+
+test('keys in a reply fold to names or away, never to bare separators', async ({ page }) => {
+  const tasks = [['task:isoa1', 'iso 周报'], ['task:isob2', 'iso 评审'], ['task:isoc3', 'iso 部署']];
+  const s = defaultSessions();
+  for (const [key, label] of tasks) {
+    s.sessions.push({ key, state: 'ready', platform: 'task', agent: 'general', cli_name: 'claude', purpose: 'task', user_label: label,
+      workspace: '/home/user/workspace/naozhi', last_active: now - 20000, node: 'local' });
+  }
+  s.sessions.push({ key: 'task:isod4', state: 'ready', platform: 'task', agent: 'general', cli_name: 'claude', purpose: 'task',
+    summary: '修复 dashboard 在断线重连之后滚动跳动的问题并补上测试', workspace: '/home/user/workspace/naozhi', last_active: now - 20000, node: 'local' });
+  const tick = (key) => '`' + key + '`';
+  const reply = (line) => line.replace('A', tick(tasks[0][0])).replace('B', tick(tasks[1][0])).replace('C', tick(tasks[2][0]))
+    .replace('{D}', tick('task:isod4')).replace('{G}', tick('task:gone9'));
+  const mock = await startMockServer({
+    ws: true, sessions: s, inbox: inbox(), systemHealth: health(),
+    plannerEvents: FOLD_ROWS.map(([line], i) => ({ type: 'text', time: now - 60000 + i, uuid: 'pc-fold' + i, detail: reply(line) })),
+    planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
+  });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await page.click('#abnav-planner');
+    const replies = page.locator('#pl-stream .event.text');
+    await expect(replies).toHaveCount(FOLD_ROWS.length);
+    // Each reply's own text: its cards and copy button read the names too.
+    const texts = () => replies.evaluateAll((els) => els.map((el) => {
+      const c = el.querySelector('.event-content').cloneNode(true);
+      c.querySelectorAll('.pl-scards, button').forEach((n) => n.remove());
+      return c.textContent.trim();
+    }));
+    await expect.poll(texts).toEqual(FOLD_ROWS.map(([, want]) => want));
+    await expect(page.locator('#pl-stream')).not.toContainText('task:');
+  } finally {
+    mock.server.close();
+  }
+});
+
 test('chat view: 交给 Planner sends the session with the typed text', async ({ page }) => {
   const mock = await startMockServer({
     ws: true, plannerEvents: [], inbox: { open: [], closed: [], counts: { open: 0, badge: 0 } },
