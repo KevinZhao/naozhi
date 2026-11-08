@@ -140,8 +140,15 @@ func (t TaskOpts) For(key string, s action.Spawn) (session.AgentOpts, error) {
 // enable_write_tools turns all its write tools on at runtime, whatever the
 // write switch the session started with, so a session dispatched with no
 // mcp_tools (the router-wide servers, switch off) could otherwise send mail
-// after one call. A user's own sessions keep it.
-var taskDeny = []string{scout.MCPTool(scout.ServerOutlook, scout.EnableWrites)}
+// after one call. A user's own sessions keep it. The two Bash rules stop
+// the plain way around the switch, a session starting its own Outlook
+// server with the write variable set; a rewritten command line still gets
+// past them, so they slow a session down and are no boundary (§15.12 ①).
+var taskDeny = []string{
+	scout.MCPTool(scout.ServerOutlook, scout.EnableWrites),
+	"Bash(" + scout.ServerOutlook + ":*)",
+	"Bash(*" + scout.WriteSwitch[scout.ServerOutlook] + "*)",
+}
 
 // maxMCPConfigBytes caps cli.mcp_config as read here (the scout's cap).
 const maxMCPConfigBytes = 1 << 20
