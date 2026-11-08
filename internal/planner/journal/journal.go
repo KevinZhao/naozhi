@@ -56,11 +56,14 @@ const (
 	// KindReap is a done task's session put away or its worktree removed
 	// (planner/reap).
 	KindReap Kind = "reap"
+	// KindTurn is a session's turn ending, one per result frame
+	// (planner/activity.Recorder.RecordTurn).
+	KindTurn Kind = "turn"
 )
 
 func (k Kind) known() bool {
 	switch k {
-	case KindHealth, KindNotify, KindBrief, KindHeartbeat, KindActivity, KindDialog, KindCustody, KindReap:
+	case KindHealth, KindNotify, KindBrief, KindHeartbeat, KindActivity, KindDialog, KindCustody, KindReap, KindTurn:
 		return true
 	}
 	return false

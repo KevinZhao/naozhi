@@ -211,6 +211,7 @@ func TestRender(t *testing.T) {
 	f.output(at(2, 20, 31), "dashboard:pj:abc:general", ws, activity.Activity{Type: activity.TypeOutput, Path: "docs/a.md", Dir: "/w"})
 	f.output(at(2, 20, 40), "dashboard:pj:abc:general", ws, activity.Activity{Type: activity.TypePRCreate, URL: "https://github.com/o/r/pull/12"})
 	f.health(at(2, 21, 0), "dashboard:pj:abc:general", ws, health.Active, health.Idle, health.KindSession, "")
+	f.turn(at(2, 21, 0), "dashboard:pj:abc:general", ws, activity.TurnDone)
 	f.health(at(3, 2, 0), "cron:nightly", ws, health.Idle, health.Failed, health.KindCron, health.ErrCredentialExpired)
 	f.health(at(3, 3, 0), "node2/dashboard:direct:x:general", ws, health.Active, health.Idle, health.KindRemote, "")
 	f.snap = health.Snapshot{At: at(3, 9, 0), Units: []health.Unit{
