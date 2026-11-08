@@ -445,6 +445,11 @@ func TestBlockedPutAwayLimits(t *testing.T) {
 			r.update(key, func(m *sidecar.Meta) { m.Chain = &sidecar.Chain{Sent: MaxIdle, Idle: MaxIdle, Progress: "p0"} })
 			r.progress[key] = "p0"
 		}, ErrStopped, true},
+		// Put away, the session is off the router and its progress reads "".
+		{"no progress, put away", func(r *rig) {
+			r.update(key, func(m *sidecar.Meta) { m.Chain = &sidecar.Chain{Sent: MaxIdle, Idle: MaxIdle, Progress: "p0"} })
+			r.progress[key] = ""
+		}, ErrStopped, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newRig(t)

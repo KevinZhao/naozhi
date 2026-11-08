@@ -728,7 +728,11 @@ func (e *Engine) Blocked(key string) error {
 	}
 	root := e.root(key)
 	c := e.chain(root)
-	if why := limit(c, e.progress(key)); why != "" {
+	// A session put away is off the router, so its progress reads "": it has
+	// made none since custody last sent to it, and Deliver after the reopen
+	// reads the progress it had then.
+	progress := cmp.Or(e.progress(key), c.Progress)
+	if why := limit(c, progress); why != "" {
 		return e.stopLocked(root, key, c, why, false)
 	}
 	return nil
