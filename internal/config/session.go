@@ -58,7 +58,7 @@ type QueueConfig struct {
 
 type ShimConfig struct {
 	IdleTimeout string `yaml:"idle_timeout"` // shim exits after no connection (default: "4h")
-	StateDir    string `yaml:"state_dir"`    // shim state directory (default: ~/.naozhi/shims)
+	StateDir    string `yaml:"state_dir"`    // shim state directory (default: shims/ beside store_path, else ~/.naozhi/shims)
 }
 
 type WatchdogConfig struct {

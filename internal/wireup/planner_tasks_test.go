@@ -29,9 +29,10 @@ func TestTaskOptsForKey(t *testing.T) {
 		to := TaskOpts{Base: session.AgentOpts{Model: "opus", Backend: "kiro", DefaultBackend: "kiro", SystemPrompt: "base"}, Sessions: side, Planner: "planner-abc123"}
 		opts, ok := to.ForKey(key)
 		if !ok || opts.Backend != "claude" || opts.DefaultBackend != "" || opts.Model != "sonnet" || opts.Workspace != "/tmp/ws" ||
-			opts.Name != "iso 写 hello" || opts.CrossSessionInbound != "accept" || opts.Exempt ||
+			opts.Name != "iso 写 hello" || opts.CrossSessionInbound != "accept" || opts.Exempt || opts.PromptCacheTTL != "" ||
 			!strings.HasPrefix(opts.SystemPrompt, "base\n\n") || !strings.Contains(opts.SystemPrompt, "SendMessage 发给 planner-abc123（") ||
-			!strings.Contains(opts.SystemPrompt, "以 <naozhi-relay> 开头的消息由网关写入") || opts.MCPConfig != "" {
+			!strings.Contains(opts.SystemPrompt, "以 <naozhi-relay> 开头的消息由网关写入") ||
+			!strings.Contains(opts.SystemPrompt, `交代以外的改动不做，包括 PR 标题、描述和分支名；你觉得该改的写进汇报的"建议"`) || opts.MCPConfig != "" {
 			t.Errorf("ForKey = %+v, %v", opts, ok)
 		}
 	})
@@ -149,7 +150,7 @@ func TestTaskOptsMCPTools(t *testing.T) {
 	if slices.Contains(opts.PermissionsDeny, "mcp__aws-outlook-mcp__calendar_meeting") || len(to.Base.PermissionsDeny) != 1 {
 		t.Errorf("deny %v (base %v): the allowed tool denied or the base changed", opts.PermissionsDeny, to.Base.PermissionsDeny)
 	}
-	if plain, _ := to.For("task:cd34", action.Spawn{Dir: "/tmp/ws", Title: "t"}); plain.MCPConfig != "" || !slices.Equal(plain.PermissionsDeny, []string{"Bash(rm -rf /)", enableWrites}) {
+	if plain, _ := to.For("task:cd34", action.Spawn{Dir: "/tmp/ws", Title: "t"}); plain.MCPConfig != "" || !slices.Equal(plain.PermissionsDeny, append([]string{"Bash(rm -rf /)"}, taskDenyRules...)) {
 		t.Errorf("no mcp_tools = %+v", plain)
 	}
 
@@ -173,7 +174,7 @@ func TestTaskOptsMCPTools(t *testing.T) {
 	if err := side.Put(sidecar.Meta{Key: key, Purpose: sidecar.PurposeTask, Title: "t", Dir: "/tmp/ws", MCPTools: tools}); err != nil {
 		t.Fatal(err)
 	}
-	if opts, ok := gone.ForKey(key); !ok || opts.MCPConfig != "" || opts.Name != "t" || !slices.Equal(opts.PermissionsDeny, []string{"Bash(rm -rf /)", enableWrites}) {
+	if opts, ok := gone.ForKey(key); !ok || opts.MCPConfig != "" || opts.Name != "t" || !slices.Equal(opts.PermissionsDeny, append([]string{"Bash(rm -rf /)"}, taskDenyRules...)) {
 		t.Errorf("respawn with a stale mcp_tools = %+v, %v", opts, ok)
 	}
 	if opts, ok := to.ForKey(key); !ok || opts.MCPConfig == "" || !slices.Contains(opts.PermissionsDeny, "mcp__aws-outlook-mcp__email_send") {
@@ -183,6 +184,10 @@ func TestTaskOptsMCPTools(t *testing.T) {
 
 // enableWrites is the rule every dispatched session denies (taskDeny).
 const enableWrites = "mcp__aws-outlook-mcp__enable_write_tools"
+
+// taskDenyRules is taskDeny written out: the tool, and the two Bash rules
+// against starting Outlook's server with its write switch.
+var taskDenyRules = []string{enableWrites, "Bash(aws-outlook-mcp:*)", "Bash(*OUTLOOK_MCP_ENABLE_WRITES*)"}
 
 func countOf(list []string, v string) (n int) {
 	for _, s := range list {
@@ -201,7 +206,7 @@ func TestTaskOptsDenyEnableWrites(t *testing.T) {
 	side := sidecar.Open("", nil)
 	to := TaskOpts{Sessions: side, Planner: "planner-abc123"}
 	opts, err := to.For("task:ab12", action.Spawn{Dir: "/tmp/ws", Title: "只读"})
-	if err != nil || !slices.Equal(opts.PermissionsDeny, []string{enableWrites}) {
+	if err != nil || !slices.Equal(opts.PermissionsDeny, taskDenyRules) {
 		t.Fatalf("For = %v, %v", opts.PermissionsDeny, err)
 	}
 	if to.Base.PermissionsDeny != nil {
@@ -211,7 +216,7 @@ func TestTaskOptsDenyEnableWrites(t *testing.T) {
 	if err := side.Put(sidecar.Meta{Key: key, Purpose: sidecar.PurposeTask, Title: "只读", Dir: "/tmp/ws"}); err != nil {
 		t.Fatal(err)
 	}
-	if opts, ok := to.ForKey(key); !ok || !slices.Equal(opts.PermissionsDeny, []string{enableWrites}) {
+	if opts, ok := to.ForKey(key); !ok || !slices.Equal(opts.PermissionsDeny, taskDenyRules) {
 		t.Errorf("respawn = %v, %v", opts.PermissionsDeny, ok)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
@@ -116,5 +117,60 @@ func TestReattachedTurnEndRefreshesLastActive(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A turn running for hours keeps last_active moving with its events, a
+// minute's step at a time: the list, index.json and the Planner's snapshot
+// read it, and an event inside the step leaves it where it was. The turn's
+// own time (LastTurnAt, what sessions.json keeps) stays the turn's start:
+// custody names a failure by it.
+func TestLastActiveFollowsEvents(t *testing.T) {
+	proc := NewTestProcess()
+	proc.StateVal = cli.StateRunning
+	s := &ManagedSession{key: "dashboard:direct:la:general"}
+	s.storeProcess(proc)
+	s.setSessionID("sid-la")
+
+	started := time.Now().Add(-3 * time.Hour)
+	s.lastActive.Store(started.UnixNano())
+	if got := s.LastActive(); !got.Equal(started) {
+		t.Fatalf("before any event: %v, want the turn's start %v", got, started)
+	}
+
+	proc.EventLog.Append(clievent.EventEntry{Type: "tool_use", Summary: "Bash"})
+	ev := proc.LastEventAt()
+	if got := s.LastActive(); !got.Equal(ev) {
+		t.Fatalf("after an event 3h into the turn: %v, want the event's %v", got, ev)
+	}
+	if got := s.Snapshot().LastActive; got != ev.UnixMilli() {
+		t.Errorf("snapshot last_active = %d, want %d", got, ev.UnixMilli())
+	}
+
+	// Within the step: it stays at the first event.
+	proc.EventLog.Append(clievent.EventEntry{Type: "text", Summary: "still going"})
+	if later := proc.LastEventAt(); later.Equal(ev) {
+		t.Fatal("the second event has the first one's time")
+	}
+	if got := s.LastActive(); !got.Equal(ev) {
+		t.Errorf("an event within the step moved it: %v, want %v", got, ev)
+	}
+
+	if got := s.LastTurnAt(); !got.Equal(started) {
+		t.Errorf("LastTurnAt = %v, want the turn's start %v", got, started)
+	}
+	e, ok := sessionToStoreEntry(s)
+	if !ok {
+		t.Fatal("no store entry")
+	}
+	if e.LastActive != started.UnixNano() {
+		t.Errorf("stored last_active = %d, want the turn's %d", e.LastActive, started.UnixNano())
+	}
+
+	// Never backwards: a turn's end after the last event stays.
+	s.touchLastActive()
+	end := s.LastTurnAt()
+	if got := s.LastActive(); !got.Equal(end) || got.Before(ev) {
+		t.Errorf("after the turn's end: %v, want %v", got, end)
 	}
 }

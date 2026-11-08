@@ -52,6 +52,9 @@ type AgentOpts struct {
 	PermissionsAllow    []string
 	// Ultracode turns the session's ultracode settings key on (Claude only).
 	Ultracode bool
+	// PromptCacheTTL is the session's promptCacheTtl settings key ("1h"):
+	// "" keeps the CLI's 5-minute prompt cache (Claude only).
+	PromptCacheTTL string
 }
 
 // SessionStatus indicates how a session was obtained.

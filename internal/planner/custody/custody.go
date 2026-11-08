@@ -699,6 +699,45 @@ func (e *Engine) Check(key string) error {
 // Allowed reports whether custody may send to key now.
 func (e *Engine) Allowed(key string) bool { return e.Check(key) == nil }
 
+// Blocked returns why custody would not send to key whatever becomes of its
+// session: custody disabled, its switch turned off by the user or the
+// Planner, paused, its lineage stopped, the user at the session, or the
+// lineage at a limit, which stops it as Deliver would. A dispatched session
+// put away (planner/reap) reads off and not local until its task is
+// reopened, so Check cannot tell these from what reopening it would change;
+// a message to it is weighed by Blocked before anything reopens it, as
+// reopening sets its task back to 进行中 for a message Deliver would then
+// refuse.
+func (e *Engine) Blocked(key string) error {
+	switch {
+	case e.cfg.Disabled:
+		return ErrDisabled
+	case e.cfg.Sessions == nil || e.cfg.Send == nil:
+		return ErrOff
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if m, ok := e.cfg.Sessions.Get(key); ok && m.Custody != nil && m.Custody.By != ByAuto && !m.Custody.On {
+		return ErrOff
+	}
+	if err := e.retryCheckLocked(key); err != nil {
+		return err
+	}
+	if e.nearbyLocked(key) {
+		return ErrNearby
+	}
+	root := e.root(key)
+	c := e.chain(root)
+	// A session put away is off the router, so its progress reads "": it has
+	// made none since custody last sent to it, and Deliver after the reopen
+	// reads the progress it had then.
+	progress := cmp.Or(e.progress(key), c.Progress)
+	if why := limit(c, progress); why != "" {
+		return e.stopLocked(root, key, c, why, false)
+	}
+	return nil
+}
+
 // checkLocked is Check short of the user being nearby.
 func (e *Engine) checkLocked(key string) error {
 	if !e.On(key) {
@@ -1010,9 +1049,11 @@ func (e *Engine) autoOff(key string) {
 	}
 }
 
-// failedAt names one failure: when the session was last active, so a retry
-// that failed again is a new one even when health saw no transition.
-func failedAt(u health.Unit) time.Time { return cmp.Or(u.LastActive, u.Since) }
+// failedAt names one failure: when the session's turn last started or
+// ended, so a retry that failed again is a new one even when health saw no
+// transition, while a background task's events after the failed turn
+// (which move LastActive) are not.
+func failedAt(u health.Unit) time.Time { return cmp.Or(u.TurnAt, u.LastActive, u.Since) }
 
 // stale reports whether u's failure is older than staleAfter.
 func (e *Engine) stale(u health.Unit) bool { return e.staleSince(failedAt(u)) }
@@ -1070,7 +1111,7 @@ func (e *Engine) answer(u health.Unit) {
 			}
 			return
 		}
-		if u.Since.Before(u.LastActive) {
+		if u.Since.Before(cmp.Or(u.TurnAt, u.LastActive)) {
 			// Active again since health judged it failed (a retry ran):
 			// no transition took this failure to the inbox.
 			e.leaveLocked(key, class, "")

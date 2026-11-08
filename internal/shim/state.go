@@ -100,6 +100,10 @@ type SpawnOverlay struct {
 	// stream-json user message), so a dispatched session gets the mode only
 	// this way.
 	Ultracode bool `json:"ultracode,omitempty"`
+	// PromptCacheTTL is the CLI's promptCacheTtl settings key. A shim that
+	// predates the field reads "" and rebuilds the argv it was spawned
+	// with: the key lives in the settings file, whose path is the key's.
+	PromptCacheTTL string `json:"prompt_cache_ttl,omitempty"`
 }
 
 // EncodeSpawnOverlay serialises ov for the --spawn-overlay flag. Nil encodes
@@ -238,6 +242,12 @@ func GenerateToken() ([]byte, string, error) {
 		return nil, "", fmt.Errorf("generate token: %w", err)
 	}
 	return raw, base64.StdEncoding.EncodeToString(raw), nil
+}
+
+// DefaultStateDir is the state directory NewManager uses when given none.
+func DefaultStateDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".naozhi", "shims")
 }
 
 // SocketPath returns the unix socket path for a given session key hash.

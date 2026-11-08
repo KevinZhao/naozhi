@@ -43,14 +43,15 @@ func (c *spawnConfig) launchSpecFor(key string, ov shim.SpawnOverlay) LaunchSpec
 }
 
 func hasSettingsOverrides(ov shim.SpawnOverlay) bool {
-	return ov.CrossSessionInbound != "" || len(ov.PermissionsDeny) > 0 || len(ov.PermissionsAllow) > 0 || ov.Ultracode
+	return ov.CrossSessionInbound != "" || len(ov.PermissionsDeny) > 0 || len(ov.PermissionsAllow) > 0 || ov.Ultracode || ov.PromptCacheTTL != ""
 }
 
 // writeSessionSettings writes the per-session settings file at path: the
 // naozhi-owned settings file base (or {} when base is "" and the CLI loads
 // ~/.claude/settings.json itself) plus ov's crossSessionInbound,
-// permissions.deny / permissions.allow and ultracode. Rewritten on every spawn, so a base
-// edit reaches the session on its next spawn, not live.
+// permissions.deny / permissions.allow, ultracode and promptCacheTtl.
+// Rewritten on every spawn, so a base edit reaches the session on its next
+// spawn, not live.
 func writeSessionSettings(path, base string, ov shim.SpawnOverlay) error {
 	doc := map[string]any{}
 	if base != "" {
@@ -70,6 +71,9 @@ func writeSessionSettings(path, base string, ov shim.SpawnOverlay) error {
 	}
 	if ov.Ultracode {
 		doc["ultracode"] = true
+	}
+	if ov.PromptCacheTTL != "" {
+		doc["promptCacheTtl"] = ov.PromptCacheTTL
 	}
 	addPermissionRules(doc, "deny", ov.PermissionsDeny)
 	addPermissionRules(doc, "allow", ov.PermissionsAllow)

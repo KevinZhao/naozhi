@@ -115,6 +115,11 @@ type Config struct {
 	// of blocks not run (agent.Agent.UnrunTurn): its own blocks not run get
 	// none, so the two do not go round. nil reports none.
 	UnrunTurn func() bool
+	// Background reports whether key has a workflow or background task
+	// running (wireup.CustodySources.Background, the judgement custody's
+	// Settled makes): a turn that ended with work still going is no end of
+	// the task to report. nil is never.
+	Background func(key string) bool
 	// PlannerBusy reports whether a Planner turn is running
 	// (agent.Agent.Busy): a report may wait behind it. nil is never.
 	PlannerBusy func() bool
@@ -150,6 +155,7 @@ type Config struct {
 type Custodian interface {
 	On(key string) bool
 	Check(key string) error
+	Blocked(key string) error
 	Settled(key string) bool
 	Set(key string, on bool, by string) error
 	Deliver(key string, reason custody.Reason, text string) (int, error)
@@ -165,19 +171,43 @@ type Runner struct {
 	endCh chan ended
 	// grace is how long a turn end waits before it is checked (endGrace).
 	grace time.Duration
+	// after runs f once d passes (time.AfterFunc): the turn ends wait on it.
+	after func(d time.Duration, f func())
 
 	// last is when the previous Planner reply came: the next one's turn ran
 	// after it. mu also serializes the dispatched sessions' turn ends as
 	// their sidecars record them.
 	mu   sync.Mutex
 	last time.Time
+	// reopened are the tasks the gateway reopened (reachable, custody) since
+	// the handling goroutine last looked, under mu: an answer reopens one on
+	// the inbox's goroutine. A reopened task starts afresh: no receipt told,
+	// no quiet window (rearmReopened).
+	reopened map[string]bool
 
 	// doneTold is the tasks whose done block got the reminder of the
 	// promises citing them; endTold the tasks told of a turn that ended
-	// without a report, until the next report or the Planner's doing block.
+	// without a report, by when that turn ended, until the next report, the
+	// Planner's status block or a reopening. A turn end meanwhile is left
+	// unchecked on disk; the doing block answering the receipt has the
+	// latest of them held to its window's end (holdLatest).
+	// doingAt is when the Planner answered such a receipt with a doing
+	// block: the receipt asks for that very block, so re-arming at once
+	// would have every unreported turn end bring another receipt and another
+	// doing block (one task got 21 in 80 minutes). A turn end within
+	// doingQuiet of it is held to the window's end, unless a check saw the
+	// session's background work running: the turn that ends once that work
+	// is done is told. A report, a status block or a reopening clears it.
+	// Neither survives a restart, which may cost a task in the window, or
+	// told and unanswered, one more receipt per restart: its turn end is
+	// still unchecked on disk, and the next run checks it afresh.
+	// quiet is the turn end each task holds to its window's end, one per
+	// task on one timer: a later turn end only replaces it.
 	// Only the handling goroutine touches them.
 	doneTold map[string]bool
-	endTold  map[string]bool
+	endTold  map[string]time.Time
+	doingAt  map[string]time.Time
+	quiet    map[string]ended
 }
 
 // ended is a dispatched session's turn end: the reply, when the turn ended
@@ -186,6 +216,9 @@ type Runner struct {
 type ended struct {
 	key, text       string
 	at, from, until time.Time
+	// wake is the timer of key's quiet window ending: what is checked is
+	// the turn end the window holds (Runner.quiet).
+	wake bool
 }
 
 const (
@@ -198,6 +231,9 @@ const (
 	endWait = 30 * time.Minute
 	// endTextRunes caps the session's last reply in the receipt.
 	endTextRunes = 600
+	// doingQuiet is how long a task the Planner marked doing gets no
+	// receipt of a turn that ended without a report (doingAt).
+	doingQuiet = time.Hour
 )
 
 // reply is one Planner turn's result text and the span its turn ran in.
@@ -231,7 +267,8 @@ func New(cfg Config) *Runner {
 	// Reports older than the runner (history restored at startup) were the
 	// previous run's to check.
 	r := &Runner{cfg: cfg, ch: make(chan reply, queueLen), endCh: make(chan ended, queueLen), grace: endGrace,
-		last: cfg.Now(), doneTold: map[string]bool{}, endTold: map[string]bool{}}
+		after: func(d time.Duration, f func()) { time.AfterFunc(d, f) }, last: cfg.Now(), doneTold: map[string]bool{}, endTold: map[string]time.Time{}, doingAt: map[string]time.Time{},
+		quiet: map[string]ended{}, reopened: map[string]bool{}}
 	if cfg.Inbox != nil {
 		cfg.Inbox.HandleDecisions(HandlerAsk, r.decideAsk)
 		open, _ := cfg.Inbox.List(0)
@@ -367,8 +404,11 @@ func (r *Runner) recheck() {
 }
 
 // later queues e for a check once grace passes.
-func (r *Runner) later(e ended) {
-	time.AfterFunc(r.grace, func() {
+func (r *Runner) later(e ended) { r.laterIn(r.grace, e) }
+
+// laterIn queues e for a check once d passes.
+func (r *Runner) laterIn(d time.Duration, e ended) {
+	r.after(d, func() {
 		select {
 		case r.endCh <- e:
 		default:
@@ -379,10 +419,16 @@ func (r *Runner) later(e ended) {
 
 // checkEnded tells the Planner of a dispatched session still 进行中 whose
 // turn ended with no report reaching the Planner since its previous turn
-// ended: its last reply, and how to mark it. A busy Planner may still be
-// holding the report, so the check waits for its turn to end, up to endWait.
-// A task gets one such receipt until it reports again or the Planner marks
-// it doing.
+// ended: its last reply, and how to mark it. Only the session's latest turn
+// end is told: an earlier one's text is stale, and the later one has its
+// own check. A busy Planner may still be holding the report, so the check
+// waits for its turn to end, up to endWait. A session with background work
+// still running gets none: the work's end starts the turn that is checked.
+// A task gets one such receipt until it reports again or the Planner
+// answers it with a status block; a turn end within doingQuiet of a doing
+// block that answered one waits for the window to end and is told then if
+// it is still the session's latest and still unreported, so a task whose
+// last turn falls in the window is not left 进行中.
 func (r *Runner) checkEnded(e ended) {
 	defer func() {
 		if p := recover(); p != nil {
@@ -393,10 +439,36 @@ func (r *Runner) checkEnded(e ended) {
 		r.checkCustody(e)
 		return
 	}
+	r.rearmReopened()
+	if e.wake {
+		held, ok := r.quiet[e.key]
+		delete(r.quiet, e.key)
+		if !ok {
+			return
+		}
+		e = held
+	}
 	tasks := r.cfg.Tasks.List()
 	i := slices.IndexFunc(tasks, func(t task.Task) bool { return t.ID == e.key })
 	now := r.cfg.Now()
-	due := i >= 0 && !r.endTold[e.key] && tasks[i].State == task.Doing && !slices.Contains(r.cfg.Reports(e.from, now), e.key)
+	due := i >= 0 && r.latestTurn(e) && tasks[i].State == task.Doing && !slices.Contains(r.cfg.Reports(e.from, now), e.key)
+	if _, told := r.endTold[e.key]; due && told {
+		// Left unchecked on disk for the doing block answering the receipt
+		// (holdLatest).
+		return
+	}
+	if due && r.cfg.Background != nil && r.cfg.Background(e.key) {
+		delete(r.doingAt, e.key)
+		due = false
+	}
+	if at, ok := r.doingAt[e.key]; ok && due {
+		if end := at.Add(doingQuiet); now.Before(end) {
+			// Left unchecked on disk: a restart checks it again.
+			r.hold(e, end)
+			return
+		}
+		delete(r.doingAt, e.key)
+	}
 	if due && r.cfg.PlannerBusy != nil && r.cfg.PlannerBusy() && now.Before(e.until) {
 		r.later(e)
 		return
@@ -408,7 +480,7 @@ func (r *Runner) checkEnded(e ended) {
 		return
 	}
 	t := tasks[i]
-	r.endTold[e.key] = true
+	r.endTold[e.key] = e.at
 	text := strings.TrimSpace(textutil.TruncateRunes(e.text, endTextRunes))
 	if text == "" {
 		text = "（没有文字）"
@@ -419,6 +491,59 @@ func (r *Runner) checkEnded(e ended) {
 		receipt += "它在托管中：没做完、下一步又显而易见，就同时让它继续（" + custodyFormat(e.key) + "）。" + irreversibleRule
 	}
 	r.tell(receipt)
+}
+
+// hold holds e, the session's latest turn end, to end, its quiet window's
+// end: one timer per task, so a window's turn ends cannot fill endCh at its
+// end and push out the one that counts. A held turn end whose window ended
+// with it still held lost its timer's wake (endCh full), so it is armed
+// again.
+func (r *Runner) hold(e ended, end time.Time) {
+	now := r.cfg.Now()
+	if held, armed := r.quiet[e.key]; !armed || !now.Before(held.until.Add(-endWait)) {
+		r.laterIn(end.Sub(now), ended{key: e.key, wake: true})
+	}
+	e.until = end.Add(endWait)
+	r.quiet[e.key] = e
+}
+
+// holdLatest holds key's latest turn end to its quiet window's end when it
+// ended after the turn the receipt the doing block answers told of (at),
+// unchecked: endTold kept it from its own check, and it may be the last.
+func (r *Runner) holdLatest(key string, at time.Time) {
+	m, ok := r.cfg.Sessions.Get(key)
+	if !ok || m.Turn == nil || !m.Turn.Check || !m.Turn.Ended.After(at) {
+		return
+	}
+	t := m.Turn
+	r.hold(ended{key: key, text: t.Text, at: t.Ended, from: t.From}, r.doingAt[key].Add(doingQuiet))
+}
+
+// reopen notes that key's task was reopened (rearmReopened). Any goroutine.
+func (r *Runner) reopen(key string) {
+	r.mu.Lock()
+	r.reopened[key] = true
+	r.mu.Unlock()
+}
+
+// rearmReopened has the tasks reopened since start afresh: the receipt and
+// the window of before their task was over do not hold over its new turns.
+func (r *Runner) rearmReopened() {
+	r.mu.Lock()
+	keys := slices.Collect(maps.Keys(r.reopened))
+	clear(r.reopened)
+	r.mu.Unlock()
+	for _, k := range keys {
+		delete(r.endTold, k)
+		delete(r.doingAt, k)
+		delete(r.quiet, k)
+	}
+}
+
+// latestTurn reports whether e is its session's latest turn end.
+func (r *Runner) latestTurn(e ended) bool {
+	m, _ := r.cfg.Sessions.Get(e.key)
+	return m.Turn == nil || m.Turn.Ended.Equal(e.at)
 }
 
 // checkCustody tells the Planner of a session in custody whose turn ended
@@ -503,6 +628,7 @@ func (r *Runner) handle(rep reply) {
 			continue
 		}
 		var err error
+		reopened := false
 		switch {
 		case rep.outside != "" && (b.Dispatch != nil || b.Status != nil || b.Custody != nil || b.Relay != nil):
 			un.add(i, b, r.refuseOutside(b, rep.outside))
@@ -515,18 +641,23 @@ func (r *Runner) handle(rep reply) {
 				dispatched[b.Dispatch.Title] = key
 			}
 		case b.Relay != nil:
-			err = r.relay(*b.Relay, rep.words)
+			reopened, err = r.relay(*b.Relay, rep.words)
 		case b.Promise != nil:
 			err = r.promise(*b.Promise, dispatched)
 		case b.Ask != nil:
-			err = r.ask(*b.Ask)
+			if err = r.ask(*b.Ask); err == nil && b.Ask.Trimmed > 0 {
+				un.note(i, b, fmt.Sprintf("%d 个选项超过 %d 字，“通知”里的按钮截成了 %d 字（末尾是 …），用户点的回答送回来也是截过的那段", b.Ask.Trimmed, optionRunes, optionRunes))
+			}
 		case b.Status != nil:
 			statused[b.Status.Task] = b.Status.State
 			err = r.status(b)
 		case b.Notify != nil:
 			err = r.notify(*b.Notify)
 		case b.Custody != nil:
-			err = r.custody(*b.Custody)
+			reopened, err = r.custody(*b.Custody)
+		}
+		if reopened && err == nil {
+			un.note(i, b, "这个会话已经收起，网关已重新打开并送到")
 		}
 		var bad blockError
 		switch {
@@ -548,15 +679,21 @@ func (r *Runner) handle(rep reply) {
 type blockError struct{ error }
 
 // unrun is a reply's blocks not run, as the receipt lists them, and which
-// kinds of reason they had.
+// kinds of reason they had; notes are the blocks run with something the
+// Planner should know, what the gateway changed or did on the way.
 type unrun struct {
-	lines                                []string
+	lines, notes                         []string
 	tooMany, malformed, outside, notUser bool
 }
 
 // add lists block i (0-based) of a reply, not run for why.
 func (u *unrun) add(i int, b Block, why string) {
 	u.lines = append(u.lines, fmt.Sprintf("第 %d 块%s：%s", i+1, blockLabel(b), why))
+}
+
+// note lists block i (0-based) of a reply, run, with what.
+func (u *unrun) note(i int, b Block, what string) {
+	u.notes = append(u.notes, fmt.Sprintf("第 %d 块%s：%s", i+1, blockLabel(b), what))
 }
 
 // blockLabel names a block as the receipt does: its type and title, read
@@ -598,16 +735,27 @@ func (r *Runner) checkReports(rep reply, statused map[string]string) {
 	if r.cfg.Reports != nil && !rep.to.IsZero() {
 		reported = r.cfg.Reports(rep.from, rep.to)
 	}
+	// A doing block re-arms the turn-end receipt, so the task is not left
+	// 进行中; one answering that receipt starts doingQuiet (doingAt), so it is
+	// not told on every turn end, and holds the turn that ended unchecked
+	// since the receipt. One answering a report, which re-arms it anyway,
+	// starts none. A done or failed block re-arms it too, so a task reopened
+	// later is told of its next unreported turn end.
+	r.rearmReopened()
+	for k, s := range statused {
+		at, told := r.endTold[k]
+		delete(r.endTold, k)
+		switch {
+		case s != string(task.Doing):
+			delete(r.doingAt, k)
+		case told:
+			r.doingAt[k] = r.cfg.Now()
+			r.holdLatest(k, at)
+		}
+	}
 	for _, k := range reported {
 		delete(r.endTold, k)
-	}
-	// A doing block answers the turn-end receipt: the task's next turn
-	// that ends unreported is told again, so a session that backgrounded
-	// its work and finished in a later turn is not left 进行中.
-	for k, s := range statused {
-		if s == string(task.Doing) {
-			delete(r.endTold, k)
-		}
+		delete(r.doingAt, k)
 	}
 	keys := slices.Clone(reported)
 	for _, k := range slices.Sorted(maps.Keys(statused)) {
@@ -763,13 +911,14 @@ func (r *Runner) refuseOutside(b Block, by string) string {
 }
 
 // tellUnrun sends the Planner one receipt naming each block of the reply
-// that was not run, why, and what to do about it; an outside turn's goes
+// that was not run, why, and what to do about it, and the notes of the
+// blocks run; an outside turn's goes
 // through TellRefused, held to the same limits. The turn answering such a
 // receipt gets none of its own (the blocks still show in the conversation),
 // judged by its source, so a turn queued ahead of the receipt still gets
 // its own.
 func (r *Runner) tellUnrun(rep reply, u unrun) {
-	if len(u.lines) == 0 || rep.unrunTurn {
+	if len(u.lines)+len(u.notes) == 0 || rep.unrunTurn {
 		return
 	}
 	by := rep.outside
@@ -781,9 +930,21 @@ func (r *Runner) tellUnrun(rep reply, u unrun) {
 		return
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "你上一条回复里有 %d 个动作块没有执行，其余的照常执行了：\n", len(u.lines))
-	for _, l := range u.lines {
-		b.WriteString("- " + l + "\n")
+	if len(u.lines) > 0 {
+		fmt.Fprintf(&b, "你上一条回复里有 %d 个动作块没有执行，其余的照常执行了：\n", len(u.lines))
+		for _, l := range u.lines {
+			b.WriteString("- " + l + "\n")
+		}
+	}
+	if len(u.notes) > 0 {
+		if len(u.lines) == 0 {
+			b.WriteString("你上一条回复里的动作块都执行了，有几处要你知道：\n")
+		} else {
+			b.WriteString("执行了的块里有几处要你知道：\n")
+		}
+		for _, l := range u.notes {
+			b.WriteString("- " + l + "\n")
+		}
 	}
 	if u.tooMany {
 		fmt.Fprintf(&b, "超出上限的块要用的话，在下一条回复里重发（一次最多 %d 个）。\n", maxBlocks)
@@ -842,19 +1003,72 @@ func (r *Runner) sessionName(key string) string {
 // the session's own send path (the user's message would take), never
 // through custody: no prefix, no count, not held back while the user is at
 // the session, as the user asked for it. The block's card says it was sent.
-func (r *Runner) relay(rl Relay, words []Words) error {
+// A session put away is reopened first (reachable); reopened says so.
+func (r *Runner) relay(rl Relay, words []Words) (reopened bool, err error) {
 	if r.cfg.Relay == nil {
-		return errors.New("转达没有接通")
+		return false, errors.New("转达没有接通")
 	}
-	if r.cfg.RelayTarget != nil {
-		if err := r.cfg.RelayTarget(rl.Key); err != nil {
-			return blockError{err}
-		}
+	if reopened, err = r.reachable(rl.Key, task.ByPlanner, "Planner 转达用户的决定，网关重新打开"); err != nil {
+		return false, err
 	}
 	if err := r.cfg.Relay(rl.Key, relayEnvelope(r.cfg.Now(), words, rl.Text)); err != nil {
-		return fmt.Errorf("没有送到（%v）", err)
+		if reopened {
+			return true, fmt.Errorf("这个会话已经收起，网关已重新打开（任务回到进行中），但没有送到（%v）", err)
+		}
+		return false, fmt.Errorf("没有送到（%v）", err)
 	}
-	return nil
+	return reopened, nil
+}
+
+// reachable is nil when key may take a relay now (Config.RelayTarget). A
+// dispatched session put away (D95) cannot, but the user or the Planner
+// writing to it means its task is not over: it is reopened the way 任务's
+// 重新打开 does, its task set back to 进行中 by, for why, on which the
+// reaper puts it back under its key and the next message resumes it.
+// reopened reports that. Any other key it refuses as before, the block's
+// fault.
+func (r *Runner) reachable(key string, by task.By, why string) (reopened bool, err error) {
+	if r.cfg.RelayTarget == nil {
+		return false, nil
+	}
+	err = r.cfg.RelayTarget(key)
+	if err == nil {
+		return false, nil
+	}
+	if !r.putAway(key) {
+		return false, blockError{err}
+	}
+	if err := r.cfg.Tasks.Set(key, task.Doing, by, why); err != nil {
+		return false, fmt.Errorf("这个会话已经收起，重新打开失败（%v）", err)
+	}
+	r.reopen(key)
+	if err := r.cfg.RelayTarget(key); err != nil {
+		return true, fmt.Errorf("这个会话已经收起，重新打开后还是送不到（%v）", err)
+	}
+	return true, nil
+}
+
+// closedByUser is how the user closed key's task, "" when they did not:
+// "停掉" for 任务's 停止, "标了完成" for their own done mark.
+func (r *Runner) closedByUser(key string) string {
+	m, _ := r.cfg.Sessions.Get(key)
+	switch {
+	case m.Mark == nil || task.By(m.Mark.By) != task.ByUser || task.State(m.Mark.State) != task.Done:
+		return ""
+	case m.Mark.Why == task.StoppedWhy:
+		return "停掉"
+	}
+	return "标了完成"
+}
+
+// putAway reports whether key is a dispatched session the gateway put away
+// (planner/reap): its sidecar keeps what resuming it needs.
+func (r *Runner) putAway(key string) bool {
+	if r.cfg.Tasks == nil || r.cfg.Sessions == nil || !sessionkey.IsTaskKey(key) {
+		return false
+	}
+	m, ok := r.cfg.Sessions.Get(key)
+	return ok && m.Reap != nil
 }
 
 // relayWords bounds the user's words an envelope carries: the latest
@@ -1023,7 +1237,8 @@ func notifyKey(n Notify) string {
 }
 
 // ask puts the Planner's question into "通知"; one naming a task has its
-// answer sent there too (decideAsk), so the session must take a relay now.
+// answer sent there too (decideAsk), so the session must take a relay now,
+// or be one put away, which the answer reopens.
 func (r *Runner) ask(q Ask) error {
 	if r.cfg.Inbox == nil {
 		return errors.New("通知没有接通")
@@ -1032,7 +1247,7 @@ func (r *Runner) ask(q Ask) error {
 		if r.cfg.Relay == nil {
 			return errors.New("转达没有接通，带 task 的提问没有发出")
 		}
-		if r.cfg.RelayTarget != nil {
+		if r.cfg.RelayTarget != nil && !r.putAway(q.Task) {
 			if err := r.cfg.RelayTarget(q.Task); err != nil {
 				return blockError{err}
 			}
@@ -1078,13 +1293,28 @@ func (r *Runner) decideAsk(it notify.Item, a notify.Action) error {
 	relayed := false
 	if c.Task != "" {
 		err := errors.New("转达没有接通")
+		reopened, sending := false, false
 		if r.cfg.Relay != nil {
-			err = r.cfg.Relay(c.Task, relayEnvelope(w.At, []Words{w}, ""))
+			if reopened, err = r.reachable(c.Task, task.ByUser, "用户回答了它的提问，网关重新打开"); err == nil {
+				sending = true
+				err = r.cfg.Relay(c.Task, relayEnvelope(w.At, []Words{w}, ""))
+			}
 		}
-		if relayed = err == nil; relayed {
-			text += "。网关已把这个回答原样送到 " + c.Task + "（" + r.sessionName(c.Task) + "），不用再转达；它做完会向你汇报。"
-		} else {
+		switch relayed = err == nil; {
+		case relayed:
+			sent := "网关已把这个回答原样送到 "
+			if reopened {
+				sent = "它已经收起，网关已重新打开并把这个回答原样送到 "
+			}
+			text += "。" + sent + c.Task + "（" + r.sessionName(c.Task) + "），不用再转达；它做完会向你汇报。"
+		case reopened && sending:
+			// As relay says it: the task is 进行中 again whether or not the
+			// answer got there.
+			text += "。" + c.Task + " 已经收起，网关已重新打开（任务回到进行中），但没有把回答送到（" + err.Error() + "）；要转达就用 relay。"
+		default:
 			text += "。网关没能把回答送到 " + c.Task + "（" + err.Error() + "）；要转达就用 relay。"
+		}
+		if !relayed {
 			slog.Warn("planner actions: an answer not relayed", "task", c.Task, "err", err)
 		}
 	}
@@ -1114,11 +1344,49 @@ func requestID() string {
 // through custody: prefixed, counted against the lineage's limits, held
 // back while the user is at the session. The block's card says it was done;
 // what was not sent says why, and none of that asks for the block again.
-func (r *Runner) custody(c Custody) error {
-	cu := r.cfg.Custody
-	if cu == nil {
-		return errors.New("托管没有接通")
+// A message to a dispatched session put away reopens it first, as a relay
+// does (reachable), unless custody would refuse it anyway: reopening sets
+// the task back to 进行中, which nothing undoes for a message never sent.
+// reopened says so. Its switch is left as it is: there is nothing to watch.
+// A task the user closed (stopped, or marked done) stays closed: the user's
+// own control (D88, D91) is not the Planner's to undo; the user may reopen
+// it by answering an ask or through a relay.
+func (r *Runner) custody(c Custody) (reopened bool, err error) {
+	if r.cfg.Custody == nil {
+		return false, errors.New("托管没有接通")
 	}
+	if r.putAway(c.Key) {
+		switch {
+		case c.On != nil:
+			return false, errors.New("这个会话已经收起（任务已完成），托管开关没有改，不用重发；要它接着做就用 text 给它发消息，网关会先重新打开它")
+		case custody.Irreversible(c.Text):
+			return false, errIrreversible
+		}
+		if what := r.closedByUser(c.Key); what != "" {
+			return false, errors.New("这个会话已经收起，是用户亲手" + what + "的，托管不重新打开它，没有发出；要它接着做就用 ask（带 task）问用户，用户决定了再用 relay 转达")
+		}
+		// Blocked stops a lineage at its limit, so it is asked last.
+		switch err := r.cfg.Custody.Blocked(c.Key); {
+		case errors.Is(err, custody.ErrOff):
+			return false, errors.New("这个会话已经收起，托管也被关掉了，没有发出，也没有重新打开；要它接着做就用 ask 问用户，用户决定了再用 relay 转达")
+		case err != nil:
+			return false, custodyError(c, err)
+		}
+		if err := r.cfg.Tasks.Set(c.Key, task.Doing, task.ByPlanner, "Planner 经托管发消息给它，网关重新打开"); err != nil {
+			return false, fmt.Errorf("这个会话已经收起，重新打开失败（%v）", err)
+		}
+		r.reopen(c.Key)
+		if err := r.custodyRun(c); err != nil {
+			return true, fmt.Errorf("这个会话已经收起，网关已重新打开（任务回到进行中），但%v", err)
+		}
+		return true, nil
+	}
+	return false, r.custodyRun(c)
+}
+
+// custodyRun runs custody block c, its errors as the receipt says them.
+func (r *Runner) custodyRun(c Custody) error {
+	cu := r.cfg.Custody
 	var err error
 	if c.On != nil {
 		if err = cu.Set(c.Key, *c.On, custody.ByPlanner); err == nil && *c.On {
@@ -1128,10 +1396,18 @@ func (r *Runner) custody(c Custody) error {
 		}
 	} else {
 		if custody.Irreversible(c.Text) {
-			return errors.New("涉及 push、合并、发版、删除或对外发送这类收不回的事，托管不替用户说，没有发出：用户已经在对话里说了就用 relay 转达，没说就用 ask（带 task）问用户")
+			return errIrreversible
 		}
 		_, err = cu.Deliver(c.Key, custody.ReasonPlanner, c.Text+custodyNote)
 	}
+	return custodyError(c, err)
+}
+
+// errIrreversible refuses a custody message about what cannot be undone.
+var errIrreversible = errors.New("涉及 push、合并、发版、删除或对外发送这类收不回的事，托管不替用户说，没有发出：用户已经在对话里说了就用 relay 转达，没说就用 ask（带 task）问用户")
+
+// custodyError is err of custody block c as the receipt says it.
+func custodyError(c Custody, err error) error {
 	switch {
 	case err == nil:
 		return nil

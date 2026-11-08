@@ -146,6 +146,11 @@ type Fact struct {
 	Finished   *Task
 	Reply      string
 	LastActive time.Time
+	// TurnAt is when a local session's turn last started or ended,
+	// LastActive without the events between (zero for other units): a
+	// failure is dated by it, which a background task's later events do
+	// not move.
+	TurnAt time.Time
 
 	// Index is the unit's index.json row, set for local and remote
 	// sessions; the machine fills in Workspace and Health.
@@ -175,6 +180,8 @@ type Unit struct {
 	// BackgroundSince is when it started; empty when none.
 	Background      string    `json:"background,omitempty"`
 	BackgroundSince time.Time `json:"background_since,omitzero"`
+	// TurnAt is Fact.TurnAt; custody names one failure by it.
+	TurnAt time.Time `json:"-"`
 }
 
 // Snapshot is the whole table at the last reconcile. Unowned counts the
@@ -465,7 +472,7 @@ func (m *Machine) Reconcile() {
 			u.dir, u.index = f.Dir, f.Index
 		}
 		u.Workspace = m.workspaceFor(f)
-		u.LastActive = f.LastActive
+		u.LastActive, u.TurnAt = f.LastActive, f.TurnAt
 		state, evidence, class := m.judge(f, now, mono)
 		state, evidence, class = u.hold(f, state, evidence, class)
 		if ev, ok := m.step(u, state, evidence, class, now); ok {
@@ -635,7 +642,7 @@ func (m *Machine) step(u *unit, state State, evidence string, class ErrorClass, 
 		from, recorded = cmp.Or(j.State, Unknown), j.At
 		delete(m.last, u.ID)
 		u.first = false
-		u.failedAt = u.LastActive
+		u.failedAt = cmp.Or(u.TurnAt, u.LastActive)
 	}
 	u.State, u.Evidence, u.ErrClass, u.Since = state, evidence, class, now
 	if first && from == state && !recorded.IsZero() {
@@ -686,7 +693,7 @@ func (u *unit) hold(f *Fact, state State, evidence string, class ErrorClass) (St
 		return state, evidence, class
 	}
 	switch {
-	case u.heldState == Failed && state == Idle && !f.LastActive.After(u.held),
+	case u.heldState == Failed && state == Idle && !cmp.Or(f.TurnAt, f.LastActive).After(u.held),
 		u.heldState == Stalled && state == Active && f.Workflow != "" && !f.WorkflowSeen.After(u.held):
 		return u.heldState, u.heldEvidence, u.heldClass
 	}
@@ -874,6 +881,9 @@ func mergeFacts(in []Fact) []Fact {
 		}
 		if f.LastActive.After(o.LastActive) {
 			o.LastActive = f.LastActive
+		}
+		if f.TurnAt.After(o.TurnAt) {
+			o.TurnAt = f.TurnAt
 		}
 		if o.Index == nil {
 			o.Index = f.Index

@@ -27,6 +27,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/planner/promise"
 	"github.com/naozhi/naozhi/internal/planner/scout"
+	"github.com/naozhi/naozhi/internal/textutil"
 	"github.com/naozhi/naozhi/internal/tuningspec"
 )
 
@@ -46,7 +47,7 @@ const (
 	messageRunes      = 20000
 	textRunes         = 500
 	maxOptions        = 6
-	optionRunes       = 40
+	optionRunes       = 80
 	workspaceRefRunes = 128
 	taskRefRunes      = 128
 	// notifyTitleRunes is what the inbox shows of a title.
@@ -114,6 +115,10 @@ type Ask struct {
 	Question string   `json:"question"`
 	Options  []string `json:"options"`
 	Task     string   `json:"task,omitempty"`
+	// Trimmed is how many options were cut to optionRunes, "…" included: a
+	// question is worth asking even if an option ran long, so the Planner is
+	// told in the receipt instead of the block refused.
+	Trimmed int `json:"-"`
 }
 
 // Status sets a task's state: Task is a task: key or a promise ID, State
@@ -436,15 +441,30 @@ func (a *Ask) validate() error {
 	case len(a.Options) > maxOptions:
 		return fmt.Errorf("options 最多 %d 个", maxOptions)
 	}
+	// Duplicates are judged on the options as written; two that differ only
+	// past the cut would read the same on the card, which only a shorter
+	// option fixes.
+	raw := make([]string, len(a.Options))
 	for i, o := range a.Options {
 		o = strings.TrimSpace(o)
+		raw[i] = o
+		cut := utf8.RuneCountInString(o) > optionRunes
+		if cut {
+			o = textutil.TruncateRunesNoEllipsis(o, optionRunes-1) + "…"
+			a.Trimmed++
+		}
 		switch {
 		case o == "":
 			return errors.New("options 里有空的选项")
-		case utf8.RuneCountInString(o) > optionRunes:
-			return fmt.Errorf("选项超过 %d 字", optionRunes)
-		case slices.Contains(a.Options[:i], o):
-			return fmt.Errorf("选项 %q 重复", o)
+		case slices.Contains(raw[:i], raw[i]):
+			return fmt.Errorf("选项 %q 重复", raw[i])
+		}
+		if j := slices.Index(a.Options[:i], o); j >= 0 {
+			long, other := i, j
+			if !cut {
+				long, other = j, i
+			}
+			return fmt.Errorf("第 %d 个选项超过 %d 字，截断后与第 %d 个相同，请缩短", long+1, optionRunes, other+1)
 		}
 		a.Options[i] = o
 	}

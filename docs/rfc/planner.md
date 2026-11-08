@@ -1523,7 +1523,7 @@ Planner 的说明：
 |---|---|
 | 回执循环 | `checkEnded`（`action/runner.go`）补两条：会话有后台任务或 workflow 在跑（`task_start` 没有对应的 `task_done`、Monitor 在跑，与 `checkCustody` 同一判断）时不发；Planner 标 doing 后 60 分钟内同一任务不再发（原来标 doing 就重置 `endTold`，回执要求标 doing → 重置 → 下一轮又发，成了循环）。保留原意：后台任务跑完、这一轮结束却没汇报时照样提醒一次 |
 | Planner 缓存 1h | `planner:main` 的 `--settings` 加 `promptCacheTtl: "1h"`（§5.2，10-17 已在 Bedrock 实测生效） |
-| 快照去重 | 快照内容（去掉时间）与上一次附上的相同时，只附 `<naozhi-snapshot unchanged since="HH:MM"/>` |
+| 快照去重 | 快照内容（去掉时间）与上一次附上的相同时，只附 `<naozhi-snapshot unchanged since="HH:MM" at="<现在>"/>`（`at` 是 Planner 唯一的钟点，格式同完整快照；比较时各会话的"最后输出"时间不算） |
 | `last_active` | 收到任何事件都刷新，每分钟最多写一次；快照与 `index.json` 的"最后活动"改称"最后输出"。D94 已写明托管的"你在旁边"与防循环不看它 |
 | 转达到已收起的会话 | `relay`、带 `task` 的 `ask`、`custody` 的目标已经收起（D95）时，网关先走"重新打开"（按原 key `--resume`），再投递；回执写"已重新打开并送到" |
 | ask 选项长度 | 上限从 40 字放宽到 80 字；仍超的截断加"…"照样执行，回执里说一句，不再整块拒绝 |

@@ -167,6 +167,9 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 		TuningModel:  s.TuningModel(),
 		TuningEffort: s.TuningEffort(),
 	}
+	if t := s.LastTurnAt(); !t.IsZero() {
+		snap.TurnAt = t.UnixMilli()
+	}
 	snap.DeathReason = loadAtomicString(&s.deathReason)
 	snap.CodeChanges = s.CodeChanges()
 	// Precomputed at publication; with or without a process.

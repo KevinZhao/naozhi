@@ -416,3 +416,43 @@ func TestLaunchSpecDrift_TaskDeny(t *testing.T) {
 		t.Errorf("settings = %s (%v)", data, err)
 	}
 }
+
+// The Planner's settings file carries promptCacheTtl, and its shim from a
+// release before the field (overlay without it) rebuilds the same argv: the
+// key lives in the settings file, whose path is the session key's, so an
+// upgrade leaves the running Planner alone and its next spawn gets the hour.
+func TestLaunchSpecPromptCacheTTL(t *testing.T) {
+	r := mkOverlayRouter(t)
+	r.spawn.sessionSettingsDir = t.TempDir()
+	wrapper, backendID := r.backends.wrapperFor("claude")
+	key := "planner:main"
+	s := newSessionWithID(key, "sess-planner-ttl")
+	s.SetBackend("claude")
+	putT(r, key, s)
+	state, _ := spawnShimState(t, r, key, "", AgentOpts{
+		Backend: "claude", Workspace: "/ws", Name: "planner-abc123", PermissionMode: "dontAsk",
+		CrossSessionInbound: "accept", PermissionsAllow: []string{"Read(//state/**)"}, PromptCacheTTL: "1h",
+	})
+	if state.SpawnOverlay == nil || state.SpawnOverlay.PromptCacheTTL != "1h" {
+		t.Fatalf("recorded overlay = %+v, want prompt_cache_ttl 1h", state.SpawnOverlay)
+	}
+	if r.spawn.launchSpecFor(key, shim.SpawnOverlay{PromptCacheTTL: "1h"}).SettingsFile == "" {
+		t.Error("an overlay with only promptCacheTtl gets no settings file")
+	}
+	path := r.spawn.launchSpecFor(key, *state.SpawnOverlay).SettingsFile
+	if err := writeSessionSettings(path, "", *state.SpawnOverlay); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil || doc["promptCacheTtl"] != "1h" {
+		t.Errorf("settings = %s (%v), want promptCacheTtl 1h", data, err)
+	}
+
+	old := *state.SpawnOverlay
+	old.PromptCacheTTL = ""
+	state.SpawnOverlay = &old
+	if drift, stored, current := driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, s); drift {
+		t.Fatalf("a shim from before promptCacheTtl reads as drift\n  stored:  %v\n  current: %v", stored, current)
+	}
+}

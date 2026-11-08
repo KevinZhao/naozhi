@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -109,6 +110,107 @@ func TestShimManagerConfig(t *testing.T) {
 	want := shim.ManagerConfig{StateDir: stateDir, IdleTimeout: 2 * time.Hour}
 	if got := shimManagerConfig(cfg); !reflect.DeepEqual(got, want) {
 		t.Errorf("shimManagerConfig = %+v, want %+v", got, want)
+	}
+}
+
+// TestShimStateDir: without session.shim.state_dir the shim state directory
+// is the one beside session.store_path, so an instance isolated by its
+// store_path alone never scans another instance's shims (11-08: a test
+// instance sent nine production shims a shutdown as argv drift). The default
+// store_path keeps ~/.naozhi/shims; an explicit state_dir wins.
+func TestShimStateDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	iso := t.TempDir()
+	explicit := t.TempDir()
+	for _, tc := range []struct {
+		name, body, want string
+	}{
+		{"default store_path", "session:\n  store_path: ~/.naozhi/sessions.json\n", filepath.Join(home, ".naozhi", "shims")},
+		{"own store_path", "session:\n  store_path: " + filepath.Join(iso, "sessions.json") + "\n", filepath.Join(iso, "shims")},
+		{"explicit state_dir", "session:\n  store_path: " + filepath.Join(iso, "sessions.json") + "\n  shim:\n    state_dir: " + explicit + "\n", explicit},
+		{"no store_path", "session:\n  max_procs: 2\n", filepath.Join(home, ".naozhi", "shims")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, err := shim.NewManager(shimManagerConfig(loadConfigBody(t, tc.body)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := mgr.StateDir(); got != tc.want {
+				t.Errorf("shim state dir = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestShimStateDirLeavesLegacyShims: a fresh instance with its own
+// store_path uses the derived directory though ~/.naozhi/shims holds live
+// shims listening in the socket directory both share (macOS: neither the
+// launchd job nor a terminal sets XDG_RUNTIME_DIR), so it never takes up the
+// other instance's shims; a warning names them, and how to keep them if they
+// are this instance's own. `shim list/stop` with the same config agree.
+func TestShimStateDirLeavesLegacyShims(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	iso := t.TempDir()
+	old := filepath.Join(home, ".naozhi", "shims")
+	sock := filepath.Join(home, ".naozhi", "run", "shim-a.sock")
+	if err := os.MkdirAll(filepath.Dir(sock), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := shim.WriteStateFile(shim.StateFilePath(old, shim.KeyHash("task:prod")), shim.State{Key: "task:prod", Socket: sock}); err != nil {
+		t.Fatal(err)
+	}
+	body := "session:\n  store_path: " + filepath.Join(iso, "sessions.json") + "\n"
+	buf := captureSlog(t)
+	want := filepath.Join(iso, "shims")
+	if got := shimStateDir(loadConfigBody(t, body)); got != want {
+		t.Errorf("shim state dir = %q, want %q", got, want)
+	}
+	if !strings.Contains(buf.String(), "session.shim.state_dir: ~/.naozhi/shims") || !strings.Contains(buf.String(), `"live":1`) {
+		t.Errorf("want the warning naming the live shims, log = %s", buf)
+	}
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir()) // an operator's ssh shell
+	if got := cliShimStateDir("", cfgPath, io.Discard); got != want {
+		t.Errorf("shim list/stop state dir = %q, want %q", got, want)
+	}
+}
+
+// TestCLIShimStateDir: `shim list` / `shim stop` work on the directory the
+// service run with --config uses, so for an instance with its own
+// store_path they never list or stop another instance's shims; --state-dir
+// wins, and a config that does not load leaves ~/.naozhi/shims, said so.
+func TestCLIShimStateDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	iso := t.TempDir()
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("session:\n  store_path: "+filepath.Join(iso, "sessions.json")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var errb strings.Builder
+	if got := cliShimStateDir("", cfgPath, &errb); got != filepath.Join(iso, "shims") {
+		t.Errorf("with the config: %q", got)
+	}
+	if got := cliShimStateDir("/given", cfgPath, &errb); got != "/given" {
+		t.Errorf("with --state-dir: %q", got)
+	}
+	if errb.Len() != 0 {
+		t.Errorf("stderr = %q", errb.String())
+	}
+	if got := cliShimStateDir("", filepath.Join(iso, "missing.yaml"), &errb); got != filepath.Join(home, ".naozhi", "shims") {
+		t.Errorf("without a config: %q", got)
+	}
+	if !strings.Contains(errb.String(), "config unavailable") {
+		t.Errorf("stderr = %q, want the note", errb.String())
 	}
 }
 

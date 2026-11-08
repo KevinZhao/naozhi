@@ -10,6 +10,9 @@ const now = Date.now();
 const FAILED = 'dashboard:direct:2026-01-01-120000-1:myproject';
 const IDLE = 'dashboard:direct:2026-01-01-120002-3:myproject';
 const RUNNING = 'dashboard:direct:2026-01-01-120001-2:otherproject';
+// A failed turn whose background task still writes events: last_active moved
+// past the verdict's seen, the turn did not.
+const BACKGROUND = 'dashboard:direct:2026-01-01-120003-4:myproject';
 
 function row(key, state, prompt, project, extra) {
   return Object.assign({
@@ -25,8 +28,12 @@ const SESSIONS = {
     }),
     row(RUNNING, 'running', 'iso 长回合', 'otherproject', { health: { state: 'active', since: now - 60000 } }),
     row(IDLE, 'ready', 'iso 销售数据', 'myproject', { health: { state: 'idle', since: now - 60000 } }),
+    row(BACKGROUND, 'ready', 'iso 后台还在跑', 'myproject', {
+      last_active: now - 60000, turn_at: now - 240000,
+      health: { state: 'failed', since: now - 240000, seen: now - 240000, error_class: 'other' },
+    }),
   ],
-  stats: { total: 3, running: 1, ready: 2, active: 3, uptime: '1h', backend: 'cc', max_procs: 20, default_workspace: '/home/user/workspace', agents: ['general'], projects: [], version: 1 },
+  stats: { total: 4, running: 1, ready: 3, active: 4, uptime: '1h', backend: 'cc', max_procs: 20, default_workspace: '/home/user/workspace', agents: ['general'], projects: [], version: 1 },
   nodes: { local: { display_name: 'Local', status: 'ok' } },
 };
 
@@ -44,6 +51,7 @@ for (const [name, viewport] of [['desktop', { width: 1440, height: 900 }], ['pho
       await expect(page.locator(`.session-card[data-key="${RUNNING}"] .sc-dot`)).toHaveClass(/dot-running/);
       await expect(page.locator(`.session-card[data-key="${IDLE}"] .sc-dot`)).toHaveClass(/dot-ready/);
       await expect(page.locator(`.session-card[data-key="${IDLE}"] .sc-dot`)).toHaveAttribute('title', '空闲');
+      await expect(page.locator(`.session-card[data-key="${BACKGROUND}"] .sc-dot`)).toHaveClass(/dot-failed/);
       // No state word on any row, and no 已回收 chip.
       for (const word of ['ready', 'running', '已回收']) await expect(page.locator('#session-list')).not.toContainText(word);
       // Relative times are written one way.

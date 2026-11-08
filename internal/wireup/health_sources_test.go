@@ -44,6 +44,27 @@ func TestSessionFactFailure(t *testing.T) {
 	}
 }
 
+// TestSessionFactTurnAtMillis: TurnAt is at the millisecond, as LastActive
+// is. Custody's sidecar may hold a failure named by LastActive (unix ms)
+// before an upgrade; a TurnAt with the nanoseconds the session keeps would
+// never equal it, and the same failure would count again after the restart.
+func TestSessionFactTurnAtMillis(t *testing.T) {
+	// Before Snapshot, whose lazy default registration would make the
+	// package's own registration panic in a later test.
+	RegisterCLIBackends()
+	r := session.NewRouter(session.RouterConfig{})
+	s := r.InjectSession("task:x", nil)
+	at := time.Date(2026, 11, 8, 10, 0, 0, 123456789, time.UTC)
+	s.SetLastTurnAtForTest(at)
+	f := sessionFact(s.Snapshot(), s, "")
+	if want := time.UnixMilli(at.UnixMilli()); !f.TurnAt.Equal(want) || !f.TurnAt.Equal(f.LastActive) {
+		t.Errorf("TurnAt = %v, want %v (LastActive %v)", f.TurnAt, want, f.LastActive)
+	}
+	if f := sessionFact(session.SessionSnapshot{Key: "task:y"}, nil, ""); !f.TurnAt.IsZero() {
+		t.Errorf("no turn: TurnAt = %v, want zero", f.TurnAt)
+	}
+}
+
 func TestRemoteFact(t *testing.T) {
 	var row map[string]any
 	if err := json.Unmarshal([]byte(`{"key":"dashboard:direct:x:general","state":"ready","workspace":"/srv/app",

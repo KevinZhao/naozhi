@@ -101,6 +101,11 @@ func (l Layout) CLIDebugRoot() string { return l.Join("cli-debug") }
 // session's crossSessionInbound / permissions.deny overrides.
 func (l Layout) SessionSettingsRoot() string { return l.Join("session-settings") }
 
+// ShimsRoot is the shim state directory when session.shim.state_dir is unset
+// (<root>/shims): an instance with its own store_path finds only its own
+// shims, never another instance's to shut down as argv drift.
+func (l Layout) ShimsRoot() string { return l.Join("shims") }
+
 // AccessProfileSecretsRoot holds per-profile secret material.
 func (l Layout) AccessProfileSecretsRoot() string { return l.Join("access-profile-secrets") }
 

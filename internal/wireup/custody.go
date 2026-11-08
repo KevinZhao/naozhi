@@ -106,15 +106,29 @@ func (c CustodySources) Settled(key string) bool {
 		return false
 	}
 	snap := s.Snapshot()
-	if snap.State == "running" || runningWorkflow(snap.Workflows) != "" || askPending(s.EventLastN(askScan)) {
-		return false
+	return snap.State != "running" && !askPending(s.EventLastN(askScan)) && !background(s, snap)
+}
+
+// Background is action.Config.Background: a workflow or a background task
+// (a task_start with no task_done yet, a Monitor) running in key.
+func (c CustodySources) Background(key string) bool {
+	s := c.Router.SessionFor(key)
+	return s != nil && background(s, s.Snapshot())
+}
+
+// background reports a workflow or background task running in s, snap its
+// snapshot. A task counts only from a live process naozhi attached to: one
+// in replayed history may belong to a process gone since.
+func background(s *session.ManagedSession, snap session.SessionSnapshot) bool {
+	if runningWorkflow(snap.Workflows) != "" {
+		return true
 	}
 	if at := s.ProcessAttachedAt(); !at.IsZero() && snap.State != "dead" {
 		if t, _ := openTask(s.EventLastN(taskScan), at, true); t != nil {
-			return false
+			return true
 		}
 	}
-	return true
+	return false
 }
 
 // Events is custody.Config.Events: the session's latest n events.

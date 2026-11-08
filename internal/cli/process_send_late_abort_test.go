@@ -58,12 +58,16 @@ func abandonInterruptedSend(t *testing.T, sh *passthroughShim) {
 	}
 }
 
-// emitInitAndWait waits until the running Send has read the init, so a
-// canceled Send cannot leave it for readLoop to start an unowned turn with.
+// emitInitAndWait waits until readLoop has read the init while the Send
+// still owns the turn, so a canceled Send cannot leave it for readLoop to
+// start an unowned turn with. The init itself may still sit in eventCh: the
+// next Send drops it as older than its turn.
 func emitInitAndWait(t *testing.T, sh *passthroughShim) {
 	t.Helper()
 	sh.emitInit("s1")
-	testhelper.Eventually(t, func() bool { return sh.proc.SessionID() == "s1" }, 2*time.Second, "init read by Send")
+	// No event marks the init as read, so this polls; the ceiling is only
+	// paid on failure, and 2s was within reach of a loaded -race runner.
+	testhelper.Eventually(t, func() bool { return sh.proc.SessionID() == "s1" }, 30*time.Second, "init read by Send")
 }
 
 func newLateAbortShim(t *testing.T) (*passthroughShim, chan clievent.SendResult) {
@@ -110,7 +114,7 @@ func TestLegacySend_LateAbortedResultOfAbandonedSendIsNotNextAnswer(t *testing.T
 // armed, the abort produces no second result: the next Send's drain books
 // that result and the next Send takes the result that follows.
 func TestLegacySend_DrainedResultReleasesAbandonedAbort(t *testing.T) {
-	sh, _ := newLateAbortShim(t)
+	sh, booked := newLateAbortShim(t)
 	ctxA, cancelA := context.WithCancel(context.Background())
 	outA := startLateAbortSend(t, sh, ctxA, "A")
 	emitInitAndWait(t, sh)
@@ -119,7 +123,17 @@ func TestLegacySend_DrainedResultReleasesAbandonedAbort(t *testing.T) {
 		t.Fatalf("Send A returned %+v, want its context error", o.res)
 	}
 	sh.emitResult("s1", "A-answer")
-	testhelper.Eventually(t, func() bool { return len(sh.proc.eventCh) == 1 }, 2*time.Second, "A's result queued")
+	// readLoop books the abandoned result only after handing it to eventCh,
+	// so the booking is the signal that it is queued. Counting eventCh is not:
+	// A may be canceled before it takes the init off eventCh, leaving two.
+	select {
+	case r := <-booked:
+		if r.Text != "A-answer" {
+			t.Fatalf("booked %q, want A's result", r.Text)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("A's result was not booked")
+	}
 	// The interrupt that raced A's result: armed after the result was read.
 	sh.proc.turn.abortRequested.arm()
 

@@ -37,6 +37,10 @@ const (
 	Key    = sessionkey.PlannerMainKey
 	Model  = "claude-opus-5-5[1m]"
 	Effort = "medium"
+	// PromptCacheTTL keeps the Planner's prompt cache an hour (§5.2): its
+	// turns are often more than the default 5 minutes apart, and each miss
+	// rewrites a context of 100k+ tokens.
+	PromptCacheTTL = "1h"
 )
 
 // NameFor is the Planner's --name for the state root root: "planner-" and a
@@ -114,6 +118,9 @@ type Sessions interface {
 	Label(key string) string
 	// Name is a session's cross-session name, "" when unknown.
 	Name(key string) string
+	// CompactedSince reports whether key's conversation may have been
+	// compacted since t, so what it was told then may be summarised away.
+	CompactedSince(key string, t time.Time) bool
 }
 
 // Turns is the gateway's turn entry for the Planner.
@@ -208,6 +215,25 @@ type Agent struct {
 	// failures and retryAt pace revival after failed spawns.
 	failures int
 	retryAt  time.Time
+	// lastSnap is the last full snapshot a turn of the current
+	// conversation ran with (nextSnapshot); zero once the conversation may
+	// not hold it. snapGen counts the forgets: a turn submitted before one
+	// records nothing at its end.
+	lastSnap sentSnapshot
+	snapGen  uint64
+	// shifting is set through a shift change: from the handoff turn's end
+	// until the new conversation starts, an idle Planner on the old
+	// session ID is not where a message goes.
+	shifting bool
+}
+
+// sentSnapshot is a full snapshot as a turn ran with it: its body (the
+// block without its times, renderSnapshotKey), when it was rendered, and in
+// which conversation ("" when the CLI had not named it).
+type sentSnapshot struct {
+	body string
+	at   time.Time
+	sid  string
 }
 
 // New loads the Planner's state. It starts nothing: Start does, once the
@@ -288,6 +314,7 @@ func (a *Agent) buildOpts() sessionview.AgentOpts {
 		CrossSessionInbound: "accept",
 		PermissionsAllow:    allowRules(root, a.cfg.Layout.EventsRoot(), a.cfg.Workspaces.LocalPaths()),
 		PermissionsDeny:     denyRules(a.cfg.Layout.Root(), a.cfg.DenyPaths),
+		PromptCacheTTL:      PromptCacheTTL,
 	}
 }
 
@@ -452,6 +479,9 @@ func (a *Agent) reconcile(ctx context.Context) {
 	}
 	st := a.cfg.Sessions.State(Key)
 	if !st.Alive {
+		// A revival may not resume the conversation (its resume target
+		// lost): the next message carries a full snapshot.
+		a.forgetSnapshot()
 		if !a.revive(ctx, now, opts) {
 			return
 		}
@@ -547,6 +577,22 @@ func (a *Agent) handoffPath(day string) string {
 // reused rather than asked for again. It stays pending until sent, so after
 // a failed restart the conversation revival starts still gets it.
 func (a *Agent) changeShift(ctx context.Context, now time.Time, day string) {
+	// From here every message carries a full snapshot: once the handoff
+	// turn ends the Planner is idle on the old session ID, while a message
+	// queued then runs in the new conversation. What a turn on the old
+	// session ran with is not in the new one, and a turn submitted before
+	// may end only after, its conversation named by the new one's ID: the
+	// forget at the end makes those record nothing.
+	a.mu.Lock()
+	a.shifting = true
+	a.mu.Unlock()
+	a.forgetSnapshot()
+	defer func() {
+		a.forgetSnapshot()
+		a.mu.Lock()
+		a.shifting = false
+		a.mu.Unlock()
+	}()
 	path := a.handoffPath(day)
 	summary, err := os.ReadFile(path)
 	if err != nil {
@@ -695,7 +741,8 @@ func (a *Agent) Send(text, ref string, images []clievent.Attachment) error {
 	if text != "" {
 		said = &Words{Text: text, At: time.Now()}
 	}
-	if _, err := turns.SubmitPlanner(Key, src, said, strings.TrimSpace(head+a.Snapshot()+"\n\n"+text), images, opts, nil); err != nil {
+	snap, ran := a.nextSnapshot()
+	if _, err := turns.SubmitPlanner(Key, src, said, strings.TrimSpace(head+snap+"\n\n"+text), images, opts, ran); err != nil {
 		return err
 	}
 	turns.PlannerReceipt(Key, ReceiptText)
@@ -739,8 +786,55 @@ func (a *Agent) tellSaid(src Source, said *Words, text string) error {
 	return err
 }
 
-// Snapshot renders the snapshot the next message would carry.
-func (a *Agent) Snapshot() string {
+// nextSnapshot is the snapshot block the next message carries: the full
+// one, or only a mark when what the last full one of this conversation said
+// still holds. ran, the message's turn's end (nil with the mark), records a
+// full one once its turn ran: a message dropped from the queue, or whose
+// turn failed, may never have reached the CLI.
+func (a *Agent) nextSnapshot() (text string, ran func(string, error)) {
+	in := a.snapshotInput()
+	full, body := renderSnapshotKey(in)
+	st := a.cfg.Sessions.State(Key)
+	now := in.Now
+	a.mu.Lock()
+	prev, gen, shifting := a.lastSnap, a.snapGen, a.shifting
+	a.mu.Unlock()
+	// The mark goes only to a Planner idle in the conversation the last
+	// full one went to, so the message goes in as it is decided: one queued
+	// behind a turn may reach a conversation a shift change or a revival
+	// started by then. A dead process's spawn may not resume; an unnamed
+	// conversation cannot be told from another; a compaction may have
+	// summarised the last one away.
+	if !shifting && st.Alive && !st.Running && prev.body == body && prev.sid != "" && prev.sid == st.SessionID &&
+		!a.cfg.Sessions.CompactedSince(Key, prev.at) {
+		return unchangedSnapshot(prev.at.In(now.Location()), now), nil
+	}
+	return full, func(_ string, err error) {
+		if err != nil {
+			return
+		}
+		sid := a.cfg.Sessions.State(Key).SessionID
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if a.snapGen == gen {
+			a.lastSnap = sentSnapshot{body: body, at: now, sid: sid}
+		}
+	}
+}
+
+// forgetSnapshot makes the next message carry a full snapshot, and the
+// turns in flight record none.
+func (a *Agent) forgetSnapshot() {
+	a.mu.Lock()
+	a.lastSnap = sentSnapshot{}
+	a.snapGen++
+	a.mu.Unlock()
+}
+
+// Snapshot renders the full snapshot the next message would carry.
+func (a *Agent) Snapshot() string { return renderSnapshot(a.snapshotInput()) }
+
+func (a *Agent) snapshotInput() snapshotInput {
 	a.mu.Lock()
 	snap := a.health
 	a.mu.Unlock()
@@ -757,7 +851,7 @@ func (a *Agent) Snapshot() string {
 	if names := a.workspaceNames(); names != nil {
 		in.Workspace = func(id string) string { return names[id] }
 	}
-	return renderSnapshot(in)
+	return in
 }
 
 // workspaceNames maps the registered workspaces' IDs to their names, nil

@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -210,6 +211,36 @@ func TestAskAndRefused(t *testing.T) {
 	}
 	if len(g.told) != 1 || !strings.Contains(g.told[0], "今天发版吗？") || !strings.HasSuffix(g.told[0], "不发") {
 		t.Errorf("told = %q", g.told)
+	}
+}
+
+// TestAskLongOption: an option over optionRunes is cut to optionRunes, "…"
+// included, and the question still goes out (an option of 42 runes once
+// refused the whole block); the Planner is told in one line, and an ask
+// with options that fit gets no receipt at all.
+func TestAskLongOption(t *testing.T) {
+	r, g, inbox, _, _ := newRunner(t)
+	fits := strings.Repeat("好", optionRunes)
+	long := strings.Repeat("长", optionRunes+5)
+	r.Handle(block(`{"type":"ask","question":"选哪个？","options":["` + fits + `"]}`))
+	if len(g.unrun) != 0 {
+		t.Fatalf("a receipt for options that fit: %q", g.unrun)
+	}
+	for _, it := range func() []notify.Item { l, _ := inbox.List(0); return l }() {
+		_ = inbox.Dismiss(it.ID)
+	}
+	r.Handle(block(`{"type":"ask","question":"选哪个？","options":["` + long + `","` + fits + `"]}`))
+	it := openDecision(t, inbox, HandlerAsk)
+	want := strings.Repeat("长", optionRunes-1) + "…"
+	if !slices.Equal(it.Decision.Actions, []notify.Action{notify.Action(want), notify.Action(fits)}) {
+		t.Errorf("actions = %q, want %q and the one that fits", it.Decision.Actions, want)
+	}
+	if len(g.notes) != 0 {
+		t.Errorf("notes = %q, want none: the block ran", g.notes)
+	}
+	if len(g.unrun) != 1 || !strings.Contains(g.unrun[0], "都执行了") || !strings.Contains(g.unrun[0], "第 1 块（ask「选哪个？」）：1 个选项超过 80 字") ||
+		strings.Contains(g.unrun[0], "没有执行") {
+		t.Errorf("unrun = %q, want one line on the cut option", g.unrun)
 	}
 }
 
@@ -511,42 +542,330 @@ func TestTaskEndedAcrossShiftChange(t *testing.T) {
 	}
 }
 
-// TestTaskEndedAfterDoing: a session that backgrounds its work ends a turn
-// unreported, the Planner marks it doing, and the turn that finishes the
-// work, unreported too, gets the Planner a second receipt: the task does
-// not stay 进行中.
-func TestTaskEndedAfterDoing(t *testing.T) {
+// endRig is a runner with one dispatched task whose turn ends are checked
+// at once, on a clock the test moves: end ends a turn with text; held are
+// the checks waiting longer than the grace (doingQuiet's end), run by fire;
+// reported is what Reports returns.
+type endRig struct {
+	t        *testing.T
+	r        *Runner
+	g        *fakeGateway
+	key      string
+	now      time.Time
+	held     []func()
+	reported []string
+}
+
+func endedRunner(t *testing.T) *endRig {
+	t.Helper()
 	r, g, _, side, dir := newRunner(t)
+	e := &endRig{t: t, r: r, g: g}
 	r.grace = 0
+	r.after = func(d time.Duration, f func()) {
+		if d > 0 {
+			e.held = append(e.held, f)
+			return
+		}
+		f()
+	}
 	r.cfg.Tasks = task.New(task.Config{Sessions: side})
-	r.cfg.Reports = func(time.Time, time.Time) []string { return nil }
-	end := func(text string) {
-		t.Helper()
-		r.Result(g.spawned[0], text)
+	r.cfg.Reports = func(time.Time, time.Time) []string { return e.reported }
+	e.now = time.Now()
+	r.cfg.Now = func() time.Time { return e.now }
+	r.Handle(block(`{"type":"dispatch","workspace":"` + filepath.Base(dir) + `","title":"iso 跑测试","model":"","message":"跑一遍测试"}`))
+	e.key = g.spawned[0]
+	g.told = nil
+	return e
+}
+
+func (e *endRig) wait(d time.Duration) { e.now = e.now.Add(d) }
+
+// check runs the turn-end checks queued.
+func (e *endRig) check() {
+	for {
 		select {
-		case e := <-r.endCh:
-			r.checkEnded(e)
-		case <-time.After(5 * time.Second):
-			t.Fatal("turn end never queued for a check")
+		case x := <-e.r.endCh:
+			e.r.checkEnded(x)
+		default:
+			return
 		}
 	}
-	r.Handle(block(`{"type":"dispatch","workspace":"` + filepath.Base(dir) + `","title":"iso 跑测试","model":"","message":"跑一遍测试"}`))
-	key := g.spawned[0]
-	g.told = nil
+}
 
-	end("测试已在后台运行，跑完再看")
-	if len(g.told) != 1 {
-		t.Fatalf("told = %q", g.told)
+func (e *endRig) end(text string) {
+	e.t.Helper()
+	e.r.Result(e.key, text)
+	e.check()
+}
+
+// receipts are the turn-end receipts told, apart from the report reminders.
+func (e *endRig) receipts() []string {
+	var out []string
+	for _, x := range e.g.told {
+		if strings.Contains(x, "这一轮已经结束") {
+			out = append(out, x)
+		}
 	}
-	r.Handle(block(`{"type":"status","task":"` + key + `","state":"doing","why":"测试还在后台跑"}`))
-	g.told = nil
-	end("测试全部通过")
-	if len(g.told) != 1 || !strings.Contains(g.told[0], "测试全部通过") {
-		t.Fatalf("after doing: told = %q", g.told)
+	return out
+}
+
+// fire runs the held checks.
+func (e *endRig) fire() {
+	held := e.held
+	e.held = nil
+	for _, f := range held {
+		f()
 	}
-	r.Handle(block(`{"type":"status","task":"` + key + `","state":"done","why":"它说测试全部通过"}`))
-	if st := r.cfg.Tasks.List()[0]; st.ID != key || st.State != task.Done {
+	e.check()
+}
+
+// planner handles a Planner reply whose turn ran since the previous one.
+func (e *endRig) planner(text string) {
+	e.r.Result(e.r.cfg.Planner, text)
+	e.r.handle(<-e.r.ch)
+}
+
+func (e *endRig) doing(why string) {
+	e.planner(block(`{"type":"status","task":"` + e.key + `","state":"doing","why":"` + why + `"}`))
+}
+
+// TestTaskEndedReceiptLoop: the receipt asks the Planner for a doing block,
+// so a doing block answering it must not re-arm it at once, else every
+// unreported turn end brings another receipt and another doing (one task
+// got 21 in 80 minutes). A turn end within doingQuiet of that block waits
+// for the window's end; only the latest is told then, once.
+func TestTaskEndedReceiptLoop(t *testing.T) {
+	e := endedRunner(t)
+	e.end("改好了一半")
+	if len(e.g.told) != 1 {
+		t.Fatalf("told = %q", e.g.told)
+	}
+	for n := range 3 {
+		e.wait(5 * time.Minute)
+		e.doing("还没做完")
+		e.wait(5 * time.Minute)
+		e.end(fmt.Sprintf("第 %d 轮", n))
+		if len(e.g.told) != 1 {
+			t.Fatalf("round %d: a receipt within %v of the doing block: %q", n, doingQuiet, e.g.told)
+		}
+	}
+	e.wait(doingQuiet)
+	e.fire()
+	if len(e.g.told) != 2 || !strings.Contains(e.g.told[1], "第 2 轮") {
+		t.Fatalf("after %v: told = %q, want one receipt of the latest turn", doingQuiet, e.g.told)
+	}
+	e.end("再一轮")
+	if len(e.g.told) != 2 {
+		t.Errorf("a second receipt before any doing block: %q", e.g.told)
+	}
+}
+
+// TestTaskEndedLastTurnInQuiet: a task whose last turn ends within
+// doingQuiet of the doing block, and that never has another, is told once
+// the window ends, so it is not left 进行中; a report meanwhile tells
+// nothing.
+func TestTaskEndedLastTurnInQuiet(t *testing.T) {
+	for _, report := range []bool{false, true} {
+		e := endedRunner(t)
+		e.end("改好了一半")
+		e.wait(5 * time.Minute)
+		e.doing("还没做完")
+		e.wait(20 * time.Minute)
+		e.end("全部做完了")
+		if len(e.g.told) != 1 {
+			t.Fatalf("report %v: a receipt within the window: %q", report, e.g.told)
+		}
+		if report {
+			e.reported = []string{e.key}
+		}
+		e.wait(doingQuiet)
+		e.fire()
+		if want := map[bool]int{false: 2, true: 1}[report]; len(e.g.told) != want || !report && !strings.Contains(e.g.told[1], "全部做完了") {
+			t.Errorf("report %v: told = %q, want %d", report, e.g.told, want)
+		}
+	}
+}
+
+// TestTaskEndedQuietOneTimer: a window's many unreported turn ends hold one
+// check to its end, not one each: endCh is shared and bounded, and the
+// latest is the one told.
+func TestTaskEndedQuietOneTimer(t *testing.T) {
+	e := endedRunner(t)
+	e.end("改好了一半")
+	e.wait(time.Minute)
+	e.doing("还没做完")
+	for n := range 2 * queueLen {
+		e.wait(time.Minute)
+		e.end(fmt.Sprintf("第 %d 轮", n))
+	}
+	if len(e.held) != 1 {
+		t.Fatalf("held = %d, want one check to the window's end", len(e.held))
+	}
+	e.wait(doingQuiet)
+	e.fire()
+	if got := e.receipts(); len(got) != 2 || !strings.Contains(got[1], fmt.Sprintf("第 %d 轮", 2*queueLen-1)) {
+		t.Fatalf("receipts = %q, want the latest turn told once", got)
+	}
+
+	// A wake lost to a full endCh does not leave the next window unarmed.
+	e.wait(time.Minute)
+	e.doing("还没做完")
+	e.wait(time.Minute)
+	e.end("又一轮")
+	e.held = nil // the wake never reaches endCh
+	e.wait(doingQuiet)
+	e.end("窗口过后")
+	e.doing("还要再看")
+	e.wait(time.Minute)
+	e.end("最后一轮")
+	if len(e.held) != 1 {
+		t.Fatalf("held = %d after a lost wake, want the window armed again", len(e.held))
+	}
+	e.wait(doingQuiet)
+	e.fire()
+	if got := e.receipts(); len(got) != 4 || !strings.Contains(got[3], "最后一轮") {
+		t.Fatalf("receipts = %q, want the last turn told at the window's end", got)
+	}
+}
+
+// TestTaskEndedWhileTold: a turn that ends after the receipt, before the
+// doing block answering it, is held to the window's end when it is the
+// latest, so a task whose last turn it is is not left 进行中.
+func TestTaskEndedWhileTold(t *testing.T) {
+	e := endedRunner(t)
+	e.end("测试在后台跑，跑完再看")
+	e.wait(3 * time.Minute)
+	e.end("测试全部通过")
+	if got := e.receipts(); len(got) != 1 {
+		t.Fatalf("receipts = %q", got)
+	}
+	e.wait(time.Minute)
+	e.doing("测试还在后台跑")
+	e.wait(doingQuiet)
+	e.fire()
+	if got := e.receipts(); len(got) != 2 || !strings.Contains(got[1], "测试全部通过") {
+		t.Fatalf("receipts = %q, want the turn that ended meanwhile told at the window's end", got)
+	}
+}
+
+// TestTaskEndedStaleSkipped: a turn end checked after its session ended
+// another is not told: its text is stale, and the later turn's own check
+// tells that one.
+func TestTaskEndedStaleSkipped(t *testing.T) {
+	e := endedRunner(t)
+	e.r.Result(e.key, "测试在后台跑，跑完再看")
+	e.wait(time.Minute)
+	e.r.Result(e.key, "测试全部通过")
+	e.check()
+	if got := e.receipts(); len(got) != 1 || !strings.Contains(got[0], "测试全部通过") {
+		t.Fatalf("receipts = %q, want only the latest turn told", got)
+	}
+}
+
+// TestTaskEndedReportRearms: a report re-arms the receipt as before, its
+// doing block answering it starts no quiet window, nor does a report after
+// a doing block that answered a receipt: the next unreported turn end is
+// told.
+func TestTaskEndedReportRearms(t *testing.T) {
+	t.Run("doing answers a report", func(t *testing.T) {
+		e := endedRunner(t)
+		e.reported = []string{e.key}
+		e.end("做了一半，汇报了")
+		e.doing("它说还要跑测试")
+		e.reported = nil
+		e.wait(10 * time.Minute)
+		e.end("全部做完了")
+		if len(e.g.told) != 1 || !strings.Contains(e.g.told[0], "全部做完了") || len(e.held) != 0 {
+			t.Fatalf("told = %q held = %d, want the turn end told at once", e.g.told, len(e.held))
+		}
+	})
+	t.Run("a doing block of its own", func(t *testing.T) {
+		e := endedRunner(t)
+		e.doing("用户说还要补文档")
+		e.wait(10 * time.Minute)
+		e.end("文档补好了")
+		if got := e.receipts(); len(got) != 1 || len(e.held) != 0 {
+			t.Fatalf("receipts = %q held = %d, want the turn end told at once", got, len(e.held))
+		}
+	})
+	t.Run("done, then reopened", func(t *testing.T) {
+		e := endedRunner(t)
+		e.end("改好了一半")
+		e.wait(5 * time.Minute)
+		e.doing("还没做完")
+		e.planner(block(`{"type":"status","task":"` + e.key + `","state":"done","why":"它说做完了"}`))
+		if err := e.r.cfg.Tasks.Set(e.key, task.Doing, task.ByUser, "重新打开"); err != nil {
+			t.Fatal(err)
+		}
+		e.wait(10 * time.Minute)
+		e.end("又改了一处")
+		if got := e.receipts(); len(got) != 2 || len(e.held) != 0 {
+			t.Fatalf("receipts = %q held = %d, want the reopened task's turn end told at once", got, len(e.held))
+		}
+	})
+	t.Run("done without a doing block, then reopened", func(t *testing.T) {
+		e := endedRunner(t)
+		e.end("改好了")
+		e.planner(block(`{"type":"status","task":"` + e.key + `","state":"done","why":"它说做完了"}`))
+		if err := e.r.cfg.Tasks.Set(e.key, task.Doing, task.ByUser, "重新打开"); err != nil {
+			t.Fatal(err)
+		}
+		e.wait(10 * time.Minute)
+		e.end("又改了一处")
+		if got := e.receipts(); len(got) != 2 || !strings.Contains(got[1], "又改了一处") {
+			t.Fatalf("receipts = %q, want the reopened task's turn end told", got)
+		}
+	})
+	t.Run("report after the doing block", func(t *testing.T) {
+		e := endedRunner(t)
+		e.end("改好了一半")
+		e.wait(5 * time.Minute)
+		e.doing("还没做完")
+		e.wait(5 * time.Minute)
+		e.reported = []string{e.key}
+		e.planner("收到汇报。")
+		e.reported = nil
+		e.wait(10 * time.Minute)
+		e.end("又一轮没汇报")
+		if got := e.receipts(); len(got) != 2 || !strings.Contains(got[1], "又一轮没汇报") {
+			t.Fatalf("receipts = %q, want the turn after the report told", got)
+		}
+	})
+}
+
+// TestTaskEndedBackground: a turn that ends with a workflow or background
+// task still running is no end of the task, so it gets no receipt; the turn
+// that ends once that work is done, unreported, does, even within
+// doingQuiet of a doing block, so the task is not left 进行中.
+func TestTaskEndedBackground(t *testing.T) {
+	e := endedRunner(t)
+	running := true
+	e.r.cfg.Background = func(k string) bool { return k == e.key && running }
+	e.end("测试已在后台运行，跑完再看")
+	if len(e.g.told) != 0 {
+		t.Fatalf("told while background work ran: %q", e.g.told)
+	}
+	running = false
+	e.end("测试全部通过")
+	if len(e.g.told) != 1 || !strings.Contains(e.g.told[0], "测试全部通过") {
+		t.Fatalf("after the background work: told = %q", e.g.told)
+	}
+	e.doing("还要再跑一遍")
+	running = true
+	e.wait(time.Minute)
+	e.end("第二遍在后台跑")
+	running = false
+	e.wait(time.Minute)
+	e.end("第二遍也通过了")
+	if len(e.g.told) != 2 || !strings.Contains(e.g.told[1], "第二遍也通过了") {
+		t.Fatalf("after the doing block and the background work: told = %q", e.g.told)
+	}
+	e.planner(block(`{"type":"status","task":"` + e.key + `","state":"done","why":"它说测试全部通过"}`))
+	if st := e.r.cfg.Tasks.List()[0]; st.ID != e.key || st.State != task.Done {
 		t.Errorf("task = %+v, want done", st)
+	}
+	if len(e.r.doingAt) != 0 {
+		t.Errorf("doingAt = %v after done, want none", e.r.doingAt)
 	}
 }
 

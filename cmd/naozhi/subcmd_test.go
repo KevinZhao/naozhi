@@ -93,7 +93,7 @@ func TestSubcommandFlagSets_ExitOnError(t *testing.T) {
 // flag they ignore: accepting a flag that does nothing is worse than not having
 // it, since an operator would believe it was honoured.
 func TestConfiglessSubcommands_HaveNoConfigFlag(t *testing.T) {
-	for _, name := range []string{"upgrade", "naozhi shim run", "naozhi shim stop"} {
+	for _, name := range []string{"upgrade", "naozhi shim run"} {
 		if f := newFlagSet(name).Lookup("config"); f != nil {
 			t.Errorf("newFlagSet(%q) must not define -config", name)
 		}

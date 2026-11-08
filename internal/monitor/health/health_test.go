@@ -357,6 +357,9 @@ func TestFailureAcrossRestart(t *testing.T) {
 	}{
 		{"still idle, nothing since", []Fact{{LastActive: before}, {LastActive: before}, {LastActive: before}}, Failed, nil},
 		{"resumed since", []Fact{{LastActive: after}}, Idle, []string{"s:failed>idle"}},
+		// A background task's events move LastActive, not the turn's time.
+		{"events since, no turn", []Fact{{LastActive: after, TurnAt: before}, {LastActive: after, TurnAt: before}}, Failed, nil},
+		{"a turn since", []Fact{{LastActive: after, TurnAt: after}}, Idle, []string{"s:failed>idle"}},
 		{"running", []Fact{{Running: true, LastActive: after}}, Active, []string{"s:failed>active"}},
 		{"held, then resumed", []Fact{{LastActive: before}, {LastActive: before}, {LastActive: after}}, Idle, []string{"s:failed>idle"}},
 		{"held, then active, then idle again", []Fact{{LastActive: before}, {LastActive: before}, {Running: true}, {LastActive: before}}, Idle,
@@ -386,8 +389,12 @@ func TestFailureAcrossRestart(t *testing.T) {
 				t.Errorf("transitions = %q, want %q", got, tt.trans)
 			}
 			if tt.want == Failed {
-				if u := r.m.Snapshot().Units[0]; !u.Since.Equal(failedAt) || u.Evidence == "" {
+				u := r.m.Snapshot().Units[0]
+				if !u.Since.Equal(failedAt) || u.Evidence == "" {
 					t.Errorf("held unit = %+v, want the journaled failure", u)
+				}
+				if last := tt.steps[len(tt.steps)-1]; !u.TurnAt.Equal(last.TurnAt) {
+					t.Errorf("unit TurnAt = %v, want the fact's %v", u.TurnAt, last.TurnAt)
 				}
 			}
 		})

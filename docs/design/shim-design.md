@@ -232,7 +232,7 @@ naozhi 断连期间，shim 自行监控 CLI 健康：
 
 ### 3.5 State File
 
-路径：`~/.naozhi/shims/<key-hash>.json`，权限 **0600**。
+路径：`<状态目录>/<key-hash>.json`，权限 **0600**。状态目录是 `session.shim.state_dir`；没设时取 `session.store_path` 所在目录下的 `shims/`（默认 `~/.naozhi/shims`），只换了 `store_path` 的隔离实例也不会扫到正式实例的 shim。目录只由配置决定，不看环境与磁盘上已有的 shim。推导出的目录不是 `~/.naozhi/shims`、而那里有 socket 还在的 shim 时，只打一条 Warn，不碰它们：升级前就自定义了 `store_path` 的实例，那些 shim 是自己的，要写 `session.shim.state_dir: ~/.naozhi/shims` 接着用。`naozhi shim list` / `shim stop` 不给 `--state-dir` 时按 `--config` 算同一个目录。
 
 ```json
 {
@@ -538,7 +538,7 @@ naozhi 重启后自动重连。
 session:
   shim:
     idle_timeout: "4h"               # 无 naozhi 连接后自动退出
-    state_dir: "~/.naozhi/shims"
+    state_dir: "~/.naozhi/shims"     # 不写时取 store_path 所在目录下的 shims/
 ```
 
 其余参数写死为 `shim.NewManager` 的默认值：ring buffer 10000 行 / 50MB，断连
