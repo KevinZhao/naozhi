@@ -3,8 +3,8 @@
 // and errors, the inbox's badge, the same count as the rail's Planner badge
 // and the phone's bottom bar. A click unfolds their cards in place, where
 // their own buttons close and answer them; with none the bar is not
-// rendered. 任务 is not here: the sidebar's "Planner 派出" group lists the
-// dispatched sessions, and the Planner page all of it.
+// rendered. 任务 is not here: the sidebar marks the dispatched sessions 派出
+// in their workspace's group, and the Planner page lists all of it.
 //
 // The count follows inbox_count frames (nzBus 'inbox:count'); the list is
 // fetched when the bar unfolds, refetched on a count change while it is

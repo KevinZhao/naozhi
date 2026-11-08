@@ -86,7 +86,7 @@ import { backendDisplayName, backendDisplayVersion, createNewSession, doCreateSe
 import { fetchAccessProfiles, fetchCLIBackends } from './backend_catalog.js';
 import { pendingBackendID } from './features.js';
 import { handleKey, sendMessage } from './send_message.js';
-import { collectWorkspaceSessionIDs, fetchSessions, onSessionsApplied, originBadgeHtml, refreshHeaderExitChip, restorePending, updateCardUnreadChip, updateMainState } from './session_list.js';
+import { collectWorkspaceSessionIDs, fetchSessions, onSessionsApplied, originBadgeHtml, refreshHeaderExitChip, restorePending, toggleOnlyDispatched, updateCardUnreadChip, updateMainState } from './session_list.js';
 import { findDiscovered, isDiscoveredKey, matchProject, parseDiscoveredPid, sid } from './session_ident.js';
 import { ICONS } from './icons.js';
 import { initLightbox } from './lightbox.js';
@@ -103,6 +103,10 @@ if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catc
 sessionList.collapsedProjects = (function() {
   try { return new Set(JSON.parse(localStorage.getItem('nz_collapsedProjects') || '[]')); }
   catch(_) { return new Set(); }
+})();
+sessionList.onlyDispatched = (function() {
+  try { return localStorage.getItem('nz_sidebarOnlyDispatched') === '1'; }
+  catch(_) { return false; }
 })();
 // selectedNode doubles as (a) the node the currently-selected session lives on
 // and (b) the "view" filter applied to the sidebar session list when multiple
@@ -1764,6 +1768,7 @@ registerActions({
   'code-copy': (el) => copyCodeBlock(el),
   // absorbed: project-header buttons (ex SIDEBAR_PROJECT_ACTIONS)
   'project-collapse': (el) => toggleProjectCollapsed(el.dataset.key),
+  'sidebar-only-dispatched': () => toggleOnlyDispatched(),
   'project-favorite': (el) => toggleFavorite(el.dataset.name, el.dataset.node),
   'project-github': (el) => showGitRemote(el.dataset.url),
   'project-settings': (el) => openProjectSettings(el.dataset.name),

@@ -625,6 +625,14 @@
 .sc-origin.kind-slack{color:var(--nz-origin-slack-fg);background:rgba(168,85,247,.14);border-color:rgba(168,85,247,.35)}
 .sc-origin.kind-discord{color:var(--nz-origin-discord-fg);background:rgba(88,101,242,.16);border-color:rgba(88,101,242,.38)}
 .sc-origin.kind-weixin{color:var(--nz-origin-weixin-fg);background:rgba(16,185,129,.14);border-color:rgba(16,185,129,.35)}
+/* A Planner-dispatched session (purpose task) in its workspace's group: an
+   outlined chip, apart from the filled IM-origin ones. */
+.sc-origin.kind-planner{color:var(--nz-accent);background:transparent;border-color:currentColor;font-weight:500}
+/* 只看 Planner 派出: narrows the list to the dispatched sessions. */
+.sb-filter{padding:6px 12px;border-bottom:1px solid var(--nz-bg-2)}
+.sb-filter-chip{display:inline-flex;align-items:center;gap:4px;min-height:26px;padding:2px 10px;border-radius:var(--nz-radius-pill);border:1px solid var(--nz-border);background:var(--nz-bg-1);color:var(--nz-text-mute);font-size:var(--nz-fs-xs);cursor:pointer}
+.sb-filter-chip b{font-weight:600}
+.sb-filter-chip.on{color:var(--nz-accent);border-color:var(--nz-accent)}
 /* History bottom sheet (mobile) */
 .history-sheet{position:fixed;bottom:0;left:0;right:0;z-index:var(--nz-z-drawer);background:var(--nz-bg-1);border-top:1px solid var(--nz-border);border-radius:var(--nz-radius-xl) 16px 0 0;max-height:60vh;overflow-y:auto;animation:sheet-in .25s ease;padding-bottom:max(8px,env(safe-area-inset-bottom))}
 .sheet-handle{width:36px;height:4px;background:var(--nz-text-faint);border-radius:2px;margin:8px auto}

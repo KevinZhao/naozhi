@@ -134,6 +134,8 @@ export const sessionList = {
   optimisticDeleteKeys: new Set(),
   // Initialized in dashboard.js at load.
   collapsedProjects: null,
+  // The sidebar's 只看 Planner 派出 filter; initialized in dashboard.js.
+  onlyDispatched: false,
   nodesData: {},
   lastVersion: 0,
   // statePushes: changes a poll must not undo, counted (n) and stamped per key (at).

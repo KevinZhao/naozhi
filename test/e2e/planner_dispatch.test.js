@@ -6,8 +6,8 @@
 // (D91); only the Planner's
 // questions with options stand at the end of the conversation; the
 // dispatched session is a 任务 with 停止, which posts /api/tasks/stop and
-// leaves it 已完成 as yours (已停止); the sessions it dispatched (purpose
-// task) are their own "Planner 派出" group on top of the session list.
+// leaves it 已完成 as yours (已停止); a session it dispatched (purpose task)
+// lists in its workspace's group, marked 派出.
 // Desktop and phone.
 const { test, expect } = require('@playwright/test');
 const { startMockServer, defaultSessions } = require('./mock-server');
@@ -74,12 +74,14 @@ for (const vp of [{ name: 'desktop', width: 1280, height: 800 }, { name: 'phone'
       await page.goto(mock.url + '/dashboard');
       await waitForWs(page, 'CONNECTED');
 
-      // The session list: the dispatched session leads, under its own header.
+      // The session list: the dispatched session is in its workspace's
+      // group, marked 派出; no group of its own.
       if (vp.name === 'desktop') {
         const list = page.locator('#session-list');
-        await expect(list.locator('.section-header').first()).toHaveText('Planner 派出');
-        await expect(list.locator('.session-card').first()).toHaveAttribute('data-key', TASK);
-        await expect(list.locator('.session-card[data-key="' + TASK + '"]')).toHaveCount(1);
+        await expect(list.locator('.section-header', { hasText: 'Planner 派出' })).toHaveCount(0);
+        const card = list.locator('.session-card[data-key="' + TASK + '"]');
+        await expect(card).toHaveCount(1);
+        await expect(card.locator('.sc-origin.kind-planner')).toHaveText('派出');
       }
 
       await page.click('#abnav-planner');
