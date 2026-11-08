@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,6 +19,9 @@ type turnState struct {
 	mu sync.RWMutex
 	// state changes only through transition; Dead is terminal (nextState).
 	state ProcessState
+	// moved is closed (and cleared) on every state change, so a Send waiting
+	// out a turn it does not own (claimSendWait) wakes when that turn ends.
+	moved chan struct{}
 	// sessionID is the CLI's session ID. Readers use Process.SessionID, never
 	// the field, to avoid racing readLoop's writes (#623).
 	sessionID string
@@ -80,6 +84,10 @@ func (t *turnState) transitionLocked(ev stateEvent) (prev ProcessState, moved bo
 	if moved {
 		t.state = next
 		t.unowned = ev == evTurnStarted
+		if t.moved != nil {
+			close(t.moved)
+			t.moved = nil
+		}
 		if ev == evSendBegin {
 			if t.sendAbandoned {
 				t.abortRequested.orphan(t.runID)
@@ -101,6 +109,43 @@ func (t *turnState) claimSend(runID string) (prev ProcessState, claimed bool) {
 		t.runID = runID
 	}
 	return prev, claimed
+}
+
+// claimSendWait is claimSend that waits out a Running turn instead of
+// refusing it: the CLI may run a turn of its own (a background-task
+// notification), a reconnect may find one in flight, or a passthrough turn
+// may still hold the process, and none of those is a reason to drop the
+// message. It gives up when the process dies, ctx ends or max passes.
+func (t *turnState) claimSendWait(ctx context.Context, runID string, max time.Duration) (prev ProcessState, claimed bool) {
+	var timeout <-chan time.Time
+	for {
+		t.mu.Lock()
+		prev, claimed = t.transitionLocked(evSendBegin)
+		if claimed {
+			t.runID = runID
+		}
+		if claimed || prev == StateDead {
+			t.mu.Unlock()
+			return prev, claimed
+		}
+		if t.moved == nil {
+			t.moved = make(chan struct{})
+		}
+		moved := t.moved
+		t.mu.Unlock()
+		if timeout == nil {
+			tm := time.NewTimer(max)
+			defer tm.Stop()
+			timeout = tm.C
+		}
+		select {
+		case <-moved:
+		case <-ctx.Done():
+			return prev, false
+		case <-timeout:
+			return prev, false
+		}
+	}
 }
 
 // noLiveSend reports whether no Send will consume a result read now: the
