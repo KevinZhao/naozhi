@@ -1,6 +1,7 @@
 package sidecar
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -86,8 +87,11 @@ func TestSidecarNewerVersionKept(t *testing.T) {
 		t.Fatalf("purpose = %q", p)
 	}
 	s.Sweep(func(string) bool { return false })
-	if err := s.Put(Meta{Key: key, Purpose: PurposeTask}); err == nil {
-		t.Error("Put overwrote a newer sidecar")
+	if err := s.Put(Meta{Key: key, Purpose: PurposeTask}); !errors.Is(err, ErrNewer) {
+		t.Errorf("Put on a newer sidecar = %v, want ErrNewer", err)
+	}
+	if ok, err := s.Update(key, func(*Meta) bool { return true }); !ok || !errors.Is(err, ErrNewer) {
+		t.Errorf("Update on a newer sidecar = %v, %v; want true, ErrNewer", ok, err)
 	}
 	s.Remove(key)
 	if got, err := os.ReadFile(file); err != nil || string(got) != string(data) {

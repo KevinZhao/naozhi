@@ -302,7 +302,9 @@ func (b *Board) List() []Task {
 			}
 			t.State, t.By, t.Why, t.At = sessionState(m, u)
 			t.ResultAt = resultTime(m, t.State, t.By, t.At)
-			t.New = isNew(t.ResultAt, m.SeenAt)
+			// A sidecar a newer naozhi wrote cannot take seen_at here: its
+			// dot would never go out.
+			t.New = isNew(t.ResultAt, m.SeenAt) && m.V <= sidecar.Version
 			if t.State == Done && m.Reap == nil && b.cfg.ReapWait != nil {
 				t.ReapWait, t.ReapAt = b.cfg.ReapWait(m.Key)
 			}
@@ -496,7 +498,11 @@ func (b *Board) seen(key string, u health.Unit, now time.Time) (bool, error) {
 		m.SeenAt, marked = now, true
 		return true
 	})
-	if err != nil {
+	switch {
+	case errors.Is(err, sidecar.ErrNewer):
+		// Not new in List either: nothing to mark, nothing to report.
+		return false, nil
+	case err != nil:
 		return false, err
 	}
 	return marked, nil

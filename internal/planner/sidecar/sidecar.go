@@ -208,6 +208,10 @@ type Store struct {
 	newer map[string]bool
 }
 
+// ErrNewer refuses a write to a sidecar a newer naozhi wrote: it keeps the
+// fields this build does not know, so it is read and never rewritten.
+var ErrNewer = errors.New("sidecar: written by a newer naozhi")
+
 // Open loads every sidecar under dir. A file that cannot be read or parsed
 // is left in place and skipped; one a newer naozhi wrote is read but never
 // rewritten. An empty dir keeps the store in memory.
@@ -266,7 +270,7 @@ func (s *Store) Put(m Meta) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.newer[m.Key] {
-		return errors.New("sidecar: written by a newer naozhi")
+		return ErrNewer
 	}
 	if err := s.writeLocked(m); err != nil {
 		return err
@@ -373,7 +377,7 @@ func (s *Store) Update(key string, fn func(*Meta) bool) (bool, error) {
 		return false, nil
 	}
 	if s.newer[key] {
-		return true, errors.New("sidecar: written by a newer naozhi")
+		return true, ErrNewer
 	}
 	if !fn(&m) {
 		return true, nil

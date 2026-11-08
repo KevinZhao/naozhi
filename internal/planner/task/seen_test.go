@@ -222,6 +222,40 @@ func TestSetViewing(t *testing.T) {
 	b.DropViewer("ws1")
 }
 
+// A sidecar a newer naozhi wrote takes no seen_at, so its result is not
+// new here: no dot that never goes out, no error from 全部已读 or from
+// opening it.
+func TestSeenNewerSidecar(t *testing.T) {
+	now := t0
+	dir := t.TempDir()
+	const key = "task:eeeeeeeeeeee"
+	data := []byte(`{"v":99,"key":"` + key + `","purpose":"task","title":"e","created":"2026-11-04T08:00:00Z",` +
+		`"report":{"state":"done","summary":"新版写的。","at":"2026-11-04T09:00:00Z"}}`)
+	p := sidecarPath(dir, key)
+	if err := os.WriteFile(p, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sc := sidecar.Open(dir, func() time.Time { return now })
+	b := New(Config{Sessions: sc, Now: func() time.Time { return now }})
+	list := b.List()
+	if len(list) != 1 || list[0].ID != key || list[0].ResultAt.IsZero() {
+		t.Fatalf("list = %+v", list)
+	}
+	if list[0].New {
+		t.Error("a newer sidecar's result is new")
+	}
+	if n, err := b.Seen([]string{key}, false); n != 0 || err != nil {
+		t.Errorf("Seen(ids) = %d, %v; want 0, nil", n, err)
+	}
+	if n, err := b.Seen(nil, true); n != 0 || err != nil {
+		t.Errorf("Seen(all) = %d, %v; want 0, nil", n, err)
+	}
+	b.SetViewing(key, "ws1", true)
+	if got, err := os.ReadFile(p); err != nil || string(got) != string(data) {
+		t.Errorf("newer sidecar changed: %q, %v", got, err)
+	}
+}
+
 // sidecarPath is key's file in store directory dir (sidecar's naming).
 func sidecarPath(dir, key string) string {
 	sum := sha256.Sum256([]byte(key))
