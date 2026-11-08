@@ -701,10 +701,13 @@ func (e *Engine) Allowed(key string) bool { return e.Check(key) == nil }
 
 // Blocked returns why custody would not send to key whatever becomes of its
 // session: custody disabled, its switch turned off by the user or the
-// Planner, paused, or its lineage stopped. A dispatched session put away
-// (planner/reap) reads off and not local until its task is reopened, so
-// Check cannot tell these from what reopening it would change; a message to
-// it is weighed by Blocked before anything reopens it.
+// Planner, paused, its lineage stopped, the user at the session, or the
+// lineage at a limit, which stops it as Deliver would. A dispatched session
+// put away (planner/reap) reads off and not local until its task is
+// reopened, so Check cannot tell these from what reopening it would change;
+// a message to it is weighed by Blocked before anything reopens it, as
+// reopening sets its task back to 进行中 for a message Deliver would then
+// refuse.
 func (e *Engine) Blocked(key string) error {
 	switch {
 	case e.cfg.Disabled:
@@ -717,7 +720,18 @@ func (e *Engine) Blocked(key string) error {
 	if m, ok := e.cfg.Sessions.Get(key); ok && m.Custody != nil && m.Custody.By != ByAuto && !m.Custody.On {
 		return ErrOff
 	}
-	return e.retryCheckLocked(key)
+	if err := e.retryCheckLocked(key); err != nil {
+		return err
+	}
+	if e.nearbyLocked(key) {
+		return ErrNearby
+	}
+	root := e.root(key)
+	c := e.chain(root)
+	if why := limit(c, e.progress(key)); why != "" {
+		return e.stopLocked(root, key, c, why, false)
+	}
+	return nil
 }
 
 // checkLocked is Check short of the user being nearby.

@@ -423,3 +423,49 @@ func TestBlockedPutAway(t *testing.T) {
 		t.Errorf("stopped: Blocked = %v", err)
 	}
 }
+
+// Blocked refuses what Deliver would refuse once the session is reopened:
+// the user at it, or the lineage at a limit not yet recorded as a stop,
+// which it records, so a reopened task does not wait on a message never
+// sent.
+func TestBlockedPutAwayLimits(t *testing.T) {
+	key := "remote/task:a"
+	for _, tc := range []struct {
+		name  string
+		setup func(r *rig)
+		want  error
+		stops bool
+	}{
+		{"user nearby", func(r *rig) { r.lastUser[key] = r.now.Add(-time.Minute) }, ErrNearby, false},
+		{"sent all", func(r *rig) {
+			r.update(key, func(m *sidecar.Meta) { m.Chain = &sidecar.Chain{Sent: MaxSends, Progress: "p0"} })
+			r.progress[key] = "p1"
+		}, ErrStopped, true},
+		{"no progress", func(r *rig) {
+			r.update(key, func(m *sidecar.Meta) { m.Chain = &sidecar.Chain{Sent: MaxIdle, Idle: MaxIdle, Progress: "p0"} })
+			r.progress[key] = "p0"
+		}, ErrStopped, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			if err := r.sessions.Put(sidecar.Meta{Key: key, Purpose: sidecar.PurposeTask, Parent: sessionkey.PlannerMainKey,
+				Mark: &sidecar.Mark{State: "done", By: "planner", At: r.now}, Reap: &sidecar.Reap{By: "planner"}}); err != nil {
+				t.Fatal(err)
+			}
+			tc.setup(r)
+			if err := r.e.Blocked(key); !errors.Is(err, tc.want) {
+				t.Fatalf("Blocked = %v, want %v", err, tc.want)
+			}
+			m, _ := r.sessions.Get(key)
+			if stopped := m.Chain != nil && m.Chain.Stopped != ""; stopped != tc.stops {
+				t.Errorf("lineage stopped = %v, want %v", stopped, tc.stops)
+			}
+			if got := len(r.inbox.items) == 1; got != tc.stops {
+				t.Errorf("inbox = %+v, want the stop told %v", r.inbox.items, tc.stops)
+			}
+			if len(r.sent) != 0 {
+				t.Errorf("sent %q", r.sent)
+			}
+		})
+	}
+}
