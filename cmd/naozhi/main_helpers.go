@@ -287,11 +287,12 @@ func shimManagerConfig(cfg *config.Config) shim.ManagerConfig {
 // default store_path gives ~/.naozhi/shims all the same. Absolute: the shims
 // it spawns are told their state file's path.
 //
-// An install whose own store_path predates the derivation keeps its shims
-// in ~/.naozhi/shims: while the derived directory holds none and that one
-// holds a shim listening in this instance's socket directory, that one is
-// kept, or the shim would be orphaned and its socket refuse the key's next
-// spawn. An instance isolated by its own socket directory never matches.
+// Config alone decides it, so the service and `naozhi shim list/stop` agree
+// whatever their environment, and an instance isolated by its store_path
+// never takes up another's shims. Live shims in ~/.naozhi/shims are only
+// named in a warning: they may be this instance's own (an install with its
+// own store_path from before the derivation), which only the operator can
+// tell, by setting state_dir to that directory.
 func shimStateDir(cfg *config.Config) string {
 	if dir := osutil.ExpandHome(cfg.Session.Shim.StateDir); dir != "" {
 		return dir
@@ -303,45 +304,36 @@ func shimStateDir(cfg *config.Config) string {
 	if abs, err := filepath.Abs(dir); err == nil {
 		dir = abs
 	}
-	if legacy := shim.DefaultStateDir(); dir != legacy && !hasShimState(dir) && listensHere(legacy) {
-		slog.Warn("shim state dir: shims of this instance are still in the old directory; set session.shim.state_dir to keep it",
-			"using", legacy, "derived", dir)
-		return legacy
+	if legacy := shim.DefaultStateDir(); dir != legacy {
+		if n := liveShims(legacy); n > 0 {
+			slog.Warn("shim state dir: live shims in "+legacy+" are left alone; if they are this instance's own, set session.shim.state_dir: ~/.naozhi/shims",
+				"using", dir, "live", n)
+		}
 	}
 	return dir
 }
 
-// shimStateFiles lists dir's shim state files.
-func shimStateFiles(dir string) []string {
+// liveShims counts the shims in dir whose state file names a socket that
+// still exists.
+func liveShims(dir string) int {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil
+		return 0
 	}
-	var out []string
+	n := 0
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") && !osutil.IsAtomicTempName(e.Name()) {
-			out = append(out, filepath.Join(dir, e.Name()))
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") || osutil.IsAtomicTempName(e.Name()) {
+			continue
 		}
-	}
-	return out
-}
-
-func hasShimState(dir string) bool { return len(shimStateFiles(dir)) > 0 }
-
-// listensHere reports whether dir holds the state of a shim whose socket
-// exists in this process's socket directory.
-func listensHere(dir string) bool {
-	sockets := shim.SocketDir()
-	for _, path := range shimStateFiles(dir) {
-		st, err := shim.ReadStateFile(path)
-		if err != nil || filepath.Dir(st.Socket) != sockets {
+		st, err := shim.ReadStateFile(filepath.Join(dir, e.Name()))
+		if err != nil || st.Socket == "" {
 			continue
 		}
 		if _, err := os.Stat(st.Socket); err == nil {
-			return true
+			n++
 		}
 	}
-	return false
+	return n
 }
 
 // buildSysessionManager wires sysession.Manager from cfg.Sysession. Returns

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -142,60 +143,44 @@ func TestShimStateDir(t *testing.T) {
 	}
 }
 
-// TestShimStateDirKeepsOldShims: an install whose own store_path predates
-// the derivation keeps its shims in ~/.naozhi/shims. While the derived
-// directory holds none and one there listens in this instance's socket
-// directory, that directory stays: else the shim is orphaned and its socket
-// refuses the key's next spawn. A shim listening elsewhere (an instance
-// isolated by XDG_RUNTIME_DIR) or a derived directory in use moves on.
-func TestShimStateDirKeepsOldShims(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		socketElse  bool // the old shim's socket is in another socket directory
-		noSocket    bool // its socket file is gone
-		derivedUsed bool // the derived directory already has a state file
-		wantOld     bool
-	}{
-		{name: "old shim listening here", wantOld: true},
-		{name: "old shim of another socket directory", socketElse: true},
-		{name: "old shim without its socket", noSocket: true},
-		{name: "derived directory in use", derivedUsed: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			home := t.TempDir()
-			t.Setenv("HOME", home)
-			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
-			iso := t.TempDir()
-			old := filepath.Join(home, ".naozhi", "shims")
-			sock := filepath.Join(shim.SocketDir(), "shim-a.sock")
-			if tc.socketElse {
-				sock = filepath.Join(t.TempDir(), "naozhi", "shim-a.sock")
-			}
-			if !tc.noSocket {
-				if err := os.MkdirAll(filepath.Dir(sock), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(sock, nil, 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if err := shim.WriteStateFile(shim.StateFilePath(old, shim.KeyHash("k")), shim.State{Key: "k", Socket: sock}); err != nil {
-				t.Fatal(err)
-			}
-			if tc.derivedUsed {
-				if err := shim.WriteStateFile(shim.StateFilePath(filepath.Join(iso, "shims"), shim.KeyHash("j")), shim.State{Key: "j"}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			cfg := loadConfigBody(t, "session:\n  store_path: "+filepath.Join(iso, "sessions.json")+"\n")
-			want := filepath.Join(iso, "shims")
-			if tc.wantOld {
-				want = old
-			}
-			if got := shimStateDir(cfg); got != want {
-				t.Errorf("shim state dir = %q, want %q", got, want)
-			}
-		})
+// TestShimStateDirLeavesLegacyShims: a fresh instance with its own
+// store_path uses the derived directory though ~/.naozhi/shims holds live
+// shims listening in the socket directory both share (macOS: neither the
+// launchd job nor a terminal sets XDG_RUNTIME_DIR), so it never takes up the
+// other instance's shims; a warning names them, and how to keep them if they
+// are this instance's own. `shim list/stop` with the same config agree.
+func TestShimStateDirLeavesLegacyShims(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	iso := t.TempDir()
+	old := filepath.Join(home, ".naozhi", "shims")
+	sock := filepath.Join(home, ".naozhi", "run", "shim-a.sock")
+	if err := os.MkdirAll(filepath.Dir(sock), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := shim.WriteStateFile(shim.StateFilePath(old, shim.KeyHash("task:prod")), shim.State{Key: "task:prod", Socket: sock}); err != nil {
+		t.Fatal(err)
+	}
+	body := "session:\n  store_path: " + filepath.Join(iso, "sessions.json") + "\n"
+	buf := captureSlog(t)
+	want := filepath.Join(iso, "shims")
+	if got := shimStateDir(loadConfigBody(t, body)); got != want {
+		t.Errorf("shim state dir = %q, want %q", got, want)
+	}
+	if !strings.Contains(buf.String(), "session.shim.state_dir: ~/.naozhi/shims") || !strings.Contains(buf.String(), `"live":1`) {
+		t.Errorf("want the warning naming the live shims, log = %s", buf)
+	}
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir()) // an operator's ssh shell
+	if got := cliShimStateDir("", cfgPath, io.Discard); got != want {
+		t.Errorf("shim list/stop state dir = %q, want %q", got, want)
 	}
 }
 

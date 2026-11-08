@@ -244,16 +244,6 @@ func GenerateToken() ([]byte, string, error) {
 	return raw, base64.StdEncoding.EncodeToString(raw), nil
 }
 
-// SocketDir is the directory SocketPath puts sockets in: naozhi/ under
-// XDG_RUNTIME_DIR, else ~/.naozhi/run. It creates nothing.
-func SocketDir() string {
-	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
-		return filepath.Join(dir, "naozhi")
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".naozhi", "run")
-}
-
 // DefaultStateDir is the state directory NewManager uses when given none.
 func DefaultStateDir() string {
 	home, _ := os.UserHomeDir()
@@ -263,7 +253,13 @@ func DefaultStateDir() string {
 // SocketPath returns the unix socket path for a given session key hash.
 // Prefers XDG_RUNTIME_DIR, falls back to ~/.naozhi/run/.
 func SocketPath(keyHash string) string {
-	dir := SocketDir()
+	dir := os.Getenv("XDG_RUNTIME_DIR")
+	if dir == "" {
+		home, _ := os.UserHomeDir()
+		dir = filepath.Join(home, ".naozhi", "run")
+	} else {
+		dir = filepath.Join(dir, "naozhi")
+	}
 	os.MkdirAll(dir, 0700) //nolint:errcheck
 	// Re-apply 0700 even when MkdirAll is a no-op: a pre-existing dir may be
 	// looser and the socket inherits its traverse-visibility.
