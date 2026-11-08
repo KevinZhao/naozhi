@@ -17,6 +17,7 @@ func sidecarMeta(key string) sidecar.Meta { return sidecar.Meta{Key: key} }
 type fakeCustody struct {
 	on         map[string]bool
 	check      error
+	blocked    error
 	settled    bool
 	setErr     error
 	deliverErr error
@@ -31,7 +32,8 @@ func (f *fakeCustody) Check(key string) error {
 	}
 	return f.check
 }
-func (f *fakeCustody) Settled(string) bool { return f.settled }
+func (f *fakeCustody) Blocked(string) error { return f.blocked }
+func (f *fakeCustody) Settled(string) bool  { return f.settled }
 func (f *fakeCustody) Set(key string, on bool, by string) error {
 	if f.setErr != nil {
 		return f.setErr

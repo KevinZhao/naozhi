@@ -155,6 +155,7 @@ type Config struct {
 type Custodian interface {
 	On(key string) bool
 	Check(key string) error
+	Blocked(key string) error
 	Settled(key string) bool
 	Set(key string, on bool, by string) error
 	Deliver(key string, reason custody.Reason, text string) (int, error)
@@ -575,7 +576,7 @@ func (r *Runner) handle(rep reply) {
 			err = r.promise(*b.Promise, dispatched)
 		case b.Ask != nil:
 			if err = r.ask(*b.Ask); err == nil && b.Ask.Trimmed > 0 {
-				un.note(i, b, fmt.Sprintf("%d 个选项超过 %d 字，截成了 %d 字（末尾是 …），用户看到的是截过的", b.Ask.Trimmed, optionRunes, optionRunes))
+				un.note(i, b, fmt.Sprintf("%d 个选项超过 %d 字，“通知”里的按钮截成了 %d 字（末尾是 …），用户点的回答送回来也是截过的那段", b.Ask.Trimmed, optionRunes, optionRunes))
 			}
 		case b.Status != nil:
 			statused[b.Status.Task] = b.Status.State
@@ -938,7 +939,10 @@ func (r *Runner) relay(rl Relay, words []Words) (reopened bool, err error) {
 		return false, err
 	}
 	if err := r.cfg.Relay(rl.Key, relayEnvelope(r.cfg.Now(), words, rl.Text)); err != nil {
-		return reopened, fmt.Errorf("没有送到（%v）", err)
+		if reopened {
+			return true, fmt.Errorf("这个会话已经收起，网关已重新打开（任务回到进行中），但没有送到（%v）", err)
+		}
+		return false, fmt.Errorf("没有送到（%v）", err)
 	}
 	return reopened, nil
 }
@@ -1246,17 +1250,29 @@ func requestID() string {
 // back while the user is at the session. The block's card says it was done;
 // what was not sent says why, and none of that asks for the block again.
 // A message to a dispatched session put away reopens it first, as a relay
-// does (reachable); reopened says so.
+// does (reachable), unless custody would refuse it anyway: reopening sets
+// the task back to 进行中, which nothing undoes for a message never sent.
+// reopened says so. Its switch is left as it is: there is nothing to watch.
 func (r *Runner) custody(c Custody) (reopened bool, err error) {
 	if r.cfg.Custody == nil {
 		return false, errors.New("托管没有接通")
 	}
-	if c.On == nil && r.putAway(c.Key) {
+	if r.putAway(c.Key) {
+		switch err := r.cfg.Custody.Blocked(c.Key); {
+		case c.On != nil:
+			return false, errors.New("这个会话已经收起（任务已完成），托管开关没有改，不用重发；要它接着做就用 text 给它发消息，网关会先重新打开它")
+		case custody.Irreversible(c.Text):
+			return false, errIrreversible
+		case errors.Is(err, custody.ErrOff):
+			return false, errors.New("这个会话已经收起，托管也被关掉了，没有发出，也没有重新打开；要它接着做就用 ask 问用户，用户决定了再用 relay 转达")
+		case err != nil:
+			return false, custodyError(c, err)
+		}
 		if err := r.cfg.Tasks.Set(c.Key, task.Doing, task.ByPlanner, "Planner 经托管发消息给它，网关重新打开"); err != nil {
 			return false, fmt.Errorf("这个会话已经收起，重新打开失败（%v）", err)
 		}
 		if err := r.custodyRun(c); err != nil {
-			return true, fmt.Errorf("这个会话已经收起，网关已重新打开，但%w", err)
+			return true, fmt.Errorf("这个会话已经收起，网关已重新打开（任务回到进行中），但%v", err)
 		}
 		return true, nil
 	}
@@ -1275,10 +1291,18 @@ func (r *Runner) custodyRun(c Custody) error {
 		}
 	} else {
 		if custody.Irreversible(c.Text) {
-			return errors.New("涉及 push、合并、发版、删除或对外发送这类收不回的事，托管不替用户说，没有发出：用户已经在对话里说了就用 relay 转达，没说就用 ask（带 task）问用户")
+			return errIrreversible
 		}
 		_, err = cu.Deliver(c.Key, custody.ReasonPlanner, c.Text+custodyNote)
 	}
+	return custodyError(c, err)
+}
+
+// errIrreversible refuses a custody message about what cannot be undone.
+var errIrreversible = errors.New("涉及 push、合并、发版、删除或对外发送这类收不回的事，托管不替用户说，没有发出：用户已经在对话里说了就用 relay 转达，没说就用 ask（带 task）问用户")
+
+// custodyError is err of custody block c as the receipt says it.
+func custodyError(c Custody, err error) error {
 	switch {
 	case err == nil:
 		return nil

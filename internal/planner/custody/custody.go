@@ -699,6 +699,27 @@ func (e *Engine) Check(key string) error {
 // Allowed reports whether custody may send to key now.
 func (e *Engine) Allowed(key string) bool { return e.Check(key) == nil }
 
+// Blocked returns why custody would not send to key whatever becomes of its
+// session: custody disabled, its switch turned off by the user or the
+// Planner, paused, or its lineage stopped. A dispatched session put away
+// (planner/reap) reads off and not local until its task is reopened, so
+// Check cannot tell these from what reopening it would change; a message to
+// it is weighed by Blocked before anything reopens it.
+func (e *Engine) Blocked(key string) error {
+	switch {
+	case e.cfg.Disabled:
+		return ErrDisabled
+	case e.cfg.Sessions == nil || e.cfg.Send == nil:
+		return ErrOff
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if m, ok := e.cfg.Sessions.Get(key); ok && m.Custody != nil && m.Custody.By != ByAuto && !m.Custody.On {
+		return ErrOff
+	}
+	return e.retryCheckLocked(key)
+}
+
 // checkLocked is Check short of the user being nearby.
 func (e *Engine) checkLocked(key string) error {
 	if !e.On(key) {

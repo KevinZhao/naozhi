@@ -383,3 +383,43 @@ func TestRetryCrashOnlyWhileTaskRuns(t *testing.T) {
 		})
 	}
 }
+
+// Blocked is what would refuse a message to a session put away whatever
+// reopening it changes (its task done and its key not local): a switch set
+// off by someone, the pause, a stopped lineage; a switch left to the
+// default, which reads off only because the task is done, is no refusal.
+func TestBlockedPutAway(t *testing.T) {
+	r := newRig(t)
+	key := "remote/task:a" // not local, as a session put away is not
+	if err := r.sessions.Put(sidecar.Meta{Key: key, Purpose: sidecar.PurposeTask, Parent: sessionkey.PlannerMainKey,
+		Mark: &sidecar.Mark{State: "done", By: "planner", At: r.now}}); err != nil {
+		t.Fatal(err)
+	}
+	if r.e.On(key) || !errors.Is(r.e.Check(key), ErrOff) {
+		t.Fatal("a done task put away reads in custody")
+	}
+	if err := r.e.Blocked(key); err != nil {
+		t.Fatalf("default switch: Blocked = %v, want nil", err)
+	}
+	for _, by := range []string{ByUser, ByPlanner} {
+		r.update(key, func(m *sidecar.Meta) { m.Custody = &sidecar.Custody{On: false, By: by, At: r.now} })
+		if err := r.e.Blocked(key); !errors.Is(err, ErrOff) {
+			t.Errorf("off by %s: Blocked = %v", by, err)
+		}
+	}
+	r.update(key, func(m *sidecar.Meta) { m.Custody = &sidecar.Custody{On: true, By: ByUser, At: r.now} })
+	if err := r.e.Blocked(key); err != nil {
+		t.Errorf("on by the user: Blocked = %v", err)
+	}
+	r.until = r.now.Add(time.Hour)
+	if err := r.e.Blocked(key); !errors.Is(err, ErrPaused) {
+		t.Errorf("paused: Blocked = %v", err)
+	}
+	r.until = time.Time{}
+	r.update(key, func(m *sidecar.Meta) {
+		m.Chain = &sidecar.Chain{Sent: MaxSends, Stopped: "托管已替你发了 8 次，交还给你"}
+	})
+	if err := r.e.Blocked(key); !errors.Is(err, ErrStopped) {
+		t.Errorf("stopped: Blocked = %v", err)
+	}
+}
