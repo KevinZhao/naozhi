@@ -206,6 +206,14 @@ func (r *Router) InjectSession(key string, proc *TestProcess) *ManagedSession {
 // session; production sets it through the spawn / takeover paths.
 func (s *ManagedSession) SetWorkspaceForTest(ws string) { s.setWorkspace(ws) }
 
+// SetHistoryLoadingForTest marks an injected session as having its startup
+// history load still running, as startBackgroundHistoryLoaders does.
+func (s *ManagedSession) SetHistoryLoadingForTest(v bool) { s.historyLoading.Store(v) }
+
+// SetCreatedAtForTest stamps an injected session's creation time, as a
+// restore from the store does.
+func (s *ManagedSession) SetCreatedAtForTest(t time.Time) { s.createdAt.Store(t.UnixNano()) }
+
 // MarkExemptForTest flags an injected session exempt, as the spawn path does
 // for exempt-namespace keys, so it counts against the exempt caps.
 func (s *ManagedSession) MarkExemptForTest() { s.exempt = true }

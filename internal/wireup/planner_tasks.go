@@ -18,6 +18,7 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/planner/action"
 	"github.com/naozhi/naozhi/internal/planner/agent"
+	"github.com/naozhi/naozhi/internal/planner/digest"
 	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/planner/task"
@@ -249,6 +250,9 @@ type TaskSpawner struct {
 	// Submit runs the first message as a turn (Server.SubmitPlanner); a
 	// task: turn has no source.
 	Submit func(key string, src agent.Source, said *agent.Words, text string, images []clievent.Attachment, opts session.AgentOpts, done func(string, error)) (bool, error)
+	// Digests keep the session's goal from its dispatch (§15.12 ②); nil
+	// keeps none.
+	Digests *digest.Writer
 }
 
 // Spawn is action.Config.Spawn. A start that fails is said in the user's
@@ -263,6 +267,11 @@ func (t TaskSpawner) Spawn(ctx context.Context, key string, s action.Spawn) erro
 		return spawnError(err, key, t.Router.MaxProcs())
 	}
 	t.Router.SetUserLabel(key, s.Title)
+	// The goal is the Planner's text of the message, before the envelope
+	// and the gateway's note; the session's events lose it later.
+	if err := t.Digests.SetGoal(key, action.Brief(s.Message)); err != nil {
+		slog.Warn("planner dispatch: goal not kept", "key", key, "err", err)
+	}
 	_, err = t.Submit(key, "", nil, s.Message+reportLine(t.Opts.Planner), nil, opts, nil)
 	return err
 }

@@ -1,6 +1,7 @@
 package task
 
 import (
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -367,5 +368,39 @@ func TestLive(t *testing.T) {
 	}
 	if by[gone].Live != nil || by[retired].Live != nil {
 		t.Errorf("gone %+v, retired %+v: want no live", by[gone].Live, by[retired].Live)
+	}
+}
+
+// A dispatched session's card carries its latest report from the sidecar
+// and whether it has a digest to open.
+func TestReportAndDigest(t *testing.T) {
+	sc := sidecar.Open(t.TempDir(), func() time.Time { return t0 })
+	const reported, plain = "task:aaaaaaaaaaaa", "task:bbbbbbbbbbbb"
+	rep := &sidecar.Report{State: "done", Summary: "已修好。CI 绿", At: t0}
+	for _, m := range []sidecar.Meta{
+		{Key: reported, Purpose: sidecar.PurposeTask, Title: "a", Report: rep},
+		{Key: plain, Purpose: sidecar.PurposeTask, Title: "b"},
+	} {
+		if err := sc.Put(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b := New(Config{Sessions: sc, Now: func() time.Time { return t0 }, Digest: func(key string) bool { return key == reported }})
+	by := map[string]Task{}
+	for _, tk := range b.List() {
+		by[tk.ID] = tk
+	}
+	if got := by[reported]; got.Report == nil || *got.Report != *rep || !got.Digest {
+		t.Errorf("reported task = %+v", got)
+	}
+	if got := by[plain]; got.Report != nil || got.Digest {
+		t.Errorf("plain task = %+v", got)
+	}
+	data, err := json.Marshal(by[plain])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(data); strings.Contains(s, `"report"`) || strings.Contains(s, `"digest"`) {
+		t.Errorf("plain task wire = %s", s)
 	}
 }

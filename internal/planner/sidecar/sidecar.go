@@ -37,6 +37,11 @@ const Version = 1
 // PurposeTask is a session the Planner dispatched (§0 purpose).
 const PurposeTask = "task"
 
+// PurposeChat is a session the user opened that the gateway observes
+// (§15.12 ⑥). Derived for index.json and the digests, never written: such
+// a session has no sidecar of its own for it.
+const PurposeChat = "chat"
+
 // Retention is how long a file outlives its session.
 const Retention = 30 * 24 * time.Hour
 
@@ -89,6 +94,17 @@ type Meta struct {
 	// Reap is set while the session, done, is put away (planner/reap): what
 	// resuming it needs and what became of its worktrees. nil once reopened.
 	Reap *Reap `json:"reap,omitempty"`
+	// Report is the session's latest report (§15.12 ③), its conclusion
+	// for the task card; the full text is in its digest (planner/digest).
+	Report *Report `json:"report,omitempty"`
+}
+
+// Report is a session's latest report: its state (done, blocked,
+// need_user, progress), its summary and when.
+type Report struct {
+	State   string    `json:"state"`
+	Summary string    `json:"summary"`
+	At      time.Time `json:"at"`
 }
 
 // Reap is a done task's session put away: when, on whose mark (By, Why),

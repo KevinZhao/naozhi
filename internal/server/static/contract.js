@@ -89,6 +89,7 @@ export const NZ_CONTRACT = Object.freeze({
     sessions_attachment: '/api/sessions/attachment',
     sessions_bind: '/api/sessions/bind',
     sessions_detail: '/api/sessions/detail',
+    sessions_digest: '/api/sessions/digest',
     sessions_events: '/api/sessions/events',
     sessions_git: '/api/sessions/git',
     sessions_history: '/api/sessions/history',

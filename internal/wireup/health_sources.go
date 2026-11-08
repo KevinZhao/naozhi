@@ -15,6 +15,7 @@ import (
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/monitor/health"
+	"github.com/naozhi/naozhi/internal/planner/digest"
 	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/session"
@@ -46,6 +47,12 @@ type HealthSources struct {
 	// Scout is the patrol's unit; its run sessions are not units of their
 	// own.
 	Scout *scout.Scout
+	// Digests fill index.json's digest and report (§15.12 ②); nil leaves
+	// them out. Observed names the sessions the user opened that the
+	// gateway observes, whose purpose index.json says is "chat" with no
+	// sidecar saying so; nil names none.
+	Digests  *digest.Writer
+	Observed func(key string) bool
 }
 
 // Collect is health.Config.Collect. Cron jobs and daemons come before the
@@ -79,6 +86,10 @@ func (h HealthSources) Collect(since time.Time) []health.Fact {
 					f.Index.Purpose, f.Index.DispatchedByPlanner = m.Purpose, m.DispatchedByPlanner()
 				}
 			}
+			if f.Index.Purpose == "" && h.Observed != nil && h.Observed(snap.Key) {
+				f.Index.Purpose = sidecar.PurposeChat
+			}
+			h.indexDigest(f.Index)
 			out = append(out, f)
 		}
 	}
@@ -104,6 +115,20 @@ func (h HealthSources) Collect(since time.Time) []health.Fact {
 		}
 	}
 	return out
+}
+
+// indexDigest fills e's digest path and report from the digests. The task
+// card reads the report from the sidecar (sidecar.Meta.Report) instead, so
+// whatever records a report (§15.12 ③) writes both, or the Planner and the
+// page see two conclusions.
+func (h HealthSources) indexDigest(e *health.IndexEntry) {
+	if h.Digests == nil {
+		return
+	}
+	e.Digest = h.Digests.Path(e.Key)
+	if st, ok := h.Digests.State(e.Key); ok && st.Report != nil {
+		e.Report = &health.IndexReport{State: st.Report.State, Summary: digest.FirstSentence(st.Report.Summary), At: st.Report.At}
+	}
 }
 
 func sessionFact(snap session.SessionSnapshot, s *session.ManagedSession, logDir string) health.Fact {

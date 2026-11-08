@@ -334,6 +334,10 @@ func (s *ManagedSession) hasInjectedHistory() bool {
 	return len(s.persistedHistory) > 0
 }
 
+// HistoryLoading reports whether the startup loader is still reading this
+// session's history from before the restart.
+func (s *ManagedSession) HistoryLoading() bool { return s.historyLoading.Load() }
+
 // EventEntries returns the event log entries for this session.
 // Returns persisted history when the process is nil or dead.
 func (s *ManagedSession) EventEntries() []clievent.EventEntry {
