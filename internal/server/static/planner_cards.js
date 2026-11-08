@@ -390,26 +390,37 @@ function foldTextKeys(ev, keys) {
 // emptyBracketRE is a bracket the folded keys emptied: "（`a` 和 `b`）".
 const emptyBracketRE = /\s*[（(]\s*(?:[和与及、，,；;]\s*)*[）)]/g;
 
-// listSepRE is the text between two items of a list: "`a`、`b`".
-const listSepRE = /^\s*[、，,；;]\s*$/;
+// listSepRE is the text between two items of a list: "`a`、`b`", "`a` 和 `b`".
+const listSepRE = /^\s*[、，,；;和与及]\s*$/;
 
 // foldKeys drops from a reply the backticked keys it names sessions by
 // after their names (§6.4): the cards under it carry them, and the user
-// reads names, not keys. A key with no text before it stands for the name,
-// and so does one after a colon or in a list of keys: dropping those would
-// leave "派出了：、、"; a bracket of keys alone goes with them.
+// reads names, not keys. A bracket holding only keys goes with them. A key
+// with no text before it stands for the name, and so does a list of keys or
+// one after a colon (unless the name is right before it): dropping those
+// would leave "派出了：、、".
 function foldKeys(ev, keys) {
   const emptied = new Set();
   const codes = [...ev.querySelectorAll('.event-content code')]
     .filter((code) => !code.closest('pre, .pl-scards') && keys.has(code.textContent.trim()));
   // Decided before any key is folded: folding changes the siblings.
-  const joined = (sep, other) => sep?.nodeType === Node.TEXT_NODE && listSepRE.test(sep.data) && codes.includes(other);
-  const standsAlone = new Set(codes.filter((code) => {
-    const prev = code.previousSibling;
-    const next = code.nextSibling;
-    return joined(prev, prev?.previousSibling) || joined(next, next?.nextSibling) ||
-      (prev?.nodeType === Node.TEXT_NODE && /[：:]\s*$/.test(prev.data));
-  }));
+  const runs = [];
+  codes.forEach((code) => {
+    const sep = code.previousSibling;
+    const run = runs[runs.length - 1];
+    if (run && sep?.nodeType === Node.TEXT_NODE && listSepRE.test(sep.data) && sep.previousSibling === run[run.length - 1]) run.push(code);
+    else runs.push([code]);
+  });
+  const text = (n) => (n?.nodeType === Node.TEXT_NODE ? n.data : '');
+  const standsAlone = new Set();
+  runs.forEach((run) => {
+    const before = text(run[0].previousSibling);
+    const bracketed = /[（(]\s*$/.test(before) && /^\s*[）)]/.test(text(run[run.length - 1].nextSibling));
+    if (bracketed) return;
+    const key = run[0].textContent.trim();
+    const colon = /[：:]\s*$/.test(before) && !before.replace(/[：:]\s*$/, '').trimEnd().endsWith(sessionTitle(key));
+    if (run.length > 1 || colon) run.forEach((code) => standsAlone.add(code));
+  });
   codes.forEach((code) => {
     const key = code.textContent.trim();
     const prev = code.previousSibling;

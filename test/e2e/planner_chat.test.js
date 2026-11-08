@@ -217,28 +217,48 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
 });
 
 // A list of keys, or one after a colon, stands for the names: folding them
-// away left "派出了 、、。" (§15.12 ①). A key after its name still goes.
-test('a list of keys in a reply folds to the names, not to bare separators', async ({ page }) => {
+// away left "派出了 、、。" (§15.12 ①). A key after its name, and a bracket
+// holding only keys, still go.
+const FOLD_ROWS = [
+  ['派出了 A、B、C。', '派出了 iso 周报、iso 评审、iso 部署。'],
+  ['派出了 A，B；C。', '派出了 iso 周报，iso 评审；iso 部署。'],
+  ['A, B 都在跑。', 'iso 周报, iso 评审 都在跑。'],
+  ['派出了 A 和 B。', '派出了 iso 周报 和 iso 评审。'],
+  ['名单：A。', '名单：iso 周报。'],
+  ['iso 周报：A 已完成。', 'iso 周报： 已完成。'],
+  ['iso 周报 A 先等等。', 'iso 周报 先等等。'],
+  ['iso 周报 和 iso 评审（A、B）都在跑。', 'iso 周报 和 iso 评审都在跑。'],
+  ['三个都在 naozhi（A，B，C）。', '三个都在 naozhi。'],
+];
+
+test('keys in a reply fold to names or away, never to bare separators', async ({ page }) => {
   const tasks = [['task:isoa1', 'iso 周报'], ['task:isob2', 'iso 评审'], ['task:isoc3', 'iso 部署']];
   const s = defaultSessions();
   for (const [key, label] of tasks) {
     s.sessions.push({ key, state: 'ready', platform: 'task', agent: 'general', cli_name: 'claude', purpose: 'task', user_label: label,
       workspace: '/home/user/workspace/naozhi', last_active: now - 20000, node: 'local' });
   }
-  const [a, b, c] = tasks.map(([key]) => '`' + key + '`');
+  const tick = (key) => '`' + key + '`';
+  const reply = (line) => line.replace('A', tick(tasks[0][0])).replace('B', tick(tasks[1][0])).replace('C', tick(tasks[2][0]));
   const mock = await startMockServer({
     ws: true, sessions: s, inbox: inbox(), systemHealth: health(),
-    plannerEvents: [{ type: 'text', time: now - 60000, uuid: 'pc-list', detail: '派出了 ' + a + '、' + b + '、' + c + '。名单：' + a + '。iso 周报 ' + a + ' 先等等。' }],
+    plannerEvents: FOLD_ROWS.map(([line], i) => ({ type: 'text', time: now - 60000 + i, uuid: 'pc-fold' + i, detail: reply(line) })),
     planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
   });
   try {
     await page.goto(mock.url + '/dashboard');
     await waitForWs(page, 'CONNECTED');
     await page.click('#abnav-planner');
-    const reply = page.locator('#pl-stream .event.text').first();
-    await expect(reply.locator('.pl-scards .pl-scard')).toHaveCount(3);
-    await expect(reply).toContainText('派出了 iso 周报、iso 评审、iso 部署。名单：iso 周报。iso 周报 先等等。');
-    await expect(reply).not.toContainText('task:');
+    const replies = page.locator('#pl-stream .event.text');
+    await expect(replies).toHaveCount(FOLD_ROWS.length);
+    // Each reply's own text: its cards and copy button read the names too.
+    const texts = () => replies.evaluateAll((els) => els.map((el) => {
+      const c = el.querySelector('.event-content').cloneNode(true);
+      c.querySelectorAll('.pl-scards, button').forEach((n) => n.remove());
+      return c.textContent.trim();
+    }));
+    await expect.poll(texts).toEqual(FOLD_ROWS.map(([, want]) => want));
+    await expect(page.locator('#pl-stream')).not.toContainText('task:');
   } finally {
     mock.server.close();
   }
