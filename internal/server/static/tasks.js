@@ -56,11 +56,15 @@ const mounts = new Set();
 // repaint when custody changes.
 let byId = new Map();
 let last = null;
-// load is the GET /api/tasks in flight, shared by every reader; readAt and
-// triedAt are when one last answered and was last tried (ensureTasks).
+// load is the GET /api/tasks in flight ({gen, p, next}), shared by the
+// readers that take a list already asked for; next is the one read after it
+// that every reader needing a list asked after now shares. gen moves with
+// the Planner shown: a read for the node it showed before is dropped. readAt
+// and failedAt are when one last answered and last failed (ensureTasks).
 let load = null;
+let gen = 0;
 let readAt = 0;
-let triedAt = 0;
+let failedAt = 0;
 // actsOpen is the card whose "⋯" is open, kept across repaints.
 let actsOpen = '';
 
@@ -256,11 +260,12 @@ function cardHtml(t) {
 // the empty state says none).
 export const countHeadHtml = (label, n) => esc(label) + (n ? ' <span class="tk-n">' + n + '</span>' : '');
 
-// tasksHtml renders a GET /api/tasks answer; the heading counts every task
-// listed, its parts each their own.
+// tasksHtml renders a GET /api/tasks answer; the heading counts the tasks in
+// progress, the phone's folded block's number (one number for 任务 on the
+// screen, §15.8 F1), its parts each their own.
 export function tasksHtml(data) {
   const tasks = (data && Array.isArray(data.tasks)) ? data.tasks : [];
-  let html = '<h2 class="pl-group-h tk-head">' + countHeadHtml('任务', tasks.length) + '</h2>';
+  let html = '<h2 class="pl-group-h tk-head">' + countHeadHtml('任务', tasks.filter(inProgress).length) + '</h2>';
   if (!tasks.length) return html + '<div class="pl-empty">还没有任务<span>Planner 派出的会话和它答应你的事会列在这里</span></div>';
   const head = (label, n) => label + ' <span class="tk-n">' + n + '</span>';
   for (const s of SECTIONS) {
@@ -303,33 +308,48 @@ function paint(el, data) {
   }
 }
 
-// fetchTasks reads GET /api/tasks into byId and last, one read for every
-// caller at the same time, and tells the readers on nzBus.
-function fetchTasks() {
-  if (load) return load;
-  triedAt = Date.now();
-  load = (async () => {
+// fetchTasks reads GET /api/tasks into byId and last and tells the readers
+// on nzBus. A read in flight answers every caller that takes it (fresh
+// false); a fresh caller (a change just posted, a turn just ended) gets a
+// read that starts after it asked, one for all of them. A read for the
+// Planner's node shown before is dropped and read again for the one shown.
+function fetchTasks(fresh = false) {
+  if (load && load.gen === gen) {
+    if (!fresh) return load.p;
+    if (!load.next) load.next = load.p.catch(() => null).then(() => fetchTasks());
+    return load.next;
+  }
+  const g = gen;
+  const p = (async () => {
+    let data;
     try {
-      const data = await fetchJSON(plannerAPI(NZ_CONTRACT.API.tasks));
-      const list = (data && Array.isArray(data.tasks)) ? data.tasks : [];
-      byId = new Map(list.map((t) => [t.id, t]));
-      if (actsOpen && !byId.has(actsOpen)) actsOpen = '';
-      last = data;
-      readAt = Date.now();
-      nzBus.dispatchEvent(new CustomEvent('tasks:changed'));
-      // The Planner conversation's cards name tasks by these titles.
-      nzBus.dispatchEvent(new CustomEvent('tasks:list', { detail: data }));
-      return data;
-    } finally {
-      load = null;
+      data = await fetchJSON(plannerAPI(NZ_CONTRACT.API.tasks));
+    } catch (e) {
+      if (load && load.p === p) load = null;
+      if (g !== gen) return fetchTasks();
+      failedAt = Date.now();
+      throw e;
     }
+    if (load && load.p === p) load = null;
+    if (g !== gen) return fetchTasks();
+    const list = (data && Array.isArray(data.tasks)) ? data.tasks : [];
+    byId = new Map(list.map((t) => [t.id, t]));
+    if (actsOpen && !byId.has(actsOpen)) actsOpen = '';
+    last = data;
+    readAt = Date.now();
+    failedAt = 0;
+    nzBus.dispatchEvent(new CustomEvent('tasks:changed'));
+    // The Planner conversation's cards name tasks by these titles.
+    nzBus.dispatchEvent(new CustomEvent('tasks:list', { detail: data }));
+    return data;
   })();
-  return load;
+  load = { gen: g, p, next: null };
+  return p;
 }
 
-async function render(el) {
+async function render(el, read) {
   try {
-    paint(el, await fetchTasks());
+    paint(el, await read);
   } catch {
     el._tkHtml = '';
     el.innerHTML = '<h2 class="pl-group-h tk-head">任务</h2><div class="pl-empty">加载失败</div>';
@@ -341,17 +361,17 @@ export function mountTasks(el) {
   el.classList.add('tk-group');
   mounts.add(el);
   refreshCustody();
-  return render(el).then(armLive);
+  return render(el, fetchTasks(true)).then(armLive);
 }
 
-// refreshTasks re-renders every mounted group.
+// refreshTasks re-renders every mounted group from a read that starts after
+// the call.
 export function refreshTasks() {
   refreshCustody();
+  for (const el of mounts) if (!el.isConnected) mounts.delete(el);
+  const read = mounts.size ? fetchTasks(true) : null;
   const out = [];
-  for (const el of mounts) {
-    if (!el.isConnected) { mounts.delete(el); continue; }
-    out.push(render(el));
-  }
+  for (const el of mounts) out.push(render(el, read));
   return Promise.all(out).then(armLive);
 }
 
@@ -376,6 +396,9 @@ function armLive() {
 }
 
 let stateTimer = 0;
+// stateHeader is whether a frame of the burst was the header's session's: a
+// later frame of another task in the same burst keeps the header's read.
+let stateHeader = false;
 // A dispatched session starting or ending a turn refetches the list, once
 // for a burst, for the page and for that session's own header; off screen
 // the next showing refetches anyway.
@@ -384,11 +407,14 @@ nzBus.addEventListener('session:state', (e) => {
   if (!msg || typeof msg.key !== 'string' || !msg.key.startsWith('task:')) return;
   const header = headerTaskKey() === msg.key;
   if (!mounts.size && !header) return;
+  stateHeader = stateHeader || header;
   clearTimeout(stateTimer);
   stateTimer = setTimeout(() => {
+    const forHeader = stateHeader && !!headerTaskKey();
     stateTimer = 0;
+    stateHeader = false;
     if (shown()) refreshTasks();
-    else if (header && !document.hidden) ensureTasks(0);
+    else if (forHeader && !document.hidden) ensureTasks(0);
   }, STATE_DEBOUNCE_MS);
 });
 document.addEventListener('visibilitychange', () => {
@@ -403,13 +429,15 @@ document.addEventListener('visibilitychange', () => {
 export const taskOf = (key) => (key && byId.get(key)) || null;
 
 // ensureTasks reads the list when the last read is older than maxAge (ms),
-// with the Planner page mounted or not; while it fails it is tried at most
-// every RETRY_MS. It resolves once the list is read (or not).
+// with the Planner page mounted or not; 0 asks for a read that starts now.
+// While the route fails it is tried at most every RETRY_MS. It resolves
+// once the list is read (or not).
 export function ensureTasks(maxAge = FRESH_MS) {
-  if (load) return load.catch(() => null);
+  const fresh = maxAge <= 0;
+  if (!fresh && load && load.gen === gen) return load.p.then(() => last, () => null);
   const now = Date.now();
-  if (now - readAt <= maxAge || (readAt < triedAt && now - triedAt < RETRY_MS)) return Promise.resolve(last);
-  return fetchTasks().then(() => { repaintAll(); return last; }, () => null);
+  if ((!fresh && now - readAt <= maxAge) || (failedAt && now - failedAt < RETRY_MS)) return Promise.resolve(last);
+  return fetchTasks(fresh).then(() => { repaintAll(); return last; }, () => null);
 }
 
 // headerTaskKey is the session the 会话 view shows when it is a session
@@ -463,8 +491,9 @@ function revealTask(id) {
 
 nzBus.addEventListener('tasks:changed', paintTaskHeader);
 nzBus.addEventListener('session:select', paintTaskHeader);
-// Another node's Planner: its tasks, read afresh.
-nzBus.addEventListener('planner:node', () => { readAt = 0; triedAt = 0; paintTaskHeader(); });
+// Another node's Planner: its tasks, read afresh; a read in flight for the
+// node before is dropped (fetchTasks).
+nzBus.addEventListener('planner:node', () => { gen++; readAt = 0; failedAt = 0; paintTaskHeader(); });
 
 // post sends a task change from control el, then refreshes every group.
 async function post(el, url, body, failed) {
@@ -491,7 +520,13 @@ function repaintAll() {
   for (const el of mounts) if (el.isConnected) paint(el, last);
 }
 
-nzBus.addEventListener('inbox:count', () => { refreshTasks(); });
+// A health change (等你, 失败, 停滞) is no turn's edge: the header of a
+// dispatched session reads it here too, the page not mounted (mounted, the
+// page's read repaints it).
+nzBus.addEventListener('inbox:count', () => {
+  refreshTasks();
+  if (!mounts.size && headerTaskKey()) ensureTasks(0);
+});
 nzBus.addEventListener('custody:changed', repaintAll);
 
 registerActions({

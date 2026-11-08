@@ -15,8 +15,9 @@
 // It repaints on inbox_count frames ('inbox:count'), a new item list
 // ('inbox:items'), every sessions poll, and each repaint of the empty main
 // area ('home:shown', from wireQuickAskInput). The Planner page refetches
-// the items only while it shows, so a changed count refetches them here
-// while the card is on screen.
+// the items only while it shows, so the items are refetched here when the
+// count is not the one they were listed at, the card on screen: on a new
+// count, and on coming back to the Home after one came in a session.
 import { selection, sessionList } from './state.js';
 import { esc, escAttr, nzBus, registerActions, sessionHealthState } from './nz_util.js';
 import { formatAbsTime, timeAgo } from './utilities.js';
@@ -40,14 +41,24 @@ function counts() {
 
 const created = (it) => Date.parse(it.created) || 0;
 
+// rowHtml leaves the relative time out (paintTimes writes it): the card is
+// rewritten only when what it lists changes, never under a click or the
+// focus as a minute goes by.
 function rowHtml(it) {
   const at = created(it);
   return '<button type="button" class="ha-row" data-action="home-attn-open" data-ref="' + escAttr(it.ref) + '" data-id="' + escAttr(it.id) +
       '" data-key="' + escAttr(it.key) + '" data-node="' + escAttr(it.node) + '">' +
       '<span class="ha-kind ha-k-' + escAttr(it.kind) + '">' + esc(it.label || '') + '</span>' +
       '<span class="ha-title" title="' + escAttr(it.title) + '">' + esc(it.title) + '</span>' +
-      (at ? '<span class="ha-time" title="' + escAttr(formatAbsTime(at)) + '">' + esc(timeAgo(at)) + '</span>' : '') +
+      (at ? '<span class="ha-time" data-at="' + at + '" title="' + escAttr(formatAbsTime(at)) + '"></span>' : '') +
     '</button>';
+}
+
+function paintTimes(el) {
+  for (const t of el.querySelectorAll('.ha-time[data-at]')) {
+    const text = timeAgo(Number(t.dataset.at));
+    if (t.textContent !== text) t.textContent = text;
+  }
 }
 
 // homeAttnHtml is the card, '' when every count is 0.
@@ -74,23 +85,34 @@ function paint() {
   const el = document.getElementById('home-attn');
   if (!el || selection.key) return;
   const html = homeAttnHtml();
-  if (el.innerHTML !== html) el.innerHTML = html;
+  if (el._haHtml !== html) {
+    el._haHtml = html;
+    el.innerHTML = html;
+  }
+  paintTimes(el);
 }
 
-// seen is the last inbox_count taken, "open/badge": fetchInbox seeds the
-// counts it fetched, and the same counts do not refetch.
-let seen = '';
-nzBus.addEventListener('inbox:count', (e) => {
+// listed is the counts ("open/badge") the items were last listed (or asked
+// for) at. fetchInbox seeds the counts it fetched before it tells
+// 'inbox:items', so the check waits a microtask: its own count frame does
+// not refetch. Before any count (null/null) a cold Home has nothing to
+// refetch: the socket's first fetchInbox lists the items.
+const countsNow = () => inbox.open + '/' + inbox.badge;
+let listed = countsNow();
+function sync() {
   paint();
-  const c = e.detail.open + '/' + e.detail.badge;
-  if (c === seen) return;
-  seen = c;
-  // The card may be empty (hidden) until the items come: the empty main
-  // area showing is what counts.
-  if (!selection.key && document.getElementById('home-attn')?.parentElement?.getClientRects().length) fetchInbox();
-});
-nzBus.addEventListener('inbox:items', paint);
-nzBus.addEventListener('home:shown', paint);
+  queueMicrotask(() => {
+    if (countsNow() === listed) return;
+    // The card may be empty (hidden) until the items come: the empty main
+    // area showing is what counts.
+    if (selection.key || !document.getElementById('home-attn')?.parentElement?.getClientRects().length) return;
+    listed = countsNow();
+    fetchInbox();
+  });
+}
+nzBus.addEventListener('inbox:count', sync);
+nzBus.addEventListener('inbox:items', () => { listed = countsNow(); paint(); });
+nzBus.addEventListener('home:shown', sync);
 onSessionsApplied(paint);
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', paint);
 else paint();

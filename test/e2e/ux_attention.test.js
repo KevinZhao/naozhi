@@ -1,14 +1,20 @@
 // E2E: what waits on you, where you look first (planner RFC §15.13 v0.7.0,
 // UX review 1, 5 and 10).
 //   1. The Planner page's left column: 等你's heading counts what it lists
-//      (the badge's number), 任务's counts every task, and on a phone 等你
+//      (the badge's number), 任务's what is in progress (the phone's folded
+//      block's number, one 任务 number on the screen), and on a phone 等你
 //      comes first.
 //   5. The idle Home: "等你 N · 运行中 N · 失败 N" over the latest three items
 //      that wait on you, each a click away from its card or session; with
 //      the Planner off (no inbox) only 运行中 and 失败; nothing with every
 //      count 0. The card comes back with the empty main area.
 //   10. A dispatched session's header: its task's badge and 在 Planner 中查看,
-//      which opens the page on the card, lit; no "(模型未配置)".
+//      which opens the page on the card, lit; no "(模型未配置)", the model
+//      switch kept (选模型) for a session with no model known.
+// And the reads behind them: a count that came in elsewhere lists afresh
+// back on the Home, a read in flight answers neither another node's
+// Planner nor a change just posted, and the header follows its task's
+// health and turns with the Planner page off screen.
 // Crowded and sparse data, desktop 1440×900 and phone 390×844; the shots go
 // to test-results and, with NZ_SHOTS_DIR set, there too.
 const fs = require('fs');
@@ -25,6 +31,19 @@ const PLANNER = 'planner:main';
 const DESKTOP = { viewport: { width: 1440, height: 900 } };
 const PHONE = { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true };
 const VIEWPORTS = [['desktop', DESKTOP], ['phone', PHONE]];
+const lastConn = (mock) => mock.wsConnections[mock.wsConnections.length - 1];
+
+// holdTasks delays this node's GET /api/tasks answers by ms, each answered
+// as the server had it when asked: a read in flight that a later change or
+// switch must not stand for.
+async function holdTasks(page, ms) {
+  await page.route((u) => new URL(u).pathname === '/api/tasks', async (route) => {
+    if (route.request().method() !== 'GET') return route.continue();
+    const resp = await route.fetch();
+    await new Promise((r) => setTimeout(r, ms));
+    await route.fulfill({ response: resp });
+  });
+}
 
 async function shot(page, name) {
   await page.waitForTimeout(300);
@@ -158,7 +177,8 @@ for (const [name, vp] of VIEWPORTS) {
           // The same number as the badge and the folded block's.
           await expect(head).toHaveText('等你 6');
           await expect(page.locator('#pl-wait .pl-card')).toHaveCount(6);
-          await expect(tkHead).toHaveText('任务 ' + crowdedTasks().tasks.length);
+          // 任务 says the folded block's number: what is in progress.
+          await expect(tkHead).toHaveText('任务 11');
           await expect(page.locator('#pl-task .tk-sec > .tk-sec-h')).toHaveText(['进行中 11', '待提醒 3', '已完成 6']);
         } else {
           // An empty group says so; its heading has no 0.
@@ -307,9 +327,9 @@ for (const [name, vp] of VIEWPORTS) {
       await expect(slot.locator('.tk-badge')).toHaveText('等你');
       await expect(slot.locator('.tk-badge')).toHaveClass(/tk-b-warn/);
       await expect(slot.locator('.tk-reveal')).toHaveText('在 Planner 中查看');
-      // A model not known yet says nothing.
+      // A model not known yet reads 选模型, still the switch.
       await expect(page.locator('.main-header')).not.toContainText('模型未配置');
-      await expect(page.locator('#header-model')).toHaveCount(0);
+      await expect(page.locator('#header-model')).toHaveText('· 选模型');
       await shot(page, `header-task-waiting-${name}`);
 
       // The link opens the Planner page on the card, lit; on a phone the
@@ -348,6 +368,195 @@ test('a done task\'s link unfolds 已完成; a session the Planner did not dispa
     await page.locator('#header-task .tk-reveal').click();
     await expect(page.locator('#pl-task .tk-sec-done')).toHaveAttribute('open', '');
     await expect(page.locator('#pl-task .tk-card[data-id="' + taskKey(11) + '"]')).toBeInViewport();
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+// ---- the reads behind them ----
+
+test('with no model known the header still offers the model switch: a listed session and a new one (desktop)', async ({ browser }) => {
+  const ctx = await browser.newContext(DESKTOP);
+  const page = await ctx.newPage();
+  // A listed session that reports no model (kiro on its own pick), and a
+  // project to start a new one in.
+  const data = sparse();
+  data.sessions.stats.projects = [{ name: 'naozhi', path: '/Users/me/workspace/naozhi', favorite: false, github: false, git_remote_url: '' }];
+  const mock = await startMockServer(data);
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    const model = page.locator('#header-model');
+    const pop = page.locator('#tuning-popover');
+    await openSessionCard(page, page.locator('.session-card').first());
+    await expect(model).toHaveText('· 选模型');
+    await expect(page.locator('.main-header')).not.toContainText('模型未配置');
+    await model.click();
+    await expect(pop).toBeVisible();
+    await expect(pop.locator('.nz-list-head')).toHaveText('切换模型');
+    await page.locator('#msg-input').click();
+    await expect(pop).toHaveCount(0);
+
+    // A new session, before its first message: the pick is made here.
+    await page.click('.hdr-btn[title="New Session"]');
+    await page.locator('.cmd-palette-item', { hasText: 'naozhi' }).first().click();
+    await page.waitForSelector('.cmd-palette-overlay', { state: 'detached' });
+    await expect(page.locator('.session-card.active')).toHaveCount(0);
+    await expect(model).toHaveText('· 选模型');
+    await model.click();
+    await expect(pop).toBeVisible();
+    await shot(page, 'header-model-unset-desktop');
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+test('a count that came in while a session was open lists afresh back on the Home (desktop)', async ({ browser }) => {
+  const ctx = await browser.newContext(DESKTOP);
+  const page = await ctx.newPage();
+  const data = crowded();
+  const mock = await startMockServer(data);
+  const inboxGets = [];
+  page.on('request', (r) => { if (new URL(r.url()).pathname === '/api/inbox') inboxGets.push(r.url()); });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    const card = page.locator('#home-attn .ha-card');
+    await expect(card.locator('.ha-row').first()).toHaveAttribute('data-id', 'in_d1');
+    // The socket's first list seeds the count: the Home asks no second time.
+    await page.waitForTimeout(500);
+    expect(inboxGets.length).toBe(1);
+
+    await openSessionCard(page, page.locator('.session-card[data-key="' + dashKey(1) + '"]'));
+    await expect(page.locator('#home-attn')).toHaveCount(0);
+    // A question comes in while the session is open, and the sidebar's
+    // 等你 bar is folded: nothing lists it then.
+    data.inbox.open.unshift({ id: 'in_new', kind: 'question', level: 'timely', unit: PLANNER, title: 'iso 新来的提问', created: iso(Date.now()), state: 'open', source: 'ask:new', decision: { handler: 'ask', actions: ['好', '不好'] } });
+    data.inbox.counts = { open: 8, badge: 7 };
+    lastConn(mock).send({ type: 'inbox_count', open: 8, badge: 7 });
+    await expect(page.locator('#abnav-planner-count')).toHaveText('7');
+
+    // Back on the Home the list is the count's.
+    await page.locator('.session-card.active').hover();
+    await page.locator('.session-card.active .btn-dismiss').click();
+    await expect(page.locator('#quick-ask-input')).toBeVisible();
+    await expect(page.locator('#home-attn .ha-n-wait')).toHaveText('等你 7');
+    await expect(page.locator('#home-attn .ha-row').first()).toHaveAttribute('data-id', 'in_new');
+    await expect(page.locator('#home-attn .ha-all')).toHaveText('在 Planner 页看全部 7 条');
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+test('the Home card is not rewritten as its times move on (desktop)', async ({ browser }) => {
+  const ctx = await browser.newContext(DESKTOP);
+  const page = await ctx.newPage();
+  const mock = await startMockServer(crowded());
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    const row = page.locator('#home-attn .ha-row').first();
+    await expect(row.locator('.ha-time')).toHaveText('5 分钟前');
+    await row.evaluate((el) => { el._mark = 1; });
+    // Ten minutes later a sessions poll repaints: the time moves, the row
+    // under a click (or the focus) stays the same element.
+    await page.evaluate(() => { const real = Date.now; Date.now = () => real() + 10 * 60000; });
+    await page.evaluate(() => window.nz.test.fetchSessions());
+    await expect(row.locator('.ha-time')).toHaveText('15 分钟前');
+    expect(await row.evaluate((el) => el._mark)).toBe(1);
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+test('a read in flight answers neither another node\'s Planner nor a change just posted (desktop)', async ({ browser }) => {
+  const ctx = await browser.newContext(DESKTOP);
+  const page = await ctx.newPage();
+  const LOCAL_TASK = 'task:l000000001';
+  const PC_TASK = 'task:p000000001';
+  const sessions = sparseSessions();
+  sessions.nodes = { local: { display_name: 'EC2', status: 'ok' }, pc: { display_name: 'MBP', status: 'ok', caps: ['files', 'planner', 'subscribe-history'] } };
+  sessions.sessions.push(sess(PC_TASK, { node: 'pc', platform: 'task', purpose: 'task', user_label: 'iso pc 的任务', purpose_title: 'iso pc 的任务', workspace: '/Users/me/workspace/naozhi', project: 'naozhi' }));
+  const tasks = { tasks: [
+    { id: LOCAL_TASK, kind: 'session', title: 'iso 本机的任务', state: 'doing', at: iso(now - M), created: iso(now - H) },
+    { id: 'pr_l1', kind: 'promise', title: 'iso 本机的约定', state: 'doing', at: iso(now - M), created: iso(now - H), close_when: 'CI 绿' },
+  ] };
+  const data = Object.assign(sparse(), { sessions, tasks, remote: { pc: {
+    planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
+    tasks: { tasks: [{ id: PC_TASK, kind: 'session', title: 'iso pc 的任务', state: 'waiting', by: 'health', health: 'waiting', at: iso(now - M), created: iso(now - H) }] },
+    inbox: { open: [], closed: [], counts: { open: 0, badge: 0 } },
+    custody: { paused: false, sessions: [] },
+    events: { [PLANNER]: [] },
+  } } });
+  const mock = await startMockServer(data);
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await page.click('#abnav-planner');
+    const titles = page.locator('#pl-task .tk-card .tk-title');
+    await expect(titles).toHaveText(['iso 本机的任务', 'iso 本机的约定']);
+
+    // A change posted while a read of the list before it is in flight: the
+    // card shows the change.
+    await holdTasks(page, 1500);
+    lastConn(mock).send({ type: 'inbox_count', open: 0, badge: 0 });
+    const promise = page.locator('#pl-task .tk-card[data-id="pr_l1"]');
+    await promise.locator('.tk-more').click();
+    await promise.locator('[data-action="task-done"]').click();
+    await expect(page.locator('#pl-task .tk-sec-done .tk-card[data-id="pr_l1"]')).toHaveCount(1, { timeout: 6000 });
+
+    // Switching to the other node's Planner while this node's read is in
+    // flight: the list is that node's, and stays so once the read lands.
+    lastConn(mock).send({ type: 'inbox_count', open: 0, badge: 0 });
+    await page.selectOption('.pl-host-pick', 'pc');
+    await expect(titles).toHaveText(['iso pc 的任务']);
+    await page.waitForTimeout(2000);
+    await expect(titles).toHaveText(['iso pc 的任务']);
+
+    // A session that node dispatched: its header says that node's task.
+    await page.click('#abnav-chat');
+    await openSessionCard(page, page.locator('.session-card[data-key="' + PC_TASK + '"][data-node="pc"]'));
+    await expect(page.locator('#header-task .tk-badge')).toHaveText('等你');
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+test('a dispatched session\'s header follows its task with the Planner page off screen (desktop)', async ({ browser }) => {
+  const ctx = await browser.newContext(DESKTOP);
+  const page = await ctx.newPage();
+  const data = crowded();
+  const mock = await startMockServer(data);
+  const task = (i) => data.tasks.tasks.find((t) => t.id === taskKey(i));
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    const badge = page.locator('#header-task .tk-badge');
+    // The Planner page never opened: a health change (an inbox_count
+    // frame, no turn's edge) reaches the header.
+    await openSessionCard(page, page.locator('.session-card[data-key="' + taskKey(0) + '"]'));
+    await expect(badge).toHaveText('在跑');
+    Object.assign(task(0), { state: 'waiting', health: 'waiting', live: { running: false } });
+    data.inbox.counts = { open: 8, badge: 7 };
+    lastConn(mock).send({ type: 'inbox_count', open: 8, badge: 7 });
+    await expect(badge).toHaveText('等你');
+
+    // The page mounted and off screen: a turn of this session ending, then
+    // another task's within the same burst, still reads it for the header.
+    await page.click('#abnav-planner');
+    await expect(page.locator('#pl-task .tk-card').first()).toBeVisible();
+    await page.click('#abnav-chat');
+    await openSessionCard(page, page.locator('.session-card[data-key="' + taskKey(0) + '"]'));
+    await expect(badge).toHaveText('等你');
+    Object.assign(task(0), { state: 'failed', health: 'failed' });
+    lastConn(mock).send({ type: 'session_state', key: taskKey(0), state: 'ready' });
+    lastConn(mock).send({ type: 'session_state', key: taskKey(3), state: 'ready' });
+    await expect(badge).toHaveText('失败');
   } finally {
     await ctx.close();
     mock.server.close();

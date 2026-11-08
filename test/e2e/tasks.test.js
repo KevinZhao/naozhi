@@ -1,6 +1,6 @@
 // E2E: the Planner page's "任务" group (tasks.js, planner RFC §15.4, D85,
 // §15.7) renders GET /api/tasks in three parts — 进行中 (等你 and 失败 first),
-// 待提醒, and 已完成 folded — the group's heading and each part's counted, each card's state said
+// 待提醒, and 已完成 folded — the group's heading (what is in progress) and each part's counted, each card's state said
 // once (its badge) with who set it only when not the default (the Planner's
 // judgment and its reason); the card's "⋯" marks a task done as yours
 // through POST /api/tasks/state, a done one reopens, and a dispatched
@@ -51,8 +51,9 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
         expect(wait.y).toBeLessThan(tk.y);
       }
       const group = page.locator('#pl-task');
-      // The heading counts every task listed; each part its own.
-      await expect(group.locator('.tk-head')).toHaveText('任务 4');
+      // The heading counts what is in progress, the folded block's number
+      // (one 任务 number on the screen, §15.8 F1); each part its own.
+      await expect(group.locator('.tk-head')).toHaveText('任务 2');
       await expect(group.locator('.tk-sec > .tk-sec-h')).toHaveText(['进行中 2', '待提醒 1', '已完成 1']);
       const doing = group.locator('.tk-sec-doing .tk-card');
       await expect(doing.locator('.tk-title')).toHaveText(['iso 写 hello', 'iso CI 绿了告诉你']);

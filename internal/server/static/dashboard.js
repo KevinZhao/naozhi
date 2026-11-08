@@ -1207,9 +1207,10 @@ function mainHeaderHtml(s) {
   // before the first turn; kiro: cli.backends[].model, "" = kiro's auto), or a
   // pending session's tuning pick. Bedrock ids are compacted for display
   // ("global.anthropic.claude-opus-4-7[1m]" → "claude-opus-4.7 1m"); the
-  // title keeps the raw value. No model yet says nothing (UX review 10: a
-  // "not configured" hint means nothing to the user); the switch shows once
-  // one is known.
+  // title keeps the raw value. No model yet reads 选模型, not "not
+  // configured" (UX review 10: that hint means nothing to the user), and stays
+  // the switch: it is the only way to pick one before the first message, and
+  // for a kiro session on its auto model.
   const rawModel = s.model ||
     (!sessionList.sessionsData[sid(selection.key, selection.node)] && perSession.pendingTuning[selection.key]
       ? (perSession.pendingTuning[selection.key].model || '') : '');
@@ -1219,7 +1220,7 @@ function mainHeaderHtml(s) {
     .replace(/\[(\d+m)\]$/i, ' $1');            // [1m] → " 1m"
   const modelLabel = rawModel
     ? '<span class="model-label nz-clickable" id="header-model" data-action="tuning-model" title="' + escAttr(rawModel + ' — 点击切换模型') + '">· ' + esc(compactModel) + '</span>'
-    : '';
+    : '<span class="model-label model-label-unset nz-clickable" id="header-model" data-action="tuning-model" title="点击指定模型">· 选模型</span>';
   const headerOriginBadge = originBadgeHtml(selection.key);
   // Last turn's duration; hidden when 0 or absent (claude does not report it).
   let turnTimerHtml = '';

@@ -486,8 +486,10 @@
 
 /* spawn-time model label rendered inline next to the
    cli identity in the main header detail row. Mute-tone keeps cli name
-   primary; with no model known there is no label. */
+   primary; with no model known the unset variant's dim 选模型 is the
+   switch still. */
 .main-header .model-label{margin-left:6px;color:var(--nz-text-mute);font-size:var(--nz-fs-sm);font-variant-numeric:tabular-nums}
+.main-header .model-label-unset{color:var(--nz-text-faint)}
 /* kiro thinking-effort tier (low/medium/high/xhigh/max). Joins the
    .model-label / .detail-turn-timer family — bare inline text, no border or
    fill — because the .detail row already carries two bordered chips
