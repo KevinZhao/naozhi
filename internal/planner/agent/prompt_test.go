@@ -28,6 +28,7 @@ func TestSystemPrompt(t *testing.T) {
 		`"with_user_words":true`,
 		"不要叫会话去改 ~/.claude.json",
 		"用户的决定只用 relay 或带 task 的 ask 送给会话",
+		`<naozhi-snapshot unchanged since="HH:MM"/>`,
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt lacks %q", want)

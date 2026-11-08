@@ -212,6 +212,19 @@ type Agent struct {
 	// failures and retryAt pace revival after failed spawns.
 	failures int
 	retryAt  time.Time
+	// lastSnap is the last full snapshot a message took into the current
+	// conversation (nextSnapshot); zero once the conversation may not hold
+	// it.
+	lastSnap sentSnapshot
+}
+
+// sentSnapshot is a full snapshot as a message carried it: its body (the
+// block without its time), when, and into which conversation ("" before
+// the CLI named it).
+type sentSnapshot struct {
+	body string
+	at   time.Time
+	sid  string
 }
 
 // New loads the Planner's state. It starts nothing: Start does, once the
@@ -457,6 +470,9 @@ func (a *Agent) reconcile(ctx context.Context) {
 	}
 	st := a.cfg.Sessions.State(Key)
 	if !st.Alive {
+		// A revival may not resume the conversation (its resume target
+		// lost): the next message carries a full snapshot.
+		a.forgetSnapshot()
 		if !a.revive(ctx, now, opts) {
 			return
 		}
@@ -577,6 +593,7 @@ func (a *Agent) changeShift(ctx context.Context, now time.Time, day string) {
 		a.state.Handoff = day
 	}
 	a.saveLocked()
+	a.lastSnap = sentSnapshot{}
 	a.mu.Unlock()
 	if err := a.cfg.Sessions.Recreate(ctx, Key, opts); err != nil {
 		// The old session is gone: revival starts the new one, and the
@@ -585,6 +602,9 @@ func (a *Agent) changeShift(ctx context.Context, now time.Time, day string) {
 		return
 	}
 	a.markShift(now)
+	// A message sent while the old session was retired carried its
+	// snapshot there.
+	a.forgetSnapshot()
 	slog.Info("planner: shift changed", "day", day, "handoff_bytes", len(summary))
 	if len(summary) > 0 {
 		a.sendHandoff(day, summary, opts)
@@ -700,9 +720,11 @@ func (a *Agent) Send(text, ref string, images []clievent.Attachment) error {
 	if text != "" {
 		said = &Words{Text: text, At: time.Now()}
 	}
-	if _, err := turns.SubmitPlanner(Key, src, said, strings.TrimSpace(head+a.Snapshot()+"\n\n"+text), images, opts, nil); err != nil {
+	snap, commit := a.nextSnapshot()
+	if _, err := turns.SubmitPlanner(Key, src, said, strings.TrimSpace(head+snap+"\n\n"+text), images, opts, nil); err != nil {
 		return err
 	}
+	commit()
 	turns.PlannerReceipt(Key, ReceiptText)
 	return nil
 }
@@ -744,7 +766,38 @@ func (a *Agent) tellSaid(src Source, said *Words, text string) error {
 	return err
 }
 
-// Snapshot renders the snapshot the next message would carry.
+// nextSnapshot is the snapshot block the next message carries: the full
+// one, or only a mark when it says what the last full one this conversation
+// got said. commit, called once the message is submitted, records a full
+// one as that.
+func (a *Agent) nextSnapshot() (text string, commit func()) {
+	full := a.Snapshot()
+	_, body, _ := strings.Cut(full, "\n")
+	st := a.cfg.Sessions.State(Key)
+	now := a.cfg.Now()
+	a.mu.Lock()
+	prev := a.lastSnap
+	a.mu.Unlock()
+	// A dead process takes the message into a spawn that may not resume
+	// the conversation; another session ID is another conversation.
+	if st.Alive && prev.body == body && (prev.sid == "" || prev.sid == st.SessionID) {
+		return unchangedSnapshot(prev.at.In(now.Location())), func() {}
+	}
+	return full, func() {
+		a.mu.Lock()
+		a.lastSnap = sentSnapshot{body: body, at: now, sid: st.SessionID}
+		a.mu.Unlock()
+	}
+}
+
+// forgetSnapshot makes the next message carry a full snapshot.
+func (a *Agent) forgetSnapshot() {
+	a.mu.Lock()
+	a.lastSnap = sentSnapshot{}
+	a.mu.Unlock()
+}
+
+// Snapshot renders the full snapshot the next message would carry.
 func (a *Agent) Snapshot() string {
 	a.mu.Lock()
 	snap := a.health

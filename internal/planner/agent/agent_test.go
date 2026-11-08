@@ -770,3 +770,92 @@ func TestSendWords(t *testing.T) {
 		t.Errorf("TurnWords = %+v", w)
 	}
 }
+
+// TestSnapshotUnchanged: a message whose snapshot says what the last full
+// one in this conversation said carries only a mark naming that one's time;
+// a change, a new conversation (shift change, another session ID) or a
+// process that is not running (its revival may not resume) gets it whole.
+func TestSnapshotUnchanged(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+	now := time.Date(2026, 11, 3, 10, 0, 0, 0, loc)
+	sess := &fakeSessions{st: SessionState{Exists: true, Alive: true, SessionID: "s1"}}
+	a, _ := newTestAgent(t, sess, &now)
+	turns := &fakeTurns{reply: "## 进行中\n无"}
+	a.turns = turns
+	units := []health.Unit{{ID: "dashboard:direct:x:general", State: health.Active, LastActive: now}}
+	a.health = func() health.Snapshot { return health.Snapshot{Units: slices.Clone(units)} }
+	a.markShift(now)
+	const full = `<naozhi-snapshot at="`
+	send := func(at time.Time, text string) string {
+		t.Helper()
+		now = at
+		if err := a.Send(text, "", nil); err != nil {
+			t.Fatal(err)
+		}
+		return turns.sent[len(turns.sent)-1]
+	}
+	at := func(hm string) time.Time {
+		v, _ := time.ParseInLocation("2006-01-02 15:04", hm, loc)
+		return v
+	}
+
+	if got := send(at("2026-11-03 10:00"), "a"); !strings.HasPrefix(got, full) {
+		t.Fatalf("first message: %q", got)
+	}
+	if got := send(at("2026-11-03 10:05"), "b"); got != `<naozhi-snapshot unchanged since="10:00"/>`+"\n\nb" {
+		t.Fatalf("same fleet: %q", got)
+	}
+	units = append(units, health.Unit{ID: "task:ab12", State: health.Active, LastActive: now})
+	if got := send(at("2026-11-03 10:10"), "c"); !strings.HasPrefix(got, full) || !strings.Contains(got, "task:ab12") {
+		t.Fatalf("changed fleet: %q", got)
+	}
+	if got := send(at("2026-11-03 10:20"), "d"); !strings.HasPrefix(got, `<naozhi-snapshot unchanged since="10:10"/>`) {
+		t.Fatalf("unchanged since the change: %q", got)
+	}
+	if err := a.Wake(SourceScout, nil, "<naozhi-scout>x</naozhi-scout>"); err != nil {
+		t.Fatal(err)
+	}
+	if got := turns.sent[len(turns.sent)-1]; !strings.HasSuffix(got, `<naozhi-snapshot unchanged since="10:10"/>`) {
+		t.Fatalf("wake: %q", got)
+	}
+
+	// The CLI named another conversation.
+	sess.st.SessionID = "s2"
+	if got := send(at("2026-11-03 10:30"), "e"); !strings.HasPrefix(got, full) {
+		t.Fatalf("another session ID: %q", got)
+	}
+	// Not running: the message spawns it.
+	sess.st.Alive = false
+	if got := send(at("2026-11-03 10:40"), "f"); !strings.HasPrefix(got, full) {
+		t.Fatalf("process not running: %q", got)
+	}
+	// Revived by the lifecycle, maybe without its conversation.
+	sess.st.Alive = false
+	now = at("2026-11-03 10:45")
+	a.reconcile(context.Background())
+	if !sess.st.Alive {
+		t.Fatal("not revived")
+	}
+	if got := send(at("2026-11-03 10:50"), "g"); !strings.HasPrefix(got, full) {
+		t.Fatalf("after revival: %q", got)
+	}
+	if got := send(at("2026-11-03 10:55"), "h"); !strings.HasPrefix(got, `<naozhi-snapshot unchanged since="10:50"/>`) {
+		t.Fatalf("after the revival's full one: %q", got)
+	}
+
+	// The shift change starts a conversation that has seen none, its ID
+	// unknown until its first turn, like one the CLI had not named when the
+	// last full snapshot went out.
+	sess.st.SessionID = ""
+	if got := send(at("2026-11-03 11:00"), "i"); !strings.HasPrefix(got, full) {
+		t.Fatalf("unnamed conversation: %q", got)
+	}
+	now = at("2026-11-04 08:30")
+	a.reconcile(context.Background())
+	if sess.recreated != 1 || sess.st.SessionID != "" {
+		t.Fatalf("recreated %d, state %+v", sess.recreated, sess.st)
+	}
+	if got := send(at("2026-11-04 08:40"), "j"); !strings.HasPrefix(got, full) {
+		t.Fatalf("after the shift change: %q", got)
+	}
+}

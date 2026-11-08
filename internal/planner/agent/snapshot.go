@@ -195,6 +195,12 @@ func renderSnapshot(in snapshotInput) string {
 	return b.String()
 }
 
+// unchangedSnapshot stands for a snapshot whose body is the one the
+// conversation got at since, so an unchanged fleet costs one line a message.
+func unchangedSnapshot(since time.Time) string {
+	return `<naozhi-snapshot unchanged since="` + since.Format("15:04") + `"/>`
+}
+
 // promiseLines lists every promise by its ID, the due time after its text:
 // the texts are cut so the lines fit promiseRunes, each to no less than
 // promiseTextRunes, and each line to snapshotLineRunes.
