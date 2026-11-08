@@ -573,8 +573,6 @@ func (a *Agent) handoffPath(day string) string {
 // reused rather than asked for again. It stays pending until sent, so after
 // a failed restart the conversation revival starts still gets it.
 func (a *Agent) changeShift(ctx context.Context, now time.Time, day string) {
-	// A turn in flight from here on may end in either conversation.
-	a.forgetSnapshot()
 	path := a.handoffPath(day)
 	summary, err := os.ReadFile(path)
 	if err != nil {
@@ -608,7 +606,9 @@ func (a *Agent) changeShift(ctx context.Context, now time.Time, day string) {
 		return
 	}
 	a.markShift(now)
-	// What a turn on the old session ran with is not in the new one.
+	// What a turn on the old session ran with is not in the new one, and
+	// a turn submitted before may end only now, its conversation named by
+	// the new one's ID.
 	a.forgetSnapshot()
 	slog.Info("planner: shift changed", "day", day, "handoff_bytes", len(summary))
 	if len(summary) > 0 {

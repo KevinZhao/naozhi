@@ -957,15 +957,35 @@ func TestSnapshotMarkOnlyWhenSafe(t *testing.T) {
 			t.Fatalf("a turn submitted before the forget recorded its snapshot: %q", got)
 		}
 	})
+	t.Run("its turn ended after the shift change", func(t *testing.T) {
+		a, sess, turns, send := setup(t)
+		var ran func(string, error)
+		a.turns = &holdTurns{fakeTurns: turns, held: &ran}
+		send("a")
+		a.changeShift(context.Background(), a.cfg.Now(), "2026-11-04")
+		if sess.recreated != 1 {
+			t.Fatalf("recreated %d", sess.recreated)
+		}
+		sess.st.SessionID = "s2" // the new conversation, named
+		ran("ok", nil)
+		a.turns = turns
+		if got := send("b"); !strings.HasPrefix(got, full) {
+			t.Fatalf("the old conversation's snapshot was taken for the new one's: %q", got)
+		}
+	})
 }
 
-// holdTurns is fakeTurns whose turns end only when the test calls held.
+// holdTurns is fakeTurns whose user turns end only when the test calls
+// held; the gateway's own (the handoff) end at once.
 type holdTurns struct {
 	*fakeTurns
 	held *func(string, error)
 }
 
 func (h *holdTurns) SubmitPlanner(key string, src Source, said *Words, text string, images []clievent.Attachment, opts sessionview.AgentOpts, done func(string, error)) (bool, error) {
+	if src != SourceUser {
+		return h.fakeTurns.SubmitPlanner(key, src, said, text, images, opts, done)
+	}
 	*h.held = done
 	return h.fakeTurns.SubmitPlanner(key, src, said, text, images, opts, nil)
 }

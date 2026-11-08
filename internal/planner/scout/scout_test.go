@@ -165,7 +165,7 @@ func TestRunsSince(t *testing.T) {
 
 func TestSessionOpts(t *testing.T) {
 	opts := sessionOpts("/w", "/s/scout-mcp.json", []string{ServerOutlook, ServerSlack, ServerAsana})
-	if opts.PermissionMode != "dontAsk" || !opts.StrictMCPConfig || opts.MCPConfig != "/s/scout-mcp.json" || opts.Model != Model {
+	if opts.PermissionMode != "dontAsk" || !opts.StrictMCPConfig || opts.MCPConfig != "/s/scout-mcp.json" || opts.Model != Model || opts.PromptCacheTTL != "" {
 		t.Errorf("opts = %+v", opts)
 	}
 	if !slices.Equal(opts.Tools, opts.PermissionsAllow) {

@@ -436,6 +436,9 @@ func TestLaunchSpecPromptCacheTTL(t *testing.T) {
 	if state.SpawnOverlay == nil || state.SpawnOverlay.PromptCacheTTL != "1h" {
 		t.Fatalf("recorded overlay = %+v, want prompt_cache_ttl 1h", state.SpawnOverlay)
 	}
+	if r.spawn.launchSpecFor(key, shim.SpawnOverlay{PromptCacheTTL: "1h"}).SettingsFile == "" {
+		t.Error("an overlay with only promptCacheTtl gets no settings file")
+	}
 	path := r.spawn.launchSpecFor(key, *state.SpawnOverlay).SettingsFile
 	if err := writeSessionSettings(path, "", *state.SpawnOverlay); err != nil {
 		t.Fatal(err)
