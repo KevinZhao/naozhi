@@ -220,8 +220,8 @@ func (b *Briefer) gather(since, now time.Time) input {
 					s.failed, s.failedAt = &d, e.TS
 				case d.From == health.Active && d.To == health.Idle && d.Kind == health.KindRemote:
 					// A local session's turns are counted from their result
-					// frames (KindTurn): a reconcile samples once a minute
-					// and misses a shorter turn, and would count one twice.
+					// frames (KindTurn): a reconcile samples once a minute,
+					// misses a shorter turn and dates a longer one late.
 					s := at(e.Unit, e.WS, d.Kind)
 					s.doneAt = later(s.doneAt, e.TS)
 				}
