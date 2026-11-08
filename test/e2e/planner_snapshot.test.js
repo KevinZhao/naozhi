@@ -1,5 +1,5 @@
 // E2E: a message to the Planner whose snapshot was unchanged carries only
-// <naozhi-snapshot unchanged since="HH:MM"/> (planner/agent nextSnapshot);
+// <naozhi-snapshot unchanged since="HH:MM" at="…"/> (planner/agent nextSnapshot);
 // its bubble shows what you wrote, as with a full snapshot, also after a
 // handed-over session.
 const { test, expect } = require('@playwright/test');
@@ -9,7 +9,7 @@ const { waitForWs } = require('./shim_wait');
 const PLANNER = 'planner:main';
 const SESSION = 'dashboard:direct:2026-01-01-120000-1:myproject';
 const now = Date.now();
-const UNCHANGED = '<naozhi-snapshot unchanged since="10:00"/>';
+const UNCHANGED = '<naozhi-snapshot unchanged since="10:00" at="2026-11-03 10:05 CST"/>';
 const REF = '<naozhi-session-ref>{"key":"' + SESSION + '","name":"iso-hello","title":"hello world"}</naozhi-session-ref>\n';
 
 test('an unchanged snapshot mark is not shown in your bubble', async ({ browser }) => {

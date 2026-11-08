@@ -82,7 +82,19 @@ func running(s health.State) bool {
 // bytes. Over the budget, trailing lines give way to a count, save the
 // promise lines, which are always kept.
 func renderSnapshot(in snapshotInput) string {
+	full, _ := renderSnapshotKey(in)
+	return full
+}
+
+// renderSnapshotKey is renderSnapshot and what of it a later one is
+// compared with: the lines it shows without the times, the sessions' in
+// any order. A running session's 最后输出 moves with its events, and its
+// place in the list with it, which says nothing the Planner acts on; a
+// state, a session coming or going, or which sessions fit is a change.
+func renderSnapshotKey(in snapshotInput) (full, key string) {
 	var lines []string
+	// times[i] is lines[i]'s trailing time, left out of the key.
+	var times []string
 	keepFrom, keepTo := 0, 0 // the promise section, lines[keepFrom:keepTo]
 	if in.Waiting != nil {
 		items := slices.Clone(in.Waiting)
@@ -145,12 +157,17 @@ func renderSnapshot(in snapshotInput) string {
 		return cmp.Compare(a.ID, b.ID)
 	})
 	lines = append(lines, fmt.Sprintf("会话（在跑 %d，最近 24 小时结束 %d）：", nRunning, len(units)-nRunning))
+	unitsFrom := len(lines)
+	times = make([]string, len(lines), len(lines)+len(units))
 	for i, u := range units {
 		if i == snapshotMaxUnits {
 			lines = append(lines, fmt.Sprintf("- …另有 %d 个，见 index.json", len(units)-i))
+			times = append(times, "")
 			break
 		}
-		lines = append(lines, unitLine(in, u))
+		line, at := unitLine(in, u)
+		lines = append(lines, line)
+		times = append(times, at)
 	}
 
 	head := "<naozhi-snapshot at=\"" + in.Now.Format("2006-01-02 15:04 MST") + "\">"
@@ -163,18 +180,21 @@ func renderSnapshot(in snapshotInput) string {
 	// The session lines come last, so the last line is one that may be cut.
 	last := len(lines) - 1
 	var b strings.Builder
+	var keyLines, keyUnits []string
 	b.WriteString(head + "\n")
 	cut := 0
 	for i, line := range lines {
 		if i >= keepFrom && i < keepTo {
 			b.WriteString(line + "\n")
+			keyLines = append(keyLines, line)
 			continue
 		}
 		if cut > 0 {
 			cut++
 			continue
 		}
-		line = textutil.TruncateRunes(line, snapshotLineRunes)
+		bare := textutil.TruncateRunes(line, snapshotLineRunes)
+		line = textutil.TruncateRunes(line+times[i], snapshotLineRunes)
 		n := utf8.RuneCountInString(line) + 1
 		// A line with more after it leaves room for the cut notice.
 		reserve := cutNoticeRunes
@@ -187,18 +207,29 @@ func renderSnapshot(in snapshotInput) string {
 		}
 		budget -= n
 		b.WriteString(line + "\n")
+		if i >= unitsFrom {
+			keyUnits = append(keyUnits, bare)
+		} else {
+			keyLines = append(keyLines, bare)
+		}
 	}
 	if cut > 0 {
-		fmt.Fprintf(&b, "…（截断，另有 %d 行，见 index.json）\n", cut)
+		notice := fmt.Sprintf("…（截断，另有 %d 行，见 index.json）", cut)
+		b.WriteString(notice + "\n")
+		keyUnits = append(keyUnits, notice)
 	}
 	b.WriteString(tail)
-	return b.String()
+	slices.Sort(keyUnits)
+	return b.String(), strings.Join(append(keyLines, keyUnits...), "\n")
 }
 
 // unchangedSnapshot stands for a snapshot whose body is the one the
 // conversation got at since, so an unchanged fleet costs one line a message.
-func unchangedSnapshot(since time.Time) string {
-	return `<naozhi-snapshot unchanged since="` + since.Format("15:04") + `"/>`
+// It still carries now, as the full one's head does: the Planner has no
+// other clock, and a promise's due time or a scout finding's age is reckoned
+// from it.
+func unchangedSnapshot(since, now time.Time) string {
+	return `<naozhi-snapshot unchanged since="` + since.Format("15:04") + `" at="` + now.Format("2006-01-02 15:04 MST") + `"/>`
 }
 
 // promiseLines lists every promise by its ID, the due time after its text:
@@ -228,7 +259,9 @@ func promiseLines(items []Promise, loc *time.Location) []string {
 	return out
 }
 
-func unitLine(in snapshotInput, u health.Unit) string {
+// unitLine is u's line in the snapshot, and the time that ends it ("" for
+// none).
+func unitLine(in snapshotInput, u health.Unit) (line, at string) {
 	// The Planner calls a session by its title or name; the key is for
 	// looking it up.
 	var label, cross string
@@ -245,7 +278,7 @@ func unitLine(in snapshotInput, u health.Unit) string {
 	case label != "" || cross != "":
 		name = label + cross + "（" + u.ID + "）"
 	}
-	line := "- " + name + " [" + cmp.Or(stateNames[u.State], string(u.State))
+	line = "- " + name + " [" + cmp.Or(stateNames[u.State], string(u.State))
 	if u.ErrClass != "" {
 		line += "·" + string(u.ErrClass)
 	}
@@ -258,7 +291,7 @@ func unitLine(in snapshotInput, u health.Unit) string {
 		line += " 工作区 " + ws
 	}
 	if !u.LastActive.IsZero() {
-		line += " · 最后输出 " + u.LastActive.In(in.Now.Location()).Format("01-02 15:04")
+		at = " · 最后输出 " + u.LastActive.In(in.Now.Location()).Format("01-02 15:04")
 	}
-	return line
+	return line, at
 }

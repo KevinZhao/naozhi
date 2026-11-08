@@ -221,11 +221,15 @@ type Agent struct {
 	// records nothing at its end.
 	lastSnap sentSnapshot
 	snapGen  uint64
+	// shifting is set through a shift change: from the handoff turn's end
+	// until the new conversation starts, an idle Planner on the old
+	// session ID is not where a message goes.
+	shifting bool
 }
 
 // sentSnapshot is a full snapshot as a turn ran with it: its body (the
-// block without its time), when it was rendered, and in which conversation
-// ("" when the CLI had not named it).
+// block without its times, renderSnapshotKey), when it was rendered, and in
+// which conversation ("" when the CLI had not named it).
 type sentSnapshot struct {
 	body string
 	at   time.Time
@@ -573,6 +577,22 @@ func (a *Agent) handoffPath(day string) string {
 // reused rather than asked for again. It stays pending until sent, so after
 // a failed restart the conversation revival starts still gets it.
 func (a *Agent) changeShift(ctx context.Context, now time.Time, day string) {
+	// From here every message carries a full snapshot: once the handoff
+	// turn ends the Planner is idle on the old session ID, while a message
+	// queued then runs in the new conversation. What a turn on the old
+	// session ran with is not in the new one, and a turn submitted before
+	// may end only after, its conversation named by the new one's ID: the
+	// forget at the end makes those record nothing.
+	a.mu.Lock()
+	a.shifting = true
+	a.mu.Unlock()
+	a.forgetSnapshot()
+	defer func() {
+		a.forgetSnapshot()
+		a.mu.Lock()
+		a.shifting = false
+		a.mu.Unlock()
+	}()
 	path := a.handoffPath(day)
 	summary, err := os.ReadFile(path)
 	if err != nil {
@@ -606,10 +626,6 @@ func (a *Agent) changeShift(ctx context.Context, now time.Time, day string) {
 		return
 	}
 	a.markShift(now)
-	// What a turn on the old session ran with is not in the new one, and
-	// a turn submitted before may end only now, its conversation named by
-	// the new one's ID.
-	a.forgetSnapshot()
 	slog.Info("planner: shift changed", "day", day, "handoff_bytes", len(summary))
 	if len(summary) > 0 {
 		a.sendHandoff(day, summary, opts)
@@ -776,12 +792,12 @@ func (a *Agent) tellSaid(src Source, said *Words, text string) error {
 // full one once its turn ran: a message dropped from the queue, or whose
 // turn failed, may never have reached the CLI.
 func (a *Agent) nextSnapshot() (text string, ran func(string, error)) {
-	full := a.Snapshot()
-	_, body, _ := strings.Cut(full, "\n")
+	in := a.snapshotInput()
+	full, body := renderSnapshotKey(in)
 	st := a.cfg.Sessions.State(Key)
-	now := a.cfg.Now()
+	now := in.Now
 	a.mu.Lock()
-	prev, gen := a.lastSnap, a.snapGen
+	prev, gen, shifting := a.lastSnap, a.snapGen, a.shifting
 	a.mu.Unlock()
 	// The mark goes only to a Planner idle in the conversation the last
 	// full one went to, so the message goes in as it is decided: one queued
@@ -789,9 +805,9 @@ func (a *Agent) nextSnapshot() (text string, ran func(string, error)) {
 	// started by then. A dead process's spawn may not resume; an unnamed
 	// conversation cannot be told from another; a compaction may have
 	// summarised the last one away.
-	if st.Alive && !st.Running && prev.body == body && prev.sid != "" && prev.sid == st.SessionID &&
+	if !shifting && st.Alive && !st.Running && prev.body == body && prev.sid != "" && prev.sid == st.SessionID &&
 		!a.cfg.Sessions.CompactedSince(Key, prev.at) {
-		return unchangedSnapshot(prev.at.In(now.Location())), nil
+		return unchangedSnapshot(prev.at.In(now.Location()), now), nil
 	}
 	return full, func(_ string, err error) {
 		if err != nil {
@@ -816,7 +832,9 @@ func (a *Agent) forgetSnapshot() {
 }
 
 // Snapshot renders the full snapshot the next message would carry.
-func (a *Agent) Snapshot() string {
+func (a *Agent) Snapshot() string { return renderSnapshot(a.snapshotInput()) }
+
+func (a *Agent) snapshotInput() snapshotInput {
 	a.mu.Lock()
 	snap := a.health
 	a.mu.Unlock()
@@ -833,7 +851,7 @@ func (a *Agent) Snapshot() string {
 	if names := a.workspaceNames(); names != nil {
 		in.Workspace = func(id string) string { return names[id] }
 	}
-	return renderSnapshot(in)
+	return in
 }
 
 // workspaceNames maps the registered workspaces' IDs to their names, nil

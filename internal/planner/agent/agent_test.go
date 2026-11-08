@@ -782,9 +782,10 @@ func TestSendWords(t *testing.T) {
 }
 
 // TestSnapshotUnchanged: a message whose snapshot says what the last full
-// one in this conversation said carries only a mark naming that one's time;
-// a change, a new conversation (shift change, another session ID) or a
-// process that is not running (its revival may not resume) gets it whole.
+// one in this conversation said carries only a mark naming that one's time
+// and the time now (the Planner's only clock); a change, a new conversation
+// (shift change, another session ID) or a process that is not running (its
+// revival may not resume) gets it whole.
 func TestSnapshotUnchanged(t *testing.T) {
 	loc := time.FixedZone("CST", 8*3600)
 	now := time.Date(2026, 11, 3, 10, 0, 0, 0, loc)
@@ -812,20 +813,20 @@ func TestSnapshotUnchanged(t *testing.T) {
 	if got := send(at("2026-11-03 10:00"), "a"); !strings.HasPrefix(got, full) {
 		t.Fatalf("first message: %q", got)
 	}
-	if got := send(at("2026-11-03 10:05"), "b"); got != `<naozhi-snapshot unchanged since="10:00"/>`+"\n\nb" {
+	if got := send(at("2026-11-03 10:05"), "b"); got != `<naozhi-snapshot unchanged since="10:00" at="2026-11-03 10:05 CST"/>`+"\n\nb" {
 		t.Fatalf("same fleet: %q", got)
 	}
 	units = append(units, health.Unit{ID: "task:ab12", State: health.Active, LastActive: now})
 	if got := send(at("2026-11-03 10:10"), "c"); !strings.HasPrefix(got, full) || !strings.Contains(got, "task:ab12") {
 		t.Fatalf("changed fleet: %q", got)
 	}
-	if got := send(at("2026-11-03 10:20"), "d"); !strings.HasPrefix(got, `<naozhi-snapshot unchanged since="10:10"/>`) {
+	if got := send(at("2026-11-03 10:20"), "d"); !strings.HasPrefix(got, `<naozhi-snapshot unchanged since="10:10" at="2026-11-03 10:20 CST"/>`) {
 		t.Fatalf("unchanged since the change: %q", got)
 	}
 	if err := a.Wake(SourceScout, nil, "<naozhi-scout>x</naozhi-scout>"); err != nil {
 		t.Fatal(err)
 	}
-	if got := turns.sent[len(turns.sent)-1]; !strings.HasSuffix(got, `<naozhi-snapshot unchanged since="10:10"/>`) {
+	if got := turns.sent[len(turns.sent)-1]; !strings.HasSuffix(got, `<naozhi-snapshot unchanged since="10:10" at="2026-11-03 10:20 CST"/>`) {
 		t.Fatalf("wake: %q", got)
 	}
 
@@ -849,7 +850,7 @@ func TestSnapshotUnchanged(t *testing.T) {
 	if got := send(at("2026-11-03 10:50"), "g"); !strings.HasPrefix(got, full) {
 		t.Fatalf("after revival: %q", got)
 	}
-	if got := send(at("2026-11-03 10:55"), "h"); !strings.HasPrefix(got, `<naozhi-snapshot unchanged since="10:50"/>`) {
+	if got := send(at("2026-11-03 10:55"), "h"); !strings.HasPrefix(got, `<naozhi-snapshot unchanged since="10:50" at="2026-11-03 10:55 CST"/>`) {
 		t.Fatalf("after the revival's full one: %q", got)
 	}
 
@@ -870,6 +871,49 @@ func TestSnapshotUnchanged(t *testing.T) {
 	}
 }
 
+// TestSnapshotUnchangedWhileRunning: a running session's 最后输出 moves with
+// its events, and the order of running sessions with it; neither is a
+// change, so a message still carries only the mark. The full snapshot still
+// says 最后输出, and a state change is a change.
+func TestSnapshotUnchangedWhileRunning(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+	now := time.Date(2026, 11, 3, 10, 0, 0, 0, loc)
+	sess := &fakeSessions{st: SessionState{Exists: true, Alive: true, SessionID: "s1"}}
+	a, _ := newTestAgent(t, sess, &now)
+	turns := &fakeTurns{reply: "ok"}
+	a.turns = turns
+	units := []health.Unit{
+		{ID: "task:aa", State: health.Active, LastActive: now},
+		{ID: "task:bb", State: health.Active, LastActive: now.Add(-time.Minute)},
+	}
+	a.health = func() health.Snapshot { return health.Snapshot{Units: slices.Clone(units)} }
+	a.markShift(now)
+	send := func(text string) string {
+		t.Helper()
+		now = now.Add(3 * time.Minute)
+		if err := a.Send(text, "", nil); err != nil {
+			t.Fatal(err)
+		}
+		return turns.sent[len(turns.sent)-1]
+	}
+	if got := send("a"); !strings.Contains(got, "task:aa [活跃] · 最后输出 11-03 10:00") {
+		t.Fatalf("full snapshot: %q", got)
+	}
+	units[0].LastActive = now.Add(2 * time.Minute)
+	if got := send("b"); !strings.HasPrefix(got, "<naozhi-snapshot unchanged") {
+		t.Fatalf("only 最后输出 moved: %q", got)
+	}
+	units[1].LastActive = now.Add(time.Minute) // task:bb now leads the list
+	if got := send("c"); !strings.HasPrefix(got, "<naozhi-snapshot unchanged") {
+		t.Fatalf("only the order moved: %q", got)
+	}
+	units[0].State = health.Waiting
+	got := send("d")
+	if !strings.HasPrefix(got, `<naozhi-snapshot at="`) || !strings.Contains(got, "task:aa [待你回复] · 最后输出 11-03 10:05") {
+		t.Fatalf("a state change: %q", got)
+	}
+}
+
 // TestSnapshotMarkOnlyWhenSafe: the mark goes only where the last full
 // snapshot is surely in the conversation the message goes into. A full one
 // counts once its turn ran (one dropped from the queue or failed may never
@@ -878,7 +922,7 @@ func TestSnapshotUnchanged(t *testing.T) {
 // a compaction may have summarised the last one away.
 func TestSnapshotMarkOnlyWhenSafe(t *testing.T) {
 	loc := time.FixedZone("CST", 8*3600)
-	const full, mark = `<naozhi-snapshot at="`, `<naozhi-snapshot unchanged since="10:05"/>`
+	const full, mark = `<naozhi-snapshot at="`, `<naozhi-snapshot unchanged since="10:05" at="2026-11-03 10:10 CST"/>`
 	setup := func(t *testing.T) (*Agent, *fakeSessions, *fakeTurns, func(string) string) {
 		now := time.Date(2026, 11, 3, 10, 0, 0, 0, loc)
 		sess := &fakeSessions{st: SessionState{Exists: true, Alive: true, SessionID: "s1"}}
@@ -957,6 +1001,29 @@ func TestSnapshotMarkOnlyWhenSafe(t *testing.T) {
 			t.Fatalf("a turn submitted before the forget recorded its snapshot: %q", got)
 		}
 	})
+	t.Run("sent between the handoff and the new conversation", func(t *testing.T) {
+		a, sess, turns, send := setup(t)
+		send("a")
+		// The first one's turn runs on the old session and ends at once; the
+		// second, sent while the Planner is idle on that session's ID, still
+		// goes into the new conversation.
+		var got string
+		a.turns = &interjectTurns{fakeTurns: turns, after: handoffPrompt, do: func() {
+			for _, text := range []string{"插话", "再插一句"} {
+				if err := a.Send(text, "", nil); err != nil {
+					t.Error(err)
+				}
+			}
+			got = turns.sent[len(turns.sent)-1]
+		}}
+		a.changeShift(context.Background(), a.cfg.Now(), "2026-11-04")
+		if sess.recreated != 1 {
+			t.Fatalf("recreated %d", sess.recreated)
+		}
+		if !strings.HasPrefix(got, full) {
+			t.Fatalf("a message decided on the old conversation may open the new one: %q", got)
+		}
+	})
 	t.Run("its turn ended after the shift change", func(t *testing.T) {
 		a, sess, turns, send := setup(t)
 		var ran func(string, error)
@@ -973,6 +1040,22 @@ func TestSnapshotMarkOnlyWhenSafe(t *testing.T) {
 			t.Fatalf("the old conversation's snapshot was taken for the new one's: %q", got)
 		}
 	})
+}
+
+// interjectTurns is fakeTurns that runs do once the turn of the message
+// after has ended, as a message arriving then would.
+type interjectTurns struct {
+	*fakeTurns
+	after string
+	do    func()
+}
+
+func (f *interjectTurns) SubmitPlanner(key string, src Source, said *Words, text string, images []clievent.Attachment, opts sessionview.AgentOpts, done func(string, error)) (bool, error) {
+	q, err := f.fakeTurns.SubmitPlanner(key, src, said, text, images, opts, done)
+	if text == f.after {
+		f.do()
+	}
+	return q, err
 }
 
 // holdTurns is fakeTurns whose user turns end only when the test calls

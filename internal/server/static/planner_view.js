@@ -623,8 +623,8 @@ function admitEvent(e) {
 
 // SNAPSHOT_RE is the <naozhi-snapshot> block the gateway puts before every
 // message to the Planner (planner/agent Send), or its one-tag stand-in
-// <naozhi-snapshot unchanged since="HH:MM"/> when it says what the last one
-// said; the bubble shows what you wrote.
+// <naozhi-snapshot unchanged since="HH:MM" at="…"/> when it says what the
+// last one said; the bubble shows what you wrote.
 // A session handed over with it (<naozhi-session-ref>) leads the message and
 // becomes a fence that planner_cards.js turns into its card. The logged
 // bubble keeps only the message's head (detail 2000 runes, summary 120), so
