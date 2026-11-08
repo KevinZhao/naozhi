@@ -974,6 +974,19 @@ func (r *Runner) reachable(key string, by task.By, why string) (reopened bool, e
 	return true, nil
 }
 
+// closedByUser is how the user closed key's task, "" when they did not:
+// "停掉" for 任务's 停止, "标了完成" for their own done mark.
+func (r *Runner) closedByUser(key string) string {
+	m, _ := r.cfg.Sessions.Get(key)
+	switch {
+	case m.Mark == nil || task.By(m.Mark.By) != task.ByUser || task.State(m.Mark.State) != task.Done:
+		return ""
+	case m.Mark.Why == task.StoppedWhy:
+		return "停掉"
+	}
+	return "标了完成"
+}
+
 // putAway reports whether key is a dispatched session the gateway put away
 // (planner/reap): its sidecar keeps what resuming it needs.
 func (r *Runner) putAway(key string) bool {
@@ -1253,16 +1266,25 @@ func requestID() string {
 // does (reachable), unless custody would refuse it anyway: reopening sets
 // the task back to 进行中, which nothing undoes for a message never sent.
 // reopened says so. Its switch is left as it is: there is nothing to watch.
+// A task the user closed (stopped, or marked done) stays closed: the user's
+// own control (D88, D91) is not the Planner's to undo; the user may reopen
+// it by answering an ask or through a relay.
 func (r *Runner) custody(c Custody) (reopened bool, err error) {
 	if r.cfg.Custody == nil {
 		return false, errors.New("托管没有接通")
 	}
 	if r.putAway(c.Key) {
-		switch err := r.cfg.Custody.Blocked(c.Key); {
+		switch {
 		case c.On != nil:
 			return false, errors.New("这个会话已经收起（任务已完成），托管开关没有改，不用重发；要它接着做就用 text 给它发消息，网关会先重新打开它")
 		case custody.Irreversible(c.Text):
 			return false, errIrreversible
+		}
+		if what := r.closedByUser(c.Key); what != "" {
+			return false, errors.New("这个会话已经收起，是用户亲手" + what + "的，托管不重新打开它，没有发出；要它接着做就用 ask（带 task）问用户，用户决定了再用 relay 转达")
+		}
+		// Blocked stops a lineage at its limit, so it is asked last.
+		switch err := r.cfg.Custody.Blocked(c.Key); {
 		case errors.Is(err, custody.ErrOff):
 			return false, errors.New("这个会话已经收起，托管也被关掉了，没有发出，也没有重新打开；要它接着做就用 ask 问用户，用户决定了再用 relay 转达")
 		case err != nil:

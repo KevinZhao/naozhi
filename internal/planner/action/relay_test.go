@@ -358,7 +358,10 @@ func TestCustodyPutAwayRefused(t *testing.T) {
 		blocked     error
 		why         string // a substring of the receipt
 		malformed   bool
+		userWhy     string // set: the user closed the task, for this why
 	}{
+		{name: "stopped by the user", block: `"text":"继续"`, why: "是用户亲手停掉的，托管不重新打开它", userWhy: task.StoppedWhy},
+		{name: "done by the user", block: `"text":"继续"`, why: "是用户亲手标了完成的，托管不重新打开它", userWhy: "我看过了"},
 		{name: "irreversible", block: `"text":"用户同意了，git push 到主分支"`, why: "托管不替用户说"},
 		{name: "paused", block: `"text":"继续"`, blocked: custody.ErrPaused, why: "用户暂停了托管"},
 		{name: "stopped", block: `"text":"继续"`, blocked: custody.ErrStopped, why: "没有发出，已经交给用户"},
@@ -370,6 +373,9 @@ func TestCustodyPutAwayRefused(t *testing.T) {
 			r, g, _, key, live := putAwayRunner(t)
 			fc := &fakeCustody{on: map[string]bool{}, blocked: tc.blocked}
 			r.cfg.Custody = &liveCustody{fakeCustody: fc, live: live}
+			if tc.userWhy != "" {
+				markByUser(t, r, key, tc.userWhy)
+			}
 			r.Result(r.cfg.Planner, block(`{"type":"custody","key":"`+key+`",`+tc.block+`}`))
 			r.handle(<-r.ch)
 			if live[key] || len(fc.delivered)+len(fc.sets) != 0 {
@@ -402,6 +408,30 @@ func TestCustodyPutAwayRefused(t *testing.T) {
 			t.Errorf("task state = %s, want done", st)
 		}
 	})
+}
+
+// markByUser marks key's task done as the user's, for why.
+func markByUser(t *testing.T, r *Runner, key, why string) {
+	t.Helper()
+	if _, err := r.cfg.Sessions.Update(key, func(m *sidecar.Meta) bool {
+		m.Mark = &sidecar.Mark{State: string(task.Done), By: string(task.ByUser), Why: why, At: time.Now()}
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A task the user stopped and that was put away is still reopened by what
+// the user starts: a relay of their decision.
+func TestRelayReopensUserStopped(t *testing.T) {
+	r, _, _, key, live := putAwayRunner(t)
+	markByUser(t, r, key, task.StoppedWhy)
+	out := userTurn(r, said)
+	r.Result(r.cfg.Planner, block(`{"type":"relay","key":"`+key+`","text":"用户要它接着做"}`))
+	r.handle(<-r.ch)
+	if len(*out) != 1 || !live[key] || taskState(t, r, key) != task.Doing {
+		t.Errorf("relayed = %q live = %v, want it reopened and sent", *out, live)
+	}
 }
 
 // An ask naming a key that never was a session, or a dispatched session
