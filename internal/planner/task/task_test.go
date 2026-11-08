@@ -398,3 +398,34 @@ func TestLive(t *testing.T) {
 		t.Errorf("gone %+v, retired %+v: want no live", by[gone].Live, by[retired].Live)
 	}
 }
+
+// A dispatched session marked done over a day ago stays listed while it was
+// active within the day (its Live.LastActive), so the reaper's window and
+// the list agree; one idle since, or not in the router, is archived.
+func TestDoneListedWhileActive(t *testing.T) {
+	sc := sidecar.Open(t.TempDir(), func() time.Time { return t0 })
+	const active, idle, gone = "task:aaaaaaaaaaaa", "task:bbbbbbbbbbbb", "task:cccccccccccc"
+	old := t0.Add(-Archive - time.Hour)
+	for _, k := range []string{active, idle, gone} {
+		if err := sc.Put(sidecar.Meta{Key: k, Purpose: sidecar.PurposeTask, Title: k}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sc.SetMark(k, sidecar.Mark{State: string(Done), By: string(ByPlanner), At: old}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b := New(Config{Sessions: sc, Now: func() time.Time { return t0 },
+		Live: func() map[string]Live {
+			return map[string]Live{
+				active: {LastActive: t0.Add(-time.Hour)},
+				idle:   {LastActive: old.Add(time.Minute)},
+			}
+		}})
+	var ids []string
+	for _, tk := range b.List() {
+		ids = append(ids, tk.ID)
+	}
+	if !slices.Equal(ids, []string{active}) {
+		t.Fatalf("listed %v, want only %s", ids, active)
+	}
+}

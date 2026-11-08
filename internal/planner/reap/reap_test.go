@@ -79,6 +79,8 @@ type fixture struct {
 	nearby   bool
 	inUse    bool
 	archived int
+	// reads counts the Session calls.
+	reads    int
 	restored []string
 	dirs     []string
 }
@@ -97,9 +99,10 @@ func newFixture(t *testing.T, dirs ...string) *fixture {
 		t.Fatal(err)
 	}
 	f.r = New(Config{
-		Sessions: f.sc,
-		Session:  func(string) (Session, bool) { return f.sess, f.live },
-		Nearby:   func(string) bool { return f.nearby },
+		Sessions:   f.sc,
+		Session:    func(string) (Session, bool) { f.reads++; return f.sess, f.live },
+		LastActive: func(string) (time.Time, bool) { return f.sess.LastActive, f.live },
+		Nearby:     func(string) bool { return f.nearby },
 		Archive: func(string) (Archived, bool) {
 			if !f.live {
 				return Archived{}, false
@@ -253,6 +256,44 @@ func TestWindowFromLastActivity(t *testing.T) {
 	f.r.Tick(context.Background())
 	if f.archived != 1 || f.reap() == nil {
 		t.Fatal("not put away once idle IdleFor, a day past the mark")
+	}
+}
+
+// A done task past its window by its mark and its last activity is left out
+// without the full Session read; one active since is read and held.
+func TestPastWindowNotRead(t *testing.T) {
+	f := newFixture(t)
+	f.markDone(t)
+	f.now = f.now.Add(task.Archive + time.Hour)
+	f.sess.LastActive = f.now.Add(-task.Archive)
+	f.r.Tick(context.Background())
+	if f.reads != 0 || f.archived != 0 {
+		t.Fatalf("past its window: Session read %d times, archived %d", f.reads, f.archived)
+	}
+	f.sess.LastActive = f.now.Add(-time.Hour)
+	f.r.Tick(context.Background())
+	if why, _ := f.r.Wait(key); f.reads != 1 || why != "空闲不到 2 小时" {
+		t.Fatalf("active an hour ago: Session read %d times, Wait = %q", f.reads, why)
+	}
+	// Without the cheap read every done task is read in full, as before.
+	f.r.cfg.LastActive = nil
+	f.sess.LastActive = f.now.Add(-task.Archive)
+	f.r.Tick(context.Background())
+	if why, _ := f.r.Wait(key); f.reads != 2 || f.archived != 0 || why != "" {
+		t.Fatalf("no LastActive: Session read %d times, archived %d, Wait = %q", f.reads, f.archived, why)
+	}
+}
+
+// A last activity in the future (the clock set back) holds the session until
+// IdleFor after it, a longer wait than IdleFor from now.
+func TestLastActiveInFuture(t *testing.T) {
+	f := newFixture(t)
+	f.markDone(t)
+	f.sess.LastActive = f.now.Add(time.Hour)
+	f.r.Tick(context.Background())
+	why, at := f.r.Wait(key)
+	if f.archived != 0 || why != "空闲不到 2 小时" || !at.Equal(f.now.Add(time.Hour+IdleFor)) {
+		t.Fatalf("active an hour ahead: archived %d, Wait = %q %v", f.archived, why, at)
 	}
 }
 

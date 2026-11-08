@@ -22,8 +22,14 @@ func TestReapSessionLastActive(t *testing.T) {
 	if !ok || s.LastActive.Before(before) || s.LastActive.After(time.Now()) {
 		t.Fatalf("Session = %+v, %v; want LastActive at the injection", s, ok)
 	}
+	if la, ok := src.LastActive("task:aaaaaaaaaaaa"); !ok || !la.Equal(s.LastActive) {
+		t.Fatalf("LastActive = %v, %v; want Session's %v", la, ok, s.LastActive)
+	}
 	if _, ok := src.Session("task:bbbbbbbbbbbb"); ok {
 		t.Fatal("a key not in the router found")
+	}
+	if _, ok := src.LastActive("task:bbbbbbbbbbbb"); ok {
+		t.Fatal("LastActive found a key not in the router")
 	}
 }
 

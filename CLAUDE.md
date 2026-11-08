@@ -58,7 +58,7 @@ Process states: `Spawning -> Ready <-> Running -> Dead`. Dead processes with a S
 
 **Watchdog**: During Running state, two timers enforce limits:
 - `no_output_timeout` (default 15min): Reset on any event; if triggered, kill process. A running tool keeps it fed through the Claude CLI's `tool_progress` heartbeat (every 30s), so it only catches silent model generation or a hung CLI
-- `total_timeout` (default 2h): Single shot; if triggered, kill process
+- `total_timeout` (default 2h): Single shot; if triggered, kill process. A `task:` session gets at least 6h (`cliinfo.DefaultTaskTotalTimeout`), taken per key at spawn, shim reconnect and the stuck sweep (2× it)
 - Both defaults live in `cliinfo` (`DefaultNoOutputTimeout` / `DefaultTotalTimeout`); `cli` and `config` alias them
 
 The shim argv is compared on restart; a field missing from that comparison reads as argv drift and kills live shims (`spawn_argv_ast_test.go` guards it).

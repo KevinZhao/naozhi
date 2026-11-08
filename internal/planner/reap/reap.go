@@ -127,6 +127,10 @@ type Config struct {
 	Sessions *sidecar.Store
 	// Session reads key's live session; false when it is not in the router.
 	Session func(key string) (Session, bool)
+	// LastActive is key's Session.LastActive alone, read before Session to
+	// leave out a done task past its window without Session's event log
+	// scans; false when key is not in the router. nil reads Session.
+	LastActive func(key string) (time.Time, bool)
 	// Nearby reports whether the user is at key (custody.Engine.Nearby).
 	Nearby func(key string) bool
 	// Archive closes key's process and takes it out of the session list,
@@ -255,13 +259,26 @@ func done(m sidecar.Meta) bool {
 		task.State(m.Mark.State) == task.Done
 }
 
-// due reports whether done task m's session s is still within window.
-func (r *Reaper) due(m sidecar.Meta, s Session) bool {
+// due reports whether done task m, its session last active at lastActive,
+// is still within window.
+func (r *Reaper) due(m sidecar.Meta, lastActive time.Time) bool {
 	from := m.Mark.At
-	if s.LastActive.After(from) {
-		from = s.LastActive
+	if lastActive.After(from) {
+		from = lastActive
 	}
 	return r.cfg.Now().Sub(from) < window
+}
+
+// mayBeDue is due read cheaply: false only when done task key is surely past
+// window or not in the router. A done task left in the router for days (a
+// mark from before an upgrade, a turn that ended in an error) is then looked
+// at every tick without the full Session read.
+func (r *Reaper) mayBeDue(m sidecar.Meta, key string) bool {
+	if r.cfg.LastActive == nil || r.due(m, time.Time{}) {
+		return true
+	}
+	la, ok := r.cfg.LastActive(key)
+	return ok && r.due(m, la)
 }
 
 // holds is why s is not to be put away yet ("" when nothing holds it), and
@@ -292,8 +309,12 @@ func (r *Reaper) tryPutAway(ctx context.Context, key string) {
 		r.setWait(key, waiting{})
 		return
 	}
+	if !r.mayBeDue(m, key) {
+		r.setWait(key, waiting{})
+		return
+	}
 	s, ok := r.cfg.Session(key)
-	if !ok || !r.due(m, s) {
+	if !ok || !r.due(m, s.LastActive) {
 		// Not in the session list: there is no process to close or session
 		// to put away. Past window: no longer listed to be reopened.
 		r.setWait(key, waiting{})

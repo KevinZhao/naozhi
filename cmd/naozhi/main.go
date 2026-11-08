@@ -550,17 +550,18 @@ func main() {
 	})
 	reapSources := wireup.ReapSources{Router: router, Health: func() health.Snapshot { return healthMon.Snapshot() }, ClaudeDir: claudeDir}
 	reaper = reap.New(reap.Config{
-		Sessions: sidecars,
-		Session:  reapSources.Session,
-		Nearby:   custodian.Nearby,
-		Archive:  reapSources.Archive,
-		Restore:  reapSources.Restore,
-		Dirs:     reapSources.Dirs,
-		InUse:    reapSources.InUse,
-		Git:      reap.Exec{},
-		Inbox:    notifier,
-		Journal:  plannerState.Journal,
-		Name:     unitNames,
+		Sessions:   sidecars,
+		Session:    reapSources.Session,
+		LastActive: reapSources.LastActive,
+		Nearby:     custodian.Nearby,
+		Archive:    reapSources.Archive,
+		Restore:    reapSources.Restore,
+		Dirs:       reapSources.Dirs,
+		InUse:      reapSources.InUse,
+		Git:        reap.Exec{},
+		Inbox:      notifier,
+		Journal:    plannerState.Journal,
+		Name:       unitNames,
 	})
 
 	routing := buildRouting(cfg, agents, projectMgr, scheduler)

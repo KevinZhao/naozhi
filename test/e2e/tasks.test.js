@@ -139,6 +139,10 @@ for (const [name, opts] of [['desktop', { viewport: { width: 1440, height: 900 }
         done('task:idle1', 'iso 修 reap', { reap_wait: '空闲不到 2 小时', reap_at: iso(now + 90 * 60000 - 20000) }),
         done('task:soon1', 'iso 补文档', { reap_wait: '空闲不到 2 小时', reap_at: iso(now + 12 * 60000 - 20000) }),
         done('task:ask1', 'iso 跑基准', { reap_wait: '有提问没回答' }),
+        // Stopped by you: 你停的 in place of who judged it done.
+        done('task:stop1', 'iso 停掉的', { by: 'user', why: '已停止', reap_wait: '空闲不到 2 小时', reap_at: iso(now + 45 * 60000 - 20000) }),
+        // reap_at passed, the next look not run yet: never 0 or less.
+        done('task:late1', 'iso 到点了', { reap_wait: '空闲不到 2 小时', reap_at: iso(now - 5 * 60000) }),
         done('task:gone1', 'iso 改配置', { reap: { at: iso(now - 60000), by: 'planner', session_id: 's1', worktrees: [] }, retired: iso(now - 60000) }),
       ],
     };
@@ -157,6 +161,9 @@ for (const [name, opts] of [['desktop', { viewport: { width: 1440, height: 900 }
       await expect(card('task:idle1').locator('.tk-badge')).toHaveText('已完成');
       await expect(card('task:idle1').locator('.tk-now')).toHaveText('约 1 小时 30 分后收起 · Planner 判断：PR 已合并');
       await expect(card('task:soon1').locator('.tk-now')).toHaveText('约 12 分钟后收起 · Planner 判断：PR 已合并');
+      await expect(card('task:stop1').locator('.tk-badge')).toHaveText('已停止');
+      await expect(card('task:stop1').locator('.tk-now')).toHaveText('约 45 分钟后收起 · 你停的');
+      await expect(card('task:late1').locator('.tk-now')).toHaveText('约 1 分钟后收起 · Planner 判断：PR 已合并');
       // Said once: not again as 等收起 under it.
       await expect(card('task:idle1')).not.toContainText('等收起');
       await expect(card('task:idle1').locator('.tk-meta')).toHaveCount(0);
