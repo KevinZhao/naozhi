@@ -495,6 +495,46 @@ func TestAskReopenedNotSent(t *testing.T) {
 	}
 }
 
+// A task told of an unreported turn end, then closed by the user and put
+// away, is told again of its next unreported turn end once a relay or the
+// user's answer reopens it: the receipt of before is not this run's.
+func TestReopenRearmsReceipt(t *testing.T) {
+	for _, via := range []string{"relay", "ask"} {
+		t.Run(via, func(t *testing.T) {
+			r, g, inbox, key, _ := putAwayRunner(t)
+			r.grace = 0
+			r.cfg.Reports = func(time.Time, time.Time) []string { return nil }
+			userTurn(r, said)
+			r.endTold[key] = time.Now().Add(-time.Hour)
+			r.doingAt[key] = time.Now().Add(-time.Minute)
+			if via == "relay" {
+				r.Result(r.cfg.Planner, block(`{"type":"relay","key":"`+key+`","text":"用户要它接着做"}`))
+				r.handle(<-r.ch)
+			} else {
+				r.Result(r.cfg.Planner, block(`{"type":"ask","question":"接着做吗？","options":["做"],"task":"`+key+`"}`))
+				r.handle(<-r.ch)
+				if err := inbox.Decide(openDecision(t, inbox, HandlerAsk).ID, "做"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if st := taskState(t, r, key); st != task.Doing {
+				t.Fatalf("task state = %s, want doing", st)
+			}
+			g.told = nil
+			r.Result(key, "又改了一处")
+			select {
+			case e := <-r.endCh:
+				r.checkEnded(e)
+			case <-time.After(5 * time.Second):
+				t.Fatal("turn end never queued for a check")
+			}
+			if len(g.told) != 1 || !strings.Contains(g.told[0], "又改了一处") {
+				t.Errorf("told = %q, want the reopened task's turn end told", g.told)
+			}
+		})
+	}
+}
+
 // liveCustody is fakeCustody delivering only to the sessions in the router.
 type liveCustody struct {
 	*fakeCustody

@@ -686,6 +686,82 @@ func TestTaskEndedLastTurnInQuiet(t *testing.T) {
 	}
 }
 
+// TestTaskEndedQuietOneTimer: a window's many unreported turn ends hold one
+// check to its end, not one each: endCh is shared and bounded, and the
+// latest is the one told.
+func TestTaskEndedQuietOneTimer(t *testing.T) {
+	e := endedRunner(t)
+	e.end("改好了一半")
+	e.wait(time.Minute)
+	e.doing("还没做完")
+	for n := range 2 * queueLen {
+		e.wait(time.Minute)
+		e.end(fmt.Sprintf("第 %d 轮", n))
+	}
+	if len(e.held) != 1 {
+		t.Fatalf("held = %d, want one check to the window's end", len(e.held))
+	}
+	e.wait(doingQuiet)
+	e.fire()
+	if got := e.receipts(); len(got) != 2 || !strings.Contains(got[1], fmt.Sprintf("第 %d 轮", 2*queueLen-1)) {
+		t.Fatalf("receipts = %q, want the latest turn told once", got)
+	}
+
+	// A wake lost to a full endCh does not leave the next window unarmed.
+	e.wait(time.Minute)
+	e.doing("还没做完")
+	e.wait(time.Minute)
+	e.end("又一轮")
+	e.held = nil // the wake never reaches endCh
+	e.wait(doingQuiet)
+	e.end("窗口过后")
+	e.doing("还要再看")
+	e.wait(time.Minute)
+	e.end("最后一轮")
+	if len(e.held) != 1 {
+		t.Fatalf("held = %d after a lost wake, want the window armed again", len(e.held))
+	}
+	e.wait(doingQuiet)
+	e.fire()
+	if got := e.receipts(); len(got) != 4 || !strings.Contains(got[3], "最后一轮") {
+		t.Fatalf("receipts = %q, want the last turn told at the window's end", got)
+	}
+}
+
+// TestTaskEndedWhileTold: a turn that ends after the receipt, before the
+// doing block answering it, is held to the window's end when it is the
+// latest, so a task whose last turn it is is not left 进行中.
+func TestTaskEndedWhileTold(t *testing.T) {
+	e := endedRunner(t)
+	e.end("测试在后台跑，跑完再看")
+	e.wait(3 * time.Minute)
+	e.end("测试全部通过")
+	if got := e.receipts(); len(got) != 1 {
+		t.Fatalf("receipts = %q", got)
+	}
+	e.wait(time.Minute)
+	e.doing("测试还在后台跑")
+	e.wait(doingQuiet)
+	e.fire()
+	if got := e.receipts(); len(got) != 2 || !strings.Contains(got[1], "测试全部通过") {
+		t.Fatalf("receipts = %q, want the turn that ended meanwhile told at the window's end", got)
+	}
+}
+
+// TestTaskEndedStaleSkipped: a turn end checked after its session ended
+// another is not told: its text is stale, and the later turn's own check
+// tells that one.
+func TestTaskEndedStaleSkipped(t *testing.T) {
+	e := endedRunner(t)
+	e.r.Result(e.key, "测试在后台跑，跑完再看")
+	e.wait(time.Minute)
+	e.r.Result(e.key, "测试全部通过")
+	e.check()
+	if got := e.receipts(); len(got) != 1 || !strings.Contains(got[0], "测试全部通过") {
+		t.Fatalf("receipts = %q, want only the latest turn told", got)
+	}
+}
+
 // TestTaskEndedReportRearms: a report re-arms the receipt as before, its
 // doing block answering it starts no quiet window, nor does a report after
 // a doing block that answered a receipt: the next unreported turn end is
@@ -725,6 +801,19 @@ func TestTaskEndedReportRearms(t *testing.T) {
 		e.end("又改了一处")
 		if got := e.receipts(); len(got) != 2 || len(e.held) != 0 {
 			t.Fatalf("receipts = %q held = %d, want the reopened task's turn end told at once", got, len(e.held))
+		}
+	})
+	t.Run("done without a doing block, then reopened", func(t *testing.T) {
+		e := endedRunner(t)
+		e.end("改好了")
+		e.planner(block(`{"type":"status","task":"` + e.key + `","state":"done","why":"它说做完了"}`))
+		if err := e.r.cfg.Tasks.Set(e.key, task.Doing, task.ByUser, "重新打开"); err != nil {
+			t.Fatal(err)
+		}
+		e.wait(10 * time.Minute)
+		e.end("又改了一处")
+		if got := e.receipts(); len(got) != 2 || !strings.Contains(got[1], "又改了一处") {
+			t.Fatalf("receipts = %q, want the reopened task's turn end told", got)
 		}
 	})
 	t.Run("report after the doing block", func(t *testing.T) {
