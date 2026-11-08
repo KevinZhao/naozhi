@@ -160,7 +160,7 @@ test('desktop: badge, 等你 cards, stream, controls, and the workbench counts o
     await wbBtn.click();
     await expect(page.locator('#fv-drawer')).toHaveClass(/fv-open/);
     await expect(page.locator('#wb-outputs .files-row')).toHaveCount(1);
-    await expect(page.locator('.pl-left')).toHaveCSS('width', '280px');
+    await expect(page.locator('.pl-left')).toHaveCSS('width', '340px');
     await expect(page.locator('#pl-wait .pl-card').first()).toBeVisible();
     await page.screenshot({ path: test.info().outputPath('planner-desktop-workbench.png') });
     await page.click('#fv-btn-close');

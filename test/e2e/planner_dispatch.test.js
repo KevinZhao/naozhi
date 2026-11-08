@@ -125,20 +125,22 @@ for (const vp of [{ name: 'desktop', width: 1280, height: 800 }, { name: 'phone'
       // 任务: the dispatched session runs, with 停止.
       if (vp.isMobile) await page.click('#pl-left-toggle');
       const task = page.locator('#pl-task .tk-card[data-id="' + TASK + '"]');
-      await expect(task.locator('.tk-menu option:checked')).toHaveText('进行中');
-      await expect(task.locator('.tk-stop')).toHaveText('停止');
+      await expect(task.locator('.tk-badge')).toHaveText('进行中');
       await task.scrollIntoViewIfNeeded();
+      await task.locator('.tk-more').click();
+      await expect(task.locator('.tk-stop')).toHaveText('停止');
       await page.screenshot({ path: test.info().outputPath('dispatch-task-' + vp.name + '.png') });
       await task.locator('.tk-stop').click();
       await expect.poll(() => mock.taskStopCalls).toEqual([{ id: TASK }]);
       // Stopping is your decision (§15.7 S2): 已完成, said as 已停止 · 你停的.
       const stopped = page.locator('#pl-task .tk-sec-done .tk-card[data-id="' + TASK + '"]');
-      await expect(stopped.locator('.tk-state')).toHaveText('已停止');
-      await expect(stopped.locator('.tk-meta')).toHaveText('你停的');
+      await expect(stopped.locator('.tk-badge')).toHaveText('已停止');
+      await expect(stopped.locator('.tk-now')).toHaveText('你停的');
       await expect(stopped).not.toContainText('失败');
+      await page.locator('#pl-task .tk-sec-done summary').click();
+      await stopped.locator('.tk-more').click();
       await expect(stopped.locator('.tk-stop')).toHaveCount(0);
       await expect(stopped.locator('.tk-reopen')).toHaveText('重新打开');
-      await page.locator('#pl-task .tk-sec-done summary').click();
       await stopped.scrollIntoViewIfNeeded();
       await page.screenshot({ path: test.info().outputPath('dispatch-stopped-' + vp.name + '.png') });
 

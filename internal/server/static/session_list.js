@@ -1025,6 +1025,8 @@ function onSessionState(msg) {
   // mutations), so the version cache would otherwise skip the re-render.
   sessionList.lastVersion = 0;
   if (msg.reason) debouncedFetchSessions();
+  // Views beyond the sidebar follow a turn starting or ending (tasks.js).
+  nzBus.dispatchEvent(new CustomEvent('session:state', { detail: msg }));
 }
 
 // ---- turns no session_state ends ----

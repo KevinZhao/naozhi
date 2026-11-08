@@ -324,3 +324,48 @@ func TestOnStateAndReap(t *testing.T) {
 		t.Fatalf("List = %+v", l)
 	}
 }
+
+// A dispatched session in the router lists what it is doing now, each text
+// folded to one capped line, and when it entered its health state; one gone
+// from the router, or retired, lists none.
+func TestLive(t *testing.T) {
+	sc := sidecar.Open(t.TempDir(), func() time.Time { return t0 })
+	const run, gone, retired = "task:aaaaaaaaaaaa", "task:bbbbbbbbbbbb", "task:cccccccccccc"
+	for _, k := range []string{run, gone, retired} {
+		m := sidecar.Meta{Key: k, Purpose: sidecar.PurposeTask, Title: k}
+		if k == retired {
+			m.Retired = t0
+		}
+		if err := sc.Put(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	long := strings.Repeat("长", liveRunes+50)
+	b := New(Config{Sessions: sc, Now: func() time.Time { return t0 },
+		Health: func() health.Snapshot {
+			return health.Snapshot{Units: []health.Unit{{ID: run, State: health.Active, Since: t0.Add(-time.Minute)}}}
+		},
+		Live: func() map[string]Live {
+			return map[string]Live{
+				run:     {Running: true, Activity: "Bash:\n  go test\t./...", Reply: long, LastActive: t0},
+				retired: {Activity: "x"},
+			}
+		}})
+	by := map[string]Task{}
+	for _, tk := range b.List() {
+		by[tk.ID] = tk
+	}
+	l := by[run].Live
+	if l == nil || !l.Running || l.Activity != "Bash: go test ./..." || !l.LastActive.Equal(t0) {
+		t.Fatalf("live = %+v", l)
+	}
+	if n := len([]rune(l.Reply)); n > liveRunes+3 || !strings.HasSuffix(l.Reply, "...") {
+		t.Errorf("reply not capped: %d runes", n)
+	}
+	if !by[run].HealthSince.Equal(t0.Add(-time.Minute)) {
+		t.Errorf("health_since = %v", by[run].HealthSince)
+	}
+	if by[gone].Live != nil || by[retired].Live != nil {
+		t.Errorf("gone %+v, retired %+v: want no live", by[gone].Live, by[retired].Live)
+	}
+}
