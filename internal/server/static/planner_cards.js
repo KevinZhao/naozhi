@@ -390,18 +390,31 @@ function foldTextKeys(ev, keys) {
 // emptyBracketRE is a bracket the folded keys emptied: "（`a` 和 `b`）".
 const emptyBracketRE = /\s*[（(]\s*(?:[和与及、，,；;]\s*)*[）)]/g;
 
+// listSepRE is the text between two items of a list: "`a`、`b`".
+const listSepRE = /^\s*[、，,；;]\s*$/;
+
 // foldKeys drops from a reply the backticked keys it names sessions by
 // after their names (§6.4): the cards under it carry them, and the user
-// reads names, not keys. A key with no text before it stands for the name;
-// a bracket of keys alone goes with them.
+// reads names, not keys. A key with no text before it stands for the name,
+// and so does one after a colon or in a list of keys: dropping those would
+// leave "派出了：、、"; a bracket of keys alone goes with them.
 function foldKeys(ev, keys) {
   const emptied = new Set();
-  ev.querySelectorAll('.event-content code').forEach((code) => {
-    const key = code.textContent.trim();
-    if (code.closest('pre, .pl-scards') || !keys.has(key)) return;
+  const codes = [...ev.querySelectorAll('.event-content code')]
+    .filter((code) => !code.closest('pre, .pl-scards') && keys.has(code.textContent.trim()));
+  // Decided before any key is folded: folding changes the siblings.
+  const joined = (sep, other) => sep?.nodeType === Node.TEXT_NODE && listSepRE.test(sep.data) && codes.includes(other);
+  const standsAlone = new Set(codes.filter((code) => {
     const prev = code.previousSibling;
     const next = code.nextSibling;
-    if (prev?.nodeType !== Node.TEXT_NODE || !prev.data.trim()) {
+    return joined(prev, prev?.previousSibling) || joined(next, next?.nextSibling) ||
+      (prev?.nodeType === Node.TEXT_NODE && /[：:]\s*$/.test(prev.data));
+  }));
+  codes.forEach((code) => {
+    const key = code.textContent.trim();
+    const prev = code.previousSibling;
+    const next = code.nextSibling;
+    if (prev?.nodeType !== Node.TEXT_NODE || !prev.data.trim() || standsAlone.has(code)) {
       code.replaceWith(sessionTitle(key));
       return;
     }

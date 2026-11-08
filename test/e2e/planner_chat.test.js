@@ -216,6 +216,34 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
   }
 });
 
+// A list of keys, or one after a colon, stands for the names: folding them
+// away left "派出了 、、。" (§15.12 ①). A key after its name still goes.
+test('a list of keys in a reply folds to the names, not to bare separators', async ({ page }) => {
+  const tasks = [['task:isoa1', 'iso 周报'], ['task:isob2', 'iso 评审'], ['task:isoc3', 'iso 部署']];
+  const s = defaultSessions();
+  for (const [key, label] of tasks) {
+    s.sessions.push({ key, state: 'ready', platform: 'task', agent: 'general', cli_name: 'claude', purpose: 'task', user_label: label,
+      workspace: '/home/user/workspace/naozhi', last_active: now - 20000, node: 'local' });
+  }
+  const [a, b, c] = tasks.map(([key]) => '`' + key + '`');
+  const mock = await startMockServer({
+    ws: true, sessions: s, inbox: inbox(), systemHealth: health(),
+    plannerEvents: [{ type: 'text', time: now - 60000, uuid: 'pc-list', detail: '派出了 ' + a + '、' + b + '、' + c + '。名单：' + a + '。iso 周报 ' + a + ' 先等等。' }],
+    planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
+  });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await page.click('#abnav-planner');
+    const reply = page.locator('#pl-stream .event.text').first();
+    await expect(reply.locator('.pl-scards .pl-scard')).toHaveCount(3);
+    await expect(reply).toContainText('派出了 iso 周报、iso 评审、iso 部署。名单：iso 周报。iso 周报 先等等。');
+    await expect(reply).not.toContainText('task:');
+  } finally {
+    mock.server.close();
+  }
+});
+
 test('chat view: 交给 Planner sends the session with the typed text', async ({ page }) => {
   const mock = await startMockServer({
     ws: true, plannerEvents: [], inbox: { open: [], closed: [], counts: { open: 0, badge: 0 } },
