@@ -111,7 +111,10 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
         await expect(bar).toBeHidden();
         await expect(page.locator('#abnav-planner-count')).toBeHidden();
         await page.screenshot({ path: test.info().outputPath(`side-wait-zero-${name}.png`) });
-        // Something new comes in: the bar is back, folded.
+        // Something new comes in: the bar is back, folded. The list says so
+        // too (the idle Home's summary refetches it on a changed count).
+        box.open.push({ id: 'in_q2', kind: 'question', level: 'timely', unit: SESSION, title: 'iso 又一个提问', created: iso(Date.now()), state: 'open', source: 'waiting:' + SESSION });
+        box.counts = { open: 2, badge: 1 };
         mock.wsConnections[mock.wsConnections.length - 1].send({ type: 'inbox_count', open: 2, badge: 1 });
         await expect(page.locator('#sw-toggle')).toHaveText('等你 1');
         await expect(page.locator('#sw-toggle')).toHaveAttribute('aria-expanded', 'false');

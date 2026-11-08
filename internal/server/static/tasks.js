@@ -38,11 +38,19 @@
 // It refetches on inbox_count frames (nzBus 'inbox:count': the health
 // changes that mark 等你 / 失败 open and close items too) and on
 // refreshTasks() (a Planner turn ending, the page's slow tick).
+//
+// A dispatched session's own header (the 会话 view) carries its card's
+// badge and 在 Planner 中查看 (UX review 10): paintTaskHeader fills
+// #header-task from the last list, which ensureTasks reads without the page
+// mounted; the link opens the page on the card, unfolded and lit.
 import { NZ_CONTRACT } from './contract.js';
+import { selection } from './state.js';
 import { esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
 import { formatAbsTime, formatMonthDayTime, timeAgo } from './utilities.js';
 import { custody, custodyChipHtml, refreshCustody, statusOf } from './custody.js';
-import { plannerAPI } from './planner_host.js';
+import { isLit, light } from './notify.js';
+import { shell } from './shell.js';
+import { plannerAPI, plannerHost } from './planner_host.js';
 
 // Mounted containers; detached ones are dropped at the next refresh.
 const mounts = new Set();
@@ -50,6 +58,15 @@ const mounts = new Set();
 // repaint when custody changes.
 let byId = new Map();
 let last = null;
+// load is the GET /api/tasks in flight ({gen, p, next}), shared by the
+// readers that take a list already asked for; next is the one read after it
+// that every reader needing a list asked after now shares. gen moves with
+// the Planner shown: a read for the node it showed before is dropped. readAt
+// and failedAt are when one last answered and last failed (ensureTasks).
+let load = null;
+let gen = 0;
+let readAt = 0;
+let failedAt = 0;
 // actsOpen is the card whose "⋯" is open, kept across repaints.
 let actsOpen = '';
 
@@ -57,6 +74,14 @@ let actsOpen = '';
 // STATE_DEBOUNCE_MS gathers a burst of session_state frames into one fetch.
 const LIVE_MS = 10000;
 const STATE_DEBOUNCE_MS = 800;
+// FRESH_MS is how old a list a header may show before ensureTasks reads it
+// again; RETRY_MS spaces the tries while the route fails (the Planner off
+// answers 404). REVEAL_TRIES × REVEAL_MS bound the wait for the page to
+// paint the card 在 Planner 中查看 opens.
+const FRESH_MS = 30000;
+const RETRY_MS = 15000;
+const REVEAL_TRIES = 40;
+const REVEAL_MS = 150;
 // STATUS_MAX caps a status line's text (the server caps it too); CSS cuts
 // it to the card's width.
 const STATUS_MAX = 160;
@@ -238,7 +263,7 @@ function cardHtml(t) {
   const mark = custodyException(t, state) ? custodyChipHtml(t.id, false) : '';
   const meta = metaHtml(t, state);
   const open = actsOpen === t.id;
-  return '<div class="tk-card tk-s-' + state + (state === 'done' ? ' done' : '') + (open ? ' tk-acts-open' : '') + '" data-id="' + escAttr(t.id) + '" data-status="' + st.badge.cls + '" role="listitem">' +
+  return '<div class="tk-card tk-s-' + state + (state === 'done' ? ' done' : '') + (open ? ' tk-acts-open' : '') + (isLit(t.id) ? ' inbox-lit' : '') + '" data-id="' + escAttr(t.id) + '" data-status="' + st.badge.cls + '" role="listitem">' +
       '<div class="tk-top">' +
         '<div class="tk-title">' + titleHtml(t) + '</div>' +
         '<button type="button" class="tk-more" data-action="task-more" data-id="' + escAttr(t.id) + '" aria-expanded="' + open + '" aria-label="更多操作" title="更多操作">⋯</button>' +
@@ -253,10 +278,17 @@ function cardHtml(t) {
     '</div>';
 }
 
-// tasksHtml renders a GET /api/tasks answer.
+// countHeadHtml is a left column group's heading: its name and, when it
+// holds any, how many (UX review 1: what the column holds reads at a glance;
+// the empty state says none).
+export const countHeadHtml = (label, n) => esc(label) + (n ? ' <span class="tk-n">' + n + '</span>' : '');
+
+// tasksHtml renders a GET /api/tasks answer; the heading counts the tasks in
+// progress, the phone's folded block's number (one number for 任务 on the
+// screen, §15.8 F1), its parts each their own.
 export function tasksHtml(data) {
   const tasks = (data && Array.isArray(data.tasks)) ? data.tasks : [];
-  let html = '<h2 class="pl-group-h tk-head">任务</h2>';
+  let html = '<h2 class="pl-group-h tk-head">' + countHeadHtml('任务', tasks.filter(inProgress).length) + '</h2>';
   if (!tasks.length) return html + '<div class="pl-empty">还没有任务<span>Planner 派出的会话和它答应你的事会列在这里</span></div>';
   const head = (label, n) => label + ' <span class="tk-n">' + n + '</span>';
   for (const s of SECTIONS) {
@@ -299,17 +331,48 @@ function paint(el, data) {
   }
 }
 
-async function render(el) {
-  try {
-    const data = await fetchJSON(plannerAPI(NZ_CONTRACT.API.tasks));
+// fetchTasks reads GET /api/tasks into byId and last and tells the readers
+// on nzBus. A read in flight answers every caller that takes it (fresh
+// false); a fresh caller (a change just posted, a turn just ended) gets a
+// read that starts after it asked, one for all of them. A read for the
+// Planner's node shown before is dropped and read again for the one shown.
+function fetchTasks(fresh = false) {
+  if (load && load.gen === gen) {
+    if (!fresh) return load.p;
+    if (!load.next) load.next = load.p.catch(() => null).then(() => fetchTasks());
+    return load.next;
+  }
+  const g = gen;
+  const p = (async () => {
+    let data;
+    try {
+      data = await fetchJSON(plannerAPI(NZ_CONTRACT.API.tasks));
+    } catch (e) {
+      if (load && load.p === p) load = null;
+      if (g !== gen) return fetchTasks();
+      failedAt = Date.now();
+      throw e;
+    }
+    if (load && load.p === p) load = null;
+    if (g !== gen) return fetchTasks();
     const list = (data && Array.isArray(data.tasks)) ? data.tasks : [];
     byId = new Map(list.map((t) => [t.id, t]));
     if (actsOpen && !byId.has(actsOpen)) actsOpen = '';
     last = data;
+    readAt = Date.now();
+    failedAt = 0;
     nzBus.dispatchEvent(new CustomEvent('tasks:changed'));
     // The Planner conversation's cards name tasks by these titles.
     nzBus.dispatchEvent(new CustomEvent('tasks:list', { detail: data }));
-    paint(el, data);
+    return data;
+  })();
+  load = { gen: g, p, next: null };
+  return p;
+}
+
+async function render(el, read) {
+  try {
+    paint(el, await read);
   } catch {
     el._tkHtml = '';
     el.innerHTML = '<h2 class="pl-group-h tk-head">任务</h2><div class="pl-empty">加载失败</div>';
@@ -321,17 +384,17 @@ export function mountTasks(el) {
   el.classList.add('tk-group');
   mounts.add(el);
   refreshCustody();
-  return render(el).then(armLive);
+  return render(el, fetchTasks(true)).then(armLive);
 }
 
-// refreshTasks re-renders every mounted group.
+// refreshTasks re-renders every mounted group from a read that starts after
+// the call.
 export function refreshTasks() {
   refreshCustody();
+  for (const el of mounts) if (!el.isConnected) mounts.delete(el);
+  const read = mounts.size ? fetchTasks(true) : null;
   const out = [];
-  for (const el of mounts) {
-    if (!el.isConnected) { mounts.delete(el); continue; }
-    out.push(render(el));
-  }
+  for (const el of mounts) out.push(render(el, read));
   return Promise.all(out).then(armLive);
 }
 
@@ -356,15 +419,104 @@ function armLive() {
 }
 
 let stateTimer = 0;
+// stateHeader is whether a frame of the burst was the header's session's: a
+// later frame of another task in the same burst keeps the header's read.
+let stateHeader = false;
 // A dispatched session starting or ending a turn refetches the list, once
-// for a burst; off screen the next showing refetches anyway.
+// for a burst, for the page and for that session's own header; off screen
+// the next showing refetches anyway.
 nzBus.addEventListener('session:state', (e) => {
   const msg = e.detail;
-  if (!msg || typeof msg.key !== 'string' || !msg.key.startsWith('task:') || !mounts.size) return;
+  if (!msg || typeof msg.key !== 'string' || !msg.key.startsWith('task:')) return;
+  const header = headerTaskKey() === msg.key;
+  if (!mounts.size && !header) return;
+  stateHeader = stateHeader || header;
   clearTimeout(stateTimer);
-  stateTimer = setTimeout(() => { stateTimer = 0; if (shown()) refreshTasks(); }, STATE_DEBOUNCE_MS);
+  stateTimer = setTimeout(() => {
+    const forHeader = stateHeader && !!headerTaskKey();
+    stateTimer = 0;
+    stateHeader = false;
+    if (shown()) refreshTasks();
+    else if (forHeader && !document.hidden) ensureTasks(0);
+  }, STATE_DEBOUNCE_MS);
 });
-document.addEventListener('visibilitychange', () => { if (!document.hidden && mounts.size && last) refreshTasks(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  if (mounts.size && last) refreshTasks();
+  else if (headerTaskKey()) ensureTasks();
+});
+
+// ---- a dispatched session's header (the 会话 view) ----
+
+// taskOf is key's task as last read, or null.
+export const taskOf = (key) => (key && byId.get(key)) || null;
+
+// ensureTasks reads the list when the last read is older than maxAge (ms),
+// with the Planner page mounted or not; 0 asks for a read that starts now.
+// While the route fails it is tried at most every RETRY_MS. It resolves
+// once the list is read (or not).
+export function ensureTasks(maxAge = FRESH_MS) {
+  const fresh = maxAge <= 0;
+  if (!fresh && load && load.gen === gen) return load.p.then(() => last, () => null);
+  const now = Date.now();
+  if ((!fresh && now - readAt <= maxAge) || (failedAt && now - failedAt < RETRY_MS)) return Promise.resolve(last);
+  return fetchTasks(fresh).then(() => { repaintAll(); return last; }, () => null);
+}
+
+// headerTaskKey is the session the 会话 view shows when it is a session
+// dispatched by the Planner shown (task keys are that node's), else ''.
+function headerTaskKey() {
+  const key = selection.key || '';
+  return key.startsWith('task:') && (selection.node || 'local') === plannerHost.node ? key : '';
+}
+
+// taskHeaderHtml is #header-task for task t: its card's badge, and the link
+// to the card on the Planner page.
+function taskHeaderHtml(t) {
+  const st = taskStatus(t);
+  const text = cut(st.text);
+  return '<span class="tk-badge tk-b-' + st.badge.cls + '" title="' + escAttr('任务状态：' + st.badge.label + (text ? '\n' + text : '')) + '">' + esc(st.badge.label) + '</span>' +
+    '<button type="button" class="pl-link tk-reveal" data-action="task-reveal" data-id="' + escAttr(t.id) + '">在 Planner 中查看</button>';
+}
+
+// paintTaskHeader fills the session header's #header-task for the selected
+// session; renderMainShell builds it empty, and :empty collapses it for
+// every session the list does not hold.
+export function paintTaskHeader() {
+  const el = document.getElementById('header-task');
+  if (!el) return;
+  const key = headerTaskKey();
+  const t = key ? taskOf(key) : null;
+  const html = t ? taskHeaderHtml(t) : '';
+  if (el.innerHTML !== html) el.innerHTML = html;
+  if (key) ensureTasks();
+}
+
+// revealTask brings task id's card on the Planner page into view and lights
+// it, unfolding 已完成 when it is there; the page may still be painting the
+// list, so it looks again for a while.
+function revealTask(id) {
+  const sel = '#pl-task .tk-card[data-id="' + CSS.escape(id) + '"]';
+  let tries = 0;
+  const look = () => {
+    const el = document.querySelector(sel);
+    const fold = el && el.closest('details.tk-sec-done');
+    if (fold && !fold.open) fold.open = true;
+    if (el && el.getClientRects().length) {
+      el.scrollIntoView({ block: 'center' });
+      light(el, sel, id);
+      return;
+    }
+    if (++tries < REVEAL_TRIES) setTimeout(look, REVEAL_MS);
+  };
+  look();
+}
+
+nzBus.addEventListener('tasks:changed', paintTaskHeader);
+nzBus.addEventListener('session:select', paintTaskHeader);
+// Another node's Planner: its tasks, read afresh; a read in flight for the
+// node before is dropped (fetchTasks).
+nzBus.addEventListener('planner:node', () => { gen++; readAt = 0; failedAt = 0; paintTaskHeader(); });
 
 // post sends a task change from control el, then refreshes every group.
 async function post(el, url, body, failed) {
@@ -391,7 +543,13 @@ function repaintAll() {
   for (const el of mounts) if (el.isConnected) paint(el, last);
 }
 
-nzBus.addEventListener('inbox:count', () => { refreshTasks(); });
+// A health change (等你, 失败, 停滞) is no turn's edge: the header of a
+// dispatched session reads it here too, the page not mounted (mounted, the
+// page's read repaints it).
+nzBus.addEventListener('inbox:count', () => {
+  refreshTasks();
+  if (!mounts.size && headerTaskKey()) ensureTasks(0);
+});
 nzBus.addEventListener('custody:changed', repaintAll);
 
 registerActions({
@@ -406,4 +564,13 @@ registerActions({
   'task-doing': (el) => setState(el, el.dataset.id, 'doing'),
   'task-reopen': (el) => setState(el, el.dataset.id, 'doing'),
   'task-stop': (el) => el.dataset.id && post(el, plannerAPI(NZ_CONTRACT.API.tasks_stop), { id: el.dataset.id }, '没有停下：'),
+  // The Planner page opens on the card; planner_view.js unfolds the phone's
+  // left block it is in ('tasks:reveal').
+  'task-reveal': (el) => {
+    const id = el.dataset.id || '';
+    if (!id) return;
+    if (shell.setActivityView) shell.setActivityView('planner');
+    nzBus.dispatchEvent(new CustomEvent('tasks:reveal', { detail: { id } }));
+    revealTask(id);
+  },
 });

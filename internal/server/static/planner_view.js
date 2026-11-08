@@ -48,7 +48,7 @@ import { followWorkbenchSubject, noteWorkbenchEvent } from './workbench_panes.js
 import { decisionActsHtml, decorateEvents, noteWorkspaces, paintSessionCards, refreshHealth, unitName, webLinkHtml, workspaceName } from './planner_cards.js';
 import { clearAck, clearPending, closePlannerSession, mountComposer, noteAck, notePlannerStatus, showPlannerLeft } from './planner_chat.js';
 import { onSessionsApplied } from './session_list.js';
-import { inProgress, mountTasks, refreshTasks } from './tasks.js';
+import { countHeadHtml, inProgress, mountTasks, refreshTasks } from './tasks.js';
 import { initPlannerResize } from './planner_resize.js';
 import { custody, refreshCustody, setCustodyPaused } from './custody.js';
 import { workbench } from './workbench.js';
@@ -238,6 +238,18 @@ function waitListHtml() {
   return html || '<div class="pl-empty">没有等你的事</div>';
 }
 
+// waitingItems are the items that wait on you to act, as the Home's summary
+// (home_attn.js) lists them: the left column's order, each with its ref on
+// the page and the listed session it is about (key '' for none, the
+// Planner's own among them).
+export function waitingItems() {
+  return actionItems().map((it) => {
+    const t = unitTarget(it.unit, it.node);
+    return { ref: itemRef(it), id: it.id, kind: it.kind, label: KIND_LABEL[it.kind], title: it.title || '', created: it.created,
+      key: t && t.key !== PLANNER_KEY ? t.key : '', node: t ? t.node : '' };
+  });
+}
+
 // actionListHtml is the cards of the items that wait on you to act, for the
 // left column and the 会话 sidebar's bar.
 export function actionListHtml() {
@@ -257,11 +269,20 @@ function noteItems() {
   nzBus.dispatchEvent(new CustomEvent('inbox:items'));
 }
 
+// paintWaitHead writes 等你's heading with the count paintLeftToggle gives.
+function paintWaitHead() {
+  const el = $('pl-wait-h');
+  if (!el) return;
+  const html = countHeadHtml('等你', actionItems().length);
+  if (el.innerHTML !== html) el.innerHTML = html;
+}
+
 function paintWaiting() {
   const box = $('pl-wait');
   if (!box) return;
   box.innerHTML = waitListHtml();
   paintInlineCards(sortedOpen());
+  paintWaitHead();
   paintLeftToggle();
   revealWaiting();
 }
@@ -1042,6 +1063,9 @@ nzBus.addEventListener('tasks:list', (e) => {
   pl.tasksActive = tasks.filter(inProgress).length;
   paintLeftToggle();
 });
+// 在 Planner 中查看 from a dispatched session's header (tasks.js) opens the
+// page on its card: on a phone that is in the left block, unfolded.
+nzBus.addEventListener('tasks:reveal', () => showPlannerLeft(true));
 // The health table names the units no list holds.
 nzBus.addEventListener('planner:health', () => { if (pl.host) paintWaiting(); });
 nzBus.addEventListener('custody:changed', () => { if (pl.host) paintTools(); });

@@ -823,6 +823,10 @@ button.custody-chip:disabled{opacity:.6;cursor:default}
 .main-header .detail:has(.detail-pr:not(:empty)) .detail-custody,
 .main-header .detail:has(.detail-effort:not(:empty)) .detail-custody{margin-right:0}
 .main-header .detail-custody .custody-chip{min-width:0}
+/* A dispatched session's task badge (tasks.js paintTaskHeader), the task
+   card's own, and the link to the card. */
+.main-header .detail-task{display:inline-flex;align-items:center;gap:8px;flex-shrink:0;white-space:nowrap;font-size:var(--nz-fs-xs)}
+.main-header .detail-task:empty{display:none}
 .pl-tool-hint{font-size:var(--nz-fs-2xs);color:var(--nz-text-faint)}
 .gw-note-time{font-size:var(--nz-fs-xs);color:var(--nz-text-faint)}
 .refusal-tag{display:inline-block;font-size:var(--nz-fs-2xs);padding:1px 8px;border-radius:var(--nz-radius-pill);border:1px solid var(--nz-warn);color:var(--nz-warn)}
