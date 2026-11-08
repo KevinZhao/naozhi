@@ -35,7 +35,7 @@ import { esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz
 import { isDiscoveredKey, sid } from './session_ident.js';
 import { isMobile } from './utilities.js';
 import { wsm } from './ws_manager.js';
-import { nodeAPI, plannerAPI, plannerHost } from './planner_host.js';
+import { isLocalNode, nodeAPI, plannerAPI, plannerHost } from './planner_host.js';
 
 // VIEW_RENEW_MS renews a viewing report: the gateway lets one lapse after a
 // minute (custody.ViewFor). VIEW_CHECK_MS is how often the tab looks again
@@ -268,31 +268,44 @@ async function toggleWatch(el) {
 
 // ---- you are at the session ----
 
-// viewedKey is the session this tab shows you now, '' when it shows none or
-// you are not at the tab: the session view's (the session list on a phone
-// shows none), or the one opened on the Planner page.
+// viewedKey is this node's session this tab shows you now, '' when it shows
+// none, another node's, or you are not at the tab: the session view's (the
+// session list on a phone shows none), or the one opened on the Planner
+// page (shownSession).
 function viewedKey() {
   if (custody.enabled !== true) return '';
-  if (document.visibilityState !== 'visible' || !document.hasFocus()) return '';
-  let key = '';
-  if (ui.activeView === 'chat') {
-    if (isMobile() && !document.body.classList.contains('mobile-chat-view')) return '';
-    if (selection.node && selection.node !== 'local') return '';
-    key = selection.key || '';
-  } else if (ui.activeView === 'planner') {
-    key = document.getElementById('pl-sess')?.dataset.key || '';
-  }
+  const s = shownSession();
+  const key = s && isLocalNode(s.node) ? s.key : '';
   return key && !isDiscoveredKey(key) ? key : '';
 }
 
-// selectionShown reports whether this tab shows you the 会话 view's
-// selected session now, as viewedKey judges it, whatever its node: another
-// node's gets no viewing frame, so its gateway cannot tell (tasks.js tells
-// it of the results you saw).
-export function selectionShown() {
-  if (document.visibilityState !== 'visible' || !document.hasFocus()) return false;
-  if (ui.activeView !== 'chat' || !selection.key) return false;
-  return !(isMobile() && !document.body.classList.contains('mobile-chat-view'));
+// shownSession is the session this tab shows you now, {key, node}, null
+// when it shows none or you are not at the tab: the 会话 view's selection
+// (the session list on a phone shows none), or the one open on the Planner
+// page beside its conversation, of the node whose Planner it shows. One
+// judgment for both ends: viewedKey's viewing frame tells this node's
+// gateway, and another node's, which no frame reaches, hears of the
+// results you saw from tasks.js (sessionShown).
+export function shownSession() {
+  if (document.visibilityState !== 'visible' || !document.hasFocus()) return null;
+  if (ui.activeView === 'chat') {
+    if (!selection.key || isMobile() && !document.body.classList.contains('mobile-chat-view')) return null;
+    return { key: selection.key, node: selection.node || 'local' };
+  }
+  if (ui.activeView === 'planner') {
+    const pane = document.getElementById('pl-sess');
+    const key = pane && !pane.hidden ? pane.dataset.key || '' : '';
+    const node = (pane && pane.dataset.node) || 'local';
+    return key && node === plannerHost.node ? { key, node } : null;
+  }
+  return null;
+}
+
+// sessionShown reports whether this tab shows you session key of node now
+// (shownSession).
+export function sessionShown(key, node) {
+  const s = shownSession();
+  return !!s && s.key === key && s.node === (node || 'local');
 }
 
 // reportViewing sends a viewing frame when what this tab shows changed, or
