@@ -84,6 +84,35 @@ type Meta struct {
 	Chain *Chain `json:"chain,omitempty"`
 	// Retry is custody's answer to the session's last failure.
 	Retry *Retry `json:"retry,omitempty"`
+	// Reap is set while the session, done, is put away (planner/reap): what
+	// resuming it needs and what became of its worktrees. nil once reopened.
+	Reap *Reap `json:"reap,omitempty"`
+}
+
+// Reap is a done task's session put away: when, on whose mark (By, Why),
+// the session to resume, and the worktrees it worked in.
+type Reap struct {
+	At         time.Time  `json:"at"`
+	By         string     `json:"by,omitempty"`
+	Why        string     `json:"why,omitempty"`
+	SessionID  string     `json:"session_id,omitempty"`
+	Workspace  string     `json:"workspace,omitempty"`
+	LastPrompt string     `json:"last_prompt,omitempty"`
+	Worktrees  []Worktree `json:"worktrees,omitempty"`
+}
+
+// Worktree is one git worktree a put-away session worked in: its directory,
+// the repository's common git directory and the branch checked out, its
+// State (planner/reap's) and why, and the reason the user was last told it
+// stays (so they are told once per reason).
+type Worktree struct {
+	Dir      string    `json:"dir"`
+	GitDir   string    `json:"git_dir"`
+	Branch   string    `json:"branch,omitempty"`
+	State    string    `json:"state"`
+	Why      string    `json:"why,omitempty"`
+	At       time.Time `json:"at"`
+	Notified string    `json:"notified,omitempty"`
 }
 
 // Custody is a session's custody switch: on or off, set by whom (auto, user

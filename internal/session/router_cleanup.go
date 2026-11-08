@@ -29,6 +29,12 @@ type removeSnapshot struct {
 	workspace        string
 	retiredSessionID string
 	retiring         bool
+	// keepHistory leaves the event log and attachment refs in place: an
+	// Archive, whose key is resumed later with its transcript.
+	keepHistory bool
+	// chainIDs and lastPrompt are what a resume of an archived key needs.
+	chainIDs   []string
+	lastPrompt string
 }
 
 // unregisterAndSnapshot runs the fast, transactional half of a session
@@ -38,7 +44,7 @@ type removeSnapshot struct {
 // one transaction, so two concurrent Remove/RemoveAsync calls cannot both
 // capture a non-nil proc. The same transaction raises key's retire barrier,
 // which finishRemoveCleanup lowers once the event log is dropped.
-func (r *Router) unregisterAndSnapshot(key string) (snap removeSnapshot, ok bool) {
+func (r *Router) unregisterAndSnapshot(key string, keepHistory bool) (snap removeSnapshot, ok bool) {
 	r.ss.Update(func(tx sessTx) {
 		var s *ManagedSession
 		if s, ok = tx.Lookup(key); !ok {
@@ -50,7 +56,11 @@ func (r *Router) unregisterAndSnapshot(key string) (snap removeSnapshot, ok bool
 		// session is gone from the session table, and OnSessionRemoved needs the
 		// root while notifyKeyRetired needs the UUID to stamp retired_at.
 		snap = removeSnapshot{proc: proc, workspace: s.Workspace(), retiredSessionID: s.SessionID(),
-			retiring: r.hist.beginRetire(key, s)}
+			retiring: r.hist.beginRetire(key, s), keepHistory: keepHistory}
+		if keepHistory {
+			snap.chainIDs = s.SnapshotChainIDs()
+			snap.lastPrompt = loadAtomicString(&s.lastPrompt)
+		}
 		r.unregisterSession(tx, key, s, false)
 		if wasActive {
 			if tx.AddActive(-1) < 0 {
@@ -117,7 +127,11 @@ func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 	// table, so the wait predicate may now pass.
 	r.ss.Update(func(tx sessTx) { tx.Broadcast() })
 
-	logSessionLifecycle("removed", key)
+	if snap.keepHistory {
+		logSessionLifecycle("archived", key)
+	} else {
+		logSessionLifecycle("removed", key)
+	}
 	r.notifyChange()
 }
 
@@ -125,7 +139,7 @@ func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 // until the full teardown completes (Shutdown, Cleanup, synchronous tests).
 // Dashboard deletes use RemoveAsync to avoid holding the handler ~15s.
 func (r *Router) Remove(key string) bool {
-	snap, ok := r.unregisterAndSnapshot(key)
+	snap, ok := r.unregisterAndSnapshot(key, false)
 	if !ok {
 		return false
 	}
@@ -144,7 +158,7 @@ func (r *Router) Remove(key string) bool {
 // single-shot + bounded-leak contract); each self-terminates in ≤15s. removeWg
 // exists ONLY so tests can wait for the teardown before asserting.
 func (r *Router) RemoveAsync(key string) bool {
-	snap, ok := r.unregisterAndSnapshot(key)
+	snap, ok := r.unregisterAndSnapshot(key, false)
 	if !ok {
 		return false
 	}
@@ -163,6 +177,33 @@ func (r *Router) RemoveAsync(key string) bool {
 		r.finishRemoveCleanup(key, snap)
 	}()
 	return true
+}
+
+// ArchivedSession is what Archive took out of the table: enough to put the
+// session back with RegisterForResume and resume it.
+type ArchivedSession struct {
+	SessionID  string
+	Workspace  string
+	LastPrompt string
+	// ChainIDs are the session IDs the conversation went through, oldest
+	// first (the transcripts its worktrees are read from).
+	ChainIDs []string
+}
+
+// Archive takes key out of the table and closes its process, as Remove
+// does, but keeps its event log and attachment references: the session is
+// put away (the history popover lists it) to be resumed later under the same
+// key, its transcript whole (planner/reap). Blocks for the teardown, as
+// Remove. False when key is absent.
+func (r *Router) Archive(key string) (ArchivedSession, bool) {
+	snap, ok := r.unregisterAndSnapshot(key, true)
+	if !ok {
+		return ArchivedSession{}, false
+	}
+	r.notifyKeyRetired(key, snap.retiredSessionID)
+	r.finishRemoveCleanup(key, snap)
+	return ArchivedSession{SessionID: snap.retiredSessionID, Workspace: snap.workspace,
+		LastPrompt: snap.lastPrompt, ChainIDs: snap.chainIDs}, true
 }
 
 // StopSession closes key's CLI process and keeps the session, dead: its

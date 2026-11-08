@@ -53,11 +53,14 @@ const (
 	KindDialog Kind = "dialog"
 	// KindCustody is what custody did on a session (planner/custody).
 	KindCustody Kind = "custody"
+	// KindReap is a done task's session put away or its worktree removed
+	// (planner/reap).
+	KindReap Kind = "reap"
 )
 
 func (k Kind) known() bool {
 	switch k {
-	case KindHealth, KindNotify, KindBrief, KindHeartbeat, KindActivity, KindDialog, KindCustody:
+	case KindHealth, KindNotify, KindBrief, KindHeartbeat, KindActivity, KindDialog, KindCustody, KindReap:
 		return true
 	}
 	return false

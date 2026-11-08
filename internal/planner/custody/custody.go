@@ -565,6 +565,14 @@ func (e *Engine) pruneLocked() bool {
 	return left
 }
 
+// Nearby reports whether the user is at key: viewing it, or sent it a
+// message within NearbyFor (planner/reap waits on it too).
+func (e *Engine) Nearby(key string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.nearbyLocked(key)
+}
+
 // nearbyLocked reports whether the user is at key: viewing it, or sent it a
 // message within NearbyFor.
 func (e *Engine) nearbyLocked(key string) bool {
