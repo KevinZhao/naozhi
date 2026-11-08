@@ -96,10 +96,13 @@ type Config struct {
 }
 
 // file is what the Writer knows of a digest on disk: when it was written
-// and its body's hash, to skip a write that would change nothing.
+// and its body's hash, to skip a write that would change nothing, and the
+// time of the report it shows (zero for none, or not known since a
+// restart until it is written again).
 type file struct {
 	updated time.Time
 	body    [sha256.Size]byte
+	report  time.Time
 }
 
 // Writer writes the digests on one goroutine (Run), each session's at most
@@ -110,8 +113,11 @@ type Writer struct {
 	cfg  Config
 	poke chan struct{}
 
-	mu     sync.Mutex
-	dirty  map[string]struct{}
+	mu    sync.Mutex
+	dirty map[string]struct{}
+	// urgent are the dirty keys to write regardless of MinGap: a report's
+	// line waits on its digest.
+	urgent map[string]struct{}
 	files  map[string]file
 	states map[string]State
 	// held are the state files New could not read (too big, misnamed, not
@@ -140,7 +146,7 @@ func New(cfg Config) *Writer {
 	}
 	w := &Writer{
 		cfg: cfg, poke: make(chan struct{}, 1),
-		dirty: map[string]struct{}{}, files: map[string]file{}, states: map[string]State{}, held: map[string]bool{},
+		dirty: map[string]struct{}{}, urgent: map[string]struct{}{}, files: map[string]file{}, states: map[string]State{}, held: map[string]bool{},
 		last: map[string]time.Time{}, due: map[string]time.Time{},
 	}
 	w.load()
@@ -225,12 +231,17 @@ func parseHeader(data []byte) (key string, updated time.Time, body []byte, ok bo
 
 // Touch asks for key's digest to be written. Never blocks; safe on a read
 // loop.
-func (w *Writer) Touch(key string) {
+func (w *Writer) Touch(key string) { w.touch(key, false) }
+
+func (w *Writer) touch(key string, urgent bool) {
 	if w == nil || key == "" {
 		return
 	}
 	w.mu.Lock()
 	w.dirty[key] = struct{}{}
+	if urgent {
+		w.urgent[key] = struct{}{}
+	}
 	w.mu.Unlock()
 	select {
 	case w.poke <- struct{}{}:
@@ -252,14 +263,16 @@ func (w *Writer) Path(key string) string {
 	return filepath.Join(w.cfg.Dir, FileName(key))
 }
 
-// File is where key's digest is written, whether or not it is yet; "" when
-// the Writer writes none. A receipt names it as the digest is being
-// written.
-func (w *Writer) File(key string) string {
-	if w == nil || w.cfg.Dir == "" {
-		return ""
+// ReportShown is the time (Report.At) of the report key's digest on disk
+// shows, zero for none: a digest written since the report came may still
+// have been rendered from the state of before it.
+func (w *Writer) ReportShown(key string) time.Time {
+	if w == nil {
+		return time.Time{}
 	}
-	return filepath.Join(w.cfg.Dir, FileName(key))
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.files[key].report
 }
 
 // Read is key's digest as on disk and when it was written; false when it
@@ -310,7 +323,8 @@ func (w *Writer) SetGoal(key, goal string) error {
 }
 
 // SetReport records key's latest report and asks for the digest to be
-// written.
+// written at once, past MinGap: the report's line to the Planner points at
+// the digest and waits for it to show the report (ReportShown).
 func (w *Writer) SetReport(key string, r Report) error {
 	if w == nil {
 		return nil
@@ -318,7 +332,7 @@ func (w *Writer) SetReport(key string, r Report) error {
 	r.Summary = textutil.TruncateRunes(oneLine(r.Summary), SummaryRunes)
 	r.Text = textutil.TruncateRunes(strings.TrimSpace(r.Text), ReportRunes)
 	_, err := w.update(key, func(st *State) bool { st.Report = &r; return true })
-	w.Touch(key)
+	w.touch(key, true)
 	return err
 }
 
@@ -477,12 +491,13 @@ func (w *Writer) Run(ctx context.Context) {
 // due by now; it returns when the next one is due (zero for none).
 func (w *Writer) step(now time.Time) time.Time {
 	w.mu.Lock()
-	dirty := w.dirty
-	w.dirty = map[string]struct{}{}
+	dirty, urgent := w.dirty, w.urgent
+	w.dirty, w.urgent = map[string]struct{}{}, map[string]struct{}{}
 	w.mu.Unlock()
 	for key := range dirty {
 		at := now
-		if last, ok := w.last[key]; ok && now.Sub(last) < w.cfg.MinGap {
+		_, asap := urgent[key]
+		if last, ok := w.last[key]; ok && !asap && now.Sub(last) < w.cfg.MinGap {
 			at = last.Add(w.cfg.MinGap)
 		}
 		if old, ok := w.due[key]; !ok || at.Before(old) {
@@ -525,14 +540,22 @@ func (w *Writer) write(key string, now time.Time) bool {
 	f.Key = key
 	st := w.settle(key, f)
 	f.Goal, f.Replies, f.Report = st.Goal, st.Replies, st.Report
+	var report time.Time
+	if st.Report != nil {
+		report = st.Report.At
+	}
 	body := renderBody(f)
 	sum := sha256.Sum256(body)
 	w.mu.Lock()
 	old, had := w.files[key]
-	w.mu.Unlock()
 	if had && old.body == sum {
+		// The file on disk shows what this write would.
+		old.report = report
+		w.files[key] = old
+		w.mu.Unlock()
 		return false
 	}
+	w.mu.Unlock()
 	f.Updated = now
 	var b bytes.Buffer
 	writeHeader(&b, key, now)
@@ -546,7 +569,7 @@ func (w *Writer) write(key string, now time.Time) bool {
 		return false
 	}
 	w.mu.Lock()
-	w.files[key] = file{updated: now, body: sum}
+	w.files[key] = file{updated: now, body: sum, report: report}
 	w.mu.Unlock()
 	if w.cfg.Written != nil {
 		w.cfg.Written(key)

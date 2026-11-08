@@ -181,10 +181,6 @@ func TestNewRebuildsPath(t *testing.T) {
 	if p := r.w.Path(key); p != "" {
 		t.Fatalf("Path before a write = %q", p)
 	}
-	// File names it before it is written, Path only after.
-	if p := r.w.File(key); p != filepath.Join(r.dir, FileName(key)) {
-		t.Fatalf("File = %q", p)
-	}
 	if err := r.w.SetGoal(key, "目标一\n\n细节"); err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +307,7 @@ func TestNilWriter(t *testing.T) {
 	w.Touch("k")
 	w.Sweep()
 	w.Run(context.Background())
-	if w.Path("k") != "" || w.File("k") != "" {
+	if w.Path("k") != "" || !w.ReportShown("k").IsZero() {
 		t.Fatal("nil Path")
 	}
 	if _, ok := w.State("k"); ok {
@@ -514,4 +510,44 @@ func TestTouchDuringSave(t *testing.T) {
 		t.Fatal("Touch waited on a save")
 	}
 	r.w.saveMu.Unlock()
+}
+
+// TestReportShown: a digest written before the report came does not show
+// it; SetReport writes at once, past MinGap, and from then the digest shows
+// it. A rewrite that would change nothing still counts as showing what the
+// file holds, so a restart learns it again.
+func TestReportShown(t *testing.T) {
+	r := newRig(t)
+	const key = "task:a"
+	r.w.Touch(key)
+	r.w.step(r.now)
+	if r.writes() != 1 || !r.w.ReportShown(key).IsZero() {
+		t.Fatalf("writes = %d shown = %v, want one write showing no report", r.writes(), r.w.ReportShown(key))
+	}
+	r.now = r.now.Add(10 * time.Second)
+	rep := Report{State: "done", Summary: "写好了", Text: "E2E-BODY", At: r.now}
+	if err := r.w.SetReport(key, rep); err != nil {
+		t.Fatal(err)
+	}
+	if next := r.w.step(r.now); !next.IsZero() || r.writes() != 2 {
+		t.Fatalf("next = %v writes = %d, want the report written at once", next, r.writes())
+	}
+	if got := r.w.ReportShown(key); !got.Equal(rep.At) || !strings.Contains(r.read(t, key), "E2E-BODY") {
+		t.Fatalf("shown = %v, want %v; digest:\n%s", got, rep.At, r.read(t, key))
+	}
+	// A plain Touch within MinGap of that write still waits for it.
+	r.w.Touch(key)
+	if next := r.w.step(r.now); next.IsZero() {
+		t.Error("a Touch after the report's write skipped MinGap")
+	}
+
+	w2 := New(r.config())
+	if !w2.ReportShown(key).IsZero() {
+		t.Error("a restart knows the report shown before writing")
+	}
+	w2.Touch(key)
+	w2.step(r.now.Add(time.Hour))
+	if got := w2.ReportShown(key); !got.Equal(rep.At) {
+		t.Errorf("after an unchanged rewrite shown = %v, want %v", got, rep.At)
+	}
 }

@@ -415,14 +415,33 @@ func (n *Notifier) AddDaily(it Item) (Item, bool) {
 
 // DismissSource closes source's open item for the user, if there is one:
 // what it reminded of was settled elsewhere.
-func (n *Notifier) DismissSource(source string) {
+func (n *Notifier) DismissSource(source string) { n.CloseSource(source, ClosedByUser) }
+
+// CloseSource closes source's open item, if there is one, as closed by by:
+// ClosedByAuto when the condition that opened it cleared without the user.
+func (n *Notifier) CloseSource(source string, by Closer) {
 	n.mu.Lock()
 	i := slices.IndexFunc(n.items, func(it Item) bool { return it.State == StateOpen && it.Source == source })
 	if i < 0 || n.deciding[n.items[i].ID] {
 		n.mu.Unlock()
 		return
 	}
-	fx := n.changedLocked(n.closeLocked(i, ClosedByUser, ""))
+	fx := n.changedLocked(n.closeLocked(i, by, ""))
+	n.mu.Unlock()
+	n.apply(fx)
+}
+
+// Retitle sets the title of source's open item, if there is one, without
+// pushing it again: the same question asked anew.
+func (n *Notifier) Retitle(source, title string) {
+	n.mu.Lock()
+	i := slices.IndexFunc(n.items, func(it Item) bool { return it.State == StateOpen && it.Source == source })
+	if i < 0 || n.items[i].Title == title {
+		n.mu.Unlock()
+		return
+	}
+	n.items[i].Title = title
+	fx := n.changedLocked()
 	n.mu.Unlock()
 	n.apply(fx)
 }

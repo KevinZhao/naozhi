@@ -170,12 +170,15 @@ type Retry struct {
 
 // Turn is a dispatched session's turn end. While Check is set the turn is
 // still to be checked for a report to the Planner, one reaching it after
-// From (the previous turn's end); Text is its reply, cut short.
+// From (the previous turn's end); Text is its reply, cut short, and
+// ReportErr why the report block it ended with does not parse ("" for
+// none), which the receipt of a turn left unreported says.
 type Turn struct {
-	Ended time.Time `json:"ended"`
-	Check bool      `json:"check,omitempty"`
-	From  time.Time `json:"from,omitzero"`
-	Text  string    `json:"text,omitempty"`
+	Ended     time.Time `json:"ended"`
+	Check     bool      `json:"check,omitempty"`
+	From      time.Time `json:"from,omitzero"`
+	Text      string    `json:"text,omitempty"`
+	ReportErr string    `json:"report_err,omitempty"`
 }
 
 // Mark is a task state set by someone: planner/task's State and By values.

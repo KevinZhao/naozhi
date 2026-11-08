@@ -284,9 +284,9 @@ func (t TaskSpawner) Spawn(ctx context.Context, key string, s action.Spawn) erro
 		return spawnError(err, key, t.Router.MaxProcs())
 	}
 	t.Router.SetUserLabel(key, s.Title)
-	// The goal is the dispatch's, else the first sentence of the Planner's
-	// text of the message (after the envelope, before the gateway's note);
-	// the session's events lose the message later.
+	// The goal is the dispatch's, else the first paragraph of the
+	// Planner's text of the message (after the envelope, before the
+	// gateway's note); the session's events lose the message later.
 	if err := t.Digests.SetGoal(key, dispatchGoal(s)); err != nil {
 		slog.Warn("planner dispatch: goal not kept", "key", key, "err", err)
 	}
@@ -294,11 +294,12 @@ func (t TaskSpawner) Spawn(ctx context.Context, key string, s action.Spawn) erro
 	return err
 }
 
-// dispatchGoal is the goal a dispatch's digest keeps (D103): its goal, else
-// the first sentence of the first paragraph of the Planner's own text of
-// the message.
+// dispatchGoal is the goal a dispatch's digest keeps (D103, brief default
+// 3): its goal, else the first paragraph (SetGoal's digest.Goal) of the
+// Planner's own text of the message. The dispatch card's one line is the
+// first sentence of it, taken where it is shown.
 func dispatchGoal(s action.Spawn) string {
-	return cmp.Or(s.Goal, digest.FirstSentence(digest.Goal(action.Brief(s.Message))))
+	return cmp.Or(s.Goal, action.Brief(s.Message))
 }
 
 // spawnError is err of a dispatched session's start as usermsg says it, a

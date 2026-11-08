@@ -305,7 +305,8 @@ func unitLine(in snapshotInput, u health.Unit) (line, at, tail string) {
 	}
 	if in.Conclusion != nil {
 		if c := in.Conclusion(u.ID); c != "" {
-			tail = " · 结论 " + textutil.TruncateRunes(c, conclusionRunes)
+			// The session's words: quoted as data (textutil.QuoteData).
+			tail = " · 结论" + textutil.QuoteData(textutil.TruncateRunes(c, conclusionRunes))
 		}
 	}
 	return line, at, tail

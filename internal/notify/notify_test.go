@@ -683,3 +683,27 @@ func TestHandleHealthCustody(t *testing.T) {
 		t.Errorf("open = %+v, want task:b's failure only", open)
 	}
 }
+
+// CloseSource closes as told, the gateway's own close recorded as auto;
+// Retitle renames the open item of a source in place, pushing nothing.
+func TestCloseSourceAndRetitle(t *testing.T) {
+	n, _, b := newTest(t, local(10, 0), datadir.Layout{})
+	first, _ := n.Add(Item{Kind: KindQuestion, Source: "report:task:a", Title: "选 A 还是 B"})
+	n.Retitle("report:task:a", "还是要你选")
+	n.Retitle("report:task:none", "无")
+	if it, _ := n.Item(first.ID); it.Title != "还是要你选" || it.State != StateOpen {
+		t.Errorf("item = %+v, want it retitled and open", it)
+	}
+	if got := b.titles(); !slices.Equal(got, []string{"选 A 还是 B"}) {
+		t.Errorf("pushed %q, want the first title once", got)
+	}
+	n.CloseSource("report:task:a", ClosedByAuto)
+	if it, _ := n.Item(first.ID); it.State != StateClosed || it.ClosedBy != ClosedByAuto {
+		t.Errorf("item = %+v, want closed by auto", it)
+	}
+	second, _ := n.Add(Item{Kind: KindQuestion, Source: "report:task:b", Title: "b"})
+	n.DismissSource("report:task:b")
+	if it, _ := n.Item(second.ID); it.State != StateClosed || it.ClosedBy != ClosedByUser {
+		t.Errorf("item = %+v, want DismissSource's closed by the user", it)
+	}
+}

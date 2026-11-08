@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/planner/action"
+	"github.com/naozhi/naozhi/internal/planner/digest"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -246,21 +247,21 @@ func TestTaskPromptReport(t *testing.T) {
 	}
 }
 
-// A dispatch's digest keeps its goal, else the first sentence of the
-// Planner's own text of the message, not of the user's words the envelope
-// leads it with.
+// A dispatch's digest keeps its goal, else the first paragraph of the
+// Planner's own text of the message (brief default 3), not of the user's
+// words the envelope leads it with.
 func TestDispatchGoal(t *testing.T) {
 	cases := []struct {
 		s    action.Spawn
 		want string
 	}{
 		{action.Spawn{Goal: "让 CI 变绿", Message: "看一下 CI。然后修。"}, "让 CI 变绿"},
-		{action.Spawn{Message: "看一下 CI 为什么红。修好后开 PR。\n\n范围：只动测试。"}, "看一下 CI 为什么红。"},
-		{action.Spawn{Message: "<naozhi-relay at=\"11/8 10:00\">\n用户 11/8 10:00 在 Planner 对话里说：「合并吧。」\n</naozhi-relay>\nPlanner 的说明：\n合并 #1。再发版"}, "合并 #1。"},
+		{action.Spawn{Message: "看一下 CI 为什么红。修好后开 PR。\n\n范围：只动测试。"}, "看一下 CI 为什么红。修好后开 PR。"},
+		{action.Spawn{Message: "<naozhi-relay at=\"11/8 10:00\">\n用户 11/8 10:00 在 Planner 对话里说：「合并吧。」\n</naozhi-relay>\nPlanner 的说明：\n合并 #1。再发版"}, "合并 #1。再发版"},
 	}
 	for _, c := range cases {
-		if got := dispatchGoal(c.s); got != c.want {
-			t.Errorf("dispatchGoal(%+v) = %q, want %q", c.s, got, c.want)
+		if got := digest.Goal(dispatchGoal(c.s)); got != c.want {
+			t.Errorf("digest.Goal(dispatchGoal(%+v)) = %q, want %q", c.s, got, c.want)
 		}
 	}
 }

@@ -371,7 +371,7 @@ const enableWrites = "mcp__aws-outlook-mcp__enable_write_tools"
 // the 📨 note in the conversation and the summary on the task card.
 func (in *instance) reported(key, word, summary, body string) {
 	in.t.Helper()
-	lead := key + "（e2e-task）汇报：" + word + " · " + summary + " · 全文 "
+	lead := key + "（e2e-task）汇报：" + word + " · 「" + summary + "」 · 全文 "
 	var line string
 	// Up to endGrace: a new session's first digest waits on the health
 	// table's first look at it, once a minute.
@@ -388,10 +388,11 @@ func (in *instance) reported(key, word, summary, body string) {
 	if !strings.HasPrefix(path, filepath.Join(in.root, "state", "planner", "digest")+"/") {
 		in.t.Errorf("the line's digest path %q is not under the state root", path)
 	}
-	in.wait("the digest with the report's full text", 90*time.Second, func() bool {
-		b, _ := os.ReadFile(path)
-		return strings.Contains(string(b), body)
-	})
+	// The line waits for the digest to show the report: the file it names
+	// has the full text by the time it comes.
+	if b, err := os.ReadFile(path); err != nil || !strings.Contains(string(b), body) {
+		in.t.Errorf("the digest the line names lacks %q (%v):\n%s", body, err, b)
+	}
 	if note := "📨 " + key + " 汇报：" + word + " · " + summary; !strings.Contains(in.notes(), note) {
 		in.t.Errorf("no %q in the Planner conversation:\n%s", note, in.notes())
 	}

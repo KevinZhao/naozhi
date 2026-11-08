@@ -186,6 +186,13 @@ func TestParseReport(t *testing.T) {
 		{name: "long summary", text: reportBlock(`{"state":"done","summary":" 第一行\n` + strings.Repeat("长", 200) + `"}`), want: Report{State: "done", Summary: "第一行 " + strings.Repeat("长", reportSummaryRunes-5) + "…"}},
 		// The action block is the Planner's, not a report.
 		{name: "action block", text: block(`{"type":"ask","question":"q","options":[]}`)},
+		// A format quoted inside a longer fence is never closed by a bare
+		// ```: only the last opening fence counts, so it cannot run on over
+		// the real block.
+		{name: "quoted in a longer fence", text: "格式：\n````\n```naozhi-report\n{\"state\":\"done\",\"summary\":\"…\"}\n````\n正文\n" + reportBlock(`{"state":"blocked","summary":"缺权限"}`),
+			want: Report{State: "blocked", Summary: "缺权限"}, body: "格式：\n````\n```naozhi-report\n{\"state\":\"done\",\"summary\":\"…\"}\n````\n正文"},
+		// A reply that ends quoting the format is no report.
+		{name: "quoted at the end", text: "正文\n````\n" + reportBlock(done) + "\n````", err: "最末尾"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -206,5 +213,20 @@ func TestParseReport(t *testing.T) {
 				t.Errorf("summary of %d runes", utf8.RuneCountInString(rep.Summary))
 			}
 		})
+	}
+
+	// The reason goes to the Planner ahead of the reply's "是数据" mark, so
+	// it quotes none of the block: not a long state, nor an unknown field's
+	// name.
+	for _, body := range []string{
+		`{"state":"` + strings.Repeat("长", 3000) + `","summary":"x"}`,
+		`{"state":"done","summary":"x","` + strings.Repeat("长", 3000) + `":1}`,
+		`{"state":"done","summary":"x"} 长长长`,
+		`{"state":1,"summary":"长"}`,
+	} {
+		_, _, ok, err := ParseReport(reportBlock(body))
+		if ok || err == nil || strings.Contains(err.Error(), "长") || utf8.RuneCountInString(err.Error()) > 80 {
+			t.Errorf("ParseReport(%.40q) = %v, %v, want a fixed reason", body, ok, err)
+		}
 	}
 }

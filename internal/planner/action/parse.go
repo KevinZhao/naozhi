@@ -126,9 +126,8 @@ type Ask struct {
 	Trimmed int `json:"-"`
 }
 
-// Status sets a task's state: Task is a task: key, the key of a session the
-// user opened, or a promise ID, State done, doing or failed, Why the
-// evidence.
+// Status sets a task's state: Task is a task: key or a promise ID, State
+// done, doing or failed, Why the evidence.
 type Status struct {
 	Task  string `json:"task"`
 	State string `json:"state"`
