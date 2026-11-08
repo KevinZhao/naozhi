@@ -35,6 +35,9 @@ type removeSnapshot struct {
 	// chainIDs and lastPrompt are what a resume of an archived key needs.
 	chainIDs   []string
 	lastPrompt string
+	// closing reports that the transaction marked key closing
+	// (shim_closing.go); finishRemoveCleanup clears it.
+	closing bool
 }
 
 // unregisterAndSnapshot runs the fast, transactional half of a session
@@ -57,6 +60,10 @@ func (r *Router) unregisterAndSnapshot(key string, keepHistory bool) (snap remov
 		// root while notifyKeyRetired needs the UUID to stamp retired_at.
 		snap = removeSnapshot{proc: proc, workspace: s.Workspace(), retiredSessionID: s.SessionID(),
 			retiring: r.hist.beginRetire(key, s), keepHistory: keepHistory}
+		if proc != nil && proc.Alive() {
+			r.closing.begin(key)
+			snap.closing = true
+		}
 		if keepHistory {
 			snap.chainIDs = s.SnapshotChainIDs()
 			snap.lastPrompt = loadAtomicString(&s.lastPrompt)
@@ -110,6 +117,9 @@ func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 			slog.Warn("shim socket still bound after Remove wait — terminal removal, not flagging key (Remove never reuses the key)",
 				"key", key)
 		}
+	}
+	if snap.closing {
+		r.closing.end(key)
 	}
 	// A same-key session admitted during the teardown owns the key's
 	// run-history ring and its per-owner lock: freeing them under a live
@@ -223,6 +233,7 @@ func (r *Router) StopSession(key string) bool {
 			return
 		}
 		storeAtomicString(&s.deathReason, DeathReasonStopped)
+		r.closing.begin(key)
 		tx.Unlocked(s.loadProcess().Close)
 		tx.Broadcast()
 		r.countActive(tx)
@@ -233,6 +244,7 @@ func (r *Router) StopSession(key string) bool {
 		if !waitSocketGoneForKey(key) {
 			slog.Warn("session stop: shim socket still bound after close; the next spawn may be refused", "key", key)
 		}
+		r.closing.end(key)
 		logSessionLifecycle("stopped", key)
 		r.notifyChange()
 	}

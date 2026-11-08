@@ -289,7 +289,11 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) (reconnected, sess
 	driftCheck := driftArgs{backends: &r.backends, spawn: &r.spawn}
 	for _, state := range states {
 		var tgt shimTarget
-		r.ss.View(func(v sessView) { tgt = lookupShimTarget(v, state) })
+		r.ss.View(func(v sessView) { tgt = lookupShimTarget(v, state); tgt.closing = r.closing.has(state.Key) })
+		if tgt.closing {
+			// Neither adopt, reconnect nor orphan-shut it: the close owns it.
+			continue
+		}
 
 		// Resolve the wrapper recorded at shim startup so reconnect uses the
 		// matching Protocol and binary; an empty Backend falls back to the
@@ -323,6 +327,9 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) (reconnected, sess
 		if !tgt.found && !tgt.spawning && recWrapper != nil && adoptableShimKey(state.Key) {
 			var adopted bool
 			tgt, adopted = r.adoptShimTarget(state, recBackendID)
+			if tgt.closing {
+				continue
+			}
 			if adopted {
 				slog.Info("adopted live shim missing from store",
 					"key", state.Key,
@@ -547,6 +554,7 @@ type shimTarget struct {
 	found    bool
 	live     bool // sess has a live process
 	spawning bool // a spawn for the key is in flight
+	closing  bool // naozhi is closing the key's process (shim_closing.go)
 	// prevIDs is a copy: the field is guarded by the table lock and written
 	// by the async history-load goroutine and concurrent spawns.
 	prevIDs []string
@@ -596,7 +604,8 @@ func sessionRidingShim(v sessView, cliPID int) *ManagedSession {
 // copy. adopted reports whether the shim state was published as a session.
 func (r *Router) adoptShimTarget(state shim.State, backendID string) (t shimTarget, adopted bool) {
 	r.ss.Update(func(tx sessTx) {
-		if t = lookupShimTarget(tx.View, state); t.found || t.spawning {
+		t = lookupShimTarget(tx.View, state)
+		if t.closing = r.closing.has(state.Key); t.found || t.spawning || t.closing {
 			return
 		}
 		// Genuinely absent + no spawn in flight: rebuild from the shim state

@@ -193,6 +193,10 @@ type Router struct {
 	// through History().
 	hist HistoryIO
 
+	// closing is the keys whose process naozhi is closing on purpose
+	// (shim_closing.go): the shim reconcile leaves their shims alone.
+	closing closingKeys
+
 	// removes tracks RemoveAsync teardown goroutines, so tests can join them.
 	// Production never waits on it: Shutdown must not block on a teardown.
 	removes sync.WaitGroup
