@@ -5,10 +5,12 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/activity"
 )
 
-// ActivitySink receives the activities sessions' tool calls produce
-// (planner/activity.Recorder): key is the session, dir its workspace.
+// ActivitySink receives the activities sessions' tool calls produce and the
+// ends of their turns (planner/activity.Recorder): key is the session, dir
+// its workspace.
 type ActivitySink interface {
 	Record(key, dir string, a activity.Activity)
+	RecordTurn(key, dir string, outcome activity.TurnOutcome)
 }
 
 // activityNotifier is the optional hook a process offers for the activities

@@ -85,12 +85,7 @@ func (r *Recorder) Record(key, dir string, a Activity) {
 	if a.Path != "" {
 		a.Dir = dir
 	}
-	var wsID string
-	if r.ws != nil {
-		if w, ok := r.ws.Lookup(dir); ok {
-			wsID = w.ID
-		}
-	}
+	wsID := r.workspace(dir)
 	if r.j != nil {
 		data, err := json.Marshal(a)
 		if err == nil {
@@ -103,6 +98,48 @@ func (r *Recorder) Record(key, dir string, a Activity) {
 	if a.IsOutput() {
 		r.index(Output{Key: key, WS: wsID, Time: now, Activity: a})
 	}
+}
+
+// TurnOutcome is how a turn ended. Values are wire-stable (journal).
+type TurnOutcome string
+
+const (
+	TurnDone    TurnOutcome = "done"    // the CLI answered
+	TurnFailed  TurnOutcome = "failed"  // the turn ended in an error
+	TurnAborted TurnOutcome = "aborted" // someone stopped it
+)
+
+// Turn is the data of a kind=turn journal entry.
+type Turn struct {
+	Outcome TurnOutcome `json:"outcome"`
+}
+
+// RecordTurn journals the end of one turn of the session key working in dir.
+// It is called once per result frame, whatever started the turn, so a turn
+// too short for the health reconcile to see running is still on record (the
+// brief's 完成 counts from these).
+func (r *Recorder) RecordTurn(key, dir string, outcome TurnOutcome) {
+	if r.j == nil {
+		return
+	}
+	wsID := r.workspace(dir)
+	data, err := json.Marshal(Turn{Outcome: outcome})
+	if err == nil {
+		err = r.j.Append(journal.Entry{TS: time.Now(), WS: wsID, Kind: journal.KindTurn, Unit: key, Data: data})
+	}
+	if err != nil {
+		slog.Warn("activity: journal append failed", "kind", journal.KindTurn, "err", err)
+	}
+}
+
+// workspace is the ID of the workspace registered for dir, "" for none.
+func (r *Recorder) workspace(dir string) string {
+	if r.ws != nil {
+		if w, ok := r.ws.Lookup(dir); ok {
+			return w.ID
+		}
+	}
+	return ""
 }
 
 // index adds o, replacing the entry for the same product. A PR mentioned

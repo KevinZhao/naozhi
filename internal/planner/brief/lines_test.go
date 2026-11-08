@@ -8,6 +8,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/notify"
+	"github.com/naozhi/naozhi/internal/planner/activity"
 	"github.com/naozhi/naozhi/internal/planner/custody"
 	"github.com/naozhi/naozhi/internal/planner/journal"
 	"github.com/naozhi/naozhi/internal/planner/note"
@@ -19,6 +20,14 @@ func (f *fixture) custody(ts time.Time, unit, event string, reason custody.Reaso
 	f.t.Helper()
 	data, _ := json.Marshal(note.CustodyData{Event: event, Reason: string(reason)})
 	if err := f.j.Append(journal.Entry{TS: ts, Kind: journal.KindCustody, Unit: unit, Data: data}); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+func (f *fixture) turn(ts time.Time, unit, ws string, outcome activity.TurnOutcome) {
+	f.t.Helper()
+	data, _ := json.Marshal(activity.Turn{Outcome: outcome})
+	if err := f.j.Append(journal.Entry{TS: ts, WS: ws, Kind: journal.KindTurn, Unit: unit, Data: data}); err != nil {
 		f.t.Fatal(err)
 	}
 }
@@ -43,18 +52,66 @@ func TestBriefLines(t *testing.T) {
 		}, nil, []string{"完成的"}},
 		{"a dispatched task stopped or failed did not finish", func(f *fixture) {
 			for _, id := range []string{"task:a", "task:b"} {
-				f.health(at(2, 20, 0), id, "ws1", health.Active, health.Idle, health.KindSession, "")
+				f.turn(at(2, 20, 0), id, "ws1", activity.TurnDone)
 			}
 			f.tasks = []task.Task{
 				{ID: "task:a", Kind: task.KindSession, Title: "停了的", State: task.Done, By: task.ByUser, Why: task.StoppedWhy, Retired: at(2, 21, 0)},
 				{ID: "task:b", Kind: task.KindSession, Title: "挂了的", State: task.Failed, Retired: at(2, 21, 0)},
 			}
 		}, nil, []string{"完成的"}},
+		// Every turn's end is on record, however short: a reconcile a minute
+		// apart never saw this one running.
+		{"a reply shorter than a reconcile", func(f *fixture) {
+			f.turn(at(2, 22, 0), s, "ws1", activity.TurnDone)
+			f.snap = snap(health.Idle)
+		}, []string{"### 完成的（1）\n- [" + s + "](#session=dashboard%3Adirect%3Aa%3Ageneral) · 工作区 ws1 · 11/2 22:00\n"}, nil},
+		// A local session is counted from its turns, not sampled: a
+		// transition with no turn's end recorded is no finish, and one with
+		// it is the same finish once.
+		{"a local session's sampled transition alone", func(f *fixture) {
+			f.health(at(2, 22, 0), s, "ws1", health.Active, health.Idle, health.KindSession, "")
+			f.snap = snap(health.Idle)
+		}, nil, []string{"完成的"}},
+		{"turns of one session, sampled or not, are one finish", func(f *fixture) {
+			f.health(at(2, 21, 0), s, "ws1", health.Idle, health.Active, health.KindSession, "")
+			f.turn(at(2, 21, 30), s, "ws1", activity.TurnDone)
+			f.health(at(2, 22, 0), s, "ws1", health.Active, health.Idle, health.KindSession, "")
+			f.turn(at(2, 22, 10), s, "ws1", activity.TurnDone)
+			f.turn(at(2, 22, 10), s, "ws1", activity.TurnDone) // the same end written twice
+			f.snap = snap(health.Idle)
+		}, []string{"### 完成的（1）\n- [" + s + "](#session=dashboard%3Adirect%3Aa%3Ageneral) · 工作区 ws1 · 11/2 22:10\n"}, nil},
+		{"a turn stopped is no finish", func(f *fixture) {
+			f.turn(at(2, 22, 0), s, "ws1", activity.TurnAborted)
+			f.snap = snap(health.Idle)
+		}, nil, []string{"完成的"}},
+		// The last word is a failure health has not confirmed yet.
+		{"a turn failed after the answer", func(f *fixture) {
+			f.turn(at(2, 22, 0), s, "ws1", activity.TurnDone)
+			f.turn(at(2, 22, 5), s, "ws1", activity.TurnFailed)
+			f.snap = snap(health.Idle)
+		}, nil, []string{"完成的"}},
+		{"answered again after a failed turn", func(f *fixture) {
+			f.turn(at(2, 22, 0), s, "ws1", activity.TurnFailed)
+			f.turn(at(2, 22, 5), s, "ws1", activity.TurnDone)
+			f.snap = snap(health.Idle)
+		}, []string{"### 完成的（1）\n- [" + s + "](#session=dashboard%3Adirect%3Aa%3Ageneral) · 工作区 ws1 · 11/2 22:05\n"}, nil},
+		// What custody sends on its own (an answer it gave, a nudge) ends
+		// turns like the user's: the session is one finish, at its last.
+		{"custody's own sends are turns like any", func(f *fixture) {
+			f.turn(at(2, 22, 0), s, "ws1", activity.TurnDone)
+			f.custody(at(2, 22, 10), s, "sent", custody.ReasonSuggested)
+			f.turn(at(2, 22, 11), s, "ws1", activity.TurnDone)
+			f.snap = snap(health.Idle)
+		}, []string{"### 完成的（1）\n- [" + s + "](#session=dashboard%3Adirect%3Aa%3Ageneral) · 工作区 ws1 · 11/2 22:11\n", "\n托管：代答 1 次\n"}, nil},
 		{"recovered after custody's retries", func(f *fixture) {
+			f.turn(at(2, 22, 50), s, "ws1", activity.TurnDone)
+			f.turn(at(2, 22, 58), s, "ws1", activity.TurnFailed)
 			f.health(at(2, 23, 0), s, "ws1", health.Active, health.Failed, health.KindSession, health.ErrNetwork)
 			f.custody(at(2, 23, 1), s, "sent", custody.ReasonRetry)
+			f.turn(at(2, 23, 2), s, "ws1", activity.TurnFailed) // the first retry failed too
 			f.custody(at(2, 23, 3), s, "sent", custody.ReasonRetry)
 			f.health(at(2, 23, 4), s, "ws1", health.Failed, health.Active, health.KindSession, "")
+			f.turn(at(2, 23, 6), s, "ws1", activity.TurnDone)
 			f.health(at(2, 23, 6), s, "ws1", health.Active, health.Idle, health.KindSession, "")
 			f.snap = snap(health.Idle)
 		}, []string{"### 完成的（1）\n- [" + s + "](#session=dashboard%3Adirect%3Aa%3Ageneral) · 工作区 ws1 · 11/2 23:06 · 托管重试 2 次后恢复\n",
@@ -62,9 +119,16 @@ func TestBriefLines(t *testing.T) {
 		{"recovered by a retry too short to be seen active", func(f *fixture) {
 			f.health(at(2, 23, 0), s, "ws1", health.Active, health.Failed, health.KindSession, health.ErrNetwork)
 			f.custody(at(2, 23, 1), s, "sent", custody.ReasonRetry)
+			f.turn(at(2, 23, 2), s, "ws1", activity.TurnDone)
 			f.health(at(2, 23, 2), s, "ws1", health.Failed, health.Idle, health.KindSession, "")
 			f.snap = snap(health.Idle)
 		}, []string{"### 完成的（1）\n- [" + s + "](#session=dashboard%3Adirect%3Aa%3Ageneral) · 工作区 ws1 · 11/2 23:02 · 托管重试 1 次后恢复\n"}, []string{"失败的"}},
+		{"a retry that failed again", func(f *fixture) {
+			f.health(at(2, 23, 0), s, "ws1", health.Active, health.Failed, health.KindSession, health.ErrNetwork)
+			f.custody(at(2, 23, 1), s, "sent", custody.ReasonRetry)
+			f.turn(at(2, 23, 2), s, "ws1", activity.TurnFailed)
+			f.snap = snap(health.Failed)
+		}, []string{"### 失败的（1）\n", "\n托管：重试 1 次（恢复 0、停下 0）\n"}, []string{"完成的"}},
 		{"recovered by itself, not finished since", func(f *fixture) {
 			f.health(at(2, 23, 0), s, "ws1", health.Active, health.Failed, health.KindSession, health.ErrNetwork)
 			f.health(at(2, 23, 6), s, "ws1", health.Failed, health.Idle, health.KindSession, "")
@@ -83,14 +147,16 @@ func TestBriefLines(t *testing.T) {
 			f.snap = health.Snapshot{At: at(3, 9, 0), Units: []health.Unit{{ID: dd, Kind: health.KindSession, State: health.Failed}}}
 		}, []string{"### 失败的（1）\n- [" + dd + "](#session=dashboard%3Adirect%3Ad%3Ageneral) · 11/2 23:00 · 网络断了\n"}, nil},
 		{"no workspace, finished", func(f *fixture) {
-			f.health(at(2, 22, 0), dd, "", health.Active, health.Idle, health.KindSession, "")
+			f.turn(at(2, 22, 0), dd, "", activity.TurnDone)
 		}, []string{"### 完成的（1）\n- [" + dd + "](#session=dashboard%3Adirect%3Ad%3Ageneral) · 11/2 22:00\n"}, nil},
 		{"no workspace, naozhi's own", func(f *fixture) {
 			f.health(at(2, 22, 0), "cron:orphan", "", health.Active, health.Failed, health.KindCron, health.ErrNetwork)
 			f.health(at(2, 22, 0), "cron:orphan", "", health.Active, health.Idle, health.KindCron, "")
+			f.turn(at(2, 22, 0), "cron:orphan", "", activity.TurnDone)
 			for _, id := range []string{sessionkey.PlannerMainKey, sessionkey.ScratchKeyPrefix + "x", sessionkey.SysKeyPrefix + "gc"} {
 				f.health(at(2, 22, 0), id, "", health.Active, health.Failed, health.KindSession, health.ErrNetwork)
 				f.health(at(2, 23, 0), id+"2", "", health.Active, health.Idle, health.KindSession, "")
+				f.turn(at(2, 23, 0), id+"2", "", activity.TurnDone)
 			}
 		}, nil, []string{"失败的", "完成的"}},
 		{"rate limited", func(f *fixture) {

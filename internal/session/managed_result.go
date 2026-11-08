@@ -5,6 +5,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/planner/activity"
 )
 
 // ResultSink receives the reply text of every turn a session's CLI completes,
@@ -87,12 +88,30 @@ func (r *Router) bookResults(s *ManagedSession, proc processIface) {
 // or not, refreshes s's last activity: this is the one hook every result
 // reaches, the turn a shim held across a restart and one the CLI started
 // itself included, and it runs before the turn's end pushes the session list.
-// Only a reply goes to the sink.
+// Every end is journaled through the activity sink, once per result frame,
+// so a turn too short for a health reconcile to see is still counted; only a
+// reply goes to the result sink.
 func (r *Router) resultFor(s *ManagedSession) func(clievent.SendResult) {
 	return func(res clievent.SendResult) {
 		s.touchLastActive()
-		if !res.Aborted && !res.IsError && !res.CLIAborted() {
+		outcome := turnOutcome(res)
+		if sink := r.activity.Load(); sink != nil {
+			(*sink).RecordTurn(s.key, s.Workspace(), outcome)
+		}
+		if outcome == activity.TurnDone {
 			r.results.deliver(s.key, res.Text)
 		}
 	}
+}
+
+// turnOutcome is how the turn res reports ended. An abort is checked first:
+// older claude reports one as an error.
+func turnOutcome(res clievent.SendResult) activity.TurnOutcome {
+	switch {
+	case res.Aborted || res.CLIAborted():
+		return activity.TurnAborted
+	case res.IsError:
+		return activity.TurnFailed
+	}
+	return activity.TurnDone
 }

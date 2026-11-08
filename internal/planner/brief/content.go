@@ -153,10 +153,10 @@ type seen struct {
 	prs      []string
 	failed   *healthData
 	failedAt time.Time
-	// healedAt is the latest Failed→Idle: after custody's retry, the
-	// retried turn ending, which a turn too short for a reconcile to see
-	// active records with no Active→Idle.
-	healedAt time.Time
+	// failedTurn is the latest turn that ended in an error: one after
+	// doneAt means the unit's last word is a failure, whether or not health
+	// has confirmed it yet.
+	failedTurn time.Time
 	// What custody did to the unit: retries sent, and whether it stopped.
 	retries int
 	stopped bool
@@ -166,8 +166,10 @@ type seen struct {
 // without a workspace are left out (§3.8), but for the user's own sessions
 // (health.UserSession: a chat started in the default directory belongs to
 // none), listed by name alone; so is the Planner's own namespace. Finished means a turn
-// ended (a health transition from active to idle, or an output: a restart
-// dates no turn) and the unit is not running, waiting or failed now;
+// ended with an answer (a local session's result frame, journaled once per
+// turn however short; a remote unit's health transition from active to
+// idle, the only sign of it here; or an output: a restart dates no turn), no
+// turn failed after it, and the unit is not running, waiting or failed now;
 // routine units (cron, daemons) and terminal sessions only count when they
 // fail, and a dispatched session that failed or that the user stopped does
 // not count. A unit that failed in the window is listed as failed while it
@@ -216,12 +218,25 @@ func (b *Briefer) gather(since, now time.Time) input {
 				case d.To == health.Failed:
 					s := at(e.Unit, e.WS, d.Kind)
 					s.failed, s.failedAt = &d, e.TS
-				case d.From == health.Active && d.To == health.Idle:
+				case d.From == health.Active && d.To == health.Idle && d.Kind == health.KindRemote:
+					// A local session's turns are counted from their result
+					// frames (KindTurn): a reconcile samples once a minute,
+					// misses a shorter turn and dates a longer one late.
 					s := at(e.Unit, e.WS, d.Kind)
 					s.doneAt = later(s.doneAt, e.TS)
-				case d.From == health.Failed && d.To == health.Idle:
-					s := at(e.Unit, e.WS, d.Kind)
-					s.healedAt = later(s.healedAt, e.TS)
+				}
+			case journal.KindTurn:
+				var d activity.Turn
+				if json.Unmarshal(e.Data, &d) != nil {
+					continue
+				}
+				switch d.Outcome {
+				case activity.TurnDone:
+					s := at(e.Unit, e.WS, "")
+					s.doneAt = later(s.doneAt, e.TS)
+				case activity.TurnFailed:
+					s := at(e.Unit, e.WS, "")
+					s.failedTurn = later(s.failedTurn, e.TS)
 				}
 			case journal.KindActivity:
 				var a activity.Activity
@@ -288,10 +303,7 @@ func (b *Briefer) gather(since, now time.Time) input {
 			in.Failed = append(in.Failed, failedItem{ref: r, At: s.failedAt, Class: s.failed.ErrClass, Stopped: s.stopped})
 			continue
 		}
-		if recovered && s.retries > 0 && s.healedAt.After(s.failedAt) {
-			s.doneAt = later(s.doneAt, s.healedAt)
-		}
-		if s.doneAt.IsZero() || recovered && !s.doneAt.After(s.failedAt) || unfinished[id] ||
+		if s.doneAt.IsZero() || s.failedTurn.After(s.doneAt) || recovered && !s.doneAt.After(s.failedAt) || unfinished[id] ||
 			kind == health.KindCron || kind == health.KindSysession || kind == health.KindExternal {
 			continue
 		}

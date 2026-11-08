@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/planner/activity"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
@@ -76,5 +77,55 @@ func TestResultSink_HeldUntilSet(t *testing.T) {
 	r.resultFor(r.ss.Load(key))(clievent.SendResult{Text: "next"})
 	if s := <-got; s != key+"=next" {
 		t.Errorf("result after the sink = %q, want next", s)
+	}
+}
+
+type turnSink struct{ turns []string }
+
+func (*turnSink) Record(string, string, activity.Activity) {}
+func (t *turnSink) RecordTurn(key, dir string, o activity.TurnOutcome) {
+	t.turns = append(t.turns, key+" "+dir+" "+string(o))
+}
+
+// Every result frame is one turn's end journaled through the activity sink,
+// with how it ended: an abort first (older claude reports one as an error),
+// then an error; only an answer reaches the result sink.
+func TestResultForRecordsEveryTurnEnd(t *testing.T) {
+	const key = "dashboard:direct:host:general"
+	for _, tc := range []struct {
+		name string
+		res  clievent.SendResult
+		want activity.TurnOutcome
+	}{
+		{"answered", clievent.SendResult{Text: "好的"}, activity.TurnDone},
+		{"empty answer", clievent.SendResult{}, activity.TurnDone},
+		{"failed", clievent.SendResult{IsError: true, SubType: "error_during_execution"}, activity.TurnFailed},
+		{"stopped by the user", clievent.SendResult{Aborted: true, IsError: true, SubType: "error_during_execution"}, activity.TurnAborted},
+		{"aborted by the CLI", clievent.SendResult{TerminalReason: "aborted_tools"}, activity.TurnAborted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &Router{}
+			sink := &turnSink{}
+			r.SetActivitySink(sink)
+			var replies []string
+			r.SetResultSink(func(_, text string) { replies = append(replies, text) })
+			s := &ManagedSession{key: key}
+			s.setWorkspace("/w")
+			r.resultFor(s)(tc.res)
+			if want := []string{key + " /w " + string(tc.want)}; len(sink.turns) != 1 || sink.turns[0] != want[0] {
+				t.Errorf("turns = %q, want %q", sink.turns, want)
+			}
+			if got := len(replies) == 1; got != (tc.want == activity.TurnDone) {
+				t.Errorf("replies = %q, want one only for an answer", replies)
+			}
+		})
+	}
+	// No sink yet: the result still reaches the result sink.
+	r := &Router{}
+	var n int
+	r.SetResultSink(func(string, string) { n++ })
+	r.resultFor(&ManagedSession{key: key})(clievent.SendResult{Text: "x"})
+	if n != 1 {
+		t.Errorf("result sink got %d replies without an activity sink, want 1", n)
 	}
 }
