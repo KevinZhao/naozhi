@@ -105,7 +105,7 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     await expect(card.locator('.pl-scard-time')).toContainText('分钟前');
     // The keys after the names fold into the cards (§6.4: names, not keys).
     await expect(reply.locator('.pl-scards .pl-scard')).toHaveCount(2);
-    await expect(reply).toContainText('hello world在等你回复，iso 周报 还没开始，hello world（名字 hw）先等等，两个都在 myproject。');
+    await expect(reply).toContainText('hello world在等你回复，iso 周报 派出的任务 还没开始，hello world（名字 hw）先等等，两个都在 myproject。');
     await expect(reply).not.toContainText(SESSION);
     const dispatch = reply.locator('.pl-act-dispatch').first();
     await expect(dispatch.locator('.pl-act-h')).toHaveText('派出会话 · iso 整理周报');
@@ -216,17 +216,24 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
   }
 });
 
-// A list of keys, or one after a colon, stands for the names: folding them
-// away left "派出了 、、。" (§15.12 ①). A key after its name, and a bracket
-// holding only keys, still go.
+// A key stands for its session's name: folding it away left "派出了。" or
+// "派出了 、、。" (§15.12 ①). Only a key that repeats the name right before
+// it (bold or not, its colon with it) and a bracket holding only keys go.
 const FOLD_ROWS = [
   ['派出了 A、B、C。', '派出了 iso 周报、iso 评审、iso 部署。'],
   ['派出了 A，B；C。', '派出了 iso 周报，iso 评审；iso 部署。'],
   ['A, B 都在跑。', 'iso 周报, iso 评审 都在跑。'],
   ['派出了 A 和 B。', '派出了 iso 周报 和 iso 评审。'],
   ['名单：A。', '名单：iso 周报。'],
-  ['iso 周报：A 已完成。', 'iso 周报： 已完成。'],
+  ['iso 周报：A 已完成。', 'iso 周报：已完成。'],
   ['iso 周报 A 先等等。', 'iso 周报 先等等。'],
+  ['派出了 A，正在跑。', '派出了 iso 周报，正在跑。'],
+  ['**iso 周报**：A 在跑。', 'iso 周报：在跑。'],
+  ['- **iso 周报**：A', 'iso 周报'],
+  ['iso 周报：A；iso 评审：B。', 'iso 周报；iso 评审。'],
+  ['iso 周报 A 和 B 都在跑。', 'iso 周报 和 iso 评审 都在跑。'],
+  ['派出了 A（iso 周报）。', '派出了 iso 周报。'],
+  ['已派：A（iso 周报，20 分钟）', '已派：（iso 周报，20 分钟）'],
   ['iso 周报 和 iso 评审（A、B）都在跑。', 'iso 周报 和 iso 评审都在跑。'],
   ['三个都在 naozhi（A，B，C）。', '三个都在 naozhi。'],
 ];
