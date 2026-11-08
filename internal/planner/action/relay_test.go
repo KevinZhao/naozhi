@@ -7,6 +7,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/notify"
+	"github.com/naozhi/naozhi/internal/planner/custody"
+	"github.com/naozhi/naozhi/internal/planner/sidecar"
+	"github.com/naozhi/naozhi/internal/planner/task"
 )
 
 type relayed struct{ key, text string }
@@ -225,4 +230,133 @@ func TestRelayEnvelopeWords(t *testing.T) {
 	if n := strings.Count(env, "在 Planner 对话里说"); n != relayWords {
 		t.Errorf("messages = %d, want %d", n, relayWords)
 	}
+}
+
+// putAwayRunner is a runner with one dispatched session the gateway put away
+// (D95: its task done, its sidecar keeping what resuming it needs) and the
+// reaper's side of reopening: the task set back to doing puts the session
+// back, after which it takes a relay. live are the keys that take one.
+func putAwayRunner(t *testing.T) (r *Runner, g *fakeGateway, inbox *notify.Notifier, key string, live map[string]bool) {
+	t.Helper()
+	r, g, inbox, side, dir := newRunner(t)
+	live = map[string]bool{}
+	r.cfg.Tasks = task.New(task.Config{Sessions: side, OnState: func(k string, st task.State) {
+		if st != task.Doing {
+			return
+		}
+		if m, ok := side.Get(k); ok && m.Reap != nil {
+			live[k] = true
+			if _, err := side.Update(k, func(m *sidecar.Meta) bool { m.Reap = nil; return true }); err != nil {
+				t.Error(err)
+			}
+		}
+	}})
+	r.cfg.RelayTarget = func(k string) error {
+		if !live[k] {
+			return errors.New("找不到会话 " + k)
+		}
+		return nil
+	}
+	r.Handle(block(`{"type":"dispatch","workspace":"` + filepath.Base(dir) + `","title":"iso 拆除","model":"","message":"拆掉测试栈"}`))
+	key = g.spawned[0]
+	if err := r.cfg.Tasks.Set(key, task.Done, task.ByPlanner, "它汇报做完了"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := side.Update(key, func(m *sidecar.Meta) bool { m.Reap = &sidecar.Reap{At: time.Now(), SessionID: "sid-1"}; return true }); err != nil {
+		t.Fatal(err)
+	}
+	g.told, g.notes = nil, nil
+	return r, g, inbox, key, live
+}
+
+func taskState(t *testing.T, r *Runner, key string) task.State {
+	t.Helper()
+	for _, tk := range r.cfg.Tasks.List() {
+		if tk.ID == key {
+			return tk.State
+		}
+	}
+	t.Fatalf("no task %s", key)
+	return ""
+}
+
+// A relay to a dispatched session put away reopens it the way 任务's 重新打开
+// does (its task back to 进行中, the session resumed under its key) and then
+// delivers; the receipt says so. A key that never was a session still fails
+// as a bad block, nothing reopened.
+func TestRelayReopensPutAway(t *testing.T) {
+	r, g, _, key, live := putAwayRunner(t)
+	out := userTurn(r, said)
+	r.Result(r.cfg.Planner, block(`{"type":"relay","key":"`+key+`","text":"用户确认拆除"}`))
+	r.handle(<-r.ch)
+	if len(*out) != 1 || (*out)[0].key != key || !live[key] {
+		t.Fatalf("relayed = %q live = %v, want it reopened and sent", *out, live)
+	}
+	if st := taskState(t, r, key); st != task.Doing {
+		t.Errorf("task state = %s, want doing", st)
+	}
+	if len(g.notes) != 0 || len(g.unrun) != 1 || !strings.Contains(g.unrun[0], "已重新打开并送到") || strings.Contains(g.unrun[0], "没有执行") {
+		t.Errorf("notes %q unrun %q, want one receipt that it was reopened and sent", g.notes, g.unrun)
+	}
+
+	g.unrun, g.notes = nil, nil
+	r.Result(r.cfg.Planner, block(`{"type":"relay","key":"task:000000000000","text":"t"}`))
+	r.handle(<-r.ch)
+	if len(*out) != 1 || len(g.notes) != 1 || !strings.Contains(g.notes[0], "找不到会话 task:000000000000") {
+		t.Errorf("relayed %q notes %q, want the unknown key refused as before", *out, g.notes)
+	}
+}
+
+// An ask naming a session put away opens its card without reopening it; the
+// user's answer reopens it and is delivered, and the Planner is told so.
+func TestAskWithTaskReopensPutAway(t *testing.T) {
+	r, g, inbox, key, live := putAwayRunner(t)
+	out := userTurn(r)
+	r.Result(r.cfg.Planner, block(`{"type":"ask","question":"拆不拆？","options":["拆","先不拆"],"task":"`+key+`"}`))
+	r.handle(<-r.ch)
+	it := openDecision(t, inbox, HandlerAsk)
+	if live[key] || len(g.notes) != 0 {
+		t.Fatalf("live = %v notes = %q, want the card open and the session left put away", live, g.notes)
+	}
+	if err := inbox.Decide(it.ID, "拆"); err != nil {
+		t.Fatal(err)
+	}
+	if len(*out) != 1 || (*out)[0].key != key || !live[key] {
+		t.Fatalf("relayed = %q live = %v", *out, live)
+	}
+	if len(g.told) != 1 || !strings.Contains(g.told[0], "重新打开并把这个回答原样送到 "+key) {
+		t.Errorf("told = %q", g.told)
+	}
+	if st := taskState(t, r, key); st != task.Doing {
+		t.Errorf("task state = %s, want doing", st)
+	}
+}
+
+// A custody message to a session put away reopens it and is delivered; the
+// receipt says so.
+func TestCustodyReopensPutAway(t *testing.T) {
+	r, g, _, key, live := putAwayRunner(t)
+	fc := &fakeCustody{on: map[string]bool{}}
+	r.cfg.Custody = &liveCustody{fakeCustody: fc, live: live}
+	r.Result(r.cfg.Planner, block(`{"type":"custody","key":"`+key+`","text":"把测试栈也删掉"}`))
+	r.handle(<-r.ch)
+	if len(fc.delivered) != 1 || !strings.HasPrefix(fc.delivered[0], key+"|") || !live[key] {
+		t.Fatalf("delivered = %q live = %v", fc.delivered, live)
+	}
+	if len(g.notes) != 0 || len(g.unrun) != 1 || !strings.Contains(g.unrun[0], "已重新打开并送到") {
+		t.Errorf("notes %q unrun %q", g.notes, g.unrun)
+	}
+}
+
+// liveCustody is fakeCustody delivering only to the sessions in the router.
+type liveCustody struct {
+	*fakeCustody
+	live map[string]bool
+}
+
+func (l *liveCustody) Deliver(key string, reason custody.Reason, text string) (int, error) {
+	if !l.live[key] {
+		return 0, custody.ErrNoSession
+	}
+	return l.fakeCustody.Deliver(key, reason, text)
 }

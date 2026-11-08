@@ -530,6 +530,7 @@ func (r *Runner) handle(rep reply) {
 			continue
 		}
 		var err error
+		reopened := false
 		switch {
 		case rep.outside != "" && (b.Dispatch != nil || b.Status != nil || b.Custody != nil || b.Relay != nil):
 			un.add(i, b, r.refuseOutside(b, rep.outside))
@@ -542,7 +543,7 @@ func (r *Runner) handle(rep reply) {
 				dispatched[b.Dispatch.Title] = key
 			}
 		case b.Relay != nil:
-			err = r.relay(*b.Relay, rep.words)
+			reopened, err = r.relay(*b.Relay, rep.words)
 		case b.Promise != nil:
 			err = r.promise(*b.Promise, dispatched)
 		case b.Ask != nil:
@@ -555,7 +556,10 @@ func (r *Runner) handle(rep reply) {
 		case b.Notify != nil:
 			err = r.notify(*b.Notify)
 		case b.Custody != nil:
-			err = r.custody(*b.Custody)
+			reopened, err = r.custody(*b.Custody)
+		}
+		if reopened && err == nil {
+			un.note(i, b, "这个会话已经收起，网关已重新打开并送到")
 		}
 		var bad blockError
 		switch {
@@ -892,19 +896,55 @@ func (r *Runner) sessionName(key string) string {
 // the session's own send path (the user's message would take), never
 // through custody: no prefix, no count, not held back while the user is at
 // the session, as the user asked for it. The block's card says it was sent.
-func (r *Runner) relay(rl Relay, words []Words) error {
+// A session put away is reopened first (reachable); reopened says so.
+func (r *Runner) relay(rl Relay, words []Words) (reopened bool, err error) {
 	if r.cfg.Relay == nil {
-		return errors.New("转达没有接通")
+		return false, errors.New("转达没有接通")
 	}
-	if r.cfg.RelayTarget != nil {
-		if err := r.cfg.RelayTarget(rl.Key); err != nil {
-			return blockError{err}
-		}
+	if reopened, err = r.reachable(rl.Key, task.ByPlanner, "Planner 转达用户的决定，网关重新打开"); err != nil {
+		return false, err
 	}
 	if err := r.cfg.Relay(rl.Key, relayEnvelope(r.cfg.Now(), words, rl.Text)); err != nil {
-		return fmt.Errorf("没有送到（%v）", err)
+		return reopened, fmt.Errorf("没有送到（%v）", err)
 	}
-	return nil
+	return reopened, nil
+}
+
+// reachable is nil when key may take a relay now (Config.RelayTarget). A
+// dispatched session put away (D95) cannot, but the user or the Planner
+// writing to it means its task is not over: it is reopened the way 任务's
+// 重新打开 does, its task set back to 进行中 by, for why, on which the
+// reaper puts it back under its key and the next message resumes it.
+// reopened reports that. Any other key it refuses as before, the block's
+// fault.
+func (r *Runner) reachable(key string, by task.By, why string) (reopened bool, err error) {
+	if r.cfg.RelayTarget == nil {
+		return false, nil
+	}
+	err = r.cfg.RelayTarget(key)
+	if err == nil {
+		return false, nil
+	}
+	if !r.putAway(key) {
+		return false, blockError{err}
+	}
+	if err := r.cfg.Tasks.Set(key, task.Doing, by, why); err != nil {
+		return false, fmt.Errorf("这个会话已经收起，重新打开失败（%v）", err)
+	}
+	if err := r.cfg.RelayTarget(key); err != nil {
+		return true, fmt.Errorf("这个会话已经收起，重新打开后还是送不到（%v）", err)
+	}
+	return true, nil
+}
+
+// putAway reports whether key is a dispatched session the gateway put away
+// (planner/reap): its sidecar keeps what resuming it needs.
+func (r *Runner) putAway(key string) bool {
+	if r.cfg.Tasks == nil || r.cfg.Sessions == nil || !sessionkey.IsTaskKey(key) {
+		return false
+	}
+	m, ok := r.cfg.Sessions.Get(key)
+	return ok && m.Reap != nil
 }
 
 // relayWords bounds the user's words an envelope carries: the latest
@@ -1073,7 +1113,8 @@ func notifyKey(n Notify) string {
 }
 
 // ask puts the Planner's question into "通知"; one naming a task has its
-// answer sent there too (decideAsk), so the session must take a relay now.
+// answer sent there too (decideAsk), so the session must take a relay now,
+// or be one put away, which the answer reopens.
 func (r *Runner) ask(q Ask) error {
 	if r.cfg.Inbox == nil {
 		return errors.New("通知没有接通")
@@ -1082,7 +1123,7 @@ func (r *Runner) ask(q Ask) error {
 		if r.cfg.Relay == nil {
 			return errors.New("转达没有接通，带 task 的提问没有发出")
 		}
-		if r.cfg.RelayTarget != nil {
+		if r.cfg.RelayTarget != nil && !r.putAway(q.Task) {
 			if err := r.cfg.RelayTarget(q.Task); err != nil {
 				return blockError{err}
 			}
@@ -1128,11 +1169,18 @@ func (r *Runner) decideAsk(it notify.Item, a notify.Action) error {
 	relayed := false
 	if c.Task != "" {
 		err := errors.New("转达没有接通")
+		reopened := false
 		if r.cfg.Relay != nil {
-			err = r.cfg.Relay(c.Task, relayEnvelope(w.At, []Words{w}, ""))
+			if reopened, err = r.reachable(c.Task, task.ByUser, "用户回答了它的提问，网关重新打开"); err == nil {
+				err = r.cfg.Relay(c.Task, relayEnvelope(w.At, []Words{w}, ""))
+			}
 		}
 		if relayed = err == nil; relayed {
-			text += "。网关已把这个回答原样送到 " + c.Task + "（" + r.sessionName(c.Task) + "），不用再转达；它做完会向你汇报。"
+			sent := "网关已把这个回答原样送到 "
+			if reopened {
+				sent = "它已经收起，网关已重新打开并把这个回答原样送到 "
+			}
+			text += "。" + sent + c.Task + "（" + r.sessionName(c.Task) + "），不用再转达；它做完会向你汇报。"
 		} else {
 			text += "。网关没能把回答送到 " + c.Task + "（" + err.Error() + "）；要转达就用 relay。"
 			slog.Warn("planner actions: an answer not relayed", "task", c.Task, "err", err)
@@ -1164,11 +1212,27 @@ func requestID() string {
 // through custody: prefixed, counted against the lineage's limits, held
 // back while the user is at the session. The block's card says it was done;
 // what was not sent says why, and none of that asks for the block again.
-func (r *Runner) custody(c Custody) error {
-	cu := r.cfg.Custody
-	if cu == nil {
-		return errors.New("托管没有接通")
+// A message to a dispatched session put away reopens it first, as a relay
+// does (reachable); reopened says so.
+func (r *Runner) custody(c Custody) (reopened bool, err error) {
+	if r.cfg.Custody == nil {
+		return false, errors.New("托管没有接通")
 	}
+	if c.On == nil && r.putAway(c.Key) {
+		if err := r.cfg.Tasks.Set(c.Key, task.Doing, task.ByPlanner, "Planner 经托管发消息给它，网关重新打开"); err != nil {
+			return false, fmt.Errorf("这个会话已经收起，重新打开失败（%v）", err)
+		}
+		if err := r.custodyRun(c); err != nil {
+			return true, fmt.Errorf("这个会话已经收起，网关已重新打开，但%w", err)
+		}
+		return true, nil
+	}
+	return false, r.custodyRun(c)
+}
+
+// custodyRun runs custody block c, its errors as the receipt says them.
+func (r *Runner) custodyRun(c Custody) error {
+	cu := r.cfg.Custody
 	var err error
 	if c.On != nil {
 		if err = cu.Set(c.Key, *c.On, custody.ByPlanner); err == nil && *c.On {
