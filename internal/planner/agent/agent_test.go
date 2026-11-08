@@ -165,7 +165,7 @@ func TestLaunchArgv(t *testing.T) {
 			t.Errorf("argv has %q: %s", bad, got)
 		}
 	}
-	if o.Workspace != lay.PlannerWorkDir() || !o.Exempt || o.Backend != "claude" || o.CrossSessionInbound != "accept" {
+	if o.Workspace != lay.PlannerWorkDir() || !o.Exempt || o.Backend != "claude" || o.CrossSessionInbound != "accept" || o.PromptCacheTTL != "1h" {
 		t.Errorf("opts = %+v", o)
 	}
 	for _, rule := range []string{"Read(~/.aws/**)", "Read(~/.ssh/**)", "Read(~/.naozhi/*.yaml)", "Read(~/.naozhi/**/*.yaml)"} {

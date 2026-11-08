@@ -37,6 +37,10 @@ const (
 	Key    = sessionkey.PlannerMainKey
 	Model  = "claude-opus-5-5[1m]"
 	Effort = "medium"
+	// PromptCacheTTL keeps the Planner's prompt cache an hour (§5.2): its
+	// turns are often more than the default 5 minutes apart, and each miss
+	// rewrites a context of 100k+ tokens.
+	PromptCacheTTL = "1h"
 )
 
 // NameFor is the Planner's --name for the state root root: "planner-" and a
@@ -288,6 +292,7 @@ func (a *Agent) buildOpts() sessionview.AgentOpts {
 		CrossSessionInbound: "accept",
 		PermissionsAllow:    allowRules(root, a.cfg.Layout.EventsRoot(), a.cfg.Workspaces.LocalPaths()),
 		PermissionsDeny:     denyRules(a.cfg.Layout.Root(), a.cfg.DenyPaths),
+		PromptCacheTTL:      PromptCacheTTL,
 	}
 }
 
