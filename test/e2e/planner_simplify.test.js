@@ -12,6 +12,10 @@
 // conversation's end, not red, also over an opened session and in the
 // drawer; the desktop left column keeps one line for the Planner's own
 // question, pointing there, while a phone and the 会话 sidebar keep the card.
+// Jumping to a question focuses its first answer; a report line from the
+// drawer goes to the page first, ends "只看新结果" for a card it hides and
+// marks read a card with no digest; hidden empty replies double no robot
+// and leave no divider over nothing; a goal is cut as the gateway cuts it.
 // Screenshots of a crowded conversation go to test-results, and to
 // $NZ_SHOTS_DIR when set.
 const fs = require('fs');
@@ -31,13 +35,19 @@ const fence = (body) => '```naozhi-action\n' + JSON.stringify(body) + '\n```';
 const GOAL_DISPATCH = { type: 'dispatch', workspace: 'ws_iso00001', title: 'iso 整理周报', goal: 'iso 周五前出一版周报初稿', message: '把本周合并的 PR 整理成周报，按模块分组。写在 docs/weekly.md。' };
 // An old block, from before dispatch had a goal: its message's first sentence.
 const OLD_DISPATCH = { type: 'dispatch', workspace: 'iso-scratch', title: 'iso 写 hello', message: '在工作区里写一个 hello.md。写完跑一下测试。' };
+// A goal past the gateway's 60 characters, an emoji where it is cut, in a
+// workspace written as a path.
+const LONG_GOAL = '长'.repeat(59) + '😀😀';
+const LONG_DISPATCH = { type: 'dispatch', workspace: '/Users/iso/work/proj-long', title: 'iso 长目标', goal: LONG_GOAL, message: '照做。' };
 
 function plannerEvents() {
   return [
     { type: 'user', detail: 'iso 把周报和 hello 都安排一下', time: now - 600000, uuid: 'ps-u1' },
-    { type: 'text', detail: '好，派两个会话：\n\n' + fence(GOAL_DISPATCH) + '\n\n' + fence(OLD_DISPATCH), time: now - 590000, uuid: 'ps-t1' },
-    // A reply of only a 进行中: nothing to show.
+    { type: 'text', detail: '好，派三个会话：\n\n' + fence(GOAL_DISPATCH) + '\n\n' + fence(OLD_DISPATCH) + '\n\n' + fence(LONG_DISPATCH), time: now - 590000, uuid: 'ps-t1' },
+    // Replies of only a 进行中: nothing to show, and the reply after them
+    // goes on under the robot of the one before.
     { type: 'text', detail: fence({ type: 'status', task: HELLO, state: 'doing', why: 'iso 它开始写了' }), time: now - 580000, uuid: 'ps-t2' },
+    { type: 'text', detail: fence({ type: 'status', task: WEEKLY, state: 'doing', why: 'iso 它也开始了' }), time: now - 575000, uuid: 'ps-t2b' },
     { type: 'text', detail: 'iso 周报那边开始了。\n\n' + fence({ type: 'status', task: WEEKLY, state: 'doing', why: 'iso 它在读 PR' }) + '\n\niso 有结果我告诉你。', time: now - 570000, uuid: 'ps-t3' },
     { type: 'system', summary: '📨 ' + HELLO + ' 汇报：完成 · iso hello.md 写好了，测试全部通过。', time: now - 400000 },
     { type: 'peer_message', peer: 'iso-weekly', peer_key: WEEKLY, detail: 'iso 周报初稿写好了。放在 docs/weekly.md，等你看一眼再发。', summary: 'iso 周报初稿写好了。', time: now - 300000, uuid: 'ps-p1' },
@@ -135,13 +145,23 @@ test('desktop: a crowded conversation shows one line for each dispatch, status, 
     await expect(withGoal.locator('.pl-act-rows dd').last()).toHaveText(GOAL_DISPATCH.message);
     await withGoal.locator('summary').click();
     await expect(withGoal.locator('.pl-act-rows')).toBeHidden();
+    // The goal cut as the gateway cuts it (60 characters, the emoji whole),
+    // a path by its last part, whole in the rows.
+    const long = stream.locator('.pl-act-dispatch').nth(2);
+    await expect(long.locator('summary')).toHaveText('派出 · iso 长目标 · proj-long · ' + '长'.repeat(59) + '…');
+    await expect(long.locator('.pl-act-ws')).toHaveAttribute('title', LONG_DISPATCH.workspace);
+    await expect(long.locator('.pl-act-rows dd').first()).toHaveText(LONG_DISPATCH.workspace);
 
     // 进行中 is not in the conversation: the reply of only that is no
     // bubble, the other keeps its text.
     await expect(stream.locator('.pl-act-status')).toHaveCount(2);
     await expect(stream.locator('.event.text[data-uuid="ps-t2"]')).toBeHidden();
+    await expect(stream.locator('.event.text[data-uuid="ps-t2b"]')).toBeHidden();
     const t3 = stream.locator('.event.text[data-uuid="ps-t3"]');
     await expect(t3).toBeVisible();
+    const robot = (loc) => loc.locator('.event-icon').evaluate((el) => getComputedStyle(el).visibility);
+    expect(await robot(stream.locator('.event.text[data-uuid="ps-t1"]'))).toBe('visible');
+    expect(await robot(t3)).toBe('hidden');
     await expect(t3).toContainText('iso 周报那边开始了。');
     await expect(t3).toContainText('iso 有结果我告诉你。');
     await expect(stream).not.toContainText('进行中');
@@ -170,6 +190,10 @@ test('desktop: a crowded conversation shows one line for each dispatch, status, 
     // folded.
     const peer = stream.locator('.event.peer_message .pl-peer');
     await expect(peer.locator('summary')).toHaveText(/^来自会话 iso-weekly\s*iso 周报初稿写好了。$/);
+    // A summary is a button already: none inside it (the sender's card in
+    // the body links the session).
+    await expect(peer.locator('summary button')).toHaveCount(0);
+    await expect(peer.locator('.pl-peer-body .pl-scard[data-key="' + WEEKLY + '"]')).toHaveCount(1);
     await expect(peer.locator('.pl-peer-body')).toBeHidden();
     await expect(peer.locator('.pl-peer-body')).toContainText('等你看一眼再发。');
 
@@ -199,6 +223,8 @@ test('desktop: a crowded conversation shows one line for each dispatch, status, 
     await pin.click();
     await expect(page.locator('#pl-cards')).toBeInViewport();
     await expect(page.locator('#pl-cards')).toHaveClass(/inbox-lit/);
+    // The focus goes to the first question's first answer.
+    await expect(page.locator('#pl-cards .pl-card[data-id="in_a1"] button', { hasText: '发' }).first()).toBeFocused();
     // "在对话底部回答 ↓" goes to its own card there.
     await page.locator('#pl-events').evaluate((el) => { el.scrollTop = 0; });
     await mine.locator('[data-action="planner-jump-ask"]').click();
@@ -206,6 +232,9 @@ test('desktop: a crowded conversation shows one line for each dispatch, status, 
     await expect(inline).toBeInViewport();
     await expect(inline).toHaveClass(/inbox-lit/);
     await expect(inline.locator('button', { hasText: '先别发' })).toBeVisible();
+    await page.locator('#pl-events').evaluate((el) => { el.scrollTop = 0; });
+    await page.locator('#pl-wait .pl-card[data-id="in_a2"] [data-action="planner-jump-ask"]').click();
+    await expect(page.locator('#pl-cards .pl-card[data-id="in_a2"] .pl-card-acts button').first()).toBeFocused();
 
     // A report line opens its 任务 card, expanded on its digest and lit;
     // expanding it looked at its new result.
@@ -337,5 +366,101 @@ test('the pin: none without the Planner\'s questions, and in the drawer', async 
   } finally {
     await ctx2.close();
     mock2.server.close();
+  }
+});
+
+test('a report line from the drawer: a put-away session opens on the page, never under the drawer\'s conversation', async ({ browser }) => {
+  test.setTimeout(60000);
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const page = await ctx.newPage();
+  const mock = await server();
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await page.keyboard.press('Alt+KeyP');
+    const drawer = page.locator('#planner-drawer');
+    await expect(drawer.locator('.pl-report')).toHaveCount(3);
+    // 任务 does not list it: the page's middle column opens it, the drawer
+    // gone with the conversation.
+    await drawer.locator('.pl-report').nth(2).click();
+    await expect(page.locator('body')).toHaveClass(/nz-view-planner/);
+    await expect(drawer).toBeHidden();
+    await expect(page.locator('#planner-main > #pl-center')).toHaveCount(1);
+    await expect(page.locator('#planner-main')).toHaveClass(/pl-sess-open/);
+    await expect(page.locator('#pl-sess')).toHaveAttribute('data-key', GONE);
+    await expect(page.locator('#pl-events')).toBeHidden();
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+test('a report line ends "只看新结果" for a card it hides, and marks read a card with no digest yet', async ({ browser }) => {
+  test.setTimeout(60000);
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const page = await ctx.newPage();
+  const list = tasks();
+  // GONE is listed, new, its digest not written yet.
+  list.tasks.push({ id: GONE, kind: 'session', title: 'iso 旧任务', state: 'done', by: 'planner', at: iso(now - 150000), created: iso(now - 900000), new: true,
+    report: { state: 'done', summary: 'iso 旧任务收尾', at: iso(now - 150000) } });
+  const mock = await server({ tasks: list });
+  try {
+    await openPlanner(page, mock);
+    await page.locator('#pl-news [data-action="tasks-only-new"]').click();
+    await expect(page.locator('#pl-task .tk-filter')).toContainText('只看新结果 2 件');
+    await expect(page.locator('#pl-task .tk-card[data-id="' + WEEKLY + '"]')).toHaveCount(0);
+    const reports = page.locator('#pl-stream .pl-report');
+    // WEEKLY has nothing new: its line shows all the cards again, on its own.
+    await reports.nth(1).click();
+    await expect(page.locator('#pl-task .tk-filter')).toHaveCount(0);
+    const weekly = page.locator('#pl-task .tk-card[data-id="' + WEEKLY + '"]');
+    await expect(weekly).toHaveClass(/inbox-lit/);
+    await expect(weekly).toBeInViewport();
+    // No digest to expand: the line still looks at its result.
+    await reports.nth(2).click();
+    const gone = page.locator('#pl-task .tk-card[data-id="' + GONE + '"]');
+    await expect(gone).toHaveClass(/inbox-lit/);
+    await expect.poll(() => mock.tasksSeenCalls).toEqual([{ ids: [GONE] }]);
+    await expect(page.locator('#planner-main')).not.toHaveClass(/pl-sess-open/);
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+test('replies of only a 进行中 leave no robot doubled and no time divider over nothing', async ({ browser }) => {
+  test.setTimeout(60000);
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const page = await ctx.newPage();
+  const t0 = now - 3600000;
+  const doing = (uuid, time) => ({ type: 'text', detail: fence({ type: 'status', task: HELLO, state: 'doing', why: 'iso 在做' }), time, uuid });
+  const events = [
+    { type: 'user', detail: 'iso 第一件', time: t0, uuid: 'pe-u1' },
+    { type: 'text', detail: 'iso 好的。', time: t0 + 1000, uuid: 'pe-a' },
+    doing('pe-e1', t0 + 2000),
+    doing('pe-e2', t0 + 3000),
+    { type: 'text', detail: 'iso 接着说。', time: t0 + 4000, uuid: 'pe-b' },
+    { type: 'user', detail: 'iso 第二件', time: t0 + 5000, uuid: 'pe-u2' },
+    doing('pe-e3', t0 + 6000),
+    { type: 'text', detail: 'iso 第二件开始了。', time: t0 + 7000, uuid: 'pe-c' },
+    // Ten minutes on, a divider that only an empty reply follows.
+    doing('pe-e4', t0 + 600000),
+  ];
+  const mock = await server({ plannerEvents: events, plannerNotes: [] });
+  try {
+    await openPlanner(page, mock);
+    const stream = page.locator('#pl-stream');
+    await expect(stream.locator('.event.text[data-uuid="pe-c"]')).toBeVisible();
+    const robot = (uuid) => stream.locator('.event.text[data-uuid="' + uuid + '"] .event-icon').evaluate((el) => getComputedStyle(el).visibility);
+    expect(await robot('pe-a')).toBe('visible');
+    // Two hidden replies between it and the reply before: one robot.
+    expect(await robot('pe-b')).toBe('hidden');
+    // After your message, the reply shows the robot the hidden one would have.
+    expect(await robot('pe-c')).toBe('visible');
+    await expect(stream.locator('.event-time-divider')).toHaveCount(2);
+    await expect(stream.locator('.event-time-divider:visible')).toHaveCount(1);
+  } finally {
+    await ctx.close();
+    mock.server.close();
   }
 });

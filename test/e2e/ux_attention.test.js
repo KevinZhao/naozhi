@@ -244,10 +244,15 @@ test('the idle Home sums up what needs you and goes straight to it (desktop)', a
     await expect(page.locator('#quick-ask-input')).toBeVisible();
     await expect(page.locator('#home-attn .ha-n-wait')).toHaveText('等你 6');
 
-    // The Planner's own question opens the Planner page on its card, lit.
+    // The Planner's own question opens the Planner page where it is
+    // answered (the desktop left column keeps a line for it, UX review 9):
+    // the conversation's end, lit, its first answer focused.
     await page.locator('#home-attn .ha-row[data-id="in_d2"]').click();
     await expect(page.locator('body')).toHaveClass(/nz-view-planner/);
-    await expect(page.locator('#pl-wait .pl-card[data-id="in_d2"]')).toHaveClass(/inbox-lit/);
+    const asked = page.locator('#pl-cards .pl-card[data-id="in_d2"]');
+    await expect(asked).toHaveClass(/inbox-lit/);
+    await expect(asked).toBeInViewport();
+    await expect(asked.locator('.pl-card-acts button').first()).toBeFocused();
   } finally {
     await ctx.close();
     mock.server.close();

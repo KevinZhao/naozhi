@@ -160,7 +160,7 @@ export function paintSessionCards(root) {
     if (!name) return;
     delete el.dataset.ws;
     const head = el.querySelector('.pl-act-ws');
-    if (head) head.textContent = ' · ' + name;
+    if (head) { head.textContent = ' · ' + wsLabel(name); head.title = name; }
     el.querySelector('.pl-act-rows')?.insertAdjacentHTML('afterbegin', '<dt>工作区</dt><dd>' + esc(name) + '</dd>');
   });
   root.querySelectorAll('.pl-report-name[data-key]').forEach((el) => {
@@ -219,10 +219,19 @@ const STATUS_MARK = { done: '✓', failed: '✗' };
 const isStr = (v) => typeof v === 'string';
 const str = (v) => (isStr(v) ? v : '');
 
-// LINE_MAX caps a dispatch's one line, as the gateway caps its goal (D103).
+// LINE_MAX caps a dispatch's one line in characters, as the gateway caps
+// its goal (planner/action goalRunes, D103): one past it is cut to the
+// "…", so the card says what the task card and the digest say.
 const LINE_MAX = 60;
 const oneLine = (s) => s.replace(/\s+/g, ' ').trim();
-const capped = (s) => (s.length > LINE_MAX ? s.slice(0, LINE_MAX) + '…' : s);
+function capped(s) {
+  const chars = Array.from(s);
+  return chars.length > LINE_MAX ? chars.slice(0, LINE_MAX - 1).join('') + '…' : s;
+}
+
+// wsLabel is a workspace in a dispatch's one line: a path by its last part,
+// the rows below saying it whole.
+const wsLabel = (name) => name.replace(/\/+$/, '').split('/').pop() || name;
 
 // firstSentence is a dispatch's message's first sentence (to its 。！？!? or
 // ". ", within its first paragraph), the goal of a block that gives none.
@@ -285,11 +294,11 @@ function actionCardHtml(raw) {
     const ws = str(a.workspace);
     // A workspace written by its ID is named once the registry is in.
     const name = WORKSPACE_ID_RE.test(ws) ? workspaceName(ws) : ws;
-    const goal = oneLine(str(a.goal));
+    const goal = capped(oneLine(str(a.goal)));
     const line = goal || firstSentence(str(a.message));
     return '<details class="pl-act pl-act-dispatch"' + (name || !ws ? '' : ' data-ws="' + escAttr(ws) + '"') + '>' +
       '<summary class="pl-act-h"><span class="pl-act-k">派出</span>' + (title ? ' · <b>' + esc(title) + '</b>' : '') +
-        '<span class="pl-act-ws">' + (name ? ' · ' + esc(name) : '') + '</span>' +
+        (name ? '<span class="pl-act-ws" title="' + escAttr(name) + '"> · ' + esc(wsLabel(name)) + '</span>' : '<span class="pl-act-ws"></span>') +
         (line ? '<span class="pl-act-goal" title="' + escAttr(line) + '"> · ' + esc(line) + '</span>' : '') + '</summary>' +
       rowsHtml([['工作区', name], ['目标', goal], ['模型', str(a.model)], ['附上', a.with_user_words === true ? '你这一轮的原话' : ''],
         ['放行写工具', mcpToolsText(a.mcp_tools)], ['模式', a.ultracode === true ? 'ultracode（每一轮可多代理编排）' : ''],
@@ -370,6 +379,35 @@ export function decorateEvents(root) {
     if (ev.matches('.event:not([data-pl-dec])')) decorateEvent(ev, turn);
     if (!ev.matches('.user')) ev.querySelectorAll('.pl-scard[data-key]').forEach((b) => turn.add(b.dataset.key));
   });
+  tidyEmpty(root);
+}
+
+// tidyEmpty mends what the hidden empty bubbles (.pl-ev-empty) would leave:
+// a reply after them shows the robot (.pl-ev-lead) unless the bubble shown
+// before them was a reply too, and a time divider that only they follow
+// goes (.pl-div-empty). The bubbles around change as pages come in on
+// either end, so each pass reads the whole stream.
+export function tidyEmpty(root) {
+  if (!root) return;
+  let div = null;
+  let shown = false;
+  const endDiv = () => { if (div) div.classList.toggle('pl-div-empty', !shown); };
+  for (const c of root.children) {
+    if (c.matches('.event-time-divider')) {
+      endDiv();
+      div = c;
+      shown = false;
+      continue;
+    }
+    const empty = c.matches('.pl-ev-empty');
+    if (!empty) shown = true;
+    if (!c.matches('.event.text') || empty) continue;
+    let prev = c.previousElementSibling;
+    if (!prev || !prev.matches('.pl-ev-empty')) { c.classList.remove('pl-ev-lead'); continue; }
+    while (prev && prev.matches('.pl-ev-empty')) prev = prev.previousElementSibling;
+    c.classList.toggle('pl-ev-lead', !(prev && prev.matches('.event.text')));
+  }
+  endDiv();
 }
 
 function decorateEvent(ev, turn) {
@@ -447,9 +485,11 @@ function reportLine(ev, content) {
 }
 
 // foldPeer folds a cross-session message on the Planner page to its sender
-// and first sentence (§15.12 ⑤): the sender's line (.peer-source) and the
-// sentence are the fold's summary, the whole message and the sender's card
-// its body. A message of one sentence has nothing to fold.
+// and first sentence (§15.12 ⑤): the sender's line as text and the sentence
+// are the fold's summary, the whole message and the sender's card (its
+// link, carded first: mentionedKeys) the body. A summary holds no button,
+// it is one itself, so the line's link (.peer-source) goes. A message of
+// one sentence has nothing to fold.
 function foldPeer(content) {
   const src = content.querySelector(':scope > .peer-source');
   if (!src) return;
@@ -465,13 +505,17 @@ function foldPeer(content) {
   d.className = 'pl-peer';
   const sum = document.createElement('summary');
   sum.className = 'pl-peer-h';
+  const from = document.createElement('span');
+  from.className = 'pl-peer-from';
+  from.textContent = oneLine(src.textContent);
   const lead = document.createElement('span');
   lead.className = 'pl-peer-first';
   lead.textContent = first;
-  sum.append(src, lead);
+  sum.append(from, lead);
   const wrap = document.createElement('div');
   wrap.className = 'pl-peer-body';
   wrap.append(...body);
+  src.remove();
   d.append(sum, wrap);
   content.prepend(d);
 }

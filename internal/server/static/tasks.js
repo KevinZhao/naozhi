@@ -622,14 +622,20 @@ export function paintTaskHeader() {
 }
 
 // revealTask brings task id's card on the Planner page into view and lights
-// it, unfolding 已完成 when it is there; the page may still be painting the
-// list, so it looks again for a while. expand also expands its digest (a
-// report line opens the card on what it reported, which looks at its
-// result).
+// it, unfolding 已完成 when it is there, and ending "只看新结果" when that
+// leaves the card out; the page may still be painting the list, so it looks
+// again for a while. expand also expands its digest (a report line opens the
+// card on what it reported) and looks at its result, a digest not written
+// yet or open already too.
 export function revealTask(id, { expand = false } = {}) {
   const sel = '#pl-task .tk-card[data-id="' + CSS.escape(id) + '"]';
   let tries = 0;
   const look = () => {
+    if (onlyNew && byId.has(id) && !onlyNew.has(id) && !byId.get(id).new) {
+      onlyNew = null;
+      paintNews();
+      repaintAll();
+    }
     let el = document.querySelector(sel);
     const fold = el && el.closest('details.tk-sec-done');
     if (fold && !fold.open) fold.open = true;
@@ -639,9 +645,9 @@ export function revealTask(id, { expand = false } = {}) {
         digestOpen = id;
         loadDigest(id);
         repaintAll();
-        seenTask(id);
         el = document.querySelector(sel) || el;
       }
+      if (expand) seenTask(id);
       el.scrollIntoView({ block: 'center' });
       light(el, sel, id);
       return;

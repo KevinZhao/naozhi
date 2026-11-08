@@ -380,11 +380,11 @@ body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
 .pl-act-line .pl-act-name{font-weight:600;color:var(--nz-text-strong)}
 .pl-act-mark{display:inline-block;width:1em;text-align:center;font-weight:700}
 .pl-st-done .pl-act-mark{color:var(--nz-green)}
-/* A reply that was only a status 进行中 (planner_cards.js): no empty bubble;
-   the next reply keeps the robot the hidden one would have shown. */
-.pl-events .event.pl-ev-empty{display:none}
-.pl-events .event.text.pl-ev-empty + .event.text .event-icon{visibility:visible}
-.pl-events .event.text:not(.pl-ev-empty) + .event.text.pl-ev-empty + .event.text .event-icon{visibility:hidden}
+/* A reply that was only a status 进行中 (planner_cards.js): no empty bubble,
+   nor a time divider only such follow; the reply after them shows the robot
+   when the bubble shown before them was not a reply (.pl-ev-lead, tidyEmpty). */
+.pl-events .event.pl-ev-empty,.pl-events .event-time-divider.pl-div-empty{display:none}
+.pl-events .event.text.pl-ev-empty + .event.text.pl-ev-lead .event-icon{visibility:visible}
 /* A session's report (📨 名字 汇报：…) is the gateway's line that opens its
    任务 card. */
 .pl-report{max-width:100%;padding:2px 6px;border:0;border-radius:var(--nz-radius-sm);background:none;color:inherit;font:inherit;text-align:center;cursor:pointer;overflow-wrap:anywhere}
@@ -393,7 +393,7 @@ body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
 /* A session's SendMessage folds to its sender and first sentence. */
 .pl-peer>summary{list-style:none;cursor:pointer;display:flex;align-items:baseline;gap:6px;min-width:0}
 .pl-peer>summary::-webkit-details-marker{display:none}
-.pl-peer>summary .peer-source{flex-shrink:0;margin:0}
+.pl-peer-from{flex-shrink:0;font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
 .pl-peer-first{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pl-peer[open] .pl-peer-first{display:none}
 .pl-peer-body{margin-top:4px}

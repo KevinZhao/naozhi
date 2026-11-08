@@ -51,7 +51,7 @@ import { dedupEarlierPage, hasMoreHeader } from './event_stream.js';
 import { renderMd, runPendingAsync } from './render_md.js';
 import { inbox, isLit, light, notifySupported, onInboxCount, onNotify, requestNotifyPermission, revealFocus } from './notify.js';
 import { followWorkbenchSubject, noteWorkbenchEvent } from './workbench_panes.js';
-import { decisionActsHtml, decorateEvents, noteWorkspaces, paintSessionCards, refreshHealth, unitName, webLinkHtml, workspaceName } from './planner_cards.js';
+import { decisionActsHtml, decorateEvents, noteWorkspaces, paintSessionCards, refreshHealth, tidyEmpty, unitName, webLinkHtml, workspaceName } from './planner_cards.js';
 import { clearAck, clearPending, closePlannerSession, mountComposer, noteAck, notePlannerStatus, openPlannerSession, showPlannerLeft } from './planner_chat.js';
 import { onSessionsApplied } from './session_list.js';
 import { countHeadHtml, ensureTasks, inProgress, mountTasks, refreshTasks, revealTask, taskOf } from './tasks.js';
@@ -311,9 +311,18 @@ function paintWaiting() {
 }
 
 // revealWaiting brings the focused item into view (notify.js), unfolding
-// the phone's left block when it is folded.
+// the phone's left block when it is folded. The Planner's own question,
+// one line in a desktop's left column (UX review 9), is brought into view
+// where it is answered, at the conversation's end.
 function revealWaiting() {
-  if (!inbox.focus || ui.activeView !== 'planner' || !$('pl-wait')?.querySelector('.pl-card[data-id="' + CSS.escape(inbox.focus) + '"]')) return;
+  const card = inbox.focus && ui.activeView === 'planner' ? $('pl-wait')?.querySelector('.pl-card[data-id="' + CSS.escape(inbox.focus) + '"]') : null;
+  if (!card) return;
+  if (card.querySelector('.pl-card-ref')?.getClientRects().length) {
+    const id = inbox.focus;
+    inbox.focus = '';
+    jumpToAsk(id);
+    return;
+  }
   showPlannerLeft(true);
   revealFocus($('pl-wait'));
 }
@@ -327,7 +336,13 @@ function paintInlineCards(items) {
   if (!box) return;
   const mine = items.filter(isPlannerAsk);
   const html = mine.length ? '<div class="pl-cards-h">待你回答 · ' + mine.length + '</div>' + mine.map((it) => itemHtml(it)).join('') : '';
-  if (box.innerHTML !== html) box.innerHTML = html;
+  if (box.innerHTML !== html) {
+    // An answer jumped to (jumpToAsk) keeps the focus across the repaint.
+    const f = box.contains(document.activeElement) ? document.activeElement : null;
+    const was = f && f.dataset.id ? '[data-id="' + CSS.escape(f.dataset.id) + '"][data-act="' + CSS.escape(f.dataset.act || '') + '"]' : '';
+    box.innerHTML = html;
+    if (was) box.querySelector(was)?.focus({ preventScroll: true });
+  }
   box.hidden = !html;
   paintPin(mine.length);
 }
@@ -346,6 +361,10 @@ function paintPin(n) {
 // jumpToAsk brings the questions at the conversation's end into view and
 // lights them (one, given its ref): from the opened session's header back to
 // the conversation, from a phone's unfolded left block onto it.
+//
+// The focus goes to the question's first answer (the first question's for
+// the pin): the button pressed scrolled away, and Tab from it would cross
+// all of 任务 and the conversation to get there.
 function jumpToAsk(ref) {
   closePlannerSession(false);
   showPlannerLeft(false);
@@ -355,21 +374,23 @@ function jumpToAsk(ref) {
   const el = document.querySelector(sel) || box;
   el.scrollIntoView({ block: 'nearest' });
   light(el, sel, ref || '');
+  el.querySelector('.pl-card-acts button')?.focus({ preventScroll: true });
 }
 
 // openReport opens the 任务 card a report line is about, expanded on its
-// digest and lit (on a phone in the unfolded left block; from the drawer on
-// the page, which has the column); a session 任务 does not list (put away)
-// opens in the middle column instead.
+// digest and lit (on a phone in the unfolded left block); a session 任务
+// does not list (put away) opens in the middle column instead. From the
+// drawer either goes to the page first: the drawer has no left column, and
+// no middle column for a session (the composer would send to it there).
 async function openReport(key) {
   if (!key) return;
   // The drawer may show the conversation with 任务 never read.
   if (!taskOf(key)) await ensureTasks();
+  if (pl.host !== 'page') shell.setActivityView('planner');
   if (!taskOf(key)) {
     openPlannerSession(key);
     return;
   }
-  if (pl.host !== 'page') shell.setActivityView('planner');
   showPlannerLeft(true);
   revealTask(key, { expand: true });
 }
@@ -636,6 +657,7 @@ function placeBriefs() {
     placed = true;
   }
   if (!placed) return;
+  tidyEmpty(box);
   paintStreamEmpty();
   runPendingAsync();
   if (atBottom) scroller.scrollTop = scroller.scrollHeight;
