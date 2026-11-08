@@ -129,6 +129,14 @@ type Config struct {
 	// makes): a turn that ended with work still going (后台中) is no end of
 	// the task to report. nil is none open.
 	Background func(key string) bgtask.State
+	// UserSent reports whether the user sent session key a message after
+	// since: typed into it, or their decision or answer the gateway relayed
+	// (clievent.SourceRelay); not custody's, nor the Planner's dispatch
+	// (wireup.CustodySources.UserSent). A need_user report's question is
+	// closed by the end of a turn after the user's answer, not by one a
+	// background task's end or a Monitor's event started. nil counts every
+	// turn as the user's.
+	UserSent func(key string, since time.Time) bool
 	// PlannerBusy reports whether a Planner turn is running
 	// (agent.Agent.Busy): a report may wait behind it. nil is never.
 	PlannerBusy func() bool
@@ -373,7 +381,8 @@ func (r *Runner) Run(ctx context.Context) {
 // one a receipt. The report goes through the gateway, not SendMessage: the
 // CLI puts a cross-session message whole into the Planner's context, which
 // the gateway cannot cut short. A need_user report opens a question in
-// "等你" on the session, open until its next turn ends.
+// "等你" on the session, open until a turn ends after the user answered
+// (answered), or the task is marked done or failed.
 func (r *Runner) taskEnded(key, text string) {
 	if r.cfg.Tasks == nil || r.cfg.Sessions == nil {
 		return
@@ -426,12 +435,16 @@ func (r *Runner) taskEnded(key, text string) {
 	if r.cfg.Inbox == nil {
 		return
 	}
-	// The question its previous turn asked is answered or moot once the
-	// session has run another, unless it asks again: then the open one
-	// stands, retitled, not pushed again.
+	// The question an earlier turn asked is answered once a turn ends after
+	// the user's message; one that ends with no word from them (a
+	// background task's end or a Monitor's event woke the CLI, custody
+	// retried) leaves it open for them. A turn that asks again keeps the
+	// open one, retitled, not pushed again.
 	src := ReportSource(key)
 	if !ok || rep.State != ReportNeedUser {
-		r.cfg.Inbox.CloseSource(src, notify.ClosedByAuto)
+		if r.answered(key, src) {
+			r.cfg.Inbox.CloseSource(src, notify.ClosedByAuto)
+		}
 		return
 	}
 	title := textutil.TruncateRunes(cmp.Or(m.Title, key)+" 要你决定："+rep.Summary, notifyTitleRunes)
@@ -447,8 +460,20 @@ func (r *Runner) taskEnded(key, text string) {
 }
 
 // ReportSource is the "等你" source of session key's need_user report:
-// closed when its next turn ends, or its task is marked done or failed.
+// closed when a turn ends after the user answered, or its task is marked
+// done or failed.
 func ReportSource(key string) string { return "report:" + key }
+
+// answered reports whether the user sent session key a message since its
+// open question src was opened; false with none open.
+func (r *Runner) answered(key, src string) bool {
+	open, _ := r.cfg.Inbox.List(0)
+	i := slices.IndexFunc(open, func(it notify.Item) bool { return it.Source == src })
+	if i < 0 {
+		return false
+	}
+	return r.cfg.UserSent == nil || r.cfg.UserSent(key, open[i].Created)
+}
 
 // TaskState is task.Config.OnState's part for the runner: a task done or
 // failed waits on no answer to its need_user report any more. Safe on a nil
@@ -619,7 +644,9 @@ func (r *Runner) checkEnded(e ended) {
 // is, its digest; the conversation gets the line too, as a note (the
 // receipt itself is not shown). Every state is told, progress too, though
 // only done and blocked are checked for the task left 进行中
-// (checkReports): progress asks for nothing, need_user waits on the user.
+// (checkReports): progress asks for no status, need_user waits on the
+// user. Progress with no background work open says the session will not
+// go on by itself, and, in custody, how to have it go on.
 // A report other than progress is what the receipts of an unreported turn
 // end ask for, so it ends their quiet: the next unreported turn end is
 // told; progress is the session still at it, as the doing block that
@@ -674,6 +701,16 @@ func (r *Runner) checkReport(e ended, tasks []task.Task, i int, now time.Time) {
 	default:
 		line += " · 全文稍后写进 " + p
 	}
+	// Progress with no background work left to wake the session is a
+	// session stopped at its turn's end: nothing starts another, so the
+	// line says so, and custody's hint the unreported receipt carries rides
+	// with it (the same judgment, bgtask, custody's Settled reads).
+	if e.report.State == ReportProgress && !r.background(e.key).Open() {
+		line += "。后台没有任务在跑，这一轮结束后它不会自己接着做"
+		if c := r.cfg.Custody; c != nil && c.Check(e.key) == nil && c.Settled(e.key) {
+			line += "。它在托管中：没做完、下一步又显而易见，就让它继续（" + custodyFormat(e.key) + "）。" + irreversibleRule
+		}
+	}
 	r.reportTold[e.key] = toldReport{at: now, state: e.report.State}
 	r.tell(line)
 	r.note("📨 " + e.key + " 汇报：" + word + " · " + e.report.Summary)
@@ -696,12 +733,24 @@ func (r *Runner) background(key string) bgtask.State {
 	return r.cfg.Background(key)
 }
 
-// reports is Config.Reports, nil-safe.
+// reports is Config.Reports, nil-safe, less the sessions that report in a
+// report block (sidecar.Meta.ReportBlock): the prompt they were dispatched
+// on has them SendMessage the Planner to ask on the way, so a message of
+// theirs is no report, and counting it would drop the receipt of a turn
+// that ended without a block and remind the Planner of a question as of a
+// report. A session dispatched before still reports by SendMessage.
 func (r *Runner) reports(from, to time.Time) []string {
 	if r.cfg.Reports == nil {
 		return nil
 	}
-	return r.cfg.Reports(from, to)
+	keys := r.cfg.Reports(from, to)
+	if r.cfg.Sessions == nil {
+		return keys
+	}
+	return slices.DeleteFunc(slices.Clone(keys), func(k string) bool {
+		m, ok := r.cfg.Sessions.Get(k)
+		return ok && m.ReportBlock
+	})
 }
 
 // hold holds e, the session's latest turn end, to end, its quiet window's
@@ -1388,7 +1437,8 @@ func (r *Runner) spawn(d Dispatch) (key, wsName string, err error) {
 	key = sidecar.TaskKey()
 	if err := r.cfg.Sessions.Put(sidecar.Meta{
 		Key: key, Purpose: sidecar.PurposeTask, Parent: r.cfg.Planner, Title: d.Title, Workspace: w.ID,
-		Dir: dir, Model: d.Model, MCPTools: d.MCPTools, Ultracode: d.Ultracode, Custody: &sidecar.Custody{On: true, By: custody.ByAuto, At: r.cfg.Now()},
+		Dir: dir, Model: d.Model, MCPTools: d.MCPTools, Ultracode: d.Ultracode, ReportBlock: true,
+		Custody: &sidecar.Custody{On: true, By: custody.ByAuto, At: r.cfg.Now()},
 	}); err != nil {
 		return "", "", fmt.Errorf("记不下会话信息（%v）", err)
 	}
@@ -1442,7 +1492,7 @@ func (r *Runner) status(b Block) error {
 	}
 	s := *b.Status
 	if _, ok := r.cfg.Tasks.Title(s.Task); !ok {
-		return blockError{fmt.Errorf("找不到任务 %q（填 task: key 或承诺 ID）", s.Task)}
+		return blockError{fmt.Errorf("找不到任务 %q（填 task: key、承诺 ID，或你开的会话的 key）", s.Task)}
 	}
 	state := task.State(s.State)
 	switch err := r.cfg.Tasks.Set(s.Task, state, task.ByPlanner, s.Why); {

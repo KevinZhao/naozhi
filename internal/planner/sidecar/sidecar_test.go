@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -178,5 +179,33 @@ func TestEnsure(t *testing.T) {
 	}
 	if err := s.Ensure(""); err == nil {
 		t.Error("Ensure(\"\") = nil, want an error")
+	}
+}
+
+// ReportBlock is a field added without a version bump: kept across a
+// reopen when set, absent from the file when not, so a sidecar of before
+// reads as a session reporting by SendMessage.
+func TestReportBlockField(t *testing.T) {
+	dir := t.TempDir()
+	s := Open(dir, nil)
+	block, old := TaskKey(), TaskKey()
+	for key, on := range map[string]bool{block: true, old: false} {
+		if err := s.Put(Meta{Key: key, Purpose: PurposeTask, ReportBlock: on}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	re := Open(dir, nil)
+	if m, _ := re.Get(block); !m.ReportBlock {
+		t.Errorf("reopened %+v, want ReportBlock kept", m)
+	}
+	if m, _ := re.Get(old); m.ReportBlock {
+		t.Errorf("reopened %+v, want no ReportBlock", m)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, fileName(old)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "report_block") {
+		t.Errorf("unset ReportBlock written: %s", data)
 	}
 }

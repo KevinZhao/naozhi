@@ -2,6 +2,7 @@ package wireup
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,5 +86,39 @@ func TestUserSince(t *testing.T) {
 	p.EventLog.Append(clievent.EventEntry{Time: time.Now().UnixMilli(), Type: clievent.KindUser, Source: clievent.SourceCustody})
 	if src.UserSince(relayed, mark) {
 		t.Error("custody's message: UserSince = true")
+	}
+}
+
+// UserSent is the user's word reaching the session after a time, typed or
+// relayed by the gateway (their decision, their answer to a question):
+// custody's message, the Planner's dispatch and a message before the time
+// are not.
+func TestUserSent(t *testing.T) {
+	r := newDigestRouter(t)
+	src := CustodySources{Router: r}
+	since := time.Now().Add(-time.Minute)
+	for _, c := range []struct {
+		name   string
+		source string
+		at     time.Time
+		want   bool
+	}{
+		{"typed", "", time.Now(), true},
+		{"relayed", clievent.SourceRelay, time.Now(), true},
+		{"custody's", clievent.SourceCustody, time.Now(), false},
+		{"the dispatch", clievent.SourcePlanner, time.Now(), false},
+		{"relayed before", clievent.SourceRelay, since.Add(-time.Minute), false},
+	} {
+		key := "task:" + strings.ReplaceAll(c.name, " ", "-")
+		p := session.NewTestProcess()
+		r.InjectSession(key, p)
+		p.EventLog.Append(clievent.EventEntry{Time: c.at.UnixMilli(), Type: clievent.KindUser, Source: c.source, Summary: "选 A"})
+		p.EventLog.Append(clievent.EventEntry{Time: time.Now().UnixMilli(), Type: "text"})
+		if got := src.UserSent(key, since); got != c.want {
+			t.Errorf("%s: UserSent = %v, want %v", c.name, got, c.want)
+		}
+	}
+	if src.UserSent("task:none", since) {
+		t.Error("no session: UserSent = true")
 	}
 }

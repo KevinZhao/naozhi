@@ -64,6 +64,25 @@ func (c CustodySources) UserSince(key string, t time.Time) bool {
 	return !lastUserAt(s.EventEntriesSince(t.UnixMilli())).IsZero()
 }
 
+// UserSent is action.Config.UserSent: UserSince, or a decision or answer of
+// the user's the gateway relayed to key after t (a relay entry): the turn
+// that ends after either was the user's.
+func (c CustodySources) UserSent(key string, t time.Time) bool {
+	if c.UserSince(key, t) {
+		return true
+	}
+	s := c.Router.SessionFor(key)
+	if s == nil {
+		return false
+	}
+	for _, e := range s.EventEntriesSince(t.UnixMilli()) {
+		if e.Type == clievent.KindUser && e.Source == clievent.SourceRelay {
+			return true
+		}
+	}
+	return false
+}
+
 // lastUserAt is when the latest entry the user sent was written.
 func lastUserAt(entries []clievent.EventEntry) time.Time {
 	for i := len(entries) - 1; i >= 0; i-- {

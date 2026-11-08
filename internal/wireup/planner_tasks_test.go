@@ -244,6 +244,11 @@ func TestTaskPromptReport(t *testing.T) {
 	if !strings.Contains(p, "长时间的远端任务（远端 benchmark、CI、远程机器上的作业）必须在本地挂后台等它结束") || !strings.Contains(p, "或用 Monitor 盯着") {
 		t.Errorf("prompt lacks the remote-job rule: %s", p)
 	}
+	// progress is a session waiting on work that wakes it: with none, its
+	// turn's end is where it stops.
+	if !strings.Contains(p, "progress 只在本地还挂着后台任务或 Monitor、它们结束时会再叫醒你的时候用") || !strings.Contains(p, "没有在等的就别停在 progress") {
+		t.Errorf("prompt does not bound progress to waiting on background work: %s", p)
+	}
 	note := reportLine("planner-abc123")
 	inner := strings.TrimSuffix(strings.TrimSpace(note), "）")
 	if !strings.HasPrefix(strings.TrimSpace(note), "（网关附注：") || strings.Contains(inner, "）") ||

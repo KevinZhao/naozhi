@@ -395,7 +395,7 @@ func TestStatus(t *testing.T) {
 	}{
 		{`{"type":"status","task":"task:ab12","state":"done","why":"它汇报 hello.md 写好了"}`, ""},
 		{`{"type":"status","task":"` + p.ID + `","state":"done","why":"CI 绿了"}`, ""},
-		{`{"type":"status","task":"task:nope","state":"done","why":"w"}`, `格式不对，没有执行：找不到任务 "task:nope"`},
+		{`{"type":"status","task":"task:nope","state":"done","why":"w"}`, `格式不对，没有执行：找不到任务 "task:nope"（填 task: key、承诺 ID，或你开的会话的 key）`},
 		{`{"type":"status","task":"` + p.ID + `","state":"failed","why":"w"}`, "格式不对，没有执行：承诺没有失败状态"},
 	}
 	for _, c := range cases {
@@ -410,6 +410,67 @@ func TestStatus(t *testing.T) {
 	}
 	if got, _ := proms.Get(p.ID); got.State != promise.StateClosed || got.ClosedBy != promise.SourcePlanner {
 		t.Errorf("promise = %+v", got)
+	}
+}
+
+// TestStatusOfYours: the Planner marks a session the user opened (你开的,
+// observed: index.json's purpose chat) done when the user says it is, and
+// doing again, as it does a task: the mark is on disk, the session listed
+// so in 任务; it is no dispatch, so neither the state hook (the reply's
+// need_user question, planner/reap's put-away) nor a reminder follows, and
+// a session not observed is still no task to mark.
+func TestStatusOfYours(t *testing.T) {
+	const chat, other = "dashboard:direct:u:general", "dashboard:direct:u:other"
+	r, g, _, side, _ := newRunner(t)
+	now := r.last
+	r.cfg.Now = func() time.Time { return now }
+	var states []string
+	r.cfg.Tasks = task.New(task.Config{
+		Sessions: side, Now: func() time.Time { return now },
+		Health: func() health.Snapshot {
+			return health.Snapshot{At: now, Units: []health.Unit{
+				{ID: chat, Kind: health.KindSession, State: health.Idle, Since: now},
+				{ID: other, Kind: health.KindSession, State: health.Idle, Since: now},
+			}}
+		},
+		Watched: func(key string) bool { return key == chat },
+		OnState: func(key string, st task.State) { states = append(states, key+" "+string(st)) },
+	})
+	state := func() task.State {
+		t.Helper()
+		l := r.cfg.Tasks.List()
+		i := slices.IndexFunc(l, func(t task.Task) bool { return t.ID == chat })
+		if i < 0 || l[i].Group != task.GroupYours {
+			t.Fatalf("%s not listed in 你开的: %+v", chat, l)
+		}
+		return l[i].State
+	}
+	for _, c := range []struct{ state, why string }{{"done", "用户说 trn2 那个会话做完了"}, {"doing", "用户说还没完"}} {
+		g.notes, g.told, g.unrun = nil, nil, nil
+		now = now.Add(time.Minute)
+		r.Result(sessionkey.PlannerMainKey, "好的。\n"+block(`{"type":"status","task":"`+chat+`","state":"`+c.state+`","why":"`+c.why+`"}`))
+		r.handle(<-r.ch)
+		if len(g.notes) != 0 || len(g.told) != 0 || len(g.unrun) != 0 {
+			t.Errorf("%s: notes %q told %q unrun %q, want the block run quietly", c.state, g.notes, g.told, g.unrun)
+		}
+		m, ok := sidecar.Open(g.sideDir, nil).Get(chat)
+		if !ok || m.Mark == nil || m.Mark.State != c.state || m.Mark.By != "planner" || m.Mark.Why != c.why || m.Purpose != "" {
+			t.Errorf("%s: sidecar on disk %+v (%v), want the Planner's mark and no purpose", c.state, m, ok)
+		}
+		if got := state(); got != task.State(c.state) {
+			t.Errorf("%s: listed as %s", c.state, got)
+		}
+	}
+	if len(states) != 0 {
+		t.Errorf("state hook told %q, want nothing for a session the user opened", states)
+	}
+	g.notes = nil
+	r.Handle(block(`{"type":"status","task":"` + other + `","state":"done","why":"w"}`))
+	if want := `找不到任务 "` + other + `"（填 task: key、承诺 ID，或你开的会话的 key）`; len(g.notes) != 1 || !strings.Contains(g.notes[0], want) {
+		t.Errorf("a session not observed: notes %q, want %q", g.notes, want)
+	}
+	if _, ok := side.Get(other); ok {
+		t.Error("a session not observed got a sidecar")
 	}
 }
 
@@ -553,6 +614,7 @@ func TestTaskEndedAcrossShiftChange(t *testing.T) {
 		now = now.Add(time.Hour)
 		if reported {
 			reports = []string{key}
+			sendMessagePrompt(t, side, key)
 		}
 		r.Result(key, "hello.md 写好了")
 		r.checkEnded(next()) // the Planner is busy: checked again later
@@ -599,6 +661,8 @@ type endRig struct {
 	now      time.Time
 	held     []func()
 	reported []string
+	// userAt is when the user last sent the session a message (UserSent).
+	userAt time.Time
 }
 
 func endedRunner(t *testing.T) *endRig {
@@ -615,6 +679,7 @@ func endedRunner(t *testing.T) *endRig {
 	}
 	r.cfg.Tasks = task.New(task.Config{Sessions: side, OnState: r.TaskState})
 	r.cfg.Reports = func(time.Time, time.Time) []string { return e.reported }
+	r.cfg.UserSent = func(key string, since time.Time) bool { return key == e.key && e.userAt.After(since) }
 	e.now = time.Now()
 	r.cfg.Now = func() time.Time { return e.now }
 	r.Handle(block(`{"type":"dispatch","workspace":"` + filepath.Base(dir) + `","title":"iso 跑测试","model":"","message":"跑一遍测试"}`))
@@ -624,6 +689,17 @@ func endedRunner(t *testing.T) *endRig {
 }
 
 func (e *endRig) wait(d time.Duration) { e.now = e.now.Add(d) }
+
+// sendMessagePrompt makes the rig's session one dispatched on the prompt of
+// before the report block, which reports by SendMessage (e.reported).
+func (e *endRig) sendMessagePrompt() { sendMessagePrompt(e.t, e.side, e.key) }
+
+func sendMessagePrompt(t *testing.T, side *sidecar.Store, key string) {
+	t.Helper()
+	if ok, err := side.Update(key, func(m *sidecar.Meta) bool { m.ReportBlock = false; return true }); !ok || err != nil {
+		t.Fatalf("sidecar of %s: %v, %v", key, ok, err)
+	}
+}
 
 // check runs the turn-end checks queued.
 func (e *endRig) check() {
@@ -721,6 +797,7 @@ func TestTaskEndedLastTurnInQuiet(t *testing.T) {
 			t.Fatalf("report %v: a receipt within the window: %q", report, e.g.told)
 		}
 		if report {
+			e.sendMessagePrompt()
 			e.reported = []string{e.key}
 		}
 		e.wait(doingQuiet)
@@ -814,6 +891,7 @@ func TestTaskEndedStaleSkipped(t *testing.T) {
 func TestTaskEndedReportRearms(t *testing.T) {
 	t.Run("doing answers a report", func(t *testing.T) {
 		e := endedRunner(t)
+		e.sendMessagePrompt()
 		e.reported = []string{e.key}
 		e.end("做了一半，汇报了")
 		e.doing("它说还要跑测试")
@@ -867,6 +945,7 @@ func TestTaskEndedReportRearms(t *testing.T) {
 		e.wait(5 * time.Minute)
 		e.doing("还没做完")
 		e.wait(5 * time.Minute)
+		e.sendMessagePrompt()
 		e.reported = []string{e.key}
 		e.planner("收到汇报。")
 		e.reported = nil
@@ -1127,7 +1206,8 @@ func (e *endRig) questions() []notify.Item {
 // whatever the state, and the conversation a 📨 note; never the receipt of
 // a turn that ended without a report. The sidecar keeps it for the task
 // card, the digest its full text; need_user opens a question in "等你" on
-// the session, closed (auto) by its next turn's end. The reply to a done or
+// the session, closed (auto) by the end of a turn after the user answered,
+// not by one with no word from them. The reply to a done or
 // blocked line that leaves the task 进行中 with no status block, as a
 // Planner on the prompt of before the report block would (v15), is
 // reminded; progress asks for nothing and need_user waits on the user.
@@ -1149,6 +1229,10 @@ func TestTaskReportBlock(t *testing.T) {
 			e.reportEnd(reportReply(c.state, "测试全部通过。文档没动"))
 			path := w.Path(e.key)
 			want := e.key + "（iso 跑测试）汇报：" + c.word + " · 「测试全部通过。文档没动」 · 全文 " + path
+			if c.state == "progress" {
+				// No background work: nothing wakes it (TestProgressReportStopped).
+				want += "。后台没有任务在跑，这一轮结束后它不会自己接着做"
+			}
 			if len(e.g.told) != 1 || e.g.told[0] != want {
 				t.Fatalf("told = %q, want %q", e.g.told, want)
 			}
@@ -1187,15 +1271,24 @@ func TestTaskReportBlock(t *testing.T) {
 				t.Errorf("reminded again: %q", e.g.told)
 			}
 
-			// The next turn ends without one: its receipt comes, the
-			// question is closed.
+			// The next turn ends without one, the user not having said a
+			// word (a background task's end woke it): its receipt comes,
+			// the question stays.
 			e.wait(time.Minute)
-			e.end("又跑了一遍")
+			e.end("后台的测试跑完了")
 			if got := e.receipts(); len(got) != 1 || !strings.Contains(got[0], "没有写汇报块") || strings.Contains(got[0], "格式不对") {
 				t.Errorf("receipts = %q, want one of the unreported turn", got)
 			}
+			if qs := e.questions(); len(qs) != map[bool]int{true: 1}[c.state == "need_user"] {
+				t.Errorf("questions after a turn the user did not start = %+v", qs)
+			}
+			// The user answers; the turn after it ends: closed.
+			e.wait(time.Minute)
+			e.userAt = e.now
+			e.wait(time.Minute)
+			e.end("按你选的 A 改好了")
 			if qs := e.questions(); len(qs) != 0 {
-				t.Errorf("questions after the next turn = %+v, want none", qs)
+				t.Errorf("questions after the user's turn = %+v, want none", qs)
 			}
 			if _, closed := e.inbox.List(10); c.state == "need_user" && (len(closed) != 1 || closed[0].ClosedBy != notify.ClosedByAuto) {
 				t.Errorf("closed = %+v, want the question closed by the gateway, not the user", closed)
@@ -1420,6 +1513,143 @@ func TestTaskReportBlock(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestProgressReportStopped: a progress report is a session waiting on work
+// that wakes it; with no background work open (bgtask), its turn's end is
+// where it stops, so the line says so and, in custody and settled, carries
+// the hint the receipt of an unreported turn does, to have it go on. With
+// work open, or for another state, the line is the report alone.
+func TestProgressReportStopped(t *testing.T) {
+	const stopped = "。后台没有任务在跑，这一轮结束后它不会自己接着做"
+	cases := []struct {
+		name             string
+		state            string
+		background, cust bool
+		settled          bool
+		stopped, hint    bool
+	}{
+		{name: "in custody", state: "progress", cust: true, settled: true, stopped: true, hint: true},
+		{name: "not settled", state: "progress", cust: true, stopped: true},
+		{name: "custody off", state: "progress", settled: true, stopped: true},
+		{name: "background open", state: "progress", background: true, cust: true, settled: true},
+		{name: "done", state: "done", cust: true, settled: true},
+		{name: "need_user", state: "need_user", cust: true, settled: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := endedRunner(t)
+			fc := &fakeCustody{on: map[string]bool{e.key: c.cust}, settled: c.settled}
+			e.r.cfg.Custody = fc
+			e.r.cfg.Background = func(k string) bgtask.State {
+				if !c.background || k != e.key {
+					return bgtask.State{}
+				}
+				return bgtask.State{Tasks: []bgtask.Task{{ID: "m1", Kind: bgtask.KindMonitor, Summary: "gh run watch"}}}
+			}
+			e.reportEnd(reportReply(c.state, "改好了大半"))
+			if len(e.g.told) != 1 {
+				t.Fatalf("told = %q, want the report line", e.g.told)
+			}
+			line := e.g.told[0]
+			if got := strings.Contains(line, stopped); got != c.stopped {
+				t.Errorf("line %q says it stopped: %v, want %v", line, got, c.stopped)
+			}
+			hint := "它在托管中：没做完、下一步又显而易见，就让它继续（" + custodyFormat(e.key) + "）。" + irreversibleRule
+			if got := strings.HasSuffix(line, hint); got != c.hint {
+				t.Errorf("line %q has custody's hint: %v, want %v", line, got, c.hint)
+			}
+			// The conversation's line is the report alone.
+			if note := "📨 " + e.key + " 汇报：" + digest.ReportWord(c.state) + " · 改好了大半"; !slices.Contains(e.g.notes, note) {
+				t.Errorf("notes = %q, want %q", e.g.notes, note)
+			}
+			// It is told once, not as the receipt of an unreported turn.
+			if got := e.receipts(); len(got) != 0 {
+				t.Errorf("receipts = %q, want none", got)
+			}
+		})
+	}
+}
+
+// TestNeedUserWaitsForTheUser: a need_user report's question in "等你" is
+// the user's to answer. A turn with no word from them since it opened (the
+// CLI woken by its background task's end or a Monitor's event, custody's
+// retry; a message of theirs from before the question) leaves it open, and
+// one that asks again only retitles it; the end of a turn after their
+// answer closes it, as marking the task done does.
+func TestNeedUserWaitsForTheUser(t *testing.T) {
+	e := endedRunner(t)
+	e.userAt = e.now.Add(-time.Minute) // the user's message before the question
+	e.reportEnd(reportReply("need_user", "PR 已开，要你决定合不合"))
+	first := e.questions()
+	if len(first) != 1 {
+		t.Fatalf("questions = %+v", first)
+	}
+	for _, text := range []string{"CI 跑完了，全绿", "Monitor：又有一条新评论"} {
+		e.wait(time.Minute)
+		e.end(text)
+		if qs := e.questions(); len(qs) != 1 || qs[0].ID != first[0].ID {
+			t.Fatalf("after %q: questions = %+v, want the one still open", text, qs)
+		}
+	}
+	e.wait(time.Minute)
+	e.reportEnd(reportReply("need_user", "CI 绿了，还是要你决定合不合"))
+	if qs := e.questions(); len(qs) != 1 || qs[0].ID != first[0].ID || !strings.Contains(qs[0].Title, "CI 绿了") {
+		t.Fatalf("asked again: questions = %+v, want the one retitled", qs)
+	}
+	if _, closed := e.inbox.List(10); len(closed) != 0 {
+		t.Fatalf("closed = %+v, want none", closed)
+	}
+
+	// The user answers in the session: the turn after it closes it.
+	e.wait(time.Minute)
+	e.userAt = e.now
+	e.wait(time.Minute)
+	e.end("好的，已合并")
+	if qs := e.questions(); len(qs) != 0 {
+		t.Fatalf("after the user's turn: questions = %+v, want none", qs)
+	}
+
+	// Asked again, then marked done with no answer: closed too.
+	e.wait(time.Minute)
+	e.reportEnd(reportReply("need_user", "要不要顺手发版"))
+	if len(e.questions()) != 1 {
+		t.Fatalf("questions = %+v", e.questions())
+	}
+	e.planner(block(`{"type":"status","task":"` + e.key + `","state":"done","why":"用户说不发版"}`))
+	if qs := e.questions(); len(qs) != 0 {
+		t.Errorf("after done: questions = %+v, want none", qs)
+	}
+}
+
+// TestSendMessageIsAQuestion: a session dispatched on the prompt with the
+// report block (sidecar ReportBlock) reports in the block and SendMessages
+// the Planner only to ask on the way: a turn that ended with no block after
+// such a message still gets its receipt, and the Planner's turn answering
+// the question is not asked for a status block as for a report. A session
+// dispatched on the prompt of before still reports by SendMessage.
+func TestSendMessageIsAQuestion(t *testing.T) {
+	for _, old := range []bool{false, true} {
+		e := endedRunner(t)
+		if m, _ := e.side.Get(e.key); !m.ReportBlock {
+			t.Fatalf("dispatched sidecar %+v, want ReportBlock", m)
+		}
+		if old {
+			e.sendMessagePrompt()
+		}
+		// Asked mid-turn: "该用哪个分支？"
+		e.reported = []string{e.key}
+		e.planner("用 main。")
+		if got := slices.ContainsFunc(e.g.told, func(x string) bool { return strings.Contains(x, "刚向你汇报") }); got != old {
+			t.Errorf("old prompt %v: told %q, want the report reminder: %v", old, e.g.told, old)
+		}
+		e.g.told = nil
+		e.wait(time.Minute)
+		e.end("按 main 改了一半")
+		if got := e.receipts(); len(got) != map[bool]int{false: 1, true: 0}[old] || !old && !strings.Contains(got[0], "没有写汇报块") {
+			t.Errorf("old prompt %v: receipts %q", old, got)
+		}
+	}
 }
 
 // TestTaskReportAcrossRestart: a turn that ended with a report and that a

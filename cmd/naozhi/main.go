@@ -773,6 +773,7 @@ func main() {
 		UnrunTurn:   plannerAgent.UnrunTurn,
 		PlannerBusy: plannerAgent.Busy,
 		Background:  sources.Background,
+		UserSent:    sources.UserSent,
 		Custody:     custodian,
 		Words:       wireup.PlannerWords(plannerAgent),
 		Relay:       srv.SubmitRelay,

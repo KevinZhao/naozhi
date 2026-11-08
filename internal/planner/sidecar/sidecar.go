@@ -72,8 +72,13 @@ type Meta struct {
 	// server (D98), kept so a respawn gets them too.
 	MCPTools map[string][]string `json:"mcp_tools,omitempty"`
 	// Ultracode is the dispatch's ultracode, kept for a respawn.
-	Ultracode bool      `json:"ultracode,omitempty"`
-	Created   time.Time `json:"created"`
+	Ultracode bool `json:"ultracode,omitempty"`
+	// ReportBlock is set on a session dispatched on the prompt that has it
+	// report in a naozhi-report block (§15.12 ③): what it sends the Planner
+	// by SendMessage is a question on the way, not a report. A session
+	// dispatched before (unset) still reports by SendMessage.
+	ReportBlock bool      `json:"report_block,omitempty"`
+	Created     time.Time `json:"created"`
 	// Retired is when the session was first seen gone from the router; the
 	// file is removed Retention later.
 	Retired time.Time `json:"retired,omitzero"`
