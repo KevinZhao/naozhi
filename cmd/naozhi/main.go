@@ -29,6 +29,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/brief"
 	"github.com/naozhi/naozhi/internal/planner/custody"
+	"github.com/naozhi/naozhi/internal/planner/digest"
 	"github.com/naozhi/naozhi/internal/planner/promise"
 	"github.com/naozhi/naozhi/internal/planner/reap"
 	"github.com/naozhi/naozhi/internal/planner/scout"
@@ -479,6 +480,35 @@ func main() {
 	// past 08:30 on a weekday, pushed once through the notifier. Only the
 	// health machine's Watch pokes it, so healthMon is set by then.
 	var healthMon *health.Machine
+	// Session digests (§15.12 ②, D100): each task: session's and each
+	// observed session's, written as its turns end and its health moves,
+	// read by the Planner (index.json points at them) and the task cards.
+	// Only with the Planner on: nothing else reads them.
+	digestSrc := wireup.DigestSources{
+		Router:   router,
+		Health:   func() health.Snapshot { return healthMon.Snapshot() },
+		Sidecars: sidecars,
+		Outputs:  activities,
+		Inbox: func() []notify.Item {
+			open, _ := notifier.List(0)
+			return open
+		},
+		Workspaces: plannerState.Workspaces,
+	}
+	var digests *digest.Writer
+	var observed func(key string) bool
+	if cfg.Planner.Enabled {
+		digests = digest.New(digest.Config{
+			Dir:     sessionLayout.PlannerDigestRoot(),
+			Facts:   digestSrc.Facts,
+			Keys:    digestSrc.Keys,
+			Written: func(string) { healthMon.Poke() },
+			Live:    func(key string) bool { return router.SessionFor(key) != nil },
+			Retired: wireup.DigestRetired(sidecars),
+		})
+		observed = digestSrc.Observed
+		router.SetActivitySink(wireup.DigestSink{Recorder: activities, Digests: digests})
+	}
 	// Puts a done task's session away (§5.2, D95); built below, once custody
 	// (whose "你在旁边" it waits on) exists.
 	var reaper *reap.Reaper
@@ -494,6 +524,7 @@ func main() {
 		OnState:  func(key string, st task.State) { reaper.OnState(key, st) },
 		ReapWait: func(key string) string { return reaper.Wait(key) },
 		Live:     wireup.TaskLive(router),
+		Digest:   func(key string) bool { return digests.Path(key) != "" },
 	})
 	briefer := brief.New(brief.Config{
 		Journal: plannerState.Journal,
@@ -580,6 +611,7 @@ func main() {
 		Beats:            beats,
 		Outputs:          activities,
 		Notes:            notes,
+		Digests:          digests,
 		Planner:          plannerAgent,
 		Scout:            scouter,
 		Briefs:           briefer,
@@ -673,6 +705,8 @@ func main() {
 			EventLogDir: eventLogDir,
 			Sidecars:    sidecars,
 			Scout:       scouter,
+			Digests:     digests,
+			Observed:    observed,
 		}.Collect,
 		Journal:    plannerState.Journal,
 		Workspaces: plannerState.Workspaces,
@@ -687,6 +721,10 @@ func main() {
 	healthMon.Subscribe(tasks.Observe)
 	healthMon.Subscribe(custodian.HandleHealth)
 	healthMon.Subscribe(func(health.Event) { reaper.Poke() })
+	if digests != nil {
+		healthMon.Subscribe(wireup.DigestOnHealth(digests))
+		go digests.Run(ctx)
+	}
 	go healthMon.Run(ctx)
 	plannerAgent.Start(ctx, srv, healthMon.Snapshot)
 	notifier.SetHealth(healthMon)
@@ -706,7 +744,7 @@ func main() {
 		Sessions:    sidecars,
 		Tasks:       tasks,
 		Brief:       briefer.Hold,
-		Spawn:       wireup.TaskSpawner{Router: router, Opts: taskOpts, Submit: srv.SubmitPlanner}.Spawn,
+		Spawn:       wireup.TaskSpawner{Router: router, Opts: taskOpts, Submit: srv.SubmitPlanner, Digests: digests}.Spawn,
 		Note:        plannerAgent.Note,
 		Tell:        plannerAgent.Tell,
 		Reports:     wireup.PlannerReports(router),

@@ -168,6 +168,12 @@ func (l Layout) PlannerHandoffRoot() string { return l.Join("planner", "handoff"
 // <root>/planner/sessions, §3.7). sessions.json is never touched.
 func (l Layout) PlannerSessionsRoot() string { return l.Join("planner", "sessions") }
 
+// PlannerDigestRoot holds the session digests the Planner reads instead of
+// the event logs, one <persist.KeyHash(key)>.md per session beside its
+// <hash>.json state (<root>/planner/digest, §15.12 ②): under the Planner
+// root its Read rule already covers.
+func (l Layout) PlannerDigestRoot() string { return l.Join("planner", "digest") }
+
 // PlannerInboxPath holds the "等你" items (<root>/planner/inbox.json,
 // §15.1).
 func (l Layout) PlannerInboxPath() string { return l.Join("planner", "inbox.json") }

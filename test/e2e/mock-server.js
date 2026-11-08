@@ -254,6 +254,9 @@ function defaultGitStates() {
  * @param {object} [overrides.sessionDetails] - key → GET /api/sessions/detail payload.
  * @param {object} [overrides.notes] - key → GET /api/sessions/notes entries (note.Note wire shape,
  *   oldest first); other keys list none. A test may edit the arrays in place.
+ * @param {object} [overrides.digests] - key → the session's digest markdown, GET
+ *   /api/sessions/digest?key= answers {key, updated, markdown}; other keys 404, as a session
+ *   without one does. Each request's key lands in digestCalls. A test may edit it in place.
  * @param {object} [overrides.inbox] - GET /api/inbox body ({open, closed, counts, paused_until});
  *   POST /api/inbox/close drops the item from open, /decide moves it to closed with its answer,
  *   PUT / DELETE /api/inbox/pause set
@@ -280,9 +283,9 @@ function defaultGitStates() {
  * @param {object[]} [overrides.plannerBriefs] - GET /api/planner/briefs answer (the morning
  *   briefs, newest first: {day, at, sent, counts, markdown}). Unset, the route 404s.
  * @param {object} [overrides.remote] - node → the Planner a node runs (docs/rfc/remote-planner.md):
- *   {planner, tasks, inbox, custody, notes: {key: [...]}, events: {key: [...]}}. /api/remote/<node>/<route>
+ *   {planner, tasks, inbox, custody, notes: {key: [...]}, digests: {key: md}, events: {key: [...]}}. /api/remote/<node>/<route>
  *   answers the GETs of /api/planner, /api/tasks, /api/inbox, /api/custody, /api/planner/briefs,
- *   /api/planner/notes, /api/system/health and /api/sessions/notes from it; every write lands in
+ *   /api/planner/notes, /api/system/health, /api/sessions/notes and /api/sessions/digest from it; every write lands in
  *   remoteCalls ({node, method, path, body}) and answers 202 — a POST /api/planner/send also
  *   runs remote[node].onSend(body) when set; GET /api/sessions/events?node=<node> answers
  *   events[key]. A node with `offline: true` answers 503, as the primary does. Unset, 404.
@@ -345,6 +348,8 @@ function startMockServer(overrides = {}) {
   const outputs = overrides.outputs || [];
   const sessionDetails = overrides.sessionDetails || {};
   const notesData = overrides.notes || {};
+  const digestsData = overrides.digests || {};
+  const digestCalls = [];
   const outputsCalls = [];
   const historySearchCalls = [];
   const inboxData = overrides.inbox || null;
@@ -601,6 +606,11 @@ function startMockServer(overrides = {}) {
         [NZ_CONTRACT.API.system_health]: r.health || { units: [] },
         [NZ_CONTRACT.API.sessions_notes]: { notes: (r.notes || {})[url.searchParams.get('key')] || [] },
       };
+      if (route === NZ_CONTRACT.API.sessions_digest) {
+        const key = url.searchParams.get('key') || '';
+        const md = (r.digests || {})[key];
+        gets[route] = md === undefined ? undefined : { key, updated: '2026-11-08T09:00:00Z', markdown: md };
+      }
       remoteCalls.push({ node: nodeID, method: 'GET', path: route });
       if (gets[route] === undefined) { answer(404, { error: 'not found' }); return; }
       answer(200, gets[route]);
@@ -692,6 +702,22 @@ function startMockServer(overrides = {}) {
       const key = url.searchParams.get('key') || '';
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ notes: notesData[key] || [] }));
+      return;
+    }
+
+    // Session digests: overrides.digests[key], 404 for a session without one.
+    if (pathname === NZ_CONTRACT.API.sessions_digest && req.method === 'GET') {
+      if (!checkAuth()) return;
+      const key = url.searchParams.get('key') || '';
+      digestCalls.push(key);
+      const md = digestsData[key];
+      if (md === undefined) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('no digest');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ key, updated: '2026-11-08T09:00:00Z', markdown: md }));
       return;
     }
 
@@ -1286,6 +1312,7 @@ function startMockServer(overrides = {}) {
         get wsConnections() { return wsConnections; },
         get workflowCalls() { return workflowCalls; },
         get outputsCalls() { return outputsCalls; },
+        get digestCalls() { return digestCalls; },
         get inboxCalls() { return inboxCalls; },
         get tasksCalls() { return tasksCalls; },
         get taskStopCalls() { return taskStopCalls; },

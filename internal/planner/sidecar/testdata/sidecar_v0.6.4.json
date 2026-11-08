@@ -1,0 +1,78 @@
+{
+  "v": 1,
+  "key": "task:0a1b2c3d4e5f",
+  "purpose": "task",
+  "parent": "planner:main",
+  "title": "修 index.json 的 last_active",
+  "workspace": "w1",
+  "dir": "/fixture/naozhi",
+  "model": "opus",
+  "mcp_tools": {
+    "aws-outlook-mcp": [
+      "email_send"
+    ]
+  },
+  "ultracode": true,
+  "created": "2026-11-08T08:00:00Z",
+  "retired": "2026-11-08T12:00:00Z",
+  "mark": {
+    "state": "done",
+    "by": "planner",
+    "why": "PR 已合并",
+    "at": "2026-11-08T11:00:00Z"
+  },
+  "failure": {
+    "state": "failed",
+    "by": "health",
+    "why": "death_reason=shim_eof",
+    "at": "2026-11-08T09:00:00Z"
+  },
+  "turn": {
+    "ended": "2026-11-08T10:59:00Z",
+    "check": true,
+    "from": "2026-11-08T10:00:00Z",
+    "text": "做完了"
+  },
+  "custody": {
+    "on": true,
+    "by": "auto",
+    "at": "2026-11-08T08:00:00Z"
+  },
+  "chain": {
+    "sent": 2,
+    "idle": 1,
+    "errors": {
+      "overloaded": 1
+    },
+    "progress": "head=abc",
+    "stopped": "no_progress",
+    "stopped_at": "2026-11-08T10:30:00Z"
+  },
+  "retry": {
+    "failed": "2026-11-08T09:00:00Z",
+    "class": "overloaded",
+    "at": "2026-11-08T09:01:00Z",
+    "cred": "2026-11-08T20:00:00Z",
+    "held": true,
+    "done": true
+  },
+  "reap": {
+    "at": "2026-11-08T12:00:00Z",
+    "by": "planner",
+    "why": "PR 已合并",
+    "session_id": "11111111-2222-3333-4444-555555555555",
+    "workspace": "/fixture/naozhi",
+    "last_prompt": "继续",
+    "worktrees": [
+      {
+        "dir": "/fixture/naozhi-wt",
+        "git_dir": "/fixture/naozhi/.git",
+        "branch": "fix/x",
+        "state": "removed",
+        "why": "已合并",
+        "at": "2026-11-08T12:00:00Z",
+        "notified": "merged"
+      }
+    ]
+  }
+}

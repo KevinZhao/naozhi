@@ -93,6 +93,11 @@ type Task struct {
 	// Live is what a dispatched session still in the router is doing now,
 	// for the card's status line; nil once it is gone.
 	Live *Live `json:"live,omitempty"`
+	// Report is a dispatched session's latest report (§15.12 ③), the
+	// card's "最新结论"; Digest says the session has a digest the card can
+	// open (GET /api/sessions/digest).
+	Report *sidecar.Report `json:"report,omitempty"`
+	Digest bool            `json:"digest,omitempty"`
 }
 
 // liveRunes caps Live's texts: a card shows one line of them.
@@ -140,6 +145,8 @@ type Config struct {
 	// Live is the dispatched sessions in the router by key; nil leaves
 	// Task.Live out.
 	Live func() map[string]Live
+	// Digest reports whether session key has a digest; nil says none has.
+	Digest func(key string) bool
 	// Now is the wall clock; nil is time.Now.
 	Now func() time.Time
 }
@@ -224,7 +231,8 @@ func (b *Board) List() []Task {
 				continue
 			}
 			u := units[m.Key]
-			t := Task{ID: m.Key, Kind: KindSession, Title: cmp.Or(m.Title, m.Key), Created: m.Created, Health: u.State, HealthSince: u.Since, Retired: m.Retired, Reap: m.Reap}
+			t := Task{ID: m.Key, Kind: KindSession, Title: cmp.Or(m.Title, m.Key), Created: m.Created, Health: u.State, HealthSince: u.Since, Retired: m.Retired, Reap: m.Reap, Report: m.Report}
+			t.Digest = b.cfg.Digest != nil && b.cfg.Digest(m.Key)
 			if l, ok := live[m.Key]; ok && m.Retired.IsZero() {
 				l.Activity, l.Reply = oneLine(l.Activity), oneLine(l.Reply)
 				t.Live = &l
