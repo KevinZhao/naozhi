@@ -1,6 +1,7 @@
 package task
 
 import (
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -95,6 +96,23 @@ func TestArchived(t *testing.T) {
 	for _, c := range cases {
 		if got := archived(Task{State: c.state, At: t0.Add(-c.age)}, t0); got != c.want {
 			t.Errorf("%s %v old: archived = %v, want %v", c.state, c.age, got, c.want)
+		}
+	}
+	// A done session's day counts from its last activity, or its putting
+	// away, when later than the mark (planner/reap waits for it to idle).
+	old := t0.Add(-Archive - time.Hour)
+	for _, c := range []struct {
+		name string
+		t    Task
+		want bool
+	}{
+		{"active since the mark", Task{State: Done, At: old, Live: &Live{LastActive: t0.Add(-time.Hour)}}, false},
+		{"active before the mark", Task{State: Done, At: old, Live: &Live{LastActive: old.Add(-time.Hour)}}, true},
+		{"put away since the mark", Task{State: Done, At: old, Reap: &sidecar.Reap{At: t0.Add(-time.Hour)}}, false},
+		{"put away a day ago", Task{State: Done, At: old, Reap: &sidecar.Reap{At: t0.Add(-Archive)}}, true},
+	} {
+		if got := archived(c.t, t0); got != c.want {
+			t.Errorf("%s: archived = %v, want %v", c.name, got, c.want)
 		}
 	}
 }
@@ -299,9 +317,10 @@ func TestOnStateAndReap(t *testing.T) {
 		t.Fatal(err)
 	}
 	var told []string
+	wait, waitAt := "有提问没回答", time.Time{}
 	b := New(Config{Sessions: sc, Now: func() time.Time { return now },
 		OnState:  func(k string, s State) { told = append(told, k+" "+string(s)) },
-		ReapWait: func(string) string { return "有提问没回答" }})
+		ReapWait: func(string) (string, time.Time) { return wait, waitAt }})
 	if err := b.Set(key, Done, ByPlanner, "完成"); err != nil {
 		t.Fatal(err)
 	}
@@ -314,14 +333,24 @@ func TestOnStateAndReap(t *testing.T) {
 	if err := b.Set(key, Done, ByUser, ""); err != nil {
 		t.Fatal(err)
 	}
-	if l := b.List(); len(l) != 1 || l[0].ReapWait != "有提问没回答" || l[0].Reap != nil {
+	if l := b.List(); len(l) != 1 || l[0].ReapWait != "有提问没回答" || !l[0].ReapAt.IsZero() || l[0].Reap != nil {
 		t.Fatalf("List = %+v", l)
+	}
+	wait, waitAt = "空闲不到 2 小时", now.Add(90*time.Minute)
+	if l := b.List(); len(l) != 1 || l[0].ReapWait != wait || !l[0].ReapAt.Equal(waitAt) {
+		t.Fatalf("List while idleness holds it = %+v", l)
+	}
+	if raw, _ := json.Marshal(b.List()[0]); !strings.Contains(string(raw), `"reap_at":"`) {
+		t.Errorf("reap_at not on the wire: %s", raw)
 	}
 	if _, err := sc.Update(key, func(m *sidecar.Meta) bool { m.Reap = &sidecar.Reap{At: now, SessionID: "s"}; return true }); err != nil {
 		t.Fatal(err)
 	}
-	if l := b.List(); len(l) != 1 || l[0].ReapWait != "" || l[0].Reap == nil || l[0].Reap.SessionID != "s" {
+	if l := b.List(); len(l) != 1 || l[0].ReapWait != "" || !l[0].ReapAt.IsZero() || l[0].Reap == nil || l[0].Reap.SessionID != "s" {
 		t.Fatalf("List = %+v", l)
+	}
+	if raw, _ := json.Marshal(b.List()[0]); strings.Contains(string(raw), "reap_at") {
+		t.Errorf("reap_at on a task put away: %s", raw)
 	}
 }
 

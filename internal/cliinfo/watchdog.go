@@ -10,4 +10,9 @@ import "time"
 const (
 	DefaultNoOutputTimeout = 15 * time.Minute
 	DefaultTotalTimeout    = 2 * time.Hour
+	// DefaultTaskTotalTimeout is the floor of a task: session's total
+	// budget: a Planner-dispatched task (a deep research, a benchmark of
+	// hours) outruns the interactive default, and a turn killed at 2h is
+	// read by custody as a retryable failure and told to continue.
+	DefaultTaskTotalTimeout = 6 * time.Hour
 )

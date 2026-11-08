@@ -492,7 +492,7 @@ func main() {
 		Journal:  plannerState.Journal,
 		Stop:     wireup.StopTask(router, func(key string) { srv.DropPlannerQueue(key) }, plannerAgent.Tell),
 		OnState:  func(key string, st task.State) { reaper.OnState(key, st) },
-		ReapWait: func(key string) string { return reaper.Wait(key) },
+		ReapWait: func(key string) (string, time.Time) { return reaper.Wait(key) },
 		Live:     wireup.TaskLive(router),
 	})
 	briefer := brief.New(brief.Config{

@@ -120,3 +120,57 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
     }
   });
 }
+
+// A done dispatched session is put away only once it has been idle 2 hours
+// (D105): while that alone holds it, its status line says about when
+// (reap_at) next to who marked it done, and its card says nothing more;
+// held by anything else it says what; once put away, that it was.
+const SHOTS = process.env.NZ_SHOTS_DIR || '';
+for (const [name, opts] of [['desktop', { viewport: { width: 1440, height: 900 } }], ['phone', { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true }]]) {
+  test(`a done task says about when it is put away (${name})`, async ({ browser }) => {
+    const ctx = await browser.newContext(opts);
+    const page = await ctx.newPage();
+    // The countdown rounds up to a minute: each reap_at sits 20s short of
+    // a whole one, read from this test's own clock.
+    const now = Date.now();
+    const done = (id, title, extra) => ({ id, kind: 'session', title, state: 'done', by: 'planner', why: 'PR 已合并', at: iso(now - 30 * 60000), created: iso(now - 7200000), ...extra });
+    const data = {
+      tasks: [
+        done('task:idle1', 'iso 修 reap', { reap_wait: '空闲不到 2 小时', reap_at: iso(now + 90 * 60000 - 20000) }),
+        done('task:soon1', 'iso 补文档', { reap_wait: '空闲不到 2 小时', reap_at: iso(now + 12 * 60000 - 20000) }),
+        done('task:ask1', 'iso 跑基准', { reap_wait: '有提问没回答' }),
+        done('task:gone1', 'iso 改配置', { reap: { at: iso(now - 60000), by: 'planner', session_id: 's1', worktrees: [] }, retired: iso(now - 60000) }),
+      ],
+    };
+    const mock = await startMockServer({
+      ws: true, tasks: data, plannerEvents: [], inbox: { open: [], closed: [], counts: { open: 0, badge: 0 } },
+      planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
+    });
+    try {
+      await page.goto(mock.url + '/dashboard');
+      await waitForWs(page, 'CONNECTED');
+      await page.click('#abnav-planner');
+      if (name === 'phone') await page.click('#pl-left-toggle');
+      const group = page.locator('#pl-task');
+      await group.locator('.tk-sec-done summary').click();
+      const card = (id) => group.locator('.tk-card[data-id="' + id + '"]');
+      await expect(card('task:idle1').locator('.tk-badge')).toHaveText('已完成');
+      await expect(card('task:idle1').locator('.tk-now')).toHaveText('约 1 小时 30 分后收起 · Planner 判断：PR 已合并');
+      await expect(card('task:soon1').locator('.tk-now')).toHaveText('约 12 分钟后收起 · Planner 判断：PR 已合并');
+      // Said once: not again as 等收起 under it.
+      await expect(card('task:idle1')).not.toContainText('等收起');
+      await expect(card('task:idle1').locator('.tk-meta')).toHaveCount(0);
+      // Held by something more specific: what holds it, no time.
+      await expect(card('task:ask1').locator('.tk-now')).toHaveText('Planner 判断：PR 已合并');
+      await expect(card('task:ask1').locator('.tk-meta')).toHaveText('等收起：有提问没回答');
+      await expect(card('task:gone1').locator('.tk-meta')).toHaveText('会话已收起');
+      await expect(card('task:gone1')).not.toContainText('后收起');
+      await card('task:idle1').scrollIntoViewIfNeeded();
+      const shot = SHOTS ? `${SHOTS}/tasks_reap_eta_${name}.png` : test.info().outputPath(`tasks-reap-eta-${name}.png`);
+      await page.screenshot({ path: shot });
+    } finally {
+      await ctx.close();
+      mock.server.close();
+    }
+  });
+}

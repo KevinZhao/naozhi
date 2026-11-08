@@ -25,9 +25,11 @@
 // there is a pointer, always on touch): 停止 a running session (POST
 // /api/tasks/stop: its process is closed, the task 已完成 as yours, shown as
 // 已停止), 标为已完成 / 标为进行中 (POST /api/tasks/state, as yours), and
-// 重新打开 a done one. A done dispatched session is put away once it is idle
-// and you are not at it (planner/reap): its card says so; 重新打开 puts it
-// back. The Planner page's header offers the same 停止 for the session open
+// 重新打开 a done one. A done dispatched session is put away once its turn
+// ended, you are not at it and it has been idle 2 hours (planner/reap, D105):
+// while only the idleness holds it its status line says about when (the
+// task's reap_at), otherwise its card says what holds it, then that it was
+// put away; 重新打开 puts it back. The Planner page's header offers the same 停止 for the session open
 // in the middle column (isRunningTask, nzBus 'tasks:changed').
 //
 // A dispatched session runs in custody; its card marks custody only when it
@@ -100,7 +102,26 @@ function reapHtml(t) {
     }
     return parts.join('<span aria-hidden="true"> · </span>');
   }
+  // reap_at is said on the status line (reapEta), not again here.
+  if (reapEta(t)) return '';
   return t.reap_wait ? '等收起：' + esc(t.reap_wait) : '';
+}
+
+// untilText says how long until at, rounded up to a minute: a countdown in
+// spanText's words.
+function untilText(at, now = Date.now()) {
+  const m = Math.max(1, Math.ceil((at - now) / 60000));
+  if (m < 60) return m + ' 分钟';
+  const h = Math.floor(m / 60);
+  return h + ' 小时' + (m % 60 ? ' ' + (m % 60) + ' 分' : '');
+}
+
+// reapEta is "约 X 后收起" for a done dispatched session that only its
+// idleness keeps from being put away (reap_at), "" otherwise.
+function reapEta(t, now = Date.now()) {
+  if (t.kind !== 'session' || t.state !== 'done' || t.reap) return '';
+  const at = ms(t.reap_at);
+  return at ? '约 ' + untilText(at, now) + '后收起' : '';
 }
 
 const stopped = (t) => t.state === 'done' && t.by === 'user' && t.why === STOPPED_WHY;
@@ -133,7 +154,9 @@ export function taskStatus(t, now = Date.now()) {
   const ago = (at, pre = '') => (at ? { time: pre + timeAgo(at), tip: formatAbsTime(at) } : {});
   if (t.state === 'done') {
     const by = stopped(t) ? '你停的' : (t.by && BY_LABEL[t.by] ? BY_LABEL[t.by] + (t.why ? '：' + t.why : '') : t.why || '');
-    return { badge: stopped(t) ? BADGES.stopped : BADGES.done, text: by, ...ago(ms(t.at)) };
+    // 已完成 · 约 X 后收起 · who and why (D105).
+    const eta = reapEta(t, now);
+    return { badge: stopped(t) ? BADGES.stopped : BADGES.done, text: eta ? eta + (by ? ' · ' + by : '') : by, ...ago(ms(t.at)) };
   }
   if (t.state === 'remind') {
     const d = ms(t.due);

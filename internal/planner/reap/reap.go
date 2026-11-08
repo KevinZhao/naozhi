@@ -2,10 +2,10 @@
 // is done (docs/rfc/planner.md §5.2, D95). A task: session marked 已完成 —
 // by the Planner's status block or by the user in 任务 — is put away when the
 // gateway sees, deterministically, that its turn ended normally, nothing
-// waits on an AskUserQuestion, nothing runs in the background, and the user
-// is not at it (custody's "你在旁边": viewing it, or a message to it in the
-// last 5 minutes). Until then it waits for the next state change or check;
-// nothing is reported.
+// waits on an AskUserQuestion, nothing runs in the background, the user is
+// not at it (custody's "你在旁边": viewing it, or a message to it in the last
+// 5 minutes), and it has been idle IdleFor (D105). Until then it waits for
+// the next state change or check; nothing is reported.
 //
 // Putting away takes two steps. First the process is closed and the session
 // leaves the session list for the history (Router.Archive): its event log,
@@ -42,12 +42,19 @@ const (
 	// recheckAfter is how long a worktree left in place waits before it is
 	// looked at again (a PR call each time).
 	recheckAfter = 10 * time.Minute
-	// window is how recent a done mark must be for its session to be put
-	// away: while the task is still listed (task.Archive), so the user can
-	// reopen it there.
+	// window is how recent a done mark, or the session's last activity
+	// after it, must be for its session to be put away: while the task is
+	// still listed (task.Archive), so the user can reopen it there. Counting
+	// from the activity too keeps a done task that is talked to for most of
+	// a day from outliving its window idle and never being put away.
 	window = task.Archive
 	// gitTimeout bounds one worktree's checks.
 	gitTimeout = time.Minute
+	// IdleFor is how long a done session must have been idle (no turn
+	// started or ended, whoever sent it) before it is put away (D105): a
+	// follow-up from the user, the Planner or the gateway soon after the
+	// done mark finds it still there.
+	IdleFor = 2 * time.Hour
 )
 
 // Worktree states (sidecar.Worktree.State).
@@ -67,6 +74,8 @@ type Session struct {
 	Background bool
 	// Failed is the error the last turn ended in ("" when it ended normally).
 	Failed string
+	// LastActive is when a turn last started or ended; zero holds nothing.
+	LastActive time.Time
 }
 
 // Archived is what Config.Archive took out: the session to resume.
@@ -148,9 +157,16 @@ type Reaper struct {
 	mu sync.Mutex
 	// wait is why each done session is not put away yet.
 	waitMu sync.Mutex
-	wait   map[string]string
+	wait   map[string]waiting
 	// checked is when each worktree left in place was last looked at.
 	checked map[string]time.Time
+}
+
+// waiting is why a done session is not put away yet, and when it will be
+// when idleness is the only thing left holding it (zero otherwise).
+type waiting struct {
+	why string
+	at  time.Time
 }
 
 // New returns a Reaper.
@@ -158,7 +174,7 @@ func New(cfg Config) *Reaper {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Reaper{cfg: cfg, poke: make(chan struct{}, 1), wait: map[string]string{}, checked: map[string]time.Time{}}
+	return &Reaper{cfg: cfg, poke: make(chan struct{}, 1), wait: map[string]waiting{}, checked: map[string]time.Time{}}
 }
 
 // Poke has the next look run now. It never blocks.
@@ -180,20 +196,23 @@ func (r *Reaper) OnState(key string, state task.State) {
 	}
 }
 
-// Wait is task.Config.ReapWait: why done session key is not put away yet.
-func (r *Reaper) Wait(key string) string {
+// Wait is task.Config.ReapWait: why done session key is not put away yet,
+// and when it is expected to be if only its idleness holds it (zero when
+// something else does, or nothing).
+func (r *Reaper) Wait(key string) (string, time.Time) {
 	r.waitMu.Lock()
 	defer r.waitMu.Unlock()
-	return r.wait[key]
+	w := r.wait[key]
+	return w.why, w.at
 }
 
-func (r *Reaper) setWait(key, why string) {
+func (r *Reaper) setWait(key string, w waiting) {
 	r.waitMu.Lock()
 	defer r.waitMu.Unlock()
-	if why == "" {
+	if w.why == "" {
 		delete(r.wait, key)
 	} else {
-		r.wait[key] = why
+		r.wait[key] = w
 	}
 }
 
@@ -230,52 +249,64 @@ func (r *Reaper) Tick(ctx context.Context) {
 	}
 }
 
-// due reports whether m is a done task whose session is to be put away.
-func (r *Reaper) due(m sidecar.Meta) bool {
+// done reports whether m is a done task not put away yet.
+func done(m sidecar.Meta) bool {
 	return m.Purpose == sidecar.PurposeTask && m.Reap == nil && m.Mark != nil &&
-		task.State(m.Mark.State) == task.Done && r.cfg.Now().Sub(m.Mark.At) < window
+		task.State(m.Mark.State) == task.Done
 }
 
-// holds is why s is not to be put away yet, "" when nothing holds it.
-func (r *Reaper) holds(key string, s Session) string {
+// due reports whether done task m's session s is still within window.
+func (r *Reaper) due(m sidecar.Meta, s Session) bool {
+	from := m.Mark.At
+	if s.LastActive.After(from) {
+		from = s.LastActive
+	}
+	return r.cfg.Now().Sub(from) < window
+}
+
+// holds is why s is not to be put away yet ("" when nothing holds it), and
+// when it will be if the last check, idleness, is what holds it.
+func (r *Reaper) holds(key string, s Session) waiting {
 	switch {
 	case s.Running:
-		return "这一轮还没结束"
+		return waiting{why: "这一轮还没结束"}
 	case s.Failed != "":
-		return "这一轮出错结束"
+		return waiting{why: "这一轮出错结束"}
 	case s.Asking:
-		return "有提问没回答"
+		return waiting{why: "有提问没回答"}
 	case s.Background:
-		return "后台还有任务在跑"
+		return waiting{why: "后台还有任务在跑"}
 	case r.cfg.Nearby != nil && r.cfg.Nearby(key):
-		return "你正看着它，或 5 分钟内给它发过消息"
+		return waiting{why: "你正看着它，或 5 分钟内给它发过消息"}
+	case !s.LastActive.IsZero() && r.cfg.Now().Sub(s.LastActive) < IdleFor:
+		return waiting{why: "空闲不到 2 小时", at: s.LastActive.Add(IdleFor)}
 	}
-	return ""
+	return waiting{}
 }
 
 func (r *Reaper) tryPutAway(ctx context.Context, key string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	m, ok := r.cfg.Sessions.Get(key)
-	if !ok || !r.due(m) {
-		r.setWait(key, "")
+	if !ok || !done(m) {
+		r.setWait(key, waiting{})
 		return
 	}
 	s, ok := r.cfg.Session(key)
-	if !ok {
+	if !ok || !r.due(m, s) {
 		// Not in the session list: there is no process to close or session
-		// to put away.
-		r.setWait(key, "")
+		// to put away. Past window: no longer listed to be reopened.
+		r.setWait(key, waiting{})
 		return
 	}
-	if why := r.holds(key, s); why != "" {
-		if r.Wait(key) != why {
-			slog.Info("reap: done task not put away yet", "key", key, "why", why)
+	if w := r.holds(key, s); w.why != "" {
+		if why, _ := r.Wait(key); why != w.why {
+			slog.Info("reap: done task not put away yet", "key", key, "why", w.why)
 		}
-		r.setWait(key, why)
+		r.setWait(key, w)
 		return
 	}
-	r.setWait(key, "")
+	r.setWait(key, waiting{})
 	a, ok := r.cfg.Archive(key)
 	if !ok {
 		return

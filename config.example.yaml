@@ -131,7 +131,8 @@ session:
     # With the Claude backend a running tool emits a heartbeat every 30s, so
     # no_output_timeout only catches a silent model or a hung CLI. Other
     # backends have no heartbeat: a silent tool must finish within it.
-    # Workflows whose turns run for hours can raise both.
+    # Workflows whose turns run for hours can raise both. A session the
+    # Planner dispatched (task:) gets at least 6h of total_timeout.
     no_output_timeout: "15m"
     total_timeout: "2h"
   store_path: "~/.naozhi/sessions.json"

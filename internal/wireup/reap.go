@@ -50,6 +50,9 @@ func (c ReapSources) Session(key string) (reap.Session, bool) {
 	if apierr.IsEnvelope(snap.LastResponse) {
 		out.Failed = snap.LastResponse
 	}
+	if la := s.LastActive(); la.UnixNano() > 0 {
+		out.LastActive = la
+	}
 	if c.Health != nil {
 		for _, u := range c.Health().Units {
 			if u.ID == key && u.State == health.Failed {
