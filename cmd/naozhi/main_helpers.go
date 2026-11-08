@@ -276,9 +276,28 @@ func sysSessionsWorkDir(cfg *config.Config, storePath string) string {
 // watchdog, ring buffer and shim cap take shim.NewManager's defaults.
 func shimManagerConfig(cfg *config.Config) shim.ManagerConfig {
 	return shim.ManagerConfig{
-		StateDir:    osutil.ExpandHome(cfg.Session.Shim.StateDir),
+		StateDir:    shimStateDir(cfg),
 		IdleTimeout: cfg.ShimIdleTimeout(),
 	}
+}
+
+// shimStateDir is session.shim.state_dir, else the shims directory beside
+// session.store_path (the state root the session store, event logs and
+// Planner state share), else "" for shim.NewManager's ~/.naozhi/shims. The
+// default store_path gives ~/.naozhi/shims all the same. Absolute: the shims
+// it spawns are told their state file's path.
+func shimStateDir(cfg *config.Config) string {
+	if dir := osutil.ExpandHome(cfg.Session.Shim.StateDir); dir != "" {
+		return dir
+	}
+	dir := datadir.ForStore(osutil.ExpandHome(cfg.Session.StorePath)).ShimsRoot()
+	if dir == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	return dir
 }
 
 // buildSysessionManager wires sysession.Manager from cfg.Sysession. Returns

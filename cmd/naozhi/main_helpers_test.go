@@ -112,6 +112,36 @@ func TestShimManagerConfig(t *testing.T) {
 	}
 }
 
+// TestShimStateDir: without session.shim.state_dir the shim state directory
+// is the one beside session.store_path, so an instance isolated by its
+// store_path alone never scans another instance's shims (11-08: a test
+// instance sent nine production shims a shutdown as argv drift). The default
+// store_path keeps ~/.naozhi/shims; an explicit state_dir wins.
+func TestShimStateDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	iso := t.TempDir()
+	explicit := t.TempDir()
+	for _, tc := range []struct {
+		name, body, want string
+	}{
+		{"default store_path", "session:\n  store_path: ~/.naozhi/sessions.json\n", filepath.Join(home, ".naozhi", "shims")},
+		{"own store_path", "session:\n  store_path: " + filepath.Join(iso, "sessions.json") + "\n", filepath.Join(iso, "shims")},
+		{"explicit state_dir", "session:\n  store_path: " + filepath.Join(iso, "sessions.json") + "\n  shim:\n    state_dir: " + explicit + "\n", explicit},
+		{"no store_path", "session:\n  max_procs: 2\n", filepath.Join(home, ".naozhi", "shims")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, err := shim.NewManager(shimManagerConfig(loadConfigBody(t, tc.body)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := mgr.StateDir(); got != tc.want {
+				t.Errorf("shim state dir = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestSysessionDaemons pins which parsed duration feeds each daemon knob.
 func TestSysessionDaemons(t *testing.T) {
 	cfg := loadConfigBody(t, "sysession:\n  daemons:\n"+
