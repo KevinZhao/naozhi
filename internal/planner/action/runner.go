@@ -439,10 +439,16 @@ func (r *Runner) taskEnded(key, text string) {
 	// the user's message; one that ends with no word from them (a
 	// background task's end or a Monitor's event woke the CLI, custody
 	// retried) leaves it open for them. A turn that asks again keeps the
-	// open one, retitled, not pushed again.
+	// open one, retitled, not pushed again; the question is then the one
+	// it asked, so only a message after that answers it (m is the sidecar
+	// before this turn's report).
 	src := ReportSource(key)
 	if !ok || rep.State != ReportNeedUser {
-		if r.answered(key, src) {
+		var asked time.Time
+		if m.Report != nil && m.Report.State == ReportNeedUser {
+			asked = m.Report.At
+		}
+		if r.answered(key, src, asked) {
 			r.cfg.Inbox.CloseSource(src, notify.ClosedByAuto)
 		}
 		return
@@ -465,14 +471,19 @@ func (r *Runner) taskEnded(key, text string) {
 func ReportSource(key string) string { return "report:" + key }
 
 // answered reports whether the user sent session key a message since its
-// open question src was opened; false with none open.
-func (r *Runner) answered(key, src string) bool {
+// open question src was last asked: opened, or asked again at asked (the
+// retitle keeps the item's Created); false with none open.
+func (r *Runner) answered(key, src string, asked time.Time) bool {
 	open, _ := r.cfg.Inbox.List(0)
 	i := slices.IndexFunc(open, func(it notify.Item) bool { return it.Source == src })
 	if i < 0 {
 		return false
 	}
-	return r.cfg.UserSent == nil || r.cfg.UserSent(key, open[i].Created)
+	since := open[i].Created
+	if asked.After(since) {
+		since = asked
+	}
+	return r.cfg.UserSent == nil || r.cfg.UserSent(key, since)
 }
 
 // TaskState is task.Config.OnState's part for the runner: a task done or
@@ -704,11 +715,21 @@ func (r *Runner) checkReport(e ended, tasks []task.Task, i int, now time.Time) {
 	// Progress with no background work left to wake the session is a
 	// session stopped at its turn's end: nothing starts another, so the
 	// line says so, and custody's hint the unreported receipt carries rides
-	// with it (the same judgment, bgtask, custody's Settled reads).
-	if e.report.State == ReportProgress && !r.background(e.key).Open() {
+	// with it (the same judgment, bgtask, custody's Settled reads). The
+	// line may be told minutes after the turn ended (reportGrace, a busy
+	// Planner), so it says so only of the session's latest turn end with
+	// nothing running since: a turn the user started meanwhile is going
+	// on. Out of custody nothing the Planner may send goes on with it, so
+	// the user is the one to ask.
+	if e.report.State == ReportProgress && r.stoppedAt(e) {
 		line += "。后台没有任务在跑，这一轮结束后它不会自己接着做"
-		if c := r.cfg.Custody; c != nil && c.Check(e.key) == nil && c.Settled(e.key) {
-			line += "。它在托管中：没做完、下一步又显而易见，就让它继续（" + custodyFormat(e.key) + "）。" + irreversibleRule
+		if c := r.cfg.Custody; c != nil {
+			switch err := c.Check(e.key); {
+			case err == nil:
+				line += "。它在托管中：没做完、下一步又显而易见，就让它继续（" + custodyFormat(e.key) + "）。" + irreversibleRule
+			case errors.Is(err, custody.ErrOff):
+				line += "。它不在托管中，你发不了让它继续的话：要接着做，用 ask 问用户"
+			}
 		}
 	}
 	r.reportTold[e.key] = toldReport{at: now, state: e.report.State}
@@ -723,6 +744,17 @@ func (r *Runner) digestShows(e ended) bool {
 		return true
 	}
 	return !r.cfg.Digests.ReportShown(e.key).Before(e.report.At)
+}
+
+// stoppedAt reports whether e's session is still where e's turn ended
+// with nothing to wake it: e is its latest turn end, no background work is
+// open, and (with custody's sources) no turn runs and no question of the
+// CLI's waits (Settled).
+func (r *Runner) stoppedAt(e ended) bool {
+	if !r.latestTurn(e) || r.background(e.key).Open() {
+		return false
+	}
+	return r.cfg.Custody == nil || r.cfg.Custody.Settled(e.key)
 }
 
 // background is Config.Background, nil-safe.

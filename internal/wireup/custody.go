@@ -66,17 +66,18 @@ func (c CustodySources) UserSince(key string, t time.Time) bool {
 
 // UserSent is action.Config.UserSent: UserSince, or a decision or answer of
 // the user's the gateway relayed to key after t (a relay entry): the turn
-// that ends after either was the user's.
+// that ends after either was the user's. One pass over the log: it runs on
+// the read loop's result sink.
 func (c CustodySources) UserSent(key string, t time.Time) bool {
-	if c.UserSince(key, t) {
-		return true
-	}
 	s := c.Router.SessionFor(key)
 	if s == nil {
 		return false
 	}
+	if s.LastUserSent().After(t) {
+		return true
+	}
 	for _, e := range s.EventEntriesSince(t.UnixMilli()) {
-		if e.Type == clievent.KindUser && e.Source == clievent.SourceRelay {
+		if e.Type == clievent.KindUser && (e.Source == "" || e.Source == clievent.SourceRelay) {
 			return true
 		}
 	}

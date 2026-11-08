@@ -1516,22 +1516,25 @@ func TestTaskReportBlock(t *testing.T) {
 }
 
 // TestProgressReportStopped: a progress report is a session waiting on work
-// that wakes it; with no background work open (bgtask), its turn's end is
-// where it stops, so the line says so and, in custody and settled, carries
-// the hint the receipt of an unreported turn does, to have it go on. With
-// work open, or for another state, the line is the report alone.
+// that wakes it; with no background work open (bgtask) and nothing running
+// when the line is told (Settled), its turn's end is where it stops, so the
+// line says so and, in custody, carries the hint the receipt of an
+// unreported turn does, to have it go on, or, out of custody, has the
+// Planner ask the user. With work open, a turn running (one the user
+// started meanwhile), or for another state, the line is the report alone.
 func TestProgressReportStopped(t *testing.T) {
 	const stopped = "。后台没有任务在跑，这一轮结束后它不会自己接着做"
+	const ask = "。它不在托管中，你发不了让它继续的话：要接着做，用 ask 问用户"
 	cases := []struct {
-		name             string
-		state            string
-		background, cust bool
-		settled          bool
-		stopped, hint    bool
+		name               string
+		state              string
+		background, cust   bool
+		settled            bool
+		stopped, hint, off bool
 	}{
 		{name: "in custody", state: "progress", cust: true, settled: true, stopped: true, hint: true},
-		{name: "not settled", state: "progress", cust: true, stopped: true},
-		{name: "custody off", state: "progress", settled: true, stopped: true},
+		{name: "a turn running", state: "progress", cust: true},
+		{name: "custody off", state: "progress", settled: true, stopped: true, off: true},
 		{name: "background open", state: "progress", background: true, cust: true, settled: true},
 		{name: "done", state: "done", cust: true, settled: true},
 		{name: "need_user", state: "need_user", cust: true, settled: true},
@@ -1559,6 +1562,9 @@ func TestProgressReportStopped(t *testing.T) {
 			if got := strings.HasSuffix(line, hint); got != c.hint {
 				t.Errorf("line %q has custody's hint: %v, want %v", line, got, c.hint)
 			}
+			if got := strings.HasSuffix(line, ask); got != c.off {
+				t.Errorf("line %q has the hint to ask the user: %v, want %v", line, got, c.off)
+			}
 			// The conversation's line is the report alone.
 			if note := "📨 " + e.key + " 汇报：" + digest.ReportWord(c.state) + " · 改好了大半"; !slices.Contains(e.g.notes, note) {
 				t.Errorf("notes = %q, want %q", e.g.notes, note)
@@ -1568,6 +1574,25 @@ func TestProgressReportStopped(t *testing.T) {
 				t.Errorf("receipts = %q, want none", got)
 			}
 		})
+	}
+}
+
+// TestProgressReportLaterTurn: a progress line told after the session's
+// next turn ended (a message of the user's started one) no longer says the
+// session stopped where the report left it.
+func TestProgressReportLaterTurn(t *testing.T) {
+	e := endedRunner(t)
+	e.r.cfg.Custody = &fakeCustody{on: map[string]bool{e.key: true}, settled: true}
+	e.r.Result(e.key, reportReply("progress", "改好了大半"))
+	e.wait(time.Minute)
+	e.r.Result(e.key, "按你说的又改了一处")
+	e.check()
+	i := slices.IndexFunc(e.g.told, func(s string) bool { return strings.Contains(s, "汇报：进度") })
+	if i < 0 {
+		t.Fatalf("told = %q, want the progress line", e.g.told)
+	}
+	if strings.Contains(e.g.told[i], "不会自己接着做") {
+		t.Errorf("line %q says it stopped, after a later turn", e.g.told[i])
 	}
 }
 
@@ -1619,6 +1644,38 @@ func TestNeedUserWaitsForTheUser(t *testing.T) {
 	e.planner(block(`{"type":"status","task":"` + e.key + `","state":"done","why":"用户说不发版"}`))
 	if qs := e.questions(); len(qs) != 0 {
 		t.Errorf("after done: questions = %+v, want none", qs)
+	}
+}
+
+// TestNeedUserAskedAgainAfterAnswer: a question the session asks again
+// after the user answered the first is a new one: the turn after it that
+// no word of theirs started (a Monitor's event) leaves it open, the user's
+// answer to the first not counting for it; their answer to it closes it.
+func TestNeedUserAskedAgainAfterAnswer(t *testing.T) {
+	e := endedRunner(t)
+	e.reportEnd(reportReply("need_user", "PR 已开，要你决定合不合"))
+	first := e.questions()
+	if len(first) != 1 {
+		t.Fatalf("questions = %+v", first)
+	}
+	e.wait(time.Minute)
+	e.userAt = e.now // "先别合，再跑一遍压测"
+	e.wait(time.Minute)
+	e.reportEnd(reportReply("need_user", "压测跑完了，要你决定合不合"))
+	if qs := e.questions(); len(qs) != 1 || qs[0].ID != first[0].ID || !strings.Contains(qs[0].Title, "压测跑完了") {
+		t.Fatalf("asked again: questions = %+v, want the one retitled", qs)
+	}
+	e.wait(time.Minute)
+	e.end("Monitor：又有一条新评论")
+	if qs := e.questions(); len(qs) != 1 || qs[0].ID != first[0].ID {
+		t.Fatalf("after a turn the user did not start: questions = %+v, want the one asked again still open", qs)
+	}
+	e.wait(time.Minute)
+	e.userAt = e.now // "合吧"
+	e.wait(time.Minute)
+	e.end("已合并")
+	if qs := e.questions(); len(qs) != 0 {
+		t.Fatalf("after the user's answer: questions = %+v, want none", qs)
 	}
 }
 

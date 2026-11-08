@@ -34,15 +34,26 @@ func SessionNotes(j *journal.Journal, inbox *notify.Notifier, sidecars *sidecar.
 			return m.Created
 		},
 		Reports: func(key string) []time.Time {
-			out := plannerReports(router, key)
-			// A report block's line reached the Planner through the
-			// gateway; the sidecar keeps the latest.
-			if m, ok := sidecars.Get(key); ok && m.Report != nil && !slices.Contains(out, m.Report.At) {
-				out = append(out, m.Report.At)
-			}
-			return out
+			m, ok := sidecars.Get(key)
+			return sessionReports(m, ok, func() []time.Time { return plannerReports(router, key) })
 		},
 	})
+}
+
+// sessionReports are the times session m reported to the Planner: its
+// cross-session messages (peer) and the report block's line the gateway
+// told, the latest of which its sidecar keeps. A session dispatched on the
+// prompt with the report block (ReportBlock) SendMessages the Planner only
+// to ask, so its messages are no reports, as action's receipts count them.
+func sessionReports(m sidecar.Meta, ok bool, peer func() []time.Time) []time.Time {
+	var out []time.Time
+	if !ok || !m.ReportBlock {
+		out = peer()
+	}
+	if ok && m.Report != nil && !slices.Contains(out, m.Report.At) {
+		out = append(out, m.Report.At)
+	}
+	return out
 }
 
 // PlannerReports is action.Config.Reports over the router: the senders of
