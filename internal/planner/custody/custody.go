@@ -361,7 +361,11 @@ func (e *Engine) eligible(key string) error {
 // does not retry: a cron run and a scratch session are one-shot; and a
 // retry goes the dashboard's way (Config.Send), so a session whose replies
 // go elsewhere (an IM chat, a project planner one may be bound to) is
-// retried only with its switch on.
+// retried only with its switch on. A dispatched session is retried, its
+// switch on or off (D94 D1), only while its task runs: once the task is
+// done (and nobody turned custody back on since, see on) or the session was
+// put away, a failure is the end of the task's process, not of a turn the
+// user waits on, and a "继续" would resume a session closed on purpose.
 func (e *Engine) retryEligible(key string) error {
 	if err := e.eligible(key); err != nil {
 		return err
@@ -369,10 +373,29 @@ func (e *Engine) retryEligible(key string) error {
 	if sessionkey.IsCronKey(key) || sessionkey.IsScratchKey(key) {
 		return ErrRefused
 	}
+	if sessionkey.IsTaskKey(key) && e.taskOver(key) {
+		return ErrRefused
+	}
 	if !dashboardSession(key) && !e.On(key) {
 		return ErrRefused
 	}
 	return nil
+}
+
+// taskOver reports whether dispatched session key's task is over for a
+// retry: put away, or marked done with its switch left to the default.
+func (e *Engine) taskOver(key string) bool {
+	if e.cfg.Sessions == nil {
+		return false
+	}
+	m, ok := e.cfg.Sessions.Get(key)
+	if !ok {
+		return false
+	}
+	if m.Reap != nil {
+		return true
+	}
+	return m.Mark != nil && task.State(m.Mark.State) == task.Done && !on(key, m, ok)
 }
 
 // dashboardSession reports whether key's replies are the dashboard's: a

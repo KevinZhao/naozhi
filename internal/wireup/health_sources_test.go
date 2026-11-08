@@ -23,6 +23,8 @@ func TestSessionFactFailure(t *testing.T) {
 		{"evicted", session.SessionSnapshot{State: "dead", DeathReason: session.DeathReasonEvicted}, false},
 		{"clean CLI exit", session.SessionSnapshot{State: "dead", DeathReason: "cli_exited"}, false},
 		{"killed by naozhi", session.SessionSnapshot{State: "dead", DeathReason: "killed"}, false},
+		{"stopped by the user", session.SessionSnapshot{State: "dead", DeathReason: session.DeathReasonStopped}, false},
+		{"shim lost", session.SessionSnapshot{State: "dead", DeathReason: "shim_eof"}, true},
 		{"watchdog", session.SessionSnapshot{State: "ready", DeathReason: "no_output_timeout"}, true},
 		{"kill -9", session.SessionSnapshot{State: "dead", DeathReason: "cli_exited_code_-1"}, true},
 		{"startup failures", session.SessionSnapshot{State: "dead", StartupFailure: &sessionview.StartupFailureView{Class: "auth", Streak: 2}}, true},

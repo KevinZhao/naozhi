@@ -31,6 +31,22 @@ func TestRetryEveryLocalSession(t *testing.T) {
 		{name: "direct chat", key: dash, want: true},
 		{name: "user at it", key: dash, setup: func(r *rig) { r.e.SetViewing(dash, "tab", true); r.lastUser[dash] = r.now }, want: true},
 		{name: "switched off", key: "task:a", setup: func(r *rig) { r.dispatch("task:a"); r.e.Set("task:a", false, ByUser) }, want: true},
+		{name: "dispatched, running", key: "task:a", setup: func(r *rig) { r.dispatch("task:a"); r.mark("task:a", "doing") }, want: true},
+		{name: "dispatched, done", key: "task:a", setup: func(r *rig) { r.dispatch("task:a"); r.mark("task:a", "done") }},
+		{name: "dispatched, done and put away", key: "task:a", setup: func(r *rig) {
+			r.dispatch("task:a")
+			r.mark("task:a", "done")
+			r.update("task:a", func(m *sidecar.Meta) { m.Reap = &sidecar.Reap{At: r.now, By: "planner"} })
+		}},
+		{name: "dispatched, put away though not marked", key: "task:a", setup: func(r *rig) {
+			r.dispatch("task:a")
+			r.update("task:a", func(m *sidecar.Meta) { m.Reap = &sidecar.Reap{At: r.now, By: "planner"} })
+		}},
+		{name: "dispatched, done, custody on by the user", key: "task:a", setup: func(r *rig) {
+			r.dispatch("task:a")
+			r.mark("task:a", "done")
+			r.e.Set("task:a", true, ByUser)
+		}, want: true},
 		{name: "cron", key: "cron:nightly"},
 		{name: "scratch", key: sessionkey.ScratchKeyPrefix + "x"},
 		{name: "remote", key: "remote/" + dash},
@@ -323,6 +339,46 @@ func TestRetryAcrossPause(t *testing.T) {
 			}
 			if left != never && (r.inbox.items[0].Source != "failed:"+dash || !strings.Contains(r.inbox.items[0].Why, "托管已暂停")) {
 				t.Errorf("left as %+v", r.inbox.items[0])
+			}
+		})
+	}
+}
+
+func (r *rig) update(key string, fn func(m *sidecar.Meta)) {
+	r.t.Helper()
+	if _, err := r.sessions.Update(key, func(m *sidecar.Meta) bool { fn(m); return true }); err != nil {
+		r.t.Fatal(err)
+	}
+}
+
+func (r *rig) mark(key, state string) {
+	r.t.Helper()
+	r.update(key, func(m *sidecar.Meta) { m.Mark = &sidecar.Mark{State: state, By: "planner", At: r.now} })
+}
+
+// A dispatched session whose process died unexpectedly is resumed while its
+// task runs (#3883); the same death once the task is done and put away (the
+// reap closed it) is left alone.
+func TestRetryCrashOnlyWhileTaskRuns(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		over bool
+	}{{"running", false}, {"done and put away", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			r.dispatch("task:a")
+			if tc.over {
+				r.mark("task:a", "done")
+				r.update("task:a", func(m *sidecar.Meta) { m.Reap = &sidecar.Reap{At: r.now, By: "planner"} })
+			}
+			u := health.Unit{ID: "task:a", Kind: health.KindSession, State: health.Failed, ErrClass: health.ErrOther,
+				Evidence: health.DeathEvidence + "shim_eof", LastActive: r.now, Since: r.now}
+			r.units = []health.Unit{u}
+			r.e.Tick()
+			r.now = r.now.Add(Backoff[0])
+			r.e.Tick()
+			if got := len(r.sent) == 1; got == tc.over {
+				t.Errorf("sent %q, want a retry %v", r.sent, !tc.over)
 			}
 		})
 	}
