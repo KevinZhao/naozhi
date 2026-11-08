@@ -47,16 +47,26 @@ var (
 )
 
 // SubmitPlanner runs text and images (nil for none) from src as a turn on
-// key, spawning it with opts; done (nil for none) gets the reply text or the
-// turn's error. queued is text waiting behind a running turn. It is the
-// agent's Turns.SubmitPlanner, and sends the first message of a session the
-// Planner dispatched (task:, src ""), which also spawns with options the
-// gateway set.
-func (s *Server) SubmitPlanner(key string, src agent.Source, text string, images []clievent.Attachment, opts session.AgentOpts, done func(reply string, err error)) (queued bool, err error) {
+// key, spawning it with opts; said (nil for none) is the user's own words in
+// it, recorded with the request (PlannerTurnWords); done (nil for none) gets
+// the reply text or the turn's error. queued is text waiting behind a
+// running turn. It is the agent's Turns.SubmitPlanner, and sends the first
+// message of a session the Planner dispatched (task:, src ""), which also
+// spawns with options the gateway set.
+func (s *Server) SubmitPlanner(key string, src agent.Source, said *agent.Words, text string, images []clievent.Attachment, opts session.AgentOpts, done func(reply string, err error)) (queued bool, err error) {
 	if s.hub == nil || s.hub.engine == nil {
 		return false, errPlannerNoEngine
 	}
-	return s.hub.engine.submitPlanner(key, src, text, images, opts, done)
+	return s.hub.engine.submitPlanner(key, src, said, text, images, opts, done)
+}
+
+// PlannerTurnWords is the user's words of key's requests in flight, oldest
+// first; none between turns. It is the agent's Turns.PlannerTurnWords.
+func (s *Server) PlannerTurnWords(key string) []agent.Words {
+	if s.hub == nil || s.hub.engine == nil {
+		return nil
+	}
+	return s.hub.engine.plannerTurns.words(key)
 }
 
 // PlannerTurnSources is the sources of key's requests in flight, sorted;
@@ -120,6 +130,9 @@ type plannerTurn struct {
 	Key   string       `json:"key"`
 	Src   agent.Source `json:"source"`
 	Began time.Time    `json:"began"`
+	// Words is the user's own words in the request (D98), nil for none: a
+	// turn carried over from the last run may still pass them on.
+	Words *agent.Words `json:"words,omitempty"`
 	// After is where the session's shim stream stood at Begin
 	// (cli.TurnWatermark); "" when none was known. A result replayed after
 	// a restart answers the request only when it sits past this, so the
@@ -163,7 +176,7 @@ func (t *plannerTurns) load(ctx context.Context, path string) {
 
 // begin records a request from src on key and returns its ID; a request
 // with no source (a task: session's first message) is not recorded, 0.
-func (t *plannerTurns) begin(key string, src agent.Source, after string) uint64 {
+func (t *plannerTurns) begin(key string, src agent.Source, said *agent.Words, after string) uint64 {
 	if src == "" {
 		return 0
 	}
@@ -173,7 +186,7 @@ func (t *plannerTurns) begin(key string, src agent.Source, after string) uint64 
 		t.live = map[uint64]plannerTurn{}
 	}
 	t.next++
-	t.live[t.next] = plannerTurn{Key: key, Src: src, Began: time.Now(), After: after}
+	t.live[t.next] = plannerTurn{Key: key, Src: src, Began: time.Now(), After: after, Words: said}
 	t.saveLocked()
 	return t.next
 }
@@ -251,6 +264,24 @@ func (t *plannerTurns) sources(key string) []agent.Source {
 	return slices.Compact(out)
 }
 
+// words is the user's words of key's requests in flight, oldest first.
+func (t *plannerTurns) words(key string) []agent.Words {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []agent.Words
+	for _, e := range t.restored {
+		if e.Key == key && e.Words != nil {
+			out = append(out, *e.Words)
+		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(t.live)) {
+		if e := t.live[id]; e.Key == key && e.Words != nil {
+			out = append(out, *e.Words)
+		}
+	}
+	return out
+}
+
 // saveLocked writes the requests in flight; it fails open to a warning,
 // the list in memory still holding.
 func (t *plannerTurns) saveLocked() {
@@ -310,8 +341,8 @@ func (s *Server) PlannerNote(key, text string) {
 // plannerNoteBytes caps a note; a promise's text is at most 500 runes.
 const plannerNoteBytes = 2048
 
-func (e *sendEngine) submitPlanner(key string, src agent.Source, text string, images []clievent.Attachment, opts session.AgentOpts, done func(string, error)) (bool, error) {
-	o := &plannerOrigin{key: key, src: src, turns: &e.plannerTurns, opts: opts, notify: e.notify, done: done, mark: e.turnWatermark}
+func (e *sendEngine) submitPlanner(key string, src agent.Source, said *agent.Words, text string, images []clievent.Attachment, opts session.AgentOpts, done func(string, error)) (bool, error) {
+	o := &plannerOrigin{key: key, src: src, said: said, turns: &e.plannerTurns, opts: opts, notify: e.notify, done: done, mark: e.turnWatermark}
 	// A turn bringing outside content in may only promise and ask (§15.6):
 	// merged with the user's message it would refuse what they asked, so
 	// it runs by itself; and the Planner's turns are judged by the sources
@@ -345,7 +376,9 @@ type plannerOrigin struct {
 	mark func(key string) (cli.TurnWatermark, bool)
 	// src is what the request came from, recorded in turns from its Begin
 	// to its Finish under id.
-	src    agent.Source
+	src agent.Source
+	// said is the user's own words in the request, recorded with src.
+	said   *agent.Words
 	id     uint64
 	turns  *plannerTurns
 	opts   session.AgentOpts
@@ -373,7 +406,7 @@ func (o *plannerOrigin) Begin(_ context.Context, t turn.TurnInfo) turn.Delivery 
 				after = w.String()
 			}
 		}
-		o.id = o.turns.begin(o.key, o.src, after)
+		o.id = o.turns.begin(o.key, o.src, o.said, after)
 	}
 	return o
 }

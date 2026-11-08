@@ -61,8 +61,8 @@ type EventEntry struct {
 	PeerMode string `json:"peer_mode,omitempty"`
 	PeerKey  string `json:"peer_key,omitempty"`
 	// Source is who sent a "user" entry when it was not the user: the
-	// gateway under custody (SourceCustody) or the Planner's dispatch
-	// (SourcePlanner); "" is the user.
+	// gateway under custody (SourceCustody), the Planner's dispatch
+	// (SourcePlanner) or a decision it relayed (SourceRelay); "" is the user.
 	Source string `json:"source,omitempty"`
 	// CustodyReason and CustodyN are why custody sent a SourceCustody entry
 	// (出错重试, 按建议执行, Planner 继续) and its count over the lineage;
@@ -111,7 +111,15 @@ const (
 	CustodyLead = "⚙ 托管 · "
 	// SourcePlanner is the first message of a session the Planner dispatched.
 	SourcePlanner = "planner"
+	// SourceRelay is the user's decision the Planner passed on, in the
+	// gateway's envelope with the user's own words (docs/rfc/planner.md D98).
+	SourceRelay = "relay"
 )
+
+// FromGateway reports whether a "user" entry from source was written by the
+// gateway rather than typed into the session (custody, a relay): a session's
+// title and last prompt skip it.
+func FromGateway(source string) bool { return source == SourceCustody || source == SourceRelay }
 
 // ToolCall is the per-event payload for ACP tool_call / tool_call_update
 // session/update notifications. The same struct serves the initial

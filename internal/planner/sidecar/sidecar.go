@@ -60,8 +60,11 @@ type Meta struct {
 	Dir       string `json:"dir,omitempty"`
 	// Model is the model the dispatch asked for ("" = the default). Dir and
 	// Model let a session whose process went away respawn as dispatched.
-	Model   string    `json:"model,omitempty"`
-	Created time.Time `json:"created"`
+	Model string `json:"model,omitempty"`
+	// MCPTools are the write tools the dispatch allowed this session, by
+	// server (D98), kept so a respawn gets them too.
+	MCPTools map[string][]string `json:"mcp_tools,omitempty"`
+	Created  time.Time           `json:"created"`
 	// Retired is when the session was first seen gone from the router; the
 	// file is removed Retention later.
 	Retired time.Time `json:"retired,omitzero"`

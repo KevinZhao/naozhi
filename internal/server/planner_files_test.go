@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	dashplanner "github.com/naozhi/naozhi/internal/dashboard/ext/planner"
@@ -43,7 +44,7 @@ type plannerFileTurns struct {
 	images [][]clievent.Attachment
 }
 
-func (f *plannerFileTurns) SubmitPlanner(_ string, _ agent.Source, text string, images []clievent.Attachment, _ sessionview.AgentOpts, _ func(string, error)) (bool, error) {
+func (f *plannerFileTurns) SubmitPlanner(_ string, _ agent.Source, _ *agent.Words, text string, images []clievent.Attachment, _ sessionview.AgentOpts, _ func(string, error)) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.texts = append(f.texts, text)
@@ -51,6 +52,7 @@ func (f *plannerFileTurns) SubmitPlanner(_ string, _ agent.Source, text string, 
 	return false, nil
 }
 func (*plannerFileTurns) PlannerTurnSources(string) []agent.Source { return nil }
+func (*plannerFileTurns) PlannerTurnWords(string) []agent.Words    { return nil }
 func (*plannerFileTurns) PlannerReceipt(string, string)            {}
 func (*plannerFileTurns) PlannerNote(string, string)               {}
 func (*plannerFileTurns) DropPlannerQueue(string)                  {}
@@ -112,6 +114,10 @@ func TestPlannerSendFileIDs(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
 			a.Start(ctx, turns, nil)
+			// The loop's first reconcile marks the shift in the state root;
+			// a case refused at once would otherwise end while that write
+			// is under way, and TempDir's cleanup finds the directory busy.
+			waitFile(t, lay.PlannerAgentPath())
 			if tc.stopped {
 				if err := a.SetStopped(true); err != nil {
 					t.Fatal(err)
@@ -187,5 +193,20 @@ func TestPlannerSendFileIDs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// waitFile waits up to 5 seconds for path to exist.
+func waitFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s not written", path)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

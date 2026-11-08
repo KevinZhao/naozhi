@@ -196,7 +196,7 @@ function mentionedKeys(ev) {
 
 // ---- action blocks (§6.2) ----
 
-const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask', 'status', 'notify', 'custody']);
+const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask', 'status', 'notify', 'custody', 'relay']);
 const STATUS_LABEL = { done: '已完成', doing: '进行中', failed: '失败' };
 
 const isStr = (v) => typeof v === 'string';
@@ -253,7 +253,17 @@ function actionCardHtml(raw) {
     // A workspace written by its ID is named once the registry is in.
     const name = WORKSPACE_ID_RE.test(ws) ? workspaceName(ws) : ws;
     return '<div class="pl-act pl-act-dispatch"' + (name || !ws ? '' : ' data-ws="' + escAttr(ws) + '"') + '><div class="pl-act-h">派出会话' + (title ? ' · <b>' + esc(title) + '</b>' : '') + '</div>' +
-      rowsHtml([['工作区', name], ['模型', str(a.model)], ['第一条消息', str(a.message)]]) + '</div>';
+      rowsHtml([['工作区', name], ['模型', str(a.model)], ['附上', a.with_user_words === true ? '你这一轮的原话' : ''],
+        ['放行写工具', mcpToolsText(a.mcp_tools)], ['第一条消息', str(a.message)]]) + '</div>';
+  }
+  if (a.type === 'relay') {
+    // What the session got is the user's words then this text; the card
+    // says whose words lead it.
+    const key = str(a.key);
+    return '<div class="pl-act pl-act-relay"><div class="pl-act-h">转达你的决定</div>' +
+      '<div class="pl-act-why">附上你这一轮的原话，再加上 Planner 的说明：</div>' +
+      '<div class="pl-act-q">' + esc(str(a.text)) + '</div>' +
+      (key ? '<div class="pl-scards">' + sessionCardHtml(key) + '</div>' : '') + '</div>';
   }
   if (a.type === 'promise') {
     return '<div class="pl-act pl-act-promise"><div class="pl-act-h">登记承诺</div>' +
@@ -286,9 +296,20 @@ function actionCardHtml(raw) {
       (link ? '<div class="pl-act-link">' + link + '</div>' : '') + '</div>';
   }
   const opts = (Array.isArray(a.options) ? a.options : []).filter(isStr).map((o) => '<span class="pl-act-opt">' + esc(o) + '</span>').join('');
+  const task = str(a.task);
   return '<div class="pl-act pl-act-ask"><div class="pl-act-h">问你</div>' +
     '<div class="pl-act-q">' + esc(str(a.question)) + '</div>' +
-    (opts ? '<div class="pl-act-opts">' + opts + '</div>' : '') + '</div>';
+    (opts ? '<div class="pl-act-opts">' + opts + '</div>' : '') +
+    (task ? '<div class="pl-act-why">你的回答会直接送到：</div><div class="pl-scards">' + sessionCardHtml(task) + '</div>' : '') + '</div>';
+}
+
+// mcpToolsText is a dispatch's mcp_tools as one line: server: tool、tool；...
+function mcpToolsText(tools) {
+  if (!tools || typeof tools !== 'object' || Array.isArray(tools)) return '';
+  return Object.entries(tools).map(([server, names]) => {
+    const list = Array.isArray(names) ? names.map(str).filter(Boolean).join('、') : '';
+    return server + (list ? '：' + list : '');
+  }).join('；');
 }
 
 // ---- decoration ----

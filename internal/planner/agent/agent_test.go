@@ -97,12 +97,15 @@ type fakeTurns struct {
 	sent    []string
 	images  [][]clievent.Attachment
 	srcs    []Source
+	said    []*Words
 	notes   []string
 	sources []Source
+	words   []Words
 }
 
-func (f *fakeTurns) SubmitPlanner(_ string, src Source, text string, images []clievent.Attachment, _ sessionview.AgentOpts, done func(string, error)) (bool, error) {
+func (f *fakeTurns) SubmitPlanner(_ string, src Source, said *Words, text string, images []clievent.Attachment, _ sessionview.AgentOpts, done func(string, error)) (bool, error) {
 	f.sent = append(f.sent, text)
+	f.said = append(f.said, said)
 	f.images = append(f.images, images)
 	f.srcs = append(f.srcs, src)
 	if done != nil {
@@ -112,6 +115,7 @@ func (f *fakeTurns) SubmitPlanner(_ string, src Source, text string, images []cl
 }
 
 func (f *fakeTurns) PlannerTurnSources(string) []Source { return f.sources }
+func (f *fakeTurns) PlannerTurnWords(string) []Words    { return f.words }
 func (*fakeTurns) PlannerReceipt(string, string)        {}
 func (f *fakeTurns) PlannerNote(_, text string)         { f.notes = append(f.notes, text) }
 func (*fakeTurns) DropPlannerQueue(string)              {}
@@ -570,7 +574,7 @@ type heldTurns struct {
 	dones []func(string, error)
 }
 
-func (h *heldTurns) SubmitPlanner(_ string, _ Source, text string, _ []clievent.Attachment, _ sessionview.AgentOpts, done func(string, error)) (bool, error) {
+func (h *heldTurns) SubmitPlanner(_ string, _ Source, _ *Words, text string, _ []clievent.Attachment, _ sessionview.AgentOpts, done func(string, error)) (bool, error) {
 	h.sent = append(h.sent, text)
 	h.dones = append(h.dones, done)
 	return false, nil
@@ -728,5 +732,41 @@ func TestPromptUpgradeChangesShiftWithUnknownSessionID(t *testing.T) {
 	a.reconcile(context.Background())
 	if sess.recreated != 1 {
 		t.Fatalf("recreated %d, want 1", sess.recreated)
+	}
+}
+
+// TestSendWords: a user message's turn records the user's own words (no
+// snapshot, no ref), a receipt's records none, and the answer to a question
+// records the answer from SourceAnswer (D98).
+func TestSendWords(t *testing.T) {
+	now := time.Now()
+	a, _ := newTestAgent(t, &fakeSessions{}, &now)
+	turns := &fakeTurns{}
+	a.turns = turns
+	if err := a.Send(" 都合并 ", refKey, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Send("", refKey, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Tell("已派出"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.TellAnswer("用户的回答：发", Words{Text: "发", Question: "发版吗？"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(turns.said) != 4 || turns.said[0] == nil || turns.said[0].Text != "都合并" || turns.said[1] != nil || turns.said[2] != nil ||
+		turns.said[3] == nil || turns.said[3].Text != "发" || turns.said[3].Question != "发版吗？" {
+		t.Errorf("said = %+v", turns.said)
+	}
+	if !slices.Equal(turns.srcs, []Source{SourceHandover, SourceHandover, SourceReceipt, SourceAnswer}) {
+		t.Errorf("sources = %v", turns.srcs)
+	}
+	if SourceAnswer.Outside() {
+		t.Error("an answer's turn reads as outside content")
+	}
+	turns.words = []Words{{Text: "x"}}
+	if w := a.TurnWords(); len(w) != 1 || w[0].Text != "x" {
+		t.Errorf("TurnWords = %+v", w)
 	}
 }

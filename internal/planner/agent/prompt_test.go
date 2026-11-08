@@ -25,6 +25,9 @@ func TestSystemPrompt(t *testing.T) {
 		"不要改用 SendMessage 绕开",
 		"也不要另派会话接着做同一件事",
 		"一律用 ask 问用户，不替用户答",
+		`"with_user_words":true`,
+		"不要叫会话去改 ~/.claude.json",
+		"用户的决定只用 relay 或带 task 的 ask 送给会话",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt lacks %q", want)
@@ -41,11 +44,11 @@ func TestSystemPrompt(t *testing.T) {
 	fill := strings.NewReplacer(
 		"<工作区 ID 或名字>", "naozhi", "<RFC3339 或空>", "", "<task: key 或承诺 ID>", "task:ab12",
 		"done | doing | failed", "done", "timely | brief", "timely", "<http(s) 链接或空>", "", "<巡检发现的 id 或空>", "", "…", "x",
-		"<会话 key>", "dashboard:direct:u:general",
+		"<会话 key>", "dashboard:direct:u:general", "<会话 key 或空>", "",
 	)
 	formats := regexp.MustCompile(`\{"type":"[a-z]+"[^\n]*?\}`).FindAllString(p, -1)
-	if len(formats) != 7 {
-		t.Fatalf("found %d block formats, want 7: %q", len(formats), formats)
+	if len(formats) != 8 {
+		t.Fatalf("found %d block formats, want 8: %q", len(formats), formats)
 	}
 	for _, f := range formats {
 		body := strings.ReplaceAll(fill.Replace(f), `["x"]`, `["是"]`)

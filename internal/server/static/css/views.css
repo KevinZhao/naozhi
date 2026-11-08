@@ -763,6 +763,11 @@ body.nz-view-planner .planner-main{display:flex;flex:1;min-width:0;min-height:0}
    on a task card and in the health table. */
 .event.user.custody-msg .event-content{background:var(--nz-bg-2);border:1px dashed var(--nz-border);color:var(--nz-text)}
 .custody-source{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-bottom:4px}
+/* A relayed decision (relay.js, D98): the user's words as a quote, then the
+   Planner's text, on the same neutral ground as custody's. */
+.event.user.relay-msg .event-content{background:var(--nz-bg-2);border:1px solid var(--nz-border);color:var(--nz-text)}
+.relay-words{margin:0 0 6px;padding:2px 0 2px 10px;border-left:3px solid var(--nz-accent);color:var(--nz-text-strong);overflow-wrap:anywhere}
+.relay-note-h{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin:2px 0}
 .custody-suggested{display:flex;flex-wrap:wrap;align-items:baseline;gap:0 4px}
 .custody-choice{font-weight:600;overflow-wrap:anywhere}
 .custody-sep{opacity:.45;padding:0 2px}

@@ -20,7 +20,7 @@ func TestPlannerScoutWakeRunsAlone(t *testing.T) {
 			e := h.engine()
 			submit := func(src agent.Source, text string) {
 				t.Helper()
-				if _, err := e.submitPlanner(agent.Key, src, text, nil, session.AgentOpts{}, nil); err != nil {
+				if _, err := e.submitPlanner(agent.Key, src, nil, text, nil, session.AgentOpts{}, nil); err != nil {
 					t.Fatalf("submit %s: %v", src, err)
 				}
 			}

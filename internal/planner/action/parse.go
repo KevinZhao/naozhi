@@ -1,12 +1,13 @@
 // Package action is the Planner's way to ask the gateway for something
 // (docs/rfc/planner.md §6.2): the ```naozhi-action blocks at the end of a
-// planner:main reply. There are six: dispatch (a task: session, started at
+// planner:main reply. There are seven: dispatch (a task: session, started at
 // once, D88), promise (a promise among the 任务), ask (a
-// question in "通知" whose answer goes back to the Planner), status (the
-// Planner's judgment of a task's state, §15.4), notify (something to tell
-// the user, pushed now or held for the morning brief, §15.6) and custody (a
-// session's custody switched, or a message sent to a session in custody,
-// planner/custody). A block that
+// question in "通知" whose answer goes back to the Planner, or straight to a
+// session, D98), status (the Planner's judgment of a task's state, §15.4),
+// notify (something to tell the user, pushed now or held for the morning
+// brief, §15.6), custody (a session's custody switched, or a message sent to
+// a session in custody, planner/custody) and relay (the user's decision
+// passed on to a session with the user's own words, D98). A block that
 // does not parse, or names an unknown type, a bad field or a task that does
 // not exist, is not run: the Planner conversation shows it as it was
 // written, with the reason, and the Planner gets a receipt naming it.
@@ -16,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"slices"
 	"strings"
@@ -24,6 +26,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/planner/promise"
+	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/tuningspec"
 )
 
@@ -55,6 +58,9 @@ const (
 	keyRunes = 512
 	// custodyTextRunes caps what the Planner tells a session in custody.
 	custodyTextRunes = 2000
+	// relayTextRunes caps the Planner's words that follow the user's in a
+	// relay.
+	relayTextRunes = 4000
 )
 
 // Type is a block's "type".
@@ -67,6 +73,7 @@ const (
 	TypeStatus   Type = "status"
 	TypeNotify   Type = "notify"
 	TypeCustody  Type = "custody"
+	TypeRelay    Type = "relay"
 )
 
 // Dispatch asks for a session in a workspace.
@@ -77,6 +84,14 @@ type Dispatch struct {
 	// Model is "" for the default.
 	Model   string `json:"model"`
 	Message string `json:"message"`
+	// WithUserWords leads the first message with the user's words of the
+	// turn, as a relay does (D98). Only a turn the user started may set it.
+	WithUserWords bool `json:"with_user_words,omitempty"`
+	// MCPTools are the write tools this session alone may use, by server
+	// (D98): server name → its tool names (scout.WriteTools). The gateway
+	// turns that server's write switch on for the session and denies its
+	// other write tools. Only a turn the user started may carry it.
+	MCPTools map[string][]string `json:"mcp_tools,omitempty"`
 }
 
 // Promise registers something the Planner promised the user.
@@ -87,10 +102,13 @@ type Promise struct {
 }
 
 // Ask puts a question to the user; Options are the answers offered (none:
-// the user replies in the conversation).
+// the user replies in the conversation). Task, when set, is the session the
+// answer goes to straight from the gateway, with the user's words (D98); it
+// needs options.
 type Ask struct {
 	Question string   `json:"question"`
 	Options  []string `json:"options"`
+	Task     string   `json:"task,omitempty"`
 }
 
 // Status sets a task's state: Task is a task: key or a promise ID, State
@@ -128,8 +146,18 @@ type Custody struct {
 	Text string `json:"text"`
 }
 
+// Relay passes the user's decision on to session Key (D98): the gateway
+// leads Text, the Planner's words, with all the user's own words it recorded
+// for the turn, never a part the Planner picks (a cut quote can turn "先不要
+// 合并" into "合并"). Only a turn the user started may relay.
+type Relay struct {
+	Key  string `json:"key"`
+	Text string `json:"text"`
+}
+
 // Block is one action block of a reply: exactly one of Dispatch, Promise,
-// Ask, Status, Notify and Custody is set, or Err says why it is not run.
+// Ask, Status, Notify, Custody and Relay is set, or Err says why it is not
+// run.
 type Block struct {
 	// Raw is the block's body as written.
 	Raw      string
@@ -140,6 +168,7 @@ type Block struct {
 	Status   *Status
 	Notify   *Notify
 	Custody  *Custody
+	Relay    *Relay
 	Err      error
 }
 
@@ -260,13 +289,22 @@ func (b *Block) decode() {
 			err = c.validate()
 			b.Custody = &c.Custody
 		}
+	case TypeRelay:
+		var r struct {
+			Type Type `json:"type"`
+			Relay
+		}
+		if err = strict(b.Raw, &r); err == nil {
+			err = r.validate()
+			b.Relay = &r.Relay
+		}
 	case "":
 		err = errors.New("缺少 type")
 	default:
-		err = fmt.Errorf("未知类型 %q（只有 dispatch、promise、ask、status、notify、custody）", head.Type)
+		err = fmt.Errorf("未知类型 %q（只有 dispatch、promise、ask、status、notify、custody、relay）", head.Type)
 	}
 	if err != nil {
-		b.Dispatch, b.Promise, b.Ask, b.Status, b.Notify, b.Custody, b.Err = nil, nil, nil, nil, nil, nil, err
+		b.Dispatch, b.Promise, b.Ask, b.Status, b.Notify, b.Custody, b.Relay, b.Err = nil, nil, nil, nil, nil, nil, nil, err
 	}
 }
 
@@ -303,7 +341,72 @@ func (d *Dispatch) validate() error {
 	if err := tuningspec.ValidateModel("model", d.Model); err != nil {
 		return errors.New("model 不是合法的模型名")
 	}
+	if err := noEnvelope("message", d.Message); err != nil {
+		return err
+	}
+	return validMCPTools(d.MCPTools)
+}
+
+// validMCPTools checks a dispatch's mcp_tools: only the write tools of a
+// server with a write switch (scout.WriteSwitch), never the one that turns
+// them all on. The other servers list their write tools without a switch,
+// so naming one would give the session nothing it lacks.
+func validMCPTools(tools map[string][]string) error {
+	for _, server := range slices.Sorted(maps.Keys(tools)) {
+		if _, ok := scout.WriteSwitch[server]; !ok {
+			return fmt.Errorf("mcp_tools 只能放行 %s 的写工具，%q 不行", strings.Join(slices.Sorted(maps.Keys(scout.WriteSwitch)), "、"), server)
+		}
+		known := scout.WriteTools(server)
+		known = slices.DeleteFunc(known, func(t string) bool { return t == scout.EnableWrites })
+		if len(tools[server]) == 0 {
+			return fmt.Errorf("mcp_tools 里 %s 没有工具", server)
+		}
+		for _, t := range tools[server] {
+			if !slices.Contains(known, t) {
+				return fmt.Errorf("mcp_tools 里 %s 没有写工具 %q（可放行：%s）", server, t, strings.Join(known, "、"))
+			}
+		}
+	}
 	return nil
+}
+
+// envelopeTag opens and closes the gateway's relay envelope (relayEnvelope).
+const envelopeTag = "naozhi-relay"
+
+// noEnvelope refuses Planner text that names the relay envelope: only the
+// gateway writes one, so a session can take it for the user's own words. In
+// 11-07 runs a copy with the brackets swapped for ‹› still passed for the
+// real one 9 times in 13.
+func noEnvelope(field, text string) error {
+	if strings.Contains(strings.ToLower(text), envelopeTag) {
+		return fmt.Errorf("%s 里不能出现 %s（只有网关写它）", field, envelopeTag)
+	}
+	return nil
+}
+
+// validKey checks a block's session key field.
+func validKey(field, key string) error {
+	switch {
+	case key == "":
+		return fmt.Errorf("缺少 %s", field)
+	case utf8.RuneCountInString(key) > keyRunes || strings.IndexFunc(key, unicode.IsControl) >= 0:
+		return fmt.Errorf("%s 不是合法的会话 key", field)
+	}
+	return nil
+}
+
+func (r *Relay) validate() error {
+	r.Key, r.Text = strings.TrimSpace(r.Key), strings.TrimSpace(r.Text)
+	if err := validKey("key", r.Key); err != nil {
+		return errors.New("relay " + err.Error())
+	}
+	switch {
+	case r.Text == "":
+		return errors.New("relay 缺少 text（你要它做什么）")
+	case utf8.RuneCountInString(r.Text) > relayTextRunes:
+		return fmt.Errorf("text 超过 %d 字", relayTextRunes)
+	}
+	return noEnvelope("text", r.Text)
 }
 
 func (p *Promise) validate() error {
@@ -339,6 +442,16 @@ func (a *Ask) validate() error {
 			return fmt.Errorf("选项 %q 重复", o)
 		}
 		a.Options[i] = o
+	}
+	a.Task = strings.TrimSpace(a.Task)
+	if a.Task == "" {
+		return nil
+	}
+	if err := validKey("task", a.Task); err != nil {
+		return errors.New("ask 的 " + err.Error())
+	}
+	if len(a.Options) == 0 {
+		return errors.New("带 task 的 ask 要给 options（用户点选的回答直接送到那个会话）")
 	}
 	return nil
 }
@@ -392,7 +505,7 @@ func (c *Custody) validate() error {
 	case utf8.RuneCountInString(c.Text) > custodyTextRunes:
 		return fmt.Errorf("text 超过 %d 字", custodyTextRunes)
 	}
-	return nil
+	return noEnvelope("text", c.Text)
 }
 
 // webLink reports whether s is an absolute http(s) URL the dashboard may

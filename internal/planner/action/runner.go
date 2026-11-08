@@ -13,6 +13,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -59,6 +60,16 @@ type Spawn struct {
 	Title   string
 	Model   string
 	Message string
+	// MCPTools is the dispatch's mcp_tools (D98), nil for none.
+	MCPTools map[string][]string
+}
+
+// Words is what the user said in a Planner turn, as the gateway recorded it
+// (D98): what they typed, or the answer they picked to Question.
+type Words struct {
+	Text     string
+	Question string
+	At       time.Time
 }
 
 // Config wires a Runner.
@@ -105,6 +116,23 @@ type Config struct {
 	// PlannerBusy reports whether a Planner turn is running
 	// (agent.Agent.Busy): a report may wait behind it. nil is never.
 	PlannerBusy func() bool
+	// Words is the user's own words of the Planner turn in flight, as the
+	// gateway recorded them (agent.Agent.TurnWords). A turn with none was
+	// not started by the user (a receipt, a reminder, a scout run, custody):
+	// it may not relay, nor dispatch with the user's words or mcp_tools
+	// (D98). nil is none.
+	Words func() []Words
+	// Relay sends text to session key as the user's decision passed on
+	// (Server.SubmitRelay), its transcript entry marked relay. nil refuses
+	// relay blocks and the asks that name a task.
+	Relay func(key, text string) error
+	// RelayTarget is why key may not take a relay, nil when it may: no
+	// local session, or one that takes no message. nil allows any.
+	RelayTarget func(key string) error
+	// TellAnswer sends the Planner the user's answer to a question as a turn
+	// the user started, its words the answer (agent.Agent.TellAnswer); nil
+	// falls back to Tell.
+	TellAnswer func(text string, w Words) error
 	// Custody is the gateway's watch over sessions for the user
 	// (planner/custody.Engine): it runs the custody blocks, and the turn
 	// ends of the sessions in custody are checked for the Planner like a
@@ -178,10 +206,16 @@ type reply struct {
 	from, to  time.Time
 	outside   string
 	unrunTurn bool
+	// words is the user's own words of the turn (Config.Words), none for a
+	// turn the user did not start.
+	words []Words
 }
 
+// askCard is an ask's payload in "通知": the question, and the session the
+// answer goes to straight from the gateway ("" for the Planner only).
 type askCard struct {
 	Question string `json:"question"`
+	Task     string `json:"task,omitempty"`
 }
 
 // New returns a Runner and registers its decision handler with cfg.Inbox.
@@ -230,8 +264,12 @@ func (r *Runner) Result(key, text string) {
 	if r.cfg.UnrunTurn != nil {
 		unrunTurn = r.cfg.UnrunTurn()
 	}
+	var words []Words
+	if r.cfg.Words != nil {
+		words = r.cfg.Words()
+	}
 	r.mu.Lock()
-	rep := reply{text: text, from: r.last, to: r.cfg.Now(), outside: outside, unrunTurn: unrunTurn}
+	rep := reply{text: text, from: r.last, to: r.cfg.Now(), outside: outside, unrunTurn: unrunTurn, words: words}
 	r.last = rep.to
 	r.mu.Unlock()
 	if r.cfg.Reports == nil && !strings.Contains(text, Fence) {
@@ -464,13 +502,18 @@ func (r *Runner) handle(rep reply) {
 		}
 		var err error
 		switch {
-		case rep.outside != "" && (b.Dispatch != nil || b.Status != nil || b.Custody != nil):
+		case rep.outside != "" && (b.Dispatch != nil || b.Status != nil || b.Custody != nil || b.Relay != nil):
 			un.add(i, b, r.refuseOutside(b, rep.outside))
 			un.outside = true
+		case len(rep.words) == 0 && needsUser(b):
+			un.add(i, b, r.refuseNotUser(b))
+			un.notUser = true
 		case b.Dispatch != nil:
-			if key := r.dispatch(*b.Dispatch); key != "" {
+			if key := r.dispatch(*b.Dispatch, rep.words); key != "" {
 				dispatched[b.Dispatch.Title] = key
 			}
+		case b.Relay != nil:
+			err = r.relay(*b.Relay, rep.words)
 		case b.Promise != nil:
 			err = r.promise(*b.Promise, dispatched)
 		case b.Ask != nil:
@@ -505,8 +548,8 @@ type blockError struct{ error }
 // unrun is a reply's blocks not run, as the receipt lists them, and which
 // kinds of reason they had.
 type unrun struct {
-	lines                       []string
-	tooMany, malformed, outside bool
+	lines                                []string
+	tooMany, malformed, outside, notUser bool
 }
 
 // add lists block i (0-based) of a reply, not run for why.
@@ -669,7 +712,10 @@ func (r *Runner) resolve(ref string) (workspace.Workspace, string, error) {
 // receipt; the conversation gets a line only when the start failed, the
 // block's card says it was dispatched (D91). It returns the session's key,
 // "" when it did not start.
-func (r *Runner) dispatch(d Dispatch) string {
+func (r *Runner) dispatch(d Dispatch, words []Words) string {
+	if d.WithUserWords {
+		d.Message = relayEnvelope(r.cfg.Now(), words, d.Message)
+	}
 	key, wsName, err := r.spawn(d)
 	if err != nil {
 		r.note("派出「" + d.Title + "」失败：" + err.Error())
@@ -698,6 +744,10 @@ func (r *Runner) refuseOutside(b Block, by string) string {
 		}
 		r.note(by + "触发的回合不能改托管，也不能给会话发消息：「" + name + "」没有执行")
 		return "这一轮不能改托管或给会话发消息，没有执行"
+	}
+	if rl := b.Relay; rl != nil {
+		r.note(by + "触发的回合不能转达用户的决定：「" + r.sessionName(rl.Key) + "」没有收到")
+		return "这一轮不能转达，没有发出"
 	}
 	s := *b.Status
 	name := s.Task
@@ -742,9 +792,107 @@ func (r *Runner) tellUnrun(rep reply, u unrun) {
 	if u.outside {
 		b.WriteString("这一轮由" + by + "触发，网关只执行 notify、promise 与 ask；需要派活、改任务状态或托管，就在对话里向用户说明，等用户发消息让你做。\n")
 	}
+	if u.notUser {
+		b.WriteString("这一轮不是用户发起的（回执、提醒、托管等），网关没有可附的用户原话，所以不转达、不带原话派活、不改 MCP 权限；要用户拍板就用 ask，带上 task 时用户的回答会直接送到那个会话。\n")
+	}
 	if err := send(strings.TrimSpace(b.String())); err != nil {
 		slog.Warn("planner actions: receipt of the blocks not run not sent to the Planner", "err", err)
 	}
+}
+
+// needsUser reports whether block b needs a turn the user started (D98):
+// a relay, and a dispatch leading with the user's words or allowing write
+// tools (mcp_tools).
+// The user's words are what a session acts on as the user's decision, so a
+// turn with none (a receipt carrying a session's reply, a reminder, custody)
+// is refused by its source, never by judging the text.
+func needsUser(b Block) bool {
+	if d := b.Dispatch; d != nil {
+		return d.WithUserWords || len(d.MCPTools) > 0
+	}
+	return b.Relay != nil
+}
+
+// refuseNotUser answers such a block from a turn the user did not start,
+// returning why as the receipt says it.
+func (r *Runner) refuseNotUser(b Block) string {
+	if d := b.Dispatch; d != nil {
+		r.note("这一轮不是用户发起的，不能带用户原话或改 MCP 权限派活：「" + d.Title + "」没有派出")
+		return "这一轮不是用户发起的，不能带用户原话或 mcp_tools 派活，没有派出"
+	}
+	r.note("这一轮不是用户发起的，不能转达用户的决定：「" + r.sessionName(b.Relay.Key) + "」没有收到")
+	return "这一轮不是用户发起的，没有可附的用户原话，没有转达"
+}
+
+// sessionName is key's name as the conversation shows it.
+func (r *Runner) sessionName(key string) string {
+	if r.cfg.Custody != nil {
+		if n := r.cfg.Custody.Name(key); n != "" {
+			return textutil.TruncateRunes(n, 60)
+		}
+	}
+	return key
+}
+
+// relay passes the user's decision on to a session (D98): the Planner's
+// text led by the user's words of the turn, in the gateway's envelope, on
+// the session's own send path (the user's message would take), never
+// through custody: no prefix, no count, not held back while the user is at
+// the session, as the user asked for it. The block's card says it was sent.
+func (r *Runner) relay(rl Relay, words []Words) error {
+	if r.cfg.Relay == nil {
+		return errors.New("转达没有接通")
+	}
+	if r.cfg.RelayTarget != nil {
+		if err := r.cfg.RelayTarget(rl.Key); err != nil {
+			return blockError{err}
+		}
+	}
+	if err := r.cfg.Relay(rl.Key, relayEnvelope(r.cfg.Now(), words, rl.Text)); err != nil {
+		return fmt.Errorf("没有送到（%v）", err)
+	}
+	return nil
+}
+
+// relayWords bounds the user's words an envelope carries: the latest
+// messages of a merged turn, each cut to wordsRunes.
+const (
+	relayWords = 4
+	wordsRunes = 2000
+)
+
+// envelopeRe finds the envelope's tag in the user's words, so a pasted
+// "</naozhi-relay>" cannot close it early.
+var envelopeRe = regexp.MustCompile(`(?i)naozhi-relay`)
+
+// relayEnvelope is what a session reads as the user's decision (D98): the
+// user's own words, as the gateway recorded them, in an envelope only the
+// gateway writes (the Planner's text may not name it, noEnvelope), then the
+// Planner's text. The task prompt tells the session to act on the words
+// within their scope, and that the Planner's text beyond them is not the
+// user's decision. 11-07 runs: a decision so relayed on stdin was acted on
+// 13/13, the same text as a peer message 1/8.
+func relayEnvelope(now time.Time, words []Words, text string) string {
+	if len(words) > relayWords {
+		words = words[len(words)-relayWords:]
+	}
+	var b strings.Builder
+	b.WriteString(`<` + envelopeTag + ` at="` + now.Format("1/2 15:04") + `">` + "\n")
+	for _, w := range words {
+		said := envelopeRe.ReplaceAllString(textutil.TruncateRunes(strings.TrimSpace(w.Text), wordsRunes), "naozhi_relay")
+		at := w.At.Format("1/2 15:04")
+		if w.Question != "" {
+			q := envelopeRe.ReplaceAllString(w.Question, "naozhi_relay")
+			b.WriteString("Planner 在通知里问用户「" + q + "」，用户 " + at + " 选了「" + said + "」。\n")
+			continue
+		}
+		b.WriteString("用户 " + at + " 在 Planner 对话里说：「" + said + "」\n")
+	}
+	b.WriteString("</" + envelopeTag + ">")
+	if text = strings.TrimSpace(text); text != "" {
+		b.WriteString("\nPlanner 的说明：\n" + text)
+	}
+	return b.String()
 }
 
 // spawn records a new task: session's sidecar, in custody from the start
@@ -761,13 +909,13 @@ func (r *Runner) spawn(d Dispatch) (key, wsName string, err error) {
 	key = sidecar.TaskKey()
 	if err := r.cfg.Sessions.Put(sidecar.Meta{
 		Key: key, Purpose: sidecar.PurposeTask, Parent: r.cfg.Planner, Title: d.Title, Workspace: w.ID,
-		Dir: dir, Model: d.Model, Custody: &sidecar.Custody{On: true, By: custody.ByAuto, At: r.cfg.Now()},
+		Dir: dir, Model: d.Model, MCPTools: d.MCPTools, Custody: &sidecar.Custody{On: true, By: custody.ByAuto, At: r.cfg.Now()},
 	}); err != nil {
 		return "", "", fmt.Errorf("记不下会话信息（%v）", err)
 	}
 	ctx, cancel := context.WithTimeout(r.cfg.Ctx, spawnTimeout)
 	defer cancel()
-	if err := r.cfg.Spawn(ctx, key, Spawn{Dir: dir, Title: d.Title, Model: d.Model, Message: d.Message}); err != nil {
+	if err := r.cfg.Spawn(ctx, key, Spawn{Dir: dir, Title: d.Title, Model: d.Model, Message: d.Message, MCPTools: d.MCPTools}); err != nil {
 		r.cfg.Sessions.Remove(key)
 		return "", "", err
 	}
@@ -871,10 +1019,21 @@ func notifyKey(n Notify) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-// ask puts the Planner's question into "通知".
+// ask puts the Planner's question into "通知"; one naming a task has its
+// answer sent there too (decideAsk), so the session must take a relay now.
 func (r *Runner) ask(q Ask) error {
 	if r.cfg.Inbox == nil {
 		return errors.New("通知没有接通")
+	}
+	if q.Task != "" {
+		if r.cfg.Relay == nil {
+			return errors.New("转达没有接通，带 task 的提问没有发出")
+		}
+		if r.cfg.RelayTarget != nil {
+			if err := r.cfg.RelayTarget(q.Task); err != nil {
+				return blockError{err}
+			}
+		}
 	}
 	it := notify.Item{
 		Kind:   notify.KindQuestion,
@@ -886,7 +1045,7 @@ func (r *Runner) ask(q Ask) error {
 	if len(q.Options) == 0 {
 		it.Why = "Planner 问你，请在 Planner 对话里回复，回复后关掉这一条"
 	} else {
-		payload, err := json.Marshal(askCard{Question: q.Question})
+		payload, err := json.Marshal(askCard{Question: q.Question, Task: q.Task})
 		if err != nil {
 			return err
 		}
@@ -900,17 +1059,45 @@ func (r *Runner) ask(q Ask) error {
 	return nil
 }
 
-// decideAsk sends the user's answer back to the Planner. Failing to (the
-// Planner is stopped) leaves the question open.
+// decideAsk sends the user's answer back to the Planner, as a turn the user
+// started whose words are the answer: the Planner may relay it. An ask
+// naming a task has the answer sent to that session first, in the relay
+// envelope (D98); the Planner is told whether it got there. Failing to
+// reach the Planner (it is stopped) leaves the question open, unless the
+// session got the answer.
 func (r *Runner) decideAsk(it notify.Item, a notify.Action) error {
 	var c askCard
 	if it.Decision == nil || json.Unmarshal(it.Decision.Payload, &c) != nil {
 		return errors.New("ask card: unreadable payload")
 	}
-	if r.cfg.Tell == nil {
-		return errors.New("ask card: no way to the Planner")
+	w := Words{Text: string(a), Question: c.Question, At: r.cfg.Now()}
+	text := "你问用户的「" + c.Question + "」，用户的回答：" + string(a)
+	relayed := false
+	if c.Task != "" {
+		err := errors.New("转达没有接通")
+		if r.cfg.Relay != nil {
+			err = r.cfg.Relay(c.Task, relayEnvelope(w.At, []Words{w}, ""))
+		}
+		if relayed = err == nil; relayed {
+			text += "。网关已把这个回答原样送到 " + c.Task + "（" + r.sessionName(c.Task) + "），不用再转达；它做完会向你汇报。"
+		} else {
+			text += "。网关没能把回答送到 " + c.Task + "（" + err.Error() + "）；要转达就用 relay。"
+			slog.Warn("planner actions: an answer not relayed", "task", c.Task, "err", err)
+		}
 	}
-	return r.cfg.Tell("你问用户的「" + c.Question + "」，用户的回答：" + string(a))
+	tell := func(t string) error {
+		if r.cfg.TellAnswer != nil {
+			return r.cfg.TellAnswer(t, w)
+		}
+		if r.cfg.Tell == nil {
+			return errors.New("ask card: no way to the Planner")
+		}
+		return r.cfg.Tell(t)
+	}
+	if err := tell(text); err != nil && !relayed {
+		return err
+	}
+	return nil
 }
 
 // requestID names one card's source, so no two proposals share a card.
@@ -937,7 +1124,10 @@ func (r *Runner) custody(c Custody) error {
 			}
 		}
 	} else {
-		_, err = cu.Deliver(c.Key, custody.ReasonPlanner, c.Text)
+		if custody.Irreversible(c.Text) {
+			return errors.New("涉及 push、合并、发版、删除或对外发送这类收不回的事，托管不替用户说，没有发出：用户已经在对话里说了就用 relay 转达，没说就用 ask（带 task）问用户")
+		}
+		_, err = cu.Deliver(c.Key, custody.ReasonPlanner, c.Text+custodyNote)
 	}
 	switch {
 	case err == nil:
@@ -959,6 +1149,13 @@ func (r *Runner) custody(c Custody) error {
 	}
 	return fmt.Errorf("没有发出（%v）", err)
 }
+
+// custodyNote ends what the Planner tells a session through custody: the
+// session reads it as the Planner's word, not the user's decision (D98). In
+// 11-07 runs a Planner's message claiming the user had decided, with this
+// note and the task prompt's rule, was refused 13/13 (without both, the same
+// text was acted on 5/6). The dashboard drops it like the dispatch's note.
+const custodyNote = "\n\n（网关附注：这条是 Planner 经托管发来的，不是用户本人的话。）"
 
 // custodyFormat spells out the custody block that sends key a message.
 func custodyFormat(key string) string {

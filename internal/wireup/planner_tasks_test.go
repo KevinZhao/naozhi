@@ -1,7 +1,11 @@
 package wireup
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -25,7 +29,8 @@ func TestTaskOptsForKey(t *testing.T) {
 		opts, ok := to.ForKey(key)
 		if !ok || opts.Backend != "claude" || opts.DefaultBackend != "" || opts.Model != "sonnet" || opts.Workspace != "/tmp/ws" ||
 			opts.Name != "iso 写 hello" || opts.CrossSessionInbound != "accept" || opts.Exempt ||
-			!strings.HasPrefix(opts.SystemPrompt, "base\n\n") || !strings.Contains(opts.SystemPrompt, "SendMessage 发给 planner-abc123（") {
+			!strings.HasPrefix(opts.SystemPrompt, "base\n\n") || !strings.Contains(opts.SystemPrompt, "SendMessage 发给 planner-abc123（") ||
+			!strings.Contains(opts.SystemPrompt, "以 <naozhi-relay> 开头的消息由网关写入") || opts.MCPConfig != "" {
 			t.Errorf("ForKey = %+v, %v", opts, ok)
 		}
 	})
@@ -81,5 +86,118 @@ func TestStopReceipt(t *testing.T) {
 				t.Errorf("receipt = %q, want it to say %q", got, c.want)
 			}
 		})
+	}
+}
+
+// A dispatch's mcp_tools give the session its own --mcp-config, every
+// server of cli.mcp_config with the write switch of those named turned on,
+// and a deny rule for each of their write tools not allowed (the one that
+// turns them all on included, once); a server the config does not define fails
+// the dispatch, and a respawn whose config no longer applies drops it
+// rather than the session.
+func TestTaskOptsMCPTools(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "mcp.json")
+	if err := os.WriteFile(src, []byte(`{"mcpServers":{"aws-outlook-mcp":{"command":"aws-outlook-mcp","args":[],"env":{"A":"1"}},"exa":{"type":"http","url":"https://x"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	side := sidecar.Open("", nil)
+	to := TaskOpts{Sessions: side, Planner: "planner-abc123", MCPConfig: src,
+		Base:    session.AgentOpts{PermissionsDeny: []string{"Bash(rm -rf /)"}},
+		MCPPath: func(key string) string { return filepath.Join(dir, "out", key+".json") }}
+	tools := map[string][]string{"aws-outlook-mcp": {"calendar_meeting"}}
+	opts, err := to.For("task:ab12", "/tmp/ws", "建日程", "", tools)
+	if err != nil || opts.MCPConfig != filepath.Join(dir, "out", "task:ab12.json") {
+		t.Fatalf("For = %+v, %v", opts.MCPConfig, err)
+	}
+	var doc struct {
+		MCPServers map[string]map[string]any `json:"mcpServers"`
+	}
+	data, _ := os.ReadFile(opts.MCPConfig)
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	outlook, _ := doc.MCPServers["aws-outlook-mcp"]["env"].(map[string]any)
+	if outlook["A"] != "1" || outlook["OUTLOOK_MCP_ENABLE_WRITES"] != "true" || doc.MCPServers["exa"]["url"] != "https://x" {
+		t.Errorf("written config = %s", data)
+	}
+	if fi, _ := os.Stat(opts.MCPConfig); fi == nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %v", fi)
+	}
+	for _, want := range []string{"Bash(rm -rf /)", "mcp__aws-outlook-mcp__email_send", "mcp__aws-outlook-mcp__enable_write_tools", "mcp__aws-outlook-mcp__calendar_room_booking"} {
+		if !slices.Contains(opts.PermissionsDeny, want) {
+			t.Errorf("deny %v lacks %s", opts.PermissionsDeny, want)
+		}
+	}
+	if n := countOf(opts.PermissionsDeny, enableWrites); n != 1 {
+		t.Errorf("deny %v holds enable_write_tools %d times", opts.PermissionsDeny, n)
+	}
+	if slices.Contains(opts.PermissionsDeny, "mcp__aws-outlook-mcp__calendar_meeting") || len(to.Base.PermissionsDeny) != 1 {
+		t.Errorf("deny %v (base %v): the allowed tool denied or the base changed", opts.PermissionsDeny, to.Base.PermissionsDeny)
+	}
+	if plain, _ := to.For("task:cd34", "/tmp/ws", "t", "", nil); plain.MCPConfig != "" || !slices.Equal(plain.PermissionsDeny, []string{"Bash(rm -rf /)", enableWrites}) {
+		t.Errorf("no mcp_tools = %+v", plain)
+	}
+
+	noOutlook := filepath.Join(dir, "exa-only.json")
+	if err := os.WriteFile(noOutlook, []byte(`{"mcpServers":{"exa":{"type":"http","url":"https://x"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gone := to
+	gone.MCPConfig = noOutlook
+	if _, err := gone.For("task:ab12", "/tmp/ws", "t", "", tools); err == nil || !strings.Contains(err.Error(), "没有 MCP 服务器 aws-outlook-mcp") {
+		t.Errorf("server not in config: %v", err)
+	}
+	if _, err := to.For("task:ab12", "/tmp/ws", "t", "", map[string][]string{"slack-mcp": {"post_message"}}); err == nil || !strings.Contains(err.Error(), "没有写开关") {
+		t.Errorf("server with no switch: %v", err)
+	}
+	if _, err := (TaskOpts{}).For("task:ab12", "/tmp/ws", "t", "", tools); err == nil || !strings.Contains(err.Error(), "cli.mcp_config") {
+		t.Errorf("no mcp_config: %v", err)
+	}
+
+	key := sidecar.TaskKey()
+	if err := side.Put(sidecar.Meta{Key: key, Purpose: sidecar.PurposeTask, Title: "t", Dir: "/tmp/ws", MCPTools: tools}); err != nil {
+		t.Fatal(err)
+	}
+	if opts, ok := gone.ForKey(key); !ok || opts.MCPConfig != "" || opts.Name != "t" || !slices.Equal(opts.PermissionsDeny, []string{"Bash(rm -rf /)", enableWrites}) {
+		t.Errorf("respawn with a stale mcp_tools = %+v, %v", opts, ok)
+	}
+	if opts, ok := to.ForKey(key); !ok || opts.MCPConfig == "" || !slices.Contains(opts.PermissionsDeny, "mcp__aws-outlook-mcp__email_send") {
+		t.Errorf("respawn = %+v, %v", opts, ok)
+	}
+}
+
+// enableWrites is the rule every dispatched session denies (taskDeny).
+const enableWrites = "mcp__aws-outlook-mcp__enable_write_tools"
+
+func countOf(list []string, v string) (n int) {
+	for _, s := range list {
+		if s == v {
+			n++
+		}
+	}
+	return n
+}
+
+// TestTaskOptsDenyEnableWrites: a dispatched session with no mcp_tools and
+// no cli.mcp_config still denies Outlook's enable_write_tools, on the first
+// spawn and on a respawn from its sidecar, and the base options (shared by
+// every dispatch) are left as they were.
+func TestTaskOptsDenyEnableWrites(t *testing.T) {
+	side := sidecar.Open("", nil)
+	to := TaskOpts{Sessions: side, Planner: "planner-abc123"}
+	opts, err := to.For("task:ab12", "/tmp/ws", "只读", "", nil)
+	if err != nil || !slices.Equal(opts.PermissionsDeny, []string{enableWrites}) {
+		t.Fatalf("For = %v, %v", opts.PermissionsDeny, err)
+	}
+	if to.Base.PermissionsDeny != nil {
+		t.Errorf("base changed: %v", to.Base.PermissionsDeny)
+	}
+	key := sidecar.TaskKey()
+	if err := side.Put(sidecar.Meta{Key: key, Purpose: sidecar.PurposeTask, Title: "只读", Dir: "/tmp/ws"}); err != nil {
+		t.Fatal(err)
+	}
+	if opts, ok := to.ForKey(key); !ok || !slices.Equal(opts.PermissionsDeny, []string{enableWrites}) {
+		t.Errorf("respawn = %v, %v", opts.PermissionsDeny, ok)
 	}
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/dispatch"
+	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/monitor/beat"
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/monitor/wake"
@@ -564,7 +565,8 @@ func main() {
 	routing := buildRouting(cfg, agents, projectMgr, scheduler)
 	// The options of the sessions the Planner dispatches: at dispatch, and
 	// rebuilt from their sidecar when one respawns from the dashboard.
-	taskOpts := wireup.TaskOpts{Base: agents["general"], Sessions: sidecars, Planner: plannerAgent.Name()}
+	taskOpts := wireup.TaskOpts{Base: agents["general"], Sessions: sidecars, Planner: plannerAgent.Name(),
+		MCPConfig: mcpConfigFile, MCPPath: func(key string) string { return sessionLayout.TaskMCPConfigPath(persist.KeyHash(key)) }}
 	// The health monitor reads srv's node and discovery caches, so it is built
 	// after srv; srv only reads it once it serves.
 	srv = server.NewWithOptions(server.ServerOptions{
@@ -713,6 +715,10 @@ func main() {
 		UnrunTurn:   plannerAgent.UnrunTurn,
 		PlannerBusy: plannerAgent.Busy,
 		Custody:     custodian,
+		Words:       wireup.PlannerWords(plannerAgent),
+		Relay:       srv.SubmitRelay,
+		RelayTarget: srv.RelayTarget,
+		TellAnswer:  wireup.PlannerTellAnswer(plannerAgent),
 		Ctx:         ctx,
 	})
 	// The result is judged by the turn's sources before the ledger lets go
