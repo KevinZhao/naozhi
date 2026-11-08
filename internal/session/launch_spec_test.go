@@ -320,3 +320,52 @@ func TestLaunchSpecProjectSettings(t *testing.T) {
 		}
 	}
 }
+
+// TestLaunchSpecDrift_TaskDeny: a dispatched session's deny rules (the
+// Outlook enable_write_tools one every task: session carries,
+// wireup.TaskOpts) ride in the overlay the shim state records, survive its
+// JSON round trip, are written into the session's settings file from it,
+// and do not read as drift on reattach.
+func TestLaunchSpecDrift_TaskDeny(t *testing.T) {
+	const rule = "mcp__aws-outlook-mcp__enable_write_tools"
+	r := mkOverlayRouter(t)
+	r.spawn.sessionSettingsDir = t.TempDir()
+	wrapper, backendID := r.backends.wrapperFor("claude")
+	key := "task:deny01"
+	s := newSessionWithID(key, "sess-task-deny")
+	s.SetBackend("claude")
+	putT(r, key, s)
+	state, _ := spawnShimState(t, r, key, "", AgentOpts{
+		Backend: "claude", Workspace: "/ws", Name: "只读", CrossSessionInbound: "accept",
+		PermissionsDeny: []string{rule},
+	})
+	enc, err := shim.EncodeSpawnOverlay(state.SpawnOverlay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.SpawnOverlay, err = shim.DecodeSpawnOverlay(enc); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(state.SpawnOverlay.PermissionsDeny, []string{rule}) {
+		t.Fatalf("recorded overlay deny = %v", state.SpawnOverlay.PermissionsDeny)
+	}
+	if drift, stored, current := driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, s); drift {
+		t.Fatalf("task deny misread as drift\n  stored:  %v\n  current: %v", stored, current)
+	}
+	path := r.spawn.launchSpecFor(key, *state.SpawnOverlay).SettingsFile
+	if path == "" || !slices.Contains(state.CLIArgs, path) {
+		t.Fatalf("settings file %q not on argv %v", path, state.CLIArgs)
+	}
+	if err := writeSessionSettings(path, "", *state.SpawnOverlay); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	var doc struct {
+		Permissions struct {
+			Deny []string `json:"deny"`
+		} `json:"permissions"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil || !slices.Contains(doc.Permissions.Deny, rule) {
+		t.Errorf("settings = %s (%v)", data, err)
+	}
+}

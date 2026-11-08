@@ -87,6 +87,7 @@ type TaskOpts struct {
 // --dangerously-skip-permissions a deny rule takes the tool out of the
 // session's tool list, and a project's own permissions.allow does not bring
 // it back, while a project's disableAllHooks turned a hook off (11-08 runs).
+// Every dispatched session, with mcp_tools or not, also denies taskDeny.
 func (t TaskOpts) For(key, dir, title, model string, tools map[string][]string) (session.AgentOpts, error) {
 	opts := t.Base
 	opts.Backend, opts.DefaultBackend = "claude", ""
@@ -98,6 +99,7 @@ func (t TaskOpts) For(key, dir, title, model string, tools map[string][]string) 
 	opts.CrossSessionInbound = "accept"
 	opts.Exempt = false
 	opts.SystemPrompt = strings.TrimSpace(opts.SystemPrompt + "\n\n" + taskPrompt(t.Planner))
+	opts.PermissionsDeny = append(slices.Clone(opts.PermissionsDeny), taskDeny...)
 	if len(tools) == 0 {
 		return opts, nil
 	}
@@ -113,8 +115,8 @@ func (t TaskOpts) For(key, dir, title, model string, tools map[string][]string) 
 		}
 		env[server] = map[string]string{sw: "true"}
 		for _, tool := range scout.WriteTools(server) {
-			if tool == scout.EnableWrites || !slices.Contains(tools[server], tool) {
-				deny = append(deny, scout.MCPTool(server, tool))
+			if rule := scout.MCPTool(server, tool); (tool == scout.EnableWrites || !slices.Contains(tools[server], tool)) && !slices.Contains(deny, rule) {
+				deny = append(deny, rule)
 			}
 		}
 	}
@@ -126,6 +128,13 @@ func (t TaskOpts) For(key, dir, title, model string, tools map[string][]string) 
 	opts.PermissionsDeny = deny
 	return opts, nil
 }
+
+// taskDeny is denied to every dispatched session: Outlook's
+// enable_write_tools turns all its write tools on at runtime, whatever the
+// write switch the session started with, so a session dispatched with no
+// mcp_tools (the router-wide servers, switch off) could otherwise send mail
+// after one call. A user's own sessions keep it.
+var taskDeny = []string{scout.MCPTool(scout.ServerOutlook, scout.EnableWrites)}
 
 // maxMCPConfigBytes caps cli.mcp_config as read here (the scout's cap).
 const maxMCPConfigBytes = 1 << 20

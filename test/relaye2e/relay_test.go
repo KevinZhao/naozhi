@@ -7,7 +7,8 @@
 // session acts on it; one in a receipt's turn is refused and never reaches
 // it; an ask naming the task sends the user's answer straight there; a
 // dispatch allowing one Outlook write tool starts its session with Outlook's
-// write switch on and the other write tools denied.
+// write switch on and the other write tools denied; a dispatch with no
+// mcp_tools still denies enable_write_tools.
 //
 //	go test -tags relaye2e -count=1 -v ./test/relaye2e/
 package relaye2e
@@ -22,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -312,52 +314,81 @@ func TestRelayEndToEnd(t *testing.T) {
 	// alone; the session starts with Outlook's switch on in its own
 	// --mcp-config and every other Outlook write tool denied in its settings.
 	in.send("E2E-TOOLS 帮我建个日程")
+	argv := in.argvOf("e2e-cal")
+	var mcpDoc struct {
+		MCPServers map[string]struct {
+			Env map[string]string `json:"env"`
+		} `json:"mcpServers"`
+	}
+	b, _ := os.ReadFile(flagOf(t, argv, "--mcp-config"))
+	if err := json.Unmarshal(b, &mcpDoc); err != nil || mcpDoc.MCPServers["aws-outlook-mcp"].Env["OUTLOOK_MCP_ENABLE_WRITES"] != "true" {
+		t.Errorf("the session's --mcp-config: %s (%v)", b, err)
+	}
+	settings := denyOf(t, argv)
+	for _, want := range []string{"mcp__aws-outlook-mcp__email_send", enableWrites} {
+		if !slices.Contains(settings, want) {
+			t.Errorf("deny lacks %s: %v", want, settings)
+		}
+	}
+	if slices.Contains(settings, "mcp__aws-outlook-mcp__calendar_meeting") {
+		t.Errorf("the allowed tool is denied: %v", settings)
+	}
+
+	// 5. The first dispatch had no mcp_tools: its session has no
+	// --mcp-config of its own, and its settings deny enable_write_tools all
+	// the same (taskDeny).
+	plain := in.argvOf("e2e-task")
+	if slices.Contains(plain, "--mcp-config") && strings.Contains(flagOf(t, plain, "--mcp-config"), "task-mcp-") {
+		t.Errorf("the plain dispatch got its own --mcp-config: %q", plain)
+	}
+	if deny := denyOf(t, plain); !slices.Contains(deny, enableWrites) {
+		t.Errorf("the plain dispatch's deny lacks %s: %v", enableWrites, deny)
+	}
+}
+
+const enableWrites = "mcp__aws-outlook-mcp__enable_write_tools"
+
+// argvOf waits for the session named name (--name) to start and returns its
+// argv as the fake claude logged it.
+func (in *instance) argvOf(name string) []string {
 	var argv []string
-	in.wait("the e2e-cal session started", 60*time.Second, func() bool {
+	in.wait("the "+name+" session started", 60*time.Second, func() bool {
 		for _, line := range strings.Split(in.file("argv.log"), "\n") {
-			if name, args, ok := strings.Cut(line, "\t"); ok && name == "e2e-cal" {
+			if n, args, ok := strings.Cut(line, "\t"); ok && n == name {
 				argv = unquoteArgs(args)
 				return true
 			}
 		}
 		return false
 	})
-	flag := func(f string) string {
-		for i, a := range argv {
-			if a == f && i+1 < len(argv) {
-				return argv[i+1]
-			}
+	return argv
+}
+
+// flagOf is the value after f in argv.
+func flagOf(t *testing.T, argv []string, f string) string {
+	t.Helper()
+	for i, a := range argv {
+		if a == f && i+1 < len(argv) {
+			return argv[i+1]
 		}
-		t.Fatalf("argv lacks %s: %q", f, argv)
-		return ""
 	}
-	var mcpDoc struct {
-		MCPServers map[string]struct {
-			Env map[string]string `json:"env"`
-		} `json:"mcpServers"`
-	}
-	b, _ := os.ReadFile(flag("--mcp-config"))
-	if err := json.Unmarshal(b, &mcpDoc); err != nil || mcpDoc.MCPServers["aws-outlook-mcp"].Env["OUTLOOK_MCP_ENABLE_WRITES"] != "true" {
-		t.Errorf("the session's --mcp-config: %s (%v)", b, err)
-	}
+	t.Fatalf("argv lacks %s: %q", f, argv)
+	return ""
+}
+
+// denyOf is the permissions.deny of the --settings file on argv.
+func denyOf(t *testing.T, argv []string) []string {
+	t.Helper()
 	var settings struct {
 		Permissions struct {
 			Deny []string `json:"deny"`
 		} `json:"permissions"`
 	}
-	b, _ = os.ReadFile(flag("--settings"))
+	b, _ := os.ReadFile(flagOf(t, argv, "--settings"))
 	if err := json.Unmarshal(b, &settings); err != nil {
 		t.Fatalf("the session's --settings: %s (%v)", b, err)
 	}
-	deny := strings.Join(settings.Permissions.Deny, " ")
-	for _, want := range []string{"mcp__aws-outlook-mcp__email_send", "mcp__aws-outlook-mcp__enable_write_tools"} {
-		if !strings.Contains(deny, want+" ") && !strings.HasSuffix(deny, want) {
-			t.Errorf("deny lacks %s: %v", want, settings.Permissions.Deny)
-		}
-	}
-	if strings.Contains(deny, "calendar_meeting") {
-		t.Errorf("the allowed tool is denied: %v", settings.Permissions.Deny)
-	}
+	return settings.Permissions.Deny
 }
 
 // unquoteArgs reads back the fake claude's argv as logged (%q of a []string).
