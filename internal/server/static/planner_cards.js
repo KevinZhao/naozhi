@@ -181,7 +181,7 @@ export function paintSessionCards(root) {
     if (head) { head.textContent = ' · ' + wsLabel(name); head.title = name; }
     el.querySelector('.pl-act-rows')?.insertAdjacentHTML('afterbegin', '<dt>工作区</dt><dd>' + esc(name) + '</dd>');
   });
-  root.querySelectorAll('.pl-report-name[data-key]').forEach((el) => {
+  root.querySelectorAll('.pl-report-name[data-key], .pl-relay-name[data-key]').forEach((el) => {
     const name = sessionTitle(el.dataset.key);
     if (el.textContent !== name) el.textContent = name;
   });
@@ -323,13 +323,19 @@ function actionCardHtml(raw) {
         ['第一条消息', str(a.message)]]) + '</details>';
   }
   if (a.type === 'relay') {
-    // What the session got is the user's words then this text; the card
-    // says whose words lead it.
+    // One line like a dispatch (转达你的决定 · 会话 · 说明的第一句); the
+    // fold says whose words lead what the session got and holds the
+    // Planner's whole text and the session card.
     const key = str(a.key);
-    return '<div class="pl-act pl-act-relay"><div class="pl-act-h">转达你的决定</div>' +
+    const text = str(a.text);
+    const line = firstSentence(text);
+    return '<details class="pl-act pl-act-relay">' +
+      '<summary class="pl-act-h"><span class="pl-act-k">转达你的决定</span>' +
+        (key ? ' · <b class="pl-relay-name" data-key="' + escAttr(key) + '">' + esc(sessionTitle(key)) + '</b>' : '') +
+        (line ? '<span class="pl-act-goal" title="' + escAttr(line) + '"> · ' + esc(line) + '</span>' : '') + '</summary>' +
       '<div class="pl-act-why">附上你这一轮的原话，再加上 Planner 的说明：</div>' +
-      '<div class="pl-act-q">' + esc(str(a.text)) + '</div>' +
-      (key ? '<div class="pl-scards">' + sessionCardHtml(key) + '</div>' : '') + '</div>';
+      '<div class="pl-act-q">' + esc(text) + '</div>' +
+      (key ? '<div class="pl-scards">' + sessionCardHtml(key) + '</div>' : '') + '</details>';
   }
   if (a.type === 'promise') {
     return '<div class="pl-act pl-act-promise"><div class="pl-act-h">登记承诺</div>' +

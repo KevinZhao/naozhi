@@ -20,11 +20,24 @@ export function parseRelay(text) {
   return { words: m[1].split('\n').filter((l) => l.trim()), note: (m[2] || '').trim() };
 }
 
+// NOTE_LINE_MAX caps the Planner's text in the folded line, in characters.
+const NOTE_LINE_MAX = 60;
+
+// noteLine is the first line of the Planner's text for the fold's summary.
+function noteLine(note) {
+  const line = note.split('\n').map((l) => l.trim()).find(Boolean) || '';
+  const chars = Array.from(line);
+  return chars.length > NOTE_LINE_MAX ? chars.slice(0, NOTE_LINE_MAX - 1).join('') + '…' : line;
+}
+
 // relayBubbleHtml renders a relayed message; renderBody renders markdown.
+// The user's words stay in view (they are what the session may act on);
+// the Planner's text folds to its first line, opened on a click.
 export function relayBubbleHtml(text, renderBody) {
   const r = parseRelay(text);
   if (!r) return '<div class="custody-source">Planner 转达</div>' + renderBody(text);
   return '<div class="custody-source">Planner 转达 · 附你的原话</div>' +
     '<blockquote class="relay-words">' + r.words.map((l) => '<div>' + esc(l) + '</div>').join('') + '</blockquote>' +
-    (r.note ? '<div class="relay-note-h">Planner 的说明</div>' + renderBody(r.note) : '');
+    (r.note ? '<details class="relay-note"><summary class="relay-note-h">Planner 的说明 · ' + esc(noteLine(r.note)) + '</summary>' +
+      '<div class="relay-note-body">' + renderBody(r.note) + '</div></details>' : '');
 }

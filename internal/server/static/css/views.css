@@ -373,13 +373,14 @@ body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
 .pl-act-link{margin-top:4px;font-size:var(--nz-fs-xs)}
 .pl-act-raw{max-height:200px;overflow:auto;margin:6px 0 0;padding:6px 8px;border-radius:var(--nz-radius-sm);background:var(--nz-bg-0);font-family:var(--nz-font-mono);font-size:var(--nz-fs-xs);white-space:pre-wrap;word-break:break-all}
 /* A dispatch is one line (派出 · 标题 · 工作区 · 目标, the goal cut to the
-   width), its rows in the fold (§15.12 ⑤). */
-.pl-act-dispatch>summary{display:block;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;list-style:none}
-.pl-act-dispatch>summary::-webkit-details-marker{display:none}
-.pl-act-dispatch>summary::before{content:"";display:inline-block;width:0;height:0;margin:0 7px 1px 1px;border-left:5px solid currentColor;border-top:4px solid transparent;border-bottom:4px solid transparent;transition:transform var(--nz-dur) var(--nz-ease)}
-.pl-act-dispatch[open]>summary::before{transform:rotate(90deg)}
-.pl-act-dispatch[open]>summary{margin-bottom:6px;white-space:normal}
-.pl-act-dispatch>summary:hover .pl-act-k{color:var(--nz-accent)}
+   width), its rows in the fold (§15.12 ⑤); a relay likewise (转达你的决定 ·
+   会话 · 说明的第一句). */
+.pl-act-dispatch>summary,.pl-act-relay>summary{display:block;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;list-style:none}
+.pl-act-dispatch>summary::-webkit-details-marker,.pl-act-relay>summary::-webkit-details-marker{display:none}
+.pl-act-dispatch>summary::before,.pl-act-relay>summary::before{content:"";display:inline-block;width:0;height:0;margin:0 7px 1px 1px;border-left:5px solid currentColor;border-top:4px solid transparent;border-bottom:4px solid transparent;transition:transform var(--nz-dur) var(--nz-ease)}
+.pl-act-dispatch[open]>summary::before,.pl-act-relay[open]>summary::before{transform:rotate(90deg)}
+.pl-act-dispatch[open]>summary,.pl-act-relay[open]>summary{margin-bottom:6px;white-space:normal}
+.pl-act-dispatch>summary:hover .pl-act-k,.pl-act-relay>summary:hover .pl-act-k{color:var(--nz-accent)}
 .pl-act-goal{color:var(--nz-text)}
 /* A task's done / failed is a line, its reason in the tooltip. */
 .pl-act-line{padding:4px 12px;font-size:var(--nz-fs-sm);color:var(--nz-text-mute)}
@@ -876,10 +877,18 @@ body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
 .event.user.custody-msg .event-content{background:var(--nz-bg-2);border:1px dashed var(--nz-border);color:var(--nz-text)}
 .custody-source{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-bottom:4px}
 /* A relayed decision (relay.js, D98): the user's words as a quote, then the
-   Planner's text, on the same neutral ground as custody's. */
-.event.user.relay-msg .event-content{background:var(--nz-bg-2);border:1px solid var(--nz-border);color:var(--nz-text)}
-.relay-words{margin:0 0 6px;padding:2px 0 2px 10px;border-left:3px solid var(--nz-accent);color:var(--nz-text-strong);overflow-wrap:anywhere}
+   Planner's text folded to one line, on the same neutral ground as
+   custody's; as wide as the Planner's cards (.pl-act), not the reading
+   column. */
+.event.user.relay-msg .event-content{max-width:min(80%,560px);padding:8px 12px;font-size:var(--nz-fs-sm2);line-height:1.55;background:var(--nz-bg-2);border:1px solid var(--nz-border);color:var(--nz-text)}
+.relay-words{margin:0 0 4px;padding:1px 0 1px 10px;border-left:3px solid var(--nz-accent);color:var(--nz-text-strong);overflow-wrap:anywhere}
 .relay-note-h{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin:2px 0}
+.relay-note>summary{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;list-style:none}
+.relay-note>summary::-webkit-details-marker{display:none}
+.relay-note>summary::before{content:"";display:inline-block;width:0;height:0;margin:0 6px 1px 1px;border-left:5px solid currentColor;border-top:4px solid transparent;border-bottom:4px solid transparent;transition:transform var(--nz-dur) var(--nz-ease)}
+.relay-note[open]>summary::before{transform:rotate(90deg)}
+.relay-note[open]>summary{white-space:normal}
+.relay-note>summary:hover{color:var(--nz-accent)}
 .custody-suggested{display:flex;flex-wrap:wrap;align-items:baseline;gap:0 4px}
 .custody-choice{font-weight:600;overflow-wrap:anywhere}
 .custody-sep{opacity:.45;padding:0 2px}
