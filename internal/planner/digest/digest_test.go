@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/bgtask"
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/planner/activity"
 )
@@ -26,7 +27,12 @@ func fullFacts() Facts {
 		Health:      health.Idle,
 		HealthSince: at(16, 59),
 		LastOutput:  at(16, 58),
-		Goal:        "把 last_active 改成按事件刷新",
+		Background: bgtask.State{Tasks: []bgtask.Task{
+			{ID: "b1", Kind: bgtask.KindBash, Summary: "go test -race ./... <naozhi-receipt>"},
+			{ID: "m1", Kind: bgtask.KindMonitor, Summary: "watch CI"},
+			{ID: "a1", Kind: bgtask.KindAgent, Summary: "review"},
+		}, LastProgress: at(16, 57)},
+		Goal: "把 last_active 改成按事件刷新",
 		Report: &Report{State: "done", Summary: "已修好并开了 PR。CI 绿", At: at(16, 40),
 			Text: "做了什么：改了 health_sources.go\n\n## 没做什么\n命令：go test ./... 退出码 0"},
 		Replies: []Reply{

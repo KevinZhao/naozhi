@@ -20,6 +20,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/shim"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // shimManagedKeys returns the set of session keys that have a surviving shim
@@ -407,7 +408,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) (reconnected, sess
 		hooks.OnResult = r.resultFor(sess)
 		proc, replays, err := recWrapper.SpawnReconnect(
 			spawnCtx, state.Key, lastSeq, recWrapper.Protocol,
-			r.spawn.noOutputTimeout, r.spawn.totalTimeout, hooks,
+			r.spawn.noOutputTimeout, r.spawn.totalTimeoutFor(state.Key), hooks,
 		)
 		spawnCancel()
 		if err != nil {
@@ -483,6 +484,11 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) (reconnected, sess
 			r.hist.injectRestoredHistory(histCtx, sess, shimChainIDs(sessPrevIDs, state.SessionID), restoreViaShimReconnect)
 			histCancel()
 		}
+
+		// Before the attach, so no reader sees the process without them:
+		// background tasks are judged from the CLI's start, not from this
+		// attach, and the replay may hold ends the event log never got.
+		sess.setReattached(proc, shimStartedAt(state), replayTaskEntries(recWrapper.Protocol, replays))
 
 		// Re-check and attach in one transaction; see commitShimReattach.
 		outcome := r.commitShimReattach(state, sess, proc, recBackendID, recWrapper)
@@ -730,6 +736,64 @@ func (r *Router) StartShimReconcileLoop(ctx context.Context, interval time.Durat
 // workflow snapshots worth ~1ms each to decode, so the walk decodes only
 // lines with this prefix.
 const replayTaskStartedPrefix = `{"type":"system","subtype":"task_started"`
+
+// replayTaskPrefixes are the shim replay lines replayTaskEntries decodes:
+// a task's start, its end, and the task_updated patch that may end it. Not
+// task_progress: a workflow's carries its whole snapshot, costly to decode,
+// and a replayed frame has no time to count as progress.
+var replayTaskPrefixes = [...]string{
+	replayTaskStartedPrefix,
+	`{"type":"system","subtype":"task_updated"`,
+	`{"type":"system","subtype":"task_notification"`,
+}
+
+// replayTaskEntries are the background-task frames of a shim replay as
+// event entries without times, in replay order (bgtask.Input.Replayed).
+// Only the fields the judgment reads are kept.
+func replayTaskEntries(proto cli.Protocol, replays []shim.ServerMsg) []clievent.EventEntry {
+	var out []clievent.EventEntry
+	for _, replay := range replays {
+		if replay.Type != "replay" || !slices.ContainsFunc(replayTaskPrefixes[:], func(p string) bool { return strings.HasPrefix(replay.Line, p) }) {
+			continue
+		}
+		events, _, err := proto.ReadEvent(replay.Line)
+		if err != nil {
+			continue
+		}
+		for _, ev := range events {
+			if ev.Type != "system" || ev.TaskID == "" {
+				continue
+			}
+			e := clievent.EventEntry{TaskID: ev.TaskID, TaskType: ev.TaskType, Summary: textutil.TruncateRunes(ev.Description, 120), Status: ev.Status}
+			switch ev.SubType {
+			case "task_started":
+				e.Type = clievent.KindTaskStart
+			case "task_progress", "task_updated":
+				e.Type = clievent.KindTaskProgress
+				e.Summary = ""
+				if ev.Patch != nil {
+					e.Status = ev.Patch.Status
+				}
+			case "task_notification":
+				e.Type = clievent.KindTaskDone
+			default:
+				continue
+			}
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// shimStartedAt is when state's shim started its CLI; zero when it did not
+// say.
+func shimStartedAt(state shim.State) time.Time {
+	t, err := time.Parse(time.RFC3339, state.StartedAt)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
 
 // replayLinkerTasks returns the task_started events in a shim replay that the
 // SubagentLinker can resolve, first occurrence per task_id, in replay order.

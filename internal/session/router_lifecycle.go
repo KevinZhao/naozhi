@@ -316,6 +316,7 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 		PermissionsDeny:     slices.Clone(opts.PermissionsDeny),
 		PermissionsAllow:    slices.Clone(opts.PermissionsAllow),
 		Ultracode:           opts.Ultracode,
+		PromptCacheTTL:      opts.PromptCacheTTL,
 	}
 
 	// mergeArgvLayers is shared verbatim with driftCompareArgs so the two argv
@@ -583,7 +584,7 @@ func (r *Router) reserveSpawn(tx sessTx, res *spawnReservation, key, resumeID st
 	res.spawnOpts.Key = key
 	res.spawnOpts.WorkingDir = res.workspace
 	res.spawnOpts.NoOutputTimeout = r.spawn.noOutputTimeout
-	res.spawnOpts.TotalTimeout = r.spawn.totalTimeout
+	res.spawnOpts.TotalTimeout = r.spawn.totalTimeoutFor(key)
 
 	// The snapshot is taken in this same critical section. The pending slot,
 	// taken last, keeps a concurrent Cleanup from pruning the slot we are about

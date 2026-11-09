@@ -1,8 +1,8 @@
 // Package custody hosts the custody endpoints over internal/planner/custody
 // (docs/rfc/planner.md §5.4, D93):
 //
-//	GET    /api/custody         the pause and every session in custody; ?key= one session's custody
-//	PUT    /api/custody         turn a session's custody on or off as the user ({"key","on"})
+//	GET    /api/custody         the pause and every session in custody or with observing off; ?key= one session's custody
+//	PUT    /api/custody         turn a session's custody ({"key","on"}) or its observing ({"key","watch"}) on or off as the user
 //	PUT    /api/custody/pause   the inbox pause's alias: pause custody and pushes ({"for"}, default "today")
 //	DELETE /api/custody/pause   resume both
 //	POST   /api/custody/undo    take back the answer custody gave on the user's behalf ({"key"})
@@ -28,6 +28,8 @@ type Source interface {
 	Status(key string) custody.Status
 	List() []custody.Status
 	Set(key string, on bool, by string) error
+	// SetWatch turns the gateway observing a session on or off (§15.12 ⑥).
+	SetWatch(key string, on bool, by string) error
 	// Paused is the one pause (暂停推送与托管) and when it ends.
 	Paused() (bool, time.Time)
 	Pause(until time.Time) error
@@ -81,16 +83,18 @@ func (h *Handler) HandleList(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// HandleSet serves PUT /api/custody: the header's one-click switch.
+// HandleSet serves PUT /api/custody: the header's one-click switches,
+// custody's ("on") or observing's ("watch"), one per request.
 func (h *Handler) HandleSet(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, httputil.MaxRequestBodyBytes)
 	var req struct {
-		Key  string `json:"key"`
-		Node string `json:"node"`
-		On   *bool  `json:"on"`
+		Key   string `json:"key"`
+		Node  string `json:"node"`
+		On    *bool  `json:"on"`
+		Watch *bool  `json:"watch"`
 	}
-	if err := httputil.DecodeJSONBody(r, &req); err != nil || req.Key == "" || req.On == nil {
-		http.Error(w, `body must be {"key","on"}`, http.StatusBadRequest)
+	if err := httputil.DecodeJSONBody(r, &req); err != nil || req.Key == "" || (req.On == nil) == (req.Watch == nil) {
+		http.Error(w, `body must be {"key","on"} or {"key","watch"}`, http.StatusBadRequest)
 		return
 	}
 	if req.Node != "" && req.Node != "local" {
@@ -101,7 +105,13 @@ func (h *Handler) HandleSet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "custody not available", http.StatusServiceUnavailable)
 		return
 	}
-	switch err := h.src.Set(req.Key, *req.On, custody.ByUser); {
+	var err error
+	if req.Watch != nil {
+		err = h.src.SetWatch(req.Key, *req.Watch, custody.ByUser)
+	} else {
+		err = h.src.Set(req.Key, *req.On, custody.ByUser)
+	}
+	switch {
 	case errors.Is(err, custody.ErrNoSession):
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, custody.ErrRefused):

@@ -1,6 +1,7 @@
 package wireup
 
 import (
+	"slices"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -16,7 +17,8 @@ import (
 
 // SessionNotes builds the session side notes (docs/rfc/planner.md §15.3 ③)
 // over the journal, the inbox for item titles, the sidecars for dispatches
-// and planner:main's history for reports.
+// and the latest report block, and planner:main's history for the reports
+// sent by SendMessage.
 func SessionNotes(j *journal.Journal, inbox *notify.Notifier, sidecars *sidecar.Store, router *session.Router) *note.Notes {
 	return note.New(note.Config{
 		Journal: j,
@@ -31,8 +33,27 @@ func SessionNotes(j *journal.Journal, inbox *notify.Notifier, sidecars *sidecar.
 			}
 			return m.Created
 		},
-		Reports: func(key string) []time.Time { return plannerReports(router, key) },
+		Reports: func(key string) []time.Time {
+			m, ok := sidecars.Get(key)
+			return sessionReports(m, ok, func() []time.Time { return plannerReports(router, key) })
+		},
 	})
+}
+
+// sessionReports are the times session m reported to the Planner: its
+// cross-session messages (peer) and the report block's line the gateway
+// told, the latest of which its sidecar keeps. A session dispatched on the
+// prompt with the report block (ReportBlock) SendMessages the Planner only
+// to ask, so its messages are no reports, as action's receipts count them.
+func sessionReports(m sidecar.Meta, ok bool, peer func() []time.Time) []time.Time {
+	var out []time.Time
+	if !ok || !m.ReportBlock {
+		out = peer()
+	}
+	if ok && m.Report != nil && !slices.Contains(out, m.Report.At) {
+		out = append(out, m.Report.At)
+	}
+	return out
 }
 
 // PlannerReports is action.Config.Reports over the router: the senders of

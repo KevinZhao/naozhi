@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/apierr"
 	"github.com/naozhi/naozhi/internal/claudefs"
@@ -40,16 +41,12 @@ func (c ReapSources) Session(key string) (reap.Session, bool) {
 	out := reap.Session{
 		Running:    snap.State == "running",
 		Asking:     askPending(s.EventLastN(askScan)),
-		Background: runningWorkflow(snap.Workflows) != "",
-	}
-	if at := s.ProcessAttachedAt(); !out.Background && !at.IsZero() && snap.State != "dead" {
-		if t, _ := openTask(s.EventLastN(taskScan), at, true); t != nil {
-			out.Background = true
-		}
+		Background: background(s, snap).Open(),
 	}
 	if apierr.IsEnvelope(snap.LastResponse) {
 		out.Failed = snap.LastResponse
 	}
+	out.LastActive, _ = c.LastActive(key)
 	if c.Health != nil {
 		for _, u := range c.Health().Units {
 			if u.ID == key && u.State == health.Failed {
@@ -61,6 +58,19 @@ func (c ReapSources) Session(key string) (reap.Session, bool) {
 		}
 	}
 	return out, true
+}
+
+// LastActive is reap.Config.LastActive: key's last activity (zero when it
+// has none), false when key is not in the router.
+func (c ReapSources) LastActive(key string) (time.Time, bool) {
+	s := c.Router.SessionFor(key)
+	if s == nil {
+		return time.Time{}, false
+	}
+	if la := s.LastActive(); la.UnixNano() > 0 {
+		return la, true
+	}
+	return time.Time{}, true
 }
 
 // Archive is reap.Config.Archive.

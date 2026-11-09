@@ -279,6 +279,9 @@ func (b *Briefer) gather(since, now time.Time) input {
 	// finish, whatever their turns did.
 	unfinished := map[string]bool{}
 	for _, t := range tasks {
+		if t.Group == task.GroupYours {
+			continue
+		}
 		if t.Kind == task.KindSession && (t.State == task.Failed || t.State == task.Done && t.By == task.ByUser && t.Why == task.StoppedWhy) {
 			unfinished[t.ID] = true
 		}
@@ -362,11 +365,13 @@ func (b *Briefer) gather(since, now time.Time) input {
 
 	// 未完成的任务, in 任务's order: the promises past due and not done
 	// (§15.4), and the live dispatched sessions waiting on the user or
-	// failed; one only in progress is not news.
+	// failed; one only in progress is not news. The sessions the user
+	// opened (你开的) are not the brief's tasks: their 等你 and 失败 are in
+	// the inbox already.
 	if b.cfg.Tasks != nil {
 		for _, t := range tasks {
 			switch {
-			case t.State == task.Done || t.State == task.Remind:
+			case t.Group == task.GroupYours, t.State == task.Done || t.State == task.Remind:
 				continue
 			case t.Kind == task.KindPromise && (t.Due.IsZero() || t.Due.After(now)):
 				continue

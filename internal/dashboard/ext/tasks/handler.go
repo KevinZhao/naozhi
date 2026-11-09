@@ -4,6 +4,7 @@
 //	GET  /api/tasks        the dispatched sessions and the promises not archived, by section
 //	POST /api/tasks/state  set a task's state ({"id","state":"doing"|"done"}) as the user
 //	POST /api/tasks/stop   stop a dispatched session ({"id"}): its process, and 已完成 (已停止) as the user's
+//	POST /api/tasks/seen   mark new results read ({"ids":[…]} or {"all":true}), as the user looked at them
 //
 // All sit behind the /api/* auth middleware: a request here is the user.
 package tasks
@@ -21,6 +22,7 @@ type Source interface {
 	List() []task.Task
 	Set(id string, state task.State, by task.By, why string) error
 	Stop(id string) error
+	Seen(ids []string, all bool) (int, error)
 }
 
 // Handler serves the endpoints. A nil source lists nothing and refuses
@@ -85,6 +87,47 @@ func (h *Handler) HandleStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reply(w, h.src.Stop(req.ID))
+}
+
+// maxSeenIDs caps one POST /api/tasks/seen: the cards a page shows.
+const maxSeenIDs = 500
+
+type seenResp struct {
+	Status string `json:"status"`
+	Seen   int    `json:"seen"`
+}
+
+// HandleSeen serves POST /api/tasks/seen (§15.12 ④): the user expanded a
+// card ({"ids":[id]}) or chose 全部已读 ({"all":true}, the results new now).
+// Only a new result is marked; seen says how many were.
+func (h *Handler) HandleSeen(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, httputil.MaxRequestBodyBytes)
+	var req struct {
+		IDs []string `json:"ids"`
+		All bool     `json:"all"`
+	}
+	if err := httputil.DecodeJSONBody(r, &req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if req.All == (len(req.IDs) > 0) {
+		http.Error(w, "give ids or all, not both", http.StatusBadRequest)
+		return
+	}
+	if len(req.IDs) > maxSeenIDs {
+		http.Error(w, "too many ids", http.StatusBadRequest)
+		return
+	}
+	if h.src == nil {
+		http.Error(w, "tasks not available", http.StatusServiceUnavailable)
+		return
+	}
+	n, err := h.src.Seen(req.IDs, req.All)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	httputil.WriteJSON(w, seenResp{Status: "ok", Seen: n})
 }
 
 func reply(w http.ResponseWriter, err error) {

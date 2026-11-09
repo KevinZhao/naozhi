@@ -176,10 +176,10 @@ type processIface interface {
 	// SessionSnapshot.LastResponse.
 	LastResponseSummary() string
 	// LastEventAt returns the wall-clock time of the most recent live event,
-	// or zero when nothing has arrived yet. Router.Cleanup uses it as a
-	// fallback activity signal so a long turn streaming tool_use / thinking
-	// events is not misclassified as stuck once the session-level
-	// lastActive (refreshed only when a turn starts and ends) has aged.
+	// or zero when nothing has arrived yet. ManagedSession.LastActive follows
+	// it a minute's step at a time; Router.Cleanup reads it as is, so a long
+	// turn streaming tool_use / thinking events is never misclassified as
+	// stuck.
 	LastEventAt() time.Time
 	// UserTurnCount returns the cumulative count of "user" entries seen
 	// since spawn. Feeds SessionSnapshot.MessageCount.
@@ -260,8 +260,12 @@ type ManagedSession struct {
 	runStore *runhistory.Store
 
 	// lastActive stores time.UnixNano atomically to avoid data races
-	// between Send() (under sendMu) and Cleanup/evictOldest (under the table lock).
+	// between Send() (under sendMu) and Cleanup/evictOldest (under the table
+	// lock): a turn's start and end, persisted as last_active.
 	lastActive atomic.Int64
+	// lastOutput is the process's latest live event as LastActive last
+	// took it, a minute's step at a time; lastActive alone is the turns'.
+	lastOutput atomic.Int64
 
 	// createdAt anchors the session's sidebar position: set once at
 	// construction (or carried over via Rename) and never touched again.
@@ -270,6 +274,11 @@ type ManagedSession struct {
 
 	// lastPrompt caches the most recent user message summary (atomic for lock-free Snapshot reads).
 	lastPrompt atomic.Pointer[string]
+
+	// lastUser is when the user last sent a message (time.UnixNano; zero
+	// for none this run): not custody, the Planner or a relay. The event
+	// log's tail cannot say it once a long turn pushed the message out.
+	lastUser atomic.Int64
 
 	// lastActivity caches the most recent tool_use/thinking summary.
 	lastActivity atomic.Pointer[string]
@@ -287,6 +296,10 @@ type ManagedSession struct {
 	keyAgentID  string
 
 	process atomic.Pointer[processBox] // stores *processBox; use loadProcess/storeProcess
+	// reattached is what a shim reattach knew of its process that the
+	// event log does not (managed_background.go); stale once the session
+	// holds another process.
+	reattached atomic.Pointer[reattachInfo]
 	// meteringCache is Snapshot's last MeteringUsage view keyed by
 	// (process, MeteringGen); see managed_metering_cache.go (#2345).
 	meteringCache atomic.Pointer[meteringCache]

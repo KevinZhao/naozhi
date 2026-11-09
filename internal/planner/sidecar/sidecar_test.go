@@ -1,8 +1,12 @@
 package sidecar
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -86,11 +90,122 @@ func TestSidecarNewerVersionKept(t *testing.T) {
 		t.Fatalf("purpose = %q", p)
 	}
 	s.Sweep(func(string) bool { return false })
-	if err := s.Put(Meta{Key: key, Purpose: PurposeTask}); err == nil {
-		t.Error("Put overwrote a newer sidecar")
+	if err := s.Put(Meta{Key: key, Purpose: PurposeTask}); !errors.Is(err, ErrNewer) {
+		t.Errorf("Put on a newer sidecar = %v, want ErrNewer", err)
+	}
+	if ok, err := s.Update(key, func(*Meta) bool { return true }); !ok || !errors.Is(err, ErrNewer) {
+		t.Errorf("Update on a newer sidecar = %v, %v; want true, ErrNewer", ok, err)
 	}
 	s.Remove(key)
 	if got, err := os.ReadFile(file); err != nil || string(got) != string(data) {
 		t.Errorf("newer sidecar changed: %q, %v", got, err)
+	}
+}
+
+// Ensure creates in the same step it checks: another writer's Upsert that
+// lands between a lookup and a create is not replaced by an empty sidecar.
+func TestEnsureKeepsAConcurrentUpsert(t *testing.T) {
+	s := Open("", time.Now)
+	at := time.Unix(100, 0)
+	lost := 0
+	const n = 20000
+	for i := range n {
+		key := fmt.Sprintf("dashboard:direct:u%d:general", i)
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			if err := s.Ensure(key); err != nil {
+				t.Error(err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			if err := s.Upsert(key, func(m *Meta) bool { m.ResultAt = at; return true }); err != nil {
+				t.Error(err)
+			}
+		}()
+		close(start)
+		wg.Wait()
+		if m, ok := s.Get(key); !ok || !m.ResultAt.Equal(at) {
+			lost++
+		}
+	}
+	if lost > 0 {
+		t.Errorf("%d of %d sidecars lost the ResultAt an Upsert wrote beside Ensure", lost, n)
+	}
+}
+
+// Ensure writes a sidecar only for a key without one: it leaves one with
+// fields, and one a newer naozhi wrote, as they are.
+func TestEnsure(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
+	s := Open(dir, func() time.Time { return now })
+	const key = "dashboard:direct:u:general"
+	if err := s.Ensure(key); err != nil {
+		t.Fatal(err)
+	}
+	m, ok := s.Get(key)
+	if !ok || m.Purpose != "" || !m.Created.Equal(now) || m.V != Version {
+		t.Fatalf("Ensure made %+v (%v), want an empty sidecar created now", m, ok)
+	}
+	if err := s.Upsert(key, func(m *Meta) bool { m.SeenAt = now; return true }); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Hour)
+	if err := s.Ensure(key); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ = Open(dir, func() time.Time { return now }).Get(key); !m.SeenAt.Equal(now.Add(-time.Hour)) || !m.Created.Equal(now.Add(-time.Hour)) {
+		t.Errorf("after a second Ensure, on disk %+v, want SeenAt and Created kept", m)
+	}
+
+	newer := TaskKey()
+	file := filepath.Join(dir, fileName(newer))
+	data := []byte(`{"v":99,"key":"` + newer + `","purpose":"task"}`)
+	if err := os.WriteFile(file, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s = Open(dir, func() time.Time { return now })
+	if err := s.Ensure(newer); err != nil {
+		t.Errorf("Ensure on a newer sidecar = %v, want nil: it has one", err)
+	}
+	if got, _ := os.ReadFile(file); string(got) != string(data) {
+		t.Errorf("Ensure rewrote a newer sidecar: %s", got)
+	}
+	if err := s.Ensure(""); err == nil {
+		t.Error("Ensure(\"\") = nil, want an error")
+	}
+}
+
+// ReportBlock is a field added without a version bump: kept across a
+// reopen when set, absent from the file when not, so a sidecar of before
+// reads as a session reporting by SendMessage.
+func TestReportBlockField(t *testing.T) {
+	dir := t.TempDir()
+	s := Open(dir, nil)
+	block, old := TaskKey(), TaskKey()
+	for key, on := range map[string]bool{block: true, old: false} {
+		if err := s.Put(Meta{Key: key, Purpose: PurposeTask, ReportBlock: on}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	re := Open(dir, nil)
+	if m, _ := re.Get(block); !m.ReportBlock {
+		t.Errorf("reopened %+v, want ReportBlock kept", m)
+	}
+	if m, _ := re.Get(old); m.ReportBlock {
+		t.Errorf("reopened %+v, want no ReportBlock", m)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, fileName(old)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "report_block") {
+		t.Errorf("unset ReportBlock written: %s", data)
 	}
 }

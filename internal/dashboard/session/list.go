@@ -1,6 +1,7 @@
 package session
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -207,7 +208,7 @@ func (h *Handlers) fillProjectAndSummary(snapshots []sessionpkg.SessionSnapshot)
 // journal) while the session itself comes back reading "ready" with no
 // death reason, so the list's status dot and exit chip read the failure from
 // here. A background task running past health.LongTask is named with when
-// it started.
+// it started; the open ones are counted from the first (后台中, D109).
 func (h *Handlers) fillHealth(snapshots []sessionpkg.SessionSnapshot, now time.Time) {
 	if h.deps.Health == nil {
 		return
@@ -223,14 +224,23 @@ func (h *Handlers) fillHealth(snapshots []sessionpkg.SessionSnapshot, now time.T
 			continue
 		}
 		sh := &sessionview.SessionHealth{State: string(u.State), Since: u.Since.UnixMilli(), ErrClass: string(u.ErrClass)}
-		if !u.LastActive.IsZero() {
-			sh.Seen = u.LastActive.UnixMilli()
+		// The turn time, as the row's turn_at it is compared with: a
+		// background task's events move last_active between reconciles
+		// without making the verdict old.
+		if at := cmp.Or(u.TurnAt, u.LastActive); !at.IsZero() {
+			sh.Seen = at.UnixMilli()
 		}
 		if r, ok := strings.CutPrefix(u.Evidence, health.DeathEvidence); ok && u.State == health.Failed {
 			sh.DeathReason = r
 		}
 		if u.Background != "" && !u.BackgroundSince.IsZero() && now.Sub(u.BackgroundSince) >= health.LongTask {
 			sh.Background, sh.BackgroundSince = u.Background, u.BackgroundSince.UnixMilli()
+		}
+		if u.BackgroundN > 0 {
+			sh.BackgroundN, sh.BackgroundTasks = u.BackgroundN, u.BackgroundTasks
+			if !u.BackgroundProgress.IsZero() {
+				sh.BackgroundProgress = u.BackgroundProgress.UnixMilli()
+			}
 		}
 		snapshots[i].Health = sh
 	}

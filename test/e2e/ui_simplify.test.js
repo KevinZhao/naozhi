@@ -267,7 +267,7 @@ test('the header keeps the name; the gateway\'s note and Markdown stay out of wh
   const s = defaultSessions();
   s.sessions[0].user_label = 'iso 命名会话';
   const mock = await startMockServer({ ws: true, sessions: s });
-  const note = '\n\n（网关附注：做完、卡住或判断做不了时，用 SendMessage 发给 planner-abc123 汇报。）';
+  const note = '\n\n（网关附注：做完、卡住或判断做不了时，在这一轮回复的末尾写 naozhi-report 汇报块；中途要问 Planner 可以 SendMessage 给 planner-abc123。）';
   try {
     await page.goto(mock.url + '/dashboard');
     await waitForWs(page, 'CONNECTED');

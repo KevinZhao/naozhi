@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/planner/action"
+	"github.com/naozhi/naozhi/internal/planner/digest"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -29,9 +30,12 @@ func TestTaskOptsForKey(t *testing.T) {
 		to := TaskOpts{Base: session.AgentOpts{Model: "opus", Backend: "kiro", DefaultBackend: "kiro", SystemPrompt: "base"}, Sessions: side, Planner: "planner-abc123"}
 		opts, ok := to.ForKey(key)
 		if !ok || opts.Backend != "claude" || opts.DefaultBackend != "" || opts.Model != "sonnet" || opts.Workspace != "/tmp/ws" ||
-			opts.Name != "iso 写 hello" || opts.CrossSessionInbound != "accept" || opts.Exempt ||
-			!strings.HasPrefix(opts.SystemPrompt, "base\n\n") || !strings.Contains(opts.SystemPrompt, "SendMessage 发给 planner-abc123（") ||
-			!strings.Contains(opts.SystemPrompt, "以 <naozhi-relay> 开头的消息由网关写入") || opts.MCPConfig != "" {
+			opts.Name != "iso 写 hello" || opts.CrossSessionInbound != "accept" || opts.Exempt || opts.PromptCacheTTL != "" ||
+			!strings.HasPrefix(opts.SystemPrompt, "base\n\n") || !strings.Contains(opts.SystemPrompt, "SendMessage 给 planner-abc123（") ||
+			!strings.Contains(opts.SystemPrompt, "在这一轮回复的末尾写汇报块") || !strings.Contains(opts.SystemPrompt, "```naozhi-report\n{\"state\"") ||
+			!strings.Contains(opts.SystemPrompt, "不要再用 SendMessage 汇报") ||
+			!strings.Contains(opts.SystemPrompt, "以 <naozhi-relay> 开头的消息由网关写入") ||
+			!strings.Contains(opts.SystemPrompt, `交代以外的改动不做，包括 PR 标题、描述和分支名；你觉得该改的写进汇报的"建议"`) || opts.MCPConfig != "" {
 			t.Errorf("ForKey = %+v, %v", opts, ok)
 		}
 	})
@@ -149,7 +153,7 @@ func TestTaskOptsMCPTools(t *testing.T) {
 	if slices.Contains(opts.PermissionsDeny, "mcp__aws-outlook-mcp__calendar_meeting") || len(to.Base.PermissionsDeny) != 1 {
 		t.Errorf("deny %v (base %v): the allowed tool denied or the base changed", opts.PermissionsDeny, to.Base.PermissionsDeny)
 	}
-	if plain, _ := to.For("task:cd34", action.Spawn{Dir: "/tmp/ws", Title: "t"}); plain.MCPConfig != "" || !slices.Equal(plain.PermissionsDeny, []string{"Bash(rm -rf /)", enableWrites}) {
+	if plain, _ := to.For("task:cd34", action.Spawn{Dir: "/tmp/ws", Title: "t"}); plain.MCPConfig != "" || !slices.Equal(plain.PermissionsDeny, append([]string{"Bash(rm -rf /)"}, taskDenyRules...)) {
 		t.Errorf("no mcp_tools = %+v", plain)
 	}
 
@@ -173,7 +177,7 @@ func TestTaskOptsMCPTools(t *testing.T) {
 	if err := side.Put(sidecar.Meta{Key: key, Purpose: sidecar.PurposeTask, Title: "t", Dir: "/tmp/ws", MCPTools: tools}); err != nil {
 		t.Fatal(err)
 	}
-	if opts, ok := gone.ForKey(key); !ok || opts.MCPConfig != "" || opts.Name != "t" || !slices.Equal(opts.PermissionsDeny, []string{"Bash(rm -rf /)", enableWrites}) {
+	if opts, ok := gone.ForKey(key); !ok || opts.MCPConfig != "" || opts.Name != "t" || !slices.Equal(opts.PermissionsDeny, append([]string{"Bash(rm -rf /)"}, taskDenyRules...)) {
 		t.Errorf("respawn with a stale mcp_tools = %+v, %v", opts, ok)
 	}
 	if opts, ok := to.ForKey(key); !ok || opts.MCPConfig == "" || !slices.Contains(opts.PermissionsDeny, "mcp__aws-outlook-mcp__email_send") {
@@ -183,6 +187,10 @@ func TestTaskOptsMCPTools(t *testing.T) {
 
 // enableWrites is the rule every dispatched session denies (taskDeny).
 const enableWrites = "mcp__aws-outlook-mcp__enable_write_tools"
+
+// taskDenyRules is taskDeny written out: the tool, and the two Bash rules
+// against starting Outlook's server with its write switch.
+var taskDenyRules = []string{enableWrites, "Bash(aws-outlook-mcp:*)", "Bash(*OUTLOOK_MCP_ENABLE_WRITES*)"}
 
 func countOf(list []string, v string) (n int) {
 	for _, s := range list {
@@ -201,7 +209,7 @@ func TestTaskOptsDenyEnableWrites(t *testing.T) {
 	side := sidecar.Open("", nil)
 	to := TaskOpts{Sessions: side, Planner: "planner-abc123"}
 	opts, err := to.For("task:ab12", action.Spawn{Dir: "/tmp/ws", Title: "只读"})
-	if err != nil || !slices.Equal(opts.PermissionsDeny, []string{enableWrites}) {
+	if err != nil || !slices.Equal(opts.PermissionsDeny, taskDenyRules) {
 		t.Fatalf("For = %v, %v", opts.PermissionsDeny, err)
 	}
 	if to.Base.PermissionsDeny != nil {
@@ -211,7 +219,82 @@ func TestTaskOptsDenyEnableWrites(t *testing.T) {
 	if err := side.Put(sidecar.Meta{Key: key, Purpose: sidecar.PurposeTask, Title: "只读", Dir: "/tmp/ws"}); err != nil {
 		t.Fatal(err)
 	}
-	if opts, ok := to.ForKey(key); !ok || !slices.Equal(opts.PermissionsDeny, []string{enableWrites}) {
+	if opts, ok := to.ForKey(key); !ok || !slices.Equal(opts.PermissionsDeny, taskDenyRules) {
 		t.Errorf("respawn = %v, %v", opts.PermissionsDeny, ok)
+	}
+}
+
+// The task prompt's report block is one ParseReport takes once its
+// placeholders are filled in; the note after the first message asks for it
+// too and holds no full-width closing parenthesis before its end, which the
+// dashboard strips the note up to.
+func TestTaskPromptReport(t *testing.T) {
+	p := taskPrompt("planner-abc123")
+	i := strings.Index(p, "```naozhi-report")
+	if i < 0 {
+		t.Fatalf("prompt has no report block: %s", p)
+	}
+	j := strings.Index(p[i+3:], "```")
+	reply := "正文\n" + strings.NewReplacer("done | blocked | need_user | progress", "done", "不超过 120 字，第一句写结论", "写好了").Replace(p[i:i+3+j+3])
+	if rep, body, ok, err := action.ParseReport(reply); !ok || err != nil || rep.State != "done" || body != "正文" {
+		t.Errorf("ParseReport(%q) = %+v, %q, %v, %v", reply, rep, body, ok, err)
+	}
+	// A remote job is waited on locally, or naozhi sees the session idle
+	// while it runs (D109).
+	if !strings.Contains(p, "长时间的远端任务（远端 benchmark、CI、远程机器上的作业）必须在本地挂后台等它结束") || !strings.Contains(p, "或用 Monitor 盯着") {
+		t.Errorf("prompt lacks the remote-job rule: %s", p)
+	}
+	// progress is a session waiting on work that wakes it: with none, its
+	// turn's end is where it stops.
+	if !strings.Contains(p, "progress 只在本地还挂着后台任务或 Monitor、它们结束时会再叫醒你的时候用") || !strings.Contains(p, "没有在等的就别停在 progress") {
+		t.Errorf("prompt does not bound progress to waiting on background work: %s", p)
+	}
+	note := reportLine("planner-abc123")
+	inner := strings.TrimSuffix(strings.TrimSpace(note), "）")
+	if !strings.HasPrefix(strings.TrimSpace(note), "（网关附注：") || strings.Contains(inner, "）") ||
+		!strings.Contains(note, "naozhi-report 汇报块") || !strings.Contains(note, "SendMessage 给 planner-abc123") {
+		t.Errorf("reportLine = %q", note)
+	}
+}
+
+// A dispatch's digest keeps its goal, else the first paragraph of the
+// Planner's own text of the message (brief default 3), not of the user's
+// words the envelope leads it with.
+func TestDispatchGoal(t *testing.T) {
+	cases := []struct {
+		s    action.Spawn
+		want string
+	}{
+		{action.Spawn{Goal: "让 CI 变绿", Message: "看一下 CI。然后修。"}, "让 CI 变绿"},
+		{action.Spawn{Message: "看一下 CI 为什么红。修好后开 PR。\n\n范围：只动测试。"}, "看一下 CI 为什么红。修好后开 PR。"},
+		{action.Spawn{Message: "<naozhi-relay at=\"11/8 10:00\">\n用户 11/8 10:00 在 Planner 对话里说：「合并吧。」\n</naozhi-relay>\nPlanner 的说明：\n合并 #1。再发版"}, "合并 #1。再发版"},
+	}
+	for _, c := range cases {
+		if got := digest.Goal(dispatchGoal(c.s)); got != c.want {
+			t.Errorf("digest.Goal(dispatchGoal(%+v)) = %q, want %q", c.s, got, c.want)
+		}
+	}
+}
+
+// The snapshot's conclusion is the first sentence of the sidecar's report.
+func TestPlannerConclusion(t *testing.T) {
+	side := sidecar.Open("", nil)
+	key := sidecar.TaskKey()
+	if err := side.Put(sidecar.Meta{Key: key, Purpose: sidecar.PurposeTask}); err != nil {
+		t.Fatal(err)
+	}
+	c := PlannerConclusion(side)
+	if got := c(key); got != "" {
+		t.Errorf("conclusion with no report = %q", got)
+	}
+	side.Update(key, func(m *sidecar.Meta) bool {
+		m.Report = &sidecar.Report{State: "done", Summary: "测试全过。文档没动"}
+		return true
+	})
+	if got := c(key); got != "测试全过。" {
+		t.Errorf("conclusion = %q", got)
+	}
+	if got := c("task:nope"); got != "" {
+		t.Errorf("conclusion of no sidecar = %q", got)
 	}
 }

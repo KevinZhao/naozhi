@@ -245,6 +245,10 @@ func TestRender(t *testing.T) {
 		{ID: "pr_4", Kind: task.KindPromise, Title: "下午看看", State: task.Doing, Due: at(3, 15, 0), Created: at(1, 9, 0)},
 		{ID: "task:ef56", Kind: task.KindSession, Title: "iso 在跑", State: task.Doing, Created: at(2, 9, 0)},
 		{ID: "task:gh78", Kind: task.KindSession, Title: "iso 挂了", State: task.Failed, Retired: at(2, 10, 0), Created: at(1, 9, 0)},
+		// The sessions the user opened (你开的) are not the brief's tasks:
+		// their 等你 and 失败 are the inbox's.
+		{ID: "dashboard:direct:y:general", Kind: task.KindSession, Group: task.GroupYours, Title: "你开的在等你", State: task.Waiting, Created: at(2, 9, 0)},
+		{ID: "feishu:direct:z:general", Kind: task.KindSession, Group: task.GroupYours, Title: "你开的挂了", State: task.Failed, Created: at(2, 9, 0)},
 	}
 	f.now = at(3, 9, 0)
 	b := f.briefer(names, reg)

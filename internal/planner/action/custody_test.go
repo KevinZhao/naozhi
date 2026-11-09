@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/bgtask"
 	"github.com/naozhi/naozhi/internal/planner/custody"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/planner/task"
@@ -17,10 +18,13 @@ func sidecarMeta(key string) sidecar.Meta { return sidecar.Meta{Key: key} }
 type fakeCustody struct {
 	on         map[string]bool
 	check      error
+	blocked    error
 	settled    bool
 	setErr     error
+	watchErr   error
 	deliverErr error
 	sets       []string
+	watches    []string
 	delivered  []string
 }
 
@@ -31,13 +35,21 @@ func (f *fakeCustody) Check(key string) error {
 	}
 	return f.check
 }
-func (f *fakeCustody) Settled(string) bool { return f.settled }
+func (f *fakeCustody) Blocked(string) error { return f.blocked }
+func (f *fakeCustody) Settled(string) bool  { return f.settled }
 func (f *fakeCustody) Set(key string, on bool, by string) error {
 	if f.setErr != nil {
 		return f.setErr
 	}
 	f.sets = append(f.sets, key+"="+map[bool]string{true: "on", false: "off"}[on]+"/"+by)
 	f.on[key] = on
+	return nil
+}
+func (f *fakeCustody) SetWatch(key string, on bool, by string) error {
+	if f.watchErr != nil {
+		return f.watchErr
+	}
+	f.watches = append(f.watches, key+"="+map[bool]string{true: "on", false: "off"}[on]+"/"+by)
 	return nil
 }
 func (f *fakeCustody) Deliver(key string, reason custody.Reason, text string) (int, error) {
@@ -96,6 +108,53 @@ func TestCustodyBlock(t *testing.T) {
 			r.handle(<-r.ch)
 			if strings.Join(fc.sets, ",") != strings.Join(c.sets, ",") || strings.Join(fc.delivered, ",") != strings.Join(c.delivered, ",") {
 				t.Errorf("sets %q delivered %q, want %q %q", fc.sets, fc.delivered, c.sets, c.delivered)
+			}
+			switch {
+			case c.note == "" && len(g.notes) != 0:
+				t.Errorf("notes = %q, want none", g.notes)
+			case c.note != "" && (len(g.notes) != 1 || !strings.Contains(g.notes[0], c.note)):
+				t.Errorf("notes = %q, want one with %q", g.notes, c.note)
+			}
+			if receipts := len(g.unrun) + len(g.refused); (c.note != "") != (receipts == 1) {
+				t.Errorf("receipts unrun %q refused %q", g.unrun, g.refused)
+			}
+		})
+	}
+}
+
+// A custody block with "watch":false turns observing a session the user
+// opened off, as the Planner's, leaving its custody alone; only a turn the
+// user started with words runs it (the user said to leave it alone), and
+// an outside turn none. What custody refuses is said in the receipt.
+func TestCustodyWatchOff(t *testing.T) {
+	off := block(`{"type":"custody","key":"` + dashKey + `","watch":false}`)
+	said := Words{Text: "别管这个会话了", At: time.Now()}
+	cases := []struct {
+		name     string
+		words    []Words
+		outside  string
+		watchErr error
+		watches  []string
+		note     string
+	}{
+		{name: "the user said so", words: []Words{said}, watches: []string{dashKey + "=off/planner"}},
+		{name: "no user words", note: "不能关掉观察"},
+		{name: "scout turn", words: []Words{said}, outside: "巡检", note: "巡检触发的回合不能改托管"},
+		{name: "a dispatched session", words: []Words{said}, watchErr: custody.ErrRefused, note: "不是用户自己开的会话"},
+		{name: "no such session", words: []Words{said}, watchErr: custody.ErrNoSession, note: "找不到会话"},
+		{name: "planner off", words: []Words{said}, watchErr: custody.ErrDisabled, note: "没有开"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r, g, _, _, _ := newRunner(t)
+			fc := &fakeCustody{on: map[string]bool{dashKey: true}, watchErr: c.watchErr}
+			r.cfg.Custody = fc
+			r.cfg.Outside = func() string { return c.outside }
+			r.cfg.Words = func() []Words { return c.words }
+			r.Result(r.cfg.Planner, "好的，不再看它。\n"+off)
+			r.handle(<-r.ch)
+			if strings.Join(fc.watches, ",") != strings.Join(c.watches, ",") || len(fc.sets) != 0 || !fc.on[dashKey] {
+				t.Errorf("watches %q sets %q on %v, want %q and custody untouched", fc.watches, fc.sets, fc.on[dashKey], c.watches)
 			}
 			switch {
 			case c.note == "" && len(g.notes) != 0:
@@ -197,6 +256,45 @@ func TestCustodyEnded(t *testing.T) {
 		r.checkEnded(second)
 		if len(g.told) != 1 || !strings.Contains(g.told[0], "第二轮") {
 			t.Errorf("told = %q, want the second turn only", g.told)
+		}
+	})
+	// A background task open: no receipt; its end lost, the turn end held
+	// back comes again once the task is no longer counted.
+	t.Run("background lost", func(t *testing.T) {
+		r, g, fc := setup(t)
+		now := time.Now()
+		r.cfg.Now = func() time.Time { return now }
+		var wakes []time.Duration
+		var wake func()
+		r.after = func(d time.Duration, f func()) {
+			if d > 0 {
+				wakes, wake = append(wakes, d), f
+				return
+			}
+			f()
+		}
+		open := bgtask.State{Tasks: []bgtask.Task{{ID: "m1", Kind: bgtask.KindMonitor, Last: now}}}
+		r.cfg.Background = func(string) bgtask.State { return open.At(now) }
+		fc.settled = false
+		r.Result(dashKey, "Monitor 在盯 CI")
+		e, _ := next(t, r)
+		r.checkEnded(e)
+		if len(g.told) != 0 || len(wakes) != 1 || wakes[0] <= bgtask.BashQuiet-time.Second {
+			t.Fatalf("told %q, wakes %v; want none told, a wake at the limit", g.told, wakes)
+		}
+		if m, _ := r.cfg.Sessions.Get(dashKey); m.Turn == nil || !m.Turn.Check {
+			t.Fatalf("turn = %+v, want left unchecked", m.Turn)
+		}
+		now = now.Add(bgtask.BashQuiet + time.Second)
+		fc.settled = true
+		wake()
+		e, ok := next(t, r)
+		if !ok {
+			t.Fatal("the wake queued nothing")
+		}
+		r.checkEnded(e)
+		if len(g.told) != 1 || !strings.Contains(g.told[0], "Monitor 在盯 CI") {
+			t.Fatalf("told = %q, want the held turn end", g.told)
 		}
 	})
 	t.Run("restart", func(t *testing.T) {

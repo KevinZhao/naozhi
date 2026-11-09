@@ -27,6 +27,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/planner/promise"
 	"github.com/naozhi/naozhi/internal/planner/scout"
+	"github.com/naozhi/naozhi/internal/textutil"
 	"github.com/naozhi/naozhi/internal/tuningspec"
 )
 
@@ -46,9 +47,10 @@ const (
 	messageRunes      = 20000
 	textRunes         = 500
 	maxOptions        = 6
-	optionRunes       = 40
+	optionRunes       = 80
 	workspaceRefRunes = 128
-	taskRefRunes      = 128
+	// goalRunes caps a dispatch's goal (D103).
+	goalRunes = 60
 	// notifyTitleRunes is what the inbox shows of a title.
 	notifyTitleRunes = 120
 	// notifyIDRunes matches the scout's finding IDs.
@@ -84,6 +86,10 @@ type Dispatch struct {
 	// Model is "" for the default.
 	Model   string `json:"model"`
 	Message string `json:"message"`
+	// Goal is the task in one line, for its card and its digest (D103);
+	// "" takes the message's first sentence. One past goalRunes is cut,
+	// not refused: it only names the task.
+	Goal string `json:"goal,omitempty"`
 	// WithUserWords leads the first message with the user's words of the
 	// turn, as a relay does (D98). Only a turn the user started may set it.
 	WithUserWords bool `json:"with_user_words,omitempty"`
@@ -114,6 +120,10 @@ type Ask struct {
 	Question string   `json:"question"`
 	Options  []string `json:"options"`
 	Task     string   `json:"task,omitempty"`
+	// Trimmed is how many options were cut to optionRunes, "…" included: a
+	// question is worth asking even if an option ran long, so the Planner is
+	// told in the receipt instead of the block refused.
+	Trimmed int `json:"-"`
 }
 
 // Status sets a task's state: Task is a task: key or a promise ID, State
@@ -143,12 +153,16 @@ type Notify struct {
 	ID    string `json:"id"`
 }
 
-// Custody switches session Key's custody (On), or sends it Text through
-// custody as the Planner's go-ahead; exactly one of the two.
+// Custody switches session Key's custody (On), sends it Text through
+// custody as the Planner's go-ahead, or turns observing it off (Watch,
+// §15.12 ⑥: the user said to leave it alone); exactly one of the three.
+// Watch takes only false: observing is on by default, and only the user
+// turns it back on.
 type Custody struct {
-	Key  string `json:"key"`
-	On   *bool  `json:"on"`
-	Text string `json:"text"`
+	Key   string `json:"key"`
+	On    *bool  `json:"on"`
+	Text  string `json:"text"`
+	Watch *bool  `json:"watch"`
 }
 
 // Relay passes the user's decision on to session Key (D98): the gateway
@@ -180,27 +194,17 @@ type Block struct {
 // errTooMany refuses the blocks past maxBlocks.
 var errTooMany = fmt.Errorf("一次回复最多 %d 个动作块", maxBlocks)
 
+// errUnclosed is a block whose closing fence never came.
+var errUnclosed = errors.New("代码块没有结束（缺少结尾的 ```）")
+
 // Parse returns text's action blocks in order.
 func Parse(text string) []Block {
 	var out []Block
-	lines := strings.Split(text, "\n")
-	for i := 0; i < len(lines); i++ {
-		if !isOpen(lines[i]) {
-			continue
-		}
-		var body []string
-		closed := false
-		for i++; i < len(lines); i++ {
-			if strings.TrimSpace(lines[i]) == "```" {
-				closed = true
-				break
-			}
-			body = append(body, lines[i])
-		}
-		b := Block{Raw: strings.TrimSpace(strings.Join(body, "\n"))}
+	for _, f := range fences(strings.Split(text, "\n"), Fence) {
+		b := Block{Raw: f.body}
 		switch {
-		case !closed:
-			b.Err = errors.New("代码块没有结束（缺少结尾的 ```）")
+		case !f.closed:
+			b.Err = errUnclosed
 		case len(out) >= maxBlocks:
 			b.Err = errTooMany
 		default:
@@ -211,11 +215,45 @@ func Parse(text string) []Block {
 	return out
 }
 
-// isOpen reports whether line opens an action block: the fence and the info
+// fence is one fenced block of a text: its body trimmed, whether its
+// closing fence came, and the lines it spans, open being the opening
+// fence's and end the line after the closing one (len(lines) when it never
+// closed).
+type fence struct {
+	body      string
+	closed    bool
+	open, end int
+}
+
+// fences returns the blocks of lines opened by info, in order. A block runs
+// to the first bare ``` line, so one never closed takes the rest of the
+// text.
+func fences(lines []string, info string) []fence {
+	var out []fence
+	for i := 0; i < len(lines); i++ {
+		if !isOpen(lines[i], info) {
+			continue
+		}
+		f := fence{open: i}
+		var body []string
+		for i++; i < len(lines); i++ {
+			if strings.TrimSpace(lines[i]) == "```" {
+				f.closed = true
+				break
+			}
+			body = append(body, lines[i])
+		}
+		f.body, f.end = strings.TrimSpace(strings.Join(body, "\n")), min(i+1, len(lines))
+		out = append(out, f)
+	}
+	return out
+}
+
+// isOpen reports whether line opens a block of info: the fence and the info
 // string alone, indented or not.
-func isOpen(line string) bool {
+func isOpen(line, info string) bool {
 	rest, ok := strings.CutPrefix(strings.TrimSpace(line), "```")
-	return ok && strings.TrimSpace(rest) == Fence
+	return ok && strings.TrimSpace(rest) == info
 }
 
 func (b *Block) decode() {
@@ -327,6 +365,7 @@ func strict(raw string, v any) error {
 func (d *Dispatch) validate() error {
 	d.Workspace, d.Title = strings.TrimSpace(d.Workspace), strings.TrimSpace(d.Title)
 	d.Model, d.Message = strings.TrimSpace(d.Model), strings.TrimSpace(d.Message)
+	d.Goal = cut(strings.Join(strings.Fields(d.Goal), " "), goalRunes)
 	switch {
 	case d.Workspace == "":
 		return errors.New("dispatch 缺少 workspace")
@@ -436,15 +475,30 @@ func (a *Ask) validate() error {
 	case len(a.Options) > maxOptions:
 		return fmt.Errorf("options 最多 %d 个", maxOptions)
 	}
+	// Duplicates are judged on the options as written; two that differ only
+	// past the cut would read the same on the card, which only a shorter
+	// option fixes.
+	raw := make([]string, len(a.Options))
 	for i, o := range a.Options {
 		o = strings.TrimSpace(o)
+		raw[i] = o
+		cut := utf8.RuneCountInString(o) > optionRunes
+		if cut {
+			o = textutil.TruncateRunesNoEllipsis(o, optionRunes-1) + "…"
+			a.Trimmed++
+		}
 		switch {
 		case o == "":
 			return errors.New("options 里有空的选项")
-		case utf8.RuneCountInString(o) > optionRunes:
-			return fmt.Errorf("选项超过 %d 字", optionRunes)
-		case slices.Contains(a.Options[:i], o):
-			return fmt.Errorf("选项 %q 重复", o)
+		case slices.Contains(raw[:i], raw[i]):
+			return fmt.Errorf("选项 %q 重复", raw[i])
+		}
+		if j := slices.Index(a.Options[:i], o); j >= 0 {
+			long, other := i, j
+			if !cut {
+				long, other = j, i
+			}
+			return fmt.Errorf("第 %d 个选项超过 %d 字，截断后与第 %d 个相同，请缩短", long+1, optionRunes, other+1)
 		}
 		a.Options[i] = o
 	}
@@ -466,7 +520,7 @@ func (s *Status) validate() error {
 	switch {
 	case s.Task == "":
 		return errors.New("status 缺少 task")
-	case utf8.RuneCountInString(s.Task) > taskRefRunes:
+	case utf8.RuneCountInString(s.Task) > keyRunes:
 		return errors.New("task 太长")
 	case s.State != "done" && s.State != "doing" && s.State != "failed":
 		return fmt.Errorf("state 只能是 done、doing 或 failed，不是 %q", s.State)
@@ -505,12 +559,30 @@ func (c *Custody) validate() error {
 		return errors.New("custody 缺少 key")
 	case utf8.RuneCountInString(c.Key) > keyRunes || strings.IndexFunc(c.Key, unicode.IsControl) >= 0:
 		return errors.New("key 不是合法的会话 key")
-	case (c.On == nil) == (c.Text == ""):
-		return errors.New("custody 要么带 on（开关托管），要么带 text（让它继续），只能二选一")
+	case btoi(c.On != nil)+btoi(c.Text != "")+btoi(c.Watch != nil) != 1:
+		return errors.New("custody 带 on（开关托管）、text（让它继续）、watch（关掉观察）三者之一，只能带一个")
+	case c.Watch != nil && *c.Watch:
+		return errors.New("watch 只能是 false（关掉观察）；观察要用户在会话头部重新打开")
 	case utf8.RuneCountInString(c.Text) > custodyTextRunes:
 		return fmt.Errorf("text 超过 %d 字", custodyTextRunes)
 	}
 	return noEnvelope("text", c.Text)
+}
+
+// btoi is 1 for true.
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// cut is s cut to n runes, "…" included, when it runs longer.
+func cut(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	return textutil.TruncateRunesNoEllipsis(s, n-1) + "…"
 }
 
 // webLink reports whether s is an absolute http(s) URL the dashboard may

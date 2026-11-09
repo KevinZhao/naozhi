@@ -285,13 +285,16 @@ export function sessionTitleText(s) {
 }
 
 // currentHealth is the health verdict on a /api/sessions row (s.health), or
-// null when there is none or it did not take in the session's last activity:
-// a send since then has moved past it while the next reconcile is due. A
-// failure custody retried in vain keeps its since; seen is what it took in.
+// null when there is none or it did not take in the session's last turn: a
+// send since then has moved past it while the next reconcile is due. A
+// failure custody retried in vain keeps its since; seen is the turn time it
+// took in. turn_at, not last_active: a background task's events move
+// last_active without a send. A row without turn_at (an older node) has
+// last_active as its seen too.
 function currentHealth(s) {
   const h = s && s.health;
   if (!h || !HEALTH_STATES[h.state]) return null;
-  return s.last_active > Math.max(h.since, h.seen || 0) ? null : h;
+  return (s.turn_at || s.last_active) > Math.max(h.since, h.seen || 0) ? null : h;
 }
 
 // sessionExit describes why a /api/sessions row s has no process, or null
@@ -349,6 +352,20 @@ export function sessionFailureText(s) {
   const h = currentHealth(s);
   const own = s && s.state === 'dead' && deathReasonInfo(s.death_reason).crashed;
   return failureText(own ? s.death_reason : h && h.death_reason, h && h.error_class);
+}
+
+// BG_SUMMARY_MAX caps each background task's summary in backgroundTasksText.
+const BG_SUMMARY_MAX = 40;
+
+// backgroundTasksText is "N 个任务 · <summary>、<summary>" for a session
+// whose turn is over with n background tasks still running (后台中, D109):
+// summaries are the first tasks' own descriptions, raw (the caller
+// escapes), each cut to BG_SUMMARY_MAX. '' when none runs.
+export function backgroundTasksText(n, summaries) {
+  if (!(n > 0)) return '';
+  const cut = (s) => { s = String(s || '').replace(/\s+/g, ' ').trim(); return s.length > BG_SUMMARY_MAX ? s.slice(0, BG_SUMMARY_MAX) + '…' : s; };
+  const names = (summaries || []).map(cut).filter(Boolean).slice(0, 2);
+  return n + ' 个任务' + (names.length ? ' · ' + names.join('、') + (n > names.length ? ' 等' : '') : '');
 }
 
 // sessionHealthState is the state a session's status dot shows: the live

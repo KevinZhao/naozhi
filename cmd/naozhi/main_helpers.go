@@ -276,9 +276,64 @@ func sysSessionsWorkDir(cfg *config.Config, storePath string) string {
 // watchdog, ring buffer and shim cap take shim.NewManager's defaults.
 func shimManagerConfig(cfg *config.Config) shim.ManagerConfig {
 	return shim.ManagerConfig{
-		StateDir:    osutil.ExpandHome(cfg.Session.Shim.StateDir),
+		StateDir:    shimStateDir(cfg),
 		IdleTimeout: cfg.ShimIdleTimeout(),
 	}
+}
+
+// shimStateDir is session.shim.state_dir, else the shims directory beside
+// session.store_path (the state root the session store, event logs and
+// Planner state share), else "" for shim.NewManager's ~/.naozhi/shims. The
+// default store_path gives ~/.naozhi/shims all the same. Absolute: the shims
+// it spawns are told their state file's path.
+//
+// Config alone decides it, so the service and `naozhi shim list/stop` agree
+// whatever their environment, and an instance isolated by its store_path
+// never takes up another's shims. Live shims in ~/.naozhi/shims are only
+// named in a warning: they may be this instance's own (an install with its
+// own store_path from before the derivation), which only the operator can
+// tell, by setting state_dir to that directory.
+func shimStateDir(cfg *config.Config) string {
+	if dir := osutil.ExpandHome(cfg.Session.Shim.StateDir); dir != "" {
+		return dir
+	}
+	dir := datadir.ForStore(osutil.ExpandHome(cfg.Session.StorePath)).ShimsRoot()
+	if dir == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	if legacy := shim.DefaultStateDir(); dir != legacy {
+		if n := liveShims(legacy); n > 0 {
+			slog.Warn("shim state dir: live shims in "+legacy+" are left alone; if they are this instance's own, set session.shim.state_dir: ~/.naozhi/shims",
+				"using", dir, "live", n)
+		}
+	}
+	return dir
+}
+
+// liveShims counts the shims in dir whose state file names a socket that
+// still exists.
+func liveShims(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") || osutil.IsAtomicTempName(e.Name()) {
+			continue
+		}
+		st, err := shim.ReadStateFile(filepath.Join(dir, e.Name()))
+		if err != nil || st.Socket == "" {
+			continue
+		}
+		if _, err := os.Stat(st.Socket); err == nil {
+			n++
+		}
+	}
+	return n
 }
 
 // buildSysessionManager wires sysession.Manager from cfg.Sysession. Returns

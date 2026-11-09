@@ -383,3 +383,135 @@ func TestRetryCrashOnlyWhileTaskRuns(t *testing.T) {
 		})
 	}
 }
+
+// Blocked is what would refuse a message to a session put away whatever
+// reopening it changes (its task done and its key not local): a switch set
+// off by someone, the pause, a stopped lineage; a switch left to the
+// default, which reads off only because the task is done, is no refusal.
+func TestBlockedPutAway(t *testing.T) {
+	r := newRig(t)
+	key := "remote/task:a" // not local, as a session put away is not
+	if err := r.sessions.Put(sidecar.Meta{Key: key, Purpose: sidecar.PurposeTask, Parent: sessionkey.PlannerMainKey,
+		Mark: &sidecar.Mark{State: "done", By: "planner", At: r.now}}); err != nil {
+		t.Fatal(err)
+	}
+	if r.e.On(key) || !errors.Is(r.e.Check(key), ErrOff) {
+		t.Fatal("a done task put away reads in custody")
+	}
+	if err := r.e.Blocked(key); err != nil {
+		t.Fatalf("default switch: Blocked = %v, want nil", err)
+	}
+	for _, by := range []string{ByUser, ByPlanner} {
+		r.update(key, func(m *sidecar.Meta) { m.Custody = &sidecar.Custody{On: false, By: by, At: r.now} })
+		if err := r.e.Blocked(key); !errors.Is(err, ErrOff) {
+			t.Errorf("off by %s: Blocked = %v", by, err)
+		}
+	}
+	r.update(key, func(m *sidecar.Meta) { m.Custody = &sidecar.Custody{On: true, By: ByUser, At: r.now} })
+	if err := r.e.Blocked(key); err != nil {
+		t.Errorf("on by the user: Blocked = %v", err)
+	}
+	r.until = r.now.Add(time.Hour)
+	if err := r.e.Blocked(key); !errors.Is(err, ErrPaused) {
+		t.Errorf("paused: Blocked = %v", err)
+	}
+	r.until = time.Time{}
+	r.update(key, func(m *sidecar.Meta) {
+		m.Chain = &sidecar.Chain{Sent: MaxSends, Stopped: "托管已替你发了 8 次，交还给你"}
+	})
+	if err := r.e.Blocked(key); !errors.Is(err, ErrStopped) {
+		t.Errorf("stopped: Blocked = %v", err)
+	}
+}
+
+// Blocked refuses what Deliver would refuse once the session is reopened:
+// the user at it, or the lineage at a limit not yet recorded as a stop,
+// which it records, so a reopened task does not wait on a message never
+// sent.
+func TestBlockedPutAwayLimits(t *testing.T) {
+	key := "remote/task:a"
+	for _, tc := range []struct {
+		name  string
+		setup func(r *rig)
+		want  error
+		stops bool
+	}{
+		{"user nearby", func(r *rig) { r.lastUser[key] = r.now.Add(-time.Minute) }, ErrNearby, false},
+		{"sent all", func(r *rig) {
+			r.update(key, func(m *sidecar.Meta) { m.Chain = &sidecar.Chain{Sent: MaxSends, Progress: "p0"} })
+			r.progress[key] = "p1"
+		}, ErrStopped, true},
+		{"no progress", func(r *rig) {
+			r.update(key, func(m *sidecar.Meta) { m.Chain = &sidecar.Chain{Sent: MaxIdle, Idle: MaxIdle, Progress: "p0"} })
+			r.progress[key] = "p0"
+		}, ErrStopped, true},
+		// Put away, the session is off the router and its progress reads "".
+		{"no progress, put away", func(r *rig) {
+			r.update(key, func(m *sidecar.Meta) { m.Chain = &sidecar.Chain{Sent: MaxIdle, Idle: MaxIdle, Progress: "p0"} })
+			r.progress[key] = ""
+		}, ErrStopped, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			if err := r.sessions.Put(sidecar.Meta{Key: key, Purpose: sidecar.PurposeTask, Parent: sessionkey.PlannerMainKey,
+				Mark: &sidecar.Mark{State: "done", By: "planner", At: r.now}, Reap: &sidecar.Reap{By: "planner"}}); err != nil {
+				t.Fatal(err)
+			}
+			tc.setup(r)
+			if err := r.e.Blocked(key); !errors.Is(err, tc.want) {
+				t.Fatalf("Blocked = %v, want %v", err, tc.want)
+			}
+			m, _ := r.sessions.Get(key)
+			if stopped := m.Chain != nil && m.Chain.Stopped != ""; stopped != tc.stops {
+				t.Errorf("lineage stopped = %v, want %v", stopped, tc.stops)
+			}
+			if got := len(r.inbox.items) == 1; got != tc.stops {
+				t.Errorf("inbox = %+v, want the stop told %v", r.inbox.items, tc.stops)
+			}
+			if len(r.sent) != 0 {
+				t.Errorf("sent %q", r.sent)
+			}
+		})
+	}
+}
+
+// A failed turn's background task keeps sending events after it, which move
+// last_active a minute at a time (D94's custody reads its own turn time):
+// it is still the one failure, retried once after its backoff rather than
+// counted again at every tick until the lineage stops; and one custody does
+// not retry is left to the user once.
+func TestFailureStaysOneWhileEventsArrive(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		class health.ErrorClass
+		since time.Duration // of health's judgement before the turn time
+		sent  int
+		inbox int
+	}{
+		{name: "retried", class: health.ErrNetwork, sent: 1},
+		{name: "not retried", class: health.ErrAuth, since: -time.Minute, inbox: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			r.dispatch("task:a")
+			turn := r.now
+			u := health.Unit{ID: "task:a", Kind: health.KindSession, State: health.Failed, ErrClass: tc.class,
+				Since: turn.Add(tc.since), LastActive: turn, TurnAt: turn}
+			for range MaxErrors + 1 {
+				r.units = []health.Unit{u}
+				r.e.Tick()
+				r.now = r.now.Add(time.Minute)
+				u.LastActive = r.now // an event of the background task
+			}
+			if len(r.sent) != tc.sent {
+				t.Errorf("sent %q, want %d", r.sent, tc.sent)
+			}
+			if st := r.e.Status("task:a"); st.State == StateStopped {
+				t.Errorf("stopped: %+v", st)
+			}
+			if n := len(r.inbox.items); n != tc.inbox {
+				t.Errorf("inbox = %+v, want %d", r.inbox.items, tc.inbox)
+			}
+		})
+	}
+}

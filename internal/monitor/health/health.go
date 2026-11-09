@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/bgtask"
 	"github.com/naozhi/naozhi/internal/monitor/beat"
 	"github.com/naozhi/naozhi/internal/monitor/wake"
 	"github.com/naozhi/naozhi/internal/planner/journal"
@@ -44,6 +45,8 @@ const (
 	// LongTask is how long a background task runs before the session list
 	// shows how long it has been running.
 	LongTask = 30 * time.Minute
+	// BackgroundShown is how many open background tasks a unit names.
+	BackgroundShown = 2
 	// FaultWindow is the window in which units failing with one error class
 	// merge into a systemic fault; FaultMin is how many it takes.
 	FaultWindow = 5 * time.Minute
@@ -137,15 +140,20 @@ type Fact struct {
 	// observation.
 	Workflow     string
 	WorkflowSeen time.Time
-	// Background is the background task the unit has open (a workflow, a
-	// Bash run_in_background, an Agent subtask) whatever its turn does,
-	// unlike Workflow, which counts one only while it is watched for
-	// stalls; nil when none. Finished is the latest one that ended with a
-	// turn's result after it, Reply the first line of that turn's reply.
-	Background *Task
+	// Background is the unit's open background tasks (a workflow, a Bash
+	// run_in_background, a Monitor, an Agent subtask; bgtask.Judge)
+	// whatever its turn does, unlike Workflow, which counts one only while
+	// it is watched for stalls. Finished is the latest one that ended with
+	// a turn's result after it, Reply the first line of that turn's reply.
+	Background bgtask.State
 	Finished   *Task
 	Reply      string
 	LastActive time.Time
+	// TurnAt is when a local session's turn last started or ended,
+	// LastActive without the events between (zero for other units): a
+	// failure is dated by it, which a background task's later events do
+	// not move.
+	TurnAt time.Time
 
 	// Index is the unit's index.json row, set for local and remote
 	// sessions; the machine fills in Workspace and Health.
@@ -171,10 +179,20 @@ type Unit struct {
 	ErrClass   ErrorClass `json:"error_class,omitempty"`
 	Since      time.Time  `json:"since"`
 	LastActive time.Time  `json:"last_active,omitzero"`
-	// Background names the background task the unit has open and
-	// BackgroundSince is when it started; empty when none.
-	Background      string    `json:"background,omitempty"`
-	BackgroundSince time.Time `json:"background_since,omitzero"`
+	// Background names the first background task the unit has open and
+	// BackgroundSince is when it started; empty when none. BackgroundN is
+	// how many it has open, BackgroundTasks the first BackgroundShown of
+	// their summaries (the sessions' own text) and BackgroundProgress the
+	// latest progress among them: an idle unit with tasks open is 后台中,
+	// its turn over and its work not (D109), and neither custody nor the
+	// Planner's receipts take it for done.
+	Background         string    `json:"background,omitempty"`
+	BackgroundSince    time.Time `json:"background_since,omitzero"`
+	BackgroundN        int       `json:"background_n,omitempty"`
+	BackgroundTasks    []string  `json:"background_tasks,omitempty"`
+	BackgroundProgress time.Time `json:"background_progress,omitzero"`
+	// TurnAt is Fact.TurnAt; custody names one failure by it.
+	TurnAt time.Time `json:"-"`
 }
 
 // Snapshot is the whole table at the last reconcile. Unowned counts the
@@ -465,7 +483,7 @@ func (m *Machine) Reconcile() {
 			u.dir, u.index = f.Dir, f.Index
 		}
 		u.Workspace = m.workspaceFor(f)
-		u.LastActive = f.LastActive
+		u.LastActive, u.TurnAt = f.LastActive, f.TurnAt
 		state, evidence, class := m.judge(f, now, mono)
 		state, evidence, class = u.hold(f, state, evidence, class)
 		if ev, ok := m.step(u, state, evidence, class, now); ok {
@@ -635,7 +653,7 @@ func (m *Machine) step(u *unit, state State, evidence string, class ErrorClass, 
 		from, recorded = cmp.Or(j.State, Unknown), j.At
 		delete(m.last, u.ID)
 		u.first = false
-		u.failedAt = u.LastActive
+		u.failedAt = cmp.Or(u.TurnAt, u.LastActive)
 	}
 	u.State, u.Evidence, u.ErrClass, u.Since = state, evidence, class, now
 	if first && from == state && !recorded.IsZero() {
@@ -686,7 +704,7 @@ func (u *unit) hold(f *Fact, state State, evidence string, class ErrorClass) (St
 		return state, evidence, class
 	}
 	switch {
-	case u.heldState == Failed && state == Idle && !f.LastActive.After(u.held),
+	case u.heldState == Failed && state == Idle && !cmp.Or(f.TurnAt, f.LastActive).After(u.held),
 		u.heldState == Stalled && state == Active && f.Workflow != "" && !f.WorkflowSeen.After(u.held):
 		return u.heldState, u.heldEvidence, u.heldClass
 	}
@@ -701,14 +719,20 @@ func (u *unit) hold(f *Fact, state State, evidence string, class ErrorClass) (St
 // active or idle (judged, before two reconciles confirm it) forgets what it
 // saw; a task that ended with no result yet is waited for.
 func (u *unit) taskDone(f *Fact, judged State) *TaskDone {
-	u.Background, u.BackgroundSince = "", time.Time{}
-	if t := f.Background; t != nil {
-		u.Background, u.BackgroundSince = t.Name, t.Start
+	u.Background, u.BackgroundSince, u.BackgroundN, u.BackgroundTasks, u.BackgroundProgress = "", time.Time{}, 0, nil, time.Time{}
+	if bg := f.Background; bg.Open() {
+		u.Background, u.BackgroundSince = bg.Tasks[0].Summary, bg.Tasks[0].Start
+		u.BackgroundN, u.BackgroundProgress = bg.Count(), bg.LastProgress
+		for _, t := range bg.Tasks[:min(len(bg.Tasks), BackgroundShown)] {
+			u.BackgroundTasks = append(u.BackgroundTasks, t.Summary)
+		}
 		if !f.Running {
 			if u.open == nil {
 				u.open = map[string]string{}
 			}
-			u.open[t.ID] = t.Name
+			for _, t := range bg.Tasks {
+				u.open[t.ID] = t.Summary
+			}
 		}
 		return nil
 	}
@@ -866,7 +890,7 @@ func mergeFacts(in []Fact) []Fact {
 		if o.Workflow == "" {
 			o.Workflow, o.WorkflowSeen = f.Workflow, f.WorkflowSeen
 		}
-		if o.Background == nil {
+		if !o.Background.Open() {
 			o.Background = f.Background
 		}
 		if o.Finished == nil {
@@ -874,6 +898,9 @@ func mergeFacts(in []Fact) []Fact {
 		}
 		if f.LastActive.After(o.LastActive) {
 			o.LastActive = f.LastActive
+		}
+		if f.TurnAt.After(o.TurnAt) {
+			o.TurnAt = f.TurnAt
 		}
 		if o.Index == nil {
 			o.Index = f.Index

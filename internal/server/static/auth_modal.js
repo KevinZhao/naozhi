@@ -1186,6 +1186,8 @@ function submitQuickAsk(e) {
 // because the user may already be mid-click on the sidebar to switch to
 // another session — grabbing focus 50ms later would intercept keystrokes.
 function wireQuickAskInput(autofocus) {
+  // The Home's summary of what needs you repaints into the new slot.
+  if (document.getElementById('home-attn')) nzBus.dispatchEvent(new CustomEvent('home:shown'));
   // Submit binding: the empty-state form is (re)painted via innerHTML on cold
   // start AND on every mainEmptyHtml() repaint, so the DOMContentLoaded binder
   // cannot catch it — wireQuickAskInput, called on all those paths, binds the

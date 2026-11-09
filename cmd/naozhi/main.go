@@ -313,6 +313,7 @@ func main() {
 		Workspaces: plannerState.Workspaces,
 		Journal:    plannerState.Journal,
 		Promises:   wireup.PlannerPromises(promises),
+		Conclusion: wireup.PlannerConclusion(sidecars),
 	})
 	// The Planner's patrol (§15.6): weekday scout runs over the mail, Slack
 	// and Asana MCP servers, read tools only; new findings wake the Planner.
@@ -480,6 +481,10 @@ func main() {
 	// past 08:30 on a weekday, pushed once through the notifier. Only the
 	// health machine's Watch pokes it, so healthMon is set by then.
 	var healthMon *health.Machine
+	// Custody (built below) holds the watch switch (§15.12 ⑥): which of the
+	// sessions the user opened the digests and 任务 observe.
+	var custodian *custody.Engine
+	watched := func(key string) bool { return custodian != nil && custodian.Watched(key) }
 	// Session digests (§15.12 ②, D100): each task: session's and each
 	// observed session's, written as its turns end and its health moves,
 	// read by the Planner (index.json points at them) and the task cards.
@@ -494,6 +499,7 @@ func main() {
 			return open
 		},
 		Workspaces: plannerState.Workspaces,
+		Watched:    watched,
 	}
 	var digests *digest.Writer
 	var observed func(key string) bool
@@ -513,19 +519,30 @@ func main() {
 	// Puts a done task's session away (§5.2, D95); built below, once custody
 	// (whose "你在旁边" it waits on) exists.
 	var reaper *reap.Reaper
-	// The 任务 (§15.4): the dispatched sessions and the promises, their
-	// states by health, the Planner's status blocks and the user, who can
-	// stop a dispatched session.
+	sources := wireup.CustodySources{Router: router, Outputs: activities}
+	// The Planner's action blocks, built below once the server and custody
+	// exist; a task's state set before then has no report to settle.
+	var actions *action.Runner
+	// The 任务 (§15.4): the dispatched sessions, the watched sessions the
+	// user opened (你开的, §15.12 ⑥) and the promises, their states by
+	// health, the Planner's status blocks and the user, who can stop a
+	// dispatched session.
 	tasks := task.New(task.Config{
 		Sessions: sidecars,
 		Promises: promises,
 		Health:   func() health.Snapshot { return healthMon.Snapshot() },
 		Journal:  plannerState.Journal,
 		Stop:     wireup.StopTask(router, func(key string) { srv.DropPlannerQueue(key) }, plannerAgent.Tell),
-		OnState:  func(key string, st task.State) { reaper.OnState(key, st) },
-		ReapWait: func(key string) string { return reaper.Wait(key) },
-		Live:     wireup.TaskLive(router),
-		Digest:   func(key string) bool { return digests.Path(key) != "" },
+		OnState: func(key string, st task.State) {
+			actions.TaskState(key, st)
+			reaper.OnState(key, st)
+		},
+		ReapWait:  func(key string) (string, time.Time) { return reaper.Wait(key) },
+		Live:      wireup.TaskLive(router),
+		Digest:    func(key string) bool { return digests.Path(key) != "" },
+		Watched:   watched,
+		Name:      unitNames,
+		UserSince: sources.UserSince,
 	})
 	briefer := brief.New(brief.Config{
 		Journal: plannerState.Journal,
@@ -550,11 +567,9 @@ func main() {
 	// Custody (§5.4, D93): the gateway watching sessions for the user. It
 	// sends through srv's own send path and reads the health machine, both
 	// set before Run below. It runs only with the Planner on.
-	sources := wireup.CustodySources{Router: router, Outputs: activities}
-	// actions, built below, takes the cards with no recommended option to
-	// the Planner; custody runs only after it is set.
-	var actions *action.Runner
-	custodian := custody.New(custody.Config{
+	// actions (declared above), built below, takes the cards with no
+	// recommended option to the Planner; custody runs only after it is set.
+	custodian = custody.New(custody.Config{
 		Sessions: sidecars,
 		Send: func(key, text string, reason custody.Reason, n int) error {
 			return srv.SubmitCustody(key, text, string(reason), n)
@@ -568,6 +583,7 @@ func main() {
 		Progress:  sources.Progress,
 		FailText:  sources.FailText,
 		Settled:   sources.Settled,
+		Asking:    sources.Asking,
 		Name:      unitNames,
 		Events:    sources.Events,
 		HandOff:   func(key, what string) error { return actions.HandOff(key, what) },
@@ -582,17 +598,18 @@ func main() {
 	})
 	reapSources := wireup.ReapSources{Router: router, Health: func() health.Snapshot { return healthMon.Snapshot() }, ClaudeDir: claudeDir}
 	reaper = reap.New(reap.Config{
-		Sessions: sidecars,
-		Session:  reapSources.Session,
-		Nearby:   custodian.Nearby,
-		Archive:  reapSources.Archive,
-		Restore:  reapSources.Restore,
-		Dirs:     reapSources.Dirs,
-		InUse:    reapSources.InUse,
-		Git:      reap.Exec{},
-		Inbox:    notifier,
-		Journal:  plannerState.Journal,
-		Name:     unitNames,
+		Sessions:   sidecars,
+		Session:    reapSources.Session,
+		LastActive: reapSources.LastActive,
+		Nearby:     custodian.Nearby,
+		Archive:    reapSources.Archive,
+		Restore:    reapSources.Restore,
+		Dirs:       reapSources.Dirs,
+		InUse:      reapSources.InUse,
+		Git:        reap.Exec{},
+		Inbox:      notifier,
+		Journal:    plannerState.Journal,
+		Name:       unitNames,
 	})
 
 	routing := buildRouting(cfg, agents, projectMgr, scheduler)
@@ -749,11 +766,14 @@ func main() {
 		Note:        plannerAgent.Note,
 		Tell:        plannerAgent.Tell,
 		Reports:     wireup.PlannerReports(router),
+		Digests:     digests,
 		Outside:     plannerAgent.OutsideTurn,
 		TellRefused: plannerAgent.TellRefused,
 		TellUnrun:   plannerAgent.TellUnrun,
 		UnrunTurn:   plannerAgent.UnrunTurn,
 		PlannerBusy: plannerAgent.Busy,
+		Background:  sources.Background,
+		UserSent:    sources.UserSent,
 		Custody:     custodian,
 		Words:       wireup.PlannerWords(plannerAgent),
 		Relay:       srv.SubmitRelay,
@@ -765,6 +785,10 @@ func main() {
 	// of a request carried over from the last run.
 	resultSink := func(key, text string) {
 		actions.Result(key, text)
+		// A watched session's turn ending with the user away is a result
+		// for them (§15.12 ⑥), custody's "你在旁边" judging the away; only
+		// queued here, on the read loop.
+		custodian.Ended(key)
 		srv.PlannerResult(key)
 	}
 	router.SetResultSink(resultSink)

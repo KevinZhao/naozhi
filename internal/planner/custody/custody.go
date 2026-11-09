@@ -31,6 +31,10 @@
 // here reads a reply's text or calls a model. State lives in the sidecars
 // (the switch, and on a lineage's root what custody did), so a restart
 // keeps it.
+//
+// Beside the switch is observing (watch.go, §15.12 ⑥): the gateway keeping
+// a digest and a task card of a session the user opened, on by default,
+// sending nothing.
 package custody
 
 import (
@@ -158,6 +162,11 @@ type Status struct {
 	// Sent is how many messages custody sent over the lineage, of Max.
 	Sent int `json:"sent"`
 	Max  int `json:"max"`
+	// Watch is whether the gateway observes the session (§15.12 ⑥, its own
+	// switch: Engine.Watched); WatchBy who last set it, empty for the
+	// default.
+	Watch   bool   `json:"watch"`
+	WatchBy string `json:"watch_by,omitempty"`
 }
 
 // Inbox is where custody leaves a session to the user (notify.Notifier).
@@ -192,6 +201,10 @@ type Config struct {
 	// Settled reports whether key's turn ended with nothing pending: not
 	// running, no unanswered AskUserQuestion, no background task running.
 	Settled func(key string) bool
+	// Asking reports whether key has an AskUserQuestion unanswered: a
+	// watched session's turn that ended asking is 等你, not a result
+	// (Ended). nil reads as none.
+	Asking func(key string) bool
 	// Name is how the user reads key.
 	Name func(key string) string
 	// Events are key's latest events, at most n: its AskUserQuestion cards
@@ -232,6 +245,8 @@ type Config struct {
 type Engine struct {
 	cfg  Config
 	poke chan struct{}
+	// ends are the turn ends Ended queued for Run (watch.go).
+	ends chan turnEnd
 
 	// mu serializes custody's decisions and its sidecar writes.
 	mu sync.Mutex
@@ -267,7 +282,7 @@ func New(cfg Config) *Engine {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	e := &Engine{cfg: cfg, poke: make(chan struct{}, 1), viewing: map[string]map[string]time.Time{}, deferred: map[string]bool{},
+	e := &Engine{cfg: cfg, poke: make(chan struct{}, 1), ends: make(chan turnEnd, endsQueued), viewing: map[string]map[string]time.Time{}, deferred: map[string]bool{},
 		asks: map[string]*askWait{}, faulted: map[string]bool{}}
 	if cfg.Path != "" {
 		st, out, err := jsonfile.Load[state](cfg.Path, jsonfile.Options{MaxBytes: stateBytes, Label: "custody state", Corrupt: jsonfile.LeaveCorrupt})
@@ -320,6 +335,7 @@ func (e *Engine) inFault(key string) bool {
 
 // Run ticks until ctx ends.
 func (e *Engine) Run(ctx context.Context) {
+	go e.runEnds(ctx)
 	t := time.NewTicker(tickInterval)
 	defer t.Stop()
 	for {
@@ -490,12 +506,11 @@ func (e *Engine) setLocked(key string, enable bool, by string) error {
 	return nil
 }
 
-// ensureLocked gives key a sidecar to hold custody's fields.
+// ensureLocked gives key a sidecar to hold custody's fields. e.mu does not
+// cover the sidecar's other writers (a result, a seen mark, the Planner's
+// status), so the "none yet" check is the store's own.
 func (e *Engine) ensureLocked(key string) error {
-	if _, ok := e.cfg.Sessions.Get(key); ok {
-		return nil
-	}
-	return e.cfg.Sessions.Put(sidecar.Meta{Key: key})
+	return e.cfg.Sessions.Ensure(key)
 }
 
 // root is the top of key's lineage: up its sidecars' parents, short of the
@@ -698,6 +713,45 @@ func (e *Engine) Check(key string) error {
 
 // Allowed reports whether custody may send to key now.
 func (e *Engine) Allowed(key string) bool { return e.Check(key) == nil }
+
+// Blocked returns why custody would not send to key whatever becomes of its
+// session: custody disabled, its switch turned off by the user or the
+// Planner, paused, its lineage stopped, the user at the session, or the
+// lineage at a limit, which stops it as Deliver would. A dispatched session
+// put away (planner/reap) reads off and not local until its task is
+// reopened, so Check cannot tell these from what reopening it would change;
+// a message to it is weighed by Blocked before anything reopens it, as
+// reopening sets its task back to 进行中 for a message Deliver would then
+// refuse.
+func (e *Engine) Blocked(key string) error {
+	switch {
+	case e.cfg.Disabled:
+		return ErrDisabled
+	case e.cfg.Sessions == nil || e.cfg.Send == nil:
+		return ErrOff
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if m, ok := e.cfg.Sessions.Get(key); ok && m.Custody != nil && m.Custody.By != ByAuto && !m.Custody.On {
+		return ErrOff
+	}
+	if err := e.retryCheckLocked(key); err != nil {
+		return err
+	}
+	if e.nearbyLocked(key) {
+		return ErrNearby
+	}
+	root := e.root(key)
+	c := e.chain(root)
+	// A session put away is off the router, so its progress reads "": it has
+	// made none since custody last sent to it, and Deliver after the reopen
+	// reads the progress it had then.
+	progress := cmp.Or(e.progress(key), c.Progress)
+	if why := limit(c, progress); why != "" {
+		return e.stopLocked(root, key, c, why, false)
+	}
+	return nil
+}
 
 // checkLocked is Check short of the user being nearby.
 func (e *Engine) checkLocked(key string) error {
@@ -1010,9 +1064,11 @@ func (e *Engine) autoOff(key string) {
 	}
 }
 
-// failedAt names one failure: when the session was last active, so a retry
-// that failed again is a new one even when health saw no transition.
-func failedAt(u health.Unit) time.Time { return cmp.Or(u.LastActive, u.Since) }
+// failedAt names one failure: when the session's turn last started or
+// ended, so a retry that failed again is a new one even when health saw no
+// transition, while a background task's events after the failed turn
+// (which move LastActive) are not.
+func failedAt(u health.Unit) time.Time { return cmp.Or(u.TurnAt, u.LastActive, u.Since) }
 
 // stale reports whether u's failure is older than staleAfter.
 func (e *Engine) stale(u health.Unit) bool { return e.staleSince(failedAt(u)) }
@@ -1070,7 +1126,7 @@ func (e *Engine) answer(u health.Unit) {
 			}
 			return
 		}
-		if u.Since.Before(u.LastActive) {
+		if u.Since.Before(cmp.Or(u.TurnAt, u.LastActive)) {
 			// Active again since health judged it failed (a retry ran):
 			// no transition took this failure to the inbox.
 			e.leaveLocked(key, class, "")
@@ -1356,6 +1412,10 @@ func (e *Engine) Status(key string) Status {
 	if m.Custody != nil {
 		st.By, st.At = m.Custody.By, m.Custody.At
 	}
+	st.Watch = watchable(key) && watched(m, ok)
+	if m.Watch != nil {
+		st.WatchBy = m.Watch.By
+	}
 	c := e.chain(e.root(key))
 	st.Sent = c.Sent
 	switch {
@@ -1372,7 +1432,9 @@ func (e *Engine) Status(key string) Status {
 	return st
 }
 
-// List is the custody of every local session in custody, or stopped.
+// List is the custody of every local session in custody, or stopped, or
+// whose observing was turned off: observing is on by default, so the page
+// reads a session left out as watched.
 func (e *Engine) List() []Status {
 	if e.cfg.Sessions == nil {
 		return nil
@@ -1382,7 +1444,7 @@ func (e *Engine) List() []Status {
 		if e.eligible(m.Key) != nil {
 			continue
 		}
-		if st := e.Status(m.Key); st.On || st.State == StateStopped {
+		if st := e.Status(m.Key); st.On || st.State == StateStopped || m.Watch != nil && !m.Watch.On && watchable(m.Key) {
 			out = append(out, st)
 		}
 	}

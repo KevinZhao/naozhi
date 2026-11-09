@@ -191,7 +191,18 @@ func (a *Agent) wakeChain(src Source, sent func(int, error), blocks []string, i 
 	}
 	// The block leads: the logged bubble keeps only the message's head, and
 	// the page marks the turn by it.
-	_, err := turns.SubmitPlanner(Key, src, nil, blocks[i]+"\n\n"+a.Snapshot(), nil, opts, done)
+	snap, ran := a.nextSnapshot()
+	if ran != nil {
+		if next := done; next != nil {
+			done = func(reply string, err error) {
+				ran(reply, err)
+				next(reply, err)
+			}
+		} else {
+			done = ran
+		}
+	}
+	_, err := turns.SubmitPlanner(Key, src, nil, blocks[i]+"\n\n"+snap, nil, opts, done)
 	if err == nil && i > 0 {
 		sent(i, nil)
 	}

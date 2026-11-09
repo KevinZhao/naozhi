@@ -54,7 +54,14 @@ type TestProcess struct {
 	// InterruptViaControlFunc, when set, handles InterruptViaControl; nil
 	// reports a delivered interrupt.
 	InterruptViaControlFunc func() error
+	// StartedAtVal is when naozhi attached to the process (StartedAt);
+	// zero, as for a process naozhi never attached, judges no background
+	// task open.
+	StartedAtVal time.Time
 }
+
+// StartedAt is StartedAtVal.
+func (p *TestProcess) StartedAt() time.Time { return p.StartedAtVal }
 
 // NewTestProcess creates a TestProcess with an event log and ready state.
 func NewTestProcess() *TestProcess {
@@ -157,7 +164,6 @@ func (p *TestProcess) EventEntriesBefore(beforeMS int64, limit int) []clievent.E
 }
 func (p *TestProcess) LastActivitySummary() string                { return p.EventLog.LastActivitySummary() }
 func (p *TestProcess) LastResponseSummary() string                { return p.EventLog.LastResponseSummary() }
-func (p *TestProcess) LastEventAt() time.Time                     { return p.EventLog.LastEventAt() }
 func (p *TestProcess) UserTurnCount() int64                       { return p.EventLog.UserTurnCount() }
 func (p *TestProcess) ProtocolName() string                       { return "test" }
 func (p *TestProcess) SubscribeEvents() (<-chan struct{}, func()) { return p.EventLog.Subscribe() }
@@ -168,6 +174,15 @@ func (p *TestProcess) InjectHistory(entries []clievent.EventEntry) {
 	}
 }
 func (p *TestProcess) TurnAgents() []ring.SubagentInfo { return p.EventLog.TurnAgents() }
+
+// LastEventAt is zero for a TestProcess built without an event log: every
+// LastActive read consults it.
+func (p *TestProcess) LastEventAt() time.Time {
+	if p.EventLog == nil {
+		return time.Time{}
+	}
+	return p.EventLog.LastEventAt()
+}
 
 // Normalize-layer stubs (docs/rfc/multi-backend.md §8.8); zero values keep
 // SessionSnapshot assertions stable.
@@ -201,6 +216,15 @@ func (r *Router) InjectSession(key string, proc *TestProcess) *ManagedSession {
 	})
 	return s
 }
+
+// SetReattachedForTest records the session's process as one a shim
+// reattach found, its CLI started at cliStart, the replay holding tasks.
+func (s *ManagedSession) SetReattachedForTest(cliStart time.Time, tasks []clievent.EventEntry) {
+	s.setReattached(s.loadProcess(), cliStart, tasks)
+}
+
+// SetLastTurnAtForTest sets when the session's last turn started or ended.
+func (s *ManagedSession) SetLastTurnAtForTest(t time.Time) { s.lastActive.Store(t.UnixNano()) }
 
 // SetWorkspaceForTest stamps the session-level workspace on an injected
 // session; production sets it through the spawn / takeover paths.

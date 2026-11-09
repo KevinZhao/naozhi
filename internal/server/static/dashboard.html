@@ -153,6 +153,9 @@
         <button type="submit" class="quick-ask-send" aria-label="发送"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
       </form>
       <div class="nz-empty-hint">默认目录 · general agent · 随时 <code>/cd</code> 切换目录，或用上方 <b>+</b> 开项目会话</div>
+      <!-- 等你 · 运行中 · 失败 and the latest items that wait on you
+           (home_attn.js); empty, and hidden, with nothing to say. -->
+      <div id="home-attn" class="home-attn"></div>
       <!-- R110-P1 Home panel slot: renderRecentSessionsPanel() fills this
            with up to 5 most-recently-active session cards after fetchSessions
            lands. Stays empty on cold-start (no data yet) or when there are
@@ -255,6 +258,12 @@
         <span class="pl-host" id="pl-host" hidden></span>
         <span class="pl-status" id="pl-status"></span>
         <span class="pl-paused" id="pl-paused" hidden></span>
+        <!-- 要你决定 N (planner_view.js paintPin, §15.12 ⑤): the Planner's
+             questions at the conversation's end, which it scrolls to. -->
+        <button type="button" class="pl-pin" id="pl-pin" data-action="planner-jump-ask" hidden></button>
+        <!-- New results (tasks.js, §15.12 ④): filters the 任务 cards to
+             them; page only, the drawer has no left column. -->
+        <span class="pl-news pl-page-only" id="pl-news" hidden><button type="button" class="pl-link" data-action="tasks-only-new" aria-pressed="false"></button><span class="pl-news-sep" aria-hidden="true">·</span><button type="button" class="pl-link pl-news-all" data-action="tasks-seen-all">全部已读</button></span>
         <span class="pl-head-sp"></span>
         <button type="button" class="files-dl-btn pl-page-only" data-action="workbench-toggle" title="工作台（预览 · 产出 · 文件 · 详情）">工作台</button>
         <details class="pl-more pl-page-only" id="pl-more">
@@ -276,6 +285,9 @@
       <div class="pl-sess" id="pl-sess" hidden>
         <header class="pl-head">
           <nav class="pl-crumb" aria-label="位置"><button type="button" class="pl-link" data-action="planner-close-session">Planner</button><span aria-hidden="true">›</span><b id="pl-sess-name"></b></nav>
+          <!-- The conversation's header is hidden under the opened session:
+               its 要你决定 N stays here, and goes back to the questions. -->
+          <button type="button" class="pl-pin" id="pl-sess-pin" data-action="planner-jump-ask" hidden></button>
           <span class="pl-head-sp"></span>
           <button type="button" class="files-dl-btn" data-action="workbench-toggle" title="工作台（预览 · 产出 · 文件 · 详情）">工作台</button>
           <button type="button" class="files-dl-btn" id="pl-sess-stop" data-action="task-stop" title="停止这个会话正在做的事" hidden>停止</button>
@@ -420,5 +432,6 @@
 <script type="module" src="/static/planner_view.js"></script>
 <script type="module" src="/static/planner_drawer.js"></script>
 <script type="module" src="/static/side_wait.js"></script>
+<script type="module" src="/static/home_attn.js"></script>
 </body>
 </html>

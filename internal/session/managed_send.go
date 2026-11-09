@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -263,6 +264,9 @@ func (s *ManagedSession) InterruptViaControlDetail() (InterruptOutcome, error) {
 func (s *ManagedSession) cachePrompt(ctx context.Context, text string, images []clievent.Attachment) {
 	if clievent.FromGateway(ctxutil.Source(ctx)) || strings.HasPrefix(text, clievent.CustodyLead) {
 		return
+	}
+	if ctxutil.Source(ctx) == "" {
+		s.lastUser.Store(time.Now().UnixNano())
 	}
 	storeAtomicString(&s.lastPrompt, textutil.TruncateRunes(text, 120)+clievent.AttachmentSuffix(images))
 }

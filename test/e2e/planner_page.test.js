@@ -79,8 +79,9 @@ test('desktop: badge, 等你 cards, stream, controls, and the workbench counts o
     await expect(page.locator('#abnav-planner')).toHaveAttribute('aria-pressed', 'true');
     const cards = page.locator('#pl-wait .pl-card');
     await expect(cards).toHaveCount(3);
-    // The column lists what waits on you to act, the badge's items (D94).
-    await expect(page.locator('#pl-wait-h')).toHaveText('等你');
+    // The column lists what waits on you to act, the badge's items (D94),
+    // and its heading counts them as the badge does (UX review 1).
+    await expect(page.locator('#pl-wait-h')).toHaveText('等你 3');
     // Decisions first, then questions, then errors.
     await expect(cards.nth(0).locator('.pl-kind')).toHaveText('待你决定');
     await expect(cards.nth(0).locator('.pl-card-acts button')).toHaveText(['模板 A', '模板 B']);

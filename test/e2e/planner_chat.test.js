@@ -107,19 +107,29 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     await expect(reply.locator('.pl-scards .pl-scard')).toHaveCount(2);
     await expect(reply).toContainText('hello world在等你回复，iso 周报 还没开始，hello world（名字 hw）先等等，两个都在 myproject。');
     await expect(reply).not.toContainText(SESSION);
+    // Folded to one line (§15.12 ⑤): 派出 · title · workspace · its message's
+    // first sentence (this block gives no goal); the rows unfold.
     const dispatch = reply.locator('.pl-act-dispatch').first();
-    await expect(dispatch.locator('.pl-act-h')).toHaveText('派出会话 · iso 整理周报');
-    await expect(dispatch).toContainText('把本周合并的 PR 整理成周报');
+    await expect(dispatch.locator('.pl-act-h')).toHaveText('派出 · iso 整理周报 · naozhi · 把本周合并的 PR 整理成周报');
+    await expect(dispatch).not.toHaveAttribute('open', '');
+    await expect(dispatch.locator('.pl-act-rows')).toBeHidden();
+    await dispatch.locator('summary').click();
+    await expect(dispatch.locator('.pl-act-rows dt')).toHaveText(['工作区', '模型', '第一条消息']);
+    await expect(dispatch.locator('.pl-act-rows dd').last()).toBeVisible();
+    await expect(dispatch.locator('.pl-act-rows dd').last()).toHaveText('把本周合并的 PR 整理成周报');
+    await dispatch.locator('summary').click();
+    await expect(dispatch.locator('.pl-act-rows')).toBeHidden();
     await expect(dispatch).not.toContainText('可在"任务"里停止');
     await expect(reply.locator('.pl-act-dispatch button')).toHaveCount(0);
     await expect(reply.locator('.pl-act-bad .pl-act-h')).toHaveText('看不懂的动作块');
     await expect(reply.locator('.pl-act-promise')).toContainText('iso 周五前提醒你看周报');
-    // The Planner's judgment of a task (§15.4 status).
-    await expect(reply.locator('.pl-act-status .pl-act-h')).toHaveText('Planner 判断 · 已完成');
-    await expect(reply.locator('.pl-act-status')).toContainText('iso 它汇报周报写好了');
-    // Its task is neither listed nor in 任务 yet: no 任务 row, never the key;
-    // its session card names its kind (D92).
-    await expect(reply.locator('.pl-act-status dt')).toHaveText(['依据']);
+    // The Planner's judgment of a task (§15.4 status): one line, its reason
+    // in the tooltip. Its task is neither listed nor in 任务 yet: named by
+    // its kind, never the key (D92).
+    const status = reply.locator('.pl-act-status');
+    await expect(status).toHaveText('✓ 派出的任务 已完成');
+    await expect(status).toHaveAttribute('title', '依据：iso 它汇报周报写好了');
+    await expect(status.locator('dt')).toHaveCount(0);
     await expect(reply.locator('.pl-scard[data-key="' + TASK + '"] .pl-scard-name')).toHaveText('派出的任务');
     await expect(reply.locator('code[data-lang="naozhi-action"]')).toHaveCount(0);
     await expect(page.locator('#pl-cards')).toBeHidden();
@@ -212,6 +222,71 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     expect(mock.sendCalls.map((b) => JSON.parse(b).key)).not.toContain(TASK);
   } finally {
     await ctx.close();
+    mock.server.close();
+  }
+});
+
+// A key stands for its session's name: folding it away left "派出了。" or
+// "派出了 、、。" (§15.12 ①). Only a key that repeats the name right before
+// it (bold or not, its colon with it) and a bracket holding only keys go.
+const FOLD_ROWS = [
+  ['派出了 A、B、C。', '派出了 iso 周报、iso 评审、iso 部署。'],
+  ['派出了 A，B；C。', '派出了 iso 周报，iso 评审；iso 部署。'],
+  ['A, B 都在跑。', 'iso 周报, iso 评审 都在跑。'],
+  ['派出了 A 和 B。', '派出了 iso 周报 和 iso 评审。'],
+  ['名单：A。', '名单：iso 周报。'],
+  ['iso 周报：A 已完成。', 'iso 周报：已完成。'],
+  ['iso 周报 A 先等等。', 'iso 周报 先等等。'],
+  ['派出了 A，正在跑。', '派出了 iso 周报，正在跑。'],
+  ['**iso 周报**：A 在跑。', 'iso 周报：在跑。'],
+  ['- **iso 周报**：A', 'iso 周报'],
+  ['iso 周报：A；iso 评审：B。', 'iso 周报；iso 评审。'],
+  ['iso 周报 A 和 B 都在跑。', 'iso 周报 和 iso 评审 都在跑。'],
+  ['派出了 A（iso 周报）。', '派出了 iso 周报。'],
+  ['已派：A（iso 周报，20 分钟）', '已派：（iso 周报，20 分钟）'],
+  ['iso 周报 和 iso 评审（A、B）都在跑。', 'iso 周报 和 iso 评审都在跑。'],
+  ['三个都在 naozhi（A，B，C）。', '三个都在 naozhi。'],
+  ['派出了 A（iso 周报整理）。', '派出了 iso 周报（iso 周报整理）。'],
+  // The Planner names a session by its whole summary; the dashboard by a
+  // shortened title. Either is its name.
+  ['修复 dashboard 在断线重连之后滚动跳动的问题并补上测试 {D} 在跑。', '修复 dashboard 在断线重连之后滚动跳动的问题并补上测试 在跑。'],
+  // A session no list knows (put away a day ago) is named only by its kind:
+  // the name before it stands, not "整理周报 派出的任务".
+  ['整理周报 {G} 在跑。', '整理周报 在跑。'],
+];
+
+test('keys in a reply fold to names or away, never to bare separators', async ({ page }) => {
+  const tasks = [['task:isoa1', 'iso 周报'], ['task:isob2', 'iso 评审'], ['task:isoc3', 'iso 部署']];
+  const s = defaultSessions();
+  for (const [key, label] of tasks) {
+    s.sessions.push({ key, state: 'ready', platform: 'task', agent: 'general', cli_name: 'claude', purpose: 'task', user_label: label,
+      workspace: '/home/user/workspace/naozhi', last_active: now - 20000, node: 'local' });
+  }
+  s.sessions.push({ key: 'task:isod4', state: 'ready', platform: 'task', agent: 'general', cli_name: 'claude', purpose: 'task',
+    summary: '修复 dashboard 在断线重连之后滚动跳动的问题并补上测试', workspace: '/home/user/workspace/naozhi', last_active: now - 20000, node: 'local' });
+  const tick = (key) => '`' + key + '`';
+  const reply = (line) => line.replace('A', tick(tasks[0][0])).replace('B', tick(tasks[1][0])).replace('C', tick(tasks[2][0]))
+    .replace('{D}', tick('task:isod4')).replace('{G}', tick('task:gone9'));
+  const mock = await startMockServer({
+    ws: true, sessions: s, inbox: inbox(), systemHealth: health(),
+    plannerEvents: FOLD_ROWS.map(([line], i) => ({ type: 'text', time: now - 60000 + i, uuid: 'pc-fold' + i, detail: reply(line) })),
+    planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
+  });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await page.click('#abnav-planner');
+    const replies = page.locator('#pl-stream .event.text');
+    await expect(replies).toHaveCount(FOLD_ROWS.length);
+    // Each reply's own text: its cards and copy button read the names too.
+    const texts = () => replies.evaluateAll((els) => els.map((el) => {
+      const c = el.querySelector('.event-content').cloneNode(true);
+      c.querySelectorAll('.pl-scards, button').forEach((n) => n.remove());
+      return c.textContent.trim();
+    }));
+    await expect.poll(texts).toEqual(FOLD_ROWS.map(([, want]) => want));
+    await expect(page.locator('#pl-stream')).not.toContainText('task:');
+  } finally {
     mock.server.close();
   }
 });
@@ -482,7 +557,7 @@ for (const vp of [{ name: 'desktop', width: 1280, height: 800 }, { name: 'phone'
       // ② every block is its card.
       const acts = stream.locator('.event.text').nth(1);
       await expect(acts.locator('.pl-act')).toHaveCount(4);
-      await expect(acts.locator('.pl-act-dispatch .pl-act-h')).toHaveText('派出会话 · iso 整理周报');
+      await expect(acts.locator('.pl-act-dispatch .pl-act-h')).toHaveText('派出 · iso 整理周报 · naozhi · 把本周合并的 PR 整理成周报，按模块分组');
       await expect(acts.locator('.pl-act-promise')).toContainText('iso 周五前提醒你看周报');
       await expect(acts.locator('.pl-act-notify')).toContainText('iso 登录页等你确认发版');
       await expect(acts.locator('.pl-act-ask .pl-act-opt')).toHaveText(['发', '先别发']);

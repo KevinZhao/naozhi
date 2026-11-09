@@ -9,6 +9,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/bgtask"
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/textutil"
@@ -45,6 +46,37 @@ type IndexEntry struct {
 	// Report is the session's latest report, its summary cut to the first
 	// sentence; nil while it has none.
 	Report *IndexReport `json:"report,omitempty"`
+	// Background is the session's open background tasks (D109); nil while
+	// none is open. With health idle it is 后台中: the turn is over, the
+	// work is not.
+	Background *IndexBackground `json:"background,omitempty"`
+}
+
+// IndexBackground is an index row's open background tasks: how many, the
+// first few by ID and summary (the session's own text), and the latest
+// progress among them.
+type IndexBackground struct {
+	Count        int         `json:"count"`
+	Tasks        []IndexTask `json:"tasks"`
+	LastProgress time.Time   `json:"last_progress,omitzero"`
+}
+
+// IndexTask is one open background task of an index row.
+type IndexTask struct {
+	ID      string `json:"id"`
+	Summary string `json:"summary"`
+}
+
+// NewIndexBackground is bg as an index row says it; nil when none is open.
+func NewIndexBackground(bg bgtask.State) *IndexBackground {
+	if !bg.Open() {
+		return nil
+	}
+	out := &IndexBackground{Count: bg.Count(), LastProgress: bg.LastProgress}
+	for _, t := range bg.Tasks[:min(len(bg.Tasks), BackgroundShown)] {
+		out.Tasks = append(out.Tasks, IndexTask{ID: t.ID, Summary: t.Summary})
+	}
+	return out
 }
 
 // IndexReport is an index row's report: its state, the first sentence of

@@ -165,6 +165,8 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .tk-b-fail{--tk-b:var(--nz-status-failed)}
 .tk-b-done{--tk-b:var(--nz-green)}
 .tk-b-idle{--tk-b:var(--nz-text-mute)}
+.tk-b-bg{--tk-b:var(--nz-status-running)}
+.tk-b-bg::before{background:transparent;box-shadow:inset 0 0 0 2px currentColor}
 .tk-now{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--nz-text)}
 .tk-card.done .tk-now{color:var(--nz-text-mute)}
 .tk-meta .custody-chip{margin-right:6px;vertical-align:1px}
@@ -173,6 +175,37 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .tk-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid var(--nz-border)}
 .tk-act{min-height:26px}
 .tk-stop{color:var(--nz-red)}
+/* New result (§15.12 ④): a round dot before the title, apart from the left
+   edge 在跑 colours the same blue; never red (red is 等你's alone). */
+.tk-new{flex-shrink:0;width:8px;height:8px;margin:5px -1px 0 -3px;border-radius:50%;background:var(--nz-status-new);box-shadow:0 0 0 2px var(--nz-bg-0)}
+.tk-sec-done>summary .tk-new{display:inline-block;margin:0 0 1px 6px;vertical-align:middle}
+/* The chevron expanding the digest, beside "⋯". */
+.tk-expand{flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;width:24px;height:22px;margin:-2px -4px 0 0;padding:0;border:0;border-radius:var(--nz-radius-ms);background:none;color:var(--nz-text-mute);cursor:pointer}
+.tk-expand svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;transition:transform var(--nz-dur) var(--nz-ease)}
+.tk-expand[aria-expanded="true"] svg{transform:rotate(180deg)}
+.tk-expand:hover,.tk-expand[aria-expanded="true"]{background:var(--nz-bg-2);color:var(--nz-text)}
+.tk-expand:focus-visible{outline:2px solid var(--nz-focus);outline-offset:1px}
+/* 最新结论: the latest report's first sentence, one line. */
+.tk-report{display:flex;align-items:baseline;gap:6px;width:100%;min-width:0;margin-top:3px;padding:0;border:0;background:none;font:inherit;font-size:var(--nz-fs-xs);color:var(--nz-text);text-align:left}
+button.tk-report{cursor:pointer}
+button.tk-report:hover .tk-report-t{text-decoration:underline}
+.tk-report-k{flex-shrink:0;color:var(--nz-text-dim)}
+.tk-report-t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tk-card.done .tk-report-t{color:var(--nz-text-mute)}
+/* The expanded digest: the session's output, rendered as data. */
+.tk-digest{margin-top:8px;padding-top:8px;border-top:1px solid var(--nz-border);max-height:360px;overflow-y:auto;font-size:var(--nz-fs-xs);line-height:1.5;color:var(--nz-text);overflow-wrap:anywhere}
+.tk-digest .md-h2{font-size:var(--nz-fs-sm2)}
+.tk-digest .md-h3{font-size:var(--nz-fs-xs)}
+.tk-digest>.md-h2:first-child{margin-top:0}
+.tk-digest-note{color:var(--nz-text-dim)}
+/* "只看新结果" over the filtered cards. */
+.tk-filter{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;padding:0 2px;font-size:var(--nz-fs-xs);color:var(--nz-text-dim)}
+/* The header's "N 件新结果 · 全部已读". */
+.pl-news{display:flex;align-items:center;gap:6px;min-width:0;overflow:hidden;font-size:var(--nz-fs-xs);white-space:nowrap}
+.pl-news>[data-action="tasks-only-new"]{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.pl-news[hidden]{display:none}
+.pl-news>button[aria-pressed="true"]{text-decoration:underline}
+.pl-news-sep{color:var(--nz-text-faint)}
 /* 等你 bar atop the 会话 sidebar (side_wait.js), not rendered with none;
    unfolded, the Planner left column's cards at their full height above the
    session list. Only a bar taller than what the
@@ -217,6 +250,16 @@ body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
 .pl-card-why{margin-top:2px;color:var(--nz-text-mute);font-size:var(--nz-fs-xs);word-break:break-word;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden}
 .pl-card-meta{margin-top:4px;color:var(--nz-text-dim);font-size:var(--nz-fs-xs);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pl-card-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+/* The Planner's own question in the left column (UX review 9): one line
+   to the conversation's end, where it is answered; a phone keeps the card. */
+.pl-card-ref{display:none}
+@media(min-width:769px){
+  .pl-card-mine{padding:6px 10px}
+  .pl-card-mine>.pl-card-full{display:none}
+  .pl-card-mine>.pl-card-ref{display:flex;align-items:center;gap:8px;min-width:0}
+}
+.pl-card-ref-t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:var(--nz-text-strong)}
+.pl-card-ref .pl-link{flex-shrink:0;font-size:var(--nz-fs-xs)}
 .pl-link{background:none;border:0;padding:0;font:inherit;color:var(--nz-accent);cursor:pointer}
 .pl-link:hover{text-decoration:underline}
 .pl-btn{padding:3px 10px;border-radius:var(--nz-radius-ms);border:1px solid var(--nz-border);background:var(--nz-bg-0);color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-xs);cursor:pointer}
@@ -249,9 +292,10 @@ body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
 .pl-head{flex-shrink:0;height:48px;display:flex;align-items:center;gap:10px;padding:0 18px;border-bottom:1px solid var(--nz-border)}
 .pl-title{font-size:var(--nz-fs-md);font-weight:600;color:var(--nz-text-strong)}
 .pl-status{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);white-space:nowrap}
+.pl-status:empty{display:none}
 .pl-host{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);white-space:nowrap;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .pl-host .pl-host-name::before{content:'· '}
-.pl-host-pick{font:inherit;color:inherit;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:1px 4px;max-width:12em}
+.pl-host-pick{font:inherit;color:inherit;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:1px 4px;max-width:min(12em,100%)}
 .pl-status.wait{color:var(--nz-amber)}
 .pl-head-sp{flex:1}
 .pl-note{flex-shrink:0;margin:12px 18px 0;padding:10px 12px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1);color:var(--nz-text-mute);font-size:var(--nz-fs-sm2);line-height:1.6}
@@ -266,6 +310,11 @@ body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
 .pl-cards{margin:4px 24px 14px;max-width:560px;display:flex;flex-direction:column;gap:8px}
 .pl-cards[hidden]{display:none}
 .pl-cards-h{font-size:var(--nz-fs-xs);font-weight:600;color:var(--nz-text-mute)}
+/* 要你决定 N in the headers: the questions at the conversation's end. An
+   accent outline, not red (the badge is the one red count, D91). */
+.pl-pin{flex-shrink:0;padding:1px 9px;border:1px solid var(--nz-accent);border-radius:var(--nz-radius-pill);background:none;color:var(--nz-accent);font-family:inherit;font-size:var(--nz-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer}
+.pl-pin:hover{background:var(--nz-bg-2)}
+.pl-pin[hidden]{display:none}
 .pl-composer{flex-shrink:0;border-top:1px solid var(--nz-border)}
 .pl-composer[hidden]{display:none}
 /* The input box, the cards in the conversation, and a session card opened
@@ -321,6 +370,37 @@ body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
 .pl-act-why{font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
 .pl-act-link{margin-top:4px;font-size:var(--nz-fs-xs)}
 .pl-act-raw{max-height:200px;overflow:auto;margin:6px 0 0;padding:6px 8px;border-radius:var(--nz-radius-sm);background:var(--nz-bg-0);font-family:var(--nz-font-mono);font-size:var(--nz-fs-xs);white-space:pre-wrap;word-break:break-all}
+/* A dispatch is one line (派出 · 标题 · 工作区 · 目标, the goal cut to the
+   width), its rows in the fold (§15.12 ⑤). */
+.pl-act-dispatch>summary{display:block;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;list-style:none}
+.pl-act-dispatch>summary::-webkit-details-marker{display:none}
+.pl-act-dispatch>summary::before{content:"";display:inline-block;width:0;height:0;margin:0 7px 1px 1px;border-left:5px solid currentColor;border-top:4px solid transparent;border-bottom:4px solid transparent;transition:transform var(--nz-dur) var(--nz-ease)}
+.pl-act-dispatch[open]>summary::before{transform:rotate(90deg)}
+.pl-act-dispatch[open]>summary{margin-bottom:6px;white-space:normal}
+.pl-act-dispatch>summary:hover .pl-act-k{color:var(--nz-accent)}
+.pl-act-goal{color:var(--nz-text)}
+/* A task's done / failed is a line, its reason in the tooltip. */
+.pl-act-line{padding:4px 12px;font-size:var(--nz-fs-sm);color:var(--nz-text-mute)}
+.pl-act-line .pl-act-name{font-weight:600;color:var(--nz-text-strong)}
+.pl-act-mark{display:inline-block;width:1em;text-align:center;font-weight:700}
+.pl-st-done .pl-act-mark{color:var(--nz-green)}
+/* A reply that was only a status 进行中 (planner_cards.js): no empty bubble,
+   nor a time divider only such follow; the reply after them shows the robot
+   when the bubble shown before them was not a reply (.pl-ev-lead, tidyEmpty). */
+.pl-events .event.pl-ev-empty,.pl-events .event-time-divider.pl-div-empty{display:none}
+.pl-events .event.text.pl-ev-empty + .event.text.pl-ev-lead .event-icon{visibility:visible}
+/* A session's report (📨 名字 汇报：…) is the gateway's line that opens its
+   任务 card. */
+.pl-report{max-width:100%;padding:2px 6px;border:0;border-radius:var(--nz-radius-sm);background:none;color:inherit;font:inherit;text-align:center;cursor:pointer;overflow-wrap:anywhere}
+.pl-report:hover{background:var(--nz-bg-2);color:var(--nz-text)}
+.pl-report .pl-report-name{color:var(--nz-text-strong);font-weight:600}
+/* A session's SendMessage folds to its sender and first sentence. */
+.pl-peer>summary{list-style:none;cursor:pointer;display:flex;align-items:baseline;gap:6px;min-width:0}
+.pl-peer>summary::-webkit-details-marker{display:none}
+.pl-peer-from{flex-shrink:0;font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.pl-peer-first{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pl-peer[open] .pl-peer-first{display:none}
+.pl-peer-body{margin-top:4px}
 /* The conversation's bubbles: yours stands right without the ">_" avatar,
    and a Planner reply that follows another goes on under the same robot. A
    table's short headers stay one line and its cells keep a few characters'
@@ -805,24 +885,31 @@ body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
 /* 撤回 takes back the session's latest answer by the recommended option only
    (Engine.Undo): an earlier one's button would undo the latest. */
 .custody-suggested-msg:has(~ .custody-suggested-msg) :is(.custody-undo,.custody-sep){display:none}
-.custody-chip{display:inline-flex;align-items:center;gap:4px;max-width:260px;padding:1px 6px;border-radius:var(--nz-radius-xs);font-family:inherit;font-size:var(--nz-fs-2xs);font-weight:600;letter-spacing:.2px;white-space:nowrap;line-height:1.3;color:var(--nz-text-mute);background:var(--nz-bg-2);border:1px solid var(--nz-border)}
-button.custody-chip{cursor:pointer}
-button.custody-chip:hover:not(:disabled){border-color:var(--nz-accent)}
-button.custody-chip:focus-visible{outline:2px solid var(--nz-focus);outline-offset:1px}
-button.custody-chip:disabled{opacity:.6;cursor:default}
+.custody-chip,.watch-chip{display:inline-flex;align-items:center;gap:4px;max-width:260px;padding:1px 6px;border-radius:var(--nz-radius-xs);font-family:inherit;font-size:var(--nz-fs-2xs);font-weight:600;letter-spacing:.2px;white-space:nowrap;line-height:1.3;color:var(--nz-text-mute);background:var(--nz-bg-2);border:1px solid var(--nz-border)}
+:is(button.custody-chip,.watch-chip){cursor:pointer}
+:is(button.custody-chip,.watch-chip):hover:not(:disabled){border-color:var(--nz-accent)}
+:is(button.custody-chip,.watch-chip):focus-visible{outline:2px solid var(--nz-focus);outline-offset:1px}
+:is(button.custody-chip,.watch-chip):disabled{opacity:.6;cursor:default}
 .custody-chip-l{font-weight:400;opacity:.8}
 .custody-on{color:var(--nz-chip-info-fg);background:var(--nz-chip-info-bg);border-color:rgba(0,122,255,.35)}
 .custody-deferred{color:var(--nz-chip-info-fg);border-style:dashed;border-color:rgba(0,122,255,.35)}
 .custody-stopped{color:var(--nz-warn);background:color-mix(in srgb, var(--nz-warn) 12%, transparent);border-color:color-mix(in srgb, var(--nz-warn) 35%, transparent)}
 .custody-paused{color:var(--nz-amber);border-style:dashed}
+/* 观察 (custody.js watchChipHtml), custody's chip in shape but its own class:
+   on is the default, so plain; off dashed. */
+.watch-off{border-style:dashed;opacity:.85}
 /* Next to the cli/model group: it holds the row's auto margin until a chip
    after it (git, PR, effort) takes it over, as those hand it on. */
-.main-header .detail-custody{display:inline-flex;align-items:center;flex-shrink:1;min-width:0;margin-right:auto}
+.main-header .detail-custody{display:inline-flex;align-items:center;gap:4px;flex-shrink:1;min-width:0;margin-right:auto}
 .main-header .detail-custody:empty{display:none}
 .main-header .detail:has(.detail-git:not(:empty)) .detail-custody,
 .main-header .detail:has(.detail-pr:not(:empty)) .detail-custody,
 .main-header .detail:has(.detail-effort:not(:empty)) .detail-custody{margin-right:0}
-.main-header .detail-custody .custody-chip{min-width:0}
+.main-header .detail-custody :is(.custody-chip,.watch-chip){min-width:0}
+/* A dispatched session's task badge (tasks.js paintTaskHeader), the task
+   card's own, and the link to the card. */
+.main-header .detail-task{display:inline-flex;align-items:center;gap:8px;flex-shrink:0;white-space:nowrap;font-size:var(--nz-fs-xs)}
+.main-header .detail-task:empty{display:none}
 .pl-tool-hint{font-size:var(--nz-fs-2xs);color:var(--nz-text-faint)}
 .gw-note-time{font-size:var(--nz-fs-xs);color:var(--nz-text-faint)}
 .refusal-tag{display:inline-block;font-size:var(--nz-fs-2xs);padding:1px 8px;border-radius:var(--nz-radius-pill);border:1px solid var(--nz-warn);color:var(--nz-warn)}

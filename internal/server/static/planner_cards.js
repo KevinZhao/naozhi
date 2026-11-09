@@ -6,7 +6,16 @@
 //     not run or was held back. A block that is not JSON of a known type
 //     shows as 看不懂; whether a block runs is the gateway's call, not this
 //     reading's. Cards name tasks and workspaces, never their IDs: a name
-//     not known yet leaves the row out.
+//     not known yet leaves the row out (a status line says the task's kind).
+//     A dispatch folds to one line (派出 · 标题 · 工作区 · 目标: its goal, else
+//     its message's first sentence; §15.12 ⑤, D103), the rest in its fold; a
+//     status 进行中 is the task card's only (no line in the conversation, an
+//     emptied bubble hidden), done / failed one line "✓ X 已完成 / ✗ X 失败",
+//     the reason in its tooltip.
+//   - the gateway's report line ("📨 <key> 汇报：<状态> · <summary>", §15.12
+//     ③ ⑤) reads by the session's name and opens its 任务 card; a message a
+//     session sent by SendMessage (peer_message) folds to its sender and first
+//     sentence. The 会话 view renders both as before (event_render.js).
 //   - sessions the conversation names — a handed-over session
 //     (<naozhi-session-ref>, rewritten to a fence by planner_view.js), a
 //     `task:` key or a listed session's key in the Planner's text, the sender
@@ -143,13 +152,20 @@ export function paintSessionCards(root) {
     const name = taskName(el.dataset.task);
     if (!name) return;
     el.dataset.named = '1';
-    el.querySelector('.pl-act-rows')?.insertAdjacentHTML('afterbegin', '<dt>任务</dt><dd>' + esc(name) + '</dd>');
+    const b = el.querySelector('.pl-act-name');
+    if (b) b.textContent = name;
   });
   root.querySelectorAll('.pl-act-dispatch[data-ws]').forEach((el) => {
     const name = workspaceName(el.dataset.ws);
     if (!name) return;
     delete el.dataset.ws;
+    const head = el.querySelector('.pl-act-ws');
+    if (head) { head.textContent = ' · ' + wsLabel(name); head.title = name; }
     el.querySelector('.pl-act-rows')?.insertAdjacentHTML('afterbegin', '<dt>工作区</dt><dd>' + esc(name) + '</dd>');
+  });
+  root.querySelectorAll('.pl-report-name[data-key]').forEach((el) => {
+    const name = sessionTitle(el.dataset.key);
+    if (el.textContent !== name) el.textContent = name;
   });
 }
 
@@ -198,9 +214,35 @@ function mentionedKeys(ev) {
 
 const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask', 'status', 'notify', 'custody', 'relay']);
 const STATUS_LABEL = { done: '已完成', doing: '进行中', failed: '失败' };
+const STATUS_MARK = { done: '✓', failed: '✗' };
 
 const isStr = (v) => typeof v === 'string';
 const str = (v) => (isStr(v) ? v : '');
+
+// LINE_MAX caps a dispatch's one line in characters, as the gateway caps
+// its goal (planner/action goalRunes, D103): one past it is cut to the
+// "…", so the card says what the task card and the digest say.
+const LINE_MAX = 60;
+const oneLine = (s) => s.replace(/\s+/g, ' ').trim();
+function capped(s) {
+  const chars = Array.from(s);
+  return chars.length > LINE_MAX ? chars.slice(0, LINE_MAX - 1).join('') + '…' : s;
+}
+
+// wsLabel is a workspace in a dispatch's one line: a path by its last part,
+// the rows below saying it whole.
+const wsLabel = (name) => name.replace(/\/+$/, '').split('/').pop() || name;
+
+// firstSentence is a dispatch's message's first sentence (to its 。！？!? or
+// ". ", within its first paragraph), the goal of a block that gives none.
+function firstSentence(s) {
+  const para = oneLine(String(s || '').trim().split(/\n\s*\n/)[0] || '');
+  const m = /^.+?(?:[。！？!?]|\.(?= |$))/.exec(para);
+  return capped(m ? m[0] : para);
+}
+
+// unnamedTask names a status block's task no list names yet by its kind.
+const unnamedTask = (task) => (task.startsWith('task:') ? sessionTitle(task) : '任务');
 
 // webLinkHtml opens an http(s) page the Planner names (a mail, a Slack
 // message) in a new tab; anything else is no link.
@@ -252,10 +294,15 @@ function actionCardHtml(raw) {
     const ws = str(a.workspace);
     // A workspace written by its ID is named once the registry is in.
     const name = WORKSPACE_ID_RE.test(ws) ? workspaceName(ws) : ws;
-    return '<div class="pl-act pl-act-dispatch"' + (name || !ws ? '' : ' data-ws="' + escAttr(ws) + '"') + '><div class="pl-act-h">派出会话' + (title ? ' · <b>' + esc(title) + '</b>' : '') + '</div>' +
-      rowsHtml([['工作区', name], ['模型', str(a.model)], ['附上', a.with_user_words === true ? '你这一轮的原话' : ''],
+    const goal = capped(oneLine(str(a.goal)));
+    const line = goal || firstSentence(str(a.message));
+    return '<details class="pl-act pl-act-dispatch"' + (name || !ws ? '' : ' data-ws="' + escAttr(ws) + '"') + '>' +
+      '<summary class="pl-act-h"><span class="pl-act-k">派出</span>' + (title ? ' · <b>' + esc(title) + '</b>' : '') +
+        (name ? '<span class="pl-act-ws" title="' + escAttr(name) + '"> · ' + esc(wsLabel(name)) + '</span>' : '<span class="pl-act-ws"></span>') +
+        (line ? '<span class="pl-act-goal" title="' + escAttr(line) + '"> · ' + esc(line) + '</span>' : '') + '</summary>' +
+      rowsHtml([['工作区', name], ['目标', goal], ['模型', str(a.model)], ['附上', a.with_user_words === true ? '你这一轮的原话' : ''],
         ['放行写工具', mcpToolsText(a.mcp_tools)], ['模式', a.ultracode === true ? 'ultracode（每一轮可多代理编排）' : ''],
-        ['第一条消息', str(a.message)]]) + '</div>';
+        ['第一条消息', str(a.message)]]) + '</details>';
   }
   if (a.type === 'relay') {
     // What the session got is the user's words then this text; the card
@@ -271,19 +318,25 @@ function actionCardHtml(raw) {
       rowsHtml([['内容', str(a.text)], ['到期', dueText(str(a.due))], ['完成条件', str(a.close_when)]]) + '</div>';
   }
   if (a.type === 'status') {
-    // A task with no name yet gets its row from paintSessionCards.
+    // 进行中 only moves the task card (§15.12 ⑤): nothing in the
+    // conversation. A task with no name yet is named by its kind until
+    // paintSessionCards has one.
+    if (a.state === 'doing') return '';
     const task = str(a.task);
     const name = task ? taskName(task) : '';
-    return '<div class="pl-act pl-act-status" data-task="' + escAttr(task) + '"' + (name || !task ? ' data-named="1"' : '') + '>' +
-      '<div class="pl-act-h">Planner 判断 · <b>' + esc(STATUS_LABEL[a.state] || str(a.state)) + '</b></div>' +
-      rowsHtml([['任务', name], ['依据', str(a.why)]]) + '</div>';
+    const why = str(a.why);
+    const mark = STATUS_MARK[a.state] || '·';
+    return '<div class="pl-act pl-act-status pl-act-line pl-st-' + escAttr(STATUS_MARK[a.state] ? a.state : 'other') + '" data-task="' + escAttr(task) + '"' + (name || !task ? ' data-named="1"' : '') +
+      (why ? ' title="' + escAttr('依据：' + why) + '"' : '') + '>' +
+      '<span class="pl-act-mark" aria-hidden="true">' + mark + '</span> <b class="pl-act-name">' + esc(name || unnamedTask(task)) + '</b> ' +
+      esc(STATUS_LABEL[a.state] || str(a.state)) + '</div>';
   }
   if (a.type === 'custody') {
     // The session by its card (its name, never the key); a go-ahead also
     // says what it was told.
     const key = str(a.key);
     const text = str(a.text);
-    const head = text ? '托管 · 让它继续' : (a.on === false ? '关掉托管' : '打开托管');
+    const head = text ? '托管 · 让它继续' : a.watch === false ? '不再观察' : (a.on === false ? '关掉托管' : '打开托管');
     return '<div class="pl-act pl-act-custody"><div class="pl-act-h">' + head + '</div>' +
       (text ? '<div class="pl-act-q">' + esc(text) + '</div>' : '') +
       (key ? '<div class="pl-scards">' + sessionCardHtml(key) + '</div>' : '') + '</div>';
@@ -326,6 +379,35 @@ export function decorateEvents(root) {
     if (ev.matches('.event:not([data-pl-dec])')) decorateEvent(ev, turn);
     if (!ev.matches('.user')) ev.querySelectorAll('.pl-scard[data-key]').forEach((b) => turn.add(b.dataset.key));
   });
+  tidyEmpty(root);
+}
+
+// tidyEmpty mends what the hidden empty bubbles (.pl-ev-empty) would leave:
+// a reply after them shows the robot (.pl-ev-lead) unless the bubble shown
+// before them was a reply too, and a time divider that only they follow
+// goes (.pl-div-empty). The bubbles around change as pages come in on
+// either end, so each pass reads the whole stream.
+export function tidyEmpty(root) {
+  if (!root) return;
+  let div = null;
+  let shown = false;
+  const endDiv = () => { if (div) div.classList.toggle('pl-div-empty', !shown); };
+  for (const c of root.children) {
+    if (c.matches('.event-time-divider')) {
+      endDiv();
+      div = c;
+      shown = false;
+      continue;
+    }
+    const empty = c.matches('.pl-ev-empty');
+    if (!empty) shown = true;
+    if (!c.matches('.event.text') || empty) continue;
+    let prev = c.previousElementSibling;
+    if (!prev || !prev.matches('.pl-ev-empty')) { c.classList.remove('pl-ev-lead'); continue; }
+    while (prev && prev.matches('.pl-ev-empty')) prev = prev.previousElementSibling;
+    c.classList.toggle('pl-ev-lead', !(prev && prev.matches('.event.text')));
+  }
+  endDiv();
 }
 
 function decorateEvent(ev, turn) {
@@ -339,14 +421,21 @@ function decorateEvent(ev, turn) {
   });
   ev.querySelectorAll('code[data-lang="naozhi-action"]').forEach((code) => {
     const wrap = code.closest('.md-code-wrap');
-    if (wrap) wrap.outerHTML = actionCardHtml(code.textContent);
+    // A block with no line in the conversation (status 进行中) leaves a
+    // marker only, for the blank lines after it to go with it.
+    if (wrap) wrap.outerHTML = actionCardHtml(code.textContent) || '<span class="pl-act-gone"></span>';
   });
   ev.querySelectorAll('.pl-act, .pl-handoff').forEach(trimAround);
+  ev.querySelectorAll('.pl-act-gone').forEach((m) => {
+    while (blankNode(m.nextSibling)) m.nextSibling.remove();
+    m.remove();
+  });
+  const content = ev.querySelector('.event-content');
+  if (ev.matches('.system') && content && reportLine(ev, content)) return;
   if (!ev.matches('.text, .peer_message, .system')) return;
   const carded = new Set([...ev.querySelectorAll('.pl-scard[data-key]')].map((b) => b.dataset.key));
   const named = mentionedKeys(ev);
   const keys = named.filter((k) => !carded.has(k) && !turn.has(k)).slice(0, MAX_CARDS);
-  const content = ev.querySelector('.event-content');
   if (keys.length && content) {
     // Above the bubble's own buttons (复制): the cards belong to its text.
     const html = '<div class="pl-scards">' + keys.map(sessionCardHtml).join('') + '</div>';
@@ -354,20 +443,89 @@ function decorateEvent(ev, turn) {
     if (acts) acts.insertAdjacentHTML('beforebegin', html);
     else content.insertAdjacentHTML('beforeend', html);
   }
+  if (ev.matches('.peer_message') && content) foldPeer(content);
   if (ev.matches('.text')) {
     const folded = new Set([...carded, ...keys, ...named.filter((k) => turn.has(k))]);
     foldKeys(ev, folded);
     foldTextKeys(ev, folded);
+    // A reply that was only blocks with no line (status 进行中) leaves no
+    // empty bubble behind.
+    if (content && emptyContent(content)) ev.classList.add('pl-ev-empty');
   }
+}
+
+// blankNode is a blank text node or the markdown's blank line / break.
+const blankNode = (n) => !!n && (n.nodeType === Node.TEXT_NODE ? !n.data.trim() : n.matches('.md-blank, br'));
+
+// emptyContent reports whether a bubble's content holds nothing to read:
+// blank lines, its own buttons (复制, 追问) and elements with no text and no
+// picture.
+function emptyContent(content) {
+  return [...content.childNodes].every((n) => blankNode(n) ||
+    (n.nodeType === Node.ELEMENT_NODE && (n.matches('.event-copy-btn, .event-ask-btn') || (!n.textContent.trim() && !n.querySelector('img, svg, canvas, video')))));
+}
+
+// REPORT_NOTE_RE is the gateway's line for a session's naozhi-report
+// (planner/action: "📨 <key> 汇报：<状态> · <summary>", §15.12 ③): the key
+// becomes the session's name, and the line opens its 任务 card.
+const REPORT_NOTE_RE = /^📨 (\S+) 汇报：([\s\S]*)$/;
+
+// reportLine renders a report line in place of the system line's text, and
+// reports whether it was one. The line names its session already: no card.
+function reportLine(ev, content) {
+  const m = REPORT_NOTE_RE.exec(content.textContent.trim());
+  if (!m) return false;
+  const key = m[1];
+  const rest = m[2].replace(/\s·\s*$/, '');
+  ev.classList.add('pl-report-ev');
+  content.innerHTML = '<button type="button" class="pl-report" data-action="planner-open-task" data-key="' + escAttr(key) + '" title="打开任务卡">' +
+    '<span aria-hidden="true">📨</span> <b class="pl-report-name" data-key="' + escAttr(key) + '">' + esc(sessionTitle(key)) + '</b> 汇报：' +
+    '<span class="pl-report-t">' + esc(rest) + '</span></button>';
+  return true;
+}
+
+// foldPeer folds a cross-session message on the Planner page to its sender
+// and first sentence (§15.12 ⑤): the sender's line as text and the sentence
+// are the fold's summary, the whole message and the sender's card (its
+// link, carded first: mentionedKeys) the body. A summary holds no button,
+// it is one itself, so the line's link (.peer-source) goes. A message of
+// one sentence has nothing to fold.
+function foldPeer(content) {
+  const src = content.querySelector(':scope > .peer-source');
+  if (!src) return;
+  const body = [];
+  for (let n = src.nextSibling; n; n = n.nextSibling) {
+    if (n.nodeType === Node.ELEMENT_NODE && n.matches('.event-copy-btn, .event-ask-btn')) break;
+    body.push(n);
+  }
+  const text = oneLine(body.filter((n) => !(n.nodeType === Node.ELEMENT_NODE && n.matches('.pl-scards'))).map((n) => n.textContent).join(' '));
+  const first = firstSentence(text);
+  if (!text || first === text) return;
+  const d = document.createElement('details');
+  d.className = 'pl-peer';
+  const sum = document.createElement('summary');
+  sum.className = 'pl-peer-h';
+  const from = document.createElement('span');
+  from.className = 'pl-peer-from';
+  from.textContent = oneLine(src.textContent);
+  const lead = document.createElement('span');
+  lead.className = 'pl-peer-first';
+  lead.textContent = first;
+  sum.append(from, lead);
+  const wrap = document.createElement('div');
+  wrap.className = 'pl-peer-body';
+  wrap.append(...body);
+  src.remove();
+  d.append(sum, wrap);
+  content.prepend(d);
 }
 
 // trimAround drops the blank lines and line breaks the markdown left around a
 // card that took a fence's place: the card's own margin spaces it, and
 // cards in a row join into one block (views.css).
 function trimAround(card) {
-  const blank = (n) => n && (n.nodeType === Node.TEXT_NODE ? !n.data.trim() : n.matches('.md-blank, br'));
-  while (blank(card.previousSibling)) card.previousSibling.remove();
-  while (blank(card.nextSibling)) card.nextSibling.remove();
+  while (blankNode(card.previousSibling)) card.previousSibling.remove();
+  while (blankNode(card.nextSibling)) card.nextSibling.remove();
 }
 
 // foldTextKeys puts a session's name where a reply wrote its key out as
@@ -390,29 +548,119 @@ function foldTextKeys(ev, keys) {
 // emptyBracketRE is a bracket the folded keys emptied: "（`a` 和 `b`）".
 const emptyBracketRE = /\s*[（(]\s*(?:[和与及、，,；;]\s*)*[）)]/g;
 
-// foldKeys drops from a reply the backticked keys it names sessions by
-// after their names (§6.4): the cards under it carry them, and the user
-// reads names, not keys. A key with no text before it stands for the name;
-// a bracket of keys alone goes with them.
+// listSepRE is the text between two items of a list: "`a`、`b`", "`a` 和 `b`".
+const listSepRE = /^\s*[、，,；;和与及]\s*$/;
+
+// lineBefore is the text of node's line up to node: its inline siblings back
+// to a line break, through the <strong>/<em> it sits in, so a bold name
+// still reads as the name before a key.
+function lineBefore(node) {
+  let s = '';
+  const line = () => s.slice(s.lastIndexOf('\n') + 1);
+  for (let n = node; n && !n.matches('li, td, th, blockquote, .event-content'); n = n.parentElement) {
+    for (let p = n.previousSibling; p; p = p.previousSibling) {
+      if (p.nodeType === Node.ELEMENT_NODE && p.matches('br, div, ul, ol, pre, table, blockquote')) return line();
+      s = p.textContent + s;
+    }
+  }
+  return line();
+}
+
+// knownNames are the names a reply may have written a session by: the
+// Planner reads a session's whole summary or the 任务 title, while the
+// dashboard shows a shortened title, so any of them counts. Empty for a
+// session known to none, which only its kind names.
+function knownNames(key) {
+  const s = sessionList.sessionsData[sid(key, plannerHost.node)];
+  const names = [s?.user_label, s?.summary, listedTitle(key), pc.tasks.get(key), pc.health.get(key)?.name];
+  const out = [];
+  names.forEach((n) => {
+    const t = String(n || '').trim();
+    if (!t) return;
+    out.push(t);
+    // An automatic title cut short ends in "…": the text before it is the name.
+    if (t.endsWith('…') && t.length > 1) out.push(t.slice(0, -1).trimEnd());
+  });
+  return out;
+}
+
+// namedBefore tells whether the line before a key already gave the
+// session's name: "名字 `key`", "名字：`key`", or the key in a bracket
+// after it, "名字（…，`key`）". For a session known to none any text before
+// the key is taken as its name, as before: its kind name ("派出的任务") would
+// only repeat what the text said. In a list it is still named, or the
+// separator before the next key would be left bare.
+function namedBefore(before, key, inList) {
+  const names = knownNames(key);
+  const head = before.replace(/\s*[：:]?\s*$/, '');
+  if (!names.length) return !inList && /[^\s、，,；;（(：:]$/.test(head);
+  if (names.some((n) => head.endsWith(n))) return true;
+  const open = Math.max(before.lastIndexOf('（'), before.lastIndexOf('('));
+  const out = open >= 0 && !/[）)]/.test(before.slice(open)) && before.slice(0, open).trimEnd();
+  return out !== false && names.some((n) => out.endsWith(n));
+}
+
+// startsWithName is whether a bracket's text opens with name as a word of
+// its own: "（iso 周报，20 分钟）", not "（iso 周报整理）".
+function startsWithName(text, name) {
+  return text.startsWith(name) && /^(?:$|[\s，,、；;：:])/.test(text.slice(name.length));
+}
+
+// foldKeys puts names in place of the backticked keys a reply names
+// sessions by (§6.4, §15.12 ①): the cards under it carry the keys, and the
+// user reads names. A key that only repeats the name the text gave right
+// before it goes, and so does a bracket holding only keys; dropping any
+// other would cut the sentence's object ("派出了。") or leave "：、、".
 function foldKeys(ev, keys) {
   const emptied = new Set();
-  ev.querySelectorAll('.event-content code').forEach((code) => {
-    const key = code.textContent.trim();
-    if (code.closest('pre, .pl-scards') || !keys.has(key)) return;
+  const codes = [...ev.querySelectorAll('.event-content code')]
+    .filter((code) => !code.closest('pre, .pl-scards') && keys.has(code.textContent.trim()));
+  // Decided before any key is folded: folding changes the siblings.
+  const runs = [];
+  codes.forEach((code) => {
+    const sep = code.previousSibling;
+    const run = runs[runs.length - 1];
+    if (run && sep?.nodeType === Node.TEXT_NODE && listSepRE.test(sep.data) && sep.previousSibling === run[run.length - 1]) run.push(code);
+    else runs.push([code]);
+  });
+  const text = (n) => (n?.nodeType === Node.TEXT_NODE ? n.data : '');
+  const drop = new Set();
+  runs.forEach((run) => {
+    const bracketed = /[（(]\s*$/.test(text(run[0].previousSibling)) && /^\s*[）)]/.test(text(run[run.length - 1].nextSibling));
+    run.forEach((code) => {
+      if (bracketed || namedBefore(lineBefore(code), code.textContent.trim(), run.length > 1)) drop.add(code);
+    });
+  });
+  codes.forEach((code) => {
+    const name = sessionTitle(code.textContent.trim());
     const prev = code.previousSibling;
     const next = code.nextSibling;
-    if (prev?.nodeType !== Node.TEXT_NODE || !prev.data.trim()) {
-      code.replaceWith(sessionTitle(key));
-      return;
+    if (!drop.has(code)) {
+      // "`key`（名字…）" names it right after: the name once, not twice.
+      const m = next?.nodeType === Node.TEXT_NODE && /^\s*[（(]\s*([^（）()]*?)\s*[）)]/.exec(next.data);
+      if (m && m[1] === name) next.data = next.data.slice(m[0].length);
+      if (!m || !startsWithName(m[1], name) || m[1] === name) {
+        code.replaceWith(name);
+        return;
+      }
     }
-    if (prev?.nodeType === Node.TEXT_NODE && next?.nodeType === Node.TEXT_NODE && /[（(]$/.test(prev.data) && /^[）)]/.test(next.data)) {
-      prev.data = prev.data.slice(0, -1);
-      next.data = next.data.slice(1);
+    if (prev?.nodeType === Node.TEXT_NODE) {
+      if (next?.nodeType === Node.TEXT_NODE && /[（(]$/.test(prev.data) && /^[）)]/.test(next.data)) {
+        prev.data = prev.data.slice(0, -1);
+        next.data = next.data.slice(1);
+      }
+      prev.data = prev.data.trimEnd();
+      if (/[：:]$/.test(prev.data)) {
+        // "名字：`key`" said the name: the colon goes when nothing is left
+        // after it, and what is left closes up to it.
+        const after = next?.nodeType === Node.TEXT_NODE ? next.data : next && !next.matches('br') ? next.textContent : '';
+        if (/^\s*(?:[，,。.、；;！!？?）)]|$)/.test(after)) prev.data = prev.data.slice(0, -1);
+        else if (next?.nodeType === Node.TEXT_NODE) next.data = next.data.trimStart();
+      }
+      // The separator before a key that closes a bracket or the line has
+      // nothing left to separate: "（名字 work，`key`）" reads "（名字 work）".
+      if (!next || next.nodeType === Node.TEXT_NODE && /^\s*[）)]/.test(next.data)) prev.data = prev.data.replace(/[，,、；;]$/, '');
     }
-    if (prev?.nodeType === Node.TEXT_NODE) prev.data = prev.data.trimEnd();
-    // The separator before a key that closes a bracket or the line has
-    // nothing left to separate: "（名字 work，`key`）" reads "（名字 work）".
-    if (!next || next.nodeType === Node.TEXT_NODE && /^\s*[）)]/.test(next.data)) prev.data = prev.data.replace(/[，,、；;]$/, '');
     emptied.add(code.parentNode);
     code.remove();
   });

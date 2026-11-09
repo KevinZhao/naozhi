@@ -65,7 +65,7 @@ func newSubFlagSet(name, defaultPath string) (*flag.FlagSet, *string) {
 }
 
 // newFlagSet is the flag-handling half of newSubFlagSet, for the subcommands
-// that take no -config (upgrade, shim run, shim stop). One place decides
+// that take no -config (upgrade, shim run). One place decides
 // ExitOnError so a new subcommand cannot pick a different error mode and turn a
 // flag typo into a silent no-op instead of a usage message.
 func newFlagSet(name string) *flag.FlagSet {

@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cliinfo"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // spawnConfig is the spawn facet: the timeouts every CLI process gets, the
@@ -44,6 +46,19 @@ type spawnConfig struct {
 	// can hand back a process of their own at a moment of their choosing.
 	// nil in production.
 	hook func(ctx context.Context, opts cli.SpawnOptions) (processIface, error)
+}
+
+// totalTimeoutFor is key's per-turn total budget: the configured one, at
+// least cliinfo.DefaultTaskTotalTimeout for a task: session (D105). The
+// spawn, the shim reconnect and Cleanup's stuck detector all read it here,
+// so a task: session reattached after a restart keeps its budget. It is not
+// argv: a change of it never reads as shim drift. 0 for any other key
+// leaves the process its default.
+func (c *spawnConfig) totalTimeoutFor(key string) time.Duration {
+	if !sessionkey.IsTaskKey(key) {
+		return c.totalTimeout
+	}
+	return max(c.totalTimeout, cliinfo.DefaultTaskTotalTimeout)
 }
 
 // spawnerFunc is the signature panicSafeSpawnFn executes; tests inject a

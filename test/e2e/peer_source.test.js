@@ -2,7 +2,8 @@
 // planner RFC §6.2, D92). The Planner is known by its key, planner:main: its
 // --name is per instance (planner-<hash>), and a bare "planner" that resolved
 // to no session here is some other naozhi's, so it reads as a terminal
-// session.
+// session. The 会话 view shows a message whole: only the Planner page folds
+// one to its sender and first sentence (planner_simplify.test.js).
 const path = require('path');
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
@@ -15,7 +16,7 @@ const T = (min) => now - min * 60000;
 
 const EVENTS = [
   { type: 'user', detail: '写一个 hello.md', time: T(30), uuid: 'u1' },
-  { type: 'peer_message', peer: 'planner-ab12cd', peer_key: 'planner:main', detail: '进展怎么样？', time: T(20), uuid: 'p1' },
+  { type: 'peer_message', peer: 'planner-ab12cd', peer_key: 'planner:main', detail: '进展怎么样？测试跑完了吗？', time: T(20), uuid: 'p1' },
   { type: 'peer_message', peer: 'planner', detail: '另一个实例的消息', time: T(10), uuid: 'p2' },
   { type: 'text', detail: '已写好', time: T(9), uuid: 't1' },
 ];
@@ -37,6 +38,9 @@ for (const [name, viewport] of [['desktop', { width: 1440, height: 900 }], ['mob
       await expect(sources).toHaveCount(2);
       await expect(sources.nth(0)).toHaveText('来自 Planner');
       await expect(sources.nth(1)).toHaveText('来自终端会话 planner');
+      await expect(page.locator('#events-scroll .pl-peer')).toHaveCount(0);
+      await expect(page.locator('#events-scroll .event.peer_message').first()).toContainText('测试跑完了吗？');
+      await expect(page.locator('#events-scroll .event.peer_message').first().getByText('测试跑完了吗？')).toBeVisible();
       if (process.env.NZ_SHOT_DIR) {
         if (name === 'mobile') await expect(page.locator('body')).toHaveClass(/mobile-chat-view/);
         await page.waitForTimeout(400); // the list's slide-out

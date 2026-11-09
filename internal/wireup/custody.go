@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/apierr"
+	"github.com/naozhi/naozhi/internal/bgtask"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/gitinfo"
 	"github.com/naozhi/naozhi/internal/planner/activity"
@@ -32,7 +33,7 @@ func (c CustodySources) Local(key string) bool { return c.Router.SessionFor(key)
 func (c CustodySources) Workflows() []string {
 	var out []string
 	for _, snap := range c.Router.ListSessions() {
-		if runningWorkflow(snap.Workflows) != "" {
+		if len(runningWorkflows(snap.Workflows, time.Time{})) > 0 {
 			out = append(out, snap.Key)
 		}
 	}
@@ -47,6 +48,40 @@ func (c CustodySources) LastUser(key string) time.Time {
 		return time.Time{}
 	}
 	return lastUserAt(s.EventLastN(userScan))
+}
+
+// UserSince is task.Config.UserSince: whether the user sent key a message
+// after t. The session's own record says it however long the turn since
+// ran; the event log answers for a message from before a restart.
+func (c CustodySources) UserSince(key string, t time.Time) bool {
+	s := c.Router.SessionFor(key)
+	if s == nil {
+		return false
+	}
+	if s.LastUserSent().After(t) {
+		return true
+	}
+	return !lastUserAt(s.EventEntriesSince(t.UnixMilli())).IsZero()
+}
+
+// UserSent is action.Config.UserSent: UserSince, or a decision or answer of
+// the user's the gateway relayed to key after t (a relay entry): the turn
+// that ends after either was the user's. One pass over the log: it runs on
+// the read loop's result sink.
+func (c CustodySources) UserSent(key string, t time.Time) bool {
+	s := c.Router.SessionFor(key)
+	if s == nil {
+		return false
+	}
+	if s.LastUserSent().After(t) {
+		return true
+	}
+	for _, e := range s.EventEntriesSince(t.UnixMilli()) {
+		if e.Type == clievent.KindUser && (e.Source == "" || e.Source == clievent.SourceRelay) {
+			return true
+		}
+	}
+	return false
 }
 
 // lastUserAt is when the latest entry the user sent was written.
@@ -99,22 +134,31 @@ func (c CustodySources) FailText(key string) string {
 }
 
 // Settled is custody.Config.Settled: no turn running, no AskUserQuestion
-// unanswered, no workflow or background task running.
+// unanswered, no background task open (bgtask, the judgment the Planner's
+// receipts and the put-away read too: 后台中 is not settled).
 func (c CustodySources) Settled(key string) bool {
 	s := c.Router.SessionFor(key)
 	if s == nil {
 		return false
 	}
 	snap := s.Snapshot()
-	if snap.State == "running" || runningWorkflow(snap.Workflows) != "" || askPending(s.EventLastN(askScan)) {
-		return false
+	return snap.State != "running" && !askPending(s.EventLastN(askScan)) && !background(s, snap).Open()
+}
+
+// Background is action.Config.Background: key's open background tasks (a
+// workflow, a task_start with no task_done yet, a Monitor).
+func (c CustodySources) Background(key string) bgtask.State {
+	s := c.Router.SessionFor(key)
+	if s == nil {
+		return bgtask.State{}
 	}
-	if at := s.ProcessAttachedAt(); !at.IsZero() && snap.State != "dead" {
-		if t, _ := openTask(s.EventLastN(taskScan), at, true); t != nil {
-			return false
-		}
-	}
-	return true
+	return background(s, s.Snapshot())
+}
+
+// Asking is custody.Config.Asking: an AskUserQuestion of key unanswered.
+func (c CustodySources) Asking(key string) bool {
+	s := c.Router.SessionFor(key)
+	return s != nil && askPending(s.EventLastN(askScan))
 }
 
 // Events is custody.Config.Events: the session's latest n events.

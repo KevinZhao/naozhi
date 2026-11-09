@@ -19,3 +19,11 @@ func TestWatchdogDefaults_OutlastKnownSilences(t *testing.T) {
 		t.Errorf("DefaultTotalTimeout = %v, want >= 4 x DefaultNoOutputTimeout (%v)", DefaultTotalTimeout, DefaultNoOutputTimeout)
 	}
 }
+
+// TestTaskTotalTimeout_AboveTheDefault pins that the task: floor raises the
+// budget: a floor at or under the default would change nothing (D105).
+func TestTaskTotalTimeout_AboveTheDefault(t *testing.T) {
+	if DefaultTaskTotalTimeout <= DefaultTotalTimeout {
+		t.Errorf("DefaultTaskTotalTimeout = %v, want > DefaultTotalTimeout (%v)", DefaultTaskTotalTimeout, DefaultTotalTimeout)
+	}
+}

@@ -340,12 +340,6 @@ func (r *Router) Cleanup() {
 		}
 	})
 	ttl := r.ttl
-	totalTimeout := r.spawn.totalTimeout
-
-	if totalTimeout <= 0 {
-		totalTimeout = cli.DefaultTotalTimeout
-	}
-	stuckThreshold := 2 * totalTimeout
 
 	// ── Pass 2: classify outside any transaction (may perform PID syscalls) ─
 	var expired []expiredEntry
@@ -359,8 +353,7 @@ func (r *Router) Cleanup() {
 		running := c.state == cli.StateRunning
 
 		// Effective activity = max(session.lastActive, process.LastEventAt):
-		// lastActive is only refreshed when a turn starts and ends, so a long turn would
-		// age past any threshold while the CLI is still streaming events.
+		// lastActive follows the events only a minute's step at a time.
 		effective := c.lastActive
 		if le := c.proc.LastEventAt(); le.After(effective) {
 			effective = le
@@ -372,8 +365,14 @@ func (r *Router) Cleanup() {
 			effective = p.StartedAt()
 		}
 
-		// Stuck running: watchdog failed, reclaim slot.
+		// Stuck running: watchdog failed, reclaim slot. Twice the key's own
+		// budget, so a task: session's long turn is not read as stuck.
 		if running {
+			totalTimeout := r.spawn.totalTimeoutFor(c.key)
+			if totalTimeout <= 0 {
+				totalTimeout = cli.DefaultTotalTimeout
+			}
+			stuckThreshold := 2 * totalTimeout
 			if age := now.Sub(effective); age > stuckThreshold {
 				slog.Warn("stuck running session detected, force killing",
 					"key", c.key, "running_for", age, "threshold", stuckThreshold)

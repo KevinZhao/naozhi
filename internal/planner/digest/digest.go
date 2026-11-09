@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/naozhi/naozhi/internal/bgtask"
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/planner/activity"
 	"github.com/naozhi/naozhi/internal/textutil"
@@ -80,6 +81,9 @@ type Facts struct {
 	// last put anything out.
 	HealthSince time.Time
 	LastOutput  time.Time
+	// Background is its open background tasks (bgtask): with no turn
+	// running, 后台中 (D109).
+	Background bgtask.State
 	// Goal is what the session is for, at most GoalRunes.
 	Goal   string
 	Report *Report
@@ -143,6 +147,18 @@ func renderBody(f Facts) []byte {
 		last = stamp(f.LastOutput)
 	}
 	b.WriteString("- 最后输出：" + last + "\n")
+	if bg := f.Background; bg.Open() {
+		names := make([]string, 0, health.BackgroundShown)
+		for _, t := range bg.Tasks[:min(len(bg.Tasks), health.BackgroundShown)] {
+			// The session's own text, quoted as data as its replies are.
+			names = append(names, textutil.QuoteData(textutil.TruncateRunes(oneLine(t.Summary), 80)))
+		}
+		line := fmt.Sprintf("- 后台：%d 个任务还在跑：%s", bg.Count(), strings.Join(names, "、"))
+		if !bg.LastProgress.IsZero() {
+			line += "，最近进度 " + stamp(bg.LastProgress)
+		}
+		b.WriteString(line + "\n")
+	}
 
 	b.WriteString("\n## 目标\n\n")
 	quote(&b, f.Goal)

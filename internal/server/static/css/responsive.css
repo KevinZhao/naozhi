@@ -41,8 +41,6 @@
   /* A group of one session shows no header: the card names the group. */
   .section-header.sh-single{display:none}
   .session-card .sc-group{display:inline;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--nz-fs-xs);color:var(--nz-text-faint)}
-  /* Unfolded, the tasks in progress come before what waits on you. */
-  .pl-left-body > .pl-group:has(.tk-sec-doing){order:-1}
   .ab-nav{width:auto;flex:1;max-width:120px;height:46px}
   /* "自动化" is 3 chars — keep the label on one line in a 4-tab bar. */
   .ab-nav-label{white-space:nowrap}
@@ -90,6 +88,23 @@
   .pl-head{height:44px;gap:6px;padding:0 12px}
   /* The header says 已暂停到 …; 恢复 is in "⋯". */
   .pl-paused>[aria-hidden],.pl-paused>button{display:none}
+  /* The phone keeps "N 件新结果"; its 全部已读 is in the filtered list. */
+  .pl-news-sep,.pl-news-all{display:none}
+  /* A crowded header (the machine switch, 要你决定 N, N 件新结果, 已暂停 at
+     once) keeps, in this order: 要你决定 and N 件新结果 whole (the two
+     things to act on; "决定 N" beside either other), the switch (cut, its
+     machine's first letters at least), 已暂停 (its until time left to the
+     title once anything else is there, then cut). The switch names the
+     Planner shown, so it stands in for the title. */
+  .pl-head:has(.pl-host:not([hidden])) .pl-title,
+  .pl-head:has(.pl-host:not([hidden])) .pl-pin-k,
+  .pl-head:has(.pl-news:not([hidden])) .pl-pin-k{display:none}
+  .pl-head:has(.pl-host:not([hidden])) .pl-paused-to,
+  .pl-head:has(.pl-pin:not([hidden])) .pl-paused-to,
+  .pl-head:has(.pl-news:not([hidden])) .pl-paused-to{display:none}
+  .pl-news{flex-shrink:0}
+  .pl-host{min-width:56px}
+  .pl-paused{flex-shrink:4;min-width:3em}
   .pl-note{margin:10px 12px 0}
   .pl-brief{max-width:100%;padding:0 12px}
   .pl-composer{padding:6px 12px 10px}
@@ -204,7 +219,7 @@
   /* cli + model + git chip already fill a phone-width row; the run-history
      overview stays reachable in the collapsed 运行记录 panel below. */
   .main-header .detail-runstats{display:none}
-  .main-header .detail-custody .custody-chip{padding:2px 8px}
+  .main-header .detail-custody :is(.custody-chip,.watch-chip){padding:2px 8px}
   .session-card .btn-dismiss{top:6px;right:8px;min-width:32px;min-height:32px;font-size:var(--nz-fs-lg);display:flex;align-items:center;justify-content:center;opacity:.75}
   .btn-icon{width:40px;height:40px}
   .input-row #msg-input{font-size:var(--nz-fs-md)} /* prevents iOS zoom on focus */

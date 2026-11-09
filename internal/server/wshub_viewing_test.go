@@ -11,6 +11,7 @@ import (
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/custody"
+	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -95,21 +96,23 @@ func TestWS_Viewing(t *testing.T) {
 }
 
 // TestHub_ViewingWiring: the Hub takes the viewing frames to the server's
-// custody and inbox, and without either holds no sink, not one wrapping a
-// nil *custody.Engine (whose SetViewing would panic).
+// custody, inbox and tasks, and without any holds no sink, not one wrapping
+// a nil *custody.Engine (whose SetViewing would panic).
 func TestHub_ViewingWiring(t *testing.T) {
 	for _, c := range []struct {
 		name    string
 		custody *custody.Engine
 		notify  *notify.Notifier
+		tasks   *task.Board
 		want    int
 	}{
+		{name: "custody, inbox and tasks", custody: custody.New(custody.Config{}), notify: notify.New(notify.Config{}), tasks: task.New(task.Config{}), want: 3},
 		{name: "custody and inbox", custody: custody.New(custody.Config{}), notify: notify.New(notify.Config{}), want: 2},
 		{name: "custody", custody: custody.New(custody.Config{}), want: 1},
 		{name: "neither"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			srv := NewWithOptions(ServerOptions{Addr: ":0", Router: session.NewRouter(session.RouterConfig{}), Custody: c.custody, Notify: c.notify})
+			srv := NewWithOptions(ServerOptions{Addr: ":0", Router: session.NewRouter(session.RouterConfig{}), Custody: c.custody, Notify: c.notify, Tasks: c.tasks})
 			t.Cleanup(srv.appCancel)
 			if c.want == 0 {
 				if srv.hub.viewing != nil {
@@ -120,6 +123,9 @@ func TestHub_ViewingWiring(t *testing.T) {
 			sinks, _ := srv.hub.viewing.(viewingSinks)
 			if len(sinks) != c.want || sinks[0] != ViewingSink(c.custody) {
 				t.Fatalf("hub's viewing sinks = %v, want the server's custody first, %d in all", sinks, c.want)
+			}
+			if c.tasks != nil && sinks[len(sinks)-1] != ViewingSink(c.tasks) {
+				t.Fatalf("hub's last viewing sink = %v, want the server's tasks", sinks[len(sinks)-1])
 			}
 		})
 	}

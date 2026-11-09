@@ -33,7 +33,7 @@ import { hydrateAskAnsweredFromHistory, lockRenderedAskCards } from './ask_card.
 import { runPendingAsync } from './render_md.js';
 import { ICONS } from './icons.js';
 import { refreshHealth, sessionStatusHtml, sessionTitle } from './planner_cards.js';
-import { isRunningTask } from './tasks.js';
+import { isRunningTask, seenTask } from './tasks.js';
 import { followPlannerSubject, noteWorkbenchEvent } from './workbench_panes.js';
 import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
@@ -401,10 +401,13 @@ export function showPlannerLeft(open) {
 }
 
 // openPlannerSession opens key in the middle column, folding the phone's left
-// block a 任务 title was tapped in.
+// block a 任务 title was tapped in, and marks its new result read.
 export function openPlannerSession(key) {
   if (!key || key === PLANNER_KEY) return;
   showPlannerLeft(false);
+  // Opening it looks at its new result (§15.12 ④), also a remote node's,
+  // which no viewing frame reaches.
+  seenTask(key);
   if (st.sess && st.sess.key === key) return;
   closePlannerSession(true);
   st.sess = { key, node: plannerHost.node, events: [], uuids: new Set(), lastTime: 0, raw: false, loading: false, gen: 0, timer: 0 };

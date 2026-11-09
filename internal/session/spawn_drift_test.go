@@ -16,6 +16,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/cliinfo"
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
@@ -109,78 +110,90 @@ func TestReconnectShims_ReconnectCarriesTheRoutersSpawnTimeouts(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shim discovery needs unix PID liveness and unix sockets")
 	}
-	// t.TempDir() on darwin overflows the 104-byte sun_path limit.
-	dir, err := os.MkdirTemp("/tmp", "nz-reconn-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	mgr, err := shim.NewManager(shim.ManagerConfig{StateDir: dir})
-	if err != nil {
-		t.Fatal(err)
-	}
-	w := cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
-	w.ShimManager = mgr
 	const noOutput, total = time.Millisecond, 97 * time.Minute
-	r := NewRouter(RouterConfig{Wrapper: w, NoOutputTimeout: noOutput, TotalTimeout: total})
-	t.Cleanup(r.Shutdown)
+	// A task: session reattached after a restart keeps its own floor, not
+	// the router's configured budget.
+	for _, tc := range []struct {
+		key  string
+		want time.Duration
+	}{
+		{"feishu:direct:alice:general", total},
+		{"task:reconnect-budget", cliinfo.DefaultTaskTotalTimeout},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			key := tc.key
+			// t.TempDir() on darwin overflows the 104-byte sun_path limit.
+			dir, err := os.MkdirTemp("/tmp", "nz-reconn-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.RemoveAll(dir) })
+			mgr, err := shim.NewManager(shim.ManagerConfig{StateDir: dir})
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
+			w.ShimManager = mgr
+			r := NewRouter(RouterConfig{Wrapper: w, NoOutputTimeout: noOutput, TotalTimeout: total})
+			t.Cleanup(r.Shutdown)
 
-	key := "feishu:direct:alice:general"
-	sess := injectSession(r, key, nil)
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-	socket := shim.SocketPath(shim.KeyHash(key))
-	ln, err := net.Listen("unix", socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	accepted := make(chan net.Conn, 1)
-	t.Cleanup(func() {
-		ln.Close()
-		select {
-		case conn := <-accepted:
-			conn.Close()
-		default:
-		}
-	})
-	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		accepted <- conn
-		rd := bufio.NewReader(conn)
-		if _, err := rd.ReadBytes('\n'); err != nil { // attach
-			return
-		}
-		fmt.Fprintf(conn, "{\"type\":\"hello\",\"protocol_version\":%d}\n{\"type\":\"replay_done\"}\n", shim.ProtocolVersion)
-		io.Copy(io.Discard, rd) //nolint:errcheck // swallow the turn; never answer
-	}()
-	// ShimPID is this test process: it passes the liveness and binary-identity
-	// gates. The socket must exist before ReconnectShimsCtx runs, or Discover
-	// treats the shim as a zombie and SIGTERMs that PID, i.e. the test binary.
-	state := shim.State{
-		ShimPID: os.Getpid(), Socket: socket, Key: key, Backend: "claude",
-		CLIArgs:      driftArgsFor(r).driftCompareArgs(w, "claude", key, sess, &shim.SpawnOverlay{}),
-		SpawnOverlay: &shim.SpawnOverlay{},
-	}
-	if err := shim.WriteStateFile(shim.StateFilePath(dir, shim.KeyHash(key)), state); err != nil {
-		t.Fatal(err)
-	}
+			sess := injectSession(r, key, nil)
+			t.Setenv("XDG_RUNTIME_DIR", dir)
+			socket := shim.SocketPath(shim.KeyHash(key))
+			ln, err := net.Listen("unix", socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			accepted := make(chan net.Conn, 1)
+			t.Cleanup(func() {
+				ln.Close()
+				select {
+				case conn := <-accepted:
+					conn.Close()
+				default:
+				}
+			})
+			go func() {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				accepted <- conn
+				rd := bufio.NewReader(conn)
+				if _, err := rd.ReadBytes('\n'); err != nil { // attach
+					return
+				}
+				fmt.Fprintf(conn, "{\"type\":\"hello\",\"protocol_version\":%d}\n{\"type\":\"replay_done\"}\n", shim.ProtocolVersion)
+				io.Copy(io.Discard, rd) //nolint:errcheck // swallow the turn; never answer
+			}()
+			// ShimPID is this test process: it passes the liveness and binary-identity
+			// gates. The socket must exist before ReconnectShimsCtx runs, or Discover
+			// treats the shim as a zombie and SIGTERMs that PID, i.e. the test binary.
+			state := shim.State{
+				ShimPID: os.Getpid(), Socket: socket, Key: key, Backend: "claude",
+				CLIArgs:      driftArgsFor(r).driftCompareArgs(w, "claude", key, sess, &shim.SpawnOverlay{}),
+				SpawnOverlay: &shim.SpawnOverlay{},
+			}
+			if err := shim.WriteStateFile(shim.StateFilePath(dir, shim.KeyHash(key)), state); err != nil {
+				t.Fatal(err)
+			}
 
-	if n, of := r.ReconnectShimsCtx(context.Background()); n != 1 || of != 1 {
-		t.Errorf("reconnected %d of %d, want 1 of 1", n, of)
-	}
+			if n, of := r.ReconnectShimsCtx(context.Background()); n != 1 || of != 1 {
+				t.Errorf("reconnected %d of %d, want 1 of 1", n, of)
+			}
 
-	proc, ok := sess.loadProcess().(*cli.Process)
-	if !ok || proc == nil {
-		t.Fatalf("session process after reconnect = %T, want the reattached *cli.Process", sess.loadProcess())
-	}
-	if got := proc.TotalTimeout(); got != total {
-		t.Errorf("reattached process TotalTimeout = %v, want the router's %v", got, total)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if _, err := proc.Send(ctx, "hi", nil, nil); !errors.Is(err, clierr.ErrNoOutputTimeout) {
-		t.Errorf("first turn on the silent shim: err = %v, want ErrNoOutputTimeout from the router's %v", err, noOutput)
+			proc, ok := sess.loadProcess().(*cli.Process)
+			if !ok || proc == nil {
+				t.Fatalf("session process after reconnect = %T, want the reattached *cli.Process", sess.loadProcess())
+			}
+			if got := proc.TotalTimeout(); got != tc.want {
+				t.Errorf("reattached process TotalTimeout = %v, want %v", got, tc.want)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if _, err := proc.Send(ctx, "hi", nil, nil); !errors.Is(err, clierr.ErrNoOutputTimeout) {
+				t.Errorf("first turn on the silent shim: err = %v, want ErrNoOutputTimeout from the router's %v", err, noOutput)
+			}
+		})
 	}
 }
