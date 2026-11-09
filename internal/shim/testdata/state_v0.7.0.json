@@ -1,0 +1,43 @@
+{
+    "version": 1,
+    "schema_version": 1,
+    "shim_pid": 70001,
+    "cli_pid": 70002,
+    "socket": "/run/user/1000/naozhi/fixture0700.sock",
+    "auth_token": "FIXTURE-NOT-A-REAL-TOKEN-v0.7.0",
+    "key": "task:fixture-0700",
+    "session_id": "3b45c8d7-0e4b-4f0e-a276-6d8e9f0a1b20",
+    "workspace": "/home/fixture/workspace/myproject",
+    "backend": "claude",
+    "cli_args": [
+        "-p",
+        "--output-format", "stream-json",
+        "--model", "fixture-model",
+        "--tools", "Read,Grep",
+        "--name", "iso-fixture-task",
+        "--strict-mcp-config",
+        "--mcp-config", "/home/fixture/.naozhi/session-settings/scout-mcp.json",
+        "--resume", "3b45c8d7-0e4b-4f0e-a276-6d8e9f0a1b20"
+    ],
+    "cli_alive": true,
+    "started_at": "2026-11-09T09:00:00Z",
+    "last_connected_at": "2026-11-09T10:30:00Z",
+    "buffer_count": 2,
+    "spawn_overlay": {
+        "model": "fixture-model",
+        "effort": "high",
+        "extra_args": ["--debug"],
+        "access_profile": "fixture-profile",
+        "append_system_prompt": "FIXTURE system prompt.",
+        "tools": ["Read", "Grep"],
+        "permission_mode": "dontAsk",
+        "name": "iso-fixture-task",
+        "strict_mcp_config": true,
+        "mcp_config": "/home/fixture/.naozhi/session-settings/scout-mcp.json",
+        "cross_session_inbound": "FIXTURE-inbound",
+        "permissions_deny": ["Bash(rm:*)"],
+        "permissions_allow": ["Read(./**)"],
+        "ultracode": true,
+        "prompt_cache_ttl": "1h"
+    }
+}
