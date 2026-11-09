@@ -456,6 +456,55 @@ func (s *Store) Ensure(key string) error {
 	return nil
 }
 
+// baselineFile marks a store directory whose sidecars got their seen_at
+// baseline (BaselineSeen). Not *.json: Open does not read it as a sidecar.
+const baselineFile = "seen-baseline"
+
+// BaselineSeen gives, once per store directory, every sidecar with no
+// seen_at the time now: they were written before naozhi kept one (v0.7.0
+// and earlier, or by v0.7.0 itself, which shipped without this baseline),
+// so a result they already had is no new one for the user, while one after
+// the upgrade still is. A marker file keeps it to the first start: a
+// sidecar written since with no seen_at was never seen, and a later start
+// must not mark it so. A newer naozhi's file is left alone. Returns how
+// many it set; a failed write leaves the marker unwritten, so the next
+// start tries again.
+func (s *Store) BaselineSeen() (int, error) {
+	if s.dir == "" {
+		return 0, nil
+	}
+	marker := filepath.Join(s.dir, baselineFile)
+	if _, err := os.Stat(marker); err == nil {
+		return 0, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return 0, err
+	}
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	var errs []error
+	for key, m := range s.m {
+		if s.newer[key] || !m.SeenAt.IsZero() {
+			continue
+		}
+		m.SeenAt = now
+		if err := s.writeLocked(m); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		s.m[key] = m
+		n++
+	}
+	if len(errs) > 0 {
+		return n, errors.Join(errs...)
+	}
+	if err := datadir.EnsureDir(s.dir); err != nil {
+		return n, err
+	}
+	return n, osutil.WriteFileAtomic(marker, []byte(now.UTC().Format(time.RFC3339)+"\n"), 0o600)
+}
+
 // Purpose is key's purpose and the title it was dispatched with (both ""
 // without a sidecar).
 func (s *Store) Purpose(key string) (purpose, title string) {

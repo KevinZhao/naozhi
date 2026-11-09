@@ -622,3 +622,29 @@ for (const vp of [{ name: 'desktop', width: 1280, height: 800 }, { name: 'phone'
     }
   });
 }
+
+// A named session idle with background tasks running reads 后台中 on its
+// card, as its sidebar row does (D109), its tasks in the tooltip; once they
+// end it reads 空闲.
+test('desktop: a session card reads 后台中 while its background tasks run', async ({ browser }) => {
+  test.setTimeout(30000);
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const page = await ctx.newPage();
+  const bgHealth = { at: iso(now), unowned: 0, units: [{ id: SESSION, kind: 'session', source: 'dashboard', coverage: 'covered', state: 'idle', since: iso(now - 600000), last_active: iso(now - 300000), background: '跑全量测试', background_since: iso(now - 300000), background_n: 2, background_tasks: ['跑全量测试', '等 CI'] }] };
+  const mock = await startMockServer({
+    ws: true, plannerEvents: plannerEvents(), inbox: inbox(), systemHealth: bgHealth,
+    planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
+  });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await page.click('#abnav-planner');
+    const card = page.locator('#pl-stream .event.text').first().locator('.pl-scards .pl-scard[data-key="' + SESSION + '"]');
+    await expect(card.locator('.hl-state')).toHaveText('后台中');
+    await expect(card.locator('.hl-state')).toHaveClass(/\bbg\b/);
+    await expect(card.locator('.hl-state')).toHaveAttribute('title', '2 个任务 · 跑全量测试、等 CI');
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});

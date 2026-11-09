@@ -261,3 +261,76 @@ func sidecarPath(dir, key string) string {
 	sum := sha256.Sum256([]byte(key))
 	return filepath.Join(dir, hex.EncodeToString(sum[:])+".json")
 }
+
+// Upgrading to a naozhi that keeps seen_at: the sidecars written before it
+// (no seen_at) get the first start's time as their baseline, so a result
+// they had is no new one, one after it is, and looking still marks read.
+// A later start does not baseline a sidecar written since.
+func TestSeenBaselineOnUpgrade(t *testing.T) {
+	h := time.Hour
+	dir := t.TempDir()
+	now := t0
+	clock := func() time.Time { return now }
+	// Written by v0.7.0 or earlier: done before the upgrade, no seen_at.
+	old := []string{"task:aaaaaaaaaaaa", "task:bbbbbbbbbbbb"}
+	pre := sidecar.Open(dir, clock)
+	for _, k := range old {
+		if err := pre.Put(sidecar.Meta{Key: k, Purpose: sidecar.PurposeTask, Title: k, Created: t0.Add(-3 * h),
+			Report: &sidecar.Report{State: "done", Summary: "升级前做完的。", At: t0.Add(-2 * h)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Still running at the upgrade.
+	if err := pre.Put(sidecar.Meta{Key: "task:cccccccccccc", Purpose: sidecar.PurposeTask, Title: "c", Created: t0.Add(-h)}); err != nil {
+		t.Fatal(err)
+	}
+	if got := newIDs(New(Config{Sessions: pre, Now: clock})); len(got) != 3-1 {
+		t.Fatalf("before the baseline new = %v, want the two done ones", got)
+	}
+
+	// The first start of the new build.
+	sc := sidecar.Open(dir, clock)
+	if n, err := sc.BaselineSeen(); n != 3 || err != nil {
+		t.Fatalf("BaselineSeen = %d, %v; want 3, nil", n, err)
+	}
+	b := New(Config{Sessions: sc, Now: clock})
+	if got := newIDs(b); len(got) != 0 {
+		t.Fatalf("after the baseline new = %v, want none", got)
+	}
+
+	// After the upgrade: c finishes, and a new task d finishes too.
+	now = t0.Add(h)
+	if _, err := sc.Update("task:cccccccccccc", func(m *sidecar.Meta) bool {
+		m.Report = &sidecar.Report{State: "done", Summary: "升级后做完的。", At: now}
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sc.Put(sidecar.Meta{Key: "task:dddddddddddd", Purpose: sidecar.PurposeTask, Title: "d", Created: now,
+		Report: &sidecar.Report{State: "blocked", Summary: "卡住了。", At: now.Add(time.Minute)}}); err != nil {
+		t.Fatal(err)
+	}
+	now = t0.Add(2 * h)
+	if got := newIDs(b); !slices.Equal(got, []string{"task:cccccccccccc", "task:dddddddddddd"}) {
+		t.Fatalf("after the upgrade new = %v", got)
+	}
+
+	// A restart does not baseline d, which has no seen_at yet.
+	sc2 := sidecar.Open(dir, clock)
+	if n, err := sc2.BaselineSeen(); n != 0 || err != nil {
+		t.Fatalf("second BaselineSeen = %d, %v; want 0, nil", n, err)
+	}
+	b2 := New(Config{Sessions: sc2, Now: clock})
+	if got := newIDs(b2); !slices.Equal(got, []string{"task:cccccccccccc", "task:dddddddddddd"}) {
+		t.Fatalf("after a restart new = %v", got)
+	}
+
+	// Looking still marks read.
+	if n, err := b2.Seen([]string{"task:cccccccccccc"}, false); n != 1 || err != nil {
+		t.Fatalf("Seen = %d, %v", n, err)
+	}
+	b2.SetViewing("task:dddddddddddd", "ws1", true)
+	if got := newIDs(b2); len(got) != 0 {
+		t.Fatalf("after looking new = %v", got)
+	}
+}
