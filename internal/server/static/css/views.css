@@ -126,6 +126,8 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .hl-state.run{color:var(--nz-accent)}
 .hl-state.idle{color:var(--nz-text-mute)}
 .hl-state.off{color:var(--nz-text-dim)}
+.hl-state.bg{color:var(--nz-accent)}
+.hl-state.bg::before{background:transparent;box-shadow:inset 0 0 0 2px currentColor}
 /* "任务" (tasks.js, D85): the dispatched sessions and the promises, in
    进行中 · 待提醒 · 已完成 (folded). Every card is the column's width and
    one shape: the title (two lines at most), a status line (badge · what it

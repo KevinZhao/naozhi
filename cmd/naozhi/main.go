@@ -300,6 +300,11 @@ func main() {
 	// Sidecar files of the sessions the Planner dispatches (lineage and
 	// purpose, §3.7); swept below once the router has its sessions.
 	sidecars := sidecar.Open(sessionLayout.PlannerSessionsRoot(), nil)
+	if n, err := sidecars.BaselineSeen(); err != nil {
+		slog.Warn("session sidecars' seen_at baseline partly written", "set", n, "err", err)
+	} else if n > 0 {
+		slog.Info("session sidecars given a seen_at baseline", "set", n)
+	}
 	// The global Planner (planner:main); Start below, once the turn entry and
 	// the health machine exist. Built even when planner.enabled is off, so
 	// /api/planner answers "off" rather than 404.

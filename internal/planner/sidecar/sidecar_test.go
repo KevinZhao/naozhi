@@ -209,3 +209,58 @@ func TestReportBlockField(t *testing.T) {
 		t.Errorf("unset ReportBlock written: %s", data)
 	}
 }
+
+// BaselineSeen sets seen_at once per directory on the sidecars with none,
+// leaves a set one and a newer naozhi's file alone, and does nothing in
+// memory or on a second call.
+func TestBaselineSeen(t *testing.T) {
+	t0 := time.Date(2026, 11, 9, 3, 0, 0, 0, time.UTC)
+	seen := t0.Add(-time.Hour)
+	dir := t.TempDir()
+	s := Open(dir, func() time.Time { return t0 })
+	for _, m := range []Meta{
+		{Key: "task:aaaaaaaaaaaa", Purpose: PurposeTask},
+		{Key: "task:bbbbbbbbbbbb", Purpose: PurposeTask, SeenAt: seen},
+	} {
+		if err := s.Put(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	newerKey := "task:cccccccccccc"
+	newer := []byte(`{"v":99,"key":"` + newerKey + `","purpose":"task","created":"2026-11-04T08:00:00Z"}`)
+	newerPath := filepath.Join(dir, fileName(newerKey))
+	if err := os.WriteFile(newerPath, newer, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	later := t0.Add(time.Hour)
+	s = Open(dir, func() time.Time { return later })
+	if n, err := s.BaselineSeen(); n != 1 || err != nil {
+		t.Fatalf("BaselineSeen = %d, %v; want 1, nil", n, err)
+	}
+	if m, _ := s.Get("task:aaaaaaaaaaaa"); !m.SeenAt.Equal(later) {
+		t.Errorf("unseen sidecar seen_at = %v, want %v", m.SeenAt, later)
+	}
+	if m, _ := s.Get("task:bbbbbbbbbbbb"); !m.SeenAt.Equal(seen) {
+		t.Errorf("seen sidecar seen_at = %v, want %v", m.SeenAt, seen)
+	}
+	if got, _ := os.ReadFile(newerPath); string(got) != string(newer) {
+		t.Errorf("newer sidecar rewritten: %s", got)
+	}
+	// On disk too, and the marker keeps a second start from it.
+	s = Open(dir, func() time.Time { return later.Add(time.Hour) })
+	if m, _ := s.Get("task:aaaaaaaaaaaa"); !m.SeenAt.Equal(later) {
+		t.Errorf("reloaded seen_at = %v, want %v", m.SeenAt, later)
+	}
+	if err := s.Put(Meta{Key: "task:dddddddddddd", Purpose: PurposeTask}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.BaselineSeen(); n != 0 || err != nil {
+		t.Fatalf("second BaselineSeen = %d, %v; want 0, nil", n, err)
+	}
+	if m, _ := s.Get("task:dddddddddddd"); !m.SeenAt.IsZero() {
+		t.Errorf("sidecar written after the baseline got seen_at %v", m.SeenAt)
+	}
+	if n, err := Open("", nil).BaselineSeen(); n != 0 || err != nil {
+		t.Errorf("in-memory BaselineSeen = %d, %v", n, err)
+	}
+}

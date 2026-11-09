@@ -27,7 +27,7 @@
 // listed state. Task titles come from the 任务 list (tasks.js 'tasks:list').
 import { NZ_CONTRACT } from './contract.js';
 import { sessionList } from './state.js';
-import { HEALTH_STATES, esc, escAttr, evidenceText, fetchJSON, nzBus, sessionHealthState, sessionTitleText } from './nz_util.js';
+import { HEALTH_STATES, backgroundTasksText, esc, escAttr, evidenceText, fetchJSON, nzBus, sessionHealthState, sessionTitleText } from './nz_util.js';
 import { sid } from './session_ident.js';
 import { formatAbsTime, formatMonthDayTime, timeAgo } from './utilities.js';
 import { plannerAPI, plannerHost } from './planner_host.js';
@@ -112,11 +112,27 @@ function taskName(id) {
   return (id.startsWith('task:') && listedTitle(id)) || pc.tasks.get(id) || '';
 }
 
-// healthOf is the unit's state, else one read off the listed session.
+// BG_STATE is an idle session's state while its background tasks run
+// (后台中, D109): the turn is over, its work is not.
+const BG_STATE = { label: '后台中', cls: 'bg' };
+
+// healthOf is the unit's state, else one read off the listed session; an
+// idle one with background tasks running reads 后台中, as its sidebar row
+// does (session_list.js rowStatusText).
 function healthOf(key, s) {
   const u = pc.health.get(key);
-  if (u && HEALTH_STATES[u.state]) return HEALTH_STATES[u.state];
-  return s ? HEALTH_STATES[sessionHealthState(s)] || HEALTH_STATES.idle : null;
+  let st = null;
+  if (u && HEALTH_STATES[u.state]) st = u.state;
+  else if (s) st = HEALTH_STATES[sessionHealthState(s)] ? sessionHealthState(s) : 'idle';
+  if (!st) return null;
+  if (st === 'idle' && !(s && s.state === 'running') && backgroundN(u, s) > 0) return BG_STATE;
+  return HEALTH_STATES[st];
+}
+
+// backgroundN is how many background tasks the session has open, by the
+// health table's unit or the listed session's health.
+function backgroundN(u, s) {
+  return Math.max((u && u.background_n) || 0, (s && s.health && s.health.background_n) || 0);
 }
 
 // sessionStatusHtml is a session's one status line: 名字 · 健康状态 · when it
@@ -128,8 +144,10 @@ export function sessionStatusHtml(key, withName = true) {
   const u = pc.health.get(key);
   const last = (u && u.last_active && Date.parse(u.last_active)) || (s && s.last_active) || 0;
   const tail = last && !(s && s.state === 'running') ? timeAgo(last) : '';
+  const tip = st === BG_STATE ? backgroundTasksText(backgroundN(u, s), (u && u.background_tasks) || (s && s.health && s.health.background_tasks))
+    : u && u.evidence ? evidenceText(u.evidence, u.error_class) : '';
   return (withName ? '<span class="pl-scard-name">' + esc(sessionTitle(key)) + '</span>' : '') +
-    (st ? '<span class="hl-state ' + st.cls + '"' + (u && u.evidence ? ' title="' + escAttr(evidenceText(u.evidence, u.error_class)) + '"' : '') + '>' + esc(st.label) + '</span>' : '') +
+    (st ? '<span class="hl-state ' + st.cls + '"' + (tip ? ' title="' + escAttr(tip) + '"' : '') + '>' + esc(st.label) + '</span>' : '') +
     (tail ? '<span class="pl-scard-time" title="' + escAttr('最后活动 ' + formatAbsTime(last)) + '">' + esc(tail) + '</span>' : '');
 }
 
