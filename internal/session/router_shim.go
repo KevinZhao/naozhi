@@ -507,7 +507,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) (reconnected, sess
 		// for a session that never held it.
 		sess.setEndMark(mark)
 		bookWorkflows(sess, proc, r.hist.projectsRoot, func() { r.ss.Update(markChanged); r.notifyChange() }, r.BumpVersion)
-		bookProcessEnd(sess, proc, r.hist.claudeDir)
+		bookProcessEnd(sess, proc, r.hist.claudeDir, r.endFor(sess, proc))
 
 		// Persist sink goes last so the history inject + shim replay above land
 		// with sinkReady=false and are dropped rather than written back to disk

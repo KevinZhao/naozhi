@@ -236,3 +236,39 @@ func TestBackgroundForegroundBash(t *testing.T) {
 		t.Fatalf("an ended Bash counted: %+v", bg)
 	}
 }
+
+// The idle expiry leaves the CLI of a session whose background Bash still
+// runs (bgtask's judgment through BackgroundOpen): 11-08 and 11-09 a trn2
+// job died at about 40 minutes with the 30-minute idle expiry. A session
+// whose Bash ended expires as before. The events are replayed so that
+// they stamp no live activity.
+func TestIdleExpiryKeepsBackgroundBash(t *testing.T) {
+	RegisterCLIBackends()
+	r := session.NewRouter(session.RouterConfig{TTL: time.Minute})
+	t.Cleanup(r.Shutdown)
+	r.SetBackgroundCheck(BackgroundOpen)
+	old := time.Now().Add(-2 * time.Hour)
+	idle := func(key string, entries ...clievent.EventEntry) *session.TestProcess {
+		p := session.NewTestProcess()
+		p.StartedAtVal = old
+		p.EventLog.AppendBatchReplay(append([]clievent.EventEntry{
+			{Type: clievent.KindToolUse, Tool: "Bash", Time: old.UnixMilli()},
+			taskStart("b1", "local_bash", "ssh trn2 ./bench.sh", old),
+			{Type: clievent.KindResult, Time: old.Add(time.Second).UnixMilli()},
+		}, entries...))
+		r.InjectSession(key, p).SetLastTurnAtForTest(old)
+		if !p.LastEventAt().IsZero() {
+			t.Fatal("the replay stamped live activity")
+		}
+		return p
+	}
+	running := idle("dashboard:direct:bg:general")
+	ended := idle("dashboard:direct:done:general", taskDone("b1", old.Add(time.Minute)))
+	r.Cleanup()
+	if !running.Alive() {
+		t.Error("the idle expiry closed a CLI whose background Bash still runs")
+	}
+	if ended.Alive() {
+		t.Error("an idle session whose background Bash ended was not expired")
+	}
+}

@@ -849,7 +849,7 @@ func (r *Router) installFreshSession(tx sessTx,
 	r.bookResults(s, proc)
 	r.bindPeerKeys(proc)
 	bookWorkflows(s, proc, r.hist.projectsRoot, func() { r.ss.Update(markChanged); r.notifyChange() }, r.BumpVersion)
-	bookProcessEnd(s, proc, r.hist.claudeDir)
+	bookProcessEnd(s, proc, r.hist.claudeDir, r.endFor(s, proc))
 	if len(snapshot) > 0 {
 		proc.InjectHistory(snapshot)
 	}

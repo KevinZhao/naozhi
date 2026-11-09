@@ -121,7 +121,7 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 			r.bookActivity(fresh, proc)
 			r.bookResults(fresh, proc)
 			bookWorkflows(fresh, proc, r.hist.projectsRoot, func() { r.ss.Update(markChanged); r.notifyChange() }, r.BumpVersion)
-			bookProcessEnd(fresh, proc, r.hist.claudeDir)
+			bookProcessEnd(fresh, proc, r.hist.claudeDir, r.endFor(fresh, proc))
 		}
 
 		// Rebind the history source (the old Source reads the orphaned struct);

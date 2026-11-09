@@ -229,6 +229,11 @@ type Router struct {
 	// results receives sessions' turn results (SetResultSink), read the
 	// same way.
 	results resultRoute
+	// background reports whether a session's background tasks still run
+	// (SetBackgroundCheck); ends receives the ends of sessions' processes
+	// (SetEndSink). Both read at use, nil for none.
+	background atomic.Pointer[BackgroundCheck]
+	ends       atomic.Pointer[EndSink]
 
 	// shutdownOnce guards Shutdown against re-entry: a double call would race
 	// the broadcast timer, re-cancel the history ctx and double-detach shim processes.

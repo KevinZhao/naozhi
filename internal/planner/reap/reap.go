@@ -133,6 +133,9 @@ type Config struct {
 	LastActive func(key string) (time.Time, bool)
 	// Nearby reports whether the user is at key (custody.Engine.Nearby).
 	Nearby func(key string) bool
+	// Waiting reports whether a question of key's waits on the user in
+	// "等你" (its need_user report's, action.ReportSource); nil is none.
+	Waiting func(key string) bool
 	// Archive closes key's process and takes it out of the session list,
 	// keeping its history (Router.Archive).
 	Archive func(key string) (Archived, bool)
@@ -196,7 +199,12 @@ func (r *Reaper) OnState(key string, state task.State) {
 	case task.Done:
 		r.Poke()
 	case task.Doing:
-		r.Reopen(context.Background(), key)
+		// Only one put away has anything to put back; the look first keeps
+		// a reopening off r.mu (held through a worktree's git checks) when
+		// it is set from a read loop (a done task reporting again).
+		if m, ok := r.cfg.Sessions.Get(key); ok && m.Reap != nil {
+			r.Reopen(context.Background(), key)
+		}
 	}
 }
 
@@ -281,9 +289,10 @@ func (r *Reaper) mayBeDue(m sidecar.Meta, key string) bool {
 	return ok && r.due(m, la)
 }
 
-// holds is why s is not to be put away yet ("" when nothing holds it), and
-// when it will be if the last check, idleness, is what holds it.
-func (r *Reaper) holds(key string, s Session) waiting {
+// holds is why s, done task m's session, is not to be put away yet (""
+// when nothing holds it), and when it will be if the last check, idleness,
+// is what holds it.
+func (r *Reaper) holds(key string, m sidecar.Meta, s Session) waiting {
 	switch {
 	case s.Running:
 		return waiting{why: "这一轮还没结束"}
@@ -291,6 +300,8 @@ func (r *Reaper) holds(key string, s Session) waiting {
 		return waiting{why: "这一轮出错结束"}
 	case s.Asking:
 		return waiting{why: "有提问没回答"}
+	case waitsOnUser(m) || r.cfg.Waiting != nil && r.cfg.Waiting(key):
+		return waiting{why: "在等你决定"}
 	case s.Background:
 		return waiting{why: "后台还有任务在跑"}
 	case r.cfg.Nearby != nil && r.cfg.Nearby(key):
@@ -300,6 +311,17 @@ func (r *Reaper) holds(key string, s Session) waiting {
 	}
 	return waiting{}
 }
+
+// waitsOnUser reports whether done task m's session reported, after the
+// done mark, that it waits on the user (a need_user report block).
+func waitsOnUser(m sidecar.Meta) bool {
+	return m.Report != nil && m.Report.State == reportNeedUser && m.Mark != nil && m.Report.At.After(m.Mark.At)
+}
+
+// reportNeedUser is a need_user report block's state (action.ReportNeedUser,
+// restated as planner/task restates its report states: this package stays
+// below action).
+const reportNeedUser = "need_user"
 
 func (r *Reaper) tryPutAway(ctx context.Context, key string) {
 	r.mu.Lock()
@@ -320,7 +342,7 @@ func (r *Reaper) tryPutAway(ctx context.Context, key string) {
 		r.setWait(key, waiting{})
 		return
 	}
-	if w := r.holds(key, s); w.why != "" {
+	if w := r.holds(key, m, s); w.why != "" {
 		if why, _ := r.Wait(key); why != w.why {
 			slog.Info("reap: done task not put away yet", "key", key, "why", w.why)
 		}

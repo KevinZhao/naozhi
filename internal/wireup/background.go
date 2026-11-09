@@ -2,6 +2,7 @@ package wireup
 
 import (
 	"cmp"
+	"slices"
 	"sync"
 	"time"
 
@@ -141,4 +142,13 @@ func later(a, b time.Time) time.Time {
 		return b
 	}
 	return a
+}
+
+// BackgroundOpen is session.BackgroundCheck: s has a Bash
+// run_in_background, a Monitor or an Agent subtask still running, so its
+// idle CLI is not to be closed. A workflow is left out: the router keeps a
+// running one's CLI itself, bounded (workflowPinned), and bgtask sets a
+// workflow no quiet limit.
+func BackgroundOpen(s *session.ManagedSession) bool {
+	return slices.ContainsFunc(background(s, s.Snapshot()).Tasks, func(t bgtask.Task) bool { return t.Kind != bgtask.KindWorkflow })
 }

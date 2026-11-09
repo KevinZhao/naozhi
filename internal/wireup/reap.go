@@ -7,12 +7,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/apierr"
 	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/monitor/health"
+	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/reap"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -156,4 +158,17 @@ func transcriptCwds(path string) []string {
 func within(path, dir string) bool {
 	rel, err := filepath.Rel(dir, path)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// InboxWaiting is reap.Config.Waiting: an item of inbox's still open from
+// source(key), the "等你" a session's need_user report opened.
+func InboxWaiting(inbox *notify.Notifier, source func(key string) string) func(key string) bool {
+	return func(key string) bool {
+		if inbox == nil {
+			return false
+		}
+		src := source(key)
+		open, _ := inbox.List(0)
+		return slices.ContainsFunc(open, func(it notify.Item) bool { return it.Source == src })
+	}
 }

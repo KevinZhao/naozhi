@@ -394,8 +394,10 @@ func (r *Router) Cleanup() {
 		if obs := time.UnixMilli(c.s.WorkflowBoard().LastObservedAt()); obs.After(effective) {
 			effective = obs
 		}
-		// Normal idle TTL expiry.
-		if now.Sub(effective) > ttl && !c.s.workflowPinned(now) {
+		// Normal idle TTL expiry. Background tasks still running (a Bash
+		// run_in_background, a Monitor) die with the CLI, so they keep it
+		// like a running workflow does.
+		if now.Sub(effective) > ttl && !c.s.workflowPinned(now) && !r.backgroundOpen(c.s) {
 			logSessionLifecycle("expired", c.key, "idle", now.Sub(effective))
 			// Carry the reason and stamp it only after the close-loop re-verify;
 			// stamping here would corrupt the deathReason of a replacement

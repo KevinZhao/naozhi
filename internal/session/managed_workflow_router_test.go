@@ -242,7 +242,7 @@ func TestWorkflowBoard_EndInsideTransaction(t *testing.T) {
 	within(t, "bind + bookProcessEnd inside r.ss.Update", func() {
 		r.ss.Update(func(sessTx) {
 			bookWorkflows(s, proc, "", func() { r.ss.Update(markChanged) }, r.BumpVersion)
-			bookProcessEnd(s, proc, "")
+			bookProcessEnd(s, proc, "", nil)
 		})
 	})
 	b := s.WorkflowBoard()
@@ -439,7 +439,7 @@ func TestWorkflowBoard_NilBoardSessions(t *testing.T) {
 		}
 	}
 	proc := newWFProc()
-	bookProcessEnd(injected, proc, "")
+	bookProcessEnd(injected, proc, "", nil)
 	proc.finish(cli.ProcessEnd{}) // the fan-out reaches a nil board
 }
 
@@ -474,7 +474,7 @@ func TestWorkflowPinned_KeepAlive(t *testing.T) {
 	other := injectSession(r, "feishu:direct:bob:general", newIdleProc())
 	other.lastActive.Store(time.Now().UnixNano())
 	r.ss.Update(func(tx sessTx) {
-		if !takeoverHasSlot(tx.View, "x", 2) {
+		if !takeoverHasSlot(tx.View, "x", 2, r.backgroundOpen) {
 			t.Error("takeoverHasSlot: an idle session must count as evictable")
 		}
 		r.evictOldest(tx)
@@ -653,7 +653,7 @@ func TestWorkflowBoard_RenameAfterEndStaysEnded(t *testing.T) {
 	proc := newWFProc()
 	old := injectSession(r, "scratch:direct:x:general", proc)
 	bookWorkflows(old, proc, "", nil, nil)
-	bookProcessEnd(old, proc, "")
+	bookProcessEnd(old, proc, "", nil)
 	proc.observe(time.Now(), wfStarted("w1", "probe"), wfSnapshot("w1", "start"))
 	proc.finish(cli.ProcessEnd{})
 	b := old.WorkflowBoard()
