@@ -65,7 +65,7 @@ func countExemptCombined(v sessView, kind string) (perKind int, total int) {
 // key, read-only. Takeover closes an alive session on key first, so it holds
 // no slot and cannot be the eviction victim. Admission passes on the active
 // count, else on a recount, else when evicting one idle session makes room.
-func takeoverHasSlot(v sessView, key string, maxProcs int) bool {
+func takeoverHasSlot(v sessView, key string, maxProcs int, bgOpen func(*ManagedSession) bool) bool {
 	active := v.Active()
 	var alive int64
 	evictable := false
@@ -78,7 +78,7 @@ func takeoverHasSlot(v sessView, key string, maxProcs int) bool {
 			continue
 		}
 		alive++
-		evictable = evictable || !s.loadProcess().IsRunning()
+		evictable = evictable || !s.loadProcess().IsRunning() && !bgOpen(s)
 	}
 	pending, limit := int64(v.Ext().PendingSpawns()), int64(maxProcs)
 	return min(active, alive)+pending < limit || (evictable && alive-1+pending < limit)
@@ -107,7 +107,8 @@ func takeoverExemptRefusal(v sessView, key string) error {
 
 // evictOldest closes the oldest idle (non-Running) session to free a slot,
 // preferring one whose CLI runs no workflow; any idle session still counts
-// as evictable (takeoverHasSlot). Close() runs with the lock released
+// as evictable (takeoverHasSlot) but one whose background tasks still run
+// (backgroundOpen): closing its CLI kills them. Close() runs with the lock released
 // (tx.Unlocked) so it does not block other goroutines. Returns true if a
 // session was evicted.
 func (r *Router) evictOldest(tx sessTx) bool {
@@ -117,7 +118,7 @@ func (r *Router) evictOldest(tx sessTx) bool {
 		if s.exempt {
 			continue // planner sessions are never evicted
 		}
-		if !s.isAlive() || s.loadProcess().IsRunning() {
+		if !s.isAlive() || s.loadProcess().IsRunning() || r.backgroundOpen(s) {
 			continue
 		}
 		pick := &oldest

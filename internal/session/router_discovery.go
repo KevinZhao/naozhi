@@ -463,7 +463,7 @@ func (r *Router) ReserveTakeover(key string, opts AgentOpts) (*TakeoverLease, er
 			err = ErrSpawnInFlight
 		case opts.Exempt:
 			err = takeoverExemptRefusal(tx.View, key)
-		case !takeoverHasSlot(tx.View, key, r.maxProcs):
+		case !takeoverHasSlot(tx.View, key, r.maxProcs, r.backgroundOpen):
 			err = fmt.Errorf("%w (%d), all busy", ErrMaxProcs, r.maxProcs)
 		}
 		if err != nil {

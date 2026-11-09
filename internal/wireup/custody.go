@@ -2,6 +2,7 @@ package wireup
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -82,6 +83,20 @@ func (c CustodySources) UserSent(key string, t time.Time) bool {
 		}
 	}
 	return false
+}
+
+// Prompted is action.Config.Prompted: anything sent key after t, by the
+// user, custody, a relay or the Planner's dispatch (every "user" entry is a
+// send of naozhi's: a Monitor's push or a task's end writes none).
+func (c CustodySources) Prompted(key string, t time.Time) bool {
+	s := c.Router.SessionFor(key)
+	if s == nil {
+		return false
+	}
+	if s.LastUserSent().After(t) {
+		return true
+	}
+	return slices.ContainsFunc(s.EventEntriesSince(t.UnixMilli()), func(e clievent.EventEntry) bool { return e.Type == clievent.KindUser })
 }
 
 // lastUserAt is when the latest entry the user sent was written.

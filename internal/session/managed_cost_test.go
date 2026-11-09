@@ -313,7 +313,7 @@ func TestProcessEnd_BooksShadowTokensOnce(t *testing.T) {
 		return nil, clierr.ErrProcessExited
 	}
 	s, ledger := newLedgerSession(t, "feishu:p2p:dead", dead.TestProcess)
-	bookProcessEnd(s, dead, "")
+	bookProcessEnd(s, dead, "", nil)
 	if _, err := s.Send(context.Background(), "hi", nil, nil); err == nil {
 		t.Fatal("expected error")
 	}
@@ -352,7 +352,7 @@ func TestProcessEnd_PricedAtLearnedRates(t *testing.T) {
 			CacheCreationInputTokens: turn.CacheWrite, CostUSD: turnUSD, CanonicalModel: "claude-opus-5-5", CostBasis: "list"},
 	}})
 	s, ledger := newLedgerSession(t, "feishu:p2p:killed", proc.TestProcess)
-	bookProcessEnd(s, proc, "")
+	bookProcessEnd(s, proc, "", nil)
 	if _, err := s.Send(context.Background(), "priced", nil, nil); err != nil {
 		t.Fatal(err)
 	}

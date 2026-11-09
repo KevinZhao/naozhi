@@ -468,3 +468,57 @@ func TestGoneSessionLeftAlone(t *testing.T) {
 		t.Fatal("a session not in the list handled")
 	}
 }
+
+// A done session waiting on the user is not put away: its latest report,
+// after the done mark, is need_user, or its question is still open in
+// "等你" (11-09: one put away two hours after it asked, still unanswered).
+// A need_user report from before the mark holds nothing.
+func TestHeldWhileWaitingOnUser(t *testing.T) {
+	report := func(f *fixture, state string, at time.Time) {
+		t.Helper()
+		if _, err := f.sc.Update(key, func(m *sidecar.Meta) bool {
+			m.Report = &sidecar.Report{State: state, Summary: "选 A 还是 B", At: at}
+			return true
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("need_user after the mark", func(t *testing.T) {
+		f := newFixture(t)
+		f.markDone(t)
+		report(f, "need_user", f.now.Add(time.Minute))
+		f.r.Tick(context.Background())
+		if why, _ := f.r.Wait(key); f.archived != 0 || why != "在等你决定" {
+			t.Fatalf("archived %d, Wait = %q", f.archived, why)
+		}
+		report(f, "progress", f.now.Add(2*time.Minute))
+		f.r.Tick(context.Background())
+		if f.archived != 1 {
+			t.Fatal("not put away once the report is no longer need_user")
+		}
+	})
+	t.Run("need_user before the mark", func(t *testing.T) {
+		f := newFixture(t)
+		report(f, "need_user", f.now.Add(-time.Minute))
+		f.markDone(t)
+		f.r.Tick(context.Background())
+		if f.archived != 1 {
+			t.Fatal("held by a question the done mark came after")
+		}
+	})
+	t.Run("question open", func(t *testing.T) {
+		f := newFixture(t)
+		f.markDone(t)
+		waiting := true
+		f.r.cfg.Waiting = func(k string) bool { return k == key && waiting }
+		f.r.Tick(context.Background())
+		if why, _ := f.r.Wait(key); f.archived != 0 || why != "在等你决定" {
+			t.Fatalf("archived %d, Wait = %q", f.archived, why)
+		}
+		waiting = false
+		f.r.Tick(context.Background())
+		if f.archived != 1 {
+			t.Fatal("not put away once the question closed")
+		}
+	})
+}

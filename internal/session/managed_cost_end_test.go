@@ -127,7 +127,7 @@ func (f *endFixture) inject(key string, proc *endingProcess) *ManagedSession {
 	s.SetBackend("claude")
 	s.setWorkspace(f.ws)
 	s.setSessionID(endSID)
-	bookProcessEnd(s, proc, f.claudeDir)
+	bookProcessEnd(s, proc, f.claudeDir, nil)
 	return s
 }
 

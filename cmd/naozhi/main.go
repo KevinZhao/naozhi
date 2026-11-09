@@ -229,6 +229,9 @@ func main() {
 	// Critical-loop heartbeats; /health degrades when one goes stale. Its
 	// startup grace starts here, before the first loop registers.
 	beats := beat.New(wake.SystemClock())
+	// Background tasks still running keep a session's idle CLI: the idle
+	// expiry and the max_procs eviction would kill them with it.
+	router.SetBackgroundCheck(wireup.BackgroundOpen)
 	router.StartCleanupLoop(ctx, cfg.ParseTTL()/2, beats)
 	router.StartShimReconcileLoop(ctx, 30*time.Second)
 
@@ -607,6 +610,7 @@ func main() {
 		Session:    reapSources.Session,
 		LastActive: reapSources.LastActive,
 		Nearby:     custodian.Nearby,
+		Waiting:    wireup.InboxWaiting(notifier, action.ReportSource),
 		Archive:    reapSources.Archive,
 		Restore:    reapSources.Restore,
 		Dirs:       reapSources.Dirs,
@@ -779,6 +783,7 @@ func main() {
 		PlannerBusy: plannerAgent.Busy,
 		Background:  sources.Background,
 		UserSent:    sources.UserSent,
+		Prompted:    sources.Prompted,
 		Custody:     custodian,
 		Words:       wireup.PlannerWords(plannerAgent),
 		Relay:       srv.SubmitRelay,
@@ -797,6 +802,9 @@ func main() {
 		srv.PlannerResult(key)
 	}
 	router.SetResultSink(resultSink)
+	// A CLI gone (reclaimed idle, evicted, exited) took its background
+	// tasks with it: the check held on them is woken now.
+	router.SetEndSink(actions.Gone)
 	// A Planner turn the restart cut across: its reply, if it came while
 	// naozhi was down, is acted on now, and the requests nothing answers no
 	// longer judge the next turn.
