@@ -18,6 +18,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/brief"
 	"github.com/naozhi/naozhi/internal/planner/custody"
+	"github.com/naozhi/naozhi/internal/planner/digest"
 	"github.com/naozhi/naozhi/internal/planner/note"
 	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/planner/task"
@@ -108,6 +109,9 @@ type ServerOptions struct {
 	// Notes are the session side notes /api/sessions/notes lists; the
 	// server binds the Hub to them for the new ones. nil lists none.
 	Notes *note.Notes
+	// Digests are the session digests /api/sessions/digest reads; nil has
+	// none.
+	Digests *digest.Writer
 	// Planner is the global Planner behind /api/planner; nil answers those
 	// routes as planner.enabled off.
 	Planner *agent.Agent

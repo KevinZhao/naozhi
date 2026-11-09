@@ -64,6 +64,7 @@ var apiRoutes = map[string]bool{
 	"DELETE /api/custody/pause": true,
 	"POST /api/custody/undo":    true,
 	"GET /api/sessions/notes":   true,
+	"GET /api/sessions/digest":  true,
 	"GET /api/system/health":    true,
 }
 

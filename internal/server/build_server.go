@@ -318,6 +318,10 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 	if opts.Notes != nil {
 		notes = opts.Notes
 	}
+	var digests dashsession.DigestSource
+	if opts.Digests != nil {
+		digests = opts.Digests
+	}
 	var workspaces dashsession.WorkspaceLookup
 	if opts.Workspaces != nil {
 		workspaces = opts.Workspaces
@@ -348,6 +352,7 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 		ValidateWS:       validateWorkspace,
 		Outputs:          outputs,
 		Notes:            notes,
+		Digests:          digests,
 		Health:           opts.Health,
 		Workspaces:       workspaces,
 		Purpose:          opts.Purpose,

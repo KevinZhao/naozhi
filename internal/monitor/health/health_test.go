@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -492,7 +493,8 @@ func TestIndex(t *testing.T) {
 	r := newRig(t, Config{IndexPath: path, Workspaces: reg})
 	r.run([]step{{facts: []Fact{
 		owned(dir, Fact{ID: "b", Running: true, Index: &IndexEntry{Key: "b", Name: "fix-ci", Title: "Fix CI", Result: strings.Repeat("x", 400)}}),
-		owned(dir, Fact{ID: "a", Index: &IndexEntry{Key: "a", EventLog: "/x/a.log"}}),
+		owned(dir, Fact{ID: "a", Index: &IndexEntry{Key: "a", EventLog: "/x/a.log", Purpose: "chat", Digest: "/x/a.md",
+			Report: &IndexReport{State: "done", Summary: "已修好。", At: time.Date(2026, 11, 8, 9, 0, 0, 0, time.UTC)}}}),
 		{ID: "cron:j", Kind: KindCron},
 	}}})
 	data, err := os.ReadFile(path)
@@ -508,11 +510,29 @@ func TestIndex(t *testing.T) {
 		t.Fatalf("index = %s", data)
 	}
 	a, b := f.Sessions[0], f.Sessions[1]
-	if a.Key != "a" || a.Health != Idle || a.Workspace != ws.ID || a.EventLog != "/x/a.log" || a.DispatchedByPlanner {
+	if a.Key != "a" || a.Health != Idle || a.Workspace != ws.ID || a.EventLog != "/x/a.log" || a.DispatchedByPlanner ||
+		a.Purpose != "chat" || a.Digest != "/x/a.md" || a.Report == nil || a.Report.State != "done" || a.Report.Summary != "已修好。" {
 		t.Errorf("row a = %+v", a)
 	}
-	if b.Key != "b" || b.Health != Active || b.Name != "fix-ci" || b.Title != "Fix CI" || len(b.Result) >= 400 {
+	if b.Key != "b" || b.Health != Active || b.Name != "fix-ci" || b.Title != "Fix CI" || len(b.Result) >= 400 || b.Digest != "" || b.Report != nil {
 		t.Errorf("row b = %+v", b)
+	}
+	// A row without a digest or report has neither key: older readers of
+	// index.json see the rows they did.
+	var rows struct {
+		Sessions []map[string]any `json:"sessions"`
+	}
+	if err := json.Unmarshal(data, &rows); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rows.Sessions[1]["digest"]; ok {
+		t.Errorf("row b has a digest key: %s", data)
+	}
+	if _, ok := rows.Sessions[1]["report"]; ok {
+		t.Errorf("row b has a report key: %s", data)
+	}
+	if got := rows.Sessions[0]["report"]; !reflect.DeepEqual(got, map[string]any{"state": "done", "summary": "已修好。", "at": "2026-11-08T09:00:00Z"}) {
+		t.Errorf("row a report = %v", got)
 	}
 }
 

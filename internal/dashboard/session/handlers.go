@@ -312,6 +312,8 @@ type Deps struct {
 	Outputs OutputSource
 	// Notes serves /api/sessions/notes; nil lists none.
 	Notes NoteSource
+	// Digests serve /api/sessions/digest; nil has none.
+	Digests DigestSource
 	// Health and Workspaces fill /api/sessions/detail's health unit and
 	// workspace; nil leaves them out.
 	Health     func() health.Snapshot

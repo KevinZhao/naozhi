@@ -38,6 +38,21 @@ type IndexEntry struct {
 	// Result is the latest assistant reply's summary, truncated.
 	Result              string `json:"result"`
 	DispatchedByPlanner bool   `json:"dispatched_by_planner"`
+	// Digest is the session's digest file (planner/digest), absolute as
+	// EventLog is; "" while it has none. The Planner reads it before the
+	// event log (§15.12 ②).
+	Digest string `json:"digest,omitempty"`
+	// Report is the session's latest report, its summary cut to the first
+	// sentence; nil while it has none.
+	Report *IndexReport `json:"report,omitempty"`
+}
+
+// IndexReport is an index row's report: its state, the first sentence of
+// its summary, and when.
+type IndexReport struct {
+	State   string    `json:"state"`
+	Summary string    `json:"summary"`
+	At      time.Time `json:"at"`
 }
 
 type indexFile struct {
