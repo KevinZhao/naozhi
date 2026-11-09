@@ -46,8 +46,16 @@ for (const [name, vp] of [['desktop', { viewport: { width: 1440, height: 900 } }
       await page.click('#abnav-planner');
       const reply = page.locator('#pl-stream .event.text').first();
       await expect(reply.locator('.pl-act-bad')).toHaveCount(0);
+      // A relay is one line like a dispatch, as wide as the other cards;
+      // the Planner's text and the session card are in the fold.
       const relay = reply.locator('.pl-act-relay');
-      await expect(relay.locator('.pl-act-h')).toHaveText('转达你的决定');
+      await expect(relay.locator('summary')).toHaveText('转达你的决定 · iso 合并发版 · iso 按顺序合并，每合一个等 CI 绿');
+      await expect(relay).not.toHaveAttribute('open', /.*/);
+      await expect(relay.locator('.pl-act-q')).toBeHidden();
+      expect((await relay.boundingBox()).height).toBeLessThan(44);
+      const actWidth = (await reply.locator('.pl-act-ask').boundingBox()).width;
+      expect(Math.abs((await relay.boundingBox()).width - actWidth)).toBeLessThan(1);
+      await relay.locator('summary').click();
       await expect(relay.locator('.pl-act-q')).toHaveText('iso 按顺序合并，每合一个等 CI 绿');
       await expect(relay.locator('.pl-scard[data-key="' + TASK + '"] .pl-scard-name')).toHaveText('iso 合并发版');
       await expect(reply.locator('.pl-act-ask')).toContainText('你的回答会直接送到');
@@ -71,7 +79,14 @@ for (const [name, vp] of [['desktop', { viewport: { width: 1440, height: 900 } }
       const msg = page.locator('#events-scroll .event.user.relay-msg');
       await expect(msg.locator('.custody-source')).toHaveText('Planner 转达 · 附你的原话');
       await expect(msg.locator('.relay-words')).toHaveText('用户 11/7 21:28 在 Planner 对话里说：「iso 都合并，发版」');
-      await expect(msg).toContainText('按 #1 → #2 的顺序合并');
+      // The Planner's text folds to its first line; the bubble is as wide
+      // as the Planner's cards, not the reading column.
+      const note = msg.locator('.relay-note');
+      await expect(note.locator('summary')).toHaveText('Planner 的说明 · 按 #1 → #2 的顺序合并，每合一个等 CI 绿。');
+      await expect(note.locator('.relay-note-body')).toBeHidden();
+      expect((await msg.locator('.event-content').boundingBox()).width).toBeLessThanOrEqual(560);
+      await note.locator('summary').click();
+      await expect(note.locator('.relay-note-body')).toContainText('按 #1 → #2 的顺序合并');
       await expect(msg).not.toContainText('naozhi-relay');
       await msg.screenshot({ path: test.info().outputPath('relay-msg-' + name + '.png') });
     } finally {
