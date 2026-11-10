@@ -9,6 +9,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/digest"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
+	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -103,5 +104,37 @@ func PlannerConclusion(sidecars *sidecar.Store) func(key string) string {
 			return ""
 		}
 		return digest.FirstSentence(m.Report.Summary)
+	}
+}
+
+// taskStateWords are the 任务's states as the task cards say them.
+var taskStateWords = map[task.State]string{
+	task.Doing:   "进行中",
+	task.Waiting: "等你",
+	task.Failed:  "失败",
+	task.Done:    "已完成",
+	task.Remind:  "待提醒",
+}
+
+// PlannerTaskIndex is the 任务 as the Planner's handoff lists them (§15.12
+// ⑧): each card's state, title, latest conclusion and digest.
+func PlannerTaskIndex(tasks *task.Board, digests *digest.Writer) func() []agent.TaskLine {
+	return func() []agent.TaskLine {
+		list := tasks.List()
+		out := make([]agent.TaskLine, 0, len(list))
+		for _, t := range list {
+			l := agent.TaskLine{ID: t.ID, State: cmp.Or(taskStateWords[t.State], string(t.State)), Title: t.Title}
+			if t.Group == task.GroupYours {
+				l.Group = "你开的"
+			}
+			if t.Report != nil {
+				l.Conclusion = digest.FirstSentence(t.Report.Summary)
+			}
+			if t.Kind == task.KindSession {
+				l.Digest = digests.Path(t.ID)
+			}
+			out = append(out, l)
+		}
+		return out
 	}
 }

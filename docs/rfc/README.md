@@ -1,6 +1,6 @@
 # RFC 索引
 
-RFC 是落地前的设计取舍与实测记录，**不是最终规范**——架构层面的事实以 `../design/DESIGN.md` 为准。下表的状态按 v0.7.2 的代码核对过（2026-11-09）；不少 RFC 首屏的状态没跟上，两者不一致时以下表为准。已实施或废弃的历史 RFC 已删除，需要时用 `git log -- docs/rfc/<name>.md` 找回。
+RFC 是落地前的设计取舍与实测记录，**不是最终规范**——架构层面的事实以 `../design/DESIGN.md` 为准。下表的状态按 v0.7.3 的代码核对过（2026-11-10）；不少 RFC 首屏的状态没跟上，两者不一致时以下表为准。已实施或废弃的历史 RFC 已删除，需要时用 `git log -- docs/rfc/<name>.md` 找回。
 
 | RFC | 状态 | 范围 |
 |---|---|---|
@@ -25,7 +25,7 @@ RFC 是落地前的设计取舍与实测记录，**不是最终规范**——架
 | [node-pairing.md](node-pairing.md) | Draft v1（未实施） | `naozhi node add` / `naozhi join` |
 | [outbound-webhooks.md](outbound-webhooks.md) | Phase 1 已实现 | run 生命周期出站 webhook |
 | [passthrough-mode.md](passthrough-mode.md)（+ `-validation`） | 已实装（opt-in，代码默认仍是 collect；Phase E 未做） | 直通 CC CLI 原生 command queue |
-| [planner.md](planner.md)（+ `planner-landscape`） | 已实装到 v0.7.2：§15.1–§15.11，§15.12 ①–⑦（①随 v0.7.0 发布，v0.6.5 未单独打 tag）与 UX 第 1、5、9、10 条；未做：§15.12 ⑧（按大小换班、按线交接、`remember`）、⑨（`lookup`、一次性读取者、污染标记，排在 v0.8.0）、UX 第 3、4、6、7、11、12 条；改造规格见 §15.12（D100–D108，owner 11-08 批准，§17.2 已全部采纳），剩余内容排期见 §15.13 | Planner 规划 agent：每个节点一个 Planner（D96 修订"全局唯一"）+ 按需工作区幕僚、设计原则（确定性放网关 / 先信任后惊喜）、三种主动、信任阶梯与治理减法、三个面与工作台面、现有 dashboard 上新增 Planner 页面；§18 决策 D1–D108；`planner-landscape.md` 是两代 agent 产品调研与对照 |
+| [planner.md](planner.md)（+ `planner-landscape`） | 已实装到 v0.7.3：§15.1–§15.11，§15.12 ①–⑧（①随 v0.7.0 发布，v0.6.5 未单独打 tag；⑧ 原排 v0.7.1，因 v0.7.1 / v0.7.2 被修复版占用，随 v0.7.3 发布）与 UX 评审（11-08）第 1、3、4、5、6、7、9、10、11、12 条；未做：§15.12 ⑨（`lookup`、一次性读取者、污染标记，排在 v0.8.0）；改造规格见 §15.12（D100–D108，owner 11-08 批准，§17.2 已全部采纳），剩余内容排期见 §15.13 | Planner 规划 agent：每个节点一个 Planner（D96 修订"全局唯一"）+ 按需工作区幕僚、设计原则（确定性放网关 / 先信任后惊喜）、三种主动、信任阶梯与治理减法、三个面与工作台面、现有 dashboard 上新增 Planner 页面；§18 决策 D1–D108；`planner-landscape.md` 是两代 agent 产品调研与对照 |
 | [project-access-profile.md](project-access-profile.md) | 已实装（PR-A / B / C，#2359） | 项目级默认访问方式 |
 | [project-stable-session-key.md](project-stable-session-key.md) | 已实装 | 项目级稳定 session key |
 | [remote-planner.md](remote-planner.md) | 已实装（#3900，随 v0.6.0 发布） | 每个节点一个 Planner、只管本节点（D60 修订）；EC2 页面可以切换到 Mac 的 Planner，经反连 RPC `api` 转发 Planner 路由；巡检与早报只在一个节点上；会话列表按节点分组；断线降级与鉴权边界，决策 D96 |

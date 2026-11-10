@@ -27,7 +27,7 @@
 // listed state. Task titles come from the 任务 list (tasks.js 'tasks:list').
 import { NZ_CONTRACT } from './contract.js';
 import { sessionList } from './state.js';
-import { HEALTH_STATES, backgroundTasksText, esc, escAttr, evidenceText, fetchJSON, nzBus, sessionHealthState, sessionTitleText } from './nz_util.js';
+import { HEALTH_STATES, backgroundTasksText, esc, escAttr, evidenceText, fetchJSON, nzBus, registerActions, sessionHealthState, sessionTitleText, showToast } from './nz_util.js';
 import { sid } from './session_ident.js';
 import { formatAbsTime, formatMonthDayTime, timeAgo } from './utilities.js';
 import { plannerAPI, plannerHost } from './planner_host.js';
@@ -230,7 +230,7 @@ function mentionedKeys(ev) {
 
 // ---- action blocks (§6.2) ----
 
-const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask', 'status', 'notify', 'custody', 'relay']);
+const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask', 'status', 'notify', 'custody', 'relay', 'remember']);
 const STATUS_LABEL = { done: '已完成', doing: '进行中', failed: '失败' };
 const STATUS_MARK = { done: '✓', failed: '✗' };
 
@@ -336,6 +336,21 @@ function actionCardHtml(raw) {
       '<div class="pl-act-why">附上你这一轮的原话，再加上 Planner 的说明：</div>' +
       '<div class="pl-act-q">' + esc(text) + '</div>' +
       (key ? '<div class="pl-scards">' + sessionCardHtml(key) + '</div>' : '') + '</details>';
+  }
+  if (a.type === 'remember') {
+    // 记下了 · name · 工作区, the text in the fold with 撤回 (§15.12 ⑧): the
+    // gateway deletes the file and its MEMORY.md line. A block the gateway
+    // refused gets its own line, as every card's.
+    const ws = str(a.workspace);
+    const where = ws.toLowerCase() === 'global' ? 'Planner 自己的记忆' : (WORKSPACE_ID_RE.test(ws) ? workspaceName(ws) : ws);
+    const line = firstSentence(str(a.text));
+    return '<details class="pl-act pl-act-remember">' +
+      '<summary class="pl-act-h"><span class="pl-act-k">记下了</span>' +
+        (where ? '<span class="pl-act-ws" title="' + escAttr(where) + '"> · ' + esc(wsLabel(where)) + '</span>' : '') +
+        (line ? '<span class="pl-act-goal" title="' + escAttr(line) + '"> · ' + esc(line) + '</span>' : '') + '</summary>' +
+      rowsHtml([['记在', where], ['名字', str(a.name)], ['内容', str(a.text)]]) +
+      '<div class="pl-card-acts"><button type="button" class="pl-btn" data-action="planner-memory-forget" data-ws="' + escAttr(ws) + '" data-name="' + escAttr(str(a.name)) + '">撤回</button></div>' +
+      '</details>';
   }
   if (a.type === 'promise') {
     return '<div class="pl-act pl-act-promise"><div class="pl-act-h">登记承诺</div>' +
@@ -695,3 +710,27 @@ function foldKeys(ev, keys) {
     });
   });
 }
+
+// 撤回 a memory the Planner kept: the gateway takes the file and its index
+// line back; one already gone (taken back before, or never kept) says so.
+registerActions({
+  'planner-memory-forget': async (el) => {
+    el.disabled = true;
+    try {
+      await fetchJSON(plannerAPI(NZ_CONTRACT.API.planner_memory_forget), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspace: el.dataset.ws || '', name: el.dataset.name || '' }), timeoutMs: 8000,
+      });
+      el.textContent = '已撤回';
+    } catch (e) {
+      const status = e && e.status;
+      if (status === 404) {
+        el.textContent = '已撤回';
+        showToast('这条记忆已经撤回，或没有记下', 'info');
+        return;
+      }
+      el.disabled = false;
+      showToast(status === 409 ? '这条记忆不是 Planner 记的，没有撤回' : '撤回失败，稍后再试', 'error');
+    }
+  },
+});
