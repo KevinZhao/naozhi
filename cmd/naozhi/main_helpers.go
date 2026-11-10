@@ -480,6 +480,7 @@ func buildAccessProfiles(in map[string]config.AccessProfile) map[string]session.
 			Env:            ap.Env,
 			DefaultModel:   ap.DefaultModel,
 			DefaultBackend: ap.DefaultBackend,
+			AWSProfile:     ap.AWSProfile,
 		}
 	}
 	return out

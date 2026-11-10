@@ -362,7 +362,7 @@ func TestLaunchSpecProjectSettings(t *testing.T) {
 		"dashboard:direct:x:general": true,
 		"task:0a1b2c3d4e5f":          true,
 	} {
-		if got := (&spawnConfig{}).launchSpecFor(key, shim.SpawnOverlay{}).ProjectSettings; got != want {
+		if got := (&spawnConfig{}).launchSpecFor(key, shim.SpawnOverlay{}, false).ProjectSettings; got != want {
 			t.Errorf("%s: ProjectSettings = %v, want %v", key, got, want)
 		}
 	}
@@ -399,11 +399,11 @@ func TestLaunchSpecDrift_TaskDeny(t *testing.T) {
 	if drift, stored, current := driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, s); drift {
 		t.Fatalf("task deny misread as drift\n  stored:  %v\n  current: %v", stored, current)
 	}
-	path := r.spawn.launchSpecFor(key, *state.SpawnOverlay).SettingsFile
+	path := r.spawn.launchSpecFor(key, *state.SpawnOverlay, false).SettingsFile
 	if path == "" || !slices.Contains(state.CLIArgs, path) {
 		t.Fatalf("settings file %q not on argv %v", path, state.CLIArgs)
 	}
-	if err := writeSessionSettings(path, "", *state.SpawnOverlay); err != nil {
+	if err := writeSessionSettings(path, "", *state.SpawnOverlay, ""); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(path)
@@ -436,11 +436,11 @@ func TestLaunchSpecPromptCacheTTL(t *testing.T) {
 	if state.SpawnOverlay == nil || state.SpawnOverlay.PromptCacheTTL != "1h" {
 		t.Fatalf("recorded overlay = %+v, want prompt_cache_ttl 1h", state.SpawnOverlay)
 	}
-	if r.spawn.launchSpecFor(key, shim.SpawnOverlay{PromptCacheTTL: "1h"}).SettingsFile == "" {
+	if r.spawn.launchSpecFor(key, shim.SpawnOverlay{PromptCacheTTL: "1h"}, false).SettingsFile == "" {
 		t.Error("an overlay with only promptCacheTtl gets no settings file")
 	}
-	path := r.spawn.launchSpecFor(key, *state.SpawnOverlay).SettingsFile
-	if err := writeSessionSettings(path, "", *state.SpawnOverlay); err != nil {
+	path := r.spawn.launchSpecFor(key, *state.SpawnOverlay, false).SettingsFile
+	if err := writeSessionSettings(path, "", *state.SpawnOverlay, ""); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(path)

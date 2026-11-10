@@ -7,6 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+
+	"github.com/naozhi/naozhi/internal/session"
 )
 
 type subcmd struct {
@@ -25,6 +27,7 @@ var subcmds = []subcmd{
 	{"doctor", "run health checks against a naozhi instance", runDoctor},
 	{"upgrade", "self-update to the latest release", runUpgrade},
 	{"config", "config.yaml tools (check|reload)", runConfig},
+	{session.AWSCredentialExportSubcommand, "print an AWS profile's credentials for awsCredentialExport (--profile)", runAWSCredentialExport},
 	{"models", "reconcile the toolbox model recommendation into cc settings (sync)", runModels},
 }
 

@@ -6,8 +6,9 @@ import "fmt"
 // keys a named per-session env override set may touch and what values are
 // legal, per the Table's SourceOverlay column. Deliberately a SMALLER surface
 // than the shim's: AWS_PROFILE / AWS_*_FILE / AWS_ACCESS_KEY_ID are NOT
-// overlay-settable — Bedrock account switching goes through a proxy port
-// (ANTHROPIC_BEDROCK_BASE_URL), never a fresh AWS profile handed to the CLI.
+// overlay-settable. A profile that needs another Bedrock account names it in
+// its own aws_profile field, which becomes the session's awsCredentialExport
+// in its settings file and never enters any env (RFC project-access-profile §3.1).
 // Not a whitelist bypass: the merged env STILL passes FilterShimEnv;
 // validation here is early feedback at config load / picker preflight.
 

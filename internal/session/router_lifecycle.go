@@ -222,6 +222,10 @@ type spawnParams struct {
 	// references); nil when AccessProfileID is "". completeSpawn expands it
 	// outside the transaction — file reads must not happen under the lock.
 	AccessProfileEnv map[string]string
+	// AccessProfileAWS is the resolved profile's aws_profile ("" = the global
+	// credential source). completeSpawn writes it into the session's settings
+	// file as awsCredentialExport.
+	AccessProfileAWS string
 	// Overlay is the per-request layer that went into Model/Effort/Args. The
 	// shim persists it so the arg-drift comparison on the next restart can
 	// re-merge it against current config (#2494). Always populated: a spawn
@@ -265,9 +269,11 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 		accessProfileID = r.backends.defaultAccessProfile
 	}
 	var accessProfileEnv map[string]string
+	var accessProfileAWS string
 	if accessProfileID != "" {
 		if ap, ok := profiles[accessProfileID]; ok {
 			accessProfileEnv = ap.Env
+			accessProfileAWS = ap.AWSProfile
 		} else {
 			slog.Warn("access profile not found; falling back to global default",
 				"key", key, "access_profile", accessProfileID)
@@ -411,8 +417,9 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 		ResumeID:         resumeID,
 		AccessProfileID:  accessProfileID,
 		AccessProfileEnv: accessProfileEnv,
+		AccessProfileAWS: accessProfileAWS,
 		Overlay:          overlay,
-		Launch:           r.spawn.launchSpecFor(key, overlay),
+		Launch:           r.spawn.launchSpecFor(key, overlay, accessProfileAWS != ""),
 	}
 }
 
@@ -463,6 +470,7 @@ type spawnReservation struct {
 	workspace        string
 	accessProfileID  string
 	accessProfileEnv map[string]string
+	accessProfileAWS string
 
 	// old is the session being replaced (nil for a fresh key), snapshotted
 	// in the same critical section.
@@ -567,7 +575,7 @@ func (r *Router) reserveSpawn(tx sessTx, res *spawnReservation, key, resumeID st
 	sp := r.resolveSpawnParams(tx, key, resumeID, opts)
 	res.key, res.resumeID, res.opts, res.doneCh = key, sp.ResumeID, opts, doneCh
 	res.wrapper, res.backendID, res.workspace = sp.Wrapper, sp.BackendID, sp.Workspace
-	res.accessProfileID, res.accessProfileEnv = sp.AccessProfileID, sp.AccessProfileEnv
+	res.accessProfileID, res.accessProfileEnv, res.accessProfileAWS = sp.AccessProfileID, sp.AccessProfileEnv, sp.AccessProfileAWS
 	// argv-bearing fields come from the shared constructor so this path and
 	// the arg-drift comparison cannot diverge. DebugFile uses the
 	// side-effecting cliDebugFileFor (log pre-created 0600) where drift uses
@@ -635,13 +643,34 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (_ *M
 		}
 		res.spawnOpts.EnvOverlay = overlay
 	}
+	// The profile's own credential source lives in the session settings file,
+	// which only the Claude CLI reads. Any other backend, or no file to put it
+	// in, fails the spawn: running on the global credentials instead would
+	// bill another account.
+	var credExport string
+	if res.accessProfileAWS != "" {
+		if cmp.Or(res.backendID, "claude") != "claude" {
+			return nil, fmt.Errorf("access profile %q: aws_profile needs the claude backend, not %q", res.accessProfileID, res.backendID)
+		}
+		if res.spawnOpts.SessionSettingsFile == "" {
+			return nil, fmt.Errorf("access profile %q: aws_profile needs a session store directory", res.accessProfileID)
+		}
+		credExport, err = awsCredentialExportFor(r.spawn.credentialExportExe, res.accessProfileAWS)
+		if err != nil {
+			return nil, fmt.Errorf("access profile %q: %w", res.accessProfileID, err)
+		}
+	}
 	// Settings overrides restrict the session (inbound policy, deny rules), so
 	// a spawn that cannot write them fails rather than running without them.
-	if ov := res.spawnOpts.SpawnOverlay; ov != nil && hasSettingsOverrides(*ov) {
+	if ov := res.spawnOpts.SpawnOverlay; credExport != "" || (ov != nil && hasSettingsOverrides(*ov)) {
 		if res.spawnOpts.SessionSettingsFile == "" {
 			return nil, errors.New("session settings overrides need a session store directory")
 		}
-		if err := writeSessionSettings(res.spawnOpts.SessionSettingsFile, r.spawn.naozhiSettingsFile, *ov); err != nil {
+		var o shim.SpawnOverlay
+		if ov != nil {
+			o = *ov
+		}
+		if err := writeSessionSettings(res.spawnOpts.SessionSettingsFile, r.spawn.naozhiSettingsFile, o, credExport); err != nil {
 			return nil, fmt.Errorf("session settings: %w", err)
 		}
 	}

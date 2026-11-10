@@ -140,7 +140,32 @@ func loadConfig(projectPath string) (ProjectConfig, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return cfg, fmt.Errorf("parse project config %s: %w", path, err)
 	}
+	if err := rejectCredentialSources(data); err != nil {
+		return cfg, fmt.Errorf("project config %s: %w", path, err)
+	}
 	return cfg, nil
+}
+
+// credentialSourceKeys are access-profile fields that only config.yaml may
+// declare. A project.yaml can come in with a git pull, so one naming an
+// account's credentials would let that pull repoint a project's billing; the
+// project refers to a profile by name (access_profile) and nothing more.
+var credentialSourceKeys = []string{"access_profiles", "aws_profile"}
+
+// rejectCredentialSources fails a project.yaml that declares a credential
+// source, instead of ignoring the key and leaving the operator to believe it
+// took effect.
+func rejectCredentialSources(data []byte) error {
+	var top map[string]any
+	if err := yaml.Unmarshal(data, &top); err != nil {
+		return nil // the typed decode above already accepted it
+	}
+	for _, k := range credentialSourceKeys {
+		if _, ok := top[k]; ok {
+			return fmt.Errorf("%q declares a credential source, which only config.yaml's access_profiles may do", k)
+		}
+	}
+	return nil
 }
 
 // saveConfigToPath atomically writes cfg to path (write-tmp → fsync → rename).

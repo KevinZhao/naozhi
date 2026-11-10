@@ -41,6 +41,9 @@ type spawnConfig struct {
 	// sessionSettingsDir is where per-session settings files live
 	// (launchSpecFor); "" when there is no session store to anchor under.
 	sessionSettingsDir string
+	// credentialExportExe is the naozhi binary an access profile's
+	// awsCredentialExport runs (RouterConfig.CredentialExportExe).
+	credentialExportExe string
 
 	// hook, when set, replaces the CLI spawn in spawnProcess, so tests
 	// can hand back a process of their own at a moment of their choosing.

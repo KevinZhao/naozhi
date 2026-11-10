@@ -86,6 +86,14 @@ type AccessProfile struct {
 	// `backend`, the dashboard pick and agents[].backend all win, and an
 	// existing session never moves.
 	DefaultBackend string `yaml:"default_backend,omitempty"`
+	// AWSProfile names a profile in the operator's ~/.aws/config (an Isengard
+	// account through `ada credentials print`, SSO, ...) that this profile's
+	// Claude sessions take their Bedrock credentials from: naozhi writes
+	// `awsCredentialExport` = `naozhi aws-credential-export --profile <name>`
+	// into the session's own settings file, in place of the global one. Only
+	// config.yaml declares it (project.yaml is rejected, settings.json cannot
+	// reach it); "" keeps the global credential source.
+	AWSProfile string `yaml:"aws_profile,omitempty"`
 }
 
 // resolveHostname is os.Hostname; tests swap it.

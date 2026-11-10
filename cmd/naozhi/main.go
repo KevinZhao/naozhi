@@ -202,6 +202,7 @@ func main() {
 		AccessProfiles:       accessProfiles,
 		DefaultAccessProfile: cfg.DefaultAccessProfile,
 		NaozhiSettingsFile:   naozhiSettingsFile,
+		CredentialExportExe:  credentialExportExe(),
 		MCPConfigFile:        mcpConfigFile,
 		PermissionMode:       cliPermissionMode(cfg),
 		Workspace:            workspace,

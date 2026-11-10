@@ -86,6 +86,14 @@ func (b *BackendRegistry) accessProfileDefaultModel(id string) string {
 	return profileDefaultModelFor(b.profiles(), id)
 }
 
+// accessProfileAWS is the aws_profile of access profile id, "" for none.
+func (b *BackendRegistry) accessProfileAWS(id string) string {
+	if id == "" {
+		return ""
+	}
+	return b.profiles()[id].AWSProfile
+}
+
 // EffectiveArgvLayers is mergeArgvLayers for an offline caller — `naozhi
 // config check --effective` — describing what the spawn path would pass for a
 // session of agent on backend bd under access profile profileID. Same
