@@ -709,6 +709,37 @@ func TestHandleFileGet_RawImage(t *testing.T) {
 	}
 }
 
+// TestHandleFileGet_RawPDF: a PDF goes inline, sandboxed, only to a frame;
+// a top-level navigation (or no Sec-Fetch-Dest) downloads it.
+func TestHandleFileGet_RawPDF(t *testing.T) {
+	h, proj, projDir := newProjectHandlersForTest(t, nil)
+	if err := os.WriteFile(filepath.Join(projDir, "a.pdf"), []byte("%PDF-1.4\n%%EOF\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ dest, disposition string }{
+		{"iframe", "inline"}, {"document", "attachment"}, {"", "attachment"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/api/projects/file?project="+proj+"&path=a.pdf&mode=raw", nil)
+		if tc.dest != "" {
+			req.Header.Set("Sec-Fetch-Dest", tc.dest)
+		}
+		w := httptest.NewRecorder()
+		h.HandleFileGet(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("dest %q: status = %d, body=%s", tc.dest, w.Code, w.Body.String())
+		}
+		if cd := w.Header().Get("Content-Disposition"); !strings.HasPrefix(cd, tc.disposition) {
+			t.Errorf("dest %q: Content-Disposition = %q, want %s", tc.dest, cd, tc.disposition)
+		}
+		if tc.disposition == "inline" {
+			csp := w.Header().Get("Content-Security-Policy")
+			if w.Header().Get("Content-Type") != "application/pdf" || !strings.Contains(csp, "sandbox") || !strings.Contains(csp, "frame-ancestors 'self'") {
+				t.Errorf("inline PDF: Content-Type %q, CSP %q", w.Header().Get("Content-Type"), csp)
+			}
+		}
+	}
+}
+
 func TestHandleFileGet_RawRejectsBinary(t *testing.T) {
 	h, proj, projDir := newProjectHandlersForTest(t, nil)
 	// Random binary — not an image, not text.

@@ -1632,7 +1632,7 @@ v0.8.0 落地时的取舍：读取者会话复用巡检的会话函数与工作�
 | P5 | 建议型与执行型主动：`planner.yaml` 的 charter / duties、自主度、Now / Next / Not-now（D14）、Planner 当放行人的检查点闸门；首个执行型在 naozhi 仓库 | L | v0.8.x 验签、P3 判断 |
 | P6 | 带教：纠正的信号强度、约束编译成 deny、写作风格（D20） | M | P4 |
 | P7 第二段 | `naozhi join` 配对（`node-pairing.md`）、系统视图"节点"区块、`dispatch-v1`、离线状态机：**条件触发**，出现"多台工作机由中心分配"时再做（D97） | L | 条件 |
-| W2 | 先做 PDF 预览（11-08 有 PDF 附件；`file_rows.js:64` 现把 pdf 列为不可预览），再做 Office 预览、执行两种按钮（直接运行 / 交给会话）、轻量编辑、截屏发送 | S（PDF）/ M | 无，可与任何版本并行 |
+| W2 | ~~先做 PDF 预览~~（**11-10 已做，随 v0.8.0**：右栏用浏览器自带的 PDF 阅读器；`raw` 只对 `Sec-Fetch-Dest: iframe` 内联返回 PDF，带 CSP `sandbox` 与 `frame-ancestors 'self'`，其他导航仍是下载；预览框不加 `sandbox` 属性，实测 Chrome 在带 `sandbox` 的框里拒绝显示 PDF），再做 Office 预览、执行两种按钮（直接运行 / 交给会话）、轻量编辑、截屏发送 | S（PDF）/ M | 无，可与任何版本并行 |
 | 其他 | D69：P0 ⑩ passthrough 一周试用已过，把代码默认值从 `collect` 改为 `passthrough`（`config/defaults.go:24`）并回写结论；P0 ⑤⑥⑦⑪ 补实测记录或标"随 D93 不需要"；`budget` 的 `task:` 成本归属（D17 下影响小，顺手做） | S | 无 |
 | iOS app | 单独立项（D80），复用"等你"与推送管线 | L | 单独立项 |
 

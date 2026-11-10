@@ -59,12 +59,11 @@ export function mimeForPath(p) {
   return '';
 }
 
-// Office files (pptx / xlsx / docx) and PDFs are outputs the preview cannot
-// show: the raw endpoint serves a PDF as a forced attachment.
-const UNPREVIEWABLE = { pptx: 1, xlsx: 1, docx: 1, pdf: 1 };
+// Office files (pptx / xlsx / docx) are outputs the preview cannot show.
+const UNPREVIEWABLE = { pptx: 1, xlsx: 1, docx: 1 };
 
 // isPreviewableOutput reports whether the 预览 tab can show output o: a file,
-// not an Office document or a PDF.
+// not an Office document.
 export function isPreviewableOutput(o) {
   if (!o || !o.path) return false;
   return !UNPREVIEWABLE[(o.path.split('.').pop() || '').toLowerCase()];

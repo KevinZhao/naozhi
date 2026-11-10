@@ -371,13 +371,9 @@ import { renderRich, runPendingAsync } from './render_md.js';
     if (ext === 'pdf') {
       body.innerHTML = '';
       var frame = document.createElement('iframe');
-      // Defense-in-depth: serveRaw redirects application/pdf to a forced
-      // attachment download today, so this iframe never inline-renders. But
-      // if a proxy strips Content-Disposition (or serveRaw later renders PDF
-      // inline) an un-sandboxed frame would let the PDF plugin execute embedded
-      // JS same-origin. sandbox="" grants zero capabilities — no scripts, no
-      // plugins — while still allowing the browser's native PDF viewer.
-      frame.setAttribute('sandbox', '');
+      // No sandbox attribute: the browsers' PDF viewers refuse a sandboxed
+      // frame. serveRaw answers a frame's request with a CSP sandbox instead
+      // (an opaque origin) and downloads the file on any other navigation.
       frame.src = fileApiUrl(root, node, rel, 'raw');
       frame.title = name;
       body.appendChild(frame);

@@ -378,12 +378,9 @@ function renderPreviewByMime(project, node, path, body, mime, fresh) {
   if (mime === 'application/pdf') {
     body.innerHTML = '';
     const frame = document.createElement('iframe');
-    // Defense-in-depth: serveRaw forces application/pdf to an attachment
-    // download so this never inline-renders today. sandbox="" guards the
-    // case where Content-Disposition is stripped (proxy) or serveRaw later
-    // renders PDF inline — zero capabilities, no plugin/script execution,
-    // while the native PDF viewer still works.
-    frame.setAttribute('sandbox', '');
+    // No sandbox attribute: the browsers' PDF viewers refuse a sandboxed
+    // frame. serveRaw answers a frame's request with a CSP sandbox instead
+    // (an opaque origin) and downloads the file on any other navigation.
     frame.src = fileApiUrl(project, node, path, 'raw');
     frame.title = path;
     body.appendChild(frame);
