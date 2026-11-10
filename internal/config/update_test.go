@@ -44,20 +44,14 @@ update:
 	}
 }
 
-// Unknown mode falls back to download (warn, not fail).
-func TestUpdateUnknownModeFallsBack(t *testing.T) {
-	tmpFile := t.TempDir() + "/config.yaml"
-	os.WriteFile(tmpFile, []byte(`
-update:
-  mode: rocket
-`), 0600)
-
-	cfg, err := Load(tmpFile)
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-	if cfg.Update.Mode != "download" {
-		t.Errorf("unknown mode = %q, want download fallback", cfg.Update.Mode)
+// An unknown mode is refused, switched on or not.
+func TestUpdateUnknownModeRefused(t *testing.T) {
+	for _, body := range []string{"update:\n  mode: rocket\n", "update:\n  enabled: false\n  mode: Auto\n"} {
+		tmpFile := t.TempDir() + "/config.yaml"
+		os.WriteFile(tmpFile, []byte(body), 0600)
+		if _, err := Load(tmpFile); err == nil || !strings.Contains(err.Error(), "update.mode") {
+			t.Errorf("%q: Load() error = %v, want an update.mode error", body, err)
+		}
 	}
 }
 

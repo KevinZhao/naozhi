@@ -57,6 +57,10 @@ type SchedulersDeps struct {
 	// Budget refuses cron runs past cost.budget; nil runs every job.
 	Budget *budget.Gate
 
+	// ManualCronOnly skips the cron jobs' scheduled runs (an isolated
+	// instance, cron.SchedulerConfig.ManualOnly).
+	ManualCronOnly bool
+
 	// Beats receives the cron tick heartbeat; nil disables it.
 	Beats *beat.Registry
 }
@@ -118,6 +122,7 @@ func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 		ParentCtx:     deps.ParentCtx,
 
 		AutoPauseAfterFailures: deps.Cfg.Cron.AutoPauseAfterFailures,
+		ManualOnly:             deps.ManualCronOnly,
 	}, cron.SchedulerDeps{
 		Router:        newCronRouterAdapter(deps.Router),
 		NotifySender:  newPlatformNotifySender(deps.Platforms),

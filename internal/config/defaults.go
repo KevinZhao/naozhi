@@ -21,7 +21,7 @@ const (
 	defaultServerAddr    = ":8080"
 	defaultLogLevel      = "info"
 	defaultSessionCWD    = "~/.naozhi/workspace"
-	defaultQueueMode     = "collect"
+	defaultQueueMode     = "passthrough"
 	defaultQueueMaxDepth = 20
 	// defaultSessionMaxProcs mirrors session.DefaultMaxProcs (config must not
 	// import internal/session).

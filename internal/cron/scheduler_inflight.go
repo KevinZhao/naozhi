@@ -41,6 +41,10 @@ func recordTriggerNowPanic(jobID string, r any) {
 // (executeIfNotDeletedOrPaused) and the registered tick closure; only the
 // viaTriggerNow flag and the skip-log subject ("TriggerNow:" vs "cron:") differ.
 func (s *Scheduler) executeJobIDIfLive(jobID string, viaTriggerNow bool, logSubject string) {
+	if s.manualOnly && !viaTriggerNow {
+		slog.Debug("cron: scheduled run skipped on an isolated instance", "job_id", jobID)
+		return
+	}
 	ok, paused := s.tbl.liveness(jobID)
 	// slog.With is built lazily (skip path only) to avoid ~500 wasted
 	// allocs/sec on the hot live-job path.

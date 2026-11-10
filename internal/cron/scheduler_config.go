@@ -207,6 +207,10 @@ type SchedulerConfig struct {
 	// a Scheduler without a fakeRouter. When unset and Router is nil the error
 	// fires at boot rather than as an opaque empty sidebar at runtime.
 	AllowNilRouter bool
+	// ManualOnly skips every scheduled tick; a run started by hand still
+	// goes. An isolated instance sets it (config.IsolationConfig): a copy of
+	// the real config would otherwise run the user's jobs a second time.
+	ManualOnly bool
 }
 
 // chatJobKey identifies a (Platform, ChatID) pair for the per-chat job

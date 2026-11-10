@@ -152,11 +152,12 @@ session:
     idle_timeout: "8h"
   queue:
     # When a session is busy:
-    #   collect     (default) — queue messages, merge into one follow-up prompt
+    #   passthrough (default) — forward each message to the CLI (stream-json/
+    #                 claude only; ACP / codex fall back to collect); enables
+    #                 /urgent <msg>
+    #   collect     — queue messages, merge into one follow-up prompt
     #   interrupt   — abort the current turn on every new message
-    #   passthrough — forward each message to the CLI (stream-json/claude only;
-    #                 ACP falls back to collect); enables /urgent <msg>
-    mode: "collect"
+    mode: "passthrough"
     max_depth: 20
     collect_delay: "500ms"
 
@@ -394,12 +395,20 @@ projects:
 #planner:
 #  enabled: false
 
+# An isolated instance — its state root (session.store_path's directory) is
+# not ~/.naozhi in the account's home, e.g. a test instance with a temporary
+# HOME or store_path — runs no scout, pre-meeting brief or scheduled cron run
+# and only notifies of updates, so a copy of the real config neither reads
+# your mail nor replaces the binary it shares. Manual cron runs still go.
+#isolation:
+#  run_schedules: false   # true runs them as on your own instance
+
 # Auto-update: polls GitHub Releases and reuses the verified `naozhi upgrade`
 # flow (download → SHA-256 → atomic swap). Enabled by default in "download"
 # mode.
 #update:
 #  enabled: true          # false disables the checker
-#  mode: "download"       # notify | download | auto
+#  mode: "download"       # notify | download | auto (anything else fails to load)
 #                         #   notify   — log + IM notice only
 #                         #   download — replace binary, apply on next restart
 #                         #   auto     — replace binary AND restart now
