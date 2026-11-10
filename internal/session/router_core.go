@@ -496,6 +496,11 @@ type RouterConfig struct {
 	// `--setting-sources "" --settings <file>` instead of `--setting-sources
 	// user`. ACP backends ignore it.
 	NaozhiSettingsFile string
+	// CredentialExportExe is the absolute path of the naozhi binary, which an
+	// access profile with aws_profile runs as its awsCredentialExport
+	// (`naozhi aws-credential-export --profile <name>`). "" fails such a
+	// profile's spawns.
+	CredentialExportExe string
 	// MCPConfigFile, when non-empty, is an operator-owned MCP server definition
 	// file (RFC cli-mcp-config): every ClaudeProtocol spawn runs `--mcp-config
 	// <file>`; empty omits the flag. ACP / codex backends ignore it. Router-global
@@ -635,6 +640,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	// debug-dir problem never blocks spawning.
 	r.spawn.cliDebugDir = resolveCLIDebugDir(cfg.EventLogDir)
 	r.spawn.naozhiSettingsFile = cfg.NaozhiSettingsFile
+	r.spawn.credentialExportExe = cfg.CredentialExportExe
 	r.spawn.mcpConfigFile = cfg.MCPConfigFile
 	r.spawn.permissionMode = cfg.PermissionMode
 	// Absolute: BuildArgs drops a relative --settings path.

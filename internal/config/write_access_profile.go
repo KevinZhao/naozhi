@@ -56,6 +56,9 @@ func AppendAccessProfile(configPath, id string, ap AccessProfile) error {
 			return fmt.Errorf("env: %w", err)
 		}
 	}
+	if err := envpolicy.ValidateAWSProfileName(ap.AWSProfile); err != nil {
+		return fmt.Errorf("aws_profile: %w", err)
+	}
 
 	data, err := os.ReadFile(configPath)
 	if err != nil {
@@ -133,6 +136,7 @@ func accessProfileToYAML(ap AccessProfile) *yaml.Node {
 	put("chip_color", ap.ChipColor)
 	put("default_model", ap.DefaultModel)
 	put("default_backend", ap.DefaultBackend)
+	put("aws_profile", ap.AWSProfile)
 	if len(ap.Env) > 0 {
 		envNode := &yaml.Node{Kind: yaml.MappingNode}
 		// Deterministic key order for a stable on-disk diff.

@@ -10,3 +10,13 @@ var reProfileValue = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 func IsSafeProfileValue(v string) bool {
 	return reProfileValue.MatchString(v)
 }
+
+// ValidateAWSProfileName checks an access profile's aws_profile: "" (unset) or
+// a safe profile name. The name lands in a shell command line
+// (awsCredentialExport), so the charset is the whole guard.
+func ValidateAWSProfileName(v string) error {
+	if v == "" {
+		return nil
+	}
+	return errIfUnsafeProfile(v)
+}

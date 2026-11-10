@@ -51,6 +51,26 @@ func TestValidateAccessProfiles(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "aws_profile names an AWS profile",
+			mut: func(c *Config) {
+				c.AccessProfiles = map[string]AccessProfile{"iso": {AWSProfile: "claude-code-DO-NOT-DELETE"}}
+			},
+		},
+		{
+			name: "aws_profile with shell metacharacters rejected",
+			mut: func(c *Config) {
+				c.AccessProfiles = map[string]AccessProfile{"bad": {AWSProfile: "x; curl evil"}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "aws_profile with a path rejected",
+			mut: func(c *Config) {
+				c.AccessProfiles = map[string]AccessProfile{"bad": {AWSProfile: "../../etc/passwd"}}
+			},
+			wantErr: true,
+		},
+		{
 			name: "profile default_backend not enabled",
 			mut: func(c *Config) {
 				c.AccessProfiles = map[string]AccessProfile{

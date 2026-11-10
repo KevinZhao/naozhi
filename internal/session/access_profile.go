@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -28,6 +29,10 @@ type AccessProfile struct {
 	// DefaultBackend is the backend for a key with no session, below
 	// agents[].backend and above the router default (EffectiveDefaultBackend).
 	DefaultBackend string
+	// AWSProfile, when set, is the ~/.aws/config profile this profile's
+	// Claude sessions take their Bedrock credentials from: the session's
+	// settings file gets an awsCredentialExport bound to it (awsCredentialExportFor).
+	AWSProfile string
 }
 
 // AccessProfileInfo is the non-sensitive projection of an access profile the
@@ -176,4 +181,26 @@ func resolveEnvOverlay(env map[string]string) (map[string]string, error) {
 		out[k] = v
 	}
 	return out, nil
+}
+
+// AWSCredentialExportSubcommand is the naozhi subcommand an access profile's
+// awsCredentialExport runs: it prints the named AWS profile's credentials in
+// the {"Credentials":{...}} shape the Claude CLI reads.
+const AWSCredentialExportSubcommand = "aws-credential-export"
+
+// awsCredentialExportFor is the awsCredentialExport command line binding a
+// session to AWS profile profile. The CLI runs it through a shell, so exe is
+// double-quoted and must hold none of the characters a double-quoted word
+// still interprets; profile is a charset-checked bare word.
+func awsCredentialExportFor(exe, profile string) (string, error) {
+	if !filepath.IsAbs(exe) {
+		return "", fmt.Errorf("aws_profile %q: no naozhi executable to export credentials with", profile)
+	}
+	if strings.ContainsAny(exe, "\"\\$`\n\r\x00") {
+		return "", fmt.Errorf("aws_profile %q: naozhi executable path %q cannot be quoted for awsCredentialExport", profile, exe)
+	}
+	if !envpolicy.IsSafeProfileValue(profile) {
+		return "", fmt.Errorf("aws_profile %q is not a valid profile name", profile)
+	}
+	return `"` + exe + `" ` + AWSCredentialExportSubcommand + " --profile " + profile, nil
 }

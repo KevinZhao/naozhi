@@ -341,6 +341,20 @@ const ACCESS_PROFILE_TEMPLATES = {
     token_hint: '',
     default_model: 'claude-opus-4-8',
   },
+  // Bedrock on the operator's own AWS profile (an Isengard account through
+  // ada's credential_process, SSO, ...): the server binds the sessions'
+  // awsCredentialExport to the named profile; only the name leaves the form.
+  'aws-profile': {
+    label: 'Isengard / 自定义 AWS profile（Bedrock）',
+    display_name: 'Isengard',
+    chip_color: 'var(--nz-amber)',
+    env: { CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_SKIP_BEDROCK_AUTH: '0' },
+    aws_profile: true,
+    region: 'us-west-2',
+    token_env_key: '',
+    token_hint: '',
+    default_model: '',
+  },
 };
 
 // openCreateAccessProfile renders the guided create-profile form (RFC P1-d).
@@ -372,6 +386,17 @@ function openCreateAccessProfile(onCreated) {
         '<label class="nz-field-label" for="cap-model">默认 model（可选）</label>' +
         '<input id="cap-model" class="nz-picker-select" maxlength="256">' +
       '</div>' +
+      '<div id="cap-aws-wrap">' +
+        '<div class="nz-field">' +
+          '<label class="nz-field-label" for="cap-aws-profile">AWS profile（~/.aws/config 里的名字）</label>' +
+          '<input id="cap-aws-profile" class="nz-picker-select" maxlength="64" placeholder="my-isengard" autocomplete="off">' +
+          '<div class="nz-hint-sm">如 [profile my-isengard] 配 credential_process = ada credentials print --account=… --role=… --provider=isengard；会话的 Bedrock 凭证只从这里取</div>' +
+        '</div>' +
+        '<div class="nz-field">' +
+          '<label class="nz-field-label" for="cap-aws-region">AWS region</label>' +
+          '<input id="cap-aws-region" class="nz-picker-select" maxlength="32" placeholder="us-west-2" autocomplete="off">' +
+        '</div>' +
+      '</div>' +
       '<div id="cap-token-wrap" class="nz-field">' +
         '<label class="nz-field-label" for="cap-token">Token（写入 0600 文件，仅此一次可见）</label>' +
         '<textarea id="cap-token" rows="2" class="nz-picker-textarea" placeholder="" autocomplete="off"></textarea>' +
@@ -399,6 +424,10 @@ function openCreateAccessProfile(onCreated) {
     const hint = overlay.querySelector('#cap-token-hint');
     if (wrap) wrap.style.display = tpl.token_env_key ? '' : 'none';
     if (hint) hint.textContent = tpl.token_hint || '';
+    const awsWrap = overlay.querySelector('#cap-aws-wrap');
+    if (awsWrap) awsWrap.style.display = tpl.aws_profile ? '' : 'none';
+    const rEl = overlay.querySelector('#cap-aws-region');
+    if (rEl && !rEl.value) rEl.value = tpl.region || '';
   };
   tplSel.addEventListener('change', applyTemplate);
   applyTemplate();
@@ -420,6 +449,16 @@ function openCreateAccessProfile(onCreated) {
       default_model: (overlay.querySelector('#cap-model').value || '').trim(),
       env: Object.assign({}, tpl.env || {}),
     };
+    if (tpl.aws_profile) {
+      const prof = (overlay.querySelector('#cap-aws-profile').value || '').trim();
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(prof)) {
+        showErr('AWS profile 名无效（英数字 _ -，1-64 位）');
+        return;
+      }
+      body.aws_profile = prof;
+      const region = (overlay.querySelector('#cap-aws-region').value || '').trim();
+      if (region) body.env.AWS_REGION = region;
+    }
     if (tpl.token_env_key) {
       const tok = (overlay.querySelector('#cap-token').value || '').trim();
       if (!tok) { showErr('该模板需要 token'); return; }

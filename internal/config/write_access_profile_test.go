@@ -120,3 +120,26 @@ func TestWriteSecretFile_RejectsRelative(t *testing.T) {
 		t.Fatal("relative path should be rejected")
 	}
 }
+
+// The dashboard's Isengard template writes aws_profile through the same
+// validation as load, and it reads back.
+func TestAppendAccessProfile_AWSProfile(t *testing.T) {
+	p := writeBaseConfig(t)
+	if err := AppendAccessProfile(p, "iso", AccessProfile{AWSProfile: "team-iso", Env: map[string]string{"AWS_REGION": "us-west-2"}}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got := cfg.AccessProfiles["iso"].AWSProfile; got != "team-iso" {
+		t.Errorf("aws_profile after reload = %q, want team-iso", got)
+	}
+	before, _ := os.ReadFile(p)
+	if err := AppendAccessProfile(p, "bad", AccessProfile{AWSProfile: "$(id)"}); err == nil {
+		t.Error("append accepted an unsafe aws_profile")
+	}
+	if after, _ := os.ReadFile(p); string(after) != string(before) {
+		t.Error("a rejected aws_profile still changed config.yaml")
+	}
+}

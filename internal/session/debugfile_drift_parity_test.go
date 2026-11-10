@@ -72,7 +72,7 @@ func TestDebugFileDriftParity_NoFalseDrift(t *testing.T) {
 	wrapper, backendID := r.backends.wrapperFor("claude")
 	bd := r.backends.backendDefaultsFor(backendID)
 	realArgs := wrapper.Protocol.BuildArgs(
-		r.spawn.argvSpawnOptions(bd.Model, bd.Effort, r.spawn.cliDebugFileFor(key), "", bd.Args, r.spawn.launchSpecFor(key, shim.SpawnOverlay{})))
+		r.spawn.argvSpawnOptions(bd.Model, bd.Effort, r.spawn.cliDebugFileFor(key), "", bd.Args, r.spawn.launchSpecFor(key, shim.SpawnOverlay{}, false)))
 
 	// Drift-side reconstruction for the surviving shim of the same session.
 	driftArgs := driftArgsFor(r).driftCompareArgs(wrapper, backendID, key, s, &shim.SpawnOverlay{})

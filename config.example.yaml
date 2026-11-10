@@ -206,6 +206,16 @@ agent_commands:
 # agents[].model; default_backend applies only to a new session key and must
 # be an enabled backend.
 #
+# aws_profile gives a profile its own Bedrock credentials: a profile name in
+# ~/.aws/config (an Isengard account through ada's credential_process, SSO,
+# static keys). Its Claude sessions get awsCredentialExport =
+# `naozhi aws-credential-export --profile <name>` in their own settings file,
+# in place of naozhi-settings.json's; other sessions keep the global one. Only
+# this file can declare it (a project.yaml carrying aws_profile or
+# access_profiles is skipped with a warning); claude backend only, and a
+# profile the AWS config cannot resolve fails the CLI's first call rather than
+# falling back to the global account.
+#
 #default_access_profile: "bedrock"
 #access_profiles:
 #  bedrock:
@@ -223,6 +233,18 @@ agent_commands:
 #      ANTHROPIC_AUTH_TOKEN_FILE: "/home/ec2-user/.secrets/anthropic-1p.token"
 #    default_model: "sonnet"
 #    # Anthropic credentials only work on claude.
+#    default_backend: "claude"
+#  isengard:
+#    display_name: "Isengard · team account"
+#    chip_color: "#d4a017"
+#    # ~/.aws/config:
+#    #   [profile my-isengard]
+#    #   credential_process = /Users/me/.toolbox/bin/ada credentials print --account=123456789012 --role=MyRole --provider=isengard
+#    aws_profile: "my-isengard"
+#    env:
+#      CLAUDE_CODE_USE_BEDROCK: "1"
+#      CLAUDE_CODE_SKIP_BEDROCK_AUTH: "0"
+#      AWS_REGION: "us-west-2"
 #    default_backend: "claude"
 
 cron:

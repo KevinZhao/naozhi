@@ -3,6 +3,7 @@
 > **状态**: Draft v1（待评审）
 > **作者**: naozhi team
 > **创建**: 2026-07-08
+> **修订**: 2026-11-10 — 档可带自己的 Bedrock 凭证来源 `aws_profile`（§3.1、D6）；§3 末段与 §11.3 的约束随之改写
 > **范围**: 让每个项目（`.naozhi/project.yaml`）能声明一套默认「访问方式」——即用哪条**认证/上游链路**（1P Anthropic 直连 vs 经本机 bedrock-fallback-proxy 的 Bedrock）、用哪个 **backend**（claude / kiro / codex）、用哪个 **model**。核心是引入一个新的、与 backend 正交的配置维度 **access profile（访问档）**，其本质是一组命名的、经白名单校验的 env 覆盖，并把 shim 的进程级 env 快照改造成「基线 + per-spawn overlay」。
 > **依赖 / 前置**:
 > - `docs/rfc/multi-backend.md`（backend.Profile 抽象、`/api/cli/backends`、new-session picker、per-session backend chip 已就位）
@@ -90,7 +91,7 @@ naozhi 主进程 os.Environ()
 - **不**支持单 session 跨 access profile 续传（认证与历史 backend 绑定，物理不可能）
 - **不**放开任何 env 白名单前缀，**不**新增可放行的 env key（只在已放行集合内覆盖值）
 - **不**在 project.yaml 里存明文 token/key（只存 `*_FILE` 路径）
-- **不**碰 `awsEnvDenyList`（多账号 Bedrock 走 §11.3 多 proxy 实例，非本轮）
+- **不**碰 `awsEnvDenyList`（多账号 Bedrock 走档自己的 `aws_profile`，§3.1；不经 env）
 
 ---
 
@@ -164,7 +165,41 @@ backend: "kiro"                       # 换 backend，认证走全局默认
 
 ### 一条会改变 Bedrock 诉求设计的约束（点名）
 
-诉求 2「Bedrock Opus」**不靠切 AWS profile 区分账号**——父进程侧 `awsEnvDenyList`（`main_claude_settings.go:85-94`）故意屏蔽 `AWS_PROFILE`。而且当前链路 naozhi 侧根本不持有 AWS 凭据（`CLAUDE_CODE_SKIP_BEDROCK_AUTH=1`，proxy 用它自己的 profile 签名）。所以 Bedrock 侧 access profile 真正要变的只有两样：**`ANTHROPIC_BEDROCK_BASE_URL`（指哪个 proxy 端口）+ `AWS_REGION`**。若未来要真正的多账号 Bedrock，走 §11.3 的「多 proxy 实例」而非切 AWS profile。
+档的 `env` **始终不能**设 `AWS_PROFILE` / AWS 密钥 / `AWS_*_FILE`——父进程侧 `awsEnvDenyList`（`main_claude_settings.go:85-94`）与 envpolicy 的 overlay 列故意屏蔽它们（2026-07-19 事故：settings.json 能被 Claude 工具写，经 env 改指 naozhi 自己的认证源等于凭证劫持通道）。这条不变。
+
+要让一部分会话用**另一个 AWS 账号**调 Bedrock（如某个 Isengard 账号），不经 env，而是档自己的类型化字段 `aws_profile`（§3.1，2026-11-10 起）。只换端点/区域的诉求（如诉求 2 经本机 proxy）仍只改 `ANTHROPIC_BEDROCK_BASE_URL` + `AWS_REGION`。
+
+### 3.1 档自带 Bedrock 凭证来源：`aws_profile`（D6）
+
+```yaml
+# config.yaml —— 只有这里能声明
+access_profiles:
+  isengard:
+    display_name: "Isengard · team account"
+    aws_profile: "my-isengard"          # ~/.aws/config 里的 profile 名
+    env:
+      CLAUDE_CODE_USE_BEDROCK: "1"
+      CLAUDE_CODE_SKIP_BEDROCK_AUTH: "0"
+      AWS_REGION: "us-west-2"
+    default_backend: "claude"
+
+# ~/.aws/config（操作者自己的文件，naozhi 不写）
+# [profile my-isengard]
+# credential_process = /Users/me/.toolbox/bin/ada credentials print --account=123456789012 --role=MyRole --provider=isengard
+```
+
+**机制**：用这个档 spawn 的 Claude 会话，naozhi 在它的会话 settings 文件（`<数据根>/session-settings/<keyhash>.json`，本来就为 crossSessionInbound 等写，内容 = naozhi-settings.json + 会话覆盖）里把 `awsCredentialExport` 换成 `"<naozhi 绝对路径>" aws-credential-export --profile my-isengard`，并删掉基底里的 `awsAuthRefresh`（它属于另一个凭证来源）。`naozhi aws-credential-export` 用 Go AWS SDK 以**程序指定的 profile** 解析 `~/.aws/config`（credential_process / SSO / 静态密钥都行），按 CLI 要的 `{"Credentials":{AccessKeyId,SecretAccessKey,SessionToken,Expiration}}` 打印。程序指定的 profile 优先于环境里的 `AWS_ACCESS_KEY_ID` / `AWS_PROFILE`，所以 CLI 继承的全局凭证顶替不了它。
+
+**不变量**：
+- **只在 config.yaml 声明**。`project.yaml`（可能随 git 同步）里出现 `aws_profile` 或 `access_profiles` 键 → 该项目加载失败并 warn（不是静默忽略）；`PUT /api/projects/config` 的 JSON 解码本就拒绝未知字段。dashboard 的建档表单（「Isengard / 自定义 AWS profile」模板）经 `AppendAccessProfile` 写进 config.yaml，与加载走同一个校验。
+- **settings.json 改不了指向**：会话 settings 文件每次 spawn 从 config 重写；它走 `--settings`，压过 naozhi-settings.json、`~/.claude/settings.json` 和项目的 `.claude/settings*.json` 同名键。
+- **校验**：profile 名过 envpolicy 的 profile guard（`^[A-Za-z0-9_-]{1,64}$`，与 shim 侧 `AWS_PROFILE` 同一条正则）；命令行里的 naozhi 路径须是绝对路径、用双引号包住，含 `"` `\` `$` `` ` `` 或换行即拒（CLI 经 shell 跑这条命令）。
+- **不经 env、不动 shim**：shim 白名单、overlay 允许集、`awsEnvDenyList` 一行不改。
+- **fail-loud**：档带 `aws_profile` 却落在非 claude backend、没有会话 settings 目录、或拿不到 naozhi 可执行路径 → spawn 失败，绝不回落到全局凭证。profile 在 `~/.aws/config` 里解析不出 → CLI 第一次调 Bedrock 时报凭证错误，同样不回落。
+- **恢复锁档**：§7 的锁定对象是档 ID；恢复时按记录的档重新取 `aws_profile`，项目改绑别的档不会换账号。操作者自己改了这个档的 `aws_profile`，下次 spawn 才生效（这是操作者的决定）。
+- **默认不变**：没有档、档没有 `aws_profile` 时，会话 settings 文件照旧继承 naozhi-settings.json 的 `awsCredentialExport`；不写会话 settings 的会话仍用 `--settings naozhi-settings.json`，argv 不变。
+
+**边界说明**：这条是「CLI 自己调 Bedrock 用哪份凭证」的选择边界，不是隔离边界——会话里的工具与 naozhi 同一个系统用户，本来就能读 `~/.aws/config`。D87 已接受的项目 env（`.claude/settings*.json` 的 `env`）仍可改 `AWS_CONFIG_FILE` 这类变量，影响 profile 的解析位置，与终端里在该目录跑 claude 的信任相同。
 
 ---
 
@@ -230,7 +265,7 @@ shim 的价值是持久进程复用（避免每次 spawn 冷启动）。但**不
 |---|---|---|
 | shim 用精确 key、**禁**通配前缀 | R214/R219-SEC-3 | overlay 只在**已有精确集合**内覆盖 value，不新增可放行 key，不引入通配 |
 | base-URL SSRF guard（loopback http / https 放行，非 loopback http 拒，IMDS 拒） | R090031-SEC-1 | overlay 的 `ANTHROPIC_*BASE_URL` value 过 `envpolicy.ValidateBaseURLValue`；`http://127.0.0.1:8889` 合法，`https://api.anthropic.com` 合法，`http://169.254.169.254` 拒 |
-| AWS profile 值校验 `^[A-Za-z0-9_-]{1,64}$` | R20260603-SEC-1 | overlay 若含 `AWS_REGION` 过 `envpolicy.IsSafeProfileValue` 同族校验；`AWS_PROFILE` 不在本轮 overlay 允许集（§3 约束） |
+| AWS profile 值校验 `^[A-Za-z0-9_-]{1,64}$` | R20260603-SEC-1 | overlay 若含 `AWS_REGION` 过 `envpolicy.IsSafeProfileValue` 同族校验；`AWS_PROFILE` 不在 overlay 允许集（§3 约束）；档的 `aws_profile` 过同一条正则（`envpolicy.ValidateAWSProfileName`，§3.1） |
 | per-backend 凭据矩阵（Bedrock 部署不泄漏 `ANTHROPIC_API_KEY`） | R040034-SEC-4 | overlay 解析后过 `envpolicy.DetectBackendFromEnv` → `EnvCredsForBackend`：若 profile 声明 Bedrock 模式却带 `ANTHROPIC_API_KEY`，按矩阵 gate 掉并 warn |
 | `CLAUDE_` kill-switch 拒绝 | R20260603-SEC-8 | `claudeEnvDenyList` 原地生效，overlay 不能引入 kill-switch |
 
@@ -418,9 +453,13 @@ type AgentOpts struct {
 
 cc child 走 `--setting-sources user` 直接读 `~/.claude/settings.json`（direct-user-settings RFC §7.1 记录的有意非对称）。access profile overlay 作用于**子进程 env**，与 settings.json 的 `env` 段是两条路径：overlay 的 env 优先级**高于** settings.json（因为它在 cmd.Env 上覆盖）。需在文档明确：**access profile 覆盖 settings.json 的同名 env**（这正是我们要的——让项目档压过全局默认）。
 
-### 11.3 未来：多账号 Bedrock（非本轮）
+### 11.3 多账号 Bedrock
 
-若要真正的多 AWS 账号 Bedrock（而非同账号跨区），正确做法是**多开 proxy 实例**：每个绑不同 AWS profile/region，各监听不同 loopback 端口（`:8889` / `:8890` …）。access profile 只切 `ANTHROPIC_BEDROCK_BASE_URL` 指向对应端口。凭据始终在 proxy 侧、不进 naozhi、不碰 `awsEnvDenyList`。本 RFC 的 access profile 机制**天然支持**这个未来（换 base-URL 而已），无需再改 naozhi。
+两条路都可用，按凭证在哪选：
+- **CLI 自己签名**（本机 toolbox / Isengard 场景，没有 proxy）：档声明 `aws_profile`（§3.1）。凭证来源是操作者 `~/.aws/config` 里的 profile，naozhi 只把会话的 `awsCredentialExport` 绑到它；不进 env，不碰 `awsEnvDenyList`。
+- **proxy 签名**（`CLAUDE_CODE_SKIP_BEDROCK_AUTH=1` 的链路）：多开 proxy 实例，各绑一个 AWS profile、监听不同 loopback 端口，档只切 `ANTHROPIC_BEDROCK_BASE_URL`。凭据始终在 proxy 侧。
+
+原先的「多账号只能走多 proxy 实例」是在没有按会话 settings 文件时的约束；会话 settings 文件（naozhi-owned-settings / planner 的 launch spec）落地后，凭证来源可以按会话换而不经 env，所以放开为上面两条。
 
 ---
 
@@ -451,6 +490,13 @@ cc child 走 `--setting-sources user` 直接读 `~/.claude/settings.json`（dire
    - 建议：两者都支持但 project 顶层 `backend` 优先——让「1P 档默认配 claude、但某项目想在 1P 下用别的」成为可能。
 5. **单账号跨区（诉求 2 现状）够用吗，还是首发就要多 proxy 实例（§11.3）**？
    - 建议：本轮只做单 proxy（换 base-URL/region 已满足 JD 诉求）；多 proxy 留到有真实多账号需求。
+6. **D6（2026-11-10，用户定：方案 3）档自带凭证来源用哪种形状？** 比较了三种：
+   | 做法 | 优点 | 否决 / 采用理由 |
+   |---|---|---|
+   | A. 每档一个 settings 文件（`--settings <路径>`） | 什么键都能配 | 否决。settings 文件放在 Claude 工具能写的地方，一个会话改了它就改了这个档所有会话的凭证来源，正是「settings.json 不能改指」要防的；CLI 只吃一个 `--settings`，还要和 naozhi-settings.json、会话覆盖合并，档文件与全局 settings 会各自漂移 |
+   | B. 每档自带 `awsCredentialExport` 命令 | 任何出凭证的方式都能接 | 否决。config.yaml 里是任意 shell 命令，没法照现有 guard 的风格校验（只能「信任整串」）；dashboard 建档也会变成写命令的入口；把 ada / Isengard 参数抄进 naozhi 配置，和 `~/.aws/config` 里已有的同一份声明重复 |
+   | **C. 每档声明 AWS profile 名，由 naozhi 生成凭证导出** | 声明只是一个名字，用 profile guard 的正则校验；真正的凭证机制留在操作者本来就维护的 `~/.aws/config`（Isengard 就是 `credential_process = ada …`）；生成的命令只有 naozhi 自己的路径和这个名字 | **采用**。多一个子命令 `naozhi aws-credential-export`；命令绑定 naozhi 的路径，`naozhi upgrade` 原地替换不改路径 |
+   落地见 §3.1。
 
 ---
 
@@ -462,5 +508,6 @@ cc child 走 `--setting-sources user` 直接读 `~/.claude/settings.json`（dire
 4. **诉求 3**：某项目绑定 `backend: kiro`，会话用 ACP wrapper，派到声明 `acp` cap 的节点。
 5. **安全**：overlay 无法注入放行集合外的 key；Bedrock 模式下 `ANTHROPIC_API_KEY` 被矩阵 gate；SSRF guard 对 overlay 生效；所有 envpolicy/shim pin 测试不改断言全绿。
 6. **resume 锁定**：dead session 恢复沿用历史档，不被 project 新档覆盖。
+6a. **档自带凭证**（§3.1）：带 `aws_profile` 的档的会话，settings 文件里的 `awsCredentialExport` 指向该 profile；其他会话仍是全局的；project.yaml 声明凭证来源被拒。
 7. **UI**：项目设置面板可读写 access_profile/backend/planner_*，未知值 inline 报错；picker 单档隐藏；chip 不泄漏认证细节；axe-core 无 violation。
 8. `go test -race -count=1 ./...` 全绿。

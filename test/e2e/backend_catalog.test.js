@@ -9,6 +9,8 @@
 //     catalog, preselects the project's saved values, shows a profile whose
 //     secret is missing as a disabled option, and labels the effective-link
 //     preview with the profile's display name.
+//   - The create-profile form's Isengard / AWS profile template posts the
+//     profile name and region, and no token.
 //
 // 跑法：cd test/e2e && npx playwright test backend_catalog.test.js --project=desktop-chrome
 
@@ -91,4 +93,39 @@ test('project settings draws its pickers from the catalog and preselects the sav
   await expect(profile.locator('option[value="broken"]')).toBeDisabled();
   await expect(profile.locator('option[value="broken"]')).toHaveText('Broken ⚠ 凭证缺失');
   await expect(page.locator('#ps-preview')).toHaveText('生效链路：Team Bedrock → opus');
+});
+
+test('the Isengard / AWS profile template posts the profile name and region, never a token', async ({ page }) => {
+  await page.route(url => url.pathname === '/api/cli/backends', route => route.fulfill(json(MANIFEST)));
+  await page.route(url => url.pathname === '/api/projects/config', route => route.fulfill(json({})));
+  let posted = null;
+  await page.route(url => url.pathname === '/api/access-profiles', route => {
+    if (route.request().method() === 'POST') {
+      posted = route.request().postDataJSON();
+      return route.fulfill(json({ ok: true, id: posted.id }));
+    }
+    return route.fulfill(json(PROFILES));
+  });
+  await page.goto(`${mock.url}/dashboard`);
+  await page.locator('[data-action="project-settings"][data-name="myproject"]').click();
+  await page.locator('[data-action="ps-new-profile"]').click();
+
+  await page.locator('#cap-template').selectOption('aws-profile');
+  await expect(page.locator('#cap-aws-wrap')).toBeVisible();
+  await expect(page.locator('#cap-token-wrap')).toBeHidden();
+  await expect(page.locator('#cap-aws-region')).toHaveValue('us-west-2');
+  await page.locator('#cap-id').fill('iso');
+
+  // A name the server would refuse is stopped in the form.
+  await page.locator('#cap-aws-profile').fill('bad name');
+  await page.locator('[data-action="cap-create"]').click();
+  await expect(page.locator('#cap-error')).toContainText('AWS profile');
+  expect(posted).toBeNull();
+
+  await page.locator('#cap-aws-profile').fill('my-isengard');
+  await page.locator('[data-action="cap-create"]').click();
+  await expect.poll(() => posted).not.toBeNull();
+  expect(posted.aws_profile).toBe('my-isengard');
+  expect(posted.env).toEqual({ CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_SKIP_BEDROCK_AUTH: '0', AWS_REGION: 'us-west-2' });
+  expect(posted.token_content).toBeUndefined();
 });

@@ -183,6 +183,43 @@ func TestLoadConfig_InvalidYAML(t *testing.T) {
 	}
 }
 
+// A project.yaml may come in with a git pull, so it can name an access
+// profile but not declare a credential source: one that tries is refused
+// rather than read with the key silently dropped.
+func TestLoadConfig_RejectsCredentialSources(t *testing.T) {
+	t.Parallel()
+	for name, content := range map[string]string{
+		"aws_profile":     "access_profile: iso\naws_profile: admin\n",
+		"access_profiles": "access_profiles:\n  iso:\n    aws_profile: admin\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			cfgDir := filepath.Join(dir, ".naozhi")
+			if err := os.MkdirAll(cfgDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(cfgDir, "project.yaml"), []byte(content), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := loadConfig(dir); err == nil || !strings.Contains(err.Error(), "credential source") {
+				t.Errorf("loadConfig = %v, want a credential-source refusal", err)
+			}
+		})
+	}
+	// Naming a profile stays fine.
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".naozhi"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".naozhi", "project.yaml"), []byte("access_profile: iso\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err := loadConfig(dir); err != nil || cfg.AccessProfile != "iso" {
+		t.Errorf("loadConfig(access_profile only) = %+v, %v", cfg, err)
+	}
+}
+
 // ---- saveConfigToPath ----
 
 func TestSaveConfigToPath_RoundTrip(t *testing.T) {

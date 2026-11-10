@@ -22,9 +22,10 @@ import (
 // launchSpecFor turns the overlay's per-session launch fields into the
 // LaunchSpec ArgvSpawnOptions renders. Shared by the spawn and the drift
 // check: the settings path is a pure function of the key, so a surviving
-// shim's argv rebuilds exactly. Pure; the spawn writes the file itself
-// (writeSessionSettings).
-func (c *spawnConfig) launchSpecFor(key string, ov shim.SpawnOverlay) LaunchSpec {
+// shim's argv rebuilds exactly. ownCreds is whether the session's access
+// profile has its own credential source (aws_profile), which also lives in
+// that file. Pure; the spawn writes the file itself (writeSessionSettings).
+func (c *spawnConfig) launchSpecFor(key string, ov shim.SpawnOverlay, ownCreds bool) LaunchSpec {
 	ls := LaunchSpec{
 		Tools:           ov.Tools,
 		PermissionMode:  ov.PermissionMode,
@@ -36,7 +37,7 @@ func (c *spawnConfig) launchSpecFor(key string, ov shim.SpawnOverlay) LaunchSpec
 		// a scout session, whose rules are its own settings alone (§15.6).
 		ProjectSettings: key != sessionkey.PlannerMainKey && !sessionkey.IsOneShotKey(key),
 	}
-	if hasSettingsOverrides(ov) && c.sessionSettingsDir != "" {
+	if (ownCreds || hasSettingsOverrides(ov)) && c.sessionSettingsDir != "" {
 		ls.SettingsFile = filepath.Join(c.sessionSettingsDir, persist.KeyHash(key)+".json")
 	}
 	return ls
@@ -49,10 +50,12 @@ func hasSettingsOverrides(ov shim.SpawnOverlay) bool {
 // writeSessionSettings writes the per-session settings file at path: the
 // naozhi-owned settings file base (or {} when base is "" and the CLI loads
 // ~/.claude/settings.json itself) plus ov's crossSessionInbound,
-// permissions.deny / permissions.allow, ultracode and promptCacheTtl.
-// Rewritten on every spawn, so a base edit reaches the session on its next
-// spawn, not live.
-func writeSessionSettings(path, base string, ov shim.SpawnOverlay) error {
+// permissions.deny / permissions.allow, ultracode and promptCacheTtl, and,
+// when credExport is set, the access profile's awsCredentialExport in place
+// of the base file's (its awsAuthRefresh belongs to that other source and is
+// dropped). Rewritten on every spawn from config, so neither a base edit nor
+// an edit of this file outlives the next spawn.
+func writeSessionSettings(path, base string, ov shim.SpawnOverlay, credExport string) error {
 	doc := map[string]any{}
 	if base != "" {
 		data, err := os.ReadFile(base)
@@ -74,6 +77,10 @@ func writeSessionSettings(path, base string, ov shim.SpawnOverlay) error {
 	}
 	if ov.PromptCacheTTL != "" {
 		doc["promptCacheTtl"] = ov.PromptCacheTTL
+	}
+	if credExport != "" {
+		doc["awsCredentialExport"] = credExport
+		delete(doc, "awsAuthRefresh")
 	}
 	addPermissionRules(doc, "deny", ov.PermissionsDeny)
 	addPermissionRules(doc, "allow", ov.PermissionsAllow)

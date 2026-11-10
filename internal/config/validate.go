@@ -186,6 +186,9 @@ func validateAccessProfiles(cfg *Config) error {
 				return fmt.Errorf("access_profiles[%s].env: %w", name, err)
 			}
 		}
+		if err := envpolicy.ValidateAWSProfileName(ap.AWSProfile); err != nil {
+			return fmt.Errorf("access_profiles[%s].aws_profile: %w", name, err)
+		}
 		if ap.DefaultBackend != "" && !backends[ap.DefaultBackend] {
 			return fmt.Errorf("access_profiles[%s].default_backend %q is not an enabled backend", name, ap.DefaultBackend)
 		}

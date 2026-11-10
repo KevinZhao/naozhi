@@ -97,6 +97,7 @@ func configAccessProfile(ap session.AccessProfile) config.AccessProfile {
 		ChipColor:      ap.ChipColor,
 		DefaultModel:   ap.DefaultModel,
 		DefaultBackend: ap.DefaultBackend,
+		AWSProfile:     ap.AWSProfile,
 	}
 	if len(ap.Env) > 0 {
 		out.Env = ap.Env

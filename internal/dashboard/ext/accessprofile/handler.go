@@ -57,6 +57,10 @@ type createReq struct {
 	DefaultModel   string            `json:"default_model"`
 	DefaultBackend string            `json:"default_backend"`
 	Env            map[string]string `json:"env"`
+	// AWSProfile names an ~/.aws/config profile the sessions take their
+	// Bedrock credentials from (config.AccessProfile.AWSProfile). Only a
+	// name: what it resolves to stays in the operator's AWS config.
+	AWSProfile string `json:"aws_profile"`
 	// TokenEnvKey MUST be a *_FILE indirection key (ANTHROPIC_AUTH_TOKEN_FILE /
 	// ANTHROPIC_API_KEY_FILE): the secret lands in a 0600 file, never in
 	// config.yaml or later reads.
@@ -130,6 +134,7 @@ func (h *Handler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		DefaultModel:   strings.TrimSpace(req.DefaultModel),
 		DefaultBackend: strings.TrimSpace(req.DefaultBackend),
 		Env:            env,
+		AWSProfile:     strings.TrimSpace(req.AWSProfile),
 	}
 	if ap.DefaultBackend != "" && !h.backendEnabled(ap.DefaultBackend) {
 		h.cleanupOrphanSecret(secretWritten)
@@ -154,6 +159,7 @@ func (h *Handler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		DefaultModel:   ap.DefaultModel,
 		DefaultBackend: ap.DefaultBackend,
 		Env:            ap.Env,
+		AWSProfile:     ap.AWSProfile,
 	}); err != nil {
 		// config.yaml already has it; a restart picks it up. Soft error.
 		slog.Error("access profile: live registry add failed after config write", "id", req.ID, "err", err)
@@ -161,7 +167,7 @@ func (h *Handler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("access profile created", "id", req.ID, "has_secret", req.TokenContent != "")
+	slog.Info("access profile created", "id", req.ID, "has_secret", req.TokenContent != "", "aws_profile", ap.AWSProfile)
 	httputil.WriteJSON(w, map[string]any{"ok": true, "id": req.ID})
 }
 
