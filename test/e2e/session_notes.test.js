@@ -64,7 +64,7 @@ test('side notes sit among the bubbles by time, arrive live and start no turn', 
     // A live note lands at the end, and nothing reads as a running turn.
     conn.send({ type: 'session_note', key: A, note: { id: 'h3', key: A, time: iso(Date.now()), kind: 'health', from: 'idle', to: 'waiting' } });
     await expect(pane.locator('.gw-note').last()).toHaveAttribute('data-note-id', 'h3');
-    await expect(pane.locator('[data-note-id="h3"]')).toContainText('进入「待你回复」');
+    await expect(pane.locator('[data-note-id="h3"]')).toContainText('进入「等你」');
     await expect(page.locator('#running-banner')).toHaveClass(/nz-hidden/);
     await expect(page.locator('#btn-stop')).toBeHidden();
     await expect(page.locator('#rb-elapsed')).toHaveText('');

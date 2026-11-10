@@ -1,9 +1,10 @@
 // E2E: the 会话 sidebar's "等你 N" bar (side_wait.js, planner RFC §15.3 ①,
 // §15.7 S1) — the questions, decisions and errors, the rail badge's count,
-// their cards unfolded in place without an inner scroll and closed or
-// answered there, no 任务, and not rendered with none — and the deep links of
-// §15.3 ④ (notify.js): #planner&item=<id> and a notification without a
-// session open the Planner on the item, the brief's #planner the page too;
+// at most three of their cards unfolded in place without an inner scroll,
+// the rest a link to the Planner page away, and closed or answered there,
+// no 任务, and not rendered with none — and the deep links of §15.3 ④
+// (notify.js): #planner&item=<id> and a notification without a session
+// open the Planner on the item, the brief's #planner the page too;
 // #session=<key>&item=<id> opens the session and scrolls to the item's note,
 // or the Planner when the session is not listed.
 const { test, expect } = require('@playwright/test');
@@ -45,13 +46,19 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
         await page.goto(mock.url + '/dashboard');
         await waitForWs(page, 'CONNECTED');
         await page.click('#sw-toggle');
-        await expect(page.locator('#sw-wait .pl-card')).toHaveCount(12);
+        // Three cards and a link to the rest (UX review 12): no scroll
+        // inside the sidebar's own.
+        await expect(page.locator('#sw-wait .pl-card')).toHaveCount(3);
+        const all = page.locator('#sw-wait .sw-all');
+        await expect(all).toHaveText('去 Planner 页看全部 12 条');
+        await expect(all).toBeInViewport();
+        expect(await page.locator('#side-wait').evaluate((el) => el.scrollHeight <= el.clientHeight)).toBe(true);
         expect((await page.locator('#session-list').boundingBox()).height).toBeGreaterThan(viewport.height * 0.3);
         await expect(page.locator('#session-list .session-card').first()).toBeInViewport();
-        // The bar scrolls as a whole to its last card.
-        await page.locator('#sw-wait .pl-card[data-id="in_11"]').scrollIntoViewIfNeeded();
-        await expect(page.locator('#sw-wait .pl-card[data-id="in_11"]')).toBeInViewport();
         await page.screenshot({ path: test.info().outputPath(`side-wait-long-${name}.png`) });
+        await all.click();
+        await expect(page.locator('body')).toHaveClass(/nz-view-planner/);
+        if (name === 'desktop') await expect(page.locator('#pl-wait .pl-card')).toHaveCount(12);
       } finally {
         await ctx.close();
         mock.server.close();

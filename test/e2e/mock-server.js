@@ -401,6 +401,8 @@ function startMockServer(overrides = {}) {
 
   let sendCalls = [];
   let bindCalls = [];
+  // DELETE /api/sessions bodies, in order.
+  const deleteCalls = [];
   let loginCalls = [];
   let favoriteCalls = [];
   let authedCookies = new Set();
@@ -918,6 +920,7 @@ function startMockServer(overrides = {}) {
       req.on('end', () => {
         try {
           const b = JSON.parse(body || '{}');
+          deleteCalls.push(b);
           const list = sessionsData.sessions || [];
           const i = list.findIndex(x => x.key === b.key && (x.node || 'local') === (b.node || 'local'));
           if (i >= 0) list.splice(i, 1);
@@ -1367,6 +1370,7 @@ function startMockServer(overrides = {}) {
         url: `http://127.0.0.1:${port}`,
         get sendCalls() { return sendCalls; },
         get bindCalls() { return bindCalls; },
+        get deleteCalls() { return deleteCalls; },
         get loginCalls() { return loginCalls; },
         get favoriteCalls() { return favoriteCalls; },
         get wsConnections() { return wsConnections; },

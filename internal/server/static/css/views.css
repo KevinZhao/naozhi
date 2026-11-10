@@ -96,8 +96,8 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 /* 全会话健康: the health state machine's table. On a phone the workspace
    column folds under the name (responsive.css); anything still too wide
    scrolls sideways inside .hl-scroll. State colours follow the mockup and
-   the daemon cards: 活跃 uses --nz-accent like .sys-state-dot.running, and
-   待你回复 shares 失败's red because both need the user. */
+   the daemon cards: 在跑 uses --nz-accent like .sys-state-dot.running;
+   等你 is amber as its sidebar dot, red is 失败's alone. */
 .sys-health{margin-top:var(--nz-space-5);padding-top:var(--nz-space-4);border-top:1px solid var(--nz-border)}
 /* Without daemons the overview's own bottom rule already separates it. */
 .svc-overview + .sys-health{margin-top:0;border-top:0}
@@ -121,7 +121,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .hl-num{font-variant-numeric:tabular-nums;color:var(--nz-text-mute)}
 .hl-state{display:inline-flex;align-items:center;gap:5px;color:var(--nz-text-mute)}
 .hl-state::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;flex-shrink:0}
-.hl-state.fail,.hl-state.ask{color:var(--nz-red)}
+.hl-state.fail{color:var(--nz-red)}
 .hl-state.warn{color:var(--nz-amber)}
 .hl-state.run{color:var(--nz-accent)}
 .hl-state.idle{color:var(--nz-text-mute)}
@@ -212,14 +212,17 @@ button.tk-report:hover .tk-report-t{text-decoration:underline}
    unfolded, the Planner left column's cards at their full height above the
    session list. Only a bar taller than what the
    session list leaves it scrolls, as a whole. */
+/* At most three cards (side_wait.js SHOWN) fit without scrolling; the
+   overflow only guards a sidebar too short for them. */
 .side-wait{flex-shrink:1;min-height:0;overflow-y:auto;border-bottom:1px solid var(--nz-border);background:var(--nz-bg-1)}
 .sw-toggle{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:8px 16px;border:0;background:none;color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-sm2);cursor:pointer;text-align:left}
 .sw-toggle:hover{background:var(--nz-bg-2)}
 .sw-toggle b{color:var(--nz-text-strong);font-variant-numeric:tabular-nums}
 .sw-toggle svg{width:14px;height:14px;flex-shrink:0;stroke:currentColor;fill:none;stroke-width:2;transition:transform var(--nz-dur) var(--nz-ease)}
 .side-wait.sw-open .sw-toggle svg{transform:rotate(180deg)}
-.sw-body{padding:4px 12px 12px}
+.sw-body{padding:4px 12px 6px}
 .sw-body[hidden]{display:none}
+.sw-all{display:inline-block;margin-top:2px;font-size:var(--nz-fs-xs)}
 /* An item a notification or link opened (notify.js), for a few seconds. */
 .inbox-lit{box-shadow:0 0 0 2px var(--nz-focus);transition:box-shadow .4s var(--nz-ease)}
 
@@ -247,7 +250,9 @@ body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
 .pl-k-error .pl-kind{color:var(--nz-red)}
 .pl-wait{font-variant-numeric:tabular-nums}
 .pl-close{margin-left:auto;min-width:24px;min-height:24px;display:inline-flex;align-items:center;justify-content:center;font-size:var(--nz-fs-md);padding:0 2px;color:var(--nz-text-mute)}
-.pl-close:hover{color:var(--nz-text)}
+/* Over .btn-close's faint grey: the × keeps ≥3:1. */
+.pl-close.btn-close{color:var(--nz-text-mute)}
+.pl-close.btn-close:hover{color:var(--nz-text)}
 .pl-card-title{margin-top:4px;color:var(--nz-text-strong);font-weight:600;word-break:break-word}
 .pl-card-why{margin-top:2px;color:var(--nz-text-mute);font-size:var(--nz-fs-xs);word-break:break-word;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden}
 .pl-card-meta{margin-top:4px;color:var(--nz-text-dim);font-size:var(--nz-fs-xs);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -268,9 +273,16 @@ body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
 .pl-btn:hover:not(:disabled){background:var(--nz-bg-2)}
 .pl-btn.pri{border-color:var(--nz-accent);color:var(--nz-accent)}
 .pl-btn:disabled{opacity:.55;cursor:default}
-.pl-empty{color:var(--nz-text-faint);font-size:var(--nz-fs-sm);padding:6px 2px}
+/* Empty states in --nz-text-mute: ≥4.5:1 on either theme's panels. */
+.pl-empty{color:var(--nz-text-mute);font-size:var(--nz-fs-sm);padding:6px 2px}
 .pl-empty span{display:block;font-size:var(--nz-fs-xs);margin-top:2px}
 .pl-events>#pl-stream>.pl-empty{text-align:center;padding:40px 20px}
+/* The empty conversation's examples (planner_view.js EXAMPLES): a tap fills
+   the input box. */
+.pl-examples{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin-top:14px}
+.pl-example{min-height:32px;padding:4px 12px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-pill);background:var(--nz-bg-1);color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-sm);cursor:pointer}
+.pl-example:hover{border-color:var(--nz-accent);color:var(--nz-accent)}
+.pl-example:focus-visible{outline:2px solid var(--nz-focus);outline-offset:1px}
 .pl-more{position:relative}
 .pl-more>summary{list-style:none}
 .pl-more>summary::-webkit-details-marker{display:none}
@@ -583,8 +595,9 @@ body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
    brand. */
 .sidebar-header h1{font-size:var(--nz-fs-md);color:var(--nz-rust);font-weight:600;font-style:italic;font-family:var(--nz-font-mono);letter-spacing:-.01em}
 .sidebar-header h1::before{content:">_";color:var(--nz-rust);margin-right:6px;font-weight:700}
-/* An unfolded 通知 bar above (.side-wait) leaves the list this much. */
-.session-list{flex:1;min-height:40%;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent}
+/* An unfolded 通知 bar above (.side-wait) leaves the list this much: its
+   three cards fit a phone's sidebar beside it. */
+.session-list{flex:1;min-height:30%;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent}
 
 .sidebar-status{padding:6px 16px;border-top:1px solid var(--nz-border);font-size:var(--nz-fs-sm);color:var(--nz-text-mute);flex-shrink:0;max-height:40%;overflow-y:auto}
 .sidebar-status .status-row{display:flex;align-items:center;gap:8px;padding:4px 0}
@@ -623,7 +636,7 @@ body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
    are unchanged. */
 .btn-close{background:none;border:none;cursor:pointer;line-height:1;color:var(--nz-text-faint)}
 .btn-close:hover{color:var(--nz-text)}
-.session-card .btn-dismiss{position:absolute;top:4px;right:6px;background:none;border:none;color:var(--nz-text-faint);font-size:17px;cursor:pointer;padding:0 4px;line-height:1;opacity:0;transition:opacity .15s}
+.session-card .btn-dismiss{position:absolute;top:2px;right:4px;min-width:24px;min-height:24px;display:flex;align-items:center;justify-content:center;background:none;border:none;color:var(--nz-text-mute);font-size:17px;cursor:pointer;padding:0 4px;line-height:1;opacity:0;transition:opacity .15s}
 .session-card:hover .btn-dismiss{opacity:1}
 .session-card .btn-dismiss:hover{color:var(--nz-red)}
 
@@ -971,7 +984,7 @@ body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
 .nz-prompt{font-family:var(--nz-font-mono);font-size:var(--nz-fs-display);opacity:.4;color:var(--nz-text-mute);user-select:none}
 .nz-prompt b{color:var(--nz-rust);font-weight:400;animation:nz-blink 1.1s steps(1) infinite}
 @keyframes nz-blink{0%,49%{opacity:.9}50%,100%{opacity:.12}}
-.no-sessions{padding:40px 16px;text-align:center;color:var(--nz-text-faint);font-size:var(--nz-fs-base)}
+.no-sessions{padding:40px 16px;text-align:center;color:var(--nz-text-mute);font-size:var(--nz-fs-base)}
 .no-sessions-cta{margin-top:12px;padding:8px 16px;background:rgba(31,111,235,.12);border:1px solid var(--nz-blue);border-radius:var(--nz-radius-ms);color:var(--nz-accent);font-family:inherit;font-size:var(--nz-fs-sm2);cursor:pointer;min-height:36px}
 .no-sessions-cta:hover{background:rgba(31,111,235,.2)}
 /* Quick-ask 空态输入框：默认目录 + general agent 的"问一下"入口 */

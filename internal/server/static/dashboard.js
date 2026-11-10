@@ -87,7 +87,7 @@ import { backendDisplayName, backendDisplayVersion, createNewSession, doCreateSe
 import { fetchAccessProfiles, fetchCLIBackends } from './backend_catalog.js';
 import { pendingBackendID } from './features.js';
 import { handleKey, sendMessage } from './send_message.js';
-import { collectWorkspaceSessionIDs, fetchSessions, onSessionsApplied, originBadgeHtml, refreshHeaderExitChip, restorePending, toggleOnlyDispatched, updateCardUnreadChip, updateMainState } from './session_list.js';
+import { collectWorkspaceSessionIDs, fetchSessions, onSessionsApplied, originBadgeHtml, refreshHeaderExitChip, restorePending, toggleOnlyDispatched, toggleOnlyNeedsYou, updateCardUnreadChip, updateMainState } from './session_list.js';
 import { findDiscovered, isDiscoveredKey, matchProject, parseDiscoveredPid, sid } from './session_ident.js';
 import { ICONS } from './icons.js';
 import { initLightbox } from './lightbox.js';
@@ -107,6 +107,10 @@ sessionList.collapsedProjects = (function() {
 })();
 sessionList.onlyDispatched = (function() {
   try { return localStorage.getItem('nz_sidebarOnlyDispatched') === '1'; }
+  catch(_) { return false; }
+})();
+sessionList.onlyNeedsYou = (function() {
+  try { return localStorage.getItem('nz_sidebarOnlyNeedsYou') === '1'; }
   catch(_) { return false; }
 })();
 // selectedNode doubles as (a) the node the currently-selected session lives on
@@ -1357,11 +1361,11 @@ function renderMainShell() {
         '<button type="button" class="btn-icon btn-mic" id="btn-mic" data-action="input-mode-toggle" title="' + (composer.voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3') + '" aria-label="' + (composer.voiceInputMode ? '\u5207\u6362\u5230\u952e\u76d8\u8f93\u5165' : '\u5207\u6362\u5230\u8bed\u97f3\u8f93\u5165') + '">' + (composer.voiceInputMode ? ICONS.keyboard : ICONS.mic) + '</button>' +
         '<div id="msg-input" contenteditable="true" role="textbox" aria-label="消息输入框" aria-multiline="true" data-placeholder="发消息…" data-action-keydown="msg-input-key" data-action-compositionend="msg-input-compend"></div>' +
         '<button type="button" class="btn-hold-talk" id="btn-hold-talk" title="\u6309\u4f4f\u8bf4\u8bdd\u6539\u5f55\u97f3" aria-label="\u6309\u4f4f\u8bf4\u8bdd\u5f00\u59cb\u5f55\u97f3">\u6309\u4f4f\u8bf4\u8bdd</button>' +
-        '<button type="button" class="btn-handoff" id="btn-handoff" data-action="planner-handoff" hidden>交给 Planner</button>' +
+        '<button type="button" class="btn-handoff" id="btn-handoff" data-action="planner-handoff" aria-label="交给 Planner" hidden>交给<span class="btn-handoff-to"> Planner</span></button>' +
         '<button type="button" class="btn-icon btn-send" id="btn-send" data-action="msg-send" title="发送" aria-label="发送消息">' + ICONS.send + '</button>' +
         '<button type="button" class="btn-icon btn-stop" id="btn-stop" data-action="session-interrupt" title="停止" aria-label="停止当前回合">' + ICONS.stop + '</button>' +
       '</div>' +
-      '<div class="input-hints">Enter send &middot; Shift+Enter newline &middot; Esc interrupt</div>' +
+      '<div class="input-hints">Enter 发送 &middot; Shift+Enter 换行 &middot; Esc 中断</div>' +
       '<input type="file" id="file-input" accept="image/*,application/pdf" multiple class="nz-hidden" data-action-change="file-input-change">' +
     '</div>';
 
@@ -1781,6 +1785,7 @@ registerActions({
   // absorbed: project-header buttons (ex SIDEBAR_PROJECT_ACTIONS)
   'project-collapse': (el) => toggleProjectCollapsed(el.dataset.key),
   'sidebar-only-dispatched': () => toggleOnlyDispatched(),
+  'sidebar-only-need': () => toggleOnlyNeedsYou(),
   'project-favorite': (el) => toggleFavorite(el.dataset.name, el.dataset.node),
   'project-github': (el) => showGitRemote(el.dataset.url),
   'project-settings': (el) => openProjectSettings(el.dataset.name),

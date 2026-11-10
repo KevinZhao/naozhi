@@ -11,7 +11,7 @@
 // noteWorkbenchEvent).
 import { NZ_CONTRACT } from './contract.js';
 import { selection, sessionList, ui } from './state.js';
-import { esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
+import { HEALTH_STATES, esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
 import { REMOTE_FILES_UNSUPPORTED, isDiscoveredKey, nodeServesFiles, sid } from './session_ident.js';
 import { notePreviewEvent, openFilePreview, resolveProjectForAbsPath } from './file_refs.js';
 import { crumbsHtml, fileRowsHtml, isPreviewableOutput, mimeForPath, outputRowsHtml } from './file_rows.js';
@@ -172,10 +172,6 @@ function onFilesClick(e) {
 
 // ---- details ----
 
-const HEALTH_LABEL = {
-  active: '活跃', idle: '正常空闲', waiting: '待你回复', stalled: '停滞',
-  failed: '失败', lost: '失联', unknown: '未知',
-};
 
 function detailRows(rows) {
   return rows.filter((r) => r[1]).map((r) =>
@@ -202,7 +198,7 @@ function loadDetails() {
     if (!cur || cur.sid !== s.sid || !d) return;
     const h = d.health;
     const since = h && h.since ? Date.parse(h.since) : 0;
-    const healthText = h ? (HEALTH_LABEL[h.state] || h.state) + (since ? ' · 自 ' + formatTimeShort(since) + ' 起' : '') : '';
+    const healthText = h ? ((HEALTH_STATES[h.state] || {}).label || h.state) + (since ? ' · 自 ' + formatTimeShort(since) + ' 起' : '') : '';
     box.innerHTML = detailRows([
       base[0],
       ['跨会话名字', d.name || ''],

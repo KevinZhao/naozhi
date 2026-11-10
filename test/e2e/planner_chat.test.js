@@ -101,7 +101,14 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     const reply = page.locator('#pl-stream .event.text').first();
     const card = reply.locator('.pl-scards .pl-scard[data-key="' + SESSION + '"]');
     await expect(card.locator('.pl-scard-name')).toHaveText('hello world');
-    await expect(card.locator('.hl-state')).toHaveText('待你回复');
+    await expect(card.locator('.hl-state')).toHaveText('等你');
+    // 等你 is amber as its sidebar dot, not 失败's red (UX review 3).
+    const tone = await card.locator('.hl-state').evaluate((el) => {
+      const probe = (v) => { const p = document.createElement('span'); p.style.color = 'var(' + v + ')'; document.body.appendChild(p); const c = getComputedStyle(p).color; p.remove(); return c; };
+      return { got: getComputedStyle(el).color, amber: probe('--nz-amber'), red: probe('--nz-red') };
+    });
+    expect(tone.got).toBe(tone.amber);
+    expect(tone.got).not.toBe(tone.red);
     await expect(card.locator('.pl-scard-time')).toContainText('分钟前');
     // The keys after the names fold into the cards (§6.4: names, not keys).
     await expect(reply.locator('.pl-scards .pl-scard')).toHaveCount(2);
@@ -172,7 +179,7 @@ test('desktop: send to the Planner, cards, and a session opened in the middle co
     await expect(page.locator('#planner-main')).toHaveClass(/pl-sess-open/);
     await expect(page.locator('#pl-events')).toBeHidden();
     await expect(page.locator('.pl-crumb')).toHaveText(/Planner›hello world/);
-    await expect(page.locator('#pl-sess-line .hl-state')).toHaveText('待你回复');
+    await expect(page.locator('#pl-sess-line .hl-state')).toHaveText('等你');
     await expect(page.locator('#pl-sess-line .pl-scard-name')).toHaveCount(0);
     await expect(page.locator('#pl-sess .pl-btn', { hasText: '返回 Planner' })).toHaveCount(0);
     // Not a dispatched session: no 停止.
@@ -344,7 +351,7 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['pho
       await waitForWs(page, 'CONNECTED');
       await page.locator('#abnav-planner').click();
       const card = page.locator('#pl-stream .pl-scard[data-key="' + SESSION + '"]');
-      await expect(card.locator('.hl-state')).toHaveText('待你回复');
+      await expect(card.locator('.hl-state')).toHaveText('等你');
       const line = await card.locator('.pl-scard-line').boundingBox();
       const state = await card.locator('.hl-state').boundingBox();
       expect(state.x + state.width).toBeLessThanOrEqual(line.x + line.width + 0.5);
@@ -406,6 +413,14 @@ test('phone: input box, an opened session card and 交给 Planner fit', async ({
     await page.keyboard.type('iso 交给你');
     await expect(page.locator('#btn-handoff')).toBeInViewport();
     await expect(page.locator('#btn-send')).toBeInViewport();
+    // 交给 alone on one line (UX review 11): the input keeps its width.
+    const handoff = page.locator('#btn-handoff');
+    expect(await handoff.evaluate((el) => el.innerText.trim())).toBe('交给');
+    await expect(handoff).toHaveAttribute('aria-label', '交给 Planner');
+    const hb = await handoff.boundingBox();
+    expect(hb.height).toBeLessThanOrEqual(40);
+    expect(await handoff.evaluate((el) => el.scrollHeight <= el.clientHeight + 1 && el.getClientRects().length === 1)).toBe(true);
+    expect((await input.boundingBox()).width).toBeGreaterThanOrEqual(160);
     await page.screenshot({ path: test.info().outputPath('planner-chat-handoff-mobile.png') });
   } finally {
     await ctx.close();

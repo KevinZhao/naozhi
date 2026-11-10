@@ -40,7 +40,7 @@ test.describe('Sidebar & session list', () => {
     // Running session has dot-running
     const runningCard = page.locator('.session-card', { hasText: 'review this code' });
     await expect(runningCard.locator('.sc-dot')).toHaveClass(/dot-running/);
-    await expect(runningCard.locator('.sc-dot')).toHaveAttribute('title', '活跃');
+    await expect(runningCard.locator('.sc-dot')).toHaveAttribute('title', '在跑');
     await expect(runningCard.locator('.sc-meta')).not.toContainText('running');
 
     // Ready session has dot-ready

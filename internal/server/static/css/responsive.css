@@ -84,6 +84,9 @@
   .pl-left-toggle svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2;transition:transform var(--nz-dur) var(--nz-ease)}
   .planner-main.pl-left-open .pl-left-toggle svg{transform:rotate(180deg)}
   .pl-left .pl-left-body{display:none}
+  /* Nothing waits and there is no task: no 等你 0 · 任务 0 row. */
+  .planner-main.pl-left-none:not(.pl-left-open) .pl-left{display:none}
+  .planner-main.pl-left-none:not(.pl-left-open) .pl-center{padding-top:env(safe-area-inset-top)}
   .planner-main.pl-left-open .pl-left .pl-left-body{display:flex;padding-top:4px}
   .pl-head{height:44px;gap:6px;padding:0 12px}
   /* The header says 已暂停到 …; 恢复 is in "⋯". */
@@ -110,7 +113,9 @@
   .pl-composer{padding:6px 12px 10px}
   #pl-input{font-size:var(--nz-fs-md)} /* prevents iOS zoom on focus */
   .pl-sess-status{margin:8px 12px 0;flex-wrap:wrap}
-  .btn-handoff{width:46px;height:40px;padding:0 2px;white-space:normal;line-height:1.15;font-size:var(--nz-fs-2xs)}
+  /* 交给 alone, on one line: the input box keeps the width. */
+  .btn-handoff{height:40px;padding:0 8px;font-size:var(--nz-fs-xs)}
+  .btn-handoff-to{display:none}
   /* Nothing typed, nothing to hand over: the input row keeps its width. */
   .btn-handoff[data-empty]{display:none}
   .pl-cards{margin:4px 16px 12px}
@@ -149,11 +154,13 @@
   /* Input area: safe area bottom+sides padding */
   .input-area{flex-shrink:0;padding-left:max(12px,env(safe-area-inset-left));padding-right:max(12px,env(safe-area-inset-right));padding-bottom:max(12px,env(safe-area-inset-bottom))}
   /* Dismiss button always visible on touch screens */
-  .session-card .btn-dismiss{opacity:.6}
+  .session-card .btn-dismiss{opacity:1}
   /* Modal never wider than screen */
   .modal{width:min(360px,calc(100vw - 32px))}
   /* Toast at top so keyboard doesn't cover it */
   .toast{bottom:auto;top:max(16px,env(safe-area-inset-top));right:16px;left:16px;text-align:center}
+  /* 已移除 · 撤销 above the bottom bar, where the thumb is. */
+  .undo-toast{bottom:calc(var(--nz-tabbar-h) + 12px)}
   /* Remove tap flash on interactive elements */
   .session-card,.btn-icon,.btn-send{-webkit-tap-highlight-color:transparent}
   .sidebar-header{display:flex;flex-wrap:wrap;align-items:center;padding-top:max(16px,env(safe-area-inset-top));padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right))}
@@ -220,7 +227,7 @@
      overview stays reachable in the collapsed 运行记录 panel below. */
   .main-header .detail-runstats{display:none}
   .main-header .detail-custody :is(.custody-chip,.watch-chip){padding:2px 8px}
-  .session-card .btn-dismiss{top:6px;right:8px;min-width:32px;min-height:32px;font-size:var(--nz-fs-lg);display:flex;align-items:center;justify-content:center;opacity:.75}
+  .session-card .btn-dismiss{top:6px;right:8px;min-width:32px;min-height:32px;font-size:var(--nz-fs-lg);display:flex;align-items:center;justify-content:center;opacity:1}
   .btn-icon{width:40px;height:40px}
   .input-row #msg-input{font-size:var(--nz-fs-md)} /* prevents iOS zoom on focus */
   /* 480px override sets width/height, but the pointer:coarse rule uses
