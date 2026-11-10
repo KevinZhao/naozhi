@@ -11,6 +11,9 @@
 //     preview with the profile's display name.
 //   - The create-profile form's Isengard / AWS profile template posts the
 //     profile name and region, and no token.
+//   - One configured profile still draws the access-profile picker (the
+//     "（全局默认）" option makes it a choice) in the new-session flow and in
+//     project settings, whose preview names the profile; none draws no picker.
 //
 // 跑法：cd test/e2e && npx playwright test backend_catalog.test.js --project=desktop-chrome
 
@@ -128,4 +131,52 @@ test('the Isengard / AWS profile template posts the profile name and region, nev
   expect(posted.aws_profile).toBe('my-isengard');
   expect(posted.env).toEqual({ CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_SKIP_BEDROCK_AUTH: '0', AWS_REGION: 'us-west-2' });
   expect(posted.token_content).toBeUndefined();
+});
+
+const ONE_PROFILE = {
+  profiles: [{ id: 'isengard', display_name: 'isengard', default_model: 'opus', secret_ok: true }],
+  default: '',
+};
+
+test('one access profile is still a choice: the new-session picker offers it beside the global default', async ({ page }) => {
+  await page.route(url => url.pathname === '/api/cli/backends', route => route.fulfill(json(MANIFEST)));
+  await page.route(url => url.pathname === '/api/access-profiles', route => route.fulfill(json(ONE_PROFILE)));
+  await page.goto(`${mock.url}/dashboard`);
+  await page.locator('#btn-new-session').click();
+
+  const profile = page.locator('#new-access-profile');
+  await expect(profile).toBeVisible();
+  await expect(profile.locator('option')).toHaveText(['（全局默认）', 'isengard']);
+  await expect(profile).toHaveValue('');
+  await profile.selectOption('isengard');
+  await expect(profile).toHaveValue('isengard');
+});
+
+test('one access profile shows in project settings and its preview names it', async ({ page }) => {
+  await page.route(url => url.pathname === '/api/cli/backends', route => route.fulfill(json(MANIFEST)));
+  await page.route(url => url.pathname === '/api/access-profiles', route => route.fulfill(json(ONE_PROFILE)));
+  await page.route(url => url.pathname === '/api/projects/config', route => route.fulfill(json({ access_profile: 'isengard' })));
+  await page.goto(`${mock.url}/dashboard`);
+  await page.locator('[data-action="project-settings"][data-name="myproject"]').click();
+
+  const profile = page.locator('#ps-access-profile');
+  await expect(profile.locator('option')).toHaveText(['（全局默认）', 'isengard']);
+  await expect(profile).toHaveValue('isengard');
+  await expect(page.locator('#ps-preview')).toHaveText('生效链路：isengard → opus');
+});
+
+test('no access profile configured draws no picker', async ({ page }) => {
+  await page.route(url => url.pathname === '/api/cli/backends', route => route.fulfill(json(MANIFEST)));
+  await page.route(url => url.pathname === '/api/access-profiles', route => route.fulfill(json({ profiles: [], default: '' })));
+  await page.route(url => url.pathname === '/api/projects/config', route => route.fulfill(json({})));
+  await page.goto(`${mock.url}/dashboard`);
+  await page.locator('#btn-new-session').click();
+  // The backend picker is there, so the modal has drawn its pickers.
+  await expect(page.locator('#new-backend')).toBeVisible();
+  await expect(page.locator('#new-access-profile')).toHaveCount(0);
+  await page.goto(`${mock.url}/dashboard`);
+
+  await page.locator('[data-action="project-settings"][data-name="myproject"]').click();
+  await expect(page.locator('#ps-backend')).toBeVisible();
+  await expect(page.locator('#ps-access-profile')).toHaveCount(0);
 });
