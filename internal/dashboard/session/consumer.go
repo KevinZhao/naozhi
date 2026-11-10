@@ -29,11 +29,11 @@ import (
 	"github.com/naozhi/naozhi/internal/session/runhistory"
 )
 
-// RouterView is the 17 router methods this package calls. *session.Router
-// provides 13; sessionRouterView adds the two CLI facts from Backends() and
+// RouterView is the 18 router methods this package calls. *session.Router
+// provides 14; sessionRouterView adds the two CLI facts from Backends() and
 // the two run-history methods from Runs(), plus the compile-time assertion.
 //
-// Still 17 and not the ≤6 the issue guessed: this package serves
+// Still 18 and not the ≤6 the issue guessed: this package serves
 // /api/sessions, which is the list, the per-session detail, the run history,
 // the label/tuning writes and the interrupt — the Router really is its
 // datasource. What the narrowing buys is that the Router's other 40 exported
@@ -52,6 +52,7 @@ type RouterView interface {
 	// Writes reachable from the session list UI.
 	SetUserLabel(key, label string) bool
 	SetSessionTuning(ctx context.Context, key string, model, effort *string) (string, error)
+	SwitchAccessProfile(ctx context.Context, key, profile string, model *string) (string, error)
 	InterruptSessionSafe(key string) sessionpkg.InterruptOutcome
 	RemoveAsync(key string) bool
 	RegisterForResume(key, sessionID, workspace, lastPrompt string) (effectiveKey string)

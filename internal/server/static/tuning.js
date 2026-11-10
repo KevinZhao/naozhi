@@ -13,6 +13,7 @@ import { gitChipHtml, gitStateCache, setHeaderGitChip } from './session_header.j
 import { wireQuickAskInput } from './auth_modal.js';
 import { shell } from './shell.js';
 import { pendingBackendID } from './features.js';
+import { fetchAccessProfiles } from './backend_catalog.js';
 
 // ===== Session tuning popover =====
 // Per-session model/effort switching from the header chips.
@@ -231,6 +232,157 @@ async function postTuningOverride(kind, value) {
     }
     // Pull fresh state now rather than waiting out the poll interval; the
     // repaint clears the pending dim with the server-confirmed value.
+    setTimeout(() => { restore(); shell.fetchSessions(); }, 800);
+  } catch (e) {
+    restore();
+    tuningToast('切换请求失败：网络错误', true);
+  }
+}
+
+// ===== Access-profile switch =====
+// The header's access-profile chip opens this popover: pick a profile (the
+// account the session bills) and, optionally, the model to run there, then
+// 切换. The server closes the CLI and the next message resumes the same
+// conversation under the new profile (docs/rfc/project-access-profile.md §7.1).
+// A model change alone stays on the model popover: it keeps the account.
+
+// The model <select>'s 保持当前 (no model sent) and 手动输入… values; no model
+// id is spelled like them.
+const TUNING_MODEL_KEEP = '__keep__';
+const TUNING_MODEL_MANUAL = '__manual__';
+
+async function openAccessProfilePopover() {
+  dismissTuningPopover();
+  if (!selection.key) return;
+  if ((selection.node || 'local') !== 'local') {
+    tuningToast('远程节点会话暂不支持切换访问档', false);
+    return;
+  }
+  const key = selection.key;
+  const s = sessionList.sessionsData[sid(key, selection.node)];
+  if (!s) return;
+  if (s.state === 'running') {
+    tuningToast('会话正在运行：等这一轮结束再切换访问档', false);
+    return;
+  }
+  const data = await fetchAccessProfiles();
+  if (!data || !Array.isArray(data.profiles) || data.profiles.length === 0) return;
+  if (selection.key !== key) return;
+  const anchor = document.getElementById('header-access-profile');
+  if (!anchor) return;
+
+  const current = s.access_profile || '';
+  const { models } = tuningModelsForSession(s);
+  const profileRows = [{ id: '', label: '（全局默认）', ok: true }].concat(data.profiles.map(p => ({
+    id: p.id || '', label: p.display_name || p.id || '', ok: p.secret_ok !== false, defaultModel: p.default_model || '',
+  })));
+  let html = '<div class="nz-list-head">切换访问档</div>';
+  for (const p of profileRows) {
+    const active = p.id === current;
+    html += '<div class="nz-tuning-opt ap-opt' + (active ? ' is-active' : '') + (p.ok ? '' : ' is-disabled') +
+      '" data-profile="' + escAttr(p.id) + '" data-default-model="' + escAttr(p.defaultModel || '') + '">' +
+      (active ? '● ' : '○ ') + esc(p.label) + (p.ok ? '' : ' ⚠ 凭证缺失') + '</div>';
+  }
+  html += '<div class="nz-list-row"><label class="nz-field-label" for="ap-model-select">模型</label>' +
+    '<select id="ap-model-select" class="nz-picker-select">' +
+    '<option value="' + escAttr(TUNING_MODEL_KEEP) + '">保持当前' + (s.model ? '（' + esc(s.model) + '）' : '') + '</option>' +
+    models.map(m => '<option value="' + escAttr(m.id) + '">' + esc(m.id) + '</option>').join('') +
+    '<option value="' + escAttr(TUNING_MODEL_MANUAL) + '">手动输入…</option>' +
+    '</select>' +
+    '<input id="ap-model-input" type="text" class="nz-tuning-input nz-hidden" placeholder="model id，如 global.anthropic.claude-fable-5-2[1m]"></div>';
+  html += '<div class="nz-list-row ap-actions"><button type="button" id="ap-submit" disabled>切换</button></div>';
+  html += '<div class="nz-list-foot">ⓘ 会关闭当前 CLI 进程；下一条消息用新访问档恢复同一段对话</div>';
+
+  const pop = document.createElement('div');
+  pop.id = 'tuning-popover';
+  pop.className = 'ap-popover';
+  pop.style.cssText = 'position:fixed;min-width:260px;max-width:360px;max-height:420px;' +
+    'overflow-y:auto;background:var(--nz-overlay-pill-bg);backdrop-filter:blur(8px);' +
+    'border:1px solid var(--nz-border);border-radius:10px;padding:6px 0;z-index:120;' +
+    'font-size:13px;scrollbar-width:thin';
+  const rect = anchor.getBoundingClientRect();
+  pop.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - 380)) + 'px';
+  pop.style.top = (rect.bottom + 6) + 'px';
+  pop.innerHTML = html;
+  document.body.appendChild(pop);
+
+  const sel = pop.querySelector('#ap-model-select');
+  const input = pop.querySelector('#ap-model-input');
+  const submit = pop.querySelector('#ap-submit');
+  let picked = null;
+  const modelChoice = () => {
+    if (sel.value === TUNING_MODEL_KEEP) return null;
+    if (sel.value === TUNING_MODEL_MANUAL) return input.value.trim() || null;
+    return sel.value;
+  };
+  const refresh = () => {
+    // Staying on the current profile is a model change, which the model
+    // popover makes without closing the CLI.
+    submit.disabled = picked === null || picked === current;
+  };
+  pop.querySelectorAll('.ap-opt').forEach(item => {
+    if (item.classList.contains('is-disabled')) return;
+    item.addEventListener('click', () => {
+      picked = item.dataset.profile;
+      pop.querySelectorAll('.ap-opt').forEach(o => {
+        const on = o === item;
+        o.classList.toggle('is-picked', on);
+        o.textContent = (on ? '● ' : '○ ') + o.textContent.slice(2);
+      });
+      const dm = item.dataset.defaultModel;
+      if (dm && sel.value === TUNING_MODEL_KEEP) {
+        if (![...sel.options].some(o => o.value === dm)) {
+          const o = document.createElement('option');
+          o.value = dm; o.textContent = dm;
+          sel.insertBefore(o, sel.lastElementChild);
+        }
+        sel.value = dm;
+      }
+      refresh();
+    });
+  });
+  sel.addEventListener('change', () => {
+    input.classList.toggle('nz-hidden', sel.value !== TUNING_MODEL_MANUAL);
+    if (sel.value === TUNING_MODEL_MANUAL) input.focus();
+  });
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !submit.disabled) submit.click(); });
+  submit.addEventListener('click', () => {
+    if (picked === null) return;
+    const model = modelChoice();
+    dismissTuningPopover();
+    postAccessProfileSwitch(key, picked, model);
+  });
+  setTimeout(() => {
+    tuningPopoverCloseHandler = (e) => {
+      if (!pop.contains(e.target)) dismissTuningPopover();
+    };
+    document.addEventListener('click', tuningPopoverCloseHandler);
+  }, 0);
+}
+
+// postAccessProfileSwitch sends the switch. Like postTuningOverride it does
+// not promote the pick optimistically: the chip dims until the sessions poll
+// repaints it with the server's value.
+async function postAccessProfileSwitch(key, profile, model) {
+  const chip = document.getElementById('header-access-profile');
+  if (chip) chip.style.opacity = '0.45';
+  const restore = () => { if (chip) chip.style.opacity = ''; };
+  const body = { key, access_profile: profile };
+  if (model) body.model = model;
+  try {
+    const resp = await fetch(NZ_CONTRACT.API.sessions_override, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const text = (await resp.text()).trim();
+      restore();
+      tuningToast(resp.status === 409 ? '会话正在运行：等这一轮结束再切换访问档' : ('切换失败：' + text), true);
+      return;
+    }
+    const data = await resp.json();
+    tuningToast(data.applied_via === 'respawn'
+      ? '访问档已切换，CLI 进程已关闭，下条消息用新访问档恢复对话'
+      : '访问档已切换，下条消息生效', false);
     setTimeout(() => { restore(); shell.fetchSessions(); }, 800);
   } catch (e) {
     restore();
@@ -540,6 +692,7 @@ export {
   dismissSession,
   fetchGitState,
   invalidateGitState,
+  openAccessProfilePopover,
   openTuningPopover,
   renameSession,
   repaintGitChip,

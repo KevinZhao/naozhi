@@ -41,6 +41,12 @@
 .nz-tuning-opt{padding:7px 12px;cursor:pointer;color:var(--nz-text)}
 .nz-tuning-opt.is-active{font-weight:600;color:var(--nz-accent)}
 .nz-tuning-opt.is-reset{border-top:1px solid var(--nz-bg-2);color:var(--nz-text-mute)}
+.nz-tuning-opt.is-picked{font-weight:600;color:var(--nz-accent)}
+.nz-tuning-opt.is-disabled{cursor:not-allowed;color:var(--nz-text-faint)}
+/* Access-profile popover: the 切换 button. */
+.ap-actions{display:flex;justify-content:flex-end}
+.ap-actions button{padding:5px 14px;border-radius:6px;border:1px solid var(--nz-border);background:var(--nz-accent);color:#fff;cursor:pointer;font-size:12px}
+.ap-actions button:disabled{background:var(--nz-bg-2);color:var(--nz-text-faint);cursor:not-allowed}
 /* Conditional visibility that JS used to write as style="display:…". The
    element ships with .nz-hidden and JS toggles the class instead. */
 .nz-cron-ws-custom{padding:8px 0 0}

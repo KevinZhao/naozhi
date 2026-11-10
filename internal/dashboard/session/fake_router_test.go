@@ -24,6 +24,16 @@ type fakeRouter struct {
 	removed   []string
 	labels    map[string]string
 	knownKeys map[string]bool
+
+	switched  []profileSwitch
+	switchVia string
+	switchErr error
+}
+
+// profileSwitch is one SwitchAccessProfile call the fake saw.
+type profileSwitch struct {
+	key, profile string
+	model        *string
 }
 
 var _ RouterView = (*fakeRouter)(nil)
@@ -53,6 +63,10 @@ func (f *fakeRouter) SetUserLabel(key, label string) bool {
 }
 func (f *fakeRouter) SetSessionTuning(context.Context, string, *string, *string) (string, error) {
 	return "", nil
+}
+func (f *fakeRouter) SwitchAccessProfile(_ context.Context, key, profile string, model *string) (string, error) {
+	f.switched = append(f.switched, profileSwitch{key: key, profile: profile, model: model})
+	return f.switchVia, f.switchErr
 }
 func (f *fakeRouter) InterruptSessionSafe(string) sessionpkg.InterruptOutcome {
 	var zero sessionpkg.InterruptOutcome
