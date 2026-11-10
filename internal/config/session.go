@@ -49,10 +49,11 @@ type QueueConfig struct {
 	// CollectDelay is the wait after a turn completes before draining the
 	// queue, so fast follow-ups batch together. Default "500ms".
 	CollectDelay string `yaml:"collect_delay"`
-	// Mode handles messages arriving mid-turn: "collect" (default) waits for
-	// the turn; "interrupt" aborts it via control_request and sends the
-	// coalesced follow-ups next. Only stream-json honours "interrupt"; ACP
-	// falls back to "collect".
+	// Mode handles messages arriving mid-turn: "passthrough" (default, D69)
+	// forwards each message to the CLI as it arrives; "collect" waits for the
+	// turn; "interrupt" aborts it via control_request and sends the coalesced
+	// follow-ups next. Only stream-json honours "interrupt" / "passthrough";
+	// ACP and codex fall back to "collect".
 	Mode string `yaml:"mode"`
 }
 

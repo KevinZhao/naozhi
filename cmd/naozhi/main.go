@@ -157,6 +157,9 @@ func main() {
 	// comes from it instead of being re-derived (#2641).
 	sessionLayout := datadir.ForStore(storePath)
 	warnIfStateDirLarge(sessionLayout.Root())
+	// An isolated instance reads no outside source on a schedule and
+	// installs no update unless isolation.run_schedules says so.
+	isolated := schedulesOff(cfg, sessionLayout.Root())
 
 	claudeDir := ""
 	if home, err := os.UserHomeDir(); err == nil {
@@ -341,6 +344,7 @@ func main() {
 		PlannerOn: wireup.PlannerOn(plannerAgent),
 		Journal:   plannerState.Journal,
 		Beats:     beats,
+		Isolated:  isolated,
 	})
 	// The Planner's web lookups (§15.12 ⑨, D107): a lookup block runs a
 	// one-shot reader session with only the web search MCP tools; its short
@@ -408,8 +412,9 @@ func main() {
 		BuildSysession: func() (*sysession.Manager, string, error) {
 			return buildSysessionManager(cfg, router, projectMgr, wrapper, storePath, runTelemetry)
 		},
-		Budget: budgetGate,
-		Beats:  beats,
+		Budget:         budgetGate,
+		Beats:          beats,
+		ManualCronOnly: isolated,
 	})
 	if err != nil {
 		slog.Error("start cron scheduler", "err", err)
@@ -476,7 +481,7 @@ func main() {
 	updateStatus := selfupdate.NewStatus(version)
 	var updateChecker *selfupdate.Checker
 	if cfg.UpdateEnabled() {
-		updateChecker = newUpdateChecker(ctx, cfg, platforms, updateStatus)
+		updateChecker = newUpdateChecker(ctx, cfg, platforms, updateStatus, isolated)
 	}
 	updateDashboardInstall := cfg.UpdateDashboardInstall()
 

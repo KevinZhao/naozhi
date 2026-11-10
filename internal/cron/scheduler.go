@@ -98,6 +98,8 @@ type Scheduler struct {
 	// jitterMax is the scheduling jitter cap. See SchedulerConfig.JitterMax.
 	// Immutable after NewScheduler returns, so no lock needed.
 	jitterMax time.Duration
+	// manualOnly: see SchedulerConfig.ManualOnly. Immutable.
+	manualOnly bool
 	// routerNilOnce limits registerStubByValue's "router missing" slog.Error
 	// to once per Scheduler lifetime, so a router-less fixture (or an
 	// AllowNilRouter deployment) does not spam the log every tick; with
@@ -256,6 +258,7 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 		allowedRoot:         cfg.AllowedRoot,
 		allowedRootResolved: allowedRootResolved,
 		jitterMax:           cfg.JitterMax,
+		manualOnly:          cfg.ManualOnly,
 		stopCtx:             stopCtx,
 		stopCancel:          stopCancel,
 		runs:                runstore.New(runstore.Options{StorePath: cfg.StorePath}),

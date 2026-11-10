@@ -53,7 +53,9 @@ chmod +x "$WORK/stub-cli"
 
 # Config must be 0600 or naozhi refuses to load it (group/world-accessible
 # check). HOME is redirected into the temp dir so we never read or write the
-# operator's ~/.claude or ~/.naozhi state.
+# operator's ~/.claude or ~/.naozhi state; the temp state root also makes it
+# an isolated instance (config isolation): no scout, no scheduled cron runs,
+# no update installs.
 cat > "$WORK/config.yaml" <<CFG
 server:
   addr: "127.0.0.1:${PORT}"

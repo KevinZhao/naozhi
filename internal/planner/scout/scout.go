@@ -93,6 +93,9 @@ type Config struct {
 	Beats     *beat.Registry
 	// Now is the wall clock; nil is time.Now.
 	Now func() time.Time
+	// Isolated turns the scout off: an isolated instance reads no mail of
+	// the user's unless it opts in (config.IsolationConfig).
+	Isolated bool
 }
 
 // Status is the scout as the health table and the API see it.
@@ -142,10 +145,10 @@ func New(cfg Config) *Scout {
 	return s
 }
 
-// Enabled reports whether there is a state root and cli.mcp_config
-// defines at least one of the scout's servers.
+// Enabled reports whether there is a state root, cli.mcp_config defines at
+// least one of the scout's servers and the instance is not isolated.
 func (s *Scout) Enabled() bool {
-	if s == nil || s.st.dir == "" || s.cfg.Session == nil {
+	if s == nil || s.st.dir == "" || s.cfg.Session == nil || s.cfg.Isolated {
 		return false
 	}
 	_, servers, err := scoutMCPConfig(s.cfg.MCPConfig)
@@ -190,7 +193,7 @@ func (s *Scout) Since(since time.Time) []Run {
 // (briefDue).
 func (s *Scout) Run(ctx context.Context) {
 	if !s.Enabled() {
-		slog.Info("scout: off (no state root, or no mail / Slack / Asana MCP server in cli.mcp_config)")
+		slog.Info("scout: off (isolated instance, no state root, or no mail / Slack / Asana MCP server in cli.mcp_config)")
 		return
 	}
 	ctx, cancel := context.WithCancel(ctx)

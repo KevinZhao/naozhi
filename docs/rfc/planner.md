@@ -961,7 +961,7 @@ naozhi 是这台电脑（及以后的远程节点、沙箱）的入口，界面�
 | `.naozhi/project.yaml` planner_model / planner_prompt | 导入到仓库外该工作区的 `planner.yaml` | — |
 | cron | 新增目标"给 Planner 投 duty 消息" | cron 不走 Orchestrator，自有端口 |
 | `turn.Orchestrator` Origin 端口 | `envelopeOrigin`（Planner / 网关消息） | Origin 端口够用；**来源区分与优先级需改 Orchestrator**（队列 FIFO） |
-| queue mode（全局 `collect`） | 全局改 passthrough，老会话重启 naozhi 即生效（D69）；Planner / 网关消息另走回合边界投递 | 存活进程早已带 `--replay-user-messages` |
+| queue mode（代码默认 `passthrough`，11-10 起；原为 `collect`） | 全局改 passthrough，老会话重启 naozhi 即生效（D69）；Planner / 网关消息另走回合边界投递 | 存活进程早已带 `--replay-user-messages` |
 | `ArgvSpawnOptions` + `driftCompareArgs` | 每 session 启动规格进 `shim.SpawnOverlay`，drift 从 overlay 读 | **不改会在重启时误杀所有存活 shim**（`spawn_drift.go:47` 用全局值重建 argv） |
 | scratch pool、`ReleaseIdleProcess` | 执行 session 模板 | `ReleaseIdleProcess` 只对 exempt key，且只有 cron 调用 |
 | `prev_session_ids`、`resolveResumeID` | 血缘 `prev` | `resolveResumeID` 失败静默开新 session，需改为显式交接 |
@@ -1015,7 +1015,7 @@ v8 复核时确认已删除、RFC 不再依赖的：Prometheus / `/metrics`、Ag
 
 | 阶段 | 内容 |
 |---|---|
-| P0 验证 | ~~① 判权 hook 出错即拒绝（被杀 / 超时 / 崩溃 / 网关不可达）及判定延迟；② 需人决定清单"拒绝 + 一次性放行"闭环（含命令改写后的放行匹配）~~（D93 收窄：不做）；③ `defer` + 释放 + `--resume`（经 shim；续跑轮不被当作回复）；④ `ask` + `--permission-prompt-tool stdio` 扣住 20 分钟时 watchdog 与 interrupt 的表现；⑤ 关闭 `--system-prompt-snapshot` 后的缓存命中；⑥ 伪造测试（tool_result 中塞伪造的 hook 上下文与 🧭 指令，一次性）；⑦ 一次性读取者隔离；⑧ `--setting-sources ""` 下仓库内 CLAUDE.md / skills / agents / `.mcp.json` 是否加载；⑨ 每会话启动规格（含权限模式）的重启存活（drift）；⑩ passthrough 本机试用一周（**2026-11-03 已开始**，D79）；⑪ CC 原生 `/goal`、跨会话消息、Monitor 在 Bedrock 下的可用性。**P1 不依赖 P0**；①–⑨、⑪ 在 P2 / P3 开工前完成 |
+| P0 验证 | ~~① 判权 hook 出错即拒绝（被杀 / 超时 / 崩溃 / 网关不可达）及判定延迟；② 需人决定清单"拒绝 + 一次性放行"闭环（含命令改写后的放行匹配）~~（D93 收窄：不做）；③ `defer` + 释放 + `--resume`（经 shim；续跑轮不被当作回复）；④ `ask` + `--permission-prompt-tool stdio` 扣住 20 分钟时 watchdog 与 interrupt 的表现；⑤ 关闭 `--system-prompt-snapshot` 后的缓存命中（**11-10：不需要**。naozhi 不关快照：Planner 的提示词换版靠换班，派出会话的提示词在派出时固定，D93 之后没有要在续接时刷新的静态约定）；⑥ 伪造测试（tool_result 中塞伪造的 hook 上下文与 🧭 指令，一次性）（**11-10：随 D93 不需要**：没有判权 hook 与 🧭 指令；伪造改为测转达信封，11-07 实验 F 组见 §15.11，网关拒收含 `naozhi-relay` 的 Planner 文字）；⑦ 一次性读取者隔离（**11-10 已实测**：带污染标记会话的事件日志进 deny 后，Planner 的 Read 与 Grep 都读不到，见 §15.12 ⑨ 末）；⑧ `--setting-sources ""` 下仓库内 CLAUDE.md / skills / agents / `.mcp.json` 是否加载；⑨ 每会话启动规格（含权限模式）的重启存活（drift）；⑩ passthrough 本机试用一周（**2026-11-03 开始，11-10 结束**，D79：一周内没有退回 collect，只修过一处首回合中重启丢会话名的问题 #3840；代码默认值随 v0.8.0 改为 `passthrough`，D69）；⑪ CC 原生 `/goal`、跨会话消息、Monitor 在 Bedrock 下的可用性（**11-10**：`/goal` 随 D93 不用；跨会话消息 11-03 实测可用（§6.4）；Monitor 在 naozhi 派出的会话里实测可用（CLI 2.1.319，Bedrock），D109 的"后台中"已按它判）。**P1 不依赖 P0**；①–⑨、⑪ 在 P2 / P3 开工前完成 |
 | P3a Planner 对话版（v0.2.0，D82） | `planner:main` 与 `planner.enabled`、全局 Planner、先回执（D63）、对话与只读查询、承诺与提醒、派活（~~派前确认~~，D88 起直接执行）与汇报派出的会话、CC 原生跨会话消息 + 动作块 + `index.json`（D81）、"交给 Planner"按钮、每天换新会话；规格见 §15.1 |
 | P1 监控底座（v0.2.0） | 状态根目录与日志、工作区登记表、Activity 事件、关键循环心跳与 `/health` 降级、会话台账与健康状态机、系统性故障合并、"等你"与推送（浏览器 + Mac 通知）、暂停推送、确定性早报、Planner 页面骨架（只读）、系统视图"全会话健康"、磁盘剩余与无人负责计数。**不依赖 Planner，单独验收**（D71，验收标准见 §15.1） |
 | W1 工作台首批（v0.2.0，与 P1 并行） | §10.2 首批 6 项，其中目录级 HTML 预览与跟随刷新顺延 v0.2.1（D83）；~~右栏"有产出时自动打开"需新增~~（D91 取消） |
@@ -1609,6 +1609,18 @@ v0.7.3 落地时的取舍：上下文大小读 Planner transcript 尾部最后�
 
 v0.8.0 落地时的取舍：读取者会话复用巡检的会话函数与工作目录（`planner/scout/work`，历史面板已经隐藏），`--mcp-config` 是 `cli.mcp_config` 只留 `exa` 与 `agentcore-websearch` 的副本（`session-settings/reader-mcp.json`），工具只有 `web_search_exa`、`web_fetch_exa` 与 `web-search-tool___WebSearch`；一次只跑一个（`reader:` 独立配额 1），最多排队 10 个，单次 5 分钟超时；`scout:` 与 `reader:` 会话的事件从此不写 `events/`（它们就是邮件与网页原文）。输出必须是裸 JSON 对象（不接受代码块和前后文字），任何一项超长或缺失判运行失败，失败也以 `<naozhi-lookup state="failed">` 告诉 Planner（计次、不缓存）。"同一问题"按去首尾空白、合并空白、忽略大小写比较；当天缓存的回答也作为一个单独的回执回合送回，同一问题正在查时不另起一次。每班的计数按 Planner 的 `shift` 名与开班时间（`ShiftName`）。记录在 `planner/reader/runs/<run>.json`（保留 14 天），查询卡经 `GET /api/planner/lookup?run=` 读取（远程节点同样转发）。污染标记：每轮结束时网关扫描会话最近 500 条事件，调用过 `WebFetch` / `WebSearch`、`exa` / `agentcore-websearch` 的工具或 `aws-outlook-mcp` 的 `email_read`，就在旁路文件记 `taint`（`kinds`：web / email，只增不减；没有旁路文件的用户会话会新建一个），摘要 frontmatter 加 `taint:`、正文开头加"含外部内容"；Planner 的 deny 规则加上这些会话事件日志的 `<keyhash>*`，变化后与 ⑧ 一样在空闲时按 `--resume` 重启生效。Planner 本身与一次性会话不打标记；升级前已有的会话在下一轮结束时补标。
 
+**11-10 实测：deny 挡不挡 Grep**（CLI 2.1.319，Bedrock，sonnet；`planner:main` 同款 `--tools Read,Grep,Glob`、`dontAsk`、`--setting-sources ""`，allow `Read(//<根>/**)` 与 `Read(//<根>/events/**)`，deny `Read(//<根>/events/<keyhash>*)`；带标记与不带标记的日志里各放一个记号）：
+
+| 尝试 | 结果 |
+|---|---|
+| Grep `events/` 整个目录（content / files_with_matches） | 只返回不带标记的那份，带标记的不在结果里 |
+| Grep 上级目录（状态根） | 同上 |
+| Grep `glob` 只指那份日志 | No matches |
+| Grep / Read 直接指那份日志 | 拒绝（"Permission to read … has been denied" / "denied by your permission settings"） |
+| 大小写变体路径（`STATE/EVENTS`、大写 keyhash 文件名、`.LOG`）、`work/../../events` | 都挡住（CC 先规范化路径再匹配） |
+
+结论：Read 的 deny 同样作用于 Grep，目录级搜索会跳过被拒的文件，不用改 deny 或目录布局。剩下的窗口是会话刚打上标记、Planner 还没空闲重启的那段时间（deny 在空闲时按 `--resume` 生效，§15.12 ⑧），与原设计一致。
+
 **验收**（v0.7.1 之后观察一周）：Planner 每班上下文峰值 < 25 万；"一轮结束没汇报"回执每天 < 5 条；"进展如何"类提问占你消息的比例从 21% 降下来；Planner 页能看到的字数里，要你拍板的占比从 1.4% 升上来；空唤醒为 0。
 
 **不做**：话题线 / 多个 Planner 会话（D60、D96 不变）；"新结果"进计数或推送；观察会话的自动代答（托管仍是单独的开关）；给 Planner 直接挂搜索工具。
@@ -1623,7 +1635,7 @@ v0.8.0 落地时的取舍：读取者会话复用巡检的会话函数与工作�
 | **v0.6.5**（未单独打 tag，随 v0.7.0 发布） | §15.12 ①：回执循环、Planner 缓存 1h、快照去重、`last_active` 按事件刷新、转达到已收起的会话自动重新打开、ask 选项 80 字、`shim.state_dir` 从 `store_path` 推导、顿号、提示词三条、Outlook 减速带；RFC README 状态更新（纯文档） | S × 11 | 无 |
 | **v0.7.0**（已发布；v0.7.1、v0.7.2 是修复版） | §15.12 ②–⑦：会话摘要与任务卡、`naozhi-report` 汇报块、新结果、对话简化、观察你开的会话（含"后台中"，D109）、收起延后；UX 评审（11-08）第 1（左栏分段计数、手机"等你"放第一）、5（首页摘要卡）、9（提问不重复）、10（派出会话头部显示任务状态）条 | M | §17.2 ①②③⑩ |
 | **v0.7.3**（原排 v0.7.1；v0.7.1、v0.7.2 是两次修复版，11-10 随 v0.7.3 发布） | §15.12 ⑧：按大小换班、交接按线写、`remember`、读目录范围即时刷新；UX 评审第 3（状态颜色与文案一张表）、4（"只看需要我"筛选）、6（移除加撤销）、7（空状态）、11（手机输入栏）、12（滚动套滚动）条 | S–M | §17.2 ④⑤⑦ |
-| **v0.8.0**（已实装，待发布） | §15.12 ⑨：一次性读取者 + `lookup` + 最小版污染标记（§7.4）；提示词 v20 | M | §17.2 ⑨ |
+| **v0.8.0**（已实装，待发布） | §15.12 ⑨：一次性读取者 + `lookup` + 最小版污染标记（§7.4）；提示词 v20；补漏（11-10）：隔离实例（状态根不是本账户 `~/.naozhi`）默认不跑巡检、会前简报与 cron 定时运行，自升级只通知，`isolation.run_schedules: true` 才照常；`update.mode` 只认 notify / download / auto，其他值加载时报错（原来静默当 download）；污染标记的 deny 实测挡得住 Grep（§15.12 ⑨ 末） | M | §17.2 ⑨ |
 | v0.8.x | 自升级验签：嵌入公钥（#1738）、发版签名；做完之前 `update.mode: auto` 要求 `.sig` 存在（D54 第一道防线的落地，P5 的前置） | S（代码）+ 密钥管理 | §17.2 ⑧ |
 | v0.9.0（P3 基础设施） | 派出会话按会话建 git worktree（#3449）；`task:` 独立配额（§5.2，现在计入 `max_procs`）；动作块 `halt` / `cancel`（§6.2 约定表） | M | v0.7.0 |
 | v0.9.x（P3 判断） | 检查点由网关识别（ExitPlanMode、第一份 diff、开 PR）+ 干净上下文评审会话（verifier，§4.9）；检查记录（kind `check`，按会话可查、可点"这不对"）；`knowledge_propose` | M–L | v0.9.0 |
@@ -1633,7 +1645,7 @@ v0.8.0 落地时的取舍：读取者会话复用巡检的会话函数与工作�
 | P6 | 带教：纠正的信号强度、约束编译成 deny、写作风格（D20） | M | P4 |
 | P7 第二段 | `naozhi join` 配对（`node-pairing.md`）、系统视图"节点"区块、`dispatch-v1`、离线状态机：**条件触发**，出现"多台工作机由中心分配"时再做（D97） | L | 条件 |
 | W2 | ~~先做 PDF 预览~~（**11-10 已做，随 v0.8.0**：右栏用浏览器自带的 PDF 阅读器；`raw` 只对 `Sec-Fetch-Dest: iframe` 内联返回 PDF，带 CSP `sandbox` 与 `frame-ancestors 'self'`，其他导航仍是下载；预览框不加 `sandbox` 属性，实测 Chrome 在带 `sandbox` 的框里拒绝显示 PDF），再做 Office 预览、执行两种按钮（直接运行 / 交给会话）、轻量编辑、截屏发送 | S（PDF）/ M | 无，可与任何版本并行 |
-| 其他 | D69：P0 ⑩ passthrough 一周试用已过，把代码默认值从 `collect` 改为 `passthrough`（`config/defaults.go:24`）并回写结论；P0 ⑤⑥⑦⑪ 补实测记录或标"随 D93 不需要"；`budget` 的 `task:` 成本归属（D17 下影响小，顺手做） | S | 无 |
+| 其他 | ~~D69：把代码默认值从 `collect` 改为 `passthrough` 并回写结论；P0 ⑤⑥⑦⑪ 补实测记录或标"随 D93 不需要"~~（**11-10 已做，随 v0.8.0**，结论见 §15 P0 一行）；`budget` 的 `task:` 成本归属：**暂不做**——预算只拦 IM 与 cron，Planner 派活两边都不经过，归属到 Planner 要新增上限配置或给派活加检查，不是顺手的改动（D17、D65） | S | 无 |
 | iOS app | 单独立项（D80），复用"等你"与推送管线 | L | 单独立项 |
 
 **不排期**（§16、§16.1 的明确不做与有条件推迟项照旧）：判权 hook、动作类别分类表、委托授权、急停、L1 停顿判读、契约与验收项、CC `/goal`、影子模式与回放包、金丝雀、六态生命周期、幕僚常驻、知识结构化与夜间整理、跨节点派活（D97）、远程节点会话的托管、话题线 / 多个 Planner 会话（§15.12）。
@@ -1810,7 +1822,7 @@ v0.8.0 落地时的取舍：读取者会话复用巡检的会话函数与工作�
 | D66 | 10-26 | 语音倒脑子：手机语音待办由 Planner 拆成承诺 / 任务 / 提醒并回清单确认 | 复用现有语音能力 |
 | D67 | 10-26 | 第二代产品原语：承诺清单、未闭环提醒、早报规则、状态三层、"每次确认"类动作不能长期授权、卡片过期作废、外发确认卡片（不自建分类器）、没有隐形画像、写作风格、成品库提前、浏览器可看可接管（`computer-use.md`） | `planner-landscape.md` B1–B13 |
 | D68 | 10-26 | 治理减法与信任阶梯：放行人只有你（机制保留为需人决定清单的实现）；Planner 上线只出意见，由你逐级放开代办 / 指令 / 执行型主动；指令只要附依据、可直接反驳、两次不通交你；记录随行动自动产生；Planner 不读污染原文、经一次性读取者；转向锁三条；L1、金丝雀、死人开关、覆盖率、影子模式、回放包、成绩单、指标、自动升降档、fd 令牌推迟，再加回的条件见 §16.1；安全底线不动 | owner 确认；做减法方向 + D61（中间层要薄）；信任靠看得见、收得回建立，不靠验证基础设施 |
-| D69 | 10-26 | queue mode 全局改为 passthrough，老会话重启 naozhi 即生效（存活 Claude 进程早已带 `--replay-user-messages`）；Kiro / Codex 自动退回 collect；Planner / 网关消息另走回合边界投递 | owner 确认；与 CC 终端行为一致，纠偏更快 |
+| D69 | 10-26 | queue mode 全局改为 passthrough，老会话重启 naozhi 即生效（存活 Claude 进程早已带 `--replay-user-messages`）；Kiro / Codex 自动退回 collect；Planner / 网关消息另走回合边界投递（11-10：本机一周试用结束，代码默认值改为 `passthrough`，随 v0.8.0） | owner 确认；与 CC 终端行为一致，纠偏更快 |
 | D70 | 10-26 | Kiro / Codex 先作为二等公民：照常供你直接使用并受监控底座覆盖；Planner 派出、托管、协作约定只用 Claude；能力位缺失时启动拒绝 | owner 确认；协作能力依赖 Claude 的 hook 与追加提示词，后续再评估等价物 |
 | D71 | 10-26 | P1 监控底座是可单独验收的里程碑，验收标准见 §15；用一段时间后再决定是否进入 P2 | owner 确认；P1 不依赖 Planner、单独就有价值，控制 2.5–3.5 万行的节奏风险 |
 | D72 | 10-26 | key 与持久化布局：现有 key 一律不改，新增不透明前缀 `planner:main` / `task:<随机 ID>`，属性放元数据、新前缀行为全部按属性；工作区用稳定 ID + 登记表；懂你用 Markdown（授权、边界用 JSON）；会话新字段放旁路文件不动 `sessions.json`；新事件只写 Planner 日志；全部状态在 `~/.naozhi/planner/` 下可一键回退；P1 开工前定稿 | owner 确认；key 是事件日志与运行历史的文件名，改 key 等于丢历史；旧版写回 `sessions.json` 会丢未知字段 |

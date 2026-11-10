@@ -14,10 +14,16 @@ import (
 // newUpdateChecker builds the auto-update checker without starting it, so the
 // same instance reaches both the HTTP layer (Checker.CheckNow) and the
 // background loop. Returns nil when the config is unusable.
-func newUpdateChecker(ctx context.Context, cfg *config.Config, platforms map[string]platform.Platform, status *selfupdate.Status) *selfupdate.Checker {
+// An isolated instance only notifies: it often runs the account's own binary,
+// which a download would replace under the real service.
+func newUpdateChecker(ctx context.Context, cfg *config.Config, platforms map[string]platform.Platform, status *selfupdate.Status, isolated bool) *selfupdate.Checker {
+	mode := selfupdate.ParseMode(cfg.Update.Mode)
+	if isolated {
+		mode = selfupdate.ModeNotify
+	}
 	return selfupdate.NewChecker(selfupdate.CheckerConfig{
 		CurrentVersion: version,
-		Mode:           selfupdate.ParseMode(cfg.Update.Mode),
+		Mode:           mode,
 		Interval:       cfg.UpdateInterval(),
 		CheckOnStart:   cfg.Update.CheckOnStart,
 		Notify:         updateNotifyFunc(ctx, cfg, platforms),

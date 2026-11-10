@@ -62,6 +62,8 @@ type Config struct {
 	Cost        CostConfig        `yaml:"cost,omitempty"`
 	// Planner switches on the global Planner (docs/rfc/planner.md §15.1).
 	Planner PlannerConfig `yaml:"planner,omitempty"`
+	// Isolation is what an isolated instance still runs (isolation.go).
+	Isolation IsolationConfig `yaml:"isolation,omitempty"`
 	// IMAccess restricts which IM senders the dispatcher serves (im_access.go).
 	IMAccess IMAccessConfig `yaml:"im_access,omitempty"`
 	// Integrations are outbound hooks (integrations.go).
@@ -219,6 +221,7 @@ func validateConfig(cfg *Config) error {
 		validateIMRateLimit,
 		validateCostBudget,
 		validateGroupScope,
+		validateUpdate,
 	} {
 		if err := check(cfg); err != nil {
 			return err

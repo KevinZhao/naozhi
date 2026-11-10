@@ -223,7 +223,6 @@ func TestConfigCheck_RegisteredSubcommand(t *testing.T) {
 func TestConfigCheck_ReplacedValuesExit1(t *testing.T) {
 	for name, tc := range map[string]struct{ body, key string }{
 		"timezone":          {"cron:\n  timezone: Mars/Olympus\n", "cron.timezone"},
-		"update mode":       {"update:\n  mode: dowload\n", "update.mode"},
 		"shim idle timeout": {"session:\n  shim:\n    idle_timeout: 4 hours\n", "session.shim.idle_timeout"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -248,6 +247,8 @@ func TestConfigCheck_StartupRefusalsAreFatal(t *testing.T) {
 	}{
 		{"undefined agent command", cleanCheckConfig + "agent_commands:\n  /x: ghost\n",
 			`agent_commands["/x"] references undefined agent "ghost"`},
+		{"unknown update mode", cleanCheckConfig + "update:\n  mode: dowload\n",
+			"update.mode must be notify, download or auto"},
 		{"short dashboard token", cleanCheckConfig + "server:\n  dashboard_token: \"short\"\n",
 			"server.dashboard_token is too short"},
 		{"single unknown backend", cleanCheckConfig + "cli:\n  backend: nope\n",

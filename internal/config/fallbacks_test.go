@@ -15,8 +15,6 @@ func TestLoad_ReportsReplacedValues(t *testing.T) {
 	}{
 		{"cron time zone", "cron:\n  timezone: Mars/Olympus\n", "cron.timezone", "fallback",
 			func(c *Config) bool { return c.ParseCronTimezone() == time.Local }},
-		{"update mode", "update:\n  mode: dowload\n", "update.mode", "fallback",
-			func(c *Config) bool { return c.Update.Mode == "download" }},
 		{"update interval floor", "update:\n  interval: 10m\n", "update.interval", "clamped",
 			func(c *Config) bool { return c.cachedInterval == time.Hour }},
 		{"cron jitter cap", "cron:\n  jitter_max: 1h\n", "cron.jitter_max", "clamped",

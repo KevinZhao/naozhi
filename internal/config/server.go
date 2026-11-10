@@ -21,7 +21,7 @@ type UpdateConfig struct {
 
 	// Mode on a newer release: "notify" (log + IM only), "download" (default;
 	// replace binary, apply on next boot), "auto" (replace AND restart).
-	// Unknown values fall back to "download".
+	// Any other value is refused at load.
 	Mode string `yaml:"mode,omitempty"`
 
 	// Interval between checks (Go duration). Default 6h; clamped up to the 1h
@@ -130,22 +130,27 @@ func applyServerDefaults(cfg *Config) {
 	}
 }
 
-// applyUpdateDefaults fills the self-update mode and interval, and falls back to
-// "download" for an unrecognized mode rather than refusing to start. Only runs
-// when updates are enabled. Split out of applyDefaults (#2710 J11).
+// applyUpdateDefaults fills the self-update mode and interval. Only runs when
+// updates are enabled; validateUpdate refuses an unknown mode. Split out of
+// applyDefaults (#2710 J11).
 func applyUpdateDefaults(cfg *Config) {
 	if cfg.UpdateEnabled() {
 		if cfg.Update.Mode == "" {
-			cfg.Update.Mode = "download"
-		}
-		switch cfg.Update.Mode {
-		case "notify", "download", "auto":
-		default:
-			reportFallback("update.mode", "fallback", "not notify, download or auto; updates run in download mode")
 			cfg.Update.Mode = "download"
 		}
 		if cfg.Update.Interval == "" {
 			cfg.Update.Interval = "6h"
 		}
 	}
+}
+
+// validateUpdate refuses an update.mode other than notify, download or auto,
+// switched on or not: a misspelt "auto" used to run as download, quietly
+// never restarting into the new binary.
+func validateUpdate(cfg *Config) error {
+	switch cfg.Update.Mode {
+	case "", "notify", "download", "auto":
+		return nil
+	}
+	return fmt.Errorf("update.mode must be notify, download or auto, got %q", cfg.Update.Mode)
 }

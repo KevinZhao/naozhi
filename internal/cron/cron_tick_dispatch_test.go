@@ -100,3 +100,25 @@ func TestRegisterJob_TickSkipsADeletedJob(t *testing.T) {
 		t.Errorf("the tick ran a deleted job (%d ended events); the callback must look the job up by ID at fire time, not hold the *Job it was registered with", n)
 	}
 }
+
+// TestRegisterJob_ManualOnlySkipsTicks: an isolated instance's scheduler
+// (ManualOnly) skips the tick but still runs a job started by hand.
+func TestRegisterJob_ManualOnlySkipsTicks(t *testing.T) {
+	rec := &recordingBroadcaster{}
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, ManualOnly: true}, SchedulerDeps{Router: &reapRouter{sid: "sess-tick"}, Telemetry: rec})
+
+	jobID := mustGenerateID()
+	j := &Job{ID: jobID, Schedule: "@every 1h", Prompt: "ping"}
+	s.putJobForTest(j)
+	if err := s.registerJobForTest(j); err != nil {
+		t.Fatalf("registerJob: %v", err)
+	}
+	s.cron.Entry(j.entryID).Job.Run()
+	if n := rec.endedCount(); n != 0 {
+		t.Fatalf("a ManualOnly scheduler ran a scheduled tick (%d ended events)", n)
+	}
+	s.executeIfNotDeletedOrPaused(jobID)
+	if n := rec.endedCount(); n != 1 {
+		t.Fatalf("a manual run on a ManualOnly scheduler produced %d ended events, want 1", n)
+	}
+}
