@@ -775,6 +775,11 @@ const RECEIPT_RE = /^<naozhi-receipt>/;
 // MEETING_RE is a pre-meeting brief's material, marked 来自会前简报.
 const SCOUT_RE = /^<naozhi-scout findings="(\d+)"/;
 const MEETING_RE = /^<naozhi-scout kind="meeting" start="(\d\d:\d\d)"/;
+// LOOKUP_RE is a web lookup's answer (planner/reader): the turn shows as the
+// query card (planner_cards.js lookupLine) rather than your bubble.
+const LOOKUP_RE = /^<naozhi-lookup q="([^"]*)" run="(\d{8}T\d{6}-[0-9a-f]{4})"/;
+// unescapeAttr undoes the gateway's html.EscapeString of an attribute.
+const unescapeAttr = (s) => s.replace(/&(lt|gt|quot|#39|#34|amp);/g, (_, n) => ({ lt: '<', gt: '>', quot: '"', '#39': "'", '#34': '"', amp: '&' })[n]);
 // COALESCE_HEAD leads requests that queued while the Planner was busy and
 // were merged into one turn (turn.Coalesce): each follows as "\n[HH:MM] ".
 // Every part gets the rules above, the gateway's as their lines and yours
@@ -818,6 +823,8 @@ function withoutSnapshot(e) {
   if (sc) return Object.assign({}, e, { type: 'system', summary: '来自巡检：' + sc[1] + ' 条新发现', detail: '' });
   const mt = e.type === 'user' && MEETING_RE.exec(e.detail || e.summary || '');
   if (mt) return Object.assign({}, e, { type: 'system', summary: '来自会前简报：' + mt[1] + ' 开始的会议', detail: '' });
+  const lk = e.type === 'user' && LOOKUP_RE.exec(e.detail || e.summary || '');
+  if (lk) return Object.assign({}, e, { type: 'system', summary: '🔎 ' + lk[2] + ' ' + unescapeAttr(lk[1]), detail: '' });
   if (e.type !== 'user' || !GATEWAY_HEAD_RE.test(e.detail || e.summary || '')) return e;
   let ref = '';
   let detail = (e.detail || '').replace(SESSION_REF_RE, (_, r) => { ref = r; return ''; });

@@ -1,15 +1,15 @@
 // Package action is the Planner's way to ask the gateway for something
 // (docs/rfc/planner.md §6.2): the ```naozhi-action blocks at the end of a
-// planner:main reply. There are eight: dispatch (a task: session, started at
+// planner:main reply. There are nine: dispatch (a task: session, started at
 // once, D88), promise (a promise among the 任务), ask (a
 // question in "通知" whose answer goes back to the Planner, or straight to a
 // session, D98), status (the Planner's judgment of a task's state, §15.4),
 // notify (something to tell the user, pushed now or held for the morning
 // brief, §15.6), custody (a session's custody switched, or a message sent to
 // a session in custody, planner/custody), relay (the user's decision
-// passed on to a session with the user's own words, D98) and remember (a
+// passed on to a session with the user's own words, D98), remember (a
 // memory the user asked for, written into a workspace's auto-memory,
-// §15.12 ⑧). A block that does not parse, or names an unknown type, a bad field or a task that does
+// §15.12 ⑧) and lookup (a web lookup by a one-shot reader, §15.12 ⑨). A block that does not parse, or names an unknown type, a bad field or a task that does
 // not exist, is not run: the Planner conversation shows it as it was
 // written, with the reason, and the Planner gets a receipt naming it.
 package action
@@ -79,6 +79,7 @@ const (
 	TypeCustody  Type = "custody"
 	TypeRelay    Type = "relay"
 	TypeRemember Type = "remember"
+	TypeLookup   Type = "lookup"
 )
 
 // Dispatch asks for a session in a workspace.
@@ -190,8 +191,36 @@ type Remember struct {
 // rememberTextRunes caps a memory's text.
 const rememberTextRunes = 2000
 
+// Lookup asks the gateway to look Q up on the web (§15.12 ⑨, D107): a
+// one-shot reader session searches and reads the pages, and its short
+// answer with sources comes back as a <naozhi-lookup> block. Why is what the
+// Planner wants it for, given to the reader.
+type Lookup struct {
+	Q   string `json:"q"`
+	Why string `json:"why"`
+}
+
+// Lookup limits.
+const (
+	lookupQRunes   = 200
+	lookupWhyRunes = 300
+)
+
+func (l *Lookup) validate() error {
+	l.Q, l.Why = strings.TrimSpace(l.Q), strings.TrimSpace(l.Why)
+	switch {
+	case l.Q == "":
+		return errors.New("lookup 缺少 q（要查的问题）")
+	case utf8.RuneCountInString(l.Q) > lookupQRunes:
+		return fmt.Errorf("q 超过 %d 字", lookupQRunes)
+	case utf8.RuneCountInString(l.Why) > lookupWhyRunes:
+		return fmt.Errorf("why 超过 %d 字", lookupWhyRunes)
+	}
+	return nil
+}
+
 // Block is one action block of a reply: exactly one of Dispatch, Promise,
-// Ask, Status, Notify, Custody, Relay and Remember is set, or Err says why
+// Ask, Status, Notify, Custody, Relay, Remember and Lookup is set, or Err says why
 // it is not run.
 type Block struct {
 	// Raw is the block's body as written.
@@ -205,6 +234,7 @@ type Block struct {
 	Custody  *Custody
 	Relay    *Relay
 	Remember *Remember
+	Lookup   *Lookup
 	Err      error
 }
 
@@ -367,13 +397,22 @@ func (b *Block) decode() {
 			err = m.validate()
 			b.Remember = &m.Remember
 		}
+	case TypeLookup:
+		var l struct {
+			Type Type `json:"type"`
+			Lookup
+		}
+		if err = strict(b.Raw, &l); err == nil {
+			err = l.validate()
+			b.Lookup = &l.Lookup
+		}
 	case "":
 		err = errors.New("缺少 type")
 	default:
-		err = fmt.Errorf("未知类型 %q（只有 dispatch、promise、ask、status、notify、custody、relay、remember）", head.Type)
+		err = fmt.Errorf("未知类型 %q（只有 dispatch、promise、ask、status、notify、custody、relay、remember、lookup）", head.Type)
 	}
 	if err != nil {
-		b.Dispatch, b.Promise, b.Ask, b.Status, b.Notify, b.Custody, b.Relay, b.Remember, b.Err = nil, nil, nil, nil, nil, nil, nil, nil, err
+		b.Dispatch, b.Promise, b.Ask, b.Status, b.Notify, b.Custody, b.Relay, b.Remember, b.Lookup, b.Err = nil, nil, nil, nil, nil, nil, nil, nil, nil, err
 	}
 }
 

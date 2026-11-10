@@ -136,7 +136,7 @@ func (e *sendEngine) prepareSend(p sendParams) (cmd turn.Cmd, reset bool, err er
 	if sessionkey.IsTaskKey(key) && e.router.SessionFor(key) == nil {
 		return cmd, false, errTaskNamespace
 	}
-	if sessionkey.IsScoutKey(key) {
+	if sessionkey.IsOneShotKey(key) {
 		return cmd, false, errScoutNamespace
 	}
 

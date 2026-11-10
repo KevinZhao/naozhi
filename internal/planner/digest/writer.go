@@ -558,7 +558,7 @@ func (w *Writer) write(key string, now time.Time) bool {
 	w.mu.Unlock()
 	f.Updated = now
 	var b bytes.Buffer
-	writeHeader(&b, key, now)
+	writeHeader(&b, key, now, f.Taint)
 	b.Write(body)
 	err := datadir.EnsureDir(w.cfg.Dir)
 	if err == nil {

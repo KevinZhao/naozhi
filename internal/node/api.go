@@ -51,6 +51,7 @@ var apiRoutes = map[string]bool{
 	"GET /api/planner/briefs":         true,
 	"GET /api/planner/notes":          true,
 	"POST /api/planner/memory/forget": true,
+	"GET /api/planner/lookup":         true,
 	"GET /api/inbox":                  true,
 	"POST /api/inbox/close":           true,
 	"POST /api/inbox/decide":          true,

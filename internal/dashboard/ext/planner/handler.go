@@ -14,6 +14,9 @@
 //	POST /api/planner/memory/forget {"workspace": "...", "name": "..."} —
 //	                         takes back a memory a remember block kept
 //	                         (§15.12 ⑧): its file and its MEMORY.md line
+//	GET  /api/planner/lookup ?run=<id> — one web lookup's record (§15.12 ⑨):
+//	                         the question, the answer with its sources, or
+//	                         why it failed, for the query card
 //	POST /api/scout/run      a scout run now, outside the schedule (§15.6);
 //	                         202 with the run ID, the record lands in
 //	                         <state root>/planner/scout/runs
@@ -31,6 +34,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/brief"
+	"github.com/naozhi/naozhi/internal/planner/reader"
 	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
@@ -43,6 +47,8 @@ type Handler struct {
 	briefs *brief.Briefer
 	scout  *scout.Scout
 	files  Files
+	// lookups are the Planner's web lookups (SetLookups).
+	lookups *reader.Reader
 }
 
 // New returns a Handler for a, b, sc and files (any nil when not built; with
@@ -219,6 +225,26 @@ func (h *Handler) HandleScoutRun(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	httputil.WriteJSONStatus(w, http.StatusAccepted, map[string]string{"status": "accepted", "run": id})
+}
+
+// SetLookups gives the handler the web lookups GET /api/planner/lookup
+// reads (nil: none).
+func (h *Handler) SetLookups(r *reader.Reader) {
+	if h != nil {
+		h.lookups = r
+	}
+}
+
+// HandleLookup is one lookup's record (?run=<id>), for the query card: the
+// question, the answer and its sources, or why it failed.
+func (h *Handler) HandleLookup(w http.ResponseWriter, r *http.Request) {
+	run, ok := h.lookups.Get(r.URL.Query().Get("run"))
+	if !ok {
+		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "没有这次查询的记录"})
+		return
+	}
+	run.Why, run.Tools, run.Shift = "", nil, ""
+	httputil.WriteJSON(w, run)
 }
 
 // writeErr maps the agent's errors to statuses; their text is user-facing.

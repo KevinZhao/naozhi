@@ -393,8 +393,9 @@ func (p *Process) Kill()
 | `cron:` | `session.CronKeyPrefix` | `internal/cron` | `cron:{jobID}` | ✓ | ✓ | ✓（cron 面板） |
 | `planner:` | `sessionkey.PlannerNSPrefix` | `internal/planner/agent` | `planner:main` | ✓ | ✓ | ✗（Planner 页面） |
 | `project:` | `session.ProjectKeyPrefix` | `internal/project` | `project:{name}:planner` | ✓ | ✓ | ✓（planner 行） |
+| `reader:` | `sessionkey.ReaderKeyPrefix` | `internal/planner/reader` | `reader:{run ID}`（Planner 的一次 `lookup` 一个，跑完即 Reset；事件不写 `events/`，与 `scout:` 同） | ✓ | ✗ | ✗ |
 | `scratch:` | `sessionkey.ScratchKeyPrefix` | `internal/session/scratch.go` | `scratch:{id}:general:{sourceAgentID}` | ✗ | ✗（ephemeral） | ✗（抽屉独立 UI） |
-| `scout:` | `sessionkey.ScoutKeyPrefix` | `internal/planner/scout` | `scout:{run ID}`（一次巡检一个，跑完即 Reset） | ✓ | ✗ | ✗（健康表里是 `sys:scout` 一行） |
+| `scout:` | `sessionkey.ScoutKeyPrefix` | `internal/planner/scout` | `scout:{run ID}`（一次巡检一个，跑完即 Reset；v0.8.0 起事件不写 `events/`） | ✓ | ✗ | ✗（健康表里是 `sys:scout` 一行） |
 | `task:` | `sessionkey.TaskKeyPrefix` | `internal/planner/action` | `task:{随机 ID}`（Planner 派出，派出即创建；血缘与 purpose 在旁路文件 `planner/sessions/`） | ✗（计入 max_procs） | ✓ | ✓（"Planner 派出"分组） |
 
 判定规则（`internal/session/key.go`）：

@@ -77,7 +77,7 @@ func (h HealthSources) Collect(since time.Time) []health.Fact {
 	}
 	if h.Router != nil {
 		for _, snap := range h.Router.ListSessions() {
-			if sessionkey.IsScoutKey(snap.Key) {
+			if sessionkey.IsOneShotKey(snap.Key) {
 				continue
 			}
 			f := sessionFact(snap, h.Router.SessionFor(snap.Key), h.EventLogDir)

@@ -20,6 +20,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/custody"
 	"github.com/naozhi/naozhi/internal/planner/digest"
 	"github.com/naozhi/naozhi/internal/planner/note"
+	"github.com/naozhi/naozhi/internal/planner/reader"
 	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
@@ -118,6 +119,9 @@ type ServerOptions struct {
 	// Scout is the Planner's patrol behind POST /api/scout/run; nil answers
 	// it as off.
 	Scout *scout.Scout
+	// Lookups are the Planner's web lookups behind GET /api/planner/lookup
+	// (the query card); nil answers it as not found.
+	Lookups *reader.Reader
 	// Briefs are the morning briefs /api/planner/briefs lists; nil lists
 	// none.
 	Briefs *brief.Briefer

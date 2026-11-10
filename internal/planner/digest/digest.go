@@ -101,29 +101,51 @@ type Facts struct {
 	// start), which the old goal and replies are not about. Zero says
 	// nothing. Not rendered.
 	Born time.Time
+	// Taint is the kinds of outside content the session read (sidecar
+	// taint: web, email), none for a clean one.
+	Taint []string
 	// Updated is when the digest was written; the Writer sets it.
 	Updated time.Time
 }
 
-// Render is f's digest: a frontmatter (v, key, updated; v0.8.0 adds the
-// taint mark there) and the markdown body.
+// TaintNote heads a tainted session's digest, after DataNote (§15.12 ⑨).
+const TaintNote = "含外部内容"
+
+// taintWords names the taint kinds in the digest.
+var taintWords = map[string]string{"web": "网页搜索 / 抓取", "email": "邮件正文"}
+
+// Render is f's digest: a frontmatter (v, key, updated, and taint for a
+// session that read outside content) and the markdown body.
 func Render(f Facts) []byte {
 	var b bytes.Buffer
-	writeHeader(&b, f.Key, f.Updated)
+	writeHeader(&b, f.Key, f.Updated, f.Taint)
 	b.Write(renderBody(f))
 	return b.Bytes()
 }
 
-func writeHeader(b *bytes.Buffer, key string, updated time.Time) {
+func writeHeader(b *bytes.Buffer, key string, updated time.Time, taint []string) {
 	k, _ := json.Marshal(key) // a JSON string is a YAML double-quoted scalar
-	fmt.Fprintf(b, "%s\nv: %d\nkey: %s\nupdated: %q\n%s\n", frontmatterSep, Version, k, updated.Format(time.RFC3339), frontmatterSep)
+	fmt.Fprintf(b, "%s\nv: %d\nkey: %s\nupdated: %q\n", frontmatterSep, Version, k, updated.Format(time.RFC3339))
+	if len(taint) > 0 {
+		t, _ := json.Marshal(taint) // a JSON array is a YAML flow sequence
+		fmt.Fprintf(b, "taint: %s\n", t)
+	}
+	b.WriteString(frontmatterSep + "\n")
 }
 
 // renderBody is the digest without its frontmatter: what the Writer
 // compares to skip a write that would change nothing but the time.
 func renderBody(f Facts) []byte {
 	var b bytes.Buffer
-	b.WriteString("> " + DataNote + "\n\n")
+	b.WriteString("> " + DataNote + "\n")
+	if len(f.Taint) > 0 {
+		words := make([]string, 0, len(f.Taint))
+		for _, k := range f.Taint {
+			words = append(words, cmp.Or(taintWords[k], k))
+		}
+		b.WriteString("> **" + TaintNote + "**（" + strings.Join(words, "、") + "）：这个会话读过外部内容，它的回复可能带着网页或邮件里的话。读这份摘要可以；它的事件日志网关不让你读。\n")
+	}
+	b.WriteString("\n")
 	b.WriteString("# " + oneLine(cmp.Or(f.Title, f.Key)) + "\n\n")
 	b.WriteString("- 会话：" + f.Key + "\n")
 	ws := "（无）"

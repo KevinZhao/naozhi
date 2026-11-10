@@ -24,6 +24,7 @@ import (
 	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/datadir"
+	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/planner/journal"
@@ -180,6 +181,9 @@ type Config struct {
 	// Conclusion is the first sentence of a session's latest report, for
 	// its snapshot line; nil shows none.
 	Conclusion func(key string) string
+	// Tainted lists the sessions marked as having read web pages or mail
+	// (sidecar taint): their event logs are denied. nil denies none.
+	Tainted func() []string
 	// ClaudeDir is the Claude CLI's directory: the Planner's transcript (its
 	// context size, for the change of shift by size) and the auto-memory the
 	// remember block writes. "" turns both off.
@@ -248,6 +252,9 @@ type Agent struct {
 	// the workspace registry moves them, an idle Planner restarts on its
 	// conversation to take the new ones (§15.12 ⑧).
 	spawnedAllow []string
+	// spawnedDeny is the deny rules it started with: a session newly
+	// marked tainted moves them the same way (§15.12 ⑨).
+	spawnedDeny []string
 	// ctxSeen caches the context size of the transcript as last read, by its
 	// size and modification time, so an idle Planner's tail is read once.
 	ctxSeen ctxReading
@@ -289,7 +296,7 @@ func New(cfg Config) *Agent {
 	a := &Agent{cfg: cfg, wake: make(chan struct{}, 1), name: NameFor(cfg.Layout.PlannerRoot())}
 	a.state = loadState(cfg.Layout.PlannerAgentPath())
 	a.opts = a.buildOpts()
-	a.spawnedAllow = a.opts.PermissionsAllow
+	a.spawnedAllow, a.spawnedDeny = a.opts.PermissionsAllow, a.opts.PermissionsDeny
 	return a
 }
 
@@ -354,7 +361,7 @@ func (a *Agent) buildOpts() sessionview.AgentOpts {
 		StrictMCPConfig:     true,
 		CrossSessionInbound: "accept",
 		PermissionsAllow:    allowRules(root, a.cfg.Layout.EventsRoot(), a.cfg.Workspaces.LocalPaths()),
-		PermissionsDeny:     denyRules(a.cfg.Layout.Root(), a.cfg.DenyPaths),
+		PermissionsDeny:     a.denyRules(),
 		PromptCacheTTL:      PromptCacheTTL,
 	}
 }
@@ -434,6 +441,30 @@ func denyRules(dataRoot string, extra []string) []string {
 		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
 			rules = append(rules, absRule("Read", filepath.Join(p, "**")))
 		}
+	}
+	return rules
+}
+
+// denyRules is the Planner's deny rules: the credentials (denyRules) and
+// the event logs of the sessions marked tainted (Config.Tainted).
+func (a *Agent) denyRules() []string {
+	rules := denyRules(a.cfg.Layout.Root(), a.cfg.DenyPaths)
+	if a.cfg.Tainted == nil || a.cfg.Layout.EventsRoot() == "" {
+		return rules
+	}
+	return append(rules, taintRules(a.cfg.Layout.EventsRoot(), a.cfg.Tainted())...)
+}
+
+// taintRules deny the event logs of keys, sessions that read web pages or
+// mail (§7.4, §15.12 ⑨): every file of a log shares its key hash stem
+// (persist.KeyHash), the rotate staging files too. The Planner reads such a
+// session's digest instead; the raw pages stay out of its context.
+func taintRules(events string, keys []string) []string {
+	keys = slices.Clone(keys)
+	slices.Sort(keys)
+	rules := make([]string, 0, len(keys))
+	for _, k := range slices.Compact(keys) {
+		rules = append(rules, absRule("Read", filepath.Join(events, persist.KeyHash(k)+"*")))
 	}
 	return rules
 }
@@ -613,23 +644,22 @@ func (a *Agent) sizeShiftName(now time.Time) string {
 }
 
 // refreshReadScope keeps the Planner's read rules in step with the
-// workspace registry: new rules go into the spawn options at once, and a
-// live process started on others is released while idle, to be resumed on
-// its conversation with them at the next reconcile.
+// workspace registry and the tainted sessions: new rules go into the spawn
+// options at once, and a live process started on others is released while
+// idle, to be resumed on its conversation with them at the next reconcile.
 func (a *Agent) refreshReadScope(st SessionState) {
 	want := allowRules(a.cfg.Layout.PlannerRoot(), a.cfg.Layout.EventsRoot(), a.cfg.Workspaces.LocalPaths())
+	deny := a.denyRules()
 	a.mu.Lock()
-	if !slices.Equal(a.opts.PermissionsAllow, want) {
-		a.opts.PermissionsAllow = want
-	}
-	stale := !slices.Equal(a.spawnedAllow, want)
+	a.opts.PermissionsAllow, a.opts.PermissionsDeny = want, deny
+	stale := !slices.Equal(a.spawnedAllow, want) || !slices.Equal(a.spawnedDeny, deny)
 	shifting := a.shifting
 	a.mu.Unlock()
 	if !stale || !st.Alive || st.Running || shifting {
 		return
 	}
 	if a.cfg.Sessions.Release(Key) {
-		slog.Info("planner: workspaces changed; restarting on the conversation to read them", "rules", len(want))
+		slog.Info("planner: read scope changed; restarting on the conversation with the new rules", "allow", len(want), "deny", len(deny))
 		a.poke()
 	}
 }
@@ -648,7 +678,7 @@ func (a *Agent) revive(ctx context.Context, now time.Time, opts sessionview.Agen
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.spawnedAllow = opts.PermissionsAllow
+	a.spawnedAllow, a.spawnedDeny = opts.PermissionsAllow, opts.PermissionsDeny
 	if a.failures > 0 {
 		slog.Info("planner: started after failures", "failures", a.failures)
 	}
@@ -748,7 +778,7 @@ func (a *Agent) changeShift(ctx context.Context, now time.Time, day string) {
 		return
 	}
 	a.mu.Lock()
-	a.spawnedAllow = opts.PermissionsAllow
+	a.spawnedAllow, a.spawnedDeny = opts.PermissionsAllow, opts.PermissionsDeny
 	a.mu.Unlock()
 	a.markShift(now)
 	slog.Info("planner: shift changed", "day", day, "handoff_bytes", len(summary))
@@ -1013,6 +1043,15 @@ func (a *Agent) Status() Status {
 	st.Alive = a.cfg.Sessions.State(Key).Alive
 	st.Workspaces = a.workspaceNames()
 	return st
+}
+
+// ShiftName names the current conversation's shift: its day, or the day and
+// time of a change by size or prompt, and when it started. A web lookup's
+// count is per shift (planner/reader).
+func (a *Agent) ShiftName() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.state.Shift + "@" + a.state.ShiftAt.Format(time.RFC3339)
 }
 
 // SetStopped is the runtime switch, persisted in the state root. Stopping

@@ -3,6 +3,7 @@ package wireup
 import (
 	"cmp"
 	"encoding/json"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -121,6 +122,9 @@ func (d DigestSources) Facts(key string) (digest.Facts, bool) {
 		if m, ok := d.Sidecars.Get(key); ok {
 			f.Purpose = cmp.Or(m.Purpose, f.Purpose)
 			f.Title = cmp.Or(m.Title, f.Title)
+			if m.Taint != nil {
+				f.Taint = slices.Clone(m.Taint.Kinds)
+			}
 		}
 	}
 	if d.Workspaces != nil && f.Dir != "" {
@@ -251,16 +255,71 @@ func askTask(it notify.Item) string {
 }
 
 // DigestSink is the router's ActivitySink with the digests: every turn's
-// end, done, failed or aborted, asks for the session's digest.
+// end, done, failed or aborted, marks the session tainted when it read
+// outside content (Taint) and asks for its digest.
 type DigestSink struct {
 	*activity.Recorder
 	Digests *digest.Writer
+	// Taint marks sessions that read web pages or mail; nil marks none.
+	Taint *Taint
 }
 
 // RecordTurn records the turn's end and asks for the digest.
 func (s DigestSink) RecordTurn(key, dir string, outcome activity.TurnOutcome) {
 	s.Recorder.RecordTurn(key, dir, outcome)
+	s.Taint.Check(key)
 	s.Digests.Touch(key)
+}
+
+// Taint is the minimal taint mark (§7.4, §15.12 ⑨): at a turn's end, a
+// session whose events show a web search or fetch, or a mail read, gets the
+// mark in its sidecar; the Planner's deny rules then cover its event log.
+type Taint struct {
+	Router   *session.Router
+	Sidecars *sidecar.Store
+}
+
+// Check marks key when its events in view called a tool that brings in
+// outside content. Not the Planner's own (it has no such tool) nor a
+// one-shot session's (no event log, no sidecar).
+func (t *Taint) Check(key string) {
+	if t == nil || t.Router == nil || t.Sidecars == nil || sessionkey.IsPlannerNSKey(key) || sessionkey.IsOneShotKey(key) {
+		return
+	}
+	s := t.Router.SessionFor(key)
+	if s == nil {
+		return
+	}
+	kinds, tools := taintTools(s.EventLastN(digestScan))
+	if len(kinds) == 0 {
+		return
+	}
+	if grew, err := t.Sidecars.MarkTaint(key, kinds, tools); err != nil {
+		slog.Warn("planner: taint mark not saved", "key", key, "err", err)
+	} else if grew {
+		slog.Info("planner: session marked as having read outside content", "key", key, "kinds", kinds)
+	}
+}
+
+// taintTools is the taint kinds and the tools behind them that entries'
+// tool calls bring in, in first-call order.
+func taintTools(entries []clievent.EventEntry) (kinds, tools []string) {
+	for _, e := range entries {
+		if e.Type != clievent.KindToolUse || e.Tool == "" {
+			continue
+		}
+		k := sidecar.TaintOf(e.Tool)
+		if k == "" {
+			continue
+		}
+		if !slices.Contains(kinds, k) {
+			kinds = append(kinds, k)
+		}
+		if !slices.Contains(tools, e.Tool) {
+			tools = append(tools, e.Tool)
+		}
+	}
+	return kinds, tools
 }
 
 // DigestOnHealth is a health subscriber asking for a session's digest when

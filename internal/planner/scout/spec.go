@@ -135,6 +135,14 @@ const maxMCPConfigBytes = 1 << 20
 // other server's definition, so no other server's credentials, goes into
 // the scout's file. servers is those it found, in Servers order.
 func scoutMCPConfig(path string) (data []byte, servers []string, err error) {
+	return CutMCPConfig(path, Servers)
+}
+
+// CutMCPConfig is the MCP config file at path cut down to the servers in
+// want: a one-shot session's --mcp-config holds no other server's
+// definition, so none of their credentials. servers is those found, in
+// want's order; none is an error.
+func CutMCPConfig(path string, want []string) (data []byte, servers []string, err error) {
 	if path == "" {
 		return nil, nil, errors.New("no cli.mcp_config")
 	}
@@ -156,14 +164,14 @@ func scoutMCPConfig(path string) (data []byte, servers []string, err error) {
 		return nil, nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	keep := map[string]json.RawMessage{}
-	for _, s := range Servers {
+	for _, s := range want {
 		if def, ok := doc.MCPServers[s]; ok {
 			keep[s] = def
 			servers = append(servers, s)
 		}
 	}
 	if len(servers) == 0 {
-		return nil, nil, fmt.Errorf("%s defines none of %s", path, strings.Join(Servers, ", "))
+		return nil, nil, fmt.Errorf("%s defines none of %s", path, strings.Join(want, ", "))
 	}
 	data, err = json.MarshalIndent(map[string]any{"mcpServers": keep}, "", "  ")
 	return data, servers, err

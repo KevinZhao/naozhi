@@ -209,6 +209,16 @@ func (l Layout) PlannerScoutWorkDir() string { return l.Join("planner", "scout",
 // out of the Planner's reach (<root>/session-settings/scout-mcp.json).
 func (l Layout) ScoutMCPConfigPath() string { return l.Join("session-settings", "scout-mcp.json") }
 
+// PlannerReaderRoot holds the Planner's web lookups (§15.12 ⑨): the
+// shift's count, today's cache and each run's record
+// (<root>/planner/reader).
+func (l Layout) PlannerReaderRoot() string { return l.Join("planner", "reader") }
+
+// ReaderMCPConfigPath is a lookup's reader session's --mcp-config,
+// cli.mcp_config cut down to the web search servers, beside the scout's
+// (<root>/session-settings/reader-mcp.json).
+func (l Layout) ReaderMCPConfigPath() string { return l.Join("session-settings", "reader-mcp.json") }
+
 // TaskMCPConfigPath is the --mcp-config of a dispatched session whose
 // dispatch allowed write tools (mcp_tools, docs/rfc/planner.md D98):
 // cli.mcp_config with those servers' write switch on, beside the scout's, named by the key's hash

@@ -5,8 +5,8 @@ import "github.com/naozhi/naozhi/internal/dashboard/httputil"
 
 // Routes returns the endpoints this package owns: the global Planner's
 // status, its runtime stop switch, its message entry, the morning briefs,
-// the gateway's notes in its conversation, taking back a memory it kept and
-// a scout run on demand.
+// the gateway's notes in its conversation, taking back a memory it kept, a
+// web lookup's record and a scout run on demand.
 //
 // Patterns must stay string literals: routes_snapshot_test.go reads them from
 // the AST as the anti-drift gate.
@@ -18,6 +18,7 @@ func (h *Handler) Routes() []httputil.Route {
 		{Pattern: "GET /api/planner/briefs", Handler: h.HandleBriefs},
 		{Pattern: "GET /api/planner/notes", Handler: h.HandleNotes},
 		{Pattern: "POST /api/planner/memory/forget", Handler: h.HandleForget},
+		{Pattern: "GET /api/planner/lookup", Handler: h.HandleLookup},
 		{Pattern: "POST /api/scout/run", Handler: h.HandleScoutRun},
 	}
 }
