@@ -32,7 +32,8 @@ const (
 	RolePlanner
 	// RoleTask is a session the Planner dispatched. Key shape "task:<id>".
 	RoleTask
-	// RoleScout is a one-shot scout session. Key shape "scout:<run>".
+	// RoleScout is a one-shot read session: a scout run's "scout:<run>" or
+	// a lookup's "reader:<run>".
 	RoleScout
 )
 
@@ -79,7 +80,7 @@ func classifyKey(key string) SessionRole {
 		return RolePlanner
 	case sessionkey.IsTaskKey(key):
 		return RoleTask
-	case sessionkey.IsScoutKey(key):
+	case sessionkey.IsOneShotKey(key):
 		return RoleScout
 	case isPlannerKey(key):
 		return RoleProject

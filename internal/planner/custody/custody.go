@@ -365,7 +365,7 @@ func (e *Engine) eligible(key string) error {
 		return ErrDisabled
 	case key == "":
 		return ErrNoSession
-	case sessionkey.IsPlannerNSKey(key), sessionkey.IsScoutKey(key), sessionkey.IsSysKey(key):
+	case sessionkey.IsPlannerNSKey(key), sessionkey.IsOneShotKey(key), sessionkey.IsSysKey(key):
 		return ErrRefused
 	case e.cfg.Local == nil || !e.cfg.Local(key):
 		return ErrNoSession

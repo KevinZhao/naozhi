@@ -12,6 +12,7 @@ import (
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // HistoryIO is Router's history facet: where transcripts and event logs live,
@@ -123,6 +124,12 @@ func (h *HistoryIO) runHistoryTask(fn func(ctx context.Context)) bool {
 // split out so a test can hand it an EventLog without a live CLI process.
 func (h *HistoryIO) bindPersistSink(log *ring.EventLog, key string) {
 	if h.persister == nil || log == nil {
+		return
+	}
+	// A one-shot read session's events are the mail or web pages it read:
+	// kept in memory for its one turn, never in events/, which the Planner
+	// may read.
+	if sessionkey.IsOneShotKey(key) {
 		return
 	}
 	persisterSink := h.persister.SinkFor(key)

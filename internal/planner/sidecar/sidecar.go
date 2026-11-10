@@ -23,6 +23,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -117,6 +119,39 @@ type Meta struct {
 	// away from it: a result for them (§15.12 ④ ⑥), new while later than
 	// SeenAt.
 	ResultAt time.Time `json:"result_at,omitzero"`
+	// Taint is set once the session read outside content: web pages it
+	// searched or fetched, a mail's body (§7.4, §15.12 ⑨). Sticky: the
+	// content stays in its context and its event log. The Planner reads its
+	// digest, marked, and never its event log (planner/agent's deny rules).
+	Taint *Taint `json:"taint,omitempty"`
+}
+
+// Taint kinds.
+const (
+	TaintWeb   = "web"
+	TaintEmail = "email"
+)
+
+// TaintOf is the kind of outside content a call of tool brings in, "" for
+// none: the CLI's web tools and the web search MCP servers' tools, and
+// reading a mail's body.
+func TaintOf(tool string) string {
+	switch {
+	case tool == "WebFetch" || tool == "WebSearch",
+		strings.HasPrefix(tool, "mcp__exa__"), strings.HasPrefix(tool, "mcp__agentcore-websearch__"):
+		return TaintWeb
+	case tool == "mcp__aws-outlook-mcp__email_read":
+		return TaintEmail
+	}
+	return ""
+}
+
+// Taint is what outside content a session read: its kinds and the tools
+// that brought it in, and when it was first seen.
+type Taint struct {
+	At    time.Time `json:"at"`
+	Kinds []string  `json:"kinds"`
+	Tools []string  `json:"tools,omitempty"`
 }
 
 // Report is a session's latest report: its state (done, blocked,
@@ -347,6 +382,51 @@ func (s *Store) List() []Meta {
 	for _, m := range s.m {
 		out = append(out, m)
 	}
+	return out
+}
+
+// MarkTaint records that key read outside content of kinds through tools,
+// giving it a sidecar when it has none; true when the mark grew.
+func (s *Store) MarkTaint(key string, kinds, tools []string) (bool, error) {
+	grew := false
+	err := s.Upsert(key, func(m *Meta) bool {
+		t := Taint{At: s.now()}
+		if m.Taint != nil {
+			t = *m.Taint
+			t.Kinds, t.Tools = slices.Clone(t.Kinds), slices.Clone(t.Tools)
+		}
+		for _, k := range kinds {
+			if !slices.Contains(t.Kinds, k) {
+				t.Kinds, grew = append(t.Kinds, k), true
+			}
+		}
+		for _, tool := range tools {
+			if !slices.Contains(t.Tools, tool) && len(t.Tools) < maxTaintTools {
+				t.Tools, grew = append(t.Tools, tool), true
+			}
+		}
+		if grew {
+			m.Taint = &t
+		}
+		return grew
+	})
+	return grew, err
+}
+
+// maxTaintTools caps the tools a taint mark names.
+const maxTaintTools = 16
+
+// Tainted lists the keys whose sidecar carries a taint mark, sorted.
+func (s *Store) Tainted() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for k, m := range s.m {
+		if m.Taint != nil {
+			out = append(out, k)
+		}
+	}
+	slices.Sort(out)
 	return out
 }
 

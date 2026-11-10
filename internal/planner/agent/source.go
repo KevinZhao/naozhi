@@ -37,6 +37,10 @@ const (
 	// SourceUnrun is the receipt of the action blocks a reply's turn did not
 	// run, in a turn no outside content brought in (TellUnrun).
 	SourceUnrun Source = "unrun"
+	// SourceLookup is a web lookup's answer (planner/reader, §15.12 ⑨):
+	// what the reader read off web pages, so its turn may only notify,
+	// promise and ask, as a scout turn.
+	SourceLookup Source = "lookup"
 	// SourceAnswer is the user's answer to a question the Planner asked
 	// (TellAnswer): a receipt, but one the user started, its words the
 	// answer (D98).
@@ -54,10 +58,10 @@ type Words struct {
 }
 
 // outsideLabels names the sources whose turns carry outside content (mail,
-// Slack messages, tasks other people wrote), or answer a turn that did: a
-// line in one could pose as a request, so their turns may only promise and
-// ask.
-var outsideLabels = map[Source]string{SourceScout: "巡检", SourceBriefing: "会前简报", SourceRefusal: "被拒动作的回执"}
+// Slack messages, tasks other people wrote, a web lookup's answer), or
+// answer a turn that did: a line in one could pose as a request, so their
+// turns may only notify, promise and ask.
+var outsideLabels = map[Source]string{SourceScout: "巡检", SourceBriefing: "会前简报", SourceRefusal: "被拒动作的回执", SourceLookup: "网页查询结果"}
 
 // Outside reports whether a turn from s carries outside content (or answers
 // a turn that did): the gateway runs such a request as a turn of its own,

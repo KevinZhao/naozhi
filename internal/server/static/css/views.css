@@ -387,13 +387,26 @@ body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
 /* A dispatch is one line (派出 · 标题 · 工作区 · 目标, the goal cut to the
    width), its rows in the fold (§15.12 ⑤); a relay likewise (转达你的决定 ·
    会话 · 说明的第一句). */
-.pl-act-dispatch>summary,.pl-act-relay>summary,.pl-act-remember>summary{display:block;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;list-style:none}
-.pl-act-dispatch>summary::-webkit-details-marker,.pl-act-relay>summary::-webkit-details-marker,.pl-act-remember>summary::-webkit-details-marker{display:none}
-.pl-act-dispatch>summary::before,.pl-act-relay>summary::before,.pl-act-remember>summary::before{content:"";display:inline-block;width:0;height:0;margin:0 7px 1px 1px;border-left:5px solid currentColor;border-top:4px solid transparent;border-bottom:4px solid transparent;transition:transform var(--nz-dur) var(--nz-ease)}
-.pl-act-dispatch[open]>summary::before,.pl-act-relay[open]>summary::before,.pl-act-remember[open]>summary::before{transform:rotate(90deg)}
-.pl-act-dispatch[open]>summary,.pl-act-relay[open]>summary,.pl-act-remember[open]>summary{margin-bottom:6px;white-space:normal}
-.pl-act-dispatch>summary:hover .pl-act-k,.pl-act-relay>summary:hover .pl-act-k,.pl-act-remember>summary:hover .pl-act-k{color:var(--nz-accent)}
+.pl-act-dispatch>summary,.pl-act-relay>summary,.pl-act-remember>summary,.pl-lookup>summary{display:block;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;list-style:none}
+.pl-act-dispatch>summary::-webkit-details-marker,.pl-act-relay>summary::-webkit-details-marker,.pl-act-remember>summary::-webkit-details-marker,.pl-lookup>summary::-webkit-details-marker{display:none}
+.pl-act-dispatch>summary::before,.pl-act-relay>summary::before,.pl-act-remember>summary::before,.pl-lookup>summary::before{content:"";display:inline-block;width:0;height:0;margin:0 7px 1px 1px;border-left:5px solid currentColor;border-top:4px solid transparent;border-bottom:4px solid transparent;transition:transform var(--nz-dur) var(--nz-ease)}
+.pl-act-dispatch[open]>summary::before,.pl-act-relay[open]>summary::before,.pl-act-remember[open]>summary::before,.pl-lookup[open]>summary::before{transform:rotate(90deg)}
+.pl-act-dispatch[open]>summary,.pl-act-relay[open]>summary,.pl-act-remember[open]>summary,.pl-lookup[open]>summary{margin-bottom:6px;white-space:normal}
+.pl-act-dispatch>summary:hover .pl-act-k,.pl-act-relay>summary:hover .pl-act-k,.pl-act-remember>summary:hover .pl-act-k,.pl-lookup>summary:hover .pl-act-k{color:var(--nz-accent)}
 .pl-act-goal{color:var(--nz-text)}
+/* A web lookup's answer (§15.12 ⑨): 网页查询 · 问题 · 答案第一句 and the
+   source sites; the whole answer and each fact's quote in the fold. */
+.event.system.pl-lookup-ev .event-content{flex:0 1 560px;min-width:0;text-align:left;color:var(--nz-text)}
+div.pl-lookup{max-width:560px;margin:8px 0;padding:8px 12px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);font-size:var(--nz-fs-sm2)}
+.pl-lookup-one{margin-top:2px;white-space:normal;color:var(--nz-text)}
+.pl-lookup[open] .pl-lookup-one{display:none}
+.pl-lookup-conf{margin-left:8px;white-space:nowrap;padding:0 6px;border-radius:var(--nz-radius-pill);background:var(--nz-bg-2);color:var(--nz-text-mute);font-size:var(--nz-fs-xs)}
+.pl-lookup-ans{white-space:pre-wrap;word-break:break-word}
+.pl-lookup-facts{margin:6px 0 0;padding-left:1.4em}
+.pl-lookup-facts li{margin:4px 0;word-break:break-word}
+.pl-lookup-quote{margin:2px 0;padding:2px 8px;border-left:2px solid var(--nz-border);color:var(--nz-text-mute);font-size:var(--nz-fs-xs)}
+.pl-lookup-facts .pl-link{font-size:var(--nz-fs-xs);word-break:break-all}
+.pl-lookup-src{display:flex;flex-wrap:wrap;gap:4px 10px;margin:-4px 0 8px;padding:0 12px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
 /* A task's done / failed is a line, its reason in the tooltip. */
 .pl-act-line{padding:4px 12px;font-size:var(--nz-fs-sm);color:var(--nz-text-mute)}
 .pl-act-line .pl-act-name{font-weight:600;color:var(--nz-text-strong)}

@@ -284,6 +284,8 @@ function defaultGitStates() {
  * @param {object[]} [overrides.plannerEvents] - GET /api/sessions/events answer for key=planner:main
  *   (the other keys keep the default events). A test may push to it. POST /api/planner/send
  *   (with overrides.planner) lands in plannerSendCalls and answers 202, or 409 while stopped.
+ * @param {object} [overrides.plannerLookups] - GET /api/planner/lookup?run= answers: run ID →
+ *   the lookup's record ({id, q, state, result: {answer, facts, confidence}}); an unknown run 404s.
  * @param {object[]} [overrides.plannerNotes] - GET /api/planner/notes answer ({time, text}, the
  *   gateway's journaled notes in the Planner conversation). Unset, the route 404s.
  * @param {object[]} [overrides.plannerBriefs] - GET /api/planner/briefs answer (the morning
@@ -386,6 +388,7 @@ function startMockServer(overrides = {}) {
   const plannerForgetCalls = [];
   const plannerEvents = overrides.plannerEvents || null;
   const plannerNotes = overrides.plannerNotes || null;
+  const plannerLookups = overrides.plannerLookups || null;
   const plannerBriefs = overrides.plannerBriefs || null;
   const plannerSendCalls = [];
   const uploadCalls = [];
@@ -804,6 +807,14 @@ function startMockServer(overrides = {}) {
         res.writeHead(again ? 404 : 200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(again ? { error: '没有这条记忆' } : { status: 'forgotten' }));
       });
+      return;
+    }
+
+    if (plannerLookups && pathname === NZ_CONTRACT.API.planner_lookup && req.method === 'GET') {
+      if (!checkAuth()) return;
+      const rec = plannerLookups[url.searchParams.get('run') || ''];
+      res.writeHead(rec ? 200 : 404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(rec || { error: '没有这次查询的记录' }));
       return;
     }
 

@@ -80,8 +80,8 @@ func TestSystemPrompt(t *testing.T) {
 		"<工作区 ID 或名字，或 global>", "global", "<slug>", "style",
 	)
 	formats := regexp.MustCompile(`\{"type":"[a-z]+"[^\n]*?\}`).FindAllString(p, -1)
-	if len(formats) != 10 {
-		t.Fatalf("found %d block formats, want 10: %q", len(formats), formats)
+	if len(formats) != 11 {
+		t.Fatalf("found %d block formats, want 11: %q", len(formats), formats)
 	}
 	for _, f := range formats {
 		body := strings.ReplaceAll(fill.Replace(f), `["x"]`, `["是"]`)

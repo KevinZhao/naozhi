@@ -150,7 +150,7 @@ func TestExemptCapFor(t *testing.T) {
 // the relief valve, never the primary trigger. R242-ARCH-2.
 func TestExemptSubQuotasFitGlobalCeiling(t *testing.T) {
 	t.Parallel()
-	sum := maxCronExempt + maxProjectExempt + maxSysExempt + maxPlannerExempt + maxScoutExempt
+	sum := maxCronExempt + maxProjectExempt + maxSysExempt + maxPlannerExempt + maxScoutExempt + maxReaderExempt
 	if sum > maxExemptSessions {
 		t.Fatalf("sum of sub-quotas %d exceeds maxExemptSessions %d", sum, maxExemptSessions)
 	}

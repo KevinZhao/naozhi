@@ -210,6 +210,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		},
 		imageDir: plannerImageDir(opts.StateDir),
 	})
+	hs.plannerH.SetLookups(opts.Lookups)
 
 	// Retired-store load is best-effort (parse error ⇒ empty store); it is
 	// persisted only when StateDir is configured.

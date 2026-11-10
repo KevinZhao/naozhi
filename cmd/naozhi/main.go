@@ -31,6 +31,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/custody"
 	"github.com/naozhi/naozhi/internal/planner/digest"
 	"github.com/naozhi/naozhi/internal/planner/promise"
+	"github.com/naozhi/naozhi/internal/planner/reader"
 	"github.com/naozhi/naozhi/internal/planner/reap"
 	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
@@ -322,6 +323,7 @@ func main() {
 		Journal:    plannerState.Journal,
 		Promises:   wireup.PlannerPromises(promises),
 		Conclusion: wireup.PlannerConclusion(sidecars),
+		Tainted:    sidecars.Tainted,
 		ClaudeDir:  claudeDir,
 	})
 	// The Planner's patrol (§15.6): weekday scout runs over the mail, Slack
@@ -338,6 +340,19 @@ func main() {
 		PlannerOn: wireup.PlannerOn(plannerAgent),
 		Journal:   plannerState.Journal,
 		Beats:     beats,
+	})
+	// The Planner's web lookups (§15.12 ⑨, D107): a lookup block runs a
+	// one-shot reader session with only the web search MCP tools; its short
+	// answer with sources comes back as a turn that may only notify, promise
+	// and ask.
+	lookups := reader.New(reader.Config{
+		Layout:    sessionLayout,
+		MCPConfig: mcpConfigFile,
+		Session:   wireup.ScoutSession(router),
+		Deliver:   wireup.LookupDeliver(plannerAgent),
+		Shift:     plannerAgent.ShiftName,
+		Journal:   plannerState.Journal,
+		Ctx:       ctx,
 	})
 	// Attachments live under each workspace root, usually outside the state dir
 	// checked above; walking every root must not hold up startup.
@@ -523,7 +538,8 @@ func main() {
 			Retired: wireup.DigestRetired(sidecars),
 		})
 		observed = digestSrc.Observed
-		router.SetActivitySink(wireup.DigestSink{Recorder: activities, Digests: digests})
+		router.SetActivitySink(wireup.DigestSink{Recorder: activities, Digests: digests,
+			Taint: &wireup.Taint{Router: router, Sidecars: sidecars}})
 	}
 	// Puts a done task's session away (§5.2, D95); built below, once custody
 	// (whose "你在旁边" it waits on) exists.
@@ -643,6 +659,7 @@ func main() {
 		Digests:          digests,
 		Planner:          plannerAgent,
 		Scout:            scouter,
+		Lookups:          lookups,
 		Briefs:           briefer,
 		Health:           func() health.Snapshot { return healthMon.Snapshot() },
 		Workspaces:       plannerState.Workspaces,
@@ -791,6 +808,7 @@ func main() {
 		Relay:       srv.SubmitRelay,
 		RelayTarget: srv.RelayTarget,
 		Remember:    plannerAgent.Remember,
+		Lookup:      wireup.PlannerLookup(lookups),
 		TellAnswer:  wireup.PlannerTellAnswer(plannerAgent),
 		Ctx:         ctx,
 	})
@@ -894,6 +912,7 @@ func main() {
 				// The scout beside the scheduler, for the same reason: its run's
 				// session calls into the router. A run cut short leaves no record.
 				{name: "scout", run: scouter.Stop},
+				{name: "reader", run: lookups.Stop},
 				// ShutdownComplete closes after srv.Shutdown's 30s drain, i.e. after
 				// every in-flight handler finished, so router.Shutdown never races a
 				// half-cleaned session map. Already closed on server-exit paths.

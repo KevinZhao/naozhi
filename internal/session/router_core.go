@@ -94,7 +94,7 @@ const (
 	// are the primary limit; this global cap is the relief valve so a future
 	// exempt namespace added without sub-quota wiring still has a hard ceiling.
 	// Sum of sub-quotas must stay ≤ maxExemptSessions (docs/design/exempt-quotas.md).
-	maxExemptSessions = 22
+	maxExemptSessions = 23
 
 	// maxCronExempt caps alive cron exempt sessions so a noisy chat with
 	// DefaultMaxJobsPerChat cron jobs cannot push planner / sys sessions out.
@@ -113,10 +113,14 @@ const (
 	maxPlannerExempt = 1
 
 	// maxScoutExempt caps the scout sessions (scout:<run>): one run at a
-	// time. 12 + 5 + 3 + 1 + 1 = 22 = maxExemptSessions: sub-quotas fully
-	// partition the pool, so adding a new exempt namespace MUST shrink an
-	// existing quota or bump maxExemptSessions.
+	// time. 12 + 5 + 3 + 1 + 1 + 1 = 23 = maxExemptSessions: sub-quotas
+	// fully partition the pool, so adding a new exempt namespace MUST shrink
+	// an existing quota or bump maxExemptSessions.
 	maxScoutExempt = 1
+
+	// maxReaderExempt caps the lookup readers (reader:<run>): the reader
+	// package runs one lookup at a time.
+	maxReaderExempt = 1
 
 	// historyLoadConcurrency limits parallel disk I/O goroutines during
 	// startup session history loading.

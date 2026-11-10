@@ -52,6 +52,7 @@ var keyNamespaces = []keyNamespace{
 	{prefix: PlannerNSPrefix, exempt: true, kind: "planner"},
 	{prefix: ProjectKeyPrefix, exempt: true, kind: "project"},
 	{prefix: sessionkey.ScratchKeyPrefix, exempt: false, kind: ""},
+	{prefix: sessionkey.ReaderKeyPrefix, exempt: true, kind: "reader"},
 	{prefix: sessionkey.ScoutKeyPrefix, exempt: true, kind: "scout"},
 	{prefix: SysKeyPrefix, exempt: true, kind: "sys"},
 	// The Planner's dispatched sessions count against max_procs like the

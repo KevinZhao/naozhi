@@ -230,7 +230,7 @@ function mentionedKeys(ev) {
 
 // ---- action blocks (§6.2) ----
 
-const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask', 'status', 'notify', 'custody', 'relay', 'remember']);
+const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask', 'status', 'notify', 'custody', 'relay', 'remember', 'lookup']);
 const STATUS_LABEL = { done: '已完成', doing: '进行中', failed: '失败' };
 const STATUS_MARK = { done: '✓', failed: '✗' };
 
@@ -352,6 +352,14 @@ function actionCardHtml(raw) {
       '<div class="pl-card-acts"><button type="button" class="pl-btn" data-action="planner-memory-forget" data-ws="' + escAttr(ws) + '" data-name="' + escAttr(str(a.name)) + '">撤回</button></div>' +
       '</details>';
   }
+  if (a.type === 'lookup') {
+    // One line: 查一下 · the question; the answer comes later as the query
+    // card (lookupLine, §15.12 ⑨).
+    const q = oneLine(str(a.q));
+    const why = str(a.why);
+    return '<div class="pl-act pl-act-lookup pl-act-line"' + (why ? ' title="' + escAttr('为什么查：' + why) + '"' : '') + '>' +
+      '<span class="pl-act-k">查一下</span>' + (q ? ' · <span class="pl-act-goal">' + esc(q) + '</span>' : '') + '</div>';
+  }
   if (a.type === 'promise') {
     return '<div class="pl-act pl-act-promise"><div class="pl-act-h">登记承诺</div>' +
       rowsHtml([['内容', str(a.text)], ['到期', dueText(str(a.due))], ['完成条件', str(a.close_when)]]) + '</div>';
@@ -470,7 +478,7 @@ function decorateEvent(ev, turn) {
     m.remove();
   });
   const content = ev.querySelector('.event-content');
-  if (ev.matches('.system') && content && reportLine(ev, content)) return;
+  if (ev.matches('.system') && content && (reportLine(ev, content) || lookupLine(ev, content))) return;
   if (!ev.matches('.text, .peer_message, .system')) return;
   const carded = new Set([...ev.querySelectorAll('.pl-scard[data-key]')].map((b) => b.dataset.key));
   const named = mentionedKeys(ev);
@@ -508,6 +516,64 @@ function emptyContent(content) {
 // (planner/action: "📨 <key> 汇报：<状态> · <summary>", §15.12 ③): the key
 // becomes the session's name, and the line opens its 任务 card.
 const REPORT_NOTE_RE = /^📨 (\S+) 汇报：([\s\S]*)$/;
+
+// LOOKUP_NOTE_RE is the line planner_view.js makes of a lookup's answer to
+// the Planner (<naozhi-lookup run=…>, planner/reader): "🔎 <run> <question>".
+// It becomes the query card, filled from the run's record.
+const LOOKUP_NOTE_RE = /^🔎 (\d{8}T\d{6}-[0-9a-f]{4}) ([\s\S]*)$/;
+const CONFIDENCE_LABEL = { high: '可信度高', medium: '可信度中', low: '可信度低' };
+
+// hostOf is a source link's site, its text in the card.
+function hostOf(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
+}
+
+// lookupLine renders a lookup's answer as the query card (question · the
+// answer's first sentence, the source links; the whole answer and each
+// fact's quote in the fold), and reports whether the line was one.
+function lookupLine(ev, content) {
+  const m = LOOKUP_NOTE_RE.exec(content.textContent.trim());
+  if (!m) return false;
+  const run = m[1];
+  ev.classList.add('pl-lookup-ev');
+  content.innerHTML = lookupCardHtml(run, { q: m[2], state: 'loading' });
+  fetchJSON(plannerAPI(NZ_CONTRACT.API.planner_lookup) + '?run=' + encodeURIComponent(run), { timeoutMs: 8000 })
+    .then((rec) => { content.innerHTML = lookupCardHtml(run, rec || {}); })
+    .catch(() => { content.innerHTML = lookupCardHtml(run, { q: m[2], state: 'gone' }); });
+  return true;
+}
+
+function lookupCardHtml(run, rec) {
+  const q = oneLine(str(rec.q));
+  const head = '<span class="pl-act-k">网页查询</span>' + (q ? ' · <b>' + esc(q) + '</b>' : '');
+  const res = rec.result && typeof rec.result === 'object' ? rec.result : null;
+  if (!res) {
+    const why = rec.state === 'failed' ? '没查成：' + str(rec.error)
+      : rec.state === 'loading' ? '正在读取结果…' : rec.state === 'running' ? '正在查…' : '这次查询的记录已经不在了';
+    return '<div class="pl-lookup pl-lookup-' + escAttr(str(rec.state) || 'gone') + '" data-run="' + escAttr(run) + '"><div class="pl-act-h">' + head + '</div>' +
+      '<div class="pl-act-why">' + esc(why) + '</div></div>';
+  }
+  const answer = str(res.answer);
+  const facts = (Array.isArray(res.facts) ? res.facts : []).filter((f) => f && typeof f === 'object');
+  // One link per site, its first page; the fold has every page.
+  const seen = new Set();
+  const links = facts.map((f) => str(f.url)).filter((u) => /^https?:\/\//i.test(u) && !seen.has(hostOf(u) || u) && seen.add(hostOf(u) || u))
+    .map((u) => '<a class="pl-link" href="' + escAttr(u) + '" target="_blank" rel="noopener noreferrer">' + esc(hostOf(u) || u) + '</a>').join('');
+  const conf = CONFIDENCE_LABEL[res.confidence] || '';
+  const factsHtml = facts.map((f) => {
+    const u = str(f.url);
+    return '<li><div class="pl-lookup-claim">' + esc(str(f.claim)) + '</div>' +
+      (f.quote ? '<blockquote class="pl-lookup-quote">' + esc(str(f.quote)) + '</blockquote>' : '') +
+      (/^https?:\/\//i.test(u) ? '<a class="pl-link" href="' + escAttr(u) + '" target="_blank" rel="noopener noreferrer">' + esc(u) + '</a>' : '') + '</li>';
+  }).join('');
+  return '<details class="pl-act pl-lookup" data-run="' + escAttr(run) + '">' +
+    '<summary class="pl-act-h">' + head +
+      '<div class="pl-lookup-one">' + esc(firstSentence(answer)) +
+        (conf ? '<span class="pl-lookup-conf pl-lookup-' + escAttr(res.confidence) + '">' + esc(conf) + '</span>' : '') + '</div></summary>' +
+    '<div class="pl-lookup-ans">' + esc(answer) + '</div>' +
+    (factsHtml ? '<ol class="pl-lookup-facts">' + factsHtml + '</ol>' : '') + '</details>' +
+    (links ? '<div class="pl-lookup-src">来源：' + links + '</div>' : '');
+}
 
 // reportLine renders a report line in place of the system line's text, and
 // reports whether it was one. The line names its session already: no card.

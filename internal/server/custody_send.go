@@ -26,7 +26,7 @@ func (s *Server) RelayTarget(key string) error {
 	switch {
 	case sessionkey.ValidateSessionKey(key) != nil:
 		return fmt.Errorf("%q 不是合法的会话 key", key)
-	case sessionkey.IsPlannerNSKey(key), sessionkey.IsScoutKey(key), sessionkey.IsCronKey(key), sessionkey.IsSysKey(key):
+	case sessionkey.IsPlannerNSKey(key), sessionkey.IsOneShotKey(key), sessionkey.IsCronKey(key), sessionkey.IsSysKey(key):
 		return fmt.Errorf("会话 %s 不接收转达", key)
 	case s.router == nil || s.router.SessionFor(key) == nil:
 		return fmt.Errorf("找不到会话 %s（填 index.json 里本机会话的 key；远程节点的会话不能转达）", key)

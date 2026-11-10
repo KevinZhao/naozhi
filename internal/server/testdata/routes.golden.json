@@ -185,6 +185,11 @@
     "handler_type": "*dashplanner.Handler"
   },
   {
+    "method": "GET",
+    "path": "/api/planner/lookup",
+    "handler_type": "*dashplanner.Handler"
+  },
+  {
     "method": "POST",
     "path": "/api/planner/memory/forget",
     "handler_type": "*dashplanner.Handler"
