@@ -72,6 +72,7 @@ import {
   dismissSession,
   fetchGitState,
   invalidateGitState,
+  openAccessProfilePopover,
   openTuningPopover,
   renameSession,
   repaintGitChip,
@@ -84,7 +85,7 @@ import {
   toggleProjectCollapsed,
 } from './sidebar_project.js';
 import { backendDisplayName, backendDisplayVersion, createNewSession, doCreateSession, keyTailDisplay, saveToken, startWSAuthRetryCountdown } from './auth_modal.js';
-import { fetchAccessProfiles, fetchCLIBackends } from './backend_catalog.js';
+import { accessProfileChipInfo, fetchAccessProfiles, fetchCLIBackends } from './backend_catalog.js';
 import { pendingBackendID } from './features.js';
 import { handleKey, sendMessage } from './send_message.js';
 import { collectWorkspaceSessionIDs, fetchSessions, onSessionsApplied, originBadgeHtml, refreshHeaderExitChip, restorePending, toggleOnlyDispatched, toggleOnlyNeedsYou, updateCardUnreadChip, updateMainState } from './session_list.js';
@@ -1186,6 +1187,26 @@ async function downloadSessionMarkdown() {
   }
 }
 
+// headerAccessProfileHtml is the header's access-profile chip, the switch to
+// another profile: the profile's label and colour, or 全局默认 for none. Only
+// where there is something to switch to (profiles configured) and a session
+// this node runs; a pending session picks its profile in the new-session form.
+function headerAccessProfileHtml(s) {
+  const ap = serverInfo.accessProfiles;
+  if (!ap || !Array.isArray(ap.profiles) || ap.profiles.length === 0) return '';
+  if ((selection.node || 'local') !== 'local' || isDiscoveredKey(selection.key)) return '';
+  if (!sessionList.sessionsData[sid(selection.key, selection.node)]) return '';
+  const id = s.access_profile || '';
+  const info = accessProfileChipInfo(id);
+  if (!info) {
+    return '<span class="sc-access-profile-chip header-access-profile is-global nz-clickable" id="header-access-profile" ' +
+      'data-action="tuning-access-profile" title="全局默认凭证 — 点击切换访问档">全局默认</span>';
+  }
+  return '<span class="sc-access-profile-chip header-access-profile nz-clickable" id="header-access-profile" ' +
+    'data-action="tuning-access-profile" data-access-profile="' + escAttr(id) + '" data-nz-bg="' + escAttr(info.color) +
+    '" title="' + escAttr(info.tooltip + ' — 点击切换访问档') + '">' + esc(info.label) + '</span>';
+}
+
 // mainHeaderHtml builds the .main-header block (title, rename/export buttons,
 // detail line with the empty #header-git / #header-effort / #header-runstats
 // mounts) for session snapshot `s`. Shared by renderMainShell (full shell) and
@@ -1225,6 +1246,7 @@ function mainHeaderHtml(s) {
   const modelLabel = rawModel
     ? '<span class="model-label nz-clickable" id="header-model" data-action="tuning-model" title="' + escAttr(rawModel + ' — 点击切换模型') + '">· ' + esc(compactModel) + '</span>'
     : '<span class="model-label model-label-unset nz-clickable" id="header-model" data-action="tuning-model" title="点击指定模型">· 选模型</span>';
+  const accessProfileLabel = headerAccessProfileHtml(s);
   const headerOriginBadge = originBadgeHtml(selection.key);
   // Last turn's duration; hidden when 0 or absent (claude does not report it).
   let turnTimerHtml = '';
@@ -1259,7 +1281,7 @@ function mainHeaderHtml(s) {
       '<div class="main-header-content">' +
       '<h2>' + esc(displayName) + renameBtn + downloadBtn + '</h2>' +
       '<div class="detail">' +
-        '<span class="detail-left">' + cliLabel + modelLabel + '</span>' +
+        '<span class="detail-left">' + cliLabel + modelLabel + accessProfileLabel + '</span>' +
         headerOriginBadge +
         '<span class="detail-exit" id="header-exit">' + sessionExitChipHtml(s) + '</span>' +
         // A dispatched session's task badge and 在 Planner 中查看 (tasks.js),
@@ -1517,6 +1539,7 @@ wsm.on(NZ_CONTRACT.WS.run_ended, daemonRun, sysRun);
 
 function updateHeaderCLI() {
   const s = sessionList.sessionsData[sid(selection.key, selection.node)] || {};
+  updateHeaderAccessProfile(s);
   // Only touch the #header-cli span painted by headerCLILabelHtml.
   // Never rewrite the whole left container — #header-model lives next door.
   const el = document.getElementById('header-cli');
@@ -1533,6 +1556,24 @@ function updateHeaderCLI() {
   if (title !== (el.getAttribute('title') || '')) {
     if (title) el.setAttribute('title', title); else el.removeAttribute('title');
   }
+}
+
+// updateHeaderAccessProfile keeps the header's access-profile chip in step
+// with the sessions poll: a switch lands there, and so does a profile list
+// that arrived after the header was painted.
+function updateHeaderAccessProfile(s) {
+  const model = document.getElementById('header-model');
+  if (!model) return;
+  const html = headerAccessProfileHtml(s);
+  const cur = document.getElementById('header-access-profile');
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  const next = tpl.content.firstElementChild;
+  if (!cur && !next) return;
+  if (cur && next && cur.textContent === next.textContent &&
+      (cur.dataset.accessProfile || '') === (next.dataset.accessProfile || '')) return;
+  if (cur) cur.remove();
+  if (next) model.after(next);
 }
 
 /* ===== Cron Tab =====
@@ -1792,6 +1833,7 @@ registerActions({
   // absorbed: header tuning chips
   'tuning-model': () => openTuningPopover('model'),
   'tuning-effort': () => openTuningPopover('effort'),
+  'tuning-access-profile': () => openAccessProfilePopover(),
   ...workflowActions,
 });
 

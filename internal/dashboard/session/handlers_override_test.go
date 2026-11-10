@@ -123,3 +123,50 @@ func TestHandleOverride_Contract(t *testing.T) {
 		}
 	})
 }
+
+// access_profile routes the request to SwitchAccessProfile with the model
+// riding along; a running turn is a 409, effort alongside it a 400.
+func TestHandleOverride_AccessProfile(t *testing.T) {
+	const key = "feishu:p2p:tuner"
+	f := newFakeRouter(key)
+	f.switchVia = sessionpkg.TuningAppliedRespawn
+	h := New(Deps{Router: f})
+
+	res := doOverride(t, h, `{"key":"`+key+`","access_profile":"isengard","model":"global.anthropic.claude-fable-5-2[1m]"}`)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["applied_via"] != sessionpkg.TuningAppliedRespawn {
+		t.Errorf("applied_via = %q", body["applied_via"])
+	}
+	if len(f.switched) != 1 || f.switched[0].profile != "isengard" || f.switched[0].model == nil ||
+		*f.switched[0].model != "global.anthropic.claude-fable-5-2[1m]" {
+		t.Fatalf("SwitchAccessProfile calls = %+v", f.switched)
+	}
+
+	if res := doOverride(t, h, `{"key":"`+key+`","access_profile":""}`); res.StatusCode != http.StatusOK {
+		t.Errorf("switch to global: status = %d", res.StatusCode)
+	}
+	if len(f.switched) != 2 || f.switched[1].profile != "" || f.switched[1].model != nil {
+		t.Errorf("switch to global calls = %+v", f.switched)
+	}
+
+	if res := doOverride(t, h, `{"key":"`+key+`","access_profile":"isengard","effort":"high"}`); res.StatusCode != http.StatusBadRequest {
+		t.Errorf("with effort: status = %d, want 400", res.StatusCode)
+	}
+	if res := doOverride(t, h, `{"key":"`+key+`","node":"ec2","access_profile":"isengard"}`); res.StatusCode != http.StatusNotImplemented {
+		t.Errorf("remote node: status = %d, want 501", res.StatusCode)
+	}
+	if len(f.switched) != 2 {
+		t.Errorf("refused requests reached the router: %+v", f.switched)
+	}
+
+	f.switchErr = sessionpkg.ErrAccessProfileSwitchBusy
+	if res := doOverride(t, h, `{"key":"`+key+`","access_profile":"isengard"}`); res.StatusCode != http.StatusConflict {
+		t.Errorf("running turn: status = %d, want 409", res.StatusCode)
+	}
+}

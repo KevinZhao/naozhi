@@ -360,6 +360,8 @@ function startMockServer(overrides = {}) {
   const digestCalls = [];
   const outputsCalls = [];
   const historySearchCalls = [];
+  // POST /api/sessions/override bodies, in order.
+  const overrideCalls = [];
   const inboxData = overrides.inbox || null;
   const inboxCalls = [];
   const tasksCalls = [];
@@ -661,6 +663,34 @@ function startMockServer(overrides = {}) {
         out = all.slice(-eventsRingSize);
       }
       sendEntries(res, out, headers);
+      return;
+    }
+
+    // Tuning / access-profile switch. Records the body and patches the
+    // snapshot as the server's next poll would show it; a running session's
+    // access-profile switch is a 409 like the real handler.
+    if (pathname === NZ_CONTRACT.API.sessions_override && req.method === 'POST') {
+      if (!checkAuth()) return;
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        let b = {};
+        try { b = JSON.parse(body || '{}'); } catch (_) { /* lenient */ }
+        overrideCalls.push(b);
+        const s = (sessionsData.sessions || []).find(x => x.key === b.key);
+        if (s && s.state === 'running' && 'access_profile' in b) {
+          res.writeHead(409, { 'Content-Type': 'text/plain' });
+          res.end('session is running a turn; switch the access profile once it ends');
+          return;
+        }
+        if (s) {
+          if ('access_profile' in b) s.access_profile = b.access_profile;
+          if (typeof b.model === 'string') s.model = b.model;
+        }
+        if (sessionsData.stats && typeof sessionsData.stats.version === 'number') sessionsData.stats.version++;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ applied_via: s ? 'respawn' : 'deferred' }));
+      });
       return;
     }
 
@@ -1399,6 +1429,7 @@ function startMockServer(overrides = {}) {
         get uploadCalls() { return uploadCalls; },
         get remoteCalls() { return remoteCalls; },
         get historySearchCalls() { return historySearchCalls; },
+        get overrideCalls() { return overrideCalls; },
         resetCalls() { sendCalls = []; bindCalls = []; loginCalls = []; favoriteCalls = []; },
       });
     }));

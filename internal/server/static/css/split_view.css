@@ -497,6 +497,10 @@
    switch still. */
 .main-header .model-label{margin-left:6px;color:var(--nz-text-mute);font-size:var(--nz-fs-sm);font-variant-numeric:tabular-nums}
 .main-header .model-label-unset{color:var(--nz-text-faint)}
+/* The session's access profile, the switch to another one. Global (no
+   profile) is a bare outline: no account colour to show. */
+.main-header .header-access-profile{margin-left:6px;cursor:pointer;max-width:160px}
+.main-header .header-access-profile.is-global{background:transparent;color:var(--nz-text-mute);text-shadow:none;border-color:var(--nz-border)}
 /* kiro thinking-effort tier (low/medium/high/xhigh/max). Joins the
    .model-label / .detail-turn-timer family — bare inline text, no border or
    fill — because the .detail row already carries two bordered chips

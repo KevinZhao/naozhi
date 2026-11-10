@@ -355,6 +355,15 @@ type AgentOpts struct {
 - `resolveSpawnParamsLocked` 的 access profile 优先级里，「existing session 记录值」高于「project 默认」（§6.3 第 2 步）。
 - **复查 `unregisterSessionLocked`（:295）**：现在它 `delete(backendOverrides, key)` 清理未 spawn 的 dashboard 选择；加了继承默认后，要确保清理的是「一次性 override」而非「持久化历史值」——历史 accessProfileID 存 session record，不存 override map，二者不混。
 
+### 7.1 运行中会话切换访问档（2026-11-10）
+
+锁定是「恢复时不自动换」，不是「永远不能换」：用户在会话头部的访问档标签上明确切换，是唯一改记录值的路径（`Router.SwitchAccessProfile`，`POST /api/sessions/override` 带 `access_profile`，可同时带 `model`）。
+
+- 正在回合中的会话拒绝切换（409），不切断回合；没有会话的 key 记成新会话的一次性选择。
+- 档的 env 与凭证来源在 CLI 进程启动时定下，所以有活进程就关掉它（`deathReason=access_profile_switch`），下一条消息按新档 `--resume` 同一个 Claude session ID，会话 settings 文件按新档重写（`awsCredentialExport` 换成新档的或回到全局的）；会话 key、历史、卡片不变，记录值进 `sessions.json`，重启后沿用。
+- 带 `aws_profile` 的档只能给 claude 后端的会话切（同 §3.1 的 fail-loud）；远程节点会话 501。
+- 切回「全局默认」（`""`）后，该 key 自己的档（项目绑定 / agent / `default_access_profile`）在下次启动时照常生效，与从没选过档的会话一样。
+
 ---
 
 ## 8. UI 设计
