@@ -11,6 +11,9 @@
 //	GET  /api/planner/briefs the latest morning briefs, newest first (?limit=)
 //	GET  /api/planner/notes  the gateway's journaled notes in the conversation
 //	                         (due reminders, dispatch outcomes), oldest first
+//	POST /api/planner/memory/forget {"workspace": "...", "name": "..."} —
+//	                         takes back a memory a remember block kept
+//	                         (§15.12 ⑧): its file and its MEMORY.md line
 //	POST /api/scout/run      a scout run now, outside the schedule (§15.6);
 //	                         202 with the run ID, the record lands in
 //	                         <state root>/planner/scout/runs
@@ -170,6 +173,37 @@ func (h *Handler) HandleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httputil.WriteJSONStatus(w, http.StatusAccepted, map[string]string{"status": "accepted", "key": agent.Key})
+}
+
+// HandleForget takes back a memory the Planner's remember block kept: 200
+// once gone, 404 when there is none (taken back already, or never kept),
+// 409 for one the gateway did not write.
+func (h *Handler) HandleForget(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, httputil.MaxRequestBodyBytes)
+	var req struct {
+		Workspace string `json:"workspace"`
+		Name      string `json:"name"`
+	}
+	if err := httputil.DecodeJSONBody(r, &req); err != nil || req.Workspace == "" || !agent.ValidMemoryName(req.Name) {
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "workspace and a valid name are required"})
+		return
+	}
+	if h.agent == nil || !h.agent.Enabled() {
+		httputil.WriteJSONStatus(w, http.StatusConflict, map[string]string{"error": agent.ErrOff.Error()})
+		return
+	}
+	err := h.agent.Forget(req.Workspace, req.Name)
+	switch {
+	case err == nil:
+		httputil.WriteJSON(w, map[string]string{"status": "forgotten"})
+	case errors.Is(err, agent.ErrNoMemory):
+		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+	case errors.Is(err, agent.ErrNotPlanners):
+		httputil.WriteJSONStatus(w, http.StatusConflict, map[string]string{"error": err.Error()})
+	default:
+		slog.Warn("planner: take back a memory", "err", err)
+		httputil.WriteJSONStatus(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+	}
 }
 
 // HandleScoutRun starts a scout run now. 409 while one runs or when the

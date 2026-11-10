@@ -322,6 +322,7 @@ func main() {
 		Journal:    plannerState.Journal,
 		Promises:   wireup.PlannerPromises(promises),
 		Conclusion: wireup.PlannerConclusion(sidecars),
+		ClaudeDir:  claudeDir,
 	})
 	// The Planner's patrol (§15.6): weekday scout runs over the mail, Slack
 	// and Asana MCP servers, read tools only; new findings wake the Planner.
@@ -552,6 +553,7 @@ func main() {
 		Name:      unitNames,
 		UserSince: sources.UserSince,
 	})
+	plannerAgent.SetTaskIndex(wireup.PlannerTaskIndex(tasks, digests))
 	briefer := brief.New(brief.Config{
 		Journal: plannerState.Journal,
 		Health:  func() health.Snapshot { return healthMon.Snapshot() },
@@ -788,6 +790,7 @@ func main() {
 		Words:       wireup.PlannerWords(plannerAgent),
 		Relay:       srv.SubmitRelay,
 		RelayTarget: srv.RelayTarget,
+		Remember:    plannerAgent.Remember,
 		TellAnswer:  wireup.PlannerTellAnswer(plannerAgent),
 		Ctx:         ctx,
 	})

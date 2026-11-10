@@ -161,6 +161,9 @@ type Config struct {
 	// RelayTarget is why key may not take a relay, nil when it may: no
 	// local session, or one that takes no message. nil allows any.
 	RelayTarget func(key string) error
+	// Remember keeps a memory for the user (agent.Agent.Remember): text as
+	// memory name of workspace. nil refuses remember blocks.
+	Remember func(workspace, name, text string) (string, error)
 	// TellAnswer sends the Planner the user's answer to a question as a turn
 	// the user started, its words the answer (agent.Agent.TellAnswer); nil
 	// falls back to Tell.
@@ -1052,7 +1055,7 @@ func (r *Runner) handle(rep reply) {
 		var err error
 		reopened := false
 		switch {
-		case rep.outside != "" && (b.Dispatch != nil || b.Status != nil || b.Custody != nil || b.Relay != nil):
+		case rep.outside != "" && (b.Dispatch != nil || b.Status != nil || b.Custody != nil || b.Relay != nil || b.Remember != nil):
 			un.add(i, b, r.refuseOutside(b, rep.outside))
 			un.outside = true
 		case len(rep.words) == 0 && needsUser(b):
@@ -1064,6 +1067,8 @@ func (r *Runner) handle(rep reply) {
 			}
 		case b.Relay != nil:
 			reopened, err = r.relay(*b.Relay, rep.words)
+		case b.Remember != nil:
+			err = r.remember(*b.Remember)
 		case b.Promise != nil:
 			err = r.promise(*b.Promise, dispatched)
 		case b.Ask != nil:
@@ -1334,6 +1339,10 @@ func (r *Runner) refuseOutside(b Block, by string) string {
 		r.note(by + "触发的回合不能转达用户的决定：「" + r.sessionName(rl.Key) + "」没有收到")
 		return "这一轮不能转达，没有发出"
 	}
+	if m := b.Remember; m != nil {
+		r.note(by + "触发的回合不能记记忆：「" + m.Name + "」没有记下")
+		return "这一轮不能记记忆，没有记下"
+	}
 	s := *b.Status
 	name := s.Task
 	if r.cfg.Tasks != nil {
@@ -1388,10 +1397,10 @@ func (r *Runner) tellUnrun(rep reply, u unrun) {
 		b.WriteString("格式不对的块按系统提示词里的格式改正后重发。\n")
 	}
 	if u.outside {
-		b.WriteString("这一轮由" + by + "触发，网关只执行 notify、promise 与 ask；需要派活、改任务状态或托管，就在对话里向用户说明，等用户发消息让你做。\n")
+		b.WriteString("这一轮由" + by + "触发，网关只执行 notify、promise 与 ask；需要派活、改任务状态、托管或记记忆，就在对话里向用户说明，等用户发消息让你做。\n")
 	}
 	if u.notUser {
-		b.WriteString("这一轮不是用户发起的（回执、提醒、托管等），网关没有可附的用户原话，所以不转达、不带原话派活、不改 MCP 权限、不开 ultracode；要用户拍板就用 ask，带上 task 时用户的回答会直接送到那个会话。\n")
+		b.WriteString("这一轮不是用户发起的（回执、提醒、托管等），网关没有可附的用户原话，所以不转达、不带原话派活、不改 MCP 权限、不开 ultracode、不记记忆；要用户拍板就用 ask，带上 task 时用户的回答会直接送到那个会话。\n")
 	}
 	if err := send(strings.TrimSpace(b.String())); err != nil {
 		slog.Warn("planner actions: receipt of the blocks not run not sent to the Planner", "err", err)
@@ -1411,7 +1420,7 @@ func needsUser(b Block) bool {
 	}
 	// Leaving a session alone is the user's word: a mail asking the
 	// Planner to stop looking at one is not.
-	return b.Relay != nil || b.Custody != nil && b.Custody.Watch != nil
+	return b.Relay != nil || b.Remember != nil || b.Custody != nil && b.Custody.Watch != nil
 }
 
 // refuseNotUser answers such a block from a turn the user did not start,
@@ -1420,6 +1429,10 @@ func (r *Runner) refuseNotUser(b Block) string {
 	if d := b.Dispatch; d != nil {
 		r.note("这一轮不是用户发起的，不能带用户原话、改 MCP 权限或开 ultracode 派活：「" + d.Title + "」没有派出")
 		return "这一轮不是用户发起的，不能带用户原话、mcp_tools 或 ultracode 派活，没有派出"
+	}
+	if m := b.Remember; m != nil {
+		r.note("这一轮不是用户发起的，不能记记忆：「" + m.Name + "」没有记下")
+		return "这一轮不是用户发起的，remember 只在用户让你记的那一轮有效，没有记下"
 	}
 	if c := b.Custody; c != nil {
 		r.note("这一轮不是用户发起的，不能关掉观察：「" + r.sessionName(c.Key) + "」照旧观察")
@@ -1790,6 +1803,18 @@ func (r *Runner) decideAsk(it notify.Item, a notify.Action) error {
 	}
 	if err := tell(text); err != nil && !relayed {
 		return err
+	}
+	return nil
+}
+
+// remember keeps a memory the user asked for (§15.12 ⑧). The card in the
+// conversation says it was kept; only a failure gets a line and a receipt.
+func (r *Runner) remember(m Remember) error {
+	if r.cfg.Remember == nil {
+		return errors.New("这台网关没有开记忆，没有记下")
+	}
+	if _, err := r.cfg.Remember(m.Workspace, m.Name, m.Text); err != nil {
+		return fmt.Errorf("「%s」没有记下：%w", m.Name, err)
 	}
 	return nil
 }

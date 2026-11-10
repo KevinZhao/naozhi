@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/monitor/health"
@@ -73,8 +74,16 @@ const (
 	// handoffWait is how long the outgoing session has to write its summary;
 	// past it the shift changes with none.
 	handoffWait = 3 * time.Minute
-	// handoffMaxRunes caps a stored summary (the prompt asks for 800 字).
-	handoffMaxRunes = 4000
+	// handoffMaxRunes caps a stored summary. The prompt asks for 2,000 字
+	// (§15.12 ⑧); a little over it is kept whole rather than cut mid-line.
+	handoffMaxRunes = 3000
+	// A conversation whose last call was sent more than sizeShiftTokens
+	// (input + cache_read + cache_creation) changes shift once the Planner
+	// has been idle sizeShiftIdle, at most once per sizeShiftGap since the
+	// conversation started (§15.12 ⑧, D106).
+	sizeShiftTokens = 250_000
+	sizeShiftIdle   = 5 * time.Minute
+	sizeShiftGap    = 2 * time.Hour
 	// reviveBackoff doubles from its base after each failed revival, up to
 	// its cap.
 	reviveBackoffBase = time.Minute
@@ -171,6 +180,10 @@ type Config struct {
 	// Conclusion is the first sentence of a session's latest report, for
 	// its snapshot line; nil shows none.
 	Conclusion func(key string) string
+	// ClaudeDir is the Claude CLI's directory: the Planner's transcript (its
+	// context size, for the change of shift by size) and the auto-memory the
+	// remember block writes. "" turns both off.
+	ClaudeDir string
 	// Now is the wall clock; nil is time.Now.
 	Now func() time.Time
 }
@@ -201,6 +214,9 @@ type persisted struct {
 	// (its restart failed, or the send did): the shift day, or the day and
 	// prompt version for a change forced by an upgrade.
 	Handoff string `json:"handoff,omitempty"`
+	// ShiftAt is when the current conversation started its shift: a change
+	// by size waits sizeShiftGap from it.
+	ShiftAt time.Time `json:"shift_at,omitzero"`
 }
 
 // Agent keeps planner:main running and takes the user's messages to it.
@@ -228,6 +244,27 @@ type Agent struct {
 	// until the new conversation starts, an idle Planner on the old
 	// session ID is not where a message goes.
 	shifting bool
+	// spawnedAllow is the read rules the running process started with: once
+	// the workspace registry moves them, an idle Planner restarts on its
+	// conversation to take the new ones (§15.12 ⑧).
+	spawnedAllow []string
+	// ctxSeen caches the context size of the transcript as last read, by its
+	// size and modification time, so an idle Planner's tail is read once.
+	ctxSeen ctxReading
+	// tasks lists the 任务 for the handoff's index (SetTaskIndex); nil
+	// leaves the index out.
+	tasks func() []TaskLine
+	// memMu serializes the remember block's writes to the memory files.
+	memMu sync.Mutex
+}
+
+// ctxReading is one read of the Planner transcript's context size.
+type ctxReading struct {
+	path    string
+	size    int64
+	mod     time.Time
+	tokens  int64
+	present bool
 }
 
 // sentSnapshot is a full snapshot as a turn ran with it: its body (the
@@ -252,6 +289,7 @@ func New(cfg Config) *Agent {
 	a := &Agent{cfg: cfg, wake: make(chan struct{}, 1), name: NameFor(cfg.Layout.PlannerRoot())}
 	a.state = loadState(cfg.Layout.PlannerAgentPath())
 	a.opts = a.buildOpts()
+	a.spawnedAllow = a.opts.PermissionsAllow
 	return a
 }
 
@@ -335,7 +373,8 @@ func absRule(tool, path string) string {
 // the registered workspaces on this node, so it can check a claim against
 // the files (RFC §4.1; Read rules also cover Grep and Glob). Under dontAsk
 // anything else is refused; denyRules still win inside these trees. A
-// workspace registered later is picked up at the next shift change.
+// workspace registered later is picked up once the Planner is next idle
+// (refreshReadScope).
 func allowRules(root, events string, workspaces []string) []string {
 	rules := []string{
 		absRule("Read", filepath.Join(root, "**")),
@@ -515,6 +554,83 @@ func (a *Agent) reconcile(ctx context.Context) {
 		}
 	case pending != "":
 		a.sendHandoff(pending, nil, opts)
+	case !st.Running && a.oversized(now, st.SessionID):
+		a.changeShift(ctx, now, a.sizeShiftName(now))
+	default:
+		a.refreshReadScope(st)
+	}
+}
+
+// oversized reports whether the conversation sessionID is due a change of
+// shift by size: its last call's context past sizeShiftTokens, its
+// transcript untouched for sizeShiftIdle and its shift sizeShiftGap old.
+func (a *Agent) oversized(now time.Time, sessionID string) bool {
+	if sessionID == "" || a.cfg.ClaudeDir == "" {
+		return false
+	}
+	a.mu.Lock()
+	since := a.state.ShiftAt
+	a.mu.Unlock()
+	if !since.IsZero() && now.Sub(since) < sizeShiftGap {
+		return false
+	}
+	path := claudefs.LocateSessionJSONL(a.cfg.ClaudeDir, a.cfg.Layout.PlannerWorkDir(), sessionID)
+	fi, err := os.Stat(path)
+	if err != nil || now.Sub(fi.ModTime()) < sizeShiftIdle {
+		return false
+	}
+	a.mu.Lock()
+	seen := a.ctxSeen
+	a.mu.Unlock()
+	if seen.path != path || seen.size != fi.Size() || !seen.mod.Equal(fi.ModTime()) {
+		tokens, found, err := claudefs.LastContextTokens(path)
+		if err != nil {
+			slog.Warn("planner: read context size", "path", path, "err", err)
+			return false
+		}
+		seen = ctxReading{path: path, size: fi.Size(), mod: fi.ModTime(), tokens: tokens, present: found}
+		a.mu.Lock()
+		a.ctxSeen = seen
+		a.mu.Unlock()
+	}
+	if seen.present && seen.tokens > sizeShiftTokens {
+		slog.Info("planner: context past the size limit; changing shift", "tokens", seen.tokens)
+		return true
+	}
+	return false
+}
+
+// sizeShiftName names a change by size: the shift day and the first
+// "-c<n>" no stored summary has.
+func (a *Agent) sizeShiftName(now time.Time) string {
+	day := shiftDay(now)
+	for n := 1; ; n++ {
+		name := fmt.Sprintf("%s-c%d", day, n)
+		if _, err := os.Stat(a.handoffPath(name)); errors.Is(err, os.ErrNotExist) || n >= 99 {
+			return name
+		}
+	}
+}
+
+// refreshReadScope keeps the Planner's read rules in step with the
+// workspace registry: new rules go into the spawn options at once, and a
+// live process started on others is released while idle, to be resumed on
+// its conversation with them at the next reconcile.
+func (a *Agent) refreshReadScope(st SessionState) {
+	want := allowRules(a.cfg.Layout.PlannerRoot(), a.cfg.Layout.EventsRoot(), a.cfg.Workspaces.LocalPaths())
+	a.mu.Lock()
+	if !slices.Equal(a.opts.PermissionsAllow, want) {
+		a.opts.PermissionsAllow = want
+	}
+	stale := !slices.Equal(a.spawnedAllow, want)
+	shifting := a.shifting
+	a.mu.Unlock()
+	if !stale || !st.Alive || st.Running || shifting {
+		return
+	}
+	if a.cfg.Sessions.Release(Key) {
+		slog.Info("planner: workspaces changed; restarting on the conversation to read them", "rules", len(want))
+		a.poke()
 	}
 }
 
@@ -532,6 +648,7 @@ func (a *Agent) revive(ctx context.Context, now time.Time, opts sessionview.Agen
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.spawnedAllow = opts.PermissionsAllow
 	if a.failures > 0 {
 		slog.Info("planner: started after failures", "failures", a.failures)
 	}
@@ -566,6 +683,7 @@ func (a *Agent) markShift(now time.Time) {
 	defer a.mu.Unlock()
 	a.state.Shift = shiftDay(now)
 	a.state.Prompt = PromptVersion
+	a.state.ShiftAt = now
 	a.saveLocked()
 }
 
@@ -574,9 +692,10 @@ func (a *Agent) handoffPath(day string) string {
 }
 
 // changeShift has the outgoing session write a handoff summary, retires it,
-// and starts a fresh conversation whose first message carries the summary.
-// day names the summary: the shift day, or day and prompt version for a
-// change an upgrade forces. A summary already stored under that name is
+// and starts a fresh conversation whose first message carries the summary
+// and the 任务 index. day names the summary: the shift day, day and prompt
+// version for a change an upgrade forces, or day and "-c<n>" for one by
+// size. A summary already stored under that name is
 // reused rather than asked for again. It stays pending until sent, so after
 // a failed restart the conversation revival starts still gets it.
 func (a *Agent) changeShift(ctx context.Context, now time.Time, day string) {
@@ -628,6 +747,9 @@ func (a *Agent) changeShift(ctx context.Context, now time.Time, day string) {
 		a.failed(now, "planner: shift change: start new session failed", err)
 		return
 	}
+	a.mu.Lock()
+	a.spawnedAllow = opts.PermissionsAllow
+	a.mu.Unlock()
 	a.markShift(now)
 	slog.Info("planner: shift changed", "day", day, "handoff_bytes", len(summary))
 	if len(summary) > 0 {
@@ -649,7 +771,7 @@ func (a *Agent) sendHandoff(day string, summary []byte, opts sessionview.AgentOp
 		a.mu.Lock()
 		turns := a.turns
 		a.mu.Unlock()
-		if _, err := turns.SubmitPlanner(Key, SourceShift, nil, handoffMessage(day, string(summary)), nil, opts, nil); err != nil {
+		if _, err := turns.SubmitPlanner(Key, SourceShift, nil, handoffMessage(day, string(summary), a.taskIndex()), nil, opts, nil); err != nil {
 			slog.Warn("planner: send handoff to new session", "err", err)
 			return
 		}

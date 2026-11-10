@@ -279,6 +279,8 @@ function defaultGitStates() {
  *   404 without overrides.custody.undo. Unset, the routes 404.
  * @param {object} [overrides.planner] - GET /api/planner body ({enabled, stopped, key, alive});
  *   POST /api/planner/state sets `stopped` and lands in plannerStateCalls. Unset, the routes 404.
+ *   POST /api/planner/memory/forget ({workspace, name}) lands in plannerForgetCalls and answers
+ *   200 the first time a name is taken back, 404 after.
  * @param {object[]} [overrides.plannerEvents] - GET /api/sessions/events answer for key=planner:main
  *   (the other keys keep the default events). A test may push to it. POST /api/planner/send
  *   (with overrides.planner) lands in plannerSendCalls and answers 202, or 409 while stopped.
@@ -381,6 +383,7 @@ function startMockServer(overrides = {}) {
   };
   const plannerData = overrides.planner || null;
   const plannerStateCalls = [];
+  const plannerForgetCalls = [];
   const plannerEvents = overrides.plannerEvents || null;
   const plannerNotes = overrides.plannerNotes || null;
   const plannerBriefs = overrides.plannerBriefs || null;
@@ -784,6 +787,20 @@ function startMockServer(overrides = {}) {
         plannerData.alive = !b.stopped;
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(plannerData));
+      });
+      return;
+    }
+
+    if (plannerData && pathname === NZ_CONTRACT.API.planner_memory_forget && req.method === 'POST') {
+      if (!checkAuth()) return;
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        const b = JSON.parse(body || '{}');
+        const again = plannerForgetCalls.some((c) => c.workspace === b.workspace && c.name === b.name);
+        plannerForgetCalls.push(b);
+        res.writeHead(again ? 404 : 200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(again ? { error: '没有这条记忆' } : { status: 'forgotten' }));
       });
       return;
     }
@@ -1362,6 +1379,7 @@ function startMockServer(overrides = {}) {
         get tasksSeenCalls() { return tasksSeenCalls; },
         get custodyCalls() { return custodyCalls; },
         get plannerStateCalls() { return plannerStateCalls; },
+        get plannerForgetCalls() { return plannerForgetCalls; },
         get plannerSendCalls() { return plannerSendCalls; },
         get uploadCalls() { return uploadCalls; },
         get remoteCalls() { return remoteCalls; },

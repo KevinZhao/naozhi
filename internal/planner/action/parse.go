@@ -1,14 +1,15 @@
 // Package action is the Planner's way to ask the gateway for something
 // (docs/rfc/planner.md §6.2): the ```naozhi-action blocks at the end of a
-// planner:main reply. There are seven: dispatch (a task: session, started at
+// planner:main reply. There are eight: dispatch (a task: session, started at
 // once, D88), promise (a promise among the 任务), ask (a
 // question in "通知" whose answer goes back to the Planner, or straight to a
 // session, D98), status (the Planner's judgment of a task's state, §15.4),
 // notify (something to tell the user, pushed now or held for the morning
 // brief, §15.6), custody (a session's custody switched, or a message sent to
-// a session in custody, planner/custody) and relay (the user's decision
-// passed on to a session with the user's own words, D98). A block that
-// does not parse, or names an unknown type, a bad field or a task that does
+// a session in custody, planner/custody), relay (the user's decision
+// passed on to a session with the user's own words, D98) and remember (a
+// memory the user asked for, written into a workspace's auto-memory,
+// §15.12 ⑧). A block that does not parse, or names an unknown type, a bad field or a task that does
 // not exist, is not run: the Planner conversation shows it as it was
 // written, with the reason, and the Planner gets a receipt naming it.
 package action
@@ -19,6 +20,7 @@ import (
 	"fmt"
 	"maps"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -76,6 +78,7 @@ const (
 	TypeNotify   Type = "notify"
 	TypeCustody  Type = "custody"
 	TypeRelay    Type = "relay"
+	TypeRemember Type = "remember"
 )
 
 // Dispatch asks for a session in a workspace.
@@ -174,9 +177,22 @@ type Relay struct {
 	Text string `json:"text"`
 }
 
+// Remember asks the gateway to keep Text as memory Name of Workspace (a
+// workspace ID or name, or "global" for the Planner's own; §15.12 ⑧, D106).
+// Only a turn the user started may remember: that is what keeps outside
+// content out of the memory (D41).
+type Remember struct {
+	Workspace string `json:"workspace"`
+	Name      string `json:"name"`
+	Text      string `json:"text"`
+}
+
+// rememberTextRunes caps a memory's text.
+const rememberTextRunes = 2000
+
 // Block is one action block of a reply: exactly one of Dispatch, Promise,
-// Ask, Status, Notify, Custody and Relay is set, or Err says why it is not
-// run.
+// Ask, Status, Notify, Custody, Relay and Remember is set, or Err says why
+// it is not run.
 type Block struct {
 	// Raw is the block's body as written.
 	Raw      string
@@ -188,6 +204,7 @@ type Block struct {
 	Notify   *Notify
 	Custody  *Custody
 	Relay    *Relay
+	Remember *Remember
 	Err      error
 }
 
@@ -341,13 +358,22 @@ func (b *Block) decode() {
 			err = r.validate()
 			b.Relay = &r.Relay
 		}
+	case TypeRemember:
+		var m struct {
+			Type Type `json:"type"`
+			Remember
+		}
+		if err = strict(b.Raw, &m); err == nil {
+			err = m.validate()
+			b.Remember = &m.Remember
+		}
 	case "":
 		err = errors.New("缺少 type")
 	default:
-		err = fmt.Errorf("未知类型 %q（只有 dispatch、promise、ask、status、notify、custody、relay）", head.Type)
+		err = fmt.Errorf("未知类型 %q（只有 dispatch、promise、ask、status、notify、custody、relay、remember）", head.Type)
 	}
 	if err != nil {
-		b.Dispatch, b.Promise, b.Ask, b.Status, b.Notify, b.Custody, b.Relay, b.Err = nil, nil, nil, nil, nil, nil, nil, err
+		b.Dispatch, b.Promise, b.Ask, b.Status, b.Notify, b.Custody, b.Relay, b.Remember, b.Err = nil, nil, nil, nil, nil, nil, nil, nil, err
 	}
 }
 
@@ -435,6 +461,25 @@ func validKey(field, key string) error {
 		return fmt.Errorf("缺少 %s", field)
 	case utf8.RuneCountInString(key) > keyRunes || strings.IndexFunc(key, unicode.IsControl) >= 0:
 		return fmt.Errorf("%s 不是合法的会话 key", field)
+	}
+	return nil
+}
+
+var memoryNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+
+func (m *Remember) validate() error {
+	m.Workspace, m.Name, m.Text = strings.TrimSpace(m.Workspace), strings.TrimSpace(m.Name), strings.TrimSpace(m.Text)
+	switch {
+	case m.Workspace == "":
+		return errors.New("remember 缺少 workspace（工作区 ID、名字，或 global）")
+	case utf8.RuneCountInString(m.Workspace) > workspaceRefRunes:
+		return errors.New("workspace 太长")
+	case !memoryNameRE.MatchString(m.Name):
+		return errors.New("remember 的 name 只能用小写字母、数字、- 和 _，以字母或数字开头，不超过 64 个")
+	case m.Text == "":
+		return errors.New("remember 缺少 text")
+	case utf8.RuneCountInString(m.Text) > rememberTextRunes:
+		return fmt.Errorf("text 超过 %d 字", rememberTextRunes)
 	}
 	return nil
 }

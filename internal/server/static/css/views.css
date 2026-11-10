@@ -375,12 +375,12 @@ body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
 /* A dispatch is one line (派出 · 标题 · 工作区 · 目标, the goal cut to the
    width), its rows in the fold (§15.12 ⑤); a relay likewise (转达你的决定 ·
    会话 · 说明的第一句). */
-.pl-act-dispatch>summary,.pl-act-relay>summary{display:block;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;list-style:none}
-.pl-act-dispatch>summary::-webkit-details-marker,.pl-act-relay>summary::-webkit-details-marker{display:none}
-.pl-act-dispatch>summary::before,.pl-act-relay>summary::before{content:"";display:inline-block;width:0;height:0;margin:0 7px 1px 1px;border-left:5px solid currentColor;border-top:4px solid transparent;border-bottom:4px solid transparent;transition:transform var(--nz-dur) var(--nz-ease)}
-.pl-act-dispatch[open]>summary::before,.pl-act-relay[open]>summary::before{transform:rotate(90deg)}
-.pl-act-dispatch[open]>summary,.pl-act-relay[open]>summary{margin-bottom:6px;white-space:normal}
-.pl-act-dispatch>summary:hover .pl-act-k,.pl-act-relay>summary:hover .pl-act-k{color:var(--nz-accent)}
+.pl-act-dispatch>summary,.pl-act-relay>summary,.pl-act-remember>summary{display:block;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;list-style:none}
+.pl-act-dispatch>summary::-webkit-details-marker,.pl-act-relay>summary::-webkit-details-marker,.pl-act-remember>summary::-webkit-details-marker{display:none}
+.pl-act-dispatch>summary::before,.pl-act-relay>summary::before,.pl-act-remember>summary::before{content:"";display:inline-block;width:0;height:0;margin:0 7px 1px 1px;border-left:5px solid currentColor;border-top:4px solid transparent;border-bottom:4px solid transparent;transition:transform var(--nz-dur) var(--nz-ease)}
+.pl-act-dispatch[open]>summary::before,.pl-act-relay[open]>summary::before,.pl-act-remember[open]>summary::before{transform:rotate(90deg)}
+.pl-act-dispatch[open]>summary,.pl-act-relay[open]>summary,.pl-act-remember[open]>summary{margin-bottom:6px;white-space:normal}
+.pl-act-dispatch>summary:hover .pl-act-k,.pl-act-relay>summary:hover .pl-act-k,.pl-act-remember>summary:hover .pl-act-k{color:var(--nz-accent)}
 .pl-act-goal{color:var(--nz-text)}
 /* A task's done / failed is a line, its reason in the tooltip. */
 .pl-act-line{padding:4px 12px;font-size:var(--nz-fs-sm);color:var(--nz-text-mute)}
