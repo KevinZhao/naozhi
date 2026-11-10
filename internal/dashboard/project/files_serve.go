@@ -205,16 +205,22 @@ func prepareStream(w http.ResponseWriter, r *http.Request, mode, name, mime stri
 			httputil.WriteJSONStatus(w, http.StatusUnsupportedMediaType, map[string]string{"error": "inline preview disabled for this type; use download mode"})
 			return false
 		}
-		// PDFs can embed JavaScript external viewers execute, and CSP sandbox does
-		// not apply to top-level navigation; serve them as explicit attachments.
-		if mime == "application/pdf" {
+		// A PDF can embed JavaScript an outside viewer runs, and Firefox ignores
+		// CSP sandbox on a top-level navigation, so only the dashboard's preview
+		// frame gets one inline (Sec-Fetch-Dest: iframe, absence fails closed,
+		// as render's inline form); anything else downloads it. The browsers'
+		// PDF viewers refuse a frame with a sandbox attribute (Chrome shows a
+		// blocked page), so that frame carries none: the CSP sandbox below
+		// keeps the document in an opaque origin and frame-ancestors keeps it
+		// in the dashboard.
+		if mime == "application/pdf" && r.Header.Get("Sec-Fetch-Dest") != "iframe" {
 			return prepareStream(w, r, "download", name, mime, size)
 		}
 		w.Header().Set("Content-Type", mime)
 		w.Header().Set("Content-Disposition", contentDisposition("inline", name))
 		// CSP: sandbox blocks script execution / form submission in a malicious
 		// SVG while it still renders; default-src 'none' blocks remote references.
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox; style-src 'unsafe-inline'; img-src 'self' data:")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox; style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'self'")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		// Cross-Origin-Resource-Policy blocks cross-origin <img>/<iframe> embedding
 		// of previews, closing the onload dimension / timing side-channel.
