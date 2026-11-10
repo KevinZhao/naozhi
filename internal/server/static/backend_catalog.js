@@ -84,12 +84,13 @@ export async function fetchAccessProfiles() {
 }
 
 // renderAccessProfilePicker returns an HTML fragment for an access-profile
-// <select>, or empty string when 0/1 profiles are configured (nothing to
-// choose — single-auth deployments see no extra control, mirroring
-// renderBackendPicker's ≤1 rule). A profile whose secret_ok is false (a
-// referenced *_FILE is missing) is shown disabled with a "⚠ 凭证缺失" suffix so
-// the user can't pick a broken profile before sending (RFC P1-f). The picker
-// NEVER shows env values — only display_name/id.
+// <select>, or empty string when no profile is configured (single-auth
+// deployments see no extra control). Unlike renderBackendPicker's ≤1 rule, one
+// profile is already a choice: the "（全局默认）" option is always there beside
+// it. A profile whose secret_ok is false (a referenced *_FILE is missing) is
+// shown disabled with a "⚠ 凭证缺失" suffix so the user can't pick a broken
+// profile before sending (RFC P1-f). The picker NEVER shows env values — only
+// display_name/id.
 //
 // opts (all optional):
 //   - selectId: element id (default 'new-access-profile').
@@ -97,7 +98,7 @@ export async function fetchAccessProfiles() {
 export function renderAccessProfilePicker(profilesData, opts) {
   if (!profilesData || !Array.isArray(profilesData.profiles)) return '';
   const list = profilesData.profiles;
-  if (list.length <= 1) return '';
+  if (list.length === 0) return '';
   const o = opts || {};
   const selectId = o.selectId || 'new-access-profile';
   // Which option starts selected. When the caller passes selectedId (even ""),
@@ -128,12 +129,14 @@ export function renderAccessProfilePicker(profilesData, opts) {
 }
 
 // accessProfileChipInfo resolves an access-profile id to {label,color,tooltip}
-// for the session card chip, or null when single-auth mode (≤1 profile) or the
-// id is empty. An id not in the registry (deleted profile) renders a neutral
-// chip with the raw id so the orphan state is visible. NEVER surfaces env/token.
+// for the session card chip, or null when no profile is configured or the id
+// is empty (global default). One profile still gets its chip, so a session on
+// it reads apart from one on the global default. An id not in the registry
+// (deleted profile) renders a neutral chip with the raw id so the orphan state
+// is visible. NEVER surfaces env/token.
 export function accessProfileChipInfo(profileID) {
   if (!serverInfo.accessProfiles || !Array.isArray(serverInfo.accessProfiles.profiles)) return null;
-  if (serverInfo.accessProfiles.profiles.length <= 1) return null; // single-auth mode
+  if (serverInfo.accessProfiles.profiles.length === 0) return null; // single-auth mode
   if (!profileID) return null; // global default → no chip (matches "no overlay")
   const entry = serverInfo.accessProfiles.profiles.find(p => p && p.id === profileID);
   if (!entry) {
