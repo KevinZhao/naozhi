@@ -1,5 +1,5 @@
 // home_attn.js — the idle Home's summary of what needs you (UX review 5,
-// planner RFC §15.13 v0.7.0): one line "等你 N · 运行中 N · 失败 N" over
+// planner RFC §15.13 v0.7.0): one line "等你 N · 在跑 N · 失败 N" over
 // the latest three items that wait on you, each a click away from its card
 // or its session, in #home-attn of the empty main area (dashboard.html's
 // cold start and utilities.js mainEmptyHtml carry the slot alike).
@@ -8,8 +8,9 @@
 // badge, the rail badge's and the sidebar bar's number, never a second red
 // one; its items are the Planner left column's (planner_view.js
 // waitingItems). With the Planner off the inbox answers 404 and the badge
-// stays unknown: the line says 运行中 and 失败 only. 运行中 and 失败 count
-// the sessions the sidebar lists by their status dots (sessionHealthState).
+// stays unknown: the line says 在跑 and 失败 only. 在跑 and 失败 count
+// the sessions the sidebar lists by their status dots (sessionHealthState),
+// in HEALTH_STATES' words.
 // With nothing to say the slot stays empty (:empty hides it).
 //
 // It repaints on inbox_count frames ('inbox:count'), a new item list
@@ -19,7 +20,7 @@
 // count is not the one they were listed at, the card on screen: on a new
 // count, and on coming back to the Home after one came in a session.
 import { selection, sessionList } from './state.js';
-import { esc, escAttr, nzBus, registerActions, sessionHealthState } from './nz_util.js';
+import { HEALTH_STATES, esc, escAttr, nzBus, registerActions, sessionHealthState } from './nz_util.js';
 import { formatAbsTime, timeAgo } from './utilities.js';
 import { followItem, inbox } from './notify.js';
 import { fetchInbox, waitingItems } from './planner_view.js';
@@ -68,7 +69,7 @@ export function homeAttnHtml() {
   const part = (cls, label, n) => '<span class="ha-n ha-n-' + cls + '">' + label + ' <b>' + n + '</b></span>';
   const parts = [];
   if (c.wait !== null) parts.push(part('wait', '等你', c.wait));
-  parts.push(part('run', '运行中', c.running), part('fail', '失败', c.failed));
+  parts.push(part('run', HEALTH_STATES.active.label, c.running), part('fail', HEALTH_STATES.failed.label, c.failed));
   // The latest first: the left column keeps its own order, by kind.
   const items = c.wait ? waitingItems().sort((a, b) => created(b) - created(a)) : [];
   const more = items.length > SHOWN

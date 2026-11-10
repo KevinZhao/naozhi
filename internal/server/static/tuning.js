@@ -5,7 +5,7 @@
 // dashboard's renderMainHeader.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, serverInfo, sessionList } from './state.js';
-import { esc, escAttr, fetchJSON, isCronSessionKey, showToast } from './nz_util.js';
+import { esc, escAttr, fetchJSON, isCronSessionKey, sessionTitleText, showToast } from './nz_util.js';
 import { sessionStream } from './session_stream.js';
 import { mainEmptyHtml, promptDialog, removePendingSession, removeSidebarCard, showAPIError, showNetworkError, stopPreviewPolling } from './utilities.js';
 import { dropDiscovered, findDiscovered, isDiscoveredKey, parseDiscoveredPid, sameDiscovered, sid } from './session_ident.js';
@@ -329,26 +329,67 @@ async function dismissDiscovered(key, node) {
   } catch (e) { showNetworkError('关闭外部会话', e); }
 }
 
-// dismissManaged deletes optimistically: the card vanishes immediately rather
-// than freezing for the server's teardown round-trip. DELETE /api/sessions
-// unregisters synchronously and tears down in a detached goroutine
-// (RemoveAsync), so 200 means "gone from the list" — but the UI does not even
-// wait for it.
-function dismissManaged(key, node) {
+// UNDO_MS is how long a removed session can be brought back (已移除 · 撤销)
+// before its DELETE goes out.
+const UNDO_MS = 5000;
+// pendingRemoval is the removal whose DELETE waits out UNDO_MS, null for none.
+let pendingRemoval = null;
+
+// dismissManaged removes a session visibly and stoppably rather than behind
+// a confirm: the card goes at once and a toast offers 撤销 for UNDO_MS; only
+// then does DELETE /api/sessions go out. A second removal sends the first
+// one's DELETE now (the toast offers the latest only), as does leaving the
+// page. forget drops the browser's own state for the key, also only then.
+function dismissManaged(key, node, forget) {
   const skey = sid(key, node);
+  if (pendingRemoval) pendingRemoval.commit();
   // Mark dismissed so an in-flight poll / sessions_update event can't
-  // resurrect the card before DELETE confirms (cleared in finally below).
+  // resurrect the card while it waits or before DELETE confirms.
   sessionList.optimisticDeleteKeys.add(skey);
+  const row = sessionList.sessionsData[skey];
+  const wasOpen = selection.key === key && (selection.node || 'local') === node;
   delete sessionList.sessionsData[skey];
   clearMainIfSelected(key);
   removeSidebarCard(key);
 
+  const p = { skey };
+  const settle = () => {
+    clearTimeout(p.timer);
+    if (pendingRemoval === p) { pendingRemoval = null; hideUndoToast(p); }
+  };
+  p.commit = (leaving) => {
+    settle();
+    forget();
+    deleteManaged(key, node, skey, leaving === true);
+  };
+  p.undo = () => {
+    settle();
+    sessionList.optimisticDeleteKeys.delete(skey);
+    if (row && !sessionList.sessionsData[skey]) sessionList.sessionsData[skey] = row;
+    sessionList.lastVersion = 0;
+    shell.debouncedFetchSessions().then(() => {
+      if (wasOpen && !selection.key) shell.selectSession(key, node);
+    });
+  };
+  pendingRemoval = p;
+  p.timer = setTimeout(p.commit, UNDO_MS);
+  showUndoToast(p, '已移除' + (row && sessionTitleText(row) ? '「' + sessionTitleText(row) + '」' : '会话'));
+}
+
+// A page left within UNDO_MS still removes what it was told to.
+window.addEventListener('pagehide', () => { if (pendingRemoval) pendingRemoval.commit(true); });
+
+// deleteManaged sends the DELETE. DELETE /api/sessions unregisters
+// synchronously and tears down in a detached goroutine (RemoveAsync), so 200
+// means "gone from the list"; the UI does not wait for it. leaving keeps the
+// request alive past the page's unload.
+function deleteManaged(key, node, skey, leaving) {
   const headers = {'Content-Type': 'application/json'};
   const body = {key: key};
   if (node && node !== 'local') body.node = node;
   // Fire-and-forget: do NOT await — the UI is already updated. On failure we
   // re-sync from the server so a genuinely-undeleted session reappears.
-  fetchJSON(NZ_CONTRACT.API.sessions, {timeoutMs: 10000, method: 'DELETE', headers, body: JSON.stringify(body)})
+  fetchJSON(NZ_CONTRACT.API.sessions, {timeoutMs: 10000, method: 'DELETE', headers, body: JSON.stringify(body), keepalive: leaving})
     .catch(err => {
       // 404 means the session was already gone — that's the outcome we want,
       // so swallow it. Any other error means the delete may not have landed:
@@ -368,12 +409,32 @@ function dismissManaged(key, node) {
     });
 }
 
-// dismissSession removes a session from the sidebar. The × button deletes
-// immediately with no confirmation — per operator preference, the friction
-// isn't worth it. Accidental deletes are recoverable by re-entering the
-// prompt (pending) or reopening the CLI (remote/discovered).
-async function dismissSession(key, node, opts) {
-  node = node || 'local';
+// showUndoToast shows removal p's "已移除 · 撤销" toast: its own element,
+// apart from #toast, which takes no clicks.
+function showUndoToast(p, text) {
+  let el = document.getElementById('undo-toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'undo-toast';
+    el.className = 'undo-toast';
+    el.setAttribute('role', 'status');
+    el.setAttribute('aria-live', 'polite');
+    el.innerHTML = '<span class="undo-toast-text"></span><button type="button" class="undo-toast-btn">撤销</button>';
+    el.querySelector('button').addEventListener('click', () => { if (pendingRemoval) pendingRemoval.undo(); });
+    document.body.appendChild(el);
+  }
+  el.querySelector('.undo-toast-text').textContent = text;
+  el.hidden = false;
+  el.dataset.key = p.skey;
+}
+
+function hideUndoToast(p) {
+  const el = document.getElementById('undo-toast');
+  if (el && el.dataset.key === p.skey) el.hidden = true;
+}
+
+// forgetSession drops what this browser keeps for a removed key.
+function forgetSession(key, node) {
   delete perSession.drafts[key];
   delete perSession.scrollPos[sid(key, node)];
   // Drop the cached git state so a later key reuse can't inherit this
@@ -384,6 +445,20 @@ async function dismissSession(key, node, opts) {
   delete perSession.backends[key];
   delete perSession.accessProfiles[key];
   delete perSession.sentPicks[key];
+}
+
+// dismissSession removes a session from the sidebar. There is no
+// confirmation: a session naozhi runs is removed with 撤销 offered for a
+// few seconds (dismissManaged); a never-sent one is recoverable by
+// re-entering the prompt, a discovered one by reopening the CLI.
+async function dismissSession(key, node, opts) {
+  node = node || 'local';
+  if (!isCronSessionKey(key) && perSession.workspaces[key] === undefined && !isDiscoveredKey(key)) {
+    // DELETE drops the parked tuning server-side; a never-sent key's (below) stays.
+    dismissManaged(key, node, () => { forgetSession(key, node); delete perSession.pendingTuning[key]; });
+    return;
+  }
+  forgetSession(key, node);
 
   // cron-panel-consolidation RFC §4.2: cron stubs are filtered server-side,
   // so this branch only runs if a server bug leaks one into the sidebar.
@@ -408,13 +483,7 @@ async function dismissSession(key, node, opts) {
     return;
   }
 
-  if (isDiscoveredKey(key)) {
-    await dismissDiscovered(key, node);
-    return;
-  }
-  // DELETE drops the parked tuning server-side; a never-sent key's (above) stays.
-  delete perSession.pendingTuning[key];
-  dismissManaged(key, node);
+  await dismissDiscovered(key, node);
 }
 
 // Operator-facing rename flow. Prompts for a new display label; empty input

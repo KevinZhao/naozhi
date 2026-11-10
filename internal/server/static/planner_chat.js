@@ -544,6 +544,19 @@ registerActions({
       showHandoffNote();
     });
   },
+  // An example of the empty conversation fills the input box and sends
+  // nothing: the text without its "…", the caret where it was.
+  'planner-example': (el) => {
+    const input = $('pl-input');
+    if (!input || input.disabled) return;
+    const raw = el.dataset.text || '';
+    const at = raw.indexOf('…');
+    input.value = raw.replace('…', '');
+    fitInput(input);
+    input.focus();
+    const caret = at < 0 ? input.value.length : at;
+    input.setSelectionRange(caret, caret);
+  },
   'planner-goto': () => {
     $('handoff-note')?.remove();
     shell.setActivityView('planner');

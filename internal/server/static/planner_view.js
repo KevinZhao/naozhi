@@ -89,6 +89,7 @@ const pl = {
   briefOpen: new Map(),
   open: [], // the open inbox items
   tasksActive: 0, // the tasks 进行中, as 任务 last listed them
+  tasksAll: -1, // every task 任务 last listed, done ones too; -1 before a list
   notice: '', // the notice a push or link opened, shown in 等你 (waitListHtml)
   pausedUntil: 0,
   customPause: false,
@@ -274,18 +275,25 @@ export function waitingItems() {
 }
 
 // actionListHtml is the cards of the items that wait on you to act, for the
-// left column and the 会话 sidebar's bar.
-export function actionListHtml() {
-  return actionItems().map((it) => itemHtml(it)).join('');
+// 会话 sidebar's bar: the first max of them, and their count n.
+export function actionListHtml(max = Infinity) {
+  const items = actionItems();
+  return { html: items.slice(0, max).map((it) => itemHtml(it)).join(''), n: items.length };
 }
 
 // paintLeftToggle writes the phone's folded left block: 等你 N · 任务 M,
 // the counts of what it holds (the badge's, and the tasks in progress).
+// Known to hold nothing at all (no item by the badge, no task, done ones
+// neither) the block takes no row: pl-left-none hides it on a phone while
+// it is folded. Until both are known it stays, so the conversation does not
+// move under a row coming back.
 function paintLeftToggle() {
   const el = $('pl-left-toggle')?.querySelector('span');
   if (!el) return;
-  const text = '等你 ' + actionItems().length + ' · 任务 ' + pl.tasksActive;
+  const n = actionItems().length;
+  const text = '等你 ' + n + ' · 任务 ' + pl.tasksActive;
   if (el.textContent !== text) el.textContent = text;
+  $('planner-main')?.classList.toggle('pl-left-none', !n && inbox.badge === 0 && pl.tasksAll === 0);
 }
 
 function noteItems() {
@@ -713,14 +721,22 @@ async function fetchStatus() {
   if (pl.host) { paintStatus(); paintTools(); paintStreamEmpty(); if (named) paintWaiting(); }
 }
 
+// EXAMPLES are the empty conversation's starters: a tap puts one in the
+// input box (planner_chat.js planner-example), the caret at its "…", and
+// sends nothing.
+const EXAMPLES = ['今天要做…帮我派出去', '现在都在干什么？', '明早 9 点提醒我…'];
+
 function paintStreamEmpty() {
   const box = $('pl-stream');
   if (!box) return;
   const empty = box.querySelector(':scope > .pl-empty');
   const hasEvents = !!box.querySelector('.event, .pl-brief');
   if (hasEvents || !(pl.status && pl.status.enabled)) { if (empty) empty.remove(); return; }
-  if (!empty) box.insertAdjacentHTML('beforeend', '<div class="pl-empty">这里是你和 Planner 的对话：早报、它派出的会话与汇报。<span>直接说要做的事，或在会话里点"交给 Planner"。</span></div>');
+  if (!empty) box.insertAdjacentHTML('beforeend', '<div class="pl-empty">这里是你和 Planner 的对话：早报、它派出的会话与汇报。<span>直接说要做的事，或在会话里点"交给 Planner"。</span>' +
+    '<div class="pl-examples" role="group" aria-label="示例">' + EXAMPLES.map((t) =>
+      '<button type="button" class="pl-example" data-action="planner-example" data-text="' + escAttr(t) + '">' + esc(t) + '</button>').join('') + '</div></div>');
 }
+
 
 // admitEvent is the same-ms replay gate (scratchAdmitEvent's rule): false
 // for a logged event already taken. A uuid-less event is a pushed system
@@ -1159,6 +1175,7 @@ nzBus.addEventListener('inbox:count', (e) => {
 nzBus.addEventListener('tasks:list', (e) => {
   const tasks = (e.detail && Array.isArray(e.detail.tasks)) ? e.detail.tasks : [];
   pl.tasksActive = tasks.filter(inProgress).length;
+  pl.tasksAll = tasks.length;
   paintLeftToggle();
 });
 // 在 Planner 中查看 from a dispatched session's header (tasks.js) opens the

@@ -175,8 +175,8 @@ function showSessionContextMenu(x, y, items) {
 // opens the menu anchored near the touch coordinates. Rename reuses the
 // existing modal-prompt pattern by selecting the session first, then
 // deferring to renameSession(); copy-key writes the key to clipboard with
-// a toast confirmation; delete routes through dismissSession() which
-// surfaces the existing confirmDialog flow on its own.
+// a toast confirmation; delete routes through dismissSession(), whose
+// toast offers 撤销 before the DELETE goes out.
 function openSessionContextMenu(card, x, y) {
   const key = card.dataset.key;
   const node = card.dataset.node || 'local';

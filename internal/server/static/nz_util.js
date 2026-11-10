@@ -235,16 +235,22 @@ const DEATH_REASONS = {
 };
 
 // HEALTH_STATES maps a health state (monitor/health, wire-stable) to its
-// label and colour class, in the server's order: abnormal first.
+// label and colour class, in the server's order: abnormal first. It is the
+// one table for a state's word and colour: the sidebar row, the health
+// table, the session cards and the 任务 badges all read it, so 等你 is
+// amber everywhere (red is 失败 alone).
 export const HEALTH_STATES = {
   failed: { label: '失败', cls: 'fail' },
   lost: { label: '失联', cls: 'warn' },
   stalled: { label: '停滞', cls: 'warn' },
-  waiting: { label: '待你回复', cls: 'ask' },
+  waiting: { label: '等你', cls: 'warn' },
   unknown: { label: '未知', cls: 'off' },
-  active: { label: '活跃', cls: 'run' },
+  active: { label: '在跑', cls: 'run' },
   idle: { label: '空闲', cls: 'idle' },
 };
+// NEEDS_YOU are the states a session waits on you in (the amber and red
+// dots): the sidebar row says them in words and "只看需要我" keeps them.
+export const NEEDS_YOU = new Set(['failed', 'lost', 'stalled', 'waiting']);
 // HEALTH_ERROR_CLASSES labels health.Classify's error classes (§15.1);
 // "other" names nothing and has no label.
 export const HEALTH_ERROR_CLASSES = {
@@ -434,6 +440,15 @@ export function sessionExitChipHtml(s) {
   return '<span class="sc-exit" title="' + escAttr(x.title) + '">⚠ 异常退出</span>';
 }
 
+// sessionStateChipHtml is a sidebar row's state in a word beside its dot
+// for the states that wait on you but 失败 (its row says 失败 · <原因> on
+// the line above): the dot's amber alone does not tell 等你 from 停滞.
+export function sessionStateChipHtml(s) {
+  const st = sessionHealthState(s);
+  if (st === 'failed' || !NEEDS_YOU.has(st)) return '';
+  return '<span class="sc-state ' + HEALTH_STATES[st].cls + '">' + esc(HEALTH_STATES[st].label) + '</span>';
+}
+
 // patchCardHealth brings a rendered session card's status dot and exit chip
 // in line with its row s, for the paths that patch a card in place between
 // renders; it produces the markup sessionCardHtml renders.
@@ -444,7 +459,8 @@ export function patchCardHealth(card, s) {
   dot.className = 'sc-dot ' + d.cls;
   dot.title = d.title;
   dot.parentElement.querySelector('.sc-exit')?.remove();
-  const html = sessionExitChipHtml(s);
+  dot.parentElement.querySelector('.sc-state')?.remove();
+  const html = sessionStateChipHtml(s) + sessionExitChipHtml(s);
   if (html) dot.insertAdjacentHTML('afterend', html);
 }
 

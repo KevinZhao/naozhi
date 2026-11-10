@@ -4,9 +4,9 @@
 //      (the badge's number), 任务's what is in progress (the phone's folded
 //      block's number, one 任务 number on the screen), and on a phone 等你
 //      comes first.
-//   5. The idle Home: "等你 N · 运行中 N · 失败 N" over the latest three items
+//   5. The idle Home: "等你 N · 在跑 N · 失败 N" over the latest three items
 //      that wait on you, each a click away from its card or session; with
-//      the Planner off (no inbox) only 运行中 and 失败; nothing with every
+//      the Planner off (no inbox) only 在跑 and 失败; nothing with every
 //      count 0. The card comes back with the empty main area.
 //   10. A dispatched session's header: its task's badge and 在 Planner 中查看,
 //      which opens the page on the card, lit; no "(模型未配置)", the model
@@ -164,10 +164,19 @@ for (const [name, vp] of VIEWPORTS) {
         await expect(page.locator('#abnav-planner-count')).toHaveText(String(n));
         await page.click('#abnav-planner');
         const toggle = page.locator('#pl-left-toggle');
+        if (name === 'phone' && label === 'sparse') {
+          // Nothing waits and there is no task: no "等你 0 · 任务 0" row
+          // (UX review 7), the conversation takes the screen.
+          await expect(toggle).toBeHidden();
+          await expect(page.locator('#pl-left')).toBeHidden();
+          await expect(page.locator('#pl-input')).toBeInViewport();
+          await shot(page, `left-${label}-${name}`);
+          continue;
+        }
         if (name === 'phone') {
           // 任务 on the folded block counts what is in progress: 等你 2,
           // 失败 2 and the 7 running, stalled or idle ones.
-          await expect(toggle).toHaveText(label === 'crowded' ? '等你 6 · 任务 11' : '等你 0 · 任务 0');
+          await expect(toggle).toHaveText('等你 6 · 任务 11');
           await toggle.click();
           await expect(toggle).toHaveAttribute('aria-expanded', 'true');
         }
@@ -219,9 +228,9 @@ test('the idle Home sums up what needs you and goes straight to it (desktop)', a
     const dots = await sidebarDots(page);
     expect(dots.running).toBeGreaterThan(0);
     expect(dots.failed).toBeGreaterThan(0);
-    // 等你 is the badge's number, not a second count; 运行中 and 失败 the
+    // 等你 is the badge's number, not a second count; 在跑 and 失败 the
     // sidebar's dots.
-    await expect(card.locator('.ha-n')).toHaveText(['等你 6', '运行中 ' + dots.running, '失败 ' + dots.failed]);
+    await expect(card.locator('.ha-n')).toHaveText(['等你 6', '在跑 ' + dots.running, '失败 ' + dots.failed]);
     // The numbers are text: the rail badge stays the one red count.
     const color = await card.locator('.ha-n-wait b').evaluate((el) => getComputedStyle(el).color);
     const red = await page.locator('#abnav-planner-count').evaluate((el) => getComputedStyle(el).backgroundColor);
@@ -259,7 +268,7 @@ test('the idle Home sums up what needs you and goes straight to it (desktop)', a
   }
 });
 
-test('the idle Home: Planner off says 运行中 and 失败 only; nothing when every count is 0', async ({ browser }) => {
+test('the idle Home: Planner off says 在跑 and 失败 only; nothing when every count is 0', async ({ browser }) => {
   const ctx = await browser.newContext(DESKTOP);
   const page = await ctx.newPage();
   // No inbox, no Planner: GET /api/inbox answers 404.
@@ -275,7 +284,7 @@ test('the idle Home: Planner off says 运行中 and 失败 only; nothing when ev
     const card = page.locator('#home-attn .ha-card');
     await expect(card).toBeVisible();
     const dots = await sidebarDots(page);
-    await expect(card.locator('.ha-n')).toHaveText(['运行中 ' + dots.running, '失败 ' + dots.failed]);
+    await expect(card.locator('.ha-n')).toHaveText(['在跑 ' + dots.running, '失败 ' + dots.failed]);
     await expect(card.locator('.ha-row')).toHaveCount(0);
     await shot(page, 'home-planner-off-desktop');
   } finally {

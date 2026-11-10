@@ -6,7 +6,7 @@ import { lsGet } from './platform.js';
 import { sessionStream } from './session_stream.js';
 import { WS_STATES, wsm } from './ws_manager.js';
 import { perSession, selection, serverInfo, sessionList, timers, transcript } from './state.js';
-import { backgroundTasksText, esc, escAttr, fetchJSON, nzBus, patchCardHealth, reconcileChildren, sessionDot, sessionExitChipHtml, sessionFailureText, sessionHealthState, sessionTitleText } from './nz_util.js';
+import { NEEDS_YOU, backgroundTasksText, esc, escAttr, fetchJSON, nzBus, patchCardHealth, reconcileChildren, sessionDot, sessionExitChipHtml, sessionFailureText, sessionHealthState, sessionStateChipHtml, sessionTitleText } from './nz_util.js';
 import { setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderPRChip, setHeaderSpawnDiagChip } from './session_header.js';
 import { deselectNodeSession, reconcileSelectedNode } from './system_view.js';
 import { turnState, updateSendButton } from './running_banner.js';
@@ -334,11 +334,19 @@ export function renderSidebar(data) {
   // Empty state: the "no sessions" text + the header `+` action.
   const items = buildSidebarItems(data);
   const dispatched = items.filter(isDispatched).length;
-  // The filter holds only while there is something to show; with no
-  // dispatched session left the list is the whole list again.
-  const only = sessionList.onlyDispatched && dispatched > 0;
-  const rows = sidebarHtml(only ? items.filter(isDispatched) : items, only);
-  const html = (rows && dispatchFilterHtml(dispatched, only) + rows) || '<div class="no-sessions">no sessions<br><button type="button" class="no-sessions-cta" data-action="session-new">+ 开启你的第一个会话</button></div>';
+  const need = items.filter(needsYou).length;
+  // A filter holds only while there is something to show; with no
+  // dispatched session (or none waiting on you) left the list is the whole
+  // list again. Both on keep the rows both keep.
+  const onlyD = sessionList.onlyDispatched && dispatched > 0;
+  const onlyN = sessionList.onlyNeedsYou && need > 0;
+  const only = onlyD || onlyN;
+  const shown = items.filter((s) => (!onlyD || isDispatched(s)) && (!onlyN || needsYou(s)));
+  const rows = sidebarHtml(shown, only);
+  const chips = filterHtml(dispatched, onlyD, need, onlyN);
+  const html = rows ? chips + rows
+    : only ? chips + '<div class="no-sessions">没有符合筛选的会话</div>'
+      : '<div class="no-sessions">no sessions<br><button type="button" class="no-sessions-cta" data-action="session-new">+ 开启你的第一个会话</button></div>';
   // Keyed reconcile: only rows whose markup changed are replaced, so a poll
   // with nothing new touches no DOM, in-place patches (state dot, unread chip,
   // a removed card) compare as they stand, and kept nodes keep the scroll
@@ -395,11 +403,21 @@ function buildSidebarItems(data) {
 // isDispatched is a session the Planner dispatched (purpose task, §15.1).
 const isDispatched = (s) => s.purpose === 'task';
 
-// dispatchFilterHtml is the chip atop the list that narrows it to the
-// dispatched sessions (only); '' while there are none.
-function dispatchFilterHtml(n, only) {
-  if (!n) return '';
-  return '<div class="sb-filter"><button type="button" class="sb-filter-chip' + (only ? ' on' : '') + '" data-action="sidebar-only-dispatched" aria-pressed="' + only + '" title="' + (only ? '显示全部会话' : '只看 Planner 派出的会话') + '">只看 Planner 派出 <b>' + n + '</b></button></div>';
+// needsYou is a session whose state waits on you: 等你, 停滞, 失联, 失败.
+const needsYou = (s) => NEEDS_YOU.has(sessionHealthState(s));
+
+// filterChipHtml is one filter chip: n rows it would keep, on while it filters.
+function filterChipHtml(action, label, offTitle, n, on) {
+  return '<button type="button" class="sb-filter-chip' + (on ? ' on' : '') + '" data-action="' + action + '" aria-pressed="' + on + '" title="' + (on ? '显示全部会话' : offTitle) + '">' + label + ' <b>' + n + '</b></button>';
+}
+
+// filterHtml is the chips atop the list that narrow it to what waits on you
+// (need, onlyN) and to the dispatched sessions (dispatched, onlyD); each is
+// left out while it has no row, the bar while neither has.
+function filterHtml(dispatched, onlyD, need, onlyN) {
+  const chips = (need ? filterChipHtml('sidebar-only-need', '只看需要我', '只看等你、停滞、失败的会话', need, onlyN) : '') +
+    (dispatched ? filterChipHtml('sidebar-only-dispatched', '只看 Planner 派出', '只看 Planner 派出的会话', dispatched, onlyD) : '');
+  return chips ? '<div class="sb-filter">' + chips + '</div>' : '';
 }
 
 // toggleOnlyDispatched flips the 派出 filter, kept across reloads, and
@@ -407,6 +425,13 @@ function dispatchFilterHtml(n, only) {
 export function toggleOnlyDispatched() {
   sessionList.onlyDispatched = !sessionList.onlyDispatched;
   try { localStorage.setItem('nz_sidebarOnlyDispatched', sessionList.onlyDispatched ? '1' : ''); } catch (_) {}
+  if (sessionList.lastSidebarData) renderSidebar(sessionList.lastSidebarData);
+}
+
+// toggleOnlyNeedsYou flips 只看需要我, kept across reloads like the 派出 one.
+export function toggleOnlyNeedsYou() {
+  sessionList.onlyNeedsYou = !sessionList.onlyNeedsYou;
+  try { localStorage.setItem('nz_sidebarOnlyNeedsYou', sessionList.onlyNeedsYou ? '1' : ''); } catch (_) {}
   if (sessionList.lastSidebarData) renderSidebar(sessionList.lastSidebarData);
 }
 
@@ -690,8 +715,8 @@ function sessionCardHtml(s, group) {
   const prompt = sessionTitleText(s) || (isNew ? '新会话' : '未命名');
   const icon = cliIcon(s.cli_name || 'cli');
 
-  // Line 2: status dot + meta. The dot is the session's health (sessionDot),
-  // its state in words only in the title.
+  // Line 2: status dot + meta. The dot is the session's health (sessionDot);
+  // a state that waits on you is also said in a word beside it.
   const dot = sessionDot(s);
   const ago = s.last_active ? timeAgo(s.last_active) : '';
   const absTime = s.last_active ? formatAbsTime(s.last_active) : '';
@@ -730,7 +755,7 @@ function sessionCardHtml(s, group) {
   const dispatchTag = isDispatched(s) ? '<span class="sc-origin kind-planner" title="Planner 派出">派出</span>' : '';
   // The cli icon rides inside the meta line at 18px so the title owns line 1.
   const metaHtml = icon +
-    '<span class="sc-dot ' + dot.cls + '" title="' + escAttr(dot.title) + '"></span>' + sessionExitChipHtml(s) +
+    '<span class="sc-dot ' + dot.cls + '" title="' + escAttr(dot.title) + '"></span>' + sessionStateChipHtml(s) + sessionExitChipHtml(s) +
     nodeBadge +
     originBadge +
     accessProfileChip +

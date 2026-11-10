@@ -16,7 +16,7 @@
   /* bumped from 40 to 44 to hit the WCAG 2.5.5 AA floor for
      touch targets. The visual footprint stays the same (padding + icon
      are unchanged); only the hit-box widens. */
-  .session-card .btn-dismiss{min-width:44px;min-height:44px;padding:8px;font-size:19px;opacity:.75}
+  .session-card .btn-dismiss{min-width:44px;min-height:44px;padding:8px;font-size:19px;opacity:1}
   .btn-mobile-back{min-width:44px;min-height:44px}
   /* manual-reconnect chip was 22px tall — impossible to tap
      reliably on a phone right after a WS blip. Only grow the hit-box on

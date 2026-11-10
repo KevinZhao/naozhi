@@ -71,7 +71,7 @@
 // line in the Planner conversation opens it so too, its digest expanded.
 import { NZ_CONTRACT } from './contract.js';
 import { selection, ui } from './state.js';
-import { backgroundTasksText, esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
+import { HEALTH_STATES, backgroundTasksText, esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
 import { formatAbsTime, formatMonthDayTime, timeAgo } from './utilities.js';
 import { custody, custodyChipHtml, refreshCustody, sessionShown, statusOf } from './custody.js';
 import { isLit, light } from './notify.js';
@@ -124,16 +124,17 @@ const REVEAL_MS = 150;
 const STATUS_MAX = 160;
 
 // BADGES are the status badges: the label and the class, whose colour is the
-// sidebar dot's for the same state (run blue, warn amber, fail red).
+// sidebar dot's for the same state (run blue, warn amber, fail red). A
+// session's health is HEALTH_STATES' own word and colour, as everywhere.
 const BADGES = {
-  run: { label: '在跑', cls: 'run' },
+  run: HEALTH_STATES.active,
   // 后台中 (D109): the turn is over, its background tasks are not; the run
   // colour, its dot a ring.
   bg: { label: '后台中', cls: 'bg' },
-  idle: { label: '空闲', cls: 'idle' },
-  stalled: { label: '停滞', cls: 'warn' },
-  waiting: { label: '等你', cls: 'warn' },
-  failed: { label: '失败', cls: 'fail' },
+  idle: HEALTH_STATES.idle,
+  stalled: HEALTH_STATES.stalled,
+  waiting: HEALTH_STATES.waiting,
+  failed: HEALTH_STATES.failed,
   doing: { label: '进行中', cls: 'idle' },
   remind: { label: '待提醒', cls: 'idle' },
   done: { label: '已完成', cls: 'done' },

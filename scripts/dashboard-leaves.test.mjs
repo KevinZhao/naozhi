@@ -234,13 +234,13 @@ test('sessionDot and the exit chip read a failure off the health verdict', () =>
   const cases = [
     ['failed before a restart', { state: 'ready', last_active: 1000, health: failed }, 'dot-failed', '失败：CLI 进程被信号终止', true],
     ['a send since the verdict', { state: 'ready', last_active: 3000, health: failed }, 'dot-ready', '空闲', false],
-    ['running', { state: 'running', last_active: 1000, health: failed }, 'dot-running', '活跃', false],
+    ['running', { state: 'running', last_active: 1000, health: failed }, 'dot-running', '在跑', false],
     ['dead, crashed', { state: 'dead', death_reason: 'killed' }, 'dot-failed', '失败：进程被终止', true],
     ['dead, reclaimed', { state: 'dead', death_reason: 'idle_timeout' }, 'dot-ready', '空闲', false],
     ['failed without a death', { state: 'ready', last_active: 1000, health: { state: 'failed', since: 2000, error_class: 'auth' } }, 'dot-failed', '失败：凭证 / 权限拒绝', false],
     ['failed, then reclaimed', { state: 'dead', death_reason: 'idle_timeout', last_active: 1000, health: { state: 'failed', since: 2000, error_class: 'auth' } }, 'dot-failed', '失败：凭证 / 权限拒绝', false],
     ['active past its turn', { state: 'ready', last_active: 1000, health: { state: 'active', since: 2000 } }, 'dot-ready', '空闲', false],
-    ['waiting', { state: 'ready', last_active: 1000, health: { state: 'waiting', since: 2000 } }, 'dot-warn', '待你回复', false],
+    ['waiting', { state: 'ready', last_active: 1000, health: { state: 'waiting', since: 2000 } }, 'dot-warn', '等你', false],
     ['unknown', { state: 'ready', health: { state: 'unknown', since: 2000 } }, 'dot-ready', '空闲', false],
     ['new', { state: 'new' }, 'dot-new', '新会话', false],
   ];
@@ -248,6 +248,18 @@ test('sessionDot and the exit chip read a failure off the health verdict', () =>
     assert.deepEqual(nzu.sessionDot(s), { cls, title }, name);
     assert.equal(nzu.sessionExitChipHtml(s) !== '', chip, name);
   }
+});
+
+// UX review 3: a row that waits on you says its state in a word beside the
+// dot, amber as the dot; 失败 is said on its status line, so no chip.
+test('sessionStateChipHtml says 等你 / 停滞 / 失联 and nothing else', () => {
+  const at = (state) => ({ state: 'ready', last_active: 1000, health: { state, since: 2000 } });
+  assert.equal(nzu.sessionStateChipHtml(at('waiting')), '<span class="sc-state warn">等你</span>');
+  assert.equal(nzu.sessionStateChipHtml(at('stalled')), '<span class="sc-state warn">停滞</span>');
+  assert.equal(nzu.sessionStateChipHtml(at('lost')), '<span class="sc-state warn">失联</span>');
+  for (const s of [at('failed'), at('idle'), { state: 'running' }, { state: 'new' }]) assert.equal(nzu.sessionStateChipHtml(s), '');
+  // One table: 等你 is never 失败's red.
+  assert.notEqual(nzu.HEALTH_STATES.waiting.cls, nzu.HEALTH_STATES.failed.cls);
 });
 
 // Q19: a name made from a prompt is its first sentence, without code, about
