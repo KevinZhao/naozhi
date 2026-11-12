@@ -218,6 +218,8 @@ type spawnParams struct {
 	// default), recorded on the session and persisted so a post-restart
 	// resume relocks the same auth chain.
 	AccessProfileID string
+	// AccessProfilePinned is whether AccessProfileID is the user's pick.
+	AccessProfilePinned bool
 	// AccessProfileEnv is the RAW profile env map (still holding *_FILE
 	// references); nil when AccessProfileID is "". completeSpawn expands it
 	// outside the transaction — file reads must not happen under the lock.
@@ -251,21 +253,29 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 	// the SAME auth chain; re-resolving would cross accounts) > one-shot
 	// dashboard override (consumed here) > opts.AccessProfile > "". An unknown
 	// ID resolves to "" with a warning: the SAFE default, never a wrong account.
+	//
+	// A user's pick (the dashboard override, SwitchAccessProfile) is pinned:
+	// a pinned "" is the global credentials, not a gap the key's project,
+	// agent or default profile fills.
 	accessProfileID := opts.AccessProfile
+	pinned := false
 	if len(tx.Ext().picks.accessProfile) > 0 {
 		if ov, ok := tx.Ext().picks.accessProfile[key]; ok {
-			accessProfileID = ov
+			if ov == pickGlobalAccessProfile {
+				ov = ""
+			}
+			accessProfileID, pinned = ov, true
 			delete(tx.Ext().picks.accessProfile, key)
 		}
 	}
 	if old := tx.Get(key); old != nil {
-		if ap := old.AccessProfile(); ap != "" {
-			accessProfileID = ap
+		if ap := old.AccessProfile(); ap != "" || old.AccessProfilePinned() {
+			accessProfileID, pinned = ap, old.AccessProfilePinned()
 		}
 	}
 	// defaultAccessProfile is the lowest tier: applies ONLY when every source
 	// above left the ID empty, so picks and resume-locked profiles always win.
-	if accessProfileID == "" && r.backends.defaultAccessProfile != "" {
+	if accessProfileID == "" && !pinned && r.backends.defaultAccessProfile != "" {
 		accessProfileID = r.backends.defaultAccessProfile
 	}
 	var accessProfileEnv map[string]string
@@ -407,19 +417,20 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 	}
 
 	return spawnParams{
-		BackendID:        backendID,
-		Wrapper:          wrapper,
-		Model:            model,
-		Args:             args,
-		Effort:           effort,
-		SystemPrompt:     merged.SystemPrompt,
-		Workspace:        workspace,
-		ResumeID:         resumeID,
-		AccessProfileID:  accessProfileID,
-		AccessProfileEnv: accessProfileEnv,
-		AccessProfileAWS: accessProfileAWS,
-		Overlay:          overlay,
-		Launch:           r.spawn.launchSpecFor(key, overlay, accessProfileAWS != ""),
+		BackendID:           backendID,
+		Wrapper:             wrapper,
+		Model:               model,
+		Args:                args,
+		Effort:              effort,
+		SystemPrompt:        merged.SystemPrompt,
+		Workspace:           workspace,
+		ResumeID:            resumeID,
+		AccessProfileID:     accessProfileID,
+		AccessProfilePinned: pinned,
+		AccessProfileEnv:    accessProfileEnv,
+		AccessProfileAWS:    accessProfileAWS,
+		Overlay:             overlay,
+		Launch:              r.spawn.launchSpecFor(key, overlay, accessProfileAWS != ""),
 	}
 }
 
@@ -432,6 +443,9 @@ type sessionOverrides struct {
 	tuningEffort string
 	userLabel    string
 	labelOrigin  string
+	// accessProfilePinned is set from the spawn's resolution, not the old
+	// entry: it travels with the profile it was resolved alongside.
+	accessProfilePinned bool
 }
 
 // consumePendingTuning moves a pre-spawn tuning pick
@@ -465,12 +479,13 @@ type spawnReservation struct {
 	slot      pendingSpawnSlot
 	spawnOpts cli.SpawnOptions
 
-	wrapper          *cli.Wrapper
-	backendID        string
-	workspace        string
-	accessProfileID  string
-	accessProfileEnv map[string]string
-	accessProfileAWS string
+	wrapper             *cli.Wrapper
+	backendID           string
+	workspace           string
+	accessProfileID     string
+	accessProfilePinned bool
+	accessProfileEnv    map[string]string
+	accessProfileAWS    string
 
 	// old is the session being replaced (nil for a fresh key), snapshotted
 	// in the same critical section.
@@ -576,6 +591,7 @@ func (r *Router) reserveSpawn(tx sessTx, res *spawnReservation, key, resumeID st
 	res.key, res.resumeID, res.opts, res.doneCh = key, sp.ResumeID, opts, doneCh
 	res.wrapper, res.backendID, res.workspace = sp.Wrapper, sp.BackendID, sp.Workspace
 	res.accessProfileID, res.accessProfileEnv, res.accessProfileAWS = sp.AccessProfileID, sp.AccessProfileEnv, sp.AccessProfileAWS
+	res.accessProfilePinned = sp.AccessProfilePinned
 	// argv-bearing fields come from the shared constructor so this path and
 	// the arg-drift comparison cannot diverge. DebugFile uses the
 	// side-effecting cliDebugFileFor (log pre-created 0600) where drift uses
@@ -732,6 +748,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (_ *M
 		if old == nil {
 			overrides = r.consumePendingTuning(tx, key, overrides)
 		}
+		overrides.accessProfilePinned = res.accessProfilePinned
 		oldHistory, prevIDs = hist.entries, hist.prevIDs
 		s = r.installFreshSession(tx,
 			key, proc, res.workspace, res.backendID, res.accessProfileID, res.wrapper, res.resumeID,
@@ -846,6 +863,7 @@ func (r *Router) installFreshSession(tx sessTx,
 	s.SetBackend(backendID)
 	// Recorded so a later resume relocks the same auth chain (§7).
 	s.SetAccessProfile(accessProfileID)
+	s.SetAccessProfilePinned(overrides.accessProfilePinned)
 	s.SetCLIName(wrapper.CLIName)
 	s.SetCLIVersion(wrapper.CLIVersion)
 	// Operator-owned state must outlive the process: this spawn's argv was

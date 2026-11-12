@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"maps"
 	"os"
 	"os/signal"
+	"reflect"
 	"slices"
 	"sync"
 	"syscall"
@@ -61,27 +61,27 @@ func (r *configReloader) bindApply(apply func(server.HotConfig), liveProfiles fu
 	r.budget = gate
 }
 
-// running is baseline plus the access profiles created at runtime (the
-// dashboard writes them to config.yaml and registers them live), so a reload
-// does not list as pending a profile that is already in force.
+// running is baseline with the access profiles as the live registry has them:
+// the dashboard creates, edits and deletes profiles in config.yaml and in the
+// registry together, so a reload does not list as pending a change already in
+// force.
 func (r *configReloader) running() *config.Config {
 	if r.liveProfiles == nil {
 		return r.baseline
 	}
-	var profiles map[string]config.AccessProfile
-	for id, ap := range r.liveProfiles() {
-		if _, ok := r.baseline.AccessProfiles[id]; ok {
+	live := r.liveProfiles()
+	profiles := make(map[string]config.AccessProfile, len(live))
+	changed := len(live) != len(r.baseline.AccessProfiles)
+	for id, ap := range live {
+		cur := configAccessProfile(ap)
+		if b, ok := r.baseline.AccessProfiles[id]; ok && reflect.DeepEqual(cur, configAccessProfile(buildAccessProfiles(map[string]config.AccessProfile{id: b})[id])) {
+			profiles[id] = b
 			continue
 		}
-		if profiles == nil {
-			profiles = maps.Clone(r.baseline.AccessProfiles)
-			if profiles == nil {
-				profiles = map[string]config.AccessProfile{}
-			}
-		}
-		profiles[id] = configAccessProfile(ap)
+		profiles[id] = cur
+		changed = true
 	}
-	if profiles == nil {
+	if !changed {
 		return r.baseline
 	}
 	run := *r.baseline

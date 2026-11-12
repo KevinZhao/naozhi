@@ -108,6 +108,7 @@ export const NZ_CONTRACT = Object.freeze({
     sessions_upload: '/api/sessions/upload',
     sessions_workflow: '/api/sessions/workflow',
     settings: '/api/settings',
+    settings_models: '/api/settings/models',
     system_config_reload: '/api/system/config/reload',
     system_daemons: '/api/system/daemons',
     system_health: '/api/system/health',

@@ -8,7 +8,11 @@ package session
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -132,6 +136,7 @@ func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 			"key", key)
 	} else {
 		r.runs.Invalidate(key)
+		r.removeSessionSettings(key)
 	}
 	// Wake a Shutdown waiting on this session running: it has left the
 	// table, so the wait predicate may now pass.
@@ -143,6 +148,20 @@ func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 		logSessionLifecycle("removed", key)
 	}
 	r.notifyChange()
+}
+
+// removeSessionSettings deletes key's per-session settings file. A spawn
+// writes it afresh whenever it needs one, so nothing is lost once the
+// process is gone, and leaving it would keep one file per session ever
+// removed.
+func (r *Router) removeSessionSettings(key string) {
+	if r.spawn.sessionSettingsDir == "" {
+		return
+	}
+	path := filepath.Join(r.spawn.sessionSettingsDir, persist.KeyHash(key)+".json")
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		slog.Warn("remove session settings file", "key", key, "err", err)
+	}
 }
 
 // Remove removes a session from the router and kills its process, blocking

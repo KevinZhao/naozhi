@@ -20,6 +20,9 @@ type Handler struct {
 	// configPath "" disables the create endpoint (400).
 	configPath string
 	secretsDir string
+	// settingsPath is naozhi's own Claude settings file
+	// (~/.naozhi/naozhi-settings.json) the model editor writes; "" disables it.
+	settingsPath string
 	// writeMu serializes the read-modify-write of config.yaml in HandleCreate:
 	// two concurrent creates would otherwise both read the same snapshot and
 	// the second write would drop the first profile from disk while the live
@@ -27,9 +30,10 @@ type Handler struct {
 	writeMu sync.Mutex
 }
 
-// New returns a Handler; configPath "" disables create, secretsDir "" disables token files.
-func New(router Router, configPath, secretsDir string) *Handler {
-	return &Handler{router: router, configPath: configPath, secretsDir: secretsDir}
+// New returns a Handler; configPath "" disables create, edit and delete,
+// secretsDir "" disables token files, settingsPath "" the model editor.
+func New(router Router, configPath, secretsDir, settingsPath string) *Handler {
+	return &Handler{router: router, configPath: configPath, secretsDir: secretsDir, settingsPath: settingsPath}
 }
 
 // HandleList serves the read-only access-profile registry, shaped like

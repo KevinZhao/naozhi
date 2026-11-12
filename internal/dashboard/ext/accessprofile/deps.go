@@ -18,6 +18,11 @@ type Router interface {
 	HasAccessProfile(id string) bool
 	// AddAccessProfile registers a profile in the live registry (no restart needed).
 	AddAccessProfile(id string, p session.AccessProfile) error
+	// AccessProfiles is the live registry, env included (never sent out).
+	AccessProfiles() map[string]session.AccessProfile
+	// ReplaceAccessProfile / RemoveAccessProfile edit the live registry.
+	ReplaceAccessProfile(id string, p session.AccessProfile) error
+	RemoveAccessProfile(id string) error
 	// BackendIDs lists the enabled backend IDs (default_backend guard).
 	BackendIDs() []string
 }

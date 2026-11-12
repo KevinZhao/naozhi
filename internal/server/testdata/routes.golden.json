@@ -1,11 +1,21 @@
 [
   {
+    "method": "DELETE",
+    "path": "/api/access-profiles",
+    "handler_type": "*accessprofile.Handler"
+  },
+  {
     "method": "GET",
     "path": "/api/access-profiles",
     "handler_type": "*accessprofile.Handler"
   },
   {
     "method": "POST",
+    "path": "/api/access-profiles",
+    "handler_type": "*accessprofile.Handler"
+  },
+  {
+    "method": "PUT",
     "path": "/api/access-profiles",
     "handler_type": "*accessprofile.Handler"
   },
@@ -418,6 +428,21 @@
     "method": "PUT",
     "path": "/api/settings",
     "handler_type": "*uisettings.Handler"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/settings/models",
+    "handler_type": "*accessprofile.Handler"
+  },
+  {
+    "method": "GET",
+    "path": "/api/settings/models",
+    "handler_type": "*accessprofile.Handler"
+  },
+  {
+    "method": "POST",
+    "path": "/api/settings/models",
+    "handler_type": "*accessprofile.Handler"
   },
   {
     "method": "POST",

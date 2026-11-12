@@ -19,6 +19,10 @@ import (
 // the switch closes the CLI, which would cut the turn off.
 var ErrAccessProfileSwitchBusy = errors.New("session is running a turn; switch the access profile once it ends")
 
+// pickGlobalAccessProfile is the pre-spawn pick of the global credentials:
+// an empty pick means none was made. No profile id can be spelled like it.
+const pickGlobalAccessProfile = "\x00global"
+
 // ErrAccessProfileUnknown refuses a switch to a profile that is not configured.
 var ErrAccessProfileUnknown = errors.New("access profile is not configured")
 
@@ -35,8 +39,9 @@ var ErrAccessProfileUnknown = errors.New("access profile is not configured")
 // (TuningAppliedDeferred). A key with no session parks both as the pre-spawn
 // picks. A running turn is refused, never cut off.
 //
-// Choosing "" lets the key's own profile (project binding, agent, default)
-// apply again on the next spawn, as for a session that never picked one.
+// The pick is pinned: choosing "" puts the session on the global credentials
+// even where the key's project binding, agent or default_access_profile names
+// a profile.
 func (r *Router) SwitchAccessProfile(ctx context.Context, key, profile string, model *string) (string, error) {
 	if profile != "" && !r.backends.HasAccessProfile(profile) {
 		return "", fmt.Errorf("%w: %q", ErrAccessProfileUnknown, profile)
@@ -59,7 +64,11 @@ func (r *Router) SwitchAccessProfile(ctx context.Context, key, profile string, m
 		sess := tx.Get(key)
 		if sess == nil {
 			pending = true
-			if !setPick(tx.Ext().picks.accessProfile, key, profile) {
+			pick := profile
+			if pick == "" {
+				pick = pickGlobalAccessProfile
+			}
+			if !setPick(tx.Ext().picks.accessProfile, key, pick) {
 				err = ErrTuningCapacity
 				return
 			}
@@ -80,12 +89,23 @@ func (r *Router) SwitchAccessProfile(ctx context.Context, key, profile string, m
 		}
 		modelChanged := model != nil && *model != sess.TuningModel()
 		if profile == sess.AccessProfile() && !modelChanged {
+			// Already on it: pin it so a later spawn keeps it, no respawn.
+			if !sess.AccessProfilePinned() {
+				sess.SetAccessProfilePinned(true)
+				tx.MarkChanged()
+			}
 			noop = true
 			return
 		}
 		sess.SetAccessProfile(profile)
+		sess.SetAccessProfilePinned(true)
 		if modelChanged {
 			sess.SetTuningModel(*model)
+		}
+		// The header shows the session's model at once rather than the
+		// closed CLI's until the next message spawns one.
+		if m := sess.TuningModel(); m != "" {
+			sess.SetModel(m)
 		}
 		proc = sess.loadProcess()
 		alive = proc != nil && proc.Alive()

@@ -74,6 +74,7 @@ func (r *Router) restoreSessionFromEntry(tx sessTx, key string, entry *storeEntr
 	// Restore the recorded access profile so a resume relocks the same auth
 	// chain rather than re-resolving from a since-changed project binding (RFC §7).
 	s.SetAccessProfile(entry.AccessProfile)
+	s.SetAccessProfilePinned(entry.AccessProfilePinned)
 	s.SetCLIName(cliName)
 	s.SetCLIVersion(cliVersion)
 	if entry.UserLabel != "" {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -45,7 +46,7 @@ func WriteSecretFile(path, content string) error {
 // AppendAccessProfile inserts a new access profile into config.yaml via
 // yaml.Node surgery (preserving comments/ordering). It rejects an existing id,
 // validates env through the same envpolicy leaf as load, and writes atomically
-// 0600. It does NOT touch the live Router; the caller sequences disk before
+// with the file's mode after a backup (editAccessProfiles). It does NOT touch the live Router; the caller sequences disk before
 // memory (validate → WriteSecretFile → AppendAccessProfile → BackendRegistry.AddAccessProfile).
 func AppendAccessProfile(configPath, id string, ap AccessProfile) error {
 	if err := ValidateAccessProfileID(id); err != nil {
@@ -60,6 +61,78 @@ func AppendAccessProfile(configPath, id string, ap AccessProfile) error {
 		return fmt.Errorf("aws_profile: %w", err)
 	}
 
+	return editAccessProfiles(configPath, func(profiles *yaml.Node) error {
+		// Refuse to clobber an existing entry.
+		if accessProfileIndex(profiles, id) >= 0 {
+			return fmt.Errorf("access profile %q already exists in config", id)
+		}
+		profiles.Content = append(profiles.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: id},
+			accessProfileToYAML(ap))
+		return nil
+	})
+}
+
+// AccessProfileFields are the fields the dashboard edits on an existing
+// profile; env and any key it does not know stay as they are in the file.
+type AccessProfileFields struct {
+	DisplayName    string
+	ChipColor      string
+	DefaultModel   string
+	DefaultBackend string
+	AWSProfile     string
+}
+
+// UpdateAccessProfile sets the dashboard's fields of profile id in
+// config.yaml ("" removes the key), keeping its env, any other key and the
+// file's comments. Backup, validation and write as AppendAccessProfile.
+func UpdateAccessProfile(configPath, id string, f AccessProfileFields) error {
+	if err := envpolicy.ValidateAWSProfileName(f.AWSProfile); err != nil {
+		return fmt.Errorf("aws_profile: %w", err)
+	}
+	return editAccessProfiles(configPath, func(profiles *yaml.Node) error {
+		i := accessProfileIndex(profiles, id)
+		if i < 0 {
+			return fmt.Errorf("access profile %q is not in config", id)
+		}
+		m := profiles.Content[i+1]
+		if m.Kind != yaml.MappingNode {
+			m = &yaml.Node{Kind: yaml.MappingNode}
+			profiles.Content[i+1] = m
+		}
+		for _, kv := range [][2]string{
+			{"display_name", f.DisplayName},
+			{"chip_color", f.ChipColor},
+			{"default_model", f.DefaultModel},
+			{"default_backend", f.DefaultBackend},
+			{"aws_profile", f.AWSProfile},
+		} {
+			setYAMLScalar(m, kv[0], kv[1])
+		}
+		return nil
+	})
+}
+
+// RemoveAccessProfile deletes profile id from config.yaml. The produced file
+// must still load, so a profile default_access_profile names is refused.
+func RemoveAccessProfile(configPath, id string) error {
+	return editAccessProfiles(configPath, func(profiles *yaml.Node) error {
+		i := accessProfileIndex(profiles, id)
+		if i < 0 {
+			return fmt.Errorf("access profile %q is not in config", id)
+		}
+		profiles.Content = append(profiles.Content[:i], profiles.Content[i+2:]...)
+		return nil
+	})
+}
+
+// editAccessProfiles runs edit on the access_profiles mapping of config.yaml
+// (created when absent) through yaml.Node surgery, so comments, ordering and
+// keys this package does not know survive. The produced bytes must load the
+// access-profile section cleanly before anything is written; the old file is
+// then copied to <path>.bak-<time> and the new one written atomically with
+// the file's own mode.
+func editAccessProfiles(configPath string, edit func(profiles *yaml.Node) error) error {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return fmt.Errorf("read config: %w", err)
@@ -75,7 +148,6 @@ func AppendAccessProfile(configPath, id string, ap AccessProfile) error {
 	if root.Kind != yaml.MappingNode {
 		return fmt.Errorf("config root is not a mapping")
 	}
-
 	profiles := yamlChildMap(root, "access_profiles")
 	if profiles == nil {
 		profiles = &yaml.Node{Kind: yaml.MappingNode}
@@ -83,16 +155,9 @@ func AppendAccessProfile(configPath, id string, ap AccessProfile) error {
 			&yaml.Node{Kind: yaml.ScalarNode, Value: "access_profiles"},
 			profiles)
 	}
-	// Refuse to clobber an existing entry.
-	for i := 0; i+1 < len(profiles.Content); i += 2 {
-		if profiles.Content[i].Value == id {
-			return fmt.Errorf("access profile %q already exists in config", id)
-		}
+	if err := edit(profiles); err != nil {
+		return err
 	}
-
-	profiles.Content = append(profiles.Content,
-		&yaml.Node{Kind: yaml.ScalarNode, Value: id},
-		accessProfileToYAML(ap))
 
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
@@ -113,11 +178,59 @@ func AppendAccessProfile(configPath, id string, ap AccessProfile) error {
 	if err := validateAccessProfiles(&check); err != nil {
 		return fmt.Errorf("produced config failed access-profile validation: %w", err)
 	}
+	return WriteFileWithBackup(configPath, data, buf.Bytes())
+}
 
-	if err := osutil.WriteFileAtomic(configPath, buf.Bytes(), 0o600); err != nil {
-		return fmt.Errorf("write config: %w", err)
+// WriteFileWithBackup copies old to <path>.bak-<YYYYMMDD-HHMMSS> and then
+// writes data to path atomically, both with path's current mode (0600 when
+// it has none), so an edit never widens a file that may hold credentials.
+func WriteFileWithBackup(path string, old, data []byte) error {
+	perm := os.FileMode(0o600)
+	if fi, err := os.Stat(path); err == nil {
+		perm = fi.Mode().Perm()
+	}
+	if len(old) > 0 {
+		backup := path + ".bak-" + time.Now().Format("20060102-150405")
+		if err := osutil.WriteFileAtomic(backup, old, perm); err != nil {
+			return fmt.Errorf("back up %s: %w", filepath.Base(path), err)
+		}
+	}
+	if err := osutil.WriteFileAtomic(path, data, perm); err != nil {
+		return fmt.Errorf("write %s: %w", filepath.Base(path), err)
 	}
 	return nil
+}
+
+// accessProfileIndex returns the index of id's key node in the
+// access_profiles mapping, or -1.
+func accessProfileIndex(profiles *yaml.Node, id string) int {
+	for i := 0; i+1 < len(profiles.Content); i += 2 {
+		if profiles.Content[i].Value == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// setYAMLScalar sets key to a double-quoted v in mapping m, or removes key
+// when v is "".
+func setYAMLScalar(m *yaml.Node, key, v string) {
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value != key {
+			continue
+		}
+		if v == "" {
+			m.Content = append(m.Content[:i], m.Content[i+2:]...)
+			return
+		}
+		m.Content[i+1] = &yaml.Node{Kind: yaml.ScalarNode, Value: v, Style: yaml.DoubleQuotedStyle}
+		return
+	}
+	if v != "" {
+		m.Content = append(m.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: key},
+			&yaml.Node{Kind: yaml.ScalarNode, Value: v, Style: yaml.DoubleQuotedStyle})
+	}
 }
 
 // accessProfileToYAML renders an AccessProfile as a YAML mapping node with a

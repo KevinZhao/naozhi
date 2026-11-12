@@ -692,6 +692,7 @@ func main() {
 			Live:                    configFP,
 			Reload:                  reloader.Reload,
 			AccessProfileSecretsDir: sessionLayout.AccessProfileSecretsRoot(),
+			ModelSettingsPath:       naozhiSettingsFile,
 		},
 		Queue: server.QueueOptions{
 			MaxDepth:     cfg.QueueMaxDepth(),
@@ -963,6 +964,7 @@ func main() {
 	// config.Load already logged this, but before setupLogging installed the
 	// configured handler, so it went to stderr rather than the service log.
 	config.WarnDashboardToken(cfg.Server.DashboardToken)
+	registerConfigSecrets(cfg)
 
 	serverErr := make(chan error, 1)
 	go func() {

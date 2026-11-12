@@ -14,7 +14,50 @@ package textutil
 import (
 	"regexp"
 	"strings"
+	"sync/atomic"
 )
+
+// literalSecrets are naozhi's own credentials (the dashboard token and the
+// node tokens), redacted wherever they appear: they have no prefix the scan
+// below would recognise, and a session that reads the config file would
+// otherwise echo them into its transcript.
+var literalSecrets atomic.Pointer[[]string]
+
+// minLiteralSecretLen keeps a short value from redacting ordinary text.
+const minLiteralSecretLen = 8
+
+// RegisterLiteralSecrets adds values RedactSecrets replaces verbatim; empty
+// and short ones are ignored. Called once at startup.
+func RegisterLiteralSecrets(values ...string) {
+	for {
+		cur := literalSecrets.Load()
+		var next []string
+		if cur != nil {
+			next = append(next, *cur...)
+		}
+		for _, v := range values {
+			if len(v) >= minLiteralSecretLen && !strings.Contains(v, secretRedactedMarker) {
+				next = append(next, v)
+			}
+		}
+		if literalSecrets.CompareAndSwap(cur, &next) {
+			return
+		}
+	}
+}
+
+func redactLiterals(s string) string {
+	p := literalSecrets.Load()
+	if p == nil {
+		return s
+	}
+	for _, v := range *p {
+		if strings.Contains(s, v) {
+			s = strings.ReplaceAll(s, v, secretRedactedMarker)
+		}
+	}
+	return s
+}
 
 // secretPrefix names a well-known token prefix RedactSecrets recognises.
 // minTail is a sanity floor: a shorter post-prefix run is treated as a
@@ -109,6 +152,7 @@ func RedactSecrets(s string) string {
 	if s == "" {
 		return s
 	}
+	s = redactLiterals(s)
 	// KEY=value masking runs first so a sensitive value that is NOT a known
 	// token prefix (`MY_SECRET=hunter2`) is still scrubbed; gated on a cheap
 	// IndexByte('=') so the common no-`=` path pays nothing (#2165).

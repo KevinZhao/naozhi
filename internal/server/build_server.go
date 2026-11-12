@@ -171,7 +171,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		// Empty StateDir yields an in-memory prefs store (no persistence).
 		uiSettingsH: uisettings.New(uiprefs.New(opts.StateDir)),
 		// Empty ConfigPath keeps the create endpoint disabled (400).
-		accessProfilesH: accessprofile.New(router.Backends(), opts.Config.Path, opts.Config.AccessProfileSecretsDir),
+		accessProfilesH: accessprofile.New(router.Backends(), opts.Config.Path, opts.Config.AccessProfileSecretsDir, opts.Config.ModelSettingsPath),
 		cronH:           buildCronHandlers(opts, claudeDir),
 		transcribeH:     buildTranscribeHandler(opts),
 		inboxH:          buildInboxHandler(opts),

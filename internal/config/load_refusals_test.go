@@ -116,16 +116,17 @@ agents:
 	})
 }
 
-// Accepted tokens that are empty or under weakDashboardTokenLen warn; 16 and
+// Accepted tokens that are empty or under weakDashboardTokenLen warn; 32 and
 // up are silent. Load logs the same warning through validateServer.
 func TestWarnDashboardToken(t *testing.T) {
 	cases := []struct {
 		name, token, want string
 	}{
 		{"empty", "", "SECURITY: dashboard_token is empty"},
-		{"eight chars", "12345678", "dashboard_token is short"},
-		{"fifteen chars", "0123456789abcde", "dashboard_token is short"},
-		{"sixteen chars", "0123456789abcdef", ""},
+		{"eight chars", "12345678", "dashboard_token is shorter than 32"},
+		{"eleven chars", "0123456789a", "naozhi config token"},
+		{"thirty-one chars", "0123456789abcdef0123456789abcde", "dashboard_token is shorter than 32"},
+		{"thirty-two chars", "0123456789abcdef0123456789abcdef", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
