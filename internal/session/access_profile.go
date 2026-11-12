@@ -44,6 +44,8 @@ type AccessProfileInfo struct {
 	ChipColor      string `json:"chip_color,omitempty"`
 	DefaultModel   string `json:"default_model,omitempty"`
 	DefaultBackend string `json:"default_backend,omitempty"`
+	// AWSProfile is the ~/.aws/config profile name only, for the editor.
+	AWSProfile string `json:"aws_profile,omitempty"`
 	// SecretOK reports whether every *_FILE the profile references exists and
 	// is readable, so the picker can warn BEFORE a message is sent. Always
 	// true for profiles with no *_FILE reference.
@@ -72,6 +74,7 @@ func (b *BackendRegistry) AccessProfileInfos() []AccessProfileInfo {
 			ChipColor:      ap.ChipColor,
 			DefaultModel:   ap.DefaultModel,
 			DefaultBackend: ap.DefaultBackend,
+			AWSProfile:     ap.AWSProfile,
 			SecretOK:       accessProfileSecretsOK(ap.Env),
 		})
 	}
@@ -135,6 +138,40 @@ func (b *BackendRegistry) AddAccessProfile(id string, ap AccessProfile) error {
 			next[k] = v
 		}
 		next[id] = ap
+		if b.accessProfiles.CompareAndSwap(cur, &next) {
+			return nil
+		}
+	}
+}
+
+// ReplaceAccessProfile swaps the registered profile id for ap (copy-on-write,
+// as AddAccessProfile). A session already running keeps the profile it
+// spawned with; its next spawn takes the new one. Errors when id is not
+// registered. The caller persists config.yaml first.
+func (b *BackendRegistry) ReplaceAccessProfile(id string, ap AccessProfile) error {
+	return b.editAccessProfiles(id, func(next map[string]AccessProfile) { next[id] = ap })
+}
+
+// RemoveAccessProfile drops profile id from the registry. A session recorded
+// on it falls back to the global credentials at its next spawn, as for any
+// profile no longer configured (resolveSpawnParams). Errors when id is not
+// registered.
+func (b *BackendRegistry) RemoveAccessProfile(id string) error {
+	return b.editAccessProfiles(id, func(next map[string]AccessProfile) { delete(next, id) })
+}
+
+func (b *BackendRegistry) editAccessProfiles(id string, edit func(map[string]AccessProfile)) error {
+	for {
+		cur := b.accessProfiles.Load()
+		var old map[string]AccessProfile
+		if cur != nil {
+			old = *cur
+		}
+		if _, ok := old[id]; !ok {
+			return fmt.Errorf("access profile %q is not registered", id)
+		}
+		next := maps.Clone(old)
+		edit(next)
 		if b.accessProfiles.CompareAndSwap(cur, &next) {
 			return nil
 		}

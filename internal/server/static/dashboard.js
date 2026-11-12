@@ -46,6 +46,7 @@ import { interruptSession, resetTurnState, saveScrollPos, updateSendButton } fro
 import { closeFilePreview, startFileRefObserver } from './file_refs.js';
 import { workbenchButtonHtml } from './workbench_panes.js';
 import { startSessionNotes } from './session_notes.js';
+import { mountAuthSettings } from './settings_auth.js';
 import {
   applyFeatureGates,
   closeHistoryPopover,
@@ -1485,9 +1486,11 @@ function renderSettingsView() {
       '<section class="settings-sec"><h2>主题</h2>' +
         '<div class="settings-theme" id="settings-theme-group" role="group" aria-label="主题">' + themeBtns + '</div>' +
       '</section>' +
+      '<section class="settings-sec" id="settings-auth"></section>' +
       aboutHtml +
       sysLinkHtml +
     '</div>';
+  mountAuthSettings(document.getElementById('settings-auth'));
   const grp = document.getElementById('settings-theme-group');
   if (grp) grp.addEventListener('click', function (e) {
     const b = e.target.closest('.settings-theme-opt');

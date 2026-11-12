@@ -41,7 +41,10 @@ type storeEntry struct {
 	// global default), so a post-restart resume relocks the same auth chain —
 	// resuming a Bedrock conversation against a 1P endpoint would cross-charge and fail.
 	AccessProfile string `json:"access_profile,omitempty"`
-	LastActive    int64  `json:"last_active,omitempty"` // unix nano
+	// AccessProfilePinned is ManagedSession.AccessProfilePinned: the user
+	// picked AccessProfile, "" included.
+	AccessProfilePinned bool  `json:"access_profile_pinned,omitempty"`
+	LastActive          int64 `json:"last_active,omitempty"` // unix nano
 	// CreatedAt anchors the sidebar position (unix nano, written once). When 0,
 	// restore copies LastActive into createdAt so existing sessions keep their order.
 	CreatedAt int64  `json:"created_at,omitempty"`
@@ -117,24 +120,25 @@ func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 	}
 	s.historyMu.RUnlock()
 	return storeEntry{
-		Key:                s.key,
-		SessionID:          sid,
-		PrevSessionIDs:     prevIDs,
-		TotalCost:          cost,
-		CostSpent:          loadTotalCost(&s.costSpent),
-		LastCumulativeCost: loadTotalCost(&s.lastCumulativeCost),
-		Workspace:          s.Workspace(),
-		Backend:            s.Backend(),
-		AccessProfile:      s.AccessProfile(),
-		LastActive:         s.lastActive.Load(), // the turns', custody's failure ID after a restart
-		CreatedAt:          s.createdAt.Load(),
-		UserLabel:          s.UserLabel(),
-		LabelOrigin:        s.LabelOrigin(),
-		Model:              s.Model(),
-		TuningModel:        s.TuningModel(),
-		TuningEffort:       s.TuningEffort(),
-		CodeChanges:        s.CodeChanges(),
-		Workflows:          s.WorkflowBoard().refs(time.Now()),
+		Key:                 s.key,
+		SessionID:           sid,
+		PrevSessionIDs:      prevIDs,
+		TotalCost:           cost,
+		CostSpent:           loadTotalCost(&s.costSpent),
+		LastCumulativeCost:  loadTotalCost(&s.lastCumulativeCost),
+		Workspace:           s.Workspace(),
+		Backend:             s.Backend(),
+		AccessProfile:       s.AccessProfile(),
+		AccessProfilePinned: s.AccessProfilePinned(),
+		LastActive:          s.lastActive.Load(), // the turns', custody's failure ID after a restart
+		CreatedAt:           s.createdAt.Load(),
+		UserLabel:           s.UserLabel(),
+		LabelOrigin:         s.LabelOrigin(),
+		Model:               s.Model(),
+		TuningModel:         s.TuningModel(),
+		TuningEffort:        s.TuningEffort(),
+		CodeChanges:         s.CodeChanges(),
+		Workflows:           s.WorkflowBoard().refs(time.Now()),
 	}, true
 }
 

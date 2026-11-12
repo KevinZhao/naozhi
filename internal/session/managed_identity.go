@@ -56,6 +56,10 @@ type cliIdentityBox struct {
 	// backend+profile — jointly the auth identity a dead session must resume
 	// on — as one consistent snapshot (RFC project-access-profile §7).
 	accessProfile string
+	// accessProfilePinned marks accessProfile as the user's own pick
+	// (SwitchAccessProfile), so "" then means the global credentials rather
+	// than "let the key's project, agent or default profile decide".
+	accessProfilePinned bool
 }
 
 // loadCLIIdentity returns a copy of the current identity box in one atomic
@@ -115,6 +119,20 @@ func (s *ManagedSession) AccessProfile() string { return s.loadCLIIdentity().acc
 func (s *ManagedSession) SetAccessProfile(id string) {
 	s.updateCLIIdentity(func(cur cliIdentityBox) cliIdentityBox {
 		cur.accessProfile = id
+		return cur
+	})
+}
+
+// AccessProfilePinned reports whether the recorded profile is the user's pick,
+// which a spawn keeps even when it is "".
+func (s *ManagedSession) AccessProfilePinned() bool {
+	return s.loadCLIIdentity().accessProfilePinned
+}
+
+// SetAccessProfilePinned records whether the profile is the user's pick.
+func (s *ManagedSession) SetAccessProfilePinned(pinned bool) {
+	s.updateCLIIdentity(func(cur cliIdentityBox) cliIdentityBox {
+		cur.accessProfilePinned = pinned
 		return cur
 	})
 }

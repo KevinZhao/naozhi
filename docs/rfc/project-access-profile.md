@@ -362,7 +362,12 @@ type AgentOpts struct {
 - 正在回合中的会话拒绝切换（409），不切断回合；没有会话的 key 记成新会话的一次性选择。
 - 档的 env 与凭证来源在 CLI 进程启动时定下，所以有活进程就关掉它（`deathReason=access_profile_switch`），下一条消息按新档 `--resume` 同一个 Claude session ID，会话 settings 文件按新档重写（`awsCredentialExport` 换成新档的或回到全局的）；会话 key、历史、卡片不变，记录值进 `sessions.json`，重启后沿用。
 - 带 `aws_profile` 的档只能给 claude 后端的会话切（同 §3.1 的 fail-loud）；远程节点会话 501。
-- 切回「全局默认」（`""`）后，该 key 自己的档（项目绑定 / agent / `default_access_profile`）在下次启动时照常生效，与从没选过档的会话一样。
+- 切换后的档是用户钉下的（`sessions.json` 的 `access_profile_pinned`）：切回「全局默认」（`""`）就用全局凭证，项目绑定 / agent / `default_access_profile` 不再补上来（2026-11-12）。
+- 切换带模型时，头部的模型立刻显示新的那个，不等下一条消息。
+
+### 7.2 设置页编辑访问档与模型（2026-11-12）
+
+设置页「访问档与模型」：左边是 `config.yaml` 的 `access_profiles`（新增 / 编辑显示名、aws_profile、默认模型 / 删除，`PUT` / `DELETE /api/access-profiles`；env 与界面不认识的键原样保留），右边是 naozhi 自己的 Claude settings 文件的模型（`/api/settings/models`，只在 `naozhi_settings.enabled` 时可用）。每次保存先把旧文件备份成 `*.bak-<时间>`，原子写，沿用文件权限。公司 wrapper 会把它的 `availableModels` 盖上来，所以加公司清单外的 profile id 时自动写一条「另一个别名 → 该 id」的 `modelOverrides`；删模型只删它自己那条映射。删掉的档，记录在它上面的会话下次启动回到全局凭证。
 
 ---
 

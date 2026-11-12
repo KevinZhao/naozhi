@@ -205,7 +205,12 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 		// captures it; empty live keeps persisted. Compare before storing:
 		// storeAtomicString always swaps the pointer, and an unconditional
 		// store per 1Hz poll dirties the cache line for nothing (#534).
+		// A closed process keeps reporting the model it ran; a switch since
+		// (SwitchAccessProfile) recorded the next one in s.Model().
 		liveModel := proc.Model()
+		if !proc.Alive() && s.Model() != "" {
+			liveModel = ""
+		}
 		if liveModel != "" {
 			if mirrorModel {
 				if cached := s.Model(); cached != liveModel {

@@ -283,4 +283,7 @@ type ConfigOptions struct {
 	// The id is charset-validated so the path cannot escape this dir. Empty
 	// disables secret-file creation.
 	AccessProfileSecretsDir string
+	// ModelSettingsPath is naozhi's own Claude settings file, the model
+	// editor's target (/api/settings/models); "" disables the editor.
+	ModelSettingsPath string
 }

@@ -152,3 +152,21 @@ func TestRedactSecrets_Idempotent(t *testing.T) {
 		}
 	}
 }
+
+// A registered credential is redacted verbatim wherever it appears, as in a
+// session that printed the config file; short values are not registered.
+func TestRedactSecrets_Literal(t *testing.T) {
+	const tok = "Zq9-literal-dash-tok"
+	RegisterLiteralSecrets(tok, "short", "")
+	in := "server:\n  dashboard_token: \"" + tok + "\"\nurl ?t=" + tok
+	got := RedactSecrets(in)
+	if strings.Contains(got, tok) {
+		t.Fatalf("token survived: %q", got)
+	}
+	if strings.Count(got, "[REDACTED]") != 2 {
+		t.Errorf("got %q, want both occurrences redacted", got)
+	}
+	if RedactSecrets("a short word") != "a short word" {
+		t.Error("a value under the minimum length was registered")
+	}
+}

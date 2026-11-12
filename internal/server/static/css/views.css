@@ -1213,3 +1213,27 @@ button.wf-row-btn:focus-visible{outline:2px solid var(--nz-focus);outline-offset
 /* Phone: a lower cap, and a row keeps label, state and tokens on its first
    line with the last tool on a second, single ellipsised line. */
 @media(max-width:768px){.workflow-panel{max-height:32vh}.wf-sum{padding:var(--nz-space-2) var(--nz-space-3)}.wf-desc,.wf-model,.wf-cur{display:none}.wf-row-btn .wf-stat{min-width:0}.wf-body{padding:0 var(--nz-space-3) var(--nz-space-2)}.wf-rows{padding-left:var(--nz-space-2)}.wf-row-btn{flex-wrap:wrap;row-gap:0}.wf-detail{flex-basis:100%;padding-left:var(--nz-space-4)}}
+/* 访问档与模型 (settings_auth.js): two plain lists, an inline form per edit. */
+.sa-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--nz-space-4)}
+@media (max-width:640px){.sa-grid{grid-template-columns:1fr}}
+.sa-col h3{font-size:var(--nz-fs-sm2);color:var(--nz-text-strong);font-weight:600;margin-bottom:var(--nz-space-2)}
+.sa-file{font-weight:400;color:var(--nz-text-faint);font-size:var(--nz-fs-xs);margin-left:4px}
+.sa-row{display:flex;align-items:center;gap:var(--nz-space-2);padding:6px 0;border-bottom:1px solid var(--nz-border)}
+.sa-row.is-editing{display:block}
+.sa-main{flex:1;min-width:0}
+.sa-name{font-size:var(--nz-fs-sm2);color:var(--nz-text);word-break:break-all}
+.sa-id{color:var(--nz-text-faint);font-size:var(--nz-fs-xs)}
+.sa-sub{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);word-break:break-all;margin-top:2px}
+.sa-tag{font-size:var(--nz-fs-2xs);color:var(--nz-accent);border:1px solid var(--nz-accent);border-radius:var(--nz-radius-pill);padding:0 6px;margin-left:4px}
+.sa-btn{flex-shrink:0;background:var(--nz-bg-2);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:3px 10px;font-family:inherit;font-size:var(--nz-fs-xs);cursor:pointer}
+.sa-btn:disabled{opacity:.5;cursor:default}
+.sa-primary{background:var(--nz-accent);border-color:var(--nz-accent);color:#fff}
+.sa-danger{color:var(--nz-danger)}
+.sa-add{margin-top:var(--nz-space-2)}
+.sa-form{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+.sa-addmodel{margin-top:var(--nz-space-3)}
+.sa-field{display:flex;align-items:center;gap:var(--nz-space-2);font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.sa-field span{width:72px;flex-shrink:0}
+.sa-field input,.sa-field select{flex:1;min-width:0;background:var(--nz-bg-0);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:4px 6px;font-family:inherit;font-size:var(--nz-fs-xs)}
+.sa-actions{display:flex;gap:var(--nz-space-2);justify-content:flex-end}
+.sa-hint{font-size:var(--nz-fs-xs);color:var(--nz-text-faint);margin-top:var(--nz-space-2)}

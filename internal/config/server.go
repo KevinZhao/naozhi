@@ -82,7 +82,7 @@ func (c *Config) UpdateInterval() time.Duration { return c.cachedInterval }
 // tokens under weakDashboardTokenLen load with a warning.
 const (
 	minDashboardTokenLen  = 8
-	weakDashboardTokenLen = 16
+	weakDashboardTokenLen = 32
 )
 
 // validateServer refuses a dashboard token that is an unexpanded ${VAR} — it
@@ -115,7 +115,8 @@ func WarnDashboardToken(token string) {
 		slog.Warn("SECURITY: dashboard_token is empty — all dashboard API endpoints are accessible without authentication",
 			"hint", "set NAOZHI_DASHBOARD_TOKEN or dashboard_token in config")
 	case len(token) < weakDashboardTokenLen:
-		slog.Warn("dashboard_token is short — consider using 16+ random characters for stronger security")
+		slog.Warn("SECURITY: dashboard_token is shorter than 32 characters — replace it with a random one",
+			"length", len(token), "hint", "generate one with `naozhi config token`")
 	}
 }
 
