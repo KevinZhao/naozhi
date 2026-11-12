@@ -190,7 +190,7 @@ var weekdays = [...]string{"星期日", "星期一", "星期二", "星期三", "
 // for the Slack unread digest (wantSlack).
 const (
 	slackDigestRule = `
-- 这次还要给出 slack_unread：用 get_unreads 的结果汇总用户现在的全部 Slack 未读（不受游标限制），给早报看。total 写 get_unreads 的 totalUnread；conversations 每个未读会话一条，最多 30 条，私信与群私信在前，再是 @了用户的，其余按最新消息从新到旧；kind 是 dm（私信）、group（群私信）、channel（频道）或 thread（订阅的线程）；name 写频道名（不带 #）或对方的名字；mentions 写 @用户的次数；summary 不超过 50 字，说这个会话在聊什么、有没有和用户有关的，不要抄录正文、不要写链接。Slack 没看成就不要写 slack_unread 这个键。`
+- 这次还要给出 slack_unread：汇总用户现在的全部 Slack 未读（不受游标限制），给早报看。先调 get_unread_counts（只有计数与名字，不带正文，没有条数上限）：total 写其中未读会话的总数（频道、私信、群私信与线程合计）；conversations 每个未读会话一条，最多 30 条，私信与群私信在前，再是 @了用户的，其余按 get_unread_counts 给的顺序；kind 是 dm（私信）、group（群私信）、channel（频道）或 thread（订阅的线程）；name 写频道名（不带 #）或对方的名字；mentions 写 mentionCount。summary 不超过 50 字，说这个会话在聊什么、有没有和用户有关的，不要抄录正文、不要写链接；只给私信、群私信与 @了用户的会话写，每个会话用 get_messages 只读最近 3 条（limit 3），其余会话 summary 留空。这一项不要调 get_unreads 或 batch_get_messages：用户未读多时它们的结果超出上限，你读不到。get_unread_counts 没看成就不要写 slack_unread 这个键。`
 	slackDigestKey = `,"slack_unread":{"total":0,"conversations":[{"id":"…","name":"…","kind":"…","mentions":0,"summary":"…"}]}`
 )
 
@@ -230,7 +230,7 @@ func prompt(now time.Time, servers []string, c Cursors, wantSlack bool) string {
 - calendar 的 organizer 与 attendees 里用户本人写 "me"；attendees 写全部参会人，包括用户本人。日历工具没给参会人名单时，别人组织、邀请了用户的会议 attendees 写 ["me"]，用户自己组织的（响应状态是 Organizer）写 []。
 - calendar 的 prep：用户需要为这场会准备时写 true（要发言、带材料、做决定，或与客户、上级的会）；广播类会议、office hours、全员会、只是旁听的写 false。只有 prep 为 true 的会议才会有会前简报。
 - cursors 写这次看到的最新位置：email 与 slack 写最新一条的时间，asana 写这次查看的时间；没看成的来源原样写回旧游标。
-- 某个来源调用失败就跳过它，继续看其他来源。%s
+- 某个来源调用失败就跳过它，继续看其他来源。工具结果超出上限时会被存成文件，你没有读文件的工具：改用更小的查询（更少条数、更短时段、只取计数），不要去读那个文件。%s
 
 只输出一个 JSON 对象，不要任何其他文字，不要代码块：
 {"findings":[{"source":"…","kind":"…","id":"…","title":"…","from":"…","at":"…","due":"…","link":"…","why":"…"}],"cursors":{"email":"…","slack":"…","asana":"…"},"calendar":[{"id":"…","title":"…","start":"…","end":"…","organizer":"…","attendees":["…"],"online":true,"link":"…","prep":true}]%s}

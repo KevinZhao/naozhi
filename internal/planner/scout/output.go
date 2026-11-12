@@ -43,8 +43,8 @@ const (
 	maxAttendees   = 50
 	idRunes        = 512
 	fieldRunes     = 500
-	// maxSlackConversations caps a Slack unread digest; get_unreads itself
-	// returns at most 50 conversations.
+	// maxSlackConversations caps a Slack unread digest; the prompt asks
+	// for at most 30.
 	maxSlackConversations = 50
 )
 
@@ -117,7 +117,7 @@ var slackKinds = map[string]bool{SlackDM: true, SlackGroup: true, SlackChannel: 
 // cursor.
 type SlackUnread struct {
 	// Total is every unread conversation, more than Conversations when
-	// get_unreads left the lowest ranked out.
+	// the session listed only the highest ranked.
 	Total         int                 `json:"total"`
 	Conversations []SlackConversation `json:"conversations"`
 }
