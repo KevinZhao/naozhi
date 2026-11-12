@@ -29,3 +29,14 @@ func due(now, last time.Time) (time.Time, bool) {
 	}
 	return slot, true
 }
+
+// digestBefore is the local hour before which a scheduled run is asked for
+// the Slack unread digest: the morning's runs, the 08:15 one before the
+// brief, or the first after a wake that late. A manual run always is.
+const digestBefore = 10
+
+// wantSlack reports whether a run started at started by trig is asked for
+// the Slack unread digest the brief shows.
+func wantSlack(started time.Time, trig string) bool {
+	return trig == TriggerManual || started.Hour() < digestBefore
+}

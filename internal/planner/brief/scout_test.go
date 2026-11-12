@@ -1,9 +1,12 @@
 package brief
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/scout"
 )
 
@@ -203,5 +206,93 @@ func TestRenderAsanaOnce(t *testing.T) {
 				t.Errorf("counts = %+v, want %+v", got[0].Counts, tt.counts)
 			}
 		})
+	}
+}
+
+// The Slack unreads are today's newest digest, not an earlier run's nor
+// yesterday's; a run with none keeps the one before. Past maxSlack the rest
+// are counted, with the conversations get_unreads left out.
+func TestRenderSlack(t *testing.T) {
+	f := newFixture(t)
+	f.now = at(3, 8, 31)
+	conv := func(name, kind string, mentions int, summary string) scout.SlackConversation {
+		return scout.SlackConversation{ID: "C" + name, Name: name, Kind: kind, Mentions: mentions, Summary: summary}
+	}
+	digest := func(total int, convs ...scout.SlackConversation) *scout.SlackUnread {
+		return &scout.SlackUnread{Total: total, Conversations: convs}
+	}
+	many := make([]scout.SlackConversation, 0, 25)
+	for i := range 25 {
+		many = append(many, conv(fmt.Sprintf("ch%02d", i), scout.SlackChannel, 0, ""))
+	}
+	runs := []scout.Run{
+		{ID: "r0", State: scout.StateOK, Started: at(2, 9, 0), Ended: at(2, 9, 2), Slack: digest(1, conv("iso-old", scout.SlackChannel, 0, "昨天的"))},
+		{ID: "r1", State: scout.StateOK, Started: at(3, 8, 0), Ended: at(3, 8, 2), Slack: digest(1, conv("iso-early", scout.SlackChannel, 0, "08:00 的"))},
+		{ID: "r2", State: scout.StateOK, Started: at(3, 8, 15), Ended: at(3, 8, 17), Slack: digest(4,
+			conv("Pippin", scout.SlackDM, 1, "问 [trn2] 结果"),
+			conv("Ann, Bob", scout.SlackGroup, 0, ""),
+			conv("claude-code-interest", scout.SlackChannel, 2, "讨论新版本的 *hooks*"),
+		)},
+		{ID: "r3", State: scout.StateOK, Started: at(3, 8, 20), Ended: at(3, 8, 22)}, // no digest
+	}
+	b := f.withScout(f.briefer(nil, nil), nil, runs...)
+	b.Check()
+	want := "自 11/2 08:31 以来：Slack 未读 4\n" +
+		"\n### Slack 未读（4）\n" +
+		"- 私信 Pippin · @你 1 · 问 ［trn2］ 结果\n" +
+		"- 群私信 Ann, Bob\n" +
+		"- #claude-code-interest · @你 2 · 讨论新版本的 ＊hooks＊\n" +
+		"- …另有 1 个会话\n"
+	got := b.Recent(1)
+	if len(got) != 1 || got[0].Markdown != want {
+		t.Fatalf("markdown:\n%v\nwant:\n%s", got, want)
+	}
+	if c := got[0].Counts; c != (Counts{Slack: 4}) {
+		t.Errorf("counts = %+v", c)
+	}
+
+	f.now = at(4, 8, 31)
+	runs = append(runs, scout.Run{ID: "r4", State: scout.StateOK, Started: at(4, 8, 15), Ended: at(4, 8, 17), Slack: digest(30, many...)})
+	b = f.withScout(f.briefer(nil, nil), nil, runs...)
+	b.Check()
+	md := b.Recent(1)[0].Markdown
+	if !strings.Contains(md, "### Slack 未读（30）\n- #ch00\n") || !strings.Contains(md, "- #ch19\n- …另有 10 个会话\n") ||
+		strings.Contains(md, "ch20") || strings.Contains(md, "iso-") {
+		t.Errorf("markdown:\n%s", md)
+	}
+}
+
+// A due brief waits for a scout run going or due, up to scoutWait, then
+// briefs without it; with none pending it briefs at once.
+func TestBriefWaitsForScout(t *testing.T) {
+	f := newFixture(t)
+	f.now = at(3, 9, 8)
+	pending := true
+	f.inbox = []notify.Item{{ID: "n1", Kind: notify.KindNotice, State: notify.StateOpen, Title: "iso 通知", Created: at(3, 7, 0)}}
+	b := f.briefer(nil, nil)
+	b.cfg.ScoutPending = func() bool { return pending }
+	b.Check()
+	f.now = at(3, 9, 20)
+	b.Check()
+	if len(f.pushes) != 0 {
+		t.Fatalf("briefed while the scout ran: %v", f.pushes)
+	}
+	pending = false
+	b.Check()
+	if len(f.pushes) != 1 {
+		t.Fatalf("pushes = %d after the scout run, want 1", len(f.pushes))
+	}
+
+	f.now, pending = at(4, 9, 0), true
+	b.Check()
+	f.now = at(4, 9, 14)
+	b.Check()
+	if len(f.pushes) != 1 {
+		t.Fatalf("Wednesday briefed before scoutWait: %d", len(f.pushes))
+	}
+	f.now = at(4, 9, 16)
+	b.Check()
+	if len(f.pushes) != 2 {
+		t.Errorf("Wednesday: pushes = %d past scoutWait, want 2", len(f.pushes))
 	}
 }

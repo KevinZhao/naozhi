@@ -45,6 +45,9 @@ type Run struct {
 	New      int          `json:"new"`
 	Events   int          `json:"events"`
 	Woke     bool         `json:"woke"`
+	// Slack is the unread digest the run was asked for (wantSlack), nil
+	// when it was not or Slack could not be read.
+	Slack *SlackUnread `json:"slack_unread,omitempty"`
 }
 
 // RunFinding is a finding as a run recorded it.

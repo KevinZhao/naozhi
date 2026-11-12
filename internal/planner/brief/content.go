@@ -17,6 +17,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/custody"
 	"github.com/naozhi/naozhi/internal/planner/journal"
 	"github.com/naozhi/naozhi/internal/planner/note"
+	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/textutil"
@@ -26,6 +27,10 @@ import (
 const (
 	maxItems   = 10 // per section; the rest become a count
 	titleRunes = 80
+	// maxSlack is how many unread Slack conversations are listed: more than
+	// a section's, as the digest is what the user reads them by.
+	maxSlack       = 20
+	slackNameRunes = 40
 )
 
 // ref is a unit as a brief line shows it.
@@ -103,6 +108,10 @@ type input struct {
 	// StaleDeadlines counts the Asana tasks overdue past staleDays, folded
 	// into one line.
 	StaleDeadlines int
+	// Slack are the unread Slack conversations as today's newest scout run
+	// with a digest summed them up; SlackTotal counts all of them.
+	Slack      []scout.SlackConversation
+	SlackTotal int
 	// Midway is when the Midway credential expires, set only when that is
 	// before 09:00 today (or past).
 	Midway  time.Time
@@ -128,6 +137,7 @@ func (in input) counts() Counts {
 	c := Counts{Meetings: len(in.Meetings), Replies: len(in.Replies), Deadlines: len(in.Deadlines),
 		Done: len(in.Done), Failed: len(in.Failed), Waiting: len(in.Waiting), Errors: len(in.Errors),
 		Tasks: len(in.Tasks), Planner: len(in.Held), Routines: len(in.Routines), Notices: len(in.Notices),
+		Slack:   max(in.SlackTotal, len(in.Slack)),
 		Custody: in.Custody.Retries + in.Custody.Stopped + in.Custody.Answered}
 	if !in.Midway.IsZero() {
 		c.Midway = 1
@@ -550,6 +560,19 @@ func render(in input) string {
 		fmt.Fprintf(&b, "\n### %s\n- %d 条过期超过 %d 天\n", asana, n, staleDays)
 	}
 
+	if len(in.Slack) > 0 {
+		fmt.Fprintf(&b, "\n### Slack 未读（%d）\n", c.Slack)
+		for i, cv := range in.Slack {
+			if i == maxSlack {
+				break
+			}
+			b.WriteString("- " + slackLine(cv) + "\n")
+		}
+		if n := c.Slack - min(len(in.Slack), maxSlack); n > 0 {
+			fmt.Fprintf(&b, "- …另有 %d 个会话\n", n)
+		}
+	}
+
 	section(&b, "完成的", in.Done, func(d doneItem) string {
 		line := link(d.Name, d.Link) + wsPart(d.WS) + " · " + d.At.In(loc).Format(stamp)
 		var outs []string
@@ -631,6 +654,23 @@ func render(in input) string {
 	return b.String()
 }
 
+// slackKinds label a conversation the way Slack's sidebar does.
+var slackKinds = map[string]string{scout.SlackDM: "私信 ", scout.SlackGroup: "群私信 ", scout.SlackChannel: "#",
+	scout.SlackThread: "线程 "}
+
+// slackLine is one unread conversation: where, how often the user was
+// mentioned, what it is about.
+func slackLine(cv scout.SlackConversation) string {
+	line := slackKinds[cv.Kind] + plain(textutil.TruncateRunes(cv.Name, slackNameRunes))
+	if cv.Mentions > 0 {
+		line += fmt.Sprintf(" · @你 %d", cv.Mentions)
+	}
+	if cv.Summary != "" {
+		line += " · " + plain(textutil.TruncateRunes(cv.Summary, titleRunes))
+	}
+	return line
+}
+
 func section[T any](b *strings.Builder, title string, items []T, line func(T) string) {
 	if len(items) == 0 {
 		return
@@ -657,7 +697,7 @@ func summary(c Counts, push bool) string {
 	for _, p := range []struct {
 		label string
 		n     int
-	}{{"今天日程", c.Meetings}, {"等你回复", c.Replies}, {"Asana 到期", c.Deadlines},
+	}{{"今天日程", c.Meetings}, {"等你回复", c.Replies}, {"Asana 到期", c.Deadlines}, {"Slack 未读", c.Slack},
 		{"完成", c.Done}, {"失败", c.Failed}, {"例行任务有变化", c.Routines}, {"等你", waits},
 		{"通知", c.Notices}, {"未完成的任务", c.Tasks}, {"Planner 记下", c.Planner}} {
 		if p.n > 0 {

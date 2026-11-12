@@ -186,14 +186,27 @@ var serverSources = map[string]string{
 
 var weekdays = [...]string{"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"}
 
+// slackDigestRule and slackDigestKey are the prompt's part for a run asked
+// for the Slack unread digest (wantSlack).
+const (
+	slackDigestRule = `
+- 这次还要给出 slack_unread：用 get_unreads 的结果汇总用户现在的全部 Slack 未读（不受游标限制），给早报看。total 写 get_unreads 的 totalUnread；conversations 每个未读会话一条，最多 30 条，私信与群私信在前，再是 @了用户的，其余按最新消息从新到旧；kind 是 dm（私信）、group（群私信）、channel（频道）或 thread（订阅的线程）；name 写频道名（不带 #）或对方的名字；mentions 写 @用户的次数；summary 不超过 50 字，说这个会话在聊什么、有没有和用户有关的，不要抄录正文、不要写链接。Slack 没看成就不要写 slack_unread 这个键。`
+	slackDigestKey = `,"slack_unread":{"total":0,"conversations":[{"id":"…","name":"…","kind":"…","mentions":0,"summary":"…"}]}`
+)
+
 // prompt is the scout session's one message: fixed but for the time, the
-// sources it has and the cursors (§15.6 提示词固定).
-func prompt(now time.Time, servers []string, c Cursors) string {
+// sources it has, the cursors (§15.6 提示词固定) and whether the run is
+// asked for the Slack unread digest.
+func prompt(now time.Time, servers []string, c Cursors, wantSlack bool) string {
 	have := make([]string, 0, len(servers))
 	for _, s := range servers {
 		have = append(have, serverSources[s])
 	}
 	cur, _ := json.Marshal(c)
+	rule, key := "", ""
+	if wantSlack && slices.Contains(servers, ServerSlack) {
+		rule, key = slackDigestRule, slackDigestKey
+	}
 	return fmt.Sprintf(`你是 naozhi 的巡检会话：只读地看用户的邮件、日历、Slack 与 Asana，找出需要用户本人处理的事，交给 Planner。
 现在是 %s（%s）。这次能看的来源：%s。
 
@@ -217,10 +230,10 @@ func prompt(now time.Time, servers []string, c Cursors) string {
 - calendar 的 organizer 与 attendees 里用户本人写 "me"；attendees 写全部参会人，包括用户本人。日历工具没给参会人名单时，别人组织、邀请了用户的会议 attendees 写 ["me"]，用户自己组织的（响应状态是 Organizer）写 []。
 - calendar 的 prep：用户需要为这场会准备时写 true（要发言、带材料、做决定，或与客户、上级的会）；广播类会议、office hours、全员会、只是旁听的写 false。只有 prep 为 true 的会议才会有会前简报。
 - cursors 写这次看到的最新位置：email 与 slack 写最新一条的时间，asana 写这次查看的时间；没看成的来源原样写回旧游标。
-- 某个来源调用失败就跳过它，继续看其他来源。
+- 某个来源调用失败就跳过它，继续看其他来源。%s
 
 只输出一个 JSON 对象，不要任何其他文字，不要代码块：
-{"findings":[{"source":"…","kind":"…","id":"…","title":"…","from":"…","at":"…","due":"…","link":"…","why":"…"}],"cursors":{"email":"…","slack":"…","asana":"…"},"calendar":[{"id":"…","title":"…","start":"…","end":"…","organizer":"…","attendees":["…"],"online":true,"link":"…","prep":true}]}
+{"findings":[{"source":"…","kind":"…","id":"…","title":"…","from":"…","at":"…","due":"…","link":"…","why":"…"}],"cursors":{"email":"…","slack":"…","asana":"…"},"calendar":[{"id":"…","title":"…","start":"…","end":"…","organizer":"…","attendees":["…"],"online":true,"link":"…","prep":true}]%s}
 没有发现时 findings 写 []，看了日历但未来 24 小时没有日程时 calendar 写 []；日历没看成（调用失败）就不要写 calendar 这个键。`,
-		now.Format(time.RFC3339), weekdays[now.Weekday()], strings.Join(have, "、"), cur)
+		now.Format(time.RFC3339), weekdays[now.Weekday()], strings.Join(have, "、"), cur, rule, key)
 }

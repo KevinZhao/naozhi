@@ -38,8 +38,9 @@ type deadlineItem struct {
 }
 
 // gatherScout adds what the scout knows: today's meetings not over, from
-// the calendar cache; and, from every run that went through in the window,
-// the people waiting on a reply and the Asana tasks due today or overdue.
+// the calendar cache; from every run that went through in the window, the
+// people waiting on a reply and the Asana tasks due today or overdue; and
+// the Slack unreads of today's newest run that summed them up.
 // A run reports only what came after its cursor, so the replies waiting
 // overnight are in the morning's first run, not the newest; and nothing
 // tells a reply sent: these are the ones reported since the last brief.
@@ -71,9 +72,14 @@ func (b *Briefer) gatherScout(in *input) {
 	// reported it.
 	index := map[string]int{}
 	var findings []scout.Finding
+	var slackAt time.Time
 	for _, r := range b.cfg.Patrol(in.Since) {
 		if r.Ended.After(now) {
 			continue
+		}
+		// The Slack unreads are a snapshot: the newest digest of today.
+		if r.Slack != nil && sameDay(r.Ended, now) && !r.Ended.Before(slackAt) {
+			in.Slack, in.SlackTotal, slackAt = r.Slack.Conversations, r.Slack.Total, r.Ended
 		}
 		for _, f := range r.Findings {
 			k := f.Source + "\x00" + f.ID + "\x00" + f.Kind
@@ -113,6 +119,12 @@ func (b *Briefer) gatherScout(in *input) {
 	// The longest wait first; the most overdue first; the undated last.
 	slices.SortStableFunc(in.Replies, func(x, y replyItem) int { return earliest(x.At, y.At) })
 	slices.SortStableFunc(in.Deadlines, func(x, y deadlineItem) int { return earliest(x.Due, y.Due) })
+}
+
+func sameDay(a, b time.Time) bool {
+	y1, m1, d1 := a.In(b.Location()).Date()
+	y2, m2, d2 := b.Date()
+	return y1 == y2 && m1 == m2 && d1 == d2
 }
 
 // earliest orders times earliest first, the zero time last.
