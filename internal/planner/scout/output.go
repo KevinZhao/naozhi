@@ -43,6 +43,9 @@ const (
 	maxAttendees   = 50
 	idRunes        = 512
 	fieldRunes     = 500
+	// maxSlackConversations caps a Slack unread digest; the prompt asks
+	// for at most 30.
+	maxSlackConversations = 50
 )
 
 // Finding is one thing a scout run found that may need the user.
@@ -99,12 +102,47 @@ type Event struct {
 	Prep bool `json:"prep,omitempty"`
 }
 
+// Kinds of Slack conversation in a digest.
+const (
+	SlackDM      = "dm"
+	SlackGroup   = "group"
+	SlackChannel = "channel"
+	SlackThread  = "thread"
+)
+
+var slackKinds = map[string]bool{SlackDM: true, SlackGroup: true, SlackChannel: true, SlackThread: true}
+
+// SlackUnread is the user's Slack unreads as one run saw them, for the
+// morning brief: a snapshot of what is unread now, not what came after the
+// cursor.
+type SlackUnread struct {
+	// Total is every unread conversation, more than Conversations when
+	// the session listed only the highest ranked.
+	Total         int                 `json:"total"`
+	Conversations []SlackConversation `json:"conversations"`
+}
+
+// SlackConversation is one unread conversation in a digest: direct and
+// group messages first, then those mentioning the user, then the rest by
+// their newest message, as the session ranked them.
+type SlackConversation struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+	Mentions int    `json:"mentions"`
+	// Summary is what it is about, in the session's words, not quoted.
+	Summary string `json:"summary"`
+}
+
 // Output is a scout session's whole reply.
 type Output struct {
 	Findings []Finding `json:"findings"`
 	Cursors  Cursors   `json:"cursors"`
 	// Calendar is nil when the session did not read it (the key left out).
 	Calendar *[]Event `json:"calendar"`
+	// Slack is nil when the run was not asked for the digest or the session
+	// could not read Slack (the key left out).
+	Slack *SlackUnread `json:"slack_unread,omitempty"`
 }
 
 // events is the calendar read, none when it was not.
@@ -197,7 +235,34 @@ func parseOutput(reply string) (Output, error) {
 	for _, c := range []*string{&out.Cursors.Email, &out.Cursors.Slack, &out.Cursors.Asana} {
 		*c = textutil.TruncateRunes(strings.TrimSpace(*c), idRunes)
 	}
+	if out.Slack != nil {
+		out.Slack = cleanSlack(*out.Slack)
+	}
 	return out, nil
+}
+
+// cleanSlack trims a digest. Unlike a finding it is only shown, never acted
+// on, so a malformed entry is dropped (no name) or mended (an unknown kind
+// reads as a channel) rather than failing the run and its findings.
+func cleanSlack(u SlackUnread) *SlackUnread {
+	convs := make([]SlackConversation, 0, min(len(u.Conversations), maxSlackConversations))
+	for _, c := range u.Conversations {
+		if len(convs) == maxSlackConversations {
+			break
+		}
+		c.Name = textutil.TruncateRunes(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(c.Name), "#")), fieldRunes)
+		if c.Name == "" {
+			continue
+		}
+		c.ID = textutil.TruncateRunes(strings.TrimSpace(c.ID), idRunes)
+		c.Summary = textutil.TruncateRunes(strings.TrimSpace(c.Summary), fieldRunes)
+		if c.Kind = strings.TrimSpace(c.Kind); !slackKinds[c.Kind] {
+			c.Kind = SlackChannel
+		}
+		c.Mentions = max(c.Mentions, 0)
+		convs = append(convs, c)
+	}
+	return &SlackUnread{Total: max(u.Total, len(convs)), Conversations: convs}
 }
 
 // conflictID is a conflict's dedup ID. A session copies the long Outlook

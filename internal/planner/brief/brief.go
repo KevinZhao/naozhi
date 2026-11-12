@@ -48,6 +48,9 @@ const (
 	// journal span New reads them back from.
 	keepRecent   = 14
 	seedLookback = 21 * 24 * time.Hour
+	// scoutWait is how long a due brief waits for a scout run (the run's
+	// own timeout is 10 minutes).
+	scoutWait = 15 * time.Minute
 	// midwayBy is the local hour a Midway credential expiring before it is
 	// in the brief: the morning's work would hit it.
 	midwayBy = 9
@@ -74,11 +77,13 @@ type Counts struct {
 	Notices  int `json:"notices,omitempty"`
 	Custody  int `json:"custody,omitempty"`
 	Midway   int `json:"midway,omitempty"`
+	// Slack is the unread Slack conversations the scout summed up.
+	Slack int `json:"slack,omitempty"`
 }
 
 func (c Counts) total() int {
 	return c.Meetings + c.Replies + c.Deadlines + c.Done + c.Failed + c.Waiting + c.Errors + c.Tasks + c.Planner +
-		c.Routines + c.Notices + c.Custody + c.Midway
+		c.Routines + c.Notices + c.Custody + c.Midway + c.Slack
 }
 
 // Routine is a cron job's latest successful run in the window and whether
@@ -161,6 +166,10 @@ type Config struct {
 	// Routines returns the cron jobs' latest successful runs in the window;
 	// the changed ones are listed, the others counted.
 	Routines func(since, until time.Time) []Routine
+	// ScoutPending reports a scout run going or due and not started
+	// (scout.Scout.Pending): the brief waits for it, up to scoutWait, so a
+	// machine that wakes late does not brief before the morning's run.
+	ScoutPending func() bool
 	// Midway returns when the local Midway credential expires, zero when
 	// unknown; one expiring before 09:00 today is in the brief.
 	Midway func() time.Time
@@ -185,6 +194,8 @@ type Briefer struct {
 	mu     sync.Mutex
 	last   Brief   // the latest judgment, sent or not
 	recent []Brief // sent briefs, oldest first, at most keepRecent
+	// waiting is when a due brief began waiting for a scout run.
+	waiting time.Time
 }
 
 // New returns a Briefer that picks up after the briefs the journal holds.
@@ -304,6 +315,22 @@ func (b *Briefer) Check() {
 	if !due(now, last.Day) {
 		return
 	}
+	if b.cfg.ScoutPending != nil && b.cfg.ScoutPending() {
+		b.mu.Lock()
+		if b.waiting.IsZero() {
+			b.waiting = now
+			slog.Info("brief: due; waiting for the scout run")
+		}
+		wait := now.Sub(b.waiting) < scoutWait
+		b.mu.Unlock()
+		if wait {
+			return
+		}
+		slog.Warn("brief: scout run still going; briefing without it", "waited", scoutWait)
+	}
+	b.mu.Lock()
+	b.waiting = time.Time{}
+	b.mu.Unlock()
 	in := b.gather(windowStart(now, last.At), now)
 	br := Brief{Day: now.Format(time.DateOnly), At: now, Since: in.Since, Counts: in.counts()}
 	if br.Counts.total() > 0 {
@@ -322,7 +349,7 @@ func (b *Briefer) Check() {
 		"deadlines", br.Counts.Deadlines, "done", br.Counts.Done, "failed", br.Counts.Failed,
 		"waiting", br.Counts.Waiting, "errors", br.Counts.Errors, "tasks", br.Counts.Tasks,
 		"planner", br.Counts.Planner, "routines", br.Counts.Routines, "notices", br.Counts.Notices,
-		"custody", br.Counts.Custody, "midway", br.Counts.Midway)
+		"custody", br.Counts.Custody, "midway", br.Counts.Midway, "slack", br.Counts.Slack)
 	if b.cfg.Carried != nil && len(in.Notices) > 0 {
 		ids := make([]string, 0, len(in.Notices))
 		for _, it := range in.Notices {

@@ -583,14 +583,15 @@ func main() {
 			open, _ := notifier.List(0)
 			return open
 		},
-		Tasks:      tasks.List,
-		Push:       notifier.Announce,
-		Name:       unitNames,
-		Workspaces: plannerState.Workspaces,
-		Calendar:   scouter.Calendar,
-		Patrol:     scouter.Since,
-		Routines:   wireup.RoutineResults(scheduler),
-		Carried:    notifier.Carried,
+		Tasks:        tasks.List,
+		Push:         notifier.Announce,
+		Name:         unitNames,
+		Workspaces:   plannerState.Workspaces,
+		Calendar:     scouter.Calendar,
+		Patrol:       scouter.Since,
+		ScoutPending: scouter.Pending,
+		Routines:     wireup.RoutineResults(scheduler),
+		Carried:      notifier.Carried,
 		// With several nodes the scout's node sends the brief, each node's
 		// Planner covering its own sessions (docs/rfc/remote-planner.md §2.1).
 		Elsewhere: func() bool { return multiNode(cfg) && !scouter.Enabled() },

@@ -171,6 +171,26 @@ func (s *Scout) Status() Status {
 	return st
 }
 
+// Pending reports that a run is going or due and not started yet: the
+// morning brief waits for it, so what it found is in the brief. False when
+// the scout is off or Run is not going.
+func (s *Scout) Pending() bool {
+	if !s.Enabled() {
+		return false
+	}
+	now := s.cfg.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ctx == nil || s.ctx.Err() != nil {
+		return false
+	}
+	if s.running {
+		return true
+	}
+	_, ok := due(now, s.started)
+	return ok
+}
+
 // Calendar is the next day's calendar as of the last run that read it.
 func (s *Scout) Calendar() []Event {
 	if s == nil || s.st.dir == "" {
@@ -330,7 +350,8 @@ func (s *Scout) run(ctx context.Context, id, trig string, started time.Time) (r 
 	cursors := s.st.cursors()
 	sctx, cancel := context.WithTimeout(ctx, runTimeout)
 	defer cancel()
-	reply, tools, err := s.cfg.Session(sctx, sessionkey.ScoutKeyPrefix+id, opts, prompt(started, servers, cursors))
+	digest := wantSlack(started, trig) && slices.Contains(servers, ServerSlack)
+	reply, tools, err := s.cfg.Session(sctx, sessionkey.ScoutKeyPrefix+id, opts, prompt(started, servers, cursors, digest))
 	r.Tools = tools
 	if err != nil {
 		return fail(fmt.Errorf("scout session: %w", err))
@@ -349,6 +370,9 @@ func (s *Scout) run(ctx context.Context, id, trig string, started time.Time) (r 
 	}
 	if !slices.Contains(servers, ServerOutlook) {
 		out.Calendar = nil // not read, whatever the reply says
+	}
+	if digest {
+		r.Slack = out.Slack
 	}
 	// Overlaps are arithmetic on the calendar the session returned, not a
 	// judgment: the gateway works them out and drops any the model listed,

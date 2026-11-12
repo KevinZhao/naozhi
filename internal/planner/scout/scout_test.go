@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -566,5 +567,71 @@ func TestRunLaterBatchKept(t *testing.T) {
 				t.Errorf("next run's wake = %q; want batch 2 again: %v", next, tc.again)
 			}
 		})
+	}
+}
+
+// A Slack digest is only shown, so a bad entry is dropped or mended rather
+// than failing the run: no name drops it, an unknown kind reads as a
+// channel, a leading '#' goes; total is at least what is listed.
+func TestParseOutputSlack(t *testing.T) {
+	reply := `{"findings":[],"cursors":{"email":"","slack":"","asana":""},"slack_unread":{"total":1,"conversations":[` +
+		`{"id":"D1","name":"Pippin","kind":"dm","mentions":1,"summary":"问进度"},` +
+		`{"id":"C1","name":" #general ","kind":"public","mentions":-2,"summary":""},` +
+		`{"id":"C2","name":"","kind":"channel","mentions":0,"summary":"没名字"}]}}`
+	out, err := parseOutput(reply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := SlackUnread{Total: 2, Conversations: []SlackConversation{
+		{ID: "D1", Name: "Pippin", Kind: SlackDM, Mentions: 1, Summary: "问进度"},
+		{ID: "C1", Name: "general", Kind: SlackChannel},
+	}}
+	if out.Slack == nil || !reflect.DeepEqual(*out.Slack, want) {
+		t.Errorf("slack = %+v, want %+v", out.Slack, want)
+	}
+	if _, err := parseOutput(strings.Replace(reply, `"summary":"问进度"`, `"summary":"问进度","text":"x"`, 1)); err == nil {
+		t.Error("an unknown field in a conversation parsed")
+	}
+}
+
+// The morning's scheduled runs and manual ones are asked for the Slack
+// digest and keep it; a later scheduled run is not asked, and drops one it
+// gives anyway.
+func TestRunSlackDigest(t *testing.T) {
+	root := t.TempDir()
+	mcp := filepath.Join(root, "mcp.json")
+	if err := os.WriteFile(mcp, []byte(`{"mcpServers":{"slack-mcp":{"command":"s"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reply := `{"findings":[],"cursors":{"email":"","slack":"s1","asana":""},` +
+		`"slack_unread":{"total":1,"conversations":[{"id":"C1","name":"iso","kind":"channel","mentions":0,"summary":"闲聊"}]}}`
+	var prompts []string
+	now := time.Date(2026, 11, 3, 8, 15, 0, 0, time.Local)
+	s := New(Config{
+		Layout:    datadir.FromRoot(root),
+		MCPConfig: mcp,
+		Session: func(_ context.Context, _ string, _ sessionview.AgentOpts, text string) (string, []string, error) {
+			prompts = append(prompts, text)
+			return reply, []string{"mcp__slack-mcp__get_unreads"}, nil
+		},
+		Now: func() time.Time { return now },
+	})
+	for i, c := range []struct {
+		at   time.Time
+		trig string
+		want bool
+	}{
+		{now, TriggerSchedule, true},
+		{now.Add(6 * time.Hour), TriggerSchedule, false},
+		{now.Add(6 * time.Hour), TriggerManual, true},
+	} {
+		r, _ := s.run(context.Background(), runID(c.at), c.trig, c.at)
+		asked := strings.Contains(prompts[i], "slack_unread")
+		if r.State != StateOK || asked != c.want || (r.Slack != nil) != c.want {
+			t.Errorf("%s run at %s: state %s, asked %v, slack %+v; want %v", c.trig, c.at.Format("15:04"), r.State, asked, r.Slack, c.want)
+		}
+	}
+	if runs := s.st.runsSince(now.Add(-time.Hour)); len(runs) != 3 || runs[0].Slack == nil || runs[0].Slack.Conversations[0].Name != "iso" {
+		t.Errorf("run records = %+v", runs)
 	}
 }
