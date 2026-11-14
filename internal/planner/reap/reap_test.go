@@ -78,9 +78,9 @@ type fixture struct {
 	live   bool
 	nearby bool
 	inUse  bool
-	// inUseBy is the session working in every directory ("" none): InUse
-	// is true for any key but it.
-	inUseBy  string
+	// respawn has a session back under the key as soon as it is archived
+	// (the owner loop spawning one for a message that raced the put away).
+	respawn  bool
 	archived int
 	// reads counts the Session calls.
 	reads    int
@@ -111,7 +111,7 @@ func newFixture(t *testing.T, dirs ...string) *fixture {
 				return Archived{}, false
 			}
 			f.archived++
-			f.live = false
+			f.live = f.respawn
 			return Archived{SessionID: "sid-1", Workspace: "/x/main", LastPrompt: "修一下", Chain: []string{"sid-0"}}, true
 		},
 		Restore: func(k, sid, ws, lp string) error {
@@ -120,7 +120,7 @@ func newFixture(t *testing.T, dirs ...string) *fixture {
 			return nil
 		},
 		Dirs:    func(string, []string) []string { return f.dirs },
-		InUse:   func(_, k string) bool { return f.inUse || f.inUseBy != "" && f.inUseBy != k },
+		InUse:   func(string, string) bool { return f.inUse },
 		Git:     f.git,
 		Inbox:   f.inbox,
 		Journal: f.j,
@@ -537,9 +537,9 @@ func TestHeldWhileWaitingOnUser(t *testing.T) {
 // A session back under a put-away key without a reopen (a fresh one the
 // owner loop spawned, one sessions.json kept across a crash, a reopen whose
 // record was not saved) clears the record: its card no longer says put away
-// and, marked done again, it is put away again. The worktrees left in place
-// stay looked at while it lives, the live session counted as working in
-// them, and go into the new record.
+// and, done and idle again, it is put away again. The worktrees left in
+// place are not removed while it lives, its user not told of them again,
+// and go into the new record, which removes the one whose PR merged.
 func TestSessionBackWithoutReopen(t *testing.T) {
 	d := mkdirs(t, "open", "dirty", "next")
 	open, dirty, next := d[0], d[1], d[2]
@@ -558,7 +558,7 @@ func TestSessionBackWithoutReopen(t *testing.T) {
 
 	// Back in the router, at work in another worktree.
 	f.now = f.now.Add(time.Hour)
-	f.live, f.dirs, f.inUseBy = true, []string{next}, key
+	f.live, f.dirs = true, []string{next}
 	f.sess = Session{LastActive: f.now}
 	f.r.Tick(context.Background())
 	if f.reap() != nil {
@@ -568,44 +568,106 @@ func TestSessionBackWithoutReopen(t *testing.T) {
 	if last := recs[len(recs)-1]; last.Event != "reset" || last.Key != key {
 		t.Fatalf("journal = %+v, want a reset last", recs)
 	}
+	if m, _ := f.sc.Get(key); len(m.LeftWorktrees) != 2 {
+		t.Fatalf("worktrees left in place not kept: %+v", m.LeftWorktrees)
+	}
 	if why, _ := f.r.Wait(key); why != "空闲不到 2 小时" || f.archived != 1 {
 		t.Fatalf("back and active: archived %d, Wait = %q", f.archived, why)
 	}
 
-	// Its PR merged: the live session is in it, so it stays; once it is not,
-	// it goes, and the user is told nothing of a session not put away.
+	// Its PR merged: the live session may have cd'd into it, which InUse
+	// does not see, so it stays while the session is back.
 	f.git.mu.Lock()
 	f.git.pr[open] = PR{State: "MERGED", Head: "h"}
 	f.git.mu.Unlock()
-	f.now = f.now.Add(recheckAfter)
-	f.sess.LastActive = f.now
-	f.r.Tick(context.Background())
+	for range 2 {
+		f.now = f.now.Add(recheckAfter)
+		f.sess.LastActive = f.now
+		f.r.Tick(context.Background())
+	}
 	if len(f.git.removed) != 0 {
 		t.Fatalf("removed under the live session: %v", f.git.removed)
 	}
-	f.inUseBy = ""
-	f.now = f.now.Add(recheckAfter)
-	f.sess.LastActive = f.now
-	f.r.Tick(context.Background())
-	if len(f.git.removed) != 1 || f.git.removed[0] != open {
-		t.Fatalf("carried worktree whose PR merged: removed %v", f.git.removed)
-	}
-	if len(f.inbox.items) != told {
-		t.Fatalf("told %d more times while the session is back", len(f.inbox.items)-told)
-	}
 
-	// Done again and idle: put away again, the worktree still kept in the
-	// new record beside the one it worked in.
-	f.markDone(t)
+	// Idle again, its done mark standing: put away again, the worktrees
+	// left in place in the new record beside the one it worked in, the one
+	// whose PR merged removed.
 	f.now = f.now.Add(IdleFor)
 	f.r.Tick(context.Background())
 	if f.archived != 2 || f.reap() == nil {
 		t.Fatalf("not put away again: archived %d", f.archived)
 	}
-	if wtState(f, dirty).State != WTKept || wtState(f, next).State != WTPending || wtState(f, open).Dir != "" {
+	if wtState(f, dirty).State != WTKept || wtState(f, next).State != WTPending || wtState(f, open).State != WTRemoved {
 		t.Fatalf("second record's worktrees = %+v", f.reap().Worktrees)
+	}
+	if m, _ := f.sc.Get(key); len(m.LeftWorktrees) != 0 {
+		t.Fatalf("LeftWorktrees beside a record: %+v", m.LeftWorktrees)
 	}
 	if len(f.inbox.items) != told {
 		t.Fatalf("told again of a worktree kept for the reason it was told: %+v", f.inbox.items[told:])
+	}
+}
+
+// A session back after a crash, its worktree removed on putting away: the
+// reset checks the worktree out again as reopening would, and the record of
+// the next put away keeps it, so reopening that checks it out again too.
+func TestSessionBackAfterWorktreeRemoved(t *testing.T) {
+	w := mkdirs(t, "wt")[0]
+	f := newFixture(t, w)
+	f.git.st[w] = Status{Head: "h", Pushed: true}
+	f.git.pr[w] = PR{State: "MERGED", Head: "h"}
+	f.markDone(t)
+	f.r.Tick(context.Background())
+	if wtState(f, w).State != WTRemoved {
+		t.Fatalf("first put away: %+v", f.reap())
+	}
+
+	// sessions.json from before the put away: back, idle since then.
+	f.now = f.now.Add(time.Minute)
+	f.live = true
+	f.r.Tick(context.Background())
+	if len(f.git.added) != 1 || f.git.added[0] != w {
+		t.Fatalf("removed worktree not checked out again on reset: added %v", f.git.added)
+	}
+	if recs := f.records(t); len(recs) != 3 || recs[1].Event != "reset" || recs[2].Event != "reaped" {
+		t.Fatalf("journal = %+v, want reaped, reset, reaped", recs)
+	}
+	if f.archived != 2 || wtState(f, w).State != WTRemoved {
+		t.Fatalf("put away again: archived %d, Reap %+v", f.archived, f.reap())
+	}
+
+	f.r.OnState(key, task.Doing)
+	if len(f.git.added) != 2 {
+		t.Fatalf("worktree not checked out again on reopening: added %v", f.git.added)
+	}
+	if _, err := os.Stat(w); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A session the owner loop spawned as the put away archived the old one:
+// nothing is removed from under it, and the put away ends at once.
+func TestSessionSpawnedAsPutAway(t *testing.T) {
+	w := mkdirs(t, "wt")[0]
+	f := newFixture(t, w)
+	f.git.st[w] = Status{Head: "h", Pushed: true}
+	f.git.pr[w] = PR{State: "MERGED", Head: "h"}
+	f.markDone(t)
+	f.respawn = true
+	f.r.Tick(context.Background())
+	if f.archived != 1 || len(f.git.removed) != 0 {
+		t.Fatalf("archived %d, removed %v", f.archived, f.git.removed)
+	}
+	if recs := f.records(t); len(recs) != 2 || recs[0].Event != "reaped" || recs[1].Event != "reset" {
+		t.Fatalf("journal = %+v, want reaped, reset", recs)
+	}
+	if m, _ := f.sc.Get(key); m.Reap != nil || len(m.LeftWorktrees) != 1 {
+		t.Fatalf("Reap %+v, LeftWorktrees %+v", m.Reap, m.LeftWorktrees)
+	}
+
+	f.respawn = false
+	f.r.Tick(context.Background())
+	if f.archived != 2 || len(f.git.removed) != 1 || wtState(f, w).State != WTRemoved {
+		t.Fatalf("not put away again: archived %d, removed %v", f.archived, f.git.removed)
 	}
 }

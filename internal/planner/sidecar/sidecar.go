@@ -105,9 +105,10 @@ type Meta struct {
 	// or once a session is back under the key without a reopen.
 	Reap *Reap `json:"reap,omitempty"`
 	// LeftWorktrees are the worktrees a put away left in place (waiting on
-	// their PR, or with work not committed or pushed) when a session came
-	// back under the key without a reopen: planner/reap keeps looking at
-	// them and carries them into the next put away. Empty while Reap is set.
+	// their PR, or with work not committed or pushed) or had removed and
+	// checked out again, when a session came back under the key without a
+	// reopen: planner/reap carries them into the next put away, which
+	// removes them once they may go. Empty while Reap is set.
 	LeftWorktrees []Worktree `json:"left_worktrees,omitempty"`
 	// Report is the session's latest report (§15.12 ③), its conclusion
 	// for the task card; the full text is in its digest (planner/digest).

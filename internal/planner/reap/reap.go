@@ -21,13 +21,17 @@
 // A session back under a put-away key other than by Reopen (the owner loop
 // spawning one for a message that raced the put away, sessions.json from
 // before it kept across a crash, a reopen whose record was not saved) ends
-// the put away: the record is cleared, so the task is no longer shown put
-// away and, marked done again, is put away again. Reopen clears the record
-// itself under the lock the put away holds, so a session found under a key
-// whose record is set is never one Reopen put back. The worktrees the record
-// left in place are kept (Meta.LeftWorktrees): looked at as before, the
-// live session counted as working in them, and carried into the next put
-// away, so one waiting on its PR is still removed once it is merged.
+// the put away as a reopen would, journaled as event=reset: the record is
+// cleared and the worktrees removed are checked out again, so the task is no
+// longer shown put away and the session finds its directories. The done mark
+// is left as it was, so the session is put away again once the checks pass
+// again (idle IdleFor). Reopen clears the record itself under the lock the
+// put away holds, so a session found under a key whose record is set is
+// never one Reopen put back. The worktrees the record left in place, and
+// those checked out again, are kept (Meta.LeftWorktrees, not on the task
+// card): none is removed while the session is back, the user is not told of
+// them again, and they go into the next put away, so one waiting on its PR
+// is still removed once it is merged.
 package reap
 
 import (
@@ -155,8 +159,7 @@ type Config struct {
 	Restore func(key, sessionID, workspace, lastPrompt string) error
 	// Dirs are the directories sessionIDs' transcripts ran in.
 	Dirs func(workspace string, sessionIDs []string) []string
-	// InUse reports whether a session other than key works in dir; key ""
-	// counts every session.
+	// InUse reports whether a session other than key works in dir.
 	InUse func(dir, key string) bool
 	Git   Git
 	Inbox Inbox
@@ -377,6 +380,14 @@ func (r *Reaper) tryPutAway(ctx context.Context, key string) {
 		slog.Warn("reap: put-away session not recorded; reopening it will not resume it", "key", key, "err", err)
 	}
 	slog.Info("reap: done task's session put away", "key", key, "by", m.Mark.By, "worktrees", len(rp.Worktrees))
+	if r.inRouter(key) {
+		// A message queued for key had the owner loop spawn a session as it
+		// was archived: InUse leaves key out, so removing now could take the
+		// new session's directory from under it.
+		r.journal(rec)
+		r.resetLocked(ctx, key)
+		return
+	}
 	r.checkLocked(ctx, key, true, &rec)
 	r.journal(rec)
 }
@@ -435,7 +446,7 @@ func unfinished(wt sidecar.Worktree) bool { return wt.State == WTPending || wt.S
 func (r *Reaper) recheck(ctx context.Context, key string, force bool) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.resetLocked(key)
+	r.resetLocked(ctx, key)
 	rec := record{Event: "worktree", Key: key}
 	r.checkLocked(ctx, key, force, &rec)
 	if len(rec.Steps) > 0 || len(rec.Skipped) > 0 {
@@ -455,19 +466,31 @@ func (r *Reaper) inRouter(key string) bool {
 	return ok
 }
 
-// resetLocked clears key's put away when a session is back under key:
-// under r.mu that is never one Reopen put back (it clears the record
-// before letting go), so the record no longer says what the key holds. The
-// worktrees it left in place go to LeftWorktrees.
-func (r *Reaper) resetLocked(key string) {
+// resetLocked ends key's put away when a session is back under key, as
+// Reopen would but for the session already there: under r.mu that is never
+// one Reopen put back (it clears the record before letting go), so the
+// record no longer says what the key holds. The worktrees removed are
+// checked out again, the session may run in them; they and the ones still
+// left in place go to LeftWorktrees.
+func (r *Reaper) resetLocked(ctx context.Context, key string) {
 	m, ok := r.cfg.Sessions.Get(key)
 	if !ok || m.Reap == nil || !r.inRouter(key) {
 		return
 	}
-	left := slices.DeleteFunc(slices.Clone(m.Reap.Worktrees), func(wt sidecar.Worktree) bool { return !unfinished(wt) })
 	rec := record{Event: "reset", Key: key, Steps: []string{"会话又回到会话列表（不是经重新打开），收起记录清掉"}}
-	for _, wt := range left {
+	var left []sidecar.Worktree
+	for _, wt := range m.Reap.Worktrees {
+		delete(r.checked, wt.Dir)
+		if wt.State == WTRemoved {
+			if !r.checkOut(ctx, wt, &rec) {
+				continue
+			}
+			wt.State, wt.Why, wt.At = WTPending, "重新检出", r.cfg.Now()
+		} else if !unfinished(wt) {
+			continue
+		}
 		rec.Steps = append(rec.Steps, "继续跟踪 worktree "+wt.Dir)
+		left = append(left, wt)
 	}
 	if _, err := r.cfg.Sessions.Update(key, func(m *sidecar.Meta) bool {
 		if m.Reap == nil {
@@ -487,21 +510,23 @@ func (r *Reaper) resetLocked(key string) {
 // checkLocked looks at key's worktrees left in place and removes those that
 // may go; rec gets each removal and each worktree whose state or reason
 // changed. With force every one is looked at, else those due. The ones
-// left by a put away whose session is back (LeftWorktrees) count that
-// session as working in them, and are dropped once removed or gone; the
-// user is told of a kept one only while the session is put away.
+// left by a put away whose session is back (LeftWorktrees) are not looked
+// at while it is in the router: InUse sees only a session's workspace, not
+// the worktree it cd'd into, and the next put away takes them over. Should
+// the session go another way, they are looked at and dropped once removed
+// or gone; the user is told of a kept one only while the session is put
+// away.
 func (r *Reaper) checkLocked(ctx context.Context, key string, force bool, rec *record) {
 	m, ok := r.cfg.Sessions.Get(key)
 	if !ok {
 		return
 	}
 	var wts []sidecar.Worktree
-	except := key
 	switch {
 	case m.Reap != nil:
 		wts = slices.Clone(m.Reap.Worktrees)
-	case len(m.LeftWorktrees) > 0:
-		wts, except = slices.Clone(m.LeftWorktrees), ""
+	case len(m.LeftWorktrees) > 0 && !r.inRouter(key):
+		wts = slices.Clone(m.LeftWorktrees)
 	default:
 		return
 	}
@@ -517,7 +542,7 @@ func (r *Reaper) checkLocked(ctx context.Context, key string, force bool, rec *r
 			continue
 		}
 		r.checked[wt.Dir] = now
-		state, why := r.judge(ctx, except, *wt)
+		state, why := r.judge(ctx, key, *wt)
 		if state == WTRemoved || state == WTGone {
 			delete(r.checked, wt.Dir)
 		}
@@ -555,10 +580,9 @@ func (r *Reaper) checkLocked(ctx context.Context, key string, force bool, rec *r
 }
 
 // judge decides wt's state: removed (it was, here), gone, kept (work not
-// committed or not pushed) or pending (no PR merged or closed yet, a check
-// that did not answer, or a session other than except working in it), with
-// why.
-func (r *Reaper) judge(ctx context.Context, except string, wt sidecar.Worktree) (string, string) {
+// committed or not pushed) or pending (no PR merged or closed yet, or a check
+// that did not answer), with why.
+func (r *Reaper) judge(ctx context.Context, key string, wt sidecar.Worktree) (string, string) {
 	if _, err := os.Stat(wt.Dir); os.IsNotExist(err) {
 		return WTGone, "目录已经不在了"
 	}
@@ -594,7 +618,7 @@ func (r *Reaper) judge(ctx context.Context, except string, wt sidecar.Worktree) 
 	default:
 		return WTPending, "PR 还没合并或关闭"
 	}
-	if r.cfg.InUse != nil && r.cfg.InUse(wt.Dir, except) {
+	if r.cfg.InUse != nil && r.cfg.InUse(wt.Dir, key) {
 		return WTPending, "另有会话在这个目录里"
 	}
 	if err := r.cfg.Git.Remove(ctx, wt.GitDir, wt.Dir); err != nil {
@@ -640,19 +664,8 @@ func (r *Reaper) Reopen(ctx context.Context, key string) {
 	}
 	for _, wt := range rp.Worktrees {
 		delete(r.checked, wt.Dir)
-		if wt.State != WTRemoved {
-			continue
-		}
-		if _, err := os.Stat(wt.Dir); err == nil {
-			continue
-		}
-		cctx, cancel := context.WithTimeout(ctx, gitTimeout)
-		err := r.cfg.Git.Add(cctx, wt.GitDir, wt.Dir, wt.Branch)
-		cancel()
-		if err != nil {
-			rec.Skipped = append(rec.Skipped, skip{Step: "worktree", Dir: wt.Dir, Why: "没能重新检出：" + short(err)})
-		} else {
-			rec.Steps = append(rec.Steps, "重新检出 worktree "+wt.Dir)
+		if wt.State == WTRemoved {
+			r.checkOut(ctx, wt, &rec)
 		}
 	}
 	if _, err := r.cfg.Sessions.Update(key, func(m *sidecar.Meta) bool {
@@ -663,6 +676,23 @@ func (r *Reaper) Reopen(ctx context.Context, key string) {
 	}
 	slog.Info("reap: put-away session reopened", "key", key)
 	r.journal(rec)
+}
+
+// checkOut checks removed worktree wt out again on its branch, unless its
+// directory is back already; it reports whether the directory is there.
+func (r *Reaper) checkOut(ctx context.Context, wt sidecar.Worktree, rec *record) bool {
+	if _, err := os.Stat(wt.Dir); err == nil {
+		return true
+	}
+	cctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	err := r.cfg.Git.Add(cctx, wt.GitDir, wt.Dir, wt.Branch)
+	cancel()
+	if err != nil {
+		rec.Skipped = append(rec.Skipped, skip{Step: "worktree", Dir: wt.Dir, Why: "没能重新检出：" + short(err)})
+		return false
+	}
+	rec.Steps = append(rec.Steps, "重新检出 worktree "+wt.Dir)
+	return true
 }
 
 // record is a KindReap journal entry: the session, what set it done
