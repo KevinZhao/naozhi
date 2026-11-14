@@ -30,9 +30,8 @@ import (
 )
 
 const (
-	repo           = "KevinZhao/naozhi"
-	defaultTimeout = 60 * time.Second
-	backupSuffix   = ".naozhi-upgrade.bak"
+	repo         = "KevinZhao/naozhi"
+	backupSuffix = ".naozhi-upgrade.bak"
 
 	// maxBinaryBytes caps the download so a rogue asset cannot fill the disk.
 	maxBinaryBytes = 200 * 1024 * 1024 // 200 MB
@@ -40,6 +39,11 @@ const (
 	// maxChecksumBytes caps checksums.txt (legit manifests are a few KB).
 	maxChecksumBytes = 64 * 1024 // 64 KB
 )
+
+// defaultTimeout bounds the release lookup's whole request. fetchFile must not
+// use it (see stallTimeout); a var so a test can shorten it below a transfer's
+// length and show that a download is not held to it.
+var defaultTimeout = 60 * time.Second
 
 // DownloadTimeout bounds one whole Download (binary, checksums, signature).
 // The binary is ~25 MB; fetchFile abandons a transfer that stalls for

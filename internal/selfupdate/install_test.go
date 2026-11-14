@@ -437,6 +437,11 @@ func TestRollbackHint(t *testing.T) {
 	if !strings.Contains(hint, "chmod 0755") {
 		t.Errorf("hint %q must restore the exec bit; a copied backup without it will not run", hint)
 	}
+	// A new file renamed into place, not a cp over the binary: on macOS that
+	// kept the inode and the kickstart after it left the service down.
+	if path, _ := SelfPath(); !strings.Contains(hint, "mv -f "+path+".restore "+path) {
+		t.Errorf("hint %q must rename the restored file into place", hint)
+	}
 	// With no managed service no restart command may be appended:
 	// launchdServiceLabel() would fall back to a constant label and produce a
 	// command that fails, inside a && chain that hides the restore.

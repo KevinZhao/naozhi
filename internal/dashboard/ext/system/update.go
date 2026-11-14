@@ -157,8 +157,11 @@ const updateApplyKey = "system-update-apply"
 // trigger; it runs inline in a polled read endpoint.
 const updateColdStartFillTimeout = 10 * time.Second
 
-// applyBackgroundTimeout bounds the detached download+verify work.
-const applyBackgroundTimeout = 10 * time.Minute
+// applyBackgroundTimeout bounds the detached lookup+download+install work. It
+// is the download's own budget plus room for the rest, as for `naozhi upgrade`
+// and the background check: a stalled transfer already fails within a minute,
+// so a shorter cap here would only cut off a slow download that keeps moving.
+const applyBackgroundTimeout = selfupdate.DownloadTimeout + 5*time.Minute
 
 // HandleUpdateApply carries out what HandleUpdateStatus reported.
 //

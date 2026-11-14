@@ -236,3 +236,29 @@ func TestLaunchAgentLabelsRunning_RealPlutil(t *testing.T) {
 		t.Fatalf("launchAgentLabelsRunning = %v, want [com.naozhi.agent]; calls=%v", got, f.calls)
 	}
 }
+
+// The restart command an IM notice names must be a job launchd confirms runs
+// this binary. A naozhi started from iTerm2 inherits the terminal's
+// XPC_SERVICE_NAME; naming it would have the operator kickstart iTerm2.
+func TestManualRestartCommand_OnlyForAConfirmedJob(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("the XPC_SERVICE_NAME label is darwin's")
+	}
+	self, err := SelfPath()
+	if err != nil {
+		t.Skipf("SelfPath unavailable: %v", err)
+	}
+	const terminal = "application.com.googlecode.iterm2.4F2C"
+	t.Setenv(xpcServiceNameEnv, terminal)
+	f := &agentExec{loaded: map[string]string{terminal: listOutput(terminal, "/Applications/iTerm.app/Contents/MacOS/iTerm2")}}
+	withLaunchAgents(t, f)
+	if got := manualRestartCommand(); got != "" {
+		t.Fatalf("manualRestartCommand() = %q under the terminal's label, want \"\"", got)
+	}
+
+	f.loaded[terminal] = listOutput(terminal, self)
+	want := fmt.Sprintf("launchctl kickstart -k gui/%d/%s", os.Getuid(), terminal)
+	if got := manualRestartCommand(); got != want {
+		t.Fatalf("manualRestartCommand() = %q for a confirmed job, want %q", got, want)
+	}
+}

@@ -148,12 +148,13 @@ func stepErr(ctx context.Context, err error, budget time.Duration) error {
 // restartRecovery returns the commands to check on the service and the one
 // that restores the previous binary when the restart was not confirmed. The
 // backup is 0600 non-executable, so the restore MUST chmod. On macOS the
-// service is a LaunchAgent of this user: launchctl, no sudo; launchdTarget is
+// service is a LaunchAgent of this user: launchctl, no sudo, and the restore
+// renames a new file into place (selfupdate.RestoreCommand); launchdTarget is
 // "" when the job could not be confirmed, then only the restore is printed
 // (a guessed kickstart would fail inside the && chain).
 func restartRecovery(goos, launchdTarget, backupPath, selfPath string) (check []string, rollback string) {
 	if goos == "darwin" {
-		rollback = fmt.Sprintf("cp %s %s && chmod 0755 %s", backupPath, selfPath, selfPath)
+		rollback = selfupdate.RestoreCommand(backupPath, selfPath)
 		if launchdTarget == "" {
 			return nil, rollback
 		}

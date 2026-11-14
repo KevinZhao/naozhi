@@ -378,8 +378,11 @@ func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) err
 	slog.Info("auto-update: binary installed", "tag", rel.Tag, "path", selfPath, "restart", restart)
 
 	if !restart {
-		c.notify(fmt.Sprintf("✅ naozhi %s 已下载并安装（当前进程仍为 %s）。下次重启生效，或运行 `%s`。",
-			rel.Tag, c.cfg.CurrentVersion, restartCommand()))
+		how := "重启 naozhi 进程后生效。"
+		if cmd := manualRestartCommand(); cmd != "" {
+			how = fmt.Sprintf("下次重启生效，或运行 `%s`。", cmd)
+		}
+		c.notify(fmt.Sprintf("✅ naozhi %s 已下载并安装（当前进程仍为 %s）。%s", rel.Tag, c.cfg.CurrentVersion, how))
 		// The backup stays as the manual rollback artifact until a restart.
 		_ = backupPath
 		return nil
@@ -399,7 +402,11 @@ func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) err
 		// Staged (with LastErr), not Failed: Failed would invite a retry of an
 		// install that already completed — the backup-destroying path.
 		c.cfg.Status.notePhase(PhaseStaged, rel.Tag, err)
-		c.notify(fmt.Sprintf("⚠️ naozhi %s 已安装但重启触发失败：%v。请手动 `%s`。", rel.Tag, err, restartCommand()))
+		how := "请手动重启 naozhi。"
+		if cmd := manualRestartCommand(); cmd != "" {
+			how = fmt.Sprintf("请手动 `%s`。", cmd)
+		}
+		c.notify(fmt.Sprintf("⚠️ naozhi %s 已安装但重启触发失败：%v。%s", rel.Tag, err, how))
 		return err
 	}
 	// Restart queued; this process is about to receive SIGTERM.

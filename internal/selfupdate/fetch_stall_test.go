@@ -22,11 +22,15 @@ func withStallTimeout(t *testing.T, d time.Duration) {
 }
 
 // A download that takes far longer than the stall window but never pauses
-// that long must finish. The old http.Client.Timeout capped the whole body
-// read at 60s, so a 25 MB binary on a slow link always failed at the 61st
-// second with "Client.Timeout … while reading body".
+// that long must finish. The old http.Client.Timeout (defaultTimeout) capped
+// the whole body read at 60s, so a 25 MB binary on a slow link always failed
+// at the 61st second with "Client.Timeout … while reading body". Here that
+// timeout is shorter than the transfer, so a download held to it fails.
 func TestFetchFile_SlowButMovingTransferCompletes(t *testing.T) {
 	withStallTimeout(t, 300*time.Millisecond)
+	origTimeout := defaultTimeout
+	defaultTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { defaultTimeout = origTimeout })
 	chunk := bytes.Repeat([]byte("x"), 1024)
 	const chunks = 10 // ~1s in all, more than three stall windows
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -45,8 +49,8 @@ func TestFetchFile_SlowButMovingTransferCompletes(t *testing.T) {
 	if err := fetchFile(context.Background(), srv.URL+"/bin", dest, maxBinaryBytes); err != nil {
 		t.Fatalf("fetchFile: %v", err)
 	}
-	if took := time.Since(start); took < 3*stallTimeout {
-		t.Fatalf("transfer took %s; the test needs it longer than the stall window to mean anything", took)
+	if took := time.Since(start); took < 3*stallTimeout || took < 3*defaultTimeout {
+		t.Fatalf("transfer took %s; the test needs it longer than the stall window and defaultTimeout to mean anything", took)
 	}
 	got, err := os.ReadFile(dest)
 	if err != nil {

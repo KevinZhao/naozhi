@@ -44,7 +44,9 @@ func TestUpgradeDecision(t *testing.T) {
 // manager of the platform: a Mac has a LaunchAgent, no systemctl or journalctl.
 func TestRestartRecovery(t *testing.T) {
 	const bak, self = "/u/bin/naozhi.naozhi-upgrade.bak", "/u/bin/naozhi"
-	restore := "cp " + bak + " " + self + " && chmod 0755 " + self
+	// A new file renamed into place: cp over the binary keeps its inode, and a
+	// kickstart after that left the macOS service down.
+	restore := "cp " + bak + " " + self + ".restore && chmod 0755 " + self + ".restore && mv -f " + self + ".restore " + self
 
 	check, rollback := restartRecovery("darwin", "gui/501/com.naozhi.agent", bak, self)
 	if want := restore + " && launchctl kickstart -k gui/501/com.naozhi.agent"; rollback != want {
