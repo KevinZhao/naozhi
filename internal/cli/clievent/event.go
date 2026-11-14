@@ -121,6 +121,8 @@ type Event struct {
 	// (ClaudeProtocol.ReadEventInto). nil otherwise.
 	Peer    *Peer    `json:"-"`
 	Refusal *Refusal `json:"-"`
+	// ModelSwitch is populated for the fallback frames ModelSwitch names.
+	ModelSwitch *ModelSwitch `json:"-"`
 
 	// ToolResultImages holds the image blocks of a user frame's tool_result
 	// blocks (ClaudeProtocol.ReadEventInto), one element per tool_result that

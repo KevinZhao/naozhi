@@ -33,6 +33,9 @@ const (
 	// system/model_refusal_no_fallback; planner.md §3.4).
 	KindPermissionDenied = "permission_denied"
 	KindModelRefusal     = "model_refusal"
+	// The CLI switched this turn (or the session) to its fallback model
+	// (system/model_fallback, model_consent_fallback, model_refusal_fallback).
+	KindModelFallback = "model_fallback"
 )
 
 // KindInfo classifies one kind. Internal: the dashboard filters it out of the
@@ -75,6 +78,7 @@ var kindTable = []KindInfo{
 	{Name: KindPeerHold},
 	{Name: KindPermissionDenied},
 	{Name: KindModelRefusal},
+	{Name: KindModelFallback},
 }
 
 var kindByName = func() map[string]KindInfo {

@@ -8,7 +8,8 @@ import (
 
 // TestPeerAndRefusalEntries: the frames CC 2.1.316 writes for a cross-session
 // message (an idle session's replay with the model-facing preamble, a busy
-// one's bare one), a held or dropped message and the two refusals each become
+// one's bare one), a held or dropped message, the two refusals and the model
+// fallbacks each become
 // one entry of their own kind; a replay with no peer origin and a release
 // (its replay follows) stay out of the log.
 func TestPeerAndRefusalEntries(t *testing.T) {
@@ -45,6 +46,16 @@ func TestPeerAndRefusalEntries(t *testing.T) {
 		{"model refusal",
 			`{"type":"system","subtype":"model_refusal_no_fallback","original_model":"claude-opus-5-5","request_id":null,"api_refusal_category":"cyber","api_refusal_explanation":null,"content":"I can't help with that.","uuid":"u5","session_id":"s"}`,
 			[]clievent.EventEntry{{Type: clievent.KindModelRefusal, Reason: "cyber", Summary: "I can't help with that.", Detail: "I can't help with that."}}},
+		// The fallback frames CC 2.1.325 streams; the row names both models.
+		{"model fallback",
+			`{"type":"system","subtype":"model_fallback","trigger":"last_resort","original_model":"claude-sonnet-5-5","fallback_model":"global.anthropic.claude-sonnet-5-5","content":"Switched to Sonnet 5.5 because Sonnet 5.5 returned an error","uuid":"u8","session_id":"s"}`,
+			[]clievent.EventEntry{{Type: clievent.KindModelFallback, Reason: "last_resort", Summary: "claude-sonnet-5-5 → global.anthropic.claude-sonnet-5-5", Detail: "Switched to Sonnet 5.5 because Sonnet 5.5 returned an error"}}},
+		{"consent fallback",
+			`{"type":"system","subtype":"model_consent_fallback","choice":"switch_default","original_model":"claude-fable-5-2","fallback_model":"claude-opus-5-5","persisted_as_default":false,"content":"","uuid":"u9","session_id":"s"}`,
+			[]clievent.EventEntry{{Type: clievent.KindModelFallback, Reason: "switch_default", Summary: "claude-fable-5-2 → claude-opus-5-5"}}},
+		{"refusal fallback",
+			`{"type":"system","subtype":"model_refusal_fallback","trigger":"refusal","direction":"retry","scope":"session","original_model":"claude-fable-5-2","fallback_model":"claude-opus-5-5","request_id":null,"content":"Retried on Opus 5.5","uuid":"u10","session_id":"s"}`,
+			[]clievent.EventEntry{{Type: clievent.KindModelFallback, Reason: "refusal", Summary: "claude-fable-5-2 → claude-opus-5-5", Detail: "Retried on Opus 5.5"}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
