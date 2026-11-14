@@ -30,9 +30,8 @@ import (
 )
 
 const (
-	repo           = "KevinZhao/naozhi"
-	defaultTimeout = 60 * time.Second
-	backupSuffix   = ".naozhi-upgrade.bak"
+	repo         = "KevinZhao/naozhi"
+	backupSuffix = ".naozhi-upgrade.bak"
 
 	// maxBinaryBytes caps the download so a rogue asset cannot fill the disk.
 	maxBinaryBytes = 200 * 1024 * 1024 // 200 MB
@@ -40,6 +39,27 @@ const (
 	// maxChecksumBytes caps checksums.txt (legit manifests are a few KB).
 	maxChecksumBytes = 64 * 1024 // 64 KB
 )
+
+// defaultTimeout bounds the release lookup's whole request. fetchFile must not
+// use it (see stallTimeout); a var so a test can shorten it below a transfer's
+// length and show that a download is not held to it.
+var defaultTimeout = 60 * time.Second
+
+// DownloadTimeout bounds one whole Download (binary, checksums, signature).
+// The binary is ~25 MB; fetchFile abandons a transfer that stalls for
+// stallTimeout, so this cap only ends a transfer that keeps moving at a crawl.
+const DownloadTimeout = 30 * time.Minute
+
+// stallTimeout is how long fetchFile waits for the next bytes (or the
+// response headers) before giving up. It replaced an http.Client.Timeout of
+// 60s that covered reading the whole body: on a link slower than ~420 KB/s the
+// 25 MB binary could never finish, and `naozhi upgrade` failed at the 61st
+// second with "context deadline exceeded (Client.Timeout … while reading body)".
+// A var so tests can shorten it; tests that set it must not run in parallel.
+var stallTimeout = 60 * time.Second
+
+// errStalled is the cancel cause fetchFile's watchdog sets.
+var errStalled = errors.New("no data received")
 
 // ErrUnsupportedPlatform is returned when the current OS has no release asset.
 var ErrUnsupportedPlatform = errors.New("upgrade not supported on this platform (no release asset)")
@@ -402,6 +422,20 @@ func fetchFile(ctx context.Context, fetchURL, dest string, maxBytes int64) error
 	if !strings.HasPrefix(fetchURL, "https://") {
 		return fmt.Errorf("selfupdate: refused non-https URL: %s", fetchURL)
 	}
+	// The watchdog cancels the request once nothing arrives for stallTimeout;
+	// every body read that returns bytes pushes it back. No client Timeout: a
+	// slow but moving download must not be cut off by its total duration.
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	watchdog := time.AfterFunc(stallTimeout, func() { cancel(errStalled) })
+	defer watchdog.Stop()
+	stalled := func(err error) error {
+		if errors.Is(context.Cause(ctx), errStalled) {
+			return fmt.Errorf("selfupdate: %w from %s for %s (transfer stalled): %v", errStalled, fetchURL, stallTimeout, err)
+		}
+		return err
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fetchURL, nil)
 	if err != nil {
 		return fmt.Errorf("build fetch request: %w", err)
@@ -421,7 +455,6 @@ func fetchFile(ctx context.Context, fetchURL, dest string, maxBytes int64) error
 		transport = testHTTPTransport // nil in production falls back to http.DefaultTransport
 	}
 	client := &http.Client{
-		Timeout:   defaultTimeout,
 		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) > 5 {
@@ -438,7 +471,7 @@ func fetchFile(ctx context.Context, fetchURL, dest string, maxBytes int64) error
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("selfupdate: HTTP request to %s: %w", fetchURL, err)
+		return stalled(fmt.Errorf("selfupdate: HTTP request to %s: %w", fetchURL, err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -454,15 +487,30 @@ func fetchFile(ctx context.Context, fetchURL, dest string, maxBytes int64) error
 
 	// maxBytes+1 surfaces truncation explicitly instead of as a confusing
 	// checksum mismatch later.
-	n, err := io.Copy(f, io.LimitReader(resp.Body, maxBytes+1))
+	body := &progressReader{r: resp.Body, onBytes: func() { watchdog.Reset(stallTimeout) }}
+	n, err := io.Copy(f, io.LimitReader(body, maxBytes+1))
 	if err != nil {
-		return fmt.Errorf("copy response body to %s: %w", dest, err)
+		return stalled(fmt.Errorf("copy response body to %s: %w", dest, err))
 	}
 	if n > maxBytes {
 		return fmt.Errorf("response body exceeds %d bytes (truncated) from %s", maxBytes, fetchURL)
 	}
 	// Flush to disk before the caller verifies the checksum.
 	return f.Sync()
+}
+
+// progressReader calls onBytes after every read that returned data.
+type progressReader struct {
+	r       io.Reader
+	onBytes func()
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	if n > 0 {
+		p.onBytes()
+	}
+	return n, err
 }
 
 func verifyChecksum(binPath, sumPath, asset string) error {

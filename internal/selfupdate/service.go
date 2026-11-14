@@ -2,6 +2,7 @@ package selfupdate
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -71,7 +72,9 @@ func RestartService(ctx context.Context) error {
 	case "linux":
 		return restartSystemd(ctx)
 	case "darwin":
-		return restartLaunchd()
+		// The external upgrader is not the job, so the label comes from
+		// serviceLaunchdLabel, which also finds a job by the binary it runs.
+		return kickstartLaunchd(serviceLaunchdLabel())
 	default:
 		return fmt.Errorf("service restart not supported on %s — restart manually", runtime.GOOS)
 	}
@@ -130,7 +133,7 @@ func ServiceRunning() bool {
 	case "linux":
 		return systemdUnitActive()
 	case "darwin":
-		return verifiedLaunchdLabel() != ""
+		return serviceLaunchdLabel() != ""
 	default:
 		return false
 	}
@@ -201,19 +204,123 @@ var execCommand = exec.Command
 // Terminal.app sees com.apple.Terminal; acting on it would kickstart the
 // operator's terminal. Hence confirm the job runs our own executable.
 func verifiedLaunchdLabel() string {
+	self, err := SelfPath()
+	if err != nil {
+		return ""
+	}
 	label := launchdServiceLabel()
+	if !launchdLabelRunsPath(label, self) {
+		return ""
+	}
+	return label
+}
+
+// launchdLabelRunsPath reports whether the job loaded under label runs self,
+// asking launchd itself (`launchctl list <label>`), not a plist on disk.
+func launchdLabelRunsPath(label, self string) bool {
 	out, err := execCommand(resolveTrustedBin("launchctl"), "list", label).Output()
 	if err != nil || len(out) == 0 {
-		return ""
+		return false
+	}
+	return launchdJobRunsPath(string(out), self)
+}
+
+// serviceLaunchdLabel returns the label of the launchd job running this
+// binary as seen from ANY process — the external upgrader's question, where
+// verifiedLaunchdLabel only knows the job THIS process runs under. `naozhi
+// upgrade` from a shell has no XPC_SERVICE_NAME of ours, and the install-time
+// constant misses a plist written under another label (com.naozhi.agent), so
+// the upgrade reported "Service not running" and skipped the restart. The
+// fallback finds a LaunchAgent whose program is this binary and then holds it
+// to the same launchctl check; nothing unconfirmed is ever returned.
+func serviceLaunchdLabel() string {
+	if l := verifiedLaunchdLabel(); l != "" {
+		return l
 	}
 	self, err := SelfPath()
 	if err != nil {
 		return ""
 	}
-	if !launchdJobRunsPath(string(out), self) {
+	for _, label := range launchAgentLabelsRunning(self) {
+		if launchdLabelRunsPath(label, self) {
+			return label
+		}
+	}
+	return ""
+}
+
+// launchAgentsDir is the per-user LaunchAgents directory `naozhi install`
+// writes to; a var so tests can point it at a fixture directory.
+var launchAgentsDir = func() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
 		return ""
 	}
-	return label
+	return filepath.Join(home, "Library", "LaunchAgents")
+}
+
+// launchAgentLabelsRunning lists the labels of the LaunchAgent plists whose
+// program is self (symlinks resolved), in file-name order. plutil reads both
+// XML and binary plists; a plist it cannot convert is skipped, not guessed at.
+func launchAgentLabelsRunning(self string) []string {
+	dir := launchAgentsDir()
+	if dir == "" {
+		return nil
+	}
+	paths, err := filepath.Glob(filepath.Join(dir, "*.plist"))
+	if err != nil {
+		return nil
+	}
+	var labels []string
+	for _, p := range paths {
+		out, err := execCommand(resolveTrustedBin("plutil"), "-convert", "json", "-o", "-", p).Output()
+		if err != nil {
+			continue
+		}
+		var job struct {
+			Label            string
+			Program          string
+			ProgramArguments []string
+		}
+		if json.Unmarshal(out, &job) != nil || job.Label == "" {
+			continue
+		}
+		prog := job.Program
+		if prog == "" && len(job.ProgramArguments) > 0 {
+			prog = job.ProgramArguments[0]
+		}
+		if prog == "" {
+			continue
+		}
+		if prog == self {
+			labels = append(labels, job.Label)
+			continue
+		}
+		if resolved, err := filepath.EvalSymlinks(prog); err == nil && resolved == self {
+			labels = append(labels, job.Label)
+		}
+	}
+	return labels
+}
+
+// LaunchdServiceTarget returns the `gui/<uid>/<label>` target of the launchd
+// job running this binary, or "" when none is confirmed (or not on darwin),
+// for the recovery commands `naozhi upgrade` prints.
+func LaunchdServiceTarget() string {
+	if runtime.GOOS != "darwin" {
+		return ""
+	}
+	label := serviceLaunchdLabel()
+	if label == "" {
+		return ""
+	}
+	return launchdTarget(label)
+}
+
+// launchdTarget is the gui/<uid> domain target for label: the LaunchAgent
+// domain `naozhi install` writes to; a LaunchDaemon would need `system/`.
+func launchdTarget(label string) string {
+	return fmt.Sprintf("gui/%d/%s", os.Getuid(), label)
 }
 
 // launchdJobPathRe / launchdJobArgv0Re pull the executable out of `launchctl
@@ -299,18 +406,23 @@ func waitServiceActive(ctx context.Context, timeout time.Duration) error {
 	}
 }
 
-// restartLaunchd restarts the naozhi launchd job via `launchctl kickstart -k`:
-// launchd, not the dying caller, must own the restart. An unload+load pair
-// cannot self-restart (unload removes the job making the call).
+// restartLaunchd restarts the launchd job THIS process runs under (the
+// in-process path); see kickstartLaunchd.
 func restartLaunchd() error {
 	// Must be the VERIFIED label — see verifiedLaunchdLabel.
-	label := verifiedLaunchdLabel()
+	return kickstartLaunchd(verifiedLaunchdLabel())
+}
+
+// kickstartLaunchd restarts the job via `launchctl kickstart -k`: launchd, not
+// the dying caller, must own the restart. An unload+load pair cannot
+// self-restart (unload removes the job making the call). An empty label (no
+// confirmed job) is a no-op. kickstart returns once launchd took the request;
+// it does not wait for the new process.
+func kickstartLaunchd(label string) error {
 	if label == "" {
 		return nil
 	}
-	// gui/<uid> is the LaunchAgent domain `naozhi install` writes to; a
-	// LaunchDaemon would need `system/`.
-	target := fmt.Sprintf("gui/%d/%s", os.Getuid(), label)
+	target := launchdTarget(label)
 	if out, err := execCommand(resolveTrustedBin("launchctl"), "kickstart", "-k", target).CombinedOutput(); err != nil {
 		return fmt.Errorf("launchctl kickstart -k %s: %w\n%s", target, err, out)
 	}

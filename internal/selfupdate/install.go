@@ -134,13 +134,23 @@ func RollbackHint(serviceRunning bool) string {
 	if err != nil {
 		return ""
 	}
-	restore := fmt.Sprintf("cp %s%s %s && chmod 0755 %s", path, backupSuffix, path, path)
+	restore := RestoreCommand(path+backupSuffix, path)
 	// No managed service ⇒ no restart tail: a guessed launchd command would
 	// fail inside the && chain and hide the restore's success.
 	if !serviceRunning {
 		return restore
 	}
 	return restore + " && " + restartCommand()
+}
+
+// RestoreCommand puts backup back at path as a NEW file renamed into place,
+// the way Replace installs. A cp over the existing file keeps its inode, and
+// on macOS a kickstart after that left the service down: the kernel still
+// held the old code signature for that vnode. The backup is 0600
+// non-executable, so the restore MUST chmod.
+func RestoreCommand(backup, path string) string {
+	tmp := path + ".restore"
+	return fmt.Sprintf("cp %s %s && chmod 0755 %s && mv -f %s %s", backup, tmp, tmp, tmp, path)
 }
 
 // restartCommand is the shell command that restarts the managed service on
@@ -150,6 +160,17 @@ func restartCommand() string {
 		return fmt.Sprintf("launchctl kickstart -k gui/%d/%s", os.Getuid(), launchdServiceLabel())
 	}
 	return "sudo systemctl restart naozhi"
+}
+
+// manualRestartCommand is restartCommand when a service manager runs this
+// process, else "". For notices that have no verdict of their own: on darwin
+// restartCommand trusts XPC_SERVICE_NAME, and a naozhi started from iTerm2
+// inherits the terminal's label, so an unchecked command would restart iTerm2.
+func manualRestartCommand() string {
+	if !ServiceManagesThisProcess() {
+		return ""
+	}
+	return restartCommand()
 }
 
 // ManualCommand is what the dashboard shows when it cannot carry out `action`
