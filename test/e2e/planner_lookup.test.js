@@ -12,6 +12,7 @@ const now = Date.now();
 const block = (a) => '```naozhi-action\n' + JSON.stringify(a) + '\n```';
 const RUN = '20261110T093000-ab12';
 const BAD = '20261110T094500-cd34';
+const CUT = '20261110T170049-a85a';
 const result = {
   answer: 'M4 Max 的内存带宽是 546GB/s。16 核 CPU 版才有这个带宽。',
   facts: [
@@ -28,6 +29,7 @@ test('lookup line and query card', async ({ page }) => {
     plannerLookups: {
       [RUN]: { id: RUN, q: 'M4 Max 内存带宽', state: 'ok', result },
       [BAD]: { id: BAD, q: 'trn3 价格', state: 'failed', error: '查询结果不合格：answer 是空的' },
+      [CUT]: { id: CUT, q: 'Fable 5.2 新特性', state: 'ok', result: { answer: '新特性很多。（已截断）', facts: [], confidence: 'medium', truncated: ['answer', 'facts'] } },
     },
     plannerEvents: [
       { type: 'text', time: now - 9000, uuid: 'lk-t1', detail: '凭记忆是 546GB/s，我查一下核实。\n\n' +
@@ -36,6 +38,7 @@ test('lookup line and query card', async ({ page }) => {
         JSON.stringify(result) + '\n</naozhi-lookup>\n\n<naozhi-snapshot unchanged since="09:30" at="x"/>' },
       { type: 'text', time: now - 5000, uuid: 'lk-t2', detail: '核实了，是 546GB/s。' },
       { type: 'user', time: now - 3000, uuid: 'lk-u2', detail: '<naozhi-lookup q="trn3 价格" run="' + BAD + '" state="failed">\n没查成\n</naozhi-lookup>' },
+      { type: 'user', time: now - 2000, uuid: 'lk-u3', detail: '<naozhi-lookup q="Fable 5.2 新特性" run="' + CUT + '" state="ok">\n注意：……网关截断了 answer、facts\n</naozhi-lookup>' },
     ],
   });
   try {
@@ -47,7 +50,7 @@ test('lookup line and query card', async ({ page }) => {
     // The answer is no bubble of yours, nor raw JSON.
     await expect(stream.locator('.event.user')).toHaveCount(0);
     await expect(stream).not.toContainText('naozhi-lookup');
-    const card = stream.locator('details.pl-lookup');
+    const card = stream.locator('details.pl-lookup[data-run="' + RUN + '"]');
     await expect(card.locator('summary')).toHaveText('网页查询 · M4 Max 内存带宽M4 Max 的内存带宽是 546GB/s。可信度高');
     await expect(card.locator('.pl-lookup-one')).toBeVisible();
     const src = stream.locator('.pl-lookup-src a');
@@ -60,6 +63,11 @@ test('lookup line and query card', async ({ page }) => {
     const failed = stream.locator('.pl-lookup-failed');
     await expect(failed).toContainText('网页查询 · trn3 价格');
     await expect(failed).toContainText('没查成：查询结果不合格');
+    // What the gateway cut to the limits shows as 已截断 (planner/reader).
+    await expect(stream.locator('.pl-lookup-cut')).toHaveCount(1);
+    const cut = stream.locator('details.pl-lookup[data-run="' + CUT + '"] .pl-lookup-cut');
+    await expect(cut).toHaveText('已截断');
+    await expect(cut).toHaveAttribute('title', '超过长度上限被截断：answer、facts');
   } finally {
     mock.server.close();
   }

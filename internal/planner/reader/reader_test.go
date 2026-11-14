@@ -4,10 +4,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
@@ -16,7 +18,6 @@ import (
 const goodReply = `{"answer":"M4 Max 的内存带宽是 546GB/s。","facts":[{"claim":"M4 Max 内存带宽 546GB/s","url":"https://www.apple.com/macbook-pro/specs/","quote":"546GB/s memory bandwidth"}],"confidence":"high"}`
 
 func TestParseResult(t *testing.T) {
-	long := strings.Repeat("字", AnswerRunes+1)
 	for _, c := range []struct{ name, reply, err string }{
 		{"ok", goodReply, ""},
 		{"ok no facts", `{"answer":"查不到","facts":[],"confidence":"low"}`, ""},
@@ -25,11 +26,16 @@ func TestParseResult(t *testing.T) {
 		{"trailing", goodReply + " 好了", "后面还有内容"},
 		{"unknown field", `{"answer":"a","facts":[],"confidence":"high","note":"x"}`, "不合格式"},
 		{"empty answer", `{"answer":" ","facts":[],"confidence":"high"}`, "answer 是空的"},
-		{"long answer", `{"answer":"` + long + `","facts":[],"confidence":"high"}`, "超过 600"},
 		{"bad confidence", `{"answer":"a","facts":[],"confidence":"sure"}`, "confidence"},
 		{"bad url", `{"answer":"a","facts":[{"claim":"c","url":"file:///etc/passwd","quote":"q"}],"confidence":"high"}`, "url"},
-		{"long quote", `{"answer":"a","facts":[{"claim":"c","url":"https://e.com","quote":"` + strings.Repeat("q", QuoteRunes+1) + `"}],"confidence":"high"}`, "quote"},
+		{"no url", `{"answer":"a","facts":[{"claim":"c","url":"","quote":"q"}],"confidence":"high"}`, "url"},
 		{"no claim", `{"answer":"a","facts":[{"claim":"","url":"https://e.com","quote":"q"}],"confidence":"high"}`, "claim"},
+		// Truncated is the gateway's to set, not a field of the contract.
+		{"truncated field", `{"answer":"a","facts":[],"confidence":"high","truncated":["answer"]}`, "不合格式"},
+		{"over 64KB", `{"answer":"` + strings.Repeat("a", maxOutputBytes) + `","facts":[],"confidence":"high"}`, "超过 65536"},
+		// A long answer does not excuse a bad URL.
+		{"long answer bad url", `{"answer":"` + strings.Repeat("字", 1205) + `","facts":[{"claim":"c","url":"javascript:alert(1)","quote":"q"}],"confidence":"high"}`, "url"},
+		{"not an object", `["answer"]`, "不是一个 JSON 对象"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			_, err := ParseResult(c.reply)
@@ -40,6 +46,113 @@ func TestParseResult(t *testing.T) {
 				t.Fatalf("err = %v, want one with %q", err, c.err)
 			}
 		})
+	}
+}
+
+// TestParseResultTruncates: what is only too long is cut to the limits and
+// named in Truncated, not failed (#3943: answers of 1205 and 707 runes
+// failed whole runs under the old 600-rune limit).
+func TestParseResultTruncates(t *testing.T) {
+	fact := func(claim, url, quote string) string {
+		return `{"claim":"` + claim + `","url":"` + url + `","quote":"` + quote + `"}`
+	}
+	t.Run("answer 707 fits", func(t *testing.T) {
+		ans := strings.Repeat("跌", 707)
+		res, err := ParseResult(`{"answer":"` + ans + `","facts":[],"confidence":"medium"}`)
+		if err != nil || res.Answer != ans || res.Truncated != nil {
+			t.Fatalf("res = %d runes, truncated %q, err %v; want it whole", utf8.RuneCountInString(res.Answer), res.Truncated, err)
+		}
+	})
+	t.Run("answer 1205 cut", func(t *testing.T) {
+		ans := strings.Repeat("新", 1205)
+		res, err := ParseResult(`{"answer":"` + ans + `","facts":[` + fact("c", "https://e.com/a", "q") + `],"confidence":"high"}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := utf8.RuneCountInString(res.Answer); n != AnswerRunes || !strings.HasSuffix(res.Answer, TruncatedMark) ||
+			!strings.HasPrefix(ans, strings.TrimSuffix(res.Answer, TruncatedMark)) {
+			t.Fatalf("answer = %d runes, ends %q; want %d with the mark", n, string([]rune(res.Answer)[n-8:]), AnswerRunes)
+		}
+		if strings.Join(res.Truncated, ",") != "answer" || len(res.Facts) != 1 {
+			t.Fatalf("truncated = %q, facts %d", res.Truncated, len(res.Facts))
+		}
+	})
+	t.Run("white space at the cut", func(t *testing.T) {
+		keep := AnswerRunes - utf8.RuneCountInString(TruncatedMark)
+		ans := strings.Repeat("a", keep-1) + "   " + strings.Repeat("b", 50)
+		res, err := ParseResult(`{"answer":"` + ans + `","facts":[],"confidence":"high"}`)
+		if err != nil || res.Answer != strings.Repeat("a", keep-1)+TruncatedMark {
+			t.Fatalf("answer = %q, err %v", res.Answer, err)
+		}
+	})
+	t.Run("facts past 8 dropped", func(t *testing.T) {
+		var fs []string
+		for i := range MaxFacts + 3 {
+			fs = append(fs, fact("c"+strconv.Itoa(i+1), "https://e.com/"+strconv.Itoa(i+1), "q"))
+		}
+		// A dropped fact is not checked: its bad URL does not fail the run.
+		fs[MaxFacts+1] = fact("bad", "file:///etc/passwd", "q")
+		res, err := ParseResult(`{"answer":"a","facts":[` + strings.Join(fs, ",") + `],"confidence":"high"}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Facts) != MaxFacts || res.Facts[MaxFacts-1].Claim != "c8" || strings.Join(res.Truncated, ",") != "facts" {
+			t.Fatalf("facts = %d, last %+v, truncated %q", len(res.Facts), res.Facts[len(res.Facts)-1], res.Truncated)
+		}
+	})
+	t.Run("claim and quote cut", func(t *testing.T) {
+		claim, quote := strings.Repeat("断", ClaimRunes+30), strings.Repeat("引", QuoteRunes+1)
+		res, err := ParseResult(`{"answer":"a","facts":[` + fact("ok", "https://e.com/1", "ok") + "," + fact(claim, "https://e.com/2", quote) + `],"confidence":"low"}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f := res.Facts[1]
+		if f.Claim != strings.Repeat("断", ClaimRunes) || f.Quote != strings.Repeat("引", QuoteRunes) || res.Facts[0].Claim != "ok" {
+			t.Fatalf("facts = %+v", res.Facts)
+		}
+		if strings.Join(res.Truncated, ",") != "facts[2].claim,facts[2].quote" {
+			t.Fatalf("truncated = %q", res.Truncated)
+		}
+	})
+}
+
+// TestBlockTruncated: a cut answer reaches the Planner with a line saying
+// what was cut, and its JSON line carries truncated; an uncut one has neither.
+func TestBlockTruncated(t *testing.T) {
+	res, err := ParseResult(`{"answer":"` + strings.Repeat("新", 1205) + `","facts":[],"confidence":"high"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := Block(Run{ID: "20261110T170049-a85a", Q: "Fable 5.2 新特性", State: StateOK, Result: &res}, false)
+	if !strings.Contains(b, "网关截断了 answer") || !strings.Contains(b, `"truncated":["answer"]`) || !strings.Contains(b, TruncatedMark) {
+		t.Fatalf("block = %s", b)
+	}
+	ok, err := ParseResult(goodReply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := Block(Run{ID: "20261110T165033-37cb", Q: "q", State: StateOK, Result: &ok}, false); strings.Contains(b, "截断") || strings.Contains(b, "truncated") {
+		t.Fatalf("uncut block = %s", b)
+	}
+}
+
+// A long answer is cut, not failed: the run is ok, its record (what GET
+// /api/planner/lookup serves) says what was cut, and so does the block.
+func TestLookupLongAnswer(t *testing.T) {
+	sess := &fakeSession{reply: `{"answer":"` + strings.Repeat("新", 1205) + `","facts":[{"claim":"c","url":"https://e.com","quote":"q"}],"confidence":"high"}`}
+	shift := "s"
+	now := time.Date(2026, 11, 10, 17, 0, 0, 0, time.Local)
+	r, blocks := newReader(t, sess, &shift, &now)
+	tk, err := r.Lookup("Fable 5.2 相比 5.1 的新特性", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := wait(t, blocks); !strings.Contains(b, `state="ok"`) || !strings.Contains(b, "网关截断了 answer") {
+		t.Fatalf("block = %s", b)
+	}
+	run, ok := r.Get(tk.Run)
+	if !ok || run.State != StateOK || run.Result == nil || strings.Join(run.Result.Truncated, ",") != "answer" {
+		t.Fatalf("record = %+v, %v", run, ok)
 	}
 }
 

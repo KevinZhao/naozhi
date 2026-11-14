@@ -560,6 +560,9 @@ function lookupCardHtml(run, rec) {
   const links = facts.map((f) => str(f.url)).filter((u) => /^https?:\/\//i.test(u) && !seen.has(hostOf(u) || u) && seen.add(hostOf(u) || u))
     .map((u) => '<a class="pl-link" href="' + escAttr(u) + '" target="_blank" rel="noopener noreferrer">' + esc(hostOf(u) || u) + '</a>').join('');
   const conf = CONFIDENCE_LABEL[res.confidence] || '';
+  // The gateway cut what was past the limits (planner/reader ParseResult).
+  const cut = Array.isArray(res.truncated) && res.truncated.length
+    ? '<span class="pl-lookup-conf pl-lookup-cut" title="' + escAttr('超过长度上限被截断：' + res.truncated.map(str).join('、')) + '">已截断</span>' : '';
   const factsHtml = facts.map((f) => {
     const u = str(f.url);
     return '<li><div class="pl-lookup-claim">' + esc(str(f.claim)) + '</div>' +
@@ -569,7 +572,7 @@ function lookupCardHtml(run, rec) {
   return '<details class="pl-act pl-lookup" data-run="' + escAttr(run) + '">' +
     '<summary class="pl-act-h">' + head +
       '<div class="pl-lookup-one">' + esc(firstSentence(answer)) +
-        (conf ? '<span class="pl-lookup-conf pl-lookup-' + escAttr(res.confidence) + '">' + esc(conf) + '</span>' : '') + '</div></summary>' +
+        (conf ? '<span class="pl-lookup-conf pl-lookup-' + escAttr(res.confidence) + '">' + esc(conf) + '</span>' : '') + cut + '</div></summary>' +
     '<div class="pl-lookup-ans">' + esc(answer) + '</div>' +
     (factsHtml ? '<ol class="pl-lookup-facts">' + factsHtml + '</ol>' : '') + '</details>' +
     (links ? '<div class="pl-lookup-src">来源：' + links + '</div>' : '');
