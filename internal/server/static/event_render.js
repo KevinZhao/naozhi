@@ -169,6 +169,29 @@ function refusalHtml(e) {
   return '<span' + (text ? ' title="' + escAttr(text) + '"' : '') + '><span class="refusal-tag">权限拒绝</span>' + (what ? ' ' + esc(what) : '') + '</span>';
 }
 
+// Why the CLI left the requested model (model_fallback's trigger, a consent
+// choice, a refusal retry); an unlisted value shows as sent.
+const FALLBACK_WHY = new Map([
+  ['model_not_found', '模型不存在'],
+  ['permission_denied', '无权限'],
+  ['overloaded', '过载'],
+  ['server_error', '服务端错误'],
+  ['last_resort', '不可重试的错误'],
+  ['model_blocked', '模型已停用'],
+  ['refusal', '模型拒答'],
+  ['switch_default', '改用默认模型'],
+  ['cancelled', '未同意用量计费'],
+  ['consent', '用量计费未开通'],
+]);
+
+// modelFallbackHtml: "A → B" plus why; the CLI's explanation (often the API
+// error) is the title.
+function modelFallbackHtml(e) {
+  const why = FALLBACK_WHY.get(e.reason) || e.reason || '';
+  return '<span' + (e.detail ? ' title="' + escAttr(e.detail) + '"' : '') + '><span class="refusal-tag">模型回退</span> ' +
+    esc(e.summary || '') + (why ? '（' + esc(why) + '）' : '') + '</span>';
+}
+
 // EVENT_WHOLE renders a type's entire bubble, bypassing the generic
 // icon/content/time wrapper below (ask_question is its own card). A Map, not
 // a plain object: an unlisted e.type like 'constructor' must resolve to
@@ -177,8 +200,9 @@ function refusalHtml(e) {
 const EVENT_WHOLE = new Map([['ask_question', renderAskQuestionCard]]);
 
 // SYSTEM_SUMMARY words the CLI system frames logged under their bare subtype
-// (process_event_format.go): the CLI retrying a failed API call.
-const SYSTEM_SUMMARY = new Map([['api_retry', '接口重试']]);
+// (process_event_format.go): the CLI retrying a failed API call, and a
+// model_fallback logged before its frame was parsed for the models.
+const SYSTEM_SUMMARY = new Map([['api_retry', '接口重试'], ['model_fallback', '模型回退']]);
 
 // EVENT_CONTENT fills div.event-content for a type still using the generic
 // wrapper. agent/result/task_* are plain escaped text (defaultTextContentHtml);
@@ -200,6 +224,7 @@ const EVENT_CONTENT = new Map([
   ['peer_hold', peerHoldHtml],
   ['permission_denied', refusalHtml],
   ['model_refusal', refusalHtml],
+  ['model_fallback', modelFallbackHtml],
 ]);
 
 // EVENT_ICONS: the .event-icon glyph for a handful of known types; anything

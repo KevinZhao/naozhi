@@ -22,6 +22,15 @@ type Peer struct {
 	Outcome string
 }
 
+// ModelSwitch is a system frame saying the CLI moved off the requested model:
+// model_fallback (Why is its trigger), model_consent_fallback (its choice)
+// or model_refusal_fallback ("refusal").
+type ModelSwitch struct {
+	From, To, Why string
+	// Text is the CLI's own explanation, often carrying the API error.
+	Text string
+}
+
 // Refusal is a system/permission_denied or system/model_refusal_no_fallback
 // frame (RFC planner §3.4).
 type Refusal struct {

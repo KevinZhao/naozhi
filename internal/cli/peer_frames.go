@@ -41,7 +41,8 @@ func parsePeerOrigin(line string) *clievent.Peer {
 }
 
 // wireSystemDetail holds the system-frame fields Event does not: those of
-// peer_message_hold, permission_denied and model_refusal_no_fallback.
+// peer_message_hold, permission_denied, model_refusal_no_fallback and the
+// model fallback frames.
 // permission_denied's "message" is a string, which Event decodes as an
 // assistant message; decodeClaudeEvent tolerates that clash.
 type wireSystemDetail struct {
@@ -55,13 +56,18 @@ type wireSystemDetail struct {
 	Content            string `json:"content"`
 	RefusalCategory    string `json:"api_refusal_category"`
 	RefusalExplanation string `json:"api_refusal_explanation"`
+	OriginalModel      string `json:"original_model"`
+	FallbackModel      string `json:"fallback_model"`
+	Trigger            string `json:"trigger"`
+	Choice             string `json:"choice"`
 }
 
-// parseSystemDetail fills ev.Peer or ev.Refusal for the system subtypes that
+// parseSystemDetail fills ev.Peer, ev.Refusal or ev.ModelSwitch for the system subtypes that
 // carry one; any other frame is left alone.
 func parseSystemDetail(line string, ev *clievent.Event) {
 	switch ev.SubType {
-	case "peer_message_hold", "permission_denied", "model_refusal_no_fallback":
+	case "peer_message_hold", "permission_denied", "model_refusal_no_fallback",
+		"model_fallback", "model_consent_fallback", "model_refusal_fallback":
 	default:
 		return
 	}
@@ -76,6 +82,11 @@ func parseSystemDetail(line string, ev *clievent.Event) {
 		ev.Refusal = &clievent.Refusal{Tool: w.ToolName, Reason: w.DecisionReason, Text: w.Message}
 	case "model_refusal_no_fallback":
 		ev.Refusal = &clievent.Refusal{Reason: w.RefusalCategory, Text: cmp.Or(w.Content, w.RefusalExplanation)}
+	case "model_fallback", "model_consent_fallback", "model_refusal_fallback":
+		if w.FallbackModel != "" {
+			ev.ModelSwitch = &clievent.ModelSwitch{From: w.OriginalModel, To: w.FallbackModel,
+				Why: cmp.Or(w.Trigger, w.Choice), Text: w.Content}
+		}
 	}
 }
 

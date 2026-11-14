@@ -4,6 +4,7 @@ package cli
 // formatting; logEventAt is the only non-pure entry (AppendBatch + cost atomic).
 
 import (
+	"cmp"
 	"encoding/json"
 	"log/slog"
 	"time"
@@ -125,6 +126,13 @@ func eventEntriesAt(ev clievent.Event, nowMS int64, root string) []clievent.Even
 				entry.Tool = r.Tool
 				entry.Reason = r.Reason
 				entry.Summary, entry.Detail = textutil.TruncateRunesPair(r.Text, 120, clievent.EventDetailMaxRunes)
+			}
+		case "model_fallback", "model_consent_fallback", "model_refusal_fallback":
+			if m := ev.ModelSwitch; m != nil {
+				entry.Type = clievent.KindModelFallback
+				entry.Summary = textutil.TruncateRunes(cmp.Or(m.From, "?")+" → "+m.To, 120)
+				entry.Reason = m.Why
+				entry.Detail = textutil.TruncateRunes(m.Text, clievent.EventDetailMaxRunes)
 			}
 		case "stop_hook_summary", "turn_duration", "hook_started", "hook_response",
 			// 1p auth (e.g. fable-5) streams these telemetry events many times per

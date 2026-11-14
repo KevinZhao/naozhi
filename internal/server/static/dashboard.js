@@ -1051,6 +1051,9 @@ function formatSessionMarkdown(meta, events) {
       lines.push('');
       lines.push(raw);
       lines.push('');
+    } else if (e.type === 'model_fallback') {
+      lines.push('> _模型回退：' + (e.summary || '') + (e.reason ? '（' + e.reason + '）' : '') + '_' + (ts ? ' · ' + ts : ''));
+      lines.push('');
     } else if (e.type === 'peer_hold' || e.type === 'permission_denied' || e.type === 'model_refusal') {
       let note;
       if (e.type === 'peer_hold') {
