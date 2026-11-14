@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/selfupdate"
@@ -28,14 +30,17 @@ Flags:
 	}
 	_ = fs.Parse(args)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
+	// Each step has its own budget, so a slow download cannot eat the
+	// restart's and a timeout names the step that ran out. stepErr may read a
+	// context after its cancel: an expired deadline keeps DeadlineExceeded.
 
 	// 1. Resolve latest release tag.
 	fmt.Printf("Checking latest release…\n")
+	ctx, cancel := context.WithTimeout(context.Background(), upgradeCheckTimeout)
 	rel, err := selfupdate.LatestRelease(ctx)
+	cancel()
 	if err != nil {
-		fatalf("check latest release: %v\n", err)
+		fatalf("check latest release: %v\n", stepErr(ctx, err, upgradeCheckTimeout))
 	}
 
 	// 2. Compare with running version.
@@ -68,9 +73,11 @@ Flags:
 	defer os.RemoveAll(tmp)
 
 	fmt.Printf("Downloading %s…\n", rel.Tag)
-	newBin, err := selfupdate.Download(ctx, rel, tmp)
+	dctx, dcancel := context.WithTimeout(context.Background(), selfupdate.DownloadTimeout)
+	newBin, err := selfupdate.Download(dctx, rel, tmp)
+	dcancel()
 	if err != nil {
-		fatalf("download: %v\n", err)
+		fatalf("download: %v\n", stepErr(dctx, err, selfupdate.DownloadTimeout))
 	}
 	fmt.Printf("Checksum verified.\n")
 
@@ -89,17 +96,20 @@ Flags:
 	restartWarned := false
 	if !*noRestart && serviceWasRunning {
 		fmt.Printf("Restarting service…\n")
-		if err := selfupdate.RestartService(ctx); err != nil {
+		rctx, rcancel := context.WithTimeout(context.Background(), upgradeRestartTimeout)
+		err := selfupdate.RestartService(rctx)
+		rcancel()
+		if err != nil {
 			restartWarned = true
-			fmt.Fprintf(os.Stderr, "\nwarning: service restart could not be confirmed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "\nwarning: service restart could not be confirmed: %v\n", stepErr(rctx, err, upgradeRestartTimeout))
 			fmt.Fprintf(os.Stderr, "The new binary IS installed and verified. naozhi may still be starting\n")
 			fmt.Fprintf(os.Stderr, "(slow cold start) OR may be failing to start. Check which:\n")
-			fmt.Fprintf(os.Stderr, "    systemctl status naozhi\n")
-			fmt.Fprintf(os.Stderr, "    journalctl -u naozhi -n 50 --no-pager\n")
-			// The backup is 0600 non-executable, so the restore MUST chmod.
+			check, rollback := restartRecovery(runtime.GOOS, selfupdate.LaunchdServiceTarget(), backupPath, selfPath)
+			for _, c := range check {
+				fmt.Fprintf(os.Stderr, "    %s\n", c)
+			}
 			fmt.Fprintf(os.Stderr, "To roll back to the previous binary:\n")
-			fmt.Fprintf(os.Stderr, "    sudo cp %s %s && sudo chmod 0755 %s && sudo systemctl restart naozhi\n",
-				backupPath, selfPath, selfPath)
+			fmt.Fprintf(os.Stderr, "    %s\n", rollback)
 		}
 	} else if !serviceWasRunning {
 		fmt.Printf("Service not running — skipping restart.\n")
@@ -115,6 +125,43 @@ Flags:
 	if *noRestart || !serviceWasRunning {
 		fmt.Printf("  Restart the service manually to apply the new binary.\n")
 	}
+}
+
+const (
+	// upgradeCheckTimeout bounds the release lookup (one redirect).
+	upgradeCheckTimeout = 60 * time.Second
+	// upgradeRestartTimeout covers systemd's wait for the unit to come back
+	// active (3 minutes) with room to spare; launchd's kickstart does not wait.
+	upgradeRestartTimeout = 4 * time.Minute
+)
+
+// stepErr says which budget ran out when a step's own context expired, since
+// "context deadline exceeded" alone does not tell a slow download from a hung
+// restart.
+func stepErr(ctx context.Context, err error, budget time.Duration) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("timed out after %s: %w", budget, err)
+	}
+	return err
+}
+
+// restartRecovery returns the commands to check on the service and the one
+// that restores the previous binary when the restart was not confirmed. The
+// backup is 0600 non-executable, so the restore MUST chmod. On macOS the
+// service is a LaunchAgent of this user: launchctl, no sudo; launchdTarget is
+// "" when the job could not be confirmed, then only the restore is printed
+// (a guessed kickstart would fail inside the && chain).
+func restartRecovery(goos, launchdTarget, backupPath, selfPath string) (check []string, rollback string) {
+	if goos == "darwin" {
+		rollback = fmt.Sprintf("cp %s %s && chmod 0755 %s", backupPath, selfPath, selfPath)
+		if launchdTarget == "" {
+			return nil, rollback
+		}
+		return []string{"launchctl print " + launchdTarget},
+			rollback + " && launchctl kickstart -k " + launchdTarget
+	}
+	return []string{"systemctl status naozhi", "journalctl -u naozhi -n 50 --no-pager"},
+		fmt.Sprintf("sudo cp %s %s && sudo chmod 0755 %s && sudo systemctl restart naozhi", backupPath, selfPath, selfPath)
 }
 
 type upgradeAction int

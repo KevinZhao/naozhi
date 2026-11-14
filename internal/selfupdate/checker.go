@@ -129,6 +129,11 @@ type Checker struct {
 	// both reading "not installed" would both Replace(), and the second Replace
 	// copies the new binary over the backup, destroying the rollback artifact.
 	installMu sync.Mutex
+
+	// now is the wall clock Run schedules by and pollEvery how often it looks;
+	// both are fields so tests can jump the clock past a simulated sleep.
+	now       func() time.Time
+	pollEvery time.Duration
 }
 
 // minOnDemandInterval throttles CheckNow globally — every open browser tab
@@ -144,11 +149,17 @@ func NewChecker(cfg CheckerConfig) *Checker {
 	if cfg.Mode == "" {
 		cfg.Mode = ModeDownload
 	}
-	return &Checker{cfg: cfg}
+	return &Checker{cfg: cfg, now: wallNow, pollEvery: defaultPollEvery}
 }
 
 // Run blocks until ctx is cancelled, checking on the configured cadence. A
 // failing check logs and the loop continues; it must never take down the gateway.
+//
+// The schedule is kept in wall-clock time and polled every pollEvery. A
+// time.Ticker runs on the monotonic clock, which on macOS stops while the
+// machine sleeps: a laptop asleep most of the night went a day without a
+// check, and the one check it did make right after waking hit DNS before the
+// network was back, then waited another six awake hours.
 func (c *Checker) Run(ctx context.Context) {
 	if c == nil {
 		return
@@ -159,61 +170,127 @@ func (c *Checker) Run(ctx context.Context) {
 		"check_on_start", c.cfg.CheckOnStart,
 		"current_version", c.cfg.CurrentVersion)
 
+	next := c.now().Add(c.cfg.Interval)
 	if c.cfg.CheckOnStart {
 		// Delay so startup is not competing with network I/O and a crash-restart
 		// loop on a bad release cannot instantly re-trigger work.
-		startDelay := time.NewTimer(30 * time.Second)
-		defer startDelay.Stop()
-		select {
-		case <-ctx.Done():
-			return
-		case <-startDelay.C:
-			c.checkOnce(ctx)
-		}
+		next = c.now().Add(checkOnStartDelay)
 	}
-
-	ticker := time.NewTicker(c.cfg.Interval)
-	defer ticker.Stop()
+	failures := 0
 	for {
-		select {
-		case <-ctx.Done():
+		now := c.now()
+		// A clock set backwards must not push the check out beyond an interval.
+		if next.Sub(now) > c.cfg.Interval {
+			next = now.Add(c.cfg.Interval)
+		}
+		wait := next.Sub(now)
+		if wait > c.pollEvery {
+			wait = c.pollEvery
+		}
+		if wait > 0 {
+			t := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				slog.Info("auto-update checker stopped")
+				return
+			case <-t.C:
+			}
+		}
+		if ctx.Err() != nil {
 			slog.Info("auto-update checker stopped")
 			return
-		case <-ticker.C:
-			c.checkOnce(ctx)
 		}
+		if c.now().Before(next) {
+			continue
+		}
+		if err := c.checkOnce(ctx); err != nil {
+			failures++
+			retry := retryDelay(failures, c.cfg.Interval)
+			next = c.now().Add(retry)
+			slog.Info("auto-update: retrying the failed check", "in", retry.String(), "consecutive_failures", failures)
+			continue
+		}
+		failures = 0
+		next = c.now().Add(c.cfg.Interval)
 	}
 }
 
+// checkOnStartDelay is how long after Run a CheckOnStart check waits.
+const checkOnStartDelay = 30 * time.Second
+
+// defaultPollEvery is how often Run compares the wall clock against the next
+// check: after a sleep the overdue check runs within this much awake time.
+const defaultPollEvery = time.Minute
+
+// retryBackoff is the wait after the 1st, 2nd, 3rd… consecutive failed
+// lookup; past the end it doubles, and retryDelay caps it at the interval. A
+// failure right after waking is usually the network not being back yet, so
+// the first retry comes soon.
+var retryBackoff = []time.Duration{5 * time.Minute, 15 * time.Minute, 30 * time.Minute, time.Hour}
+
+// retryDelay returns the wait before retrying after `failures` consecutive
+// failed lookups, never more than interval.
+func retryDelay(failures int, interval time.Duration) time.Duration {
+	if failures < 1 {
+		failures = 1
+	}
+	var d time.Duration
+	if failures <= len(retryBackoff) {
+		d = retryBackoff[failures-1]
+	} else {
+		d = retryBackoff[len(retryBackoff)-1]
+		for i := len(retryBackoff); i < failures && d < interval; i++ {
+			d *= 2
+		}
+	}
+	if d > interval {
+		d = interval
+	}
+	return d
+}
+
+// wallNow is time.Now without the monotonic reading, so Sub and Before compare
+// wall-clock instants and count the time the machine slept.
+func wallNow() time.Time { return time.Now().Round(0) }
+
 // checkOnce performs one poll+react cycle; all errors are logged and swallowed.
-func (c *Checker) checkOnce(ctx context.Context) {
+// It returns the release lookup's error only, so Run retries a lookup that
+// did not get through sooner than the interval. A failed install is not
+// returned: retrying it every few minutes would repeat the download and the
+// failure notice, and the next interval retries it anyway.
+func (c *Checker) checkOnce(ctx context.Context) error {
 	// Auto-replacing a dev build would silently discard a local build.
 	if c.cfg.CurrentVersion == "dev" || c.cfg.CurrentVersion == "" {
 		slog.Debug("auto-update: skipping check for dev/unknown build")
-		return
+		return nil
 	}
 
 	// A stuck connection must not pin the goroutine across a whole interval.
-	cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
-
-	rel, err := latestRelease(cctx)
+	lctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	rel, err := latestRelease(lctx)
+	cancel()
 	c.cfg.Status.noteCheck(relTag(rel), err)
 	if err != nil {
 		slog.Warn("auto-update: check failed", "err", err)
-		return
+		return err
 	}
+
+	// The download gets its own budget: fetchFile already gives up on a
+	// stalled transfer, so this only bounds a slow one that keeps moving.
+	cctx, cancel := context.WithTimeout(ctx, DownloadTimeout)
+	defer cancel()
 
 	// Strictly greater only: equality/inequality would allow a downgrade
 	// attack via a rolled-back "latest" tag.
 	if rel.Tag == c.installedTag() {
 		slog.Debug("auto-update: already installed this release", "tag", rel.Tag)
-		return
+		return nil
 	}
 	if !semverGreater(rel.Tag, c.cfg.CurrentVersion) {
 		slog.Debug("auto-update: latest is not newer than current",
 			"latest", rel.Tag, "current", c.cfg.CurrentVersion)
-		return
+		return nil
 	}
 
 	slog.Info("auto-update: newer release found",
@@ -230,6 +307,7 @@ func (c *Checker) checkOnce(ctx context.Context) {
 	case ModeAuto:
 		_ = c.installLocked(cctx, rel, true)
 	}
+	return nil
 }
 
 // installedTag reads the installed tag under installMu.
@@ -300,8 +378,8 @@ func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) err
 	slog.Info("auto-update: binary installed", "tag", rel.Tag, "path", selfPath, "restart", restart)
 
 	if !restart {
-		c.notify(fmt.Sprintf("✅ naozhi %s 已下载并安装（当前进程仍为 %s）。下次重启生效，或运行 `sudo systemctl restart naozhi`。",
-			rel.Tag, c.cfg.CurrentVersion))
+		c.notify(fmt.Sprintf("✅ naozhi %s 已下载并安装（当前进程仍为 %s）。下次重启生效，或运行 `%s`。",
+			rel.Tag, c.cfg.CurrentVersion, restartCommand()))
 		// The backup stays as the manual rollback artifact until a restart.
 		_ = backupPath
 		return nil
@@ -321,7 +399,7 @@ func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) err
 		// Staged (with LastErr), not Failed: Failed would invite a retry of an
 		// install that already completed — the backup-destroying path.
 		c.cfg.Status.notePhase(PhaseStaged, rel.Tag, err)
-		c.notify(fmt.Sprintf("⚠️ naozhi %s 已安装但重启触发失败：%v。请手动 `sudo systemctl restart naozhi`。", rel.Tag, err))
+		c.notify(fmt.Sprintf("⚠️ naozhi %s 已安装但重启触发失败：%v。请手动 `%s`。", rel.Tag, err, restartCommand()))
 		return err
 	}
 	// Restart queued; this process is about to receive SIGTERM.
