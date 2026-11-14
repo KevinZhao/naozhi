@@ -19,7 +19,7 @@ RFC 是落地前的设计取舍与实测记录，**不是最终规范**——架
 | [dashboard-update-notice.md](dashboard-update-notice.md) | 已实装 | 新版本发现与一键生效 |
 | [event-log-persistence.md](event-log-persistence.md) | v3 GA | EventLog 磁盘持久化 |
 | [memory-link-rendering.md](memory-link-rendering.md) | 已实装（#261） | memory 链接渲染 |
-| [meeting-notes.md](meeting-notes.md) | Draft v1（方向待确认，未实施） | 会议录音、转写与纪要：Mac 线上会议自动录（进程音频捕获 + 麦克风两条音轨）、现场会议与手机 dashboard 录音、本机 Qwen3-ASR 识别、纪要进成品库、待办进任务，决策 MR1–MR7 |
+| [meeting-notes.md](meeting-notes.md) | Draft v2（MR8 定做常开录音，未实施） | 会议录音、转写与纪要：Mac 线上会议自动录（进程音频捕获 + 麦克风两条音轨）、现场会议与手机 dashboard 录音、本机 Qwen3-ASR 识别、纪要进成品库、待办进任务；常开录音可行性实测（§12），决策 MR1–MR8 |
 | [multi-backend.md](multi-backend.md) | 已实装（v2，基于实测） | Claude + Kiro 多 backend |
 | [naozhi-owned-settings-v3.md](naozhi-owned-settings-v3.md) | 部分实装：PR-1/PR-2 已交付，PR-3（thinking 旋钮）、PR-4（UI）未做 | naozhi 独立 settings |
 | [node-pairing.md](node-pairing.md) | Draft v1（未实施） | `naozhi node add` / `naozhi join` |
