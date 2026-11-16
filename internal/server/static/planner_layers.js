@@ -22,10 +22,14 @@
 // the gateway's markers, and what cannot be told stays in 对话.
 //
 // planner_view.js puts an invisible marker (.pl-turn, markerHtml) before
-// each turn's first element; layerStream reads the stream in order, each
-// element belonging to the marker before it (a report or reminder line to
-// its own), and folds. It runs after every repaint of the stream and is
-// idempotent: the rows are rebuilt each time, what was unfolded kept by ID.
+// each turn's first element and one (.pl-end, endHtml) where a turn's result
+// came; layerStream reads the stream in order, each element belonging to the
+// marker before it (a report or reminder line to its own), and folds. A
+// SendMessage the CLI delivered before the turn under way had its result is
+// part of that turn (a queued_command), so it is an entry of its own and the
+// turn goes on as it began. layerStream runs after every repaint of the
+// stream and is idempotent: a row whose entries did not change is the same
+// node, so what was opened or selected inside it stays.
 import { NZ_CONTRACT } from './contract.js';
 import { esc, escAttr, registerActions } from './nz_util.js';
 import { renderMd, runPendingAsync } from './render_md.js';
@@ -49,7 +53,10 @@ const LOOKUP_RE = /^<naozhi-lookup /;
 // handoffPrompt), HANDOFF_RE the new conversation's first message with it
 // (handoffMessage).
 const SHIFT_ASK_RE = /^现在换班：/;
-const HANDOFF_RE = /^<naozhi-handoff day="(\d{4}-\d\d-\d\d)">\n?([\s\S]*?)(?:<\/naozhi-handoff>|$)/;
+// A handoff's day names its summary: the shift day, with "-v<N>" or
+// "-c<n>" after it for a change an upgrade or the size forced
+// (agent.changeShift).
+const HANDOFF_RE = /^<naozhi-handoff day="(\d{4}-\d\d-\d\d)[^"]*">\n?([\s\S]*?)(?:<\/naozhi-handoff>|$)/;
 // ANSWER_RE is your answer as the gateway tells it (planner/action decideAsk):
 // the question, the answer, then what became of a relay, which starts with
 // one of the gateway's own sentences.
@@ -66,6 +73,13 @@ const SEND_ERROR_RE = /^没有发出：/;
 // KEY_RE finds the session a receipt is about: a dispatched session's key,
 // or a dashboard or IM session's (custody's receipts).
 const KEY_RE = /\btask:[A-Za-z0-9_-]+|\b(?:dashboard|feishu|slack|discord|weixin):[a-z]+:[\w.#@-]+:[\w-]+/;
+// SNAPSHOT_ANY_RE is a snapshot block wherever it sits (a wake block leads
+// and the snapshot follows it), cut off or whole: the sessions it lists are
+// not what the turn is about.
+const SNAPSHOT_ANY_RE = /<naozhi-snapshot(?:\s[^>]*\/>|[\s>][\s\S]*?(?:<\/naozhi-snapshot>|$))/g;
+// BY_SOURCE are the turns named by their source alone: what a scout run, a
+// pre-meeting brief or a lookup brought in names sessions of its own.
+const BY_SOURCE = new Set(['scout', 'briefing', 'lookup']);
 
 // SOURCE_NAME names an entry by where it came from when no session does.
 const SOURCE_NAME = {
@@ -78,9 +92,10 @@ const MODE_KEY = 'plannerLayer';
 
 const lay = {
   mode: lsGet(MODE_KEY, 'talk') === 'all' ? 'all' : 'talk',
-  // resultAt is the newest turn end seen (a result event, or the process
-  // going idle): a turn begun after it is still being worked on.
-  resultAt: 0,
+  // running is whether the Planner is on a turn as the server last said
+  // (GET /api/planner, a session_state frame), null when it has not: a
+  // turn cut off without a result is over once it says no.
+  running: null,
   busy: false,
   rows: new Set(), // the rows unfolded, by their first entry's ID
   lines: new Set(), // the entries unfolded to their whole reply
@@ -152,13 +167,13 @@ export function plannerHead(e) {
   else if (src) kind = src === ANSWER ? ANSWER : 'user';
   else kind = textKind(text);
   const head = { id, at, kind, layer: kind === 'shift' ? 'shift' : DYNAMIC.has(kind) ? 'dyn' : 'talk' };
-  if (head.layer === 'dyn') head.key = (KEY_RE.exec(text) || [''])[0];
+  if (head.layer === 'dyn' && !BY_SOURCE.has(kind)) head.key = (KEY_RE.exec(text.replace(SNAPSHOT_ANY_RE, '')) || [''])[0];
   if (kind === 'shift') {
     const h = HANDOFF_RE.exec(text);
     if (h) {
       head.day = h[1];
       lay.handoffs.set(id, h[2].trim());
-    }
+    } else if (SHIFT_ASK_RE.test(text)) head.ask = true;
   }
   return head;
 }
@@ -169,20 +184,20 @@ export function markerHtml(h) {
   return '<div class="pl-turn" hidden data-pl-id="' + escAttr(h.id) + '" data-pl-kind="' + escAttr(h.kind) +
     '" data-pl-layer="' + h.layer + '" data-time="' + (h.at || 0) + '"' +
     (h.alone ? ' data-pl-alone="1"' : '') + (h.key ? ' data-pl-key="' + escAttr(h.key) + '"' : '') +
-    (h.name ? ' data-pl-name="' + escAttr(h.name) + '"' : '') + (h.day ? ' data-pl-day="' + escAttr(h.day) + '"' : '') + '></div>';
+    (h.name ? ' data-pl-name="' + escAttr(h.name) + '"' : '') + (h.day ? ' data-pl-day="' + escAttr(h.day) + '"' : '') +
+    (h.ask ? ' data-pl-ask="1"' : '') + '></div>';
 }
 
-// noteEvents takes the turn ends among events taken into the stream; reset
-// for a first page, which replaces what was known.
-export function noteEvents(events, reset) {
-  if (reset) lay.resultAt = 0;
-  for (const e of events) if (e && e.type === 'result' && (e.time || 0) > lay.resultAt) lay.resultAt = e.time;
+// endHtml is the invisible element where a turn's result came, for a
+// result event; '' for any other.
+export function endHtml(e) {
+  return e && e.type === 'result' ? '<div class="pl-end" hidden data-time="' + (e.time || 0) + '"></div>' : '';
 }
 
-// noteIdle is the Planner's process going idle or away: whatever turn was
-// open has ended, with or without a result.
-export function noteIdle() {
-  lay.resultAt = Math.max(lay.resultAt, Date.now());
+// noteRunning takes what the server says of the Planner's process: on a
+// turn (true), idle or gone (false); anything else leaves it unknown.
+export function noteRunning(on) {
+  lay.running = typeof on === 'boolean' ? on : null;
 }
 
 // plannerBusy reports whether the Planner is on a turn you did not start
@@ -196,30 +211,33 @@ export const layerMode = () => lay.mode;
 function itemOf(m) {
   const d = m.dataset;
   return { id: d.plId || '', kind: d.plKind || '', layer: d.plLayer || 'talk', alone: !!d.plAlone, at: Number(d.time || 0),
-    key: d.plKey || '', name: d.plName || '', day: d.plDay || '', marker: m, els: [], run: null };
+    key: d.plKey || '', name: d.plName || '', day: d.plDay || '', ask: !!d.plAsk, marker: m, els: [], run: null };
 }
 
 // shows reports whether an element of a turn you started is something to
 // read: a hidden empty reply or a time divider is not, and leaves a run of
 // 动态 whole.
-const shows = (c) => !c.matches('.pl-ev-empty, .event-time-divider, .pl-turn');
+const shows = (c) => !c.matches('.pl-ev-empty, .event-time-divider, .pl-turn, .pl-end');
 
 // layerStream folds the stream (#pl-stream) as the mode says and works out
 // whether the Planner is on a turn you did not start.
 export function layerStream(box) {
   if (!box) return;
-  // The rows are rebuilt as events stream in: a row's button holding the
-  // focus gets it back.
+  // A row built again as events stream in: its button holding the focus
+  // gets it back.
   const f = document.activeElement;
   const fRow = f && box.contains(f) ? f.closest('.pl-dyn, .pl-shift') : null;
   const refocus = fRow ? { id: fRow.dataset.id, item: f.closest('.pl-dyn-item')?.dataset.id || '', act: f.dataset.action || '' } : null;
-  box.querySelectorAll(':scope > .pl-dyn, :scope > .pl-shift').forEach((n) => n.remove());
+  const old = new Map();
+  const rowKey = (n) => (n.matches('.pl-dyn') ? 'dyn ' : 'shift ') + n.dataset.id;
+  box.querySelectorAll(':scope > .pl-dyn, :scope > .pl-shift').forEach((n) => old.set(rowKey(n), n));
   box.querySelectorAll(':scope > .pl-folded').forEach((n) => n.classList.remove('pl-folded'));
   const talk = lay.mode === 'talk';
   box.classList.toggle('pl-talk', talk);
   const runs = [];
   let run = null;
   let cur = null; // the turn the elements belong to
+  let open = false; // cur has had no result yet
   let alone = null; // an entry of its own, until its element
   let last = null; // the last turn begun
   const close = () => { if (run) runs.push(run); run = null; };
@@ -229,15 +247,21 @@ export function layerStream(box) {
     if (!it.run) { it.run = run; run.items.push(it); }
   };
   for (const c of [...box.children]) {
+    if (c.matches('.pl-dyn, .pl-shift')) continue;
+    if (c.matches('.pl-end')) { open = false; continue; }
     if (c.matches('.pl-turn')) {
       const it = itemOf(c);
+      // A SendMessage before the turn under way ended came into that turn.
+      if (it.kind === 'peer' && cur && open) it.alone = true;
       if (it.alone) alone = it;
-      else { cur = it; alone = null; last = it; }
+      else { cur = it; alone = null; last = it; open = true; }
       if (it.layer !== 'talk') join(it, c);
       continue;
     }
     // A brief, the bubble of what you just sent, the empty conversation's
-    // text: in view whatever turn they fall in.
+    // text: in view whatever turn they fall in. The morning brief comes as
+    // the shift changes: the change stays one line above it.
+    if (c.matches('.pl-brief') && run && run.type === 'shift') continue;
     if (c.matches('.pl-brief, .pl-pending, .pl-empty')) { close(); continue; }
     const it = alone || cur;
     if (alone && c.matches('.event')) alone = null;
@@ -250,15 +274,44 @@ export function layerStream(box) {
     if (talk) c.classList.add('pl-folded');
   }
   close();
-  lay.busy = !!last && last.layer !== 'talk' && last.at > lay.resultAt;
-  if (!talk) return;
-  for (const r of runs) {
-    const items = r.type === 'dyn' ? mergeReports(r.items) : r.items;
-    const el = r.type === 'dyn' ? rowEl(items, last) : shiftEl(items);
-    r.first.before(el);
+  lay.busy = !!last && last.layer !== 'talk' && open && lay.running !== false;
+  const kept = new Set();
+  if (talk) {
+    for (const r of runs) {
+      const items = r.type === 'dyn' ? mergeReports(r.items) : r.items;
+      const fresh = r.type === 'dyn' ? rowEl(items, last) : shiftEl(items);
+      const prev = old.get(rowKey(fresh));
+      const el = prev && prev.dataset.sig === fresh.dataset.sig ? keep(prev, fresh) : fresh;
+      if (el === fresh && prev) carryOpen(prev, fresh);
+      kept.add(el);
+      // Moving a node in place would drop a selection inside it.
+      if (el.nextElementSibling !== r.first) r.first.before(el);
+    }
   }
+  for (const n of old.values()) if (!kept.has(n)) n.remove();
   if (refocus) focusAgain(box, refocus);
   runPendingAsync();
+}
+
+// keep is a row as it was, its entries the ones read now: what it says
+// (dataset.sig) and the bubbles of each entry did not change, and the
+// copies of an unfolded line stay as the user left them.
+function keep(prev, fresh) {
+  prev._items = fresh._items;
+  return prev;
+}
+
+// carryOpen moves the unfolded lines of a row that changed to its new
+// copy, where the entry still has the same bubbles: a card opened inside
+// stays open.
+function carryOpen(prev, fresh) {
+  prev.querySelectorAll('.pl-dyn-item').forEach((box) => {
+    const full = box.querySelector(':scope > .pl-dyn-full');
+    const to = full && fresh.querySelector('.pl-dyn-item[data-id="' + CSS.escape(box.dataset.id) + '"]');
+    if (!to || to.dataset.n !== box.dataset.n) return;
+    to.querySelector(':scope > .pl-dyn-full')?.remove();
+    to.appendChild(full);
+  });
 }
 
 function focusAgain(box, r) {
@@ -359,15 +412,17 @@ function rowEl(items, last) {
       '<span class="pl-dyn-mark" aria-hidden="true">' + (open ? '▾' : '▸') + '</span> <span class="pl-dyn-when">' + esc(whenText(items)) + '</span> · ' +
       items.length + ' 条动态<span class="pl-dyn-who">（' + esc(namedText(names)) + '）</span></button>' +
     '<div class="pl-dyn-list"' + (open ? '' : ' hidden') + '>' + items.map((it, i) => lineHtml(it, names[i], last)).join('') + '</div>';
+  row.dataset.sig = [whenText(items), namedText(names), ...items.map((it, i) => it.id + ':' + it.els.length + ':' + names[i] + ':' + entryLine(it, last) + ':' + asksYou(it))].join('|');
   for (const it of items) if (lay.lines.has(it.id)) fillLine(row.querySelector('.pl-dyn-item[data-id="' + CSS.escape(it.id) + '"]'), it);
   row._items = items;
   return row;
 }
 
+
 function lineHtml(it, name, last) {
   const open = lay.lines.has(it.id);
   const one = entryLine(it, last);
-  return '<div class="pl-dyn-item" data-id="' + escAttr(it.id) + '">' +
+  return '<div class="pl-dyn-item" data-id="' + escAttr(it.id) + '" data-n="' + it.els.length + '">' +
     '<button type="button" class="pl-dyn-line" data-action="planner-dyn-line" aria-expanded="' + open + '" title="' + escAttr(formatAbsTime(it.at)) + '">' +
       '<span class="pl-dyn-t">' + esc(hm(it.at)) + '</span><span class="pl-dyn-src">' + esc(name) + '</span>' +
       (one ? '<span class="pl-dyn-one">' + esc(one) + '</span>' : '') +
@@ -405,6 +460,7 @@ function shiftEl(items) {
   el.innerHTML = '<button type="button" class="pl-shift-h" data-action="planner-shift" aria-expanded="' + open + '" title="' + escAttr(formatAbsTime(items[0].at)) + '">' +
     '—— ' + esc(day) + ' 换班 · 看交接 <span class="pl-dyn-mark" aria-hidden="true">' + (open ? '▾' : '▸') + '</span> ——</button>' +
     '<div class="pl-shift-body"' + (open ? '' : ' hidden') + '></div>';
+  el.dataset.sig = [day, ...items.map((it) => it.id + ':' + it.els.length)].join('|');
   el._items = items;
   if (open) fillShift(el);
   return el;
@@ -419,7 +475,7 @@ function fillShift(el) {
   const body = el.querySelector('.pl-shift-body');
   if (!body || body.childNodes.length) return;
   const items = el._items || [];
-  const asked = items.find((it) => !it.day);
+  const asked = items.find((it) => it.ask);
   const replies = asked ? asked.els.filter((n) => n.matches('.event.text') && !n.matches('.pl-ev-empty')) : [];
   if (replies.length) {
     for (const r of replies) {

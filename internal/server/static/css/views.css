@@ -438,7 +438,7 @@ div.pl-lookup{max-width:560px;margin:8px 0;padding:8px 12px;border:1px solid var
 .pl-layer-b:hover{color:var(--nz-text)}
 .pl-layer-tool{display:none}
 .pl-layer-tool .pl-layer{align-self:flex-start}
-#pl-stream>.pl-turn,#pl-stream.pl-talk>.pl-folded{display:none}
+#pl-stream>.pl-turn,#pl-stream>.pl-end,#pl-stream.pl-talk>.pl-folded{display:none}
 .pl-dyn,.pl-shift{width:100%;max-width:clamp(760px,65vw,1200px);margin:6px auto;padding:0 24px;box-sizing:border-box;font-size:var(--nz-fs-sm)}
 .pl-dyn-h,.pl-shift-h{display:block;max-width:100%;padding:2px 6px;border:0;border-radius:var(--nz-radius-sm);background:none;color:var(--nz-text-dim);font-family:inherit;font-size:var(--nz-fs-sm);text-align:left;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pl-dyn-h:hover,.pl-shift-h:hover{background:var(--nz-bg-2);color:var(--nz-text)}

@@ -247,6 +247,23 @@ func TestStatusWorkspaces(t *testing.T) {
 	}
 }
 
+// TestStatusRunning: the status says whether a turn is in flight, so the
+// page knows a turn cut off without a result is over (§15.14 ②).
+func TestStatusRunning(t *testing.T) {
+	now := time.Now()
+	sess := &fakeSessions{st: SessionState{Exists: true, Alive: true}}
+	a, _ := newTestAgent(t, sess, &now)
+	if a.Status().Running {
+		t.Fatal("idle: running")
+	}
+	sess.mu.Lock()
+	sess.st.Running = true
+	sess.mu.Unlock()
+	if st := a.Status(); !st.Running || !st.Alive {
+		t.Fatalf("on a turn: %+v", st)
+	}
+}
+
 // TestShiftChange drives reconcile on a fake clock: no change before 08:30,
 // one at 08:30 that stores the outgoing session's summary and hands it to
 // the new one, none again the same day.

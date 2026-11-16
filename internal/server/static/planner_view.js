@@ -64,7 +64,7 @@ import { choosePlannerNode, eventsURL, hostName, hostOnline, hostRemote, isLocal
 import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
 import { EARLIER_PAGE_LIMIT, EVENT_DIVIDER_GAP_MS, formatAbsTime, formatMonthDayTime, lastDividerTime, timeAgo, timeDividerHtml } from './utilities.js';
-import { answerOf, layerMode, layerStream, markerHtml, noteEvents, noteIdle, paintLayerSwitch, plannerBusy, plannerHead, setOnLayerChange } from './planner_layers.js';
+import { answerOf, endHtml, layerMode, layerStream, markerHtml, noteRunning, paintLayerSwitch, plannerBusy, plannerHead, setOnLayerChange } from './planner_layers.js';
 
 const PLANNER_KEY = 'planner:main';
 // EVENTS_LIMIT is the first page of the conversation; later events come in
@@ -507,6 +507,7 @@ let hostWasOnline = true;
 // onHostChanged re-runs what the page shows for the Planner now shown.
 function onHostChanged() {
   pl.status = null;
+  noteRunning(null);
   pl.briefs = [];
   pl.notes = [];
   pl.open = [];
@@ -751,6 +752,7 @@ async function fetchStatus() {
     const s = await fetchJSON(plannerAPI(NZ_CONTRACT.API.planner), { timeoutMs: 8000 });
     if (host !== plannerHost.node) return;
     pl.status = s;
+    noteRunning(s && s.running);
   } catch {
     if (hostRemote()) paintStatus();
     return;
@@ -895,11 +897,13 @@ const RENDER_OPTS = { key: PLANNER_KEY };
 
 // renderPlanner renders events as the conversation shows them, a time
 // divider where the gap since the bubble before (at prevTime) asks for
-// one, and before each turn the marker planner_layers.js folds it by.
+// one, and the markers planner_layers.js folds by: before each turn, and
+// where its result came.
 function renderPlanner(events, prevTime) {
   let html = '';
   let last = prevTime || 0;
   for (const e of events) {
+    html += endHtml(e);
     const head = plannerHead(e);
     if (head) html += markerHtml(head);
     for (const p of plannerEvents(e)) {
@@ -969,7 +973,6 @@ function appendEvents(events, reset) {
   const fresh = events.filter((e) => admitEvent(e) && !isAck(e));
   const shown = fresh.flatMap(plannerEvents);
   const html = renderPlanner(fresh, reset ? 0 : lastDividerTime(box));
-  noteEvents(fresh, reset);
   followAck(shown);
   if (reset) box.innerHTML = html;
   else if (fresh.length) {
@@ -1338,7 +1341,7 @@ wsm.on(NZ_CONTRACT.WS.send_error, (msg) => {
 // a timed-out push loop ends it, and polling covers until the next one.
 wsm.on(NZ_CONTRACT.WS.session_state, (msg) => {
   if (msg.state === 'dead') dropAck();
-  if (msg.state === 'ready' || msg.state === 'dead') { noteIdle(); if (pl.host) relayer(); }
+  if (msg.state === 'running' || msg.state === 'ready' || msg.state === 'dead') { noteRunning(msg.state === 'running'); if (pl.host) relayer(); }
   if (msg.state === 'running' && pl.sub === 'suspended') subscribe();
   else if (pl.sub && (msg.state === 'dead' || msg.reason === 'subscription_timeout')) pl.sub = '';
 }, ours);
@@ -1408,6 +1411,7 @@ registerActions({
       pl.status = await fetchJSON(plannerAPI(NZ_CONTRACT.API.planner_state), {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ stopped }), timeoutMs: 15000,
       });
+      noteRunning(pl.status && pl.status.running);
       notePlannerStatus(pl.status);
     } catch (e) {
       showToast((stopped ? '停用' : '恢复') + '失败：' + e.message, 'error');

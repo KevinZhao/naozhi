@@ -237,3 +237,153 @@ test('the drawer folds as the page does', async ({ browser }) => {
     await new Promise((r) => mock.server.close(r));
   }
 });
+
+test('a SendMessage that came into your turn stays out of your answer', async ({ browser }) => {
+  test.setTimeout(60000);
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await ctx.newPage();
+  // The CLI delivered the session's SendMessage while it was on your turn
+  // (a queued_command): the rest of the turn answers you.
+  const events = [
+    { type: 'user', detail: snap + 'iso 任务都怎么样了', time: at(0), uuid: 'mt-u1' },
+    { type: 'text', detail: 'iso 我先查一下。', time: at(0.1), uuid: 'mt-t1' },
+    { type: 'peer_message', peer: 'iso-docs', peer_key: DOCS, detail: 'iso 文档写到一半。', summary: 'iso 文档写到一半。', time: at(0.2), uuid: 'mt-p1' },
+  ];
+  const mock = await startMockServer({ ws: true, plannerEvents: events, tasks: tasks(), planner: { ...planner, running: true } });
+  try {
+    await openPlanner(page, mock);
+    const stream = page.locator('#pl-stream');
+    await expect(stream.getByText('iso 我先查一下。')).toBeVisible();
+    await expect(stream.locator('.pl-dyn .pl-dyn-h')).toContainText('1 条动态（iso 写文档）');
+    await expect(stream.locator('.event.peer_message:visible')).toHaveCount(0);
+    // Your turn, still under way: it streams, the header says nothing.
+    events.push({ type: 'text', detail: 'iso 结论：三个任务都在跑，没有卡住。', time: at(0.3), uuid: 'mt-t2' });
+    await expect(stream.getByText('iso 结论：三个任务都在跑，没有卡住。')).toBeVisible();
+    await expect(page.locator('#pl-status')).toHaveText('');
+    events.push({ type: 'result', time: at(0.4), uuid: 'mt-r1' });
+    // After the result, a SendMessage starts a turn of its own: 动态.
+    events.push({ type: 'peer_message', peer: 'iso-docs', peer_key: DOCS, detail: 'iso 文档写完了。', summary: 'iso 文档写完了。', time: at(5), uuid: 'mt-p2' },
+      { type: 'text', detail: 'iso 文档那边写完了。', time: at(5.1), uuid: 'mt-t3' });
+    await expect(stream.locator('.pl-dyn')).toHaveCount(2);
+    await expect(stream.locator('.event.text', { hasText: 'iso 文档那边写完了。' })).toBeHidden();
+    await expect(page.locator('#pl-status')).toHaveText('处理汇报中');
+    const order = await stream.evaluate((box) => [...box.children].filter((c) => c.offsetParent !== null)
+      .map((c) => (c.matches('.pl-dyn') ? 'row' : c.matches('.event.user') ? 'you' : c.matches('.event.text') ? 'reply' : '')).filter(Boolean));
+    expect(order).toEqual(['you', 'reply', 'row', 'reply', 'row']);
+  } finally {
+    await ctx.close();
+    await new Promise((r) => mock.server.close(r));
+  }
+});
+
+test('what is opened in an unfolded entry stays open as the page refreshes', async ({ browser }) => {
+  test.setTimeout(60000);
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await ctx.newPage();
+  const mock = await startMockServer({ ws: true, plannerEvents: plannerEvents(), tasks: tasks(), planner });
+  try {
+    await openPlanner(page, mock);
+    const row = page.locator('#pl-stream .pl-dyn');
+    await row.locator('.pl-dyn-h').click();
+    await row.locator('.pl-dyn-line').nth(1).click();
+    const peer = row.locator('.pl-dyn-item').nth(1).locator('.pl-dyn-full details.pl-peer');
+    await peer.locator('summary').click();
+    await expect(peer).toHaveAttribute('open', '');
+    await peer.evaluate((el) => { el.dataset.mark = 'kept'; });
+    // The stream is folded again for every repaint: the state frames, the
+    // session list's poll, a 任务 list, a new event.
+    for (const c of mock.wsConnections) {
+      c.send({ type: 'session_state', key: PLANNER, state: 'running' });
+      c.send({ type: 'session_state', key: PLANNER, state: 'ready' });
+      c.send({ type: 'event', key: PLANNER, event: { type: 'user', detail: snap + 'iso 再看看', time: at(57), uuid: 'keep-u' } });
+    }
+    await expect(page.locator('#pl-stream').getByText('iso 再看看')).toBeVisible();
+    await expect(row.locator('details.pl-peer[data-mark="kept"]')).toHaveAttribute('open', '');
+  } finally {
+    await ctx.close();
+    await new Promise((r) => mock.server.close(r));
+  }
+});
+
+test('a turn cut off without a result is over once the Planner is idle', async ({ browser }) => {
+  test.setTimeout(60000);
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await ctx.newPage();
+  // The last turn, a receipt's, has no result: the watchdog killed it.
+  const events = plannerEvents().slice(0, 3).concat([
+    { type: 'user', source: 'receipt', detail: receipt(FIX + '（iso 修复批次）汇报：进行中 · iso 在跑测试'), time: at(20), uuid: 'cut-u' },
+    { type: 'text', detail: 'iso 修复批次还在跑测试。', time: at(20.1), uuid: 'cut-t' },
+  ]);
+  const status = { ...planner, running: false };
+  const mock = await startMockServer({ ws: true, plannerEvents: events, tasks: tasks(), planner: status });
+  try {
+    await openPlanner(page, mock);
+    const stream = page.locator('#pl-stream');
+    await expect(stream.locator('.pl-dyn .pl-dyn-h')).toContainText('1 条动态（iso 修复批次）');
+    await expect(page.locator('#pl-status')).toHaveText('');
+    await stream.locator('.pl-dyn-h').click();
+    await expect(stream.locator('.pl-dyn-one')).toHaveText('iso 修复批次还在跑测试。');
+    // On a turn again, and idle: as the server says.
+    for (const c of mock.wsConnections) c.send({ type: 'session_state', key: PLANNER, state: 'running' });
+    await expect(page.locator('#pl-status')).toHaveText('处理汇报中');
+    for (const c of mock.wsConnections) c.send({ type: 'session_state', key: PLANNER, state: 'ready' });
+    await expect(page.locator('#pl-status')).toHaveText('');
+  } finally {
+    await ctx.close();
+    await new Promise((r) => mock.server.close(r));
+  }
+});
+
+test('the shift change is one line: the morning brief beside it, a handoff of an upgrade, a scout named by its source', async ({ browser }) => {
+  test.setTimeout(60000);
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await ctx.newPage();
+  // The snapshot a scout run carries lists the sessions under way.
+  const fullSnap = '<naozhi-snapshot at="x">\n## 会话\n- ' + FIX + ' iso 修复批次 进行中\n</naozhi-snapshot>';
+  const events = [
+    { type: 'user', detail: snap + 'iso 早', time: at(0), uuid: 'sh-u0' },
+    { type: 'text', detail: 'iso 早。', time: at(0.1), uuid: 'sh-t0' },
+    { type: 'result', time: at(0.2), uuid: 'sh-r0' },
+    { type: 'user', source: 'scout', detail: '<naozhi-scout findings="2" run="20261116T080000-ab12">\n{}\n</naozhi-scout>\n\n' + fullSnap, time: at(5), uuid: 'sh-u1' },
+    { type: 'text', detail: 'iso 巡检两条都不急。', time: at(5.1), uuid: 'sh-t1' },
+    { type: 'result', time: at(5.2), uuid: 'sh-r1' },
+    // The brief is made while the old conversation writes its handoff.
+    { type: 'user', source: 'shift', detail: '现在换班：请写交接摘要，交给接班的新会话。', time: at(10), uuid: 'sh-u2' },
+    { type: 'text', detail: SUMMARY, time: at(10.6), uuid: 'sh-t2' },
+    { type: 'result', time: at(10.7), uuid: 'sh-r2' },
+    { type: 'user', source: 'shift', detail: '<naozhi-handoff day="2026-11-16">\n' + SUMMARY + '\n</naozhi-handoff>\n这是上一班会话留下的交接摘要。', time: at(11), uuid: 'sh-u3' },
+    { type: 'text', detail: '已接班', time: at(11.1), uuid: 'sh-t3' },
+    { type: 'result', time: at(11.2), uuid: 'sh-r3' },
+    { type: 'user', detail: snap + 'iso 好', time: at(20), uuid: 'sh-u4' },
+    { type: 'text', detail: 'iso 嗯。', time: at(20.1), uuid: 'sh-t4' },
+    { type: 'result', time: at(20.2), uuid: 'sh-r4' },
+    // An upgrade's change, its summary reused from its file: only the
+    // handoff is sent, its day the summary's name (an older entry, no source).
+    { type: 'user', detail: '<naozhi-handoff day="2026-11-16-v19">\niso 升级后的交接。\n</naozhi-handoff>\n这是上一班会话留下的交接摘要。', time: at(30), uuid: 'sh-u5' },
+    { type: 'text', detail: '已接班', time: at(30.1), uuid: 'sh-t5' },
+    { type: 'result', time: at(30.2), uuid: 'sh-r5' },
+  ];
+  const briefs = [{ day: '2026-11-16', at: new Date(at(10.3)).toISOString(), sent: true, markdown: 'iso 今天的早报' }];
+  const mock = await startMockServer({ ws: true, plannerEvents: events, tasks: tasks(), planner, plannerBriefs: briefs });
+  try {
+    await openPlanner(page, mock);
+    const stream = page.locator('#pl-stream');
+    await expect(stream.locator('.pl-brief')).toHaveCount(1);
+    const order = await stream.evaluate((box) => [...box.children].filter((c) => c.offsetParent !== null)
+      .map((c) => (c.matches('.pl-dyn') ? 'row' : c.matches('.pl-shift') ? 'shift' : c.matches('.pl-brief') ? 'brief' : c.matches('.event.user') ? 'you' : c.matches('.event.text') ? 'reply' : '')).filter(Boolean));
+    expect(order).toEqual(['you', 'reply', 'row', 'shift', 'brief', 'you', 'reply', 'shift']);
+    await expect(stream.locator('.pl-dyn .pl-dyn-h')).toContainText('1 条动态（巡检）');
+    const shifts = stream.locator('.pl-shift');
+    await shifts.nth(0).locator('.pl-shift-h').click();
+    await expect(shifts.nth(0).locator('.pl-shift-body')).toContainText('iso 修复批次已合并。');
+    await expect(shifts.nth(1).locator('.pl-shift-h')).toHaveText('—— 11-16 换班 · 看交接 ▸ ——');
+    await shifts.nth(1).locator('.pl-shift-h').click();
+    await expect(shifts.nth(1).locator('.pl-shift-body')).toContainText('iso 升级后的交接。');
+    await expect(shifts.nth(1).locator('.pl-shift-body')).not.toContainText('已接班');
+    await expect(stream.getByText('iso 升级后的交接。', { exact: false }).first()).toBeVisible();
+    await expect(stream.locator('.event.user:visible')).toHaveCount(2);
+  } finally {
+    await ctx.close();
+    await new Promise((r) => mock.server.close(r));
+  }
+});
