@@ -68,7 +68,18 @@ func (f *Feishu) DownloadFile(ctx context.Context, messageID, fileKey string) ([
 	return data, err
 }
 
-// downloadResource downloads a message resource (image/audio/file) from the Feishu API.
+// resourceQueryType maps what naozhi downloads to the resource API's `type`,
+// which takes only image and file: audio and video are fetched as file.
+func resourceQueryType(resType string) string {
+	if resType == "image" {
+		return "image"
+	}
+	return "file"
+}
+
+// downloadResource downloads a message resource (image/audio/file) from the
+// Feishu API. resType picks naozhi's cap, client and sniffing; the API's
+// `type` comes from resourceQueryType.
 func (f *Feishu) downloadResource(ctx context.Context, messageID, fileKey, resType string, maxBytes int64, defaultMIME string) ([]byte, string, error) {
 	// math.MaxInt64 would overflow maxBytes+1 and degrade LimitReader to 0 bytes.
 	if maxBytes <= 0 || maxBytes >= (1<<62) {
@@ -80,7 +91,7 @@ func (f *Feishu) downloadResource(ctx context.Context, messageID, fileKey, resTy
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET",
-		f.baseURL+"/open-apis/im/v1/messages/"+url.PathEscape(messageID)+"/resources/"+url.PathEscape(fileKey)+"?type="+url.QueryEscape(resType), nil)
+		f.baseURL+"/open-apis/im/v1/messages/"+url.PathEscape(messageID)+"/resources/"+url.PathEscape(fileKey)+"?type="+url.QueryEscape(resourceQueryType(resType)), nil)
 	if err != nil {
 		return nil, "", fmt.Errorf("create request: %w", err)
 	}

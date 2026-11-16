@@ -27,7 +27,8 @@ func (s *mediaStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case strings.Contains(r.URL.Path, "/resources/"):
 		s.downloads.Add(1)
-		if r.URL.Query().Get("type") == "audio" {
+		// The API fetches audio as type=file, so tell the two apart by key.
+		if strings.HasSuffix(r.URL.Path, "/file_1") {
 			_, _ = w.Write([]byte("OggS\x00\x02\x00\x00\x00\x00\x00\x00voice"))
 			return
 		}

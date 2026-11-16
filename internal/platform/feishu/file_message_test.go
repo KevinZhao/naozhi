@@ -295,6 +295,48 @@ func TestDownloadFile_UsesFileClient(t *testing.T) {
 	}
 }
 
+// The resource API's type takes only image and file (audio and video go as
+// file); type=audio is not one of its values.
+func TestDownloadResource_QueryType(t *testing.T) {
+	t.Parallel()
+	ogg := []byte("OggS\x00\x02\x00\x00\x00\x00\x00\x00voice")
+	png := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR")
+	cases := []struct {
+		name string
+		body []byte
+		get  func(f *Feishu) error
+		want string
+	}{
+		{"audio", ogg, func(f *Feishu) error {
+			_, _, err := f.DownloadAudio(context.Background(), "om_1", "aud_1")
+			return err
+		}, "/open-apis/im/v1/messages/om_1/resources/aud_1?type=file"},
+		{"image", png, func(f *Feishu) error {
+			_, _, err := f.DownloadImage(context.Background(), "om_1", "img_1")
+			return err
+		}, "/open-apis/im/v1/messages/om_1/resources/img_1?type=image"},
+		{"file", pdfBytes, func(f *Feishu) error {
+			_, err := f.DownloadFile(context.Background(), "om_1", "file_1")
+			return err
+		}, "/open-apis/im/v1/messages/om_1/resources/file_1?type=file"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			stub := &fileStub{body: tc.body}
+			f := newFileFeishu(t, Config{}, stub)
+			if err := tc.get(f); err != nil {
+				t.Fatalf("download: %v", err)
+			}
+			stub.mu.Lock()
+			defer stub.mu.Unlock()
+			if len(stub.queries) != 1 || stub.queries[0] != tc.want {
+				t.Errorf("requests = %q, want [%q]", stub.queries, tc.want)
+			}
+		})
+	}
+}
+
 // A file download carries the bearer token, so a 3xx is surfaced as a failure
 // rather than followed to wherever the upstream points it.
 func TestDownloadFile_DoesNotFollowRedirects(t *testing.T) {
