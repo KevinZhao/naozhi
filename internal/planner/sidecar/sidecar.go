@@ -140,12 +140,14 @@ const (
 )
 
 // TaintOf is the kind of outside content a call of tool brings in, "" for
-// none: the CLI's web tools and the web search MCP servers' tools, and
-// reading a mail's body.
+// none: the CLI's web tools, the web search MCP servers' tools and the
+// internal page read (an internal page is anyone's writing as much as a
+// public one), and reading a mail's body.
 func TaintOf(tool string) string {
 	switch {
 	case tool == "WebFetch" || tool == "WebSearch",
-		strings.HasPrefix(tool, "mcp__exa__"), strings.HasPrefix(tool, "mcp__agentcore-websearch__"):
+		strings.HasPrefix(tool, "mcp__exa__"), strings.HasPrefix(tool, "mcp__agentcore-websearch__"),
+		tool == "mcp__builder-mcp__ReadInternalWebsites":
 		return TaintWeb
 	case tool == "mcp__aws-outlook-mcp__email_read":
 		return TaintEmail

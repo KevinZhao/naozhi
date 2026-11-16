@@ -222,6 +222,9 @@ type persisted struct {
 	// ShiftAt is when the current conversation started its shift: a change
 	// by size waits sizeShiftGap from it.
 	ShiftAt time.Time `json:"shift_at,omitzero"`
+	// Held is the receipts waiting for the next one (held.go), kept so a
+	// restart loses none.
+	Held []heldReceipt `json:"held,omitempty"`
 }
 
 // Agent keeps planner:main running and takes the user's messages to it.
@@ -267,6 +270,13 @@ type Agent struct {
 	// parked is the 搁置区 the handoff check and the park block move the
 	// "等你定" items into (§15.14 ⑤).
 	parked *parked.Store
+	// tellMu serializes Tell, from the held receipts read to their drop.
+	tellMu sync.Mutex
+	// userAt is when the user last sent a message on the Planner page
+	// (Send): progress-class receipts wait chatQuiet from it (TellLater).
+	// Not kept across a restart: the first idle Planner after one gets what
+	// was held.
+	userAt time.Time
 }
 
 // ctxReading is one read of the Planner transcript's context size.
@@ -594,6 +604,7 @@ func (a *Agent) reconcile(ctx context.Context) {
 		a.changeShift(ctx, now, a.sizeShiftName(now))
 	default:
 		a.refreshReadScope(st)
+		a.flushHeld(now)
 	}
 }
 
@@ -911,13 +922,31 @@ func (a *Agent) Send(text, ref string, images []clievent.Attachment) error {
 		return err
 	}
 	turns.PlannerReceipt(Key, ReceiptText)
+	a.mu.Lock()
+	a.userAt = a.cfg.Now()
+	a.mu.Unlock()
 	return nil
 }
 
 // Tell sends the gateway's own message to the Planner: the outcome of an
 // action block (a dispatch, the user's answer). It carries no snapshot and
-// gets no receipt.
-func (a *Agent) Tell(text string) error { return a.tell(SourceReceipt, text) }
+// gets no receipt. The receipts waiting (TellLater, TellAlong) go in the
+// same turn, ahead of text; with none, an empty text sends nothing.
+// Tells run one at a time (tellMu), so two cannot both send the receipts
+// waiting, and drop only what they sent: one held meanwhile stays.
+func (a *Agent) Tell(text string) error {
+	a.tellMu.Lock()
+	defer a.tellMu.Unlock()
+	text, sent := a.withHeld(text)
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	if err := a.tell(SourceReceipt, text); err != nil {
+		return err
+	}
+	a.dropHeld(sent)
+	return nil
+}
 
 // TellRefused is Tell for the receipt of action blocks the gateway refused
 // in a turn outside content brought in: the receipt's own turn answers that

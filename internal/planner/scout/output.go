@@ -64,6 +64,40 @@ type Finding struct {
 // key is the finding's dedup key: (source, ID, kind).
 func (f Finding) key() string { return f.Source + "\x00" + f.ID + "\x00" + f.Kind }
 
+// dedupState is what, beside its key, makes a finding worth reporting
+// again: for an Asana deadline its due date and whether it is overdue as of
+// now's day ("overdue:2026-09-30", "due:2026-11-16"), so a task overdue for
+// weeks is reported once, and again only once its due date moves or it
+// turns from due today to overdue. "" for any other finding, or a due date
+// that does not parse.
+func (f Finding) dedupState(now time.Time) string {
+	if f.Source != SourceAsana || f.Kind != KindDeadline {
+		return ""
+	}
+	due, ok := dueDay(f.Due, now.Location())
+	if !ok {
+		return ""
+	}
+	today := now.Format(time.DateOnly)
+	if due < today {
+		return "overdue:" + due
+	}
+	return "due:" + due
+}
+
+// dueDay is a due time as the scout writes it, RFC 3339 or a bare date, as
+// a date in loc.
+func dueDay(s string, loc *time.Location) (string, bool) {
+	s = strings.TrimSpace(s)
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.In(loc).Format(time.DateOnly), true
+	}
+	if t, err := time.ParseInLocation(time.DateOnly, s, loc); err == nil {
+		return t.Format(time.DateOnly), true
+	}
+	return "", false
+}
+
 // Cursors are where each source was last read up to: a time or an ID, as
 // the scout session wrote it; "" is never read.
 type Cursors struct {

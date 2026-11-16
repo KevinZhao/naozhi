@@ -126,6 +126,11 @@ func (l Layout) NaozhiSettingsPath() string { return l.Join("naozhi-settings.jso
 // instance (docs note in internal/uiprefs).
 func (l Layout) UISettingsPath() string { return l.Join("ui-settings.json") }
 
+// UpdateSchedulePath is the auto-update checker's next check time
+// (<root>/update-check.json), kept so a restart does not start the interval
+// over.
+func (l Layout) UpdateSchedulePath() string { return l.Join("update-check.json") }
+
 // ProjectsIndexPath is naozhi's per-project bookkeeping for projects.root
 // (<root>/projects-index.json): the sidebar order of projects whose
 // .naozhi/project.yaml carries none, so discovery never writes into a
@@ -225,9 +230,14 @@ func (l Layout) ScoutMCPConfigPath() string { return l.Join("session-settings", 
 // (<root>/planner/reader).
 func (l Layout) PlannerReaderRoot() string { return l.Join("planner", "reader") }
 
+// PlannerGitHubRoot holds one markdown file of GitHub issues per
+// registered repository, for the Planner to read (<root>/planner/github,
+// docs/rfc/planner.md §15.14 ⑤).
+func (l Layout) PlannerGitHubRoot() string { return l.Join("planner", "github") }
+
 // ReaderMCPConfigPath is a lookup's reader session's --mcp-config,
-// cli.mcp_config cut down to the web search servers, beside the scout's
-// (<root>/session-settings/reader-mcp.json).
+// cli.mcp_config cut down to the web search servers and the internal page
+// read, beside the scout's (<root>/session-settings/reader-mcp.json).
 func (l Layout) ReaderMCPConfigPath() string { return l.Join("session-settings", "reader-mcp.json") }
 
 // TaskMCPConfigPath is the --mcp-config of a dispatched session whose

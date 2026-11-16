@@ -158,24 +158,29 @@ func TestLookupLongAnswer(t *testing.T) {
 
 // fakeSession answers every reader session with reply, counting the runs.
 type fakeSession struct {
-	mu    sync.Mutex
-	reply string
-	keys  []string
-	opts  []sessionview.AgentOpts
+	mu      sync.Mutex
+	reply   string
+	keys    []string
+	opts    []sessionview.AgentOpts
+	prompts []string
 }
 
-func (f *fakeSession) run(_ context.Context, key string, opts sessionview.AgentOpts, _ string) (string, []string, error) {
+func (f *fakeSession) run(_ context.Context, key string, opts sessionview.AgentOpts, prompt string) (string, []string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.keys, f.opts = append(f.keys, key), append(f.opts, opts)
+	f.keys, f.opts, f.prompts = append(f.keys, key), append(f.opts, opts), append(f.prompts, prompt)
 	return f.reply, []string{"mcp__exa__web_search_exa"}, nil
 }
 
 func newReader(t *testing.T, sess *fakeSession, shift *string, now *time.Time) (*Reader, chan string) {
+	return newReaderMCP(t, sess, shift, now, `{"mcpServers":{"exa":{"type":"stdio","command":"x"},"aws-outlook-mcp":{"type":"stdio","command":"y"}}}`)
+}
+
+func newReaderMCP(t *testing.T, sess *fakeSession, shift *string, now *time.Time, mcpJSON string) (*Reader, chan string) {
 	t.Helper()
 	root := t.TempDir()
 	mcp := filepath.Join(root, "mcp.json")
-	if err := os.WriteFile(mcp, []byte(`{"mcpServers":{"exa":{"type":"stdio","command":"x"},"aws-outlook-mcp":{"type":"stdio","command":"y"}}}`), 0o600); err != nil {
+	if err := os.WriteFile(mcp, []byte(mcpJSON), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	blocks := make(chan string, 64)
@@ -285,4 +290,47 @@ func TestLookupBadOutput(t *testing.T) {
 		t.Fatal("failed answer served from the cache")
 	}
 	wait(t, blocks)
+}
+
+// TestLookupInternalSource (#3942): with builder-mcp in cli.mcp_config the
+// reader also gets its ReadInternalWebsites, none of its other tools, and
+// the prompt sends the amazon / a2z.com / aws.dev pages to it; without it
+// the prompt does not name it. builder-mcp alone does not turn lookups on.
+func TestLookupInternalSource(t *testing.T) {
+	shift := "s"
+	now := time.Date(2026, 11, 16, 9, 0, 0, 0, time.Local)
+	sess := &fakeSession{reply: goodReply}
+	r, blocks := newReaderMCP(t, sess, &shift, &now,
+		`{"mcpServers":{"exa":{"type":"stdio","command":"x"},"builder-mcp":{"type":"stdio","command":"b"},"slack-mcp":{"type":"stdio","command":"s"}}}`)
+	if _, err := r.Lookup("w.amazon.com 上 trn3 的页面", ""); err != nil {
+		t.Fatal(err)
+	}
+	wait(t, blocks)
+	o := sess.opts[0]
+	want := "mcp__exa__web_search_exa,mcp__exa__web_fetch_exa,mcp__builder-mcp__ReadInternalWebsites"
+	if strings.Join(o.Tools, ",") != want || strings.Join(o.PermissionsAllow, ",") != want {
+		t.Errorf("tools = %q, allow = %q, want %s", o.Tools, o.PermissionsAllow, want)
+	}
+	data, _ := os.ReadFile(r.cfg.Layout.ReaderMCPConfigPath())
+	if !strings.Contains(string(data), `"builder-mcp"`) || strings.Contains(string(data), "slack") {
+		t.Errorf("reader MCP config = %s", data)
+	}
+	if p := sess.prompts[0]; !strings.Contains(p, "ReadInternalWebsites") || !strings.Contains(p, "a2z.com") || !strings.Contains(p, "aws.dev") {
+		t.Errorf("prompt does not send internal pages to ReadInternalWebsites:\n%s", p)
+	}
+
+	plain := &fakeSession{reply: goodReply}
+	r2, blocks2 := newReader(t, plain, &shift, &now)
+	if _, err := r2.Lookup("q", ""); err != nil {
+		t.Fatal(err)
+	}
+	wait(t, blocks2)
+	if strings.Contains(plain.prompts[0], "ReadInternalWebsites") {
+		t.Errorf("prompt names a tool the session lacks:\n%s", plain.prompts[0])
+	}
+
+	only, _ := newReaderMCP(t, &fakeSession{}, &shift, &now, `{"mcpServers":{"builder-mcp":{"type":"stdio","command":"b"}}}`)
+	if only.Enabled() {
+		t.Error("builder-mcp alone turned lookups on")
+	}
 }

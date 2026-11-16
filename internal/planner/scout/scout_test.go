@@ -126,8 +126,11 @@ func TestMarkSeen(t *testing.T) {
 		{day0.Add(2 * time.Hour), []Finding{a, b, {Source: SourceEmail, Kind: KindDeadline, ID: "m1"}},
 			[]Finding{b, {Source: SourceEmail, Kind: KindDeadline, ID: "m1"}}},
 		{day0.Add(13 * 24 * time.Hour), []Finding{a}, nil},
-		// Fourteen days on, a's entry has expired.
-		{day0.Add(15 * 24 * time.Hour), []Finding{a}, []Finding{a}},
+		// Retention runs from the last report: a, reported every run, stays
+		// seen past fourteen days from the first.
+		{day0.Add(15 * 24 * time.Hour), []Finding{a}, nil},
+		// Fourteen days without a report, b's entry has expired.
+		{day0.Add(17 * 24 * time.Hour), []Finding{b}, []Finding{b}},
 	}
 	for i, s := range steps {
 		fresh, seen := st.fresh(s.in, s.at)
@@ -136,6 +139,59 @@ func TestMarkSeen(t *testing.T) {
 		}
 		if !slices.Equal(fresh, s.fresh) {
 			t.Errorf("step %d: fresh = %+v, want %+v", i, fresh, s.fresh)
+		}
+	}
+}
+
+// An overdue Asana task reported every run, as the one due 09-30 was from
+// 11-05, is new once while it stays overdue on the same due date, past the
+// fourteen days its first report would have expired at; it is new again
+// when it turns from due today to overdue, or its due date moves. An entry
+// written before the state was kept matches any state.
+func TestMarkSeenAsanaDeadline(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+	day := func(m time.Month, d, h int) time.Time { return time.Date(2026, m, d, h, 0, 0, 0, loc) }
+	task := func(id, due string) Finding {
+		return Finding{Source: SourceAsana, Kind: KindDeadline, ID: id, Title: "iso " + id, Due: due}
+	}
+	st := store{dir: t.TempDir()}
+	if err := st.write("seen.json", seenFile{V: 1, Seen: []seenEntry{
+		{Source: SourceAsana, ID: "old", Kind: KindDeadline, At: day(11, 5, 4)},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	steps := []struct {
+		at    time.Time
+		in    []Finding
+		fresh []string
+	}{
+		{day(11, 5, 8), []Finding{task("t930", "2026-09-30T23:59:00+08:00"), task("old", "2026-10-30"), task("today", "2026-11-05")},
+			[]string{"t930", "today"}},
+		{day(11, 5, 10), []Finding{task("t930", "2026-09-30"), task("old", "2026-10-30"), task("today", "2026-11-05T18:00:00+08:00")}, nil},
+		// The next morning the task due yesterday is overdue: one more report.
+		{day(11, 6, 8), []Finding{task("t930", "2026-09-30T23:59:59+08:00"), task("old", "2026-10-30"), task("today", "2026-11-05")},
+			[]string{"today"}},
+		// Every run on until 11-19, past 11-05 + 14 days: never new.
+		{day(11, 19, 8), []Finding{task("t930", "2026-09-30"), task("old", "2026-10-30"), task("today", "2026-11-05")}, nil},
+		{day(11, 20, 8), []Finding{task("t930", "2026-09-30"), task("old", "2026-10-30"), task("today", "2026-11-05")}, nil},
+		// A run whose model left the due dates out (the 11-11 20:00 run)
+		// changes nothing, and the next run with them is no change either.
+		{day(11, 20, 9), []Finding{task("t930", ""), task("old", "never")}, nil},
+		{day(11, 20, 9), []Finding{task("t930", "2026-09-30"), task("old", "2026-10-30")}, nil},
+		// Its due date moved: reported again.
+		{day(11, 20, 10), []Finding{task("t930", "2026-11-30"), task("old", "2026-10-30")}, []string{"t930"}},
+	}
+	for i, s := range steps {
+		fresh, seen := st.fresh(s.in, s.at)
+		if err := st.saveSeen(seen); err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, f := range fresh {
+			got = append(got, f.ID)
+		}
+		if !slices.Equal(got, s.fresh) {
+			t.Errorf("step %d: fresh = %v, want %v", i, got, s.fresh)
 		}
 	}
 }
@@ -172,11 +228,16 @@ func TestSessionOpts(t *testing.T) {
 	if !slices.Equal(opts.Tools, opts.PermissionsAllow) {
 		t.Errorf("tools %q, allow %q: want the same read list", opts.Tools, opts.PermissionsAllow)
 	}
-	for _, want := range []string{"mcp__aws-outlook-mcp__email_inbox", "mcp__aws-outlook-mcp__calendar_view", "mcp__slack-mcp__get_unreads",
+	for _, want := range []string{"mcp__aws-outlook-mcp__email_inbox", "mcp__aws-outlook-mcp__calendar_view", "mcp__slack-mcp__get_unread_counts",
 		"mcp__slack-mcp__get_thread", "mcp__enterprise-asana-mcp__asana___GetUserTasks", "mcp__enterprise-asana-mcp__asana___SearchTasksInWorkspace"} {
 		if !slices.Contains(opts.Tools, want) {
 			t.Errorf("tools lack %s", want)
 		}
+	}
+	// get_unreads' result is past the tool result cap and slow enough to
+	// time a run out: the session does not get it.
+	if slices.Contains(opts.Tools, "mcp__slack-mcp__get_unreads") {
+		t.Errorf("tools hold get_unreads")
 	}
 	for _, tool := range opts.Tools {
 		if !strings.HasPrefix(tool, "mcp__") || slices.Contains(opts.PermissionsDeny, tool) {
@@ -241,14 +302,14 @@ func TestRun(t *testing.T) {
 		MCPConfig: mcp,
 		Session: func(_ context.Context, key string, opts sessionview.AgentOpts, text string) (string, []string, error) {
 			keys, prompts, gotOpts = append(keys, key), append(prompts, text), opts
-			return reply, []string{"mcp__slack-mcp__get_unreads"}, nil
+			return reply, []string{"mcp__slack-mcp__get_unread_counts"}, nil
 		},
 		Wake: func(_ func(int, error), b ...string) error { woken = append(woken, b...); return nil },
 		Now:  func() time.Time { return now },
 	})
 	ctx := context.Background()
 
-	r, _ := s.run(ctx, runID(now), TriggerManual, now)
+	r, _ := s.run(ctx, runID(now), TriggerManual, "", now)
 	if r.State != StateOK || r.New != 1 || !r.Woke || r.Events != 1 || len(woken) != 1 {
 		t.Fatalf("first run = %+v, woken %d", r, len(woken))
 	}
@@ -265,7 +326,7 @@ func TestRun(t *testing.T) {
 		t.Errorf("calendar = %+v", cal)
 	}
 
-	r, _ = s.run(ctx, runID(now.Add(time.Minute)), TriggerManual, now.Add(time.Minute))
+	r, _ = s.run(ctx, runID(now.Add(time.Minute)), TriggerManual, "", now.Add(time.Minute))
 	if r.State != StateOK || r.New != 0 || r.Woke || len(woken) != 1 {
 		t.Errorf("second run = %+v, woken %d", r, len(woken))
 	}
@@ -274,7 +335,7 @@ func TestRun(t *testing.T) {
 	}
 
 	reply = `{"findings":[],"cursors":{"email":"e2","slack":"s2","asana":""}}` + "\n好的"
-	r, _ = s.run(ctx, runID(now.Add(2*time.Minute)), TriggerManual, now.Add(2*time.Minute))
+	r, _ = s.run(ctx, runID(now.Add(2*time.Minute)), TriggerManual, "", now.Add(2*time.Minute))
 	if r.State != StateFailed || !strings.Contains(r.Error, "after the JSON") {
 		t.Errorf("bad run = %+v", r)
 	}
@@ -341,7 +402,7 @@ func TestRunWakeAndCalendar(t *testing.T) {
 		}
 		reply += "}"
 		wakeErr = st.wakeErr
-		r, kept := s.run(context.Background(), runID(now), TriggerManual, now)
+		r, kept := s.run(context.Background(), runID(now), TriggerManual, "", now)
 		if r.State != StateOK || !kept || woken != st.woken {
 			t.Errorf("%s: run %+v kept %v, woken %d; want %d", st.name, r, kept, woken, st.woken)
 		}
@@ -361,7 +422,7 @@ func TestRunWakeAndCalendar(t *testing.T) {
 	// The Planner off: kept on disk, as seen.
 	reply = `{"findings":[` + strings.Replace(finding, `"m1"`, `"m2"`, 1) + `],"cursors":{"email":"e2","slack":"","asana":""}}`
 	wakeErr = fmt.Errorf("%w: off", ErrPlannerOff)
-	if r, _ := s.run(context.Background(), runID(now), TriggerManual, now); r.State != StateOK || r.Woke || s.st.cursors().Email != "e2" {
+	if r, _ := s.run(context.Background(), runID(now), TriggerManual, "", now); r.State != StateOK || r.Woke || s.st.cursors().Email != "e2" {
 		t.Errorf("Planner off: run %+v, cursors %+v", r, s.st.cursors())
 	}
 	if fresh, _ := s.st.fresh([]Finding{{Source: SourceEmail, Kind: KindReplyNeeded, ID: "m2"}}, now); len(fresh) != 0 {
@@ -372,7 +433,7 @@ func TestRunWakeAndCalendar(t *testing.T) {
 	cancel()
 	sessErr = context.Canceled
 	before, _ := s.st.lastRun()
-	if _, kept := s.run(ctx, runID(now.Add(time.Hour)), TriggerSchedule, now.Add(time.Hour)); kept {
+	if _, kept := s.run(ctx, runID(now.Add(time.Hour)), TriggerSchedule, "", now.Add(time.Hour)); kept {
 		t.Error("a run shutdown cut short was kept")
 	}
 	if after, _ := s.st.lastRun(); after.ID != before.ID {
@@ -441,7 +502,7 @@ func TestRunConflictsAndMarkAs(t *testing.T) {
 		Now:  func() time.Time { return now },
 	})
 	want := "at:" + now.Add(90*time.Minute).UTC().Format(time.RFC3339)
-	r, _ := s.run(context.Background(), runID(now), TriggerManual, now)
+	r, _ := s.run(context.Background(), runID(now), TriggerManual, "", now)
 	if r.State != StateOK || r.New != 1 || len(r.Findings) != 1 || r.Findings[0].ID != want {
 		t.Fatalf("run = %+v", r)
 	}
@@ -452,13 +513,13 @@ func TestRunConflictsAndMarkAs(t *testing.T) {
 	// The model copies the meeting IDs differently next time: same overlap,
 	// nothing new, no wake.
 	reply = strings.ReplaceAll(strings.ReplaceAll(reply, `"id":"a"`, `"id":"a2"`), `"id":"b"`, `"id":"b+x"`)
-	r, _ = s.run(context.Background(), runID(now.Add(30*time.Second)), TriggerManual, now.Add(30*time.Second))
+	r, _ = s.run(context.Background(), runID(now.Add(30*time.Second)), TriggerManual, "", now.Add(30*time.Second))
 	if r.State != StateOK || r.New != 0 || len(woken) != 1 {
 		t.Errorf("rerun with recopied IDs = %+v, woken %d", r, len(woken))
 	}
 
 	tools = append(tools, "mcp__aws-outlook-mcp__email_read"+MarkAsSuffix)
-	r, _ = s.run(context.Background(), runID(now.Add(time.Minute)), TriggerManual, now.Add(time.Minute))
+	r, _ = s.run(context.Background(), runID(now.Add(time.Minute)), TriggerManual, "", now.Add(time.Minute))
 	if r.State != StateFailed || !strings.Contains(r.Error, "markAs") {
 		t.Errorf("markAs run = %+v", r)
 	}
@@ -488,7 +549,7 @@ func TestRunBatches(t *testing.T) {
 		Wake: func(_ func(int, error), b ...string) error { calls = append(calls, b); return nil },
 		Now:  func() time.Time { return now },
 	})
-	r, _ := s.run(context.Background(), runID(now), TriggerManual, now)
+	r, _ := s.run(context.Background(), runID(now), TriggerManual, "", now)
 	if r.State != StateOK || r.New != 11 || !r.Woke || len(calls) != 1 {
 		t.Fatalf("run = %+v, wakes %d", r, len(calls))
 	}
@@ -548,7 +609,7 @@ func TestRunLaterBatchKept(t *testing.T) {
 				Now:  func() time.Time { return now },
 			}
 			s := New(cfg)
-			if r, _ := s.run(context.Background(), runID(now), TriggerManual, now); !r.Woke || len(calls) != 1 || len(calls[0]) != 2 {
+			if r, _ := s.run(context.Background(), runID(now), TriggerManual, "", now); !r.Woke || len(calls) != 1 || len(calls[0]) != 2 {
 				t.Fatalf("first run = %+v, wakes %q", r, calls)
 			}
 			if tc.told {
@@ -559,7 +620,7 @@ func TestRunLaterBatchKept(t *testing.T) {
 			}
 			now = now.Add(2 * time.Hour)
 			reply = `{"findings":[],"cursors":{"email":"","slack":"s2","asana":""}}`
-			if r, _ := s.run(context.Background(), runID(now), TriggerManual, now); r.State != StateOK {
+			if r, _ := s.run(context.Background(), runID(now), TriggerManual, "", now); r.State != StateOK {
 				t.Fatalf("next run = %+v", r)
 			}
 			next := fmt.Sprint(calls[1:])
@@ -612,7 +673,7 @@ func TestRunSlackDigest(t *testing.T) {
 		MCPConfig: mcp,
 		Session: func(_ context.Context, _ string, _ sessionview.AgentOpts, text string) (string, []string, error) {
 			prompts = append(prompts, text)
-			return reply, []string{"mcp__slack-mcp__get_unreads"}, nil
+			return reply, []string{"mcp__slack-mcp__get_unread_counts"}, nil
 		},
 		Now: func() time.Time { return now },
 	})
@@ -625,7 +686,7 @@ func TestRunSlackDigest(t *testing.T) {
 		{now.Add(6 * time.Hour), TriggerSchedule, false},
 		{now.Add(6 * time.Hour), TriggerManual, true},
 	} {
-		r, _ := s.run(context.Background(), runID(c.at), c.trig, c.at)
+		r, _ := s.run(context.Background(), runID(c.at), c.trig, "", c.at)
 		asked := strings.Contains(prompts[i], "slack_unread")
 		if r.State != StateOK || asked != c.want || (r.Slack != nil) != c.want {
 			t.Errorf("%s run at %s: state %s, asked %v, slack %+v; want %v", c.trig, c.at.Format("15:04"), r.State, asked, r.Slack, c.want)

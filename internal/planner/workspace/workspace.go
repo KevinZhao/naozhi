@@ -155,6 +155,29 @@ func (r *Registry) LocalPaths() []string {
 	return out
 }
 
+// Dir is one directory a workspace covers on this node, with its name.
+type Dir struct {
+	Name string
+	Path string
+}
+
+// LocalDirs returns every directory a workspace covers on this node, in
+// registration order.
+func (r *Registry) LocalDirs() []Dir {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []Dir
+	for _, w := range r.ws {
+		for _, p := range w.Paths[r.node] {
+			out = append(out, Dir{Name: w.Name, Path: p})
+		}
+	}
+	return out
+}
+
 // Lookup returns the workspace whose path on this node most deeply contains
 // dir (an absolute path).
 func (r *Registry) Lookup(dir string) (Workspace, bool) {

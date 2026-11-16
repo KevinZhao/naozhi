@@ -647,6 +647,7 @@ func TestClassify(t *testing.T) {
 		{"dial tcp 10.0.0.5:4013: connect: connection refused", ErrNetwork},
 		{"ExpiredTokenException: The security token included in the request is expired", ErrCredentialExpired},
 		{"Midway credentials expired; run mwinit", ErrCredentialExpired},
+		{"API Error: Could not load AWS credentials · Could not load credentials from any providers. Check or refresh your AWS credentials and try again.", ErrCredentialExpired},
 		{"write /tmp/x: no space left on device", ErrDiskFull},
 		{"system/model_refusal_no_fallback", ErrRefusal},
 		{"API Error: 529 overloaded_error", ErrOther},

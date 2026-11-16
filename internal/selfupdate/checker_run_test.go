@@ -2,7 +2,10 @@ package selfupdate
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -25,18 +28,40 @@ type runHarness struct {
 	// with that check, which is how waitChecks knows the schedule is set.
 	mark int
 	fail bool
+	// tag is the release the lookup answers, the running version if empty.
+	tag string
+	// during is the saved schedule as each lookup found it: what a process
+	// killed mid-check leaves behind.
+	during [][]byte
+
+	// stop ends Run and waits for it, as a process exit would.
+	stop func()
 }
+
+var harnessStart = time.Date(2026, 11, 12, 23, 8, 0, 0, time.UTC)
 
 func newRunHarness(t *testing.T, cfg CheckerConfig) (*runHarness, *Checker) {
 	t.Helper()
-	h := &runHarness{t: t, now: time.Date(2026, 11, 12, 23, 8, 0, 0, time.UTC)}
+	return newRunHarnessAt(t, cfg, harnessStart)
+}
+
+func newRunHarnessAt(t *testing.T, cfg CheckerConfig, start time.Time) (*runHarness, *Checker) {
+	t.Helper()
+	h := &runHarness{t: t, now: start}
 	withStubbedLatest(t, func(context.Context) (*Release, error) {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		h.checks++
 		h.mark = h.nowCalls
+		if cfg.StatePath != "" {
+			data, _ := os.ReadFile(cfg.StatePath)
+			h.during = append(h.during, data)
+		}
 		if h.fail {
 			return nil, errors.New("lookup github.com: no such host")
+		}
+		if h.tag != "" {
+			return &Release{Tag: h.tag}, nil
 		}
 		return &Release{Tag: cfg.CurrentVersion}, nil
 	})
@@ -46,10 +71,14 @@ func newRunHarness(t *testing.T, cfg CheckerConfig) (*runHarness, *Checker) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { c.Run(ctx); close(done) }()
-	t.Cleanup(func() {
-		cancel()
-		<-done
-	})
+	var once sync.Once
+	h.stop = func() {
+		once.Do(func() {
+			cancel()
+			<-done
+		})
+	}
+	t.Cleanup(h.stop)
 	// Run reads the clock to set the first check and again to wait for it;
 	// advancing before that would move the first check along with the clock.
 	deadline := time.Now().Add(5 * time.Second)
@@ -219,4 +248,160 @@ func TestRun_ClockSetBackwardsKeepsTheIntervalBound(t *testing.T) {
 	h.expectChecks(0, "right after the clock went back")
 	h.advance(6 * time.Hour)
 	h.waitChecks(1, "an interval after the clock went back")
+}
+
+// A restart resumes the saved schedule: an instance restarted more often than
+// the interval used to start it over every time and never checked.
+func TestRun_RestartResumesTheSavedSchedule(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "update-check.json")
+	cfg := CheckerConfig{CurrentVersion: "v1.0.0", Mode: ModeNotify, Interval: 6 * time.Hour, StatePath: path}
+
+	h1, _ := newRunHarness(t, cfg)
+	h1.advance(5 * time.Hour)
+	h1.expectChecks(0, "5 hours in")
+	h1.stop()
+
+	h2, _ := newRunHarnessAt(t, cfg, harnessStart.Add(5*time.Hour))
+	h2.advance(time.Hour - time.Minute)
+	h2.expectChecks(0, "a minute short of the saved check")
+	h2.advance(time.Minute)
+	h2.waitChecks(1, "at the check saved before the restart")
+	h2.stop()
+
+	// The check moved the saved schedule on by an interval.
+	h3, _ := newRunHarnessAt(t, cfg, harnessStart.Add(6*time.Hour+time.Minute))
+	h3.advance(5 * time.Hour)
+	h3.expectChecks(0, "5 hours after the check, restarted")
+	h3.advance(time.Hour)
+	h3.waitChecks(1, "an interval after the check")
+}
+
+// A check that fell due while the process was down runs after the start
+// delay, not at once, and a saved retry keeps its backoff.
+func TestRun_RestartWithOverdueSavedCheck(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "update-check.json")
+	cfg := CheckerConfig{CurrentVersion: "v1.0.0", Mode: ModeNotify, Interval: 6 * time.Hour, StatePath: path}
+
+	h1, _ := newRunHarness(t, cfg)
+	h1.setFail(true)
+	h1.advance(6 * time.Hour)
+	h1.waitChecks(1, "first check")
+	h1.advance(5 * time.Minute)
+	h1.waitChecks(2, "first retry")
+	h1.stop()
+
+	h2, _ := newRunHarnessAt(t, cfg, harnessStart.Add(6*time.Hour+5*time.Minute+48*time.Hour))
+	h2.setFail(true)
+	h2.expectChecks(0, "right after the restart")
+	h2.advance(checkOnStartDelay)
+	h2.waitChecks(1, "the overdue check after the start delay")
+	// Third consecutive failure: 30 minutes, not the first retry's 5.
+	h2.advance(15 * time.Minute)
+	h2.expectChecks(1, "15 minutes after the third failure")
+	h2.advance(15 * time.Minute)
+	h2.waitChecks(2, "30 minutes after the third failure")
+}
+
+// A missing or corrupt file falls back to a fresh interval.
+func TestRun_UnreadableSavedScheduleStartsOver(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "update-check.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h, _ := newRunHarness(t, CheckerConfig{CurrentVersion: "v1.0.0", Mode: ModeNotify, Interval: 6 * time.Hour, StatePath: path})
+	h.advance(6*time.Hour - time.Minute)
+	h.expectChecks(0, "a minute short of the interval")
+	h.advance(time.Minute)
+	h.waitChecks(1, "an interval after start")
+}
+
+// readSchedule decodes a saved schedule the test captured.
+func readSchedule(t *testing.T, data []byte) savedSchedule {
+	t.Helper()
+	var s savedSchedule
+	if err := json.Unmarshal(data, &s); err != nil {
+		t.Fatalf("saved schedule %q: %v", data, err)
+	}
+	return s
+}
+
+// A process killed while a retry is running keeps the retry's backoff: the
+// next start must not wait a whole interval for the check that failed.
+func TestRun_KilledDuringARetryKeepsTheBackoff(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "update-check.json")
+	cfg := CheckerConfig{CurrentVersion: "v1.0.0", Mode: ModeNotify, Interval: 6 * time.Hour, StatePath: path}
+
+	h1, _ := newRunHarness(t, cfg)
+	h1.setFail(true)
+	h1.advance(6 * time.Hour)
+	h1.waitChecks(1, "first check")
+	h1.advance(5 * time.Minute)
+	h1.waitChecks(2, "first retry")
+	h1.stop()
+
+	retryAt := harnessStart.Add(6*time.Hour + 5*time.Minute)
+	h1.mu.Lock()
+	mid := h1.during[1]
+	h1.mu.Unlock()
+	if got, want := readSchedule(t, mid), (savedSchedule{NextCheck: retryAt.Add(15 * time.Minute), Failures: 2}); !got.NextCheck.Equal(want.NextCheck) || got.Failures != want.Failures {
+		t.Fatalf("saved during the retry = %+v, want %+v", got, want)
+	}
+	// The kill: the retry never finished, so the file is as the lookup found it.
+	if err := os.WriteFile(path, mid, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	h2, _ := newRunHarnessAt(t, cfg, retryAt.Add(time.Minute))
+	h2.advance(13 * time.Minute)
+	h2.expectChecks(0, "a minute short of the second retry")
+	h2.advance(time.Minute)
+	h2.waitChecks(1, "the second retry, 15 minutes after the first")
+}
+
+// The install that restarts this process claims the whole interval first,
+// so the new binary does not check again as soon as it is up.
+func TestRun_AutoInstallClaimsTheInterval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "update-check.json")
+	var mu sync.Mutex
+	var atNotice [][]byte
+	cfg := CheckerConfig{
+		CurrentVersion: "v1.0.0", Mode: ModeAuto, Interval: 6 * time.Hour, StatePath: path,
+		// The release carries no download URL, so the install stops at the
+		// download and its notice shows what a restart in its place would find.
+		Notify: func(string) {
+			data, _ := os.ReadFile(path)
+			mu.Lock()
+			atNotice = append(atNotice, data)
+			mu.Unlock()
+		},
+	}
+
+	h1, _ := newRunHarness(t, cfg)
+	h1.mu.Lock()
+	h1.tag = "v9.9.9"
+	h1.mu.Unlock()
+	h1.advance(6 * time.Hour)
+	h1.waitChecks(1, "the check that finds v9.9.9")
+	h1.stop()
+
+	checkAt := harnessStart.Add(6 * time.Hour)
+	mu.Lock()
+	if len(atNotice) == 0 {
+		mu.Unlock()
+		t.Fatal("the install sent no notice")
+	}
+	mid := atNotice[0]
+	mu.Unlock()
+	if got := readSchedule(t, mid); !got.NextCheck.Equal(checkAt.Add(6*time.Hour)) || got.Failures != 0 {
+		t.Fatalf("saved during the install = %+v, want next %v, no failures", got, checkAt.Add(6*time.Hour))
+	}
+	if err := os.WriteFile(path, mid, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	h2, _ := newRunHarnessAt(t, cfg, checkAt.Add(time.Minute))
+	h2.advance(5*time.Hour + 58*time.Minute)
+	h2.expectChecks(0, "a minute short of the interval after the install")
+	h2.advance(time.Minute)
+	h2.waitChecks(1, "an interval after the check that installed")
 }

@@ -260,3 +260,22 @@ func TestLoadNewerVersionNotOverwritten(t *testing.T) {
 		t.Errorf("newer-version registry overwritten: %s", got)
 	}
 }
+
+// LocalDirs names each of this node's directories by its workspace, and
+// leaves the other nodes' out.
+func TestLocalDirs(t *testing.T) {
+	a, b := t.TempDir(), t.TempDir()
+	r := Load("", "local")
+	wa, _ := r.Ensure(a)
+	wb, _ := r.Ensure(b)
+	r.mu.Lock()
+	r.ws[0].Paths["remote"] = []string{"/elsewhere"}
+	r.mu.Unlock()
+	got := r.LocalDirs()
+	if len(got) != 2 || got[0].Name != wa.Name || got[1].Name != wb.Name || got[0].Path != wa.Paths["local"][0] || got[1].Path != wb.Paths["local"][0] {
+		t.Fatalf("LocalDirs = %+v", got)
+	}
+	if (*Registry)(nil).LocalDirs() != nil {
+		t.Error("nil registry listed directories")
+	}
+}

@@ -72,6 +72,14 @@ export function showToast(msg, type, duration) {
   el._tid = setTimeout(() => { el.className = 'toast'; }, duration || 3000);
 }
 
+// isComposingKey reports whether a key event belongs to an IME composition,
+// so an Enter that picks a candidate does not also send or submit. Chrome
+// marks it isComposing; Safari fires compositionend first and then that
+// Enter's keydown with isComposing false and keyCode 229.
+export function isComposingKey(e) {
+  return !!e.isComposing || e.keyCode === 229;
+}
+
 // typingOutside reports whether a key event comes from an input, textarea
 // or editable element outside panel: a non-modal panel's Esc leaves such a
 // key to that element (the chat input's Esc arms an interrupt).

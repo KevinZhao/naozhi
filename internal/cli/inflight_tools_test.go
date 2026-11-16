@@ -120,3 +120,17 @@ func TestInflightTools_CodexStatuslessItemCloses(t *testing.T) {
 		}
 	}
 }
+
+// InflightTools lists every unfinished call, oldest first, with its start.
+func TestProcessInflightTools(t *testing.T) {
+	t0 := time.Unix(1000, 0)
+	var p Process
+	for i, ev := range []clievent.Event{toolUseEv("a", "mcp__x__mail"), toolUseEv("b", "mcp__x__cal"), toolUseEv("c", "mcp__x__slack"), toolResultEv("b")} {
+		p.tools.observe(ev, t0.Add(time.Duration(i)*time.Second))
+	}
+	got := p.InflightTools()
+	want := []InflightTool{{Name: "mcp__x__mail", Started: t0}, {Name: "mcp__x__slack", Started: t0.Add(2 * time.Second)}}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("InflightTools() = %+v, want %+v", got, want)
+	}
+}

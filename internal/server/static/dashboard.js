@@ -4,7 +4,7 @@ import { registerShell } from './shell.js';
 import { sessionStream } from './session_stream.js';
 import { WS_STATES, wsm } from './ws_manager.js';
 import { composer, perSession, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
-import { esc, escAttr, fetchJSON, showToast, trapFocus, nzBus, nzViews, registerActions, sessionExitChipHtml, sessionTitleText } from './nz_util.js';
+import { esc, escAttr, fetchJSON, isComposingKey, showToast, trapFocus, nzBus, nzViews, registerActions, sessionExitChipHtml, sessionTitleText } from './nz_util.js';
 import { onAskOptionToggle, onAskSubmit } from './ask_card.js';
 import { eventIdentityKey, fetchEvents, hasMoreHeader, loadEarlierEvents, memoryOnlyHeader, renderEvents } from './event_stream.js';
 import { fetchSessionRuns, setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderPRChip, setHeaderSpawnDiagChip } from './session_header.js';
@@ -1784,7 +1784,7 @@ function thumbIdxOf(el) {
 }
 const dashActivate = (fn) => (el, e) => {
   if (e.type === 'keydown') {
-    if (e.key !== 'Enter') return;
+    if (e.key !== 'Enter' || isComposingKey(e)) return;
   }
   fn(el, e);
 };
