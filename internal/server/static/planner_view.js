@@ -19,8 +19,9 @@
 // The stream follows a WS subscription to planner:main; GET
 // /api/sessions/events loads the first page, the older ones as the stream is
 // scrolled to its top, and polls while the subscription is not live. What the gateway writes for the Planner (its receipts) is not
-// shown, and its "收到，正在看" to subscribers is the input box's note
-// (D91). The gateway's notes in the conversation (due reminders, dispatch
+// shown, but for your answer to a question, which is your bubble; its
+// "收到，正在看" to subscribers is the input box's note (D91). Under 对话
+// the turns you did not start fold into 动态 rows (planner_layers.js, D113). The gateway's notes in the conversation (due reminders, dispatch
 // outcomes) live in its in-memory history, which a restart drops: the first
 // page merges in the journaled ones from GET /api/planner/notes by time.
 //
@@ -47,7 +48,7 @@ import { NZ_CONTRACT } from './contract.js';
 import { sessionList, ui } from './state.js';
 import { esc, escAttr, fetchJSON, nzBus, registerActions, sessionFailureText, sessionTitleText, showToast } from './nz_util.js';
 import { sid } from './session_ident.js';
-import { leadingTimeDivider, renderEventsWithDividers } from './event_render.js';
+import { eventHtml, leadingTimeDivider } from './event_render.js';
 import { dedupEarlierPage, hasMoreHeader } from './event_stream.js';
 import { renderMd, runPendingAsync } from './render_md.js';
 import { inbox, isLit, light, notifySupported, onInboxCount, onNotify, requestNotifyPermission, revealFocus } from './notify.js';
@@ -62,7 +63,8 @@ import { workbench } from './workbench.js';
 import { choosePlannerNode, eventsURL, hostName, hostOnline, hostRemote, isLocalNode, nodeAPI, notePlannerNodes, plannerAPI, plannerHost, plannerNodes, readLocalPlanner } from './planner_host.js';
 import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
-import { EARLIER_PAGE_LIMIT, EVENT_DIVIDER_GAP_MS, formatAbsTime, formatMonthDayTime, lastDividerTime, timeAgo } from './utilities.js';
+import { EARLIER_PAGE_LIMIT, EVENT_DIVIDER_GAP_MS, formatAbsTime, formatMonthDayTime, lastDividerTime, timeAgo, timeDividerHtml } from './utilities.js';
+import { answerOf, layerMode, layerStream, markerHtml, noteEvents, noteIdle, paintLayerSwitch, plannerBusy, plannerHead, setOnLayerChange } from './planner_layers.js';
 
 const PLANNER_KEY = 'planner:main';
 // EVENTS_LIMIT is the first page of the conversation; later events come in
@@ -592,9 +594,17 @@ function paintTools() {
   // Repainting under the custom-pause input would drop what is typed; only
   // the input holding focus counts (Chromium focuses the clicked 自定义).
   if (pl.customPause && document.activeElement?.id === 'pl-pause-hours') return;
-  box.innerHTML = notifyToolHtml() +
+  box.innerHTML = layerToolHtml() + notifyToolHtml() +
     '<div class="pl-tool" title="暂停期间不推送，也不替任何会话回话；正在跑的回合不受影响"><span class="pl-tool-l">暂停推送与托管</span><div class="pl-tool-btns">' + pauseToolHtml() + '</div></div>' +
     '<div class="pl-tool">' + stopToolHtml() + '</div>';
+}
+
+// layerToolHtml is 对话 | 全部 in the "⋯" menu, where a phone has it: its
+// header has no room (responsive.css).
+function layerToolHtml() {
+  const mode = layerMode();
+  const b = (m, label) => '<button type="button" class="pl-layer-b" data-action="planner-layer" data-layer="' + m + '" aria-pressed="' + (mode === m) + '">' + label + '</button>';
+  return '<div class="pl-tool pl-layer-tool"><span class="pl-tool-l">时间线</span><span class="pl-layer" role="group" aria-label="时间线">' + b('talk', '对话') + b('all', '全部') + '</span></div>';
 }
 
 async function pause(forVal) {
@@ -640,8 +650,9 @@ function paintStatus() {
   if (away) { text = '离线'; cls = 'off'; } else if (s) {
     if (!s.enabled) { text = '未开启'; cls = 'off'; }
     else if (s.stopped) { text = '已停用'; cls = 'off'; }
-    // Running is the normal case and goes unsaid.
-    else if (s.alive) { text = ''; }
+    // Running is the normal case and goes unsaid; a turn you did not
+    // start is worked on out of the timeline's sight (D113).
+    else if (s.alive) { text = plannerBusy() ? '处理汇报中' : ''; }
     else { text = '启动中'; cls = 'wait'; }
   }
   if (chip) { chip.textContent = text; chip.className = 'pl-status' + (cls ? ' ' + cls : ''); }
@@ -698,6 +709,7 @@ function placeBriefs() {
   if (!placed) return;
   tidyEmpty(box);
   paintStreamEmpty();
+  relayer();
   runPendingAsync();
   if (atBottom) scroller.scrollTop = scroller.scrollHeight;
   revealBrief();
@@ -843,7 +855,7 @@ const CLI_NOISE = new Set(['api_retry']);
 // noise or a permission the Planner's own tool was refused (nothing for you
 // to do; a session's view still shows its own).
 function withoutSnapshot(e) {
-  if (e.type === 'user' && RECEIPT_RE.test(e.detail || e.summary || '')) return null;
+  if (e.type === 'user' && RECEIPT_RE.test(e.detail || e.summary || '')) return answerBubble(e);
   if (e.type === 'system' && CLI_NOISE.has(e.summary)) return null;
   if (e.type === 'permission_denied') return null;
   const sc = e.type === 'user' && SCOUT_RE.exec(e.detail || e.summary || '');
@@ -869,7 +881,45 @@ function withoutSnapshot(e) {
   return Object.assign({}, e, { detail, summary });
 }
 
+// answerBubble is your answer to a question as your bubble (D113: the turn
+// is yours): the question quoted over what you picked. Any other receipt is
+// the gateway's, null.
+function answerBubble(e) {
+  const a = answerOf(e.detail || e.summary || '');
+  if (!a) return null;
+  const quoted = a.question.split('\n').map((l) => '> ' + l).join('\n');
+  return Object.assign({}, e, { detail: quoted + '\n\n' + a.answer, summary: a.answer });
+}
+
 const RENDER_OPTS = { key: PLANNER_KEY };
+
+// renderPlanner renders events as the conversation shows them, a time
+// divider where the gap since the bubble before (at prevTime) asks for
+// one, and before each turn the marker planner_layers.js folds it by.
+function renderPlanner(events, prevTime) {
+  let html = '';
+  let last = prevTime || 0;
+  for (const e of events) {
+    const head = plannerHead(e);
+    if (head) html += markerHtml(head);
+    for (const p of plannerEvents(e)) {
+      const h = eventHtml(p, RENDER_OPTS);
+      if (!h) continue;
+      const t = p.time || 0;
+      if (t && (last === 0 || t - last >= EVENT_DIVIDER_GAP_MS)) html += timeDividerHtml(t);
+      html += h;
+      if (t) last = t;
+    }
+  }
+  return html;
+}
+
+// relayer folds the stream as the 对话 | 全部 switch says, and repaints the
+// status, which says 处理汇报中 while a turn you did not start runs.
+function relayer() {
+  layerStream($('pl-stream'));
+  paintStatus();
+}
 
 // ACK_TEXT is the gateway's "got it" for a message you sent (planner/agent
 // ReceiptText), pushed to subscribers only: it shows by the input box until
@@ -918,7 +968,8 @@ function appendEvents(events, reset) {
   }
   const fresh = events.filter((e) => admitEvent(e) && !isAck(e));
   const shown = fresh.flatMap(plannerEvents);
-  const html = renderEventsWithDividers(shown, reset ? 0 : lastDividerTime(box), RENDER_OPTS);
+  const html = renderPlanner(fresh, reset ? 0 : lastDividerTime(box));
+  noteEvents(fresh, reset);
   followAck(shown);
   if (reset) box.innerHTML = html;
   else if (fresh.length) {
@@ -932,6 +983,7 @@ function appendEvents(events, reset) {
   }
   decorateEvents(box);
   paintStreamEmpty();
+  relayer();
   runPendingAsync();
   if (atBottom) scroller.scrollTop = scroller.scrollHeight;
   // After the scroll: a brief a push asked for scrolls to itself.
@@ -1075,7 +1127,7 @@ function prependEvents(events) {
   const box = $('pl-stream');
   const scroller = $('pl-events');
   if (!box || !scroller || !events.length) return;
-  const html = renderEventsWithDividers(events.flatMap(plannerEvents), 0, RENDER_OPTS);
+  const html = renderPlanner(events, 0);
   if (!html) return;
   const fromBottom = scroller.scrollHeight - scroller.scrollTop;
   const anchor = revealedTop();
@@ -1091,6 +1143,7 @@ function prependEvents(events) {
   if (lead && newest && Number(lead.dataset.time || 0) - newest < EVENT_DIVIDER_GAP_MS) lead.remove();
   decorateEvents(box);
   placeBriefs();
+  relayer();
   runPendingAsync();
   const moved = anchor !== null && revealedEl();
   if (moved) scroller.scrollTop += moved.getBoundingClientRect().top - anchor;
@@ -1115,6 +1168,7 @@ function revealedTop() {
 
 function startConversation() {
   mountComposer();
+  paintLayerSwitch();
   paintHost();
   paintStatus();
   paintWaiting();
@@ -1211,12 +1265,14 @@ nzBus.addEventListener('tasks:list', (e) => {
   pl.tasksActive = tasks.filter(inProgress).length;
   pl.tasksAll = tasks.length;
   paintLeftToggle();
+  // A 动态 row names its tasks by their titles.
+  if (pl.host) relayer();
 });
 // 在 Planner 中查看 from a dispatched session's header (tasks.js) opens the
 // page on its card: on a phone that is in the left block, unfolded.
 nzBus.addEventListener('tasks:reveal', () => showPlannerLeft(true));
 // The health table names the units no list holds.
-nzBus.addEventListener('planner:health', () => { if (pl.host) paintWaiting(); });
+nzBus.addEventListener('planner:health', () => { if (pl.host) { paintWaiting(); relayer(); } });
 nzBus.addEventListener('custody:changed', () => { if (pl.host) paintTools(); });
 // A push or link without an item lands on the conversation, even where the
 // phone's left block was left unfolded or a session opened in its place.
@@ -1250,7 +1306,7 @@ onSessionsApplied(() => {
     notePlannerStatus(pl.status);
     if (online) onHostChanged();
   }
-  if (pl.host) paintSessionCards($('pl-stream'));
+  if (pl.host) { paintSessionCards($('pl-stream')); relayer(); }
 });
 nzBus.addEventListener('planner:node', onHostChanged);
 readLocalPlanner();
@@ -1282,9 +1338,19 @@ wsm.on(NZ_CONTRACT.WS.send_error, (msg) => {
 // a timed-out push loop ends it, and polling covers until the next one.
 wsm.on(NZ_CONTRACT.WS.session_state, (msg) => {
   if (msg.state === 'dead') dropAck();
+  if (msg.state === 'ready' || msg.state === 'dead') { noteIdle(); if (pl.host) relayer(); }
   if (msg.state === 'running' && pl.sub === 'suspended') subscribe();
   else if (pl.sub && (msg.state === 'dead' || msg.reason === 'subscription_timeout')) pl.sub = '';
 }, ours);
+
+// 对话 | 全部 changed: the reader goes on at the end of the conversation,
+// where what changed under them is newest.
+setOnLayerChange(() => {
+  if (!pl.host) return;
+  relayer();
+  const scroller = $('pl-events');
+  if (scroller) scroller.scrollTop = scroller.scrollHeight;
+});
 
 registerActions({
   'planner-open-task': (el) => openReport(el.dataset.key || ''),

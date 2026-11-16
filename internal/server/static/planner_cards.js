@@ -251,9 +251,10 @@ function capped(s) {
 // the rows below saying it whole.
 const wsLabel = (name) => name.replace(/\/+$/, '').split('/').pop() || name;
 
-// firstSentence is a dispatch's message's first sentence (to its 。！？!? or
-// ". ", within its first paragraph), the goal of a block that gives none.
-function firstSentence(s) {
+// firstSentence is a text's first sentence (to its 。！？!? or ". ", within
+// its first paragraph), cut to LINE_MAX: a dispatch's goal when its block
+// gives none, a 动态 line's (planner_layers.js).
+export function firstSentence(s) {
   const para = oneLine(String(s || '').trim().split(/\n\s*\n/)[0] || '');
   const m = /^.+?(?:[。！？!?]|\.(?= |$))/.exec(para);
   return capped(m ? m[0] : para);
@@ -391,7 +392,7 @@ function actionCardHtml(raw) {
   if (a.type === 'notify') {
     const brief = a.level === 'brief';
     const link = webLinkHtml(a.link);
-    return '<div class="pl-act pl-act-notify"><div class="pl-act-h">' + (brief ? '记入早报' : '提醒你') + '</div>' +
+    return '<div class="pl-act pl-act-notify' + (brief ? ' pl-act-brief' : '') + '"><div class="pl-act-h">' + (brief ? '记入早报' : '提醒你') + '</div>' +
       '<div class="pl-act-q">' + esc(str(a.title)) + '</div>' +
       (a.why ? '<div class="pl-act-why">' + esc(str(a.why)) + '</div>' : '') +
       (link ? '<div class="pl-act-link">' + link + '</div>' : '') + '</div>';
@@ -422,6 +423,9 @@ export function decorateEvents(root) {
   if (!root) return;
   let turn = new Set(); // the keys carded in the turn so far
   root.querySelectorAll('.event, .event-time-divider').forEach((ev) => {
+    // A 动态 entry unfolded (planner_layers.js) is a copy of bubbles
+    // decorated already.
+    if (ev.closest('.pl-dyn, .pl-shift')) return;
     if (ev.matches(TURN_START)) turn = new Set();
     if (ev.matches('.event:not([data-pl-dec])')) decorateEvent(ev, turn);
     if (!ev.matches('.user')) ev.querySelectorAll('.pl-scard[data-key]').forEach((b) => turn.add(b.dataset.key));
