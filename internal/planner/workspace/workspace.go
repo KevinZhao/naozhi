@@ -176,21 +176,28 @@ func (r *Registry) LocalAliases() map[string]string {
 		return nil
 	}
 	r.mu.Lock()
-	all := map[string]string{}
+	// One spelling can be recorded by several workspaces when its symlink
+	// was repointed between visits; every target is kept so the one it
+	// names now wins below, whatever order the workspaces are listed in.
+	all := map[string][]string{}
 	for _, w := range r.ws {
 		for alias, target := range w.Aliases[r.node] {
 			if slices.ContainsFunc(w.Paths[r.node], func(p string) bool {
 				return within(target, filepath.Clean(p))
 			}) {
-				all[alias] = target
+				all[alias] = append(all[alias], target)
 			}
 		}
 	}
 	r.mu.Unlock()
 	out := map[string]string{}
-	for alias, path := range all {
-		if sameDir(alias, path) {
-			out[alias] = path
+	for alias, targets := range all {
+		slices.Sort(targets)
+		for _, path := range targets {
+			if sameDir(alias, path) {
+				out[alias] = path
+				break
+			}
 		}
 	}
 	if len(out) == 0 {
