@@ -17,6 +17,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/custody"
 	"github.com/naozhi/naozhi/internal/planner/journal"
 	"github.com/naozhi/naozhi/internal/planner/note"
+	"github.com/naozhi/naozhi/internal/planner/parked"
 	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -31,6 +32,8 @@ const (
 	// a section's, as the digest is what the user reads them by.
 	maxSlack       = 20
 	slackNameRunes = 40
+	// parkedRunes is what a 搁置区 line shows of its item, the source in it.
+	parkedRunes = 160
 )
 
 // ref is a unit as a brief line shows it.
@@ -131,13 +134,15 @@ type input struct {
 	Notices []inboxItem
 	Tasks   []taskItem
 	Held    []heldItem
+	// Parked is the 搁置区, set in the week's first brief only.
+	Parked []parked.Entry
 }
 
 func (in input) counts() Counts {
 	c := Counts{Meetings: len(in.Meetings), Replies: len(in.Replies), Deadlines: len(in.Deadlines),
 		Done: len(in.Done), Failed: len(in.Failed), Waiting: len(in.Waiting), Errors: len(in.Errors),
 		Tasks: len(in.Tasks), Planner: len(in.Held), Routines: len(in.Routines), Notices: len(in.Notices),
-		Slack:   max(in.SlackTotal, len(in.Slack)),
+		Slack: max(in.SlackTotal, len(in.Slack)), Parked: len(in.Parked),
 		Custody: in.Custody.Retries + in.Custody.Stopped + in.Custody.Answered}
 	if !in.Midway.IsZero() {
 		c.Midway = 1
@@ -651,6 +656,22 @@ func render(in input) string {
 		}
 		return line + " · " + h.At.In(loc).Format(stamp)
 	})
+	section(&b, "搁置区", in.Parked, func(e parked.Entry) string {
+		line := plain(textutil.TruncateRunes(e.Text, parkedRunes))
+		if d, err := time.ParseInLocation(time.DateOnly, e.Day, loc); err == nil {
+			// Counted in days: an item moves in by the day, not the hour.
+			y, m, dd := in.Now.In(loc).Date()
+			if n := int(time.Date(y, m, dd, 0, 0, 0, 0, loc).Sub(d).Hours()/24 + 0.5); n > 0 {
+				line += fmt.Sprintf(" · 已搁置 %d 天", n)
+			} else {
+				line += " · 今天搁置"
+			}
+		}
+		if e.ByUser {
+			line += " · 你说放下"
+		}
+		return line
+	})
 	return b.String()
 }
 
@@ -699,7 +720,7 @@ func summary(c Counts, push bool) string {
 		n     int
 	}{{"今天日程", c.Meetings}, {"等你回复", c.Replies}, {"Asana 到期", c.Deadlines}, {"Slack 未读", c.Slack},
 		{"完成", c.Done}, {"失败", c.Failed}, {"例行任务有变化", c.Routines}, {"等你", waits},
-		{"通知", c.Notices}, {"未完成的任务", c.Tasks}, {"Planner 记下", c.Planner}} {
+		{"通知", c.Notices}, {"未完成的任务", c.Tasks}, {"Planner 记下", c.Planner}, {"搁置", c.Parked}} {
 		if p.n > 0 {
 			parts = append(parts, fmt.Sprintf("%s %d", p.label, p.n))
 		}

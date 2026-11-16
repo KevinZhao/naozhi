@@ -1,6 +1,6 @@
 // Package action is the Planner's way to ask the gateway for something
 // (docs/rfc/planner.md §6.2): the ```naozhi-action blocks at the end of a
-// planner:main reply. There are nine: dispatch (a task: session, started at
+// planner:main reply. There are ten: dispatch (a task: session, started at
 // once, D88), promise (a promise among the 任务), ask (a
 // question in "通知" whose answer goes back to the Planner, or straight to a
 // session, D98), status (the Planner's judgment of a task's state, §15.4),
@@ -9,8 +9,10 @@
 // a session in custody, planner/custody), relay (the user's decision
 // passed on to a session with the user's own words, D98), remember (a
 // memory the user asked for, written into a workspace's auto-memory,
-// §15.12 ⑧) and lookup (a web lookup by a one-shot reader, §15.12 ⑨). A block that does not parse, or names an unknown type, a bad field or a task that does
-// not exist, is not run: the Planner conversation shows it as it was
+// §15.12 ⑧), lookup (a web lookup by a one-shot reader, §15.12 ⑨) and park
+// (an item the user put down, moved into the 搁置区, §15.14 ⑤). A block
+// that does not parse, or names an unknown type, a bad field or a task that
+// does not exist, is not run: the Planner conversation shows it as it was
 // written, with the reason, and the Planner gets a receipt naming it.
 package action
 
@@ -80,6 +82,7 @@ const (
 	TypeRelay    Type = "relay"
 	TypeRemember Type = "remember"
 	TypeLookup   Type = "lookup"
+	TypePark     Type = "park"
 )
 
 // Dispatch asks for a session in a workspace.
@@ -200,6 +203,37 @@ type Lookup struct {
 	Why string `json:"why"`
 }
 
+// Park moves an item the user put down into the 搁置区, planner/parked.md
+// (§15.14 ⑤, D116): Text is the item, Source where it came from (a task
+// key, a promise ID, an #issue, the time the user said it). Only a turn the
+// user started may park: content brought in must not set aside what the
+// user is to decide.
+type Park struct {
+	Text   string `json:"text"`
+	Source string `json:"source"`
+}
+
+// Park limits: the item is one line, its source short.
+const (
+	parkTextRunes   = 300
+	parkSourceRunes = 120
+)
+
+func (p *Park) validate() error {
+	p.Text, p.Source = strings.Join(strings.Fields(p.Text), " "), strings.Join(strings.Fields(p.Source), " ")
+	switch {
+	case p.Text == "":
+		return errors.New("park 缺少 text（要搁置的事）")
+	case utf8.RuneCountInString(p.Text) > parkTextRunes:
+		return fmt.Errorf("text 超过 %d 字", parkTextRunes)
+	case p.Source == "":
+		return errors.New("park 缺少 source（出处：任务 key、承诺 ID、#issue，或用户那句话的时间）")
+	case utf8.RuneCountInString(p.Source) > parkSourceRunes:
+		return fmt.Errorf("source 超过 %d 字", parkSourceRunes)
+	}
+	return nil
+}
+
 // Lookup limits.
 const (
 	lookupQRunes   = 200
@@ -220,7 +254,7 @@ func (l *Lookup) validate() error {
 }
 
 // Block is one action block of a reply: exactly one of Dispatch, Promise,
-// Ask, Status, Notify, Custody, Relay, Remember and Lookup is set, or Err says why
+// Ask, Status, Notify, Custody, Relay, Remember, Lookup and Park is set, or Err says why
 // it is not run.
 type Block struct {
 	// Raw is the block's body as written.
@@ -235,6 +269,7 @@ type Block struct {
 	Relay    *Relay
 	Remember *Remember
 	Lookup   *Lookup
+	Park     *Park
 	Err      error
 }
 
@@ -406,13 +441,22 @@ func (b *Block) decode() {
 			err = l.validate()
 			b.Lookup = &l.Lookup
 		}
+	case TypePark:
+		var pk struct {
+			Type Type `json:"type"`
+			Park
+		}
+		if err = strict(b.Raw, &pk); err == nil {
+			err = pk.validate()
+			b.Park = &pk.Park
+		}
 	case "":
 		err = errors.New("缺少 type")
 	default:
-		err = fmt.Errorf("未知类型 %q（只有 dispatch、promise、ask、status、notify、custody、relay、remember、lookup）", head.Type)
+		err = fmt.Errorf("未知类型 %q（只有 dispatch、promise、ask、status、notify、custody、relay、remember、lookup、park）", head.Type)
 	}
 	if err != nil {
-		b.Dispatch, b.Promise, b.Ask, b.Status, b.Notify, b.Custody, b.Relay, b.Remember, b.Lookup, b.Err = nil, nil, nil, nil, nil, nil, nil, nil, nil, err
+		b.Dispatch, b.Promise, b.Ask, b.Status, b.Notify, b.Custody, b.Relay, b.Remember, b.Lookup, b.Park, b.Err = nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
 	}
 }
 

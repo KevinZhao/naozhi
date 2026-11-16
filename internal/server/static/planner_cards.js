@@ -230,7 +230,7 @@ function mentionedKeys(ev) {
 
 // ---- action blocks (§6.2) ----
 
-const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask', 'status', 'notify', 'custody', 'relay', 'remember', 'lookup']);
+const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask', 'status', 'notify', 'custody', 'relay', 'remember', 'lookup', 'park']);
 const STATUS_LABEL = { done: '已完成', doing: '进行中', failed: '失败' };
 const STATUS_MARK = { done: '✓', failed: '✗' };
 
@@ -351,6 +351,16 @@ function actionCardHtml(raw) {
       rowsHtml([['记在', where], ['名字', str(a.name)], ['内容', str(a.text)]]) +
       '<div class="pl-card-acts"><button type="button" class="pl-btn" data-action="planner-memory-forget" data-ws="' + escAttr(ws) + '" data-name="' + escAttr(str(a.name)) + '">撤回</button></div>' +
       '</details>';
+  }
+  if (a.type === 'park') {
+    // One line: 放下 · the item · its source; the gateway moved it into the
+    // 搁置区 (planner/parked.md, §15.14 ⑤), which the handoff no longer
+    // copies.
+    const text = oneLine(str(a.text));
+    const src = oneLine(str(a.source));
+    return '<div class="pl-act pl-act-park pl-act-line" title="移进搁置区，交接里不再重抄">' +
+      '<span class="pl-act-k">放下</span>' + (text ? ' · <span class="pl-act-goal">' + esc(text) + '</span>' : '') +
+      (src ? '<span class="pl-act-ws"> · 出处 ' + esc(src) + '</span>' : '') + '</div>';
   }
   if (a.type === 'lookup') {
     // One line: 查一下 · the question; the answer comes later as the query

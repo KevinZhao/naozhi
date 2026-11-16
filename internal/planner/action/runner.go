@@ -164,6 +164,9 @@ type Config struct {
 	// Remember keeps a memory for the user (agent.Agent.Remember): text as
 	// memory name of workspace. nil refuses remember blocks.
 	Remember func(workspace, name, text string) (string, error)
+	// Park moves an item the user put down into the 搁置区
+	// (agent.Agent.Park). nil refuses park blocks.
+	Park func(text, source string) error
 	// Lookup starts a web lookup of q (planner/reader.Reader.Lookup): its
 	// answer, or the cache's of the same question today, reaches the
 	// Planner as a turn of its own. nil refuses lookup blocks.
@@ -1059,7 +1062,7 @@ func (r *Runner) handle(rep reply) {
 		var err error
 		reopened := false
 		switch {
-		case rep.outside != "" && (b.Dispatch != nil || b.Status != nil || b.Custody != nil || b.Relay != nil || b.Remember != nil || b.Lookup != nil):
+		case rep.outside != "" && (b.Dispatch != nil || b.Status != nil || b.Custody != nil || b.Relay != nil || b.Remember != nil || b.Lookup != nil || b.Park != nil):
 			un.add(i, b, r.refuseOutside(b, rep.outside))
 			un.outside = true
 		case len(rep.words) == 0 && needsUser(b):
@@ -1075,6 +1078,8 @@ func (r *Runner) handle(rep reply) {
 			err = r.remember(*b.Remember)
 		case b.Lookup != nil:
 			err = r.lookup(*b.Lookup)
+		case b.Park != nil:
+			err = r.park(*b.Park)
 		case b.Promise != nil:
 			err = r.promise(*b.Promise, dispatched)
 		case b.Ask != nil:
@@ -1350,6 +1355,10 @@ func (r *Runner) refuseOutside(b Block, by string) string {
 		r.note(by + "触发的回合不能记记忆：「" + m.Name + "」没有记下")
 		return "这一轮不能记记忆，没有记下"
 	}
+	if p := b.Park; p != nil {
+		r.note(by + "触发的回合不能搁置：「" + textutil.TruncateRunes(p.Text, 60) + "」没有移进搁置区")
+		return "这一轮不能搁置，没有移进搁置区"
+	}
 	if l := b.Lookup; l != nil {
 		r.note(by + "触发的回合不能发起网页查询：「" + textutil.TruncateRunes(l.Q, 60) + "」没有查")
 		return "这一轮不能发起网页查询，没有查"
@@ -1408,10 +1417,10 @@ func (r *Runner) tellUnrun(rep reply, u unrun) {
 		b.WriteString("格式不对的块按系统提示词里的格式改正后重发。\n")
 	}
 	if u.outside {
-		b.WriteString("这一轮由" + by + "触发，网关只执行 notify、promise 与 ask；需要派活、改任务状态、托管、记记忆或网页查询，就在对话里向用户说明，等用户发消息让你做。\n")
+		b.WriteString("这一轮由" + by + "触发，网关只执行 notify、promise 与 ask；需要派活、改任务状态、托管、记记忆、搁置或网页查询，就在对话里向用户说明，等用户发消息让你做。\n")
 	}
 	if u.notUser {
-		b.WriteString("这一轮不是用户发起的（回执、提醒、托管等），网关没有可附的用户原话，所以不转达、不带原话派活、不改 MCP 权限、不开 ultracode、不记记忆；要用户拍板就用 ask，带上 task 时用户的回答会直接送到那个会话。\n")
+		b.WriteString("这一轮不是用户发起的（回执、提醒、托管等），网关没有可附的用户原话，所以不转达、不带原话派活、不改 MCP 权限、不开 ultracode、不记记忆、不搁置；要用户拍板就用 ask，带上 task 时用户的回答会直接送到那个会话。\n")
 	}
 	if err := send(strings.TrimSpace(b.String())); err != nil {
 		slog.Warn("planner actions: receipt of the blocks not run not sent to the Planner", "err", err)
@@ -1431,7 +1440,7 @@ func needsUser(b Block) bool {
 	}
 	// Leaving a session alone is the user's word: a mail asking the
 	// Planner to stop looking at one is not.
-	return b.Relay != nil || b.Remember != nil || b.Custody != nil && b.Custody.Watch != nil
+	return b.Relay != nil || b.Remember != nil || b.Park != nil || b.Custody != nil && b.Custody.Watch != nil
 }
 
 // refuseNotUser answers such a block from a turn the user did not start,
@@ -1444,6 +1453,10 @@ func (r *Runner) refuseNotUser(b Block) string {
 	if m := b.Remember; m != nil {
 		r.note("这一轮不是用户发起的，不能记记忆：「" + m.Name + "」没有记下")
 		return "这一轮不是用户发起的，remember 只在用户让你记的那一轮有效，没有记下"
+	}
+	if p := b.Park; p != nil {
+		r.note("这一轮不是用户发起的，不能搁置：「" + textutil.TruncateRunes(p.Text, 60) + "」没有移进搁置区")
+		return "这一轮不是用户发起的，park 只在用户说放下的那一轮有效，没有搁置"
 	}
 	if c := b.Custody; c != nil {
 		r.note("这一轮不是用户发起的，不能关掉观察：「" + r.sessionName(c.Key) + "」照旧观察")
@@ -1840,6 +1853,18 @@ func (r *Runner) remember(m Remember) error {
 	}
 	if _, err := r.cfg.Remember(m.Workspace, m.Name, m.Text); err != nil {
 		return fmt.Errorf("「%s」没有记下：%w", m.Name, err)
+	}
+	return nil
+}
+
+// park moves an item the user put down into the 搁置区 (§15.14 ⑤). The
+// card says it was; only a failure gets a line and a receipt.
+func (r *Runner) park(p Park) error {
+	if r.cfg.Park == nil {
+		return errors.New("这台网关没有搁置区，没有搁置")
+	}
+	if err := r.cfg.Park(p.Text, p.Source); err != nil {
+		return fmt.Errorf("「%s」没有搁置：%w", textutil.TruncateRunes(p.Text, 60), err)
 	}
 	return nil
 }

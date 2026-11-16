@@ -168,6 +168,17 @@ func (l Layout) PlannerTurnsPath() string { return l.Join("planner", "turns.json
 // <YYYY-MM-DD>.md per shift change (<root>/planner/handoff).
 func (l Layout) PlannerHandoffRoot() string { return l.Join("planner", "handoff") }
 
+// PlannerParkedPath is the 搁置区, the "等你定" items set aside: one line
+// each with its source and the day it moved in (<root>/planner/parked.md,
+// docs/rfc/planner.md §15.14 ⑤). Under the Planner's read scope, and the
+// user may edit it.
+func (l Layout) PlannerParkedPath() string { return l.Join("planner", "parked.md") }
+
+// PlannerDecidePath is when each "等你定" item of the handoffs was first
+// written as it now reads (<root>/planner/handoff/decide.json), which is
+// what judges an item untouched.
+func (l Layout) PlannerDecidePath() string { return l.Join("planner", "handoff", "decide.json") }
+
 // PlannerSessionsRoot holds the session sidecar files, one
 // <sha256(key)>.json per session with Planner fields (lineage, purpose;
 // <root>/planner/sessions, §3.7). sessions.json is never touched.
