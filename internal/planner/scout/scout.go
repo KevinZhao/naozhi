@@ -368,9 +368,13 @@ func (s *Scout) run(ctx context.Context, id, trig, retryOf string, started time.
 	sctx, cancel := context.WithTimeout(ctx, runTimeout)
 	defer cancel()
 	digest := wantSlack(started, trig) && slices.Contains(servers, ServerSlack)
+	exp := s.credExpiry()
 	reply, tools, err := s.cfg.Session(sctx, sessionkey.ScoutKeyPrefix+id, opts, prompt(started, servers, cursors, digest))
 	r.Tools = tools
-	if exp, ok := s.credential(err); ok && ctx.Err() == nil {
+	if credential(err, exp) && ctx.Err() == nil {
+		if s.waitedOn(exp) {
+			return fail(fmt.Errorf("%s: %w", errCredStill, err))
+		}
 		// Not the scout's failure: the next model call works once the
 		// Midway session is renewed, and the run goes again then.
 		r.State, r.Cred = StateWaiting, exp

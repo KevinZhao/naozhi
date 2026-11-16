@@ -19,6 +19,10 @@ const TriggerRetry = "retry"
 // credential gives up: a brief that late is no use.
 const briefGiveUp = 5 * time.Minute
 
+// errCredStill heads the error of a run failed for the credential the last
+// run already waited on.
+const errCredStill = "凭证仍然失效，上次巡检以来 Midway 没有续过"
+
 // credWait is a run waiting for the credential: it goes again once the
 // Midway session expires later than cred, until the next scheduled slot,
 // which reads the same span anyway.
@@ -28,26 +32,39 @@ type credWait struct {
 	until time.Time
 }
 
+// credExpiry is the Midway session's expiry now, zero with none to watch.
+func (s *Scout) credExpiry() time.Time {
+	if s.cfg.CredExpiry == nil {
+		return time.Time{}
+	}
+	return s.cfg.CredExpiry()
+}
+
 // credential reports whether err is the model call finding the credential
 // expired or missing, the class custody waits on (health.ErrCredentialExpired),
-// with the Midway session's expiry now. False with no Midway session to
-// watch: nothing would tell a renewal, so the failure stands.
-func (s *Scout) credential(err error) (time.Time, bool) {
-	if err == nil || s.cfg.CredExpiry == nil || health.Classify(err.Error()) != health.ErrCredentialExpired {
-		return time.Time{}, false
-	}
-	exp := s.cfg.CredExpiry()
-	return exp, !exp.IsZero()
+// exp being the Midway session's expiry read before the session started: a
+// renewal while the failing session still ran must count as one. False
+// with no Midway session to watch: nothing would tell a renewal, so the
+// failure stands.
+func credential(err error, exp time.Time) bool {
+	return err != nil && !exp.IsZero() && health.Classify(err.Error()) == health.ErrCredentialExpired
 }
 
 // renewed reports whether the Midway session was renewed since a failure
 // that saw it expire at cred: it expires later now, and not yet.
 func (s *Scout) renewed(cred, now time.Time) bool {
-	if s.cfg.CredExpiry == nil {
-		return false
-	}
-	exp := s.cfg.CredExpiry()
+	exp := s.credExpiry()
 	return exp.After(cred) && exp.After(now)
+}
+
+// waitedOn reports whether the last run already waited for the credential
+// with the Midway session expiring at exp, not renewed since. A second run
+// failing so is failed: waiting again would hide, run after run, a
+// credential that renewing Midway does not fix.
+func (s *Scout) waitedOn(exp time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.last != nil && s.last.State == StateWaiting && !exp.After(s.last.Cred)
 }
 
 // waitLocked records r, a run just ended, as the one to go again or, any

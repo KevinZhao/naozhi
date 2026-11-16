@@ -174,6 +174,10 @@ func TestMarkSeenAsanaDeadline(t *testing.T) {
 		// Every run on until 11-19, past 11-05 + 14 days: never new.
 		{day(11, 19, 8), []Finding{task("t930", "2026-09-30"), task("old", "2026-10-30"), task("today", "2026-11-05")}, nil},
 		{day(11, 20, 8), []Finding{task("t930", "2026-09-30"), task("old", "2026-10-30"), task("today", "2026-11-05")}, nil},
+		// A run whose model left the due dates out (the 11-11 20:00 run)
+		// changes nothing, and the next run with them is no change either.
+		{day(11, 20, 9), []Finding{task("t930", ""), task("old", "never")}, nil},
+		{day(11, 20, 9), []Finding{task("t930", "2026-09-30"), task("old", "2026-10-30")}, nil},
 		// Its due date moved: reported again.
 		{day(11, 20, 10), []Finding{task("t930", "2026-11-30"), task("old", "2026-10-30")}, []string{"t930"}},
 	}

@@ -16,9 +16,9 @@ import (
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
-// credErr is the model call's failure of the 11-16 08:00 and 08:15 runs,
+// errCred is the model call's failure of the 11-16 08:00 and 08:15 runs,
 // woken before the Bedrock credential was back.
-var credErr = errors.New("cron: turn failed (success): API Error: Could not load AWS credentials · Could not load credentials from any providers. Check or refresh your AWS credentials and try again.")
+var errCred = errors.New("cron: turn failed (success): API Error: Could not load AWS credentials · Could not load credentials from any providers. Check or refresh your AWS credentials and try again")
 
 // waitFixture is a scout whose session answers with err or reply, and whose
 // Midway session expires at exp.
@@ -77,7 +77,7 @@ func (f *waitFixture) count() int { f.mu.Lock(); defer f.mu.Unlock(); return f.c
 func TestCredentialWaitRetries(t *testing.T) {
 	f := newWaitFixture(t, false)
 	mon := time.Date(2026, 11, 16, 8, 0, 29, 0, time.Local) // a Monday
-	f.set(func() { f.now, f.exp, f.err = mon, mon.Add(-time.Hour), credErr })
+	f.set(func() { f.now, f.exp, f.err = mon, mon.Add(-time.Hour), errCred })
 	id, err := f.s.start(TriggerSchedule)
 	if err != nil {
 		t.Fatal(err)
@@ -129,7 +129,7 @@ func TestCredentialWaitRetries(t *testing.T) {
 func TestCredentialWaitEndsAtNextSlot(t *testing.T) {
 	f := newWaitFixture(t, false)
 	fri := time.Date(2026, 11, 13, 20, 0, 0, 0, time.Local) // a Friday, the day's last slot
-	f.set(func() { f.now, f.exp, f.err = fri, fri.Add(-time.Hour), credErr })
+	f.set(func() { f.now, f.exp, f.err = fri, fri.Add(-time.Hour), errCred })
 	if _, err := f.s.start(TriggerSchedule); err != nil {
 		t.Fatal(err)
 	}
@@ -153,6 +153,109 @@ func TestCredentialWaitEndsAtNextSlot(t *testing.T) {
 	}
 }
 
+// A credential renewing Midway does not fix is no wait run after run: the
+// next run failing so with Midway not renewed since is failed, as the health
+// table and the inbox see; one after a renewal waits again.
+func TestCredentialWaitNotRenewedFails(t *testing.T) {
+	f := newWaitFixture(t, false)
+	mon := time.Date(2026, 11, 16, 8, 0, 29, 0, time.Local)
+	valid := mon.Add(10 * time.Hour) // the cookie is fine; the credential is not
+	f.set(func() { f.now, f.exp, f.err = mon, valid, errCred })
+	run := func(at time.Time, trig string) *Run {
+		t.Helper()
+		f.set(func() { f.now = at })
+		if _, err := f.s.start(trig); err != nil {
+			t.Fatal(err)
+		}
+		f.s.runs.Wait()
+		return f.s.Status().Last
+	}
+	if r := run(mon, TriggerSchedule); r == nil || r.State != StateWaiting {
+		t.Fatalf("first run = %+v, want waiting", r)
+	}
+	f.s.checkRetry(mon.Add(15 * time.Minute)) // the wait ends at the next slot
+	r := run(mon.Add(15*time.Minute), TriggerSchedule)
+	if r == nil || r.State != StateFailed || !strings.Contains(r.Error, errCredStill) {
+		t.Fatalf("second run, Midway not renewed = %+v, want failed", r)
+	}
+	f.s.mu.Lock()
+	w := f.s.wait
+	f.s.mu.Unlock()
+	if w != nil {
+		t.Errorf("wait after a failed run = %+v, want none", w)
+	}
+	if rec, _ := f.s.st.lastRun(); rec.State != StateFailed {
+		t.Errorf("run record = %+v, want failed", rec)
+	}
+
+	// A failed run then a renewal: the next failure waits again.
+	f.set(func() { f.exp = valid.Add(time.Hour) })
+	if r := run(mon.Add(2*time.Hour), TriggerSchedule); r == nil || r.State != StateWaiting {
+		t.Fatalf("after a failed run = %+v, want waiting", r)
+	}
+	// Renewed during the wait, the retry failing so waits again too.
+	f.set(func() { f.exp = valid.Add(2 * time.Hour) })
+	f.s.checkRetry(mon.Add(2*time.Hour + time.Minute))
+	f.s.runs.Wait()
+	if r := f.s.Status().Last; f.count() != 4 || r == nil || r.Trigger != TriggerRetry || r.State != StateWaiting {
+		t.Fatalf("retry after a renewal: sessions %d, last %+v; want a waiting retry", f.count(), r)
+	}
+}
+
+// The renewal baseline is the Midway expiry before the session started: a
+// renewal while the failing session still runs is one the retry sees, for
+// a run and for a pre-meeting brief.
+func TestCredentialRenewedMidSession(t *testing.T) {
+	f := newWaitFixture(t, false)
+	mon := time.Date(2026, 11, 16, 8, 0, 0, 0, time.Local)
+	f.set(func() { f.now, f.exp = mon, mon.Add(-time.Hour) })
+	session := f.s.cfg.Session
+	failing := true
+	f.s.cfg.Session = func(ctx context.Context, key string, o sessionview.AgentOpts, p string) (string, []string, error) {
+		if failing {
+			failing = false
+			// mwinit while the failing call is still on its way back.
+			f.set(func() { f.exp, f.err = mon.Add(12*time.Hour), errCred })
+			defer f.set(func() { f.err = nil })
+		}
+		return session(ctx, key, o, p)
+	}
+	id, err := f.s.start(TriggerSchedule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.s.runs.Wait()
+	if r := f.s.Status().Last; r == nil || r.State != StateWaiting || !r.Cred.Equal(mon.Add(-time.Hour)) {
+		t.Fatalf("run = %+v, want waiting on the expiry before the session", r)
+	}
+	f.s.checkRetry(mon.Add(time.Minute))
+	f.s.runs.Wait()
+	if r := f.s.Status().Last; f.count() != 2 || r == nil || r.RetryOf != id || r.State != StateOK {
+		t.Fatalf("sessions %d, last %+v; want the retry of %s at the next tick", f.count(), r, id)
+	}
+
+	start := time.Date(2026, 11, 16, 10, 0, 0, 0, time.Local)
+	cal := []Event{{ID: "m1", Title: "iso 评审", Start: start, End: start.Add(time.Hour), Organizer: "a@x", Attendees: []string{"b@x"}, Prep: true}}
+	if _, err := f.s.st.saveCalendar(&cal, start.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	f.s.cfg.Brief = func(func(int, error), ...string) error { return nil }
+	f.set(func() {
+		f.exp = start.Add(-time.Hour)
+		f.reply = `{"why":"定方案","last":"","waiting":"","prepare":"","related":[]}`
+	})
+	failing = true
+	check := func(at time.Time) { f.set(func() { f.now = at }); f.s.checkBrief(at); f.s.runs.Wait() }
+	check(start.Add(-15 * time.Minute))
+	if len(f.s.st.briefed()) != 0 {
+		t.Fatalf("briefed %+v, want the brief waiting", f.s.st.briefed())
+	}
+	check(start.Add(-14 * time.Minute))
+	if b := f.s.st.briefed(); f.count() != 4 || len(b) != 1 || b[0].State != StateOK {
+		t.Fatalf("sessions %d, briefed %+v; want the brief run again at the next tick", f.count(), b)
+	}
+}
+
 // Without a Midway session to watch, or for another failure, the run fails
 // as before.
 func TestCredentialWaitNeedsMidway(t *testing.T) {
@@ -162,8 +265,8 @@ func TestCredentialWaitNeedsMidway(t *testing.T) {
 		exp    time.Duration // from now; 0 leaves no cookie
 		err    error
 	}{
-		{"no CredExpiry", true, -time.Hour, credErr},
-		{"no Midway cookie", false, 0, credErr},
+		{"no CredExpiry", true, -time.Hour, errCred},
+		{"no Midway cookie", false, 0, errCred},
 		{"another failure", false, -time.Hour, errors.New("API Error: 500 internal server error")},
 	}
 	for _, c := range cases {
@@ -242,7 +345,7 @@ func TestBriefCredentialWait(t *testing.T) {
 	f.s.cfg.Brief = func(_ func(int, error), b ...string) error { blocks = append(blocks, b...); return nil }
 	check := func(at time.Time) { f.set(func() { f.now = at }); f.s.checkBrief(at); f.s.runs.Wait() }
 
-	f.set(func() { f.exp, f.err = start.Add(-2*time.Hour), credErr })
+	f.set(func() { f.exp, f.err = start.Add(-2*time.Hour), errCred })
 	check(start.Add(-15 * time.Minute))
 	check(start.Add(-14 * time.Minute))
 	if n := f.count(); n != 1 || len(f.s.st.briefed()) != 0 {
@@ -263,7 +366,7 @@ func TestBriefCredentialWait(t *testing.T) {
 	if _, err := f.s.st.saveCalendar(&cal, start2.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	f.set(func() { f.exp, f.err = start2.Add(-time.Hour), credErr })
+	f.set(func() { f.exp, f.err = start2.Add(-time.Hour), errCred })
 	check(start2.Add(-15 * time.Minute))
 	check(start2.Add(-6 * time.Minute))
 	if n := f.count(); n != 3 || len(f.s.st.briefed()) != 1 {

@@ -170,10 +170,16 @@ func (st store) fresh(findings []Finding, now time.Time) ([]Finding, seenFile) {
 			fresh = append(fresh, x)
 			continue
 		}
-		if e := &kept[i]; e.State != "" && e.State != state {
+		// A state not known on either side (an entry from before states, a
+		// run whose model left the due date out) matches any: only a
+		// change seen on both sides reports again.
+		if e := &kept[i]; e.State != "" && state != "" && e.State != state {
 			fresh = append(fresh, x)
 		}
-		kept[i].State, kept[i].At = state, now
+		if state != "" {
+			kept[i].State = state
+		}
+		kept[i].At = now
 	}
 	return fresh, seenFile{V: 1, Seen: kept}
 }

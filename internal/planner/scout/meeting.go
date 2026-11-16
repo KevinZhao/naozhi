@@ -199,11 +199,12 @@ func (s *Scout) brief(ctx context.Context, id string, e Event, started time.Time
 	}
 	sctx, cancel := context.WithTimeout(ctx, runTimeout)
 	defer cancel()
+	exp := s.credExpiry()
 	reply, tools, err := s.cfg.Session(sctx, sessionkey.ScoutKeyPrefix+id, opts, meetingPrompt(started, servers, e))
 	if extra := unlisted(tools, servers); len(extra) > 0 {
 		slog.Warn("scout: brief session tried tools outside its read list", "run", id, "tools", extra)
 	}
-	if exp, ok := s.credential(err); ok && ctx.Err() == nil {
+	if credential(err, exp) && ctx.Err() == nil {
 		if e.Start.Sub(s.cfg.Now()) > briefGiveUp {
 			waitCred = exp
 			return
