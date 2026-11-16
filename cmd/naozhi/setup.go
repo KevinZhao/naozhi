@@ -106,17 +106,17 @@ func runSetupWeixin(args []string) {
 	defer cancel()
 
 	// Step 1: Get QR code
-	fmt.Println("Fetching WeChat login QR code...")
+	fmt.Println("正在获取微信登录二维码…")
 	qr, err := setupGetQRCode(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get QR code: %v\n", err)
+		fmt.Fprintf(os.Stderr, "获取二维码失败：%v\n", err)
 		os.Exit(1)
 	}
 
 	fmt.Println()
-	fmt.Println("Scan with WeChat (use the bot account):")
+	fmt.Println("用你自己的微信扫码：")
 	fmt.Printf("\n  %s\n\n", qr.QRCodeImgContent)
-	fmt.Println("Waiting for confirmation...")
+	fmt.Println("等待在手机上确认…")
 
 	// Step 2: Poll for status
 	poller := &qrPoller{
@@ -128,12 +128,12 @@ func runSetupWeixin(args []string) {
 	}
 	login, err := poller.poll(ctx, qr.QRCode)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "\nLogin failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "\n登录失败：%v\n", err)
 		os.Exit(1)
 	}
 	token := login.BotToken
 
-	fmt.Println("\nLogin successful!")
+	fmt.Println("\n登录成功")
 
 	// Step 3: Write config
 	// confirmed carries the account's API host; the default needs no base_url.
@@ -165,9 +165,11 @@ type setupQRResp struct {
 }
 
 // setupStatusResp is one get_qrcode_status reply. Status is one of "wait",
-// "scaned", "confirmed", "expired", "scaned_but_redirect", "need_verifycode"
-// or "verify_code_blocked" (from openclaw-weixin's docs/protocol.md; its
-// binded_redirect needs a local_token_list naozhi never sends).
+// "scaned", "confirmed", "expired", "scaned_but_redirect", "verify_code_blocked"
+// or one containing "need_verifycode" ("need_verifycode",
+// "confirmed_but_need_verifycode"), per Tencent/openclaw-weixin's
+// docs/protocol.md and src/auth/login-qr.ts; its binded_redirect needs a
+// local_token_list naozhi never sends.
 type setupStatusResp struct {
 	Status     string `json:"status"`
 	BotToken   string `json:"bot_token,omitempty"`
@@ -234,56 +236,73 @@ func (p *qrPoller) poll(ctx context.Context, qrcode string) (*setupStatusResp, e
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("timed out waiting for scan")
+			return nil, fmt.Errorf("等待扫码确认超时，请重新运行 naozhi setup weixin")
 		case <-ticker.C:
 			status, err := p.check(ctx, qrcode, verifyCode)
 			if err != nil {
 				return nil, err
 			}
-			switch status.Status {
-			case "confirmed":
-				if status.BotToken == "" {
-					return nil, fmt.Errorf("confirmed but no token returned")
-				}
-				return status, nil
-			case "expired":
-				return nil, fmt.Errorf("QR code expired, please retry")
-			case "wait":
-			case "scaned":
-				verifyCode = "" // scaned after a submitted number means it matched
-				fmt.Fprint(p.out, ".")
-			case "need_verifycode":
-				prompt := "Enter the number WeChat shows on your phone: "
+			// iLink asks for the phone's digits with any status containing
+			// need_verifycode, confirmed_but_need_verifycode included: a
+			// confirmed scan still carries no token until they match.
+			if strings.Contains(status.Status, "need_verifycode") {
+				prompt := "输入手机微信上显示的数字："
 				if verifyCode != "" {
-					prompt = "That number did not match, enter it again: "
+					prompt = "数字不匹配，请重新输入："
 				}
 				fmt.Fprint(p.out, "\n"+prompt)
 				line, err := p.in.ReadString('\n')
 				code := strings.TrimSpace(line)
 				if code == "" && err != nil {
-					return nil, fmt.Errorf("iLink asked for the number WeChat shows on your phone, but none could be read (%w); rerun 'naozhi setup weixin' in an interactive terminal", err)
+					return nil, fmt.Errorf("微信要求输入手机上显示的数字，但读不到输入（%w）。请在可交互的终端里重新运行 naozhi setup weixin，扫码后按提示输入手机微信上显示的数字", err)
 				}
 				verifyCode = code
+				continue
+			}
+			switch status.Status {
+			case "confirmed":
+				if status.BotToken == "" {
+					return nil, fmt.Errorf("已确认登录，但微信没有返回 token")
+				}
+				return status, nil
+			case "expired":
+				return nil, fmt.Errorf("二维码已过期，请重新运行 naozhi setup weixin")
+			case "wait":
+			case "scaned":
+				verifyCode = "" // scaned after a submitted number means it matched
+				fmt.Fprint(p.out, ".")
 			case "verify_code_blocked":
-				return nil, fmt.Errorf("too many wrong numbers, iLink blocked the login (verify_code_blocked); wait a while, then rerun 'naozhi setup weixin'")
+				return nil, fmt.Errorf("数字输错次数太多，微信暂时拦下了这次登录（verify_code_blocked）。请过一段时间再运行 naozhi setup weixin，用新二维码重新扫码")
 			case "scaned_but_redirect":
-				if status.RedirectHost != "" {
+				if isBareHost(status.RedirectHost) {
 					if base := "https://" + status.RedirectHost; base != p.baseURL {
-						fmt.Fprintf(p.out, "\nContinuing on %s\n", osutil.SanitizeForLog(base, 128))
+						fmt.Fprintf(p.out, "\n改到 %s 继续等待确认\n", osutil.SanitizeForLog(base, 128))
 						p.baseURL = base
 					}
 					continue
 				}
-				fallthrough // no redirect_host: report it like an unknown status
+				fallthrough // no usable redirect_host: report it like an unknown status
 			default:
 				if !reported[status.Status] {
 					reported[status.Status] = true
-					fmt.Fprintf(p.out, "\nunhandled iLink QR status %q, still waiting\n",
+					fmt.Fprintf(p.out, "\n未识别的扫码状态 %q，继续等待\n",
 						osutil.SanitizeForLog(status.Status, 64))
 				}
 			}
 		}
 	}
+}
+
+// isBareHost reports whether h is a host[:port] and nothing else, so a
+// redirect_host can only change which server is polled, never smuggle a path,
+// query or userinfo into the URL that carries the QR code.
+func isBareHost(h string) bool {
+	if h == "" || len(h) > 253 {
+		return false
+	}
+	u, err := url.Parse("https://" + h)
+	return err == nil && u.Host == h && u.User == nil && u.Path == "" &&
+		u.RawQuery == "" && u.Fragment == "" && u.Hostname() != ""
 }
 
 func (p *qrPoller) check(ctx context.Context, qrcode, verifyCode string) (*setupStatusResp, error) {
