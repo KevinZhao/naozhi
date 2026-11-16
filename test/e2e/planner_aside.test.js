@@ -340,3 +340,35 @@ test('phone: a 单独聊 takes the screen, the breadcrumb at its top left goes b
     mock.server.close();
   }
 });
+
+test('结束 takes the 单独聊 out of 你开的 at once, not at the next read of 任务', async ({ browser }) => {
+  test.setTimeout(60000);
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+  const page = await ctx.newPage();
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  const key = 'dashboard:direct:2026-01-01-120000-1-workspace:general';
+  const s = defaultSessions();
+  s.sessions.push({ key, state: 'ready', platform: 'dashboard', agent: 'general', cli_name: 'claude', user_label: '单独聊：iso 今天几号？',
+    workspace: '/home/user/workspace', node: 'local', last_active: now - 60000, created_at: now - 90000 });
+  const at = new Date(now - 60000).toISOString();
+  const tasks = { tasks: [{ id: key, kind: 'session', group: 'yours', title: '单独聊：iso 今天几号？', state: 'doing', at, health: 'idle', health_since: at,
+    live: { running: false, reply: '11 月 16 日', last_active: at } }] };
+  const mock = await startMockServer({ ws: true, sessions: s, tasks, plannerEvents: plannerEvents(), planner, custody: { paused: false, sessions: [] } });
+  try {
+    await openPlanner(page, mock);
+    const card = page.locator(`#pl-task .tk-card[data-id="${key}"]`);
+    await expect(card).toHaveCount(1);
+    await card.locator('.tk-title').click();
+    await expect(page.locator('#pl-sess-name')).toHaveText('单独聊：iso 今天几号？');
+    await page.click('#pl-sess-end');
+    await expect.poll(() => mock.plannerAsideEndCalls).toEqual([{ key }]);
+    await expect(page.locator('#toast')).toHaveText('单独聊已结束，移到了历史');
+    // Well inside the 10 s the group refetches in only while a turn runs.
+    await expect(card).toHaveCount(0, { timeout: 3000 });
+    expect(errors).toEqual([]);
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
