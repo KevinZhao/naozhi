@@ -18,7 +18,7 @@ import (
 func TestTaint(t *testing.T) {
 	r := newDigestRouter(t)
 	sc := sidecar.Open(t.TempDir(), nil)
-	const web, clean = "dashboard:direct:u:general", "dashboard:direct:u:other"
+	const web, clean, internal = "dashboard:direct:u:general", "dashboard:direct:u:other", "dashboard:direct:u:wiki"
 	wp := session.NewTestProcess()
 	wp.EventLog.Append(clievent.EventEntry{Time: 1, Type: clievent.KindUser, Detail: "查一下"})
 	wp.EventLog.Append(clievent.EventEntry{Time: 2, Type: clievent.KindToolUse, Tool: "mcp__exa__web_search_exa"})
@@ -27,12 +27,24 @@ func TestTaint(t *testing.T) {
 	cp := session.NewTestProcess()
 	cp.EventLog.Append(clievent.EventEntry{Time: 1, Type: clievent.KindToolUse, Tool: "Read"})
 	r.InjectSession(clean, cp)
+	// An internal page read through builder-mcp is outside content too; its
+	// other tools (code search, a ticket's read) are not page fetches.
+	ip := session.NewTestProcess()
+	ip.EventLog.Append(clievent.EventEntry{Time: 1, Type: clievent.KindToolUse, Tool: "mcp__builder-mcp__InternalCodeSearch"})
+	ip.EventLog.Append(clievent.EventEntry{Time: 2, Type: clievent.KindToolUse, Tool: "mcp__builder-mcp__ReadInternalWebsites"})
+	r.InjectSession(internal, ip)
 
 	taint := &Taint{Router: r, Sidecars: sc}
 	taint.Check(web)
 	taint.Check(clean)
-	if got := sc.Tainted(); !slices.Equal(got, []string{web}) {
-		t.Fatalf("tainted = %q, want [%s]", got, web)
+	taint.Check(internal)
+	got := sc.Tainted()
+	slices.Sort(got)
+	if !slices.Equal(got, []string{web, internal}) {
+		t.Fatalf("tainted = %q, want [%s %s]", got, web, internal)
+	}
+	if m, _ := sc.Get(internal); !slices.Equal(m.Taint.Kinds, []string{sidecar.TaintWeb}) || !slices.Equal(m.Taint.Tools, []string{"mcp__builder-mcp__ReadInternalWebsites"}) {
+		t.Errorf("internal page read: taint = %+v", m.Taint)
 	}
 	m, _ := sc.Get(web)
 	if !slices.Equal(m.Taint.Kinds, []string{sidecar.TaintWeb, sidecar.TaintEmail}) {

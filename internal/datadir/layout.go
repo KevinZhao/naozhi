@@ -214,9 +214,14 @@ func (l Layout) ScoutMCPConfigPath() string { return l.Join("session-settings", 
 // (<root>/planner/reader).
 func (l Layout) PlannerReaderRoot() string { return l.Join("planner", "reader") }
 
+// PlannerGitHubRoot holds one markdown file of GitHub issues per
+// registered repository, for the Planner to read (<root>/planner/github,
+// docs/rfc/planner.md §15.14 ⑤).
+func (l Layout) PlannerGitHubRoot() string { return l.Join("planner", "github") }
+
 // ReaderMCPConfigPath is a lookup's reader session's --mcp-config,
-// cli.mcp_config cut down to the web search servers, beside the scout's
-// (<root>/session-settings/reader-mcp.json).
+// cli.mcp_config cut down to the web search servers and the internal page
+// read, beside the scout's (<root>/session-settings/reader-mcp.json).
 func (l Layout) ReaderMCPConfigPath() string { return l.Join("session-settings", "reader-mcp.json") }
 
 // TaskMCPConfigPath is the --mcp-config of a dispatched session whose
