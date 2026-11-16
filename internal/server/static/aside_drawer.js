@@ -4,7 +4,7 @@
 // DOM lives in dashboard.html; dashboard's module body runs initAsideDrawer().
 import { NZ_CONTRACT } from './contract.js';
 import { selection, sessionList } from './state.js';
-import { showToast } from './nz_util.js';
+import { isComposingKey, showToast } from './nz_util.js';
 import { eventHtml } from './event_render.js';
 import { collapseSidebarForDrawer, restoreSidebarAfterDrawer } from './mobile_nav.js';
 import { splitDock } from './split_view.js';
@@ -512,7 +512,7 @@ export function initAsideDrawer() {
   ad.elSend.addEventListener('click', sendInScratch);
   ad.elInput.addEventListener('keydown', (e) => {
     // Enter sends; Shift+Enter inserts newline.
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    if (e.key === 'Enter' && !e.shiftKey && !isComposingKey(e)) {
       e.preventDefault();
       sendInScratch();
     }

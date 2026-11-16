@@ -126,6 +126,11 @@ func (l Layout) NaozhiSettingsPath() string { return l.Join("naozhi-settings.jso
 // instance (docs note in internal/uiprefs).
 func (l Layout) UISettingsPath() string { return l.Join("ui-settings.json") }
 
+// UpdateSchedulePath is the auto-update checker's next check time
+// (<root>/update-check.json), kept so a restart does not start the interval
+// over.
+func (l Layout) UpdateSchedulePath() string { return l.Join("update-check.json") }
+
 // ProjectsIndexPath is naozhi's per-project bookkeeping for projects.root
 // (<root>/projects-index.json): the sidebar order of projects whose
 // .naozhi/project.yaml carries none, so discovery never writes into a

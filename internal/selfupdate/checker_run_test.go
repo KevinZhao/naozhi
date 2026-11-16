@@ -3,6 +3,8 @@ package selfupdate
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -25,11 +27,21 @@ type runHarness struct {
 	// with that check, which is how waitChecks knows the schedule is set.
 	mark int
 	fail bool
+
+	// stop ends Run and waits for it, as a process exit would.
+	stop func()
 }
+
+var harnessStart = time.Date(2026, 11, 12, 23, 8, 0, 0, time.UTC)
 
 func newRunHarness(t *testing.T, cfg CheckerConfig) (*runHarness, *Checker) {
 	t.Helper()
-	h := &runHarness{t: t, now: time.Date(2026, 11, 12, 23, 8, 0, 0, time.UTC)}
+	return newRunHarnessAt(t, cfg, harnessStart)
+}
+
+func newRunHarnessAt(t *testing.T, cfg CheckerConfig, start time.Time) (*runHarness, *Checker) {
+	t.Helper()
+	h := &runHarness{t: t, now: start}
 	withStubbedLatest(t, func(context.Context) (*Release, error) {
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -46,10 +58,14 @@ func newRunHarness(t *testing.T, cfg CheckerConfig) (*runHarness, *Checker) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { c.Run(ctx); close(done) }()
-	t.Cleanup(func() {
-		cancel()
-		<-done
-	})
+	var once sync.Once
+	h.stop = func() {
+		once.Do(func() {
+			cancel()
+			<-done
+		})
+	}
+	t.Cleanup(h.stop)
 	// Run reads the clock to set the first check and again to wait for it;
 	// advancing before that would move the first check along with the clock.
 	deadline := time.Now().Add(5 * time.Second)
@@ -219,4 +235,69 @@ func TestRun_ClockSetBackwardsKeepsTheIntervalBound(t *testing.T) {
 	h.expectChecks(0, "right after the clock went back")
 	h.advance(6 * time.Hour)
 	h.waitChecks(1, "an interval after the clock went back")
+}
+
+// A restart resumes the saved schedule: an instance restarted more often than
+// the interval used to start it over every time and never checked.
+func TestRun_RestartResumesTheSavedSchedule(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "update-check.json")
+	cfg := CheckerConfig{CurrentVersion: "v1.0.0", Mode: ModeNotify, Interval: 6 * time.Hour, StatePath: path}
+
+	h1, _ := newRunHarness(t, cfg)
+	h1.advance(5 * time.Hour)
+	h1.expectChecks(0, "5 hours in")
+	h1.stop()
+
+	h2, _ := newRunHarnessAt(t, cfg, harnessStart.Add(5*time.Hour))
+	h2.advance(time.Hour - time.Minute)
+	h2.expectChecks(0, "a minute short of the saved check")
+	h2.advance(time.Minute)
+	h2.waitChecks(1, "at the check saved before the restart")
+	h2.stop()
+
+	// The check moved the saved schedule on by an interval.
+	h3, _ := newRunHarnessAt(t, cfg, harnessStart.Add(6*time.Hour+time.Minute))
+	h3.advance(5 * time.Hour)
+	h3.expectChecks(0, "5 hours after the check, restarted")
+	h3.advance(time.Hour)
+	h3.waitChecks(1, "an interval after the check")
+}
+
+// A check that fell due while the process was down runs after the start
+// delay, not at once, and a saved retry keeps its backoff.
+func TestRun_RestartWithOverdueSavedCheck(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "update-check.json")
+	cfg := CheckerConfig{CurrentVersion: "v1.0.0", Mode: ModeNotify, Interval: 6 * time.Hour, StatePath: path}
+
+	h1, _ := newRunHarness(t, cfg)
+	h1.setFail(true)
+	h1.advance(6 * time.Hour)
+	h1.waitChecks(1, "first check")
+	h1.advance(5 * time.Minute)
+	h1.waitChecks(2, "first retry")
+	h1.stop()
+
+	h2, _ := newRunHarnessAt(t, cfg, harnessStart.Add(6*time.Hour+5*time.Minute+48*time.Hour))
+	h2.setFail(true)
+	h2.expectChecks(0, "right after the restart")
+	h2.advance(checkOnStartDelay)
+	h2.waitChecks(1, "the overdue check after the start delay")
+	// Third consecutive failure: 30 minutes, not the first retry's 5.
+	h2.advance(15 * time.Minute)
+	h2.expectChecks(1, "15 minutes after the third failure")
+	h2.advance(15 * time.Minute)
+	h2.waitChecks(2, "30 minutes after the third failure")
+}
+
+// A missing or corrupt file falls back to a fresh interval.
+func TestRun_UnreadableSavedScheduleStartsOver(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "update-check.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h, _ := newRunHarness(t, CheckerConfig{CurrentVersion: "v1.0.0", Mode: ModeNotify, Interval: 6 * time.Hour, StatePath: path})
+	h.advance(6*time.Hour - time.Minute)
+	h.expectChecks(0, "a minute short of the interval")
+	h.advance(time.Minute)
+	h.waitChecks(1, "an interval after start")
 }
