@@ -41,7 +41,10 @@ var patterns = []struct {
 }{
 	{ErrDiskFull, []string{"no space left on device", "enospc", "disk full", "disk quota exceeded"}},
 	{ErrCredentialExpired, []string{"expiredtoken", "token has expired", "token is expired", "security token included in the request is expired",
-		"sso session", "midway", "mwinit", "credentials have expired", "refresh token"}},
+		"sso session", "midway", "mwinit", "credentials have expired", "refresh token",
+		// The Claude CLI's words when the Bedrock credential process finds
+		// no credential, as after a wake before the Midway session is renewed.
+		"could not load aws credentials", "could not load credentials from any providers"}},
 	{ErrRegion, []string{"unsupported countr", "unsupported_country", "not available in your region", "region is not supported"}},
 	{ErrRefusal, []string{"model_refusal", "refusal"}},
 }

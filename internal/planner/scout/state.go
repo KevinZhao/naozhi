@@ -26,6 +26,10 @@ const (
 const (
 	StateOK     = "ok"
 	StateFailed = "failed"
+	// StateWaiting is a run whose model call found the credential expired:
+	// not a failure, it runs again once the Midway session is renewed, until
+	// the next scheduled slot (credWait).
+	StateWaiting = "waiting"
 )
 
 // Run is one scout run's record, runs/<ID>.json.
@@ -48,6 +52,13 @@ type Run struct {
 	// Slack is the unread digest the run was asked for (wantSlack), nil
 	// when it was not or Slack could not be read.
 	Slack *SlackUnread `json:"slack_unread,omitempty"`
+	// Cred is, for a waiting run, the Midway session's expiry when it
+	// failed: it runs again once the session expires later than that.
+	Cred time.Time `json:"cred_expiry,omitzero"`
+	// RetryOf is the waiting run a retry run is for.
+	RetryOf string `json:"retry_of,omitempty"`
+	// Timeout is what the session was doing when the run's time ran out.
+	Timeout *Timeout `json:"timeout,omitempty"`
 }
 
 // RunFinding is a finding as a run recorded it.
@@ -70,10 +81,15 @@ type cursorsFile struct {
 }
 
 type seenEntry struct {
-	Source string    `json:"source"`
-	ID     string    `json:"id"`
-	Kind   string    `json:"kind"`
-	At     time.Time `json:"at"`
+	Source string `json:"source"`
+	ID     string `json:"id"`
+	Kind   string `json:"kind"`
+	// State is the finding's dedupState when last reported; "" matches any,
+	// as entries written before it was kept have none.
+	State string `json:"state,omitempty"`
+	// At is when a run last reported it: retention runs from there, so a
+	// finding reported every run stays seen however long it lasts.
+	At time.Time `json:"at"`
 }
 
 type seenFile struct {
@@ -123,28 +139,41 @@ func (st store) saveCursors(c Cursors, now time.Time) error {
 	return st.write("cursors.json", cursorsFile{V: 1, Cursors: c, Updated: now})
 }
 
-// fresh returns the findings not seen in the last seenRetention, in order,
-// and the seen table with them added at now and older entries dropped, for
-// saveSeen once they reached the Planner.
+// fresh returns the findings not seen in the last seenRetention, or seen
+// in another state (dedupState), in order, and the seen table with every
+// finding of this run stamped at now in its current state and older entries
+// dropped, for saveSeen once they reached the Planner.
 func (st store) fresh(findings []Finding, now time.Time) ([]Finding, seenFile) {
 	var f seenFile
 	st.read("seen.json", &f)
-	seen := map[string]bool{}
-	kept := f.Seen[:0]
+	at := map[string]int{} // key -> index in kept
+	var kept []seenEntry
 	for _, e := range f.Seen {
 		if now.Sub(e.At) <= seenRetention {
+			at[Finding{Source: e.Source, ID: e.ID, Kind: e.Kind}.key()] = len(kept)
 			kept = append(kept, e)
-			seen[Finding{Source: e.Source, ID: e.ID, Kind: e.Kind}.key()] = true
 		}
 	}
 	var fresh []Finding
+	done := map[string]bool{}
 	for _, x := range findings {
-		if seen[x.key()] {
+		k := x.key()
+		if done[k] {
 			continue
 		}
-		seen[x.key()] = true
-		fresh = append(fresh, x)
-		kept = append(kept, seenEntry{Source: x.Source, ID: x.ID, Kind: x.Kind, At: now})
+		done[k] = true
+		state := x.dedupState(now)
+		i, ok := at[k]
+		if !ok {
+			at[k] = len(kept)
+			kept = append(kept, seenEntry{Source: x.Source, ID: x.ID, Kind: x.Kind, State: state, At: now})
+			fresh = append(fresh, x)
+			continue
+		}
+		if e := &kept[i]; e.State != "" && e.State != state {
+			fresh = append(fresh, x)
+		}
+		kept[i].State, kept[i].At = state, now
 	}
 	return fresh, seenFile{V: 1, Seen: kept}
 }

@@ -107,8 +107,15 @@ func (s *Scout) checkBrief(now time.Time) {
 	if busy || ctx == nil || ctx.Err() != nil {
 		return
 	}
+	s.giveUpBriefs(now)
 	e, ok := briefDue(now, s.st.Calendar(), s.st.briefed())
 	if !ok || (s.cfg.PlannerOn != nil && !s.cfg.PlannerOn()) {
+		return
+	}
+	s.mu.Lock()
+	w, waiting := s.briefWait[e.Start]
+	s.mu.Unlock()
+	if waiting && !s.renewed(w.cred, now) {
 		return
 	}
 	s.mu.Lock()
@@ -124,11 +131,44 @@ func (s *Scout) checkBrief(now time.Time) {
 	}()
 }
 
+// errBriefCred is a brief's record when the credential was still expired
+// briefGiveUp before its meeting.
+const errBriefCred = "凭证失效，开会前 5 分钟还没续上，放弃"
+
+// briefCred is a brief waiting for the credential: its meeting's ID and the
+// Midway expiry the brief saw.
+type briefCred struct {
+	id   string
+	cred time.Time
+}
+
+// giveUpBriefs records each brief still waiting for the credential
+// briefGiveUp before its meeting, or later (the machine slept), as given
+// up, journaled.
+func (s *Scout) giveUpBriefs(now time.Time) {
+	s.mu.Lock()
+	var late []briefed
+	for start, w := range s.briefWait {
+		if start.Sub(now) <= briefGiveUp {
+			late = append(late, briefed{ID: w.id, Start: start, Run: runID(now), At: now, State: StateFailed, Error: errBriefCred})
+			delete(s.briefWait, start)
+		}
+	}
+	s.mu.Unlock()
+	for _, b := range late {
+		s.finishBrief(b)
+	}
+}
+
 // brief runs one pre-meeting brief and records it, whatever the outcome:
-// a meeting gets one try. A brief Stop cut short leaves no record, so the
+// a meeting gets one try, but for a model call that found the credential
+// expired, which leaves no record and waits in briefWait for the Midway
+// session to be renewed. A brief Stop cut short leaves no record, so the
 // next start tries again if the meeting is still ahead.
 func (s *Scout) brief(ctx context.Context, id string, e Event, started time.Time) {
 	b := briefed{ID: e.ID, Start: e.Start, Run: id, At: started, State: StateFailed}
+	// waitCred is the Midway expiry a brief waiting for the credential saw.
+	var waitCred time.Time
 	defer func() {
 		if p := recover(); p != nil {
 			slog.Error("scout: brief panicked", "run", id, "panic", p)
@@ -136,6 +176,17 @@ func (s *Scout) brief(ctx context.Context, id string, e Event, started time.Time
 		}
 		if b.State != StateOK && ctx.Err() != nil {
 			slog.Info("scout: brief cut short by shutdown", "run", id)
+			return
+		}
+		s.mu.Lock()
+		if waitCred.IsZero() {
+			delete(s.briefWait, e.Start)
+		} else {
+			s.briefWait[e.Start] = briefCred{id: e.ID, cred: waitCred}
+		}
+		s.mu.Unlock()
+		if !waitCred.IsZero() {
+			slog.Info("scout: brief waits for the credential", "run", id, "meeting", e.Start)
 			return
 		}
 		s.finishBrief(b)
@@ -151,6 +202,18 @@ func (s *Scout) brief(ctx context.Context, id string, e Event, started time.Time
 	reply, tools, err := s.cfg.Session(sctx, sessionkey.ScoutKeyPrefix+id, opts, meetingPrompt(started, servers, e))
 	if extra := unlisted(tools, servers); len(extra) > 0 {
 		slog.Warn("scout: brief session tried tools outside its read list", "run", id, "tools", extra)
+	}
+	if exp, ok := s.credential(err); ok && ctx.Err() == nil {
+		if e.Start.Sub(s.cfg.Now()) > briefGiveUp {
+			waitCred = exp
+			return
+		}
+		fail(errors.New(errBriefCred))
+		return
+	}
+	if t := timedOut(err, s.cfg.Now().Sub(started)); t != nil && ctx.Err() == nil {
+		fail(fmt.Errorf("scout session %s: %w", t.describe(), context.DeadlineExceeded))
+		return
 	}
 	if err != nil {
 		fail(fmt.Errorf("scout session: %w", err))
@@ -274,7 +337,7 @@ func meetingPrompt(now time.Time, servers []string, e Event) string {
 - why：这场会为什么开；last：上次聊到哪（上一次会议或最近的讨论停在哪）；waiting：对方在等用户什么；prepare：用户要准备什么。每项一两句；找不到依据就留空，不要编。
 - related 列出依据，最多 10 条：source 是 email、slack 或 asana；id 用来源里的稳定 ID；title 不超过 60 字；note 用一句话说明它和这场会的关系；不要抄录正文。
 - 时间一律写带时区的 RFC 3339。
-- 某个来源调用失败就跳过它，继续看其他来源。
+- 某个来源的调用失败或超时一次，这一轮就不要再调用这个来源的工具，跳过它，继续看其他来源。
 
 只输出一个 JSON 对象，不要任何其他文字，不要代码块：
 {"why":"…","last":"…","waiting":"…","prepare":"…","related":[{"source":"…","id":"…","title":"…","from":"…","at":"…","link":"…","note":"…"}]}`,

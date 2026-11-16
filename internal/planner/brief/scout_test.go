@@ -127,14 +127,17 @@ func TestScoutNothingToReport(t *testing.T) {
 }
 
 // The brief says each thing once (§15.7): an Asana task overdue past
-// staleDays is only counted, one line for all of them; what the Planner
-// held about a task the Asana section reports is left out.
+// staleDays is only counted, one line for all of them, and only in the
+// brief after the run that first reported it overdue (D90: 只进早报一次);
+// what the Planner held about a task the Asana section reports is left out.
 func TestRenderAsanaOnce(t *testing.T) {
 	asana := func(id, due string) scout.RunFinding {
 		f := finding("asana", "deadline", id, "iso "+id, "", "", due)
 		f.Link = "https://app.asana.com/0/1/" + id
+		f.New = true
 		return f
 	}
+	reported := func(f scout.RunFinding) scout.RunFinding { f.New = false; return f }
 	tests := []struct {
 		name     string
 		findings []scout.RunFinding
@@ -181,6 +184,17 @@ func TestRenderAsanaOnce(t *testing.T) {
 				"\n### Planner 记下的（1）\n" +
 				"- [iso 别的](https://example.com/x) · 11/2 08:30\n",
 			counts: Counts{Deadlines: 1, Planner: 1},
+		},
+		{
+			// Reported overdue by a run before the last brief: every run
+			// since lists it again, none as new.
+			name:     "a stale one already briefed",
+			findings: []scout.RunFinding{asana("t0", "2026-11-03"), reported(asana("t401", "2025-09-28")), reported(asana("t7", "2026-10-27"))},
+			want: "自 11/2 08:30 以来：Asana 到期 2\n" +
+				"\n### 今天到期或已过期的 Asana 任务（2）\n" +
+				"- iso t7 · 已过期 7 天\n" +
+				"- iso t0 · 今天到期\n",
+			counts: Counts{Deadlines: 2},
 		},
 	}
 	for _, tt := range tests {

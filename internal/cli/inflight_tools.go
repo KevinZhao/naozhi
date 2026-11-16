@@ -135,3 +135,22 @@ func (t *inflightTools) oldest() (tool inflightTool, ok bool) {
 	}
 	return t.tools[0], true
 }
+
+// InflightTool is a tool call the backend started and has not finished.
+type InflightTool struct {
+	Name    string
+	Started time.Time
+}
+
+// InflightTools is the tool calls in flight, oldest first: what a turn cut
+// short by its caller's deadline was waiting on, read before the cut's
+// interrupt closes them.
+func (p *Process) InflightTools() []InflightTool {
+	p.tools.mu.Lock()
+	defer p.tools.mu.Unlock()
+	out := make([]InflightTool, 0, len(p.tools.tools))
+	for _, t := range p.tools.tools {
+		out = append(out, InflightTool{Name: t.name, Started: t.started})
+	}
+	return out
+}
