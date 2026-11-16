@@ -2,6 +2,7 @@ package selfupdate
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -27,6 +28,11 @@ type runHarness struct {
 	// with that check, which is how waitChecks knows the schedule is set.
 	mark int
 	fail bool
+	// tag is the release the lookup answers, the running version if empty.
+	tag string
+	// during is the saved schedule as each lookup found it: what a process
+	// killed mid-check leaves behind.
+	during [][]byte
 
 	// stop ends Run and waits for it, as a process exit would.
 	stop func()
@@ -47,8 +53,15 @@ func newRunHarnessAt(t *testing.T, cfg CheckerConfig, start time.Time) (*runHarn
 		defer h.mu.Unlock()
 		h.checks++
 		h.mark = h.nowCalls
+		if cfg.StatePath != "" {
+			data, _ := os.ReadFile(cfg.StatePath)
+			h.during = append(h.during, data)
+		}
 		if h.fail {
 			return nil, errors.New("lookup github.com: no such host")
+		}
+		if h.tag != "" {
+			return &Release{Tag: h.tag}, nil
 		}
 		return &Release{Tag: cfg.CurrentVersion}, nil
 	})
@@ -300,4 +313,95 @@ func TestRun_UnreadableSavedScheduleStartsOver(t *testing.T) {
 	h.expectChecks(0, "a minute short of the interval")
 	h.advance(time.Minute)
 	h.waitChecks(1, "an interval after start")
+}
+
+// readSchedule decodes a saved schedule the test captured.
+func readSchedule(t *testing.T, data []byte) savedSchedule {
+	t.Helper()
+	var s savedSchedule
+	if err := json.Unmarshal(data, &s); err != nil {
+		t.Fatalf("saved schedule %q: %v", data, err)
+	}
+	return s
+}
+
+// A process killed while a retry is running keeps the retry's backoff: the
+// next start must not wait a whole interval for the check that failed.
+func TestRun_KilledDuringARetryKeepsTheBackoff(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "update-check.json")
+	cfg := CheckerConfig{CurrentVersion: "v1.0.0", Mode: ModeNotify, Interval: 6 * time.Hour, StatePath: path}
+
+	h1, _ := newRunHarness(t, cfg)
+	h1.setFail(true)
+	h1.advance(6 * time.Hour)
+	h1.waitChecks(1, "first check")
+	h1.advance(5 * time.Minute)
+	h1.waitChecks(2, "first retry")
+	h1.stop()
+
+	retryAt := harnessStart.Add(6*time.Hour + 5*time.Minute)
+	h1.mu.Lock()
+	mid := h1.during[1]
+	h1.mu.Unlock()
+	if got, want := readSchedule(t, mid), (savedSchedule{NextCheck: retryAt.Add(15 * time.Minute), Failures: 2}); !got.NextCheck.Equal(want.NextCheck) || got.Failures != want.Failures {
+		t.Fatalf("saved during the retry = %+v, want %+v", got, want)
+	}
+	// The kill: the retry never finished, so the file is as the lookup found it.
+	if err := os.WriteFile(path, mid, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	h2, _ := newRunHarnessAt(t, cfg, retryAt.Add(time.Minute))
+	h2.advance(13 * time.Minute)
+	h2.expectChecks(0, "a minute short of the second retry")
+	h2.advance(time.Minute)
+	h2.waitChecks(1, "the second retry, 15 minutes after the first")
+}
+
+// The install that restarts this process claims the whole interval first,
+// so the new binary does not check again as soon as it is up.
+func TestRun_AutoInstallClaimsTheInterval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "update-check.json")
+	var mu sync.Mutex
+	var atNotice [][]byte
+	cfg := CheckerConfig{
+		CurrentVersion: "v1.0.0", Mode: ModeAuto, Interval: 6 * time.Hour, StatePath: path,
+		// The release carries no download URL, so the install stops at the
+		// download and its notice shows what a restart in its place would find.
+		Notify: func(string) {
+			data, _ := os.ReadFile(path)
+			mu.Lock()
+			atNotice = append(atNotice, data)
+			mu.Unlock()
+		},
+	}
+
+	h1, _ := newRunHarness(t, cfg)
+	h1.mu.Lock()
+	h1.tag = "v9.9.9"
+	h1.mu.Unlock()
+	h1.advance(6 * time.Hour)
+	h1.waitChecks(1, "the check that finds v9.9.9")
+	h1.stop()
+
+	checkAt := harnessStart.Add(6 * time.Hour)
+	mu.Lock()
+	if len(atNotice) == 0 {
+		mu.Unlock()
+		t.Fatal("the install sent no notice")
+	}
+	mid := atNotice[0]
+	mu.Unlock()
+	if got := readSchedule(t, mid); !got.NextCheck.Equal(checkAt.Add(6*time.Hour)) || got.Failures != 0 {
+		t.Fatalf("saved during the install = %+v, want next %v, no failures", got, checkAt.Add(6*time.Hour))
+	}
+	if err := os.WriteFile(path, mid, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	h2, _ := newRunHarnessAt(t, cfg, checkAt.Add(time.Minute))
+	h2.advance(5*time.Hour + 58*time.Minute)
+	h2.expectChecks(0, "a minute short of the interval after the install")
+	h2.advance(time.Minute)
+	h2.waitChecks(1, "an interval after the check that installed")
 }

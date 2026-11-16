@@ -218,9 +218,10 @@ func (c *Checker) Run(ctx context.Context) {
 		if c.now().Before(next) {
 			continue
 		}
-		// Claimed before the check: an auto install restarts this process
-		// mid-check, and the new binary must not check again straight away.
-		c.saveSchedule(c.now().Add(c.cfg.Interval), failures)
+		// Saved as if this check will fail, so a process killed mid-check
+		// retries on the backoff it would have had; the install that restarts
+		// this process on purpose claims the whole interval in checkOnce.
+		c.saveSchedule(c.now().Add(retryDelay(failures+1, c.cfg.Interval)), failures+1)
 		if err := c.checkOnce(ctx); err != nil {
 			failures++
 			retry := retryDelay(failures, c.cfg.Interval)
@@ -324,6 +325,9 @@ func (c *Checker) checkOnce(ctx context.Context) error {
 		// exists for InstallLatest's HTTP caller.
 		_ = c.installLocked(cctx, rel, false)
 	case ModeAuto:
+		// The install restarts this process before checkOnce returns; the
+		// new binary must not check again straight away.
+		c.saveSchedule(c.now().Add(c.cfg.Interval), 0)
 		_ = c.installLocked(cctx, rel, true)
 	}
 	return nil
