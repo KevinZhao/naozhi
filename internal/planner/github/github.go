@@ -247,13 +247,30 @@ func (w *Writer) prune(repos []Repo) {
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !fileRe.MatchString(name) || slices.ContainsFunc(repos, func(r Repo) bool { return r.File() == name }) {
+		if e.IsDir() || !fileRe.MatchString(name) || slices.ContainsFunc(repos, func(r Repo) bool { return w.isFile(name, r.File()) }) {
 			continue
 		}
 		if err := os.Remove(filepath.Join(w.cfg.Dir, name)); err == nil {
 			slog.Info("planner github: repository no longer registered; file removed", "file", name)
 		}
 	}
+}
+
+// isFile reports whether the entry name is the file written as file. Repos
+// are told apart case-insensitively and the file name takes the casing of
+// the first directory seen, so it can change between runs; on a
+// case-insensitive file system the rename then keeps the entry's old casing,
+// and only the same file on disk tells it is the one just written.
+func (w *Writer) isFile(name, file string) bool {
+	if name == file {
+		return true
+	}
+	if !strings.EqualFold(name, file) {
+		return false
+	}
+	a, err1 := os.Stat(filepath.Join(w.cfg.Dir, name))
+	b, err2 := os.Stat(filepath.Join(w.cfg.Dir, file))
+	return err1 == nil && err2 == nil && os.SameFile(a, b)
 }
 
 // remoteRe matches a GitHub remote URL's owner and repository: https, ssh
@@ -376,7 +393,11 @@ func MarkStale(old []byte, r Repo, now time.Time, err error) []byte {
 func Exec(ctx context.Context, dir, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GH_PROMPT_DISABLED=1", "NO_COLOR=1")
+	// LC_ALL=C keeps git's messages untranslated: repos tells a non-git
+	// directory from an unreadable one by git's English text, and a
+	// translated git (Homebrew's follows the macOS language even with no
+	// LANG set) would leave every refresh incomplete and the prune off.
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "GIT_TERMINAL_PROMPT=0", "GH_PROMPT_DISABLED=1", "NO_COLOR=1")
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {

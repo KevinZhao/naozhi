@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -220,5 +221,67 @@ func TestRefreshNeverOK(t *testing.T) {
 	}
 	if _, err := os.Stat(keep); err != nil {
 		t.Errorf("a file pruned while a remote was unreadable: %v", err)
+	}
+}
+
+// A non-git workspace does not hold the prune off under a translated git:
+// the real Exec runs git with untranslated messages, so the directory is
+// recognised as not a repository whatever the service's locale.
+func TestRefreshNonGitTranslatedLocale(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("no git")
+	}
+	for _, k := range []string{"LANG", "LC_ALL", "LC_MESSAGES", "LANGUAGE"} {
+		t.Setenv(k, "zh_CN.UTF-8")
+	}
+	t.Setenv("GIT_CEILING_DIRECTORIES", os.TempDir())
+	root := t.TempDir()
+	plain := filepath.Join(root, "plain")
+	gh := filepath.Join(root, "github")
+	for _, d := range []string{plain, gh} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gone := filepath.Join(gh, "o-gone.md")
+	if err := os.WriteFile(gone, []byte("# o/gone 的 GitHub issue\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := New(Config{Dir: gh, Workspaces: func() []workspace.Dir { return []workspace.Dir{{Name: "plain", Path: plain}} }})
+	w.Refresh(context.Background())
+	if _, err := os.Stat(gone); !os.IsNotExist(err) {
+		t.Errorf("an unregistered repository's file kept beside a non-git workspace: %v", err)
+	}
+}
+
+// The file name follows the casing of the first directory seen; when that
+// casing changes, the file just written is kept (on a case-insensitive file
+// system the entry keeps its old casing) and no second file stays.
+func TestRefreshFileCasingChanges(t *testing.T) {
+	root := t.TempDir()
+	d := filepath.Join(root, "r")
+	gh := filepath.Join(root, "github")
+	for _, p := range []string{d, gh} {
+		if err := os.Mkdir(p, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(gh, "KevinZhao-naozhi.md"), []byte("# KevinZhao/naozhi 的 GitHub issue\n\n更新于 2026-11-16 11:00\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fe := &fakeExec{
+		remotes: map[string]string{d: "origin\tgit@github.com:kevinzhao/naozhi.git (fetch)\n"},
+		issues:  map[string]string{"kevinzhao/naozhi open": `[{"number":1,"title":"新的","labels":[],"updatedAt":"2026-11-16T03:00:00Z"}]`, "kevinzhao/naozhi closed": `[]`},
+	}
+	w := New(Config{Dir: gh, Workspaces: func() []workspace.Dir { return []workspace.Dir{{Name: "r", Path: d}} }, Exec: fe.run,
+		Now: func() time.Time { return time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC) }})
+	w.Refresh(context.Background())
+	entries, _ := os.ReadDir(gh)
+	if len(entries) != 1 || !strings.EqualFold(entries[0].Name(), "kevinzhao-naozhi.md") {
+		t.Fatalf("files = %v, want the repository's one file", entries)
+	}
+	data, err := os.ReadFile(filepath.Join(gh, entries[0].Name()))
+	if err != nil || !strings.Contains(string(data), "更新于 2026-11-16 12:00") || !strings.Contains(string(data), "#1") {
+		t.Errorf("file = %s, %v", data, err)
 	}
 }
