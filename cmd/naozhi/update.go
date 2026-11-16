@@ -16,7 +16,7 @@ import (
 // background loop. Returns nil when the config is unusable.
 // An isolated instance only notifies: it often runs the account's own binary,
 // which a download would replace under the real service.
-func newUpdateChecker(ctx context.Context, cfg *config.Config, platforms map[string]platform.Platform, status *selfupdate.Status, isolated bool) *selfupdate.Checker {
+func newUpdateChecker(ctx context.Context, cfg *config.Config, platforms map[string]platform.Platform, status *selfupdate.Status, isolated bool, statePath string) *selfupdate.Checker {
 	mode := selfupdate.ParseMode(cfg.Update.Mode)
 	if isolated {
 		mode = selfupdate.ModeNotify
@@ -28,6 +28,7 @@ func newUpdateChecker(ctx context.Context, cfg *config.Config, platforms map[str
 		CheckOnStart:   cfg.Update.CheckOnStart,
 		Notify:         updateNotifyFunc(ctx, cfg, platforms),
 		Status:         status,
+		StatePath:      statePath,
 	})
 }
 

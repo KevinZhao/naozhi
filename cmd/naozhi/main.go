@@ -482,7 +482,7 @@ func main() {
 	updateStatus := selfupdate.NewStatus(version)
 	var updateChecker *selfupdate.Checker
 	if cfg.UpdateEnabled() {
-		updateChecker = newUpdateChecker(ctx, cfg, platforms, updateStatus, isolated)
+		updateChecker = newUpdateChecker(ctx, cfg, platforms, updateStatus, isolated, sessionLayout.UpdateSchedulePath())
 	}
 	updateDashboardInstall := cfg.UpdateDashboardInstall()
 

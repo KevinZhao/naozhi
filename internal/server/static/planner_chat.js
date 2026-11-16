@@ -26,7 +26,7 @@
 // Layering: never import dashboard.js back; setActivityView is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
 import { composer, selection, sessionList, ui } from './state.js';
-import { esc, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
+import { esc, fetchJSON, isComposingKey, nzBus, registerActions, showToast } from './nz_util.js';
 import { isDiscoveredKey, sid } from './session_ident.js';
 import { eventHtml } from './event_render.js';
 import { hydrateAskAnsweredFromHistory, lockRenderedAskCards } from './ask_card.js';
@@ -186,7 +186,7 @@ export function mountComposer() {
   box.hidden = false;
   const input = $('pl-input');
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendFromComposer(); }
+    if (e.key === 'Enter' && !e.shiftKey && !isComposingKey(e)) { e.preventDefault(); sendFromComposer(); }
   });
   input.addEventListener('input', () => fitInput(input));
   // Dropped files join the box's attachments, as in the chat view's input.

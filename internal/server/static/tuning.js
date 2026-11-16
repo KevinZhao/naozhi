@@ -5,7 +5,7 @@
 // dashboard's renderMainHeader.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, serverInfo, sessionList } from './state.js';
-import { esc, escAttr, fetchJSON, isCronSessionKey, sessionTitleText, showToast } from './nz_util.js';
+import { esc, escAttr, fetchJSON, isComposingKey, isCronSessionKey, sessionTitleText, showToast } from './nz_util.js';
 import { sessionStream } from './session_stream.js';
 import { mainEmptyHtml, promptDialog, removePendingSession, removeSidebarCard, showAPIError, showNetworkError, stopPreviewPolling } from './utilities.js';
 import { dropDiscovered, findDiscovered, isDiscoveredKey, parseDiscoveredPid, sameDiscovered, sid } from './session_ident.js';
@@ -173,7 +173,7 @@ function openTuningPopover(kind) {
   if (manual) {
     manual.addEventListener('click', (e) => e.stopPropagation());
     manual.onkeydown = (e) => {
-      if (e.key === 'Enter') {
+      if (e.key === 'Enter' && !isComposingKey(e)) {
         const v = manual.value.trim();
         dismissTuningPopover();
         if (v) postTuningOverride('model', v);
@@ -345,7 +345,7 @@ async function openAccessProfilePopover() {
     input.classList.toggle('nz-hidden', sel.value !== TUNING_MODEL_MANUAL);
     if (sel.value === TUNING_MODEL_MANUAL) input.focus();
   });
-  input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !submit.disabled) submit.click(); });
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !isComposingKey(e) && !submit.disabled) submit.click(); });
   submit.addEventListener('click', () => {
     if (picked === null) return;
     const model = modelChoice();
