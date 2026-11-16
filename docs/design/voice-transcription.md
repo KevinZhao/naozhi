@@ -71,7 +71,7 @@ transport_hook.go / transport_ws.go
     | 新增 "audio" 分支
     v
 feishu.DownloadAudio(ctx, messageID, fileKey)
-    | GET /open-apis/im/v1/messages/{id}/resources/{key}?type=audio
+    | GET /open-apis/im/v1/messages/{id}/resources/{key}?type=file
     v
 []byte (原始音频) + Content-Type
     |
@@ -196,7 +196,7 @@ func resolveEncoding(mimeType string) (types.MediaEncoding, int32, error) {
 
 ### 2. `feishu.DownloadAudio`（新增方法）
 
-复用 `DownloadImage` 的模式，只改 `type=audio`：
+复用 `DownloadImage` 的模式，只改 `type=file`（接口的 `type` 只有 `image` / `file` 两个值，音频走 `file`，见 #3624）：
 
 ```go
 // DownloadAudio 下载飞书语音消息的音频文件，返回原始字节和 MIME 类型。
@@ -207,7 +207,7 @@ func (f *Feishu) DownloadAudio(ctx context.Context, messageID, fileKey string) (
     }
 
     req, err := http.NewRequestWithContext(ctx, "GET",
-        f.baseURL+"/open-apis/im/v1/messages/"+messageID+"/resources/"+fileKey+"?type=audio", nil)
+        f.baseURL+"/open-apis/im/v1/messages/"+messageID+"/resources/"+fileKey+"?type=file", nil)
     if err != nil {
         return nil, "", fmt.Errorf("create request: %w", err)
     }
