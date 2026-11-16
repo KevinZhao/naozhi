@@ -284,6 +284,11 @@ naozhi --config ~/.naozhi/config.yaml
 扫码确认的微信用户（登录响应里的 `ilink_user_id`）会被写进
 `im_access.platforms.weixin.allowed_users`，只有这个号发来的消息会被处理。其他微信号
 发消息会在私聊里收到自己的 ID，加进 `allowed_users` 即可，见 [IM 访问控制](#im-访问控制)。
+一个微信号就能测试：扫码的号自己给 bot 发消息即可。
+
+扫码后手机上若显示一串数字，按终端提示输入；输错太多次会被暂时拦下，过一段时间重新运行
+`naozhi setup weixin`。扫码账号在别的机房时，setup 会自动换到对应地址继续，并把确认回包里的
+地址写进 `platforms.weixin.base_url`。
 
 ### 飞书
 
@@ -425,6 +430,8 @@ im_access:
       admin_users: ["ou_alice"]
     slack:
       allowed_users: ["U012ABCDEF"]           # Slack user ID
+    weixin:
+      allowed_users: ["o9cq80xxxx@im.wechat"] # 微信 ilink_user_id，naozhi setup weixin 自动写入
 ```
 
 - **不配置 = 所有人都能用**。启动日志、`naozhi config check`、`naozhi doctor` 会对没有条目的

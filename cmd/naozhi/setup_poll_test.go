@@ -71,24 +71,32 @@ func TestQRPoller_Statuses(t *testing.T) {
 		{
 			name:    "expired",
 			replies: []setupStatusResp{{Status: "expired"}},
-			wantErr: "QR code expired",
+			wantErr: "二维码已过期",
 		},
 		{
 			name:    "confirmed without token",
 			replies: []setupStatusResp{{Status: "confirmed"}},
-			wantErr: "no token",
+			wantErr: "没有返回 token",
 		},
 		{
 			name:      "need_verifycode sends the typed number until accepted",
 			replies:   []setupStatusResp{{Status: "need_verifycode"}, {Status: "need_verifycode"}, {Status: "scaned"}, testQRConfirmed},
 			stdin:     "12\n34\n",
 			wantCodes: []string{"", "12", "34", ""},
-			wantOut:   "did not match",
+			wantOut:   "数字不匹配",
+		},
+		{
+			// openclaw-weixin prompts for any status containing need_verifycode.
+			name:      "confirmed_but_need_verifycode asks for the number too",
+			replies:   []setupStatusResp{{Status: "confirmed_but_need_verifycode"}, {Status: "scaned"}, testQRConfirmed},
+			stdin:     "56\n",
+			wantCodes: []string{"", "56", ""},
+			wantOut:   "输入手机微信上显示的数字",
 		},
 		{
 			name:    "need_verifycode with no input",
 			replies: []setupStatusResp{{Status: "need_verifycode"}},
-			wantErr: "interactive terminal",
+			wantErr: "可交互的终端",
 		},
 		{
 			name:    "verify_code_blocked",
@@ -98,7 +106,18 @@ func TestQRPoller_Statuses(t *testing.T) {
 		{
 			name:    "unknown status is reported",
 			replies: []setupStatusResp{{Status: "brand_new"}, testQRConfirmed},
-			wantOut: `unhandled iLink QR status "brand_new"`,
+			wantOut: `未识别的扫码状态 "brand_new"`,
+		},
+		{
+			name:    "scaned_but_redirect without redirect_host is reported",
+			replies: []setupStatusResp{{Status: "scaned_but_redirect"}, testQRConfirmed},
+			wantOut: `未识别的扫码状态 "scaned_but_redirect"`,
+		},
+		{
+			// A path in redirect_host must not be followed: polling stays here.
+			name:    "scaned_but_redirect with a path is not followed",
+			replies: []setupStatusResp{{Status: "scaned_but_redirect", RedirectHost: "127.0.0.1:1/x?"}, testQRConfirmed},
+			wantOut: `未识别的扫码状态 "scaned_but_redirect"`,
 		},
 	}
 	for _, tt := range tests {
@@ -162,7 +181,27 @@ func TestQRPoller_FollowsRedirectHost(t *testing.T) {
 	if n := len(idc.codes()); n != 2 {
 		t.Errorf("redirect host polled %d times, want 2", n)
 	}
-	if !strings.Contains(out.String(), "Continuing on "+idcSrv.URL) {
+	if !strings.Contains(out.String(), "改到 "+idcSrv.URL) {
 		t.Errorf("output %q does not announce the host switch", out.String())
+	}
+}
+
+func TestIsBareHost(t *testing.T) {
+	t.Parallel()
+	for h, want := range map[string]bool{
+		"sh.ilinkai.weixin.qq.com":     true,
+		"ilinkai.weixin.qq.com:8443":   true,
+		"127.0.0.1:1234":               true,
+		"":                             false,
+		"evil.example/x":               false,
+		"evil.example?q=1":             false,
+		"evil.example#f":               false,
+		"user@evil.example":            false,
+		":443":                         false,
+		"ilinkai.weixin.qq.com\x1b[2J": false,
+	} {
+		if got := isBareHost(h); got != want {
+			t.Errorf("isBareHost(%q) = %v, want %v", h, got, want)
+		}
 	}
 }
