@@ -268,12 +268,16 @@ func runID(t time.Time) string {
 // run waits its turn, runs the reader session, records and caches its
 // answer and hands it to the Planner, failed or not.
 func (r *Reader) run(run Run, key, day string) {
-	defer func() {
+	// finish releases the question before the block goes out: the Planner
+	// may ask it again as soon as it reads a failure, and that ask must
+	// start a run, not get back this one as still pending.
+	release := sync.OnceFunc(func() {
 		r.mu.Lock()
 		delete(r.inflight, key)
 		r.queued--
 		r.mu.Unlock()
-	}()
+	})
+	defer release()
 	defer func() {
 		if p := recover(); p != nil {
 			slog.Error("reader: lookup panicked", "run", run.ID, "panic", p)
@@ -283,7 +287,7 @@ func (r *Reader) run(run Run, key, day string) {
 	case r.sem <- struct{}{}:
 		defer func() { <-r.sem }()
 	case <-r.ctx.Done():
-		r.finish(run, errors.New("naozhi 正在停止"), day, key)
+		r.finish(run, errors.New("naozhi 正在停止"), day, key, release)
 		return
 	}
 	res, tools, err := r.session(run)
@@ -291,7 +295,7 @@ func (r *Reader) run(run Run, key, day string) {
 	if err == nil {
 		run.Result = &res
 	}
-	r.finish(run, err, day, key)
+	r.finish(run, err, day, key, release)
 }
 
 // session runs the reader session for run and checks its answer.
@@ -329,8 +333,8 @@ func (r *Reader) session(run Run) (Result, []string, error) {
 }
 
 // finish records run's end (err nil: its Result), caches an answer,
-// journals it and hands it to the Planner.
-func (r *Reader) finish(run Run, err error, day, key string) {
+// journals it, calls release and hands it to the Planner.
+func (r *Reader) finish(run Run, err error, day, key string, release func()) {
 	run.Ended, run.State = r.cfg.Now(), StateOK
 	if err != nil {
 		run.State, run.Error, run.Result = StateFailed, textutil.TruncateRunes(err.Error(), errRunes), nil
@@ -350,6 +354,7 @@ func (r *Reader) finish(run Run, err error, day, key string) {
 	r.pruneRuns(run.Ended)
 	slog.Info("reader: lookup ended", "run", run.ID, "state", run.State, "tools", len(run.Tools), "err", run.Error)
 	r.journal(run)
+	release()
 	if r.ctx.Err() != nil {
 		return // shutting down: no Planner turn to take it
 	}

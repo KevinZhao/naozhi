@@ -59,11 +59,15 @@ const (
 	// KindTurn is a session's turn ending, one per result frame
 	// (planner/activity.Recorder.RecordTurn).
 	KindTurn Kind = "turn"
+	// KindHandoff is the gateway's check of a handoff summary: its items,
+	// those without a source, and the "等你定" moved into the 搁置区
+	// (planner/agent, §15.14 ⑤).
+	KindHandoff Kind = "handoff"
 )
 
 func (k Kind) known() bool {
 	switch k {
-	case KindHealth, KindNotify, KindBrief, KindHeartbeat, KindActivity, KindDialog, KindCustody, KindReap, KindTurn:
+	case KindHealth, KindNotify, KindBrief, KindHeartbeat, KindActivity, KindDialog, KindCustody, KindReap, KindTurn, KindHandoff:
 		return true
 	}
 	return false

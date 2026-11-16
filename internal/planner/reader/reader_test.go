@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -290,6 +291,52 @@ func TestLookupBadOutput(t *testing.T) {
 		t.Fatal("failed answer served from the cache")
 	}
 	wait(t, blocks)
+}
+
+// The Planner may ask again the moment it reads a failure: by the time the
+// block goes out the question is no longer in flight, so the ask starts a
+// fresh run instead of getting the failed one back as pending.
+func TestLookupAskAgainOnFailure(t *testing.T) {
+	sess := &fakeSession{reply: "不是 JSON"}
+	root := t.TempDir()
+	mcp := filepath.Join(root, "mcp.json")
+	if err := os.WriteFile(mcp, []byte(`{"mcpServers":{"exa":{"type":"stdio","command":"x"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 10, 9, 0, 0, 0, time.Local)
+	again := make(chan Ticket, 1)
+	var asked atomic.Bool
+	var r *Reader
+	r = New(Config{
+		Layout:    datadir.FromRoot(root),
+		MCPConfig: mcp,
+		Session:   sess.run,
+		Deliver: func(b string) error {
+			if strings.Contains(b, `state="failed"`) && asked.CompareAndSwap(false, true) {
+				tk, err := r.Lookup("q", "")
+				if err != nil {
+					t.Errorf("ask again: %v", err)
+				}
+				again <- tk
+			}
+			return nil
+		},
+		Shift: func() string { return "s" },
+		Now:   func() time.Time { return now },
+	})
+	t.Cleanup(r.Stop)
+	first, err := r.Lookup("q", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case tk := <-again:
+		if tk.Pending || tk.Run == first.Run {
+			t.Fatalf("asked again during delivery: %+v, first run %s", tk, first.Run)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no block delivered")
+	}
 }
 
 // TestLookupInternalSource (#3942): with builder-mcp in cli.mcp_config the
