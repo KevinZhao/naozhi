@@ -30,7 +30,7 @@ RFC 是落地前的设计取舍与实测记录，**不是最终规范**——架
 | [project-stable-session-key.md](project-stable-session-key.md) | 已实装 | 项目级稳定 session key |
 | [remote-planner.md](remote-planner.md) | 已实装（#3900，随 v0.6.0 发布） | 每个节点一个 Planner、只管本节点（D60 修订）；EC2 页面可以切换到 Mac 的 Planner，经反连 RPC `api` 转发 Planner 路由；巡检与早报只在一个节点上；会话列表按节点分组；断线降级与鉴权边界，决策 D96 |
 | [reverse-protocol.md](reverse-protocol.md) | 已实现 | reverse-connect wire format |
-| [selfupdate-signing.md](selfupdate-signing.md) | 部分实装：签名工具、release 流水线与 `.sig` 校验已合；`trustedSigKeys` 仍为空，客户端实际不验签（#1738；排期见 planner.md §15.13） | 自更新二进制签名 |
+| [selfupdate-signing.md](selfupdate-signing.md) | 部分实装：签名工具、release 流水线与 `.sig` 校验已合；`trustedSigKeys` 仍为空，客户端实际不验签；推迟到 P5 执行型主动落到 naozhi 仓库时再做（#1738，planner.md D111、§16.1） | 自更新二进制签名 |
 | [sysession-telemetry-and-hardfail.md](sysession-telemetry-and-hardfail.md) | 部分实装：Phase 1（telemetry）已合；Phase 2 未做，`OnHardFail` 默认仍是 `os.Exit` | sysession 接 runtelemetry Broadcaster |
 | [system-session.md](system-session.md) | 部分实装：Phase 1 已上线；Phase 2 只加了 attachment-gc daemon | System Session 统一抽象 |
 | [workflow-dashboard.md](workflow-dashboard.md) | 已实现 v5 | Workflow 运行进度看板 |
