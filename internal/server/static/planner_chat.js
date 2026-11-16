@@ -52,10 +52,9 @@ import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
 import { getMsgValue, promptDialog, setMsgValue } from './utilities.js';
 import { awaitPendingOrients, clearFiles, createFileTray, filesBlockSend, handleFiles } from './composer_files.js';
-import { eventsURL, hostOnline, hostRemote, isLocalNode, plannerAPI, plannerHost } from './planner_host.js';
+import { eventsURL, hostOnline, hostRemote, isLocalNode, nodeAPI, plannerAPI, plannerHost } from './planner_host.js';
 import { quickSessionKey } from './auth_modal.js';
-import { dismissSession } from './tuning.js';
-import { asideFromScratch } from './aside_drawer.js';
+import { asideFromScratch, closePlannerScratch } from './aside_drawer.js';
 
 const PLANNER_KEY = 'planner:main';
 // SESS_LIMIT is the opened session's first page; SESS_KEEP the events kept
@@ -66,13 +65,17 @@ const SESS_POLL_MS = 2000;
 // NOTE_MS is how long the chat view's "已交给 Planner" note stays.
 const NOTE_MS = 8000;
 // ASIDE is a 单独聊's label prefix; ASIDE_TITLE_RUNES caps the title after it
-// (a label is at most 128 bytes). LABEL_TRIES × LABEL_RETRY_MS bound the
-// wait for a new session to be there to label (a node creates it after the
-// send's answer).
+// and LABEL_BYTES the whole label (sessionview.MaxUserLabelBytes). The label
+// is what makes the session a 单独聊 after a reload, so a new session is
+// waited for up to LABEL_WAIT_MS (the send answers before its spawn puts the
+// key in the list, and a backend's handshake or a node can take a while),
+// asking again after LABEL_RETRY_MS, doubled up to LABEL_RETRY_MAX_MS.
 const ASIDE = '单独聊：';
 const ASIDE_TITLE_RUNES = 30;
-const LABEL_TRIES = 5;
-const LABEL_RETRY_MS = 1000;
+const LABEL_BYTES = 128;
+const LABEL_WAIT_MS = 90000;
+const LABEL_RETRY_MS = 500;
+const LABEL_RETRY_MAX_MS = 5000;
 
 const st = {
   status: null, // GET /api/planner; null until read
@@ -533,19 +536,26 @@ function isAside(key) {
 // asideTitle is a 单独聊's title from what it was opened with: its first
 // sentence, cut to fit a label.
 function asideTitle(text) {
-  const one = firstSentence(String(text || '').replace(/\s+/g, ' ').trim());
-  const chars = [...one];
-  let t = chars.length > ASIDE_TITLE_RUNES ? chars.slice(0, ASIDE_TITLE_RUNES).join('') + '…' : one;
-  while (t && new TextEncoder().encode(ASIDE + t).length > 128) t = [...t].slice(0, -2).join('') + '…';
-  return t || '新对话';
+  return fitTitle(firstSentence(String(text || '').replace(/\s+/g, ' ').trim())) || '新对话';
 }
 
-// labelAside names key's session "单独聊：<title>", retrying while the
-// session is not there yet (a node creates it after answering the send).
+// fitTitle cuts title to ASIDE_TITLE_RUNES and, with the prefix, to a
+// label's LABEL_BYTES, marking a cut with "…".
+function fitTitle(title) {
+  const chars = [...title];
+  let t = chars.length > ASIDE_TITLE_RUNES ? chars.slice(0, ASIDE_TITLE_RUNES).join('') + '…' : title;
+  const enc = new TextEncoder();
+  while (t && enc.encode(ASIDE + t).length > LABEL_BYTES) t = [...t].slice(0, -2).join('') + '…';
+  return t;
+}
+
+// labelAside names key's session "单独聊：<title>", asking again while the
+// session is not there yet (404) until LABEL_WAIT_MS has passed.
 async function labelAside(key, node, title) {
   const body = { key, label: ASIDE + title };
   if (!isLocalNode(node)) body.node = node;
-  for (let i = 0; i < LABEL_TRIES; i++) {
+  const until = Date.now() + LABEL_WAIT_MS;
+  for (let wait = LABEL_RETRY_MS; ; wait = Math.min(wait * 2, LABEL_RETRY_MAX_MS)) {
     try {
       await fetchJSON(NZ_CONTRACT.API.sessions_label, {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), timeoutMs: 8000,
@@ -557,11 +567,10 @@ async function labelAside(key, node, title) {
       if (st.sess && st.sess.key === key) paintSessionStatus();
       return true;
     } catch (e) {
-      if (!e || e.status !== 404 || i === LABEL_TRIES - 1) return false;
-      await new Promise((r) => setTimeout(r, LABEL_RETRY_MS));
+      if (!e || e.status !== 404 || Date.now() + wait > until) return false;
+      await new Promise((r) => setTimeout(r, wait));
     }
   }
-  return false;
 }
 
 // registerAside labels a new 单独聊 and leaves its line in the Planner
@@ -572,13 +581,14 @@ async function registerAside(key, title, pending) {
   sessionList.lastVersion = 0;
   shell.debouncedFetchSessions();
   openPlannerSession(key, pending);
-  const [, noted] = await Promise.all([
+  const [labeled, noted] = await Promise.all([
     labelAside(key, node, title),
     fetchJSON(plannerAPI(NZ_CONTRACT.API.planner_aside), {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, title }), timeoutMs: 8000,
     }).then(() => true, () => false),
   ]);
-  if (!noted) showToast('单独聊已开，但没能记进 Planner 的动态', 'warning');
+  if (!labeled) showToast('单独聊已开，但没能标上标题，刷新后它会显示成普通会话', 'warning');
+  else if (!noted) showToast('单独聊已开，但没能记进 Planner 的动态', 'warning');
 }
 
 // startAside sends text (and fileIDs) to a new ordinary session, the
@@ -619,9 +629,9 @@ async function renameAside() {
   const row = sessionList.sessionsData[sid(p.key, p.node)] || {};
   const label = String(row.user_label || '');
   const current = label.startsWith(ASIDE) ? label.slice(ASIDE.length) : label;
-  const next = await promptDialog({ title: '改标题', defaultValue: current, placeholder: '单独聊的标题', confirmText: '保存', maxLength: 40 });
+  const next = await promptDialog({ title: '改标题', defaultValue: current, placeholder: '单独聊的标题', confirmText: '保存', maxLength: ASIDE_TITLE_RUNES });
   if (next === null) return;
-  const title = next.replace(/\s+/g, ' ').trim();
+  const title = fitTitle(next.replace(/\s+/g, ' ').trim());
   if (!title || title === current) return;
   if (!(await labelAside(p.key, p.node, title))) showToast('没有改成标题', 'error');
 }
@@ -649,19 +659,36 @@ async function handAside() {
   }
 }
 
-// endAside ends the opened 单独聊 as the sidebar's 移除 does (撤销 offered
-// for a few seconds): out of the session list, to the history.
-function endAside() {
+// endAside ends the opened 单独聊: put away to the history (the server's
+// Router.Archive, as a done task is put away), not removed as the sidebar's
+// 移除 does, so its images and question cards stay and the history reopens
+// it under its key.
+async function endAside() {
   const p = st.sess;
-  if (!p || !isAside(p.key)) return;
-  closePlannerSession(false);
+  if (!p || !isAside(p.key) || p.ending) return;
+  p.ending = true;
+  try {
+    await fetchJSON(nodeAPI(p.node, NZ_CONTRACT.API.planner_aside_end), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: p.key }), timeoutMs: 20000,
+    });
+  } catch (e) {
+    p.ending = false;
+    showToast('没有结束单独聊：' + apiError(e), 'error');
+    return;
+  }
+  if (st.sess === p) closePlannerSession(false);
   st.asides.delete(p.key);
-  dismissSession(p.key, p.node);
+  delete sessionList.sessionsData[sid(p.key, p.node)];
+  sessionList.lastVersion = 0;
+  shell.debouncedFetchSessions();
+  showToast('单独聊已结束，移到了历史');
 }
 
 // fromScratch makes the ↗ 追问 on a Planner reply a 单独聊: the drawer's
-// scratch, with its exchange, becomes the session.
+// scratch, with its exchange, becomes the session. The scratch runs on this
+// node, so only this node's Planner takes it.
 async function fromScratch() {
+  if (!isLocalNode(plannerHost.node)) return;
   const r = await asideFromScratch();
   if (!r) return;
   await registerAside(r.key, asideTitle(r.ask || r.quote), '');
@@ -796,6 +823,8 @@ nzBus.addEventListener('planner:node', () => {
   st.status = null;
   st.to = 'planner';
   closePlannerSession(false);
+  // An aside on the last node's Planner reply: its 转成单独聊 has no Planner here.
+  closePlannerScratch();
   fetchPlannerStatus();
 });
 nzBus.addEventListener('session:select', () => paintHandoffButton());

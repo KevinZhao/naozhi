@@ -20,6 +20,7 @@ func (h *Handler) Routes() []httputil.Route {
 		{Pattern: "POST /api/planner/memory/forget", Handler: h.HandleForget},
 		{Pattern: "GET /api/planner/lookup", Handler: h.HandleLookup},
 		{Pattern: "POST /api/planner/aside", Handler: h.HandleAside},
+		{Pattern: "POST /api/planner/aside/end", Handler: h.HandleAsideEnd},
 		{Pattern: "POST /api/scout/run", Handler: h.HandleScoutRun},
 	}
 }

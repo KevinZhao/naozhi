@@ -20,6 +20,9 @@
 //	POST /api/planner/aside  {"key": "<dashboard session key>", "title": "..."} —
 //	                         notes in the conversation that the user opened
 //	                         that session as an aside chat (单独聊, §15.14 ⑥)
+//	POST /api/planner/aside/end {"key": "<dashboard session key>"} — ends
+//	                         that aside chat: put away to the history,
+//	                         its event log kept (Router.Archive)
 //	POST /api/scout/run      a scout run now, outside the schedule (§15.6);
 //	                         202 with the run ID, the record lands in
 //	                         <state root>/planner/scout/runs
@@ -53,6 +56,8 @@ type Handler struct {
 	files  Files
 	// lookups are the Planner's web lookups (SetLookups).
 	lookups *reader.Reader
+	// archive puts a session away to the history (SetArchive).
+	archive func(key string) bool
 }
 
 // New returns a Handler for a, b, sc and files (any nil when not built; with
@@ -232,7 +237,7 @@ func (h *Handler) HandleAside(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
-	if !strings.HasPrefix(req.Key, sessionkey.DashboardPlatform+":") || strings.Count(req.Key, ":") != 3 || sessionkey.ValidateSessionKey(req.Key) != nil {
+	if !asideKey(req.Key) {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "单独聊只能是看板上的会话"})
 		return
 	}
@@ -247,6 +252,48 @@ func (h *Handler) HandleAside(w http.ResponseWriter, r *http.Request) {
 	}
 	h.agent.Note(note)
 	httputil.WriteJSON(w, map[string]string{"status": "noted"})
+}
+
+// asideKey reports whether key can be an aside chat: only a dashboard
+// session, the page opens it as an ordinary one.
+func asideKey(key string) bool {
+	return strings.HasPrefix(key, sessionkey.DashboardPlatform+":") && strings.Count(key, ":") == 3 && sessionkey.ValidateSessionKey(key) == nil
+}
+
+// SetArchive gives the handler what puts a session away to the history,
+// keeping its event log so it resumes under its key (nil: 结束 is refused).
+func (h *Handler) SetArchive(archive func(key string) bool) {
+	if h != nil {
+		h.archive = archive
+	}
+}
+
+// HandleAsideEnd ends an aside chat (结束, §15.14 ⑥): put away to the
+// history as planner/reap puts a task away, not removed as the sidebar's 移除
+// does, so its images and question cards stay and it can be reopened from
+// the history under its key, where the Planner's line about it points.
+func (h *Handler) HandleAsideEnd(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, httputil.MaxRequestBodyBytes)
+	var req struct {
+		Key string `json:"key"`
+	}
+	if err := httputil.DecodeJSONBody(r, &req); err != nil {
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if !asideKey(req.Key) {
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "单独聊只能是看板上的会话"})
+		return
+	}
+	if h.archive == nil {
+		httputil.WriteJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "不能收起会话"})
+		return
+	}
+	if !h.archive(req.Key) {
+		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "这个会话已不在会话列表里"})
+		return
+	}
+	httputil.WriteJSON(w, map[string]string{"status": "ended"})
 }
 
 // HandleScoutRun starts a scout run now. 409 while one runs or when the

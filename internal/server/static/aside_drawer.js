@@ -521,6 +521,12 @@ export function closeScratchDrawer() {
   if (ad.drawer) closeScratch(true);
 }
 
+// closePlannerScratch closes the drawer when it is an aside on a Planner
+// reply, whose Planner the page no longer shows.
+export function closePlannerScratch() {
+  if (ad.drawer && ad.state && ad.state.sourceKey === PLANNER_KEY) closeScratch(true);
+}
+
 // askAside opens the drawer on an AI bubble's text (the ↗ 'ask-aside' action).
 export function askAside(btn) {
   if (!btn || !ad.drawer) return;

@@ -244,6 +244,12 @@ type OpenOptions struct {
 	// order; Open re-filters types but trusts the caller's ordering.
 	ContextBefore []clievent.EventEntry
 	ContextAfter  []clievent.EventEntry
+	// NewChat marks an aside that is a chat of its own, not a continuation of
+	// its source (an aside on a Planner reply, §15.14 ⑥): with no Backend it
+	// takes the backend a new session on BaseOpts would, agents[].backend
+	// then the access profile's default_backend, so a later promote resumes
+	// on the CLI and account it was created on.
+	NewChat bool
 }
 
 // Open creates a new scratch session. The quote is sanitized and truncated;
@@ -297,7 +303,15 @@ func (p *ScratchPool) Open(opts OpenOptions) (*Scratch, error) {
 	// A pending dashboard pick on the source is not mirrored: its spawn
 	// follows at once and stamps the source's backend.
 	if opts.Backend == "" && p.router != nil {
-		_, opts.Backend = p.router.backends.wrapperFor("")
+		want := ""
+		if opts.NewChat {
+			profileID := opts.BaseOpts.AccessProfile
+			if profileID == "" {
+				profileID = p.router.backends.defaultAccessProfile
+			}
+			want = EffectiveDefaultBackend(opts.BaseOpts.DefaultBackend, p.router.backends.profiles(), profileID)
+		}
+		_, opts.Backend = p.router.backends.wrapperFor(want)
 	}
 	if opts.Backend != "" {
 		cloned.Backend = opts.Backend

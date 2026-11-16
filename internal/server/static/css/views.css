@@ -502,6 +502,8 @@ div.pl-lookup{max-width:560px;margin:8px 0;padding:8px 12px;border:1px solid var
    dialogs. Desktop only: a phone has no drawer (D91). */
 .pld{position:fixed;top:0;right:0;bottom:0;width:min(520px,92vw);z-index:calc(var(--nz-z-split-resizer) + 1);display:flex;flex-direction:column;background:var(--nz-bg-0);border-left:1px solid var(--nz-border);box-shadow:var(--nz-shadow-drawer);animation:pld-in .18s var(--nz-ease-out)}
 .pld[hidden]{display:none}
+/* The 追问 drawer would open under this one (z-index), so the drawer's copy of the conversation offers none. */
+.pld .event-ask-btn{display:none}
 @keyframes pld-in{from{transform:translateX(100%)}}
 .pl-head .pl-drawer-only,.pld .pl-head .pl-page-only{display:none}
 .pld .pl-head .pl-drawer-only{display:inline-flex}

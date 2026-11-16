@@ -111,21 +111,22 @@ func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 	}
 	base := sessionview.AgentOpts{}
 	var before, after []clievent.EventEntry
+	newChat := false
 	// The aside runs on the source's backend. An empty one (a source that never
 	// spawned) is resolved by pool.Open to the CLI the source resumes on, never
 	// to the access profile's default_backend.
 	workspace, backend := snap.Workspace, snap.Backend
 	if req.SourceKey == sessionkey.PlannerMainKey {
 		// An aside on a Planner reply is an ordinary chat, as the 单独聊 it
-		// may become (§15.14 ⑥): the default agent, workspace, backend and
-		// model, none of the Planner's own. Only the quote goes in: the
+		// may become (§15.14 ⑥): the default agent with its own account,
+		// backend and model on the default workspace, as a sidebar new
+		// session gets, none of the Planner's. Only the quote goes in: the
 		// turns around it carry the gateway's snapshots and receipts.
 		agentID = "general"
 		if h.agents != nil {
 			base = h.agents[agentID]
 		}
-		base.AccessProfile, base.DefaultBackend = "", ""
-		workspace, backend = "", ""
+		workspace, backend, newChat = "", "", true
 	} else {
 		if h.agents != nil {
 			base = h.agents[agentID]
@@ -144,6 +145,7 @@ func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 		Quote:         req.Quote,
 		ContextBefore: before,
 		ContextAfter:  after,
+		NewChat:       newChat,
 	})
 	if err != nil {
 		switch {
