@@ -11,6 +11,7 @@ import (
 	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/notify"
+	"github.com/naozhi/naozhi/internal/planner/action"
 	"github.com/naozhi/naozhi/internal/planner/reap"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -176,15 +177,17 @@ func within(path, dir string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// InboxWaiting is reap.Config.Waiting: an item of inbox's still open from
-// source(key), the "等你" a session's need_user report opened.
-func InboxWaiting(inbox *notify.Notifier, source func(key string) string) func(key string) bool {
+// ReapWaiting is reap.Config.Waiting: an item of inbox's still open that
+// waits on the user about key, the "等你" its need_user report opened or a
+// Planner ask naming it (§15.14 ④: an ask about a done task holds its
+// session until answered or settled).
+func ReapWaiting(inbox *notify.Notifier) func(key string) bool {
 	return func(key string) bool {
 		if inbox == nil {
 			return false
 		}
-		src := source(key)
+		src := action.ReportSource(key)
 		open, _ := inbox.List(0)
-		return slices.ContainsFunc(open, func(it notify.Item) bool { return it.Source == src })
+		return slices.ContainsFunc(open, func(it notify.Item) bool { return it.Source == src }) || action.AskOpen(inbox, key)
 	}
 }

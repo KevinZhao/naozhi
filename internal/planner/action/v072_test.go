@@ -57,19 +57,33 @@ func TestDoneTaskReportReopens(t *testing.T) {
 	}
 }
 
-// A relay to a done session not put away yet sets its task back to 进行中.
-func TestRelayToDoneTaskReopens(t *testing.T) {
-	e := endedRunner(t)
-	if err := e.r.cfg.Tasks.Set(e.key, task.Done, task.ByPlanner, "做完了"); err != nil {
-		t.Fatal(err)
-	}
-	e.r.cfg.RelayTarget = func(string) error { return nil }
-	reopened, err := e.r.reachable(e.key, task.ByPlanner, "Planner 转达用户的决定")
-	if err != nil || reopened {
-		t.Fatalf("reachable = %v, %v", reopened, err)
-	}
-	if m, _ := e.side.Get(e.key); m.Mark == nil || task.State(m.Mark.State) != task.Doing {
-		t.Fatalf("mark = %+v, want doing", m.Mark)
+// A relay to a done session not put away yet reaches it and leaves its task
+// done (§15.14 ④); what it reports next decides, even against the user's
+// own done mark, since the user wrote to it after making it.
+func TestRelayToDoneTaskKeepsState(t *testing.T) {
+	for _, by := range []task.By{task.ByPlanner, task.ByUser} {
+		t.Run(string(by), func(t *testing.T) {
+			e := endedRunner(t)
+			if err := e.r.cfg.Tasks.Set(e.key, task.Done, by, "做完了"); err != nil {
+				t.Fatal(err)
+			}
+			e.wait(time.Minute)
+			out := userTurn(e.r, said)
+			e.r.cfg.RelayTarget = func(string) error { return nil }
+			e.r.Result(e.r.cfg.Planner, block(`{"type":"relay","key":"`+e.key+`","text":"用户要它把文档也补上"}`))
+			e.r.handle(<-e.r.ch)
+			if len(*out) != 1 {
+				t.Fatalf("relayed = %q", *out)
+			}
+			if m, _ := e.side.Get(e.key); m.Mark == nil || task.State(m.Mark.State) != task.Done {
+				t.Fatalf("mark = %+v, want still done", m.Mark)
+			}
+			e.wait(time.Minute)
+			e.reportEnd(reportReply("progress", "在补文档"))
+			if m, _ := e.side.Get(e.key); m.Mark == nil || task.State(m.Mark.State) != task.Doing {
+				t.Fatalf("mark = %+v, want doing after its progress report", m.Mark)
+			}
+		})
 	}
 }
 

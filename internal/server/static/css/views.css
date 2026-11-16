@@ -257,6 +257,11 @@ body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
 .pl-card-why{margin-top:2px;color:var(--nz-text-mute);font-size:var(--nz-fs-xs);word-break:break-word;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden}
 .pl-card-meta{margin-top:4px;color:var(--nz-text-dim);font-size:var(--nz-fs-xs);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pl-card-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+/* A question that expired (§15.14 ④): kept a while to say why, quieter
+   than what still waits on you. */
+.pl-card-expired{background:transparent;border-style:dashed}
+.pl-card-expired .pl-kind{color:var(--nz-text-mute)}
+.pl-card-expired .pl-card-title{color:var(--nz-text-mute);font-weight:500}
 /* The Planner's own question in the left column (UX review 9): one line
    to the conversation's end, where it is answered; a phone keeps the card. */
 .pl-card-ref{display:none}

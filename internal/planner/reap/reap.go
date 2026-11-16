@@ -170,7 +170,11 @@ type Config struct {
 	Journal *journal.Journal
 	// Name is how the user reads key; nil uses the task's title.
 	Name func(key string) string
-	Now  func() time.Time
+	// PutAway is told of each session put away, once its sidecar records
+	// it (planner/action.Runner.PutAway: the asks naming it expire); nil
+	// tells nobody.
+	PutAway func(key string)
+	Now     func() time.Time
 }
 
 // Reaper puts done tasks' sessions away. Safe for concurrent use.
@@ -405,6 +409,9 @@ func (r *Reaper) tryPutAway(ctx context.Context, key string) {
 		slog.Warn("reap: put-away session not recorded; reopening it will not resume it", "key", key, "err", err)
 	}
 	slog.Info("reap: done task's session put away", "key", key, "by", m.Mark.By, "worktrees", len(rp.Worktrees))
+	if r.cfg.PutAway != nil {
+		r.cfg.PutAway(key)
+	}
 	if r.inRouter(key) {
 		// A message queued for key had the owner loop spawn a session as it
 		// was archived: InUse leaves key out, so removing now could take the

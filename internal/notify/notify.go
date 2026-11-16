@@ -107,6 +107,13 @@ type Item struct {
 	// ClosedBy and ClosedAt are set once the item is closed.
 	ClosedBy Closer    `json:"closed_by,omitempty"`
 	ClosedAt time.Time `json:"closed_at,omitzero"`
+	// ClosedWhy says why a question closed without an answer, as "等你"
+	// shows it (Expire): what it asked was settled elsewhere.
+	ClosedWhy string `json:"closed_why,omitempty"`
+	// Task is the session a question is about besides its Unit (an ask
+	// naming a task, whose answer goes there too): once that session's
+	// matter is settled the question expires.
+	Task string `json:"task,omitempty"`
 	// Source names the condition that opened the item; at most one item per
 	// source is open.
 	Source string `json:"source"`
@@ -144,7 +151,21 @@ var (
 	ErrNoHandler  = errors.New("notify: no handler for this decision")
 	// ErrPending: another answer to the decision is being applied.
 	ErrPending = errors.New("notify: decision is being applied")
+	// ErrExpired: the item closed without an answer, what it asked settled
+	// elsewhere (Expired carries why).
+	ErrExpired = errors.New("notify: item expired")
 )
+
+// Expired is an item that no longer waits on an answer: a DecisionFunc
+// returns it to have Decide close the item as expired, the answer not
+// applied, and Decide returns it for an item so closed. It matches
+// ErrExpired and ErrClosed.
+type Expired struct{ Why string }
+
+func (e Expired) Error() string { return "notify: item expired: " + e.Why }
+
+// Is lets callers that only know an answer came too late match ErrClosed.
+func (e Expired) Is(target error) bool { return target == ErrExpired || target == ErrClosed }
 
 // Retention for closed items: they are kept this long, at most keepClosed
 // of them, so the inbox file stays small.
@@ -481,6 +502,9 @@ func (n *Notifier) Decide(id string, a Action) error {
 	}
 	it := n.items[i]
 	switch {
+	case it.State != StateOpen && it.ClosedWhy != "":
+		n.mu.Unlock()
+		return Expired{Why: it.ClosedWhy}
 	case it.State != StateOpen:
 		n.mu.Unlock()
 		return ErrClosed
@@ -499,6 +523,15 @@ func (n *Notifier) Decide(id string, a Action) error {
 	n.deciding[id] = true
 	n.mu.Unlock()
 	if err := n.applyDecision(fn, it, a); err != nil {
+		var exp Expired
+		if errors.As(err, &exp) {
+			// Closed here: while the decider runs the item is marked as
+			// being decided, which Expire leaves alone.
+			if xerr := n.Expire(id, exp.Why); xerr != nil && !errors.Is(xerr, ErrClosed) {
+				return xerr
+			}
+			return exp
+		}
 		return err
 	}
 	n.mu.Lock()
@@ -528,6 +561,33 @@ func (n *Notifier) applyDecision(fn DecisionFunc, it Item, a Action) (err error)
 	err = fn(it, a)
 	ok = err == nil
 	return err
+}
+
+// Expire closes an open item that no longer waits on an answer, recording
+// why ("你已在会话里处理"): it is closed by the gateway, and an answer that
+// comes after gets Expired. An item whose answer is being applied is left
+// to that answer (ErrPending).
+func (n *Notifier) Expire(id, why string) error {
+	n.mu.Lock()
+	i := n.indexLocked(id)
+	switch {
+	case i < 0:
+		n.mu.Unlock()
+		return ErrNotFound
+	case n.items[i].State != StateOpen:
+		n.mu.Unlock()
+		return ErrClosed
+	case n.deciding[id]:
+		n.mu.Unlock()
+		return ErrPending
+	}
+	n.items[i].ClosedWhy = why
+	line := n.closeLocked(i, ClosedByAuto, "")
+	line.data.Reason = why
+	fx := n.changedLocked(line)
+	n.mu.Unlock()
+	n.apply(fx)
+	return nil
 }
 
 // PausedUntil returns when the push pause ends; zero when not paused.
@@ -608,7 +668,7 @@ type notifyData struct {
 	Source   string    `json:"source,omitempty"`
 	ClosedBy Closer    `json:"closed_by,omitempty"`
 	Answer   Action    `json:"answer,omitempty"`
-	Reason   string    `json:"reason,omitempty"` // why a push was held
+	Reason   string    `json:"reason,omitempty"` // why a push was held, or an item expired
 	Until    time.Time `json:"until,omitzero"`
 }
 
@@ -620,7 +680,7 @@ func (n *Notifier) addLocked(it Item) (Item, bool, effects) {
 	}
 	now := n.cfg.Clock.Now()
 	it.ID = newID()
-	it.Created, it.State, it.ClosedBy, it.ClosedAt = now, StateOpen, "", time.Time{}
+	it.Created, it.State, it.ClosedBy, it.ClosedAt, it.ClosedWhy = now, StateOpen, "", time.Time{}, ""
 	it.Level = cmp.Or(it.Level, LevelTimely)
 	ok, reason := n.admitLocked(it.Level, it.Uncapped, now)
 	it.PushPending = !ok && it.Uncapped

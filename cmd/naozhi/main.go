@@ -640,7 +640,7 @@ func main() {
 		Session:    reapSources.Session,
 		LastActive: reapSources.LastActive,
 		Nearby:     custodian.Nearby,
-		Waiting:    wireup.InboxWaiting(notifier, action.ReportSource),
+		Waiting:    wireup.ReapWaiting(notifier),
 		Archive:    reapSources.Archive,
 		Restore:    reapSources.Restore,
 		Dirs:       reapSources.Dirs,
@@ -649,6 +649,7 @@ func main() {
 		Inbox:      notifier,
 		Journal:    plannerState.Journal,
 		Name:       unitNames,
+		PutAway:    func(key string) { actions.PutAway(key) },
 	})
 
 	routing := buildRouting(cfg, agents, projectMgr, scheduler)
@@ -818,6 +819,8 @@ func main() {
 		PlannerBusy: plannerAgent.Busy,
 		Background:  sources.Background,
 		UserSent:    sources.UserSent,
+		UserTyped:   sources.UserSince,
+		Reopen:      func(key string) { reaper.Reopen(ctx, key) },
 		Prompted:    sources.Prompted,
 		Custody:     custodian,
 		Words:       wireup.PlannerWords(plannerAgent),
