@@ -2,7 +2,8 @@
 // ⑨, D107): a lookup action block asks a question, and the gateway starts a
 // one-shot reader session, reader:<run>, on the scout's footing (sonnet,
 // dontAsk, --strict-mcp-config with only the web search and fetch tools of
-// exa and agentcore-websearch, no Read and no Bash, nothing persisted, reset
+// exa and agentcore-websearch, and builder-mcp's internal page read when
+// cli.mcp_config has it, no Read and no Bash, nothing persisted, reset
 // when it ends). Its strict JSON answer, checked here, goes back to the
 // Planner in a <naozhi-lookup> block, whose turn may only notify, promise and
 // ask: the pages it read never reach the Planner, only the short summary
@@ -163,7 +164,7 @@ func (r *Reader) Enabled() bool {
 	if r == nil || r.dir == "" || r.cfg.Session == nil {
 		return false
 	}
-	_, servers, err := scout.CutMCPConfig(r.cfg.MCPConfig, Servers)
+	_, servers, err := scout.CutMCPConfig(r.cfg.MCPConfig, WebServers)
 	return err == nil && len(servers) > 0
 }
 
