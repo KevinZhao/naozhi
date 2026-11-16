@@ -317,7 +317,8 @@ function defaultGitStates() {
  *   the text as its user event, as the router's GetOrCreate does; a key with keyEvents is left.
  * POST /api/planner/aside (with overrides.planner) lands in plannerAsideCalls and, as the
  * gateway's note does, appends "💬 <key> 你开了单独聊：<title>" to plannerEvents as a system line.
- * POST /api/planner/aside/end lands in plannerAsideEndCalls and takes the key out of the list.
+ * POST /api/planner/aside/end lands in plannerAsideEndCalls and takes the key out of the list
+ *   (and out of overrides.tasks).
  * PATCH /api/sessions/label lands in labelCalls (each with the status answered); a label over
  * 128 bytes is refused with 400, as the real handler does.
  * @param {number} [overrides.labelMissing] - PATCH /api/sessions/label answers 404 that many
@@ -958,6 +959,8 @@ function startMockServer(overrides = {}) {
         }
         list.splice(i, 1);
         if (sessionsData.stats && typeof sessionsData.stats.version === 'number') sessionsData.stats.version++;
+        // Put away, it leaves the 任务 list as the gateway's Router.Archive does.
+        if (overrides.tasks) overrides.tasks.tasks = overrides.tasks.tasks.filter(t => t.id !== b.key);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ended' }));
       });

@@ -46,7 +46,7 @@ import { hydrateAskAnsweredFromHistory, lockRenderedAskCards } from './ask_card.
 import { runPendingAsync } from './render_md.js';
 import { ICONS } from './icons.js';
 import { firstSentence, refreshHealth, sessionStatusHtml, sessionTitle } from './planner_cards.js';
-import { isRunningTask, seenTask } from './tasks.js';
+import { isRunningTask, refreshTasks, seenTask } from './tasks.js';
 import { followPlannerSubject, noteWorkbenchEvent } from './workbench_panes.js';
 import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
@@ -681,6 +681,9 @@ async function endAside() {
   delete sessionList.sessionsData[sid(p.key, p.node)];
   sessionList.lastVersion = 0;
   shell.debouncedFetchSessions();
+  // No frame says it was put away, and with no turn running 你开的 would
+  // keep its card until the next read.
+  refreshTasks();
   showToast('单独聊已结束，移到了历史');
 }
 
