@@ -636,7 +636,7 @@ func main() {
 		Session:    reapSources.Session,
 		LastActive: reapSources.LastActive,
 		Nearby:     custodian.Nearby,
-		Waiting:    wireup.InboxWaiting(notifier, action.ReportSource),
+		Waiting:    wireup.ReapWaiting(notifier),
 		Archive:    reapSources.Archive,
 		Restore:    reapSources.Restore,
 		Dirs:       reapSources.Dirs,

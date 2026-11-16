@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -172,12 +173,13 @@ func TestAskExpiresOnDoneOrPutAway(t *testing.T) {
 	a.wantExpired(withOpts.ID, expiredDone)
 	a.wantExpired(other.ID, expiredDone)
 
-	// An ask about a task done already is asked on purpose: open until it
-	// is put away.
+	// An ask about a task done already is asked on purpose: open, and
+	// holding the put-away (AskOpen), until something settles it; a
+	// put-away all the same does.
 	a.now = at1114(16, 0)
 	later := a.ask(a.key, "要不要接着做？", `"做"`)
 	a.r.TaskState(a.key, task.Done)
-	if a.item(later.ID).State != notify.StateOpen {
+	if a.item(later.ID).State != notify.StateOpen || !AskOpen(a.inbox, a.key) {
 		t.Fatal("an ask about a done task closed by the mark from before it")
 	}
 	a.now = at1114(18, 0)
@@ -243,4 +245,77 @@ func TestAskExpiresAtStart(t *testing.T) {
 	cancel()
 	a.r.Run(ctx)
 	a.wantExpired(it.ID, expiredUserSent)
+}
+
+// One reply that asks about a task and marks it done asks about a done
+// task: the mark is what the question follows, not what settled it, so the
+// ask stays open whichever block comes first.
+func TestAskSameReplyDone(t *testing.T) {
+	for _, askFirst := range []bool{true, false} {
+		a := newAskRig(t)
+		a.now = at1114(15, 25)
+		ask := block(`{"type":"ask","question":"PR 要合并吗？","options":["合","先不合"],"task":"` + a.key + `"}`)
+		done := block(`{"type":"status","task":"` + a.key + `","state":"done","why":"它汇报做完了"}`)
+		text := done + "\n" + ask
+		if askFirst {
+			text = ask + "\n" + done
+		}
+		a.planner(text)
+		if st := taskState(t, a.r, a.key); st != task.Done {
+			t.Fatalf("ask first %v: task state = %s, want done", askFirst, st)
+		}
+		open, _ := a.inbox.List(0)
+		if len(open) != 1 || open[0].Title != "PR 要合并吗？" || open[0].State != notify.StateOpen {
+			t.Fatalf("ask first %v: open = %+v, want the ask open", askFirst, open)
+		}
+		if !AskOpen(a.inbox, a.key) || AskOpen(a.inbox, dashKey) {
+			t.Errorf("ask first %v: AskOpen does not see the ask naming %s alone", askFirst, a.key)
+		}
+		a.now = at1114(15, 40)
+		if err := a.inbox.Decide(open[0].ID, "合"); err != nil {
+			t.Fatalf("ask first %v: Decide = %v", askFirst, err)
+		}
+		if len(*a.relayed) != 1 || (*a.relayed)[0].key != a.key {
+			t.Errorf("ask first %v: relayed = %q", askFirst, *a.relayed)
+		}
+	}
+}
+
+// A relayed answer leaves a done task done; the turn it starts that ends
+// with no report block is told to the Planner all the same, once, so the
+// decision's outcome is not lost: the next unprompted turn end is not.
+func TestRelayedDoneTurnTold(t *testing.T) {
+	for _, malformed := range []bool{false, true} {
+		a := newAskRig(t)
+		a.now = at1114(15, 0)
+		if err := a.r.cfg.Tasks.Set(a.key, task.Done, task.ByPlanner, "做完了"); err != nil {
+			t.Fatal(err)
+		}
+		a.now = at1114(15, 25)
+		it := a.ask(a.key, "测试栈拆不拆？", `"拆","先留着"`)
+		a.now = at1114(15, 30)
+		if err := a.inbox.Decide(it.ID, "拆"); err != nil {
+			t.Fatal(err)
+		}
+		a.g.told = nil
+		a.now = at1114(15, 40)
+		text := "拆好了"
+		if malformed {
+			text += "\n```naozhi-report\n{\"state\":\n```"
+		}
+		a.end(text)
+		got := a.receipts()
+		if len(got) != 1 || !strings.Contains(got[0], "已完成") || !strings.Contains(got[0], "拆好了") {
+			t.Fatalf("malformed %v: receipts = %q, want one telling the relayed turn's end", malformed, got)
+		}
+		if st := taskState(t, a.r, a.key); st != task.Done {
+			t.Errorf("malformed %v: task state = %s, want done", malformed, st)
+		}
+		a.g.told = nil
+		a.now = at1114(16, 0)
+		a.end("后台通知：没什么")
+		if got := a.receipts(); len(got) != 0 {
+			t.Errorf("malformed %v: a later turn end told again: %q", malformed, got)
+		}
+	}
 }
