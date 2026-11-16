@@ -385,6 +385,15 @@ func (s *ManagedSession) AgentEventLog() *ring.EventLog {
 	return nil
 }
 
+// InflightTools is the tool calls the session's process has in flight,
+// oldest first; none without a live *cli.Process.
+func (s *ManagedSession) InflightTools() []cli.InflightTool {
+	if real := s.loadCliProcess(); real != nil {
+		return real.InflightTools()
+	}
+	return nil
+}
+
 // loadCliProcess returns the live *cli.Process when the session is backed by
 // one, nil otherwise (fake test process, dead session, ACP protocol, etc.).
 func (s *ManagedSession) loadCliProcess() *cli.Process {

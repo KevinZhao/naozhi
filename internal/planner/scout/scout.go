@@ -96,6 +96,11 @@ type Config struct {
 	// Isolated turns the scout off: an isolated instance reads no mail of
 	// the user's unless it opts in (config.IsolationConfig).
 	Isolated bool
+	// CredExpiry is when the Midway session expires (midway.Expiry), zero
+	// for none: a run or brief whose model call found the credential
+	// expired waits for it to expire later, renewed, and goes again, as
+	// custody's retry does. nil fails them.
+	CredExpiry func() time.Time
 }
 
 // Status is the scout as the health table and the API see it.
@@ -124,6 +129,10 @@ type Scout struct {
 	last *Run
 	// started is the last run's start, scheduled or manual.
 	started time.Time
+	// wait is the run waiting for the credential, nil for none.
+	wait *credWait
+	// briefWait is the briefs waiting for the credential, by meeting start.
+	briefWait map[time.Time]briefCred
 
 	// pendMu guards pending.json; sending is the pending findings a wake
 	// of this process still has to submit, which a run leaves to it.
@@ -136,10 +145,11 @@ func New(cfg Config) *Scout {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	s := &Scout{cfg: cfg, st: store{dir: cfg.Layout.PlannerScoutRoot()}, sending: map[string]bool{}}
+	s := &Scout{cfg: cfg, st: store{dir: cfg.Layout.PlannerScoutRoot()}, sending: map[string]bool{}, briefWait: map[time.Time]briefCred{}}
 	if s.st.dir != "" {
 		if r, ok := s.st.lastRun(); ok {
 			s.last, s.started = &r, r.Started
+			s.waitLocked(r) // a restart keeps waiting for the credential
 		}
 	}
 	return s
@@ -233,6 +243,7 @@ func (s *Scout) Run(ctx context.Context) {
 		if ok {
 			s.start(TriggerSchedule)
 		}
+		s.checkRetry(now)
 		s.checkBrief(now)
 		select {
 		case <-ctx.Done():
@@ -281,7 +292,12 @@ func (s *Scout) Stop() {
 
 // start begins a run in the background unless one is running, or Run has
 // not started or has ended.
-func (s *Scout) start(trig string) (string, error) {
+func (s *Scout) start(trig string) (string, error) { return s.begin(trig, "") }
+
+// startRetry begins the retry of waiting run of.
+func (s *Scout) startRetry(of string) (string, error) { return s.begin(TriggerRetry, of) }
+
+func (s *Scout) begin(trig, retryOf string) (string, error) {
 	now := s.cfg.Now()
 	s.mu.Lock()
 	ctx := s.ctx
@@ -300,11 +316,12 @@ func (s *Scout) start(trig string) (string, error) {
 	id := runID(now)
 	go func() {
 		defer s.runs.Done()
-		r, kept := s.run(ctx, id, trig, now)
+		r, kept := s.run(ctx, id, trig, retryOf, now)
 		s.mu.Lock()
 		s.running = false
 		if kept {
 			s.last = &r
+			s.waitLocked(r)
 		} else {
 			s.started = prev
 		}
@@ -324,8 +341,8 @@ func runID(t time.Time) string {
 // fails anywhere before its output parsed leaves the cursors as they were,
 // so the next one reads the same span again. kept is false for a run ctx
 // cut short (Stop): it leaves no record.
-func (s *Scout) run(ctx context.Context, id, trig string, started time.Time) (r Run, kept bool) {
-	r = Run{ID: id, Trigger: trig, Started: started, State: StateFailed}
+func (s *Scout) run(ctx context.Context, id, trig, retryOf string, started time.Time) (r Run, kept bool) {
+	r = Run{ID: id, Trigger: trig, RetryOf: retryOf, Started: started, State: StateFailed}
 	defer func() {
 		if p := recover(); p != nil {
 			slog.Error("scout: run panicked", "run", id, "panic", p)
@@ -351,8 +368,22 @@ func (s *Scout) run(ctx context.Context, id, trig string, started time.Time) (r 
 	sctx, cancel := context.WithTimeout(ctx, runTimeout)
 	defer cancel()
 	digest := wantSlack(started, trig) && slices.Contains(servers, ServerSlack)
+	exp := s.credExpiry()
 	reply, tools, err := s.cfg.Session(sctx, sessionkey.ScoutKeyPrefix+id, opts, prompt(started, servers, cursors, digest))
 	r.Tools = tools
+	if credential(err, exp) && ctx.Err() == nil {
+		if s.waitedOn(exp) {
+			return fail(fmt.Errorf("%s: %w", errCredStill, err))
+		}
+		// Not the scout's failure: the next model call works once the
+		// Midway session is renewed, and the run goes again then.
+		r.State, r.Cred = StateWaiting, exp
+		r.Error = textutil.TruncateRunes(err.Error(), errRunes)
+		return r, true
+	}
+	if r.Timeout = timedOut(err, s.cfg.Now().Sub(started)); r.Timeout != nil && ctx.Err() == nil {
+		return fail(fmt.Errorf("scout session %s: %w", r.Timeout.describe(), context.DeadlineExceeded))
+	}
 	if err != nil {
 		return fail(fmt.Errorf("scout session: %w", err))
 	}
@@ -485,6 +516,9 @@ type activity struct {
 }
 
 func summary(r Run) string {
+	if r.State == StateWaiting {
+		return "巡检暂缓：凭证失效，Midway 续上后补跑"
+	}
 	if r.State != StateOK {
 		return "巡检失败：" + r.Error
 	}

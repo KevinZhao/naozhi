@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/scout"
@@ -28,7 +30,7 @@ func ScoutSession(router *session.Router) scout.Session {
 			return "", nil, err
 		}
 		defer router.Reset(key)
-		res, err := cronSessionAdapter{sess}.Send(ctx, text)
+		res, err := sendTimed(ctx, sess, text)
 		if ctx.Err() != nil {
 			// Cut short (shutdown, or the run's timeout) mid-turn: the
 			// Reset's graceful close waits seconds for a CLI that does
@@ -42,6 +44,50 @@ func ScoutSession(router *session.Router) scout.Session {
 		}
 		return res.Text, tools, err
 	}
+}
+
+// sendTimed sends text under a ctx of its own that ctx's end cuts: when
+// ctx's deadline passes, the tools the session has in flight are read
+// before the cut, whose interrupt closes them, and the error says what the
+// session was doing (scout.TimeoutError).
+func sendTimed(ctx context.Context, sess *session.ManagedSession, text string) (cron.SendResult, error) {
+	sctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancel()
+	var cut *scout.TimeoutError
+	done := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		defer close(done)
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			cut = stalled(sess, time.Now())
+		}
+		cancel()
+	})
+	res, err := cronSessionAdapter{sess}.Send(sctx, text)
+	if !stop() {
+		<-done
+		if cut != nil {
+			// The send saw its own ctx cancelled; the cause is ctx's deadline.
+			cut.Err = ctx.Err()
+			if err != nil && !errors.Is(err, context.Canceled) {
+				cut.Err = fmt.Errorf("%w: %w", ctx.Err(), err)
+			}
+			err = cut
+		}
+	}
+	return res, err
+}
+
+// stalled is what sess is doing at now: its tool calls in flight and how
+// long it has sent nothing.
+func stalled(sess *session.ManagedSession, now time.Time) *scout.TimeoutError {
+	var t scout.Timeout
+	for _, tool := range sess.InflightTools() {
+		t.Tools = append(t.Tools, scout.TimeoutTool{Tool: cmp.Or(tool.Name, "unknown"), ElapsedSec: int(now.Sub(tool.Started) / time.Second)})
+	}
+	if last := sess.EventLastN(1); len(last) == 1 && last[0].Time > 0 {
+		t.QuietSec = int(now.Sub(time.UnixMilli(last[0].Time)) / time.Second)
+	}
+	return &scout.TimeoutError{Timeout: t}
 }
 
 // ScoutWake is scout.Config.Wake (src agent.SourceScout) or Brief

@@ -2,9 +2,11 @@ package wireup
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -70,5 +72,41 @@ func TestScoutSession_CutShortInterruptsBeforeReset(t *testing.T) {
 	i, j := slices.Index(sent, "interrupt"), slices.Index(sent, "shutdown")
 	if i < 0 || j < 0 || i > j {
 		t.Fatalf("client sent %q, want interrupt before shutdown", sent)
+	}
+}
+
+// TestScoutSession_TimeoutSaysWhatWasRunning: a session its deadline cuts
+// short mid tool call says which tool it was waiting on and for how long,
+// read before the cut's interrupt closes the call.
+func TestScoutSession_TimeoutSaysWhatWasRunning(t *testing.T) {
+	const key = "cron:7a1c9e4b2d6f8053"
+	const tool = "mcp__aws-outlook-mcp__calendar_view"
+	// The replayed turn ended, so the scout's turn is not queued behind it.
+	fs := session.StartFakeShimForTest(t, key, 1, []string{adoptE2EAssistant, adoptE2EPrevResult})
+	r := session.NewRouter(fs.Config)
+	t.Cleanup(r.Shutdown)
+	r.ReconnectShimsCtx(context.Background())
+	fs.Attached(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	errc := make(chan error, 1)
+	go func() {
+		_, _, err := ScoutSession(r)(ctx, key, session.AgentOpts{}, "patrol")
+		errc <- err
+	}()
+	for start := time.Now(); len(fs.Sent()) == 0; {
+		if time.Since(start) > 2*time.Second {
+			t.Fatal("the turn never reached the shim")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	fs.Emit(t, `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu1","name":"`+tool+`","input":{}}]},"session_id":"s1"}`)
+	err := <-errc
+	te, ok := errors.AsType[*scout.TimeoutError](err)
+	if !ok || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want a scout.TimeoutError over the deadline", err)
+	}
+	if len(te.Tools) != 1 || te.Tools[0].Tool != tool || te.Tools[0].ElapsedSec > 3 {
+		t.Errorf("tools in flight = %+v, want %s", te.Tools, tool)
 	}
 }
