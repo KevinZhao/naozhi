@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -87,6 +88,49 @@ func TestFetchFile_StalledTransferFails(t *testing.T) {
 	}
 	if took := time.Since(start); took > 5*time.Second {
 		t.Fatalf("gave up after %s, want about the stall window", took)
+	}
+}
+
+// eofAfterCancel is a transport whose body, once the request is cancelled,
+// ends in a clean io.EOF instead of the cancel error: what a real transport
+// does now and then when the cancel races the end of the read.
+type eofAfterCancel struct{}
+
+func (eofAfterCancel) RoundTrip(r *http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Request: r,
+		Body: io.NopCloser(&cancelThenEOF{ctx: r.Context(), first: []byte("partial")})}, nil
+}
+
+type cancelThenEOF struct {
+	ctx   context.Context
+	first []byte
+}
+
+func (c *cancelThenEOF) Read(b []byte) (int, error) {
+	if len(c.first) > 0 {
+		n := copy(b, c.first)
+		c.first = c.first[n:]
+		return n, nil
+	}
+	<-c.ctx.Done()
+	return 0, io.EOF
+}
+
+// A stalled transfer whose read still ends in a clean EOF after the
+// watchdog cancelled it must fail as stalled, not pass a truncated file on
+// (it reproduced about 1 in 100 runs of the test above on a real server).
+func TestFetchFile_StalledThenCleanEOFFails(t *testing.T) {
+	withStallTimeout(t, 100*time.Millisecond)
+	prev := testHTTPTransport
+	testHTTPTransport = eofAfterCancel{}
+	t.Cleanup(func() { testHTTPTransport = prev })
+
+	err := fetchFile(context.Background(), "https://example.invalid/bin", filepath.Join(t.TempDir(), "bin"), maxBinaryBytes)
+	if err == nil {
+		t.Fatal("fetchFile succeeded on a stalled transfer that ended in EOF")
+	}
+	if !errors.Is(err, errStalled) {
+		t.Fatalf("err = %v, want the stall named", err)
 	}
 }
 
