@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -113,7 +114,8 @@ func (s *Store) List() ([]Entry, error) {
 
 // Park puts an item the user put down into the 搁置区: text is the item,
 // source where it came from (a task key, a promise ID, an #issue, the time
-// the user said it). The same item parked again is not listed twice.
+// the user said it). The same item parked again, from any source, is not
+// listed twice.
 func (s *Store) Park(text, source string) (Entry, error) {
 	text, source = Clean(text), Clean(source)
 	switch {
@@ -124,8 +126,12 @@ func (s *Store) Park(text, source string) (Entry, error) {
 	case source == "":
 		return Entry{}, errors.New("缺少出处")
 	}
-	e := Entry{Text: textutil.TruncateRunes(text+"（出处："+textutil.TruncateRunes(source, SourceRunes)+"）", TextRunes),
-		Day: s.now().Format(time.DateOnly), ByUser: true}
+	// Only the text is cut, so the source the line must carry stays whole.
+	src := "（出处：" + textutil.TruncateRunes(source, SourceRunes) + "）"
+	if room := TextRunes - utf8.RuneCountInString(src); utf8.RuneCountInString(text) > room {
+		text = textutil.TruncateRunesNoEllipsis(text, room-1) + "…"
+	}
+	e := Entry{Text: text + src, Day: s.now().Format(time.DateOnly), ByUser: true}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	lines, err := s.read()
@@ -133,7 +139,7 @@ func (s *Store) Park(text, source string) (Entry, error) {
 		return Entry{}, err
 	}
 	for _, l := range lines {
-		if p, ok := parseLine(l); ok && Same(p.Text, e.Text) {
+		if p, ok := parseLine(l); ok && core(p.Text) == core(e.Text) {
 			return p, nil
 		}
 	}
@@ -160,10 +166,12 @@ func (s *Store) Sweep(items []string) (keep []bool, moved, total int, err error)
 	if err != nil {
 		return nil, 0, 0, err
 	}
+	// An item is parked by its words without the source it ends with, so
+	// one the Planner copies back writing its source its own way stays out.
 	parked := map[string]bool{}
 	for _, l := range lines {
 		if e, ok := parseLine(l); ok {
-			parked[norm(e.Text)] = true
+			parked[core(e.Text)] = true
 			total++
 		}
 	}
@@ -177,7 +185,7 @@ func (s *Store) Sweep(items []string) (keep []bool, moved, total int, err error)
 		case k == "":
 			keep[i] = true
 			continue
-		case parked[k]:
+		case parked[core(it)]:
 			continue
 		}
 		since, ok := prev.Items[k]
@@ -185,7 +193,7 @@ func (s *Store) Sweep(items []string) (keep []bool, moved, total int, err error)
 			since = now
 		}
 		if days(since, now) > StaleDays {
-			parked[k] = true
+			parked[core(it)] = true
 			add = append(add, renderLine(Entry{Text: it, Day: now.Format(time.DateOnly)}))
 			moved++
 			continue
@@ -302,10 +310,6 @@ func Clean(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-// Same reports whether two items read the same, whitespace and the
-// bullet aside.
-func Same(a, b string) bool { return norm(a) == norm(b) }
-
 // norm is an item's identity: its words without the list bullet, spacing
 // or case.
 func norm(s string) string {
@@ -314,6 +318,21 @@ func norm(s string) string {
 		s = strings.TrimPrefix(s, p)
 	}
 	return strings.ToLower(strings.Join(strings.Fields(s), ""))
+}
+
+// sourceTailRE is the source an item ends with: a bracketed note, or an
+// 出处 after the words.
+var sourceTailRE = regexp.MustCompile(`(?:[（(][^（）()]*[）)]|[，,;；]?出处[:：].*)$`)
+
+// core is an item's identity without the source it ends with: two lines
+// differing only in how their source is written are one item. An item that
+// is nothing but a source keeps it.
+func core(s string) string {
+	n := norm(s)
+	if c := sourceTailRE.ReplaceAllString(n, ""); c != "" {
+		return c
+	}
+	return n
 }
 
 // days is how many local calendar days lie between since and now.

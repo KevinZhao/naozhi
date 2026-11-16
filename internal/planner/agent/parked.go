@@ -22,13 +22,15 @@ const decideHeading = "等你定"
 
 // sourceRE finds an item's source: a session key (task: and the other
 // namespaces, or any key in backticks), a promise ID, an #issue, a link, a
-// date or time the user said it, or an explicit 出处.
+// date (11-14 included; two digits each, so a range like 2-3 天 is not
+// one) or time the user said it, or an explicit 出处.
 var sourceRE = regexp.MustCompile("`[a-z][a-z0-9_-]*:[^`\\s]+`" +
 	`|\b(?:task|dashboard|feishu|slack|discord|weixin|project|cron|scratch|sys|planner):[A-Za-z0-9_#.:-]+` +
 	`|\bpr_[a-z0-9]{6,}\b` +
 	`|#\d+` +
 	`|https?://\S+` +
 	`|\d{4}-\d{1,2}-\d{1,2}` +
+	`|\b(?:1[0-2]|0[1-9])-(?:3[01]|[12]\d|0[1-9])\b` +
 	`|\d{1,2}月\d{1,2}日` +
 	`|\b\d{1,2}[:：]\d{2}\b` +
 	`|出处[:：]\s*\S`)
@@ -38,6 +40,10 @@ func hasSource(item string) bool { return sourceRE.MatchString(item) }
 
 // bulletRE opens a list item.
 var bulletRE = regexp.MustCompile(`^\s*(?:[-*•]|\d+[.、)])\s+`)
+
+// headingRE opens a Markdown heading. A line like "#3902 …" is an item
+// naming its issue, not a heading.
+var headingRE = regexp.MustCompile(`^#{1,6}(?:\s|$)`)
 
 // parkedLineRE is the line the gateway writes in "等你定" for the 搁置区.
 var parkedLineRE = regexp.MustCompile(`^\s*(?:[-*•]\s*)?搁置\s*\d+\s*条`)
@@ -65,7 +71,7 @@ func handoffItems(lines []string) (items []handoffItem, sec, secEnd int) {
 	for i, l := range lines {
 		t := strings.TrimSpace(l)
 		switch {
-		case strings.HasPrefix(t, "#"):
+		case headingRE.MatchString(t):
 			closeItem()
 			if inDecide && secEnd < 0 {
 				secEnd = i
@@ -78,7 +84,7 @@ func handoffItems(lines []string) (items []handoffItem, sec, secEnd int) {
 		case t == "":
 			closeItem()
 			continue
-		case bulletRE.MatchString(l) || cur < 0:
+		case bulletRE.MatchString(l) || cur < 0 || inDecide && !indentedUnder(l, lines[items[cur].start]):
 			closeItem()
 			items = append(items, handoffItem{start: i, end: i + 1, decide: inDecide})
 			cur = len(items) - 1
@@ -95,6 +101,13 @@ func handoffItems(lines []string) (items []handoffItem, sec, secEnd int) {
 		items[i].filler = isNone(items[i].text) || parkedLineRE.MatchString(items[i].text)
 	}
 	return items, sec, secEnd
+}
+
+// indentedUnder reports whether line l goes on with the list item opened
+// by head. "等你定" is one item a line, bulleted or not (the handoff
+// prompt), so there only an indented line under a bullet does.
+func indentedUnder(l, head string) bool {
+	return (strings.HasPrefix(l, " ") || strings.HasPrefix(l, "\t")) && bulletRE.MatchString(head)
 }
 
 // isNone reports whether an item is the 无 of an empty section.

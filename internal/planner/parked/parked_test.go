@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func newStore(t *testing.T, now *time.Time) *Store {
@@ -106,5 +107,34 @@ func TestNoRoot(t *testing.T) {
 	}
 	if _, err := s.Park("a", "#1"); err == nil {
 		t.Error("parked without a root")
+	}
+}
+
+// A long item keeps its whole source: only the text is cut.
+func TestParkLongKeepsSource(t *testing.T) {
+	now := time.Date(2026, 11, 16, 10, 0, 0, 0, time.Local)
+	s := newStore(t, &now)
+	src := strings.Repeat("源", 110)
+	e, err := s.Park(strings.Repeat("事", 290), src)
+	if err != nil || !strings.HasSuffix(e.Text, "（出处："+src+"）") || utf8.RuneCountInString(e.Text) > TextRunes+1 {
+		t.Fatalf("park = %q (%d runes), %v", e.Text, utf8.RuneCountInString(e.Text), err)
+	}
+	if list, _ := s.List(); len(list) != 1 || list[0].Text != e.Text {
+		t.Fatalf("list = %+v", list)
+	}
+}
+
+// The same item put down again with another source is listed once.
+func TestParkSameItemOtherSource(t *testing.T) {
+	now := time.Date(2026, 11, 16, 10, 0, 0, 0, time.Local)
+	s := newStore(t, &now)
+	if _, err := s.Park("家里网络换不换", "11-14 15:25 用户说"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Park("家里网络换不换", "11-16 10:00 用户说"); err != nil {
+		t.Fatal(err)
+	}
+	if list, _ := s.List(); len(list) != 1 {
+		t.Fatalf("list = %+v", list)
 	}
 }

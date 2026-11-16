@@ -70,6 +70,8 @@ func TestHandoffSources(t *testing.T) {
 		{"- 用户 11-14 15:25 说先不做", true},
 		{"- 2026-11-14 定的", true},
 		{"- 11月14日说的", true},
+		{"- 家里网络换不换（11-14 用户说）", true},
+		{"- 09-03 定的", true},
 		{"- 看 https://github.com/x/y/pull/1", true},
 		{"- 出处：用户口头", true},
 		{"- HYD 选型等用户定", false},
@@ -194,5 +196,55 @@ func TestParkedReadable(t *testing.T) {
 		if strings.Contains(r, "parked") {
 			t.Errorf("deny rule %s names parked.md", r)
 		}
+	}
+}
+
+// In 等你定 each line is an item, bulleted or not, and a line opening with
+// an #issue is an item, not a heading: both are tracked and parked one by
+// one.
+func TestCheckHandoffDecideLines(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+	now := time.Date(2026, 11, 14, 8, 30, 0, 0, loc)
+	a, j := newJournaledAgent(t, &fakeSessions{}, &now)
+	summary := "## 等你定\n#3902 收起检查要不要改\nHYD 选型（#1）\n- M1 升级（#2）\n  已问过价格\n## 待跟进\n无"
+	a.checkHandoff("2026-11-14", summary)
+	if ck := handoffChecks(t, j, now); len(ck) != 1 || ck[0].Items != 3 || ck[0].Decide != 3 || ck[0].Unsourced != 0 {
+		t.Fatalf("check = %+v", ck)
+	}
+	now = time.Date(2026, 11, 18, 8, 30, 0, 0, loc)
+	got := a.checkHandoff("2026-11-18", summary)
+	if got != "## 等你定\n- 搁置 3 条，见 parked.md\n## 待跟进\n无" {
+		t.Fatalf("summary:\n%s", got)
+	}
+	list := a.Parked()
+	if len(list) != 3 || list[0].Text != "#3902 收起检查要不要改" || list[1].Text != "HYD 选型（#1）" ||
+		list[2].Text != "M1 升级（#2） 已问过价格" {
+		t.Fatalf("parked = %+v", list)
+	}
+}
+
+// An item the user put down and the Planner copies back in its own
+// wording of the source stays out of the handoff and is not parked twice.
+func TestCheckHandoffUserParkedCopied(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+	now := time.Date(2026, 11, 14, 15, 30, 0, 0, loc)
+	a, _ := newJournaledAgent(t, &fakeSessions{}, &now)
+	if err := a.Park("家里网络换不换", "11-14 15:25 用户说"); err != nil {
+		t.Fatal(err)
+	}
+	summary := "## 等你定\n- 家里网络换不换（11-14 15:25 用户说）\n- M1 升级（#2）"
+	for day := 15; day <= 19; day++ {
+		now = time.Date(2026, 11, day, 8, 30, 0, 0, loc)
+		got := a.checkHandoff("d", summary)
+		want := "搁置 1 条" // M1 joins it once copied for more than three days
+		if day == 19 {
+			want = "搁置 2 条"
+		}
+		if strings.Contains(got, "家里网络") || !strings.Contains(got, want) {
+			t.Fatalf("11-%d summary:\n%s", day, got)
+		}
+	}
+	if list := a.Parked(); len(list) != 2 || strings.Count(list[0].Text+list[1].Text, "家里网络") != 1 {
+		t.Fatalf("parked = %+v", list)
 	}
 }
