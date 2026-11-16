@@ -596,6 +596,7 @@ func main() {
 		ScoutPending: scouter.Pending,
 		Routines:     wireup.RoutineResults(scheduler),
 		Carried:      notifier.Carried,
+		Parked:       plannerAgent.Parked,
 		// With several nodes the scout's node sends the brief, each node's
 		// Planner covering its own sessions (docs/rfc/remote-planner.md §2.1).
 		Elsewhere: func() bool { return multiNode(cfg) && !scouter.Enabled() },
@@ -827,6 +828,7 @@ func main() {
 		Relay:       srv.SubmitRelay,
 		RelayTarget: srv.RelayTarget,
 		Remember:    plannerAgent.Remember,
+		Park:        plannerAgent.Park,
 		Lookup:      wireup.PlannerLookup(lookups),
 		TellAnswer:  wireup.PlannerTellAnswer(plannerAgent),
 		Ctx:         ctx,

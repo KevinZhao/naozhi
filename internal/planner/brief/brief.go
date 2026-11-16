@@ -7,8 +7,9 @@
 // notice is read, and it closes the ones it carried) and the 任务 not done
 // (§15.4) — and, from the scout (§15.6 早报增强), today's calendar, the
 // people waiting on a reply and the Asana tasks due, with what the Planner
-// held for it (notify blocks of level brief) and a Midway credential that
-// runs out before 09:00, as short Chinese Markdown, journals it
+// held for it (notify blocks of level brief), a Midway credential that
+// runs out before 09:00 and, in the week's first brief, the 搁置区
+// (§15.14 ⑤), as short Chinese Markdown, journals it
 // (kind=brief) and pushes it once. It is rendered by fixed rules from the
 // journal, the inbox, the health snapshot, the cron run history and the
 // scout's state; nothing here calls a model.
@@ -29,6 +30,7 @@ import (
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/journal"
+	"github.com/naozhi/naozhi/internal/planner/parked"
 	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
@@ -79,11 +81,13 @@ type Counts struct {
 	Midway   int `json:"midway,omitempty"`
 	// Slack is the unread Slack conversations the scout summed up.
 	Slack int `json:"slack,omitempty"`
+	// Parked is the 搁置区's items, listed in the week's first brief.
+	Parked int `json:"parked,omitempty"`
 }
 
 func (c Counts) total() int {
 	return c.Meetings + c.Replies + c.Deadlines + c.Done + c.Failed + c.Waiting + c.Errors + c.Tasks + c.Planner +
-		c.Routines + c.Notices + c.Custody + c.Midway + c.Slack
+		c.Routines + c.Notices + c.Custody + c.Midway + c.Slack + c.Parked
 }
 
 // Routine is a cron job's latest successful run in the window and whether
@@ -176,6 +180,9 @@ type Config struct {
 	// Carried closes the notices a sent brief listed
 	// (notify.Notifier.Carried).
 	Carried func(ids []string)
+	// Parked lists the Planner's 搁置区 (agent.Agent.Parked); the week's
+	// first brief lists it.
+	Parked func() []parked.Entry
 	// Elsewhere reports that the brief is another node's to send: with
 	// several nodes, only the one running the scout sends one, so a day is
 	// not briefed twice (docs/rfc/remote-planner.md §2.1). nil is never.
@@ -290,6 +297,19 @@ func due(now time.Time, lastDay string) bool {
 	return now.Format(time.DateOnly) != lastDay
 }
 
+// sameWeek reports whether day (YYYY-MM-DD, local) is in now's ISO week:
+// the 搁置区 goes in the week's first brief, Monday's unless the machine
+// slept through it.
+func sameWeek(day string, now time.Time) bool {
+	d, err := time.ParseInLocation(time.DateOnly, day, now.Location())
+	if err != nil {
+		return false
+	}
+	y1, w1 := d.ISOWeek()
+	y2, w2 := now.ISOWeek()
+	return y1 == y2 && w1 == w2
+}
+
 // windowStart is where the brief judged at now starts: the latest judgment,
 // within maxLookback.
 func windowStart(now, last time.Time) time.Time {
@@ -332,6 +352,9 @@ func (b *Briefer) Check() {
 	b.waiting = time.Time{}
 	b.mu.Unlock()
 	in := b.gather(windowStart(now, last.At), now)
+	if b.cfg.Parked != nil && !sameWeek(last.Day, now) {
+		in.Parked = b.cfg.Parked()
+	}
 	br := Brief{Day: now.Format(time.DateOnly), At: now, Since: in.Since, Counts: in.counts()}
 	if br.Counts.total() > 0 {
 		br.Sent = true
@@ -349,7 +372,7 @@ func (b *Briefer) Check() {
 		"deadlines", br.Counts.Deadlines, "done", br.Counts.Done, "failed", br.Counts.Failed,
 		"waiting", br.Counts.Waiting, "errors", br.Counts.Errors, "tasks", br.Counts.Tasks,
 		"planner", br.Counts.Planner, "routines", br.Counts.Routines, "notices", br.Counts.Notices,
-		"custody", br.Counts.Custody, "midway", br.Counts.Midway, "slack", br.Counts.Slack)
+		"custody", br.Counts.Custody, "midway", br.Counts.Midway, "slack", br.Counts.Slack, "parked", br.Counts.Parked)
 	if b.cfg.Carried != nil && len(in.Notices) > 0 {
 		ids := make([]string, 0, len(in.Notices))
 		for _, it := range in.Notices {

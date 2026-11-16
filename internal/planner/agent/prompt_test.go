@@ -55,6 +55,12 @@ func TestSystemPrompt(t *testing.T) {
 		"每个任务最多 3 行",
 		"要你决定（等用户拍板的）→ 新结果",
 		`"goal":"…"`,
+		"/state/planner/parked.md（搁置区",
+		"/state/planner/github/<owner>-<repo>.md",
+		`用户问"还有什么要做 / 还有什么没开发"时，先读 /state/planner/github/`,
+		"RFC 的排期表，再读 parked.md",
+		`{"type":"park","text":"…","source":"…"}`,
+		"交接里每条事项都带出处",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt lacks %q", want)
@@ -80,8 +86,8 @@ func TestSystemPrompt(t *testing.T) {
 		"<工作区 ID 或名字，或 global>", "global", "<slug>", "style",
 	)
 	formats := regexp.MustCompile(`\{"type":"[a-z]+"[^\n]*?\}`).FindAllString(p, -1)
-	if len(formats) != 11 {
-		t.Fatalf("found %d block formats, want 11: %q", len(formats), formats)
+	if len(formats) != 12 {
+		t.Fatalf("found %d block formats, want 12: %q", len(formats), formats)
 	}
 	for _, f := range formats {
 		body := strings.ReplaceAll(fill.Replace(f), `["x"]`, `["是"]`)

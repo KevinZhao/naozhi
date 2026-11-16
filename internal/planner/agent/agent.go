@@ -28,6 +28,7 @@ import (
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/planner/journal"
+	"github.com/naozhi/naozhi/internal/planner/parked"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -270,6 +271,9 @@ type Agent struct {
 	tasks func() []TaskLine
 	// memMu serializes the remember block's writes to the memory files.
 	memMu sync.Mutex
+	// parked is the 搁置区 the handoff check and the park block move the
+	// "等你定" items into (§15.14 ⑤).
+	parked *parked.Store
 	// tellMu serializes Tell, from the held receipts read to their drop.
 	tellMu sync.Mutex
 	// userAt is when the user last sent a message on the Planner page
@@ -307,7 +311,8 @@ func New(cfg Config) *Agent {
 		slog.Warn("planner: no state root (session.store_path); planner.enabled ignored")
 		cfg.Enabled = false
 	}
-	a := &Agent{cfg: cfg, wake: make(chan struct{}, 1), name: NameFor(cfg.Layout.PlannerRoot())}
+	a := &Agent{cfg: cfg, wake: make(chan struct{}, 1), name: NameFor(cfg.Layout.PlannerRoot()),
+		parked: parked.New(cfg.Layout.PlannerParkedPath(), cfg.Layout.PlannerDecidePath(), cfg.Now)}
 	a.state = loadState(cfg.Layout.PlannerAgentPath())
 	a.opts = a.buildOpts()
 	a.spawnedAllow, a.spawnedDeny = a.opts.PermissionsAllow, a.opts.PermissionsDeny
@@ -766,6 +771,11 @@ func (a *Agent) changeShift(ctx context.Context, now time.Time, day string) {
 		text := a.askHandoff(ctx)
 		if ctx.Err() != nil {
 			return // shutting down: the next start changes the shift
+		}
+		if text != "" {
+			// Checked once, before it is stored: a stored summary handed
+			// over again after a failed restart is not swept twice.
+			text = a.checkHandoff(day, text)
 		}
 		summary = []byte(text)
 		if text != "" {
