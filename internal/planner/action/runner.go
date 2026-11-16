@@ -36,6 +36,9 @@ import (
 // HandlerAsk is the decision handler the runner registers with the inbox.
 const HandlerAsk = "ask"
 
+// askSourcePrefix opens the inbox source of an ask block's question.
+const askSourcePrefix = "ask:"
+
 // handlerDispatch named the dispatch confirmation cards before D88; New
 // closes the ones a previous run left open, nothing answers them now.
 const handlerDispatch = "dispatch"
@@ -156,6 +159,16 @@ type Config struct {
 	// background task's end or a Monitor's event started. nil counts every
 	// turn as the user's.
 	UserSent func(key string, since time.Time) bool
+	// UserTyped reports whether the user sent session key a message after
+	// since themselves, in the session: not a relay, custody's or the
+	// Planner's (wireup.CustodySources.UserSince). An ask naming key
+	// expires on it (§15.14 ④). nil is never.
+	UserTyped func(key string, since time.Time) bool
+	// Reopen puts a dispatched session put away back under its key without
+	// touching its task's state (planner/reap.Reaper.Reopen): a relay or an
+	// answer reaches it, and what it reports next decides the state. nil
+	// leaves put-away sessions unreachable to them.
+	Reopen func(key string)
 	// Prompted reports whether anything was sent session key after since:
 	// the user's message, custody's, a relay, the Planner's dispatch. A
 	// turn after none woke by itself (a Monitor's push, a background task's
@@ -236,6 +249,10 @@ type Runner struct {
 	// the inbox's goroutine. A reopened task starts afresh: no receipt told,
 	// no quiet window (rearmReopened).
 	reopened map[string]bool
+	// relayedAt is when the user's decision or answer last reached each
+	// done task (relayed), under mu. It does not survive a restart: a
+	// report after one then leaves the user's own done mark standing.
+	relayedAt map[string]time.Time
 
 	// doneTold is the tasks whose done block got the reminder of the
 	// promises citing them; endTold the tasks told of a turn that ended
@@ -350,7 +367,7 @@ func New(cfg Config) *Runner {
 	// previous run's to check.
 	r := &Runner{cfg: cfg, ch: make(chan reply, queueLen), endCh: make(chan ended, queueLen), grace: endGrace, reportGrace: endReportGrace,
 		after: func(d time.Duration, f func()) { time.AfterFunc(d, f) }, last: cfg.Now(), doneTold: map[string]bool{}, endTold: map[string]time.Time{}, doingAt: map[string]time.Time{},
-		quiet: map[string]ended{}, custodyTold: map[string]time.Time{}, reopened: map[string]bool{}, reportTold: map[string]toldReport{}}
+		quiet: map[string]ended{}, custodyTold: map[string]time.Time{}, reopened: map[string]bool{}, reportTold: map[string]toldReport{}, relayedAt: map[string]time.Time{}}
 	if cfg.Inbox != nil {
 		cfg.Inbox.HandleDecisions(HandlerAsk, r.decideAsk)
 		open, _ := cfg.Inbox.List(0)
@@ -374,6 +391,9 @@ func (r *Runner) Result(key, text string) {
 		return
 	}
 	if key != r.cfg.Planner {
+		// An ask may name any session that takes a relay: the user's
+		// message to it settles the ask once its turn ends.
+		r.expireAsks(key)
 		r.custodyEnded(key, text)
 		return
 	}
@@ -404,9 +424,12 @@ func (r *Runner) Result(key, text string) {
 }
 
 // Run runs the queued replies until ctx ends, after queuing again the turn
-// ends a restart left unchecked (recheck).
+// ends a restart left unchecked (recheck) and expiring the asks settled
+// meanwhile.
 func (r *Runner) Run(ctx context.Context) {
 	r.recheck()
+	// What settled an ask while naozhi was down closes it now.
+	r.expireAsks("")
 	for {
 		select {
 		case <-ctx.Done():
@@ -476,8 +499,10 @@ func (r *Runner) taskEnded(key, text string) {
 	// 进行中, so the put-away does not take a session waiting on the user.
 	// The user's own mark stands: theirs to change (the put-away still
 	// holds a need_user one, reap's holds).
+	// So does it when the user's decision or answer was relayed to it after
+	// the mark (relayed): a relay leaves the state to the report (§15.14 ④).
 	reopen := ok && rep.State != ReportDone && m.Mark != nil && task.State(m.Mark.State) == task.Done &&
-		now.After(m.Mark.At) && task.By(m.Mark.By) != task.ByUser
+		now.After(m.Mark.At) && (task.By(m.Mark.By) != task.ByUser || r.relayedAt[key].After(m.Mark.At))
 	if ok && m.Mark != nil && task.State(m.Mark.State) == task.Done {
 		e.markedDone = true
 		e.reopened = reopen
@@ -500,6 +525,7 @@ func (r *Runner) taskEnded(key, text string) {
 	if r.cfg.Inbox == nil {
 		return
 	}
+	r.expireAsks(key)
 	// The question an earlier turn asked is answered once a turn ends after
 	// the user's message; one that ends with no word from them (a
 	// background task's end or a Monitor's event woke the CLI, custody
@@ -552,13 +578,17 @@ func (r *Runner) answered(key, src string, asked time.Time) bool {
 }
 
 // TaskState is task.Config.OnState's part for the runner: a task done or
-// failed waits on no answer to its need_user report any more. Safe on a nil
-// Runner (a state set before it is built).
+// failed waits on no answer to its need_user report any more, nor a done
+// one on the asks naming it. Safe on a nil Runner (a state set before it
+// is built).
 func (r *Runner) TaskState(key string, st task.State) {
 	if r == nil || r.cfg.Inbox == nil || st != task.Done && st != task.Failed {
 		return
 	}
 	r.cfg.Inbox.CloseSource(ReportSource(key), notify.ClosedByAuto)
+	if st == task.Done {
+		r.expireAsks(key)
+	}
 }
 
 // custodyEnded has the turn end of a session in custody checked after
@@ -1560,58 +1590,64 @@ func (r *Runner) sessionName(key string) string {
 // the session's own send path (the user's message would take), never
 // through custody: no prefix, no count, not held back while the user is at
 // the session, as the user asked for it. The block's card says it was sent.
-// A session put away is reopened first (reachable); reopened says so.
+// A session put away is put back first (reachable); reopened says so.
 func (r *Runner) relay(rl Relay, words []Words) (reopened bool, err error) {
 	if r.cfg.Relay == nil {
 		return false, errors.New("转达没有接通")
 	}
-	if reopened, err = r.reachable(rl.Key, task.ByPlanner, "Planner 转达用户的决定，网关重新打开"); err != nil {
-		return false, err
+	if reopened, err = r.reachable(rl.Key); err != nil {
+		return reopened, err
 	}
 	if err := r.cfg.Relay(rl.Key, relayEnvelope(r.cfg.Now(), words, rl.Text)); err != nil {
 		if reopened {
-			return true, fmt.Errorf("这个会话已经收起，网关已重新打开（任务回到进行中），但没有送到（%v）", err)
+			return true, fmt.Errorf("这个会话已经收起，网关已重新打开，但没有送到（%v）", err)
 		}
 		return false, fmt.Errorf("没有送到（%v）", err)
 	}
+	r.relayed(rl.Key)
 	return reopened, nil
 }
 
 // reachable is nil when key may take a relay now (Config.RelayTarget). A
-// dispatched session put away (D95) cannot, but the user or the Planner
-// writing to it means its task is not over: it is reopened the way 任务's
-// 重新打开 does, its task set back to 进行中 by, for why, on which the
-// reaper puts it back under its key and the next message resumes it.
-// reopened reports that. One marked done and not put away yet takes it,
-// its task set back to 进行中 all the same. Any other key it refuses as
-// before, the block's fault.
-func (r *Runner) reachable(key string, by task.By, why string) (reopened bool, err error) {
+// dispatched session put away (D95) cannot until it is put back under its
+// key (Config.Reopen), which reopened reports. The task's state is left
+// as it is, for one put away as for one marked done and not put away yet:
+// a relayed decision or answer does not make a done task 进行中 again,
+// what it reports next does (taskEnded, §15.14 ④). Any other key it
+// refuses as before, the block's fault.
+func (r *Runner) reachable(key string) (reopened bool, err error) {
 	if r.cfg.RelayTarget == nil {
 		return false, nil
 	}
 	err = r.cfg.RelayTarget(key)
 	if err == nil {
-		// Done and not put away yet: still a task not over.
-		if r.doneTask(key) {
-			if err := r.cfg.Tasks.Set(key, task.Doing, by, why); err != nil {
-				slog.Warn("planner actions: a done task written to not set back to doing", "key", key, "err", err)
-			} else {
-				r.reopen(key)
-			}
-		}
 		return false, nil
 	}
 	if !r.putAway(key) {
 		return false, blockError{err}
 	}
-	if err := r.cfg.Tasks.Set(key, task.Doing, by, why); err != nil {
-		return false, fmt.Errorf("这个会话已经收起，重新打开失败（%v）", err)
+	if r.cfg.Reopen == nil {
+		return false, errors.New("这个会话已经收起，重新打开没有接通")
 	}
+	r.cfg.Reopen(key)
 	r.reopen(key)
 	if err := r.cfg.RelayTarget(key); err != nil {
 		return true, fmt.Errorf("这个会话已经收起，重新打开后还是送不到（%v）", err)
 	}
 	return true, nil
+}
+
+// relayed notes that the user's decision or answer reached done task key
+// (after its done mark): what it reports next decides its state even
+// against the user's own mark, since the user wrote to it after making it.
+// Any goroutine.
+func (r *Runner) relayed(key string) {
+	if !r.doneTask(key) {
+		return
+	}
+	r.mu.Lock()
+	r.relayedAt[key] = r.cfg.Now()
+	r.mu.Unlock()
 }
 
 // closedByUser is how the user closed key's task, "" when they did not:
@@ -1835,7 +1871,8 @@ func (r *Runner) ask(q Ask) error {
 		Unit:   r.cfg.Planner,
 		Title:  textutil.TruncateRunes(q.Question, 120),
 		Why:    "Planner 问你",
-		Source: "ask:" + requestID(),
+		Task:   q.Task,
+		Source: askSourcePrefix + requestID(),
 	}
 	if len(q.Options) == 0 {
 		it.Why = "Planner 问你，请在 Planner 对话里回复，回复后关掉这一条"
@@ -1857,13 +1894,18 @@ func (r *Runner) ask(q Ask) error {
 // decideAsk sends the user's answer back to the Planner, as a turn the user
 // started whose words are the answer: the Planner may relay it. An ask
 // naming a task has the answer sent to that session first, in the relay
-// envelope (D98); the Planner is told whether it got there. Failing to
-// reach the Planner (it is stopped) leaves the question open, unless the
-// session got the answer.
+// envelope (D98); the Planner is told whether it got there. An ask whose
+// matter was settled since (expiry) takes no answer: notify closes it as
+// expired and nothing is sent. Failing to reach the Planner (it is
+// stopped) leaves the question open, unless the session got the answer.
 func (r *Runner) decideAsk(it notify.Item, a notify.Action) error {
 	var c askCard
 	if it.Decision == nil || json.Unmarshal(it.Decision.Payload, &c) != nil {
 		return errors.New("ask card: unreadable payload")
+	}
+	if why := r.expiry(c.Task, it.Created); why != "" {
+		slog.Info("planner actions: an answer to an expired ask not sent", "task", c.Task, "why", why)
+		return notify.Expired{Why: why}
 	}
 	w := Words{Text: string(a), Question: c.Question, At: r.cfg.Now()}
 	text := "你问用户的「" + c.Question + "」，用户的回答：" + string(a)
@@ -1872,22 +1914,21 @@ func (r *Runner) decideAsk(it notify.Item, a notify.Action) error {
 		err := errors.New("转达没有接通")
 		reopened, sending := false, false
 		if r.cfg.Relay != nil {
-			if reopened, err = r.reachable(c.Task, task.ByUser, "用户回答了它的提问，网关重新打开"); err == nil {
+			if reopened, err = r.reachable(c.Task); err == nil {
 				sending = true
 				err = r.cfg.Relay(c.Task, relayEnvelope(w.At, []Words{w}, ""))
 			}
 		}
 		switch relayed = err == nil; {
 		case relayed:
+			r.relayed(c.Task)
 			sent := "网关已把这个回答原样送到 "
 			if reopened {
 				sent = "它已经收起，网关已重新打开并把这个回答原样送到 "
 			}
 			text += "。" + sent + c.Task + "（" + r.sessionName(c.Task) + "），不用再转达；它做完会写汇报块，网关转给你。"
 		case reopened && sending:
-			// As relay says it: the task is 进行中 again whether or not the
-			// answer got there.
-			text += "。" + c.Task + " 已经收起，网关已重新打开（任务回到进行中），但没有把回答送到（" + err.Error() + "）；要转达就用 relay。"
+			text += "。" + c.Task + " 已经收起，网关已重新打开，但没有把回答送到（" + err.Error() + "）；要转达就用 relay。"
 		default:
 			text += "。网关没能把回答送到 " + c.Task + "（" + err.Error() + "）；要转达就用 relay。"
 		}
@@ -1909,6 +1950,84 @@ func (r *Runner) decideAsk(it notify.Item, a notify.Action) error {
 	}
 	return nil
 }
+
+// Why an ask naming a task closed without an answer (§15.14 ④, D115), as
+// "等你" records it.
+const (
+	expiredUserSent = "你已在会话里处理"
+	expiredDone     = "任务已完成"
+)
+
+// expiry is why an ask naming session key, opened at asked, no longer
+// waits on an answer ("" while it does): the user wrote to the session
+// themselves since, or its task was marked done or put away since. An ask
+// about a task done already is asked on purpose; only what happens after
+// it settles it.
+func (r *Runner) expiry(key string, asked time.Time) string {
+	if key == "" {
+		return ""
+	}
+	if r.cfg.UserTyped != nil && r.cfg.UserTyped(key, asked) {
+		return expiredUserSent
+	}
+	if r.cfg.Sessions == nil {
+		return ""
+	}
+	m, ok := r.cfg.Sessions.Get(key)
+	switch {
+	case !ok:
+		return ""
+	case m.Reap != nil && !m.Reap.At.Before(asked),
+		m.Mark != nil && task.State(m.Mark.State) == task.Done && !m.Mark.At.Before(asked):
+		return expiredDone
+	}
+	return ""
+}
+
+// askTask is the session open ask it names, "" for none or for an item
+// that is no ask: its Task, or, for a card opened before it was kept
+// there, its payload's.
+func askTask(it notify.Item) string {
+	if !strings.HasPrefix(it.Source, askSourcePrefix) || it.State != notify.StateOpen {
+		return ""
+	}
+	if it.Task != "" || it.Decision == nil {
+		return it.Task
+	}
+	var c askCard
+	if json.Unmarshal(it.Decision.Payload, &c) != nil {
+		return ""
+	}
+	return c.Task
+}
+
+// expireAsks closes the open asks naming key whose matter was settled
+// (expiry), all of them for key "": the user wrote to it, its task was
+// marked done or put away. An ask being answered is left to its answer,
+// which looks again.
+func (r *Runner) expireAsks(key string) {
+	if r == nil || r.cfg.Inbox == nil {
+		return
+	}
+	open, _ := r.cfg.Inbox.List(0)
+	for _, it := range open {
+		k := askTask(it)
+		if k == "" || key != "" && k != key {
+			continue
+		}
+		why := r.expiry(k, it.Created)
+		if why == "" {
+			continue
+		}
+		if err := r.cfg.Inbox.Expire(it.ID, why); err == nil {
+			slog.Info("planner actions: an ask expired", "task", k, "why", why)
+		}
+	}
+}
+
+// PutAway is planner/reap's word that dispatched session key was put away:
+// the asks naming it expire. Safe on a nil Runner.
+func (r *Runner) PutAway(key string) { r.expireAsks(key) }
 
 // lookup starts a web lookup (§15.12 ⑨). Its card in the conversation says
 // it is being looked up; the answer is a turn of its own, its card the

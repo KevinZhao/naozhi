@@ -707,3 +707,62 @@ func TestCloseSourceAndRetitle(t *testing.T) {
 		t.Errorf("item = %+v, want DismissSource's closed by the user", it)
 	}
 }
+
+// An item expired closes as the gateway's with why, which survives a
+// restart; an answer after it gets Expired (matching ErrClosed too) and a
+// dismiss ErrClosed. A decider returning Expired closes the item so, the
+// answer not applied; an item being decided is left to its answer.
+func TestExpire(t *testing.T) {
+	lay := datadir.FromRoot(t.TempDir())
+	if err := datadir.EnsureDir(lay.PlannerRoot()); err != nil {
+		t.Fatal(err)
+	}
+	n, _, _ := newTest(t, local(15, 25), lay)
+	it, _ := n.Add(Item{Kind: KindQuestion, Source: "ask:1", Title: "录音怎么处理？", Task: "task:ab12",
+		Decision: &Decision{Handler: "h", Actions: []Action{"清理掉"}}})
+	if err := n.Expire(it.ID, "你已在会话里处理"); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.Expire(it.ID, "任务已完成"); !errors.Is(err, ErrClosed) {
+		t.Errorf("second expire = %v, want ErrClosed", err)
+	}
+	re := New(Config{Layout: lay, System: func(string, string) error { return nil }})
+	got, ok := re.Item(it.ID)
+	if !ok || got.State != StateClosed || got.ClosedBy != ClosedByAuto || got.ClosedWhy != "你已在会话里处理" || got.Task != "task:ab12" {
+		t.Fatalf("reloaded = %+v", got)
+	}
+	var exp Expired
+	if err := re.Decide(it.ID, "清理掉"); !errors.As(err, &exp) || exp.Why != "你已在会话里处理" || !errors.Is(err, ErrClosed) {
+		t.Errorf("answer after expiry = %v", err)
+	}
+	if err := re.Dismiss(it.ID); !errors.Is(err, ErrClosed) {
+		t.Errorf("dismiss after expiry = %v", err)
+	}
+
+	applied := false
+	n.HandleDecisions("h", func(Item, Action) error { applied = true; return Expired{Why: "任务已完成"} })
+	it2, _ := n.Add(Item{Kind: KindQuestion, Source: "ask:2", Title: "拆不拆？", Decision: &Decision{Handler: "h", Actions: []Action{"拆"}}})
+	if err := n.Decide(it2.ID, "拆"); !errors.Is(err, ErrExpired) {
+		t.Fatalf("Decide = %v, want ErrExpired", err)
+	}
+	if got, _ := n.Item(it2.ID); !applied || got.State != StateClosed || got.ClosedWhy != "任务已完成" || got.Decision.Answer != "" {
+		t.Errorf("item = %+v, want closed as expired, no answer", got)
+	}
+
+	entered, release := make(chan struct{}), make(chan struct{})
+	n.HandleDecisions("h2", func(Item, Action) error { close(entered); <-release; return nil })
+	it3, _ := n.Add(Item{Kind: KindQuestion, Source: "ask:3", Title: "合不合？", Decision: &Decision{Handler: "h2", Actions: []Action{"合"}}})
+	done := make(chan error)
+	go func() { done <- n.Decide(it3.ID, "合") }()
+	<-entered
+	if err := n.Expire(it3.ID, "任务已完成"); !errors.Is(err, ErrPending) {
+		t.Errorf("expire while deciding = %v, want ErrPending", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := n.Item(it3.ID); got.ClosedBy != ClosedByUser || got.ClosedWhy != "" {
+		t.Errorf("item = %+v, want answered", got)
+	}
+}

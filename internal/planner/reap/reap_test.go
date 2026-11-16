@@ -305,11 +305,21 @@ func TestLastActiveInFuture(t *testing.T) {
 // under its key, to resume its session ID.
 func TestPutAwayAndReopen(t *testing.T) {
 	f := newFixture(t)
+	// Told once the sidecar records it: the asks naming it expire then.
+	var told []string
+	f.r.cfg.PutAway = func(k string) {
+		if m, _ := f.sc.Get(k); m.Reap != nil {
+			told = append(told, k)
+		}
+	}
 	f.markDone(t)
 	f.r.Tick(context.Background())
 	rp := f.reap()
 	if rp == nil || rp.SessionID != "sid-1" || rp.By != "planner" || rp.Why != "PR 已开" || len(rp.Worktrees) != 0 {
 		t.Fatalf("Reap = %+v", rp)
+	}
+	if len(told) != 1 || told[0] != key {
+		t.Fatalf("PutAway told %q, want %s once recorded", told, key)
 	}
 	recs := f.records(t)
 	if len(recs) != 1 || recs[0].Event != "reaped" || recs[0].Trigger != "planner" || len(recs[0].Steps) != 1 ||
