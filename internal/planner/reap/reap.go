@@ -16,9 +16,9 @@
 // uncommitted, its branch is on the remote and the branch's PR is merged or
 // closed; a worktree with work not committed or not pushed is never removed
 // and the user is told once per reason. A worktree another session still in
-// the router went into is left alone, unchecked, while that session is there.
-// A worktree waiting on its PR is looked at again every recheckAfter, a PR
-// lookup that failed after ghBackoff. Every step and every step not taken is
+// the router works in (Config.InUse) is left alone, unchecked, while it does.
+// A worktree waiting on its PR is looked at again every recheckAfter, one
+// pending on a PR lookup that failed after ghBackoff. Every step and every step not taken is
 // journaled (journal.KindReap) and shown on the task.
 //
 // A session back under a put-away key other than by Reopen (the owner loop
@@ -639,8 +639,10 @@ func (r *Reaper) judge(ctx context.Context, key string, wt sidecar.Worktree) (st
 	}
 	pr, err := r.cfg.Git.PR(ctx, wt.Dir, wt.Branch)
 	if err != nil {
+		// Kept for what git says, not for the lookup: no backoff, so a push
+		// the user was told to make is seen at the next check.
 		if !st.Pushed {
-			return WTKept, "有没推送的提交", true
+			return WTKept, "有没推送的提交", false
 		}
 		return WTPending, "查不到 PR：" + short(err), true
 	}

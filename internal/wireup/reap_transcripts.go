@@ -9,8 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -36,39 +38,62 @@ func NewTranscriptDirs() *TranscriptDirs {
 	return &TranscriptDirs{files: map[string]*scanned{}}
 }
 
+// dirSeen is one directory a transcript went into: as a line's cwd, or
+// named by a Bash command's cd, pushd or git -C (cmdAt, the latest such
+// line's time).
+type dirSeen struct {
+	dir   string
+	cwd   bool
+	cmdAt time.Time
+}
+
+// merge folds o, the same directory seen elsewhere, into d.
+func (d *dirSeen) merge(o dirSeen) {
+	d.cwd = d.cwd || o.cwd
+	if o.cmdAt.After(d.cmdAt) {
+		d.cmdAt = o.cmdAt
+	}
+}
+
 // scanned is what was read of one transcript: up to off, the end of its
 // last complete line, so a line being written is read again whole.
 type scanned struct {
 	off  int64
-	cmds bool
-	dirs []string
-	seen map[string]bool
+	dirs []dirSeen
+	idx  map[string]int
+	// mtime stands in for the time of a line that carries none.
+	mtime time.Time
 }
 
+func newScanned() *scanned { return &scanned{idx: map[string]int{}} }
+
 // read is the distinct directories path's lines went into, in the order
-// first seen: each line's cwd, and with cmds the directories its Bash tool
-// calls cd into.
-func (c *TranscriptDirs) read(path string, cmds bool) []string {
+// first seen: each line's cwd and the directories its Bash tool calls cd
+// into. A session's shell is reset to the workspace after a cd out of the
+// project, and a sub-agent's before each command, so where they worked
+// outside the workspace shows only in the commands.
+func (c *TranscriptDirs) read(path string) []dirSeen {
 	if c == nil {
-		s := &scanned{cmds: cmds, seen: map[string]bool{}}
+		s := newScanned()
 		s.scan(path)
 		return s.dirs
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	s := c.files[path]
-	if s == nil || s.cmds != cmds {
+	if s == nil {
 		if len(c.files) >= maxCachedTranscripts {
 			clear(c.files)
 		}
-		s = &scanned{cmds: cmds, seen: map[string]bool{}}
+		s = newScanned()
 		c.files[path] = s
 	}
 	if !s.scan(path) {
 		delete(c.files, path)
 		return nil
 	}
-	return s.dirs
+	// A copy: the next scan updates the entries in place.
+	return slices.Clone(s.dirs)
 }
 
 // scan reads path from s.off; false when path is not a readable file.
@@ -84,8 +109,9 @@ func (s *scanned) scan(path string) bool {
 	}
 	if fi.Size() < s.off {
 		// Rewritten shorter: what was read may no longer be there.
-		*s = scanned{cmds: s.cmds, seen: map[string]bool{}}
+		*s = *newScanned()
 	}
+	s.mtime = fi.ModTime()
 	if fi.Size() == s.off {
 		return true
 	}
@@ -141,13 +167,14 @@ var (
 
 func (s *scanned) line(line []byte) {
 	hasCwd := bytes.Contains(line, cwdKey)
-	hasTool := s.cmds && bytes.Contains(line, toolUseKey)
+	hasTool := bytes.Contains(line, toolUseKey)
 	if !hasCwd && !hasTool {
 		return
 	}
 	var v struct {
-		Cwd     string `json:"cwd"`
-		Message struct {
+		Cwd       string `json:"cwd"`
+		Timestamp string `json:"timestamp"`
+		Message   struct {
 			Content json.RawMessage `json:"content"`
 		} `json:"message"`
 	}
@@ -155,7 +182,7 @@ func (s *scanned) line(line []byte) {
 		return
 	}
 	if filepath.IsAbs(v.Cwd) {
-		s.add(v.Cwd)
+		s.add(dirSeen{dir: v.Cwd, cwd: true})
 	}
 	if !hasTool || len(v.Message.Content) == 0 || v.Message.Content[0] != '[' {
 		return
@@ -170,20 +197,26 @@ func (s *scanned) line(line []byte) {
 	if json.Unmarshal(v.Message.Content, &blocks) != nil {
 		return
 	}
+	at, err := time.Parse(time.RFC3339Nano, v.Timestamp)
+	if err != nil {
+		at = s.mtime
+	}
 	for _, b := range blocks {
 		if b.Type == "tool_use" && b.Name == "Bash" {
 			for _, d := range commandDirs(b.Input.Command) {
-				s.add(d)
+				s.add(dirSeen{dir: d, cmdAt: at})
 			}
 		}
 	}
 }
 
-func (s *scanned) add(d string) {
-	if !s.seen[d] {
-		s.seen[d] = true
-		s.dirs = append(s.dirs, d)
+func (s *scanned) add(d dirSeen) {
+	if i, ok := s.idx[d.dir]; ok {
+		s.dirs[i].merge(d)
+		return
 	}
+	s.idx[d.dir] = len(s.dirs)
+	s.dirs = append(s.dirs, d)
 }
 
 // cdArg matches a shell command's cd, pushd or git -C and its directory.

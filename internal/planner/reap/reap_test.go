@@ -768,3 +768,33 @@ func TestPRLookupBackoff(t *testing.T) {
 		t.Fatalf("after an answer: %+v", got)
 	}
 }
+
+// A worktree kept for unpushed commits stays on recheckAfter while gh fails:
+// what keeps it is git's answer, so the push the user was told to make is
+// seen at the next check, not a day later.
+func TestKeptUnpushedNoBackoff(t *testing.T) {
+	d := mkdirs(t, "wt")
+	wt := d[0]
+	f := newFixture(t, d...)
+	f.git.st[wt] = Status{Head: "h"}
+	f.git.prErr = errors.New("gh pr: error connecting to api.github.com")
+	f.markDone(t)
+	f.r.Tick(context.Background())
+	for i := 1; i <= 4; i++ {
+		f.now = f.now.Add(recheckAfter)
+		f.r.Tick(context.Background())
+	}
+	if got := wtState(f, wt); got.State != WTKept || got.Why != "有没推送的提交" {
+		t.Fatalf("unpushed: %+v", got)
+	}
+	f.git.mu.Lock()
+	f.git.st[wt] = Status{Head: "h", Pushed: true}
+	f.git.prErr = nil
+	f.git.pr[wt] = PR{State: "MERGED", Head: "h"}
+	f.git.mu.Unlock()
+	f.now = f.now.Add(recheckAfter)
+	f.r.Tick(context.Background())
+	if got := wtState(f, wt); got.State != WTRemoved {
+		t.Fatalf("pushed and merged, one recheckAfter later: %+v", got)
+	}
+}
