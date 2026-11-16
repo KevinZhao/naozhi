@@ -27,6 +27,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/ctxutil"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
@@ -166,7 +167,10 @@ type parityCall struct {
 	Text        string
 	Priority    string
 	Passthrough bool // arrived through SendPassthrough
-	OnEvent     clievent.EventCallback
+	// Source is the message source the turn's ctx carried (ctxutil.Source),
+	// what its transcript entry records.
+	Source  string
+	OnEvent clievent.EventCallback
 }
 
 // parityOutcome is how the test answers a turn.
@@ -430,10 +434,10 @@ func (h *parityHarness) session(key string, passthrough bool) *parityTurns {
 	}
 	tt.proc.PassthroughVal = passthrough
 	tt.proc.SendFunc = func(ctx context.Context, text string, _ []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error) {
-		return tt.run(ctx, parityCall{Text: text, OnEvent: onEvent})
+		return tt.run(ctx, parityCall{Text: text, Source: ctxutil.Source(ctx), OnEvent: onEvent})
 	}
 	tt.proc.SendPassthroughFunc = func(ctx context.Context, text string, _ []clievent.Attachment, onEvent clievent.EventCallback, priority string) (*clievent.SendResult, error) {
-		return tt.run(ctx, parityCall{Text: text, Priority: priority, Passthrough: true, OnEvent: onEvent})
+		return tt.run(ctx, parityCall{Text: text, Priority: priority, Passthrough: true, Source: ctxutil.Source(ctx), OnEvent: onEvent})
 	}
 	tt.proc.InterruptViaControlFunc = func() error {
 		tt.interMu.Lock()

@@ -46,3 +46,39 @@ func TestPlannerScoutWakeRunsAlone(t *testing.T) {
 		})
 	}
 }
+
+// A Planner turn's transcript entry carries what started it, so the
+// Planner page lays out its timeline without reading the text (§15.14 ②,
+// D113): your message and a session you handed over are the user's own
+// (""), your answer and every turn the gateway started name their source,
+// and a dispatch's first message is the Planner's.
+func TestPlannerTurnEntrySource(t *testing.T) {
+	h := newParityHarness(t, parityOpts{mode: "collect"})
+	turns := h.session(agent.Key, false)
+	e := h.engine()
+	for _, tc := range []struct {
+		src  agent.Source
+		want string
+	}{
+		{agent.SourceUser, ""},
+		{agent.SourceHandover, ""},
+		{agent.SourceAnswer, "answer"},
+		{agent.SourceReceipt, "receipt"},
+		{agent.SourceUnrun, "unrun"},
+		{agent.SourceScout, "scout"},
+		{agent.SourceBriefing, "briefing"},
+		{agent.SourceLookup, "lookup"},
+		{agent.SourceRefusal, "refusal"},
+		{agent.SourceShift, "shift"},
+	} {
+		if _, err := e.submitPlanner(agent.Key, tc.src, nil, "m-"+string(tc.src), nil, session.AgentOpts{}, nil); err != nil {
+			t.Fatalf("submit %s: %v", tc.src, err)
+		}
+		c := turns.next(t, string(tc.src)+" turn")
+		if c.Source != tc.want {
+			t.Errorf("%s turn: entry source = %q, want %q", tc.src, c.Source, tc.want)
+		}
+		turns.answer(okTurn("R"))
+		h.waitEngineIdle()
+	}
+}

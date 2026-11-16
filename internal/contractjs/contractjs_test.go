@@ -9,6 +9,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cliinfo"
+	"github.com/naozhi/naozhi/internal/planner/agent"
 )
 
 // TestContractJS_Current rebuilds contract.js and byte-compares it against
@@ -107,5 +108,24 @@ func TestContractJS_StartupFailureClass(t *testing.T) {
 	want := "    STARTUP_FAILURE_CLASS: ['" + strings.Join(clierr.AllExitClassWires(), "', '") + "'],\n"
 	if !strings.Contains(out, want) {
 		t.Errorf("contract.js lacks %q", want)
+	}
+}
+
+// TestContractJS_PlannerTurnEnums pins the Planner page's turn vocabularies
+// to planner/agent, the one place that says which turns fold into 动态.
+func TestContractJS_PlannerTurnEnums(t *testing.T) {
+	t.Parallel()
+	out, err := Build(filepath.Join("..", "..", "internal", "server", "testdata", "routes.golden.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string][]string{
+		"PLANNER_TURN_DYNAMIC": agent.DynamicSources(),
+		"PLANNER_TURN_SHIFT":   {agent.SourceShift.Entry()},
+	} {
+		line := "    " + name + ": ['" + strings.Join(want, "', '") + "'],\n"
+		if !strings.Contains(out, line) {
+			t.Errorf("contract.js lacks %q", line)
+		}
 	}
 }

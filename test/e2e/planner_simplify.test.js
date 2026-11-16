@@ -111,7 +111,11 @@ const red = (page) => page.evaluate(() => {
   return c;
 });
 
+// openPlanner opens the page on the whole timeline (全部): the lines and
+// cards here are how it shows every turn, and how a 动态 entry unfolds
+// (planner_layers.test.js: 对话 folds the reports and messages).
 async function openPlanner(page, mock) {
+  await page.addInitScript(() => localStorage.setItem('nz:plannerLayer', '"all"'));
   await page.goto(mock.url + '/dashboard');
   await waitForWs(page, 'CONNECTED');
   await page.click('#abnav-planner');
@@ -334,6 +338,7 @@ test('the pin: none without the Planner\'s questions, and in the drawer', async 
   const page2 = await ctx2.newPage();
   const mock2 = await server();
   try {
+    await page2.addInitScript(() => localStorage.setItem('nz:plannerLayer', '"all"'));
     await page2.goto(mock2.url + '/dashboard');
     await waitForWs(page2, 'CONNECTED');
     // The 会话 sidebar's 等你 has no conversation to point to: whole cards.
@@ -375,6 +380,7 @@ test('a report line from the drawer: a put-away session opens on the page, never
   const page = await ctx.newPage();
   const mock = await server();
   try {
+    await page.addInitScript(() => localStorage.setItem('nz:plannerLayer', '"all"'));
     await page.goto(mock.url + '/dashboard');
     await waitForWs(page, 'CONNECTED');
     await page.keyboard.press('Alt+KeyP');

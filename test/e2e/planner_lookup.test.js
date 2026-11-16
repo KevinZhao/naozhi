@@ -3,6 +3,8 @@
 // (<naozhi-lookup q run state>) is not your bubble but the query card: the
 // question and the answer's first sentence, the source sites as links, the
 // whole answer and each fact's quote in the fold. A failed lookup says why.
+// Under 对话 the answers are 动态 (§15.14 ②): one row, 网页查询 3 条; the
+// cards are what 全部 shows.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
 const { waitForWs } = require('./shim_wait');
@@ -47,6 +49,10 @@ test('lookup line and query card', async ({ page }) => {
     await page.click('#abnav-planner');
     const stream = page.locator('#pl-stream');
     await expect(stream.locator('.pl-act-lookup')).toHaveText('查一下 · M4 Max 内存带宽');
+    await expect(stream.locator('.pl-dyn-who')).toHaveText('（网页查询 3 条）');
+    await expect(stream.locator('details.pl-lookup[data-run="' + RUN + '"]')).toBeHidden();
+    await page.click('.pl-head > .pl-layer [data-layer="all"]');
+    await expect(stream.locator('.pl-dyn')).toHaveCount(0);
     // The answer is no bubble of yours, nor raw JSON.
     await expect(stream.locator('.event.user')).toHaveCount(0);
     await expect(stream).not.toContainText('naozhi-lookup');

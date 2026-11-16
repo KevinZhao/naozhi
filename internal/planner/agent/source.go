@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -55,6 +56,31 @@ type Words struct {
 	Text     string    `json:"text"`
 	Question string    `json:"question,omitempty"`
 	At       time.Time `json:"at"`
+}
+
+// Entry is the source a turn from s writes on its transcript entry
+// (clievent.EventEntry.Source), by which the Planner page lays out its
+// timeline without reading the text (§15.14 ②, D113): "" for your message
+// and a session you handed over, the user's own as on any session; the
+// source's name for the rest, your answer among them. A turn merging
+// requests of different sources carries "" (turn.startTurn), which the page
+// reads part by part.
+func (s Source) Entry() string {
+	if s == SourceUser || s == SourceHandover {
+		return ""
+	}
+	return string(s)
+}
+
+// DynamicSources are the sources whose turns the Planner page folds into
+// 动态 rather than showing as the conversation (§15.14 ②, D113): what the
+// gateway, a session or outside content brought in, not you. SourceShift
+// is neither: it is the timeline's separator. Sorted, as contract.js lists
+// it.
+func DynamicSources() []string {
+	out := []string{string(SourceBriefing), string(SourceLookup), string(SourceReceipt), string(SourceRefusal), string(SourceReminder), string(SourceScout), string(SourceUnrun)}
+	slices.Sort(out)
+	return out
 }
 
 // outsideLabels names the sources whose turns carry outside content (mail,

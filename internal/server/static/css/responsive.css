@@ -110,6 +110,12 @@
   .pl-paused{flex-shrink:4;min-width:3em}
   .pl-note{margin:10px 12px 0}
   .pl-brief{max-width:100%;padding:0 12px}
+  .pl-dyn,.pl-shift{max-width:100%;padding:0 12px}
+  .pl-dyn-src{max-width:7em}
+  .pl-dyn-h{white-space:normal}
+  /* 对话 | 全部 is in "⋯" on a phone: the header has no room for it. */
+  .pl-head>.pl-layer{display:none}
+  .pl-layer-tool{display:flex}
   .pl-composer{padding:6px 12px 10px}
   #pl-input{font-size:var(--nz-fs-md)} /* prevents iOS zoom on focus */
   .pl-sess-status{margin:8px 12px 0;flex-wrap:wrap}
