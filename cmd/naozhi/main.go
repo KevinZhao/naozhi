@@ -804,6 +804,7 @@ func main() {
 		Tell:        plannerAgent.Tell,
 		TellLater:   plannerAgent.TellLater,
 		TellAlong:   plannerAgent.TellAlong,
+		ChatQuiet:   plannerAgent.ChatQuietAt,
 		Reports:     wireup.PlannerReports(router),
 		Digests:     digests,
 		Outside:     plannerAgent.OutsideTurn,

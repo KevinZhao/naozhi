@@ -266,6 +266,8 @@ type Agent struct {
 	tasks func() []TaskLine
 	// memMu serializes the remember block's writes to the memory files.
 	memMu sync.Mutex
+	// tellMu serializes Tell, from the held receipts read to their drop.
+	tellMu sync.Mutex
 	// userAt is when the user last sent a message on the Planner page
 	// (Send): progress-class receipts wait chatQuiet from it (TellLater).
 	// Not kept across a restart: the first idle Planner after one gets what
@@ -920,15 +922,19 @@ func (a *Agent) Send(text, ref string, images []clievent.Attachment) error {
 // action block (a dispatch, the user's answer). It carries no snapshot and
 // gets no receipt. The receipts waiting (TellLater, TellAlong) go in the
 // same turn, ahead of text; with none, an empty text sends nothing.
+// Tells run one at a time (tellMu), so two cannot both send the receipts
+// waiting, and drop only what they sent: one held meanwhile stays.
 func (a *Agent) Tell(text string) error {
-	text, n := a.withHeld(text)
+	a.tellMu.Lock()
+	defer a.tellMu.Unlock()
+	text, sent := a.withHeld(text)
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
 	if err := a.tell(SourceReceipt, text); err != nil {
 		return err
 	}
-	a.dropHeld(n)
+	a.dropHeld(sent)
 	return nil
 }
 

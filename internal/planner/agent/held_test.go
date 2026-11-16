@@ -2,10 +2,15 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
 // heldAgent is an agent on a live, idle Planner whose shift is marked, so
@@ -181,5 +186,89 @@ func TestHeldRefusedWhenStopped(t *testing.T) {
 	}
 	if len(turns.sent) != 1 {
 		t.Errorf("sent %q", turns.sent)
+	}
+}
+
+// hookTurns is fakeTurns, safe across goroutines, running during inside
+// each submit: what lands between a Tell reading the held receipts and
+// dropping them.
+type hookTurns struct {
+	mu sync.Mutex
+	*fakeTurns
+	during func()
+}
+
+func (h *hookTurns) SubmitPlanner(key string, src Source, said *Words, text string, images []clievent.Attachment, opts sessionview.AgentOpts, done func(string, error)) (bool, error) {
+	if h.during != nil {
+		h.during()
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.fakeTurns.SubmitPlanner(key, src, said, text, images, opts, done)
+}
+
+// TestHeldDropOnlySent: a Tell drops the held receipts it sent, not as
+// many from the front: one held while it submitted stays, though the list
+// lost its oldest past heldMax meanwhile.
+func TestHeldDropOnlySent(t *testing.T) {
+	now := time.Date(2026, 11, 16, 14, 0, 0, 0, time.UTC)
+	a, _, _ := heldAgent(t, &now)
+	turns := &hookTurns{fakeTurns: &fakeTurns{}}
+	a.turns = turns
+	if err := a.Send("在吗", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	for i := range heldMax {
+		if err := a.TellLater(fmt.Sprintf("已派出：%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	turns.during = func() {
+		turns.during = nil
+		if err := a.TellLater("已派出：新"); err != nil {
+			t.Error(err)
+		}
+	}
+	if err := a.Tell("甲 汇报：完成"); err != nil {
+		t.Fatal(err)
+	}
+	if len(a.state.Held) != 1 || a.state.Held[0].Text != "已派出：新" {
+		t.Fatalf("held = %+v, want the one held during the submit", a.state.Held)
+	}
+	if strings.Contains(turns.sent[len(turns.sent)-1], "已派出：新") {
+		t.Errorf("the receipt carried one held after it was read")
+	}
+}
+
+// TestHeldConcurrentTells: Tells at once send each held receipt once.
+func TestHeldConcurrentTells(t *testing.T) {
+	now := time.Date(2026, 11, 16, 14, 0, 0, 0, time.UTC)
+	a, _, _ := heldAgent(t, &now)
+	turns := &hookTurns{fakeTurns: &fakeTurns{}}
+	a.turns = turns
+	if err := a.Send("在吗", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.TellLater("已派出：甲"); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range 8 {
+		wg.Go(func() {
+			<-start
+			if err := a.Tell(fmt.Sprintf("乙%d 汇报：完成", i)); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	close(start)
+	wg.Wait()
+	n := 0
+	for _, s := range turns.sent {
+		n += strings.Count(s, "已派出：甲")
+	}
+	if n != 1 || len(a.state.Held) != 0 {
+		t.Errorf("held receipt sent %d times, held after: %+v", n, a.state.Held)
 	}
 }

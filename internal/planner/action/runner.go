@@ -105,16 +105,22 @@ type Config struct {
 	// Planner, sent merged once they are quiet (agent.Agent.TellLater,
 	// D114). nil is Tell.
 	TellLater func(text string) error
+	// ChatQuiet is when the user's chat with the Planner goes quiet
+	// (agent.Agent.ChatQuietAt), zero or past when they are not chatting:
+	// the check of a progress report from a session stopped waits for it.
+	// nil never waits.
+	ChatQuiet func() time.Time
 	// TellAlong keeps text for the next receipt, starting no turn of its
 	// own (agent.Agent.TellAlong): a report line the Planner already has
-	// from the session's cross-session message of the same turn (D114).
+	// from the session's cross-session message of the same turn, progress
+	// with its work still running (D114).
 	// nil drops it.
 	TellAlong func(text string)
 	// Reports are the senders (session keys) of the cross-session messages
 	// that reached the Planner in (from, to]; nil checks none. A session
 	// started on the prompt of before the report block still reports so,
-	// and one ending a turn with the block that sent one too gets no turn
-	// for the block's line (peerReported).
+	// and one ending a turn with a progress block that sent one too gets
+	// no turn for the block's line (peerReported).
 	Reports func(from, to time.Time) []string
 	// Digests keep a dispatched session's report, its full text, in the
 	// session's digest (planner/digest), which the report's receipt points
@@ -728,9 +734,10 @@ func (r *Runner) checkEnded(e ended) {
 // back. A busy Planner holds the line back as it does a receipt, so that
 // the reply that answers it is the one checked, and so, for a while, does
 // a digest not showing the report yet.
-// The line of a report the same turn also sent by SendMessage starts no
-// turn (peerReported), and a progress line waits while the user is
-// chatting with the Planner (TellLater); the rest go at once (D114).
+// The progress line of a report the same turn also sent by SendMessage,
+// its work still running, starts no turn (peerReported), and a progress
+// line waits while the user is chatting with the Planner (TellLater, or
+// the check itself for a session stopped); the rest go at once (D114).
 func (r *Runner) checkReport(e ended, tasks []task.Task, i int, now time.Time) {
 	if m, ok := r.cfg.Sessions.Get(e.key); ok && m.Report != nil && m.Report.At.After(e.report.At) {
 		if err := r.cfg.Sessions.Checked(e.key, e.at); err != nil {
@@ -753,6 +760,19 @@ func (r *Runner) checkReport(e ended, tasks []task.Task, i int, now time.Time) {
 	shown := r.digestShows(e)
 	if i >= 0 && !shown && now.Before(e.at.Add(endGrace)) {
 		r.laterIn(max(r.reportGrace, time.Second), e)
+		return
+	}
+	// Progress with the session stopped is a judgment of now that asks the
+	// Planner to act (custody's 继续): held as text it would be told stale,
+	// after the user had the session go another way, so while the user is
+	// chatting the check itself waits, unchecked on disk, and runs afresh
+	// once they are quiet.
+	stopped := i >= 0 && e.report.State == ReportProgress && r.stoppedAt(e)
+	if q := r.chatQuietAt(); stopped && now.Before(q) {
+		if u := q.Add(endWait); e.until.Before(u) {
+			e.until = u
+		}
+		r.laterIn(q.Sub(now), e)
 		return
 	}
 	if err := r.cfg.Sessions.Checked(e.key, e.at); err != nil {
@@ -792,7 +812,7 @@ func (r *Runner) checkReport(e ended, tasks []task.Task, i int, now time.Time) {
 	// nothing running since: a turn the user started meanwhile is going
 	// on. Out of custody nothing the Planner may send goes on with it, so
 	// the user is the one to ask.
-	if e.report.State == ReportProgress && r.stoppedAt(e) {
+	if stopped {
 		line += "。后台没有任务在跑，这一轮结束后它不会自己接着做"
 		if c := r.cfg.Custody; c != nil {
 			switch err := c.Check(e.key); {
@@ -804,22 +824,22 @@ func (r *Runner) checkReport(e ended, tasks []task.Task, i int, now time.Time) {
 		}
 	}
 	note := "📨 " + e.key + " 汇报：" + word + " · " + e.report.Summary
-	// The same turn's report sent by SendMessage too has had its turn: the
-	// line rides on the next receipt, with the reminder checkReports would
-	// make of that turn's reply, which did not count the message (reports).
-	if r.peerReported(e, now) {
-		line += "。这份汇报它已经用 SendMessage 发给过你，网关不另起回合"
-		// A session dispatched before the report block had its message
-		// counted as the report, and reminded of already.
-		m, _ := r.cfg.Sessions.Get(e.key)
-		if t := tasks[i]; m.ReportBlock && t.State == task.Doing && (e.report.State == ReportDone || e.report.State == ReportBlocked) {
-			line += "；汇报时它在任务里仍是进行中：还没标的话，完成了就用 status 标 done，没完成用 doing 并说明原因（" + statusFormat(e.key) + "）"
-		}
+	// A report the same turn also sent by SendMessage has had its turn when
+	// it asks nothing of the Planner: progress with the session's own work
+	// still running rides on the next receipt. The rest say what only the
+	// gateway knows at the turn's end (done, blocked, need_user, a session
+	// stopped), and a message of the turn may have been a question, so they
+	// still start one, saying the message came too.
+	peer := r.peerReported(e, now)
+	if peer && e.report.State == ReportProgress && !stopped {
 		if r.cfg.TellAlong != nil {
-			r.cfg.TellAlong(line + "。")
+			r.cfg.TellAlong(line + "。这份汇报它这一轮也用 SendMessage 发给过你，网关不另起回合。")
 		}
 		r.note(note)
 		return
+	}
+	if peer {
+		line += "。这一轮它也用 SendMessage 给你发过消息：说的是这份汇报的话，回过的不必再回"
 	}
 	r.reportTold[e.key] = toldReport{at: now, state: e.report.State}
 	if e.report.State == ReportProgress {
@@ -1337,6 +1357,14 @@ func (r *Runner) tell(text string) {
 	if err := r.cfg.Tell(text); err != nil {
 		slog.Warn("planner actions: receipt not sent to the Planner", "err", err)
 	}
+}
+
+// chatQuietAt is Config.ChatQuiet, nil-safe.
+func (r *Runner) chatQuietAt() time.Time {
+	if r.cfg.ChatQuiet == nil {
+		return time.Time{}
+	}
+	return r.cfg.ChatQuiet()
 }
 
 // tellLater is tell for a progress-class receipt (Config.TellLater).
