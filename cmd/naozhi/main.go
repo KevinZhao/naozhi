@@ -346,6 +346,9 @@ func main() {
 		Journal:   plannerState.Journal,
 		Beats:     beats,
 		Isolated:  isolated,
+		// A run or brief whose model call found the credential expired goes
+		// again once the Midway session is renewed, as custody's retry does.
+		CredExpiry: wireup.MidwayExpiry,
 	})
 	// The Planner's web lookups (§15.12 ⑨, D107): a lookup block runs a
 	// one-shot reader session with only the web search MCP tools; its short

@@ -72,6 +72,10 @@ func (b *Briefer) gatherScout(in *input) {
 	// reported it.
 	index := map[string]int{}
 	var findings []scout.Finding
+	// isNew marks the findings a run in the window reported for the first
+	// time in their state (scout's dedup): a task overdue past staleDays
+	// goes into one brief only, not every brief while it stays overdue.
+	isNew := map[string]bool{}
 	var slackAt time.Time
 	for _, r := range b.cfg.Patrol(in.Since) {
 		if r.Ended.After(now) {
@@ -83,6 +87,7 @@ func (b *Briefer) gatherScout(in *input) {
 		}
 		for _, f := range r.Findings {
 			k := f.Source + "\x00" + f.ID + "\x00" + f.Kind
+			isNew[k] = isNew[k] || f.New
 			if i, ok := index[k]; ok {
 				findings[i] = f.Finding
 				continue
@@ -104,6 +109,9 @@ func (b *Briefer) gatherScout(in *input) {
 			case days < 0:
 				continue
 			case days > staleDays:
+				if !isNew[f.Source+"\x00"+f.ID+"\x00"+f.Kind] {
+					continue
+				}
 				in.StaleDeadlines++
 			default:
 				in.Deadlines = append(in.Deadlines, deadlineItem{Title: f.Title, Due: due, Link: f.Link})
