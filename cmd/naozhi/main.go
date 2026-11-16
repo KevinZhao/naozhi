@@ -802,6 +802,8 @@ func main() {
 		Spawn:       wireup.TaskSpawner{Router: router, Opts: taskOpts, Submit: srv.SubmitPlanner, Digests: digests}.Spawn,
 		Note:        plannerAgent.Note,
 		Tell:        plannerAgent.Tell,
+		TellLater:   plannerAgent.TellLater,
+		TellAlong:   plannerAgent.TellAlong,
 		Reports:     wireup.PlannerReports(router),
 		Digests:     digests,
 		Outside:     plannerAgent.OutsideTurn,

@@ -100,9 +100,21 @@ type Config struct {
 	Note func(text string)
 	// Tell sends text to the Planner as the gateway's receipt.
 	Tell func(text string) error
+	// TellLater is Tell for a progress-class receipt, a progress report's
+	// line or a dispatch's: held while the user is chatting with the
+	// Planner, sent merged once they are quiet (agent.Agent.TellLater,
+	// D114). nil is Tell.
+	TellLater func(text string) error
+	// TellAlong keeps text for the next receipt, starting no turn of its
+	// own (agent.Agent.TellAlong): a report line the Planner already has
+	// from the session's cross-session message of the same turn (D114).
+	// nil drops it.
+	TellAlong func(text string)
 	// Reports are the senders (session keys) of the cross-session messages
 	// that reached the Planner in (from, to]; nil checks none. A session
-	// started on the prompt of before the report block still reports so.
+	// started on the prompt of before the report block still reports so,
+	// and one ending a turn with the block that sent one too gets no turn
+	// for the block's line (peerReported).
 	Reports func(from, to time.Time) []string
 	// Digests keep a dispatched session's report, its full text, in the
 	// session's digest (planner/digest), which the report's receipt points
@@ -716,6 +728,9 @@ func (r *Runner) checkEnded(e ended) {
 // back. A busy Planner holds the line back as it does a receipt, so that
 // the reply that answers it is the one checked, and so, for a while, does
 // a digest not showing the report yet.
+// The line of a report the same turn also sent by SendMessage starts no
+// turn (peerReported), and a progress line waits while the user is
+// chatting with the Planner (TellLater); the rest go at once (D114).
 func (r *Runner) checkReport(e ended, tasks []task.Task, i int, now time.Time) {
 	if m, ok := r.cfg.Sessions.Get(e.key); ok && m.Report != nil && m.Report.At.After(e.report.At) {
 		if err := r.cfg.Sessions.Checked(e.key, e.at); err != nil {
@@ -788,9 +803,47 @@ func (r *Runner) checkReport(e ended, tasks []task.Task, i int, now time.Time) {
 			}
 		}
 	}
+	note := "📨 " + e.key + " 汇报：" + word + " · " + e.report.Summary
+	// The same turn's report sent by SendMessage too has had its turn: the
+	// line rides on the next receipt, with the reminder checkReports would
+	// make of that turn's reply, which did not count the message (reports).
+	if r.peerReported(e, now) {
+		line += "。这份汇报它已经用 SendMessage 发给过你，网关不另起回合"
+		// A session dispatched before the report block had its message
+		// counted as the report, and reminded of already.
+		m, _ := r.cfg.Sessions.Get(e.key)
+		if t := tasks[i]; m.ReportBlock && t.State == task.Doing && (e.report.State == ReportDone || e.report.State == ReportBlocked) {
+			line += "；汇报时它在任务里仍是进行中：还没标的话，完成了就用 status 标 done，没完成用 doing 并说明原因（" + statusFormat(e.key) + "）"
+		}
+		if r.cfg.TellAlong != nil {
+			r.cfg.TellAlong(line + "。")
+		}
+		r.note(note)
+		return
+	}
 	r.reportTold[e.key] = toldReport{at: now, state: e.report.State}
-	r.tell(line)
-	r.note("📨 " + e.key + " 汇报：" + word + " · " + e.report.Summary)
+	if e.report.State == ReportProgress {
+		r.tellLater(line)
+	} else {
+		r.tell(line)
+	}
+	r.note(note)
+}
+
+// peerReported reports whether e's session sent the Planner a
+// cross-session message in the turn e ended (from its previous turn's end
+// to endGrace after this one's, the message landing a moment after it was
+// sent): a session dispatched on the report block's prompt still does at
+// times, and the Planner answered that message in a turn of its own.
+func (r *Runner) peerReported(e ended, now time.Time) bool {
+	if r.cfg.Reports == nil {
+		return false
+	}
+	to := e.at.Add(endGrace)
+	if now.Before(to) {
+		to = now
+	}
+	return slices.Contains(r.cfg.Reports(e.from, to), e.key)
 }
 
 // digestShows reports whether e's session's digest on disk shows its
@@ -1286,6 +1339,17 @@ func (r *Runner) tell(text string) {
 	}
 }
 
+// tellLater is tell for a progress-class receipt (Config.TellLater).
+func (r *Runner) tellLater(text string) {
+	if r.cfg.TellLater == nil {
+		r.tell(text)
+		return
+	}
+	if err := r.cfg.TellLater(text); err != nil {
+		slog.Warn("planner actions: receipt not sent to the Planner", "err", err)
+	}
+}
+
 // resolve finds a workspace's directory on this node.
 func (r *Runner) resolve(ref string) (workspace.Workspace, string, error) {
 	if r.cfg.Workspaces == nil {
@@ -1319,7 +1383,7 @@ func (r *Runner) dispatch(d Dispatch, words []Words) string {
 		r.tell("派出「" + d.Title + "」失败，没有拉起会话：" + err.Error())
 		return ""
 	}
-	r.tell("已派出：" + d.Title + "（" + key + "），工作区 " + wsName + "。它的跨会话名字是「" + d.Title + "」（重名时 CC 会加短 ID，以 ListAgents 为准）。它做完、卡住会在回复末尾写汇报块，网关一行转给你；一轮结束却没写汇报块时网关会再告诉你。收到后在对话里告诉用户结果。")
+	r.tellLater("已派出：" + d.Title + "（" + key + "），工作区 " + wsName + "。它的跨会话名字是「" + d.Title + "」（重名时 CC 会加短 ID，以 ListAgents 为准）。它做完、卡住会在回复末尾写汇报块，网关一行转给你；一轮结束却没写汇报块时网关会再告诉你。收到后在对话里告诉用户结果。")
 	return key
 }
 
