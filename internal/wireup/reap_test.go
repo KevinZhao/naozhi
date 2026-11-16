@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/notify"
+	"github.com/naozhi/naozhi/internal/planner/action"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -68,5 +70,28 @@ func TestWithin(t *testing.T) {
 		if got := within(c.path, c.dir); got != c.want {
 			t.Errorf("within(%q, %q) = %v", c.path, c.dir, got)
 		}
+	}
+}
+
+// A done task's session waits on the user while its need_user report or a
+// Planner ask naming it is open in "等你": the reaper keeps it.
+func TestReapWaiting(t *testing.T) {
+	inbox := notify.New(notify.Config{System: func(string, string) error { return nil }})
+	waiting := ReapWaiting(inbox)
+	const a, b = "task:aaaaaaaaaaaa", "task:bbbbbbbbbbbb"
+	if waiting(a) || ReapWaiting(nil)(a) {
+		t.Fatal("waiting with nothing open")
+	}
+	inbox.Add(notify.Item{Kind: notify.KindQuestion, Unit: a, Title: "要你决定", Source: action.ReportSource(a)})
+	inbox.Add(notify.Item{Kind: notify.KindQuestion, Unit: "planner:main", Title: "拆不拆？", Task: b, Source: "ask:1"})
+	if !waiting(a) || !waiting(b) {
+		t.Fatalf("waiting = %v, %v; want both held", waiting(a), waiting(b))
+	}
+	if waiting("task:cccccccccccc") {
+		t.Fatal("a session nothing names waits")
+	}
+	inbox.CloseSource("ask:1", notify.ClosedByUser)
+	if waiting(b) {
+		t.Fatal("a closed ask still holds the session")
 	}
 }

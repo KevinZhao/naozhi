@@ -1,6 +1,7 @@
 package action
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"reflect"
@@ -235,9 +236,9 @@ func TestRelayEnvelopeWords(t *testing.T) {
 
 // putAwayRunner is a runner with one dispatched session the gateway put away
 // (D95: its task done, its sidecar keeping what resuming it needs) and the
-// reaper reopening it as the gateway wires it: the task set back to doing
-// restores the session, after which it takes a relay. live are the keys
-// that take one.
+// reaper reopening it as the gateway wires it: Reopen, or the task set back
+// to doing (custody's), restores the session, after which it takes a relay.
+// live are the keys that take one.
 func putAwayRunner(t *testing.T) (r *Runner, g *fakeGateway, inbox *notify.Notifier, key string, live map[string]bool) {
 	t.Helper()
 	r, g, inbox, side, dir := newRunner(t)
@@ -250,6 +251,7 @@ func putAwayRunner(t *testing.T) (r *Runner, g *fakeGateway, inbox *notify.Notif
 		return nil
 	}})
 	r.cfg.Tasks = task.New(task.Config{Sessions: side, OnState: reaper.OnState})
+	r.cfg.Reopen = func(k string) { reaper.Reopen(context.Background(), k) }
 	r.cfg.RelayTarget = func(k string) error {
 		if !live[k] {
 			return errors.New("找不到会话 " + k)
@@ -279,10 +281,9 @@ func taskState(t *testing.T, r *Runner, key string) task.State {
 	return ""
 }
 
-// A relay to a dispatched session put away reopens it the way 任务's 重新打开
-// does (its task back to 进行中, the session resumed under its key) and then
-// delivers; the receipt says so. A key that never was a session still fails
-// as a bad block, nothing reopened.
+// A relay to a dispatched session put away puts it back under its key and
+// then delivers, its task left done (§15.14 ④); the receipt says so. A key
+// that never was a session still fails as a bad block, nothing reopened.
 func TestRelayReopensPutAway(t *testing.T) {
 	r, g, _, key, live := putAwayRunner(t)
 	out := userTurn(r, said)
@@ -291,8 +292,8 @@ func TestRelayReopensPutAway(t *testing.T) {
 	if len(*out) != 1 || (*out)[0].key != key || !live[key] {
 		t.Fatalf("relayed = %q live = %v, want it reopened and sent", *out, live)
 	}
-	if st := taskState(t, r, key); st != task.Doing {
-		t.Errorf("task state = %s, want doing", st)
+	if st := taskState(t, r, key); st != task.Done {
+		t.Errorf("task state = %s, want done", st)
 	}
 	if len(g.notes) != 0 || len(g.unrun) != 1 || !strings.Contains(g.unrun[0], "已重新打开并送到") || strings.Contains(g.unrun[0], "没有执行") {
 		t.Errorf("notes %q unrun %q, want one receipt that it was reopened and sent", g.notes, g.unrun)
@@ -307,7 +308,8 @@ func TestRelayReopensPutAway(t *testing.T) {
 }
 
 // An ask naming a session put away opens its card without reopening it; the
-// user's answer reopens it and is delivered, and the Planner is told so.
+// user's answer reopens it and is delivered, its task left done, and the
+// Planner is told so.
 func TestAskWithTaskReopensPutAway(t *testing.T) {
 	r, g, inbox, key, live := putAwayRunner(t)
 	out := userTurn(r)
@@ -326,8 +328,8 @@ func TestAskWithTaskReopensPutAway(t *testing.T) {
 	if len(g.told) != 1 || !strings.Contains(g.told[0], "重新打开并把这个回答原样送到 "+key) {
 		t.Errorf("told = %q", g.told)
 	}
-	if st := taskState(t, r, key); st != task.Doing {
-		t.Errorf("task state = %s, want doing", st)
+	if st := taskState(t, r, key); st != task.Done {
+		t.Errorf("task state = %s, want done", st)
 	}
 }
 
@@ -421,15 +423,16 @@ func markByUser(t *testing.T, r *Runner, key, why string) {
 	}
 }
 
-// A task the user stopped and that was put away is still reopened by what
-// the user starts: a relay of their decision.
+// A task the user stopped and that was put away is still put back by what
+// the user starts, a relay of their decision; its state waits for its
+// report.
 func TestRelayReopensUserStopped(t *testing.T) {
 	r, _, _, key, live := putAwayRunner(t)
 	markByUser(t, r, key, task.StoppedWhy)
 	out := userTurn(r, said)
 	r.Result(r.cfg.Planner, block(`{"type":"relay","key":"`+key+`","text":"用户要它接着做"}`))
 	r.handle(<-r.ch)
-	if len(*out) != 1 || !live[key] || taskState(t, r, key) != task.Doing {
+	if len(*out) != 1 || !live[key] || taskState(t, r, key) != task.Done {
 		t.Errorf("relayed = %q live = %v, want it reopened and sent", *out, live)
 	}
 }
@@ -462,23 +465,23 @@ func TestPutAwayOnly(t *testing.T) {
 }
 
 // A relay that reopened a session put away but did not reach it says it
-// was reopened, its task back to 进行中.
+// was reopened; its task stays done.
 func TestRelayReopenedNotSent(t *testing.T) {
 	r, g, _, key, _ := putAwayRunner(t)
 	userTurn(r, said)
 	r.cfg.Relay = func(string, string) error { return errors.New("会话忙") }
 	r.Result(r.cfg.Planner, block(`{"type":"relay","key":"`+key+`","text":"用户确认拆除"}`))
 	r.handle(<-r.ch)
-	if len(g.unrun) != 1 || !strings.Contains(g.unrun[0], "网关已重新打开（任务回到进行中），但没有送到（会话忙）") {
+	if len(g.unrun) != 1 || !strings.Contains(g.unrun[0], "网关已重新打开，但没有送到（会话忙）") {
 		t.Errorf("unrun = %q", g.unrun)
 	}
-	if st := taskState(t, r, key); st != task.Doing {
-		t.Errorf("task state = %s, want doing", st)
+	if st := taskState(t, r, key); st != task.Done {
+		t.Errorf("task state = %s, want done", st)
 	}
 }
 
 // An answer that reopened a session put away but did not reach it tells the
-// Planner it was reopened, its task back to 进行中.
+// Planner it was reopened; its task stays done.
 func TestAskReopenedNotSent(t *testing.T) {
 	r, g, inbox, key, _ := putAwayRunner(t)
 	r.cfg.Relay = func(string, string) error { return errors.New("会话忙") }
@@ -487,17 +490,18 @@ func TestAskReopenedNotSent(t *testing.T) {
 	if err := inbox.Decide(openDecision(t, inbox, HandlerAsk).ID, "拆"); err != nil {
 		t.Fatal(err)
 	}
-	if len(g.told) != 1 || !strings.Contains(g.told[0], key+" 已经收起，网关已重新打开（任务回到进行中），但没有把回答送到（会话忙）") {
+	if len(g.told) != 1 || !strings.Contains(g.told[0], key+" 已经收起，网关已重新打开，但没有把回答送到（会话忙）") {
 		t.Errorf("told = %q", g.told)
 	}
-	if st := taskState(t, r, key); st != task.Doing {
-		t.Errorf("task state = %s, want doing", st)
+	if st := taskState(t, r, key); st != task.Done {
+		t.Errorf("task state = %s, want done", st)
 	}
 }
 
-// A task told of an unreported turn end, then closed by the user and put
-// away, is told again of its next unreported turn end once a relay or the
-// user's answer reopens it: the receipt of before is not this run's.
+// A task told of an unreported turn end, then closed and put away, is told
+// again of its next unreported turn end once a relay or the user's answer
+// reopened it and its report set it back to 进行中: the receipt of before
+// is not this run's.
 func TestReopenRearmsReceipt(t *testing.T) {
 	for _, via := range []string{"relay", "ask"} {
 		t.Run(via, func(t *testing.T) {
@@ -517,8 +521,16 @@ func TestReopenRearmsReceipt(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			r.reportGrace = 0
+			r.Result(key, reportReply("progress", "接着拆"))
+			select {
+			case e := <-r.endCh:
+				r.checkEnded(e)
+			case <-time.After(5 * time.Second):
+				t.Fatal("report never queued for a check")
+			}
 			if st := taskState(t, r, key); st != task.Doing {
-				t.Fatalf("task state = %s, want doing", st)
+				t.Fatalf("task state = %s, want doing after its report", st)
 			}
 			g.told = nil
 			r.Result(key, "又改了一处")

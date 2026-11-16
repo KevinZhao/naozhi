@@ -133,9 +133,13 @@ func (h *Handler) decode(w http.ResponseWriter, r *http.Request, dst any) bool {
 }
 
 func (h *Handler) reply(w http.ResponseWriter, err error) {
+	var exp notify.Expired
 	switch {
 	case err == nil:
 		httputil.WriteOK(w)
+	case errors.As(err, &exp):
+		// The dashboard shows this text: the answer was not sent anywhere.
+		http.Error(w, "这条提问已过期（"+exp.Why+"），回答没有送出", http.StatusConflict)
 	case errors.Is(err, notify.ErrNotFound):
 		http.Error(w, "no such item", http.StatusNotFound)
 	case errors.Is(err, notify.ErrClosed):

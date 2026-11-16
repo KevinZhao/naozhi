@@ -258,7 +258,9 @@ function defaultGitStates() {
  *   /api/sessions/digest?key= answers {key, updated, markdown}; other keys 404, as a session
  *   without one does. Each request's key lands in digestCalls. A test may edit it in place.
  * @param {object} [overrides.inbox] - GET /api/inbox body ({open, closed, counts, paused_until});
- *   POST /api/inbox/close drops the item from open, /decide moves it to closed with its answer,
+ *   POST /api/inbox/close drops the item from open, /decide moves it to closed with its answer;
+ *   an open item with `expire` (a why) answers /decide 409 as an expired question does and moves
+ *   to closed with closed_why (§15.14 ④),
  *   PUT / DELETE /api/inbox/pause set
  *   paused_until, and pause or resume custody with it (D94: one pause). Every write lands in
  *   inboxCalls. Unset, the routes 404.
@@ -779,6 +781,18 @@ function startMockServer(overrides = {}) {
         const b = body ? JSON.parse(body) : {};
         inboxCalls.push({ path: pathname, method: req.method, body: b });
         let out = { status: 'ok' };
+        const expiring = pathname === NZ_CONTRACT.API.inbox_decide && (inboxData.open || []).find(x => x.id === b.id && x.expire);
+        if (expiring) {
+          const why = expiring.expire;
+          delete expiring.expire;
+          Object.assign(expiring, { state: 'closed', closed_by: 'auto', closed_at: new Date().toISOString(), closed_why: why });
+          inboxData.closed = [expiring].concat(inboxData.closed || []);
+          inboxData.open = inboxData.open.filter(it => it !== expiring);
+          inboxData.counts = { open: inboxData.open.length, badge: inboxData.open.filter(it => it.kind === 'decision' || it.kind === 'question' || it.kind === 'error').length };
+          res.writeHead(409, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('这条提问已过期（' + why + '），回答没有送出\n');
+          return;
+        }
         if (pathname === NZ_CONTRACT.API.inbox_close || pathname === NZ_CONTRACT.API.inbox_decide) {
           // A decision answered moves to closed with its answer.
           const it = (inboxData.open || []).find(x => x.id === b.id);
