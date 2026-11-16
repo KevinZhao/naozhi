@@ -25,6 +25,9 @@ type fakeGit struct {
 	prErr   error
 	removed []string
 	added   []string
+	// statusCalls and prCalls count the checks run per worktree.
+	statusCalls map[string]int
+	prCalls     map[string]int
 }
 
 func (g *fakeGit) Linked(_ context.Context, dir string) (string, string, string, bool) {
@@ -37,12 +40,14 @@ func (g *fakeGit) Linked(_ context.Context, dir string) (string, string, string,
 func (g *fakeGit) Status(_ context.Context, top string) (Status, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.statusCalls[top]++
 	return g.st[top], nil
 }
 
 func (g *fakeGit) PR(_ context.Context, top, _ string) (PR, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.prCalls[top]++
 	return g.pr[top], g.prErr
 }
 
@@ -77,7 +82,8 @@ type fixture struct {
 	sess   Session
 	live   bool
 	nearby bool
-	inUse  bool
+	// inUse are the directories another session works in.
+	inUse map[string]bool
 	// respawn has a session back under the key as soon as it is archived
 	// (the owner loop spawning one for a message that raced the put away).
 	respawn  bool
@@ -90,7 +96,7 @@ type fixture struct {
 
 func newFixture(t *testing.T, dirs ...string) *fixture {
 	t.Helper()
-	f := &fixture{now: time.Date(2026, 11, 6, 10, 0, 0, 0, time.Local), live: true, git: &fakeGit{st: map[string]Status{}, pr: map[string]PR{}}, inbox: &fakeInbox{}, dirs: dirs}
+	f := &fixture{now: time.Date(2026, 11, 6, 10, 0, 0, 0, time.Local), live: true, git: &fakeGit{st: map[string]Status{}, pr: map[string]PR{}, statusCalls: map[string]int{}, prCalls: map[string]int{}}, inbox: &fakeInbox{}, dirs: dirs}
 	clock := func() time.Time { return f.now }
 	f.sc = sidecar.Open(t.TempDir(), clock)
 	j, err := journal.Open(t.TempDir())
@@ -120,7 +126,7 @@ func newFixture(t *testing.T, dirs ...string) *fixture {
 			return nil
 		},
 		Dirs:    func(string, []string) []string { return f.dirs },
-		InUse:   func(string, string) bool { return f.inUse },
+		InUse:   func(dir, _ string) bool { return f.inUse[dir] },
 		Git:     f.git,
 		Inbox:   f.inbox,
 		Journal: f.j,
@@ -457,7 +463,7 @@ func TestWorktrees(t *testing.T) {
 func TestWorktreeHeld(t *testing.T) {
 	d := mkdirs(t, "inuse", "noanswer", "noanswer-pushed")
 	f := newFixture(t, d...)
-	f.inUse = true
+	f.inUse = map[string]bool{d[0]: true}
 	f.git.st[d[0]] = Status{Head: "h", Pushed: true}
 	f.git.pr[d[0]] = PR{State: "MERGED", Head: "h"}
 	f.markDone(t)
@@ -679,5 +685,126 @@ func TestSessionSpawnedAsPutAway(t *testing.T) {
 	f.r.Tick(context.Background())
 	if f.archived != 2 || len(f.git.removed) != 1 || wtState(f, w).State != WTRemoved {
 		t.Fatalf("not put away again: archived %d, removed %v", f.archived, f.git.removed)
+	}
+}
+
+// A worktree another session still works in is left alone: no git status,
+// no PR lookup and nothing told, however long it stays so; once that session
+// is gone it is checked as before.
+func TestWorktreeInUseNotChecked(t *testing.T) {
+	d := mkdirs(t, "meeting-m1")
+	wt := d[0]
+	f := newFixture(t, d...)
+	f.inUse = map[string]bool{wt: true}
+	f.git.st[wt] = Status{Dirty: true, Head: "h", Pushed: true}
+	f.git.prErr = errors.New("gh pr: error connecting to api.github.com")
+	f.markDone(t)
+	f.r.Tick(context.Background())
+	for range 6 {
+		f.now = f.now.Add(recheckAfter)
+		f.r.Tick(context.Background())
+	}
+	if got := wtState(f, wt); got.State != WTPending || got.Why != "另有会话在这个目录里" {
+		t.Fatalf("in use: %+v", got)
+	}
+	if f.git.statusCalls[wt] != 0 || f.git.prCalls[wt] != 0 {
+		t.Fatalf("checked while in use: status %d, PR %d", f.git.statusCalls[wt], f.git.prCalls[wt])
+	}
+	if len(f.inbox.items) != 0 {
+		t.Fatalf("told while in use: %+v", f.inbox.items)
+	}
+	if recs := f.records(t); len(recs) != 1 {
+		t.Fatalf("journaled each check: %+v", recs)
+	}
+
+	delete(f.inUse, wt)
+	f.now = f.now.Add(recheckAfter)
+	f.r.Tick(context.Background())
+	if got := wtState(f, wt); got.State != WTKept || f.git.statusCalls[wt] != 1 || len(f.inbox.items) != 1 {
+		t.Fatalf("after the other session left: %+v, status %d, told %d", got, f.git.statusCalls[wt], len(f.inbox.items))
+	}
+}
+
+// A PR lookup that fails is tried again after 1 hour, then 4 hours, then a
+// day, not on every check; one that answers puts it back on recheckAfter.
+func TestPRLookupBackoff(t *testing.T) {
+	d := mkdirs(t, "wt")
+	wt := d[0]
+	f := newFixture(t, d...)
+	f.git.st[wt] = Status{Head: "h", Pushed: true}
+	f.git.prErr = errors.New("gh pr: Post \"https://api.github.com/graphql\": unexpected EOF")
+	f.markDone(t)
+	f.r.Tick(context.Background())
+	if got := wtState(f, wt); got.State != WTPending || f.git.prCalls[wt] != 1 {
+		t.Fatalf("put away: %+v, PR calls %d", got, f.git.prCalls[wt])
+	}
+	start := f.now
+	// at is how long after the put away a check runs, calls the PR count
+	// expected after it.
+	for _, c := range []struct {
+		at    time.Duration
+		calls int
+	}{
+		{recheckAfter, 1},
+		{time.Hour - time.Minute, 1},
+		{time.Hour, 2},
+		{time.Hour + recheckAfter, 2},
+		{5*time.Hour - time.Minute, 2},
+		{5 * time.Hour, 3},
+		{9 * time.Hour, 3},
+		{29*time.Hour - time.Minute, 3},
+		{29 * time.Hour, 4},
+		{52 * time.Hour, 4},
+		{53 * time.Hour, 5},
+	} {
+		f.now = start.Add(c.at)
+		f.r.Tick(context.Background())
+		if f.git.prCalls[wt] != c.calls {
+			t.Fatalf("at +%v: %d PR calls, want %d", c.at, f.git.prCalls[wt], c.calls)
+		}
+	}
+	f.git.mu.Lock()
+	f.git.prErr = nil
+	f.git.pr[wt] = PR{State: "OPEN", Head: "h"}
+	f.git.mu.Unlock()
+	f.now = start.Add(77 * time.Hour)
+	f.r.Tick(context.Background())
+	f.now = f.now.Add(recheckAfter)
+	f.r.Tick(context.Background())
+	if f.git.prCalls[wt] != 7 {
+		t.Fatalf("after an answer: %d PR calls, want 7 (back on recheckAfter)", f.git.prCalls[wt])
+	}
+	if got := wtState(f, wt); got.Why != "PR 还没合并或关闭" {
+		t.Fatalf("after an answer: %+v", got)
+	}
+}
+
+// A worktree kept for unpushed commits stays on recheckAfter while gh fails:
+// what keeps it is git's answer, so the push the user was told to make is
+// seen at the next check, not a day later.
+func TestKeptUnpushedNoBackoff(t *testing.T) {
+	d := mkdirs(t, "wt")
+	wt := d[0]
+	f := newFixture(t, d...)
+	f.git.st[wt] = Status{Head: "h"}
+	f.git.prErr = errors.New("gh pr: error connecting to api.github.com")
+	f.markDone(t)
+	f.r.Tick(context.Background())
+	for i := 1; i <= 4; i++ {
+		f.now = f.now.Add(recheckAfter)
+		f.r.Tick(context.Background())
+	}
+	if got := wtState(f, wt); got.State != WTKept || got.Why != "有没推送的提交" {
+		t.Fatalf("unpushed: %+v", got)
+	}
+	f.git.mu.Lock()
+	f.git.st[wt] = Status{Head: "h", Pushed: true}
+	f.git.prErr = nil
+	f.git.pr[wt] = PR{State: "MERGED", Head: "h"}
+	f.git.mu.Unlock()
+	f.now = f.now.Add(recheckAfter)
+	f.r.Tick(context.Background())
+	if got := wtState(f, wt); got.State != WTRemoved {
+		t.Fatalf("pushed and merged, one recheckAfter later: %+v", got)
 	}
 }

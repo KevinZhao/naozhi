@@ -633,7 +633,8 @@ func main() {
 		Path:        sessionLayout.PlannerCustodyPath(),
 		Disabled:    !cfg.Planner.Enabled,
 	})
-	reapSources := wireup.ReapSources{Router: router, Health: func() health.Snapshot { return healthMon.Snapshot() }, ClaudeDir: claudeDir}
+	reapSources := wireup.ReapSources{Router: router, Health: func() health.Snapshot { return healthMon.Snapshot() }, ClaudeDir: claudeDir,
+		Transcripts: wireup.NewTranscriptDirs()}
 	reaper = reap.New(reap.Config{
 		Sessions:   sidecars,
 		Session:    reapSources.Session,
