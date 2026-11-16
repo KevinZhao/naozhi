@@ -1092,13 +1092,7 @@ function createQuickSession(initialText, onTextStranded) {
   document.querySelectorAll('.modal-overlay, .cmd-palette-overlay').forEach(el => el.remove());
 
   const workspace = serverInfo.defaultWorkspace || '';
-  const agent = 'general';
-  const folderName = workspace ? (workspace.replace(/\/+$/, '').split('/').pop() || 'quick') : 'quick';
-
-  sessionList.sessionCounter++;
-  const now = new Date();
-  const ts = localDateStamp(now) + '-' + sessionList.sessionCounter;
-  const key = buildDashboardSessionKey(ts, folderName, agent);
+  const key = quickSessionKey(workspace);
 
   if (workspace) perSession.workspaces[key] = workspace;
   // Backend left unset → router falls back to the configured default.
@@ -1144,6 +1138,16 @@ function createQuickSession(initialText, onTextStranded) {
       input.focus();
     }
   });
+}
+
+// quickSessionKey is a new session's key on the default agent, named after
+// workspace (session.cwd's folder for the quick ask and the Planner page's
+// 单独聊; '' names it "quick").
+function quickSessionKey(workspace) {
+  const folderName = workspace ? (workspace.replace(/\/+$/, '').split('/').pop() || 'quick') : 'quick';
+  sessionList.sessionCounter++;
+  const ts = localDateStamp(new Date()) + '-' + sessionList.sessionCounter;
+  return buildDashboardSessionKey(ts, folderName, 'general');
 }
 
 // submitQuickAsk is the Enter-key / submit-button handler for the empty-state
@@ -1250,6 +1254,7 @@ export {
   keyTailDisplay,
   openProjectPalette,
   pickPaletteCustom,
+  quickSessionKey,
   renderNodePicker,
   saveToken,
   startWSAuthRetryCountdown,

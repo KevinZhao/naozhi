@@ -893,7 +893,9 @@ function answerBubble(e) {
   return Object.assign({}, e, { detail: quoted + '\n\n' + a.answer, summary: a.answer });
 }
 
-const RENDER_OPTS = { key: PLANNER_KEY };
+// renderOpts: a reply of this node's Planner offers ↗ 追问 (the drawer runs
+// on this node; §15.14 ⑥ makes it a 单独聊).
+const renderOpts = () => ({ key: PLANNER_KEY, ask: isLocalNode(plannerHost.node) });
 
 // renderPlanner renders events as the conversation shows them, a time
 // divider where the gap since the bubble before (at prevTime) asks for
@@ -902,12 +904,13 @@ const RENDER_OPTS = { key: PLANNER_KEY };
 function renderPlanner(events, prevTime) {
   let html = '';
   let last = prevTime || 0;
+  const opts = renderOpts();
   for (const e of events) {
     html += endHtml(e);
     const head = plannerHead(e);
     if (head) html += markerHtml(head);
     for (const p of plannerEvents(e)) {
-      const h = eventHtml(p, RENDER_OPTS);
+      const h = eventHtml(p, opts);
       if (!h) continue;
       const t = p.time || 0;
       if (t && (last === 0 || t - last >= EVENT_DIVIDER_GAP_MS)) html += timeDividerHtml(t);

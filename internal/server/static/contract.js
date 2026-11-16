@@ -66,6 +66,8 @@ export const NZ_CONTRACT = Object.freeze({
     inbox_pause: '/api/inbox/pause',
     memory_slug: '/api/memory/{slug}',
     planner: '/api/planner',
+    planner_aside: '/api/planner/aside',
+    planner_aside_end: '/api/planner/aside/end',
     planner_briefs: '/api/planner/briefs',
     planner_lookup: '/api/planner/lookup',
     planner_memory_forget: '/api/planner/memory/forget',

@@ -19,27 +19,42 @@
 //     reference with what is typed and the attachments in that input. A
 //     session opened here is already in front of the Planner, so its input
 //     box has no 交给 Planner.
+//   - 单独聊 (§15.14 ⑥, D117): the box's "发给 [Planner ▾]" set to 新对话
+//     sends that one message to a new ordinary session (the sidebar's quick
+//     session: session.cwd, the default agent and model; no snapshot, none
+//     of the Planner's tools), labelled "单独聊：<its first sentence>", and
+//     opens it here; the switch goes back to Planner. A ↗ 追问 on a Planner
+//     reply becomes one too (aside_drawer.js, 转成单独聊). Either leaves a
+//     line in the Planner conversation (POST /api/planner/aside, a 动态 that
+//     opens it again; it never reaches planner:main's context) and is one
+//     of 任务's 你开的. Its header has 交给 Planner (its card with a line you
+//     add: a turn you started) and 结束 (the sidebar's 移除, so it goes to
+//     the history); the title is renamed from the breadcrumb. A session is a
+//     单独聊 by its label's "单独聊：".
 //
 // The switch (GET /api/planner) is read once the socket is up and whenever
 // the Planner page reads it; with planner.enabled off the chat view's button
 // is hidden, and stopped it is disabled.
 // Layering: never import dashboard.js back; setActivityView is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
-import { composer, selection, sessionList, ui } from './state.js';
+import { composer, selection, serverInfo, sessionList, ui } from './state.js';
 import { esc, fetchJSON, isComposingKey, nzBus, registerActions, showToast } from './nz_util.js';
 import { isDiscoveredKey, sid } from './session_ident.js';
+import { onSessionsApplied } from './session_list.js';
 import { eventHtml } from './event_render.js';
 import { hydrateAskAnsweredFromHistory, lockRenderedAskCards } from './ask_card.js';
 import { runPendingAsync } from './render_md.js';
 import { ICONS } from './icons.js';
-import { refreshHealth, sessionStatusHtml, sessionTitle } from './planner_cards.js';
+import { firstSentence, refreshHealth, sessionStatusHtml, sessionTitle } from './planner_cards.js';
 import { isRunningTask, seenTask } from './tasks.js';
 import { followPlannerSubject, noteWorkbenchEvent } from './workbench_panes.js';
 import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
-import { getMsgValue, setMsgValue } from './utilities.js';
+import { getMsgValue, promptDialog, setMsgValue } from './utilities.js';
 import { awaitPendingOrients, clearFiles, createFileTray, filesBlockSend, handleFiles } from './composer_files.js';
-import { eventsURL, hostOnline, hostRemote, isLocalNode, plannerAPI, plannerHost } from './planner_host.js';
+import { eventsURL, hostOnline, hostRemote, isLocalNode, nodeAPI, plannerAPI, plannerHost } from './planner_host.js';
+import { quickSessionKey } from './auth_modal.js';
+import { asideFromScratch, closePlannerScratch } from './aside_drawer.js';
 
 const PLANNER_KEY = 'planner:main';
 // SESS_LIMIT is the opened session's first page; SESS_KEEP the events kept
@@ -49,6 +64,18 @@ const SESS_KEEP = 500;
 const SESS_POLL_MS = 2000;
 // NOTE_MS is how long the chat view's "已交给 Planner" note stays.
 const NOTE_MS = 8000;
+// ASIDE is a 单独聊's label prefix; ASIDE_TITLE_RUNES caps the title after it
+// and LABEL_BYTES the whole label (sessionview.MaxUserLabelBytes). The label
+// is what makes the session a 单独聊 after a reload, so a new session is
+// waited for up to LABEL_WAIT_MS (the send answers before its spawn puts the
+// key in the list, and a backend's handshake or a node can take a while),
+// asking again after LABEL_RETRY_MS, doubled up to LABEL_RETRY_MAX_MS.
+const ASIDE = '单独聊：';
+const ASIDE_TITLE_RUNES = 30;
+const LABEL_BYTES = 128;
+const LABEL_WAIT_MS = 90000;
+const LABEL_RETRY_MS = 500;
+const LABEL_RETRY_MAX_MS = 5000;
 
 const st = {
   status: null, // GET /api/planner; null until read
@@ -59,6 +86,12 @@ const st = {
   acked: false,
   // sess is the session opened in the middle column, or null.
   sess: null,
+  // to is where the box sends with no session opened: 'planner', or 'new'
+  // for a 单独聊.
+  to: 'planner',
+  // asides are the 单独聊 this tab opened, key → title: one until the list
+  // has its label.
+  asides: new Map(),
   noteTimer: 0,
 };
 
@@ -164,7 +197,15 @@ function composerTarget() {
 // sessionListed reports whether key is listed on the Planner's node, the
 // node every session it names runs on.
 function sessionListed(key) {
-  return !!sessionList.sessionsData[sid(key, plannerHost.node)];
+  return st.asides.has(key) || !!sessionList.sessionsData[sid(key, plannerHost.node)];
+}
+
+// titleOf names a session for the breadcrumb and the box: a 单独聊 this tab
+// just opened by its title until its label is set.
+function titleOf(key) {
+  const row = sessionList.sessionsData[sid(key, plannerHost.node)];
+  if (st.asides.has(key) && !(row && row.user_label)) return ASIDE + st.asides.get(key);
+  return sessionTitle(key);
 }
 
 // mountComposer fills #pl-composer once.
@@ -179,6 +220,8 @@ export function mountComposer() {
     '<div class="file-preview" id="pl-file-preview"></div>' +
     '<input type="file" id="pl-file-input" accept="image/*,application/pdf" multiple class="nz-hidden" data-action-change="file-input-change">' +
     '<div class="pl-input-row">' +
+      '<label class="pl-to" id="pl-to-wrap" title="新对话开一个单独聊：普通会话，不进 Planner 的上下文"><span class="pl-to-k">发给</span>' +
+        '<select id="pl-to" aria-label="发给"><option value="planner">Planner</option><option value="new">新对话</option></select></label>' +
       '<button type="button" class="btn-icon" id="pl-attach" data-action="file-picker" title="上传图片或 PDF" aria-label="上传图片或 PDF">' + ICONS.attach + '</button>' +
       '<textarea id="pl-input" rows="1" aria-label="消息输入框"></textarea>' +
       '<button type="button" class="btn-icon btn-send" id="pl-send" data-action="planner-composer-send" title="发送" aria-label="发送消息">' + ICONS.send + '</button>' +
@@ -189,6 +232,11 @@ export function mountComposer() {
     if (e.key === 'Enter' && !e.shiftKey && !isComposingKey(e)) { e.preventDefault(); sendFromComposer(); }
   });
   input.addEventListener('input', () => fitInput(input));
+  $('pl-to').addEventListener('change', (e) => {
+    st.to = e.target.value === 'new' ? 'new' : 'planner';
+    paintComposer();
+    input.focus();
+  });
   // Dropped files join the box's attachments, as in the chat view's input.
   box.addEventListener('dragover', (e) => { e.preventDefault(); box.classList.add('pl-drop'); });
   box.addEventListener('dragleave', () => box.classList.remove('pl-drop'));
@@ -213,11 +261,16 @@ function paintComposer() {
   const note = $('pl-target-note');
   // The row above the input takes room only while it says something.
   const row = () => { const r = $('pl-target'); if (r) r.hidden = !to.textContent && !(note && note.textContent); };
+  // "发给" picks the target only with no session opened.
+  const pick = $('pl-to');
+  const wrap = $('pl-to-wrap');
+  if (wrap) wrap.hidden = !!st.sess;
+  if (pick) pick.value = st.to;
   if (st.sess) {
     // A card may name a session that does not exist (yet): a send would
     // create it as an ordinary session under that key.
     const listed = sessionListed(st.sess.key);
-    to.textContent = '→ ' + sessionTitle(st.sess.key);
+    to.textContent = '→ ' + titleOf(st.sess.key);
     if (note) note.textContent = listed ? '' : '不在会话列表里，不能发消息';
     input.placeholder = listed ? '追问或调整方向…' : '';
     input.disabled = !listed;
@@ -228,6 +281,20 @@ function paintComposer() {
   }
   // The Planner's own page needs no "→ Planner".
   to.textContent = '';
+  if (st.to === 'new') {
+    // A 单独聊 does not need the Planner running, only its page (the line
+    // it leaves) and the node.
+    const ok = !!(st.status && st.status.enabled) && hostOnline();
+    if (note) note.textContent = !hostOnline() ? '节点离线' : st.sending ? '发送中…' : '开一个单独聊：普通会话，不进 Planner 的上下文';
+    input.placeholder = ok ? '问点别的…' : '';
+    input.disabled = !ok;
+    $('pl-attach').disabled = input.disabled || hostRemote();
+    if (pick) pick.disabled = st.sending;
+    send.disabled = st.sending || !ok;
+    row();
+    return;
+  }
+  if (pick) pick.disabled = st.sending || !hostOnline() || !(st.status && st.status.enabled);
   const usable = plannerUsable();
   if (note) note.textContent = !hostOnline() ? '节点离线' : !st.status ? '' : !st.status.enabled ? '未开启 Planner' : st.status.stopped ? '已停用 Planner' : st.sending ? '发送中…' : st.acked ? '收到，正在看' : '';
   input.placeholder = usable || !st.status ? '交代、追问…' : '';
@@ -244,12 +311,13 @@ async function sendFromComposer() {
   if (!input || st.sending) return;
   const text = input.value.trim();
   if (!text && !tray.files.length) return;
-  const key = composerTarget();
-  if (key !== PLANNER_KEY && !sessionListed(key)) return;
+  const aside = !st.sess && st.to === 'new';
+  const key = aside ? '' : composerTarget();
+  if (key && key !== PLANNER_KEY && !sessionListed(key)) return;
   if (filesBlockSend(tray)) return;
   st.sending = true;
   paintComposer();
-  const box = key === PLANNER_KEY ? $('pl-stream') : $('pl-sess-stream');
+  const box = aside ? null : key === PLANNER_KEY ? $('pl-stream') : $('pl-sess-stream');
   addPending(box, text);
   input.value = '';
   fitInput(input);
@@ -259,7 +327,9 @@ async function sendFromComposer() {
     const files = tray.files.slice();
     const fileIDs = files.map((f) => f.id).filter(Boolean);
     try {
-      if (key === PLANNER_KEY) {
+      if (aside) {
+        await startAside(text, fileIDs);
+      } else if (key === PLANNER_KEY) {
         await sendToPlanner(text, '', fileIDs);
         st.acked = true;
       } else {
@@ -325,8 +395,11 @@ function paintSessionPane(reset, fresh) {
   // An AskUserQuestion followed by a user event was answered: its card
   // renders locked (answering it posts to #pl-sess's key, ask_card.js).
   hydrateAskAnsweredFromHistory(p.events);
+  if (p.pending && p.events.some((e) => e.type === 'user')) p.pending = '';
   if (reset) {
-    box.innerHTML = sessHtml(p.events) || '<div class="pl-empty">还没有记录</div>';
+    box.innerHTML = sessHtml(p.events) || (p.pending ? '' : '<div class="pl-empty">还没有记录</div>');
+    // A 单独聊 just started: its first message until the log has it.
+    if (p.pending) addPending(box, p.pending);
   } else if (fresh.length) {
     const html = sessHtml(fresh);
     if (html) {
@@ -348,7 +421,7 @@ function paintSessionStatus() {
   const p = st.sess;
   if (!p) return;
   const name = $('pl-sess-name');
-  if (name) name.textContent = sessionTitle(p.key);
+  if (name) name.textContent = titleOf(p.key);
   const line = $('pl-sess-line');
   if (line) {
     // The breadcrumb names it.
@@ -356,6 +429,7 @@ function paintSessionStatus() {
     if (line.innerHTML !== html) line.innerHTML = html;
   }
   paintStop();
+  paintAsideActs();
   const raw = $('pl-sess-raw');
   if (raw) {
     raw.setAttribute('aria-pressed', p.raw ? 'true' : 'false');
@@ -401,8 +475,9 @@ export function showPlannerLeft(open) {
 }
 
 // openPlannerSession opens key in the middle column, folding the phone's left
-// block a 任务 title was tapped in, and marks its new result read.
-export function openPlannerSession(key) {
+// block a 任务 title was tapped in, and marks its new result read. pending
+// is a message just sent to it, shown until its log has a user event.
+export function openPlannerSession(key, pending) {
   if (!key || key === PLANNER_KEY) return;
   showPlannerLeft(false);
   // Opening it looks at its new result (§15.12 ④), also a remote node's,
@@ -410,12 +485,13 @@ export function openPlannerSession(key) {
   seenTask(key);
   if (st.sess && st.sess.key === key) return;
   closePlannerSession(true);
-  st.sess = { key, node: plannerHost.node, events: [], uuids: new Set(), lastTime: 0, raw: false, loading: false, gen: 0, timer: 0 };
+  st.sess = { key, node: plannerHost.node, events: [], uuids: new Set(), lastTime: 0, raw: false, loading: false, gen: 0, timer: 0, pending: pending || '' };
   $('planner-main')?.classList.add('pl-sess-open');
   const pane = $('pl-sess');
   if (pane) { pane.hidden = false; pane.dataset.key = key; pane.dataset.node = plannerHost.node; }
   const box = $('pl-sess-stream');
   if (box) box.innerHTML = '<div class="pl-empty">正在加载…</div>';
+  if (pending) addPending(box, pending);
   paintSessionStatus();
   followPlannerSubject(key);
   loadSession(true);
@@ -439,10 +515,183 @@ export function closePlannerSession(quiet) {
   const box = $('pl-sess-stream');
   if (box) box.innerHTML = '';
   paintStop();
+  paintAsideActs();
   if (!quiet) {
     paintComposer();
     followPlannerSubject(PLANNER_KEY);
   }
+}
+
+// ---- 单独聊 ----
+
+// isAside reports whether key, on the Planner's node, is a 单独聊: its label
+// says so, or this tab just opened it.
+function isAside(key) {
+  if (!key) return false;
+  if (st.asides.has(key)) return true;
+  const row = sessionList.sessionsData[sid(key, plannerHost.node)];
+  return !!row && String(row.user_label || '').startsWith(ASIDE);
+}
+
+// asideTitle is a 单独聊's title from what it was opened with: its first
+// sentence, cut to fit a label.
+function asideTitle(text) {
+  return fitTitle(firstSentence(String(text || '').replace(/\s+/g, ' ').trim())) || '新对话';
+}
+
+// fitTitle cuts title to ASIDE_TITLE_RUNES and, with the prefix, to a
+// label's LABEL_BYTES, marking a cut with "…".
+function fitTitle(title) {
+  const chars = [...title];
+  let t = chars.length > ASIDE_TITLE_RUNES ? chars.slice(0, ASIDE_TITLE_RUNES).join('') + '…' : title;
+  const enc = new TextEncoder();
+  while (t && enc.encode(ASIDE + t).length > LABEL_BYTES) t = [...t].slice(0, -2).join('') + '…';
+  return t;
+}
+
+// labelAside names key's session "单独聊：<title>", asking again while the
+// session is not there yet (404) until LABEL_WAIT_MS has passed.
+async function labelAside(key, node, title) {
+  const body = { key, label: ASIDE + title };
+  if (!isLocalNode(node)) body.node = node;
+  const until = Date.now() + LABEL_WAIT_MS;
+  for (let wait = LABEL_RETRY_MS; ; wait = Math.min(wait * 2, LABEL_RETRY_MAX_MS)) {
+    try {
+      await fetchJSON(NZ_CONTRACT.API.sessions_label, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), timeoutMs: 8000,
+      });
+      const row = sessionList.sessionsData[sid(key, node)];
+      if (row) row.user_label = body.label;
+      sessionList.lastVersion = 0;
+      shell.debouncedFetchSessions();
+      if (st.sess && st.sess.key === key) paintSessionStatus();
+      return true;
+    } catch (e) {
+      if (!e || e.status !== 404 || Date.now() + wait > until) return false;
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+}
+
+// registerAside labels a new 单独聊 and leaves its line in the Planner
+// conversation (on the Planner's node), then opens it here.
+async function registerAside(key, title, pending) {
+  const node = plannerHost.node;
+  st.asides.set(key, title);
+  sessionList.lastVersion = 0;
+  shell.debouncedFetchSessions();
+  openPlannerSession(key, pending);
+  const [labeled, noted] = await Promise.all([
+    labelAside(key, node, title),
+    fetchJSON(plannerAPI(NZ_CONTRACT.API.planner_aside), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, title }), timeoutMs: 8000,
+    }).then(() => true, () => false),
+  ]);
+  if (!labeled) showToast('单独聊已开，但没能标上标题，刷新后它会显示成普通会话', 'warning');
+  else if (!noted) showToast('单独聊已开，但没能记进 Planner 的动态', 'warning');
+}
+
+// startAside sends text (and fileIDs) to a new ordinary session, the
+// sidebar's quick session: session.cwd, the default agent and model. The
+// switch goes back to Planner once it went out.
+async function startAside(text, fileIDs) {
+  const local = isLocalNode(plannerHost.node);
+  const workspace = local ? (serverInfo.defaultWorkspace || '') : '';
+  const key = quickSessionKey(workspace);
+  const body = { key, text };
+  if (workspace) body.workspace = workspace;
+  if (!local) body.node = plannerHost.node;
+  if (fileIDs.length) body.file_ids = fileIDs;
+  await fetchJSON(NZ_CONTRACT.API.sessions_send, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), timeoutMs: 15000,
+  });
+  st.to = 'planner';
+  registerAside(key, asideTitle(text || (fileIDs.length ? '图片' : '')), text);
+}
+
+// paintAsideActs shows the opened 单独聊's 交给 Planner, 结束 and title edit.
+function paintAsideActs() {
+  const key = st.sess ? st.sess.key : '';
+  const aside = isAside(key);
+  for (const id of ['pl-sess-hand', 'pl-sess-end', 'pl-sess-rename']) {
+    const b = $(id);
+    if (b) { b.hidden = !aside; b.dataset.key = key; }
+  }
+  const hand = $('pl-sess-hand');
+  if (hand) hand.disabled = !aside || st.sending || !plannerUsable() || !sessionListed(key);
+  $('planner-main')?.classList.toggle('pl-aside-open', aside);
+}
+
+// renameAside edits the opened 单独聊's title, the label after "单独聊：".
+async function renameAside() {
+  const p = st.sess;
+  if (!p || !isAside(p.key)) return;
+  const row = sessionList.sessionsData[sid(p.key, p.node)] || {};
+  const label = String(row.user_label || '');
+  const current = label.startsWith(ASIDE) ? label.slice(ASIDE.length) : label;
+  const next = await promptDialog({ title: '改标题', defaultValue: current, placeholder: '单独聊的标题', confirmText: '保存', maxLength: ASIDE_TITLE_RUNES });
+  if (next === null) return;
+  const title = fitTitle(next.replace(/\s+/g, ' ').trim());
+  if (!title || title === current) return;
+  if (!(await labelAside(p.key, p.node, title))) showToast('没有改成标题', 'error');
+}
+
+// handAside hands the opened 单独聊 to the Planner: its card and a line you
+// add (none is fine), a turn you started; the page goes back to the
+// conversation, where the answer comes.
+async function handAside() {
+  const p = st.sess;
+  if (!p || !isAside(p.key) || st.sending) return;
+  const line = await promptDialog({ title: '交给 Planner', message: '会附上这次单独聊，可以补一句话（可不填）', placeholder: '比如：记下结论', confirmText: '交给' });
+  if (line === null || !st.sess || st.sess.key !== p.key) return;
+  st.sending = true;
+  paintAsideActs();
+  try {
+    await sendToPlanner(line.trim(), p.key, []);
+    st.acked = true;
+    closePlannerSession(false);
+  } catch (e) {
+    showToast('没有交给 Planner：' + apiError(e), 'error');
+  } finally {
+    st.sending = false;
+    paintAsideActs();
+    paintComposer();
+  }
+}
+
+// endAside ends the opened 单独聊: put away to the history (the server's
+// Router.Archive, as a done task is put away), not removed as the sidebar's
+// 移除 does, so its images and question cards stay and the history reopens
+// it under its key.
+async function endAside() {
+  const p = st.sess;
+  if (!p || !isAside(p.key) || p.ending) return;
+  p.ending = true;
+  try {
+    await fetchJSON(nodeAPI(p.node, NZ_CONTRACT.API.planner_aside_end), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: p.key }), timeoutMs: 20000,
+    });
+  } catch (e) {
+    p.ending = false;
+    showToast('没有结束单独聊：' + apiError(e), 'error');
+    return;
+  }
+  if (st.sess === p) closePlannerSession(false);
+  st.asides.delete(p.key);
+  delete sessionList.sessionsData[sid(p.key, p.node)];
+  sessionList.lastVersion = 0;
+  shell.debouncedFetchSessions();
+  showToast('单独聊已结束，移到了历史');
+}
+
+// fromScratch makes the ↗ 追问 on a Planner reply a 单独聊: the drawer's
+// scratch, with its exchange, becomes the session. The scratch runs on this
+// node, so only this node's Planner takes it.
+async function fromScratch() {
+  if (!isLocalNode(plannerHost.node)) return;
+  const r = await asideFromScratch();
+  if (!r) return;
+  await registerAside(r.key, asideTitle(r.ask || r.quote), '');
 }
 
 // ---- 交给 Planner ----
@@ -528,6 +777,10 @@ registerActions({
   'planner-composer-send': () => sendFromComposer(),
   'planner-open-session': (el) => openPlannerSession(el.dataset.key),
   'planner-close-session': () => closePlannerSession(false),
+  'planner-aside-handoff': () => handAside(),
+  'planner-aside-end': () => endAside(),
+  'planner-aside-rename': () => renameAside(),
+  'scratch-aside': () => fromScratch(),
   'planner-sess-raw': () => {
     const p = st.sess;
     if (!p) return;
@@ -568,8 +821,13 @@ wsm.onReady(fetchPlannerStatus);
 // Another node's Planner: its switch, its sessions.
 nzBus.addEventListener('planner:node', () => {
   st.status = null;
+  st.to = 'planner';
   closePlannerSession(false);
+  // An aside on the last node's Planner reply: its 转成单独聊 has no Planner here.
+  closePlannerScratch();
   fetchPlannerStatus();
 });
 nzBus.addEventListener('session:select', () => paintHandoffButton());
 nzBus.addEventListener('tasks:changed', paintStop);
+// A 单独聊 opened elsewhere is one once the list has its label.
+onSessionsApplied(paintAsideActs);
