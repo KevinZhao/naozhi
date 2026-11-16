@@ -6,7 +6,7 @@
 import { NZ_CONTRACT } from './contract.js';
 import { composer, perSession, selection, sessionList, timers } from './state.js';
 import { interruptSession, startTurnTimer, turnState, updateSendButton } from './running_banner.js';
-import { fetchJSON, showToast, patchCardHealth } from './nz_util.js';
+import { fetchJSON, isComposingKey, showToast, patchCardHealth } from './nz_util.js';
 import { wsm } from './ws_manager.js';
 import { featureForCurrent } from './features.js';
 import { EVENT_DIVIDER_GAP_MS, getMsgValue, lastDividerTime, persistPending, removeSidebarCard, setMsgValue, showAPIError, showAuthModal, showNetworkError, stickEventsBottom, timeDividerHtml } from './utilities.js';
@@ -37,7 +37,7 @@ function handleKey(e) {
     }
     return;
   }
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && Date.now() - composer.lastCompositionEnd > 30) { e.preventDefault(); sendMessage(); }
+  if (e.key === 'Enter' && !e.shiftKey && !isComposingKey(e) && Date.now() - composer.lastCompositionEnd > 30) { e.preventDefault(); sendMessage(); }
 }
 
 function clearMsg(el) { if (el) el.textContent = ''; }

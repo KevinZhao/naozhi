@@ -100,9 +100,27 @@ type Config struct {
 	Note func(text string)
 	// Tell sends text to the Planner as the gateway's receipt.
 	Tell func(text string) error
+	// TellLater is Tell for a progress-class receipt, a progress report's
+	// line or a dispatch's: held while the user is chatting with the
+	// Planner, sent merged once they are quiet (agent.Agent.TellLater,
+	// D114). nil is Tell.
+	TellLater func(text string) error
+	// ChatQuiet is when the user's chat with the Planner goes quiet
+	// (agent.Agent.ChatQuietAt), zero or past when they are not chatting:
+	// the check of a progress report from a session stopped waits for it.
+	// nil never waits.
+	ChatQuiet func() time.Time
+	// TellAlong keeps text for the next receipt, starting no turn of its
+	// own (agent.Agent.TellAlong): a report line the Planner already has
+	// from the session's cross-session message of the same turn, progress
+	// with its work still running (D114).
+	// nil drops it.
+	TellAlong func(text string)
 	// Reports are the senders (session keys) of the cross-session messages
 	// that reached the Planner in (from, to]; nil checks none. A session
-	// started on the prompt of before the report block still reports so.
+	// started on the prompt of before the report block still reports so,
+	// and one ending a turn with a progress block that sent one too gets
+	// no turn for the block's line (peerReported).
 	Reports func(from, to time.Time) []string
 	// Digests keep a dispatched session's report, its full text, in the
 	// session's digest (planner/digest), which the report's receipt points
@@ -716,6 +734,10 @@ func (r *Runner) checkEnded(e ended) {
 // back. A busy Planner holds the line back as it does a receipt, so that
 // the reply that answers it is the one checked, and so, for a while, does
 // a digest not showing the report yet.
+// The progress line of a report the same turn also sent by SendMessage,
+// its work still running, starts no turn (peerReported), and a progress
+// line waits while the user is chatting with the Planner (TellLater, or
+// the check itself for a session stopped); the rest go at once (D114).
 func (r *Runner) checkReport(e ended, tasks []task.Task, i int, now time.Time) {
 	if m, ok := r.cfg.Sessions.Get(e.key); ok && m.Report != nil && m.Report.At.After(e.report.At) {
 		if err := r.cfg.Sessions.Checked(e.key, e.at); err != nil {
@@ -738,6 +760,19 @@ func (r *Runner) checkReport(e ended, tasks []task.Task, i int, now time.Time) {
 	shown := r.digestShows(e)
 	if i >= 0 && !shown && now.Before(e.at.Add(endGrace)) {
 		r.laterIn(max(r.reportGrace, time.Second), e)
+		return
+	}
+	// Progress with the session stopped is a judgment of now that asks the
+	// Planner to act (custody's 继续): held as text it would be told stale,
+	// after the user had the session go another way, so while the user is
+	// chatting the check itself waits, unchecked on disk, and runs afresh
+	// once they are quiet.
+	stopped := i >= 0 && e.report.State == ReportProgress && r.stoppedAt(e)
+	if q := r.chatQuietAt(); stopped && now.Before(q) {
+		if u := q.Add(endWait); e.until.Before(u) {
+			e.until = u
+		}
+		r.laterIn(q.Sub(now), e)
 		return
 	}
 	if err := r.cfg.Sessions.Checked(e.key, e.at); err != nil {
@@ -777,7 +812,7 @@ func (r *Runner) checkReport(e ended, tasks []task.Task, i int, now time.Time) {
 	// nothing running since: a turn the user started meanwhile is going
 	// on. Out of custody nothing the Planner may send goes on with it, so
 	// the user is the one to ask.
-	if e.report.State == ReportProgress && r.stoppedAt(e) {
+	if stopped {
 		line += "。后台没有任务在跑，这一轮结束后它不会自己接着做"
 		if c := r.cfg.Custody; c != nil {
 			switch err := c.Check(e.key); {
@@ -788,9 +823,47 @@ func (r *Runner) checkReport(e ended, tasks []task.Task, i int, now time.Time) {
 			}
 		}
 	}
+	note := "📨 " + e.key + " 汇报：" + word + " · " + e.report.Summary
+	// A report the same turn also sent by SendMessage has had its turn when
+	// it asks nothing of the Planner: progress with the session's own work
+	// still running rides on the next receipt. The rest say what only the
+	// gateway knows at the turn's end (done, blocked, need_user, a session
+	// stopped), and a message of the turn may have been a question, so they
+	// still start one, saying the message came too.
+	peer := r.peerReported(e, now)
+	if peer && e.report.State == ReportProgress && !stopped {
+		if r.cfg.TellAlong != nil {
+			r.cfg.TellAlong(line + "。这份汇报它这一轮也用 SendMessage 发给过你，网关不另起回合。")
+		}
+		r.note(note)
+		return
+	}
+	if peer {
+		line += "。这一轮它也用 SendMessage 给你发过消息：说的是这份汇报的话，回过的不必再回"
+	}
 	r.reportTold[e.key] = toldReport{at: now, state: e.report.State}
-	r.tell(line)
-	r.note("📨 " + e.key + " 汇报：" + word + " · " + e.report.Summary)
+	if e.report.State == ReportProgress {
+		r.tellLater(line)
+	} else {
+		r.tell(line)
+	}
+	r.note(note)
+}
+
+// peerReported reports whether e's session sent the Planner a
+// cross-session message in the turn e ended (from its previous turn's end
+// to endGrace after this one's, the message landing a moment after it was
+// sent): a session dispatched on the report block's prompt still does at
+// times, and the Planner answered that message in a turn of its own.
+func (r *Runner) peerReported(e ended, now time.Time) bool {
+	if r.cfg.Reports == nil {
+		return false
+	}
+	to := e.at.Add(endGrace)
+	if now.Before(to) {
+		to = now
+	}
+	return slices.Contains(r.cfg.Reports(e.from, to), e.key)
 }
 
 // digestShows reports whether e's session's digest on disk shows its
@@ -1286,6 +1359,25 @@ func (r *Runner) tell(text string) {
 	}
 }
 
+// chatQuietAt is Config.ChatQuiet, nil-safe.
+func (r *Runner) chatQuietAt() time.Time {
+	if r.cfg.ChatQuiet == nil {
+		return time.Time{}
+	}
+	return r.cfg.ChatQuiet()
+}
+
+// tellLater is tell for a progress-class receipt (Config.TellLater).
+func (r *Runner) tellLater(text string) {
+	if r.cfg.TellLater == nil {
+		r.tell(text)
+		return
+	}
+	if err := r.cfg.TellLater(text); err != nil {
+		slog.Warn("planner actions: receipt not sent to the Planner", "err", err)
+	}
+}
+
 // resolve finds a workspace's directory on this node.
 func (r *Runner) resolve(ref string) (workspace.Workspace, string, error) {
 	if r.cfg.Workspaces == nil {
@@ -1319,7 +1411,7 @@ func (r *Runner) dispatch(d Dispatch, words []Words) string {
 		r.tell("派出「" + d.Title + "」失败，没有拉起会话：" + err.Error())
 		return ""
 	}
-	r.tell("已派出：" + d.Title + "（" + key + "），工作区 " + wsName + "。它的跨会话名字是「" + d.Title + "」（重名时 CC 会加短 ID，以 ListAgents 为准）。它做完、卡住会在回复末尾写汇报块，网关一行转给你；一轮结束却没写汇报块时网关会再告诉你。收到后在对话里告诉用户结果。")
+	r.tellLater("已派出：" + d.Title + "（" + key + "），工作区 " + wsName + "。它的跨会话名字是「" + d.Title + "」（重名时 CC 会加短 ID，以 ListAgents 为准）。它做完、卡住会在回复末尾写汇报块，网关一行转给你；一轮结束却没写汇报块时网关会再告诉你。收到后在对话里告诉用户结果。")
 	return key
 }
 

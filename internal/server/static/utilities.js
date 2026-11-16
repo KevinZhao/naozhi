@@ -3,7 +3,7 @@
 // without forming a cycle. Shared state is read from the state.js objects.
 import { NZ_CONTRACT } from './contract.js';
 import { composer, perSession, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
-import { esc, escAttr, showToast, trapFocus, sessionDot, sessionExitChipHtml, sessionTitleText } from './nz_util.js';
+import { esc, escAttr, isComposingKey, showToast, trapFocus, sessionDot, sessionExitChipHtml, sessionTitleText } from './nz_util.js';
 import { wsm } from './ws_manager.js';
 import { lsSet } from './platform.js';
 import { sid } from './session_ident.js';
@@ -899,7 +899,7 @@ function promptDialog(opts) {
     overlay.querySelector('.prompt-ok').addEventListener('click', () => finish(input.value));
     overlay.addEventListener('click', (e) => { if (e.target === overlay) finish(null); });
     input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); finish(input.value); }
+      if (e.key === 'Enter' && !isComposingKey(e)) { e.preventDefault(); finish(input.value); }
     });
     // Mirror confirmDialog: if the overlay is removed externally (trapFocus
     // Esc handling, or a caller manipulating DOM), settle as cancelled.

@@ -5,7 +5,7 @@
 // dashboard's renderMainShell.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, serverInfo, sessionList, transcript } from './state.js';
-import { esc, escAttr, nzBus, showToast, trapFocus } from './nz_util.js';
+import { esc, escAttr, isComposingKey, nzBus, showToast, trapFocus } from './nz_util.js';
 import { sessionStream } from './session_stream.js';
 import { wsm } from './ws_manager.js';
 import { accessProfileChipInfo, fetchAccessProfiles, fetchCLIBackends, renderAccessProfilePicker, renderBackendPicker } from './backend_catalog.js';
@@ -878,7 +878,7 @@ function handlePaletteKey(e, state, input) {
     updateActiveRow(state);
     return;
   }
-  if (e.key === 'Enter') {
+  if (e.key === 'Enter' && !isComposingKey(e)) {
     e.preventDefault();
     const item = state.items[state.activeIdx];
     if (!item) return;
@@ -1206,7 +1206,7 @@ function wireQuickAskInput(autofocus) {
   ta.dataset.wired = '1';
   ta.addEventListener('keydown', function(e) {
     // Enter (without modifiers) sends; Shift+Enter keeps native newline.
-    if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !e.isComposing) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !isComposingKey(e)) {
       e.preventDefault();
       submitQuickAsk(e);
     }

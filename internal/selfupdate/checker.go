@@ -105,6 +105,10 @@ type CheckerConfig struct {
 	// Status, if non-nil, receives every state transition for the dashboard;
 	// nil disables reporting (a nil *Status is a valid no-op receiver).
 	Status *Status
+
+	// StatePath, if set, is where Run keeps the next check time so a restart
+	// resumes the schedule instead of starting the interval over.
+	StatePath string
 }
 
 // latestRelease is indirected so tests can stub the lookup; tests that swap
@@ -170,13 +174,23 @@ func (c *Checker) Run(ctx context.Context) {
 		"check_on_start", c.cfg.CheckOnStart,
 		"current_version", c.cfg.CurrentVersion)
 
-	next := c.now().Add(c.cfg.Interval)
+	// One clock read before the loop: the test harness counts reads to know
+	// when the first check is scheduled.
+	start := c.now()
+	next := start.Add(c.cfg.Interval)
+	failures := 0
 	if c.cfg.CheckOnStart {
 		// Delay so startup is not competing with network I/O and a crash-restart
 		// loop on a bad release cannot instantly re-trigger work.
-		next = c.now().Add(checkOnStartDelay)
+		next = start.Add(checkOnStartDelay)
+	} else if saved, ok := c.loadSchedule(); ok {
+		next, failures = saved.NextCheck, saved.Failures
+		// An overdue check still waits the start delay, for the same reasons.
+		if earliest := start.Add(checkOnStartDelay); next.Before(earliest) {
+			next = earliest
+		}
 	}
-	failures := 0
+	c.saveSchedule(next, failures)
 	for {
 		now := c.now()
 		// A clock set backwards must not push the check out beyond an interval.
@@ -204,15 +218,21 @@ func (c *Checker) Run(ctx context.Context) {
 		if c.now().Before(next) {
 			continue
 		}
+		// Saved as if this check will fail, so a process killed mid-check
+		// retries on the backoff it would have had; the install that restarts
+		// this process on purpose claims the whole interval in checkOnce.
+		c.saveSchedule(c.now().Add(retryDelay(failures+1, c.cfg.Interval)), failures+1)
 		if err := c.checkOnce(ctx); err != nil {
 			failures++
 			retry := retryDelay(failures, c.cfg.Interval)
 			next = c.now().Add(retry)
+			c.saveSchedule(next, failures)
 			slog.Info("auto-update: retrying the failed check", "in", retry.String(), "consecutive_failures", failures)
 			continue
 		}
 		failures = 0
 		next = c.now().Add(c.cfg.Interval)
+		c.saveSchedule(next, failures)
 	}
 }
 
@@ -305,6 +325,9 @@ func (c *Checker) checkOnce(ctx context.Context) error {
 		// exists for InstallLatest's HTTP caller.
 		_ = c.installLocked(cctx, rel, false)
 	case ModeAuto:
+		// The install restarts this process before checkOnce returns; the
+		// new binary must not check again straight away.
+		c.saveSchedule(c.now().Add(c.cfg.Interval), 0)
 		_ = c.installLocked(cctx, rel, true)
 	}
 	return nil

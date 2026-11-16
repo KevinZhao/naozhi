@@ -30,6 +30,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/brief"
 	"github.com/naozhi/naozhi/internal/planner/custody"
 	"github.com/naozhi/naozhi/internal/planner/digest"
+	"github.com/naozhi/naozhi/internal/planner/github"
 	"github.com/naozhi/naozhi/internal/planner/promise"
 	"github.com/naozhi/naozhi/internal/planner/reader"
 	"github.com/naozhi/naozhi/internal/planner/reap"
@@ -481,7 +482,7 @@ func main() {
 	updateStatus := selfupdate.NewStatus(version)
 	var updateChecker *selfupdate.Checker
 	if cfg.UpdateEnabled() {
-		updateChecker = newUpdateChecker(ctx, cfg, platforms, updateStatus, isolated)
+		updateChecker = newUpdateChecker(ctx, cfg, platforms, updateStatus, isolated, sessionLayout.UpdateSchedulePath())
 	}
 	updateDashboardInstall := cfg.UpdateDashboardInstall()
 
@@ -802,6 +803,9 @@ func main() {
 		Spawn:       wireup.TaskSpawner{Router: router, Opts: taskOpts, Submit: srv.SubmitPlanner, Digests: digests}.Spawn,
 		Note:        plannerAgent.Note,
 		Tell:        plannerAgent.Tell,
+		TellLater:   plannerAgent.TellLater,
+		TellAlong:   plannerAgent.TellAlong,
+		ChatQuiet:   plannerAgent.ChatQuietAt,
 		Reports:     wireup.PlannerReports(router),
 		Digests:     digests,
 		Outside:     plannerAgent.OutsideTurn,
@@ -843,6 +847,9 @@ func main() {
 	go custodian.Run(ctx)
 	if cfg.Planner.Enabled {
 		go reaper.Run(ctx)
+		// The registered repositories' GitHub issues, hourly, where the
+		// Planner reads (§15.14 ⑤): it has no network tool of its own.
+		go github.New(github.Config{Dir: sessionLayout.PlannerGitHubRoot(), Workspaces: plannerState.Workspaces.LocalDirs}).Run(ctx)
 	}
 	go sidecars.Run(ctx, func(key string) bool { return router.SessionFor(key) != nil })
 	go briefer.Run(ctx)
