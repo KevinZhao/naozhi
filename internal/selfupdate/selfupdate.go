@@ -492,6 +492,13 @@ func fetchFile(ctx context.Context, fetchURL, dest string, maxBytes int64) error
 	if err != nil {
 		return stalled(fmt.Errorf("copy response body to %s: %w", dest, err))
 	}
+	// A cancelled transfer can still end in a clean EOF (the transport may
+	// hand back what it had before it sees the cancel), which would pass a
+	// truncated file on as complete; once the watchdog has fired the body is
+	// not trusted, however the read ended.
+	if !watchdog.Stop() && errors.Is(context.Cause(ctx), errStalled) {
+		return stalled(fmt.Errorf("copy response body to %s: %w", dest, io.ErrUnexpectedEOF))
+	}
 	if n > maxBytes {
 		return fmt.Errorf("response body exceeds %d bytes (truncated) from %s", maxBytes, fetchURL)
 	}
