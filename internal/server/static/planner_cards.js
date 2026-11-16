@@ -13,7 +13,9 @@
 //     emptied bubble hidden), done / failed one line "✓ X 已完成 / ✗ X 失败",
 //     the reason in its tooltip.
 //   - the gateway's report line ("📨 <key> 汇报：<状态> · <summary>", §15.12
-//     ③ ⑤) reads by the session's name and opens its 任务 card; a message a
+//     ③ ⑤) reads by the session's name and opens its 任务 card; the line a
+//     单独聊 leaves ("💬 <key> 你开了单独聊：<title>", §15.14 ⑥) opens that
+//     session in the middle column; a message a
 //     session sent by SendMessage (peer_message) folds to its sender and first
 //     sentence. The 会话 view renders both as before (event_render.js).
 //   - sessions the conversation names — a handed-over session
@@ -482,7 +484,7 @@ function decorateEvent(ev, turn) {
     m.remove();
   });
   const content = ev.querySelector('.event-content');
-  if (ev.matches('.system') && content && (reportLine(ev, content) || lookupLine(ev, content))) return;
+  if (ev.matches('.system') && content && (reportLine(ev, content) || asideLine(ev, content) || lookupLine(ev, content))) return;
   if (!ev.matches('.text, .peer_message, .system')) return;
   const carded = new Set([...ev.querySelectorAll('.pl-scard[data-key]')].map((b) => b.dataset.key));
   const named = mentionedKeys(ev);
@@ -593,6 +595,21 @@ function reportLine(ev, content) {
   content.innerHTML = '<button type="button" class="pl-report" data-action="planner-open-task" data-key="' + escAttr(key) + '" title="打开任务卡">' +
     '<span aria-hidden="true">📨</span> <b class="pl-report-name" data-key="' + escAttr(key) + '">' + esc(sessionTitle(key)) + '</b> 汇报：' +
     '<span class="pl-report-t">' + esc(rest) + '</span></button>';
+  return true;
+}
+
+// ASIDE_NOTE_RE is the gateway's line for a 单独聊 you opened (planner/agent
+// AsideNote: "💬 <key> 你开了单独聊：<title>", §15.14 ⑥).
+const ASIDE_NOTE_RE = /^💬 (\S+) 你开了单独聊：([\s\S]*)$/;
+
+// asideLine renders a 单独聊's line as the way back into it, and reports
+// whether the line was one.
+function asideLine(ev, content) {
+  const m = ASIDE_NOTE_RE.exec(content.textContent.trim());
+  if (!m) return false;
+  ev.classList.add('pl-report-ev', 'pl-aside-ev');
+  content.innerHTML = '<button type="button" class="pl-report pl-aside" data-action="planner-open-session" data-key="' + escAttr(m[1]) + '" title="回到这次单独聊">' +
+    '<span aria-hidden="true">💬</span> 你开了单独聊：<span class="pl-report-t">' + esc(m[2].trim()) + '</span> <span aria-hidden="true">▸</span></button>';
   return true;
 }
 

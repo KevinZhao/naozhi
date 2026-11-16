@@ -171,6 +171,12 @@
 /* Save button follows .btn-icon but full-width + neutral fill. */
 .aside-drawer .ad-save-btn{display:none;margin-top:8px;width:100%;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);color:var(--nz-text);padding:8px 12px;font-size:var(--nz-fs-sm2);cursor:pointer;transition:all .15s;font-family:inherit;min-height:36px}
 .aside-drawer .ad-save-btn.visible{display:block}
+/* On a Planner reply 转成单独聊 takes its place (§15.14 ⑥). */
+.aside-drawer.ad-from-planner .ad-save-btn.visible{display:none}
+.aside-drawer .ad-to-aside{height:26px;padding:0 10px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);background:var(--nz-bg-2);color:var(--nz-text);font-size:var(--nz-fs-xs);font-family:inherit;cursor:pointer;white-space:nowrap}
+.aside-drawer .ad-to-aside[hidden]{display:none}
+.aside-drawer .ad-to-aside:hover:not(:disabled){border-color:var(--nz-accent);color:var(--nz-accent)}
+.aside-drawer .ad-to-aside:disabled{opacity:.5;cursor:default}
 .aside-drawer .ad-save-btn:hover{background:var(--nz-bg-2);border-color:var(--nz-accent);color:var(--nz-accent)}
 .aside-drawer .ad-loading{display:none;padding:6px 14px;font-size:var(--nz-fs-xs);color:var(--nz-text-faint);font-style:italic;animation:pulse var(--nz-dur-loop) ease-in-out infinite}
 .aside-drawer .ad-loading.visible{display:block}

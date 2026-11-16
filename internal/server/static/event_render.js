@@ -407,14 +407,15 @@ function eventImagesHtml(e, sk) {
 // eventActionsHtml: copy / ask-aside buttons, one shared >500-char gate:
 // a short bubble is selected by hand, so only a long passage gets 复制 (both
 // hover-revealed via .hover-only; the latest answer's 复制 always shows).
-// noAsk drops 追问, which always asks about the selected session.
-function eventActionsHtml(e, cleanRaw, noAsk) {
+// noAsk drops 追问, which otherwise asks about the selected session, or
+// about askKey when one is given (the Planner page's planner:main).
+function eventActionsHtml(e, cleanRaw, noAsk, askKey) {
   const isLong = !!cleanRaw && cleanRaw.length > 500;
   const copyBtn = isLong && (e.type === 'text' || e.type === 'user')
     ? '<button class="event-copy-btn hover-only" type="button" data-raw="' + escAttr(cleanRaw) + '" data-action="event-copy" title="复制" aria-label="复制消息">复制</button>'
     : '';
   const askBtn = isLong && !noAsk && e.type === 'text'
-    ? '<button class="event-ask-btn hover-only" type="button" data-raw="' + escAttr(cleanRaw) + '" data-msg-time="' + (e.time || 0) + '" data-action="ask-aside" title="基于此内容追问">' + ICONS.preview + ' 追问</button>'
+    ? '<button class="event-ask-btn hover-only" type="button" data-raw="' + escAttr(cleanRaw) + '" data-msg-time="' + (e.time || 0) + '"' + (askKey ? ' data-key="' + escAttr(askKey) + '"' : '') + ' data-action="ask-aside" title="基于此内容追问">' + ICONS.preview + ' 追问</button>'
     : '';
   return { copyBtn, askBtn };
 }
@@ -424,7 +425,8 @@ function eventActionsHtml(e, cleanRaw, noAsk) {
 // parent view hides — agent_view.js's sub-agent panel needs them, since a
 // team member's work is almost entirely tool_use. opts.key renders a local
 // session other than the selection (the Planner page's planner:main): its
-// URLs name that key, and there is no 追问 button.
+// URLs name that key, and there is no 追问 button unless opts.ask asks about
+// that key.
 export function eventHtml(e, opts) {
   const includeInternal = !!(opts && opts.includeInternal);
   if (shouldHideEvent(e, includeInternal)) return '';
@@ -440,7 +442,8 @@ export function eventHtml(e, opts) {
 
   const content = (EVENT_CONTENT.get(e.type) || defaultEventChip)(e, cleanRaw, sk);
   const imgHtml = eventImagesHtml(e, sk);
-  const { copyBtn, askBtn } = eventActionsHtml(e, cleanRaw, !!(opts && opts.key));
+  const ownKey = !!(opts && opts.key);
+  const { copyBtn, askBtn } = eventActionsHtml(e, cleanRaw, ownKey && !opts.ask, ownKey && opts.ask ? opts.key : '');
 
   const timeAttr = e.time ? ' data-time="' + e.time + '" title="' + escAttr(formatTimeFull(e.time)) + '"' : '';
   // data-uuid: the backend's entry identity, the dedup key for a restart's

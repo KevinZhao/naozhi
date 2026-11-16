@@ -101,16 +101,6 @@ func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 	if agentID == "" {
 		agentID = "general"
 	}
-	base := sessionview.AgentOpts{}
-	if h.agents != nil {
-		base = h.agents[agentID]
-	}
-	base = inheritSourceTuning(base, snap)
-	// The aside runs on the source's backend. An empty one (a source that never
-	// spawned) is resolved by pool.Open to the CLI the source resumes on, never
-	// to the access profile's default_backend.
-	workspace := snap.Workspace
-
 	// ContextTurns is per side; the renderer enforces the byte budget later.
 	turns := req.ContextTurns
 	if turns <= 0 {
@@ -119,13 +109,36 @@ func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 	if turns > session.MaxScratchContextTurns {
 		turns = session.MaxScratchContextTurns
 	}
-	// No timestamp: best effort, last N entries as before-window, after empty.
-	before, after := collectScratchContext(r.Context(), src, req.SourceMessageTime, turns)
+	base := sessionview.AgentOpts{}
+	var before, after []clievent.EventEntry
+	// The aside runs on the source's backend. An empty one (a source that never
+	// spawned) is resolved by pool.Open to the CLI the source resumes on, never
+	// to the access profile's default_backend.
+	workspace, backend := snap.Workspace, snap.Backend
+	if req.SourceKey == sessionkey.PlannerMainKey {
+		// An aside on a Planner reply is an ordinary chat, as the 单独聊 it
+		// may become (§15.14 ⑥): the default agent, workspace, backend and
+		// model, none of the Planner's own. Only the quote goes in: the
+		// turns around it carry the gateway's snapshots and receipts.
+		agentID = "general"
+		if h.agents != nil {
+			base = h.agents[agentID]
+		}
+		base.AccessProfile, base.DefaultBackend = "", ""
+		workspace, backend = "", ""
+	} else {
+		if h.agents != nil {
+			base = h.agents[agentID]
+		}
+		base = inheritSourceTuning(base, snap)
+		// No timestamp: best effort, last N entries as before-window, after empty.
+		before, after = collectScratchContext(r.Context(), src, req.SourceMessageTime, turns)
+	}
 
 	sc, err := h.pool.Open(session.OpenOptions{
 		SourceKey:     req.SourceKey,
 		AgentID:       agentID,
-		Backend:       snap.Backend,
+		Backend:       backend,
 		Workspace:     workspace,
 		BaseOpts:      base,
 		Quote:         req.Quote,
@@ -282,15 +295,6 @@ func (h *Handler) HandlePromote(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "scratch not found"})
 		return
 	}
-	// Promoted key: "{platform}:{chatType}:{chatID}:aside-{agentID}-{shortID}"
-	// — still 4 segments, still passes ValidateSessionKey.
-	srcParts := strings.SplitN(sc.SourceKey, ":", 4)
-	if len(srcParts) != 4 {
-		// Unreachable after open-time ValidateSessionKey; kill the orphan and report.
-		h.router.Remove(sc.Key)
-		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "source key malformed"})
-		return
-	}
 	short, err := shortPromoteSuffix()
 	if err != nil {
 		slog.Warn("promote suffix generation failed", "err", err)
@@ -298,11 +302,28 @@ func (h *Handler) HandlePromote(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "failed to promote"})
 		return
 	}
-	newAgent := "aside-" + short
-	if sc.AgentID != "" {
-		newAgent = "aside-" + sc.AgentID + "-" + short
+	var newKey string
+	if sc.SourceKey == sessionkey.PlannerMainKey {
+		// An aside on a Planner reply becomes an ordinary dashboard session
+		// (a 单独聊, §15.14 ⑥) on the default agent, which a respawn under
+		// the new key resolves to again.
+		newKey = sessionkey.SessionKey(sessionkey.DashboardPlatform, "direct", "aside-"+short, "general")
+	} else {
+		// Promoted key: "{platform}:{chatType}:{chatID}:aside-{agentID}-{shortID}"
+		// — still 4 segments, still passes ValidateSessionKey.
+		srcParts := strings.SplitN(sc.SourceKey, ":", 4)
+		if len(srcParts) != 4 {
+			// Unreachable after open-time ValidateSessionKey; kill the orphan and report.
+			h.router.Remove(sc.Key)
+			httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "source key malformed"})
+			return
+		}
+		newAgent := "aside-" + short
+		if sc.AgentID != "" {
+			newAgent = "aside-" + sc.AgentID + "-" + short
+		}
+		newKey = sessionkey.SessionKey(srcParts[0], srcParts[1], srcParts[2], newAgent)
 	}
-	newKey := sessionkey.SessionKey(srcParts[0], srcParts[1], srcParts[2], newAgent)
 
 	if !h.router.RenameSession(sc.Key, newKey) {
 		// Collision, invalid key, or entry vanished post-Detach: stay orphan-free.

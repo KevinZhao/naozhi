@@ -88,6 +88,10 @@
   .planner-main.pl-left-none:not(.pl-left-open) .pl-left{display:none}
   .planner-main.pl-left-none:not(.pl-left-open) .pl-center{padding-top:env(safe-area-inset-top)}
   .planner-main.pl-left-open .pl-left .pl-left-body{display:flex;padding-top:4px}
+  /* A 单独聊 takes the screen (§15.14 ⑥); its breadcrumb is the way back. */
+  .planner-main.pl-aside-open:not(.pl-left-open) .pl-left{display:none}
+  .planner-main.pl-aside-open:not(.pl-left-open) .pl-center{padding-top:env(safe-area-inset-top)}
+  .pl-hand-to{display:none}
   .pl-head{height:44px;gap:6px;padding:0 12px}
   /* The header says 已暂停到 …; 恢复 is in "⋯". */
   .pl-paused>[aria-hidden],.pl-paused>button{display:none}
@@ -117,6 +121,8 @@
   .pl-head>.pl-layer{display:none}
   .pl-layer-tool{display:flex}
   .pl-composer{padding:6px 12px 10px}
+  /* "发给" is the select's own label on a phone: the input keeps the width. */
+  .pl-to-k{display:none}
   #pl-input{font-size:var(--nz-fs-md)} /* prevents iOS zoom on focus */
   .pl-sess-status{margin:8px 12px 0;flex-wrap:wrap}
   /* 交给 alone, on one line: the input box keeps the width. */

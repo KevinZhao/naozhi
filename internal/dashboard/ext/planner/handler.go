@@ -17,6 +17,9 @@
 //	GET  /api/planner/lookup ?run=<id> — one web lookup's record (§15.12 ⑨):
 //	                         the question, the answer with its sources, or
 //	                         why it failed, for the query card
+//	POST /api/planner/aside  {"key": "<dashboard session key>", "title": "..."} —
+//	                         notes in the conversation that the user opened
+//	                         that session as an aside chat (单独聊, §15.14 ⑥)
 //	POST /api/scout/run      a scout run now, outside the schedule (§15.6);
 //	                         202 with the run ID, the record lands in
 //	                         <state root>/planner/scout/runs
@@ -29,6 +32,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
@@ -210,6 +214,39 @@ func (h *Handler) HandleForget(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("planner: take back a memory", "err", err)
 		httputil.WriteJSONStatus(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 	}
+}
+
+// HandleAside notes an aside chat (单独聊, §15.14 ⑥, D117) in the
+// conversation: the line names the session for the page to open it again,
+// and is never sent to the CLI, so the chat stays out of the Planner's
+// context. Only a dashboard session can be one: the page opens it as an
+// ordinary session (default workspace, agent and model), never a Planner,
+// dispatched or IM one.
+func (h *Handler) HandleAside(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, httputil.MaxRequestBodyBytes)
+	var req struct {
+		Key   string `json:"key"`
+		Title string `json:"title"`
+	}
+	if err := httputil.DecodeJSONBody(r, &req); err != nil {
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if !strings.HasPrefix(req.Key, sessionkey.DashboardPlatform+":") || strings.Count(req.Key, ":") != 3 || sessionkey.ValidateSessionKey(req.Key) != nil {
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "单独聊只能是看板上的会话"})
+		return
+	}
+	note := agent.AsideNote(req.Key, req.Title)
+	if note == "" {
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "title is required"})
+		return
+	}
+	if h.agent == nil || !h.agent.Enabled() {
+		writeErr(w, agent.ErrOff, false)
+		return
+	}
+	h.agent.Note(note)
+	httputil.WriteJSON(w, map[string]string{"status": "noted"})
 }
 
 // HandleScoutRun starts a scout run now. 409 while one runs or when the

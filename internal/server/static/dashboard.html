@@ -287,13 +287,17 @@
            session in progress, its status line, its events. -->
       <div class="pl-sess" id="pl-sess" hidden>
         <header class="pl-head">
-          <nav class="pl-crumb" aria-label="位置"><button type="button" class="pl-link" data-action="planner-close-session">Planner</button><span aria-hidden="true">›</span><b id="pl-sess-name"></b></nav>
+          <nav class="pl-crumb" aria-label="位置"><button type="button" class="pl-link" data-action="planner-close-session">Planner</button><span aria-hidden="true">›</span><b id="pl-sess-name"></b><button type="button" class="pl-sess-rename" id="pl-sess-rename" data-action="planner-aside-rename" title="改标题" aria-label="改标题" hidden>✎</button></nav>
           <!-- The conversation's header is hidden under the opened session:
                its 要你决定 N stays here, and goes back to the questions. -->
           <button type="button" class="pl-pin" id="pl-sess-pin" data-action="planner-jump-ask" hidden></button>
           <span class="pl-head-sp"></span>
           <button type="button" class="files-dl-btn" data-action="workbench-toggle" title="工作台（预览 · 产出 · 文件 · 详情）">工作台</button>
           <button type="button" class="files-dl-btn" id="pl-sess-stop" data-action="task-stop" title="停止这个会话正在做的事" hidden>停止</button>
+          <!-- A 单独聊's close (§15.14 ⑥): neither is required, it is put
+               away 24 hours idle as any session you opened. -->
+          <button type="button" class="files-dl-btn" id="pl-sess-hand" data-action="planner-aside-handoff" title="把这次单独聊交给 Planner，可以补一句话" hidden>交给<span class="pl-hand-to"> Planner</span></button>
+          <button type="button" class="files-dl-btn" id="pl-sess-end" data-action="planner-aside-end" title="结束这次单独聊，移到历史" hidden>结束</button>
         </header>
         <div class="pl-sess-status"><span class="pl-sess-line" id="pl-sess-line"></span><button type="button" class="pl-link" id="pl-sess-raw" data-action="planner-sess-raw" aria-pressed="false">原始记录</button></div>
         <div class="events pl-events" id="pl-sess-events" role="log" aria-live="off"><div id="pl-sess-stream"></div></div>
@@ -364,6 +368,8 @@
       <span class="ad-agent" id="ad-agent"></span>
     </div>
     <div class="ad-actions">
+      <!-- An aside on a Planner reply becomes a 单独聊 (planner_chat.js, §15.14 ⑥). -->
+      <button type="button" class="ad-to-aside" id="ad-aside" data-action="scratch-aside" hidden disabled>转成单独聊</button>
       <button type="button" class="ad-close btn-close" id="ad-close" title="关闭" aria-label="关闭追问窗口">&times;</button>
     </div>
   </header>

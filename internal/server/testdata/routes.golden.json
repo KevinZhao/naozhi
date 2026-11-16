@@ -190,6 +190,11 @@
     "handler_type": "*dashplanner.Handler"
   },
   {
+    "method": "POST",
+    "path": "/api/planner/aside",
+    "handler_type": "*dashplanner.Handler"
+  },
+  {
     "method": "GET",
     "path": "/api/planner/briefs",
     "handler_type": "*dashplanner.Handler"

@@ -286,7 +286,12 @@ function setActivityView(view) {
   if (prev === 'assets' && view !== 'assets' && nzViews.asset) nzViews.asset.hide();
   if (prev === 'files' && view !== 'files' && nzViews.files) nzViews.files.hide();
   if (prev === 'system' && view !== 'system') stopSystemPoll();
-  if (prev === 'planner' && view !== 'planner') closePlannerPanel();
+  if (prev === 'planner' && view !== 'planner') {
+    closePlannerPanel();
+    // A ↗ 追问 on a Planner reply opens the drawer here; it is fixed and
+    // would float over the next view.
+    closeScratchDrawer();
+  }
   // Leaving chat: close any docked preview / 追问 drawer. They are position:fixed
   // siblings of .container with no nz-view-* hide rule, so without this they
   // float over the assets/cron/settings view and leave the split padding

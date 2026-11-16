@@ -1,7 +1,10 @@
 // aside_drawer.js — the 追问 (scratch) drawer. The ↗ button on an AI bubble
 // opens it: it creates a scratch session on the server, polls its events,
-// sends messages, and can promote it into a sidebar-visible session. Drawer
-// DOM lives in dashboard.html; dashboard's module body runs initAsideDrawer().
+// sends messages, and can promote it into a sidebar-visible session. Opened
+// on a Planner reply (the Planner page, §15.14 ⑥) it is an ordinary chat on
+// the quote alone, and 转成单独聊 at its top right promotes it into a 单独聊
+// instead (planner_chat.js, asideFromScratch). Drawer DOM lives in
+// dashboard.html; dashboard's module body runs initAsideDrawer().
 import { NZ_CONTRACT } from './contract.js';
 import { selection, sessionList } from './state.js';
 import { isComposingKey, showToast } from './nz_util.js';
@@ -20,14 +23,15 @@ import { fetchSessions } from './session_list.js';
 // session is still empty/unreachable, and snap back to POLL_BASE_MS the
 // moment a real poll succeeds.
 const POLL_BASE_MS = 1000;
+const PLANNER_KEY = 'planner:main';
 const POLL_MAX_MS = 8000;
 
 // ad: the drawer's elements (looked up by initAsideDrawer) and the open
 // scratch session. state is written only through setScratch.
 const ad = {
-  drawer: null, elMsgs: null, elEmpty: null, elInput: null, elSend: null, elClose: null, elSave: null,
+  drawer: null, elMsgs: null, elEmpty: null, elInput: null, elSend: null, elClose: null, elSave: null, elAside: null,
   elQuoteChip: null, elQuotePreview: null, elQuoteTrunc: null, elQuoteCtx: null, elLoading: null, elAgent: null,
-  state: null,            // {scratchId, key, agentId, sourceKey, sourceMsgTime, quote, lastEventTime, pendingUserEchoes}
+  state: null,            // {scratchId, key, agentId, sourceKey, sourceMsgTime, quote, firstAsk, lastEventTime, pendingUserEchoes}
   pollTimer: null,
   sending: false,
   pollDelayMs: POLL_BASE_MS,
@@ -73,6 +77,7 @@ async function closeScratch(silent) {
   const id = ad.state.scratchId;
   setScratch(null);
   ad.elSave.classList.remove('visible');
+  paintAsideButton(false);
   clearMessages();
   ad.elInput.value = '';
   if (!id) return;
@@ -233,6 +238,7 @@ function renderNewEvents(events) {
   // Save button appears once there's at least one AI reply.
   if (events.some(e => e.type === 'text' || e.type === 'result')) {
     ad.elSave.classList.add('visible');
+    paintAsideButton(true);
   }
 }
 
@@ -361,6 +367,7 @@ async function openScratch(quote, agentId, sourceKey, sourceMsgTime) {
     ad.elQuoteChip.dataset.full = quote;
     clearMessages();
     ad.elSave.classList.remove('visible');
+    paintAsideButton(false);
     // Collapse first: the split sizes itself against the sidebar it sees.
     collapseSidebarForDrawer();
     showDrawer();
@@ -387,6 +394,7 @@ async function sendInScratch() {
     if (first !== undefined) ad.state.pendingUserEchoes.delete(first);
   }
   ad.state.pendingUserEchoes.add(text);
+  if (!ad.state.firstAsk) ad.state.firstAsk = text;
   // Render the user message immediately via renderNewEvents so scroll
   // policy, divider insertion, and ↗-button stripping all match the
   // poll path. The time stamp is just above Date.now() so it sorts
@@ -421,6 +429,19 @@ async function sendInScratch() {
     ad.elSend.disabled = false;
     ad.elInput.focus();
   }
+}
+
+// paintAsideButton shows 转成单独聊 for an aside on a Planner reply, which
+// "保存为正式会话" does not serve: there is something to take along once a
+// reply came (the scratch's process, which promoting moves, exists only
+// after the first send).
+function paintAsideButton(replied) {
+  if (!ad.elAside || !ad.drawer) return;
+  const fromPlanner = !!ad.state && ad.state.sourceKey === PLANNER_KEY;
+  ad.drawer.classList.toggle('ad-from-planner', fromPlanner);
+  ad.elAside.hidden = !fromPlanner;
+  if (replied !== undefined) ad.elAside.disabled = !replied;
+  ad.elAside.title = ad.elAside.disabled ? '先在这里问一句，有了回答就能转成单独聊' : '带着这里的往来，开一个持久的单独聊';
 }
 
 // promoteScratch turns the open scratch into a sidebar session (the
@@ -461,6 +482,37 @@ export async function promoteScratch() {
   }
 }
 
+// asideFromScratch promotes the open aside on a Planner reply into a
+// persistent session (the server gives it a dashboard key on the default
+// agent) and closes the drawer; it resolves to {key, ask, quote} — the
+// first thing asked in the drawer and the quoted reply, for its title — or
+// to null when it did not go.
+export async function asideFromScratch() {
+  const st = ad.state;
+  if (!st || st.sourceKey !== PLANNER_KEY) return null;
+  try {
+    const r = await fetch(NZ_CONTRACT.API.scratch_id_promote.replace('{id}', encodeURIComponent(st.scratchId)), { method: 'POST' });
+    if (!r.ok) {
+      const txt = await r.text().catch(() => '');
+      showAPIError('转成单独聊', r.status, txt);
+      return null;
+    }
+    const data = await r.json();
+    if (ad.state !== st) return null;
+    setScratch(null);
+    stopPolling();
+    hideDrawer();
+    clearMessages();
+    ad.elSave.classList.remove('visible');
+    paintAsideButton(false);
+    ad.elInput.value = '';
+    return { key: data.key, ask: st.firstAsk || '', quote: st.quote || '' };
+  } catch (e) {
+    showNetworkError('转成单独聊', e);
+    return null;
+  }
+}
+
 // closeScratchDrawer lets the view-router (setActivityView) tear the 追问
 // drawer down when leaving the chat view — the drawer is position:fixed and
 // would otherwise float over assets/cron/settings. closeScratch handles the
@@ -475,15 +527,17 @@ export function askAside(btn) {
   const raw = btn.getAttribute('data-raw') || '';
   const msgTime = Number(btn.getAttribute('data-msg-time') || 0);
   if (!raw || raw.length < 1) return;
-  if (!selection.key) {
+  // A bubble of a session other than the selection names it (the Planner's).
+  const source = btn.dataset.key || selection.key;
+  if (!source) {
     showToast('请先选择会话');
     return;
   }
   // Derive agentId from the current session key (4th segment) so the
   // server can inherit the matching agent registration.
-  const parts = String(selection.key).split(':');
+  const parts = String(source).split(':');
   const agentId = parts.length >= 4 ? parts[3] : 'general';
-  openScratch(raw, agentId, selection.key, msgTime);
+  openScratch(raw, agentId, source, msgTime);
 }
 
 // initAsideDrawer looks up the drawer's elements and wires its buttons
@@ -500,6 +554,7 @@ export function initAsideDrawer() {
   ad.elSend = $('ad-send');
   ad.elClose = $('ad-close');
   ad.elSave = $('ad-save');
+  ad.elAside = $('ad-aside');
   ad.elQuoteChip = $('ad-quote-chip');
   ad.elQuotePreview = $('ad-quote-preview');
   ad.elQuoteTrunc = $('ad-quote-trunc');

@@ -346,6 +346,13 @@ body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
 #pl-sess-handoff{margin-left:auto;flex-shrink:0}
 #pl-sess-handoff:disabled{color:var(--nz-text-dim);cursor:default;text-decoration:none}
 .pl-input-row{display:flex;gap:8px;align-items:flex-end}
+/* "发给 [Planner ▾]" (§15.14 ⑥): 新对话 opens a 单独聊. */
+.pl-to{flex-shrink:0;display:flex;align-items:center;gap:4px;height:38px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.pl-to[hidden]{display:none}
+#pl-to{height:30px;padding:0 4px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);background:var(--nz-bg-1);color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-sm);cursor:pointer}
+#pl-to:disabled{opacity:.6;cursor:not-allowed}
+.pl-sess-rename{flex-shrink:0;padding:0 2px;border:0;background:none;color:var(--nz-accent);font:inherit;font-size:var(--nz-fs-xs);cursor:pointer}
+.pl-sess-rename[hidden]{display:none}
 #pl-input{flex:1;min-width:0;resize:none;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);color:var(--nz-text);padding:8px 12px;font-family:inherit;font-size:var(--nz-fs-md);min-height:38px;max-height:160px;line-height:1.4;outline:none}
 #pl-input:focus{border-color:var(--nz-rust)}
 #pl-input:disabled{opacity:.6;cursor:not-allowed}
@@ -451,6 +458,7 @@ div.pl-lookup{max-width:560px;margin:8px 0;padding:8px 12px;border:1px solid var
 .pl-dyn-src{flex-shrink:0;max-width:12em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:var(--nz-text-strong)}
 .pl-dyn-one{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--nz-text-mute)}
 .pl-dyn-wait{flex-shrink:0;color:var(--nz-accent);font-weight:600}
+.pl-dyn-go{flex-shrink:0;color:var(--nz-text-dim)}
 .pl-dyn-full{margin:2px 0 8px;padding:4px 0 4px 8px;border-left:2px solid var(--nz-border)}
 .pl-dyn-full .event{max-width:none}
 .pl-dyn-none{padding:4px 6px;color:var(--nz-text-dim)}

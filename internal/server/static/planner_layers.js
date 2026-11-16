@@ -4,7 +4,8 @@
 // to a question — with the Planner's whole reply. Every other turn is one
 // 动态 entry: a receipt (a report, a dispatch's outcome, custody's), a
 // session's SendMessage, a due reminder, the receipt of blocks not run or
-// refused, a scout run, a pre-meeting brief, a web lookup's answer. The
+// refused, a scout run, a pre-meeting brief, a web lookup's answer, the
+// line a 单独聊 you opened left (§15.14 ⑥: its line opens it). The
 // entries between two of yours fold into one row
 // "▸ HH:MM–HH:MM · N 条动态（…）", which unfolds to one line each (time, task
 // or source, the Planner's first sentence, "→ 等你" when the turn asked you
@@ -16,8 +17,8 @@
 //
 // A turn is told by what started it, never by the model: its user entry's
 // source (planner/agent Source.Entry, contract.js PLANNER_TURN_*), a
-// SendMessage by its entry type, the gateway's report and reminder lines by
-// their own format. An entry with no source is yours, a merge of requests
+// SendMessage by its entry type, the gateway's report, reminder and 单独聊
+// lines by their own format. An entry with no source is yours, a merge of requests
 // of different sources, or older than the field: it is read part by part by
 // the gateway's markers, and what cannot be told stays in 对话.
 //
@@ -68,6 +69,9 @@ const COALESCE_SPLIT_RE = /\n\[\d\d:\d\d\] /;
 // (wireup PromiseReminder), SEND_ERROR_RE the page's own line for a message
 // of yours that did not go out, which stays in view whatever turn it lands in.
 const REPORT_NOTE_RE = /^📨 (\S+) 汇报：/;
+// ASIDE_NOTE_RE is its line for a 单独聊 you opened (planner/agent
+// AsideNote, §15.14 ⑥): an entry whose line opens that session.
+const ASIDE_NOTE_RE = /^💬 (\S+) 你开了单独聊：/;
 const REMINDER_NOTE_RE = /^到点提醒（/;
 const SEND_ERROR_RE = /^没有发出：/;
 // KEY_RE finds the session a receipt is about: a dispatched session's key,
@@ -84,7 +88,7 @@ const BY_SOURCE = new Set(['scout', 'briefing', 'lookup']);
 // SOURCE_NAME names an entry by where it came from when no session does.
 const SOURCE_NAME = {
   receipt: '网关回执', unrun: '没执行的动作', refusal: '被拒的动作', scout: '巡检', briefing: '会前简报',
-  lookup: '网页查询', reminder: '到点提醒', peer: '会话消息', report: '汇报',
+  lookup: '网页查询', reminder: '到点提醒', peer: '会话消息', report: '汇报', aside: '单独聊',
 };
 // MAX_NAMED is how many tasks or sources a row's parentheses name.
 const MAX_NAMED = 3;
@@ -144,7 +148,7 @@ export function answerOf(text) {
 
 // plannerHead is what an event starts, null for one that starts nothing:
 // a turn (a user entry, a SendMessage) or an entry of its own (the
-// gateway's report and reminder lines, the page's send error).
+// gateway's report, reminder and 单独聊 lines, the page's send error).
 export function plannerHead(e) {
   if (!e) return null;
   const at = e.time || 0;
@@ -155,6 +159,8 @@ export function plannerHead(e) {
     const m = REPORT_NOTE_RE.exec(text);
     if (m) return { id, at, kind: 'report', layer: 'dyn', alone: true, key: m[1] };
     if (REMINDER_NOTE_RE.test(text)) return { id, at, kind: 'reminder', layer: 'dyn', alone: true };
+    const a = ASIDE_NOTE_RE.exec(text);
+    if (a) return { id, at, kind: 'aside', layer: 'dyn', alone: true, key: a[1] };
     if (SEND_ERROR_RE.test(text)) return { id, at, kind: 'note', layer: 'talk', alone: true };
     return null;
   }
@@ -341,6 +347,7 @@ function mergeReports(items) {
 
 // entryName is the task or source an entry is about.
 function entryName(it) {
+  if (it.kind === 'aside') return SOURCE_NAME.aside;
   if (it.key) return sessionTitle(it.key);
   if (it.kind === 'peer' && it.name) return it.name;
   return SOURCE_NAME[it.kind] || '动态';
@@ -422,11 +429,16 @@ function rowEl(items, last) {
 function lineHtml(it, name, last) {
   const open = lay.lines.has(it.id);
   const one = entryLine(it, last);
+  // A 单独聊's line is the way back into it, not a reply to unfold.
+  const act = it.kind === 'aside' && it.key
+    ? 'data-action="planner-open-session" data-key="' + escAttr(it.key) + '"'
+    : 'data-action="planner-dyn-line" aria-expanded="' + open + '"';
   return '<div class="pl-dyn-item" data-id="' + escAttr(it.id) + '" data-n="' + it.els.length + '">' +
-    '<button type="button" class="pl-dyn-line" data-action="planner-dyn-line" aria-expanded="' + open + '" title="' + escAttr(formatAbsTime(it.at)) + '">' +
+    '<button type="button" class="pl-dyn-line" ' + act + ' title="' + escAttr(formatAbsTime(it.at)) + '">' +
       '<span class="pl-dyn-t">' + esc(hm(it.at)) + '</span><span class="pl-dyn-src">' + esc(name) + '</span>' +
       (one ? '<span class="pl-dyn-one">' + esc(one) + '</span>' : '') +
-      (asksYou(it) ? '<span class="pl-dyn-wait">→ 等你</span>' : '') + '</button></div>';
+      (asksYou(it) ? '<span class="pl-dyn-wait">→ 等你</span>' : '') +
+      (it.kind === 'aside' ? '<span class="pl-dyn-go" aria-hidden="true">▸</span>' : '') + '</button></div>';
 }
 
 // fillLine unfolds an entry to its whole reply: its bubbles as the 全部

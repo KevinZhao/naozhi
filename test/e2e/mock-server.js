@@ -312,6 +312,14 @@ function defaultGitStates() {
  *   this string as the JSON "error" (the trusted_proxy XFF refusal); later logins take the
  *   normal token check.
  * @param {number} [overrides.sendStatus] - Status code for POST /api/sessions/send.
+ * @param {boolean} [overrides.sendCreates] - If true, POST /api/sessions/send to a key not listed
+ *   lists it (a ready dashboard session, its workspace and last_prompt from the body) and logs
+ *   the text as its user event, as the router's GetOrCreate does; a key with keyEvents is left.
+ * POST /api/planner/aside (with overrides.planner) lands in plannerAsideCalls and, as the
+ * gateway's note does, appends "💬 <key> 你开了单独聊：<title>" to plannerEvents as a system line.
+ * POST /api/scratch/open lands in scratchOpenCalls; POST /api/scratch/{id}/promote lands in
+ * scratchPromoteCalls and lists overrides.scratchPromoteKey (default a dashboard aside key) as
+ * a ready session, answering {key}.
  * @param {boolean} [overrides.ws] - If true, accept /ws upgrades with a minimal
  *   WebSocket server (auth → auth_ok, everything else recorded). Default: no
  *   upgrade listener, so the dashboard falls back to polling.
@@ -395,6 +403,9 @@ function startMockServer(overrides = {}) {
   const plannerLookups = overrides.plannerLookups || null;
   const plannerBriefs = overrides.plannerBriefs || null;
   const plannerSendCalls = [];
+  const plannerAsideCalls = [];
+  const scratchOpenCalls = [];
+  const scratchPromoteCalls = [];
   const uploadCalls = [];
   const remoteData = overrides.remote || {};
   const remoteCalls = [];
@@ -413,6 +424,16 @@ function startMockServer(overrides = {}) {
   let loginCalls = [];
   let favoriteCalls = [];
   let authedCookies = new Set();
+  // listSession lists key as a ready dashboard session, as a send or a
+  // promote makes one.
+  const listSession = (key, workspace, prompt) => {
+    if ((sessionsData.sessions || []).some(x => x.key === key)) return;
+    (sessionsData.sessions = sessionsData.sessions || []).push({
+      key, state: 'ready', platform: 'dashboard', agent: 'general', cli_name: 'claude',
+      workspace, last_active: Date.now(), last_prompt: prompt, node: 'local',
+    });
+    if (sessionsData.stats && typeof sessionsData.stats.version === 'number') sessionsData.stats.version++;
+  };
 
   const server = http.createServer((req, res) => {
     // Auth check helper
@@ -546,6 +567,7 @@ function startMockServer(overrides = {}) {
       let body = '';
       req.on('data', c => (body += c));
       req.on('end', () => {
+        try { scratchOpenCalls.push(JSON.parse(body || '{}')); } catch { scratchOpenCalls.push({}); }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           scratch_id: 'scr-0001',
@@ -555,6 +577,16 @@ function startMockServer(overrides = {}) {
           context_truncated: false,
         }));
       });
+      return;
+    }
+
+    const promote = /^\/api\/scratch\/([^/]+)\/promote$/.exec(pathname);
+    if (promote && req.method === 'POST') {
+      const key = overrides.scratchPromoteKey || 'dashboard:direct:aside-0123456789abcdef:general';
+      scratchPromoteCalls.push(promote[1]);
+      listSession(key, '', '');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ key }));
       return;
     }
 
@@ -876,6 +908,20 @@ function startMockServer(overrides = {}) {
       return;
     }
 
+    if (plannerData && pathname === NZ_CONTRACT.API.planner_aside && req.method === 'POST') {
+      if (!checkAuth()) return;
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        const b = JSON.parse(body || '{}');
+        plannerAsideCalls.push(b);
+        if (plannerEvents) plannerEvents.push({ type: 'system', time: Date.now(), summary: '💬 ' + b.key + ' 你开了单独聊：' + b.title });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'noted' }));
+      });
+      return;
+    }
+
     if (plannerData && pathname === NZ_CONTRACT.API.planner_send && req.method === 'POST') {
       if (!checkAuth()) return;
       let body = '';
@@ -940,6 +986,15 @@ function startMockServer(overrides = {}) {
       req.on('data', c => (body += c));
       req.on('end', () => {
         sendCalls.push(body);
+        if (overrides.sendCreates && status < 400) {
+          try {
+            const b = JSON.parse(body || '{}');
+            if (b.key && !keyEvents[b.key] && !(sessionsData.sessions || []).some(x => x.key === b.key)) {
+              listSession(b.key, b.workspace || '', b.text || '');
+              keyEvents[b.key] = [{ type: 'user', detail: b.text || '', time: Date.now(), uuid: 'sc-' + sendCalls.length }];
+            }
+          } catch { /* not JSON: nothing to list */ }
+        }
         if (status === 429) {
           res.writeHead(429, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'message queue full' }));
@@ -1440,6 +1495,9 @@ function startMockServer(overrides = {}) {
         get plannerStateCalls() { return plannerStateCalls; },
         get plannerForgetCalls() { return plannerForgetCalls; },
         get plannerSendCalls() { return plannerSendCalls; },
+        get plannerAsideCalls() { return plannerAsideCalls; },
+        get scratchOpenCalls() { return scratchOpenCalls; },
+        get scratchPromoteCalls() { return scratchPromoteCalls; },
         get uploadCalls() { return uploadCalls; },
         get remoteCalls() { return remoteCalls; },
         get historySearchCalls() { return historySearchCalls; },

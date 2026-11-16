@@ -1153,6 +1153,25 @@ func (a *Agent) Note(text string) {
 	}
 }
 
+// asideTitleRunes caps an aside chat's title in its note: the page shows it
+// on one line.
+const asideTitleRunes = 60
+
+// AsideNote is the line an aside chat (单独聊, §15.14 ⑥, D117) leaves in the
+// conversation, "💬 <key> 你开了单独聊：<title>": the page reads the key from
+// it to open the session (planner_cards.js, planner_layers.js). The title is
+// folded to one line; "" when it is empty.
+func AsideNote(key, title string) string {
+	title = strings.Join(strings.Fields(title), " ")
+	if cut := textutil.TruncateRunesNoEllipsis(title, asideTitleRunes); cut != title {
+		title = cut + "…"
+	}
+	if title == "" {
+		return ""
+	}
+	return "💬 " + key + " 你开了单独聊：" + title
+}
+
 // Notes returns the journaled notes of the last notesLookback, oldest first,
 // at most notesMax.
 func (a *Agent) Notes() ([]Note, error) {
