@@ -199,6 +199,10 @@ type Status struct {
 	Stopped bool   `json:"stopped"`
 	Key     string `json:"key"`
 	Alive   bool   `json:"alive"`
+	// Running is a turn in flight: the page says 处理汇报中 while it is one
+	// you did not start (§15.14 ②), a turn cut off without a result
+	// included.
+	Running bool `json:"running"`
 	// Shift is the day of the current conversation's shift (YYYY-MM-DD).
 	Shift string `json:"shift,omitempty"`
 	// Workspaces names the registered workspaces by ID, for the page to
@@ -1079,7 +1083,8 @@ func (a *Agent) Status() Status {
 	a.mu.Lock()
 	st := Status{Enabled: a.cfg.Enabled, Stopped: a.state.Stopped, Key: Key, Shift: a.state.Shift}
 	a.mu.Unlock()
-	st.Alive = a.cfg.Sessions.State(Key).Alive
+	ss := a.cfg.Sessions.State(Key)
+	st.Alive, st.Running = ss.Alive, ss.Running
 	st.Workspaces = a.workspaceNames()
 	return st
 }

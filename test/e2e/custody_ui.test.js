@@ -197,7 +197,8 @@ for (const [name, vp] of [['desktop', { viewport: { width: 1440, height: 900 } }
       if (name === 'phone') await page.click('#pl-left-toggle');
       await page.click('#pl-more > summary');
       const tools = page.locator('#pl-tools');
-      await expect(tools.locator('.pl-tool-l')).toHaveText(['暂停推送与托管']);
+      // A phone has 对话 | 全部 there too: its header has no room (§15.14 ②).
+      await expect(tools.locator('.pl-tool-l:visible')).toHaveText(name === 'phone' ? ['时间线', '暂停推送与托管'] : ['暂停推送与托管']);
       await tools.screenshot({ path: test.info().outputPath('custody-menu-' + name + '.png') });
       await tools.locator('[data-action="planner-pause"][data-for="1h"]').click();
       await expect.poll(() => mock.inboxCalls.at(-1)).toMatchObject({ method: 'PUT', body: { for: '1h' } });

@@ -22,6 +22,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cli/workflow"
 	"github.com/naozhi/naozhi/internal/cliinfo"
+	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/wsproto"
 )
@@ -82,6 +83,10 @@ export const NZ_CONTRACT = Object.freeze({
 	writeEnum(&b, "STARTUP_FAILURE_CLASS", clierr.AllExitClassWires())
 	writeEnum(&b, "WORKFLOW_STATUS", workflow.AllStatuses())
 	writeEnum(&b, "WORKFLOW_AGENT_STATE", workflow.AllAgentStates())
+	// The Planner turn sources the Planner page folds into 动态, and its
+	// shift change's (§15.14 ②): the user entry's source names them.
+	writeEnum(&b, "PLANNER_TURN_DYNAMIC", agent.DynamicSources())
+	writeEnum(&b, "PLANNER_TURN_SHIFT", []string{agent.SourceShift.Entry()})
 	b.WriteString("  },\n")
 
 	// DEATH_REASON_PREFIX: the shapes of a cli_exited reason that carries an

@@ -1,9 +1,6 @@
 package wireup
 
 import (
-	"os"
-	"path/filepath"
-	"slices"
 	"testing"
 	"time"
 
@@ -32,28 +29,6 @@ func TestReapSessionLastActive(t *testing.T) {
 	}
 	if _, ok := src.LastActive("task:bbbbbbbbbbbb"); ok {
 		t.Fatal("LastActive found a key not in the router")
-	}
-}
-
-// The cwds a transcript ran in, each once in the order first seen; lines
-// without one, relative ones and garbage are skipped.
-func TestTranscriptCwds(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "s.jsonl")
-	body := `{"type":"user","cwd":"/r"}
-{"type":"assistant","cwd":"/r/.claude/worktrees/x"}
-not json "cwd":
-{"type":"summary"}
-{"cwd":"rel"}
-{"type":"user","cwd":"/r"}
-`
-	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if got := transcriptCwds(p); !slices.Equal(got, []string{"/r", "/r/.claude/worktrees/x"}) {
-		t.Fatalf("transcriptCwds = %v", got)
-	}
-	if got := transcriptCwds(filepath.Join(t.TempDir(), "none")); got != nil {
-		t.Fatalf("missing transcript = %v", got)
 	}
 }
 

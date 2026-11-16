@@ -63,6 +63,8 @@ type EventEntry struct {
 	// Source is who sent a "user" entry when it was not the user: the
 	// gateway under custody (SourceCustody), the Planner's dispatch
 	// (SourcePlanner) or a decision it relayed (SourceRelay); "" is the user.
+	// On planner:main it is what started the turn (planner/agent
+	// Source.Entry: receipt, scout, shift, answer, ...).
 	Source string `json:"source,omitempty"`
 	// CustodyReason and CustodyN are why custody sent a SourceCustody entry
 	// (出错重试, 按建议执行, Planner 继续) and its count over the lineage;

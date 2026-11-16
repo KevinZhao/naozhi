@@ -1,11 +1,7 @@
 package wireup
 
 import (
-	"bufio"
-	"bytes"
-	"encoding/json"
 	"errors"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -20,10 +16,6 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// maxTranscriptLine caps one transcript line read for its cwd; a longer
-// line (a huge tool result) ends the scan with what was found.
-const maxTranscriptLine = 16 << 20
-
 // ReapSources are the router's signals and actions planner/reap uses.
 type ReapSources struct {
 	Router *session.Router
@@ -31,7 +23,19 @@ type ReapSources struct {
 	Health func() health.Snapshot
 	// ClaudeDir is the Claude CLI's directory, where the transcripts are.
 	ClaudeDir string
+	// Transcripts keeps what was read of each transcript; nil reads each
+	// one whole every time.
+	Transcripts *TranscriptDirs
+	// Now is the clock InUse reads; nil is time.Now.
+	Now func() time.Time
 }
+
+// cmdInUseFor is how long a directory a session's command cd'd into counts
+// as that session's in InUse. A cwd counts while the session is in the
+// router, but a command may only have looked (a reviewer's git -C W diff),
+// and a session such as the user's own stays in the router for weeks; one
+// still working there names it again with each command.
+const cmdInUseFor = 24 * time.Hour
 
 // Session is reap.Config.Session: the same signals custody's Settled reads,
 // kept apart so the hold says which one holds.
@@ -91,11 +95,29 @@ func (c ReapSources) Restore(key, sessionID, workspace, lastPrompt string) error
 	return nil
 }
 
-// InUse is reap.Config.InUse: a session other than key whose workspace is
-// dir or under it.
+// InUse is reap.Config.InUse: a session other than key, still in the
+// router (not put away), whose workspace is dir or under it, whose
+// transcripts' cwd went into dir, or whose commands or its sub-agents' cd'd
+// into it within cmdInUseFor.
 func (c ReapSources) InUse(dir, key string) bool {
+	now := time.Now
+	if c.Now != nil {
+		now = c.Now
+	}
+	since := now().Add(-cmdInUseFor)
+	using := func(d dirSeen) bool { return (d.cwd || d.cmdAt.After(since)) && within(d.dir, dir) }
 	for _, snap := range c.Router.ListSessions() {
-		if snap.Key != key && snap.Workspace != "" && within(snap.Workspace, dir) {
+		if snap.Key == key {
+			continue
+		}
+		if snap.Workspace != "" && within(snap.Workspace, dir) {
+			return true
+		}
+		ids := []string{snap.SessionID}
+		if s := c.Router.SessionFor(snap.Key); s != nil {
+			ids = s.SnapshotChainIDs()
+		}
+		if slices.ContainsFunc(c.sessionDirs(snap.Workspace, ids), using) {
 			return true
 		}
 	}
@@ -103,54 +125,48 @@ func (c ReapSources) InUse(dir, key string) bool {
 }
 
 // Dirs is reap.Config.Dirs: the working directories sessionIDs' transcripts
-// recorded (the CLI writes its cwd on each line, so a cd into a worktree
-// shows), in the order first seen.
+// and their sub-agents' went into, in the order first seen. The CLI writes
+// its cwd on each line, but the shell is reset to the workspace after a cd
+// out of the project (a worktree under ~/workspace/naozhiwt/) and, in a
+// sub-agent, before each command; so the directories Bash commands cd into
+// are read too (a workflow's agents each working in their own worktree).
 func (c ReapSources) Dirs(workspace string, sessionIDs []string) []string {
-	if c.ClaudeDir == "" || workspace == "" {
-		return nil
-	}
 	var out []string
-	seen := map[string]bool{}
-	for _, id := range sessionIDs {
-		p := claudefs.LocateSessionJSONL(c.ClaudeDir, workspace, id)
-		if p == "" {
-			continue
-		}
-		for _, d := range transcriptCwds(p) {
-			if !seen[d] {
-				seen[d] = true
-				out = append(out, d)
-			}
-		}
+	for _, d := range c.sessionDirs(workspace, sessionIDs) {
+		out = append(out, d.dir)
 	}
 	return out
 }
 
-// transcriptCwds are the distinct cwd fields of the transcript at path.
-func transcriptCwds(path string) []string {
-	f, err := os.Open(path)
-	if err != nil {
+func (c ReapSources) sessionDirs(workspace string, sessionIDs []string) []dirSeen {
+	if c.ClaudeDir == "" || workspace == "" {
 		return nil
 	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64<<10), maxTranscriptLine)
-	key := []byte(`"cwd":`)
-	var out []string
-	seen := map[string]bool{}
-	for sc.Scan() {
-		line := sc.Bytes()
-		if !bytes.Contains(line, key) {
+	projectDirs := claudefs.WorkspaceProjectDirs(claudefs.ProjectsRoot(c.ClaudeDir), workspace)
+	var out []dirSeen
+	idx := map[string]int{}
+	add := func(dirs []dirSeen) {
+		for _, d := range dirs {
+			if i, ok := idx[d.dir]; ok {
+				out[i].merge(d)
+				continue
+			}
+			idx[d.dir] = len(out)
+			out = append(out, d)
+		}
+	}
+	for _, id := range sessionIDs {
+		if id == "" {
 			continue
 		}
-		var v struct {
-			Cwd string `json:"cwd"`
+		if p := claudefs.LocateSessionJSONL(c.ClaudeDir, workspace, id); p != "" {
+			add(c.Transcripts.read(p))
 		}
-		if json.Unmarshal(line, &v) != nil || v.Cwd == "" || seen[v.Cwd] || !filepath.IsAbs(v.Cwd) {
-			continue
+		for _, pd := range projectDirs {
+			for _, p := range claudefs.SubagentTranscripts(pd, id) {
+				add(c.Transcripts.read(p))
+			}
 		}
-		seen[v.Cwd] = true
-		out = append(out, v.Cwd)
 	}
 	return out
 }

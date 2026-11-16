@@ -264,6 +264,9 @@
         <!-- New results (tasks.js, §15.12 ④): filters the 任务 cards to
              them; page only, the drawer has no left column. -->
         <span class="pl-news pl-page-only" id="pl-news" hidden><button type="button" class="pl-link" data-action="tasks-only-new" aria-pressed="false"></button><span class="pl-news-sep" aria-hidden="true">·</span><button type="button" class="pl-link pl-news-all" data-action="tasks-seen-all">全部已读</button></span>
+        <!-- 对话 | 全部 (planner_layers.js, §15.14 ②): the turns you started
+             with the rest folded into 动态 rows, or the whole timeline. -->
+        <span class="pl-layer" role="group" aria-label="时间线"><button type="button" class="pl-layer-b" data-action="planner-layer" data-layer="talk" aria-pressed="true" title="只看你和 Planner 的对话，其余折成动态">对话</button><button type="button" class="pl-layer-b" data-action="planner-layer" data-layer="all" aria-pressed="false" title="完整时间线">全部</button></span>
         <span class="pl-head-sp"></span>
         <button type="button" class="files-dl-btn pl-page-only" data-action="workbench-toggle" title="工作台（预览 · 产出 · 文件 · 详情）">工作台</button>
         <details class="pl-more pl-page-only" id="pl-more">

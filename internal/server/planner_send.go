@@ -352,6 +352,9 @@ func (e *sendEngine) submitPlanner(key string, src agent.Source, said *agent.Wor
 	if src == "" {
 		// A dispatch's first message is the Planner's, not the user's.
 		r.Source = clievent.SourcePlanner
+	} else {
+		// The Planner page tells your turns from the rest by it (D113).
+		r.Source = src.Entry()
 	}
 	switch e.turns.Submit(e.ctx, r, dashAdmission{track: e.TrackSend, ctx: e.ctx}) {
 	case turn.AckOwner, turn.AckDetached:
