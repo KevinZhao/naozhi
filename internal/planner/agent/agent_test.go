@@ -217,7 +217,7 @@ func TestName(t *testing.T) {
 }
 
 func TestAllowRulesWorkspaces(t *testing.T) {
-	got := allowRules("/s/planner", "/s/events", []string{"/w/a", "/w/b", "/w/a"})
+	got := allowRules("/s/planner", "/s/events", []string{"/w/a", "/w/b", "/w/a"}, nil)
 	for _, want := range []string{"Read(//s/planner/**)", "Read(//w/a/**)", "Read(//w/b/**)"} {
 		if !slices.Contains(got, want) {
 			t.Errorf("allow lacks %s: %v", want, got)

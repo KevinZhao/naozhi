@@ -14,7 +14,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -366,6 +368,7 @@ func (a *Agent) Opts() sessionview.AgentOpts {
 
 func (a *Agent) buildOpts() sessionview.AgentOpts {
 	root := a.cfg.Layout.PlannerRoot()
+	allow, deny := a.readRules()
 	return sessionview.AgentOpts{
 		Model:     Model,
 		Effort:    Effort,
@@ -379,8 +382,8 @@ func (a *Agent) buildOpts() sessionview.AgentOpts {
 		Name:                a.name,
 		StrictMCPConfig:     true,
 		CrossSessionInbound: "accept",
-		PermissionsAllow:    allowRules(root, a.cfg.Layout.EventsRoot(), a.cfg.Workspaces.LocalPaths()),
-		PermissionsDeny:     a.denyRules(),
+		PermissionsAllow:    allow,
+		PermissionsDeny:     deny,
 		PromptCacheTTL:      PromptCacheTTL,
 	}
 }
@@ -394,14 +397,26 @@ func absRule(tool, path string) string {
 	return tool + "(/" + filepath.ToSlash(path) + ")"
 }
 
+// readRules are the Planner's allow and deny rules, both built on one read
+// of the workspace aliases so a spelling the allow rules open is one the
+// deny rules close.
+func (a *Agent) readRules() (allow, deny []string) {
+	aliases := a.cfg.Workspaces.LocalAliases()
+	allow = allowRules(a.cfg.Layout.PlannerRoot(), a.cfg.Layout.EventsRoot(), a.cfg.Workspaces.LocalPaths(), aliases)
+	return allow, a.denyRules(aliases)
+}
+
 // allowRules are what the Planner may read outside its working directory:
 // its state root, the event logs index.json points at, the "懂你" sources and
 // the registered workspaces on this node, so it can check a claim against
 // the files (RFC §4.1; Read rules also cover Grep and Glob). Under dontAsk
 // anything else is refused; denyRules still win inside these trees. A
 // workspace registered later is picked up once the Planner is next idle
-// (refreshReadScope).
-func allowRules(root, events string, workspaces []string) []string {
+// (refreshReadScope). The CLI matches a rule against the path as written,
+// never resolving symlinks, so a workspace's aliases (the spellings sessions
+// reached it by, as the snapshot and reports give it) get rules of their
+// own, after the paths and sorted, keeping the list stable between refreshes.
+func allowRules(root, events string, workspaces []string, aliases map[string]string) []string {
 	rules := []string{
 		absRule("Read", filepath.Join(root, "**")),
 		absRule("Read", filepath.Join(events, "**")),
@@ -413,79 +428,214 @@ func allowRules(root, events string, workspaces []string) []string {
 			rules = append(rules, r)
 		}
 	}
+	for _, alias := range slices.Sorted(maps.Keys(aliases)) {
+		if r := absRule("Read", filepath.Join(alias, "**")); !slices.Contains(rules, r) {
+			rules = append(rules, r)
+		}
+	}
 	return rules
 }
 
+// spellings are the paths the Planner may name dir by: dir made absolute,
+// dir with its symlinks resolved, and dir under each workspace alias whose
+// directory holds it. A deny rule written for one spelling would leave the
+// file readable by another an allow rule covers, so each gets one. dir need
+// not exist yet: the part that does is resolved and the rest kept, so the
+// rules do not change (and restart the Planner) once it is created.
+func spellings(dir string, aliases map[string]string) []string {
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	out := []string{dir}
+	if real := resolveExisting(dir); real != dir {
+		out = append(out, real)
+	}
+	for _, alias := range slices.Sorted(maps.Keys(aliases)) {
+		target := aliases[alias]
+		for _, p := range out[:min(len(out), 2)] {
+			var s string
+			if p == target {
+				s = alias
+			} else if rest, ok := strings.CutPrefix(p, target+string(filepath.Separator)); ok {
+				s = filepath.Join(alias, rest)
+			}
+			if s != "" && !slices.Contains(out, s) {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
+
+// resolveExisting resolves the symlinks of p's longest existing ancestor
+// and keeps the components below it.
+func resolveExisting(p string) string {
+	var rest []string
+	for cur := p; ; {
+		if real, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Join(append([]string{real}, rest...)...)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p
+		}
+		rest = append([]string{filepath.Base(cur)}, rest...)
+		cur = parent
+	}
+}
+
+// insideRules carry deny rules rooted at dir (pats relative to it, "" for
+// dir itself) to the aliases whose directory lies inside dir. A file
+// reached through such an alias is matched only by the alias's spelling,
+// which is no spelling of dir, so spellings misses it. An alias gets what
+// the pattern still matches below its directory, or all of it when the
+// pattern names a tree the directory sits in.
+func insideRules(dir string, pats []string, aliases map[string]string) []string {
+	bases := spellings(dir, nil)
+	var rules []string
+	for _, alias := range slices.Sorted(maps.Keys(aliases)) {
+		for _, b := range bases {
+			rel, ok := strings.CutPrefix(aliases[alias], b+string(filepath.Separator))
+			if !ok {
+				continue
+			}
+			for _, p := range pats {
+				if tail, ok := patternBelow(p, rel); ok {
+					if r := absRule("Read", filepath.Join(alias, tail)); !slices.Contains(rules, r) {
+						rules = append(rules, r)
+					}
+				}
+			}
+			break
+		}
+	}
+	return rules
+}
+
+// patternBelow is what pat, relative to a directory, matches below its
+// subdirectory rel: the rest of pat once its leading components matched
+// rel's, "**" when pat names rel or one of its ancestors (a denied
+// directory covers what is in it), the pattern from a "**" on since that
+// spans any depth. ok is false when pat matches nothing below rel.
+func patternBelow(pat, rel string) (string, bool) {
+	var pc []string
+	if pat != "" {
+		pc = strings.Split(filepath.ToSlash(pat), "/")
+	}
+	rc := strings.Split(filepath.ToSlash(rel), "/")
+	for i, r := range rc {
+		if i == len(pc) {
+			return "**", true
+		}
+		if pc[i] == "**" {
+			return filepath.FromSlash(path.Join(pc[i:]...)), true
+		}
+		if m, err := path.Match(pc[i], r); err != nil || !m {
+			return "", false
+		}
+	}
+	if len(pc) == len(rc) {
+		return "**", true
+	}
+	return filepath.FromSlash(path.Join(pc[len(rc):]...)), true
+}
+
+// spelledRules deny pats, relative to dir, under every spelling of dir and
+// inside every alias that lies within it.
+func spelledRules(dir string, pats []string, aliases map[string]string) []string {
+	var rules []string
+	for _, s := range spellings(dir, aliases) {
+		for _, p := range pats {
+			rules = append(rules, absRule("Read", filepath.Join(s, p)))
+		}
+	}
+	return append(rules, insideRules(dir, pats, aliases)...)
+}
+
+// homeDeny are the home-relative credential paths §15.1 lists.
+var homeDeny = []string{
+	".aws/**", ".ssh/**",
+	".naozhi/*.yaml", ".naozhi/**/*.yaml", ".naozhi/*.json", ".naozhi/shims/**", ".naozhi/access-profile-secrets/**",
+	".gnupg/**", ".config/gh/**", ".docker/config.json", ".kube/**",
+	".netrc", ".git-credentials", ".npmrc",
+	".claude.json", ".claude/.credentials.json", ".claude/settings*.json",
+}
+
 // denyRules keep credentials out of reach even inside an allowed tree: the
-// home-relative ones §15.1 lists, the data root's secret-bearing files (its
+// home-relative ones (homeDeny), the data root's secret-bearing files (its
 // config-shaped files, shim state with auth tokens, profile secrets, debug
-// captures with API keys) and the extra paths.
-func denyRules(dataRoot string, extra []string) []string {
-	rules := []string{
-		"Read(~/.aws/**)",
-		"Read(~/.ssh/**)",
-		"Read(~/.naozhi/*.yaml)",
-		"Read(~/.naozhi/**/*.yaml)",
-		"Read(~/.naozhi/*.json)",
-		"Read(~/.naozhi/shims/**)",
-		"Read(~/.naozhi/access-profile-secrets/**)",
-		"Read(~/.gnupg/**)",
-		"Read(~/.config/gh/**)",
-		"Read(~/.docker/config.json)",
-		"Read(~/.kube/**)",
-		"Read(~/.netrc)",
-		"Read(~/.git-credentials)",
-		"Read(~/.npmrc)",
-		"Read(~/.claude.json)",
-		"Read(~/.claude/.credentials.json)",
-		"Read(~/.claude/settings*.json)",
+// captures with API keys) and the extra paths, each under every spelling
+// (spelledRules). The CLI expands "~" to the one home spelling it was
+// given, so the other spellings of home get absolute rules.
+func denyRules(home, dataRoot string, extra []string, aliases map[string]string) []string {
+	var rules []string
+	for _, p := range homeDeny {
+		rules = append(rules, "Read(~/"+p+")")
+	}
+	rules = append(rules,
 		"Read(//**/.env)",
 		"Read(//**/.env.*)",
 		"Read(//**/*.pem)",
 		"Read(//**/*.key)",
 		"Read(//**/id_rsa*)",
 		"Read(//**/id_ed25519*)",
+	)
+	if home != "" {
+		pats := make([]string, len(homeDeny))
+		for i, p := range homeDeny {
+			pats[i] = filepath.FromSlash(p)
+		}
+		// The first spelling is home as given, which "~" already covers.
+		for _, s := range spellings(home, aliases)[1:] {
+			for _, p := range pats {
+				rules = append(rules, absRule("Read", filepath.Join(s, p)))
+			}
+		}
+		rules = append(rules, insideRules(home, pats, aliases)...)
 	}
 	if dataRoot != "" {
-		for _, p := range []string{"*.yaml", filepath.Join("**", "*.yaml"), "*.json", filepath.Join("shims", "**"),
-			filepath.Join("access-profile-secrets", "**"), filepath.Join("session-settings", "**"), filepath.Join("cli-debug", "**")} {
-			rules = append(rules, absRule("Read", filepath.Join(dataRoot, p)))
-		}
+		rules = append(rules, spelledRules(dataRoot, []string{"*.yaml", filepath.Join("**", "*.yaml"), "*.json", filepath.Join("shims", "**"),
+			filepath.Join("access-profile-secrets", "**"), filepath.Join("session-settings", "**"), filepath.Join("cli-debug", "**")}, aliases)...)
 	}
 	for _, p := range extra {
 		if p == "" {
 			continue
 		}
-		rules = append(rules, absRule("Read", p))
+		pats := []string{""}
 		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
-			rules = append(rules, absRule("Read", filepath.Join(p, "**")))
+			pats = append(pats, "**")
 		}
+		rules = append(rules, spelledRules(p, pats, aliases)...)
 	}
 	return rules
 }
 
 // denyRules is the Planner's deny rules: the credentials (denyRules) and
-// the event logs of the sessions marked tainted (Config.Tainted).
-func (a *Agent) denyRules() []string {
-	rules := denyRules(a.cfg.Layout.Root(), a.cfg.DenyPaths)
+// the event logs of the sessions marked tainted (Config.Tainted), under
+// the spellings aliases adds.
+func (a *Agent) denyRules(aliases map[string]string) []string {
+	rules := denyRules(a.cfg.Home, a.cfg.Layout.Root(), a.cfg.DenyPaths, aliases)
 	if a.cfg.Tainted == nil || a.cfg.Layout.EventsRoot() == "" {
 		return rules
 	}
-	return append(rules, taintRules(a.cfg.Layout.EventsRoot(), a.cfg.Tainted())...)
+	return append(rules, taintRules(a.cfg.Layout.EventsRoot(), a.cfg.Tainted(), aliases)...)
 }
 
 // taintRules deny the event logs of keys, sessions that read web pages or
 // mail (§7.4, §15.12 ⑨): every file of a log shares its key hash stem
 // (persist.KeyHash), the rotate staging files too. The Planner reads such a
 // session's digest instead; the raw pages stay out of its context.
-func taintRules(events string, keys []string) []string {
+func taintRules(events string, keys []string, aliases map[string]string) []string {
 	keys = slices.Clone(keys)
 	slices.Sort(keys)
-	rules := make([]string, 0, len(keys))
+	pats := make([]string, 0, len(keys))
 	for _, k := range slices.Compact(keys) {
-		rules = append(rules, absRule("Read", filepath.Join(events, persist.KeyHash(k)+"*")))
+		pats = append(pats, persist.KeyHash(k)+"*")
 	}
-	return rules
+	if len(pats) == 0 {
+		return nil
+	}
+	return spelledRules(events, pats, aliases)
 }
 
 // maxMemoryIndexes caps the auto-memory indexes listed in the prompt.
@@ -668,8 +818,7 @@ func (a *Agent) sizeShiftName(now time.Time) string {
 // options at once, and a live process started on others is released while
 // idle, to be resumed on its conversation with them at the next reconcile.
 func (a *Agent) refreshReadScope(st SessionState) {
-	want := allowRules(a.cfg.Layout.PlannerRoot(), a.cfg.Layout.EventsRoot(), a.cfg.Workspaces.LocalPaths())
-	deny := a.denyRules()
+	want, deny := a.readRules()
 	a.mu.Lock()
 	a.opts.PermissionsAllow, a.opts.PermissionsDeny = want, deny
 	stale := !slices.Equal(a.spawnedAllow, want) || !slices.Equal(a.spawnedDeny, deny)

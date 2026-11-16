@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -277,5 +278,117 @@ func TestLocalDirs(t *testing.T) {
 	}
 	if (*Registry)(nil).LocalDirs() != nil {
 		t.Error("nil registry listed directories")
+	}
+}
+
+// TestAliases: a directory reached through a symlink is registered resolved,
+// and the spelling it was reached by is kept as an alias of that path — for
+// a subdirectory too, less what lies below the path — and survives a reload.
+// A symlink inside the workspace adds none, and an alias that no longer
+// names the path is left out of LocalAliases.
+func TestAliases(t *testing.T) {
+	root := tempRoot(t, "real/ws/sub/inner", "elsewhere")
+	ws := filepath.Join(root, "real", "ws")
+	for link, target := range map[string]string{
+		"link":  filepath.Join(root, "real"),
+		"link2": filepath.Join(root, "real"),
+	} {
+		if err := os.Symlink(target, filepath.Join(root, link)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(ws, "sub", "inner"), filepath.Join(ws, "in")); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "workspaces.json")
+	r := Load(path, node)
+	w, ok := r.Ensure(filepath.Join(root, "link", "ws"))
+	if !ok || w.Paths[node][0] != ws {
+		t.Fatalf("Ensure = %+v, %v; want %s registered", w, ok, ws)
+	}
+	if again, _ := r.Ensure(filepath.Join(root, "link2", "ws", "sub") + "/"); again.ID != w.ID {
+		t.Fatalf("subdirectory through link2 went to %+v", again)
+	}
+	r.Ensure(filepath.Join(ws, "in"))
+	want := map[string]string{filepath.Join(root, "link", "ws"): ws, filepath.Join(root, "link2", "ws"): ws}
+	if got := Load(path, node).LocalAliases(); !maps.Equal(got, want) {
+		t.Fatalf("LocalAliases after reload = %v, want %v", got, want)
+	}
+
+	if err := os.Remove(filepath.Join(root, "link2")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "elsewhere"), filepath.Join(root, "link2")); err != nil {
+		t.Fatal(err)
+	}
+	delete(want, filepath.Join(root, "link2", "ws"))
+	if got := r.LocalAliases(); !maps.Equal(got, want) {
+		t.Errorf("an alias pointed elsewhere still listed: %v", got)
+	}
+
+	seeded := Load("", node)
+	seeded.SeedIfEmpty([]Seed{{Path: filepath.Join(root, "link", "ws")}})
+	if got := seeded.LocalAliases(); !maps.Equal(got, want) {
+		t.Errorf("seeded aliases = %v, want %v", got, want)
+	}
+	if (*Registry)(nil).LocalAliases() != nil {
+		t.Error("nil registry listed aliases")
+	}
+}
+
+// TestAliasSymlinkIntoSubdir: a symlink outside the workspace naming one of
+// its subdirectories is kept as an alias of that subdirectory, also when a
+// session's cwd lies below it, since the Planner reads files by the
+// spelling the session gave.
+func TestAliasSymlinkIntoSubdir(t *testing.T) {
+	root := tempRoot(t, "w/sub/deeper")
+	ws := filepath.Join(root, "w")
+	link := filepath.Join(root, "l")
+	if err := os.Symlink(filepath.Join(ws, "sub"), link); err != nil {
+		t.Fatal(err)
+	}
+	r := Load("", node)
+	w, _ := r.Ensure(ws)
+	for _, dir := range []string{link, filepath.Join(link, "deeper")} {
+		if got, ok := r.Ensure(dir); !ok || got.ID != w.ID {
+			t.Fatalf("Ensure(%s) = %+v, %v; want %s", dir, got, ok, w.ID)
+		}
+	}
+	want := map[string]string{link: filepath.Join(ws, "sub")}
+	if got := r.LocalAliases(); !maps.Equal(got, want) {
+		t.Fatalf("LocalAliases = %v, want %v", got, want)
+	}
+}
+
+// TestLocalAliasesDropUnregistered: a path taken out of workspaces.json by
+// hand takes its aliases with it, though the file still lists them.
+func TestLocalAliasesDropUnregistered(t *testing.T) {
+	root := tempRoot(t, "real/a", "real/b", "c")
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(filepath.Join(root, "real"), link); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "workspaces.json")
+	r := Load(path, node)
+	r.Ensure(filepath.Join(link, "a"))
+	r.Ensure(filepath.Join(link, "b"))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f file
+	if err := json.Unmarshal(data, &f); err != nil {
+		t.Fatal(err)
+	}
+	f.Workspaces[0].Paths[node] = []string{filepath.Join(root, "c")}
+	if data, err = json.Marshal(f); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{filepath.Join(link, "b"): filepath.Join(root, "real", "b")}
+	if got := Load(path, node).LocalAliases(); !maps.Equal(got, want) {
+		t.Fatalf("LocalAliases = %v, want %v", got, want)
 	}
 }

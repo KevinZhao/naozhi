@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"maps"
 	"math/rand/v2"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -44,18 +45,27 @@ const (
 
 // Workspace is one registry entry. Paths maps a node ID (config workspace.id
 // for this node, the workspaces / reverse_nodes key for a remote one) to the
-// absolute directories the workspace covers on that node.
+// absolute directories the workspace covers on that node. Paths are stored
+// with their symlinks resolved; Aliases maps a node ID to the spellings
+// sessions reached a path by through a symlink (/tmp/x for /private/tmp/x
+// on macOS), each to the path it names. Permission rules match a path as
+// written, so the Planner's read rules need both.
 type Workspace struct {
-	ID      string              `json:"id"`
-	Name    string              `json:"name"`
-	Paths   map[string][]string `json:"paths"`
-	Created time.Time           `json:"created"`
+	ID      string                       `json:"id"`
+	Name    string                       `json:"name"`
+	Paths   map[string][]string          `json:"paths"`
+	Aliases map[string]map[string]string `json:"aliases,omitempty"`
+	Created time.Time                    `json:"created"`
 }
 
 func (w Workspace) clone() Workspace {
 	w.Paths = maps.Clone(w.Paths)
 	for k, v := range w.Paths {
 		w.Paths[k] = slices.Clone(v)
+	}
+	w.Aliases = maps.Clone(w.Aliases)
+	for k, v := range w.Aliases {
+		w.Aliases[k] = maps.Clone(v)
 	}
 	return w
 }
@@ -155,6 +165,49 @@ func (r *Registry) LocalPaths() []string {
 	return out
 }
 
+// LocalAliases maps every other spelling of a directory a workspace covers
+// on this node to that directory. An alias that no longer names the same
+// directory (its symlink removed or pointed elsewhere), or whose directory
+// is no longer in one of its workspace's paths (one taken out of
+// workspaces.json by hand), is left out: a read rule written for it would
+// reach what is no longer registered.
+func (r *Registry) LocalAliases() map[string]string {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	all := map[string]string{}
+	for _, w := range r.ws {
+		for alias, target := range w.Aliases[r.node] {
+			if slices.ContainsFunc(w.Paths[r.node], func(p string) bool {
+				return within(target, filepath.Clean(p))
+			}) {
+				all[alias] = target
+			}
+		}
+	}
+	r.mu.Unlock()
+	out := map[string]string{}
+	for alias, path := range all {
+		if sameDir(alias, path) {
+			out[alias] = path
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func sameDir(a, b string) bool {
+	ai, err := os.Stat(a)
+	if err != nil || !ai.IsDir() {
+		return false
+	}
+	bi, err := os.Stat(b)
+	return err == nil && os.SameFile(ai, bi)
+}
+
 // Dir is one directory a workspace covers on this node, with its name.
 type Dir struct {
 	Name string
@@ -249,17 +302,78 @@ func (r *Registry) Ensure(dir string) (Workspace, bool) {
 	if !ok {
 		return Workspace{}, false
 	}
+	spelled := filepath.Clean(dir)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if i := r.lookupLocked(resolved); i >= 0 {
+		if r.aliasLocked(i, spelled, resolved) {
+			r.saveLocked()
+		}
 		return r.ws[i].clone(), true
 	}
 	if r.isContainer(resolved) {
 		return Workspace{}, false
 	}
-	w := r.addLocked(filepath.Base(resolved), resolved)
+	r.addLocked(filepath.Base(resolved), resolved)
+	r.aliasLocked(len(r.ws)-1, spelled, resolved)
 	r.saveLocked()
-	return w.clone(), true
+	return r.ws[len(r.ws)-1].clone(), true
+}
+
+// aliasLocked records the spelling of a directory of workspace i that
+// spelled (dir as a session gave it, resolving to resolved) implies, when
+// it differs from the resolved one: spelled with each trailing component it
+// shares with resolved's place below the workspace path taken off while
+// the two still name one directory, so /tmp/x/sub gives /tmp/x for
+// /private/tmp/x, and /L -> /W/sub gives /L for /W/sub. An alias lying in
+// one of the workspace's paths is covered by that path's rules and not
+// kept. Reports whether it added one.
+func (r *Registry) aliasLocked(i int, spelled, resolved string) bool {
+	if spelled == resolved || !filepath.IsAbs(spelled) {
+		return false
+	}
+	w := &r.ws[i]
+	var path, rel string
+	for _, p := range w.Paths[r.node] {
+		p = filepath.Clean(p)
+		if rl, ok := osutil.RelUnderRoot(resolved, p); ok && len(p) > len(path) {
+			path, rel = p, rl
+		}
+	}
+	if path == "" {
+		return false
+	}
+	var parts []string
+	if rel != "." {
+		parts = strings.Split(rel, string(filepath.Separator))
+	}
+	alias := spelled
+	for n := len(parts); n > 0; n-- {
+		up := filepath.Dir(alias)
+		if filepath.Base(alias) != parts[n-1] || !sameDir(up, filepath.Join(append([]string{path}, parts[:n-1]...)...)) {
+			break
+		}
+		alias, parts = up, parts[:n-1]
+	}
+	target := filepath.Join(append([]string{path}, parts...)...)
+	if alias == target || w.Aliases[r.node][alias] == target || slices.ContainsFunc(w.Paths[r.node], func(p string) bool {
+		return within(alias, filepath.Clean(p))
+	}) {
+		return false
+	}
+	if w.Aliases == nil {
+		w.Aliases = map[string]map[string]string{}
+	}
+	if w.Aliases[r.node] == nil {
+		w.Aliases[r.node] = map[string]string{}
+	}
+	w.Aliases[r.node][alias] = target
+	return true
+}
+
+// within reports whether p is root or lies below it, byte-wise.
+func within(p, root string) bool {
+	return p == root || strings.HasPrefix(p, root+string(filepath.Separator))
 }
 
 // SeedIfEmpty registers one workspace per seed when the registry holds none —
@@ -280,6 +394,7 @@ func (r *Registry) SeedIfEmpty(seeds []Seed) int {
 		}
 		seen[p] = true
 		r.addLocked(cmp.Or(s.Name, filepath.Base(p)), p)
+		r.aliasLocked(len(r.ws)-1, filepath.Clean(s.Path), p)
 	}
 	if len(r.ws) > 0 {
 		r.saveLocked()
