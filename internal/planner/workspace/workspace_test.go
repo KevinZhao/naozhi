@@ -336,6 +336,41 @@ func TestAliases(t *testing.T) {
 	}
 }
 
+// TestAliasRepointedAcrossWorkspaces: a symlink repointed from one
+// workspace to another between visits is recorded by both; the stale record
+// must not hide the one it names now (#3959 review).
+func TestAliasRepointedAcrossWorkspaces(t *testing.T) {
+	root := tempRoot(t, "a", "b")
+	a, b := filepath.Join(root, "a"), filepath.Join(root, "b")
+	link := filepath.Join(root, "x")
+	path := filepath.Join(root, "workspaces.json")
+	r := Load(path, node)
+	if _, ok := r.Ensure(b); !ok {
+		t.Fatal("Ensure(b) refused")
+	}
+	if err := os.Symlink(a, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.Ensure(link); !ok {
+		t.Fatal("Ensure(x -> a) refused")
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(b, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.Ensure(link); !ok {
+		t.Fatal("Ensure(x -> b) refused")
+	}
+	want := map[string]string{link: b}
+	for i := 0; i < 5; i++ {
+		if got := Load(path, node).LocalAliases(); !maps.Equal(got, want) {
+			t.Fatalf("LocalAliases = %v, want %v", got, want)
+		}
+	}
+}
+
 // TestAliasSymlinkIntoSubdir: a symlink outside the workspace naming one of
 // its subdirectories is kept as an alias of that subdirectory, also when a
 // session's cwd lies below it, since the Planner reads files by the

@@ -412,10 +412,11 @@ func (a *Agent) readRules() (allow, deny []string) {
 // the files (RFC §4.1; Read rules also cover Grep and Glob). Under dontAsk
 // anything else is refused; denyRules still win inside these trees. A
 // workspace registered later is picked up once the Planner is next idle
-// (refreshReadScope). The CLI matches a rule against the path as written,
-// never resolving symlinks, so a workspace's aliases (the spellings sessions
-// reached it by, as the snapshot and reports give it) get rules of their
-// own, after the paths and sorted, keeping the list stable between refreshes.
+// (refreshReadScope). A read through a symlink is not allowed by the rule
+// for the resolved directory alone (the CLI checks the spelling as written),
+// so a workspace's aliases (the spellings sessions reached it by, as the
+// snapshot and reports give it) get rules of their own, after the paths and
+// sorted, keeping the list stable between refreshes.
 func allowRules(root, events string, workspaces []string, aliases map[string]string) []string {
 	rules := []string{
 		absRule("Read", filepath.Join(root, "**")),
