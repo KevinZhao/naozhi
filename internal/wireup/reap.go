@@ -1,11 +1,7 @@
 package wireup
 
 import (
-	"bufio"
-	"bytes"
-	"encoding/json"
 	"errors"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -19,10 +15,6 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// maxTranscriptLine caps one transcript line read for its cwd; a longer
-// line (a huge tool result) ends the scan with what was found.
-const maxTranscriptLine = 16 << 20
-
 // ReapSources are the router's signals and actions planner/reap uses.
 type ReapSources struct {
 	Router *session.Router
@@ -30,6 +22,9 @@ type ReapSources struct {
 	Health func() health.Snapshot
 	// ClaudeDir is the Claude CLI's directory, where the transcripts are.
 	ClaudeDir string
+	// Transcripts keeps what was read of each transcript; nil reads each
+	// one whole every time.
+	Transcripts *TranscriptDirs
 }
 
 // Session is reap.Config.Session: the same signals custody's Settled reads,
@@ -90,11 +85,22 @@ func (c ReapSources) Restore(key, sessionID, workspace, lastPrompt string) error
 	return nil
 }
 
-// InUse is reap.Config.InUse: a session other than key whose workspace is
-// dir or under it.
+// InUse is reap.Config.InUse: a session other than key, still in the
+// router (not put away), whose workspace is dir or under it, or whose
+// transcripts or its sub-agents' went into dir.
 func (c ReapSources) InUse(dir, key string) bool {
 	for _, snap := range c.Router.ListSessions() {
-		if snap.Key != key && snap.Workspace != "" && within(snap.Workspace, dir) {
+		if snap.Key == key {
+			continue
+		}
+		if snap.Workspace != "" && within(snap.Workspace, dir) {
+			return true
+		}
+		ids := []string{snap.SessionID}
+		if s := c.Router.SessionFor(snap.Key); s != nil {
+			ids = s.SnapshotChainIDs()
+		}
+		if slices.ContainsFunc(c.sessionDirs(snap.Workspace, ids), func(d string) bool { return within(d, dir) }) {
 			return true
 		}
 	}
@@ -102,54 +108,42 @@ func (c ReapSources) InUse(dir, key string) bool {
 }
 
 // Dirs is reap.Config.Dirs: the working directories sessionIDs' transcripts
-// recorded (the CLI writes its cwd on each line, so a cd into a worktree
-// shows), in the order first seen.
+// went into, in the order first seen. The CLI writes its cwd on each line of
+// the session's own transcript, so a cd there shows; a sub-agent's shell is
+// reset to the workspace before each command, so its transcript's cwd stays
+// put and the directories its commands cd into are read instead (a
+// workflow's agents each working in their own worktree).
 func (c ReapSources) Dirs(workspace string, sessionIDs []string) []string {
+	return c.sessionDirs(workspace, sessionIDs)
+}
+
+func (c ReapSources) sessionDirs(workspace string, sessionIDs []string) []string {
 	if c.ClaudeDir == "" || workspace == "" {
 		return nil
 	}
+	projectDirs := claudefs.WorkspaceProjectDirs(claudefs.ProjectsRoot(c.ClaudeDir), workspace)
 	var out []string
 	seen := map[string]bool{}
-	for _, id := range sessionIDs {
-		p := claudefs.LocateSessionJSONL(c.ClaudeDir, workspace, id)
-		if p == "" {
-			continue
-		}
-		for _, d := range transcriptCwds(p) {
+	add := func(dirs []string) {
+		for _, d := range dirs {
 			if !seen[d] {
 				seen[d] = true
 				out = append(out, d)
 			}
 		}
 	}
-	return out
-}
-
-// transcriptCwds are the distinct cwd fields of the transcript at path.
-func transcriptCwds(path string) []string {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64<<10), maxTranscriptLine)
-	key := []byte(`"cwd":`)
-	var out []string
-	seen := map[string]bool{}
-	for sc.Scan() {
-		line := sc.Bytes()
-		if !bytes.Contains(line, key) {
+	for _, id := range sessionIDs {
+		if id == "" {
 			continue
 		}
-		var v struct {
-			Cwd string `json:"cwd"`
+		if p := claudefs.LocateSessionJSONL(c.ClaudeDir, workspace, id); p != "" {
+			add(c.Transcripts.read(p, false))
 		}
-		if json.Unmarshal(line, &v) != nil || v.Cwd == "" || seen[v.Cwd] || !filepath.IsAbs(v.Cwd) {
-			continue
+		for _, pd := range projectDirs {
+			for _, p := range claudefs.SubagentTranscripts(pd, id) {
+				add(c.Transcripts.read(p, true))
+			}
 		}
-		seen[v.Cwd] = true
-		out = append(out, v.Cwd)
 	}
 	return out
 }

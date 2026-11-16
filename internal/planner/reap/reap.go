@@ -11,12 +11,15 @@
 // leaves the session list for the history (Router.Archive): its event log,
 // transcript and session ID stay, so reopening it in 任务 puts it back under
 // its key and the next message resumes it. Then each git worktree it worked
-// in (the directories its transcript ran in) is removed, only once the
-// worktree has nothing uncommitted, its branch is on the remote and the
-// branch's PR is merged or closed; a worktree with work not committed or not
-// pushed is never removed and the user is told once per reason. A worktree
-// waiting on its PR is looked at again every recheckAfter. Every step and
-// every step not taken is journaled (journal.KindReap) and shown on the task.
+// in (the directories its transcript and its sub-agents' went into, a
+// workflow's agents included) is removed, only once the worktree has nothing
+// uncommitted, its branch is on the remote and the branch's PR is merged or
+// closed; a worktree with work not committed or not pushed is never removed
+// and the user is told once per reason. A worktree another session still in
+// the router went into is left alone, unchecked, while that session is there.
+// A worktree waiting on its PR is looked at again every recheckAfter, a PR
+// lookup that failed after ghBackoff. Every step and every step not taken is
+// journaled (journal.KindReap) and shown on the task.
 //
 // A session back under a put-away key other than by Reopen (the owner loop
 // spawning one for a message that raced the put away, sessions.json from
@@ -180,8 +183,29 @@ type Reaper struct {
 	// wait is why each done session is not put away yet.
 	waitMu sync.Mutex
 	wait   map[string]waiting
-	// checked is when each worktree left in place was last looked at.
-	checked map[string]time.Time
+	// next is when each worktree left in place is to be looked at again;
+	// prFails how many PR lookups in a row failed for it.
+	next    map[string]time.Time
+	prFails map[string]int
+}
+
+// ghBackoff is how long a worktree waits after its n-th PR lookup in a row
+// that failed (gh not reaching GitHub, not logged in): looking every
+// recheckAfter gets the same failure and journals the flip each time.
+func ghBackoff(n int) time.Duration {
+	switch {
+	case n <= 1:
+		return time.Hour
+	case n == 2:
+		return 4 * time.Hour
+	}
+	return 24 * time.Hour
+}
+
+// forget drops what is kept of worktree dir's checks.
+func (r *Reaper) forget(dir string) {
+	delete(r.next, dir)
+	delete(r.prFails, dir)
 }
 
 // waiting is why a done session is not put away yet, and when it will be
@@ -196,7 +220,8 @@ func New(cfg Config) *Reaper {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Reaper{cfg: cfg, poke: make(chan struct{}, 1), wait: map[string]waiting{}, checked: map[string]time.Time{}}
+	return &Reaper{cfg: cfg, poke: make(chan struct{}, 1), wait: map[string]waiting{},
+		next: map[string]time.Time{}, prFails: map[string]int{}}
 }
 
 // Poke has the next look run now. It never blocks.
@@ -480,7 +505,7 @@ func (r *Reaper) resetLocked(ctx context.Context, key string) {
 	rec := record{Event: "reset", Key: key, Steps: []string{"会话又回到会话列表（不是经重新打开），收起记录清掉"}}
 	var left []sidecar.Worktree
 	for _, wt := range m.Reap.Worktrees {
-		delete(r.checked, wt.Dir)
+		r.forget(wt.Dir)
 		if wt.State == WTRemoved {
 			if !r.checkOut(ctx, wt, &rec) {
 				continue
@@ -511,11 +536,10 @@ func (r *Reaper) resetLocked(ctx context.Context, key string) {
 // may go; rec gets each removal and each worktree whose state or reason
 // changed. With force every one is looked at, else those due. The ones
 // left by a put away whose session is back (LeftWorktrees) are not looked
-// at while it is in the router: InUse sees only a session's workspace, not
-// the worktree it cd'd into, and the next put away takes them over. Should
-// the session go another way, they are looked at and dropped once removed
-// or gone; the user is told of a kept one only while the session is put
-// away.
+// at while it is in the router: InUse leaves key's own session out, and the
+// next put away takes them over. Should the session go another way, they
+// are looked at and dropped once removed or gone; the user is told of a
+// kept one only while the session is put away.
 func (r *Reaper) checkLocked(ctx context.Context, key string, force bool, rec *record) {
 	m, ok := r.cfg.Sessions.Get(key)
 	if !ok {
@@ -538,13 +562,19 @@ func (r *Reaper) checkLocked(ctx context.Context, key string, force bool, rec *r
 		if !unfinished(*wt) {
 			continue
 		}
-		if !force && now.Sub(r.checked[wt.Dir]) < recheckAfter {
+		if !force && now.Before(r.next[wt.Dir]) {
 			continue
 		}
-		r.checked[wt.Dir] = now
-		state, why := r.judge(ctx, key, *wt)
-		if state == WTRemoved || state == WTGone {
-			delete(r.checked, wt.Dir)
+		state, why, prFailed := r.judge(ctx, key, *wt)
+		switch {
+		case state == WTRemoved || state == WTGone:
+			r.forget(wt.Dir)
+		case prFailed:
+			r.prFails[wt.Dir]++
+			r.next[wt.Dir] = now.Add(ghBackoff(r.prFails[wt.Dir]))
+		default:
+			delete(r.prFails, wt.Dir)
+			r.next[wt.Dir] = now.Add(recheckAfter)
 		}
 		if state == wt.State && why == wt.Why {
 			continue
@@ -580,51 +610,54 @@ func (r *Reaper) checkLocked(ctx context.Context, key string, force bool, rec *r
 }
 
 // judge decides wt's state: removed (it was, here), gone, kept (work not
-// committed or not pushed) or pending (no PR merged or closed yet, or a check
-// that did not answer), with why.
-func (r *Reaper) judge(ctx context.Context, key string, wt sidecar.Worktree) (string, string) {
+// committed or not pushed) or pending (in use by another session, no PR
+// merged or closed yet, or a check that did not answer), with why;
+// prFailed when the PR lookup failed. A worktree another session works in
+// is not looked into: its changes and PR are that session's, still under
+// way.
+func (r *Reaper) judge(ctx context.Context, key string, wt sidecar.Worktree) (state, why string, prFailed bool) {
 	if _, err := os.Stat(wt.Dir); os.IsNotExist(err) {
-		return WTGone, "目录已经不在了"
+		return WTGone, "目录已经不在了", false
+	}
+	if r.cfg.InUse != nil && r.cfg.InUse(wt.Dir, key) {
+		return WTPending, "另有会话在这个目录里", false
 	}
 	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
 	st, err := r.cfg.Git.Status(ctx, wt.Dir)
 	if err != nil {
-		return WTPending, "读不到 git 状态：" + short(err)
+		return WTPending, "读不到 git 状态：" + short(err), false
 	}
 	if st.Dirty {
-		return WTKept, "有未提交的改动"
+		return WTKept, "有未提交的改动", false
 	}
 	if wt.Branch == "" {
 		if !st.Pushed {
-			return WTKept, "有没推送的提交"
+			return WTKept, "有没推送的提交", false
 		}
-		return WTPending, "不在分支上，找不到对应的 PR"
+		return WTPending, "不在分支上，找不到对应的 PR", false
 	}
 	pr, err := r.cfg.Git.PR(ctx, wt.Dir, wt.Branch)
 	if err != nil {
 		if !st.Pushed {
-			return WTKept, "有没推送的提交"
+			return WTKept, "有没推送的提交", true
 		}
-		return WTPending, "查不到 PR：" + short(err)
+		return WTPending, "查不到 PR：" + short(err), true
 	}
 	if !st.Pushed && (pr.Head == "" || pr.Head != st.Head) {
-		return WTKept, "有没推送的提交"
+		return WTKept, "有没推送的提交", false
 	}
 	switch pr.State {
 	case "MERGED", "CLOSED":
 	case "":
-		return WTPending, "分支还没有 PR"
+		return WTPending, "分支还没有 PR", false
 	default:
-		return WTPending, "PR 还没合并或关闭"
-	}
-	if r.cfg.InUse != nil && r.cfg.InUse(wt.Dir, key) {
-		return WTPending, "另有会话在这个目录里"
+		return WTPending, "PR 还没合并或关闭", false
 	}
 	if err := r.cfg.Git.Remove(ctx, wt.GitDir, wt.Dir); err != nil {
-		return WTPending, "删除失败：" + short(err)
+		return WTPending, "删除失败：" + short(err), false
 	}
-	return WTRemoved, "PR 已" + map[string]string{"MERGED": "合并", "CLOSED": "关闭"}[pr.State]
+	return WTRemoved, "PR 已" + map[string]string{"MERGED": "合并", "CLOSED": "关闭"}[pr.State], false
 }
 
 // tell tells the user a worktree stays and why.
@@ -663,7 +696,7 @@ func (r *Reaper) Reopen(ctx context.Context, key string) {
 		}
 	}
 	for _, wt := range rp.Worktrees {
-		delete(r.checked, wt.Dir)
+		r.forget(wt.Dir)
 		if wt.State == WTRemoved {
 			r.checkOut(ctx, wt, &rec)
 		}
