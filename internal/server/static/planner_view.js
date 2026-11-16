@@ -1,7 +1,8 @@
 // planner_view.js — the Planner page (docs/rfc/planner.md §10, §10.1, D77;
 // §15.1 PR ⑥, §15.4 D85, §15.7). Left: 等你 (the open inbox items of GET
 // /api/inbox that wait on you to act, decisions and questions first and
-// labelled, each closable; decision cards answer through /api/inbox/decide)
+// labelled, each closable; decision cards answer through /api/inbox/decide;
+// below them, for a while, the questions that expired and why, §15.14 ④)
 // and the #pl-task container 任务 (tasks.js) mounts into. The header's "⋯"
 // menu holds the seldom used controls — browser notifications (only while
 // the browser has not asked yet), the one pause of pushes and custody (D94:
@@ -88,6 +89,7 @@ const pl = {
   // repaints the stream, and a brief folded stays folded.
   briefOpen: new Map(),
   open: [], // the open inbox items
+  expired: [], // the questions closed without an answer lately (expiredHtml)
   tasksActive: 0, // the tasks 进行中, as 任务 last listed them
   tasksAll: -1, // every task 任务 last listed, done ones too; -1 before a list
   notice: '', // the notice a push or link opened, shown in 等你 (waitListHtml)
@@ -255,7 +257,31 @@ function waitListHtml() {
   const notice = pl.notice ? pl.open.find((it) => itemRef(it) === pl.notice) : null;
   if (!notice) pl.notice = '';
   const html = actionItems().map((it) => itemHtml(it, isPlannerAsk(it))).join('') + (notice ? itemHtml(notice) : '');
-  return html || '<div class="pl-empty">没有等你的事</div>';
+  return (html || '<div class="pl-empty">没有等你的事</div>') + pl.expired.map(expiredHtml).join('');
+}
+
+// EXPIRED_MS is how long a question that closed without an answer stays in
+// 等你 as a card saying why (§15.14 ④: you handled it in the session, or
+// its task is done), so an answer meant for it finds where it went. It
+// counts nowhere and has nothing to press but its session.
+const EXPIRED_MS = 12 * 3600 * 1000;
+
+// expiredOf picks those questions from GET /api/inbox's closed items.
+function expiredOf(closed) {
+  const now = Date.now();
+  return closed.filter((it) => it.kind === 'question' && it.closed_why && now - (Date.parse(it.closed_at) || 0) < EXPIRED_MS);
+}
+
+function expiredHtml(it) {
+  const target = unitTarget(it.task, it.node);
+  const closed = Date.parse(it.closed_at);
+  const open = target ? '<div class="pl-card-meta"><button type="button" class="pl-link" data-action="session-select" data-key="' + escAttr(target.key) + '" data-node="' + escAttr(target.node) + '">打开会话</button></div>' : '';
+  return '<div class="pl-card pl-k-question pl-card-expired" role="listitem" data-id="' + escAttr(itemRef(it)) + '">' +
+    '<div class="pl-card-top"><span class="pl-kind">提问 · 已过期</span>' +
+      (isNaN(closed) ? '' : '<span class="pl-wait" title="' + escAttr(formatAbsTime(closed)) + '">' + esc(timeAgo(closed)) + '</span>') + '</div>' +
+    '<div class="pl-card-title">' + esc(it.title || '') + '</div>' +
+    '<div class="pl-card-why">' + esc(it.closed_why) + '，不用再回答</div>' + open +
+    '</div>';
 }
 
 // isPlannerAsk is a question of the Planner shown with its answers, which the
@@ -284,7 +310,7 @@ export function actionListHtml(max = Infinity) {
 // paintLeftToggle writes the phone's folded left block: 等你 N · 任务 M,
 // the counts of what it holds (the badge's, and the tasks in progress).
 // Known to hold nothing at all (no item by the badge, no task, done ones
-// neither) the block takes no row: pl-left-none hides it on a phone while
+// neither, no expired question saying why) the block takes no row: pl-left-none hides it on a phone while
 // it is folded. Until both are known it stays, so the conversation does not
 // move under a row coming back.
 function paintLeftToggle() {
@@ -293,7 +319,7 @@ function paintLeftToggle() {
   const n = actionItems().length;
   const text = '等你 ' + n + ' · 任务 ' + pl.tasksActive;
   if (el.textContent !== text) el.textContent = text;
-  $('planner-main')?.classList.toggle('pl-left-none', !n && inbox.badge === 0 && pl.tasksAll === 0);
+  $('planner-main')?.classList.toggle('pl-left-none', !n && inbox.badge === 0 && pl.tasksAll === 0 && !pl.expired.length);
 }
 
 function noteItems() {
@@ -419,6 +445,7 @@ export async function fetchInbox() {
   } catch { return; }
   if (host !== plannerHost.node) return;
   pl.open = ((res && Array.isArray(res.open)) ? res.open : []).map((it) => Object.assign({}, it, { node: host }));
+  pl.expired = expiredOf((res && Array.isArray(res.closed)) ? res.closed : []).map((it) => Object.assign({}, it, { node: host }));
   if (!local) notifyNewRemote(host, pl.open);
   pl.pausedUntil = res && res.paused_until ? Date.parse(res.paused_until) || 0 : 0;
   if (res && res.counts) {
@@ -1288,7 +1315,9 @@ registerActions({
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action: el.dataset.act }), timeoutMs: 15000,
       });
     } catch (e) {
-      showToast('没有生效：' + e.message, 'error');
+      // An expired question says why in words of its own (§15.14 ④).
+      if (e.status === 409 && e.message.includes('已过期')) showToast(e.message.replace(/^HTTP 409:\s*/, '').trim(), 'warning');
+      else showToast('没有生效：' + e.message, 'error');
     }
     fetchInbox();
   },
