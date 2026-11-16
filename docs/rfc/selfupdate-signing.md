@@ -1,6 +1,6 @@
 # RFC: selfupdate 加密签名验证
 
-> **状态**: Draft v1（待评审）
+> **状态**: 部分实装，剩余推迟（2026-11-16，planner.md D111：签名工具、release 流水线与 `.sig` 校验已合，`trustedSigKeys` 为空；到 P5 执行型主动落到 naozhi 仓库时再填公钥、发版签名）
 > **作者**: naozhi team (cron-cr)
 > **创建**: 2026-06-04
 > **范围**: 给 selfupdate 升级链加一层真正的发布者身份签名验证，使下载的二进制可信不再单纯依赖"checksums.txt 与 binary 同源同 token"假设
