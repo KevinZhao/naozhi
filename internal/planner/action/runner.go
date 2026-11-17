@@ -1833,6 +1833,16 @@ const (
 // "</naozhi-relay>" cannot close it early.
 var envelopeRe = regexp.MustCompile(`(?i)naozhi-relay`)
 
+// plannerWords is Planner text quoted in the envelope (an ask's question,
+// the option the user picked) folded to one line, its 「」 turned to “”.
+func plannerWords(s string) string {
+	return strings.NewReplacer("「", "“", "」", "”").Replace(strings.Join(strings.Fields(s), " "))
+}
+
+// askTitleRunes caps an ask's question on its card, all the user sees of
+// it; the envelope carries no more.
+const askTitleRunes = 120
+
 // relayEnvelope is what a session reads as the user's decision (D98): the
 // user's own words, as the gateway recorded them, in an envelope only the
 // gateway writes (the Planner's text may not name it, noEnvelope), then the
@@ -1850,7 +1860,11 @@ func relayEnvelope(now time.Time, words []Words, text string) string {
 		said := envelopeRe.ReplaceAllString(textutil.TruncateRunes(strings.TrimSpace(w.Text), wordsRunes), "naozhi_relay")
 		at := w.At.Format("1/2 15:04")
 		if w.Question != "" {
-			q := envelopeRe.ReplaceAllString(w.Question, "naozhi_relay")
+			// Both are the Planner's text, not the user's: only what the
+			// card showed, on one line and unable to close its 「」, so
+			// neither can write a line that reads as the user's words.
+			q := envelopeRe.ReplaceAllString(plannerWords(textutil.TruncateRunes(w.Question, askTitleRunes)), "naozhi_relay")
+			said = plannerWords(said)
 			b.WriteString("Planner 在通知里问用户「" + q + "」，用户 " + at + " 选了「" + said + "」。\n")
 			continue
 		}
@@ -2008,7 +2022,7 @@ func (r *Runner) ask(q Ask) error {
 	it := notify.Item{
 		Kind:   notify.KindQuestion,
 		Unit:   r.cfg.Planner,
-		Title:  textutil.TruncateRunes(q.Question, 120),
+		Title:  textutil.TruncateRunes(q.Question, askTitleRunes),
 		Why:    "Planner 问你",
 		Task:   q.Task,
 		Source: askSourcePrefix + requestID(),
