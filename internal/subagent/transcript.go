@@ -47,6 +47,10 @@ type TranscriptReader struct {
 	f         *os.File
 	statSig   os.FileInfo
 	closeOnce sync.Once
+	// closed is set by Close: a Read/Tail racing it (the tailer's poller
+	// against a task_done finalize) must not reopen an fd no one will
+	// close again.
+	closed bool
 	// pastFirst is set once the file's first line has been mapped.
 	pastFirst bool
 	// firstMS/lastMS bound the timestamps of every record read so far (unix
@@ -90,12 +94,13 @@ func NewTranscriptReaderFrom(path string, f *os.File, open func() (*os.File, err
 }
 
 // Close releases the persistent transcript fd. Idempotent; subsequent
-// Read/Tail calls reopen on demand.
+// Read/Tail calls read nothing.
 func (r *TranscriptReader) Close() error {
 	var err error
 	r.closeOnce.Do(func() {
 		r.mu.Lock()
 		defer r.mu.Unlock()
+		r.closed = true
 		if r.f != nil {
 			err = r.f.Close()
 			r.f = nil
@@ -174,6 +179,9 @@ func (r *TranscriptReader) Tail() ([]clievent.EventEntry, error) {
 }
 
 func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]clievent.EventEntry, error) {
+	if r.closed {
+		return nil, nil
+	}
 	f, err := r.openOrReuse()
 	if err != nil {
 		return nil, err

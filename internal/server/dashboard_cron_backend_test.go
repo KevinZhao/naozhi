@@ -67,7 +67,7 @@ func TestValidateCronBackend_Standalone(t *testing.T) {
 // reusable across the accept / reject tests below.
 func postCronCreate(t *testing.T, srv *Server, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/api/cron", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/cron", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
@@ -99,7 +99,7 @@ func TestCronCreate_AcceptsValidBackend(t *testing.T) {
 
 	// List the jobs through the same HTTP pipeline so the assertion runs
 	// against the wire shape the dashboard actually consumes.
-	listReq := httptest.NewRequest(http.MethodGet, "/api/cron", nil)
+	listReq := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/cron", nil)
 	listW := httptest.NewRecorder()
 	srv.mux.ServeHTTP(listW, listReq)
 	if listW.Code != http.StatusOK {
@@ -197,7 +197,7 @@ func TestCronCreate_AcceptsEmptyBackend(t *testing.T) {
 			// running parallel would risk per-chat cron limit on the
 			// "dashboard"/"global" key. Two cases is light enough that
 			// the loss of parallelism doesn't matter.
-			req := httptest.NewRequest(http.MethodPost, "/api/cron", bytes.NewReader([]byte(tc.body)))
+			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/cron", bytes.NewReader([]byte(tc.body)))
 			req.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
 			srv.mux.ServeHTTP(w, req)
@@ -231,7 +231,7 @@ func TestCronUpdate_AcceptsBackendChange(t *testing.T) {
 
 	// PATCH to backend "kiro".
 	patchBody := `{"backend":"kiro"}`
-	patchReq := httptest.NewRequest(http.MethodPatch, "/api/cron?id="+created.ID, strings.NewReader(patchBody))
+	patchReq := httptest.NewRequest(http.MethodPatch, "http://127.0.0.1/api/cron?id="+created.ID, strings.NewReader(patchBody))
 	patchReq.Header.Set("Content-Type", "application/json")
 	patchW := httptest.NewRecorder()
 	srv.mux.ServeHTTP(patchW, patchReq)
@@ -240,7 +240,7 @@ func TestCronUpdate_AcceptsBackendChange(t *testing.T) {
 	}
 
 	// Read back through list to confirm.
-	listReq := httptest.NewRequest(http.MethodGet, "/api/cron", nil)
+	listReq := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/cron", nil)
 	listW := httptest.NewRecorder()
 	srv.mux.ServeHTTP(listW, listReq)
 	var listResp struct {
@@ -281,7 +281,7 @@ func TestCronUpdate_RejectsInvalidBackend(t *testing.T) {
 	}
 
 	patchBody := `{"backend":"BAD/CHARS"}`
-	req := httptest.NewRequest(http.MethodPatch, "/api/cron?id="+created.ID, strings.NewReader(patchBody))
+	req := httptest.NewRequest(http.MethodPatch, "http://127.0.0.1/api/cron?id="+created.ID, strings.NewReader(patchBody))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
@@ -290,7 +290,7 @@ func TestCronUpdate_RejectsInvalidBackend(t *testing.T) {
 	}
 
 	// Confirm the stored value still says "claude".
-	listReq := httptest.NewRequest(http.MethodGet, "/api/cron", nil)
+	listReq := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/cron", nil)
 	listW := httptest.NewRecorder()
 	srv.mux.ServeHTTP(listW, listReq)
 	var listResp struct {
@@ -360,7 +360,7 @@ func TestCronUpdate_RejectsHalfNotifyPatch(t *testing.T) {
 				t.Fatalf("decode create: %v", err)
 			}
 
-			req := httptest.NewRequest(http.MethodPatch, "/api/cron?id="+created.ID, bytes.NewReader([]byte(tc.body)))
+			req := httptest.NewRequest(http.MethodPatch, "http://127.0.0.1/api/cron?id="+created.ID, bytes.NewReader([]byte(tc.body)))
 			req.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
 			srv.mux.ServeHTTP(w, req)
@@ -372,7 +372,7 @@ func TestCronUpdate_RejectsHalfNotifyPatch(t *testing.T) {
 			// partial write). This is the property the caller cares about
 			// — the wire-level status is incidental, what matters is that
 			// the orphan tuple never reaches disk.
-			listReq := httptest.NewRequest(http.MethodGet, "/api/cron", nil)
+			listReq := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/cron", nil)
 			listW := httptest.NewRecorder()
 			srv.mux.ServeHTTP(listW, listReq)
 			var listResp struct {
@@ -421,7 +421,7 @@ func TestCronUpdate_AcceptsBothNotifyPatch(t *testing.T) {
 	// Both halves cleared together — the legitimate "fall back to default"
 	// flow. Must accept.
 	patchBody := `{"notify_platform":"","notify_chat_id":""}`
-	req := httptest.NewRequest(http.MethodPatch, "/api/cron?id="+created.ID, bytes.NewReader([]byte(patchBody)))
+	req := httptest.NewRequest(http.MethodPatch, "http://127.0.0.1/api/cron?id="+created.ID, bytes.NewReader([]byte(patchBody)))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)

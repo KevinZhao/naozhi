@@ -180,6 +180,24 @@ func (b *wsBroadcaster) broadcastSessionSystemEvent(key, summary string) {
 	})
 }
 
+// broadcastRemoteSessionSystemEvent is broadcastSessionSystemEvent for a
+// session on nodeID. Its subscribers are held by the node conn, not this
+// registry, so the frame goes to every authenticated tab with the node
+// named; the dashboard shows it only in the tab viewing that key on that
+// node. summary must not carry the raw transport error, which every tab
+// now receives.
+func (b *wsBroadcaster) broadcastRemoteSessionSystemEvent(key, nodeID, summary string) {
+	if key == "" || nodeID == "" || summary == "" {
+		return
+	}
+	ev := clievent.EventEntry{
+		Time:    time.Now().UnixMilli(),
+		Type:    clievent.KindSystem,
+		Summary: summary,
+	}
+	b.marshalBroadcastAuth(wsproto.NewEvent(wsproto.Event{Key: key, Node: nodeID, Event: &ev}))
+}
+
 // sanitizeHexIDForBroadcast returns id unchanged when it matches the
 // cron.IsValidID hex shape (and fits within maxLen), otherwise routes
 // through the regular sanitiser, avoiding its strings.Map slow path.

@@ -33,7 +33,7 @@ func TestSessionsGitRoute_EndToEnd(t *testing.T) {
 	const key = "dashboard:pj:abc0123456789012:general"
 	routerOf(srv).SetWorkspace("dashboard:pj:abc0123456789012", repo)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/sessions/git?key="+key, nil)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/sessions/git?key="+key, nil)
 	rec := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rec, req)
 
@@ -94,7 +94,7 @@ func TestSessionsGitRoute_DoesNotDiscloseRepoAboveAllowedRoot(t *testing.T) {
 	const key = "dashboard:pj:abc0123456789012:general"
 	routerOf(srv).SetWorkspace("dashboard:pj:abc0123456789012", ws)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/sessions/git?key="+key, nil)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/sessions/git?key="+key, nil)
 	rec := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rec, req)
 
@@ -124,7 +124,7 @@ func TestSessionsGitRoute_RequiresAuth(t *testing.T) {
 	srv := newTestServerWithToken(&mockPlatform{}, "s3cret")
 	t.Cleanup(routerOf(srv).Shutdown)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/sessions/git?key=a:b:c:general", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/sessions/git?key=a:b:c:general", nil)
 	rec := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rec, req)
 
@@ -140,7 +140,7 @@ func TestSessionsGitRoute_MethodNotAllowed(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
 	t.Cleanup(routerOf(srv).Shutdown)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/sessions/git?key=a:b:c:general", nil)
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/sessions/git?key=a:b:c:general", nil)
 	rec := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rec, req)
 

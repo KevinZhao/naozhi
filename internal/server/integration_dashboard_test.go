@@ -23,7 +23,7 @@ func TestIntegrationDashboardStack(t *testing.T) {
 	t.Run("token-protected server rejects unauthenticated API request", func(t *testing.T) {
 		srv := newTestServerWithToken(&mockPlatform{}, "s3cret-token")
 
-		req := httptest.NewRequest(http.MethodGet, "/api/system/daemons", nil)
+		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/system/daemons", nil)
 		w := httptest.NewRecorder()
 		srv.mux.ServeHTTP(w, req)
 
@@ -41,7 +41,7 @@ func TestIntegrationDashboardStack(t *testing.T) {
 		// so the request traverses the real route table and handler unauthed.
 		srv := newTestServer(&mockPlatform{})
 
-		req := httptest.NewRequest(http.MethodGet, "/api/system/daemons", nil)
+		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/system/daemons", nil)
 		w := httptest.NewRecorder()
 		srv.mux.ServeHTTP(w, req)
 
@@ -63,7 +63,7 @@ func TestIntegrationDashboardStack(t *testing.T) {
 	t.Run("unknown route returns 404 through the mux", func(t *testing.T) {
 		srv := newTestServer(&mockPlatform{})
 
-		req := httptest.NewRequest(http.MethodGet, "/api/does-not-exist", nil)
+		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/does-not-exist", nil)
 		w := httptest.NewRecorder()
 		srv.mux.ServeHTTP(w, req)
 

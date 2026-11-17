@@ -37,7 +37,7 @@ func TestRequireAuth_SlidingRenewal_RefreshesCookieOnAuthedRequest(t *testing.T)
 	called := false
 	h := a.RequireAuth(func(w http.ResponseWriter, r *http.Request) { called = true })
 
-	req := httptest.NewRequest(http.MethodGet, "http://naozhi.example/api/sessions", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/sessions", nil)
 	req.AddCookie(&http.Cookie{Name: AuthCookieName, Value: mac})
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -78,7 +78,7 @@ func TestRequireAuth_NoRenewalForBearerToken(t *testing.T) {
 	called := false
 	h := a.RequireAuth(func(w http.ResponseWriter, r *http.Request) { called = true })
 
-	req := httptest.NewRequest(http.MethodGet, "http://naozhi.example/api/sessions", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/sessions", nil)
 	req.Header.Set("Authorization", "Bearer bearer-token")
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -103,7 +103,7 @@ func TestRequireAuth_NoRenewalWhenUnauthenticated(t *testing.T) {
 	called := false
 	h := a.RequireAuth(func(w http.ResponseWriter, r *http.Request) { called = true })
 
-	req := httptest.NewRequest(http.MethodGet, "http://naozhi.example/api/sessions", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/sessions", nil)
 	req.AddCookie(&http.Cookie{Name: AuthCookieName, Value: "forged-value"})
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -130,7 +130,7 @@ func TestRequireAuth_NoRenewalInNoTokenMode(t *testing.T) {
 	called := false
 	h := a.RequireAuth(func(w http.ResponseWriter, r *http.Request) { called = true })
 
-	req := httptest.NewRequest(http.MethodGet, "http://naozhi.example/api/sessions", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/sessions", nil)
 	rec := httptest.NewRecorder()
 	h(rec, req)
 

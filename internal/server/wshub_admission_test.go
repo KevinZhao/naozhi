@@ -175,3 +175,41 @@ func TestDeriveUploadOwner_EmptyCookieMACAuthenticatesNothing(t *testing.T) {
 		t.Errorf("empty MAC + empty cookie: owner=%q authed=%v ok=%v, want unauthenticated", owner, authed, ok)
 	}
 }
+
+// TestConnAdmission_NoTokenRefusesReboundHost: without a token the upgrade is
+// the whole authentication, and a page on evil.example rebound to 127.0.0.1
+// sends a matching Origin and Host, so the Host itself must be one rebinding
+// cannot take over. With a token the cookie stays with the real origin.
+func TestConnAdmission_NoTokenRefusesReboundHost(t *testing.T) {
+	for _, tc := range []struct {
+		token, host string
+		want        bool
+	}{
+		{"", "evil.example:8080", false},
+		{"", "127.0.0.1:8080", true},
+		{"", "localhost:8080", true},
+		{"tok", "naozhi.example.com", true},
+	} {
+		a := newConnAdmission(HubOptions{DashToken: tc.token})
+		r := httptest.NewRequest(http.MethodGet, "/ws", nil)
+		r.Host = tc.host
+		r.Header.Set("Origin", "http://"+tc.host)
+		if got := a.upgrader.CheckOrigin(r); got != tc.want {
+			t.Errorf("token %q Host %q: CheckOrigin = %v, want %v", tc.token, tc.host, got, tc.want)
+		}
+	}
+}
+
+// TestConnAdmission_NoTokenTrustedProxyForgedForwardedHost: a rebound page
+// cannot set headers on a WebSocket upgrade, but the check must not lean on
+// that: a loopback X-Forwarded-Host never vouches for a rebound Host.
+func TestConnAdmission_NoTokenTrustedProxyForgedForwardedHost(t *testing.T) {
+	a := newConnAdmission(HubOptions{TrustedProxy: true})
+	r := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	r.Host = "evil.example:8080"
+	r.Header.Set("X-Forwarded-Host", "127.0.0.1:8080")
+	r.Header.Set("Origin", "http://127.0.0.1:8080")
+	if a.upgrader.CheckOrigin(r) {
+		t.Error("CheckOrigin = true for a rebound Host behind a forged X-Forwarded-Host, want false")
+	}
+}

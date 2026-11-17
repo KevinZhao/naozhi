@@ -167,9 +167,11 @@ func (a *Handlers) RotateCookieGen() {
 
 // IsAuthenticated checks auth without writing an error response. Used by
 // endpoints that serve partial data to unauthenticated callers (e.g. /health).
+// Without a token every caller is in, but only one addressing the server by
+// a name DNS rebinding cannot take over (UnboundHostOK).
 func (a *Handlers) IsAuthenticated(r *http.Request) bool {
 	if a.DashboardToken == "" {
-		return true
+		return UnboundHostOK(r, a.TrustedProxy)
 	}
 	// Compare SHA-256 digests so length differences do not leak via the
 	// short-circuit inside ConstantTimeCompare.

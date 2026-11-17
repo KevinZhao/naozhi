@@ -79,8 +79,8 @@ func (s *Server) PlannerTurnSources(key string) []agent.Source {
 }
 
 // PlannerResult tells the turn ledger a result of key's arrived and was
-// judged: it answers the oldest request carried over from the last run, if
-// any. The router's result sink calls it after the action runner.
+// judged: it answers the requests carried over from the last run, if any.
+// The router's result sink calls it after the action runner.
 func (s *Server) PlannerResult(key string) {
 	if s.hub != nil && s.hub.engine != nil {
 		s.hub.engine.plannerTurns.resulted(key)
@@ -112,8 +112,8 @@ const plannerTurnMaxAge = cliinfo.DefaultTotalTimeout
 // them in one result, so a result is judged by all of them: never by fewer
 // sources than its own. The list is kept on disk (path) as well: a
 // shim-held turn finishes on the CLI the next run reattaches, so the
-// requests in flight when a run ended are carried over (restored), each
-// until a result answers it or it is older than any turn runs.
+// requests in flight when a run ended are carried over (restored), until
+// a result answers them or they are older than any turn runs.
 type plannerTurns struct {
 	path string
 	// ctx is the engine's. Once it is done (shutdown) a finish no longer
@@ -201,16 +201,20 @@ func (t *plannerTurns) finish(id uint64) {
 	t.saveLocked()
 }
 
-// resulted drops key's oldest carried-over request.
+// resulted drops all of key's carried-over requests. They all went into
+// the one turn the reattached CLI holds: the Planner's key is Serial, so
+// no two of its turns run side by side, and a request still queued at the
+// restart never began, so it was not recorded. The CLI answers a merged
+// batch with one result; dropping only the oldest would leave the rest,
+// the user's words among them, to judge the next turn (D98).
 func (t *plannerTurns) resulted(key string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	i := slices.IndexFunc(t.restored, func(e plannerTurn) bool { return e.Key == key })
-	if i < 0 {
-		return
+	n := len(t.restored)
+	t.restored = slices.DeleteFunc(t.restored, func(e plannerTurn) bool { return e.Key == key })
+	if n > len(t.restored) {
+		t.saveLocked()
 	}
-	t.restored = slices.Delete(t.restored, i, i+1)
-	t.saveLocked()
 }
 
 // settle answers the requests carried over from the last run by the turn

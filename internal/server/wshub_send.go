@@ -30,11 +30,6 @@ const wsFileNotFoundMsg = "file not found or expired，请重新添加附件后�
 const remoteNodeProxyTimeout = 10 * time.Second
 
 func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
-	if msg.Node != "" && msg.Node != "local" {
-		h.handleRemoteSend(c, msg)
-		return
-	}
-
 	key := msg.Key
 	if key == "" {
 		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Error: "key is required"}))
@@ -43,9 +38,15 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 	// Same trust-boundary gate every other ws path (subscribe / unsubscribe /
 	// interrupt) applies: reject C1/bidi/newline bytes and cap length at
 	// MaxSessionKeyBytes before the key reaches the dispatch queue, slog attrs,
-	// or sessions.json.
+	// or sessions.json. Checked before the remote branch too: a remote send
+	// logs and echoes the key on this node before the node checks it.
 	if err := sessionkey.ValidateSessionKey(key); err != nil {
 		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Error: "invalid key"}))
+		return
+	}
+
+	if msg.Node != "" && msg.Node != "local" {
+		h.handleRemoteSend(c, msg)
 		return
 	}
 	if msg.Text == "" && len(msg.FileIDs) == 0 {
@@ -232,9 +233,9 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 			}
 			c.SendJSON(wsproto.NewInterruptAck(wsproto.InterruptAck{ID: capturedID, Status: "error", Key: capturedKey, Node: nodeID, Error: errMsg}))
 			// interrupt_ack reaches only the originating tab; fan the failure out
-			// to every dashboard subscribed to this remote session. The summary
-			// is re-sanitised because it is broadcast verbatim (#433).
-			h.bcast.broadcastSessionSystemEvent(capturedKey, "中断失败："+osutil.SanitizeForLog(err.Error(), 512))
+			// to every dashboard watching this remote session (#433), with the
+			// ack's text: the raw err stays in the log above.
+			h.bcast.broadcastRemoteSessionSystemEvent(capturedKey, nodeID, "中断失败："+errMsg)
 			return
 		}
 		status := "ok"
@@ -373,9 +374,9 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 			// clients. Operators still see the detail in the slog above.
 			c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: capturedID, Status: "error", Key: capturedKey, Node: nodeID, Error: remoteSendErrorText(err, "remote send failed")}))
 			// send_ack reaches only the originating tab; fan the failure out to
-			// every dashboard subscribed to this remote session (whose EventLog
-			// lives on the node). Summary is re-sanitised: broadcast verbatim (#433).
-			h.bcast.broadcastSessionSystemEvent(capturedKey, "发送失败："+osutil.SanitizeForLog(err.Error(), 512))
+			// every dashboard watching this remote session (whose EventLog
+			// lives on the node, #433), with the ack's text for the same reason.
+			h.bcast.broadcastRemoteSessionSystemEvent(capturedKey, nodeID, "发送失败："+remoteSendErrorText(err, "remote send failed"))
 		default:
 			if res.Dup {
 				slog.Info("remote ws send answered as a repeat", "node", nodeID, "key", capturedKey, "turn_id", req.TurnID, "status", res.Status)

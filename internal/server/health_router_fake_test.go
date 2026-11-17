@@ -40,7 +40,7 @@ func TestHealthHandler_FakeRouterDrivesSections(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	h.handleHealth(w, httptest.NewRequest(http.MethodGet, "/health", nil))
+	h.handleHealth(w, httptest.NewRequest(http.MethodGet, "http://127.0.0.1/health", nil))
 	var got struct {
 		Sessions struct {
 			Active int `json:"active"`
@@ -67,7 +67,7 @@ func TestHealthHandler_FakeRouterDrivesSections(t *testing.T) {
 	}
 
 	w = httptest.NewRecorder()
-	h.handleReadyz(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	h.handleReadyz(w, httptest.NewRequest(http.MethodGet, "http://127.0.0.1/readyz", nil))
 	if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != "ready" {
 		t.Errorf("/readyz = %d %q, want 200 ready", w.Code, w.Body.String())
 	}

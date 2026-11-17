@@ -233,6 +233,39 @@ func TestPlannerTurnWords(t *testing.T) {
 	}
 }
 
+// TestPlannerResult_AnswersMergedBatch: requests merged into one turn and
+// cut by a restart are all answered by the one result the reattached CLI
+// gives, so the user's words in it do not judge the next turn (D98).
+func TestPlannerResult_AnswersMergedBatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "turns.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	var before plannerTurns
+	before.load(ctx, path)
+	receipt := &plannerOrigin{key: agent.Key, src: agent.SourceUnrun, turns: &before, notify: nopNotifier{}}
+	user := &plannerOrigin{key: agent.Key, src: agent.SourceUser, said: &agent.Words{Text: "发吧"}, turns: &before, notify: nopNotifier{}}
+	receipt.Begin(ctx, turn.TurnInfo{Role: turn.RoleHead})
+	user.Begin(ctx, turn.TurnInfo{Role: turn.RoleHead})
+	cancel() // shutdown: the shim keeps the merged turn
+	receipt.Finish(ctx, turn.Outcome{Err: context.Canceled})
+	user.Finish(ctx, turn.Outcome{Err: context.Canceled})
+
+	s := &Server{hub: &Hub{engine: &sendEngine{}}}
+	turns := &s.hub.engine.plannerTurns
+	turns.load(context.Background(), path)
+	s.SettlePlannerTurns(func(string, cli.TurnWatermark, bool) (string, bool, bool) {
+		return "", false, true // still running on the reattached CLI
+	}, func(string, string) { t.Error("nothing ended while down") })
+	s.PlannerResult(agent.Key) // the merged batch's one result
+
+	turns.begin(agent.Key, agent.SourceReminder, nil, "")
+	if got := s.PlannerTurnWords(agent.Key); len(got) != 0 {
+		t.Errorf("next turn's words = %+v, want none", got)
+	}
+	if got := s.PlannerTurnSources(agent.Key); !slices.Equal(got, []agent.Source{agent.SourceReminder}) {
+		t.Errorf("next turn's sources = %q, want [reminder]", got)
+	}
+}
+
 // TestRelayTarget: a relay goes to an existing local session only, never
 // the Planner's own, a scout's, a cron run's or a daemon's.
 func TestRelayTarget(t *testing.T) {

@@ -180,7 +180,7 @@ func TestHandleBind_BadJSON(t *testing.T) {
 func TestHandleBind_RouteRegistered(t *testing.T) {
 	srv, _, _, root := newBindServer(t)
 	projDir := mkProjDir(t, root)
-	req := httptest.NewRequest(http.MethodPost, "/api/sessions/bind",
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/sessions/bind",
 		strings.NewReader(`{"key":"dashboard:pj:abc0123456789012:general","node":"local","workspace":"`+projDir+`"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
