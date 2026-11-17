@@ -150,11 +150,11 @@ func sleepOrCancel(ctx context.Context, d time.Duration) bool {
 // Resolve maps taskID to its on-disk transcript and returns the LinkInfo plus
 // whether a terminal verdict (Resolved=true) was reached. Idempotent: cached
 // results (including tombstones for permanently missing task_ids) are O(1).
-// The direct agent-<task_id>.jsonl path is tried first (covers replayed
-// entries with empty name); the agentType scan with retry is the fallback for
-// older CLIs. ctx should be Process-scoped: cancellation is observed at every
-// retry sleep and the semaphore acquire, returning (LinkInfo{}, false) with no
-// cache write (#644).
+// The direct agent-<task_id>.jsonl path is tried first and again on every
+// retry (covers replayed entries with empty name and a late flush); the
+// agentType scan is the fallback for older CLIs. ctx should be Process-scoped:
+// cancellation is observed at every retry sleep and the semaphore acquire,
+// returning (LinkInfo{}, false) with no cache write (#644).
 func (l *Linker) Resolve(ctx context.Context, taskID, toolUseID, name, description string, agentToolUseMS int64) (LinkInfo, bool) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -239,6 +239,15 @@ func (l *Linker) Resolve(ctx context.Context, taskID, toolUseID, name, descripti
 
 	// Steps 2-4: scan, filter by agentType, retry while empty.
 	for attempt := 0; attempt <= l.retryLimit; attempt++ {
+		// The CLI emits task_started before it flushes the first line of
+		// agent-<task_id>.jsonl, so the stat above usually misses on a live
+		// start; the grace window exists for that late flush. The agentType
+		// scan alone cannot cover it: on the live path name is the task
+		// description, not the meta's agentType, so it never matches and
+		// the window would end in a tombstone that outlives the transcript.
+		if info, ok := l.resolveByTaskIDFast(taskID, toolUseID, subagentDir, sessionID); ok {
+			return info, true
+		}
 		if len(metaCache) > maxMetaCacheEntries {
 			clear(metaCache)
 		}

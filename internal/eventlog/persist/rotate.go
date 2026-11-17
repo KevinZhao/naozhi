@@ -28,9 +28,10 @@ var rotateAfterCloseHook func() error
 // pair (POSIX atomic), SyncDir, then reopen the new pair as w's fds.
 //
 // Crash safety: tmp files orphaned before the renames are removed by
-// SweepOrphans at startup; a crash between the two renames leaves a
-// log/idx mismatch that Recover repairs (ext4 may reorder the renames —
-// worst case is one recovery pass, not lost data). On failure the old
+// SweepOrphans at startup. A crash between the two renames (or a power loss
+// that keeps only one of them) leaves one new file, one old file and the
+// other staging file; SweepOrphans finishes that rename, since Recover only
+// compares sizes and would cut a mixed pair mid-frame. On failure the old
 // files stay intact and the writer keeps using them.
 func (p *Persister) rotate(key, stem string, w *perKeyWriter) error {
 	idxEntries, err := ReadAllIdx(w.idxPath)

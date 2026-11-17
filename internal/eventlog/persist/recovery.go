@@ -7,8 +7,11 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/naozhi/naozhi/internal/eventlog/schema"
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // RecoverResult is what Recover reports so the Persister can initialise a
@@ -271,8 +274,13 @@ func truncateFile(path string, size int64) error {
 }
 
 // SweepOrphans removes rotate-staging files (*.tmp.*) from dir at Persister
-// startup and returns the count. Non-tmp files are left alone: a sibling
-// naozhi version may legitimately store something else in events/.
+// startup and returns the count removed. Non-tmp files are left alone: a
+// sibling naozhi version may legitimately store something else in events/.
+//
+// A staging pair with exactly one half left is a rotate that stopped between
+// its two renames; completeRotate finishes it instead of deleting the half,
+// because the live pair is then one old file and one new one and Recover,
+// which only compares sizes, would cut it mid-frame.
 func SweepOrphans(dir string) (int, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -281,7 +289,9 @@ func SweepOrphans(dir string) (int, error) {
 		}
 		return 0, fmt.Errorf("read events dir %s: %w", dir, err)
 	}
-	removed := 0
+	type staged struct{ log, idx string }
+	groups := make(map[string]*staged)
+	var order []string
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -290,12 +300,93 @@ func SweepOrphans(dir string) (int, error) {
 		if !IsTmpFileName(name) {
 			continue
 		}
-		if err := os.Remove(dir + string(os.PathSeparator) + name); err != nil {
-			slog.Warn("event log: failed to remove orphan tmp file",
-				"path", name, "err", err)
+		base, isLog := strings.CutSuffix(name, logExt)
+		if !isLog {
+			base = strings.TrimSuffix(name, idxExt)
+		}
+		g := groups[base]
+		if g == nil {
+			g = &staged{}
+			groups[base] = g
+			order = append(order, base)
+		}
+		if isLog {
+			g.log = name
+		} else {
+			g.idx = name
+		}
+	}
+	removed := 0
+	completed := false
+	for _, base := range order {
+		g := groups[base]
+		if completeRotate(dir, base, g.log, g.idx) {
+			completed = true
 			continue
 		}
-		removed++
+		for _, name := range []string{g.log, g.idx} {
+			if name == "" {
+				continue
+			}
+			if err := os.Remove(filepath.Join(dir, name)); err != nil {
+				slog.Warn("event log: failed to remove orphan tmp file",
+					"path", name, "err", err)
+				continue
+			}
+			removed++
+		}
+	}
+	if completed {
+		if err := osutil.SyncDir(dir); err != nil {
+			slog.Warn("event log: SyncDir after completing rotate failed", "dir", dir, "err", err)
+		}
 	}
 	return removed, nil
+}
+
+// completeRotate renames the one staging file a rotate left behind over its
+// live counterpart when the other rename already landed, and reports whether
+// it did. rotate fsyncs both staging files before either rename, so a lone
+// half is whole. It is only taken when the live file it pairs with matches
+// it exactly: the new idx's edge equals the live log's size, or the live
+// idx's edge equals the new log's size. A cut always drops at least one
+// record, so the old log is strictly longer than the new one and a lone
+// half left by a failed rotate's cleanup (the live pair still both old)
+// never matches; that half is deleted as before.
+func completeRotate(dir, base, tmpLog, tmpIdx string) bool {
+	if (tmpLog == "") == (tmpIdx == "") {
+		// Both halves staged: neither rename ran and the live pair is old
+		// and consistent.
+		return false
+	}
+	stem, _, ok := strings.Cut(base, tmpInfix)
+	if !ok || !isHexStem(stem) {
+		return false
+	}
+	liveLog := filepath.Join(dir, stem+logExt)
+	liveIdx := filepath.Join(dir, stem+idxExt)
+	var src, dst, idxPath, logPath string
+	if tmpIdx != "" {
+		src, dst = filepath.Join(dir, tmpIdx), liveIdx
+		idxPath, logPath = src, liveLog
+	} else {
+		src, dst = filepath.Join(dir, tmpLog), liveLog
+		idxPath, logPath = liveIdx, src
+	}
+	last, hasLast, err := LastIdxEntry(idxPath)
+	if err != nil || !hasLast || !idxEntrySane(last) {
+		return false
+	}
+	size, exists, err := fileSize(logPath)
+	if err != nil || !exists || size != last.ByteOff+int64(last.Len) {
+		return false
+	}
+	if err := os.Rename(src, dst); err != nil {
+		slog.Warn("event log: completing interrupted rotate failed",
+			"from", src, "to", dst, "err", err)
+		return false
+	}
+	slog.Warn("event log: completed a rotate interrupted between its renames",
+		"from", src, "to", dst)
+	return true
 }
