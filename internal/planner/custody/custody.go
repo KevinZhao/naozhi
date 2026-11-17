@@ -485,14 +485,21 @@ func (e *Engine) setLocked(key string, enable bool, by string) error {
 		if err := e.ensureLocked(root); err != nil {
 			return err
 		}
+		stopped := false
 		if _, err := e.cfg.Sessions.Update(root, func(m *sidecar.Meta) bool {
 			if m.Chain == nil {
 				return false
 			}
+			stopped = m.Chain.Stopped != ""
 			m.Chain = nil
 			return true
 		}); err != nil {
 			return err
+		}
+		// The stop is lifted, so its "托管已停" item goes with it: takenOver
+		// only sees lineages still stopped.
+		if stopped {
+			e.closeStopItem(root)
 		}
 	}
 	// The user's own switch is the chip they clicked: only the Planner's and

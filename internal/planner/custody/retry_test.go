@@ -550,8 +550,9 @@ func TestFailureStaysOneWhileEventsArrive(t *testing.T) {
 }
 
 // The "托管已停" question closes once the stop is gone: the user took the
-// session over, or its task was marked done (custody is off for it then,
-// which used to leave the item open for good, #3972).
+// session over, restarted custody from the chip, or its task was marked done
+// (custody is off for it then, which used to leave the item open for good,
+// #3972).
 func TestStopItemClosesWhenSettled(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -563,6 +564,11 @@ func TestStopItemClosesWhenSettled(t *testing.T) {
 		}},
 		{"task done", func(r *rig) {
 			r.update("task:a", func(m *sidecar.Meta) { m.Mark = &sidecar.Mark{State: "done", By: "user", At: r.now} })
+		}},
+		{"user restarted it from the chip", func(r *rig) {
+			if err := r.e.Set("task:a", true, ByUser); err != nil {
+				r.t.Fatal(err)
+			}
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
