@@ -2,6 +2,7 @@ package cron
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -309,6 +310,19 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 	// directly — f.Seek would be wrong because the scanner's read-ahead advances
 	// the file offset past the logical budget even if only one line was consumed.
 	// 显式 int64 cast 防止 maxTranscriptBytes 类型变更后静默截断（当前已是 int64）。
+	//
+	// A fresh=false JSONL only grows, run after run; read from the head, the
+	// budget went on earlier runs and every run past the first 8 MB came back
+	// empty. Start such a file just before this run's window instead (Seek
+	// before any read; the file may still grow under a running run).
+	if !run.Fresh && fi.Size() > maxTranscriptBytes {
+		if start := windowStartOffset(f, fi.Size(), startedMS); start > 0 {
+			if _, err := f.Seek(start, io.SeekStart); err != nil {
+				slog.Warn("cron transcript: seek failed, reading from the head", "file", filepath.Base(resolved), "err", err)
+				_, _ = f.Seek(0, io.SeekStart)
+			}
+		}
+	}
 	lr := &io.LimitedReader{R: f, N: int64(maxTranscriptBytes)}
 	scanner := bufio.NewScanner(lr)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxTranscriptLineBytes)
@@ -429,4 +443,55 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httputil.WriteJSON(w, resp)
+}
+
+// windowStartOffset returns the start of a line in a shared JSONL from which
+// a read still reaches every line dated at or after startedMS. The CLI
+// appends lines in time order, so a binary search over the dated lines finds
+// one just before the window. A probe that finds no dated line moves the
+// search earlier, never later: the cost is budget, not a lost turn.
+func windowStartOffset(r io.ReaderAt, size, startedMS int64) int64 {
+	buf := make([]byte, 2*maxTranscriptLineBytes)
+	lo, hi := int64(0), size
+	for hi-lo > maxTranscriptLineBytes {
+		mid := lo + (hi-lo)/2
+		off, ts, ok := probeDatedLine(r, buf, mid)
+		if ok && ts < startedMS {
+			lo = off
+		} else {
+			hi = mid
+		}
+	}
+	return lo
+}
+
+// probeDatedLine finds the first complete line starting after pos (pos may
+// fall mid-line) that carries a timestamp, within len(buf) bytes, and
+// returns its offset and time.
+func probeDatedLine(r io.ReaderAt, buf []byte, pos int64) (off, ts int64, ok bool) {
+	n, err := r.ReadAt(buf, pos)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return 0, 0, false
+	}
+	b := buf[:n]
+	i := bytes.IndexByte(b, '\n')
+	if i < 0 {
+		return 0, 0, false
+	}
+	start := i + 1
+	for {
+		j := bytes.IndexByte(b[start:], '\n')
+		if j < 0 {
+			return 0, 0, false
+		}
+		var probe struct {
+			Timestamp string `json:"timestamp"`
+		}
+		if json.Unmarshal(b[start:start+j], &probe) == nil {
+			if t := claudefs.TimestampMillis(probe.Timestamp); t > 0 {
+				return pos + int64(start), t, true
+			}
+		}
+		start += j + 1
+	}
 }
