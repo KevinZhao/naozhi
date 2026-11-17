@@ -94,6 +94,13 @@ func (r *Router) runOrphanSweep() {
 	if r.hist.eventLogDir == "" {
 		return
 	}
+	// An unreadable sessions.json left the table empty, so the known set is
+	// not authoritative: every log older than the cutoff would read as an
+	// orphan, and the sessions come back once the file is repaired.
+	if err := blockedIfUnreadable(r.storePath); err != nil {
+		slog.Warn("eventlog orphan sweep skipped: session store unreadable", "err", err)
+		return
+	}
 	// Snapshot known keys in one View so we don't race concurrent spawns.
 	var known map[string]struct{}
 	r.ss.View(func(v sessView) {

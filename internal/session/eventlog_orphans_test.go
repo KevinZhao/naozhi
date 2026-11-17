@@ -204,3 +204,38 @@ func TestRouter_RunOrphanSweep_Integration(t *testing.T) {
 		return os.IsNotExist(err)
 	}, 2*time.Second, "orphan sweep did not remove stale-ghost")
 }
+
+// An unreadable sessions.json (here a symlink, refused by the loader) leaves
+// the table empty; the sweep must not read that as "no session owns these
+// logs" and delete them before the operator repairs the file.
+func TestRouter_RunOrphanSweep_SkipsWhenStoreUnreadable(t *testing.T) {
+	tmp := t.TempDir()
+	eventLogDir := filepath.Join(tmp, "events")
+	if err := os.MkdirAll(eventLogDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	makeFakeLog(t, eventLogDir, "kept-session", orphanSweepAge*2)
+	real := filepath.Join(tmp, "real-sessions.json")
+	if err := os.WriteFile(real, []byte(`[]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	storePath := filepath.Join(tmp, "sessions.json")
+	if err := os.Symlink(real, storePath); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewRouter(RouterConfig{
+		MaxProcs:    2,
+		TTL:         time.Hour,
+		StorePath:   storePath,
+		EventLogDir: eventLogDir,
+	})
+	if blockedIfUnreadable(storePath) == nil {
+		t.Fatal("precondition: the symlinked store should be blocked as unreadable")
+	}
+	// Shutdown drains the history tasks, the sweep among them.
+	r.Shutdown()
+	if _, err := os.Stat(persist.LogPath(eventLogDir, "kept-session")); err != nil {
+		t.Errorf("event log of a session in the unreadable store was removed: %v", err)
+	}
+}
