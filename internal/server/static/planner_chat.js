@@ -46,7 +46,7 @@ import { hydrateAskAnsweredFromHistory, lockRenderedAskCards } from './ask_card.
 import { runPendingAsync } from './render_md.js';
 import { ICONS } from './icons.js';
 import { firstSentence, refreshHealth, sessionStatusHtml, sessionTitle } from './planner_cards.js';
-import { isRunningTask, refreshTasks, seenTask } from './tasks.js';
+import { closeTaskActs, isRunningTask, refreshTasks, seenTask } from './tasks.js';
 import { followPlannerSubject, noteWorkbenchEvent } from './workbench_panes.js';
 import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
@@ -477,15 +477,27 @@ export function showPlannerLeft(open) {
 // openPlannerSession opens key in the middle column, folding the phone's left
 // block a 任务 title was tapped in, and marks its new result read. pending
 // is a message just sent to it, shown until its log has a user event.
-export function openPlannerSession(key, pending) {
+// opts.raw opens it on its raw record, tool calls and all (D124: a card's
+// 原始记录, its digest's 看原始记录), scrolled to the latest, also when it is
+// open already. Every other opening starts on its milestones: the switch is
+// not remembered, or a title clicked later would open raw too.
+export function openPlannerSession(key, pending, opts) {
   if (!key || key === PLANNER_KEY) return;
+  const raw = !!(opts && opts.raw);
   showPlannerLeft(false);
   // Opening it looks at its new result (§15.12 ④), also a remote node's,
   // which no viewing frame reaches.
   seenTask(key);
-  if (st.sess && st.sess.key === key) return;
+  if (st.sess && st.sess.key === key) {
+    // Switched or on its raw record already, it lands on the latest.
+    if (raw) {
+      st.sess.raw = true;
+      paintSessionPane(true, []);
+    }
+    return;
+  }
   closePlannerSession(true);
-  st.sess = { key, node: plannerHost.node, events: [], uuids: new Set(), lastTime: 0, raw: false, loading: false, gen: 0, timer: 0, pending: pending || '' };
+  st.sess = { key, node: plannerHost.node, events: [], uuids: new Set(), lastTime: 0, raw, loading: false, gen: 0, timer: 0, pending: pending || '' };
   $('planner-main')?.classList.add('pl-sess-open');
   const pane = $('pl-sess');
   if (pane) { pane.hidden = false; pane.dataset.key = key; pane.dataset.node = plannerHost.node; }
@@ -778,7 +790,12 @@ async function handoff(key, text, done) {
 
 registerActions({
   'planner-composer-send': () => sendFromComposer(),
-  'planner-open-session': (el) => openPlannerSession(el.dataset.key),
+  'planner-open-session': (el) => {
+    const raw = el.dataset.raw === '1';
+    // A card's "⋯" it was picked from has done its part.
+    if (raw) closeTaskActs();
+    openPlannerSession(el.dataset.key, '', { raw });
+  },
   'planner-close-session': () => closePlannerSession(false),
   'planner-aside-handoff': () => handAside(),
   'planner-aside-end': () => endAside(),

@@ -5,7 +5,10 @@
 // judgment and its reason); the card's "⋯" marks a task done as yours
 // through POST /api/tasks/state, a done one reopens, and a dispatched
 // session's title opens it in the middle column, whose header has 停止
-// while it is in progress.
+// while it is in progress. A session's "⋯ → 原始记录" and 看原始记录 › under
+// its expanded digest open it on its raw record, tool calls and all, at
+// the latest, also when it is open already; the title still opens it on its
+// milestones (D124). A promise has no 原始记录.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
 const { waitForWs } = require('./shim_wait');
@@ -18,7 +21,7 @@ const iso = (ms) => new Date(ms).toISOString();
 function tasks() {
   return {
     tasks: [
-      { id: TASK, kind: 'session', title: 'iso 写 hello', state: 'waiting', by: 'health', at: iso(now - 5 * 60000), created: iso(now - 3600000), health: 'waiting' },
+      { id: TASK, kind: 'session', title: 'iso 写 hello', state: 'waiting', by: 'health', at: iso(now - 5 * 60000), created: iso(now - 3600000), health: 'waiting', digest: true },
       { id: 'pr_cond', kind: 'promise', title: 'iso CI 绿了告诉你', state: 'doing', at: iso(now - 7200000), created: iso(now - 7200000), close_when: 'master CI 绿' },
       { id: 'pr_later', kind: 'promise', title: 'iso 明早提醒你看压测结果', state: 'remind', at: iso(now - 600000), created: iso(now - 600000), due: iso(now + 20 * 3600000) },
       { id: 'task:done1', kind: 'session', title: 'iso 跑测试', state: 'done', by: 'planner', why: '它汇报测试全部通过', at: iso(now - 1800000), created: iso(now - 7200000) },
@@ -34,7 +37,14 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
     const mock = await startMockServer({
       ws: true, tasks: data, plannerEvents: [], inbox: { open: [], closed: [], counts: { open: 0, badge: 0 } },
       planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
-      keyEvents: { [TASK]: [{ type: 'text', detail: 'iso hello.md 写好了', time: now - 60000, uuid: 'tk-t1' }] },
+      // Enough of a record that the stream overflows: where it lands is
+      // then something to check.
+      keyEvents: { [TASK]: [
+        ...Array.from({ length: 30 }, (_, i) => ({ type: 'text', detail: 'iso 进度 ' + i + '：检查了一遍目录结构，确认 hello.md 应该写在仓库根下。', time: now - 600000 + i * 1000, uuid: 'tk-f' + i })),
+        { type: 'tool_use', tool: 'Write', summary: 'Write hello.md', time: now - 90000, uuid: 'tk-tu1' },
+        { type: 'text', detail: 'iso hello.md 写好了', time: now - 60000, uuid: 'tk-t1' },
+      ] },
+      digests: { [TASK]: '# iso 写 hello\n\n## 目标\n\n写 hello.md。\n' },
     });
     try {
       await page.goto(mock.url + '/dashboard');
@@ -75,7 +85,7 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
       await expect(done.locator('.tk-badge')).toHaveText('已完成');
       await done.locator('.tk-more').click();
       await expect(done.locator('.tk-more')).toHaveAttribute('aria-expanded', 'true');
-      await expect(done.locator('.tk-act')).toHaveText(['重新打开']);
+      await expect(done.locator('.tk-act')).toHaveText(['重新打开', '原始记录']);
       await page.screenshot({ path: test.info().outputPath(`tasks-${name}.png`) });
 
       // Marking the promise done from its "⋯": yours, and folded away.
@@ -99,18 +109,87 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
       // which offers 停止 too while it runs.
       const waiting = group.locator('.tk-card[data-id="' + TASK + '"]');
       await waiting.locator('.tk-more').click();
-      await expect(waiting.locator('.tk-act')).toHaveText(['停止', '标为进行中', '标为已完成']);
+      await expect(waiting.locator('.tk-act')).toHaveText(['停止', '标为进行中', '标为已完成', '原始记录']);
       await waiting.locator('.tk-doing').click();
       await expect.poll(() => mock.tasksCalls.length).toBe(3);
       expect(mock.tasksCalls[2]).toEqual({ id: TASK, state: 'doing' });
       await expect(waiting.locator('.tk-badge')).toHaveText('进行中');
       await expect(waiting.locator('.tk-meta')).toContainText('你标记');
 
+      // "⋯ → 原始记录" opens it in the middle column on its raw record, tool
+      // calls and all, scrolled to the latest; the header offers 只看里程碑.
+      const sess = page.locator('#pl-sess-stream');
+      const rawBtn = page.locator('#pl-sess-raw');
+      const unfold = async () => { if (name === 'mobile') await page.click('#pl-left-toggle'); };
+      await waiting.locator('.tk-more').click();
+      await expect(waiting.locator('.tk-raw')).toHaveAttribute('title', '打开这个会话，连工具调用一起看');
+      await waiting.locator('.tk-raw').click();
+      await expect(page.locator('#planner-main')).toHaveClass(/pl-sess-open/);
+      await expect(sess.locator('.event.tool_use')).toHaveCount(1);
+      await expect(sess).toContainText('iso hello.md 写好了');
+      await expect(rawBtn).toHaveText('只看里程碑');
+      await expect(rawBtn).toHaveAttribute('aria-pressed', 'true');
+      const events = page.locator('#pl-sess-events');
+      const fromBottom = () => events.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop);
+      expect(await events.evaluate((el) => el.scrollHeight - el.clientHeight)).toBeGreaterThan(200);
+      await expect.poll(fromBottom).toBeLessThan(41);
+      // The "⋯" it was picked from folded.
+      await expect(group.locator('.tk-acts')).toHaveCount(0);
+      await page.screenshot({ path: test.info().outputPath(`tasks-raw-${name}.png`) });
+      // Back on its milestones, the session open: 原始记录 switches it to raw.
+      await rawBtn.click();
+      await expect(sess.locator('.event.tool_use')).toHaveCount(0);
+      await expect(rawBtn).toHaveText('原始记录');
+      await unfold();
+      await waiting.locator('.tk-more').click();
+      await waiting.locator('.tk-raw').click();
+      await expect(sess.locator('.event.tool_use')).toHaveCount(1);
+      await expect(rawBtn).toHaveText('只看里程碑');
+      // So does 看原始记录 › under its expanded digest.
+      await rawBtn.click();
+      await expect(sess.locator('.event.tool_use')).toHaveCount(0);
+      await unfold();
+      await waiting.locator('.tk-expand').click();
+      await expect(waiting.locator('.tk-digest .md-h2')).toHaveText('目标');
+      const digestRaw = waiting.locator('.tk-digest-raw .pl-link');
+      await expect(digestRaw).toHaveText('看原始记录 ›');
+      await digestRaw.click();
+      await expect(sess.locator('.event.tool_use')).toHaveCount(1);
+      await expect(rawBtn).toHaveText('只看里程碑');
+      // Read up on its raw record, either entry lands on the latest again.
+      for (const entry of ['digest', 'acts']) {
+        await events.evaluate((el) => { el.scrollTop = 0; });
+        await expect.poll(fromBottom).toBeGreaterThan(200);
+        await unfold();
+        if (entry === 'acts') await waiting.locator('.tk-more').click();
+        await (entry === 'acts' ? waiting.locator('.tk-raw') : digestRaw).click();
+        await expect.poll(fromBottom).toBeLessThan(41);
+        await expect(rawBtn).toHaveText('只看里程碑');
+      }
+      // Back to the Planner: the switch is not remembered, the title opens
+      // it on its milestones.
+      await page.click('.pl-crumb [data-action="planner-close-session"]');
+      await expect(page.locator('#planner-main')).not.toHaveClass(/pl-sess-open/);
+      await unfold();
+      // The "⋯"'s 原始记录 and 看原始记录 › share an action and a key: a
+      // repaint (the list refetched on a turn's frame) keeps the focus on
+      // the one it was on.
+      await waiting.locator('.tk-more').click();
+      await waiting.locator('.tk-raw').focus();
+      data.tasks[0].title = 'iso 写 hello 改';
+      for (const c of mock.wsConnections) c.send({ type: 'session_state', key: TASK, state: 'ready' });
+      await expect(waiting.locator('.tk-title')).toHaveText('iso 写 hello 改');
+      await expect(waiting.locator('.tk-digest-raw .pl-link')).toHaveCount(1);
+      await expect(waiting.locator('.tk-raw')).toBeFocused();
+      await waiting.locator('.tk-more').click();
+
       // A dispatched session's title opens it in the middle column, whose
       // header stops it while it is in progress.
       await group.locator('.tk-card[data-id="' + TASK + '"] .tk-open').click();
       await expect(page.locator('#planner-main')).toHaveClass(/pl-sess-open/);
       await expect(page.locator('#pl-sess-stream')).toContainText('iso hello.md 写好了');
+      await expect(sess.locator('.event.tool_use')).toHaveCount(0);
+      await expect(rawBtn).toHaveText('原始记录');
       const stop = page.locator('#pl-sess-stop');
       await expect(stop).toBeVisible();
       await page.screenshot({ path: test.info().outputPath(`tasks-session-${name}.png`) });

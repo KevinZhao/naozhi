@@ -200,6 +200,7 @@ button.tk-report:hover .tk-report-t{text-decoration:underline}
 .tk-digest .md-h3{font-size:var(--nz-fs-xs)}
 .tk-digest>.md-h2:first-child{margin-top:0}
 .tk-digest-note{color:var(--nz-text-dim)}
+.tk-digest-raw{margin-top:6px;font-size:var(--nz-fs-xs);text-align:right}
 /* "只看新结果" over the filtered cards. */
 .tk-filter{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;padding:0 2px;font-size:var(--nz-fs-xs);color:var(--nz-text-dim)}
 /* The header's "N 件新结果 · 全部已读". */
