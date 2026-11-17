@@ -30,11 +30,6 @@ const wsFileNotFoundMsg = "file not found or expired，请重新添加附件后�
 const remoteNodeProxyTimeout = 10 * time.Second
 
 func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
-	if msg.Node != "" && msg.Node != "local" {
-		h.handleRemoteSend(c, msg)
-		return
-	}
-
 	key := msg.Key
 	if key == "" {
 		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Error: "key is required"}))
@@ -43,9 +38,15 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 	// Same trust-boundary gate every other ws path (subscribe / unsubscribe /
 	// interrupt) applies: reject C1/bidi/newline bytes and cap length at
 	// MaxSessionKeyBytes before the key reaches the dispatch queue, slog attrs,
-	// or sessions.json.
+	// or sessions.json. Checked before the remote branch too: a remote send
+	// logs and echoes the key on this node before the node checks it.
 	if err := sessionkey.ValidateSessionKey(key); err != nil {
 		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Error: "invalid key"}))
+		return
+	}
+
+	if msg.Node != "" && msg.Node != "local" {
+		h.handleRemoteSend(c, msg)
 		return
 	}
 	if msg.Text == "" && len(msg.FileIDs) == 0 {

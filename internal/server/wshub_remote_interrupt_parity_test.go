@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"errors"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -132,5 +134,43 @@ func TestRemoteFailure_ReachesRemoteWatchers(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// countSendNode counts the sends that reach the node.
+type countSendNode struct {
+	fakeCapNode
+	sends atomic.Int32
+}
+
+func (f *countSendNode) Send(context.Context, node.SendRequest) (node.SendResult, error) {
+	f.sends.Add(1)
+	return node.SendResult{}, nil
+}
+
+// TestHandleSend_RemoteKeyValidated: a send naming a node gets the same key
+// check as a local one before anything on this node logs or echoes the key.
+func TestHandleSend_RemoteKeyValidated(t *testing.T) {
+	for key, want := range map[string]string{
+		"":                        "key is required",
+		"dashboard:direct:\u202e": "invalid key",
+		strings.Repeat("k", 8192): "invalid key",
+	} {
+		n := &countSendNode{fakeCapNode: fakeCapNode{id: "node1"}}
+		hub := newTestHubWithNodes(t, map[string]node.Conn{"node1": n})
+		c, out := newCapturedClient(t, hub)
+		hub.handleSend(c, node.ClientMsg{Node: "node1", Key: key, Text: "hi", ID: "sid"})
+		select {
+		case m := <-out:
+			if m.Type != "send_ack" || m.Status != "error" || m.Error != want || m.Key != "" {
+				t.Errorf("key %.20q: ack = type %q status %q error %q key %.20q, want error %q with no key", key, m.Type, m.Status, m.Error, m.Key, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("key %.20q: no send_ack", key)
+		}
+		hub.Shutdown()
+		if got := n.sends.Load(); got != 0 {
+			t.Errorf("key %.20q: %d sends reached the node", key, got)
+		}
 	}
 }
