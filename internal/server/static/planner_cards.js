@@ -572,9 +572,17 @@ function lookupLine(ev, content) {
   const run = m[1];
   ev.classList.add('pl-lookup-ev');
   content.innerHTML = lookupCardHtml(run, { q: m[2], state: 'loading' });
+  const paint = (html) => {
+    content.innerHTML = html;
+    // A 动态 line kept unfolded (planner_layers.js fillLine) copied the card
+    // while it was loading, and nothing copies it again.
+    for (const c of document.querySelectorAll('.pl-dyn-full .pl-lookup-loading[data-run="' + CSS.escape(run) + '"]')) {
+      if (c.parentElement) c.parentElement.innerHTML = html;
+    }
+  };
   fetchJSON(plannerAPI(NZ_CONTRACT.API.planner_lookup) + '?run=' + encodeURIComponent(run), { timeoutMs: 8000 })
-    .then((rec) => { content.innerHTML = lookupCardHtml(run, rec || {}); })
-    .catch(() => { content.innerHTML = lookupCardHtml(run, { q: m[2], state: 'gone' }); });
+    .then((rec) => paint(lookupCardHtml(run, rec || {})))
+    .catch(() => paint(lookupCardHtml(run, { q: m[2], state: 'gone' })));
   return true;
 }
 

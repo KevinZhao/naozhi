@@ -78,3 +78,35 @@ test('lookup line and query card', async ({ page }) => {
     mock.server.close();
   }
 });
+
+// An unfolded 动态 line stays unfolded across leaving the page; coming back
+// copies its query card while the card still reads its record, and the copy
+// then shows the answer too.
+test('an unfolded lookup line shows its card after leaving the page and coming back', async ({ page }) => {
+  const mock = await startMockServer({
+    ws: true,
+    planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
+    plannerLookups: { [RUN]: { id: RUN, q: 'M4 Max 内存带宽', state: 'ok', result } },
+    plannerEvents: [
+      { type: 'user', time: now - 6000, uuid: 'lk-u1', detail: '<naozhi-lookup q="M4 Max 内存带宽" run="' + RUN + '" state="ok">\n以下是……\n</naozhi-lookup>' },
+      { type: 'text', time: now - 5000, uuid: 'lk-t2', detail: '核实了，是 546GB/s。' },
+    ],
+  });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await page.click('#abnav-planner');
+    const stream = page.locator('#pl-stream');
+    await stream.locator('.pl-dyn-h').click();
+    await stream.locator('.pl-dyn-line').click();
+    const copy = stream.locator('.pl-dyn-full details.pl-lookup[data-run="' + RUN + '"]');
+    await expect(copy.locator('.pl-lookup-one')).toContainText('M4 Max 的内存带宽是 546GB/s。');
+    await page.click('#abnav-chat');
+    await page.click('#abnav-planner');
+    await expect(stream.locator('.pl-dyn-full')).toHaveCount(1);
+    await expect(copy.locator('.pl-lookup-one')).toContainText('M4 Max 的内存带宽是 546GB/s。');
+    await expect(stream.locator('.pl-dyn-full')).not.toContainText('正在读取结果');
+  } finally {
+    mock.server.close();
+  }
+});
