@@ -91,18 +91,29 @@ func Candidates(snap Snapshot) []Alias {
 // alias is dropped with the verdict that dropped it.
 func BuildPlan(snap Snapshot, verdicts map[string]Verdict) Plan {
 	var plan Plan
+	// A repair spelling can equal another snapshot alias (a dated alias whose
+	// profile is the bare family's), so a name is offered once: availableModels
+	// and the picker would otherwise list it twice, and DiffSettings compares by
+	// set so a later sync would never clean the duplicate up.
+	seen := make(map[string]bool, len(snap.Aliases))
 	for _, a := range snap.Aliases {
 		if r, ok := RepairCandidate(a); ok {
 			rv, probed := verdicts[r.Name]
 			if keepable(rv, probed) {
-				plan.Aliases = append(plan.Aliases, r)
-				plan.Repaired = append(plan.Repaired, Repair{From: a.Name, To: r.Name})
+				if !seen[r.Name] {
+					seen[r.Name] = true
+					plan.Aliases = append(plan.Aliases, r)
+					plan.Repaired = append(plan.Repaired, Repair{From: a.Name, To: r.Name})
+				}
 				continue
 			}
 		}
 		v, probed := verdicts[a.Name]
 		if keepable(v, probed) {
-			plan.Aliases = append(plan.Aliases, a)
+			if !seen[a.Name] {
+				seen[a.Name] = true
+				plan.Aliases = append(plan.Aliases, a)
+			}
 			continue
 		}
 		v.Alias = a.Name

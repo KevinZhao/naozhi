@@ -206,6 +206,38 @@ func TestBuildPlan_FallsBackToSnapshotSpellingWhenRepairFails(t *testing.T) {
 	}
 }
 
+// The toolbox snapshot carries dated aliases whose profile is another alias's
+// own (claude-sonnet-4-5-20250929 -> claude-sonnet-5-5); the repair spelling
+// must not be offered a second time beside the alias that already has it.
+func TestBuildPlan_RepairEqualToAnotherAliasIsOfferedOnce(t *testing.T) {
+	snap := Snapshot{Aliases: []Alias{
+		{Name: "claude-fable-5", Profile: "global.anthropic.claude-fable-5[1m]"},
+		{Name: "claude-fable-5-1", Profile: "global.anthropic.claude-fable-5"},
+		{Name: "claude-sonnet-4-5-20250929", Profile: "global.anthropic.claude-sonnet-5-5"},
+		{Name: "claude-sonnet-5-5", Profile: "global.anthropic.claude-sonnet-5-5"},
+		{Name: "claude-sonnet-5-5[1m]", Profile: "global.anthropic.claude-sonnet-5-5[1m]"},
+		{Name: "claude-sonnet-4-5-20250929[1m]", Profile: "global.anthropic.claude-sonnet-5-5[1m]"},
+	}}
+	plan := BuildPlan(snap, nil)
+	want := []string{"claude-sonnet-5-5[1m]", "claude-sonnet-5-5", "claude-fable-5"}
+	got := plan.Available()
+	seen := map[string]int{}
+	for _, n := range got {
+		seen[n]++
+	}
+	for _, n := range want {
+		if seen[n] != 1 {
+			t.Errorf("%s offered %d times in %v, want once", n, seen[n], got)
+		}
+	}
+	if len(got) != len(seen) {
+		t.Errorf("Available = %v has duplicates", got)
+	}
+	if rows := plan.PickerRows(); len(rows) != len(got) {
+		t.Errorf("PickerRows = %d rows for %d aliases", len(rows), len(got))
+	}
+}
+
 func TestPlan_EmptyGuardsAnEmptyAllowlist(t *testing.T) {
 	if !(Plan{}).Empty() {
 		t.Error("zero Plan must report Empty")
