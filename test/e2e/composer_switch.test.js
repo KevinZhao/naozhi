@@ -130,3 +130,69 @@ test('a multi-line draft keeps its lines when a session is opened from another v
     mock.server.close();
   }
 });
+
+test('a WS send the server turns away gives its text back to the composer', async ({ browser }) => {
+  const ctx = await browser.newContext(desktop);
+  const page = await ctx.newPage();
+  const mock = await startMockServer({ ws: true });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await open(page, A);
+    const conn = mock.wsConnections[mock.wsConnections.length - 1];
+    for (const [status, text] of [['busy', 'a long message, busy'], ['error', 'a long message, error']]) {
+      await page.locator('#msg-input').click();
+      await page.keyboard.type(text);
+      await page.keyboard.press('Enter');
+      await expect.poll(() => conn.messages.filter((m) => m.type === 'send' && m.text === text).length).toBe(1);
+      expect(await inputText(page)).toBe('');
+      const sent = conn.messages.find((m) => m.type === 'send' && m.text === text);
+      await expect(page.locator('#events-scroll .optimistic-msg[data-send-id="' + sent.id + '"]')).toHaveCount(1);
+      conn.send({ type: 'send_ack', id: sent.id, key: A, status, error: status === 'error' ? 'all busy' : undefined });
+      await expect(page.locator('#events-scroll .optimistic-msg[data-send-id="' + sent.id + '"]')).toHaveCount(0);
+      await expect.poll(() => inputText(page)).toBe(text);
+      await page.locator('#msg-input').evaluate((el) => { el.textContent = ''; });
+    }
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+test('an HTTP send still out when the user switches finishes on its own session', async ({ browser }) => {
+  const ctx = await browser.newContext(desktop);
+  const page = await ctx.newPage();
+  const mock = await startMockServer();
+  try {
+    await page.goto(mock.url + '/dashboard');
+    let release;
+    const held = new Promise((r) => { release = r; });
+    let seen = false;
+    await page.route('**/api/sessions/send', async (route) => { seen = true; await held; await route.continue(); });
+
+    await open(page, B);
+    await page.locator('#msg-input').click();
+    await page.keyboard.type('draft of B');
+    await open(page, A);
+    await page.locator('#msg-input').click();
+    await page.keyboard.type('sent from A');
+    await page.keyboard.press('Enter');
+    await expect.poll(() => seen).toBe(true);
+    await open(page, B);
+    expect(await inputText(page)).toBe('draft of B');
+    release();
+    await expect.poll(() => mock.sendCalls.length).toBe(1);
+    expect(JSON.parse(mock.sendCalls[0]).key).toBe(A);
+    await expect.poll(() => page.evaluate(() => nz.test.sending)).toBe(false);
+
+    // B's draft survives the send's cleanup, and A's sent text is not left
+    // behind as A's draft to be sent twice.
+    await open(page, A);
+    expect(await inputText(page)).toBe('');
+    await open(page, B);
+    expect(await inputText(page)).toBe('draft of B');
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});

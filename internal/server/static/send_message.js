@@ -12,7 +12,7 @@ import { featureForCurrent } from './features.js';
 import { EVENT_DIVIDER_GAP_MS, getMsgValue, lastDividerTime, persistPending, removeSidebarCard, setMsgValue, showAPIError, showAuthModal, showNetworkError, stickEventsBottom, timeDividerHtml } from './utilities.js';
 import { discoveredKey, dropDiscovered, sid } from './session_ident.js';
 import { eventHtml } from './event_render.js';
-import { awaitPendingOrients, filesBlockSend, renderFilePreviews } from './composer_files.js';
+import { awaitPendingOrients, dropSentFiles, filesBlockSend, renderFilePreviews } from './composer_files.js';
 import { navSync } from './msg_nav.js';
 import { shell } from './shell.js';
 
@@ -360,10 +360,10 @@ function buildSendPayload(text, fileIDs, sendId) {
 // took the pre-uploaded attachments out of the uploadStore before rejecting
 // (post-TakeAll 4xx/5xx) — drop the now-dead ids and ask for a re-attach;
 // pre-TakeAll rejections never set the flag, so unsent attachments stay put.
-async function handleSendRejected(r, sentSid, text, input) {
+async function handleSendRejected(r, sentSid, text, target, sentFiles) {
   perSession.httpSendPending.delete(sentSid); // rejected synchronously — no async frame will follow
-  if (input) setMsgValue(input, text);
-  rollbackOptimisticRunning(selection.key, selection.node);
+  refillComposer(target, text);
+  rollbackOptimisticRunning(target.key, target.node);
   // Some error paths still write text/plain; fall back to text() so we
   // always surface the real message instead of a generic "send failed".
   const raw = await r.text().catch(() => '');
@@ -374,7 +374,7 @@ async function handleSendRejected(r, sentSid, text, input) {
     if (j && j.files_consumed) filesConsumed = true;
   } catch (_) { if (raw) detail = raw; }
   if (filesConsumed) {
-    clearPendingFiles();
+    dropSentFiles(sentFiles, target.key, target.node);
     showToast('附件已失效，请重新添加后再发送', 'warning');
   }
   if (r.status === 401 || r.status === 403) {
@@ -388,24 +388,28 @@ async function handleSendRejected(r, sentSid, text, input) {
 // pre-send optimistic flip back on ack:"reset" (/clear, /new — no turn
 // spawned) and otherwise mirrors the WS path's optimistic bubble while WS
 // is live (the WS-down fallback keeps its legacy no-bubble behaviour).
-async function finishHttpSend(r, sentSid, text, input, sendId) {
+async function finishHttpSend(r, sentSid, text, target, sentFiles, sendId) {
   // Record the sent text BEFORE awaiting the body (interrupt re-fill
   // source; also a secondary onSendError gate).
   if (text) perSession.lastSent[sentSid] = text;
   let ackStatus = '';
   try { const j = await r.json(); if (j && j.status) ackStatus = j.status; } catch (_) {}
 
-  if (input) clearMsg(input);
-  delete perSession.drafts[selection.key];
-  clearPendingFiles();
+  // The composer on screen is the target's only while it is still selected:
+  // a switch during the POST saved the unsent text as its draft and rebuilt
+  // the composer for another session.
+  const onScreen = isSelected(target);
+  if (onScreen) clearMsg(document.getElementById('msg-input'));
+  delete perSession.drafts[target.key];
+  dropSentFiles(sentFiles, target.key, target.node);
   // Confirmed send: the pending maps were consumed in buildSendPayload;
   // rewrite the durable blob without this key, same as the WS path.
   persistPending();
   if (ackStatus === 'reset') {
-    rollbackOptimisticRunning(selection.key, selection.node);
+    rollbackOptimisticRunning(target.key, target.node);
     delete perSession.lastSent[sentSid]; // no turn ran, nothing to re-fill on interrupt
     perSession.httpSendPending.delete(sentSid);
-  } else if (wsm.isConnected()) {
+  } else if (onScreen && wsm.isConnected()) {
     renderOptimisticUserMsg(text, sendId);
   }
   armFallbackEventPoll();
@@ -442,7 +446,8 @@ async function sendComposerTurn(targetKey, targetNode) {
   if (!text && composer.pendingFiles.length === 0) return;
   if (!validateComposerForSend(text)) return;
   if (composerSendBlocked()) return;
-  const fileIDs = composer.pendingFiles.map(f => f.id).filter(Boolean);
+  const sentFiles = composer.pendingFiles.slice();
+  const fileIDs = sentFiles.map(f => f.id).filter(Boolean);
 
   // Flip the send→stop button + running banner BEFORE the network round trip,
   // not after — a resumed session has no CLI process yet, so the first send
@@ -455,7 +460,11 @@ async function sendComposerTurn(targetKey, targetNode) {
 
   if (trySendViaWS(text, fileIDs, input)) return;
 
-  // HTTP POST fallback — JSON only; files already on server.
+  // HTTP POST fallback — JSON only; files already on server. Nothing stops a
+  // session switch while the POST is out, so everything after the await acts
+  // on the target, never on the live selection.
+  const target = { key: targetKey, node: targetNode };
+  const sentSid = sid(targetKey, targetNode);
   try {
     const headers = { 'Content-Type': 'application/json' };
     const sendId = newSendID();
@@ -464,21 +473,48 @@ async function sendComposerTurn(targetKey, targetNode) {
     // Mark this tab as the originator BEFORE the request leaves (text or
     // image-only alike): a send_error for this turn can arrive over the WS
     // any time after the server has the request.
-    const sentSid = sid(selection.key, selection.node);
     perSession.httpSendPending.add(sentSid);
     const r = await fetch(NZ_CONTRACT.API.sessions_send, {method:'POST', headers, body: JSON.stringify(payload)});
     if (!r.ok) {
       restoreSpawnFields(targetKey, sendId);
-      await handleSendRejected(r, sentSid, text, input);
+      await handleSendRejected(r, sentSid, text, target, sentFiles);
       return;
     }
-    await finishHttpSend(r, sentSid, text, input, sendId);
+    await finishHttpSend(r, sentSid, text, target, sentFiles, sendId);
   } catch (e) {
-    perSession.httpSendPending.delete(sid(selection.key, selection.node));
-    if (input) setMsgValue(input, text);
-    rollbackOptimisticRunning(selection.key, selection.node);
+    perSession.httpSendPending.delete(sentSid);
+    refillComposer(target, text);
+    rollbackOptimisticRunning(targetKey, targetNode);
     showNetworkError('发送消息', e);
   }
+}
+
+function isSelected(target) {
+  return selection.key === target.key && selection.node === target.node;
+}
+
+// refillComposer puts text a send did not deliver back for the user: into the
+// composer when the target is still on screen and the composer is empty (never
+// over what was typed since), else into the target's draft unless it has one.
+function refillComposer(target, text) {
+  if (!text) return;
+  if (isSelected(target)) {
+    const input = document.getElementById('msg-input');
+    if (input && !getMsgValue(input)) setMsgValue(input, text);
+    return;
+  }
+  if (!perSession.drafts[target.key]) perSession.drafts[target.key] = text;
+}
+
+// refillUnsent puts the text of WS send id back into the composer when the
+// server turned it away (send_ack busy / error) and its bubble is still up —
+// the CLI never echoed it, so the bubble about to be removed holds the only
+// copy. Only into an empty composer: never over what was typed since.
+export function refillUnsent(id) {
+  const text = id ? bubbleFor(id)?.dataset.sendText : '';
+  if (!text) return;
+  const input = document.getElementById('msg-input');
+  if (input && !getMsgValue(input)) setMsgValue(input, text);
 }
 
 // renderOptimisticUserMsg appends the just-sent text as an optimistic user
@@ -500,6 +536,8 @@ function renderOptimisticUserMsg(text, sendId) {
   el.insertAdjacentHTML('beforeend', html);
   el.lastElementChild.classList.add('optimistic-msg');
   if (sendId) el.lastElementChild.setAttribute('data-send-id', sendId);
+  // What refillUnsent gives back if the server turns this send away.
+  el.lastElementChild.dataset.sendText = text;
   // Always force-bottom after a send, even if scrolled up; stickEventsBottom
   // outlasts the input-area collapse and lazy images.
   stickEventsBottom();
