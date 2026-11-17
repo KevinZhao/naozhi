@@ -3,9 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/selfupdate"
 )
 
 func TestUpgradeDecision(t *testing.T) {
@@ -90,5 +94,51 @@ func TestStepErr(t *testing.T) {
 	orig := errors.New("HTTP 404")
 	if got := stepErr(live, orig, time.Hour); got != orig {
 		t.Errorf("stepErr on a context that did not expire = %v, want the error unchanged", got)
+	}
+}
+
+// The backup goes only after a restart that confirmed the new binary is up.
+// The old rule removed it whenever no restart warning was printed, so
+// --no-restart and a stopped service lost the rollback before the new binary
+// had ever started.
+func TestUpgradeRemovesBackup(t *testing.T) {
+	cases := []struct {
+		name                     string
+		goos                     string
+		restarted, restartWarned bool
+		want                     bool
+	}{
+		{"linux restart confirmed", "linux", true, false, true},
+		{"linux restart not confirmed", "linux", true, true, false},
+		{"linux no restart (--no-restart or service stopped)", "linux", false, false, false},
+		// kickstart returns once launchd took the request; it confirms nothing.
+		{"darwin kickstart accepted", "darwin", true, false, false},
+		{"darwin no restart", "darwin", false, false, false},
+	}
+	for _, c := range cases {
+		if got := upgradeRemovesBackup(c.goos, c.restarted, c.restartWarned); got != c.want {
+			t.Errorf("%s: upgradeRemovesBackup = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// A failed download must not leave its temp dir behind: runUpgrade exits
+// through fatalf, whose os.Exit skips defers, so the cleanup has to run before
+// the error reaches it. The release has no asset URL, so the download fails
+// before any connection.
+func TestDownloadAndReplace_FailureRemovesTempDir(t *testing.T) {
+	tmpRoot := t.TempDir()
+	t.Setenv("TMPDIR", tmpRoot)
+
+	_, err := downloadAndReplace(&selfupdate.Release{Tag: "v9.9.9"}, filepath.Join(t.TempDir(), "naozhi"))
+	if err == nil || !strings.Contains(err.Error(), "download") {
+		t.Fatalf("err = %v, want a download failure", err)
+	}
+	left, rerr := os.ReadDir(tmpRoot)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	for _, e := range left {
+		t.Errorf("left behind in $TMPDIR: %s", e.Name())
 	}
 }

@@ -65,27 +65,10 @@ Flags:
 		fatalf("locate running binary: %v\n", err)
 	}
 
-	// 4. Download into a temp dir.
-	tmp, err := os.MkdirTemp("", "naozhi-upgrade-*")
+	// 4–5. Download and replace.
+	backupPath, err := downloadAndReplace(rel, selfPath)
 	if err != nil {
-		fatalf("create temp dir: %v\n", err)
-	}
-	defer os.RemoveAll(tmp)
-
-	fmt.Printf("Downloading %s…\n", rel.Tag)
-	dctx, dcancel := context.WithTimeout(context.Background(), selfupdate.DownloadTimeout)
-	newBin, err := selfupdate.Download(dctx, rel, tmp)
-	dcancel()
-	if err != nil {
-		fatalf("download: %v\n", stepErr(dctx, err, selfupdate.DownloadTimeout))
-	}
-	fmt.Printf("Checksum verified.\n")
-
-	// 5. Replace binary (atomic: stage → rename).
-	fmt.Printf("Installing to %s…\n", selfPath)
-	backupPath, err := selfupdate.Replace(newBin, selfPath)
-	if err != nil {
-		fatalf("replace binary: %v\n", err)
+		fatalf("%v\n", err)
 	}
 
 	// 6. Restart service (unless skipped or not running). Deliberately NO
@@ -115,9 +98,13 @@ Flags:
 		fmt.Printf("Service not running — skipping restart.\n")
 	}
 
-	// 7. Keep the backup when the restart was not confirmed (manual rollback).
-	if !restartWarned {
+	// 7. The backup is the only way back if the new binary does not start.
+	restarted := !*noRestart && serviceWasRunning
+	if upgradeRemovesBackup(runtime.GOOS, restarted, restartWarned) {
 		_ = os.Remove(backupPath)
+	} else if !restartWarned {
+		fmt.Printf("Previous binary kept for rollback: %s\n", backupPath)
+		fmt.Printf("    %s\n", selfupdate.RestoreCommand(backupPath, selfPath))
 	}
 
 	fmt.Printf("\n✓ naozhi upgraded to %s\n", rel.Tag)
@@ -125,6 +112,45 @@ Flags:
 	if *noRestart || !serviceWasRunning {
 		fmt.Printf("  Restart the service manually to apply the new binary.\n")
 	}
+}
+
+// downloadAndReplace downloads rel into a temp dir and swaps it in at
+// selfPath, returning Replace's backup path. It returns its errors instead of
+// exiting: fatalf's os.Exit skips defers, which left a naozhi-upgrade-* dir
+// with the downloaded binary in $TMPDIR after every failed attempt.
+func downloadAndReplace(rel *selfupdate.Release, selfPath string) (string, error) {
+	tmp, err := os.MkdirTemp("", "naozhi-upgrade-*")
+	if err != nil {
+		return "", fmt.Errorf("create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmp)
+
+	fmt.Printf("Downloading %s…\n", rel.Tag)
+	dctx, dcancel := context.WithTimeout(context.Background(), selfupdate.DownloadTimeout)
+	newBin, err := selfupdate.Download(dctx, rel, tmp)
+	dcancel()
+	if err != nil {
+		return "", fmt.Errorf("download: %w", stepErr(dctx, err, selfupdate.DownloadTimeout))
+	}
+	fmt.Printf("Checksum verified.\n")
+
+	// Atomic: stage → rename.
+	fmt.Printf("Installing to %s…\n", selfPath)
+	backupPath, err := selfupdate.Replace(newBin, selfPath)
+	if err != nil {
+		return "", fmt.Errorf("replace binary: %w", err)
+	}
+	return backupPath, nil
+}
+
+// upgradeRemovesBackup reports whether the upgrade may delete Replace's
+// backup: only once a restart ran and confirmed the new binary is up. With no
+// restart (--no-restart, service not running) the new binary has never
+// started, and launchd's kickstart returns once the request is accepted, so on
+// darwin nothing confirms it either. A kept backup costs nothing more: the
+// next Replace overwrites it.
+func upgradeRemovesBackup(goos string, restarted, restartWarned bool) bool {
+	return restarted && !restartWarned && goos != "darwin"
 }
 
 const (
