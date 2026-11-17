@@ -160,20 +160,35 @@ test('delete: 撤销 within 5 s sends nothing; otherwise one DELETE', async ({ p
   }
 });
 
-test('delete: a 409 puts the row back and says so', async ({ page }) => {
+test('delete: a 409 puts the row back with the latest, and the next delete names it', async ({ page }) => {
   const data = memories();
-  data.deleteStatus = 409;
   const mock = await startMockServer({ memories: data });
   try {
     await page.goto(mock.url + '/dashboard');
     await openSettings(page);
     const r = row(page, 'reply-style');
     await r.locator('.mem-row-h').click();
+    await expect(r.locator('.mem-md')).toContainText('再细节');
+    // A CLI session rewrites it after the page opened it.
+    const f = data.files['-Users-me--naozhi-planner-main/reply-style'];
+    f.version = 'v9';
+    f.text = f.text.replace('再细节', '再给例子');
+    f.body = '回复**先结论**，再给例子。\n';
     await r.locator('[data-mem="delete"]').click();
     await expect(r).toBeHidden();
     await expect.poll(() => mock.memoryCalls.length, { timeout: 8000 }).toBe(1);
+    expect(mock.memoryCalls[0].version).toBe('v1');
     await expect(r).toBeVisible();
     await expect(page.locator('#toast')).toHaveText('这条刚被改过，没有删');
+    await expect(r.locator('.mem-md')).toContainText('再给例子');
+    // Collapsed and opened again it is still the latest, not the cached one.
+    await r.locator('.mem-row-h').click();
+    await r.locator('.mem-row-h').click();
+    await expect(r.locator('.mem-md')).toContainText('再给例子');
+    await r.locator('[data-mem="delete"]').click();
+    await expect.poll(() => mock.memoryCalls.length, { timeout: 8000 }).toBe(2);
+    expect(mock.memoryCalls[1].version).toBe('v9');
+    await expect(page.locator('#settings-memory .mem-row[data-name="reply-style"]')).toHaveCount(0);
   } finally {
     mock.server.close();
   }
@@ -194,10 +209,13 @@ const VIEWPORTS = [
 ];
 
 for (const vp of VIEWPORTS) {
-  test(vp.name + ': another node is read through /api/remote and read-only', async ({ browser }) => {
+  test(vp.name + ': another node is read through /api/remote and read-only, whatever it says', async ({ browser }) => {
     const ctx = await browser.newContext({ viewport: { width: vp.width, height: vp.height }, isMobile: !!vp.isMobile, hasTouch: !!vp.hasTouch });
     const page = await ctx.newPage();
+    // writable:true as a node reached over a loopback URL answers: the
+    // page stays read-only, the primary does not forward a write.
     const remote = memories();
+    expect(remote.writable).toBe(true);
     const mock = await startMockServer({
       ws: true, sessions: remoteSessions(), planner: { enabled: false }, memories: { writable: true, groups: [], files: {} },
       remote: { [NODE]: { planner: { enabled: true, stopped: false, key: 'planner:main', alive: true }, memories: remote } },
@@ -213,7 +231,7 @@ for (const vp of VIEWPORTS) {
       await expect(pick).toBeVisible();
       await expect(pick.locator('option')).toHaveText(['本机', 'MBP']);
       await expect(pick).toHaveValue(NODE);
-      await expect(sec.locator('.mem-ro')).toHaveText('只读：在这台机器本机打开 dashboard 才能改');
+      await expect(sec.locator('.mem-ro')).toHaveText('只读：在那台机器本机用 localhost 打开 dashboard 才能改');
       await expect(sec.locator('.mem-intro')).toContainText('对 Planner 说"记下来"');
       const r = row(page, 'frankfurt-az');
       await r.locator('.mem-row-h').click();

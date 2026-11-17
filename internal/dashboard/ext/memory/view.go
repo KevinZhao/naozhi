@@ -113,8 +113,8 @@ type listResponse struct {
 // HandleList serves GET /api/memories.
 func (h *Handler) HandleList(w http.ResponseWriter, r *http.Request) {
 	resp := listResponse{Writable: directLoopback(r), Groups: []listGroup{}}
-	if h.claudeMD != "" {
-		if st, err := os.Stat(h.claudeMD); err == nil && st.Mode().IsRegular() {
+	if path, ok := h.claudeMDFile(); ok {
+		if st, err := os.Stat(path); err == nil {
 			resp.ClaudeMD = &claudeMDInfo{Size: st.Size(), Modified: st.ModTime()}
 		}
 	}
@@ -287,11 +287,7 @@ func (h *Handler) readEntry(dir, base string) (listEntry, bool) {
 	if err != nil {
 		return listEntry{}, false
 	}
-	raw, truncated, err := readCappedMemoryFile(path, maxMemoryFileBytes)
-	if err != nil {
-		return listEntry{}, false
-	}
-	st, err := os.Stat(path)
+	raw, truncated, st, err := readCappedMemoryFile(path, maxMemoryFileBytes)
 	if err != nil {
 		return listEntry{}, false
 	}
@@ -322,11 +318,7 @@ func (h *Handler) readIndex(dir, base string) (*listIndex, map[string]bool, bool
 	if err != nil {
 		return nil, nil, false
 	}
-	raw, truncated, err := readCappedMemoryFile(path, maxMemoryFileBytes)
-	if err != nil {
-		return nil, nil, false
-	}
-	st, err := os.Stat(path)
+	raw, truncated, st, err := readCappedMemoryFile(path, maxMemoryFileBytes)
 	if err != nil {
 		return nil, nil, false
 	}

@@ -515,3 +515,121 @@ func TestDeleteRacesRemember(t *testing.T) {
 		}
 	}
 }
+
+// TestIndexByItsExactNameOnly: on a case-insensitive file system (macOS)
+// "memory" opens MEMORY.md, so a delete by that spelling would remove the
+// index the section never deletes; and "Foo" opens foo.md, whose delete would
+// then miss the "(foo.md)" index line. Only the spelling on disk is taken.
+func TestIndexByItsExactNameOnly(t *testing.T) {
+	f := newViewFixture(t, "", nil)
+	f.write("-p", "foo.md", "f\n")
+	idx := f.write("-p", "MEMORY.md", "- [f](foo.md)\n")
+	st, err := os.Stat(idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"memory", "Memory", "mEMORY"} {
+		if w, out := f.do(http.MethodGet, "/api/memories/file?project=-p&name="+name, nil, true); w.Code != http.StatusBadRequest || out["error"] != "invalid_name" {
+			t.Errorf("open %s = %d %v", name, w.Code, out)
+		}
+		w, out := f.do(http.MethodDelete, "/api/memories/file?project=-p&name="+name+"&version="+url.QueryEscape(version(st)), nil, true)
+		if w.Code != http.StatusBadRequest || out["error"] != "memory_index_undeletable" {
+			t.Errorf("delete %s = %d %v", name, w.Code, out)
+		}
+		if w, out := f.do(http.MethodPut, "/api/memories/file", putRequest{Project: "-p", Name: name, Text: "x\n", Version: version(st)}, true); w.Code != http.StatusBadRequest || out["error"] != "invalid_name" {
+			t.Errorf("put %s = %d %v", name, w.Code, out)
+		}
+	}
+	if _, err := os.Stat(idx); err != nil {
+		t.Fatalf("MEMORY.md gone: %v", err)
+	}
+	fst, err := os.Stat(filepath.Join(f.projects, "-p", "memory", "foo.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w, out := f.do(http.MethodGet, "/api/memories/file?project=-p&name=Foo", nil, true); w.Code != http.StatusNotFound || out["error"] != "memory_gone" {
+		t.Errorf("open Foo = %d %v", w.Code, out)
+	}
+	if w, out := f.do(http.MethodDelete, "/api/memories/file?project=-p&name=Foo&version="+url.QueryEscape(version(fst)), nil, true); w.Code != http.StatusNotFound || out["error"] != "memory_gone" {
+		t.Errorf("delete Foo = %d %v", w.Code, out)
+	}
+	if _, err := os.Stat(filepath.Join(f.projects, "-p", "memory", "foo.md")); err != nil {
+		t.Fatalf("foo.md gone by another spelling: %v", err)
+	}
+}
+
+// TestVersionNamesTheTextRead: the version sent with a file is the file the
+// text was read from. A CLI session rewriting it (rename-replace) between the
+// read and a separate stat would pair the old text with the new version, and
+// an edit of that text would then overwrite the session's change unseen.
+func TestVersionNamesTheTextRead(t *testing.T) {
+	f := newViewFixture(t, "", nil)
+	short, long := "a\n", strings.Repeat("b", 300)+"\n"
+	path := f.write("-p", "x.md", short)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			text := short
+			if i%2 == 1 {
+				text = long
+			}
+			tmp := path + ".tmp"
+			if err := os.WriteFile(tmp, []byte(text), 0o644); err != nil {
+				return
+			}
+			_ = os.Rename(tmp, path)
+		}
+	}()
+	defer func() { close(stop); wg.Wait() }()
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for n := 0; time.Now().Before(deadline); n++ {
+		w, out := f.do(http.MethodGet, "/api/memories/file?project=-p&name=x", nil, false)
+		if w.Code != http.StatusOK {
+			continue
+		}
+		text, _ := out["text"].(string)
+		ver, _ := out["version"].(string)
+		if !strings.HasSuffix(ver, fmt.Sprintf("-%d", len(text))) {
+			t.Fatalf("read %d: version %q sent with a %d-byte text", n, ver, len(text))
+		}
+		if out["size"] != float64(len(text)) {
+			t.Fatalf("read %d: size %v sent with a %d-byte text", n, out["size"], len(text))
+		}
+	}
+}
+
+// TestSymlinkedClaudeMD: ~/.claude/CLAUDE.md is often a dotfile link; listed
+// when it resolves, it opens too.
+func TestSymlinkedClaudeMD(t *testing.T) {
+	f := newViewFixture(t, "", nil)
+	target := filepath.Join(t.TempDir(), "dotfiles-CLAUDE.md")
+	if err := os.WriteFile(target, []byte("# 我\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(f.claude, "CLAUDE.md")); err != nil {
+		t.Fatal(err)
+	}
+	if f.list(true).ClaudeMD == nil {
+		t.Fatal("linked CLAUDE.md not listed")
+	}
+	if md := f.open("", "CLAUDE"); md.Body != "# 我\n" || md.ReadOnly != "claude_md" || md.Text != "" {
+		t.Errorf("CLAUDE.md = %+v", md)
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	if f.list(true).ClaudeMD != nil {
+		t.Error("a dangling CLAUDE.md link listed")
+	}
+	if w, out := f.do(http.MethodGet, "/api/memories/file?project=&name=CLAUDE", nil, false); w.Code != http.StatusNotFound || out["error"] != "memory_gone" {
+		t.Errorf("dangling CLAUDE.md = %d %v", w.Code, out)
+	}
+}

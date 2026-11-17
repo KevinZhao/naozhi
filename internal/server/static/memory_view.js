@@ -30,7 +30,10 @@ const RECENT_MAX = 10;
 // UNDO_MS matches the session list's 移除 · 撤销 (tuning.js).
 const UNDO_MS = 5000;
 const PLANNER_SOURCE = 'naozhi-planner';
-const READONLY_HINT = '只读：在这台机器本机打开 dashboard 才能改';
+// The machine itself opened by its LAN address or hostname is not loopback
+// either, so the visible line names localhost (a phone has no tooltip).
+const READONLY_HINT = '只读：在这台机器本机用 localhost 打开 dashboard 才能改';
+const READONLY_HINT_REMOTE = '只读：在那台机器本机用 localhost 打开 dashboard 才能改';
 const UNSUPPORTED = '那台机器的 naozhi 版本还不支持懂你，升级后可用';
 
 const mem = {
@@ -73,11 +76,24 @@ function errorText(res, what) {
   const code = res.body && (res.body.error || res.body.code);
   if (res.status === 404 && code === 'memory_gone') return '这条已经被删了';
   if (res.status === 404) return UNSUPPORTED;
-  if (res.status === 403 && code === 'memory_readonly_remote') return READONLY_HINT;
+  if (res.status === 403 && code === 'memory_readonly_remote') return readOnlyHint();
   if (res.status === 413) return '太大了（超过 256 KB），请在编辑器里改';
   if (res.status === 501) return '那台机器没有运行 Planner，看不了它的记忆';
   if (res.status === 503 || res.status === 504 || res.status === 0) return what + '（节点离线或没有回应）';
   return what + (res.status ? '（HTTP ' + res.status + '）' : '');
+}
+
+// canWrite is whether the section may offer 编辑 / 删除. Another node is
+// read-only whatever its own list says: the primary does not forward a
+// write (node.APIRoutes), and a node reached over a loopback URL (a tunnel,
+// a second instance on this host) sees a loopback RemoteAddr and answers
+// writable:true.
+function canWrite() {
+  return isLocalNode(mem.node) && !!(mem.data && mem.data.writable);
+}
+
+function readOnlyHint() {
+  return isLocalNode(mem.node) ? READONLY_HINT : READONLY_HINT_REMOTE;
 }
 
 function nodeOptions() {
@@ -161,9 +177,9 @@ function paintIntro() {
     '这里能看到它们读的全部内容，改和删都直接写回文件，对之后启动或续接的会话生效（已经在跑的会话在下次压缩或重启前仍按旧的）。' +
     (plannerOff ? '' : '想让它以后都这样，就对 Planner 说"记下来"。');
   const ro = mem.root.querySelector('.mem-ro');
-  const readOnly = !!mem.data && !mem.data.writable;
+  const readOnly = !!mem.data && !canWrite();
   ro.hidden = !readOnly;
-  ro.textContent = readOnly ? READONLY_HINT : '';
+  ro.textContent = readOnly ? readOnlyHint() : '';
   ro.title = readOnly ? '改和删只接受从这台机器自己（localhost）打开的页面' : '';
 }
 
@@ -375,7 +391,7 @@ function paintDetail(key) {
   if (!row || !r || !r.file) return;
   const f = r.file;
   const detail = row.querySelector('.mem-detail');
-  const writable = !!(mem.data && mem.data.writable) && !f.readonly;
+  const writable = canWrite() && !f.readonly;
   const isIndex = f.name === 'MEMORY';
   const note = r.note ? '<div class="mem-note" role="status">' + esc(r.note) + '</div>' : '';
   if (r.editing) {
@@ -491,7 +507,21 @@ function remove(key) {
       dropEntry(r.file.project, r.file.name);
       return;
     }
-    if (res.status === 409) restore('这条刚被改过，没有删');
+    if (res.status === 409) {
+      // The 409 carries the file as it is now: without it the row would
+      // keep showing the old text and every further 删除 would send the
+      // same stale version.
+      const latest = { ...(res.body || {}) };
+      delete latest.error;
+      if (latest.version) {
+        r.file = { ...r.file, ...latest };
+        r.editing = false;
+        r.conflictText = null;
+        r.note = '这条在你打开后被改过，下面是最新内容';
+        if (mem.rows[key] === r && mem.node === node) paintDetail(key);
+      }
+      restore('这条刚被改过，没有删');
+    }
     else if (res.status === 503 || res.status === 504 || res.status === 0) restore('没删成（节点离线）');
     else restore(errorText(res, '没删成'));
   };

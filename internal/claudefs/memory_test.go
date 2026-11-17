@@ -52,6 +52,25 @@ func TestEditMemoryIndex(t *testing.T) {
 	}
 }
 
+// TestEditMemoryIndex_OnlyTheEntrysOwnLine: a line is the entry's when its
+// first link is the entry; another entry's line that mentions it later (a
+// second link, a "supersedes (a.md)") stays when it goes.
+func TestEditMemoryIndex_OnlyTheEntrysOwnLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), MemoryIndexFile)
+	in := "- [a](a.md) — 旧\n- [x](x.md) — supersedes (a.md)\n- [y](y.md), [a](a.md)\n"
+	if err := os.WriteFile(path, []byte(in), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	n, err := EditMemoryIndex(path, "a", "")
+	if err != nil || n != 1 {
+		t.Fatalf("EditMemoryIndex = %d, %v", n, err)
+	}
+	data, _ := os.ReadFile(path)
+	if want := "- [x](x.md) — supersedes (a.md)\n- [y](y.md), [a](a.md)\n"; string(data) != want {
+		t.Fatalf("index = %q, want %q", data, want)
+	}
+}
+
 func TestPlannerWrittenMemory(t *testing.T) {
 	for data, want := range map[string]bool{
 		"---\nname: a\nmetadata:\n  source: naozhi-planner\n---\nx\n": true,

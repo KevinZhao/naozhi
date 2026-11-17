@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -47,10 +48,24 @@ func PlannerWrittenMemory(data []byte) bool {
 	return ok && bytes.Contains(front, []byte("source: "+MemorySourcePlanner))
 }
 
-// EditMemoryIndex drops the lines of the index at path that link name's file
-// ("(<name>.md)") and, when line is not "", appends line; every other line is
-// kept as it was. It reports how many lines it dropped. A missing index is
-// created only to add. The caller holds LockMemory.
+// memoryIndexLinkRE finds a memory file an index line links, "(<name>.md)".
+var memoryIndexLinkRE = regexp.MustCompile(`\(([^()\s/\\]+)\.md\)`)
+
+// indexLineEntry is the entry an index line is for: the first file it
+// links. A line may mention other entries after it ("— supersedes (b.md)",
+// a second link); it still belongs to the first and stays when they go.
+func indexLineEntry(l string) string {
+	m := memoryIndexLinkRE.FindStringSubmatch(l)
+	if m == nil {
+		return ""
+	}
+	return m[1]
+}
+
+// EditMemoryIndex drops the lines of the index at path that are name's own
+// (their first link is "(<name>.md)") and, when line is not "", appends line;
+// every other line is kept as it was. It reports how many lines it dropped.
+// A missing index is created only to add. The caller holds LockMemory.
 func EditMemoryIndex(path, name, line string) (int, error) {
 	data, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -59,12 +74,11 @@ func EditMemoryIndex(path, name, line string) (int, error) {
 	if errors.Is(err, os.ErrNotExist) && line == "" {
 		return 0, nil
 	}
-	link := "(" + name + ".md)"
 	var out []string
 	dropped := 0
 	if trimmed := strings.TrimRight(string(data), "\n"); trimmed != "" {
 		for _, l := range strings.Split(trimmed, "\n") {
-			if strings.Contains(l, link) {
+			if indexLineEntry(l) == name {
 				dropped++
 				continue
 			}

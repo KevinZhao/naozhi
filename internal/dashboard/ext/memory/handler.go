@@ -308,7 +308,7 @@ func (h *Handler) tryRead(projectDir, slug string) (*memoryResponse, error) {
 
 	// Cap the read at maxMemoryFileBytes (reads cap+1 to distinguish
 	// "exactly at cap" from truncation) (#1044).
-	raw, truncated, err := readCappedMemoryFile(resolved, int64(maxMemoryFileBytes))
+	raw, truncated, _, err := readCappedMemoryFile(resolved, int64(maxMemoryFileBytes))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -332,7 +332,12 @@ func (h *Handler) tryRead(projectDir, slug string) (*memoryResponse, error) {
 
 // readCappedMemoryFile reads up to capBytes from path; truncated=true when
 // the file was larger. Errors (including os.ErrNotExist) propagate unchanged.
-func readCappedMemoryFile(path string, capBytes int64) ([]byte, bool, error) {
+//
+// fi is the descriptor's own stat: a version or size taken from it names the
+// bytes returned, where a later os.Stat could name a file a CLI session
+// wrote in between (and an edit or delete checked against it would then
+// accept a version the page never saw).
+func readCappedMemoryFile(path string, capBytes int64) (raw []byte, truncated bool, fi os.FileInfo, err error) {
 	// Open via OpenWorkspaceFile (O_NOFOLLOW) rather than os.Open to close the
 	// TOCTOU window between the caller's EvalSymlinks check and the open; then
 	// Lstat-before / Fstat-after SameFile pins the descriptor to the exact
@@ -340,30 +345,30 @@ func readCappedMemoryFile(path string, capBytes int64) ([]byte, bool, error) {
 	// by O_NOFOLLOW alone). os.ErrNotExist still propagates unchanged.
 	li, err := os.Lstat(path)
 	if err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
 	f, err := dashproject.OpenWorkspaceFile(path)
 	if err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
 	defer f.Close()
-	fi, err := f.Stat()
+	fi, err = f.Stat()
 	if err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
 	if !os.SameFile(li, fi) {
-		return nil, false, os.ErrNotExist
+		return nil, false, nil, os.ErrNotExist
 	}
 	// Read capBytes+1 to detect overflow without a racy extra Stat.
 	lr := &io.LimitedReader{R: f, N: capBytes + 1}
-	raw, err := io.ReadAll(lr)
+	raw, err = io.ReadAll(lr)
 	if err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
 	if int64(len(raw)) > capBytes {
-		return raw[:capBytes], true, nil
+		return raw[:capBytes], true, fi, nil
 	}
-	return raw, false, nil
+	return raw, false, fi, nil
 }
 
 type memoryFrontmatter struct {

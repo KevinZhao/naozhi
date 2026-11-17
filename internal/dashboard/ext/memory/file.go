@@ -76,11 +76,7 @@ func writePathErr(w http.ResponseWriter, err error) {
 
 // readFile reads path into the answer for (project, name).
 func readFile(project, name, path string) (fileResponse, error) {
-	raw, truncated, err := readCappedMemoryFile(path, maxMemoryFileBytes)
-	if err != nil {
-		return fileResponse{}, err
-	}
-	st, err := os.Stat(path)
+	raw, truncated, st, err := readCappedMemoryFile(path, maxMemoryFileBytes)
 	if err != nil {
 		return fileResponse{}, err
 	}
@@ -107,22 +103,36 @@ func readFile(project, name, path string) (fileResponse, error) {
 	return resp, nil
 }
 
+// claudeMDFile resolves ~/.claude/CLAUDE.md to the regular file it is, a
+// symlink followed: it is often a dotfile link, and the list (HandleList)
+// shows it whenever it resolves. The path is fixed and the section only
+// reads it, so where the user's link points is theirs to choose.
+func (h *Handler) claudeMDFile() (string, bool) {
+	if h.claudeMD == "" {
+		return "", false
+	}
+	resolved, err := filepath.EvalSymlinks(h.claudeMD)
+	if err != nil {
+		return "", false
+	}
+	st, err := os.Lstat(resolved)
+	if err != nil || !st.Mode().IsRegular() {
+		return "", false
+	}
+	return resolved, true
+}
+
 // HandleFile serves GET /api/memories/file?project=&name=.
 func (h *Handler) HandleFile(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	project, name := q.Get("project"), q.Get("name")
 	var path string
 	if project == "" && name == claudeMDName {
-		if h.claudeMD == "" {
+		var ok bool
+		if path, ok = h.claudeMDFile(); !ok {
 			writeErr(w, http.StatusNotFound, "memory_gone")
 			return
 		}
-		st, err := os.Lstat(h.claudeMD)
-		if err != nil || !st.Mode().IsRegular() {
-			writeErr(w, http.StatusNotFound, "memory_gone")
-			return
-		}
-		path = h.claudeMD
 	} else {
 		var err error
 		if _, path, err = h.entryFile(project, name); err != nil {
@@ -239,7 +249,7 @@ func (h *Handler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	project, name, ver := q.Get("project"), q.Get("name"), q.Get("version")
-	if name == indexName {
+	if strings.EqualFold(name, indexName) {
 		writeErr(w, http.StatusBadRequest, "memory_index_undeletable")
 		return
 	}

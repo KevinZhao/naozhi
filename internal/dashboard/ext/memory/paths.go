@@ -39,8 +39,14 @@ func validProject(project string) bool {
 }
 
 // validName reports whether name may name a memory file (or the index).
+// The index goes by its exact name only: on a case-insensitive file system
+// (macOS) "memory" opens MEMORY.md too, and would slip past the index's
+// rules (it cannot be deleted).
 func validName(name string) bool {
-	return name == indexName || memorySlugRE.MatchString(name)
+	if strings.EqualFold(name, indexName) {
+		return name == indexName
+	}
+	return memorySlugRE.MatchString(name)
 }
 
 // memoryDir resolves project's memory directory: it must exist and resolve
@@ -86,8 +92,28 @@ func (h *Handler) entryFile(project, name string) (dir, file string, err error) 
 	if err != nil {
 		return "", "", err
 	}
+	if !hasExactEntry(dir, name+".md") {
+		return "", "", errGone
+	}
 	file, err = h.resolveIn(dir, name+".md")
 	return dir, file, err
+}
+
+// hasExactEntry reports whether dir holds an entry spelled exactly base. A
+// case-insensitive file system opens "Foo.md" for foo.md, and a delete by
+// that spelling would then miss the index line linking "(foo.md)"; the name
+// the page sends is the one the list read from disk.
+func hasExactEntry(dir, base string) bool {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range ents {
+		if e.Name() == base {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveIn resolves base in the resolved memory directory dir, kept to the

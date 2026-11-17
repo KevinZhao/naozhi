@@ -303,7 +303,8 @@ function defaultGitStates() {
  *   {writable, claude_md, groups: [...], files: {'<project>/<name>': fileResponse}}. GET /api/memories
  *   answers {writable, claude_md, groups}; GET /api/memories/file answers files[key] or 404
  *   memory_gone; PUT takes the text when its version is the file's (bumping it), else 409 with the
- *   file as it is; DELETE (status overrides.memories.deleteStatus when set) drops the file and the
+ *   file as it is; DELETE (status overrides.memories.deleteStatus when set; a version not the
+ *   file's is 409 with the file as it is) drops the file and the
  *   entry. Every PUT / DELETE lands in memoryCalls ({method, project, name, version, text}).
  *   overrides.remote[node].memories is the same for a node, read-only (GETs). Unset, the routes 404.
  * @param {boolean} [overrides.uploads] - If true, POST /api/sessions/upload takes the file and
@@ -675,7 +676,9 @@ function startMockServer(overrides = {}) {
         [NZ_CONTRACT.API.sessions_notes]: { notes: (r.notes || {})[url.searchParams.get('key')] || [] },
       };
       if (r.memories && route === NZ_CONTRACT.API.memories) {
-        gets[route] = { writable: false, groups: r.memories.groups || [], claude_md: r.memories.claude_md };
+        // The node's own answer, passed on as the primary does: a node
+        // reached over a loopback URL says writable:true.
+        gets[route] = { writable: r.memories.writable === true, groups: r.memories.groups || [], claude_md: r.memories.claude_md };
       }
       if (r.memories && route === NZ_CONTRACT.API.memories_file) {
         const f = (r.memories.files || {})[(url.searchParams.get('project') || '') + '/' + (url.searchParams.get('name') || '')];
@@ -927,6 +930,8 @@ function startMockServer(overrides = {}) {
         const project = url.searchParams.get('project') || '', name = url.searchParams.get('name') || '';
         memoryCalls.push({ method: 'DELETE', project, name, version: url.searchParams.get('version') || '' });
         if (memoriesData.deleteStatus) { answer(memoriesData.deleteStatus, { error: memoriesData.deleteStatus === 409 ? 'memory_changed' : 'x' }); return; }
+        const f = files[project + '/' + name];
+        if (f && f.version !== (url.searchParams.get('version') || '')) { answer(409, { error: 'memory_changed', ...f }); return; }
         delete files[project + '/' + name];
         for (const g of memoriesData.groups || []) if (g.project === project) g.entries = g.entries.filter((e) => e.name !== name);
         answer(200, { ok: true, index_lines_removed: 1 });
