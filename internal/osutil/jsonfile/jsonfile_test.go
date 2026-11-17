@@ -169,7 +169,8 @@ func TestLoadRefusesSymlink(t *testing.T) {
 }
 
 // TestLoadRefusesNonRegularFile covers what O_NOFOLLOW cannot: a directory or
-// fifo at the path opens fine and only Fstat catches it.
+// fifo at the path opens fine (the fifo non-blocking, see fifo_unix_test.go)
+// and only Fstat catches it.
 func TestLoadRefusesNonRegularFile(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "adir")
 	if err := os.Mkdir(dir, 0o700); err != nil {
