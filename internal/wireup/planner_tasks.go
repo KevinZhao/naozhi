@@ -249,26 +249,38 @@ func (t TaskOpts) ForKey(key string) (session.AgentOpts, bool) {
 	return opts, true
 }
 
-// StopTask is task.Config.Stop: it drops the messages queued for the
-// dispatched session's next turn (Server.DropPlannerQueue), which would
-// otherwise resume it once the cut turn ends, closes its process (its
-// background work too; the session stays) and tells the Planner, which would
-// otherwise wait on it, send it on, or mark it again as its own judgement.
-// The receipt names the promises the stop closed, so the Planner does not
-// close them again.
-func StopTask(router *session.Router, drop func(key string), tell func(string) error) func(key, title string, promises []string) {
-	return func(key, title string, promises []string) {
+// StopProcess drops the messages queued for session key's next turn
+// (Server.DropPlannerQueue), which would otherwise resume it once the cut
+// turn ends, and closes its process (its background work and workflows
+// too; the session stays): what stopping a task does to its session, and
+// all a halt block does once custody stopped (action.Config.StopProcess,
+// §15.15 ②).
+func StopProcess(router *session.Router, drop func(key string)) func(key string) {
+	return func(key string) {
 		drop(key)
 		router.StopSession(key)
+	}
+}
+
+// StopTask is task.Config.Stop: it stops the dispatched session's process
+// (StopProcess) and tells the Planner, which would otherwise wait on it,
+// send it on, or mark it again as its own judgement. The receipt names the
+// promises the stop closed, so the Planner does not close them again.
+func StopTask(router *session.Router, drop func(key string), tell func(string) error) func(key, title string, promises []string) {
+	stop := StopProcess(router, drop)
+	return func(key, title string, promises []string) {
+		stop(key)
 		if err := tell(stopReceipt(key, title, promises)); err != nil {
 			slog.Info("task stop: the Planner not told", "key", key, "err", err)
 		}
 	}
 }
 
-// stopReceipt is what the Planner is told of a task the user stopped.
+// stopReceipt is what the Planner is told of a task the user stopped, in
+// 任务 or by asking the Planner (a cancel block, D120): one receipt for
+// both.
 func stopReceipt(key, title string, promises []string) string {
-	text := "用户在「任务」里停止了「" + title + "」（" + key + "），它已记为已完成（用户停止），不用再改它的状态。"
+	text := "用户停止了「" + title + "」（" + key + "），它已记为已完成（用户停止），不用再改它的状态。"
 	if len(promises) > 0 {
 		text += "相关的承诺 " + strings.Join(promises, "、") + " 已一并标为已完成（任务已停止），不用再处理。"
 	}

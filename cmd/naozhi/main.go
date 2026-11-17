@@ -824,6 +824,8 @@ func main() {
 		Reopen:      func(key string) { reaper.Reopen(ctx, key) },
 		Prompted:    sources.Prompted,
 		Custody:     custodian,
+		StopProcess: wireup.StopProcess(router, func(key string) { srv.DropPlannerQueue(key) }),
+		Asking:      sources.Asking,
 		Words:       wireup.PlannerWords(plannerAgent),
 		Relay:       srv.SubmitRelay,
 		RelayTarget: srv.RelayTarget,

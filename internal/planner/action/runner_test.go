@@ -200,15 +200,15 @@ func TestOldDispatchCardClosed(t *testing.T) {
 // the Planner; a refused block shows in the conversation and the receipt.
 func TestAskAndRefused(t *testing.T) {
 	r, g, inbox, _, _ := newRunner(t)
-	r.Handle("看这里：\n" + block(`{"type":"ask","question":"今天发版吗？","options":["发","不发"]}`) + "\n" + block(`{"type":"halt"}`))
+	r.Handle("看这里：\n" + block(`{"type":"ask","question":"今天发版吗？","options":["发","不发"]}`) + "\n" + block(`{"type":"read_external"}`))
 	it := openDecision(t, inbox, HandlerAsk)
 	if it.Kind != notify.KindQuestion || !slices.Equal(it.Decision.Actions, []notify.Action{"发", "不发"}) {
 		t.Errorf("ask card = %+v", it)
 	}
-	if len(g.notes) != 1 || !strings.Contains(g.notes[0], "格式不对") || !strings.Contains(g.notes[0], `{"type":"halt"}`) {
+	if len(g.notes) != 1 || !strings.Contains(g.notes[0], "格式不对") || !strings.Contains(g.notes[0], `{"type":"read_external"}`) {
 		t.Errorf("notes = %q", g.notes)
 	}
-	if len(g.unrun) != 1 || !strings.Contains(g.unrun[0], "第 2 块（halt）：未知类型") {
+	if len(g.unrun) != 1 || !strings.Contains(g.unrun[0], "第 2 块（read_external）：未知类型") {
 		t.Errorf("unrun = %q, want the receipt of the refused block", g.unrun)
 	}
 	if err := inbox.Decide(it.ID, "不发"); err != nil {

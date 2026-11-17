@@ -80,7 +80,7 @@ func TestSpawnError(t *testing.T) {
 }
 
 // The Planner is told a stopped task's promises the stop closed, so it does
-// not close them again.
+// not close them again, in one receipt for 任务's stop and the cancel block.
 func TestStopReceipt(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -93,7 +93,9 @@ func TestStopReceipt(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			got := stopReceipt("task:ab12", "iso 写 hello", c.promises)
-			if !strings.HasPrefix(got, "用户在「任务」里停止了「iso 写 hello」（task:ab12）") || !strings.HasSuffix(got, "除非用户再要求。") {
+			// The cancel block's stop says it too, so the receipt names no
+			// place the user stopped it from (D120).
+			if !strings.HasPrefix(got, "用户停止了「iso 写 hello」（task:ab12）") || strings.Contains(got, "「任务」") || !strings.HasSuffix(got, "除非用户再要求。") {
 				t.Errorf("receipt = %q", got)
 			}
 			// The Planner reads the receipt; "你" is the Planner there.

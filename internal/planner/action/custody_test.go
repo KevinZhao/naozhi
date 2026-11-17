@@ -26,6 +26,11 @@ type fakeCustody struct {
 	sets       []string
 	watches    []string
 	delivered  []string
+	// stopped are the lineages stopped (Status); halts the Halt calls, as
+	// key|why; haltErr what Halt returns.
+	stopped map[string]bool
+	halts   []string
+	haltErr error
 }
 
 func (f *fakeCustody) On(key string) bool { return f.on[key] }
@@ -60,6 +65,23 @@ func (f *fakeCustody) Deliver(key string, reason custody.Reason, text string) (i
 	return len(f.delivered), nil
 }
 func (f *fakeCustody) Name(key string) string { return "名字 " + key }
+func (f *fakeCustody) Halt(key, why string) error {
+	if f.haltErr != nil {
+		return f.haltErr
+	}
+	f.halts = append(f.halts, key+"|"+why)
+	if f.stopped == nil {
+		f.stopped = map[string]bool{}
+	}
+	f.stopped[key] = true
+	return nil
+}
+func (f *fakeCustody) Status(key string) custody.Status {
+	if f.stopped[key] {
+		return custody.Status{Key: key, State: custody.StateStopped}
+	}
+	return custody.Status{Key: key, State: custody.StateOn}
+}
 
 const dashKey = "dashboard:direct:u:general"
 

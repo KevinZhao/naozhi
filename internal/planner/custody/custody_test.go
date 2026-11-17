@@ -659,3 +659,62 @@ func TestIrreversible(t *testing.T) {
 		}
 	}
 }
+
+// The user having the Planner halt a session (§15.15 ②, D119) is custody's
+// own stop: every message custody would send it is refused, a retry of a
+// failure too, the stop is journaled and left to the user, and it holds
+// over a restart; a relay is no message of the user's in the session, so
+// only their own message there starts the lineage afresh. An IM session
+// the user opened can be halted; the Planner, and a remote node's session,
+// cannot.
+func TestHalt(t *testing.T) {
+	r := newRig(t)
+	r.dispatch("task:a")
+	if err := r.e.Halt("task:a", " 用户说先别跑了 "); err != nil {
+		t.Fatal(err)
+	}
+	const why = HaltPrefix + "用户说先别跑了"
+	if _, err := r.e.Deliver("task:a", ReasonPlanner, "接着做"); !errors.Is(err, ErrStopped) || len(r.sent) != 0 {
+		t.Fatalf("Deliver after halt: err=%v sent=%q", err, r.sent)
+	}
+	if st := r.e.Status("task:a"); st.State != StateStopped || st.Why != why {
+		t.Errorf("status = %+v, want stopped with %q", st, why)
+	}
+	if it := r.inbox.items; len(it) != 1 || it[0].Source != "custody:task:a" || it[0].Title != "修 bug 托管已停" || it[0].Why != why {
+		t.Errorf("inbox = %+v", r.inbox.items)
+	}
+	if ev := r.custodyEvents("task:a"); len(ev) != 1 || !strings.Contains(ev[0], `"event":"stopped"`) || !strings.Contains(ev[0], "你让 Planner 叫停") {
+		t.Errorf("journal = %q", ev)
+	}
+	r.open() // the stop survives a restart
+	r.units = []health.Unit{{ID: "task:a", Kind: health.KindSession, State: health.Failed, ErrClass: health.ErrNetwork, LastActive: r.now}}
+	r.e.Tick()
+	r.now = r.now.Add(time.Hour)
+	r.e.Tick()
+	if len(r.sent) != 0 {
+		t.Fatalf("a halted session got a retry: %q", r.sent)
+	}
+	r.units = nil
+	// The user's own message in the session takes it on again.
+	r.lastUser["task:a"] = r.now.Add(time.Second)
+	r.now = r.now.Add(time.Minute)
+	r.e.Tick()
+	if st := r.e.Status("task:a"); st.State == StateStopped {
+		t.Fatalf("the user's message did not lift the halt: %+v", st)
+	}
+	r.now = r.now.Add(NearbyFor)
+	if n, err := r.e.Deliver("task:a", ReasonPlanner, "接着做"); err != nil || n != 1 {
+		t.Errorf("after the user's message: n=%d err=%v, want a fresh count", n, err)
+	}
+
+	const im = "feishu:direct:alice:general"
+	if err := r.e.Halt(im, "用户说停"); err != nil || r.e.Status(im).State != StateStopped {
+		t.Errorf("IM session: err=%v status=%+v", err, r.e.Status(im))
+	}
+	if err := r.e.Halt(sessionkey.PlannerMainKey, "x"); !errors.Is(err, ErrRefused) {
+		t.Errorf("planner:main: %v, want ErrRefused", err)
+	}
+	if err := r.e.Halt("remote/task:b", "x"); !errors.Is(err, ErrNoSession) {
+		t.Errorf("remote: %v, want ErrNoSession", err)
+	}
+}
