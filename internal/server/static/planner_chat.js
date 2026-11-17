@@ -595,6 +595,10 @@ async function registerAside(key, title, pending) {
   st.asides.set(key, title);
   sessionList.lastVersion = 0;
   shell.debouncedFetchSessions();
+  // The Alt+P drawer has no middle column: there the 单独聊 would stack
+  // under the Planner conversation and take its input box. It opens on the
+  // page, as the drawer's session cards do.
+  if (!$('planner-main')?.contains($('pl-center'))) shell.setActivityView('planner');
   openPlannerSession(key, pending);
   const [labeled, noted] = await Promise.all([
     labelAside(key, node, title),
