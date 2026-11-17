@@ -1135,11 +1135,12 @@ func (e *Engine) answer(u health.Unit) {
 	m, _ := e.cfg.Sessions.Get(key)
 	r := m.Retry
 	if u.State != health.Failed {
-		switch {
-		case r != nil && settled(u):
+		// A failure someone else resumed before its retry went out (the
+		// user's "继续", a relay, the Planner) ends here too: its count is
+		// of failures custody would retry, and the turn that settles it
+		// would find no retry left to say so.
+		if r != nil && (settled(u) || !r.Done) {
 			e.recovered(key, *r)
-		case r != nil && !r.Done:
-			e.setRetry(key, nil)
 		}
 		return
 	}
@@ -1205,9 +1206,10 @@ func (e *Engine) answer(u health.Unit) {
 	next.At, next.Done, next.Held = e.now().Add(Backoff[n-1]), false, e.paused()
 }
 
-// recovered ends key's failure r, its turn having ended normally since: the
-// retries of its class start afresh, so failures days apart, each recovered,
-// never add up to a stop. A session out of custody had nothing sent but
+// recovered ends key's failure r, its turn having ended normally since, or
+// someone else having resumed it before its retry went out: the retries of
+// its class start afresh, so failures days apart, each recovered, never add
+// up to a stop. A session out of custody had nothing sent but
 // retries, so its whole count starts afresh too. A stopped lineage stays
 // stopped: the user lifts that.
 func (e *Engine) recovered(key string, r sidecar.Retry) {

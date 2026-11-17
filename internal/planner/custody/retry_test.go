@@ -277,6 +277,39 @@ func TestRetryCountEndsWithRecovery(t *testing.T) {
 	}
 }
 
+// A failure the session recovers from before its retry goes out (the user
+// wrote "继续" in the backoff) ends the same way: its count starts afresh,
+// so such failures days apart never add up to a stop custody never retried.
+func TestRetryCountEndsWithRecoveryBeforeRetry(t *testing.T) {
+	r := newRig(t)
+	for _, key := range []string{dash, "task:a"} {
+		if key != dash {
+			r.dispatch(key)
+		}
+		for day := range MaxErrors + 2 {
+			r.units = []health.Unit{{ID: key, Kind: health.KindSession, State: health.Failed, ErrClass: health.ErrNetwork, LastActive: r.now}}
+			r.e.Tick()
+			m, _ := r.e.cfg.Sessions.Get(key)
+			if m.Retry == nil || m.Retry.Done || !m.Retry.At.Equal(r.now.Add(Backoff[0])) {
+				t.Fatalf("%s blip %d: retry %+v, want one a first backoff out", key, day+1, m.Retry)
+			}
+			r.now = r.now.Add(20 * time.Second)
+			r.units[0].State, r.units[0].LastActive, r.units[0].TurnAt = health.Active, r.now, r.now
+			r.e.Tick()
+			r.now = r.now.Add(10 * time.Second)
+			r.units[0].State, r.units[0].LastActive = health.Idle, r.now
+			r.e.Tick()
+			r.now = r.now.Add(24 * time.Hour)
+		}
+		if len(r.sent) != 0 {
+			t.Errorf("%s: sent %q, want none (each failure recovered first)", key, r.sent)
+		}
+		if st := r.e.Status(key); st.State == StateStopped || len(r.inbox.items) != 0 {
+			t.Errorf("%s after recovered blips: %+v, inbox %+v", key, st, r.inbox.items)
+		}
+	}
+}
+
 // A retry due while custody is paused waits for the pause to end and goes
 // out then, at once if due by then, as its backoff has it otherwise; the
 // failure opens no item meanwhile. One the pause kept past staleAfter is
