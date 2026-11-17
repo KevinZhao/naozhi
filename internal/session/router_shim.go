@@ -238,10 +238,14 @@ func (r *Router) adoptLiveShim(tx sessTx, state shim.State, backendID string) *M
 		Workspace: state.Workspace,
 		Backend:   backendID,
 	}
-	// The overlay holds the profile the CLI was spawned under; without it the
-	// adopted session records "" and its next resume re-resolves the account.
+	// The overlay holds the resolved profile the CLI was spawned under; without
+	// it the adopted session records "" and its next resume re-resolves the
+	// account. It is pinned because it is the account this CLI's conversation
+	// actually ran on: an unpinned "" (global credentials) would let
+	// default_access_profile fill it on the next resume, crossing accounts.
 	if state.SpawnOverlay != nil {
 		entry.AccessProfile = state.SpawnOverlay.AccessProfile
+		entry.AccessProfilePinned = true
 	}
 	r.restoreSessionFromEntry(tx, state.Key, entry)
 	s := tx.Get(state.Key)
