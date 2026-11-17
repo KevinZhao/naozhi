@@ -6,8 +6,8 @@
 // through POST /api/tasks/state, a done one reopens, and a dispatched
 // session's title opens it in the middle column, whose header has 停止
 // while it is in progress. A session's "⋯ → 原始记录" and 看原始记录 › under
-// its expanded digest open it on its raw record, tool calls and all, and
-// switch it there when it is open already; the title still opens it on its
+// its expanded digest open it on its raw record, tool calls and all, at
+// the latest, also when it is open already; the title still opens it on its
 // milestones (D124). A promise has no 原始记录.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
@@ -37,7 +37,10 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
     const mock = await startMockServer({
       ws: true, tasks: data, plannerEvents: [], inbox: { open: [], closed: [], counts: { open: 0, badge: 0 } },
       planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
+      // Enough of a record that the stream overflows: where it lands is
+      // then something to check.
       keyEvents: { [TASK]: [
+        ...Array.from({ length: 30 }, (_, i) => ({ type: 'text', detail: 'iso 进度 ' + i + '：检查了一遍目录结构，确认 hello.md 应该写在仓库根下。', time: now - 600000 + i * 1000, uuid: 'tk-f' + i })),
         { type: 'tool_use', tool: 'Write', summary: 'Write hello.md', time: now - 90000, uuid: 'tk-tu1' },
         { type: 'text', detail: 'iso hello.md 写好了', time: now - 60000, uuid: 'tk-t1' },
       ] },
@@ -126,7 +129,10 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
       await expect(sess).toContainText('iso hello.md 写好了');
       await expect(rawBtn).toHaveText('只看里程碑');
       await expect(rawBtn).toHaveAttribute('aria-pressed', 'true');
-      await expect.poll(() => page.locator('#pl-sess-events').evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(41);
+      const events = page.locator('#pl-sess-events');
+      const fromBottom = () => events.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop);
+      expect(await events.evaluate((el) => el.scrollHeight - el.clientHeight)).toBeGreaterThan(200);
+      await expect.poll(fromBottom).toBeLessThan(41);
       // The "⋯" it was picked from folded.
       await expect(group.locator('.tk-acts')).toHaveCount(0);
       await page.screenshot({ path: test.info().outputPath(`tasks-raw-${name}.png`) });
@@ -150,11 +156,32 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
       await digestRaw.click();
       await expect(sess.locator('.event.tool_use')).toHaveCount(1);
       await expect(rawBtn).toHaveText('只看里程碑');
+      // Read up on its raw record, either entry lands on the latest again.
+      for (const entry of ['digest', 'acts']) {
+        await events.evaluate((el) => { el.scrollTop = 0; });
+        await expect.poll(fromBottom).toBeGreaterThan(200);
+        await unfold();
+        if (entry === 'acts') await waiting.locator('.tk-more').click();
+        await (entry === 'acts' ? waiting.locator('.tk-raw') : digestRaw).click();
+        await expect.poll(fromBottom).toBeLessThan(41);
+        await expect(rawBtn).toHaveText('只看里程碑');
+      }
       // Back to the Planner: the switch is not remembered, the title opens
       // it on its milestones.
       await page.click('.pl-crumb [data-action="planner-close-session"]');
       await expect(page.locator('#planner-main')).not.toHaveClass(/pl-sess-open/);
       await unfold();
+      // The "⋯"'s 原始记录 and 看原始记录 › share an action and a key: a
+      // repaint (the list refetched on a turn's frame) keeps the focus on
+      // the one it was on.
+      await waiting.locator('.tk-more').click();
+      await waiting.locator('.tk-raw').focus();
+      data.tasks[0].title = 'iso 写 hello 改';
+      for (const c of mock.wsConnections) c.send({ type: 'session_state', key: TASK, state: 'ready' });
+      await expect(waiting.locator('.tk-title')).toHaveText('iso 写 hello 改');
+      await expect(waiting.locator('.tk-digest-raw .pl-link')).toHaveCount(1);
+      await expect(waiting.locator('.tk-raw')).toBeFocused();
+      await waiting.locator('.tk-more').click();
 
       // A dispatched session's title opens it in the middle column, whose
       // header stops it while it is in progress.

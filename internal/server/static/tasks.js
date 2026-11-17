@@ -499,7 +499,7 @@ function paint(el, data) {
   if (el._tkHtml === html && el.firstChild) return;
   const wasOpen = !!el.querySelector('.tk-sec-done')?.open;
   const a = document.activeElement;
-  const focus = a && el.contains(a) && a.dataset.action ? { id: a.dataset.id || a.dataset.key, action: a.dataset.action, raw: a.dataset.raw || '' } : null;
+  const focus = a && el.contains(a) && a.dataset.action ? { id: a.dataset.id || a.dataset.key, action: a.dataset.action, raw: a.dataset.raw || '', acts: !!a.closest('.tk-acts') } : null;
   const kept = el._tkDigest;
   const inPage = kept && el.contains(kept.node);
   const scroll = inPage ? kept.node.scrollTop : 0;
@@ -524,8 +524,9 @@ function paint(el, data) {
   }
   if (focus) {
     for (const b of el.querySelectorAll('[data-action="' + CSS.escape(focus.action) + '"]')) {
-      // The title and 看原始记录 share an action and a key.
-      if ((b.dataset.id || b.dataset.key) === focus.id && (b.dataset.raw || '') === focus.raw) { b.focus(); break; }
+      // The title, 看原始记录 › and the "⋯"'s 原始记录 share an action and a
+      // key: data-raw tells the title apart, the "⋯" row the other two.
+      if ((b.dataset.id || b.dataset.key) === focus.id && (b.dataset.raw || '') === focus.raw && !!b.closest('.tk-acts') === focus.acts) { b.focus(); break; }
     }
   }
 }

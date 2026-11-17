@@ -478,9 +478,9 @@ export function showPlannerLeft(open) {
 // block a 任务 title was tapped in, and marks its new result read. pending
 // is a message just sent to it, shown until its log has a user event.
 // opts.raw opens it on its raw record, tool calls and all (D124: a card's
-// 原始记录, its digest's 看原始记录), and switches it there when it is open
-// already. Every other opening starts on its milestones: the switch is not
-// remembered, or a title clicked later would open raw too.
+// 原始记录, its digest's 看原始记录), scrolled to the latest, also when it is
+// open already. Every other opening starts on its milestones: the switch is
+// not remembered, or a title clicked later would open raw too.
 export function openPlannerSession(key, pending, opts) {
   if (!key || key === PLANNER_KEY) return;
   const raw = !!(opts && opts.raw);
@@ -489,7 +489,8 @@ export function openPlannerSession(key, pending, opts) {
   // which no viewing frame reaches.
   seenTask(key);
   if (st.sess && st.sess.key === key) {
-    if (raw && !st.sess.raw) {
+    // Switched or on its raw record already, it lands on the latest.
+    if (raw) {
       st.sess.raw = true;
       paintSessionPane(true, []);
     }
