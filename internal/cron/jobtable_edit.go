@@ -87,7 +87,7 @@ func (t *jobTable) freshIDLocked() (string, error) {
 	}
 	prevID := id
 	for i := 0; i < 10; i++ {
-		if _, exists := t.jobs[id]; !exists {
+		if !t.idTakenLocked(id) {
 			break
 		}
 		if i == 0 {
@@ -106,7 +106,7 @@ func (t *jobTable) freshIDLocked() (string, error) {
 		prevID = retryID
 		id = retryID
 	}
-	if _, exists := t.jobs[id]; exists {
+	if t.idTakenLocked(id) {
 		return "", fmt.Errorf("cron: failed to generate unique job ID after 10 attempts")
 	}
 	return id, nil
