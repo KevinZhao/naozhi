@@ -108,7 +108,9 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 
 	// Replay buffered lines directly (still not the active client, no duplication)
 	lines := s.buffer.LinesSince(attachMsg.Seq)
+	lastReplayed := attachMsg.Seq
 	for _, l := range lines {
+		lastReplayed = l.seq
 		// MarshalReplayLine aliases l.data only across the synchronous marshal
 		// and writeRaw writes before the next iteration — no copy needed.
 		data, err := MarshalReplayLine(l.seq, l.data)
@@ -129,7 +131,18 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 	// NOW become the active client (after replay complete, no duplication
 	// window). A refused handler returns before the defers below, leaving the
 	// watchdog, idle timer and state file to the client that is active.
-	writeCh, clientDone, admit := s.admitClient(conn, gen, cliAlive)
+	// The CLI kept writing while the replay went out; under liveMu, what the
+	// ring took in since the snapshot goes first on writeCh and every later
+	// line is enqueued live, so none falls between the two.
+	s.liveMu.Lock()
+	var backlog [][]byte
+	for _, l := range s.buffer.LinesSince(lastReplayed) {
+		if data, err := MarshalStdoutLine(l.seq, l.data); err == nil {
+			backlog = append(backlog, data)
+		}
+	}
+	writeCh, clientDone, admit := s.admitClient(conn, gen, cliAlive, backlog)
+	s.liveMu.Unlock()
 	switch admit {
 	case admitBusy:
 		slog.Warn("rejecting new client: active client exists while CLI alive")

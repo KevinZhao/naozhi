@@ -458,13 +458,13 @@ func TestAdmitClient_ReplacesOld(t *testing.T) {
 	defer clientB.Close()
 	defer serverB.Close()
 
-	ch1, done1, res := s.admitClient(clientA, 1, false)
+	ch1, done1, res := s.admitClient(clientA, 1, false, nil)
 	if res != admitOK || ch1 == nil || done1 == nil {
 		t.Fatalf("admitClient = (%v, %v, %v), want channels and admitOK", ch1, done1, res)
 	}
 
 	// A later attach with the CLI dead kicks the old client.
-	ch2, done2, res := s.admitClient(clientB, 2, false)
+	ch2, done2, res := s.admitClient(clientB, 2, false, nil)
 	if res != admitOK || ch2 == nil || done2 == nil {
 		t.Fatalf("admitClient (second) = (%v, %v, %v), want channels and admitOK", ch2, done2, res)
 	}
@@ -488,11 +488,11 @@ func TestAdmitClient_OlderGenDoesNotKickNewer(t *testing.T) {
 	defer newServer.Close()
 	defer newPeer.Close()
 
-	_, newDone, res := s.admitClient(newServer, 2, false)
+	_, newDone, res := s.admitClient(newServer, 2, false, nil)
 	if res != admitOK {
 		t.Fatalf("newer admit = %v, want admitOK", res)
 	}
-	if ch, done, res := s.admitClient(oldServer, 1, false); res != admitSuperseded || ch != nil || done != nil {
+	if ch, done, res := s.admitClient(oldServer, 1, false, nil); res != admitSuperseded || ch != nil || done != nil {
 		t.Fatalf("older admit = (%v, %v, %v), want (nil, nil, admitSuperseded)", ch, done, res)
 	}
 
@@ -527,8 +527,8 @@ func TestAdmitClient_LiveCLIRejectsSecond(t *testing.T) {
 	defer clientB.Close()
 	defer serverB.Close()
 
-	_, doneA, _ := s.admitClient(clientA, 1, true)
-	if ch, done, res := s.admitClient(clientB, 2, true); res != admitBusy || ch != nil || done != nil {
+	_, doneA, _ := s.admitClient(clientA, 1, true, nil)
+	if ch, done, res := s.admitClient(clientB, 2, true, nil); res != admitBusy || ch != nil || done != nil {
 		t.Fatalf("second admit with a live CLI = (%v, %v, %v), want (nil, nil, admitBusy)", ch, done, res)
 	}
 	s.mu.Lock()
@@ -545,7 +545,7 @@ func TestAdmitClient_LiveCLIRejectsSecond(t *testing.T) {
 
 	// Once the active client is gone the next attach is admitted.
 	s.clearClient(clientA)
-	if _, _, res := s.admitClient(clientB, 3, true); res != admitOK {
+	if _, _, res := s.admitClient(clientB, 3, true, nil); res != admitOK {
 		t.Errorf("admit after clearClient = %v, want admitOK", res)
 	}
 }
@@ -557,7 +557,7 @@ func TestClearClient_RemovesCorrectClient(t *testing.T) {
 	defer clientA.Close()
 	defer serverA.Close()
 
-	s.admitClient(clientA, 1, false)
+	s.admitClient(clientA, 1, false, nil)
 
 	// Clear it
 	s.clearClient(clientA)
@@ -582,7 +582,7 @@ func TestClearClient_WrongConn_Ignored(t *testing.T) {
 	defer clientB.Close()
 	defer serverB.Close()
 
-	s.admitClient(clientA, 1, false)
+	s.admitClient(clientA, 1, false, nil)
 	s.clearClient(clientB) // different conn, must be ignored
 
 	s.mu.Lock()
@@ -675,6 +675,29 @@ func TestResetIdleTimer_TriggersAfterDuration(t *testing.T) {
 		// fired correctly
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("idle timer did not fire")
+	}
+}
+
+// Run's select keeps the channel idleC gave it when it was entered; a reset
+// on detach must arm that same channel, both when the timer was still pending
+// and when it already fired while a client was attached.
+func TestResetIdleTimer_FiresOnChannelHeldBeforeReset(t *testing.T) {
+	s := makeShimServerForTest(t)
+	s.resetIdleTimer(time.Hour)
+	held := s.idleC()
+
+	s.resetIdleTimer(20 * time.Millisecond) // detach while pending
+	select {
+	case <-held:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reset of a pending timer never fired on the held channel")
+	}
+
+	s.resetIdleTimer(20 * time.Millisecond) // detach after it fired attached
+	select {
+	case <-held:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reset of a fired timer never fired on the held channel")
 	}
 }
 

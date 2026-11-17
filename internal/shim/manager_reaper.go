@@ -139,3 +139,18 @@ func (m *Manager) removeShimIfCurrent(key string, want *ShimHandle) {
 	}
 	m.mu.Unlock()
 }
+
+// pruneExitedLocked drops entries whose shim process is gone, so a full
+// admission count reflects live shims. A reconnected shim is not this
+// process's child, so no cmd.Wait reaper removes its entry when it exits
+// (TTL close, a reaped task: key, an orphan shut down), and those keys may
+// never be spawned again to overwrite it. Run only at the cap: it costs one
+// signal-0 probe per entry. A handle without a hello PID is kept; the
+// process conn is not closed, since the cli Process owns it. Caller holds m.mu.
+func (m *Manager) pruneExitedLocked() {
+	for key, h := range m.shims {
+		if pid := h.Hello.ShimPID; pid > 0 && !pidAlive(pid) {
+			delete(m.shims, key)
+		}
+	}
+}

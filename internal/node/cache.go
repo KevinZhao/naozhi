@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 )
@@ -145,25 +146,16 @@ func (m *CacheManager) RefreshAll() {
 			continue
 		}
 		newStatus[res.nodeID] = "ok"
-		for _, rs := range res.sessions {
-			rs["node"] = res.nodeID
-		}
-		newSessions[res.nodeID] = res.sessions
+		newSessions[res.nodeID] = tagNode(res.sessions, res.nodeID)
 		// projects/discovered are independent RPCs; preserve last-known on
 		// failure so a transient error does not blank the sub-items.
 		if res.projErr == nil {
-			for _, rp := range res.projects {
-				rp["node"] = res.nodeID
-			}
-			newProjects[res.nodeID] = res.projects
+			newProjects[res.nodeID] = tagNode(res.projects, res.nodeID)
 		} else if p, ok := prevProjects[res.nodeID]; ok {
 			newProjects[res.nodeID] = p
 		}
 		if res.discErr == nil {
-			for _, rd := range res.discovered {
-				rd["node"] = res.nodeID
-			}
-			newDiscovered[res.nodeID] = res.discovered
+			newDiscovered[res.nodeID] = tagNode(res.discovered, res.nodeID)
 		} else if d, ok := prevDiscovered[res.nodeID]; ok {
 			newDiscovered[res.nodeID] = d
 		}
@@ -224,22 +216,13 @@ func (m *CacheManager) RefreshFor(id string) {
 	// reference and readers iterate race-free.
 	m.mu.Lock()
 	if sessErr == nil {
-		for _, rs := range sessions {
-			rs["node"] = id
-		}
-		m.sessions = cloneSetSlice(m.sessions, id, sessions)
+		m.sessions = cloneSetSlice(m.sessions, id, tagNode(sessions, id))
 	}
 	if projErr == nil {
-		for _, rp := range projects {
-			rp["node"] = id
-		}
-		m.projects = cloneSetSlice(m.projects, id, projects)
+		m.projects = cloneSetSlice(m.projects, id, tagNode(projects, id))
 	}
 	if discErr == nil {
-		for _, rd := range discovered {
-			rd["node"] = id
-		}
-		m.discovered = cloneSetSlice(m.discovered, id, discovered)
+		m.discovered = cloneSetSlice(m.discovered, id, tagNode(discovered, id))
 	}
 	m.status = cloneSetString(m.status, id, status)
 	m.mu.Unlock()
@@ -247,6 +230,21 @@ func (m *CacheManager) RefreshFor(id string) {
 	if m.onChange != nil {
 		m.onChange()
 	}
+}
+
+// tagNode sets "node" on each row a node answered, dropping null rows: a
+// node's `[null]` decodes to a nil map, and writing into it panics in a
+// goroutine with no recover, taking the whole primary down. It filters into a
+// new slice only when a nil is present, so the common path stays in place.
+func tagNode(rows []map[string]any, id string) []map[string]any {
+	isNil := func(r map[string]any) bool { return r == nil }
+	if slices.ContainsFunc(rows, isNil) {
+		rows = slices.DeleteFunc(slices.Clone(rows), isNil)
+	}
+	for _, r := range rows {
+		r["node"] = id
+	}
+	return rows
 }
 
 // PurgeNode removes all cached data for a node and marks it as error
