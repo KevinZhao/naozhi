@@ -20,8 +20,9 @@ import (
 )
 
 type fakeInbox struct {
-	mu    sync.Mutex
-	items []notify.Item
+	mu     sync.Mutex
+	items  []notify.Item
+	closed []string // CloseSource calls as source/closer
 }
 
 func (f *fakeInbox) Add(it notify.Item) (notify.Item, bool) {
@@ -29,6 +30,12 @@ func (f *fakeInbox) Add(it notify.Item) (notify.Item, bool) {
 	defer f.mu.Unlock()
 	f.items = append(f.items, it)
 	return it, true
+}
+
+func (f *fakeInbox) CloseSource(source string, by notify.Closer) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closed = append(f.closed, source+"/"+string(by))
 }
 
 // rig is an Engine over a sidecar directory and fakes for every source.

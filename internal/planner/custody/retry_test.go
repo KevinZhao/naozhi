@@ -515,3 +515,38 @@ func TestFailureStaysOneWhileEventsArrive(t *testing.T) {
 		})
 	}
 }
+
+// The "托管已停" question closes once the stop is gone: the user took the
+// session over, or its task was marked done (custody is off for it then,
+// which used to leave the item open for good, #3972).
+func TestStopItemClosesWhenSettled(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		settle func(r *rig)
+	}{
+		{"user took over", func(r *rig) {
+			r.lastUser["task:a"] = r.now.Add(time.Second)
+			r.now = r.now.Add(time.Minute)
+		}},
+		{"task done", func(r *rig) {
+			r.update("task:a", func(m *sidecar.Meta) { m.Mark = &sidecar.Mark{State: "done", By: "user", At: r.now} })
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			r.dispatch("task:a")
+			if err := r.e.Halt("task:a", "先别跑了"); err != nil {
+				t.Fatal(err)
+			}
+			r.e.Tick()
+			if len(r.inbox.closed) != 0 {
+				t.Fatalf("closed before it settled: %q", r.inbox.closed)
+			}
+			tc.settle(r)
+			r.e.Tick()
+			if want := []string{"custody:task:a/auto"}; !slices.Equal(r.inbox.closed, want) {
+				t.Errorf("closed = %q, want %q", r.inbox.closed, want)
+			}
+		})
+	}
+}
