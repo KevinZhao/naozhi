@@ -222,8 +222,8 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
-	if cfg.Server.Addr != ":8080" {
-		t.Errorf("default addr = %q, want %q", cfg.Server.Addr, ":8080")
+	if cfg.Server.Addr != "127.0.0.1:8080" {
+		t.Errorf("default addr = %q, want %q", cfg.Server.Addr, "127.0.0.1:8080")
 	}
 	if cfg.CLI.Model != "" {
 		t.Errorf("default model = %q, want empty", cfg.CLI.Model)

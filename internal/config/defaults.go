@@ -18,7 +18,7 @@ import (
 const CurrentSchemaVersion = 2
 
 const (
-	defaultServerAddr    = ":8080"
+	defaultServerAddr    = "127.0.0.1:8080"
 	defaultLogLevel      = "info"
 	defaultSessionCWD    = "~/.naozhi/workspace"
 	defaultQueueMode     = "passthrough"
