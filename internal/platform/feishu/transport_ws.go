@@ -59,7 +59,7 @@ func (f *Feishu) startWebSocket() error {
 			f.routeParsed(ctx, handler, pe)
 		}
 		return nil
-	}).OnP2CardActionTrigger(func(cardCtx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+	}).OnP2CardActionTrigger(func(_ context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
 		// The SDK requires a non-nil response; an empty Toast keeps the client silent.
 		if event == nil || event.Event == nil || event.Event.Action == nil {
 			return &callback.CardActionTriggerResponse{}, nil
@@ -85,8 +85,10 @@ func (f *Feishu) startWebSocket() error {
 			operatorID = event.Event.Operator.OpenID
 		}
 		// The WS callback carries no chat_type; an empty one makes
-		// dispatchCardAction derive it from the button value.
-		f.dispatchCardActionTracked(cardCtx, val, chatID, messageID, "", operatorID, handler)
+		// dispatchCardAction derive it from the button value. The adapter
+		// ctx, as the message branches use: the click's turn outlives the
+		// callback, and the SDK's frame ctx is not ours to hold.
+		f.dispatchCardActionTracked(ctx, val, chatID, messageID, "", operatorID, handler)
 		return &callback.CardActionTriggerResponse{}, nil
 	})
 
@@ -131,17 +133,19 @@ func wsConnStateOptions(t *platform.ConnTracker) []larkws.ClientOption {
 	}
 }
 
-// dispatchCardActionTracked runs dispatchCardAction under f.dispatch.TryRun —
-// tracked and capped like the message branches, but synchronous because the
-// larkws SDK acks the frame only after the callback returns. On a full pool
-// the click is dropped best-effort rather than blocking the SDK read loop (#1964).
+// dispatchCardActionTracked runs dispatchCardAction under f.dispatch.TryGo,
+// tracked and capped like the message branches (#1964). It must not run
+// inline: the larkws SDK answers the callback only once it returns, Feishu
+// wants that answer within 3 seconds, and the handler may carry the click's
+// whole turn (the owner loop runs on the caller in collect / interrupt
+// mode). On a full pool the click is dropped best-effort.
 func (f *Feishu) dispatchCardActionTracked(
 	ctx context.Context,
 	val platform.AskAnswerPayload,
 	chatID, messageID, chatType, operatorID string,
 	handler platform.MessageHandler,
 ) {
-	f.dispatch.TryRun("feishu ws card_action", func() {
+	f.dispatch.TryGo("feishu ws card_action", func() {
 		f.dispatchCardAction(ctx, val, chatID, messageID, chatType, operatorID, handler)
 	})
 }

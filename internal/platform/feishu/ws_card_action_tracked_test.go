@@ -52,21 +52,27 @@ func TestDispatchCardActionTracked(t *testing.T) {
 			}
 
 			var called atomic.Int32
+			var mu sync.Mutex
 			var got platform.IncomingMessage
 			handler := func(_ context.Context, m platform.IncomingMessage) {
 				called.Add(1)
+				mu.Lock()
 				got = m
+				mu.Unlock()
 			}
 
 			// messageID empty so the cosmetic EditMessage goroutine is skipped
 			// (it requires a configured client); we only assert tracking + sem.
 			f.dispatchCardActionTracked(context.Background(), payload,
 				"oc_123", "", "group", "ou_user", handler)
+			f.dispatch.Wait() // the dispatch runs on its own goroutine
 
 			if called.Load() != tt.wantCalled {
 				t.Fatalf("handler called %d times, want %d", called.Load(), tt.wantCalled)
 			}
 			if !tt.wantDropped {
+				mu.Lock()
+				defer mu.Unlock()
 				if got.Text != "Error style: Return an error." {
 					t.Errorf("message text = %q", got.Text)
 				}
@@ -154,4 +160,30 @@ func TestDispatchCardActionTracked_StopDrainsInFlight(t *testing.T) {
 		t.Fatal("wg.Wait() did not return after dispatch completed")
 	}
 	dispatchWG.Wait()
+}
+
+// TestDispatchCardActionTracked_ReturnsBeforeTheTurn: the click's dispatch
+// returns while its handler (which may run the whole turn) is still going,
+// so the SDK answers Feishu's card callback inside its 3-second limit.
+func TestDispatchCardActionTracked_ReturnsBeforeTheTurn(t *testing.T) {
+	t.Parallel()
+	f := &Feishu{}
+	release := make(chan struct{})
+	handler := func(context.Context, platform.IncomingMessage) { <-release }
+
+	returned := make(chan struct{})
+	go func() {
+		f.dispatchCardActionTracked(context.Background(),
+			platform.AskAnswerPayload{Kind: "ask_answer", Label: "L"},
+			"oc_1", "", "group", "ou_1", handler)
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("dispatchCardActionTracked waited for the handler: the card callback is answered only after the turn")
+	}
+	close(release)
+	f.dispatch.Wait()
 }
