@@ -494,14 +494,21 @@ export function tidyEmpty(root) {
 
 function decorateEvent(ev, turn) {
   ev.dataset.plDec = '1';
-  ev.querySelectorAll('code[data-lang="naozhi-session-ref"]').forEach((code) => {
+  // Fences become cards only in the bubbles they are the gateway's in: an
+  // action block in the Planner's own reply (the one planner/action runs),
+  // a session ref in your message (withoutSnapshot builds it). The same
+  // fence in a session's message to the Planner (peer_message) is its text:
+  // as a card it would claim what was never done, its buttons live.
+  const refs = ev.matches('.text, .user') ? ev.querySelectorAll('code[data-lang="naozhi-session-ref"]') : [];
+  const acts = ev.matches('.text') ? ev.querySelectorAll('code[data-lang="naozhi-action"]') : [];
+  refs.forEach((code) => {
     let ref = null;
     try { ref = JSON.parse(code.textContent); } catch { /* left as code */ }
     const wrap = code.closest('.md-code-wrap');
     if (!wrap || !ref || !isStr(ref.key) || !ref.key) return;
     wrap.outerHTML = '<div class="pl-handoff"><span class="pl-handoff-l">交给 Planner</span>' + sessionCardHtml(ref.key) + '</div>';
   });
-  ev.querySelectorAll('code[data-lang="naozhi-action"]').forEach((code) => {
+  acts.forEach((code) => {
     const wrap = code.closest('.md-code-wrap');
     // A block with no line in the conversation (status 进行中) leaves a
     // marker only, for the blank lines after it to go with it.
