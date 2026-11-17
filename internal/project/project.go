@@ -3,6 +3,7 @@ package project
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -124,17 +125,36 @@ func (p *Project) configPath() string {
 	return filepath.Join(p.Path, configDir, configFile)
 }
 
+// maxConfigBytes caps a project.yaml read. Bindings and a few planner fields
+// fit in a few KB; the cap only has to stop a hostile file.
+const maxConfigBytes = 64 << 10
+
 // loadConfig reads .naozhi/project.yaml. Returns zero-value config if file doesn't exist.
+//
+// The file can arrive with a git clone or pull into projects.root, and git
+// keeps symlinks: one pointing at /dev/zero would grow os.ReadFile's buffer
+// until the process ran out of memory, a FIFO would block the scan forever.
+// Only a regular file within maxConfigBytes is read; anything else is a bad
+// config, which Scan skips like a parse error.
 func loadConfig(projectPath string) (ProjectConfig, error) {
 	var cfg ProjectConfig
 	path := filepath.Join(projectPath, configDir, configFile)
 
-	data, err := os.ReadFile(path)
+	f, _, err := osutil.OpenRegular(path, maxConfigBytes)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return cfg, nil
 		}
 		return cfg, fmt.Errorf("read project config: %w", err)
+	}
+	// The cap holds on the read too: the file may grow after the open's Fstat.
+	data, err := io.ReadAll(io.LimitReader(f, maxConfigBytes+1))
+	f.Close()
+	if err != nil {
+		return cfg, fmt.Errorf("read project config: %w", err)
+	}
+	if len(data) > maxConfigBytes {
+		return cfg, fmt.Errorf("read project config: %w", osutil.ErrTooLarge)
 	}
 
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
