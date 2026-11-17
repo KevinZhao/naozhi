@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -379,20 +380,33 @@ func (s *Scheduler) Start() error {
 	// Reject persisted jobs whose WorkDir escapes the configured sandbox:
 	// replaying an on-disk tampered entry must not grant filesystem access that
 	// validateWorkspace would reject at creation. Filtered before the caps so a
-	// rejected entry does not consume a slot. No-op when allowedRoot is empty.
+	// rejected entry does not consume a slot; it is held, not run, so the next
+	// persist keeps it on disk. No-op when allowedRoot is empty.
 	admitted := make([]*Job, 0, len(restored))
+	var rejected []*Job
 	for _, j := range restored {
 		if s.allowedRoot != "" && j.WorkDir != "" && !workDirUnderRoot(j.WorkDir, s.allowedRoot, s.allowedRootResolved) {
 			slog.Warn("cron job work_dir outside allowed_root; skipping",
 				"job_id", j.ID, "work_dir", j.WorkDir)
+			rejected = append(rejected, j)
 			continue
 		}
 		admitted = append(admitted, j)
 	}
+	// loadJobs returns a map, so without a fixed order every restart over a
+	// cap would admit a different subset of the same file: jobs the user saw
+	// and relied on would vanish and held ones come back. Oldest first keeps
+	// the jobs that already had their slots; ID breaks ties.
+	slices.SortFunc(admitted, func(a, b *Job) int {
+		if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
+			return c
+		}
+		return jobIDCmpForSort(a, b)
+	})
 	// Entry-lifecycle writer like any other: the load plans, the commits below
 	// apply. Before s.cron.Start() a commit only appends to robfig's slice.
 	s.entryMu.Lock()
-	lr := s.tbl.load(admitted, s.maxJobs, s.maxJobsPerChat)
+	lr := s.tbl.load(admitted, rejected, s.maxJobs, s.maxJobsPerChat)
 	for _, p := range lr.plans {
 		s.commitAndApplyCronEntry(p)
 	}

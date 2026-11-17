@@ -215,6 +215,7 @@ func (t *jobTable) marshalLocked() ([]byte, error) {
 			slices.SortFunc(entries, jobIDCmpForSort)
 		}
 	}
+	entries = t.withHeldLocked(entries)
 	var fn *marshalJobsFn
 	if t.marshal != nil {
 		fn = t.marshal.Load()
@@ -269,7 +270,33 @@ func (t *jobTable) snapshotForSaveLocked() jobsSnapshot {
 			slices.SortFunc(entries, jobIDCmpForSort)
 		}
 	}
-	return jobsSnapshot{entries: entries, seq: t.saveSeq.Add(1)}
+	return jobsSnapshot{entries: t.withHeldLocked(entries), seq: t.saveSeq.Add(1)}
+}
+
+// withHeldLocked adds the held jobs to a persist's ID-sorted entries, keeping
+// the order, so a save never drops a job Start did not admit. Held jobs are
+// never mutated, so sharing their pointers with an off-lock marshal is safe.
+func (t *jobTable) withHeldLocked(entries []*Job) []*Job {
+	if len(t.held) == 0 {
+		return entries
+	}
+	entries = append(entries, t.held...)
+	slices.SortFunc(entries, jobIDCmpForSort)
+	return entries
+}
+
+// idTakenLocked reports whether id names a registered or a held job, so a
+// new job never takes the ID of one still on disk.
+func (t *jobTable) idTakenLocked(id string) bool {
+	if _, ok := t.jobs[id]; ok {
+		return true
+	}
+	for _, h := range t.held {
+		if h.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // applyEntry writes a committed robfig registration onto job p.jobID and

@@ -58,6 +58,13 @@ type jobTable struct {
 	// the source of truth: marshalLocked validates this hint and rebuilds
 	// from the map on drift.
 	sortedJobIDs []string
+	// held are the stored jobs Start did not admit: over a cap, a schedule
+	// that no longer plans, a work_dir outside allowed_root. They are not
+	// scheduled, listed or counted, but every persist writes them back as
+	// read, so the file loses a job only when someone deletes it and raising
+	// the cap (or fixing the cause) and restarting brings it back. Set by
+	// load and never mutated after, so snapshots may share the pointers.
+	held []*Job
 	// saveSeq tags every marshaled snapshot at capture time, under mu.
 	// saveMarshaled skips the write under storeMu if lastSavedSeq is already
 	// newer: sync.Mutex is not FIFO, so an older snapshot could otherwise reach

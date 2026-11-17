@@ -8,6 +8,7 @@ package cron
 import (
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 )
 
@@ -22,30 +23,36 @@ type loadResult struct {
 }
 
 // load registers restored jobs within the global and per-chat caps, skipping
-// any whose schedule no longer plans. Over-cap jobs stay on disk (Start never
-// persists), so raising the cap and restarting recovers them (#1187, #2060).
-func (t *jobTable) load(restored []*Job, maxJobs, maxPerChat int) loadResult {
+// any whose schedule no longer plans. rejected are the stored jobs the caller
+// already turned away (outside allowed_root). Every skipped job is held, not
+// dropped: persists write it back, so raising the cap and restarting
+// recovers it (#1187, #2060).
+func (t *jobTable) load(restored, rejected []*Job, maxJobs, maxPerChat int) loadResult {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	var r loadResult
+	held := append([]*Job(nil), rejected...)
 	for _, j := range restored {
 		if len(t.jobs) >= maxJobs {
 			slog.Warn("cron job over maxJobs cap; skipping (raise cron.MaxJobs to restore)",
 				"job_id", j.ID, "schedule", j.Schedule, "cap", maxJobs)
 			r.skippedOverCap++
+			held = append(held, j)
 			continue
 		}
 		if t.chatJobCount[chatKeyFor(j.Platform, j.ChatID)] >= maxPerChat {
 			slog.Warn("cron job over per-chat cap; skipping",
 				"job_id", j.ID, "platform", j.Platform, "chat_id", j.ChatID, "cap", maxPerChat)
 			r.skippedOverPerChat++
+			held = append(held, j)
 			continue
 		}
 		if !j.Paused {
 			p, err := planCronEntry(j.ID, j.Schedule, time.Now())
 			if err != nil {
 				slog.Warn("skip invalid cron job", "job_id", j.ID, "schedule", j.Schedule, "err", err)
+				held = append(held, j)
 				continue
 			}
 			r.plans = append(r.plans, p)
@@ -56,6 +63,8 @@ func (t *jobTable) load(restored []*Job, maxJobs, maxPerChat int) loadResult {
 		// session_id，historySource 才能从 JSONL 把历史读回来给 dashboard 显示。
 		r.stubs = append(r.stubs, jobStubFields{id: j.ID, workDir: j.WorkDir, prompt: j.Prompt, lastSessionID: j.LastSessionID})
 	}
+	slices.SortFunc(held, jobIDCmpForSort)
+	t.held = held
 	r.loaded = len(t.jobs)
 	return r
 }

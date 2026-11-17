@@ -16,7 +16,7 @@ func TestJobTableLoad(t *testing.T) {
 		{ID: "d", Schedule: "@every 5m", Platform: "p", ChatID: "d"},
 		{ID: "cap-over", Schedule: "@every 5m", Platform: "p", ChatID: "e"},
 	}
-	r := tbl.load(restored, 3, 2)
+	r := tbl.load(restored, nil, 3, 2)
 	if r.loaded != 3 || r.skippedOverCap != 1 || r.skippedOverPerChat != 1 {
 		t.Errorf("loaded %d, over cap %d, over per-chat %d; want 3, 1, 1", r.loaded, r.skippedOverCap, r.skippedOverPerChat)
 	}
@@ -24,6 +24,10 @@ func TestJobTableLoad(t *testing.T) {
 		if _, ok := tbl.jobs[id]; !ok {
 			t.Errorf("%s not loaded", id)
 		}
+	}
+	// The skipped ones are held for the next save, in ID order.
+	if len(tbl.held) != 3 || tbl.held[0].ID != "bad" || tbl.held[1].ID != "cap-over" || tbl.held[2].ID != "chat-over" {
+		t.Errorf("held = %v, want bad, cap-over, chat-over", tbl.held)
 	}
 	if len(tbl.sortedJobIDs) != 3 || tbl.chatJobCount[chatKeyFor("p", "c")] != 2 {
 		t.Error("loaded jobs not indexed")
