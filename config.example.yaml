@@ -35,7 +35,10 @@
 schema_version: 2
 
 server:
-  addr: ":8180"
+  # Loopback by default: the dashboard is then reachable from this machine
+  # only. Bind every interface (":8180") only inside a private network, e.g.
+  # behind an internal ALB with trusted_proxy: true; never publish it as is.
+  addr: "127.0.0.1:8180"
   dashboard_token: "${NAOZHI_DASHBOARD_TOKEN}"
   # trusted_proxy: set true only when an ALB, CloudFront or nginx in front of
   # naozhi stamps X-Forwarded-For / X-Forwarded-Proto. With true, a direct
