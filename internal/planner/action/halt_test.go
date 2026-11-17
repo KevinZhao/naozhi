@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/bgtask"
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/custody"
 	"github.com/naozhi/naozhi/internal/planner/promise"
@@ -318,6 +319,59 @@ func TestNoUnreportedReceiptWhenStopped(t *testing.T) {
 	h.r.checkEnded(<-h.r.endCh)
 	if len(h.g.told) != 1 || !strings.Contains(h.g.told[0], "被叫停，基准跑了一半") {
 		t.Errorf("a report after the halt: told = %q, want its line", h.g.told)
+	}
+}
+
+// A turn end held on background work still running, then the session
+// halted and its process stopped: the CLI's end (Gone) wakes the hold, and
+// no "之后进程被停止，不是正常结束" receipt goes to the Planner, the stop
+// being the user's. Without the halt the same wake is told, so the check
+// is reached.
+func TestNoGoneReceiptWhenHalted(t *testing.T) {
+	for _, halted := range []bool{false, true} {
+		t.Run(map[bool]string{false: "not halted", true: "halted"}[halted], func(t *testing.T) {
+			h := newHaltRig(t)
+			h.r.grace, h.r.reportGrace = 0, 0
+			now := time.Now()
+			h.r.cfg.Now = func() time.Time { return now }
+			var wakes int
+			h.r.after = func(d time.Duration, f func()) {
+				if d > 0 {
+					wakes++
+					return
+				}
+				f()
+			}
+			open := true
+			h.r.cfg.Background = func(string) bgtask.State {
+				if !open {
+					return bgtask.State{}
+				}
+				return bgtask.State{Tasks: []bgtask.Task{{ID: "b1", Kind: bgtask.KindBash, Last: now}}}.At(now)
+			}
+			h.r.Result(h.key, "基准在后台跑，跑完再看")
+			h.r.checkEnded(<-h.r.endCh)
+			if len(h.g.told) != 0 || wakes != 1 {
+				t.Fatalf("told %q wakes %d; want the turn end held", h.g.told, wakes)
+			}
+			if halted {
+				h.run(block(`{"type":"halt","task":"`+h.key+`","why":"用户说先停下"}`), "", said)
+				if len(h.stopped) != 1 || h.stopped[0] != h.key {
+					t.Fatalf("stopped = %q, want the process closed", h.stopped)
+				}
+				h.g.told = nil
+			}
+			open = false
+			now = now.Add(time.Minute)
+			h.r.Gone(h.key, "stopped")
+			h.r.checkEnded(<-h.r.endCh)
+			switch {
+			case halted && len(h.g.told) != 0:
+				t.Errorf("halted, process gone: told = %q, want no receipt", h.g.told)
+			case !halted && (len(h.g.told) != 1 || !strings.Contains(h.g.told[0], "进程被停止，后台任务随之停止，不是正常结束")):
+				t.Errorf("not halted, process gone: told = %q, want the receipt", h.g.told)
+			}
+		})
 	}
 }
 
