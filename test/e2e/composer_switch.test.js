@@ -196,3 +196,69 @@ test('an HTTP send still out when the user switches finishes on its own session'
     mock.server.close();
   }
 });
+
+test('an image pasted into a discovered session preview goes out with the takeover send', async ({ browser }) => {
+  const ctx = await browser.newContext(desktop);
+  const page = await ctx.newPage();
+  const mock = await startMockServer({ uploads: true });
+  try {
+    const D = { pid: 4242, session_id: 'ext-sid-1', cwd: '/home/user/myproject', proc_start_time: 1, node: 'local', state: 'ready', cli_name: 'claude', started_at: Date.now() };
+    await page.route('**/api/discovered', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify([D]) }));
+    // No takeover_id: the wait goes by the key alone, which the mock lists.
+    await page.route('**/api/discovered/takeover', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ key: B }) }));
+    await page.goto(mock.url + '/dashboard');
+    const dkey = '_discovered:4242:local';
+    await card(page, dkey).click();
+    await expect(page.locator('#msg-input')).toHaveAttribute('data-placeholder', 'send a message to take over...');
+
+    await page.evaluate((b64) => {
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const dt = new DataTransfer();
+      dt.items.add(new File([bytes], 'shot.png', { type: 'image/png' }));
+      const input = document.getElementById('msg-input');
+      input.focus();
+      input.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    }, PNG_1X1);
+    await expect(page.locator('#file-preview .file-thumb.ready')).toHaveCount(1);
+    await page.locator('#msg-input').click();
+    await page.keyboard.type('take over with an image');
+    await page.keyboard.press('Enter');
+
+    await expect.poll(() => mock.sendCalls.length, { timeout: 10000 }).toBe(1);
+    const sent = JSON.parse(mock.sendCalls[0]);
+    expect(sent.key).toBe(B);
+    expect(sent.text).toBe('take over with an image');
+    expect(sent.file_ids).toEqual([mock.uploadCalls[0].id]);
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+test('a dismissed session leaves no stashed attachments behind', async ({ browser }) => {
+  const ctx = await browser.newContext(desktop);
+  const page = await ctx.newPage();
+  const mock = await startMockServer({ uploads: true });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await open(page, A);
+    await page.locator('#file-input').setInputFiles({ name: 'a.png', mimeType: 'image/png', buffer: Buffer.from(PNG_1X1, 'base64') });
+    await expect(page.locator('#file-preview .file-thumb.ready')).toHaveCount(1);
+    await open(page, B);
+    // The same module instance the dashboard runs, so its live state.
+    const stashed = () => page.evaluate(async () => Object.keys((await import('/static/state.js')).perSession.files));
+    expect(await stashed()).toHaveLength(1);
+
+    await card(page, A).hover();
+    await card(page, A).locator('.btn-dismiss').click();
+    // A second dismiss commits the first at once instead of after its 撤销 window.
+    const other = page.locator('.session-card[data-key="dashboard:direct:2026-01-01-120001-2:otherproject"]');
+    await other.hover();
+    await other.locator('.btn-dismiss').click();
+    // A leftover stash would keep the asset-skew reload from ever finding the tab idle.
+    await expect.poll(stashed).toEqual([]);
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});

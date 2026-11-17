@@ -143,7 +143,13 @@ async function takeoverThenSend(input, text) {
       return endTakeover(input, btn, 'send a message...');
     }
     composer.sending = false;
+    // The preview has no session key, so selectSession would drop its
+    // attachments (stashComposer); they belong to this first message.
+    const files = composer.pendingFiles;
+    composer.pendingFiles = [];
     shell.selectSession(takenKey, takenNode);
+    composer.pendingFiles = composer.pendingFiles.concat(files);
+    renderFilePreviews();
     setMsgValue(document.getElementById('msg-input'), text);
     await sendMessage();
   } catch (e) {
