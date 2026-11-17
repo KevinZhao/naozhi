@@ -2,11 +2,12 @@
 // thumbnail drag-reorder and the HEIC/orientation pre-pass.
 // Layering: never import dashboard.js back.
 import { NZ_CONTRACT } from './contract.js';
-import { composer } from './state.js';
+import { composer, perSession, selection, ui } from './state.js';
 import { esc, escAttr, showToast } from './nz_util.js';
 import { featureForCurrent } from './features.js';
 import { ICONS } from './icons.js';
-import { formatFileSize, showAuthModal } from './utilities.js';
+import { formatFileSize, getMsgValue, setMsgValue, showAuthModal } from './utilities.js';
+import { sid } from './session_ident.js';
 
 // --- File handling ---
 //
@@ -509,12 +510,76 @@ function renderFilePreviews(tray = mainTray) {
   }).join('');
 }
 
+// --- The chat composer across sessions ---
+//
+// The chat view has one composer, rebuilt by renderMainShell for whichever
+// session is selected, and one attachment list (composer.pendingFiles). Every
+// path that moves selection.key off a session runs stashComposer first, and
+// every path that lands on one runs restoreComposer after the rebuild, so a
+// session's draft and attachments come back with it and never ride along
+// with another session's send.
+
+// saveDraft keeps the selected session's unsent text for its return. It reads
+// the composer only while the chat view shows it: innerText of an element that
+// is not rendered is its textContent, which drops the line breaks of a
+// multi-line draft. Leaving chat saves it (setActivityView), and a read from
+// another view keeps that copy — the hidden composer cannot be edited.
+function saveDraft() {
+  if (!selection.key || ui.activeView !== 'chat') return;
+  const draft = getMsgValue(document.getElementById('msg-input'));
+  if (draft) perSession.drafts[selection.key] = draft;
+  else delete perSession.drafts[selection.key];
+}
+
+// stashComposer saves the selected session's draft and moves its attachments
+// out of the composer, before selection.key changes. An upload still running
+// finishes into its stashed entry. With no session selected there is nothing
+// to keep them for, so they are dropped.
+function stashComposer() {
+  saveDraft();
+  const files = composer.pendingFiles;
+  composer.pendingFiles = [];
+  if (!selection.key) {
+    files.forEach(f => { if (f.blobUrl) URL.revokeObjectURL(f.blobUrl); });
+    return;
+  }
+  const s = sid(selection.key, selection.node);
+  if (files.length) perSession.files[s] = files;
+  else delete perSession.files[s];
+}
+
+// restoreComposer puts the now-selected session's draft and attachments back
+// into the composer renderMainShell just built.
+function restoreComposer() {
+  const s = sid(selection.key, selection.node);
+  composer.pendingFiles = perSession.files[s] || [];
+  delete perSession.files[s];
+  const inp = document.getElementById('msg-input');
+  if (inp && perSession.drafts[selection.key]) setMsgValue(inp, perSession.drafts[selection.key]);
+  renderFilePreviews();
+}
+
+// dropSentFiles removes the attachments a send took, from the composer and
+// from key's stash: the user may have switched sessions while it was out.
+// One added meanwhile stays.
+function dropSentFiles(entries, key, node) {
+  if (!entries.length) return;
+  const s = sid(key, node);
+  const stashed = perSession.files[s];
+  if (stashed) {
+    const left = stashed.filter(f => !entries.includes(f));
+    if (left.length) perSession.files[s] = left;
+    else delete perSession.files[s];
+  }
+  clearFiles(mainTray, entries);
+}
 
 export {
   ORIENT_MAX_WAIT_MS,
   awaitPendingOrients,
   clearFiles,
   createFileTray,
+  dropSentFiles,
   filesBlockSend,
   handleFiles,
   maybeAutoOrient,
@@ -527,7 +592,10 @@ export {
   openFilePicker,
   removeFile,
   renderFilePreviews,
+  restoreComposer,
   retryUpload,
+  saveDraft,
+  stashComposer,
   trayOf,
 };
 

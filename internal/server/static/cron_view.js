@@ -56,11 +56,14 @@ import {
   announce,
   confirmDialog,
   formatAbsTime,
+  mainEmptyHtml,
   setActiveSessionCard,
   shortPath,
   showAPIError,
   showNetworkError,
 } from './utilities.js';
+import { stashComposer } from './composer_files.js';
+import { wireQuickAskInput } from './auth_modal.js';
 // cron_view.js — Cron (定时任务) dashboard view: job list / drawer /
 // create+edit forms / run timeline / live event subscription / context menus.
 //
@@ -599,7 +602,18 @@ function openCronPanel() {
   // Deselect managed session via selectedKey only — selectedNode is the
   // sidebar filter now (see previewDiscovered comment) and must survive
   // opening the cron panel so the user comes back to the right node list.
+  // #main still shows the session the user left; with selection.key gone its
+  // composer would send nothing and no event would reach it, so it gives way
+  // to the empty state (as deselectNodeSession), its draft and attachments
+  // kept for when it is opened again.
+  const left = !!selection.key;
+  if (left) stashComposer();
   selection.key = null;
+  const main = left && document.getElementById('main');
+  if (main) {
+    main.innerHTML = mainEmptyHtml();
+    wireQuickAskInput();
+  }
   if (sessionStream.subscribedKey) sessionStream.unsubscribe();
   if (timers.events) { clearInterval(timers.events); timers.events = null; }
   setActiveSessionCard(null);

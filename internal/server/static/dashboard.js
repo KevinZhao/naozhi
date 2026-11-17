@@ -20,7 +20,11 @@ import {
   onThumbKeyDown,
   openFilePicker,
   removeFile,
+  renderFilePreviews,
+  restoreComposer,
   retryUpload,
+  saveDraft,
+  stashComposer,
   trayOf,
 } from './composer_files.js';
 import {
@@ -55,13 +59,11 @@ import {
   copyEventContent,
   dismissAuthModal,
   formatAbsTime,
-  getMsgValue,
   historyDayLabel,
   isMobile,
   mobileEnterChat,
   reconnectNow,
   setActiveSessionCard,
-  setMsgValue,
   showAPIError,
   showNetworkError,
   startSidebarTimeTick,
@@ -257,6 +259,8 @@ function setActivityView(view) {
   if (ACTIVITY_VIEWS.indexOf(view) === -1) view = 'chat';
   if (view === ui.activeView) return;
   const prev = ui.activeView;
+  // Read the draft while the composer is still rendered (saveDraft).
+  if (prev === 'chat') saveDraft();
   ui.activeView = view;
   // A session picked on the Planner page sets it again (selectSession).
   selection.fromPlanner = false;
@@ -875,15 +879,10 @@ function selectSession(key, node) {
   if (nzViews.agent) nzViews.agent.onSessionSwitch();
   // Recent session card click → trigger resume flow
   // Discovered session card click → trigger preview flow
-  // Save draft for current session before switching
-  if (selection.key) {
-    const inp = document.getElementById('msg-input');
-    const draft = getMsgValue(inp);
-    if (draft) perSession.drafts[selection.key] = draft;
-    else delete perSession.drafts[selection.key];
-    // 同时快照当前会话的滚动位置，回来时恢复
-    if (!drilledIn) saveScrollPos(selection.key, selection.node);
-  }
+  // Save the current session's draft and attachments before switching
+  // 同时快照当前会话的滚动位置，回来时恢复
+  if (selection.key && !drilledIn) saveScrollPos(selection.key, selection.node);
+  stashComposer();
   if (isDiscoveredKey(key)) {
     const d = findDiscovered(parseDiscoveredPid(key), node);
     if (d) {
@@ -938,10 +937,7 @@ function selectSession(key, node) {
   fetchSessionRuns(key, node); // populate the run-history timeline (best-effort)
   fetchGitState(key, node); // populate the branch / worktree chip (best-effort)
   navRebuild(); // clear stale nav state before async events arrive
-  const draftInput = document.getElementById('msg-input');
-  if (draftInput && perSession.drafts[key]) {
-    setMsgValue(draftInput, perSession.drafts[key]);
-  }
+  restoreComposer();
 
   const changed = prevKey !== key || prevNode !== node;
   if (wsm.isConnected()) {
@@ -1415,6 +1411,9 @@ function renderMainShell() {
   }
 
   updateSendButton(s.state || '');
+  // The rebuilt #file-preview is empty: show the attachments still pending,
+  // or they go out with the next send unseen.
+  renderFilePreviews();
   // Attach file-ref observer to the freshly-created events-scroll so any
   // newly-inserted .event bubble gets auto-scanned for workspace path
   // references. Safe to call on every renderMainShell: dataset.frObserver
