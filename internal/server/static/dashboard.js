@@ -47,6 +47,7 @@ import { closeFilePreview, startFileRefObserver } from './file_refs.js';
 import { workbenchButtonHtml } from './workbench_panes.js';
 import { startSessionNotes } from './session_notes.js';
 import { mountAuthSettings } from './settings_auth.js';
+import { mountMemoryView, showMemoryView } from './memory_view.js';
 import {
   applyFeatureGates,
   closeHistoryPopover,
@@ -305,7 +306,7 @@ function setActivityView(view) {
   else if (view === 'files') { if (nzViews.files) nzViews.files.show(); }
   else if (view === 'cron') { nzBus.dispatchEvent(new CustomEvent('cron:open-panel')); }
   else if (view === 'system') { openSystemPanel(); }
-  else if (view === 'settings') { renderSettingsView(); }
+  else if (view === 'settings') { renderSettingsView(); showMemoryView(); }
   else if (view === 'planner') { openPlannerPanel(); }
 }
 
@@ -1451,13 +1452,25 @@ function renderMainShell() {
 }
 
 // renderSettingsView paints the standalone settings top-level view into
-// #settings-main. Currently a single section: theme (tri-state, reusing
-// applyTheme/THEME_ORDER/THEME_LABELS). Theme buttons are wired via event
+// #settings-main: theme (tri-state, reusing applyTheme/THEME_ORDER/
+// THEME_LABELS), 懂你, auth, 关于. Theme buttons are wired via event
 // delegation — no inline onclick (the HTML inline-handler cap is 0).
-// Re-rendered on each theme click to refresh the active state.
+// Re-rendered on each theme click to refresh the active state; the 懂你
+// section (memory_view.js) is mounted once between the repainted parts, so a
+// repaint never drops an open editor or its draft.
 function renderSettingsView() {
   const root = document.getElementById('settings-main');
   if (!root) return;
+  if (!document.getElementById('settings-top')) {
+    root.innerHTML =
+      '<div class="settings-head"><h1>设置</h1></div>' +
+      '<div class="settings-body">' +
+        '<div id="settings-top"></div>' +
+        '<section class="settings-sec" id="settings-memory" aria-label="懂你"></section>' +
+        '<div id="settings-rest"></div>' +
+      '</div>';
+    mountMemoryView(document.getElementById('settings-memory'));
+  }
   const cur = getCurrentTheme();
   const themeBtns = THEME_ORDER.map(function (t) {
     return '<button type="button" class="settings-theme-opt' + (t === cur ? ' active' : '') +
@@ -1488,16 +1501,14 @@ function renderSettingsView() {
     '<section class="settings-sec settings-syslink">' +
       '<button type="button" class="settings-syslink-btn" id="settings-open-system">系统 · 全会话健康 ›</button>' +
     '</section>';
-  root.innerHTML =
-    '<div class="settings-head"><h1>设置</h1></div>' +
-    '<div class="settings-body">' +
-      '<section class="settings-sec"><h2>主题</h2>' +
-        '<div class="settings-theme" id="settings-theme-group" role="group" aria-label="主题">' + themeBtns + '</div>' +
-      '</section>' +
-      '<section class="settings-sec" id="settings-auth"></section>' +
-      aboutHtml +
-      sysLinkHtml +
-    '</div>';
+  document.getElementById('settings-top').innerHTML =
+    '<section class="settings-sec"><h2>主题</h2>' +
+      '<div class="settings-theme" id="settings-theme-group" role="group" aria-label="主题">' + themeBtns + '</div>' +
+    '</section>';
+  document.getElementById('settings-rest').innerHTML =
+    '<section class="settings-sec" id="settings-auth"></section>' +
+    aboutHtml +
+    sysLinkHtml;
   mountAuthSettings(document.getElementById('settings-auth'));
   const grp = document.getElementById('settings-theme-group');
   if (grp) grp.addEventListener('click', function (e) {

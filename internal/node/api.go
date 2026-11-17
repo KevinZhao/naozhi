@@ -41,9 +41,12 @@ type APIResponse struct {
 }
 
 // apiRoutes are the routes an `api` call may reach: the Planner page's and
-// the session view's Planner-side reads and writes, nothing else. Each is
-// "METHOD path"; a node serves them from a mux holding only these, and the
-// primary checks the same list before forwarding.
+// the session view's Planner-side reads and writes, and the settings view's
+// 懂你 reads, nothing else. Each is "METHOD path"; a node serves them from a
+// mux holding only these, and the primary checks the same list before
+// forwarding. The 懂你 edits and deletes (PUT / DELETE /api/memories/file)
+// are deliberately not here: a node's memories are written only from that
+// machine itself (planner RFC D126, decision B).
 var apiRoutes = map[string]bool{
 	"GET /api/planner":                true,
 	"POST /api/planner/send":          true,
@@ -71,6 +74,8 @@ var apiRoutes = map[string]bool{
 	"GET /api/sessions/notes":         true,
 	"GET /api/sessions/digest":        true,
 	"GET /api/system/health":          true,
+	"GET /api/memories":               true,
+	"GET /api/memories/file":          true,
 }
 
 // APIRoutes lists the routes an `api` call may reach, "METHOD path" each.

@@ -215,8 +215,9 @@ func sameDir(a, b string) bool {
 	return err == nil && os.SameFile(ai, bi)
 }
 
-// Dir is one directory a workspace covers on this node, with its name.
+// Dir is one directory a workspace covers on this node, with its name and ID.
 type Dir struct {
+	ID   string
 	Name string
 	Path string
 }
@@ -232,7 +233,7 @@ func (r *Registry) LocalDirs() []Dir {
 	var out []Dir
 	for _, w := range r.ws {
 		for _, p := range w.Paths[r.node] {
-			out = append(out, Dir{Name: w.Name, Path: p})
+			out = append(out, Dir{ID: w.ID, Name: w.Name, Path: p})
 		}
 	}
 	return out

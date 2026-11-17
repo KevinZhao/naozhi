@@ -14,6 +14,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/ext/accessprofile"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/agentevents"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/cli"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/memory"
 	dashplanner "github.com/naozhi/naozhi/internal/dashboard/ext/planner"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/uisettings"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/workflows"
@@ -190,6 +191,10 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	// sidebar and out of sessions.json; the sweeper goroutine starts in
 	// registerDashboard so an early failure does not leak the ticker.
 	s.scratchPool = session.NewScratchPool(router, session.DefaultScratchMax, session.DefaultScratchTTL)
+
+	// The 懂你 section reads the Claude directory the Planner agent writes
+	// its memories under, so it lists what the Planner reads and remembers.
+	hs.memoryH = memory.New(memoryDeps(opts.Planner, opts.Workspaces))
 
 	// Hub + the handlers that depend on it (build_dashboard.go). After this
 	// line s.hub is non-nil for the Server's whole life, which is what lets the

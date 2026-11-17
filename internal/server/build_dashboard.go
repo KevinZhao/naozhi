@@ -53,7 +53,7 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 
 	// memory link preview (docs/rfc/memory-link-rendering.md).
 	if hs.memoryH == nil {
-		hs.memoryH = memory.New(resolveClaudeProjectsDir())
+		hs.memoryH = memory.New(memory.Deps{ProjectsDir: resolveClaudeProjectsDir()})
 	}
 
 	// Push session list changes to WS clients. The router is built in

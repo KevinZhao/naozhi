@@ -159,7 +159,7 @@
 
 | 层 | 改动 |
 |---|---|
-| 节点协议（`internal/node/api.go`） | 能力位 `planner`；`APIRequest` / `APIResponse`；路由白名单 `apiRoutes` 与 `CheckAPIRequest`（方法、规范路径、2 MiB）；`ReverseConn.CallAPI`（反连 RPC `api`）与 `HTTPClient.CallAPI`（直连节点按 `X-Naozhi-Caps` 里的 `planner` 逐次轮询学到，转发同一路径并带节点 token） |
+| 节点协议（`internal/node/api.go`） | 能力位 `planner`；`APIRequest` / `APIResponse`；路由白名单 `apiRoutes` 与 `CheckAPIRequest`（方法、规范路径、2 MiB；懂你只进两条 GET，改和删不进，planner.md D127）；`ReverseConn.CallAPI`（反连 RPC `api`）与 `HTTPClient.CallAPI`（直连节点按 `X-Naozhi-Caps` 里的 `planner` 逐次轮询学到，转发同一路径并带节点 token） |
 | 节点侧（`internal/upstream/connector_api.go`） | `ServePlanner`：`api` RPC 交给只挂白名单路由的 mux（用 `httptest.Recorder` 在进程内执行，再查一次白名单）；`fetch_sessions` 补 `purpose` / `purpose_title`；有 Planner 时 register 帧带 `planner` |
 | 服务端（`internal/server/node_api.go`、`routes.go`） | `mountRoutes` 把白名单里的路由同时挂到节点 mux（同一个处理器，不经鉴权链）；primary 的 `/api/remote/{node}/{path...}`（GET / POST / PUT / DELETE，在鉴权链之后）：未知节点 400、不在白名单 404、带附件 400、无 Planner 501、未连接 503、超时 504、其他 502 |
 | 会话列表（`internal/dashboard/session/list.go`） | 合并远程会话时按 `hiddenFromList` 隐去 `planner:` / `cron:` / `sys:` / `scout:` / `scratch:`；有 Planner 时 `X-Naozhi-Caps` 带 `planner` |

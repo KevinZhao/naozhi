@@ -271,8 +271,6 @@ type Agent struct {
 	// tasks lists the 任务 for the handoff's index (SetTaskIndex); nil
 	// leaves the index out.
 	tasks func() []TaskLine
-	// memMu serializes the remember block's writes to the memory files.
-	memMu sync.Mutex
 	// parked is the 搁置区 the handoff check and the park block move the
 	// "等你定" items into (§15.14 ⑤).
 	parked *parked.Store

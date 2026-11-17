@@ -6,9 +6,10 @@
 //
 // Self-contained ES module (D3 PR-A): no cross-file consumption, no imports;
 // its esc/fetchJSON are deliberately local. The only dashboard.js touch is
-// the activity-bar wiring (calls the exported window.nzAssetView.{show,hide}).
+// the activity-bar wiring (calls the exported window.nzAssetView.{show,hide});
+// the 记忆 kind's link to the settings view's 懂你 goes out as a nzBus event.
 import { NZ_CONTRACT } from './contract.js';
-import { nzViews } from './nz_util.js';
+import { nzBus, nzViews } from './nz_util.js';
 
 (function () {
   'use strict';
@@ -84,7 +85,11 @@ import { nzViews } from './nz_util.js';
       return a.kind === state.kind &&
         (!q || a.name.toLowerCase().indexOf(q) >= 0 || (a.description || '').toLowerCase().indexOf(q) >= 0);
     });
-    if (!items.length) { box.innerHTML = '<div class="asset-empty">暂无 ' + esc(state.kind) + ' 资产</div>'; return; }
+    // 记忆 stays read-only here; the settings view's 懂你 lists every
+    // project's and edits them (memory_view.js, planner RFC §15.15 ⑦).
+    var memLink = state.kind === 'memory'
+      ? '<div class="asset-mem-link"><button type="button" class="pl-link asset-mem-open">在设置 · 懂你里看全部、可改 ›</button></div>' : '';
+    if (!items.length) { box.innerHTML = memLink + '<div class="asset-empty">暂无 ' + esc(state.kind) + ' 资产</div>'; return; }
 
     var groups = {}, order = [];
     items.forEach(function (a) {
@@ -97,7 +102,7 @@ import { nzViews } from './nz_util.js';
       return (rx == null ? 9 : rx) - (ry == null ? 9 : ry);
     });
 
-    var html = '';
+    var html = memLink;
     order.forEach(function (g) {
       var grp = groups[g];
       var collapsed = state.collapsed[g] != null ? state.collapsed[g] : (grp.src === 'plugin');
@@ -217,6 +222,10 @@ import { nzViews } from './nz_util.js';
 
     var list = $('asset-sidebar-list');
     if (list) list.addEventListener('click', function (e) {
+      if (e.target.closest('.asset-mem-open')) {
+        nzBus.dispatchEvent(new CustomEvent('memory:open', { detail: { node: 'local' } }));
+        return;
+      }
       var grp = e.target.closest('.asset-grp');
       if (grp) {
         var g = grp.dataset.g;
