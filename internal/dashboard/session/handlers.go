@@ -227,8 +227,12 @@ type Handlers struct {
 	// historyCacheMu together with historyCacheTime so fast-path readers never
 	// see "fresh" before the slice is installed.
 	historyCacheTimeUnixNano atomic.Int64
-	historyCacheMu           sync.RWMutex
-	historyFlight            singleflight.Group
+	// historyGen counts InvalidateHistoryCache calls (under historyCacheMu). A
+	// scan that saw it move took its exclude snapshot before the invalidation,
+	// so its result is installed without a fresh timestamp.
+	historyGen     uint64
+	historyCacheMu sync.RWMutex
+	historyFlight  singleflight.Group
 	// warmHistoryWg tracks the WarmHistoryCache goroutine so server shutdown
 	// can wait for the background FS scan before tearing down claudeDir state.
 	warmHistoryWg sync.WaitGroup

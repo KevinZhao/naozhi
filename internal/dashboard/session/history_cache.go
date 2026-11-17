@@ -137,6 +137,7 @@ func (h *Handlers) WaitWarmHistory() {
 // merges into, so a retirement under load does not empty the list (#3141).
 func (h *Handlers) InvalidateHistoryCache() {
 	h.historyCacheMu.Lock()
+	h.historyGen++
 	h.historyCacheTime = time.Time{}
 	// Keep the atomic mirror in lockstep (Store=0 ⇔ time.Time{}) so wait-free
 	// readers see the invalidation immediately.
@@ -220,6 +221,11 @@ func (h *Handlers) loadHistorySessions() []discovery.RecentSession {
 // history cache. A scan ctx cut short is a partial view, so it is merged into
 // the previous cache rather than replacing it (#3141).
 func (h *Handlers) loadHistorySessionsCtx(ctx context.Context) []discovery.RecentSession {
+	// Read before the exclude snapshot: a session retired after this point may
+	// still be excluded below as live.
+	h.historyCacheMu.RLock()
+	gen := h.historyGen
+	h.historyCacheMu.RUnlock()
 	excludeIDs := h.deps.Router.DiscoveryExcludeIDs()
 
 	// Hide cron-spawned and sys-session JSONLs (both have their own UI; the sys
@@ -268,10 +274,15 @@ func (h *Handlers) loadHistorySessionsCtx(ctx context.Context) []discovery.Recen
 	h.historyCacheMu.Lock()
 	h.historyCache = all
 	h.historyTag = tag
-	h.historyCacheTime = now
-	// Mirror update under the lock so wait-free readers never see atomic-fresh
-	// while h.historyCache still points at the old slice.
-	h.historyCacheTimeUnixNano.Store(now.UnixNano())
+	// An invalidation during the scan promised the next poll a list with the
+	// just-retired session; this result predates it, so leave the timestamp
+	// zero and let that poll scan again instead of serving it for 120s.
+	if h.historyGen == gen {
+		h.historyCacheTime = now
+		// Mirror update under the lock so wait-free readers never see
+		// atomic-fresh while h.historyCache still points at the old slice.
+		h.historyCacheTimeUnixNano.Store(now.UnixNano())
+	}
 	h.historyCacheMu.Unlock()
 
 	return all
