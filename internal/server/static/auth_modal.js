@@ -12,6 +12,8 @@ import { accessProfileChipInfo, fetchAccessProfiles, fetchCLIBackends, renderAcc
 import { authModalCooldown, eagerBindWorkspace, mobileEnterChat, persistPending, setActiveSessionCard, setMsgValue, shortPath, showNetworkError, stopPreviewPolling } from './utilities.js';
 import { getNodeDisplayName, getNodeStatus, isMultiNode, nodeColor, projectDisplayLabel, projectDisplayPrefix, statusLabelForNode } from './session_ident.js';
 import { navRebuild } from './msg_nav.js';
+import { resetTurnState } from './running_banner.js';
+import { restoreComposer, stashComposer } from './composer_files.js';
 import { sendMessage } from './send_message.js';
 import { shell } from './shell.js';
 
@@ -1009,6 +1011,10 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
 
   stopPreviewPolling();
   sessionStream.unsubscribe();
+  // Leaving the current session as selectSession does: its draft and
+  // attachments wait for its return, and its turn's banner state stays behind.
+  stashComposer();
+  resetTurnState();
   selection.key = key;
   selection.node = nodeId || 'local';
   nzBus.dispatchEvent(new CustomEvent('session:select'));
@@ -1017,6 +1023,7 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   mobileEnterChat();
   setActiveSessionCard(key, selection.node);
   shell.renderMainShell();
+  restoreComposer();
   navRebuild();
   sessionList.lastVersion = 0;
   shell.debouncedFetchSessions();
@@ -1053,6 +1060,10 @@ function doCreateSession() {
 
   stopPreviewPolling();
   sessionStream.unsubscribe();
+  // Leaving the current session as selectSession does: its draft and
+  // attachments wait for its return, and its turn's banner state stays behind.
+  stashComposer();
+  resetTurnState();
   selection.key = key;
   selection.node = targetNode;
   nzBus.dispatchEvent(new CustomEvent('session:select'));
@@ -1061,6 +1072,7 @@ function doCreateSession() {
   mobileEnterChat();
   setActiveSessionCard(key, targetNode);
   shell.renderMainShell();
+  restoreComposer();
   navRebuild();
   sessionList.lastVersion = 0;
   shell.debouncedFetchSessions();
@@ -1102,6 +1114,8 @@ function createQuickSession(initialText, onTextStranded) {
 
   stopPreviewPolling();
   sessionStream.unsubscribe();
+  // A dismissed session's attachments may still be in the composer's list.
+  stashComposer();
   selection.key = key;
   selection.node = 'local';
   nzBus.dispatchEvent(new CustomEvent('session:select'));
@@ -1110,6 +1124,7 @@ function createQuickSession(initialText, onTextStranded) {
   mobileEnterChat();
   setActiveSessionCard(key, 'local');
   shell.renderMainShell();
+  restoreComposer();
   navRebuild();
   sessionList.lastVersion = 0;
   shell.debouncedFetchSessions();

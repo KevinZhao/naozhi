@@ -345,7 +345,8 @@ const skew = { server: '', lastInputAt: 0 };
 function skewIdle() {
   const texts = [...document.querySelectorAll('#msg-input, textarea')].map((el) => el.value ?? el.innerText);
   if (texts.concat(Object.values(perSession.drafts)).some((t) => (t || '').trim()) || composer.sending) return false;
-  if (composer.pendingFiles.length || ui.activePopover || document.querySelector(SKEW_BUSY)) return false;
+  // Attachments a session switched away from (perSession.files) would be lost too.
+  if (composer.pendingFiles.length || Object.keys(perSession.files).length || ui.activePopover || document.querySelector(SKEW_BUSY)) return false;
   if (document.hidden) return true;
   const sd = sessionList.sessionsData[sid(selection.key, selection.node)];
   return Date.now() - skew.lastInputAt >= SKEW_IDLE_MS && !(sd && sd.state === 'running');

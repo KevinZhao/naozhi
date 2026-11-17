@@ -589,6 +589,10 @@ function hideUndoToast(p) {
 function forgetSession(key, node) {
   delete perSession.drafts[key];
   delete perSession.scrollPos[sid(key, node)];
+  // Its stashed attachments can never be reopened, and a leftover stash keeps
+  // skewIdle false for the life of the tab.
+  (perSession.files[sid(key, node)] || []).forEach(f => { if (f.blobUrl) URL.revokeObjectURL(f.blobUrl); });
+  delete perSession.files[sid(key, node)];
   // Drop the cached git state so a later key reuse can't inherit this
   // session's branch chip before its own fetch resolves.
   delete gitStateCache[sid(key, node)];

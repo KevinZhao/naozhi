@@ -1,0 +1,264 @@
+// E2E: the chat composer across a session switch. The view has one composer
+// and one attachment list, rebuilt for whichever session is selected, so each
+// way off a session (another card, a new session, the cron view, another view)
+// must take its draft and attachments with it and give them back on return,
+// and a send that is still out when the user switches must finish on its own
+// session.
+//
+// 跑法：cd test/e2e && npx playwright test composer_switch.test.js --project=desktop-chrome
+const { test, expect } = require('@playwright/test');
+const { startMockServer } = require('./mock-server');
+const { waitForWs } = require('./shim_wait');
+
+const desktop = { viewport: { width: 1280, height: 800 } };
+const A = 'dashboard:direct:2026-01-01-120000-1:myproject';
+const B = 'dashboard:direct:2026-01-01-120002-3:myproject';
+const PNG_1X1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+
+const card = (page, key) => page.locator('.session-card[data-key="' + key + '"]');
+const inputText = (page) => page.locator('#msg-input').evaluate((el) => el.innerText.trim());
+
+async function open(page, key) {
+  await card(page, key).click();
+  await expect(card(page, key)).toHaveClass(/\bactive\b/);
+  await expect(page.locator('#msg-input')).toBeVisible();
+}
+
+test('an attachment stays with its session: not shown in, nor sent with, another session', async ({ browser }) => {
+  const ctx = await browser.newContext(desktop);
+  const page = await ctx.newPage();
+  const mock = await startMockServer({ uploads: true });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await open(page, A);
+    await page.locator('#file-input').setInputFiles({ name: 'a.png', mimeType: 'image/png', buffer: Buffer.from(PNG_1X1, 'base64') });
+    await expect(page.locator('#file-preview .file-thumb.ready')).toHaveCount(1);
+
+    await open(page, B);
+    await expect(page.locator('#file-preview .file-thumb')).toHaveCount(0);
+    mock.resetCalls();
+    await page.locator('#msg-input').click();
+    await page.keyboard.type('only text for B');
+    await page.keyboard.press('Enter');
+    await expect.poll(() => mock.sendCalls.length).toBe(1);
+    const sentB = JSON.parse(mock.sendCalls[0]);
+    expect(sentB.key).toBe(B);
+    expect(sentB.file_ids).toBeUndefined();
+
+    await open(page, A);
+    await expect(page.locator('#file-preview .file-thumb.ready')).toHaveCount(1);
+    await page.locator('#msg-input').click();
+    await page.keyboard.press('Enter');
+    await expect.poll(() => mock.sendCalls.length).toBe(2);
+    const sentA = JSON.parse(mock.sendCalls[1]);
+    expect(sentA.key).toBe(A);
+    expect(sentA.file_ids).toEqual([mock.uploadCalls[0].id]);
+    await expect(page.locator('#file-preview .file-thumb')).toHaveCount(0);
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+test('a new session keeps the draft of the one left', async ({ browser }) => {
+  const ctx = await browser.newContext(desktop);
+  const page = await ctx.newPage();
+  const mock = await startMockServer();
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await open(page, A);
+    await page.locator('#msg-input').click();
+    await page.keyboard.type('draft of A');
+    await page.click('.hdr-btn[title="New Session"]');
+    await page.locator('.cmd-palette-item', { hasText: 'myproject' }).first().click();
+    await page.waitForSelector('.cmd-palette-overlay', { state: 'detached' });
+    await expect.poll(() => page.evaluate(() => nz.test.selectedKey)).not.toBe(A);
+    expect(await inputText(page)).toBe('');
+
+    await open(page, A);
+    expect(await inputText(page)).toBe('draft of A');
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+test('back from the cron view, the session left is not shown as if still selected; its draft comes back with it', async ({ browser }) => {
+  const ctx = await browser.newContext(desktop);
+  const page = await ctx.newPage();
+  const mock = await startMockServer();
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await open(page, A);
+    await page.locator('#msg-input').click();
+    await page.keyboard.type('draft before cron');
+    await page.locator('#abnav-cron').click();
+    await expect(page.locator('body')).toHaveClass(/nz-view-cron/);
+    await page.locator('#abnav-chat').click();
+    await expect(page.locator('body')).not.toHaveClass(/nz-view-cron/);
+    // No session is selected, so no composer that would send nothing.
+    await expect(page.locator('#main #msg-input')).toHaveCount(0);
+    await expect(page.locator('#quick-ask-form')).toBeVisible();
+
+    await open(page, A);
+    expect(await inputText(page)).toBe('draft before cron');
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+test('a multi-line draft keeps its lines when a session is opened from another view', async ({ browser }) => {
+  const ctx = await browser.newContext(desktop);
+  const page = await ctx.newPage();
+  const mock = await startMockServer();
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await open(page, A);
+    // A multi-line paste (execCommand insertText) leaves the lines as blocks.
+    await page.locator('#msg-input').evaluate((el) => { el.innerHTML = 'line one<div>line two</div>'; });
+    await page.locator('#abnav-settings').click();
+    await expect(page.locator('body')).toHaveClass(/nz-view-settings/);
+    // As the system view's health table and the Planner page open a session.
+    await page.evaluate((k) => nz.test.selectSession(k, 'local'), B);
+    await expect(card(page, B)).toHaveClass(/\bactive\b/);
+
+    await open(page, A);
+    expect(await inputText(page)).toBe('line one\nline two');
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+test('a WS send the server turns away gives its text back to the composer', async ({ browser }) => {
+  const ctx = await browser.newContext(desktop);
+  const page = await ctx.newPage();
+  const mock = await startMockServer({ ws: true });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await open(page, A);
+    const conn = mock.wsConnections[mock.wsConnections.length - 1];
+    for (const [status, text] of [['busy', 'a long message, busy'], ['error', 'a long message, error']]) {
+      await page.locator('#msg-input').click();
+      await page.keyboard.type(text);
+      await page.keyboard.press('Enter');
+      await expect.poll(() => conn.messages.filter((m) => m.type === 'send' && m.text === text).length).toBe(1);
+      expect(await inputText(page)).toBe('');
+      const sent = conn.messages.find((m) => m.type === 'send' && m.text === text);
+      await expect(page.locator('#events-scroll .optimistic-msg[data-send-id="' + sent.id + '"]')).toHaveCount(1);
+      conn.send({ type: 'send_ack', id: sent.id, key: A, status, error: status === 'error' ? 'all busy' : undefined });
+      await expect(page.locator('#events-scroll .optimistic-msg[data-send-id="' + sent.id + '"]')).toHaveCount(0);
+      await expect.poll(() => inputText(page)).toBe(text);
+      await page.locator('#msg-input').evaluate((el) => { el.textContent = ''; });
+    }
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+test('an HTTP send still out when the user switches finishes on its own session', async ({ browser }) => {
+  const ctx = await browser.newContext(desktop);
+  const page = await ctx.newPage();
+  const mock = await startMockServer();
+  try {
+    await page.goto(mock.url + '/dashboard');
+    let release;
+    const held = new Promise((r) => { release = r; });
+    let seen = false;
+    await page.route('**/api/sessions/send', async (route) => { seen = true; await held; await route.continue(); });
+
+    await open(page, B);
+    await page.locator('#msg-input').click();
+    await page.keyboard.type('draft of B');
+    await open(page, A);
+    await page.locator('#msg-input').click();
+    await page.keyboard.type('sent from A');
+    await page.keyboard.press('Enter');
+    await expect.poll(() => seen).toBe(true);
+    await open(page, B);
+    expect(await inputText(page)).toBe('draft of B');
+    release();
+    await expect.poll(() => mock.sendCalls.length).toBe(1);
+    expect(JSON.parse(mock.sendCalls[0]).key).toBe(A);
+    await expect.poll(() => page.evaluate(() => nz.test.sending)).toBe(false);
+
+    // B's draft survives the send's cleanup, and A's sent text is not left
+    // behind as A's draft to be sent twice.
+    await open(page, A);
+    expect(await inputText(page)).toBe('');
+    await open(page, B);
+    expect(await inputText(page)).toBe('draft of B');
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+test('an image pasted into a discovered session preview goes out with the takeover send', async ({ browser }) => {
+  const ctx = await browser.newContext(desktop);
+  const page = await ctx.newPage();
+  const mock = await startMockServer({ uploads: true });
+  try {
+    const D = { pid: 4242, session_id: 'ext-sid-1', cwd: '/home/user/myproject', proc_start_time: 1, node: 'local', state: 'ready', cli_name: 'claude', started_at: Date.now() };
+    await page.route('**/api/discovered', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify([D]) }));
+    // No takeover_id: the wait goes by the key alone, which the mock lists.
+    await page.route('**/api/discovered/takeover', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ key: B }) }));
+    await page.goto(mock.url + '/dashboard');
+    const dkey = '_discovered:4242:local';
+    await card(page, dkey).click();
+    await expect(page.locator('#msg-input')).toHaveAttribute('data-placeholder', 'send a message to take over...');
+
+    await page.evaluate((b64) => {
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const dt = new DataTransfer();
+      dt.items.add(new File([bytes], 'shot.png', { type: 'image/png' }));
+      const input = document.getElementById('msg-input');
+      input.focus();
+      input.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    }, PNG_1X1);
+    await expect(page.locator('#file-preview .file-thumb.ready')).toHaveCount(1);
+    await page.locator('#msg-input').click();
+    await page.keyboard.type('take over with an image');
+    await page.keyboard.press('Enter');
+
+    await expect.poll(() => mock.sendCalls.length, { timeout: 10000 }).toBe(1);
+    const sent = JSON.parse(mock.sendCalls[0]);
+    expect(sent.key).toBe(B);
+    expect(sent.text).toBe('take over with an image');
+    expect(sent.file_ids).toEqual([mock.uploadCalls[0].id]);
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+test('a dismissed session leaves no stashed attachments behind', async ({ browser }) => {
+  const ctx = await browser.newContext(desktop);
+  const page = await ctx.newPage();
+  const mock = await startMockServer({ uploads: true });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await open(page, A);
+    await page.locator('#file-input').setInputFiles({ name: 'a.png', mimeType: 'image/png', buffer: Buffer.from(PNG_1X1, 'base64') });
+    await expect(page.locator('#file-preview .file-thumb.ready')).toHaveCount(1);
+    await open(page, B);
+    // The same module instance the dashboard runs, so its live state.
+    const stashed = () => page.evaluate(async () => Object.keys((await import('/static/state.js')).perSession.files));
+    expect(await stashed()).toHaveLength(1);
+
+    await card(page, A).hover();
+    await card(page, A).locator('.btn-dismiss').click();
+    // A second dismiss commits the first at once instead of after its 撤销 window.
+    const other = page.locator('.session-card[data-key="dashboard:direct:2026-01-01-120001-2:otherproject"]');
+    await other.hover();
+    await other.locator('.btn-dismiss').click();
+    // A leftover stash would keep the asset-skew reload from ever finding the tab idle.
+    await expect.poll(stashed).toEqual([]);
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});

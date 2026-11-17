@@ -12,7 +12,7 @@ import { runPendingAsync } from './render_md.js';
 import { processEventsForDisplay } from './file_refs.js';
 import { navRebuild, navSync } from './msg_nav.js';
 import { applyEventToTurnState, idleTaskEvent, paintTurnElapsed, refreshBanner, resetTurnState, resetTurnStateForUserEcho, restoreScrollPos, saveScrollPos, scrollSlackPx, turnState, updateSendButton } from './running_banner.js';
-import { markSendUnknown, restoreSpawnFields, rollbackOptimisticRunning, settleSend } from './send_message.js';
+import { markSendUnknown, refillUnsent, restoreSpawnFields, rollbackOptimisticRunning, settleSend } from './send_message.js';
 import { EARLIER_PAGE_LIMIT, EVENT_DIVIDER_GAP_MS, MAX_LIVE_DOM_EVENTS, lastDividerTime, showAPIError, stickEventsBottom, timeDividerHtml } from './utilities.js';
 import { isInternalEvent, sid } from './session_ident.js';
 import { isCronSessionFrozen } from './cron_state.js';
@@ -854,6 +854,8 @@ const sessionFrames = {
       // Queue disabled (MaxDepth<=0) and the session busy: the send was
       // dropped, so roll back and say so rather than silently eat it.
       showToast('会话正忙，消息未送达，请稍后重试', 'error');
+      // The send cleared the composer; its text goes back before its bubble does.
+      refillUnsent(msg.id);
       removeOptimisticMsg(msg.id);
       rollbackOptimisticRunning(msg.key || selection.key, msg.node || selection.node);
       // send 从未真正进入 turn，别把它当成「当前 turn 的输入」残留 —— 否则
@@ -864,7 +866,9 @@ const sessionFrames = {
       // but treat the server-supplied `error` string the same way as an
       // HTTP 500 body: truncate + prefix with "发送消息失败：".
       showAPIError('发送消息', 500, msg.error || '');
-      // Remove this send's optimistic message on send failure
+      // Remove this send's optimistic message on send failure, its text back
+      // in the composer first.
+      refillUnsent(msg.id);
       removeOptimisticMsg(msg.id);
       restoreSpawnFields(msg.key || selection.key, msg.id);
       rollbackOptimisticRunning(msg.key || selection.key, msg.node || selection.node);

@@ -219,6 +219,12 @@ export const perSession = {
   pendingTuning: {},
   // key -> draft text, preserved across session switches
   drafts: {},
+  // sid(key,node) -> the composer attachments (composer.pendingFiles entries)
+  // of a session switched away from, put back when it is opened again
+  // (stashComposer / restoreComposer). The list is one for the whole composer,
+  // so a session's attachments must leave it with the session, or they go
+  // out with the next session's send.
+  files: {},
   // sessionScrollPos: sid(key,node) -> {fromBottom, atBottom}
   // 记住每个会话上次切走时的 events-scroll 位置，回来时恢复，避免正在阅读
   // 历史被强行拉回底部。atBottom=true 表示离开前就在底，回来后继续走贴底路径，

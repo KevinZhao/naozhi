@@ -46,25 +46,34 @@ export const wsm = {
 
     this.setState(WS_STATES.CONNECTING);
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    this.conn = new WebSocket(proto + '//' + location.host + '/ws');
+    const ws = new WebSocket(proto + '//' + location.host + '/ws');
+    this.conn = ws;
 
-    this.conn.onopen = () => {
+    // Each handler first checks it still belongs to this.conn: after
+    // disconnect()+connect() (a re-entered token) the old socket's close
+    // arrives late — up to the browser's closing-handshake timeout on a dead
+    // path — and must not clear the new connection's ping or leave the state
+    // DISCONNECTED under a live, authenticated socket.
+    ws.onopen = () => {
+      if (this.conn !== ws) return;
       this.setState(WS_STATES.AUTH);
-      this.conn.send(JSON.stringify({ type: NZ_CONTRACT.WS.auth }));
+      ws.send(JSON.stringify({ type: NZ_CONTRACT.WS.auth }));
     };
 
-    this.conn.onmessage = (evt) => {
+    ws.onmessage = (evt) => {
+      if (this.conn !== ws) return;
       try { this.onMessage(JSON.parse(evt.data)); }
       catch (err) { console.error('ws parse error:', err); }
     };
 
-    this.conn.onclose = () => {
+    ws.onclose = () => {
+      if (this.conn !== ws) return;
       this.cleanup();
       this.setState(WS_STATES.DISCONNECTED);
       this.scheduleReconnect();
     };
 
-    this.conn.onerror = () => {};
+    ws.onerror = () => {};
   },
 
   cleanup() {

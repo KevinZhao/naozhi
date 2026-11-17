@@ -142,3 +142,38 @@ test('disconnect cancels the reconnect, closes the socket and ends OFF', async (
   assert.equal(wsm.reconnectTimer, null);
   assert.deepEqual(got, [WS_STATES.OFF]);
 });
+
+test('after disconnect()+connect(), the old socket\'s late close leaves the new connection alone', async () => {
+  const { wsm, WS_STATES } = await fresh();
+  try {
+    wsm.connect();
+    const old = sockets[sockets.length - 1];
+    old.readyState = FakeSocket.OPEN;
+    old.onopen();
+    wsm.onMessage({ type: 'auth_ok' });
+    // saveToken: re-dial with the new token while the old socket is still open.
+    wsm.disconnect();
+    wsm.connect();
+    const cur = sockets[sockets.length - 1];
+    assert.notEqual(cur, old);
+    cur.readyState = FakeSocket.OPEN;
+    cur.onopen();
+    cur.onmessage({ data: JSON.stringify({ type: 'auth_ok' }) });
+    assert.equal(wsm.state, WS_STATES.CONNECTED);
+    const ping = wsm.pingTimer;
+    assert.notEqual(ping, null);
+    // The old socket's close lands only now, after the new auth_ok.
+    old.onclose();
+    assert.equal(wsm.state, WS_STATES.CONNECTED, 'a stale close must not mark a live connection DISCONNECTED');
+    assert.equal(wsm.pingTimer, ping, 'a stale close must not stop the new connection\'s ping');
+    assert.equal(wsm.reconnectTimer, null, 'a stale close must not schedule a reconnect');
+    // And a stale frame from the old socket is not dispatched.
+    const got = [];
+    wsm.on('event', (msg) => got.push(msg.key));
+    old.onmessage({ data: JSON.stringify({ type: 'event', key: 'stale' }) });
+    assert.deepEqual(got, []);
+  } finally {
+    wsm.cleanup();
+    if (wsm.reconnectTimer) clearTimeout(wsm.reconnectTimer);
+  }
+});
