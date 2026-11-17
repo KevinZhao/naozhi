@@ -61,6 +61,11 @@ func TestSystemPrompt(t *testing.T) {
 		"RFC 的排期表，再读 parked.md",
 		`{"type":"park","text":"…","source":"…"}`,
 		"交接里每条事项都带出处",
+		`{"type":"halt","task":"<会话 key>","why":"…"}`,
+		"不要用 relay 让叫停的会话继续",
+		`{"type":"cancel","task":"<task: key>","why":"…"}`,
+		"只是判断它做完了用 status",
+		"也不用写 worktree 的做法",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt lacks %q", want)
@@ -83,11 +88,11 @@ func TestSystemPrompt(t *testing.T) {
 		"<工作区 ID 或名字>", "naozhi", "<RFC3339 或空>", "", "<task: key、承诺 ID，或你开的会话的 key>", "task:ab12",
 		"done | doing | failed", "done", "timely | brief", "timely", "<http(s) 链接或空>", "", "<巡检发现的 id 或空>", "", "…", "x",
 		"<会话 key>", "dashboard:direct:u:general", "<会话 key 或空>", "",
-		"<工作区 ID 或名字，或 global>", "global", "<slug>", "style",
+		"<工作区 ID 或名字，或 global>", "global", "<slug>", "style", "<task: key>", "task:ab12",
 	)
 	formats := regexp.MustCompile(`\{"type":"[a-z]+"[^\n]*?\}`).FindAllString(p, -1)
-	if len(formats) != 12 {
-		t.Fatalf("found %d block formats, want 12: %q", len(formats), formats)
+	if len(formats) != 14 {
+		t.Fatalf("found %d block formats, want 14: %q", len(formats), formats)
 	}
 	for _, f := range formats {
 		body := strings.ReplaceAll(fill.Replace(f), `["x"]`, `["是"]`)

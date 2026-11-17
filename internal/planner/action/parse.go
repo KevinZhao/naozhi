@@ -1,6 +1,6 @@
 // Package action is the Planner's way to ask the gateway for something
 // (docs/rfc/planner.md §6.2): the ```naozhi-action blocks at the end of a
-// planner:main reply. There are ten: dispatch (a task: session, started at
+// planner:main reply. There are twelve: dispatch (a task: session, started at
 // once, D88), promise (a promise among the 任务), ask (a
 // question in "通知" whose answer goes back to the Planner, or straight to a
 // session, D98), status (the Planner's judgment of a task's state, §15.4),
@@ -9,8 +9,11 @@
 // a session in custody, planner/custody), relay (the user's decision
 // passed on to a session with the user's own words, D98), remember (a
 // memory the user asked for, written into a workspace's auto-memory,
-// §15.12 ⑧), lookup (a web lookup by a one-shot reader, §15.12 ⑨) and park
-// (an item the user put down, moved into the 搁置区, §15.14 ⑤). A block
+// §15.12 ⑧), lookup (a web lookup by a one-shot reader, §15.12 ⑨), park
+// (an item the user put down, moved into the 搁置区, §15.14 ⑤), halt (a
+// session the user asked to stop: its custody stopped, its process closed,
+// D119) and cancel (a task the user said is not wanted, stopped as from 任务,
+// D120). A block
 // that does not parse, or names an unknown type, a bad field or a task that
 // does not exist, is not run: the Planner conversation shows it as it was
 // written, with the reason, and the Planner gets a receipt naming it.
@@ -31,6 +34,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/planner/promise"
 	"github.com/naozhi/naozhi/internal/planner/scout"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/textutil"
 	"github.com/naozhi/naozhi/internal/tuningspec"
 )
@@ -83,7 +87,13 @@ const (
 	TypeRemember Type = "remember"
 	TypeLookup   Type = "lookup"
 	TypePark     Type = "park"
+	TypeHalt     Type = "halt"
+	TypeCancel   Type = "cancel"
 )
+
+// allTypes lists the block types as the refusal of an unknown one names
+// them.
+const allTypes = "dispatch、promise、ask、status、notify、custody、relay、remember、lookup、park、halt、cancel"
 
 // Dispatch asks for a session in a workspace.
 type Dispatch struct {
@@ -234,6 +244,52 @@ func (p *Park) validate() error {
 	return nil
 }
 
+// Halt stops session Task for the user (§15.15 ②, D119): its custody's
+// lineage is stopped and its process closed, the session and its context
+// kept; the user's own message in it takes it on again. Only a turn the
+// user started may halt: the Planner wakes only once a turn ended, so a
+// halt it judged by itself would come too late to matter (D118).
+type Halt struct {
+	Task string `json:"task"`
+	Why  string `json:"why"`
+}
+
+// Cancel stops dispatched session Task's task as the user's stop in 任务
+// does (§15.15 ③, D120): marked done by the user, 已停止, the promises citing
+// it closed. Why is the Planner's and shows only on its block's card. Only
+// a turn the user started may cancel, so it is the user's word.
+type Cancel struct {
+	Task string `json:"task"`
+	Why  string `json:"why"`
+}
+
+// stopFields checks the task and why of a halt or cancel block of type t.
+func stopFields(t Type, task, why *string) error {
+	*task, *why = strings.TrimSpace(*task), strings.TrimSpace(*why)
+	if err := validKey("task", *task); err != nil {
+		return errors.New(string(t) + " " + err.Error())
+	}
+	switch {
+	case *why == "":
+		return fmt.Errorf("%s 缺少 why（用户怎么说的）", t)
+	case utf8.RuneCountInString(*why) > textRunes:
+		return fmt.Errorf("why 超过 %d 字", textRunes)
+	}
+	return nil
+}
+
+func (h *Halt) validate() error { return stopFields(TypeHalt, &h.Task, &h.Why) }
+
+func (c *Cancel) validate() error {
+	if err := stopFields(TypeCancel, &c.Task, &c.Why); err != nil {
+		return err
+	}
+	if !sessionkey.IsTaskKey(c.Task) {
+		return errors.New("cancel 的 task 要是 task: key（你派出的任务）；用户自己开的会话由用户结束，做完了用 status 标 done")
+	}
+	return nil
+}
+
 // Lookup limits.
 const (
 	lookupQRunes   = 200
@@ -254,8 +310,8 @@ func (l *Lookup) validate() error {
 }
 
 // Block is one action block of a reply: exactly one of Dispatch, Promise,
-// Ask, Status, Notify, Custody, Relay, Remember, Lookup and Park is set, or Err says why
-// it is not run.
+// Ask, Status, Notify, Custody, Relay, Remember, Lookup, Park, Halt and
+// Cancel is set, or Err says why it is not run.
 type Block struct {
 	// Raw is the block's body as written.
 	Raw      string
@@ -270,6 +326,8 @@ type Block struct {
 	Remember *Remember
 	Lookup   *Lookup
 	Park     *Park
+	Halt     *Halt
+	Cancel   *Cancel
 	Err      error
 }
 
@@ -450,13 +508,31 @@ func (b *Block) decode() {
 			err = pk.validate()
 			b.Park = &pk.Park
 		}
+	case TypeHalt:
+		var h struct {
+			Type Type `json:"type"`
+			Halt
+		}
+		if err = strict(b.Raw, &h); err == nil {
+			err = h.validate()
+			b.Halt = &h.Halt
+		}
+	case TypeCancel:
+		var c struct {
+			Type Type `json:"type"`
+			Cancel
+		}
+		if err = strict(b.Raw, &c); err == nil {
+			err = c.validate()
+			b.Cancel = &c.Cancel
+		}
 	case "":
 		err = errors.New("缺少 type")
 	default:
-		err = fmt.Errorf("未知类型 %q（只有 dispatch、promise、ask、status、notify、custody、relay、remember、lookup、park）", head.Type)
+		err = fmt.Errorf("未知类型 %q（只有 %s）", head.Type, allTypes)
 	}
 	if err != nil {
-		b.Dispatch, b.Promise, b.Ask, b.Status, b.Notify, b.Custody, b.Relay, b.Remember, b.Lookup, b.Park, b.Err = nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
+		*b = Block{Raw: b.Raw, Type: b.Type, Err: err}
 	}
 }
 

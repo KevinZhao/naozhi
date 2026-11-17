@@ -183,7 +183,7 @@ export function paintSessionCards(root) {
     if (head) { head.textContent = ' · ' + wsLabel(name); head.title = name; }
     el.querySelector('.pl-act-rows')?.insertAdjacentHTML('afterbegin', '<dt>工作区</dt><dd>' + esc(name) + '</dd>');
   });
-  root.querySelectorAll('.pl-report-name[data-key], .pl-relay-name[data-key]').forEach((el) => {
+  root.querySelectorAll('.pl-report-name[data-key], .pl-relay-name[data-key], .pl-stop-name[data-key]').forEach((el) => {
     const name = sessionTitle(el.dataset.key);
     if (el.textContent !== name) el.textContent = name;
   });
@@ -232,7 +232,13 @@ function mentionedKeys(ev) {
 
 // ---- action blocks (§6.2) ----
 
-const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask', 'status', 'notify', 'custody', 'relay', 'remember', 'lookup', 'park']);
+const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask', 'status', 'notify', 'custody', 'relay', 'remember', 'lookup', 'park', 'halt', 'cancel']);
+// STOP_HEAD is a halt or cancel block's one line (§15.15 ①): its mark, what
+// the gateway did and the tooltip saying it.
+const STOP_HEAD = {
+  halt: { k: '⏸ 叫停', tip: '停掉托管、关掉进程，会话还在；你在会话里发一条消息它就接着做' },
+  cancel: { k: '■ 停止', tip: '等于你在“任务”里点停止：记为已完成（已停止）' },
+};
 const STATUS_LABEL = { done: '已完成', doing: '进行中', failed: '失败' };
 const STATUS_MARK = { done: '✓', failed: '✗' };
 
@@ -364,6 +370,18 @@ function actionCardHtml(raw) {
     return '<div class="pl-act pl-act-park pl-act-line" title="移进搁置区，交接里不再重抄">' +
       '<span class="pl-act-k">放下</span>' + (text ? ' · <span class="pl-act-goal">' + esc(text) + '</span>' : '') +
       (src ? '<span class="pl-act-ws"> · 出处 ' + esc(src) + '</span>' : '') + '</div>';
+  }
+  if (a.type === 'halt' || a.type === 'cancel') {
+    // One line: ⏸ 叫停 / ■ 停止 · the session · the why's first sentence;
+    // the why whole in the tooltip, the session named as the list names it.
+    const h = STOP_HEAD[a.type];
+    const key = str(a.task);
+    const why = str(a.why);
+    const line = firstSentence(why);
+    return '<div class="pl-act pl-act-' + a.type + ' pl-act-line" title="' + escAttr(h.tip + (why ? '。依据：' + why : '')) + '">' +
+      '<span class="pl-act-k">' + esc(h.k) + '</span>' +
+      (key ? ' · <b class="pl-act-name pl-stop-name" data-key="' + escAttr(key) + '">' + esc(sessionTitle(key)) + '</b>' : '') +
+      (line ? '<span class="pl-act-goal"> · ' + esc(line) + '</span>' : '') + '</div>';
   }
   if (a.type === 'lookup') {
     // One line: 查一下 · the question; the answer comes later as the query

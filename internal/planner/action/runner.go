@@ -211,6 +211,15 @@ type Config struct {
 	// ends of the sessions in custody are checked for the Planner like a
 	// dispatched session's. nil refuses the blocks and checks none.
 	Custody Custodian
+	// StopProcess drops the messages queued for session key and closes its
+	// process, its background work and workflows with it (wireup.StopProcess,
+	// the half of 任务's stop that tells no one): a halt block's, once custody
+	// is stopped. nil leaves the process running.
+	StopProcess func(key string)
+	// Asking reports whether session key has an AskUserQuestion unanswered
+	// (wireup.CustodySources.Asking): a halt keeps such a process, so the
+	// user's answer reaches a live one. nil is none.
+	Asking func(key string) bool
 	// Ctx bounds dispatches' spawns; nil is Background.
 	Ctx context.Context
 	// Now is the wall clock; nil is time.Now.
@@ -227,6 +236,8 @@ type Custodian interface {
 	SetWatch(key string, on bool, by string) error
 	Deliver(key string, reason custody.Reason, text string) (int, error)
 	Name(key string) string
+	Halt(key, why string) error
+	Status(key string) custody.Status
 }
 
 // Runner runs the action blocks of the Planner's replies and applies the
@@ -703,6 +714,13 @@ func (r *Runner) checkEnded(e ended) {
 		r.settleRelay(e.key, e.at)
 	}
 	due := i >= 0 && r.latestTurn(e) && (tasks[i].State == task.Doing || stillDone) && !crossReported
+	// A session whose custody stopped (the user had it halted, D119, or
+	// custody gave it back at a limit) is the user's: its turn cut short
+	// or left unreported asks nothing of the Planner, which could only send
+	// it on. A report it wrote still goes (checkReport).
+	if due && r.custodyStopped(e.key) {
+		due = false
+	}
 	if _, told := r.endTold[e.key]; due && told && !stillDone {
 		// Left unchecked on disk for the doing block answering the receipt
 		// (holdLatest).
@@ -1194,7 +1212,8 @@ func (r *Runner) handle(rep reply) {
 		var err error
 		reopened := false
 		switch {
-		case rep.outside != "" && (b.Dispatch != nil || b.Status != nil || b.Custody != nil || b.Relay != nil || b.Remember != nil || b.Lookup != nil || b.Park != nil):
+		case rep.outside != "" && (b.Dispatch != nil || b.Status != nil || b.Custody != nil || b.Relay != nil || b.Remember != nil || b.Lookup != nil || b.Park != nil ||
+			b.Halt != nil || b.Cancel != nil):
 			un.add(i, b, r.refuseOutside(b, rep.outside))
 			un.outside = true
 		case len(rep.words) == 0 && needsUser(b):
@@ -1225,6 +1244,13 @@ func (r *Runner) handle(rep reply) {
 			err = r.notify(*b.Notify)
 		case b.Custody != nil:
 			reopened, err = r.custody(*b.Custody)
+		case b.Halt != nil:
+			var what string
+			if what, err = r.halt(*b.Halt); err == nil && what != "" {
+				un.note(i, b, what)
+			}
+		case b.Cancel != nil:
+			err = r.cancel(*b.Cancel)
 		}
 		if reopened && err == nil {
 			un.note(i, b, "这个会话已经收起，网关已重新打开并送到")
@@ -1522,6 +1548,14 @@ func (r *Runner) refuseOutside(b Block, by string) string {
 		r.note(by + "触发的回合不能发起网页查询：「" + textutil.TruncateRunes(l.Q, 60) + "」没有查")
 		return "这一轮不能发起网页查询，没有查"
 	}
+	if h := b.Halt; h != nil {
+		r.note(by + "触发的回合不能叫停会话：「" + r.sessionName(h.Task) + "」没有停")
+		return "这一轮不能叫停，halt 只在用户让你停的那一轮有效，没有停"
+	}
+	if c := b.Cancel; c != nil {
+		r.note(by + "触发的回合不能停止任务：「" + r.taskName(c.Task) + "」没有停止")
+		return "这一轮不能停止任务，cancel 只在用户让你停的那一轮有效，没有停止"
+	}
 	s := *b.Status
 	name := s.Task
 	if r.cfg.Tasks != nil {
@@ -1576,10 +1610,10 @@ func (r *Runner) tellUnrun(rep reply, u unrun) {
 		b.WriteString("格式不对的块按系统提示词里的格式改正后重发。\n")
 	}
 	if u.outside {
-		b.WriteString("这一轮由" + by + "触发，网关只执行 notify、promise 与 ask；需要派活、改任务状态、托管、记记忆、搁置或网页查询，就在对话里向用户说明，等用户发消息让你做。\n")
+		b.WriteString("这一轮由" + by + "触发，网关只执行 notify、promise 与 ask；需要派活、改任务状态、托管、记记忆、搁置、网页查询、叫停或停止任务，就在对话里向用户说明，等用户发消息让你做。\n")
 	}
 	if u.notUser {
-		b.WriteString("这一轮不是用户发起的（回执、提醒、托管等），网关没有可附的用户原话，所以不转达、不带原话派活、不改 MCP 权限、不开 ultracode、不记记忆、不搁置；要用户拍板就用 ask，带上 task 时用户的回答会直接送到那个会话。\n")
+		b.WriteString("这一轮不是用户发起的（回执、提醒、托管等），网关没有可附的用户原话，所以不转达、不带原话派活、不改 MCP 权限、不开 ultracode、不记记忆、不搁置、不叫停、不停止任务；要用户拍板就用 ask，带上 task 时用户的回答会直接送到那个会话。\n")
 	}
 	if err := send(strings.TrimSpace(b.String())); err != nil {
 		slog.Warn("planner actions: receipt of the blocks not run not sent to the Planner", "err", err)
@@ -1598,8 +1632,10 @@ func needsUser(b Block) bool {
 		return d.WithUserWords || len(d.MCPTools) > 0 || d.Ultracode
 	}
 	// Leaving a session alone is the user's word: a mail asking the
-	// Planner to stop looking at one is not.
-	return b.Relay != nil || b.Remember != nil || b.Park != nil || b.Custody != nil && b.Custody.Watch != nil
+	// Planner to stop looking at one is not. So is stopping one (D118): the
+	// Planner wakes only once a turn ended, too late to halt what it sees.
+	return b.Relay != nil || b.Remember != nil || b.Park != nil || b.Custody != nil && b.Custody.Watch != nil ||
+		b.Halt != nil || b.Cancel != nil
 }
 
 // refuseNotUser answers such a block from a turn the user did not start,
@@ -1617,12 +1653,34 @@ func (r *Runner) refuseNotUser(b Block) string {
 		r.note("这一轮不是用户发起的，不能搁置：「" + textutil.TruncateRunes(p.Text, 60) + "」没有移进搁置区")
 		return "这一轮不是用户发起的，park 只在用户说放下的那一轮有效，没有搁置"
 	}
+	if h := b.Halt; h != nil {
+		r.note("这一轮不是用户发起的，不能叫停：「" + r.sessionName(h.Task) + "」没有停")
+		return notUserStop
+	}
+	if c := b.Cancel; c != nil {
+		r.note("这一轮不是用户发起的，不能停止任务：「" + r.taskName(c.Task) + "」没有停止")
+		return notUserStop
+	}
 	if c := b.Custody; c != nil {
 		r.note("这一轮不是用户发起的，不能关掉观察：「" + r.sessionName(c.Key) + "」照旧观察")
 		return "这一轮不是用户发起的，watch:false 只在用户说别管这个会话时用，没有关掉观察"
 	}
 	r.note("这一轮不是用户发起的，不能转达用户的决定：「" + r.sessionName(b.Relay.Key) + "」没有收到")
 	return "这一轮不是用户发起的，没有可附的用户原话，没有转达"
+}
+
+// notUserStop is why a halt or cancel block of a turn the user did not
+// start was not run, as the receipt says it.
+const notUserStop = "这一轮不是用户发起的，halt / cancel 只在用户让你停的那一轮有效，没有停"
+
+// taskName is task id's title as the conversation shows it, else id.
+func (r *Runner) taskName(id string) string {
+	if r.cfg.Tasks != nil {
+		if title, ok := r.cfg.Tasks.Title(id); ok {
+			return textutil.TruncateRunes(title, 60)
+		}
+	}
+	return id
 }
 
 // sessionName is key's name as the conversation shows it.
@@ -2147,6 +2205,86 @@ func (r *Runner) park(p Park) error {
 		return fmt.Errorf("「%s」没有搁置：%w", textutil.TruncateRunes(p.Text, 60), err)
 	}
 	return nil
+}
+
+// halt stops session h.Task for the user, who asked the Planner to
+// (§15.15 ②, D119): custody stops its lineage (custody.Engine.Halt: no
+// retry, no answer, no 继续 the Planner sends through custody), then the
+// messages queued for it are dropped and its process closed, its
+// background work and workflows with it, so nothing wakes it; an interrupt
+// would cut the turn alone. The session and its context stay, and the
+// user's own message in it takes it on again; its task's state is left as
+// it is. A session already waiting on the user (an AskUserQuestion
+// unanswered, its need_user question open in "等你") keeps its process, so
+// the answer reaches a live one, which what it returns tells the Planner.
+// Only this node's sessions the user opened or the Planner dispatched may
+// be halted: a remote node's is its own Planner's (D96).
+func (r *Runner) halt(h Halt) (string, error) {
+	if r.cfg.Custody == nil {
+		return "", errors.New("叫停没有接通")
+	}
+	key := h.Task
+	switch {
+	case sessionkey.IsPlannerNSKey(key), sessionkey.IsCronKey(key), sessionkey.IsScratchKey(key), sessionkey.IsSysKey(key), sessionkey.IsOneShotKey(key):
+		return "", blockError{fmt.Errorf("会话 %q 不能叫停（只能叫停本机你派出的会话和用户自己开的会话）", key)}
+	case r.putAway(key):
+		return "", errors.New("已经收起，没有在做事，不用叫停")
+	}
+	waiting := r.cfg.Asking != nil && r.cfg.Asking(key) || r.openSource(ReportSource(key))
+	switch err := r.cfg.Custody.Halt(key, h.Why); {
+	case errors.Is(err, custody.ErrNoSession):
+		return "", blockError{fmt.Errorf("找不到会话 %q（填 index.json 里本机会话的 key；远程节点的会话由那个节点的 Planner 叫停，请用户在 Planner 页切到那个节点说）", key)}
+	case errors.Is(err, custody.ErrRefused):
+		return "", blockError{fmt.Errorf("会话 %q 不能叫停", key)}
+	case err != nil:
+		return "", fmt.Errorf("没有叫停（%v）", err)
+	}
+	if waiting {
+		return "它已经在等用户回答，网关只停了托管，没有关进程", nil
+	}
+	if r.cfg.StopProcess == nil {
+		return "", errors.New("托管已停，但关进程没有接通，进程还在")
+	}
+	r.cfg.StopProcess(key)
+	return "", nil
+}
+
+// openSource reports whether an item of source src is open in "等你".
+func (r *Runner) openSource(src string) bool {
+	if r.cfg.Inbox == nil {
+		return false
+	}
+	open, _ := r.cfg.Inbox.List(0)
+	return slices.ContainsFunc(open, func(it notify.Item) bool { return it.Source == src })
+}
+
+// cancel stops dispatched task c.Task the user said is not wanted
+// (§15.15 ③, D120) as their stop in 任务 does (task.Board.Stop): marked
+// done as theirs, 已停止, the promises citing it closed, its process closed
+// (task.Config.Stop), and the Planner told in the receipt that stop sends.
+// The turn is the user's (needsUser), so the stop is recorded as theirs:
+// the Planner then cannot reopen it through custody (closedByUser), and the
+// brief and the task card read it as stopped. c.Why stays on the block's
+// card. A task done already with nothing running needs no stop.
+func (r *Runner) cancel(c Cancel) error {
+	if r.cfg.Tasks == nil {
+		return errors.New("任务没有接通")
+	}
+	if _, ok := r.cfg.Tasks.Title(c.Task); !ok {
+		return blockError{fmt.Errorf("找不到任务 %q（填你派出的会话的 task: key）", c.Task)}
+	}
+	if r.doneTask(c.Task) && (r.putAway(c.Task) || r.cfg.Custody != nil && r.cfg.Custody.Settled(c.Task)) {
+		return errors.New("已经是已完成，没有在跑，不用停止")
+	}
+	if err := r.cfg.Tasks.Stop(c.Task); err != nil {
+		return fmt.Errorf("没有停止（%v）", err)
+	}
+	return nil
+}
+
+// custodyStopped reports whether session key's custody lineage is stopped.
+func (r *Runner) custodyStopped(key string) bool {
+	return r.cfg.Custody != nil && r.cfg.Custody.Status(key).State == custody.StateStopped
 }
 
 // requestID names one card's source, so no two proposals share a card.

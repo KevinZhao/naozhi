@@ -26,7 +26,7 @@ func TestParse(t *testing.T) {
 		{"ask", block(`{"type":"ask","question":"今天发版吗？","options":["发","不发"]}`), []string{"ask"}},
 		{"indented fence", "1. 派活：\n   ```naozhi-action\n   {\"type\":\"ask\",\"question\":\"好吗\",\"options\":[]}\n   ```", []string{"ask"}},
 		{"several", block(`{"type":"promise","text":"a","due":"","close_when":""}`) + "\n中间的话\n" + block(`{"type":"ask","question":"b","options":["x"]}`), []string{"promise", "ask"}},
-		{"unknown type", block(`{"type":"halt","key":"task:1"}`), []string{"!未知类型"}},
+		{"unknown type", block(`{"type":"read_external","key":"task:1"}`), []string{"!未知类型"}},
 		{"missing type", block(`{"text":"a"}`), []string{"!缺少 type"}},
 		{"not json", block(`type: dispatch`), []string{"!不是一个 JSON 对象"}},
 		{"unknown field", block(`{"type":"promise","text":"a","due":"","close_when":"","extra":1}`), []string{"!字段不对"}},

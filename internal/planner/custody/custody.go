@@ -906,6 +906,32 @@ func (e *Engine) stopLocked(root, key string, c sidecar.Chain, why string, faile
 	return fmt.Errorf("%w：%s", ErrStopped, why)
 }
 
+// HaltPrefix opens why a lineage the user had the Planner halt stopped.
+const HaltPrefix = "你让 Planner 叫停："
+
+// Halt stops key's lineage because the user asked the Planner to stop it
+// (planner/action's halt block, §15.15 ②, D119): the stop custody makes at
+// a limit, so nothing new is built for it. Every message custody would
+// send it is refused (a retry, a recommended answer, the Planner's 继续),
+// the stop is journaled, noted in the session and left to the user in
+// "等你", and it holds over a restart; the user's own message in the
+// session starts the lineage afresh (takenOver). Closing the process is
+// the caller's.
+func (e *Engine) Halt(key, why string) error {
+	if e.cfg.Sessions == nil {
+		return ErrNoSession
+	}
+	if err := e.eligible(key); err != nil {
+		return err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	root := e.root(key)
+	// stopLocked always returns the stop as an error, for Deliver's callers.
+	_ = e.stopLocked(root, key, e.chain(root), HaltPrefix+strings.TrimSpace(why), false)
+	return nil
+}
+
 // leaveLocked leaves key's failure to the user: the item the inbox opens for
 // a failure custody does not take (the same source, so one already open
 // stands), why being the class's label and then why custody did not retry,
