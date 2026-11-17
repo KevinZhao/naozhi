@@ -199,3 +199,17 @@ func TestConnAdmission_NoTokenRefusesReboundHost(t *testing.T) {
 		}
 	}
 }
+
+// TestConnAdmission_NoTokenTrustedProxyForgedForwardedHost: a rebound page
+// cannot set headers on a WebSocket upgrade, but the check must not lean on
+// that: a loopback X-Forwarded-Host never vouches for a rebound Host.
+func TestConnAdmission_NoTokenTrustedProxyForgedForwardedHost(t *testing.T) {
+	a := newConnAdmission(HubOptions{TrustedProxy: true})
+	r := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	r.Host = "evil.example:8080"
+	r.Header.Set("X-Forwarded-Host", "127.0.0.1:8080")
+	r.Header.Set("Origin", "http://127.0.0.1:8080")
+	if a.upgrader.CheckOrigin(r) {
+		t.Error("CheckOrigin = true for a rebound Host behind a forged X-Forwarded-Host, want false")
+	}
+}

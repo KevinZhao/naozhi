@@ -72,12 +72,23 @@ func RequestHost(r *http.Request, trustedProxy bool) string {
 	return host
 }
 
-// UnboundHostOK reports whether host (RequestHost's answer, port optional)
-// cannot be a DNS-rebound name: an IP literal, or localhost and its
+// UnboundHostOK reports whether r addresses the server by names DNS
+// rebinding cannot take over: an IP literal, or localhost and its
 // subdomains, which browsers resolve to loopback themselves. Without a
 // dashboard token this is the only thing keeping a page on evil.example,
 // rebound to 127.0.0.1, from being same-origin with the dashboard.
-func UnboundHostOK(host string) bool {
+//
+// Both r.Host and RequestHost must pass. A rebound page can set
+// X-Forwarded-Host on its own same-origin fetch (it is not a forbidden
+// header), so with trustedProxy on RequestHost alone is the page's word;
+// r.Host is what its browser actually sent. And behind a proxy that rewrites
+// Host to its upstream address, the forwarded host is the one that still
+// names what the browser addressed.
+func UnboundHostOK(r *http.Request, trustedProxy bool) bool {
+	return unboundHost(r.Host) && unboundHost(RequestHost(r, trustedProxy))
+}
+
+func unboundHost(host string) bool {
 	if host == "" {
 		return false
 	}

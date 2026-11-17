@@ -171,7 +171,7 @@ func (a *Handlers) RotateCookieGen() {
 // a name DNS rebinding cannot take over (UnboundHostOK).
 func (a *Handlers) IsAuthenticated(r *http.Request) bool {
 	if a.DashboardToken == "" {
-		return UnboundHostOK(RequestHost(r, a.TrustedProxy))
+		return UnboundHostOK(r, a.TrustedProxy)
 	}
 	// Compare SHA-256 digests so length differences do not leak via the
 	// short-circuit inside ConstantTimeCompare.

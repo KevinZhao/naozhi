@@ -97,7 +97,7 @@ func newConnAdmission(opts HubOptions) *connAdmission {
 		// Without a token the upgrade is the whole auth, so the host must not
 		// be a DNS-rebound name either (as auth.Handlers.IsAuthenticated).
 		CheckOrigin: func(r *http.Request) bool {
-			if a.dashToken == "" && !auth.UnboundHostOK(auth.RequestHost(r, a.trustedProxy)) {
+			if a.dashToken == "" && !auth.UnboundHostOK(r, a.trustedProxy) {
 				return false
 			}
 			return auth.SameOriginOK(r, a.trustedProxy)

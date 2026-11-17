@@ -49,3 +49,32 @@ func TestRequireAuth_NoTokenReboundHostRefused(t *testing.T) {
 		t.Fatalf("rebound request: handler called=%v, code=%d; want refused with 401", called, rec.Code)
 	}
 }
+
+// TestIsAuthenticated_NoTokenTrustedProxyForgedForwardedHost: with
+// trusted_proxy on, a rebound page can put X-Forwarded-Host on its own
+// same-origin GET, so a loopback forwarded host must not vouch for a rebound
+// Host; nor may a loopback Host (a proxy rewriting it to its upstream) vouch
+// for a rebound forwarded host.
+func TestIsAuthenticated_NoTokenTrustedProxyForgedForwardedHost(t *testing.T) {
+	t.Parallel()
+	a := &Handlers{DashboardToken: "", TrustedProxy: true}
+	for _, tc := range []struct {
+		host, fwd string
+		want      bool
+	}{
+		{"evil.example:8080", "127.0.0.1", false},
+		{"evil.example:8080", "evil.example:8080, 127.0.0.1", false},
+		{"127.0.0.1:8080", "evil.example", false},
+		{"127.0.0.1:8080", "127.0.0.1:8443", true},
+		{"127.0.0.1:8080", "", true},
+	} {
+		r := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
+		r.Host = tc.host
+		if tc.fwd != "" {
+			r.Header.Set("X-Forwarded-Host", tc.fwd)
+		}
+		if got := a.IsAuthenticated(r); got != tc.want {
+			t.Errorf("Host %q X-Forwarded-Host %q: IsAuthenticated = %v, want %v", tc.host, tc.fwd, got, tc.want)
+		}
+	}
+}
