@@ -67,6 +67,40 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .settings-theme-opt{padding:8px 16px;border-radius:var(--nz-radius-md);font-size:var(--nz-fs-sm);color:var(--nz-text-mute);cursor:pointer;border:1px solid var(--nz-border);background:var(--nz-bg-1);font-family:inherit;transition:background .15s,color .15s,border-color .15s}
 .settings-theme-opt:hover{background:var(--nz-bg-2);color:var(--nz-text)}
 .settings-theme-opt.active{background:var(--nz-bg-2);color:var(--nz-text-strong);border-color:var(--nz-selected-bar)}
+/* 懂你 (memory_view.js): the auto-memory list, one group per project. */
+.mem-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.mem-head h2{margin-bottom:0;flex:1}
+.mem-node{font:inherit;font-size:var(--nz-fs-xs);padding:2px 6px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);background:var(--nz-bg-0);color:var(--nz-text)}
+.mem-intro{color:var(--nz-text-dim);font-size:var(--nz-fs-xs);line-height:1.6;margin-bottom:8px}
+.mem-ro{font-size:var(--nz-fs-xs);color:var(--nz-warn);margin-bottom:8px}
+.mem-filter{width:100%;box-sizing:border-box;margin-bottom:10px;padding:6px 10px;font:inherit;font-size:var(--nz-fs-sm2);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);background:var(--nz-bg-0);color:var(--nz-text)}
+.mem-recent{margin-bottom:12px}
+.mem-recent h3,.mem-latest-l{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);font-weight:600;margin:4px 0}
+.mem-more,.mem-empty,.mem-hint,.mem-where{font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.mem-where{display:block;padding:0 8px 4px}
+.mem-err{font-size:var(--nz-fs-xs);color:var(--nz-err)}
+.mem-grp{border-top:1px solid var(--nz-border);padding:6px 0}
+.mem-grp-h{cursor:pointer;display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:var(--nz-fs-sm2);color:var(--nz-text-strong);padding:4px 0}
+.mem-grp-l{min-width:0;overflow-wrap:anywhere}
+.mem-row{border-radius:var(--nz-radius-ms)}
+.mem-row-focus{outline:1px solid var(--nz-selected-bar)}
+.mem-row-h{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px;width:100%;text-align:left;padding:5px 8px;border:0;background:none;color:var(--nz-text);font:inherit;font-size:var(--nz-fs-sm2);cursor:pointer;border-radius:var(--nz-radius-ms)}
+.mem-row-h:hover{background:var(--nz-bg-2)}
+.mem-title{font-weight:600;overflow-wrap:anywhere}
+.mem-desc{color:var(--nz-text-dim);font-size:var(--nz-fs-xs);flex:1 1 200px;min-width:0;overflow-wrap:anywhere}
+.mem-time{color:var(--nz-text-mute);font-size:var(--nz-fs-xs);margin-left:auto}
+.mem-tag{font-size:var(--nz-fs-xs);padding:0 6px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);color:var(--nz-text-mute);white-space:nowrap}
+.mem-tag-pl{color:var(--nz-accent);border-color:var(--nz-accent)}
+.mem-tag-warn{color:var(--nz-warn);border-color:var(--nz-warn)}
+.mem-detail{padding:4px 8px 10px 16px;font-size:var(--nz-fs-sm2)}
+.mem-md{overflow-wrap:anywhere}
+.mem-raw,.mem-latest{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--nz-font-mono);font-size:var(--nz-fs-xs);margin:0;max-height:320px;overflow:auto}
+.mem-latest{padding:6px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);margin-bottom:6px}
+.mem-edit{width:100%;box-sizing:border-box;min-height:220px;resize:vertical;font-family:var(--nz-font-mono);font-size:var(--nz-fs-xs);line-height:1.5;padding:8px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);background:var(--nz-bg-0);color:var(--nz-text)}
+.mem-note{font-size:var(--nz-fs-xs);color:var(--nz-warn);margin-bottom:6px}
+.mem-acts{display:flex;gap:8px;margin-top:8px}
+.mem-del{color:var(--nz-err)}
+.asset-mem-link{padding:8px 12px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
 
 /* ===== System view (sysession daemons) ===== */
 .system-head{flex-shrink:0;display:flex;align-items:center;gap:8px;padding:14px 20px;border-bottom:1px solid var(--nz-border)}

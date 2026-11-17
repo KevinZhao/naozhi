@@ -2,6 +2,7 @@ package memory
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -49,6 +50,35 @@ type Handler struct {
 	// so repeated misses cannot DoS via ReadDir.
 	negCacheMu sync.RWMutex
 	negCache   map[string]time.Time
+
+	// The 懂你 section's view (view.go, file.go).
+	claudeMD       string
+	plannerProject string
+	workspaces     func() []Workspace
+}
+
+// Deps wires a Handler. The server builds it from the Planner agent's
+// Claude directory, so the 懂你 section lists the memories the remember
+// block writes and the Planner reads.
+type Deps struct {
+	// ProjectsDir is <ClaudeDir>/projects; "" serves nothing.
+	ProjectsDir string
+	// ClaudeMD is the user's ~/.claude/CLAUDE.md, listed read-only: the
+	// Planner reads it, sessions naozhi starts do not.
+	ClaudeMD string
+	// PlannerDir is the Planner's working directory: its project is the
+	// Planner's own memory (the remember block's global). "" marks none.
+	PlannerDir string
+	// Workspaces lists this node's registered workspace directories, which
+	// name the groups; nil names none.
+	Workspaces func() []Workspace
+}
+
+// Workspace is one registered workspace directory on this node.
+type Workspace struct {
+	ID   string
+	Name string
+	Path string
 }
 
 var memorySlugRE = regexp.MustCompile(`^[a-zA-Z0-9_\-]{1,64}$`)
@@ -70,10 +100,10 @@ const maxMemoryFileBytes = 256 * 1024
 
 var errMemoryPathEscape = errors.New("path escapes projects dir")
 
-// New constructs a memory Handler. projectsDir is injected by the server
+// New constructs a memory Handler. Its paths are injected by the server
 // package so this sub-package never reverse-imports it.
-func New(projectsDir string) *Handler {
-	dir := projectsDir
+func New(d Deps) *Handler {
+	dir := d.ProjectsDir
 	// Canonicalise projectsDir so the prefix check in tryRead compares the
 	// resolved leaf against a resolved root (symlinked ~/.claude etc.).
 	// Best-effort: a not-yet-existing dir keeps the cleaned raw path.
@@ -92,12 +122,18 @@ func New(projectsDir string) *Handler {
 	if prefix != "" {
 		prefix += string(filepath.Separator)
 	}
-	return &Handler{
+	h := &Handler{
 		projectsDir:         dir,
 		currentProject:      cur,
 		resolvedPrefix:      prefix,
 		resolvedPrefixNoSep: prefixNoSep,
+		claudeMD:            d.ClaudeMD,
+		workspaces:          d.Workspaces,
 	}
+	if d.PlannerDir != "" {
+		h.plannerProject = claudefs.ProjectSlug(d.PlannerDir)
+	}
+	return h
 }
 
 // encodeCurrentProjectDir maps the current working directory to the directory
@@ -272,7 +308,7 @@ func (h *Handler) tryRead(projectDir, slug string) (*memoryResponse, error) {
 
 	// Cap the read at maxMemoryFileBytes (reads cap+1 to distinguish
 	// "exactly at cap" from truncation) (#1044).
-	raw, truncated, err := readCappedMemoryFile(resolved, int64(maxMemoryFileBytes))
+	raw, truncated, _, err := readCappedMemoryFile(resolved, int64(maxMemoryFileBytes))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -296,7 +332,12 @@ func (h *Handler) tryRead(projectDir, slug string) (*memoryResponse, error) {
 
 // readCappedMemoryFile reads up to capBytes from path; truncated=true when
 // the file was larger. Errors (including os.ErrNotExist) propagate unchanged.
-func readCappedMemoryFile(path string, capBytes int64) ([]byte, bool, error) {
+//
+// fi is the descriptor's own stat: a version or size taken from it names the
+// bytes returned, where a later os.Stat could name a file a CLI session
+// wrote in between (and an edit or delete checked against it would then
+// accept a version the page never saw).
+func readCappedMemoryFile(path string, capBytes int64) (raw []byte, truncated bool, fi os.FileInfo, err error) {
 	// Open via OpenWorkspaceFile (O_NOFOLLOW) rather than os.Open to close the
 	// TOCTOU window between the caller's EvalSymlinks check and the open; then
 	// Lstat-before / Fstat-after SameFile pins the descriptor to the exact
@@ -304,36 +345,40 @@ func readCappedMemoryFile(path string, capBytes int64) ([]byte, bool, error) {
 	// by O_NOFOLLOW alone). os.ErrNotExist still propagates unchanged.
 	li, err := os.Lstat(path)
 	if err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
 	f, err := dashproject.OpenWorkspaceFile(path)
 	if err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
 	defer f.Close()
-	fi, err := f.Stat()
+	fi, err = f.Stat()
 	if err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
 	if !os.SameFile(li, fi) {
-		return nil, false, os.ErrNotExist
+		return nil, false, nil, os.ErrNotExist
 	}
 	// Read capBytes+1 to detect overflow without a racy extra Stat.
 	lr := &io.LimitedReader{R: f, N: capBytes + 1}
-	raw, err := io.ReadAll(lr)
+	raw, err = io.ReadAll(lr)
 	if err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
 	if int64(len(raw)) > capBytes {
-		return raw[:capBytes], true, nil
+		return raw[:capBytes], true, fi, nil
 	}
-	return raw, false, nil
+	return raw, false, fi, nil
 }
 
 type memoryFrontmatter struct {
 	name        string
 	description string
 	typ         string
+	// source and rememberedAt are what the remember block writes under
+	// metadata: who wrote it (claudefs.MemorySourcePlanner) and when.
+	source       string
+	rememberedAt string
 }
 
 // parseMemoryFrontmatter strips a leading YAML frontmatter block if present
@@ -376,8 +421,13 @@ func parseMemoryFrontmatter(raw []byte) (memoryFrontmatter, string) {
 			if !ok {
 				continue
 			}
-			if k == "type" {
+			switch k {
+			case "type":
 				meta.typ = v
+			case "source":
+				meta.source = v
+			case "remembered_at":
+				meta.rememberedAt = v
 			}
 			continue
 		}
@@ -411,7 +461,15 @@ func splitYAMLKV(line string) (string, string, bool) {
 	v := strings.TrimSpace(line[i+1:])
 	if len(v) >= 2 {
 		first, last := v[0], v[len(v)-1]
-		if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+		if first == '"' && last == '"' {
+			// The remember block writes a JSON string (a YAML double-quoted
+			// scalar), whose escapes (\", \u003c) must read back as written.
+			var s string
+			if json.Unmarshal([]byte(v), &s) == nil {
+				return k, s, true
+			}
+			v = v[1 : len(v)-1]
+		} else if first == '\'' && last == '\'' {
 			v = v[1 : len(v)-1]
 		}
 	}

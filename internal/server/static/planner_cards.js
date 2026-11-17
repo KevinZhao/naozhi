@@ -358,7 +358,8 @@ function actionCardHtml(raw) {
         (where ? '<span class="pl-act-ws" title="' + escAttr(where) + '"> · ' + esc(wsLabel(where)) + '</span>' : '') +
         (line ? '<span class="pl-act-goal" title="' + escAttr(line) + '"> · ' + esc(line) + '</span>' : '') + '</summary>' +
       rowsHtml([['记在', where], ['名字', str(a.name)], ['内容', str(a.text)]]) +
-      '<div class="pl-card-acts"><button type="button" class="pl-btn" data-action="planner-memory-forget" data-ws="' + escAttr(ws) + '" data-name="' + escAttr(str(a.name)) + '">撤回</button></div>' +
+      '<div class="pl-card-acts"><button type="button" class="pl-btn" data-action="planner-memory-forget" data-ws="' + escAttr(ws) + '" data-name="' + escAttr(str(a.name)) + '">撤回</button>' +
+        '<button type="button" class="pl-link" data-action="memory-open" data-node="' + escAttr(plannerHost.node) + '" data-ws="' + escAttr(ws) + '" data-name="' + escAttr(str(a.name)) + '">在懂你里看 ›</button></div>' +
       '</details>';
   }
   if (a.type === 'park') {

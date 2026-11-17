@@ -299,6 +299,14 @@ function defaultGitStates() {
  *   remoteCalls ({node, method, path, body}) and answers 202 — a POST /api/planner/send also
  *   runs remote[node].onSend(body) when set; GET /api/sessions/events?node=<node> answers
  *   events[key]. A node with `offline: true` answers 503, as the primary does. Unset, 404.
+ * @param {object} [overrides.memories] - the 懂你 section's memories (planner RFC §15.15 ⑦):
+ *   {writable, claude_md, groups: [...], files: {'<project>/<name>': fileResponse}}. GET /api/memories
+ *   answers {writable, claude_md, groups}; GET /api/memories/file answers files[key] or 404
+ *   memory_gone; PUT takes the text when its version is the file's (bumping it), else 409 with the
+ *   file as it is; DELETE (status overrides.memories.deleteStatus when set; a version not the
+ *   file's is 409 with the file as it is) drops the file and the
+ *   entry. Every PUT / DELETE lands in memoryCalls ({method, project, name, version, text}).
+ *   overrides.remote[node].memories is the same for a node, read-only (GETs). Unset, the routes 404.
  * @param {boolean} [overrides.uploads] - If true, POST /api/sessions/upload takes the file and
  *   answers {id: 'up-<n>', kind, size, name} (image_inline, file_ref for a PDF); each lands in
  *   uploadCalls ({id, bytes}). Unset, the route 404s and an upload fails.
@@ -417,6 +425,8 @@ function startMockServer(overrides = {}) {
   const scratchOpenCalls = [];
   const scratchPromoteCalls = [];
   const uploadCalls = [];
+  const memoriesData = overrides.memories || null;
+  const memoryCalls = [];
   const remoteData = overrides.remote || {};
   const remoteCalls = [];
   const keyEvents = overrides.keyEvents || {};
@@ -665,6 +675,16 @@ function startMockServer(overrides = {}) {
         [NZ_CONTRACT.API.system_health]: r.health || { units: [] },
         [NZ_CONTRACT.API.sessions_notes]: { notes: (r.notes || {})[url.searchParams.get('key')] || [] },
       };
+      if (r.memories && route === NZ_CONTRACT.API.memories) {
+        // The node's own answer, passed on as the primary does: a node
+        // reached over a loopback URL says writable:true.
+        gets[route] = { writable: r.memories.writable === true, groups: r.memories.groups || [], claude_md: r.memories.claude_md };
+      }
+      if (r.memories && route === NZ_CONTRACT.API.memories_file) {
+        const f = (r.memories.files || {})[(url.searchParams.get('project') || '') + '/' + (url.searchParams.get('name') || '')];
+        if (!f) { remoteCalls.push({ node: nodeID, method: 'GET', path: route }); answer(404, { error: 'memory_gone' }); return; }
+        gets[route] = f;
+      }
       if (route === NZ_CONTRACT.API.sessions_digest) {
         const key = url.searchParams.get('key') || '';
         const md = (r.digests || {})[key];
@@ -891,6 +911,49 @@ function startMockServer(overrides = {}) {
         res.end(JSON.stringify(plannerData));
       });
       return;
+    }
+
+    if (memoriesData && (pathname === NZ_CONTRACT.API.memories || pathname === NZ_CONTRACT.API.memories_file)) {
+      if (!checkAuth()) return;
+      const answer = (status, body) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
+      const files = memoriesData.files || (memoriesData.files = {});
+      if (pathname === NZ_CONTRACT.API.memories) {
+        answer(200, { writable: memoriesData.writable !== false, groups: memoriesData.groups || [], claude_md: memoriesData.claude_md });
+        return;
+      }
+      if (req.method === 'GET') {
+        const f = files[(url.searchParams.get('project') || '') + '/' + (url.searchParams.get('name') || '')];
+        if (f) answer(200, f); else answer(404, { error: 'memory_gone' });
+        return;
+      }
+      if (req.method === 'DELETE') {
+        const project = url.searchParams.get('project') || '', name = url.searchParams.get('name') || '';
+        memoryCalls.push({ method: 'DELETE', project, name, version: url.searchParams.get('version') || '' });
+        if (memoriesData.deleteStatus) { answer(memoriesData.deleteStatus, { error: memoriesData.deleteStatus === 409 ? 'memory_changed' : 'x' }); return; }
+        const f = files[project + '/' + name];
+        if (f && f.version !== (url.searchParams.get('version') || '')) { answer(409, { error: 'memory_changed', ...f }); return; }
+        delete files[project + '/' + name];
+        for (const g of memoriesData.groups || []) if (g.project === project) g.entries = g.entries.filter((e) => e.name !== name);
+        answer(200, { ok: true, index_lines_removed: 1 });
+        return;
+      }
+      if (req.method === 'PUT') {
+        let body = '';
+        req.on('data', c => (body += c));
+        req.on('end', () => {
+          const b = JSON.parse(body || '{}');
+          memoryCalls.push({ method: 'PUT', project: b.project, name: b.name, version: b.version, text: b.text });
+          const f = files[b.project + '/' + b.name];
+          if (!f) { answer(404, { error: 'memory_gone' }); return; }
+          if (b.version !== f.version) { answer(409, { error: 'memory_changed', ...f }); return; }
+          f.text = b.text;
+          f.body = b.text.replace(/^---\n[\s\S]*?\n---\n/, '');
+          f.version = 'v' + (memoryCalls.length + 1);
+          f.modified = new Date().toISOString();
+          answer(200, { version: f.version, modified: f.modified, size: b.text.length });
+        });
+        return;
+      }
     }
 
     if (plannerData && pathname === NZ_CONTRACT.API.planner_memory_forget && req.method === 'POST') {
@@ -1547,6 +1610,7 @@ function startMockServer(overrides = {}) {
         get scratchPromoteCalls() { return scratchPromoteCalls; },
         get uploadCalls() { return uploadCalls; },
         get remoteCalls() { return remoteCalls; },
+        get memoryCalls() { return memoryCalls; },
         get historySearchCalls() { return historySearchCalls; },
         get overrideCalls() { return overrideCalls; },
         resetCalls() { sendCalls = []; bindCalls = []; loginCalls = []; favoriteCalls = []; },

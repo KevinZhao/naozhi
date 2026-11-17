@@ -597,7 +597,8 @@ function paintTools() {
   if (pl.customPause && document.activeElement?.id === 'pl-pause-hours') return;
   box.innerHTML = layerToolHtml() + notifyToolHtml() +
     '<div class="pl-tool" title="暂停期间不推送，也不替任何会话回话；正在跑的回合不受影响"><span class="pl-tool-l">暂停推送与托管</span><div class="pl-tool-btns">' + pauseToolHtml() + '</div></div>' +
-    '<div class="pl-tool">' + stopToolHtml() + '</div>';
+    '<div class="pl-tool">' + stopToolHtml() + '</div>' +
+    '<div class="pl-tool"><button type="button" class="pl-link" data-action="memory-open" data-node="' + escAttr(plannerHost.node) + '" title="这台机器的 Planner 和各项目会话记住的事">懂你（记忆）›</button></div>';
 }
 
 // layerToolHtml is 对话 | 全部 in the "⋯" menu, where a phone has it: its

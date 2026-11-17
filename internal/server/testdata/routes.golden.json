@@ -181,6 +181,26 @@
   },
   {
     "method": "GET",
+    "path": "/api/memories",
+    "handler_type": "*memory.Handler"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/memories/file",
+    "handler_type": "*memory.Handler"
+  },
+  {
+    "method": "GET",
+    "path": "/api/memories/file",
+    "handler_type": "*memory.Handler"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/memories/file",
+    "handler_type": "*memory.Handler"
+  },
+  {
+    "method": "GET",
     "path": "/api/memory/{slug}",
     "handler_type": "*memory.Handler"
   },

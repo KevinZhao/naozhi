@@ -587,7 +587,7 @@ func TestReadCappedMemoryFile_NormalPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, truncated, err := readCappedMemoryFile(path, int64(maxMemoryFileBytes))
+	got, truncated, _, err := readCappedMemoryFile(path, int64(maxMemoryFileBytes))
 	if err != nil {
 		t.Fatalf("readCappedMemoryFile: %v", err)
 	}
@@ -630,7 +630,7 @@ func TestReadCappedMemoryFile_SymlinkRejectedByONofollow(t *testing.T) {
 
 	// readCappedMemoryFile must not return the target's bytes when fed the
 	// symlink path directly; O_NOFOLLOW blocks the open at the kernel boundary.
-	_, _, err := readCappedMemoryFile(link, int64(maxMemoryFileBytes))
+	_, _, _, err := readCappedMemoryFile(link, int64(maxMemoryFileBytes))
 	if err == nil {
 		t.Error("expected an error when opening a symlink path, got nil")
 	}
