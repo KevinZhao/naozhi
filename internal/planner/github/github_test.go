@@ -29,6 +29,8 @@ func TestParseRemote(t *testing.T) {
 		{"git@gitlab.com:o/r.git", "", "", false},
 		{"https://github.com.evil.example/o/r", "", "", false},
 		{"https://github.com/o", "", "", false},
+		{"https://github.com/a_b/c", "", "", false},
+		{"https://github.com/a.b/c", "", "", false},
 		{"/local/path/repo.git", "", "", false},
 	} {
 		o, n, ok := ParseRemote(tc.url)
@@ -120,10 +122,10 @@ func TestRefresh(t *testing.T) {
 	w.Refresh(context.Background())
 
 	entries, _ := os.ReadDir(gh)
-	if len(entries) != 1 || entries[0].Name() != "KevinZhao-naozhi.md" {
-		t.Fatalf("files = %v, want KevinZhao-naozhi.md only", entries)
+	if len(entries) != 1 || entries[0].Name() != "KevinZhao_naozhi.md" {
+		t.Fatalf("files = %v, want KevinZhao_naozhi.md only", entries)
 	}
-	data, _ := os.ReadFile(filepath.Join(gh, "KevinZhao-naozhi.md"))
+	data, _ := os.ReadFile(filepath.Join(gh, "KevinZhao_naozhi.md"))
 	md := string(data)
 	for _, want := range []string{
 		"# KevinZhao/naozhi 的 GitHub issue",
@@ -161,7 +163,7 @@ func TestRefresh(t *testing.T) {
 		now = now.Add(time.Hour)
 		w.Refresh(context.Background())
 	}
-	data, _ = os.ReadFile(filepath.Join(gh, "KevinZhao-naozhi.md"))
+	data, _ = os.ReadFile(filepath.Join(gh, "KevinZhao_naozhi.md"))
 	stale := string(data)
 	if !strings.Contains(stale, "更新于 2026-11-16 12:00") || !strings.Contains(stale, "#3942") ||
 		!strings.Contains(stale, "> 最近一次刷新失败：2026-11-16 14:00（gh issue: error connecting to api.github.com）") ||
@@ -171,7 +173,7 @@ func TestRefresh(t *testing.T) {
 	// Back again: the note goes.
 	fe.fail = false
 	w.Refresh(context.Background())
-	data, _ = os.ReadFile(filepath.Join(gh, "KevinZhao-naozhi.md"))
+	data, _ = os.ReadFile(filepath.Join(gh, "KevinZhao_naozhi.md"))
 	if strings.Contains(string(data), "刷新失败") || !strings.Contains(string(data), "更新于 2026-11-16 14:00") {
 		t.Errorf("recovered file:\n%s", data)
 	}
@@ -179,7 +181,7 @@ func TestRefresh(t *testing.T) {
 	// The repository unregistered: its file goes.
 	ws = ws[2:]
 	w.Refresh(context.Background())
-	if _, err := os.Stat(filepath.Join(gh, "KevinZhao-naozhi.md")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(gh, "KevinZhao_naozhi.md")); !os.IsNotExist(err) {
 		t.Errorf("unregistered repository's file kept: %v", err)
 	}
 }
@@ -196,7 +198,7 @@ func TestRefreshNeverOK(t *testing.T) {
 	if err := os.MkdirAll(gh, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	keep := filepath.Join(gh, "o-other.md")
+	keep := filepath.Join(gh, "o_other.md")
 	if err := os.WriteFile(keep, []byte("# o/other 的 GitHub issue\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +217,7 @@ func TestRefreshNeverOK(t *testing.T) {
 	}, Exec: exec,
 		Now: func() time.Time { return time.Date(2026, 11, 16, 12, 0, 0, 0, time.Local) }})
 	w.Refresh(context.Background())
-	data, err := os.ReadFile(filepath.Join(gh, "o-r.md"))
+	data, err := os.ReadFile(filepath.Join(gh, "o_r.md"))
 	if err != nil || !strings.Contains(string(data), "还没有成功刷新过") || !strings.Contains(string(data), "最近一次刷新失败") {
 		t.Errorf("file = %s, %v", data, err)
 	}
@@ -243,7 +245,7 @@ func TestRefreshNonGitTranslatedLocale(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	gone := filepath.Join(gh, "o-gone.md")
+	gone := filepath.Join(gh, "o_gone.md")
 	if err := os.WriteFile(gone, []byte("# o/gone 的 GitHub issue\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +268,7 @@ func TestRefreshFileCasingChanges(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(gh, "KevinZhao-naozhi.md"), []byte("# KevinZhao/naozhi 的 GitHub issue\n\n更新于 2026-11-16 11:00\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(gh, "KevinZhao_naozhi.md"), []byte("# KevinZhao/naozhi 的 GitHub issue\n\n更新于 2026-11-16 11:00\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	fe := &fakeExec{
@@ -277,11 +279,65 @@ func TestRefreshFileCasingChanges(t *testing.T) {
 		Now: func() time.Time { return time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC) }})
 	w.Refresh(context.Background())
 	entries, _ := os.ReadDir(gh)
-	if len(entries) != 1 || !strings.EqualFold(entries[0].Name(), "kevinzhao-naozhi.md") {
+	if len(entries) != 1 || !strings.EqualFold(entries[0].Name(), "kevinzhao_naozhi.md") {
 		t.Fatalf("files = %v, want the repository's one file", entries)
 	}
 	data, err := os.ReadFile(filepath.Join(gh, entries[0].Name()))
 	if err != nil || !strings.Contains(string(data), "更新于 2026-11-16 12:00") || !strings.Contains(string(data), "#1") {
 		t.Errorf("file = %s, %v", data, err)
+	}
+}
+
+// Owners and repository names both hold '-': foo-bar/baz and foo/bar-baz
+// each keep their own file with their own issues, and a file named the old
+// <owner>-<repo>.md way goes once the new one is written.
+func TestRefreshHyphenatedReposApart(t *testing.T) {
+	root := t.TempDir()
+	a, b := filepath.Join(root, "a"), filepath.Join(root, "b")
+	gh := filepath.Join(root, "github")
+	for _, p := range []string{a, b, gh} {
+		if err := os.Mkdir(p, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := filepath.Join(gh, "foo-bar-baz.md")
+	if err := os.WriteFile(old, []byte("# foo-bar/baz 的 GitHub issue\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fe := &fakeExec{
+		remotes: map[string]string{
+			a: "origin\tgit@github.com:foo-bar/baz.git (fetch)\n",
+			b: "origin\tgit@github.com:foo/bar-baz.git (fetch)\n",
+		},
+		issues: map[string]string{
+			"foo-bar/baz open":   `[{"number":11,"title":"甲","labels":[],"updatedAt":"2026-11-16T03:00:00Z"}]`,
+			"foo-bar/baz closed": `[]`,
+			"foo/bar-baz open":   `[{"number":22,"title":"乙","labels":[],"updatedAt":"2026-11-16T03:00:00Z"}]`,
+			"foo/bar-baz closed": `[]`,
+		},
+	}
+	w := New(Config{Dir: gh, Workspaces: func() []workspace.Dir {
+		return []workspace.Dir{{Name: "a", Path: a}, {Name: "b", Path: b}}
+	}, Exec: fe.run, Now: func() time.Time { return time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC) }})
+	w.Refresh(context.Background())
+
+	entries, _ := os.ReadDir(gh)
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if len(names) != 2 {
+		t.Fatalf("files = %v, want one per repository", names)
+	}
+	for _, r := range []struct{ repo, want, other string }{{"foo-bar/baz", "#11", "#22"}, {"foo/bar-baz", "#22", "#11"}} {
+		owner, name, _ := strings.Cut(r.repo, "/")
+		data, err := os.ReadFile(filepath.Join(gh, Repo{Owner: owner, Name: name}.File()))
+		md := string(data)
+		if err != nil || !strings.Contains(md, "# "+r.repo+" 的 GitHub issue") || !strings.Contains(md, r.want) || strings.Contains(md, r.other) {
+			t.Errorf("%s file = %s, %v (files %v)", r.repo, md, err, names)
+		}
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("the old-named file kept: %v", err)
 	}
 }

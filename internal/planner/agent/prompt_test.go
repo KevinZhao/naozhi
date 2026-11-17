@@ -56,7 +56,7 @@ func TestSystemPrompt(t *testing.T) {
 		"要你决定（等用户拍板的）→ 新结果",
 		`"goal":"…"`,
 		"/state/planner/parked.md（搁置区",
-		"/state/planner/github/<owner>-<repo>.md",
+		"/state/planner/github/<owner>_<repo>.md",
 		`用户问"还有什么要做 / 还有什么没开发"时，先读 /state/planner/github/`,
 		"RFC 的排期表，再读 parked.md",
 		`{"type":"park","text":"…","source":"…"}`,
