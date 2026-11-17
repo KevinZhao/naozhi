@@ -329,6 +329,9 @@ type ended struct {
 	// background work (Gone), "" while it lives: the work died with it, so
 	// the turn did not end as a turn that has nothing left running.
 	gone string
+	// onBackground is a hold on background work, not on a doing window:
+	// only the CLI's end under such a hold killed work (woken).
+	onBackground bool
 }
 
 const (
@@ -734,6 +737,7 @@ func (r *Runner) checkEnded(e ended) {
 		// workflow has no limit: the board has its end. An expiry passed
 		// already is a judgment not counting by the clock: no hold.
 		if end, ok := bg.Expires(); ok && end.After(now) {
+			e.onBackground = true
 			r.hold(e, end)
 			return
 		}
@@ -742,6 +746,7 @@ func (r *Runner) checkEnded(e ended) {
 	if at, ok := r.doingAt[e.key]; ok && due {
 		if end := at.Add(doingQuiet); now.Before(end) {
 			// Left unchecked on disk: a restart checks it again.
+			e.onBackground = false
 			r.hold(e, end)
 			return
 		}
@@ -1000,12 +1005,17 @@ func (r *Runner) hold(e ended, end time.Time) {
 
 // woken is e, or, for the wake of a hold, the turn end held; false when
 // none is (a later check took it). A wake for the CLI's end (Gone) carries
-// how it ended onto the turn end held.
+// how it ended onto a turn end held on background work; one held to a
+// doing window had no work to kill, so the CLI's end leaves it held, its
+// timer armed, and the receipt says nothing of background work.
 func (r *Runner) woken(e ended) (ended, bool) {
 	if !e.wake {
 		return e, true
 	}
 	held, ok := r.quiet[e.key]
+	if e.gone != "" && ok && !held.onBackground {
+		return ended{}, false
+	}
 	delete(r.quiet, e.key)
 	if e.gone != "" {
 		held.gone = e.gone
@@ -1116,6 +1126,7 @@ func (r *Runner) checkCustody(e ended) {
 		// end none, so look again once the task is no longer counted.
 		// Left unchecked on disk meanwhile.
 		if end, ok := bg.Expires(); ok && end.After(r.cfg.Now()) {
+			e.onBackground = true
 			r.hold(e, end)
 			return
 		}
@@ -1822,6 +1833,18 @@ const (
 // "</naozhi-relay>" cannot close it early.
 var envelopeRe = regexp.MustCompile(`(?i)naozhi-relay`)
 
+// plannerWords is Planner text quoted in the envelope (an ask's question,
+// the option the user picked) folded to one line, its 「」 turned to “”.
+func plannerWords(s string) string {
+	return strings.NewReplacer("「", "“", "」", "”").Replace(strings.Join(strings.Fields(s), " "))
+}
+
+// askTitleRunes caps an ask's question as the title of its "通知" item. The
+// envelope carries the whole question: the ask card in the Planner
+// conversation shows all of it, and it is the only context the session gets
+// for what the option picked means.
+const askTitleRunes = 120
+
 // relayEnvelope is what a session reads as the user's decision (D98): the
 // user's own words, as the gateway recorded them, in an envelope only the
 // gateway writes (the Planner's text may not name it, noEnvelope), then the
@@ -1839,7 +1862,11 @@ func relayEnvelope(now time.Time, words []Words, text string) string {
 		said := envelopeRe.ReplaceAllString(textutil.TruncateRunes(strings.TrimSpace(w.Text), wordsRunes), "naozhi_relay")
 		at := w.At.Format("1/2 15:04")
 		if w.Question != "" {
-			q := envelopeRe.ReplaceAllString(w.Question, "naozhi_relay")
+			// Both are the Planner's text, not the user's: on one line and
+			// unable to close its 「」, so neither can write a line that
+			// reads as the user's words.
+			q := envelopeRe.ReplaceAllString(plannerWords(w.Question), "naozhi_relay")
+			said = plannerWords(said)
 			b.WriteString("Planner 在通知里问用户「" + q + "」，用户 " + at + " 选了「" + said + "」。\n")
 			continue
 		}
@@ -1997,7 +2024,7 @@ func (r *Runner) ask(q Ask) error {
 	it := notify.Item{
 		Kind:   notify.KindQuestion,
 		Unit:   r.cfg.Planner,
-		Title:  textutil.TruncateRunes(q.Question, 120),
+		Title:  textutil.TruncateRunes(q.Question, askTitleRunes),
 		Why:    "Planner 问你",
 		Task:   q.Task,
 		Source: askSourcePrefix + requestID(),

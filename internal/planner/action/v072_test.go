@@ -153,6 +153,36 @@ func TestGoneWakesHeldCheck(t *testing.T) {
 	})
 }
 
+// A turn end held only to a doing window had no background work to kill:
+// the CLI reaped in the window wakes nothing, and the receipt at the
+// window's end is the plain one, not "后台任务随之停止".
+func TestGoneLeavesDoingWindowHold(t *testing.T) {
+	e := endedRunner(t)
+	e.end("改好了一半")
+	if len(e.receipts()) != 1 {
+		t.Fatalf("told = %q", e.g.told)
+	}
+	e.wait(5 * time.Minute)
+	e.doing("还没做完")
+	e.wait(5 * time.Minute)
+	e.end("全部做完了")
+	if n := len(e.receipts()); n != 1 {
+		t.Fatalf("a receipt within the doing window: %q", e.g.told)
+	}
+	e.wait(31 * time.Minute)
+	e.r.Gone(e.key, "idle_timeout")
+	e.check()
+	if n := len(e.receipts()); n != 1 {
+		t.Fatalf("the CLI's end woke the window's hold: %q", e.g.told)
+	}
+	e.wait(doingQuiet)
+	e.fire()
+	last := e.g.told[len(e.g.told)-1]
+	if !strings.Contains(last, "这一轮已经结束") || !strings.Contains(last, "全部做完了") || strings.Contains(last, "后台任务") {
+		t.Fatalf("told = %q, want the plain receipt for the window's turn", e.g.told)
+	}
+}
+
 // A session in custody told of a turn end is not told again of the turns
 // that woke by themselves after it (a Monitor pushing past bgtask's quiet
 // limit: one receipt per push); a turn after anything sent it is.

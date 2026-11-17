@@ -277,6 +277,39 @@ func TestRetryCountEndsWithRecovery(t *testing.T) {
 	}
 }
 
+// A failure the session recovers from before its retry goes out (the user
+// wrote "继续" in the backoff) ends the same way: its count starts afresh,
+// so such failures days apart never add up to a stop custody never retried.
+func TestRetryCountEndsWithRecoveryBeforeRetry(t *testing.T) {
+	r := newRig(t)
+	for _, key := range []string{dash, "task:a"} {
+		if key != dash {
+			r.dispatch(key)
+		}
+		for day := range MaxErrors + 2 {
+			r.units = []health.Unit{{ID: key, Kind: health.KindSession, State: health.Failed, ErrClass: health.ErrNetwork, LastActive: r.now}}
+			r.e.Tick()
+			m, _ := r.e.cfg.Sessions.Get(key)
+			if m.Retry == nil || m.Retry.Done || !m.Retry.At.Equal(r.now.Add(Backoff[0])) {
+				t.Fatalf("%s blip %d: retry %+v, want one a first backoff out", key, day+1, m.Retry)
+			}
+			r.now = r.now.Add(20 * time.Second)
+			r.units[0].State, r.units[0].LastActive, r.units[0].TurnAt = health.Active, r.now, r.now
+			r.e.Tick()
+			r.now = r.now.Add(10 * time.Second)
+			r.units[0].State, r.units[0].LastActive = health.Idle, r.now
+			r.e.Tick()
+			r.now = r.now.Add(24 * time.Hour)
+		}
+		if len(r.sent) != 0 {
+			t.Errorf("%s: sent %q, want none (each failure recovered first)", key, r.sent)
+		}
+		if st := r.e.Status(key); st.State == StateStopped || len(r.inbox.items) != 0 {
+			t.Errorf("%s after recovered blips: %+v, inbox %+v", key, st, r.inbox.items)
+		}
+	}
+}
+
 // A retry due while custody is paused waits for the pause to end and goes
 // out then, at once if due by then, as its backoff has it otherwise; the
 // failure opens no item meanwhile. One the pause kept past staleAfter is
@@ -517,8 +550,9 @@ func TestFailureStaysOneWhileEventsArrive(t *testing.T) {
 }
 
 // The "托管已停" question closes once the stop is gone: the user took the
-// session over, or its task was marked done (custody is off for it then,
-// which used to leave the item open for good, #3972).
+// session over, restarted custody from the chip, or its task was marked done
+// (custody is off for it then, which used to leave the item open for good,
+// #3972).
 func TestStopItemClosesWhenSettled(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -530,6 +564,11 @@ func TestStopItemClosesWhenSettled(t *testing.T) {
 		}},
 		{"task done", func(r *rig) {
 			r.update("task:a", func(m *sidecar.Meta) { m.Mark = &sidecar.Mark{State: "done", By: "user", At: r.now} })
+		}},
+		{"user restarted it from the chip", func(r *rig) {
+			if err := r.e.Set("task:a", true, ByUser); err != nil {
+				r.t.Fatal(err)
+			}
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
