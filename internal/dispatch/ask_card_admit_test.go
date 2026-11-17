@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/budget"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
@@ -102,3 +103,45 @@ func TestAskCard_RefusedClickIsNotAccepted(t *testing.T) {
 		t.Errorf("accepted %d then %d, want 1 then 0", first, second)
 	}
 }
+
+// TestAskCard_RefusedClickCanBeRetried: a click a gate refuses does not use
+// up its dedup ID, so the same user's next click on the same card (the same
+// ID) gets through once the gate lets it; an accepted click's ID stays used.
+func TestAskCard_RefusedClickCanBeRetried(t *testing.T) {
+	d, _, ct := newRateLimitDispatcher(t, RateLimit{MsgsPerMin: 1, Burst: 1})
+	h := d.BuildHandler()
+	var first, refused, retried, replay int
+	h(context.Background(), cardClick("c1", "u1", "", &first))
+	h(context.Background(), cardClick("X", "u1", "", &refused))
+	d.SetRateLimit(RateLimit{})
+	h(context.Background(), cardClick("X", "u1", "", &retried))
+	h(context.Background(), cardClick("X", "u1", "", &replay))
+	if first != 1 || refused != 0 || retried != 1 || replay != 0 {
+		t.Errorf("accepted: first %d, refused %d, retry %d, replay %d; want 1, 0, 1, 0", first, refused, retried, replay)
+	}
+	if n := ct.submits.Load(); n != 2 {
+		t.Errorf("submits = %d, want 2", n)
+	}
+}
+
+// TestAskCard_BudgetRefusedClickCanBeRetried: the same for a click refused
+// after prepareInbound, by today's budget.
+func TestAskCard_BudgetRefusedClickCanBeRetried(t *testing.T) {
+	d, _, _ := newRateLimitDispatcher(t, RateLimit{})
+	gate := &switchGate{blocked: true}
+	d.budget = gate
+	h := d.BuildHandler()
+	var refused, retried int
+	h(context.Background(), cardClick("X", "u1", "", &refused))
+	gate.blocked = false
+	h(context.Background(), cardClick("X", "u1", "", &retried))
+	if refused != 0 || retried != 1 {
+		t.Errorf("accepted: refused %d, retry %d; want 0, 1", refused, retried)
+	}
+}
+
+// switchGate refuses every key while blocked.
+type switchGate struct{ blocked bool }
+
+func (g *switchGate) CheckKey(string) budget.Verdict          { return budget.Verdict{Blocked: g.blocked} }
+func (g *switchGate) Once(budget.Notice, budget.Subject) bool { return true }
