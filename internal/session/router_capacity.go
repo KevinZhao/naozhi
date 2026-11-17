@@ -118,7 +118,9 @@ func (r *Router) evictOldest(tx sessTx) bool {
 		if s.exempt {
 			continue // planner sessions are never evicted
 		}
-		if !s.isAlive() || s.loadProcess().IsRunning() || r.backgroundOpen(s) {
+		// turnOutstanding, not only IsRunning: a Send queued on sendMu or a
+		// passthrough still pending is a turn about to start on this CLI.
+		if !s.isAlive() || s.turnOutstanding(s.loadProcess()) || r.backgroundOpen(s) {
 			continue
 		}
 		pick := &oldest
