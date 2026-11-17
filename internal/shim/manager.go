@@ -282,6 +282,9 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 	// Reserve a slot atomically to prevent TOCTOU race with concurrent callers
 	m.mu.Lock()
 	if len(m.shims)+m.pendingShims >= m.maxShims {
+		m.pruneExitedLocked()
+	}
+	if len(m.shims)+m.pendingShims >= m.maxShims {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("%w (%d)", ErrMaxShims, m.maxShims)
 	}
