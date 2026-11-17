@@ -195,6 +195,26 @@ func TestHaltTargets(t *testing.T) {
 		{name: "need_user open", setup: func(h *haltRig) {
 			h.inbox.Add(notify.Item{Kind: notify.KindQuestion, Unit: h.key, Title: "要你决定", Source: ReportSource(h.key)})
 		}, halted: true, receipt: "它已经在等用户回答"},
+		// The user answered its need_user question in the session: the item
+		// stays open until the turn that answer started ends, the session is
+		// at work on it, and a halt closes it.
+		{name: "need_user answered", setup: func(h *haltRig) {
+			h.inbox.Add(notify.Item{Kind: notify.KindQuestion, Unit: h.key, Title: "要你决定", Source: ReportSource(h.key)})
+			answeredAt := time.Now().Add(time.Second)
+			h.r.cfg.UserSent = func(key string, since time.Time) bool { return key == h.key && answeredAt.After(since) }
+		}, halted: true, closed: true},
+		// Asked again after that answer: the open item is the new question.
+		{name: "need_user asked again", setup: func(h *haltRig) {
+			h.inbox.Add(notify.Item{Kind: notify.KindQuestion, Unit: h.key, Title: "要你决定", Source: ReportSource(h.key)})
+			answeredAt := time.Now().Add(time.Second)
+			h.r.cfg.UserSent = func(key string, since time.Time) bool { return key == h.key && answeredAt.After(since) }
+			if _, err := h.side.Update(h.key, func(m *sidecar.Meta) bool {
+				m.Report = &sidecar.Report{State: ReportNeedUser, Summary: "还要你定", At: answeredAt.Add(time.Second)}
+				return true
+			}); err != nil {
+				panic(err)
+			}
+		}, halted: true, receipt: "它已经在等用户回答"},
 		{name: "running", halted: true, closed: true},
 	}
 	for _, c := range cases {
