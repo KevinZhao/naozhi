@@ -32,13 +32,26 @@ import (
 // remote job is waited on locally (a background task or a Monitor, the only
 // work naozhi sees running once the turn ends, D109), how it reports back, in a report block the gateway passes on to the Planner
 // (docs/rfc/planner.md §15.12 ③, D101), and how it asks the Planner,
-// named planner (agent.NameFor), on the way. It rides in the spawn
-// overlay, and TaskOpts.ForKey rebuilds it for a respawn, whose first
-// message may still carry the older note to report by SendMessage.
+// named planner (agent.NameFor), on the way. Changes it will commit get a
+// worktree of their own under the repository's .claude/worktrees/ (§15.15
+// ④, D121), so the user's checkout is left alone without the Planner
+// having to remember to say so, and the put-away recognizes the place
+// (its transcript cwd, or a literal path after cd / git -C: a variable
+// one is skipped). The gateway neither creates nor checks the worktree.
+// It rides in the spawn overlay the shim keeps, and the drift check
+// compares a live shim's argv with that stored text, not today's, so a
+// changed text kills no running session: it takes effect at the next
+// spawn, where TaskOpts.ForKey rebuilds it; that first message may still
+// carry the older note to report by SendMessage.
 func taskPrompt(planner string) string {
 	return `你是 Planner 派出的会话：第一条消息是 Planner 派给你的任务。
 - 下一步在任务范围内就直接做，不要停下来问；确需用户时一次把问题问全。
 - 交代以外的改动不做，包括 PR 标题、描述和分支名；你觉得该改的写进汇报的"建议"。
+- 要提交、推送或开 PR 的改动（派活消息或仓库规定要的；改文件、新建文件都算），先给这件事建自己的 worktree，不在主 checkout（工作区原来那个目录，是用户的）里改文件、切分支或提交：用 EnterWorktree，或在仓库顶层 git fetch origin 后 git worktree add --no-track -b <分支> <仓库顶层>/.claude/worktrees/<名字> origin/<默认分支>，第一次推送 git push -u origin <分支>。默认分支取 refs/remotes/origin/HEAD，取不到用 git ls-remote --symref origin HEAD，再不行看本地有 main 还是 master。位置一律在 .claude/worktrees/ 下，派活消息另指位置也一样；<名字> 只用小写字母、数字和 -；新分支自己起名，已有 PR 的标题和分支名不改。
+- 要接着做的分支已经检出时：在主 checkout 里的不碰，写 need_user；在别的会话的 worktree 里的不进去，SendMessage 问 Planner 或写 blocked；在你自己（同一条血缘）原来那个 worktree 里的直接进去。
+- cd 和 git -C 后面写字面绝对路径，不用变量；git check-ignore 说没忽略 .claude/worktrees/ 时，往 <git rev-parse --git-common-dir>/info/exclude 加一行 /.claude/worktrees/。
+- 例外，在原目录做：只读的；只写不提交的报告和笔记；要在原处立刻生效的改动（skill、数据台账、本机配置如 config-local.yaml）；没有远端的仓库；仓库的 CLAUDE.md / skill 或用户另有规定的。已经在主 checkout 里改了的不搬、不撤，汇报里写明。
+- 用了 worktree 的，汇报里写 worktree 路径、分支和 PR 链接，没推送就写"未推送"。
 - 长时间的远端任务（远端 benchmark、CI、远程机器上的作业）必须在本地挂后台等它结束（Bash 的 run_in_background 跑一个等待命令，如 gh run watch、ssh 上的 wait），或用 Monitor 盯着；只发出去就结束这一轮，naozhi 看不到它还在跑，会当你已经停下。
 - 做完、卡住或判断做不了时，在这一轮回复的末尾写汇报块，块后面不要再有文字：
 ` + "```" + `naozhi-report
