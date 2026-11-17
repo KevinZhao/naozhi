@@ -218,6 +218,39 @@ test('desktop: the Alt+P drawer, under which the 追问 drawer would open, offer
   }
 });
 
+test('desktop: 新对话 sent from the Alt+P drawer opens the 单独聊 on the Planner page', async ({ browser }) => {
+  test.setTimeout(60000);
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+  const page = await ctx.newPage();
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  const mock = await startMockServer({ ws: true, plannerEvents: plannerEvents(), planner, sendCreates: true });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await page.keyboard.press('Alt+KeyP');
+    const drawer = page.locator('#planner-drawer');
+    await expect(drawer).toBeVisible();
+    await expect(drawer.locator('#pl-stream .event.text')).toHaveCount(1);
+    await drawer.locator('#pl-to').selectOption('new');
+    await drawer.locator('#pl-input').fill('iso 抽屉里问点别的');
+    await drawer.locator('#pl-input').press('Enter');
+    await expect.poll(() => sent(mock).length).toBe(1);
+    // The drawer has no middle column: the page takes it, the drawer goes,
+    // and the input box says it sends to the 单独聊.
+    await expect(page.locator('body')).toHaveClass(/nz-view-planner/);
+    await expect(drawer).toBeHidden();
+    await expect(page.locator('#planner-main #pl-sess')).toBeVisible();
+    await expect(page.locator('#pl-sess-name')).toHaveText('单独聊：iso 抽屉里问点别的');
+    await expect(page.locator('#pl-events')).toBeHidden();
+    expect(mock.plannerSendCalls).toHaveLength(0);
+    expect(errors).toEqual([]);
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
 test('desktop: switching the page to another node\'s Planner closes the 追问 on this one\'s reply', async ({ browser }) => {
   test.setTimeout(60000);
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });

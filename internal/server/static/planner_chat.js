@@ -243,7 +243,10 @@ export function mountComposer() {
   box.addEventListener('drop', (e) => {
     e.preventDefault();
     box.classList.remove('pl-drop');
-    if (!input.disabled) handleFiles(e.dataTransfer.files, tray);
+    // #pl-attach says whether this box takes files: not to another node,
+    // which cannot read the uploads kept here (remote-planner.md §7).
+    if (!$('pl-attach').disabled) handleFiles(e.dataTransfer.files, tray);
+    else if (!input.disabled && e.dataTransfer.files.length) showToast('发给别的节点的消息不能带附件', 'warning');
   });
   paintComposer();
 }
@@ -592,6 +595,10 @@ async function registerAside(key, title, pending) {
   st.asides.set(key, title);
   sessionList.lastVersion = 0;
   shell.debouncedFetchSessions();
+  // The Alt+P drawer has no middle column: there the 单独聊 would stack
+  // under the Planner conversation and take its input box. It opens on the
+  // page, as the drawer's session cards do.
+  if (!$('planner-main')?.contains($('pl-center'))) shell.setActivityView('planner');
   openPlannerSession(key, pending);
   const [labeled, noted] = await Promise.all([
     labelAside(key, node, title),

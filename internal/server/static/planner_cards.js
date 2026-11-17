@@ -494,14 +494,21 @@ export function tidyEmpty(root) {
 
 function decorateEvent(ev, turn) {
   ev.dataset.plDec = '1';
-  ev.querySelectorAll('code[data-lang="naozhi-session-ref"]').forEach((code) => {
+  // Fences become cards only in the bubbles they are the gateway's in: an
+  // action block in the Planner's own reply (the one planner/action runs),
+  // a session ref in your message (withoutSnapshot builds it). The same
+  // fence in a session's message to the Planner (peer_message) is its text:
+  // as a card it would claim what was never done, its buttons live.
+  const refs = ev.matches('.text, .user') ? ev.querySelectorAll('code[data-lang="naozhi-session-ref"]') : [];
+  const acts = ev.matches('.text') ? ev.querySelectorAll('code[data-lang="naozhi-action"]') : [];
+  refs.forEach((code) => {
     let ref = null;
     try { ref = JSON.parse(code.textContent); } catch { /* left as code */ }
     const wrap = code.closest('.md-code-wrap');
     if (!wrap || !ref || !isStr(ref.key) || !ref.key) return;
     wrap.outerHTML = '<div class="pl-handoff"><span class="pl-handoff-l">交给 Planner</span>' + sessionCardHtml(ref.key) + '</div>';
   });
-  ev.querySelectorAll('code[data-lang="naozhi-action"]').forEach((code) => {
+  acts.forEach((code) => {
     const wrap = code.closest('.md-code-wrap');
     // A block with no line in the conversation (status 进行中) leaves a
     // marker only, for the blank lines after it to go with it.
@@ -572,9 +579,17 @@ function lookupLine(ev, content) {
   const run = m[1];
   ev.classList.add('pl-lookup-ev');
   content.innerHTML = lookupCardHtml(run, { q: m[2], state: 'loading' });
+  const paint = (html) => {
+    content.innerHTML = html;
+    // A 动态 line kept unfolded (planner_layers.js fillLine) copied the card
+    // while it was loading, and nothing copies it again.
+    for (const c of document.querySelectorAll('.pl-dyn-full .pl-lookup-loading[data-run="' + CSS.escape(run) + '"]')) {
+      if (c.parentElement) c.parentElement.innerHTML = html;
+    }
+  };
   fetchJSON(plannerAPI(NZ_CONTRACT.API.planner_lookup) + '?run=' + encodeURIComponent(run), { timeoutMs: 8000 })
-    .then((rec) => { content.innerHTML = lookupCardHtml(run, rec || {}); })
-    .catch(() => { content.innerHTML = lookupCardHtml(run, { q: m[2], state: 'gone' }); });
+    .then((rec) => paint(lookupCardHtml(run, rec || {})))
+    .catch(() => paint(lookupCardHtml(run, { q: m[2], state: 'gone' })));
   return true;
 }
 

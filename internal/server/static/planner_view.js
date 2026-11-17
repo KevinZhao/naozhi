@@ -1315,7 +1315,8 @@ onSessionsApplied(() => {
   }
   if (pl.host) { paintSessionCards($('pl-stream')); relayer(); }
 });
-nzBus.addEventListener('planner:node', onHostChanged);
+// The ack was the last node's Planner's: its answer does not come here.
+nzBus.addEventListener('planner:node', () => { dropAck(); onHostChanged(); });
 readLocalPlanner();
 setInterval(() => { if (hostRemote()) fetchInbox(); }, REMOTE_INBOX_MS);
 // A new socket holds no subscriptions: re-subscribe after the last event
