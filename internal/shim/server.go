@@ -332,7 +332,8 @@ func (s *shimServer) waitForReattach(acceptCh <-chan net.Conn, spawnClient func(
 
 // shimServer holds the shim's runtime state.
 //
-// Lock ordering: s.mu → buffer.mu (never acquire s.mu while holding buffer.mu).
+// Lock ordering: s.liveMu → s.mu → buffer.mu (never acquire s.mu while holding
+// buffer.mu).
 type shimServer struct {
 	cli       *cliProc
 	listener  net.Listener
@@ -341,6 +342,11 @@ type shimServer struct {
 	stateFile string
 	watchdog  *Watchdog
 	startedAt time.Time
+
+	// liveMu orders readStdout's buffer Push and live enqueue against a
+	// client's admission: a line is either in the tail handed to admitClient
+	// or enqueued to the admitted client live, never neither.
+	liveMu sync.Mutex
 
 	mu    sync.Mutex
 	state State
@@ -408,7 +414,11 @@ const (
 // a client that authenticated after it; with a live CLI an active client is
 // never kicked. On admitOK the old client (if any) is kicked and conn's write
 // channel and done channel are returned. Must only be called AFTER auth.
-func (s *shimServer) admitClient(conn net.Conn, gen uint64, cliAlive bool) (writeCh chan []byte, clientDone chan struct{}, res admitResult) {
+//
+// backlog is the stdout frames the ring took in after the replay snapshot; on
+// admitOK they head writeCh (sized to hold them) so they reach the client
+// before any live frame.
+func (s *shimServer) admitClient(conn net.Conn, gen uint64, cliAlive bool, backlog [][]byte) (writeCh chan []byte, clientDone chan struct{}, res admitResult) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -429,7 +439,10 @@ func (s *shimServer) admitClient(conn net.Conn, gen uint64, cliAlive bool) (writ
 
 	s.clientConn = conn
 	s.clientGen = gen
-	s.writeCh = make(chan []byte, 256)
+	s.writeCh = make(chan []byte, 256+len(backlog))
+	for _, f := range backlog {
+		s.writeCh <- f
+	}
 	s.clientDone = make(chan struct{})
 	s.clientAttached.Store(true)
 

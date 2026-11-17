@@ -56,24 +56,24 @@ func (s *shimServer) readStdout() {
 		// A final unterminated line (err == io.EOF, len > 0) is forwarded
 		// below; the loop ends on the next read.
 
+		// Push and enqueue under liveMu, so a client being admitted either
+		// finds this line in the ring after its replay or gets it live.
+		s.liveMu.Lock()
 		seq := s.buffer.Push(line) // Push makes its own copy for replay storage
+		// Skip the per-line frame marshal when no naozhi is attached (#2295).
+		// MarshalStdoutLine aliases `line` via unsafe.String; enqueueWrite hands
+		// the result off before the next read, so the alias never outlives
+		// this iteration.
+		if s.clientAttached.Load() {
+			if data, merr := MarshalStdoutLine(seq, line); merr == nil {
+				s.enqueueWrite(data)
+			}
+		}
+		s.liveMu.Unlock()
 		s.watchdog.Reset()
 
 		s.tryExtractSessionID(line)
 
-		// Skip the per-line frame marshal when no naozhi is attached (#2295);
-		// Push/extract/Reset above still run. A client attaching mid-line
-		// misses one frame, which replay backfills on attach.
-		if !s.clientAttached.Load() {
-			continue
-		}
-
-		// MarshalStdoutLine aliases `line` via unsafe.String; enqueueWrite hands
-		// the result off before the next Scan(), so the alias never outlives
-		// this iteration.
-		if data, err := MarshalStdoutLine(seq, line); err == nil {
-			s.enqueueWrite(data)
-		}
 		if err != nil {
 			break
 		}
