@@ -147,6 +147,47 @@ func TestTurnSender_SendHonoursSpec(t *testing.T) {
 	}
 }
 
+// TestTurnSender_PassthroughUnsupported: only a session known not to take
+// passthrough sends (kiro / codex, live or awaiting resume) reports true; an
+// absent key, a passthrough-capable process and a dead claude session do not.
+func TestTurnSender_PassthroughUnsupported(t *testing.T) {
+	cases := []struct {
+		name    string
+		backend string
+		proc    bool
+		pt      bool
+		want    bool
+	}{
+		{"live kiro", "kiro", true, false, true},
+		{"dead kiro", "kiro", false, false, true},
+		{"dead codex", "codex", false, false, true},
+		{"dead claude", "claude", false, false, false},
+		{"dead pre-backend store entry", "", false, false, false},
+		{"live passthrough process", "claude", true, true, false},
+		{"unknown backend", "nope", false, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := session.NewRouter(session.RouterConfig{MaxProcs: 1})
+			t.Cleanup(r.Shutdown)
+			const key = "feishu:direct:pt:general"
+			var proc *session.TestProcess
+			if tc.proc {
+				proc = session.NewTestProcess()
+				proc.PassthroughVal = tc.pt
+			}
+			r.InjectSession(key, proc).SetBackend(tc.backend)
+			s := turnSender{router: r}
+			if got := s.PassthroughUnsupported(key); got != tc.want {
+				t.Errorf("PassthroughUnsupported = %v, want %v", got, tc.want)
+			}
+			if s.PassthroughUnsupported("feishu:direct:absent:general") {
+				t.Error("PassthroughUnsupported(absent) = true, want false")
+			}
+		})
+	}
+}
+
 // TestTurnSender_ResetKeepsOrDropsOverride: Reset(key, false) keeps the
 // chat's workspace override (IM /new), Reset(key, true) drops it with the
 // session in one step.

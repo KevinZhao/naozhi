@@ -200,6 +200,12 @@ type Sender interface {
 	AfterTurn(key string)
 	// Interrupt aborts the in-flight turn (ModeInterrupt's first follow-up).
 	Interrupt(key string) sessionview.InterruptOutcome
+	// PassthroughUnsupported reports that key's session is known not to
+	// take passthrough sends (an ACP or codex backend), so ModePassthrough
+	// queues its requests as ModeCollect does: a detached turn there would
+	// only wait on the session's send lock, unmerged and out of reach of
+	// Reset's discard. An unknown key reports false.
+	PassthroughUnsupported(key string) bool
 	// DiscardPending fails the session's in-flight passthrough sends.
 	DiscardPending(key string, reason error)
 	Reset(key string, discardOverride bool)
