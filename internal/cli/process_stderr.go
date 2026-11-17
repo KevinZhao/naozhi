@@ -17,9 +17,12 @@ const stderrSummaryRunes = 200
 // secret-redacted; nil when the CLI wrote none.
 func (p *Process) StderrTail() []string { return p.stderrTail.Lines() }
 
-// recordStderrLine keeps one live stderr line; line is already sanitized.
-func (p *Process) recordStderrLine(line string) {
-	p.stderrTail.Push(textutil.RedactSecrets(line))
+// recordStderrLine keeps one live stderr line, already sanitized, and returns
+// it as kept (secret-redacted) for whoever logs it.
+func (p *Process) recordStderrLine(line string) string {
+	line = textutil.RedactSecrets(line)
+	p.stderrTail.Push(line)
+	return line
 }
 
 // adoptExitStderrTail takes the tail a cli_exited frame carries and returns

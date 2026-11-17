@@ -218,3 +218,24 @@ func TestHandleShimCLIExited_DeathReason(t *testing.T) {
 		}
 	}
 }
+
+// A secret the CLI prints to stderr must not reach the debug log in plain
+// text: the tail is redacted, and so must be the line logged beside it.
+func TestHandleShimStderr_DebugLogRedacted(t *testing.T) {
+	p := newStderrTestProcess(t)
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	const secret = "sk-ant-api03-abcDEF123_xyz-456"
+	feedShim(t, p, log, `{"type":"stderr","line":"mcp: token `+secret+` rejected"}`)
+
+	recs := logRecords(t, &buf, "cli stderr")
+	if len(recs) != 1 {
+		t.Fatalf("cli stderr records = %d, want 1; log:\n%s", len(recs), buf.String())
+	}
+	if line, _ := recs[0]["line"].(string); strings.Contains(line, secret) || !strings.Contains(line, "[REDACTED]") {
+		t.Errorf("debug line = %q, want the secret redacted", line)
+	}
+	if tail := p.StderrTail(); len(tail) != 1 || strings.Contains(tail[0], secret) {
+		t.Errorf("StderrTail = %q, want one redacted line", tail)
+	}
+}

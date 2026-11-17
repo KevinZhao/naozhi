@@ -272,9 +272,10 @@ func (p *Process) handleShimMessage(msg shimMsg, log *slog.Logger) shimDispatchO
 		return p.handleShimStdout(msg, log)
 
 	case "stderr":
-		line := sanitizeStderrLine(msg.Line)
+		// Logged as recorded: redacted, since the CLI or an MCP server may echo
+		// a token to stderr and the debug log would keep it in plain text.
+		line := p.recordStderrLine(sanitizeStderrLine(msg.Line))
 		log.Debug("cli stderr", "line", line)
-		p.recordStderrLine(line)
 
 	case "cli_exited":
 		p.handleShimCLIExited(msg, log)
