@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -735,16 +736,65 @@ var discordHTTPClient = &http.Client{
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	},
-	Transport: &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           blockPrivateDial(),
+	Transport: newCDNTransport(http.ProxyFromEnvironment),
+}
+
+// newCDNTransport is the CDN download transport going through proxy (nil
+// for none). The guard is for the CDN host; the operator's proxy, often on
+// loopback or the LAN, is dialed as it is (cdnDial).
+func newCDNTransport(proxy func(*http.Request) (*url.URL, error)) *http.Transport {
+	return &http.Transport{
+		Proxy:                 proxy,
+		DialContext:           cdnDial(proxy),
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 15 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-	},
+	}
+}
+
+// cdnDial dials the address proxy names for the CDN hosts without the
+// reserved-IP check, and every other address through blockPrivateDial.
+// net/http dials the proxy through the same DialContext as a direct
+// connection, and a proxy is the operator's own: refusing a loopback or LAN
+// proxy would fail every download while the gateway and REST, which honour
+// the same proxy, work. Through a proxy the CDN host is resolved there.
+func cdnDial(proxy func(*http.Request) (*url.URL, error)) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	guarded := blockPrivateDial()
+	dialer := &net.Dialer{Timeout: 15 * time.Second}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if isProxyAddr(proxy, addr) {
+			return dialer.DialContext(ctx, network, addr)
+		}
+		return guarded(ctx, network, addr)
+	}
+}
+
+// proxyDefaultPorts are net/http's default ports per proxy scheme.
+var proxyDefaultPorts = map[string]string{"http": "80", "https": "443", "socks5": "1080", "socks5h": "1080"}
+
+// isProxyAddr reports whether addr is the host:port proxy sends a download
+// from a CDN host through, as net/http dials it.
+func isProxyAddr(proxy func(*http.Request) (*url.URL, error), addr string) bool {
+	if proxy == nil {
+		return false
+	}
+	for host := range discordCDNHosts {
+		u, err := proxy(&http.Request{URL: &url.URL{Scheme: "https", Host: host}})
+		if err != nil || u == nil || u.Hostname() == "" {
+			continue
+		}
+		port := u.Port()
+		if port == "" {
+			port = proxyDefaultPorts[u.Scheme]
+		}
+		if net.JoinHostPort(u.Hostname(), port) == addr {
+			return true
+		}
+	}
+	return false
 }
 
 // discordCDNHosts is the set of trusted Discord CDN domains for attachment downloads.
