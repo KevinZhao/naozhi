@@ -2230,7 +2230,7 @@ func (r *Runner) halt(h Halt) (string, error) {
 	case r.putAway(key):
 		return "", errors.New("已经收起，没有在做事，不用叫停")
 	}
-	waiting := r.cfg.Asking != nil && r.cfg.Asking(key) || r.openSource(ReportSource(key))
+	waiting := r.cfg.Asking != nil && r.cfg.Asking(key) || r.awaitsAnswer(key)
 	switch err := r.cfg.Custody.Halt(key, h.Why); {
 	case errors.Is(err, custody.ErrNoSession):
 		return "", blockError{fmt.Errorf("找不到会话 %q（填 index.json 里本机会话的 key；远程节点的会话由那个节点的 Planner 叫停，请用户在 Planner 页切到那个节点说）", key)}
@@ -2247,6 +2247,27 @@ func (r *Runner) halt(h Halt) (string, error) {
 	}
 	r.cfg.StopProcess(key)
 	return "", nil
+}
+
+// awaitsAnswer reports whether session key's need_user question is open in
+// "等你" with no message from the user since it was last asked. The item
+// stays open until a turn the answer started ends, so while that turn runs
+// it is no sign of waiting: a halt then has to close the process, or the
+// session goes on to do what the user asked to stop. Without UserSent no
+// answer is seen, and an open item counts as waiting.
+func (r *Runner) awaitsAnswer(key string) bool {
+	src := ReportSource(key)
+	if !r.openSource(src) {
+		return false
+	}
+	if r.cfg.UserSent == nil {
+		return true
+	}
+	var asked time.Time
+	if m, ok := r.cfg.Sessions.Get(key); ok && m.Report != nil && m.Report.State == ReportNeedUser {
+		asked = m.Report.At
+	}
+	return !r.answered(key, src, asked)
 }
 
 // openSource reports whether an item of source src is open in "等你".

@@ -1839,7 +1839,7 @@ halt 不造新状态，用托管已有的血缘链停（`stopLocked`，`custody.
 
 其余规则：
 - **能叫停的**：本机 `task:` 会话；本机你开的、被观察的会话（D104），包括飞书 / Slack 等 IM 会话（`StopSession` 对任何 key 都能用，`watchable` 也不排除它们）。`planner:main`、`cron:`、`scratch:`、`sys:`、`scout:`、`reader:`、远程节点的会话拒收：远程的在 Planner 页切到那个节点、和它的 Planner 说（D96 / D97）。已收起的回执写"已经收起，没有在做事，不用叫停"。
-- **已经在等你的**：会话有没回答的 AskUserQuestion（`reap` 的 `Asking`），或它的 need_user 卡（`ReportSource(key)`）在"等你"里开着时，只停托管、**不关进程**，回执写"它已经在等用户回答，网关只停了托管，没有关进程"。关掉它会让你在卡上的回答送给一个死进程。
+- **已经在等你的**：会话有没回答的 AskUserQuestion（`reap` 的 `Asking`），或它的 need_user 卡（`ReportSource(key)`）在"等你"里开着、你还没在会话里回它时，只停托管、**不关进程**，回执写"它已经在等用户回答，网关只停了托管，没有关进程"。关掉它会让你在卡上的回答送给一个死进程。你回了以后卡要等那一轮结束才关，这时会话正照你的回答在做，照常关进程。
 - **恢复**：你在会话里亲自发一条消息（`takenOver`，`custody.go:1001`；`LastUser` 只认 `Source == ""`）。relay 照旧送达（那是你的原话，D98），但不解除托管停；提示词让 Planner 别用 relay 去恢复。不做自动超时解除。
 - **回执**：`checkEnded` 遇到托管已停的会话（`custody.Engine` 状态为已停），不补"这一轮已经结束，没有写汇报块"的回执，被截断的那一轮与 `Gone` 的"进程被停止"同样不补。汇报块照常转。
 - **任务状态**：halt 不改任务状态，没标完成就不会被收起；你要它不做了，在同一轮里说，Planner 用 cancel。
