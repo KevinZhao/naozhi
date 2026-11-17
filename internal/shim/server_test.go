@@ -678,6 +678,29 @@ func TestResetIdleTimer_TriggersAfterDuration(t *testing.T) {
 	}
 }
 
+// Run's select keeps the channel idleC gave it when it was entered; a reset
+// on detach must arm that same channel, both when the timer was still pending
+// and when it already fired while a client was attached.
+func TestResetIdleTimer_FiresOnChannelHeldBeforeReset(t *testing.T) {
+	s := makeShimServerForTest(t)
+	s.resetIdleTimer(time.Hour)
+	held := s.idleC()
+
+	s.resetIdleTimer(20 * time.Millisecond) // detach while pending
+	select {
+	case <-held:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reset of a pending timer never fired on the held channel")
+	}
+
+	s.resetIdleTimer(20 * time.Millisecond) // detach after it fired attached
+	select {
+	case <-held:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reset of a fired timer never fired on the held channel")
+	}
+}
+
 func TestIdleC_NilTimer(t *testing.T) {
 	s := makeShimServerForTest(t)
 	s.mu.Lock()

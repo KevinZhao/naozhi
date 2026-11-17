@@ -379,18 +379,17 @@ func (s *shimServer) idleC() <-chan time.Time {
 	return s.idleTimer.C
 }
 
+// resetIdleTimer re-arms the one idle timer in place. Run's select holds the
+// channel idleC returned when it was entered and is not woken by a reset, so
+// swapping in a new timer would leave it on a dead channel and idle_timeout
+// would never fire after a detach. Reset keeps C, and since Go 1.23 it also
+// discards a value the timer had already sent.
 func (s *shimServer) resetIdleTimer(d time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.idleTimer != nil {
-		// Drain if Stop returns false so a stale idle event cannot bleed into
-		// the next reset cycle (pre-1.23 toolchains; belt-and-suspenders now).
-		if !s.idleTimer.Stop() {
-			select {
-			case <-s.idleTimer.C:
-			default:
-			}
-		}
+		s.idleTimer.Reset(d)
+		return
 	}
 	s.idleTimer = time.NewTimer(d)
 }
