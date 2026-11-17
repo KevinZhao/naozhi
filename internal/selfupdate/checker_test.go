@@ -254,3 +254,126 @@ func TestNotify_Concurrent(t *testing.T) {
 		t.Errorf("expected 10 notices, got %d", n)
 	}
 }
+
+// The periodic check in the staged state must not install a still newer
+// release: Replace would back the never-run staged binary up over the backup
+// holding the running version, the only one known to boot (RFC §1.3, G7).
+// Reaching doInstall shows as PhaseFailed and a failure notice — the stubbed
+// release has no asset URL, so its download fails before any connection.
+func TestCheckOnce_StagedDoesNotReplaceAgain(t *testing.T) {
+	for _, mode := range []Mode{ModeDownload, ModeAuto} {
+		t.Run(string(mode), func(t *testing.T) {
+			withStubbedLatest(t, func(context.Context) (*Release, error) {
+				return &Release{Tag: "v1.2.0"}, nil
+			})
+			withStubbedOnDiskVersion(t, "v1.1.0", true)
+			restarts := withNoManagedService(t)
+			var notices []string
+			st := NewStatus("v1.0.0")
+			c := NewChecker(CheckerConfig{
+				CurrentVersion: "v1.0.0",
+				Mode:           mode,
+				Interval:       time.Hour,
+				Status:         st,
+				Notify:         func(s string) { notices = append(notices, s) },
+			})
+			// An earlier tick of this process installed v1.1.0; nobody restarted.
+			c.installed = "v1.1.0"
+			st.notePhase(PhaseStaged, "v1.1.0", nil)
+
+			_ = c.checkOnce(context.Background())
+
+			snap := st.Snapshot()
+			if snap.Phase != PhaseStaged || snap.Staged != "v1.1.0" {
+				t.Errorf("phase = %q staged = %q, want %q v1.1.0: the tick went on to install v1.2.0 over the staged binary", snap.Phase, snap.Staged, PhaseStaged)
+			}
+			if len(notices) != 0 {
+				t.Errorf("notices = %v, want none: the tick tried to install over the staged binary", notices)
+			}
+			if n := restarts(); n != 0 {
+				t.Errorf("RestartServiceNoWait called %d times, want 0", n)
+			}
+			if c.installed != "v1.1.0" {
+				t.Errorf("installed = %q, want v1.1.0", c.installed)
+			}
+		})
+	}
+}
+
+// `naozhi upgrade` from a shell stages the binary without this process knowing
+// (`installed` stays empty); the on-disk probe has to stop the tick the same
+// way, and the staged version is recorded so the dashboard offers a restart.
+func TestCheckOnce_ShellStagedOnDiskDoesNotReplace(t *testing.T) {
+	for _, latest := range []string{"v1.1.0", "v1.2.0"} {
+		t.Run(latest, func(t *testing.T) {
+			withStubbedLatest(t, func(context.Context) (*Release, error) {
+				return &Release{Tag: latest}, nil
+			})
+			withStubbedOnDiskVersion(t, "v1.1.0", true)
+			var notices []string
+			st := NewStatus("v1.0.0")
+			c := NewChecker(CheckerConfig{
+				CurrentVersion: "v1.0.0",
+				Mode:           ModeDownload,
+				Interval:       time.Hour,
+				Status:         st,
+				Notify:         func(s string) { notices = append(notices, s) },
+			})
+
+			_ = c.checkOnce(context.Background())
+
+			if snap := st.Snapshot(); snap.Phase != PhaseStaged || snap.Staged != "v1.1.0" {
+				t.Errorf("phase = %q staged = %q, want %q v1.1.0", snap.Phase, snap.Staged, PhaseStaged)
+			}
+			if len(notices) != 0 {
+				t.Errorf("notices = %v, want none: the tick tried to install over the binary staged on disk", notices)
+			}
+			if c.installed != "v1.1.0" {
+				t.Errorf("installed = %q, want v1.1.0 so later ticks stop before the probe", c.installed)
+			}
+		})
+	}
+}
+
+// An older binary on disk is not staged (a restart would downgrade), and the
+// tick still does not replace it.
+func TestCheckOnce_OlderOnDiskNotRecordedAsStaged(t *testing.T) {
+	withStubbedLatest(t, func(context.Context) (*Release, error) {
+		return &Release{Tag: "v1.2.0"}, nil
+	})
+	withStubbedOnDiskVersion(t, "v0.9.0", true)
+	st := NewStatus("v1.0.0")
+	c := NewChecker(CheckerConfig{
+		CurrentVersion: "v1.0.0",
+		Mode:           ModeDownload,
+		Interval:       time.Hour,
+		Status:         st,
+	})
+	_ = c.checkOnce(context.Background())
+	if snap := st.Snapshot(); snap.Staged != "" || snap.Phase == PhaseFailed {
+		t.Errorf("phase = %q staged = %q, want nothing staged and no install attempt", snap.Phase, snap.Staged)
+	}
+	if c.installed != "" {
+		t.Errorf("installed = %q, want empty", c.installed)
+	}
+}
+
+// With the on-disk binary still the running version the tick installs as
+// before (and here fails at the download, which is all that is asserted).
+func TestCheckOnce_SameOnDiskInstalls(t *testing.T) {
+	withStubbedLatest(t, func(context.Context) (*Release, error) {
+		return &Release{Tag: "v1.2.0"}, nil
+	})
+	withStubbedOnDiskVersion(t, "v1.0.0", true)
+	st := NewStatus("v1.0.0")
+	c := NewChecker(CheckerConfig{
+		CurrentVersion: "v1.0.0",
+		Mode:           ModeDownload,
+		Interval:       time.Hour,
+		Status:         st,
+	})
+	_ = c.checkOnce(context.Background())
+	if snap := st.Snapshot(); snap.Phase != PhaseFailed {
+		t.Errorf("phase = %q, want %q: the install path was not entered", snap.Phase, PhaseFailed)
+	}
+}

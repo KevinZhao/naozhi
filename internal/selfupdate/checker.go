@@ -343,10 +343,34 @@ func (c *Checker) installedTag() string {
 // installLocked runs doInstall under installMu, re-checking the
 // already-installed short-circuit inside the lock — checkOnce's earlier read
 // is only an optimisation; this one cannot be raced into a second Replace().
+//
+// It also refuses to install over a staged binary, as InstallLatest does: the
+// backup then holds the running version, the only one known to boot, and a
+// second Replace would back the never-run staged binary up over it
+// (docs/rfc/dashboard-update-notice.md §1.3, G7). The newer release waits for
+// the restart; the process it starts installs it.
 func (c *Checker) installLocked(ctx context.Context, rel *Release, restart bool) error {
 	c.installMu.Lock()
 	defer c.installMu.Unlock()
 	if rel.Tag == c.installed {
+		return ErrNothingToDo
+	}
+	if c.installed != "" && c.installed != c.cfg.CurrentVersion {
+		slog.Info("auto-update: newer release waits for the restart of the staged binary",
+			"latest", rel.Tag, "staged", c.installed, "current", c.cfg.CurrentVersion)
+		return ErrNothingToDo
+	}
+	// `installed` only remembers THIS process; a `naozhi upgrade` from a shell
+	// stages the binary without it.
+	if onDisk, ok := onDiskVersionFn(); ok && onDisk != c.cfg.CurrentVersion {
+		slog.Info("auto-update: binary on disk differs from the running one, not replacing it",
+			"latest", rel.Tag, "on_disk", onDisk, "current", c.cfg.CurrentVersion)
+		// Only a newer one is staged; recording an older one would offer a
+		// restart into a downgrade.
+		if semverGreater(onDisk, c.cfg.CurrentVersion) {
+			c.installed = onDisk
+			c.cfg.Status.notePhase(PhaseStaged, onDisk, nil)
+		}
 		return ErrNothingToDo
 	}
 	return c.doInstall(ctx, rel, restart)
