@@ -1,7 +1,7 @@
 // Package github writes the registered repositories' GitHub issues where
 // the Planner reads (docs/rfc/planner.md §15.14 ⑤, D116): every hour, for
 // each workspace on this node whose git remote is on GitHub, the open issues
-// and those closed in the last 7 days go to planner/github/<owner>-<repo>.md
+// and those closed in the last 7 days go to planner/github/<owner>+<repo>.md
 // as number, title, labels and update time. The Planner has no network tool,
 // so the gateway runs gh for it; no model is involved. A failed gh run keeps
 // the old file and says since when it is stale.
@@ -107,8 +107,13 @@ type Repo struct {
 	Workspaces []string
 }
 
-// File is the repository's file name under planner/github.
-func (r Repo) File() string { return r.Owner + "-" + r.Name + ".md" }
+// File is the repository's file name under planner/github. The separator is
+// '+' because neither owner nor name ever holds one (ParseRemote takes
+// [A-Za-z0-9_.-] only): both may hold '-', and an Enterprise Managed User
+// owner holds '_' (kevin_amzn), so with either between them foo-bar/baz and
+// foo/bar-baz, or a_b/c and a/b_c, would share one file and one
+// repository's issues would overwrite the other's every hour.
+func (r Repo) File() string { return r.Owner + "+" + r.Name + ".md" }
 
 // Issue is one issue as listed.
 type Issue struct {
@@ -236,8 +241,9 @@ func (w *Writer) list(ctx context.Context, dir string, args ...string) ([]Issue,
 	return issues, nil
 }
 
-// fileRe is a file Refresh writes.
-var fileRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+-[A-Za-z0-9_.-]+\.md$`)
+// fileRe is a file Refresh writes, or one of the <owner>-<repo>.md files
+// it wrote before the separator was '+', so they are pruned once.
+var fileRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+[-+][A-Za-z0-9_.-]+\.md$`)
 
 // prune removes the files of repositories not in repos.
 func (w *Writer) prune(repos []Repo) {
@@ -274,7 +280,8 @@ func (w *Writer) isFile(name, file string) bool {
 }
 
 // remoteRe matches a GitHub remote URL's owner and repository: https, ssh
-// and scp-like forms.
+// and scp-like forms. Neither part takes '+', so Repo.File's separator
+// keeps file names apart.
 var remoteRe = regexp.MustCompile(`(?i)^(?:(?:https?|ssh|git)://(?:[^@/]+@)?github\.com(?::\d+)?/|[^@/]+@github\.com:)([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$`)
 
 // ParseRemote is a remote URL's GitHub owner and repository.
