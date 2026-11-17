@@ -16,6 +16,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
@@ -230,6 +231,11 @@ func (r *wsRelay) connect() error {
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", r.node.ID, err)
 	}
+	// gorilla's default read limit is none and ReadMessage buffers a whole
+	// message, so one huge frame from a faulty or compromised node (or a MITM
+	// on plain ws://) would exhaust the primary's memory; same ceiling as the
+	// reverse and upstream links (#2084).
+	conn.SetReadLimit(limits.MaxStreamJSONLine)
 
 	if err := conn.WriteJSON(ClientMsg{Type: string(wsproto.TypeAuth), Token: r.node.Token}); err != nil {
 		conn.Close()
