@@ -84,8 +84,10 @@ func RestartService(ctx context.Context) error {
 // WITHOUT polling for active. It is the IN-PROCESS primitive: the caller is
 // the process being restarted, so an is-active poll would see us still active,
 // falsely confirm, and be killed mid-confirmation; Restart=always brings the
-// new binary up. No-op when the service does not manage THIS process. Indirected
-// through restartServiceNoWaitFn so tests can refuse the (self-killing) call.
+// new binary up. Returns ErrRestartUnsupported when no service manages THIS
+// process: a nil there left update.mode auto on PhaseRestarting forever with
+// the old binary running. Indirected through restartServiceNoWaitFn so tests
+// can refuse the (self-killing) call.
 func RestartServiceNoWait(ctx context.Context) error {
 	return restartServiceNoWaitFn(ctx)
 }
@@ -99,6 +101,9 @@ func restartServiceNoWait(context.Context) error {
 	case "linux":
 		return restartSystemdNoWait()
 	case "darwin":
+		if !ServiceManagesThisProcess() {
+			return ErrRestartUnsupported
+		}
 		return restartLaunchd()
 	default:
 		return fmt.Errorf("service restart not supported on %s — restart manually", runtime.GOOS)
@@ -110,7 +115,7 @@ func restartServiceNoWait(context.Context) error {
 // restart the system service and leave the caller stuck on "restarting".
 func restartSystemdNoWait() error {
 	if !ServiceManagesThisProcess() {
-		return nil
+		return ErrRestartUnsupported
 	}
 	if out, err := exec.Command(resolveTrustedBin("systemctl"), "restart", "--no-block", "naozhi").CombinedOutput(); err != nil {
 		return fmt.Errorf("systemctl restart --no-block naozhi: %w\n%s", err, out)

@@ -437,9 +437,10 @@ func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) err
 
 	// No outer ServiceRunning gate here: a stale "not running" read would skip
 	// the restart with c.installed already set, stranding a staged binary
-	// silently. RestartServiceNoWait is the single authority (and already a
-	// no-op when nothing manages us). The backup is DELIBERATELY kept: it is
-	// the only rollback artifact if the new binary fails to boot.
+	// silently. RestartServiceNoWait is the single authority: when nothing
+	// manages us it reports ErrRestartUnsupported, which the branch below turns
+	// into Staged + a manual-restart notice. The backup is DELIBERATELY kept: it
+	// is the only rollback artifact if the new binary fails to boot.
 	slog.Info("auto-update: triggering self-restart", "tag", rel.Tag, "backup_kept", backupPath)
 	c.cfg.Status.notePhase(PhaseRestarting, rel.Tag, nil)
 	c.notify(fmt.Sprintf("🔄 naozhi 正在自动升级到 %s 并重启…", rel.Tag))
