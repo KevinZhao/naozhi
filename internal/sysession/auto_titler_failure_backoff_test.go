@@ -2,6 +2,7 @@ package sysession
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -49,5 +50,41 @@ func TestAutoTitler_FailedRenameBacksOff(t *testing.T) {
 	}
 	if got := router.label(old.Key); got != "旧会话标题" {
 		t.Errorf("older session label = %q, want it titled on the second tick", got)
+	}
+}
+
+// flakyRunner fails its first call with an upstream (non-validation) error
+// and answers a valid title afterwards.
+type flakyRunner struct{ calls atomic.Int32 }
+
+func (r *flakyRunner) Run(_ context.Context, _ string) (string, error) {
+	if r.calls.Add(1) == 1 {
+		return "", errors.New("bedrock: 503 service unavailable")
+	}
+	return "恢复后的标题", nil
+}
+
+// TestAutoTitler_UpstreamFailureDoesNotHoldSession: a Runner failure is not
+// about the session, so it must not be recorded as a rename. An idle,
+// never-titled session is titled by the next tick once the upstream
+// recovers, without waiting for minUserTurns new user turns.
+func TestAutoTitler_UpstreamFailureDoesNotHoldSession(t *testing.T) {
+	t.Parallel()
+	idle := session.SessionSnapshot{Key: "feishu:direct:u1:general", MessageCount: 2, LastPrompt: "idle", LastActive: time.Now().UnixMilli()}
+	router := newSnapshotFakeRouter([]session.SessionSnapshot{idle})
+	runner := &flakyRunner{}
+	a, err := newAutoTitler(DaemonDeps{Router: wrapRouter(router), Runner: runner})
+	if err != nil {
+		t.Fatalf("newAutoTitler: %v", err)
+	}
+
+	if _, err := a.Tick(context.Background()); err == nil {
+		t.Fatal("first tick: want the upstream error")
+	}
+	if _, err := a.Tick(context.Background()); err != nil {
+		t.Fatalf("second tick: %v", err)
+	}
+	if got := router.label(idle.Key); got != "恢复后的标题" {
+		t.Errorf("label = %q after the upstream recovered, want the session titled (runner calls %d)", got, runner.calls.Load())
 	}
 }

@@ -3,6 +3,7 @@ package sysession
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -357,12 +358,15 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 			if firstErr == nil {
 				firstErr = err
 			}
-			// A failed attempt counts as a rename for the gates, unless the
-			// tick itself was cancelled: otherwise the same session, still
-			// the most recently active untitled one, is retried every tick,
-			// spending a call each time, starving the older ones, and an
-			// upstream failure tied to it trips the breaker for all.
-			if ctx.Err() == nil {
+			// A rejected result counts as a rename for the gates: the same
+			// content would be rejected again, and the session, still the
+			// most recently active untitled one, would be retried every
+			// tick, spending a call each time and starving the older ones.
+			// A Runner failure (credentials, throttle, spawn) is not about
+			// the session: the Manager's breaker backs off, and marking the
+			// batch would hold never-titled sessions behind minUserTurns
+			// new turns long after the upstream recovered.
+			if errors.Is(err, ErrValidation) && ctx.Err() == nil {
 				pendingWrites[c.key] = autoTitlerHighwater{lastRenamedAt: now, lastRenameAtTurn: c.userTurnCount}
 			}
 			continue
