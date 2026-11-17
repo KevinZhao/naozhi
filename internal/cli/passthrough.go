@@ -368,6 +368,15 @@ func (p *Process) handleReplayEventLocked(ev clievent.Event) {
 		return
 	}
 
+	// A cross-session message is a turn of its own: the CLI never batches it
+	// with naozhi's stdin messages (it is isMeta), and its uuid is the CLI's.
+	// Sweeping would hand that turn's answer to a queued Send and leave the
+	// Send's own replay to sweep the next slot.
+	if ev.Peer != nil {
+		slog.Debug("passthrough: peer replay claims no slot", "uuid", ev.UUID, "peer", ev.Peer.Name)
+		return
+	}
+
 	// Merged replay: sweep every unclaimed pending slot.
 	claimed := 0
 	for _, s := range p.slots.pending {

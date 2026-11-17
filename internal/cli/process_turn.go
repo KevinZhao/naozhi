@@ -48,12 +48,31 @@ func resultFromEvent(ev clievent.Event) clievent.SendResult {
 	}
 }
 
+// findResultSnapshotHook, when set, runs between findResultSince's ring
+// snapshot and its orphan-mark read. Test-only seam: it lets a test land an
+// orphan in exactly that gap.
+var findResultSnapshotHook func()
+
 // findResultSince checks ring.EventLog for a result entry logged after afterMS; the
 // fallback when eventCh may have dropped events. The "result" entry carries
 // only cost + turn metadata (its Detail is empty to avoid a duplicate dashboard
 // bubble), so the reply text is recovered from the preceding "text" entry (#1805).
+// An orphaned result can land after afterMS (an abort slower than the settle
+// window); it never reaches eventCh, so the scan starts past it.
 func (p *Process) findResultSince(afterMS int64) *clievent.SendResult {
 	entries := p.eventLog.EntriesSince(afterMS)
+	if findResultSnapshotHook != nil {
+		findResultSnapshotHook()
+	}
+	// The mark is read after the snapshot: readLoop stores it before it appends
+	// the orphan, so a snapshot holding an orphan always meets a mark covering
+	// it. Read first, an orphan landing in between would pass as this answer.
+	orphanMS := p.turn.orphanResultMS.Load()
+	k := 0
+	for k < len(entries) && entries[k].Time <= orphanMS {
+		k++
+	}
+	entries = entries[k:]
 	for i := len(entries) - 1; i >= 0; i-- {
 		if entries[i].Type != clievent.KindResult {
 			continue
