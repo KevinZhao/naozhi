@@ -172,6 +172,7 @@ type Status struct {
 // Inbox is where custody leaves a session to the user (notify.Notifier).
 type Inbox interface {
 	Add(it notify.Item) (notify.Item, bool)
+	CloseSource(source string, by notify.Closer)
 }
 
 // Config wires an Engine. Sessions and Send are required for custody to do
@@ -1023,25 +1024,41 @@ func (e *Engine) woke() {
 
 // takenOver starts afresh each stopped lineage the user sent a message to
 // since it stopped: their message is progress (§15.9 ④), so the stop and
-// the count go, the switch stays as it was.
+// the count go, the switch stays as it was. The "托管已停" item stopLocked
+// left goes with the stop, and also once the task is done: either way the
+// session is no longer waiting on the user, and a stale item would hold the
+// inbox count up (#3972).
 func (e *Engine) takenOver() {
-	if e.cfg.LastUser == nil {
-		return
-	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, m := range e.cfg.Sessions.List() {
-		if e.eligible(m.Key) != nil {
-			continue
-		}
 		root := e.root(m.Key)
 		c := e.chain(root)
-		if c.Stopped == "" || !e.cfg.LastUser(m.Key).After(c.StoppedAt) {
+		if c.Stopped == "" {
+			continue
+		}
+		// Checked before eligibility: custody turns itself off for a done
+		// task, which would otherwise leave its item open for good.
+		if m.Mark != nil && task.State(m.Mark.State) == task.Done {
+			e.closeStopItem(root)
+			continue
+		}
+		if e.cfg.LastUser == nil || e.eligible(m.Key) != nil || !e.cfg.LastUser(m.Key).After(c.StoppedAt) {
 			continue
 		}
 		if _, err := e.cfg.Sessions.Update(root, func(m *sidecar.Meta) bool { m.Chain = nil; return true }); err != nil {
 			slog.Warn("custody: a lineage the user took over not started afresh", "key", root, "err", err)
+			continue
 		}
+		e.closeStopItem(root)
+	}
+}
+
+// closeStopItem closes the question stopLocked opened for root's lineage,
+// if it is still open (a failure's item is notify's to close).
+func (e *Engine) closeStopItem(root string) {
+	if e.cfg.Inbox != nil {
+		e.cfg.Inbox.CloseSource("custody:"+root, notify.ClosedByAuto)
 	}
 }
 
