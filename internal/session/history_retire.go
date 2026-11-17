@@ -108,6 +108,33 @@ func (h *HistoryIO) bindUnlessRetired(s *ManagedSession, log *ring.EventLog, key
 	h.bindPersistSink(log, key)
 }
 
+// moveSinkOnRename rebinds a renamed session's process to newKey's event log,
+// the one fresh's history source, Remove and the taint deny rules all read;
+// left on the old key, every event after the rename would land in a log no
+// session owns. old is marked retired in the same critical section, so a bind
+// for it still pending (a spawn's installPersistSink) cannot take the sink
+// back. Called inside the rename's table transaction (retireMu is a leaf).
+func (h *HistoryIO) moveSinkOnRename(old, fresh *ManagedSession, proc processIface, newKey string) {
+	holder, ok := proc.(eventLogHolder)
+	if !ok || h.persister == nil {
+		return
+	}
+	log := holder.EventLog()
+	if log == nil {
+		return
+	}
+	h.retireMu.Lock()
+	defer h.retireMu.Unlock()
+	if old.historyRetired {
+		return
+	}
+	old.historyRetired = true
+	if fresh.historyRetired {
+		return
+	}
+	h.bindPersistSink(log, newKey)
+}
+
 // retireKeyHistory drops a removed session's event log and attachment refs
 // (an Archive keeps both, keepHistory),
 // first detaching its process's persist sink so the dying process cannot
