@@ -370,6 +370,12 @@ func (c *Checker) installLocked(ctx context.Context, rel *Release, restart bool)
 		if semverGreater(onDisk, c.cfg.CurrentVersion) {
 			c.installed = onDisk
 			c.cfg.Status.notePhase(PhaseStaged, onDisk, nil)
+			// update.mode auto restarts on its own; without this a binary staged
+			// from a shell would wait for a manual restart, since later ticks
+			// stop at `installed`. restartOnly touches no binary.
+			if restart {
+				return c.restartOnly(ctx, onDisk)
+			}
 		}
 		return ErrNothingToDo
 	}
@@ -435,30 +441,38 @@ func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) err
 		return nil
 	}
 
-	// No outer ServiceRunning gate here: a stale "not running" read would skip
-	// the restart with c.installed already set, stranding a staged binary
-	// silently. RestartServiceNoWait is the single authority: when nothing
-	// manages us it reports ErrRestartUnsupported, which the branch below turns
-	// into Staged + a manual-restart notice. The backup is DELIBERATELY kept: it
-	// is the only rollback artifact if the new binary fails to boot.
-	slog.Info("auto-update: triggering self-restart", "tag", rel.Tag, "backup_kept", backupPath)
-	c.cfg.Status.notePhase(PhaseRestarting, rel.Tag, nil)
-	c.notify(fmt.Sprintf("🔄 naozhi 正在自动升级到 %s 并重启…", rel.Tag))
-	if err := RestartServiceNoWait(ctx); err != nil {
-		// Installed and verified; only the trigger failed. Do NOT roll back.
-		slog.Warn("auto-update: restart trigger failed (binary IS installed)", "tag", rel.Tag, "err", err)
-		// Staged (with LastErr), not Failed: Failed would invite a retry of an
-		// install that already completed — the backup-destroying path.
-		c.cfg.Status.notePhase(PhaseStaged, rel.Tag, err)
-		how := "请手动重启 naozhi。"
-		if cmd := manualRestartCommand(); cmd != "" {
-			how = fmt.Sprintf("请手动 `%s`。", cmd)
+	// The backup is DELIBERATELY kept: it is the only rollback artifact if the
+	// new binary fails to boot.
+	return c.restartAfterInstall(ctx, rel.Tag, backupPath)
+}
+
+// restartAfterInstall triggers the restart that makes a just-installed tag
+// take effect. The ServiceManagesThisProcess check comes before the
+// "restarting" notice: an unmanaged process was told it was restarting and, in
+// the next notice, that it was not. Its false verdict is not silent — it takes
+// the failure branch (Staged + LastErr + a manual-restart notice).
+func (c *Checker) restartAfterInstall(ctx context.Context, tag, backupPath string) error {
+	err := ErrRestartUnsupported
+	if ServiceManagesThisProcess() {
+		slog.Info("auto-update: triggering self-restart", "tag", tag, "backup_kept", backupPath)
+		c.cfg.Status.notePhase(PhaseRestarting, tag, nil)
+		c.notify(fmt.Sprintf("🔄 naozhi 正在自动升级到 %s 并重启…", tag))
+		if err = RestartServiceNoWait(ctx); err == nil {
+			// Restart queued; this process is about to receive SIGTERM.
+			return nil
 		}
-		c.notify(fmt.Sprintf("⚠️ naozhi %s 已安装但重启触发失败：%v。%s", rel.Tag, err, how))
-		return err
 	}
-	// Restart queued; this process is about to receive SIGTERM.
-	return nil
+	// Installed and verified; only the trigger failed. Do NOT roll back.
+	slog.Warn("auto-update: restart trigger failed (binary IS installed)", "tag", tag, "err", err)
+	// Staged (with LastErr), not Failed: Failed would invite a retry of an
+	// install that already completed — the backup-destroying path.
+	c.cfg.Status.notePhase(PhaseStaged, tag, err)
+	how := "请手动重启 naozhi。"
+	if cmd := manualRestartCommand(); cmd != "" {
+		how = fmt.Sprintf("请手动 `%s`。", cmd)
+	}
+	c.notify(fmt.Sprintf("⚠️ naozhi %s 已安装但重启触发失败：%v。%s", tag, err, how))
+	return err
 }
 
 // notify delivers a notice best-effort.

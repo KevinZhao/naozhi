@@ -3,6 +3,10 @@ package selfupdate
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -375,5 +379,136 @@ func TestCheckOnce_SameOnDiskInstalls(t *testing.T) {
 	_ = c.checkOnce(context.Background())
 	if snap := st.Snapshot(); snap.Phase != PhaseFailed {
 		t.Errorf("phase = %q, want %q: the install path was not entered", snap.Phase, PhaseFailed)
+	}
+}
+
+// withManagedService makes ServiceManagesThisProcess true on linux (unit
+// active, MainPID ours) and darwin (a verified launchd job running this test
+// binary), and stubs the restart primitive so nothing on the host restarts.
+func withManagedService(t *testing.T) (restarts func() int) {
+	t.Helper()
+	switch runtime.GOOS {
+	case "linux":
+		withStubbedUnitActive(t, func() bool { return true })
+		withStubbedMainPID(t, os.Getpid())
+	case "darwin":
+		self, err := SelfPath()
+		if err != nil {
+			t.Skipf("SelfPath unavailable: %v", err)
+		}
+		const label = "com.naozhi.agent"
+		t.Setenv(xpcServiceNameEnv, label)
+		withFakeExec(t, &fakeExec{t: t, listOut: fmt.Sprintf("{\n\t\"Label\" = %q;\n\t\"PID\" = 1552;\n\t\"Program\" = %q;\n};", label, self)})
+	default:
+		t.Skipf("no managed service on %s", runtime.GOOS)
+	}
+	if !ServiceManagesThisProcess() {
+		t.Fatal("stubs did not make the process look managed")
+	}
+	return withStubbedRestartNoWait(t, nil)
+}
+
+// update.mode auto restarts on its own: a binary staged from a shell
+// (`naozhi upgrade --no-restart`, or one that found the service "not running")
+// must be restarted into by the tick, not left until someone restarts by hand.
+// Only the restart is triggered, never a second Replace.
+func TestCheckOnce_AutoRestartsIntoShellStagedBinary(t *testing.T) {
+	for _, latest := range []string{"v1.1.0", "v1.2.0"} {
+		t.Run(latest, func(t *testing.T) {
+			withStubbedLatest(t, func(context.Context) (*Release, error) {
+				return &Release{Tag: latest}, nil
+			})
+			withStubbedOnDiskVersion(t, "v1.1.0", true)
+			restarts := withManagedService(t)
+			var notices []string
+			st := NewStatus("v1.0.0")
+			c := NewChecker(CheckerConfig{
+				CurrentVersion: "v1.0.0",
+				Mode:           ModeAuto,
+				Interval:       time.Hour,
+				Status:         st,
+				Notify:         func(s string) { notices = append(notices, s) },
+			})
+
+			_ = c.checkOnce(context.Background())
+
+			if n := restarts(); n != 1 {
+				t.Errorf("RestartServiceNoWait called %d times, want 1: auto mode left the shell-staged v1.1.0 waiting for a manual restart", n)
+			}
+			if snap := st.Snapshot(); snap.Phase != PhaseRestarting || snap.Staged != "v1.1.0" {
+				t.Errorf("phase = %q staged = %q, want %q v1.1.0", snap.Phase, snap.Staged, PhaseRestarting)
+			}
+			for _, n := range notices {
+				if strings.Contains(n, "失败") {
+					t.Errorf("notice %q: the tick went on to install instead of restarting", n)
+				}
+			}
+		})
+	}
+}
+
+// An auto install in a process no service manages must not first announce a
+// restart and then, in the next notice, that the restart failed: one notice,
+// the manual-restart one, with Staged + ErrRestartUnsupported for the UI.
+func TestRestartAfterInstall_UnmanagedSendsOnlyManualNotice(t *testing.T) {
+	switch runtime.GOOS {
+	case "linux":
+	case "darwin":
+		t.Setenv(xpcServiceNameEnv, "com.naozhi.agent")
+		withFakeExec(t, &fakeExec{t: t, listFail: true})
+	default:
+		t.Skipf("no managed service on %s", runtime.GOOS)
+	}
+	restarts := withNoManagedService(t)
+	var notices []string
+	st := NewStatus("v1.0.0")
+	c := NewChecker(CheckerConfig{
+		CurrentVersion: "v1.0.0",
+		Mode:           ModeAuto,
+		Interval:       time.Hour,
+		Status:         st,
+		Notify:         func(s string) { notices = append(notices, s) },
+	})
+
+	err := c.restartAfterInstall(context.Background(), "v1.2.0", "/x.bak")
+
+	if !errors.Is(err, ErrRestartUnsupported) {
+		t.Errorf("err = %v, want ErrRestartUnsupported", err)
+	}
+	if n := restarts(); n != 0 {
+		t.Errorf("RestartServiceNoWait called %d times with no managed service", n)
+	}
+	if len(notices) != 1 || !strings.Contains(notices[0], "重启触发失败") {
+		t.Errorf("notices = %q, want only the manual-restart notice", notices)
+	}
+	if snap := st.Snapshot(); snap.Phase != PhaseStaged || snap.Staged != "v1.2.0" || !strings.Contains(snap.LastErr, ErrRestartUnsupported.Error()) {
+		t.Errorf("phase = %q staged = %q lastErr = %q, want Staged v1.2.0 with ErrRestartUnsupported", snap.Phase, snap.Staged, snap.LastErr)
+	}
+}
+
+// With a managed service the restart is announced and triggered once.
+func TestRestartAfterInstall_ManagedAnnouncesAndRestarts(t *testing.T) {
+	restarts := withManagedService(t)
+	var notices []string
+	st := NewStatus("v1.0.0")
+	c := NewChecker(CheckerConfig{
+		CurrentVersion: "v1.0.0",
+		Mode:           ModeAuto,
+		Interval:       time.Hour,
+		Status:         st,
+		Notify:         func(s string) { notices = append(notices, s) },
+	})
+
+	if err := c.restartAfterInstall(context.Background(), "v1.2.0", "/x.bak"); err != nil {
+		t.Fatalf("restartAfterInstall: %v", err)
+	}
+	if n := restarts(); n != 1 {
+		t.Errorf("RestartServiceNoWait called %d times, want 1", n)
+	}
+	if len(notices) != 1 || !strings.Contains(notices[0], "并重启") {
+		t.Errorf("notices = %q, want only the restarting notice", notices)
+	}
+	if snap := st.Snapshot(); snap.Phase != PhaseRestarting {
+		t.Errorf("phase = %q, want %q", snap.Phase, PhaseRestarting)
 	}
 }
