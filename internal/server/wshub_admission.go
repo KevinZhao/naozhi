@@ -94,7 +94,14 @@ func newConnAdmission(opts HubOptions) *connAdmission {
 	a.upgrader = websocket.Upgrader{
 		// Shared with the HTTP CSRF gate so both stay in lockstep (empty
 		// Origin permitted, "null" rejected, X-Forwarded-Host under trustedProxy).
-		CheckOrigin:     func(r *http.Request) bool { return auth.SameOriginOK(r, a.trustedProxy) },
+		// Without a token the upgrade is the whole auth, so the host must not
+		// be a DNS-rebound name either (as auth.Handlers.IsAuthenticated).
+		CheckOrigin: func(r *http.Request) bool {
+			if a.dashToken == "" && !auth.UnboundHostOK(auth.RequestHost(r, a.trustedProxy)) {
+				return false
+			}
+			return auth.SameOriginOK(r, a.trustedProxy)
+		},
 		ReadBufferSize:  8192,
 		WriteBufferSize: 8192,
 	}

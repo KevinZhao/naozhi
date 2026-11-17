@@ -12,7 +12,7 @@ import (
 func TestTranscript_RouteIsRegistered(t *testing.T) {
 	t.Parallel()
 	srv := newTestServerWithScheduler(&mockPlatform{})
-	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+strings.Repeat("a", 16)+"/transcript?job_id="+strings.Repeat("b", 16), nil)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/cron/runs/"+strings.Repeat("a", 16)+"/transcript?job_id="+strings.Repeat("b", 16), nil)
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
 	// Either 200 (lucky run hit) or 404 (no such run) — both prove

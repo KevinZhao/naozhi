@@ -32,7 +32,7 @@ func TestRotateCookieGen_InvalidatesOutstandingMAC(t *testing.T) {
 	}
 
 	// Pre-rotate: a request carrying the before-value cookie must auth.
-	req := httptest.NewRequest(http.MethodGet, "http://naozhi.example/api/whatever", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/whatever", nil)
 	req.AddCookie(&http.Cookie{Name: AuthCookieName, Value: before})
 	if !a.IsAuthenticated(req) {
 		t.Fatal("pre-rotate cookie did not authenticate — test setup broken")
@@ -49,7 +49,7 @@ func TestRotateCookieGen_InvalidatesOutstandingMAC(t *testing.T) {
 	// Post-rotate: the same before-value cookie must NOT auth (the
 	// browser would still be carrying it; rotation's whole point is
 	// that those cookies are no longer good).
-	rejReq := httptest.NewRequest(http.MethodGet, "http://naozhi.example/api/whatever", nil)
+	rejReq := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/whatever", nil)
 	rejReq.AddCookie(&http.Cookie{Name: AuthCookieName, Value: before})
 	if a.IsAuthenticated(rejReq) {
 		t.Errorf("after RotateCookieGen, the pre-rotate cookie still authenticated — "+
@@ -58,7 +58,7 @@ func TestRotateCookieGen_InvalidatesOutstandingMAC(t *testing.T) {
 
 	// Sanity: the post-rotate cookie still authenticates so legitimate
 	// re-login isn't broken.
-	okReq := httptest.NewRequest(http.MethodGet, "http://naozhi.example/api/whatever", nil)
+	okReq := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/whatever", nil)
 	okReq.AddCookie(&http.Cookie{Name: AuthCookieName, Value: after})
 	if !a.IsAuthenticated(okReq) {
 		t.Error("post-rotate cookie failed to authenticate — RotateCookieGen broke the auth flow")
@@ -136,7 +136,7 @@ func TestIsAuthenticated_EmptyTokenRejectsForgedEmptyCookie(t *testing.T) {
 	}
 	// Sanity: the no-token short-circuit means a request with NO cookie
 	// is already accepted (the deployment chose "no auth").
-	noCookieReq := httptest.NewRequest(http.MethodGet, "http://naozhi.example/api/whatever", nil)
+	noCookieReq := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/whatever", nil)
 	if !a.IsAuthenticated(noCookieReq) {
 		t.Fatal("no-token deployment must accept requests with no cookie (top-level short-circuit broken)")
 	}
@@ -159,7 +159,7 @@ func TestIsAuthenticated_EmptyTokenRejectsForgedEmptyCookie(t *testing.T) {
 	// inner branch without the short-circuit gone) — this part of the
 	// test is best-effort context, not a stronger gate.
 	for _, val := range []string{"", "deadbeef", "x"} {
-		req := httptest.NewRequest(http.MethodGet, "http://naozhi.example/api/whatever", nil)
+		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/whatever", nil)
 		req.AddCookie(&http.Cookie{Name: AuthCookieName, Value: val})
 		if !a.IsAuthenticated(req) {
 			t.Errorf("no-token deployment must accept requests regardless of cookie %q (top-level short-circuit broken)", val)

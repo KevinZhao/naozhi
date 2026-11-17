@@ -92,7 +92,7 @@ func TestVendorRoutes_ServeEmbeddedTree(t *testing.T) {
 	types := map[string]string{".js": "application/javascript", ".css": "text/css; charset=utf-8", ".woff2": "font/woff2"}
 	for key := range keys {
 		w := httptest.NewRecorder()
-		srv.mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/static/"+key, nil))
+		srv.mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "http://127.0.0.1/static/"+key, nil))
 		if w.Code != http.StatusOK {
 			t.Errorf("GET /static/%s = %d, want 200", key, w.Code)
 			continue
@@ -109,7 +109,7 @@ func TestVendorRoutes_ServeEmbeddedTree(t *testing.T) {
 		if strings.HasSuffix(key, ".woff2") {
 			continue
 		}
-		req := httptest.NewRequest(http.MethodGet, "/static/"+key, nil)
+		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/static/"+key, nil)
 		req.Header.Set("Accept-Encoding", "gzip")
 		w = httptest.NewRecorder()
 		srv.mux.ServeHTTP(w, req)
@@ -140,14 +140,14 @@ func TestVendorRoutes_RejectOutsideTree(t *testing.T) {
 		"/static/dashboard.html",
 	} {
 		w := httptest.NewRecorder()
-		srv.mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, p, nil))
+		srv.mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "http://127.0.0.1"+p, nil))
 		if w.Code == http.StatusOK {
 			t.Errorf("GET %s = 200, want a miss", p)
 		}
 	}
 	// The dashboard's own stylesheets resolve through the same handler.
 	w := httptest.NewRecorder()
-	srv.mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/static/css/tokens.css", nil))
+	srv.mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "http://127.0.0.1/static/css/tokens.css", nil))
 	if w.Code != http.StatusOK || w.Header().Get("Content-Type") != "text/css; charset=utf-8" {
 		t.Errorf("GET /static/css/tokens.css = %d %q, want 200 text/css", w.Code, w.Header().Get("Content-Type"))
 	}
@@ -165,7 +165,7 @@ func TestVendorRoutes_RequireAuth(t *testing.T) {
 		"/static/vendor/mermaid-11.14.0/mermaid.min.js",
 	} {
 		w := httptest.NewRecorder()
-		srv.mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, p, nil))
+		srv.mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "http://127.0.0.1"+p, nil))
 		if w.Code != http.StatusUnauthorized {
 			t.Errorf("unauthenticated GET %s = %d, want 401", p, w.Code)
 		}

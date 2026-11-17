@@ -2,7 +2,9 @@ package auth
 
 import (
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 
@@ -68,6 +70,27 @@ func RequestHost(r *http.Request, trustedProxy bool) string {
 		}
 	}
 	return host
+}
+
+// UnboundHostOK reports whether host (RequestHost's answer, port optional)
+// cannot be a DNS-rebound name: an IP literal, or localhost and its
+// subdomains, which browsers resolve to loopback themselves. Without a
+// dashboard token this is the only thing keeping a page on evil.example,
+// rebound to 127.0.0.1, from being same-origin with the dashboard.
+func UnboundHostOK(host string) bool {
+	if host == "" {
+		return false
+	}
+	h := host
+	if hh, _, err := net.SplitHostPort(host); err == nil {
+		h = hh
+	}
+	h = strings.TrimSuffix(strings.TrimPrefix(h, "["), "]")
+	if _, err := netip.ParseAddr(h); err == nil {
+		return true
+	}
+	h = strings.TrimSuffix(strings.ToLower(h), ".")
+	return h == "localhost" || strings.HasSuffix(h, ".localhost")
 }
 
 // SameOriginOK reports whether the Origin (or Referer fallback) identifies the
