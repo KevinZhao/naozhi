@@ -226,6 +226,8 @@ type fakeSender struct {
 	panicEarly func(text string) bool
 	status     sessionview.SessionStatus
 	interrupt  sessionview.InterruptOutcome
+	// noPassthrough is what PassthroughUnsupported reports for every key.
+	noPassthrough bool
 
 	mu    sync.Mutex
 	sends []sendCall
@@ -280,6 +282,8 @@ func (s *fakeSender) Interrupt(key string) sessionview.InterruptOutcome {
 	s.rec.add("interrupt:%s", key)
 	return s.interrupt
 }
+
+func (s *fakeSender) PassthroughUnsupported(string) bool { return s.noPassthrough }
 
 func (s *fakeSender) DiscardPending(key string, reason error) {
 	s.rec.add("discardPending:%s:%v", key, reason)

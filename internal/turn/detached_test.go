@@ -46,6 +46,41 @@ func TestDetached_PassthroughModeRunsEachRequestAlone(t *testing.T) {
 	}
 }
 
+// TestDetached_PassthroughModeQueuesWhereUnsupported: on a key whose session
+// takes no passthrough sends (ACP / codex), ModePassthrough falls back to
+// collect: the follow-up queues behind the running turn instead of running
+// detached, so Reset discards it as DropReset rather than leaving it to fail
+// on the reset session.
+func TestDetached_PassthroughModeQueuesWhereUnsupported(t *testing.T) {
+	t.Parallel()
+	h := newHarness(8, ModePassthrough)
+	h.s.noPassthrough = true
+	release := h.hold()
+	adm := &fakeAdmission{rec: h.rec, async: true}
+	a, b := newOrigin(h.rec, "a", "im:x"), newOrigin(h.rec, "b", "im:x")
+
+	if ack := h.submit("m1", a, adm); ack != AckOwner {
+		t.Fatalf("Submit = %v, want AckOwner", ack)
+	}
+	h.rec.waitFor(t, "send:k:m1", 1)
+	if ack := h.submit("m2", b, adm); ack != AckQueued {
+		t.Fatalf("follow-up Submit = %v, want AckQueued", ack)
+	}
+	h.o.Reset(context.Background(), "k", false)
+	release()
+	adm.wg.Wait()
+
+	if got := h.rec.count("dropped:b:reset"); got != 1 {
+		t.Fatalf("follow-up dropped as reset %d times, want 1; events: %v", got, h.rec.snapshot())
+	}
+	if got := h.s.texts(); len(got) != 1 || got[0] != "m1" {
+		t.Fatalf("sends = %v, want only m1", got)
+	}
+	if c := h.s.sendCalls()[0]; c.spec.Passthrough {
+		t.Fatalf("spec = %+v, want a collect send", c.spec)
+	}
+}
+
 // TestDetached_UrgentPreemptsInCollectMode (#3004 分叉 6): a PriorityNow
 // request runs detached in any mode, is not First, does not queue behind the
 // running owner, and carries PriorityNow to Send.

@@ -104,6 +104,15 @@ type Server struct {
 // once-guard lazily registers defaults for tests that skip main's
 // backend.RegisterDefaults().
 func replyTagForBackend(id string) string {
+	if p, ok := backendProfile(id); ok {
+		return p.DefaultTag
+	}
+	return ""
+}
+
+// backendProfile is backend.Get with replyTagForBackend's defaults: an empty
+// id is claude, and the registry is filled once for tests that skip main.
+func backendProfile(id string) (backend.Profile, bool) {
 	replyTagForBackendOnce.Do(func() {
 		if len(backend.All()) == 0 {
 			backend.RegisterDefaults()
@@ -112,10 +121,7 @@ func replyTagForBackend(id string) string {
 	if id == "" {
 		id = "claude"
 	}
-	if p, ok := backend.Get(id); ok {
-		return p.DefaultTag
-	}
-	return ""
+	return backend.Get(id)
 }
 
 var replyTagForBackendOnce sync.Once

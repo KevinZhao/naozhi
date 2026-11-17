@@ -317,6 +317,9 @@ type preparedInbound struct {
 	key       string
 	opts      sessionview.AgentOpts
 	images    []clievent.Attachment
+	// clickID is a card click's dedup ID ("" for any other message), given
+	// back if the click is refused after prepareInbound.
+	clickID string
 }
 
 // inboundLogger returns the logger carrying msg's platform/user/chat attrs.
@@ -334,17 +337,29 @@ func (d *Dispatcher) inboundLogger(msg platform.IncomingMessage) *slog.Logger {
 // commands, agent resolution, file classification, accounting, key/opts
 // resolution, image conversion). Returns false when the message was fully
 // handled or dropped here.
-func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMessage) (preparedInbound, bool) {
+func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMessage) (_ preparedInbound, ok bool) {
 	// Dedup first: platform retries (e.g. IM event re-delivery) must
 	// not double-dispatch. Empty EventID (#1310) falls back to a composite
-	// minute-bucketed key since Seen("") never records. The ID is consumed
-	// even if the message is later gated/dropped — benign in practice.
+	// minute-bucketed key since Seen("") never records. A message's ID is
+	// consumed even if it is later gated or dropped: a resend has a new ID.
 	dedupID := msg.EventID
 	if dedupID == "" {
 		dedupID = fallbackDedupKey(msg, time.Now())
 	}
 	if d.dedup.Seen(dedupID) {
 		return preparedInbound{}, false
+	}
+	clickID := ""
+	if msg.OnAccepted != nil {
+		// A card click's ID is the same on the same user's next click, and
+		// a refused click keeps its buttons for that retry (#3628), so a
+		// refusal gives the ID back.
+		clickID = dedupID
+		defer func() {
+			if !ok {
+				d.dedup.Forget(clickID)
+			}
+		}()
 	}
 
 	// Group chats respond only when @mentioned (1:1 chats unaffected).
@@ -450,6 +465,7 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 		key:       key,
 		opts:      opts,
 		images:    images,
+		clickID:   clickID,
 	}, true
 }
 
@@ -461,6 +477,22 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 		p, ok := d.prepareInbound(ctx, msg)
 		if !ok {
 			return
+		}
+		if p.clickID != "" {
+			// Admitted runs inside Submit on this goroutine, so accepted is
+			// settled when submit returns: a click refused there (budget,
+			// busy, shutdown) gives its ID back as prepareInbound's do.
+			accepted := false
+			onAccepted := p.msg.OnAccepted
+			p.msg.OnAccepted = func() {
+				accepted = true
+				onAccepted()
+			}
+			defer func() {
+				if !accepted {
+					d.dedup.Forget(p.clickID)
+				}
+			}()
 		}
 		o := d.newIMOrigin(p.msg, p.lg, p.key, p.agentID, p.opts, imMessage, len(p.cleanText), len(p.images))
 		d.submit(ctx, o, turn.Request{Key: p.key, Text: p.cleanText, Images: p.images})

@@ -47,3 +47,12 @@ func (d *Dedup) Seen(eventID string) bool {
 	d.current[eventID] = struct{}{}
 	return false
 }
+
+// Forget drops eventID, so its next delivery is seen as new. For an event a
+// gate refused whose ID repeats on a retry (a question card click).
+func (d *Dedup) Forget(eventID string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.current, eventID)
+	delete(d.previous, eventID)
+}

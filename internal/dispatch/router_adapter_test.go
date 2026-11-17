@@ -63,6 +63,8 @@ func (s *testSender) Interrupt(key string) sessionview.InterruptOutcome {
 	return s.router.InterruptSessionViaControl(key)
 }
 
+func (s *testSender) PassthroughUnsupported(string) bool { return false }
+
 func (s *testSender) DiscardPending(key string, reason error) {
 	if s.discardPending != nil {
 		s.discardPending(key, reason)

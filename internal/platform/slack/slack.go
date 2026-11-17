@@ -205,7 +205,7 @@ func (s *Slack) Reply(ctx context.Context, msg platform.OutgoingMessage) (string
 	}
 
 	opts := []slack.MsgOption{
-		slack.MsgOptionText(msg.Text, false),
+		slack.MsgOptionText(defuseBroadcasts(msg.Text), false),
 	}
 	if msg.ThreadID != "" {
 		opts = append(opts, slack.MsgOptionTS(msg.ThreadID))
@@ -217,6 +217,16 @@ func (s *Slack) Reply(ctx context.Context, msg platform.OutgoingMessage) (string
 	return platform.EncodeMessageRef(msg.ChatID, ts), nil
 }
 
+// defuseBroadcasts escapes the "<" of Slack's special mentions (<!channel>,
+// <!here>, <!everyone>, <!subteam^ID>), so a reply shows them as text instead
+// of notifying the channel or a user group. Replies are model output, which
+// a member or content the model read can steer into one. The rest is sent
+// as it is: escaping all of it would also break <url|label> links and
+// blockquotes.
+func defuseBroadcasts(text string) string {
+	return strings.ReplaceAll(text, "<!", "&lt;!")
+}
+
 // EditMessage updates an existing Slack message.
 func (s *Slack) EditMessage(ctx context.Context, msgID string, text string) error {
 	channel, ts, ok := platform.DecodeMessageRef(msgID)
@@ -224,7 +234,7 @@ func (s *Slack) EditMessage(ctx context.Context, msgID string, text string) erro
 		return fmt.Errorf("invalid slack msgID format: %q", msgID)
 	}
 	_, _, _, err := s.api.UpdateMessageContext(ctx, channel, ts,
-		slack.MsgOptionText(text, false))
+		slack.MsgOptionText(defuseBroadcasts(text), false))
 	if err != nil {
 		return fmt.Errorf("slack edit message: %w", err)
 	}

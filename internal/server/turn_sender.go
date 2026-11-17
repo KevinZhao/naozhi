@@ -104,6 +104,20 @@ func (s turnSender) Interrupt(key string) session.InterruptOutcome {
 	return s.router.InterruptSessionViaControl(key)
 }
 
+// PassthroughUnsupported: a live process that takes passthrough sends
+// answers for itself; otherwise the session's backend profile does, since a
+// session with no process (dead, awaiting --resume) comes back on that
+// backend. An unknown backend reports false, the detached path Send already
+// downgrades.
+func (s turnSender) PassthroughUnsupported(key string) bool {
+	sess := s.router.SessionFor(key)
+	if sess == nil || sess.SupportsPassthrough() {
+		return false
+	}
+	p, ok := backendProfile(sess.Backend())
+	return ok && !p.Features["passthrough"]
+}
+
 func (s turnSender) DiscardPending(key string, reason error) {
 	s.router.DiscardPassthroughPending(key, reason)
 }

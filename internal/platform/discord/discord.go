@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -498,6 +499,9 @@ func (d *Discord) closeSession() error {
 }
 
 // Reply sends a message to a Discord channel. Handles text and/or images.
+// The text is model output, which a member or content the model read can
+// steer into "@everyone", "@here" or a role mention; noMentions keeps the
+// bot from pinging anyone with it, as the question card does.
 func (d *Discord) Reply(ctx context.Context, msg platform.OutgoingMessage) (string, error) {
 	if len(msg.Images) > 0 {
 		var files []*discordgo.File
@@ -510,8 +514,9 @@ func (d *Discord) Reply(ctx context.Context, msg platform.OutgoingMessage) (stri
 			})
 		}
 		ms := &discordgo.MessageSend{
-			Content: msg.Text,
-			Files:   files,
+			Content:         msg.Text,
+			Files:           files,
+			AllowedMentions: noMentions(),
 		}
 		m, err := d.session.ChannelMessageSendComplex(msg.ChatID, ms, discordgo.WithContext(ctx))
 		if err != nil {
@@ -520,20 +525,26 @@ func (d *Discord) Reply(ctx context.Context, msg platform.OutgoingMessage) (stri
 		return platform.EncodeMessageRef(msg.ChatID, m.ID), nil
 	}
 
-	m, err := d.session.ChannelMessageSend(msg.ChatID, msg.Text, discordgo.WithContext(ctx))
+	m, err := d.session.ChannelMessageSendComplex(msg.ChatID, &discordgo.MessageSend{
+		Content:         msg.Text,
+		AllowedMentions: noMentions(),
+	}, discordgo.WithContext(ctx))
 	if err != nil {
 		return "", fmt.Errorf("discord send: %w", err)
 	}
 	return platform.EncodeMessageRef(msg.ChatID, m.ID), nil
 }
 
-// EditMessage updates an existing Discord message.
+// EditMessage updates an existing Discord message, with no mentions parsed
+// (Reply).
 func (d *Discord) EditMessage(ctx context.Context, msgID string, text string) error {
 	channel, id, ok := platform.DecodeMessageRef(msgID)
 	if !ok {
 		return fmt.Errorf("invalid discord msgID format: %q", msgID)
 	}
-	if _, err := d.session.ChannelMessageEdit(channel, id, text, discordgo.WithContext(ctx)); err != nil {
+	edit := discordgo.NewMessageEdit(channel, id).SetContent(text)
+	edit.AllowedMentions = noMentions()
+	if _, err := d.session.ChannelMessageEditComplex(edit, discordgo.WithContext(ctx)); err != nil {
 		return fmt.Errorf("discord edit message %s: %w", msgID, err)
 	}
 	return nil
@@ -725,16 +736,65 @@ var discordHTTPClient = &http.Client{
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	},
-	Transport: &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           blockPrivateDial(),
+	Transport: newCDNTransport(http.ProxyFromEnvironment),
+}
+
+// newCDNTransport is the CDN download transport going through proxy (nil
+// for none). The guard is for the CDN host; the operator's proxy, often on
+// loopback or the LAN, is dialed as it is (cdnDial).
+func newCDNTransport(proxy func(*http.Request) (*url.URL, error)) *http.Transport {
+	return &http.Transport{
+		Proxy:                 proxy,
+		DialContext:           cdnDial(proxy),
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 15 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-	},
+	}
+}
+
+// cdnDial dials the address proxy names for the CDN hosts without the
+// reserved-IP check, and every other address through blockPrivateDial.
+// net/http dials the proxy through the same DialContext as a direct
+// connection, and a proxy is the operator's own: refusing a loopback or LAN
+// proxy would fail every download while the gateway and REST, which honour
+// the same proxy, work. Through a proxy the CDN host is resolved there.
+func cdnDial(proxy func(*http.Request) (*url.URL, error)) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	guarded := blockPrivateDial()
+	dialer := &net.Dialer{Timeout: 15 * time.Second}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if isProxyAddr(proxy, addr) {
+			return dialer.DialContext(ctx, network, addr)
+		}
+		return guarded(ctx, network, addr)
+	}
+}
+
+// proxyDefaultPorts are net/http's default ports per proxy scheme.
+var proxyDefaultPorts = map[string]string{"http": "80", "https": "443", "socks5": "1080", "socks5h": "1080"}
+
+// isProxyAddr reports whether addr is the host:port proxy sends a download
+// from a CDN host through, as net/http dials it.
+func isProxyAddr(proxy func(*http.Request) (*url.URL, error), addr string) bool {
+	if proxy == nil {
+		return false
+	}
+	for host := range discordCDNHosts {
+		u, err := proxy(&http.Request{URL: &url.URL{Scheme: "https", Host: host}})
+		if err != nil || u == nil || u.Hostname() == "" {
+			continue
+		}
+		port := u.Port()
+		if port == "" {
+			port = proxyDefaultPorts[u.Scheme]
+		}
+		if net.JoinHostPort(u.Hostname(), port) == addr {
+			return true
+		}
+	}
+	return false
 }
 
 // discordCDNHosts is the set of trusted Discord CDN domains for attachment downloads.
