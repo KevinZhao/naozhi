@@ -8,8 +8,9 @@
 // observes (group "yours"): the same card, its state by health (等你 / 失败,
 // else 在跑 / 停滞 / 空闲 from health and live), a blue dot when a turn
 // ended with you away; "⋯" only marks it done or back in progress (no 停止,
-// nothing is put away: the session itself is left alone). The group's
-// heading counts what the Planner dispatched and promised, not these.
+// nothing is put away: the session itself is left alone) and opens its raw
+// record. The group's heading counts what the Planner dispatched and
+// promised, not these.
 //
 // Every card has one shape, the column's full width: the title (two lines at
 // most, the whole of it in the tooltip; a dispatched session's opens it in
@@ -31,13 +32,16 @@
 // The controls sit behind the card's "⋯" (shown on hover or focus where
 // there is a pointer, always on touch): 停止 a running session (POST
 // /api/tasks/stop: its process is closed, the task 已完成 as yours, shown as
-// 已停止), 标为已完成 / 标为进行中 (POST /api/tasks/state, as yours), and
-// 重新打开 a done one. A done dispatched session is put away once its turn
-// ended, you are not at it and it has been idle 2 hours (planner/reap, D105):
-// while only the idleness holds it its status line says about when (the
-// task's reap_at), otherwise its card says what holds it, then that it was
-// put away; 重新打开 puts it back. The Planner page's header offers the same 停止 for the session open
-// in the middle column (isRunningTask, nzBus 'tasks:changed').
+// 已停止), 标为已完成 / 标为进行中 (POST /api/tasks/state, as yours),
+// 重新打开 a done one, and a session's 原始记录: it opens in the middle
+// column on its raw record, tool calls and all, as 看原始记录 › under its
+// expanded digest does (D124, the third of D67's layers). A done dispatched
+// session is put away once its turn ended, you are not at it and it has
+// been idle 2 hours (planner/reap, D105): while only the idleness holds it
+// its status line says about when (the task's reap_at), otherwise its card
+// says what holds it, then that it was put away; 重新打开 puts it back. The
+// Planner page's header offers the same 停止 for the session open in the
+// middle column (isRunningTask, nzBus 'tasks:changed').
 //
 // A dispatched session runs in custody; its card marks custody only when it
 // is off or stopped (custody.js's mark, not a switch: the header has that).
@@ -304,15 +308,32 @@ function titleHtml(t) {
 
 // actsHtml is what "⋯" opens: 停止 a running session, mark it done or back
 // in progress (a promise before its reminder is not in progress yet), or
-// reopen a done one.
+// reopen a done one; a session's, yours too, last 原始记录 (D124). A
+// promise has no session to open.
 function actsHtml(t) {
   const btn = (action, label, tip) => '<button type="button" class="pl-btn tk-act tk-' + action.replace('task-', '') + '" data-action="' + action + '" data-id="' + escAttr(t.id) + '"' + (tip ? ' title="' + escAttr(tip) + '"' : '') + '>' + label + '</button>';
+  const raw = t.kind === 'session' ? rawHtml(t, 'pl-btn tk-act tk-raw', '原始记录') : '';
   // A session you opened is only marked: nothing stops or reopens it.
-  if (isYours(t)) return t.state === 'done' ? btn('task-doing', '标为进行中', '放回「你开的」') : btn('task-done', '标为已完成', '从「你开的」里拿掉（会话本身不动）');
-  if (t.state === 'done') return btn('task-reopen', '重新打开', t.reap ? '放回会话列表，下一条消息接着上下文继续' : '');
+  if (isYours(t)) return (t.state === 'done' ? btn('task-doing', '标为进行中', '放回「你开的」') : btn('task-done', '标为已完成', '从「你开的」里拿掉（会话本身不动）')) + raw;
+  if (t.state === 'done') return btn('task-reopen', '重新打开', t.reap ? '放回会话列表，下一条消息接着上下文继续' : '') + raw;
   return (running(t) ? btn('task-stop', '停止', '停止这个会话正在做的事') : '') +
     (t.state === 'doing' || t.state === 'remind' ? '' : btn('task-doing', '标为进行中')) +
-    btn('task-done', '标为已完成');
+    btn('task-done', '标为已完成') + raw;
+}
+
+// rawHtml opens session t in the middle column on its raw record, tool
+// calls and all, scrolled to the latest (planner_chat.js's
+// planner-open-session with data-raw).
+function rawHtml(t, cls, label) {
+  return '<button type="button" class="' + cls + '" data-action="planner-open-session" data-key="' + escAttr(t.id) + '" data-raw="1" title="打开这个会话，连工具调用一起看">' + label + '</button>';
+}
+
+// closeTaskActs folds the "⋯" open on a card, once what was picked from it
+// does its work elsewhere.
+export function closeTaskActs() {
+  if (!actsOpen) return;
+  actsOpen = '';
+  repaintAll();
 }
 
 // custodyException reports whether a task's card marks its custody: only
@@ -366,12 +387,14 @@ function reportHtml(t) {
 // in it, the one already in the page while the version holds, so the live
 // repaints of the other cards (every LIVE_MS while one runs) neither scroll
 // it back to its top, nor drop what is selected in it, nor draw its
-// diagrams again.
+// diagrams again. Under it, outside its scroll, 看原始记录 › opens the session's raw record
+// (D124), also while the digest cannot be read.
 function digestHtml(t) {
   if (digestOpen !== t.id) return '';
   const d = digests.get(t.id) || { wait: true };
-  if (d.md !== undefined) return '<div class="tk-digest-slot" data-digest="' + escAttr(t.id) + '" data-v="' + d.v + '"></div>';
-  return '<div class="tk-digest tk-digest-note" id="tk-digest-' + escAttr(t.id) + '">' + (d.err ? '读不到摘要：' + esc(d.err) : '正在读取摘要…') + '</div>';
+  const raw = '<div class="tk-digest-raw">' + rawHtml(t, 'pl-link', '看原始记录 ›') + '</div>';
+  if (d.md !== undefined) return '<div class="tk-digest-slot" data-digest="' + escAttr(t.id) + '" data-v="' + d.v + '"></div>' + raw;
+  return '<div class="tk-digest tk-digest-note" id="tk-digest-' + escAttr(t.id) + '">' + (d.err ? '读不到摘要：' + esc(d.err) : '正在读取摘要…') + '</div>' + raw;
 }
 
 // digestNode renders task id's digest as read (digests) for its slot.
@@ -476,7 +499,7 @@ function paint(el, data) {
   if (el._tkHtml === html && el.firstChild) return;
   const wasOpen = !!el.querySelector('.tk-sec-done')?.open;
   const a = document.activeElement;
-  const focus = a && el.contains(a) && a.dataset.action ? { id: a.dataset.id || a.dataset.key, action: a.dataset.action } : null;
+  const focus = a && el.contains(a) && a.dataset.action ? { id: a.dataset.id || a.dataset.key, action: a.dataset.action, raw: a.dataset.raw || '' } : null;
   const kept = el._tkDigest;
   const inPage = kept && el.contains(kept.node);
   const scroll = inPage ? kept.node.scrollTop : 0;
@@ -501,7 +524,8 @@ function paint(el, data) {
   }
   if (focus) {
     for (const b of el.querySelectorAll('[data-action="' + CSS.escape(focus.action) + '"]')) {
-      if ((b.dataset.id || b.dataset.key) === focus.id) { b.focus(); break; }
+      // The title and 看原始记录 share an action and a key.
+      if ((b.dataset.id || b.dataset.key) === focus.id && (b.dataset.raw || '') === focus.raw) { b.focus(); break; }
     }
   }
 }

@@ -3,7 +3,7 @@
 // card as a dispatched session's: the state by health (等你, else 在跑 /
 // 空闲 from health and live), a blue dot when a turn ended with you away,
 // no custody mark (off is their default), "⋯" only marking it done or back
-// in progress (no 停止, no 重新打开); the group's heading counts what the
+// in progress (no 停止, no 重新打开) and opening its 原始记录; the group's heading counts what the
 // Planner dispatched, not these. A turn of one starting or ending (its
 // session_state frame) refetches the list as a dispatched one's does. The
 // session header has 观察 beside the custody chip (not on a dispatched
@@ -121,14 +121,14 @@ for (const [name, opts] of VIEWPORTS) {
 
       // "⋯" only marks it: no 停止.
       await card(page, A).locator('.tk-more').click();
-      await expect(card(page, A).locator('.tk-act')).toHaveText(['标为已完成']);
+      await expect(card(page, A).locator('.tk-act')).toHaveText(['标为已完成', '原始记录']);
       await card(page, A).locator('.tk-done').click();
       await expect.poll(() => mock.tasksCalls).toEqual([{ id: A, state: 'done' }]);
       await expect(group.locator('.tk-sec > .tk-sec-h')).toHaveText(['进行中 1', '你开的 2', '已完成 2']);
       // A done one goes back in progress, and is not reopened.
       await group.locator('.tk-sec-done summary').click();
       await card(page, DONE).locator('.tk-more').click();
-      await expect(card(page, DONE).locator('.tk-act')).toHaveText(['标为进行中']);
+      await expect(card(page, DONE).locator('.tk-act')).toHaveText(['标为进行中', '原始记录']);
       await expect(card(page, DONE).locator('.tk-now')).toHaveText('Planner 判断：周报已发');
 
       // A turn of one ending refetches the list, as a dispatched one's does:
