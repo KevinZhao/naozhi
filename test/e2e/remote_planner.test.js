@@ -67,6 +67,18 @@ function remote() {
   return r;
 }
 
+// putImage pastes a PNG into the Planner box, or drops one on it.
+async function putImage(page, how) {
+  await page.evaluate((h) => {
+    const dt = new DataTransfer();
+    dt.items.add(new File([new Uint8Array([137, 80, 78, 71])], 'shot.png', { type: 'image/png' }));
+    const input = document.getElementById('pl-input');
+    input.focus();
+    if (h === 'paste') input.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    else document.getElementById('pl-composer').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+  }, how);
+}
+
 const VIEWPORTS = [
   { name: 'desktop', width: 1280, height: 800 },
   { name: 'phone', width: 390, height: 844, isMobile: true, hasTouch: true },
@@ -139,8 +151,14 @@ for (const vp of VIEWPORTS) {
       await expect(stream).toContainText('iso 早上好');
       await expect.poll(() => mock.wsConnections.flatMap((c) => c.messages)
         .some((m) => m.type === 'subscribe' && m.key === PLANNER && m.node === NODE)).toBe(true);
-      // Uploads stay here: no attachment to another node's Planner.
+      // Uploads stay here: no attachment to another node's Planner, also
+      // none pasted or dropped into the box.
       await expect(page.locator('#pl-attach')).toBeDisabled();
+      await expect(page.locator('#pl-input')).toBeEnabled();
+      await putImage(page, 'paste');
+      await putImage(page, 'drop');
+      await expect(page.locator('#pl-file-preview .file-thumb')).toHaveCount(0);
+      await expect(page.locator('#toast')).toHaveText('发给别的节点的消息不能带附件');
       // The badge counts the node's question; 等你 lists it.
       await expect(page.locator('#abnav-planner-count')).toHaveText('1');
       if (vp.isMobile) await page.click('#pl-left-toggle');

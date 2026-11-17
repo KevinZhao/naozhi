@@ -2,7 +2,7 @@
 // prev/next) and composer paste handling.
 // Layering: never import dashboard.js back; selectSession is a shell slot.
 import { selection, sessionList } from './state.js';
-import { esc } from './nz_util.js';
+import { esc, showToast } from './nz_util.js';
 import { shell } from './shell.js';
 import { handleFiles, trayOf } from './composer_files.js';
 
@@ -239,6 +239,13 @@ document.addEventListener('paste', function(e) {
   }
   if (imageFiles.length > 0) {
     e.preventDefault();
+    // The Planner box's paperclip says whether it takes files: not while it
+    // sends to another node, which cannot read the uploads kept here
+    // (remote-planner.md §7); the send would fail until they are removed.
+    if (box.id === 'pl-input' && document.getElementById('pl-attach')?.disabled) {
+      showToast('发给别的节点的消息不能带附件', 'warning');
+      return;
+    }
     handleFiles(imageFiles, trayOf(box));
     return;
   }
