@@ -249,6 +249,19 @@ func TestTaskPromptReport(t *testing.T) {
 	if !strings.Contains(p, "progress 只在本地还挂着后台任务或 Monitor、它们结束时会再叫醒你的时候用") || !strings.Contains(p, "没有在等的就别停在 progress") {
 		t.Errorf("prompt does not bound progress to waiting on background work: %s", p)
 	}
+	// Committed changes go to a worktree of their own under
+	// .claude/worktrees/, where the put-away finds it; --no-track keeps a
+	// bare git push off the default branch; info/exclude keeps the user's
+	// checkout clean in a repository not ignoring the place (D121).
+	for _, want := range []string{
+		"<仓库顶层>/.claude/worktrees/<名字> origin/<默认分支>",
+		"git worktree add --no-track -b <分支>",
+		"往 <git rev-parse --git-common-dir>/info/exclude 加一行 /.claude/worktrees/",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("prompt lacks the worktree rule %q: %s", want, p)
+		}
+	}
 	note := reportLine("planner-abc123")
 	inner := strings.TrimSuffix(strings.TrimSpace(note), "）")
 	if !strings.HasPrefix(strings.TrimSpace(note), "（网关附注：") || strings.Contains(inner, "）") ||
