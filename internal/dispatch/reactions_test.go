@@ -19,6 +19,10 @@ type fakeReactorPlatform struct {
 	added   []reactionCall
 	removed []reactionCall
 	addErr  error
+	// beforeAdd, when set, runs at the start of each AddReaction, outside mu.
+	beforeAdd func(messageID string)
+	// seq is every landed add and remove in order, as "add:<id>" / "remove:<id>".
+	seq []string
 }
 
 type reactionCall struct {
@@ -27,12 +31,16 @@ type reactionCall struct {
 }
 
 func (f *fakeReactorPlatform) AddReaction(_ context.Context, messageID string, r platform.ReactionType) error {
+	if f.beforeAdd != nil {
+		f.beforeAdd(messageID)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.addErr != nil {
 		return f.addErr
 	}
 	f.added = append(f.added, reactionCall{msgID: messageID, reaction: r})
+	f.seq = append(f.seq, "add:"+messageID)
 	return nil
 }
 
@@ -40,6 +48,7 @@ func (f *fakeReactorPlatform) RemoveReaction(_ context.Context, messageID string
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.removed = append(f.removed, reactionCall{msgID: messageID, reaction: r})
+	f.seq = append(f.seq, "remove:"+messageID)
 	return nil
 }
 

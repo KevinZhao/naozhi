@@ -33,11 +33,18 @@ type imOrigin struct {
 	kind    imKind
 	textLen int
 	images  int
-	// ackDone is closed once the ⏳ of a request that runs at once has
-	// landed or failed (startAck); nil for any other request. reacted is
-	// written before the close and read only after it (awaitAck).
+	// ackDone is closed once the request's ⏳ has landed or failed, or
+	// Admitted knew none would be added. submit makes it before the request
+	// is enqueued: a queued request can be drained or dropped on another
+	// goroutine while Admitted still adds its ⏳, and the clear must wait for
+	// that add. nil for an origin admitted without submit (no add to wait
+	// for). reacted is written before the close and read only after it
+	// (awaitAck).
 	ackDone chan struct{}
 	reacted bool
+	// ackAsync marks a request that runs at once, whose ⏳ goes on in the
+	// background (startAck).
+	ackAsync bool
 }
 
 func (d *Dispatcher) newIMOrigin(msg platform.IncomingMessage, lg *slog.Logger, key, agentID string, opts sessionview.AgentOpts, kind imKind, textLen, images int) *imOrigin {
@@ -56,6 +63,7 @@ func (d *Dispatcher) submit(ctx context.Context, o *imOrigin, r turn.Request) {
 		return
 	}
 	r.Origin = o
+	o.ackDone = make(chan struct{})
 	d.turns.Submit(ctx, r, imAdmission{ctx: ctx, stop: d.stopCtx})
 }
 
@@ -116,14 +124,26 @@ func (o *imOrigin) Admitted(ctx context.Context, a turn.Ack) {
 		}
 		o.startAck(ctx)
 	case turn.AckQueued:
-		if !d.ackQueuedWithReaction(ctx, o.msg, o.lg) {
+		reacted := d.ackQueuedWithReaction(ctx, o.msg, o.lg)
+		o.ackSettled(reacted)
+		if !reacted {
 			d.replyNotice(ctx, o.msg, o.key, "消息已收到，待当前回复完成后一并处理。", o.lg, "queued")
 		}
 	case turn.AckDropped:
+		o.ackSettled(false)
 		notified := d.replyNotice(ctx, o.msg, o.key, "正在处理上一条消息，请稍候...", o.lg, "busy")
 		o.lg.InfoContext(ctx, "message dropped: session busy", "key", o.key, "notified", notified)
 	case turn.AckShuttingDown:
+		o.ackSettled(false)
 		o.lg.WarnContext(ctx, "message declined: shutting down", "key", o.key)
+	}
+}
+
+// ackSettled records whether the ⏳ landed and releases awaitAck.
+func (o *imOrigin) ackSettled(reacted bool) {
+	o.reacted = reacted
+	if o.ackDone != nil {
+		close(o.ackDone)
 	}
 }
 
@@ -131,11 +151,12 @@ func (o *imOrigin) Admitted(ctx context.Context, a turn.Ack) {
 // request's inbound ctx can end as soon as Submit returns; the add is still
 // bounded by reactionAckTimeout.
 func (o *imOrigin) startAck(ctx context.Context) {
-	done := make(chan struct{})
-	o.ackDone = done
+	o.ackAsync = true
+	if o.ackDone == nil {
+		o.ackDone = make(chan struct{})
+	}
 	go func() {
-		defer close(done)
-		o.reacted = o.d.ackQueuedWithReaction(context.WithoutCancel(ctx), o.msg, o.lg)
+		o.ackSettled(o.d.ackQueuedWithReaction(context.WithoutCancel(ctx), o.msg, o.lg))
 	}()
 }
 
@@ -143,9 +164,9 @@ func (o *imOrigin) startAck(ctx context.Context) {
 // ignores its ctx.
 const ackWaitLimit = reactionAckTimeout + time.Second
 
-// awaitAck waits for startAck's add and reports whether the ⏳ landed; false
-// at once when no add was started, and false when the add outlives
-// ackWaitLimit.
+// awaitAck waits for Admitted's add and reports whether the ⏳ landed; false
+// at once for an origin with nothing to wait for, and false when the add
+// outlives ackWaitLimit.
 func (o *imOrigin) awaitAck() bool {
 	if o.ackDone == nil {
 		return false
@@ -161,9 +182,9 @@ func (o *imOrigin) awaitAck() bool {
 }
 
 // Dropped clears the ⏳ of a request that will never get a turn (#1945,
-// #2013). Only queued requests are dropped, and their add is synchronous;
-// awaitAck guards a dropped request that ran startAck, so its ⏳ cannot land
-// behind the clear. A removed key also gets a notice (#3297): the user did
+// #2013). A drop comes on another goroutine (an evicting Submit, /new, a
+// retire) and can overtake the queued request's add; awaitAck makes the
+// clear wait for it, so the ⏳ cannot land behind the clear. A removed key also gets a notice (#3297): the user did
 // not ask for the removal, and a platform without reactions promised to
 // answer. It is rate-limited per sink on the key (chats can share a planner
 // key), so the queued messages of a chat or thread share one.
@@ -212,7 +233,7 @@ func (dl *imDelivery) BeforeSession(ctx context.Context) {
 	o := dl.o
 	dl.tracker = newIMEventTracker(ctx, dl.p, replyDestOf(o.msg), o.msg.ChatType, o.agentID)
 	dl.tracker.askerID = o.d.askerOf(o.msg, o.key)
-	if dl.info.Role == turn.RoleHead && o.ackDone != nil {
+	if dl.info.Role == turn.RoleHead && o.ackAsync {
 		dl.tracker.armFallbackBanner(o.d.fallbackBannerDelay, o.awaitAck)
 	}
 	if !dl.info.First || o.d.scopedSession(o.msg, o.key) {
@@ -281,8 +302,9 @@ func (dl *imDelivery) Finish(ctx context.Context, out turn.Outcome) {
 
 // queuedIDs are the message IDs carrying a ⏳ that this delivery answers: the
 // Mates, and the head itself unless it is a first turn's message whose ⏳
-// never landed. It waits for the head's add still in flight, so the ⏳
-// cannot land after it is cleared.
+// never landed. It waits for each one's add still in flight (a queued
+// message can be drained while its Admitted still adds), so no ⏳ lands after
+// it is cleared.
 func (dl *imDelivery) queuedIDs() []string {
 	var ids []string
 	if dl.info.Role == turn.RoleHead {
@@ -292,6 +314,7 @@ func (dl *imDelivery) queuedIDs() []string {
 	}
 	for _, m := range dl.info.Mates {
 		if mo, ok := m.(*imOrigin); ok {
+			mo.awaitAck()
 			ids = append(ids, mo.msg.MessageID)
 		}
 	}
