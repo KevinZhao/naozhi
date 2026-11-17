@@ -50,3 +50,25 @@ func TestLegacySend_FallbackSkipsOrphanedResult(t *testing.T) {
 		})
 	}
 }
+
+// An orphan that readLoop books while findResultSince is between its ring
+// snapshot and its orphan-mark read must not come back as the answer.
+func TestFindResultSince_OrphanLandingMidScanSkipped(t *testing.T) {
+	p, _ := shimTestPair(&ClaudeProtocol{})
+	turnStartMS := time.Now().UnixMilli() - 10
+	orphanMS := turnStartMS + 5
+	findResultSnapshotHook = func() {
+		findResultSnapshotHook = nil
+		// readLoop's order: the mark first, then the orphan's entries.
+		p.turn.orphanResultMS.Store(orphanMS)
+		p.eventLog.AppendBatch([]clievent.EventEntry{
+			{Time: orphanMS, Type: clievent.KindText, Detail: "A-partial"},
+			{Time: orphanMS, Type: clievent.KindResult},
+		})
+	}
+	t.Cleanup(func() { findResultSnapshotHook = nil })
+
+	if r := p.findResultSince(turnStartMS); r != nil {
+		t.Fatalf("findResultSince = %+v, want nil: the only result is the orphan", r)
+	}
+}
