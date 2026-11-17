@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -392,6 +393,16 @@ func (s *Scheduler) Start() error {
 		}
 		admitted = append(admitted, j)
 	}
+	// loadJobs returns a map, so without a fixed order every restart over a
+	// cap would admit a different subset of the same file: jobs the user saw
+	// and relied on would vanish and held ones come back. Oldest first keeps
+	// the jobs that already had their slots; ID breaks ties.
+	slices.SortFunc(admitted, func(a, b *Job) int {
+		if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
+			return c
+		}
+		return jobIDCmpForSort(a, b)
+	})
 	// Entry-lifecycle writer like any other: the load plans, the commits below
 	// apply. Before s.cron.Start() a commit only appends to robfig's slice.
 	s.entryMu.Lock()

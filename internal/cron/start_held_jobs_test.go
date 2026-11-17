@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
+	"time"
 )
 
 // TestStart_OverCapJobsSurviveSaves: a job a lower cron.max_jobs left out at
@@ -106,5 +108,65 @@ func TestStart_UnadmittedJobsSurviveSaves(t *testing.T) {
 	}
 	if len(after) != len(stored) {
 		t.Errorf("saved %d jobs, want %d", len(after), len(stored))
+	}
+}
+
+// TestStart_CapAdmitsSameJobsEveryRestart: with more jobs stored than a cap
+// allows, every restart must admit the same ones, the oldest, not a fresh
+// pick of the store: otherwise the jobs the user saw vanish and held ones,
+// never listed in that process, start firing again.
+func TestStart_CapAdmitsSameJobsEveryRestart(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "cron.json")
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	// IDs run against creation order so neither the file's ID order nor
+	// the ID alone decides who is admitted.
+	ids := []string{"f8", "e7", "d6", "c5", "b4", "a3", "92", "81"}
+	var stored []map[string]any
+	for i, id := range ids {
+		stored = append(stored, map[string]any{
+			"id": id, "schedule": "@hourly", "prompt": id, "platform": "p", "chat_id": "c",
+			"created_at": base.Add(time.Duration(i) * time.Hour),
+		})
+	}
+	data, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"b4", "c5", "d6", "e7", "f8"}
+
+	listed := func(s *Scheduler) []string {
+		var got []string
+		for _, j := range s.ListJobs("p", "c") {
+			got = append(got, j.ID)
+		}
+		slices.Sort(got)
+		return got
+	}
+	for i := range 10 {
+		s := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 5}, SchedulerDeps{})
+		if err := s.Start(); err != nil {
+			t.Fatalf("restart %d Start: %v", i, err)
+		}
+		got := listed(s)
+		s.Stop()
+		if !slices.Equal(got, want) {
+			t.Fatalf("restart %d at MaxJobs=5 admitted %v, want the 5 oldest %v", i, got, want)
+		}
+	}
+	for i := range 10 {
+		s := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 50}, SchedulerDeps{})
+		s.maxJobsPerChat = 5
+		if err := s.Start(); err != nil {
+			t.Fatalf("per-chat restart %d Start: %v", i, err)
+		}
+		got := listed(s)
+		s.Stop()
+		if !slices.Equal(got, want) {
+			t.Fatalf("restart %d at a per-chat cap of 5 admitted %v, want the 5 oldest %v", i, got, want)
+		}
 	}
 }
