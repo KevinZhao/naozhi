@@ -29,7 +29,7 @@
 | **闸门 / 放行记录** | 需要你放行的动作（需人决定清单）；实现为"拒绝 + 一次性放行记录"（§5.6） |
 | **转向锁** | 网关为每个会话维护的输入优先级（§4.9） |
 
-界面与文档用词固定为：`advice` = 意见，`nudge` = 代办，`directive` = 指令，`halt` = 叫停，`proposal` = 提议；session = 会话，workspace = 工作区，duty = 例行任务，workflow = 工作流。
+界面与文档用词固定为：`advice` = 意见，`nudge` = 代办，`directive` = 指令，`halt` = 叫停，`cancel` = 停止（D118），`proposal` = 提议；session = 会话，workspace = 工作区，duty = 例行任务，workflow = 工作流。
 
 ## 1. 背景与问题
 
@@ -212,10 +212,10 @@ Message{ id, from, on_behalf_of, origin, chain[], to, kind, session?, body, refs
 | `review_request` | 执行会话 → Planner（跨会话消息，请求评审） | 是 | 否 |
 | `nudge` | Planner / 网关 → 执行会话（继续、回答已知事实） | 是 | 否（带原因码） |
 | `directive` | Planner → 执行会话（纠正；必须附依据，只经网关信封投递，§4.9） | 是 | 否（会话内可见） |
-| `halt` | 你 / Planner / 网关 → 执行会话（走 interrupt 控制请求，不作为消息进上下文） | 是 | 同时发错误 / 决定卡片 |
+| `halt` | ~~你 / Planner / 网关 → 执行会话（走 interrupt 控制请求，不作为消息进上下文）~~ 你 → 执行会话，经 Planner 的 `halt` 块，只在你发起的回合（D118）；停掉托管并关进程，不作为消息进上下文（D119，§15.15 ②） | 是 | ~~同时发错误 / 决定卡片~~ 否（托管已停的现有条目，D119） |
 | `advice` | Planner → 你（旁注）或 → 执行 session | 视对象 | 否（给你时以旁注出现在对话流里） |
 | `proposal` | Planner → 你 | — | 决定 |
-| `cancel` | 你 / Planner → 执行 session | 是 | 否 |
+| `cancel` | ~~你 / Planner → 执行 session~~ 你 → 执行 session：在"任务"里点停止，或经 Planner 的 `cancel` 块，只在你发起的回合（D118、D120） | 是 | 否 |
 | `event` | 网关 → Planner（事件流的唤醒通知） | 是 | 视严重度 |
 
 **来源权威只认网关元数据**（D58）：注入的上下文落在用户角色的文本块里，网页、issue、其他会话的输出可以逐字伪造"Planner 指令"或 🧭 标记（评审实测）。因此判权只读网关记账的 `on_behalf_of`；界面上的来源标签只看 `Message.from` 元数据，模型输出与外部文本中出现的来源前缀一律转义；Planner 的消息只由网关以信封形式投递到用户角色，工具输出里出现的同样文字没有信封，不被当作 Planner。
@@ -284,8 +284,8 @@ Message{ id, from, on_behalf_of, origin, chain[], to, kind, session?, body, refs
 |---|---|---|---|
 | 消息日志、事件流（健康转移、承诺、检查记录） | `~/.naozhi/planner/log/<YYYY-MM>.jsonl`，只追加，每行带格式版本号与工作区 ID | 网关 | 否 |
 | 工作区登记表 | `~/.naozhi/planner/workspaces.json`：工作区 ID ↔ 名字 ↔ 各节点上的路径 | 网关（你可改名） | 否 |
-| 懂你：偏好、先例、关注点、写作风格 | `~/.naozhi/planner/user/*.md`（全局一份，Markdown，宽松解析你手改的内容） | 你 / 网关 | 否（可自行 git 管理） |
-| 懂你：授权、边界 | `~/.naozhi/planner/user/grants.json`、`bounds.json`（只经 UI 卡片写入） | 只有你 | 否 |
+| 懂你：偏好、先例、关注点、写作风格 | ~~`~/.naozhi/planner/user/*.md`（全局一份，Markdown，宽松解析你手改的内容）~~（从没建过；偏好与先例已由各项目的 Claude auto-memory 承担，`remember` 写进去，D106；看改删的界面见 §15.15 ⑦，待定 D126；关注点、写作风格随 P5 / P6 再定） | 你 / 网关 / 会话 | 否（可自行 git 管理） |
+| 懂你：授权、边界 | `~/.naozhi/planner/user/grants.json`、`bounds.json`（只经 UI 卡片写入）（P5 / P6，未建） | 只有你 | 否 |
 | 承诺、闹钟、"等你"条目（`inbox.json`） | `~/.naozhi/planner/` | 网关 | 否 |
 | 会话新字段（契约、血缘、产物、托管、污染、所属工作区、`purpose`） | **旁路文件** `~/.naozhi/planner/sessions/`，按 key 索引；`sessions.json` 不改 | 网关 | 否 |
 | 懂系统：项目长期知识 | `~/.naozhi/planner/workspaces/<工作区 ID>/knowledge/`，可选导出到仓库 | Planner / 工作区幕僚提议，网关写入 | 可选 |
@@ -407,7 +407,7 @@ runtelemetry 扩展普通会话类别（`SubsystemSession` 已预留但未发出
 |---|---|---|
 | 你正在和这个 session 对话 | 旁注给你，不插进 session | `advice`："这里在改症状，根因可能在 X，因为……"由你决定是否转达 |
 | session 托管中，或由 Planner 派出 | 直接发给 session | 带理由的 `advice`；session 可以反驳（它可能更了解细节），分歧记录在懂系统，同一处反复分歧升级给你 |
-| 严重：破坏性操作、篡改测试、安全风险 | 先叫停再给你卡片 | `halt` + error 卡片 |
+| ~~严重：破坏性操作、篡改测试、安全风险~~ | ~~先叫停再给你卡片~~ | ~~`halt` + error 卡片~~（D118：不做，触发不了——Planner 只在回合结束时醒，看不到回合中途；有了回合中途观察再议，§16.1） |
 
 意见去向的判定统一用网关谓词 `user_engaged`（§4.9）。
 
@@ -456,7 +456,7 @@ runtelemetry 扩展普通会话类别（`SubsystemSession` 已预留但未发出
 |---|---|---|
 | 通知已有 session | 同一目标或同一产物，且该 session 还活着或可 `--resume` | `request` / `advice` 发给它；你正在对话的 session 改为旁注给你 |
 | 排在已有之后 | 不同目标但同路径 / 同 PR | 新 session 的契约写 `blocked_by` |
-| 取代 | 新要求推翻旧的（"别做 A 了，改做 B"） | 旧 session 停止，处置其产物，新 session 接手 |
+| 取代 | 新要求推翻旧的（"别做 A 了，改做 B"） | 旧 session 停止（D118：Planner 只在你发起的回合用 `cancel`），处置其产物，新 session 接手 |
 | 另开 | 独立目标、不冲突、需要不同挂载 / 节点 / backend，或已有 session 无法续接、带有 `taint` | 新开执行 session，附结构化交接 |
 
 "通知"在旧会话无法续接（上下文过大、已归档、带 `taint`）时自动退化为"另开 + 交接"。
@@ -511,7 +511,7 @@ runtelemetry 扩展普通会话类别（`SubsystemSession` 已预留但未发出
 | 意见 | `advice` | 有更好做法，属判断题 | 可采纳或说明理由不采纳 |
 | 代办 | `nudge`（继续 / 回答已知事实） | "显而易见"五条门槛（§4.5） | 照做 |
 | 指令 | `directive` | 有依据地指出做错（违反契约 / 验收、违反你明确的边界、测试或 CI 证明错了、与其他会话冲突） | 照做，或直接回复说明理由 |
-| 叫停 | `halt`（走 interrupt 控制请求，不作为消息进上下文） | 破坏性操作、篡改测试、安全风险 | 暂停，同时给你卡片 |
+| ~~叫停~~ | ~~`halt`（走 interrupt 控制请求，不作为消息进上下文）~~ | ~~破坏性操作、篡改测试、安全风险~~ | ~~暂停，同时给你卡片~~（D118：Planner 自己叫停不做，触发不了；`halt` 只按你的话，§15.15 ①②） |
 | 提议 / 上报 | `proposal` / `need_input` | 超出授权或拿不准 | 不受影响的部分继续 |
 
 **指令的依据与分歧**（D68，取代 v6 的四条件、哈希校验与 `appeal`）：指令必须附依据（文字 + 链接）；会话可以直接回复反驳；同一件事 Planner 第二次仍说不通，就交给你，卡片上并列双方说法，选项为"按 Planner / 按会话 / 我来说"。
@@ -520,7 +520,7 @@ runtelemetry 扩展普通会话类别（`SubsystemSession` 已预留但未发出
 
 | 级 | Planner 能做 | 默认 |
 |---|---|---|
-| 1 只出意见 | 意见、标注、提议、上报、叫停（叫停始终可用）；你明确委托时可以派活（`dispatch`） | **P3 上线时** |
+| 1 只出意见 | 意见、标注、提议、上报、~~叫停（叫停始终可用）~~（D118：叫停只按你的话，在你发起的回合）；你明确委托时可以派活（`dispatch`） | **P3 上线时** |
 | 2 代办 | 加上 `nudge`：自动继续、用已知事实回答澄清 | 你说"可以替我继续"后 |
 | 3 指令 | 加上 `directive` | 你说"可以直接纠正"后 |
 | 4 执行型主动 | 例行任务在授权内自主推进（§9） | P5，且满足 D54 |
@@ -545,7 +545,7 @@ runtelemetry 扩展普通会话类别（`SubsystemSession` 已预留但未发出
 ### 5.1 选型、交接与执行形态（D27）
 
 - 由发起者（你，或 Planner 按任务）选 model / effort / backend / 挂载 / 节点；Planner 派出时常规活 sonnet，难活 opus。
-- Planner 派出的 session 各用一个 git worktree + 分支（#3449）；路径重叠由 Planner 决定排后（§4.7），网关只对同一 PR / 分支做硬互斥。
+- Planner 派出的 session 各用一个 git worktree + 分支（#3449）（D121：派出会话按网关给的系统提示词在 `.claude/worktrees/` 下自建，网关不建，收起时清理，§15.15 ④）；路径重叠由 Planner 决定排后（§4.7）~~，网关只对同一 PR / 分支做硬互斥~~（D122：取消，§16）。
 - 结束时返回结构化交接：做了什么 / 没做什么 / 命令与退出码 / 发现的问题 / 经验候选；允许显式"不可完成"退出（无诚实出口时 agent 倾向作弊）。
 
 | 形态 | 适合 | 谁决定 |
@@ -685,7 +685,7 @@ runtelemetry 扩展普通会话类别（`SubsystemSession` 已预留但未发出
 | `dispatch` / `promise` / `ask_user` / `set_alarm` | Planner 的动作块（闹钟并入 `promise`） |
 | `send`（意见 / 代办 / 指令） | Planner `SendMessage`，按信任阶梯开放 |
 | `session_status` / `read_result` | 读 `index.json` 与事件日志 |
-| `halt` / `cancel` / `park` / `read_external` / `knowledge_propose` | P3 起补成动作块 |
+| `halt` / `cancel` / `park` / `read_external` / `knowledge_propose` | P3 起补成动作块（`park` 随 v0.9.0，§15.14 ⑤；`halt` / `cancel` 随 v0.9.x，只在你发起的回合，§15.15 ①–③） |
 
 **收件策略**（按会话设置，放进 `SpawnOverlay`）：你直接对话的会话 `hold`（只提示、不投递，对应"Planner 不插进你正在对话的会话"）；Planner 派出的会话 `accept`；Planner 自己 `accept`。**Planner 的发信规则**：主动发信只发给它派出的会话，其他会话（含你本机终端里的 CC 会话）只在你明确要求时才发。
 
@@ -882,7 +882,7 @@ naozhi 是这台电脑（及以后的远程节点、沙箱）的入口，界面�
 | **Planner 页面 · 右栏** | 工作台：预览 · 产出 · 文件 · 详情；不放代码 diff（D76）。默认关闭，~~有可预览的产出时自动打开，打开时左栏收成 48px 窄条~~（D91：不自动打开、不收左栏，工作台按钮上显示"产出 N"）；"⤢ 放大"占满窗口 |
 | 现有"会话"视图 | 只加两处：Planner 旁注插在对话流里（只给你看，不进会话上下文）；输入框旁"交给 Planner" |
 | 现有"系统"视图 | 加"全会话健康"（含 Planner 检查记录入口）。"**节点**"区块（各节点状态与能力、"＋ 连接一台机器"：配对码 + 一行 `naozhi join` 命令）随 P7 加入——`naozhi join` 配对命令尚未实现（`node-pairing.md` 仍是 Draft） |
-| 现有"设置"视图 | 加"懂你"分组：关注点、最近的一句话设置（可撤销）、写作风格、信任阶梯、授权、Planner 对你的推断 |
+| 现有"设置"视图 | 加"懂你"分组：关注点、最近的一句话设置（可撤销）、写作风格、信任阶梯、授权、Planner 对你的推断（D126：先做看、改、删 auto-memory，规格见 §15.15 ⑦，暴露范围待 owner 定） |
 | 现有"自动化"视图 | 例行任务（与 cron 同一处）；~~早报~~（D91：早报只在 Planner 对话里，每条信息只有一个家） |
 
 **每条信息只有一个家**：等你的事只在 Planner 页面左栏（以及推送与活动栏角标），承诺只在"答应你的"，早报 / 提议只在 Planner 对话里，节点只在系统视图。
@@ -895,9 +895,9 @@ naozhi 是这台电脑（及以后的远程节点、沙箱）的入口，界面�
 - **等你**（原收件箱，D77 放在 Planner 页面左栏）：只放需要你处理的事；会话状态不进这里。条目五类：通知 / 提问 / 待审 / 决定（提议并入决定）/ 错误，带工作区与等待时长；**承诺**单独一组（"答应你的"），按时间排序；**只有 notify 会在条件消失时自动关闭，其余只有你能关**。早报与离开摘要在 Planner 对话里；已解决与已过期的条目留在原对话的卡片上。
 - **卡片**：带请求 ID，校验发送者本人；首个回答生效；应用决定前重读待决项；有有效期，过期作废（§5.6）。
 - **先回执**（D63）：发给 Planner 的消息一秒内出现"收到，交给 X / 正在看"，随后才是结论。
-- **状态三层**（D67）：会话卡片上一行状态（"正在跑测试 · 第 3/5 项验收"）→ 展开看进行中的事与最近的里程碑 → 原始工具调用记录（"原始记录"展开）。
+- **状态三层**（D67）：会话卡片上一行状态（"正在跑测试 · 第 3/5 项验收"）→ 展开看进行中的事与最近的里程碑 → 原始工具调用记录（"原始记录"展开；D124：任务卡"⋯"与摘要里一键直达，§15.15 ⑤）。
 - **一句话设置**（D65）：频率、静默时段、偏好、例行任务都用对话设置，Planner 回显"我改了什么"并给出撤销入口；不新增设置页。
-- **语音倒脑子**（D66）：手机上一次说出脑子里的待办，Planner 拆成承诺、任务、提醒，分别登记或派出，回一张清单让你确认。
+- **语音倒脑子**（D66）：手机上一次说出脑子里的待办，Planner 拆成承诺、任务、提醒，分别登记或派出，回一张清单让你确认。（D125：推迟到 `transcribe` 在某个节点真开起来，见 §16.1、§15.15 ⑥）
 - **可解释**：每条代办 / 注入消息带原因码与计数（~~"⚙ 自动继续 · E · 第 2/8 次 · 剩余验收项…"~~ ~~D93："⚙ 托管 · <原因> · 第 n/8 次"~~ D94：正文不带前缀，界面按事件条目的 `custody_reason` / `custody_n` 显示"托管 · <原因> · 第 n 次"，原因为出错重试 / 按建议执行 / Planner 继续，§15.10 D3）；每个 session 显示托管 chip（开 / 关 / ~~已暂缓 /~~ 已停，原因放进说明）；Planner 卡片显示"被什么唤醒、做了什么决定、理由"；全局暂停开关。
 - **推送三级**（D57）：紧急（需人决定、真 blocker、叫停、系统性故障）立即推送且**不受打扰预算限制**；有时效（里程碑、待审、完成）立即推送，受每日上限约束；其余进早报。每条只讲一件事并注明"为什么推给你"。
 - **推送渠道**：dashboard 目前只注册了一个空的 service worker，没有 Notification / Web Push，IM 未接（`platforms: {}`）。v0.2.0 先做两个出口：dashboard 浏览器通知（页面在后台时）与 macOS 系统通知（不需要开着页面）。手机推送随原生 iOS app 单独立项（app 内推送，D80）。
@@ -1762,7 +1762,187 @@ Planner 页的时间线默认只显示"对话"层，其余折成"动态"。判�
 - ⑥ 单独聊按标签前缀"单独聊："识别，不加新字段；"结束"用现有的移除（可撤销），naozhi 自己的事件日志不保留，Claude 的 transcript 仍在历史里。从 Planner 回答开的追问只带被引用的那条回答。↗ 沿用原来的规则，只出现在 500 字以上的回答上，短回答走入口一。
 - ⑦ 巡检超时只修了能确定原因的部分：去掉 `get_unreads`，失败的来源不再重试。单个 MCP 调用卡住的情况先靠运行记录里的超时字段观察。收起时普通子代理的 transcript 也一并扫；`gh` 的退避状态只在内存里。
 
-### 15.13 剩余内容排期（11-08；11-16 调整）
+### 15.15 v0.9.x 规格：叫停与停止、派出会话的 worktree、懂你（D118–D126，owner 11-17 定）
+
+> 依据：§15.13 的 v0.9.x 一行（动作块 `halt` / `cancel`；派活提示词要求改代码先建 worktree，#3449 最小版；P4"懂你"，11-16 提前到 v0.9.x）。三份草案与各自的评审写于 11-17，owner 当天的决定覆盖草案，评审意见全部采纳。本节与旧文字冲突时以本节为准，旧条目在原处划删除线并注明。代码位置按 origin/master `1d0a6d3d` 核实。
+
+**证据**（本机只读，`~/.naozhi`，11-04 – 11-17）
+
+第一组：叫停与停止。
+
+| 现象 | 数字 |
+|---|---|
+| 派出的任务 | 107 个 `task:` 会话，100 个已收起；88 个由 Planner 标完成，15 个由你标完成 |
+| 你用"停止" | 一共 1 次（11-04 21:16 `task:23ccaae728c7`，在 D91 之前，当时记成失败） |
+| 你按停止键（interrupt） | 10-04 起 13 次，全在你自己的 dashboard 会话，`task:` 会话上 0 次 |
+| 你对 Planner 说"停 / 取消 / 别做了" | 11-04 起发给 Planner 的 239 条消息里没有一条 |
+| 会话自己停下等你 | journal 里至少 7 次（11-07 – 11-09）。其中一次是破坏性操作：11-08 12:04 `task:b810a3153dfa` 主栈 destroy "已删 30、剩 51，停手等用户选方案"，拦住它的是会话自己的规则 |
+| Planner 什么时候醒 | 只在回合结束：派出会话的回执、跨会话消息、巡检、提醒；摘要也在回合结束时写。会话正在做破坏性操作时 Planner 看不到，等回执到了那一轮已经结束 |
+
+第二组：派出会话的 worktree。
+
+| 现象 | 数字 |
+|---|---|
+| 派活消息里写了 worktree | 能找到第一条消息的 100 个任务里 23 个（naozhi 52 个里 16 个，sample-eks 7 个里 5 个，CliScripts 4 个里 1 个，emburse-reimbursement、JD 都是 0），全凭 Planner 记不记得写 |
+| naozhi 仓库 | 20 个任务记着 worktree（23 条），**全在 `.claude/worktrees/<名字>`**：PR 合并后自动删 15 个，手删 6 个，另有会话在用而留着 2 个（meeting-m1）。靠的是仓库自己的 dev-workflow skill |
+| 报销台账（gitlab.aws.dev） | `task:2a48c7f6044c` 在主 checkout 里新建了 `scripts/invoice_ledger.py`、`check_dup.py`、`tests/`（未跟踪），改了 `.gitignore`、`README.md`、`SKILL.md`。这个 checkout 就是正在用的 skill 和台账，改动本该在原处生效，**不是**"该建 worktree 没建"的例子 |
+| 不该建 worktree 的 | `task:cafe1bc2d26a` 改被忽略的 `config-local.yaml`（服务读的就是这一份）；JD、Horizon monitor 的任务在原目录写调研和笔记（JD 你直接在 main 上记文档，Horizon monitor 没有远端） |
+| 仓库外的位置认不出 | 11-14 workflow 在 `~/workspace/naozhiwt/` 建的 3 个 worktree 收起时没认出（§15.14）；早期 `~/Workspace/naozhi-wt*` 的 5 个目录还被登记成了工作区 |
+| 没忽略 `.claude/worktrees/` 的仓库 | sample-eks-enterprise-quickstart、emburse-reimbursement。实测建嵌套 worktree 后主 checkout 多一行 `?? .claude/`，往 `info/exclude` 加 `/.claude/worktrees/` 就干净 |
+| 默认分支 | CliScripts、JDClaudeTest、bedrock-performance 没有 `origin/HEAD`，`git symbolic-ref refs/remotes/origin/HEAD` 直接失败 |
+| 上游 | `git worktree add -b <分支> <路径> origin/main` 会把上游设成 `origin/main`（实测"设置为跟踪 'origin/main'"）：裸 `git push` 在 `push.default=simple` 下报错，设成 `upstream` 的机器上会直接推到 main |
+| 收起记录 | 旁路文件里 101 次收起，81 次是"不在 worktree 里干活"（只读任务、不是 git 仓库的工作区），正常 |
+| EC2 | 11-17 经 SSM 核实 `gh` 已登录，收起查 PR 与 Mac 相同 |
+
+第三组：懂你。
+
+| 现象 | 数字 |
+|---|---|
+| auto-memory | 21 个项目目录有条目，共 326 条（不算 `MEMORY.md`），约 1.07 MB；近 7 天新增或改动 144 条，近 24 小时 12 条。写者是各项目的 CLI 会话，**和你看页面同时写同一个文件是真实情况**。本机 235 个 memory 目录里 214 个是空的 |
+| `remember` | v0.7.3（11-10）上线后正式实例一次没用过 |
+| 目录名 | 登记表是 `/Users/zhaokm/Workspace/naozhi`（大写 W），记忆目录是 `-Users-zhaokm-workspace-naozhi`；没登记的目录名把 `/`、`.` 都编成 `-`，超长的还会被哈希，还原不了 |
+| 原始记录 | Planner 页中栏的会话卡有"原始记录 / 只看里程碑"开关（`planner_chat.js:433`），每次打开都回到里程碑（`:488` `raw: false`）；同一会话已打开时再打开直接返回（`:486`）；从任务卡要点两次，摘要里没有入口 |
+| 语音 | Mac 的配置没有 `transcribe` 段，10-05 以来 `/api/transcribe` 被调用 0 次；手机只在 HTTPS 下给麦克风 |
+| 监听 | Mac 上 dashboard 在 `*:8180` 明文 HTTP；EC2 经 CloudFront 公开；两边都只靠自签的 `dashboard_token` |
+
+**① `halt` / `cancel` 只在你发起的回合（D118）**
+
+格式与 `status` / `relay` 一样严格，多一个字段就拒收；两种都用 `task` 字段（与 `status` 一致，`status` 的 `task` 本来就收你开的会话的 key）：
+
+````
+```naozhi-action
+{"type":"halt","task":"<会话 key>","why":"…"}
+```
+```naozhi-action
+{"type":"cancel","task":"<task: key>","why":"…"}
+```
+````
+
+`why` 必填，不超过 500 字。
+- **只在你发起的回合跑**：两种都加进 `needsUser`，与 `relay`、`park` 同列；也加进巡检、会前简报、lookup 回合的拒收清单。回执、跨会话消息、提醒、托管、未执行回执的回合一律拒收，回执写"这一轮不是用户发起的，halt / cancel 只在用户让你停的那一轮有效，没有停"。
+- **Planner 不自己叫停**：它只在回合结束时醒，看不到回合中途；等它知道，那一轮已经结束，最多挡住托管接着发，而托管已停本来就是"等你"的默认。所以 §4.3"严重 → 先叫停再给你卡片"、§4.9 介入阶梯的"叫停"、信任阶梯的"叫停始终可用"改为不做（触发不了），叫停的提问卡、"你正看着时不叫停"、D57 推送与 §4.9 `user_engaged` 的修订都不做。以后有了回合中途观察再议（§16.1）。
+- **提示词 v22**（`prompt.go`）：v0.9.x 唯一一次升版，与 ④ 的半句合并。动作块清单加两条：
+  > - halt：`{"type":"halt","task":"<会话 key>","why":"…"}`。用户让你停下某个会话时用：网关停掉它的托管、关掉进程（连同后台任务），会话与上下文都在；用户在会话里发一条消息它就接着做。不要用 SendMessage 让会话停下，也不要用 relay 让叫停的会话继续：要它继续，请用户在会话里说一句。只在用户发消息或回答提问的回合有效。
+  > - cancel：`{"type":"cancel","task":"<task: key>","why":"…"}`。用户说某个任务不用做了时用：等于用户在"任务"里点停止，任务记为已完成（已停止），引用它的承诺一并关闭，之后照常收起。只在用户发消息或回答提问的回合有效；只是判断它做完了用 status。
+
+**② halt：托管停 + 关进程（D119）**
+
+halt 不造新状态，用托管已有的血缘链停（`stopLocked`，`custody.go:893`）：
+1. `custody` 加一个导出方法 `Engine.Halt(key, why)`，调 `stopLocked(root, key, chain, "你让 Planner 叫停：" + why, false)`。它已经做了这些：
+   - 设 `Chain.Stopped` 并存进旁路文件，重启后照样成立；
+   - `retryCheckLocked` → `stoppedLocked`（`:766-781`）挡住全部托管发送：出错重试、按建议代答、Planner 经托管的继续、凭证续上后的继续；
+   - 写 journal `kind=custody`、`event=stopped`，会话视图的旁注显示"托管：已停 · 你让 Planner 叫停：…"（`session_notes.js` 现有的 `custodyBody`），早报照常计入；
+   - 在"等你"开一张"<会话名> 托管已停"（`custody:<root>`，按来源去重），任务卡与托管 chip 显示"托管已停"。
+2. 再 `DropPlannerQueue(key)` 丢掉排给它的消息，`Router.StopSession(key)` 关进程，连同后台任务与 workflow；收件 socket 随之关掉，SendMessage 也唤不醒它。这两步就是"停止"现在走的路（`wireup.StopTask`，拆出不发回执的那一半给 halt 用）。
+
+为什么关进程，而不像 §3.3 写的只发 interrupt：interrupt 只截断这一轮，后台任务照跑、跑完会开新一轮（D109），收件 socket 也还开着（§6.2 实测），做不到"停下就不动了"。§3.3 的要点是"不作为消息进上下文"，关进程同样满足，下次续接 `--resume`，上下文不丢。
+
+其余规则：
+- **能叫停的**：本机 `task:` 会话；本机你开的、被观察的会话（D104），包括飞书 / Slack 等 IM 会话（`StopSession` 对任何 key 都能用，`watchable` 也不排除它们）。`planner:main`、`cron:`、`scratch:`、`sys:`、`scout:`、`reader:`、远程节点的会话拒收：远程的在 Planner 页切到那个节点、和它的 Planner 说（D96 / D97）。已收起的回执写"已经收起，没有在做事，不用叫停"。
+- **已经在等你的**：会话有没回答的 AskUserQuestion（`reap` 的 `Asking`），或它的 need_user 卡（`ReportSource(key)`）在"等你"里开着时，只停托管、**不关进程**，回执写"它已经在等用户回答，网关只停了托管，没有关进程"。关掉它会让你在卡上的回答送给一个死进程。
+- **恢复**：你在会话里亲自发一条消息（`takenOver`，`custody.go:1001`；`LastUser` 只认 `Source == ""`）。relay 照旧送达（那是你的原话，D98），但不解除托管停；提示词让 Planner 别用 relay 去恢复。不做自动超时解除。
+- **回执**：`checkEnded` 遇到托管已停的会话（`custody.Engine` 状态为已停），不补"这一轮已经结束，没有写汇报块"的回执，被截断的那一轮与 `Gone` 的"进程被停止"同样不补。汇报块照常转。
+- **任务状态**：halt 不改任务状态，没标完成就不会被收起；你要它不做了，在同一轮里说，Planner 用 cancel。
+- 不加旁路字段、`ErrHalted`、`Halted` 配置、新卡片类型，不改 `note.go`，不做启动时补关（托管停已持久化，进程活下来也只会空闲）。
+
+**③ cancel：现有的"停止"（D120）**
+
+cancel 直接调 `Board.Stop(id)`（`task.go:564`），行为与你在"任务"里点停止相同：
+- 任务记为已完成，标记人是你（`ByUser`），原因 `已停止`（`StoppedWhy`）；引用它的承诺一并关闭；`Config.Stop`（`wireup.StopTask`）丢队列、关进程；之后照 D95 / D105 收起，可"重新打开"。
+- 只在你发起的回合跑，本来就是你的话，所以记成你停的。记成 Planner 停的会让 `closedByUser`（`runner.go:1725`）认不出，Planner 在之后的回执回合里经托管就能把它重新打开；早报、"已停止"徽标、新结果蓝点也都认不出。
+- Planner 写的 why 显示在对话里它自己的块卡上，不进任务状态。
+- `stopReceipt`（`planner_tasks.go:257`）的"用户在「任务」里停止了"改成"用户停止了"，两种停止共用这一条回执。
+- 只对 `task:` key；已完成且没在跑的回执写"已经是已完成，没有在跑，不用停止"。不泛化 `Cancel(id, by, why)`，不加"Planner 按你的话停的"这类新文案。
+
+**④ 派出会话的 worktree（D121–D123，#3449 最小版）**
+
+规则写进网关给每个派出会话的系统提示词 `taskPrompt`（`internal/wireup/planner_tasks.go:38`），插在"交代以外的改动不做…"之后，约 5 行：
+
+```
+- 要提交、推送或开 PR 的改动（派活消息或仓库规定要的；改文件、新建文件都算），先给这件事建自己的 worktree，不在主 checkout（工作区原来那个目录，是用户的）里改文件、切分支或提交：用 EnterWorktree，或在仓库顶层 git fetch origin 后 git worktree add --no-track -b <分支> <仓库顶层>/.claude/worktrees/<名字> origin/<默认分支>，第一次推送 git push -u origin <分支>。默认分支取 refs/remotes/origin/HEAD，取不到用 git ls-remote --symref origin HEAD，再不行看本地有 main 还是 master。位置一律在 .claude/worktrees/ 下，派活消息另指位置也一样；<名字> 只用小写字母、数字和 -；新分支自己起名，已有 PR 的标题和分支名不改。
+- 要接着做的分支已经检出时：在主 checkout 里的不碰，写 need_user；在别的会话的 worktree 里的不进去，SendMessage 问 Planner 或写 blocked；在你自己（同一条血缘）原来那个 worktree 里的直接进去。
+- cd 和 git -C 后面写字面绝对路径，不用变量；git check-ignore 说没忽略 .claude/worktrees/ 时，往 <git rev-parse --git-common-dir>/info/exclude 加一行 /.claude/worktrees/。
+- 例外，在原目录做：只读的；只写不提交的报告和笔记；要在原处立刻生效的改动（skill、数据台账、本机配置如 config-local.yaml）；没有远端的仓库；仓库的 CLAUDE.md / skill 或用户另有规定的。已经在主 checkout 里改了的不搬、不撤，汇报里写明。
+- 用了 worktree 的，汇报里写 worktree 路径、分支和 PR 链接，没推送就写"未推送"。
+```
+
+- **为什么写在 `taskPrompt`**：每个派出会话都拿到，不靠 Planner 记得写；会话重新拉起（闲置回收、崩溃、`--resume`）时 `TaskOpts.ForKey` 重建，带上新文本。提示词随 spawn overlay 存在 shim 里（`spawn_layers.go:52` 把 `AppendSystemPrompt` 放进 `argvLayers.SystemPrompt`，`spawn_drift.go:49` 拿它比对；`:44-46` 那段说 systemPrompt 为空的注释已过时），换了文本不会被判漂移、杀掉在跑的会话，它们下次拉起时用新文本。Planner 提示词只在 dispatch 说明"所以 message 里不用写你的名字、ref 或汇报格式"后补半句"也不用写 worktree 的做法"，随 ① 的 v22。
+- **为什么是 `.claude/worktrees/`**：与 dev-workflow skill（`SKILL.md:10`）和 Claude Code 的惯例一致；项目目录里 `cd` 的位置跨命令保留，transcript 的 `cwd` 记得下来，收起的 `Dirs` / `InUse` 认得出；隐藏目录，项目扫描与 `go test ./...` 都跳过它。Workflow 子代理每条命令前 shell 会被重置、`commandDirs` 跳过带 `$` 的参数（`reap_transcripts.go:247`），所以要写字面绝对路径。
+- **EnterWorktree** 会挪动会话的 cwd，transcript 记得下来，收起照样认得出；基点和分支的要求只针对手写命令。
+- **非 GitHub 远端（D123）**：照样建 worktree，隔离的价值不变。收起时 `gh pr view` 查不到 PR，按 1 小时 / 4 小时 / 1 天退避后留着，任务卡上看得到；没推送的按原因通知一次（`reap.go` 按 `Notified` 去重）。攒多了再改成看远端分支是否已合入默认分支。EC2 有 `gh` 且已登录，行为与 Mac 相同。
+- **分支 / PR 互斥（D122）**：取消 §5.1"网关只对同一 PR / 分支做硬互斥"。它从没实现；真实数据里重叠只有 meeting-m1 一次，收起的 `InUse` 已经兜住；分支已检出的情况由上面第二条处理。
+- 只影响 `task:` 会话。网关不建、不查、不拦 worktree，不对"没用 worktree"另行提醒，收起逻辑一行不改，不加 `isolation` / `worktree_cleanup` 配置（#3449 完整版）。
+- **测试**：只在已有的 `TestTaskPromptReport`（`planner_tasks_test.go:231`）里加 2–3 个关键串：`.claude/worktrees/`、`--no-track`、`info/exclude`。不加新的 meta 测试；收起认 `.claude/worktrees/` 已有 `reap/git_test.go`、`reap_transcripts_test.go` 覆盖。
+
+**⑤ 原始记录一键直达（D124）**
+
+D67 状态三层的第三层，只改前端：
+- 任务卡"⋯"加一项"原始记录"（悬停"打开这个会话，连工具调用一起看"），派出的任务与"你开的"都有（`actsHtml` 里你开的那一支提前返回，`tasks.js:311`，也要加），承诺没有。展开的摘要底部加"看原始记录 ›"（`digestHtml`，`:370`）。
+- 两处都在中栏打开会话，直接是原始记录、滚到最新；头部按钮照旧显示"只看里程碑"，可切回。
+- `openPlannerSession(key, pending, {raw})`：同一会话已经打开时（现在 `:486` 直接返回），把 `raw` 置上并重画。
+- 其余打开照旧从里程碑开始，**不按标签页记住**开关：记住会让之后点任务标题打开的也都是原始，悄悄改掉"默认里程碑、原始记录展开看"。
+- 远程节点的会话同样适用（`eventsURL` 已带 node）；手机上中栏全屏。会话视图不加这个开关（它隐藏工具调用是既定做法，要显示得带内部事件重画整条对话流，M 级）。
+- e2e（mock-server，并进已有的任务卡用例）："⋯ → 原始记录"打开后看得到 tool_use、按钮是"只看里程碑"；同一会话已打开时点它会切到原始；摘要入口可用；你开的卡上有、承诺卡上没有。
+
+**⑥ 语音倒脑子：推迟（D125）**
+
+等 `transcribe` 在某个节点真开起来，或会议录音线（MR3）的本机识别接到 `/api/transcribe` 后面再做（§16.1）。不为它改提示词。做的时候按草案的最小版，并带上评审的几条：多件事那句按动作区分（"到时提醒或替用户盯着的用 promise；要做的用 dispatch；用户说'以后都这样 / 记下来'的规则或偏好用 remember"），与那一版别的提示词改动合并升版；"发给"不是 Planner 时那句不适用；手机窄屏的麦克风收进附件菜单；手势与会话视图的按住说话对齐或说明为什么不同。
+
+**⑦ 懂你：看、改、删记忆（D126，待定：暴露范围等 owner 定（builder-security））**
+
+这一部分要在 dashboard 的监听上加读写路由：Mac 上是 `*:8180` 明文 HTTP，EC2 经 CloudFront 公开，只靠自签的 `dashboard_token`；写进记忆的内容会进之后每个 bypass 会话的上下文，是一条持久的注入通道。所以**规格写在这里、暂不实现**，等 owner 在下面三种暴露范围里选一种：
+
+| 方案 | 读 | 写（改、删） | 反连 `api` 白名单 |
+|---|---|---|---|
+| A | 只认本机回环（127.0.0.1 / ::1）来的请求 | 同左 | 不进 |
+| B | 远端可读：`GET` 两条进白名单 | 只认本机回环 | 只进 `GET` |
+| C | 按草稿：四条都进白名单，远端可读写 | 远端可写 | 全进；依据是同一个令牌本来就能经 `/api/planner/send` 让 Mac 的 Planner 派活（D97），风险没有增加；owner 承担风险 |
+
+三种都要先过 builder-security，A 也是在网络服务上新增路由。下面是选定之后的做法（评审意见已全部写进去）。
+
+- **范围**：本节点 `~/.claude/projects/*/memory/` 下全部条目与各自的 `MEMORY.md`，包括 Planner 自己的目录（`remember` 写的）。`~/.claude/CLAUDE.md` 存在时列成只读一行，标"Planner 读；naozhi 拉起的会话不读"。范围与 Planner 的读规则（`agent.go:425`）一致，这就是"没有隐形画像"（D67）。不列托管 CLAUDE.md、`~/.claude/rules`、仓库里的 CLAUDE.md、`parked.md`、承诺、交接。跳过既没有条目也没有 `MEMORY.md` 的空目录。
+- **位置**：设置视图里"主题"下面一节（D77、§10），不加开关和配置项（D65 禁的是这两样）；入口还有 Planner 页"⋯"里的"懂你（记忆）›"和"记下了"卡上的"在懂你里看 ›"（定位到那一条）。CC 资产浏览器的"记忆"一类保持只读，顶部加一行"在设置 · 懂你里看全部、可改 ›"。
+- **不被重画冲掉**：`renderSettingsView`（`dashboard.js:1458`）每次点主题、拿到服务端主题、进入设置都整段重写 `innerHTML`。`#settings-memory` 挂在被重写的部分之外，作为一个持久的兄弟节点，只挂一次；有未保存的编辑框时，进入设置不重新读盘覆盖。
+- **节点**：这一节自己维护节点选择：本机（始终有，不看 `planner.enabled`）加上 `plannerNodes()` 里的远程节点，初值取 `plannerHost.node`；只有一个选项时不显示。远程的经 `/api/remote/{node}/…` 由那台自己读写（只在 B / C）。
+- **看**：顶部说明"Planner 和各项目的会话记住的关于你和你项目的事……改和删直接写回文件，对之后启动或续接的会话生效"；按标题、描述、正文首段筛选；"最近 7 天"最多 10 条；每个项目一组：Planner 自己的 → 登记过的工作区（`claudefs.ProjectSlug(路径)` 与目录名不区分大小写比较；Linux 上两个目录都对上时组名后附目录名）→ 其他目录（组名取该目录下任一 `*.jsonl` 首行的 `cwd`，读不到就原样显示目录名，不做还原）→ 临时目录（默认折叠）。条目行：标题、类型（feedback 偏好 / project 项目 / reference 参考 / user 关于你）、描述、相对时间，标记"没进索引"与组头的"索引里 N 行指向不存在的文件"。`parseMemoryFrontmatter`（`handler.go:342`）要扩展到读 `metadata.source` 与 `metadata.remembered_at`，并能反解 `remember` 写的 JSON 引号串描述。
+- **改**：等宽文本框改整份原文，保存带打开时的版本（`mtime` 纳秒加大小）。被别人改过回 409，载入最新内容、草稿留在下面；文件不在回 404 并带 `{"error":"memory_gone"}`，提示"这条已经被删了"；**别的 404**（旧版本节点不认这条路由，`connector_api.go:55` 与直连节点都回 not found）提示"那台机器的 naozhi 版本还不支持懂你，升级后可用"。超过 256 KB（`maxMemoryFileBytes`）或不是 UTF-8 的只读。网关保存时不动 frontmatter；规格写明：Planner 再 `remember` 同名条目会替换整条，包括你手改的部分；你去掉 `source` 行后，这一条只能在懂你里删。
+- **删**：不弹确认，5 秒撤销（沿用 `UNDO_MS`）后才发 DELETE：删文件，再只去掉 `MEMORY.md` 里链接 `(<name>.md)` 的行。DELETE 不是 2xx 时这一行回到原位并提示：409"这条刚被改过，没有删"；404（`memory_gone`）当作已删、不恢复；503 / 超时"没删成（节点离线）"。`MEMORY.md` 只能改不能删。不能新建、改名、挪项目，新增仍走对话（`remember`）。
+- **一把锁**：`remember.go` 的 `editIndex` / `plannerWritten` 挪到 `internal/claudefs/memory.go`，带进程内锁，`remember`、`forget` 和这一节的写操作都经过它；与 CLI 会话的并发写只靠版本检查兜底。CLAUDE.md 的 `claudefs` 一行补"含 auto-memory 索引的增删，带进程内锁"。认"Planner 自己的"那个目录，与 agent 用同一个 `ClaudeDir` 来源算。
+- **安全**：参数只有 `project`（匹配 `memoryProjectDirRE`，且是解析后的 projects 根下已有的目录）和 `name`（`^[a-zA-Z0-9_-]{1,64}$` 或 `MEMORY`）；落盘前 `EvalSymlinks` 后再查一次仍在根下；只覆盖已有的 `.md`，同目录临时文件加 rename；不新建文件或目录。
+- **测试**：`ext/memory` 的列表、PUT（版本、409、404 `memory_gone`、坏参数、`..`、指出根目录的符号链接、拒新建、413）、DELETE（只去掉精确链接的那一行）；`claudefs` 的 `Remember` 与 DELETE 在 `-race` 下并发；node 侧只留一条真实转发 PUT 带请求体的测试（只在 B / C）；e2e 合成 `memory_view` 一份（分组、筛选、409 草稿保留、编辑中点主题草稿还在、5 秒撤销、DELETE 409 后恢复、远程节点回 not found 时的提示、手机视口），"在懂你里看"并进 `tasks` 那份。
+- 改动量 M，拆两个 PR：后端（路由、`claudefs` 锁、按所选方案的白名单）与前端（设置一节、入口）。
+
+**重启与多节点**
+
+- halt 的托管停在旁路文件里，重启后照样成立；关掉的进程重启后仍是死的，没有东西会自动续接它。cancel 的状态在任务板里。
+- 每个节点的 Planner 只停自己的会话（D96 / D97），不做跨节点叫停；还没升级的节点不认 `halt` / `cancel`，块按未知类型进未执行回执。
+- `taskPrompt` 用的是本节点 binary 里的文本：从 EC2 的 Planner 页切到 Mac 派出的会话跑在 Mac 上，用 Mac 的文本。
+
+**不做**
+
+- Planner 自己叫停（触发不了，§16.1）；急停、全局叫停、"叫停全部任务"（D93），暂停推送与托管仍是唯一的全局开关（§7.6）。
+- 只发 interrupt 的软叫停；叫停自动超时解除；跨节点叫停；`cancel` 用在你开的会话上（你自己"结束 / 移除"，Planner 标完成用 `status`）；网关自己判断要不要叫停（§3.3 发送方里的"网关"划掉）。
+- 叫停的提问卡、新按钮、接口、配置项；任务卡上的"继续"按钮（发一条消息就是继续）。
+- 网关建 / 查 / 拦 worktree；分支 / PR 硬互斥（D122，§16）；收起支持非 GitHub 的 PR 查询（D123）；任务卡上新增 worktree 路径字段（汇报里写）。
+- 会话视图的原始记录开关；下载原始 JSONL。
+- 语音倒脑子（D125）；懂你的记忆界面在 owner 定暴露范围之前（D126）。
+
+**改动与拆分**
+
+整体 S–M，三个 PR，可以并行：
+- **叫停与停止**（后端加提示词 v22）：
+  - `internal/planner/action/parse.go`：`TypeHalt`、`TypeCancel`，`Block` 加两个字段，decode 与 validate（`task`、`why` ≤ 500 字、多字段拒收），未知类型的报错列出全部类型；
+  - `internal/planner/action/runner.go`：`needsUser`（`:1596`）与巡检类回合的拒收清单（`:1197`）加两种，`refuseNotUser` 的措辞；`halt()`：目标判定、等你中只停托管、否则 `Custody.Halt` 再关进程；`cancel()`：`Tasks.Stop`；`checkEnded` 跳过托管已停的会话；`Custodian` 加 `Halt`，`Config` 加关进程的钩子；
+  - `internal/planner/custody/custody.go`：导出 `Engine.Halt(key, why)`；
+  - `internal/wireup/planner_tasks.go`：`StopTask` 拆出不发回执的关进程一半；`stopReceipt` 措辞；`cmd/naozhi` 接线；
+  - `internal/planner/agent/prompt.go`：`PromptVersion` 22，halt / cancel 两条，dispatch 说明补"也不用写 worktree 的做法"；
+  - `static/planner_cards.js`：`ACTION_TYPES` 加两种，块卡一行"⏸ 叫停 · <会话名> · <why 首句>" / "■ 停止 · <会话名> · <why 首句>"；
+  - 测试：parse 的合法与拒收；runner 按回合来源一张表（用户、回答、回执、提醒、托管、巡检、会前简报、lookup）；halt 的各种目标与"等你中只停托管"；cancel 走 `Board.Stop`、记你停的；托管停之后 `Deliver` 拒收、你发消息后恢复、relay 不解除；`checkEnded` 不补回执；块卡 e2e。
+- **派出会话的 worktree**：`taskPrompt` 约 5 行与它上面的注释，`TestTaskPromptReport` 加 2–3 个串（S）。
+- **原始记录直达**：`planner_chat.js`、`tasks.js` 与 e2e（S）。
+- 懂你的记忆界面等 D126 定了再拆（M）；语音推迟（D125）。
+
+### 15.13 剩余内容排期（11-08；11-16、11-17 调整）
 
 > 依据：`/tmp/rfc-audit-2026-11-08.md` 的逐条盘点（基线 `5994daf5`）与 §15.12。改动量 S / M / L；"前置"写的是依据的 §17.2 项（11-08 已全部采纳）或要先落地的版本。排期是推荐顺序，不是承诺日期。
 
@@ -1775,11 +1955,11 @@ Planner 页的时间线默认只显示"对话"层，其余折成"动态"。判�
 | **v0.8.0**（已发布 11-10；v0.8.1–v0.8.7 是修复与小功能版） | §15.12 ⑨：一次性读取者 + `lookup` + 最小版污染标记（§7.4）；提示词 v20；补漏（11-10）：隔离实例（状态根不是本账户 `~/.naozhi`）默认不跑巡检、会前简报与 cron 定时运行，自升级只通知，`isolation.run_schedules: true` 才照常；`update.mode` 只认 notify / download / auto，其他值加载时报错（原来静默当 download）；污染标记的 deny 实测挡得住 Grep（§15.12 ⑨ 末） | M | §17.2 ⑨ |
 | ~~v0.8.x~~ | ~~自升级验签：嵌入公钥（#1738）、发版签名；做完之前 `update.mode: auto` 要求 `.sig` 存在~~（**D111，11-16 不排期**：推迟到 P5 执行型主动落到 naozhi 仓库时，见 §16.1） | — | — |
 | **v0.9.0**（11-16 定，**11-16 已发布**；PR #3950–#3958、#3960） | §15.14：时间线分对话与动态两层、单独聊、回执去重与延后、提问过期、交接出处与搁置区、Planner 读 GitHub issue、读取者内网来源（#3942）、巡检凭证补跑与超时排查、收起 worktree 两处修正、小项 | M | 无 |
-| v0.9.x | 动作块 `halt` / `cancel`（§6.2 约定表）；派活提示词要求改代码的任务先建 worktree（#3449 的最小版，网关不接管）；P4 "懂你"设置视图（见下面 P4 行） | S–M | v0.9.0 |
+| v0.9.x（11-17 定，§15.15） | 动作块 `halt` / `cancel`，只在你发起的回合（D118–D120）；派出会话的系统提示词要求要提交的改动先建 worktree（#3449 的最小版，网关不接管，D121–D123）；Planner 提示词 v22（唯一一次升版）；原始记录一键直达（D124）。~~P4 "懂你"设置视图~~（D126：记忆界面规格已写，**待定**，暴露范围等 owner 按 builder-security 定）；~~语音倒脑子~~（D125：推迟） | S–M | v0.9.0 |
 | ~~原 v0.9.0 余项~~ | ~~`task:` 独立配额~~（**D117 改为有条件**：派活挤占你自己会话的 `max_procs` 名额时再做）；~~网关按会话建 worktree（#3449 完整版）~~（D117：派出会话已按 dev-workflow 自建 worktree、收起时网关清理，先用提示词补别的仓库） | — | — |
 | ~~v0.9.x（P3 判断）~~ | ~~检查点由网关识别 + verifier、检查记录（kind `check`）、`knowledge_propose`~~（**D117 推迟**，见 §16.1；`knowledge_propose` 随 P4 再议） | — | — |
 | v0.10（P3 幕僚） | 工作区幕僚（D60、§6.3）：按需派出的只读会话；`project:{name}:planner` 改造为幕僚、`project.yaml` 的 planner_prompt 导入为章程；按工作区加载（§4.1） | L | v0.9.0 |
-| P4（11-16 起提前到 v0.9.x） | 设置视图"懂你"：看、改、删 auto-memory 与 `remember` 写下的条目（D41、D65 的一句话设置用 `remember` 落地）；状态三层（D67）由 §15.12 ② 的任务卡与摘要基本覆盖，剩"原始记录"一键直达；语音倒脑子（D66） | M | v0.7.1 |
+| P4（11-16 起提前到 v0.9.x） | 设置视图"懂你"：看、改、删 auto-memory 与 `remember` 写下的条目（D41、D65 的一句话设置用 `remember` 落地）（**待定**：规格见 §15.15 ⑦，D126）；状态三层（D67）由 §15.12 ② 的任务卡与摘要基本覆盖，剩"原始记录"一键直达（v0.9.x，D124）；语音倒脑子（D66）（推迟，D125） | M | v0.7.1；记忆界面等 owner 定暴露范围 |
 | P5 | 建议型与执行型主动：`planner.yaml` 的 charter / duties、自主度、Now / Next / Not-now（D14）、Planner 当放行人的检查点闸门；首个执行型在 naozhi 仓库 | L | 落到 naozhi 仓库前补自升级验签（D111）与检查点（§16.1） |
 | P6 | 带教：纠正的信号强度、约束编译成 deny、写作风格（D20） | M | P4 |
 | P7 第二段 | `naozhi join` 配对（`node-pairing.md`）、系统视图"节点"区块、`dispatch-v1`、离线状态机：**条件触发**，出现"多台工作机由中心分配"时再做（D97） | L | 条件 |
@@ -1788,7 +1968,7 @@ Planner 页的时间线默认只显示"对话"层，其余折成"动态"。判�
 | iOS app | 单独立项（D80），复用"等你"与推送管线 | L | 单独立项 |
 | 会议录音 | `meeting-notes.md`（MR1–MR8）：M0 实测起步，与 Planner 各版并行 | L | 单独立项 |
 
-**不排期**（§16、§16.1 的明确不做与有条件推迟项照旧）：判权 hook、动作类别分类表、委托授权、急停、L1 停顿判读、契约与验收项、CC `/goal`、影子模式与回放包、金丝雀、六态生命周期、幕僚常驻、知识结构化与夜间整理、跨节点派活（D97）、远程节点会话的托管、话题线 / 多个 Planner 会话（§15.12）。
+**不排期**（§16、§16.1 的明确不做与有条件推迟项照旧）：判权 hook、动作类别分类表、委托授权、急停、L1 停顿判读、契约与验收项、CC `/goal`、影子模式与回放包、金丝雀、六态生命周期、幕僚常驻、知识结构化与夜间整理、跨节点派活（D97）、远程节点会话的托管、话题线 / 多个 Planner 会话（§15.12）、Planner 自己叫停（D118）、网关的分支 / PR 互斥（D122）。
 
 ## 16. 明确不做
 
@@ -1819,6 +1999,7 @@ Planner 页的时间线默认只显示"对话"层，其余折成"动态"。判�
 | 留存与增长设计（推送拉活） | 单人使用，衡量标准是替你省掉的操作，不是打开次数 |
 | 设置页与新配置项 | D65：一律用对话设置 |
 | naozhi MCP 服务 | D81：会话间通信用 CC 原生跨会话消息，向网关请求动作用动作块 |
+| 网关对同一 PR / 分支的硬互斥（原 §5.1） | D122：从没实现；D88 可见 + 可停止与减法方向；真实数据里重叠只有 meeting-m1 一次，收起的 `InUse` 已兜住；分支已检出由派出会话的提示词处理（D121） |
 
 ### 16.1 推迟项与再加回的条件（D68）
 
@@ -1828,6 +2009,8 @@ Planner 页的时间线默认只显示"对话"层，其余折成"动态"。判�
 | 自升级验签（嵌入公钥 `trustedSigKeys`、发版签名、auto 模式要求 `.sig`；#1738，D54 第 2 道，D111） | P5 执行型主动落到 naozhi 仓库，即 Planner 派出的会话能自己合并 PR 或打 tag。签名工具、release 流水线与 `.sig` 校验代码已在，加回时只需生成密钥、填公钥、发版签名 |
 | 检查点由网关识别（ExitPlanMode、第一份 diff、开 PR）、干净上下文评审会话（verifier，§4.9）、检查记录（kind `check`）（D117） | 派出会话交付的东西出过一次错、你事后才发现；或 P5 执行型主动开始自主合并 PR |
 | `task:` 独立配额（§5.2）（D117） | 派出会话挤占了你自己会话的 `max_procs` 名额 |
+| Planner 自己叫停（§4.3、§4.9，D118） | 有了回合中途观察：Planner 能在会话的回合进行中看到它在做什么（现在只在回合结束时醒） |
+| 语音倒脑子（§10.1，D66、D125） | `transcribe` 在某个节点真开起来，或会议录音线（MR3）的本机识别接到 `/api/transcribe` 后面 |
 | 两周影子模式、回放包、准确度成绩单 | 信任阶梯不足以发现 Planner 的系统性误判（出现过一次你事后才发现的错误介入） |
 | 指令四条件、可解析证据哈希校验、`appeal` 工具 | 出现会话与 Planner 反复分歧、你判不过来 |
 | ~~L1 停顿判读~~ | ~~L0 误判明显（自动继续打断了该停的会话，或该继续的没继续）~~（D93 收窄：不做，见 §16；A / E 交给 Planner） |
@@ -2014,6 +2197,15 @@ Planner 页的时间线默认只显示"对话"层，其余折成"动态"。判�
 | D115 | 11-16 | 带 `task` 的 ask 在你已直接给那个会话发过消息、或任务已完成 / 收起时自动关闭；转达给已完成任务的答复不再把它改回进行中（§15.14 ④） | 11-14 录音清理：答了一个过期提问，任务被重新打开，你又说了一次"任务结束" |
 | D116 | 11-16 | 交接事项必须带出处，超过 3 天没动的"等你定"移进 `planner/parked.md`；网关每小时把登记仓库的 GitHub issue 写进 Planner 读目录；读取者加内网来源（`ReadInternalWebsites`，#3942），Planner 本身仍不挂 MCP（§15.14 ⑤） | 同一问题 4 天问了 5 次、每次重读 RFC；四条"等你定"三份交接原样重抄；无出处的条目派出后查不到来源 |
 | D117 | 11-16 | 单独聊：Planner 页输入框"发给"选"新对话"即开一个普通会话在 Planner 页里聊（默认工作目录与模型，不带快照），↗ 追问抽屉可"转成单独聊"，收尾"交给 Planner" / "结束" / 闲置 24 小时收起（§15.14 ⑥）；排期调整：P3 判断（检查点、verifier、检查记录）推迟到 §16.1，`task:` 独立配额改为有条件，#3449 先用派活提示词，`halt` / `cancel` 与 P4 提前到 v0.9.x（§15.13） | owner 11-16 按建议规划；近两天 8 个一次性问题另开会话问；减法方向（不加闸门与治理环节） |
+| D118 | 11-17 | 动作块 `halt`（叫停）与 `cancel`（停止）只在你发起的回合有效（与 `relay` / `park` 同列 `needsUser`），字段都用 `task`；Planner 不自己叫停：§4.3"严重 → 先叫停再给你卡片"、§4.9 介入阶梯的"叫停"与信任阶梯的"叫停始终可用"改为不做（触发不了），有了回合中途观察再议（§16.1）；叫停的提问卡、"你正看着时不叫停"、D57 与 §4.9 `user_engaged` 的修订都不做；Planner 提示词 v22 是 v0.9.x 唯一一次升版，与 worktree 的半句合并（§15.15 ①；修订 §0、§3.3、§4.3、§4.7、§4.9，D47 / D68 的"叫停始终可用"） | Planner 只在回合结束时醒（回执、跨会话消息、巡检、提醒），看不到会话正在做什么，等它知道那一轮已经结束；107 个派出任务没有一次需要叫停，破坏性操作前会话自己停下等你（11-08 destroy）；你两周只停过 1 次、对 Planner 说"停"0 次；owner 11-17 定 |
+| D119 | 11-17 | halt = 托管的血缘链停 + 关进程：新增 `custody.Engine.Halt(key, why)` 调 `stopLocked`（原因"你让 Planner 叫停：<why>"），再 `DropPlannerQueue` + `Router.StopSession`；会话与上下文保留，你在会话里亲自发一条消息即恢复（`takenOver`），relay 照旧送达但不解除；会话在等 AskUserQuestion 或 need_user 卡开着时只停托管、不关进程；`checkEnded` 不给托管已停的会话补"没写汇报块"回执；本机 `task:` 与你开的被观察会话（含 IM 会话）可叫停。不加旁路字段、`ErrHalted`、配置、卡片类型，不做启动补关（§15.15 ②；修订 §3.3 halt 一行的 interrupt 做法） | interrupt 只截断这一轮，后台任务照跑、收件 socket 还开着，做不到"停下就不动了"；托管停已经挡住全部托管发送、写 journal 与旁注、开"托管已停"、存在旁路文件、你发消息自动解除，再造一套是重复（评审）；关掉等你回答的进程会让答案送给死进程；owner 11-17 定 |
+| D120 | 11-17 | cancel = 现有的 `Board.Stop`：记你停的（`ByUser`、`已停止`），引用它的承诺一并关闭，之后照常收起；Planner 写的 why 只在它的块卡上；不泛化 `Cancel(id, by, why)`、不加新文案；`stopReceipt` 去掉"在「任务」里"，两种停止共用（§15.15 ③） | 只在你发起的回合跑，本来就是你的话；记成 Planner 停的会让 `closedByUser`、早报、"已停止"徽标与新结果蓝点都认不出，Planner 还能在回执回合经托管把它重新打开（评审）；owner 11-17 定 |
+| D121 | 11-17 | 派出会话要提交、推送或开 PR 的改动先建自己的 worktree：规则写进网关给派出会话的系统提示词 `taskPrompt`（约 5 行），位置一律 `<仓库顶层>/.claude/worktrees/<名字>`（派活消息另指也一样），用 EnterWorktree 或 `git worktree add --no-track -b`，第一次 `git push -u origin <分支>`，默认分支按 origin/HEAD → `ls-remote --symref` → 本地 main / master 兜底；分支已检出时：主 checkout → need_user，别的会话的 worktree → 问 Planner 或 blocked，自己血缘的 → 进去；`cd` / `git -C` 写字面绝对路径；没忽略就写 `info/exclude`；汇报写路径、分支、PR（或"未推送"）；例外含要在原处生效的改动（skill、数据台账、本机配置）。网关不建、不查、不拦，收起不改；测试只在已有的提示词测试里加 2–3 个串（§15.15 ④；#3449 最小版；修订 §5.1） | 100 条派活消息只有 23 条写了 worktree；naozhi 的 23 条 worktree 记录全在 `.claude/worktrees/`、收起认得出，仓库外的兄弟目录认不出；`--track` 默认会让裸 `git push` 报错或推到 main；3 个已登记仓库没有 origin/HEAD；报销台账那次是该在原处生效的改动（评审）；owner 11-17 定 |
+| D122 | 11-17 | 取消 §5.1"网关只对同一 PR / 分支做硬互斥"（§16） | 从没实现；D88 可见 + 可停止与减法方向；真实数据里重叠只有 meeting-m1 一次，收起的 `InUse` 已兜住；分支已检出的情况由 D121 的提示词处理；owner 11-17 定 |
+| D123 | 11-17 | 远端不在 GitHub 的仓库照样建 worktree，收起时查不到 PR 就留着、任务卡上可见，攒多了再改成看远端分支是否已合入默认分支；EC2 已登录 `gh`（11-17 经 SSM 核实），收起行为与 Mac 相同（§15.15 ④；#3449 留言） | 隔离的价值不随托管平台变；现在只有报销台账一个 gitlab 仓库，留着不出错；按"只在 blocker 上请示"不另问；owner 11-17 定 |
+| D124 | 11-17 | 原始记录一键直达，只改前端：任务卡"⋯"（派出的与你开的，不含承诺）和展开的摘要底部各一个入口，直接以原始记录打开；`openPlannerSession` 收 `{raw}`，同一会话已打开时切到原始并重画；其余打开照旧从里程碑开始，不按标签页记住（§15.15 ⑤；D67 状态三层的第三层） | 现在要打开再切、点两次，同一会话已打开时点了没反应（`planner_chat.js:486`）；按标签页记住会悄悄改掉"默认里程碑"（评审）；owner 11-17 定 |
+| D125 | 11-17 | 语音倒脑子推迟：等 `transcribe` 在某个节点真开起来，或会议录音的本机识别接到 `/api/transcribe` 后面再做；不为它改提示词（§15.15 ⑥、§16.1） | Mac 没配 `transcribe`，10-05 以来 `/api/transcribe` 0 次，手机只能经 HTTPS 用麦克风；为一个用不了的功能升提示词要多换一次班（评审）；owner 11-17 定 |
+| D126 | 11-17 | 懂你的记忆界面（看、改、删 auto-memory，新增 `/api/memories` 读写路由）**待定**：规格写进 §15.15 ⑦（评审意见全部采纳），暴露范围等 owner 按 builder-security 定（A 仅本机回环可读写、不进反连白名单；B 远端只读、写只限本机；C 按草稿远端读写，owner 承担风险），定之前不实现；§3.7 的"懂你：偏好、先例"一行改为由 auto-memory 承担（D106 已是事实），授权、边界一行注"P5 / P6，未建" | 它要在 Mac 上 `*:8180` 明文 HTTP、EC2 经 CloudFront 公开的监听上加读写路由，只靠自签的 `dashboard_token` 把关；写进记忆的内容会进之后每个 bypass 会话的上下文，是持久的注入通道；owner 11-17 定 |
 
 ## 附录 A. auto mode 实测（2026-10-16）
 
