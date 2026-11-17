@@ -33,6 +33,10 @@ const ad = {
   elQuoteChip: null, elQuotePreview: null, elQuoteTrunc: null, elQuoteCtx: null, elLoading: null, elAgent: null,
   state: null,            // {scratchId, key, agentId, sourceKey, sourceMsgTime, quote, firstAsk, lastEventTime, pendingUserEchoes}
   pollTimer: null,
+  // pollGen names the running poll chain: a tick still awaiting its poll
+  // when the chain stopped or restarted must not schedule another, or two
+  // chains poll side by side (pollTimer still holds the spent id then).
+  pollGen: 0,
   sending: false,
   pollDelayMs: POLL_BASE_MS,
 };
@@ -67,6 +71,7 @@ function hideDrawer() {
 }
 
 function stopPolling() {
+  ad.pollGen++;
   if (ad.pollTimer) { clearTimeout(ad.pollTimer); ad.pollTimer = null; }
 }
 
@@ -187,7 +192,11 @@ function scratchAdmitEvent(st, e) {
 }
 // @contract-end scratchAdmitEvent
 
-function renderNewEvents(events) {
+// local marks the bubble sendInScratch draws of what was just sent: it
+// carries the browser's clock, so it neither moves the watermark the poll
+// asks the server with (?after=, the server's clock) nor meets the echo
+// filter it is the other half of.
+function renderNewEvents(events, local) {
   if (!Array.isArray(events) || events.length === 0) return;
   // Remember whether the user was reading the latest message BEFORE we
   // mutate the DOM. Mirrors the main transcript's policy: only auto-pin
@@ -204,9 +213,9 @@ function renderNewEvents(events) {
   let prevT = asideLastTime();
   for (const e of events) {
     // Same-ms replay / strictly-older guard; also owns the watermark.
-    if (!scratchAdmitEvent(ad.state, e)) continue;
+    if (!local && !scratchAdmitEvent(ad.state, e)) continue;
     // Drop server-echoed user messages that we already rendered locally.
-    if (matchesPendingEcho(e)) continue;
+    if (!local && matchesPendingEcho(e)) continue;
     // Reuse the main event renderer so aside bubbles match the transcript
     // style (markdown, code blocks, etc.) without duplicating logic.
     const h = eventHtml(e);
@@ -243,12 +252,16 @@ function renderNewEvents(events) {
 }
 
 async function pollOnce() {
-  if (!ad.state) return;
+  const st = ad.state;
+  if (!st) return;
   try {
-    let url = NZ_CONTRACT.API.sessions_events + '?key=' + encodeURIComponent(ad.state.key);
-    if (ad.state.lastEventTime > 0) url += '&after=' + ad.state.lastEventTime;
+    let url = NZ_CONTRACT.API.sessions_events + '?key=' + encodeURIComponent(st.key);
+    if (st.lastEventTime > 0) url += '&after=' + st.lastEventTime;
     else url += '&limit=50';
     const r = await fetch(url);
+    // The drawer closed or another scratch opened meanwhile: these are
+    // the old scratch's events, not the one shown now.
+    if (ad.state !== st) return;
     if (!r.ok) {
       // 404 = the scratch session has no persisted events yet (brand-new,
       // first turn not landed). That is an expected empty state, not an
@@ -262,6 +275,7 @@ async function pollOnce() {
     // to the responsive base so newly-arriving events render promptly.
     ad.pollDelayMs = POLL_BASE_MS;
     const evs = await r.json();
+    if (ad.state !== st) return;
     if (Array.isArray(evs) && evs.length > 0) {
       renderNewEvents(evs);
       // Hide the "thinking…" indicator once the first bubble arrives.
@@ -281,11 +295,12 @@ function startPolling() {
   // Self-scheduling loop (not setInterval) so each tick's delay can grow
   // with the backoff set inside pollOnce. stopPolling()'s clearTimeout
   // cancels the next scheduled tick.
+  const gen = ad.pollGen;
   const tick = async () => {
     await pollOnce();
-    // stopPolling() nulls pollTimer; if that happened during the await we
-    // must not reschedule (the drawer closed mid-flight).
-    if (ad.pollTimer === null) return;
+    // stopPolling() ran during the await (the drawer closed mid-flight, or
+    // a send restarted the chain): this chain ends here.
+    if (gen !== ad.pollGen) return;
     ad.pollTimer = setTimeout(tick, ad.pollDelayMs);
   };
   ad.pollTimer = setTimeout(tick, ad.pollDelayMs);
@@ -397,10 +412,11 @@ async function sendInScratch() {
   if (!ad.state.firstAsk) ad.state.firstAsk = text;
   // Render the user message immediately via renderNewEvents so scroll
   // policy, divider insertion, and ↗-button stripping all match the
-  // poll path. The time stamp is just above Date.now() so it sorts
-  // after whatever was already rendered; the subsequent server replay
-  // will be consumed by matchesPendingEcho.
-  renderNewEvents([{type: 'user', detail: text, time: Date.now()}]);
+  // poll path. Its time only places the bubble's divider: a reply event
+  // the server stamped before it (a clock ahead of the server's, or the
+  // last reply's tail not polled yet) must still come. The subsequent
+  // server replay will be consumed by matchesPendingEcho.
+  renderNewEvents([{type: 'user', detail: text, time: Date.now()}], true);
   ad.elInput.value = '';
   try {
     const r = await fetch(NZ_CONTRACT.API.sessions_send, {
