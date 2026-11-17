@@ -1703,7 +1703,7 @@ Planner 页的时间线默认只显示"对话"层，其余折成"动态"。判�
 - **出处**：交接里每条事项都要带出处：任务 key、承诺 ID、`#issue`，或你那句话的时间。没有出处的不写（提示词 v21 + 交接校验：缺出处的行数记进 journal 观察，不拒收）。
 - **搁置区**："等你定"的事项超过 3 天没动，移进 `planner/parked.md`，每条带出处和移入日期，不再每班重抄。交接只写一行"搁置 N 条，见 parked.md"。早报每周一列一次搁置清单。你说"放下"的事直接进搁置区。
 - **GitHub issue**：
-  - 网关每小时对登记的工作区里有 GitHub 远端的仓库，用 `gh issue list --state open` 加近 7 天关闭的，写 `planner/github/<owner>_<repo>.md`：编号、标题、标签、更新时间。
+  - 网关每小时对登记的工作区里有 GitHub 远端的仓库，用 `gh issue list --state open` 加近 7 天关闭的，写 `planner/github/<owner>+<repo>.md`：编号、标题、标签、更新时间。
   - 这个文件进 Planner 的读目录。Planner 不挂网络工具，`gh` 失败就留旧文件、注明时间。
   - 提示词加一句：问"还有什么要做"时先读它和 RFC 的排期表。
 - **内部网页（#3942）**：读取者（§15.12 ⑨）加一个内网来源，`builder-mcp` 只开 `ReadInternalWebsites`。`lookup` 的问题或 URL 指向 amazon / a2z.com / aws.dev 时可以用它，会话照常记污染标记（kind `web`）。Planner 本身仍不挂 MCP（D107）。
