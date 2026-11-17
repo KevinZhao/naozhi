@@ -1,6 +1,8 @@
 package selfupdate
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -152,5 +154,31 @@ func TestServiceRunning_LinuxAsksSystemd(t *testing.T) {
 		if got := ServiceRunning(); got != active {
 			t.Errorf("ServiceRunning() = %v with the unit active=%v", got, active)
 		}
+	}
+}
+
+// With no service managing this process the in-process restart cannot happen,
+// and it must say so: a nil sent update.mode auto's doInstall on to report
+// "restarting" forever while the old binary kept running. Every probe is faked
+// (systemd unit/MainPID on linux, `launchctl` on darwin), so nothing on the
+// host is restarted.
+func TestRestartServiceNoWait_UnmanagedReportsUnsupported(t *testing.T) {
+	switch runtime.GOOS {
+	case "linux":
+		withStubbedUnitActive(t, func() bool { return false })
+		withStubbedMainPID(t, 0)
+	case "darwin":
+	default:
+		t.Skipf("no service manager restart on %s", runtime.GOOS)
+	}
+	t.Setenv(xpcServiceNameEnv, "com.naozhi.agent")
+	f := &fakeExec{t: t, listFail: true}
+	withFakeExec(t, f)
+
+	if err := restartServiceNoWait(context.Background()); !errors.Is(err, ErrRestartUnsupported) {
+		t.Errorf("restartServiceNoWait() = %v, want ErrRestartUnsupported when nothing manages this process", err)
+	}
+	if argv := f.argvFor("kickstart"); argv != nil {
+		t.Errorf("issued %v with no verified launchd job", argv)
 	}
 }

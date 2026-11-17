@@ -188,11 +188,13 @@ func (d *doctor) checkZeroDowntimeScopes() {
 	d.add("zero-downtime", "pass", fmt.Sprintf("%d shim scope(s) active (sudoers hardening is working)", count))
 }
 
-// checkServerSecurity warns when dashboard_token is set on a non-loopback
-// addr without trusted_proxy: behind a TLS-terminating proxy r.TLS is nil and
-// X-Forwarded-Proto is ignored, so the dashboard cookie is minted without
-// Secure and can leak on a downgrade of the proxy hop. Warn, not FAIL —
-// doctor reserves FAIL for "broken now".
+// checkServerSecurity warns on a non-loopback addr without trusted_proxy in
+// two cases. With no dashboard_token the whole dashboard API, sending messages
+// to sessions included, answers anyone who can reach the port — the case the
+// server logs at startup (shouldWarnNoTokenOpen). With a token, behind a
+// TLS-terminating proxy r.TLS is nil and X-Forwarded-Proto is ignored, so the
+// dashboard cookie is minted without Secure and can leak on a downgrade of the
+// proxy hop. Warn, not FAIL — doctor reserves FAIL for "broken now".
 func (d *doctor) checkServerSecurity() {
 	cfg, err := d.loadConfig()
 	if err != nil {
@@ -200,7 +202,17 @@ func (d *doctor) checkServerSecurity() {
 		return
 	}
 	if cfg.Server.DashboardToken == "" {
-		d.add("server security", "pass", "no dashboard token configured (open mode)")
+		switch {
+		case isLoopbackAddr(cfg.Server.Addr):
+			d.add("server security", "pass", "no dashboard token configured (open mode, loopback bind)")
+		case cfg.Server.TrustedProxy:
+			d.add("server security", "pass", "no dashboard token configured (open mode, trusted_proxy=true — the proxy must enforce auth)")
+		default:
+			d.add("server security", "warn",
+				"no dashboard token + non-loopback addr ("+cfg.Server.Addr+") + trusted_proxy=false: "+
+					"the whole dashboard API, sending messages to sessions included, is open to anyone who can reach the port; "+
+					"set server.dashboard_token or bind server.addr to 127.0.0.1")
+		}
 		return
 	}
 	if isLoopbackAddr(cfg.Server.Addr) {

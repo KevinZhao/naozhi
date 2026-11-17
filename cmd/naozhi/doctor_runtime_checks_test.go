@@ -238,3 +238,31 @@ func TestDoctor_RunIncludesRuntimeChecks(t *testing.T) {
 		}
 	}
 }
+
+// TestDoctor_ServerSecurityOpenDashboard: no dashboard_token on a
+// non-loopback bind without trusted_proxy opens the whole dashboard API, the
+// case the server warns about at startup; doctor used to show it as pass.
+func TestDoctor_ServerSecurityOpenDashboard(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, body, want string
+	}{
+		{"all interfaces", "server:\n  addr: \":8180\"\n", "warn"},
+		{"lan ip", "server:\n  addr: \"192.168.1.5:8180\"\n", "warn"},
+		{"loopback", "server:\n  addr: \"127.0.0.1:8180\"\n", "pass"},
+		{"default addr", "", "pass"},
+		{"trusted proxy", "server:\n  addr: \":8180\"\n  trusted_proxy: true\n", "pass"},
+	}
+	for _, c := range cases {
+		cfgPath := writeDoctorConfig(t, c.body)
+		d := &doctor{out: &bytes.Buffer{}, timeout: time.Second, configPath: cfgPath}
+		d.checkServerSecurity()
+		f := findingsByCategory(d)["server security"]
+		if f.Level != c.want {
+			t.Errorf("%s: server security = %+v, want level %s", c.name, f, c.want)
+		}
+		if strings.Contains(f.Detail, "config not loaded") {
+			t.Errorf("%s: config did not load: %+v", c.name, f)
+		}
+	}
+}
