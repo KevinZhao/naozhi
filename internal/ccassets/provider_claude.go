@@ -165,7 +165,7 @@ func scanSkillDir(root, relPrefix string, src assets.Source) ([]assets.Asset, er
 		}
 		dirName := ent.Name()
 		skillPath := filepath.Join(root, dirName, "SKILL.md")
-		// readFrontmatter's os.Open is the existence check (no Stat per subdir).
+		// readFrontmatter's open is the existence check (no Stat per subdir).
 		meta, err := readFrontmatter(skillPath)
 		if err != nil {
 			continue

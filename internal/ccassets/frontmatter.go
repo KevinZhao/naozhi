@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"errors"
 	"io"
-	"os"
 	"strings"
 )
 
@@ -19,9 +18,10 @@ type fmMeta struct {
 const maxFrontmatterBytes = 16 << 10
 
 // readFrontmatter reads only the leading YAML frontmatter block of path and
-// extracts name/description. No frontmatter → zero fmMeta, nil error.
+// extracts name/description. No frontmatter → zero fmMeta, nil error; a path
+// that is not a regular file → osutil.ErrNotRegular.
 func readFrontmatter(path string) (fmMeta, error) {
-	f, err := os.Open(path)
+	f, err := openRegular(path)
 	if err != nil {
 		return fmMeta{}, err
 	}
@@ -30,8 +30,9 @@ func readFrontmatter(path string) (fmMeta, error) {
 	r := bufio.NewReader(io.LimitReader(f, maxFrontmatterBytes))
 	first, err := r.ReadString('\n')
 	if err != nil && first == "" {
-		// Empty file degrades; an unreadable path (e.g. EISDIR for a directory
-		// named SKILL.md) propagates so existence-probe callers can skip it.
+		// Empty file degrades; a read error propagates so existence-probe
+		// callers can skip it (openRegular already refused a directory or FIFO
+		// named SKILL.md).
 		if errors.Is(err, io.EOF) {
 			return fmMeta{}, nil
 		}

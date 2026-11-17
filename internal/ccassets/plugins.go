@@ -4,9 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // installedPlugins mirrors ~/.claude/plugins/installed_plugins.json (v2); the
@@ -41,9 +42,11 @@ type marketplaceSource struct {
 // readInstalledPlugins parses the install manifest. Missing file => nil, nil.
 func readInstalledPlugins(home string) (*installedPlugins, error) {
 	path := filepath.Join(home, "plugins", "installed_plugins.json")
-	data, err := os.ReadFile(path)
+	data, err := readRegularFile(path)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		// A FIFO or device there degrades like a malformed manifest rather
+		// than failing the whole panel.
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, osutil.ErrNotRegular) {
 			return nil, nil
 		}
 		return nil, err
@@ -59,7 +62,7 @@ func readInstalledPlugins(home string) (*installedPlugins, error) {
 func readMarketplaces(home string) map[string]string {
 	out := map[string]string{}
 	path := filepath.Join(home, "plugins", "known_marketplaces.json")
-	data, err := os.ReadFile(path)
+	data, err := readRegularFile(path)
 	if err != nil {
 		return out
 	}
@@ -78,7 +81,7 @@ func readMarketplaces(home string) map[string]string {
 // readPluginManifest parses plugin.json; missing/malformed => empty manifest.
 func readPluginManifest(installPath string) pluginManifest {
 	path := filepath.Join(installPath, ".claude-plugin", "plugin.json")
-	data, err := os.ReadFile(path)
+	data, err := readRegularFile(path)
 	if err != nil {
 		return pluginManifest{}
 	}
