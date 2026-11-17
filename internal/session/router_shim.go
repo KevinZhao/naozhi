@@ -295,7 +295,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) (reconnected, sess
 	driftCheck := driftArgs{backends: &r.backends, spawn: &r.spawn}
 	for _, state := range states {
 		var tgt shimTarget
-		r.ss.View(func(v sessView) { tgt = lookupShimTarget(v, state); tgt.closing = r.closing.has(state.Key) })
+		r.ss.View(func(v sessView) { tgt = lookupShimTarget(v, state); tgt.closing = r.shimKeyClosing(state, tgt) })
 		if tgt.closing {
 			// Neither adopt, reconnect nor orphan-shut it: the close owns it.
 			continue
@@ -344,6 +344,9 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) (reconnected, sess
 			}
 		}
 		sess, sessPrevIDs := tgt.sess, tgt.prevIDs
+		// sessKey names the session in the table, the event log and the drift
+		// marks; state.Key stays the shim's own (its socket).
+		sessKey := tgt.key
 
 		st := classifyShimState(tgt.spawning, tgt.found, tgt.live, recWrapper == nil, argsDrift)
 		if st != shimStateSkip && st != shimStateOrphan {
@@ -382,7 +385,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) (reconnected, sess
 			// the operator's own config edit — record the why, so the adoption
 			// verdict (router_adopt.go) can say config_drift instead of the
 			// generic interrupted (#2749).
-			r.drift.mark(state.Key)
+			r.drift.mark(sessKey)
 			// The session is now suspended until the next user message, so
 			// backfill an empty history (proc-nil safe) or the panel stays blank
 			// until the user sends. A startup loader or an earlier tick may have
@@ -413,7 +416,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) (reconnected, sess
 		hooks.OnResult = r.resultFor(sess)
 		proc, replays, err := recWrapper.SpawnReconnect(
 			spawnCtx, state.Key, lastSeq, recWrapper.Protocol,
-			r.spawn.noOutputTimeout, r.spawn.totalTimeoutFor(state.Key), hooks,
+			r.spawn.noOutputTimeout, r.spawn.totalTimeoutFor(sessKey), hooks,
 		)
 		spawnCancel()
 		if err != nil {
@@ -496,7 +499,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) (reconnected, sess
 		sess.setReattached(proc, shimStartedAt(state), replayTaskEntries(recWrapper.Protocol, replays))
 
 		// Re-check and attach in one transaction; see commitShimReattach.
-		outcome := r.commitShimReattach(state, sess, proc, recBackendID, recWrapper)
+		outcome := r.commitShimReattach(state, sessKey, sess, proc, recBackendID, recWrapper)
 		switch outcome {
 		case reattachReplaced:
 			proc.Close()
@@ -517,7 +520,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) (reconnected, sess
 		// Persist sink goes last so the history inject + shim replay above land
 		// with sinkReady=false and are dropped rather than written back to disk
 		// (RFC §3.2.2).
-		r.hist.installPersistSink(parentCtx, sess, proc, state.Key)
+		r.hist.installPersistSink(parentCtx, sess, proc, sessKey)
 
 		// Sidebar label instead of "(no prompt)".
 		sess.extractLastPromptFromProcess()
@@ -561,7 +564,10 @@ func shimChainIDs(prevIDs []string, sessionID string) []string {
 // shimTarget is what ReconnectShimsCtx knows about the session a shim belongs
 // to, read in one transaction.
 type shimTarget struct {
-	sess     *ManagedSession
+	sess *ManagedSession
+	// key is the key sess lives under: state.Key, or the new key of a
+	// promoted scratch whose shim kept the scratch key (renamedShimSession).
+	key      string
 	found    bool
 	live     bool // sess has a live process
 	spawning bool // a spawn for the key is in flight
@@ -572,7 +578,7 @@ type shimTarget struct {
 }
 
 func lookupShimTarget(v sessView, state shim.State) shimTarget {
-	var t shimTarget
+	t := shimTarget{key: state.Key}
 	t.sess, t.found = v.Lookup(state.Key)
 	if t.found {
 		t.live = t.sess.isAlive()
@@ -587,9 +593,44 @@ func lookupShimTarget(v sessView, state shim.State) shimTarget {
 			// Reporting it found+live classifies it Skip instead of Orphan,
 			// which would shut down the CLI under the renamed session.
 			t.sess, t.found, t.live = s, true, true
+		} else if k, s := renamedShimSession(v, state); s != nil {
+			// The same promote seen after a restart: the renamed session is
+			// restored with no process, so the PID match above cannot find
+			// it; its session ID can.
+			t.sess, t.found, t.key = s, true, k
+			t.prevIDs = slices.Clone(s.prevSessionIDs)
 		}
 	}
 	return t
+}
+
+// renamedShimSession returns the session a promoted scratch's shim belongs to
+// when no process holds it: the stored session under another key with the
+// shim's session ID, restored and not yet spawned (no process at all, no
+// spawn in flight). A session that has a process of its own, even a dead one,
+// was closed or respawned since, and the scratch shim is an orphan.
+func renamedShimSession(v sessView, state shim.State) (string, *ManagedSession) {
+	if !sessionkey.IsScratchKey(state.Key) || state.SessionID == "" {
+		return "", nil
+	}
+	k, ok := v.KeyForID(state.SessionID)
+	if !ok || k == state.Key {
+		return "", nil
+	}
+	s, ok := v.Lookup(k)
+	if !ok || s.loadProcess() != nil || s.getSessionID() != state.SessionID {
+		return "", nil
+	}
+	if _, spawning := v.Ext().SpawnInFlight(k); spawning {
+		return "", nil
+	}
+	return k, s
+}
+
+// shimKeyClosing reports whether naozhi is closing the session a shim
+// belongs to, under the shim's own key or the one its session moved to.
+func (r *Router) shimKeyClosing(state shim.State, t shimTarget) bool {
+	return r.closing.has(state.Key) || (t.key != state.Key && r.closing.has(t.key))
 }
 
 // sessionRidingShim returns the session whose live process is the CLI a shim
@@ -616,7 +657,7 @@ func sessionRidingShim(v sessView, cliPID int) *ManagedSession {
 func (r *Router) adoptShimTarget(state shim.State, backendID string) (t shimTarget, adopted bool) {
 	r.ss.Update(func(tx sessTx) {
 		t = lookupShimTarget(tx.View, state)
-		if t.closing = r.closing.has(state.Key); t.found || t.spawning || t.closing {
+		if t.closing = r.shimKeyClosing(state, t); t.found || t.spawning || t.closing {
 			return
 		}
 		// Genuinely absent + no spawn in flight: rebuild from the shim state
@@ -646,9 +687,9 @@ const (
 // the same transaction so a concurrent GetOrCreate cannot see
 // isAlive()==false between check and attach. On any outcome but
 // reattachDone the caller owns proc and closes it.
-func (r *Router) commitShimReattach(state shim.State, sess *ManagedSession, proc processIface, backendID string, wrapper *cli.Wrapper) (outcome reattachOutcome) {
+func (r *Router) commitShimReattach(state shim.State, key string, sess *ManagedSession, proc processIface, backendID string, wrapper *cli.Wrapper) (outcome reattachOutcome) {
 	r.ss.Update(func(tx sessTx) {
-		currentSess := tx.Get(state.Key)
+		currentSess := tx.Get(key)
 		if currentSess != sess || (currentSess != nil && currentSess.isAlive()) {
 			outcome = reattachReplaced
 			return
@@ -681,7 +722,7 @@ func (r *Router) commitShimReattach(state shim.State, sess *ManagedSession, proc
 		}
 		if state.SessionID != "" {
 			r.kid.Track(state.SessionID)
-			tx.SetID(state.SessionID, state.Key)
+			tx.SetID(state.SessionID, key)
 		}
 		if !sess.exempt {
 			tx.AddActive(1)

@@ -1,8 +1,13 @@
 package session
 
 import (
+	"context"
+	"os"
+	"path/filepath"
+	"slices"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
@@ -54,5 +59,56 @@ func TestLookupShimTarget_RenamedSessionKeepsItsShim(t *testing.T) {
 	proc.mu.Unlock()
 	if _, got := classify(shim.State{Key: scratchKey, CLIPID: cliPID}); got != shimStateOrphan {
 		t.Errorf("dead process: classified %v, want shimStateOrphan", got)
+	}
+}
+
+// After a restart the promoted session is restored with no process, so its
+// shim (still under the scratch key) cannot be matched by CLI PID. It is
+// matched by session ID and reconnected under the renamed key, as every other
+// session's shim is, instead of being shut down as an orphan mid-turn.
+func TestReconnectShims_PromotedScratchShimSurvivesRestart(t *testing.T) {
+	const (
+		scratchKey = "scratch:85f19f806dbf3c6769b567ec3ed16778:general:general"
+		newKey     = "dashboard:direct:r50d790411fecf45017497662c69564b7:aside-general-97ed171fef4517a7"
+		sid        = "0b6f3a52-6c1e-4a57-9a7e-3f1d2c4b5a69"
+	)
+	fs := StartFakeShimForTest(t, scratchKey, 1, []string{adoptAssistantLine})
+	statePath := shim.StateFilePath(os.Getenv("XDG_RUNTIME_DIR"), shim.KeyHash(scratchKey))
+	state, err := shim.ReadStateFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.SessionID = sid
+	if err := shim.WriteStateFile(statePath, state); err != nil {
+		t.Fatal(err)
+	}
+	storePath := filepath.Join(t.TempDir(), "sessions.json")
+	if err := os.WriteFile(storePath, []byte(`[{"key":"`+newKey+`","session_id":"`+sid+`","backend":"claude"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := fs.Config
+	cfg.StorePath = storePath
+	r := NewRouter(cfg)
+	t.Cleanup(r.Shutdown)
+
+	r.ReconnectShimsCtx(context.Background())
+	if sent := fs.Sent(); slices.Contains(sent, "shutdown") {
+		t.Fatalf("the promoted session's shim was shut down as an orphan (sent %v)", sent)
+	}
+	fs.Attached(t)
+	sess := r.SessionFor(newKey)
+	if sess == nil {
+		t.Fatal("renamed session missing after restore")
+	}
+	if p, ok := sess.loadProcess().(*cli.Process); !ok || p == nil || !p.Alive() {
+		t.Fatalf("renamed session's process = %T, want the reattached shim's", sess.loadProcess())
+	}
+	if r.SessionFor(scratchKey) != nil {
+		t.Error("reconnect published a session under the scratch key")
+	}
+	var owner string
+	r.ss.View(func(v sessView) { owner, _ = v.KeyForID(sid) })
+	if owner != newKey {
+		t.Errorf("session ID indexed under %q, want %q", owner, newKey)
 	}
 }
