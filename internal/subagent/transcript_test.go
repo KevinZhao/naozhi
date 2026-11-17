@@ -237,3 +237,32 @@ func TestTranscriptReader_TeammateDetection_ContentString(t *testing.T) {
 		t.Errorf("Summary=%q", ents[0].Summary)
 	}
 }
+
+// TestTranscriptReader_NoReopenAfterClose: a Tail racing Close (the agent
+// tailer's poller against a task_done finalize) must not open a new fd that
+// nothing closes again.
+func TestTranscriptReader_NoReopenAfterClose(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "agent-0a1b.jsonl")
+	line := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"a reply"}]},"sessionId":"s","timestamp":"2026-05-10T10:00:00Z"}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opens := 0
+	r := NewTranscriptReaderFrom(path, nil, func() (*os.File, error) {
+		opens++
+		return os.Open(path)
+	}, ReaderOpts{})
+	if got, err := r.Tail(); err != nil || len(got) != 1 {
+		t.Fatalf("Tail = %d entries, %v", len(got), err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := r.Tail(); err != nil || len(got) != 0 {
+		t.Errorf("Tail after Close = %d entries, %v; want none", len(got), err)
+	}
+	if opens != 1 {
+		t.Errorf("opens = %d, want 1: Tail after Close reopened the file", opens)
+	}
+}

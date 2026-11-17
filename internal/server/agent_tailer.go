@@ -281,8 +281,9 @@ func (t *agentTailer) finalize(status string) {
 		t.refCount.Store(0)
 		t.mu.Unlock()
 
-		// Release the transcript fd eagerly; t.closed=true plus the byTask
-		// removal stop the poller from re-Tailing, and Close() is idempotent (#1807).
+		// Release the transcript fd eagerly (#1807). A poller that took its
+		// snapshot before the byTask removal may still Tail; a closed reader
+		// reads nothing rather than reopening, and Close() is idempotent.
 		if t.reader != nil {
 			_ = t.reader.Close()
 		}
