@@ -704,11 +704,18 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, 
 				"abort_fired", abort.fired,
 				"abort_outcome", abort.outcome)
 		}
+		// A cancel from the process shutting down (stopCtx) with no operator
+		// interrupt leaves the CLI mid-turn behind its shim for the next
+		// process to adopt (#2712), so the fresh session is not Reset: Reset
+		// would Close the shim and kill the turn the kept marker points at.
+		// Router.Shutdown detaches it, and the adopting run's release does the
+		// fresh reset.
+		shutdownCancel := s.stopCtx.Err() != nil && !abort.fired
 		// Reset must run while the inflight CAS gate is still held, i.e. BEFORE
 		// finishRun releases it (#1956): a late Reset would let a
 		// concurrent TriggerNow win the CAS and then blindly delete run-B's fresh
 		// session (resetLocked has no owner check).
-		if snap.fresh {
+		if snap.fresh && !shutdownCancel {
 			s.router.Reset(key)
 		}
 		// Likewise re-register the sidebar stub BEFORE finishRun releases the
@@ -723,7 +730,7 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, 
 			// is still mid-turn behind its shim, and the next process's adoption
 			// pass (#2712) is what turns that into a finished run. An operator
 			// cancel (abort fired) is a genuine finish — marker cleared.
-			keepInflightMarker: s.stopCtx.Err() != nil && !abort.fired,
+			keepInflightMarker: shutdownCancel,
 		})
 		return
 	}
