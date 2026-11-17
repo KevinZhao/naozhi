@@ -69,8 +69,15 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 		// all concurrent writers except the Send hot path (lastPrompt /
 		// lastActivity), which are idempotent on copy.
 		fresh.SetBackend(old.Backend())
+		// The account follows the conversation: with "" unpinned on fresh the
+		// resume lock in resolveSpawnParams lets go, and the next spawn would
+		// --resume this Claude session ID on the new key's default profile.
+		fresh.SetAccessProfile(old.AccessProfile())
+		fresh.SetAccessProfilePinned(old.AccessProfilePinned())
 		fresh.SetCLIName(old.CLIName())
 		fresh.SetCLIVersion(old.CLIVersion())
+		fresh.SetModel(old.Model())
+		fresh.setCLISessionName(old.CLISessionName())
 		fresh.SetUserLabel(old.UserLabel())
 		fresh.setLabelOrigin(old.LabelOrigin()) // label+origin travel as one unit
 		// Tuning overrides follow the conversation: dropping them would make the
@@ -128,6 +135,9 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 		// oldKey's map entry and index slot are removed next so the rename is
 		// atomic under the table lock.
 		r.publishSession(tx, newKey, fresh, false)
+		if proc != nil {
+			r.hist.moveSinkOnRename(old, fresh, proc, newKey)
+		}
 		tx.Delete(oldKey)
 		tx.SetID(fresh.getSessionID(), newKey)
 		tx.Ext().picks.rename(oldKey, newKey)

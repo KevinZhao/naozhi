@@ -226,3 +226,47 @@ func TestScratch_NilRouterKeepsEmptyBackend(t *testing.T) {
 		t.Errorf("Backend = %q, BaseOpts.Backend = %q, want both empty", sc.Backend, sc.BaseOpts.Backend)
 	}
 }
+
+// A source the user pinned to the global credentials keeps its aside there:
+// the aside's "" profile must not be read as a gap default_access_profile
+// fills, or the quoted conversation runs on another account.
+func TestScratch_SourcePinnedGlobalStaysGlobal(t *testing.T) {
+	r := twoBackendRouter()
+	setAccessProfiles(r, map[string]AccessProfile{"team-bedrock": {}})
+	r.backends.defaultAccessProfile = "team-bedrock"
+	const srcKey = "feishu:direct:bob:general"
+	src := injectSession(r, srcKey, newDeadProc())
+	src.SetAccessProfile("")
+	src.SetAccessProfilePinned(true)
+
+	p := NewScratchPool(r, 5, time.Minute)
+	sc, err := p.Open(OpenOptions{
+		SourceKey: srcKey,
+		AgentID:   "general",
+		Backend:   "claude",
+		BaseOpts:  AgentOpts{AccessProfile: src.AccessProfile()},
+		Quote:     "why?",
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	opts, ok := p.OptsForKey(sc.Key)
+	if !ok {
+		t.Fatal("OptsForKey miss")
+	}
+	if got := resolveT(r, sc.Key, "", opts).AccessProfileID; got != "" {
+		t.Errorf("aside of a source pinned to the global credentials resolves profile %q, want \"\"", got)
+	}
+
+	// Control: an unpinned source's aside still takes default_access_profile,
+	// as the source itself would.
+	src.SetAccessProfilePinned(false)
+	sc2, err := p.Open(OpenOptions{SourceKey: srcKey, AgentID: "general", Backend: "claude", Quote: "and?"})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	opts2, _ := p.OptsForKey(sc2.Key)
+	if got := resolveT(r, sc2.Key, "", opts2).AccessProfileID; got != "team-bedrock" {
+		t.Errorf("aside of an unpinned source resolves profile %q, want team-bedrock", got)
+	}
+}

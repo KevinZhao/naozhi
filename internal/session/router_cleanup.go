@@ -323,6 +323,9 @@ func (r *Router) Cleanup() {
 		key    string
 		proc   processIface
 		reason string // deathReason to stamp; written only after kill re-verify
+		// lastActive is pass 1's reading; a later one means a message came in
+		// since, so the idle close must leave the process to its turn.
+		lastActive time.Time
 	}
 
 	now := time.Now()
@@ -395,7 +398,7 @@ func (r *Router) Cleanup() {
 			if age := now.Sub(effective); age > stuckThreshold {
 				slog.Warn("stuck running session detected, force killing",
 					"key", c.key, "running_for", age, "threshold", stuckThreshold)
-				stuckKill = append(stuckKill, expiredEntry{c.s, c.key, c.proc, "stuck_running"})
+				stuckKill = append(stuckKill, expiredEntry{c.s, c.key, c.proc, "stuck_running", c.lastActive})
 			}
 			continue
 		}
@@ -404,7 +407,7 @@ func (r *Router) Cleanup() {
 		if pid := c.proc.PID(); pid > 0 && !osutil.PidAlive(pid) {
 			slog.Warn("CLI process gone but session still alive, force killing",
 				"key", c.key, "pid", pid)
-			stuckKill = append(stuckKill, expiredEntry{c.s, c.key, c.proc, "pid_gone"})
+			stuckKill = append(stuckKill, expiredEntry{c.s, c.key, c.proc, "pid_gone", c.lastActive})
 			continue
 		}
 
@@ -421,7 +424,7 @@ func (r *Router) Cleanup() {
 			// Carry the reason and stamp it only after the close-loop re-verify;
 			// stamping here would corrupt the deathReason of a replacement
 			// session spawned between this snapshot and the close loop.
-			expired = append(expired, expiredEntry{c.s, c.key, c.proc, DeathReasonIdleTimeout})
+			expired = append(expired, expiredEntry{c.s, c.key, c.proc, DeathReasonIdleTimeout, c.lastActive})
 		}
 	}
 
@@ -449,11 +452,23 @@ func (r *Router) Cleanup() {
 		if cur := e.s.loadProcess(); cur != nil && cur != e.proc {
 			continue
 		}
+		// A message may have reached the session since pass 1 (GetOrCreate's
+		// lock-free fast path, then Send): closing now would fail that turn.
+		// Same guard as ReleaseIdleProcess; sendMu held across the close so a
+		// Send cannot start between the check and it.
+		if !e.s.sendMu.TryLock() {
+			continue
+		}
+		if e.s.turnOutstanding(e.proc) || e.s.LastActive().After(e.lastActive) {
+			e.s.sendMu.Unlock()
+			continue
+		}
 		// Stamp deathReason only after re-verify (mirrors stuckKill).
 		if e.reason != "" {
 			storeAtomicString(&e.s.deathReason, e.reason)
 		}
 		e.proc.Close()
+		e.s.sendMu.Unlock()
 		closedCount++
 	}
 

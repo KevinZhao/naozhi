@@ -211,3 +211,57 @@ func TestRestoreSessionFromEntry_DoesNotMarkCostBaselineUnknown(t *testing.T) {
 			"so the next turn's delta is real and must not be zeroed")
 	}
 }
+
+// An adopted shim keeps the account its CLI runs on: with "" recorded, the
+// session's next resume would re-resolve the profile and could cross accounts.
+func TestAdoptLiveShim_KeepsAccessProfile(t *testing.T) {
+	r := newTestRouter(3)
+	const key = "dashboard:direct:alice:general"
+	state := shim.State{
+		Key:          key,
+		SessionID:    "sid-adopt-ap",
+		Backend:      "claude",
+		SpawnOverlay: &shim.SpawnOverlay{AccessProfile: "team-bedrock"},
+	}
+	_, backendID := r.backends.wrapperFor(state.Backend)
+	var got *ManagedSession
+	r.ss.Update(func(tx sessTx) { got = r.adoptLiveShim(tx, state, backendID) })
+	if got == nil {
+		t.Fatal("adoptLiveShim returned nil")
+	}
+	if ap := got.AccessProfile(); ap != "team-bedrock" {
+		t.Errorf("adopted session's access profile = %q, want team-bedrock", ap)
+	}
+}
+
+// A shim whose CLI ran on the global credentials (overlay access_profile "")
+// is adopted pinned there, so its next resume does not take
+// default_access_profile, another account.
+func TestAdoptLiveShim_KeepsGlobalCredentialsOverDefaultProfile(t *testing.T) {
+	r := newTestRouter(3)
+	setAccessProfiles(r, map[string]AccessProfile{"team-bedrock": {}})
+	r.backends.defaultAccessProfile = "team-bedrock"
+	const key = "dashboard:direct:alice:general"
+	state := shim.State{
+		Key:          key,
+		SessionID:    "sid-adopt-global",
+		Backend:      "claude",
+		SpawnOverlay: &shim.SpawnOverlay{},
+	}
+	_, backendID := r.backends.wrapperFor(state.Backend)
+	var got *ManagedSession
+	var sp spawnParams
+	r.ss.Update(func(tx sessTx) {
+		got = r.adoptLiveShim(tx, state, backendID)
+		sp = r.resolveSpawnParams(tx, key, state.SessionID, AgentOpts{})
+	})
+	if got == nil {
+		t.Fatal("adoptLiveShim returned nil")
+	}
+	if got.AccessProfile() != "" || !got.AccessProfilePinned() {
+		t.Errorf("adopted profile=%q pinned=%v, want global and pinned", got.AccessProfile(), got.AccessProfilePinned())
+	}
+	if sp.AccessProfileID != "" {
+		t.Errorf("resume after adoption resolves access profile %q, want the global credentials it ran on", sp.AccessProfileID)
+	}
+}

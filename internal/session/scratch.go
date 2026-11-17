@@ -297,6 +297,14 @@ func (p *ScratchPool) Open(opts OpenOptions) (*Scratch, error) {
 	if opts.Workspace != "" {
 		cloned.Workspace = opts.Workspace
 	}
+	// A source the user pinned to its profile keeps the aside there too: the
+	// snapshot the caller copied AccessProfile from has no pin, and an
+	// unpinned "" would take default_access_profile, another account.
+	if !opts.NewChat && p.router != nil {
+		if src := p.router.SessionFor(opts.SourceKey); src != nil && src.AccessProfilePinned() && src.AccessProfile() == cloned.AccessProfile {
+			cloned.AccessProfilePinned = true
+		}
+	}
 	// A source with no backend (a RegisterForResume placeholder, a legacy
 	// entry) resumes on wrapperFor(""), so the aside pins that same CLI; left
 	// empty, the scratch key would take the access profile's default_backend.

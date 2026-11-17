@@ -258,7 +258,7 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 	// a pinned "" is the global credentials, not a gap the key's project,
 	// agent or default profile fills.
 	accessProfileID := opts.AccessProfile
-	pinned := false
+	pinned := opts.AccessProfilePinned
 	if len(tx.Ext().picks.accessProfile) > 0 {
 		if ov, ok := tx.Ext().picks.accessProfile[key]; ok {
 			if ov == pickGlobalAccessProfile {
