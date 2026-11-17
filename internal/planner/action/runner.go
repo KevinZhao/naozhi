@@ -1839,8 +1839,10 @@ func plannerWords(s string) string {
 	return strings.NewReplacer("「", "“", "」", "”").Replace(strings.Join(strings.Fields(s), " "))
 }
 
-// askTitleRunes caps an ask's question on its card, all the user sees of
-// it; the envelope carries no more.
+// askTitleRunes caps an ask's question as the title of its "通知" item. The
+// envelope carries the whole question: the ask card in the Planner
+// conversation shows all of it, and it is the only context the session gets
+// for what the option picked means.
 const askTitleRunes = 120
 
 // relayEnvelope is what a session reads as the user's decision (D98): the
@@ -1860,10 +1862,10 @@ func relayEnvelope(now time.Time, words []Words, text string) string {
 		said := envelopeRe.ReplaceAllString(textutil.TruncateRunes(strings.TrimSpace(w.Text), wordsRunes), "naozhi_relay")
 		at := w.At.Format("1/2 15:04")
 		if w.Question != "" {
-			// Both are the Planner's text, not the user's: only what the
-			// card showed, on one line and unable to close its 「」, so
-			// neither can write a line that reads as the user's words.
-			q := envelopeRe.ReplaceAllString(plannerWords(textutil.TruncateRunes(w.Question, askTitleRunes)), "naozhi_relay")
+			// Both are the Planner's text, not the user's: on one line and
+			// unable to close its 「」, so neither can write a line that
+			// reads as the user's words.
+			q := envelopeRe.ReplaceAllString(plannerWords(w.Question), "naozhi_relay")
 			said = plannerWords(said)
 			b.WriteString("Planner 在通知里问用户「" + q + "」，用户 " + at + " 选了「" + said + "」。\n")
 			continue
