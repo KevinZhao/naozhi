@@ -32,3 +32,14 @@ func readCapped(path string, cap int64) ([]byte, error) {
 	}
 	return data, nil
 }
+
+// readRegularFile is os.ReadFile through openRegular, for the scan's JSON
+// manifests (.mcp.json, hooks.json, the plugin manifests).
+func readRegularFile(path string) ([]byte, error) {
+	f, err := openRegular(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
+}

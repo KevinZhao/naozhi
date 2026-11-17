@@ -2,6 +2,8 @@ package ccassets
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/assets"
@@ -35,5 +37,54 @@ func TestResolveUnder_RejectsNULAndAbsolute(t *testing.T) {
 				t.Errorf("resolveUnder error = %v, want wrapping assets.ErrNotFound (errPathEscape)", err)
 			}
 		})
+	}
+}
+
+// The user source's root is all of ~/.claude; ReadRaw must serve only what
+// Scan lists there, never the credentials, settings or transcripts beside it.
+func TestReadRaw_UserSourceOnlyServesListedShapes(t *testing.T) {
+	home := t.TempDir()
+	files := map[string]string{
+		".credentials.json":        "SECRET",
+		"settings.json":            "ENV",
+		"projects/-x/s.jsonl":      "TRANSCRIPT",
+		"skills/learned/SKILL.md":  "skill",
+		"skills/learned/notes.txt": "notes",
+		"agents/a.md":              "agent",
+		"agents/a.txt":             "agent text",
+		"commands/c.md":            "command",
+		".mcp.json":                "{}",
+	}
+	for rel, body := range files {
+		p := filepath.Join(home, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	allowed := map[string]bool{
+		"skills/learned/SKILL.md": true,
+		"agents/a.md":             true,
+		"commands/c.md":           true,
+		".mcp.json":               true,
+	}
+	for rel, body := range files {
+		raw, err := NewClaudeProvider().ReadRaw(assets.RawRequest{
+			Home: home,
+			Ref:  assets.Ref{Source: assets.Source{Kind: "user"}, RelPath: rel},
+		})
+		if allowed[rel] {
+			if err != nil || string(raw) != body {
+				t.Errorf("ReadRaw(%q) = %q, %v; want %q", rel, raw, err, body)
+			}
+			continue
+		}
+		if err == nil {
+			t.Errorf("ReadRaw(%q) served %q; want refused", rel, raw)
+		} else if !errors.Is(err, assets.ErrNotFound) {
+			t.Errorf("ReadRaw(%q) error = %v; want ErrNotFound", rel, err)
+		}
 	}
 }

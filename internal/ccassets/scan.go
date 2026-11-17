@@ -11,6 +11,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/assets"
 	"github.com/naozhi/naozhi/internal/claudefs"
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // scanMarkdownDir scans the direct *.md files in dir for agents/commands. A
@@ -29,7 +30,11 @@ func scanMarkdownDir(dir, kind, relPrefix string, src assets.Source) ([]assets.A
 			continue
 		}
 		base := strings.TrimSuffix(ent.Name(), ".md")
-		meta, _ := readFrontmatter(filepath.Join(dir, ent.Name()))
+		meta, err := readFrontmatter(filepath.Join(dir, ent.Name()))
+		if errors.Is(err, osutil.ErrNotRegular) {
+			// A FIFO or device is no asset, and ReadRaw would refuse it.
+			continue
+		}
 		name := meta.name
 		if name == "" || kind == "command" {
 			name = base
@@ -58,7 +63,7 @@ type hookEntry struct {
 
 // scanHooksJSON expands each hook entry to its own Asset (same RelPath, Anchor=id).
 func scanHooksJSON(path, relPath string, src assets.Source) []assets.Asset {
-	data, err := os.ReadFile(path)
+	data, err := readRegularFile(path)
 	if err != nil {
 		return nil
 	}
@@ -102,7 +107,7 @@ type mcpServer struct {
 // scanMCP turns each server in ~/.claude/.mcp.json into one Asset (Anchor=key).
 func scanMCP(home string) []assets.Asset {
 	path := filepath.Join(home, ".mcp.json")
-	data, err := os.ReadFile(path)
+	data, err := readRegularFile(path)
 	if err != nil {
 		return nil
 	}
@@ -158,7 +163,10 @@ func scanMemory(home, repoRoot string) []assets.Asset {
 		if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".md") {
 			continue
 		}
-		meta, _ := readFrontmatter(filepath.Join(dir, ent.Name()))
+		meta, err := readFrontmatter(filepath.Join(dir, ent.Name()))
+		if errors.Is(err, osutil.ErrNotRegular) {
+			continue
+		}
 		name := meta.name
 		if name == "" {
 			name = strings.TrimSuffix(ent.Name(), ".md")
