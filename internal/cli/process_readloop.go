@@ -632,6 +632,7 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 	runID := ""
 	if orphaned {
 		runID = orphanRun
+		p.turn.orphanResultMS.Store(nowMS)
 	} else if ev.Type == "result" {
 		runID = p.turn.resultRunID()
 	}

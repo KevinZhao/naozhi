@@ -52,7 +52,10 @@ func resultFromEvent(ev clievent.Event) clievent.SendResult {
 // fallback when eventCh may have dropped events. The "result" entry carries
 // only cost + turn metadata (its Detail is empty to avoid a duplicate dashboard
 // bubble), so the reply text is recovered from the preceding "text" entry (#1805).
+// An orphaned result can land after afterMS (an abort slower than the settle
+// window); it never reaches eventCh, so the scan starts past it.
 func (p *Process) findResultSince(afterMS int64) *clievent.SendResult {
+	afterMS = max(afterMS, p.turn.orphanResultMS.Load())
 	entries := p.eventLog.EntriesSince(afterMS)
 	for i := len(entries) - 1; i >= 0; i-- {
 		if entries[i].Type != clievent.KindResult {

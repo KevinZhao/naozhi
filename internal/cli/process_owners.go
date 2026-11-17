@@ -67,6 +67,10 @@ type turnState struct {
 	// runID is the run (ctxutil.RunID) of the Send that claimed the process
 	// last, kept after it returns so a result it gave up on can name it.
 	runID string
+	// orphanResultMS is the ring time of the last orphaned result (an
+	// abandoned turn's late aborted one). Send's ring fallback reads only
+	// past it: that result and the text before it are not the live turn's.
+	orphanResultMS atomic.Int64
 }
 
 // transition applies ev and reports the state before it and whether the state
