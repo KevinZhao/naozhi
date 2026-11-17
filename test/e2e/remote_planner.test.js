@@ -305,3 +305,36 @@ for (const vp of VIEWPORTS) {
     }
   });
 }
+
+// "收到，正在看" by the box is this node's Planner's receipt: switching the
+// page to another node's Planner leaves it behind, its answer does not come
+// there.
+test('desktop: switching to another node\'s Planner drops the receipt of a message to this one', async ({ browser }) => {
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const page = await ctx.newPage();
+  const s = defaultSessions();
+  s.nodes = { local: { display_name: 'EC2', status: 'ok' }, [NODE]: { display_name: 'MBP', status: 'ok', caps: ['files', 'planner', 'subscribe-history'] } };
+  const node = remote();
+  const mock = await startMockServer({
+    ws: true, sessions: s, remote: { [NODE]: node },
+    planner: { enabled: true, stopped: false, key: PLANNER, alive: true },
+    plannerEvents: [{ type: 'text', detail: 'iso 本机的 Planner。', time: now - 5000, uuid: 'lc-t1' }],
+  });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await page.click('#abnav-planner');
+    await expect(page.locator('#pl-stream')).toContainText('iso 本机的 Planner。');
+    await page.fill('#pl-input', 'iso 在吗');
+    await page.press('#pl-input', 'Enter');
+    await expect.poll(() => mock.plannerSendCalls).toEqual([{ text: 'iso 在吗' }]);
+    await expect(page.locator('#pl-target-note')).toHaveText('收到，正在看');
+    await page.locator('#pl-host select').selectOption(NODE);
+    await expect(page.locator('#pl-stream')).toContainText('iso 早上好');
+    await expect(page.locator('#pl-input')).toBeEnabled();
+    await expect(page.locator('#pl-target-note')).toHaveText('');
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
