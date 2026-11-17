@@ -89,6 +89,12 @@ func resolveUnder(root, rel string) (string, error) {
 func rootForRef(home, repoRoot string, ref assets.Ref) (root, rel string, err error) {
 	switch ref.Source.Kind {
 	case "user":
+		// The user root is all of ~/.claude (credentials, settings env,
+		// transcripts), so only the shapes Scan lists are readable:
+		// 能列出 ⟺ 能读 (docs/rfc/cc-asset-browser.md §5).
+		if !userAssetRel(ref.RelPath) {
+			return "", "", errPathEscape
+		}
 		root, rel = home, ref.RelPath
 
 	case "project":
@@ -126,4 +132,25 @@ func rootForRef(home, repoRoot string, ref assets.Ref) (root, rel string, err er
 		return "", "", errPathEscape
 	}
 	return root, rel, nil
+}
+
+// userAssetRel reports whether rel is one Scan lists under the user source:
+// skills/<dir>/SKILL.md, agents/<file>.md, commands/<file>.md or .mcp.json.
+func userAssetRel(rel string) bool {
+	if rel == ".mcp.json" {
+		return true
+	}
+	parts := strings.Split(rel, "/")
+	for _, p := range parts {
+		if p == "" || p == "." || p == ".." {
+			return false
+		}
+	}
+	switch {
+	case len(parts) == 3 && parts[0] == "skills" && parts[2] == "SKILL.md":
+		return true
+	case len(parts) == 2 && (parts[0] == "agents" || parts[0] == "commands") && strings.HasSuffix(parts[1], ".md"):
+		return true
+	}
+	return false
 }
