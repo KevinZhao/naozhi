@@ -106,17 +106,27 @@ function previewText(s) {
 // against the pendingUserEchoes set populated by sendInScratch; the set
 // is bounded at 10 entries (most users don't queue more than 2-3 sends
 // before polling catches up).
+//
+// Sends made while a turn ran come back merged into one user event
+// (turn.Coalesce: COALESCE_HEAD, then each as "\n[HH:MM] text"): it is the
+// echo of the bubbles already drawn when every part is one of them.
+const COALESCE_HEAD = '[以下是用户在你处理上一条消息期间追加发送的内容]\n';
+const COALESCE_SPLIT_RE = /\n\[\d\d:\d\d\] /;
 function matchesPendingEcho(ev) {
   if (!ad.state || !ad.state.pendingUserEchoes || ev.type !== 'user') return false;
-  const body = String(ev.detail || ev.summary || '').trim();
+  const pending = ad.state.pendingUserEchoes;
+  const raw = String(ev.detail || ev.summary || '');
+  const body = raw.trim();
   if (!body) return false;
-  for (const pending of ad.state.pendingUserEchoes) {
-    if (pending === body) {
-      ad.state.pendingUserEchoes.delete(pending);
-      return true;
-    }
+  if (pending.has(body)) {
+    pending.delete(body);
+    return true;
   }
-  return false;
+  if (!raw.startsWith(COALESCE_HEAD)) return false;
+  const parts = raw.slice(COALESCE_HEAD.length).split(COALESCE_SPLIT_RE).map((p) => p.trim()).filter(Boolean);
+  if (parts.length === 0 || !parts.every((p) => pending.has(p))) return false;
+  for (const p of parts) pending.delete(p);
+  return true;
 }
 
 // isNearBottom mirrors the main transcript's wasBottom check (appendEvents in

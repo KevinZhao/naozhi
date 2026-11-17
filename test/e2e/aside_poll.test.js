@@ -1,8 +1,9 @@
 // E2E: the 追问 drawer's poll (aside_drawer.js). The bubble it draws of what
 // you sent carries the browser's clock and leaves the watermark alone, so a
 // reply the server stamped before it still comes; a send while a poll is out
-// leaves one poll running, not two; and a poll answered after its drawer
-// closed draws nothing into the next one.
+// leaves one poll running, not two; sends merged into one turn come back as
+// the bubbles already drawn; and a poll answered after its drawer closed
+// draws nothing into the next one.
 //
 // 跑法：cd test/e2e && npx playwright test aside_poll.test.js --project=desktop-chrome
 const { test, expect } = require('@playwright/test');
@@ -54,6 +55,38 @@ test('a reply the server stamped before the bubble of what was sent still shows'
     // The echo is the bubble already drawn, not a second one.
     await expect(msgs.locator('.event.user')).toHaveCount(1);
     await expect(page.locator('#ad-loading')).not.toHaveClass(/visible/);
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+test('two sends merged into one turn come back as the bubbles already drawn', async ({ browser }) => {
+  const ctx = await browser.newContext(desktop);
+  const page = await ctx.newPage();
+  const keyEvents = Object.assign(sessionEvents(), { [SCRATCH]: [] });
+  const mock = await startMockServer({ keyEvents });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await page.click('.session-card[data-key="' + SESSION + '"]');
+    await openAside(page);
+    for (const text of ['iso 甲', 'iso 乙']) {
+      await page.fill('#ad-input', text);
+      await page.press('#ad-input', 'Enter');
+      await expect(page.locator('#ad-input')).toHaveValue('');
+    }
+    await expect.poll(() => mock.sendCalls.length).toBe(2);
+    // A turn was running: the server merged both into one user event
+    // (turn.Coalesce).
+    const t = Date.now();
+    keyEvents[SCRATCH].push(
+      { type: 'user', detail: '[以下是用户在你处理上一条消息期间追加发送的内容]\n\n[12:00] iso 甲\n\n[12:00] iso 乙\n', time: t, uuid: 'sx-c1' },
+      { type: 'text', detail: 'iso 合并后的回答', time: t + 100, uuid: 'sx-c2' },
+    );
+    const msgs = page.locator('#ad-messages');
+    await expect(msgs.locator('.event.text')).toContainText('iso 合并后的回答', { timeout: 10000 });
+    await expect(msgs.locator('.event.user')).toHaveCount(2);
+    await expect(msgs).not.toContainText('追加发送的内容');
   } finally {
     await ctx.close();
     mock.server.close();
