@@ -602,12 +602,34 @@ func validMCPTools(tools map[string][]string) error {
 // envelopeTag opens and closes the gateway's relay envelope (relayEnvelope).
 const envelopeTag = "naozhi-relay"
 
-// noEnvelope refuses Planner text that names the relay envelope: only the
-// gateway writes one, so a session can take it for the user's own words. In
-// 11-07 runs a copy with the brackets swapped for ‹› still passed for the
-// real one 9 times in 13.
+// envelopeLike is the envelope's tag however it is spelled: any run of
+// punctuation, symbols or spaces between its two words ("naozhi_relay", the
+// gateway's own escape of it; U+2010 or a space for the hyphen), matched on
+// foldLookalike's text.
+var envelopeLike = regexp.MustCompile(`(?i)naozhi[^\p{L}\p{N}]*relay`)
+
+// foldLookalike drops the invisible format characters (zero-width space,
+// joiners, soft hyphen) and maps the full-width ASCII forms to ASCII, so a
+// tag spelled with them reads as the tag.
+func foldLookalike(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case unicode.Is(unicode.Cf, r):
+			return -1
+		case r >= 0xFF01 && r <= 0xFF5E:
+			return r - 0xFEE0
+		}
+		return r
+	}, s)
+}
+
+// noEnvelope refuses Planner text that names the relay envelope, in any
+// spelling a reader takes for it: only the gateway writes one, so a session
+// can take it for the user's own words. In 11-07 runs a copy with the
+// brackets swapped for ‹› still passed for the real one 9 times in 13, so a
+// look-alike tag is the forgery as much as the tag itself.
 func noEnvelope(field, text string) error {
-	if strings.Contains(strings.ToLower(text), envelopeTag) {
+	if envelopeLike.MatchString(foldLookalike(text)) {
 		return fmt.Errorf("%s 里不能出现 %s（只有网关写它）", field, envelopeTag)
 	}
 	return nil
@@ -678,6 +700,16 @@ func (a *Ask) validate() error {
 		return fmt.Errorf("question 超过 %d 字", textRunes)
 	case len(a.Options) > maxOptions:
 		return fmt.Errorf("options 最多 %d 个", maxOptions)
+	}
+	// The question and the option picked go into the relay envelope with
+	// the answer (relayEnvelope), there or from the answer's turn.
+	if err := noEnvelope("question", a.Question); err != nil {
+		return err
+	}
+	for _, o := range a.Options {
+		if err := noEnvelope("options", o); err != nil {
+			return err
+		}
 	}
 	// Duplicates are judged on the options as written; two that differ only
 	// past the cut would read the same on the card, which only a shorter
