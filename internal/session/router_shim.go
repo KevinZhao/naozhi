@@ -238,6 +238,11 @@ func (r *Router) adoptLiveShim(tx sessTx, state shim.State, backendID string) *M
 		Workspace: state.Workspace,
 		Backend:   backendID,
 	}
+	// The overlay holds the profile the CLI was spawned under; without it the
+	// adopted session records "" and its next resume re-resolves the account.
+	if state.SpawnOverlay != nil {
+		entry.AccessProfile = state.SpawnOverlay.AccessProfile
+	}
 	r.restoreSessionFromEntry(tx, state.Key, entry)
 	s := tx.Get(state.Key)
 	if s != nil {

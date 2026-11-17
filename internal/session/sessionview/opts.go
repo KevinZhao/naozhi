@@ -23,6 +23,10 @@ type AgentOpts struct {
 	// must resume on the SAME auth chain it was created on (RFC
 	// project-access-profile §7).
 	AccessProfile string
+	// AccessProfilePinned marks AccessProfile as the user's own pick, as
+	// SwitchAccessProfile records it: a pinned "" is the global credentials,
+	// not a gap default_access_profile fills. An aside carries its source's.
+	AccessProfilePinned bool
 	// Effort overrides the backend's thinking-effort tier for this session.
 	// Empty = inherit. Only ACP-protocol backends act on it.
 	Effort string

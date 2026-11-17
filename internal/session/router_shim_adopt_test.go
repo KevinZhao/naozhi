@@ -211,3 +211,25 @@ func TestRestoreSessionFromEntry_DoesNotMarkCostBaselineUnknown(t *testing.T) {
 			"so the next turn's delta is real and must not be zeroed")
 	}
 }
+
+// An adopted shim keeps the account its CLI runs on: with "" recorded, the
+// session's next resume would re-resolve the profile and could cross accounts.
+func TestAdoptLiveShim_KeepsAccessProfile(t *testing.T) {
+	r := newTestRouter(3)
+	const key = "dashboard:direct:alice:general"
+	state := shim.State{
+		Key:          key,
+		SessionID:    "sid-adopt-ap",
+		Backend:      "claude",
+		SpawnOverlay: &shim.SpawnOverlay{AccessProfile: "team-bedrock"},
+	}
+	_, backendID := r.backends.wrapperFor(state.Backend)
+	var got *ManagedSession
+	r.ss.Update(func(tx sessTx) { got = r.adoptLiveShim(tx, state, backendID) })
+	if got == nil {
+		t.Fatal("adoptLiveShim returned nil")
+	}
+	if ap := got.AccessProfile(); ap != "team-bedrock" {
+		t.Errorf("adopted session's access profile = %q, want team-bedrock", ap)
+	}
+}
