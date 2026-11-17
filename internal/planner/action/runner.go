@@ -329,6 +329,9 @@ type ended struct {
 	// background work (Gone), "" while it lives: the work died with it, so
 	// the turn did not end as a turn that has nothing left running.
 	gone string
+	// onBackground is a hold on background work, not on a doing window:
+	// only the CLI's end under such a hold killed work (woken).
+	onBackground bool
 }
 
 const (
@@ -734,6 +737,7 @@ func (r *Runner) checkEnded(e ended) {
 		// workflow has no limit: the board has its end. An expiry passed
 		// already is a judgment not counting by the clock: no hold.
 		if end, ok := bg.Expires(); ok && end.After(now) {
+			e.onBackground = true
 			r.hold(e, end)
 			return
 		}
@@ -742,6 +746,7 @@ func (r *Runner) checkEnded(e ended) {
 	if at, ok := r.doingAt[e.key]; ok && due {
 		if end := at.Add(doingQuiet); now.Before(end) {
 			// Left unchecked on disk: a restart checks it again.
+			e.onBackground = false
 			r.hold(e, end)
 			return
 		}
@@ -1000,12 +1005,17 @@ func (r *Runner) hold(e ended, end time.Time) {
 
 // woken is e, or, for the wake of a hold, the turn end held; false when
 // none is (a later check took it). A wake for the CLI's end (Gone) carries
-// how it ended onto the turn end held.
+// how it ended onto a turn end held on background work; one held to a
+// doing window had no work to kill, so the CLI's end leaves it held, its
+// timer armed, and the receipt says nothing of background work.
 func (r *Runner) woken(e ended) (ended, bool) {
 	if !e.wake {
 		return e, true
 	}
 	held, ok := r.quiet[e.key]
+	if e.gone != "" && ok && !held.onBackground {
+		return ended{}, false
+	}
 	delete(r.quiet, e.key)
 	if e.gone != "" {
 		held.gone = e.gone
@@ -1116,6 +1126,7 @@ func (r *Runner) checkCustody(e ended) {
 		// end none, so look again once the task is no longer counted.
 		// Left unchecked on disk meanwhile.
 		if end, ok := bg.Expires(); ok && end.After(r.cfg.Now()) {
+			e.onBackground = true
 			r.hold(e, end)
 			return
 		}
