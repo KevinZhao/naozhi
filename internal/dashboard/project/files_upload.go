@@ -137,8 +137,9 @@ func validUploadLeaf(raw string) (string, bool) {
 //
 // Form: project (required), dir (optional, default "."; must already exist —
 // never MkdirAll'd), file (exactly one part; its filename supplies the leaf).
-// Query: overwrite=1 replaces in place (O_TRUNC) instead of 409 (O_EXCL);
-// O_NOFOLLOW applies in both modes. Remote nodes are unsupported → 400.
+// Query: overwrite=1 replaces a regular file (temp file + rename) instead of
+// 409 (O_EXCL); a symlinked leaf is refused in both modes. Remote nodes are
+// unsupported → 400.
 func (h *Handlers) HandleFilesUpload(w http.ResponseWriter, r *http.Request) {
 	if h.deps.ProjectMgr == nil {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "projects not configured"})
@@ -295,9 +296,37 @@ func (h *Handlers) HandleFilesUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// O_NOFOLLOW (refuse symlinked leaf) + O_EXCL (refuse silent overwrite) or
-	// O_TRUNC (overwrite=1): this open IS the atomic security boundary for the leaf.
-	dst, err := CreateWorkspaceFile(finalPath, overwrite)
+	// overwrite=1 writes beside the target and renames over it once the bytes
+	// are durable: truncating in place lost the original whenever the copy then
+	// failed (size cap, ENOSPC, fsync). The leaf must be a regular file or
+	// absent; a symlink is refused as 409 like the O_NOFOLLOW path, and the
+	// rename replaces a directory entry, never writing through a link.
+	var prior os.FileInfo
+	if overwrite {
+		fi, lerr := os.Lstat(finalPath)
+		switch {
+		case lerr == nil && !fi.Mode().IsRegular():
+			httputil.WriteJSONStatus(w, http.StatusConflict, map[string]string{"error": "file already exists"})
+			return
+		case lerr == nil:
+			prior = fi
+		case !errors.Is(lerr, fs.ErrNotExist):
+			slog.Warn("files/upload: stat target IO failure", "err", lerr, "project", project,
+				"target", osutil.SanitizeForLog(relTarget, 256))
+			httputil.WriteJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "could not create file"})
+			return
+		}
+	}
+
+	// Without overwrite: O_NOFOLLOW (refuse symlinked leaf) + O_EXCL (refuse
+	// silent overwrite); this open IS the atomic security boundary for the leaf.
+	// With overwrite: an O_EXCL temp file in the same directory, 0600.
+	var dst *os.File
+	if overwrite {
+		dst, err = os.CreateTemp(parentResolved, ".naozhi-upload-*")
+	} else {
+		dst, err = CreateWorkspaceFile(finalPath, false)
+	}
 	if err != nil {
 		switch {
 		case errors.Is(err, os.ErrExist):
@@ -317,13 +346,14 @@ func (h *Handlers) HandleFilesUpload(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// Every failure below removes only what this request created: the new
+	// file, or the temp file beside an original that stays as it was.
+	writePath := dst.Name()
 
 	src, err := fh.Open()
 	if err != nil {
 		_ = dst.Close()
-		if !overwrite {
-			_ = os.Remove(finalPath)
-		}
+		_ = os.Remove(writePath)
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "could not read uploaded file"})
 		return
 	}
@@ -337,9 +367,7 @@ func (h *Handlers) HandleFilesUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	if copyErr != nil {
 		_ = dst.Close()
-		if !overwrite {
-			_ = os.Remove(finalPath)
-		}
+		_ = os.Remove(writePath)
 		if osutil.IsDiskFull(copyErr) {
 			httputil.WriteJSONStatus(w, http.StatusInsufficientStorage, map[string]string{"error": "no space left on device"})
 			return
@@ -357,9 +385,7 @@ func (h *Handlers) HandleFilesUpload(w http.ResponseWriter, r *http.Request) {
 	// ordering); surface a sync failure rather than report an unsafe success.
 	if err := dst.Sync(); err != nil {
 		_ = dst.Close()
-		if !overwrite {
-			_ = os.Remove(finalPath)
-		}
+		_ = os.Remove(writePath)
 		if osutil.IsDiskFull(err) {
 			httputil.WriteJSONStatus(w, http.StatusInsufficientStorage, map[string]string{"error": "no space left on device"})
 			return
@@ -369,12 +395,28 @@ func (h *Handlers) HandleFilesUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := dst.Close(); err != nil {
-		if !overwrite {
-			_ = os.Remove(finalPath)
-		}
+		_ = os.Remove(writePath)
 		slog.Warn("files/upload: close IO failure", "err", err, "project", project)
 		httputil.WriteJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "could not persist file"})
 		return
+	}
+	if overwrite {
+		// Truncating in place kept the file's mode; the temp file is 0600.
+		if prior != nil {
+			_ = os.Chmod(writePath, prior.Mode().Perm())
+		}
+		// The leaf may have turned into a symlink or directory since the Lstat.
+		if fi, lerr := os.Lstat(finalPath); lerr == nil && !fi.Mode().IsRegular() {
+			_ = os.Remove(writePath)
+			httputil.WriteJSONStatus(w, http.StatusConflict, map[string]string{"error": "file already exists"})
+			return
+		}
+		if err := os.Rename(writePath, finalPath); err != nil {
+			_ = os.Remove(writePath)
+			slog.Warn("files/upload: rename IO failure", "err", err, "project", project)
+			httputil.WriteJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "could not persist file"})
+			return
+		}
 	}
 	_ = osutil.SyncDir(parentResolved)
 

@@ -3,9 +3,11 @@ package project
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -124,17 +126,52 @@ func (p *Project) configPath() string {
 	return filepath.Join(p.Path, configDir, configFile)
 }
 
+// maxConfigBytes caps a project.yaml read. Bindings and a few planner fields
+// fit in a few KB; the cap only has to stop a hostile file.
+const maxConfigBytes = 64 << 10
+
 // loadConfig reads .naozhi/project.yaml. Returns zero-value config if file doesn't exist.
+//
+// The file can arrive with a git clone or pull into projects.root, and git
+// keeps symlinks: one pointing at /dev/zero would grow os.ReadFile's buffer
+// until the process ran out of memory, a FIFO would block the scan forever.
+// Only a regular file within maxConfigBytes is read; anything else is a bad
+// config, which Scan skips like a parse error.
+//
+// A symlink to a regular file is still followed (osutil.OpenRegular's
+// O_NOFOLLOW is not used): users keep project.yaml in a shared or dotfiles
+// directory, and refusing the link would drop the whole project from Scan.
+// O_NONBLOCK and the Fstat type check on the opened fd are what stop the
+// FIFO and the device, wherever the link points.
 func loadConfig(projectPath string) (ProjectConfig, error) {
 	var cfg ProjectConfig
 	path := filepath.Join(projectPath, configDir, configFile)
 
-	data, err := os.ReadFile(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return cfg, nil
 		}
 		return cfg, fmt.Errorf("read project config: %w", err)
+	}
+	fi, err := f.Stat()
+	if err == nil && !fi.Mode().IsRegular() {
+		err = osutil.ErrNotRegular
+	} else if err == nil && fi.Size() > maxConfigBytes {
+		err = osutil.ErrTooLarge
+	}
+	if err != nil {
+		f.Close()
+		return cfg, fmt.Errorf("read project config: %w", err)
+	}
+	// The cap holds on the read too: the file may grow after the open's Fstat.
+	data, err := io.ReadAll(io.LimitReader(f, maxConfigBytes+1))
+	f.Close()
+	if err != nil {
+		return cfg, fmt.Errorf("read project config: %w", err)
+	}
+	if len(data) > maxConfigBytes {
+		return cfg, fmt.Errorf("read project config: %w", osutil.ErrTooLarge)
 	}
 
 	if err := yaml.Unmarshal(data, &cfg); err != nil {

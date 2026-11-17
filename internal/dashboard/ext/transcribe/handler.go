@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"strings"
 	"time"
@@ -96,9 +97,16 @@ func (h *Handler) HandleTranscribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 1: allowlist the declared Content-Type before sniffing.
+	// Step 1: allowlist the declared Content-Type before sniffing. Browsers
+	// send MediaRecorder's type with its parameters ("audio/webm;codecs=opus"),
+	// so the media type is compared without them; one that does not parse is
+	// rejected like any type off the list.
 	declaredMIME := fh.Header.Get("Content-Type")
-	switch declaredMIME {
+	mediaType, _, perr := mime.ParseMediaType(declaredMIME)
+	if perr != nil {
+		mediaType = ""
+	}
+	switch mediaType {
 	case "audio/ogg", "audio/mpeg", "audio/wav", "audio/flac", "audio/mp4",
 		"audio/amr", "audio/webm", "audio/aac", "audio/x-m4a",
 		"video/mp4", "video/webm": // some browsers tag voice memos as video

@@ -433,23 +433,68 @@ func (m *Manager) BindChat(projectName, platform, chatType, chatID string) error
 	}
 
 	binding := ChatBinding{Platform: platform, ChatID: chatID, ChatType: chatType}
+	same := func(b ChatBinding) bool {
+		return b.Platform == platform && b.ChatID == chatID && b.ChatType == chatType
+	}
 
-	for _, b := range p.Config.ChatBindings {
-		if b.Platform == platform && b.ChatID == chatID && b.ChatType == chatType {
-			return nil // already bound
+	// A chat belongs to one project: /project B replaces A's binding. Left in
+	// A as well, rebuildBindingIndex would pick A or B by map order, and every
+	// Scan could flip which planner the chat's messages reach.
+	type pendingSave struct {
+		path string
+		cfg  ProjectConfig
+	}
+	var saves []pendingSave
+	for name, other := range m.projects {
+		if name == projectName {
+			continue
+		}
+		filtered := other.Config.ChatBindings[:0]
+		removed := false
+		for _, b := range other.Config.ChatBindings {
+			if same(b) {
+				removed = true
+				continue
+			}
+			filtered = append(filtered, b)
+		}
+		if removed {
+			other.Config.ChatBindings = filtered
+			saves = append(saves, pendingSave{path: other.configPath(), cfg: snapshotConfig(other)})
 		}
 	}
 
-	p.Config.ChatBindings = append(p.Config.ChatBindings, binding)
+	bound := false
+	for _, b := range p.Config.ChatBindings {
+		if same(b) {
+			bound = true
+			break
+		}
+	}
+	if bound && len(saves) == 0 {
+		return nil // already bound here and nowhere else
+	}
+	if !bound {
+		p.Config.ChatBindings = append(p.Config.ChatBindings, binding)
+		saves = append(saves, pendingSave{path: p.configPath(), cfg: snapshotConfig(p)})
+	}
 	m.mutGen++
 	m.rebuildBindingIndex()
-	return saveConfigToPath(p.configPath(), snapshotConfig(p))
+
+	var firstErr error
+	for _, s := range saves {
+		if err := saveConfigToPath(s.path, s.cfg); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // UnbindAllChat removes all bindings for a given chat across all projects.
-// A chat can be bound to several projects (BindChat allows cross-project
-// duplicates), so the single-value bindingIndex is not a reliable enumeration:
-// every project's ChatBindings is scanned; only modified ones persist (#1961).
+// A project.yaml edited by hand (or written before BindChat moved a chat
+// instead of adding it) can bind one chat to several projects, so the
+// single-value bindingIndex is not a reliable enumeration: every project's
+// ChatBindings is scanned; only modified ones persist (#1961).
 func (m *Manager) UnbindAllChat(platform, chatType, chatID string) error {
 	// Persist under the lock so a concurrent Scan() cannot resurrect the
 	// bindings just stripped (see BindChat).
@@ -529,6 +574,12 @@ func (m *Manager) UpdateConfig(name string, cfg ProjectConfig) error {
 	if cfg.CreatedAt == 0 {
 		cfg.CreatedAt = p.Config.CreatedAt
 	}
+	// Chat bindings and the favorite flag have their own writers (BindChat /
+	// UnbindAllChat from IM, SetFavorite from the sidebar star). The settings
+	// modal sends back the copy it loaded when it opened, so taking the
+	// client's value would undo a bind, unbind or star made meanwhile.
+	cfg.ChatBindings = p.Config.ChatBindings
+	cfg.Favorite = p.Config.Favorite
 	p.Config = cfg
 	m.mutGen++
 	m.rebuildBindingIndex()
