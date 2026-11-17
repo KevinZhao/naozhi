@@ -615,3 +615,37 @@ func TestCacheManager_RefreshAll_parallel(t *testing.T) {
 		}
 	}
 }
+
+// A node answering `[null]` (buggy, version-skewed or compromised) must not
+// panic the primary: the null rows are dropped and the rest tagged.
+func TestCacheManager_NullRowsDoNotPanic(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		refresh func(cm *CacheManager)
+	}{
+		{"RefreshAll", func(cm *CacheManager) { cm.RefreshAll() }},
+		{"RefreshFor", func(cm *CacheManager) { cm.RefreshFor("n") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node := &stubConn{
+				nodeID:   "n",
+				sessions: []map[string]any{nil, {"session_id": "s1"}},
+				projects: []map[string]any{nil},
+				disc:     []map[string]any{{"session_id": "d1"}, nil},
+			}
+			cm := NewCacheManager(func() map[string]Conn { return map[string]Conn{"n": node} }, nil)
+			tc.refresh(cm)
+
+			sessions, status := cm.Sessions()
+			if status["n"] != "ok" || len(sessions["n"]) != 1 || sessions["n"][0]["node"] != "n" {
+				t.Fatalf("sessions = %v, status = %v", sessions["n"], status["n"])
+			}
+			if p := cm.Projects()["n"]; len(p) != 0 {
+				t.Fatalf("projects = %v, want empty", p)
+			}
+			if d := cm.Discovered()["n"]; len(d) != 1 || d[0]["node"] != "n" {
+				t.Fatalf("discovered = %v", d)
+			}
+		})
+	}
+}
