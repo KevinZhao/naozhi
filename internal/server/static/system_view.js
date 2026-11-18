@@ -198,7 +198,7 @@ function healthUnitName(u, target) {
   if (u.id === 'sys:scout') return '巡检';
   if (target && target.title) return target.title;
   if (u.name) return u.name;
-  if (u.kind === 'remote') return u.id.slice(u.id.indexOf('/') + 1);
+  if (u.kind === 'remote') return '未命名会话';
   if (u.kind === 'sysession') return u.id.replace(/^sys:/, '');
   if (u.kind === 'cron') return u.id.replace(/^cron:/, '');
   if (u.kind === 'external') return u.id.replace(/^external:/, '');

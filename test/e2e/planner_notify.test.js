@@ -75,7 +75,8 @@ for (const vp of [{ name: 'desktop', width: 1280, height: 800 }, { name: 'phone'
       await expect(notice).toBeVisible();
       await expect(notice.locator('.pl-card-meta a.pl-link')).toHaveAttribute('href', LINK);
       await expect(notice.locator('.pl-card-meta')).toHaveText('打开原文');
-      if (vp.name === 'phone') await expect(page.locator('#pl-left-toggle')).toHaveText('等你 0 · 任务 0');
+      // No tasks fixture: GET /api/tasks answers 404, a count never read.
+      if (vp.name === 'phone') await expect(page.locator('#pl-left-toggle')).toHaveText('等你 0 · 任务');
       await notice.locator('[data-action="planner-inbox-close"]').click();
       await expect(page.locator('#pl-wait')).toHaveText('没有等你的事');
     } finally {

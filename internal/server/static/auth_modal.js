@@ -50,8 +50,14 @@ async function saveToken() {
       note.textContent = (reason || 'login refused (HTTP 400)').slice(0, 300);
       document.querySelector('.modal-overlay .auth-hint')?.after(note);
     } else {
-      document.getElementById('token-input').value = '';
-      document.getElementById('token-input').placeholder = 'invalid token — try again';
+      // Said under the box, not as its placeholder: typing would hide it.
+      const input = document.getElementById('token-input');
+      input.value = '';
+      // An .auth-refusal, so the next try clears it first.
+      const wrong = Object.assign(document.createElement('div'), { className: 'auth-hint auth-refusal auth-wrong', textContent: 'token 不对，请重试' });
+      wrong.setAttribute('role', 'alert');
+      input.after(wrong);
+      input.focus();
     }
   } catch(e) {
     showNetworkError('', e);
@@ -98,7 +104,7 @@ function startLoginRetryCountdown(seconds) {
 }
 
 // startWSAuthRetryCountdown arms the auth rate-limit gate and drives an
-// inline sidebar-status countdown (via shell.updateStatusBar, so it stays out
+// inline #conn-status countdown (via shell.updateStatusBar, so it stays out
 // of the way on mobile) rather than a toast. Triggered by an
 // auth_fail(Error="too many attempts") message that carries a retry_after
 // hint. On expiry the gate clears and wsm.connect() fires once so the user

@@ -255,10 +255,10 @@ export function initLightbox() {
   // group model (RFC lightbox-gallery-nav): hidden via .lb-single when the
   // group holds one image.
   ov.innerHTML='<div class="lb-toolbar">'
-    +'<button type="button" class="lb-tool-btn" data-lb-action="zoom-out" aria-label="Zoom out" title="缩小 (-)">' + ICONS.zoomOut + '</button>'
-    +'<button type="button" class="lb-tool-btn" data-lb-action="zoom-in" aria-label="Zoom in" title="放大 (+)">' + ICONS.zoomIn + '</button>'
-    +'<button type="button" class="lb-tool-btn" data-lb-action="rotate-left" aria-label="Rotate left" title="Rotate left (R)">' + ICONS.rotateLeft + '</button>'
-    +'<button type="button" class="lb-tool-btn" data-lb-action="rotate-right" aria-label="Rotate right" title="Rotate right (Shift+R)">' + ICONS.rotateRight + '</button>'
+    +'<button type="button" class="lb-tool-btn" data-lb-action="zoom-out" aria-label="缩小" title="缩小 (-)">' + ICONS.zoomOut + '</button>'
+    +'<button type="button" class="lb-tool-btn" data-lb-action="zoom-in" aria-label="放大" title="放大 (+)">' + ICONS.zoomIn + '</button>'
+    +'<button type="button" class="lb-tool-btn" data-lb-action="rotate-left" aria-label="向左旋转" title="向左旋转 (R)">' + ICONS.rotateLeft + '</button>'
+    +'<button type="button" class="lb-tool-btn" data-lb-action="rotate-right" aria-label="向右旋转" title="向右旋转 (Shift+R)">' + ICONS.rotateRight + '</button>'
     +'</div>'
     +'<button type="button" class="lb-nav lb-nav-prev" data-lb-action="prev" aria-label="上一张" title="上一张 (←)">' + ICONS.galleryPrev + '</button>'
     +'<button type="button" class="lb-nav lb-nav-next" data-lb-action="next" aria-label="下一张" title="下一张 (→)">' + ICONS.galleryNext + '</button>'

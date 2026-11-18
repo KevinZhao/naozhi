@@ -109,13 +109,6 @@ test.describe('Sidebar & session list', () => {
     await ctx.close();
     emptyMock.server.close();
   });
-
-  // The '#sidebar-status' WebSocket status bar test was removed: the node was
-  // deleted when the sidebar foot gave way to the session list (already absent
-  // at the history-squash commit a274e0cc; session_list.js updateStatusBar()
-  // early-returns with the comment "#sidebar-status 节点已在'底部让位给 session
-  // 列表'的迭代中删除"). Local WS state now only surfaces via getNodeStatus()
-  // in the New Session connection picker.
 });
 
 // ─── Session Selection & Events Display ────────────────────────────────────────
@@ -171,7 +164,7 @@ test.describe('Session selection & events', () => {
     expect(thTexts).toEqual(['Col A', 'Col B']);
 
     // Fenced code blocks get a copy button.
-    await expect(page.locator('.md-code-wrap .md-copy-btn').first()).toHaveText('copy');
+    await expect(page.locator('.md-code-wrap .md-copy-btn').first()).toHaveText('复制');
 
     await ctx.close();
   });
@@ -430,7 +423,7 @@ test.describe('Auth modal & login', () => {
     // Auth modal should appear since /api/sessions returns 401
     await page.waitForSelector('.modal-overlay');
     const modalTitle = await page.$eval('.modal h3', el => el.textContent);
-    expect(modalTitle).toContain('Dashboard API Token');
+    expect(modalTitle).toContain('登录');
 
     // Token input should be focused
     const tokenInput = page.locator('#token-input');
@@ -467,7 +460,7 @@ test.describe('Auth modal & login', () => {
     authMock.server.close();
   });
 
-  test('wrong token shows error in placeholder', async ({ browser }) => {
+  test('wrong token says so under the box', async ({ browser }) => {
     const authMock = await startMockServer({
       requireAuth: true,
       authToken: 'secret-token',
@@ -482,11 +475,12 @@ test.describe('Auth modal & login', () => {
     await page.fill('#token-input', 'wrong-token');
     await page.click('.modal-btns button.primary');
 
-    // Input should be cleared and placeholder changed. Poll instead of a fixed
-    // 300ms sleep — under a parallel worker load the 401 round-trip
-    // occasionally landed after the sleep (observed 1/3 runs; #2454).
+    // Input cleared, the error said under it in Chinese (not as the
+    // placeholder, which typing hides). Poll: under a parallel worker load
+    // the 401 round-trip can land late (#2454).
     const tokenInput = page.locator('#token-input');
-    await expect(tokenInput).toHaveAttribute('placeholder', /invalid token/);
+    await expect(page.locator('.modal-overlay .auth-wrong')).toHaveText('token 不对，请重试');
+    await expect(tokenInput).toHaveAttribute('placeholder', '请输入 dashboard token…');
     await expect(tokenInput).toHaveValue('');
 
     // Modal should still be open
@@ -497,7 +491,7 @@ test.describe('Auth modal & login', () => {
     authMock.server.close();
   });
 
-  test('a 400 login refusal shows the server reason, not invalid token', async ({ browser }) => {
+  test('a 400 login refusal shows the server reason, not the wrong-token line', async ({ browser }) => {
     const reason = 'server.trusted_proxy is on <b>x</b>';
     const authMock = await startMockServer({
       requireAuth: true,
@@ -520,7 +514,7 @@ test.describe('Auth modal & login', () => {
     // The permanent hint keeps saying where the token lives.
     await expect(page.locator('.modal-overlay .auth-hint').first()).toContainText('dashboard_token');
     const tokenInput = page.locator('#token-input');
-    await expect(tokenInput).not.toHaveAttribute('placeholder', /invalid token/);
+    await expect(page.locator('.modal-overlay .auth-wrong')).toHaveCount(0);
     // The token was never compared, so it is kept for the retry.
     await expect(tokenInput).toHaveValue('secret-token');
     expect(authMock.loginCalls).toHaveLength(1);
@@ -528,8 +522,8 @@ test.describe('Auth modal & login', () => {
     // A later 401 clears the stale reason instead of stacking under it.
     await page.fill('#token-input', 'wrong-token');
     await page.click('.modal-btns button.primary');
-    await expect(tokenInput).toHaveAttribute('placeholder', /invalid token/);
-    await expect(refusal).toHaveCount(0);
+    await expect(refusal).toHaveText('token 不对，请重试');
+    await expect(refusal).toHaveCount(1);
     expect(authMock.loginCalls).toHaveLength(2);
 
     await ctx.close();
@@ -558,7 +552,7 @@ test.describe('New session creation', () => {
     await page.waitForSelector('.session-card');
 
     // Click new session button
-    await page.click('.hdr-btn[title="New Session"]');
+    await page.click('#btn-new-session');
     await page.waitForSelector('.cmd-palette-overlay');
 
     const dialogLabel = await page.$eval('.cmd-palette', el => el.getAttribute('aria-label'));
@@ -588,7 +582,7 @@ test.describe('New session creation', () => {
     await page.waitForSelector('.session-card');
 
     // First open: learn where the 'myproject' row renders, then close.
-    await page.click('.hdr-btn[title="New Session"]');
+    await page.click('#btn-new-session');
     await page.waitForSelector('.cmd-palette-item');
     const box = await page.locator('.cmd-palette-item', { hasText: 'myproject' }).first().boundingBox();
     // Palette keys are handled on #cp-input, which is focused asynchronously.
@@ -599,7 +593,7 @@ test.describe('New session creation', () => {
     // Park the pointer exactly where that row will appear, then open the
     // palette via a JS click so the pointer does not move.
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-    await page.$eval('.hdr-btn[title="New Session"]', el => el.click());
+    await page.$eval('#btn-new-session', el => el.click());
     await page.waitForSelector('.cmd-palette-item');
     await page.waitForFunction(() => document.activeElement && document.activeElement.id === 'cp-input');
     await page.waitForTimeout(50); // let any synthetic mouseenter land
@@ -619,7 +613,7 @@ test.describe('New session creation', () => {
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
-    await page.click('.hdr-btn[title="New Session"]');
+    await page.click('#btn-new-session');
     await page.waitForSelector('.cmd-palette-item');
     const row = page.locator('.cmd-palette-item', { hasText: 'otherproject' }).first();
     const box = await row.boundingBox();
@@ -648,7 +642,7 @@ test.describe('New session creation', () => {
     const hasStable = await page.evaluate(() => (projectsData.find(p => p.name === 'myproject') || {}).stableKey);
     expect(hasStable).toBe('dashboard:pj:0123456789abcdef:general');
 
-    await page.click('.hdr-btn[title="New Session"]');
+    await page.click('#btn-new-session');
     await page.waitForSelector('.cmd-palette-item');
     await page.locator('.cmd-palette-item', { hasText: 'myproject' }).first().click();
     await page.waitForSelector('.cmd-palette-overlay', { state: 'detached' });
@@ -667,7 +661,7 @@ test.describe('New session creation', () => {
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
 
-    await page.click('.hdr-btn[title="New Session"]');
+    await page.click('#btn-new-session');
     await page.waitForSelector('.cmd-palette-item');
 
     // Pick a project row
@@ -686,7 +680,7 @@ test.describe('New session creation', () => {
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
 
-    await page.click('.hdr-btn[title="New Session"]');
+    await page.click('#btn-new-session');
     await page.waitForSelector('.cmd-palette-item');
 
     // Click "打开自定义工作目录…" (pickPaletteCustom)
@@ -707,13 +701,13 @@ test.describe('New session creation', () => {
     await page.waitForSelector('.session-card');
 
     // Palette has no cancel button — footer advertises "Esc 关闭".
-    await page.click('.hdr-btn[title="New Session"]');
+    await page.click('#btn-new-session');
     await page.waitForSelector('.cmd-palette-overlay');
     await page.press('#cp-input', 'Escape');
     await page.waitForSelector('.cmd-palette-overlay', { state: 'detached' });
 
     // The custom-workspace modal keeps a 取消 button.
-    await page.click('.hdr-btn[title="New Session"]');
+    await page.click('#btn-new-session');
     await page.locator('.cmd-palette-item', { hasText: '打开自定义工作目录' }).click();
     await page.waitForSelector('.modal-overlay');
     await page.click('.modal-btns button:not(.primary)');
@@ -738,7 +732,7 @@ test.describe('New session creation', () => {
     // No first-visit overlay stands in front of the header.
     await expect(page.locator('.modal-overlay')).toHaveCount(0);
 
-    await page.click('.hdr-btn[title="New Session"]');
+    await page.click('#btn-new-session');
     await page.waitForSelector('.modal-overlay');
 
     // Should show workspace input directly (no palette)

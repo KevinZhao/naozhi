@@ -90,7 +90,7 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
         await expect(page.locator('#sw-toggle')).toHaveAttribute('aria-expanded', 'true');
         const cards = page.locator('#sw-wait .pl-card');
         await expect(cards).toHaveCount(3);
-        await expect(cards.locator('.pl-kind')).toHaveText(['待你决定', '提问', '错误']);
+        await expect(cards.locator('.pl-kind')).toHaveText(['待你决定', '提问', '失败']);
         await expect(page.locator('#side-wait .tk-card')).toHaveCount(0);
         // Unfolded in place, not scrolled inside.
         expect(await page.locator('#sw-wait').evaluate((el) => getComputedStyle(el).overflowY)).toBe('visible');

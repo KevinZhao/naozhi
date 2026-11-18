@@ -26,7 +26,7 @@ import { renderRich, runPendingAsync } from './render_md.js';
 (function () {
   'use strict';
 
-  function toast(m) { showToast(m); }
+  function toast(m, type) { showToast(m, type); }
   function $(id) { return document.getElementById(id); }
 
   // state.project: the current browse root's project name. Initialised to the
@@ -457,13 +457,13 @@ import { renderRich, runPendingAsync } from './render_md.js';
         done();
         return;
       }
-      if (xhr.status === 413) { toast('文件过大：' + file.name); done(); return; }
-      if (xhr.status === 403) { toast('该文件名不允许上传：' + file.name); done(); return; }
+      if (xhr.status === 413) { toast('文件过大：' + file.name, 'error'); done(); return; }
+      if (xhr.status === 403) { toast('该文件名不允许上传：' + file.name, 'error'); done(); return; }
       if (xhr.status === 429) { toast('上传过于频繁，请稍后重试'); done(); return; }
-      toast('上传失败（' + xhr.status + '）：' + file.name);
+      toast('上传失败（' + xhr.status + '）：' + file.name, 'error');
       done();
     };
-    xhr.onerror = function () { bar.done(); toast('上传出错：' + file.name); done(); };
+    xhr.onerror = function () { bar.done(); toast('上传出错：' + file.name, 'error'); done(); };
     xhr.send(fd);
   }
 

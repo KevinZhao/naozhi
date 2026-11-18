@@ -255,12 +255,12 @@ function effortTagHtml(effort) {
   const hot = raw === 'max' || raw === 'xhigh';
   // aria-label rather than the bare title the neighbouring chips rely on: read
   // aloud, a lone "max" carries no meaning, and the leading "·" separator would
-  // be announced as "middle dot". Labelling the span supplies the context and
+  // be announced as "middle dot". Labelling the button supplies the context and
   // suppresses the decorative punctuation in one go.
-  return '<span class="effort-tag' + (hot ? ' effort-hot' : '') +
-      ' nz-clickable" title="' + escAttr(tip + ' — 点击切换档位') + '" aria-label="' + escAttr(tip) + '"' +
+  return '<button type="button" class="effort-tag' + (hot ? ' effort-hot' : '') +
+      '" title="' + escAttr(tip + ' — 点击切换档位') + '" aria-label="' + escAttr(tip) + '"' +
       ' data-action="tuning-effort">' +
-      esc(raw) + '</span>';
+      esc(raw) + '</button>';
 }
 
 // setHeaderEffortChip repaints the header effort tag for the selected session.

@@ -241,7 +241,7 @@ function renderPathListFence(pathLines) {
   }).join('');
   return '<div class="md-code-wrap md-pathlist">' + rows +
     '<div class="md-code-actions">' +
-      '<button type="button" class="md-code-btn md-copy-btn" data-action="code-copy" aria-label="Copy file paths">copy</button>' +
+      '<button type="button" class="md-code-btn md-copy-btn" data-action="code-copy" aria-label="复制文件路径">复制</button>' +
     '</div>' +
     '</div>';
 }
@@ -250,7 +250,7 @@ function renderCodeFence(code, lang) {
   const langAttr = lang ? ' data-lang="' + escAttr(lang) + '"' : '';
   return '<div class="md-code-wrap"><pre class="md-pre"><code' + langAttr + '>' + esc(code) + '</code></pre>' +
     '<div class="md-code-actions">' +
-      '<button type="button" class="md-code-btn md-copy-btn" data-action="code-copy" aria-label="Copy code snippet">copy</button>' +
+      '<button type="button" class="md-code-btn md-copy-btn" data-action="code-copy" aria-label="复制代码">复制</button>' +
     '</div>' +
     '</div>';
 }

@@ -160,14 +160,14 @@ test('the palette and the custom workspace box: a candidate Enter neither picks 
   try {
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
-    await page.click('.hdr-btn[title="New Session"]');
+    await page.click('#btn-new-session');
     await page.waitForFunction(() => document.activeElement && document.activeElement.id === 'cp-input');
     await page.fill('#cp-input', 'my');
     await expectImeEnterIgnored(page, '#cp-input', '.cmd-palette-overlay', 'my');
     await page.press('#cp-input', 'Escape');
     await page.waitForSelector('.cmd-palette-overlay', { state: 'detached' });
 
-    await page.click('.hdr-btn[title="New Session"]');
+    await page.click('#btn-new-session');
     await page.locator('.cmd-palette-item', { hasText: '打开自定义工作目录' }).click();
     const ws = page.locator('#new-workspace');
     await expect(ws).toBeVisible();

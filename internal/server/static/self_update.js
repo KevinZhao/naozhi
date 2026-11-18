@@ -307,12 +307,12 @@ async function applyUpdate(action) {
       return;
     }
     const raw = (await r.text().catch(() => '')).trim();
-    showToast('升级未启动：' + (raw.slice(0, 200) || ('HTTP ' + r.status)));
+    showToast('升级未启动：' + (raw.slice(0, 200) || ('HTTP ' + r.status)), 'error');
     // A 409 means our view of the state was stale — re-read it immediately so
     // the chip stops offering the operation that was just refused.
     fetchUpdateStatus();
   } catch (e) {
-    showToast('升级请求失败：' + (e && e.message ? e.message : e));
+    showToast('升级请求失败：' + (e && e.message ? e.message : e), 'error');
   } finally {
     // On the 202 path renderUpdateChip has already set the busy class from
     // state; this only clears the optimistic one on the error paths.
