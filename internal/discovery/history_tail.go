@@ -45,7 +45,23 @@ func LoadHistoryTailBeforeCtx(ctx context.Context, claudeDir, sessionID, cwd str
 	if limit <= 0 {
 		return LoadHistory(claudeDir, sessionID, cwd)
 	}
+	return loadTail(ctx, claudeDir, sessionID, cwd, beforeMS, limit, tailOpts{toolImages: true})
+}
 
+// LoadTurnsTailCtx is the reply search's tail read: like LoadHistoryTailCtx,
+// but it stops once it has passed `turns` user entries and leaves out the
+// tool_result screenshots. The search keeps only the text after the
+// turns-th newest user entry, so neither the older lines nor the thumbnails
+// (a full image decode each) change what it finds, and a tool-heavy
+// transcript is no longer read back to its head.
+func LoadTurnsTailCtx(ctx context.Context, claudeDir, sessionID, cwd string, limit, turns int) ([]clievent.EventEntry, error) {
+	if limit <= 0 || turns <= 0 {
+		return nil, nil
+	}
+	return loadTail(ctx, claudeDir, sessionID, cwd, 0, limit, tailOpts{maxUsers: turns})
+}
+
+func loadTail(ctx context.Context, claudeDir, sessionID, cwd string, beforeMS int64, limit int, opts tailOpts) ([]clievent.EventEntry, error) {
 	path, err := resolveJSONLPath(claudeDir, sessionID, cwd)
 	if err != nil || path == "" {
 		return nil, err
@@ -73,7 +89,7 @@ func LoadHistoryTailBeforeCtx(ctx context.Context, claudeDir, sessionID, cwd str
 			"path", path, "size", size, "cap", maxTailReadBytes)
 	}
 
-	entries, err := parseTail(ctx, f, size, beforeMS, limit)
+	entries, err := parseTailOpts(ctx, f, size, beforeMS, limit, opts)
 	if err != nil {
 		return nil, fmt.Errorf("parse tail %s: %w", path, err)
 	}
@@ -108,6 +124,18 @@ func resolveJSONLPath(claudeDir, sessionID, cwd string) (string, error) {
 // counting. `carry` holds a line spanning the chunk boundary and is prepended
 // to the next (older) chunk; the result is reversed so callers see chronology.
 func parseTail(ctx context.Context, f *os.File, size int64, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
+	return parseTailOpts(ctx, f, size, beforeMS, limit, tailOpts{toolImages: true})
+}
+
+// tailOpts narrows parseTail for a caller that needs less than the display:
+// toolImages keeps the tool_result screenshot entries (thumbnailed), and
+// maxUsers > 0 stops the read once that many user entries are collected.
+type tailOpts struct {
+	toolImages bool
+	maxUsers   int
+}
+
+func parseTailOpts(ctx context.Context, f *os.File, size int64, beforeMS int64, limit int, opts tailOpts) ([]clievent.EventEntry, error) {
 	// Over-collect slightly: assistant lines may contribute 0 text blocks
 	// (tool_use / thinking filtered out), so a small cushion avoids a
 	// second pass when the newest lines are tool-heavy.
@@ -130,7 +158,12 @@ func parseTail(ctx context.Context, f *os.File, size int64, beforeMS int64, limi
 		scanBudget = maxTailReadBytes
 	}
 
-	for offset > 0 && len(entries) < target && scanBudget > 0 {
+	users := 0
+	done := func() bool {
+		return len(entries) >= target || (opts.maxUsers > 0 && users >= opts.maxUsers)
+	}
+
+	for offset > 0 && !done() && scanBudget > 0 {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -188,7 +221,7 @@ func parseTail(ctx context.Context, f *os.File, size int64, beforeMS int64, limi
 			if len(bytes.TrimSpace(line)) == 0 {
 				continue
 			}
-			lineEntries, ok := parseHistoryLine(line, beforeMS, true)
+			lineEntries, ok := parseHistoryLine(line, beforeMS, opts.toolImages)
 			if !ok {
 				continue
 			}
@@ -196,11 +229,14 @@ func parseTail(ctx context.Context, f *os.File, size int64, beforeMS int64, limi
 			// walking newest→oldest, append them reversed.
 			for j := len(lineEntries) - 1; j >= 0; j-- {
 				entries = append(entries, lineEntries[j])
-				if len(entries) >= target {
+				if lineEntries[j].Type == clievent.KindUser {
+					users++
+				}
+				if done() {
 					break
 				}
 			}
-			if len(entries) >= target {
+			if done() {
 				break
 			}
 		}

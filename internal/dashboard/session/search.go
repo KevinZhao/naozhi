@@ -95,8 +95,11 @@ func (c *replyCache) readSlot() chan struct{} {
 	return c.reading
 }
 
-// loadHistoryTail is the transcript tail read; tests count the reads.
-var loadHistoryTail = discovery.LoadHistoryTailCtx
+// loadHistoryTail is the transcript tail read, up to the searchTurns-th
+// newest user entry (all lastTurnReplies looks at); tests count the reads.
+var loadHistoryTail = func(ctx context.Context, claudeDir, sessionID, cwd string, limit int) ([]clievent.EventEntry, error) {
+	return discovery.LoadTurnsTailCtx(ctx, claudeDir, sessionID, cwd, limit, searchTurns)
+}
 
 // handleSearch answers GET /api/sessions/history?q=: the sidebar sessions
 // (in-memory event log) and the history sessions (transcript tail) whose last
