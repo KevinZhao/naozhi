@@ -125,6 +125,7 @@ func (p *Persister) writerFor(key, stem string) (*perKeyWriter, error) {
 		w.nextSeq = 1
 		w.dirty = true
 		w.firstDirtyAt = now
+		p.flushWanted = true
 
 		// fsync the header now so a crash before any other write leaves a
 		// valid file rather than 0 bytes.

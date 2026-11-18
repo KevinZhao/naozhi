@@ -26,6 +26,17 @@ import (
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
+// answerList replaces a list body the primary already holds (its tag in
+// params) with the short unchanged answer; errors pass through.
+func answerList(params json.RawMessage) func(json.RawMessage, error) (json.RawMessage, error) {
+	return func(body json.RawMessage, err error) (json.RawMessage, error) {
+		if err != nil {
+			return nil, err
+		}
+		return node.AnswerListFetch(params, body), nil
+	}
+}
+
 // handleRequest dispatches a reverse-RPC request received from the primary.
 //
 // Context rule: connCtx is cancelled when handleConn returns (WS drop, ping
@@ -39,7 +50,7 @@ import (
 func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.ReverseMsg, wg *sync.WaitGroup) (json.RawMessage, error) {
 	switch req.Method {
 	case "fetch_sessions":
-		return marshalResult(c.listSessions())
+		return answerList(req.Params)(marshalResult(c.listSessions()))
 
 	case "api":
 		return c.handleAPI(connCtx, req.Params)
@@ -48,11 +59,11 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if c.projMgr == nil {
 			return marshalResult([]any{})
 		}
-		return marshalResult(c.projMgr.All())
+		return answerList(req.Params)(marshalResult(c.projMgr.All()))
 
 	case "fetch_discovered":
 		if fn := c.discovery.Sessions; fn != nil {
-			return fn()
+			return answerList(req.Params)(fn())
 		}
 		return marshalResult([]any{})
 

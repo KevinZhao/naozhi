@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -351,4 +352,39 @@ func TestStore_DisabledIsNoop(t *testing.T) {
 		t.Fatalf("disabled summary = %+v err=%v", sum, err)
 	}
 	d.Close()
+}
+
+// A full batch flushed after the UTC day changed runs the retention sweep
+// then, not only the timed flush or the hourly check.
+func TestStore_FullBatchFlushSweepsAfterDayChange(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "cost")
+	if err := os.MkdirAll(dir, dirPerm); err != nil {
+		t.Fatal(err)
+	}
+	good, _ := json.Marshal(mk(t0.Add(-30*24*time.Hour), SourceSession, UnitUSD, 1))
+	edge := filepath.Join(dir, "2026-08-06.jsonl") // inside retention on t0, expired a day later
+	os.WriteFile(edge, append(good, '\n'), filePerm)
+	var now atomic.Int64
+	now.Store(t0.UnixNano())
+	s := NewStore(dir, Options{Now: func() time.Time { return time.Unix(0, now.Load()).UTC() }, RetentionDays: 30})
+	if _, err := os.Stat(edge); err != nil {
+		t.Fatalf("day file swept at open: %v", err)
+	}
+	// One timed flush first, so the worker has noted t0's day before the clock moves.
+	s.Append(mk(t0, SourceSession, UnitUSD, 1))
+	if !waitDurable(s, 1, 5*time.Second) {
+		t.Fatal("first entry never reached disk")
+	}
+	time.Sleep(100 * time.Millisecond) // let that flush's sweep check pass on t0's day
+	t1 := t0.Add(24 * time.Hour)
+	now.Store(t1.UnixNano())
+	for range batchMax {
+		if !s.Append(mk(t1, SourceSession, UnitUSD, 1)) {
+			t.Fatal("append dropped")
+		}
+	}
+	s.Close() // well inside flushEvery: only the full-batch flush can have swept
+	if _, err := os.Stat(edge); !os.IsNotExist(err) {
+		t.Error("expired day file not swept after the full-batch flush")
+	}
 }

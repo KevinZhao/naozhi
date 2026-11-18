@@ -169,6 +169,12 @@ Remote → Primary: {"type":"response","req_id":"r1","error":"..."}
 Methods: `fetch_sessions`, `fetch_projects`, `fetch_discovered`, `fetch_discovered_preview`,
 `fetch_events`, `send`, `takeover`, `update_config`.
 
+The three polled lists (`fetch_sessions`, `fetch_projects`, `fetch_discovered`)
+carry `"params":{"etag":"<tag of the body the primary holds>"}` once the
+primary has a body; a node whose body has the same tag answers
+`"result":{"not_modified":true}` and the primary keeps its copy, like an HTTP
+node's 304. An older node ignores the params and answers in full.
+
 **Event push (subscribe -> stream):**
 
 ```

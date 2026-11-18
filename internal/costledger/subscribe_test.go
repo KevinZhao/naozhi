@@ -122,3 +122,18 @@ func TestSubscribe_ClosedReplaysDisabledNever(t *testing.T) {
 		t.Error("a disabled store called its subscriber")
 	}
 }
+
+// The flush timer runs only while a batch waits; an entry after an idle
+// spell must re-arm it and reach disk without Close.
+func TestStore_FlushTimerRearmsAfterIdle(t *testing.T) {
+	s, _ := newTestStore(t, t0)
+	s.Append(tagged(t0, "first"))
+	if !waitDurable(s, 1, 5*time.Second) {
+		t.Fatal("first entry never reached disk")
+	}
+	time.Sleep(flushEvery + 200*time.Millisecond) // the timer fired on nothing pending
+	s.Append(tagged(t0, "second"))
+	if !waitDurable(s, 2, 5*time.Second) {
+		t.Fatal("entry after idle never reached disk")
+	}
+}

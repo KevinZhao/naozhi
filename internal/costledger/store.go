@@ -15,14 +15,17 @@ import (
 )
 
 const (
-	dayLayout    = "2006-01-02"
-	fileSuffix   = ".jsonl"
-	filePerm     = 0o600
-	dirPerm      = 0o700
-	queueDepth   = 4096
-	batchMax     = 64
-	flushEvery   = time.Second
-	dropLogEvery = time.Minute
+	dayLayout  = "2006-01-02"
+	fileSuffix = ".jsonl"
+	filePerm   = 0o600
+	dirPerm    = 0o700
+	queueDepth = 4096
+	batchMax   = 64
+	flushEvery = time.Second
+	// sweepCheckEvery bounds how late the daily retention sweep runs when no
+	// entry is flushed after the UTC day changes.
+	sweepCheckEvery = time.Hour
+	dropLogEvery    = time.Minute
 
 	// rateSeedDays is how far back the rate book learns from at open, capped
 	// by the retention window.
@@ -169,13 +172,19 @@ func (s *Store) Close() {
 	s.wg.Wait()
 }
 
-// worker drains the queue in batches: up to batchMax entries or flushEvery,
-// whichever first, then one fsync. Retention sweeps run once per UTC day.
+// worker drains the queue in batches: up to batchMax entries or flushEvery
+// after the first queued entry, whichever first, then one fsync. The flush
+// timer is armed only while a batch is pending so an idle gateway does not
+// wake every second. Retention sweeps run once per UTC day, checked after
+// each flush and hourly.
 func (s *Store) worker() {
 	defer s.wg.Done()
 	defer s.closeCur()
 	timer := time.NewTimer(flushEvery)
-	defer timer.Stop()
+	timer.Stop()
+	armed := false
+	sweepT := time.NewTicker(sweepCheckEvery)
+	defer sweepT.Stop()
 	batch := make([]Entry, 0, batchMax)
 	sweptDay := s.now().UTC().Format(dayLayout)
 	flush := func() {
@@ -187,6 +196,12 @@ func (s *Store) worker() {
 		s.subMu.Unlock()
 		batch = batch[:0]
 	}
+	checkSweep := func() {
+		if d := s.now().UTC().Format(dayLayout); d != sweptDay {
+			sweptDay = d
+			s.sweep()
+		}
+	}
 	for {
 		select {
 		case e, ok := <-s.ch:
@@ -197,14 +212,17 @@ func (s *Store) worker() {
 			batch = append(batch, e)
 			if len(batch) >= batchMax {
 				flush()
+				checkSweep()
+			} else if !armed {
+				timer.Reset(flushEvery)
+				armed = true
 			}
 		case <-timer.C:
+			armed = false
 			flush()
-			if d := s.now().UTC().Format(dayLayout); d != sweptDay {
-				sweptDay = d
-				s.sweep()
-			}
-			timer.Reset(flushEvery)
+			checkSweep()
+		case <-sweepT.C:
+			checkSweep()
 		}
 	}
 }

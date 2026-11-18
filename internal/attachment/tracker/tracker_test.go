@@ -727,3 +727,33 @@ func TestOnSessionRemoved_SecondSelectHonorsClose(t *testing.T) {
 		t.Fatalf("OnSessionRemoved blocked %v; should return promptly via closeCh", elapsed)
 	}
 }
+
+// The tick stops while nothing is pending; a bump after an idle spell must
+// re-arm it and reach the .meta without Flush.
+func TestOnPersistedEntry_TickRearmsAfterIdle(t *testing.T) {
+	ws := t.TempDir()
+	date := time.Now().Format("2006-01-02")
+	relA, metaA := writeAttachment(t, ws, date, "a", attachment.Meta{UploadedAt: time.Now()})
+	relB, metaB := writeAttachment(t, ws, date, "b", attachment.Meta{UploadedAt: time.Now()})
+	tr := newTracker(t, ws)
+	waitRef := func(metaPath string) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			raw, _ := os.ReadFile(metaPath)
+			var m attachment.Meta
+			if json.Unmarshal(raw, &m) == nil && m.HasReference("kh") {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: reference never flushed by the tick", metaPath)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	tr.OnPersistedEntry("kh", []string{relA}, 1700000000000)
+	waitRef(metaA)
+	time.Sleep(300 * time.Millisecond) // several ticks with nothing pending
+	tr.OnPersistedEntry("kh", []string{relB}, 1700000000001)
+	waitRef(metaB)
+}

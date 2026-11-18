@@ -73,3 +73,37 @@ func hasRecordIdx(idx []schema.IdxEntry) bool {
 	}
 	return false
 }
+
+// The debounce ticker stops once nothing is dirty; a write after that idle
+// spell must re-arm it and still be flushed by the tick, without Flush.
+func TestTickFlush_RearmsAfterIdle(t *testing.T) {
+	p, dir := newTestPersister(t, func(o *Options) {
+		o.FlushInterval = 20 * time.Millisecond
+	})
+	waitRecords := func(key string, want int) {
+		t.Helper()
+		deadline := time.Now().Add(opGuard)
+		for {
+			idx, _ := ReadAllIdx(filepath.Join(dir, KeyHash(key)+idxExt))
+			n := 0
+			for _, e := range idx {
+				if e.Seq >= 1 {
+					n++
+				}
+			}
+			if n >= want {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: %d records flushed, want %d", key, n, want)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	sink := p.SinkFor("k")
+	sink([]Entry{entry(t, 1700000000000, "u1")}, false)
+	waitRecords("k", 1)
+	time.Sleep(100 * time.Millisecond) // several ticks with nothing dirty
+	sink([]Entry{entry(t, 1700000000001, "u2")}, false)
+	waitRecords("k", 2)
+}

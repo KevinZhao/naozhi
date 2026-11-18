@@ -76,6 +76,10 @@ type ReverseConn struct {
 	statusMu sync.RWMutex
 	status   string // "ok" | "connecting" | "error"
 
+	// The last body of each polled list, so an unchanged one is not sent
+	// again (listtag.go).
+	sessList, projList, discList listCache
+
 	done    chan struct{}
 	closed  bool
 	closeMu sync.Mutex
@@ -228,30 +232,15 @@ func marshalParams(v any) (json.RawMessage, error) {
 }
 
 func (c *ReverseConn) FetchSessions(ctx context.Context) ([]map[string]any, error) {
-	raw, err := c.rpc(ctx, "fetch_sessions", nil)
-	if err != nil {
-		return nil, err
-	}
-	var result []map[string]any
-	return result, json.Unmarshal(raw, &result)
+	return c.fetchList(ctx, "fetch_sessions", &c.sessList)
 }
 
 func (c *ReverseConn) FetchProjects(ctx context.Context) ([]map[string]any, error) {
-	raw, err := c.rpc(ctx, "fetch_projects", nil)
-	if err != nil {
-		return nil, err
-	}
-	var result []map[string]any
-	return result, json.Unmarshal(raw, &result)
+	return c.fetchList(ctx, "fetch_projects", &c.projList)
 }
 
 func (c *ReverseConn) FetchDiscovered(ctx context.Context) ([]map[string]any, error) {
-	raw, err := c.rpc(ctx, "fetch_discovered", nil)
-	if err != nil {
-		return nil, err
-	}
-	var result []map[string]any
-	return result, json.Unmarshal(raw, &result)
+	return c.fetchList(ctx, "fetch_discovered", &c.discList)
 }
 
 func (c *ReverseConn) FetchDiscoveredPreview(ctx context.Context, sessionID string) ([]clievent.EventEntry, error) {
