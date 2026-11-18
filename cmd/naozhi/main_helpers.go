@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"os"
@@ -628,8 +629,41 @@ func newDataDirSweeper(cfg *config.Config, layout datadir.Layout, shimMgr *shim.
 			MaxAge: sysSessionsMaxAge,
 		})
 	}
+	if root := layout.PlannerAttachmentsRoot(); root != "" {
+		s.AddFunc("tool-images", toolImagesTask(root, layout.EventsRoot()))
+	}
 	addStdioCaps(s, os.Stdout, os.Stderr)
 	return s
+}
+
+// toolImagesMaxAge is how long an image under planner/attachments that no
+// event log names is kept: a record still on its way to disk names it well
+// within that.
+const toolImagesMaxAge = 7 * 24 * time.Hour
+
+// toolImagesTask removes the originals under planner/attachments (tool
+// screenshots, Planner send images) that no event log in eventsDir names any
+// more: the log that showed them was dropped with its session or rotated past
+// them, so no view can reach them, while a heavy browser-automation day adds
+// 100-200 MB. One that is still named is kept whatever its age.
+func toolImagesTask(root, eventsDir string) func() {
+	return func() {
+		refs, err := attachment.CollectRefs(eventsDir, ".log", datadir.PlannerAttachmentsRel+"/")
+		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				slog.Warn("sweep: tool images skipped, event logs unreadable", "dir", eventsDir, "err", err)
+			}
+			return
+		}
+		res, err := attachment.PruneUnreferenced(root, toolImagesMaxAge, refs, time.Now())
+		if err != nil {
+			slog.Warn("sweep: tool images failed", "dir", root, "err", err)
+		}
+		if res.Removed > 0 {
+			slog.Info("sweep reclaimed", "pass", "tool-images", "dir", root,
+				"removed", res.Removed, "bytes", res.Bytes, "max_age", toolImagesMaxAge)
+		}
+	}
 }
 
 const (
