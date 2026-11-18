@@ -65,25 +65,42 @@ test('the page\'s own socket down shows one pill, gone once it is back', async (
   }
 });
 
-test('the pill sits over the tab bar on a phone', async ({ browser }) => {
-  const ctx = await browser.newContext(PHONE);
-  const page = await ctx.newPage();
-  // No upgrade listener: the page stays on the HTTP fallback.
-  const mock = await startMockServer({});
-  try {
-    await page.goto(mock.url + '/dashboard');
-    await waitForShim(page);
-    const pill = page.locator('#conn-status');
-    await expect(pill).toBeVisible({ timeout: 12000 });
-    const p = await pill.boundingBox();
-    const bar = await page.locator('#activity-bar').boundingBox();
-    expect(p.y + p.height).toBeLessThanOrEqual(bar.y);
-    await shot(page, 'conn-down-phone');
-  } finally {
-    await ctx.close();
-    mock.server.close();
-  }
-});
+const overlaps = (a, b) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+
+for (const [name, vp] of [['phone', PHONE], ['tablet', { viewport: { width: 768, height: 1024 }, isMobile: true, hasTouch: true }]]) {
+  test(`on a ${name} the pill clears the composer and the tab bar`, async ({ browser }) => {
+    const ctx = await browser.newContext(vp);
+    const page = await ctx.newPage();
+    // No upgrade listener: the page stays on the HTTP fallback.
+    const mock = await startMockServer({ planner });
+    try {
+      await page.goto(mock.url + '/dashboard');
+      await waitForShim(page);
+      const pill = page.locator('#conn-status');
+      await expect(pill).toBeVisible({ timeout: 12000 });
+      const clear = async (sel) => {
+        const p = await pill.boundingBox();
+        for (const s of [sel, '#activity-bar']) {
+          const b = await page.locator(s).boundingBox();
+          expect(overlaps(p, b), s).toBe(false);
+        }
+      };
+      await page.waitForSelector('.session-card');
+      await page.click(`.session-card[data-key="${SESSION}"]`);
+      await expect(page.locator('#msg-input')).toBeVisible();
+      await clear('#input-area .input-row');
+      await shot(page, 'conn-down-chat-' + name);
+      await page.click('#abnav-planner');
+      await expect(page.locator('#pl-input')).toBeVisible();
+      await expect(pill).toBeVisible();
+      await clear('.pl-input-row');
+      await shot(page, 'conn-down-planner-' + name);
+    } finally {
+      await ctx.close();
+      mock.server.close();
+    }
+  });
+}
 
 test('without a socket the 等你 badge is still read and kept fresh', async ({ browser }) => {
   test.setTimeout(60000);

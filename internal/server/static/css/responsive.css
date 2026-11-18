@@ -173,8 +173,9 @@
   .toast{bottom:auto;top:max(16px,env(safe-area-inset-top));right:16px;left:16px;text-align:center}
   /* 已移除 · 撤销 above the bottom bar, where the thumb is. */
   .undo-toast{bottom:calc(var(--nz-tabbar-h) + 12px)}
-  /* The connection pill too, centred over the tab bar. */
-  .conn-status{left:50%;right:auto;transform:translateX(-50%);bottom:calc(var(--nz-tabbar-h) + 12px);max-width:calc(100vw - 32px)}
+  /* The connection pill at the top like .toast: the composer sits right
+     above the tab bar, and 重连 there would take the input's taps. */
+  .conn-status{left:50%;right:auto;transform:translateX(-50%);bottom:auto;top:max(16px,env(safe-area-inset-top));max-width:calc(100vw - 32px)}
   /* Remove tap flash on interactive elements */
   .session-card,.btn-icon,.btn-send{-webkit-tap-highlight-color:transparent}
   .sidebar-header{display:flex;flex-wrap:wrap;align-items:center;padding-top:max(16px,env(safe-area-inset-top));padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right))}
