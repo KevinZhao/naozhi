@@ -106,7 +106,7 @@ import { nzBus, nzViews } from './nz_util.js';
     order.forEach(function (g) {
       var grp = groups[g];
       var collapsed = state.collapsed[g] != null ? state.collapsed[g] : (grp.src === 'plugin');
-      html += '<div class="asset-grp ' + (collapsed ? 'collapsed' : '') + '" data-g="' + esc(g) + '">' +
+      html += '<div class="asset-grp ' + (collapsed ? 'collapsed' : '') + '" role="button" tabindex="0" aria-expanded="' + !collapsed + '" data-g="' + esc(g) + '">' +
         '<svg class="agchev" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>' +
         '<span class="agl">' + esc(grp.label) + '</span>' +
         '<span class="asset-srcchip asrc-' + esc(grp.src) + '">' + esc(SRC_LABEL[grp.src] || grp.src) + '</span>' +
@@ -115,7 +115,7 @@ import { nzBus, nzViews } from './nz_util.js';
       grp.items.forEach(function (a, i) {
         var d = a.description ? '<div class="asset-rdesc">' + esc(a.description) + '</div>'
           : '<div class="asset-rdesc asset-nodesc">（无描述信息，名称取自目录名）</div>';
-        html += '<div class="asset-row' + (state.sel === a ? ' active' : '') + '" role="listitem" data-g="' + esc(g) + '" data-i="' + i + '">' +
+        html += '<div class="asset-row' + (state.sel === a ? ' active' : '') + '" role="listitem" tabindex="0" data-g="' + esc(g) + '" data-i="' + i + '">' +
           '<div class="asset-rname">' + esc(a.name) + '</div>' + d + '</div>';
       });
       html += '</div>';
@@ -165,6 +165,8 @@ import { nzBus, nzViews } from './nz_util.js';
     fetch(NZ_CONTRACT.API.cc_assets_raw + qs, { credentials: 'same-origin' })
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
       .then(function (txt) {
+        // A row clicked after this one owns the reader now.
+        if (state.sel !== a) return;
         var html = '';
         if (a.anchor) {
           html += '<div class="asset-anchor-note">该资产位于含多条目的文件，已返回整文件；定位条目：<code class="md-code">' + esc(a.anchor) + '</code></div>';
@@ -172,7 +174,10 @@ import { nzBus, nzViews } from './nz_util.js';
         html += '<pre class="araw">' + esc(txt) + '</pre>';
         body.innerHTML = html;
       })
-      .catch(function (e) { body.innerHTML = '<div class="asset-empty">加载失败：' + esc(e.message) + '</div>'; });
+      .catch(function (e) {
+        if (state.sel !== a) return;
+        body.innerHTML = '<div class="asset-empty">加载失败：' + esc(e.message) + '</div>';
+      });
   }
 
   function backToList() {
@@ -230,6 +235,7 @@ import { nzBus, nzViews } from './nz_util.js';
       if (grp) {
         var g = grp.dataset.g;
         var cur = grp.classList.toggle('collapsed');
+        grp.setAttribute('aria-expanded', String(!cur));
         state.collapsed[g] = cur;
         var items = list.querySelector('.asset-grpitems[data-gi="' + cssEsc(g) + '"]');
         if (items) items.classList.toggle('collapsed', cur);
@@ -242,6 +248,14 @@ import { nzBus, nzViews } from './nz_util.js';
         var gd = list._groups[row.dataset.g];
         if (gd) openRaw(gd.items[+row.dataset.i]);
       }
+    });
+    // Enter / Space on a focused group head or row acts as its click.
+    if (list) list.addEventListener('keydown', function (e) {
+      if ((e.key !== 'Enter' && e.key !== ' ') || e.isComposing) return;
+      var t = e.target.closest('.asset-grp, .asset-row');
+      if (!t || t !== e.target) return;
+      e.preventDefault();
+      t.click();
     });
   }
 

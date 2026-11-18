@@ -641,7 +641,7 @@ function applyHistoryFilter(merged, query) {
       : '(' + merged.length + ')';
   }
   if (merged.length === 0 && live.length === 0) {
-    itemsEl.innerHTML = '<div class="history-popover-empty">no history<br><span class="hp-empty-hint">发起对话后，历史记录会出现在这里</span></div>';
+    itemsEl.innerHTML = '<div class="history-popover-empty">还没有历史<br><span class="hp-empty-hint">发起对话后，历史记录会出现在这里</span></div>';
     return;
   }
   if (filtered.length === 0 && live.length === 0) {

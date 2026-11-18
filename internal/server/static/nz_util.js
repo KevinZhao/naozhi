@@ -90,33 +90,74 @@ export function typingOutside(e, panel) {
   return tag === 'input' || tag === 'textarea' || !!t.isContentEditable;
 }
 
-/* Focus trap: confine Tab within an overlay, restore focus on dismissal.
-   Called after an overlay is appended to the DOM. Returns nothing — the
-   overlay's MutationObserver tears down listeners when it's removed. */
+/* Focus trap: move focus into an overlay, confine Tab within it, let Esc
+   close it and restore focus on dismissal. Called after an overlay is
+   appended to the DOM. Returns nothing — the overlay's MutationObserver
+   tears down listeners when it's removed.
+   Only the topmost trapped overlay answers. A key from inside it goes
+   through the overlay (inner handlers may pre-empt Esc); one from outside —
+   focus left on <body> by a click on the backdrop, or on a dialog below —
+   is taken on the document before anything behind the dialog sees it, so
+   Esc over stacked dialogs closes the one on top and keeps what was typed
+   below. */
+const trapStack = [];
+const topTrapped = () => {
+  for (let i = trapStack.length - 1; i >= 0; i--) {
+    if (document.body.contains(trapStack[i])) return trapStack[i];
+  }
+  return null;
+};
 export function trapFocus(overlay) {
   if (!overlay || overlay._trapped) return;
   overlay._trapped = true;
+  trapStack.push(overlay);
   const prevActive = document.activeElement;
   const FOCUSABLE = 'button, [href], input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"]), [contenteditable="true"]';
-  const onKey = (e) => {
-    if (e.key === 'Escape') {
-      // Let inner handlers pre-empt; otherwise dismiss the overlay.
-      if (!e.defaultPrevented) { overlay.remove(); }
-      return;
-    }
-    if (e.key !== 'Tab') return;
+  // The dialog box itself takes the first focus: Tab then goes to its first
+  // control, and a phone does not open its keyboard on a field. A caller that
+  // focuses a field of its own (prompt / confirm) does so after this.
+  const box = overlay.querySelector('[role="dialog"]') || overlay.firstElementChild || overlay;
+  if (!overlay.contains(document.activeElement)) {
+    if (!box.hasAttribute('tabindex')) box.setAttribute('tabindex', '-1');
+    try { box.focus({ preventScroll: true }); } catch (_) {}
+  }
+  const tab = (e) => {
     const nodes = [...overlay.querySelectorAll(FOCUSABLE)].filter(el => !el.disabled && el.offsetParent !== null);
     if (nodes.length === 0) { e.preventDefault(); return; }
     const first = nodes[0], last = nodes[nodes.length - 1];
-    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    const at = document.activeElement;
+    if (!nodes.includes(at)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); }
+    else if (e.shiftKey && at === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && at === last) { e.preventDefault(); first.focus(); }
+  };
+  const onKey = (e) => {
+    if (topTrapped() !== overlay) return;
+    if (e.key === 'Escape') {
+      // Let inner handlers pre-empt; otherwise dismiss the overlay.
+      if (!e.defaultPrevented && !e.isComposing) { overlay.remove(); }
+      return;
+    }
+    if (e.key === 'Tab') tab(e);
+  };
+  const onOutside = (e) => {
+    if (e.key !== 'Escape' && e.key !== 'Tab') return;
+    if (topTrapped() !== overlay || overlay.contains(e.target)) return;
+    // A lightbox opened over the dialog keeps its own keys.
+    if (document.querySelector('.lightbox-overlay.active')) return;
+    e.stopPropagation();
+    if (e.key === 'Escape') { e.preventDefault(); overlay.remove(); return; }
+    tab(e);
   };
   overlay.addEventListener('keydown', onKey);
+  document.addEventListener('keydown', onOutside, true);
   const obs = new MutationObserver(() => {
     if (!document.body.contains(overlay)) {
       overlay.removeEventListener('keydown', onKey);
+      document.removeEventListener('keydown', onOutside, true);
       obs.disconnect();
-      if (prevActive && prevActive.focus) { try { prevActive.focus(); } catch (_) {} }
+      const i = trapStack.indexOf(overlay);
+      if (i >= 0) trapStack.splice(i, 1);
+      if (prevActive && prevActive.focus && document.body.contains(prevActive)) { try { prevActive.focus(); } catch (_) {} }
     }
   });
   obs.observe(document.body, { childList: true, subtree: false });

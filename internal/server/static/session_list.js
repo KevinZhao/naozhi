@@ -265,7 +265,7 @@ export async function fetchSessions() {
     const pushesBefore = sessionList.statePushes.n;
     const got = await fetchSessionsPayload();
     if (got === NOT_MODIFIED) return;
-    if (!got) return false;
+    if (!got) { noteFirstLoadFailed(); return false; }
     let data = got.data;
     // The effort tier, spawn diagnosis and overlay drift change at turn
     // boundaries, which do not advance stats.version, and renderMainShell does
@@ -289,12 +289,23 @@ export async function fetchSessions() {
     // The sidebar search re-renders from this payload, not a fetch per key.
     sessionList.lastSidebarData = data;
     if (got.validator) got.validator.unpainted = false;
+    // The 5 s poll outlives CONNECTED until the list has painted once.
+    if (wsConnected && timers.sessionPoll) { clearInterval(timers.sessionPoll); timers.sessionPoll = null; }
     for (const fn of sessionsAppliedHooks) fn(wsConnected);
     return true;
   } catch (e) {
     console.error('fetchSessions:', e);
+    noteFirstLoadFailed();
     return false;
   }
+}
+
+// noteFirstLoadFailed says so in place of the skeletons while the list has
+// never painted; the 5 s poll keeps retrying (wsStateChanged leaves it armed).
+function noteFirstLoadFailed() {
+  if (sessionList.lastSidebarData) return;
+  const el = document.getElementById('session-list');
+  if (el && !el.querySelector('.sl-load-err')) el.innerHTML = '<div class="no-sessions sl-load-err" role="status">会话列表加载失败，重试中…</div>';
 }
 
 export function debouncedFetchSessions() {
@@ -346,7 +357,7 @@ export function renderSidebar(data) {
   const chips = filterHtml(dispatched, onlyD, need, onlyN);
   const html = rows ? chips + rows
     : only ? chips + '<div class="no-sessions">没有符合筛选的会话</div>'
-      : '<div class="no-sessions">no sessions<br><button type="button" class="no-sessions-cta" data-action="session-new">+ 开启你的第一个会话</button></div>';
+      : '<div class="no-sessions">还没有会话<br><button type="button" class="no-sessions-cta" data-action="session-new">+ 开启你的第一个会话</button></div>';
   // Keyed reconcile: only rows whose markup changed are replaced, so a poll
   // with nothing new touches no DOM, in-place patches (state dot, unread chip,
   // a removed card) compare as they stand, and kept nodes keep the scroll
@@ -926,8 +937,9 @@ function wsStateChanged(s, prev) {
     // transition (prev !== CONNECTED) to avoid re-announcing on no-op
     // state refreshes.
     if (prev !== WS_STATES.CONNECTED) announce(wsm._everConnected ? '已重新连接' : '已连接');
-    // WS connected: stop session polling, rely on push
-    if (timers.sessionPoll) { clearInterval(timers.sessionPoll); timers.sessionPoll = null; }
+    // WS connected: stop session polling, rely on push — once the list has
+    // painted: a first load that failed has no push to wait for.
+    if (timers.sessionPoll && sessionList.lastSidebarData) { clearInterval(timers.sessionPoll); timers.sessionPoll = null; }
     // Reduce discovered scan frequency
     if (timers.discoveredPoll) { clearInterval(timers.discoveredPoll); timers.discoveredPoll = null; }
     // A hidden tab has had its pollers suspended by stopPollers;

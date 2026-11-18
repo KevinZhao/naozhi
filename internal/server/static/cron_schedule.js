@@ -378,11 +378,11 @@ function buildFreqPickerHtml(initial) {
 
   return '<div class="freq-row-inline">' +
       '<select class="freq-mode-select" id="freq-mode-select" aria-label="频率模式" data-action-change="cron-freq-mode">' +
-        modeOption('hourly', 'Hourly') +
-        modeOption('daily', 'Daily') +
-        modeOption('weekdays', 'Weekdays') +
-        modeOption('weekly', 'Weekly') +
-        modeOption('monthly', 'Monthly') +
+        modeOption('hourly', '每小时') +
+        modeOption('daily', '每天') +
+        modeOption('weekdays', '工作日') +
+        modeOption('weekly', '每周') +
+        modeOption('monthly', '每月') +
       '</select>' +
       timeInput +
       weeklySelect +
