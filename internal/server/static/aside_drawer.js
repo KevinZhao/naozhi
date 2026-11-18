@@ -9,7 +9,7 @@ import { NZ_CONTRACT } from './contract.js';
 import { selection, sessionList } from './state.js';
 import { isComposingKey, showToast } from './nz_util.js';
 import { eventHtml } from './event_render.js';
-import { collapseSidebarForDrawer, restoreSidebarAfterDrawer } from './mobile_nav.js';
+import { collapseSidebarForDrawer, mobileLayer, restoreSidebarAfterDrawer } from './mobile_nav.js';
 import { splitDock } from './split_view.js';
 import { regroupAvatars } from './file_refs.js';
 import { confirmDialog, showAPIError, showNetworkError, timeDividerHtml } from './utilities.js';
@@ -31,6 +31,7 @@ const POLL_MAX_MS = 8000;
 const ad = {
   drawer: null, elMsgs: null, elEmpty: null, elInput: null, elSend: null, elClose: null, elSave: null, elAside: null,
   elQuoteChip: null, elQuotePreview: null, elQuoteTrunc: null, elQuoteCtx: null, elLoading: null, elAgent: null,
+  layer: null,            // mobileLayer: the phone back closes it
   state: null,            // {scratchId, key, agentId, sourceKey, sourceMsgTime, quote, firstAsk, lastEventTime, pendingUserEchoes}
   pollTimer: null,
   // pollGen names the running poll chain: a tick still awaiting its poll
@@ -61,6 +62,7 @@ function showDrawer() {
   splitDock.enter();
   // Opened last → stack on top of the preview pane if both are docked.
   splitDock.bringToFront('scratch');
+  ad.layer?.opened();
 }
 function hideDrawer() {
   ad.drawer.classList.remove('visible');
@@ -68,6 +70,7 @@ function hideDrawer() {
   // Re-expand the sidebar if openScratch auto-collapsed it (no-op if the
   // preview drawer is still open or the user collapsed it themselves).
   restoreSidebarAfterDrawer();
+  ad.layer?.closed();
 }
 
 function stopPolling() {
@@ -593,6 +596,8 @@ export function initAsideDrawer() {
   ad.elQuoteCtx = $('ad-quote-ctx');
   ad.elLoading = $('ad-loading');
   ad.elAgent = $('ad-agent');
+  // A phone's back closes it as its × does.
+  ad.layer = mobileLayer('scratch', () => drawer.classList.contains('visible'), () => closeScratch(true));
 
   // Wire drawer buttons.
   ad.elClose.addEventListener('click', () => { closeScratch(true); });

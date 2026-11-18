@@ -64,7 +64,7 @@ function getCronTimelineState(jobId) {
       runs: [],
       nextBefore: 0,
       done: false,         // true = next_before 缺失，已到结尾
-      showAll: false,      // true = 用户已展开 5 行折叠（查看全部 / 展开第 ≥6 行），重绘不再折回
+      showAll: false,      // true = 用户已展开 5 行折叠（展开其余 / 加载更多 / 展开第 ≥6 行），重绘不再折回
       loading: false,
       details: Object.create(null),
       lastMountAt: 0,       // 上次 mount 渲染的 ms 时戳；renderCronTimelineForJob 用来判 stale
@@ -82,7 +82,7 @@ function getCronTimelineState(jobId) {
 // 头部：简洁标题"最近运行"+ 总次数小标签（cron-dashboard-redesign P3 §4：
 // 把"成功率/最后错误分类"等运维指标隐去；用户首屏只看"它最近跑得怎样"，
 // 排查时再点单条 run 进 sheet 看详情）。
-// 行列表：默认折叠到 5 条，"查看全部 N 条"按钮展开剩余 + 触发 loadMore。
+// 行列表：默认折叠到 5 条，"展开其余 N 条"按钮展开剩余，之后 [加载更多] 分页。
 // CRON_TIMELINE_DEFAULT_VISIBLE = 5 条与 cronDrawerSpecHtml 的视觉密度同源。
 function cronTimelineHtml(jobId, job, st) {
   const stats = job && job.stats;
@@ -98,7 +98,7 @@ function cronTimelineHtml(jobId, job, st) {
     ? '<div class="ct-empty">暂无执行记录。下次调度或点击「立即执行」触发首次运行。</div>'
     : st.runs.map(r => cronTimelineRowHtml(jobId, r, st)).join('');
 
-  // P3 §4 折叠机制：data-collapsed=true 时 CSS 只露前 5 行；点 [查看全部]
+  // P3 §4 折叠机制：data-collapsed=true 时 CSS 只露前 5 行；点 [展开其余]
   // 切到 false。展开态记在 st.showAll（而非只在 DOM dataset）：detail fetch
   // 落地 / WS 刷新 / 选中行都会走 renderCronTimelinePanel 整段重建 innerHTML，
   // 只存 DOM 的话每次重绘都折回 5 行。
@@ -109,11 +109,11 @@ function cronTimelineHtml(jobId, job, st) {
   let moreBtn = '';
   if (st.runs.length > 0) {
     if (collapsed) {
-      // 折叠态："查看全部 N 条"——展开后再让既有 [加载更多] 接管分页。
+      // 折叠态："展开其余 N 条"（N 是已加载里折起的条数，不是总次数）——展开后再让既有 [加载更多] 接管分页。
       moreBtn = '<button type="button" class="ct-more-btn ct-show-all"' +
         ' data-hidden-count="' + hiddenCount + '"' +
         ' data-action="cron-tl-showall">' +
-        '查看全部 ' + st.runs.length + ' 条' +
+        '展开其余 ' + hiddenCount + ' 条' +
       '</button>';
     } else if (st.done) {
       moreBtn = '<button type="button" class="ct-more-btn" disabled aria-disabled="true">已到结尾</button>';
@@ -534,6 +534,8 @@ function cronTimelineLoadMore(jobId, onDone) {
   const st = getCronTimelineState(jobId);
   if (st.loading || st.done) return;
   st.loading = true;
+  // 要了更多就是要看：拉回来的不再折回 5 行。
+  st.showAll = true;
   renderCronTimelinePanel(jobId);
   (async () => {
     let loaded = false;
