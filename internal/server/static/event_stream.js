@@ -694,12 +694,11 @@ function patchHeaderTitle(ev) {
   const s = sessionList.sessionsData[sKey];
   const text = ev.detail || ev.summary || '';
   if (!s || !text || ev.source === 'custody') return;
-  const h2 = document.querySelector('.main-header h2');
+  const t = document.querySelector('.main-header h2 .hdr-title-t');
   const name = sessionTitleText(Object.assign({}, s, { last_prompt: text }));
-  if (!h2 || !name) return;
-  // The name is the heading's text node; its rename and export buttons stay.
-  const t = h2.firstChild;
-  if (t && t.nodeType === Node.TEXT_NODE) { if (t.data !== name) t.data = name; } else h2.prepend(name);
+  if (!t || !name) return;
+  // Only the name's span: its rename and export buttons stay.
+  if (t.textContent !== name) t.textContent = name;
 }
 
 // appendLiveEvent appends a pushed event's bubble: a user replay is dropped by

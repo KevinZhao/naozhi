@@ -1476,4 +1476,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const more = $('pl-more');
     if (more?.open && !e.composedPath().includes(more)) more.open = false;
   });
+  // Esc closes it as every other popover here, before the workbench under
+  // it takes the key; focus inside it goes back onto "⋯".
+  window.addEventListener('keydown', (e) => {
+    const more = $('pl-more');
+    if (e.key !== 'Escape' || !more?.open) return;
+    // A dialog or lightbox above the menu takes its Esc first.
+    if (document.querySelector('.modal-overlay, .cmd-palette-overlay, .lightbox-overlay.active')) return;
+    e.stopPropagation();
+    const inside = more.contains(document.activeElement);
+    closeMenu();
+    if (inside) more.querySelector('summary')?.focus();
+  }, true);
 });

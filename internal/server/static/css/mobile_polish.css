@@ -35,6 +35,10 @@
   .pl-close,.pl-btn,.tk-more{min-width:44px;min-height:44px}
   .tk-more{margin:-10px -10px -10px 0}
   .tk-expand{min-width:44px;min-height:44px;margin:-10px -10px -10px 0}
+  /* Its text buttons: N 件新结果, a card's 打开, 对话 | 全部, and the "⋯"
+     menu's rows (停用 Planner's whole label, 懂你). */
+  .pl-news>.pl-link,.pl-card .pl-link,.pl-layer-b{min-height:32px}
+  .pl-tool .pl-switch,.pl-tool>.pl-link{min-height:44px}
   /* The session header's custody switch and custody's 撤回. */
   button.custody-chip,.watch-chip{min-height:32px}
   .custody-undo{min-height:44px;padding:0 8px}

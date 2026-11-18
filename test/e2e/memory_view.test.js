@@ -56,8 +56,8 @@ test('groups, the last 7 days and the filter', async ({ page }) => {
     const sec = page.locator('#settings-memory');
     await expect(sec.locator('h2')).toHaveText('懂你');
     await expect(sec.locator('.mem-ro')).toBeHidden();
-    // The section sits under 主题.
-    const order = await page.locator('#settings-main .settings-sec').evaluateAll((els) => els.map((e) => e.id || e.querySelector('h2')?.textContent));
+    // The section sits under 主题 (the phone's 系统 row above it is hidden here).
+    const order = await page.locator('#settings-main .settings-sec:visible').evaluateAll((els) => els.map((e) => e.id || e.querySelector('h2')?.textContent));
     expect(order.slice(0, 2)).toEqual(['主题', 'settings-memory']);
     const heads = sec.locator('.mem-grp-h .mem-grp-l');
     await expect(heads).toHaveText([/^Planner 自己的 · 1 条/, /^naozhi · 2 条 · 索引 3 行/, /^-private-tmp-iso1 · 1 条/]);

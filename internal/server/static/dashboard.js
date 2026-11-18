@@ -268,7 +268,9 @@ function setActivityView(view) {
   [['abnav-planner', 'planner'], ['abnav-chat', 'chat'], ['abnav-assets', 'assets'], ['abnav-files', 'files'], ['abnav-cron', 'cron'], ['abnav-system', 'system'], ['abnav-settings', 'settings']]
     .forEach(function (pair) {
       const el = document.getElementById(pair[0]);
-      if (el) { el.classList.toggle('active', pair[1] === view); el.setAttribute('aria-pressed', String(pair[1] === view)); }
+      // A phone has no 系统 tab: 系统 is entered from 设置, whose tab stays lit.
+      const on = pair[1] === view || (pair[1] === 'settings' && view === 'system' && isMobile());
+      if (el) { el.classList.toggle('active', on); el.setAttribute('aria-pressed', String(on)); }
     });
   // Mutually-exclusive view classes. 'chat' clears all of them.
   document.body.classList.toggle('nz-view-assets', view === 'assets');
@@ -1302,7 +1304,7 @@ function mainHeaderHtml(s) {
   return '<div class="main-header">' +
       '<button type="button" class="btn-mobile-back" data-action="mobile-back" title="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868" aria-label="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868">' + ICONS.back + '</button>' +
       '<div class="main-header-content">' +
-      '<h2>' + esc(displayName) + renameBtn + downloadBtn + '</h2>' +
+      '<h2><span class="hdr-title-t">' + esc(displayName) + '</span>' + renameBtn + downloadBtn + '</h2>' +
       '<div class="detail">' +
         '<span class="detail-left">' + cliLabel + modelLabel + accessProfileLabel + '</span>' +
         headerOriginBadge +
@@ -1511,20 +1513,20 @@ function renderSettingsView() {
       }).join('') +
     '</section>';
   // 系统 entry: the mobile tab bar has no 系统 tab, so this row is its
-  // entry point. Hidden on desktop via CSS (.settings-syslink) where the rail
-  // tab remains.
+  // entry point, first on the page: the 设置 tab's red dot is its (the row
+  // has it too, css). Hidden on desktop via CSS (.settings-syslink) where the
+  // rail tab remains.
   const sysLinkHtml =
     '<section class="settings-sec settings-syslink">' +
       '<button type="button" class="settings-syslink-btn" id="settings-open-system">系统 · 全会话健康 ›</button>' +
     '</section>';
-  document.getElementById('settings-top').innerHTML =
+  document.getElementById('settings-top').innerHTML = sysLinkHtml +
     '<section class="settings-sec"><h2>主题</h2>' +
       '<div class="settings-theme" id="settings-theme-group" role="group" aria-label="主题">' + themeBtns + '</div>' +
     '</section>';
   document.getElementById('settings-rest').innerHTML =
     '<section class="settings-sec" id="settings-auth"></section>' +
-    aboutHtml +
-    sysLinkHtml;
+    aboutHtml;
   mountAuthSettings(document.getElementById('settings-auth'));
   const grp = document.getElementById('settings-theme-group');
   if (grp) grp.addEventListener('click', function (e) {

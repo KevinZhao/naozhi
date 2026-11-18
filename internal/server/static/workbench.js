@@ -11,7 +11,7 @@
 // including on open.
 import { nzBus, typingOutside } from './nz_util.js';
 import { splitDock } from './split_view.js';
-import { restoreSidebarAfterDrawer } from './mobile_nav.js';
+import { mobileLayer, restoreSidebarAfterDrawer } from './mobile_nav.js';
 
 const TABS = ['preview', 'outputs', 'files', 'details'];
 
@@ -53,6 +53,7 @@ function open(name) {
   // The session sidebar stays where it is (D91 S6).
   if (!was) nzBus.dispatchEvent(new CustomEvent('workbench:open'));
   showTab(name || tab());
+  layer.opened();
 }
 
 function close() {
@@ -68,7 +69,11 @@ function close() {
   // the 追问 drawer is still open or the user collapsed it themselves).
   restoreSidebarAfterDrawer();
   nzBus.dispatchEvent(new CustomEvent('workbench:close'));
+  layer.closed();
 }
+
+// On a phone, where it is full-screen, the system back closes it.
+const layer = mobileLayer('wb', isOpen, close);
 
 function toggleMax() {
   const d = drawer();

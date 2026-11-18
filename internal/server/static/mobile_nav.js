@@ -9,7 +9,7 @@ import { lsGet, lsSet } from './platform.js';
 import { shell } from './shell.js';
 import { splitDock } from './split_view.js';
 import { dismissSession, renameSession } from './tuning.js';
-import { copyText, isMobile, mobileQuery, poppedView } from './utilities.js';
+import { copyText, isMobile, mobileQuery, poppedView, pushView } from './utilities.js';
 
 /* ===== Mobile Navigation ===== */
 
@@ -57,6 +57,23 @@ window.addEventListener('popstate', () => {
     leaveChat();
   }
 });
+
+// mobileLayer gives a phone layer over a view (the 追问 drawer, the
+// full-screen workbench) a history entry {view} while it is open, as the
+// Planner page does for its session and left block, so the system back
+// closes it instead of leaving the dashboard. The returned opened / closed
+// run as it opens and as the app closes it: a layer closed in the app takes
+// its entry back, so the next back is not spent on it.
+export function mobileLayer(view, isOpen, close) {
+  const mine = () => !!(history.state && history.state.view === view);
+  window.addEventListener('popstate', () => {
+    if (isMobile() && isOpen() && !mine()) close();
+  });
+  return {
+    opened() { if (isMobile() && !mine()) pushView({ view }); },
+    closed() { if (isMobile() && mine()) history.back(); },
+  };
+}
 
 function initMobile() {
   if (!isMobile()) return;

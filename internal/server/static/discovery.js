@@ -43,7 +43,7 @@ function discoveredPreviewHtml(base, typeLabel) {
   return '<div class="main-header">' +
       '<button type="button" class="btn-mobile-back" data-action="mobile-back" title="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868" aria-label="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868">' + ICONS.back + '</button>' +
       '<div class="main-header-content">' +
-        '<h2>' + esc(base) + '</h2>' +
+        '<h2><span class="hdr-title-t">' + esc(base) + '</span></h2>' +
         '<div class="detail">' +
           sessionTypeTag(typeLabel) +
         '</div>' +

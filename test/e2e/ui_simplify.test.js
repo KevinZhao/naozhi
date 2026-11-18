@@ -281,9 +281,9 @@ test('the header keeps the name; the gateway\'s note and Markdown stay out of wh
     await expect(pane.locator('.event.user .event-content')).toHaveText('iso 把周报整理一下');
     await expect(pane).not.toContainText('网关附注');
     // A message you send leaves the name you gave the session.
-    // The heading's text: its rename and export buttons follow it.
+    // The heading's name: its rename and export buttons follow it.
     const h2 = page.locator('.main-header h2');
-    const title = () => h2.evaluate((el) => el.firstChild.data);
+    const title = () => h2.locator('.hdr-title-t').textContent();
     await expect.poll(title).toBe('iso 命名会话');
     push(mock, A, [{ type: 'user', detail: '继续', time: Date.now(), uuid: 'h-u2' }]);
     await expect(pane.locator('.event.user[data-uuid="h-u2"]')).toBeVisible();
