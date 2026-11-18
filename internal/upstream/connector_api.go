@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
+	"strings"
 
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
@@ -30,9 +32,11 @@ type Planner struct {
 func (c *Connector) ServePlanner(p Planner) { c.planner = p }
 
 // listSessions is fetch_sessions' answer: the router's snapshots with their
-// purpose.
+// purpose, in key order so an unchanged list answers the same bytes and the
+// primary's etag (node.AnswerListFetch) holds from one poll to the next.
 func (c *Connector) listSessions() []sessionview.SessionSnapshot {
 	snaps := c.router.ListSessions()
+	slices.SortFunc(snaps, func(a, b sessionview.SessionSnapshot) int { return strings.Compare(a.Key, b.Key) })
 	if c.planner.Purpose != nil {
 		for i := range snaps {
 			snaps[i].Purpose, snaps[i].PurposeTitle = c.planner.Purpose(snaps[i].Key)
