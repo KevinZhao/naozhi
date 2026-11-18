@@ -200,15 +200,33 @@ function modelFallbackHtml(e) {
 const EVENT_WHOLE = new Map([['ask_question', renderAskQuestionCard]]);
 
 // SYSTEM_SUMMARY words the CLI system frames logged under their bare subtype
-// (process_event_format.go): the CLI retrying a failed API call, and a
-// model_fallback logged before its frame was parsed for the models.
-const SYSTEM_SUMMARY = new Map([['api_retry', '接口重试'], ['model_fallback', '模型回退']]);
+// (process_event_format.go; a sub-agent transcript's api_error): the CLI
+// retrying a failed API call, a model_fallback logged before its frame was parsed for the models, and the
+// context compacted. A run of retries is folded into one row (foldRetryRuns).
+const SYSTEM_SUMMARY = new Map([['api_retry', '接口重试'], ['api_error', '接口错误'], ['model_fallback', '模型回退'], ['compact_boundary', '上下文已压缩']]);
+
+// systemContentHtml: a known subtype's words; a retry's in the span
+// foldRetryRuns counts the run in.
+function systemContentHtml(e) {
+  const words = esc(SYSTEM_SUMMARY.get(e.summary) || e.summary || e.type);
+  return e.summary === 'api_retry' ? '<span class="nz-retry">' + words + '</span>' : words;
+}
+
+// A system row whose summary is still a bare CLI subtype the gateway has no
+// words for (per_turn_effort_changed, status, informational in older logs)
+// carries nothing but the identifier; a backend error notice is prose and
+// stays.
+const BARE_SUBTYPES = new Set(['status', 'informational']);
+function isBareSubtype(e) {
+  const s = e.summary || '';
+  return e.type === 'system' && !e.detail && !SYSTEM_SUMMARY.has(s) && (BARE_SUBTYPES.has(s) || /^[a-z]+(_[a-z]+)+$/.test(s));
+}
 
 // EVENT_CONTENT fills div.event-content for a type still using the generic
 // wrapper. agent/result/task_* are plain escaped text (defaultTextContentHtml);
 // persist_gap shares the unrecognised-type chip (defaultEventChip).
 const EVENT_CONTENT = new Map([
-  ['system', (e) => esc(SYSTEM_SUMMARY.get(e.summary) || e.summary || e.type)],
+  ['system', systemContentHtml],
   ['text', textOrUserContentHtml],
   ['user', userContentHtml],
   ['todo', (e) => renderTodoList(e.detail, e.summary)],
@@ -245,6 +263,7 @@ const EVENT_ICONS = new Map([
 const NO_BUBBLE_EVENT_TYPES = new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_NO_BUBBLE);
 function shouldHideEvent(e, includeInternal) {
   if (NO_BUBBLE_EVENT_TYPES.has(e.type) || (!includeInternal && isInternalEvent(e))) return true;
+  if (isBareSubtype(e)) return true;
   const raw = e.detail || e.summary || '';
   if (e.type === 'user' && /^<(task-notification|system-reminder|local-command|command-name|available-deferred-tools)[\s>]/.test(raw)) return true;
   if (e.type === 'user' && (raw === '[Request interrupted by user]' || raw === '[Request interrupted by user for tool use]')) return true;

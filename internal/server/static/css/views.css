@@ -1068,6 +1068,8 @@ div.pl-lookup{max-width:560px;margin:8px 0;padding:8px 12px;border:1px solid var
    30s would spam the transcript). visibility:hidden (not display:none)
    preserves the 36px icon slot so stacked bubbles stay edge-aligned. */
 .event.nz-grouped .event-icon{visibility:hidden}
+/* A run of API-retry rows shows as its last one, counted (foldRetryRuns). */
+.event.nz-folded{display:none}
 .event-time-divider{text-align:center;color:var(--nz-text-dim);font-size:var(--nz-fs-xs);margin:16px 0 6px;opacity:.55;user-select:none;letter-spacing:.02em}
 .empty-state{display:flex;align-items:center;justify-content:center;height:100%;color:var(--nz-text-dim);font-size:15px}
 /* Brand ">_" prompt motif for the quick-ask empty state. The underscore
@@ -1151,7 +1153,9 @@ div.pl-lookup{max-width:560px;margin:8px 0;padding:8px 12px;border:1px solid var
 .btn-send{background:var(--nz-rust);border-color:var(--nz-rust);color:#fff}
 .btn-send:hover{background:var(--nz-rust-emphasis);border-color:var(--nz-rust-emphasis)}
 .btn-stop{background:var(--nz-red);border-color:var(--nz-red);color:#fff;display:none}
-.btn-stop:hover{background:#b62324}
+.btn-stop:hover:not(:disabled){background:#b62324}
+/* 停止中: the stop is on its way (running_banner.js paintStopButton). */
+.btn-stop.stopping{opacity:.55;cursor:progress}
 .btn-mic{font-size:var(--nz-fs-md);position:relative}
 .btn-mic.recording{background:var(--nz-red);border-color:var(--nz-red);color:#fff;animation:pulse var(--nz-dur-loop) ease-in-out infinite}
 .btn-mic.transcribing{opacity:.5;pointer-events:none}

@@ -11,7 +11,7 @@ import { hydrateAskAnsweredFromHistory, lockRenderedAskCards } from './ask_card.
 import { runPendingAsync } from './render_md.js';
 import { processEventsForDisplay } from './file_refs.js';
 import { navRebuild, navSync } from './msg_nav.js';
-import { applyEventToTurnState, idleTaskEvent, paintTurnElapsed, refreshBanner, resetTurnState, resetTurnStateForUserEcho, restoreScrollPos, saveScrollPos, scrollSlackPx, turnState, updateSendButton } from './running_banner.js';
+import { applyEventToTurnState, endStopping, idleTaskEvent, paintTurnElapsed, refreshBanner, resetTurnState, resetTurnStateForUserEcho, restoreScrollPos, saveScrollPos, scrollSlackPx, turnState, updateSendButton } from './running_banner.js';
 import { markSendUnknown, refillUnsent, restoreSpawnFields, rollbackOptimisticRunning, settleSend } from './send_message.js';
 import { EARLIER_PAGE_LIMIT, EVENT_DIVIDER_GAP_MS, MAX_LIVE_DOM_EVENTS, lastDividerTime, showAPIError, stickEventsBottom, timeDividerHtml } from './utilities.js';
 import { isInternalEvent, sid } from './session_ident.js';
@@ -883,6 +883,7 @@ const sessionFrames = {
   // must be reported or the operator believes the interrupt landed.
   onInterruptAck(msg) {
     if (!msg || msg.status === 'ok') return;
+    endStopping();
     if (msg.status === 'not_running') {
       showToast('会话未在运行，无需中断', 'warning');
       return;

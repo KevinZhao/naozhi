@@ -1452,6 +1452,21 @@ func TestEventEntryFromEvent(t *testing.T) {
 			wantOK: false,
 		},
 		{
+			name:   "system per_turn_effort_changed skipped",
+			event:  clievent.Event{Type: "system", SubType: "per_turn_effort_changed"},
+			wantOK: false,
+		},
+		{
+			name:   "system status skipped",
+			event:  clievent.Event{Type: "system", SubType: "status"},
+			wantOK: false,
+		},
+		{
+			name:   "system informational skipped",
+			event:  clievent.Event{Type: "system", SubType: "informational"},
+			wantOK: false,
+		},
+		{
 			name: "assistant thinking",
 			event: clievent.Event{Type: "assistant", Message: &clievent.AssistantMessage{
 				Content: []clievent.ContentBlock{{Type: "thinking", Text: "analyzing"}},

@@ -7,7 +7,7 @@ import { selection, sessionList } from './state.js';
 import { esc, fetchJSON, nzBus, showToast } from './nz_util.js';
 import { workbench } from './workbench.js';
 import { REMOTE_FILES_UNSUPPORTED, isInternalEvent, matchProject, sid } from './session_ident.js';
-import { AVATAR_GROUP_GAP_MS, copyText, formatFileSize } from './utilities.js';
+import { AVATAR_GROUP_GAP_MS, copyText, formatFileSize, formatTimeFull } from './utilities.js';
 import { ICONS } from './icons.js';
 import { isFileRefCandidate, splitPathLine } from './file_ref_parse.js';
 import { loadKatex, loadMermaid, renderRich, runPendingAsync } from './render_md.js';
@@ -782,6 +782,7 @@ function startFileRefObserver() {
     // an incremental append can't know without looking back — so we rescan
     // the (DOM-bounded, ≤MAX_LIVE_DOM_EVENTS) container rather than diffing.
     regroupAvatars(target);
+    foldRetryRuns(target);
   });
   mo.observe(target, { childList: true, subtree: false });
   _fileRefObserver = mo;
@@ -789,6 +790,7 @@ function startFileRefObserver() {
   // attached (e.g. the full-history render on session select).
   target.querySelectorAll('.event').forEach(scanEventForFileRefs);
   regroupAvatars(target);
+  foldRetryRuns(target);
 }
 
 // regroupAvatars walks the rendered transcript and tags each .event bubble
@@ -823,6 +825,30 @@ function regroupAvatars(container) {
     prevSender = sender;
     prevTime = t; // 0 when undated → next bubble can't group against it
   }
+}
+
+// foldRetryRuns shows a run of adjacent API-retry rows as its last one,
+// "接口重试 ×N" titled with the run's first and last time: a retry row says
+// nothing but its time, and a failing turn's ten in a row pushed its reply
+// and its error off screen. Rerun on every mutation, as regroupAvatars.
+function foldRetryRuns(el) {
+  let run = [];
+  const flush = () => {
+    run.forEach((node, i) => {
+      const last = i === run.length - 1;
+      node.classList.toggle('nz-folded', !last);
+      node.querySelector('.nz-retry').textContent = last && run.length > 1 ? '接口重试 ×' + run.length : '接口重试';
+      const t = Number(node.getAttribute('data-time') || 0);
+      const t0 = Number(run[0].getAttribute('data-time') || 0);
+      if (t) node.title = last && run.length > 1 && t0 ? formatTimeFull(t0) + ' – ' + formatTimeFull(t) : formatTimeFull(t);
+    });
+    run = [];
+  };
+  for (const node of el.children) {
+    if (node.classList && node.classList.contains('system') && node.querySelector(':scope > .event-content > .nz-retry')) run.push(node);
+    else flush();
+  }
+  flush();
 }
 
 
