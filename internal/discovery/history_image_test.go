@@ -1,10 +1,14 @@
 package discovery
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/claudefs"
 )
 
 // setThumbnailFn installs a ThumbnailFn for the duration of one test and
@@ -306,5 +310,50 @@ func TestParseHistoryLine_ToolResultImagesSkipped(t *testing.T) {
 				t.Errorf("entries=%d thumbnails=%d, want %d", len(entries), thumbs, tc.want)
 			}
 		})
+	}
+}
+
+// TestLoadTurnsTailCtx: the reply search's read keeps everything from the
+// turns-th newest user entry on, the same as the display tail does, but
+// stops there and thumbnails no tool screenshot.
+func TestLoadTurnsTailCtx(t *testing.T) {
+	thumbs := 0
+	setThumbnailFn(t, func(d []byte, n int) string { thumbs++; return stubThumb(d, n) })
+	claudeDir := makeClaudeDir(t)
+	cwd := "/tmp/turns-tail"
+	sessionID := "00000000-0000-0000-0000-000000003001"
+	shot, _ := json.Marshal(map[string]any{"role": "user", "content": []map[string]any{
+		{"type": "tool_result", "tool_use_id": "tu1", "content": imageBlockContent("", b64("png"))},
+	}})
+	shotLine := `{"type":"user","timestamp":"2026-01-01T00:00:30Z","message":` + string(shot) + `}`
+	var lines []string
+	for i := range 5 {
+		lines = append(lines, userJSONLLine("user", fmt.Sprintf("q%d", i)), shotLine, assistantJSONLLine(fmt.Sprintf("a%d", i)))
+	}
+	makeSessionJSONL(t, claudeDir, claudefs.ProjectSlug(cwd), sessionID, lines)
+
+	got, err := LoadTurnsTailCtx(context.Background(), claudeDir, sessionID, cwd, 200, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sums []string
+	for _, e := range got {
+		sums = append(sums, e.Type+":"+e.Summary)
+	}
+	want := "user:q2 text:a2 user:q3 text:a3 user:q4 text:a4"
+	if s := strings.Join(sums, " "); s != want {
+		t.Errorf("entries = %q, want %q", s, want)
+	}
+	if thumbs != 0 {
+		t.Errorf("thumbnailed %d screenshots, want 0", thumbs)
+	}
+
+	// The display tail still has the screenshots and the older turns.
+	all, err := LoadHistoryTailCtx(context.Background(), claudeDir, sessionID, cwd, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 15 || thumbs != 5 {
+		t.Errorf("display tail: %d entries, %d thumbnails, want 15 and 5", len(all), thumbs)
 	}
 }

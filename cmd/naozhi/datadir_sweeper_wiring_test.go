@@ -97,6 +97,9 @@ func TestSweeperKeepsCLIDebugLogOfALiveShim(t *testing.T) {
 	debugDir := layout.CLIDebugRoot()
 	liveLog := plantOld(t, debugDir, filepath.Base(session.CLIDebugPath(debugDir, liveKey)))
 	goneLog := plantOld(t, debugDir, filepath.Base(session.CLIDebugPath(debugDir, goneKey)))
+	// The CLI's own 10 MB rotation of each.
+	liveRotated := plantOld(t, debugDir, filepath.Base(liveLog)+".1")
+	goneRotated := plantOld(t, debugDir, filepath.Base(goneLog)+".1")
 
 	got := newDataDirSweeper(&config.Config{}, layout, mgr, "").RunOnce()
 
@@ -108,6 +111,15 @@ func TestSweeperKeepsCLIDebugLogOfALiveShim(t *testing.T) {
 	}
 	if _, err := os.Stat(goneLog); err == nil {
 		t.Error("the debug log of a session with no shim is still there")
+	}
+	if got["cli-debug-rotated"].Removed != 1 {
+		t.Errorf("cli-debug-rotated removed %d, want 1", got["cli-debug-rotated"].Removed)
+	}
+	if _, err := os.Stat(liveRotated); err != nil {
+		t.Errorf("the live session's rotated debug log was swept: %v", err)
+	}
+	if _, err := os.Stat(goneRotated); err == nil {
+		t.Error("the rotated debug log of a session with no shim is still there")
 	}
 }
 
@@ -179,5 +191,31 @@ func TestSweeperRemovesOldSysSessionJSONL(t *testing.T) {
 	}
 	if _, err := os.Stat(oldJSONL); err == nil {
 		t.Error("the 90-day-old JSONL survived the sweep")
+	}
+}
+
+// TestSweeperPrunesUnreferencedToolImages: an old tool screenshot no event log
+// names any more is removed with its .meta; one a log still names is kept.
+func TestSweeperPrunesUnreferencedToolImages(t *testing.T) {
+	layout := datadir.ForStore(filepath.Join(t.TempDir(), "sessions.json"))
+	dayDir := filepath.Join(layout.PlannerAttachmentsRoot(), "2026-10-01")
+	orphan := plantOld(t, dayDir, "orphan.png")
+	orphanMeta := plantOld(t, dayDir, "orphan.meta")
+	named := plantOld(t, dayDir, "named.jpg")
+	plantOld(t, layout.EventsRoot(), "k.log")
+	ref := `{"image_paths":["` + datadir.PlannerAttachmentsRel + `/2026-10-01/named.jpg"]}`
+	if err := os.WriteFile(filepath.Join(layout.EventsRoot(), "k.log"), []byte(ref), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	newDataDirSweeper(&config.Config{}, layout, nil, "").RunOnce()
+
+	for _, p := range []string{orphan, orphanMeta} {
+		if _, err := os.Stat(p); err == nil {
+			t.Errorf("%s survived the sweep", p)
+		}
+	}
+	if _, err := os.Stat(named); err != nil {
+		t.Errorf("the image an event log names was swept: %v", err)
 	}
 }

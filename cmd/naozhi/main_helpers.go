@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"os"
@@ -566,10 +567,10 @@ func backendHistoryDirs() map[string]string {
 // accumulate. Ages are chosen so a pass can never remove a file a live process
 // is still appending to:
 //
-//   - cli-debug/<keyhash>.log is appended for a session's whole life, and age
-//     alone cannot prove that life is over: the shim idle timer only runs while
-//     naozhi is detached, and exempt sessions or a long session.ttl keep a CLI
-//     idle for weeks. shim.Manager.KeyHashFileIsLive keeps any file whose
+//   - cli-debug/<keyhash>.log (and the CLI's own <keyhash>.log.1 rotation) is
+//     appended for a session's whole life, and age alone cannot prove that life
+//     is over: the shim idle timer only runs while naozhi is detached, and
+//     exempt sessions or a long session.ttl keep a CLI idle for weeks. shim.Manager.KeyHashFileIsLive keeps any file whose
 //     session still has a live shim; the max(7d, 2×idle) age is only the cheap
 //     pre-filter that decides which files are worth asking about.
 //   - shims/shim-<pid>.log is decided by liveness, not age: shim.LogFileIsLive
@@ -597,6 +598,13 @@ func newDataDirSweeper(cfg *config.Config, layout datadir.Layout, shimMgr *shim.
 		cliDebug.Keep = shimMgr.KeyHashFileIsLive
 	}
 	s.Add(cliDebug)
+	// The CLI rotates its --debug-file at 10 MB into <keyhash>.log.1, whose
+	// extension is ".1"; the same age and live-shim check apply (Keep cuts the
+	// name at its first dot).
+	cliDebugRotated := cliDebug
+	cliDebugRotated.Name = "cli-debug-rotated"
+	cliDebugRotated.Ext = ".1"
+	s.Add(cliDebugRotated)
 	// shimMgr.StateDir(), never cfg.Session.Shim.StateDir: NewManager applies the
 	// ~/.naozhi/shims default to its own copy, so the raw config value is empty in
 	// the common case and this pass silently swept nothing. Taking the Manager
@@ -621,8 +629,41 @@ func newDataDirSweeper(cfg *config.Config, layout datadir.Layout, shimMgr *shim.
 			MaxAge: sysSessionsMaxAge,
 		})
 	}
+	if root := layout.PlannerAttachmentsRoot(); root != "" {
+		s.AddFunc("tool-images", toolImagesTask(root, layout.EventsRoot()))
+	}
 	addStdioCaps(s, os.Stdout, os.Stderr)
 	return s
+}
+
+// toolImagesMaxAge is how long an image under planner/attachments that no
+// event log names is kept: a record still on its way to disk names it well
+// within that.
+const toolImagesMaxAge = 7 * 24 * time.Hour
+
+// toolImagesTask removes the originals under planner/attachments (tool
+// screenshots, Planner send images) that no event log in eventsDir names any
+// more: the log that showed them was dropped with its session or rotated past
+// them, so no view can reach them, while a heavy browser-automation day adds
+// 100-200 MB. One that is still named is kept whatever its age.
+func toolImagesTask(root, eventsDir string) func() {
+	return func() {
+		refs, err := attachment.CollectRefs(eventsDir, ".log", datadir.PlannerAttachmentsRel+"/")
+		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				slog.Warn("sweep: tool images skipped, event logs unreadable", "dir", eventsDir, "err", err)
+			}
+			return
+		}
+		res, err := attachment.PruneUnreferenced(root, toolImagesMaxAge, refs, time.Now())
+		if err != nil {
+			slog.Warn("sweep: tool images failed", "dir", root, "err", err)
+		}
+		if res.Removed > 0 {
+			slog.Info("sweep reclaimed", "pass", "tool-images", "dir", root,
+				"removed", res.Removed, "bytes", res.Bytes, "max_age", toolImagesMaxAge)
+		}
+	}
 }
 
 const (
