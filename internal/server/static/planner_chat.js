@@ -50,8 +50,8 @@ import { closeTaskActs, isRunningTask, refreshTasks, seenTask } from './tasks.js
 import { followPlannerSubject, noteWorkbenchEvent } from './workbench_panes.js';
 import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
-import { getMsgValue, promptDialog, setMsgValue } from './utilities.js';
-import { awaitPendingOrients, clearFiles, createFileTray, filesBlockSend, handleFiles } from './composer_files.js';
+import { getMsgValue, isMobile, promptDialog, pushView, replaceView, setMsgValue } from './utilities.js';
+import { awaitPendingOrients, clearFiles, createFileTray, filesBlockSend, handleFiles, renderFilePreviews } from './composer_files.js';
 import { eventsURL, hostOnline, hostRemote, isLocalNode, nodeAPI, plannerAPI, plannerHost } from './planner_host.js';
 import { quickSessionKey } from './auth_modal.js';
 import { asideFromScratch, closePlannerScratch } from './aside_drawer.js';
@@ -101,6 +101,95 @@ const $ = (id) => document.getElementById(id);
 // the shared file actions (dashboard.js) reach it.
 const TRAY = 'planner';
 const tray = createFileTray(TRAY, 'pl-file-preview', 'pl-file-input');
+
+// drafts keeps the unsent text and attachments of each target the one box
+// left (a node's Planner, or a session by node and key), so they come back
+// with it and never go to the next one.
+const drafts = new Map();
+
+// draftOf is the box's target as drafts keys it: the session opened, else
+// the Planner shown (发给 新对话 is picked with the text typed, so it shares
+// it). planner:main is the same key on every node, so the node goes in.
+const draftKey = (node, key) => node + ' ' + key;
+const draftOf = () => (st.sess ? draftKey(st.sess.node, st.sess.key) : draftKey(plannerHost.node, PLANNER_KEY));
+
+// boxOf is the target the box's text was written for: once the node
+// switched, draftOf already names the next one.
+let boxOf = '';
+const boxTarget = () => boxOf || draftOf();
+
+// stashDraft moves the box's text and attachments into drafts, emptying it.
+function stashDraft() {
+  const input = $('pl-input');
+  const text = input ? input.value : '';
+  const files = tray.files;
+  const k = boxTarget();
+  if (text || files.length) drafts.set(k, { text, files });
+  else drafts.delete(k);
+  tray.files = [];
+  if (input) { input.value = ''; fitInput(input); }
+  renderFilePreviews(tray);
+}
+
+// restoreDraft puts the target's own draft back into the box.
+function restoreDraft() {
+  boxOf = draftOf();
+  const d = drafts.get(boxOf);
+  drafts.delete(boxOf);
+  tray.files = d ? d.files : [];
+  const input = $('pl-input');
+  if (input) { input.value = d ? d.text : ''; fitInput(input); }
+  renderFilePreviews(tray);
+}
+
+// dropDraftFiles takes files a send took out of every stashed draft: the
+// box may have moved to another target while it was out.
+function dropDraftFiles(files) {
+  for (const [k, d] of drafts) {
+    d.files = d.files.filter((f) => !files.includes(f));
+    if (!d.text && !d.files.length) drafts.delete(k);
+  }
+}
+
+// ---- the phone's back ----
+//
+// On a phone the session opened in the middle column and the unfolded left
+// block each push a history entry (as mobileEnterChat does for the chat
+// view), so the system back (Android's key, the browser's back, iOS's swipe)
+// closes them as the breadcrumb does instead of leaving the dashboard. The
+// block unfolded over an open session stacks on the session's entry (over),
+// so folding it shows the session again; a session opened from the block
+// takes the block's place.
+const ENTRY_SESS = 'pl-sess';
+const ENTRY_LEFT = 'pl-left';
+
+function ownEntry() {
+  const v = history.state && history.state.view;
+  return v === ENTRY_SESS || v === ENTRY_LEFT ? v : '';
+}
+
+function pushEntry(view) {
+  const cur = ownEntry();
+  if (!isMobile() || cur === view) return;
+  if (view === ENTRY_LEFT && cur === ENTRY_SESS) pushView({ view, over: true });
+  // Back onto the session's entry, which the session opening now takes.
+  else if (cur === ENTRY_LEFT && history.state.over) history.back();
+  else if (cur) replaceView({ view });
+  else pushView({ view });
+}
+
+// popEntry drops view's entry when the page closes it itself; leaving the
+// page leaves it (a back then would land on whatever view comes next).
+function popEntry(view) {
+  if (isMobile() && ownEntry() === view && ui.activeView === 'planner') history.back();
+}
+
+window.addEventListener('popstate', () => {
+  if (!isMobile()) return;
+  const v = ownEntry();
+  if (st.sess && v !== ENTRY_SESS) closePlannerSession(false, true);
+  if (v !== ENTRY_LEFT) showPlannerLeft(false, true);
+});
 
 // apiError is the user-facing text of a failed fetchJSON: the JSON error a
 // handler wrote, else the status line.
@@ -205,7 +294,14 @@ function sessionListed(key) {
 function titleOf(key) {
   const row = sessionList.sessionsData[sid(key, plannerHost.node)];
   if (st.asides.has(key) && !(row && row.user_label)) return ASIDE + st.asides.get(key);
+  if (!row && st.sess && st.sess.key === key && st.sess.title) return st.sess.title;
   return sessionTitle(key);
+}
+
+// endedAside reports whether the session opened is a 单独聊 that ended: its
+// line opened it, and the list no longer has it (结束 put it in the history).
+function endedAside() {
+  return !!(st.sess && st.sess.title && !sessionListed(st.sess.key));
 }
 
 // mountComposer fills #pl-composer once.
@@ -214,6 +310,7 @@ export function mountComposer() {
   if (!box || box.dataset.mounted) return;
   box.dataset.mounted = '1';
   box.dataset.fileTray = TRAY;
+  boxOf = draftOf();
   box.innerHTML =
     '<div class="pl-target" id="pl-target" hidden><span class="pl-target-to" id="pl-target-to"></span>' +
       '<span class="pl-target-note" id="pl-target-note"></span></div>' +
@@ -274,7 +371,7 @@ function paintComposer() {
     // create it as an ordinary session under that key.
     const listed = sessionListed(st.sess.key);
     to.textContent = '→ ' + titleOf(st.sess.key);
-    if (note) note.textContent = listed ? '' : '不在会话列表里，不能发消息';
+    if (note) note.textContent = listed ? '' : endedAside() ? '已结束，在历史里' : '不在会话列表里，不能发消息';
     input.placeholder = listed ? '追问或调整方向…' : '';
     input.disabled = !listed;
     $('pl-attach').disabled = input.disabled || hostRemote();
@@ -324,6 +421,7 @@ async function sendFromComposer() {
   st.sending = true;
   paintComposer();
   const box = aside ? null : key === PLANNER_KEY ? $('pl-stream') : $('pl-sess-stream');
+  const target = boxTarget();
   addPending(box, text);
   input.value = '';
   fitInput(input);
@@ -348,16 +446,26 @@ async function sendFromComposer() {
         if (st.sess && st.sess.key === key) loadSession(false);
       }
       clearFiles(tray, files);
+      dropDraftFiles(files);
     } catch (e) {
       if (filesConsumed(e)) {
         clearFiles(tray, files);
+        dropDraftFiles(files);
         showToast('附件已失效，请重新添加后再发送', 'warning');
       }
       throw e;
     }
   } catch (e) {
     clearPending(box);
-    if (!input.value) { input.value = text; fitInput(input); }
+    // The text goes back to the target it was written for: the box may show
+    // another one by now.
+    if (boxTarget() === target) {
+      if (!input.value) { input.value = text; fitInput(input); }
+    } else if (text) {
+      const d = drafts.get(target);
+      if (!d) drafts.set(target, { text, files: [] });
+      else if (!d.text) d.text = text;
+    }
     showToast('没有发出：' + apiError(e), 'error');
   } finally {
     st.sending = false;
@@ -472,12 +580,16 @@ async function loadSession(reset) {
 }
 
 // showPlannerLeft unfolds (open) or folds the phone's left block, which
-// unfolded hides the middle column.
-export function showPlannerLeft(open) {
+// unfolded hides the middle column. keepEntry leaves the history entry to
+// the caller: a back that folded it, or a session taking its place.
+export function showPlannerLeft(open, keepEntry) {
   const main = $('planner-main');
   if (!main || main.classList.contains('pl-left-open') === open) return;
   main.classList.toggle('pl-left-open', open);
   $('pl-left-toggle')?.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (keepEntry) return;
+  if (open) pushEntry(ENTRY_LEFT);
+  else popEntry(ENTRY_LEFT);
 }
 
 // openPlannerSession opens key in the middle column, folding the phone's left
@@ -490,7 +602,8 @@ export function showPlannerLeft(open) {
 export function openPlannerSession(key, pending, opts) {
   if (!key || key === PLANNER_KEY) return;
   const raw = !!(opts && opts.raw);
-  showPlannerLeft(false);
+  showPlannerLeft(false, true);
+  pushEntry(ENTRY_SESS);
   // Opening it looks at its new result (§15.12 ④), also a remote node's,
   // which no viewing frame reaches.
   seenTask(key);
@@ -502,8 +615,13 @@ export function openPlannerSession(key, pending, opts) {
     }
     return;
   }
-  closePlannerSession(true);
-  st.sess = { key, node: plannerHost.node, events: [], uuids: new Set(), lastTime: 0, raw, loading: false, gen: 0, timer: 0, pending: pending || '' };
+  if (st.sess) closePlannerSession(true);
+  else stashDraft();
+  // title: what the 单独聊 line it was opened from calls it, for once the
+  // list no longer does (ended).
+  st.sess = { key, node: plannerHost.node, events: [], uuids: new Set(), lastTime: 0, raw, loading: false, gen: 0, timer: 0, pending: pending || '',
+    title: (opts && opts.title) || '' };
+  restoreDraft();
   $('planner-main')?.classList.add('pl-sess-open');
   const pane = $('pl-sess');
   if (pane) { pane.hidden = false; pane.dataset.key = key; pane.dataset.node = plannerHost.node; }
@@ -521,12 +639,18 @@ export function openPlannerSession(key, pending, opts) {
 }
 
 // closePlannerSession goes back to the Planner conversation; quiet keeps the
-// workbench on its subject (another session is about to open).
-export function closePlannerSession(quiet) {
+// workbench on its subject (another session is about to open, and takes its
+// history entry and the box). fromBack: a back closed it, its entry is gone.
+export function closePlannerSession(quiet, fromBack) {
   const p = st.sess;
   if (!p) return;
   clearInterval(p.timer);
+  stashDraft();
   st.sess = null;
+  if (!quiet) {
+    restoreDraft();
+    if (!fromBack) popEntry(ENTRY_SESS);
+  }
   $('planner-main')?.classList.remove('pl-sess-open');
   const pane = $('pl-sess');
   if (pane) { pane.hidden = true; delete pane.dataset.key; delete pane.dataset.node; }
@@ -699,6 +823,10 @@ async function endAside() {
     return;
   }
   if (st.sess === p) closePlannerSession(false);
+  // What was typed there has nowhere to go now.
+  const dk = draftKey(p.node, p.key);
+  drafts.get(dk)?.files.forEach((f) => { if (f.blobUrl) URL.revokeObjectURL(f.blobUrl); });
+  drafts.delete(dk);
   st.asides.delete(p.key);
   delete sessionList.sessionsData[sid(p.key, p.node)];
   sessionList.lastVersion = 0;
@@ -706,7 +834,7 @@ async function endAside() {
   // No frame says it was put away, and with no turn running 你开的 would
   // keep its card until the next read.
   refreshTasks();
-  showToast('单独聊已结束，移到了历史');
+  showToast('单独聊已结束，移到了历史', 'success');
 }
 
 // fromScratch makes the ↗ 追问 on a Planner reply a 单独聊: the drawer's
@@ -804,7 +932,7 @@ registerActions({
     const raw = el.dataset.raw === '1';
     // A card's "⋯" it was picked from has done its part.
     if (raw) closeTaskActs();
-    openPlannerSession(el.dataset.key, '', { raw });
+    openPlannerSession(el.dataset.key, '', { raw, title: el.dataset.title || '' });
   },
   'planner-close-session': () => closePlannerSession(false),
   'planner-aside-handoff': () => handAside(),
@@ -852,7 +980,9 @@ wsm.onReady(fetchPlannerStatus);
 nzBus.addEventListener('planner:node', () => {
   st.status = null;
   st.to = 'planner';
-  closePlannerSession(false);
+  // The box goes with the Planner it was written for.
+  if (st.sess) closePlannerSession(false);
+  else { stashDraft(); restoreDraft(); }
   // An aside on the last node's Planner reply: its 转成单独聊 has no Planner here.
   closePlannerScratch();
   fetchPlannerStatus();

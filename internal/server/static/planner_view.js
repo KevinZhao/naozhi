@@ -1221,6 +1221,9 @@ function startConversation() {
       if (document.hidden || !pl.host) return;
       if (!(pl.sub === 'live' && wsm.isConnected())) loadEvents(false);
       if (++pl.ticks % SLOW_TICKS === 0) {
+        // A list that failed is read again: with the socket up nothing else
+        // re-reads this node's until it changes.
+        if (pl.openState === 'failed') fetchInbox();
         paintWaiting();
         fetchStatus();
         fetchBriefs();

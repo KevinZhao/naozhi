@@ -9,7 +9,7 @@ import { lsGet, lsSet } from './platform.js';
 import { shell } from './shell.js';
 import { splitDock } from './split_view.js';
 import { dismissSession, renameSession } from './tuning.js';
-import { copyText, isMobile, mobileQuery } from './utilities.js';
+import { copyText, isMobile, mobileQuery, poppedView } from './utilities.js';
 
 /* ===== Mobile Navigation ===== */
 
@@ -47,8 +47,12 @@ function mobileBack() {
   leaveChat();
 }
 
-// Handle Android back button and iOS swipe-back gesture
+// Handle Android back button and iOS swipe-back gesture. A back off another
+// view's entry (the Planner's session or left block) is that view's: the
+// chat stays.
 window.addEventListener('popstate', () => {
+  const left = poppedView();
+  if (left && left !== 'chat') return;
   if (isMobile() && document.body.classList.contains('mobile-chat-view')) {
     leaveChat();
   }
