@@ -58,7 +58,8 @@ func (noopRecentFilter) SkipSessionID(string) bool { return false }
 
 // RecentSessionsCtx scans ~/.claude/projects/* for recent sessions, returning up
 // to `limit` sessions modified within `maxAge` (limit <= 0 returns all).
-// Filtering, in order: (1) directories that cannot be mapped back to a real
+// Filtering, in order: (0) directories with no .jsonl modified within maxAge
+// are skipped unresolved; (1) directories that cannot be mapped back to a real
 // workspace on disk are skipped; (2) workspaces with a dot-prefixed component
 // (automated tools) are skipped, except git worktrees under ".claude/worktrees";
 // (3) filter.SkipWorkspace, then excludeSessionIDs / filter.SkipSessionID.
@@ -116,6 +117,14 @@ func recentSessionsUnder(ctx context.Context, root, claudeDir string, limit int,
 		dirName := e.Name()
 
 		projDir := filepath.Join(projectsDir, dirName)
+		// Both session sources below take LastActive from this same cached
+		// jsonl list and drop anything older than cutoff, so a directory with
+		// no recent jsonl contributes nothing. Skip it before resolving: most
+		// stale directories name a deleted worktree or temp dir, whose failed
+		// resolution (not cached, #1994) is a full bounded DFS every scan.
+		if !hasJSONLSince(projDir, cutoff) {
+			continue
+		}
 		workspace, idx := resolveWorkspaceWithIndex(projDir, dirName, root)
 
 		if workspace == "" {
@@ -226,6 +235,17 @@ func cachedJSONLFileInfo(projDir string) []jsonlFileInfo {
 		return entry.files
 	}
 	return nil
+}
+
+// hasJSONLSince reports whether projDir holds a .jsonl whose mtime (unix ms)
+// is at or after cutoff, using the same cache as cachedJSONLFileInfo.
+func hasJSONLSince(projDir string, cutoff int64) bool {
+	for _, f := range cachedJSONLFileInfo(projDir) {
+		if f.mtime >= cutoff {
+			return true
+		}
+	}
+	return false
 }
 
 // cachedJSONLByID returns the sessionID→mtime map for a project directory from
