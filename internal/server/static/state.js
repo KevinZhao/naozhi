@@ -254,6 +254,10 @@ export const perSession = {
   // 的中断-回填行为），方便修改后重发。只在输入框当前为空时回填，避免覆盖
   // 用户已经开始敲的新内容。
   lastSent: {},
+  // midTurnSent: sids whose lastSent went out while a turn was already
+  // running. Such a send waits in the turn queue (or the CLI's) and still runs
+  // after an interrupt, so it is not the interrupted turn's text to refill.
+  midTurnSent: new Set(),
   // httpSendPending: sids this tab has an HTTP send in flight for (added before
   // the request leaves, cleared on sync rejection / send_error / the key's next
   // ready|dead state). onSendError gates on it so a send_error fanned out to

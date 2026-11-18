@@ -1096,7 +1096,11 @@ function settleTurnBoundary(msg, msgNode, sKey, prevState) {
   if (turnCompleted) delete perSession.lastSent[sKey];
   // The HTTP send ended (or never became a turn): drop its originator mark, or
   // a much later send_error for someone else's send would slip through.
-  if (msg.state === 'ready' || msg.state === 'dead') perSession.httpSendPending.delete(sKey);
+  // The same for a send's mid-turn mark: whatever it queued behind has ended.
+  if (msg.state === 'ready' || msg.state === 'dead') {
+    perSession.httpSendPending.delete(sKey);
+    perSession.midTurnSent.delete(sKey);
+  }
   // A turn may switch branches without changing the workspace path, so the
   // git chip re-resolves at each turn end (only for the selected session).
   if (turnCompleted) invalidateGitState(msg.key, msgNode);

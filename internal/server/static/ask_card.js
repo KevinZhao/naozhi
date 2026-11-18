@@ -149,9 +149,13 @@ export function lockRenderedAskCards(scrollEl, ev) {
 // renderAskQuestionCard renders card e of session sk (for 撤回 on its line).
 export function renderAskQuestionCard(e, sk) {
   const aq = e.ask_question;
+  // data-uuid as eventHtml writes it: the watermark millisecond a poll or a
+  // resubscribe re-delivers is deduped by it, so without it every redelivery
+  // appends another live copy of the card.
+  const uuidAttr = e.uuid ? ' data-uuid="' + escAttr(e.uuid) + '"' : '';
   if (!aq || !Array.isArray(aq.items) || aq.items.length === 0) {
     // Defensive: if payload missing, fall back to a plain status bubble.
-    return '<div class="event ask_question"><span class="event-icon">?</span>' +
+    return '<div class="event ask_question"' + uuidAttr + '><span class="event-icon">?</span>' +
       '<div class="event-content">' + esc(e.summary || 'AskUserQuestion') + '</div></div>';
   }
   // Multi-Backend RFC §8.3 D12 — when the active session's backend doesn't
@@ -169,7 +173,7 @@ export function renderAskQuestionCard(e, sk) {
       return '<div class="ask-degraded-q">' + header + q +
         (opts ? '<div class="ask-degraded-opts">' + opts + '</div>' : '') + '</div>';
     }).join('');
-    return '<div class="event ask_question ask-degraded"><span class="event-icon">?</span>' +
+    return '<div class="event ask_question ask-degraded"' + uuidAttr + '><span class="event-icon">?</span>' +
       '<div class="event-content">' +
         '<div class="ask-degraded-hint">' +
           '当前后端不支持 AskUserQuestion，请直接回复你的选择：' +
@@ -183,7 +187,7 @@ export function renderAskQuestionCard(e, sk) {
   // the malformed payload surfaces in dev tools.
   const hasDegenerateItem = aq.items.some(it => !it || !Array.isArray(it.options) || it.options.length === 0);
   if (hasDegenerateItem) {
-    return '<div class="event ask_question"><span class="event-icon">?</span>' +
+    return '<div class="event ask_question"' + uuidAttr + '><span class="event-icon">?</span>' +
       '<div class="event-content">' + esc(e.summary || 'AskUserQuestion (malformed: empty options)') + '</div></div>';
   }
   const tuid = aq.tool_use_id || '';
@@ -233,7 +237,7 @@ export function renderAskQuestionCard(e, sk) {
   const questions = aq.items.map((it) => (it && it.question) || '').filter(Boolean).join('\n');
   const timeAttr = e.time ? ' data-time="' + e.time + '" title="' + escAttr([formatTimeFull(e.time), questions].filter(Boolean).join('\n')) + '"' : '';
   return '<div class="event ask_question' + done + '"' + timeAttr +
-    ' data-tool-use-id="' + escAttr(tuid) + '">' +
+    ' data-tool-use-id="' + escAttr(tuid) + '"' + uuidAttr + '>' +
     '<span class="event-icon">?</span>' +
     '<div class="event-content ask-card">' +
       '<div class="ask-title">提问' + (aq.items.length > 1 ? '<span class="ask-title-hint"> · 全部作答后提交</span>' : '') + '</div>' +

@@ -155,9 +155,10 @@ function handleFiles(fileList, tray = mainTray) {
   // normalization and must stay under the server's 32 MB Anthropic ceiling.
   const MAX_IMAGE_BYTES = 40 * 1024 * 1024;
   const MAX_PDF_BYTES = 32 * 1024 * 1024;
+  let skipped = 0;
   for (const raw of fileList) {
     const kind = fileKind(raw);
-    if (!kind) continue;
+    if (!kind) { skipped++; continue; }
     if (kind === 'pdf' && raw.size > MAX_PDF_BYTES) {
       showToast('PDF 过大（上限 32 MB）', 'warning');
       continue;
@@ -183,6 +184,8 @@ function handleFiles(fileList, tray = mainTray) {
     tray.files.push(entry);
     toUpload.push(entry);
   }
+  // A dropped .txt / .go would otherwise vanish without a word.
+  if (skipped) showToast('只支持图片和 PDF，已跳过 ' + skipped + ' 个文件', 'warning');
   const fi = document.getElementById(tray.inputId);
   if (fi) fi.value = '';
   renderFilePreviews(tray);
@@ -227,7 +230,7 @@ async function uploadEntry(entry) {
     if (r.status === 401 || r.status === 403) { showAuthModal(); throw new Error('unauthorized'); }
     if (!r.ok) {
       const txt = await r.text().catch(() => '');
-      let msg = 'upload failed: ' + r.status;
+      let msg = 'HTTP ' + r.status;
       try { const j = JSON.parse(txt); if (j && j.error) msg = j.error; } catch (_) { if (txt) msg = txt; }
       throw new Error(msg);
     }
@@ -249,7 +252,7 @@ async function uploadEntry(entry) {
     if (entry.kind === 'image') maybeAutoOrient(entry);
   } catch (e) {
     entry.status = 'error';
-    entry.error = e.message || 'upload failed';
+    entry.error = e.message || '上传失败';
   }
   renderFilePreviews(tray);
 }
@@ -353,14 +356,14 @@ function clearFiles(tray = mainTray, entries) {
 // stay under ~9 MB). PDFs travel as file_ref and do not count.
 function filesBlockSend(tray = mainTray) {
   if (tray.files.some(f => f.status === 'uploading')) {
-    showToast('图片上传中，请稍候…', 'warning');
+    showToast('附件上传中，请稍候…', 'warning');
     return true;
   }
   const failed = tray.files.filter(f => f.status === 'error');
   if (failed.length > 0) {
     const detail = failed[0].error || '';
     const tail = detail ? '（' + detail.slice(0, 120) + '）' : '';
-    showToast('图片上传失败' + tail + '，请移除或重试', 'error');
+    showToast('附件上传失败' + tail + '，请移除或重试', 'error');
     return true;
   }
   const totalBytes = tray.files.reduce((n, f) => {
@@ -472,7 +475,7 @@ function renderFilePreviews(tray = mainTray) {
   el.innerHTML = tray.files.map((entry, i) => {
     const overlay =
       entry.status === 'uploading' ? '<div class="upload-status uploading"></div>' :
-      entry.status === 'error' ? '<div class="upload-status error" title="' + escAttr(entry.error || 'upload failed') + '" data-action="upload-retry">\u21bb</div>' :
+      entry.status === 'error' ? '<div class="upload-status error" role="button" tabindex="0" aria-label="重试上传" title="' + escAttr(entry.error || '上传失败') + '" data-action="upload-retry" data-action-keydown="upload-retry">\u21bb</div>' :
       '';
     // Only 'ready' files are draggable so an in-flight upload's index stays
     // stable for the uploadEntry completion handler. tabindex=0 makes the

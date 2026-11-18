@@ -76,7 +76,7 @@ function validateComposerForSend(text) {
   // A send references file_ids only, so one mid-upload would silently drop
   // the image (errored uploads: composerSendBlocked).
   if (composer.pendingFiles.some(f => f.status === 'uploading')) {
-    showToast('图片上传中，请稍候…', 'warning');
+    showToast('附件上传中，请稍候…', 'warning');
     return false;
   }
   return true;
@@ -462,6 +462,9 @@ async function sendComposerTurn(targetKey, targetNode) {
   // and invites double-sends. onSendAck/rollbackOptimisticRunning undo this on
   // busy/error/reset; the 20s safety timer in markSessionOptimisticRunning
   // prevents a stuck banner if the server never responds.
+  const sentSid = sid(targetKey, targetNode);
+  if (sessionList.sessionsData[sentSid]?.state === 'running') perSession.midTurnSent.add(sentSid);
+  else perSession.midTurnSent.delete(sentSid);
   markSessionOptimisticRunning(selection.key, selection.node);
 
   if (trySendViaWS(text, fileIDs, input)) return;
@@ -470,7 +473,6 @@ async function sendComposerTurn(targetKey, targetNode) {
   // session switch while the POST is out, so everything after the await acts
   // on the target, never on the live selection.
   const target = { key: targetKey, node: targetNode };
-  const sentSid = sid(targetKey, targetNode);
   try {
     const headers = { 'Content-Type': 'application/json' };
     const sendId = newSendID();

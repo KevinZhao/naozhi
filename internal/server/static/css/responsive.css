@@ -240,8 +240,14 @@
   .main-header .detail{font-size:var(--nz-fs-xs)}
   /* cli + model + git chip already fill a phone-width row; the run-history
      overview stays reachable in the collapsed 运行记录 panel below. */
-  .main-header .detail-runstats{display:none}
+  .main-header .detail-runstats,.main-header .detail-turn-timer{display:none}
   .main-header .detail-custody :is(.custody-chip,.watch-chip){padding:2px 8px}
+  /* The custody chips keep their width, so the model and the access profile
+     share what is left: each shrinks to an ellipsis of its own (the chip as a
+     block, so its text ends in … inside its border rather than being cut at
+     the group's edge), the chip keeping room for its first letters. */
+  .main-header .detail-left>*{margin-left:0}
+  .main-header .header-access-profile{display:inline-block;flex-shrink:1;min-width:3.5em;max-width:80px}
   .session-card .btn-dismiss{top:6px;right:8px;min-width:32px;min-height:32px;font-size:var(--nz-fs-lg);display:flex;align-items:center;justify-content:center;opacity:1}
   .btn-icon{width:40px;height:40px}
   .input-row #msg-input{font-size:var(--nz-fs-md)} /* prevents iOS zoom on focus */

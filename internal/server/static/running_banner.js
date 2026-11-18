@@ -383,9 +383,10 @@ function interruptSession() {
   // Claude Code 风格：中断时把刚发的那条用户文本回填到输入框方便改写。
   // 只在输入框当前为空时回填，避免覆盖用户已经开始输入的新内容；回填后
   // 把光标挪到末尾、聚焦、滚进视口。回填完成即消费掉 lastSent，防止同一条
-  // 文本在后续多次中断里反复回填。
+  // 文本在后续多次中断里反复回填。回合进行中发出的那条在排队，中断后照样会跑，
+  // 回填它再发就重复了，所以不回填。
   const lastText = perSession.lastSent[sid(selection.key, selection.node)];
-  if (lastText) {
+  if (lastText && !perSession.midTurnSent.has(sid(selection.key, selection.node))) {
     const input = document.getElementById('msg-input');
     if (input && !getMsgValue(input)) {
       setMsgValue(input, lastText);
