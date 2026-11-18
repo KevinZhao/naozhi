@@ -21,6 +21,10 @@ let mountEl = null;
 let profiles = [];
 let models = [];
 let modelsEnabled = false;
+// The error text of a list that did not load, '' when it did: each column
+// says so on its own, a failed models read hides no profile.
+let profilesErr = '';
+let modelsErr = '';
 // editing: null, '' for a new profile, or the id being edited.
 let editing = null;
 
@@ -32,17 +36,17 @@ export async function mountAuthSettings(el) {
 }
 
 async function reload() {
-  try {
-    const [p, m] = await Promise.all([
-      fetchJSON(API_PROFILES, { credentials: 'same-origin' }),
-      fetchJSON(API_MODELS, { credentials: 'same-origin' }),
-    ]);
-    profiles = (p && Array.isArray(p.profiles)) ? p.profiles : [];
-    models = (m && Array.isArray(m.models)) ? m.models : [];
-    modelsEnabled = !!(m && m.enabled);
-  } catch (e) {
-    profiles = []; models = []; modelsEnabled = false;
-  }
+  const [p, m] = await Promise.allSettled([
+    fetchJSON(API_PROFILES, { credentials: 'same-origin' }),
+    fetchJSON(API_MODELS, { credentials: 'same-origin' }),
+  ]);
+  const pv = p.status === 'fulfilled' ? p.value : null;
+  const mv = m.status === 'fulfilled' ? m.value : null;
+  profiles = (pv && Array.isArray(pv.profiles)) ? pv.profiles : [];
+  profilesErr = p.status === 'rejected' ? errText(p.reason) : '';
+  models = (mv && Array.isArray(mv.models)) ? mv.models : [];
+  modelsEnabled = !!(mv && mv.enabled);
+  modelsErr = m.status === 'rejected' ? errText(m.reason) : '';
   // The header's access-profile picker caches the list for a minute.
   serverInfo.accessProfilesFetchedAt = 0;
   render();
@@ -103,6 +107,7 @@ function profilesHtml() {
   let html = '<div class="sa-col"><h3>访问档 <span class="sa-file">config.yaml</span></h3>';
   html += '<div class="sa-row sa-global"><div class="sa-main"><div class="sa-name">（全局默认）</div>' +
     '<div class="sa-sub">naozhi-settings.json 的凭证</div></div></div>';
+  if (profilesErr) html += '<div class="sa-sub">访问档加载失败：' + esc(profilesErr) + '</div>';
   for (const p of profiles) {
     if (editing === p.id) {
       html += '<div class="sa-row is-editing"><div class="sa-name">' + esc(p.id) + '</div>' + profileFormHtml(p) + '</div>';
@@ -111,7 +116,8 @@ function profilesHtml() {
     const sub = [p.aws_profile ? 'aws_profile: ' + p.aws_profile : '', p.default_model ? '默认 ' + p.default_model : '']
       .filter(Boolean).join(' · ');
     html += '<div class="sa-row"><div class="sa-main"><div class="sa-name">' + esc(p.display_name || p.id) +
-      (p.display_name ? ' <span class="sa-id">' + esc(p.id) + '</span>' : '') + '</div>' +
+      (p.display_name ? ' <span class="sa-id">' + esc(p.id) + '</span>' : '') +
+      (p.secret_ok === false ? ' <span class="sa-tag sa-tag-warn">⚠ 凭证缺失</span>' : '') + '</div>' +
       (sub ? '<div class="sa-sub">' + esc(sub) + '</div>' : '') + '</div>' +
       '<button type="button" class="sa-btn" data-sa="edit" data-id="' + escAttr(p.id) + '">编辑</button>' +
       '<button type="button" class="sa-btn sa-danger" data-sa="del-profile" data-id="' + escAttr(p.id) + '">删除</button></div>';
@@ -126,6 +132,7 @@ function profilesHtml() {
 
 function modelsHtml() {
   let html = '<div class="sa-col"><h3>模型 <span class="sa-file">naozhi-settings.json</span></h3>';
+  if (modelsErr) return html + '<div class="sa-sub">模型加载失败：' + esc(modelsErr) + '</div></div>';
   if (!modelsEnabled) {
     return html + '<div class="sa-sub">未开 naozhi_settings.enabled，没有 naozhi 自己的 settings 文件可改。</div></div>';
   }

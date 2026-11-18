@@ -104,7 +104,7 @@ test.describe('Sidebar & session list', () => {
     await page.waitForSelector('.no-sessions');
 
     const text = await page.$eval('.no-sessions', el => el.textContent);
-    expect(text).toContain('no sessions');
+    expect(text).toContain('还没有会话');
 
     await ctx.close();
     emptyMock.server.close();
@@ -810,6 +810,9 @@ test.describe('Cron panel', () => {
     await page.waitForSelector('.cron-detail');
     await page.click('.cron-detail .cron-new-btn');
     await page.waitForSelector('#freq-mode-select');
+
+    // The modes read in Chinese, as the list's schedules do.
+    await expect(page.locator('#freq-mode-select option')).toHaveText(['每小时', '每天', '工作日', '每周', '每月']);
 
     // Daily → time-of-day shown, weekday / day-of-month pickers hidden.
     await page.selectOption('#freq-mode-select', 'daily');

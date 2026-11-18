@@ -681,11 +681,14 @@ async function renameSession() {
   // Esc/backdrop cancel) and doesn't block the event loop on mobile.
   const input = await promptDialog({
     title: '重命名会话',
-    message: '留空恢复默认标题，最多 128 字节',
+    message: '留空恢复默认标题，最多 128 字节（约 42 个汉字）',
     defaultValue: current,
     placeholder: '输入新标题',
     confirmText: '保存',
     maxLength: 128,
+    // The gateway counts UTF-8 bytes (sessionview.MaxUserLabelBytes); the
+    // input's maxlength counts characters, and a 汉字 is 3 bytes.
+    validate: (v) => new TextEncoder().encode(v.trim()).length > 128 ? '太长了，最多 128 字节（约 42 个汉字）' : '',
   });
   if (input === null) return; // user cancelled
   const next = input.trim();

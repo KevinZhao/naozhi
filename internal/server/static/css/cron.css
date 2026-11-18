@@ -625,7 +625,7 @@
    the standard .modal scaffold so trapFocus / Esc / backdrop-dismiss all
    work without extra code. The ks- prefix namespaces internal classes so
    a future refactor of .modal defaults won't silently break the layout. */
-.modal.cheatsheet{width:520px;max-width:calc(100vw - 32px)}
+.modal.cheatsheet{width:520px;max-width:calc(100vw - 32px);max-height:calc(100dvh - 32px);overflow-y:auto}
 .modal.cheatsheet h3{font-size:var(--nz-fs-md);margin-bottom:6px}
 .modal.cheatsheet .ks-sub{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);margin-bottom:14px}
 .modal.cheatsheet .ks-grid{display:grid;grid-template-columns:max-content 1fr;row-gap:8px;column-gap:16px;align-items:center}

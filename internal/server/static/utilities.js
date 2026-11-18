@@ -401,7 +401,7 @@ function renderBackendsDoctorPanel() {
   // Arrow is supplied by the .doctor-summary::before CSS so it can flip
   // 90° on [open]. Don't bake it into the text.
   return '<details class="doctor-panel" aria-label="后端状态详情">' +
-    '<summary class="doctor-summary">Backends 状态 (default: ' + defaultID + ')</summary>' +
+    '<summary class="doctor-summary">后端状态（默认 ' + defaultID + '）</summary>' +
     '<div class="doctor-body">' + rows + '</div>' +
   '</details>';
 }
@@ -852,6 +852,8 @@ function confirmDialog(opts) {
 //     null to avoid stacking.
 //   - XSS-safe: every caller-supplied string routes through esc() before
 //     insertion. defaultValue is set via .value (DOM property) not innerHTML.
+//   - opts.validate(value) may return an error text: the dialog then stays
+//     open with the text under the input, and what was typed is kept.
 function promptDialog(opts) {
   return new Promise((resolve) => {
     if (document.querySelector('.modal-overlay.prompt-overlay')) {
@@ -865,6 +867,7 @@ function promptDialog(opts) {
     const confirmText = (opts && opts.confirmText) || '确认';
     const cancelText = (opts && opts.cancelText) || '取消';
     const maxLength = (opts && opts.maxLength) || 0;
+    const validate = (opts && opts.validate) || null;
 
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay prompt-overlay';
@@ -874,6 +877,7 @@ function promptDialog(opts) {
         '<h3 id="prompt-title">' + esc(title) + '</h3>' +
         (message ? '<p class="prompt-message">' + esc(message) + '</p>' : '') +
         '<input type="text" class="prompt-input" placeholder="' + escAttr(placeholder) + '"' + maxAttr + '>' +
+        '<div class="nz-form-error prompt-error" role="alert"></div>' +
         '<div class="modal-btns">' +
           '<button type="button" class="prompt-cancel">' + esc(cancelText) + '</button>' +
           '<button type="button" class="primary prompt-ok">' + esc(confirmText) + '</button>' +
@@ -894,11 +898,23 @@ function promptDialog(opts) {
       resolve(value);
     };
 
+    const errBox = overlay.querySelector('.prompt-error');
+    const submit = () => {
+      const msg = validate ? validate(input.value) : '';
+      if (msg) {
+        errBox.textContent = msg;
+        errBox.style.display = 'block';
+        input.focus();
+        return;
+      }
+      finish(input.value);
+    };
+    input.addEventListener('input', () => { errBox.style.display = 'none'; });
     overlay.querySelector('.prompt-cancel').addEventListener('click', () => finish(null));
-    overlay.querySelector('.prompt-ok').addEventListener('click', () => finish(input.value));
+    overlay.querySelector('.prompt-ok').addEventListener('click', submit);
     overlay.addEventListener('click', (e) => { if (e.target === overlay) finish(null); });
     input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !isComposingKey(e)) { e.preventDefault(); finish(input.value); }
+      if (e.key === 'Enter' && !isComposingKey(e)) { e.preventDefault(); submit(); }
     });
     // Mirror confirmDialog: if the overlay is removed externally (trapFocus
     // Esc handling, or a caller manipulating DOM), settle as cancelled.

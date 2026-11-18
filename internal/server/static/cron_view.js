@@ -675,6 +675,7 @@ function closeCronMenus() {
     if (el.parentNode) el.parentNode.removeChild(el);
   });
   cronMenuOpenId = null;
+  document.querySelectorAll('.cj-menu-btn[aria-expanded="true"]').forEach(b => b.setAttribute('aria-expanded', 'false'));
   if (cronMenuOnDoc) {
     document.removeEventListener('click', cronMenuOnDoc, true);
     cronMenuOnDoc = null;
@@ -748,7 +749,7 @@ function toggleCronMenu(id) {
   const j = (cronStore.jobs || []).find(x => x && x.id === id);
   if (!j) return;
   const items = [];
-  if (!j.paused) items.push({ label: '立即运行', action: 'run' });
+  if (!j.paused) items.push({ label: '立即执行', action: 'run' });
   items.push({ label: '打开最近会话', action: 'open' });
   items.push({ label: '编辑', action: 'edit' });
   items.push({ label: j.paused ? '恢复' : '暂停', action: j.paused ? 'resume' : 'pause' });
@@ -770,6 +771,7 @@ function toggleCronMenu(id) {
   document.body.appendChild(menu);
   const anchor = row.querySelector('.cj-menu-btn') || row;
   positionCronMenu(menu, anchor);
+  if (anchor !== row) anchor.setAttribute('aria-expanded', 'true');
   cronMenuOpenId = id;
   // Close on outside click / scroll / resize. setTimeout defers the doc
   // handler past the current click so the same event that opened doesn't
@@ -998,7 +1000,7 @@ function cronJobCardHtml(j) {
   const runBtn = j.paused
     ? ''
     : '<button type="button" class="cc-btn cj-run" data-action="cron-run-now" title="立即执行一次" aria-label="立即执行一次"><span aria-hidden="true">▷</span> 运行</button>';
-  const menuBtn = '<button type="button" class="cj-menu-btn" data-action="cron-menu-toggle" aria-label="更多操作" aria-haspopup="true">⋯</button>';
+  const menuBtn = '<button type="button" class="cj-menu-btn" data-action="cron-menu-toggle" aria-label="更多操作" aria-haspopup="true" aria-expanded="false">⋯</button>';
 
   // Status dot is the only at-a-glance signal of a job's run state; give it a
   // text label so it doesn't rely on colour alone (a11y) and so hover/SR users
@@ -1151,8 +1153,15 @@ function cronStateLabel(state) { return runStateLabel(state); }
 // （部署期缓存撕裂）即 `ReferenceError: cronExpandedRunId is not defined`。把决策收进
 // cron_view.js，dashboard.js 仅经可选链委托，cron_view.js 缺席时 Esc 优雅降级。
 //
-// 关闭优先级与原 dashboard.js 一致：行内展开（更靠前的二级状态）先于 drawer。
+// 关闭优先级：⋯ 菜单先关；行内展开（更靠前的二级状态）先于 drawer，与原 dashboard.js 一致。
 function cronEscClose() {
+  // An open ⋯ menu is the topmost layer; the ⋯ button gets the focus back.
+  if (cronMenuOpenId) {
+    const btn = document.querySelector('.cj-menu-btn[aria-expanded="true"]');
+    closeCronMenus();
+    if (btn) btn.focus();
+    return true;
+  }
   if (cronExpandedRunId && cronExpandedRunId.runId) { cronTimelineCollapse(); return true; }
   if (cronDrawerState.jobId !== null) { closeCronDetail(); return true; }
   return false;

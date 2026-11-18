@@ -435,9 +435,10 @@ function nodeFilteredProjects() {
 }
 
 // Alt+N opens a new session. Cmd/Ctrl+N is left alone so the browser's
-// "new window" still works.
+// "new window" still works. Option+N is a dead key (˜) on a Mac, hence
+// e.code, as Alt+P (planner_drawer.js).
 document.addEventListener('keydown', function(e) {
-  if (e.altKey && (e.key === 'n' || e.key === 'N')) {
+  if (e.altKey && e.code === 'KeyN' && !e.ctrlKey && !e.metaKey && !e.isComposing) {
     const tag = (e.target.tagName || '').toLowerCase();
     if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
     e.preventDefault();
@@ -462,7 +463,7 @@ function createNewSession() {
       overlay.className = 'modal-overlay';
       overlay.innerHTML =
         '<div class="modal" role="dialog" aria-modal="true" aria-label="新建会话">' +
-          '<h3>New Session</h3>' +
+          '<h3>新建会话</h3>' +
           accessProfilePicker +
           '<div id="new-backend-slot">' + backendPicker + '</div>' +
           renderNodePicker() +
@@ -716,7 +717,7 @@ function renderPaletteList(state, query) {
   wirePaletteHover(list, state);
 
   if (!scored.length && q) {
-    list.innerHTML = '<div class="cmd-palette-empty">No projects match "' + esc(q) + '"</div>';
+    list.innerHTML = '<div class="cmd-palette-empty">没有匹配“' + esc(q) + '”的项目</div>';
     // Still render custom row below.
     const customEl = buildCustomRow(q, 0);
     list.appendChild(customEl);

@@ -182,7 +182,7 @@ export function renderBackendPicker(backendsData, opts) {
   }).join('');
   const auto = '<option value=""' + (preselect ? '' : ' selected') + '>' + esc(autoBackendLabel(backendsData, o.profileID)) + '</option>';
   return '<div class="nz-field">' +
-    '<label class="nz-field-label" for="' + escAttr(selectId) + '">CLI backend</label>' +
+    '<label class="nz-field-label" for="' + escAttr(selectId) + '">后端</label>' +
     '<span class="picker-select-wrap"><select id="' + escAttr(selectId) + '" class="nz-picker-select nz-picker-select-only">' +
     auto + options +
     '</select></span>' +
