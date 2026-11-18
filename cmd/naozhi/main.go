@@ -157,7 +157,9 @@ func main() {
 	// One Layout for the session store's directory; every sibling path below
 	// comes from it instead of being re-derived (#2641).
 	sessionLayout := datadir.ForStore(storePath)
-	warnIfStateDirLarge(sessionLayout.Root())
+	// Only a warning hangs on this walk of every state file; startup must not
+	// wait for it.
+	go warnIfStateDirLarge(sessionLayout.Root())
 	// An isolated instance reads no outside source on a schedule and
 	// installs no update unless isolation.run_schedules says so.
 	isolated := schedulesOff(cfg, sessionLayout.Root())
