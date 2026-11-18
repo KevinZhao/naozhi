@@ -13,7 +13,7 @@ import { processEventsForDisplay } from './file_refs.js';
 import { navRebuild, navSync } from './msg_nav.js';
 import { applyEventToTurnState, endStopping, idleTaskEvent, paintTurnElapsed, refreshBanner, resetTurnState, resetTurnStateForUserEcho, restoreScrollPos, saveScrollPos, scrollSlackPx, turnState, updateSendButton } from './running_banner.js';
 import { markSendUnknown, refillUnsent, restoreSpawnFields, rollbackOptimisticRunning, settleSend } from './send_message.js';
-import { EARLIER_PAGE_LIMIT, EVENT_DIVIDER_GAP_MS, MAX_LIVE_DOM_EVENTS, lastDividerTime, showAPIError, stickEventsBottom, timeDividerHtml } from './utilities.js';
+import { EARLIER_PAGE_LIMIT, EVENT_DIVIDER_GAP_MS, MAX_LIVE_DOM_EVENTS, lastDividerTime, stickEventsBottom, timeDividerHtml } from './utilities.js';
 import { isInternalEvent, sid } from './session_ident.js';
 import { isCronSessionFrozen } from './cron_state.js';
 import { registerShell } from './shell.js';
@@ -522,6 +522,12 @@ export function appendEvents(events) {
 
 /* ===== Session-stream frames: history, event and the send / interrupt acks ===== */
 
+// showAckError toasts a WS ack's error: "<action>失败：<reason>".
+function showAckError(action, raw) {
+  const tail = String(raw || '').trim().slice(0, 120);
+  showToast(action + '失败' + (tail ? '：' + tail : ''), 'error');
+}
+
 // renderInitialHistory paints a subscribe's opening frame over the whole pane.
 function renderInitialHistory(el, msg, events, display) {
   paintWholePane(el, events, display, typeof msg.has_more === 'boolean' ? msg.has_more : null);
@@ -862,10 +868,9 @@ const sessionFrames = {
       // 下次中断会把这条从未送达的文本回填上来。
       delete perSession.lastSent[sid(msg.key || selection.key, msg.node || selection.node)];
     } else if (msg.status === 'error') {
-      // The WS send_ack error is an in-band message, not an HTTP status,
-      // but treat the server-supplied `error` string the same way as an
-      // HTTP 500 body: truncate + prefix with "发送消息失败：".
-      showAPIError('发送消息', 500, msg.error || '');
+      // The WS send_ack error is an in-band message, not an HTTP status:
+      // the server's own reason, without an HTTP 500 that never happened.
+      showAckError('发送消息', msg.error);
       // Remove this send's optimistic message on send failure, its text back
       // in the composer first.
       refillUnsent(msg.id);
@@ -889,7 +894,7 @@ const sessionFrames = {
       return;
     }
     if (msg.status === 'error') {
-      showAPIError('中断会话', 500, msg.error || '');
+      showAckError('中断会话', msg.error);
     }
   },
 

@@ -879,6 +879,11 @@ div.pl-lookup{max-width:560px;margin:8px 0;padding:8px 12px;border:1px solid var
 /* Message navigation pill */
 .nav-pill{position:absolute;right:16px;bottom:100px;display:flex;flex-direction:column;align-items:center;gap:0;background:var(--nz-overlay-pill-bg);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid var(--nz-border);border-radius:20px;padding:4px;z-index:10;opacity:0;pointer-events:none;transition:opacity .2s;user-select:none}
 .nav-pill.visible{opacity:1;pointer-events:auto}
+/* The pill floats over the pane's right edge: while it shows, the column
+   keeps clear of it on both sides (a narrow pane's ask card put its 提交
+   under the pill). A wide pane's column is narrower than this anyway; a
+   phone hides the pill. */
+@media(min-width:769px){.events:has(+ .nav-pill.visible){padding-left:46px;padding-right:46px}}
 .nav-pill button{width:32px;height:28px;background:none;border:none;color:var(--nz-text-mute);cursor:pointer;font-size:var(--nz-fs-base);display:flex;align-items:center;justify-content:center;border-radius:14px;transition:all .15s}
 .nav-pill button:hover{background:var(--nz-border);color:var(--nz-text)}
 .nav-pill .nav-counter{font-size:var(--nz-fs-2xs);color:var(--nz-text-dim);padding:0 4px;white-space:nowrap;cursor:pointer;transition:color .15s}
@@ -1006,13 +1011,14 @@ div.pl-lookup{max-width:560px;margin:8px 0;padding:8px 12px;border:1px solid var
    on is the default, so plain; off dashed. */
 .watch-off{border-style:dashed;opacity:.85}
 /* Next to the cli/model group: it holds the row's auto margin until a chip
-   after it (git, PR, effort) takes it over, as those hand it on. */
-.main-header .detail-custody{display:inline-flex;align-items:center;gap:4px;flex-shrink:1;min-width:0;margin-right:auto}
+   after it (git, PR, effort) takes it over, as those hand it on. It keeps
+   its width: squeezed, the chips' text (on / off) spilled over the next one;
+   the cli/model group is the row's part that shrinks, with an ellipsis. */
+.main-header .detail-custody{display:inline-flex;align-items:center;gap:4px;flex-shrink:0;margin-right:auto}
 .main-header .detail-custody:empty{display:none}
 .main-header .detail:has(.detail-git:not(:empty)) .detail-custody,
 .main-header .detail:has(.detail-pr:not(:empty)) .detail-custody,
 .main-header .detail:has(.detail-effort:not(:empty)) .detail-custody{margin-right:0}
-.main-header .detail-custody :is(.custody-chip,.watch-chip){min-width:0}
 /* A dispatched session's task badge (tasks.js paintTaskHeader), the task
    card's own, and the link to the card. */
 .main-header .detail-task{display:inline-flex;align-items:center;gap:8px;flex-shrink:0;white-space:nowrap;font-size:var(--nz-fs-xs)}

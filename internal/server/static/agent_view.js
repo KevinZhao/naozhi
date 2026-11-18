@@ -452,6 +452,10 @@ import { sid } from './session_ident.js';
     return el;
   }
 
+  // statusText words a sub-agent's status for the breadcrumb.
+  var STATUS_TEXT = { spawned: '启动中', running: '运行中', completed: '完成', error: '出错', failed: '失败', stopped: '已停止', killed: '已停止' };
+  function statusText(s) { return STATUS_TEXT[s] || s || ''; }
+
   function showBreadcrumb() {
     var el = ensureBreadcrumbEl();
     if (!el) return;
@@ -461,7 +465,7 @@ import { sid } from './session_ident.js';
     var st = document.getElementById('bc-agent-stat');
     if (nm) nm.textContent = state.activeAgentName || '';
     if (tm) tm.textContent = state.activeTeamName || '';
-    if (st) st.textContent = state.activeStatus || state.fixedDur;
+    if (st) st.textContent = statusText(state.activeStatus) || state.fixedDur;
   }
 
   function hideBreadcrumb() {
@@ -523,8 +527,8 @@ import { sid } from './session_ident.js';
       var st = document.getElementById('bc-agent-stat');
       if (st) {
         var cur = st.textContent || '';
-        st.textContent = cur ? cur + ' · ' + (msg.status || '完成')
-          : (msg.status || '完成');
+        st.textContent = cur ? cur + ' · ' + statusText(msg.status || 'completed')
+          : statusText(msg.status || 'completed');
       }
     }
   }
@@ -670,6 +674,17 @@ import { sid } from './session_ident.js';
     if (!row) return;
     var taskID = row.dataset ? row.dataset.task : row.getAttribute('data-task');
     if (!taskID) return; // pre-task_start agents (no taskId yet) — dead tap.
+    e.preventDefault();
+    switchTo(taskID);
+  });
+
+  // A focused row (role=button) opens on Enter or Space, as a click does.
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    var row = e.target;
+    if (!row || typeof row.matches !== 'function' || !row.matches('.rb-agent-row[data-task]')) return;
+    var taskID = row.dataset ? row.dataset.task : row.getAttribute('data-task');
+    if (!taskID) return;
     e.preventDefault();
     switchTo(taskID);
   });

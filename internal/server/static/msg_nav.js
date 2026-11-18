@@ -97,11 +97,25 @@ function navUpdatePill() {
     return;
   }
   pill.classList.add('visible');
+  navPlacePill(pill);
   if (navState.idx < 0) {
     counter.textContent = navState.userEls.length;
   } else {
     counter.textContent = (navState.idx + 1) + '/' + navState.userEls.length;
   }
+}
+
+// navPlacePill keeps the pill just above the events pane's bottom edge. The
+// running banner and a taller composer sit between that edge and #main's, so
+// a fixed offset from #main put the pill over the banner's timer.
+function navPlacePill(pill) {
+  const main = document.getElementById('main');
+  const events = document.getElementById('events-scroll');
+  if (!main || !events || pill.parentElement !== main) return;
+  pill.style.bottom = Math.max(0, main.getBoundingClientRect().bottom - events.getBoundingClientRect().bottom) + 8 + 'px';
+  if (pill._placeObs || typeof ResizeObserver !== 'function') return;
+  pill._placeObs = new ResizeObserver(() => navPlacePill(pill));
+  pill._placeObs.observe(events);
 }
 
 function navDismissPopover() {

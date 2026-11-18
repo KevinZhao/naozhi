@@ -412,12 +412,12 @@ function renderPreviewText(project, node, path, body, data, line) {
       renderPreviewByMime(project, node, path, body, binMime);
       return;
     }
-    body.innerHTML = '<div class="fv-binary">Binary file — click <strong>download</strong> to save.<span class="fv-mime">' + esc(binMime) + '</span></div>';
+    body.innerHTML = '<div class="fv-binary">二进制文件，请下载查看<span class="fv-mime">' + esc(binMime) + '</span></div>';
     return;
   }
   const parts = [];
   if (data.truncated) {
-    parts.push('<div class="fv-truncated">file truncated at ' + formatFileSize(1024 * 1024) + ' (total ' + formatFileSize(data.size || 0) + ') — download for full content</div>');
+    parts.push('<div class="fv-truncated">已截断：只显示前 ' + formatFileSize(1024 * 1024) + '（共 ' + formatFileSize(data.size || 0) + '），完整内容请下载</div>');
   }
   const lang = inferLang(path, data.mime || '');
   // Route through renderRich — same renderer chat bubbles use so behaviour
@@ -485,7 +485,7 @@ async function openFilePreview(wrapEl, follow) {
   const headerPath = wrapEl.dataset.displayPath || path;
   title.textContent = headerPath + (line ? ':' + line : '');
   meta.textContent = [mime, formatFileSize(size)].filter(Boolean).join(' \u00b7 ');
-  body.innerHTML = '<div class="fv-loading">loading\u2026</div>';
+  body.innerHTML = '<div class="fv-loading">加载中…</div>';
   resetFollowScroll(body);
   const again = { dataset: { project, node, path, mime } };
   followPreview('workbench', { root: project, node, path }, () => openFilePreview(again, true));
@@ -496,7 +496,7 @@ async function openFilePreview(wrapEl, follow) {
     const headers = {};
     const r = await fetch(fileApiUrl(project, node, path, 'preview'), { headers });
     if (!r.ok) {
-      body.innerHTML = '<div class="fv-error">' + (r.status === 501 ? REMOTE_FILES_UNSUPPORTED : 'preview failed (' + r.status + ')') + '</div>';
+      body.innerHTML = '<div class="fv-error">' + (r.status === 501 ? REMOTE_FILES_UNSUPPORTED : '预览失败（' + r.status + '）') + '</div>';
       return;
     }
     const data = await r.json();

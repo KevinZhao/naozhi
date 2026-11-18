@@ -25,6 +25,7 @@ import { fetchAccessProfiles } from './backend_catalog.js';
 
 const TUNING_EFFORT_TIERS = ['low', 'medium', 'high', 'xhigh', 'max'];
 let tuningPopoverCloseHandler = null;
+let tuningPopoverKeyHandler = null;
 
 // #1980 PR-2: the header tuning chips' document-level listener merged into
 // the global nz.actions registry (keys tuning-model / tuning-effort) — the
@@ -37,6 +38,37 @@ function dismissTuningPopover() {
     document.removeEventListener('click', tuningPopoverCloseHandler);
     tuningPopoverCloseHandler = null;
   }
+  if (tuningPopoverKeyHandler) {
+    document.removeEventListener('keydown', tuningPopoverKeyHandler);
+    tuningPopoverKeyHandler = null;
+  }
+}
+
+// wireTuningPopover closes pop on a click outside it or on Esc (focus back
+// on its chip), opens a focused option on Enter or Space, and focuses the
+// current option, so a popover opened from the keyboard is usable from it.
+function wireTuningPopover(pop, anchor) {
+  pop.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    if (!e.target.matches || !e.target.matches('.nz-tuning-opt') || isComposingKey(e)) return;
+    e.preventDefault();
+    e.target.click();
+  });
+  (pop.querySelector('.nz-tuning-opt.is-active') || pop.querySelector('.nz-tuning-opt[tabindex]'))?.focus();
+  tuningPopoverKeyHandler = (e) => {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    dismissTuningPopover();
+    if (anchor.isConnected) (anchor.querySelector('[tabindex]') || anchor).focus();
+  };
+  document.addEventListener('keydown', tuningPopoverKeyHandler);
+  // Deferred: the click that opened the popover is still bubbling.
+  setTimeout(() => {
+    tuningPopoverCloseHandler = (e) => {
+      if (!pop.contains(e.target)) dismissTuningPopover();
+    };
+    document.addEventListener('click', tuningPopoverCloseHandler);
+  }, 0);
 }
 
 // tuningToast is a minimal self-dismissed notice — the dashboard has no
@@ -145,7 +177,7 @@ function openTuningPopover(kind) {
     html += '<div class="tuning-opt nz-tuning-opt' +
       (rowSpec.active ? ' is-active' : '') +
       (rowSpec.reset ? ' is-reset' : '') +
-      '" data-value="' + escAttr(rowSpec.value) + '"' +
+      '" role="button" tabindex="0" data-value="' + escAttr(rowSpec.value) + '"' +
       (rowSpec.desc ? ' title="' + escAttr(rowSpec.desc) + '"' : '') + '>' +
       mark + esc(rowSpec.label) + '</div>';
   }
@@ -180,12 +212,7 @@ function openTuningPopover(kind) {
       }
     };
   }
-  setTimeout(() => {
-    tuningPopoverCloseHandler = (e) => {
-      if (!pop.contains(e.target)) dismissTuningPopover();
-    };
-    document.addEventListener('click', tuningPopoverCloseHandler);
-  }, 0);
+  wireTuningPopover(pop, anchor);
 }
 
 // postTuningOverride sends the switch and renders the outcome. Pending
@@ -280,7 +307,7 @@ async function openAccessProfilePopover() {
   for (const p of profileRows) {
     const active = p.id === current;
     html += '<div class="nz-tuning-opt ap-opt' + (active ? ' is-active' : '') + (p.ok ? '' : ' is-disabled') +
-      '" data-profile="' + escAttr(p.id) + '" data-default-model="' + escAttr(p.defaultModel || '') + '">' +
+      '"' + (p.ok ? ' role="button" tabindex="0"' : '') + ' data-profile="' + escAttr(p.id) + '" data-default-model="' + escAttr(p.defaultModel || '') + '">' +
       (active ? '● ' : '○ ') + esc(p.label) + (p.ok ? '' : ' ⚠ 凭证缺失') + '</div>';
   }
   html += '<div class="nz-list-row"><label class="nz-field-label" for="ap-model-select">模型</label>' +
@@ -352,12 +379,7 @@ async function openAccessProfilePopover() {
     dismissTuningPopover();
     postAccessProfileSwitch(key, picked, model);
   });
-  setTimeout(() => {
-    tuningPopoverCloseHandler = (e) => {
-      if (!pop.contains(e.target)) dismissTuningPopover();
-    };
-    document.addEventListener('click', tuningPopoverCloseHandler);
-  }, 0);
+  wireTuningPopover(pop, anchor);
 }
 
 // postAccessProfileSwitch sends the switch. Like postTuningOverride it does
