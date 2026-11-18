@@ -754,7 +754,7 @@ div.pl-lookup{max-width:560px;margin:8px 0;padding:8px 12px;border:1px solid var
    viewport edge (git text painted over "N 轮"). Clip + ellipsis the children
    instead; the raw model id stays in the label's title. */
 .main-header .detail-left{min-width:0;overflow:hidden;text-overflow:ellipsis}
-.main-header .detail-left>span{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.main-header .detail-left>*{min-width:0;overflow:hidden;text-overflow:ellipsis}
 /* #header-cli is always emitted so updateHeaderCLI has an in-place
    target, but with no backend name yet it is empty — collapse it like
    .detail-git / .detail-effort / .detail-runstats so the 6px flex gap
@@ -880,10 +880,11 @@ div.pl-lookup{max-width:560px;margin:8px 0;padding:8px 12px;border:1px solid var
 .nav-pill{position:absolute;right:16px;bottom:100px;display:flex;flex-direction:column;align-items:center;gap:0;background:var(--nz-overlay-pill-bg);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid var(--nz-border);border-radius:20px;padding:4px;z-index:10;opacity:0;pointer-events:none;transition:opacity .2s;user-select:none}
 .nav-pill.visible{opacity:1;pointer-events:auto}
 /* The pill floats over the pane's right edge: while it shows, the column
-   keeps clear of it on both sides (a narrow pane's ask card put its 提交
-   under the pill). A wide pane's column is narrower than this anyway; a
-   phone hides the pill. */
-@media(min-width:769px){.events:has(+ .nav-pill.visible){padding-left:46px;padding-right:46px}}
+   keeps clear of it (a narrow pane's ask card put its 提交 under the pill).
+   The left side takes what keeps the column (.event's max-width) where it
+   was: a wide pane's column does not move, a narrow one loses only the
+   right 46px. A phone hides the pill. */
+@media(min-width:769px){.events:has(+ .nav-pill.visible){padding-right:46px;padding-left:clamp(0px,calc((100% - clamp(760px,65vw,1200px)) / 2),46px)}}
 .nav-pill button{width:32px;height:28px;background:none;border:none;color:var(--nz-text-mute);cursor:pointer;font-size:var(--nz-fs-base);display:flex;align-items:center;justify-content:center;border-radius:14px;transition:all .15s}
 .nav-pill button:hover{background:var(--nz-border);color:var(--nz-text)}
 .nav-pill .nav-counter{font-size:var(--nz-fs-2xs);color:var(--nz-text-dim);padding:0 4px;white-space:nowrap;cursor:pointer;transition:color .15s}

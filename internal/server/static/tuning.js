@@ -39,7 +39,7 @@ function dismissTuningPopover() {
     tuningPopoverCloseHandler = null;
   }
   if (tuningPopoverKeyHandler) {
-    document.removeEventListener('keydown', tuningPopoverKeyHandler);
+    window.removeEventListener('keydown', tuningPopoverKeyHandler, true);
     tuningPopoverKeyHandler = null;
   }
 }
@@ -55,13 +55,17 @@ function wireTuningPopover(pop, anchor) {
     e.target.click();
   });
   (pop.querySelector('.nz-tuning-opt.is-active') || pop.querySelector('.nz-tuning-opt[tabindex]'))?.focus();
+  // Esc is taken on window in the capture phase, ahead of the panes' own
+  // (workbench, Planner drawer, a sub-agent drill-in): the popover sits above
+  // them, so one Esc closes it and nothing else.
   tuningPopoverKeyHandler = (e) => {
-    if (e.key !== 'Escape') return;
+    if (e.key !== 'Escape' || e.isComposing) return;
     e.preventDefault();
+    e.stopPropagation();
     dismissTuningPopover();
-    if (anchor.isConnected) (anchor.querySelector('[tabindex]') || anchor).focus();
+    if (anchor.isConnected) (anchor.querySelector('button') || anchor).focus();
   };
-  document.addEventListener('keydown', tuningPopoverKeyHandler);
+  window.addEventListener('keydown', tuningPopoverKeyHandler, true);
   // Deferred: the click that opened the popover is still bubbling.
   setTimeout(() => {
     tuningPopoverCloseHandler = (e) => {

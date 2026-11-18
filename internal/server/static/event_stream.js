@@ -464,6 +464,16 @@ export function trimEventsScroll(el) {
   ensureEarlierButton();
 }
 
+// takeSendEcho replaces this tab's optimistic bubble with the user event that
+// echoes it and says whether there was one. A message sent mid-turn echoes
+// when its own turn starts, so from then on it is the running turn's text and
+// interrupting refills it (interruptSession).
+function takeSendEcho() {
+  if (!removeOptimisticMsg()) return false;
+  perSession.midTurnSent.delete(sid(selection.key, selection.node));
+  return true;
+}
+
 export function appendEvents(events) {
   const el = document.getElementById('events-scroll');
   if (!el || drilledIn()) return;
@@ -497,7 +507,7 @@ export function appendEvents(events) {
         if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
         return;
       }
-      echo = removeOptimisticMsg();
+      echo = takeSendEcho();
       // Lock cards already on screen before this user bubble is appended.
       lockRenderedAskCards(el, e);
     }
@@ -568,7 +578,7 @@ function appendHistoryBackfill(el, display) {
         if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
         return;
       }
-      if (!removeOptimisticMsg()) sawUser = true;
+      if (!takeSendEcho()) sawUser = true;
       lockRenderedAskCards(el, e);
     }
     const h = eventHtml(e);
@@ -714,7 +724,7 @@ function appendLiveEvent(ev) {
       return;
     }
     // First arrival of the real user event: drop the optimistic placeholder.
-    echo = removeOptimisticMsg();
+    echo = takeSendEcho();
   }
   // An 80px slack band so a small natural scroll doesn't leave auto-stick.
   // A teammate's user event always pins; AI chunks, results and this tab's own

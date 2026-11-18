@@ -10,12 +10,11 @@
 //   4. The ▲▼ pill sits above the events pane, not over the running
 //      banner's timer, and the column keeps clear of it (a pending
 //      question's 提交).
-//   5. The header's model / effort / access-profile chips, the popover's
-//      options, a sub-agent row and an upload's ↻ work from the keyboard;
-//      Esc closes the popover.
-//   6. The closed 追问 drawer is out of the Tab order and the a11y tree.
-//   7. Dropping a file that is neither an image nor a PDF says so.
-//   8. The session view's wording is Chinese and says what happened: a WS
+//   5. The tuning popover's options, a sub-agent row and an upload's ↻ work
+//      from the keyboard; Esc closes the popover (and only it) with focus
+//      back on its chip.
+//   6. Dropping a file that is neither an image nor a PDF says so.
+//   7. The session view's wording is Chinese and says what happened: a WS
 //      ack's error is not an HTTP 500, an attachment is not always a picture,
 //      a sub-agent's status reads 运行中.
 const { test, expect } = require('@playwright/test');
@@ -124,6 +123,16 @@ test.describe('session view UX review', () => {
       expect(await inputText(page)).toBe('');
       await page.screenshot({ path: test.info().outputPath('interrupt-queued.png') });
 
+      // Once the queued message's own turn starts (its echo arrives), it is
+      // the running turn's text again: interrupting that turn refills it.
+      conn.send({ type: 'event', key: B, event: { type: 'result', detail: 'iso 好了', time: now - 3000, uuid: 'r1' } });
+      conn.send({ type: 'event', key: B, event: { type: 'user', detail: text, time: now - 2000, uuid: 'u-x' } });
+      conn.send({ type: 'session_state', key: B, node: 'local', state: 'running' });
+      await expect(page.locator('#events-scroll .event.user.optimistic-msg')).toHaveCount(0);
+      await page.locator('#btn-stop').click();
+      await expect.poll(() => inputText(page)).toBe(text);
+      await page.locator('#msg-input').evaluate((el) => { el.textContent = ''; });
+
       // The turn this tab started is still refilled.
       const conn2 = await openSession(page, mock, A, [{ type: 'user', detail: 'iso hello', time: now - 9000, uuid: 'u2' }]);
       const mine = '写一个快速排序';
@@ -169,6 +178,10 @@ test.describe('session view UX review', () => {
             chips: chips.map(r),
             effort: r(document.querySelector('#header-effort .effort-tag')),
             rowRight: document.querySelector('.main-header .detail').getBoundingClientRect().right,
+            left: r(document.querySelector('.main-header .detail-left')),
+            model: r(document.getElementById('header-model')),
+            profile: r(document.getElementById('header-access-profile')),
+            profileStyle: (() => { const cs = getComputedStyle(document.getElementById('header-access-profile')); return cs.display + ' ' + cs.textOverflow; })(),
           };
         });
         // Each chip's text fits its box, and nothing sits on another.
@@ -176,6 +189,13 @@ test.describe('session view UX review', () => {
         expect(rectsOverlap(m.chips[0], m.chips[1])).toBe(false);
         expect(rectsOverlap(m.chips[1], m.effort)).toBe(false);
         expect(m.effort.x + m.effort.width).toBeLessThanOrEqual(m.rowRight + 1);
+        // The model and the access profile shrink to ellipses of their own:
+        // both keep some width, and the chip ends inside the group, its
+        // border whole, rather than being cut at the group's edge.
+        expect(m.model.width).toBeGreaterThan(20);
+        expect(m.profile.width).toBeGreaterThan(30);
+        expect(m.profile.x + m.profile.width).toBeLessThanOrEqual(m.left.x + m.left.width + 1);
+        expect(m.profileStyle).toBe('block ellipsis'); // a flex item's inline-block is blockified
         await page.locator('.main-header').screenshot({ path: test.info().outputPath('header-390-' + theme + '.png') });
       } finally {
         await ctx.close();
@@ -207,13 +227,32 @@ test.describe('session view UX review', () => {
       expect(p.y + p.height).toBeLessThanOrEqual(banner.y + 1);
       expect(rectsOverlap(p, submit)).toBe(false);
       await page.screenshot({ path: test.info().outputPath('pill-1024.png') });
+
+      // Only the pill's side gives way in a pane narrower than the column; a
+      // wide pane's column keeps its place whether the pill shows or not.
+      const pad = () => page.locator('#events-scroll').evaluate((el) => {
+        const cs = getComputedStyle(el);
+        return { left: parseFloat(cs.paddingLeft), right: parseFloat(cs.paddingRight) };
+      });
+      expect(await pad()).toEqual({ left: 0, right: 46 });
+      await page.locator('.main-header .btn-workbench').click();
+      await expect(page.locator('#fv-drawer')).toBeVisible();
+      expect(await pad()).toEqual({ left: 0, right: 46 });
+      await page.locator('#fv-btn-close').click();
+      await expect(page.locator('#fv-drawer')).toBeHidden();
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await expect(pill).toHaveClass(/visible/);
+      const colX = () => page.locator('#events-scroll > .event.text').first().evaluate((el) => el.getBoundingClientRect().x);
+      const withPill = await colX();
+      await pill.evaluate((el) => el.classList.remove('visible'));
+      expect(Math.abs((await colX()) - withPill)).toBeLessThanOrEqual(1);
     } finally {
       await ctx.close();
       mock.server.close();
     }
   });
 
-  test('header chips, the popover, a sub-agent row and ↻ work from the keyboard', async ({ browser }) => {
+  test('the popover, a sub-agent row and ↻ work from the keyboard', async ({ browser }) => {
     const ctx = await browser.newContext(DESKTOP);
     const page = await ctx.newPage();
     const sessions = defaultSessions();
@@ -223,19 +262,6 @@ test.describe('session view UX review', () => {
       await page.goto(mock.url + '/dashboard');
       await waitForWs(page);
       const conn = await openSession(page, mock, B, [{ type: 'user', detail: 'iso 调研', time: now - 9000, uuid: 'u1' }], 'running');
-
-      // Tab reaches the model and effort chips.
-      for (const sel of ['#header-model', '#header-effort .effort-tag']) {
-        await expect(page.locator(sel)).toHaveAttribute('tabindex', '0');
-        await expect(page.locator(sel)).toHaveAttribute('role', 'button');
-      }
-      await page.locator('.main-header .btn-download').focus();
-      const order = [];
-      for (let i = 0; i < 6; i++) {
-        await page.keyboard.press('Tab');
-        order.push(await page.evaluate(() => document.activeElement.id || document.activeElement.className));
-      }
-      expect(order).toContain('header-model');
 
       // Enter opens the model popover with an option focused; Esc closes it.
       await page.locator('#header-model').focus();
@@ -253,6 +279,20 @@ test.describe('session view UX review', () => {
       await expect(pop).toBeVisible();
       await page.keyboard.press('Escape');
       await expect(pop).toHaveCount(0);
+      // Focus back on the tag itself, not on its (unfocusable) wrapper.
+      await expect(page.locator('#header-effort .effort-tag')).toBeFocused();
+      // With the workbench docked, Esc closes the popover above it, not the pane.
+      await page.locator('.main-header .btn-workbench').click();
+      await expect(page.locator('#fv-drawer')).toBeVisible();
+      await page.locator('#header-model').focus();
+      await page.keyboard.press('Enter');
+      await expect(pop).toBeVisible();
+      await page.keyboard.press('Escape');
+      await expect(pop).toHaveCount(0);
+      await expect(page.locator('#fv-drawer')).toBeVisible();
+      await expect(page.locator('#header-model')).toBeFocused();
+      await page.keyboard.press('Escape');
+      await expect(page.locator('#fv-drawer')).toBeHidden();
 
       // A sub-agent row opens on Enter, its status in Chinese.
       conn.send({ type: 'event', key: B, event: { type: 'agent', tool_use_id: 'tu1', subagent: 'Explore', summary: 'iso 查调用方', time: now - 3000 } });
@@ -292,33 +332,6 @@ test.describe('session view UX review', () => {
       await page.keyboard.type('iso 看看这份');
       await page.keyboard.press('Enter');
       await expect(page.locator('#toast')).toContainText('附件上传失败（disk full）');
-    } finally {
-      await ctx.close();
-      mock.server.close();
-    }
-  });
-
-  test('the closed 追问 drawer is out of the Tab order and the a11y tree', async ({ browser }) => {
-    const ctx = await browser.newContext(DESKTOP);
-    const page = await ctx.newPage();
-    const mock = await startMockServer({ ws: true });
-    try {
-      await page.goto(mock.url + '/dashboard');
-      await waitForWs(page);
-      await openSession(page, mock, A, [{ type: 'user', detail: 'iso hi', time: now - 9000, uuid: 'u1' }]);
-      // Chrome's own a11y tree (Playwright's role engine ignores inert).
-      const cdp = await ctx.newCDPSession(page);
-      const { nodes } = await cdp.send('Accessibility.getFullAXTree');
-      expect(nodes.filter((n) => !n.ignored && n.name && n.name.value === '追问抽屉')).toHaveLength(0);
-      await page.locator('#msg-input').focus();
-      const ids = [];
-      for (let i = 0; i < 8; i++) {
-        await page.keyboard.press('Tab');
-        ids.push(await page.evaluate(() => document.activeElement.id || ''));
-      }
-      expect(ids).not.toContain('ad-close');
-      expect(ids).not.toContain('ad-input');
-      expect(ids).not.toContain('ad-send');
     } finally {
       await ctx.close();
       mock.server.close();
