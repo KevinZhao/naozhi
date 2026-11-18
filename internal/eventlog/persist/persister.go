@@ -72,6 +72,9 @@ type Persister struct {
 	closed  atomic.Bool
 
 	writers map[string]*perKeyWriter
+	// flushWanted is set when a writer turns dirty so run() re-arms its
+	// stopped debounce ticker. Run-goroutine only.
+	flushWanted bool
 
 	// dropping tracks stems whose files are mid-removal by the async
 	// goroutine spawned in handleOp(opDrop). Batches for such a stem are

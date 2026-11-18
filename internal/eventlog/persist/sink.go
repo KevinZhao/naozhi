@@ -144,6 +144,7 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 	if !w.dirty {
 		w.dirty = true
 		w.firstDirtyAt = now
+		p.flushWanted = true
 	}
 	w.lastActivity = now
 

@@ -51,8 +51,22 @@ func (p *Persister) run() {
 	if flushTick < 10*time.Millisecond {
 		flushTick = 10 * time.Millisecond
 	}
+	// The tick runs only while a writer is dirty so an idle gateway does not
+	// wake every flushTick; a write re-arms it (flushWanted) and the flush
+	// deadline is still checked within one tick.
 	flushT := time.NewTicker(flushTick)
+	flushT.Stop()
 	defer flushT.Stop()
+	flushArmed := false
+	armFlush := func() {
+		if p.flushWanted {
+			p.flushWanted = false
+			if !flushArmed {
+				flushT.Reset(flushTick)
+				flushArmed = true
+			}
+		}
+	}
 
 	// Idle sweeper closes fds not written to recently.
 	idleTick := p.opts.IdleCloseAfter / 4
@@ -69,12 +83,18 @@ func (p *Persister) run() {
 			now := p.opts.Clock()
 			p.handleBatch(job, now)
 			p.lastDrainNS.Store(now.UnixNano())
+			armFlush()
 
 		case o := <-p.opCh:
 			p.handleOp(o)
+			armFlush()
 
 		case <-flushT.C:
 			p.tickFlush()
+			if !p.anyDirty() {
+				flushT.Stop()
+				flushArmed = false
+			}
 
 		case <-idleT.C:
 			p.tickIdleClose()

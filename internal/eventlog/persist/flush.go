@@ -165,6 +165,16 @@ func effectiveFlushInterval(base time.Duration, writerCount int) time.Duration {
 	}
 }
 
+// anyDirty reports whether some writer still awaits a debounced flush.
+func (p *Persister) anyDirty() bool {
+	for _, w := range p.writers {
+		if w.dirty {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *Persister) tickIdleClose() {
 	if len(p.writers) == 0 {
 		return

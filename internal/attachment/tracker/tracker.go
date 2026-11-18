@@ -307,16 +307,28 @@ func (t *Tracker) run() {
 	if tickEvery > time.Second {
 		tickEvery = time.Second
 	}
+	// The tick runs only while bumps are pending so an idle tracker does not
+	// wake every tickEvery; a bump's deadline is still checked within one tick.
 	tick := time.NewTicker(tickEvery)
+	tick.Stop()
 	defer tick.Stop()
+	armed := false
 
 	for {
 		select {
 		case job := <-t.in:
 			t.handleJob(job)
 			t.lastDrainNS.Store(t.opts.Clock().UnixNano())
+			if !armed && len(t.pending) > 0 {
+				tick.Reset(tickEvery)
+				armed = true
+			}
 		case <-tick.C:
 			t.flushDue()
+			if len(t.pending) == 0 {
+				tick.Stop()
+				armed = false
+			}
 		case <-t.closeCh:
 			// Drain queued work and flush pending before exit.
 			for {
