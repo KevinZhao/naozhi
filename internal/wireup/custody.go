@@ -134,15 +134,15 @@ func (c CustodySources) Progress(key string) string {
 	return b.String()
 }
 
-// FailText is custody.Config.FailText: the API error the last turn ended
-// in, else the process's death detail.
+// FailText is custody.Config.FailText: the error the last turn ended in
+// (an API error, or what the CLI reported as one), else the process's death detail.
 func (c CustodySources) FailText(key string) string {
 	s := c.Router.SessionFor(key)
 	if s == nil {
 		return ""
 	}
 	snap := s.Snapshot()
-	if apierr.IsEnvelope(snap.LastResponse) {
+	if snap.LastTurnFailed || apierr.IsEnvelope(snap.LastResponse) {
 		return snap.LastResponse
 	}
 	return snap.DeathDetail

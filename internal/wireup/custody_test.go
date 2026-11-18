@@ -125,3 +125,27 @@ func TestUserSent(t *testing.T) {
 		t.Error("no session: UserSent = true")
 	}
 }
+
+// A turn the CLI ended as failed without the "API Error" prefix (its own
+// retries ran out: "Request timed out") is a failure health marks and
+// custody retries, not an idle session; the next turn's answer clears it.
+func TestFailedTurnWithoutEnvelope(t *testing.T) {
+	r := newDigestRouter(t)
+	const key = "dashboard:direct:timeout:general"
+	p := session.NewTestProcess()
+	p.EventLog.Append(clievent.EventEntry{Time: time.Now().UnixMilli(), Type: "text", Summary: "Request timed out"})
+	s := r.InjectSession(key, p)
+	r.EndTurnForTest(s, clievent.SendResult{Text: "Request timed out", IsError: true, SubType: "success"})
+	src := CustodySources{Router: r}
+	if got := src.FailText(key); got != "Request timed out" {
+		t.Errorf("FailText = %q, want the CLI's error", got)
+	}
+	f := sessionFact(s.Snapshot(), s, "")
+	if f.Failed == "" || f.ErrText != "Request timed out" {
+		t.Errorf("fact Failed = %q, ErrText = %q; want a failure", f.Failed, f.ErrText)
+	}
+	r.EndTurnForTest(s, clievent.SendResult{Text: "好了"})
+	if f := sessionFact(s.Snapshot(), s, ""); f.Failed != "" {
+		t.Errorf("fact after an answer Failed = %q", f.Failed)
+	}
+}

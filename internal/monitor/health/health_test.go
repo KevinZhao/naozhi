@@ -645,6 +645,8 @@ func TestClassify(t *testing.T) {
 		{"ThrottlingException: Too many requests", ErrRateLimit},
 		{"dial tcp: lookup bedrock-runtime.us-east-1.amazonaws.com: no such host", ErrNetwork},
 		{"dial tcp 10.0.0.5:4013: connect: connection refused", ErrNetwork},
+		// The Claude CLI's reply once its own API retries ran out: no prefix.
+		{"Request timed out", ErrNetwork},
 		{"ExpiredTokenException: The security token included in the request is expired", ErrCredentialExpired},
 		{"Midway credentials expired; run mwinit", ErrCredentialExpired},
 		{"API Error: Could not load AWS credentials · Could not load credentials from any providers. Check or refresh your AWS credentials and try again.", ErrCredentialExpired},

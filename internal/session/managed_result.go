@@ -95,6 +95,7 @@ func (r *Router) resultFor(s *ManagedSession) func(clievent.SendResult) {
 	return func(res clievent.SendResult) {
 		s.touchLastActive()
 		outcome := turnOutcome(res)
+		s.lastTurnFailed.Store(outcome == activity.TurnFailed)
 		if sink := r.activity.Load(); sink != nil {
 			(*sink).RecordTurn(s.key, s.Workspace(), outcome)
 		}

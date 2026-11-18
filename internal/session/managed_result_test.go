@@ -118,6 +118,11 @@ func TestResultForRecordsEveryTurnEnd(t *testing.T) {
 			if got := len(replies) == 1; got != (tc.want == activity.TurnDone) {
 				t.Errorf("replies = %q, want one only for an answer", replies)
 			}
+			// Health and custody read the failure off the snapshot: a
+			// failure without an "API Error" prefix has nothing else.
+			if got := s.Snapshot().LastTurnFailed; got != (tc.want == activity.TurnFailed) {
+				t.Errorf("LastTurnFailed = %v, want %v", got, tc.want == activity.TurnFailed)
+			}
 		})
 	}
 	// No sink yet: the result still reaches the result sink.

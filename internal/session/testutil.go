@@ -226,6 +226,10 @@ func (s *ManagedSession) SetReattachedForTest(cliStart time.Time, tasks []clieve
 // SetLastTurnAtForTest sets when the session's last turn started or ended.
 func (s *ManagedSession) SetLastTurnAtForTest(t time.Time) { s.lastActive.Store(t.UnixNano()) }
 
+// EndTurnForTest ends s's turn with res, as its process's result callback
+// does.
+func (r *Router) EndTurnForTest(s *ManagedSession, res clievent.SendResult) { r.resultFor(s)(res) }
+
 // SetWorkspaceForTest stamps the session-level workspace on an injected
 // session; production sets it through the spawn / takeover paths.
 func (s *ManagedSession) SetWorkspaceForTest(ws string) { s.setWorkspace(ws) }

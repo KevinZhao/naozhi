@@ -33,6 +33,9 @@ func TestSessionFactFailure(t *testing.T) {
 		{"API error reply", session.SessionSnapshot{State: "ready", LastResponse: "API Error: 403 permission_error"}, true},
 		{"prose about an API error", session.SessionSnapshot{State: "ready", LastResponse: "The API Error: 403 you saw means…"}, false},
 		{"API error mid-turn", session.SessionSnapshot{State: "running", LastResponse: "API Error: 429 rate_limit"}, false},
+		// The CLI's own is_error: "Request timed out" has no envelope prefix.
+		{"turn the CLI reported failed", session.SessionSnapshot{State: "ready", LastTurnFailed: true, LastResponse: "Request timed out"}, true},
+		{"failed turn's retry running", session.SessionSnapshot{State: "running", LastTurnFailed: true, LastResponse: "Request timed out"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -288,6 +288,11 @@ type ManagedSession struct {
 	// the cache exists for dead/suspended sessions whose process is gone.
 	lastResponse atomic.Pointer[string]
 
+	// lastTurnFailed is whether the last turn's result said it failed (the
+	// CLI's is_error, an abort excepted): "Request timed out" after the
+	// CLI's own retries carries no "API Error" prefix to recognise it by.
+	lastTurnFailed atomic.Bool
+
 	// Cached key parts, parsed once via keyOnce. Key is immutable.
 	keyOnce     sync.Once
 	keyPlatform string
