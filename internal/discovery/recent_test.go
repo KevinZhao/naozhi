@@ -1153,3 +1153,64 @@ func TestRecentSessionsCtx_CancelledDuringExtractionKeepsSessions(t *testing.T) 
 		}
 	}
 }
+
+// TestRecentSessions_StaleDirNotResolved: a project directory whose newest
+// jsonl is older than maxAge contributes nothing, so the scan must not pay for
+// resolving its workspace (most such directories name a deleted worktree, and
+// a failed resolution is an uncached DFS on every scan). A jsonl exactly at
+// the cutoff still counts, matching the LastActive >= cutoff filter.
+func TestRecentSessions_StaleDirNotResolved(t *testing.T) {
+	t.Parallel()
+	claudeDir := makeClaudeDir(t)
+	root := t.TempDir()
+	write := func(name, sid string, mtime time.Time) string {
+		ws := filepath.Join(root, name)
+		if err := os.MkdirAll(ws, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		enc := slugUnder(t, root, ws)
+		projDir := filepath.Join(claudeDir, "projects", enc)
+		if err := os.MkdirAll(projDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(projDir, sid+".jsonl")
+		if err := os.WriteFile(p, []byte("data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			dirFilesCache.Delete(projDir)
+			dfsPathCache.Delete(dfsCacheKey(root, enc))
+		})
+		return enc
+	}
+	staleSID := "eeeeeeee-0001-0001-0001-000000000001"
+	freshSID := "eeeeeeee-0001-0001-0001-000000000002"
+	staleEnc := write("staleproj", staleSID, time.Now().Add(-2*time.Hour))
+	freshEnc := write("freshproj", freshSID, time.Now().Add(-time.Minute))
+
+	got := recentSessionsUnder(context.Background(), root, claudeDir, 10, time.Hour, nil, nil)
+	if len(got) != 1 || got[0].SessionID != freshSID {
+		t.Fatalf("want only the fresh session, got %+v", got)
+	}
+	if _, ok := dfsPathCache.Load(dfsCacheKey(root, staleEnc)); ok {
+		t.Error("stale project dir was resolved; it should be skipped before resolution")
+	}
+	if _, ok := dfsPathCache.Load(dfsCacheKey(root, freshEnc)); !ok {
+		t.Error("fresh project dir should have been resolved")
+	}
+
+	files := cachedJSONLFileInfo(filepath.Join(claudeDir, "projects", staleEnc))
+	if len(files) != 1 {
+		t.Fatalf("want 1 cached jsonl, got %d", len(files))
+	}
+	projDir := filepath.Join(claudeDir, "projects", staleEnc)
+	if !hasJSONLSince(projDir, files[0].mtime) {
+		t.Error("a jsonl exactly at the cutoff must count as recent")
+	}
+	if hasJSONLSince(projDir, files[0].mtime+1) {
+		t.Error("a jsonl older than the cutoff must not count")
+	}
+}
