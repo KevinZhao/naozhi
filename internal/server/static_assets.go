@@ -14,9 +14,10 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"sync"
 )
 
-// The whole static/ tree, registered into staticAssets by fs.WalkDir at init.
+// The whole static/ tree, registered into staticAssets by fs.WalkDir on first use.
 // Third-party files under static/vendor are byte-identical to their npm dist
 // (mermaid's bundle gzipped) and kept under a versioned directory, so their
 // responses can be cached as immutable. KaTeX ships only its woff2 fonts: every
@@ -27,15 +28,15 @@ var staticFS embed.FS
 
 // staticAsset is the once-read, immutable view of an embedded dashboard asset:
 // its bytes and precomputed strong-form ETag. embed.FS.ReadFile copies the
-// whole file on every call, so each asset is read+hashed exactly once at init
-// and handlers share the read-only slice (#1771).
+// whole file on every call, so each asset is read+hashed exactly once and
+// handlers share the read-only slice (#1771).
 type staticAsset struct {
 	// bytes is nil for a gzip-only asset (a vendor file embedded as .gz): only
 	// gz stays resident, and the rare client that refuses gzip gets it
 	// decompressed per request (#3662).
 	bytes []byte
 	etag  string
-	// gz is the gzip.BestCompression form, precomputed once at init for
+	// gz is the gzip.BestCompression form, precomputed once for
 	// compressible assets (content is immutable, so level 9 is paid once and
 	// beats the middleware's level 1 by ~15%). nil when not precompressed (#1769).
 	gz []byte
@@ -64,12 +65,34 @@ func precompressGzip(b []byte) []byte {
 	return out
 }
 
-// staticAssets maps the asset key (basename used by handlers and the 304
-// fast-path) to its cached bytes + ETag. Populated once at init; the
-// dashboard.html entry is the rendered page (static_versioning.go), so its
-// ETag and gzip form are those of the bytes actually served.
-// servedAssetVersion is the nz-asset-version that page carries.
-var staticAssets, servedAssetVersion = func() (map[string]staticAsset, string) {
+// loadStaticAssets builds the asset table once: it maps the asset key
+// (basename used by handlers and the 304 fast-path) to its cached bytes +
+// ETag, and the dashboard.html entry is the rendered page
+// (static_versioning.go), so its ETag and gzip form are those of the bytes
+// actually served. The second value is the nz-asset-version that page carries.
+//
+// It is lazy, not a package-level value, because every process of this binary
+// runs package init — the shim spawned per session, `naozhi version`, the
+// aws-credential-export command the CLI runs — and gzipping the assets at level
+// 9 costs ~70 ms of CPU and ~100 MB of allocations none of them need. The
+// server constructor calls it, so the gateway still pays it (and panics on a
+// broken embed) at startup, not on the first request.
+var loadStaticAssets = sync.OnceValues(buildStaticAssets)
+
+// staticAssets returns the asset table built by loadStaticAssets. Callers MUST
+// NOT mutate it.
+func staticAssets() map[string]staticAsset {
+	m, _ := loadStaticAssets()
+	return m
+}
+
+// servedAssetVersion returns the nz-asset-version the served page carries.
+func servedAssetVersion() string {
+	_, v := loadStaticAssets()
+	return v
+}
+
+func buildStaticAssets() (map[string]staticAsset, string) {
 	out := map[string]staticAsset{}
 	err := fs.WalkDir(staticFS, "static", func(name string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -103,7 +126,7 @@ var staticAssets, servedAssetVersion = func() (map[string]staticAsset, string) {
 	}
 	out["dashboard.html"] = newStaticAsset(page, true)
 	return out, version
-}()
+}
 
 func addStaticAsset(out map[string]staticAsset, name, key string, compress bool) error {
 	b, err := staticFS.ReadFile(name)
@@ -150,7 +173,8 @@ func newStaticAsset(b []byte, compress bool) staticAsset {
 
 // newGzipOnlyAsset wraps the gzip form gz of an asset that keeps no
 // decompressed copy. Its ETag hashes gz: the file is gzip -9n output, so its
-// bytes change exactly when the content does, and init never decompresses it.
+// bytes change exactly when the content does, and it is never decompressed
+// up front.
 func newGzipOnlyAsset(gz []byte) staticAsset {
 	sum := sha256.Sum256(gz)
 	return staticAsset{gz: gz, etag: `"` + hex.EncodeToString(sum[:16]) + `"`}
@@ -160,7 +184,7 @@ func newGzipOnlyAsset(gz []byte) staticAsset {
 // not staticAssetBytes(key) != nil, to tell a miss: a gzip-only asset has no
 // bytes.
 func hasStaticAsset(key string) bool {
-	_, ok := staticAssets[key]
+	_, ok := staticAssets()[key]
 	return ok
 }
 
@@ -169,7 +193,7 @@ func hasStaticAsset(key string) bool {
 // requests. Returns nil when the key is unknown (asset failed to embed) and for
 // a gzip-only asset, which writeStaticAssetBody serves.
 func staticAssetBytes(key string) []byte {
-	return staticAssets[key].bytes
+	return staticAssets()[key].bytes
 }
 
 // writeStaticAssetBody writes the asset body, preferring the precomputed gzip
@@ -177,7 +201,7 @@ func staticAssetBytes(key string) []byte {
 // here makes gzipMiddleware.decide() leave the bytes untouched. Caller must
 // have set Content-Type / cache headers and handled the 304 case first.
 func writeStaticAssetBody(w http.ResponseWriter, r *http.Request, key string) {
-	a := staticAssets[key]
+	a := staticAssets()[key]
 	if a.gz != nil && acceptsGzip(r.Header.Get("Accept-Encoding")) {
 		h := w.Header()
 		h.Set("Content-Encoding", "gzip")
@@ -211,7 +235,7 @@ func writeStaticAssetBody(w http.ResponseWriter, r *http.Request, key string) {
 // Call it BEFORE touching the body bytes; security headers (CSP/COOP/etc.)
 // must already be set by the caller.
 func serveStaticWithETag(w http.ResponseWriter, r *http.Request, assetKey string) bool {
-	tag := staticAssets[assetKey].etag
+	tag := staticAssets()[assetKey].etag
 	if tag == "" {
 		return false
 	}

@@ -22,7 +22,7 @@ var (
 // rendered one: the input renderDashboardHTML gets at init.
 func rawStaticAssets(t *testing.T) map[string]staticAsset {
 	t.Helper()
-	out := maps.Clone(staticAssets)
+	out := maps.Clone(staticAssets())
 	out["dashboard.html"] = newStaticAsset(rawDashboardHTML(t), true)
 	return out
 }
@@ -60,12 +60,12 @@ func TestDashboardPage_StaticURLsVersioned(t *testing.T) {
 	raw := string(rawDashboardHTML(t))
 	rawHits := servedStaticAttrRe.FindAllStringSubmatch(raw, -1)
 	entries := len(moduleEntryTagRe.FindAllString(raw, -1))
-	modules := len(dashboardModuleKeys(staticAssets))
+	modules := len(dashboardModuleKeys(staticAssets()))
 	if len(hits) != len(rawHits)-entries+modules {
 		t.Errorf("served page links %d /static/ URLs, want the raw page's %d minus %d entry tags plus %d modulepreloads", len(hits), len(rawHits), entries, modules)
 	}
 	for _, h := range hits {
-		want := "?v=" + assetURLVersion(staticAssets[h[1]].etag)
+		want := "?v=" + assetURLVersion(staticAssets()[h[1]].etag)
 		if want == "?v=" || h[2] != want {
 			t.Errorf("/static/%s linked with %q, want %q", h[1], h[2], want)
 		}
@@ -85,7 +85,7 @@ func TestDashboardPage_ImportMapAndPreload(t *testing.T) {
 		t.Errorf("import map has %d entries, want one per module (%d)", len(imports), len(modules))
 	}
 	for _, name := range modules {
-		want := "/static/" + name + "?v=" + assetURLVersion(staticAssets[name].etag)
+		want := "/static/" + name + "?v=" + assetURLVersion(staticAssets()[name].etag)
 		if got := imports["/static/"+name]; got != want {
 			t.Errorf("import map /static/%s -> %q, want %q", name, got, want)
 		}
@@ -214,16 +214,16 @@ func TestStaticCacheControl_ThroughMux(t *testing.T) {
 		revalidated = "no-cache, must-revalidate"
 	)
 	for _, key := range []string{"ws_manager.js", "css/tokens.css"} {
-		v := assetURLVersion(staticAssets[key].etag)
+		v := assetURLVersion(staticAssets()[key].etag)
 		stale := strings.Repeat("0", 16)
 		for _, tc := range []struct {
 			name, query, inm, want string
 			code                   int
 		}{
 			{"current v", "?v=" + v, "", immutable, http.StatusOK},
-			{"current v, 304", "?v=" + v, staticAssets[key].etag, immutable, http.StatusNotModified},
+			{"current v, 304", "?v=" + v, staticAssets()[key].etag, immutable, http.StatusNotModified},
 			{"no v", "", "", revalidated, http.StatusOK},
-			{"no v, 304", "", staticAssets[key].etag, revalidated, http.StatusNotModified},
+			{"no v, 304", "", staticAssets()[key].etag, revalidated, http.StatusNotModified},
 			{"stale v", "?v=" + stale, "", revalidated, http.StatusOK},
 			{"empty v", "?v=", "", revalidated, http.StatusOK},
 		} {

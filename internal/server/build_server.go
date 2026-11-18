@@ -56,6 +56,9 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	if opts.Router == nil {
 		panic("server: ServerOptions.Router is required")
 	}
+	// Build the dashboard assets now, so the gateway pays the gzip work at
+	// startup rather than on the first request (static_assets.go).
+	loadStaticAssets()
 	addr := opts.Addr
 	router := opts.Router
 	platforms := opts.Platforms
