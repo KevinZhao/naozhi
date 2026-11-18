@@ -139,7 +139,7 @@ func renderDashboardHTML(raw []byte, assets map[string]staticAsset) ([]byte, err
 // assets are auth-gated, so a shared cache must not serve them. A vendor/ path
 // names its release version, so it is always immutable.
 func staticCacheControl(r *http.Request, key string) string {
-	if v := r.URL.Query().Get("v"); strings.HasPrefix(key, "vendor/") || v != "" && v == assetURLVersion(staticAssets[key].etag) {
+	if v := r.URL.Query().Get("v"); strings.HasPrefix(key, "vendor/") || v != "" && v == assetURLVersion(staticAssets()[key].etag) {
 		return "private, max-age=31536000, immutable"
 	}
 	return "no-cache, must-revalidate"

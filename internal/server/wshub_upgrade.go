@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -20,8 +21,11 @@ import (
 const wsAuthRetryAfterSeconds = 60
 
 // rawAuthOK names the asset version the served dashboard page carries, so a
-// tab loaded from another build sees the skew on every (re)connect.
-var rawAuthOK = wsproto.MarshalAuthOK(servedAssetVersion)
+// tab loaded from another build sees the skew on every (re)connect. Built on
+// first use, like the asset table it reads.
+var rawAuthOK = sync.OnceValue(func() string {
+	return wsproto.MarshalAuthOK(servedAssetVersion())
+})
 
 func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// The handshake has its own per-IP bucket, so tab-reload / mobile-wake
@@ -124,7 +128,7 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 	// credential here: answer without touching msg.Token or the auth bucket,
 	// so tab reloads and extra tabs cannot lock out a login.
 	if c.authenticated.Load() {
-		c.SendRaw([]byte(rawAuthOK))
+		c.SendRaw([]byte(rawAuthOK()))
 		return
 	}
 	valid := !h.admit.tokenMode() || h.admit.tokenMatches(msg.Token)
@@ -173,7 +177,7 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 		// The Store above precedes this so a broadcast that finds c in the
 		// authenticated set also sees authenticated==true.
 		h.subs.markAuthenticated(c)
-		c.SendRaw([]byte(rawAuthOK))
+		c.SendRaw([]byte(rawAuthOK()))
 	} else {
 		c.SendRaw([]byte(wsproto.RawAuthFailInvalid))
 	}

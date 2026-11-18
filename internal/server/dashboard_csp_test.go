@@ -25,7 +25,7 @@ func TestDashboardCSP_Smoke(t *testing.T) {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	csp := w.Header().Get("Content-Security-Policy")
-	if csp != dashboardCSP {
+	if csp != dashboardCSP() {
 		t.Fatalf("/dashboard serves CSP %q, want dashboardCSP", csp)
 	}
 	directives := map[string]string{}

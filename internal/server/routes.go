@@ -157,7 +157,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// KaTeX and mermaid output carries. No outside origin is
 	// listed: KaTeX and mermaid are vendored; connect-src 'self' covers the
 	// same-origin ws/wss upgrade; frame-src blob: is for sandboxed previews.
-	w.Header().Set("Content-Security-Policy", dashboardCSP)
+	w.Header().Set("Content-Security-Policy", dashboardCSP())
 	// HSTS only over TLS (RFC 6797 §7.2): on plain HTTP it would brick local
 	// loopback access for a year. Same gate as the auth cookie Secure flag.
 	if s.auth.IsSecure(r) {

@@ -17,7 +17,7 @@ import (
 // decompression of a gzip-only asset's gz form.
 func vendorContent(t *testing.T, key string) []byte {
 	t.Helper()
-	a, ok := staticAssets[key]
+	a, ok := staticAssets()[key]
 	if !ok || a.bytes != nil {
 		return a.bytes
 	}
@@ -56,7 +56,7 @@ func TestVendorAssets_LargeFilesPrecompressed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := staticAssets[key]
+	a := staticAssets()[key]
 	if !bytes.Equal(a.gz, gz) {
 		t.Errorf("%s: gzip form is not the embedded .gz", key)
 	}
@@ -76,7 +76,7 @@ func TestVendorRoutes_ServeEmbeddedTree(t *testing.T) {
 	t.Parallel()
 	srv := newTestServer(&mockPlatform{})
 	keys := map[string]bool{}
-	for key := range staticAssets {
+	for key := range staticAssets() {
 		if strings.HasPrefix(key, "vendor/") {
 			keys[key] = true
 		}

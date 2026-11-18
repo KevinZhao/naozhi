@@ -13,7 +13,7 @@ import (
 // cached bytes without allocating on the 304 path.
 func TestServeStaticWithETag_304BeforeBody(t *testing.T) {
 	t.Parallel()
-	tag := staticAssets["dashboard.js"].etag
+	tag := staticAssets()["dashboard.js"].etag
 	if tag == "" {
 		t.Fatal("missing ETag for dashboard.js")
 	}
@@ -58,7 +58,7 @@ func TestManifestAndSW_304FastPath(t *testing.T) {
 		{"sw.js", "/sw.js", handleSW},
 	}
 	for _, tc := range cases {
-		tag := staticAssets[tc.key].etag
+		tag := staticAssets()[tc.key].etag
 		if tag == "" {
 			t.Fatalf("%s missing cached ETag", tc.key)
 		}

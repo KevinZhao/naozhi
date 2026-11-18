@@ -65,7 +65,7 @@ func TestStaticAsset_Precompressed(t *testing.T) {
 	// path for every entry, so the sample tests the mechanism, not coverage.
 	// That every module is in the table is TestStaticJS_ModuleInventory.
 	for _, key := range []string{"dashboard.html", "dashboard.js", "agent_view.js", "asset_browser.js"} {
-		a := staticAssets[key]
+		a := staticAssets()[key]
 		if a.gz == nil {
 			t.Errorf("%s has no precompressed form; expected gzip.BestCompression cache", key)
 			continue
@@ -100,7 +100,7 @@ func TestHandleDashboardJS_ServesPrecompressedThroughMiddleware(t *testing.T) {
 	// One handler serves every module; the gzip interaction is identical for
 	// any of them.
 	h := gzipMiddleware(http.HandlerFunc(handleStaticAsset))
-	a := staticAssets["dashboard.js"]
+	a := staticAssets()["dashboard.js"]
 
 	// gzip-capable client → precompressed level-9 body.
 	w := httptest.NewRecorder()

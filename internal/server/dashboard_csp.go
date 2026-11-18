@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 )
 
 // dashboardCSP is the Content-Security-Policy served with /dashboard.
@@ -17,14 +18,17 @@ import (
 // the generated import map and entry loaders) are allowlisted by SHA-256 hash,
 // computed from the page as served, so an edit re-derives the hash instead of
 // silently breaking the page. KaTeX and mermaid are served from static/vendor,
-// so the policy names no origin but the dashboard's own.
-var dashboardCSP = buildDashboardCSP(staticAssets["dashboard.html"].bytes)
+// so the policy names no origin but the dashboard's own. Built on first use,
+// like the asset table it hashes.
+var dashboardCSP = sync.OnceValue(func() string {
+	return buildDashboardCSP(staticAssetBytes("dashboard.html"))
+})
 
 // DashboardPage returns a copy of the page handleDashboard serves and the
 // Content-Security-Policy it serves it with, for tools/render-dashboard, which
 // hands them to the e2e mock so a browser boots the rendered page.
 func DashboardPage() (page []byte, csp string) {
-	return slices.Clone(staticAssetBytes("dashboard.html")), dashboardCSP
+	return slices.Clone(staticAssetBytes("dashboard.html")), dashboardCSP()
 }
 
 // dashInlineScriptRe matches inline <script> blocks WITHOUT a src attribute —
