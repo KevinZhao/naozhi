@@ -151,7 +151,11 @@ func eventEntriesAt(ev clievent.Event, nowMS int64, root string) []clievent.Even
 			"session_title_changed",
 			// Auto-mode classifier progress (checking/done) for a tool call already
 			// on the timeline; no row-worthy payload. permission_denied stays a row.
-			"permission_check_status":
+			"permission_check_status",
+			// An effort change after a model fallback (the fallback is its own
+			// row), compaction's progress (compact_boundary stays a row) and a
+			// CLI notice whose text the entry does not carry.
+			"per_turn_effort_changed", "status", "informational":
 			return nil
 		}
 		return []clievent.EventEntry{entry}

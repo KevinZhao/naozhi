@@ -168,6 +168,8 @@ func sessionFact(snap session.SessionSnapshot, s *session.ManagedSession, logDir
 		if sf.Class == "auth" {
 			f.ErrClass = health.ErrAuth
 		}
+	case snap.State != "running" && snap.LastTurnFailed:
+		f.Failed, f.ErrText = "last turn ended in an API error", snap.LastTurnError
 	case snap.State != "running" && apierr.IsEnvelope(snap.LastResponse):
 		f.Failed, f.ErrText = "last turn ended in an API error", snap.LastResponse
 	}

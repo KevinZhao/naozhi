@@ -332,11 +332,53 @@ function applyEventToTurnState(ev) {
   }
 }
 
+// STOP_SLOW_MS is how long ■ waits as 停止中 for the stopped turn to end: a
+// hung tool or the CLI's own API retries keep a turn going past the
+// interrupt, and then the user is told and may stop it again.
+const STOP_SLOW_MS = 10000;
+
+// stopping is the stop sent and not yet answered by the turn's end: its
+// session and the STOP_SLOW_MS timer.
+const stopping = { key: '', timer: 0 };
+
+// paintStopButton shows ■ as 停止中 (busy, no click) while the session on
+// screen has a stop on its way.
+function paintStopButton() {
+  const btn = document.getElementById('btn-stop');
+  if (!btn) return;
+  const busy = !!stopping.key && stopping.key === sid(selection.key, selection.node);
+  btn.disabled = busy;
+  btn.classList.toggle('stopping', busy);
+  btn.title = busy ? '停止中…' : '停止';
+  if (busy) btn.setAttribute('aria-busy', 'true');
+  else btn.removeAttribute('aria-busy');
+}
+
+// endStopping lets ■ go: the turn ended, the interrupt failed or found
+// nothing running, or STOP_SLOW_MS passed.
+function endStopping() {
+  if (stopping.timer) clearTimeout(stopping.timer);
+  stopping.key = '';
+  stopping.timer = 0;
+  paintStopButton();
+}
+
 function interruptSession() {
   if (!selection.key) return;
   const sd = sessionList.sessionsData[sid(selection.key, selection.node || 'local')];
   if (!sd || sd.state !== 'running') return;
-  turnState.interruptedKey = sid(selection.key, selection.node);
+  const key = sid(selection.key, selection.node);
+  if (stopping.key === key) return;
+  turnState.interruptedKey = key;
+  if (stopping.timer) clearTimeout(stopping.timer);
+  stopping.key = key;
+  stopping.timer = setTimeout(() => {
+    if (stopping.key !== key) return;
+    endStopping();
+    const cur = sessionList.sessionsData[key];
+    if (cur && cur.state === 'running' && key === sid(selection.key, selection.node)) showToast('回合还没停下，可再点一次停止', 'warning');
+  }, STOP_SLOW_MS);
+  paintStopButton();
   const targetNode = selection.node && selection.node !== 'local' ? selection.node : '';
   // Claude Code 风格：中断时把刚发的那条用户文本回填到输入框方便改写。
   // 只在输入框当前为空时回填，避免覆盖用户已经开始输入的新内容；回填后
@@ -374,8 +416,9 @@ function interruptSession() {
       headers,
       body: JSON.stringify(body)
     }).then(r => r.json()).then(d => {
+      if (d.status !== 'ok') endStopping();
       showToast(d.status === 'ok' ? '已发送中断' : '会话未在运行', 'warning');
-    }).catch((e) => showNetworkError('中断会话', e));
+    }).catch((e) => { endStopping(); showNetworkError('中断会话', e); });
   }
 }
 
@@ -470,6 +513,7 @@ function updateSendButton(state, opts) {
     if (banner) banner.classList.remove('nz-hidden');
     if (sendBtn) sendBtn.style.display = 'none';
     if (stopBtn) stopBtn.style.display = 'flex';
+    paintStopButton();
     if (nzViews.agent) nzViews.agent.initFromSession();
     refreshBanner();
     startTurnWatchdog();
@@ -477,6 +521,7 @@ function updateSendButton(state, opts) {
     stopTurnWatchdog();
     if (!(opts && opts.silent)) announceTurnEnd(prev, state);
     turnState.interruptedKey = '';
+    if (stopping.key === sid(selection.key, selection.node)) endStopping();
     // resetTurnState → refreshBanner will hide the banner since the session
     // is no longer "running". If background agents are still active (e.g.
     // zero-downtime restart), refreshBanner keeps the banner visible.
@@ -499,6 +544,7 @@ function updateSendButton(state, opts) {
 
 export {
   applyEventToTurnState,
+  endStopping,
   idleTaskEvent,
   interruptSession,
   paintTurnElapsed,

@@ -125,3 +125,38 @@ func TestUserSent(t *testing.T) {
 		t.Error("no session: UserSent = true")
 	}
 }
+
+// A turn the CLI ended as failed without the "API Error" prefix (its own
+// retries ran out: "Request timed out") is a failure health marks and
+// custody retries, not an idle session; the next turn's answer clears it.
+func TestFailedTurnWithoutEnvelope(t *testing.T) {
+	r := newDigestRouter(t)
+	const key = "dashboard:direct:timeout:general"
+	p := session.NewTestProcess()
+	p.EventLog.Append(clievent.EventEntry{Time: time.Now().UnixMilli(), Type: "text", Summary: "Request timed out"})
+	s := r.InjectSession(key, p)
+	r.EndTurnForTest(s, clievent.SendResult{Text: "Request timed out", IsError: true, SubType: "success"})
+	src := CustodySources{Router: r}
+	if got := src.FailText(key); got != "Request timed out" {
+		t.Errorf("FailText = %q, want the CLI's error", got)
+	}
+	f := sessionFact(s.Snapshot(), s, "")
+	if f.Failed == "" || f.ErrText != "Request timed out" {
+		t.Errorf("fact Failed = %q, ErrText = %q; want a failure", f.Failed, f.ErrText)
+	}
+	// A failed turn that wrote no assistant text (a kiro rejection, a
+	// max-turns stop) is classified by its own error, not by the older
+	// reply still in LastResponse.
+	p.EventLog.Append(clievent.EventEntry{Time: time.Now().UnixMilli(), Type: "text", Summary: "上次的 403 forbidden 是 connection refused 引起的"})
+	r.EndTurnForTest(s, clievent.SendResult{Text: "[kiro] session/prompt rejected", IsError: true})
+	if got := src.FailText(key); got != "[kiro] session/prompt rejected" {
+		t.Errorf("FailText = %q, want the failed turn's own error", got)
+	}
+	if f := sessionFact(s.Snapshot(), s, ""); f.Failed == "" || f.ErrText != "[kiro] session/prompt rejected" {
+		t.Errorf("fact Failed = %q, ErrText = %q; want the failed turn's own error", f.Failed, f.ErrText)
+	}
+	r.EndTurnForTest(s, clievent.SendResult{Text: "好了"})
+	if f := sessionFact(s.Snapshot(), s, ""); f.Failed != "" {
+		t.Errorf("fact after an answer Failed = %q", f.Failed)
+	}
+}

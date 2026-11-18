@@ -171,6 +171,9 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 		snap.TurnAt = t.UnixMilli()
 	}
 	snap.DeathReason = loadAtomicString(&s.deathReason)
+	if e := s.lastTurnErr.Load(); e != nil {
+		snap.LastTurnFailed, snap.LastTurnError = true, *e
+	}
 	snap.CodeChanges = s.CodeChanges()
 	// Precomputed at publication; with or without a process.
 	snap.Workflows = s.WorkflowBoard().Summaries()

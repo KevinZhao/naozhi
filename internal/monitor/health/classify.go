@@ -58,7 +58,9 @@ var fallbacks = []struct {
 	subs  []string
 }{
 	{ErrNetwork, []string{"no such host", "dial tcp", "connection refused", "connection reset", "enotfound", "getaddrinfo",
-		"network is unreachable", "i/o timeout", "tls handshake"}},
+		"network is unreachable", "i/o timeout", "tls handshake",
+		// The Claude CLI's whole reply once its own retries ran out.
+		"request timed out"}},
 	{ErrRateLimit, []string{"too many requests", "throttlingexception", "throttled"}},
 	{ErrAuth, []string{"accessdenied", "access denied", "forbidden", "unauthorized", "not authorized"}},
 }
