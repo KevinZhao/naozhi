@@ -566,10 +566,10 @@ func backendHistoryDirs() map[string]string {
 // accumulate. Ages are chosen so a pass can never remove a file a live process
 // is still appending to:
 //
-//   - cli-debug/<keyhash>.log is appended for a session's whole life, and age
-//     alone cannot prove that life is over: the shim idle timer only runs while
-//     naozhi is detached, and exempt sessions or a long session.ttl keep a CLI
-//     idle for weeks. shim.Manager.KeyHashFileIsLive keeps any file whose
+//   - cli-debug/<keyhash>.log (and the CLI's own <keyhash>.log.1 rotation) is
+//     appended for a session's whole life, and age alone cannot prove that life
+//     is over: the shim idle timer only runs while naozhi is detached, and
+//     exempt sessions or a long session.ttl keep a CLI idle for weeks. shim.Manager.KeyHashFileIsLive keeps any file whose
 //     session still has a live shim; the max(7d, 2×idle) age is only the cheap
 //     pre-filter that decides which files are worth asking about.
 //   - shims/shim-<pid>.log is decided by liveness, not age: shim.LogFileIsLive
@@ -597,6 +597,13 @@ func newDataDirSweeper(cfg *config.Config, layout datadir.Layout, shimMgr *shim.
 		cliDebug.Keep = shimMgr.KeyHashFileIsLive
 	}
 	s.Add(cliDebug)
+	// The CLI rotates its --debug-file at 10 MB into <keyhash>.log.1, whose
+	// extension is ".1"; the same age and live-shim check apply (Keep cuts the
+	// name at its first dot).
+	cliDebugRotated := cliDebug
+	cliDebugRotated.Name = "cli-debug-rotated"
+	cliDebugRotated.Ext = ".1"
+	s.Add(cliDebugRotated)
 	// shimMgr.StateDir(), never cfg.Session.Shim.StateDir: NewManager applies the
 	// ~/.naozhi/shims default to its own copy, so the raw config value is empty in
 	// the common case and this pass silently swept nothing. Taking the Manager

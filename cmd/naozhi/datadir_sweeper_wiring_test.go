@@ -97,6 +97,9 @@ func TestSweeperKeepsCLIDebugLogOfALiveShim(t *testing.T) {
 	debugDir := layout.CLIDebugRoot()
 	liveLog := plantOld(t, debugDir, filepath.Base(session.CLIDebugPath(debugDir, liveKey)))
 	goneLog := plantOld(t, debugDir, filepath.Base(session.CLIDebugPath(debugDir, goneKey)))
+	// The CLI's own 10 MB rotation of each.
+	liveRotated := plantOld(t, debugDir, filepath.Base(liveLog)+".1")
+	goneRotated := plantOld(t, debugDir, filepath.Base(goneLog)+".1")
 
 	got := newDataDirSweeper(&config.Config{}, layout, mgr, "").RunOnce()
 
@@ -108,6 +111,15 @@ func TestSweeperKeepsCLIDebugLogOfALiveShim(t *testing.T) {
 	}
 	if _, err := os.Stat(goneLog); err == nil {
 		t.Error("the debug log of a session with no shim is still there")
+	}
+	if got["cli-debug-rotated"].Removed != 1 {
+		t.Errorf("cli-debug-rotated removed %d, want 1", got["cli-debug-rotated"].Removed)
+	}
+	if _, err := os.Stat(liveRotated); err != nil {
+		t.Errorf("the live session's rotated debug log was swept: %v", err)
+	}
+	if _, err := os.Stat(goneRotated); err == nil {
+		t.Error("the rotated debug log of a session with no shim is still there")
 	}
 }
 
