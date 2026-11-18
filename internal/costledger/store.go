@@ -212,6 +212,7 @@ func (s *Store) worker() {
 			batch = append(batch, e)
 			if len(batch) >= batchMax {
 				flush()
+				checkSweep()
 			} else if !armed {
 				timer.Reset(flushEvery)
 				armed = true
