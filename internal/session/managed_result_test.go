@@ -99,7 +99,7 @@ func TestResultForRecordsEveryTurnEnd(t *testing.T) {
 	}{
 		{"answered", clievent.SendResult{Text: "好的"}, activity.TurnDone},
 		{"empty answer", clievent.SendResult{}, activity.TurnDone},
-		{"failed", clievent.SendResult{IsError: true, SubType: "error_during_execution"}, activity.TurnFailed},
+		{"failed", clievent.SendResult{IsError: true, SubType: "error_during_execution", Text: "Request timed out"}, activity.TurnFailed},
 		{"stopped by the user", clievent.SendResult{Aborted: true, IsError: true, SubType: "error_during_execution"}, activity.TurnAborted},
 		{"aborted by the CLI", clievent.SendResult{TerminalReason: "aborted_tools"}, activity.TurnAborted},
 	} {
@@ -122,6 +122,11 @@ func TestResultForRecordsEveryTurnEnd(t *testing.T) {
 			// failure without an "API Error" prefix has nothing else.
 			if got := s.Snapshot().LastTurnFailed; got != (tc.want == activity.TurnFailed) {
 				t.Errorf("LastTurnFailed = %v, want %v", got, tc.want == activity.TurnFailed)
+			}
+			// Its text is the result's own: a failed turn may write no
+			// assistant text, leaving LastResponse at an older reply.
+			if got, want := s.Snapshot().LastTurnError, map[bool]string{true: tc.res.Text}[tc.want == activity.TurnFailed]; got != want {
+				t.Errorf("LastTurnError = %q, want %q", got, want)
 			}
 		})
 	}

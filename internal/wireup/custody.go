@@ -142,7 +142,10 @@ func (c CustodySources) FailText(key string) string {
 		return ""
 	}
 	snap := s.Snapshot()
-	if snap.LastTurnFailed || apierr.IsEnvelope(snap.LastResponse) {
+	if snap.LastTurnFailed {
+		return snap.LastTurnError
+	}
+	if apierr.IsEnvelope(snap.LastResponse) {
 		return snap.LastResponse
 	}
 	return snap.DeathDetail

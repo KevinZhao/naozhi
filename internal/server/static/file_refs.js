@@ -830,10 +830,17 @@ function regroupAvatars(container) {
 // foldRetryRuns shows a run of adjacent API-retry rows as its last one,
 // "接口重试 ×N" titled with the run's first and last time: a retry row says
 // nothing but its time, and a failing turn's ten in a row pushed its reply
-// and its error off screen. Rerun on every mutation, as regroupAvatars.
+// and its error off screen. A time divider between two retries (they can be
+// minutes apart once a request times out) is folded with the run instead of
+// ending it; the one before the run stays. Rerun on every mutation, as
+// regroupAvatars.
 function foldRetryRuns(el) {
   let run = [];
+  let gap = []; // dividers after the run's latest retry
+  const isRetry = (node) => node.classList && node.classList.contains('system') && node.querySelector(':scope > .event-content > .nz-retry');
   const flush = () => {
+    gap.forEach((d) => d.classList.remove('nz-folded'));
+    gap = [];
     run.forEach((node, i) => {
       const last = i === run.length - 1;
       node.classList.toggle('nz-folded', !last);
@@ -845,8 +852,16 @@ function foldRetryRuns(el) {
     run = [];
   };
   for (const node of el.children) {
-    if (node.classList && node.classList.contains('system') && node.querySelector(':scope > .event-content > .nz-retry')) run.push(node);
-    else flush();
+    if (isRetry(node)) {
+      gap.forEach((d) => d.classList.add('nz-folded'));
+      gap = [];
+      run.push(node);
+    } else if (run.length && node.classList && node.classList.contains('event-time-divider')) {
+      gap.push(node);
+    } else {
+      flush();
+      if (node.classList && node.classList.contains('event-time-divider')) node.classList.remove('nz-folded');
+    }
   }
   flush();
 }

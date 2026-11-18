@@ -144,6 +144,17 @@ func TestFailedTurnWithoutEnvelope(t *testing.T) {
 	if f.Failed == "" || f.ErrText != "Request timed out" {
 		t.Errorf("fact Failed = %q, ErrText = %q; want a failure", f.Failed, f.ErrText)
 	}
+	// A failed turn that wrote no assistant text (a kiro rejection, a
+	// max-turns stop) is classified by its own error, not by the older
+	// reply still in LastResponse.
+	p.EventLog.Append(clievent.EventEntry{Time: time.Now().UnixMilli(), Type: "text", Summary: "上次的 403 forbidden 是 connection refused 引起的"})
+	r.EndTurnForTest(s, clievent.SendResult{Text: "[kiro] session/prompt rejected", IsError: true})
+	if got := src.FailText(key); got != "[kiro] session/prompt rejected" {
+		t.Errorf("FailText = %q, want the failed turn's own error", got)
+	}
+	if f := sessionFact(s.Snapshot(), s, ""); f.Failed == "" || f.ErrText != "[kiro] session/prompt rejected" {
+		t.Errorf("fact Failed = %q, ErrText = %q; want the failed turn's own error", f.Failed, f.ErrText)
+	}
 	r.EndTurnForTest(s, clievent.SendResult{Text: "好了"})
 	if f := sessionFact(s.Snapshot(), s, ""); f.Failed != "" {
 		t.Errorf("fact after an answer Failed = %q", f.Failed)

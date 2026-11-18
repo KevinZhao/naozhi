@@ -6,7 +6,12 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/planner/activity"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
+
+// maxTurnErrRunes caps the failed turn's text kept for health and custody,
+// which only classify it.
+const maxTurnErrRunes = 1000
 
 // ResultSink receives the reply text of every turn a session's CLI completes,
 // whoever started it: the Planner's action blocks are parsed from it
@@ -95,7 +100,12 @@ func (r *Router) resultFor(s *ManagedSession) func(clievent.SendResult) {
 	return func(res clievent.SendResult) {
 		s.touchLastActive()
 		outcome := turnOutcome(res)
-		s.lastTurnFailed.Store(outcome == activity.TurnFailed)
+		if outcome == activity.TurnFailed {
+			msg := textutil.TruncateRunes(res.Text, maxTurnErrRunes)
+			s.lastTurnErr.Store(&msg)
+		} else {
+			s.lastTurnErr.Store(nil)
+		}
 		if sink := r.activity.Load(); sink != nil {
 			(*sink).RecordTurn(s.key, s.Workspace(), outcome)
 		}

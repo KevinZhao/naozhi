@@ -65,6 +65,32 @@ test('a run of API retries is one counted row', async ({ browser }) => {
   }
 });
 
+// A timed-out request's retries are minutes apart, so a time divider falls
+// between them; it is folded with the run rather than ending it.
+test('retries minutes apart are still one row', async ({ browser }) => {
+  for (const vp of VIEWPORTS) {
+    const { ctx, page, mock, conn } = await open(browser, vp, A);
+    try {
+      const t0 = now - 60 * 60000;
+      const events = [{ type: 'user', detail: '继续', time: t0, uuid: 'u1' }];
+      for (let i = 0; i < 6; i++) events.push(retry(i, t0 + 1000 + i * 6 * 60000));
+      events.push({ type: 'text', detail: 'Request timed out', time: t0 + 37 * 60000, uuid: 't1' });
+      conn.send({ type: 'subscribed', key: A, state: 'ready' });
+      conn.send({ type: 'history', key: A, initial: true, events });
+
+      const rows = page.locator('#events-scroll .event.system:visible');
+      await expect(rows).toHaveCount(1);
+      await expect(rows.locator('.event-content')).toHaveText('接口重试 ×6');
+      // The heading before the run and the one before the reply remain.
+      await expect(page.locator('#events-scroll .event-time-divider:visible')).toHaveCount(2);
+      if (SHOTS) await page.screenshot({ path: SHOTS + '/retry-gap-' + vp.name + '.png' });
+    } finally {
+      await ctx.close();
+      mock.server.close();
+    }
+  }
+});
+
 test('a bare CLI subtype is no row; compaction reads in words', async ({ browser }) => {
   for (const vp of VIEWPORTS) {
     const { ctx, page, mock, conn } = await open(browser, vp, A);

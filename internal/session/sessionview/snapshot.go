@@ -59,9 +59,11 @@ type SessionSnapshot struct {
 	// back to the s.lastResponse cache for suspended/dead sessions.
 	LastResponse string `json:"last_response,omitempty"`
 	// LastTurnFailed is whether the last turn's result was an error the CLI
-	// reported (not an abort); health and custody read it with LastResponse
-	// as the error's text.
+	// reported (not an abort), LastTurnError that result's text: health and
+	// custody classify the failure by it, not by LastResponse, which a failed
+	// turn writing no assistant text leaves at an older reply.
 	LastTurnFailed bool   `json:"-"`
+	LastTurnError  string `json:"-"`
 	Summary        string `json:"summary,omitempty"`    // Claude-generated session title
 	UserLabel      string `json:"user_label,omitempty"` // operator-set override for sidebar/header title
 	// LabelOrigin records who set UserLabel: "" / "user" (human) or "auto"

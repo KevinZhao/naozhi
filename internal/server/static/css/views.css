@@ -1068,8 +1068,9 @@ div.pl-lookup{max-width:560px;margin:8px 0;padding:8px 12px;border:1px solid var
    30s would spam the transcript). visibility:hidden (not display:none)
    preserves the 36px icon slot so stacked bubbles stay edge-aligned. */
 .event.nz-grouped .event-icon{visibility:hidden}
-/* A run of API-retry rows shows as its last one, counted (foldRetryRuns). */
-.event.nz-folded{display:none}
+/* A run of API-retry rows shows as its last one, counted, with the time
+   dividers between them (foldRetryRuns). */
+.event.nz-folded,.event-time-divider.nz-folded{display:none}
 .event-time-divider{text-align:center;color:var(--nz-text-dim);font-size:var(--nz-fs-xs);margin:16px 0 6px;opacity:.55;user-select:none;letter-spacing:.02em}
 .empty-state{display:flex;align-items:center;justify-content:center;height:100%;color:var(--nz-text-dim);font-size:15px}
 /* Brand ">_" prompt motif for the quick-ask empty state. The underscore
