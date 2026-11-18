@@ -71,7 +71,7 @@ const COALESCE_SPLIT_RE = /\n\[\d\d:\d\d\] /;
 const REPORT_NOTE_RE = /^📨 (\S+) 汇报：/;
 // ASIDE_NOTE_RE is its line for a 单独聊 you opened (planner/agent
 // AsideNote, §15.14 ⑥): an entry whose line opens that session.
-const ASIDE_NOTE_RE = /^💬 (\S+) 你开了单独聊：/;
+const ASIDE_NOTE_RE = /^💬 (\S+) 你开了单独聊：([\s\S]*)$/;
 const REMINDER_NOTE_RE = /^到点提醒（/;
 const SEND_ERROR_RE = /^没有发出：/;
 // KEY_RE finds the session a receipt is about: a dispatched session's key,
@@ -160,7 +160,7 @@ export function plannerHead(e) {
     if (m) return { id, at, kind: 'report', layer: 'dyn', alone: true, key: m[1] };
     if (REMINDER_NOTE_RE.test(text)) return { id, at, kind: 'reminder', layer: 'dyn', alone: true };
     const a = ASIDE_NOTE_RE.exec(text);
-    if (a) return { id, at, kind: 'aside', layer: 'dyn', alone: true, key: a[1] };
+    if (a) return { id, at, kind: 'aside', layer: 'dyn', alone: true, key: a[1], title: a[2].trim() };
     if (SEND_ERROR_RE.test(text)) return { id, at, kind: 'note', layer: 'talk', alone: true };
     return null;
   }
@@ -191,7 +191,7 @@ export function markerHtml(h) {
     '" data-pl-layer="' + h.layer + '" data-time="' + (h.at || 0) + '"' +
     (h.alone ? ' data-pl-alone="1"' : '') + (h.key ? ' data-pl-key="' + escAttr(h.key) + '"' : '') +
     (h.name ? ' data-pl-name="' + escAttr(h.name) + '"' : '') + (h.day ? ' data-pl-day="' + escAttr(h.day) + '"' : '') +
-    (h.ask ? ' data-pl-ask="1"' : '') + '></div>';
+    (h.ask ? ' data-pl-ask="1"' : '') + (h.title ? ' data-pl-title="' + escAttr(h.title) + '"' : '') + '></div>';
 }
 
 // endHtml is the invisible element where a turn's result came, for a
@@ -217,7 +217,7 @@ export const layerMode = () => lay.mode;
 function itemOf(m) {
   const d = m.dataset;
   return { id: d.plId || '', kind: d.plKind || '', layer: d.plLayer || 'talk', alone: !!d.plAlone, at: Number(d.time || 0),
-    key: d.plKey || '', name: d.plName || '', day: d.plDay || '', ask: !!d.plAsk, marker: m, els: [], run: null };
+    key: d.plKey || '', name: d.plName || '', day: d.plDay || '', ask: !!d.plAsk, title: d.plTitle || '', marker: m, els: [], run: null };
 }
 
 // shows reports whether an element of a turn you started is something to
@@ -429,9 +429,10 @@ function rowEl(items, last) {
 function lineHtml(it, name, last) {
   const open = lay.lines.has(it.id);
   const one = entryLine(it, last);
-  // A 单独聊's line is the way back into it, not a reply to unfold.
+  // A 单独聊's line is the way back into it, not a reply to unfold; its
+  // title names it once it ended and the list no longer does.
   const act = it.kind === 'aside' && it.key
-    ? 'data-action="planner-open-session" data-key="' + escAttr(it.key) + '"'
+    ? 'data-action="planner-open-session" data-key="' + escAttr(it.key) + '"' + (it.title ? ' data-title="单独聊：' + escAttr(it.title) + '"' : '')
     : 'data-action="planner-dyn-line" aria-expanded="' + open + '"';
   return '<div class="pl-dyn-item" data-id="' + escAttr(it.id) + '" data-n="' + it.els.length + '">' +
     '<button type="button" class="pl-dyn-line" ' + act + ' title="' + escAttr(formatAbsTime(it.at)) + '">' +

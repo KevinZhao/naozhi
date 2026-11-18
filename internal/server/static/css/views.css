@@ -243,6 +243,8 @@ button.tk-report:hover .tk-report-t{text-decoration:underline}
 .pl-news>[data-action="tasks-only-new"]{min-width:0;overflow:hidden;text-overflow:ellipsis}
 .pl-news[hidden]{display:none}
 .pl-news>button[aria-pressed="true"]{text-decoration:underline}
+/* Filtered, the list's own bar has 全部已读. */
+.pl-news:has(>[aria-pressed="true"])>.pl-news-sep,.pl-news:has(>[aria-pressed="true"])>.pl-news-all{display:none}
 .pl-news-sep{color:var(--nz-text-faint)}
 /* 等你 bar atop the 会话 sidebar (side_wait.js), not rendered with none;
    unfolded, the Planner left column's cards at their full height above the

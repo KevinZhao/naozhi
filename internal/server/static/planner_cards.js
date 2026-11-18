@@ -652,7 +652,8 @@ function asideLine(ev, content) {
   const m = ASIDE_NOTE_RE.exec(content.textContent.trim());
   if (!m) return false;
   ev.classList.add('pl-report-ev', 'pl-aside-ev');
-  content.innerHTML = '<button type="button" class="pl-report pl-aside" data-action="planner-open-session" data-key="' + escAttr(m[1]) + '" title="回到这次单独聊">' +
+  content.innerHTML = '<button type="button" class="pl-report pl-aside" data-action="planner-open-session" data-key="' + escAttr(m[1]) +
+    '" data-title="单独聊：' + escAttr(m[2].trim()) + '" title="回到这次单独聊">' +
     '<span aria-hidden="true">💬</span> 你开了单独聊：<span class="pl-report-t">' + esc(m[2].trim()) + '</span> <span aria-hidden="true">▸</span></button>';
   return true;
 }

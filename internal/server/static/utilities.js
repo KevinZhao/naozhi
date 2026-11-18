@@ -1193,12 +1193,24 @@ const mobileMQ = { list: null };
 export function mobileQuery() { return mobileMQ.list || (mobileMQ.list = window.matchMedia('(max-width:768px)')); }
 export function isMobile() { return mobileQuery().matches; }
 
+// nav is the view of the history entry the page is on, as the dashboard's
+// own pushes and the backs and forwards left it: poppedView tells a popstate
+// handler whose entry was just left. This listener is registered before
+// those of the modules importing this one. Optional chaining: the node tests
+// import this module without a browser's history.
+const viewOf = (s) => (s && s.view) || '';
+const nav = { view: viewOf(globalThis.history?.state), popped: '' };
+globalThis.addEventListener?.('popstate', () => { nav.popped = nav.view; nav.view = viewOf(history.state); });
+export const poppedView = () => nav.popped;
+export function pushView(state) { history.pushState(state, ''); nav.view = viewOf(state); }
+export function replaceView(state) { history.replaceState(state, ''); nav.view = viewOf(state); }
+
 export function mobileEnterChat() {
   if (!isMobile()) return;
   // Switching sessions while already in chat view must not stack
   // another entry — replace ours so a single back press leaves chat.
-  if (history.state && history.state.view === 'chat') history.replaceState({ view: 'chat' }, '');
-  else history.pushState({ view: 'chat' }, '');
+  if (history.state && history.state.view === 'chat') replaceView({ view: 'chat' });
+  else pushView({ view: 'chat' });
   document.body.classList.remove('mobile-list-view');
   document.body.classList.add('mobile-chat-view');
 }
