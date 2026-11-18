@@ -45,7 +45,7 @@ async function pickerLabels(page, wsState, opts = {}) {
   if (opts.reload !== false) await page.goto(mock.url + '/dashboard');
   await page.waitForSelector('.session-card');
   await waitForWs(page, wsState);
-  await page.click('.hdr-btn[title="New Session"]');
+  await page.click('#btn-new-session');
   await page.waitForSelector('#new-node');
   return page.locator('#new-node option').allTextContents();
 }

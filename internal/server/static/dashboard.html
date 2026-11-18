@@ -54,7 +54,7 @@
       <button type="button" class="ab-nav" id="abnav-planner" data-view="planner" title="Planner" aria-label="Planner 页面" aria-pressed="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><polygon points="15.5 8.5 10.5 10.5 8.5 15.5 13.5 13.5 15.5 8.5"/></svg>
         <span class="ab-nav-label">Planner</span>
-        <span class="ab-count" id="abnav-planner-count" hidden aria-label="等你处理的条目数（提问、待你决定、错误）"></span>
+        <span class="ab-count" id="abnav-planner-count" hidden aria-label="等你处理的条目数（提问、待你决定、失败）"></span>
       </button>
       <button type="button" class="ab-nav active" id="abnav-chat" data-view="chat" title="会话" aria-label="会话视图" aria-pressed="true">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
@@ -105,7 +105,7 @@
         <div class="hdr-btns">
           <button type="button" class="hdr-btn hdr-btn-update" id="btn-update" hidden title="" aria-label=""><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg><span class="hdr-update-tag" id="update-tag"></span></button>
           <button type="button" class="hdr-btn" id="btn-history" title="历史会话" aria-label="查看会话历史" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg><span class="hdr-badge nz-hidden" id="history-badge" aria-label="历史记录数"></span></button>
-          <button type="button" class="hdr-btn" id="btn-new-session" title="New Session" aria-label="Create new session"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+          <button type="button" class="hdr-btn" id="btn-new-session" title="新建会话" aria-label="新建会话"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         </div>
       </div>
     </div>
@@ -152,7 +152,7 @@
         <textarea id="quick-ask-input" class="quick-ask-input" rows="1" placeholder="Enter 发送 · Shift+Enter 换行" autocomplete="off" spellcheck="false" aria-label="快速提问输入框"></textarea>
         <button type="submit" class="quick-ask-send" aria-label="发送"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
       </form>
-      <div class="nz-empty-hint">默认目录 · general agent · 随时 <code>/cd</code> 切换目录，或用上方 <b>+</b> 开项目会话</div>
+      <div class="nz-empty-hint">默认目录 · 通用助手 · 随时 <code>/cd</code> 切换目录，或用上方 <b>+</b> 开项目会话</div>
       <!-- 等你 · 运行中 · 失败 and the latest items that wait on you
            (home_attn.js); empty, and hidden, with nothing to say. -->
       <div id="home-attn" class="home-attn"></div>
@@ -314,6 +314,8 @@
   <main class="settings-main" id="settings-main" aria-label="设置" hidden></main>
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+<!-- This page's own socket down past 5s (session_list.js updateStatusBar); hidden online. -->
+<div class="conn-status" id="conn-status" hidden></div>
 <!-- Version-skew banner: self_update.js shows it when the server serves other
      assets than this page booted with. No close control by design. -->
 <div class="asset-skew-banner" id="asset-skew-banner" role="alert" hidden><button type="button">naozhi 已更新，点击刷新</button></div>

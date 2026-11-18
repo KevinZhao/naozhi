@@ -475,7 +475,7 @@ function paintAsideButton(replied) {
 // once the sidebar has it, for dashboard to select; otherwise to undefined.
 export async function promoteScratch() {
   if (!ad.state) {
-    showToast('追问会话已关闭，无法保存');
+    showToast('追问会话已关闭，无法保存', 'error');
     return;
   }
   const id = ad.state.scratchId;

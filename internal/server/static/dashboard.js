@@ -416,6 +416,18 @@ function toggleHistory() {
 
   ui.activePopover = popover;
   document.body.appendChild(popover);
+  // ↑↓ walk the search box and the results; Tab stays inside, as the
+  // popover covers what is behind it (Esc closes it).
+  popover.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Tab') return;
+    const stops = [...popover.querySelectorAll('#hp-search, .history-popover-item')];
+    const i = stops.indexOf(document.activeElement);
+    if (!stops.length || (i < 0 && e.key !== 'Tab')) return;
+    e.preventDefault();
+    const step = (e.key === 'ArrowUp' || (e.key === 'Tab' && e.shiftKey)) ? -1 : 1;
+    const n = e.key === 'Tab' ? (i + step + stops.length) % stops.length : Math.max(0, Math.min(stops.length - 1, i + step));
+    stops[n].focus();
+  });
 
   if (!isMobile()) {
     const btn = document.getElementById('btn-history');
@@ -444,6 +456,11 @@ function toggleHistory() {
     // focus from the moment the popover opens.
     searchInput.addEventListener('keydown', e => {
       if (e.key === 'Escape') { e.preventDefault(); closeHistoryPopover(); }
+      // Enter opens the first match, as a click on it would.
+      if (e.key === 'Enter' && !isComposingKey(e)) {
+        const first = popover.querySelector('.history-popover-item');
+        if (first) { e.preventDefault(); first.click(); }
+      }
     });
     // Auto-focus on desktop only; mobile focus pops the keyboard and
     // pushes the sheet up, which is annoying if the user just wanted to
@@ -527,11 +544,11 @@ function hitTarget(el) {
 function liveHitHtml(h, query) {
   const s = sessionList.sessionsData[sid(h.key, 'local')];
   const title = s.user_label || s.summary || s.last_prompt || '';
-  return '<div class="history-popover-item" data-action="history-jump" data-key="' + escAttr(h.key) + '"' + hitAttrs(h) + '>' +
+  return '<button type="button" class="history-popover-item" data-action="history-jump" data-key="' + escAttr(h.key) + '"' + hitAttrs(h) + '>' +
     (title ? '<div class="hp-prompt" title="' + escAttr(title) + '">' + esc(title) + '</div>' : '<div class="hp-prompt nz-dim">未命名</div>') +
     snippetHtml(h.snippet, query) +
     (h.time ? '<div class="hp-meta"><span title="' + escAttr(formatAbsTime(h.time)) + '">' + timeAgo(h.time) + '</span></div>' : '') +
-    '</div>';
+    '</button>';
 }
 
 // revealEvent scrolls the opened session to the reply a hit names once its
@@ -652,14 +669,14 @@ function applyHistoryFilter(merged, query) {
     const abs = s.last_active ? formatAbsTime(s.last_active) : '';
     const hit = byHistory.get(s.session_id);
     return dayHeader +
-      '<div class="history-popover-item" data-sid="' + escAttr(s.session_id) + '" data-action="history-resume"' + hitAttrs(hit) + '>' +
+      '<button type="button" class="history-popover-item" data-sid="' + escAttr(s.session_id) + '" data-action="history-resume"' + hitAttrs(hit) + '>' +
       (s.prompt ? '<div class="hp-prompt" title="' + escAttr(s.prompt) + '">' + esc(s.prompt) + '</div>' : '<div class="hp-prompt nz-dim">未命名</div>') +
       (hit ? snippetHtml(hit.snippet, query) : '') +
       '<div class="hp-meta">' +
         (s.project ? '<span class="hp-project">' + esc(s.project) + '</span><span class="hp-dot">&middot;</span>' : '') +
         (ago ? '<span' + (abs ? ' title="' + escAttr(abs) + '"' : '') + '>' + ago + '</span>' : '') +
       '</div>' +
-      '</div>';
+      '</button>';
   }).join('');
 }
 
@@ -1205,12 +1222,12 @@ function headerAccessProfileHtml(s) {
   const id = s.access_profile || '';
   const info = accessProfileChipInfo(id);
   if (!info) {
-    return '<span class="sc-access-profile-chip header-access-profile is-global nz-clickable" id="header-access-profile" ' +
-      'data-action="tuning-access-profile" title="全局默认凭证 — 点击切换访问档">全局默认</span>';
+    return '<button type="button" class="sc-access-profile-chip header-access-profile is-global" id="header-access-profile" ' +
+      'data-action="tuning-access-profile" title="全局默认凭证 — 点击切换访问档">全局默认</button>';
   }
-  return '<span class="sc-access-profile-chip header-access-profile nz-clickable" id="header-access-profile" ' +
+  return '<button type="button" class="sc-access-profile-chip header-access-profile" id="header-access-profile" ' +
     'data-action="tuning-access-profile" data-access-profile="' + escAttr(id) + '" data-nz-bg="' + escAttr(info.color) +
-    '" title="' + escAttr(info.tooltip + ' — 点击切换访问档') + '">' + esc(info.label) + '</span>';
+    '" title="' + escAttr(info.tooltip + ' — 点击切换访问档') + '">' + esc(info.label) + '</button>';
 }
 
 // mainHeaderHtml builds the .main-header block (title, rename/export buttons,
@@ -1250,8 +1267,8 @@ function mainHeaderHtml(s) {
     .replace(/-(\d+)-(\d+)/, '-$1.$2')          // 4-7 → 4.7 (matches kiro list)
     .replace(/\[(\d+m)\]$/i, ' $1');            // [1m] → " 1m"
   const modelLabel = rawModel
-    ? '<span class="model-label nz-clickable" id="header-model" data-action="tuning-model" title="' + escAttr(rawModel + ' — 点击切换模型') + '">· ' + esc(compactModel) + '</span>'
-    : '<span class="model-label model-label-unset nz-clickable" id="header-model" data-action="tuning-model" title="点击指定模型">· 选模型</span>';
+    ? '<button type="button" class="model-label" id="header-model" data-action="tuning-model" title="' + escAttr(rawModel + ' — 点击切换模型') + '">· ' + esc(compactModel) + '</button>'
+    : '<button type="button" class="model-label model-label-unset" id="header-model" data-action="tuning-model" title="点击指定模型">· 选模型</button>';
   const accessProfileLabel = headerAccessProfileHtml(s);
   const headerOriginBadge = originBadgeHtml(selection.key);
   // Last turn's duration; hidden when 0 or absent (claude does not report it).

@@ -61,7 +61,7 @@ import { initPlannerResize } from './planner_resize.js';
 import { custody, refreshCustody, setCustodyPaused } from './custody.js';
 import { workbench } from './workbench.js';
 import { choosePlannerNode, eventsURL, hostName, hostOnline, hostRemote, isLocalNode, nodeAPI, notePlannerNodes, plannerAPI, plannerHost, plannerNodes, readLocalPlanner } from './planner_host.js';
-import { wsm } from './ws_manager.js';
+import { WS_STATES, wsm } from './ws_manager.js';
 import { shell } from './shell.js';
 import { EARLIER_PAGE_LIMIT, EVENT_DIVIDER_GAP_MS, formatAbsTime, formatMonthDayTime, lastDividerTime, timeAgo, timeDividerHtml } from './utilities.js';
 import { answerOf, endHtml, layerMode, layerStream, markerHtml, noteRunning, paintLayerSwitch, plannerBusy, plannerHead, setOnLayerChange } from './planner_layers.js';
@@ -81,7 +81,7 @@ const TASK_REFRESH_MS = 1500;
 
 // KIND_LABEL labels a card by kind: the kinds that wait on you to act, the
 // only ones listed. A notice is not labelled.
-const KIND_LABEL = { decision: '待你决定', question: '提问', error: '错误' };
+const KIND_LABEL = { decision: '待你决定', question: '提问', error: '失败' };
 const KIND_ORDER = { decision: 0, question: 1, error: 2, notice: 3 };
 
 const pl = {
@@ -91,8 +91,11 @@ const pl = {
   // repaints the stream, and a brief folded stays folded.
   briefOpen: new Map(),
   open: [], // the open inbox items
+  // openState is whether open is a list read from this Planner's node:
+  // 'unread' (not yet), 'read', or 'failed' (offline, or the read failed).
+  openState: 'unread',
   expired: [], // the questions closed without an answer lately (expiredHtml)
-  tasksActive: 0, // the tasks 进行中, as 任务 last listed them
+  tasksActive: null, // the tasks 进行中, as 任务 last listed them; null before a list
   tasksAll: -1, // every task 任务 last listed, done ones too; -1 before a list
   notice: '', // the notice a push or link opened, shown in 等你 (waitListHtml)
   pausedUntil: 0,
@@ -259,7 +262,9 @@ function waitListHtml() {
   const notice = pl.notice ? pl.open.find((it) => itemRef(it) === pl.notice) : null;
   if (!notice) pl.notice = '';
   const html = actionItems().map((it) => itemHtml(it, isPlannerAsk(it))).join('') + (notice ? itemHtml(notice) : '');
-  return (html || '<div class="pl-empty">没有等你的事</div>') + pl.expired.map(expiredHtml).join('');
+  // Not readable (the node offline, or the read failed) is not "none".
+  const none = { read: '没有等你的事', failed: '连上后显示' }[pl.openState];
+  return (html || (none ? '<div class="pl-empty">' + none + '</div>' : '')) + pl.expired.map(expiredHtml).join('');
 }
 
 // EXPIRED_MS is how long a question that closed without an answer stays in
@@ -319,7 +324,8 @@ function paintLeftToggle() {
   const el = $('pl-left-toggle')?.querySelector('span');
   if (!el) return;
   const n = actionItems().length;
-  const text = '等你 ' + n + ' · 任务 ' + pl.tasksActive;
+  // A count not read yet (or not readable) is left out rather than said as 0.
+  const text = (pl.openState === 'read' ? '等你 ' + n : '等你') + ' · ' + (pl.tasksActive === null ? '任务' : '任务 ' + pl.tasksActive);
   if (el.textContent !== text) el.textContent = text;
   $('planner-main')?.classList.toggle('pl-left-none', !n && inbox.badge === 0 && pl.tasksAll === 0 && !pl.expired.length);
 }
@@ -440,15 +446,25 @@ async function openReport(key) {
 export async function fetchInbox() {
   const host = plannerHost.node;
   const local = isLocalNode(host);
-  if (!local && !hostOnline()) return;
+  // What it listed last stays; never listed, 等你 says it could not read.
+  const failed = () => {
+    if (host !== plannerHost.node || pl.openState === 'read') return;
+    pl.openState = 'failed';
+    if (pl.host) { paintWaiting(); paintTools(); }
+  };
+  if (!local && !hostOnline()) { failed(); return; }
   let res;
   try {
     res = await fetchJSON(plannerAPI(NZ_CONTRACT.API.inbox), { timeoutMs: 8000 });
-  } catch { return; }
+  } catch { failed(); return; }
   if (host !== plannerHost.node) return;
   pl.open = ((res && Array.isArray(res.open)) ? res.open : []).map((it) => Object.assign({}, it, { node: host }));
+  pl.openState = 'read';
   pl.expired = expiredOf((res && Array.isArray(res.closed)) ? res.closed : []).map((it) => Object.assign({}, it, { node: host }));
-  if (!local) notifyNewRemote(host, pl.open);
+  // Without a socket this node's notify frames do not come either: its new
+  // items are told from the list too. With one, the list only marks them seen.
+  if (!local || !wsm.isConnected()) notifyNewRemote(host, pl.open);
+  else remoteSeen = new Set(pl.open.map(itemRef));
   pl.pausedUntil = res && res.paused_until ? Date.parse(res.paused_until) || 0 : 0;
   if (res && res.counts) {
     pl.seeding = true;
@@ -459,9 +475,10 @@ export async function fetchInbox() {
 }
 
 // remoteSeen is the Planner's node's open items already seen (by ref): this
-// node pushes no frame for that node's items, so a new one that waits on you
-// is notified from here (notify.js onNotify, in the background only). null
-// until the first list, which notifies nothing.
+// node pushes no frame for that node's items (nor, without its socket, for
+// its own), so a new one that waits on you is notified from here (notify.js
+// onNotify, in the background only). null until the first list, which
+// notifies nothing.
 let remoteSeen = null;
 function notifyNewRemote(node, items) {
   const refs = new Set(items.map(itemRef));
@@ -475,8 +492,9 @@ function notifyNewRemote(node, items) {
   remoteSeen = refs;
 }
 
-// REMOTE_INBOX_MS: with the Planner on another node its inbox is polled, for
-// the badge and the notifications this node's frames do not carry.
+// REMOTE_INBOX_MS: with the Planner on another node, or this page without
+// its socket (HTTP fallback), the inbox is polled, for the badge and the
+// notifications no frame carries then.
 const REMOTE_INBOX_MS = 15000;
 
 // ---- the Planner's node ----
@@ -511,6 +529,10 @@ function onHostChanged() {
   pl.briefs = [];
   pl.notes = [];
   pl.open = [];
+  pl.openState = 'unread';
+  // The last node's tasks are not this one's.
+  pl.tasksActive = null;
+  pl.tasksAll = -1;
   remoteSeen = null;
   hostWasOnline = hostOnline();
   paintHost();
@@ -1069,9 +1091,15 @@ async function loadEvents(reset) {
       }
       // The page is in: what it paints is no longer about to be replaced.
       pl.loading = false;
+      $('pl-stream')?.querySelector(':scope > .pl-stream-fail')?.remove();
       appendEvents(events, reset);
     }
-  } catch { /* the next tick retries */ } finally {
+  } catch {
+    // The next tick retries; an empty page meanwhile says it could not read,
+    // not that there is nothing.
+    const box = $('pl-stream');
+    if (gen === pl.gen && pl.host && box && !box.children.length) box.innerHTML = '<div class="pl-empty pl-stream-fail">加载失败，连上后自动刷新</div>';
+  } finally {
     if (gen === pl.gen) pl.loading = false;
   }
 }
@@ -1318,7 +1346,10 @@ onSessionsApplied(() => {
 // The ack was the last node's Planner's: its answer does not come here.
 nzBus.addEventListener('planner:node', () => { dropAck(); onHostChanged(); });
 readLocalPlanner();
-setInterval(() => { if (hostRemote()) fetchInbox(); }, REMOTE_INBOX_MS);
+setInterval(() => { if (hostRemote() || !wsm.isConnected()) fetchInbox(); }, REMOTE_INBOX_MS);
+// The socket given up on for now (a fallback poll starts): list at once, the
+// interval keeps it fresh until the next onReady.
+wsm.onStateChange((s, prev) => { if (s === WS_STATES.DISCONNECTED && prev !== WS_STATES.DISCONNECTED) fetchInbox(); });
 // A new socket holds no subscriptions: re-subscribe after the last event
 // taken, the history frame fills the gap.
 wsm.onReady(() => {

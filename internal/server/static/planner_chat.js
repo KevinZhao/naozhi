@@ -288,7 +288,8 @@ function paintComposer() {
     // A 单独聊 does not need the Planner running, only its page (the line
     // it leaves) and the node.
     const ok = !!(st.status && st.status.enabled) && hostOnline();
-    if (note) note.textContent = !hostOnline() ? '节点离线' : st.sending ? '发送中…' : '开一个单独聊：普通会话，不进 Planner 的上下文';
+    // Offline is said once, by the header and the note over the stream.
+    if (note) note.textContent = !hostOnline() ? '' : st.sending ? '发送中…' : '开一个单独聊：普通会话，不进 Planner 的上下文';
     input.placeholder = ok ? '问点别的…' : '';
     input.disabled = !ok;
     $('pl-attach').disabled = input.disabled || hostRemote();
@@ -299,7 +300,9 @@ function paintComposer() {
   }
   if (pick) pick.disabled = st.sending || !hostOnline() || !(st.status && st.status.enabled);
   const usable = plannerUsable();
-  if (note) note.textContent = !hostOnline() ? '节点离线' : !st.status ? '' : !st.status.enabled ? '未开启 Planner' : st.status.stopped ? '已停用 Planner' : st.sending ? '发送中…' : st.acked ? '收到，正在看' : '';
+  // Offline, off and stopped are said once, by the header's chip and the
+  // note over the stream (paintStatus); the input is disabled besides.
+  if (note) note.textContent = !hostOnline() || !st.status || !st.status.enabled || st.status.stopped ? '' : st.sending ? '发送中…' : st.acked ? '收到，正在看' : '';
   input.placeholder = usable || !st.status ? '交代、追问…' : '';
   input.disabled = (!!st.status || !hostOnline()) && !usable;
   // The uploads stay in this node's store, which the Planner's node cannot

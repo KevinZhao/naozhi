@@ -69,7 +69,7 @@ test('a new session keeps the draft of the one left', async ({ browser }) => {
     await open(page, A);
     await page.locator('#msg-input').click();
     await page.keyboard.type('draft of A');
-    await page.click('.hdr-btn[title="New Session"]');
+    await page.click('#btn-new-session');
     await page.locator('.cmd-palette-item', { hasText: 'myproject' }).first().click();
     await page.waitForSelector('.cmd-palette-overlay', { state: 'detached' });
     await expect.poll(() => page.evaluate(() => nz.test.selectedKey)).not.toBe(A);
@@ -209,7 +209,7 @@ test('an image pasted into a discovered session preview goes out with the takeov
     await page.goto(mock.url + '/dashboard');
     const dkey = '_discovered:4242:local';
     await card(page, dkey).click();
-    await expect(page.locator('#msg-input')).toHaveAttribute('data-placeholder', 'send a message to take over...');
+    await expect(page.locator('#msg-input')).toHaveAttribute('data-placeholder', '发消息接管这个会话…');
 
     await page.evaluate((b64) => {
       const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));

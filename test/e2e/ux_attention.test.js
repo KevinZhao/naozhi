@@ -413,7 +413,7 @@ test('with no model known the header still offers the model switch: a listed ses
     await expect(pop).toHaveCount(0);
 
     // A new session, before its first message: the pick is made here.
-    await page.click('.hdr-btn[title="New Session"]');
+    await page.click('#btn-new-session');
     await page.locator('.cmd-palette-item', { hasText: 'naozhi' }).first().click();
     await page.waitForSelector('.cmd-palette-overlay', { state: 'detached' });
     await expect(page.locator('.session-card.active')).toHaveCount(0);

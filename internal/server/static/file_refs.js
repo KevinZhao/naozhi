@@ -306,8 +306,8 @@ function applyFileRefResult(wrapEl, entry) {
   preview.type = 'button';
   preview.className = 'fr-btn fr-btn-preview';
   preview.textContent = ICONS.preview; // paired with ICONS.downArrow for symmetric arrow look
-  preview.setAttribute('aria-label', 'Preview ' + label);
-  preview.title = 'Preview ' + label;
+  preview.setAttribute('aria-label', '预览 ' + label);
+  preview.title = '预览 ' + label;
   preview.addEventListener('click', evt => {
     evt.preventDefault();
     evt.stopPropagation();
@@ -317,8 +317,8 @@ function applyFileRefResult(wrapEl, entry) {
   download.type = 'button';
   download.className = 'fr-btn fr-btn-download';
   download.textContent = ICONS.downArrow;
-  download.setAttribute('aria-label', 'Download ' + label);
-  download.title = 'Download ' + label;
+  download.setAttribute('aria-label', '下载 ' + label);
+  download.title = '下载 ' + label;
   download.addEventListener('click', evt => {
     evt.preventDefault();
     evt.stopPropagation();

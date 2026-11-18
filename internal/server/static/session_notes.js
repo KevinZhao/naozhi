@@ -31,7 +31,7 @@ const REPORT_REFETCH_MS = 3000;
 // one reconcile; within this of each other they are one event, one note.
 const PAIR_MS = 2 * 60000;
 
-const ITEM_KINDS = { decision: '待你决定', question: '提问', error: '错误', notice: '' };
+const ITEM_KINDS = { decision: '待你决定', question: '提问', error: '失败', notice: '' };
 const BAD = new Set(['waiting', 'stalled', 'failed']);
 // ITEM_STATE is the health state whose entry opens an item of a kind
 // (notify.HandleHealth); only those pair. The waiting and stalled items open

@@ -36,7 +36,7 @@ function mainEmptyHtml() {
           '<polygon points="22 2 15 22 11 13 2 9 22 2"/>' +
         '</svg></button>' +
     '</form>' +
-    '<div class="nz-hint-dim">默认目录 · general agent · 随时 <code>/cd</code> 切换目录，或用上方 <b>+</b> 开项目会话</div>' +
+    '<div class="nz-hint-dim">默认目录 · 通用助手 · 随时 <code>/cd</code> 切换目录，或用上方 <b>+</b> 开项目会话</div>' +
     // What needs you (home_attn.js fills it on 'home:shown').
     '<div id="home-attn" class="home-attn"></div>' +
     // 空闲态 Home：renderRecentSessionsPanel()
@@ -337,7 +337,7 @@ function renderServiceOverviewHtml() {
       '</div>' +
       '<div class="svc-stat">' +
         '<div class="svc-stat-value">' + stats.totalPrompts + '</div>' +
-        '<div class="svc-stat-label">已处理 prompt</div>' +
+        '<div class="svc-stat-label">已处理消息</div>' +
       '</div>' +
       costStatHtml(stats) +
     '</div>';
@@ -502,15 +502,14 @@ function showAPIError(action, status, raw, duration) {
 // / CORS / abort). Keep the Chinese verbiage identical to localizeAPIError's
 // status=0 arm so the user's mental model stays unified.
 function showNetworkError(action, err, duration) {
-  const detail = (err && err.message) ? err.message.slice(0, 120) : '';
-  const tail = detail ? '（' + detail + '）' : '';
-  const msg = (action ? action + '失败：' : '') + '网络错误' + tail;
-  showToast(msg, 'error', duration);
+  // The browser's own words ("Failed to fetch") go to the console, not the toast.
+  if (err && err.message) console.warn('network error', action || '', err.message);
+  showToast((action ? action + '失败：' : '') + '网络错误', 'error', duration);
 }
 
 // reconnectNow cancels any pending reconnect timer, resets the exponential
 // backoff so the next failure window starts tight again, and kicks an
-// immediate connect. Triggered by the sidebar-status "reconnect" button
+// immediate connect. Triggered by the #conn-status "重连" button
 // that surfaces after backoff has grown past 8s (see updateStatusBar).
 // Idempotent: double-click only results in one connect attempt because
 // wsm.connect short-circuits when the socket is already OPEN/CONNECTING.
@@ -520,7 +519,7 @@ function reconnectNow() {
     wsm.reconnectTimer = null;
   }
   wsm.backoff = 1000;
-  // No toast: the sidebar status row already flips to "connecting..." when
+  // No toast: the #conn-status pill already flips to "正在重连" when
   // wsm.connect() sets CONNECTING, and the outage/reconnect button update
   // through updateStatusBar. A toast here was redundant with that signal.
   wsm.connect();
@@ -550,11 +549,11 @@ async function copyText(text) {
   }
 }
 
-// Flash a button to "copied!" state for ~1.5s then revert.
+// Flash a button to "已复制" for ~1.5s then revert.
 function flashCopyButton(btn) {
-  btn.textContent = 'copied!';
+  btn.textContent = '已复制';
   btn.classList.add('copied');
-  setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 1500);
+  setTimeout(() => { btn.textContent = '复制'; btn.classList.remove('copied'); }, 1500);
 }
 
 function copyWithFeedback(btn, text) {
@@ -937,7 +936,7 @@ function showAuthModal(opts) {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML =
-    '<div class="modal" role="dialog" aria-modal="true" aria-label="Dashboard API token">' +
+    '<div class="modal" role="dialog" aria-modal="true" aria-label="登录 naozhi">' +
       // Brand lockup: `>_` mark + `naozhi` wordmark, pure text.
       '<div class="auth-brand">' +
         '<div class="ab-mark" aria-hidden="true">&gt;_</div>' +
@@ -946,7 +945,7 @@ function showAuthModal(opts) {
           '<span class="ab-tag">Claude Code on IM</span>' +
         '</div>' +
       '</div>' +
-      '<h3>Dashboard API Token</h3>' +
+      '<h3>登录</h3>' +
       // Onboarding hint: points first-time operators at dashboard_token in
       // config.yaml.
       '<div class="auth-hint">token 配置于 <code>config.yaml</code> 的 <code>dashboard_token</code> 字段</div>' +

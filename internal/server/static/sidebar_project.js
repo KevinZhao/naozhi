@@ -54,7 +54,7 @@ function sectionHeaderHtml(p) {
   const node = p.node || 'local';
   const fav = !!p.favorite;
   const starCls = fav ? 'sh-btn star-on' : 'sh-btn';
-  const starTitle = fav ? 'Unfavorite' : 'Favorite';
+  const starTitle = fav ? '取消收藏' : '收藏';
   const ck = node + ':' + p.name;
   const collapsed = sessionList.collapsedProjects.has(ck);
   const count = typeof p._sessionCount === 'number' ? p._sessionCount : 0;

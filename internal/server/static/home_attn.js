@@ -1,5 +1,6 @@
 // home_attn.js — the idle Home's summary of what needs you (UX review 5,
-// planner RFC §15.13 v0.7.0): one line "等你 N · 在跑 N · 失败 N" over
+// planner RFC §15.13 v0.7.0): one line "等你 N · 在跑 N · 失败 N" (a 0
+// left out) over
 // the latest three items that wait on you, each a click away from its card
 // or its session, in #home-attn of the empty main area (dashboard.html's
 // cold start and utilities.js mainEmptyHtml carry the slot alike).
@@ -69,7 +70,10 @@ export function homeAttnHtml() {
   const part = (cls, label, n) => '<span class="ha-n ha-n-' + cls + '">' + label + ' <b>' + n + '</b></span>';
   const parts = [];
   if (c.wait !== null) parts.push(part('wait', '等你', c.wait));
-  parts.push(part('run', HEALTH_STATES.active.label, c.running), part('fail', HEALTH_STATES.failed.label, c.failed));
+  // 在跑 / 失败 at 0 say nothing: a "失败 0" over a failed cron's item read as
+  // a contradiction (that count is the sessions').
+  if (c.running) parts.push(part('run', HEALTH_STATES.active.label, c.running));
+  if (c.failed) parts.push(part('fail', HEALTH_STATES.failed.label, c.failed));
   // The latest first: the left column keeps its own order, by kind.
   const items = c.wait ? waitingItems().sort((a, b) => created(b) - created(a)) : [];
   const more = items.length > SHOWN

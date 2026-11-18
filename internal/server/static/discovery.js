@@ -58,7 +58,7 @@ function discoveredPreviewHtml(base, typeLabel) {
     '<div class="input-area" id="input-area">' +
       '<div class="file-preview" id="file-preview"></div>' +
       '<div class="input-row">' +
-        '<div id="msg-input" contenteditable="true" role="textbox" aria-label="消息输入框" aria-multiline="true" data-placeholder="send a message to take over..." data-action-keydown="msg-input-key" data-action-compositionend="msg-input-compend"></div>' +
+        '<div id="msg-input" contenteditable="true" role="textbox" aria-label="消息输入框" aria-multiline="true" data-placeholder="发消息接管这个会话…" data-action-keydown="msg-input-key" data-action-compositionend="msg-input-compend"></div>' +
         '<button type="button" class="btn-icon btn-send" id="btn-send" data-action="msg-send" title="发送" aria-label="发送消息">' + ICONS.send + '</button>' +
       '</div>' +
     '</div>';

@@ -544,7 +544,7 @@ test('等你 cards and the "⋯" menu say only what is needed', async ({ browser
       const lines = await reason.evaluate((el) => Math.round(el.clientHeight / parseFloat(getComputedStyle(el).lineHeight)));
       expect(lines).toBe(2);
       const err = page.locator('.pl-card[data-id="in_e"]');
-      await expect(err.locator('.pl-kind')).toHaveText('错误');
+      await expect(err.locator('.pl-kind')).toHaveText('失败');
       await expect(err.locator('.pl-wait')).toHaveText(/^[34] 分钟前$/);
       await expect(err.locator('.pl-card-why')).toHaveCount(0);
       await expect(err.locator('.pl-card-meta')).toHaveText(/^myproject\s*打开$/);

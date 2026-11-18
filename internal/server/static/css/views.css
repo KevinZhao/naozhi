@@ -170,7 +170,8 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .tk-head{margin-bottom:0}
 .tk-sec{display:flex;flex-direction:column;gap:6px;min-width:0}
 .tk-sec-h{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);padding:0 2px}
-.tk-n{font-variant-numeric:tabular-nums;color:var(--nz-text-faint)}
+/* A count reads in its label's colour: text-faint is decorative-only (≈2:1). */
+.tk-n{font-variant-numeric:tabular-nums}
 .tk-sec-done>summary{cursor:pointer}
 .tk-sec-done>.tk-list{margin-top:6px}
 .tk-list{display:flex;flex-direction:column;gap:6px;min-width:0}
@@ -692,28 +693,17 @@ div.pl-lookup{max-width:560px;margin:8px 0;padding:8px 12px;border:1px solid var
    three cards fit a phone's sidebar beside it. */
 .session-list{flex:1;min-height:30%;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent}
 
-.sidebar-status{padding:6px 16px;border-top:1px solid var(--nz-border);font-size:var(--nz-fs-sm);color:var(--nz-text-mute);flex-shrink:0;max-height:40%;overflow-y:auto}
-.sidebar-status .status-row{display:flex;align-items:center;gap:8px;padding:4px 0}
-.sidebar-status .status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
-.sidebar-status .status-dot.ok,.sidebar-status .status-dot.connected{background:var(--nz-green)}
-.sidebar-status .status-dot.connecting,.sidebar-status .status-dot.authenticating{background:var(--nz-amber);animation:pulse var(--nz-dur-loop) ease-in-out infinite}
-.sidebar-status .status-dot.disconnected,.sidebar-status .status-dot.error{background:var(--nz-red)}
-.sidebar-status .status-dot.offline,.sidebar-status .status-dot.off,.sidebar-status .status-dot.unreachable{background:var(--nz-text-faint)}
-.sidebar-status .status-info{flex:1;min-width:0;overflow:hidden}
-.sidebar-status .status-ws{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-/* WS outage duration hint — surfaced alongside the reconnect button
-   so users see "已断开 N 秒/分" instead of a static pulsing dot. Amber to
-   mirror the .connecting pulse color. */
-.sidebar-status .status-outage{color:var(--nz-amber);font-size:var(--nz-fs-xs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
-/* Auth rate-limit countdown surfaced inline in the sidebar status row
-   instead of a top-of-screen toast. Amber mirrors .status-outage (this is
-   still a connection-health signal, not an operator-visible error). */
-.sidebar-status .status-authwait{color:var(--nz-amber);font-size:var(--nz-fs-xs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
-/* Manual reconnect button surfaced after WS backoff > 8s — see
-   updateStatusBar gating. Small/dim by default so the status row stays
-   low-chrome; hover pops to accent blue to signal it's actionable. */
-.sidebar-status .status-reconnect{flex-shrink:0;background:transparent;border:1px solid var(--nz-border);color:var(--nz-text-mute);font-family:inherit;font-size:var(--nz-fs-xs);padding:2px 8px;border-radius:var(--nz-radius-sm);cursor:pointer;line-height:1.4;min-height:22px}
-.sidebar-status .status-reconnect:hover{color:var(--nz-accent);border-color:var(--nz-accent);background:rgba(31,111,235,.08)}
+/* This page's own socket down (session_list.js updateStatusBar): one pill at
+   the bottom of the sidebar's column, over whichever view is open; hidden
+   while connected. Takes clicks only on its 重连. */
+.conn-status{position:fixed;left:68px;bottom:12px;z-index:var(--nz-z-toast);display:flex;align-items:center;gap:8px;max-width:calc(100vw - 88px);padding:4px 6px 4px 10px;background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);box-shadow:var(--nz-shadow-2);font-size:var(--nz-fs-sm);color:var(--nz-text-strong);pointer-events:none}
+.conn-status[hidden]{display:none}
+.conn-status .status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.conn-status .status-dot.connecting{background:var(--nz-amber);animation:pulse var(--nz-dur-loop) ease-in-out infinite}
+.conn-status .status-dot.disconnected{background:var(--nz-red)}
+.conn-status .status-ws{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:4px}
+.conn-status .status-reconnect{pointer-events:auto;flex-shrink:0;background:transparent;border:1px solid var(--nz-border);color:var(--nz-text-mute);font-family:inherit;font-size:var(--nz-fs-xs);padding:2px 8px;border-radius:var(--nz-radius-sm);cursor:pointer;line-height:1.4;min-height:22px}
+.conn-status .status-reconnect:hover{color:var(--nz-accent);border-color:var(--nz-accent);background:rgba(31,111,235,.08)}
 
 .session-card{position:relative;display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--nz-bg-2);cursor:pointer;transition:background .15s;border-left:3px solid transparent}
 .session-card:hover{background:var(--nz-bg-1)}
@@ -1071,7 +1061,7 @@ div.pl-lookup{max-width:560px;margin:8px 0;padding:8px 12px;border:1px solid var
 /* A run of API-retry rows shows as its last one, counted, with the time
    dividers between them (foldRetryRuns). */
 .event.nz-folded,.event-time-divider.nz-folded{display:none}
-.event-time-divider{text-align:center;color:var(--nz-text-dim);font-size:var(--nz-fs-xs);margin:16px 0 6px;opacity:.55;user-select:none;letter-spacing:.02em}
+.event-time-divider{text-align:center;color:var(--nz-text-dim);font-size:var(--nz-fs-xs);margin:16px 0 6px;user-select:none;letter-spacing:.02em}
 .empty-state{display:flex;align-items:center;justify-content:center;height:100%;color:var(--nz-text-dim);font-size:15px}
 /* Brand ">_" prompt motif for the quick-ask empty state. The underscore
    blinks like a terminal cursor — the one ambient brand signature, hit every

@@ -857,12 +857,8 @@ export function updateCardUnreadChip(card, count) {
   }
 }
 
-const STATUS_LABELS = { off: 'offline', connecting: 'connecting...', authenticating: 'authenticating...', connected: 'connected', disconnected: 'HTTP fallback', disconnected_retry: 'reconnecting...' };
-const REMOTE_LABELS = { ok: 'connected', error: 'error', offline: 'offline', unreachable: 'unreachable' };
-const VALID_DOT_CLASSES = { ok: 'ok', error: 'error', offline: 'offline', connecting: 'connecting', off: 'off', connected: 'connected', disconnected: 'disconnected', authenticating: 'authenticating', unreachable: 'unreachable' };
-
 // formatOutageDuration turns an elapsed millisecond count into a Chinese
-// label suitable for the sidebar-status hint. Pure function so a contract
+// label suitable for the #conn-status hint. Pure function so a contract
 // test can exercise it without driving the DOM or a WS state machine.
 // Under 5s returns '' (render-suppressed - transient reconnects don't
 // warrant a duration hint); otherwise rounds to seconds up to 90s, then
@@ -881,86 +877,40 @@ function formatOutageDuration(elapsedMs) {
   return remM > 0 ? '已断开 ' + h + ' 小时 ' + remM + ' 分' : '已断开 ' + h + ' 小时';
 }
 
+// updateStatusBar paints #conn-status, shown only while this page has no
+// socket to its own node: an outage past 5s (formatOutageDuration), with a
+// 重连 once the backoff passed 8s, or the auth rate-limit countdown. Online it
+// is hidden and takes no room. Remote nodes are not its business: the node picker marks theirs.
 export function updateStatusBar() {
-  const container = document.getElementById('sidebar-status');
-  // #sidebar-status 节点已在"底部让位给 session 列表"的迭代中删除。没节点就
-  // 早退，但仍要 reconcileSelectedNode()——选中的远程节点若已下线，需把
-  // selectedNode 拨回 local，否则 dispatch / 头部会指向一个消失的连接。
-  if (!container) { reconcileSelectedNode(); return; }
-  const wsUp = wsm.state === WS_STATES.CONNECTED;
-  // With multiple nodes the bar collapses to "current node only" to reclaim
-  // vertical space (the New Session connection picker lists every node's
-  // status). Single-node setups always show the local row.
-  const multi = isMultiNode();
-  const currentIsLocal = !multi || selection.node === 'local';
-
-  // Local node row (always first)
-  // Distinguish short reconnect vs stable polling mode
-  const statusKey = (wsm.state === WS_STATES.DISCONNECTED && wsm.backoff > 8000) ? 'disconnected' : (wsm.state === WS_STATES.DISCONNECTED ? 'disconnected_retry' : wsm.state);
-  const localLabel = STATUS_LABELS[statusKey] || wsm.state;
-  const dotKey = statusKey === 'disconnected' ? 'connecting' : wsm.state; // HTTP fallback = yellow dot
-
-  // UX P1 manual reconnect: when the connection has been down long enough
-  // that backoff has grown past 8s (statusKey "disconnected" — the
-  // "HTTP fallback" stable state), offer an explicit "reconnect" button
-  // so users don't have to wait for the automatic retry window. The
-  // short-retry state (backoff <= 8s, labeled "reconnecting...") stays
-  // button-free because the next auto-retry is already imminent.
-  const showReconnect = statusKey === 'disconnected';
-  const reconnectBtn = showReconnect
-    ? '<button type="button" class="status-reconnect" data-action="ws-reconnect" title="立即重连" aria-label="立即重连">重连</button>'
-    : '';
-
-  // Outage duration hint: only when we have a stamped disconnect
-  // timestamp (live outage) AND the state is not CONNECTED. A stale non-zero
-  // timestamp on CONNECTED would be a bug elsewhere; the state gate is
-  // defensive. Empty string from formatOutageDuration means "< 5s, suppress"
-  // so transient flickers don't spawn a noisy hint.
-  const outageLabel = (!wsUp && wsm._disconnectedSince > 0)
-    ? formatOutageDuration(Date.now() - wsm._disconnectedSince)
-    : '';
-
-  // Auth rate-limit countdown surfaces here (replaces the old top-of-screen
-  // toast). Rendered only while the gate is armed; _wsAuthCountdownTimer
-  // repaints this row every second. Suppresses the reconnect button while
-  // active — no point offering a manual dial that connect() will bounce.
-  const authWaitSecs = (wsm._authBlockUntil > 0)
-    ? Math.max(0, Math.ceil((wsm._authBlockUntil - Date.now()) / 1000))
-    : 0;
-  const authWaitLabel = authWaitSecs > 0
-    ? '鉴权过于频繁，' + authWaitSecs + 's 后自动重连'
-    : '';
-  const reconnectBtnGated = authWaitLabel ? '' : reconnectBtn;
-
-  let html = '';
-  if (currentIsLocal) {
-    html = '<div class="status-row">' +
-      '<span class="status-dot ' + (VALID_DOT_CLASSES[dotKey] || 'off') + '"></span>' +
-      '<div class="status-info">' +
-        '<div class="status-ws">' + esc(localLabel) + '</div>' +
-        (outageLabel ? '<div class="status-outage">' + esc(outageLabel) + '</div>' : '') +
-        (authWaitLabel ? '<div class="status-authwait">' + esc(authWaitLabel) + '</div>' : '') +
-      '</div>' + reconnectBtnGated +
-      '</div>';
-  } else {
-    // Multi-node view with a remote selected: show one row for the chosen
-    // remote. Other remotes are summarized by the selector's aggregated
-    // alert dot \u2014 users open the dropdown to see the full list.
-    const nd = sessionList.nodesData[selection.node] || {};
-    const status = nd.status || (wsUp ? 'offline' : 'unreachable');
-    const dotCls = VALID_DOT_CLASSES[status] || 'offline';
-    const label = REMOTE_LABELS[status] || status;
-    html = '<div class="status-row">' +
-      '<span class="status-dot ' + dotCls + '"></span>' +
-      '<div class="status-info">' +
-        '<div class="status-ws">' + esc(label) + '</div>' +
-      '</div></div>';
-  }
-
-  container.innerHTML = html;
-  // A remote flipping offline must also pull selectedNode back to local if it
-  // was pointing at that now-gone node, without waiting for the next poll.
   reconcileSelectedNode();
+  const el = document.getElementById('conn-status');
+  if (!el) return;
+  const wsUp = wsm.state === WS_STATES.CONNECTED;
+  const outage = (!wsUp && wsm._disconnectedSince > 0) ? formatOutageDuration(Date.now() - wsm._disconnectedSince) : '';
+  const authWaitSecs = wsm._authBlockUntil > 0 ? Math.max(0, Math.ceil((wsm._authBlockUntil - Date.now()) / 1000)) : 0;
+  const authWait = authWaitSecs > 0 ? '鉴权过于频繁，' + authWaitSecs + ' 秒后自动重连' : '';
+  const line = wsUp ? '' : (authWait || outage);
+  if (!line) {
+    el.hidden = true;
+    if (el.innerHTML) el.innerHTML = '';
+    return;
+  }
+  // Past 8s of backoff the next dial is far off: offer one now. Under it the
+  // retry is imminent and the dot pulses.
+  const stable = wsm.state === WS_STATES.DISCONNECTED && wsm.backoff > 8000;
+  const html = '<span class="status-dot' + (stable ? ' disconnected' : ' connecting') + '" aria-hidden="true"></span>' +
+    '<span class="status-ws">' + esc(line) + (authWait || stable ? '' : ' · 正在重连') + '</span>' +
+    (stable && !authWait ? '<button type="button" class="status-reconnect" data-action="ws-reconnect" title="立即重连">重连</button>' : '');
+  if (el.innerHTML !== html) el.innerHTML = html;
+  el.hidden = false;
+}
+
+// The outage line counts on while it is down; a tick every 5s also brings
+// it up once the first 5s are past.
+let statusTick = null;
+function armStatusTick(up) {
+  if (up) { if (statusTick) { clearInterval(statusTick); statusTick = null; } return; }
+  if (!statusTick) statusTick = setInterval(updateStatusBar, 5000);
 }
 
 /* ===== WebSocket state: status bar, fallback pollers, announcements ===== */
@@ -969,6 +919,7 @@ export function updateStatusBar() {
 // status bar; CONNECTED stops the REST fallback pollers, DISCONNECTED arms them.
 function wsStateChanged(s, prev) {
   updateStatusBar();
+  armStatusTick(s === WS_STATES.CONNECTED);
   if (s === WS_STATES.CONNECTED) {
     // Sighted users see the dot flip; AT users get the
     // transition announced politely. Only announce when it's a real

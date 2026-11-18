@@ -68,6 +68,8 @@ test('health table lists units and a row opens its session', async ({ page }) =>
   await expect(section).not.toContainText('无人负责');
   // Nothing on the dashboard to open for these: plain text, no button.
   await expect(lost.locator('.hl-open')).toHaveCount(0);
+  // A remote unit the dashboard has no title for reads by its key.
+  await expect(lost.locator('.hl-name')).toHaveText('dashboard:direct:x:general');
   // A cron job reads by its title; naozhi's own units belong to no workspace.
   await expect(section.locator('tr[data-unit="cron:nightly"] .hl-name')).toHaveText('夜间构建');
   await expect(section.locator('tr[data-unit="planner:main"] .hl-col-ws')).toHaveText('—');
@@ -77,4 +79,21 @@ test('health table lists units and a row opens its session', async ({ page }) =>
   await first.locator('.hl-open').click();
   await expect(page.locator('#system-main')).toBeHidden();
   await expect(page.locator(`.session-card.active[data-key="${KEY}"]`)).toHaveCount(1);
+});
+
+test('a remote unit with no title reads by its key, a cron job by its name', async ({ browser }) => {
+  const units = ['cron:nightly', 'task:abc', 'feishu:direct:alice:general'].map((k) => (
+    { id: 'gpu-box/' + k, kind: 'remote', source: 'node:gpu-box', coverage: 'snapshot', state: 'lost', evidence: 'node gpu-box unreachable', since: iso(now - 120000) }));
+  const m = await startMockServer({ systemHealth: { at: iso(now - 20000), units } });
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${m.url}/dashboard`);
+    await page.waitForSelector('.session-card');
+    await page.click('#abnav-system');
+    const names = page.locator('.sys-health tbody tr .hl-name');
+    await expect(names).toHaveText(['nightly', 'task:abc', 'feishu:direct:alice:general']);
+  } finally {
+    await page.close();
+    m.server.close();
+  }
 });

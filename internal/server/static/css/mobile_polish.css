@@ -21,7 +21,7 @@
   /* manual-reconnect chip was 22px tall — impossible to tap
      reliably on a phone right after a WS blip. Only grow the hit-box on
      coarse pointers so desktop keeps the compact 11px / 22px chrome. */
-  .sidebar-status .status-reconnect{min-width:44px;min-height:44px;padding:8px 12px;font-size:var(--nz-fs-sm2)}
+  .conn-status .status-reconnect{min-width:44px;min-height:44px;padding:8px 12px;font-size:var(--nz-fs-sm2)}
   /* cron-job kebab + cron-drawer header icon buttons were
      28/32px hard targets with no coarse bump — below the WCAG 2.5.5 floor.
      Widen only the hit-box on touch; the glyph/footprint is unchanged. */
@@ -124,8 +124,10 @@
    box-shadow, z-index, slide transition) so the dashboard has a single
    "drawer" visual vocabulary, and reuses .main-header + .input-area token
    spacing so the input/header feel matches the main transcript. */
-.aside-drawer{position:fixed;top:0;right:0;bottom:0;width:min(420px,94vw);background:var(--nz-bg-1);border-left:1px solid var(--nz-border);z-index:var(--nz-z-drawer);display:flex;flex-direction:column;transform:translateX(100%);transition:transform .2s var(--nz-ease-out);box-shadow:var(--nz-shadow-drawer)}
-.aside-drawer.visible{transform:translateX(0)}
+.aside-drawer{position:fixed;top:0;right:0;bottom:0;width:min(420px,94vw);background:var(--nz-bg-1);border-left:1px solid var(--nz-border);z-index:var(--nz-z-drawer);display:flex;flex-direction:column;transform:translateX(100%);visibility:hidden;transition:transform .2s var(--nz-ease-out),visibility 0s .2s;box-shadow:var(--nz-shadow-drawer)}
+/* Closed it is hidden once slid out (as .fv-drawer.hidden): out of the Tab
+   order and the accessibility tree. */
+.aside-drawer.visible{transform:translateX(0);visibility:visible;transition-delay:0s}
 /* Header shares .fv-header's proportions (10px 14px padding, min-height 48px,
    13px title). Background inherits .aside-drawer bg-1; no separate color so
    the header melts into the drawer body like file-viewer does. */

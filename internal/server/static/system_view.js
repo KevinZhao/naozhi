@@ -198,11 +198,13 @@ function healthUnitName(u, target) {
   if (u.id === 'sys:scout') return '巡检';
   if (target && target.title) return target.title;
   if (u.name) return u.name;
-  if (u.kind === 'remote') return u.id.slice(u.id.indexOf('/') + 1);
-  if (u.kind === 'sysession') return u.id.replace(/^sys:/, '');
-  if (u.kind === 'cron') return u.id.replace(/^cron:/, '');
-  if (u.kind === 'external') return u.id.replace(/^external:/, '');
-  return u.id;
+  // A remote unit is any router key on its node: read it as the local
+  // one would be, so a cron job keeps its name and rows stay distinct.
+  const id = u.kind === 'remote' ? u.id.slice(u.id.indexOf('/') + 1) : u.id;
+  if (u.kind === 'sysession' || id.startsWith('sys:')) return id.replace(/^sys:/, '');
+  if (u.kind === 'cron' || id.startsWith('cron:')) return id.replace(/^cron:/, '');
+  if (u.kind === 'external') return id.replace(/^external:/, '');
+  return id;
 }
 
 // custodyStopped reports whether custody gave up on unit u: its state cell
