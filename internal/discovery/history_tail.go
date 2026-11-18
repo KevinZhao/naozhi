@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -121,8 +122,7 @@ func resolveJSONLPath(claudeDir, sessionID, cwd string) (string, error) {
 // parseTail does the reverse chunked read + parse, accumulating lines from
 // newest to oldest until `limit` entries are collected or the file head is
 // reached; with beforeMS > 0, entries at Time >= beforeMS are skipped without
-// counting. `carry` holds a line spanning the chunk boundary and is prepended
-// to the next (older) chunk; the result is reversed so callers see chronology.
+// counting. The result is reversed so callers see chronology.
 func parseTail(ctx context.Context, f *os.File, size int64, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
 	return parseTailOpts(ctx, f, size, beforeMS, limit, tailOpts{toolImages: true})
 }
@@ -135,6 +135,23 @@ type tailOpts struct {
 	maxUsers   int
 }
 
+// tailBufPool holds parseTailOpts's buffers; one grown past tailBufPoolMax by
+// a long line is left to the GC rather than pinned.
+var tailBufPool = sync.Pool{New: func() any {
+	b := make([]byte, tailChunkSize)
+	return &b
+}}
+
+const tailBufPoolMax = 1024 * 1024
+
+// parseTailOpts is parseTail with tailOpts.
+//
+// One buffer holds the bytes still to parse at buf[start:stop]: each older
+// chunk is read in front of them at buf[start-chunk:start], so a line
+// spanning chunks is never re-joined, and the buffer grows by doubling
+// (copying only the unparsed carry) when a long line uses up the room.
+// parseHistoryLine copies what it keeps out of the line, so the buffer is
+// reused.
 func parseTailOpts(ctx context.Context, f *os.File, size int64, beforeMS int64, limit int, opts tailOpts) ([]clievent.EventEntry, error) {
 	// Over-collect slightly: assistant lines may contribute 0 text blocks
 	// (tool_use / thinking filtered out), so a small cushion avoids a
@@ -144,11 +161,20 @@ func parseTailOpts(ctx context.Context, f *os.File, size int64, beforeMS int64, 
 		target = limit + 8
 	}
 
+	bp := tailBufPool.Get().(*[]byte)
+	defer func() {
+		if cap(*bp) <= tailBufPoolMax {
+			tailBufPool.Put(bp)
+		}
+	}()
+	buf := *bp
+
 	var (
 		entries = make([]clievent.EventEntry, 0, target)
-		carry   []byte // unterminated head fragment from prior chunk
 		offset  = size
-		buf     = make([]byte, tailChunkSize)
+		// buf[start:stop] is the carry: the unterminated head fragment of a
+		// line whose start lives in an older chunk.
+		start, stop = len(buf), len(buf)
 	)
 	// scanBudget bounds the bytes touched when stat.Size() lies (FUSE / /proc)
 	// or every line is rejected; normal paths stop via len(entries) >= target
@@ -175,22 +201,41 @@ func parseTailOpts(ctx context.Context, f *os.File, size int64, beforeMS int64, 
 		offset -= chunkSize
 		scanBudget -= chunkSize
 
-		readBuf := buf[:chunkSize]
-		if _, err := f.ReadAt(readBuf, offset); err != nil && !errors.Is(err, io.EOF) {
+		// Make room for the chunk in front of the carry: move the carry to
+		// the buffer's end when both fit, else double the buffer.
+		n := int(chunkSize)
+		if start < n {
+			carryLen := stop - start
+			if carryLen+n > len(buf) {
+				grownLen := 2 * len(buf)
+				for grownLen < carryLen+n {
+					grownLen *= 2
+				}
+				grown := make([]byte, grownLen)
+				copy(grown[grownLen-carryLen:], buf[start:stop])
+				buf = grown
+				*bp = buf
+			} else {
+				copy(buf[len(buf)-carryLen:], buf[start:stop])
+			}
+			start, stop = len(buf)-carryLen, len(buf)
+		}
+		start -= n
+		got, err := f.ReadAt(buf[start:start+n], offset)
+		if err != nil && !errors.Is(err, io.EOF) {
 			return nil, fmt.Errorf("readAt offset=%d size=%d: %w", offset, chunkSize, err)
 		}
+		// A short read (the file shrank after Stat) leaves the rest of the
+		// chunk unread; the pooled buffer may hold another transcript's lines
+		// there, so zero it as a fresh buffer would be. Zeros hold no '\n',
+		// so they only spoil the line they fall in.
+		clear(buf[start+got : start+n])
 
-		// Join this chunk with the fragment carried from the newer chunk. When
+		// This chunk followed by the carry from the newer chunk. When
 		// offset > 0 the first line of `chunk` may be partial (its head lives
 		// in an older chunk) and becomes the next carry.
-		chunk := readBuf
-		if len(carry) > 0 {
-			joined := make([]byte, 0, len(chunk)+len(carry))
-			joined = append(joined, chunk...)
-			joined = append(joined, carry...)
-			chunk = joined
-			carry = nil
-		}
+		chunk := buf[start:stop]
+		carried := false
 
 		// Walk backward via LastIndexByte('\n') rather than bytes.Split, which
 		// allocates a header for every line even when we exit after a few.
@@ -202,18 +247,17 @@ func parseTailOpts(ctx context.Context, f *os.File, size int64, beforeMS int64, 
 			nl := bytes.LastIndexByte(chunk[:end], '\n')
 			lineStart := nl + 1 // 0 when no newline left in remaining prefix
 			// Before the file head, the prefix before the first '\n' is a partial
-			// line whose head lives in an older chunk: stash as carry, stop.
+			// line whose head lives in an older chunk: keep it as carry, stop.
 			if nl < 0 && offset > 0 {
 				// Cap carry growth so a pathologically long line (corrupt JSONL
 				// with MBs of base64 and no newline) cannot drive this to O(N)
 				// RAM. Past the cap the prefix is dropped; it would fail
 				// parseHistoryLine anyway.
 				const maxCarryBytes = 4 * 1024 * 1024
-				if len(carry)+end > maxCarryBytes {
-					carry = nil
-					break
+				if end <= maxCarryBytes {
+					stop = start + end
+					carried = true
 				}
-				carry = append(carry, chunk[:end]...)
 				break
 			}
 			line := chunk[lineStart:end]
@@ -239,6 +283,9 @@ func parseTailOpts(ctx context.Context, f *os.File, size int64, beforeMS int64, 
 			if done() {
 				break
 			}
+		}
+		if !carried {
+			start, stop = len(buf), len(buf)
 		}
 	}
 
