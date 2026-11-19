@@ -70,6 +70,10 @@ type Promise struct {
 	// RemindedAt is when the due reminder went out, so it goes out once
 	// across restarts.
 	RemindedAt time.Time `json:"reminded_at,omitzero"`
+	// WakeOwed marks a due promise with a close condition whose wake the
+	// Planner could not take (Waker): it is woken again at each check until
+	// it takes one or the promise closes, never reminded again.
+	WakeOwed bool `json:"wake_owed,omitempty"`
 	// Task is the dispatched session the Planner made it for in the reply
 	// that dispatched it, before it could know the session's key.
 	Task string `json:"task,omitempty"`
@@ -112,6 +116,15 @@ type Reminder interface {
 	// Closed is called when the Planner or the user closes p; a pure
 	// reminder done by its reminder keeps what the reminder opened.
 	Closed(p Promise)
+}
+
+// Waker is a Reminder that also wakes the Planner on a due promise that is
+// not a pure reminder: its close condition is the Planner's to work on, so
+// a reminder to the user alone leaves it undone. Wake returns an error when
+// the Planner did not take it (off, stopped, starting); the store then owes
+// it the wake and tries again at each check.
+type Waker interface {
+	Wake(p Promise) error
 }
 
 // Errors the API returns.
@@ -285,6 +298,7 @@ func (s *Store) Close(id string, by Source, why string) error {
 	}
 	s.items[i].State, s.items[i].ClosedAt = StateClosed, now
 	s.items[i].ClosedBy, s.items[i].Why = by, textutil.TruncateRunes(strings.TrimSpace(why), textRunes)
+	s.items[i].WakeOwed = false
 	p, r := s.items[i], s.reminder
 	s.saveLocked(now)
 	s.mu.Unlock()
@@ -371,30 +385,59 @@ func (s *Store) safeCheck() {
 }
 
 // Check reminds of the open promises whose due time arrived and that were
-// not reminded of yet. Without a reminder nothing is marked, so the first
-// check after one is bound still reminds.
+// not reminded of yet, and wakes the Planner on those that are not pure
+// reminders (Waker), again on those whose wake it did not take. Without a
+// reminder nothing is marked, so the first check after one is bound still
+// reminds.
 func (s *Store) Check() {
 	now := s.cfg.Now()
 	s.mu.Lock()
 	r := s.reminder
-	var due []Promise
+	var due, owed []Promise
 	if r != nil {
 		for _, p := range s.items {
-			if p.State == StateOpen && !p.Due.IsZero() && !now.Before(p.Due) && p.RemindedAt.IsZero() {
+			switch {
+			case p.State != StateOpen:
+			case !p.Due.IsZero() && !now.Before(p.Due) && p.RemindedAt.IsZero():
 				due = append(due, p)
+			case p.WakeOwed:
+				owed = append(owed, p)
 			}
 		}
 	}
 	s.mu.Unlock()
-	if len(due) == 0 {
+	if len(due) == 0 && len(owed) == 0 {
 		return
 	}
 	slices.SortStableFunc(due, byDue)
+	slices.SortStableFunc(owed, byDue)
+	w, _ := r.(Waker)
+	// woke is each woken promise's outcome: nil once the Planner took it.
+	woke := map[string]error{}
 	// Remind before marking: a crash in between reminds again on restart,
 	// and the inbox keeps one open item per promise.
 	for _, p := range due {
 		r.Due(p)
 		s.record(p, "promise_due")
+		if w != nil && !reminderOnly(p) {
+			err := w.Wake(p)
+			woke[p.ID] = err
+			if err != nil {
+				slog.Warn("promise: due wake not taken by the Planner; owed until it can", "id", p.ID, "err", err)
+			}
+		}
+	}
+	// Owed wakes go at each check: the Planner stopped or starting takes
+	// one once it can. Only the first failure is logged.
+	for _, p := range owed {
+		if w == nil {
+			continue
+		}
+		err := w.Wake(p)
+		woke[p.ID] = err
+		if err == nil {
+			slog.Info("promise: owed due wake taken by the Planner", "id", p.ID)
+		}
 	}
 	var closed, done []Promise
 	s.mu.Lock()
@@ -411,6 +454,13 @@ func (s *Store) Check() {
 		case reminderOnly(*p):
 			p.State, p.ClosedAt, p.ClosedBy, p.Why = StateClosed, now, SourceAuto, "到点提醒后自动完成"
 			done = append(done, *p)
+		}
+	}
+	for id, err := range woke {
+		i := slices.IndexFunc(s.items, func(p Promise) bool { return p.ID == id })
+		if i >= 0 {
+			// Closed meanwhile: nothing is owed any more.
+			s.items[i].WakeOwed = err != nil && s.items[i].State == StateOpen
 		}
 	}
 	s.saveLocked(now)

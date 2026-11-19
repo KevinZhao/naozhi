@@ -1785,3 +1785,43 @@ func TestReportLineAnsweredByStatus(t *testing.T) {
 		t.Errorf("task = %+v, want done", st)
 	}
 }
+
+// A due promise's wake is a turn from the reminder source: no outside
+// content and no user words (§15.6, D98). Its dispatch runs and its status
+// closes the promise, so the Planner can keep the promise it woke for; the
+// blocks only the user's turn runs (relay, remember, park, a dispatch with
+// the user's words) are refused in one receipt.
+func TestReminderTurnRuns(t *testing.T) {
+	r, g, _, side, dir := newRunner(t)
+	proms := promise.New(promise.Config{})
+	r.cfg.Promises = proms
+	r.cfg.Tasks = task.New(task.Config{Sessions: side, Promises: proms})
+	r.cfg.Relay = func(string, string) error { t.Error("relayed from a reminder turn"); return nil }
+	p, err := proms.Add(promise.Promise{Text: "派出 CPU 容量快照补拍", Due: time.Now(), CloseWhen: "补拍会话已派出"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := filepath.Base(dir)
+	r.cfg.Outside = func() string { return "" }
+	r.cfg.Words = func() []Words { return nil }
+	r.Result(r.cfg.Planner, "到点了，派出补拍。\n"+
+		block(`{"type":"dispatch","workspace":"`+ws+`","title":"CPU 快照补拍","model":"","message":"补拍 CPU 容量快照"}`)+"\n"+
+		block(`{"type":"status","task":"`+p.ID+`","state":"done","why":"补拍会话已派出"}`)+"\n"+
+		block(`{"type":"dispatch","workspace":"`+ws+`","title":"带原话","model":"","message":"x","with_user_words":true}`)+"\n"+
+		block(`{"type":"relay","key":"task:ab12","text":"用户同意合并"}`)+"\n"+
+		block(`{"type":"remember","workspace":"global","name":"cpu","text":"补拍规则"}`)+"\n"+
+		block(`{"type":"park","text":"补拍","source":"`+p.ID+`"}`))
+	r.handle(<-r.ch)
+	if len(g.spawned) != 1 || g.spawns[0].Title != "CPU 快照补拍" {
+		t.Errorf("spawned %q, want only the plain dispatch", g.spawned)
+	}
+	if got, _ := proms.Get(p.ID); got.State != promise.StateClosed || got.ClosedBy != promise.SourcePlanner {
+		t.Errorf("promise %+v, want closed by the Planner", got)
+	}
+	if len(g.unrun) != 1 || strings.Count(g.unrun[0], "）：这一轮不是用户发起的") != 4 || !strings.Contains(g.unrun[0], "有 4 个动作块没有执行") {
+		t.Errorf("unrun receipts = %q, want one refusing the four user-only blocks", g.unrun)
+	}
+	if len(g.refused) != 0 {
+		t.Errorf("refusal receipts = %q: a reminder turn is not outside content", g.refused)
+	}
+}

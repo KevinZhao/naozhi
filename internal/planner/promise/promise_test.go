@@ -222,3 +222,89 @@ func TestTitle(t *testing.T) {
 		}
 	}
 }
+
+// fakeWaker is a Reminder and Waker: err is what each wake answers.
+type fakeWaker struct {
+	fakeReminder
+	woke []string
+	err  error
+}
+
+func (w *fakeWaker) Wake(p Promise) error {
+	w.woke = append(w.woke, p.ID)
+	return w.err
+}
+
+// A due promise with a close condition wakes the Planner once; a pure
+// reminder or an undated one does not.
+func TestDueWakesPlanner(t *testing.T) {
+	s, clock, _ := newTest(t, "")
+	w := &fakeWaker{}
+	s.SetReminder(w)
+	cond := mustAdd(t, s, Promise{Text: "派出补拍", Due: t0.Add(time.Minute), CloseWhen: "补拍会话已派出"})
+	only := mustAdd(t, s, Promise{Text: "交周报", Due: t0.Add(time.Minute)})
+	mustAdd(t, s, Promise{Text: "盯 CI", CloseWhen: "CI 绿了"})
+	clock.advance(time.Minute)
+	s.Check()
+	s.Check()
+	if !slices.Equal(w.woke, []string{cond.ID}) {
+		t.Fatalf("woke %q, want only %q", w.woke, cond.ID)
+	}
+	if !slices.Equal(w.due, []string{"派出补拍", "交周报"}) {
+		t.Errorf("reminded %q", w.due)
+	}
+	if got, _ := s.Get(only.ID); got.State != StateClosed {
+		t.Errorf("pure reminder %+v not done", got)
+	}
+	if got, _ := s.Get(cond.ID); got.WakeOwed || got.State != StateOpen {
+		t.Errorf("woken promise %+v", got)
+	}
+}
+
+// A wake the Planner did not take is owed: the next checks wake again,
+// without reminding the user again, until one is taken; the debt is kept
+// across restarts and dropped once the promise closes.
+func TestDueWakeOwed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "promises.json")
+	s, clock, _ := newTest(t, path)
+	w := &fakeWaker{err: errors.New("已停用 Planner")}
+	s.SetReminder(w)
+	p := mustAdd(t, s, Promise{Text: "派出补拍", Due: t0.Add(time.Minute), CloseWhen: "补拍会话已派出"})
+	clock.advance(time.Minute)
+	s.Check()
+	s.Check()
+	if got, _ := s.Get(p.ID); !got.WakeOwed {
+		t.Fatalf("failed wake not owed: %+v", got)
+	}
+	if len(w.woke) != 2 || len(w.due) != 1 {
+		t.Fatalf("woke %q, reminded %q: want 2 wakes, 1 reminder", w.woke, w.due)
+	}
+
+	// Restart: the debt is read back and paid once the Planner takes it.
+	s2 := New(Config{Path: path, Now: clock.Now})
+	w2 := &fakeWaker{err: ErrInvalid}
+	s2.SetReminder(w2)
+	s2.Check()
+	w2.err = nil
+	s2.Check()
+	s2.Check()
+	if len(w2.woke) != 2 || len(w2.due) != 0 {
+		t.Fatalf("after restart woke %q, reminded %q: want 2 wakes, no reminder", w2.woke, w2.due)
+	}
+	if got, _ := s2.Get(p.ID); got.WakeOwed {
+		t.Errorf("taken wake still owed: %+v", got)
+	}
+
+	// Closed with a wake owed: nothing more is woken.
+	q := mustAdd(t, s2, Promise{Text: "第二件", Due: clock.Now(), CloseWhen: "做完"})
+	w2.err = errors.New("正在启动 Planner")
+	s2.Check()
+	if err := s2.Close(q.ID, SourceUser, ""); err != nil {
+		t.Fatal(err)
+	}
+	n := len(w2.woke)
+	s2.Check()
+	if got, _ := s2.Get(q.ID); got.WakeOwed || len(w2.woke) != n {
+		t.Errorf("closed promise %+v woken again (%d → %d)", got, n, len(w2.woke))
+	}
+}
