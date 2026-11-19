@@ -7,6 +7,18 @@
 > **关联 issue**: #1198 `[DEADCODE-5] Attachment GC subsystem is wired in code but never invoked at runtime`
 > **前置 RFC**: [attachment-refcount.md](attachment-refcount.md)(双 TTL refcount 算法)、[system-session.md](system-session.md)(Daemon 框架)
 
+## 0.0 工具截图的自动清理（2026-11-19，owner 决定保留）
+
+本 daemon 管的是用户上传的附件，默认关闭并只做演练，这一点不变。另有一项独立的清理：会话里工具结果的截图（`<状态根>/planner/attachments/<日期>/`）由 `datadir.Sweeper` 每小时跑一次 `tool-images` 任务（`cmd/naozhi/main_helpers.go`，#3997）。规则如下：
+
+- 只删超过 7 天、并且没有任何 `events/*.log` 引用的截图，连同它的 `.meta`；
+- 被引用的一律保留；
+- 事件日志读不出或不存在时，这一轮什么都不删。
+
+截图原件仍以 base64 留在 Claude 的 transcript 里。
+
+依据（11-18 实测）：这个目录 414 MB、2367 张图，其中 93%（约 390 MB）已没有任何事件日志引用，dashboard 也没有入口能看到它们；清理后约剩 30 MB，一轮扫描中位 34 ms。这是一项默认开启的保留期变更，owner 11-19 确认保留。
+
 ## 0.1 v2.1 变更摘要(相对 v2 — 枚举完整性复审)
 
 v2 把枚举从"活跃 session"改为"已知 workspace 根",消除了 prune-session 缺口。但复审发现 v2 的 root 集合定义仍不完整,且引入若干新约束:
