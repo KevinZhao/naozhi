@@ -793,7 +793,7 @@ func main() {
 	notifier.SetHealth(healthMon)
 	notifier.SetCustody(custodian.Covers)
 	go notifier.Run(ctx)
-	promises.SetReminder(wireup.PromiseReminder{Notify: notifier, Note: plannerAgent.Note})
+	promises.SetReminder(wireup.PromiseReminder{Notify: notifier, Note: plannerAgent.Note, Planner: plannerAgent.Wake})
 	go promises.Run(ctx)
 	// The Planner's action blocks (§6.2): parsed from planner:main's turn
 	// results; a dispatch starts a task: session at once (D88), and a task left
