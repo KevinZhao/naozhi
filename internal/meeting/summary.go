@@ -60,7 +60,7 @@ func summaryPrompt(m Meeting, transcript string, clues Clues, now time.Time) str
 	if len(clues.Workspaces) > 0 || clues.PlannerDir != "" {
 		b.WriteString("写之前先参照用户的项目核对：从文字稿判断会上谈到了哪些项目，到对应工作区里读与话题相关的 README、CLAUDE.md、docs 下的文件，")
 		b.WriteString("以及下面线索目录里的 issue 列表与任务摘要，用来核对人名、项目名、术语的写法和进展；文字稿里没提到的项目不要硬扯。只读，不改任何文件，读取控制在二十次以内。")
-		b.WriteString("用到的线索在纪要末尾单列一节「## 相关项目与线索」，每条写明来源路径；没有就不写这一节。\n\n<clues>\n")
+		b.WriteString("用到的线索在纪要末尾单列一节「## 相关项目与线索」，每条写明来源路径；没有就不写这一节，也不要解释为什么没写。\n\n<clues>\n")
 		for _, w := range clues.Workspaces {
 			fmt.Fprintf(&b, "工作区 %s：%s\n", w.Name, w.Path)
 		}
