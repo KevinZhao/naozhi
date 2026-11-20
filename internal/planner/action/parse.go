@@ -32,6 +32,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/naozhi/naozhi/internal/planner/front"
 	"github.com/naozhi/naozhi/internal/planner/promise"
 	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -89,11 +90,13 @@ const (
 	TypePark     Type = "park"
 	TypeHalt     Type = "halt"
 	TypeCancel   Type = "cancel"
+	TypeRoutine  Type = "routine"
+	TypeFront    Type = "front"
 )
 
 // allTypes lists the block types as the refusal of an unknown one names
 // them.
-const allTypes = "dispatch、promise、ask、status、notify、custody、relay、remember、lookup、park、halt、cancel"
+const allTypes = "dispatch、promise、ask、status、notify、custody、relay、remember、lookup、park、halt、cancel、routine、front"
 
 // Dispatch asks for a session in a workspace.
 type Dispatch struct {
@@ -309,9 +312,98 @@ func (l *Lookup) validate() error {
 	return nil
 }
 
+// Routine asks for a standing task (例行关注, §15.17, D131): Prompt run in
+// Workspace on Schedule (a five-field cron expression, or @daily / @every
+// 6h), each run a fresh session, its result in the morning brief when it
+// changed. With ID it switches an existing one off or back on instead. Only
+// a turn the user started may make or switch one: a mail asking for a
+// standing task is not the user asking.
+type Routine struct {
+	Title     string `json:"title,omitempty"`
+	Workspace string `json:"workspace,omitempty"`
+	Schedule  string `json:"schedule,omitempty"`
+	Prompt    string `json:"prompt,omitempty"`
+	// ID names an existing routine (the snapshot lists them by it), Off
+	// whether to pause it (true) or run it again (false).
+	ID  string `json:"id,omitempty"`
+	Off *bool  `json:"off,omitempty"`
+}
+
+const (
+	routineScheduleBytes = 100
+	routinePromptRunes   = 8000
+	routineIDRunes       = 64
+)
+
+func (t *Routine) validate() error {
+	t.Title, t.Workspace, t.Schedule = strings.TrimSpace(t.Title), strings.TrimSpace(t.Workspace), strings.TrimSpace(t.Schedule)
+	t.Prompt, t.ID = strings.TrimSpace(t.Prompt), strings.TrimSpace(t.ID)
+	if t.ID != "" {
+		switch {
+		case utf8.RuneCountInString(t.ID) > routineIDRunes:
+			return errors.New("routine 的 id 太长")
+		case t.Off == nil:
+			return errors.New("带 id 的 routine 要写 off（true 暂停，false 恢复）")
+		case t.Title != "" || t.Workspace != "" || t.Schedule != "" || t.Prompt != "":
+			return errors.New("带 id 的 routine 只能暂停或恢复，改内容请用户在“自动化”里改")
+		}
+		return nil
+	}
+	switch {
+	case t.Off != nil:
+		return errors.New("off 只和 id 一起用")
+	case t.Title == "":
+		return errors.New("routine 缺少 title")
+	case utf8.RuneCountInString(t.Title) > titleRunes:
+		return fmt.Errorf("title 超过 %d 字", titleRunes)
+	case t.Workspace == "":
+		return errors.New("routine 缺少 workspace")
+	case utf8.RuneCountInString(t.Workspace) > workspaceRefRunes:
+		return errors.New("workspace 太长")
+	case t.Schedule == "":
+		return errors.New("routine 缺少 schedule（五段 cron 表达式，如 0 9 * * 1-5）")
+	case len(t.Schedule) > routineScheduleBytes:
+		return errors.New("schedule 太长")
+	case t.Prompt == "":
+		return errors.New("routine 缺少 prompt")
+	case utf8.RuneCountInString(t.Prompt) > routinePromptRunes:
+		return fmt.Errorf("prompt 超过 %d 字", routinePromptRunes)
+	}
+	return nil
+}
+
+// Front writes one line of work into the ledger (工作线台账, §15.17, D132):
+// the front ID names is made (with Name) or changed field by field. State,
+// Next and Waiting left out stay as they are; "" clears one.
+type Front struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name,omitempty"`
+	State    *string  `json:"state,omitempty"`
+	Next     *string  `json:"next,omitempty"`
+	Waiting  *string  `json:"waiting,omitempty"`
+	Sessions []string `json:"sessions,omitempty"`
+	Decision string   `json:"decision,omitempty"`
+	Close    bool     `json:"close,omitempty"`
+}
+
+// Update is f as the ledger takes it.
+func (f Front) Update() front.Update {
+	return front.Update{ID: f.ID, Name: f.Name, State: f.State, Next: f.Next, Waiting: f.Waiting,
+		Sessions: f.Sessions, Decision: f.Decision, Close: f.Close}
+}
+
+func (f *Front) validate() error {
+	u := f.Update()
+	if err := u.Validate(); err != nil {
+		return err
+	}
+	f.ID, f.Name, f.Decision = u.ID, u.Name, u.Decision
+	return nil
+}
+
 // Block is one action block of a reply: exactly one of Dispatch, Promise,
-// Ask, Status, Notify, Custody, Relay, Remember, Lookup, Park, Halt and
-// Cancel is set, or Err says why it is not run.
+// Ask, Status, Notify, Custody, Relay, Remember, Lookup, Park, Halt, Cancel,
+// Routine and Front is set, or Err says why it is not run.
 type Block struct {
 	// Raw is the block's body as written.
 	Raw      string
@@ -328,6 +420,8 @@ type Block struct {
 	Park     *Park
 	Halt     *Halt
 	Cancel   *Cancel
+	Routine  *Routine
+	Front    *Front
 	Err      error
 }
 
@@ -525,6 +619,24 @@ func (b *Block) decode() {
 		if err = strict(b.Raw, &c); err == nil {
 			err = c.validate()
 			b.Cancel = &c.Cancel
+		}
+	case TypeRoutine:
+		var t struct {
+			Type Type `json:"type"`
+			Routine
+		}
+		if err = strict(b.Raw, &t); err == nil {
+			err = t.validate()
+			b.Routine = &t.Routine
+		}
+	case TypeFront:
+		var f struct {
+			Type Type `json:"type"`
+			Front
+		}
+		if err = strict(b.Raw, &f); err == nil {
+			err = f.validate()
+			b.Front = &f.Front
 		}
 	case "":
 		err = errors.New("缺少 type")

@@ -37,6 +37,14 @@ func (a *Agent) SetTaskIndex(list func() []TaskLine) {
 	a.mu.Unlock()
 }
 
+// SetRoutines wires the standing tasks the snapshot lists (§15.17); the
+// cron scheduler is built after the Planner, so it comes in later.
+func (a *Agent) SetRoutines(list func() []Routine) {
+	a.mu.Lock()
+	a.routines = list
+	a.mu.Unlock()
+}
+
 // taskIndex renders the 任务 for the incoming conversation, "" when none are
 // wired or listed.
 func (a *Agent) taskIndex() string {

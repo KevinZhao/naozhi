@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/monitor/health"
+	"github.com/naozhi/naozhi/internal/planner/front"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -18,11 +19,16 @@ import (
 // Every open promise's ID is listed past it all the same: the Planner closes
 // a promise by its ID, and has no other place to read it from.
 const (
-	snapshotMaxRunes  = 2000
+	// snapshotMaxRunes leaves the sessions the 2,000 runes they had before
+	// the fronts and routines were listed (§15.17).
+	snapshotMaxRunes  = 3200
 	snapshotLineRunes = 160
 	snapshotMaxItems  = 10 // in the waiting section
 	snapshotMaxUnits  = 20
-	cutNoticeRunes    = 32
+	// snapshotMaxFronts and snapshotMaxRoutines cap their sections.
+	snapshotMaxFronts   = 10
+	snapshotMaxRoutines = 8
+	cutNoticeRunes      = 32
 	// promiseRunes is what the promise lines take before their texts are
 	// cut, to no less than promiseTextRunes each.
 	promiseRunes     = snapshotMaxRunes / 2
@@ -47,6 +53,19 @@ type Promise struct {
 	Due  time.Time // zero when it has no due time
 }
 
+// Routine is one standing task (a cron job) as the snapshot lists it
+// (§15.17, D131); ID is what a routine block names to switch it.
+type Routine struct {
+	ID       string
+	Title    string
+	Schedule string
+	Paused   bool
+	// Failed is a last run that ended in an error; Result is the first line
+	// of the last result, "" before the first run.
+	Failed bool
+	Result string
+}
+
 // snapshotInput is what one snapshot is rendered from. A nil Waiting or
 // Promises means the source is not wired, and its section is left out
 // rather than reported empty.
@@ -54,6 +73,10 @@ type snapshotInput struct {
 	Now      time.Time
 	Waiting  []Waiting
 	Promises []Promise
+	// Fronts are the lines of work in progress, the latest updated first,
+	// and Routines the standing tasks (§15.17); nil leaves a section out.
+	Fronts   []front.Front
+	Routines []Routine
 	Units    []health.Unit
 	// Label is a unit's title, Name its cross-session name, Workspace a
 	// workspace ID's name; any may return "".
@@ -134,6 +157,26 @@ func renderSnapshotKey(in snapshotInput) (full, key string) {
 		lines = append(lines, fmt.Sprintf("未完成的承诺（%d）：", len(items)))
 		lines = append(lines, promiseLines(items, in.Now.Location())...)
 		keepTo = len(lines)
+	}
+	if in.Fronts != nil {
+		lines = append(lines, fmt.Sprintf("工作线（%d）：", len(in.Fronts)))
+		for i, f := range in.Fronts {
+			if i == snapshotMaxFronts {
+				lines = append(lines, fmt.Sprintf("- …另有 %d 条，见 fronts.json", len(in.Fronts)-i))
+				break
+			}
+			lines = append(lines, frontLine(f))
+		}
+	}
+	if in.Routines != nil {
+		lines = append(lines, fmt.Sprintf("例行任务（%d）：", len(in.Routines)))
+		for i, r := range in.Routines {
+			if i == snapshotMaxRoutines {
+				lines = append(lines, fmt.Sprintf("- …另有 %d 个", len(in.Routines)-i))
+				break
+			}
+			lines = append(lines, routineLine(r))
+		}
 	}
 
 	var units []health.Unit
@@ -228,6 +271,38 @@ func renderSnapshotKey(in snapshotInput) (full, key string) {
 	b.WriteString(tail)
 	slices.Sort(keyUnits)
 	return b.String(), strings.Join(append(keyLines, keyUnits...), "\n")
+}
+
+// frontLine is a line of work as the snapshot lists it: its ID (what a
+// front block names), its name, where it stands, the next step and who it
+// waits on. The sessions and decisions stay in fronts.json.
+func frontLine(f front.Front) string {
+	line := "- [" + f.ID + "] " + f.Name
+	if f.State != "" {
+		line += "：" + f.State
+	}
+	if f.Next != "" {
+		line += " → " + f.Next
+	}
+	// The Planner often writes the verb itself ("等客户确认").
+	if w := strings.TrimSpace(strings.TrimPrefix(f.Waiting, "等")); w != "" {
+		line += "（等 " + w + "）"
+	}
+	return line
+}
+
+// routineLine is a standing task as the snapshot lists it.
+func routineLine(r Routine) string {
+	line := "- [" + r.ID + "] " + r.Title + " · " + r.Schedule
+	switch {
+	case r.Paused:
+		line += " · 已暂停"
+	case r.Failed:
+		line += " · 上次失败"
+	case r.Result != "":
+		line += " · 上次：" + r.Result
+	}
+	return line
 }
 
 // unchangedSnapshot stands for a snapshot whose body is the one the

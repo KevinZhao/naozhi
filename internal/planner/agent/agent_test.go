@@ -18,6 +18,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/monitor/health"
+	"github.com/naozhi/naozhi/internal/planner/front"
 	"github.com/naozhi/naozhi/internal/planner/journal"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
 	"github.com/naozhi/naozhi/internal/session"
@@ -517,7 +518,7 @@ func TestRenderSnapshot(t *testing.T) {
 	big.Units = nil
 	for i := range 200 {
 		big.Units = append(big.Units, health.Unit{
-			ID: fmt.Sprintf("dashboard:direct:%03d-%s:general", i, strings.Repeat("长", 60)), Kind: health.KindSession,
+			ID: fmt.Sprintf("dashboard:direct:%03d-%s:general", i, strings.Repeat("长", 150)), Kind: health.KindSession,
 			State: health.Active, LastActive: now.Add(-time.Duration(i) * time.Second),
 		})
 	}
@@ -527,6 +528,44 @@ func TestRenderSnapshot(t *testing.T) {
 	}
 	if !strings.Contains(got, "截断") || !strings.HasSuffix(got, "</naozhi-snapshot>") {
 		t.Errorf("large snapshot not cut cleanly:\n%s", got)
+	}
+}
+
+// TestSnapshotFrontsRoutines (§15.17): the lines of work in progress and the
+// standing tasks are listed by the IDs their blocks name, between the
+// promises and the sessions; an unwired source leaves its section out, and
+// a front's new state is a change of the snapshot.
+func TestSnapshotFrontsRoutines(t *testing.T) {
+	now := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	in := snapshotInput{Now: now, Label: func(string) string { return "" }, Name: func(string) string { return "" }}
+	if got := renderSnapshot(in); strings.Contains(got, "工作线") || strings.Contains(got, "例行任务") {
+		t.Fatalf("unwired sections listed:\n%s", got)
+	}
+	in.Promises = []Promise{}
+	in.Fronts = []front.Front{
+		{ID: "jd-tgw", Name: "JD TGW 迁移", State: "EC2 VXLAN 方案被否", Next: "改迁移路线图", Waiting: "客户"},
+		{ID: "blog", Name: "trn2 blog", Waiting: "等同事 review"},
+	}
+	in.Routines = []Routine{
+		{ID: "1cc584f384db82fc", Title: "内网模型动态", Schedule: "0 9 * * 1-5", Result: "没有变化"},
+		{ID: "aa", Title: "CUR 更新", Schedule: "@daily", Paused: true},
+		{ID: "bb", Title: "容量快照", Schedule: "0 16 * * 2", Failed: true, Result: "旧结果"},
+	}
+	got, key := renderSnapshotKey(in)
+	want := "未完成的承诺（0）：\n工作线（2）：\n- [jd-tgw] JD TGW 迁移：EC2 VXLAN 方案被否 → 改迁移路线图（等 客户）\n- [blog] trn2 blog（等 同事 review）\n" +
+		"例行任务（3）：\n- [1cc584f384db82fc] 内网模型动态 · 0 9 * * 1-5 · 上次：没有变化\n- [aa] CUR 更新 · @daily · 已暂停\n- [bb] 容量快照 · 0 16 * * 2 · 上次失败\n会话（"
+	if !strings.Contains(got, want) {
+		t.Fatalf("snapshot:\n%s\nwant it to hold:\n%s", got, want)
+	}
+	in.Fronts[0].State = "路线图已改"
+	if _, key2 := renderSnapshotKey(in); key2 == key {
+		t.Error("a front's new state is not a change of the snapshot")
+	}
+	for i := range snapshotMaxFronts + 2 {
+		in.Fronts = append(in.Fronts, front.Front{ID: fmt.Sprintf("f%d", i), Name: "线"})
+	}
+	if got := renderSnapshot(in); !strings.Contains(got, "- …另有 4 条，见 fronts.json") {
+		t.Errorf("fronts past the cap:\n%s", got)
 	}
 }
 

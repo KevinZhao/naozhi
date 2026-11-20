@@ -72,6 +72,13 @@ func TestSystemPrompt(t *testing.T) {
 		"说 PR、CI、issue 现在的状态之前先用 gh 查",
 		"你自己用工具读到的也一样",
 		"这次对话不按天更换",
+		"/state/planner/fronts.json",
+		"进行中的工作线（方括号里是它的 id",
+		"同一条回复里用 front 块更新那一条，只写变了的字段",
+		"请用户点开接着聊",
+		"同一类问题用户问到第三次",
+		`没有新变化时整条回复只写"没有变化"`,
+		`{"type":"routine","id":"<快照里方括号中的 id>","off":true}`,
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt lacks %q", want)
@@ -102,10 +109,11 @@ func TestSystemPrompt(t *testing.T) {
 		"done | doing | failed", "done", "timely | brief", "timely", "<http(s) 链接或空>", "", "<巡检发现的 id 或空>", "", "…", "x",
 		"<会话 key>", "dashboard:direct:u:general", "<会话 key 或空>", "",
 		"<工作区 ID 或名字，或 global>", "global", "<slug>", "style", "<task: key>", "task:ab12",
+		"<定时表达式>", "0 9 * * 1-5", "<快照里方括号中的 id>", "1cc584f384db82fc",
 	)
 	formats := regexp.MustCompile(`\{"type":"[a-z]+"[^\n]*?\}`).FindAllString(p, -1)
-	if len(formats) != 13 {
-		t.Fatalf("found %d block formats, want 13: %q", len(formats), formats)
+	if len(formats) != 16 {
+		t.Fatalf("found %d block formats, want 16: %q", len(formats), formats)
 	}
 	for _, f := range formats {
 		body := strings.ReplaceAll(fill.Replace(f), `["x"]`, `["是"]`)

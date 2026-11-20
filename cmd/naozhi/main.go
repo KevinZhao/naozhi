@@ -30,6 +30,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/brief"
 	"github.com/naozhi/naozhi/internal/planner/custody"
 	"github.com/naozhi/naozhi/internal/planner/digest"
+	"github.com/naozhi/naozhi/internal/planner/front"
 	"github.com/naozhi/naozhi/internal/planner/github"
 	"github.com/naozhi/naozhi/internal/planner/promise"
 	"github.com/naozhi/naozhi/internal/planner/reader"
@@ -316,6 +317,9 @@ func main() {
 	} else if n > 0 {
 		slog.Info("session sidecars given a seen_at baseline", "set", n)
 	}
+	// The ledger of the user's lines of work (§15.17, D132): the Planner's
+	// front blocks write it, its snapshot lists the open ones.
+	fronts := front.New(sessionLayout.PlannerFrontsPath(), nil)
 	// The global Planner (planner:main); Start below, once the turn entry and
 	// the health machine exist. Built even when planner.enabled is off, so
 	// /api/planner answers "off" rather than 404.
@@ -329,6 +333,7 @@ func main() {
 		Workspaces: plannerState.Workspaces,
 		Journal:    plannerState.Journal,
 		Promises:   wireup.PlannerPromises(promises),
+		Fronts:     wireup.PlannerFronts(fronts),
 		Conclusion: wireup.PlannerConclusion(sidecars),
 		MCPConfig:  mcpConfigFile,
 		// Bash for gh only where the session settings are naozhi's own.
@@ -584,6 +589,7 @@ func main() {
 		UserSince: sources.UserSince,
 	})
 	plannerAgent.SetTaskIndex(wireup.PlannerTaskIndex(tasks, digests))
+	plannerAgent.SetRoutines(wireup.PlannerRoutineList(scheduler))
 	briefer := brief.New(brief.Config{
 		Journal: plannerState.Journal,
 		Health:  func() health.Snapshot { return healthMon.Snapshot() },
@@ -835,6 +841,8 @@ func main() {
 		RelayTarget: srv.RelayTarget,
 		Remember:    plannerAgent.Remember,
 		Park:        plannerAgent.Park,
+		Routines:    wireup.PlannerRoutines{Sched: scheduler},
+		Front:       fronts.Apply,
 		Lookup:      wireup.PlannerLookup(lookups),
 		TellAnswer:  wireup.PlannerTellAnswer(plannerAgent),
 		Ctx:         ctx,
