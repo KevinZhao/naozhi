@@ -442,7 +442,8 @@ func TestRunWakeAndCalendar(t *testing.T) {
 }
 
 // TestConflicts: the gateway's overlaps — a pair once, its ID sorted;
-// touching, all-day and zero-length events conflict with nothing.
+// touching, all-day and zero-length events conflict with nothing, nor does
+// an overlap of a few minutes.
 func TestConflicts(t *testing.T) {
 	at := time.Date(2026, 11, 5, 9, 0, 0, 0, time.Local)
 	ev := func(id string, start, end time.Duration) Event {
@@ -461,6 +462,10 @@ func TestConflicts(t *testing.T) {
 		// a+c and b+c both start at 1:30: one alert.
 		{"three-way", []Event{ev("a", 0, 3*h), ev("b", h, 2*h), ev("c", 90*time.Minute, 4*h)}, []string{key(h), key(90 * time.Minute)}},
 		{"all-day and zero-length", []Event{ev("day", 0, 24*h), ev("dot", h, h), ev("a", 30*time.Minute, 2*h)}, nil},
+		// 11-20: a 17:00–17:05 logging reminder inside a weekly meeting.
+		{"a few minutes", []Event{ev("weekly", 0, 90*time.Minute), ev("reminder", h, h+5*time.Minute)}, nil},
+		{"running over", []Event{ev("a", 0, h+10*time.Minute), ev("b", h, 2*h)}, nil},
+		{"fifteen minutes", []Event{ev("a", 0, h+15*time.Minute), ev("b", h, 2*h)}, []string{key(h)}},
 	} {
 		var got []string
 		for _, f := range conflicts(tc.events) {
