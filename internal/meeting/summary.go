@@ -3,6 +3,7 @@ package meeting
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -32,9 +33,22 @@ func eventAt(events []CalendarEvent, t time.Time) (CalendarEvent, bool) {
 	return best, ok
 }
 
+// Clues is where the summary session may look for context (§4): the registered workspaces on
+// this node and the Planner's state root (GitHub issue lists, session digests, the 搁置区).
+type Clues struct {
+	Workspaces []ClueWorkspace
+	PlannerDir string
+}
+
+// ClueWorkspace is one registered workspace directory.
+type ClueWorkspace struct {
+	Name string
+	Path string
+}
+
 // summaryPrompt is the one-shot summary session's whole message (§4, MR7): the transcript is in
-// it, so the session needs no tools.
-func summaryPrompt(m Meeting, transcript string, now time.Time) string {
+// it; the read-only tools are for the projects it touches.
+func summaryPrompt(m Meeting, transcript string, clues Clues, now time.Time) string {
 	var b strings.Builder
 	b.WriteString("请为下面这场会议写纪要。只依据文字稿和会议信息，不要编造；听不清或不确定的地方照实写「不确定」。\n\n")
 	b.WriteString("「你」是录音的用户本人（麦克风那一轨）；「说话人 A/B…」或「对方」是会议另一端的人。能从文字稿和参会人名单确定是谁时，写成人名并注明「（推断）」。\n\n")
@@ -43,6 +57,19 @@ func summaryPrompt(m Meeting, transcript string, now time.Time) string {
 	b.WriteString("最后单独附一个 ```json 代码块，列出全部待办：\n")
 	b.WriteString(`{"todos":[{"owner":"你 或 人名","text":"做什么","due":"YYYY-MM-DD，没有就空字符串","mine":true}]}`)
 	b.WriteString("\nmine 只在待办是用户本人（「你」）要做的时候为 true。\n\n")
+	if len(clues.Workspaces) > 0 || clues.PlannerDir != "" {
+		b.WriteString("写之前先参照用户的项目核对：从文字稿判断会上谈到了哪些项目，到对应工作区里读与话题相关的 README、CLAUDE.md、docs 下的文件，")
+		b.WriteString("以及下面线索目录里的 issue 列表与任务摘要，用来核对人名、项目名、术语的写法和进展；文字稿里没提到的项目不要硬扯。只读，不改任何文件，读取控制在二十次以内。")
+		b.WriteString("用到的线索在纪要末尾单列一节「## 相关项目与线索」，每条写明来源路径；没有就不写这一节。\n\n<clues>\n")
+		for _, w := range clues.Workspaces {
+			fmt.Fprintf(&b, "工作区 %s：%s\n", w.Name, w.Path)
+		}
+		if clues.PlannerDir != "" {
+			fmt.Fprintf(&b, "GitHub issue 列表：%s\n", filepath.Join(clues.PlannerDir, "github"))
+			fmt.Fprintf(&b, "任务摘要：%s\n", filepath.Join(clues.PlannerDir, "digest"))
+		}
+		b.WriteString("</clues>\n\n")
+	}
 	fmt.Fprintf(&b, "今天是 %s。\n\n<meeting>\n标题：%s\n时间：%s 起，时长 %s\n软件：%s\n",
 		now.Local().Format("2006-01-02 Monday"), m.Title, m.Started.Local().Format("2006-01-02 15:04"), Clock(m.Seconds), m.App)
 	if len(m.Attendees) > 0 {

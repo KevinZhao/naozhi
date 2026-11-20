@@ -678,6 +678,9 @@ func main() {
 		Notifier: notifier,
 		Journal:  plannerState.Journal,
 		Calendar: scouter.Calendar,
+		// The summary reads the projects with the Planner's read scope.
+		Workspaces: plannerState.Workspaces,
+		ReadRules:  plannerAgent.ReadRules,
 	})
 
 	routing := buildRouting(cfg, agents, projectMgr, scheduler)

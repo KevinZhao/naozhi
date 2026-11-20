@@ -422,6 +422,11 @@ func absRule(tool, path string) string {
 	return tool + "(/" + filepath.ToSlash(path) + ")"
 }
 
+// ReadRules are the Planner's read scope as permission rules, allow then deny:
+// the meeting summary session reads the same projects and clues with the same
+// credentials kept out (docs/rfc/meeting-notes.md §4).
+func (a *Agent) ReadRules() (allow, deny []string) { return a.readRules() }
+
 // readRules are the Planner's allow and deny rules, both built on one read
 // of the workspace aliases so a spelling the allow rules open is one the
 // deny rules close.

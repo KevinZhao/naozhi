@@ -14,6 +14,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/journal"
 	"github.com/naozhi/naozhi/internal/planner/promise"
 	"github.com/naozhi/naozhi/internal/planner/scout"
+	"github.com/naozhi/naozhi/internal/planner/workspace"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -27,6 +28,11 @@ type MeetingDeps struct {
 	Journal  *journal.Journal
 	// Calendar is the scout's cached calendar; nil names meetings by program.
 	Calendar func() []scout.Event
+	// Workspaces are the registered workspaces the summary looks into for context.
+	Workspaces *workspace.Registry
+	// ReadRules is the Planner's read scope (allow, deny): the summary session reads the same
+	// trees with the same credentials kept out. nil leaves it the transcript alone.
+	ReadRules func() (allow, deny []string)
 }
 
 // OpenMeetings builds the meeting recorder, nil when it is off, not on macOS, or there is no
@@ -42,7 +48,16 @@ func OpenMeetings(d MeetingDeps) *meeting.Manager {
 		Helper:     helper,
 		Recognizer: &meeting.LocalEngine{Dir: root},
 		Diarizer:   helper,
-		Summarize:  MeetingSession(d.Router, d.Layout.PlannerScoutWorkDir()),
+		Summarize:  MeetingSession(d.Router, d.Layout.PlannerScoutWorkDir(), d.ReadRules),
+	}
+	if d.ReadRules != nil {
+		cfg.Clues = func() meeting.Clues {
+			c := meeting.Clues{PlannerDir: d.Layout.PlannerRoot()}
+			for _, w := range d.Workspaces.LocalDirs() {
+				c.Workspaces = append(c.Workspaces, meeting.ClueWorkspace{Name: w.Name, Path: w.Path})
+			}
+			return c
+		}
 	}
 	if d.Calendar != nil {
 		cfg.Calendar = func() []meeting.CalendarEvent {
@@ -79,15 +94,16 @@ func OpenMeetings(d MeetingDeps) *meeting.Manager {
 	return meeting.New(cfg)
 }
 
-// meetingSessionTools is the summary session's whole tool list: the transcript is in its
-// message, Read is there for nothing else to be.
-var meetingSessionTools = []string{"Read"}
+// meetingSessionTools is the summary session's whole tool list: reading only, for the projects
+// the meeting touches (the transcript itself is in its message).
+var meetingSessionTools = []string{"Read", "Grep", "Glob"}
 
 // MeetingSession is meeting.Config.Summarize over the session router: a fresh one-shot session
-// (meeting:<id>) with no MCP server and only Read, allowed under dontAsk, run in workDir (the
-// scout's, whose CLI transcripts the history popover hides), its one turn judged like a cron
-// run's, then reset.
-func MeetingSession(router *session.Router, workDir string) meeting.Session {
+// (meeting:<id>) with no MCP server and only the read tools under dontAsk, reading what the
+// Planner may read (rules; Read rules cover Grep and Glob) and refused the rest, run in workDir
+// (the scout's, whose CLI transcripts the history popover hides), its one turn judged like a
+// cron run's, then reset.
+func MeetingSession(router *session.Router, workDir string, rules func() (allow, deny []string)) meeting.Session {
 	return func(ctx context.Context, key, _ string, text string) (string, error) {
 		if router == nil {
 			return "", errors.New("no session router")
@@ -100,7 +116,9 @@ func MeetingSession(router *session.Router, workDir string) meeting.Session {
 			PermissionMode:      "dontAsk",
 			StrictMCPConfig:     true,
 			CrossSessionInbound: "hold",
-			PermissionsAllow:    meetingSessionTools,
+		}
+		if rules != nil {
+			opts.PermissionsAllow, opts.PermissionsDeny = rules()
 		}
 		sess, _, err := router.GetOrCreate(ctx, key, opts)
 		if err != nil {

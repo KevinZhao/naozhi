@@ -167,6 +167,9 @@ func newHarness(t *testing.T, mut func(*Config, *fakeHelper)) *harness {
 		Calendar: func() []CalendarEvent {
 			return []CalendarEvent{{Title: "客户 A 周会", Start: x.clock.Now().Add(-2 * time.Minute), End: x.clock.Now().Add(time.Hour), Attendees: []string{"Bob"}}}
 		},
+		Clues: func() Clues {
+			return Clues{Workspaces: []ClueWorkspace{{Name: "naozhi", Path: "/w/naozhi"}}, PlannerDir: "/state/planner"}
+		},
 		Promise: func(text string, due time.Time) (string, error) {
 			x.mu.Lock()
 			defer x.mu.Unlock()
@@ -304,6 +307,12 @@ func TestRecordSummarizeEndToEnd(t *testing.T) {
 	}
 	if len(x.notices) != 2 || !strings.Contains(x.notices[1], "纪要好了") || !strings.Contains(x.notices[1], "你的 1 条") {
 		t.Fatalf("notices = %q", x.notices)
+	}
+	// The summary is pointed at the projects and the Planner's clues.
+	for _, want := range []string{"工作区 naozhi：/w/naozhi", "/state/planner/github", "## 相关项目与线索"} {
+		if !strings.Contains(x.prompts[0], want) {
+			t.Fatalf("prompt lacks %q", want)
+		}
 	}
 	if !strings.HasPrefix(x.prompts[0], SummaryKeyPrefix+mt.ID) || !strings.Contains(x.prompts[0], "你：mic 说了话") || !strings.Contains(x.prompts[0], "Bob") {
 		t.Fatalf("prompt = %s", x.prompts[0])

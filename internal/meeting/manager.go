@@ -60,6 +60,8 @@ type Config struct {
 	Summarize  Session
 	// Calendar is the cached calendar (the scout's); nil or empty names meetings by program.
 	Calendar func() []CalendarEvent
+	// Clues is where the summary may look for project context; nil gives it none.
+	Clues func() Clues
 	// Promise registers one of the user's to-dos as a promise and returns its ID.
 	Promise func(text string, due time.Time) (string, error)
 	// Notify pushes a notice; key ties repeats of one notice together.
@@ -970,7 +972,11 @@ func (m *Manager) summarize(ctx context.Context, mt Meeting, lines []Line) (stri
 	}
 	ctx, cancel := context.WithTimeout(ctx, summaryTimeout)
 	defer cancel()
-	reply, err := m.cfg.Summarize(ctx, SummaryKeyPrefix+mt.ID, m.store.Dir(mt.ID), summaryPrompt(mt, transcriptText(lines), m.cfg.Now()))
+	var clues Clues
+	if m.cfg.Clues != nil {
+		clues = m.cfg.Clues()
+	}
+	reply, err := m.cfg.Summarize(ctx, SummaryKeyPrefix+mt.ID, m.store.Dir(mt.ID), summaryPrompt(mt, transcriptText(lines), clues, m.cfg.Now()))
 	if err != nil {
 		return "", nil, err
 	}
