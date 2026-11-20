@@ -103,13 +103,20 @@ for (const [name, opts] of [['desktop', { viewport: { width: 1440, height: 900 }
         await page.click('#pl-left-toggle');
       }
 
-      // A blue dot before the title of each new card in progress; the 已完成
-      // fold holding one says so on its heading.
+      // A blue dot before the title of each new card in progress. A done
+      // task whose result was not looked at is not in the 已完成 fold: it
+      // is listed first, under 做完了，等你看, unmuted (D136).
       const doing = page.locator('#pl-task .tk-sec-doing');
       await expect(doing.locator('.tk-card.tk-has-new')).toHaveCount(2);
       await expect(card(page, FAIL).locator('.tk-top > .tk-new:first-child')).toBeVisible();
       await expect(card(page, RUN).locator('.tk-new')).toHaveCount(0);
-      await expect(page.locator('#pl-task .tk-sec-done > summary .tk-new')).toBeVisible();
+      const fresh = page.locator('#pl-task .tk-sec-fresh');
+      await expect(fresh.locator('.tk-sec-h')).toHaveText('做完了，等你看 1');
+      await expect(fresh.locator('.tk-card')).toHaveCount(1);
+      await expect(fresh.locator('.tk-card')).toHaveAttribute('data-id', DONE);
+      await expect(fresh.locator('.tk-card .tk-new')).toBeVisible();
+      await expect(page.locator('#pl-task .tk-sec > :first-child').first()).toHaveText('做完了，等你看 1');
+      await expect(page.locator('#pl-task .tk-sec-done .tk-card[data-id="' + DONE + '"]')).toHaveCount(0);
       // The dot is round and apart from 在跑's blue left edge.
       const dot = await card(page, OPEN).locator('.tk-new').evaluate((el) => {
         const s = getComputedStyle(el);
@@ -178,8 +185,9 @@ for (const [name, opts] of [['desktop', { viewport: { width: 1440, height: 900 }
       await page.locator('#pl-task .tk-filter [data-action="tasks-only-new"]').click();
       await expect(page.locator('#pl-task .tk-filter')).toHaveCount(0);
       await expect(page.locator('#pl-task .tk-card')).toHaveCount(6);
-      // 已完成 stays unfolded as the filter left it, the digest open.
-      await expect(page.locator('#pl-task .tk-sec-done')).toHaveAttribute('open', '');
+      // Read, the card stays under 做完了，等你看 until the page is opened
+      // again, the digest open: it does not jump into the fold as it is read.
+      await expect(page.locator('#pl-task .tk-sec-fresh .tk-card[data-id="' + DONE + '"] .tk-digest')).toBeVisible();
       await expect(dg.locator('.md-h2').first()).toHaveText('目标');
       await expect(dg).toContainText('结论：已修好。');
       await expect(dg).not.toContainText('v: 1');
@@ -294,7 +302,12 @@ test('全部已读 leaves a result the page has not shown', async ({ browser }) 
     await expect.poll(() => mock.tasksSeenCalls).toEqual([{ ids: [FAIL, OPEN, DONE] }]);
     await expect(page.locator('#pl-news [data-action="tasks-only-new"]')).toHaveText('1 件新结果');
     await expect(card(page, RUN).locator('.tk-new')).toHaveCount(1);
-    await expect(page.locator('#pl-task .tk-sec-done > summary .tk-new')).toBeVisible();
+    // Done since, not looked at: under 做完了，等你看. The one just marked
+    // read stays there too until the page is opened again.
+    const fresh = page.locator('#pl-task .tk-sec-fresh');
+    await expect(fresh.locator('.tk-card[data-id="' + RUN + '"] .tk-new')).toBeVisible();
+    await expect(fresh.locator('.tk-card[data-id="' + DONE + '"]')).toHaveCount(1);
+    await expect(fresh.locator('.tk-card[data-id="' + DONE + '"] .tk-new')).toHaveCount(0);
   } finally {
     await ctx.close();
     await mock.server.close();

@@ -8,6 +8,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/budget"
 	"github.com/naozhi/naozhi/internal/cron"
+	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/imauth"
 	"github.com/naozhi/naozhi/internal/monitor/beat"
@@ -123,6 +124,9 @@ type ServerOptions struct {
 	// Lookups are the Planner's web lookups behind GET /api/planner/lookup
 	// (the query card); nil answers it as not found.
 	Lookups *reader.Reader
+	// PutAway reads the record of a dispatched session put away, for
+	// /api/sessions/events (wireup.PutAwayRecord); nil serves none.
+	PutAway dashsession.PutAwaySource
 	// Fronts is the ledger of the user's lines of work behind
 	// /api/planner/fronts (docs/rfc/planner.md §15.19); nil lists none.
 	Fronts *front.Store

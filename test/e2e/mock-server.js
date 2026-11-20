@@ -313,6 +313,7 @@ function defaultGitStates() {
  *   answers {id: 'up-<n>', kind, size, name} (image_inline, file_ref for a PDF); each lands in
  *   uploadCalls ({id, bytes}). Unset, the route 404s and an upload fails.
  * @param {object} [overrides.keyEvents] - key → GET /api/sessions/events answer for that key.
+ * @param {string[]} [overrides.eventsMissing] - keys GET /api/sessions/events answers 404 for.
  * @param {object[]} [overrides.cronJobs] - Custom cron jobs response.
  * @param {object} [overrides.cronListMeta] - Extra top-level fields merged into GET /api/cron
  *   (timezone / timezone_abbr / timezone_label ...). recent_runs_cap defaults to 5 like the backend.
@@ -705,6 +706,8 @@ function startMockServer(overrides = {}) {
       // so every poll re-delivers the watermark millisecond.
       const evKey = url.searchParams.get('key');
       const evNode = url.searchParams.get('node');
+      // A key the router no longer has and whose record is not kept.
+      if ((overrides.eventsMissing || []).includes(evKey)) { res.writeHead(404); res.end('session not found'); return; }
       const nodeEvents = evNode && remoteData[evNode] && remoteData[evNode].events;
       const all = nodeEvents ? (nodeEvents[evKey] || []) : keyEvents[evKey] || (plannerEvents && evKey === 'planner:main' ? plannerEvents : eventsData);
       const after = Number(url.searchParams.get('after') || 0);

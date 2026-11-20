@@ -372,6 +372,7 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 		Outputs:          outputs,
 		Notes:            notes,
 		Digests:          digests,
+		PutAway:          opts.PutAway,
 		Health:           opts.Health,
 		Workspaces:       workspaces,
 		Purpose:          opts.Purpose,

@@ -155,6 +155,14 @@ const SECTIONS = [
   { id: 'remind', label: '待提醒', states: ['remind'] },
   { id: 'yours', label: '你开的', states: ['waiting', 'failed', 'doing'], yours: true },
 ];
+// A done task whose result you have not looked at is not over for you: it
+// is listed first, under 做完了，等你看, and joins the 已完成 fold only once
+// you looked (opened the session, expanded the card, 全部已读). freshKept are
+// the ones looked at since the page was opened: they stay in that section
+// until it is opened again, so a card does not jump into the fold as it is
+// read (D136).
+let freshKept = new Set();
+const isFresh = (t) => t.state === 'done' && (!!t.new || freshKept.has(t.id));
 // isYours reports whether task t is a session you opened (你开的).
 export const isYours = (t) => !!t && t.group === 'yours';
 const inSection = (s, t) => s.states.includes(t.state) && !!s.yours === isYours(t);
@@ -427,7 +435,7 @@ function cardHtml(t) {
   const open = actsOpen === t.id;
   const expandable = t.kind === 'session' && !!t.digest;
   const expanded = expandable && digestOpen === t.id;
-  return '<div class="tk-card tk-s-' + state + (state === 'done' ? ' done' : '') + (open ? ' tk-acts-open' : '') + (t.new ? ' tk-has-new' : '') + (expanded ? ' tk-expanded' : '') + (isLit(t.id) ? ' inbox-lit' : '') + '" data-id="' + escAttr(t.id) + '" data-status="' + st.badge.cls + '" role="listitem">' +
+  return '<div class="tk-card tk-s-' + state + (state === 'done' ? ' done' : '') + (isFresh(t) ? ' tk-fresh' : '') + (open ? ' tk-acts-open' : '') + (t.new ? ' tk-has-new' : '') + (expanded ? ' tk-expanded' : '') + (isLit(t.id) ? ' inbox-lit' : '') + '" data-id="' + escAttr(t.id) + '" data-status="' + st.badge.cls + '" role="listitem">' +
       '<div class="tk-top">' +
         (t.new ? NEW_DOT : '') +
         '<div class="tk-title">' + titleHtml(t) + '</div>' +
@@ -469,13 +477,18 @@ export function tasksHtml(data) {
       '<button type="button" class="pl-link" data-action="tasks-only-new">显示全部</button></div>';
   }
   const head = (label, n) => label + ' <span class="tk-n">' + n + '</span>';
+  const fresh = tasks.filter(isFresh);
+  if (fresh.length) {
+    html += '<section class="tk-sec tk-sec-fresh"><div class="tk-sec-h" title="做完了，结果你还没看过；看过之后归到“已完成”">' + head('做完了，等你看', fresh.length) + '</div>' +
+      '<div class="tk-list" role="list">' + fresh.map(cardHtml).join('') + '</div></section>';
+  }
   for (const s of SECTIONS) {
     const rows = tasks.filter((t) => inSection(s, t));
     if (!rows.length) continue;
     html += '<section class="tk-sec tk-sec-' + s.id + '"><div class="tk-sec-h">' + head(s.label, rows.length) + '</div>' +
       '<div class="tk-list" role="list">' + rows.map(cardHtml).join('') + '</div></section>';
   }
-  const done = tasks.filter((t) => t.state === 'done');
+  const done = tasks.filter((t) => t.state === 'done' && !isFresh(t));
   if (done.length) {
     html += '<details class="tk-sec tk-sec-done"' + (filtered ? ' open' : '') + '><summary class="tk-sec-h">' + head('已完成', done.length) + (done.some((t) => t.new) ? NEW_DOT : '') + '</summary>' +
       '<div class="tk-list" role="list">' + done.map(cardHtml).join('') + '</div></details>';
@@ -560,6 +573,9 @@ function fetchTasks(fresh = false) {
     if (actsOpen && !byId.has(actsOpen)) actsOpen = '';
     if (digestOpen && !byId.has(digestOpen)) digestOpen = '';
     last = data;
+    // What is listed new now stays under 做完了，等你看 once looked at.
+    for (const t of list) if (t.state === 'done' && t.new) freshKept.add(t.id);
+    for (const id of freshKept) if (!byId.has(id)) freshKept.delete(id);
     paintNews();
     refreshDigest();
     readAt = Date.now();
@@ -585,6 +601,8 @@ async function render(el, read) {
 // mountTasks renders the group into el and keeps it current.
 export function mountTasks(el) {
   el.classList.add('tk-group');
+  // The page opened again: what was read last time is in 已完成 now.
+  freshKept = new Set();
   mounts.add(el);
   refreshCustody();
   return render(el, fetchTasks(true)).then(armLive);

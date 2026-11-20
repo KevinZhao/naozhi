@@ -318,6 +318,10 @@ type Deps struct {
 	Notes NoteSource
 	// Digests serve /api/sessions/digest; nil has none.
 	Digests DigestSource
+	// PutAway reads the record of a dispatched session that was put away
+	// (planner/reap), which /api/sessions/events serves once the router no
+	// longer has the session; nil leaves such a key a 404.
+	PutAway PutAwaySource
 	// Health and Workspaces fill /api/sessions/detail's health unit and
 	// workspace; nil leaves them out.
 	Health     func() health.Snapshot
