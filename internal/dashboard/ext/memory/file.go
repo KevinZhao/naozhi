@@ -54,6 +54,27 @@ func version(st os.FileInfo) string {
 	return fmt.Sprintf("%d-%d", st.ModTime().UnixNano(), st.Size())
 }
 
+// movedVersion is st, the file at path just written over the one opened as
+// version opened, with a version that is not opened's. A write of the same
+// size inside the clock tick the opened file was stamped in (Linux stamps
+// files by a coarse clock, a few ms) leaves mtime and size as they were: its
+// mtime is then put a millisecond on, or the next save could not tell a
+// write in between from the page's own.
+func movedVersion(path string, st os.FileInfo, opened string) os.FileInfo {
+	if version(st) != opened {
+		return st
+	}
+	at := st.ModTime().Add(time.Millisecond)
+	if err := os.Chtimes(path, at, at); err != nil {
+		slog.Warn("memory: version not moved after an edit", "path", path, "err", err)
+		return st
+	}
+	if moved, err := os.Stat(path); err == nil {
+		return moved
+	}
+	return st
+}
+
 func writeErr(w http.ResponseWriter, status int, code string) {
 	httputil.WriteJSONStatus(w, status, map[string]string{"error": code})
 }
@@ -235,6 +256,7 @@ func (h *Handler) HandlePut(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "io")
 		return
 	}
+	st = movedVersion(path, st, req.Version)
 	slog.Info("memory: edited from the 懂你 section", "project", req.Project, "name", req.Name)
 	httputil.WriteJSON(w, map[string]any{"version": version(st), "modified": st.ModTime(), "size": st.Size()})
 }
