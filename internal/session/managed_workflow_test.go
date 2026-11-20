@@ -849,7 +849,11 @@ func TestWorkflowBoard_IOBounds(t *testing.T) {
 		b.bind(p, "/ws")
 		boards = append(boards, b)
 	}
-	testhelper.Eventually(t, func() bool { return inflight.Load() == workflowIOSlots }, 5*time.Second, "global slots never filled")
+	// A resolver counts itself in flight before it records the peak, so the
+	// peak is waited for too: read right after the eighth's count, it can
+	// still say seven.
+	testhelper.Eventually(t, func() bool { return inflight.Load() == workflowIOSlots && peak.Load() == workflowIOSlots },
+		5*time.Second, "global slots never filled")
 	if got := peak.Load(); got != workflowIOSlots {
 		t.Errorf("peak in flight %d, want the global %d", got, workflowIOSlots)
 	}
