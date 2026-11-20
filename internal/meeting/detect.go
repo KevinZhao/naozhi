@@ -6,20 +6,20 @@ import (
 )
 
 // App is a meeting program: a process of one of its bundle-ID prefixes taking microphone input
-// starts a recording, and the tap captures every process under the same prefixes (meeting apps
+// is a meeting (offered for recording), and the tap captures every process under the same prefixes (meeting apps
 // play the far end from helper processes, e.g. Teams' ModuleHost / WebView helpers).
 type App struct {
 	Name    string
 	Bundles []string
 }
 
-// Apps is the meeting programs that start a recording (§3.2: a constant list, not configuration).
+// Apps is the meeting programs whose microphone use is a meeting (§3.2: a constant list, not configuration).
 // Browsers count while they use the microphone, for meetings joined on the web.
 var Apps = []App{
 	{Name: "Teams", Bundles: []string{"com.microsoft.teams"}},
 	{Name: "Zoom", Bundles: []string{"us.zoom."}},
 	{Name: "Chime", Bundles: []string{"com.amazon.Amazon-Chime", "com.amazon.chime"}},
-	{Name: "Webex", Bundles: []string{"com.cisco.webex", "Cisco-Systems.Spark"}},
+	{Name: "Webex", Bundles: []string{"com.cisco.webex", "com.webex.", "Cisco-Systems.Spark"}},
 	{Name: "Slack", Bundles: []string{"com.tinyspeck.slackmacgap"}},
 	{Name: "飞书", Bundles: []string{"com.larksuite.", "com.bytedance.lark", "com.electron.lark"}},
 	{Name: "腾讯会议", Bundles: []string{"com.tencent.meeting", "com.tencent.wemeet"}},

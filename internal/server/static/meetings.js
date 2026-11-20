@@ -1,6 +1,7 @@
 // meetings.js — meeting recording in the dashboard (docs/rfc/meeting-notes.md §6, §7):
-//   - the red "录音中 · 名称 · 时长 · 停止" strip on top of every view while one records,
-//     following meeting_state frames;
+//   - while a meeting program is in a meeting nothing records, a strip offering 录音 / 不录
+//     (not every meeting is to be recorded); then the red "录音中 · 名称 · 时长 · 停止" strip
+//     on top of every view while it records, both following meeting_state frames;
 //   - the meetings panel: the list, and one meeting's summary and transcript (a timestamp plays
 //     that moment of its track), with the audio's 30-day keep / delete;
 //   - the 设置 section: the two macOS grants and the button that brings up their prompts;
@@ -54,9 +55,13 @@ function strip() {
 
 function paintStrip() {
   const rec = mt.status && mt.status.recording;
+  const det = !rec && mt.status && mt.status.detected;
   const el = strip();
-  document.body.classList.toggle('nz-recording', !!rec);
+  const offer = offerStrip();
+  document.body.classList.toggle('nz-recording', !!rec || !!det);
   el.hidden = !rec;
+  offer.hidden = !det;
+  if (det) offer.querySelector('#rec-offer-title').textContent = '检测到' + (det.title ? '「' + det.title + '」' : ' ' + det.app + ' 会议');
   clearInterval(mt.timer);
   if (!rec) return;
   el.querySelector('#rec-open').textContent = '录音中 · ' + rec.title;
@@ -64,6 +69,36 @@ function paintStrip() {
   const tick = () => { el.querySelector('#rec-time').textContent = clock((Date.now() - t0) / 1000); };
   tick();
   mt.timer = setInterval(tick, 1000);
+}
+
+// The offer: a meeting program is in a meeting and nothing records it. Not every meeting is to
+// be recorded, so it waits for 录音; 不录 (or doing nothing) leaves this meeting alone.
+function offerStrip() {
+  let el = $('rec-offer');
+  if (el) return el;
+  el = document.createElement('div');
+  el.id = 'rec-offer';
+  el.className = 'rec-strip rec-offer';
+  el.setAttribute('role', 'status');
+  el.hidden = true;
+  el.innerHTML = '<span class="rec-title" id="rec-offer-title"></span>' +
+    '<button type="button" class="rec-stop rec-start" id="rec-start">● 录音</button>' +
+    '<button type="button" class="rec-stop" id="rec-dismiss">不录</button>';
+  document.body.prepend(el);
+  el.querySelector('#rec-start').addEventListener('click', () => post(API.meetings_start, '开始录音失败', el.querySelector('#rec-start')));
+  el.querySelector('#rec-dismiss').addEventListener('click', () => post(API.meetings_dismiss, '操作失败', el.querySelector('#rec-dismiss')));
+  return el;
+}
+
+async function post(url, what, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    await fetchJSON(url, { method: 'POST' });
+  } catch (e) {
+    showToast(what + '：' + e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function stopRecording() {
@@ -264,7 +299,7 @@ function paintSettings() {
       html += '<p class="mtg-hint">点「授权」后，这台 Mac 上会依次弹出两个系统窗口，都点「允许」。如果跳到了系统设置，就在 隐私与安全性 → 屏幕与系统录音 里打开 naozhi-audio。拒绝过的只能在系统设置里改。</p>' +
         '<button type="button" class="settings-syslink-btn" id="mtg-authorize">授权</button>';
     } else {
-      html += '<p class="mtg-hint">线上会议（Teams、Zoom、Chime、浏览器…）用上麦克风就自动录音，释放麦克风 2 分钟后结束。告知参会者由你负责。</p>';
+      html += '<p class="mtg-hint">线上会议（Teams、Zoom、Webex、腾讯会议、浏览器…）一开始，顶部会出现「录音」按钮，点了才录；会议软件释放麦克风 2 分钟后自动结束。告知参会者由你负责。</p>';
     }
   }
   html += '<button type="button" class="settings-syslink-btn" id="mtg-open-list">会议纪要 ›</button>';

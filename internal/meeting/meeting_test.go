@@ -203,6 +203,16 @@ func (x *harness) stop() {
 
 func (x *harness) snap(p ...Proc) { x.h.snaps <- p }
 
+// record is the user starting the recording of a Teams meeting the detector offers.
+func (x *harness) record(t *testing.T) {
+	t.Helper()
+	x.snap(teams)
+	waitFor(t, "detected", func() bool { d := x.m.Status().Detected; return d != nil && d.App == "Teams" })
+	if _, err := x.m.Start(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -260,7 +270,7 @@ func TestDetector(t *testing.T) {
 
 func TestRecordSummarizeEndToEnd(t *testing.T) {
 	x := newHarness(t, nil)
-	x.snap(teams)
+	x.record(t)
 	waitFor(t, "recording", func() bool { st := x.m.Status(); return st.Recording != nil && st.Recording.Segments == 3 })
 	st := x.m.Status()
 	if st.Recording.Title != "客户 A 周会" || st.Recording.App != "Teams" {
@@ -292,7 +302,7 @@ func TestRecordSummarizeEndToEnd(t *testing.T) {
 	if len(x.promises) != 1 || x.promises[0] != "发报价单（会议「客户 A 周会」）@11-20 09:00" {
 		t.Fatalf("promises = %q", x.promises)
 	}
-	if len(x.notices) != 1 || !strings.Contains(x.notices[0], "纪要好了") || !strings.Contains(x.notices[0], "你的 1 条") {
+	if len(x.notices) != 2 || !strings.Contains(x.notices[1], "纪要好了") || !strings.Contains(x.notices[1], "你的 1 条") {
 		t.Fatalf("notices = %q", x.notices)
 	}
 	if !strings.HasPrefix(x.prompts[0], SummaryKeyPrefix+mt.ID) || !strings.Contains(x.prompts[0], "你：mic 说了话") || !strings.Contains(x.prompts[0], "Bob") {
@@ -315,7 +325,7 @@ func TestRecordSummarizeEndToEnd(t *testing.T) {
 
 func TestUserStopHoldsUntilMicReleased(t *testing.T) {
 	x := newHarness(t, nil)
-	x.snap(teams)
+	x.record(t)
 	waitFor(t, "recording", func() bool { return x.m.Status().Recording != nil })
 	if !x.m.StopRecording("user") {
 		t.Fatal("nothing to stop")
@@ -326,7 +336,7 @@ func TestUserStopHoldsUntilMicReleased(t *testing.T) {
 	x.snap(teams)
 	x.clock.Add(time.Minute)
 	x.snap(teams)
-	if x.m.Status().Recording != nil || x.h.records != 1 {
+	if st := x.m.Status(); st.Recording != nil || st.Detected != nil || x.h.records != 1 {
 		t.Fatalf("restarted after the user stopped it (%d records)", x.h.records)
 	}
 	waitFor(t, "processed", func() bool { return x.only(t).State == StateDone })
@@ -337,7 +347,7 @@ func TestUserStopHoldsUntilMicReleased(t *testing.T) {
 
 func TestRestartContinuesSegments(t *testing.T) {
 	x := newHarness(t, func(_ *Config, h *fakeHelper) { h.exits = []int{ExitInputChanged, 1} })
-	x.snap(teams)
+	x.record(t)
 	waitFor(t, "three parts", func() bool { r := x.m.Status().Recording; return r != nil && r.Segments == 9 })
 	x.h.mu.Lock()
 	starts := fmt.Sprint(x.h.starts)
@@ -354,7 +364,7 @@ func TestRestartContinuesSegments(t *testing.T) {
 
 func TestHelperFailingWithoutSegmentsGivesUp(t *testing.T) {
 	x := newHarness(t, func(_ *Config, h *fakeHelper) { h.perPart = 0; h.exits = []int{77} })
-	x.snap(teams)
+	x.record(t)
 	waitFor(t, "failed", func() bool { ms := x.m.Store().List(); return len(ms) == 1 && ms[0].State == StateFailed })
 	if x.m.Status().Recording != nil {
 		t.Fatal("still recording")
@@ -379,7 +389,7 @@ func TestUnauthorisedDoesNotRecord(t *testing.T) {
 
 func TestSilentFarEndIsFlagged(t *testing.T) {
 	x := newHarness(t, func(_ *Config, h *fakeHelper) { h.silent = true })
-	x.snap(teams)
+	x.record(t)
 	waitFor(t, "recording", func() bool { r := x.m.Status().Recording; return r != nil && r.Segments == 3 })
 	x.m.StopRecording("user")
 	waitFor(t, "processed", func() bool { return x.only(t).State == StateDone })
@@ -398,7 +408,7 @@ func TestSilentFarEndIsFlagged(t *testing.T) {
 func TestShutdownResumesSameMeeting(t *testing.T) {
 	root := t.TempDir()
 	x := newHarness(t, func(c *Config, _ *fakeHelper) { c.Root = root })
-	x.snap(teams)
+	x.record(t)
 	waitFor(t, "recording", func() bool { r := x.m.Status().Recording; return r != nil && r.Segments == 3 })
 	x.stop()
 	if mt := x.only(t); mt.State != StateRecording {
@@ -421,7 +431,7 @@ func TestShutdownResumesSameMeeting(t *testing.T) {
 func TestOrphanProcessedAfterAge(t *testing.T) {
 	root := t.TempDir()
 	x := newHarness(t, func(c *Config, _ *fakeHelper) { c.Root = root })
-	x.snap(teams)
+	x.record(t)
 	waitFor(t, "recording", func() bool { r := x.m.Status().Recording; return r != nil && r.Segments == 3 })
 	x.stop()
 	mt := x.only(t)
@@ -435,7 +445,7 @@ func TestOrphanProcessedAfterAge(t *testing.T) {
 
 func TestAudioRetention(t *testing.T) {
 	x := newHarness(t, nil)
-	x.snap(teams)
+	x.record(t)
 	waitFor(t, "recording", func() bool { r := x.m.Status().Recording; return r != nil && r.Segments == 3 })
 	x.m.StopRecording("user")
 	waitFor(t, "processed", func() bool { return x.only(t).State == StateDone })
@@ -474,7 +484,7 @@ func TestSummaryFailureThenRetry(t *testing.T) {
 			return "纪要正文", nil
 		}
 	})
-	x.snap(teams)
+	x.record(t)
 	waitFor(t, "recording", func() bool { r := x.m.Status().Recording; return r != nil && r.Segments == 3 })
 	x.m.StopRecording("user")
 	waitFor(t, "failed", func() bool { return x.only(t).State == StateFailed })
@@ -530,7 +540,7 @@ func TestParseSummary(t *testing.T) {
 
 func TestRetranscribeInAnotherLanguage(t *testing.T) {
 	x := newHarness(t, nil)
-	x.snap(teams)
+	x.record(t)
 	waitFor(t, "recording", func() bool { r := x.m.Status().Recording; return r != nil && r.Segments == 3 })
 	x.m.StopRecording("user")
 	waitFor(t, "done", func() bool { return x.only(t).State == StateDone })
@@ -561,4 +571,45 @@ func (x *harness) asrCalls() []string {
 	x.asr.mu.Lock()
 	defer x.asr.mu.Unlock()
 	return append([]string(nil), x.asr.calls...)
+}
+
+func TestDetectedMeetingWaitsForTheUser(t *testing.T) {
+	x := newHarness(t, nil)
+	if _, err := x.m.Start(); err != ErrNoMeeting {
+		t.Fatalf("start with no meeting: %v", err)
+	}
+	x.snap(teams)
+	waitFor(t, "detected", func() bool { return x.m.Status().Detected != nil })
+	st := x.m.Status()
+	if st.Detected.Title != "客户 A 周会" || st.Recording != nil || x.h.records != 0 || len(x.m.Store().List()) != 0 {
+		t.Fatalf("detection recorded or lost the calendar title: %+v", st)
+	}
+	x.mu.Lock()
+	notices := strings.Join(x.notices, "\n")
+	x.mu.Unlock()
+	if !strings.Contains(notices, "检测到「客户 A 周会」，要录音吗？") {
+		t.Fatalf("notices = %s", notices)
+	}
+	// 不录: it stays off while the program keeps the microphone.
+	x.m.Dismiss()
+	x.snap(teams)
+	x.clock.Add(time.Minute)
+	x.snap(teams)
+	if st := x.m.Status(); st.Detected != nil || st.Recording != nil {
+		t.Fatalf("dismissed meeting came back: %+v", st)
+	}
+	// The program leaves the microphone past the grace; the next use is offered again.
+	x.snap()
+	x.clock.Add(Grace + time.Second)
+	x.snap()
+	x.snap(teams)
+	waitFor(t, "offered again", func() bool { return x.m.Status().Detected != nil })
+	// Leaving the microphone without anyone choosing to record takes the offer away.
+	x.snap()
+	x.clock.Add(Grace + time.Second)
+	x.snap()
+	waitFor(t, "offer gone", func() bool { return x.m.Status().Detected == nil })
+	if len(x.m.Store().List()) != 0 {
+		t.Fatal("a meeting nobody recorded was stored")
+	}
 }

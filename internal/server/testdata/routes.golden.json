@@ -191,6 +191,16 @@
   },
   {
     "method": "POST",
+    "path": "/api/meetings/dismiss",
+    "handler_type": "*meetings.Handler"
+  },
+  {
+    "method": "POST",
+    "path": "/api/meetings/start",
+    "handler_type": "*meetings.Handler"
+  },
+  {
+    "method": "POST",
     "path": "/api/meetings/stop",
     "handler_type": "*meetings.Handler"
   },

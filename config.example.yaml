@@ -406,9 +406,10 @@ projects:
 #isolation:
 #  run_schedules: false   # true runs them as on your own instance
 
-# Meeting recording (macOS, docs/rfc/meeting-notes.md): records an online
-# meeting (Teams, Zoom, Chime, a browser...) while its program uses the
-# microphone, transcribes it on this Mac and writes a summary; your to-dos go
+# Meeting recording (macOS, docs/rfc/meeting-notes.md): when an online
+# meeting starts (Teams, Zoom, Webex, a browser...) the dashboard offers
+# 录音; once taken up it records until the program leaves the microphone,
+# transcribes it on this Mac and writes a summary; your to-dos go
 # to the Planner's 任务. Telling the other participants is up to you. Needs
 # naozhi-audio (shipped next to naozhi) and uv for the local recognizer.
 #meeting:

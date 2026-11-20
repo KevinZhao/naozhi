@@ -4,6 +4,8 @@
 //	GET    /api/meetings                  the recorder's status and every meeting
 //	GET    /api/meetings/{id}             one meeting with its summary and transcript
 //	GET    /api/meetings/{id}/audio/{track}  the mic / remote audio (m4a, else wav)
+//	POST   /api/meetings/start            record the detected meeting (the strip's 录音)
+//	POST   /api/meetings/dismiss          leave the detected meeting unrecorded (不录)
 //	POST   /api/meetings/stop             stop the recording now
 //	POST   /api/meetings/authorize        bring up the system prompts (answers at once;
 //	                                      the status follows on the meeting_state frame)
@@ -137,6 +139,34 @@ func (h *Handler) HandleAudio(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
 	http.ServeFile(w, r, p)
+}
+
+// HandleStart serves POST /api/meetings/start.
+func (h *Handler) HandleStart(w http.ResponseWriter, _ *http.Request) {
+	if h.m == nil {
+		http.Error(w, "meeting recording not available", http.StatusServiceUnavailable)
+		return
+	}
+	mt, err := h.m.Start()
+	if err != nil {
+		code := http.StatusConflict
+		if errors.Is(err, meeting.ErrNoHelper) {
+			code = http.StatusServiceUnavailable
+		}
+		http.Error(w, err.Error(), code)
+		return
+	}
+	httputil.WriteJSON(w, mt)
+}
+
+// HandleDismiss serves POST /api/meetings/dismiss.
+func (h *Handler) HandleDismiss(w http.ResponseWriter, _ *http.Request) {
+	if h.m == nil {
+		http.Error(w, "meeting recording not available", http.StatusServiceUnavailable)
+		return
+	}
+	h.m.Dismiss()
+	httputil.WriteOK(w)
 }
 
 // HandleStop serves POST /api/meetings/stop.

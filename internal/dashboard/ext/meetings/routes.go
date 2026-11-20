@@ -11,6 +11,8 @@ func (h *Handler) Routes() []httputil.Route {
 		{Pattern: "GET /api/meetings", Handler: h.HandleList},
 		{Pattern: "GET /api/meetings/{id}", Handler: h.HandleGet},
 		{Pattern: "GET /api/meetings/{id}/audio/{track}", Handler: h.HandleAudio},
+		{Pattern: "POST /api/meetings/start", Handler: h.HandleStart},
+		{Pattern: "POST /api/meetings/dismiss", Handler: h.HandleDismiss},
 		{Pattern: "POST /api/meetings/stop", Handler: h.HandleStop},
 		{Pattern: "POST /api/meetings/authorize", Handler: h.HandleAuthorize},
 		{Pattern: "POST /api/meetings/{id}/keep", Handler: h.HandleKeep},

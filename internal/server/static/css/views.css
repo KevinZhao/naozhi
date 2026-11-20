@@ -1391,3 +1391,5 @@ body.nz-recording{padding-top:30px}
 .mtg-auth-authorized{color:var(--nz-green)}
 .mtg-auth-denied{color:var(--nz-red)}
 .mtg-libro{display:block;width:100%;padding:10px 12px;margin-bottom:6px;border:1px solid var(--nz-bg-2);border-radius:var(--nz-radius-md);background:none;color:inherit;text-align:left;font-weight:600;cursor:pointer}
+.rec-offer{background:var(--nz-blue)}
+.rec-start{font-weight:600}

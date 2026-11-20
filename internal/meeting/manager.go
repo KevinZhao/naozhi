@@ -2,8 +2,9 @@
 // and to-dos (docs/rfc/meeting-notes.md, M1).
 //
 // naozhi-audio (tools/naozhi-audio) does all Core Audio work; this package follows its process
-// snapshots, starts a recording when a meeting program takes the microphone (MR1), keeps the
-// 30-second segments it writes, and after the meeting runs recognition, speaker separation and a
+// snapshots, offers 录音 when a meeting program takes the microphone and records once the user
+// takes it up (MR1, revised 11-20: not every meeting is to be recorded), keeps the 30-second
+// segments it writes, and after the meeting runs recognition, speaker separation and a
 // one-shot summary session. Everything a meeting produces lives in its own directory under the
 // state root.
 package meeting
@@ -77,10 +78,28 @@ type Status struct {
 	Auth      Auth `json:"auth"`
 	// Recording is the meeting being recorded, nil when none.
 	Recording *Meeting `json:"recording,omitempty"`
+	// Detected is the meeting a program is in that nothing records yet: the dashboard offers
+	// 录音 for it (MR1 as revised: not every meeting is to be recorded).
+	Detected *Detected `json:"detected,omitempty"`
 	// Processing is the meeting whose transcript or summary is being made.
 	Processing string `json:"processing,omitempty"`
 	Error      string `json:"error,omitempty"`
 }
+
+// Detected is a meeting program taking the microphone, since Since.
+type Detected struct {
+	App   string    `json:"app"`
+	Since time.Time `json:"since"`
+	// Title is the calendar event under way, "" when none.
+	Title string `json:"title,omitempty"`
+}
+
+// Errors of Start.
+var (
+	ErrNoMeeting = errors.New("没有检测到正在进行的会议")
+	ErrRecording = errors.New("已经在录音")
+	ErrNotReady  = errors.New("还没有录音授权：先在 设置 → 会议录音 里授权")
+)
 
 // Manager owns detection, recording and processing.
 type Manager struct {
@@ -93,6 +112,10 @@ type Manager struct {
 	authAt  time.Time
 	authErr string
 	rec     *recording
+	// detected is the meeting the detector follows that nobody chose to record (yet).
+	detected *Detected
+	// runCtx is Run's: a recording the user starts from a request outlives the request.
+	runCtx context.Context
 	// orphans are recordings a previous run of the gateway left in StateRecording.
 	orphans    []Meeting
 	processing string
@@ -130,6 +153,9 @@ func (m *Manager) Run(ctx context.Context) {
 		return
 	}
 	m.refreshAuth(ctx)
+	m.mu.Lock()
+	m.runCtx = ctx
+	m.mu.Unlock()
 	for _, mt := range m.store.List() {
 		switch mt.State {
 		case StateRecording:
@@ -214,6 +240,10 @@ func (m *Manager) Status() Status {
 		r := m.rec.m
 		st.Recording = &r
 	}
+	if m.detected != nil && m.rec == nil {
+		d := *m.detected
+		st.Detected = &d
+	}
 	return st
 }
 
@@ -249,6 +279,11 @@ func (m *Manager) observe(ctx context.Context, procs []Proc) {
 	m.mu.Unlock()
 	switch act {
 	case ActStart:
+		// A recording a restart cut across goes on by itself: the user chose to record it.
+		if m.resumable(*app, now) {
+			m.startRecording(ctx, *app, "resume")
+			return
+		}
 		if !auth.Ready() && now.Sub(m.authAt) > time.Minute {
 			auth = m.refreshAuth(ctx)
 		}
@@ -259,9 +294,81 @@ func (m *Manager) observe(ctx context.Context, procs []Proc) {
 			m.mu.Unlock()
 			return
 		}
-		m.startRecording(ctx, *app, "auto")
+		d := &Detected{App: app.Name, Since: now}
+		if m.cfg.Calendar != nil {
+			if e, ok := eventAt(m.cfg.Calendar(), now); ok {
+				d.Title = e.Title
+			}
+		}
+		m.mu.Lock()
+		m.detected = d
+		m.mu.Unlock()
+		m.changed()
+		if m.cfg.Notify != nil {
+			what := app.Name + " 会议"
+			if d.Title != "" {
+				what = "「" + d.Title + "」"
+			}
+			m.cfg.Notify("meeting:detected", "检测到"+what+"，要录音吗？", "在 dashboard 顶部点「录音」开始；不录就不用管。")
+		}
 	case ActStop:
-		m.StopRecording("auto")
+		m.mu.Lock()
+		had := m.detected != nil
+		m.detected = nil
+		m.mu.Unlock()
+		if !m.StopRecording("auto") && had {
+			m.changed()
+		}
+	}
+}
+
+func (m *Manager) resumable(app App, now time.Time) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, o := range m.orphans {
+		if o.App == app.Name && now.Sub(lastActive(o)) < orphanAge {
+			return true
+		}
+	}
+	return false
+}
+
+// Start records the detected meeting: the user's 录音.
+func (m *Manager) Start() (Meeting, error) {
+	if !m.available() {
+		return Meeting{}, ErrNoHelper
+	}
+	m.mu.Lock()
+	d, rec, ctx, auth := m.detected, m.rec, m.runCtx, m.auth
+	app := m.det.App()
+	m.mu.Unlock()
+	switch {
+	case rec != nil:
+		return rec.m, ErrRecording
+	case d == nil || app == nil || ctx == nil:
+		return Meeting{}, ErrNoMeeting
+	case !auth.Ready():
+		return Meeting{}, ErrNotReady
+	}
+	m.startRecording(ctx, *app, "user")
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.rec == nil {
+		return Meeting{}, errors.New("录音没能开始")
+	}
+	return m.rec.m, nil
+}
+
+// Dismiss is the user's 不录: the detected meeting is left alone until its program leaves the
+// microphone.
+func (m *Manager) Dismiss() {
+	m.mu.Lock()
+	m.det.Decline()
+	had := m.detected != nil
+	m.detected = nil
+	m.mu.Unlock()
+	if had {
+		m.changed()
 	}
 }
 
@@ -316,6 +423,7 @@ func (m *Manager) startRecording(ctx context.Context, app App, by string) {
 	r := &recording{m: mt, stop: make(chan struct{}), stopped: make(chan struct{})}
 	m.mu.Lock()
 	m.rec = r
+	m.detected = nil
 	m.mu.Unlock()
 	m.journal(map[string]any{"meeting": mt.ID, "step": "record_start", "summary": "开始录音：" + mt.Title, "app": app.Name, "by": by, "resumed": resumed})
 	m.changed()

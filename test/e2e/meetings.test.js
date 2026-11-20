@@ -1,6 +1,6 @@
-// Meeting recording in the dashboard (meetings.js, docs/rfc/meeting-notes.md §6–§7): the red
-// "录音中" strip follows meeting_state frames on every view and its 停止 posts
-// /api/meetings/stop; 设置 shows the two macOS grants and brings up their prompts; the 成品库's
+// Meeting recording in the dashboard (meetings.js, docs/rfc/meeting-notes.md §6–§7): a detected
+// meeting is offered (录音 posts /api/meetings/start); the red "录音中" strip follows
+// meeting_state frames on every view and its 停止 posts /api/meetings/stop; 设置 shows the two macOS grants and brings up their prompts; the 成品库's
 // "会议纪要" row opens the meetings panel, whose meeting shows its summary and transcript.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
@@ -40,8 +40,17 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
         await expect(strip).toBeHidden();
         const conn = mock.wsConnections[mock.wsConnections.length - 1];
         const st = { available: true, auth: { microphone: 'authorized', audio_capture: 'authorized' } };
+        // A meeting nothing records yet is offered, and waits for 录音.
+        conn.send({ type: 'meeting_state', state: { ...st, detected: { app: 'Teams', since: started(), title: '客户 A 周会' } } });
+        const offer = page.locator('#rec-offer');
+        await expect(offer).toBeVisible();
+        await expect(offer.locator('#rec-offer-title')).toHaveText('检测到「客户 A 周会」');
+        await expect(strip).toBeHidden();
+        await offer.locator('#rec-start').click();
+        await expect.poll(() => mock.meetingCalls.map((c) => c.path)).toContain('/api/meetings/start');
         conn.send({ type: 'meeting_state', state: { ...st, recording: { id: ID, title: '客户 A 周会', app: 'Teams', started: started(), state: 'recording', seconds: 60 } } });
         await expect(strip).toBeVisible();
+        await expect(offer).toBeHidden();
         await expect(strip.locator('#rec-open')).toHaveText('录音中 · 客户 A 周会');
         await expect(strip.locator('#rec-time')).toHaveText(/^01:0\d$/);
         await strip.locator('#rec-stop').click();
