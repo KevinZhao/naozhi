@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"runtime"
 	"time"
@@ -107,6 +108,11 @@ func MeetingSession(router *session.Router, workDir string, rules func() (allow,
 	return func(ctx context.Context, key, _ string, text string) (string, error) {
 		if router == nil {
 			return "", errors.New("no session router")
+		}
+		// The scout makes its work directory when it runs; with the scout off (an isolated
+		// instance, no mail / Slack MCP) nothing has, and the CLI cannot start in it.
+		if err := os.MkdirAll(workDir, 0o700); err != nil {
+			return "", err
 		}
 		opts := session.AgentOpts{
 			Backend:             "claude",
