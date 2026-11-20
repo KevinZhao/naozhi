@@ -633,3 +633,48 @@ func TestSymlinkedClaudeMD(t *testing.T) {
 		t.Errorf("dangling CLAUDE.md = %d %v", w.Code, out)
 	}
 }
+
+// An edit of the same size written inside the clock tick the opened file was
+// stamped in leaves mtime and size, the whole version, as they were (CI's
+// Linux runners stamp files by a coarse clock: TestPut failed there once).
+// The version is moved all the same; one that already differs is left alone.
+func TestMovedVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "a.md")
+	if err := os.WriteFile(path, []byte("v1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Date(2026, 11, 20, 8, 0, 0, 123456789, time.UTC)
+	if err := os.Chtimes(path, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened := version(st)
+
+	// Rewritten at the same size and, by the file clock, the same instant.
+	if err := os.WriteFile(path, []byte("v2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	st, _ = os.Stat(path)
+	if version(st) != opened {
+		t.Fatalf("the fixture does not collide: %s vs %s", version(st), opened)
+	}
+	moved := movedVersion(path, st, opened)
+	onDisk, _ := os.Stat(path)
+	if version(moved) == opened || version(onDisk) != version(moved) || !onDisk.ModTime().After(stamp) {
+		t.Fatalf("version %s (on disk %s), opened %s", version(moved), version(onDisk), opened)
+	}
+
+	// A version that already moved is not touched.
+	if got := movedVersion(path, onDisk, opened); version(got) != version(onDisk) {
+		t.Errorf("moved again: %s", version(got))
+	}
+	if again, _ := os.Stat(path); !again.ModTime().Equal(onDisk.ModTime()) {
+		t.Error("mtime changed for a version that had moved")
+	}
+}
