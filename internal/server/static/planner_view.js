@@ -57,6 +57,7 @@ import { decisionActsHtml, decorateEvents, noteWorkspaces, paintSessionCards, re
 import { clearAck, clearPending, closePlannerSession, mountComposer, noteAck, notePlannerStatus, openPlannerSession, showPlannerLeft } from './planner_chat.js';
 import { onSessionsApplied } from './session_list.js';
 import { countHeadHtml, ensureTasks, inProgress, mountTasks, refreshTasks, revealTask, taskOf } from './tasks.js';
+import { mountFronts, refreshFronts } from './fronts.js';
 import { initPlannerResize } from './planner_resize.js';
 import { custody, refreshCustody, setCustodyPaused } from './custody.js';
 import { workbench } from './workbench.js';
@@ -539,7 +540,7 @@ function onHostChanged() {
   const center = $('pl-center');
   if (pl.host && center?.parentElement) hostConversation(pl.host, center.parentElement);
   else fetchInbox();
-  if (pl.host === 'page') refreshTasks();
+  if (pl.host === 'page') { refreshTasks(); refreshFronts(); }
   refreshCustody();
 }
 
@@ -1004,7 +1005,7 @@ function appendEvents(events, reset) {
   else if (fresh.length) {
     box.querySelector(':scope > .pl-empty')?.remove();
     if (fresh.some((e) => e.type === 'user')) clearPending(box);
-    if (fresh.some((e) => e.type === 'result')) setTimeout(refreshTasks, TASK_REFRESH_MS);
+    if (fresh.some((e) => e.type === 'result')) setTimeout(() => { refreshTasks(); refreshFronts(); }, TASK_REFRESH_MS);
     box.insertAdjacentHTML('beforeend', html);
     // The workbench follows planner:main on the page only; beside the
     // drawer it shows the chat view's session.
@@ -1230,7 +1231,7 @@ function startConversation() {
         refreshHealth($('pl-center'), false);
         paintSessionCards($('pl-center'));
         // A task's 等你 / 失败 follow health, which pushes no frame.
-        if (pl.host === 'page') refreshTasks();
+        if (pl.host === 'page') { refreshTasks(); refreshFronts(); }
         if (!pl.sub) subscribe();
       }
     }, POLL_MS);
@@ -1276,6 +1277,7 @@ export function openPlannerPanel() {
   if (ui.activeView !== 'planner') { shell.setActivityView('planner'); return; }
   hostConversation('page', $('planner-main'));
   mountTasks($('pl-task'));
+  mountFronts($('pl-front'));
   paintTools();
   followWorkbenchSubject();
 }

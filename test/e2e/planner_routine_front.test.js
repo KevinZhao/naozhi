@@ -18,6 +18,8 @@ test('routine and front cards', async ({ page }) => {
       { type: 'text', time: now - 5000, uuid: 'rf-t1', detail: '好，每个工作日早上查一次，并记到这条线上。\n\n' +
         block({ type: 'routine', title: '内网模型动态', workspace: 'myproject', schedule: '0 9 * * 1-5', prompt: '查内网 Anthropic 新模型动态，第一行写结论' }) + '\n' +
         block({ type: 'routine', id: '1cc584f384db82fc', off: true }) + '\n' +
+        block({ type: 'routine', id: 'aa11', schedule: '0 8 * * *' }) + '\n' +
+        block({ type: 'routine', id: 'bb22', delete: true }) + '\n' +
         block({ type: 'front', id: 'jd-tgw', name: 'JD TGW 迁移', state: 'EC2 VXLAN 方案被否', next: '改迁移路线图', waiting: '客户', decision: '先迁回 JDOS VPC' }) + '\n' +
         block({ type: 'front', id: 'blog', close: true }) },
     ],
@@ -33,7 +35,8 @@ test('routine and front cards', async ({ page }) => {
     await expect(made.locator('summary')).toHaveText('例行 · 内网模型动态 · 0 9 * * 1-5 · myproject');
     await made.locator('summary').click();
     await expect(made.locator('.pl-act-rows')).toContainText('查内网 Anthropic 新模型动态，第一行写结论');
-    await expect(reply.locator('div.pl-act-routine')).toHaveText('例行 · 暂停 · 1cc584f384db82fc');
+    await expect(reply.locator('div.pl-act-routine')).toHaveText(
+      ['例行 · 暂停 · 1cc584f384db82fc', '例行 · 改了定时 → 0 8 * * * · aa11', '例行 · 删除 · bb22']);
 
     const fronts = reply.locator('.pl-act-front');
     await expect(fronts).toHaveCount(2);

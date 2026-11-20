@@ -44,11 +44,36 @@ func TestPlannerRoutines(t *testing.T) {
 	if got := PlannerRoutineList(sched)(); got[0].Paused {
 		t.Errorf("not resumed: %+v", got)
 	}
+	// An edit changes the fields named and leaves the rest.
+	if err := p.Edit(list[0].ID, "", "0 8 * * *", ""); err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	if got := PlannerRoutineList(sched)(); got[0].Schedule != "0 8 * * *" || got[0].Title != "内网模型动态" {
+		t.Errorf("after the edit: %+v", got)
+	}
+	if job, _ := sched.GetJob(list[0].ID); !strings.HasPrefix(job.Prompt, "查内网 Anthropic") {
+		t.Errorf("the prompt changed: %q", job.Prompt)
+	}
+	if err := p.Edit(list[0].ID, "", "每天八点", ""); err == nil || !strings.Contains(err.Error(), "schedule 不是有效的定时表达式") {
+		t.Errorf("edit to a bad schedule: %v", err)
+	}
+	if err := p.Edit("nope", "x", "", ""); err == nil || !strings.Contains(err.Error(), "没有这个例行任务") {
+		t.Errorf("edit of an unknown id: %v", err)
+	}
 	if _, err := p.Switch("nope", true); err == nil || !strings.Contains(err.Error(), "没有这个例行任务") {
 		t.Errorf("unknown id: %v", err)
 	}
 	if err := p.Add("坏的", dir, "每天九点", "p"); err == nil || !strings.Contains(err.Error(), "schedule 不是有效的定时表达式") {
 		t.Errorf("bad schedule: %v", err)
+	}
+	if err := p.Delete(list[0].ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if got := PlannerRoutineList(sched)(); len(got) != 0 {
+		t.Errorf("after the delete: %+v", got)
+	}
+	if err := p.Delete(list[0].ID); err == nil || !strings.Contains(err.Error(), "没有这个例行任务") {
+		t.Errorf("deleting it again: %v", err)
 	}
 	if err := (PlannerRoutines{}).Add("t", dir, "@daily", "p"); err == nil {
 		t.Error("no scheduler: added")

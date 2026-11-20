@@ -219,6 +219,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		imageDir: plannerImageDir(opts.StateDir),
 	})
 	hs.plannerH.SetLookups(opts.Lookups)
+	hs.plannerH.SetFronts(opts.Fronts)
 	if router != nil {
 		hs.plannerH.SetArchive(func(key string) bool {
 			_, ok := router.Archive(key)

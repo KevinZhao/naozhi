@@ -79,6 +79,9 @@ func TestSystemPrompt(t *testing.T) {
 		"同一类问题用户问到第三次",
 		`没有新变化时整条回复只写"没有变化"`,
 		`{"type":"routine","id":"<快照里方括号中的 id>","off":true}`,
+		`{"type":"routine","id":"<快照里方括号中的 id>","delete":true}`,
+		"用户明确说删才用",
+		"可能自己改了或结束了某一条",
 		`<naozhi-morning day="…">`,
 		"早报由网关随后按台账发出",
 	} {
@@ -114,8 +117,8 @@ func TestSystemPrompt(t *testing.T) {
 		"<定时表达式>", "0 9 * * 1-5", "<快照里方括号中的 id>", "1cc584f384db82fc",
 	)
 	formats := regexp.MustCompile(`\{"type":"[a-z]+"[^\n]*?\}`).FindAllString(p, -1)
-	if len(formats) != 16 {
-		t.Fatalf("found %d block formats, want 16: %q", len(formats), formats)
+	if len(formats) != 18 {
+		t.Fatalf("found %d block formats, want 18: %q", len(formats), formats)
 	}
 	for _, f := range formats {
 		body := strings.ReplaceAll(fill.Replace(f), `["x"]`, `["是"]`)

@@ -225,7 +225,7 @@
        conversation in the middle. The workbench (#fv-drawer) docks on the
        right as in the chat view. -->
   <main class="planner-main" id="planner-main" aria-label="Planner" hidden>
-    <aside class="pl-left" id="pl-left" aria-label="等你与任务">
+    <aside class="pl-left" id="pl-left" aria-label="等你、工作线与任务">
       <button type="button" class="pl-left-toggle" id="pl-left-toggle" aria-expanded="false" aria-controls="pl-left-body">
         <span>等你 0 · 任务 0</span>
         <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
@@ -234,6 +234,11 @@
         <section class="pl-group" aria-labelledby="pl-wait-h">
           <h2 class="pl-group-h" id="pl-wait-h">等你</h2>
           <div class="pl-list" id="pl-wait" role="list"></div>
+        </section>
+        <!-- 工作线: fronts.js (§15.19) mountFronts(#pl-front); hidden while
+             the ledger holds no line. -->
+        <section class="pl-group" aria-label="工作线" hidden>
+          <div id="pl-front"></div>
         </section>
         <!-- 任务: tasks.js (§15.4) mountTasks(#pl-task) replaces this
              heading and empty state with its own group. -->

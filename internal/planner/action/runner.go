@@ -2253,17 +2253,31 @@ type Routines interface {
 	Add(title, dir, schedule, prompt string) error
 	// Switch pauses (off) or resumes the one id names, returning its title.
 	Switch(id string, off bool) (title string, err error)
+	// Edit changes the title, schedule or prompt of the one id names; ""
+	// leaves a field.
+	Edit(id, title, schedule, prompt string) error
+	// Delete removes the one id names, its run history with it.
+	Delete(id string) error
 }
 
-// routine makes a standing task the user agreed to, or switches one off or
-// on (§15.17, D131). The card in the conversation says so; only a failure
+// routine makes a standing task the user agreed to, or switches, edits or
+// deletes one (§15.17, D131; §15.19, D135). The card in the conversation says so; only a failure
 // gets a line and a receipt.
 func (r *Runner) routine(t Routine) error {
 	if r.cfg.Routines == nil {
 		return errors.New("这台网关没有开定时任务，例行任务没有加")
 	}
 	if t.ID != "" {
-		if _, err := r.cfg.Routines.Switch(t.ID, *t.Off); err != nil {
+		var err error
+		switch {
+		case t.Delete:
+			err = r.cfg.Routines.Delete(t.ID)
+		case t.Off != nil:
+			_, err = r.cfg.Routines.Switch(t.ID, *t.Off)
+		default:
+			err = r.cfg.Routines.Edit(t.ID, t.Title, t.Schedule, t.Prompt)
+		}
+		if err != nil {
 			return fmt.Errorf("例行任务 %s 没有改：%w", t.ID, err)
 		}
 		return nil

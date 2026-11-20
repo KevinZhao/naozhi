@@ -375,11 +375,15 @@ function actionCardHtml(raw) {
   if (a.type === 'routine') {
     // 例行任务 (§15.17, D131). A new one folds like a dispatch: 例行 · 标题 ·
     // 定时 · 工作区, the prompt in its fold; it is a cron job the 自动化 view
-    // lists. One naming an id is a line: 暂停 / 恢复 that job.
+    // lists. One naming an id is a line saying what it did to that job:
+    // 暂停 / 恢复, 删除, or 改了 with the fields changed (§15.19, D135).
     const id = str(a.id);
     if (id) {
-      return '<div class="pl-act pl-act-routine pl-act-line" title="在“自动化”里能看到这个例行任务">' +
-        '<span class="pl-act-k">例行</span> · ' + (a.off === true ? '暂停' : '恢复') +
+      const changed = [['title', '标题'], ['schedule', '定时'], ['prompt', '内容']].filter(([k]) => str(a[k])).map(([, label]) => label);
+      const did = a.delete === true ? '删除' : typeof a.off === 'boolean' ? (a.off ? '暂停' : '恢复') : '改了' + changed.join('、');
+      const to = !a.delete && str(a.schedule) ? ' → ' + str(a.schedule) : '';
+      return '<div class="pl-act pl-act-routine pl-act-line" title="' + (a.delete === true ? '例行任务和它的运行记录已删除' : '在“自动化”里能看到这个例行任务') + '">' +
+        '<span class="pl-act-k">例行</span> · ' + esc(did + to) +
         '<span class="pl-act-ws"> · ' + esc(id) + '</span></div>';
     }
     const title = str(a.title);

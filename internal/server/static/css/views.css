@@ -212,6 +212,18 @@ body:has(#abnav-settings-badge:not([hidden])) .settings-syslink-btn::after{conte
 .tk-time{flex-shrink:0;margin-left:auto;font-variant-numeric:tabular-nums;color:var(--nz-text-dim);white-space:nowrap}
 .tk-meta{margin-top:3px;min-width:0;font-size:var(--nz-fs-xs);color:var(--nz-text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tk-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid var(--nz-border)}
+/* "工作线" (fronts.js, D134): a line of work's card is a task card's shape
+   with no status: the name, where it stands, then the next step and who it
+   waits on in one muted line. */
+.fr-state{margin-top:3px;color:var(--nz-text);overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-clamp:3;overflow:hidden}
+.fr-card.tk-acts-open .fr-state{-webkit-line-clamp:unset;line-clamp:unset}
+.fr-meta{margin-top:3px;min-width:0;font-size:var(--nz-fs-xs);color:var(--nz-text-dim);overflow-wrap:anywhere}
+.fr-idle{color:var(--nz-status-warn)}
+.fr-decisions{margin:6px 0 0;padding:0;list-style:none;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);display:flex;flex-direction:column;gap:2px;overflow-wrap:anywhere}
+.fr-edit{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+.fr-field{display:flex;flex-direction:column;gap:2px;font-size:var(--nz-fs-xs);color:var(--nz-text-dim)}
+.fr-field textarea{box-sizing:border-box;width:100%;resize:vertical;padding:4px 6px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);background:var(--nz-bg-0);color:var(--nz-text);font:inherit;font-size:var(--nz-fs-sm2)}
+.fr-field textarea:focus-visible{outline:2px solid var(--nz-focus);outline-offset:1px}
 .tk-act{min-height:26px}
 .tk-stop{color:var(--nz-red)}
 /* New result (§15.12 ④): a round dot before the title, apart from the left
