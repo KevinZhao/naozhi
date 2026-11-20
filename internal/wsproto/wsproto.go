@@ -50,6 +50,7 @@ const (
 	TypeNotify                 MsgType = "notify"
 	TypeInboxCount             MsgType = "inbox_count"
 	TypeSessionNote            MsgType = "session_note"
+	TypeMeetingState           MsgType = "meeting_state"
 )
 
 // Inbound (browser → server) message types, parsed out of node.ClientMsg.
@@ -392,4 +393,16 @@ type SessionNote struct {
 
 func NewSessionNote(key string, note json.RawMessage) SessionNote {
 	return SessionNote{Type: TypeSessionNote, Key: key, Note: note}
+}
+
+// MeetingState is the meeting recorder's status (meeting.Status), sent when
+// it changes: the red "录音中" strip on every view follows it
+// (docs/rfc/meeting-notes.md §6).
+type MeetingState struct {
+	Type  MsgType         `json:"type"`
+	State json.RawMessage `json:"state"`
+}
+
+func NewMeetingState(state json.RawMessage) MeetingState {
+	return MeetingState{Type: TypeMeetingState, State: state}
 }

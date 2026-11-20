@@ -35,6 +35,7 @@ func TestReservedNamespacePrefixes(t *testing.T) {
 		sessionkey.TaskKeyPrefix:    true,
 		sessionkey.ScoutKeyPrefix:   true,
 		sessionkey.ReaderKeyPrefix:  true,
+		sessionkey.MeetingKeyPrefix: true,
 	}
 	for _, p := range reservedKeyPrefixes {
 		if !wantSet[p] {
@@ -95,12 +96,13 @@ func TestIsReservedNamespace(t *testing.T) {
 func TestExemptKeyPrefixesUsesConstants(t *testing.T) {
 	t.Parallel()
 	want := map[string]bool{
-		CronKeyPrefix:              true,
-		ProjectKeyPrefix:           true,
-		SysKeyPrefix:               true,
-		PlannerNSPrefix:            true,
-		sessionkey.ScoutKeyPrefix:  true,
-		sessionkey.ReaderKeyPrefix: true,
+		CronKeyPrefix:               true,
+		ProjectKeyPrefix:            true,
+		SysKeyPrefix:                true,
+		PlannerNSPrefix:             true,
+		sessionkey.ScoutKeyPrefix:   true,
+		sessionkey.ReaderKeyPrefix:  true,
+		sessionkey.MeetingKeyPrefix: true,
 	}
 	for _, p := range exemptKeyPrefixes {
 		if !want[p] {

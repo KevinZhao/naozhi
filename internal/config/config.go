@@ -64,6 +64,8 @@ type Config struct {
 	Planner PlannerConfig `yaml:"planner,omitempty"`
 	// Isolation is what an isolated instance still runs (isolation.go).
 	Isolation IsolationConfig `yaml:"isolation,omitempty"`
+	// Meeting is meeting recording (docs/rfc/meeting-notes.md), macOS only.
+	Meeting MeetingConfig `yaml:"meeting,omitempty"`
 	// IMAccess restricts which IM senders the dispatcher serves (im_access.go).
 	IMAccess IMAccessConfig `yaml:"im_access,omitempty"`
 	// Integrations are outbound hooks (integrations.go).
