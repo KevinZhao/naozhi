@@ -153,3 +153,32 @@ func WAVSeconds(path string) (float64, error) {
 	_, n, err := wavData(f)
 	return float64(n) / (SampleRate * bytesPerSample), err
 }
+
+// SilenceWAV zeroes the spans of a WAV file in place; an open span (End 0) runs to the end.
+func SilenceWAV(path string, spans []Span) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	off, n, err := wavData(f)
+	if err != nil {
+		return err
+	}
+	zero := make([]byte, 32*1024)
+	for _, s := range spans {
+		from := min(int64(s.Start*SampleRate)*bytesPerSample, n)
+		to := n
+		if s.End > 0 {
+			to = min(int64(s.End*SampleRate)*bytesPerSample, n)
+		}
+		for p := from; p < to; {
+			k := min(int64(len(zero)), to-p)
+			if _, err := f.WriteAt(zero[:k], off+p); err != nil {
+				return err
+			}
+			p += k
+		}
+	}
+	return f.Sync()
+}

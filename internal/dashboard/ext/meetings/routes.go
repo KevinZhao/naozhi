@@ -14,6 +14,7 @@ func (h *Handler) Routes() []httputil.Route {
 		{Pattern: "POST /api/meetings/start", Handler: h.HandleStart},
 		{Pattern: "POST /api/meetings/dismiss", Handler: h.HandleDismiss},
 		{Pattern: "POST /api/meetings/stop", Handler: h.HandleStop},
+		{Pattern: "POST /api/meetings/pause-mine", Handler: h.HandlePauseMine},
 		{Pattern: "POST /api/meetings/authorize", Handler: h.HandleAuthorize},
 		{Pattern: "POST /api/meetings/{id}/keep", Handler: h.HandleKeep},
 		{Pattern: "POST /api/meetings/{id}/retry", Handler: h.HandleRetry},

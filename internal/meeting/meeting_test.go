@@ -114,7 +114,7 @@ type fakeASR struct {
 func (a *fakeASR) Name() string { return "fake" }
 func (a *fakeASR) Transcribe(_ context.Context, wav string, h Hints) ([]Segment, error) {
 	a.mu.Lock()
-	a.calls = append(a.calls, filepath.Base(wav)+"|"+h.Title+"|"+h.Language)
+	a.calls = append(a.calls, filepath.Base(wav)+"|"+h.Title+"|"+strings.Join(h.Terms, ",")+"|"+h.Language)
 	a.mu.Unlock()
 	secs, err := WAVSeconds(wav)
 	if err != nil {
@@ -309,7 +309,10 @@ func TestRecordSummarizeEndToEnd(t *testing.T) {
 		t.Fatalf("notices = %q", x.notices)
 	}
 	// The summary is pointed at the projects and the Planner's clues.
-	for _, want := range []string{"工作区 naozhi：/w/naozhi", "/state/planner/github", "## 相关项目与线索"} {
+	if !strings.Contains(x.asr.calls[0], "|naozhi|") {
+		t.Fatalf("project names not given to the recogniser: %q", x.asr.calls)
+	}
+	for _, want := range []string{"工作区 naozhi：/w/naozhi", "/state/planner/github", "## 相关项目与线索", "（原文：X）"} {
 		if !strings.Contains(x.prompts[0], want) {
 			t.Fatalf("prompt lacks %q", want)
 		}
@@ -641,5 +644,48 @@ func TestPartialSegmentsAreNotListed(t *testing.T) {
 	writeSegment(t, filepath.Join(s.Root, "m", "audio", "mic", "part-000002.wav"), 10, 1)
 	if got := s.segments("m", "mic"); len(got) != 1 || filepath.Base(got[0]) != "000001.wav" {
 		t.Fatalf("segments = %v", got)
+	}
+}
+
+func TestPauseMineSilencesOnlyMyTrack(t *testing.T) {
+	x := newHarness(t, nil)
+	x.record(t)
+	waitFor(t, "recording", func() bool { r := x.m.Status().Recording; return r != nil && r.Segments == 3 })
+	if _, err := x.m.PauseMine(true); err != nil {
+		t.Fatal(err)
+	}
+	x.m.PauseMine(true) // a second pause keeps the one stretch
+	x.clock.Add(2 * time.Second)
+	mt, err := x.m.PauseMine(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mt.MinePaused) != 1 || mt.MinePaused[0].Start != 2.5 || mt.MinePaused[0].End != 5.5 {
+		t.Fatalf("paused = %+v", mt.MinePaused)
+	}
+	if st := x.m.Status(); st.Recording == nil || len(st.Recording.MinePaused) != 1 {
+		t.Fatalf("status lost the pause: %+v", st.Recording)
+	}
+	x.m.StopRecording("user")
+	if _, err := x.m.PauseMine(true); err == nil {
+		t.Fatal("paused with nothing recording")
+	}
+	waitFor(t, "done", func() bool { return x.only(t).State == StateDone })
+}
+
+func TestSilenceWAV(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "mic.wav")
+	writeSegment(t, p, 4*SampleRate, 1000)
+	if err := SilenceWAV(p, []Span{{Start: 1, End: 2}, {Start: 3}}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(p)
+	pcm := b[44:]
+	at := func(sec float64) int16 {
+		i := int(sec*SampleRate) * 2
+		return int16(binary.LittleEndian.Uint16(pcm[i:]))
+	}
+	if at(0.5) != 1000 || at(1.5) != 0 || at(2.5) != 1000 || at(3.5) != 0 {
+		t.Fatalf("samples %d %d %d %d", at(0.5), at(1.5), at(2.5), at(3.5))
 	}
 }

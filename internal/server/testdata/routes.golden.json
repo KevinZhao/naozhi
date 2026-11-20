@@ -196,6 +196,11 @@
   },
   {
     "method": "POST",
+    "path": "/api/meetings/pause-mine",
+    "handler_type": "*meetings.Handler"
+  },
+  {
+    "method": "POST",
     "path": "/api/meetings/start",
     "handler_type": "*meetings.Handler"
   },

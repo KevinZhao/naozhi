@@ -134,6 +134,9 @@ type recording struct {
 	by      string
 	heard   bool
 	micOn   bool
+	// partStart is when the current helper run started: with the last segment's time it places
+	// "now" on the recording's timeline.
+	partStart time.Time
 }
 
 // New loads the meetings directory. It starts nothing: Run does.
@@ -453,6 +456,9 @@ func (m *Manager) record(ctx context.Context, r *recording) {
 	for {
 		next := nextIndex(m.store, r.m.ID)
 		before := next
+		m.mu.Lock()
+		r.partStart = m.cfg.Now()
+		m.mu.Unlock()
 		ev, err := m.cfg.Helper.Record(ctx, dir, r.m.Bundles, next, r.stop, func(ev Event) { m.onEvent(r, ev) })
 		select {
 		case <-r.stop:
@@ -531,6 +537,48 @@ func (m *Manager) onEvent(r *recording, ev Event) {
 	r.micOn = r.micOn || micOn
 	m.mu.Unlock()
 	m.changed()
+}
+
+// PauseMine pauses (or resumes) the user's own track of the recording: what the microphone
+// takes meanwhile is silenced before recognition (a muted meeting still reaches the microphone,
+// and an aside is not for the transcript). The far end records on.
+func (m *Manager) PauseMine(pause bool) (Meeting, error) {
+	m.mu.Lock()
+	r := m.rec
+	var start time.Time
+	if r != nil {
+		start = r.partStart
+		if r.m.LastSegment.After(start) {
+			start = r.m.LastSegment
+		}
+	}
+	m.mu.Unlock()
+	if r == nil {
+		return Meeting{}, errors.New("没有在录音")
+	}
+	now := m.cfg.Now()
+	mt, err := m.store.Update(r.m.ID, func(mt *Meeting) {
+		at := mt.Seconds + now.Sub(start).Seconds()
+		open := len(mt.MinePaused) > 0 && mt.MinePaused[len(mt.MinePaused)-1].End == 0
+		switch {
+		case pause && !open:
+			mt.MinePaused = append(mt.MinePaused, Span{Start: max(at-0.5, 0)})
+		case !pause && open:
+			mt.MinePaused[len(mt.MinePaused)-1].End = at + 0.5
+		}
+	})
+	if err != nil {
+		return Meeting{}, err
+	}
+	m.mu.Lock()
+	if m.rec == r {
+		r.m = mt
+	}
+	m.mu.Unlock()
+	m.journal(map[string]any{"meeting": mt.ID, "step": map[bool]string{true: "mine_paused", false: "mine_resumed"}[pause],
+		"summary": map[bool]string{true: "暂停了你的声音：", false: "恢复了你的声音："}[pause] + mt.Title})
+	m.changed()
+	return mt, nil
 }
 
 // StopRecording ends the current recording (by "user", "auto" or "shutdown"). A user's stop
@@ -884,6 +932,15 @@ func (m *Manager) transcribe(ctx context.Context, mt Meeting) ([]Line, error) {
 		return nil, fmt.Errorf("拼接音频：%w", err)
 	}
 	hints := Hints{Title: mt.Title, Attendees: mt.Attendees, Language: mt.Language}
+	if m.cfg.Clues != nil {
+		seen := map[string]bool{}
+		for _, w := range m.cfg.Clues().Workspaces {
+			if w.Name != "" && !seen[w.Name] {
+				seen[w.Name] = true
+				hints.Terms = append(hints.Terms, w.Name)
+			}
+		}
+	}
 	mine, err := m.cfg.Recognizer.Transcribe(ctx, mic, hints)
 	if err != nil {
 		return nil, fmt.Errorf("识别（你）：%w", err)
@@ -963,10 +1020,19 @@ func (m *Manager) joinTracks(id string) (string, string, error) {
 		if err != nil {
 			return "", "", err
 		}
+		mt, err := m.store.Get(id)
+		if err != nil {
+			return "", "", err
+		}
 		// The segments go once the summary is written, so audio that did not join whole must
 		// fail here, with the segments still there.
-		if mt, err := m.store.Get(id); err == nil && secs < mt.Seconds*0.9-1 {
+		if secs < mt.Seconds*0.9-1 {
 			return "", "", fmt.Errorf("%s 轨拼接后只有 %.0f 秒，录了 %.0f 秒", track, secs, mt.Seconds)
+		}
+		if track == "mic" && len(mt.MinePaused) > 0 {
+			if err := SilenceWAV(dst, mt.MinePaused); err != nil {
+				return "", "", err
+			}
 		}
 	}
 	return mic, remote, nil

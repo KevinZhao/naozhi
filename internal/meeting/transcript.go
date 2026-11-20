@@ -21,7 +21,12 @@ type Hints struct {
 	Attendees []string
 	// Language pins recognition ("Chinese", "English"); "" lets the engine pick per track.
 	Language string
+	// Terms are names the meeting may use: the registered workspaces (project names).
+	Terms []string
 }
+
+// maxTerms caps the terms given to the recogniser: its context prompt is short.
+const maxTerms = 40
 
 // Languages a meeting can be re-recognised in; "" is the engine's own pick.
 var Languages = []string{"", "Chinese", "English"}

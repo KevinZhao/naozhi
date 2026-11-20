@@ -7,6 +7,7 @@
 //	POST   /api/meetings/start            record the detected meeting (the strip's 录音)
 //	POST   /api/meetings/dismiss          leave the detected meeting unrecorded (不录)
 //	POST   /api/meetings/stop             stop the recording now
+//	POST   /api/meetings/pause-mine       {"paused":bool}: pause / resume the user's own track
 //	POST   /api/meetings/authorize        bring up the system prompts (answers at once;
 //	                                      the status follows on the meeting_state frame)
 //	POST   /api/meetings/{id}/keep        {"keep":bool}: keep the audio past 30 days
@@ -167,6 +168,28 @@ func (h *Handler) HandleDismiss(w http.ResponseWriter, _ *http.Request) {
 	}
 	h.m.Dismiss()
 	httputil.WriteOK(w)
+}
+
+// HandlePauseMine serves POST /api/meetings/pause-mine.
+func (h *Handler) HandlePauseMine(w http.ResponseWriter, r *http.Request) {
+	if h.m == nil {
+		http.Error(w, "meeting recording not available", http.StatusServiceUnavailable)
+		return
+	}
+	var req struct {
+		Paused bool `json:"paused"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, httputil.MaxRequestBodyBytes)
+	if err := httputil.DecodeJSONBody(r, &req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	mt, err := h.m.PauseMine(req.Paused)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	httputil.WriteJSON(w, mt)
 }
 
 // HandleStop serves POST /api/meetings/stop.

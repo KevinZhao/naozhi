@@ -68,6 +68,7 @@ export const NZ_CONTRACT = Object.freeze({
     meetings: '/api/meetings',
     meetings_authorize: '/api/meetings/authorize',
     meetings_dismiss: '/api/meetings/dismiss',
+    meetings_pause_mine: '/api/meetings/pause-mine',
     meetings_start: '/api/meetings/start',
     meetings_stop: '/api/meetings/stop',
     meetings_id: '/api/meetings/{id}',

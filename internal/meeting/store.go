@@ -53,9 +53,19 @@ type Meeting struct {
 	AudioDeleted bool      `json:"audio_deleted,omitempty"`
 	AudioExpires time.Time `json:"audio_expires,omitzero"`
 	Speakers     int       `json:"speakers,omitempty"`
+	// MinePaused are the stretches of the recording (seconds into it) in which the user paused
+	// their own track: that audio is silenced before anything reads it, so it is neither
+	// transcribed nor kept. An open stretch (End 0) runs to the end.
+	MinePaused []Span `json:"mine_paused,omitempty"`
 	// Language is the recognition language the user chose ("" lets the engine pick per track).
 	Language string `json:"language,omitempty"`
 	Engine   string `json:"engine,omitempty"`
+}
+
+// Span is a stretch of a recording, seconds from its start.
+type Span struct {
+	Start float64 `json:"start"`
+	End   float64 `json:"end,omitempty"`
 }
 
 // Todo is one to-do the summary found. Mine are the user's own; they become promises.

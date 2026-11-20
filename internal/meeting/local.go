@@ -120,5 +120,8 @@ func hintText(h Hints) string {
 	if len(h.Attendees) > 0 {
 		parts = append(parts, "参会人："+strings.Join(h.Attendees, "、"))
 	}
+	if len(h.Terms) > 0 {
+		parts = append(parts, "可能提到的项目："+strings.Join(h.Terms[:min(len(h.Terms), maxTerms)], "、"))
+	}
 	return strings.Join(parts, "\n")
 }

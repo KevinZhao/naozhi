@@ -46,9 +46,15 @@ function strip() {
   el.setAttribute('role', 'status');
   el.hidden = true;
   el.innerHTML = '<span class="rec-dot" aria-hidden="true"></span><button type="button" class="rec-title" id="rec-open"></button>' +
-    '<span class="rec-time" id="rec-time"></span><button type="button" class="rec-stop" id="rec-stop">停止</button>';
+    '<span class="rec-time" id="rec-time"></span>' +
+    '<button type="button" class="rec-stop" id="rec-mine" title="只停你这一路，对方照录；暂停期间你的声音不转写、不保存">暂停我的声音</button>' +
+    '<button type="button" class="rec-stop" id="rec-stop">停止</button>';
   document.body.prepend(el);
   el.querySelector('#rec-stop').addEventListener('click', stopRecording);
+  el.querySelector('#rec-mine').addEventListener('click', () => {
+    const btn = el.querySelector('#rec-mine');
+    post(API.meetings_pause_mine, '操作失败', btn, { paused: btn.dataset.paused !== '1' });
+  });
   el.querySelector('#rec-open').addEventListener('click', () => openPanel());
   return el;
 }
@@ -65,6 +71,12 @@ function paintStrip() {
   clearInterval(mt.timer);
   if (!rec) return;
   el.querySelector('#rec-open').textContent = '录音中 · ' + rec.title;
+  const spans = rec.mine_paused || [];
+  const paused = spans.length > 0 && !spans[spans.length - 1].end;
+  const mine = el.querySelector('#rec-mine');
+  mine.dataset.paused = paused ? '1' : '0';
+  mine.textContent = paused ? '恢复我的声音' : '暂停我的声音';
+  mine.classList.toggle('rec-mine-paused', paused);
   const t0 = Date.parse(rec.started);
   const tick = () => { el.querySelector('#rec-time').textContent = clock((Date.now() - t0) / 1000); };
   tick();
@@ -90,10 +102,10 @@ function offerStrip() {
   return el;
 }
 
-async function post(url, what, btn) {
+async function post(url, what, btn, body) {
   if (btn) btn.disabled = true;
   try {
-    await fetchJSON(url, { method: 'POST' });
+    await fetchJSON(url, body ? { method: 'POST', body: JSON.stringify(body) } : { method: 'POST' });
   } catch (e) {
     showToast(what + '：' + e.message);
   } finally {
@@ -296,10 +308,10 @@ function paintSettings() {
     html += row('麦克风', a.microphone) + row('屏幕与系统录音', a.audio_capture);
     if (st.error) html += '<div class="mtg-err">' + esc(st.error) + '</div>';
     if (!ready) {
-      html += '<p class="mtg-hint">点「授权」后，这台 Mac 上会依次弹出两个系统窗口，都点「允许」。如果跳到了系统设置，就在 隐私与安全性 → 屏幕与系统录音 里打开 naozhi-audio。拒绝过的只能在系统设置里改。</p>' +
+      html += '<p class="mtg-hint">授权记在 naozhi-audio 这个文件上：移动 naozhi 的安装目录后要重新授权。点「授权」后，这台 Mac 上会依次弹出两个系统窗口，都点「允许」。如果跳到了系统设置，就在 隐私与安全性 → 屏幕与系统录音 里打开 naozhi-audio。拒绝过的只能在系统设置里改。</p>' +
         '<button type="button" class="settings-syslink-btn" id="mtg-authorize">授权</button>';
     } else {
-      html += '<p class="mtg-hint">线上会议（Teams、Zoom、Webex、腾讯会议、浏览器…）一开始，顶部会出现「录音」按钮，点了才录；会议软件释放麦克风 2 分钟后自动结束。告知参会者由你负责。</p>';
+      html += '<p class="mtg-hint">线上会议（Teams、Zoom、Webex、腾讯会议、浏览器…）一开始，顶部会出现「录音」按钮，点了才录；会议软件释放麦克风 2 分钟后自动结束。会议软件里闭麦不影响这里录你的声音，不想被录时点红条上的「暂停我的声音」。告知参会者由你负责。</p>';
     }
   }
   html += '<button type="button" class="settings-syslink-btn" id="mtg-open-list">会议纪要 ›</button>';

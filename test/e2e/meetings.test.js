@@ -53,6 +53,8 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 800 }], ['mob
         await expect(offer).toBeHidden();
         await expect(strip.locator('#rec-open')).toHaveText('录音中 · 客户 A 周会');
         await expect(strip.locator('#rec-time')).toHaveText(/^01:0\d$/);
+        await strip.locator('#rec-mine').click();
+        await expect.poll(() => mock.meetingCalls.map((c) => c.path + ' ' + JSON.stringify(c.body))).toContain('/api/meetings/pause-mine {"paused":true}');
         await strip.locator('#rec-stop').click();
         await expect.poll(() => mock.meetingCalls.map((c) => c.path)).toContain('/api/meetings/stop');
         conn.send({ type: 'meeting_state', state: st });
