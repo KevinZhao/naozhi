@@ -25,8 +25,8 @@ type Hints struct {
 	Terms []string
 }
 
-// maxTerms caps the terms given to the recogniser: its context prompt is short.
-const maxTerms = 40
+// maxTerms caps the terms given to the recogniser: they go in its context prompt.
+const maxTerms = 80
 
 // Languages a meeting can be re-recognised in; "" is the engine's own pick.
 var Languages = []string{"", "Chinese", "English"}

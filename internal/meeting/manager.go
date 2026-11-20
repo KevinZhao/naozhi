@@ -932,15 +932,10 @@ func (m *Manager) transcribe(ctx context.Context, mt Meeting) ([]Line, error) {
 		return nil, fmt.Errorf("拼接音频：%w", err)
 	}
 	hints := Hints{Title: mt.Title, Attendees: mt.Attendees, Language: mt.Language}
-	if m.cfg.Clues != nil {
-		seen := map[string]bool{}
-		for _, w := range m.cfg.Clues().Workspaces {
-			if w.Name != "" && !seen[w.Name] {
-				seen[w.Name] = true
-				hints.Terms = append(hints.Terms, w.Name)
-			}
-		}
-	}
+	// Only the user's own list: terms pulled from workspace documents made the 11-20 real
+	// meeting no better and garbled one phrase ("DMAS 2.0" → "边卖少点零"); they go to the
+	// summary's correction step instead (Clues.Terms).
+	hints.Terms = Glossary(m.cfg.Root, nil, maxTerms, m.cfg.Now())
 	mine, err := m.cfg.Recognizer.Transcribe(ctx, mic, hints)
 	if err != nil {
 		return nil, fmt.Errorf("识别（你）：%w", err)
@@ -1047,6 +1042,7 @@ func (m *Manager) summarize(ctx context.Context, mt Meeting, lines []Line) (stri
 	var clues Clues
 	if m.cfg.Clues != nil {
 		clues = m.cfg.Clues()
+		clues.Terms = Glossary(m.cfg.Root, matchWorkspaces(clues.Workspaces, mt), maxTerms, m.cfg.Now())
 	}
 	reply, err := m.cfg.Summarize(ctx, SummaryKeyPrefix+mt.ID, m.store.Dir(mt.ID), summaryPrompt(mt, transcriptText(lines), clues, m.cfg.Now()))
 	if err != nil {

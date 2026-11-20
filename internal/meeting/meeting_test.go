@@ -153,6 +153,10 @@ func newHarness(t *testing.T, mut func(*Config, *fakeHelper)) *harness {
 		clock: &fakeClock{t: time.Date(2026, 11, 9, 10, 0, 0, 0, time.Local)},
 		done:  make(chan struct{}),
 	}
+	wsDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(wsDir, "CLAUDE.md"), []byte("naozhi talks to the GTM team"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	cfg := Config{
 		Root:       t.TempDir(),
 		Helper:     x.h,
@@ -168,7 +172,7 @@ func newHarness(t *testing.T, mut func(*Config, *fakeHelper)) *harness {
 			return []CalendarEvent{{Title: "客户 A 周会", Start: x.clock.Now().Add(-2 * time.Minute), End: x.clock.Now().Add(time.Hour), Attendees: []string{"Bob"}}}
 		},
 		Clues: func() Clues {
-			return Clues{Workspaces: []ClueWorkspace{{Name: "naozhi", Path: "/w/naozhi"}}, PlannerDir: "/state/planner"}
+			return Clues{Workspaces: []ClueWorkspace{{Name: "naozhi", Path: wsDir}}, PlannerDir: "/state/planner"}
 		},
 		Promise: func(text string, due time.Time) (string, error) {
 			x.mu.Lock()
@@ -309,10 +313,11 @@ func TestRecordSummarizeEndToEnd(t *testing.T) {
 		t.Fatalf("notices = %q", x.notices)
 	}
 	// The summary is pointed at the projects and the Planner's clues.
-	if !strings.Contains(x.asr.calls[0], "|naozhi|") {
-		t.Fatalf("project names not given to the recogniser: %q", x.asr.calls)
+	// Only the user's own list goes to the recogniser (none here).
+	if !strings.Contains(x.asr.calls[0], "|客户 A 周会||") {
+		t.Fatalf("recogniser hints: %q", x.asr.calls)
 	}
-	for _, want := range []string{"工作区 naozhi：/w/naozhi", "/state/planner/github", "## 相关项目与线索", "（原文：X）"} {
+	for _, want := range []string{"工作区 naozhi：", "/state/planner/github", "## 相关项目与线索", "（原文：X）"} {
 		if !strings.Contains(x.prompts[0], want) {
 			t.Fatalf("prompt lacks %q", want)
 		}
@@ -687,5 +692,34 @@ func TestSilenceWAV(t *testing.T) {
 	}
 	if at(0.5) != 1000 || at(1.5) != 0 || at(2.5) != 1000 || at(3.5) != 0 {
 		t.Fatalf("samples %d %d %d %d", at(0.5), at(1.5), at(2.5), at(3.5))
+	}
+}
+
+func TestGlossary(t *testing.T) {
+	root, ws := t.TempDir(), t.TempDir()
+	os.WriteFile(filepath.Join(root, GlossaryFile), []byte("# mine\nCMHK\n言犀 # JoyAI's model\n\n"), 0o600)
+	os.WriteFile(filepath.Join(ws, "CLAUDE.md"), []byte("The TGW and DXGW plan, TGW again; JoyAI on p5en. See `CodeSpan` and https://x.io/NotATerm v1 The"), 0o600)
+	old := t.TempDir()
+	os.WriteFile(filepath.Join(old, "README.md"), []byte("OldTerm OldTerm"), 0o600)
+	past := time.Now().Add(-60 * 24 * time.Hour)
+	os.Chtimes(filepath.Join(old, "README.md"), past, past)
+	got := Glossary(root, []ClueWorkspace{{Name: "JD", Path: ws}, {Name: "stale", Path: old}}, 80, time.Now())
+	want := "CMHK,言犀,TGW,DXGW,JoyAI,p5en,JD"
+	if strings.Join(got, ",") != want {
+		t.Fatalf("glossary = %v, want %s", got, want)
+	}
+	if got := Glossary(root, nil, 1, time.Now()); len(got) != 1 || got[0] != "CMHK" {
+		t.Fatalf("capped glossary = %v", got)
+	}
+}
+
+func TestMatchWorkspaces(t *testing.T) {
+	all := []ClueWorkspace{{Name: "JD", Path: "/w/jd"}, {Name: "naozhi", Path: "/w/n"}, {Name: "x", Path: "/w/x"}}
+	got := matchWorkspaces(all, Meeting{Title: "JD 周会", Attendees: []string{"bob"}})
+	if len(got) != 1 || got[0].Name != "JD" {
+		t.Fatalf("matched %v", got)
+	}
+	if got := matchWorkspaces(all, Meeting{Title: "Teams 会议 16:55"}); len(got) != 0 {
+		t.Fatalf("matched %v", got)
 	}
 }

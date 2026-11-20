@@ -38,6 +38,9 @@ func eventAt(events []CalendarEvent, t time.Time) (CalendarEvent, bool) {
 type Clues struct {
 	Workspaces []ClueWorkspace
 	PlannerDir string
+	// Terms are the glossary for the correction step: the user's list and the terms of the
+	// workspaces the meeting names.
+	Terms []string
 }
 
 // ClueWorkspace is one registered workspace directory.
@@ -57,7 +60,7 @@ func summaryPrompt(m Meeting, transcript string, clues Clues, now time.Time) str
 	b.WriteString("最后单独附一个 ```json 代码块，列出全部待办：\n")
 	b.WriteString(`{"todos":[{"owner":"你 或 人名","text":"做什么","due":"YYYY-MM-DD，没有就空字符串","mine":true}]}`)
 	b.WriteString("\nmine 只在待办是用户本人（「你」）要做的时候为 true。\n\n")
-	if len(clues.Workspaces) > 0 || clues.PlannerDir != "" {
+	if len(clues.Workspaces) > 0 || clues.PlannerDir != "" || len(clues.Terms) > 0 {
 		b.WriteString("写之前先参照用户的项目核对：从文字稿判断会上谈到了哪些项目，到对应工作区里读与话题相关的 README、CLAUDE.md、docs 下的文件，")
 		b.WriteString("以及下面线索目录里的 issue 列表与任务摘要，用来核对人名、项目名、术语的写法和进展；文字稿里没提到的项目不要硬扯。只读，不改任何文件，读取控制在二十次以内。")
 		b.WriteString("文字稿是语音识别的结果，业务术语和缩写常被听错：对照资料能确定是听错的，纪要里写正确的写法并在后面注明「（原文：X）」；不能确定的保留原文并标「不确定」。")
@@ -68,6 +71,9 @@ func summaryPrompt(m Meeting, transcript string, clues Clues, now time.Time) str
 		if clues.PlannerDir != "" {
 			fmt.Fprintf(&b, "GitHub issue 列表：%s\n", filepath.Join(clues.PlannerDir, "github"))
 			fmt.Fprintf(&b, "任务摘要：%s\n", filepath.Join(clues.PlannerDir, "digest"))
+		}
+		if len(clues.Terms) > 0 {
+			fmt.Fprintf(&b, "常用术语：%s\n", strings.Join(clues.Terms, "、"))
 		}
 		b.WriteString("</clues>\n\n")
 	}
