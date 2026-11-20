@@ -315,18 +315,21 @@ func (l *Lookup) validate() error {
 // Routine asks for a standing task (例行关注, §15.17, D131): Prompt run in
 // Workspace on Schedule (a five-field cron expression, or @daily / @every
 // 6h), each run a fresh session, its result in the morning brief when it
-// changed. With ID it switches an existing one off or back on instead. Only
-// a turn the user started may make or switch one: a mail asking for a
-// standing task is not the user asking.
+// changed. With ID it changes an existing one instead (§15.19, D135): Off
+// pauses or resumes it, Delete removes it with its run history, and a
+// Title, Schedule or Prompt alone edits that field. Only a turn the user
+// started may make or change one: a mail asking for a standing task is not
+// the user asking.
 type Routine struct {
 	Title     string `json:"title,omitempty"`
 	Workspace string `json:"workspace,omitempty"`
 	Schedule  string `json:"schedule,omitempty"`
 	Prompt    string `json:"prompt,omitempty"`
-	// ID names an existing routine (the snapshot lists them by it), Off
-	// whether to pause it (true) or run it again (false).
-	ID  string `json:"id,omitempty"`
-	Off *bool  `json:"off,omitempty"`
+	// ID names an existing routine (the snapshot lists them by it).
+	ID string `json:"id,omitempty"`
+	// Off pauses it (true) or runs it again (false); Delete removes it.
+	Off    *bool `json:"off,omitempty"`
+	Delete bool  `json:"delete,omitempty"`
 }
 
 const (
@@ -335,39 +338,54 @@ const (
 	routineIDRunes       = 64
 )
 
+// Edits reports whether t, naming an existing routine, changes its content.
+func (t Routine) Edits() bool { return t.Title != "" || t.Schedule != "" || t.Prompt != "" }
+
 func (t *Routine) validate() error {
 	t.Title, t.Workspace, t.Schedule = strings.TrimSpace(t.Title), strings.TrimSpace(t.Workspace), strings.TrimSpace(t.Schedule)
 	t.Prompt, t.ID = strings.TrimSpace(t.Prompt), strings.TrimSpace(t.ID)
+	switch {
+	case utf8.RuneCountInString(t.Title) > titleRunes:
+		return fmt.Errorf("title 超过 %d 字", titleRunes)
+	case len(t.Schedule) > routineScheduleBytes:
+		return errors.New("schedule 太长")
+	case utf8.RuneCountInString(t.Prompt) > routinePromptRunes:
+		return fmt.Errorf("prompt 超过 %d 字", routinePromptRunes)
+	}
 	if t.ID != "" {
+		// One block does one thing to a routine: switch it, delete it, or
+		// edit it.
+		does := 0
+		for _, b := range []bool{t.Off != nil, t.Delete, t.Edits()} {
+			if b {
+				does++
+			}
+		}
 		switch {
 		case utf8.RuneCountInString(t.ID) > routineIDRunes:
 			return errors.New("routine 的 id 太长")
-		case t.Off == nil:
-			return errors.New("带 id 的 routine 要写 off（true 暂停，false 恢复）")
-		case t.Title != "" || t.Workspace != "" || t.Schedule != "" || t.Prompt != "":
-			return errors.New("带 id 的 routine 只能暂停或恢复，改内容请用户在“自动化”里改")
+		case t.Workspace != "":
+			return errors.New("例行任务的工作区不能改：删掉重建，或请用户在“自动化”里改")
+		case does == 0:
+			return errors.New("带 id 的 routine 要写 off（true 暂停，false 恢复）、delete:true，或要改的 title / schedule / prompt")
+		case does > 1:
+			return errors.New("带 id 的 routine 一块只做一件事：暂停或恢复、删除、改内容分开写")
 		}
 		return nil
 	}
 	switch {
-	case t.Off != nil:
-		return errors.New("off 只和 id 一起用")
+	case t.Off != nil || t.Delete:
+		return errors.New("off 和 delete 只和 id 一起用")
 	case t.Title == "":
 		return errors.New("routine 缺少 title")
-	case utf8.RuneCountInString(t.Title) > titleRunes:
-		return fmt.Errorf("title 超过 %d 字", titleRunes)
 	case t.Workspace == "":
 		return errors.New("routine 缺少 workspace")
 	case utf8.RuneCountInString(t.Workspace) > workspaceRefRunes:
 		return errors.New("workspace 太长")
 	case t.Schedule == "":
 		return errors.New("routine 缺少 schedule（五段 cron 表达式，如 0 9 * * 1-5）")
-	case len(t.Schedule) > routineScheduleBytes:
-		return errors.New("schedule 太长")
 	case t.Prompt == "":
 		return errors.New("routine 缺少 prompt")
-	case utf8.RuneCountInString(t.Prompt) > routinePromptRunes:
-		return fmt.Errorf("prompt 超过 %d 字", routinePromptRunes)
 	}
 	return nil
 }

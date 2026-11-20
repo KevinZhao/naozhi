@@ -230,6 +230,13 @@ func (s *Store) Apply(u Update) (Front, error) {
 	return out, nil
 }
 
+// Has reports whether a front, open or closed, has the ID.
+func (s *Store) Has(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.ContainsFunc(s.fronts, func(f Front) bool { return f.ID == id })
+}
+
 func (s *Store) openLocked() int {
 	n := 0
 	for _, f := range s.fronts {

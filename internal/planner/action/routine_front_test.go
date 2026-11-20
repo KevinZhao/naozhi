@@ -13,7 +13,19 @@ import (
 type fakeRoutines struct {
 	added    [][4]string // title, dir, schedule, prompt
 	switched []string    // "<id> off|on"
+	edited   [][4]string // id, title, schedule, prompt
+	deleted  []string
 	err      error
+}
+
+func (f *fakeRoutines) Edit(id, title, schedule, prompt string) error {
+	f.edited = append(f.edited, [4]string{id, title, schedule, prompt})
+	return f.err
+}
+
+func (f *fakeRoutines) Delete(id string) error {
+	f.deleted = append(f.deleted, id)
+	return f.err
 }
 
 func (f *fakeRoutines) Add(title, dir, schedule, prompt string) error {
@@ -40,8 +52,16 @@ func TestRoutineUserTurn(t *testing.T) {
 	r.cfg.Routines = rt
 	r.Result(r.cfg.Planner, "好，每个工作日早上查一次。\n"+
 		block(`{"type":"routine","title":"内网模型动态","workspace":"`+filepath.Base(dir)+`","schedule":" 0 9 * * 1-5 ","prompt":"查内网 Anthropic 新模型动态"}`)+"\n"+
-		block(`{"type":"routine","id":"1cc584f384db82fc","off":true}`))
+		block(`{"type":"routine","id":"1cc584f384db82fc","off":true}`)+"\n"+
+		block(`{"type":"routine","id":"aa11","schedule":"0 8 * * *"}`)+"\n"+
+		block(`{"type":"routine","id":"bb22","delete":true}`))
 	r.handle(<-r.ch)
+	if len(rt.edited) != 1 || rt.edited[0] != [4]string{"aa11", "", "0 8 * * *", ""} {
+		t.Fatalf("edited = %q", rt.edited)
+	}
+	if len(rt.deleted) != 1 || rt.deleted[0] != "bb22" {
+		t.Fatalf("deleted = %q", rt.deleted)
+	}
 	if len(rt.added) != 1 || rt.added[0] != [4]string{"内网模型动态", dir, "0 9 * * 1-5", "查内网 Anthropic 新模型动态"} {
 		t.Fatalf("added = %q", rt.added)
 	}
@@ -107,9 +127,14 @@ func TestRoutineParse(t *testing.T) {
 		{`{"type":"routine","title":"t","workspace":"w","prompt":"p"}`, "schedule"},
 		{`{"type":"routine","title":"t","schedule":"@daily","prompt":"p"}`, "workspace"},
 		{`{"type":"routine","workspace":"w","schedule":"@daily","prompt":"p"}`, "title"},
-		{`{"type":"routine","id":"abc"}`, "off"},
-		{`{"type":"routine","id":"abc","off":true,"prompt":"新的"}`, "只能暂停或恢复"},
-		{`{"type":"routine","title":"t","workspace":"w","schedule":"@daily","prompt":"p","off":true}`, "off"},
+		{`{"type":"routine","id":"abc","delete":true}`, ""},
+		{`{"type":"routine","id":"abc","title":"新标题","prompt":"新的"}`, ""},
+		{`{"type":"routine","id":"abc"}`, "要写 off"},
+		{`{"type":"routine","id":"abc","off":true,"prompt":"新的"}`, "一块只做一件事"},
+		{`{"type":"routine","id":"abc","delete":true,"off":true}`, "一块只做一件事"},
+		{`{"type":"routine","id":"abc","workspace":"w","prompt":"p"}`, "工作区不能改"},
+		{`{"type":"routine","title":"t","workspace":"w","schedule":"@daily","prompt":"p","off":true}`, "只和 id 一起用"},
+		{`{"type":"routine","title":"t","workspace":"w","schedule":"@daily","prompt":"p","delete":true}`, "只和 id 一起用"},
 		{`{"type":"routine","title":"t","workspace":"w","schedule":"@daily","prompt":"` + strings.Repeat("字", routinePromptRunes+1) + `"}`, "prompt"},
 	} {
 		b := Parse(block(c.raw))

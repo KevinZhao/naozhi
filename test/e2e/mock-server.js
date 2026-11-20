@@ -264,6 +264,8 @@ function defaultGitStates() {
  *   PUT / DELETE /api/inbox/pause set
  *   paused_until, and pause or resume custody with it (D94: one pause). Every write lands in
  *   inboxCalls. Unset, the routes 404.
+ * @param {object} [overrides.fronts] - GET /api/planner/fronts body ({fronts, writable}); POST
+ *   /api/planner/fronts lands in frontsCalls and edits or closes the line when writable (403 otherwise).
  * @param {object} [overrides.tasks] - GET /api/tasks body ({tasks}, task.Task wire shape); POST
  *   /api/tasks/state sets the task's state as the user's and lands in tasksCalls; POST
  *   /api/tasks/stop marks the task done as the user's ('已停止') and lands in taskStopCalls;
@@ -390,6 +392,7 @@ function startMockServer(overrides = {}) {
   const inboxData = overrides.inbox || null;
   const inboxCalls = [];
   const tasksCalls = [];
+  const frontsCalls = [];
   const taskStopCalls = [];
   const tasksSeenCalls = [];
   const custodyData = overrides.custody || null;
@@ -1356,6 +1359,34 @@ function startMockServer(overrides = {}) {
     // GET /api/tasks and POST /api/tasks/state: opt-in via overrides.tasks
     // ({tasks}); a state change sets the task's state, by and at in place,
     // so the test's object shows it, and lands in tasksCalls.
+    // The ledger of the lines of work (overrides.fronts: {fronts, writable}).
+    // A POST lands in frontsCalls and, when writable, changes the line as
+    // the gateway does: the fields named, "" clearing one, close dropping it
+    // from the open list.
+    if (pathname === NZ_CONTRACT.API.planner_fronts && req.method === 'GET' && overrides.fronts) {
+      if (!checkAuth()) return;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(overrides.fronts));
+      return;
+    }
+    if (pathname === NZ_CONTRACT.API.planner_fronts && req.method === 'POST' && overrides.fronts) {
+      if (!checkAuth()) return;
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        const req2 = JSON.parse(body || '{}');
+        frontsCalls.push(req2);
+        if (!overrides.fronts.writable) { res.writeHead(403, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'fronts_readonly_remote' })); return; }
+        const f = overrides.fronts.fronts.find(x => x.id === req2.id);
+        if (!f) { res.writeHead(404); res.end(); return; }
+        for (const k of ['state', 'next', 'waiting']) if (typeof req2[k] === 'string') f[k] = req2[k];
+        f.updated = new Date().toISOString();
+        if (req2.close) overrides.fronts.fronts = overrides.fronts.fronts.filter(x => x.id !== req2.id);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(f));
+      });
+      return;
+    }
     if (pathname === NZ_CONTRACT.API.tasks && req.method === 'GET' && overrides.tasks) {
       if (!checkAuth()) return;
       // Opening a session (a viewing frame) marks its result read
@@ -1597,6 +1628,7 @@ function startMockServer(overrides = {}) {
         get digestCalls() { return digestCalls; },
         get inboxCalls() { return inboxCalls; },
         get tasksCalls() { return tasksCalls; },
+        get frontsCalls() { return frontsCalls; },
         get taskStopCalls() { return taskStopCalls; },
         get tasksSeenCalls() { return tasksSeenCalls; },
         get custodyCalls() { return custodyCalls; },

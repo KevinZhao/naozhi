@@ -19,6 +19,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/brief"
 	"github.com/naozhi/naozhi/internal/planner/custody"
 	"github.com/naozhi/naozhi/internal/planner/digest"
+	"github.com/naozhi/naozhi/internal/planner/front"
 	"github.com/naozhi/naozhi/internal/planner/note"
 	"github.com/naozhi/naozhi/internal/planner/reader"
 	"github.com/naozhi/naozhi/internal/planner/scout"
@@ -122,6 +123,9 @@ type ServerOptions struct {
 	// Lookups are the Planner's web lookups behind GET /api/planner/lookup
 	// (the query card); nil answers it as not found.
 	Lookups *reader.Reader
+	// Fronts is the ledger of the user's lines of work behind
+	// /api/planner/fronts (docs/rfc/planner.md §15.19); nil lists none.
+	Fronts *front.Store
 	// Briefs are the morning briefs /api/planner/briefs lists; nil lists
 	// none.
 	Briefs *brief.Briefer

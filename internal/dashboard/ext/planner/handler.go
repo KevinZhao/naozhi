@@ -41,6 +41,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/brief"
+	"github.com/naozhi/naozhi/internal/planner/front"
 	"github.com/naozhi/naozhi/internal/planner/reader"
 	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -58,6 +59,8 @@ type Handler struct {
 	lookups *reader.Reader
 	// archive puts a session away to the history (SetArchive).
 	archive func(key string) bool
+	// fronts is the ledger of the user's lines of work (SetFronts).
+	fronts *front.Store
 }
 
 // New returns a Handler for a, b, sc and files (any nil when not built; with

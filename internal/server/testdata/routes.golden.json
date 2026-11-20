@@ -226,6 +226,16 @@
   },
   {
     "method": "GET",
+    "path": "/api/planner/fronts",
+    "handler_type": "*dashplanner.Handler"
+  },
+  {
+    "method": "POST",
+    "path": "/api/planner/fronts",
+    "handler_type": "*dashplanner.Handler"
+  },
+  {
+    "method": "GET",
     "path": "/api/planner/lookup",
     "handler_type": "*dashplanner.Handler"
   },

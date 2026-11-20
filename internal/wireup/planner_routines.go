@@ -17,6 +17,10 @@ type PlannerRoutines struct {
 	Sched *cron.Scheduler
 }
 
+// errBadSchedule is a schedule the scheduler refuses, in words the Planner
+// can act on.
+var errBadSchedule = errors.New("schedule 不是有效的定时表达式（五段 cron，如 0 9 * * 1-5；或 @daily、@every 6h）")
+
 // errNoCron is a gateway with no cron scheduler.
 var errNoCron = errors.New("这台网关没有开定时任务")
 
@@ -32,7 +36,7 @@ func (p PlannerRoutines) Add(title, dir, schedule, prompt string) error {
 	})
 	switch {
 	case errors.Is(err, cron.ErrInvalidSchedule):
-		return errors.New("schedule 不是有效的定时表达式（五段 cron，如 0 9 * * 1-5；或 @daily、@every 6h）")
+		return errBadSchedule
 	case errors.Is(err, cron.ErrPersistFailed):
 		return errors.New("已加上，但没能存盘，重启后会丢")
 	}
@@ -55,7 +59,7 @@ func (p PlannerRoutines) Switch(id string, off bool) (string, error) {
 	}
 	switch {
 	case errors.Is(err, cron.ErrJobNotFound):
-		return "", errors.New("没有这个例行任务（id 照抄快照里方括号中的那串）")
+		return "", errNoRoutine
 	case errors.Is(err, cron.ErrJobAlreadyPaused), errors.Is(err, cron.ErrJobNotPaused):
 		err = nil // already as asked
 	case err != nil:
@@ -65,6 +69,47 @@ func (p PlannerRoutines) Switch(id string, off bool) (string, error) {
 		return "", nil
 	}
 	return routineTitle(*job), nil
+}
+
+// errNoRoutine is an ID no cron job has.
+var errNoRoutine = errors.New("没有这个例行任务（id 照抄快照里方括号中的那串）")
+
+// Edit implements action.Routines.
+func (p PlannerRoutines) Edit(id, title, schedule, prompt string) error {
+	if p.Sched == nil {
+		return errNoCron
+	}
+	var upd cron.JobUpdate
+	if title != "" {
+		upd.Title = &title
+	}
+	if schedule != "" {
+		upd.Schedule = &schedule
+	}
+	if prompt != "" {
+		upd.Prompt = &prompt
+	}
+	_, err := p.Sched.UpdateJob(id, upd)
+	switch {
+	case errors.Is(err, cron.ErrJobNotFound):
+		return errNoRoutine
+	case errors.Is(err, cron.ErrInvalidSchedule):
+		return errBadSchedule
+	}
+	return err
+}
+
+// Delete implements action.Routines.
+func (p PlannerRoutines) Delete(id string) error {
+	if p.Sched == nil {
+		return errNoCron
+	}
+	if _, err := p.Sched.DeleteJobByID(id); errors.Is(err, cron.ErrJobNotFound) {
+		return errNoRoutine
+	} else if err != nil {
+		return err
+	}
+	return nil
 }
 
 // routineResultRunes caps a routine's last result in the snapshot.

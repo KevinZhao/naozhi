@@ -689,6 +689,7 @@ func main() {
 		Planner:          plannerAgent,
 		Scout:            scouter,
 		Lookups:          lookups,
+		Fronts:           fronts,
 		Briefs:           briefer,
 		Health:           func() health.Snapshot { return healthMon.Snapshot() },
 		Workspaces:       plannerState.Workspaces,
