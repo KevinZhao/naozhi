@@ -42,6 +42,13 @@ const (
 	// what the reader read off web pages, so its turn may only notify,
 	// promise and ask, as a scout turn.
 	SourceLookup Source = "lookup"
+	// SourceMorning is the morning tidy (§15.18, D133): before the brief
+	// the gateway lists the sessions that moved since the last one, for the
+	// Planner to bring the ledger of the user's lines of work up to date.
+	// The list is the gateway's and what it names is the sessions' output,
+	// as a receipt's is: not outside content, and with no words of the
+	// user's.
+	SourceMorning Source = "morning"
 	// SourceAnswer is the user's answer to a question the Planner asked
 	// (TellAnswer): a receipt, but one the user started, its words the
 	// answer (D98).
@@ -78,7 +85,7 @@ func (s Source) Entry() string {
 // is neither: it is the timeline's separator. Sorted, as contract.js lists
 // it.
 func DynamicSources() []string {
-	out := []string{string(SourceBriefing), string(SourceLookup), string(SourceReceipt), string(SourceRefusal), string(SourceReminder), string(SourceScout), string(SourceUnrun)}
+	out := []string{string(SourceBriefing), string(SourceLookup), string(SourceMorning), string(SourceReceipt), string(SourceRefusal), string(SourceReminder), string(SourceScout), string(SourceUnrun)}
 	slices.Sort(out)
 	return out
 }
@@ -114,6 +121,10 @@ func (a *Agent) TurnSources() []Source {
 	}
 	return turns.PlannerTurnSources(Key)
 }
+
+// Tidying reports whether the morning tidy's turn is in flight: the brief
+// waits for it (brief.Config.Tidying).
+func (a *Agent) Tidying() bool { return slices.Contains(a.TurnSources(), SourceMorning) }
 
 // TurnWords is the user's words of the Planner requests in flight, oldest
 // first (Turns.PlannerTurnWords): none for a turn the user did not start.

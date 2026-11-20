@@ -29,6 +29,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/notify"
+	"github.com/naozhi/naozhi/internal/planner/front"
 	"github.com/naozhi/naozhi/internal/planner/journal"
 	"github.com/naozhi/naozhi/internal/planner/parked"
 	"github.com/naozhi/naozhi/internal/planner/scout"
@@ -53,6 +54,11 @@ const (
 	// scoutWait is how long a due brief waits for a scout run (the run's
 	// own timeout is 10 minutes).
 	scoutWait = 15 * time.Minute
+	// tidyWait is how long a due brief waits for the morning tidy's turn,
+	// and tidyGrace how long after asking it is taken as running whatever
+	// the turn ledger says.
+	tidyWait  = 5 * time.Minute
+	tidyGrace = 20 * time.Second
 	// midwayBy is the local hour a Midway credential expiring before it is
 	// in the brief: the morning's work would hit it.
 	midwayBy = 9
@@ -83,10 +89,17 @@ type Counts struct {
 	Slack int `json:"slack,omitempty"`
 	// Parked is the 搁置区's items, listed in the week's first brief.
 	Parked int `json:"parked,omitempty"`
+	// Fronts are the lines of work in progress the brief leads with, and
+	// Yours the sessions the user opened that got somewhere (§15.18): Done
+	// counts what was handed out.
+	Fronts int `json:"fronts,omitempty"`
+	Yours  int `json:"yours,omitempty"`
 }
 
+// total is what makes a brief worth sending. The lines of work alone do
+// not: they lead a brief that has something new under them.
 func (c Counts) total() int {
-	return c.Meetings + c.Replies + c.Deadlines + c.Done + c.Failed + c.Waiting + c.Errors + c.Tasks + c.Planner +
+	return c.Meetings + c.Replies + c.Deadlines + c.Done + c.Yours + c.Failed + c.Waiting + c.Errors + c.Tasks + c.Planner +
 		c.Routines + c.Notices + c.Custody + c.Midway + c.Slack + c.Parked
 }
 
@@ -183,6 +196,15 @@ type Config struct {
 	// Parked lists the Planner's 搁置区 (agent.Agent.Parked); the week's
 	// first brief lists it.
 	Parked func() []parked.Entry
+	// Fronts returns the lines of work in progress (front.Store.Open): the
+	// brief leads with them (§15.18, D133).
+	Fronts func() []front.Front
+	// Tidy wakes the Planner with text, the sessions that moved since the
+	// last brief, to bring the ledger up to date before the brief is
+	// written; false when the Planner cannot take it. Tidying reports that
+	// turn still running. nil (the Planner is off) briefs at once.
+	Tidy    func(text string) bool
+	Tidying func() bool
 	// Elsewhere reports that the brief is another node's to send: with
 	// several nodes, only the one running the scout sends one, so a day is
 	// not briefed twice (docs/rfc/remote-planner.md §2.1). nil is never.
@@ -203,6 +225,11 @@ type Briefer struct {
 	recent []Brief // sent briefs, oldest first, at most keepRecent
 	// waiting is when a due brief began waiting for a scout run.
 	waiting time.Time
+	// tidyDay is the day whose morning tidy was asked for, tidyAt when, and
+	// tidying whether the Planner took it.
+	tidyDay string
+	tidyAt  time.Time
+	tidying bool
 }
 
 // New returns a Briefer that picks up after the briefs the journal holds.
@@ -351,6 +378,9 @@ func (b *Briefer) Check() {
 	b.mu.Lock()
 	b.waiting = time.Time{}
 	b.mu.Unlock()
+	if b.tidyFirst(now, last) {
+		return
+	}
 	in := b.gather(windowStart(now, last.At), now)
 	if b.cfg.Parked != nil && !sameWeek(last.Day, now) {
 		in.Parked = b.cfg.Parked()
@@ -384,6 +414,49 @@ func (b *Briefer) Check() {
 		b.cfg.Push(notify.Push{ID: "brief:" + br.Day, Kind: notify.KindNotice, Level: notify.LevelTimely,
 			Title: "早报", Body: pushBody(br.Counts)})
 	}
+}
+
+// tidyFirst has the Planner bring the ledger up to date before today's
+// brief is written (§15.18, D133): once a day it sends the sessions that
+// moved since the last brief, then holds the brief while that turn runs, up
+// to tidyWait. The lines of work the user drives in their own sessions are
+// only as current as the Planner's last look at them. true while the brief
+// is to wait.
+func (b *Briefer) tidyFirst(now time.Time, last Brief) bool {
+	if b.cfg.Tidy == nil || b.cfg.Fronts == nil {
+		return false
+	}
+	day := now.Format(time.DateOnly)
+	b.mu.Lock()
+	asked, at, tidying := b.tidyDay == day, b.tidyAt, b.tidying
+	b.mu.Unlock()
+	if !asked {
+		in := b.gather(windowStart(now, last.At), now)
+		text := tidyText(in)
+		started := text != "" && b.cfg.Tidy(text)
+		b.mu.Lock()
+		b.tidyDay, b.tidyAt, b.tidying = day, now, started
+		b.mu.Unlock()
+		if started {
+			slog.Info("brief: due; the Planner tidies the ledger first", "sessions", len(in.Done)+len(in.Yours)+len(in.Failed))
+		}
+		return started
+	}
+	if !tidying {
+		return false
+	}
+	waited := now.Sub(at)
+	switch {
+	case waited >= tidyWait:
+		slog.Warn("brief: the morning tidy still going; briefing without it", "waited", tidyWait)
+	case waited < tidyGrace, b.cfg.Tidying != nil && b.cfg.Tidying():
+		// Inside tidyGrace the turn may not be counted as in flight yet.
+		return true
+	}
+	b.mu.Lock()
+	b.tidying = false
+	b.mu.Unlock()
+	return false
 }
 
 func (b *Briefer) record(br Brief) {

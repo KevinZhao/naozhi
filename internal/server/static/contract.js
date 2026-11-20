@@ -134,7 +134,7 @@ export const NZ_CONTRACT = Object.freeze({
     STARTUP_FAILURE_CLASS: ['unknown', 'resume_not_found', 'auth', 'mcp_config', 'missing_runtime'],
     WORKFLOW_STATUS: ['running', 'paused', 'completed', 'failed', 'killed', 'interrupted', 'unknown'],
     WORKFLOW_AGENT_STATE: ['queued', 'running', 'done', 'failed', 'skipped', 'stopped', 'unknown'],
-    PLANNER_TURN_DYNAMIC: ['briefing', 'lookup', 'receipt', 'refusal', 'reminder', 'scout', 'unrun'],
+    PLANNER_TURN_DYNAMIC: ['briefing', 'lookup', 'morning', 'receipt', 'refusal', 'reminder', 'scout', 'unrun'],
     PLANNER_TURN_SHIFT: ['shift'],
   },
   DEATH_REASON_PREFIX: { CODE: 'cli_exited_code_', SIGNAL: 'cli_exited_signal_' },
