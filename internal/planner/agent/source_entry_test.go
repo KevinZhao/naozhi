@@ -29,6 +29,7 @@ func TestSourceEntryAndDynamic(t *testing.T) {
 		{SourceRefusal, "refusal", true},
 		{SourceUnrun, "unrun", true},
 		{SourceLookup, "lookup", true},
+		{SourceMorning, "morning", true},
 	} {
 		if got := tc.src.Entry(); got != tc.entry {
 			t.Errorf("%s.Entry() = %q, want %q", tc.src, got, tc.entry)
@@ -69,5 +70,34 @@ func TestReminderTurnFooting(t *testing.T) {
 	}
 	if err := a.Wake(SourceReminder, nil, "<naozhi-reminder>x</naozhi-reminder>"); !errors.Is(err, ErrStopped) {
 		t.Errorf("wake while stopped: %v, want ErrStopped", err)
+	}
+}
+
+// The morning tidy's turn (brief.Config.Tidy) stands as a reminder's does:
+// the gateway's list of sessions, not outside content, so its front blocks
+// run; and not the user's. Tidying is what the brief waits on.
+func TestMorningTurnFooting(t *testing.T) {
+	now := time.Now()
+	a, _ := newTestAgent(t, &fakeSessions{}, &now)
+	if SourceMorning.Outside() {
+		t.Fatal("the morning tidy is judged as outside content: its front blocks would be refused")
+	}
+	if a.Tidying() {
+		t.Fatal("tidying before Start")
+	}
+	turns := &fakeTurns{sources: []Source{SourceMorning}}
+	a.turns = turns
+	if err := a.Wake(SourceMorning, nil, "<naozhi-morning>x</naozhi-morning>"); err != nil {
+		t.Fatal(err)
+	}
+	if len(turns.srcs) != 1 || turns.srcs[0] != SourceMorning || turns.said[0] != nil {
+		t.Fatalf("submitted from %v with words %v", turns.srcs, turns.said)
+	}
+	if !a.Tidying() || a.OutsideTurn() != "" || len(a.TurnWords()) != 0 {
+		t.Fatalf("tidying %v, outside %q, words %v", a.Tidying(), a.OutsideTurn(), a.TurnWords())
+	}
+	turns.sources = nil
+	if a.Tidying() {
+		t.Fatal("tidying once the turn is over")
 	}
 }

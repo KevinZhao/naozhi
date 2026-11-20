@@ -15,6 +15,7 @@ import (
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/activity"
 	"github.com/naozhi/naozhi/internal/planner/custody"
+	"github.com/naozhi/naozhi/internal/planner/front"
 	"github.com/naozhi/naozhi/internal/planner/journal"
 	"github.com/naozhi/naozhi/internal/planner/note"
 	"github.com/naozhi/naozhi/internal/planner/parked"
@@ -34,6 +35,14 @@ const (
 	slackNameRunes = 40
 	// parkedRunes is what a 搁置区 line shows of its item, the source in it.
 	parkedRunes = 160
+	// maxPRLinks is how many PRs a finished session's line links; more are
+	// counted.
+	maxPRLinks = 3
+	// frontIdle is how long a line of work goes unchanged before the brief
+	// says so.
+	frontIdle = 3 * 24 * time.Hour
+	// maxTidy is how many sessions the morning tidy lists.
+	maxTidy = 30
 )
 
 // ref is a unit as a brief line shows it.
@@ -47,6 +56,8 @@ type ref struct {
 
 type doneItem struct {
 	ref
+	// Unit is the session's key.
+	Unit  string
 	At    time.Time
 	Files int
 	PRs   []string // PR URLs, in the order first seen
@@ -117,8 +128,14 @@ type input struct {
 	SlackTotal int
 	// Midway is when the Midway credential expires, set only when that is
 	// before 09:00 today (or past).
-	Midway  time.Time
+	Midway time.Time
+	// Fronts are the lines of work in progress, the latest updated first.
+	Fronts []front.Front
+	// Done are the sessions handed out (the Planner's dispatches, another
+	// node's) that finished; Yours the ones the user opened that got
+	// somewhere, which the user was there for and the brief only names.
 	Done    []doneItem
+	Yours   []doneItem
 	Failed  []failedItem
 	Custody custodyTally
 	// Routines are the cron jobs whose latest successful result changed;
@@ -140,7 +157,7 @@ type input struct {
 
 func (in input) counts() Counts {
 	c := Counts{Meetings: len(in.Meetings), Replies: len(in.Replies), Deadlines: len(in.Deadlines),
-		Done: len(in.Done), Failed: len(in.Failed), Waiting: len(in.Waiting), Errors: len(in.Errors),
+		Done: len(in.Done), Yours: len(in.Yours), Fronts: len(in.Fronts), Failed: len(in.Failed), Waiting: len(in.Waiting), Errors: len(in.Errors),
 		Tasks: len(in.Tasks), Planner: len(in.Held), Routines: len(in.Routines), Notices: len(in.Notices),
 		Slack: max(in.SlackTotal, len(in.Slack)), Parked: len(in.Parked),
 		Custody: in.Custody.Retries + in.Custody.Stopped + in.Custody.Answered}
@@ -328,7 +345,15 @@ func (b *Briefer) gather(since, now time.Time) input {
 		if live && u.State != health.Idle && u.State != health.Unknown {
 			continue
 		}
-		in.Done = append(in.Done, doneItem{ref: r, At: s.doneAt, Files: len(s.files), PRs: s.prs, Recovered: recovered, Retries: s.retries})
+		d := doneItem{ref: r, Unit: id, At: s.doneAt, Files: len(s.files), PRs: s.prs, Recovered: recovered, Retries: s.retries}
+		if kind == health.KindSession && !sessionkey.IsTaskKey(id) {
+			in.Yours = append(in.Yours, d)
+		} else {
+			in.Done = append(in.Done, d)
+		}
+	}
+	if b.cfg.Fronts != nil {
+		in.Fronts = b.cfg.Fronts()
 	}
 
 	if b.cfg.Inbox != nil {
@@ -413,6 +438,7 @@ func (b *Briefer) gather(since, now time.Time) input {
 		return cmp.Or(t2.Compare(t1), cmp.Compare(n1, n2))
 	}
 	slices.SortFunc(in.Done, func(x, y doneItem) int { return newest(x.At, y.At, x.Name, y.Name) })
+	slices.SortFunc(in.Yours, func(x, y doneItem) int { return newest(x.At, y.At, x.Name, y.Name) })
 	slices.SortFunc(in.Failed, func(x, y failedItem) int { return newest(x.At, y.At, x.Name, y.Name) })
 	oldest := func(x, y inboxItem) int { return cmp.Or(x.Created.Compare(y.Created), cmp.Compare(x.Title, y.Title)) }
 	slices.SortFunc(in.Waiting, oldest)
@@ -537,6 +563,22 @@ func render(in input) string {
 		}
 	}
 
+	section(&b, "工作线", in.Fronts, func(f front.Front) string {
+		line := "**" + plain(f.Name) + "**"
+		if f.State != "" {
+			line += "：" + plain(f.State)
+		}
+		if f.Next != "" {
+			line += " → " + plain(f.Next)
+		}
+		if w := strings.TrimSpace(strings.TrimPrefix(f.Waiting, "等")); w != "" {
+			line += "（等 " + plain(w) + "）"
+		}
+		if idle := in.Now.Sub(f.Updated); !f.Updated.IsZero() && idle >= frontIdle {
+			line += " · " + ago(idle) + "没动"
+		}
+		return line
+	})
 	section(&b, "今天的日程", in.Meetings, func(m meetingItem) string {
 		line := "全天"
 		if !m.AllDay {
@@ -578,14 +620,19 @@ func render(in input) string {
 		}
 	}
 
-	section(&b, "完成的", in.Done, func(d doneItem) string {
+	doneLine := func(d doneItem) string {
 		line := link(d.Name, d.Link) + wsPart(d.WS) + " · " + d.At.In(loc).Format(stamp)
 		var outs []string
 		if d.Files > 0 {
 			outs = append(outs, fmt.Sprintf("%d 个文件", d.Files))
 		}
-		for _, u := range d.PRs {
-			outs = append(outs, link(prLabel(u), u))
+		if len(d.PRs) > maxPRLinks {
+			// A session that opened a dozen PRs is one line, not a dozen links.
+			outs = append(outs, fmt.Sprintf("%d 个 PR", len(d.PRs)))
+		} else {
+			for _, u := range d.PRs {
+				outs = append(outs, link(prLabel(u), u))
+			}
 		}
 		if len(outs) > 0 {
 			line += " · 产出 " + strings.Join(outs, "、")
@@ -597,7 +644,10 @@ func render(in input) string {
 			line += " · 出错后已恢复"
 		}
 		return line
-	})
+	}
+	section(&b, "完成的", in.Done, doneLine)
+	// The user was in these, so they come after what was handed out.
+	section(&b, "你开的会话有新输出", in.Yours, doneLine)
 	section(&b, "失败的", in.Failed, func(f failedItem) string {
 		line := link(f.Name, f.Link) + wsPart(f.WS) + " · " + f.At.In(loc).Format(stamp)
 		switch {
@@ -718,8 +768,8 @@ func summary(c Counts, push bool) string {
 	for _, p := range []struct {
 		label string
 		n     int
-	}{{"今天日程", c.Meetings}, {"等你回复", c.Replies}, {"Asana 到期", c.Deadlines}, {"Slack 未读", c.Slack},
-		{"完成", c.Done}, {"失败", c.Failed}, {"例行任务有变化", c.Routines}, {"等你", waits},
+	}{{"工作线", c.Fronts}, {"今天日程", c.Meetings}, {"等你回复", c.Replies}, {"Asana 到期", c.Deadlines}, {"Slack 未读", c.Slack},
+		{"完成", c.Done}, {"你开的会话有新输出", c.Yours}, {"失败", c.Failed}, {"例行任务有变化", c.Routines}, {"等你", waits},
 		{"通知", c.Notices}, {"未完成的任务", c.Tasks}, {"Planner 记下", c.Planner}, {"搁置", c.Parked}} {
 		if p.n > 0 {
 			parts = append(parts, fmt.Sprintf("%s %d", p.label, p.n))
@@ -737,6 +787,49 @@ func link(text, href string) string {
 		return text
 	}
 	return "[" + text + "](" + href + ")"
+}
+
+// tidyText is the morning tidy's block (§15.18): the sessions that got
+// somewhere or failed since the last brief, by key, for the Planner to
+// bring the ledger up to date from. "" with none.
+func tidyText(in input) string {
+	type row struct {
+		unit, name, ws, what string
+		at                   time.Time
+	}
+	var rows []row
+	for _, d := range in.Yours {
+		rows = append(rows, row{d.Unit, d.Name, d.WS, "你开的", d.At})
+	}
+	for _, d := range in.Done {
+		rows = append(rows, row{d.Unit, d.Name, d.WS, "派出的", d.At})
+	}
+	if len(rows) == 0 {
+		return ""
+	}
+	slices.SortFunc(rows, func(a, b row) int { return cmp.Or(b.at.Compare(a.at), cmp.Compare(a.unit, b.unit)) })
+	loc := in.Now.Location()
+	var b strings.Builder
+	fmt.Fprintf(&b, "<naozhi-morning day=%q>\n早报之前先整理工作线台账。自上次早报（%s）以来有新输出的会话（%d 个）：\n",
+		in.Now.Format(time.DateOnly), in.Since.In(loc).Format("01-02 15:04"), len(rows))
+	for i, r := range rows {
+		if i == maxTidy {
+			fmt.Fprintf(&b, "- …另有 %d 个，见 index.json\n", len(rows)-i)
+			break
+		}
+		line := "- " + r.unit
+		if r.name != "" && r.name != r.unit {
+			line += "（" + plain(textutil.TruncateRunes(r.name, titleRunes)) + "）"
+		}
+		if r.ws != "" {
+			line += " · 工作区 " + plain(r.ws)
+		}
+		b.WriteString(line + " · " + r.what + " · 最后输出 " + r.at.In(loc).Format("01-02 15:04") + "\n")
+	}
+	b.WriteString("对照快照里的工作线逐个看：它属于哪条线、有没有新进展或新决定（先读它的摘要，index.json 里有路径；不够再分段读事件日志），" +
+		"用 front 块更新那条线的现状、下一步、等谁和 sessions；看不出属于哪条线、但看起来会持续几天的事建一条新线；闲聊、一次性问答不建线。" +
+		"几天没动、看起来已经结束的线先不要关，在回复里提一句。回复只写两三行，说改了哪几条；早报由网关接着发，不要用 notify 重复。\n</naozhi-morning>")
+	return b.String()
 }
 
 func wsPart(ws string) string {

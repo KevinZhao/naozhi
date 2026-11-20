@@ -79,6 +79,8 @@ func TestSystemPrompt(t *testing.T) {
 		"同一类问题用户问到第三次",
 		`没有新变化时整条回复只写"没有变化"`,
 		`{"type":"routine","id":"<快照里方括号中的 id>","off":true}`,
+		`<naozhi-morning day="…">`,
+		"早报由网关随后按台账发出",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt lacks %q", want)

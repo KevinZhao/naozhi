@@ -607,6 +607,11 @@ func main() {
 		Routines:     wireup.RoutineResults(scheduler),
 		Carried:      notifier.Carried,
 		Parked:       plannerAgent.Parked,
+		// The brief leads with the lines of work; the Planner brings the
+		// ledger up to date first (§15.18, D133).
+		Fronts:  fronts.Open,
+		Tidy:    wireup.BriefTidy(plannerAgent),
+		Tidying: plannerAgent.Tidying,
 		// With several nodes the scout's node sends the brief, each node's
 		// Planner covering its own sessions (docs/rfc/remote-planner.md §2.1).
 		Elsewhere: func() bool { return multiNode(cfg) && !scouter.Enabled() },

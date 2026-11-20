@@ -82,11 +82,12 @@ func TestBriefCountsTurnShorterThanAReconcile(t *testing.T) {
 		t.Fatal("no brief sent: the short turns were not counted as finished")
 	}
 	md := got[0].Markdown
-	if !strings.Contains(md, "### 完成的（1）\n- ["+key+"]") {
+	// A session the user opened: listed apart from what was handed out.
+	if !strings.Contains(md, "### 你开的会话有新输出（1）\n- ["+key+"]") {
 		t.Errorf("brief lacks the session as one finished unit:\n%s", md)
 	}
-	if got[0].Counts.Done != 1 {
-		t.Errorf("Counts.Done = %d, want 1 (two turns of one session)", got[0].Counts.Done)
+	if got[0].Counts.Yours != 1 || got[0].Counts.Done != 0 {
+		t.Errorf("Counts = %+v, want one of the user's own (two turns of one session)", got[0].Counts)
 	}
 }
 

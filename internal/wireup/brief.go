@@ -1,9 +1,11 @@
 package wireup
 
 import (
+	"log/slog"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/brief"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
@@ -23,5 +25,23 @@ func RoutineResults(sched *cron.Scheduler) func(since, until time.Time) []brief.
 			}
 		}
 		return out
+	}
+}
+
+// BriefTidy is brief.Config.Tidy: the morning tidy's block goes to the
+// Planner as a turn of its own (agent.SourceMorning), followed by the
+// snapshot with the lines of work. false when the Planner cannot take it
+// (off, stopped, starting), and the brief goes out without waiting. nil
+// without a Planner.
+func BriefTidy(a *agent.Agent) func(text string) bool {
+	if !a.Enabled() {
+		return nil
+	}
+	return func(text string) bool {
+		if err := a.Wake(agent.SourceMorning, nil, text); err != nil {
+			slog.Info("brief: the Planner did not take the morning tidy", "err", err)
+			return false
+		}
+		return true
 	}
 }
