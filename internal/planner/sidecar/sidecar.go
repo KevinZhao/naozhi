@@ -128,8 +128,8 @@ type Meta struct {
 	ResultAt time.Time `json:"result_at,omitzero"`
 	// Taint is set once the session read outside content: web pages it
 	// searched or fetched, a mail's body (§7.4, §15.12 ⑨). Sticky: the
-	// content stays in its context and its event log. The Planner reads its
-	// digest, marked, and never its event log (planner/agent's deny rules).
+	// content stays in its context and its event log. Its digest is headed
+	// 含外部内容 for the Planner, which reads it as data.
 	Taint *Taint `json:"taint,omitempty"`
 }
 

@@ -66,6 +66,12 @@ func TestSystemPrompt(t *testing.T) {
 		`{"type":"cancel","task":"<task: key>","why":"…"}`,
 		"只是判断它做完了用 status",
 		"也不用写 worktree 的做法",
+		`这一轮直接查了回答，不要派会话，也不要说"我读不了"`,
+		"要动手的派出去",
+		"Bash 只用来跑 gh 的只读命令",
+		"说 PR、CI、issue 现在的状态之前先用 gh 查",
+		"你自己用工具读到的也一样",
+		"这次对话不按天更换",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt lacks %q", want)
@@ -73,6 +79,13 @@ func TestSystemPrompt(t *testing.T) {
 	}
 	if strings.Contains(p, "%!") {
 		t.Error("prompt has a bad format verb")
+	}
+	// The Planner searches and reads itself (D129): a lookup block or "I
+	// cannot go online" would send it back to dispatching every question.
+	for _, gone := range []string{`"type":"lookup"`, "不上网", "每天早上"} {
+		if strings.Contains(p, gone) {
+			t.Errorf("prompt still has %q", gone)
+		}
 	}
 	// The subscription a dispatch once asked for died with the conversation
 	// at a shift change; the gateway's receipt replaces it.
@@ -91,8 +104,8 @@ func TestSystemPrompt(t *testing.T) {
 		"<工作区 ID 或名字，或 global>", "global", "<slug>", "style", "<task: key>", "task:ab12",
 	)
 	formats := regexp.MustCompile(`\{"type":"[a-z]+"[^\n]*?\}`).FindAllString(p, -1)
-	if len(formats) != 14 {
-		t.Fatalf("found %d block formats, want 14: %q", len(formats), formats)
+	if len(formats) != 13 {
+		t.Fatalf("found %d block formats, want 13: %q", len(formats), formats)
 	}
 	for _, f := range formats {
 		body := strings.ReplaceAll(fill.Replace(f), `["x"]`, `["是"]`)

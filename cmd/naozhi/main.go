@@ -330,8 +330,10 @@ func main() {
 		Journal:    plannerState.Journal,
 		Promises:   wireup.PlannerPromises(promises),
 		Conclusion: wireup.PlannerConclusion(sidecars),
-		Tainted:    sidecars.Tainted,
-		ClaudeDir:  claudeDir,
+		MCPConfig:  mcpConfigFile,
+		// Bash for gh only where the session settings are naozhi's own.
+		OwnSettings: naozhiSettingsFile != "",
+		ClaudeDir:   claudeDir,
 	})
 	// The Planner's patrol (§15.6): weekday scout runs over the mail, Slack
 	// and Asana MCP servers, read tools only; new findings wake the Planner.

@@ -35,6 +35,10 @@ var tools = map[string][]string{
 	ServerBuilder:   {"ReadInternalWebsites"},
 }
 
+// Tools is server's search and read tools, a copy; nil for a server that is
+// not the reader's.
+func Tools(server string) []string { return slices.Clone(tools[server]) }
+
 // toolNames is the tools of servers as the CLI names them, in server order.
 func toolNames(servers []string) []string {
 	var out []string

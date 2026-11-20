@@ -23,10 +23,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/apierr"
 	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/datadir"
-	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/planner/journal"
@@ -61,10 +61,6 @@ func NameFor(root string) string {
 	return "planner-" + hex.EncodeToString(sum[:3])
 }
 
-// Tools is the Planner's whole built-in tool set: read-only tools to check a
-// claim, and CC's own cross-session channel.
-var Tools = []string{"Read", "Grep", "Glob", "ListAgents", "SendMessage"}
-
 // ReceiptText is the gateway's receipt for a user message (§4.1 先回执再干活).
 const ReceiptText = "收到，正在看"
 
@@ -72,12 +68,21 @@ const ReceiptText = "收到，正在看"
 const (
 	// interval is the reconcile period: revival and the shift-change check.
 	interval = time.Minute
-	// shiftHour:shiftMinute local is the daily shift change, the morning
-	// brief's time.
+	// shiftHour:shiftMinute local is where a shift's day starts (shiftDay),
+	// the morning brief's time. The shift itself changes only by size or by
+	// prompt version (D130).
 	shiftHour, shiftMinute = 8, 30
-	// handoffWait is how long the outgoing session has to write its summary;
-	// past it the shift changes with none.
+	// handoffWait is how long the outgoing session has to write its summary.
 	handoffWait = 3 * time.Minute
+	// A change of shift whose summary could not be written is put off
+	// handoffRetry and tried again, the conversation kept. While the model
+	// cannot be reached (handoffUnreachable) that goes on however long: a
+	// credential expired overnight comes back in the morning. A turn that
+	// failed, timed out or said nothing waits handoffRetry longer each time,
+	// and the handoffTries-th in a row changes the shift with none, so a
+	// conversation that cannot answer at all is still replaced.
+	handoffRetry = 10 * time.Minute
+	handoffTries = 3
 	// handoffMaxRunes caps a stored summary. The prompt asks for 2,000 字
 	// (§15.12 ⑧); a little over it is kept whole rather than cut mid-line.
 	handoffMaxRunes = 3000
@@ -184,9 +189,15 @@ type Config struct {
 	// Conclusion is the first sentence of a session's latest report, for
 	// its snapshot line; nil shows none.
 	Conclusion func(key string) string
-	// Tainted lists the sessions marked as having read web pages or mail
-	// (sidecar taint): their event logs are denied. nil denies none.
-	Tainted func() []string
+	// MCPConfig is cli.mcp_config's absolute path: the Planner gets the read
+	// tools of the servers in it that it knows (tools.go). "" gives it none.
+	MCPConfig string
+	// OwnSettings is whether the session spawns on the naozhi-owned settings
+	// file (naozhi_settings.enabled): only then are the Planner's allow rules
+	// its whole grant, and only then does it get Bash for gh's reads. With
+	// the CLI loading ~/.claude/settings.json itself, an allow rule there
+	// (Bash(aws *)) would open with it.
+	OwnSettings bool
 	// ClaudeDir is the Claude CLI's directory: the Planner's transcript (its
 	// context size, for the change of shift by size) and the auto-memory the
 	// remember block writes. "" turns both off.
@@ -219,7 +230,7 @@ type persisted struct {
 	Shift   string `json:"shift,omitempty"`
 	// Prompt is the PromptVersion the current conversation started with. A
 	// resumed conversation keeps its first system prompt, so after an
-	// upgrade the shift changes at once instead of at the next 08:30.
+	// upgrade the shift changes at once.
 	Prompt int `json:"prompt,omitempty"`
 	// Handoff names a stored summary not yet handed to a new conversation
 	// (its restart failed, or the send did): the shift day, or the day and
@@ -228,6 +239,11 @@ type persisted struct {
 	// ShiftAt is when the current conversation started its shift: a change
 	// by size waits sizeShiftGap from it.
 	ShiftAt time.Time `json:"shift_at,omitzero"`
+	// Scope fingerprints the scope the live process started with (scope.sum).
+	// Kept here because a restart of naozhi keeps a process a shim holds:
+	// what it started with is not what this binary would start it with after
+	// an upgrade that moved the tools or the rules.
+	Scope string `json:"scope,omitempty"`
 	// Held is the receipts waiting for the next one (held.go), kept so a
 	// restart loses none.
 	Held []heldReceipt `json:"held,omitempty"`
@@ -258,13 +274,15 @@ type Agent struct {
 	// until the new conversation starts, an idle Planner on the old
 	// session ID is not where a message goes.
 	shifting bool
-	// spawnedAllow is the read rules the running process started with: once
-	// the workspace registry moves them, an idle Planner restarts on its
-	// conversation to take the new ones (§15.12 ⑧).
-	spawnedAllow []string
-	// spawnedDeny is the deny rules it started with: a session newly
-	// marked tainted moves them the same way (§15.12 ⑨).
-	spawnedDeny []string
+	// cur is the scope the spawn options carry; state.Scope fingerprints the
+	// one the running process started with. Once the workspace registry or
+	// cli.mcp_config moves cur, an idle Planner restarts on its conversation
+	// to take it (§15.12 ⑧).
+	cur scope
+	// handoffFails counts the changes of shift put off in a row for want of
+	// a summary; until shiftRetryAt none is tried again.
+	handoffFails int
+	shiftRetryAt time.Time
 	// ctxSeen caches the context size of the transcript as last read, by its
 	// size and modification time, so an idle Planner's tail is read once.
 	ctxSeen ctxReading
@@ -315,7 +333,6 @@ func New(cfg Config) *Agent {
 		parked: parked.New(cfg.Layout.PlannerParkedPath(), cfg.Layout.PlannerDecidePath(), cfg.Now)}
 	a.state = loadState(cfg.Layout.PlannerAgentPath())
 	a.opts = a.buildOpts()
-	a.spawnedAllow, a.spawnedDeny = a.opts.PermissionsAllow, a.opts.PermissionsDeny
 	return a
 }
 
@@ -364,26 +381,29 @@ func (a *Agent) Opts() sessionview.AgentOpts {
 	return a.opts
 }
 
+// buildOpts is the launch spec with the scope as it is now, which becomes
+// a.cur. The caller holds a.mu or is New.
 func (a *Agent) buildOpts() sessionview.AgentOpts {
 	root := a.cfg.Layout.PlannerRoot()
-	allow, deny := a.readRules()
-	return sessionview.AgentOpts{
+	opts := sessionview.AgentOpts{
 		Model:     Model,
 		Effort:    Effort,
 		Backend:   "claude",
 		Workspace: a.cfg.Layout.PlannerWorkDir(),
 		Exempt:    true,
 		// Rendered as --append-system-prompt.
-		SystemPrompt:        systemPrompt(root, a.name, memoryIndexes(a.cfg.Home)),
-		Tools:               slices.Clone(Tools),
-		PermissionMode:      "dontAsk",
-		Name:                a.name,
+		SystemPrompt:   systemPrompt(root, a.name, memoryIndexes(a.cfg.Home)),
+		PermissionMode: "dontAsk",
+		Name:           a.name,
+		// Only the servers of the scope's own --mcp-config, never the
+		// router-wide cli.mcp_config with its write tools' servers whole.
 		StrictMCPConfig:     true,
 		CrossSessionInbound: "accept",
-		PermissionsAllow:    allow,
-		PermissionsDeny:     deny,
 		PromptCacheTTL:      PromptCacheTTL,
 	}
+	a.cur = a.scope()
+	a.cur.apply(&opts)
+	return opts
 }
 
 // absRule is the permission-rule form of a path made absolute
@@ -405,12 +425,13 @@ func (a *Agent) readRules() (allow, deny []string) {
 }
 
 // allowRules are what the Planner may read outside its working directory:
-// its state root, the event logs index.json points at, the "懂你" sources and
-// the registered workspaces on this node, so it can check a claim against
-// the files (RFC §4.1; Read rules also cover Grep and Glob). Under dontAsk
-// anything else is refused; denyRules still win inside these trees. A
-// workspace registered later is picked up once the Planner is next idle
-// (refreshReadScope). A read through a symlink is not allowed by the rule
+// the user's home (D129: a project not registered as a workspace, the
+// transcripts, the "懂你" sources), its state root and the event logs
+// index.json points at, and the registered workspaces on this node, which
+// may lie outside home (RFC §4.1; Read rules also cover Grep and Glob).
+// Under dontAsk anything else is refused; denyRules still win inside these
+// trees. A workspace registered later is picked up once the Planner is next
+// idle (refreshScope). A read through a symlink is not allowed by the rule
 // for the resolved directory alone (the CLI checks the spelling as written),
 // so a workspace's aliases (the spellings sessions reached it by, as the
 // snapshot and reports give it) get rules of their own, after the paths and
@@ -419,8 +440,7 @@ func allowRules(root, events string, workspaces []string, aliases map[string]str
 	rules := []string{
 		absRule("Read", filepath.Join(root, "**")),
 		absRule("Read", filepath.Join(events, "**")),
-		"Read(~/.claude/CLAUDE.md)",
-		"Read(~/.claude/projects/*/memory/**)",
+		"Read(~/**)",
 	}
 	for _, ws := range workspaces {
 		if r := absRule("Read", filepath.Join(ws, "**")); !slices.Contains(rules, r) {
@@ -551,13 +571,18 @@ func spelledRules(dir string, pats []string, aliases map[string]string) []string
 	return append(rules, insideRules(dir, pats, aliases)...)
 }
 
-// homeDeny are the home-relative credential paths §15.1 lists.
+// homeDeny are the home-relative credential paths §15.1 lists, and, with
+// the whole home readable (D129), the other places a login keeps secrets:
+// the Midway cookie, the keychains and browser profiles under Library, the
+// tools' config directories, the shell's history and startup files.
 var homeDeny = []string{
 	".aws/**", ".ssh/**",
 	".naozhi/*.yaml", ".naozhi/**/*.yaml", ".naozhi/*.json", ".naozhi/shims/**", ".naozhi/access-profile-secrets/**",
-	".gnupg/**", ".config/gh/**", ".docker/config.json", ".kube/**",
+	".gnupg/**", ".config/**", ".docker/config.json", ".kube/**",
 	".netrc", ".git-credentials", ".npmrc",
 	".claude.json", ".claude/.credentials.json", ".claude/settings*.json",
+	".midway/**", ".ada/**", "Library/**", ".password-store/**",
+	".zsh_history", ".bash_history", ".zshenv", ".zshrc", ".zprofile", ".bashrc", ".bash_profile", ".profile",
 }
 
 // denyRules keep credentials out of reach even inside an allowed tree: the
@@ -609,32 +634,12 @@ func denyRules(home, dataRoot string, extra []string, aliases map[string]string)
 	return rules
 }
 
-// denyRules is the Planner's deny rules: the credentials (denyRules) and
-// the event logs of the sessions marked tainted (Config.Tainted), under
-// the spellings aliases adds.
+// denyRules is the Planner's deny rules: the credentials (denyRules),
+// under the spellings aliases adds. A session marked as having read web
+// pages or mail keeps its mark on its digest; its event log is no longer
+// denied, the Planner reading such sources itself (D129).
 func (a *Agent) denyRules(aliases map[string]string) []string {
-	rules := denyRules(a.cfg.Home, a.cfg.Layout.Root(), a.cfg.DenyPaths, aliases)
-	if a.cfg.Tainted == nil || a.cfg.Layout.EventsRoot() == "" {
-		return rules
-	}
-	return append(rules, taintRules(a.cfg.Layout.EventsRoot(), a.cfg.Tainted(), aliases)...)
-}
-
-// taintRules deny the event logs of keys, sessions that read web pages or
-// mail (§7.4, §15.12 ⑨): every file of a log shares its key hash stem
-// (persist.KeyHash), the rotate staging files too. The Planner reads such a
-// session's digest instead; the raw pages stay out of its context.
-func taintRules(events string, keys []string, aliases map[string]string) []string {
-	keys = slices.Clone(keys)
-	slices.Sort(keys)
-	pats := make([]string, 0, len(keys))
-	for _, k := range slices.Compact(keys) {
-		pats = append(pats, persist.KeyHash(k)+"*")
-	}
-	if len(pats) == 0 {
-		return nil
-	}
-	return spelledRules(events, pats, aliases)
+	return denyRules(a.cfg.Home, a.cfg.Layout.Root(), a.cfg.DenyPaths, aliases)
 }
 
 // maxMemoryIndexes caps the auto-memory indexes listed in the prompt.
@@ -660,7 +665,8 @@ func memoryIndexes(home string) []string {
 }
 
 // Start runs the lifecycle until ctx ends: it keeps planner:main alive and
-// changes its shift each morning. With planner.enabled off it only stops a
+// changes its shift when the conversation grew too large or an upgrade
+// changed its prompt. With planner.enabled off it only stops a
 // Planner an earlier run left alive.
 func (a *Agent) Start(ctx context.Context, turns Turns, snapshot func() health.Snapshot) {
 	if !a.cfg.Enabled {
@@ -733,30 +739,29 @@ func (a *Agent) reconcile(ctx context.Context) {
 	}
 	a.mu.Lock()
 	shift, pending, prompt := a.state.Shift, a.state.Handoff, a.state.Prompt
+	// A busy Planner changes at a later reconcile, so the handoff request
+	// runs at once rather than queued behind a turn; one whose summary
+	// failed waits out its retry.
+	due := !st.Running && !now.Before(a.shiftRetryAt)
 	a.mu.Unlock()
+	// The conversation is kept from day to day (D130): a new one starts only
+	// on a new prompt or past the size limit.
 	switch {
 	case shift == "":
 		a.markShift(now)
-	case shift != shiftDay(now):
-		// A busy Planner changes at a later reconcile, so the handoff
-		// request runs at once rather than queued behind a turn.
-		if !st.Running {
-			a.changeShift(ctx, now, shiftDay(now))
-		}
+	case prompt != PromptVersion && due:
+		// An upgrade changed the system prompt, which the resumed
+		// conversation would keep. A fresh conversation was marked above, so
+		// this is one started on the old prompt, even when its session ID is
+		// unknown (a shim adopted before its first turn).
+		a.changeShift(ctx, now, fmt.Sprintf("%s-v%d", shiftDay(now), PromptVersion))
 	case prompt != PromptVersion:
-		// An upgrade changed the system prompt; the resumed conversation
-		// would keep the old one until tomorrow. A fresh conversation was
-		// marked above, so this is one started on the old prompt, even when
-		// its session ID is unknown (a shim adopted before its first turn).
-		if !st.Running {
-			a.changeShift(ctx, now, fmt.Sprintf("%s-v%d", shiftDay(now), PromptVersion))
-		}
 	case pending != "":
 		a.sendHandoff(pending, nil, opts)
-	case !st.Running && a.oversized(now, st.SessionID):
+	case due && a.oversized(now, st.SessionID):
 		a.changeShift(ctx, now, a.sizeShiftName(now))
 	default:
-		a.refreshReadScope(st)
+		a.refreshScope(st)
 		a.flushHeld(now)
 	}
 }
@@ -812,23 +817,33 @@ func (a *Agent) sizeShiftName(now time.Time) string {
 	}
 }
 
-// refreshReadScope keeps the Planner's read rules in step with the
-// workspace registry and the tainted sessions: new rules go into the spawn
-// options at once, and a live process started on others is released while
-// idle, to be resumed on its conversation with them at the next reconcile.
-func (a *Agent) refreshReadScope(st SessionState) {
-	want, deny := a.readRules()
+// refreshScope keeps the Planner's scope in step with the workspace
+// registry and cli.mcp_config: a new one goes into the spawn options at
+// once, and a live process started on another is released while idle, to be
+// resumed on its conversation with it at the next reconcile.
+func (a *Agent) refreshScope(st SessionState) {
+	want := a.scope()
 	a.mu.Lock()
-	a.opts.PermissionsAllow, a.opts.PermissionsDeny = want, deny
-	stale := !slices.Equal(a.spawnedAllow, want) || !slices.Equal(a.spawnedDeny, deny)
+	a.cur = want
+	want.apply(&a.opts)
+	stale := a.state.Scope != want.sum()
 	shifting := a.shifting
 	a.mu.Unlock()
 	if !stale || !st.Alive || st.Running || shifting {
 		return
 	}
 	if a.cfg.Sessions.Release(Key) {
-		slog.Info("planner: read scope changed; restarting on the conversation with the new rules", "allow", len(want), "deny", len(deny))
+		slog.Info("planner: scope changed; restarting on the conversation with the new one",
+			"tools", len(want.tools), "allow", len(want.allow), "deny", len(want.deny))
 		a.poke()
+	}
+}
+
+// markScopeLocked records that the process just started runs on a.cur.
+func (a *Agent) markScopeLocked() {
+	if sum := a.cur.sum(); a.state.Scope != sum {
+		a.state.Scope = sum
+		a.saveLocked()
 	}
 }
 
@@ -846,7 +861,7 @@ func (a *Agent) revive(ctx context.Context, now time.Time, opts sessionview.Agen
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.spawnedAllow, a.spawnedDeny = opts.PermissionsAllow, opts.PermissionsDeny
+	a.markScopeLocked()
 	if a.failures > 0 {
 		slog.Info("planner: started after failures", "failures", a.failures)
 	}
@@ -864,8 +879,8 @@ func (a *Agent) failed(now time.Time, msg string, err error) {
 	slog.Warn(msg, "err", err, "failures", a.failures, "retry_in", backoff)
 }
 
-// shiftDay is the shift t belongs to: a day's shift starts at 08:30 local,
-// so before then t is still in the previous day's.
+// shiftDay is the day a shift starting at t is named by: a day starts at
+// 08:30 local, so before then t is still in the previous one.
 func shiftDay(t time.Time) string {
 	start := time.Date(t.Year(), t.Month(), t.Day(), shiftHour, shiftMinute, 0, 0, t.Location())
 	if t.Before(start) {
@@ -891,11 +906,13 @@ func (a *Agent) handoffPath(day string) string {
 
 // changeShift has the outgoing session write a handoff summary, retires it,
 // and starts a fresh conversation whose first message carries the summary
-// and the 任务 index. day names the summary: the shift day, day and prompt
-// version for a change an upgrade forces, or day and "-c<n>" for one by
-// size. A summary already stored under that name is
-// reused rather than asked for again. It stays pending until sent, so after
-// a failed restart the conversation revival starts still gets it.
+// and the 任务 index. day names the summary: day and prompt version for a
+// change an upgrade forces, or day and "-c<n>" for one by size. A summary
+// already stored under that name is reused rather than asked for again. It
+// stays pending until sent, so after a failed restart the conversation
+// revival starts still gets it. A session that could not write one keeps
+// its conversation and is asked again later (deferShift): the summary is
+// all the new conversation knows of the old.
 func (a *Agent) changeShift(ctx context.Context, now time.Time, day string) {
 	// From here every message carries a full snapshot: once the handoff
 	// turn ends the Planner is idle on the old session ID, while a message
@@ -916,9 +933,12 @@ func (a *Agent) changeShift(ctx context.Context, now time.Time, day string) {
 	path := a.handoffPath(day)
 	summary, err := os.ReadFile(path)
 	if err != nil {
-		text := a.askHandoff(ctx)
+		text, res := a.askHandoff(ctx)
 		if ctx.Err() != nil {
 			return // shutting down: the next start changes the shift
+		}
+		if a.deferShift(now, res) {
+			return
 		}
 		if text != "" {
 			// Checked once, before it is stored: a stored summary handed
@@ -935,6 +955,7 @@ func (a *Agent) changeShift(ctx context.Context, now time.Time, day string) {
 		}
 	}
 	a.mu.Lock()
+	a.handoffFails, a.shiftRetryAt = 0, time.Time{}
 	// The memory indexes and prompt are re-read for the new conversation.
 	a.opts = a.buildOpts()
 	opts := a.opts
@@ -951,7 +972,7 @@ func (a *Agent) changeShift(ctx context.Context, now time.Time, day string) {
 		return
 	}
 	a.mu.Lock()
-	a.spawnedAllow, a.spawnedDeny = opts.PermissionsAllow, opts.PermissionsDeny
+	a.markScopeLocked()
 	a.mu.Unlock()
 	a.markShift(now)
 	slog.Info("planner: shift changed", "day", day, "handoff_bytes", len(summary))
@@ -987,11 +1008,58 @@ func (a *Agent) sendHandoff(day string, summary []byte, opts sessionview.AgentOp
 	}
 }
 
+// handoffResult is how asking for the handoff summary went.
+type handoffResult int
+
+const (
+	// handoffWritten: the reply is the summary.
+	handoffWritten handoffResult = iota
+	// handoffNothing: nothing was said in the conversation; it changes with
+	// no summary.
+	handoffNothing
+	// handoffUnreachable: the model could not be called (the CLI answers
+	// such a turn with the API error as the reply's text; a credential
+	// expired overnight was once stored as the summary).
+	handoffUnreachable
+	// handoffFailed: the turn failed, timed out or said nothing.
+	handoffFailed
+	// handoffBroken: the conversation is past the model's context; no later
+	// turn of it can answer, so it changes with no summary now.
+	handoffBroken
+)
+
+// deferShift reports whether the change of shift is put off after res, and
+// until when it is not tried again (shiftRetryAt): always while the model is
+// unreachable, up to handoffTries times in a row for a failed turn.
+func (a *Agent) deferShift(now time.Time, res handoffResult) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	switch res {
+	case handoffUnreachable:
+		a.shiftRetryAt = now.Add(handoffRetry)
+		slog.Warn("planner: model unreachable for the handoff summary; keeping the conversation", "retry_in", handoffRetry)
+		return true
+	case handoffFailed:
+		a.handoffFails++
+		if a.handoffFails >= handoffTries {
+			slog.Warn("planner: no handoff summary; changing shift without one", "failures", a.handoffFails)
+			return false
+		}
+		wait := handoffRetry * time.Duration(a.handoffFails)
+		a.shiftRetryAt = now.Add(wait)
+		slog.Warn("planner: no handoff summary; keeping the conversation", "failures", a.handoffFails, "retry_in", wait)
+		return true
+	case handoffBroken:
+		slog.Warn("planner: conversation past the model's context; changing shift without a summary")
+	}
+	return false
+}
+
 // askHandoff asks the outgoing session for its summary and waits up to
-// handoffWait; "" on a timeout or failure.
-func (a *Agent) askHandoff(ctx context.Context) string {
+// handoffWait; text is the summary when res is handoffWritten.
+func (a *Agent) askHandoff(ctx context.Context) (text string, res handoffResult) {
 	if a.cfg.Sessions.State(Key).SessionID == "" {
-		return "" // nothing was said yet
+		return "", handoffNothing
 	}
 	a.mu.Lock()
 	turns, opts := a.turns, a.opts
@@ -1006,19 +1074,29 @@ func (a *Agent) askHandoff(ctx context.Context) string {
 	})
 	if err != nil {
 		slog.Warn("planner: ask for handoff", "err", err)
-		return ""
+		return "", handoffFailed
 	}
 	t := time.NewTimer(handoffWait)
 	defer t.Stop()
 	select {
 	case r := <-ch:
-		if r.err != nil {
+		text := strings.TrimSpace(r.text)
+		switch {
+		case r.err != nil:
 			slog.Warn("planner: handoff turn failed", "err", r.err)
-			return ""
+		case text == "":
+			slog.Warn("planner: handoff turn answered with no summary")
+		case apierr.IsEnvelope(text):
+			if kind, _ := apierr.ClassifyError(text); kind == apierr.KindContextLength {
+				return "", handoffBroken
+			}
+			return "", handoffUnreachable
+		default:
+			return textutil.TruncateRunes(text, handoffMaxRunes), handoffWritten
 		}
-		return textutil.TruncateRunes(strings.TrimSpace(r.text), handoffMaxRunes)
+		return "", handoffFailed
 	case <-t.C:
-		slog.Warn("planner: handoff timed out; changing shift without one")
+		slog.Warn("planner: handoff timed out")
 	case <-ctx.Done():
 	}
 	// A request that never started would otherwise run first on the new
@@ -1026,7 +1104,7 @@ func (a *Agent) askHandoff(ctx context.Context) string {
 	if queued {
 		turns.DropPlannerQueue(Key)
 	}
-	return ""
+	return "", handoffFailed
 }
 
 // Send takes a user message to the Planner: it puts the snapshot before the
@@ -1237,9 +1315,8 @@ func (a *Agent) Status() Status {
 	return st
 }
 
-// ShiftName names the current conversation's shift: its day, or the day and
-// time of a change by size or prompt, and when it started. A web lookup's
-// count is per shift (planner/reader).
+// ShiftName names the current conversation's shift: the day it started and
+// when. A web lookup's count is per shift (planner/reader).
 func (a *Agent) ShiftName() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()

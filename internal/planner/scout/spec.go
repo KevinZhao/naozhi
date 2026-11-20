@@ -92,6 +92,10 @@ const EnableWrites = "enable_write_tools"
 // write tools of these servers only: the other servers list theirs anyway.
 var WriteSwitch = map[string]string{ServerOutlook: "OUTLOOK_MCP_ENABLE_WRITES"}
 
+// ReadTools is server's read tools, a copy; nil for a server that is not
+// the scout's.
+func ReadTools(server string) []string { return slices.Clone(readTools[server]) }
+
 // WriteTools is server's write tools, a copy; nil for a server with none
 // known.
 func WriteTools(server string) []string { return slices.Clone(writeTools[server]) }

@@ -43,6 +43,10 @@ func (c *spawnConfig) launchSpecFor(key string, ov shim.SpawnOverlay, ownCreds b
 	return ls
 }
 
+// permissionModeDontAsk is the overlay's permission mode of a restricted
+// session (the Planner, a scout, a reader): what is not allowed is refused.
+const permissionModeDontAsk = "dontAsk"
+
 func hasSettingsOverrides(ov shim.SpawnOverlay) bool {
 	return ov.CrossSessionInbound != "" || len(ov.PermissionsDeny) > 0 || len(ov.PermissionsAllow) > 0 || ov.Ultracode || ov.PromptCacheTTL != ""
 }
@@ -53,8 +57,11 @@ func hasSettingsOverrides(ov shim.SpawnOverlay) bool {
 // permissions.deny / permissions.allow, ultracode and promptCacheTtl, and,
 // when credExport is set, the access profile's awsCredentialExport in place
 // of the base file's (its awsAuthRefresh belongs to that other source and is
-// dropped). Rewritten on every spawn from config, so neither a base edit nor
-// an edit of this file outlives the next spawn.
+// dropped). Under dontAsk the base file's permissions.allow is left out: a
+// restricted session's allow rules are its whole grant, and a rule the
+// owner allowed their own sessions (Bash(git *), Bash(aws *)) would open
+// what its launch spec did not. Rewritten on every spawn from config, so
+// neither a base edit nor an edit of this file outlives the next spawn.
 func writeSessionSettings(path, base string, ov shim.SpawnOverlay, credExport string) error {
 	doc := map[string]any{}
 	if base != "" {
@@ -67,6 +74,11 @@ func writeSessionSettings(path, base string, ov shim.SpawnOverlay, credExport st
 		}
 		if doc == nil {
 			doc = map[string]any{}
+		}
+	}
+	if ov.PermissionMode == permissionModeDontAsk {
+		if perms, ok := doc["permissions"].(map[string]any); ok {
+			delete(perms, "allow")
 		}
 	}
 	if ov.CrossSessionInbound != "" {
