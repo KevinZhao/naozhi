@@ -644,8 +644,15 @@ func markedRead(tools []string) error {
 // which overlaps everything and conflicts with nothing.
 const allDay = 20 * time.Hour
 
-// conflicts is each pair of timed events in events that overlap, as a
-// finding keyed by the overlap's start (conflictID).
+// minOverlap is how long two meetings must overlap to be a conflict: a
+// five-minute reminder block inside a weekly meeting, or one meeting running
+// a few minutes into the next, asks nothing of the user.
+const minOverlap = 15 * time.Minute
+
+// conflicts is each pair of timed events in events that overlap by
+// minOverlap or more, as a finding keyed by the overlap's start
+// (conflictID). Who attends is not asked: the calendar tool leaves the list
+// out of some meetings, the user's own among them.
 func conflicts(events []Event) []Finding {
 	var timed []Event
 	for _, e := range events {
@@ -666,6 +673,9 @@ func conflicts(events []Event) []Finding {
 			end := a.End
 			if b.End.Before(end) {
 				end = b.End
+			}
+			if end.Sub(b.Start) < minOverlap {
+				continue
 			}
 			// Keyed by when the overlap starts, as parseOutput keys a
 			// conflict: the model copies the long Outlook IDs unevenly from
