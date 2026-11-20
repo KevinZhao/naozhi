@@ -622,3 +622,24 @@ func TestDetectedMeetingWaitsForTheUser(t *testing.T) {
 		t.Fatal("a meeting nobody recorded was stored")
 	}
 }
+
+func TestConcatRefusesUnreadableSegment(t *testing.T) {
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "000001.wav")
+	// A CAF file under a .wav name: what AVAudioFile writes for an unknown extension.
+	if err := os.WriteFile(bad, []byte("caff\x00\x01\x00\x00desc"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ConcatWAV(filepath.Join(dir, "out.wav"), []string{bad}, []float64{30}); err == nil {
+		t.Fatal("unreadable segment padded with silence")
+	}
+}
+
+func TestPartialSegmentsAreNotListed(t *testing.T) {
+	s := &Store{Root: t.TempDir()}
+	writeSegment(t, filepath.Join(s.Root, "m", "audio", "mic", "000001.wav"), 10, 1)
+	writeSegment(t, filepath.Join(s.Root, "m", "audio", "mic", "part-000002.wav"), 10, 1)
+	if got := s.segments("m", "mic"); len(got) != 1 || filepath.Base(got[0]) != "000001.wav" {
+		t.Fatalf("segments = %v", got)
+	}
+}

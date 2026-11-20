@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 )
@@ -69,6 +68,8 @@ type Todo struct {
 }
 
 var idRE = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}-[0-9a-f]{6}$`)
+
+var segmentRE = regexp.MustCompile(`^\d{6}\.wav$`)
 
 // ValidID reports whether id names a meeting directory.
 func ValidID(id string) bool { return idRE.MatchString(id) }
@@ -170,7 +171,8 @@ func (s *Store) segments(id, track string) []string {
 	}
 	var out []string
 	for _, e := range ents {
-		if strings.HasSuffix(e.Name(), ".wav") {
+		// Only closed segments: the helper writes part-NNNNNN.wav and renames it on close.
+		if segmentRE.MatchString(e.Name()) {
 			out = append(out, filepath.Join(s.Dir(id), "audio", track, e.Name()))
 		}
 	}

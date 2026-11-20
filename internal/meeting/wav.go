@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 )
 
@@ -76,8 +77,8 @@ func wavHeader(dataLen int64) []byte {
 }
 
 // ConcatWAV joins the segments into dst, in order, and returns the total seconds. A segment
-// that cannot be read is replaced by silence of padSeconds[i] (when given) so the track keeps
-// its alignment with the other one.
+// that is missing is replaced by silence of padSeconds[i] (when given) so the track keeps its
+// alignment with the other one; one that is there but unreadable is an error.
 func ConcatWAV(dst string, srcs []string, padSeconds []float64) (float64, error) {
 	out, err := os.OpenFile(dst+".tmp", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -92,7 +93,7 @@ func ConcatWAV(dst string, srcs []string, padSeconds []float64) (float64, error)
 	for i, src := range srcs {
 		n, err := appendPCM(out, src)
 		if err != nil {
-			if i >= len(padSeconds) {
+			if i >= len(padSeconds) || !errors.Is(err, fs.ErrNotExist) {
 				out.Close()
 				return 0, fmt.Errorf("%s: %w", src, err)
 			}

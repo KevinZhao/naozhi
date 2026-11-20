@@ -190,6 +190,7 @@ final class SegmentTrack {
     let converter: AVAudioConverter
     var file: AVAudioFile?
     var partPath = ""
+    var donePath = ""
     var peak: Float = 0
     var sumSq: Double = 0
     var count = 0
@@ -204,7 +205,10 @@ final class SegmentTrack {
     }
 
     func open(index: Int) throws {
-        partPath = String(format: "%@/%06d.wav.part", dir, index)
+        // AVAudioFile picks the container from the extension (anything but .wav is CAF), so the
+        // segment being written is part-NNNNNN.wav and becomes NNNNNN.wav once closed.
+        partPath = String(format: "%@/part-%06d.wav", dir, index)
+        donePath = String(format: "%@/%06d.wav", dir, index)
         let settings: [String: Any] = [AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: targetRate, AVNumberOfChannelsKey: 1,
                                        AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false, AVLinearPCMIsBigEndianKey: false]
         file = try AVAudioFile(forWriting: URL(fileURLWithPath: partPath), settings: settings, commonFormat: .pcmFormatInt16, interleaved: true)
@@ -235,7 +239,7 @@ final class SegmentTrack {
     // Closes the segment and renames it so the gateway only ever reads complete files.
     func close() -> (String, Float, Double) {
         file = nil
-        let done = String(partPath.dropLast(".part".count))
+        let done = donePath
         try? FileManager.default.moveItem(atPath: partPath, toPath: done)
         let rms = count > 0 ? (sumSq / Double(count)).squareRoot() : 0
         return (done, peak, rms)

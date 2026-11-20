@@ -959,8 +959,14 @@ func (m *Manager) joinTracks(id string) (string, string, error) {
 			pads = append(pads, pad)
 		}
 		dst := map[string]string{"mic": mic, "remote": remote}[track]
-		if _, err := ConcatWAV(dst, srcs, pads); err != nil {
+		secs, err := ConcatWAV(dst, srcs, pads)
+		if err != nil {
 			return "", "", err
+		}
+		// The segments go once the summary is written, so audio that did not join whole must
+		// fail here, with the segments still there.
+		if mt, err := m.store.Get(id); err == nil && secs < mt.Seconds*0.9-1 {
+			return "", "", fmt.Errorf("%s 轨拼接后只有 %.0f 秒，录了 %.0f 秒", track, secs, mt.Seconds)
 		}
 	}
 	return mic, remote, nil
