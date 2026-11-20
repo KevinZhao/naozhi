@@ -232,7 +232,7 @@ function mentionedKeys(ev) {
 
 // ---- action blocks (§6.2) ----
 
-const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask', 'status', 'notify', 'custody', 'relay', 'remember', 'lookup', 'park', 'halt', 'cancel']);
+const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask', 'status', 'notify', 'custody', 'relay', 'remember', 'lookup', 'park', 'halt', 'cancel', 'routine', 'front']);
 // STOP_HEAD is a halt or cancel block's one line (§15.15 ①): its mark, what
 // the gateway did and the tooltip saying it.
 const STOP_HEAD = {
@@ -371,6 +371,45 @@ function actionCardHtml(raw) {
     return '<div class="pl-act pl-act-park pl-act-line" title="移进搁置区，交接里不再重抄">' +
       '<span class="pl-act-k">放下</span>' + (text ? ' · <span class="pl-act-goal">' + esc(text) + '</span>' : '') +
       (src ? '<span class="pl-act-ws"> · 出处 ' + esc(src) + '</span>' : '') + '</div>';
+  }
+  if (a.type === 'routine') {
+    // 例行任务 (§15.17, D131). A new one folds like a dispatch: 例行 · 标题 ·
+    // 定时 · 工作区, the prompt in its fold; it is a cron job the 自动化 view
+    // lists. One naming an id is a line: 暂停 / 恢复 that job.
+    const id = str(a.id);
+    if (id) {
+      return '<div class="pl-act pl-act-routine pl-act-line" title="在“自动化”里能看到这个例行任务">' +
+        '<span class="pl-act-k">例行</span> · ' + (a.off === true ? '暂停' : '恢复') +
+        '<span class="pl-act-ws"> · ' + esc(id) + '</span></div>';
+    }
+    const title = str(a.title);
+    const ws = str(a.workspace);
+    const name = WORKSPACE_ID_RE.test(ws) ? workspaceName(ws) : ws;
+    const schedule = str(a.schedule);
+    return '<details class="pl-act pl-act-routine">' +
+      '<summary class="pl-act-h"><span class="pl-act-k">例行</span>' + (title ? ' · <b>' + esc(title) + '</b>' : '') +
+        (schedule ? '<span class="pl-act-goal" title="定时表达式，按本机时区"> · ' + esc(schedule) + '</span>' : '') +
+        (name ? '<span class="pl-act-ws" title="' + escAttr(name) + '"> · ' + esc(wsLabel(name)) + '</span>' : '<span class="pl-act-ws"></span>') + '</summary>' +
+      rowsHtml([['工作区', name], ['定时', schedule], ['每次执行', str(a.prompt)], ['在哪改', '“自动化”里能看、改、删']]) + '</details>';
+  }
+  if (a.type === 'front') {
+    // 工作线台账 (§15.17, D132), one line: 工作线 · 名称（没写就是 id）· what
+    // this block changed — 现状 → 下一步（等谁）, a decision, or 已结束.
+    const name = oneLine(str(a.name)) || str(a.id);
+    const parts = [];
+    const state = oneLine(str(a.state));
+    const next = oneLine(str(a.next));
+    const waiting = oneLine(str(a.waiting)).replace(/^等\s*/, '');
+    if (state) parts.push(state);
+    if (next) parts.push('→ ' + next);
+    if (waiting) parts.push('（等 ' + waiting + '）');
+    const decision = oneLine(str(a.decision));
+    if (decision) parts.push('定了：' + decision);
+    if (a.close === true) parts.push('已结束');
+    const line = parts.join(' ');
+    return '<div class="pl-act pl-act-front pl-act-line" title="记进工作线台账；进行中的工作线随每次对话带给 Planner">' +
+      '<span class="pl-act-k">工作线</span>' + (name ? ' · <b>' + esc(name) + '</b>' : '') +
+      (line ? '<span class="pl-act-goal" title="' + escAttr(line) + '"> · ' + esc(line) + '</span>' : '') + '</div>';
   }
   if (a.type === 'halt' || a.type === 'cancel') {
     // One line: ⏸ 叫停 / ■ 停止 · the session · the why's first sentence;

@@ -179,6 +179,11 @@ func (l Layout) PlannerHandoffRoot() string { return l.Join("planner", "handoff"
 // user may edit it.
 func (l Layout) PlannerParkedPath() string { return l.Join("planner", "parked.md") }
 
+// PlannerFrontsPath is the ledger of the user's lines of work the Planner
+// keeps (<root>/planner/fronts.json, docs/rfc/planner.md §15.17), inside
+// its read scope.
+func (l Layout) PlannerFrontsPath() string { return l.Join("planner", "fronts.json") }
+
 // PlannerDecidePath is when each "等你定" item of the handoffs was first
 // written as it now reads (<root>/planner/handoff/decide.json), which is
 // what judges an item untouched.

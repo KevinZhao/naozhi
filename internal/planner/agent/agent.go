@@ -29,6 +29,7 @@ import (
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/planner/front"
 	"github.com/naozhi/naozhi/internal/planner/journal"
 	"github.com/naozhi/naozhi/internal/planner/parked"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
@@ -186,6 +187,9 @@ type Config struct {
 	// Waiting and Promises feed the snapshot; nil leaves their section out.
 	Waiting  func() []Waiting
 	Promises func() []Promise
+	// Fronts feeds the snapshot the lines of work in progress (§15.17); nil
+	// leaves the section out.
+	Fronts func() []front.Front
 	// Conclusion is the first sentence of a session's latest report, for
 	// its snapshot line; nil shows none.
 	Conclusion func(key string) string
@@ -289,6 +293,9 @@ type Agent struct {
 	// tasks lists the 任务 for the handoff's index (SetTaskIndex); nil
 	// leaves the index out.
 	tasks func() []TaskLine
+	// routines lists the standing tasks for the snapshot (SetRoutines); nil
+	// leaves the section out.
+	routines func() []Routine
 	// parked is the 搁置区 the handoff check and the park block move the
 	// "等你定" items into (§15.14 ⑤).
 	parked *parked.Store
@@ -1260,7 +1267,7 @@ func (a *Agent) Snapshot() string { return renderSnapshot(a.snapshotInput()) }
 
 func (a *Agent) snapshotInput() snapshotInput {
 	a.mu.Lock()
-	snap := a.health
+	snap, routines := a.health, a.routines
 	a.mu.Unlock()
 	in := snapshotInput{Now: a.cfg.Now(), Label: a.cfg.Sessions.Label, Name: a.cfg.Sessions.Name, Conclusion: a.cfg.Conclusion}
 	if snap != nil {
@@ -1271,6 +1278,12 @@ func (a *Agent) snapshotInput() snapshotInput {
 	}
 	if a.cfg.Promises != nil {
 		in.Promises = orEmpty(a.cfg.Promises())
+	}
+	if a.cfg.Fronts != nil {
+		in.Fronts = orEmpty(a.cfg.Fronts())
+	}
+	if routines != nil {
+		in.Routines = orEmpty(routines())
 	}
 	if names := a.workspaceNames(); names != nil {
 		in.Workspace = func(id string) string { return names[id] }

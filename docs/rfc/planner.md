@@ -1974,6 +1974,37 @@ D67 状态三层的第三层，只改前端：
 **后续候选**（未定）：工作线台账（每条线的现状、下一步、等谁，随快照带上）；例行关注（把重复的问题变成 cron 任务）；早报按工作线写、巡检冲突只算多人会议且重叠 15 分钟以上；"继续某件事"时由 Planner 找到并打开对的会话。
 
 
+### 15.17 v0.9.6 规格：例行关注与工作线台账（D131、D132，owner 11-20 同意继续）
+
+§15.16 放权之后，Planner 能当场查了，但还缺两样单个会话做不到的事：把你反复问的事变成它自己定时去做的事，以及跨会话、跨天记住你在推进什么。
+
+**例行关注（D131）**
+
+| 项 | 内容 | 落点 |
+|---|---|---|
+| 动作块 | `{"type":"routine","title":"…","workspace":"…","schedule":"…","prompt":"…"}` 建；`{"type":"routine","id":"…","off":true}` 暂停，`off:false` 恢复；带 id 的不能改内容（请你在"自动化"里改） | `planner/action` parse / runner |
+| 执行 | `cron.Scheduler.AddJob`：`FreshContext`、`WorkDir` 是工作区目录、`Platform: dashboard` / `ChatID: global` / `CreatedBy: planner`；定时表达式不对时回执写明格式 | `wireup.PlannerRoutines` |
+| 放行 | 只在你发消息或回答提问的回合；回执、提醒、托管的回合回执"不是用户发起的"，巡检等外部回合拒绝 | `needsUser`、`refuseOutside` |
+| 快照 | "例行任务（N）"：`- [id] 标题 · 定时 · 上次：结果第一行`（或 已暂停 / 上次失败） | `agent.Routine`、`SetRoutines` |
+| 结果去向 | 不新做：早报"例行任务有变化"一节照旧（整条结果与上次不同才算有变化） | `planner/brief` |
+| 界面 | 对话里的卡片：新建折成"例行 · 标题 · 定时 · 工作区"，展开是每次执行的 prompt；暂停 / 恢复一行 | `planner_cards.js` |
+
+**工作线台账（D132）**
+
+| 项 | 内容 | 落点 |
+|---|---|---|
+| 存储 | `planner/fronts.json`（在 Planner 读范围内）：`id`、`name`、`state`、`next`、`waiting`、`sessions`、`decisions`、`created` / `updated` / `closed` | `planner/front` |
+| 动作块 | `{"type":"front","id":"…","name":"…","state":"…","next":"…","waiting":"…","sessions":["…"],"decision":"…","close":false}`；第一次写要带 `name` | `planner/action` |
+| 放行 | 你发起的回合与回执、提醒回合可写；巡检、会前简报、查询结果等外部内容触发的回合拒绝 | `refuseOutside` |
+| 快照 | "工作线（N）"：`- [id] 名称：现状 → 下一步（等 谁）`，按更新时间新的在前，最多 10 行；会话与决定记录不进快照，要时读 `fronts.json` | `agent` snapshot |
+| 提示词 v25 | 何时更新（你说起进展、做了决定、换了方向，或派出的会话汇报了结果）；一次性的问答不建线；问进展先按台账答；台账与事实对不上以事实为准并改台账；"接着做某件事"时给出那条线最近的会话卡片 | `prompt.go` |
+| 界面 | 对话里一行卡片"工作线 · 名称 · 这次改了什么"。左栏暂不加"工作线"分组：先看 Planner 维护得准不准 | `planner_cards.js` |
+
+**验收**（11-20，隔离实例 `127.0.0.1:8292`）：一条消息里说"JD TGW 迁移客户否了 EC2 VXLAN、我定了先迁回 JDOS VPC、下一步改路线图、在等客户确认 2468 配置；以后每个工作日 9 点在 intel 工作区查内网 Anthropic 新模型动态"，Planner 同一轮写了一条 `front`（现状、下一步、等谁、一条决定）和一条 `routine`（`0 9 * * 1-5`，prompt 里让会话读写 `anthropic-model-watch.md`、没有变化只回"没有变化"）；`fronts.json` 与 `cron_jobs.json` 都落了盘（`created_by: planner`、`fresh_context`、工作区目录）。第二条消息的快照带上了"工作线（1）""例行任务（1）"；说"客户确认了，先暂停那个例行任务"，它清掉了"等谁"、改了现状，并按 id 把任务暂停。
+
+**不做**：台账的界面编辑（你口头让 Planner 改）；自动从会话摘要推断工作线（由 Planner 在回合里判断）；`routine` 改内容或删除（"自动化"里已有）。
+
+
 ### 15.13 剩余内容排期（11-08；11-16、11-17 调整）
 
 > 依据：`/tmp/rfc-audit-2026-11-08.md` 的逐条盘点（基线 `5994daf5`）与 §15.12。改动量 S / M / L；"前置"写的是依据的 §17.2 项（11-08 已全部采纳）或要先落地的版本。排期是推荐顺序，不是承诺日期。
@@ -1989,6 +2020,7 @@ D67 状态三层的第三层，只改前端：
 | **v0.9.0**（11-16 定，**11-16 已发布**；PR #3950–#3958、#3960） | §15.14：时间线分对话与动态两层、单独聊、回执去重与延后、提问过期、交接出处与搁置区、Planner 读 GitHub issue、读取者内网来源（#3942）、巡检凭证补跑与超时排查、收起 worktree 两处修正、小项 | M | 无 |
 | v0.9.x（11-17 定，§15.15） | 动作块 `halt` / `cancel`，只在你发起的回合（D118–D120）；派出会话的系统提示词要求要提交的改动先建 worktree（#3449 的最小版，网关不接管，D121–D123）；Planner 提示词 v22（唯一一次升版）；原始记录一键直达（D124）。P4 "懂你"设置视图的记忆界面（D126 / D127：远端只读，写只在本机）；~~语音倒脑子~~（D125：推迟） | S–M | v0.9.0 |
 | **v0.9.5**（11-20 定，§15.16） | Planner 放权：读类 MCP 工具、`gh` 只读命令、读范围放宽到用户目录（D129）；不再每天换班，交接写不成不换班（D130）；提示词 v24 | S–M | 无 |
+| **v0.9.6**（11-20 定，§15.17） | 例行关注：动作块 `routine` 建 / 暂停 cron 任务（D131）；工作线台账：`planner/fronts.json`、动作块 `front`、快照加"工作线"与"例行任务"（D132）；提示词 v25 | M | v0.9.5 |
 | ~~原 v0.9.0 余项~~ | ~~`task:` 独立配额~~（**D117 改为有条件**：派活挤占你自己会话的 `max_procs` 名额时再做）；~~网关按会话建 worktree（#3449 完整版）~~（D117：派出会话已按 dev-workflow 自建 worktree、收起时网关清理，先用提示词补别的仓库） | — | — |
 | ~~v0.9.x（P3 判断）~~ | ~~检查点由网关识别 + verifier、检查记录（kind `check`）、`knowledge_propose`~~（**D117 推迟**，见 §16.1；`knowledge_propose` 随 P4 再议） | — | — |
 | v0.10（P3 幕僚） | 工作区幕僚（D60、§6.3）：按需派出的只读会话；`project:{name}:planner` 改造为幕僚、`project.yaml` 的 planner_prompt 导入为章程；按工作区加载（§4.1） | L | v0.9.0 |
@@ -2243,6 +2275,8 @@ D67 状态三层的第三层，只改前端：
 | D128 | 11-19 | 承诺到点叫醒 Planner：写了 `close_when`（不是纯提醒类）的承诺到期时，网关照旧推送"到点提醒"并在对话里写一行，同时以来源 `reminder` 叫醒 Planner，块 `<naozhi-reminder>` 带承诺的 `id`、`text`、`due`、`close_when`，说明这是到期叫醒、按承诺去做或向你说明；纯提醒类保持只提醒。Planner 关着、已停用或正在启动（`ErrOff` / `ErrStopped` / `ErrNotReady`）时记日志、在 `promises.json` 记下欠一次叫醒（`wake_owed`），之后每分钟的检查补叫，接住为止，承诺关闭即作废；补叫不再提醒你。叫醒那一轮按 §15.6 的来源规则：不是外部内容，能 `dispatch` / `status`；没有你的原话，`relay` 等只限你触发的回合的动作照旧拒绝。提示词版本 23：说明 `<naozhi-reminder>`，并要求答应"到点去做某事"时写 `close_when`（§3.6、§15.4、§15.6） | 11-19 Planner 登记"16:00 派出 CPU 容量快照补拍"（写了 `close_when`），16:00:56 网关只推了通知、写了一行 Note、记了 `promise_due`，Note 不进 CLI，Planner 到 16:42 你发消息才跑下一轮，活没派出；`SourceReminder` 早已定义但没有地方用它叫醒 |
 | D129 | 11-20 | Planner 放权（owner 11-20 定；修订 D82 的工具条、D68 的"Planner 不读污染原文"、D107 的一次性读取者）：`planner:main` 自己当场查。① 工具在 Read / Grep / Glob / ListAgents / SendMessage 之外加 `cli.mcp_config` 里它认识的服务器的读类工具（邮件与日历、Slack、Asana 用巡检的读工具表，网页搜索与抓取、内网页面用读取者的表，另加 `calendar_availability`、`get_canvas_content`、Asana 的项目与搜索、`builder-mcp` 的 `InternalSearch` / `InternalCodeSearch` / `TicketingReadActions` / `SearchAcronymCentral`），MCP 配置裁成只含这些服务器的一份（`session-settings/planner-mcp.json`，照旧 `--strict-mcp-config`），写类工具按名字 deny；`Bash` 只放行 `gh` 的只读子命令（`pr view / list / checks / diff / status`、`issue view / list`、`run list / view`、`release list / view`、`repo view`、`search`；不含 `gh api`），仍是 `dontAsk`，且只在用 naozhi 自有 settings 时给；`dontAsk` 会话不再继承基础 settings 的 `permissions.allow`（它自己的 allow 就是全部授权）。② 读范围放宽到整个用户目录（`Read(~/**)`），凭证路径照旧拒绝并补上 `~/.midway`、`~/Library`、`~/.config`、`~/.ada`、shell 历史与启动文件。③ "含外部内容"的会话事件日志不再进 deny 规则，标记只留在摘要上。④ 提示词 v24：能查的这一轮直接查了回答，不说"我读不了"；改文件、跑命令、对外发送的事照旧派会话或转达；`lookup` 不再写进提示词（网关仍认这个块）。巡检、会前简报触发的回合照旧只执行 `notify` / `promise` / `ask`（§15.6）。`cli.mcp_config` 的内容变了（密钥轮换）或工作区登记变了，空闲的 Planner 按 `--resume` 重启取新的 | 11-04 至 11-20 本机数据（§15.16）：你发给 Planner 的消息从 76 条/天降到 1–5 条/天；Slack 未读问了 3 次都答"我读不了，已派会话"，11-20 的 IMR 查询你对 Planner 说 1 句、在派出的会话里追问了 11 句；进展汇报里常有"我没核实"。风险：Planner 会读到外部内容，同时握有派活与转达的权力，与你自己开的会话同一水平；不可逆的事派出会话仍会停下来问你（D98） |
 | D130 | 11-20 | 不再每天换班（owner 11-20 定；修订 §15.1 "每天早报时换一个新会话"与 D106）：`planner:main` 的对话跨天保留，只有上下文超过 25 万 token 且空闲 5 分钟（D106），或升级换了提示词版本时才写交接、换新会话；早报照旧每天 08:30，与换班无关。交接写不成时不换班、不存这份"摘要"：模型调不通（CLI 把 API 报错当正文返回）就每 10 分钟重试、不限次数；回合出错、超时或空回复每次多等 10 分钟，连续第 3 次才不带摘要换班；超出模型上下文的立即换 | 每班上下文峰值多在 5–16 万（§15.14 数据），按天换班只带来失忆："naozhi 还有什么要开发"同一周问了 7 次、每次口径不同；11-09、11-19、11-20 三次换班时凭证过期，`API Error: Could not load AWS credentials` 被存成交接摘要，新会话空手接班 |
+| D131 | 11-20 | 例行关注（owner 11-20 同意继续）：动作块 `routine`，`{"type":"routine","title","workspace","schedule","prompt"}` 建一个 cron 任务（每次全新会话、工作区目录、`created_by: planner`），与"自动化"里建的是同一种，你在那里看、改、删；`{"type":"routine","id","off"}` 暂停或恢复已有的。只在你发起的回合有效（与 `remember` 同类），外部内容触发的回合拒绝。快照新增"例行任务"一节（全部 cron 任务：id、标题、定时、上次结果第一行 / 已暂停 / 上次失败，最多 8 行）。提示词 v25：同一类问题问到第三次，回答之后用 `ask` 提议做成例行任务；prompt 要让会话把每次结论记在工作区的文件里、没有变化时整条回复只写"没有变化"（早报按整条结果是否相同判断"有变化"，`cron.LatestResultChange`） | 11-12 至 11-20 你至少 7 次手工问"内网 Anthropic / Grok 新模型动态"，Slack 未读 3 次、CUR 更新多次；cron 与早报的"例行任务有变化"都已有，缺的只是 Planner 建任务的手 |
+| D132 | 11-20 | 工作线台账（owner 11-20 同意继续；落实 D14 的 Now / Next，但由 Planner 维护、你口头改）：`planner/fronts.json`，每条线有固定 id、名称、现状、下一步、等谁、干过活的会话（最多 8 个）、你做的决定（最多 20 条）；动作块 `front` 逐字段更新（不带的字段不动，空串清掉，`close` 结束，结束后再写会重新打开；进行中最多 30 条，结束的留 30 天）。你发起的回合与回执回合（会话汇报推进了某条线）都能写，巡检、会前简报等外部内容触发的回合拒绝。进行中的工作线进每次快照（"工作线"一节，最多 10 行），快照上限从 2,000 提到 3,200 字。"接着做某件事"：提示词要求 Planner 从那条线的会话里找到最近的一个，给出会话卡片请你点开接着聊，只用两三行说上次停在哪，不二手转述 | "naozhi 还有什么要开发"同一周问了 7 次、每次口径不同；JD TGW 迁移 4 天开了约 6 个会话，每个都要重新交代背景；换班（现在只在超大小或升版时发生）后只有 2,000 字交接 |
 
 ## 附录 A. auto mode 实测（2026-10-16）
 

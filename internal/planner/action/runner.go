@@ -25,6 +25,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/brief"
 	"github.com/naozhi/naozhi/internal/planner/custody"
 	"github.com/naozhi/naozhi/internal/planner/digest"
+	"github.com/naozhi/naozhi/internal/planner/front"
 	"github.com/naozhi/naozhi/internal/planner/promise"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/planner/task"
@@ -198,6 +199,12 @@ type Config struct {
 	// Park moves an item the user put down into the 搁置区
 	// (agent.Agent.Park). nil refuses park blocks.
 	Park func(text, source string) error
+	// Routines makes and switches the standing tasks (§15.17, D131). nil
+	// refuses routine blocks.
+	Routines Routines
+	// Front writes one line of work into the ledger (front.Store.Apply,
+	// §15.17, D132). nil refuses front blocks.
+	Front func(front.Update) (front.Front, error)
 	// Lookup starts a web lookup of q (planner/reader.Reader.Lookup): its
 	// answer, or the cache's of the same question today, reaches the
 	// Planner as a turn of its own. nil refuses lookup blocks.
@@ -1224,7 +1231,7 @@ func (r *Runner) handle(rep reply) {
 		reopened := false
 		switch {
 		case rep.outside != "" && (b.Dispatch != nil || b.Status != nil || b.Custody != nil || b.Relay != nil || b.Remember != nil || b.Lookup != nil || b.Park != nil ||
-			b.Halt != nil || b.Cancel != nil):
+			b.Halt != nil || b.Cancel != nil || b.Routine != nil || b.Front != nil):
 			un.add(i, b, r.refuseOutside(b, rep.outside))
 			un.outside = true
 		case len(rep.words) == 0 && needsUser(b):
@@ -1242,6 +1249,10 @@ func (r *Runner) handle(rep reply) {
 			err = r.lookup(*b.Lookup)
 		case b.Park != nil:
 			err = r.park(*b.Park)
+		case b.Routine != nil:
+			err = r.routine(*b.Routine)
+		case b.Front != nil:
+			err = r.front(*b.Front)
 		case b.Promise != nil:
 			err = r.promise(*b.Promise, dispatched)
 		case b.Ask != nil:
@@ -1563,6 +1574,14 @@ func (r *Runner) refuseOutside(b Block, by string) string {
 		r.note(by + "触发的回合不能叫停会话：「" + r.sessionName(h.Task) + "」没有停")
 		return "这一轮不能叫停，halt 只在用户让你停的那一轮有效，没有停"
 	}
+	if t := b.Routine; t != nil {
+		r.note(by + "触发的回合不能改例行任务：「" + cmp.Or(t.Title, t.ID) + "」没有执行")
+		return "这一轮不能加或改例行任务，没有执行"
+	}
+	if f := b.Front; f != nil {
+		r.note(by + "触发的回合不能改工作线台账：「" + cmp.Or(f.Name, f.ID) + "」没有记")
+		return "这一轮读的是外部内容，不能改工作线台账，没有记"
+	}
 	if c := b.Cancel; c != nil {
 		r.note(by + "触发的回合不能停止任务：「" + r.taskName(c.Task) + "」没有停止")
 		return "这一轮不能停止任务，cancel 只在用户让你停的那一轮有效，没有停止"
@@ -1646,7 +1665,7 @@ func needsUser(b Block) bool {
 	// Planner to stop looking at one is not. So is stopping one (D118): the
 	// Planner wakes only once a turn ended, too late to halt what it sees.
 	return b.Relay != nil || b.Remember != nil || b.Park != nil || b.Custody != nil && b.Custody.Watch != nil ||
-		b.Halt != nil || b.Cancel != nil
+		b.Halt != nil || b.Cancel != nil || b.Routine != nil
 }
 
 // refuseNotUser answers such a block from a turn the user did not start,
@@ -1663,6 +1682,10 @@ func (r *Runner) refuseNotUser(b Block) string {
 	if p := b.Park; p != nil {
 		r.note("这一轮不是用户发起的，不能搁置：「" + textutil.TruncateRunes(p.Text, 60) + "」没有移进搁置区")
 		return "这一轮不是用户发起的，park 只在用户说放下的那一轮有效，没有搁置"
+	}
+	if t := b.Routine; t != nil {
+		r.note("这一轮不是用户发起的，不能加或改例行任务：「" + cmp.Or(t.Title, t.ID) + "」没有执行")
+		return "这一轮不是用户发起的，routine 只在用户同意的那一轮有效，没有执行；要做就先问用户"
 	}
 	if h := b.Halt; h != nil {
 		r.note("这一轮不是用户发起的，不能叫停：「" + r.sessionName(h.Task) + "」没有停")
@@ -2218,6 +2241,51 @@ func (r *Runner) remember(m Remember) error {
 	}
 	if _, err := r.cfg.Remember(m.Workspace, m.Name, m.Text); err != nil {
 		return fmt.Errorf("「%s」没有记下：%w", m.Name, err)
+	}
+	return nil
+}
+
+// Routines is the standing tasks as a routine block changes them (the cron
+// scheduler behind wireup.PlannerRoutines).
+type Routines interface {
+	// Add makes one: prompt run in dir on schedule, each run a fresh
+	// session.
+	Add(title, dir, schedule, prompt string) error
+	// Switch pauses (off) or resumes the one id names, returning its title.
+	Switch(id string, off bool) (title string, err error)
+}
+
+// routine makes a standing task the user agreed to, or switches one off or
+// on (§15.17, D131). The card in the conversation says so; only a failure
+// gets a line and a receipt.
+func (r *Runner) routine(t Routine) error {
+	if r.cfg.Routines == nil {
+		return errors.New("这台网关没有开定时任务，例行任务没有加")
+	}
+	if t.ID != "" {
+		if _, err := r.cfg.Routines.Switch(t.ID, *t.Off); err != nil {
+			return fmt.Errorf("例行任务 %s 没有改：%w", t.ID, err)
+		}
+		return nil
+	}
+	_, dir, err := r.resolve(t.Workspace)
+	if err != nil {
+		return fmt.Errorf("例行任务「%s」没有加：%w", t.Title, err)
+	}
+	if err := r.cfg.Routines.Add(t.Title, dir, t.Schedule, t.Prompt); err != nil {
+		return fmt.Errorf("例行任务「%s」没有加：%w", t.Title, err)
+	}
+	return nil
+}
+
+// front writes a line of work into the ledger (§15.17, D132). The card
+// says what changed; only a failure gets a line and a receipt.
+func (r *Runner) front(f Front) error {
+	if r.cfg.Front == nil {
+		return errors.New("这台网关没有工作线台账，没有记")
+	}
+	if _, err := r.cfg.Front(f.Update()); err != nil {
+		return fmt.Errorf("工作线「%s」没有记：%w", cmp.Or(f.Name, f.ID), err)
 	}
 	return nil
 }
