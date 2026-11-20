@@ -8,13 +8,12 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/datadir"
-	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
 )
 
 // TestReadRulesSymlinkedWorkspace: a workspace a session reached through a
 // symlink (/tmp → /private/tmp on macOS) is readable by both spellings, and
-// a tainted event log and the data root's secrets inside it are denied by
+// the data root's secrets inside it are denied by
 // every spelling the allow rules open, the state root's own one included.
 // The rules come out the same on every build, so a refresh restarts nothing.
 func TestReadRulesSymlinkedWorkspace(t *testing.T) {
@@ -41,7 +40,6 @@ func TestReadRulesSymlinkedWorkspace(t *testing.T) {
 	}
 
 	now := time.Now()
-	key := "dashboard:direct:u:general"
 	a := New(Config{
 		Enabled:    true,
 		Layout:     datadir.FromRoot(filepath.Join(link, "state")),
@@ -49,20 +47,14 @@ func TestReadRulesSymlinkedWorkspace(t *testing.T) {
 		Sessions:   &fakeSessions{},
 		Now:        func() time.Time { return now },
 		Workspaces: reg,
-		Tainted:    func() []string { return []string{key} },
 	})
 	allow, deny := a.readRules()
 	for _, dir := range []string{real, link, link2} {
 		if r := absRule("Read", filepath.Join(dir, "**")); !slices.Contains(allow, r) {
 			t.Errorf("allow lacks %s: %q", r, allow)
 		}
-		for _, r := range []string{
-			absRule("Read", filepath.Join(dir, "state", "events", persist.KeyHash(key)+"*")),
-			absRule("Read", filepath.Join(dir, "state", "*.yaml")),
-		} {
-			if !slices.Contains(deny, r) {
-				t.Errorf("deny lacks %s: %q", r, deny)
-			}
+		if r := absRule("Read", filepath.Join(dir, "state", "*.yaml")); !slices.Contains(deny, r) {
+			t.Errorf("deny lacks %s: %q", r, deny)
 		}
 	}
 	for range 5 {

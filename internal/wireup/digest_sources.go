@@ -273,14 +273,15 @@ func (s DigestSink) RecordTurn(key, dir string, outcome activity.TurnOutcome) {
 
 // Taint is the minimal taint mark (§7.4, §15.12 ⑨): at a turn's end, a
 // session whose events show a web search or fetch, or a mail read, gets the
-// mark in its sidecar; the Planner's deny rules then cover its event log.
+// mark in its sidecar, which heads its digest 含外部内容. It marks what the
+// Planner reads as data; the event log itself is no longer denied (D129).
 type Taint struct {
 	Router   *session.Router
 	Sidecars *sidecar.Store
 }
 
 // Check marks key when its events in view called a tool that brings in
-// outside content. Not the Planner's own (it has no such tool) nor a
+// outside content. Not the Planner's own (it has no digest to head) nor a
 // one-shot session's (no event log, no sidecar).
 func (t *Taint) Check(key string) {
 	if t == nil || t.Router == nil || t.Sidecars == nil || sessionkey.IsPlannerNSKey(key) || sessionkey.IsOneShotKey(key) {

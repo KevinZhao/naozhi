@@ -134,19 +134,30 @@ func newTestAgent(t *testing.T, sess *fakeSessions, now *time.Time) (*Agent, dat
 	t.Helper()
 	lay := datadir.FromRoot(t.TempDir())
 	a := New(Config{
-		Enabled:  true,
-		Layout:   lay,
-		Home:     t.TempDir(),
-		Sessions: sess,
-		Now:      func() time.Time { return *now },
+		Enabled:     true,
+		Layout:      lay,
+		Home:        t.TempDir(),
+		Sessions:    sess,
+		OwnSettings: true,
+		Now:         func() time.Time { return *now },
 	})
+	// A Planner alive at the start is one this agent started.
+	a.state.Scope = a.cur.sum()
 	return a, lay
 }
 
+// oldPrompt makes the current conversation one started on the previous
+// prompt version: the one thing, besides its size, that changes the shift.
+func oldPrompt(a *Agent) {
+	a.mu.Lock()
+	a.state.Prompt = PromptVersion - 1
+	a.mu.Unlock()
+}
+
 // TestLaunchArgv renders planner:main's spawn options through the spawn's
-// own argv builder: the five tools, dontAsk, no MCP servers, the instance's
-// --name,
-// the model and effort, the system prompt and the per-session settings.
+// own argv builder: the built-in tools, dontAsk, no MCP servers without a
+// cli.mcp_config, the instance's --name, the model and effort, the system
+// prompt and the per-session settings.
 func TestLaunchArgv(t *testing.T) {
 	now := time.Now()
 	a, lay := newTestAgent(t, &fakeSessions{}, &now)
@@ -159,7 +170,7 @@ func TestLaunchArgv(t *testing.T) {
 	for _, want := range []string{
 		"--settings /state/session-settings/p.json",
 		"--permission-mode dontAsk",
-		"--tools Read,Grep,Glob,ListAgents,SendMessage",
+		"--tools Read,Grep,Glob,ListAgents,SendMessage,Bash",
 		"--strict-mcp-config",
 		"--name " + NameFor(lay.PlannerRoot()),
 		"--model claude-opus-5-5[1m]",
@@ -183,8 +194,16 @@ func TestLaunchArgv(t *testing.T) {
 			t.Errorf("deny lacks %s: %v", rule, o.PermissionsDeny)
 		}
 	}
-	if !slices.Contains(o.PermissionsAllow, absRule("Read", filepath.Join(lay.PlannerRoot(), "**"))) {
-		t.Errorf("allow lacks the state root: %v", o.PermissionsAllow)
+	for _, rule := range []string{absRule("Read", filepath.Join(lay.PlannerRoot(), "**")), "Read(~/**)", "Bash(gh pr view:*)", "Bash(gh run list:*)"} {
+		if !slices.Contains(o.PermissionsAllow, rule) {
+			t.Errorf("allow lacks %s: %v", rule, o.PermissionsAllow)
+		}
+	}
+	// gh api writes; no rule may open Bash whole.
+	for _, rule := range o.PermissionsAllow {
+		if rule == "Bash" || strings.HasPrefix(rule, "Bash(gh api") || strings.HasPrefix(rule, "Bash(*") {
+			t.Errorf("allow has %s", rule)
+		}
 	}
 }
 
@@ -207,6 +226,7 @@ func TestName(t *testing.T) {
 	a.reconcile(context.Background()) // spawn
 	sess.st.SessionID = "s1"
 	now = time.Date(2026, 11, 4, 8, 30, 0, 0, loc)
+	oldPrompt(a)
 	a.reconcile(context.Background()) // shift change
 	if len(sess.names) != 2 || sess.names[0] != want || sess.names[1] != want || a.Name() != want {
 		t.Errorf("names = %q, Name() = %s, want %s", sess.names, a.Name(), want)
@@ -223,8 +243,8 @@ func TestAllowRulesWorkspaces(t *testing.T) {
 			t.Errorf("allow lacks %s: %v", want, got)
 		}
 	}
-	if n := len(got); n != 6 {
-		t.Errorf("len = %d, want 6 (duplicate workspace collapsed): %v", n, got)
+	if n := len(got); n != 5 {
+		t.Errorf("len = %d, want 5 (duplicate workspace collapsed): %v", n, got)
 	}
 }
 
@@ -264,10 +284,10 @@ func TestStatusRunning(t *testing.T) {
 	}
 }
 
-// TestShiftChange drives reconcile on a fake clock: no change before 08:30,
-// one at 08:30 that stores the outgoing session's summary and hands it to
-// the new one, none again the same day.
-func TestShiftChange(t *testing.T) {
+// TestShiftKept: the conversation is kept from day to day (D130). Nothing
+// asks for a summary and nothing is restarted as the days pass; the shift
+// still names the day the conversation started.
+func TestShiftKept(t *testing.T) {
 	loc := time.FixedZone("CST", 8*3600)
 	for _, tc := range []struct {
 		at   string
@@ -286,42 +306,122 @@ func TestShiftChange(t *testing.T) {
 
 	now := time.Date(2026, 11, 3, 20, 0, 0, 0, loc)
 	sess := &fakeSessions{st: SessionState{Exists: true, Alive: true, SessionID: "s1"}}
-	a, lay := newTestAgent(t, sess, &now)
+	a, _ := newTestAgent(t, sess, &now)
 	turns := &fakeTurns{reply: "## 进行中\n无"}
 	a.turns = turns
 	ctx := context.Background()
 
-	a.reconcile(ctx) // first run: today's shift is the current conversation
-	steps := []struct {
-		at        time.Time
-		running   bool
-		recreated int
-	}{
-		{time.Date(2026, 11, 4, 8, 29, 0, 0, loc), false, 0},
-		{time.Date(2026, 11, 4, 8, 30, 0, 0, loc), true, 0}, // waits out a running turn
-		{time.Date(2026, 11, 4, 8, 31, 0, 0, loc), false, 1},
-		{time.Date(2026, 11, 4, 9, 30, 0, 0, loc), false, 1},
-	}
-	for _, s := range steps {
-		now = s.at
-		sess.mu.Lock()
-		sess.st.Running = s.running
-		sess.mu.Unlock()
+	a.reconcile(ctx) // first run: the current conversation's shift is marked
+	for _, at := range []time.Time{
+		time.Date(2026, 11, 4, 8, 29, 0, 0, loc),
+		time.Date(2026, 11, 4, 8, 31, 0, 0, loc),
+		time.Date(2026, 11, 7, 9, 30, 0, 0, loc),
+	} {
+		now = at
 		a.reconcile(ctx)
-		if sess.recreated != s.recreated {
-			t.Fatalf("at %s: recreated %d, want %d", s.at.Format(time.Kitchen), sess.recreated, s.recreated)
+		if sess.recreated != 0 || len(turns.sent) != 0 {
+			t.Fatalf("at %s: recreated %d, turns %q", at.Format(time.DateTime), sess.recreated, turns.sent)
 		}
 	}
-	saved, err := os.ReadFile(filepath.Join(lay.PlannerHandoffRoot(), "2026-11-04.md"))
-	if err != nil || string(saved) != turns.reply {
-		t.Fatalf("handoff = %q, %v", saved, err)
+	if st := a.Status(); st.Shift != "2026-11-03" || !st.Alive {
+		t.Errorf("status = %+v", st)
 	}
-	if len(turns.sent) != 2 || turns.sent[0] != handoffPrompt || !strings.Contains(turns.sent[1], turns.reply) {
-		t.Fatalf("turns = %q", turns.sent)
+}
+
+// TestHandoffFailureKeepsConversation: a summary the outgoing session could
+// not write is not stored and does not end the conversation; the change is
+// tried again later. The CLI answers a model call that failed with the API
+// error as the reply's text (a credential expired overnight): that waits
+// however long it takes. A turn that failed or said nothing gives up at the
+// third in a row, and a conversation past the model's context at once.
+func TestHandoffFailureKeepsConversation(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+	const apiErr = "API Error: Could not load AWS credentials · Could not load credentials from any providers."
+	start := func(t *testing.T, reply string, err error) (*Agent, *fakeSessions, *fakeTurns, *time.Time, datadir.Layout) {
+		now := time.Date(2026, 11, 19, 8, 30, 0, 0, loc)
+		sess := &fakeSessions{st: SessionState{Exists: true, Alive: true, SessionID: "s1"}}
+		a, lay := newTestAgent(t, sess, &now)
+		turns := &fakeTurns{reply: reply, turnErr: err}
+		a.turns = turns
+		a.reconcile(context.Background())
+		oldPrompt(a)
+		return a, sess, turns, &now, lay
 	}
-	if st := a.Status(); st.Shift != "2026-11-04" {
-		t.Errorf("shift = %s", st.Shift)
+	stored := func(lay datadir.Layout) int {
+		files, _ := os.ReadDir(lay.PlannerHandoffRoot())
+		return len(files)
 	}
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name  string
+		reply string
+		err   error
+	}{
+		{"api error as the reply", apiErr, nil},
+		{"turn error", "", errors.New("turn failed")},
+		{"empty reply", "  ", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, sess, turns, now, lay := start(t, tc.reply, tc.err)
+			a.reconcile(ctx) // first failure
+			if sess.recreated != 0 || len(turns.sent) != 1 || !a.Status().Alive || stored(lay) != 0 {
+				t.Fatalf("after the first failure: recreated %d, turns %d, stored %d", sess.recreated, len(turns.sent), stored(lay))
+			}
+			*now = now.Add(handoffRetry - time.Minute)
+			a.reconcile(ctx)
+			if len(turns.sent) != 1 {
+				t.Fatalf("asked again inside the retry wait: %d turns", len(turns.sent))
+			}
+
+			// The model answers again: the next try's summary is the one stored.
+			*now = now.Add(time.Minute)
+			turns.reply, turns.turnErr = "## 进行中\n统计任务", nil
+			a.reconcile(ctx)
+			name := fmt.Sprintf("%s-v%d.md", shiftDay(*now), PromptVersion)
+			saved, err := os.ReadFile(filepath.Join(lay.PlannerHandoffRoot(), name))
+			if sess.recreated != 1 || err != nil || string(saved) != turns.reply {
+				t.Fatalf("after the retry: recreated %d, handoff %q, %v", sess.recreated, saved, err)
+			}
+			if last := turns.sent[len(turns.sent)-1]; !strings.Contains(last, "统计任务") {
+				t.Fatalf("handed over: %q", last)
+			}
+		})
+	}
+
+	t.Run("unreachable all night", func(t *testing.T) {
+		a, sess, turns, now, lay := start(t, apiErr, nil)
+		for i := 1; i <= 3*handoffTries; i++ {
+			a.reconcile(ctx)
+			if sess.recreated != 0 || len(turns.sent) != i || stored(lay) != 0 {
+				t.Fatalf("try %d: recreated %d, turns %d, stored %d", i, sess.recreated, len(turns.sent), stored(lay))
+			}
+			*now = now.Add(handoffRetry)
+		}
+	})
+
+	t.Run("failing turns give up", func(t *testing.T) {
+		a, sess, turns, now, lay := start(t, "", errors.New("turn failed"))
+		for i := 1; i <= handoffTries; i++ {
+			a.reconcile(ctx)
+			if want := i / handoffTries; sess.recreated != want || len(turns.sent) != i {
+				t.Fatalf("try %d: recreated %d (want %d), turns %d", i, sess.recreated, want, len(turns.sent))
+			}
+			*now = now.Add(handoffRetry * time.Duration(i))
+		}
+		a.reconcile(ctx)
+		if sess.recreated != 1 || len(turns.sent) != handoffTries || stored(lay) != 0 {
+			t.Fatalf("after the change: recreated %d, turns %d, stored %d", sess.recreated, len(turns.sent), stored(lay))
+		}
+	})
+
+	t.Run("past the context limit", func(t *testing.T) {
+		a, sess, turns, _, lay := start(t, "API Error: 400 prompt is too long: 1000001 tokens > 1000000 maximum", nil)
+		a.reconcile(ctx)
+		if sess.recreated != 1 || len(turns.sent) != 1 || stored(lay) != 0 {
+			t.Fatalf("recreated %d, turns %d, stored %d", sess.recreated, len(turns.sent), stored(lay))
+		}
+	})
 }
 
 // TestShiftChangeRestartFails: a failed restart leaves the Planner gone and
@@ -339,6 +439,7 @@ func TestShiftChangeRestartFails(t *testing.T) {
 
 	sess.recreateErr = errors.New("spawn failed")
 	now = time.Date(2026, 11, 4, 8, 30, 0, 0, loc)
+	oldPrompt(a)
 	a.reconcile(ctx)
 	sess.recreateErr = nil
 	if st := a.Status(); st.Alive || st.Shift != "2026-11-03" || len(turns.sent) != 1 {
@@ -929,6 +1030,7 @@ func TestSnapshotUnchanged(t *testing.T) {
 		t.Fatalf("unnamed conversation: %q", got)
 	}
 	now = at("2026-11-04 08:30")
+	oldPrompt(a)
 	a.reconcile(context.Background())
 	if sess.recreated != 1 || sess.st.SessionID != "" {
 		t.Fatalf("recreated %d, state %+v", sess.recreated, sess.st)

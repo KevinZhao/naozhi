@@ -240,6 +240,13 @@ func (l Layout) PlannerGitHubRoot() string { return l.Join("planner", "github") 
 // read, beside the scout's (<root>/session-settings/reader-mcp.json).
 func (l Layout) ReaderMCPConfigPath() string { return l.Join("session-settings", "reader-mcp.json") }
 
+// PlannerMCPConfigPath is planner:main's --mcp-config, cli.mcp_config cut
+// down to the servers whose read tools the Planner has, beside the scout's
+// (<root>/session-settings/planner-mcp.json).
+func (l Layout) PlannerMCPConfigPath() string {
+	return l.Join("session-settings", "planner-mcp.json")
+}
+
 // TaskMCPConfigPath is the --mcp-config of a dispatched session whose
 // dispatch allowed write tools (mcp_tools, docs/rfc/planner.md D98):
 // cli.mcp_config with those servers' write switch on, beside the scout's, named by the key's hash

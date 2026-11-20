@@ -219,6 +219,54 @@ func TestSessionSettingsFile_WrittenOnSpawn(t *testing.T) {
 	}
 }
 
+// A restricted session's allow rules are its whole grant: the base file's
+// own allow rules (what the owner lets their sessions run unasked) do not
+// ride into a dontAsk session's settings, while its deny rules and every
+// other key do; a session in another mode keeps them.
+func TestSessionSettingsFile_DontAskDropsBaseAllow(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "naozhi-settings.json")
+	if err := os.WriteFile(base, []byte(`{"model":"opus","permissions":{"allow":["Bash(git *)","Bash(aws *)"],"deny":["Bash(rm -rf /)"]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	read := func(ov shim.SpawnOverlay) (allow, deny []string, model string) {
+		t.Helper()
+		path := filepath.Join(dir, "session-settings", "s.json")
+		if err := writeSessionSettings(path, base, ov, ""); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc struct {
+			Model       string `json:"model"`
+			Permissions struct {
+				Deny  []string `json:"deny"`
+				Allow []string `json:"allow"`
+			} `json:"permissions"`
+		}
+		if err := json.Unmarshal(data, &doc); err != nil {
+			t.Fatal(err)
+		}
+		return doc.Permissions.Allow, doc.Permissions.Deny, doc.Model
+	}
+	allow, deny, model := read(shim.SpawnOverlay{PermissionMode: "dontAsk",
+		PermissionsAllow: []string{"Bash(gh pr view:*)"}, PermissionsDeny: []string{"Read(~/.aws/**)"}})
+	if !slices.Equal(allow, []string{"Bash(gh pr view:*)"}) {
+		t.Errorf("dontAsk allow = %q, want the session's own rule alone", allow)
+	}
+	if !slices.Equal(deny, []string{"Bash(rm -rf /)", "Read(~/.aws/**)"}) || model != "opus" {
+		t.Errorf("dontAsk deny = %q, model %q", deny, model)
+	}
+	if allow, _, _ := read(shim.SpawnOverlay{PermissionMode: "dontAsk", CrossSessionInbound: "hold"}); len(allow) != 0 {
+		t.Errorf("dontAsk with no rule of its own: allow = %q", allow)
+	}
+	if allow, _, _ := read(shim.SpawnOverlay{PermissionsAllow: []string{"Read(//srv/**)"}}); !slices.Equal(allow, []string{"Bash(git *)", "Bash(aws *)", "Read(//srv/**)"}) {
+		t.Errorf("unrestricted session: allow = %q", allow)
+	}
+}
+
 // Ultracode alone puts a session on its own settings file with the CLI's
 // ultracode key on: the CLI ignores the keyword in a stream-json message
 // that carries no human origin, so this is how a session gets the mode.

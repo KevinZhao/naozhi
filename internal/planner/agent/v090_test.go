@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
@@ -163,9 +164,10 @@ func TestShiftChangeParks(t *testing.T) {
 		sess.mu.Lock()
 		sess.st.SessionID = "s1" // the new conversation said something
 		sess.mu.Unlock()
+		oldPrompt(a)
 		a.reconcile(ctx)
 	}
-	saved, err := os.ReadFile(filepath.Join(lay.PlannerHandoffRoot(), "2026-11-18.md"))
+	saved, err := os.ReadFile(filepath.Join(lay.PlannerHandoffRoot(), fmt.Sprintf("2026-11-18-v%d.md", PromptVersion)))
 	if err != nil || string(saved) != "## 等你定\n- 搁置 1 条，见 parked.md" {
 		t.Fatalf("11-18 handoff = %q, %v", saved, err)
 	}
@@ -313,25 +315,37 @@ func TestReadScopeGitHub(t *testing.T) {
 	}
 }
 
-// TestReadScopeClaudeProjects pins why the Planner's Grep over
-// ~/.claude/projects was refused on 11-15 (§15.14 ⑤): only the memory
-// directories under it are in scope, not the tree itself, whose session
-// transcripts carry the pages the taint deny rules keep out of the
-// Planner's context. A search must name a memory directory.
-func TestReadScopeClaudeProjects(t *testing.T) {
+// TestReadScopeHome (D129): the user's home is in the Planner's read scope,
+// a project not registered as a workspace and the CLI's transcripts
+// included, so "I cannot read that" is left for the credentials: the paths
+// a login keeps its secrets at are denied.
+func TestReadScopeHome(t *testing.T) {
 	now := time.Now()
 	a, _ := newTestAgent(t, &fakeSessions{}, &now)
-	allow, home := a.Opts().PermissionsAllow, a.cfg.Home
-	mem := filepath.Join(home, ".claude", "projects", "-Users-u-w-x", "memory", "MEMORY.md")
-	if !covered(allow, home, mem) {
-		t.Errorf("memory index out of scope: %q", allow)
+	o, home := a.Opts(), a.cfg.Home
+	for _, p := range []string{
+		filepath.Join(home, ".claude", "projects", "-Users-u-w-x", "memory", "MEMORY.md"),
+		filepath.Join(home, ".claude", "projects", "-Users-u-w-x", "0f1e.jsonl"),
+		filepath.Join(home, "workspace", "cpu-capacity", "2026-11-12", "README.md"),
+	} {
+		if !covered(o.PermissionsAllow, home, p) {
+			t.Errorf("%s out of the read scope: %q", p, o.PermissionsAllow)
+		}
+		if covered(o.PermissionsDeny, home, p) {
+			t.Errorf("%s denied", p)
+		}
 	}
 	for _, p := range []string{
-		filepath.Join(home, ".claude", "projects"),
-		filepath.Join(home, ".claude", "projects", "-Users-u-w-x", "0f1e.jsonl"),
+		filepath.Join(home, ".aws", "credentials"),
+		filepath.Join(home, ".midway", "cookie"),
+		filepath.Join(home, "Library", "Keychains", "login.keychain-db"),
+		filepath.Join(home, ".config", "gh", "hosts.yml"),
+		filepath.Join(home, ".zsh_history"),
+		filepath.Join(home, ".naozhi", "mcp.json"),
+		filepath.Join(home, "workspace", "x", ".env"),
 	} {
-		if covered(allow, home, p) {
-			t.Errorf("%s in the read scope: transcripts would bypass the taint deny rules", p)
+		if !covered(o.PermissionsDeny, home, p) {
+			t.Errorf("%s not denied: the whole home is readable", p)
 		}
 	}
 }

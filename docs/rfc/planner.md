@@ -356,7 +356,7 @@ runtelemetry 扩展普通会话类别（`SubsystemSession` 已预留但未发出
 ### 4.1 模型、工具与单例
 
 - **模型**：owner 排序的偏好表，取第一个当前凭证能调通的（`ccprobe` 实跑验证）。当前 owner 判断 opus 5.5 优于 fable 5.1，偏好表为 `[claude-opus-5-5[1m], …]`。**effort 自适应**（D63）：路由、回答、汇报用低档，检查点评审、复盘、拿不准的决策用高档（Anthropic Projects 的协调者默认 low effort）。弱 planner 的损失远大于弱执行者（PEAR，EACL 2026 Findings；arXiv 2603.26458）。
-- **工具**（D82）：内置工具只开 `Read` / `Grep` / `Glob`，权限模式 `dontAsk`（没预先允许的一律拒绝）；Read 不允许读 `~/.aws`、`~/.ssh`、`~/.naozhi/*.yaml` 等凭证路径；不开 Bash、不开网页搜索（v0.2.0 的 Planner 没有任何外发通道）；`--strict-mcp-config` 不挂 MCP；与会话通信用 CC 原生的 `ListAgents` / `SendMessage`，向网关请求动作用动作块（§6.2）。只读工具只用于核实具体说法，不用于"读一眼就判定已修好"。
+- **工具**（D82）：内置工具只开 `Read` / `Grep` / `Glob`，权限模式 `dontAsk`（没预先允许的一律拒绝）；Read 不允许读 `~/.aws`、`~/.ssh`、`~/.naozhi/*.yaml` 等凭证路径；不开 Bash、不开网页搜索（v0.2.0 的 Planner 没有任何外发通道）；`--strict-mcp-config` 不挂 MCP；与会话通信用 CC 原生的 `ListAgents` / `SendMessage`，向网关请求动作用动作块（§6.2）。只读工具只用于核实具体说法，不用于"读一眼就判定已修好"。 **D129（11-20）放权**：加上邮件与日历、Slack、Asana、网页搜索、内网的读类 MCP 工具与 `gh` 的只读命令，读范围放宽到整个用户目录（凭证路径除外），见 §15.16。
 - **全局单例与串行**（D60）：只有一个 Planner，你只对它说话；想限定范围时说"@naozhi"指定工作区。所有触发都是投给它的消息；单轮"看状态 → 决策 → 派活 / 建议 → 返回"，单轮设上限（如 3 分钟），从不等待。耗时的检查派给干净上下文的评审会话或工作区幕僚并行做（§6.3），Planner 只读结论。
 - **按工作区加载**：醒来时只加载唤醒原因所属工作区的懂系统分区与章程；懂你全局一份常驻。工作区之间的上下文不搅在一起。
 - **先回执再干活**（D63）：你发给 Planner 的消息，网关在 1 秒内确定性回执（"收到，交给 X / 正在看"），归属判断由一次性助手完成；Planner 的结论随后到达。
@@ -1099,7 +1099,7 @@ D94 修订（§15.10 D5）：通知类条目照旧按级别推送，但不进"�
 | 能做 | 回答"现在都在干什么 / 那个会话进展到哪了 / 之前怎么定的"（只读）；登记承诺并到点提醒；派活（D88：派出后直接执行，你可以在"任务"里停止）；它派出的会话完成或失败时向你汇报；整理汇报 |
 | 不能做 | 主动给运行中的会话发意见 / 代办 / 指令（你明确要求时才转达）；自动继续与按建议执行；主动巡检；改任何文件；放行任何动作；网页搜索 |
 | 形态 | key `planner:main`（保留命名空间，与 `cron:` 同样处理）；Claude 后端，opus 5.5 [1m]，effort 固定 medium；工具与权限见 §4.1；启动规格（`--tools`、`--permission-mode dontAsk`、`--strict-mcp-config`、~~`--name planner`~~ `--name planner-<6 位短哈希>`（D92：哈希取自本实例的 Planner 状态根路径，跨重启与换班不变）、`--append-system-prompt`、收件策略）全部放进 `SpawnOverlay` |
-| 上下文 | 每天早报时换一个新会话，带上前一天的交接摘要（由旧会话在换班前写）；你每次发消息，网关先附一份小的确定性快照（"等你"、承诺、在跑与刚结束的会话），细节由它读 `index.json` 与事件日志 |
+| 上下文 | ~~每天早报时换一个新会话~~（D130：对话跨天保留，只按大小或提示词版本换班），换班时带上交接摘要（由旧会话在换班前写）；你每次发消息，网关先附一份小的确定性快照（"等你"、承诺、在跑与刚结束的会话），细节由它读 `index.json` 与事件日志 |
 | 懂你 | 只读导入 auto-memory（本仓库的 memory 目录与索引）与 `~/.claude/CLAUDE.md`；不写 |
 | 派出的会话 | key `task:<随机 ID>`，计入现有 `max_procs`，不另设配额；血缘与 `purpose` 写进旁路文件 `sessions/<sha256(key)>.json`（原子写；会话退役后保留 30 天）；在现有"会话"视图里单独成一组"Planner 派出"；权限模式与你手动新建的一致 |
 | 汇报 | ~~派出时 `notify_when_idle` 订阅；~~会话完成 / 卡住时 `SendMessage` 给 ~~`planner`~~ Planner 的实例名；一轮结束而没汇报时网关补回执（D92）；Planner 再在自己的对话里告诉你 |
@@ -1941,6 +1941,39 @@ D67 状态三层的第三层，只改前端：
 - **原始记录直达**：`planner_chat.js`、`tasks.js` 与 e2e（S）。
 - **懂你的记忆界面**（M，D126 / D127 方案 B）：`dashboard/ext/memory` 的 `/api/memories[/file]`、`claudefs` 的索引编辑与锁、`node.APIRoutes` 只加两条 GET、设置视图的 `memory_view.js` 与三个入口；语音推迟（D125）。
 
+### 15.16 v0.9.5 规格：Planner 放权与不再每天换班（D129、D130，owner 11-20 定）
+
+**依据**（本机 `events/` 与 `planner/log`，11-04 至 11-20）：
+
+| 观察 | 数据 |
+|---|---|
+| 你发给 Planner 的消息 | 11-08 是 76 条/天，11-16 之后 1–5 条/天；同期你直接发给普通会话的消息 6–31 条/天 |
+| 派出的任务 | 11-08 是 39 个，11-13 之后每天 1–2 个；naozhi 的开发编排改在普通会话里用 Workflow 做 |
+| 不能当场办事 | Slack 未读问了 3 次都答"我读不了，已派会话"；邮件、CUR、容量、内网查询同样先派会话；11-20 的 IMR 查询你对 Planner 说 1 句，随后在派出的会话里追问了 11 句 |
+| 记不住 | "naozhi 还有什么要开发"问了 7 次，每次口径不同；近 12 次每日换班里 3 次的交接内容是一句 API 报错 |
+| 读不到 | 登记工作区之外的目录（`~/workspace/cpu-capacity`）被拒，回答里反复出现"我这边读不到 / 没核实" |
+
+**做法**：
+
+| 项 | 内容 | 落点 |
+|---|---|---|
+| 读类 MCP 工具 | `cli.mcp_config` 里有的服务器才给；配置裁成只含这些服务器的一份写到 `session-settings/planner-mcp.json`（在 Planner 的 deny 范围内），内容变了就重写并让空闲的 Planner 按 `--resume` 重启；`--tools` 列出内置工具与这些读工具，allow 同名，写工具按名字 deny | `planner/agent/tools.go` |
+| `gh` 只读 | `Bash` 进工具表，allow 只有 `gh` 的只读子命令前缀；CLI 会拆开复合命令逐段判，`gh api` 不放行。只在会话用 naozhi 自有 settings（`naozhi_settings.enabled`）时给：否则 CLI 自己读 `~/.claude/settings.json`，那里的放行规则网关去不掉 | 同上，`Config.OwnSettings` |
+| 受限会话不继承基础放行 | `dontAsk` 的会话（Planner、巡检、读取者）写每会话 settings 时去掉基础文件的 `permissions.allow`，它自己的 allow 就是全部授权；deny 与其他键照旧继承。隔离实例验收时发现：本机 `naozhi-settings.json` 有 `Bash(git *)`、`Bash(aws *)`，带进 Planner 后它能跑任意 `git` / `aws` | `session/launch_spec.go` writeSessionSettings |
+| 重启后的权限 | 进程启动时的权限指纹记在 `agent.json` 的 `scope`；naozhi 重启接回 shim 里的旧进程后，指纹与当前不一致就在空闲时按 `--resume` 重启一次（原来默认接回的进程就是当前权限） | `agent.go` markScopeLocked / refreshScope |
+| 读范围 | allow 加 `Read(~/**)`，保留状态根、事件日志与登记工作区（可能在用户目录之外）；deny 的凭证清单补 `.midway`、`Library`、`.config`、`.ada`、`.password-store`、shell 历史与启动文件 | `agent.go` allowRules / homeDeny |
+| 污染标记 | sidecar 的 `taint` 与摘要标题"含外部内容"照旧；事件日志不再进 deny（`Config.Tainted` 删除） | `agent.go`、`wireup/digest_sources.go` |
+| 提示词 v24 | 职责改成"能查的当场查、要动手的派出去"；工具按种类写，不点服务器名（`cli.mcp_config` 会变，提示词在一个对话里不能变）；说 PR / CI 状态前先用 `gh` 查；Slack 与邮件的读法（先计数再读，结果太大换更小的查询）；自己读到的外部内容同样是数据；去掉 `lookup` 与"不上网" | `prompt.go` |
+| 不再每天换班 | `reconcile` 去掉按日期换班一支；`shiftDay` 只用于给交接文件与 shift 起名 | `agent.go` |
+| 交接写不成 | `askHandoff` 分四种：模型调不通（CLI 把 API 报错当正文返回，`apierr.IsEnvelope`）一直保留对话、每 10 分钟重试，不限次数（凭证过期一夜，早上续期后再写）；回合出错、超时、空回复保留对话，10 / 20 分钟后重试，连续第 3 次不带摘要换班；报错是超出模型上下文的立即不带摘要换班（这个对话再也答不了）；这些"摘要"都不存盘 | `agent.go` askHandoff / deferShift |
+
+**验收**（11-20，隔离实例 `127.0.0.1:8291`，状态根 `/tmp`，同一份 Bedrock 凭证与 `mcp.json`）：问"Slack 现在有哪些未读，PR #4004 什么状态"，Planner 一轮内用 `get_unread_counts` / `get_messages` 与 `gh pr view` 直接答完，没有派会话；`~/workspace/cpu-capacity`（未登记）读得到；隔一次重启后记得上一轮问的 PR，并读出当天日历。用 Planner 的同一份 settings 直接测 CLI 权限层：Read 与 `cat` / `ls` / `head` / `wc` 读 `~/.aws`、`~/.midway`、`mcp.json`、`.zsh_history` 都被拒，`gh api`、`gh pr merge`、`aws sts get-caller-identity`、`git push --dry-run`、写文件、`gh pr view … && aws …` 被拒，`gh pr view` / `gh pr list` 放行。
+
+**不做**：写类工具（发信、发 Slack、建日程）与改文件、跑命令仍不给 Planner，照旧派会话（`mcp_tools`、`with_user_words`）；读取者（`planner/reader`）代码先留着，等确认 Planner 自己查够用再删；按回合来源关工具（巡检回合照旧只限动作块）。
+
+**后续候选**（未定）：工作线台账（每条线的现状、下一步、等谁，随快照带上）；例行关注（把重复的问题变成 cron 任务）；早报按工作线写、巡检冲突只算多人会议且重叠 15 分钟以上；"继续某件事"时由 Planner 找到并打开对的会话。
+
+
 ### 15.13 剩余内容排期（11-08；11-16、11-17 调整）
 
 > 依据：`/tmp/rfc-audit-2026-11-08.md` 的逐条盘点（基线 `5994daf5`）与 §15.12。改动量 S / M / L；"前置"写的是依据的 §17.2 项（11-08 已全部采纳）或要先落地的版本。排期是推荐顺序，不是承诺日期。
@@ -1955,6 +1988,7 @@ D67 状态三层的第三层，只改前端：
 | ~~v0.8.x~~ | ~~自升级验签：嵌入公钥（#1738）、发版签名；做完之前 `update.mode: auto` 要求 `.sig` 存在~~（**D111，11-16 不排期**：推迟到 P5 执行型主动落到 naozhi 仓库时，见 §16.1） | — | — |
 | **v0.9.0**（11-16 定，**11-16 已发布**；PR #3950–#3958、#3960） | §15.14：时间线分对话与动态两层、单独聊、回执去重与延后、提问过期、交接出处与搁置区、Planner 读 GitHub issue、读取者内网来源（#3942）、巡检凭证补跑与超时排查、收起 worktree 两处修正、小项 | M | 无 |
 | v0.9.x（11-17 定，§15.15） | 动作块 `halt` / `cancel`，只在你发起的回合（D118–D120）；派出会话的系统提示词要求要提交的改动先建 worktree（#3449 的最小版，网关不接管，D121–D123）；Planner 提示词 v22（唯一一次升版）；原始记录一键直达（D124）。P4 "懂你"设置视图的记忆界面（D126 / D127：远端只读，写只在本机）；~~语音倒脑子~~（D125：推迟） | S–M | v0.9.0 |
+| **v0.9.5**（11-20 定，§15.16） | Planner 放权：读类 MCP 工具、`gh` 只读命令、读范围放宽到用户目录（D129）；不再每天换班，交接写不成不换班（D130）；提示词 v24 | S–M | 无 |
 | ~~原 v0.9.0 余项~~ | ~~`task:` 独立配额~~（**D117 改为有条件**：派活挤占你自己会话的 `max_procs` 名额时再做）；~~网关按会话建 worktree（#3449 完整版）~~（D117：派出会话已按 dev-workflow 自建 worktree、收起时网关清理，先用提示词补别的仓库） | — | — |
 | ~~v0.9.x（P3 判断）~~ | ~~检查点由网关识别 + verifier、检查记录（kind `check`）、`knowledge_propose`~~（**D117 推迟**，见 §16.1；`knowledge_propose` 随 P4 再议） | — | — |
 | v0.10（P3 幕僚） | 工作区幕僚（D60、§6.3）：按需派出的只读会话；`project:{name}:planner` 改造为幕僚、`project.yaml` 的 planner_prompt 导入为章程；按工作区加载（§4.1） | L | v0.9.0 |
@@ -2207,6 +2241,8 @@ D67 状态三层的第三层，只改前端：
 | D126 | 11-17 | 懂你的记忆界面（看、改、删 auto-memory，新增 `/api/memories[/file]`）按方案 B 实装：读本机照常、也经反连 `api` 给别的节点看；改和删只接受直接从回环地址到达本机监听的请求（只看 `RemoteAddr`，带任何转发头一律算远端，反连 `api` 也算远端），否则 403 `memory_readonly_remote`，列表带 `writable`，只读时界面写"只读：在这台机器本机用 localhost 打开 dashboard 才能改"，看别的节点一律只读；EC2 在 ALB 后面，它自己的记忆在它的页面上也只读；规格见 §15.15 ⑦（评审意见全部采纳）；§3.7 的"懂你：偏好、先例"一行改为由 auto-memory 承担（D106 已是事实），授权、边界一行注"P5 / P6，未建" | 加在 Mac `*:8180` 明文 HTTP、EC2 经 CloudFront 公开的监听上，只靠自签的 `dashboard_token`；写进记忆的内容会进之后每个 bypass 会话的上下文，是持久的注入通道，所以写不开到远端；EC2 的令牌暂不轮换：持有它的人本来就能让 Mac 的 Planner 读这些文件、经派出的 bypass 会话改写它们（D97），B 没有增加能力，也不新增远端直接改写记忆的路径；残余是本机上不加转发头的端口转发（SSH `-L` 等）算本机，要先能登录这台机器；按 builder-security 审过，不改监听、绑定、令牌与鉴权；owner 11-17 定 B |
 | D127 | 11-17 | 修订 D96 的反连 `api` 路由组：加懂你的 `GET /api/memories`、`GET /api/memories/file` 两条只读路由，`PUT` / `DELETE /api/memories/file` 不进（`node.APIRoutes`，节点与 primary 各查一次）；EC2 页面切到 Mac 时这一节自己维护节点选择（本机始终有，加上跑着 Planner 的节点），看到的是 Mac 的记忆、只读 | D126 的方案 B；同一个令牌已经能经 `/api/planner/send` 让 Mac 的 Planner 读到同样的内容，远端只读不增加能力；写不进白名单，转发不到节点；owner 11-17 定 |
 | D128 | 11-19 | 承诺到点叫醒 Planner：写了 `close_when`（不是纯提醒类）的承诺到期时，网关照旧推送"到点提醒"并在对话里写一行，同时以来源 `reminder` 叫醒 Planner，块 `<naozhi-reminder>` 带承诺的 `id`、`text`、`due`、`close_when`，说明这是到期叫醒、按承诺去做或向你说明；纯提醒类保持只提醒。Planner 关着、已停用或正在启动（`ErrOff` / `ErrStopped` / `ErrNotReady`）时记日志、在 `promises.json` 记下欠一次叫醒（`wake_owed`），之后每分钟的检查补叫，接住为止，承诺关闭即作废；补叫不再提醒你。叫醒那一轮按 §15.6 的来源规则：不是外部内容，能 `dispatch` / `status`；没有你的原话，`relay` 等只限你触发的回合的动作照旧拒绝。提示词版本 23：说明 `<naozhi-reminder>`，并要求答应"到点去做某事"时写 `close_when`（§3.6、§15.4、§15.6） | 11-19 Planner 登记"16:00 派出 CPU 容量快照补拍"（写了 `close_when`），16:00:56 网关只推了通知、写了一行 Note、记了 `promise_due`，Note 不进 CLI，Planner 到 16:42 你发消息才跑下一轮，活没派出；`SourceReminder` 早已定义但没有地方用它叫醒 |
+| D129 | 11-20 | Planner 放权（owner 11-20 定；修订 D82 的工具条、D68 的"Planner 不读污染原文"、D107 的一次性读取者）：`planner:main` 自己当场查。① 工具在 Read / Grep / Glob / ListAgents / SendMessage 之外加 `cli.mcp_config` 里它认识的服务器的读类工具（邮件与日历、Slack、Asana 用巡检的读工具表，网页搜索与抓取、内网页面用读取者的表，另加 `calendar_availability`、`get_canvas_content`、Asana 的项目与搜索、`builder-mcp` 的 `InternalSearch` / `InternalCodeSearch` / `TicketingReadActions` / `SearchAcronymCentral`），MCP 配置裁成只含这些服务器的一份（`session-settings/planner-mcp.json`，照旧 `--strict-mcp-config`），写类工具按名字 deny；`Bash` 只放行 `gh` 的只读子命令（`pr view / list / checks / diff / status`、`issue view / list`、`run list / view`、`release list / view`、`repo view`、`search`；不含 `gh api`），仍是 `dontAsk`，且只在用 naozhi 自有 settings 时给；`dontAsk` 会话不再继承基础 settings 的 `permissions.allow`（它自己的 allow 就是全部授权）。② 读范围放宽到整个用户目录（`Read(~/**)`），凭证路径照旧拒绝并补上 `~/.midway`、`~/Library`、`~/.config`、`~/.ada`、shell 历史与启动文件。③ "含外部内容"的会话事件日志不再进 deny 规则，标记只留在摘要上。④ 提示词 v24：能查的这一轮直接查了回答，不说"我读不了"；改文件、跑命令、对外发送的事照旧派会话或转达；`lookup` 不再写进提示词（网关仍认这个块）。巡检、会前简报触发的回合照旧只执行 `notify` / `promise` / `ask`（§15.6）。`cli.mcp_config` 的内容变了（密钥轮换）或工作区登记变了，空闲的 Planner 按 `--resume` 重启取新的 | 11-04 至 11-20 本机数据（§15.16）：你发给 Planner 的消息从 76 条/天降到 1–5 条/天；Slack 未读问了 3 次都答"我读不了，已派会话"，11-20 的 IMR 查询你对 Planner 说 1 句、在派出的会话里追问了 11 句；进展汇报里常有"我没核实"。风险：Planner 会读到外部内容，同时握有派活与转达的权力，与你自己开的会话同一水平；不可逆的事派出会话仍会停下来问你（D98） |
+| D130 | 11-20 | 不再每天换班（owner 11-20 定；修订 §15.1 "每天早报时换一个新会话"与 D106）：`planner:main` 的对话跨天保留，只有上下文超过 25 万 token 且空闲 5 分钟（D106），或升级换了提示词版本时才写交接、换新会话；早报照旧每天 08:30，与换班无关。交接写不成时不换班、不存这份"摘要"：模型调不通（CLI 把 API 报错当正文返回）就每 10 分钟重试、不限次数；回合出错、超时或空回复每次多等 10 分钟，连续第 3 次才不带摘要换班；超出模型上下文的立即换 | 每班上下文峰值多在 5–16 万（§15.14 数据），按天换班只带来失忆："naozhi 还有什么要开发"同一周问了 7 次、每次口径不同；11-09、11-19、11-20 三次换班时凭证过期，`API Error: Could not load AWS credentials` 被存成交接摘要，新会话空手接班 |
 
 ## 附录 A. auto mode 实测（2026-10-16）
 
