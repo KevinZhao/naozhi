@@ -135,7 +135,18 @@ func newFixture(t *testing.T, dirs ...string) *fixture {
 	return f
 }
 
+// markDone marks the task done as the Planner does, its result looked at:
+// what the checks of a put away start from. markDoneUnread leaves the
+// result unread.
 func (f *fixture) markDone(t *testing.T) {
+	t.Helper()
+	f.markDoneUnread(t)
+	if _, err := f.sc.Update(key, func(m *sidecar.Meta) bool { m.SeenAt = f.now; return true }); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f *fixture) markDoneUnread(t *testing.T) {
 	t.Helper()
 	if _, err := f.sc.SetMark(key, sidecar.Mark{State: string(task.Done), By: string(task.ByPlanner), Why: "PR 已开", At: f.now}); err != nil {
 		t.Fatal(err)
@@ -806,5 +817,52 @@ func TestKeptUnpushedNoBackoff(t *testing.T) {
 	f.r.Tick(context.Background())
 	if got := wtState(f, wt); got.State != WTRemoved {
 		t.Fatalf("pushed and merged, one recheckAfter later: %+v", got)
+	}
+}
+
+// A done task whose result the user has not looked at is not put away,
+// however long it idled: closed, its session is one they cannot find or
+// answer. Once they looked it goes as any; one never looked at goes when
+// task.UnreadKeep ran out (D136).
+func TestUnreadResultHoldsPutAway(t *testing.T) {
+	f := newFixture(t)
+	f.markDoneUnread(t)
+	done := f.now
+	f.sess.LastActive = done
+	f.now = done.Add(IdleFor + time.Hour)
+	f.r.Tick(context.Background())
+	if why, at := f.r.Wait(key); f.archived != 0 || why != "结果你还没看" || !at.IsZero() {
+		t.Fatalf("idle three hours, unread: archived %d, Wait = %q %v", f.archived, why, at)
+	}
+	// Past the list's day too: still held, still looked at each tick.
+	f.now = done.Add(3 * window)
+	f.r.Tick(context.Background())
+	if why, _ := f.r.Wait(key); f.archived != 0 || why != "结果你还没看" {
+		t.Fatalf("three days on, unread: archived %d, Wait = %q", f.archived, why)
+	}
+
+	// The user looks at it: put away at the next check.
+	if _, err := f.sc.Update(key, func(m *sidecar.Meta) bool { m.SeenAt = f.now; return true }); err != nil {
+		t.Fatal(err)
+	}
+	f.r.Tick(context.Background())
+	if f.archived != 1 || f.reap() == nil {
+		t.Fatalf("after the look: archived %d, reap %+v", f.archived, f.reap())
+	}
+
+	// Never looked at: put away once the keep ran out.
+	g := newFixture(t)
+	g.markDoneUnread(t)
+	g.sess.LastActive = g.now
+	start := g.now
+	g.now = start.Add(task.UnreadKeep - time.Minute)
+	g.r.Tick(context.Background())
+	if g.archived != 0 {
+		t.Fatal("unread inside the keep: put away")
+	}
+	g.now = start.Add(task.UnreadKeep + time.Minute)
+	g.r.Tick(context.Background())
+	if g.archived != 1 {
+		t.Fatalf("unread past the keep: archived %d, Wait = %v", g.archived, func() string { w, _ := g.r.Wait(key); return w }())
 	}
 }

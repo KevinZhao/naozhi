@@ -43,8 +43,15 @@ import (
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// Archive is how long a done task stays listed.
+// Archive is how long a done task stays listed, counted from when the user
+// looked at its result when that is later than its done mark.
 const Archive = 24 * time.Hour
+
+// UnreadKeep is how long a done task whose result the user has not looked at
+// stays listed, and its session where it is (planner/reap): the result is
+// what the task was for, and a task done while the user was away is not over
+// for them. Past it the result was not wanted.
+const UnreadKeep = 7 * 24 * time.Hour
 
 // whyRunes caps a reason recorded with a state.
 const whyRunes = 500
@@ -129,6 +136,8 @@ type Task struct {
 	// card's blue dot, never a count of 等你 nor a push.
 	ResultAt time.Time `json:"result_at,omitzero"`
 	New      bool      `json:"new,omitempty"`
+	// SeenAt is when the user last looked at a result of it; zero for never.
+	SeenAt time.Time `json:"seen_at,omitzero"`
 }
 
 // liveRunes caps Live's texts: a card shows one line of them.
@@ -271,9 +280,11 @@ func promiseState(p promise.Promise, now time.Time) (State, By, string, time.Tim
 // archived reports whether t is done and past Archive. A dispatched
 // session's Archive counts from its last activity or its putting away when
 // later than the done mark: planner/reap puts it away only after it idled
-// (D105), and a session put away is to stay listed to be reopened.
+// (D105), and a session put away is to stay listed to be reopened. A result
+// the user has not looked at keeps the task listed (UnreadKeep), and looking
+// at it starts Archive anew: the card must not go as it is read.
 func archived(t Task, now time.Time) bool {
-	if t.State != Done {
+	if t.State != Done || unread(t, now) {
 		return false
 	}
 	from := t.At
@@ -283,7 +294,16 @@ func archived(t Task, now time.Time) bool {
 	if t.Reap != nil && t.Reap.At.After(from) {
 		from = t.Reap.At
 	}
+	if t.SeenAt.After(from) {
+		from = t.SeenAt
+	}
 	return now.Sub(from) >= Archive
+}
+
+// unread reports whether t has a result the user has not looked at that is
+// still within UnreadKeep.
+func unread(t Task, now time.Time) bool {
+	return t.New && now.Sub(t.ResultAt) < UnreadKeep
 }
 
 // archivedYours reports whether watched session t is to leave the list:
@@ -293,10 +313,15 @@ func archived(t Task, now time.Time) bool {
 // mark, which only the user's own message takes back.
 func archivedYours(t Task, now time.Time) bool {
 	switch {
+	case unread(t, now):
+		return false
 	case t.State == Done:
 		from := t.At
 		if t.Live != nil && t.Live.LastActive.After(from) {
 			from = t.Live.LastActive
+		}
+		if t.SeenAt.After(from) {
+			from = t.SeenAt
 		}
 		return now.Sub(from) >= Archive
 	case t.State == Doing && t.Health == health.Idle:
@@ -332,6 +357,18 @@ func resultTime(m sidecar.Meta, st State, by By, at time.Time) time.Time {
 
 // isNew reports whether a result at result is one not seen at seen.
 func isNew(result, seen time.Time) bool { return !result.IsZero() && result.After(seen) }
+
+// DoneResult is when dispatched session m, marked done, last had a result
+// for the user, and whether they have looked at it since: what planner/reap
+// holds a put away on (zero and false for a session not marked done, or one
+// the user marked themselves and reported nothing since).
+func DoneResult(m sidecar.Meta) (at time.Time, unseen bool) {
+	if m.Mark == nil || State(m.Mark.State) != Done {
+		return time.Time{}, false
+	}
+	at = resultTime(m, Done, By(m.Mark.By), m.Mark.At)
+	return at, isNew(at, m.SeenAt) && m.V <= sidecar.Version
+}
 
 // units is the health table by unit ID; empty without one.
 func (b *Board) units() map[string]health.Unit {
@@ -371,6 +408,7 @@ func (b *Board) List() []Task {
 			// A sidecar a newer naozhi wrote cannot take seen_at here: its
 			// dot would never go out.
 			t.New = isNew(t.ResultAt, m.SeenAt) && m.V <= sidecar.Version
+			t.SeenAt = m.SeenAt
 			if t.State == Done && m.Reap == nil && b.cfg.ReapWait != nil {
 				t.ReapWait, t.ReapAt = b.cfg.ReapWait(m.Key)
 			}
@@ -411,11 +449,12 @@ func (b *Board) yours(units map[string]health.Unit, live map[string]Live, now ti
 			t.Live = &l
 		}
 		t.State, t.By, t.Why, t.At = yoursState(m, u, b.userSince(u.ID))
+		t.ResultAt = resultTime(m, t.State, t.By, t.At)
+		t.New = isNew(t.ResultAt, m.SeenAt) && m.V <= sidecar.Version
+		t.SeenAt = m.SeenAt
 		if archivedYours(t, now) {
 			continue
 		}
-		t.ResultAt = resultTime(m, t.State, t.By, t.At)
-		t.New = isNew(t.ResultAt, m.SeenAt) && m.V <= sidecar.Version
 		out = append(out, t)
 	}
 	return out

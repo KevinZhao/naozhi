@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -148,6 +149,9 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 		sess = h.deps.Router.SessionFor(key)
 	}
 	if sess == nil {
+		if h.putAwayEvents(w, r, key, afterStr != "", before, limit) {
+			return
+		}
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
@@ -196,6 +200,41 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httputil.WriteJSON(w, clievent.ForWire(entries))
+}
+
+// PutAwaySource is the record of a dispatched session put away
+// (wireup.PutAwayRecord): the page before beforeMS (0 for the latest), at
+// most limit entries, whether older ones remain, and ok false for a key that
+// is no session put away.
+type PutAwaySource interface {
+	Events(ctx context.Context, key string, beforeMS int64, limit int) (entries []clievent.EventEntry, more, ok bool)
+}
+
+// putAwayEvents serves key's record when it is a dispatched session put
+// away: the router has no session for it, its event log is kept. A done
+// task's card opens on it (planner RFC D136). The record no longer grows, so
+// a catch-up (`after`) is empty. false when key is no such session.
+func (h *Handlers) putAwayEvents(w http.ResponseWriter, r *http.Request, key string, catchUp bool, before int64, limit int) bool {
+	if h.deps.PutAway == nil {
+		return false
+	}
+	if limit <= 0 || limit > maxEventsPageLimit {
+		limit = maxEventsPageLimit
+	}
+	entries, more, ok := h.deps.PutAway.Events(r.Context(), key, before, limit)
+	if !ok {
+		return false
+	}
+	if catchUp {
+		httputil.WriteJSON(w, []clievent.EventEntry{})
+		return true
+	}
+	setHasMore(w, more)
+	if entries == nil {
+		entries = []clievent.EventEntry{}
+	}
+	httputil.WriteJSON(w, clievent.ForWire(entries))
+	return true
 }
 
 // remoteEventsPage serves a node's initial or "load earlier" page. A node

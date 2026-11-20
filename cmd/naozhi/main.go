@@ -690,6 +690,7 @@ func main() {
 		Scout:            scouter,
 		Lookups:          lookups,
 		Fronts:           fronts,
+		PutAway:          wireup.PutAwayRecord{Sidecars: sidecars, EventsDir: sessionLayout.EventsRoot()},
 		Briefs:           briefer,
 		Health:           func() health.Snapshot { return healthMon.Snapshot() },
 		Workspaces:       plannerState.Workspaces,

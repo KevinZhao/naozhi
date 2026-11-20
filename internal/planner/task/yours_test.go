@@ -202,6 +202,9 @@ func TestYoursDoneArchivedByActivity(t *testing.T) {
 	if err := r.b.Set(yDash, Done, ByPlanner, "PR 合了"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := r.b.Seen([]string{yDash}, false); err != nil { // looked at
+		t.Fatal(err)
+	}
 	r.live[yDash] = Live{LastActive: t0.Add(20 * time.Hour)}
 	r.now = t0.Add(Archive + time.Minute)
 	if d, ok := r.yours()[yDash]; !ok || d.State != Done {

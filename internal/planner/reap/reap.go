@@ -4,8 +4,9 @@
 // gateway sees, deterministically, that its turn ended normally, nothing
 // waits on an AskUserQuestion, nothing runs in the background, the user is
 // not at it (custody's "你在旁边": viewing it, or a message to it in the last
-// 5 minutes), and it has been idle IdleFor (D105). Until then it waits for
-// the next state change or check; nothing is reported.
+// 5 minutes), the user has looked at its result (D136: one not looked at
+// holds it up to task.UnreadKeep), and it has been idle IdleFor (D105). Until then it waits for the next state change or check;
+// nothing is reported.
 //
 // Putting away takes two steps. First the process is closed and the session
 // leaves the session list for the history (Router.Archive): its event log,
@@ -312,11 +313,19 @@ func done(m sidecar.Meta) bool {
 }
 
 // due reports whether done task m, its session last active at lastActive,
-// is still within window.
+// is still within window. The window opens again when the user looks at the
+// result, and for a result never looked at once task.UnreadKeep ran out:
+// until either, the session is held where it is (holds).
 func (r *Reaper) due(m sidecar.Meta, lastActive time.Time) bool {
 	from := m.Mark.At
 	if lastActive.After(from) {
 		from = lastActive
+	}
+	if m.SeenAt.After(from) {
+		from = m.SeenAt
+	}
+	if at, unseen := task.DoneResult(m); unseen && at.Add(task.UnreadKeep).After(from) {
+		from = at.Add(task.UnreadKeep)
 	}
 	return r.cfg.Now().Sub(from) < window
 }
@@ -350,10 +359,21 @@ func (r *Reaper) holds(key string, m sidecar.Meta, s Session) waiting {
 		return waiting{why: "后台还有任务在跑"}
 	case r.cfg.Nearby != nil && r.cfg.Nearby(key):
 		return waiting{why: "你正看着它，或 5 分钟内给它发过消息"}
+	case r.unread(m):
+		// The result is what the task was for: a session closed before the
+		// user read it is one they then cannot find or answer.
+		return waiting{why: "结果你还没看"}
 	case !s.LastActive.IsZero() && r.cfg.Now().Sub(s.LastActive) < IdleFor:
 		return waiting{why: "空闲不到 2 小时", at: s.LastActive.Add(IdleFor)}
 	}
 	return waiting{}
+}
+
+// unread reports whether done task m has a result the user has not looked
+// at, still within task.UnreadKeep.
+func (r *Reaper) unread(m sidecar.Meta) bool {
+	at, unseen := task.DoneResult(m)
+	return unseen && r.cfg.Now().Sub(at) < task.UnreadKeep
 }
 
 // waitsOnUser reports whether done task m's session reported, after the

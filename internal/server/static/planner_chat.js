@@ -38,7 +38,7 @@
 // Layering: never import dashboard.js back; setActivityView is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
 import { composer, selection, serverInfo, sessionList, ui } from './state.js';
-import { esc, fetchJSON, isComposingKey, nzBus, registerActions, showToast } from './nz_util.js';
+import { esc, escAttr, fetchJSON, isComposingKey, nzBus, registerActions, showToast } from './nz_util.js';
 import { isDiscoveredKey, sid } from './session_ident.js';
 import { onSessionsApplied } from './session_list.js';
 import { eventHtml } from './event_render.js';
@@ -46,7 +46,7 @@ import { hydrateAskAnsweredFromHistory, lockRenderedAskCards } from './ask_card.
 import { runPendingAsync } from './render_md.js';
 import { ICONS } from './icons.js';
 import { firstSentence, refreshHealth, sessionStatusHtml, sessionTitle } from './planner_cards.js';
-import { closeTaskActs, isRunningTask, refreshTasks, seenTask } from './tasks.js';
+import { closeTaskActs, isRunningTask, refreshTasks, seenTask, taskOf } from './tasks.js';
 import { followPlannerSubject, noteWorkbenchEvent } from './workbench_panes.js';
 import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
@@ -283,6 +283,14 @@ function composerTarget() {
   return st.sess ? st.sess.key : PLANNER_KEY;
 }
 
+// putAway reports whether key is a done task's session that was put away
+// (planner/reap): out of the session list, its record kept, which the pane
+// still shows; 重新打开 puts it back (D136).
+function putAway(key) {
+  const t = taskOf(key);
+  return !!(t && t.reap);
+}
+
 // sessionListed reports whether key is listed on the Planner's node, the
 // node every session it names runs on.
 function sessionListed(key) {
@@ -371,7 +379,7 @@ function paintComposer() {
     // create it as an ordinary session under that key.
     const listed = sessionListed(st.sess.key);
     to.textContent = '→ ' + titleOf(st.sess.key);
-    if (note) note.textContent = listed ? '' : endedAside() ? '已结束，在历史里' : '不在会话列表里，不能发消息';
+    if (note) note.textContent = listed ? '' : endedAside() ? '已结束，在历史里' : putAway(st.sess.key) ? '已收起，记录还在；要接着做先点上面的“重新打开”' : '不在会话列表里，不能发消息';
     input.placeholder = listed ? '追问或调整方向…' : '';
     input.disabled = !listed;
     $('pl-attach').disabled = input.disabled || hostRemote();
@@ -538,8 +546,12 @@ function paintSessionStatus() {
   if (name) name.textContent = titleOf(p.key);
   const line = $('pl-sess-line');
   if (line) {
-    // The breadcrumb names it.
-    const html = sessionStatusHtml(p.key, false);
+    // The breadcrumb names it. A session put away says so, with the way
+    // back: its status would read as one that is simply gone.
+    const html = putAway(p.key)
+      ? '<span class="pl-sess-away">已收起</span><span class="pl-sess-away-why">做完后自动收起，记录都在</span>' +
+        '<button type="button" class="pl-btn" data-action="task-reopen" data-id="' + escAttr(p.key) + '" title="放回会话列表，下一条消息接着上下文继续">重新打开</button>'
+      : sessionStatusHtml(p.key, false);
     if (line.innerHTML !== html) line.innerHTML = html;
   }
   paintStop();
@@ -574,7 +586,16 @@ async function loadSession(reset) {
     if (st.sess !== p || gen !== p.gen) return;
     const fresh = sessEvents(Array.isArray(evs) ? evs : []);
     paintSessionPane(reset, fresh);
-  } catch { /* the next tick retries */ } finally {
+  } catch {
+    // The next tick retries. A first read that fails says so: "正在加载…"
+    // left standing reads as a session that cannot be found.
+    if (st.sess === p && gen === p.gen && !p.events.length) {
+      const box = $('pl-sess-stream');
+      if (box && box.querySelector(':scope > .pl-empty') && !p.pending) {
+        box.innerHTML = '<div class="pl-empty">读不到这个会话的记录<span>它不在会话列表里了；在“任务”里重新打开，或到历史里找它</span></div>';
+      }
+    }
+  } finally {
     if (st.sess === p && gen === p.gen) p.loading = false;
   }
 }
@@ -988,6 +1009,7 @@ nzBus.addEventListener('planner:node', () => {
   fetchPlannerStatus();
 });
 nzBus.addEventListener('session:select', () => paintHandoffButton());
-nzBus.addEventListener('tasks:changed', paintStop);
+// 重新打开 put it back: the status line and the input box follow.
+nzBus.addEventListener('tasks:changed', () => { paintStop(); if (st.sess) paintSessionStatus(); });
 // A 单独聊 opened elsewhere is one once the list has its label.
 onSessionsApplied(paintAsideActs);

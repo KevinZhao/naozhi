@@ -208,6 +208,10 @@ func TestBoard(t *testing.T) {
 	if err := b.Set(cond.ID, Doing, ByUser, ""); err != nil {
 		t.Fatal(err)
 	}
+	// The user looked at task:a's result: a day after, it is archived.
+	if _, err := b.Seen([]string{"task:a"}, false); err != nil {
+		t.Fatal(err)
+	}
 	now = t0.Add(Archive)
 	if got, want := ids(), []string{"task:b=waiting", cond.ID + "=doing", later.ID + "=doing"}; !slices.Equal(got, want) {
 		t.Errorf("a day later: %q, want %q", got, want)
@@ -447,6 +451,10 @@ func TestDoneListedWhileActive(t *testing.T) {
 		if _, err := sc.SetMark(k, sidecar.Mark{State: string(Done), By: string(ByPlanner), At: old}); err != nil {
 			t.Fatal(err)
 		}
+		// Looked at when it was done: what keeps it listed is its activity.
+		if _, err := sc.Update(k, func(m *sidecar.Meta) bool { m.SeenAt = old; return true }); err != nil {
+			t.Fatal(err)
+		}
 	}
 	b := New(Config{Sessions: sc, Now: func() time.Time { return t0 },
 		Live: func() map[string]Live {
@@ -462,4 +470,93 @@ func TestDoneListedWhileActive(t *testing.T) {
 	if !slices.Equal(ids, []string{active}) {
 		t.Fatalf("listed %v, want only %s", ids, active)
 	}
+}
+
+// A done task whose result the user has not looked at stays listed past
+// Archive, up to UnreadKeep; looking at it starts Archive anew, so the card
+// does not go as it is read (D136).
+func TestUnreadResultKeepsDoneListed(t *testing.T) {
+	now := t0
+	clock := func() time.Time { return now }
+	sc := sidecar.Open(t.TempDir(), clock)
+	const key = "task:aaaaaaaaaaaa"
+	if err := sc.Put(sidecar.Meta{Key: key, Purpose: sidecar.PurposeTask, Title: "查容量"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sc.SetMark(key, sidecar.Mark{State: string(Done), By: string(ByPlanner), At: t0}); err != nil {
+		t.Fatal(err)
+	}
+	b := New(Config{Sessions: sc, Now: clock})
+	listed := func() (Task, bool) {
+		for _, tk := range b.List() {
+			if tk.ID == key {
+				return tk, true
+			}
+		}
+		return Task{}, false
+	}
+
+	now = t0.Add(3 * Archive)
+	tk, ok := listed()
+	if !ok || !tk.New || tk.State != Done {
+		t.Fatalf("three days on, unread: %+v (listed %v)", tk, ok)
+	}
+	if at, unseen := DoneResult(mustGet(t, sc, key)); !unseen || !at.Equal(t0) {
+		t.Errorf("DoneResult = %v, %v", at, unseen)
+	}
+
+	// Looked at now: listed another day, then archived.
+	if _, err := b.Seen([]string{key}, false); err != nil {
+		t.Fatal(err)
+	}
+	tk, ok = listed()
+	if !ok || tk.New || !tk.SeenAt.Equal(now) {
+		t.Fatalf("just read: %+v (listed %v)", tk, ok)
+	}
+	if _, unseen := DoneResult(mustGet(t, sc, key)); unseen {
+		t.Error("DoneResult still unseen after the look")
+	}
+	now = now.Add(Archive - time.Minute)
+	if _, ok := listed(); !ok {
+		t.Error("under a day after the look: archived")
+	}
+	now = now.Add(2 * time.Minute)
+	if _, ok := listed(); ok {
+		t.Error("a day after the look: still listed")
+	}
+
+	// Never looked at: gone once UnreadKeep ran out.
+	const other = "task:bbbbbbbbbbbb"
+	if err := sc.Put(sidecar.Meta{Key: other, Purpose: sidecar.PurposeTask, Title: "没人看"}); err != nil {
+		t.Fatal(err)
+	}
+	start := now
+	if _, err := sc.SetMark(other, sidecar.Mark{State: string(Done), By: string(ByPlanner), At: start}); err != nil {
+		t.Fatal(err)
+	}
+	has := func() bool {
+		return slices.ContainsFunc(b.List(), func(tk Task) bool { return tk.ID == other })
+	}
+	now = start.Add(UnreadKeep - time.Minute)
+	if !has() {
+		t.Error("unread inside UnreadKeep: archived")
+	}
+	now = start.Add(UnreadKeep)
+	if has() {
+		t.Error("unread past UnreadKeep: still listed")
+	}
+
+	// A task the user marked done themselves has nothing to read.
+	if _, unseen := DoneResult(sidecar.Meta{Mark: &sidecar.Mark{State: string(Done), By: string(ByUser), At: t0}}); unseen {
+		t.Error("the user's own mark counts as an unread result")
+	}
+}
+
+func mustGet(t *testing.T, sc *sidecar.Store, key string) sidecar.Meta {
+	t.Helper()
+	m, ok := sc.Get(key)
+	if !ok {
+		t.Fatalf("no sidecar for %s", key)
+	}
+	return m
 }

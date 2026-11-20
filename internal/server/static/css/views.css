@@ -183,6 +183,11 @@ body:has(#abnav-settings-badge:not([hidden])) .settings-syslink-btn::after{conte
 .tk-card[data-status="fail"]{--tk-c:var(--nz-status-failed)}
 .tk-card.done{--tk-c:var(--nz-border);background:var(--nz-bg-1)}
 .tk-card.done .tk-title-t{color:var(--nz-text-mute)}
+/* 做完了，等你看 (D136): done, its result not looked at yet. It reads as a
+   card to act on, not as one put behind: the fold's muting is taken off. */
+.tk-card.done.tk-fresh{--tk-c:var(--nz-green);background:var(--nz-bg-0)}
+.tk-card.done.tk-fresh .tk-title-t{color:var(--nz-text-strong);-webkit-line-clamp:2;line-clamp:2}
+.tk-card.done.tk-fresh .tk-now{color:var(--nz-text)}
 .tk-top{display:flex;align-items:flex-start;gap:6px;min-width:0}
 .tk-title{flex:1;min-width:0;line-height:1.35}
 .tk-title-t{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden;color:var(--nz-text-strong);font-weight:600;overflow-wrap:anywhere;text-align:left}
@@ -212,6 +217,9 @@ body:has(#abnav-settings-badge:not([hidden])) .settings-syslink-btn::after{conte
 .tk-time{flex-shrink:0;margin-left:auto;font-variant-numeric:tabular-nums;color:var(--nz-text-dim);white-space:nowrap}
 .tk-meta{margin-top:3px;min-width:0;font-size:var(--nz-fs-xs);color:var(--nz-text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tk-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid var(--nz-border)}
+/* A done task's session put away, opened in the middle column (D136). */
+.pl-sess-away{font-weight:600;color:var(--nz-text-mute)}
+.pl-sess-away-why{margin:0 8px 0 6px;color:var(--nz-text-dim)}
 /* "工作线" (fronts.js, D134): a line of work's card is a task card's shape
    with no status: the name, where it stands, then the next step and who it
    waits on in one muted line. */
