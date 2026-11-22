@@ -50,6 +50,7 @@ import { closeTaskActs, isRunningTask, refreshTasks, seenTask, taskOf } from './
 import { followPlannerSubject, noteWorkbenchEvent } from './workbench_panes.js';
 import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
+import { followPane, notePane, settlePane } from './scroll_follow.js';
 import { getMsgValue, isMobile, promptDialog, pushView, replaceView, setMsgValue } from './utilities.js';
 import { awaitPendingOrients, clearFiles, createFileTray, filesBlockSend, handleFiles, renderFilePreviews } from './composer_files.js';
 import { eventsURL, hostOnline, hostRemote, isLocalNode, nodeAPI, plannerAPI, plannerHost } from './planner_host.js';
@@ -255,8 +256,7 @@ function addPending(box, text) {
   box.querySelector(':scope > .pl-empty')?.remove();
   box.insertAdjacentHTML('beforeend', '<div class="event user pl-pending"><span class="event-icon">' + ICONS.user + '</span>' +
     '<div class="event-content">' + esc(text) + '</div></div>');
-  const scroller = box.closest('.pl-events');
-  if (scroller) scroller.scrollTop = scroller.scrollHeight;
+  followPane(box.closest('.pl-events'));
 }
 
 export function clearPending(box) {
@@ -513,7 +513,7 @@ function paintSessionPane(reset, fresh) {
   const box = $('pl-sess-stream');
   const scroller = $('pl-sess-events');
   if (!p || !box || !scroller) return;
-  const atBottom = reset || scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 40;
+  notePane(scroller);
   // An AskUserQuestion followed by a user event was answered: its card
   // renders locked (answering it posts to #pl-sess's key, ask_card.js).
   hydrateAskAnsweredFromHistory(p.events);
@@ -536,7 +536,10 @@ function paintSessionPane(reset, fresh) {
   }
   runPendingAsync();
   paintSessionStatus();
-  if (atBottom) scroller.scrollTop = scroller.scrollHeight;
+  // Opened at the newest; after that the pane follows until its reader
+  // scrolls up (scroll_follow.js).
+  if (reset) followPane(scroller);
+  else settlePane(scroller);
 }
 
 function paintSessionStatus() {

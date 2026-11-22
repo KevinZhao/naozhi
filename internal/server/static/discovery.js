@@ -13,6 +13,7 @@ import { eventHtml, renderEventsWithDividers } from './event_render.js';
 import { navRebuild, navSync } from './msg_nav.js';
 import { processEventsForDisplay } from './file_refs.js';
 import { shell } from './shell.js';
+import { notePane, settlePane } from './scroll_follow.js';
 
 /* ===== Discovery & Takeover ===== */
 
@@ -67,9 +68,9 @@ function discoveredPreviewHtml(base, typeLabel) {
 // appendPreviewEvents appends the events a preview poll found past the ones
 // already shown, with time dividers, keeping a bottom-anchored pane anchored.
 function appendPreviewEvents(el, fresh) {
+  notePane(el);
   const empty = el.querySelector('.empty-state');
   if (empty) empty.remove();
-  const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
   let prevT = lastDividerTime(el);
   fresh.forEach(e => {
     if (isInternalEvent(e)) return;
@@ -81,7 +82,7 @@ function appendPreviewEvents(el, fresh) {
     el.insertAdjacentHTML('beforeend', h);
     if (t) prevT = t;
   });
-  if (wasBottom) el.scrollTop = el.scrollHeight;
+  settlePane(el);
   navSync();
 }
 

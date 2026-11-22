@@ -10,6 +10,7 @@ import { ICONS } from './icons.js';
 import { sid } from './session_ident.js';
 import { announce, getMsgValue, setMsgValue, showNetworkError } from './utilities.js';
 import { shell } from './shell.js';
+import { paneFollows, placedPane } from './scroll_follow.js';
 
 // --- Running banner: tool activity + agent tracking ---
 
@@ -430,14 +431,15 @@ const sameUuid = (el, uuid) => el.querySelectorAll(':scope > .event[data-uuid="'
 // 会话整页重绘前（见 event_stream.js keepReader）——之后恢复。锚点是压着视口顶部的
 // 气泡：重绘会换掉上方的分页、下方也可能多出新事件，锚点比「距底距离」稳。同 uuid 的
 // 气泡记倒数第几个（分页和 trim 都从上方切）；锚点不在了就是被切在上方，回到顶部
-// （「加载更早」处）；没有带 uuid 的气泡才用距底距离。atBottom 的读者继续贴底。
+// （「加载更早」处）；没有带 uuid 的气泡才用距底距离。atBottom 是窗格还在跟随
+// （scroll_follow.js），这样的读者回来后继续跟随。
 function saveScrollPos(key, node) {
   const el = document.getElementById('events-scroll');
   if (!el || !key) return;
   // clientHeight === 0：还未 layout（极早期竞态），算出的 atBottom 会擦掉真实快照，跳过。
   if (el.clientHeight === 0) return;
   const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-  const pos = perSession.scrollPos[sid(key, node || 'local')] = { fromBottom, atBottom: fromBottom <= 30, uuid: '', nth: 0, offset: 0 };
+  const pos = perSession.scrollPos[sid(key, node || 'local')] = { fromBottom, atBottom: paneFollows(el), uuid: '', nth: 0, offset: 0 };
   if (pos.atBottom) return;
   const top = el.getBoundingClientRect().top;
   const a = [...el.querySelectorAll(':scope > .event[data-uuid]')].find(b => b.getBoundingClientRect().bottom > top);
@@ -461,14 +463,11 @@ function restoreScrollPos(key, node) {
     else el.scrollTop = group ? 0 : Math.max(0, el.scrollHeight - el.clientHeight - pos.fromBottom);
   };
   apply();
+  placedPane(el);
   // 异步布局（图片 / mermaid / katex / "加载更早" 按钮注入）会挪动内容，再跑两帧复位。
   requestAnimationFrame(() => { apply(); requestAnimationFrame(apply); });
   return true;
 }
-
-// scrollSlackPx is how far above the bottom (px) still counts as pinned: a
-// live event follows the bottom only for a reader within it.
-const scrollSlackPx = 80;
 
 // Turn watchdog: while the selected session is "running", periodically pull
 // the authoritative REST snapshot so the banner self-heals when a terminal WS
@@ -534,13 +533,6 @@ function updateSendButton(state, opts) {
     const loadingEl = evEl2 && evEl2.querySelector('.loading-indicator');
     if (loadingEl) loadingEl.textContent = '暂无事件';
   }
-  // Banner show/hide changes .events height — keep latest message visible.
-  // Only auto-scroll if the user is already near the bottom; otherwise
-  // respect their scroll position (e.g. reading history).
-  const evEl = document.getElementById('events-scroll');
-  if (evEl && evEl.scrollTop + evEl.clientHeight >= evEl.scrollHeight - 50) {
-    evEl.scrollTop = evEl.scrollHeight;
-  }
 }
 
 export {
@@ -554,7 +546,6 @@ export {
   resetTurnStateForUserEcho,
   restoreScrollPos,
   saveScrollPos,
-  scrollSlackPx,
   startTurnTimer,
   turnState,
   updateSendButton,
