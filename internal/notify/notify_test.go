@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"encoding/json"
 	"errors"
 	"slices"
 	"strconv"
@@ -478,6 +479,46 @@ func TestDecideOnce(t *testing.T) {
 	}
 	if !slices.Equal(applied, []Action{ActionApprove}) {
 		t.Errorf("applied = %v, want only the first answer", applied)
+	}
+}
+
+// TestDecideMore: an answer a card keeps behind "⋯" (Decision.More) is
+// taken as one of its Actions is; one in neither is refused, and a card
+// with no More takes what it always did.
+func TestDecideMore(t *testing.T) {
+	n, _, _ := newTest(t, local(10, 0), datadir.Layout{})
+	var applied []Action
+	n.HandleDecisions("h", func(_ Item, a Action) error { applied = append(applied, a); return nil })
+	add := func(source string, more ...Action) Item {
+		it, _ := n.Add(Item{Kind: KindNotice, Source: source, Title: "已备好 PR",
+			Decision: &Decision{Handler: "h", Actions: []Action{"不做"}, More: more}})
+		return it
+	}
+	it := add("a", "这个工作区别巡查了")
+	if err := n.Decide(it.ID, "合并"); !errors.Is(err, ErrNoDecision) {
+		t.Errorf("an answer in neither list = %v, want ErrNoDecision", err)
+	}
+	if err := n.Decide(it.ID, "这个工作区别巡查了"); err != nil {
+		t.Fatalf("an answer behind ⋯: %v", err)
+	}
+	got, _ := n.Item(it.ID)
+	if got.State != StateClosed || got.ClosedBy != ClosedByUser || got.Decision.Answer != "这个工作区别巡查了" {
+		t.Errorf("item after the answer: %+v", got)
+	}
+	plain := add("b")
+	if err := n.Decide(plain.ID, "这个工作区别巡查了"); !errors.Is(err, ErrNoDecision) {
+		t.Errorf("an answer the card does not carry = %v, want ErrNoDecision", err)
+	}
+	if err := n.Decide(plain.ID, "不做"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(applied, []Action{"这个工作区别巡查了", "不做"}) {
+		t.Errorf("applied = %v", applied)
+	}
+	// A card without More is written as it always was.
+	data, err := json.Marshal(plain.Decision)
+	if err != nil || strings.Contains(string(data), "more") {
+		t.Errorf("decision without More = %s, %v", data, err)
 	}
 }
 

@@ -27,13 +27,15 @@ const (
 // (TellWatch), Key its session and Outside whether that session read
 // outside content: it waits as the rest do, for an idle Planner and for its
 // session's watchEvery, but goes in a watch turn of its own, never in a
-// receipt's.
+// receipt's. Patrol is a receipt about a session dispatched to fix a
+// patrol finding: the turn it goes in is from SourcePatrolReceipt.
 type heldReceipt struct {
 	Text    string    `json:"text"`
 	At      time.Time `json:"at"`
 	Along   bool      `json:"along,omitempty"`
 	Watch   bool      `json:"watch,omitempty"`
 	Outside bool      `json:"outside,omitempty"`
+	Patrol  bool      `json:"patrol,omitempty"`
 	Key     string    `json:"key,omitempty"`
 }
 
@@ -43,7 +45,13 @@ type heldReceipt struct {
 // into one turn once they have been quiet chatQuiet and the Planner is idle,
 // or rides on the next receipt Tell sends before then. Otherwise it is
 // Tell.
-func (a *Agent) TellLater(text string) error {
+func (a *Agent) TellLater(text string) error { return a.tellLater(text, false) }
+
+// TellPatrolLater is TellLater for a receipt about a session dispatched to
+// fix a patrol finding (TellPatrol).
+func (a *Agent) TellPatrolLater(text string) error { return a.tellLater(text, true) }
+
+func (a *Agent) tellLater(text string, patrol bool) error {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil
@@ -56,9 +64,9 @@ func (a *Agent) TellLater(text string) error {
 	quietAt := a.userAt.Add(chatQuiet)
 	if !now.Before(quietAt) {
 		a.mu.Unlock()
-		return a.Tell(text)
+		return a.tellHeld(text, patrol)
 	}
-	a.holdLocked(heldReceipt{Text: text, At: now})
+	a.holdLocked(heldReceipt{Text: text, At: now, Patrol: patrol})
 	a.mu.Unlock()
 	a.pokeAt(quietAt.Sub(now))
 	return nil
@@ -205,14 +213,20 @@ func (a *Agent) dropWatchLocked() {
 // what the Planner already has another way (a report its session also sent
 // by SendMessage, D114), so a turn of its own would only repeat it. It is
 // dropped while the Planner cannot take receipts, as a Tell then is.
-func (a *Agent) TellAlong(text string) {
+func (a *Agent) TellAlong(text string) { a.tellAlong(text, false) }
+
+// TellPatrolAlong is TellAlong for a line about a session dispatched to fix
+// a patrol finding (TellPatrol): the receipt it rides on is the patrol's.
+func (a *Agent) TellPatrolAlong(text string) { a.tellAlong(text, true) }
+
+func (a *Agent) tellAlong(text string, patrol bool) {
 	text = strings.TrimSpace(text)
 	if text == "" || a.tellable() != nil {
 		return
 	}
 	now := a.cfg.Now()
 	a.mu.Lock()
-	a.holdLocked(heldReceipt{Text: text, At: now, Along: true})
+	a.holdLocked(heldReceipt{Text: text, At: now, Along: true, Patrol: patrol})
 	a.mu.Unlock()
 }
 
@@ -313,7 +327,7 @@ func (a *Agent) dropHeld(sent []heldReceipt) {
 
 // same reports whether h and o are the one receipt.
 func (h heldReceipt) same(o heldReceipt) bool {
-	return h.Text == o.Text && h.At.Equal(o.At) && h.Along == o.Along && h.Watch == o.Watch && h.Outside == o.Outside && h.Key == o.Key
+	return h.Text == o.Text && h.At.Equal(o.At) && h.Along == o.Along && h.Watch == o.Watch && h.Outside == o.Outside && h.Patrol == o.Patrol && h.Key == o.Key
 }
 
 // flushHeld sends the receipts held for the user going quiet once they

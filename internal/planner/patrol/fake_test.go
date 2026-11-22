@@ -37,6 +37,16 @@ type fakeRepo struct {
 	linked bool
 	// fail is the git subcommand that fails here.
 	fail string
+	// sha is HEAD's commit ("" has none) and prefix the directory's path
+	// below the repository's top, as `git rev-parse --show-prefix HEAD`.
+	sha, prefix string
+	// branch is `git branch --show-current` ("" is a detached HEAD); log
+	// the commits `git log` lists, newest first, each "<short sha>
+	// <subject>". A range of a commit not in gone lists them all; one in
+	// gone fails, as an unknown revision does.
+	branch string
+	log    []string
+	gone   []string
 }
 
 // fakeGH is what gh answers for one repository.
@@ -50,6 +60,8 @@ type fakeGH struct {
 	pulls, runs, issues string
 	// heads answers `gh pr list --head=<branch>` per branch; missing: [].
 	heads map[string]string
+	// views answers `gh pr view <number>` per number; missing fails.
+	views map[string]string
 	// fail is the "<command> <subcommand>" that fails ("pr list"); "head"
 	// fails the per-branch lookups only.
 	fail string
@@ -79,11 +91,24 @@ func (f *fakeExec) run(_ context.Context, dir, name string, args ...string) (str
 		}
 		switch args[0] {
 		case "rev-parse":
+			if slices.Contains(args, "HEAD") {
+				if r.sha == "" {
+					return r.prefix + "\n", errors.New("git rev-parse: fatal: ambiguous argument 'HEAD': unknown revision or path not in the working tree.")
+				}
+				return r.prefix + "\n" + r.sha + "\n", nil
+			}
 			gitDir := filepath.Join(dir, ".git")
 			if r.linked {
 				return dir + "\n" + filepath.Join(filepath.Dir(dir), "main", ".git", "worktrees", "x") + "\n" + filepath.Join(filepath.Dir(dir), "main", ".git") + "\n", nil
 			}
 			return dir + "\n" + gitDir + "\n.git\n", nil
+		case "branch":
+			return r.branch + "\n", nil
+		case "log":
+			if rev := args[len(args)-1]; strings.HasSuffix(rev, "..HEAD") && slices.Contains(r.gone, strings.TrimSuffix(rev, "..HEAD")) {
+				return "", errors.New("git log: fatal: bad revision")
+			}
+			return strings.Join(r.log, "\n") + "\n", nil
 		case "status":
 			return r.status, nil
 		case "remote":
@@ -131,6 +156,11 @@ func (f *fakeExec) run(_ context.Context, dir, name string, args ...string) (str
 				return out, nil
 			}
 			return "[]", nil
+		case cmd == "pr view":
+			if out, ok := g.views[args[2]]; ok {
+				return out, nil
+			}
+			return "", errors.New("gh pr view: could not resolve to a PullRequest")
 		case cmd == "repo view":
 			return `{"nameWithOwner":"` + cmp.Or(g.full, strings.ToLower(repo)) + `","defaultBranchRef":{"name":"` + g.def + `"}}`, nil
 		case cmd == "pr list":
@@ -202,8 +232,10 @@ type env struct {
 	dirs   []workspace.Dir
 	active map[string]time.Time
 	paused time.Time
-	cfg    Config
-	p      *Patrol
+	// now is the patrol's clock, the package's now until a test moves it.
+	now time.Time
+	cfg Config
+	p   *Patrol
 }
 
 func newEnv(t *testing.T) *env {
@@ -212,7 +244,7 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &env{t: t, root: root, fe: &fakeExec{repos: map[string]*fakeRepo{}, gh: map[string]*fakeGH{}}, active: map[string]time.Time{}}
+	e := &env{t: t, root: root, fe: &fakeExec{repos: map[string]*fakeRepo{}, gh: map[string]*fakeGH{}}, active: map[string]time.Time{}, now: now}
 	e.items = front.New(filepath.Join(root, "planner", "fronts.json"), func() time.Time { return now })
 	e.cfg = Config{
 		Dir:         filepath.Join(root, "planner", "patrol"),
@@ -221,7 +253,7 @@ func newEnv(t *testing.T) *env {
 		Items:       e.items,
 		PausedUntil: func() time.Time { return e.paused },
 		Exec:        e.fe.run,
-		Now:         func() time.Time { return now },
+		Now:         func() time.Time { return e.now },
 	}
 	e.p = New(e.cfg)
 	return e

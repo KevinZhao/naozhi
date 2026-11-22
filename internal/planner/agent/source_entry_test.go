@@ -33,6 +33,9 @@ func TestSourceEntryAndDynamic(t *testing.T) {
 		{SourceWatch, "watch", true},
 		{SourceWatchOutside, "watch", true},
 		{SourceWatchRefusal, "refusal", true},
+		{SourcePatrol, "patrol", true},
+		{SourcePatrolRefusal, "refusal", true},
+		{SourcePatrolReceipt, "receipt", true},
 	} {
 		if got := tc.src.Entry(); got != tc.entry {
 			t.Errorf("%s.Entry() = %q, want %q", tc.src, got, tc.entry)
@@ -164,5 +167,62 @@ func TestWatchTurnFooting(t *testing.T) {
 	if len(turns.sent) != 1 || turns.srcs[0] != SourceWatchRefusal || turns.said[0] != nil ||
 		turns.sent[0] != "<naozhi-receipt>\n第 1 块（dispatch）没有执行\n</naozhi-receipt>" {
 		t.Errorf("sent %q from %q with words %v, want the receipt from watch_refusal", turns.sent, turns.srcs, turns.said)
+	}
+}
+
+// A deep check's new findings start a turn of their own, never merged with
+// the user's message (Alone), and not an outside one: they are the user's
+// own repository's content, so the turn may dispatch (§15.23 ③). PatrolTurn
+// is what the action runner limits such a turn by. The receipt of its
+// blocks not run (TellPatrolRefused) starts a turn that is a patrol turn
+// and a receipt's own: the same limits and caps hold, and it gets no
+// receipt, so the two do not go round.
+func TestPatrolTurnFooting(t *testing.T) {
+	for _, src := range []Source{SourcePatrol, SourcePatrolRefusal} {
+		if !src.Alone() || src.Outside() {
+			t.Errorf("%s: alone %v outside %v, want alone and not outside", src, src.Alone(), src.Outside())
+		}
+	}
+	now := time.Now()
+	a, _ := newTestAgent(t, &fakeSessions{}, &now)
+	if a.PatrolTurn() {
+		t.Fatal("a patrol turn before Start")
+	}
+	turns := &fakeTurns{}
+	a.turns = turns
+	for _, tc := range []struct {
+		sources       []Source
+		patrol, unrun bool
+	}{
+		{nil, false, false},
+		{[]Source{SourceReceipt}, false, false},
+		{[]Source{SourceUnrun}, false, true},
+		{[]Source{SourceScout}, false, false},
+		{[]Source{SourceWatch}, false, false},
+		{[]Source{SourcePatrol}, true, false},
+		{[]Source{SourcePatrolRefusal}, true, true},
+		{[]Source{SourceUser, SourcePatrol}, true, false},
+	} {
+		turns.sources = tc.sources
+		if a.PatrolTurn() != tc.patrol || a.UnrunTurn() != tc.unrun {
+			t.Errorf("%v: patrol %v unrun %v, want %v %v", tc.sources, a.PatrolTurn(), a.UnrunTurn(), tc.patrol, tc.unrun)
+		}
+		if slices.Contains(tc.sources, SourcePatrol) && (a.OutsideTurn() != "" || a.WatchTurn()) {
+			t.Errorf("%v: outside %q watch %v, want neither", tc.sources, a.OutsideTurn(), a.WatchTurn())
+		}
+	}
+	turns.sources = nil
+	if err := a.Wake(SourcePatrol, nil, `<naozhi-patrol workspace="ws_ab12cd34" name="gateway" run="r1" findings="1">x</naozhi-patrol>`); err != nil {
+		t.Fatal(err)
+	}
+	if len(turns.srcs) != 1 || turns.srcs[0] != SourcePatrol || turns.said[0] != nil {
+		t.Fatalf("woken from %q with words %v, want patrol and none", turns.srcs, turns.said)
+	}
+	if err := a.TellPatrolRefused("第 1 块（status）没有执行"); err != nil {
+		t.Fatal(err)
+	}
+	if len(turns.sent) != 2 || turns.srcs[1] != SourcePatrolRefusal || turns.said[1] != nil ||
+		turns.sent[1] != "<naozhi-receipt>\n第 1 块（status）没有执行\n</naozhi-receipt>" {
+		t.Errorf("sent %q from %q with words %v, want the receipt from patrol_refusal", turns.sent, turns.srcs, turns.said)
 	}
 }

@@ -26,6 +26,12 @@
 //	POST /api/scout/run      a scout run now, outside the schedule (§15.6);
 //	                         202 with the run ID, the record lands in
 //	                         <state root>/planner/scout/runs
+//	POST /api/planner/patrol/run {"workspace": "<ID or name>"} — a deep
+//	                         check of that workspace now (patrol.go)
+//	POST /api/planner/patrol/decide {"ref", "choice"} or {"workspace",
+//	                         "choice": "mute_ws"} — the user's say on a
+//	                         finding or a workspace's patrol, only
+//	                         straight from loopback (patrol.go)
 //
 // All sit behind the /api/* auth middleware.
 package planner
@@ -42,6 +48,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/brief"
 	"github.com/naozhi/naozhi/internal/planner/front"
+	"github.com/naozhi/naozhi/internal/planner/patrol"
 	"github.com/naozhi/naozhi/internal/planner/reader"
 	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -61,6 +68,8 @@ type Handler struct {
 	archive func(key string) bool
 	// fronts is the ledger of the user's lines of work (SetFronts).
 	fronts *front.Store
+	// patrol is the project patrol (SetPatrol).
+	patrol *patrol.Patrol
 }
 
 // New returns a Handler for a, b, sc and files (any nil when not built; with

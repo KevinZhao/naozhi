@@ -983,6 +983,10 @@ const LOOKUP_RE = /^<naozhi-lookup q="([^"]*)" run="(\d{8}T\d{6}-[0-9a-f]{4})"/;
 // turn (planner/agent TellWatch, D138): written for the model, as a receipt
 // is, so it is not shown.
 const WATCH_RE = /^<naozhi-watch>/;
+// PATROL_RE is a project patrol's weekly deep check waking the Planner with
+// what it found in a workspace (planner/patrol): the turn is marked 来自项目巡查
+// with the workspace's name rather than shown as your bubble.
+const PATROL_RE = /^<naozhi-patrol workspace="[^"]*" name="([^"]*)" run="[^"]*" findings="(\d+)"/;
 // unescapeAttr undoes the gateway's html.EscapeString of an attribute.
 const unescapeAttr = (s) => s.replace(/&(lt|gt|quot|#39|#34|amp);/g, (_, n) => ({ lt: '<', gt: '>', quot: '"', '#39': "'", '#34': '"', amp: '&' })[n]);
 // COALESCE_HEAD leads requests that queued while the Planner was busy and
@@ -1029,6 +1033,8 @@ function withoutSnapshot(e) {
   if (sc) return Object.assign({}, e, { type: 'system', summary: '来自巡检：' + sc[1] + ' 条新发现', detail: '' });
   const mt = e.type === 'user' && MEETING_RE.exec(e.detail || e.summary || '');
   if (mt) return Object.assign({}, e, { type: 'system', summary: '来自会前简报：' + mt[1] + ' 开始的会议', detail: '' });
+  const pa = e.type === 'user' && PATROL_RE.exec(e.detail || e.summary || '');
+  if (pa) return Object.assign({}, e, { type: 'system', summary: '来自项目巡查 · ' + pa[1] + '：' + pa[2] + ' 条新发现', detail: '' });
   const lk = e.type === 'user' && LOOKUP_RE.exec(e.detail || e.summary || '');
   if (lk) return Object.assign({}, e, { type: 'system', summary: '🔎 ' + lk[2] + ' ' + unescapeAttr(lk[1]), detail: '' });
   if (e.type !== 'user' || !GATEWAY_HEAD_RE.test(e.detail || e.summary || '')) return e;

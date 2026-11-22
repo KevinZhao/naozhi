@@ -1,23 +1,34 @@
 package wireup
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/notify"
+	"github.com/naozhi/naozhi/internal/planner/action"
 	"github.com/naozhi/naozhi/internal/planner/activity"
 	"github.com/naozhi/naozhi/internal/planner/agent"
+	"github.com/naozhi/naozhi/internal/planner/brief"
+	"github.com/naozhi/naozhi/internal/planner/front"
 	"github.com/naozhi/naozhi/internal/planner/journal"
 	"github.com/naozhi/naozhi/internal/planner/note"
 	"github.com/naozhi/naozhi/internal/planner/patrol"
 	"github.com/naozhi/naozhi/internal/planner/reap"
 	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
+	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
+	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 func patrolJournal(t *testing.T) *journal.Journal {
@@ -46,13 +57,14 @@ func appendEntry(t *testing.T, j *journal.Journal, e journal.Entry, data any) {
 // the user's sessions and the dispatched ones, those written before the
 // first call (read from the journal) and those after (observed); a cron
 // run's, the Planner's and the scout's turns do not count, nor a turn past
-// the 7 days read.
+// the 7 days read, nor the patrol's own: a deep check's session, and a task
+// dispatched to fix a finding.
 func TestPatrolActive(t *testing.T) {
 	j := patrolJournal(t)
 	reg := workspace.Load("", "node1")
 	root, _ := filepath.EvalSymlinks(t.TempDir())
 	id := map[string]string{}
-	for _, n := range []string{"chat", "task", "cron", "planner", "scout", "later", "old"} {
+	for _, n := range []string{"chat", "task", "cron", "planner", "scout", "later", "old", "fix", "fixlater", "deep"} {
 		ws, ok := reg.Ensure(filepath.Join(root, n))
 		if !ok {
 			t.Fatal("workspace not registered")
@@ -65,13 +77,26 @@ func TestPatrolActive(t *testing.T) {
 	rec.RecordTurn("cron:job1", filepath.Join(root, "cron"), activity.TurnDone)
 	rec.RecordTurn("planner:main", filepath.Join(root, "planner"), activity.TurnDone)
 	rec.RecordTurn("scout:20261123T080000-abcd", filepath.Join(root, "scout"), activity.TurnDone)
+	// The patrol's own: a deep check's session, and the tasks dispatched to
+	// fix its findings.
+	rec.RecordTurn("patrol:20261125T110412-9c1e", filepath.Join(root, "deep"), activity.TurnDone)
+	side := sidecar.Open(t.TempDir(), nil)
+	for _, key := range []string{"task:ffffffffffff", "task:eeeeeeeeeeee"} {
+		if err := side.Put(sidecar.Meta{Key: key, Purpose: sidecar.PurposeTask, Finding: "ws_ab12cd34/bug-router-nil"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := side.Put(sidecar.Meta{Key: "task:aaaaaaaaaaaa", Purpose: sidecar.PurposeTask}); err != nil {
+		t.Fatal(err)
+	}
+	rec.RecordTurn("task:ffffffffffff", filepath.Join(root, "fix"), activity.TurnDone)
 	// In no workspace at all.
 	rec.RecordTurn("dashboard:direct:u:general", "", activity.TurnDone)
 	now := time.Now()
 	appendEntry(t, j, journal.Entry{TS: now.Add(-patrol.ActiveDays*24*time.Hour - time.Hour), WS: id["old"], Kind: journal.KindTurn, Unit: "dashboard:direct:u:general"},
 		activity.Turn{Outcome: activity.TurnDone})
 
-	active := PatrolActive(j, func() time.Time { return now })
+	active := PatrolActive(j, func() time.Time { return now }, PatrolOwnTask(side))
 	got := active()
 	var have []string
 	for n, ws := range id {
@@ -89,6 +114,7 @@ func TestPatrolActive(t *testing.T) {
 
 	rec.RecordTurn("feishu:direct:alice:general", filepath.Join(root, "later"), activity.TurnDone)
 	rec.RecordTurn("cron:job1", filepath.Join(root, "cron"), activity.TurnDone)
+	rec.RecordTurn("task:eeeeeeeeeeee", filepath.Join(root, "fixlater"), activity.TurnDone)
 	got = active()
 	if _, ok := got[id["later"]]; !ok || len(got) != 3 {
 		t.Errorf("after a turn observed active = %v", got)
@@ -98,7 +124,7 @@ func TestPatrolActive(t *testing.T) {
 	if _, ok := active()[id["later"]]; !ok {
 		t.Error("the caller's change reached the table")
 	}
-	if got := PatrolActive(nil, nil)(); len(got) != 0 {
+	if got := PatrolActive(nil, nil, nil)(); len(got) != 0 {
 		t.Errorf("with no journal active = %v", got)
 	}
 }
@@ -254,5 +280,287 @@ func TestPatrolRoutines(t *testing.T) {
 	}
 	if PatrolRoutines(nil, reg) != nil {
 		t.Error("PatrolRoutines with no scheduler is not nil")
+	}
+}
+
+// TestPatrolSession: the deep check's one turn runs on the key's session;
+// what comes back is its reply, and the session is reset.
+func TestPatrolSession(t *testing.T) {
+	// A cron key: reconnect retires a one-shot key's surviving shim, and
+	// the key is all PatrolSession takes from the patrol (as ScoutSession's
+	// test).
+	const key = "cron:3b9d1f6a8c2e4705"
+	fs := session.StartFakeShimForTest(t, key, 1, []string{adoptE2EAssistant, adoptE2EPrevResult})
+	r := session.NewRouter(fs.Config)
+	t.Cleanup(r.Shutdown)
+	r.ReconnectShimsCtx(context.Background())
+	fs.Attached(t)
+	type out struct {
+		reply string
+		err   error
+	}
+	done := make(chan out, 1)
+	go func() {
+		reply, err := PatrolSession(r)(context.Background(), key, session.AgentOpts{}, "深查")
+		done <- out{reply, err}
+	}()
+	testhelper.Eventually(t, func() bool { return len(fs.Sent()) > 0 }, 5*time.Second, "the turn never reached the shim")
+	fs.Emit(t, `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu1","name":"Read","input":{"file_path":"/ws/a.go"}}]},"session_id":"s1"}`)
+	fs.Emit(t, `{"type":"result","subtype":"success","result":"{\"findings\":[]}","session_id":"s1"}`)
+	var got out
+	select {
+	case got = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the deep check's session did not return")
+	}
+	if got.err != nil || got.reply != `{"findings":[]}` {
+		t.Fatalf("reply %q, err %v", got.reply, got.err)
+	}
+	if r.SessionFor(key) != nil {
+		t.Error("the session is still in the router after the deep check")
+	}
+}
+
+// TestPatrolTaskOpen: a task of the patrol's holds its place in the
+// workspace's cap, and its finding, until it is really over: marked done
+// or failed, stopped by the user, its session gone, or no longer listed. A
+// failure health reports of a live session is none of those — custody sends
+// it on in minutes — nor is waiting on the user.
+func TestPatrolTaskOpen(t *testing.T) {
+	side := sidecar.Open(t.TempDir(), nil)
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	put := func(key string, edit func(*sidecar.Meta)) {
+		t.Helper()
+		m := sidecar.Meta{Key: key, Purpose: sidecar.PurposeTask, Title: key, Created: now.Add(-time.Hour)}
+		if edit != nil {
+			edit(&m)
+		}
+		if err := side.Put(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mark := func(st task.State, by task.By) func(*sidecar.Meta) {
+		return func(m *sidecar.Meta) {
+			m.Mark = &sidecar.Mark{State: string(st), By: string(by), At: now.Add(-time.Minute)}
+		}
+	}
+	put("task:doing", nil)
+	put("task:waiting", nil)
+	put("task:failing", nil) // health says failed; the session is alive
+	put("task:done", mark(task.Done, task.ByPlanner))
+	put("task:failed", mark(task.Failed, task.ByPlanner))
+	put("task:failed-by-user", mark(task.Failed, task.ByUser))
+	put("task:reopened", mark(task.Doing, task.ByPlanner))
+	put("task:ended", func(m *sidecar.Meta) { m.Retired = now.Add(-time.Minute) })
+	put("task:died", func(m *sidecar.Meta) {
+		m.Retired = now.Add(-time.Minute)
+		m.Failure = &sidecar.Mark{State: string(task.Failed), By: string(task.ByHealth), Why: "CLI exited", At: now.Add(-2 * time.Minute)}
+	})
+	put("task:archived", func(m *sidecar.Meta) {
+		m.Mark = &sidecar.Mark{State: string(task.Done), By: string(task.ByPlanner), At: now.Add(-2 * task.Archive)}
+		m.SeenAt = now.Add(-2 * task.Archive)
+	})
+	board := task.New(task.Config{Sessions: side, Now: func() time.Time { return now }, Health: func() health.Snapshot {
+		return health.Snapshot{Units: []health.Unit{
+			{ID: "task:waiting", State: health.Waiting, Since: now.Add(-time.Minute)},
+			{ID: "task:failing", State: health.Failed, Since: now.Add(-time.Minute), Evidence: "API Error: 529"},
+		}}
+	}})
+	if err := board.Stop("task:doing-then-stopped"); err == nil {
+		t.Fatal("stopped a task that is not there")
+	}
+	put("task:stopped", nil)
+	if err := board.Stop("task:stopped"); err != nil {
+		t.Fatal(err)
+	}
+	// The board's own states, so the cases above are what they claim.
+	states := map[string]task.Task{}
+	for _, tk := range board.List() {
+		states[tk.ID] = tk
+	}
+	if tk := states["task:failing"]; tk.State != task.Failed || tk.By != task.ByHealth {
+		t.Fatalf("task:failing is %s by %s on the board, want failed by health", tk.State, tk.By)
+	}
+	if _, listed := states["task:archived"]; listed {
+		t.Fatal("task:archived is still listed")
+	}
+	open := PatrolTaskOpen(board)
+	for key, want := range map[string]bool{
+		"task:doing": true, "task:waiting": true, "task:failing": true, "task:reopened": true,
+		"task:done": false, "task:failed": false, "task:failed-by-user": false, "task:stopped": false,
+		"task:ended": false, "task:died": false, "task:archived": false, "task:gone": false, "": false,
+	} {
+		if got := open(key); got != want {
+			t.Errorf("open(%q) = %v, want %v", key, got, want)
+		}
+	}
+}
+
+// TestPatrolAlarm: a file of the patrol's that does not read opens an
+// error in "等你".
+func TestPatrolAlarm(t *testing.T) {
+	n := notify.New(notify.Config{System: func(string, string) error { return nil }})
+	PatrolAlarm(n)("patrol:declined", "项目巡查的被否清单读不了，巡查已停", "declined.json：文件是空的")
+	open, _ := n.List(0)
+	if len(open) != 1 || open[0].Kind != notify.KindError || open[0].Source != "patrol:declined" || open[0].Title != "项目巡查的被否清单读不了，巡查已停" {
+		t.Errorf("inbox %+v", open)
+	}
+}
+
+// TestPatrolTaskDeny: a session dispatched to fix a patrol finding cannot
+// merge a pull request or cut a release by gh, nor by the ways round them
+// that cost a fix nothing (a tag, gh api, a workflow started by hand): the
+// rules are in its deny list at dispatch and on a respawn from its sidecar.
+// Any other dispatched session does not carry them.
+func TestPatrolTaskDeny(t *testing.T) {
+	const finding = "ws_ab12cd34/bug-router-nil"
+	merge, release := "Bash(gh pr merge:*)", "Bash(gh release create:*)"
+	side := sidecar.Open("", nil)
+	to := TaskOpts{Base: session.AgentOpts{PermissionsDeny: []string{"Bash(rm -rf /)"}}, Sessions: side, Planner: "planner-abc123"}
+	want := append(append([]string{"Bash(rm -rf /)"}, taskDenyRules...), merge, release,
+		"Bash(git tag:*)", "Bash(git push*--tags*)", "Bash(git push*refs/tags/*)", "Bash(gh api:*)", "Bash(gh workflow run:*)")
+
+	opts, err := to.For("task:ab12", action.Spawn{Dir: "/tmp/ws", Title: "修重连", Finding: finding})
+	if err != nil || !slices.Equal(opts.PermissionsDeny, want) {
+		t.Fatalf("a patrol task's deny = %v, %v; want %v", opts.PermissionsDeny, err, want)
+	}
+	if len(to.Base.PermissionsDeny) != 1 {
+		t.Errorf("base changed: %v", to.Base.PermissionsDeny)
+	}
+	// The rules are deny rules only: nothing of them is allowed back.
+	for _, r := range opts.PermissionsAllow {
+		if strings.Contains(r, "gh pr merge") || strings.Contains(r, "gh release") {
+			t.Errorf("allow holds %s", r)
+		}
+	}
+	plain, err := to.For("task:cd34", action.Spawn{Dir: "/tmp/ws", Title: "写文档"})
+	if err != nil || slices.Contains(plain.PermissionsDeny, merge) || slices.Contains(plain.PermissionsDeny, release) {
+		t.Fatalf("a plain task's deny = %v, %v; want neither rule", plain.PermissionsDeny, err)
+	}
+
+	// A respawn rebuilds the options from the sidecar: the same rules, or
+	// the shim's recorded overlay would read as drift.
+	patrolKey, plainKey := sidecar.TaskKey(), sidecar.TaskKey()
+	if err := side.Put(sidecar.Meta{Key: patrolKey, Purpose: sidecar.PurposeTask, Title: "修重连", Dir: "/tmp/ws", Finding: finding}); err != nil {
+		t.Fatal(err)
+	}
+	if err := side.Put(sidecar.Meta{Key: plainKey, Purpose: sidecar.PurposeTask, Title: "写文档", Dir: "/tmp/ws"}); err != nil {
+		t.Fatal(err)
+	}
+	if opts, ok := to.ForKey(patrolKey); !ok || !slices.Equal(opts.PermissionsDeny, want) {
+		t.Errorf("a patrol task's respawn = %v, %v", opts.PermissionsDeny, ok)
+	}
+	if opts, ok := to.ForKey(plainKey); !ok || slices.Contains(opts.PermissionsDeny, merge) || slices.Contains(opts.PermissionsDeny, release) {
+		t.Errorf("a plain task's respawn = %v, %v", opts.PermissionsDeny, ok)
+	}
+	// With mcp_tools as well (the user's own dispatch of a finding): both
+	// sets of rules.
+	if _, err := to.For("task:ef56", action.Spawn{Dir: "/tmp/ws", Title: "t", Finding: finding, MCPTools: map[string][]string{"aws-outlook-mcp": {"email_send"}}}); err == nil {
+		t.Error("mcp_tools with no cli.mcp_config went through")
+	}
+}
+
+// TestPatrolCards: the user's answer on a patrol card in "通知" reaches the
+// patrol (its handler), which turns the finding down and has the other
+// cards about that finding closed as settled; a card about another finding
+// stays. The brief gets the patrol's part in its own types.
+func TestPatrolCards(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "gateway")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const ws = "ws_ab12cd34"
+	one, two := patrol.Ref(ws, "bug-one"), patrol.Ref(ws, "doc-two")
+	n := notify.New(notify.Config{System: func(string, string) error { return nil }})
+	handed := make(chan struct{}, 1)
+	var told []string
+	p := patrol.New(patrol.Config{
+		Dir:        filepath.Join(root, "planner", "patrol"),
+		Workspaces: func() []workspace.Dir { return []workspace.Dir{{ID: ws, Name: "gateway", Path: dir}} },
+		Items:      front.New("", nil),
+		Exec: func(context.Context, string, string, ...string) (string, error) {
+			return "", os.ErrNotExist // no git here
+		},
+		Deny: func() []string { return nil },
+		Session: func(context.Context, string, session.AgentOpts, string) (string, error) {
+			return `{"findings":[
+				{"id":"bug-one","title":"重连时会话为空会崩","kind":"bug","evidence":["a.go:1"],"impact":"重连即崩","fix":"先判空","size":"S","reversible":true,"confidence":"high"},
+				{"id":"doc-two","title":"README 与脚本不符","kind":"doc","evidence":["a.go:1"],"impact":"装不上","fix":"改 README","size":"S","reversible":true,"confidence":"high"}]}`, nil
+		},
+		// The findings are on record once they are handed to the Planner.
+		Wake:       func(_, _ func(int, error), _ ...string) error { handed <- struct{}{}; return nil },
+		Answer:     func(text, _, words string) error { told = append(told, words+"|"+text); return nil },
+		CloseCards: PatrolCloseCards(n),
+	})
+	t.Cleanup(p.Stop)
+	n.HandleDecisions(patrol.Handler, p.DecideCard)
+	if _, err := p.Trigger(ws); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-handed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the deep check did not hand its findings over")
+	}
+
+	ask := func(source, ref string) notify.Item {
+		it, _ := n.Add(notify.Item{Kind: notify.KindQuestion, Source: "ask:" + source, Title: "怎么改？",
+			Decision: &notify.Decision{Handler: action.HandlerAsk, Payload: json.RawMessage(`{"question":"怎么改？","finding":"` + ref + `"}`), Actions: []notify.Action{"方案 A"}}})
+		return it
+	}
+	notice, _ := n.Add(notify.Item{Kind: notify.KindNotice, Source: "planner:pr", Title: "PR 已备好", Decision: p.Card(one)})
+	about, other := ask("r1", one), ask("r2", two)
+	if notice.Decision == nil || action.AskFinding(about) != one {
+		t.Fatalf("cards: %+v, %+v", notice.Decision, about.Decision)
+	}
+
+	if err := n.Decide(notice.ID, patrol.LabelSkip); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := p.Finding(one); r.State != patrol.StateDeclined {
+		t.Errorf("record %+v, want the finding turned down", r)
+	}
+	if got, _ := n.Item(notice.ID); got.State != notify.StateClosed || got.ClosedBy != notify.ClosedByUser || got.Decision.Answer != patrol.LabelSkip {
+		t.Errorf("the card answered: %+v", got)
+	}
+	if got, _ := n.Item(about.ID); got.State != notify.StateClosed || got.ClosedWhy != "你已选了不做" {
+		t.Errorf("the question about the same finding: %+v, want it closed as settled", got)
+	}
+	if got, _ := n.Item(other.ID); got.State != notify.StateOpen {
+		t.Errorf("the question about another finding: %+v, want it open", got)
+	}
+	if len(told) != 0 {
+		t.Errorf("the Planner was told %q with nothing left to do", told)
+	}
+	// An answer the card does not carry never reaches the patrol.
+	again, _ := n.Add(notify.Item{Kind: notify.KindNotice, Source: "planner:pr2", Title: "PR 已备好", Decision: p.Card(two)})
+	if err := n.Decide(again.ID, "合并"); !errors.Is(err, notify.ErrNoDecision) {
+		t.Errorf("an answer the card does not carry: %v", err)
+	}
+	// "做" goes on to the Planner in the user's words.
+	if err := n.Decide(again.ID, patrol.LabelDo); err != nil || len(told) != 1 || !strings.HasPrefix(told[0], "做|") || !strings.Contains(told[0], `"finding":"`+two+`"`) {
+		t.Errorf("做 on the card: %v, told %q", err, told)
+	}
+
+	rep := BriefProjects(p)(time.Time{})
+	if len(rep.PRs) != 0 || len(rep.Stopped) != 0 || !slices.Equal(rep.New, []brief.ProjectFinding{{Title: "README 与脚本不符", Kind: "doc", Workspace: "gateway"}}) {
+		t.Errorf("the brief's part: %+v", rep)
+	}
+}
+
+// TestPatrolAnswer: the user's choice goes to the Planner as an answer of
+// theirs; a Planner that is off says so, for the patrol to keep the choice
+// and go no further.
+func TestPatrolAnswer(t *testing.T) {
+	a := agent.New(agent.Config{})
+	if err := PatrolAnswer(a, nil)("用户选了：做", "怎么处置", "做"); !errors.Is(err, agent.ErrOff) {
+		t.Errorf("with the Planner off: %v, want ErrOff", err)
 	}
 }

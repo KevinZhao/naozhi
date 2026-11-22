@@ -595,6 +595,46 @@ func main() {
 	})
 	plannerAgent.SetTaskIndex(wireup.PlannerTaskIndex(tasks, digests))
 	plannerAgent.SetRoutines(wireup.PlannerRoutineList(scheduler))
+	// The project patrol (§15.23, D142). Its deterministic checks: hourly,
+	// with no model, over the workspaces that had a session in the last 7
+	// days; its hits are open items of the ledger. Its deep check: once a
+	// week per workspace, a one-shot read-only session whose new findings
+	// wake the Planner, which sorts them; the caps on what comes of them
+	// are the patrol's. It follows the one pause and stays off on an
+	// isolated instance, as the scout does.
+	// A deep check's allow rules are its whole grant only where the session
+	// settings are naozhi's own: under dontAsk the base file's
+	// permissions.allow is left out. With the CLI reading
+	// ~/.claude/settings.json itself the user's own allow rules would widen
+	// what the session reads, so there it gets no deny rules, and does not
+	// run.
+	var patrolDeny func() []string
+	if naozhiSettingsFile != "" {
+		patrolDeny = plannerAgent.ReadDeny
+	}
+	patroller := patrol.New(patrol.Config{
+		Dir:         sessionLayout.PlannerPatrolRoot(),
+		Workspaces:  plannerState.Workspaces.LocalDirs,
+		Active:      wireup.PatrolActive(plannerState.Journal, nil, wireup.PatrolOwnTask(sidecars)),
+		Items:       fronts,
+		Worktrees:   wireup.PatrolWorktrees(sidecars),
+		Routines:    wireup.PatrolRoutines(scheduler, plannerState.Workspaces),
+		Self:        wireup.PatrolSelf(plannerState.Journal),
+		PausedUntil: notifier.PausedUntil,
+		Isolated:    isolated,
+		Session:     wireup.PatrolSession(router),
+		Wake:        wireup.PatrolWake(plannerAgent),
+		// What the Planner may not read, a deep check may not either.
+		Deny:     patrolDeny,
+		TaskOpen: wireup.PatrolTaskOpen(tasks),
+		Alarm:    wireup.PatrolAlarm(notifier),
+		Ctx:      ctx,
+		// The user's say on a finding (§15.23 ④): "做" reaches the Planner
+		// as their words, a finding settled closes its cards.
+		Answer:     wireup.PatrolAnswer(plannerAgent, nil),
+		CloseCards: wireup.PatrolCloseCards(notifier),
+	})
+	notifier.HandleDecisions(patrol.Handler, patroller.DecideCard)
 	briefer := brief.New(brief.Config{
 		Journal: plannerState.Journal,
 		Health:  func() health.Snapshot { return healthMon.Snapshot() },
@@ -614,10 +654,13 @@ func main() {
 		Parked:       plannerAgent.Parked,
 		// The brief leads with the lines of work; the Planner brings the
 		// ledger up to date first (§15.18, D133).
-		Fronts:  fronts.Open,
-		Items:   fronts.Items,
-		Tidy:    wireup.BriefTidy(plannerAgent),
-		Tidying: plannerAgent.Tidying,
+		Fronts: fronts.Open,
+		Items:  fronts.Items,
+		// The patrol's section comes after them (§15.23 ⑤).
+		Projects:        wireup.BriefProjects(patroller),
+		ProjectsBriefed: patroller.Briefed,
+		Tidy:            wireup.BriefTidy(plannerAgent),
+		Tidying:         plannerAgent.Tidying,
 		// With several nodes the scout's node sends the brief, each node's
 		// Planner covering its own sessions (docs/rfc/remote-planner.md §2.1).
 		Elsewhere: func() bool { return multiNode(cfg) && !scouter.Enabled() },
@@ -705,6 +748,7 @@ func main() {
 		Scout:            scouter,
 		Lookups:          lookups,
 		Fronts:           fronts,
+		Patrol:           patroller,
 		PutAway:          wireup.PutAwayRecord{Sidecars: sidecars, EventsDir: sessionLayout.EventsRoot()},
 		Briefs:           briefer,
 		Health:           func() health.Snapshot { return healthMon.Snapshot() },
@@ -878,22 +922,18 @@ func main() {
 		Items:      fronts,
 		Lookup:     wireup.PlannerLookup(lookups),
 		TellAnswer: wireup.PlannerTellAnswer(plannerAgent),
-		Ctx:        ctx,
-	})
-	// The project patrol's deterministic checks (§15.23 ①, D142): hourly,
-	// with no model, over the workspaces that had a session in the last 7
-	// days; its hits are open items of the ledger. It follows the one pause
-	// and stays off on an isolated instance, as the scout does.
-	patroller := patrol.New(patrol.Config{
-		Dir:         sessionLayout.PlannerPatrolRoot(),
-		Workspaces:  plannerState.Workspaces.LocalDirs,
-		Active:      wireup.PatrolActive(plannerState.Journal, nil),
-		Items:       fronts,
-		Worktrees:   wireup.PatrolWorktrees(sidecars),
-		Routines:    wireup.PatrolRoutines(scheduler, plannerState.Workspaces),
-		Self:        wireup.PatrolSelf(plannerState.Journal),
-		PausedUntil: notifier.PausedUntil,
-		Isolated:    isolated,
+		// The blocks naming a patrol finding, and the turns its findings
+		// start.
+		PatrolTurn:        plannerAgent.PatrolTurn,
+		TellPatrolRefused: plannerAgent.TellPatrolRefused,
+		// The receipts about a task dispatched to fix a finding, and the
+		// turns they start: held to the patrol's limits as well.
+		PatrolTaskTurn:  plannerAgent.PatrolTaskTurn,
+		TellPatrol:      plannerAgent.TellPatrol,
+		TellPatrolLater: plannerAgent.TellPatrolLater,
+		TellPatrolAlong: plannerAgent.TellPatrolAlong,
+		Patrol:          patroller,
+		Ctx:             ctx,
 	})
 	// A watch line the Planner held goes out as its session stands then.
 	plannerAgent.SetWatchNow(actions.WatchNow)
@@ -1006,7 +1046,8 @@ func main() {
 				{name: "reader", run: lookups.Stop},
 				// The patrol's round in flight: its git and gh calls end with
 				// the cancel above, and nothing of it is left writing the
-				// ledger while the rest goes down.
+				// ledger while the rest goes down. Its deep check's session
+				// calls into the router, as the scout's does.
 				{name: "patrol", run: patroller.Stop},
 				// ShutdownComplete closes after srv.Shutdown's 30s drain, i.e. after
 				// every in-flight handler finished, so router.Shutdown never races a

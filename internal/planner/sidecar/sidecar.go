@@ -75,6 +75,11 @@ type Meta struct {
 	MCPTools map[string][]string `json:"mcp_tools,omitempty"`
 	// Ultracode is the dispatch's ultracode, kept for a respawn.
 	Ultracode bool `json:"ultracode,omitempty"`
+	// Finding is the project patrol's finding the session was dispatched to
+	// fix, by its ref (planner/patrol.Ref), "" for none: its report goes
+	// back to the finding's record, and a respawn keeps the rules such a
+	// session starts with (wireup.TaskOpts).
+	Finding string `json:"finding,omitempty"`
 	// ReportBlock is set on a session dispatched on the prompt that has it
 	// report in a naozhi-report block (§15.12 ③): what it sends the Planner
 	// by SendMessage is a question on the way, not a report. A session

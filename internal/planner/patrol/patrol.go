@@ -35,6 +35,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/front"
 	"github.com/naozhi/naozhi/internal/planner/github"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
+	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
 const (
@@ -93,14 +94,61 @@ type Config struct {
 	Exec github.ExecFunc
 	// Now is the wall clock; nil is time.Now.
 	Now func() time.Time
+
+	// Session runs a deep check's one-shot session (wireup.PatrolSession);
+	// nil makes no deep checks (§15.23 ②).
+	Session Session
+	// Wake hands a workspace's new findings to the Planner, a block a
+	// batch, each batch a turn of its own (agent.Agent.WakeEnded from
+	// agent.SourcePatrol); sent is told how each later batch went, ended
+	// how each batch's turn ended. Whatever the error, the findings go
+	// again at the next round, twice in all: a deep check is a week away,
+	// so none is dropped for a Planner that is off. nil hands none over.
+	Wake func(sent, ended func(batch int, err error), blocks ...string) error
+	// Deny is the read rules a deep check's session is denied besides the
+	// credential files by name: the Planner's own (agent.Agent.ReadDeny),
+	// read as each check starts. nil makes no deep checks: a session that
+	// reads a repository does not run without them. It is nil too where the
+	// session settings are not naozhi's own: the user's own allow rules
+	// would be added to the session's, which are to be all it may read.
+	Deny func() []string
+	// TaskOpen reports whether dispatched session key is still going: not
+	// marked done or failed, not stopped, not gone from 任务
+	// (wireup.PatrolTaskOpen). A failure custody sends on is still going.
+	// nil counts every one as going.
+	TaskOpen func(key string) bool
+	// Alarm opens an error in "等你": a file of the patrol's the user
+	// edits does not read. nil only logs.
+	Alarm func(source, title, why string)
+	// Ctx bounds the deep checks' sessions; nil is Background. Stop cuts
+	// them as well.
+	Ctx context.Context
+	// Answer tells the Planner what the user chose about a finding, as a
+	// turn the user started whose words are the choice (words, in answer to
+	// question): the Planner may dispatch on it (agent.Agent.TellAnswer).
+	// nil reaches nobody: a finding turned down stands all the same, one
+	// to be done is refused (ErrPlanner).
+	Answer func(text, question, words string) error
+	// CloseCards closes the cards in "通知" about a finding, saying why
+	// (wireup.PatrolCloseCards): it was turned down, or its pull request is
+	// over. nil closes none.
+	CloseCards func(ref, why string)
 }
+
+// Session runs one deep check: key's session started with opts and sent
+// text. It returns the reply; the session is gone when it returns.
+type Session func(ctx context.Context, key string, opts sessionview.AgentOpts, text string) (reply string, err error)
 
 // Items is the part of the ledger the patrol writes: Reconcile makes a
 // check's open items be its hits, CloseItems closes those of a workspace no
-// longer registered.
+// longer registered and of a finding whose pull request is over, AddItem
+// and EditItem file a deep check's finding and say its pull request is
+// ready.
 type Items interface {
 	Reconcile(match func(front.Item) bool, want []front.Item, by string) (added, closed []front.Item)
 	CloseItems(match func(front.Item) bool, by string) []front.Item
+	AddItem(front.Item) (front.Item, bool, error)
+	EditItem(id string, text, source, frontID *string) (front.Item, error)
 }
 
 // Worktree is a git worktree a put-away session left in place: its
@@ -147,9 +195,37 @@ type Patrol struct {
 	runMu  sync.Mutex
 	cancel context.CancelFunc
 	done   chan struct{}
+
+	// deepMu guards the deep checks' records on disk (deep/*.json) and
+	// declined.json, each change a read, an edit and a write under it, and
+	// the fields below. Four goroutines come here: a deep check's, the
+	// round's, the action runner's and a request's. Nothing slow runs
+	// under it (no session, no gh, no wake, no telling the Planner, no
+	// card closed); the ledger is written under it (deepMu, then
+	// front.Store's lock), and the ledger never calls back.
+	deepMu sync.Mutex
+	// deepRunning is the deep check in flight: one at a time.
+	deepRunning bool
+	// sending are the findings (by ref) handed to the Planner by this
+	// process whose turn has not ended: a round does not hand them over a
+	// second time. had are those whose turn ended normally, and when: what
+	// the Planner left without a word after its turn is the gateway's to
+	// file.
+	sending map[string]bool
+	had     map[string]time.Time
+	// declinedAlarmed says declined.json was unreadable at the last look,
+	// and the user was told; stateAlarmed the same of the workspaces'
+	// records, by workspace ID.
+	declinedAlarmed bool
+	stateAlarmed    map[string]bool
+	// deepCtx bounds the deep checks' sessions, cut by Stop; runs are the
+	// ones in flight, for Stop to wait on.
+	deepCtx    context.Context
+	deepCancel context.CancelFunc
+	runs       sync.WaitGroup
 }
 
-// New returns a Patrol; nothing runs until Run or Round.
+// New returns a Patrol; nothing runs until Run, Round or Trigger.
 func New(cfg Config) *Patrol {
 	if cfg.Exec == nil {
 		cfg.Exec = github.Exec
@@ -157,7 +233,12 @@ func New(cfg Config) *Patrol {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Patrol{cfg: cfg, hasPR: map[string]bool{}}
+	if cfg.Ctx == nil {
+		cfg.Ctx = context.Background()
+	}
+	p := &Patrol{cfg: cfg, hasPR: map[string]bool{}, sending: map[string]bool{}, had: map[string]time.Time{}, stateAlarmed: map[string]bool{}}
+	p.deepCtx, p.deepCancel = context.WithCancel(cfg.Ctx)
+	return p
 }
 
 // Enabled reports whether rounds run here.
@@ -193,28 +274,43 @@ func (p *Patrol) Run(ctx context.Context) {
 }
 
 // Stop ends Run and waits for its round in flight, whose git and gh calls
-// the cancel cuts.
+// the cancel cuts, and for the deep check in flight: its session calls into
+// the router, so Stop comes before the router's shutdown. A deep check cut
+// short leaves no record and runs again after the next start.
 func (p *Patrol) Stop() {
 	if p == nil {
 		return
 	}
+	// Under deepMu: a deep check starting now either is counted before the
+	// wait below or finds the patrol stopped.
+	p.deepMu.Lock()
+	p.deepCancel()
+	p.deepMu.Unlock()
 	p.runMu.Lock()
 	cancel, done := p.cancel, p.done
 	p.runMu.Unlock()
-	if cancel == nil {
-		return
+	if cancel != nil {
+		cancel()
 	}
-	cancel()
+	gone := make(chan struct{})
+	go func() {
+		if done != nil {
+			<-done
+		}
+		p.runs.Wait()
+		close(gone)
+	}()
 	select {
-	case <-done:
+	case <-gone:
 	case <-time.After(stopWait):
-		slog.Warn("planner patrol: round still going at shutdown")
+		slog.Warn("planner patrol: round or deep check still going at shutdown")
 	}
 }
 
-// Round makes one round now, unless one is in flight or pushes and custody
-// are paused: a paused round looks at nothing, writes nothing and leaves
-// every item as it is. A panic ends the round, not the process.
+// Round makes one round now, unless one is in flight, pushes and custody
+// are paused, or declined.json does not read: such a round looks at
+// nothing, writes nothing and leaves every item as it is. A panic ends the
+// round, not the process.
 func (p *Patrol) Round(ctx context.Context) {
 	if !p.Enabled() || !p.mu.TryLock() {
 		return
@@ -232,7 +328,20 @@ func (p *Patrol) Round(ctx context.Context) {
 			return
 		}
 	}
-	p.checks(ctx, now)
+	// What the user turned down decides what is looked at (§15.23 ④): not
+	// knowing it, the round looks at nothing.
+	declined, err := p.readDeclined()
+	if err != nil {
+		return
+	}
+	p.checks(ctx, now, declined)
+	if ctx.Err() != nil {
+		return
+	}
+	// The deep checks ride the hourly round (§15.23 ②): what became of
+	// the findings handed on is looked at, then the check due is started.
+	p.follow(ctx)
+	p.deep(ctx, now, declined)
 }
 
 // round is what one round shares between its workspaces.
@@ -242,6 +351,8 @@ type round struct {
 	// repos are the GitHub repositories looked at, by lowercased
 	// owner/name: one that several directories are in is asked once.
 	repos map[string]*repoReport
+	// own are the pull requests the deep checks' findings led to (ownPulls).
+	own map[string]bool
 	// failed counts the checks that could not be made; added and closed
 	// the items filed and closed.
 	failed, added, closed int
@@ -250,19 +361,20 @@ type round struct {
 // checks makes the deterministic checks of one round: the files and items
 // of workspaces no longer registered go first, so what another workspace
 // still finds is filed again in the same round; then each workspace in
-// scope, then the standing tasks and naozhi's own week.
-func (p *Patrol) checks(ctx context.Context, now time.Time) {
+// scope the user has not taken out of the patrol, then the standing tasks
+// and naozhi's own week.
+func (p *Patrol) checks(ctx context.Context, now time.Time, declined Declined) {
 	if err := datadir.EnsureDir(p.cfg.Dir); err != nil {
 		slog.Warn("planner patrol: directory unavailable", "dir", p.cfg.Dir, "err", err)
 		return
 	}
-	rd := &round{now: now, dirs: p.cfg.Workspaces(), repos: map[string]*repoReport{}}
+	rd := &round{now: now, dirs: p.cfg.Workspaces(), repos: map[string]*repoReport{}, own: p.ownPulls()}
 	var active map[string]time.Time
 	if p.cfg.Active != nil {
 		active = p.cfg.Active()
 	}
 	p.prune(rd)
-	targets := scope(rd.dirs, active, now)
+	targets := unmuted(scope(rd.dirs, active, now), declined)
 	for _, t := range targets {
 		if ctx.Err() != nil {
 			return
@@ -465,13 +577,15 @@ func groupOf(source string) (check, repo string) {
 	return "", ""
 }
 
-// prune removes the files of workspaces no longer registered and closes
-// the checks' items filed under them: nothing looks at those again.
-// naozhi.md and whatever else lives in the directory stay. A registry with
-// nothing on this node prunes nothing: that is one that could not be read,
-// or a node whose ID changed, far more often than every workspace gone at
-// once, and the files and items of the workspaces out of scope would not
-// come back.
+// prune removes the files of workspaces no longer registered — the checks'
+// result and the deep checks' record — and closes the patrol's items filed
+// under them, the deep checks' findings among them: nothing looks at those
+// again, and a finding left on record would still be handed to the Planner
+// for a workspace it cannot dispatch into. naozhi.md and whatever else
+// lives in the directory stay. A registry with nothing on this node prunes
+// nothing: that is one that could not be read, or a node whose ID changed,
+// far more often than every workspace gone at once, and the files and
+// items of the workspaces out of scope would not come back.
 func (p *Patrol) prune(rd *round) {
 	if len(rd.dirs) == 0 {
 		return
@@ -480,20 +594,28 @@ func (p *Patrol) prune(rd *round) {
 	for _, d := range rd.dirs {
 		registered[d.ID] = true
 	}
-	if entries, err := os.ReadDir(p.cfg.Dir); err == nil {
+	gone := func(dir, suffix string) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
 		for _, e := range entries {
-			id, ok := strings.CutSuffix(e.Name(), ".md")
+			id, ok := strings.CutSuffix(e.Name(), suffix)
 			if e.IsDir() || !ok || !wsRE.MatchString(id) || registered[id] {
 				continue
 			}
-			if err := os.Remove(filepath.Join(p.cfg.Dir, e.Name())); err == nil {
+			if err := os.Remove(filepath.Join(dir, e.Name())); err == nil {
 				slog.Info("planner patrol: workspace no longer registered; file removed", "file", e.Name())
 			}
 		}
 	}
+	gone(p.cfg.Dir, ".md")
+	p.deepMu.Lock()
+	gone(filepath.Join(p.cfg.Dir, deepDir), ".json")
+	p.deepMu.Unlock()
 	closed := p.cfg.Items.CloseItems(func(it front.Item) bool {
 		g, _ := groupOf(it.Source)
-		return it.From == front.FromPatrol && g != "" && it.Workspace != "" && !registered[it.Workspace]
+		return it.From == front.FromPatrol && (g != "" || strings.HasPrefix(it.Source, front.PatrolSource)) && it.Workspace != "" && !registered[it.Workspace]
 	}, front.ByPatrol)
 	rd.closed += len(closed)
 }

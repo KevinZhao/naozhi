@@ -220,6 +220,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	})
 	hs.plannerH.SetLookups(opts.Lookups)
 	hs.plannerH.SetFronts(opts.Fronts)
+	hs.plannerH.SetPatrol(opts.Patrol)
 	if router != nil {
 		hs.plannerH.SetArchive(func(key string) bool {
 			_, ok := router.Archive(key)

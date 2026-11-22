@@ -125,6 +125,12 @@ func TestExemptCapFor(t *testing.T) {
 	if got := exemptCapFor("sys"); got != maxSysExempt {
 		t.Errorf("exemptCapFor(sys) = %d, want %d", got, maxSysExempt)
 	}
+	if got := exemptCapFor("patrol"); got != 1 {
+		t.Errorf("exemptCapFor(patrol) = %d, want 1: one deep check at a time", got)
+	}
+	if got := exemptKind("patrol:20261125T110412-9c1e"); got != "patrol" {
+		t.Errorf("exemptKind(patrol:…) = %q, want patrol", got)
+	}
 	if got := exemptCapFor("unknown"); got != maxExemptSessions {
 		t.Errorf("exemptCapFor(unknown) = %d, want %d (global fallback)", got, maxExemptSessions)
 	}
@@ -150,7 +156,7 @@ func TestExemptCapFor(t *testing.T) {
 // the relief valve, never the primary trigger. R242-ARCH-2.
 func TestExemptSubQuotasFitGlobalCeiling(t *testing.T) {
 	t.Parallel()
-	sum := maxCronExempt + maxProjectExempt + maxSysExempt + maxPlannerExempt + maxScoutExempt + maxReaderExempt
+	sum := maxCronExempt + maxProjectExempt + maxSysExempt + maxPlannerExempt + maxScoutExempt + maxReaderExempt + maxPatrolExempt
 	if sum > maxExemptSessions {
 		t.Fatalf("sum of sub-quotas %d exceeds maxExemptSessions %d", sum, maxExemptSessions)
 	}

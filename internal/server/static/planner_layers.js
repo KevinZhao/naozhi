@@ -52,6 +52,7 @@ const RECEIPT_END_RE = /<\/naozhi-receipt>\s*$/;
 const SCOUT_RE = /^<naozhi-scout findings="/;
 const MEETING_RE = /^<naozhi-scout kind="meeting"/;
 const LOOKUP_RE = /^<naozhi-lookup /;
+const PATROL_RE = /^<naozhi-patrol /;
 // WATCH_RE is the gateway's word that a session you opened ended a turn
 // (planner/agent TellWatch), WATCH_KEY_RE each session's line in it.
 const WATCH_RE = /^<naozhi-watch>/;
@@ -91,15 +92,16 @@ const KEY_RE = /\btask:[A-Za-z0-9_-]+|\b(?:dashboard|feishu|slack|discord|weixin
 // not what the turn is about.
 const SNAPSHOT_ANY_RE = /<naozhi-snapshot(?:\s[^>]*\/>|[\s>][\s\S]*?(?:<\/naozhi-snapshot>|$))/g;
 // BY_SOURCE are the turns named by their source alone: what a scout run, a
-// pre-meeting brief or a lookup brought in names sessions of its own, and
-// the morning tidy lists every session that moved.
-const BY_SOURCE = new Set(['scout', 'briefing', 'lookup', 'morning']);
+// pre-meeting brief, a lookup or a project patrol's deep check brought in
+// names sessions of its own, and the morning tidy lists every session that
+// moved.
+const BY_SOURCE = new Set(['scout', 'briefing', 'lookup', 'morning', 'patrol']);
 
 // SOURCE_NAME names an entry by where it came from when no session does.
 const SOURCE_NAME = {
   receipt: '网关回执', unrun: '没执行的动作', refusal: '被拒的动作', scout: '巡检', briefing: '会前简报',
   lookup: '网页查询', reminder: '到点提醒', morning: '晨间整理', peer: '会话消息', report: '汇报', aside: '单独聊',
-  watch: '你开的会话',
+  watch: '你开的会话', patrol: '项目巡查',
 };
 // MAX_NAMED is how many tasks or sources a row's parentheses name.
 const MAX_NAMED = 3;
@@ -135,6 +137,7 @@ function partKind(t, merged) {
   if (MEETING_RE.test(t)) return 'briefing';
   if (SCOUT_RE.test(t)) return 'scout';
   if (LOOKUP_RE.test(t)) return 'lookup';
+  if (PATROL_RE.test(t)) return 'patrol';
   if (WATCH_RE.test(t)) return 'watch';
   if (SHIFT_ASK_RE.test(t) || HANDOFF_RE.test(t)) return 'shift';
   return 'user';

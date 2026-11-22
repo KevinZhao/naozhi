@@ -118,7 +118,8 @@ type TaskOpts struct {
 // --dangerously-skip-permissions a deny rule takes the tool out of the
 // session's tool list, and a project's own permissions.allow does not bring
 // it back, while a project's disableAllHooks turned a hook off (11-08 runs).
-// Every dispatched session, with mcp_tools or not, also denies taskDeny.
+// Every dispatched session, with mcp_tools or not, also denies taskDeny,
+// and one dispatched to fix a patrol finding patrolTaskDeny.
 // A dispatch with ultracode turns the CLI's ultracode settings key on.
 func (t TaskOpts) For(key string, s action.Spawn) (session.AgentOpts, error) {
 	opts := t.Base
@@ -134,6 +135,9 @@ func (t TaskOpts) For(key string, s action.Spawn) (session.AgentOpts, error) {
 	opts.Exempt = false
 	opts.SystemPrompt = strings.TrimSpace(opts.SystemPrompt + "\n\n" + taskPrompt(t.Planner))
 	opts.PermissionsDeny = append(slices.Clone(opts.PermissionsDeny), taskDeny...)
+	if s.Finding != "" {
+		opts.PermissionsDeny = append(opts.PermissionsDeny, patrolTaskDeny...)
+	}
 	if len(tools) == 0 {
 		return opts, nil
 	}
@@ -175,6 +179,24 @@ var taskDeny = []string{
 	scout.MCPTool(scout.ServerOutlook, scout.EnableWrites),
 	"Bash(" + scout.ServerOutlook + ":*)",
 	"Bash(*" + scout.WriteSwitch[scout.ServerOutlook] + "*)",
+}
+
+// patrolTaskDeny is denied, on top of taskDeny, to a session dispatched to
+// fix a project patrol's finding (§15.23 ③, D142): it opens a pull request
+// and stops there, so merging one and cutting a release are off its tools,
+// not only out of its prompt. Nobody asked for the fix in so many words;
+// the merge is the user's. The rules are prefix rules as the Planner's own
+// gh rules are (agent's ghRead), and the CLI checks each part of a compound
+// command against them; a command line rewritten to start otherwise (gh -R
+// … pr merge, a script) still gets past, so like taskDeny's Bash rules they
+// slow a session down and are no boundary.
+//
+// The rest close the ways round those two that cost a fix nothing: a tag
+// pushed is a release where a workflow cuts one on it, gh api merges as gh
+// pr merge does, and a workflow can be started by hand.
+var patrolTaskDeny = []string{
+	"Bash(gh pr merge:*)", "Bash(gh release create:*)",
+	"Bash(git tag:*)", "Bash(git push*--tags*)", "Bash(git push*refs/tags/*)", "Bash(gh api:*)", "Bash(gh workflow run:*)",
 }
 
 // maxMCPConfigBytes caps cli.mcp_config as read here (the scout's cap).
@@ -241,7 +263,7 @@ func (t TaskOpts) ForKey(key string) (session.AgentOpts, bool) {
 	if !ok || m.Purpose != sidecar.PurposeTask {
 		return session.AgentOpts{}, false
 	}
-	s := action.Spawn{Dir: m.Dir, Title: m.Title, Model: m.Model, MCPTools: m.MCPTools, Ultracode: m.Ultracode}
+	s := action.Spawn{Dir: m.Dir, Title: m.Title, Model: m.Model, MCPTools: m.MCPTools, Ultracode: m.Ultracode, Finding: m.Finding}
 	opts, err := t.For(key, s)
 	if err != nil {
 		slog.Warn("planner task: mcp_tools not applied on respawn", "key", key, "err", err)

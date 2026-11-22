@@ -601,10 +601,26 @@ var homeDeny = []string{
 	".zsh_history", ".bash_history", ".zshenv", ".zshrc", ".zprofile", ".bashrc", ".bash_profile", ".profile",
 }
 
+// secretDeny keeps the files that hold credentials by their name unread
+// wherever they lie, a repository's working tree included.
+var secretDeny = []string{
+	"Read(//**/.env)",
+	"Read(//**/.env.*)",
+	"Read(//**/*.pem)",
+	"Read(//**/*.key)",
+	"Read(//**/id_rsa*)",
+	"Read(//**/id_ed25519*)",
+}
+
+// ReadRule is the allow rule for reading path, an absolute path or a
+// pattern below one.
+func ReadRule(path string) string { return absRule("Read", path) }
+
 // denyRules keep credentials out of reach even inside an allowed tree: the
-// home-relative ones (homeDeny), the data root's secret-bearing files (its
-// config-shaped files, shim state with auth tokens, profile secrets, debug
-// captures with API keys) and the extra paths, each under every spelling
+// home-relative ones (homeDeny), the name-bound ones (secretDeny), the data
+// root's secret-bearing files (its config-shaped files, shim state with
+// auth tokens, profile secrets, debug captures with API keys) and the extra
+// paths, each under every spelling
 // (spelledRules). The CLI expands "~" to the one home spelling it was
 // given, so the other spellings of home get absolute rules.
 func denyRules(home, dataRoot string, extra []string, aliases map[string]string) []string {
@@ -612,14 +628,7 @@ func denyRules(home, dataRoot string, extra []string, aliases map[string]string)
 	for _, p := range homeDeny {
 		rules = append(rules, "Read(~/"+p+")")
 	}
-	rules = append(rules,
-		"Read(//**/.env)",
-		"Read(//**/.env.*)",
-		"Read(//**/*.pem)",
-		"Read(//**/*.key)",
-		"Read(//**/id_rsa*)",
-		"Read(//**/id_ed25519*)",
-	)
+	rules = append(rules, secretDeny...)
 	if home != "" {
 		pats := make([]string, len(homeDeny))
 		for i, p := range homeDeny {
@@ -656,6 +665,13 @@ func denyRules(home, dataRoot string, extra []string, aliases map[string]string)
 // denied, the Planner reading such sources itself (D129).
 func (a *Agent) denyRules(aliases map[string]string) []string {
 	return denyRules(a.cfg.Home, a.cfg.Layout.Root(), a.cfg.DenyPaths, aliases)
+}
+
+// ReadDeny is the Planner's deny rules as they stand now, for another
+// restricted session that reads the user's files (the project patrol's deep
+// check): what the Planner may not read, it may not either.
+func (a *Agent) ReadDeny() []string {
+	return a.denyRules(a.cfg.Workspaces.LocalAliases())
 }
 
 // maxMemoryIndexes caps the auto-memory indexes listed in the prompt.
@@ -1180,14 +1196,27 @@ func (a *Agent) Send(text, ref string, images []clievent.Attachment) error {
 // same turn, ahead of text; with none, an empty text sends nothing.
 // Tells run one at a time (tellMu), so two cannot both send the receipts
 // waiting, and drop only what they sent: one held meanwhile stays.
-func (a *Agent) Tell(text string) error {
+func (a *Agent) Tell(text string) error { return a.tellHeld(text, false) }
+
+// TellPatrol is Tell for a receipt about a session dispatched to fix a
+// patrol finding: its turn is from SourcePatrolReceipt.
+func (a *Agent) TellPatrol(text string) error { return a.tellHeld(text, true) }
+
+// tellHeld is Tell; patrol says text is about a task of the patrol's. The
+// turn is from SourcePatrolReceipt when text is, or any receipt going with
+// it: one turn answers them all, so it is held to the stricter limits.
+func (a *Agent) tellHeld(text string, patrol bool) error {
 	a.tellMu.Lock()
 	defer a.tellMu.Unlock()
 	text, sent := a.withHeld(text)
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
-	if err := a.tell(SourceReceipt, text); err != nil {
+	src := SourceReceipt
+	if patrol || slices.ContainsFunc(sent, func(h heldReceipt) bool { return h.Patrol }) {
+		src = SourcePatrolReceipt
+	}
+	if err := a.tell(src, text); err != nil {
 		return err
 	}
 	a.dropHeld(sent)
@@ -1207,6 +1236,11 @@ func (a *Agent) TellUnrun(text string) error { return a.tell(SourceUnrun, text) 
 // turn did not run: from SourceWatchRefusal, whose turn runs none of them
 // either.
 func (a *Agent) TellWatchRefused(text string) error { return a.tell(SourceWatchRefusal, text) }
+
+// TellPatrolRefused is Tell for the receipt of the action blocks a patrol
+// turn did not run: from SourcePatrolRefusal, whose turn is held to the
+// same limits.
+func (a *Agent) TellPatrolRefused(text string) error { return a.tell(SourcePatrolRefusal, text) }
 
 // TellAnswer is Tell for the user's answer to a question: a turn the user
 // started, w its words, so the Planner may pass the answer on (D98).

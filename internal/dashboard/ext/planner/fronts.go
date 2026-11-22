@@ -8,6 +8,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/planner/front"
+	"github.com/naozhi/naozhi/internal/planner/patrol"
 )
 
 // The ledger of the user's lines of work on the Planner page (planner RFC
@@ -16,7 +17,10 @@ import (
 //	GET  /api/planner/fronts  the lines in progress, the latest updated
 //	                          first, the open items (§15.23, D143) each
 //	                          with the line it shows under, oldest first,
-//	                          and whether this request may edit them
+//	                          the project patrol's findings those items
+//	                          point at (by ref: kind, size, evidence with
+//	                          its links, impact, fix, pull request), and
+//	                          whether this request may edit them
 //	POST /api/planner/fronts  {"id", "name", "state", "next", "waiting",
 //	                          "close"} — the user's own edit of one line
 //	                          (a field left out stays, "" clears it);
@@ -39,6 +43,9 @@ func (h *Handler) SetFronts(s *front.Store) { h.fronts = s }
 type frontsResponse struct {
 	Fronts []front.Front `json:"fronts"`
 	Items  []front.Item  `json:"items"`
+	// Findings are the patrol findings the items point at (source
+	// "patrol:<ref>"), by ref; left out with none.
+	Findings map[string]patrol.Detail `json:"findings,omitempty"`
 	// Writable is whether an edit from this request would be taken
 	// (httputil.DirectLoopback); the page offers none otherwise.
 	Writable bool `json:"writable"`
@@ -53,6 +60,7 @@ func (h *Handler) HandleFronts(w http.ResponseWriter, r *http.Request) {
 		}
 		if items := h.fronts.Items(); items != nil {
 			resp.Items = items
+			resp.Findings = h.findingDetails(items)
 		}
 	}
 	httputil.WriteJSON(w, resp)

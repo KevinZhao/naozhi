@@ -174,6 +174,18 @@ func TestReadRulesAliasInsideDeniedTree(t *testing.T) {
 	if r := absRule("Read", filepath.Join(link, "state", "sys", "x", "*.json")); slices.Contains(deny, r) {
 		t.Errorf("the data root's top-level *.json reached into a subdirectory: %s", r)
 	}
+	// What another restricted session is handed (the project patrol's deep
+	// check) is these very rules: the home's credential paths, the names,
+	// the data root's and the extra paths under every spelling.
+	got := a.ReadDeny()
+	if !slices.Equal(got, deny) {
+		t.Errorf("ReadDeny %q, want the Planner's own deny rules %q", got, deny)
+	}
+	for _, r := range []string{"Read(~/.aws/**)", "Read(~/.ssh/**)", "Read(~/.config/**)", "Read(//**/.env)", absRule("Read", filepath.Join(real, "shimstate", "**"))} {
+		if !slices.Contains(got, r) {
+			t.Errorf("ReadDeny lacks %s", r)
+		}
+	}
 }
 
 func TestPatternBelow(t *testing.T) {
