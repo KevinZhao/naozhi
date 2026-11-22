@@ -46,7 +46,7 @@ import { hydrateAskAnsweredFromHistory, lockRenderedAskCards } from './ask_card.
 import { runPendingAsync } from './render_md.js';
 import { ICONS } from './icons.js';
 import { firstSentence, refreshHealth, sessionStatusHtml, sessionTitle } from './planner_cards.js';
-import { closeTaskActs, isRunningTask, refreshTasks, seenTask, taskOf } from './tasks.js';
+import { closeTaskActs, dropTask, isRunningTask, refreshTasks, seenTask, taskOf } from './tasks.js';
 import { followPlannerSubject, noteWorkbenchEvent } from './workbench_panes.js';
 import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
@@ -839,12 +839,14 @@ async function handAside() {
 // endAside ends the opened 单独聊: put away to the history (the server's
 // Router.Archive, as a done task is put away), not removed as the sidebar's
 // 移除 does, so its images and question cards stay and the history reopens
-// it under its key. The view closes and the sidebar card goes at once, kept
-// off the list while the request is in flight (optimisticDeleteKeys: the
-// archive is synchronous, a poll answering before it still lists the key);
-// what was typed there is dropped only once it ended. A refused end puts the
-// card back and opens the 单独聊 again, unless another session took the
-// middle column meanwhile. 404 is a session no longer listed: ended.
+// it under its key. The view closes and the sidebar card goes at once, as
+// does its 你开的 card in 任务 (dropTask), kept off the lists while the
+// request is in flight (optimisticDeleteKeys: the archive is synchronous, a
+// poll answering before it still lists the key); what was typed there is
+// dropped only once it ended. A refused end puts the cards back and opens the
+// 单独聊 again, unless another session took the middle column meanwhile, and
+// reads the list again: a request that failed late (a timeout, a lost relay)
+// may have ended it all the same. 404 is a session no longer listed: ended.
 async function endAside() {
   const p = st.sess;
   if (!p || !isAside(p.key) || p.ending) return;
@@ -856,6 +858,7 @@ async function endAside() {
   st.asides.delete(p.key);
   if (st.sess === p) closePlannerSession(false);
   repaintSidebar();
+  const taskDone = plannerHost.node === p.node ? dropTask(p.key) : null;
   try {
     await fetchJSON(nodeAPI(p.node, NZ_CONTRACT.API.planner_aside_end), {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: p.key }), timeoutMs: 20000,
@@ -866,8 +869,11 @@ async function endAside() {
       restoreSidebarRow(row);
       if (title !== undefined) st.asides.set(p.key, title);
       repaintSidebar();
+      taskDone?.(false);
       if (!st.sess && plannerHost.node === p.node) openPlannerSession(p.key);
       showToast('没有结束单独聊：' + apiError(e), 'error');
+      sessionList.lastVersion = 0;
+      shell.debouncedFetchSessions();
       return;
     }
   }
@@ -880,7 +886,8 @@ async function endAside() {
   shell.debouncedFetchSessions();
   // No frame says it was put away, and with no turn running 你开的 would
   // keep its card until the next read.
-  refreshTasks();
+  if (taskDone) taskDone(true);
+  else refreshTasks();
   showToast('单独聊已结束，移到了历史', 'success');
 }
 

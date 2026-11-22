@@ -142,7 +142,9 @@ function applySessionsStats(data) {
 // key to backendKeys and returns the list the sidebar paints from. A key pushed
 // since the poll went out (pushesBefore) keeps its pushed state and death_reason;
 // overriding a state zeroes lastVersion, as the snapshot may postdate a lost push.
-function mergeBackendSessions(polled, backendKeys, pushesBefore) {
+function mergeBackendSessions(polled, backendKeys, pushesBefore, seq) {
+  // A rename whose PATCH answered before this read went out: the read has it.
+  for (const [k, m] of sessionList.pendingLabels) if (m.settled != null && seq > m.settled) sessionList.pendingLabels.delete(k);
   // A session the operator just dismissed stays out until its DELETE
   // resolves, or a lagging poll re-adds the card; a failed delete clears the
   // key and the session reappears on the next poll.
@@ -164,7 +166,7 @@ function mergeBackendSessions(polled, backendKeys, pushesBefore) {
     if (perSession.optimisticRunning[sKey] && s.state !== 'running') {
       s = Object.assign({}, s, { state: 'running' });
     }
-    // A rename in flight: the snapshot may predate the PATCH.
+    // A rename in flight or just answered: the snapshot may predate the PATCH.
     const label = sessionList.pendingLabels.get(sKey);
     if (label && s.user_label !== label.label) s = Object.assign({}, s, { user_label: label.label });
     // A new workspace (/cd, or the first snapshot after spawn resolved the
@@ -267,6 +269,7 @@ export function onSessionsApplied(fn) {
 export async function fetchSessions() {
   try {
     const pushesBefore = sessionList.statePushes.n;
+    const seq = ++sessionList.fetchSeq;
     const got = await fetchSessionsPayload();
     if (got === NOT_MODIFIED) return;
     if (!got) { noteFirstLoadFailed(); return false; }
@@ -285,7 +288,7 @@ export async function fetchSessions() {
     applySessionsStats(data);
     const backendKeys = new Set();
     const replied = repliedSince(data.sessions || []);
-    data = Object.assign({}, data, { sessions: mergeBackendSessions(data.sessions || [], backendKeys, pushesBefore) });
+    data = Object.assign({}, data, { sessions: mergeBackendSessions(data.sessions || [], backendKeys, pushesBefore, seq) });
     replied.forEach(noteUnseenTurnEnd);
     reconcilePending(backendKeys);
     appendPendingCards(data.sessions, backendKeys);

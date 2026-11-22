@@ -115,12 +115,16 @@ let onlyNew = null;
 // unwatched is the sessions whose 观察 this page just switched off, by key
 // (→ a mark of that switch): 你开的 leaves them out meanwhile.
 const unwatched = new Map();
-// pending holds the changes posted from here not answered yet: id → {patch},
-// the fields the change set. A read answering meanwhile (refreshTasks, the
-// live tick, a session_state frame) may have the task as it was, so
-// fetchTasks lays the patch over it and the card does not flip back; once
-// the POST answered, the next read is the server's.
+// pending holds the changes made here ahead of their request: id → {patch}
+// (the fields the change set) or {gone} (a task taken off the list), and
+// settled, readSeq when the request answered (unset before). A read that
+// started before then (refreshTasks, the live tick, a session_state frame)
+// may have the task as it was, even one landing after the answer, so
+// fetchTasks lays the mark over it and the card does not flip back; a read
+// started after is the server's, and drops the mark.
 const pending = new Map();
+// readSeq numbers the reads of the list as they start.
+let readSeq = 0;
 
 // LIVE_MS is how often the group refetches while a dispatched session runs;
 // STATE_DEBOUNCE_MS gathers a burst of session_state frames into one fetch.
@@ -578,6 +582,7 @@ function fetchTasks(fresh = false) {
     return load.next;
   }
   const g = gen;
+  const seq = ++readSeq;
   const p = (async () => {
     let data;
     try {
@@ -592,7 +597,7 @@ function fetchTasks(fresh = false) {
     if (g !== gen) return fetchTasks();
     let list = (data && Array.isArray(data.tasks)) ? data.tasks : [];
     if (pending.size) {
-      list = list.map((t) => (pending.has(t.id) ? { ...t, ...pending.get(t.id).patch } : t));
+      list = overlay(list, seq);
       data = { ...data, tasks: list };
     }
     byId = new Map(list.map((t) => [t.id, t]));
@@ -924,6 +929,61 @@ nzBus.addEventListener('planner:node', () => {
   paintTaskHeader();
 });
 
+// overlay lays the pending marks over list, a read started as seq: a task
+// taken off stays off, a changed one keeps the change. A mark whose request
+// answered before this read started is done with.
+function overlay(list, seq) {
+  const out = [];
+  for (const t of list) {
+    const m = pending.get(t.id);
+    if (!m) out.push(t);
+    else if (m.settled != null && seq > m.settled) { pending.delete(t.id); out.push(t); }
+    else if (!m.gone) out.push({ ...t, ...m.patch });
+  }
+  for (const [id, m] of pending) if (m.settled != null && seq > m.settled) pending.delete(id);
+  return out;
+}
+
+// settle ends mark, task id's, once its request answered: kept over the
+// reads started before, until the refresh that follows read the list.
+async function settle(id, mark) {
+  mark.settled = readSeq;
+  await refreshTasks();
+  if (pending.get(id) === mark) pending.delete(id);
+}
+
+// dropTask takes task id off the list at once, for a request about to end
+// it (a 单独聊's 结束: 你开的 lists it until the gateway archived it), and
+// keeps it off reads answering before the request did. It returns done(ok)
+// for when the request answered: ok refreshes, else the task is put back
+// where it was and the list read again (a request failed late may have ended
+// it all the same). null when the list does not have it.
+export function dropTask(id) {
+  const t = byId.get(id);
+  if (!t || !last || !Array.isArray(last.tasks)) return null;
+  const at = last.tasks.findIndex((x) => x.id === id);
+  const mark = { gone: true };
+  pending.set(id, mark);
+  byId.delete(id);
+  last = { ...last, tasks: last.tasks.filter((x) => x.id !== id) };
+  if (actsOpen === id) actsOpen = '';
+  if (digestOpen === id) digestOpen = '';
+  repaintChanged(id);
+  return (ok) => {
+    if (pending.get(id) !== mark) return;
+    if (ok) { settle(id, mark); return; }
+    pending.delete(id);
+    if (!byId.has(id) && last && Array.isArray(last.tasks)) {
+      const tasks = last.tasks.slice();
+      tasks.splice(at < 0 ? tasks.length : Math.min(at, tasks.length), 0, t);
+      last = { ...last, tasks };
+      byId.set(id, t);
+    }
+    repaintChanged(id);
+    refreshTasks();
+  };
+}
+
 // post sends a change to task body.id from control el, then refreshes every
 // group. A task in the last list shows the change at once (patch: the fields
 // the gateway sets, as the user's): its card, the header counts, the
@@ -959,10 +1019,10 @@ async function post(el, url, body, failed, patch) {
     if (held) releasePutAway(id, node, true);
     showToast(failed + e.message, 'error');
   }
-  if (mark && pending.get(id) === mark) pending.delete(id);
   el.disabled = false;
   el.blur();
-  await refreshTasks();
+  if (mark && pending.get(id) === mark) await settle(id, mark);
+  else await refreshTasks();
 }
 
 // putTask puts t in the last list in place of the task with its ID.
@@ -972,12 +1032,14 @@ function putTask(t) {
 }
 
 // repaintChanged repaints what reads task id from the last list: the groups,
-// the page header's new results, the session headers. Focus, on a control of
-// the "⋯" just closed, goes back to the card's "⋯".
+// the page header's new results, the session headers, the phone's left-block
+// counts ('tasks:list'). Focus, on a control of the "⋯" just closed, goes
+// back to the card's "⋯".
 function repaintChanged(id) {
   paintNews();
   repaintAll();
   nzBus.dispatchEvent(new CustomEvent('tasks:changed'));
+  if (last) nzBus.dispatchEvent(new CustomEvent('tasks:list', { detail: last }));
   const a = document.activeElement;
   if (!a || a === document.body) document.querySelector('#pl-task .tk-card[data-id="' + CSS.escape(id) + '"] .tk-more')?.focus();
 }

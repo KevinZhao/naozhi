@@ -12,8 +12,11 @@
 //   任务 标为已完成 / 停止: the card moves at once; a session the gateway
 //     puts away right after (nothing of it runs, D137) leaves the sidebar at
 //     once, one still running stays; a refused POST puts both back.
-//   单独聊 结束: the view closes and its card goes at once; a refused end
-//     opens it again.
+//   单独聊 结束: the view closes, its sidebar and 你开的 cards go at once; a
+//     refused end opens it again, one failed after it ended reads the lists
+//     again.
+//   A read of 任务 sent before a POST answered, landing after it, keeps the
+//     change shown.
 //   重命名 (the session header's, a 单独聊's): the title shows at once, a
 //     refused PATCH puts the old one back.
 const { test, expect } = require('@playwright/test');
@@ -300,6 +303,81 @@ test('任务: 标为已完成 and 停止 show at once, the session put away leav
   }
 });
 
+// holdGets keeps the page's GET /api/tasks from the mock: answer(body)
+// answers the oldest held one with body, pass() lets them through and stops
+// holding.
+async function holdGets(page) {
+  const held = [];
+  let on = true;
+  await page.route('**/api/tasks', (route) => {
+    if (!on || route.request().method() !== 'GET') return route.fallback();
+    held.push(route);
+  });
+  return {
+    held,
+    answer: (body) => held.shift().fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) }),
+    async pass() {
+      on = false;
+      for (const r of held.splice(0)) await r.continue();
+    },
+  };
+}
+
+test('任务: a read sent before the POST answered and landing after it does not flip the card back; the phone toggle counts at once', async ({ page }) => {
+  test.setTimeout(60000);
+  const tasks = { tasks: [
+    { id: IDLE_TASK, kind: 'session', title: 'iso 查容量', state: 'doing', at: iso(now - 40 * M), created: iso(now - 40 * M), health: 'idle',
+      live: { running: false, last_active: iso(now - 10 * M) } },
+    { id: FAIL_TASK, kind: 'session', title: 'iso 写周报', state: 'doing', at: iso(now - 20 * M), created: iso(now - 20 * M), health: 'idle',
+      live: { running: false, last_active: iso(now - 15 * M) } },
+  ] };
+  const mock = await startMockServer({
+    ws: true, sessions: sessionsOf([]), tasks, plannerEvents: [], inbox: { open: [], closed: [], counts: { open: 0, badge: 0 } }, planner,
+  });
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  try {
+    await page.setViewportSize(DESKTOP.viewport);
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await page.click('#abnav-planner');
+    await expect(page.locator('#pl-task .tk-head')).toHaveText('任务 2');
+    await expect(page.locator('#pl-left-toggle span')).toHaveText('等你 0 · 任务 2');
+
+    // A read goes out (a session_state frame of a listed task) and is held:
+    // the list as it is before the change.
+    const gets = await holdGets(page);
+    const stale = JSON.parse(JSON.stringify(tasks));
+    for (const c of mock.wsConnections) c.send({ type: 'session_state', key: IDLE_TASK, state: 'ready' });
+    await expect.poll(() => gets.held.length, { timeout: 8000 }).toBe(1);
+
+    const post = await hold(page, '**/api/tasks/state', 'POST');
+    await tkCard(page, IDLE_TASK).hover();
+    await tkCard(page, IDLE_TASK).locator('.tk-more').click();
+    await tkCard(page, IDLE_TASK).locator('[data-action="task-done"]').click();
+    await expect(page.locator('#pl-task .tk-head')).toHaveText('任务 1');
+    await expect(page.locator('#pl-left-toggle span')).toHaveText('等你 0 · 任务 1');
+    await expect.poll(() => post.held.length).toBe(1);
+    await post.release();
+    await expect.poll(() => mock.tasksCalls).toEqual([{ id: IDLE_TASK, state: 'done' }]);
+
+    // The read from before lands after the POST answered. The read the
+    // change asked for goes out only once it landed, and is held too: what
+    // shows meanwhile is what the old read was painted as.
+    await gets.answer(stale);
+    await expect.poll(() => gets.held.length, { timeout: 8000 }).toBe(1);
+    await expect(page.locator('#pl-task .tk-sec-done .tk-card[data-id="' + IDLE_TASK + '"]')).toHaveCount(1);
+    await expect(page.locator('#pl-task .tk-head')).toHaveText('任务 1');
+    await expect(page.locator('#pl-left-toggle span')).toHaveText('等你 0 · 任务 1');
+    await gets.pass();
+    await expect(page.locator('#pl-task .tk-sec-done .tk-card[data-id="' + IDLE_TASK + '"]')).toHaveCount(1);
+    await expect(page.locator('#pl-task .tk-head')).toHaveText('任务 1');
+    expect(errors).toEqual([]);
+  } finally {
+    mock.server.close();
+  }
+});
+
 const sent = (mock) => mock.sendCalls.map((b) => JSON.parse(b));
 
 async function openAside(page, mock, text) {
@@ -375,6 +453,67 @@ test('单独聊: 结束 closes it and drops its card at once; refused, it comes 
   }
 });
 
+test('单独聊: 结束 drops its 你开的 card at once too; refused, it comes back; failed after it ended, the lists are read again', async ({ page }) => {
+  test.setTimeout(90000);
+  const data = sessionsOf([row(BETA1, 'beta', 'iso 乙一')]);
+  const tasks = { tasks: [] };
+  const mock = await startMockServer({
+    ws: true, sessions: data, tasks, plannerEvents: [], inbox: { open: [], closed: [], counts: { open: 0, badge: 0 } }, planner, sendCreates: true,
+  });
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  let taskReads = 0;
+  page.on('response', (r) => { if (new URL(r.url()).pathname === '/api/tasks') taskReads++; });
+  // A session_state frame of a dispatched session has 任务 read again.
+  const readTasks = async () => {
+    const before = taskReads;
+    for (const c of mock.wsConnections) c.send({ type: 'session_state', key: 'task:other0000009', state: 'ready' });
+    await expect.poll(() => taskReads, { timeout: 8000 }).toBeGreaterThan(before);
+  };
+  try {
+    await page.setViewportSize(DESKTOP.viewport);
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await page.click('#abnav-planner');
+    const key = await openAside(page, mock, 'iso 问个事');
+    tasks.tasks.push({ id: key, kind: 'session', group: 'yours', title: '单独聊：iso 问个事', state: 'doing', at: iso(now - M), created: iso(now - M),
+      health: 'idle', live: { running: false, last_active: iso(now - M) } });
+    await readTasks();
+    await expect(tkCard(page, key)).toHaveCount(1);
+
+    // Refused: the 你开的 card goes with the view at once, a read of 任务
+    // answering meanwhile keeps it gone, and it is back once refused.
+    const end = await hold(page, '**/api/planner/aside/end', 'POST');
+    await page.click('#pl-sess-end');
+    await expect(tkCard(page, key)).toHaveCount(0);
+    await expect(card(page, key)).toHaveCount(0);
+    await expect.poll(() => end.held.length).toBe(1);
+    await readTasks();
+    await expect(tkCard(page, key)).toHaveCount(0);
+    await end.release(500);
+    await expect(tkCard(page, key)).toHaveCount(1);
+    await expect(card(page, key)).toHaveCount(1);
+    await expect(page.locator('#toast')).toContainText('没有结束单独聊');
+
+    // The end went through but its answer did not come back: refused as far
+    // as the page knows, so it puts the cards back, then reads both lists and
+    // the session ended there is gone from them.
+    await page.route('**/api/planner/aside/end', async (route) => {
+      await route.fetch();
+      await route.fulfill({ status: 504, contentType: 'application/json', body: JSON.stringify({ error: 'iso 网关超时' }) });
+    });
+    await expect(page.locator('#pl-sess')).toBeVisible();
+    await page.click('#pl-sess-end');
+    await expect.poll(() => mock.plannerAsideEndCalls).toEqual([{ key }]);
+    await expect(page.locator('#toast')).toContainText('没有结束单独聊');
+    await expect(card(page, key)).toHaveCount(0, { timeout: 5000 });
+    await expect(tkCard(page, key)).toHaveCount(0, { timeout: 5000 });
+    expect(errors).toEqual([]);
+  } finally {
+    mock.server.close();
+  }
+});
+
 test('重命名 in the session header shows at once, through a read from before; a refused PATCH puts the old title back', async ({ page }) => {
   const data = sessionsOf([row(BETA1, 'beta', 'iso 乙一'), row(BETA2, 'beta', 'iso 乙二')]);
   const mock = await startMockServer({ sessions: data });
@@ -413,6 +552,35 @@ test('重命名 in the session header shows at once, through a read from before;
     await expect(page.locator('#toast')).toHaveText('已重命名');
     await stalePoll(page, data);
     await expect(card(page, BETA1)).toContainText('iso 终于改好');
+
+    // A read sent before the PATCH answered and landing after it still has
+    // the label from before: the new one stays. The read the rename asks for
+    // after is held behind it, so only the old one has landed.
+    label.on();
+    await page.click('[data-action="session-rename"]');
+    await page.fill('.prompt-input', 'iso 第三个名字');
+    await page.press('.prompt-input', 'Enter');
+    await expect.poll(() => label.held.length).toBe(1);
+    const stale = JSON.parse(JSON.stringify(data));
+    stale.stats.version += 10;
+    stale.sessions[0].iso_stale = true;
+    const gets = [];
+    await page.route('**/api/sessions', (route) => {
+      if (route.request().method() !== 'GET') return route.fallback();
+      gets.push(route);
+    });
+    page.evaluate(() => { window.nz.test.fetchSessions(); });
+    await expect.poll(() => gets.length).toBe(1);
+    await label.release();
+    await expect(page.locator('#toast')).toHaveText('已重命名');
+    await expect.poll(() => gets.length).toBe(2);
+    await gets.shift().fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(stale) });
+    await expect.poll(() => page.evaluate((k) => !!(window.nz.test.sessionsData[k] || {}).iso_stale, BETA1 + '\tlocal')).toBe(true);
+    await expect(card(page, BETA1)).toContainText('iso 第三个名字');
+    await expect(title).toHaveText('iso 第三个名字');
+    await page.unroute('**/api/sessions');
+    await gets.shift().continue();
+    await expect(card(page, BETA1)).toContainText('iso 第三个名字');
     expect(errors).toEqual([]);
   } finally {
     mock.server.close();

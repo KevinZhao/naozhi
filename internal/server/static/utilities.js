@@ -1296,9 +1296,10 @@ export function releasePutAway(key, node, repaint) {
 }
 
 // setPendingLabel shows label as key's title at once (sessionsData and the
-// cached payload) and keeps it over polls answering with the one before,
-// until the returned settle(ok) runs once the PATCH answered: a refused one
-// puts the label before back, unless a later rename replaced it.
+// cached payload) and keeps it over polls answering with the one before. The
+// returned settle(ok) runs once the PATCH answered: accepted, the label is
+// kept over the polls sent before then still; refused, the label before goes
+// back, unless a later rename replaced it.
 export function setPendingLabel(key, node, label) {
   node = node || 'local';
   const sKey = sid(key, node);
@@ -1307,9 +1308,11 @@ export function setPendingLabel(key, node, label) {
   const prev = writeLabel(key, node, label);
   repaintSidebar();
   return (ok) => {
-    if (sessionList.pendingLabels.get(sKey) !== mark) return;
-    sessionList.pendingLabels.delete(sKey);
-    if (!ok) {
+    if (sessionList.pendingLabels.get(sKey) !== mark || mark.settled != null) return;
+    if (ok) {
+      mark.settled = sessionList.fetchSeq;
+    } else {
+      sessionList.pendingLabels.delete(sKey);
       writeLabel(key, node, prev);
       repaintSidebar();
     }

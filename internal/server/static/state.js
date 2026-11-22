@@ -140,10 +140,13 @@ export const sessionList = {
   // Bounded, so a put away that does not come shows the card again
   // (holdPutAway).
   putAwayHolds: new Map(),
-  // pendingLabels: sid(key,node) → the user_label a rename in flight set
-  // locally; a poll answering with the label from before keeps this one
-  // until the PATCH settles (setPendingLabel).
+  // pendingLabels: sid(key,node) → {label, settled}: the user_label a rename
+  // set locally, kept over the polls sent before its PATCH answered (settled:
+  // fetchSeq then, unset before), which may carry the label from before even
+  // when they land after it (setPendingLabel).
   pendingLabels: new Map(),
+  // fetchSeq numbers the session list's reads as they go out.
+  fetchSeq: 0,
   // Initialized in dashboard.js at load.
   collapsedProjects: null,
   // The sidebar's 只看 Planner 派出 and 只看需要我 filters; initialized in dashboard.js.
