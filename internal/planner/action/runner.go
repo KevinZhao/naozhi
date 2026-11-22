@@ -304,8 +304,9 @@ type Patrol interface {
 	Surface(ref, kind string, unasked bool) error
 	// File files the finding as an open item, once: text "" is its title,
 	// line the front it goes under. known is false for a ref no finding
-	// has.
-	File(ref, text, line string) (known bool, err error)
+	// has; filed says the finding has its item (one in a task's hands, or
+	// over, gets none).
+	File(ref, text, line string) (known, filed bool, err error)
 }
 
 // Custodian is what the runner uses of planner/custody.Engine.
@@ -1771,16 +1772,20 @@ func (r *Runner) findingDispatch(d *Dispatch, unasked bool) error {
 // patrol refused for why (a cap, a finding the patrol may not have fixed
 // on its own): the gateway files the finding as an open item, so nothing
 // is lost and the Planner need not send the block again, says so in the
-// conversation (what: what was not done) and in the error. A ref no
+// conversation (what: what was not done) and in the error. One already in
+// a task's hands, or over, needs no item: why says where it is. A ref no
 // finding has is the block's fault.
 func (r *Runner) refuseFinding(ref, what string, why error) error {
-	known, err := r.cfg.Patrol.File(ref, "", "")
+	known, filed, err := r.cfg.Patrol.File(ref, "", "")
 	switch {
 	case !known && err == nil:
 		return blockError{why}
 	case err != nil:
 		r.note(what + "：" + why.Error() + "；也没能记进未了事项：" + err.Error())
 		return refused{fmt.Errorf("%w；网关也没能把这条发现记进未了事项（%v）", why, err)}
+	case !filed:
+		r.note(what + "：" + why.Error())
+		return refused{fmt.Errorf("%w；不用重发", why)}
 	}
 	r.note(what + "：" + why.Error() + "；这条发现已记进未了事项")
 	return refused{fmt.Errorf("%w；网关已把这条发现记进未了事项，不用重发", why)}
@@ -2716,7 +2721,7 @@ func (r *Runner) front(f Front, byUser bool) error {
 		// the finding's record. A ref no finding has is an item like any.
 		err, known := error(nil), false
 		if ref, ok := strings.CutPrefix(it.Source, front.PatrolSource); ok && r.cfg.Patrol != nil {
-			known, err = r.cfg.Patrol.File(ref, it.Text, it.Front)
+			known, _, err = r.cfg.Patrol.File(ref, it.Text, it.Front)
 		}
 		if !known {
 			_, _, err = r.cfg.Items.AddItem(it)

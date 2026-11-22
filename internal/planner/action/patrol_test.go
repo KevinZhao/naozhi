@@ -25,8 +25,10 @@ type fakePatrol struct {
 	known map[string]bool
 	// deny answers CanDispatch and capped Surface, in an unasked turn.
 	deny, capped error
-	// fileErr fails File of a known finding.
+	// fileErr fails File of a known finding; inHand has File give it no
+	// item (it is in a task's hands, or over).
 	fileErr error
+	inHand  bool
 	calls   []string
 }
 
@@ -62,12 +64,12 @@ func (p *fakePatrol) Surface(ref, kind string, unasked bool) error {
 	return nil
 }
 
-func (p *fakePatrol) File(ref, text, line string) (bool, error) {
+func (p *fakePatrol) File(ref, text, line string) (bool, bool, error) {
 	p.calls = append(p.calls, "file "+ref+" "+text+" "+line)
 	if !p.known[ref] {
-		return false, nil
+		return false, false, nil
 	}
-	return true, p.fileErr
+	return true, p.fileErr == nil && !p.inHand, p.fileErr
 }
 
 // did is the calls made that start with prefix.
@@ -295,6 +297,16 @@ func TestPatrolDispatchRefused(t *testing.T) {
 	pt.run(pt.dispatch(`,"finding":"` + refA + `"`))
 	if len(pt.refusals) != 1 || !strings.Contains(pt.refusals[0], "这条发现不是 S；网关也没能把这条发现记进未了事项（"+front.ErrItemsFull.Error()+"）") {
 		t.Errorf("receipt %q", pt.refusals)
+	}
+
+	// Already in a task's hands: nothing to file, and the receipt does not
+	// say it was.
+	pt = newPatrolTurn(t)
+	pt.p.deny, pt.p.inHand = errors.New("这条发现已经派给 task:t1 在做"), true
+	pt.run(pt.dispatch(`,"finding":"` + refA + `"`))
+	if len(pt.g.spawned) != 0 || len(pt.refusals) != 1 || !strings.Contains(pt.refusals[0], "这条发现已经派给 task:t1 在做；不用重发") ||
+		strings.Contains(pt.refusals[0], "记进未了事项") || len(pt.g.notes) != 1 || strings.Contains(pt.g.notes[0], "未了事项") {
+		t.Errorf("in a task's hands: spawned %q, receipt %q, notes %q", pt.g.spawned, pt.refusals, pt.g.notes)
 	}
 
 	// A ref no finding has is the block's fault, shown like a malformed one.

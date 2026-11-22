@@ -377,7 +377,8 @@ func (p *Patrol) record(ref string, edit func(st *deepState, r *Record) bool) {
 // among prs, the finding is fixed and waits on the user, and is an open
 // item saying so. The item's source stays the finding (ItemSource). A
 // report without a pull request leaves the record alone: the Planner has
-// the report and decides.
+// the report and decides, and once the task is no longer at work the round
+// files the finding as an open item (follow).
 func (p *Patrol) Reported(ref, task, state string, prs []string) {
 	if state != "done" || len(prs) == 0 {
 		return
@@ -431,7 +432,7 @@ func (p *Patrol) Surface(ref, kind string, unasked bool) error {
 	today := 0
 	for _, st := range p.deepStates() {
 		for _, r := range st.Findings {
-			if sameDay(r.Surfaced, now) && !(st.Workspace == ws && r.ID == id) {
+			if sameDay(r.Surfaced, now) {
 				today++
 			}
 		}
@@ -470,32 +471,44 @@ func (p *Patrol) Surface(ref, kind string, unasked bool) error {
 // text its sentence ("" for the finding's title), line the front it goes
 // under ("" for none). known is false for a ref no finding has, or whose
 // record does not read (the error then): the caller files it as any other
-// item. A finding already filed, or in a task's or a pull request's hands,
-// is not filed again.
-func (p *Patrol) File(ref, text, line string) (known bool, err error) {
+// item. filed says the finding has its item, this one or an earlier one;
+// a finding in a task's hands, or whose pull request is over, gets none.
+func (p *Patrol) File(ref, text, line string) (known, filed bool, err error) {
 	ws, id, ok := SplitRef(ref)
 	if p == nil || p.cfg.Dir == "" || !ok {
-		return false, nil
+		return false, false, nil
 	}
-	var filed error
+	var failed error
 	err = p.editDeep(ws, func(st *deepState) bool {
 		r := st.find(id)
-		if known = r != nil; !known || r.Item != "" || !slices.Contains([]string{StateNew, StateTold, StateAsked}, r.State) {
+		if known = r != nil; !known {
 			return false
 		}
-		it, _, err := p.cfg.Items.AddItem(front.Item{Text: clip(fold(cmp.Or(text, r.Title)), front.ItemRunes), Workspace: ws, Front: line,
-			Source: ItemSource(ref), From: front.FromPatrol})
-		if err != nil {
-			filed = err
+		if filed = r.Item != ""; filed || !slices.Contains([]string{StateNew, StateTold, StateAsked}, r.State) {
 			return false
 		}
-		r.Item, r.Pending = it.ID, false
+		if failed = p.fileLocked(st, r, text, line); failed != nil {
+			return false
+		}
+		filed = true
 		if r.State != StateAsked {
 			r.State = StateItem
 		}
 		return true
 	})
-	return known, cmp.Or(err, filed)
+	return known, filed, cmp.Or(err, failed)
+}
+
+// fileLocked files r of st as an open item from the patrol, its source the
+// finding. Callers hold deepMu.
+func (p *Patrol) fileLocked(st *deepState, r *Record, text, line string) error {
+	it, _, err := p.cfg.Items.AddItem(front.Item{Text: clip(fold(cmp.Or(text, r.Title)), front.ItemRunes), Workspace: st.Workspace, Front: line,
+		Source: ItemSource(Ref(st.Workspace, r.ID)), From: front.FromPatrol})
+	if err != nil {
+		return err
+	}
+	r.Item, r.Pending = it.ID, false
+	return nil
 }
 
 // sameDay reports whether t is on now's calendar day, in now's location.

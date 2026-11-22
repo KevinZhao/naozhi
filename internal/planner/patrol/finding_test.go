@@ -186,6 +186,7 @@ func TestEvidence(t *testing.T) {
 		{"leak.txt:1", false},                      // a symlink pointing outside
 		{filepath.Join(dir, "a.go") + ":1", false}, // absolute
 		{"/etc/hosts:1", false},
+		{"/a.go:1", false}, // absolute, though joined to the workspace it would be a.go
 		{"ftp://example.com/x", false},
 		{"https://:1", false},
 		{"", false},

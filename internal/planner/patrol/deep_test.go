@@ -230,13 +230,23 @@ func TestDue(t *testing.T) {
 		}
 	}
 	// The retry of a failed run waits for the next weekday that is still in
-	// the week.
+	// the week; a second failure waits for the next week.
+	later := 0
 	for d := 1; d <= 4; d++ {
 		at := s.AddDate(0, 0, d)
 		want := at.Weekday() != time.Saturday && at.Weekday() != time.Sunday && weekLabel(at) == week
 		if got := due(deepState{Week: week, Tries: 1, Last: failed}, wsA, at); got != want {
 			t.Errorf("failed, %d days later (%s): due = %v, want %v", d, at.Weekday(), got, want)
 		}
+		if due(deepState{Week: week, Tries: 2, Last: failed}, wsA, at) && weekLabel(at) == week {
+			t.Errorf("failed twice, %d days later (%s): due again within the week", d, at.Weekday())
+		}
+		if want {
+			later++
+		}
+	}
+	if later == 0 {
+		t.Fatalf("the slot of %s leaves no later weekday in its week: pick a workspace ID that does", wsA)
 	}
 }
 
@@ -735,8 +745,8 @@ func TestDeepLeavesChecksAlone(t *testing.T) {
 	d.at(wsA, 0)
 	d.set(func() { d.reply = findings(finding("bug-a-nil", nil)) })
 	d.tick()
-	if known, err := d.p.File(wsA+"/bug-a-nil", "", ""); !known || err != nil {
-		t.Fatalf("File = %v, %v", known, err)
+	if known, filed, err := d.p.File(wsA+"/bug-a-nil", "", ""); !known || !filed || err != nil {
+		t.Fatalf("File = %v, %v, %v", known, filed, err)
 	}
 	d.now = d.now.Add(time.Hour)
 	d.tick()

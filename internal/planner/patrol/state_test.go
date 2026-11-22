@@ -216,11 +216,11 @@ func TestFile(t *testing.T) {
 	d := newDeep(t)
 	d.repo(wsA, "gateway", "a")
 	d.found(finding("bug-one", nil), finding("bug-two", map[string]string{"title": `"` + strings.Repeat("长", 80) + `"`}), finding("bug-three", nil))
-	if known, err := d.p.File(ref("bug-one"), "", ""); !known || err != nil {
-		t.Fatalf("File = %v, %v", known, err)
+	if known, filed, err := d.p.File(ref("bug-one"), "", ""); !known || !filed || err != nil {
+		t.Fatalf("File = %v, %v, %v", known, filed, err)
 	}
-	if known, err := d.p.File(ref("bug-one"), "换个说法", ""); !known || err != nil {
-		t.Fatalf("File again = %v, %v", known, err)
+	if known, filed, err := d.p.File(ref("bug-one"), "换个说法", ""); !known || !filed || err != nil {
+		t.Fatalf("File again = %v, %v, %v", known, filed, err)
 	}
 	items := d.items.Items()
 	if len(items) != 1 || items[0].Source != "patrol:"+ref("bug-one") || items[0].From != front.FromPatrol || items[0].Workspace != wsA || items[0].Text != "重连时会话为空会崩" {
@@ -233,34 +233,43 @@ func TestFile(t *testing.T) {
 	if _, err := d.items.Apply(front.Update{ID: "gw", Name: "网关"}); err != nil {
 		t.Fatal(err)
 	}
-	if known, err := d.p.File(ref("bug-two"), "重连崩溃要修", "gw"); !known || err != nil {
-		t.Fatalf("File with text = %v, %v", known, err)
+	if known, filed, err := d.p.File(ref("bug-two"), "重连崩溃要修", "gw"); !known || !filed || err != nil {
+		t.Fatalf("File with text = %v, %v, %v", known, filed, err)
 	}
 	if it := d.items.Items()[1]; it.Text != "重连崩溃要修" || it.Front != "gw" {
 		t.Errorf("item %+v", it)
 	}
 	// A line the ledger lacks: known, and not filed.
-	if known, err := d.p.File(ref("bug-three"), "", "nope"); !known || !errors.Is(err, front.ErrNoFront) {
-		t.Errorf("File under an unknown line = %v, %v", known, err)
+	if known, filed, err := d.p.File(ref("bug-three"), "", "nope"); !known || filed || !errors.Is(err, front.ErrNoFront) {
+		t.Errorf("File under an unknown line = %v, %v, %v", known, filed, err)
 	}
 	if r, _ := d.p.Finding(ref("bug-three")); r.Item != "" || r.State != StateTold {
 		t.Errorf("record after a failed filing: %+v", r)
 	}
+	// One asked about and filed is not filed a second time under other
+	// words.
+	if err := d.p.Surface(ref("bug-two"), "ask", true); err != nil {
+		t.Fatal(err)
+	}
+	if known, filed, err := d.p.File(ref("bug-two"), "又一种说法", ""); !known || !filed || err != nil || len(d.items.Items()) != 2 {
+		t.Errorf("File of an asked, filed finding = %v, %v, %v, %d items", known, filed, err, len(d.items.Items()))
+	}
 	// In a task's hands it is not filed.
+	d.atWork["task:t1"] = true
 	d.p.Dispatched(ref("bug-three"), "task:t1")
-	if known, err := d.p.File(ref("bug-three"), "", ""); !known || err != nil || len(d.items.Items()) != 2 {
-		t.Errorf("File of a dispatched finding = %v, %v, %d items", known, err, len(d.items.Items()))
+	if known, filed, err := d.p.File(ref("bug-three"), "", ""); !known || filed || err != nil || len(d.items.Items()) != 2 {
+		t.Errorf("File of a dispatched finding = %v, %v, %v, %d items", known, filed, err, len(d.items.Items()))
 	}
 	// One the user struck is not filed again.
 	if _, err := d.items.CloseItem(items[0].ID, front.ByUser); err != nil {
 		t.Fatal(err)
 	}
-	if known, err := d.p.File(ref("bug-one"), "", ""); !known || err != nil || len(d.items.Items()) != 1 {
-		t.Errorf("File of a struck finding = %v, %v, %d items", known, err, len(d.items.Items()))
+	if known, filed, err := d.p.File(ref("bug-one"), "", ""); !known || !filed || err != nil || len(d.items.Items()) != 1 {
+		t.Errorf("File of a struck finding = %v, %v, %v, %d items", known, filed, err, len(d.items.Items()))
 	}
 	for _, unknown := range []string{ref("bug-nope"), "check:dirty:/x", "ws_zzzzzzz9/bug-one", ""} {
-		if known, err := d.p.File(unknown, "x", ""); known || err != nil {
-			t.Errorf("File(%q) = %v, %v; want unknown", unknown, known, err)
+		if known, filed, err := d.p.File(unknown, "x", ""); known || filed || err != nil {
+			t.Errorf("File(%q) = %v, %v, %v; want unknown", unknown, known, filed, err)
 		}
 	}
 }
@@ -283,7 +292,9 @@ func TestReported(t *testing.T) {
 	d.found(finding("bug-one", nil), finding("bug-two", nil), finding("bug-three", nil))
 	link := "https://github.com/owner/gateway/pull/31"
 	for i, id := range []string{"bug-one", "bug-two", "bug-three"} {
-		d.p.Dispatched(ref(id), fmt.Sprintf("task:t%d", i+1))
+		key := fmt.Sprintf("task:t%d", i+1)
+		d.atWork[key] = true
+		d.p.Dispatched(ref(id), key)
 	}
 	// Not the finding's task, not done, no pull request, another
 	// repository's: the record stays.
@@ -304,12 +315,8 @@ func TestReported(t *testing.T) {
 		t.Errorf("item %+v", it)
 	}
 	// A finding filed before keeps its item, retitled.
-	if _, err := d.p.File(ref("bug-nope"), "", ""); err != nil {
-		t.Fatal(err)
-	}
-	d.set(func() { d.reply = findings(finding("bug-filed", nil)) })
 	d.found(finding("bug-filed", nil))
-	if _, err := d.p.File(ref("bug-filed"), "", ""); err != nil {
+	if _, _, err := d.p.File(ref("bug-filed"), "", ""); err != nil {
 		t.Fatal(err)
 	}
 	filed, _ := d.p.Finding(ref("bug-filed"))
@@ -442,5 +449,54 @@ func TestRecordsKept(t *testing.T) {
 	d.p.Dispatched(ref("bug-two"), "task:t3")
 	if got := states(d.state(wsA)); got != "bug-two=dispatched" {
 		t.Fatalf("past 90 days: %s", got)
+	}
+}
+
+// TestTaskLeftUnfixed: a finding given to a task that is no longer at work
+// and left no pull request goes back to being an open item at the next
+// round: what was found is not dropped for a task not having fixed it. One
+// whose task is still at work is left with it.
+func TestTaskLeftUnfixed(t *testing.T) {
+	d := newDeep(t)
+	d.repo(wsA, "gateway", "a")
+	d.at(wsA, 0)
+	d.found(finding("bug-one", nil), finding("bug-two", nil), finding("bug-three", nil))
+	// The third was filed before, in the Planner's own words.
+	if _, _, err := d.p.File(ref("bug-three"), "重连要先判空", ""); err != nil {
+		t.Fatal(err)
+	}
+	for i, id := range []string{"bug-one", "bug-two", "bug-three"} {
+		key := fmt.Sprintf("task:t%d", i+1)
+		d.atWork[key] = true
+		d.p.Dispatched(ref(id), key)
+	}
+	d.now = d.now.Add(time.Hour)
+	d.tick()
+	if got := states(d.state(wsA)); got != "bug-one=dispatched bug-two=dispatched bug-three=dispatched" || len(d.items.Items()) != 1 {
+		t.Fatalf("tasks at work: %s, %d items", got, len(d.items.Items()))
+	}
+	// The first failed, the third was stopped: both are open items again,
+	// the third the one it already was.
+	d.set(func() { d.atWork["task:t1"], d.atWork["task:t3"] = false, false })
+	d.now = d.now.Add(time.Hour)
+	d.tick()
+	if got := states(d.state(wsA)); got != "bug-one=item bug-two=dispatched bug-three=item" {
+		t.Fatalf("after two tasks ended: %s", got)
+	}
+	if got := d.open(); !slices.Equal(got, []string{"patrol:" + ref("bug-one") + "|重连时会话为空会崩", "patrol:" + ref("bug-three") + "|重连要先判空"}) {
+		t.Fatalf("open items %q, want one each, the third's as it was filed", got)
+	}
+	if r, _ := d.p.Finding(ref("bug-one")); r.Item == "" || r.Task != "task:t1" {
+		t.Errorf("record %+v", r)
+	}
+	// The workspace has room again, and the finding may be dispatched anew.
+	if _, err := d.p.CanDispatch(ref("bug-one"), true); err != nil {
+		t.Errorf("dispatching it again: %v", err)
+	}
+	// Nothing more happens to it on the rounds after.
+	d.now = d.now.Add(time.Hour)
+	d.tick()
+	if len(d.items.Items()) != 2 {
+		t.Errorf("%d items after another round, want 2", len(d.items.Items()))
 	}
 }

@@ -309,9 +309,9 @@ func (p *Patrol) Round(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
-	// The deep checks ride the hourly round (§15.23 ②): the pull requests
-	// they led to are looked at, then the one due is started.
-	p.pulls(ctx)
+	// The deep checks ride the hourly round (§15.23 ②): what became of
+	// the findings handed on is looked at, then the check due is started.
+	p.follow(ctx)
 	p.deep(ctx, now)
 }
 

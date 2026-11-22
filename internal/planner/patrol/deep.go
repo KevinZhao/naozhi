@@ -484,13 +484,32 @@ const (
 	ciPending = "进行中"
 )
 
-// pulls looks at the pull requests the findings led to (StatePR): how
-// their checks stand, and whether they are merged or closed, which ends
-// the finding and closes its open item by the fact. A gh call failing
-// leaves the record as it is.
-func (p *Patrol) pulls(ctx context.Context) {
+// follow looks at what became of the findings handed on. One given to a
+// task that is no longer at work and left no pull request (it failed, was
+// stopped, or reported without one) goes back to being an open item:
+// nothing found is dropped for a task not having fixed it. One with a pull
+// request (StatePR) has its checks looked at, and is over once that is
+// merged or closed, which closes its open item by the fact. A gh call
+// failing leaves the record as it is.
+func (p *Patrol) follow(ctx context.Context) {
 	for _, st := range p.deepStates() {
 		for _, r := range st.Findings {
+			if r.State == StateDispatched && !p.taskOpen(r.Task) {
+				ref := Ref(st.Workspace, r.ID)
+				p.record(ref, func(st *deepState, r *Record) bool {
+					if r.State != StateDispatched {
+						return false
+					}
+					r.State = StateItem
+					if r.Item == "" {
+						if err := p.fileLocked(st, r, "", ""); err != nil {
+							slog.Warn("planner patrol: a finding its task left unfixed not filed", "finding", ref, "err", err)
+						}
+					}
+					return true
+				})
+				continue
+			}
 			owner, name, n, ok := front.SourcePR(r.PR)
 			if r.State != StatePR || !ok {
 				continue
