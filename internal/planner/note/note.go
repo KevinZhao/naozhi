@@ -106,6 +106,9 @@ type notifyData struct {
 	ClosedBy string `json:"closed_by"`
 }
 
+// CustodyStopped is the Event of custody stopping at a limit.
+const CustodyStopped = "stopped"
+
 // CustodyData is a custody journal entry's data (planner/custody writes it).
 type CustodyData struct {
 	Event  string `json:"event"`

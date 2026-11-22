@@ -1387,7 +1387,7 @@ func (r *Runner) handle(rep reply) {
 			un.add(i, b, bad.Error())
 			un.malformed = true
 		case err != nil:
-			r.note("动作块没有执行：" + err.Error())
+			r.note(unrunLead + err.Error())
 			un.add(i, b, err.Error())
 		}
 	}
@@ -1560,12 +1560,27 @@ func (r *Runner) checkReports(rep reply, statused map[string]string) {
 	}
 }
 
+// The leads of the lines that say a block was malformed, or failed when
+// run: what UnrunNote tells them by.
+const (
+	malformedLead = "动作块格式不对，没有执行："
+	unrunLead     = "动作块没有执行："
+)
+
+// UnrunNote reports whether text is a line the runner wrote into the
+// Planner's conversation for a block that was malformed or failed when run
+// (the project patrol counts them, §15.23 ①). A block refused for the
+// turn's source is not one: the Planner wrote that one right.
+func UnrunNote(text string) bool {
+	return strings.HasPrefix(text, malformedLead) || strings.HasPrefix(text, unrunLead)
+}
+
 // refuse shows a block that is not run, with why.
 func (r *Runner) refuse(b Block, why error) {
 	// A note is one line: the block's whitespace folds to spaces.
-	lead := "动作块格式不对，没有执行："
+	lead := malformedLead
 	if errors.Is(why, errTooMany) {
-		lead = "动作块没有执行："
+		lead = unrunLead
 	}
 	r.note(lead + why.Error() + "。原文：" + textutil.TruncateRunes(strings.Join(strings.Fields(b.Raw), " "), rawRunes))
 }

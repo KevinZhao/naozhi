@@ -43,7 +43,10 @@ const (
 	callTimeout = time.Minute
 	titleRunes  = 200
 	errRunes    = 200
-	timeLayout  = "2006-01-02 15:04"
+	// execWait is how long Exec waits, once the command is over, for what
+	// it started to let go of its output.
+	execWait   = 2 * time.Second
+	timeLayout = "2006-01-02 15:04"
 )
 
 // ExecFunc runs name with args in dir and returns its standard output; the
@@ -417,10 +420,20 @@ func Exec(ctx context.Context, dir, name string, args ...string) (string, error)
 	// directory from an unreadable one by git's English text, and a
 	// translated git (Homebrew's follows the macOS language even with no
 	// LANG set) would leave every refresh incomplete and the prune off.
-	cmd.Env = append(os.Environ(), "LC_ALL=C", "GIT_TERMINAL_PROMPT=0", "GH_PROMPT_DISABLED=1", "NO_COLOR=1")
+	// GIT_OPTIONAL_LOCKS=0 keeps a read (git status, which the patrol runs
+	// hourly) from rewriting the index: it would take index.lock under a
+	// session's own git command and fail it.
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "GIT_TERMINAL_PROMPT=0", "GH_PROMPT_DISABLED=1", "NO_COLOR=1", "GIT_OPTIONAL_LOCKS=0")
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
-	if err := cmd.Run(); err != nil {
+	// The context only kills the command itself. A process it started (git
+	// for a submodule, a credential helper) that still holds the output
+	// would keep Run waiting past any deadline, and the caller's loop with
+	// it; past execWait the pipes are closed instead.
+	cmd.WaitDelay = execWait
+	// A command that ended well and left such a process behind has said
+	// all it had to say.
+	if err := cmd.Run(); err != nil && !errors.Is(err, exec.ErrWaitDelay) {
 		if msg := strings.TrimSpace(errb.String()); msg != "" {
 			return out.String(), fmt.Errorf("%s %s: %s", name, args[0], msg)
 		}

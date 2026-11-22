@@ -257,7 +257,7 @@ func (s *Scout) finishBrief(b briefed) {
 	case !b.Woke:
 		sum = "会前简报：Planner 没有收到"
 	}
-	data, err := json.Marshal(activity{Type: "scout", Summary: sum, Run: b.Run, Trigger: TriggerMeeting, State: b.State, Woke: b.Woke})
+	data, err := json.Marshal(activity{Type: ActivityType, Summary: sum, Run: b.Run, Trigger: TriggerMeeting, State: b.State, Woke: b.Woke})
 	if err == nil {
 		err = s.cfg.Journal.Append(journal.Entry{TS: now, Kind: journal.KindActivity, Unit: UnitID, Data: data})
 	}

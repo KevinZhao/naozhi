@@ -32,6 +32,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/digest"
 	"github.com/naozhi/naozhi/internal/planner/front"
 	"github.com/naozhi/naozhi/internal/planner/github"
+	"github.com/naozhi/naozhi/internal/planner/patrol"
 	"github.com/naozhi/naozhi/internal/planner/promise"
 	"github.com/naozhi/naozhi/internal/planner/reader"
 	"github.com/naozhi/naozhi/internal/planner/reap"
@@ -879,6 +880,21 @@ func main() {
 		TellAnswer: wireup.PlannerTellAnswer(plannerAgent),
 		Ctx:        ctx,
 	})
+	// The project patrol's deterministic checks (§15.23 ①, D142): hourly,
+	// with no model, over the workspaces that had a session in the last 7
+	// days; its hits are open items of the ledger. It follows the one pause
+	// and stays off on an isolated instance, as the scout does.
+	patroller := patrol.New(patrol.Config{
+		Dir:         sessionLayout.PlannerPatrolRoot(),
+		Workspaces:  plannerState.Workspaces.LocalDirs,
+		Active:      wireup.PatrolActive(plannerState.Journal, nil),
+		Items:       fronts,
+		Worktrees:   wireup.PatrolWorktrees(sidecars),
+		Routines:    wireup.PatrolRoutines(scheduler, plannerState.Workspaces),
+		Self:        wireup.PatrolSelf(plannerState.Journal),
+		PausedUntil: notifier.PausedUntil,
+		Isolated:    isolated,
+	})
 	// A watch line the Planner held goes out as its session stands then.
 	plannerAgent.SetWatchNow(actions.WatchNow)
 	// The result is judged by the turn's sources before the ledger lets go
@@ -908,6 +924,7 @@ func main() {
 		// The same round closes the open items whose pull request or issue
 		// is over.
 		go github.New(github.Config{Dir: sessionLayout.PlannerGitHubRoot(), Workspaces: plannerState.Workspaces.LocalDirs, Ledger: fronts}).Run(ctx)
+		go patroller.Run(ctx)
 	}
 	go sidecars.Run(ctx, func(key string) bool { return router.SessionFor(key) != nil })
 	go briefer.Run(ctx)
@@ -987,6 +1004,10 @@ func main() {
 				// session calls into the router. A run cut short leaves no record.
 				{name: "scout", run: scouter.Stop},
 				{name: "reader", run: lookups.Stop},
+				// The patrol's round in flight: its git and gh calls end with
+				// the cancel above, and nothing of it is left writing the
+				// ledger while the rest goes down.
+				{name: "patrol", run: patroller.Stop},
 				// ShutdownComplete closes after srv.Shutdown's 30s drain, i.e. after
 				// every in-flight handler finished, so router.Shutdown never races a
 				// half-cleaned session map. Already closed on server-exit paths.
