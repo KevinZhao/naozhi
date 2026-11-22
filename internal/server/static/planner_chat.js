@@ -46,12 +46,12 @@ import { hydrateAskAnsweredFromHistory, lockRenderedAskCards } from './ask_card.
 import { runPendingAsync } from './render_md.js';
 import { ICONS } from './icons.js';
 import { firstSentence, refreshHealth, sessionStatusHtml, sessionTitle } from './planner_cards.js';
-import { closeTaskActs, isRunningTask, refreshTasks, seenTask, taskOf } from './tasks.js';
+import { closeTaskActs, dropTask, isRunningTask, refreshTasks, seenTask, taskOf } from './tasks.js';
 import { followPlannerSubject, noteWorkbenchEvent } from './workbench_panes.js';
 import { wsm } from './ws_manager.js';
 import { shell } from './shell.js';
 import { followPane, notePane, settlePane } from './scroll_follow.js';
-import { getMsgValue, isMobile, promptDialog, pushView, replaceView, setMsgValue } from './utilities.js';
+import { dropSidebarRow, getMsgValue, isMobile, promptDialog, pushView, repaintSidebar, replaceView, restoreSidebarRow, setMsgValue, setPendingLabel } from './utilities.js';
 import { awaitPendingOrients, clearFiles, createFileTray, filesBlockSend, handleFiles, renderFilePreviews } from './composer_files.js';
 import { eventsURL, hostOnline, hostRemote, isLocalNode, nodeAPI, plannerAPI, plannerHost } from './planner_host.js';
 import { quickSessionKey } from './auth_modal.js';
@@ -716,24 +716,31 @@ function fitTitle(title) {
 }
 
 // labelAside names key's session "单独聊：<title>", asking again while the
-// session is not there yet (404) until LABEL_WAIT_MS has passed.
+// session is not there yet (404) until LABEL_WAIT_MS has passed. The title
+// shows at once, its sidebar card's too, and is kept over the polls that
+// answer before the PATCH, a new session's first listing included
+// (setPendingLabel); a label that did not go puts the one before back.
 async function labelAside(key, node, title) {
   const body = { key, label: ASIDE + title };
   if (!isLocalNode(node)) body.node = node;
+  const settle = setPendingLabel(key, node, body.label);
+  const repaint = () => { if (st.sess && st.sess.key === key) paintSessionStatus(); };
+  repaint();
   const until = Date.now() + LABEL_WAIT_MS;
   for (let wait = LABEL_RETRY_MS; ; wait = Math.min(wait * 2, LABEL_RETRY_MAX_MS)) {
     try {
       await fetchJSON(NZ_CONTRACT.API.sessions_label, {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), timeoutMs: 8000,
       });
-      const row = sessionList.sessionsData[sid(key, node)];
-      if (row) row.user_label = body.label;
-      sessionList.lastVersion = 0;
-      shell.debouncedFetchSessions();
-      if (st.sess && st.sess.key === key) paintSessionStatus();
+      settle(true);
+      repaint();
       return true;
     } catch (e) {
-      if (!e || e.status !== 404 || Date.now() + wait > until) return false;
+      if (!e || e.status !== 404 || Date.now() + wait > until) {
+        settle(false);
+        repaint();
+        return false;
+      }
       await new Promise((r) => setTimeout(r, wait));
     }
   }
@@ -832,32 +839,55 @@ async function handAside() {
 // endAside ends the opened 单独聊: put away to the history (the server's
 // Router.Archive, as a done task is put away), not removed as the sidebar's
 // 移除 does, so its images and question cards stay and the history reopens
-// it under its key.
+// it under its key. The view closes and the sidebar card goes at once, as
+// does its 你开的 card in 任务 (dropTask), kept off the lists while the
+// request is in flight (optimisticDeleteKeys: the archive is synchronous, a
+// poll answering before it still lists the key); what was typed there is
+// dropped only once it ended. A refused end puts the cards back and opens the
+// 单独聊 again, unless another session took the middle column meanwhile, and
+// reads the list again: a request that failed late (a timeout, a lost relay)
+// may have ended it all the same. 404 is a session no longer listed: ended.
 async function endAside() {
   const p = st.sess;
   if (!p || !isAside(p.key) || p.ending) return;
   p.ending = true;
+  const skey = sid(p.key, p.node);
+  const title = st.asides.get(p.key);
+  sessionList.optimisticDeleteKeys.add(skey);
+  const row = dropSidebarRow(p.key, p.node);
+  st.asides.delete(p.key);
+  if (st.sess === p) closePlannerSession(false);
+  repaintSidebar();
+  const taskDone = plannerHost.node === p.node ? dropTask(p.key) : null;
   try {
     await fetchJSON(nodeAPI(p.node, NZ_CONTRACT.API.planner_aside_end), {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: p.key }), timeoutMs: 20000,
     });
   } catch (e) {
-    p.ending = false;
-    showToast('没有结束单独聊：' + apiError(e), 'error');
-    return;
+    if (!e || e.status !== 404) {
+      sessionList.optimisticDeleteKeys.delete(skey);
+      restoreSidebarRow(row);
+      if (title !== undefined) st.asides.set(p.key, title);
+      repaintSidebar();
+      taskDone?.(false);
+      if (!st.sess && plannerHost.node === p.node) openPlannerSession(p.key);
+      showToast('没有结束单独聊：' + apiError(e), 'error');
+      sessionList.lastVersion = 0;
+      shell.debouncedFetchSessions();
+      return;
+    }
   }
-  if (st.sess === p) closePlannerSession(false);
+  sessionList.optimisticDeleteKeys.delete(skey);
   // What was typed there has nowhere to go now.
   const dk = draftKey(p.node, p.key);
   drafts.get(dk)?.files.forEach((f) => { if (f.blobUrl) URL.revokeObjectURL(f.blobUrl); });
   drafts.delete(dk);
-  st.asides.delete(p.key);
-  delete sessionList.sessionsData[sid(p.key, p.node)];
   sessionList.lastVersion = 0;
   shell.debouncedFetchSessions();
   // No frame says it was put away, and with no turn running 你开的 would
   // keep its card until the next read.
-  refreshTasks();
+  if (taskDone) taskDone(true);
+  else refreshTasks();
   showToast('单独聊已结束，移到了历史', 'success');
 }
 
