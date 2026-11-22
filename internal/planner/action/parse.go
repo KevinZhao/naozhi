@@ -55,10 +55,13 @@ const (
 	// maxBlockBytes caps one block's body.
 	maxBlockBytes = 64 << 10
 	// titleRunes is the CLI's --name cap.
-	titleRunes        = 64
-	messageRunes      = 20000
-	textRunes         = 500
-	maxOptions        = 6
+	titleRunes   = 64
+	messageRunes = 20000
+	textRunes    = 500
+	maxOptions   = 6
+	// maxFindingOptions is maxOptions less the two choices every patrol
+	// finding's question leaves room for.
+	maxFindingOptions = 4
 	optionRunes       = 80
 	workspaceRefRunes = 128
 	// goalRunes caps a dispatch's goal (D103).
@@ -127,6 +130,23 @@ type Dispatch struct {
 	// Message does nothing: the CLI takes it only from a human's input. Only
 	// a turn the user started may set it, as the user's choice.
 	Ultracode bool `json:"ultracode,omitempty"`
+	// Finding is the project patrol's finding the task is to fix, by its
+	// ref (§15.23 ③, D142): the gateway judges whether it may be dispatched
+	// with no word of the user's, and counts the task against the
+	// workspace's cap.
+	Finding string `json:"finding,omitempty"`
+}
+
+// findingRE is a patrol finding's ref, "<workspace ID>/<finding ID>"
+// (planner/patrol.Ref).
+var findingRE = regexp.MustCompile(`^ws_[a-z0-9]{8}/[a-z0-9][a-z0-9-]{2,59}$`)
+
+// validFinding checks a block's finding: a ref, or none.
+func validFinding(ref *string) error {
+	if *ref = strings.TrimSpace(*ref); *ref != "" && !findingRE.MatchString(*ref) {
+		return errors.New("finding 要写 <naozhi-patrol> 里那条发现的 ref（<工作区 ID>/<发现 id>）")
+	}
+	return nil
 }
 
 // Promise registers something the Planner promised the user.
@@ -144,6 +164,9 @@ type Ask struct {
 	Question string   `json:"question"`
 	Options  []string `json:"options"`
 	Task     string   `json:"task,omitempty"`
+	// Finding is the patrol finding the question is about, by its ref: it
+	// counts against the day's cap of findings put to the user.
+	Finding string `json:"finding,omitempty"`
 	// Trimmed is how many options were cut to optionRunes, "…" included: a
 	// question is worth asking even if an option ran long, so the Planner is
 	// told in the receipt instead of the block refused.
@@ -169,12 +192,16 @@ const (
 // Notify tells the user something: Level timely pushes it, brief holds it
 // for the next morning brief. ID is the scout finding it is about, "" when
 // none; with Title and Link it names the thing, so it is pushed once a day.
+// Finding is the patrol finding it is about, by its ref (its pull request
+// ready): a timely one counts against the day's cap, and it names the
+// thing when there is no ID.
 type Notify struct {
-	Title string `json:"title"`
-	Why   string `json:"why"`
-	Level string `json:"level"`
-	Link  string `json:"link"`
-	ID    string `json:"id"`
+	Title   string `json:"title"`
+	Why     string `json:"why"`
+	Level   string `json:"level"`
+	Link    string `json:"link"`
+	ID      string `json:"id"`
+	Finding string `json:"finding,omitempty"`
 }
 
 // Custody switches session Key's custody (On), sends it Text through
@@ -823,6 +850,9 @@ func (d *Dispatch) validate() error {
 	if err := noEnvelope("message", d.Message); err != nil {
 		return err
 	}
+	if err := validFinding(&d.Finding); err != nil {
+		return err
+	}
 	return validMCPTools(d.MCPTools)
 }
 
@@ -974,6 +1004,14 @@ func (a *Ask) validate() error {
 	case len(a.Options) > maxOptions:
 		return fmt.Errorf("options 最多 %d 个", maxOptions)
 	}
+	if err := validFinding(&a.Finding); err != nil {
+		return err
+	}
+	// A question about a finding leaves room, within maxOptions, for the
+	// user's own two choices on any finding (不做, 这类别再提; §15.23 ④).
+	if a.Finding != "" && len(a.Options) > maxFindingOptions {
+		return fmt.Errorf("带 finding 的 ask，options 最多 %d 个", maxFindingOptions)
+	}
 	// The question and the option picked go into the relay envelope with
 	// the answer (relayEnvelope), there or from the answer's turn.
 	if err := noEnvelope("question", a.Question); err != nil {
@@ -1058,7 +1096,7 @@ func (n *Notify) validate() error {
 	case n.Link != "" && !webLink(n.Link):
 		return errors.New("link 要是 http(s) 链接或空")
 	}
-	return nil
+	return validFinding(&n.Finding)
 }
 
 func (c *Custody) validate() error {

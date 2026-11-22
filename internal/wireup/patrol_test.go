@@ -1,14 +1,19 @@
 package wireup
 
 import (
+	"context"
 	"encoding/json"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/notify"
+	"github.com/naozhi/naozhi/internal/planner/action"
 	"github.com/naozhi/naozhi/internal/planner/activity"
 	"github.com/naozhi/naozhi/internal/planner/agent"
 	"github.com/naozhi/naozhi/internal/planner/journal"
@@ -17,7 +22,10 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/reap"
 	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
+	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
+	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 func patrolJournal(t *testing.T) *journal.Journal {
@@ -46,13 +54,14 @@ func appendEntry(t *testing.T, j *journal.Journal, e journal.Entry, data any) {
 // the user's sessions and the dispatched ones, those written before the
 // first call (read from the journal) and those after (observed); a cron
 // run's, the Planner's and the scout's turns do not count, nor a turn past
-// the 7 days read.
+// the 7 days read, nor the patrol's own: a deep check's session, and a task
+// dispatched to fix a finding.
 func TestPatrolActive(t *testing.T) {
 	j := patrolJournal(t)
 	reg := workspace.Load("", "node1")
 	root, _ := filepath.EvalSymlinks(t.TempDir())
 	id := map[string]string{}
-	for _, n := range []string{"chat", "task", "cron", "planner", "scout", "later", "old"} {
+	for _, n := range []string{"chat", "task", "cron", "planner", "scout", "later", "old", "fix", "fixlater", "deep"} {
 		ws, ok := reg.Ensure(filepath.Join(root, n))
 		if !ok {
 			t.Fatal("workspace not registered")
@@ -65,13 +74,26 @@ func TestPatrolActive(t *testing.T) {
 	rec.RecordTurn("cron:job1", filepath.Join(root, "cron"), activity.TurnDone)
 	rec.RecordTurn("planner:main", filepath.Join(root, "planner"), activity.TurnDone)
 	rec.RecordTurn("scout:20261123T080000-abcd", filepath.Join(root, "scout"), activity.TurnDone)
+	// The patrol's own: a deep check's session, and the tasks dispatched to
+	// fix its findings.
+	rec.RecordTurn("patrol:20261125T110412-9c1e", filepath.Join(root, "deep"), activity.TurnDone)
+	side := sidecar.Open(t.TempDir(), nil)
+	for _, key := range []string{"task:ffffffffffff", "task:eeeeeeeeeeee"} {
+		if err := side.Put(sidecar.Meta{Key: key, Purpose: sidecar.PurposeTask, Finding: "ws_ab12cd34/bug-router-nil"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := side.Put(sidecar.Meta{Key: "task:aaaaaaaaaaaa", Purpose: sidecar.PurposeTask}); err != nil {
+		t.Fatal(err)
+	}
+	rec.RecordTurn("task:ffffffffffff", filepath.Join(root, "fix"), activity.TurnDone)
 	// In no workspace at all.
 	rec.RecordTurn("dashboard:direct:u:general", "", activity.TurnDone)
 	now := time.Now()
 	appendEntry(t, j, journal.Entry{TS: now.Add(-patrol.ActiveDays*24*time.Hour - time.Hour), WS: id["old"], Kind: journal.KindTurn, Unit: "dashboard:direct:u:general"},
 		activity.Turn{Outcome: activity.TurnDone})
 
-	active := PatrolActive(j, func() time.Time { return now })
+	active := PatrolActive(j, func() time.Time { return now }, PatrolOwnTask(side))
 	got := active()
 	var have []string
 	for n, ws := range id {
@@ -89,6 +111,7 @@ func TestPatrolActive(t *testing.T) {
 
 	rec.RecordTurn("feishu:direct:alice:general", filepath.Join(root, "later"), activity.TurnDone)
 	rec.RecordTurn("cron:job1", filepath.Join(root, "cron"), activity.TurnDone)
+	rec.RecordTurn("task:eeeeeeeeeeee", filepath.Join(root, "fixlater"), activity.TurnDone)
 	got = active()
 	if _, ok := got[id["later"]]; !ok || len(got) != 3 {
 		t.Errorf("after a turn observed active = %v", got)
@@ -98,7 +121,7 @@ func TestPatrolActive(t *testing.T) {
 	if _, ok := active()[id["later"]]; !ok {
 		t.Error("the caller's change reached the table")
 	}
-	if got := PatrolActive(nil, nil)(); len(got) != 0 {
+	if got := PatrolActive(nil, nil, nil)(); len(got) != 0 {
 		t.Errorf("with no journal active = %v", got)
 	}
 }
@@ -250,5 +273,162 @@ func TestPatrolRoutines(t *testing.T) {
 	}
 	if PatrolRoutines(nil, reg) != nil {
 		t.Error("PatrolRoutines with no scheduler is not nil")
+	}
+}
+
+// TestStateChanges: a deep check's calls that change state are told from
+// its events, each once, by the tool and what planner/activity classifies
+// the call as; reads are none.
+func TestStateChanges(t *testing.T) {
+	bash := func(cmd string) clievent.EventEntry {
+		in, _ := json.Marshal(map[string]string{"command": cmd})
+		ev := clievent.Event{Type: "assistant", Message: &clievent.AssistantMessage{Role: "assistant",
+			Content: []clievent.ContentBlock{{Type: "tool_use", ID: "tu", Name: "Bash", Input: in}}}}
+		return cli.EventEntriesFromEventAt(ev, 1)[0]
+	}
+	reads := []clievent.EventEntry{
+		bash("git log --oneline -20"), bash("gh pr list --state open"), bash("git status && git diff HEAD~1"),
+		bash("git tag --list"), bash("git push --dry-run origin x"),
+		{Type: clievent.KindToolUse, Tool: "Read"}, {Type: clievent.KindText, Activity: "git_push"},
+	}
+	if got := stateChanges(reads); got != nil {
+		t.Errorf("reads told as state changes: %q", got)
+	}
+	writes := append(reads,
+		bash("git push origin fix/x"), bash("cd /srv/repo && git push origin fix/x"), bash("gh pr merge 31 --squash"),
+		bash("git tag v1.2.3"), bash("gh pr create --fill"), bash("gh release create v1.2.3"), bash("git push origin fix/x"))
+	want := []string{"Bash:git_push", "Bash:pr_merge", "Bash:git_tag", "Bash:pr_create", "Bash:release"}
+	if got := stateChanges(writes); !slices.Equal(got, want) {
+		t.Errorf("state changes %q, want %q", got, want)
+	}
+}
+
+// TestPatrolSession: the deep check's one turn runs on the key's session;
+// what comes back is its reply, the tools it called and the calls that
+// changed state, and the session is reset.
+func TestPatrolSession(t *testing.T) {
+	// A cron key: reconnect retires a one-shot key's surviving shim, and
+	// the key is all PatrolSession takes from the patrol (as ScoutSession's
+	// test).
+	const key = "cron:3b9d1f6a8c2e4705"
+	fs := session.StartFakeShimForTest(t, key, 1, []string{adoptE2EAssistant, adoptE2EPrevResult})
+	r := session.NewRouter(fs.Config)
+	t.Cleanup(r.Shutdown)
+	r.ReconnectShimsCtx(context.Background())
+	fs.Attached(t)
+	type out struct {
+		reply         string
+		tools, writes []string
+		err           error
+	}
+	done := make(chan out, 1)
+	go func() {
+		reply, tools, writes, err := PatrolSession(r)(context.Background(), key, session.AgentOpts{}, "深查")
+		done <- out{reply, tools, writes, err}
+	}()
+	testhelper.Eventually(t, func() bool { return len(fs.Sent()) > 0 }, 5*time.Second, "the turn never reached the shim")
+	fs.Emit(t, `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu1","name":"Read","input":{"file_path":"/ws/a.go"}}]},"session_id":"s1"}`)
+	fs.Emit(t, `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu2","name":"Bash","input":{"command":"git log -3"}}]},"session_id":"s1"}`)
+	fs.Emit(t, `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu3","name":"Bash","input":{"command":"git push origin fix/x"}}]},"session_id":"s1"}`)
+	fs.Emit(t, `{"type":"result","subtype":"success","result":"{\"findings\":[]}","session_id":"s1"}`)
+	var got out
+	select {
+	case got = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the deep check's session did not return")
+	}
+	if got.err != nil || got.reply != `{"findings":[]}` {
+		t.Fatalf("reply %q, err %v", got.reply, got.err)
+	}
+	if !slices.Equal(got.tools, []string{"Read", "Bash"}) || !slices.Equal(got.writes, []string{"Bash:git_push"}) {
+		t.Errorf("tools %q writes %q, want Read, Bash and the push", got.tools, got.writes)
+	}
+	if r.SessionFor(key) != nil {
+		t.Error("the session is still in the router after the deep check")
+	}
+}
+
+// TestPatrolTaskOpen: a task of the patrol's holds its place in the
+// workspace's cap while it is in progress or waits on the user, and gives it
+// up once done, failed, stopped or gone.
+func TestPatrolTaskOpen(t *testing.T) {
+	side := sidecar.Open(t.TempDir(), nil)
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	put := func(key string, mark *sidecar.Mark) {
+		t.Helper()
+		if err := side.Put(sidecar.Meta{Key: key, Purpose: sidecar.PurposeTask, Title: key, Created: now.Add(-time.Hour), Mark: mark}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("task:doing", nil)
+	put("task:done", &sidecar.Mark{State: string(task.Done), By: string(task.ByPlanner), At: now.Add(-time.Minute)})
+	put("task:failed", &sidecar.Mark{State: string(task.Failed), By: string(task.ByPlanner), At: now.Add(-time.Minute)})
+	put("task:reopened", &sidecar.Mark{State: string(task.Doing), By: string(task.ByPlanner), At: now.Add(-time.Minute)})
+	open := PatrolTaskOpen(task.New(task.Config{Sessions: side, Now: func() time.Time { return now }}))
+	for key, want := range map[string]bool{"task:doing": true, "task:reopened": true, "task:done": false, "task:failed": false, "task:gone": false, "": false} {
+		if got := open(key); got != want {
+			t.Errorf("open(%q) = %v, want %v", key, got, want)
+		}
+	}
+}
+
+// TestPatrolAlarm: a deep check that wrote opens an error in "等你".
+func TestPatrolAlarm(t *testing.T) {
+	n := notify.New(notify.Config{System: func(string, string) error { return nil }})
+	PatrolAlarm(n)("patrol:write:r1", "项目巡查的深查会话做了写操作", "gateway：Bash:git_push；它本该只读，请检查这个仓库")
+	open, _ := n.List(0)
+	if len(open) != 1 || open[0].Kind != notify.KindError || open[0].Source != "patrol:write:r1" || open[0].Title != "项目巡查的深查会话做了写操作" {
+		t.Errorf("inbox %+v", open)
+	}
+}
+
+// TestPatrolTaskDeny: a session dispatched to fix a patrol finding cannot
+// merge a pull request or cut a release by gh: the two rules are in its
+// deny list at dispatch and on a respawn from its sidecar. Any other
+// dispatched session does not carry them.
+func TestPatrolTaskDeny(t *testing.T) {
+	const finding = "ws_ab12cd34/bug-router-nil"
+	merge, release := "Bash(gh pr merge:*)", "Bash(gh release create:*)"
+	side := sidecar.Open("", nil)
+	to := TaskOpts{Base: session.AgentOpts{PermissionsDeny: []string{"Bash(rm -rf /)"}}, Sessions: side, Planner: "planner-abc123"}
+	want := append(append([]string{"Bash(rm -rf /)"}, taskDenyRules...), merge, release)
+
+	opts, err := to.For("task:ab12", action.Spawn{Dir: "/tmp/ws", Title: "修重连", Finding: finding})
+	if err != nil || !slices.Equal(opts.PermissionsDeny, want) {
+		t.Fatalf("a patrol task's deny = %v, %v; want %v", opts.PermissionsDeny, err, want)
+	}
+	if len(to.Base.PermissionsDeny) != 1 {
+		t.Errorf("base changed: %v", to.Base.PermissionsDeny)
+	}
+	// The rules are deny rules only: nothing of them is allowed back.
+	for _, r := range opts.PermissionsAllow {
+		if strings.Contains(r, "gh pr merge") || strings.Contains(r, "gh release") {
+			t.Errorf("allow holds %s", r)
+		}
+	}
+	plain, err := to.For("task:cd34", action.Spawn{Dir: "/tmp/ws", Title: "写文档"})
+	if err != nil || slices.Contains(plain.PermissionsDeny, merge) || slices.Contains(plain.PermissionsDeny, release) {
+		t.Fatalf("a plain task's deny = %v, %v; want neither rule", plain.PermissionsDeny, err)
+	}
+
+	// A respawn rebuilds the options from the sidecar: the same rules, or
+	// the shim's recorded overlay would read as drift.
+	patrolKey, plainKey := sidecar.TaskKey(), sidecar.TaskKey()
+	if err := side.Put(sidecar.Meta{Key: patrolKey, Purpose: sidecar.PurposeTask, Title: "修重连", Dir: "/tmp/ws", Finding: finding}); err != nil {
+		t.Fatal(err)
+	}
+	if err := side.Put(sidecar.Meta{Key: plainKey, Purpose: sidecar.PurposeTask, Title: "写文档", Dir: "/tmp/ws"}); err != nil {
+		t.Fatal(err)
+	}
+	if opts, ok := to.ForKey(patrolKey); !ok || !slices.Equal(opts.PermissionsDeny, want) {
+		t.Errorf("a patrol task's respawn = %v, %v", opts.PermissionsDeny, ok)
+	}
+	if opts, ok := to.ForKey(plainKey); !ok || slices.Contains(opts.PermissionsDeny, merge) || slices.Contains(opts.PermissionsDeny, release) {
+		t.Errorf("a plain task's respawn = %v, %v", opts.PermissionsDeny, ok)
+	}
+	// With mcp_tools as well (the user's own dispatch of a finding): both
+	// sets of rules.
+	if _, err := to.For("task:ef56", action.Spawn{Dir: "/tmp/ws", Title: "t", Finding: finding, MCPTools: map[string][]string{"aws-outlook-mcp": {"email_send"}}}); err == nil {
+		t.Error("mcp_tools with no cli.mcp_config went through")
 	}
 }

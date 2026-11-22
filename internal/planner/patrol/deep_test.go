@@ -521,6 +521,34 @@ func TestDeepWake(t *testing.T) {
 	}
 }
 
+// TestDeepWakePaused: while pushes and custody are paused the Planner is
+// not woken with findings, which it would dispatch on; they go once the
+// pause is over.
+func TestDeepWakePaused(t *testing.T) {
+	d := newDeep(t)
+	d.repo(wsA, "gateway", "a")
+	d.at(wsA, 0)
+	d.paused = d.now.Add(2 * time.Hour)
+	d.set(func() { d.reply = findings(finding("bug-a-nil", nil)) })
+	if _, err := d.p.Trigger(wsA); err != nil {
+		t.Fatal(err)
+	}
+	d.wait()
+	if got := states(d.state(wsA)); got != "bug-a-nil=new(pending)" || len(d.blocks()) != 0 {
+		t.Fatalf("paused: %s, %d blocks", got, len(d.blocks()))
+	}
+	d.now = d.now.Add(time.Hour)
+	d.tick()
+	if len(d.blocks()) != 0 {
+		t.Fatalf("%d blocks while still paused", len(d.blocks()))
+	}
+	d.now = d.now.Add(2 * time.Hour)
+	d.tick()
+	if got := states(d.state(wsA)); got != "bug-a-nil=told" || len(d.blocks()) != 1 {
+		t.Fatalf("after the pause: %s, %d blocks", got, len(d.blocks()))
+	}
+}
+
 // TestDeepBlockEscapes: a finding's text cannot close the block or pass
 // for the gateway's words.
 func TestDeepBlockEscapes(t *testing.T) {

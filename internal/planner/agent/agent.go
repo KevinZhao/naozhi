@@ -1221,6 +1221,11 @@ func (a *Agent) TellUnrun(text string) error { return a.tell(SourceUnrun, text) 
 // either.
 func (a *Agent) TellWatchRefused(text string) error { return a.tell(SourceWatchRefusal, text) }
 
+// TellPatrolRefused is Tell for the receipt of the action blocks a patrol
+// turn did not run: from SourcePatrolRefusal, whose turn is held to the
+// same limits.
+func (a *Agent) TellPatrolRefused(text string) error { return a.tell(SourcePatrolRefusal, text) }
+
 // TellAnswer is Tell for the user's answer to a question: a turn the user
 // started, w its words, so the Planner may pass the answer on (D98).
 func (a *Agent) TellAnswer(text string, w Words) error { return a.tellSaid(SourceAnswer, &w, text) }

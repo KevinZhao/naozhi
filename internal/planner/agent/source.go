@@ -70,6 +70,17 @@ const (
 	// turn was refused is not run on a second asking, which a receipt from
 	// SourceUnrun would let it be. It gets no receipt of its own.
 	SourceWatchRefusal Source = "watch_refusal"
+	// SourcePatrol is the new findings of a workspace's weekly deep check
+	// (Wake, §15.23 ③, D142). They are the user's own repository's content,
+	// so the turn is not held to an outside turn's limits and may dispatch;
+	// it has none of the user's words, and runs only dispatch (naming its
+	// finding), front, notify, ask and note.
+	SourcePatrol Source = "patrol"
+	// SourcePatrolRefusal is the receipt of the action blocks a patrol turn
+	// did not run (TellPatrolRefused). Its turn is held to a patrol turn's
+	// limits and caps, or they would hold for one turn only, and gets no
+	// receipt of its own.
+	SourcePatrolRefusal Source = "patrol_refusal"
 )
 
 // Words is what the user said in a Planner turn, as the gateway recorded it
@@ -89,14 +100,15 @@ type Words struct {
 // source's name for the rest, your answer among them. A turn merging
 // requests of different sources carries "" (turn.startTurn), which the page
 // reads part by part. Both watch sources write "watch", and the receipt of
-// a watch turn's blocks "refusal": the page lays each pair out alike.
+// a watch turn's blocks "refusal", as does that of a patrol turn's: the
+// page lays each pair out alike.
 func (s Source) Entry() string {
 	switch s {
 	case SourceUser, SourceHandover:
 		return ""
 	case SourceWatchOutside:
 		return string(SourceWatch)
-	case SourceWatchRefusal:
+	case SourceWatchRefusal, SourcePatrolRefusal:
 		return string(SourceRefusal)
 	}
 	return string(s)
@@ -108,7 +120,7 @@ func (s Source) Entry() string {
 // is neither: it is the timeline's separator. Sorted, as contract.js lists
 // it.
 func DynamicSources() []string {
-	out := []string{string(SourceBriefing), string(SourceLookup), string(SourceMorning), string(SourceReceipt), string(SourceRefusal), string(SourceReminder), string(SourceScout), string(SourceUnrun), string(SourceWatch)}
+	out := []string{string(SourceBriefing), string(SourceLookup), string(SourceMorning), string(SourcePatrol), string(SourceReceipt), string(SourceRefusal), string(SourceReminder), string(SourceScout), string(SourceUnrun), string(SourceWatch)}
 	slices.Sort(out)
 	return out
 }
@@ -129,10 +141,13 @@ func (s Source) Outside() bool { return outsideLabels[s] != "" }
 
 // Alone reports whether the gateway runs a request from s as a turn of its
 // own, never merged with the user's message: an outside turn, whose limits
-// would refuse what the user asked for in the same turn, and a watch turn,
-// which merged would either refuse the user's dispatch or run by the user's
-// leave.
-func (s Source) Alone() bool { return s.Outside() || s == SourceWatch }
+// would refuse what the user asked for in the same turn, and a watch turn
+// or a patrol turn (and the receipt of its blocks), which merged would
+// either refuse the user's blocks or run its own by the user's leave — a
+// patrol's dispatch with the user's words.
+func (s Source) Alone() bool {
+	return s.Outside() || s == SourceWatch || s == SourcePatrol || s == SourcePatrolRefusal
+}
 
 // ErrNoBlock answers a Wake with nothing to say.
 var ErrNoBlock = errors.New("唤醒 Planner 的内容为空")
@@ -186,13 +201,14 @@ func (a *Agent) OutsideTurn() string {
 }
 
 // UnrunTurn reports whether the turn in flight answers a receipt of action
-// blocks not run (TellUnrun, TellRefused, TellWatchRefused). The action
+// blocks not run (TellUnrun, TellRefused, TellWatchRefused,
+// TellPatrolRefused). The action
 // runner reads it as a turn's result arrives: such a turn's own blocks not
 // run get no receipt, so the two do not go round, while any other turn's do,
 // however the turns queued up between.
 func (a *Agent) UnrunTurn() bool {
 	for _, src := range a.TurnSources() {
-		if src == SourceUnrun || src == SourceRefusal || src == SourceWatchRefusal {
+		if src == SourceUnrun || src == SourceRefusal || src == SourceWatchRefusal || src == SourcePatrolRefusal {
 			return true
 		}
 	}
@@ -206,6 +222,20 @@ func (a *Agent) UnrunTurn() bool {
 func (a *Agent) WatchTurn() bool {
 	for _, src := range a.TurnSources() {
 		if src == SourceWatch || src == SourceWatchOutside || src == SourceWatchRefusal {
+			return true
+		}
+	}
+	return false
+}
+
+// PatrolTurn reports whether the turn in flight was started by a deep
+// check's new findings (Wake from SourcePatrol), or answers the receipt of
+// such a turn's blocks (TellPatrolRefused). The action runner reads it as a
+// turn's result arrives: such a turn runs only its dispatch (naming a
+// finding), front, notify, ask and note blocks.
+func (a *Agent) PatrolTurn() bool {
+	for _, src := range a.TurnSources() {
+		if src == SourcePatrol || src == SourcePatrolRefusal {
 			return true
 		}
 	}

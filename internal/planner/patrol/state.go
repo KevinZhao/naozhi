@@ -468,9 +468,10 @@ func (p *Patrol) Surface(ref, kind string, unasked bool) error {
 
 // File files the finding ref names as an open item of the ledger, once:
 // text its sentence ("" for the finding's title), line the front it goes
-// under ("" for none). known is false for a ref no finding has, which the
-// caller files as any other item. A finding already filed, or in a task's
-// or a pull request's hands, is not filed again.
+// under ("" for none). known is false for a ref no finding has, or whose
+// record does not read (the error then): the caller files it as any other
+// item. A finding already filed, or in a task's or a pull request's hands,
+// is not filed again.
 func (p *Patrol) File(ref, text, line string) (known bool, err error) {
 	ws, id, ok := SplitRef(ref)
 	if p == nil || p.cfg.Dir == "" || !ok {
@@ -494,10 +495,6 @@ func (p *Patrol) File(ref, text, line string) (known bool, err error) {
 		}
 		return true
 	})
-	if errors.Is(err, ErrState) {
-		// Not known to be a finding: the caller's to file as it is.
-		return false, nil
-	}
 	return known, cmp.Or(err, filed)
 }
 

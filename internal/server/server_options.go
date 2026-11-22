@@ -22,6 +22,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/digest"
 	"github.com/naozhi/naozhi/internal/planner/front"
 	"github.com/naozhi/naozhi/internal/planner/note"
+	"github.com/naozhi/naozhi/internal/planner/patrol"
 	"github.com/naozhi/naozhi/internal/planner/reader"
 	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/planner/task"
@@ -130,6 +131,9 @@ type ServerOptions struct {
 	// Fronts is the ledger of the user's lines of work behind
 	// /api/planner/fronts (docs/rfc/planner.md §15.19); nil lists none.
 	Fronts *front.Store
+	// Patrol is the project patrol behind POST /api/planner/patrol/run
+	// (§15.23 ②); nil answers it as off.
+	Patrol *patrol.Patrol
 	// Briefs are the morning briefs /api/planner/briefs lists; nil lists
 	// none.
 	Briefs *brief.Briefer

@@ -1,12 +1,16 @@
 package wireup
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/notify"
@@ -18,7 +22,9 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/reap"
 	"github.com/naozhi/naozhi/internal/planner/scout"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
+	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
+	"github.com/naozhi/naozhi/internal/session"
 )
 
 // PatrolActive is patrol.Config.Active: when each workspace's last turn of
@@ -26,8 +32,12 @@ import (
 // scout's turns are not the user being there). The turns from now on are
 // seen as the journal writes them; those of the last patrol.ActiveDays are
 // read once, at the first call, which is the patrol's first round and not
-// startup. now nil is time.Now.
-func PatrolActive(j *journal.Journal, now func() time.Time) func() map[string]time.Time {
+// startup. now nil is time.Now. own (nil for none) names the sessions the
+// patrol itself had dispatched (PatrolOwnTask): their turns are not the
+// user being there either, or a workspace the user left would stay in scope,
+// and count as changed, for as long as the patrol kept finding things to
+// fix in it.
+func PatrolActive(j *journal.Journal, now func() time.Time, own func(unit string) bool) func() map[string]time.Time {
 	if j == nil {
 		return func() map[string]time.Time { return nil }
 	}
@@ -41,7 +51,7 @@ func PatrolActive(j *journal.Journal, now func() time.Time) func() map[string]ti
 	)
 	// The observer runs on whichever goroutine appends: one map write.
 	see := func(e journal.Entry) {
-		if e.Kind != journal.KindTurn || e.WS == "" || !health.UserSession(e.Unit, health.KindSession) {
+		if e.Kind != journal.KindTurn || e.WS == "" || !health.UserSession(e.Unit, health.KindSession) || own != nil && own(e.Unit) {
 			return
 		}
 		mu.Lock()
@@ -69,6 +79,18 @@ func PatrolActive(j *journal.Journal, now func() time.Time) func() map[string]ti
 			out[ws] = at
 		}
 		return out
+	}
+}
+
+// PatrolOwnTask reports whether session key was dispatched to fix a
+// finding of the patrol's (its sidecar names one), for PatrolActive.
+func PatrolOwnTask(sidecars *sidecar.Store) func(key string) bool {
+	if sidecars == nil {
+		return nil
+	}
+	return func(key string) bool {
+		m, ok := sidecars.Get(key)
+		return ok && m.Finding != ""
 	}
 }
 
@@ -171,5 +193,78 @@ func PatrolSelf(j *journal.Journal) func(since, until time.Time) patrol.Self {
 			}
 		}
 		return s
+	}
+}
+
+// PatrolSession is patrol.Config.Session over the session router, as
+// ScoutSession is the scout's: a fresh session spawned for the deep check,
+// its one turn sent, then reset. Besides the reply it returns what the
+// session did, read off its events: the tools it called, and the calls
+// planner/activity classifies as changing state (a push, a tag, a pull
+// request made or merged, a release), which a read-only session has none of.
+func PatrolSession(router *session.Router) patrol.Session {
+	return func(ctx context.Context, key string, opts session.AgentOpts, text string) (string, []string, []string, error) {
+		sess, _, err := router.GetOrCreate(ctx, key, opts)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		defer router.Reset(key)
+		res, err := sendTimed(ctx, sess, text)
+		if ctx.Err() != nil {
+			// Cut short mid-turn: end the CLI before the Reset's graceful
+			// close, which waits past Patrol.Stop's wait (ScoutSession).
+			sess.Interrupt()
+		}
+		entries := sess.EventLastN(scoutEventScan)
+		if err == nil && res.Text == "" {
+			err = errors.New("empty reply")
+		}
+		return res.Text, calledTools(entries), stateChanges(entries), err
+	}
+}
+
+// stateChanges is the tool calls of entries that change state, each
+// "<tool>:<activity types>", in call order.
+func stateChanges(entries []clievent.EventEntry) []string {
+	var out []string
+	for _, e := range entries {
+		if e.Type != clievent.KindToolUse || e.Activity == "" {
+			continue
+		}
+		if c := e.Tool + ":" + e.Activity; !slices.Contains(out, c) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// PatrolWake is patrol.Config.Wake over the Planner: each block of a
+// workspace's new findings as a turn from agent.SourcePatrol. Whatever
+// keeps the Planner from taking them, the patrol keeps them for its next
+// round.
+func PatrolWake(a *agent.Agent) func(sent func(batch int, err error), blocks ...string) error {
+	return func(sent func(int, error), blocks ...string) error {
+		return a.Wake(agent.SourcePatrol, sent, blocks...)
+	}
+}
+
+// PatrolTaskOpen is patrol.Config.TaskOpen: whether dispatched session key
+// is in progress or waiting on the user in 任务. One done, failed, stopped
+// or archived has left its place to the next.
+func PatrolTaskOpen(tasks *task.Board) func(key string) bool {
+	return func(key string) bool {
+		for _, t := range tasks.List() {
+			if t.ID == key {
+				return t.State == task.Doing || t.State == task.Waiting
+			}
+		}
+		return false
+	}
+}
+
+// PatrolAlarm is patrol.Config.Alarm: an error in "等你", pushed.
+func PatrolAlarm(n *notify.Notifier) func(source, title, why string) {
+	return func(source, title, why string) {
+		n.Add(notify.Item{Kind: notify.KindError, Level: notify.LevelTimely, Source: source, Title: title, Why: why})
 	}
 }

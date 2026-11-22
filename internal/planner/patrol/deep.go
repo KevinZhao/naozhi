@@ -343,7 +343,9 @@ func (p *Patrol) runDeep(ctx context.Context, t target, id, trig string, started
 // pending for the next round, whatever the reason. Those a wake of this
 // process still has to submit are left to it.
 func (p *Patrol) flush() {
-	if p.cfg.Wake == nil {
+	// Paused with pushes and custody, the Planner is not woken to dispatch
+	// either: the findings wait for the first round after the pause.
+	if p.cfg.Wake == nil || p.cfg.PausedUntil != nil && p.cfg.PausedUntil().After(p.cfg.Now()) {
 		return
 	}
 	names := map[string]string{}
@@ -461,7 +463,7 @@ func (p *Patrol) block(st deepState, name, run string, recs []Record, free bool,
 	fmt.Fprintf(&b, "1. auto 为 true 的（小、可逆、把握大、仓库在 GitHub 上、这个工作区巡查派出的任务不到 %d 个）：用 dispatch 派一个任务去修，带上 \"finding\":\"<ref>\"；message 写清问题、证据、建议的改法和完成标准：开分支、修好、开 PR、等 CI 通过后汇报，不合并。\n", MaxOpenTasks)
 	b.WriteString("2. 要用户取舍的（有不止一种改法、要动接口或数据、你拿不准值不值得）：写清方案，用 ask 问用户，带上 \"finding\":\"<ref>\"。\n")
 	b.WriteString("3. 其余：用 front 块的 item 记成未了事项，source 写 \"patrol:<ref>\"。\n")
-	fmt.Fprintf(&b, "这一轮只能用 dispatch（带 finding）、front、notify、ask、note。每天提到用户面前的（提问与已备好的 PR 合计）最多 %d 条，超出的网关会改记成未了事项。\n", MaxSurfaced)
+	fmt.Fprintf(&b, "这一轮只能用 dispatch（带 finding）、front、notify、ask、note；ask 和 timely 的 notify 也要带 finding。每天提到用户面前的（提问与已备好的 PR 合计）最多 %d 条，超出的网关会改记成未了事项。\n", MaxSurfaced)
 	if n > 1 {
 		fmt.Fprintf(&b, "这次发现较多，分 %d 批发给你，这是第 %d 批；只处理这一批，其余的随后单独发来。\n", n, i)
 	}
