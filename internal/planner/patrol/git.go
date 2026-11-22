@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/planner/github"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
 )
@@ -309,9 +310,12 @@ func reports(dirs []workspace.Dir, dir string, main bool, worktree string) bool 
 	return main
 }
 
-// within reports whether path is root or lies below it, byte-wise.
+// within reports whether path is root or lies below it. Not by the bytes
+// alone: the registry keeps a directory as the session came in by, git
+// says what is on disk, and on a filesystem that folds case the two may
+// spell one directory differently.
 func within(path, root string) bool {
-	return path == root || strings.HasPrefix(path, root+string(filepath.Separator))
+	return osutil.PathContainedInRoot(path, root)
 }
 
 // leftWorktrees is the worktrees a put-away left whose repository is in
@@ -333,7 +337,7 @@ func (p *Patrol) leftWorktrees(dir string) []hit {
 			continue
 		}
 		name := wt.Dir
-		if rel, err := filepath.Rel(dir, wt.Dir); err == nil && !strings.HasPrefix(rel, "..") {
+		if rel, ok := osutil.RelUnderRoot(filepath.Clean(wt.Dir), filepath.Clean(dir)); ok {
 			name = rel
 		}
 		text := "收起时留下的 worktree " + fold(name)

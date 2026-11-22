@@ -342,3 +342,40 @@ func TestLinkedWorktree(t *testing.T) {
 		t.Errorf("alone, the main worktree reports %v, want %v", got, want)
 	}
 }
+
+// TestCaseVariantPaths: on a filesystem that folds case a registered path
+// may spell a directory otherwise than git does (the registry keeps what
+// the session came in by, git says what is on disk). The worktrees a
+// put-away left are still found there, and a branch is still reported by
+// the registered directory its worktree is in.
+func TestCaseVariantPaths(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk, registered := filepath.Join(root, "Repo"), filepath.Join(root, "repo")
+	left := filepath.Join(disk, ".claude", "worktrees", "x")
+	if err := os.MkdirAll(left, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if a, err := os.Stat(disk); err != nil {
+		t.Fatal(err)
+	} else if b, err := os.Stat(registered); err != nil || !os.SameFile(a, b) {
+		t.Skip("the filesystem tells case apart")
+	}
+	p := New(Config{Dir: t.TempDir(), Worktrees: func() []Worktree {
+		return []Worktree{{Dir: left, GitDir: filepath.Join(disk, ".git"), Why: "有未提交的改动"}}
+	}})
+	if got, want := texts(p.leftWorktrees(registered)), []string{"收起时留下的 worktree .claude/worktrees/x（有未提交的改动）"}; !slices.Equal(got, want) {
+		t.Errorf("worktrees = %v, want %v", got, want)
+	}
+
+	other := filepath.Join(root, "other")
+	dirs := []workspace.Dir{{ID: wsA, Path: other}, {ID: wsB, Path: registered}}
+	if !reports(dirs, registered, false, disk) {
+		t.Error("the registered directory does not report the branch checked out in it")
+	}
+	if reports(dirs, other, true, disk) {
+		t.Error("the main worktree reports a branch whose worktree is a registered directory")
+	}
+}
