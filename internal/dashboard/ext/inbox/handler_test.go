@@ -42,7 +42,7 @@ func TestDecideExpired(t *testing.T) {
 // An answer its handler refused for a reason the user can act on is a
 // conflict that carries the reason; any other failure stays a bare 500.
 func TestDecideRefused(t *testing.T) {
-	const why = "Planner 现在收不到（没开或已停用），这条发现没有交出去"
+	const why = "现在联系不上 Planner（没开或已停用），这条发现没有交出去"
 	for _, c := range []struct {
 		err  error
 		code int

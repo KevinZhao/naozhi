@@ -179,14 +179,14 @@ test('这个工作区别巡查了 takes the patrol\'s items of that workspace of
 
 test('a choice the gateway refuses puts the list back and says why', async ({ page }) => {
   const fronts = ledger(true);
-  fronts.decideFail = 'Planner 现在收不到（没开或已停用），这条发现没有交出去';
+  fronts.decideFail = '现在联系不上 Planner（没开或已停用），这条发现没有交出去';
   const mock = await open(page, { fronts });
   try {
     const before = await texts(page);
     const debt = itemOf(page, '退避有两份实现');
     await debt.locator('[data-action="front-item-more"]').click();
     await debt.locator('[data-choice="do"]').click();
-    await expect(page.locator('#toast')).toContainText('没有生效：Planner 现在收不到');
+    await expect(page.locator('#toast')).toContainText('没有生效：现在联系不上 Planner');
     await expect(debt.locator('.fr-detail-meta')).toHaveText('debt · M · 把握中等');
     await expect(debt.locator('[data-choice="do"]')).toHaveCount(1);
 

@@ -73,7 +73,7 @@ var (
 	// ErrChoice is a choice the finding's state does not take.
 	ErrChoice = errors.New("这条发现现在不能这样处置")
 	// ErrPlanner is "do" with no Planner to hand the finding to.
-	ErrPlanner = errors.New("Planner 现在收不到（没开或已停用），这条发现没有交出去")
+	ErrPlanner = errors.New("现在联系不上 Planner（没开或已停用），这条发现没有交出去")
 )
 
 // Declined is declined.json.
