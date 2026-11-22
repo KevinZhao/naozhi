@@ -303,7 +303,10 @@ export function taskStatus(t, now = Date.now()) {
   const bg = live && live.background;
   if (bg && bg.count > 0) {
     const p = ms(bg.last_progress);
-    return { badge: BADGES.bg, text: backgroundTasksText(bg.count, (bg.tasks || []).map((x) => x.summary)), ...(p ? { time: '最近进度 ' + timeAgo(p), tip: formatAbsTime(p) } : {}) };
+    // live.progress is the line the gateway's progress notes say in the
+    // session (§15.22 ④): how long it has run, a workflow's agents done and
+    // its phase. A list without it (an older node's) names the tasks.
+    return { badge: BADGES.bg, text: live.progress || backgroundTasksText(bg.count, (bg.tasks || []).map((x) => x.summary)), ...(p ? { time: '最近进度 ' + timeAgo(p), tip: formatAbsTime(p) } : {}) };
   }
   if (live) {
     const at = lastActive || ms(t.at);

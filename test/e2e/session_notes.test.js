@@ -9,6 +9,8 @@
 // folds what it goes by behind 依据, and takes 没用: marked at once, posted
 // to /api/sessions/notes/useless, taken back when the post fails. The notes
 // of a session on a node running its own Planner show without 没用.
+// A progress note (§15.22 ④) says how far the background work got, takes no
+// 没用, and a stretch of background work shows its latest one only.
 const { test, expect } = require('@playwright/test');
 const { startMockServer, defaultSessions } = require('./mock-server');
 const { waitForWs } = require('./shim_wait');
@@ -245,6 +247,51 @@ test('a remote node\'s Planner note shows without 没用', async ({ page }) => {
     await expect(n1.locator('.gw-note-done')).toHaveCount(0);
     expect(mock.noteUselessCalls).toEqual([]);
     expect(mock.remoteCalls.filter((c) => c.method !== 'GET')).toEqual([]);
+  } finally {
+    mock.server.close();
+  }
+});
+
+// The gateway's progress notes: 后台中 and the line as text, no button; a
+// later note of the same stretch (run) takes the earlier one's place, in the
+// list read and live, and another stretch's note is its own.
+test('a stretch of background work shows its latest progress note only', async ({ page }) => {
+  const line = (min, done) => '已跑 ' + min + ' 分钟 · 工作流 review-all：12 个子代理完成 ' + done + ' 个，阶段「验证」';
+  const notes = [
+    { id: 'g1', key: A, time: iso(T(25)), kind: 'progress', run: 'r1', text: line(30, 3) + ' <b>x</b>' },
+    { id: 'h1', key: A, time: iso(T(22)), kind: 'health', from: 'idle', to: 'waiting' },
+    { id: 'g2', key: A, time: iso(T(15)), kind: 'progress', run: 'r1', text: line(40, 5) + ' <b>x</b>' },
+    { id: 'g3', key: A, time: iso(T(5)), kind: 'progress', run: 'r2', text: '已跑 31 分钟 · 1 个后台任务：npm run bench' },
+  ];
+  const mock = await startMockServer({
+    ws: true,
+    notes: { [A]: notes },
+    planner: { enabled: true, stopped: false, key: 'planner:main', alive: true },
+  });
+  try {
+    const conn = await openSession(page, mock);
+    const pane = page.locator('#events-scroll');
+    const order = () => pane.evaluate((el) => [...el.children]
+      .filter((c) => c.matches('.event.user, .event.text, .gw-note'))
+      .map((c) => c.dataset.noteId || c.dataset.uuid));
+    await expect.poll(order).toEqual(['u1', 't1', 'h1', 'g2', 'u2', 't2', 'g3']);
+    const g2 = pane.locator('[data-note-id="g2"]');
+    await expect(g2.locator('.gw-note-text')).toHaveText('后台中 · ' + line(40, 5) + ' <b>x</b>');
+    await expect(g2.locator('.gw-note-text b')).toHaveCount(0);
+    await expect(g2).not.toHaveClass(/gw-note-pl/);
+    await expect(pane.locator('.gw-note button')).toHaveCount(0);
+    await expect(pane.locator('.gw-note-by')).toHaveCount(0);
+
+    // Live: the next note of r2 replaces g3 where the conversation ends,
+    // and starts no turn; r1's stays where it was.
+    conn.send({ type: 'session_note', key: A, note: { id: 'g4', key: A, time: iso(Date.now()), kind: 'progress', run: 'r2', text: '已跑 1 小时 1 分钟 · 1 个后台任务：npm run bench' } });
+    await expect.poll(order).toEqual(['u1', 't1', 'h1', 'g2', 'u2', 't2', 'g4']);
+    await expect(pane.locator('[data-note-id="g4"] .gw-note-text')).toHaveText('后台中 · 已跑 1 小时 1 分钟 · 1 个后台任务：npm run bench');
+    await expect(page.locator('#running-banner')).toHaveClass(/nz-hidden/);
+    // A note of a stretch after a new turn is one more.
+    conn.send({ type: 'session_note', key: A, note: { id: 'g5', key: A, time: iso(Date.now() + 5), kind: 'progress', run: 'r3', text: '已跑 30 分钟 · 1 个后台任务：make' } });
+    await expect.poll(order).toEqual(['u1', 't1', 'h1', 'g2', 'u2', 't2', 'g4', 'g5']);
+    expect(mock.noteUselessCalls).toEqual([]);
   } finally {
     mock.server.close();
   }
