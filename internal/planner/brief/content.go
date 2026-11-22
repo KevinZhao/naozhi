@@ -27,8 +27,10 @@ import (
 
 // Rendering caps.
 const (
-	maxItems   = 10 // per section; the rest become a count
-	titleRunes = 80
+	maxItems = 10 // per section; the rest become a count
+	// maxFrontItems is how many open items the brief lists under a line.
+	maxFrontItems = 3
+	titleRunes    = 80
 	// maxSlack is how many unread Slack conversations are listed: more than
 	// a section's, as the digest is what the user reads them by.
 	maxSlack       = 20
@@ -131,6 +133,8 @@ type input struct {
 	Midway time.Time
 	// Fronts are the lines of work in progress, the latest updated first.
 	Fronts []front.Front
+	// Items are the open items of those lines, by line, oldest first.
+	Items map[string][]front.Item
 	// Done are the sessions handed out (the Planner's dispatches, another
 	// node's) that finished; Yours the ones the user opened that got
 	// somewhere, which the user was there for and the brief only names.
@@ -355,6 +359,14 @@ func (b *Briefer) gather(since, now time.Time) input {
 	if b.cfg.Fronts != nil {
 		in.Fronts = b.cfg.Fronts()
 	}
+	if b.cfg.Items != nil && len(in.Fronts) > 0 {
+		in.Items = map[string][]front.Item{}
+		for _, it := range b.cfg.Items() {
+			if it.Front != "" {
+				in.Items[it.Front] = append(in.Items[it.Front], it)
+			}
+		}
+	}
 
 	if b.cfg.Inbox != nil {
 		for _, it := range b.cfg.Inbox() {
@@ -563,22 +575,7 @@ func render(in input) string {
 		}
 	}
 
-	section(&b, "工作线", in.Fronts, func(f front.Front) string {
-		line := "**" + plain(f.Name) + "**"
-		if f.State != "" {
-			line += "：" + plain(f.State)
-		}
-		if f.Next != "" {
-			line += " → " + plain(f.Next)
-		}
-		if w := strings.TrimSpace(strings.TrimPrefix(f.Waiting, "等")); w != "" {
-			line += "（等 " + plain(w) + "）"
-		}
-		if idle := in.Now.Sub(f.Updated); !f.Updated.IsZero() && idle >= frontIdle {
-			line += " · " + ago(idle) + "没动"
-		}
-		return line
-	})
+	frontsSection(&b, in)
 	section(&b, "今天的日程", in.Meetings, func(m meetingItem) string {
 		line := "全天"
 		if !m.AllDay {
@@ -740,6 +737,44 @@ func slackLine(cv scout.SlackConversation) string {
 		line += " · " + plain(textutil.TruncateRunes(cv.Summary, titleRunes))
 	}
 	return line
+}
+
+// frontsSection lists the lines of work in progress, each with the first
+// of its open items under it (§15.23, D143): what is left on a line is what
+// the user picks the day's work from. The items under no line are not
+// listed: the Planner page's left column has them.
+func frontsSection(b *strings.Builder, in input) {
+	if len(in.Fronts) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "\n### 工作线（%d）\n", len(in.Fronts))
+	for i, f := range in.Fronts {
+		if i == maxItems {
+			fmt.Fprintf(b, "- …另有 %d 项\n", len(in.Fronts)-i)
+			break
+		}
+		line := "**" + plain(f.Name) + "**"
+		if f.State != "" {
+			line += "：" + plain(f.State)
+		}
+		if f.Next != "" {
+			line += " → " + plain(f.Next)
+		}
+		if w := strings.TrimSpace(strings.TrimPrefix(f.Waiting, "等")); w != "" {
+			line += "（等 " + plain(w) + "）"
+		}
+		if idle := in.Now.Sub(f.Updated); !f.Updated.IsZero() && idle >= frontIdle {
+			line += " · " + ago(idle) + "没动"
+		}
+		b.WriteString("- " + line + "\n")
+		for j, it := range in.Items[f.ID] {
+			if j == maxFrontItems {
+				fmt.Fprintf(b, "  - …另有 %d 条\n", len(in.Items[f.ID])-j)
+				break
+			}
+			b.WriteString("  - 未了：" + plain(it.Text) + "\n")
+		}
+	}
 }
 
 func section[T any](b *strings.Builder, title string, items []T, line func(T) string) {

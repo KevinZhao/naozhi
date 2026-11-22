@@ -561,6 +561,24 @@ func TestSnapshotFrontsRoutines(t *testing.T) {
 	if _, key2 := renderSnapshotKey(in); key2 == key {
 		t.Error("a front's new state is not a change of the snapshot")
 	}
+	// The open items (§15.23): a line says how many it has, after its name
+	// so the line's cap does not cut the count; the ones under no line get
+	// a line of their own. A count that moved is a change of the snapshot.
+	in.Fronts[1].State = strings.Repeat("长", snapshotLineRunes)
+	in.Items = []front.Item{{ID: "i0000001", Front: "blog"}, {ID: "i0000002", Front: "blog"}}
+	got, key = renderSnapshotKey(in)
+	if !strings.Contains(got, "- [jd-tgw] JD TGW 迁移：路线图已改 →") || !strings.Contains(got, "- [blog] trn2 blog（未了 2）：长长") || strings.Contains(got, "未归线") {
+		t.Fatalf("snapshot with open items:\n%s", got)
+	}
+	in.Items = append(in.Items, front.Item{ID: "i0000003"}, front.Item{ID: "i0000004", Front: "jd-tgw"})
+	got, key2 := renderSnapshotKey(in)
+	if !strings.Contains(got, "- [jd-tgw] JD TGW 迁移（未了 1）：路线图已改") || !strings.Contains(got, "\n- 未归线：未了 1（见 fronts.json 的 items）\n例行任务（") {
+		t.Fatalf("snapshot with a loose item:\n%s", got)
+	}
+	if key2 == key {
+		t.Error("an open item more is not a change of the snapshot")
+	}
+	in.Fronts[1].State = ""
 	for i := range snapshotMaxFronts + 2 {
 		in.Fronts = append(in.Fronts, front.Front{ID: fmt.Sprintf("f%d", i), Name: "线"})
 	}

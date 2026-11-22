@@ -232,6 +232,29 @@ body:has(#abnav-settings-badge:not([hidden])) .settings-syslink-btn::after{conte
 .fr-field{display:flex;flex-direction:column;gap:2px;font-size:var(--nz-fs-xs);color:var(--nz-text-dim)}
 .fr-field textarea{box-sizing:border-box;width:100%;resize:vertical;padding:4px 6px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);background:var(--nz-bg-0);color:var(--nz-text);font:inherit;font-size:var(--nz-fs-sm2)}
 .fr-field textarea:focus-visible{outline:2px solid var(--nz-focus);outline-offset:1px}
+/* 未了事项 (§15.23): under a line's card, or after the cards by workspace
+   (未归线). One row each: the text, where it came from, its source, "×". */
+.fr-items{margin:6px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:3px;font-size:var(--nz-fs-xs)}
+.fr-item{display:flex;align-items:baseline;gap:6px;min-width:0}
+.fr-item::before{content:"·";flex-shrink:0;color:var(--nz-text-dim)}
+.fr-item-t{flex:1;min-width:0;color:var(--nz-text);overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden}
+.fr-from{flex-shrink:0;color:var(--nz-text-dim)}
+/* Over .pl-link's font:inherit, declared further down. */
+.pl-link.fr-src{flex-shrink:0;font-size:var(--nz-fs-xs)}
+.fr-item-x{flex-shrink:0;align-self:center;width:18px;height:18px;padding:0;border:0;border-radius:var(--nz-radius-ms);background:none;color:var(--nz-text-mute);font:inherit;line-height:1;cursor:pointer}
+.fr-item-x:hover{background:var(--nz-bg-2);color:var(--nz-text)}
+.fr-item-x:focus-visible{outline:2px solid var(--nz-focus);outline-offset:1px}
+.pl-link.fr-items-more{margin-top:3px;font-size:var(--nz-fs-xs)}
+.fr-add{margin-top:6px}
+.fr-add input{box-sizing:border-box;width:100%;padding:3px 6px;border:1px solid transparent;border-radius:var(--nz-radius-ms);background:none;color:var(--nz-text);font:inherit;font-size:var(--nz-fs-xs)}
+.fr-add input::placeholder{color:var(--nz-text-dim)}
+.fr-add input:hover,.fr-card .fr-add input{border-color:var(--nz-border)}
+.fr-add input:focus-visible{border-color:var(--nz-border);background:var(--nz-bg-0);outline:2px solid var(--nz-focus);outline-offset:1px}
+.fr-loose-h{margin:10px 2px 4px;font-size:var(--nz-fs-xs);font-weight:600;color:var(--nz-text-dim)}
+.fr-loose{padding:0 2px}
+.fr-loose+.fr-loose{margin-top:8px}
+.fr-loose-ws{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fr-loose .fr-items{margin-top:3px}
 .tk-act{min-height:26px}
 .tk-stop{color:var(--nz-red)}
 /* New result (§15.12 ④): a round dot before the title, apart from the left

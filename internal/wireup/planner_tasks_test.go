@@ -238,8 +238,16 @@ func TestTaskPromptReport(t *testing.T) {
 	}
 	j := strings.Index(p[i+3:], "```")
 	reply := "正文\n" + strings.NewReplacer("done | blocked | need_user | progress", "done", "不超过 120 字，第一句写结论", "写好了").Replace(p[i:i+3+j+3])
-	if rep, body, ok, err := action.ParseReport(reply); !ok || err != nil || rep.State != "done" || body != "正文" {
+	if rep, body, ok, err := action.ParseReport(reply); !ok || err != nil || rep.State != "done" || body != "正文" || len(rep.Left) != 1 {
 		t.Errorf("ParseReport(%q) = %+v, %q, %v, %v", reply, rep, body, ok, err)
+	}
+	// left is all the session still has undone, said whole each time: what
+	// it no longer says is closed, and a done report without it closes what
+	// the session left before (D143).
+	if !strings.Contains(p, "left 写现在还剩下没做的全部事项，没有就不写：最多 5 条、每条不超过 100 字") ||
+		!strings.Contains(p, "这次没再写的，网关就当它了结了") || !strings.Contains(p, "一字不改再写一遍") ||
+		!strings.Contains(p, "汇报 done 且不带 left 是之前留下的全部了结；不是 done 又不带 left，之前留下的保持不动") {
+		t.Errorf("prompt does not say what left is for: %s", p)
 	}
 	// A remote job is waited on locally, or naozhi sees the session idle
 	// while it runs (D109).

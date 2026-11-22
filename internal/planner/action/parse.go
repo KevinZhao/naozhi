@@ -22,6 +22,7 @@
 package action
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -431,16 +432,37 @@ func (t *Routine) validate() error {
 // Front writes one line of work into the ledger (工作线台账, §15.17, D132):
 // the front ID names is made (with Name) or changed field by field. State,
 // Next and Waiting left out stay as they are; "" clears one.
+//
+// Item and Done write the ledger's open items (未了事项, §15.23, D143): Item
+// files one, under the front ID names when it names one, or changes the
+// source of the one its id names; Done closes the ones it lists. A block
+// carrying only those needs no ID, and touches no front.
 type Front struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name,omitempty"`
-	State    *string  `json:"state,omitempty"`
-	Next     *string  `json:"next,omitempty"`
-	Waiting  *string  `json:"waiting,omitempty"`
-	Sessions []string `json:"sessions,omitempty"`
-	Decision string   `json:"decision,omitempty"`
-	Close    bool     `json:"close,omitempty"`
+	ID       string     `json:"id,omitempty"`
+	Name     string     `json:"name,omitempty"`
+	State    *string    `json:"state,omitempty"`
+	Next     *string    `json:"next,omitempty"`
+	Waiting  *string    `json:"waiting,omitempty"`
+	Sessions []string   `json:"sessions,omitempty"`
+	Decision string     `json:"decision,omitempty"`
+	Close    bool       `json:"close,omitempty"`
+	Item     *FrontItem `json:"item,omitempty"`
+	Done     []string   `json:"done,omitempty"`
 }
+
+// FrontItem is a front block's open item: with no ID a new one (Text, and
+// the workspace and source it has), with one the new source of the item it
+// names (the issue it was filed as).
+type FrontItem struct {
+	ID   string `json:"id,omitempty"`
+	Text string `json:"text,omitempty"`
+	// Workspace is a workspace's ID or name, "" to go by the source.
+	Workspace string `json:"workspace,omitempty"`
+	Source    string `json:"source,omitempty"`
+}
+
+// maxFrontDone is how many items one front block closes.
+const maxFrontDone = 10
 
 // Update is f as the ledger takes it.
 func (f Front) Update() front.Update {
@@ -448,12 +470,62 @@ func (f Front) Update() front.Update {
 		Sessions: f.Sessions, Decision: f.Decision, Close: f.Close}
 }
 
-func (f *Front) validate() error {
-	u := f.Update()
-	if err := u.Validate(); err != nil {
-		return err
+// ledger reports whether f changes a front, not only the open items.
+func (f Front) ledger() bool {
+	return f.Name != "" || f.State != nil || f.Next != nil || f.Waiting != nil || len(f.Sessions) > 0 || f.Decision != "" || f.Close
+}
+
+// label names f as the conversation does: its front, else its item.
+func (f Front) label() string {
+	if name := cmp.Or(f.Name, f.ID); name != "" {
+		return name
 	}
-	f.ID, f.Name, f.Decision = u.ID, u.Name, u.Decision
+	if f.Item != nil && f.Item.Text != "" {
+		return textutil.TruncateRunes(f.Item.Text, labelRunes)
+	}
+	return "未了事项"
+}
+
+func (f *Front) validate() error {
+	f.ID, f.Name = strings.TrimSpace(f.ID), strings.TrimSpace(f.Name)
+	// Only a block that writes no front may go without its ID.
+	if f.ID != "" || f.ledger() || f.Item == nil && len(f.Done) == 0 {
+		u := f.Update()
+		if err := u.Validate(); err != nil {
+			return err
+		}
+		f.ID, f.Name, f.Decision = u.ID, u.Name, u.Decision
+	}
+	if it := f.Item; it != nil {
+		it.ID, it.Workspace = strings.TrimSpace(it.ID), strings.TrimSpace(it.Workspace)
+		it.Text, it.Source = strings.Join(strings.Fields(it.Text), " "), strings.Join(strings.Fields(it.Source), " ")
+		switch {
+		case utf8.RuneCountInString(it.Source) > front.SourceRunes:
+			return fmt.Errorf("item 的 source 超过 %d 字", front.SourceRunes)
+		case it.ID != "" && !front.ItemID(it.ID):
+			return errors.New("item 的 id 不是未了事项的 id（i 加 7 位小写字母或数字，见 fronts.json 的 items）")
+		case it.ID != "" && (it.Text != "" || it.Workspace != ""):
+			return errors.New("item 带 id 是改已有那条的出处，只能再带 source")
+		case it.ID != "" && it.Source == "":
+			return errors.New("item 带 id 时要有 source（新的出处）")
+		case it.ID != "":
+		case it.Text == "":
+			return errors.New("item 缺少 text")
+		case utf8.RuneCountInString(it.Text) > front.ItemRunes:
+			return fmt.Errorf("item 的 text 超过 %d 字，写成一句话", front.ItemRunes)
+		case utf8.RuneCountInString(it.Workspace) > workspaceRefRunes:
+			return errors.New("item 的 workspace 太长")
+		}
+	}
+	if len(f.Done) > maxFrontDone {
+		return fmt.Errorf("done 最多 %d 个", maxFrontDone)
+	}
+	for i, id := range f.Done {
+		if id = strings.TrimSpace(id); !front.ItemID(id) {
+			return errors.New("done 里要写未了事项的 id（i 加 7 位小写字母或数字，见 fronts.json 的 items）")
+		}
+		f.Done[i] = id
+	}
 	return nil
 }
 

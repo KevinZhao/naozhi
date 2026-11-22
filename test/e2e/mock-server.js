@@ -267,8 +267,10 @@ function defaultGitStates() {
  *   PUT / DELETE /api/inbox/pause set
  *   paused_until, and pause or resume custody with it (D94: one pause). Every write lands in
  *   inboxCalls. Unset, the routes 404.
- * @param {object} [overrides.fronts] - GET /api/planner/fronts body ({fronts, writable}); POST
- *   /api/planner/fronts lands in frontsCalls and edits or closes the line when writable (403 otherwise).
+ * @param {object} [overrides.fronts] - GET /api/planner/fronts body ({fronts, items, writable}); POST
+ *   /api/planner/fronts lands in frontsCalls and edits or closes the line when writable (403 otherwise);
+ *   {item} adds an open item (id i<n>, from user) and {item_done} drops one. `itemsFail` (not served)
+ *   makes those two answer 500.
  * @param {object} [overrides.tasks] - GET /api/tasks body ({tasks}, task.Task wire shape); POST
  *   /api/tasks/state sets the task's state as the user's and lands in tasksCalls; POST
  *   /api/tasks/stop marks the task done as the user's ('已停止') and lands in taskStopCalls;
@@ -1384,14 +1386,16 @@ function startMockServer(overrides = {}) {
     // GET /api/tasks and POST /api/tasks/state: opt-in via overrides.tasks
     // ({tasks}); a state change sets the task's state, by and at in place,
     // so the test's object shows it, and lands in tasksCalls.
-    // The ledger of the lines of work (overrides.fronts: {fronts, writable}).
-    // A POST lands in frontsCalls and, when writable, changes the line as
-    // the gateway does: the fields named, "" clearing one, close dropping it
-    // from the open list.
+    // The ledger of the lines of work (overrides.fronts: {fronts, items,
+    // writable}). A POST lands in frontsCalls and, when writable, changes
+    // the line as the gateway does: the fields named, "" clearing one, close
+    // dropping it from the open list; {item} adds an open item and
+    // {item_done} drops one, both answering 500 while itemsFail is set.
     if (pathname === NZ_CONTRACT.API.planner_fronts && req.method === 'GET' && overrides.fronts) {
       if (!checkAuth()) return;
+      const { itemsFail: _, ...ledger } = overrides.fronts;
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(overrides.fronts));
+      res.end(JSON.stringify(ledger));
       return;
     }
     if (pathname === NZ_CONTRACT.API.planner_fronts && req.method === 'POST' && overrides.fronts) {
@@ -1402,6 +1406,22 @@ function startMockServer(overrides = {}) {
         const req2 = JSON.parse(body || '{}');
         frontsCalls.push(req2);
         if (!overrides.fronts.writable) { res.writeHead(403, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'fronts_readonly_remote' })); return; }
+        if (req2.item || req2.item_done) {
+          if (overrides.fronts.itemsFail) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: '台账写不进去' })); return; }
+          const items = overrides.fronts.items || (overrides.fronts.items = []);
+          let it;
+          if (req2.item) {
+            it = { id: 'i' + String(frontsCalls.length).padStart(7, '0'), from: 'user', created: new Date().toISOString(), ...req2.item };
+            items.push(it);
+          } else {
+            it = items.find(x => x.id === req2.item_done);
+            if (!it) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: '找不到这条未了事项' })); return; }
+            overrides.fronts.items = items.filter(x => x !== it);
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(it));
+          return;
+        }
         const f = overrides.fronts.fronts.find(x => x.id === req2.id);
         if (!f) { res.writeHead(404); res.end(); return; }
         for (const k of ['state', 'next', 'waiting']) if (typeof req2[k] === 'string') f[k] = req2[k];

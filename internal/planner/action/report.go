@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
+
+	"github.com/naozhi/naozhi/internal/planner/front"
 )
 
 // ReportFence is the info string of a dispatched session's report block
@@ -24,11 +27,21 @@ const (
 // summary is cut, not refused, since the report is worth having anyway.
 const reportSummaryRunes = 120
 
+// reportLeftMax and reportLeftRunes cap what a report leaves (D143): past
+// them the list and each line are cut, as the summary is.
+const (
+	reportLeftMax   = 5
+	reportLeftRunes = front.ItemRunes
+)
+
 // Report is a dispatched session's report: State one of the Report states,
-// Summary its conclusion first, on one line.
+// Summary its conclusion first, on one line. Left is all the session still
+// has left undone, one line each: the gateway makes the ledger's open items
+// of this session be them (§15.23, D143). An empty one reads as not given.
 type Report struct {
-	State   string `json:"state"`
-	Summary string `json:"summary"`
+	State   string   `json:"state"`
+	Summary string   `json:"summary"`
+	Left    []string `json:"left,omitempty"`
 }
 
 // The reasons a report block does not parse. They name the fault only,
@@ -38,7 +51,7 @@ var (
 	errReportNotLast   = errors.New("汇报块要写在这一轮回复的最末尾，后面不能再有文字")
 	errReportTooBig    = fmt.Errorf("汇报块超过 %d KB", maxBlockBytes>>10)
 	errReportNotJSON   = errors.New("汇报块不是一个 JSON 对象")
-	errReportFields    = errors.New("汇报块的字段不对（只能有 state 和 summary，都是字符串）")
+	errReportFields    = errors.New("汇报块的字段不对（只能有 state、summary 和 left；前两个是字符串，left 是字符串数组）")
 	errReportState     = errors.New("state 只能是 done、blocked、need_user 或 progress")
 	errReportNoSummary = errors.New("汇报块缺少 summary")
 )
@@ -90,5 +103,12 @@ func ParseReport(text string) (rep Report, body string, ok bool, err error) {
 	if rep.Summary == "" {
 		return Report{}, text, false, errReportNoSummary
 	}
+	var left []string
+	for _, l := range rep.Left {
+		if l = cut(strings.Join(strings.Fields(l), " "), reportLeftRunes); l != "" && len(left) < reportLeftMax && !slices.Contains(left, l) {
+			left = append(left, l)
+		}
+	}
+	rep.Left = left
 	return rep, strings.TrimSpace(strings.Join(lines[:open], "\n")), true, nil
 }

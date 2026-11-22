@@ -318,7 +318,10 @@ func main() {
 		slog.Info("session sidecars given a seen_at baseline", "set", n)
 	}
 	// The ledger of the user's lines of work (§15.17, D132): the Planner's
-	// front blocks write it, its snapshot lists the open ones.
+	// front blocks write it, its snapshot lists the open ones. Its open
+	// items (§15.23, D143) are filed by the dispatched sessions' reports,
+	// the front blocks and the user, and closed by the hourly GitHub
+	// refresh once their pull request or issue is.
 	fronts := front.New(sessionLayout.PlannerFrontsPath(), nil)
 	// The global Planner (planner:main); Start below, once the turn entry and
 	// the health machine exist. Built even when planner.enabled is off, so
@@ -334,6 +337,7 @@ func main() {
 		Journal:    plannerState.Journal,
 		Promises:   wireup.PlannerPromises(promises),
 		Fronts:     wireup.PlannerFronts(fronts),
+		Items:      fronts.Items,
 		Conclusion: wireup.PlannerConclusion(sidecars),
 		MCPConfig:  mcpConfigFile,
 		// Bash for gh only where the session settings are naozhi's own.
@@ -610,6 +614,7 @@ func main() {
 		// The brief leads with the lines of work; the Planner brings the
 		// ledger up to date first (§15.18, D133).
 		Fronts:  fronts.Open,
+		Items:   fronts.Items,
 		Tidy:    wireup.BriefTidy(plannerAgent),
 		Tidying: plannerAgent.Tidying,
 		// With several nodes the scout's node sends the brief, each node's
@@ -869,6 +874,7 @@ func main() {
 		Park:       plannerAgent.Park,
 		Routines:   wireup.PlannerRoutines{Sched: scheduler},
 		Front:      fronts.Apply,
+		Items:      fronts,
 		Lookup:     wireup.PlannerLookup(lookups),
 		TellAnswer: wireup.PlannerTellAnswer(plannerAgent),
 		Ctx:        ctx,
@@ -899,7 +905,9 @@ func main() {
 		go reaper.Run(ctx)
 		// The registered repositories' GitHub issues, hourly, where the
 		// Planner reads (§15.14 ⑤): it has no network tool of its own.
-		go github.New(github.Config{Dir: sessionLayout.PlannerGitHubRoot(), Workspaces: plannerState.Workspaces.LocalDirs}).Run(ctx)
+		// The same round closes the open items whose pull request or issue
+		// is over.
+		go github.New(github.Config{Dir: sessionLayout.PlannerGitHubRoot(), Workspaces: plannerState.Workspaces.LocalDirs, Ledger: fronts}).Run(ctx)
 	}
 	go sidecars.Run(ctx, func(key string) bool { return router.SessionFor(key) != nil })
 	go briefer.Run(ctx)

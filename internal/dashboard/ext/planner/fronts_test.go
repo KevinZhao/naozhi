@@ -60,7 +60,7 @@ func TestHandleFronts(t *testing.T) {
 	}
 	w := httptest.NewRecorder()
 	New(nil, nil, nil, nil).HandleFronts(w, frontReq("GET", "", "127.0.0.1:1", nil))
-	if got := strings.TrimSpace(w.Body.String()); got != `{"fronts":[],"writable":false}` {
+	if got := strings.TrimSpace(w.Body.String()); got != `{"fronts":[],"items":[],"writable":false}` {
 		t.Errorf("no ledger: %s", got)
 	}
 }
@@ -117,5 +117,118 @@ func TestFrontsNotANodeRoute(t *testing.T) {
 		if node.IsAPIRoute(r) {
 			t.Errorf("%s is forwarded to nodes", r)
 		}
+	}
+}
+
+// The open items list with the line each shows under, to any caller past
+// the page's auth (§15.23, D143).
+func TestHandleFrontItems(t *testing.T) {
+	h, s := frontsHandler(t)
+	w := httptest.NewRecorder()
+	h.HandleFronts(w, frontReq("GET", "", "127.0.0.1:50000", nil))
+	if !strings.Contains(w.Body.String(), `"items":[]`) {
+		t.Fatalf("with no item: %s", w.Body)
+	}
+	if _, _, err := s.AddItem(front.Item{Text: "迁完剩下的调用点", Workspace: "ws_ab12cd34", Front: "jd-tgw", Source: "task:9f3c2a71d0", From: front.FromReport}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.AddItem(front.Item{Text: "没归线的", Workspace: "ws_ab12cd34", Source: "https://github.com/owner/repo/pull/12", From: front.FromPlanner}); err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	h.HandleFronts(w, frontReq("GET", "", "192.168.1.20:50000", nil))
+	var got frontsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || w.Code != http.StatusOK {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	if len(got.Items) != 2 || got.Items[0].Front != "jd-tgw" || got.Items[0].From != front.FromReport || got.Items[0].Source != "task:9f3c2a71d0" ||
+		got.Items[1].Front != "" || got.Items[1].Workspace != "ws_ab12cd34" || got.Writable {
+		t.Errorf("items = %+v, writable %v", got.Items, got.Writable)
+	}
+}
+
+// The user adds an open item and strikes one only straight from loopback,
+// one thing a request; an added one is the user's, a struck one is closed
+// by the user and off the list.
+func TestHandleFrontItemEdit(t *testing.T) {
+	const local = "127.0.0.1:50000"
+	const add = `{"item":{"text":"给 README 补上安装步骤","workspace":"ws_ab12cd34","front":"jd-tgw"}}`
+	seed := func(s *front.Store) string {
+		t.Helper()
+		it, _, err := s.AddItem(front.Item{Text: "迁完剩下的调用点", Source: "task:9f3c2a71d0", From: front.FromReport})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return it.ID
+	}
+	for _, tc := range []struct {
+		name, body, remote string
+		hdr                map[string]string
+		code               int
+	}{
+		{"add from another machine", add, "10.0.0.5:50000", nil, http.StatusForbidden},
+		{"add forwarded", add, local, map[string]string{"X-Forwarded-For": "127.0.0.1"}, http.StatusForbidden},
+		{"add by a reverse node's api call", add, "", nil, http.StatusForbidden},
+		{"strike from another machine", `{"item_done":"ID"}`, "10.0.0.5:50000", nil, http.StatusForbidden},
+		{"strike by a reverse node's api call", `{"item_done":"ID"}`, "", nil, http.StatusForbidden},
+		{"add and strike", `{"item":{"text":"x"},"item_done":"ID"}`, local, nil, http.StatusBadRequest},
+		{"add and edit a line", `{"id":"jd-tgw","state":"s","item":{"text":"x"}}`, local, nil, http.StatusBadRequest},
+		{"strike and close a line", `{"id":"jd-tgw","close":true,"item_done":"ID"}`, local, nil, http.StatusBadRequest},
+		{"no text", `{"item":{"text":" "}}`, local, nil, http.StatusBadRequest},
+		{"long text", `{"item":{"text":"` + strings.Repeat("字", front.ItemRunes+1) + `"}}`, local, nil, http.StatusBadRequest},
+		{"a workspace's name", `{"item":{"text":"x","workspace":"repo"}}`, local, nil, http.StatusBadRequest},
+		{"unknown line", `{"item":{"text":"x","front":"nope"}}`, local, nil, http.StatusNotFound},
+		{"unknown item field", `{"item":{"text":"x","source":"task:1"}}`, local, nil, http.StatusBadRequest},
+		{"unknown item", `{"item_done":"i0000000"}`, local, nil, http.StatusNotFound},
+	} {
+		h, s := frontsHandler(t)
+		id := seed(s)
+		w := httptest.NewRecorder()
+		h.HandleFrontEdit(w, frontReq("POST", strings.ReplaceAll(tc.body, "ID", id), tc.remote, tc.hdr))
+		if w.Code != tc.code {
+			t.Errorf("%s: %d %s, want %d", tc.name, w.Code, w.Body, tc.code)
+		}
+		if items := s.Items(); len(items) != 1 || items[0].ID != id {
+			t.Errorf("%s: the items changed: %+v", tc.name, items)
+		}
+		if open := s.Open(); len(open) != 1 || open[0].State != "方案被否" {
+			t.Errorf("%s: the ledger changed: %+v", tc.name, open)
+		}
+	}
+
+	h, s := frontsHandler(t)
+	id := seed(s)
+	w := httptest.NewRecorder()
+	h.HandleFrontEdit(w, frontReq("POST", add, local, nil))
+	var got front.Item
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || w.Code != http.StatusOK {
+		t.Fatalf("add: %d %s", w.Code, w.Body)
+	}
+	if !front.ItemID(got.ID) || got.Text != "给 README 补上安装步骤" || got.From != front.FromUser || got.Front != "jd-tgw" || got.Workspace != "ws_ab12cd34" {
+		t.Errorf("added = %+v", got)
+	}
+	// One under no line and no workspace.
+	w = httptest.NewRecorder()
+	h.HandleFrontEdit(w, frontReq("POST", `{"item":{"text":"没归线的"}}`, local, nil))
+	if w.Code != http.StatusOK || len(s.Items()) != 3 {
+		t.Fatalf("add a loose one: %d %s", w.Code, w.Body)
+	}
+
+	w = httptest.NewRecorder()
+	h.HandleFrontEdit(w, frontReq("POST", `{"item_done":"`+id+`"}`, local, nil))
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || w.Code != http.StatusOK {
+		t.Fatalf("strike: %d %s", w.Code, w.Body)
+	}
+	if got.ID != id || got.ClosedBy != front.ByUser || got.Closed.IsZero() {
+		t.Errorf("struck = %+v", got)
+	}
+	if items := s.Items(); len(items) != 2 || items[0].ID == id || items[1].ID == id {
+		t.Errorf("after the strike: %+v", items)
+	}
+	// Struck twice (two tabs) is struck.
+	w = httptest.NewRecorder()
+	h.HandleFrontEdit(w, frontReq("POST", `{"item_done":"`+id+`"}`, local, nil))
+	if w.Code != http.StatusOK {
+		t.Errorf("strike again: %d %s", w.Code, w.Body)
 	}
 }

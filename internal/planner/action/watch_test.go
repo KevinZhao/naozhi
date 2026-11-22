@@ -641,7 +641,7 @@ func TestWatchTurnOutside(t *testing.T) {
 	}
 	got := w.g.watchRefused[0]
 	for _, want := range []string{
-		"- 第 1 块（front）：这个会话读过外部内容，这一轮不能改工作线台账，没有记",
+		"- 第 1 块（front「登录页改版」）：这个会话读过外部内容，这一轮不能改工作线台账，没有记",
 		"- 第 4 块（dispatch「改注册页」）：这一轮由用户自己开的会话一轮结束触发，只能用 note、notify，没有执行",
 		"会话读过外部内容时只有 note、notify",
 	} {
