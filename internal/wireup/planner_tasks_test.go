@@ -243,7 +243,7 @@ func TestTaskPromptReport(t *testing.T) {
 	}
 	// What the turn leaves undone goes in left, and a done report without
 	// it closes what the session left before (D143).
-	if !strings.Contains(p, "left 可以不写：最多 5 条、每条不超过 100 字") || !strings.Contains(p, "汇报 done 且不带 left 时，网关把你之前留下的一并了结") {
+	if !strings.Contains(p, "left 可以不写：最多 5 条、每条不超过 100 字") || !strings.Contains(p, "汇报 done 且不带 left，网关就把你之前留下的全部了结") {
 		t.Errorf("prompt does not say what left is for: %s", p)
 	}
 	// A remote job is waited on locally, or naozhi sees the session idle

@@ -61,6 +61,8 @@ func TestSystemPrompt(t *testing.T) {
 		"工作区里 RFC 的排期表和 parked.md，补台账里没有的",
 		"每条线下可以挂未了事项（/state/planner/fronts.json 的 items）",
 		`回执里写着"留下 N 条未了事项"`,
+		"带 closed 的已经了结（留 7 天备查），不算",
+		"出处的会话在哪条线的 sessions 里就算哪条线的",
 		`后面带" · 留下 N 条未了事项（已入列）"的`,
 		`名称后的"未了 N"是这条线上开着的未了事项数`,
 		`末尾的"未归线：未了 N"`,
