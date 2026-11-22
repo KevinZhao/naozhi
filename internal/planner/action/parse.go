@@ -1,6 +1,6 @@
 // Package action is the Planner's way to ask the gateway for something
 // (docs/rfc/planner.md §6.2): the ```naozhi-action blocks at the end of a
-// planner:main reply. There are twelve: dispatch (a task: session, started at
+// planner:main reply. They are: dispatch (a task: session, started at
 // once, D88), promise (a promise among the 任务), ask (a
 // question in "通知" whose answer goes back to the Planner, or straight to a
 // session, D98), status (the Planner's judgment of a task's state, §15.4),
@@ -12,8 +12,10 @@
 // §15.12 ⑧), lookup (a web lookup by a one-shot reader, §15.12 ⑨), park
 // (an item the user put down, moved into the 搁置区, §15.14 ⑤), halt (a
 // session the user asked to stop: its custody stopped, its process closed,
-// D119) and cancel (a task the user said is not wanted, stopped as from 任务,
-// D120). A block
+// D119), cancel (a task the user said is not wanted, stopped as from 任务,
+// D120), routine (a standing task, D131), front (a line of work in the
+// ledger, D132) and note (a side note on a session, for the user alone,
+// §15.22 ②). A block
 // that does not parse, or names an unknown type, a bad field or a task that
 // does not exist, is not run: the Planner conversation shows it as it was
 // written, with the reason, and the Planner gets a receipt naming it.
@@ -92,11 +94,12 @@ const (
 	TypeCancel   Type = "cancel"
 	TypeRoutine  Type = "routine"
 	TypeFront    Type = "front"
+	TypeNote     Type = "note"
 )
 
 // allTypes lists the block types as the refusal of an unknown one names
 // them.
-const allTypes = "dispatch、promise、ask、status、notify、custody、relay、remember、lookup、park、halt、cancel、routine、front"
+const allTypes = "dispatch、promise、ask、status、notify、custody、relay、remember、lookup、park、halt、cancel、routine、front、note"
 
 // Dispatch asks for a session in a workspace.
 type Dispatch struct {
@@ -243,6 +246,41 @@ func (p *Park) validate() error {
 		return errors.New("park 缺少 source（出处：任务 key、承诺 ID、#issue，或用户那句话的时间）")
 	case utf8.RuneCountInString(p.Source) > parkSourceRunes:
 		return fmt.Errorf("source 超过 %d 字", parkSourceRunes)
+	}
+	return nil
+}
+
+// Note writes a side note on session Key (§15.22 ②, D139): the gateway puts
+// Text into that session's view, marked as the Planner's, with Why (what it
+// goes by, and where that is) behind it. The user alone reads it: it is not
+// sent to the session and never enters its context, so a turn of any source
+// may write one.
+type Note struct {
+	Key  string `json:"key"`
+	Text string `json:"text"`
+	Why  string `json:"why"`
+}
+
+// noteTextRunes caps a side note: one sentence beside the conversation.
+const noteTextRunes = 200
+
+func (n *Note) validate() error {
+	n.Key = strings.TrimSpace(n.Key)
+	n.Text, n.Why = strings.Join(strings.Fields(n.Text), " "), strings.Join(strings.Fields(n.Why), " ")
+	if err := validKey("key", n.Key); err != nil {
+		return errors.New("note " + err.Error())
+	}
+	switch {
+	case sessionkey.IsPlannerNSKey(n.Key) || sessionkey.IsOneShotKey(n.Key):
+		return errors.New("note 的 key 不能是 planner:main 或一次性会话（巡检、网页查询）")
+	case n.Text == "":
+		return errors.New("note 缺少 text")
+	case utf8.RuneCountInString(n.Text) > noteTextRunes:
+		return fmt.Errorf("text 超过 %d 字", noteTextRunes)
+	case n.Why == "":
+		return errors.New("note 缺少 why（依据与出处）")
+	case utf8.RuneCountInString(n.Why) > textRunes:
+		return fmt.Errorf("why 超过 %d 字", textRunes)
 	}
 	return nil
 }
@@ -421,7 +459,7 @@ func (f *Front) validate() error {
 
 // Block is one action block of a reply: exactly one of Dispatch, Promise,
 // Ask, Status, Notify, Custody, Relay, Remember, Lookup, Park, Halt, Cancel,
-// Routine and Front is set, or Err says why it is not run.
+// Routine, Front and Note is set, or Err says why it is not run.
 type Block struct {
 	// Raw is the block's body as written.
 	Raw      string
@@ -440,6 +478,7 @@ type Block struct {
 	Cancel   *Cancel
 	Routine  *Routine
 	Front    *Front
+	Note     *Note
 	Err      error
 }
 
@@ -655,6 +694,15 @@ func (b *Block) decode() {
 		if err = strict(b.Raw, &f); err == nil {
 			err = f.validate()
 			b.Front = &f.Front
+		}
+	case TypeNote:
+		var n struct {
+			Type Type `json:"type"`
+			Note
+		}
+		if err = strict(b.Raw, &n); err == nil {
+			err = n.validate()
+			b.Note = &n.Note
 		}
 	case "":
 		err = errors.New("缺少 type")

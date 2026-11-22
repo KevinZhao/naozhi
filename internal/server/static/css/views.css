@@ -1000,6 +1000,22 @@ div.pl-lookup{max-width:560px;margin:8px 0;padding:8px 12px;border:1px solid var
 .gw-warn .gw-note-icon,.gw-inbox .gw-note-icon{color:var(--nz-amber)}
 .gw-ok .gw-note-icon{color:var(--nz-green)}
 .gw-planner .gw-note-icon{color:var(--nz-accent)}
+/* A note the Planner wrote to you (session_notes.js, §15.22 ②): its words in
+   full, so left-aligned and as wide as the Planner's cards; 依据 opens onto
+   a row of its own; marked 没用 it fades. */
+.gw-note-pl{justify-content:flex-start;text-align:left;max-width:min(100%,640px);margin:4px auto;padding:8px 12px;background:var(--nz-bg-2);border:1px dashed var(--nz-border);color:var(--nz-text)}
+.gw-note-pl .gw-note-text{flex:1 1 240px;min-width:0;overflow-wrap:anywhere}
+.gw-note-by{font-size:var(--nz-fs-xs);font-weight:600;color:var(--nz-accent)}
+.gw-note-why{font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.gw-note-why>summary{cursor:pointer}
+.gw-note-why>summary:hover{color:var(--nz-accent)}
+.gw-note-why[open]{flex-basis:100%;order:1}
+.gw-note-why>div{margin-top:4px;overflow-wrap:anywhere;white-space:pre-wrap}
+.gw-note-btn{padding:1px 8px;border-radius:var(--nz-radius-pill);border:1px solid var(--nz-border);background:none;font:inherit;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);cursor:pointer}
+.gw-note-btn:hover{border-color:var(--nz-accent);color:var(--nz-accent)}
+.gw-note-btn:focus-visible{outline:2px solid var(--nz-focus);outline-offset:1px}
+.gw-note-done{font-size:var(--nz-fs-xs);color:var(--nz-text-faint)}
+.gw-note-off{opacity:.6}
 /* Custody (custody.js, RFC planner §5.4 D93). A message custody sent sits on
    your side but is not yours: dashed and neutral, its prefix a faint source
    line. The chip is the session header's switch and, as plain text, the mark

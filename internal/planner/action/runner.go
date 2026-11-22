@@ -132,9 +132,9 @@ type Config struct {
 	Digests *digest.Writer
 	// Outside names what brought outside content into the Planner turn in
 	// flight ("巡检", "会前简报"; agent.Agent.OutsideTurn), "" for nothing;
-	// that turn runs only its notify, promise and ask blocks, its dispatch
-	// and status blocks are refused (docs/rfc/planner.md §15.6 安全). nil
-	// refuses none.
+	// that turn runs only its notify, promise, ask and note blocks, its
+	// dispatch and status blocks are refused (docs/rfc/planner.md §15.6
+	// 安全). nil refuses none.
 	Outside func() string
 	// TellRefused sends the receipt of the blocks not run in such a turn, as
 	// a turn held to the same limits (agent.Agent.TellRefused); nil sends
@@ -223,6 +223,16 @@ type Config struct {
 	// the half of 任务's stop that tells no one): a halt block's, once custody
 	// is stopped. nil leaves the process running.
 	StopProcess func(key string)
+	// SideNote writes text as the Planner's side note on session key, why
+	// being what it goes by (planner/note.Notes.Write): shown to the user in
+	// that session's view, never sent to the session. Its error is why the
+	// note was not written (a limit, the pause), as the receipt says it. nil
+	// refuses note blocks. Not Note above, which writes a line into the
+	// Planner's own conversation.
+	SideNote func(key, text, why string) error
+	// NoteTarget is why session key takes no side note, nil when it does:
+	// not a session of this node. nil allows any.
+	NoteTarget func(key string) error
 	// Asking reports whether session key has an AskUserQuestion unanswered
 	// (wireup.CustodySources.Asking): a halt keeps such a process, so the
 	// user's answer reaches a live one. nil is none.
@@ -1273,6 +1283,8 @@ func (r *Runner) handle(rep reply) {
 			}
 		case b.Cancel != nil:
 			err = r.cancel(*b.Cancel)
+		case b.Note != nil:
+			err = r.sideNote(*b.Note)
 		}
 		if reopened && err == nil {
 			un.note(i, b, "这个会话已经收起，网关已重新打开并送到")
@@ -1640,7 +1652,7 @@ func (r *Runner) tellUnrun(rep reply, u unrun) {
 		b.WriteString("格式不对的块按系统提示词里的格式改正后重发。\n")
 	}
 	if u.outside {
-		b.WriteString("这一轮由" + by + "触发，网关只执行 notify、promise 与 ask；需要派活、改任务状态、托管、记记忆、搁置、网页查询、叫停或停止任务，就在对话里向用户说明，等用户发消息让你做。\n")
+		b.WriteString("这一轮由" + by + "触发，网关只执行 notify、promise、ask 与 note；需要派活、改任务状态、托管、记记忆、搁置、网页查询、叫停或停止任务，就在对话里向用户说明，等用户发消息让你做。\n")
 	}
 	if u.notUser {
 		b.WriteString("这一轮不是用户发起的（回执、提醒、托管等），网关没有可附的用户原话，所以不转达、不带原话派活、不改 MCP 权限、不开 ultracode、不记记忆、不搁置、不叫停、不停止任务；要用户拍板就用 ask，带上 task 时用户的回答会直接送到那个会话。\n")
@@ -2312,6 +2324,26 @@ func (r *Runner) park(p Park) error {
 	}
 	if err := r.cfg.Park(p.Text, p.Source); err != nil {
 		return fmt.Errorf("「%s」没有搁置：%w", textutil.TruncateRunes(p.Text, 60), err)
+	}
+	return nil
+}
+
+// sideNote writes a note block's side note on its session (§15.22 ②). It
+// is for the user's eyes: nothing here sends to the session, so the block
+// runs in a turn of any source, one outside content started included. A
+// note written leaves no line in the Planner conversation, the block's card
+// says it; one not written goes back to the Planner with why.
+func (r *Runner) sideNote(n Note) error {
+	if r.cfg.SideNote == nil {
+		return errors.New("旁注没有接通")
+	}
+	if r.cfg.NoteTarget != nil {
+		if err := r.cfg.NoteTarget(n.Key); err != nil {
+			return blockError{err}
+		}
+	}
+	if err := r.cfg.SideNote(n.Key, n.Text, n.Why); err != nil {
+		return fmt.Errorf("给「%s」的旁注没有写：%w", r.sessionName(n.Key), err)
 	}
 	return nil
 }

@@ -416,6 +416,11 @@
   },
   {
     "method": "POST",
+    "path": "/api/sessions/notes/useless",
+    "handler_type": "*dashsession.Handlers"
+  },
+  {
+    "method": "POST",
     "path": "/api/sessions/orient",
     "handler_type": "*SendHandler"
   },

@@ -19,7 +19,7 @@ func TestSystemPrompt(t *testing.T) {
 		"  - ~/.claude/projects/x/memory/MEMORY.md\n",
 		"<naozhi-scout>",
 		"超过 4 小时没回",
-		"巡检触发的回合只能用 notify、promise、ask",
+		"巡检触发的回合只能用 notify、promise、ask、note：",
 		"你的跨会话名字是 planner-abc123",
 		`不要写成"提醒用户提交周报"`,
 		"不要改用 SendMessage 绕开",
@@ -84,6 +84,15 @@ func TestSystemPrompt(t *testing.T) {
 		"可能自己改了或结束了某一条",
 		`<naozhi-morning day="…">`,
 		"早报由网关随后按台账发出",
+		`{"type":"note","key":"<会话 key>","text":"…","why":"…"}`,
+		"只给用户看，不进会话的上下文",
+		"任何回合都能用",
+		"值得写旁注的只有五类：与另一个会话的结论或改动冲突；与用户记下的决定或记忆相悖；用户答应过的事到了该做的时候；会话停在一个你有依据的选择上（写建议与依据）；会话说做完了而你用 gh 或文件核实下来没有。其余不写。",
+		"每个会话每小时最多 3 条、全天 30 条",
+		"同一会话当天点了 3 次，当天不再给它写",
+		"用户暂停推送与托管时也不写",
+		"用户在旁注上点了“没用”",
+		"对运行中的会话有话说，用 note 写给用户看，不发进会话",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt lacks %q", want)
@@ -109,6 +118,11 @@ func TestSystemPrompt(t *testing.T) {
 	if strings.Contains(p, "不用标也不用回") {
 		t.Error("prompt still says a progress report needs no answer")
 	}
+	// A side note is how the Planner speaks about a running session (D139):
+	// the old rule would keep it silent.
+	if strings.Contains(p, "不主动给运行中的会话发意见") {
+		t.Error("prompt still forbids speaking about a running session")
+	}
 	fill := strings.NewReplacer(
 		"<工作区 ID 或名字>", "naozhi", "<RFC3339 或空>", "", "<task: key、承诺 ID，或你开的会话的 key>", "task:ab12",
 		"done | doing | failed", "done", "timely | brief", "timely", "<http(s) 链接或空>", "", "<巡检发现的 id 或空>", "", "…", "x",
@@ -117,8 +131,8 @@ func TestSystemPrompt(t *testing.T) {
 		"<定时表达式>", "0 9 * * 1-5", "<快照里方括号中的 id>", "1cc584f384db82fc",
 	)
 	formats := regexp.MustCompile(`\{"type":"[a-z]+"[^\n]*?\}`).FindAllString(p, -1)
-	if len(formats) != 18 {
-		t.Fatalf("found %d block formats, want 18: %q", len(formats), formats)
+	if len(formats) != 19 {
+		t.Fatalf("found %d block formats, want 19: %q", len(formats), formats)
 	}
 	for _, f := range formats {
 		body := strings.ReplaceAll(fill.Replace(f), `["x"]`, `["是"]`)

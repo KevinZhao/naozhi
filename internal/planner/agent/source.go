@@ -93,7 +93,8 @@ func DynamicSources() []string {
 // outsideLabels names the sources whose turns carry outside content (mail,
 // Slack messages, tasks other people wrote, a web lookup's answer), or
 // answer a turn that did: a line in one could pose as a request, so their
-// turns may only notify, promise and ask.
+// turns may only notify, promise and ask, and write the user a side note
+// (note), which reaches no session.
 var outsideLabels = map[Source]string{SourceScout: "巡检", SourceBriefing: "会前简报", SourceRefusal: "被拒动作的回执", SourceLookup: "网页查询结果"}
 
 // Outside reports whether a turn from s carries outside content (or answers

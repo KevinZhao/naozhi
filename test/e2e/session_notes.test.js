@@ -5,8 +5,12 @@
 // no note links back to the Planner page (its card only opens this session
 // again), and a new socket lists the notes pushed while it was down.
 // data-inbox-item anchors a note to its item for a notification's click.
+// A note the Planner wrote (§15.22 ②) is marked Planner, shows its words,
+// folds what it goes by behind 依据, and takes 没用: marked at once, posted
+// to /api/sessions/notes/useless, taken back when the post fails. The notes
+// of a session on a node running its own Planner show without 没用.
 const { test, expect } = require('@playwright/test');
-const { startMockServer } = require('./mock-server');
+const { startMockServer, defaultSessions } = require('./mock-server');
 const { waitForWs } = require('./shim_wait');
 
 const A = 'dashboard:direct:2026-01-01-120000-1:myproject';
@@ -99,6 +103,148 @@ test('side notes sit among the bubbles by time, arrive live and start no turn', 
     await expect.poll(() => mock.wsConnections.length).toBeGreaterThan(conns);
     await expect(pane.locator('[data-note-id="h4"]')).toContainText('进入「停滞」');
     await expect(page.locator('#running-banner')).toHaveClass(/nz-hidden/);
+  } finally {
+    mock.server.close();
+  }
+});
+
+// openSession opens A and feeds its history; it returns the socket.
+async function openSession(page, mock) {
+  await page.goto(mock.url + '/dashboard');
+  await waitForWs(page, 'CONNECTED');
+  await page.click(`.session-card[data-key="${A}"]`);
+  const conn = mock.wsConnections[mock.wsConnections.length - 1];
+  await expect.poll(() => conn.messages.filter((m) => m.type === 'subscribe' && m.key === A).length).toBe(1);
+  conn.send({ type: 'subscribed', key: A, state: 'ready' });
+  conn.send({ type: 'history', key: A, initial: true, events: EVENTS });
+  return conn;
+}
+
+const P1 = 'p0123456789ab', P2 = 'pfedcba987654', P3 = 'p00000000000c';
+
+test('a Planner note shows its words, folds its why, and takes 没用', async ({ page }) => {
+  const notes = [
+    { id: P1, key: A, time: iso(T(20)), kind: 'planner', text: '这个改法和 task:ab12 的结论冲突 <b>', why: 'task:ab12 的摘要：已改成方案 B <b>x</b>' },
+    { id: P2, key: A, time: iso(T(5)), kind: 'planner', text: '你答应过今天回复张三', why: '承诺 pr_1', useless: true },
+  ];
+  const mock = await startMockServer({
+    ws: true,
+    notes: { [A]: notes },
+    planner: { enabled: true, stopped: false, key: 'planner:main', alive: true },
+  });
+  try {
+    const conn = await openSession(page, mock);
+    const pane = page.locator('#events-scroll');
+    const order = () => pane.evaluate((el) => [...el.children]
+      .filter((c) => c.matches('.event.user, .event.text, .gw-note'))
+      .map((c) => c.dataset.noteId || c.dataset.uuid));
+    await expect.poll(order).toEqual(['u1', 't1', P1, 'u2', 't2', P2]);
+
+    // Marked Planner, the words as text (never markup), the why folded.
+    const n1 = pane.locator(`[data-note-id="${P1}"]`);
+    await expect(n1).toHaveClass(/gw-note-pl/);
+    await expect(n1.locator('.gw-note-by')).toHaveText('Planner');
+    await expect(n1.locator('.gw-note-text')).toHaveText('这个改法和 task:ab12 的结论冲突 <b>');
+    await expect(n1.locator('.gw-note-text b')).toHaveCount(0);
+    const why = n1.locator('.gw-note-why');
+    await expect(why.locator('summary')).toHaveText('依据');
+    await expect(why.locator('div')).toBeHidden();
+    await why.locator('summary').click();
+    await expect(why.locator('div')).toBeVisible();
+    // The why can quote outside content (a scout's turn): text, never markup.
+    await expect(why.locator('div')).toHaveText('task:ab12 的摘要：已改成方案 B <b>x</b>');
+    await expect(why.locator('b')).toHaveCount(0);
+    // No inline handler: the button is a delegated data-action.
+    await expect(n1.locator('button')).toHaveText('没用');
+    await expect(n1.locator('[onclick]')).toHaveCount(0);
+
+    // One listed as marked says so and has no button.
+    const n2 = pane.locator(`[data-note-id="${P2}"]`);
+    await expect(n2).toHaveClass(/gw-note-off/);
+    await expect(n2.locator('.gw-note-done')).toHaveText('已标没用');
+    await expect(n2.locator('button')).toHaveCount(0);
+
+    // 没用: one POST naming the session and the note; the note stays where it
+    // stood, marked.
+    await n1.locator('button').click();
+    await expect(n1.locator('.gw-note-done')).toHaveText('已标没用');
+    await expect(n1.locator('button')).toHaveCount(0);
+    await expect.poll(() => mock.noteUselessCalls).toEqual([{ key: A, id: P1 }]);
+    expect(await order()).toEqual(['u1', 't1', P1, 'u2', 't2', P2]);
+
+    // A live one lands at the end with its button, and starts no turn.
+    conn.send({ type: 'session_note', key: A, note: { id: P3, key: A, time: iso(Date.now()), kind: 'planner', text: '它说做完了，PR 还没合', why: 'gh pr view 12：OPEN' } });
+    const n3 = pane.locator(`[data-note-id="${P3}"]`);
+    await expect(n3.locator('.gw-note-text')).toHaveText('它说做完了，PR 还没合');
+    await expect(n3.locator('button')).toHaveText('没用');
+    await expect(pane.locator('.gw-note').last()).toHaveAttribute('data-note-id', P3);
+    await expect(page.locator('#running-banner')).toHaveClass(/nz-hidden/);
+    await expect(pane.locator('.event.gw-note')).toHaveCount(0);
+
+    // A mark made elsewhere comes with the next list read.
+    notes.push({ id: P3, key: A, time: iso(Date.now()), kind: 'planner', text: '它说做完了，PR 还没合', why: 'gh pr view 12：OPEN', useless: true });
+    const conns = mock.wsConnections.length;
+    conn.close();
+    await expect.poll(() => mock.wsConnections.length).toBeGreaterThan(conns);
+    await expect(n3.locator('.gw-note-done')).toHaveText('已标没用');
+    await expect(pane.locator('.gw-note')).toHaveCount(3);
+  } finally {
+    mock.server.close();
+  }
+});
+
+test('没用 that is not kept is taken back', async ({ page }) => {
+  const mock = await startMockServer({
+    ws: true,
+    notes: { [A]: [{ id: P1, key: A, time: iso(T(20)), kind: 'planner', text: '和你记下的决定相悖', why: '记忆 release_rule' }] },
+    noteUselessFail: true,
+    planner: { enabled: true, stopped: false, key: 'planner:main', alive: true },
+  });
+  try {
+    await openSession(page, mock);
+    const n1 = page.locator(`#events-scroll [data-note-id="${P1}"]`);
+    await n1.locator('button').click();
+    await expect.poll(() => mock.noteUselessCalls).toEqual([{ key: A, id: P1 }]);
+    await expect(page.locator('#toast')).toHaveText('没记下，请再点一次');
+    await expect(n1.locator('button')).toHaveText('没用');
+    await expect(n1.locator('.gw-note-done')).toHaveCount(0);
+    await expect(n1).not.toHaveClass(/gw-note-off/);
+  } finally {
+    mock.server.close();
+  }
+});
+
+// The primary's page lists the notes of a session on a node running its own
+// Planner from that node's journal; 没用 is clicked on that node's own page,
+// so none shows here and nothing is posted.
+test('a remote node\'s Planner note shows without 没用', async ({ page }) => {
+  const NODE = 'pc', R = 'dashboard:direct:2026-01-02-090000-1:general';
+  const s = defaultSessions();
+  s.sessions.push({
+    key: R, node: NODE, state: 'ready', platform: 'dashboard', agent: 'general', cli_name: 'claude',
+    workspace: '/Users/me/workspace/naozhi', project: 'naozhi', last_active: now - 60000, last_prompt: 'remote',
+  });
+  s.nodes = { local: { display_name: 'EC2', status: 'ok' }, [NODE]: { display_name: 'MBP', status: 'ok', caps: ['planner', 'subscribe-history'] } };
+  const mock = await startMockServer({
+    ws: true, sessions: s,
+    planner: { enabled: true, stopped: false, key: 'planner:main', alive: true },
+    remote: { [NODE]: {
+      planner: { enabled: true, stopped: false, key: 'planner:main', alive: true },
+      notes: { [R]: [{ id: P1, key: R, time: iso(T(20)), kind: 'planner', text: '它说做完了，PR 还没合', why: 'gh pr view 12：OPEN' }] },
+    } },
+  });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await page.click(`.session-card[data-node="${NODE}"][data-key="${R}"]`);
+    const n1 = page.locator(`#events-scroll [data-note-id="${P1}"]`);
+    await expect(n1.locator('.gw-note-by')).toHaveText('Planner');
+    await expect(n1.locator('.gw-note-text')).toHaveText('它说做完了，PR 还没合');
+    await expect(n1.locator('.gw-note-why summary')).toHaveText('依据');
+    await expect(n1.locator('button')).toHaveCount(0);
+    await expect(n1.locator('.gw-note-done')).toHaveCount(0);
+    expect(mock.noteUselessCalls).toEqual([]);
+    expect(mock.remoteCalls.filter((c) => c.method !== 'GET')).toEqual([]);
   } finally {
     mock.server.close();
   }

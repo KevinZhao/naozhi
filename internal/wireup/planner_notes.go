@@ -1,6 +1,7 @@
 package wireup
 
 import (
+	"fmt"
 	"slices"
 	"time"
 
@@ -18,10 +19,15 @@ import (
 // SessionNotes builds the session side notes (docs/rfc/planner.md §15.3 ③)
 // over the journal, the inbox for item titles, the sidecars for dispatches
 // and the latest report block, and planner:main's history for the reports
-// sent by SendMessage.
-func SessionNotes(j *journal.Journal, inbox *notify.Notifier, sidecars *sidecar.Store, router *session.Router) *note.Notes {
+// sent by SendMessage. The Planner's own notes (§15.22 ②) follow the
+// inbox's pause; tell sends the Planner the receipt of one the user marked
+// useless, name being the session's name in it.
+func SessionNotes(j *journal.Journal, inbox *notify.Notifier, sidecars *sidecar.Store, router *session.Router, tell func(string) error, name func(string) string) *note.Notes {
 	return note.New(note.Config{
-		Journal: j,
+		Journal:     j,
+		PausedUntil: inbox.PausedUntil,
+		Tell:        tell,
+		Name:        name,
 		Item: func(id string) (string, bool) {
 			it, ok := inbox.Item(id)
 			return it.Title, ok
@@ -38,6 +44,23 @@ func SessionNotes(j *journal.Journal, inbox *notify.Notifier, sidecars *sidecar.
 			return sessionReports(m, ok, func() []time.Time { return plannerReports(router, key) })
 		},
 	})
+}
+
+// NoteTarget is action.Config.NoteTarget over the router: a side note goes
+// on a session of this node the user can open. One put away is not in the
+// router, and a remote node's is its own Planner's (D96).
+func NoteTarget(router *session.Router) func(key string) error {
+	return func(key string) error {
+		switch {
+		case sessionkey.ValidateSessionKey(key) != nil:
+			return fmt.Errorf("%q 不是合法的会话 key", key)
+		case sessionkey.IsPlannerNSKey(key), sessionkey.IsOneShotKey(key):
+			return fmt.Errorf("会话 %s 不能写旁注", key)
+		case router == nil || router.SessionFor(key) == nil:
+			return fmt.Errorf("找不到会话 %s（填 index.json 里本机会话的 key；远程节点的会话写不了旁注）", key)
+		}
+		return nil
+	}
 }
 
 // sessionReports are the times session m reported to the Planner: its
