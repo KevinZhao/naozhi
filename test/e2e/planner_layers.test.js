@@ -7,7 +7,9 @@
 // sentence, "→ 等你" for a turn that asked you) and a line to its whole
 // reply; the shift change is one separator, not your bubble, its fold the
 // handoff; the Planner on a turn you did not start says 处理汇报中 and
-// writes nothing into the timeline. 全部 is the whole timeline, remembered
+// writes nothing into the timeline; a session you opened ending a turn
+// (§15.22 ①, D138) is an entry only when the Planner had something to say.
+// 全部 is the whole timeline, remembered
 // on this device. The page, the Alt+P drawer and a phone alike.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
@@ -328,6 +330,83 @@ test('a turn cut off without a result is over once the Planner is idle', async (
     await expect(page.locator('#pl-status')).toHaveText('处理汇报中');
     for (const c of mock.wsConnections) c.send({ type: 'session_state', key: PLANNER, state: 'ready' });
     await expect(page.locator('#pl-status')).toHaveText('');
+  } finally {
+    await ctx.close();
+    await new Promise((r) => mock.server.close(r));
+  }
+});
+
+test('a session you opened ending a turn: the Planner saying 无 leaves nothing in 对话, a note is one 动态 entry', async ({ browser }) => {
+  test.setTimeout(60000);
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await ctx.newPage();
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  // The mock's first listed session, titled by its last prompt.
+  const YOURS = 'dashboard:direct:2026-01-01-120000-1:myproject';
+  const watch = (last) => '<naozhi-watch>\n' + JSON.stringify({ key: YOURS, name: 'hello world', workspace: 'myproject', ended: '10:05', last }) + '\n</naozhi-watch>';
+  const events = [
+    { type: 'user', detail: snap + 'iso 早', time: at(0), uuid: 'wt-u0' },
+    { type: 'text', detail: 'iso 早。', time: at(0.1), uuid: 'wt-t0' },
+    { type: 'result', time: at(0.2), uuid: 'wt-r0' },
+    // Nothing worth saying: the whole reply is 无.
+    { type: 'user', source: 'watch', detail: watch('iso 登录页改好了。'), time: at(5), uuid: 'wt-u1' },
+    { type: 'text', detail: '无', time: at(5.1), uuid: 'wt-t1' },
+    { type: 'result', time: at(5.2), uuid: 'wt-r1' },
+    { type: 'user', detail: snap + 'iso 接着呢', time: at(10), uuid: 'wt-u2' },
+    { type: 'text', detail: 'iso 没有别的了。', time: at(10.1), uuid: 'wt-t2' },
+    { type: 'result', time: at(10.2), uuid: 'wt-r2' },
+    // Something to say: a side note in that session.
+    { type: 'user', source: 'watch', detail: watch('iso 注册页也改了。'), time: at(20), uuid: 'wt-u3' },
+    { type: 'text', detail: 'iso 这和修复批次的结论冲突。\n\n' + fence({ type: 'note', key: YOURS, text: 'iso 修复批次已经改成方案 B', why: 'iso 修复批次的摘要' }), time: at(20.2), uuid: 'wt-t3' },
+    { type: 'result', time: at(20.3), uuid: 'wt-r3' },
+    // An entry from before the source was written, told by its text.
+    { type: 'user', detail: watch('iso 又一轮。'), time: at(25), uuid: 'wt-u4' },
+    { type: 'text', detail: '无。', time: at(25.1), uuid: 'wt-t4' },
+    { type: 'result', time: at(25.2), uuid: 'wt-r4' },
+  ];
+  const mock = await startMockServer({ ws: true, plannerEvents: events, tasks: tasks(), planner });
+  try {
+    await openPlanner(page, mock);
+    const stream = page.locator('#pl-stream');
+    await expect(stream.getByText('iso 没有别的了。')).toBeVisible();
+    // Only your two messages are bubbles: the gateway's word is not one.
+    await expect(stream.locator('.event.user:visible')).toHaveCount(2);
+    await expect(stream.getByText('naozhi-watch', { exact: false })).toHaveCount(0);
+    await expect(stream.locator('.event.text:visible', { hasText: /^无[。]?$/ })).toHaveCount(0);
+    // One row, for the turn with the note; the two 无 turns are no entry.
+    const rows = stream.locator('.pl-dyn');
+    await expect(rows).toHaveCount(1);
+    await expect(rows.locator('.pl-dyn-h')).toHaveText('▸ ' + hm(at(20)) + ' · 1 条动态（hello world）');
+    const order = await stream.evaluate((box) => [...box.children].filter((c) => c.offsetParent !== null)
+      .map((c) => (c.matches('.pl-dyn') ? 'row' : c.matches('.event.user') ? 'you' : c.matches('.event.text') ? 'reply' : '')).filter(Boolean));
+    expect(order).toEqual(['you', 'reply', 'you', 'reply', 'row']);
+    await rows.locator('.pl-dyn-h').click();
+    const line = rows.locator('.pl-dyn-line');
+    await expect(line).toHaveCount(1);
+    await expect(line.locator('.pl-dyn-one')).toHaveText('iso 这和修复批次的结论冲突。');
+    await line.click();
+    await expect(rows.locator('.pl-dyn-full .pl-act-note')).toContainText('iso 修复批次已经改成方案 B');
+    await expect(page.locator('#pl-status')).toHaveText('');
+
+    // A watch turn under way says 处理汇报中 and adds no entry until it has
+    // something to show; 无 leaves the timeline as it was.
+    const t0 = Date.now();
+    events.push({ type: 'user', source: 'watch', detail: watch('iso 第四轮。'), time: t0, uuid: 'wt-live-u' });
+    await expect(page.locator('#pl-status')).toHaveText('处理汇报中');
+    await expect(rows).toHaveCount(1);
+    events.push({ type: 'text', detail: '无', time: t0 + 1, uuid: 'wt-live-t' }, { type: 'result', time: t0 + 2, uuid: 'wt-live-r' });
+    await expect(page.locator('#pl-status')).toHaveText('');
+    await expect(rows).toHaveCount(1);
+    await expect(rows.locator('.pl-dyn-h')).toContainText('1 条动态（hello world）');
+
+    // 全部 shows every turn, the 无 ones too, still without a bubble of yours.
+    await page.locator('.pl-head > .pl-layer [data-layer="all"]').click();
+    await expect(stream.locator('.pl-dyn')).toHaveCount(0);
+    await expect(stream.locator('.event.text:visible', { hasText: /^无[。]?$/ })).toHaveCount(3);
+    await expect(stream.locator('.event.text:visible .pl-act-note')).toHaveCount(1);
+    await expect(stream.locator('.event.user:visible')).toHaveCount(2);
+    expect(errors).toEqual([]);
   } finally {
     await ctx.close();
     await new Promise((r) => mock.server.close(r));
