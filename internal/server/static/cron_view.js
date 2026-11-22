@@ -16,12 +16,25 @@ import {
   cronTimezoneSuffix,
 } from './cron_schedule.js';
 import { cronLive, ensureCronLiveSubscription, setCronLiveStatus } from './cron_live.js';
-import { cronDrawerState, cronFrozenRuns, cronRefetchFullJob, cronStore, cronTriggerCooldownClear, fetchCronJobs, noteCronRunCleared } from './cron_state.js';
+import {
+  cronDrawerState,
+  cronFrozenRuns,
+  cronPendingDrop,
+  cronPendingOps,
+  cronPendingSettle,
+  cronRailBadgeRefresh,
+  cronRefetchFullJob,
+  cronStore,
+  cronTriggerCooldownClear,
+  fetchCronJobs,
+  noteCronRunCleared,
+} from './cron_state.js';
 import { firstNonEmptyLine, formatAgoColloquial, formatRunningElapsed, formatWhenColloquial } from './cron_format.js';
 import { registerShell } from './shell.js';
 import {
   closeCronDetail,
   cronDrawerForgetJob,
+  cronDrawerRestoreJob,
   cronDrawerSpecPromptToggle,
   openCronDetail,
   renderCronDrawer,
@@ -1310,6 +1323,43 @@ function cronFilterBarHtml(attentionCount) {
     '</div>';
 }
 
+// renderCronChrome repaints what the panel derives from the whole job list —
+// the title's summary counts, the filter bar (its 需关注 N chip, and whether the
+// bar and its search row show at all) and the missed banner — so a pause, a
+// delete or a refetch moves them with the rows. Each part is rewritten only when
+// its markup changed; a rebuilt search box gets back the text, caret and focus
+// it had, so a repaint while the user types does not interrupt them.
+function renderCronChrome() {
+  const title = document.getElementById('cron-list-title');
+  const host = document.getElementById('cron-list-chrome');
+  if (!title || !host) return;
+  const attentionCount = cronStore.jobs.filter(j => j.paused || j.last_error || j.missed).length;
+  const titleHtml = '定时任务' + cronSummaryChipHtml(attentionCount);
+  if (title._nzHtml !== titleHtml) {
+    title.innerHTML = titleHtml;
+    title._nzHtml = titleHtml;
+  }
+  const chromeHtml = cronFilterBarHtml(attentionCount) + cronMissedBannerHtml();
+  if (host._nzHtml === chromeHtml) return;
+  const oldInput = document.getElementById('cron-search-input');
+  const typed = oldInput ? {
+    value: oldInput.value,
+    focused: document.activeElement === oldInput,
+    start: oldInput.selectionStart,
+    end: oldInput.selectionEnd,
+  } : null;
+  host.innerHTML = chromeHtml;
+  host._nzHtml = chromeHtml;
+  const input = typed && document.getElementById('cron-search-input');
+  if (input) {
+    input.value = typed.value;
+    if (typed.focused) {
+      input.focus();
+      try { input.setSelectionRange(typed.start, typed.end); } catch (_) {}
+    }
+  }
+}
+
 function renderCronPanel() {
   // Guard against an async race: fetchCronJobs().then(renderCronPanel) and the
   // WS run_ended handler fire after the user may have switched away from
@@ -1323,11 +1373,11 @@ function renderCronPanel() {
   // repaint the list + drawer. Rebuilding the shell would wipe the input
   // value and steal focus. Detect by probing for the list host element.
   if (document.getElementById('cron-list-items')) {
+    renderCronChrome();
     renderCronList();
     renderCronDrawer();
     return;
   }
-  const attentionCount = cronStore.jobs.filter(j => j.paused || j.last_error || j.missed).length;
   let html =
     '<div class="cron-detail">' +
       '<div class="cron-detail-body">' +
@@ -1335,15 +1385,14 @@ function renderCronPanel() {
           '<div class="cron-list-head">' +
             '<div class="cron-list-head-title">' +
               '<button class="btn-mobile-back" data-action="cron-mobile-back" title="返回会话列表" aria-label="返回会话列表">&#8592;</button>' +
-              '<h3>定时任务' + cronSummaryChipHtml(attentionCount) + '</h3>' +
+              '<h3 id="cron-list-title">定时任务</h3>' +
             '</div>' +
             '<button type="button" class="cron-new-btn" data-action="cron-new" aria-label="新建定时任务">' +
               '<svg viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>' +
               ' 新建' +
             '</button>' +
           '</div>' +
-          cronFilterBarHtml(attentionCount) +
-          cronMissedBannerHtml() +
+          '<div id="cron-list-chrome"></div>' +
           '<div id="cron-list-items"></div>' +
         '</div>' +
         // cron-panel-consolidation RFC §4.1 / §4.2: the drawer pane is always
@@ -1355,6 +1404,7 @@ function renderCronPanel() {
   main.innerHTML = html;
   // Paint list now that the shell is mounted; subsequent keystrokes / chip
   // flips route through renderCronList directly without touching the shell.
+  renderCronChrome();
   renderCronList();
   renderCronDrawer();
   // Wire the layout observer once the shell is in the DOM. The CSS rules key off
@@ -1432,30 +1482,51 @@ function setupCronLayoutObserver() {
   body._cronLayoutObs = obs;
 }
 
-async function cronPause(id) {
+// cronSetPaused shows the new state on the row, the drawer and the panel's
+// counts at once, then lets the request confirm it. cronPendingOps keeps a list
+// response that left before the server applied it (a run_ended refetch, the
+// panel-open refresh) from flipping the row back meanwhile. On failure the
+// job's own fields go back to what they were and the error is shown; either
+// way a refetch then takes the server's word.
+async function cronSetPaused(id, paused) {
+  const what = paused ? '暂停定时任务' : '恢复定时任务';
+  const job = cronStore.jobs.find(j => j && j.id === id);
+  const prev = job ? { paused: job.paused, paused_reason: job.paused_reason } : null;
+  const op = { paused, settledAt: 0 };
+  cronPendingOps.set(id, op);
+  if (job) {
+    job.paused = paused;
+    job.paused_reason = '';
+  }
+  renderCronPanel();
   // fetchJSON's 10s timeout keeps a NAT-dropped connection from hanging the
-  // button. err.status carries the HTTP status for showAPIError; errors
+  // request. err.status carries the HTTP status for showAPIError; errors
   // without it are network failures and route to showNetworkError.
   try {
     const headers = { 'Content-Type': 'application/json' };
-    await fetchJSON(NZ_CONTRACT.API.cron_pause, { method: 'POST', headers, body: JSON.stringify({ id }) });
-    fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
+    await fetchJSON(paused ? NZ_CONTRACT.API.cron_pause : NZ_CONTRACT.API.cron_resume, { method: 'POST', headers, body: JSON.stringify({ id }) });
+    cronPendingSettle(id, op);
   } catch (e) {
-    if (e && e.status) { showAPIError('暂停定时任务', e.status, (e.message || '').slice(0, 500)); return; }
-    showNetworkError('暂停定时任务', e);
+    // A later toggle of the same job owns the row now; rolling this one back
+    // would undo the user's newer choice.
+    if (cronPendingOps.get(id) === op) {
+      cronPendingDrop(id, op);
+      const cur = cronStore.jobs.find(j => j && j.id === id);
+      if (cur && prev) {
+        cur.paused = prev.paused;
+        cur.paused_reason = prev.paused_reason;
+      }
+      renderCronPanel();
+    }
+    if (e && e.status) showAPIError(what, e.status, (e.message || '').slice(0, 500));
+    else showNetworkError(what, e);
   }
+  fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
 }
 
-async function cronResume(id) {
-  try {
-    const headers = { 'Content-Type': 'application/json' };
-    await fetchJSON(NZ_CONTRACT.API.cron_resume, { method: 'POST', headers, body: JSON.stringify({ id }) });
-    fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
-  } catch (e) {
-    if (e && e.status) { showAPIError('恢复定时任务', e.status, (e.message || '').slice(0, 500)); return; }
-    showNetworkError('恢复定时任务', e);
-  }
-}
+function cronPause(id) { return cronSetPaused(id, true); }
+
+function cronResume(id) { return cronSetPaused(id, false); }
 
 async function cronDelete(id) {
   // Destructive flow:
@@ -1500,23 +1571,43 @@ async function cronDelete(id) {
     countdownSecs: 3,
   });
   if (!ok) return;
+  // The row, its drawer and the panel's counts go at once; cronPendingOps keeps
+  // a list response that left before the server deleted it from bringing the
+  // row back. A failure puts the job back where it was (and its drawer, unless
+  // another one was opened meanwhile).
+  const idx = cronStore.jobs.findIndex(j => j && j.id === id);
+  const removed = idx >= 0 ? cronStore.jobs[idx] : null;
+  const op = { deleted: true, settledAt: 0 };
+  cronPendingOps.set(id, op);
+  if (idx >= 0) cronStore.jobs.splice(idx, 1);
+  const drawerWasOpen = cronDrawerForgetJob(id);
+  cronRailBadgeRefresh();
+  renderCronPanel();
   try {
     const headers = {};
     await fetchJSON(NZ_CONTRACT.API.cron + '?id=' + encodeURIComponent(id), { method: 'DELETE', headers });
-    // 释放该 job 在前端持有的 timeline 状态（runs / details / pagination
-    // 游标 / fetched 标记），避免 cronTimelineState 累积已删除 job 的内存。
-    if (cronTimelineState[id]) delete cronTimelineState[id];
-    // cron-panel-consolidation RFC §4.5 state-machine row "G. 删除中":
-    // close the drawer if it was showing the just-deleted job. The
-    // subsequent renderCronPanel (via fetchCronJobs.then) will repaint
-    // the empty drawer — calling closeCronDetail explicitly here keeps
-    // the visual feedback synchronous (no flash of the deleted task).
-    cronDrawerForgetJob(id);
-    fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
   } catch (e) {
-    if (e && e.status) { showAPIError('删除定时任务', e.status, (e.message || '').slice(0, 500)); return; }
-    showNetworkError('删除定时任务', e);
+    // 404: the job is gone already — what the user asked for.
+    if (!(e && e.status === 404)) {
+      cronPendingDrop(id, op);
+      if (removed && !cronStore.jobs.some(j => j && j.id === id)) {
+        cronStore.jobs.splice(Math.min(idx, cronStore.jobs.length), 0, removed);
+      }
+      if (drawerWasOpen) cronDrawerRestoreJob(id);
+      cronRailBadgeRefresh();
+      renderCronPanel();
+      if (e && e.status) showAPIError('删除定时任务', e.status, (e.message || '').slice(0, 500));
+      else showNetworkError('删除定时任务', e);
+      fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
+      return;
+    }
   }
+  cronPendingSettle(id, op);
+  // 释放该 job 在前端持有的 timeline 状态（runs / details / pagination
+  // 游标 / fetched 标记），避免 cronTimelineState 累积已删除 job 的内存。
+  // 删除确认之后才丢：失败回滚时抽屉要原样带着它的执行历史回来。
+  if (cronTimelineState[id]) delete cronTimelineState[id];
+  fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
 }
 
 // Edit an existing cron job. Opens a modal pre-populated with the current
