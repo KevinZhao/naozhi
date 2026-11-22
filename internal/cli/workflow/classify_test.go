@@ -100,6 +100,8 @@ func TestWorkflowPhase(t *testing.T) {
 		{name: "no phases"},
 		{name: "the first unfinished", phases: []Phase{ph(0, "探索", 0, 0, 3), ph(1, "实现", 1, 2, 0), ph(2, "验证", 4, 0, 0)}, want: "实现"},
 		{name: "all finished: the last", phases: []Phase{ph(0, "探索", 0, 0, 3), ph(1, "实现", 0, 0, 2)}, want: "实现"},
+		{name: "between two phases: the one that just ran", phases: []Phase{ph(0, "探索", 0, 0, 3), ph(1, "实现", 0, 0, 0), ph(2, "验证", 0, 0, 0)}, want: "探索"},
+		{name: "no agent yet", phases: []Phase{ph(0, "探索", 0, 0, 0), ph(1, "实现", 0, 0, 0)}},
 		{name: "no title", phases: []Phase{ph(3, "", 0, 1, 0)}, want: "#3"},
 	}
 	for _, tt := range tests {

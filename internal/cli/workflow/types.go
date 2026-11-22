@@ -182,20 +182,28 @@ type Workflow struct {
 }
 
 // Phase is the title of the phase w is in: the first with agents still to
-// finish, else the last (the dashboard's panel heads a workflow with the
-// same one); "#<index>" for one without a title, "" when w has no phases.
+// finish, else the last that has any; "#<index>" for one without a title,
+// "" when none has an agent yet. Phases are all declared up front, so
+// between two of them and before the first agent the later ones are empty:
+// the dashboard's panel heads a workflow with the last of them then and is
+// right again a frame later, where a progress note that named it would stay
+// wrong and count the next phase as one more move.
 func (w *Workflow) Phase() string {
-	if len(w.Phases) == 0 {
-		return ""
-	}
-	p := w.Phases[len(w.Phases)-1]
-	for _, x := range w.Phases {
+	var p *Phase
+	for i := range w.Phases {
+		x := &w.Phases[i]
 		if x.Queued+x.Running > 0 {
 			p = x
 			break
 		}
+		if x.Total > 0 {
+			p = x
+		}
 	}
-	if p.Title == "" {
+	switch {
+	case p == nil:
+		return ""
+	case p.Title == "":
 		return "#" + strconv.Itoa(p.Index)
 	}
 	return p.Title

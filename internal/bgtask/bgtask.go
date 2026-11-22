@@ -70,10 +70,14 @@ type Task struct {
 	Summary string    `json:"summary"`
 	Start   time.Time `json:"start"`
 	Last    time.Time `json:"last"`
-	Agents  int       `json:"agents,omitempty"`
-	Done    int       `json:"done,omitempty"`
-	Failed  int       `json:"failed,omitempty"`
-	Phase   string    `json:"phase,omitempty"`
+	// Replayed is a task only a shim's replay started: Start is when the
+	// gateway attached, the latest moment it was known open, and how long
+	// it ran before is not known.
+	Replayed bool   `json:"replayed,omitempty"`
+	Agents   int    `json:"agents,omitempty"`
+	Done     int    `json:"done,omitempty"`
+	Failed   int    `json:"failed,omitempty"`
+	Phase    string `json:"phase,omitempty"`
 }
 
 // State is a session's open background tasks, in the order they started,
@@ -238,7 +242,7 @@ func ScanFrom(c Carry, in Input) (State, Carry) {
 			}
 			t := open[e.TaskID]
 			if t == nil {
-				t = &Task{ID: e.TaskID, Kind: kindOf(e.TaskType, ""), Start: attached, Last: attached}
+				t = &Task{ID: e.TaskID, Kind: kindOf(e.TaskType, ""), Start: attached, Last: attached, Replayed: true}
 				open[e.TaskID] = t
 				order = append(order, e.TaskID)
 			}

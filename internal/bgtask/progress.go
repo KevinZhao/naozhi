@@ -19,15 +19,22 @@ const (
 // §15.22 ④): how long it has run, each workflow's agents done of how many
 // and the phase it is in, and the other tasks by their own descriptions. The
 // gateway's progress note and the task card both say it, so they cannot
-// disagree. Only what is known is said: a start not known adds no duration,
-// a workflow whose board has no counts or phase names none. "" when none is
-// open. The names are the session's own text, data the page escapes.
+// disagree. Only what is known is said: the duration is from the earliest
+// start, so one start not known (a workflow's the board has not learned, a
+// task only a replay started) leaves it out, where the earliest of the
+// others would say less than a note before a restart did; a workflow whose
+// board has no counts or phase names none. "" when none is open. The names
+// are the session's own text, data the page escapes.
 func (s State) Progress(now time.Time) string {
 	var start time.Time
+	known := true
 	var workflows, others []string
 	nWorkflows, nOthers := 0, 0
 	for _, t := range s.Tasks {
-		if !t.Start.IsZero() && (start.IsZero() || t.Start.Before(start)) {
+		switch {
+		case t.Start.IsZero() || t.Replayed:
+			known = false
+		case start.IsZero() || t.Start.Before(start):
 			start = t.Start
 		}
 		if t.Kind == KindWorkflow {
@@ -42,7 +49,7 @@ func (s State) Progress(now time.Time) string {
 	}
 	var parts []string
 	switch d := now.Sub(start); {
-	case start.IsZero() || d < 0:
+	case !known || start.IsZero() || d < 0:
 	case d < time.Minute:
 		parts = append(parts, "刚开始")
 	default:

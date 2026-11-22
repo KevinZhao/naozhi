@@ -36,17 +36,20 @@ type Background struct {
 }
 
 // stretch is a session's background work since one turn's end. id names
-// its notes (the view shows the latest of a stretch only), at is its latest
-// note, zero before the first, and phases are its workflows' as that note
-// had them (as first seen, before it); nil when not seen yet.
+// its notes (the view shows the latest of a stretch only), seen is when
+// this process first saw it, at is its latest note, zero before the first,
+// and phases are its workflows' as that note had them, one not in it as
+// first seen since.
 type stretch struct {
 	id     string
+	seen   time.Time
 	at     time.Time
 	phases map[string]string
 }
 
 // stretchID names the stretch after the turn that ended at turn: a turn's
-// end is the same after a restart, so its notes stay one stretch's.
+// end is the same after a restart, so its notes stay one stretch's. A turn
+// whose end is not known (zero) names one stretch too.
 func stretchID(turn time.Time) string { return strconv.FormatInt(turn.UnixMilli(), 10) }
 
 // Progress writes the progress notes due among list, the sessions whose
@@ -72,14 +75,27 @@ func (n *Notes) Progress(list []Background) {
 		if st == nil || st.id != id {
 			// A turn ran since: what the session said in it is newer than
 			// any note, and the wait starts over from its end.
-			st = &stretch{id: id}
+			st = &stretch{id: id, seen: now}
 			n.stretches[b.Key] = st
 		}
 		phases := b.State.Phases()
+		// A workflow is first seen in a phase whenever its board first has
+		// one, which may be ticks after the session is: it moves from there.
 		if st.phases == nil {
-			st.phases = phases
+			st.phases = map[string]string{}
 		}
-		since := now.Sub(later(st.at, b.Turn))
+		for wf, p := range phases {
+			if _, ok := st.phases[wf]; !ok {
+				st.phases[wf] = p
+			}
+		}
+		// A session adopted from a live shim has no turn's end on record:
+		// its wait runs from the first sight of it, not from the year 1.
+		from := b.Turn
+		if from.IsZero() {
+			from = st.seen
+		}
+		since := now.Sub(later(st.at, from))
 		if since < progressGap || since < ProgressEvery && !moved(st.phases, phases) || paused {
 			continue
 		}

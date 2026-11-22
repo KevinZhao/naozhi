@@ -140,6 +140,89 @@ func TestProgressPhase(t *testing.T) {
 	}
 }
 
+// A workflow whose phase is not known when the session is first seen (its
+// board has no frame yet after a restart, its script runs agents before its
+// first phase) moves from the phase it is first seen in.
+func TestProgressPhaseSeenLater(t *testing.T) {
+	t.Parallel()
+	r := newPlannerRig(t)
+	turn := r.now
+	at := func(m int) time.Time { return turn.Add(time.Duration(m) * time.Minute) }
+	r.tick(at(1), workflow(progressKey, turn, 0, ""))
+	r.tick(at(2), workflow(progressKey, turn, 1, "探索"))
+	if got := r.progress(); len(got) != 0 {
+		t.Fatalf("the phase first seen read as a move: %+v", got)
+	}
+	r.tick(at(8), workflow(progressKey, turn, 3, "实现"))
+	r.tick(at(15), workflow(progressKey, turn, 9, "验证"))
+	got := r.progress()
+	if len(got) != 2 || !strings.Contains(got[0].Text, "阶段「实现」") || !strings.Contains(got[1].Text, "阶段「验证」") {
+		t.Fatalf("after two moves: %+v, want a note each", got)
+	}
+	r.tick(at(45), workflow(progressKey, turn, 9, "验证"))
+	if got := r.progress(); len(got) != 3 {
+		t.Fatalf("30 minutes after the last: %+v", got)
+	}
+
+	// The same after a restart, the stretch read back from the journal.
+	r.pushed = nil
+	r.now = at(50)
+	r.open()
+	r.tick(at(51), workflow(progressKey, turn, 9, ""))
+	r.tick(at(52), workflow(progressKey, turn, 9, "验证"))
+	if got := r.progress(); len(got) != 0 {
+		t.Fatalf("after the restart, the phase first seen: %+v", got)
+	}
+	r.tick(at(58), workflow(progressKey, turn, 11, "汇总"))
+	if got := r.progress(); len(got) != 1 || !strings.Contains(got[0].Text, "阶段「汇总」") {
+		t.Fatalf("a move after the restart: %+v", got)
+	}
+}
+
+// A session whose turn's end is not known (one adopted from a live shim
+// with no stored entry) waits 30 minutes from when it is first seen, and its
+// notes are one stretch's, a restart included.
+func TestProgressTurnUnknown(t *testing.T) {
+	t.Parallel()
+	r := newPlannerRig(t)
+	start := r.now
+	at := func(m int) time.Time { return start.Add(time.Duration(m) * time.Minute) }
+	b := bash(progressKey, start)
+	b.Turn = time.Time{}
+	r.tick(at(1), b)
+	r.tick(at(30), b)
+	if got := r.progress(); len(got) != 0 {
+		t.Fatalf("noted within 30 minutes of the first sight: %+v", got)
+	}
+	r.tick(at(31), b)
+	r.tick(at(60), b)
+	if got := r.progress(); len(got) != 1 {
+		t.Fatalf("30 minutes after the first sight: %+v, want one note", got)
+	}
+	r.tick(at(61), b)
+	got := r.progress()
+	if len(got) != 2 || got[1].Run != got[0].Run {
+		t.Fatalf("30 minutes after the note: %+v, want one more of the same run", got)
+	}
+	run := got[0].Run
+
+	r.pushed = nil
+	r.now = at(70)
+	r.open()
+	r.tick(at(71), b)
+	r.tick(at(90), b)
+	if got := r.progress(); len(got) != 0 {
+		t.Fatalf("noted right after the restart: %+v", got)
+	}
+	r.tick(at(91), b)
+	if got := r.progress(); len(got) != 1 || got[0].Run != run {
+		t.Fatalf("30 minutes after the last note: %+v, want one of run %s", got, run)
+	}
+	if list := r.n.List(progressKey, r.now); len(list) != 1 {
+		t.Fatalf("List = %+v, want the stretch's latest alone", list)
+	}
+}
+
 // What the work last wrote is said when it wrote anything.
 func TestProgressOutput(t *testing.T) {
 	t.Parallel()
@@ -152,6 +235,12 @@ func TestProgressOutput(t *testing.T) {
 	if len(got) != 1 || got[0].Key != "task:ab12" || got[0].Text != "已跑 31 分钟 · 1 个后台任务：explore · 最近输出 5 分钟前" {
 		t.Fatalf("note = %+v", got)
 	}
+	// A write after now (the clock moved back) is no "ago" to say.
+	b.Key, b.State.Tasks[0].Last = progressKey, turn.Add(40*time.Minute)
+	r.tick(turn.Add(30*time.Minute), b)
+	if got := r.progress(); len(got) != 2 || got[1].Text != "已跑 31 分钟 · 1 个后台任务：explore" {
+		t.Fatalf("with a write after now: %+v", got)
+	}
 }
 
 // Once the work ended, or while a turn runs, the session is not listed and
@@ -163,7 +252,14 @@ func TestProgressEndsAndStartsOver(t *testing.T) {
 	turn := r.now
 	at := func(m int) time.Time { return turn.Add(time.Duration(m) * time.Minute) }
 	r.tick(at(30), bash(progressKey, turn))
+	r.tick(at(59))
+	if len(r.n.stretches) != 1 {
+		t.Fatalf("stretches = %v, want the session's kept while its note holds the next back", r.n.stretches)
+	}
 	r.tick(at(60))
+	if len(r.n.stretches) != 0 {
+		t.Fatalf("stretches = %v, want none kept of a session whose work ended", r.n.stretches)
+	}
 	r.tick(at(90))
 	if got := r.progress(); len(got) != 1 {
 		t.Fatalf("noted after the work ended: %+v", got)

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // The progress line says how long the work has run, each workflow's agents
@@ -40,6 +42,11 @@ func TestProgress(t *testing.T) {
 			{ID: "m1", Kind: KindMonitor, Summary: "watch CI", Start: ago(time.Hour)},
 			{ID: "a1", Kind: KindAgent, Summary: "explore", Start: ago(time.Hour)}},
 			want: "已跑 2 小时 · 工作流 review-all：3 个子代理完成 3 个，阶段「汇总」 · 3 个后台任务：tail -f build.log、watch CI 等"},
+		{name: "a start not known among those known: no duration", tasks: []Task{
+			{ID: "r1", Kind: KindBash, Summary: "deploy", Start: ago(10 * time.Minute), Last: ago(10 * time.Minute), Replayed: true},
+			{ID: "b1", Kind: KindBash, Summary: "bench", Start: ago(5 * time.Minute)},
+			{ID: "w1", Kind: KindWorkflow, Summary: "fix"}},
+			want: "工作流 fix · 2 个后台任务：deploy、bench"},
 		{name: "more workflows than are named", tasks: []Task{
 			{ID: "w1", Kind: KindWorkflow, Summary: "a"}, {ID: "w2", Kind: KindWorkflow, Summary: "b"}, {ID: "w3", Kind: KindWorkflow, Summary: "c"}},
 			want: "工作流 a · 工作流 b · 另有 1 个工作流"},
@@ -54,6 +61,30 @@ func TestProgress(t *testing.T) {
 				t.Errorf("Progress = %q\nwant       %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// A task only a shim's replay started ran before the gateway attached, for
+// how long is not known: its line says no duration, where one whose start
+// is in the event log says its own.
+func TestProgressReplayed(t *testing.T) {
+	now := time.Date(2026, 11, 23, 15, 0, 0, 0, time.Local)
+	in := Input{Alive: true, Since: now.Add(-4 * time.Hour), Attached: now.Add(-10 * time.Minute), Now: now,
+		Replayed: []clievent.EventEntry{{Type: clievent.KindTaskStart, TaskID: "b1", TaskType: "local_bash", Summary: "npm run bench"}}}
+	s := Judge(in)
+	if got := s.Progress(now); got != "1 个后台任务：npm run bench" {
+		t.Errorf("Progress of a task the replay alone started = %q, want no duration", got)
+	}
+	if got := s.Output(); !got.IsZero() {
+		t.Errorf("Output = %v, want none: the attach is no write of the task's", got)
+	}
+	in.Entries = []clievent.EventEntry{
+		{Type: clievent.KindToolUse, Tool: "Bash", Time: now.Add(-3 * time.Hour).UnixMilli()},
+		{Type: clievent.KindTaskStart, TaskID: "b1", TaskType: "local_bash", Summary: "npm run bench", Time: now.Add(-3 * time.Hour).UnixMilli()},
+		{Type: clievent.KindResult, Time: now.Add(-3*time.Hour).UnixMilli() + 1},
+	}
+	if got := Judge(in).Progress(now); got != "已跑 3 小时 · 1 个后台任务：npm run bench" {
+		t.Errorf("Progress with the start in the log = %q", got)
 	}
 }
 
