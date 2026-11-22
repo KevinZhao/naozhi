@@ -35,6 +35,7 @@ func TestSourceEntryAndDynamic(t *testing.T) {
 		{SourceWatchRefusal, "refusal", true},
 		{SourcePatrol, "patrol", true},
 		{SourcePatrolRefusal, "refusal", true},
+		{SourcePatrolReceipt, "receipt", true},
 	} {
 		if got := tc.src.Entry(); got != tc.entry {
 			t.Errorf("%s.Entry() = %q, want %q", tc.src, got, tc.entry)

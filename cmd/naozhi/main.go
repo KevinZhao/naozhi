@@ -916,8 +916,14 @@ func main() {
 		// start.
 		PatrolTurn:        plannerAgent.PatrolTurn,
 		TellPatrolRefused: plannerAgent.TellPatrolRefused,
-		Patrol:            patroller,
-		Ctx:               ctx,
+		// The receipts about a task dispatched to fix a finding, and the
+		// turns they start: held to the patrol's limits as well.
+		PatrolTaskTurn:  plannerAgent.PatrolTaskTurn,
+		TellPatrol:      plannerAgent.TellPatrol,
+		TellPatrolLater: plannerAgent.TellPatrolLater,
+		TellPatrolAlong: plannerAgent.TellPatrolAlong,
+		Patrol:          patroller,
+		Ctx:             ctx,
 	})
 	// A watch line the Planner held goes out as its session stands then.
 	plannerAgent.SetWatchNow(actions.WatchNow)

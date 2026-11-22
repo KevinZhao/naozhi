@@ -81,6 +81,16 @@ const (
 	// limits and caps, or they would hold for one turn only, and gets no
 	// receipt of its own.
 	SourcePatrolRefusal Source = "patrol_refusal"
+	// SourcePatrolReceipt is the gateway's receipt about a session
+	// dispatched to fix a patrol finding (TellPatrol): dispatched, its
+	// report, its turn's end. The session came of a patrol turn, or of one
+	// like it, so the turn its receipt starts is held to a patrol turn's
+	// limits and caps as well — or they would hold for the one turn that
+	// dispatched and no longer for what follows from it — and may besides
+	// mark the task and send it on through custody, as any receipt's turn.
+	// A receipt carrying other receipts with it is from here too: the
+	// stricter of the two.
+	SourcePatrolReceipt Source = "patrol_receipt"
 )
 
 // Words is what the user said in a Planner turn, as the gateway recorded it
@@ -100,8 +110,9 @@ type Words struct {
 // source's name for the rest, your answer among them. A turn merging
 // requests of different sources carries "" (turn.startTurn), which the page
 // reads part by part. Both watch sources write "watch", and the receipt of
-// a watch turn's blocks "refusal", as does that of a patrol turn's: the
-// page lays each pair out alike.
+// a watch turn's blocks "refusal", as does that of a patrol turn's, and a
+// receipt about a patrol's task "receipt": the page lays each pair out
+// alike.
 func (s Source) Entry() string {
 	switch s {
 	case SourceUser, SourceHandover:
@@ -110,6 +121,8 @@ func (s Source) Entry() string {
 		return string(SourceWatch)
 	case SourceWatchRefusal, SourcePatrolRefusal:
 		return string(SourceRefusal)
+	case SourcePatrolReceipt:
+		return string(SourceReceipt)
 	}
 	return string(s)
 }
@@ -142,11 +155,12 @@ func (s Source) Outside() bool { return outsideLabels[s] != "" }
 // Alone reports whether the gateway runs a request from s as a turn of its
 // own, never merged with the user's message: an outside turn, whose limits
 // would refuse what the user asked for in the same turn, and a watch turn
-// or a patrol turn (and the receipt of its blocks), which merged would
-// either refuse the user's blocks or run its own by the user's leave — a
-// patrol's dispatch with the user's words.
+// or a patrol turn (and the receipt of its blocks, and a receipt about a
+// task of the patrol's), which merged would either refuse the user's blocks
+// or run its own by the user's leave — a patrol's dispatch with the user's
+// words.
 func (s Source) Alone() bool {
-	return s.Outside() || s == SourceWatch || s == SourcePatrol || s == SourcePatrolRefusal
+	return s.Outside() || s == SourceWatch || s == SourcePatrol || s == SourcePatrolRefusal || s == SourcePatrolReceipt
 }
 
 // ErrNoBlock answers a Wake with nothing to say.
@@ -240,6 +254,14 @@ func (a *Agent) PatrolTurn() bool {
 		}
 	}
 	return false
+}
+
+// PatrolTaskTurn reports whether the turn in flight answers a receipt about
+// a session dispatched to fix a patrol finding (TellPatrol). The action
+// runner reads it as a turn's result arrives: such a turn runs what a
+// patrol turn runs, held to the same caps, and status and custody blocks.
+func (a *Agent) PatrolTaskTurn() bool {
+	return slices.Contains(a.TurnSources(), SourcePatrolReceipt)
 }
 
 // Wake starts a Planner turn from src with each block, the gateway's data

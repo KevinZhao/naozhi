@@ -1196,14 +1196,27 @@ func (a *Agent) Send(text, ref string, images []clievent.Attachment) error {
 // same turn, ahead of text; with none, an empty text sends nothing.
 // Tells run one at a time (tellMu), so two cannot both send the receipts
 // waiting, and drop only what they sent: one held meanwhile stays.
-func (a *Agent) Tell(text string) error {
+func (a *Agent) Tell(text string) error { return a.tellHeld(text, false) }
+
+// TellPatrol is Tell for a receipt about a session dispatched to fix a
+// patrol finding: its turn is from SourcePatrolReceipt.
+func (a *Agent) TellPatrol(text string) error { return a.tellHeld(text, true) }
+
+// tellHeld is Tell; patrol says text is about a task of the patrol's. The
+// turn is from SourcePatrolReceipt when text is, or any receipt going with
+// it: one turn answers them all, so it is held to the stricter limits.
+func (a *Agent) tellHeld(text string, patrol bool) error {
 	a.tellMu.Lock()
 	defer a.tellMu.Unlock()
 	text, sent := a.withHeld(text)
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
-	if err := a.tell(SourceReceipt, text); err != nil {
+	src := SourceReceipt
+	if patrol || slices.ContainsFunc(sent, func(h heldReceipt) bool { return h.Patrol }) {
+		src = SourcePatrolReceipt
+	}
+	if err := a.tell(src, text); err != nil {
 		return err
 	}
 	a.dropHeld(sent)

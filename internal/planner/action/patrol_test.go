@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/brief"
@@ -713,5 +714,171 @@ func TestFindingParse(t *testing.T) {
 	}
 	if b := Parse(block(fmt.Sprintf(d, `" `+refA+` "`)))[0]; b.Dispatch == nil || b.Dispatch.Finding != refA {
 		t.Errorf("finding not trimmed: %+v", b.Dispatch)
+	}
+}
+
+// patrolReceipts wires the patrol's three receipt senders of r, returning
+// what each was handed.
+func patrolReceipts(r *Runner) (now, later, along *[]string) {
+	now, later, along = new([]string), new([]string), new([]string)
+	r.cfg.TellPatrol = func(text string) error { *now = append(*now, text); return nil }
+	r.cfg.TellPatrolLater = func(text string) error { *later = append(*later, text); return nil }
+	r.cfg.TellPatrolAlong = func(text string) { *along = append(*along, text) }
+	return now, later, along
+}
+
+// The receipts about a session dispatched to fix a finding go to the
+// Planner as the patrol's, each kind through its own sender: dispatched,
+// the start that failed, the report, the turn that ended unreported. A
+// plain task's go as any receipt.
+func TestPatrolTaskReceiptsSource(t *testing.T) {
+	pt := newPatrolTurn(t)
+	now, later, _ := patrolReceipts(pt.r)
+	pt.run(pt.dispatch(`,"finding":"` + refA + `"`))
+	if len(*later) != 1 || !strings.Contains((*later)[0], "已派出：修重连") || len(pt.g.told)+len(*now) != 0 {
+		t.Fatalf("dispatched: patrol later %q now %q, plain %q; want the one receipt as the patrol's", *later, *now, pt.g.told)
+	}
+	pt.g.spawnErr = errors.New("进程数已满")
+	pt.run(pt.dispatch(`,"finding":"` + refB + `"`))
+	if len(*now) != 1 || !strings.Contains((*now)[0], "派出「修重连」失败") || len(pt.g.told) != 0 {
+		t.Fatalf("start failed: patrol %q, plain %q", *now, pt.g.told)
+	}
+	// A dispatch naming no finding, in a turn of the user's: a receipt like
+	// any.
+	pt.g.spawnErr, pt.patrol = nil, false
+	userTurn(pt.r, said)
+	pt.run(pt.dispatch(``))
+	if len(pt.g.told) != 1 || len(*later) != 1 {
+		t.Fatalf("a plain dispatch: plain %q, patrol later %q", pt.g.told, *later)
+	}
+
+	e := endedRunner(t)
+	now, later, along := patrolReceipts(e.r)
+	e.end("做完了")
+	if len(e.g.told) != 1 || len(*now) != 0 {
+		t.Fatalf("a plain task's turn end: plain %q, patrol %q", e.g.told, *now)
+	}
+	e.g.told = nil
+	if _, err := e.side.Update(e.key, func(m *sidecar.Meta) bool { m.Finding = refA; return true }); err != nil {
+		t.Fatal(err)
+	}
+	e.r.cfg.Patrol = &fakePatrol{known: map[string]bool{refA: true}}
+	e.wait(time.Minute)
+	e.end("还在等 CI。\n\n" + reportBlock(`{"state":"progress","summary":"等 CI"}`))
+	if len(*later) != 1 || !strings.Contains((*later)[0], "汇报：") || len(e.g.told)+len(*now) != 0 {
+		t.Fatalf("a progress report: patrol later %q now %q, plain %q", *later, *now, e.g.told)
+	}
+	e.wait(time.Minute)
+	e.end("修好了。\n\n" + reportBlock(`{"state":"done","summary":"已开 PR"}`))
+	if len(*now) != 1 || !strings.Contains((*now)[0], "汇报：") || len(e.g.told) != 0 {
+		t.Fatalf("a done report: patrol %q, plain %q", *now, e.g.told)
+	}
+	// The reminder to mark it, after a reply that did not: the patrol's too.
+	e.r.handle(reply{text: "好的", from: e.now.Add(-time.Second), to: e.now})
+	if len(*now) != 2 || !strings.Contains((*now)[1], "刚向你汇报，它在任务里仍是进行中") || len(e.g.told) != 0 {
+		t.Fatalf("the reminder to mark the task: patrol %q, plain %q", *now, e.g.told)
+	}
+	// A turn that ended with no report block.
+	e.wait(time.Minute)
+	e.end("我看了一下，还没弄完")
+	if len(*now) != 3 || !strings.Contains((*now)[2], "这一轮已经结束，没有写汇报块") || len(e.g.told) != 0 {
+		t.Fatalf("an unreported turn end: patrol %q, plain %q", *now, e.g.told)
+	}
+	if len(*along) != 0 {
+		t.Errorf("lines along: %q", *along)
+	}
+}
+
+// The turn answering a receipt about a task of the patrol's is held to the
+// patrol's limits and caps (the hole a dispatch's own receipt would leave):
+// a dispatch must name a finding and is the patrol's to allow, a question
+// and a timely notice must name theirs and count against the day's cap. It
+// marks the task and sends it on through custody, which a patrol turn does
+// not; what it was refused goes out as a patrol turn's receipt does.
+func TestPatrolTaskTurn(t *testing.T) {
+	pt := newPatrolTurn(t)
+	pt.patrol = false
+	pt.r.cfg.PatrolTaskTurn = func() bool { return true }
+	fronts := fronter(pt.r, nil)
+	if err := pt.side.Put(sidecar.Meta{Key: "task:ab12", Purpose: sidecar.PurposeTask, Title: "修重连", Finding: refA}); err != nil {
+		t.Fatal(err)
+	}
+	pt.p.capped = errors.New("今天提到用户面前的巡查事项已有 3 条")
+	pt.run(strings.Join([]string{
+		block(`{"type":"status","task":"task:ab12","state":"done","why":"PR 已开，CI 通过"}`),
+		pt.dispatch(``), // names no finding: the cap would not see it
+		block(`{"type":"notify","title":"修重连的 PR 备好了","why":"CI 通过","level":"timely","link":"https://github.com/owner/repo/pull/31","id":""}`),
+		block(`{"type":"ask","question":"顺手把退避也统一了？","options":["要","先不"]}`),
+		block(`{"type":"promise","text":"周五前合并","due":"2026-11-27T18:00:00+08:00","close_when":"PR 合并"}`),
+		block(`{"type":"front","id":"gw","name":"网关"}`),
+		block(`{"type":"notify","title":"修重连的 PR 备好了","why":"CI 通过","level":"timely","link":"https://github.com/owner/repo/pull/31","id":"","finding":"` + refA + `"}`),
+	}, "\n"))
+	if m, _ := pt.side.Get("task:ab12"); m.Mark == nil || m.Mark.State != string(task.Done) {
+		t.Errorf("status did not run in the task's receipt turn: %+v", m.Mark)
+	}
+	if len(pt.g.spawned) != 0 {
+		t.Errorf("spawned %q: a dispatch naming no finding ran", pt.g.spawned)
+	}
+	if open, _ := pt.inbox.List(0); len(open) != 0 {
+		t.Errorf("inbox %+v: a notice or a question got past the patrol's cap", open)
+	}
+	if open, _ := pt.r.cfg.Promises.List(0); len(open) != 0 {
+		t.Errorf("promise ran: %+v", open)
+	}
+	if len(*fronts) != 1 {
+		t.Errorf("front blocks run: %d, want 1", len(*fronts))
+	}
+	// The one notice naming its finding went to the patrol to count, in a
+	// turn with none of the user's words, and was past the cap.
+	if got := pt.p.did("surface"); !slices.Equal(got, []string{"surface " + refA + " pr unasked=true"}) {
+		t.Errorf("surface calls %q", got)
+	}
+	if len(pt.refusals) != 1 || len(pt.g.unrun)+len(pt.g.refused) != 0 {
+		t.Fatalf("receipts: patrol %q unrun %q refused %q; want one through TellPatrolRefused", pt.refusals, pt.g.unrun, pt.g.refused)
+	}
+	for _, want := range []string{
+		"有 5 个动作块没有执行",
+		"第 2 块（dispatch「修重连」）：这一轮回的是项目巡查派出的任务的回执，和巡查的回合一样由网关限着，dispatch 要带 finding",
+		"第 3 块（notify「修重连的 PR 备好了」）：这一轮回的是项目巡查派出的任务的回执，和巡查的回合一样由网关限着，timely 的 notify 要带 finding",
+		"第 4 块（ask「顺手把退避也统一了？」）：这一轮回的是项目巡查派出的任务的回执，和巡查的回合一样由网关限着，ask 要带 finding",
+		"第 5 块（promise", "只能用 dispatch（带 finding）、front、notify、ask、note、status、custody，没有执行",
+		"第 7 块（notify「修重连的 PR 备好了」）：今天提到用户面前的巡查事项已有 3 条",
+		"这一轮回的是项目巡查派出的任务的回执，网关只执行",
+	} {
+		if !strings.Contains(pt.refusals[0], want) {
+			t.Errorf("receipt lacks %q:\n%s", want, pt.refusals[0])
+		}
+	}
+
+	// A dispatch naming its finding is the patrol's to allow, unasked; one
+	// it lets go starts, and a question naming its finding is asked.
+	pt.refusals, pt.p.calls, pt.p.capped = nil, nil, nil
+	pt.run(pt.dispatch(`,"finding":"`+refB+`"`) + "\n" + block(`{"type":"ask","question":"退避要不要统一？","options":["要","先不"],"finding":"`+refB+`"}`))
+	if len(pt.g.spawns) != 1 || pt.g.spawns[0].Finding != refB || !strings.Contains(pt.g.spawns[0].Message, "网关附注") {
+		t.Fatalf("spawns %+v, receipts %q", pt.g.spawns, pt.refusals)
+	}
+	if want := "can " + refB + " unasked=true"; pt.p.calls[0] != want {
+		t.Errorf("patrol calls %q, want first %q", pt.p.calls, want)
+	}
+	if got := pt.p.did("surface"); !slices.Equal(got, []string{"surface " + refB + " ask unasked=true"}) {
+		t.Errorf("surface calls %q", got)
+	}
+
+	// Past the workspace's cap the dispatch is refused and the finding
+	// filed, as in a patrol turn.
+	pt.refusals, pt.g.spawns, pt.g.spawned = nil, nil, nil
+	pt.p.deny = errors.New("这个工作区巡查派出的任务已有 2 个在做（上限 2）")
+	pt.run(pt.dispatch(`,"finding":"` + refB + `"`))
+	if len(pt.g.spawned) != 0 || len(pt.refusals) != 1 || !strings.Contains(pt.refusals[0], "已有 2 个在做（上限 2）；网关已把这条发现记进未了事项，不用重发") {
+		t.Errorf("past the cap: spawned %q, receipt %q", pt.g.spawned, pt.refusals)
+	}
+
+	// The user's own turn is held to none of it.
+	pt = newPatrolTurn(t)
+	pt.patrol = false
+	userTurn(pt.r, said)
+	pt.run(pt.dispatch(``))
+	if len(pt.g.spawned) != 1 || len(pt.refusals) != 0 {
+		t.Errorf("the user's turn: spawned %q, receipts %q", pt.g.spawned, pt.refusals)
 	}
 }

@@ -625,3 +625,107 @@ func TestTellWatchCheckedAsItGoes(t *testing.T) {
 		t.Errorf("agent.json keeps %q", heldWatch(c))
 	}
 }
+
+// TestPatrolReceipts: a receipt about a session dispatched to fix a patrol
+// finding starts a turn from patrol_receipt, which the action runner holds
+// to the patrol's limits; so does a receipt that takes one waiting along,
+// whichever of the two is the patrol's, the turn answering both. A receipt
+// with none of the patrol's is from receipt as before. The mark is kept in
+// agent.json with the receipt.
+func TestPatrolReceipts(t *testing.T) {
+	if !SourcePatrolReceipt.Alone() || SourcePatrolReceipt.Outside() || SourcePatrolReceipt.Entry() != string(SourceReceipt) {
+		t.Errorf("patrol_receipt: alone %v outside %v entry %q; want a turn of its own, laid out as a receipt", SourcePatrolReceipt.Alone(),
+			SourcePatrolReceipt.Outside(), SourcePatrolReceipt.Entry())
+	}
+	now := time.Date(2026, 11, 16, 14, 0, 0, 0, time.UTC)
+	a, _, turns := heldAgent(t, &now)
+	last := func() (Source, string) { return turns.srcs[len(turns.srcs)-1], turns.sent[len(turns.sent)-1] }
+
+	if err := a.TellPatrol("task:p1（修重连）汇报：完成"); err != nil {
+		t.Fatal(err)
+	}
+	if src, text := last(); src != SourcePatrolReceipt || !strings.Contains(text, "task:p1（修重连）汇报：完成") || turns.said[0] != nil {
+		t.Fatalf("TellPatrol sent %q from %q", text, src)
+	}
+	if err := a.TellPatrolLater("已派出：修重连（task:p1）"); err != nil {
+		t.Fatal(err)
+	}
+	if src, _ := last(); len(turns.sent) != 2 || src != SourcePatrolReceipt {
+		t.Fatalf("TellPatrolLater with the user away: sent %q from %q", turns.sent, turns.srcs)
+	}
+	if err := a.Tell("task:n1（写文档）汇报：完成"); err != nil {
+		t.Fatal(err)
+	}
+	if src, _ := last(); src != SourceReceipt {
+		t.Fatalf("a plain receipt went from %q", src)
+	}
+
+	// The user is chatting: the patrol's receipt waits, and the plain one
+	// that takes it along goes from patrol_receipt.
+	if err := a.Send("在吗", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.TellPatrolLater("已派出：修退避（task:p2）"); err != nil {
+		t.Fatal(err)
+	}
+	if len(a.state.Held) != 1 || !a.state.Held[0].Patrol {
+		t.Fatalf("held %+v, want the patrol's receipt marked", a.state.Held)
+	}
+	if err := a.Tell("task:n1（写文档）汇报：完成"); err != nil {
+		t.Fatal(err)
+	}
+	if src, text := last(); src != SourcePatrolReceipt || !strings.Contains(text, "已派出：修退避") || !strings.Contains(text, "task:n1") || len(a.state.Held) != 0 {
+		t.Fatalf("a plain receipt carrying the patrol's: sent %q from %q, held %+v", text, src, a.state.Held)
+	}
+
+	// The other way round: a plain one waiting, the patrol's taking it.
+	if err := a.TellLater("已派出：写文档（task:n2）"); err != nil {
+		t.Fatal(err)
+	}
+	a.TellPatrolAlong("task:p2 汇报：进度")
+	if err := a.TellPatrol("task:p2（修退避）汇报：完成"); err != nil {
+		t.Fatal(err)
+	}
+	if src, text := last(); src != SourcePatrolReceipt || !strings.Contains(text, "已派出：写文档") || !strings.Contains(text, "task:p2 汇报：进度") {
+		t.Fatalf("the patrol's receipt carrying a plain one: sent %q from %q", text, src)
+	}
+
+	// Held ones going by themselves once the user is quiet: by their marks.
+	if err := a.TellLater("已派出：写文档（task:n3）"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(10 * time.Minute)
+	a.reconcile(context.Background())
+	if src, text := last(); src != SourceReceipt || !strings.Contains(text, "task:n3") {
+		t.Fatalf("plain receipts waiting went from %q: %q", src, text)
+	}
+	if err := a.Send("在吗", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.TellPatrolLater("已派出：修超时（task:p3）"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(10 * time.Minute)
+	a.reconcile(context.Background())
+	if src, text := last(); src != SourcePatrolReceipt || !strings.Contains(text, "task:p3") {
+		t.Fatalf("the patrol's receipt waiting went from %q: %q", src, text)
+	}
+
+	// PatrolTaskTurn is what the runner reads; a patrol turn proper is not
+	// one, nor the other way round.
+	for _, tc := range []struct {
+		sources      []Source
+		task, patrol bool
+	}{
+		{nil, false, false},
+		{[]Source{SourceReceipt}, false, false},
+		{[]Source{SourcePatrolReceipt}, true, false},
+		{[]Source{SourcePatrol}, false, true},
+		{[]Source{SourcePatrolRefusal}, false, true},
+	} {
+		turns.sources = tc.sources
+		if a.PatrolTaskTurn() != tc.task || a.PatrolTurn() != tc.patrol || a.UnrunTurn() != (len(tc.sources) > 0 && tc.sources[0] == SourcePatrolRefusal) {
+			t.Errorf("%v: task turn %v, patrol turn %v", tc.sources, a.PatrolTaskTurn(), a.PatrolTurn())
+		}
+	}
+}
