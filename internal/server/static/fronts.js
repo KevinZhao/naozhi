@@ -183,10 +183,20 @@ export function mountFronts(el) {
 // it. A failure puts the line back as it was, the editor reopened on what
 // was typed (or its card's controls, for 结束), and says why; a line the
 // ledger no longer has is gone already, which is what 结束 asked.
+//
+// The card stays open after an edit, so 结束 may come while the edit is
+// out: what shows is then only the edit's prediction. The later save takes
+// over the line as the ledger last had it (was) and holds the edit with its
+// own; the earlier one, failing, leaves the page to it (its own failure or
+// the read after it puts back what it must).
 async function save(body, failed) {
   if (!last || !Array.isArray(last.fronts)) return;
-  const prior = { fronts: last.fronts, openId, editId };
-  const mark = { edit: body, upTo: Infinity };
+  const prior = { openId, editId };
+  const prev = held.get(body.id);
+  const chained = prev && prev.upTo === Infinity ? prev : null;
+  const i = last.fronts.findIndex((f) => f.id === body.id);
+  const was = chained ? chained.was : { line: i < 0 ? null : last.fronts[i], at: i };
+  const mark = { edit: chained ? Object.assign({}, chained.edit, body) : body, upTo: Infinity, was };
   held.set(body.id, mark);
   last = Object.assign({}, last, { fronts: applyEdit(last.fronts, body) });
   editId = '';
@@ -204,14 +214,12 @@ async function save(body, failed) {
     }
   } catch (e) {
     ok = body.close && e.status === 404;
-    if (!ok) {
-      if (held.get(body.id) === mark) held.delete(body.id);
-      const was = prior.fronts.find((f) => f.id === body.id);
-      if (was && last) {
+    if (!ok && held.get(body.id) === mark) {
+      held.delete(body.id);
+      if (was.line && last) {
         // Put back where it stood, among what the page lists now.
         const now = last.fronts.filter((f) => f.id !== body.id);
-        const at = prior.fronts.indexOf(was);
-        last = Object.assign({}, last, { fronts: now.slice(0, at).concat([was], now.slice(at)) });
+        last = Object.assign({}, last, { fronts: now.slice(0, was.at).concat([was.line], now.slice(was.at)) });
       }
       openId = prior.openId;
       editId = prior.editId;
@@ -221,8 +229,8 @@ async function save(body, failed) {
           if (typeof body[t.dataset.field] === 'string') t.value = body[t.dataset.field];
         });
       }
-      showToast(failed + e.message, 'error');
     }
+    if (!ok) showToast(failed + e.message, 'error');
   }
   if (ok && held.get(body.id) === mark) mark.upTo = gen;
   await refreshFronts();

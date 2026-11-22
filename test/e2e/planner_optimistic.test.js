@@ -28,22 +28,37 @@ function inbox() {
 }
 
 // holdPath holds the page's method requests to path until release(); with
-// status set it answers the next ones with that instead, the gateway left
-// untouched. held counts the requests taken. The latest one set up takes a
-// request first; another method goes on to the ones before it.
+// status set it answers the next ones with that instead (body h.body), the
+// gateway left untouched. release(status) answers the held ones with status
+// instead of letting them through. held counts the requests taken. The
+// latest one set up takes a request first; another method goes on to the
+// ones before it.
 async function holdPath(page, path, method) {
-  const h = { status: 0, held: 0 };
+  const h = { status: 0, held: 0, body: 'boom' };
   let open;
   h.gate = new Promise((r) => { open = r; });
-  h.release = () => open();
+  h.release = (status) => open(status || 0);
   await page.route((u) => u.pathname === path, async (route) => {
     if (route.request().method() !== method) { await route.fallback(); return; }
-    if (h.status) { await route.fulfill({ status: h.status, contentType: 'text/plain', body: 'boom' }); return; }
+    if (h.status) { await route.fulfill({ status: h.status, contentType: 'text/plain', body: h.body }); return; }
     h.held++;
-    await h.gate;
-    await route.continue();
+    const status = await h.gate;
+    if (status) await route.fulfill({ status, contentType: 'text/plain', body: 'boom' });
+    else await route.continue();
   });
   return h;
+}
+
+// queuePath holds each of the page's method requests to path apart:
+// answer(i, status) lets the i-th through, or answers it with status.
+async function queuePath(page, path, method) {
+  const q = { routes: [] };
+  q.answer = (i, status) => (status ? q.routes[i].fulfill({ status, contentType: 'text/plain', body: 'boom' }) : q.routes[i].continue());
+  await page.route((u) => u.pathname === path, async (route) => {
+    if (route.request().method() !== method) { await route.fallback(); return; }
+    q.routes.push(route);
+  });
+  return q;
 }
 async function openPlanner(page, overrides) {
   const mock = await startMockServer({ ws: true, planner, plannerEvents: [], tasks: { tasks: [] }, ...overrides });
@@ -356,6 +371,181 @@ test('托管 and 观察 switch at once; the gateway\'s answer then; a failure pu
     await expect(page.locator('#toast')).toHaveText(/没有打开观察：/);
     await expect(watch).toHaveText('观察关');
     expect(mock.custodyCalls.length).toBe(2);
+  } finally {
+    mock.server.close();
+  }
+});
+
+test('等你: a notice a push opened comes back when its close fails; a 409 still open says so', async ({ page }) => {
+  const box = inbox();
+  box.open.push({ id: 'in_n', kind: 'notice', level: 'timely', unit: PLANNER, title: 'iso 例行巡检', why: 'iso 一切正常', created: iso(now - 9 * 60000), state: 'open', source: 'planner:n0' });
+  box.counts = { open: 4, badge: 3 };
+  const mock = await openPlanner(page, { inbox: box });
+  try {
+    await expect(page.locator('#pl-wait .pl-card')).toHaveCount(3);
+    // Only the push (or a link) shows a notice in 等你.
+    await page.evaluate(() => { location.hash = 'planner&item=in_n'; });
+    const notice = page.locator('#pl-wait .pl-card[data-id="in_n"]');
+    await expect(notice).toHaveCount(1);
+    const close = await holdPath(page, '/api/inbox/close', 'POST');
+    close.status = 500;
+    await notice.locator('.pl-close').click();
+    await expect(page.locator('#toast')).toHaveText(/关闭失败：/);
+    await expect(notice).toHaveCount(1);
+    await expect(notice.locator('.pl-close')).toBeEnabled();
+
+    // A 409 for an answer being applied leaves the item open: the card is
+    // back and the toast says why; only "already closed" is what was asked.
+    close.status = 409;
+    close.body = 'another answer is being applied';
+    await page.evaluate(() => { document.getElementById('toast').className = 'toast'; });
+    await page.click('.pl-card[data-id="in_err"] .pl-close');
+    await expect(page.locator('#toast')).toHaveText(/关闭失败：.*another answer is being applied/);
+    await expect(page.locator('.pl-card[data-id="in_err"]')).toHaveCount(1);
+    close.body = 'item already closed';
+    box.open = box.open.filter((it) => it.id !== 'in_err');
+    box.counts = { open: 3, badge: 2 };
+    await page.evaluate(() => { document.getElementById('toast').className = 'toast'; });
+    await page.click('.pl-card[data-id="in_err"] .pl-close');
+    await expect(page.locator('.pl-card[data-id="in_err"]')).toHaveCount(0);
+    await expect(page.locator('#toast')).not.toHaveClass(/show/);
+  } finally {
+    mock.server.close();
+  }
+});
+
+test('恢复 clicked while the pause is out: both failing leave nothing paused', async ({ page }) => {
+  const box = inbox();
+  const mock = await openPlanner(page, { inbox: box, custody: { paused: false, sessions: [] } });
+  try {
+    await expect(page.locator('#pl-wait .pl-card')).toHaveCount(3);
+    const paused = page.locator('#pl-paused');
+    const pause = await holdPath(page, '/api/inbox/pause', 'PUT');
+    const resume = await holdPath(page, '/api/inbox/pause', 'DELETE');
+    await page.click('#pl-more > summary');
+    await page.click('[data-action="planner-pause"][data-for="1h"]');
+    await expect(paused).toBeVisible();
+    await page.click('#pl-paused [data-action="planner-pause-resume"]');
+    await expect(paused).toBeHidden();
+    await expect.poll(() => [pause.held, resume.held]).toEqual([1, 1]);
+    // The pause fails first (taken over already), then 恢复: what was before
+    // the pause is what shows, the pause never having been.
+    pause.release(500);
+    await expect(page.locator('#toast')).toHaveText(/暂停失败：/);
+    await expect(paused).toBeHidden();
+    resume.release(500);
+    await expect(page.locator('#toast')).toHaveText(/恢复失败：/);
+    await expect(paused).toBeHidden();
+    await expect.poll(() => page.evaluate(async () => (await import('/static/custody.js')).custody.paused)).toBe(false);
+    expect(mock.inboxCalls).toEqual([]);
+  } finally {
+    mock.server.close();
+  }
+});
+
+test('工作线: 结束 over an edit still out; the edit failing does not bring the line back', async ({ page }) => {
+  const data = fronts();
+  const mock = await openPlanner(page, { fronts: data });
+  try {
+    const group = page.locator('#pl-front');
+    await expect(group.locator('.fr-card')).toHaveCount(3);
+    const post = await queuePath(page, '/api/planner/fronts', 'POST');
+    const blog = group.locator('.fr-card[data-id="blog"]');
+    await blog.locator('.tk-more').click();
+    await blog.locator('[data-action="front-edit"]').click();
+    await blog.locator('textarea[data-field="state"]').fill('发出去了');
+    await blog.locator('[type="submit"]').click();
+    await expect(blog.locator('.fr-state')).toHaveText('发出去了');
+    // The card is left open: 结束 is right there.
+    await blog.locator('[data-action="front-close"]').click();
+    await expect(blog).toHaveCount(0);
+    await expect.poll(() => post.routes.length).toBe(2);
+    // The read after the edit's failure is held: what shows meanwhile is the
+    // page's own doing.
+    const get = await holdPath(page, '/api/planner/fronts', 'GET');
+    await post.answer(0, 500);
+    await expect(page.locator('#toast')).toHaveText(/没有保存：/);
+    await expect(blog).toHaveCount(0);
+    await expect(group.locator('.fr-edit')).toHaveCount(0);
+    await expect(group.locator('.pl-group-h')).toHaveText('工作线 2');
+    get.release();
+    await post.answer(1);
+    await expect.poll(() => mock.frontsCalls).toEqual([{ id: 'blog', close: true }]);
+    await expect(blog).toHaveCount(0);
+    await expect(group.locator('.fr-card')).toHaveCount(2);
+  } finally {
+    mock.server.close();
+  }
+});
+
+test('托管 clicked twice while out: both failing leave it as the gateway has it', async ({ page }) => {
+  const custody = { paused: false, sessions: [{ key: A, on: false, state: 'off', sent: 0, max: 8 }] };
+  const mock = await startMockServer({ ws: true, sessions: defaultSessions(), planner, plannerEvents: [], inbox: { open: [], closed: [], counts: { open: 0, badge: 0 } }, custody });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await openSession(page, mock, A);
+    const chip = page.locator('#header-custody .custody-chip');
+    await expect(chip).toHaveText('托管关');
+    const put = await queuePath(page, '/api/custody', 'PUT');
+    await chip.click();
+    await expect(chip).toHaveText('托管开');
+    await chip.click();
+    await expect(chip).toHaveText('托管关');
+    await expect.poll(() => put.routes.length).toBe(2);
+    // The list read after each failure is held: what shows is the page's own.
+    const get = await holdPath(page, '/api/custody', 'GET');
+    await put.answer(0, 500);
+    await expect(page.locator('#toast')).toHaveText(/没有打开托管：/);
+    await put.answer(1, 500);
+    await expect(page.locator('#toast')).toHaveText(/没有关掉托管：/);
+    await expect(chip).toHaveText('托管关');
+    await expect(chip).toHaveAttribute('aria-pressed', 'false');
+    get.release();
+    await expect(chip).toHaveText('托管关');
+    expect(mock.custodyCalls).toEqual([]);
+  } finally {
+    mock.server.close();
+  }
+});
+
+test('观察 switched off: 你开的 loses the card at once, gets it back if it failed', async ({ page }) => {
+  const B = 'dashboard:direct:2026-01-01-120001-2:otherproject';
+  const at = iso(now - 20 * 60000);
+  const tasks = { tasks: [
+    { id: A, kind: 'session', group: 'yours', title: 'iso 压测', state: 'doing', at, health: 'idle', health_since: at },
+    { id: B, kind: 'session', group: 'yours', title: 'iso 调研', state: 'doing', at, health: 'idle', health_since: at },
+  ] };
+  const mock = await openPlanner(page, { sessions: defaultSessions(), tasks, custody: { paused: false, sessions: [] } });
+  try {
+    const card = (k) => page.locator('#pl-task .tk-card[data-id="' + k + '"]');
+    await expect(card(A)).toHaveCount(1);
+    await expect(card(B)).toHaveCount(1);
+    await openSession(page, mock, A);
+    const watch = page.locator('#header-custody .watch-chip');
+    await expect(watch).toHaveText('观察开');
+    const put = await holdPath(page, '/api/custody', 'PUT');
+    await watch.click();
+    await expect(watch).toHaveText('观察关');
+    // Out of 你开的 before the gateway answers; a list read meanwhile (still
+    // listing it) does not bring it back.
+    await expect(card(A)).toHaveCount(0);
+    await expect(page.locator('#pl-task .tk-sec-yours .tk-sec-h')).toHaveText('你开的 1');
+    expect(put.held).toBe(1);
+    await read(page, 'tasks.js', 'refreshTasks');
+    await expect(card(A)).toHaveCount(0);
+    put.release();
+    await expect.poll(() => mock.custodyCalls).toEqual([{ key: A, watch: false }]);
+    await read(page, 'tasks.js', 'refreshTasks');
+    await expect(card(A)).toHaveCount(0);
+
+    // A switch that fails: the card is back, and why.
+    await openSession(page, mock, B);
+    put.status = 500;
+    await watch.click();
+    await expect(page.locator('#toast')).toHaveText(/没有关掉观察：/);
+    await expect(watch).toHaveText('观察开');
+    await expect(card(B)).toHaveCount(1);
   } finally {
     mock.server.close();
   }

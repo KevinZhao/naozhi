@@ -244,9 +244,20 @@ function refreshAfter() {
 // holdCustodyPaused shows custody paused (or resumed) at once, for the
 // request that does it (the one pause's PUT / DELETE). done(actual) once it
 // answered — actual the gateway's paused when it says — reads the list
-// again and resolves after; undo() puts back what was shown.
+// again and resolves after; undo() puts back what the gateway last said and
+// reads it again. Over a hold still unanswered (恢复 while the pause is out)
+// what shows is only that one's prediction: its prior is taken over, so a
+// failure never puts back a pause that never was.
 export function holdCustodyPaused(paused) {
-  const mark = { paused, upTo: Infinity, priorPaused: custody.paused, priorAt: custody.pausedAt, was: showPaused(paused) };
+  const prev = pauseHold && pauseHold.upTo === Infinity ? pauseHold : null;
+  const was = showPaused(paused);
+  // For a session the hold before changed, the state before that one.
+  if (prev) for (const [k, state] of prev.was) was.set(k, state);
+  const mark = {
+    paused, upTo: Infinity, was,
+    priorPaused: prev ? prev.priorPaused : custody.paused,
+    priorAt: prev ? prev.priorAt : custody.pausedAt,
+  };
   pauseHold = mark;
   changed();
   return {
@@ -259,41 +270,50 @@ export function holdCustodyPaused(paused) {
       return refreshAfter();
     },
     undo() {
-      if (pauseHold !== mark) return;
-      pauseHold = null;
-      custody.paused = mark.priorPaused;
-      custody.pausedAt = mark.priorAt;
-      for (const [k, state] of mark.was) {
-        const st = custody.byKey.get(k);
-        if (st) custody.byKey.set(k, Object.assign({}, st, { state }));
+      if (pauseHold === mark) {
+        pauseHold = null;
+        custody.paused = mark.priorPaused;
+        custody.pausedAt = mark.priorAt;
+        for (const [k, state] of mark.was) {
+          const st = custody.byKey.get(k);
+          if (st) custody.byKey.set(k, Object.assign({}, st, { state }));
+        }
+        changed();
       }
-      changed();
+      return refreshAfter();
     },
   };
 }
 
 // holdSwitch shows key reading st at once, ahead of the PUT that sets it;
 // settle(res) takes the gateway's answer (res null: the prediction stays
-// until the next read), undo() puts back what key read before.
+// until the next read), undo() puts back what the gateway last said key
+// read. The chip is not disabled meanwhile, so a second click may come
+// over a first still out: it takes over the first's prior (what shows is
+// only a prediction), and a request answering after another took over
+// reads the list again, the one way its outcome reaches the page.
 function holdSwitch(key, st) {
-  const prior = custody.byKey.get(key);
-  const mark = { st, upTo: Infinity };
+  const prev = held.get(key);
+  const prior = prev && prev.upTo === Infinity ? prev.prior : custody.byKey.get(key);
+  const mark = { st, upTo: Infinity, prior };
   held.set(key, mark);
   custody.byKey.set(key, st);
   changed();
   return {
     settle(res) {
-      if (held.get(key) !== mark) return;
+      if (held.get(key) !== mark) { refreshAfter(); return; }
       if (res) { mark.st = res; custody.byKey.set(key, res); }
       mark.upTo = readSeq;
       changed();
     },
     undo() {
-      if (held.get(key) !== mark) return;
-      held.delete(key);
-      if (prior) custody.byKey.set(key, prior);
-      else custody.byKey.delete(key);
-      changed();
+      if (held.get(key) === mark) {
+        held.delete(key);
+        if (prior) custody.byKey.set(key, prior);
+        else custody.byKey.delete(key);
+        changed();
+      }
+      refreshAfter();
     },
   };
 }
@@ -311,9 +331,9 @@ export async function setCustodyPaused(paused) {
     custody.pausedAt = res?.paused_at ? Date.parse(res.paused_at) || 0 : 0;
     await h.done(typeof res?.paused === 'boolean' ? res.paused : undefined);
   } catch (e) {
-    h.undo();
+    const read = h.undo();
     showToast((paused ? '暂停托管' : '恢复托管') + '失败：' + failText(e), 'error');
-    await refreshCustody();
+    await read;
   }
 }
 
@@ -365,17 +385,22 @@ function toggleWatch(el) {
   const watch = !watchOf(key);
   const h = holdSwitch(key, Object.assign({}, statusOf(key), { watch, watch_by: 'user' }));
   showToast(watchToast(watch), 'success', 4000);
+  // 任务's 你开的 follows (tasks.js): pending at once, then the gateway's
+  // answer (its list read again) or the failure that puts it back.
+  const tell = (detail) => nzBus.dispatchEvent(new CustomEvent('watch:changed', { detail: Object.assign({ key }, detail) }));
+  tell({ watch, pending: true });
   fetchJSON(plannerAPI(NZ_CONTRACT.API.custody), {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, watch }), timeoutMs: 8000,
   }).then((res) => {
     h.settle(res && res.key === key ? res : null);
     // The gateway's answer is what it is now.
-    if (res && typeof res.watch === 'boolean' && res.watch !== watch) showToast(watchToast(res.watch), 'success', 4000);
-    // 任务's 你开的 gains or loses the session: the gateway has it now.
-    nzBus.dispatchEvent(new CustomEvent('watch:changed', { detail: { key, watch } }));
+    const now = res && typeof res.watch === 'boolean' ? res.watch : watch;
+    if (now !== watch) showToast(watchToast(now), 'success', 4000);
+    tell({ watch: now });
   }, (e) => {
     h.undo();
     showToast((watch ? '没有打开观察：' : '没有关掉观察：') + failText(e), 'error');
+    tell({ watch: !watch, failed: true });
   });
 }
 

@@ -517,6 +517,10 @@ function countBy(it, d) {
 function takeOff(ref) {
   const host = plannerHost.node;
   const it = pl.open.find((x) => itemRef(x) === ref);
+  // A notice shows only as pl.notice, which painting without its item
+  // clears and nothing sets again (the push's focus is spent): back() must
+  // set it again for the card to come back.
+  const notice = pl.notice === ref;
   const mark = { it, upTo: Infinity };
   gone.set(ref, mark);
   if (it) {
@@ -534,6 +538,7 @@ function takeOff(ref) {
       if (gone.get(ref) === mark) gone.delete(ref);
       if (it && host === plannerHost.node && !pl.open.some((x) => itemRef(x) === ref)) {
         pl.open = pl.open.concat(it);
+        if (notice) pl.notice = ref;
         countBy(it, 1);
         paintWaiting();
         noteItems();
@@ -715,23 +720,32 @@ function pauseEnd(forVal) {
 
 // holdPause shows the pause ending at until (0: resumed) at once, ahead of
 // the request: done(u) takes the gateway's end, back() puts back the one
-// shown before.
+// the gateway last said, true when it did. Over a hold still unanswered (恢复
+// clicked while the pause is out) what shows is only that one's prediction:
+// the prior is the one it held, so a failure never puts back a pause that
+// never was. A request answering after another took over reads the list
+// again: the later one's prior may be what this one just changed.
 function holdPause(until) {
-  const prior = pl.pausedUntil;
-  const mark = { until, upTo: Infinity };
+  const prev = pauseHold && pauseHold.upTo === Infinity ? pauseHold : null;
+  const prior = prev ? prev.prior : pl.pausedUntil;
+  const mark = { until, upTo: Infinity, prior };
   pauseHold = mark;
   pl.pausedUntil = until;
   return {
     done(u) {
-      if (pauseHold !== mark) return;
+      if (pauseHold !== mark) { fetchInbox(); return; }
       mark.until = u;
       mark.upTo = inboxSeq;
       pl.pausedUntil = u;
     },
     back() {
-      if (pauseHold !== mark) return;
-      pauseHold = null;
-      pl.pausedUntil = prior;
+      const mine = pauseHold === mark;
+      if (mine) {
+        pauseHold = null;
+        pl.pausedUntil = prior;
+      }
+      fetchInbox();
+      return mine;
     },
   };
 }
@@ -754,12 +768,10 @@ async function pause(forVal) {
     paintTools();
     c.done();
   } catch (e) {
-    h.back();
+    if (h.back()) pl.customPause = custom;
     c.undo();
-    pl.customPause = custom;
     paintTools();
     showToast('暂停失败：' + e.message, 'error');
-    refreshCustody();
   }
 }
 
@@ -777,7 +789,6 @@ async function resume() {
     c.undo();
     paintTools();
     showToast('恢复失败：' + e.message, 'error');
-    refreshCustody();
     return;
   }
   h.done(0);
@@ -1522,7 +1533,8 @@ registerActions({
   'planner-open-task': (el) => openReport(el.dataset.key || ''),
   'planner-jump-ask': (el) => jumpToAsk(el.dataset.id || ''),
   // Closing takes the card off at once; an item the gateway has closed
-  // already (404, 409) is what was asked.
+  // already (404, or 409 "already closed") is what was asked. Another 409
+  // (an answer to it being applied) leaves it open: the card comes back.
   'planner-inbox-close': async (el) => {
     const ref = el.dataset.id;
     const { node, id } = itemOf(ref);
@@ -1530,7 +1542,7 @@ registerActions({
     try {
       await fetchJSON(nodeAPI(node, NZ_CONTRACT.API.inbox_close), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }), timeoutMs: 8000 });
     } catch (e) {
-      if (e.status !== 404 && e.status !== 409) {
+      if (e.status !== 404 && !(e.status === 409 && /already closed|已过期/.test(e.message))) {
         h.back();
         showToast('关闭失败：' + e.message, 'error');
         return;
