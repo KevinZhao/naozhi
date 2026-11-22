@@ -168,21 +168,30 @@ function toggleProjectCollapsed(key) {
   }
 }
 
-// _favPending is the favorite flag each (node, name) was set to while its
-// POST is in flight. The star flips and the sidebar regroups at the click;
-// a sessions poll answering from before the POST would flip it back, so
-// withPendingFavorites lays these over every polled project list until the
-// request and the refresh after it settle. A second click inside that
-// window is dropped: it would read the flag this one has not confirmed.
+// _favPending is, per (node, name), the favorite flag the star shows ahead
+// of the server: {value, busy, timer}. A sessions poll answering from before
+// the change would flip it back, so withPendingFavorites lays value over
+// every polled project list. While busy a POST is out; after it, the entry
+// stays until a poll echoes value or FAV_ECHO_MS passes, because a remote
+// node's projects reach /api/sessions through the node cache, which picks the
+// change up only on its next tick.
 const _favPending = new Map();
+const FAV_ECHO_MS = 30000;
 
 // withPendingFavorites overrides, in place, the favorite flag of the
-// projects whose toggle is in flight, and answers the list.
+// projects whose change the server has not shown yet, and answers the list.
 export function withPendingFavorites(projects) {
   if (_favPending.size === 0 || !Array.isArray(projects)) return projects;
   for (const p of projects) {
-    const v = _favPending.get((p.node || 'local') + ':' + p.name);
-    if (v !== undefined) p.favorite = v;
+    const key = (p.node || 'local') + ':' + p.name;
+    const e = _favPending.get(key);
+    if (!e) continue;
+    if (!e.busy && !!p.favorite === e.value) {
+      clearTimeout(e.timer);
+      _favPending.delete(key);
+      continue;
+    }
+    p.favorite = e.value;
   }
   return projects;
 }
@@ -201,42 +210,58 @@ function setFavoriteLocal(name, nodeID, value) {
   if (sessionList.lastSidebarData) shell.renderSidebar(sessionList.lastSidebarData);
 }
 
+// postFavorite asks the server for value; it throws as fetchJSON does.
+function postFavorite(name, node, value) {
+  const qs = 'name=' + encodeURIComponent(name) + '&favorite=' + (value ? 'true' : 'false') +
+    (node && node !== 'local' ? '&node=' + encodeURIComponent(node) : '');
+  return fetchJSON(NZ_CONTRACT.API.projects_favorite + '?' + qs, { timeoutMs: 10000, method: 'POST', headers: {} });
+}
+
 async function toggleFavorite(name, node) {
   const nodeID = node || 'local';
   const key = nodeID + ':' + name;
-  if (_favPending.has(key)) return; // drop re-entry
   // Derive current state from the source of truth (sessionList.projectsData), not the
   // button's data-fav attribute which may not have been re-rendered yet.
   const proj = sessionList.projectsData.find(x => x.name === name && (x.node || 'local') === nodeID);
   if (!proj) return;
-  const prev = !!proj.favorite;
-  const next = !prev;
-  _favPending.set(key, next);
-  setFavoriteLocal(name, nodeID, next);
-  const qs = 'name=' + encodeURIComponent(name) + '&favorite=' + (next ? 'true' : 'false') +
-    (node && node !== 'local' ? '&node=' + encodeURIComponent(node) : '');
-  try {
-    await fetchJSON(NZ_CONTRACT.API.projects_favorite + '?' + qs, { timeoutMs: 10000, method: 'POST', headers: {} });
-  } catch (err) {
-    _favPending.delete(key);
-    setFavoriteLocal(name, nodeID, prev);
-    if (err && err.status) {
-      showAPIError(next ? '收藏项目' : '取消收藏', err.status, '');
-    } else {
-      showNetworkError(next ? '收藏项目' : '取消收藏', err);
-    }
-    // The server may have taken it after all (a timeout): the next poll says.
-    shell.fetchSessions();
+  const cur = _favPending.get(key);
+  if (cur && cur.busy) {
+    // A click while the POST is out changes where it should end: the star
+    // follows now, the loop below sends it once that POST settles.
+    cur.value = !cur.value;
+    setFavoriteLocal(name, nodeID, cur.value);
     return;
   }
-  showToast(next ? '已收藏 ' + name : '已取消收藏 ' + name, 'success');
-  // The override holds through this refresh: a poll sent before the POST
-  // can still answer after it.
-  try {
-    await shell.fetchSessions();
-  } finally {
-    _favPending.delete(key);
+  if (cur) clearTimeout(cur.timer);
+  let saved = !!proj.favorite;
+  const entry = { value: !saved, busy: true, timer: 0 };
+  _favPending.set(key, entry);
+  setFavoriteLocal(name, nodeID, entry.value);
+  // One POST at a time, the last click winning: two out at once could land
+  // in either order.
+  while (entry.value !== saved) {
+    const want = entry.value;
+    try {
+      await postFavorite(name, node, want);
+    } catch (err) {
+      _favPending.delete(key);
+      // Back to what the server last took.
+      setFavoriteLocal(name, nodeID, saved);
+      if (err && err.status) {
+        showAPIError(want ? '收藏项目' : '取消收藏', err.status, '');
+      } else {
+        showNetworkError(want ? '收藏项目' : '取消收藏', err);
+      }
+      // The server may have taken it after all (a timeout): the next poll says.
+      shell.fetchSessions();
+      return;
+    }
+    saved = want;
   }
+  entry.busy = false;
+  entry.timer = setTimeout(() => { if (_favPending.get(key) === entry) _favPending.delete(key); }, FAV_ECHO_MS);
+  showToast(saved ? '已收藏 ' + name : '已取消收藏 ' + name, 'success');
+  shell.fetchSessions();
 }
 
 // openProjectSettings opens the per-project settings modal (RFC

@@ -78,3 +78,39 @@ test('favorite: a refused unfavorite brings the empty favorite group back and sa
   expect(await headerOrder(page)).toEqual(before);
   expect(mock.favoriteCalls).toEqual([]);
 });
+
+test('favorite: a list still behind after the POST (a remote node\'s cache) does not undo the star', async ({ page }) => {
+  // The POST is taken but the mock's list is not told, as a remote node's
+  // projects reach /api/sessions through a cache that refreshes on its tick.
+  await page.route((url) => url.pathname === '/api/projects/favorite', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '{"status":"ok","favorite":true}' }));
+  const header = page.locator('.section-header', { hasText: 'otherproject' });
+  const star = header.locator('.sh-btn[data-action="project-favorite"]');
+  const stale = () => page.waitForResponse(async (r) => new URL(r.url()).pathname === '/api/sessions' &&
+    (await r.json()).stats.projects.find((p) => p.name === 'otherproject').favorite === false, { timeout: 8000 });
+  await star.click();
+  await expect(page.locator('#toast')).toHaveText('已收藏 otherproject');
+  // The refresh right after the POST, then the 5 s poll: both still say false.
+  await stale();
+  await stale();
+  await page.waitForTimeout(300);
+  await expect(star).toHaveClass(/star-on/);
+  const order = await headerOrder(page);
+  expect(order.indexOf('otherproject')).toBeLessThan(order.indexOf('myproject'));
+});
+
+test('favorite: a second click while the POST is out flips the star back and is sent after it', async ({ page }) => {
+  const release = await holdFavorite(page);
+  const header = page.locator('.section-header', { hasText: 'otherproject' });
+  const star = header.locator('.sh-btn[data-action="project-favorite"]');
+  await star.click();
+  await expect(star).toHaveClass(/star-on/, { timeout: 1000 });
+  await star.click();
+  await expect(star).not.toHaveClass(/star-on/, { timeout: 1000 });
+  expect(mock.favoriteCalls).toEqual([]);
+
+  release();
+  await expect.poll(() => mock.favoriteCalls.length).toBe(2);
+  expect(mock.favoriteCalls).toEqual([{ name: 'otherproject', favorite: true }, { name: 'otherproject', favorite: false }]);
+  await expect(page.locator('#toast')).toHaveText('已取消收藏 otherproject');
+  await expect(star).not.toHaveClass(/star-on/);
+});

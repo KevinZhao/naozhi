@@ -49,6 +49,9 @@ const mem = {
   focus: null,
   // pending is the delete waiting out UNDO_MS.
   pending: null,
+  // recentBuilt is the 最近 7 天 content last put in, so a filter keystroke
+  // does not rebuild it.
+  recentBuilt: null,
 };
 
 const keyOf = (project, name) => project + '/' + name;
@@ -112,12 +115,13 @@ function nodeLabel(n) {
 // editor, or one shown as saved while its PUT is still out (a failed save
 // puts it back in the editor).
 function dirty() {
-  for (const k in mem.rows) {
-    const r = mem.rows[k];
-    if (r.saving) return true;
-    if (r.editing && r.file && r.draft !== r.file.text) return true;
-  }
-  return false;
+  return saving() || Object.values(mem.rows).some((r) => r.editing && r.file && r.draft !== r.file.text);
+}
+
+// saving is whether a save's PUT is still out: nothing is left to save or
+// cancel then, only to wait for.
+function saving() {
+  return Object.values(mem.rows).some((r) => r.saving);
 }
 
 // mountMemoryView builds the section once into el.
@@ -134,7 +138,7 @@ export function mountMemoryView(el) {
     const next = e.target.value;
     if (dirty()) {
       e.target.value = mem.node;
-      showToast('先保存或取消正在改的那条', 'info');
+      showToast(saving() ? '正在保存，稍等' : '先保存或取消正在改的那条', 'info');
       return;
     }
     mem.node = next;
@@ -292,15 +296,24 @@ function paintBody() {
       '<button type="button" class="mem-row-h" data-mem="toggle" aria-expanded="false"><span class="mem-title">~/.claude/CLAUDE.md</span>' +
       '<span class="mem-tag">只读</span><span class="mem-desc">Planner 读；naozhi 拉起的会话不读</span></button><div class="mem-detail" hidden></div></div>');
   }
-  const recent = recentEntries();
-  if (recent.length) {
-    parts.push('<div class="mem-recent"><h3>最近 7 天</h3>' + recent.slice(0, RECENT_MAX).map((x) => rowHtml(x.g, x.e, true)).join('') +
-      (recent.length > RECENT_MAX ? '<div class="mem-more">还有 ' + (recent.length - RECENT_MAX) + ' 条</div>' : '') + '</div>');
-  }
+  parts.push('<div class="mem-recent" hidden></div>');
+  mem.recentBuilt = null;
   parts.push('<div class="mem-empty mem-none" hidden>这台机器上还没有记忆</div>');
   parts.push(mem.data.groups.map(groupHtml).join(''));
   body.innerHTML = parts.join('');
   applyFilter();
+}
+
+// recentHtml is the 最近 7 天 block's content from the data, '' when no
+// entry is recent. It is rebuilt rather than patched: a removed entry has left
+// the data, so the next one moves up into the shown ten and 还有 N 条 counts
+// down. Its rows never hold an open detail (a click opens the group's row),
+// so a rebuild loses nothing.
+function recentHtml() {
+  const recent = recentEntries();
+  if (!recent.length) return '';
+  return '<h3>最近 7 天</h3>' + recent.slice(0, RECENT_MAX).map((x) => rowHtml(x.g, x.e, true)).join('') +
+    (recent.length > RECENT_MAX ? '<div class="mem-more">还有 ' + (recent.length - RECENT_MAX) + ' 条</div>' : '');
 }
 
 // emptied is whether a group's last entry was removed here (it may still be
@@ -312,9 +325,15 @@ function emptied(g) {
 
 // applyFilter repaints what the rows imply: which rows and groups the filter
 // keeps, each group's head count (from the data, which a removed entry has
-// already left), an emptied group, an emptied 最近 7 天, and the empty state.
+// already left), an emptied group, 最近 7 天, and the empty state.
 function applyFilter() {
   if (!mem.root) return;
+  const recent = mem.root.querySelector('.mem-recent');
+  if (recent && mem.data) {
+    const html = recentHtml();
+    if (mem.recentBuilt !== html) { recent.innerHTML = html; mem.recentBuilt = html; }
+    recent.hidden = !html;
+  }
   const q = (mem.root.querySelector('.mem-filter').value || '').trim().toLowerCase();
   for (const row of mem.root.querySelectorAll('.mem-row')) {
     row.hidden = !!q && !(row.dataset.filter || '').includes(q) || row.classList.contains('mem-gone');
@@ -327,8 +346,6 @@ function applyFilter() {
     el.hidden = !!q && !el.querySelector('.mem-row:not([hidden])') || !!g && emptied(g);
     if (q && !el.hidden) el.open = true;
   }
-  const recent = mem.root.querySelector('.mem-recent');
-  if (recent) recent.hidden = !recent.querySelector('.mem-row:not(.mem-gone)');
   const none = mem.root.querySelector('.mem-none');
   if (none) none.hidden = !groups.every(emptied);
 }

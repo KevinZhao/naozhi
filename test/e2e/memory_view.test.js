@@ -276,6 +276,40 @@ test('delete: the last entry on the node leaves the empty state at once, 撤销 
   }
 });
 
+test('delete: 最近 7 天 moves the next entry up and counts 还有 N 条 down at once; 撤销 puts both back', async ({ page }) => {
+  const project = '-Users-me-workspace-many';
+  const entries = [];
+  const files = {};
+  for (let i = 0; i < 12; i++) {
+    const name = 'e' + i;
+    const at = iso(now - (i + 1) * 60000);
+    entries.push({ name, title: '条目' + i, type: 'project', snippet: name, modified: at, size: 10, version: 'v1', indexed: true });
+    files[project + '/' + name] = { project, name, title: '条目' + i, text: name + '\n', body: name + '\n', version: 'v1', modified: at, size: 10 };
+  }
+  const mock = await startMockServer({ memories: { writable: true, groups: [{ project, label: 'many', kind: 'workspace', modified: iso(now), entries }], files } });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await openSettings(page);
+    const recent = page.locator('#settings-memory .mem-recent');
+    const titles = (from, to) => Array.from({ length: to - from }, (_, i) => '条目' + (from + i));
+    await expect(recent.locator('.mem-row .mem-title')).toHaveText(titles(0, 10));
+    await expect(recent.locator('.mem-more')).toHaveText('还有 2 条');
+
+    const r = row(page, 'e0');
+    await r.locator('.mem-row-h').click();
+    await r.locator('[data-mem="delete"]').click();
+    await expect(recent.locator('.mem-row:visible .mem-title')).toHaveText(titles(1, 11), { timeout: 1000 });
+    await expect(recent.locator('.mem-more')).toHaveText('还有 1 条');
+
+    await page.locator('#mem-undo-toast button').click();
+    await expect(recent.locator('.mem-row:visible .mem-title')).toHaveText(titles(0, 10));
+    await expect(recent.locator('.mem-more')).toHaveText('还有 2 条');
+    expect(mock.memoryCalls).toEqual([]);
+  } finally {
+    mock.server.close();
+  }
+});
+
 // holdPut parks the PUTs of /api/memories/file until release(), then
 // answers with answer(route) (the mock by default).
 async function holdPut(page, answer) {
@@ -370,6 +404,36 @@ function remoteSessions() {
   };
   return s;
 }
+
+test('save: switching node while the PUT is out says to wait, not to save or cancel', async ({ page }) => {
+  const mock = await startMockServer({
+    ws: true, sessions: remoteSessions(), memories: memories(),
+    remote: { [NODE]: { planner: { enabled: true, stopped: false, key: 'planner:main', alive: true }, memories: memories() } },
+  });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await openSettings(page);
+    const pick = page.locator('#settings-memory select.mem-node');
+    await expect(pick.locator('option')).toHaveText(['本机', 'MBP']);
+    await pick.selectOption('local');
+    await expect(row(page, 'frankfurt-az')).toBeVisible();
+    const release = await holdPut(page);
+    const r = row(page, 'frankfurt-az');
+    await r.locator('.mem-row-h').click();
+    await r.locator('[data-mem="edit"]').click();
+    await r.locator('textarea.mem-edit').fill('---\nname: 法兰克福可用区\n---\n\n用 az3。\n');
+    await r.locator('[data-mem="save"]').click();
+    await expect(r.locator('.mem-note')).toHaveText('保存中…');
+    await pick.selectOption(NODE);
+    await expect(pick).toHaveValue('local');
+    await expect(page.locator('#toast')).toHaveText('正在保存，稍等');
+    release();
+    await expect(r.locator('.mem-note')).toHaveText('已保存');
+  } finally {
+    mock.server.close();
+  }
+});
 
 const VIEWPORTS = [
   { name: 'desktop', width: 1280, height: 800 },
