@@ -63,6 +63,9 @@ type rig struct {
 
 const dash = "dashboard:direct:u:general"
 
+// serverError is a failure's text of a class custody counts (ClassServer).
+const serverError = "API Error: 500 Internal error"
+
 func newRig(t *testing.T) *rig {
 	t.Helper()
 	dir := t.TempDir()
@@ -340,8 +343,9 @@ func TestLegacyPause(t *testing.T) {
 
 // A failure of a retryable class gets "继续" after 1, 2, 4, 8 minutes, the
 // next failure being a new one when the session was active again; the fifth
-// of a class is left to the user; one that is not retryable is the user's at
-// once, and a session that recovered drops its retry.
+// of a class is left to the user (a class custody waits out is not counted:
+// wait_test.go); one that is not retryable is the user's at once, and a
+// session that recovered drops its retry.
 func TestRetry(t *testing.T) {
 	failed := func(key string, class health.ErrorClass, evidence string, active time.Time) health.Unit {
 		return health.Unit{ID: key, Kind: health.KindSession, State: health.Failed, ErrClass: class, Evidence: evidence, LastActive: active}
@@ -349,9 +353,10 @@ func TestRetry(t *testing.T) {
 	t.Run("backoff then stop", func(t *testing.T) {
 		r := newRig(t)
 		r.dispatch("task:a")
+		r.failText["task:a"] = serverError
 		for i, wait := range Backoff {
 			active := r.now
-			r.units = []health.Unit{failed("task:a", health.ErrNetwork, "last turn ended in an API error", active)}
+			r.units = []health.Unit{failed("task:a", health.ErrOther, "last turn ended in an API error", active)}
 			r.progress["task:a"] = string(rune('a' + i))
 			if !r.e.Covers(r.units[0]) {
 				t.Fatalf("failure %d not covered", i+1)
@@ -370,7 +375,7 @@ func TestRetry(t *testing.T) {
 			}
 			r.now = r.now.Add(time.Minute)
 		}
-		r.units = []health.Unit{failed("task:a", health.ErrNetwork, "", r.now)}
+		r.units = []health.Unit{failed("task:a", health.ErrOther, "", r.now)}
 		if r.e.Covers(r.units[0]) {
 			t.Error("the fifth failure is covered")
 		}
@@ -381,14 +386,15 @@ func TestRetry(t *testing.T) {
 			t.Errorf("sent %d, want %d", len(r.sent), len(Backoff))
 		}
 		if it := r.inbox.items; len(it) != 1 || it[0].Source != "failed:task:a" || it[0].Title != "修 bug 托管已停" ||
-			it[0].Why != "托管重试了 4 次还是出错（网络断了）。发「继续」再试，或换个说法" {
+			it[0].Why != "托管重试了 4 次还是出错（服务端错误）。发「继续」再试，或换个说法" {
 			t.Errorf("inbox = %+v", r.inbox.items)
 		}
 	})
 	t.Run("recovered", func(t *testing.T) {
 		r := newRig(t)
 		r.dispatch("task:a")
-		r.units = []health.Unit{failed("task:a", health.ErrRegion, "", r.now)}
+		r.failText["task:a"] = serverError
+		r.units = []health.Unit{failed("task:a", health.ErrOther, "", r.now)}
 		r.e.Tick()
 		r.units = []health.Unit{{ID: "task:a", Kind: health.KindSession, State: health.Active}}
 		r.now = r.now.Add(time.Hour)
@@ -400,7 +406,8 @@ func TestRetry(t *testing.T) {
 	t.Run("restart keeps a due retry", func(t *testing.T) {
 		r := newRig(t)
 		r.dispatch("task:a")
-		r.units = []health.Unit{failed("task:a", health.ErrNetwork, "", r.now)}
+		r.failText["task:a"] = serverError
+		r.units = []health.Unit{failed("task:a", health.ErrOther, "", r.now)}
 		r.e.Tick()
 		r.open()
 		r.e.Tick() // the same failure: not counted again
@@ -409,7 +416,7 @@ func TestRetry(t *testing.T) {
 		if len(r.sent) != 1 {
 			t.Errorf("sent %v after a restart", r.sent)
 		}
-		if m, _ := r.sessions.Get("task:a"); m.Chain == nil || m.Chain.Errors["network"] != 1 {
+		if m, _ := r.sessions.Get("task:a"); m.Chain == nil || m.Chain.Errors[ClassServer] != 1 {
 			t.Errorf("chain = %+v", m.Chain)
 		}
 	})
@@ -593,8 +600,9 @@ func TestRetryLeftToUser(t *testing.T) {
 		r := newRig(t)
 		r.dispatch("task:a")
 		r.progress["task:a"] = "same"
+		r.failText["task:a"] = serverError
 		for i := range MaxIdle {
-			r.units = []health.Unit{failed("task:a", health.ErrNetwork, r.now, r.now)}
+			r.units = []health.Unit{failed("task:a", health.ErrOther, r.now, r.now)}
 			if !r.e.Covers(r.units[0]) {
 				t.Fatalf("failure %d not covered", i+1)
 			}
@@ -603,7 +611,7 @@ func TestRetryLeftToUser(t *testing.T) {
 			r.e.Tick()
 			r.now = r.now.Add(time.Minute)
 		}
-		u := failed("task:a", health.ErrNetwork, r.now, r.now)
+		u := failed("task:a", health.ErrOther, r.now, r.now)
 		r.units = []health.Unit{u}
 		if r.e.Covers(u) {
 			t.Error("a failure the lineage would stop at is covered")
@@ -614,7 +622,7 @@ func TestRetryLeftToUser(t *testing.T) {
 		}
 		it := r.inbox.items
 		if len(it) != 1 || it[0].Kind != notify.KindError || it[0].Source != "failed:task:a" ||
-			it[0].Why != "托管重试了 3 次还是出错（网络断了）。发「继续」再试，或换个说法" {
+			it[0].Why != "托管重试了 3 次还是出错（服务端错误）。发「继续」再试，或换个说法" {
 			t.Errorf("inbox = %+v", it)
 		}
 		if st := r.e.Status("task:a"); st.State != StateStopped {
