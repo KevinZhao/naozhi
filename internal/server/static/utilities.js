@@ -8,6 +8,7 @@ import { wsm } from './ws_manager.js';
 import { lsSet } from './platform.js';
 import { sid } from './session_ident.js';
 import { featureForBackend, pendingBackendID } from './features.js';
+import { followPane } from './scroll_follow.js';
 
 // --- Utilities ---
 
@@ -1140,35 +1141,11 @@ export function setActiveSessionCard(key, node) {
 export function getMsgValue(el) { return (el ? el.innerText : '').trim(); }
 export function setMsgValue(el, v) { if (el) el.innerText = v; }
 
-// stickEventsBottom forces the events pane to the last bubble and keeps it there
-// across the async layout tail — lazy-loaded images, mermaid diagrams, katex
-// formulas, and the "load earlier" button that inserts at the top after the
-// initial scrollTop assignment all change scrollHeight after the first paint.
-// Used by session-open flows where losing the bottom anchor would hide the
-// newest messages (the whole point of opening the session).
+// stickEventsBottom puts the events pane at its last bubble and has it follow
+// what comes after (scroll_follow.js): opening a session, the reader's own
+// send, a repaint with no reading position to go back to.
 export function stickEventsBottom() {
-  const el = document.getElementById('events-scroll');
-  if (!el) return;
-  el.scrollTop = el.scrollHeight;
-  requestAnimationFrame(() => {
-    el.scrollTop = el.scrollHeight;
-    requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
-  });
-  // Re-stick after each lazy-loaded image, but only while the user hasn't
-  // scrolled away from the bottom. Without this guard, a session opened
-  // seconds ago whose images are still loading will yank the viewport back
-  // to the bottom the moment any image finishes — even if the user has
-  // since scrolled up to read history (common on mobile/slow networks).
-  el.querySelectorAll('img').forEach(img => {
-    if (img.complete) return;
-    const restick = () => {
-      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 30) {
-        el.scrollTop = el.scrollHeight;
-      }
-    };
-    img.addEventListener('load', restick, { once: true });
-    img.addEventListener('error', restick, { once: true });
-  });
+  followPane(document.getElementById('events-scroll'));
 }
 
 // Read the data-time of the last event-time-divider in the scroll container so

@@ -22,6 +22,7 @@ import { HEALTH_STATES, esc, escAttr, evidenceCause, evidenceText, fetchJSON, nz
 import { wsm } from './ws_manager.js';
 import { formatTimeFull, formatTimeShort } from './utilities.js';
 import { isLocalNode, nodeAPI, nodeRunsPlanner } from './planner_host.js';
+import { notePane, settlePane } from './scroll_follow.js';
 
 // REPORT_REFETCH_MS: a turn's report reaches the Planner after the turn
 // ends, and reports are not pushed, so the list is fetched again this long
@@ -228,11 +229,10 @@ wsm.on(NZ_CONTRACT.WS.session_note, (msg) => {
   // Custody's notes, on any session, also change what custody.js shows.
   if (msg.note?.kind === 'custody') nzBus.dispatchEvent(new CustomEvent('custody:note', { detail: msg }));
   if (!msg.note || msg.key !== notes.key || !isLocalNode(notes.node) || !notes.el) return;
-  const el = notes.el;
-  const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+  notePane(notes.el);
   addNotes([msg.note]);
   placeNotes();
-  if (wasBottom) el.scrollTop = el.scrollHeight;
+  settlePane(notes.el);
 });
 
 // Frames pushed while the socket was down are lost: list again on a new one.

@@ -11,9 +11,10 @@ import { hydrateAskAnsweredFromHistory, lockRenderedAskCards } from './ask_card.
 import { runPendingAsync } from './render_md.js';
 import { processEventsForDisplay } from './file_refs.js';
 import { navRebuild, navSync } from './msg_nav.js';
-import { applyEventToTurnState, endStopping, idleTaskEvent, paintTurnElapsed, refreshBanner, resetTurnState, resetTurnStateForUserEcho, restoreScrollPos, saveScrollPos, scrollSlackPx, turnState, updateSendButton } from './running_banner.js';
+import { applyEventToTurnState, endStopping, idleTaskEvent, paintTurnElapsed, refreshBanner, resetTurnState, resetTurnStateForUserEcho, restoreScrollPos, saveScrollPos, turnState, updateSendButton } from './running_banner.js';
 import { markSendUnknown, refillUnsent, restoreSpawnFields, rollbackOptimisticRunning, settleSend } from './send_message.js';
 import { EARLIER_PAGE_LIMIT, EVENT_DIVIDER_GAP_MS, MAX_LIVE_DOM_EVENTS, lastDividerTime, stickEventsBottom, timeDividerHtml } from './utilities.js';
+import { notePane, settlePane } from './scroll_follow.js';
 import { isInternalEvent, sid } from './session_ident.js';
 import { isCronSessionFrozen } from './cron_state.js';
 import { registerShell } from './shell.js';
@@ -374,7 +375,7 @@ export function renderEvents(events, hasMore) {
 // omitted it) leaves the call to the length heuristic.
 function paintWholePane(el, events, display, hasMore) {
   if (drilledIn()) return;
-  const kept = keepReader(el);
+  keepReader(el);
   const html = renderEventsWithDividers(display, 0);
   // Decide "load earlier" BEFORE the all-internal placeholder so its copy never
   // invites a click on a button that won't appear: the server's has_more knows
@@ -408,7 +409,7 @@ function paintWholePane(el, events, display, hasMore) {
   if (showEarlier) ensureEarlierButton();
   runPendingAsync();
   navRebuild();
-  placeRepaint(el, kept);
+  placeRepaint();
   // Safety net: a blank page despite events → page back to real messages
   // (bounded by AUTO_PAGEBACK_MAX), for what the server's visible-aware read
   // can't cover (remote nodes, disk-exhausted sessions).
@@ -421,21 +422,16 @@ const drilledIn = () => !!nzViews.agent?.activeTaskID();
 
 // keepReader / placeRepaint bracket a whole-pane paint. A repaint of the session
 // on screen (a resubscribe, the REST full fetch; a switch paints an empty shell)
-// puts its reader back where they stand, but pins one who was at the bottom or a
-// teammate's new message, as appendEvents does — not this tab's echo, which
-// replaces an optimistic bubble. A hidden pane has no position to keep.
+// puts a reader who moved up back where they stand; one who was following, or
+// has no position kept, is at the bottom. A hidden pane has no position to keep.
 function keepReader(el) {
-  if (!el.querySelector('.event')) return null;
+  if (!el.querySelector('.event')) return;
   if (el.clientHeight) saveScrollPos(selection.key, selection.node);
   else delete perSession.scrollPos[sid(selection.key, selection.node)];
-  return { user: lastUserUuid(el), echo: !!el.querySelector('.optimistic-msg') };
 }
-function placeRepaint(el, kept) {
-  const user = lastUserUuid(el);
-  const teammate = kept && !kept.echo && user && user !== kept.user;
-  if (teammate || !restoreScrollPos(selection.key, selection.node)) stickEventsBottom();
+function placeRepaint() {
+  if (!restoreScrollPos(selection.key, selection.node)) stickEventsBottom();
 }
-const lastUserUuid = (el) => [...el.querySelectorAll(':scope > .event.user[data-uuid]')].pop()?.getAttribute('data-uuid') || '';
 
 // trimEventsScroll bounds the live DOM: drop oldest top children once the
 // scroller exceeds MAX_LIVE_DOM_EVENTS. Preserves a pinned "load earlier" button
@@ -477,21 +473,15 @@ function takeSendEcho() {
 export function appendEvents(events) {
   const el = document.getElementById('events-scroll');
   if (!el || drilledIn()) return;
+  notePane(el);
   const empty = el.querySelector('.empty-state');
   if (empty) empty.remove();
-  const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
   let prevT = lastDividerTime(el);
   // An ask_question followed by a user event inside this same batch must
   // render already locked (mirrors onHistory's pre-render hydrate).
   hydrateAskAnsweredFromHistory(events);
-  // Force-bottom when a teammate's "user" event arrives (IM channel): it must be
-  // visible even if scrolled up. The echo of this tab's send (it replaces the
-  // optimistic bubble) does not: the send pinned already, and a queued send
-  // echoes after the running turn's result, when the reader may be scrolled up.
-  let sawUser = false;
   events.forEach(e => {
     if (isInternalEvent(e)) return;
-    let echo = false;
     // Deduplicate: drop strictly-older events. Same-ms events are legitimate
     // siblings (thinking + text from one frame, two text blocks) and are only
     // dropped when their uuid is already on screen — same rule as onHistory.
@@ -507,7 +497,7 @@ export function appendEvents(events) {
         if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
         return;
       }
-      echo = takeSendEcho();
+      takeSendEcho();
       // Lock cards already on screen before this user bubble is appended.
       lockRenderedAskCards(el, e);
     }
@@ -519,13 +509,11 @@ export function appendEvents(events) {
     el.insertAdjacentHTML('beforeend', h);
     if (t) prevT = t;
     if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
-    if (e.type === 'user' && !echo) sawUser = true;
   });
   // Bound the live DOM before scroll/scan so a long streaming session can't
   // grow #events-scroll without limit and OOM the tab.
   trimEventsScroll(el);
-  if (sawUser) stickEventsBottom();
-  else if (wasBottom) el.scrollTop = el.scrollHeight;
+  settlePane(el);
   runPendingAsync();
   navSync();
 }
@@ -547,14 +535,11 @@ function renderInitialHistory(el, msg, events, display) {
 // what an earlier frame already painted.
 function appendHistoryBackfill(el, display) {
   if (drilledIn()) return;
-  const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+  notePane(el);
   // Remove stale "no events yet" before processing incremental events
   const emptyEl = el.querySelector('.empty-state');
   if (emptyEl) emptyEl.remove();
   let prevT = lastDividerTime(el);
-  // Force-bottom on a teammate's "user" event, not on this tab's own echo —
-  // the same rule as appendEvents.
-  let sawUser = false;
   display.forEach(e => {
     // Strictly-older events were rendered by an earlier frame. Same-ms
     // events must NOT be dropped on time alone: one CLI frame's blocks
@@ -578,7 +563,7 @@ function appendHistoryBackfill(el, display) {
         if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
         return;
       }
-      if (!takeSendEcho()) sawUser = true;
+      takeSendEcho();
       lockRenderedAskCards(el, e);
     }
     const h = eventHtml(e);
@@ -593,10 +578,9 @@ function appendHistoryBackfill(el, display) {
     if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
   });
   // Bound the live DOM on the incremental WS history path too;
-  // mirror appendEvents — trim before the scrollHeight reads below.
+  // mirror appendEvents — trim before the pane settles.
   trimEventsScroll(el);
-  if (sawUser) stickEventsBottom();
-  else if (wasBottom) el.scrollTop = el.scrollHeight;
+  settlePane(el);
   runPendingAsync();
   navSync();
 }
@@ -702,17 +686,16 @@ function patchHeaderTitle(ev) {
 }
 
 // appendLiveEvent appends a pushed event's bubble: a user replay is dropped by
-// uuid, then the time divider, the cursor, the DOM cap and the scroll stick.
+// uuid, then the time divider, the cursor, the DOM cap and the pane settling.
 function appendLiveEvent(ev) {
   const html = eventHtml(ev);
   if (!html) return;
   const el = document.getElementById('events-scroll');
   if (!el) return;
+  notePane(el);
   const empty = el.querySelector('.empty-state');
   if (empty) empty.remove();
-  const isUser = ev.type === 'user';
-  let echo = false;
-  if (isUser) {
+  if (ev.type === 'user') {
     // uuid idempotency (user bubbles only): a duplicate push or a re-subscribe
     // replay must not paint the same user message twice; advance the cursor so
     // the time-gated onHistory path stays consistent. User-only by design:
@@ -723,12 +706,8 @@ function appendLiveEvent(ev) {
       return;
     }
     // First arrival of the real user event: drop the optimistic placeholder.
-    echo = takeSendEcho();
+    takeSendEcho();
   }
-  // An 80px slack band so a small natural scroll doesn't leave auto-stick.
-  // A teammate's user event always pins; AI chunks, results and this tab's own
-  // echo stick only in the band, so reading earlier history keeps its position.
-  const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - scrollSlackPx;
   const prevT = lastDividerTime(el);
   const evT = ev.time || 0;
   if (evT && (prevT === 0 || evT - prevT >= EVENT_DIVIDER_GAP_MS)) {
@@ -740,10 +719,9 @@ function appendLiveEvent(ev) {
   if (evT && evT > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = evT;
   // Bound the live DOM so a long streaming session over the WS push path
   // can't grow #events-scroll without limit and OOM the tab. Must run
-  // before the scrollHeight reads below, matching appendEvents.
+  // before the pane settles, matching appendEvents.
   trimEventsScroll(el);
-  if (isUser && !echo) stickEventsBottom();
-  else if (wasBottom) el.scrollTop = el.scrollHeight;
+  settlePane(el);
   runPendingAsync();
   if (ev.type === 'user') navSync();
 }

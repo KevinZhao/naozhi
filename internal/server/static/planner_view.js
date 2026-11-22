@@ -64,6 +64,7 @@ import { workbench } from './workbench.js';
 import { choosePlannerNode, eventsURL, hostName, hostOnline, hostRemote, isLocalNode, nodeAPI, notePlannerNodes, plannerAPI, plannerHost, plannerNodes, readLocalPlanner } from './planner_host.js';
 import { WS_STATES, wsm } from './ws_manager.js';
 import { shell } from './shell.js';
+import { followPane, notePane, placedPane, settlePane } from './scroll_follow.js';
 import { EARLIER_PAGE_LIMIT, EVENT_DIVIDER_GAP_MS, formatAbsTime, formatMonthDayTime, lastDividerTime, timeAgo, timeDividerHtml } from './utilities.js';
 import { answerOf, endHtml, layerMode, layerStream, markerHtml, noteRunning, paintLayerSwitch, plannerBusy, plannerHead, setOnLayerChange } from './planner_layers.js';
 
@@ -721,7 +722,7 @@ function placeBriefs() {
   const box = $('pl-stream');
   const scroller = $('pl-events');
   if (!box || !scroller) return;
-  const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 40;
+  notePane(scroller);
   let placed = false;
   for (const b of pl.briefs.slice().reverse()) {
     const t = Date.parse(b.at);
@@ -736,7 +737,7 @@ function placeBriefs() {
   paintStreamEmpty();
   relayer();
   runPendingAsync();
-  if (atBottom) scroller.scrollTop = scroller.scrollHeight;
+  settlePane(scroller);
   revealBrief();
 }
 
@@ -755,6 +756,8 @@ function revealBrief() {
   pl.briefOpen.set(day, true);
   pl.revealed = day;
   el.scrollIntoView({ block: 'start' });
+  // The reader is on the brief now: what arrives below does not take them off it.
+  placedPane($('pl-events'));
   light(el, sel, id);
 }
 
@@ -990,7 +993,7 @@ function appendEvents(events, reset) {
   const box = $('pl-stream');
   const scroller = $('pl-events');
   if (!box || !scroller) return;
-  const atBottom = reset || scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 40;
+  notePane(scroller);
   if (reset) { pl.lastTime = 0; pl.seenAtWM.clear(); }
   const ack = events.find(isAck);
   if (ack) {
@@ -1015,7 +1018,10 @@ function appendEvents(events, reset) {
   paintStreamEmpty();
   relayer();
   runPendingAsync();
-  if (atBottom) scroller.scrollTop = scroller.scrollHeight;
+  // A first page opens at the newest; after it the pane follows until its
+  // reader scrolls up (scroll_follow.js).
+  if (reset) followPane(scroller);
+  else settlePane(scroller);
   // After the scroll: a brief a push asked for scrolls to itself.
   if (reset) placeBriefs();
   // A first page shorter than the stream leaves nothing to scroll up by.
@@ -1184,6 +1190,7 @@ function prependEvents(events) {
   const moved = anchor !== null && revealedEl();
   if (moved) scroller.scrollTop += moved.getBoundingClientRect().top - anchor;
   else scroller.scrollTop = scroller.scrollHeight - fromBottom;
+  placedPane(scroller);
 }
 
 function revealedEl() {
@@ -1392,8 +1399,7 @@ wsm.on(NZ_CONTRACT.WS.session_state, (msg) => {
 setOnLayerChange(() => {
   if (!pl.host) return;
   relayer();
-  const scroller = $('pl-events');
-  if (scroller) scroller.scrollTop = scroller.scrollHeight;
+  followPane($('pl-events'));
 });
 
 registerActions({
