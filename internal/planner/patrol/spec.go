@@ -86,27 +86,33 @@ func sessionOpts(dir string, ownSettings bool) sessionview.AgentOpts {
 	}
 }
 
-// knownInPrompt caps the findings on record a deep check is shown.
+// knownInPrompt caps the findings on record a deep check is shown, and
+// those the user turned down.
 const knownInPrompt = 50
 
 // stateWords names a record's state in the prompt.
 var stateWords = map[string]string{
 	StateNew: "已报", StateTold: "已报", StateItem: "已记为未了事项", StateAsked: "已问用户",
 	StateDispatched: "已派任务在修", StatePR: "已有 PR", StateMerged: "已修（PR 已合并）", StateClosed: "PR 已关闭、没合并",
+	StateDoing: "用户说了做",
 }
 
 // prompt is the deep check session's one message: what to look for, what is
 // already covered or reported, and the output contract. bash is whether it
 // has git's and gh's reads; known the workspace's findings on record, the
-// latest seen first.
-func prompt(now time.Time, name string, bash bool, known []Record) string {
+// latest seen first; declined what the user turned down, of which workspace
+// ws's part is shown (§15.23 ④): the findings by ID and title, the latest
+// first, and the kinds no longer wanted.
+func prompt(now time.Time, name string, bash bool, known []Record, declined Declined, ws string) string {
 	tools := "Read / Grep / Glob"
 	history := "先读 CLAUDE.md / README（有的话）了解约定，再挑最近改动多、最要紧的地方按需深入。"
 	if bash {
 		tools += "，以及 git、gh 的只读命令（git log / show / diff / status / blame / grep，gh pr / issue / run 的 view 与 list）"
 		history = "先读 CLAUDE.md / README（有的话）了解约定，再看最近两周的提交（git log --since=\"2 weeks ago\"）和它们动过的地方，最后按需深入。"
 	}
-	known = slices.Clone(known)
+	// One turned down is on the list below while it is, and may be
+	// reported again once it is not.
+	known = slices.DeleteFunc(slices.Clone(known), func(r Record) bool { return r.State == StateDeclined })
 	slices.SortStableFunc(known, func(a, b Record) int { return b.Seen.Compare(a.Seen) })
 	var seen strings.Builder
 	for _, r := range known[:min(len(known), knownInPrompt)] {
@@ -114,6 +120,26 @@ func prompt(now time.Time, name string, bash bool, known []Record) string {
 	}
 	if seen.Len() == 0 {
 		seen.WriteString("（还没有）")
+	}
+	turned := slices.DeleteFunc(slices.Clone(declined.Findings), func(f DeclinedFinding) bool { return f.Workspace != ws })
+	slices.SortStableFunc(turned, func(a, b DeclinedFinding) int { return b.At.Compare(a.At) })
+	var no strings.Builder
+	for _, f := range turned[:min(len(turned), knownInPrompt)] {
+		// The file is edited by hand: an entry is shown at a finding's size.
+		fmt.Fprintf(&no, "\n- %s · %s", clip(fold(f.ID), titleCap), clip(fold(f.Title), titleCap))
+	}
+	if no.Len() == 0 {
+		no.WriteString("（还没有）")
+	}
+	var muted []string
+	for _, k := range kinds {
+		if declined.kind(ws, k) {
+			muted = append(muted, k)
+		}
+	}
+	noKinds := "（没有）"
+	if len(muted) > 0 {
+		noKinds = strings.Join(muted, "、")
 	}
 	return fmt.Sprintf(`你是 naozhi 的项目巡查会话：只读地检查这个仓库，找出值得用户处理的问题，交给 Planner。
 现在是 %s。工作区：%q，你就在它的目录里。
@@ -130,10 +156,15 @@ func prompt(now time.Time, name string, bash bool, known []Record) string {
   stale：过期的 TODO / FIXME、废弃却还留着的开关与分支。
 - 这些已经由每小时的确定性检查覆盖，不要报：没提交的改动、推了没合的分支、停着的 PR、默认分支的 CI、没动的 issue。
 - 已经报过的（下面列着 id、标题与现状）：还在的同一件事用同一个 id 再报一次；已修、已有 PR 的不用再报。
+- 用户说了不做的（下面列着 id 与标题）：同一件事不要再报，换一个 id、换一种说法也不要。用户不要再提的类别：整类都不报。
 - 最多 %d 条，宁少勿滥；没有值得报的，findings 写 []。
 - 输出前逐条复核：重新打开 evidence 指的那一行，确认问题还在、你的描述对得上；复现不了、证据打不开的不报。
 
 已报过的：%s
+
+用户说了不做的：%s
+
+用户不要再提的类别：%s
 
 只输出一个 JSON 对象，不要任何其他文字，不要代码块：
 {"findings":[{"id":"…","title":"…","kind":"bug | risk | debt | doc | stale","evidence":["相对路径:行号"],"impact":"…","fix":"…","size":"S | M | L","reversible":true,"confidence":"high | medium | low"}]}
@@ -142,5 +173,5 @@ title 不超过 %d 字。evidence 1–%d 条，每条是"相对路径:行号"（
 impact 说不改会怎样（不超过 %d 字）；fix 说建议怎么改（不超过 %d 字）。
 size：S 是一个小 PR（几十行内、一两个文件）；M 是一个像样的 PR；L 要拆。reversible：改了能用一次 revert 撤回、不动数据与对外接口为 true。
 confidence：你复核过、能复现或能从代码直接看出为 high；有合理依据但没验证为 medium；推测为 low。`,
-		now.Format(time.RFC3339), fold(name), tools, history, MaxFindings, seen.String(), titleCap, maxEvidence, impactRunes, fixRunes)
+		now.Format(time.RFC3339), fold(name), tools, history, MaxFindings, seen.String(), no.String(), noKinds, titleCap, maxEvidence, impactRunes, fixRunes)
 }

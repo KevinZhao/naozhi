@@ -27,8 +27,8 @@ const (
 	deepDir       = "deep"
 	stateVersion  = 1
 	maxStateBytes = 4 << 20
-	// recordKeep is how long a finding that is over (merged, closed) stays
-	// on record after it was last seen.
+	// recordKeep is how long a finding that is over (merged, closed, turned
+	// down) stays on record after it was last seen.
 	recordKeep = 90 * day
 	// MaxOpenTasks is how many tasks the patrol dispatched may be going in
 	// one workspace at a time; MaxSurfaced how many findings a day are put
@@ -56,6 +56,13 @@ const (
 	// without a merge.
 	StateMerged = "merged"
 	StateClosed = "closed"
+	// StateDoing is one the user said to do, the Planner told and no task
+	// started yet.
+	StateDoing = "doing"
+	// StateDeclined is one the user turned down, by itself, with its kind
+	// or with its workspace (declined.go). Reported again once nothing in
+	// declined.json covers it any more, it starts over as new.
+	StateDeclined = "declined"
 )
 
 // The states of a deep run.
@@ -74,6 +81,9 @@ var (
 	ErrDailyCap = fmt.Errorf("今天提到用户面前的巡查事项已有 %d 条", MaxSurfaced)
 	// ErrState is the records unreadable: nothing is judged on a guess.
 	ErrState = errors.New("巡查的记录读不了")
+	// ErrTurnedDown is a finding the user turned down, brought up again in
+	// a turn with none of their words.
+	ErrTurnedDown = errors.New("用户已对这条发现选了不做（或停了它这一类、这个工作区的巡查）")
 )
 
 // Record is a finding on record: what the deep check reported, and what
@@ -96,9 +106,19 @@ type Record struct {
 	Item string `json:"item,omitempty"`
 	PR   string `json:"pr,omitempty"`
 	CI   string `json:"ci,omitempty"`
+	// Ready is when that pull request was first reported.
+	Ready time.Time `json:"ready,omitzero"`
 	// Surfaced is when it was last put in front of the user in a turn that
 	// had none of their words: what the daily cap counts.
 	Surfaced time.Time `json:"surfaced,omitzero"`
+	// Disposed is when the user settled it (said do it or do not, took an
+	// option of a question about it, merged or closed its pull request) and
+	// Adopted whether that was a yes: what a kind's share of findings taken
+	// is counted from. Tallied marks one already counted towards a stop of
+	// its kind, which a later count leaves out.
+	Disposed time.Time `json:"disposed,omitzero"`
+	Adopted  bool      `json:"adopted,omitempty"`
+	Tallied  bool      `json:"tallied,omitempty"`
 }
 
 // DeepRun is one deep check as recorded.
@@ -176,7 +196,7 @@ func (p *Patrol) loadDeep(ws string) (deepState, error) {
 func (p *Patrol) saveDeep(st deepState, now time.Time) error {
 	st.V = stateVersion
 	st.Findings = slices.DeleteFunc(slices.Clone(st.Findings), func(r Record) bool {
-		return (r.State == StateMerged || r.State == StateClosed) && now.Sub(r.Seen) > recordKeep
+		return (r.State == StateMerged || r.State == StateClosed || r.State == StateDeclined) && now.Sub(r.Seen) > recordKeep
 	})
 	if st.Findings == nil {
 		st.Findings = []Record{}
@@ -195,9 +215,13 @@ func (p *Patrol) saveDeep(st deepState, now time.Time) error {
 // editDeep changes ws's record under the lock: edit reports whether it
 // changed anything to write. A record that cannot be read is not edited.
 func (p *Patrol) editDeep(ws string, edit func(st *deepState) bool) error {
-	now := p.cfg.Now()
 	p.deepMu.Lock()
 	defer p.deepMu.Unlock()
+	return p.editDeepLocked(ws, p.cfg.Now(), edit)
+}
+
+// editDeepLocked is editDeep for a caller that holds deepMu.
+func (p *Patrol) editDeepLocked(ws string, now time.Time, edit func(st *deepState) bool) error {
 	st, err := p.loadDeep(ws)
 	if err != nil {
 		return err
@@ -341,6 +365,8 @@ func (p *Patrol) CanDispatch(ref string, unasked bool) (ws string, err error) {
 		return "", fmt.Errorf("这条发现已有 PR %s", r.PR)
 	case r.State == StateMerged || r.State == StateClosed:
 		return "", errors.New("这条发现的 PR 已经合并或关闭")
+	case r.State == StateDeclined:
+		return "", ErrTurnedDown
 	}
 	if n := p.openTasks(st); n >= MaxOpenTasks {
 		return "", fmt.Errorf("这个工作区巡查派出的任务已有 %d 个在做（上限 %d）", n, MaxOpenTasks)
@@ -398,6 +424,9 @@ func (p *Patrol) Reported(ref, task, state string, prs []string) {
 		if link == "" {
 			return false
 		}
+		if r.State != StatePR {
+			r.Ready = p.cfg.Now()
+		}
 		r.State, r.PR, r.Pending = StatePR, link, false
 		text := clip(fmt.Sprintf("已备好 PR #%d：%s", n, r.Title), front.ItemRunes)
 		if r.Item != "" {
@@ -437,10 +466,13 @@ func (p *Patrol) Surface(ref, kind string, unasked bool) error {
 			}
 		}
 	}
-	found, capped := false, false
+	found, capped, turned := false, false, false
 	err := p.editDeep(ws, func(st *deepState) bool {
 		r := st.find(id)
 		if found = r != nil; !found {
+			return false
+		}
+		if turned = unasked && r.State == StateDeclined; turned {
 			return false
 		}
 		if unasked && !sameDay(r.Surfaced, now) && today >= MaxSurfaced {
@@ -461,6 +493,8 @@ func (p *Patrol) Surface(ref, kind string, unasked bool) error {
 		return err
 	case !found:
 		return ErrNoFinding
+	case turned:
+		return ErrTurnedDown
 	case capped:
 		return ErrDailyCap
 	}

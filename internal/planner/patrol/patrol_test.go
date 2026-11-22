@@ -510,8 +510,10 @@ func TestPrune(t *testing.T) {
 	e := newEnv(t)
 	gateway(e)
 	e.round()
-	for _, name := range []string{"declined.json", "ws_zzzzzzz9.md", "notes.md"} {
-		if err := os.WriteFile(filepath.Join(e.cfg.Dir, name), []byte("x"), 0o600); err != nil {
+	// declined.json is read by every round: one that did not parse would
+	// stop them.
+	for name, body := range map[string]string{"declined.json": `{"v":1}`, "ws_zzzzzzz9.md": "x", "notes.md": "x"} {
+		if err := os.WriteFile(filepath.Join(e.cfg.Dir, name), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}

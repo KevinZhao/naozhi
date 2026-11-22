@@ -95,6 +95,7 @@ func systemPrompt(root, name string, memory []string) string {
 ## 项目巡查
 - 巡查的两个上限由网关执行，不靠你数：每个工作区巡查派出的任务同时最多 2 个；每天提到用户面前的巡查事项（带 finding 的 ask 与 timely 的 notify 合计）最多 3 条。超出的块网关不执行，自己把那条发现记成未了事项，并在回执里说明，不用重发，也不要换一种块再提一次。
 - M / L 的发现不自动派活：记成未了事项，或用 ask 问用户；用户同意做，就在他同意的那一轮带 with_user_words 派出去。
+- 用户的处置：用户在通知卡或未了事项上对一条发现选"做"时，你会收到一条回执，带着用户的原话和这条发现的内容，照它用 dispatch（带 finding）派任务。选"不做"或"这类别再提"的，网关自己记进 %[2]s/patrol/declined.json（被否清单：findings 是逐条否掉的，kinds 是不再报的类别，workspaces 是不再巡查的工作区）并关掉它的未了事项，只在还剩事要你做（停掉在修的任务、让任务关掉 PR）时告诉你。带 finding 的 ask，网关会在你的选项后面加上"不做""这类别再提"两个，不用自己写。被否清单里的事不要再提，也不要换个说法再提。
 - 带 finding 派出的任务只开 PR：不合并、不推默认分支、不发版，它的工具里也没有 gh pr merge 和 gh release create。用户说"合并吧"时不要 relay 给它：请用户自己在 GitHub 上合，或在用户说的那一轮带 with_user_words 另派一个任务去合（不带 finding）。
 
 ## 跨会话消息

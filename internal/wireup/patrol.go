@@ -16,6 +16,7 @@ import (
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/action"
 	"github.com/naozhi/naozhi/internal/planner/agent"
+	"github.com/naozhi/naozhi/internal/planner/brief"
 	"github.com/naozhi/naozhi/internal/planner/journal"
 	"github.com/naozhi/naozhi/internal/planner/note"
 	"github.com/naozhi/naozhi/internal/planner/patrol"
@@ -266,5 +267,53 @@ func PatrolTaskOpen(tasks *task.Board) func(key string) bool {
 func PatrolAlarm(n *notify.Notifier) func(source, title, why string) {
 	return func(source, title, why string) {
 		n.Add(notify.Item{Kind: notify.KindError, Level: notify.LevelTimely, Source: source, Title: title, Why: why})
+	}
+}
+
+// PatrolAnswer is patrol.Config.Answer over the Planner: what the user
+// chose about a finding, as a turn they started whose words are the choice
+// (agent.Agent.TellAnswer), so a dispatch that follows is theirs.
+func PatrolAnswer(a *agent.Agent, now func() time.Time) func(text, question, words string) error {
+	if now == nil {
+		now = time.Now
+	}
+	return func(text, question, words string) error {
+		return a.TellAnswer(text, agent.Words{Text: words, Question: question, At: now()})
+	}
+}
+
+// PatrolCloseCards is patrol.Config.CloseCards: the open cards in "通知"
+// about a finding — the notice of its pull request, the Planner's questions
+// about it — close as settled elsewhere, why saying how. The card being
+// answered right now is left to its answer (notify.ErrPending).
+func PatrolCloseCards(n *notify.Notifier) func(ref, why string) {
+	return func(ref, why string) {
+		open, _ := n.List(0)
+		for _, it := range open {
+			if patrol.CardRef(it) == ref || action.AskFinding(it) == ref {
+				if err := n.Expire(it.ID, why); err != nil && !errors.Is(err, notify.ErrPending) && !errors.Is(err, notify.ErrClosed) {
+					slog.Warn("planner patrol: a finding's card not closed", "finding", ref, "err", err)
+				}
+			}
+		}
+	}
+}
+
+// BriefProjects is brief.Config.Projects over the patrol: its part of the
+// morning brief, in the brief's own types.
+func BriefProjects(p *patrol.Patrol) func(since time.Time) brief.ProjectPatrol {
+	return func(since time.Time) brief.ProjectPatrol {
+		rep := p.Brief(since)
+		var out brief.ProjectPatrol
+		for _, pr := range rep.PRs {
+			out.PRs = append(out.PRs, brief.ProjectPR{Title: pr.Title, URL: pr.URL, CI: pr.CI, Workspace: pr.Workspace, Fresh: pr.Fresh})
+		}
+		for _, f := range rep.New {
+			out.New = append(out.New, brief.ProjectFinding{Title: f.Title, Kind: f.Kind, Workspace: f.Workspace})
+		}
+		for _, k := range rep.Stopped {
+			out.Stopped = append(out.Stopped, brief.ProjectStopped{Kind: k.Kind, Adopted: k.Adopted, Of: k.Of})
+		}
+		return out
 	}
 }

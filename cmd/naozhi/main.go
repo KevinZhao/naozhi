@@ -595,6 +595,37 @@ func main() {
 	})
 	plannerAgent.SetTaskIndex(wireup.PlannerTaskIndex(tasks, digests))
 	plannerAgent.SetRoutines(wireup.PlannerRoutineList(scheduler))
+	// The project patrol (§15.23, D142). Its deterministic checks: hourly,
+	// with no model, over the workspaces that had a session in the last 7
+	// days; its hits are open items of the ledger. Its deep check: once a
+	// week per workspace, a one-shot read-only session whose new findings
+	// wake the Planner, which sorts them; the caps on what comes of them
+	// are the patrol's. It follows the one pause and stays off on an
+	// isolated instance, as the scout does.
+	patroller := patrol.New(patrol.Config{
+		Dir:         sessionLayout.PlannerPatrolRoot(),
+		Workspaces:  plannerState.Workspaces.LocalDirs,
+		Active:      wireup.PatrolActive(plannerState.Journal, nil, wireup.PatrolOwnTask(sidecars)),
+		Items:       fronts,
+		Worktrees:   wireup.PatrolWorktrees(sidecars),
+		Routines:    wireup.PatrolRoutines(scheduler, plannerState.Workspaces),
+		Self:        wireup.PatrolSelf(plannerState.Journal),
+		PausedUntil: notifier.PausedUntil,
+		Isolated:    isolated,
+		Session:     wireup.PatrolSession(router),
+		Wake:        wireup.PatrolWake(plannerAgent),
+		// Bash for git and gh only where the session settings are naozhi's
+		// own, as for the Planner.
+		OwnSettings: naozhiSettingsFile != "",
+		TaskOpen:    wireup.PatrolTaskOpen(tasks),
+		Alarm:       wireup.PatrolAlarm(notifier),
+		Ctx:         ctx,
+		// The user's say on a finding (§15.23 ④): "做" reaches the Planner
+		// as their words, a finding settled closes its cards.
+		Answer:     wireup.PatrolAnswer(plannerAgent, nil),
+		CloseCards: wireup.PatrolCloseCards(notifier),
+	})
+	notifier.HandleDecisions(patrol.Handler, patroller.DecideCard)
 	briefer := brief.New(brief.Config{
 		Journal: plannerState.Journal,
 		Health:  func() health.Snapshot { return healthMon.Snapshot() },
@@ -614,10 +645,13 @@ func main() {
 		Parked:       plannerAgent.Parked,
 		// The brief leads with the lines of work; the Planner brings the
 		// ledger up to date first (§15.18, D133).
-		Fronts:  fronts.Open,
-		Items:   fronts.Items,
-		Tidy:    wireup.BriefTidy(plannerAgent),
-		Tidying: plannerAgent.Tidying,
+		Fronts: fronts.Open,
+		Items:  fronts.Items,
+		// The patrol's section comes after them (§15.23 ⑤).
+		Projects:        wireup.BriefProjects(patroller),
+		ProjectsBriefed: patroller.Briefed,
+		Tidy:            wireup.BriefTidy(plannerAgent),
+		Tidying:         plannerAgent.Tidying,
 		// With several nodes the scout's node sends the brief, each node's
 		// Planner covering its own sessions (docs/rfc/remote-planner.md §2.1).
 		Elsewhere: func() bool { return multiNode(cfg) && !scouter.Enabled() },
@@ -683,32 +717,6 @@ func main() {
 		progressNotes = wireup.ProgressNotes(notes, router, watched)
 	}
 
-	// The project patrol (§15.23, D142). Its deterministic checks: hourly,
-	// with no model, over the workspaces that had a session in the last 7
-	// days; its hits are open items of the ledger. Its deep check: once a
-	// week per workspace, a one-shot read-only session whose new findings
-	// wake the Planner, which sorts them; the caps on what comes of them
-	// are the patrol's. It follows the one pause and stays off on an
-	// isolated instance, as the scout does.
-	patroller := patrol.New(patrol.Config{
-		Dir:         sessionLayout.PlannerPatrolRoot(),
-		Workspaces:  plannerState.Workspaces.LocalDirs,
-		Active:      wireup.PatrolActive(plannerState.Journal, nil, wireup.PatrolOwnTask(sidecars)),
-		Items:       fronts,
-		Worktrees:   wireup.PatrolWorktrees(sidecars),
-		Routines:    wireup.PatrolRoutines(scheduler, plannerState.Workspaces),
-		Self:        wireup.PatrolSelf(plannerState.Journal),
-		PausedUntil: notifier.PausedUntil,
-		Isolated:    isolated,
-		Session:     wireup.PatrolSession(router),
-		Wake:        wireup.PatrolWake(plannerAgent),
-		// Bash for git and gh only where the session settings are naozhi's
-		// own, as for the Planner.
-		OwnSettings: naozhiSettingsFile != "",
-		TaskOpen:    wireup.PatrolTaskOpen(tasks),
-		Alarm:       wireup.PatrolAlarm(notifier),
-		Ctx:         ctx,
-	})
 	routing := buildRouting(cfg, agents, projectMgr, scheduler)
 	// The options of the sessions the Planner dispatches: at dispatch, and
 	// rebuilt from their sidecar when one respawns from the dashboard.

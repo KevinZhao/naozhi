@@ -119,6 +119,16 @@ type Config struct {
 	// Ctx bounds the deep checks' sessions; nil is Background. Stop cuts
 	// them as well.
 	Ctx context.Context
+	// Answer tells the Planner what the user chose about a finding, as a
+	// turn the user started whose words are the choice (words, in answer to
+	// question): the Planner may dispatch on it (agent.Agent.TellAnswer).
+	// nil reaches nobody: a finding turned down stands all the same, one
+	// to be done is refused (ErrPlanner).
+	Answer func(text, question, words string) error
+	// CloseCards closes the cards in "通知" about a finding, saying why
+	// (wireup.PatrolCloseCards): it was turned down, or its pull request is
+	// over. nil closes none.
+	CloseCards func(ref, why string)
 }
 
 // Session runs one deep check: key's session started with opts and sent
@@ -184,18 +194,22 @@ type Patrol struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 
-	// deepMu guards the deep checks' records on disk (deep/*.json), each
-	// change a read, an edit and a write under it, and the three fields
-	// below. Four goroutines come here: a deep check's, the round's, the
-	// action runner's and a request's. Nothing slow runs under it (no
-	// session, no gh, no wake); the ledger is written under it (deepMu,
-	// then front.Store's lock), and the ledger never calls back.
+	// deepMu guards the deep checks' records on disk (deep/*.json) and
+	// declined.json, each change a read, an edit and a write under it, and
+	// the fields below. Four goroutines come here: a deep check's, the
+	// round's, the action runner's and a request's. Nothing slow runs
+	// under it (no session, no gh, no wake, no telling the Planner, no
+	// card closed); the ledger is written under it (deepMu, then
+	// front.Store's lock), and the ledger never calls back.
 	deepMu sync.Mutex
 	// deepRunning is the deep check in flight: one at a time.
 	deepRunning bool
 	// sending are the findings (by ref) a wake of this process still has
 	// to submit: a round does not hand them over a second time.
 	sending map[string]bool
+	// declinedAlarmed says declined.json was unreadable at the last look,
+	// and the user was told.
+	declinedAlarmed bool
 	// deepCtx bounds the deep checks' sessions, cut by Stop; runs are the
 	// ones in flight, for Stop to wait on.
 	deepCtx    context.Context
@@ -285,9 +299,10 @@ func (p *Patrol) Stop() {
 	}
 }
 
-// Round makes one round now, unless one is in flight or pushes and custody
-// are paused: a paused round looks at nothing, writes nothing and leaves
-// every item as it is. A panic ends the round, not the process.
+// Round makes one round now, unless one is in flight, pushes and custody
+// are paused, or declined.json does not read: such a round looks at
+// nothing, writes nothing and leaves every item as it is. A panic ends the
+// round, not the process.
 func (p *Patrol) Round(ctx context.Context) {
 	if !p.Enabled() || !p.mu.TryLock() {
 		return
@@ -305,14 +320,20 @@ func (p *Patrol) Round(ctx context.Context) {
 			return
 		}
 	}
-	p.checks(ctx, now)
+	// What the user turned down decides what is looked at (§15.23 ④): not
+	// knowing it, the round looks at nothing.
+	declined, err := p.readDeclined()
+	if err != nil {
+		return
+	}
+	p.checks(ctx, now, declined)
 	if ctx.Err() != nil {
 		return
 	}
 	// The deep checks ride the hourly round (§15.23 ②): what became of
 	// the findings handed on is looked at, then the check due is started.
 	p.follow(ctx)
-	p.deep(ctx, now)
+	p.deep(ctx, now, declined)
 }
 
 // round is what one round shares between its workspaces.
@@ -332,8 +353,9 @@ type round struct {
 // checks makes the deterministic checks of one round: the files and items
 // of workspaces no longer registered go first, so what another workspace
 // still finds is filed again in the same round; then each workspace in
-// scope, then the standing tasks and naozhi's own week.
-func (p *Patrol) checks(ctx context.Context, now time.Time) {
+// scope the user has not taken out of the patrol, then the standing tasks
+// and naozhi's own week.
+func (p *Patrol) checks(ctx context.Context, now time.Time, declined Declined) {
 	if err := datadir.EnsureDir(p.cfg.Dir); err != nil {
 		slog.Warn("planner patrol: directory unavailable", "dir", p.cfg.Dir, "err", err)
 		return
@@ -344,7 +366,7 @@ func (p *Patrol) checks(ctx context.Context, now time.Time) {
 		active = p.cfg.Active()
 	}
 	p.prune(rd)
-	targets := scope(rd.dirs, active, now)
+	targets := unmuted(scope(rd.dirs, active, now), declined)
 	for _, t := range targets {
 		if ctx.Err() != nil {
 			return

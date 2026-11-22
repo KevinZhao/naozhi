@@ -94,13 +94,50 @@ type Counts struct {
 	// counts what was handed out.
 	Fronts int `json:"fronts,omitempty"`
 	Yours  int `json:"yours,omitempty"`
+	// Patrol is what the project patrol's section lists (§15.23 ⑤): the
+	// pull requests ready, the new findings and the kinds it stopped
+	// reporting. PatrolNews are those of them new since the last brief.
+	Patrol     int `json:"patrol,omitempty"`
+	PatrolNews int `json:"patrol_news,omitempty"`
 }
 
 // total is what makes a brief worth sending. The lines of work alone do
-// not: they lead a brief that has something new under them.
+// not: they lead a brief that has something new under them. Nor does a
+// pull request of the patrol's that an earlier brief listed and that still
+// waits.
 func (c Counts) total() int {
 	return c.Meetings + c.Replies + c.Deadlines + c.Done + c.Yours + c.Failed + c.Waiting + c.Errors + c.Tasks + c.Planner +
-		c.Routines + c.Notices + c.Custody + c.Midway + c.Slack + c.Parked
+		c.Routines + c.Notices + c.Custody + c.Midway + c.Slack + c.Parked + c.PatrolNews
+}
+
+// ProjectPatrol is what the project patrol has for a brief (§15.23 ⑤).
+type ProjectPatrol struct {
+	// PRs are the pull requests it had made that wait on the user.
+	PRs []ProjectPR
+	// New are the findings of the brief's window still to be settled.
+	New []ProjectFinding
+	// Stopped are the kinds it stopped reporting, said in one brief.
+	Stopped []ProjectStopped
+}
+
+// ProjectPR is a pull request ready: the finding's title, the link, its
+// checks ("通过", "失败", "进行中", "" when not looked at yet), the
+// workspace's name, and whether it became ready in the brief's window.
+type ProjectPR struct {
+	Title, URL, CI, Workspace string
+	Fresh                     bool
+}
+
+// ProjectFinding is a new finding: its title, kind and workspace's name.
+type ProjectFinding struct {
+	Title, Kind, Workspace string
+}
+
+// ProjectStopped is a kind no longer reported: Adopted of the last Of
+// findings of it the user settled were taken.
+type ProjectStopped struct {
+	Kind        string
+	Adopted, Of int
 }
 
 // Routine is a cron job's latest successful run in the window and whether
@@ -203,6 +240,12 @@ type Config struct {
 	// (front.Store.Items): the brief lists a few under each line (§15.23,
 	// D143). nil lists none.
 	Items func() []front.Item
+	// Projects returns the project patrol's part of the brief whose window
+	// starts at since (patrol.Patrol.Brief, by wireup.BriefProjects); nil
+	// has no such section. ProjectsBriefed is told the stopped kinds a sent
+	// brief named, so each is said once (patrol.Patrol.Briefed).
+	Projects        func(since time.Time) ProjectPatrol
+	ProjectsBriefed func(kinds []string)
 	// Tidy wakes the Planner with text, the sessions that moved since the
 	// last brief, to bring the ledger up to date before the brief is
 	// written; false when the Planner cannot take it. Tidying reports that
@@ -406,13 +449,21 @@ func (b *Briefer) Check() {
 		"deadlines", br.Counts.Deadlines, "done", br.Counts.Done, "failed", br.Counts.Failed,
 		"waiting", br.Counts.Waiting, "errors", br.Counts.Errors, "tasks", br.Counts.Tasks,
 		"planner", br.Counts.Planner, "routines", br.Counts.Routines, "notices", br.Counts.Notices,
-		"custody", br.Counts.Custody, "midway", br.Counts.Midway, "slack", br.Counts.Slack, "parked", br.Counts.Parked)
+		"custody", br.Counts.Custody, "midway", br.Counts.Midway, "slack", br.Counts.Slack, "parked", br.Counts.Parked,
+		"patrol", br.Counts.Patrol)
 	if b.cfg.Carried != nil && len(in.Notices) > 0 {
 		ids := make([]string, 0, len(in.Notices))
 		for _, it := range in.Notices {
 			ids = append(ids, it.ID)
 		}
 		b.cfg.Carried(ids)
+	}
+	if b.cfg.ProjectsBriefed != nil && len(in.Projects.Stopped) > 0 {
+		kinds := make([]string, 0, len(in.Projects.Stopped))
+		for _, s := range in.Projects.Stopped {
+			kinds = append(kinds, s.Kind)
+		}
+		b.cfg.ProjectsBriefed(kinds)
 	}
 	if b.cfg.Push != nil {
 		b.cfg.Push(notify.Push{ID: "brief:" + br.Day, Kind: notify.KindNotice, Level: notify.LevelTimely,

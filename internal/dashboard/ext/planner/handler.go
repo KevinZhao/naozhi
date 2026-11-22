@@ -28,6 +28,10 @@
 //	                         <state root>/planner/scout/runs
 //	POST /api/planner/patrol/run {"workspace": "<ID or name>"} — a deep
 //	                         check of that workspace now (patrol.go)
+//	POST /api/planner/patrol/decide {"ref", "choice"} or {"workspace",
+//	                         "choice": "mute_ws"} — the user's say on a
+//	                         finding or a workspace's patrol, only
+//	                         straight from loopback (patrol.go)
 //
 // All sit behind the /api/* auth middleware.
 package planner

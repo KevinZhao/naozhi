@@ -307,7 +307,29 @@ type Patrol interface {
 	// has; filed says the finding has its item (one in a task's hands, or
 	// over, gets none).
 	File(ref, text, line string) (known, filed bool, err error)
+	// Card is the choices a notice about the finding carries for the user
+	// (do it, don't, no more of its kind; §15.23 ④), answered through the
+	// patrol's own handler; nil for a ref no finding has, or one that is
+	// over.
+	Card(ref string) *notify.Decision
+	// Decided takes the user's answer to a question about the finding:
+	// FindingSkip or FindingMuteKind for the two answers the gateway adds
+	// to every such question, which turn the finding down, anything else
+	// for one of the Planner's own. left is what the answer leaves the
+	// Planner to do, for its receipt. An error leaves the question open.
+	Decided(ref, choice string) (left string, err error)
 }
+
+// The two answers the gateway adds to a question about a patrol finding,
+// as the user reads them and as Patrol.Decided takes them: the user can
+// turn a finding down wherever it is put to them.
+const (
+	askSkip     = "不做"
+	askMuteKind = "这类别再提"
+
+	FindingSkip     = "skip"
+	FindingMuteKind = "mute_kind"
+)
 
 // Custodian is what the runner uses of planner/custody.Engine.
 type Custodian interface {
@@ -2356,7 +2378,7 @@ func (r *Runner) notify(n Notify, unasked bool) error {
 	if r.cfg.Inbox == nil {
 		return errors.New("通知没有接通")
 	}
-	if _, opened := r.cfg.Inbox.AddDaily(notify.Item{
+	it := notify.Item{
 		Kind:   notify.KindNotice,
 		Level:  notify.LevelTimely,
 		Unit:   r.cfg.Planner,
@@ -2364,7 +2386,12 @@ func (r *Runner) notify(n Notify, unasked bool) error {
 		Why:    cmp.Or(n.Why, "Planner 提醒你"),
 		Link:   n.Link,
 		Source: SourcePrefix + key,
-	}); !opened {
+	}
+	if n.Finding != "" {
+		// The user's say on the finding rides on the notice (§15.23 ④).
+		it.Decision = r.cfg.Patrol.Card(n.Finding)
+	}
+	if _, opened := r.cfg.Inbox.AddDaily(it); !opened {
 		r.note("这件事今天提醒过或还开着，不再推送：" + n.Title)
 	}
 	return nil
@@ -2423,15 +2450,30 @@ func (r *Runner) ask(q Ask, unasked bool) error {
 		Task:   q.Task,
 		Source: askSourcePrefix + requestID(),
 	}
-	if len(q.Options) == 0 {
+	options := q.Options
+	if q.Finding != "" {
+		// Turning the finding down is offered with every question about it
+		// (§15.23 ④), after the Planner's own options.
+		options = slices.Clone(options)
+		for _, o := range []string{askSkip, askMuteKind} {
+			if !slices.Contains(options, o) {
+				options = append(options, o)
+			}
+		}
+	}
+	switch {
+	case len(options) == 0:
 		it.Why = "Planner 问你，请在 Planner 对话里回复，回复后关掉这一条"
-	} else {
+	case len(q.Options) == 0:
+		it.Why = "Planner 问你；要做就在 Planner 对话里回复，回复后关掉这一条"
+		fallthrough
+	default:
 		payload, err := json.Marshal(askCard{Question: q.Question, Task: q.Task, Finding: q.Finding})
 		if err != nil {
 			return err
 		}
-		acts := make([]notify.Action, len(q.Options))
-		for i, o := range q.Options {
+		acts := make([]notify.Action, len(options))
+		for i, o := range options {
 			acts[i] = notify.Action(o)
 		}
 		it.Decision = &notify.Decision{Handler: HandlerAsk, Payload: payload, Actions: acts}
@@ -2455,6 +2497,17 @@ func (r *Runner) decideAsk(it notify.Item, a notify.Action) error {
 	if why := r.expiry(c.Task, it.Created); why != "" {
 		slog.Info("planner actions: an answer to an expired ask not sent", "task", c.Task, "why", why)
 		return notify.Expired{Why: why}
+	}
+	// The patrol hears of an answer about one of its findings first: one
+	// of the two the gateway added turns the finding down, any other counts
+	// as the finding taken. Not written down, the answer is not passed on.
+	left := ""
+	if c.Finding != "" && r.cfg.Patrol != nil {
+		choice := map[notify.Action]string{askSkip: FindingSkip, askMuteKind: FindingMuteKind}[a]
+		var err error
+		if left, err = r.cfg.Patrol.Decided(c.Finding, choice); err != nil {
+			return notify.Refused{Why: "这条巡查发现的处置没有记下（" + err.Error() + "），回答没有送出"}
+		}
 	}
 	w := Words{Text: string(a), Question: c.Question, At: r.cfg.Now()}
 	text := "你问用户的「" + c.Question + "」，用户的回答：" + string(a)
@@ -2494,7 +2547,12 @@ func (r *Runner) decideAsk(it notify.Item, a notify.Action) error {
 		}
 		return r.cfg.Tell(t)
 	}
-	if err := tell(text); err != nil && !relayed {
+	if left != "" {
+		text += "。" + left
+	}
+	// A finding turned down is turned down whether or not the Planner
+	// hears of it now: the question does not stay open over that.
+	if err := tell(text); err != nil && !relayed && left == "" {
 		return err
 	}
 	return nil
@@ -2549,6 +2607,20 @@ func askTask(it notify.Item) string {
 		return ""
 	}
 	return c.Task
+}
+
+// AskFinding is the patrol finding open ask it is about, "" for none or
+// for an item that is no ask: the patrol closes the questions about a
+// finding the user settled elsewhere.
+func AskFinding(it notify.Item) string {
+	if !strings.HasPrefix(it.Source, askSourcePrefix) || it.State != notify.StateOpen || it.Decision == nil {
+		return ""
+	}
+	var c askCard
+	if json.Unmarshal(it.Decision.Payload, &c) != nil {
+		return ""
+	}
+	return c.Finding
 }
 
 // AskOpen reports whether an ask naming session key waits on the user in

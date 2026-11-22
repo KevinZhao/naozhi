@@ -111,7 +111,7 @@ func TestPrompt(t *testing.T) {
 		known = append(known, Record{Finding: Finding{ID: id, Title: "旧的 " + id}, State: StateItem, Seen: at.Add(-time.Duration(i) * time.Hour)})
 	}
 	known = append(known, Record{Finding: Finding{ID: "bug-a-nil", Title: "重连时\n会话为空"}, State: StatePR, Seen: at})
-	text := prompt(at, "网关\n仓库", true, known)
+	text := prompt(at, "网关\n仓库", true, known, Declined{}, wsA)
 	for _, want := range []string{
 		"现在是 2026-11-25T11:00:00+08:00", `工作区："网关 仓库"`, "git、gh 的只读命令", "git log --since",
 		"- bug-a-nil · 重连时 会话为空 · 已有 PR", "- debt-old-aa · 旧的 debt-old-aa · 已记为未了事项",
@@ -130,7 +130,7 @@ func TestPrompt(t *testing.T) {
 		t.Error("the oldest finding on record is listed past the cap")
 	}
 	// The contract's example is one ParseFindings takes the shape of.
-	bare := prompt(at, "docs", false, nil)
+	bare := prompt(at, "docs", false, nil, Declined{}, wsA)
 	if strings.Contains(bare, "git log") || strings.Contains(bare, "gh pr") || !strings.Contains(bare, "能用的是 Read / Grep / Glob。") || !strings.Contains(bare, "已报过的：（还没有）") {
 		t.Errorf("prompt without Bash:\n%s", bare)
 	}

@@ -3,6 +3,8 @@ package wireup
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -16,6 +18,8 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/action"
 	"github.com/naozhi/naozhi/internal/planner/activity"
 	"github.com/naozhi/naozhi/internal/planner/agent"
+	"github.com/naozhi/naozhi/internal/planner/brief"
+	"github.com/naozhi/naozhi/internal/planner/front"
 	"github.com/naozhi/naozhi/internal/planner/journal"
 	"github.com/naozhi/naozhi/internal/planner/note"
 	"github.com/naozhi/naozhi/internal/planner/patrol"
@@ -434,5 +438,109 @@ func TestPatrolTaskDeny(t *testing.T) {
 	// sets of rules.
 	if _, err := to.For("task:ef56", action.Spawn{Dir: "/tmp/ws", Title: "t", Finding: finding, MCPTools: map[string][]string{"aws-outlook-mcp": {"email_send"}}}); err == nil {
 		t.Error("mcp_tools with no cli.mcp_config went through")
+	}
+}
+
+// TestPatrolCards: the user's answer on a patrol card in "通知" reaches the
+// patrol (its handler), which turns the finding down and has the other
+// cards about that finding closed as settled; a card about another finding
+// stays. The brief gets the patrol's part in its own types.
+func TestPatrolCards(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "gateway")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const ws = "ws_ab12cd34"
+	one, two := patrol.Ref(ws, "bug-one"), patrol.Ref(ws, "doc-two")
+	n := notify.New(notify.Config{System: func(string, string) error { return nil }})
+	handed := make(chan struct{}, 1)
+	var told []string
+	p := patrol.New(patrol.Config{
+		Dir:        filepath.Join(root, "planner", "patrol"),
+		Workspaces: func() []workspace.Dir { return []workspace.Dir{{ID: ws, Name: "gateway", Path: dir}} },
+		Items:      front.New("", nil),
+		Exec: func(context.Context, string, string, ...string) (string, error) {
+			return "", os.ErrNotExist // no git here
+		},
+		Session: func(context.Context, string, session.AgentOpts, string) (string, []string, []string, error) {
+			return `{"findings":[
+				{"id":"bug-one","title":"重连时会话为空会崩","kind":"bug","evidence":["a.go:1"],"impact":"重连即崩","fix":"先判空","size":"S","reversible":true,"confidence":"high"},
+				{"id":"doc-two","title":"README 与脚本不符","kind":"doc","evidence":["a.go:1"],"impact":"装不上","fix":"改 README","size":"S","reversible":true,"confidence":"high"}]}`, nil, nil, nil
+		},
+		// The findings are on record once they are handed to the Planner.
+		Wake:       func(func(int, error), ...string) error { handed <- struct{}{}; return nil },
+		Answer:     func(text, _, words string) error { told = append(told, words+"|"+text); return nil },
+		CloseCards: PatrolCloseCards(n),
+	})
+	t.Cleanup(p.Stop)
+	n.HandleDecisions(patrol.Handler, p.DecideCard)
+	if _, err := p.Trigger(ws); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-handed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the deep check did not hand its findings over")
+	}
+
+	ask := func(source, ref string) notify.Item {
+		it, _ := n.Add(notify.Item{Kind: notify.KindQuestion, Source: "ask:" + source, Title: "怎么改？",
+			Decision: &notify.Decision{Handler: action.HandlerAsk, Payload: json.RawMessage(`{"question":"怎么改？","finding":"` + ref + `"}`), Actions: []notify.Action{"方案 A"}}})
+		return it
+	}
+	notice, _ := n.Add(notify.Item{Kind: notify.KindNotice, Source: "planner:pr", Title: "PR 已备好", Decision: p.Card(one)})
+	about, other := ask("r1", one), ask("r2", two)
+	if notice.Decision == nil || action.AskFinding(about) != one {
+		t.Fatalf("cards: %+v, %+v", notice.Decision, about.Decision)
+	}
+
+	if err := n.Decide(notice.ID, patrol.LabelSkip); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := p.Finding(one); r.State != patrol.StateDeclined {
+		t.Errorf("record %+v, want the finding turned down", r)
+	}
+	if got, _ := n.Item(notice.ID); got.State != notify.StateClosed || got.ClosedBy != notify.ClosedByUser || got.Decision.Answer != patrol.LabelSkip {
+		t.Errorf("the card answered: %+v", got)
+	}
+	if got, _ := n.Item(about.ID); got.State != notify.StateClosed || got.ClosedWhy != "你已选了不做" {
+		t.Errorf("the question about the same finding: %+v, want it closed as settled", got)
+	}
+	if got, _ := n.Item(other.ID); got.State != notify.StateOpen {
+		t.Errorf("the question about another finding: %+v, want it open", got)
+	}
+	if len(told) != 0 {
+		t.Errorf("the Planner was told %q with nothing left to do", told)
+	}
+	// An answer the card does not carry never reaches the patrol.
+	again, _ := n.Add(notify.Item{Kind: notify.KindNotice, Source: "planner:pr2", Title: "PR 已备好", Decision: p.Card(two)})
+	if err := n.Decide(again.ID, "合并"); !errors.Is(err, notify.ErrNoDecision) {
+		t.Errorf("an answer the card does not carry: %v", err)
+	}
+	// "做" goes on to the Planner in the user's words.
+	if err := n.Decide(again.ID, patrol.LabelDo); err != nil || len(told) != 1 || !strings.HasPrefix(told[0], "做|") || !strings.Contains(told[0], `"finding":"`+two+`"`) {
+		t.Errorf("做 on the card: %v, told %q", err, told)
+	}
+
+	rep := BriefProjects(p)(time.Time{})
+	if len(rep.PRs) != 0 || len(rep.Stopped) != 0 || !slices.Equal(rep.New, []brief.ProjectFinding{{Title: "README 与脚本不符", Kind: "doc", Workspace: "gateway"}}) {
+		t.Errorf("the brief's part: %+v", rep)
+	}
+}
+
+// TestPatrolAnswer: the user's choice goes to the Planner as an answer of
+// theirs; a Planner that is off says so, for the patrol to keep the choice
+// and go no further.
+func TestPatrolAnswer(t *testing.T) {
+	a := agent.New(agent.Config{})
+	if err := PatrolAnswer(a, nil)("用户选了：做", "怎么处置", "做"); !errors.Is(err, agent.ErrOff) {
+		t.Errorf("with the Planner off: %v, want ErrOff", err)
 	}
 }

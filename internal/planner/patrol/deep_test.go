@@ -47,6 +47,12 @@ type deepEnv struct {
 	// atWork are the dispatched sessions still at work.
 	atWork map[string]bool
 	alarms []string
+	// answers are what the Planner was told of the user's choices, each
+	// "words|question|text"; answerErr fails the telling. closed are the
+	// findings whose cards were closed, each "ref|why".
+	answers   []string
+	answerErr error
+	closed    []string
 }
 
 func newDeep(t *testing.T) *deepEnv {
@@ -89,6 +95,20 @@ func newDeep(t *testing.T) *deepEnv {
 		d.mu.Lock()
 		defer d.mu.Unlock()
 		d.alarms = append(d.alarms, source+"|"+title+"|"+why)
+	}
+	d.cfg.Answer = func(text, question, words string) error {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		if d.answerErr != nil {
+			return d.answerErr
+		}
+		d.answers = append(d.answers, words+"|"+question+"|"+text)
+		return nil
+	}
+	d.cfg.CloseCards = func(ref, why string) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		d.closed = append(d.closed, ref+"|"+why)
 	}
 	d.cfg.OwnSettings = true
 	d.p = New(d.cfg)

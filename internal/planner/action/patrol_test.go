@@ -29,7 +29,12 @@ type fakePatrol struct {
 	// item (it is in a task's hands, or over).
 	fileErr error
 	inHand  bool
-	calls   []string
+	// card is the Decision a notice about a known finding gets; left and
+	// decideErr what Decided answers.
+	card      *notify.Decision
+	left      string
+	decideErr error
+	calls     []string
 }
 
 var errNoFinding = errors.New("没有这条巡查发现")
@@ -70,6 +75,19 @@ func (p *fakePatrol) File(ref, text, line string) (bool, bool, error) {
 		return false, false, nil
 	}
 	return true, p.fileErr == nil && !p.inHand, p.fileErr
+}
+
+func (p *fakePatrol) Card(ref string) *notify.Decision {
+	p.calls = append(p.calls, "card "+ref)
+	if !p.known[ref] {
+		return nil
+	}
+	return p.card
+}
+
+func (p *fakePatrol) Decided(ref, choice string) (string, error) {
+	p.calls = append(p.calls, "decided "+ref+" "+choice)
+	return p.left, p.decideErr
 }
 
 // did is the calls made that start with prefix.
@@ -362,7 +380,7 @@ func TestPatrolSurfaceCap(t *testing.T) {
 	if len(open) != 2 || len(pt.refusals)+len(pt.g.notes) != 0 {
 		t.Fatalf("inbox %+v, receipts %q, notes %q", open, pt.refusals, pt.g.notes)
 	}
-	if want := []string{"surface " + refB + " ask unasked=true", "surface " + refA + " pr unasked=true"}; !slices.Equal(pt.p.calls, want) {
+	if want := []string{"surface " + refB + " ask unasked=true", "surface " + refA + " pr unasked=true", "card " + refA}; !slices.Equal(pt.p.calls, want) {
 		t.Errorf("patrol calls %q, want %q", pt.p.calls, want)
 	}
 	card := openDecision(t, pt.inbox, HandlerAsk)
@@ -410,6 +428,150 @@ func TestPatrolSurfaceCap(t *testing.T) {
 	pt.run(block(strings.Replace(ask, refB, "ws_ab12cd34/bug-nope", 1)))
 	if open, _ := pt.inbox.List(0); len(open) != 0 || len(pt.refusals) != 1 || !strings.Contains(pt.refusals[0], errNoFinding.Error()) {
 		t.Errorf("unknown finding: inbox %+v, receipt %q", open, pt.refusals)
+	}
+}
+
+// The user's say on a finding rides on what puts it in front of them
+// (§15.23 ④): a notice about it carries the patrol's card, whose answers go
+// to the patrol's own handler; a question about it gets, after the
+// Planner's options, the two that turn it down.
+func TestPatrolChoices(t *testing.T) {
+	const ready = `{"type":"notify","title":"修重连的 PR 已备好","why":"CI 通过","level":"timely","link":"https://github.com/owner/repo/pull/31","id":"","finding":"` + refA + `"}`
+	pt := newPatrolTurn(t)
+	pt.p.card = &notify.Decision{Handler: "patrol", Payload: []byte(`{"ref":"` + refA + `"}`), Actions: []notify.Action{"不做", "这类别再提"}, More: []notify.Action{"这个工作区别巡查了"}}
+	pt.run(block(ready))
+	card := openDecision(t, pt.inbox, "patrol")
+	if card.Kind != notify.KindNotice || card.Title != "修重连的 PR 已备好" || card.Link != "https://github.com/owner/repo/pull/31" ||
+		!slices.Equal(card.Decision.Actions, pt.p.card.Actions) || !slices.Equal(card.Decision.More, pt.p.card.More) || string(card.Decision.Payload) != `{"ref":"`+refA+`"}` {
+		t.Errorf("the notice %+v, decision %+v", card, card.Decision)
+	}
+	// A notice about nothing of the patrol's carries none; nor does one
+	// the patrol has no card for.
+	pt = newPatrolTurn(t)
+	pt.patrol = false
+	userTurn(pt.r, said)
+	pt.p.card = &notify.Decision{Handler: "patrol", Actions: []notify.Action{"不做"}}
+	pt.run(block(`{"type":"notify","title":"有个要紧的事","why":"现在看","level":"timely","link":"","id":""}`))
+	if open, _ := pt.inbox.List(0); len(open) != 1 || open[0].Decision != nil || len(pt.p.did("card ")) != 0 {
+		t.Errorf("a notice naming no finding: %+v, patrol calls %q", open, pt.p.calls)
+	}
+	pt = newPatrolTurn(t)
+	pt.run(block(ready))
+	if open, _ := pt.inbox.List(0); len(open) != 1 || open[0].Decision != nil {
+		t.Errorf("a notice the patrol has no card for: %+v", open)
+	}
+
+	for name, tc := range map[string]struct {
+		options string
+		want    []notify.Action
+		why     string
+	}{
+		"the Planner's options":   {`["统一","先不动"]`, []notify.Action{"统一", "先不动", "不做", "这类别再提"}, "Planner 问你"},
+		"one of them the Planner": {`["统一","不做"]`, []notify.Action{"统一", "不做", "这类别再提"}, "Planner 问你"},
+		"none of the Planner's":   {`[]`, []notify.Action{"不做", "这类别再提"}, "Planner 问你；要做就在 Planner 对话里回复，回复后关掉这一条"},
+	} {
+		pt = newPatrolTurn(t)
+		pt.run(block(`{"type":"ask","question":"退避要不要统一？","options":` + tc.options + `,"finding":"` + refB + `"}`))
+		card := openDecision(t, pt.inbox, HandlerAsk)
+		if !slices.Equal(card.Decision.Actions, tc.want) || card.Why != tc.why || AskFinding(card) != refB {
+			t.Errorf("%s: answers %q, why %q, finding %q", name, card.Decision.Actions, card.Why, AskFinding(card))
+		}
+	}
+	// A question about no finding is as the Planner wrote it.
+	pt = newPatrolTurn(t)
+	pt.patrol = false
+	userTurn(pt.r, said)
+	pt.run(block(`{"type":"ask","question":"要不要统一退避？","options":["要","先不"]}`))
+	if card := openDecision(t, pt.inbox, HandlerAsk); !slices.Equal(card.Decision.Actions, []notify.Action{"要", "先不"}) || AskFinding(card) != "" {
+		t.Errorf("a question naming no finding: %+v", card.Decision)
+	}
+}
+
+// The answer to a question about a finding goes to the patrol first: the
+// two answers the gateway added turn the finding down, any other counts it
+// as taken; the Planner gets its receipt either way, with what the patrol
+// says is left to do. An answer the patrol could not record is not passed
+// on and leaves the question open.
+func TestPatrolAnswer(t *testing.T) {
+	const ask = `{"type":"ask","question":"退避要不要统一？","options":["统一","先不动"],"finding":"` + refB + `"}`
+	for name, tc := range map[string]struct {
+		answer notify.Action
+		choice string
+		left   string
+	}{
+		"turned down":          {"不做", "skip", "网关已把这条发现记进被否清单并关掉了它的未了事项，不用再处理它。"},
+		"its kind stopped":     {"这类别再提", "mute_kind", "网关已把这条发现记进被否清单并关掉了它的未了事项，不用再处理它。任务 task:t1 还在修它：用 cancel 把这个任务停掉。"},
+		"one of the Planner's": {"统一", "", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pt := newPatrolTurn(t)
+			var answers []Words
+			var told []string
+			pt.r.cfg.TellAnswer = func(text string, w Words) error {
+				told, answers = append(told, text), append(answers, w)
+				return nil
+			}
+			pt.run(block(ask))
+			card := openDecision(t, pt.inbox, HandlerAsk)
+			pt.p.left = tc.left
+			if err := pt.inbox.Decide(card.ID, tc.answer); err != nil {
+				t.Fatal(err)
+			}
+			if got := pt.p.did("decided "); !slices.Equal(got, []string{"decided " + refB + " " + tc.choice}) {
+				t.Errorf("patrol calls %q", got)
+			}
+			want := "你问用户的「退避要不要统一？」，用户的回答：" + string(tc.answer)
+			if tc.left != "" {
+				want += "。" + tc.left
+			}
+			if len(told) != 1 || told[0] != want || answers[0].Text != string(tc.answer) || answers[0].Question != "退避要不要统一？" {
+				t.Errorf("the Planner was told %q with %+v, want %q", told, answers, want)
+			}
+			if got, _ := pt.inbox.Item(card.ID); got.State != notify.StateClosed {
+				t.Errorf("the question is %s after its answer", got.State)
+			}
+		})
+	}
+
+	// The patrol could not write it down: nothing goes on, the question
+	// stays.
+	pt := newPatrolTurn(t)
+	told := 0
+	pt.r.cfg.TellAnswer = func(string, Words) error { told++; return nil }
+	pt.run(block(ask))
+	card := openDecision(t, pt.inbox, HandlerAsk)
+	pt.p.decideErr = errors.New("被否清单 declined.json 读不了")
+	if err := pt.inbox.Decide(card.ID, "不做"); err == nil || !strings.Contains(err.Error(), "declined.json 读不了") {
+		t.Errorf("Decide = %v, want the patrol's error", err)
+	}
+	if got, _ := pt.inbox.Item(card.ID); got.State != notify.StateOpen || told != 0 {
+		t.Errorf("the question is %s, the Planner told %d times", got.State, told)
+	}
+	// Turned down with the Planner out of reach: the finding is turned
+	// down all the same, so the question closes.
+	pt.p.decideErr, pt.p.left = nil, "网关已把这条发现记进被否清单并关掉了它的未了事项，不用再处理它。"
+	pt.r.cfg.TellAnswer = func(string, Words) error { return errors.New("planner is stopped") }
+	if err := pt.inbox.Decide(card.ID, "不做"); err != nil {
+		t.Errorf("turned down with the Planner stopped: %v", err)
+	}
+	// One of the Planner's own with it out of reach stays open, as any
+	// answer does.
+	pt = newPatrolTurn(t)
+	pt.r.cfg.TellAnswer = func(string, Words) error { return errors.New("planner is stopped") }
+	pt.run(block(ask))
+	card = openDecision(t, pt.inbox, HandlerAsk)
+	if err := pt.inbox.Decide(card.ID, "统一"); err == nil {
+		t.Error("an answer that reached nobody closed the question")
+	}
+
+	// A question about no finding does not come to the patrol.
+	pt = newPatrolTurn(t)
+	pt.patrol = false
+	userTurn(pt.r, said)
+	pt.r.cfg.TellAnswer = func(string, Words) error { return nil }
+	pt.run(block(`{"type":"ask","question":"要不要统一退避？","options":["要","不做"]}`))
+	if err := pt.inbox.Decide(openDecision(t, pt.inbox, HandlerAsk).ID, "不做"); err != nil || len(pt.p.did("decided ")) != 0 {
+		t.Errorf("a question naming no finding: %v, patrol calls %q", err, pt.p.calls)
 	}
 }
 
