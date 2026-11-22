@@ -489,6 +489,8 @@ body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
 .pl-act-dispatch[open]>summary,.pl-act-relay[open]>summary,.pl-act-remember[open]>summary,.pl-lookup[open]>summary{margin-bottom:6px;white-space:normal}
 .pl-act-dispatch>summary:hover .pl-act-k,.pl-act-relay>summary:hover .pl-act-k,.pl-act-remember>summary:hover .pl-act-k,.pl-lookup>summary:hover .pl-act-k{color:var(--nz-accent)}
 .pl-act-goal{color:var(--nz-text)}
+/* A block about a project patrol's finding (§15.23 ③). */
+.pl-act-tag{padding:0 5px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);color:var(--nz-text-dim);font-size:var(--nz-fs-xs);font-weight:400}
 /* A web lookup's answer (§15.12 ⑨): 网页查询 · 问题 · 答案第一句 and the
    source sites; the whole answer and each fact's quote in the fold. */
 .event.system.pl-lookup-ev .event-content{flex:0 1 560px;min-width:0;text-align:left;color:var(--nz-text)}

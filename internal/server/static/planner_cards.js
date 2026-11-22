@@ -310,6 +310,13 @@ function dueText(due) {
 }
 
 // actionCardHtml renders one block.
+// findingTagHtml marks a block about a project patrol's finding (its
+// "finding", §15.23 ③): nobody asked for it in so many words.
+function findingTagHtml(a) {
+  const ref = str(a.finding);
+  return ref ? ' <span class="pl-act-tag" title="' + escAttr('项目巡查的发现：' + ref) + '">巡查</span>' : '';
+}
+
 function actionCardHtml(raw) {
   const { action: a, error } = parseAction(raw);
   if (!a) {
@@ -324,7 +331,7 @@ function actionCardHtml(raw) {
     const goal = capped(oneLine(str(a.goal)));
     const line = goal || firstSentence(str(a.message));
     return '<details class="pl-act pl-act-dispatch"' + (name || !ws ? '' : ' data-ws="' + escAttr(ws) + '"') + '>' +
-      '<summary class="pl-act-h"><span class="pl-act-k">派出</span>' + (title ? ' · <b>' + esc(title) + '</b>' : '') +
+      '<summary class="pl-act-h"><span class="pl-act-k">派出</span>' + findingTagHtml(a) + (title ? ' · <b>' + esc(title) + '</b>' : '') +
         (name ? '<span class="pl-act-ws" title="' + escAttr(name) + '"> · ' + esc(wsLabel(name)) + '</span>' : '<span class="pl-act-ws"></span>') +
         (line ? '<span class="pl-act-goal" title="' + escAttr(line) + '"> · ' + esc(line) + '</span>' : '') + '</summary>' +
       rowsHtml([['工作区', name], ['目标', goal], ['模型', str(a.model)], ['附上', a.with_user_words === true ? '你这一轮的原话' : ''],
@@ -483,14 +490,14 @@ function actionCardHtml(raw) {
   if (a.type === 'notify') {
     const brief = a.level === 'brief';
     const link = webLinkHtml(a.link);
-    return '<div class="pl-act pl-act-notify' + (brief ? ' pl-act-brief' : '') + '"><div class="pl-act-h">' + (brief ? '记入早报' : '提醒你') + '</div>' +
+    return '<div class="pl-act pl-act-notify' + (brief ? ' pl-act-brief' : '') + '"><div class="pl-act-h">' + (brief ? '记入早报' : '提醒你') + findingTagHtml(a) + '</div>' +
       '<div class="pl-act-q">' + esc(str(a.title)) + '</div>' +
       (a.why ? '<div class="pl-act-why">' + esc(str(a.why)) + '</div>' : '') +
       (link ? '<div class="pl-act-link">' + link + '</div>' : '') + '</div>';
   }
   const opts = (Array.isArray(a.options) ? a.options : []).filter(isStr).map((o) => '<span class="pl-act-opt">' + esc(o) + '</span>').join('');
   const task = str(a.task);
-  return '<div class="pl-act pl-act-ask"><div class="pl-act-h">问你</div>' +
+  return '<div class="pl-act pl-act-ask"><div class="pl-act-h">问你' + findingTagHtml(a) + '</div>' +
     '<div class="pl-act-q">' + esc(str(a.question)) + '</div>' +
     (opts ? '<div class="pl-act-opts">' + opts + '</div>' : '') +
     (task ? '<div class="pl-act-why">你的回答会直接送到：</div><div class="pl-scards">' + sessionCardHtml(task) + '</div>' : '') + '</div>';
