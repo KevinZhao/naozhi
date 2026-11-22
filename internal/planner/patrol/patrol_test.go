@@ -22,7 +22,7 @@ const (
 
 	greenPull = `{"number":12,"title":"修正重连时的\n会话恢复","createdAt":"2026-11-14T03:00:00Z","isDraft":false,"headRefName":"fix/reconnect",
 		"statusCheckRollup":[{"__typename":"CheckRun","name":"test","workflowName":"CI","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-11-14T03:01:00Z"}]}`
-	failedRun = `{"workflowName":"test","status":"completed","conclusion":"failure","createdAt":"2026-11-22T02:02:00Z","url":"https://github.com/acme/gateway/actions/runs/123"}`
+	failedRun = `{"workflowName":"test","event":"push","status":"completed","conclusion":"failure","createdAt":"2026-11-22T02:02:00Z","url":"https://github.com/acme/gateway/actions/runs/123"}`
 	oldIssues = `[{"number":1,"updatedAt":"2026-10-01T00:00:00Z"},{"number":2,"updatedAt":"2026-10-02T00:00:00Z"},{"number":3,"updatedAt":"2026-10-03T00:00:00Z"},
 		{"number":4,"updatedAt":"2026-10-24T10:00:00Z"}]`
 

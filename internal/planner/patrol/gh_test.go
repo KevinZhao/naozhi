@@ -83,12 +83,17 @@ func TestStalledPulls(t *testing.T) {
 	}
 }
 
-// TestFailingCI: of each workflow on the default branch the latest
-// completed run counts; any of them failed is one item, its source the
-// branch's Actions page.
+// TestFailingCI: of each workflow the latest completed run of a push to the
+// default branch counts; any of them failed is one item, its source the
+// branch's Actions page. A run whose head branch only has the default
+// branch's name — a fork's pull request from its own branch of that name,
+// a workflow an issue or a schedule started — is not the branch's CI.
 func TestFailingCI(t *testing.T) {
+	run := func(event, name, status, conclusion, created string) string {
+		return fmt.Sprintf(`{"workflowName":%q,"event":%q,"status":%q,"conclusion":%q,"createdAt":%q,"url":"https://github.com/acme/gateway/actions/runs/%s"}`, name, event, status, conclusion, created, created[11:13])
+	}
 	wf := func(name, status, conclusion, created string) string {
-		return fmt.Sprintf(`{"workflowName":%q,"status":%q,"conclusion":%q,"createdAt":%q,"url":"https://github.com/acme/gateway/actions/runs/%s"}`, name, status, conclusion, created, created[11:13])
+		return run("push", name, status, conclusion, created)
 	}
 	e := newEnv(t)
 	dir := e.workspace(wsA, "gateway")
@@ -101,6 +106,10 @@ func TestFailingCI(t *testing.T) {
 		wf("lint", "completed", "failure", "2026-11-23T02:00:00Z"),     // failed before
 		wf("deploy", "completed", "timed_out", "2026-11-23T01:00:00Z"), // timed out
 		wf("docs", "completed", "cancelled", "2026-11-23T01:00:00Z"),   // cancelled is not a failure
+		// Newer than lint's green run, from a fork's branch of the same name.
+		run("pull_request", "lint", "completed", "failure", "2026-11-23T05:00:00Z"),
+		run("issues", "triage", "completed", "failure", "2026-11-23T05:00:00Z"),
+		run("schedule", "stale", "completed", "failure", "2026-11-23T05:00:00Z"),
 	}, ",") + "]"}
 	e.fe.gh["acme/gateway"] = g
 	e.round()
@@ -111,7 +120,7 @@ func TestFailingCI(t *testing.T) {
 	if md := e.read(wsA + ".md"); !strings.Contains(md, "- release/1.x 最近一次 CI 失败：deploy（2026-11-23 09:00 · https://github.com/acme/gateway/actions/runs/01）、test（2026-11-23 12:00 · https://github.com/acme/gateway/actions/runs/04）\n") {
 		t.Errorf("file:\n%s", md)
 	}
-	if n := e.fe.count("gh run list -R acme/gateway --branch=release/1.x "); n != 1 {
+	if n := e.fe.count("gh run list -R acme/gateway --branch=release/1.x --event push "); n != 1 {
 		t.Errorf("gh run list calls: %v", e.fe.calls)
 	}
 
@@ -160,13 +169,15 @@ func TestStaleIssues(t *testing.T) {
 // TestBranchPulls: in a GitHub repository a pushed branch hits when it has
 // no pull request and never had one. One with an open pull request costs no
 // call; one that had one is asked about once and remembered; a lookup that
-// fails leaves the branch items as they were.
+// fails leaves the branch items as they were. A branch pushed under another
+// name is asked about by that name; one that only tracks a branch it is
+// ahead of, or a local branch, was not pushed.
 func TestBranchPulls(t *testing.T) {
 	e := newEnv(t)
 	dir := e.workspace(wsA, "gateway")
 	old := now.Add(-4*day - time.Hour)
 	e.fe.repos[dir] = &fakeRepo{remotes: githubRemote, head: "origin/main",
-		remoteRefs: []string{"main", "open", "merged", "none"},
+		remoteRefs: []string{"main", "open", "merged", "none", "published"},
 		branches: []string{
 			branchLine("open", "origin/open", old, ""),
 			branchLine("merged", "origin/merged", old, ""),
@@ -176,10 +187,15 @@ func TestBranchPulls(t *testing.T) {
 			// Its remote branch was deleted.
 			strings.Replace(branchLine("gone", "origin/gone", old, ""), "\x00\x00", "\x00[gone]\x00", 1),
 			branchLine("fresh", "origin/fresh", now.Add(-day), ""),
+			// Pushed as origin/published, where its pull request is.
+			branchLine("aliased", "origin/published", old, ""),
+			// Cut from origin/none and never pushed.
+			strings.Replace(branchLine("stacked", "origin/none", old, ""), "\x00\x00", "\x00[ahead 2]\x00", 1),
+			branchLine("local-track", "refs/heads/main", old, ""),
 		}}
 	g := &fakeGH{def: "main",
 		pulls: `[{"number":3,"title":"开着的","createdAt":"2026-11-22T00:00:00Z","isDraft":false,"headRefName":"open","statusCheckRollup":[]}]`,
-		heads: map[string]string{"merged": `[{"number":2}]`}}
+		heads: map[string]string{"merged": `[{"number":2}]`, "published": `[{"number":5}]`}}
 	e.fe.gh["acme/gateway"] = g
 	e.round()
 	want := []string{"check:branch:none|分支 none 推上去了还没开 PR，最后的提交在 4 天前"}
@@ -188,8 +204,11 @@ func TestBranchPulls(t *testing.T) {
 	}
 	e.round()
 	lookup := "gh pr list -R acme/gateway --head="
-	if a, b, c := e.fe.count(lookup+"merged "), e.fe.count(lookup+"none "), e.fe.count(lookup); a != 1 || b != 2 || c != 3 {
-		t.Errorf("lookups over two rounds: merged %d (want 1, remembered), none %d (want 2), all %d (want 3)", a, b, c)
+	if a, b, c := e.fe.count(lookup+"merged "), e.fe.count(lookup+"none "), e.fe.count(lookup); a != 1 || b != 2 || c != 4 {
+		t.Errorf("lookups over two rounds: merged %d (want 1, remembered), none %d (want 2), all %d (want 4)", a, b, c)
+	}
+	if a, b := e.fe.count(lookup+"published "), e.fe.count(lookup+"aliased "); a != 1 || b != 0 {
+		t.Errorf("a branch pushed under another name: %d lookups by its remote name (want 1), %d by its local name (want 0)", a, b)
 	}
 
 	g.fail = "head"

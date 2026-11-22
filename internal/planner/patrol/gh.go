@@ -99,7 +99,7 @@ type check struct {
 	StartedAt    time.Time `json:"startedAt"`
 }
 
-// workflowRun is one run of a workflow on the default branch.
+// workflowRun is one run of a workflow a push to the default branch started.
 type workflowRun struct {
 	WorkflowName string    `json:"workflowName"`
 	Status       string    `json:"status"`
@@ -146,7 +146,11 @@ func (p *Patrol) ask(ctx context.Context, r *repoReport, dir string, now time.Ti
 	// A repository with no commit has no default branch, and no CI.
 	if r.def != "" {
 		var runs []workflowRun
-		if err := p.gh(ctx, dir, &runs, "run", "list", "-R", repo, "--branch="+r.def, "--limit", fmt.Sprint(runLimit),
+		// Pushes only: --branch is a run's head branch, which a fork's pull
+		// request from its own branch of that name has too, as has every
+		// workflow an issue, a comment or a schedule starts; those are not
+		// the branch's CI, and would crowd it out of the list.
+		if err := p.gh(ctx, dir, &runs, "run", "list", "-R", repo, "--branch="+r.def, "--event", "push", "--limit", fmt.Sprint(runLimit),
 			"--json", "workflowName,status,conclusion,createdAt,url"); err != nil {
 			return err
 		}
@@ -244,9 +248,10 @@ func green(checks []check) bool {
 }
 
 // failing is one hit when the default branch's CI is failing: of each
-// workflow the latest completed run is taken (a repository's "last CI run"
-// is one per workflow), and any of them failed. The source is the Actions
-// page of the branch, the same while it fails.
+// workflow the latest completed run among runs (those pushes to the branch
+// started) is taken (a repository's "last CI run" is one per workflow), and
+// any of them failed. The source is the Actions page of the branch, the
+// same while it fails.
 func failing(r *repoReport, runs []workflowRun, loc *time.Location) []hit {
 	latest := map[string]workflowRun{}
 	for _, run := range runs {
@@ -283,9 +288,9 @@ func failing(r *repoReport, runs []workflowRun, loc *time.Location) []hit {
 	return []hit{{Source: link, Text: lead + strings.Join(names, "、"), Line: lead + strings.Join(lines, "、")}}
 }
 
-// hasPull reports whether branch has, or had, a pull request in r; known is
-// false when this round's lookups are spent. A branch found to have one is
-// remembered: that does not change.
+// hasPull reports whether branch (as origin names it) has, or had, a pull
+// request in r; known is false when this round's lookups are spent. A
+// branch found to have one is remembered: that does not change.
 func (p *Patrol) hasPull(ctx context.Context, r *repoReport, dir, branch string) (has, known bool, err error) {
 	key := r.key + "\x00" + branch
 	if r.heads[branch] || p.hasPR[key] {

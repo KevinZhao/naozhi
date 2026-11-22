@@ -189,17 +189,37 @@ func TestBranches(t *testing.T) {
 	git(t, main, at, "push", "-q", "-u", "origin", "merged")
 	git(t, main, at, "merge", "-q", "--ff-only", "merged")
 	git(t, main, at, "push", "-q", "origin", "master")
+	// Cut from another branch of origin and never pushed: git makes that
+	// branch its upstream from the start, and it is ahead of it.
+	commit(t, main, "develop", old)
+	git(t, main, at, "push", "-q", "origin", "develop")
+	git(t, main, old, "checkout", "-q", "-b", "stacked", "origin/develop")
+	git(t, main, old, "commit", "-q", "--allow-empty", "-m", "stacked")
+	git(t, main, at, "checkout", "-q", "master")
+	git(t, main, at, "branch", "-q", "-D", "develop")
+	// Tracks a local branch, never pushed.
+	git(t, main, old, "checkout", "-q", "-b", "local-track", "--track", "master")
+	git(t, main, old, "commit", "-q", "--allow-empty", "-m", "local-track")
+	git(t, main, at, "checkout", "-q", "master")
+	// Pushed under another name, which it tracks.
+	commit(t, main, "aliased", at.Add(-5*day))
+	git(t, main, at, "push", "-q", "origin", "aliased:published")
+	git(t, main, at, "branch", "-q", "--set-upstream-to=origin/published", "aliased")
 
 	want := []string{
 		"分支 plain 推上去了还没合进 master，最后的提交在 6 天前",
+		"分支 aliased（远端是 published）推上去了还没合进 master，最后的提交在 5 天前",
 		"分支 feat 推上去了还没合进 master，最后的提交在 4 天前",
 	}
 	rep := look(t, at, main)
 	if got := texts(rep.branches); !slices.Equal(got, want) {
 		t.Fatalf("branches = %v, want %v", got, want)
 	}
-	if rep.branches[1].Source != "check:branch:feat" || !strings.HasSuffix(rep.branches[1].Line, "（按本地上次 fetch 的状态）") {
-		t.Errorf("hit = %+v", rep.branches[1])
+	if rep.branches[2].Source != "check:branch:feat" || !strings.HasSuffix(rep.branches[2].Line, "（按本地上次 fetch 的状态）") {
+		t.Errorf("hit = %+v", rep.branches[2])
+	}
+	if rep.branches[1].Source != "check:branch:aliased" {
+		t.Errorf("a branch pushed under another name is told by %q, want its local name", rep.branches[1].Source)
 	}
 	if len(rep.notes) != 0 || rep.gh != nil {
 		t.Errorf("notes = %v, gh = %v", rep.notes, rep.gh)
@@ -214,8 +234,14 @@ func TestBranches(t *testing.T) {
 	// Merged since: it no longer hits.
 	git(t, main, at, "merge", "-q", "-m", "merge feat", "feat")
 	git(t, main, at, "push", "-q", "origin", "master")
-	if got := texts(look(t, at, main).branches); !slices.Equal(got, want[:1]) {
-		t.Errorf("after the merge branches = %v, want %v", got, want[:1])
+	if got := texts(look(t, at, main).branches); !slices.Equal(got, want[:2]) {
+		t.Errorf("after the merge branches = %v, want %v", got, want[:2])
+	}
+
+	// The default branch ahead of origin's is not a branch pushed and left.
+	git(t, main, old, "commit", "-q", "--allow-empty", "-m", "not pushed yet")
+	if got := texts(look(t, at, main).branches); !slices.Equal(got, want[:2]) {
+		t.Errorf("with master ahead of origin branches = %v, want %v", got, want[:2])
 	}
 }
 
