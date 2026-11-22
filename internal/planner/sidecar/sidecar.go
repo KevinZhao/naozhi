@@ -224,7 +224,8 @@ type Chain struct {
 // Held is set once the pause held the retry back: past the pause, one
 // grown stale (custody's staleAfter) is left to the user, not sent.
 // A failure of a class custody waits out (network, region) is one of a run:
-// Since is when the run's first failure was, N which of the run this is.
+// Since is when the run's first failure was, moved on by what custody does
+// not count of a long gap between two of them; N which of the run this is.
 type Retry struct {
 	Failed time.Time `json:"failed"`
 	Class  string    `json:"class,omitempty"`

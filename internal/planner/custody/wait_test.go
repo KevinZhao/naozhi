@@ -27,43 +27,49 @@ func up(key string, at time.Time, ended bool) health.Unit {
 // A network or region failure counts toward no stop (D140): its retries go
 // on past MaxErrors of the class and MaxSends in all with the session making
 // no progress, and the lineage's own count is neither moved nor read by
-// them, so what else custody sends is limited as if they never happened.
+// them, so what else custody sends is limited as if they never happened. A
+// lineage already at its limit is waited out the same: the failure stays
+// custody's, the stop being for its next counted message.
 func TestWaitedClassCountsTowardNoStop(t *testing.T) {
 	for _, class := range []health.ErrorClass{health.ErrNetwork, health.ErrRegion} {
-		t.Run(string(class), func(t *testing.T) {
-			r := newRig(t)
-			r.dispatch("task:a")
-			r.progress["task:a"] = "same"
-			const before = MaxIdle - 1 // one short of the stop for want of progress
-			for range before {
-				if _, err := r.e.Deliver("task:a", ReasonPlanner, "接着做"); err != nil {
-					t.Fatal(err)
+		// One short of the stop for want of progress, and right at it.
+		for _, before := range []int{MaxIdle - 1, MaxIdle} {
+			t.Run(fmt.Sprintf("%s after %d", class, before), func(t *testing.T) {
+				r := newRig(t)
+				r.dispatch("task:a")
+				r.progress["task:a"] = "same"
+				for range before {
+					if _, err := r.e.Deliver("task:a", ReasonPlanner, "接着做"); err != nil {
+						t.Fatal(err)
+					}
 				}
-			}
-			for i := 1; i <= MaxSends+MaxErrors; i++ {
-				u := down("task:a", class, r.now)
-				r.units = []health.Unit{u}
-				if !r.e.Covers(u) {
-					t.Fatalf("failure %d not covered", i)
+				for i := 1; i <= MaxSends+MaxErrors; i++ {
+					u := down("task:a", class, r.now)
+					r.units = []health.Unit{u}
+					if !r.e.Covers(u) {
+						t.Fatalf("failure %d not covered", i)
+					}
+					r.e.Tick()
+					r.now = r.now.Add(waitFor(i))
+					r.e.Tick()
+					if len(r.sent) != before+i || r.marks[before+i-1] != fmt.Sprintf("出错重试 %d", i) {
+						t.Fatalf("failure %d: sent %q %q, want its retry, numbered within the run", i, r.sent, r.marks)
+					}
+					r.now = r.now.Add(time.Minute)
 				}
-				r.e.Tick()
-				r.now = r.now.Add(waitFor(i))
-				r.e.Tick()
-				if len(r.sent) != before+i || r.marks[before+i-1] != fmt.Sprintf("出错重试 %d", i) {
-					t.Fatalf("failure %d: sent %q %q, want its retry, numbered within the run", i, r.sent, r.marks)
+				if st := r.e.Status("task:a"); st.State != StateOn || st.Sent != before || len(r.inbox.items) != 0 {
+					t.Fatalf("status = %+v, inbox %+v; want on, the lineage's count at %d, nothing left to the user", st, r.inbox.items, before)
 				}
-				r.now = r.now.Add(time.Minute)
-			}
-			if st := r.e.Status("task:a"); st.State != StateOn || st.Sent != before || len(r.inbox.items) != 0 {
-				t.Fatalf("status = %+v, inbox %+v; want on, the lineage's count at %d, nothing left to the user", st, r.inbox.items, before)
-			}
-			if n, err := r.e.Deliver("task:a", ReasonPlanner, "接着做"); err != nil || n != MaxIdle {
-				t.Errorf("the Planner's next: n=%d err=%v, want %d", n, err, MaxIdle)
-			}
-			if _, err := r.e.Deliver("task:a", ReasonPlanner, "接着做"); !errors.Is(err, ErrStopped) {
-				t.Errorf("the one after: %v, want the stop for want of progress", err)
-			}
-		})
+				for n := before + 1; n <= MaxIdle; n++ {
+					if got, err := r.e.Deliver("task:a", ReasonPlanner, "接着做"); err != nil || got != n {
+						t.Errorf("the Planner's next: n=%d err=%v, want %d", got, err, n)
+					}
+				}
+				if _, err := r.e.Deliver("task:a", ReasonPlanner, "接着做"); !errors.Is(err, ErrStopped) {
+					t.Errorf("the one past MaxIdle: %v, want the stop for want of progress", err)
+				}
+			})
+		}
 	}
 }
 
@@ -203,66 +209,162 @@ func TestWaitHandsOverAfterMaxWait(t *testing.T) {
 	}
 }
 
-// A run is of failures that follow one another. One that comes long after
-// the failure before it follows a retry that ran for a while, or a sleep,
-// which is no time the cause held: it starts a new run, however long ago the
-// old one began. Someone else's resume that fails again soon is the same
-// run.
-func TestWaitRunRestartsAfterAGap(t *testing.T) {
+// A run ends only with a turn that ended normally. A failure long after the
+// one before it (a retry that ran for a while, a sleep) goes on with the run,
+// the gap counting waitGap toward MaxWait: it is not handed over for a night
+// asleep, and its wait does not fall back to the first. One of the other
+// class custody waits out goes on with it too, as does someone else's resume
+// that failed again.
+func TestWaitRunSpansAGap(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		then  func(r *rig) // from the first failure, registered, to the time of the second
-		sent  int
-		wantN int
+		name   string
+		then   func(r *rig) // from the first failure, registered, to the time of the second
+		class  health.ErrorClass
+		sent   int
+		waited time.Duration // the run's, at the second failure
 	}{
 		{"failed again at once", func(r *rig) {
 			r.now = r.now.Add(Backoff[0])
 			r.e.Tick()
 			r.now = r.now.Add(time.Minute)
-		}, 1, 2},
+		}, health.ErrNetwork, 1, 2 * time.Minute},
+		{"failed again as the other class", func(r *rig) {
+			r.now = r.now.Add(Backoff[0])
+			r.e.Tick()
+			r.now = r.now.Add(time.Minute)
+		}, health.ErrRegion, 1, 2 * time.Minute},
 		{"resumed by someone else, failed again", func(r *rig) {
 			r.now = r.now.Add(20 * time.Second)
 			r.units = []health.Unit{up(dash, r.now, false)}
 			r.e.Tick()
 			r.now = r.now.Add(20 * time.Second)
-		}, 0, 2},
+		}, health.ErrNetwork, 0, 40 * time.Second},
 		{"the retry ran past MaxWait", func(r *rig) {
 			r.now = r.now.Add(Backoff[0])
 			r.e.Tick()
 			r.units = []health.Unit{up(dash, r.now, false)}
 			r.now = r.now.Add(MaxWait + time.Hour)
 			r.e.Tick()
-		}, 1, 1},
+		}, health.ErrNetwork, 1, waitGap},
 		{"asleep past MaxWait", func(r *rig) {
 			r.now = r.now.Add(MaxWait + 3*time.Hour)
 			r.woke = true
 			r.e.Tick() // the retry goes at once
 			r.now = r.now.Add(2 * time.Minute)
-		}, 1, 1},
+		}, health.ErrNetwork, 1, waitGap},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newRig(t)
-			start := r.now
 			r.units = []health.Unit{down(dash, health.ErrNetwork, r.now)}
 			r.e.Tick()
 			tc.then(r)
 			if len(r.sent) != tc.sent {
 				t.Fatalf("sent %q, want %d", r.sent, tc.sent)
 			}
-			u := down(dash, health.ErrNetwork, r.now)
+			u := down(dash, tc.class, r.now)
 			r.units = []health.Unit{u}
 			if !r.e.Covers(u) {
 				t.Error("the second failure is not covered")
 			}
 			r.e.Tick()
-			since := map[int]time.Time{1: r.now, 2: start}[tc.wantN]
 			m, _ := r.sessions.Get(dash)
-			if got := m.Retry; got == nil || got.Done || got.N != tc.wantN || !got.Since.Equal(since) || !got.At.Equal(r.now.Add(waitFor(tc.wantN))) {
-				t.Errorf("retry = %+v, want failure %d of a run since %s, due in %s", got, tc.wantN, since, waitFor(tc.wantN))
+			if got := m.Retry; got == nil || got.Done || got.N != 2 || r.now.Sub(got.Since) != tc.waited || !got.At.Equal(r.now.Add(waitFor(2))) {
+				t.Errorf("retry = %+v at %s, want the run's second failure, %s waited, due in %s", got, r.now, tc.waited, waitFor(2))
 			}
 			if st := r.e.Status(dash); st.State == StateStopped || len(r.inbox.items) != 0 {
 				t.Errorf("status = %+v, inbox %+v; want waited out", st, r.inbox.items)
 			}
 		})
+	}
+}
+
+// The time waited adds up over a run's gaps to MaxWait, each counting
+// waitGap at most, however long every retry's turn ran before it failed
+// again and whatever sleep fell between: the waits stay WaitEvery apart, and
+// the session is handed over in the end, so none gets "继续" without end.
+func TestWaitRunEndsThoughItsGapsAreLong(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		class   health.ErrorClass
+		ran     time.Duration // each retry's turn, before it failed again
+		asleep  time.Duration // the machine's sleep in place of every third wait
+		retries int
+		waited  string
+	}{
+		{name: "each retry ran 16 minutes", class: health.ErrNetwork, ran: 16 * time.Minute, retries: 14, waited: "6 小时 19 分钟"},
+		{name: "each retry ran 31 minutes", class: health.ErrRegion, ran: 31 * time.Minute, retries: 12, waited: "6 小时"},
+		{name: "asleep ten hours at every third wait", class: health.ErrRegion, ran: time.Minute, asleep: 10 * time.Hour,
+			retries: 20, waited: "6 小时 10 分钟"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			n := 0
+			for {
+				n++
+				u := down(dash, tc.class, r.now)
+				r.units = []health.Unit{u}
+				if !r.e.Covers(u) {
+					t.Fatalf("failure %d not covered", n)
+				}
+				r.e.Tick()
+				if r.e.Status(dash).State == StateStopped {
+					break
+				}
+				if n > tc.retries {
+					t.Fatalf("failure %d: not handed over after %d retries", n, len(r.sent))
+				}
+				if m, _ := r.sessions.Get(dash); m.Retry == nil || !m.Retry.At.Equal(r.now.Add(waitFor(n))) {
+					t.Fatalf("failure %d: retry %+v, want one due in %s", n, m.Retry, waitFor(n))
+				}
+				if tc.asleep > 0 && n%3 == 0 {
+					r.now = r.now.Add(tc.asleep)
+					r.woke = true
+				} else {
+					r.now = r.now.Add(waitFor(n))
+				}
+				r.e.Tick()
+				if len(r.sent) != n {
+					t.Fatalf("failure %d: sent %d", n, len(r.sent))
+				}
+				r.units = []health.Unit{up(dash, r.now, false)}
+				r.e.Tick()
+				r.now = r.now.Add(tc.ran)
+			}
+			why := fmt.Sprintf("托管等了 %s、重试了 %d 次还是出错（%s）。发「继续」再试", tc.waited, tc.retries, ClassLabel(string(tc.class)))
+			if it := r.inbox.items; len(r.sent) != tc.retries || len(it) != 1 || it[0].Source != "failed:"+dash || it[0].Why != why {
+				t.Errorf("sent %d, inbox %+v; want %d retries, then the failure saying %q", len(r.sent), it, tc.retries, why)
+			}
+		})
+	}
+}
+
+// A dispatched session that got through and whose task was marked done
+// before custody saw its turn's end is retried no more, and is the sign all
+// the same: the others waiting on its class go at once, and its own retry is
+// dropped.
+func TestRecoveryOfAFinishedTaskReleasesTheClass(t *testing.T) {
+	r := newRig(t)
+	r.dispatch("task:a")
+	r.units = []health.Unit{down("task:a", health.ErrNetwork, r.now)}
+	r.e.Tick()
+	r.now = r.now.Add(Backoff[0])
+	r.e.Tick()
+	if len(r.sent) != 1 || r.sent[0] != "task:a|"+RetryText {
+		t.Fatalf("sent %q, want the task's retry", r.sent)
+	}
+	r.sent = nil
+	waiting := []health.Unit{down(dash, health.ErrNetwork, r.now)}
+	r.units = append(waiting, up("task:a", r.now, false))
+	r.e.Tick()
+	r.now = r.now.Add(10 * time.Second)
+	r.mark("task:a", "done")
+	r.units = append(waiting, up("task:a", r.now, true))
+	r.e.Tick()
+	r.e.Tick()
+	if len(r.sent) != 1 || r.sent[0] != dash+"|"+RetryText {
+		t.Errorf("sent %q, want the waiting session's retry, at once", r.sent)
+	}
+	if m, _ := r.sessions.Get("task:a"); m.Retry != nil {
+		t.Errorf("the finished task's retry = %+v, want none", m.Retry)
 	}
 }

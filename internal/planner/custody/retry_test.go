@@ -249,8 +249,9 @@ func TestCredentialRefresh(t *testing.T) {
 // never stop custody; failures in a row still do.
 func TestRetryCountEndsWithRecovery(t *testing.T) {
 	r := newRig(t)
+	r.failText[dash] = serverError
 	for day := range MaxErrors + 2 {
-		r.units = []health.Unit{{ID: dash, Kind: health.KindSession, State: health.Failed, ErrClass: health.ErrNetwork, LastActive: r.now}}
+		r.units = []health.Unit{{ID: dash, Kind: health.KindSession, State: health.Failed, ErrClass: health.ErrOther, LastActive: r.now}}
 		r.e.Tick()
 		r.now = r.now.Add(Backoff[0])
 		r.e.Tick()
@@ -288,8 +289,9 @@ func TestRetryCountEndsWithRecoveryBeforeRetry(t *testing.T) {
 		if key != dash {
 			r.dispatch(key)
 		}
+		r.failText[key] = serverError
 		for day := range MaxErrors + 2 {
-			r.units = []health.Unit{{ID: key, Kind: health.KindSession, State: health.Failed, ErrClass: health.ErrNetwork, LastActive: r.now}}
+			r.units = []health.Unit{{ID: key, Kind: health.KindSession, State: health.Failed, ErrClass: health.ErrOther, LastActive: r.now}}
 			r.e.Tick()
 			m, _ := r.e.cfg.Sessions.Get(key)
 			if m.Retry == nil || m.Retry.Done || !m.Retry.At.Equal(r.now.Add(Backoff[0])) {
