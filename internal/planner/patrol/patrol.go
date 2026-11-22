@@ -325,6 +325,17 @@ func (p *Patrol) workspace(ctx context.Context, rd *round, t target) {
 		// The cancel cut a call short: what it left is not a finding.
 		return
 	}
+	// A workspace of several directories may hold several repositories,
+	// each with a branch of one name: there the directory tells the two
+	// items apart. Counted over the registered directories, not those on
+	// disk today: one unmounted for a round must not file the rest again.
+	if n := len(slices.DeleteFunc(slices.Clone(rd.dirs), func(d workspace.Dir) bool { return d.ID != t.ID })); n > 1 {
+		for _, r := range reps {
+			for i := range r.branches {
+				r.branches[i].Source += ":" + r.dir
+			}
+		}
+	}
 	// A check's items are the workspace's, whichever of its directories
 	// they were found in; one directory it could not be made in leaves the
 	// whole check as it was.
@@ -355,6 +366,15 @@ func (p *Patrol) workspace(ctx context.Context, rd *round, t target) {
 			g, _ := groupOf(it.Source)
 			return it.From == front.FromPatrol && it.Workspace == t.ID && g == c.name
 		})
+		// The cap is over the directories together; each one's section
+		// says which of its own hits it left out.
+		n := 0
+		for _, r := range reps {
+			for i := range c.hits(r) {
+				c.hits(r)[i].unfiled = hits[n].unfiled
+				n++
+			}
+		}
 	}
 	path := filepath.Join(p.cfg.Dir, t.ID+".md")
 	old, _ := os.ReadFile(path)
@@ -373,12 +393,17 @@ type hit struct {
 	// Workspace is the workspace the item is filed under when the check is
 	// not one workspace's.
 	Workspace string
+	// unfiled says the hit is past its check's cap: in the file only.
+	unfiled bool
 }
 
 // reconcile makes the open items match takes be hits, the first
-// maxPerCheck of them, filed under workspace ws.
+// maxPerCheck of them, filed under workspace ws; it marks the rest unfiled.
 func (p *Patrol) reconcile(rd *round, ws string, hits []hit, match func(front.Item) bool) {
 	want := make([]front.Item, 0, min(len(hits), maxPerCheck))
+	for i := maxPerCheck; i < len(hits); i++ {
+		hits[i].unfiled = true
+	}
 	for _, h := range hits[:min(len(hits), maxPerCheck)] {
 		// The ledger refuses a text or a source past its bounds; a source
 		// cannot be cut and still tell the item apart.

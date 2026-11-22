@@ -568,6 +568,58 @@ func TestPerCheckCap(t *testing.T) {
 	}
 }
 
+// TestSeveralDirectories: a workspace's cap is over its directories
+// together, and each directory's section says which of its own hits were
+// left out; a branch of one name in two of its repositories is two items.
+func TestSeveralDirectories(t *testing.T) {
+	e := newEnv(t)
+	a, b := e.workspace(wsA, "a"), e.workspace(wsA, "b")
+	for i, dir := range []string{a, b} {
+		repo := &fakeRepo{remotes: "origin\t/srv/git/" + filepath.Base(dir) + ".git (fetch)\n", remoteRefs: []string{"master", "shared"}}
+		repo.branches = append(repo.branches, branchLine("shared", "", now.Add(-time.Duration(20-i)*day-time.Hour), ""))
+		for j := range 3 {
+			name := fmt.Sprintf("%s%d", filepath.Base(dir), j)
+			repo.remoteRefs = append(repo.remoteRefs, name)
+			repo.branches = append(repo.branches, branchLine(name, "", now.Add(-time.Duration(10-j)*day-time.Hour), ""))
+		}
+		e.fe.repos[dir] = repo
+	}
+	e.round()
+	want := []string{
+		"check:branch:a0:" + a + "|分支 a0 推上去了还没合进 master，最后的提交在 10 天前",
+		"check:branch:a1:" + a + "|分支 a1 推上去了还没合进 master，最后的提交在 9 天前",
+		"check:branch:a2:" + a + "|分支 a2 推上去了还没合进 master，最后的提交在 8 天前",
+		"check:branch:shared:" + a + "|分支 shared 推上去了还没合进 master，最后的提交在 20 天前",
+		"check:branch:shared:" + b + "|分支 shared 推上去了还没合进 master，最后的提交在 19 天前",
+	}
+	if got := e.open(); !slices.Equal(got, want) {
+		t.Fatalf("items =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	md := e.read(wsA + ".md")
+	first, second, ok := strings.Cut(md, "## git（"+b+"）")
+	if !ok || strings.Count(first, "- 分支 ") != 4 || strings.Contains(first, "没列进未了事项") {
+		t.Errorf("the first directory's section, all of whose hits were filed:\n%s", md)
+	}
+	if strings.Count(second, "- 分支 ") != 4 || !strings.Contains(second, "- 分支 b2 推上去了还没合进 master，最后的提交在 8 天前（按本地上次 fetch 的状态）\n- （上面这一类的后 3 条没列进未了事项）\n") {
+		t.Errorf("the second directory's section, three of whose hits were not filed:\n%s", md)
+	}
+
+	// The next round finds the same: nothing is filed again.
+	ids := map[string]string{}
+	for _, it := range e.items.Items() {
+		ids[it.Source] = it.ID
+	}
+	e.round()
+	for _, it := range e.items.Items() {
+		if ids[it.Source] != it.ID {
+			t.Errorf("item %s was filed again", it.Source)
+		}
+	}
+	if got := e.open(); !slices.Equal(got, want) {
+		t.Errorf("after another round items =\n%s", strings.Join(got, "\n"))
+	}
+}
+
 // TestSharedRepository: two workspaces in one GitHub repository ask gh
 // once a round, both files carry the section, and the repository's items
 // are filed once, whichever of the two is looked at and however its remote

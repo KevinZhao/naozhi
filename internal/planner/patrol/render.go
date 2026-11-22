@@ -90,14 +90,18 @@ func gitLines(r dirReport) []string {
 	return append(lines, hitLines(r.worktrees)...)
 }
 
-// hitLines is a check's lines, with one more when it has hits past those
-// filed as items.
+// hitLines is a check's lines, with one more when some of its hits were not
+// filed as items: they are its last, the cap taking the first.
 func hitLines(hits []hit) []string {
 	lines := make([]string, 0, len(hits)+1)
+	n := 0
 	for _, h := range hits {
 		lines = append(lines, h.Line)
+		if h.unfiled {
+			n++
+		}
 	}
-	if n := len(hits) - maxPerCheck; n > 0 {
+	if n > 0 {
 		lines = append(lines, fmt.Sprintf("（上面这一类的后 %d 条没列进未了事项）", n))
 	}
 	return lines
