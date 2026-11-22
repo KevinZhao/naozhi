@@ -40,7 +40,7 @@ func schedulesOff(cfg *config.Config, stateRoot string) bool {
 	if !isolatedInstance(stateRoot) || cfg.Isolation.RunSchedules {
 		return false
 	}
-	slog.Warn("isolated instance: no scout runs, pre-meeting briefs or scheduled cron runs, updates only notified; isolation.run_schedules: true runs them",
+	slog.Warn("isolated instance: no scout runs, pre-meeting briefs, project patrol or scheduled cron runs, updates only notified; isolation.run_schedules: true runs them",
 		"state_root", stateRoot)
 	return true
 }

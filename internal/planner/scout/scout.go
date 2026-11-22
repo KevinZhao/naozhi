@@ -32,6 +32,10 @@ import (
 // UnitID is the scout's unit in the health table and the journal.
 const UnitID = sessionkey.SysKeyPrefix + "scout"
 
+// ActivityType is the type of the scout's journal lines, one per run and
+// per pre-meeting brief (its trigger then TriggerMeeting).
+const ActivityType = "scout"
+
 const (
 	// tick is how often the loop checks for a due slot, and its heartbeat.
 	tick = time.Minute
@@ -492,7 +496,7 @@ func (s *Scout) finish(r Run) {
 	if s.cfg.Journal == nil {
 		return
 	}
-	data, err := json.Marshal(activity{Type: "scout", Summary: summary(r), Run: r.ID, State: r.State,
+	data, err := json.Marshal(activity{Type: ActivityType, Summary: summary(r), Run: r.ID, State: r.State,
 		Findings: len(r.Findings), New: r.New, Woke: r.Woke})
 	if err == nil {
 		err = s.cfg.Journal.Append(journal.Entry{TS: r.Ended, Kind: journal.KindActivity, Unit: UnitID, Data: data})

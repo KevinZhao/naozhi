@@ -967,7 +967,7 @@ func errStop(c sidecar.Chain, class, why string) string {
 func (e *Engine) stopLocked(root, key string, c sidecar.Chain, why string, failed bool) error {
 	c.Stopped, c.StoppedAt = why, e.now()
 	e.saveChainLocked(root, c)
-	e.record(key, note.CustodyData{Event: "stopped", Reason: why})
+	e.record(key, note.CustodyData{Event: note.CustodyStopped, Reason: why})
 	if e.cfg.Inbox != nil {
 		it := notify.Item{Kind: notify.KindQuestion, Level: notify.LevelTimely, Unit: key,
 			Source: "custody:" + root, Title: e.Name(key) + " 托管已停", Why: why}

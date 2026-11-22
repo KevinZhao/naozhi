@@ -25,6 +25,9 @@ const (
 	// MidwayWarn is how long before the Midway session expires it becomes a
 	// notice, closed once mwinit renews it.
 	MidwayWarn = 30 * time.Minute
+	// CrashSource leads the Source of the item a start opens after a run
+	// that did not end normally.
+	CrashSource = "crash:"
 )
 
 // loopName is this pipeline's heartbeat; the health loop watches it.
@@ -87,7 +90,7 @@ func (n *Notifier) Run(ctx context.Context) {
 	}
 	if n.crashed {
 		// Each abnormal exit is its own item, even with an earlier one open.
-		n.Add(Item{Kind: KindNotice, Level: LevelTimely, Source: "crash:" + n.cfg.Clock.Now().Format(time.RFC3339),
+		n.Add(Item{Kind: KindNotice, Level: LevelTimely, Source: CrashSource + n.cfg.Clock.Now().Format(time.RFC3339),
 			Title: "naozhi 上次异常退出", Why: "上次运行没有正常结束，已重新启动"})
 	}
 	if n.upgraded != nil {

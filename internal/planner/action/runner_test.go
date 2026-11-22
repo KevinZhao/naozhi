@@ -1833,3 +1833,32 @@ func TestReminderTurnRuns(t *testing.T) {
 		t.Errorf("refusal receipts = %q: a reminder turn is not outside content", g.refused)
 	}
 }
+
+// UnrunNote tells the lines the runner writes for a block that was
+// malformed or past the cap (what the project patrol counts as naozhi's own
+// trouble) from a block refused for the turn's source and from any other
+// line of the conversation.
+func TestUnrunNote(t *testing.T) {
+	r, g, _, _, _ := newRunner(t)
+	ask := block(`{"type":"ask","question":"q","options":["是"]}`)
+	r.Handle(block(`{"type":"read_external"}`) + "\n" + strings.Repeat(ask+"\n", maxBlocks))
+	if len(g.notes) != 2 {
+		t.Fatalf("notes = %q, want the malformed block's and the one past the cap", g.notes)
+	}
+	for _, n := range g.notes {
+		if !UnrunNote(n) {
+			t.Errorf("UnrunNote(%q) = false", n)
+		}
+	}
+	for _, n := range []string{
+		"",
+		"巡检触发的回合不能派活：「iso 写 hello」没有派出",
+		"这一轮不是用户发起的，不能记记忆：「x」没有记下",
+		"派出「x」失败：session limit",
+		"用户说：动作块没有执行：",
+	} {
+		if UnrunNote(n) {
+			t.Errorf("UnrunNote(%q) = true", n)
+		}
+	}
+}
