@@ -398,7 +398,9 @@ function actionCardHtml(raw) {
   }
   if (a.type === 'front') {
     // 工作线台账 (§15.17, D132), one line: 工作线 · 名称（没写就是 id）· what
-    // this block changed — 现状 → 下一步（等谁）, a decision, or 已结束.
+    // this block changed — 现状 → 下一步（等谁）, a decision, or 已结束 — and
+    // what it did to the open items (§15.23): one filed or re-sourced, some
+    // closed. A block of items alone names no line.
     const name = oneLine(str(a.name)) || str(a.id);
     const parts = [];
     const state = oneLine(str(a.state));
@@ -410,6 +412,10 @@ function actionCardHtml(raw) {
     const decision = oneLine(str(a.decision));
     if (decision) parts.push('定了：' + decision);
     if (a.close === true) parts.push('已结束');
+    const item = a.item && typeof a.item === 'object' ? a.item : null;
+    if (item && oneLine(str(item.text))) parts.push('未了：' + oneLine(str(item.text)));
+    else if (item && str(item.id)) parts.push('改了一条未了事项的出处');
+    if (Array.isArray(a.done) && a.done.length) parts.push('了结 ' + a.done.length + ' 条未了事项');
     const line = parts.join(' ');
     return '<div class="pl-act pl-act-front pl-act-line" title="记进工作线台账；进行中的工作线随每次对话带给 Planner">' +
       '<span class="pl-act-k">工作线</span>' + (name ? ' · <b>' + esc(name) + '</b>' : '') +

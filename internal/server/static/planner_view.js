@@ -57,7 +57,7 @@ import { decisionActsHtml, decorateEvents, noteWorkspaces, paintSessionCards, re
 import { clearAck, clearPending, closePlannerSession, mountComposer, noteAck, notePlannerStatus, openPlannerSession, showPlannerLeft } from './planner_chat.js';
 import { onSessionsApplied } from './session_list.js';
 import { countHeadHtml, ensureTasks, inProgress, mountTasks, refreshTasks, revealTask, taskOf } from './tasks.js';
-import { mountFronts, refreshFronts } from './fronts.js';
+import { mountFronts, paintFronts, refreshFronts } from './fronts.js';
 import { initPlannerResize } from './planner_resize.js';
 import { custody, holdCustodyPaused, refreshCustody, setCustodyPaused } from './custody.js';
 import { workbench } from './workbench.js';
@@ -919,7 +919,7 @@ async function fetchStatus() {
   }
   notePlannerStatus(pl.status);
   const named = noteWorkspaces(pl.status && pl.status.workspaces);
-  if (pl.host) { paintStatus(); paintTools(); paintStreamEmpty(); if (named) paintWaiting(); }
+  if (pl.host) { paintStatus(); paintTools(); paintStreamEmpty(); if (named) { paintWaiting(); paintFronts(); } }
 }
 
 // EXAMPLES are the empty conversation's starters: a tap puts one in the
