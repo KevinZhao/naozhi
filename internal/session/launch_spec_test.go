@@ -427,7 +427,7 @@ func TestLaunchSpecProjectSettings(t *testing.T) {
 // reattach.
 func TestLaunchSpecDrift_TaskDeny(t *testing.T) {
 	for name, rules := range map[string][]string{
-		"task":   {"mcp__aws-outlook-mcp__enable_write_tools"},
+		"task": {"mcp__aws-outlook-mcp__enable_write_tools"},
 		"patrol": {"mcp__aws-outlook-mcp__enable_write_tools", "Bash(gh pr merge:*)", "Bash(gh release create:*)",
 			"Bash(git tag:*)", "Bash(git push*--tags*)", "Bash(git push*refs/tags/*)", "Bash(gh api:*)", "Bash(gh workflow run:*)"},
 	} {
