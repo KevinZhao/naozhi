@@ -35,6 +35,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/front"
 	"github.com/naozhi/naozhi/internal/planner/github"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
+	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
 const (
@@ -93,14 +94,49 @@ type Config struct {
 	Exec github.ExecFunc
 	// Now is the wall clock; nil is time.Now.
 	Now func() time.Time
+
+	// Session runs a deep check's one-shot session (wireup.PatrolSession);
+	// nil makes no deep checks (§15.23 ②).
+	Session Session
+	// Wake hands a workspace's new findings to the Planner, a block a
+	// batch, each batch a turn of its own (agent.Agent.Wake from
+	// agent.SourcePatrol); sent is told how each later batch went. Whatever
+	// the error, the findings stay pending and go again at the next round:
+	// a deep check is a week away, so none is dropped for a Planner that is
+	// off. nil hands none over.
+	Wake func(sent func(batch int, err error), blocks ...string) error
+	// OwnSettings is agent.Config.OwnSettings: a deep check gets Bash, for
+	// git's and gh's reads, only where the session settings are naozhi's
+	// own.
+	OwnSettings bool
+	// TaskOpen reports whether dispatched session key is still at work (in
+	// progress or waiting on the user in 任务). nil counts every one as at
+	// work.
+	TaskOpen func(key string) bool
+	// Alarm opens an error in "等你": a deep check's session did what it
+	// must not. nil only logs.
+	Alarm func(source, title, why string)
+	// Ctx bounds the deep checks' sessions; nil is Background. Stop cuts
+	// them as well.
+	Ctx context.Context
 }
+
+// Session runs one deep check: key's session started with opts and sent
+// text. It returns the reply, the tools the session called, and its calls
+// that change state as "<tool>:<activity>" (planner/activity's types); the
+// session is gone when it returns.
+type Session func(ctx context.Context, key string, opts sessionview.AgentOpts, text string) (reply string, tools, writes []string, err error)
 
 // Items is the part of the ledger the patrol writes: Reconcile makes a
 // check's open items be its hits, CloseItems closes those of a workspace no
-// longer registered.
+// longer registered and of a finding whose pull request is over, AddItem
+// and EditItem file a deep check's finding and say its pull request is
+// ready.
 type Items interface {
 	Reconcile(match func(front.Item) bool, want []front.Item, by string) (added, closed []front.Item)
 	CloseItems(match func(front.Item) bool, by string) []front.Item
+	AddItem(front.Item) (front.Item, bool, error)
+	EditItem(id string, text, source, frontID *string) (front.Item, error)
 }
 
 // Worktree is a git worktree a put-away session left in place: its
@@ -147,9 +183,27 @@ type Patrol struct {
 	runMu  sync.Mutex
 	cancel context.CancelFunc
 	done   chan struct{}
+
+	// deepMu guards the deep checks' records on disk (deep/*.json), each
+	// change a read, an edit and a write under it, and the three fields
+	// below. Four goroutines come here: a deep check's, the round's, the
+	// action runner's and a request's. Nothing slow runs under it (no
+	// session, no gh, no wake); the ledger is written under it (deepMu,
+	// then front.Store's lock), and the ledger never calls back.
+	deepMu sync.Mutex
+	// deepRunning is the deep check in flight: one at a time.
+	deepRunning bool
+	// sending are the findings (by ref) a wake of this process still has
+	// to submit: a round does not hand them over a second time.
+	sending map[string]bool
+	// deepCtx bounds the deep checks' sessions, cut by Stop; runs are the
+	// ones in flight, for Stop to wait on.
+	deepCtx    context.Context
+	deepCancel context.CancelFunc
+	runs       sync.WaitGroup
 }
 
-// New returns a Patrol; nothing runs until Run or Round.
+// New returns a Patrol; nothing runs until Run, Round or Trigger.
 func New(cfg Config) *Patrol {
 	if cfg.Exec == nil {
 		cfg.Exec = github.Exec
@@ -157,7 +211,12 @@ func New(cfg Config) *Patrol {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Patrol{cfg: cfg, hasPR: map[string]bool{}}
+	if cfg.Ctx == nil {
+		cfg.Ctx = context.Background()
+	}
+	p := &Patrol{cfg: cfg, hasPR: map[string]bool{}, sending: map[string]bool{}}
+	p.deepCtx, p.deepCancel = context.WithCancel(cfg.Ctx)
+	return p
 }
 
 // Enabled reports whether rounds run here.
@@ -193,22 +252,36 @@ func (p *Patrol) Run(ctx context.Context) {
 }
 
 // Stop ends Run and waits for its round in flight, whose git and gh calls
-// the cancel cuts.
+// the cancel cuts, and for the deep check in flight: its session calls into
+// the router, so Stop comes before the router's shutdown. A deep check cut
+// short leaves no record and runs again after the next start.
 func (p *Patrol) Stop() {
 	if p == nil {
 		return
 	}
+	// Under deepMu: a deep check starting now either is counted before the
+	// wait below or finds the patrol stopped.
+	p.deepMu.Lock()
+	p.deepCancel()
+	p.deepMu.Unlock()
 	p.runMu.Lock()
 	cancel, done := p.cancel, p.done
 	p.runMu.Unlock()
-	if cancel == nil {
-		return
+	if cancel != nil {
+		cancel()
 	}
-	cancel()
+	gone := make(chan struct{})
+	go func() {
+		if done != nil {
+			<-done
+		}
+		p.runs.Wait()
+		close(gone)
+	}()
 	select {
-	case <-done:
+	case <-gone:
 	case <-time.After(stopWait):
-		slog.Warn("planner patrol: round still going at shutdown")
+		slog.Warn("planner patrol: round or deep check still going at shutdown")
 	}
 }
 
@@ -233,6 +306,13 @@ func (p *Patrol) Round(ctx context.Context) {
 		}
 	}
 	p.checks(ctx, now)
+	if ctx.Err() != nil {
+		return
+	}
+	// The deep checks ride the hourly round (§15.23 ②): the pull requests
+	// they led to are looked at, then the one due is started.
+	p.pulls(ctx)
+	p.deep(ctx, now)
 }
 
 // round is what one round shares between its workspaces.
@@ -242,6 +322,8 @@ type round struct {
 	// repos are the GitHub repositories looked at, by lowercased
 	// owner/name: one that several directories are in is asked once.
 	repos map[string]*repoReport
+	// own are the pull requests the deep checks' findings led to (ownPulls).
+	own map[string]bool
 	// failed counts the checks that could not be made; added and closed
 	// the items filed and closed.
 	failed, added, closed int
@@ -256,7 +338,7 @@ func (p *Patrol) checks(ctx context.Context, now time.Time) {
 		slog.Warn("planner patrol: directory unavailable", "dir", p.cfg.Dir, "err", err)
 		return
 	}
-	rd := &round{now: now, dirs: p.cfg.Workspaces(), repos: map[string]*repoReport{}}
+	rd := &round{now: now, dirs: p.cfg.Workspaces(), repos: map[string]*repoReport{}, own: p.ownPulls()}
 	var active map[string]time.Time
 	if p.cfg.Active != nil {
 		active = p.cfg.Active()

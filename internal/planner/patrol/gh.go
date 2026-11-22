@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,7 +60,7 @@ func (p *Patrol) github(ctx context.Context, rd *round, ws, owner, name, dir str
 	}
 	r := &repoReport{Owner: owner, Name: name, key: key, full: owner + "/" + name}
 	rd.repos[key] = r
-	r.err = p.ask(ctx, r, dir, rd.now)
+	r.err = p.ask(ctx, r, dir, rd.now, rd.own)
 	if r.err != nil {
 		rd.failed++
 		return r
@@ -111,7 +112,7 @@ type workflowRun struct {
 // ask makes r's four gh calls; any failing fails the repository's checks
 // together. Every argument is a part parsed out of the remote's URL or a
 // value gh gave, never text as written elsewhere.
-func (p *Patrol) ask(ctx context.Context, r *repoReport, dir string, now time.Time) error {
+func (p *Patrol) ask(ctx context.Context, r *repoReport, dir string, now time.Time, own map[string]bool) error {
 	repo := r.Owner + "/" + r.Name
 	var view struct {
 		NameWithOwner    string `json:"nameWithOwner"`
@@ -141,7 +142,7 @@ func (p *Patrol) ask(ctx context.Context, r *repoReport, dir string, now time.Ti
 	for _, pr := range pulls {
 		r.heads[pr.HeadRefName] = true
 	}
-	r.pulls = stalled(r, pulls, now)
+	r.pulls = stalled(r, pulls, now, own)
 
 	// A repository with no commit has no default branch, and no CI.
 	if r.def != "" {
@@ -195,18 +196,19 @@ func (p *Patrol) gh(ctx context.Context, dir string, v any, args ...string) erro
 }
 
 // stalled is the pull requests open prDays or more, not drafts, whose CI
-// passed, the oldest first. The item's source is the pull request's link,
+// passed, the oldest first; those in own (ownPulls) are a deep check
+// finding's, which has its own item. The item's source is the pull request's link,
 // built from the repository and the number: the user can open it, and the
 // hourly GitHub refresh closes the item once the pull request is merged or
 // closed even on a round the patrol did not make.
-func stalled(r *repoReport, pulls []pull, now time.Time) []hit {
+func stalled(r *repoReport, pulls []pull, now time.Time, own map[string]bool) []hit {
 	pulls = slices.Clone(pulls)
 	slices.SortFunc(pulls, func(a, b pull) int {
 		return cmp.Or(a.CreatedAt.Compare(b.CreatedAt), a.Number-b.Number)
 	})
 	var hits []hit
 	for _, pr := range pulls {
-		if pr.Number <= 0 || pr.IsDraft || now.Sub(pr.CreatedAt) < prDays*day || !green(pr.Checks) {
+		if pr.Number <= 0 || pr.IsDraft || now.Sub(pr.CreatedAt) < prDays*day || !green(pr.Checks) || own[r.key+"#"+strconv.Itoa(pr.Number)] {
 			continue
 		}
 		link := fmt.Sprintf("https://github.com/%s/pull/%d", r.full, pr.Number)
@@ -220,7 +222,19 @@ func stalled(r *repoReport, pulls []pull, now time.Time) []hit {
 // green reports whether a pull request's checks passed: it has some, and
 // the latest run of each is a success (or neutral, or skipped). One with no
 // check at all is not "CI 通过": nothing looked at it.
-func green(checks []check) bool {
+func green(checks []check) bool { return rollup(checks) == rollPass }
+
+// How a pull request's checks stand together.
+const (
+	rollNone    = ""
+	rollPass    = "pass"
+	rollFail    = "fail"
+	rollPending = "pending"
+)
+
+// rollup is how a pull request's checks stand, by the latest run of each:
+// none at all, one failed, else one still going, else all passed.
+func rollup(checks []check) string {
 	latest := map[string]check{}
 	for _, c := range checks {
 		// A re-run check is listed once per run.
@@ -229,18 +243,31 @@ func green(checks []check) bool {
 			latest[key] = c
 		}
 	}
+	out := rollNone
+	if len(latest) > 0 {
+		out = rollPass
+	}
 	for _, c := range latest {
-		if c.Typename == "StatusContext" {
-			if c.State != "SUCCESS" {
-				return false
-			}
-			continue
+		var one string
+		switch {
+		case c.Typename == "StatusContext" && c.State == "SUCCESS":
+			one = rollPass
+		case c.Typename == "StatusContext" && slices.Contains([]string{"PENDING", "EXPECTED"}, c.State):
+			one = rollPending
+		case c.Typename == "StatusContext":
+			one = rollFail
+		case c.Status != "COMPLETED":
+			one = rollPending
+		case slices.Contains([]string{"SUCCESS", "NEUTRAL", "SKIPPED"}, c.Conclusion):
+			one = rollPass
+		default:
+			one = rollFail
 		}
-		if c.Status != "COMPLETED" || !slices.Contains([]string{"SUCCESS", "NEUTRAL", "SKIPPED"}, c.Conclusion) {
-			return false
+		if one == rollFail || one == rollPending && out != rollFail {
+			out = one
 		}
 	}
-	return len(latest) > 0
+	return out
 }
 
 // failing is one hit when the default branch's CI is failing: of each

@@ -601,10 +601,30 @@ var homeDeny = []string{
 	".zsh_history", ".bash_history", ".zshenv", ".zshrc", ".zprofile", ".bashrc", ".bash_profile", ".profile",
 }
 
+// secretDeny keeps the files that hold credentials by their name unread
+// wherever they lie, a repository's working tree included.
+var secretDeny = []string{
+	"Read(//**/.env)",
+	"Read(//**/.env.*)",
+	"Read(//**/*.pem)",
+	"Read(//**/*.key)",
+	"Read(//**/id_rsa*)",
+	"Read(//**/id_ed25519*)",
+}
+
+// SecretReadDeny is secretDeny, a copy: the deny rules of another
+// restricted session that reads a repository (the project patrol's deep
+// check).
+func SecretReadDeny() []string { return slices.Clone(secretDeny) }
+
+// ReadRule is the allow rule for reading everything below dir.
+func ReadRule(dir string) string { return absRule("Read", filepath.Join(dir, "**")) }
+
 // denyRules keep credentials out of reach even inside an allowed tree: the
-// home-relative ones (homeDeny), the data root's secret-bearing files (its
-// config-shaped files, shim state with auth tokens, profile secrets, debug
-// captures with API keys) and the extra paths, each under every spelling
+// home-relative ones (homeDeny), the name-bound ones (secretDeny), the data
+// root's secret-bearing files (its config-shaped files, shim state with
+// auth tokens, profile secrets, debug captures with API keys) and the extra
+// paths, each under every spelling
 // (spelledRules). The CLI expands "~" to the one home spelling it was
 // given, so the other spellings of home get absolute rules.
 func denyRules(home, dataRoot string, extra []string, aliases map[string]string) []string {
@@ -612,14 +632,7 @@ func denyRules(home, dataRoot string, extra []string, aliases map[string]string)
 	for _, p := range homeDeny {
 		rules = append(rules, "Read(~/"+p+")")
 	}
-	rules = append(rules,
-		"Read(//**/.env)",
-		"Read(//**/.env.*)",
-		"Read(//**/*.pem)",
-		"Read(//**/*.key)",
-		"Read(//**/id_rsa*)",
-		"Read(//**/id_ed25519*)",
-	)
+	rules = append(rules, secretDeny...)
 	if home != "" {
 		pats := make([]string, len(homeDeny))
 		for i, p := range homeDeny {
