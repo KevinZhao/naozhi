@@ -199,6 +199,10 @@ type Config struct {
 	// Fronts returns the lines of work in progress (front.Store.Open): the
 	// brief leads with them (§15.18, D133).
 	Fronts func() []front.Front
+	// Items returns the ledger's open items, each under its line
+	// (front.Store.Items): the brief lists a few under each line (§15.23,
+	// D143). nil lists none.
+	Items func() []front.Item
 	// Tidy wakes the Planner with text, the sessions that moved since the
 	// last brief, to bring the ledger up to date before the brief is
 	// written; false when the Planner cannot take it. Tidying reports that

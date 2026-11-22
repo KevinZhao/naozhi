@@ -202,6 +202,15 @@ func TestParseReport(t *testing.T) {
 		{name: "not json", text: reportBlock(`state: done`), err: "不是一个 JSON 对象"},
 		{name: "two objects", text: reportBlock(done + " " + done), err: "不是一个 JSON 对象"},
 		{name: "unclosed", text: "正文\n```naozhi-report\n" + done, err: "没有结束"},
+		// What the turn leaves: folded to a line each, the empty and the
+		// repeated dropped, a long one cut, at most five kept.
+		{name: "left", text: reportBlock(`{"state":"progress","summary":"迁了一半","left":[" 迁完 internal/b\n的调用点 ","","跑一遍集成测试","跑一遍集成测试"]}`),
+			want: Report{State: "progress", Summary: "迁了一半", Left: []string{"迁完 internal/b 的调用点", "跑一遍集成测试"}}},
+		{name: "left cut", text: reportBlock(`{"state":"done","summary":"s","left":["` + strings.Repeat("长", 150) + `","1","2","3","4","5","6"]}`),
+			want: Report{State: "done", Summary: "s", Left: []string{strings.Repeat("长", reportLeftRunes-1) + "…", "1", "2", "3", "4"}}},
+		{name: "left empty", text: reportBlock(`{"state":"done","summary":"s","left":[]}`), want: Report{State: "done", Summary: "s"}},
+		{name: "left not a list", text: reportBlock(`{"state":"done","summary":"s","left":"跑一遍集成测试"}`), err: "字段不对"},
+		{name: "left of objects", text: reportBlock(`{"state":"done","summary":"s","left":[{"text":"x"}]}`), err: "字段不对"},
 		{name: "long summary", text: reportBlock(`{"state":"done","summary":" 第一行\n` + strings.Repeat("长", 200) + `"}`), want: Report{State: "done", Summary: "第一行 " + strings.Repeat("长", reportSummaryRunes-5) + "…"}},
 		// The action block is the Planner's, not a report.
 		{name: "action block", text: block(`{"type":"ask","question":"q","options":[]}`)},
@@ -216,7 +225,7 @@ func TestParseReport(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			rep, body, ok, err := ParseReport(c.text)
-			if ok != (c.want.State != "") || rep != c.want {
+			if ok != (c.want.State != "") || !reflect.DeepEqual(rep, c.want) {
 				t.Errorf("report = %+v, %v, want %+v", rep, ok, c.want)
 			}
 			if (err == nil) != (c.err == "") || err != nil && !strings.Contains(err.Error(), c.err) {
@@ -231,6 +240,11 @@ func TestParseReport(t *testing.T) {
 			if utf8.RuneCountInString(rep.Summary) > reportSummaryRunes {
 				t.Errorf("summary of %d runes", utf8.RuneCountInString(rep.Summary))
 			}
+			for _, l := range rep.Left {
+				if utf8.RuneCountInString(l) > reportLeftRunes {
+					t.Errorf("a left line of %d runes", utf8.RuneCountInString(l))
+				}
+			}
 		})
 	}
 
@@ -242,6 +256,7 @@ func TestParseReport(t *testing.T) {
 		`{"state":"done","summary":"x","` + strings.Repeat("长", 3000) + `":1}`,
 		`{"state":"done","summary":"x"} 长长长`,
 		`{"state":1,"summary":"长"}`,
+		`{"state":"done","summary":"x","left":[{"长":1}]}`,
 	} {
 		_, _, ok, err := ParseReport(reportBlock(body))
 		if ok || err == nil || strings.Contains(err.Error(), "长") || utf8.RuneCountInString(err.Error()) > 80 {

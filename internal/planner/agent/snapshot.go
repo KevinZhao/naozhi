@@ -77,7 +77,11 @@ type snapshotInput struct {
 	// and Routines the standing tasks (§15.17); nil leaves a section out.
 	Fronts   []front.Front
 	Routines []Routine
-	Units    []health.Unit
+	// Items are the ledger's open items (§15.23, D143), each with the open
+	// line it shows under, "" for none: the fronts section says how many a
+	// line has, and how many are under none.
+	Items []front.Item
+	Units []health.Unit
 	// Label is a unit's title, Name its cross-session name, Workspace a
 	// workspace ID's name; any may return "".
 	Label     func(id string) string
@@ -159,13 +163,20 @@ func renderSnapshotKey(in snapshotInput) (full, key string) {
 		keepTo = len(lines)
 	}
 	if in.Fronts != nil {
+		left := map[string]int{}
+		for _, it := range in.Items {
+			left[it.Front]++
+		}
 		lines = append(lines, fmt.Sprintf("工作线（%d）：", len(in.Fronts)))
 		for i, f := range in.Fronts {
 			if i == snapshotMaxFronts {
 				lines = append(lines, fmt.Sprintf("- …另有 %d 条，见 fronts.json", len(in.Fronts)-i))
 				break
 			}
-			lines = append(lines, frontLine(f))
+			lines = append(lines, frontLine(f, left[f.ID]))
+		}
+		if n := left[""]; n > 0 {
+			lines = append(lines, fmt.Sprintf("- 未归线：未了 %d（见 fronts.json 的 items）", n))
 		}
 	}
 	if in.Routines != nil {
@@ -274,10 +285,16 @@ func renderSnapshotKey(in snapshotInput) (full, key string) {
 }
 
 // frontLine is a line of work as the snapshot lists it: its ID (what a
-// front block names), its name, where it stands, the next step and who it
-// waits on. The sessions and decisions stay in fronts.json.
-func frontLine(f front.Front) string {
+// front block names), its name, how many open items it has (left, said
+// only when there are some), where it stands, the next step and who it
+// waits on. The count follows the name: the line is cut at its end, and a
+// count there would be the first thing lost. The sessions, decisions and
+// the items themselves stay in fronts.json.
+func frontLine(f front.Front, left int) string {
 	line := "- [" + f.ID + "] " + f.Name
+	if left > 0 {
+		line += fmt.Sprintf("（未了 %d）", left)
+	}
 	if f.State != "" {
 		line += "：" + f.State
 	}

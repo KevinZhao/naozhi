@@ -57,8 +57,19 @@ func TestSystemPrompt(t *testing.T) {
 		`"goal":"…"`,
 		"/state/planner/parked.md（搁置区",
 		"/state/planner/github/<owner>+<repo>.md",
-		`用户问"还有什么要做 / 还有什么没开发"时，先读 /state/planner/github/`,
-		"RFC 的排期表，再读 parked.md",
+		`用户问"还有什么要做 / 还有什么没开发"时，先按 /state/planner/fronts.json 的未了事项答`,
+		"工作区里 RFC 的排期表和 parked.md，补台账里没有的",
+		"每条线下可以挂未了事项（/state/planner/fronts.json 的 items）",
+		`回执里写着"留下 N 条未了事项"`,
+		`后面带" · 留下 N 条未了事项（已入列）"的`,
+		`名称后的"未了 N"是这条线上开着的未了事项数`,
+		`末尾的"未归线：未了 N"`,
+		`"item":{"text":"…","workspace":"<工作区 ID 或名字>","source":"<出处>"},"done":["<未了事项的 id>"]}`,
+		`{"type":"front","item":{"text":"…","source":"…"}}`,
+		"只带 done 的块不动工作线",
+		"线上还有未了事项时不要 close 这条线",
+		"用 front 的 item 记下来，source 填这个会话的 key",
+		"用 item 带 id 把那一条的出处改成 issue 链接",
 		`{"type":"park","text":"…","source":"…"}`,
 		"交接里每条事项都带出处",
 		`{"type":"halt","task":"<会话 key>","why":"…"}`,
@@ -143,10 +154,13 @@ func TestSystemPrompt(t *testing.T) {
 		"<会话 key>", "dashboard:direct:u:general", "<会话 key 或空>", "",
 		"<工作区 ID 或名字，或 global>", "global", "<slug>", "style", "<task: key>", "task:ab12",
 		"<定时表达式>", "0 9 * * 1-5", "<快照里方括号中的 id>", "1cc584f384db82fc",
+		"<出处>", "task:ab12", "<未了事项的 id>", "i7k2m9qa",
 	)
-	formats := regexp.MustCompile(`\{"type":"[a-z]+"[^\n]*?\}`).FindAllString(p, -1)
-	if len(formats) != 19 {
-		t.Fatalf("found %d block formats, want 19: %q", len(formats), formats)
+	// One object, whose fields may hold an object of their own (a front
+	// block's item).
+	formats := regexp.MustCompile(`\{"type":"[a-z]+"(?:[^\n{}]|\{[^\n{}]*\})*?\}`).FindAllString(p, -1)
+	if len(formats) != 20 {
+		t.Fatalf("found %d block formats, want 20: %q", len(formats), formats)
 	}
 	for _, f := range formats {
 		body := strings.ReplaceAll(fill.Replace(f), `["x"]`, `["是"]`)

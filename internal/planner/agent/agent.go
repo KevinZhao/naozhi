@@ -190,6 +190,9 @@ type Config struct {
 	// Fronts feeds the snapshot the lines of work in progress (§15.17); nil
 	// leaves the section out.
 	Fronts func() []front.Front
+	// Items feeds the snapshot the ledger's open items, each under its line
+	// (front.Store.Items, §15.23); nil counts none.
+	Items func() []front.Item
 	// Conclusion is the first sentence of a session's latest report, for
 	// its snapshot line; nil shows none.
 	Conclusion func(key string) string
@@ -1298,6 +1301,9 @@ func (a *Agent) snapshotInput() snapshotInput {
 	}
 	if a.cfg.Fronts != nil {
 		in.Fronts = orEmpty(a.cfg.Fronts())
+	}
+	if a.cfg.Items != nil {
+		in.Items = a.cfg.Items()
 	}
 	if routines != nil {
 		in.Routines = orEmpty(routines())

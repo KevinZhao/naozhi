@@ -57,6 +57,10 @@ type Config struct {
 	// Workspaces lists the registered directories on this node
 	// (workspace.Registry.LocalDirs).
 	Workspaces func() []workspace.Dir
+	// Ledger is the ledger's open items (front.Store): the ones whose
+	// source is a pull request or an issue are closed once it is (settle).
+	// nil checks none.
+	Ledger Ledger
 	// Exec runs git and gh; nil is Exec.
 	Exec ExecFunc
 	// Now is the wall clock; nil is time.Now.
@@ -66,6 +70,9 @@ type Config struct {
 // Writer refreshes the issue files.
 type Writer struct {
 	cfg Config
+	// settled is the last open item a round over factsMax looked up, where
+	// the next goes on (settle). Refresh's goroutine alone touches it.
+	settled string
 }
 
 // New returns a Writer; nothing runs until Run or Refresh.
@@ -103,8 +110,10 @@ type Repo struct {
 	Owner, Name string
 	// Dir is a directory of it, where gh runs.
 	Dir string
-	// Workspaces names the workspaces in it, in registration order.
-	Workspaces []string
+	// Workspaces names the workspaces in it, in registration order;
+	// WorkspaceIDs are their IDs.
+	Workspaces   []string
+	WorkspaceIDs []string
 }
 
 // File is the repository's file name under planner/github. The separator is
@@ -166,6 +175,7 @@ func (w *Writer) Refresh(ctx context.Context) {
 		w.prune(repos)
 	}
 	slog.Info("planner github: issues refreshed", "repos", len(repos), "failed", failed)
+	w.settle(ctx, repos)
 }
 
 // repos is the GitHub repositories the registered directories are in, by
@@ -201,6 +211,9 @@ func (w *Writer) repos(ctx context.Context) (out []Repo, complete bool) {
 		}
 		if d.Name != "" && !slices.Contains(out[i].Workspaces, d.Name) {
 			out[i].Workspaces = append(out[i].Workspaces, d.Name)
+		}
+		if d.ID != "" && !slices.Contains(out[i].WorkspaceIDs, d.ID) {
+			out[i].WorkspaceIDs = append(out[i].WorkspaceIDs, d.ID)
 		}
 	}
 	slices.SortFunc(out, func(a, b Repo) int { return strings.Compare(strings.ToLower(a.File()), strings.ToLower(b.File())) })

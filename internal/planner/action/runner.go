@@ -205,6 +205,10 @@ type Config struct {
 	// Front writes one line of work into the ledger (front.Store.Apply,
 	// §15.17, D132). nil refuses front blocks.
 	Front func(front.Update) (front.Front, error)
+	// Items files and closes the ledger's open items (front.Store, §15.23,
+	// D143): what a dispatched session's report leaves, and a front block's
+	// item and done. nil drops the former and refuses the latter.
+	Items Items
 	// Lookup starts a web lookup of q (planner/reader.Reader.Lookup): its
 	// answer, or the cache's of the same question today, reaches the
 	// Planner as a turn of its own. nil refuses lookup blocks.
@@ -378,6 +382,9 @@ type ended struct {
 	// onBackground is a hold on background work, not on a doing window:
 	// only the CLI's end under such a hold killed work (woken).
 	onBackground bool
+	// left is how many open items the report filed (fileLeft). It is not
+	// kept on disk: a check redone after a restart says nothing of them.
+	left int
 }
 
 const (
@@ -546,6 +553,11 @@ func (r *Runner) taskEnded(key, text string) {
 	case err != nil:
 		e.reportErr = err.Error()
 	}
+	// Filed before the turn is recorded: a restart in between has the
+	// session report again, and the same item is not filed twice.
+	if ok {
+		e.left = r.fileLeft(key, m.Workspace, rep)
+	}
 	// On disk until checked: a restart in between checks it again. The
 	// report and the turn it ended are one write, so a restart never finds
 	// the one without the other (reportedTurn).
@@ -625,6 +637,31 @@ func (r *Runner) taskEnded(key, text string) {
 	}); !opened {
 		r.cfg.Inbox.Retitle(src, title)
 	}
+}
+
+// fileLeft files what session key's report leaves as the ledger's open
+// items, the session their source, and returns how many are new; a report
+// of done that leaves nothing closes the ones the session left before
+// (§15.23, D143: closed by the fact, not by a tick). An item not filed (the
+// list full) is logged only: the report itself still goes on.
+func (r *Runner) fileLeft(key, ws string, rep Report) int {
+	if r.cfg.Items == nil {
+		return 0
+	}
+	n := 0
+	for _, l := range rep.Left {
+		_, added, err := r.cfg.Items.AddItem(front.Item{Text: l, Workspace: ws, Source: key, From: front.FromReport})
+		switch {
+		case err != nil:
+			slog.Warn("planner actions: an item a report left not filed", "key", key, "err", err)
+		case added:
+			n++
+		}
+	}
+	if rep.State == ReportDone && len(rep.Left) == 0 {
+		r.cfg.Items.CloseItems(func(it front.Item) bool { return it.From == front.FromReport && it.Source == key }, front.ByReport)
+	}
+	return n
 }
 
 // ReportSource is the "等你" source of session key's need_user report:
@@ -917,6 +954,9 @@ func (r *Runner) checkReport(e ended, tasks []task.Task, i int, now time.Time) {
 		line += "（任务已标完成，网关已改回进行中）"
 	case e.markedDone:
 		line += "（任务已标完成）"
+	}
+	if e.left > 0 {
+		line += fmt.Sprintf(" · 留下 %d 条未了事项（已入列）", e.left)
 	}
 	// A path is named only where the digest shows the report: one not
 	// written yet is a file the Planner cannot read.
@@ -1303,7 +1343,7 @@ func (r *Runner) handle(rep reply) {
 		case b.Routine != nil:
 			err = r.routine(*b.Routine)
 		case b.Front != nil:
-			err = r.front(*b.Front)
+			err = r.front(*b.Front, len(rep.words) > 0)
 		case b.Promise != nil:
 			err = r.promise(*b.Promise, dispatched)
 		case b.Ask != nil:
@@ -1385,12 +1425,15 @@ func blockLabel(b Block) string {
 		Question string `json:"question"`
 		Text     string `json:"text"`
 		Q        string `json:"q"`
+		// A front block has none of the above: its name, else its ID.
+		Name string `json:"name"`
+		ID   string `json:"id"`
 	}
 	if json.Unmarshal([]byte(b.Raw), &head) != nil || head.Type == "" {
 		return ""
 	}
 	label := textutil.TruncateRunes(strings.Join(strings.Fields(head.Type), " "), labelRunes)
-	if name := cmp.Or(head.Title, head.Task, head.Question, head.Text, head.Q); name != "" {
+	if name := cmp.Or(head.Title, head.Task, head.Question, head.Text, head.Q, head.Name, head.ID); name != "" {
 		label += "「" + textutil.TruncateRunes(strings.Join(strings.Fields(name), " "), labelRunes) + "」"
 	}
 	return "（" + label + "）"
@@ -1632,7 +1675,7 @@ func (r *Runner) refuseOutside(b Block, by string) string {
 		return "这一轮不能加或改例行任务，没有执行"
 	}
 	if f := b.Front; f != nil {
-		r.note(by + "触发的回合不能改工作线台账：「" + cmp.Or(f.Name, f.ID) + "」没有记")
+		r.note(by + "触发的回合不能改工作线台账：「" + f.label() + "」没有记")
 		return "这一轮读的是外部内容，不能改工作线台账，没有记"
 	}
 	if c := b.Cancel; c != nil {
@@ -1666,7 +1709,7 @@ func (r *Runner) refuseWatch(b Block, rep reply) string {
 		r.note("你开的会话一轮结束触发的回合，它的回执那一轮也只能写旁注、发通知：" + label + "没有执行")
 		return "这一轮回的是 <naozhi-watch> 回合的回执，只能用 note、notify，没有执行"
 	case b.Front != nil && outside:
-		r.note("读过外部内容的会话一轮结束触发的回合不能改工作线台账：「" + cmp.Or(b.Front.Name, b.Front.ID) + "」没有记")
+		r.note("读过外部内容的会话一轮结束触发的回合不能改工作线台账：「" + b.Front.label() + "」没有记")
 		return "这个会话读过外部内容，这一轮不能改工作线台账，没有记"
 	}
 	does, blocks := "只能写旁注、发通知、更新工作线", "note、notify、front"
@@ -2378,16 +2421,106 @@ func (r *Runner) routine(t Routine) error {
 	return nil
 }
 
-// front writes a line of work into the ledger (§15.17, D132). The card
-// says what changed; only a failure gets a line and a receipt.
-func (r *Runner) front(f Front) error {
-	if r.cfg.Front == nil {
+// Items is the ledger's open items as the runner writes them (front.Store).
+type Items interface {
+	AddItem(front.Item) (front.Item, bool, error)
+	EditItem(id string, text, source, frontID *string) (front.Item, error)
+	CloseItem(id, by string) (front.Item, error)
+	CloseItems(match func(front.Item) bool, by string) []front.Item
+}
+
+// front writes a line of work into the ledger (§15.17, D132), then the
+// block's open items (§15.23, D143): the one it files or re-sources, the
+// ones it closes. The card says what changed; only a failure gets a line
+// and a receipt. byUser is whether the user started the turn: an item is
+// theirs then, the Planner's own otherwise, by the turn's source and never
+// by what the block says.
+//
+// A block that only closes items applies nothing to its front: Apply
+// reopens a closed line, which closing an item must not. What cannot be
+// checked before the first write fails on its own, and the error says which
+// part was done.
+func (r *Runner) front(f Front, byUser bool) error {
+	items := f.Item != nil || len(f.Done) > 0
+	newItem := f.Item != nil && f.Item.ID == ""
+	apply := f.ledger() || !items || newItem && f.ID != ""
+	switch {
+	case apply && r.cfg.Front == nil:
 		return errors.New("这台网关没有工作线台账，没有记")
+	case items && r.cfg.Items == nil:
+		return errors.New("这台网关的工作线台账不记未了事项，整块没有记")
 	}
-	if _, err := r.cfg.Front(f.Update()); err != nil {
-		return fmt.Errorf("工作线「%s」没有记：%w", cmp.Or(f.Name, f.ID), err)
+	var it front.Item
+	if newItem {
+		ws, err := r.itemWorkspace(*f.Item)
+		if err != nil {
+			return blockError{fmt.Errorf("未了事项「%s」没有记：%w", textutil.TruncateRunes(f.Item.Text, labelRunes), err)}
+		}
+		it = front.Item{Text: f.Item.Text, Workspace: ws, Front: f.ID, Source: f.Item.Source, From: front.FromPlanner}
+		if byUser {
+			it.From = front.FromUser
+		}
 	}
-	return nil
+	did := ""
+	if apply {
+		if _, err := r.cfg.Front(f.Update()); err != nil {
+			return fmt.Errorf("工作线「%s」没有记：%w", cmp.Or(f.Name, f.ID), err)
+		}
+		did = "工作线「" + cmp.Or(f.Name, f.ID) + "」已记；"
+	}
+	var failed []string
+	switch {
+	case newItem:
+		if _, _, err := r.cfg.Items.AddItem(it); err != nil {
+			failed = append(failed, "未了事项「"+textutil.TruncateRunes(it.Text, labelRunes)+"」没有记："+err.Error())
+		}
+	case f.Item != nil:
+		if _, err := r.cfg.Items.EditItem(f.Item.ID, nil, &f.Item.Source, nil); err != nil {
+			failed = append(failed, "未了事项 "+f.Item.ID+" 的出处没有改："+err.Error())
+		}
+	}
+	for _, id := range f.Done {
+		if _, err := r.cfg.Items.CloseItem(id, front.ByPlanner); err != nil {
+			failed = append(failed, "未了事项 "+id+" 没有了结："+err.Error())
+		}
+	}
+	if len(failed) == 0 {
+		return nil
+	}
+	return errors.New(did + strings.Join(failed, "；"))
+}
+
+// itemWorkspace is the workspace ID a front block's new item belongs to:
+// the one it names, else its source's when that is a session of this node
+// (the workspace it was dispatched into, or the one its directory is in),
+// else "".
+func (r *Runner) itemWorkspace(it FrontItem) (string, error) {
+	if it.Workspace != "" {
+		if r.cfg.Workspaces == nil {
+			return "", errors.New("没有工作区登记表")
+		}
+		w, _, ok := r.cfg.Workspaces.Find(it.Workspace)
+		if !ok {
+			return "", fmt.Errorf("找不到工作区「%s」（填 ID，或不重名的名字）", it.Workspace)
+		}
+		return w.ID, nil
+	}
+	if it.Source == "" {
+		return "", nil
+	}
+	if r.cfg.Sessions != nil {
+		if m, ok := r.cfg.Sessions.Get(it.Source); ok && m.Workspace != "" {
+			return m.Workspace, nil
+		}
+	}
+	if r.cfg.SessionDir != nil && r.cfg.Workspaces != nil {
+		if dir := r.cfg.SessionDir(it.Source); dir != "" {
+			if w, ok := r.cfg.Workspaces.Lookup(dir); ok {
+				return w.ID, nil
+			}
+		}
+	}
+	return "", nil
 }
 
 // park moves an item the user put down into the 搁置区 (§15.14 ⑤). The

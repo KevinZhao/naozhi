@@ -176,3 +176,45 @@ func TestDonePRsCounted(t *testing.T) {
 		t.Errorf("a few PRs not linked:\n%s", md)
 	}
 }
+
+// The brief lists the first three open items of a line under it and counts
+// the rest (§15.23, D143); a line with none reads as before, and the items
+// under no line are left to the Planner page.
+func TestFrontItems(t *testing.T) {
+	f := newFixture(t)
+	f.output(at(2, 22, 0), "task:ab12", "ws1", activity.Activity{Type: activity.TypeOutput, Path: "out.md"})
+	f.now = at(3, 8, 30)
+	td := &tidied{fronts: []front.Front{
+		{ID: "gateway-refactor", Name: "网关重构", State: "迁了一半", Updated: at(2, 18, 0)},
+		{ID: "docs", Name: "文档", Updated: at(2, 17, 0)},
+	}}
+	b := f.tidyBriefer(td)
+	var items []front.Item
+	for i := 1; i <= 5; i++ {
+		items = append(items, front.Item{ID: fmt.Sprintf("i000000%d", i), Text: fmt.Sprintf("第 %d 件 *没做完* 的事", i), Front: "gateway-refactor"})
+	}
+	items = append(items, front.Item{ID: "i0000009", Text: "没归线的", Workspace: "ws1"})
+	b.cfg.Items = func() []front.Item { return items }
+	b.Check()
+	got := b.Recent(1)
+	if len(got) != 1 {
+		t.Fatalf("briefs = %d", len(got))
+	}
+	want := "\n### 工作线（2）\n" +
+		"- **网关重构**：迁了一半\n" +
+		"  - 未了：第 1 件 ＊没做完＊ 的事\n" +
+		"  - 未了：第 2 件 ＊没做完＊ 的事\n" +
+		"  - 未了：第 3 件 ＊没做完＊ 的事\n" +
+		"  - …另有 2 条\n" +
+		"- **文档**\n" +
+		"\n### "
+	if !strings.Contains(got[0].Markdown, want) {
+		t.Errorf("markdown:\n%s\nwant it to hold:\n%s", got[0].Markdown, want)
+	}
+	if strings.Contains(got[0].Markdown, "没归线的") {
+		t.Errorf("an item under no line listed:\n%s", got[0].Markdown)
+	}
+	if got[0].Counts.Fronts != 2 {
+		t.Errorf("counts = %+v", got[0].Counts)
+	}
+}
