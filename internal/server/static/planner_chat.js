@@ -549,7 +549,7 @@ function paintSessionStatus() {
     // The breadcrumb names it. A session put away says so, with the way
     // back: its status would read as one that is simply gone.
     const html = putAway(p.key)
-      ? '<span class="pl-sess-away">已收起</span><span class="pl-sess-away-why">做完后自动收起，记录都在</span>' +
+      ? '<span class="pl-sess-away">已收起</span><span class="pl-sess-away-why">做完后收进了历史，记录都在</span>' +
         '<button type="button" class="pl-btn" data-action="task-reopen" data-id="' + escAttr(p.key) + '" title="放回会话列表，下一条消息接着上下文继续">重新打开</button>'
       : sessionStatusHtml(p.key, false);
     if (line.innerHTML !== html) line.innerHTML = html;

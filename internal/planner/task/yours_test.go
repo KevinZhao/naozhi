@@ -147,8 +147,9 @@ func TestYoursGroup(t *testing.T) {
 }
 
 // A watched session marked done is 已完成 until the user sends it another
-// message; it leaves the list a day after it was done, the session left
-// alone (no OnState: planner/reap is the dispatched sessions').
+// message; it leaves the list a day after it was done. Each mark is told on
+// (OnState): planner/reap puts the session away on the user's own (D137),
+// and leaves it alone on the Planner's.
 func TestYoursMarkThenTalk(t *testing.T) {
 	r := newYoursRig(t)
 	r.lastUser[yDash] = t0.Add(-10 * time.Minute)
@@ -159,8 +160,11 @@ func TestYoursMarkThenTalk(t *testing.T) {
 	if !ok || m.Purpose != "" || m.Mark == nil || m.Mark.State != string(Done) {
 		t.Fatalf("sidecar = %+v (%v), want a mark, purpose left empty", m, ok)
 	}
-	if len(r.states) != 0 {
-		t.Errorf("OnState = %v, want none for a session the user opened", r.states)
+	if !slices.Equal(r.states, []string{yDash + "=done"}) {
+		t.Errorf("OnState = %v, want the mark told on", r.states)
+	}
+	if !r.b.YoursDone(m) {
+		t.Error("YoursDone false for a mark that holds")
 	}
 	d := r.yours()[yDash]
 	if d.State != Done || d.By != ByPlanner || d.Why != "PR 合了" || !d.New {
@@ -172,6 +176,9 @@ func TestYoursMarkThenTalk(t *testing.T) {
 	r.lastUser[yDash] = r.now
 	if d := r.yours()[yDash]; d.State != Doing {
 		t.Errorf("talked to after the mark: %s, want doing", d.State)
+	}
+	if r.b.YoursDone(m) {
+		t.Error("YoursDone true for a mark the user talked past: the session would be put away under them")
 	}
 
 	// Marked done again, then a day later it is archived.
@@ -189,8 +196,60 @@ func TestYoursMarkThenTalk(t *testing.T) {
 	if _, ok := r.yours()[yDash]; ok {
 		t.Error("done a day ago: still listed")
 	}
-	if len(r.states) != 0 {
+	if !slices.Equal(r.states, []string{yDash + "=done", yDash + "=done"}) {
 		t.Errorf("OnState = %v", r.states)
+	}
+}
+
+// A session the user opened and marked done themselves is put away
+// (planner/reap, D137): out of the health table, its card stays in 已完成
+// from its sidecar, named as it was, and marking it in progress again is
+// told on, which reopens it; a day on it is archived.
+func TestYoursPutAwayStaysListed(t *testing.T) {
+	r := newYoursRig(t)
+	if err := r.b.Set(yDash, Done, ByUser, ""); err != nil {
+		t.Fatal(err)
+	}
+	// planner/reap put it away: the record on its sidecar, the session gone.
+	if _, err := r.sc.Update(yDash, func(m *sidecar.Meta) bool {
+		m.Reap = &sidecar.Reap{At: r.now, By: string(ByUser), SessionID: "sid-1", LastPrompt: "分析 TGW 迁移\n第二行"}
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r.units = slices.DeleteFunc(r.units, func(u health.Unit) bool { return u.ID == yDash })
+	r.off[yDash] = true // no longer eligible: not in the router
+
+	d, ok := r.yours()[yDash]
+	if !ok || d.State != Done || d.By != ByUser || d.Reap == nil || d.Group != GroupYours || d.Title != "分析 TGW 迁移" {
+		t.Fatalf("put away: %+v (listed %v)", d, ok)
+	}
+	if title, ok := r.b.Title(yDash); !ok || title != "分析 TGW 迁移" {
+		t.Errorf("Title = %q, %v", title, ok)
+	}
+	// Reopened from the card.
+	r.states = nil
+	if err := r.b.Set(yDash, Doing, ByUser, ""); err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if !slices.Equal(r.states, []string{yDash + "=doing"}) {
+		t.Errorf("OnState = %v, want the reopening told on", r.states)
+	}
+
+	// Left put away instead (the mark as it was): archived a day after.
+	if _, err := r.sc.Update(yDash, func(m *sidecar.Meta) bool {
+		m.Mark = &sidecar.Mark{State: string(Done), By: string(ByUser), At: r.now}
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r.now = r.now.Add(Archive - time.Minute)
+	if _, ok := r.yours()[yDash]; !ok {
+		t.Error("put away under a day: not listed")
+	}
+	r.now = r.now.Add(2 * time.Minute)
+	if _, ok := r.yours()[yDash]; ok {
+		t.Error("put away a day ago: still listed")
 	}
 }
 

@@ -461,8 +461,10 @@ func TestStatusOfYours(t *testing.T) {
 			t.Errorf("%s: listed as %s", c.state, got)
 		}
 	}
-	if len(states) != 0 {
-		t.Errorf("state hook told %q, want nothing for a session the user opened", states)
+	// The hook is told of each mark (D137): planner/reap puts a session the
+	// user opened away only on the user's own, and leaves these alone.
+	if want := []string{chat + " done", chat + " doing"}; !slices.Equal(states, want) {
+		t.Errorf("state hook told %q, want %q", states, want)
 	}
 	g.notes = nil
 	r.Handle(block(`{"type":"status","task":"` + other + `","state":"done","why":"w"}`))

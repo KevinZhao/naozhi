@@ -37,7 +37,9 @@
 // column on its raw record, tool calls and all, as 看原始记录 › under its
 // expanded digest does (D124, the third of D67's layers). A done dispatched
 // session is put away once its turn ended, you are not at it and it has
-// been idle 2 hours (planner/reap, D105): while only the idleness holds it
+// been idle 2 hours (planner/reap, D105); one you marked done or stopped
+// yourself, a session you opened included, goes as soon as nothing of it
+// runs (D137). While only the idleness holds it
 // its status line says about when (the task's reap_at), otherwise its card
 // says what holds it, then that it was put away; 重新打开 puts it back. The
 // Planner page's header offers the same 停止 for the session open in the
@@ -321,13 +323,23 @@ function titleHtml(t) {
 function actsHtml(t) {
   const btn = (action, label, tip) => '<button type="button" class="pl-btn tk-act tk-' + action.replace('task-', '') + '" data-action="' + action + '" data-id="' + escAttr(t.id) + '"' + (tip ? ' title="' + escAttr(tip) + '"' : '') + '>' + label + '</button>';
   const raw = t.kind === 'session' ? rawHtml(t, 'pl-btn tk-act tk-raw', '原始记录') : '';
-  // A session you opened is only marked: nothing stops or reopens it.
-  if (isYours(t)) return (t.state === 'done' ? btn('task-doing', '标为进行中', '放回「你开的」') : btn('task-done', '标为已完成', '从「你开的」里拿掉（会话本身不动）')) + raw;
-  if (t.state === 'done') return btn('task-reopen', '重新打开', t.reap ? '放回会话列表，下一条消息接着上下文继续' : '') + raw;
-  return (running(t) ? btn('task-stop', '停止', '停止这个会话正在做的事') : '') +
+  // A session you opened: marking it done yourself also closes it (D137:
+  // put away to the history, its record kept), and a put-away one reopens.
+  // One the Planner marked is only listed as done; nothing stops one.
+  if (isYours(t)) {
+    if (t.state !== 'done') return btn('task-done', '标为已完成', CLOSES_TIP) + raw;
+    return (t.reap ? btn('task-reopen', '重新打开', REOPENS_TIP) : btn('task-doing', '标为进行中', '放回「你开的」')) + raw;
+  }
+  if (t.state === 'done') return btn('task-reopen', '重新打开', t.reap ? REOPENS_TIP : '') + raw;
+  return (running(t) ? btn('task-stop', '停止', '停止这个会话正在做的事，并把会话收进历史') : '') +
     (t.state === 'doing' || t.state === 'remind' ? '' : btn('task-doing', '标为进行中')) +
-    btn('task-done', '标为已完成') + raw;
+    btn('task-done', '标为已完成', t.kind === 'session' ? CLOSES_TIP : '') + raw;
 }
+
+// CLOSES_TIP and REOPENS_TIP say what marking a session done yourself does
+// to the session, and how it comes back (D137).
+const CLOSES_TIP = '标为已完成，并关掉“会话”里的这个会话：收进历史，记录都在，可以从这里重新打开';
+const REOPENS_TIP = '放回会话列表，下一条消息接着上下文继续';
 
 // rawHtml opens session t in the middle column on its raw record, tool
 // calls and all, scrolled to the latest (planner_chat.js's
