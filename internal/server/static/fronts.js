@@ -17,6 +17,15 @@
 // struck with "×"; an opened card takes one more typed in. The items under
 // no line are listed after the cards as 未归线, by workspace.
 //
+// An item the project patrol filed opens with "⋯" (§15.23 ④, D142). One
+// that is a deep check's finding (its source "patrol:<ref>") shows what
+// was found: kind, size, how sure, the evidence as links, what it costs
+// and how to fix it, its pull request once there is one. With it come the
+// user's choices: 做 hands it to the Planner to have fixed, 不做 turns it
+// down, 这类别再提 turns it down with its kind in that workspace; every
+// patrol item has 这个工作区别巡查了. What is turned down goes into
+// planner/patrol/declined.json and is not reported again.
+//
 // The ledger is shown and edited on the machine that keeps it: the route is
 // not among a reverse node's, so the group stays hidden while the page shows
 // another node's Planner; the gateway takes an edit only straight from
@@ -25,8 +34,8 @@
 //
 // The lines are read when the page opens and after each Planner turn
 // (refreshFronts, with the tasks). An edit, 结束, an item struck or added
-// shows at once, ahead of the gateway (held, heldItems); a failure puts it
-// back as it was.
+// and a choice about a finding show at once, ahead of the gateway (held,
+// heldItems, heldDoing); a failure puts it back as it was.
 import { NZ_CONTRACT } from './contract.js';
 import { esc, escAttr, fetchJSON, registerActions, showToast } from './nz_util.js';
 import { formatAbsTime } from './utilities.js';
@@ -43,11 +52,20 @@ const MAX_DECISIONS = 3;
 const MAX_ITEMS = 5;
 // FROM names where an item came from.
 const FROM = { report: '汇报', patrol: '巡查', planner: 'Planner', user: '你' };
+// PATROL opens the source of an item that is a deep check's finding.
+const PATROL = 'patrol:';
+// CONFIDENCE and STATE word a finding's sureness and what became of it.
+const CONFIDENCE = { high: '把握大', medium: '把握中等', low: '把握小' };
+const STATE = { doing: '已交给 Planner 派任务', dispatched: '已派任务在修', pr: '已备好 PR' };
+// RESTORE says how a kind or a workspace turned down comes back.
+const RESTORE = '要恢复，从 planner/patrol/declined.json 里删掉它';
 
 let mount = null;
 let last = null; // { fronts, items, writable }
 let openId = '';
 let editId = '';
+// openItem is the patrol item opened with its "⋯".
+let openItem = '';
 let gen = 0;
 // held is the user's edits this page shows ahead of the ledger, by line:
 // {edit} (the fields saved; close drops the line). While the POST is out
@@ -57,6 +75,9 @@ const held = new Map();
 // heldItems is the same for the open items, by item: {op: 'done'} keeps a
 // struck one off the list, {op: 'add', item} keeps an added one on it.
 const heldItems = new Map();
+// heldDoing are the findings (by ref) the user said to do, shown as handed
+// to the Planner ahead of the gateway's record.
+const heldDoing = new Map();
 // moreKeys are the item lists unfolded past MAX_ITEMS, by listKey.
 const moreKeys = new Set();
 let tmpSeq = 0;
@@ -113,18 +134,88 @@ function sourceHtml(src) {
   return '<button type="button" class="pl-link fr-src" data-action="planner-open-session" data-key="' + escAttr(src) + '" title="' + escAttr('打开会话：' + sessionTitle(src)) + '">出处</button>';
 }
 
+// findingOf is the deep check's finding an item is, with its ref; null for
+// any other item (the gateway lists the findings its open items point at).
+function findingOf(it) {
+  const src = str(it.source);
+  if (it.from !== 'patrol' || !src.startsWith(PATROL)) return null;
+  const ref = src.slice(PATROL.length);
+  const d = last && last.findings && typeof last.findings === 'object' ? last.findings[ref] : null;
+  if (!d || typeof d !== 'object') return null;
+  return { ref, d: heldDoing.has(ref) ? Object.assign({}, d, { state: 'doing' }) : d };
+}
+
+// evidenceHtml lists a finding's evidence: a piece that opens somewhere (a
+// file line on GitHub, a link) as a link in a new tab, else as text.
+function evidenceHtml(d) {
+  const ev = Array.isArray(d.evidence) ? d.evidence : [];
+  if (!ev.length) return '';
+  return '<ul class="fr-ev" aria-label="证据">' + ev.map((e) => {
+    const text = str(e && e.text);
+    const link = str(e && e.link);
+    return '<li>' + (/^https?:\/\//i.test(link)
+      ? '<a class="pl-link" href="' + escAttr(link) + '" target="_blank" rel="noopener noreferrer">' + esc(text) + '</a>'
+      : esc(text)) + '</li>';
+  }).join('') + '</ul>';
+}
+
+// detailHtml is an opened patrol item: what the finding is, and the user's
+// choices about it (and about its workspace's patrol).
+function detailHtml(it, f, writable) {
+  const id = str(it.id);
+  let html = '';
+  if (f) {
+    const d = f.d;
+    const pr = str(d.pr);
+    const meta = [str(d.kind), str(d.size), CONFIDENCE[d.confidence] || '', pr ? '' : STATE[d.state] || ''].filter(Boolean);
+    html += '<div class="fr-detail-meta">' + esc(meta.join(' · ')) + '</div>' + evidenceHtml(d) +
+      (str(d.impact) ? '<div class="fr-detail-row"><span>影响</span>' + esc(str(d.impact)) + '</div>' : '') +
+      (str(d.fix) ? '<div class="fr-detail-row"><span>改法</span>' + esc(str(d.fix)) + '</div>' : '') +
+      (/^https?:\/\//i.test(pr)
+        ? '<div class="fr-detail-row"><span>PR</span><a class="pl-link" href="' + escAttr(pr) + '" target="_blank" rel="noopener noreferrer">' + esc(pr.replace(/^https?:\/\/github\.com\//i, '')) + '</a>' +
+          (str(d.ci) ? ' · CI ' + esc(str(d.ci)) : '') + '</div>'
+        : '');
+  }
+  if (!writable) return html ? '<div class="fr-detail">' + html + '</div>' : '';
+  const act = (choice, label, title, pri) =>
+    '<button type="button" class="pl-btn tk-act' + (pri ? ' pri' : '') + '" data-action="front-item-decide" data-id="' + escAttr(id) + '" data-choice="' + choice + '" title="' + escAttr(title) + '">' + label + '</button>';
+  let acts = '';
+  if (f) {
+    // In a task's hands, or with its pull request ready, "do" is past.
+    if (!STATE[f.d.state]) acts += act('do', '做', '交给 Planner 派一个任务去修：开 PR，不合并', true);
+    acts += act('skip', '不做', '这条不做，以后也不再报', false) +
+      act('mute_kind', '这类别再提', '这条不做，这个工作区的 ' + str(f.d.kind) + ' 类以后都不报；' + RESTORE, false);
+  }
+  if (str(it.workspace)) {
+    acts += '<button type="button" class="pl-link fr-mute-ws" data-action="front-item-decide" data-id="' + escAttr(id) + '" data-choice="mute_ws" title="' +
+      escAttr('每小时的检查和每周的深查都不再看这个工作区；' + RESTORE) + '">这个工作区别巡查了</button>';
+  }
+  return '<div class="fr-detail">' + html + (acts ? '<div class="tk-acts fr-detail-acts">' + acts + '</div>' : '') + '</div>';
+}
+
 function itemHtml(it, writable) {
   const id = str(it.id);
   const text = str(it.text);
   const src = str(it.source);
   const from = FROM[it.from] || '';
-  // One being added has no ID of the ledger's yet: nothing to strike.
-  const strike = writable && !id.startsWith('tmp-')
+  const f = findingOf(it);
+  // A patrol item opens when there is something behind it: a finding to
+  // read, or (where this page may write) a choice to make.
+  const opens = it.from === 'patrol' && (f || (writable && str(it.workspace)));
+  const open = opens && openItem === id;
+  // One being added has no ID of the ledger's yet: nothing to strike. A
+  // finding is not struck: it is done, turned down, or left.
+  const strike = writable && !f && !id.startsWith('tmp-')
     ? '<button type="button" class="fr-item-x" data-action="front-item-done" data-id="' + escAttr(id) + '" aria-label="划掉这一条" title="划掉：做完了，或不做了">×</button>'
     : '';
-  return '<li class="fr-item" data-id="' + escAttr(id) + '">' +
+  const more = opens
+    ? '<button type="button" class="fr-item-x fr-item-more" data-action="front-item-more" data-id="' + escAttr(id) + '" aria-expanded="' + !!open + '" aria-label="' +
+      escAttr('「' + text + '」的' + (f ? '详情与处置' : '更多操作')) + '" title="' + (f ? '详情与处置' : '更多操作') + '">⋯</button>'
+    : '';
+  return '<li class="fr-item' + (open ? ' fr-item-open' : '') + '" data-id="' + escAttr(id) + '">' +
     '<span class="fr-item-t" title="' + escAttr(text + (src ? '\n出处：' + src : '')) + '">' + esc(text) + '</span>' +
-    (from ? '<span class="fr-from">' + from + '</span>' : '') + sourceHtml(src) + strike + '</li>';
+    (from ? '<span class="fr-from">' + from + '</span>' : '') + sourceHtml(src) + more + strike +
+    (open ? detailHtml(it, f, writable) : '') + '</li>';
 }
 
 // itemsHtml lists items, MAX_ITEMS of them until unfolded.
@@ -270,7 +361,9 @@ export async function refreshFronts() {
       else list = applyEdit(list, h.edit);
     }
     for (const [id, h] of heldItems) if (g > h.upTo) heldItems.delete(id);
+    for (const [ref, h] of heldDoing) if (g > h.upTo) heldDoing.delete(ref);
     last = Object.assign({}, data, { fronts: list, items: applyItems(Array.isArray(data.items) ? data.items : []) });
+    if (openItem && !last.items.some((it) => it.id === openItem)) openItem = '';
     if (openId && !(data.fronts || []).some((f) => f.id === openId)) openId = '';
     if (editId && !(data.fronts || []).some((f) => f.id === editId)) editId = '';
   } catch {
@@ -438,6 +531,66 @@ async function addItem(form) {
   await refreshFronts();
 }
 
+// decide is the user's choice about a patrol item (§15.23 ④): do, skip and
+// mute_kind about the finding it is, mute_ws about its workspace's patrol.
+// What the choice takes off the list goes at once — the finding turned
+// down, with mute_kind the workspace's other findings of its kind nobody
+// has in hand, with mute_ws everything the patrol filed under the
+// workspace but a standing task's failures — and "do" shows the finding as
+// handed to the Planner. A failure puts all of it back and says why.
+async function decide(id, choice) {
+  const items = last && Array.isArray(last.items) ? last.items : [];
+  const it = items.find((x) => x.id === id);
+  if (!it || heldItems.has(id)) return;
+  const f = findingOf(it);
+  const ws = str(it.workspace);
+  let body;
+  let gone = [];
+  if (choice === 'mute_ws') {
+    if (!ws) return;
+    body = { workspace: ws, choice };
+    gone = items.filter((x) => x.from === 'patrol' && str(x.workspace) === ws && !str(x.source).startsWith('check:routine:'));
+  } else {
+    if (!f) return;
+    body = { ref: f.ref, choice };
+    if (choice === 'skip') gone = [it];
+    if (choice === 'mute_kind') {
+      gone = items.filter((x) => {
+        const o = findingOf(x);
+        return x === it || (o && str(x.workspace) === ws && o.d.kind === f.d.kind && o.d.state !== 'dispatched' && o.d.state !== 'pr');
+      });
+    }
+  }
+  const mark = { op: 'done', upTo: Infinity };
+  const was = gone.map((x) => ({ item: x, at: items.indexOf(x) }));
+  for (const x of gone) heldItems.set(x.id, mark);
+  const doing = choice === 'do' ? { upTo: Infinity } : null;
+  if (doing) heldDoing.set(f.ref, doing);
+  setItems((list) => list.filter((x) => !gone.includes(x)));
+  try {
+    await fetchJSON(NZ_CONTRACT.API.planner_patrol_decide, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), timeoutMs: 15000,
+    });
+  } catch (e) {
+    for (const x of gone) if (heldItems.get(x.id) === mark) heldItems.delete(x.id);
+    if (doing && heldDoing.get(f.ref) === doing) heldDoing.delete(f.ref);
+    // Each back where it stood, among what the page lists now.
+    setItems((list) => {
+      const out = list.slice();
+      for (const w of was) if (!out.some((x) => x.id === w.item.id)) out.splice(Math.min(w.at, out.length), 0, w.item);
+      return out;
+    });
+    showToast('没有生效：' + errorText(e), 'error', 6000);
+    return;
+  }
+  mark.upTo = gen;
+  if (doing) doing.upTo = gen;
+  const name = ws ? workspaceName(ws) || ws : '';
+  if (choice === 'mute_ws') showToast('不再巡查「' + name + '」；' + RESTORE, 'success', 6000);
+  if (choice === 'mute_kind') showToast('「' + name + '」的 ' + str(f.d.kind) + ' 类不再报；' + RESTORE, 'success', 6000);
+  await refreshFronts();
+}
+
 const byId = (id) => (last && Array.isArray(last.fronts) ? last.fronts.find((f) => f.id === id) : null);
 
 registerActions({
@@ -471,6 +624,13 @@ registerActions({
     if (id) save({ id, close: true }, '没有结束：');
   },
   'front-item-done': (el) => strikeItem(el.dataset.id || ''),
+  'front-item-more': (el) => {
+    const id = el.dataset.id || '';
+    openItem = openItem === id ? '' : id;
+    paint();
+    mount?.querySelector('.fr-item[data-id="' + CSS.escape(id) + '"] .fr-item-more')?.focus();
+  },
+  'front-item-decide': (el) => decide(el.dataset.id || '', el.dataset.choice || ''),
   'front-items-more': (el) => {
     const key = el.dataset.key || '';
     if (!moreKeys.delete(key)) moreKeys.add(key);

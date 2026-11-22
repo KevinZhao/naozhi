@@ -270,7 +270,12 @@ function defaultGitStates() {
  * @param {object} [overrides.fronts] - GET /api/planner/fronts body ({fronts, items, writable}); POST
  *   /api/planner/fronts lands in frontsCalls and edits or closes the line when writable (403 otherwise);
  *   {item} adds an open item (id i<n>, from user) and {item_done} drops one. `itemsFail` (not served)
- *   makes those two answer 500.
+ *   makes those two answer 500. `findings` (served) are the patrol findings the items point at, by
+ *   ref; POST /api/planner/patrol/decide lands in patrolCalls and, when writable (403 otherwise),
+ *   does what the gateway does: skip drops the finding's item, mute_kind drops it with the
+ *   workspace's other findings of its kind nobody has in hand, mute_ws drops the patrol's items of
+ *   the workspace, do marks the finding doing. `decideFail` (not served, a message) makes it
+ *   answer 409 with that message.
  * @param {object} [overrides.tasks] - GET /api/tasks body ({tasks}, task.Task wire shape); POST
  *   /api/tasks/state sets the task's state as the user's and lands in tasksCalls; POST
  *   /api/tasks/stop marks the task done as the user's ('已停止') and lands in taskStopCalls;
@@ -400,6 +405,7 @@ function startMockServer(overrides = {}) {
   const inboxCalls = [];
   const tasksCalls = [];
   const frontsCalls = [];
+  const patrolCalls = [];
   const taskStopCalls = [];
   const tasksSeenCalls = [];
   const custodyData = overrides.custody || null;
@@ -1393,7 +1399,7 @@ function startMockServer(overrides = {}) {
     // {item_done} drops one, both answering 500 while itemsFail is set.
     if (pathname === NZ_CONTRACT.API.planner_fronts && req.method === 'GET' && overrides.fronts) {
       if (!checkAuth()) return;
-      const { itemsFail: _, ...ledger } = overrides.fronts;
+      const { itemsFail: _, decideFail: __, ...ledger } = overrides.fronts;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(ledger));
       return;
@@ -1429,6 +1435,40 @@ function startMockServer(overrides = {}) {
         if (req2.close) overrides.fronts.fronts = overrides.fronts.fronts.filter(x => x.id !== req2.id);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(f));
+      });
+      return;
+    }
+    if (pathname === NZ_CONTRACT.API.planner_patrol_decide && req.method === 'POST' && overrides.fronts) {
+      if (!checkAuth()) return;
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        const req2 = JSON.parse(body || '{}');
+        patrolCalls.push(req2);
+        const fail = (code, error) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error })); };
+        const led = overrides.fronts;
+        if (!led.writable) return fail(403, 'patrol_readonly_remote');
+        if (led.decideFail) return fail(409, led.decideFail);
+        const items = led.items || [];
+        const findings = led.findings || {};
+        const refOf = (x) => (x.from === 'patrol' && String(x.source || '').startsWith('patrol:') ? x.source.slice(7) : '');
+        if (req2.choice === 'mute_ws') {
+          led.items = items.filter(x => !(x.from === 'patrol' && x.workspace === req2.workspace && !String(x.source || '').startsWith('check:routine:')));
+        } else {
+          const f = findings[req2.ref];
+          const it = items.find(x => refOf(x) === req2.ref);
+          if (!f || !it) return fail(404, '没有这条巡查发现');
+          if (req2.choice === 'do') f.state = 'doing';
+          if (req2.choice === 'skip') led.items = items.filter(x => x !== it);
+          if (req2.choice === 'mute_kind') {
+            led.items = items.filter(x => {
+              const o = findings[refOf(x)];
+              return !(x === it || (o && x.workspace === it.workspace && o.kind === f.kind && o.state !== 'dispatched' && o.state !== 'pr'));
+            });
+          }
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok' }));
       });
       return;
     }
@@ -1675,6 +1715,7 @@ function startMockServer(overrides = {}) {
         get inboxCalls() { return inboxCalls; },
         get tasksCalls() { return tasksCalls; },
         get frontsCalls() { return frontsCalls; },
+        get patrolCalls() { return patrolCalls; },
         get taskStopCalls() { return taskStopCalls; },
         get tasksSeenCalls() { return tasksSeenCalls; },
         get custodyCalls() { return custodyCalls; },

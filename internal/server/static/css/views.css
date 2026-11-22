@@ -245,6 +245,17 @@ body:has(#abnav-settings-badge:not([hidden])) .settings-syslink-btn::after{conte
 .fr-item-x:hover{background:var(--nz-bg-2);color:var(--nz-text)}
 .fr-item-x:focus-visible{outline:2px solid var(--nz-focus);outline-offset:1px}
 .pl-link.fr-items-more{margin-top:3px;font-size:var(--nz-fs-xs)}
+/* A patrol item opened with its "⋯" (§15.23 ④): the finding and the choices about it, on a row of their own under the item. */
+.fr-item-open{flex-wrap:wrap}
+.fr-item-more[aria-expanded="true"]{background:var(--nz-bg-2);color:var(--nz-text)}
+.fr-detail{flex-basis:100%;min-width:0;margin:3px 0 4px 10px;padding:6px 8px;border-left:2px solid var(--nz-border);color:var(--nz-text-mute);overflow-wrap:anywhere}
+.fr-detail-meta{color:var(--nz-text-dim)}
+.fr-ev{margin:3px 0;padding:0;list-style:none}
+.fr-ev li{font-family:var(--nz-font-mono)}
+.fr-detail-row{margin-top:3px}
+.fr-detail-row>span{margin-right:6px;color:var(--nz-text-dim)}
+.fr-detail-acts{align-items:center;margin-top:6px}
+.pl-link.fr-mute-ws{margin-left:auto;font-size:var(--nz-fs-xs)}
 .fr-add{margin-top:6px}
 .fr-add input{box-sizing:border-box;width:100%;padding:3px 6px;border:1px solid transparent;border-radius:var(--nz-radius-ms);background:none;color:var(--nz-text);font:inherit;font-size:var(--nz-fs-xs)}
 .fr-add input::placeholder{color:var(--nz-text-dim)}
@@ -340,6 +351,10 @@ body.pl-resizing{cursor:col-resize;user-select:none;-webkit-user-select:none}
 .pl-card-why{margin-top:2px;color:var(--nz-text-mute);font-size:var(--nz-fs-xs);word-break:break-word;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden}
 .pl-card-meta{margin-top:4px;color:var(--nz-text-dim);font-size:var(--nz-fs-xs);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pl-card-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+/* The answers a card keeps behind "⋯" (decision.more): opened, they join the row. */
+.pl-card-more{display:flex;flex-wrap:wrap;gap:6px}
+.pl-card-more>summary{list-style:none;cursor:pointer}
+.pl-card-more>summary::-webkit-details-marker{display:none}
 /* A question that expired (§15.14 ④): kept a while to say why, quieter
    than what still waits on you. */
 .pl-card-expired{background:transparent;border-style:dashed}

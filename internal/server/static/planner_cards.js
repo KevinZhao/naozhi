@@ -280,12 +280,22 @@ export function webLinkHtml(href, cls) {
 
 // decisionActsHtml is an item's answer buttons (a decision's actions, or a
 // Planner question's options, §6.2 ask): the left column's card and the
-// conversation's repeat of it share it.
+// conversation's repeat of it share it. The answers a card keeps back
+// (decision.more: a project patrol's "这个工作区别巡查了", §15.23 ④) sit
+// behind "⋯" at the row's end and answer the same way.
 export function decisionActsHtml(it) {
   if (!it || !it.decision || !Array.isArray(it.decision.actions)) return '';
-  return '<div class="pl-card-acts">' + it.decision.actions.map((a, i) =>
-    '<button type="button" class="pl-btn' + (i === 0 ? ' pri' : '') + '" data-action="planner-inbox-decide" data-id="' + escAttr(it.id) + '" data-act="' + escAttr(a) + '">' +
-      esc(a) + '</button>').join('') + '</div>';
+  const btn = (a, cls) =>
+    '<button type="button" class="pl-btn' + cls + '" data-action="planner-inbox-decide" data-id="' + escAttr(it.id) + '" data-act="' + escAttr(a) + '">' +
+      esc(a) + '</button>';
+  const more = Array.isArray(it.decision.more) ? it.decision.more.filter(isStr) : [];
+  // The first answer is put forward, but not a patrol card's "不做": with
+  // the pull request ready the thing to do is open it.
+  const lead = it.decision.handler === 'patrol' && it.decision.actions[0] !== '做' ? -1 : 0;
+  return '<div class="pl-card-acts">' + it.decision.actions.map((a, i) => btn(a, i === lead ? ' pri' : '')).join('') +
+    (more.length
+      ? '<details class="pl-card-more"><summary class="pl-btn" aria-label="更多选择" title="更多选择">⋯</summary>' + more.map((a) => btn(a, '')).join('') + '</details>'
+      : '') + '</div>';
 }
 
 // parseAction reads a block for display only: one JSON object of a known
