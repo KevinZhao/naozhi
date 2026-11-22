@@ -23,8 +23,11 @@
 // Two triggers live here (L0, deterministic): a session whose health turned
 // failed with a retryable error class gets "继续" after a backoff (at once
 // for a network error after the machine woke), and is left to the user
-// after MaxErrors failures of a class; one whose credential expired gets it
-// once the credential is refreshed (CredExpiry); an AskUserQuestion card
+// after MaxErrors failures of a class; a network or region failure is
+// waited out instead (waits, D140), retried uncounted until its turn gets
+// through or MaxWait passed, and at once when another session of its class
+// got through; one whose credential expired gets it once the credential is
+// refreshed (CredExpiry); an AskUserQuestion card
 // left SuggestAfter is answered with its recommended options, handed to the
 // Planner when it has none, or left to the user (suggest.go). A turn that
 // ended normally goes to the Planner (planner/action's receipts); nothing
@@ -62,6 +65,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/planner/task"
 	"github.com/naozhi/naozhi/internal/sessionkey"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // Limits (D93). Constants, not configuration.
@@ -71,8 +75,20 @@ const (
 	// MaxIdle is how many in a row may see no progress.
 	MaxIdle = 3
 	// MaxErrors is how many failures of one error class custody answers
-	// before it stops: the first MaxErrors-1 get a retry.
+	// before it stops: the first MaxErrors-1 get a retry. A class custody
+	// waits out (waits) is not counted.
 	MaxErrors = 5
+	// WaitEvery is the wait before a retry of a class custody waits out,
+	// once Backoff ran out.
+	WaitEvery = 15 * time.Minute
+	// MaxWait is how long custody waits such a class out, from the first
+	// failure of a run of them, before it leaves the session to the user.
+	MaxWait = 6 * time.Hour
+	// waitGap is how long after the failure before it a failure still
+	// continues its run. One later follows a retry that ran for a while, or
+	// a sleep: neither is time the cause held, and counting it would hand
+	// over a session at its first failure after a long turn or a night.
+	waitGap = 2 * WaitEvery
 	// NearbyFor is how long after the user's message to a session custody
 	// leaves it to them.
 	NearbyFor = 5 * time.Minute
@@ -96,6 +112,41 @@ const (
 
 // Backoff is the wait before the retry of a class's n-th failure.
 var Backoff = [MaxErrors - 1]time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute}
+
+// waits reports whether custody waits class out (D140): a network that is
+// down and a region restriction fail every retry until they lift, whatever
+// the session does, so their failures say nothing of the session and count
+// toward no stop. A systemic fault is no signal for it: health opens one
+// only at FaultMin sessions failing together.
+func waits(class string) bool {
+	return class == string(health.ErrNetwork) || class == string(health.ErrRegion)
+}
+
+// runOf places a failure at id of a class custody waits out, given the
+// session's retry before it: when its run's first failure was, and which of
+// the run it is. It continues prev's run only within waitGap of prev's
+// failure.
+func runOf(prev *sidecar.Retry, id, now time.Time) (since time.Time, n int) {
+	if prev != nil && !prev.Since.IsZero() && id.Sub(prev.Failed) <= waitGap {
+		return prev.Since, prev.N + 1
+	}
+	return cmp.Or(id, now), 1
+}
+
+// waitFor is the wait before the retry of a run's n-th failure.
+func waitFor(n int) time.Duration {
+	if n <= len(Backoff) {
+		return Backoff[n-1]
+	}
+	return WaitEvery
+}
+
+// waitStop is why custody gives up waiting class out: how long it waited
+// and how many retries it sent.
+func waitStop(class string, waited time.Duration, retries int) string {
+	return fmt.Sprintf("托管等了 %s、重试了 %d 次还是出错（%s）。发「继续」再试",
+		textutil.FormatChineseDuration(waited.Truncate(time.Minute)), retries, ClassLabel(class))
+}
 
 // RetryText is what a retry says.
 const RetryText = "继续"
@@ -821,15 +872,19 @@ func (e *Engine) Deliver(key string, reason Reason, text string) (int, error) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.deliverLocked(key, reason, text, "")
+	return e.deliverLocked(key, reason, text, nil)
 }
 
-// deliverLocked is Deliver; class names the error class of the failure a
-// retry answers. A retry needs no switch on and is not held back for the
-// user nearby: the failure is most likely the reply to their own last
-// message. A stop leaves that failure to the user.
-func (e *Engine) deliverLocked(key string, reason Reason, text, class string) (int, error) {
-	if class != "" {
+// deliverLocked is Deliver; retry is the failure a retry answers. A retry
+// needs no switch on and is not held back for the user nearby: the failure
+// is most likely the reply to their own last message. A stop leaves that
+// failure to the user. The retry of a class custody waits out is no part of
+// the lineage's count: it reads no limit, moves none, and is numbered within
+// its run.
+func (e *Engine) deliverLocked(key string, reason Reason, text string, retry *sidecar.Retry) (int, error) {
+	class := ""
+	if retry != nil {
+		class = retry.Class
 		if err := e.retryCheckLocked(key); err != nil {
 			return 0, err
 		}
@@ -845,21 +900,26 @@ func (e *Engine) deliverLocked(key string, reason Reason, text, class string) (i
 	root := e.root(key)
 	c := e.chain(root)
 	progress := e.progress(key)
-	if why := limit(c, progress); why != "" {
+	counted := !waits(class)
+	n := c.Sent + 1
+	if !counted {
+		n = retry.N
+	} else if why := limit(c, progress); why != "" {
 		if class != "" {
 			why = errStop(c, class, why)
 		}
 		return 0, e.stopLocked(root, key, c, why, class != "")
 	}
-	if progress != c.Progress {
-		c.Idle = 0
-	}
-	n := c.Sent + 1
 	if err := e.cfg.Send(key, strings.TrimSpace(text), reason, n); err != nil {
 		return 0, err
 	}
-	c.Sent, c.Idle, c.Progress = n, c.Idle+1, progress
-	e.saveChainLocked(root, c)
+	if counted {
+		if progress != c.Progress {
+			c.Idle = 0
+		}
+		c.Sent, c.Idle, c.Progress = n, c.Idle+1, progress
+		e.saveChainLocked(root, c)
+	}
 	delete(e.deferred, key)
 	e.record(key, note.CustodyData{Event: "sent", Reason: string(reason), N: n})
 	return n, nil
@@ -977,8 +1037,9 @@ const credWhy = "刷新凭证（mwinit）后托管会替你发「继续」"
 // scheduled (or is left to the user), a due retry is sent, and one whose
 // session recovered meanwhile is dropped; and the cards waiting on the user
 // are acted on once due (answerAsks). After the machine woke, the network
-// errors' retries are due at once; a lineage the user sent a message to
-// since it stopped starts afresh.
+// errors' retries are due at once, as are a network or region error's once
+// another session's turn got through after one (recovered); a lineage the
+// user sent a message to since it stopped starts afresh.
 func (e *Engine) Tick() {
 	if e.cfg.Sessions == nil || e.cfg.Disabled {
 		return
@@ -1019,12 +1080,20 @@ func (e *Engine) Tick() {
 func (e *Engine) woke() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.dueNowLocked(string(health.ErrNetwork))
+}
+
+// dueNowLocked makes the retries waiting on class due now; one the pause
+// holds still waits for it. The tick is run again for them: it may be past
+// their sessions already.
+func (e *Engine) dueNowLocked(class string) {
 	now := e.now()
 	for _, m := range e.cfg.Sessions.List() {
-		if r := m.Retry; r != nil && !r.Done && r.Class == string(health.ErrNetwork) && r.At.After(now) {
+		if r := m.Retry; r != nil && !r.Done && r.Class == class && r.At.After(now) {
 			next := *r
 			next.At = now
 			e.setRetryLocked(m.Key, &next)
+			e.Poke()
 		}
 	}
 }
@@ -1142,12 +1211,24 @@ func (e *Engine) answer(u health.Unit) {
 	m, _ := e.cfg.Sessions.Get(key)
 	r := m.Retry
 	if u.State != health.Failed {
-		// A failure someone else resumed before its retry went out (the
-		// user's "继续", a relay, the Planner) ends here too: its count is
-		// of failures custody would retry, and the turn that settles it
-		// would find no retry left to say so.
-		if r != nil && (settled(u) || !r.Done) {
-			e.recovered(key, *r)
+		switch {
+		case r == nil:
+		case settled(u):
+			e.recovered(key, *r, true)
+		case r.Done:
+		case waits(r.Class):
+			// Someone else resumed it before its retry went out: that
+			// stands for the retry, and the run goes on until the turn's
+			// end says whether the cause lifted.
+			next := *r
+			next.Done = true
+			e.setRetry(key, &next)
+		default:
+			// A failure someone else resumed before its retry went out
+			// (the user's "继续", a relay, the Planner) ends here too: its
+			// count is of failures custody would retry, and the turn that
+			// settles it would find no retry left to say so.
+			e.recovered(key, *r, false)
 		}
 		return
 	}
@@ -1192,6 +1273,16 @@ func (e *Engine) answer(u health.Unit) {
 	}
 	root := e.root(key)
 	c := e.chain(root)
+	if waits(class) {
+		since, n := runOf(r, id, e.now())
+		if waited := e.now().Sub(since); waited >= MaxWait {
+			_ = e.stopLocked(root, key, c, waitStop(class, waited, n-1), true)
+			return
+		}
+		next.Since, next.N = since, n
+		next.At, next.Done, next.Held = e.now().Add(waitFor(n)), false, e.paused()
+		return
+	}
 	if c.Errors == nil {
 		c.Errors = map[string]int{}
 	}
@@ -1213,16 +1304,22 @@ func (e *Engine) answer(u health.Unit) {
 	next.At, next.Done, next.Held = e.now().Add(Backoff[n-1]), false, e.paused()
 }
 
-// recovered ends key's failure r, its turn having ended normally since, or
-// someone else having resumed it before its retry went out: the retries of
-// its class start afresh, so failures days apart, each recovered, never add
-// up to a stop. A session out of custody had nothing sent but
+// recovered ends key's failure r, its turn having ended normally since
+// (ended), or someone else having resumed it before its retry went out: the
+// retries of its class start afresh, so failures days apart, each recovered,
+// never add up to a stop. A session out of custody had nothing sent but
 // retries, so its whole count starts afresh too. A stopped lineage stays
-// stopped: the user lifts that.
-func (e *Engine) recovered(key string, r sidecar.Retry) {
+// stopped: the user lifts that. A turn that ended normally after a failure
+// of a class custody waits out is the sign the cause lifted, so the other
+// sessions waiting on that class go now; a turn only started is none, it
+// may yet fail the same way.
+func (e *Engine) recovered(key string, r sidecar.Retry, ended bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.setRetryLocked(key, nil)
+	if ended && waits(r.Class) {
+		e.dueNowLocked(r.Class)
+	}
 	root := e.root(key)
 	c := e.chain(root)
 	if c.Stopped != "" || (c.Errors[r.Class] == 0 && c.Sent == 0) {
@@ -1304,7 +1401,7 @@ func (e *Engine) retryDue(key string, r sidecar.Retry) {
 	if !r.Cred.IsZero() {
 		reason = ReasonCredential
 	}
-	switch _, err := e.deliverLocked(key, reason, RetryText, r.Class); {
+	switch _, err := e.deliverLocked(key, reason, RetryText, &r); {
 	case err == nil, errors.Is(err, ErrStopped):
 		r.Done = true
 		e.setRetryLocked(key, &r)
@@ -1362,6 +1459,11 @@ func (e *Engine) Covers(u health.Unit) bool {
 		return false
 	}
 	if !retry {
+		return true
+	}
+	if waits(class) {
+		// Past MaxWait too: custody's own item says how long it waited,
+		// and the inbox's, opened first, would stand in its place.
 		return true
 	}
 	c := e.chain(e.root(u.ID))

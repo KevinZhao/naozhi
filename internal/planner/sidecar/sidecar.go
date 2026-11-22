@@ -223,11 +223,15 @@ type Chain struct {
 // the credential to expire later than Cred, its expiry then: refreshed.
 // Held is set once the pause held the retry back: past the pause, one
 // grown stale (custody's staleAfter) is left to the user, not sent.
+// A failure of a class custody waits out (network, region) is one of a run:
+// Since is when the run's first failure was, N which of the run this is.
 type Retry struct {
 	Failed time.Time `json:"failed"`
 	Class  string    `json:"class,omitempty"`
 	At     time.Time `json:"at,omitzero"`
 	Cred   time.Time `json:"cred,omitzero"`
+	Since  time.Time `json:"since,omitzero"`
+	N      int       `json:"n,omitempty"`
 	Held   bool      `json:"held,omitempty"`
 	Done   bool      `json:"done,omitempty"`
 }
