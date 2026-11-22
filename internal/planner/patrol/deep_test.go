@@ -685,7 +685,10 @@ func TestDeepStopped(t *testing.T) {
 // TestDeepUnreadable: a record that does not read stops the workspace's
 // deep checks and is left as it is; the other workspaces go on.
 func TestDeepUnreadable(t *testing.T) {
-	for name, body := range map[string]string{"corrupt": `{"v":1,"findings":[`, "newer": `{"v":2,"workspace":"` + wsA + `","findings":[]}`} {
+	for name, body := range map[string]string{"corrupt": `{"v":1,"findings":[`, "newer": `{"v":2,"workspace":"` + wsA + `","findings":[]}`,
+		// What read as no record at all would have everything on it reported
+		// anew: an empty file, a shape that is not the record's.
+		"empty": ``, "null": `null`, "an unknown key": `{"v":1,"workspace":"` + wsA + `","finding":[]}`, "no version": `{"workspace":"` + wsA + `","findings":[]}`} {
 		t.Run(name, func(t *testing.T) {
 			d := newDeep(t)
 			d.repo(wsA, "gateway", "a")

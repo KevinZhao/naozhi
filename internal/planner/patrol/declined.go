@@ -7,11 +7,12 @@ import (
 	"log/slog"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/osutil"
-	"github.com/naozhi/naozhi/internal/osutil/jsonfile"
 	"github.com/naozhi/naozhi/internal/planner/front"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
 )
@@ -22,8 +23,9 @@ import (
 // findings are filtered by: what the user turned down is not reported
 // again. The file is the user's to edit (taking an entry out brings the
 // thing back), so it is read from disk every time it is used and never
-// cached. One that cannot be read stops the patrol rather than reading as
-// nothing declined, which would report all of it again.
+// cached. One that cannot be read — and anything but the list as the patrol
+// writes it cannot — stops the patrol rather than reading as nothing
+// declined, which would report all of it again.
 const (
 	declinedFile    = "declined.json"
 	declinedVersion = 1
@@ -135,18 +137,20 @@ func (d Declined) covers(ws string, f Finding) bool { return d.finding(ws, f.ID)
 
 func (p *Patrol) declinedPath() string { return filepath.Join(p.cfg.Dir, declinedFile) }
 
-// loadDeclined reads declined.json: none is nothing declined; one that
-// does not parse, or that a newer naozhi wrote, is ErrDeclined and is left
-// as it is. Callers hold deepMu.
+// loadDeclined reads declined.json: none is nothing declined; one that is
+// not the list this version writes (readStrict, and the version) is
+// ErrDeclined and is left as it is. A list left out or null is an empty
+// one: that is how a hand leaves it. Callers hold deepMu.
 func (p *Patrol) loadDeclined() (Declined, error) {
-	d, out, err := jsonfile.Load[Declined](p.declinedPath(), jsonfile.Options{MaxBytes: maxStateBytes, Label: "planner patrol declined list", Corrupt: jsonfile.LeaveCorrupt})
+	var d Declined
+	exists, err := readStrict(p.declinedPath(), &d)
 	switch {
 	case err != nil:
-		return Declined{}, fmt.Errorf("%w：%w", ErrDeclined, err)
-	case out == jsonfile.CorruptLeft:
-		return Declined{}, fmt.Errorf("%w：不是合格的 JSON", ErrDeclined)
-	case out == jsonfile.Parsed && d.V > declinedVersion:
-		return Declined{}, fmt.Errorf("%w：是更新版本的 naozhi 写的", ErrDeclined)
+		return Declined{}, fmt.Errorf("%w：%v", ErrDeclined, err)
+	case !exists:
+		return Declined{V: declinedVersion}, nil
+	case d.V != declinedVersion:
+		return Declined{}, fmt.Errorf("%w：版本 v 是 %d，这个版本的 naozhi 只认 %d", ErrDeclined, d.V, declinedVersion)
 	}
 	return d, nil
 }
@@ -164,7 +168,8 @@ func (p *Patrol) readDeclined() (Declined, error) {
 	if alarm {
 		slog.Warn("planner patrol: declined list unreadable; nothing is checked or reported until it is fixed or removed", "path", p.declinedPath(), "err", err)
 		if p.cfg.Alarm != nil {
-			p.cfg.Alarm("patrol:declined", "项目巡查的被否清单读不了，巡查已停", p.declinedPath()+" 不是合格的 JSON（或是更新版本写的）。改好或删掉它之后，下一轮照常巡查；删掉等于清空被否清单。")
+			p.cfg.Alarm("patrol:declined", "项目巡查的被否清单读不了，巡查已停", p.declinedPath()+"："+strings.TrimPrefix(err.Error(), ErrDeclined.Error()+"：")+
+				"。改好或删掉它之后，下一轮照常巡查；删掉等于清空被否清单。")
 		}
 	}
 	return d, err
@@ -185,6 +190,10 @@ func (p *Patrol) saveDeclined(d Declined, now time.Time) error {
 	}
 	if d.Workspaces == nil {
 		d.Workspaces = []DeclinedWorkspace{}
+	}
+	// A choice may come before the first round made the directory.
+	if err := datadir.EnsureDir(p.cfg.Dir); err != nil {
+		return err
 	}
 	data, err := json.MarshalIndent(d, "", "  ")
 	if err != nil {

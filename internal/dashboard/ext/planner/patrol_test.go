@@ -40,13 +40,14 @@ func patrolHandler(t *testing.T) (h *Handler, hold chan struct{}, started chan s
 		Exec: func(context.Context, string, string, ...string) (string, error) {
 			return "", os.ErrNotExist
 		},
-		Session: func(ctx context.Context, key string, _ sessionview.AgentOpts, _ string) (string, []string, []string, error) {
+		Deny: func() []string { return nil },
+		Session: func(ctx context.Context, key string, _ sessionview.AgentOpts, _ string) (string, error) {
 			started <- key
 			select {
 			case <-hold:
 			case <-ctx.Done():
 			}
-			return `{"findings":[]}`, nil, nil, ctx.Err()
+			return `{"findings":[]}`, ctx.Err()
 		},
 	})
 	t.Cleanup(p.Stop)
@@ -156,10 +157,11 @@ func decideHandler(t *testing.T) (h *Handler, p *patrol.Patrol, ledger *front.St
 		Exec: func(context.Context, string, string, ...string) (string, error) {
 			return "", os.ErrNotExist
 		},
-		Session: func(context.Context, string, sessionview.AgentOpts, string) (string, []string, []string, error) {
+		Deny: func() []string { return nil },
+		Session: func(context.Context, string, sessionview.AgentOpts, string) (string, error) {
 			return `{"findings":[
 				{"id":"bug-one","title":"重连时会话为空会崩","kind":"bug","evidence":["a.go:1","https://example.com/issue/7"],"impact":"重连即崩","fix":"先判空","size":"S","reversible":true,"confidence":"high"},
-				{"id":"doc-two","title":"README 与脚本不符","kind":"doc","evidence":["a.go:1"],"impact":"装不上","fix":"改 README","size":"M","reversible":true,"confidence":"medium"}]}`, nil, nil, nil
+				{"id":"doc-two","title":"README 与脚本不符","kind":"doc","evidence":["a.go:1"],"impact":"装不上","fix":"改 README","size":"M","reversible":true,"confidence":"medium"}]}`, nil
 		},
 		// The findings are on record once they are handed over.
 		Wake: func(func(int, error), ...string) error { handed <- struct{}{}; return nil },
@@ -365,9 +367,13 @@ func TestHandleFrontsFindings(t *testing.T) {
 	if len(got.Items) != 2 || len(got.Findings) != 1 || !ok {
 		t.Fatalf("items %+v, findings %+v", got.Items, got.Findings)
 	}
-	if d.Kind != "bug" || d.Size != "S" || d.Confidence != "high" || d.Impact != "重连即崩" || d.Fix != "先判空" || d.State != patrol.StateItem || len(d.Evidence) != 2 ||
-		d.Evidence[0] != (patrol.Evidence{Text: "a.go:1"}) || d.Evidence[1] != (patrol.Evidence{Text: "https://example.com/issue/7", Link: "https://example.com/issue/7"}) {
+	if d.Kind != "bug" || d.Size != "S" || d.Confidence != "high" || d.Impact != "重连即崩" || d.Fix != "先判空" || d.State != patrol.StateItem {
 		t.Errorf("finding %+v", d)
+	}
+	// The link a session wrote as evidence is not shown: the links are the
+	// gateway's own, and this directory is no repository on GitHub.
+	if len(d.Evidence) != 1 || d.Evidence[0] != (patrol.Evidence{Text: "a.go:1"}) {
+		t.Errorf("evidence %+v, want the file line alone", d.Evidence)
 	}
 	// With no finding among the items the field is left out.
 	plain, _ := frontsHandler(t)

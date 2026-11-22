@@ -1,10 +1,13 @@
 package patrol
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -14,7 +17,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/osutil"
-	"github.com/naozhi/naozhi/internal/osutil/jsonfile"
 	"github.com/naozhi/naozhi/internal/planner/front"
 )
 
@@ -173,23 +175,67 @@ func (p *Patrol) deepPath(ws string) string {
 	return filepath.Join(p.cfg.Dir, deepDir, ws+".json")
 }
 
-// loadDeep reads ws's file: none is an empty record; one that does not
-// parse, or that a newer naozhi wrote, is an error and is left as it is.
-// Callers hold deepMu.
+// readStrict reads the JSON object at path into v: one of the patrol's own
+// files, which must be exactly what the patrol writes. exists is false for
+// no file, which is the only thing that reads as nothing on record. A file
+// that is empty, is no object, carries a key v does not have, or has
+// anything after the object is an error: read leniently, a save cut short
+// or a key renamed by hand would be nothing declined, or nothing reported,
+// and the next write would put that over what the file said. The error
+// names no path: it is shown to the user of a page.
+func readStrict(path string, v any) (exists bool, err error) {
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		var pe *fs.PathError
+		if errors.As(err, &pe) {
+			err = pe.Err
+		}
+		return true, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxStateBytes+1))
+	if err != nil {
+		return true, err
+	}
+	data = bytes.TrimSpace(data)
+	switch {
+	case len(data) > maxStateBytes:
+		return true, fmt.Errorf("超过 %d 字节", maxStateBytes)
+	case len(data) == 0:
+		return true, errors.New("文件是空的")
+	case data[0] != '{':
+		return true, errors.New("不是一个 JSON 对象")
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return true, fmt.Errorf("不合格式（%v）", err)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return true, errors.New("JSON 对象后面还有内容")
+	}
+	return true, nil
+}
+
+// loadDeep reads ws's file: none is an empty record; one that is not the
+// record this version writes (readStrict, and the version) is an error and
+// is left as it is. Callers hold deepMu.
 func (p *Patrol) loadDeep(ws string) (deepState, error) {
-	st, out, err := jsonfile.Load[deepState](p.deepPath(ws), jsonfile.Options{MaxBytes: maxStateBytes, Label: "planner patrol record", Corrupt: jsonfile.LeaveCorrupt})
+	var st deepState
+	exists, err := readStrict(p.deepPath(ws), &st)
 	switch {
 	case err != nil:
-		return deepState{}, fmt.Errorf("%w：%w", ErrState, err)
-	case out == jsonfile.CorruptLeft:
-		return deepState{}, fmt.Errorf("%w：%s 不是合格的 JSON", ErrState, ws+".json")
-	case out == jsonfile.Parsed && st.V > stateVersion:
-		return deepState{}, fmt.Errorf("%w：%s 是更新版本的 naozhi 写的", ErrState, ws+".json")
-	case out == jsonfile.Parsed:
-		st.Workspace = ws
-		return st, nil
+		return deepState{}, fmt.Errorf("%w：%s %v", ErrState, ws+".json", err)
+	case !exists:
+		return deepState{V: stateVersion, Workspace: ws}, nil
+	case st.V != stateVersion:
+		return deepState{}, fmt.Errorf("%w：%s 的版本 v 是 %d，这个版本的 naozhi 只认 %d", ErrState, ws+".json", st.V, stateVersion)
 	}
-	return deepState{V: stateVersion, Workspace: ws}, nil
+	st.Workspace = ws
+	return st, nil
 }
 
 // saveDeep writes st, the findings long over left out. Callers hold deepMu.

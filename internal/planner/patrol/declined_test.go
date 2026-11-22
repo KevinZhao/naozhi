@@ -547,7 +547,27 @@ func TestDeclinedWhileChecking(t *testing.T) {
 // nothing. No choice is written over it, no deep check runs, the round
 // looks at nothing, and the user is told once, until it reads again.
 func TestDeclinedUnreadable(t *testing.T) {
-	for name, body := range map[string]string{"not JSON": `{"v":1,"findings":[`, "a newer version": `{"v":2,"findings":[],"kinds":[],"workspaces":[]}`} {
+	entry := `{"workspace":"` + wsB + `","at":"2026-11-20T10:00:00+08:00"}`
+	for name, body := range map[string]string{
+		"not JSON":        `{"v":1,"findings":[`,
+		"a newer version": `{"v":2,"findings":[],"kinds":[],"workspaces":[]}`,
+		// The file is edited by hand, which is where these come from: a save
+		// half way, a key renamed, the version line lost. Each would read as
+		// nothing declined to a lenient reader.
+		"an empty file":              ``,
+		"only blanks":                " \n\t\n",
+		"null":                       `null`,
+		"a list, not an object":      `[]`,
+		"a string":                   `"declined"`,
+		"an unknown key":             `{"v":1,"findings":[],"kinds":[],"workspace":[` + entry + `]}`,
+		"an unknown key in a kind":   `{"v":1,"findings":[],"kinds":[{"workspace":"","kind":"debt","by":"user","when":"2026-11-20T10:00:00+08:00"}],"workspaces":[]}`,
+		"an unknown key in a list":   `{"v":1,"findings":[{"workspace":"` + wsB + `","finding":"bug-x"}],"kinds":[],"workspaces":[]}`,
+		"no version":                 `{"findings":[],"kinds":[],"workspaces":[` + entry + `]}`,
+		"version zero":               `{"v":0,"findings":[],"kinds":[],"workspaces":[]}`,
+		"a version that is no int":   `{"v":"1","findings":[],"kinds":[],"workspaces":[]}`,
+		"a list that is an object":   `{"v":1,"findings":{},"kinds":[],"workspaces":[]}`,
+		"something after the object": `{"v":1,"findings":[],"kinds":[],"workspaces":[]} {"v":1}`,
+	} {
 		t.Run(name, func(t *testing.T) {
 			d := newDeep(t)
 			dir := d.repo(wsA, "gateway", "a")
@@ -609,6 +629,50 @@ func TestDeclinedUnreadable(t *testing.T) {
 				t.Errorf("alarms %q, want a second once it is unreadable again", d.alarms)
 			}
 		})
+	}
+}
+
+// TestDeclinedAbsent: no file is nothing declined, and so is one whose
+// lists are left out or null (a list emptied by hand): the patrol goes on,
+// and the next choice writes the lists back.
+func TestDeclinedAbsent(t *testing.T) {
+	for name, body := range map[string]string{"no file": "", "no lists": `{"v":1}`, "null lists": `{"v":1,"findings":null,"kinds":null,"workspaces":null}`,
+		"blanks around": "\n  {\"v\": 1, \"findings\": []}\n\n"} {
+		t.Run(name, func(t *testing.T) {
+			d := newDeep(t)
+			d.repo(wsA, "gateway", "a")
+			d.found(finding("bug-one", nil))
+			if body != "" {
+				d.writeDeclined(body)
+			}
+			d.round()
+			if len(d.alarms) != 0 || d.read(wsA+".md") == "" {
+				t.Fatalf("the round did not run: alarms %q", d.alarms)
+			}
+			if err := d.p.Decide(ref("bug-one"), ChoiceSkip); err != nil {
+				t.Fatal(err)
+			}
+			got := d.declined()
+			if got.V != 1 || len(got.Findings) != 1 || got.Kinds == nil || got.Workspaces == nil {
+				t.Errorf("declined.json after a choice: %+v", got)
+			}
+		})
+	}
+}
+
+// TestMuteBeforeFirstRound: a workspace taken out of the patrol before any
+// round made planner/patrol is written all the same.
+func TestMuteBeforeFirstRound(t *testing.T) {
+	d := newDeep(t)
+	d.repo(wsA, "gateway", "a")
+	if _, err := os.Stat(d.cfg.Dir); !os.IsNotExist(err) {
+		t.Fatalf("planner/patrol is there before a round: %v", err)
+	}
+	if err := d.p.MuteWorkspace(wsA); err != nil {
+		t.Fatalf("MuteWorkspace before the first round: %v", err)
+	}
+	if got := d.declined(); len(got.Workspaces) != 1 || got.Workspaces[0].Workspace != wsA {
+		t.Errorf("declined.json %+v", got)
 	}
 }
 
