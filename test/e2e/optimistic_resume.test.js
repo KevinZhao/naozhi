@@ -4,7 +4,9 @@
 // before the server made it does not take the card away; the refresh's row
 // then replaces the stand-in. The 追问 drawer opens on the quote while
 // scratch_open is out (a send made meanwhile goes once the key is known),
-// and closes with the error if it fails.
+// and closes with the error if it fails, keeping what was typed. A card
+// removed while the refresh is out stays removed, and the refresh's row of a
+// session left meanwhile is not an unread turn.
 //
 // 跑法：cd test/e2e && npx playwright test optimistic_resume.test.js --project=desktop-chrome
 const { test, expect } = require('@playwright/test');
@@ -25,7 +27,7 @@ const isSessionsGet = (req) => req.method() === 'GET' && new URL(req.url()).path
 // the list as it stood (stale: it lacks the new key). The held one, once
 // released, is answered with extra(row) added to the mock's list.
 async function holdSessionsAfter(page, armed, extra) {
-  const h = { held: null, stale: 0, release: null };
+  const h = { held: null, stale: 0, release: null, done: false };
   let gate = null;
   await page.route((u) => u.pathname === '/api/sessions', async (route) => {
     if (!isSessionsGet(route.request()) || !armed()) return route.continue();
@@ -36,7 +38,9 @@ async function holdSessionsAfter(page, armed, extra) {
       const body = await resp.json();
       if (extra) body.sessions = (body.sessions || []).filter((s) => s.key !== extra.key).concat([extra]);
       if (body.stats) body.stats = Object.assign({}, body.stats, { version: (body.stats.version || 1) + 100 });
-      return route.fulfill({ response: resp, json: body });
+      await route.fulfill({ response: resp, json: body });
+      h.done = true;
+      return;
     }
     h.stale++;
     const resp = await route.fetch();
@@ -89,6 +93,72 @@ test('a resumed history session opens with its card before the sidebar refresh a
     await expect(page.locator('#main .hdr-title-t')).toHaveText('服务端的标题');
     await expect(card).toHaveCount(1);
     await expect(card).toContainText('服务端的标题');
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+// resumeHeld resumes hist-001 and returns once the sidebar refresh it starts
+// is held; server is the row that refresh answers with.
+async function resumeHeld(page, mock, server) {
+  let resumed = false;
+  page.on('response', (r) => { if (r.url().includes('/api/sessions/resume')) resumed = true; });
+  const hold = await holdSessionsAfter(page, () => resumed, server);
+  await page.goto(mock.url + '/dashboard');
+  await page.waitForSelector('.session-card');
+  await page.click('#btn-history');
+  await page.click('.history-popover-item[data-sid="hist-001"]');
+  await expect.poll(() => !!hold.held).toBe(true);
+  await expect(page.locator(`.session-card[data-key="${RESUMED}"]`)).toHaveCount(1);
+  return hold;
+}
+
+const resumedRow = (extra) => Object.assign({
+  key: RESUMED, state: 'ready', platform: 'dashboard', agent: 'myproject', cli_name: 'claude',
+  workspace: '/home/user/workspace/myproject', project: 'myproject', node: 'local',
+  session_id: 'hist-001', last_prompt: 'old task from yesterday', user_label: '服务端的标题',
+  last_active: Date.now(), created_at: Date.now(),
+}, extra);
+
+test('a resumed card removed while the refresh is out stays removed when it answers', async ({ browser }) => {
+  const ctx = await browser.newContext(desktop);
+  const page = await ctx.newPage();
+  const mock = await startMockServer({});
+  try {
+    const hold = await resumeHeld(page, mock, resumedRow());
+    const card = page.locator(`.session-card[data-key="${RESUMED}"]`);
+    await card.locator('.btn-dismiss').click();
+    await expect(card).toHaveCount(0);
+
+    // The refresh lists the session (its DELETE waits out the undo window):
+    // the stand-in does not put the card back.
+    hold.release();
+    await expect.poll(() => hold.done).toBe(true);
+    // Counted once, not retried: the DELETE after the undo window would
+    // take a resurrected card away again.
+    await page.waitForTimeout(300);
+    expect(await card.count()).toBe(0);
+    await expect(page.locator('#undo-toast')).toContainText('已移除');
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+test('the refresh row of a resumed session left meanwhile does not count as unread', async ({ browser }) => {
+  const ctx = await browser.newContext(desktop);
+  const page = await ctx.newPage();
+  const mock = await startMockServer({});
+  try {
+    const hold = await resumeHeld(page, mock, resumedRow({ last_response: '昨天的回答' }));
+    await page.click(`.session-card[data-key="${SESSION}"]`);
+    expect(await page.evaluate(() => window.nz.test.selectedKey)).toBe(SESSION);
+    hold.release();
+    const card = page.locator(`.session-card[data-key="${RESUMED}"]`);
+    await expect(card).toContainText('服务端的标题');
+    await page.waitForTimeout(300);
+    expect(await card.locator('.sc-unread').count()).toBe(0);
   } finally {
     await ctx.close();
     mock.server.close();
@@ -245,12 +315,24 @@ test('a scratch_open that fails closes the drawer and says why', async ({ browse
     await clickAskAside(page);
     await expect.poll(() => release !== null).toBe(true);
     await expect(page.locator('#aside-drawer')).toHaveClass(/visible/);
+    // A question typed and sent while it opens is not thrown away.
+    await page.fill('#ad-input', 'iso 打开时打的问题');
+    await page.press('#ad-input', 'Enter');
     release();
     await expect(page.locator('#aside-drawer')).not.toHaveClass(/visible/);
     await expect(page.locator('#toast')).toHaveClass(/show/);
     await expect(page.locator('#toast')).toContainText('打开追问');
     await expect(page.locator('#ad-loading')).not.toHaveClass(/visible/);
     expect(await page.evaluate(() => window.nz.test.selectedKey)).toBe(SESSION);
+    expect(mock.sendCalls.length).toBe(0);
+
+    // The next 追问 opens on it.
+    release = null;
+    await clickAskAside(page);
+    await expect.poll(() => release !== null).toBe(true);
+    await expect(page.locator('#aside-drawer')).toHaveClass(/visible/);
+    await expect(page.locator('#ad-input')).toHaveValue('iso 打开时打的问题');
+    release();
   } finally {
     await ctx.close();
     mock.server.close();

@@ -767,7 +767,7 @@ function freshRow(key, seed) {
   const base = ws.replace(/\/+$/, '').split('/').pop() || '';
   const now = Date.now();
   return {
-    key, node: 'local', state: 'ready', source: 'managed',
+    key, node: 'local', state: 'ready', source: 'managed', seed: true,
     platform: parts[0] || 'dashboard', agent: parts[3] || 'general',
     workspace: ws, session_id: seed.session_id || '', last_prompt: seed.last_prompt || '', last_response: '',
     created_at: now, last_active: now,
@@ -776,12 +776,17 @@ function freshRow(key, seed) {
   };
 }
 
-// paintFreshSeeds adds to the sidebar each seed its last payload lacks.
+// paintFreshSeeds adds to the sidebar each seed its last payload lacks. A
+// session removed meanwhile (dismissManaged drops its row and marks the key)
+// stays out: the payload lacks it for that reason, not for being stale. An
+// undo puts the row back, and the seed with it.
 function paintFreshSeeds() {
   const data = sessionList.lastSidebarData;
   if (!data || freshSeeds.size === 0) return;
   const listed = new Set((data.sessions || []).map(s => sid(s.key, s.node || 'local')));
-  const missing = [...freshSeeds].filter(([k]) => !listed.has(k)).map(([, row]) => row);
+  const missing = [...freshSeeds.keys()]
+    .filter(k => !listed.has(k) && !sessionList.optimisticDeleteKeys.has(k) && sessionList.sessionsData[k])
+    .map(k => sessionList.sessionsData[k]);
   if (missing.length === 0) return;
   // The sidebar search repaints from lastSidebarData: it keeps the seed too.
   sessionList.lastSidebarData = Object.assign({}, data, { sessions: (data.sessions || []).concat(missing) });

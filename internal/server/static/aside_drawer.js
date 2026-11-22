@@ -393,7 +393,7 @@ async function openScratch(quote, agentId, sourceKey, sourceMsgTime) {
     if (!r.ok) {
       const txt = await r.text().catch(() => '');
       if (ad.state !== st) return;
-      closeScratch(true);
+      failOpen();
       showAPIError('打开追问', r.status, txt);
       return;
     }
@@ -431,9 +431,17 @@ async function openScratch(quote, agentId, sourceKey, sourceMsgTime) {
   } catch (e) {
     console.error('open scratch', e);
     if (ad.state !== st) return;
-    closeScratch(true);
+    failOpen();
     showNetworkError('打开追问', e);
   }
+}
+
+// failOpen closes a drawer whose scratch_open failed. What was typed into it
+// meanwhile stays in the box: the next 追问 opens on it.
+function failOpen() {
+  const typed = ad.elInput.value;
+  closeScratch(true); // no scratch id yet: it clears synchronously
+  ad.elInput.value = typed;
 }
 
 function paintAgentLabel() {
