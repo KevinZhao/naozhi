@@ -300,13 +300,15 @@ func TestReconcile(t *testing.T) {
 	}
 
 	// One closed by the check itself comes back when it hits again; a hit
-	// with no source or no text is left out.
+	// with no source or no text, or one the group does not take (it would
+	// be filed again every round), is left out.
 	now = now.Add(time.Hour)
 	if _, closed = s.Reconcile(group, nil, ByPatrol); len(closed) != 1 {
 		t.Fatalf("no hit: closed %+v", closed)
 	}
 	now = now.Add(time.Hour)
-	added, _ = s.Reconcile(group, []Item{hit("check:git:dirty", "3 个文件 4 天没提交"), hit("", "没有出处"), hit("check:git:empty", " ")}, ByPatrol)
+	added, _ = s.Reconcile(group, []Item{hit("check:git:dirty", "3 个文件 4 天没提交"), hit("", "没有出处"), hit("check:git:empty", " "),
+		{Text: "圈外的", Workspace: "ws_zz99zz99", Source: "check:git:stray", From: FromPatrol}}, ByPatrol)
 	if len(added) != 1 || added[0].Text != "3 个文件 4 天没提交" {
 		t.Fatalf("hitting again: added %+v", added)
 	}

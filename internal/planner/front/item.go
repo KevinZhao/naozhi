@@ -301,9 +301,11 @@ func (s *Store) CloseItems(match func(Item) bool, by string) []Item {
 // wanted is closed by by. A wanted one the user struck (an item of the same
 // From and Source closed by ByUser, still kept) is not filed again: the
 // user said no, and the check hitting again an hour later is not news. A
-// wanted item that does not validate or has no Source (what tells it
-// apart), or one past MaxOpenItems, is left out. match runs under the
-// store's lock: it must not call the store.
+// wanted item that does not validate, has no Source (what tells it apart)
+// or is not one match takes, or one past MaxOpenItems, is left out: filed
+// outside its own group it would be filed again every round. A wanted
+// item's Front the ledger lacks is dropped, the item kept. match runs under
+// the store's lock: it must not call the store.
 //
 // It is what a deterministic check calls each round with its hits (the
 // patrol, D142): the hits are the list, whatever was filed before.
@@ -315,8 +317,12 @@ func (s *Store) Reconcile(match func(Item) bool, want []Item, by string) (added,
 	wanted := map[string]bool{}
 	for _, w := range want {
 		err := w.normalize()
-		if err == nil && w.Source == "" {
+		switch {
+		case err != nil:
+		case w.Source == "":
 			err = errors.New("no source")
+		case !match(w):
+			err = errors.New("not in the group reconciled")
 		}
 		if err != nil {
 			slog.Warn("planner fronts: an item to reconcile left out", "source", w.Source, "err", err)
