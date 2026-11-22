@@ -10,7 +10,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/journal"
 )
 
-// List derives a session's notes from the journal's health and notify
+// List derives a session's notes from the journal's health, notify and note
 // entries, the dispatch and the reports, oldest first, within Window; a
 // reopened journal (a restart) lists the same, and each journaled note is
 // pushed as it is appended with the same ID.
@@ -64,6 +64,8 @@ func TestList(t *testing.T) {
 	appendE(-20, journal.KindHealth, "systemic:rate_limit", `{"systemic":true,"error_class":"rate_limit","units":["task:a","b"]}`)
 	appendE(-20, journal.KindHealth, "b", `{"from":"active","to":"stalled"}`)
 	appendE(-10, journal.KindActivity, "task:a", `{"type":"output"}`)
+	appendE(-8, journal.KindNote, "task:a", `{"event":"write","id":"p0123456789ab","text":"和 task:b 的结论冲突","why":"task:b 的摘要"}`)
+	appendE(-7, journal.KindNote, "task:a", `{"event":"useless","id":"p0123456789ab"}`)
 
 	type row struct {
 		Kind               Kind
@@ -71,12 +73,14 @@ func TestList(t *testing.T) {
 		Event, Item        string
 		ItemKind, ClosedBy string
 		Title              string
+		Text, Why          string
+		Useless            bool
 		Time               time.Time
 	}
 	rows := func(ns []Note) []row {
 		out := make([]row, len(ns))
 		for i, nt := range ns {
-			out[i] = row{nt.Kind, nt.From, nt.To, nt.ErrClass, nt.Event, nt.Item, nt.ItemKind, nt.ClosedBy, nt.Title, nt.Time.UTC()}
+			out[i] = row{nt.Kind, nt.From, nt.To, nt.ErrClass, nt.Event, nt.Item, nt.ItemKind, nt.ClosedBy, nt.Title, nt.Text, nt.Why, nt.Useless, nt.Time.UTC()}
 		}
 		return out
 	}
@@ -88,6 +92,7 @@ func TestList(t *testing.T) {
 		{Kind: KindInbox, Event: "close", Item: "in_shut", ItemKind: "question", ClosedBy: "auto", Title: "title in_shut", Time: at(-50).UTC()},
 		{Kind: KindHealth, From: "idle", To: "failed", ErrClass: "rate_limit", Time: at(-40).UTC()},
 		{Kind: KindInbox, Event: "open", Item: "in_open", ItemKind: "error", Title: "title in_open", Time: at(-40).UTC()},
+		{Kind: KindPlanner, Text: "和 task:b 的结论冲突", Why: "task:b 的摘要", Useless: true, Time: at(-8).UTC()},
 		{Kind: KindReport, Time: at(-5).UTC()},
 	}
 	got := n.List("task:a", now)
@@ -111,7 +116,7 @@ func TestList(t *testing.T) {
 	}
 	var listedA []string
 	for _, nt := range got {
-		if nt.Kind == KindHealth || nt.Kind == KindInbox {
+		if nt.Kind == KindHealth || nt.Kind == KindInbox || nt.Kind == KindPlanner {
 			listedA = append(listedA, nt.ID)
 		}
 	}

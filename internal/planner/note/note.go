@@ -1,15 +1,17 @@
 // Package note derives the gateway's side notes on a session
 // (docs/rfc/planner.md §15.3 ③): its health entering "waiting for you",
 // "stalled" or "failed" and recovering, its "等你" items opening and closing,
-// the Planner dispatching it, it reporting to the Planner, and what custody
-// did on it. The notes are
+// the Planner dispatching it, it reporting to the Planner, what custody
+// did on it, and what the Planner wrote on it for the user (its note blocks,
+// §15.22 ②). The notes are
 // shown in the session view only; they never reach the CLI and are not
 // events of the session's own log.
 //
-// Nothing is stored here: health and inbox notes are read back from the
+// No file is kept here: health and inbox notes are read back from the
 // Planner journal (the health and notify entries already written there), the
 // dispatch from the session's sidecar file and the reports from planner:main's
-// history, so a restart keeps them. Nothing here calls a model.
+// history, and the Planner's notes are journal entries of their own
+// (kind=note), so a restart keeps them. Nothing here calls a model.
 package note
 
 import (
@@ -17,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -39,6 +42,7 @@ const (
 	KindDispatch Kind = "dispatch" // the Planner dispatched the session
 	KindReport   Kind = "report"   // the session's message reached the Planner
 	KindCustody  Kind = "custody"  // custody switched, sent, held back or stopped
+	KindPlanner  Kind = "planner"  // the Planner's words to the user on the session
 )
 
 // Note is one side note on session Key. ID is stable across reads and
@@ -65,6 +69,11 @@ type Note struct {
 	Title    string `json:"title,omitempty"`
 	By       string `json:"by,omitempty"`
 	N        int    `json:"n,omitempty"`
+	// Planner notes: what the Planner tells the user, what it goes by, and
+	// whether the user marked the note useless.
+	Text    string `json:"text,omitempty"`
+	Why     string `json:"why,omitempty"`
+	Useless bool   `json:"useless,omitempty"`
 }
 
 // Health states a note is written for: entering one, or leaving one for a
@@ -133,6 +142,13 @@ func FromEntry(e journal.Entry) (Note, bool) {
 		}
 		n.Kind, n.ID = KindCustody, fmt.Sprintf("c%d", e.TS.UnixNano())
 		n.Event, n.Evidence, n.By, n.N = d.Event, d.Reason, d.By, d.N
+	case journal.KindNote:
+		// Only the writing is a note; the user's "没用" marks one (List).
+		var d PlannerData
+		if json.Unmarshal(e.Data, &d) != nil || d.Event != EventWrite || d.ID == "" {
+			return Note{}, false
+		}
+		n.Kind, n.ID, n.Text, n.Why = KindPlanner, d.ID, d.Text, d.Why
 	default:
 		return Note{}, false
 	}
@@ -150,17 +166,33 @@ type Config struct {
 	Dispatched func(key string) time.Time
 	// Reports returns when key's messages reached the Planner.
 	Reports func(key string) []time.Time
+	// PausedUntil is when the pause of pushes and custody ends
+	// (notify.Notifier.PausedUntil), zero when not paused: the Planner's
+	// notes are not written meanwhile.
+	PausedUntil func() time.Time
+	// Tell sends the Planner the receipt of a note the user marked useless.
+	Tell func(text string) error
+	// Name is a session's name as the receipt shows it beside its key.
+	Name func(key string) string
+	// Now is the wall clock; nil is time.Now.
+	Now func() time.Time
 }
 
-// Notes lists a session's side notes and pushes the new ones. Safe for
-// concurrent use.
+// Notes lists a session's side notes and pushes the new ones, and keeps the
+// ones the Planner writes (Write, Useless). Safe for concurrent use.
 type Notes struct {
 	cfg  Config
 	push atomic.Pointer[func(Note)]
+	// mu makes the Planner's notes count and write in one step (Write,
+	// Useless): two at once would both pass a limit with one place left.
+	mu sync.Mutex
 }
 
 // New returns a Notes over cfg; it pushes once SetPush binds an exit.
 func New(cfg Config) *Notes {
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
 	n := &Notes{cfg: cfg}
 	if cfg.Journal != nil {
 		cfg.Journal.Observe(n.observe)
@@ -203,13 +235,20 @@ func (n *Notes) List(key string, now time.Time) []Note {
 		if err != nil {
 			slog.Warn("session notes: journal read", "key", key, "err", err)
 		}
+		useless := map[string]bool{}
 		for _, e := range entries {
 			if e.Unit != key {
 				continue
 			}
+			if d, ok := plannerData(e); ok && d.Event == EventUseless {
+				useless[d.ID] = true
+			}
 			if nt, ok := FromEntry(e); ok {
 				out = append(out, n.fill(nt))
 			}
+		}
+		for i := range out {
+			out[i].Useless = out[i].Kind == KindPlanner && useless[out[i].ID]
 		}
 	}
 	if n.cfg.Dispatched != nil {

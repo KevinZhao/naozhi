@@ -518,7 +518,7 @@ func main() {
 	})
 	// Side notes in the session view (§15.3 ③), read back from the journal
 	// and pushed as the health machine and the inbox write it.
-	notes := wireup.SessionNotes(plannerState.Journal, notifier, sidecars, router)
+	notes := wireup.SessionNotes(plannerState.Journal, notifier, sidecars, router, plannerAgent.TellLater, unitNames)
 
 	// Morning brief (早报, §15.1): judged after the first health reconcile
 	// past 08:30 on a weekday, pushed once through the notifier. Only the
@@ -847,13 +847,18 @@ func main() {
 		Words:       wireup.PlannerWords(plannerAgent),
 		Relay:       srv.SubmitRelay,
 		RelayTarget: srv.RelayTarget,
-		Remember:    plannerAgent.Remember,
-		Park:        plannerAgent.Park,
-		Routines:    wireup.PlannerRoutines{Sched: scheduler},
-		Front:       fronts.Apply,
-		Lookup:      wireup.PlannerLookup(lookups),
-		TellAnswer:  wireup.PlannerTellAnswer(plannerAgent),
-		Ctx:         ctx,
+		SideNote: func(key, text, why string) error {
+			_, err := notes.Write(key, text, why)
+			return err
+		},
+		NoteTarget: wireup.NoteTarget(router),
+		Remember:   plannerAgent.Remember,
+		Park:       plannerAgent.Park,
+		Routines:   wireup.PlannerRoutines{Sched: scheduler},
+		Front:      fronts.Apply,
+		Lookup:     wireup.PlannerLookup(lookups),
+		TellAnswer: wireup.PlannerTellAnswer(plannerAgent),
+		Ctx:        ctx,
 	})
 	// The result is judged by the turn's sources before the ledger lets go
 	// of a request carried over from the last run.
