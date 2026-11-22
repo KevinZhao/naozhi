@@ -112,6 +112,9 @@ let digestOpen = '';
 const digests = new Map();
 let digestSeq = 0;
 let onlyNew = null;
+// unwatched is the sessions whose 观察 this page just switched off, by key
+// (→ a mark of that switch): 你开的 leaves them out meanwhile.
+const unwatched = new Map();
 
 // LIVE_MS is how often the group refetches while a dispatched session runs;
 // STATE_DEBOUNCE_MS gathers a burst of session_state frames into one fetch.
@@ -475,7 +478,8 @@ export const countHeadHtml = (label, n) => esc(label) + (n ? ' <span class="tk-n
 // progress, the phone's folded block's number (one number for 任务 on the
 // screen, §15.8 F1), its parts each their own.
 export function tasksHtml(data) {
-  const all = (data && Array.isArray(data.tasks)) ? data.tasks : [];
+  // A session put away is listed from its record, watched or not.
+  const all = ((data && Array.isArray(data.tasks)) ? data.tasks : []).filter((t) => !(isYours(t) && !t.reap && !t.retired && unwatched.has(t.id)));
   let html = '<h2 class="pl-group-h tk-head">' + countHeadHtml('任务', all.filter(inProgress).length) + '</h2>';
   if (!all.length) return html + '<div class="pl-empty">还没有任务<span>Planner 派出的会话、它答应你的事和你开的会话会列在这里</span></div>';
   // "N 件新结果" filters to the new ones (those it was chosen for, and any
@@ -903,6 +907,7 @@ nzBus.addEventListener('session:select', () => {
 nzBus.addEventListener('planner:node', () => {
   gen++; readAt = 0; failedAt = 0;
   digestOpen = ''; digests.clear(); onlyNew = null;
+  unwatched.clear();
   // The count was the node before's; its own list repaints it.
   const news = document.getElementById('pl-news');
   if (news) news.hidden = true;
@@ -942,8 +947,28 @@ nzBus.addEventListener('inbox:count', () => {
   if (!mounts.size && headerTaskKey()) ensureTasks(0);
 });
 nzBus.addEventListener('custody:changed', repaintAll);
-// 观察 switched in a session's header: 你开的 gains or loses it.
-nzBus.addEventListener('watch:changed', () => { if (mounts.size) refreshTasks(); });
+// 观察 switched in a session's header (custody.js): 你开的 loses it at once,
+// ahead of the gateway, and gains it from the list read once the gateway
+// answered (a card needs what only the list says). The key stays out until
+// that read is shown: one started before the answer still lists it.
+nzBus.addEventListener('watch:changed', (e) => {
+  const { key, watch, pending, failed } = e.detail || {};
+  if (!key) return;
+  if (pending) {
+    if (watch) unwatched.delete(key);
+    else unwatched.set(key, {});
+    repaintAll();
+    return;
+  }
+  const mark = unwatched.get(key);
+  const settle = () => {
+    if (!mark || unwatched.get(key) !== mark) return;
+    unwatched.delete(key);
+    repaintAll();
+  };
+  if (failed || !mounts.size) { settle(); return; }
+  refreshTasks().finally(settle);
+});
 
 registerActions({
   'task-more': (el) => {
