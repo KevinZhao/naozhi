@@ -237,6 +237,19 @@ type Config struct {
 	// (wireup.CustodySources.Asking): a halt keeps such a process, so the
 	// user's answer reaches a live one. nil is none.
 	Asking func(key string) bool
+	// TellWatch tells the Planner of a watched session's turn end
+	// (agent.Agent.TellWatch, D138): line is the gateway's JSON line of
+	// session key, outside whether it read outside content. Its error is
+	// why the Planner takes none now (stopped, off). nil tells none.
+	TellWatch func(key, line string, outside bool) error
+	// WatchTurn reports whether the Planner turn in flight was started by
+	// such a turn end (agent.Agent.WatchTurn): it runs only its note, notify
+	// and front blocks. nil reports none.
+	WatchTurn func() bool
+	// SessionDir is session key's working directory on this node
+	// (wireup.CustodySources.Dir), "" when unknown: the workspace a watched
+	// session's line names. nil names none.
+	SessionDir func(key string) string
 	// Ctx bounds dispatches' spawns; nil is Background.
 	Ctx context.Context
 	// Now is the wall clock; nil is time.Now.
@@ -255,6 +268,11 @@ type Custodian interface {
 	Name(key string) string
 	Halt(key, why string) error
 	Status(key string) custody.Status
+	// Watched reports whether the gateway observes key (a session of this
+	// node the user opened, its 观察 switch on); Nearby whether the user is
+	// at it.
+	Watched(key string) bool
+	Nearby(key string) bool
 }
 
 // Runner runs the action blocks of the Planner's replies and applies the
@@ -262,8 +280,10 @@ type Custodian interface {
 type Runner struct {
 	cfg Config
 	ch  chan reply
-	// endCh takes the dispatched sessions' turn ends due for a check.
-	endCh chan ended
+	// endCh takes the dispatched sessions' turn ends due for a check,
+	// watchCh the watched sessions' (watch.go).
+	endCh   chan ended
+	watchCh chan ended
 	// grace is how long a turn end waits before it is checked (endGrace),
 	// reportGrace one that ended with a report block (endReportGrace).
 	grace, reportGrace time.Duration
@@ -314,6 +334,12 @@ type Runner struct {
 	// after it (Config.Prompted) are not told. Only the handling goroutine
 	// touches it; a restart tells the next one afresh.
 	custodyTold map[string]time.Time
+	// watchTold is, per watched session, when the Planner was last told of
+	// a turn end (checkWatch); watchHeld the turn end each holds to its
+	// window's end, a later one replacing it, on one timer per session. Only
+	// the handling goroutine touches them; neither survives a restart.
+	watchTold map[string]time.Time
+	watchHeld map[string]ended
 	// reportTold is the reports told the Planner, by task, until the reply
 	// of the turn they started comes: that reply is checked for leaving the
 	// task 进行中 (checkReports), as for a report sent by SendMessage.
@@ -328,7 +354,9 @@ type toldReport struct {
 
 // ended is a dispatched session's turn end: the reply, when the turn ended
 // (at), the span a report of it may come in (from on), and how long a busy
-// Planner can hold the check off (until).
+// Planner can hold the check off (until). A watched session's (watchEnded)
+// has only its key, when it ended and, as text, its last reply's first
+// sentence; its wake is its window's end (Runner.watchHeld).
 type ended struct {
 	key, text       string
 	at, from, until time.Time
@@ -371,12 +399,14 @@ const (
 
 // reply is one Planner turn's result text and the span its turn ran in.
 // outside names what brought outside content into the turn, "" for nothing;
-// unrunTurn is set when the turn answers a receipt of blocks not run.
+// unrunTurn is set when the turn answers a receipt of blocks not run, watch
+// when a watched session's turn end started it.
 type reply struct {
 	text      string
 	from, to  time.Time
 	outside   string
 	unrunTurn bool
+	watch     bool
 	// words is the user's own words of the turn (Config.Words), none for a
 	// turn the user did not start.
 	words []Words
@@ -399,9 +429,10 @@ func New(cfg Config) *Runner {
 	}
 	// Reports older than the runner (history restored at startup) were the
 	// previous run's to check.
-	r := &Runner{cfg: cfg, ch: make(chan reply, queueLen), endCh: make(chan ended, queueLen), grace: endGrace, reportGrace: endReportGrace,
+	r := &Runner{cfg: cfg, ch: make(chan reply, queueLen), endCh: make(chan ended, queueLen), watchCh: make(chan ended, watchQueue), grace: endGrace, reportGrace: endReportGrace,
 		after: func(d time.Duration, f func()) { time.AfterFunc(d, f) }, last: cfg.Now(), doneTold: map[string]bool{}, endTold: map[string]time.Time{}, doingAt: map[string]time.Time{},
-		quiet: map[string]ended{}, custodyTold: map[string]time.Time{}, reopened: map[string]bool{}, reportTold: map[string]toldReport{}, relayedAt: map[string]time.Time{}}
+		quiet: map[string]ended{}, custodyTold: map[string]time.Time{}, reopened: map[string]bool{}, reportTold: map[string]toldReport{}, relayedAt: map[string]time.Time{},
+		watchTold: map[string]time.Time{}, watchHeld: map[string]ended{}}
 	if cfg.Inbox != nil {
 		cfg.Inbox.HandleDecisions(HandlerAsk, r.decideAsk)
 		open, _ := cfg.Inbox.List(0)
@@ -416,9 +447,9 @@ func New(cfg Config) *Runner {
 
 // Result is the router's result sink: it queues key's reply when key is the
 // Planner, for its action blocks and the reports its turn took, has a
-// dispatched session's turn end checked for a report (taskEnded) and a
-// session's in custody for the Planner to judge (custodyEnded). It never
-// blocks.
+// dispatched session's turn end checked for a report (taskEnded), a
+// session's in custody for the Planner to judge (custodyEnded) and a watched
+// session's told the Planner (watchEnded). It never blocks.
 func (r *Runner) Result(key, text string) {
 	if sessionkey.IsTaskKey(key) {
 		r.taskEnded(key, text)
@@ -429,22 +460,26 @@ func (r *Runner) Result(key, text string) {
 		// message to it settles the ask once its turn ends.
 		r.expireAsks(key)
 		r.custodyEnded(key, text)
+		r.watchEnded(key, text)
 		return
 	}
 	// Read now: the turn is still in flight while its result arrives.
-	outside, unrunTurn := "", false
+	outside, unrunTurn, watch := "", false, false
 	if r.cfg.Outside != nil {
 		outside = r.cfg.Outside()
 	}
 	if r.cfg.UnrunTurn != nil {
 		unrunTurn = r.cfg.UnrunTurn()
 	}
+	if r.cfg.WatchTurn != nil {
+		watch = r.cfg.WatchTurn()
+	}
 	var words []Words
 	if r.cfg.Words != nil {
 		words = r.cfg.Words()
 	}
 	r.mu.Lock()
-	rep := reply{text: text, from: r.last, to: r.cfg.Now(), outside: outside, unrunTurn: unrunTurn, words: words}
+	rep := reply{text: text, from: r.last, to: r.cfg.Now(), outside: outside, unrunTurn: unrunTurn, watch: watch, words: words}
 	r.last = rep.to
 	r.mu.Unlock()
 	if r.cfg.Tasks == nil && !strings.Contains(text, Fence) {
@@ -472,6 +507,8 @@ func (r *Runner) Run(ctx context.Context) {
 			r.handle(rep)
 		case e := <-r.endCh:
 			r.checkEnded(e)
+		case e := <-r.watchCh:
+			r.checkWatch(e)
 		}
 	}
 }
@@ -1240,6 +1277,11 @@ func (r *Runner) handle(rep reply) {
 		var err error
 		reopened := false
 		switch {
+		case rep.watch && !(b.Note != nil || b.Notify != nil || b.Front != nil && rep.outside == ""):
+			// Before the two below: a watch turn's limit is the narrowest, and
+			// its receipt says which blocks it does run.
+			un.add(i, b, r.refuseWatch(b, rep.outside != ""))
+			un.watch = true
 		case rep.outside != "" && (b.Dispatch != nil || b.Status != nil || b.Custody != nil || b.Relay != nil || b.Remember != nil || b.Lookup != nil || b.Park != nil ||
 			b.Halt != nil || b.Cancel != nil || b.Routine != nil || b.Front != nil):
 			un.add(i, b, r.refuseOutside(b, rep.outside))
@@ -1320,8 +1362,8 @@ type blockError struct{ error }
 // kinds of reason they had; notes are the blocks run with something the
 // Planner should know, what the gateway changed or did on the way.
 type unrun struct {
-	lines, notes                         []string
-	tooMany, malformed, outside, notUser bool
+	lines, notes                                []string
+	tooMany, malformed, outside, notUser, watch bool
 }
 
 // add lists block i (0-based) of a reply, not run for why.
@@ -1609,6 +1651,26 @@ func (r *Runner) refuseOutside(b Block, by string) string {
 	return "这一轮不能改任务状态，没有标为 " + s.State
 }
 
+// refuseWatch answers a block of a turn a watched session's turn end
+// started (D138) that is none of the three such a turn runs, or a front
+// block of one whose session read outside content (outside): the turn was
+// not the user's and what started it is a session's output, so the gateway
+// refuses by the turn's source, as refuseOutside does. It returns why, as
+// the receipt says it.
+func (r *Runner) refuseWatch(b Block, outside bool) string {
+	if f := b.Front; f != nil && outside {
+		r.note("读过外部内容的会话一轮结束触发的回合不能改工作线台账：「" + cmp.Or(f.Name, f.ID) + "」没有记")
+		return "这个会话读过外部内容，这一轮不能改工作线台账，没有记"
+	}
+	does, blocks := "只能写旁注、发通知、更新工作线", "note、notify、front"
+	if outside {
+		does, blocks = "只能写旁注、发通知", "note、notify"
+	}
+	label := strings.TrimSuffix(strings.TrimPrefix(blockLabel(b), "（"), "）")
+	r.note("你开的会话一轮结束触发的回合" + does + "：" + cmp.Or(label, "动作块") + "没有执行")
+	return "这一轮由用户自己开的会话一轮结束触发，只能用 " + blocks + "，没有执行"
+}
+
 // tellUnrun sends the Planner one receipt naming each block of the reply
 // that was not run, why, and what to do about it, and the notes of the
 // blocks run; an outside turn's goes
@@ -1653,6 +1715,9 @@ func (r *Runner) tellUnrun(rep reply, u unrun) {
 	}
 	if u.outside {
 		b.WriteString("这一轮由" + by + "触发，网关只执行 notify、promise、ask 与 note；需要派活、改任务状态、托管、记记忆、搁置、网页查询、叫停或停止任务，就在对话里向用户说明，等用户发消息让你做。\n")
+	}
+	if u.watch {
+		b.WriteString("这一轮由用户自己开的会话一轮结束触发（<naozhi-watch>），网关只执行 note、notify 与 front（会话读过外部内容时只有 note、notify）；别的事等用户在对话里让你做。\n")
 	}
 	if u.notUser {
 		b.WriteString("这一轮不是用户发起的（回执、提醒、托管等），网关没有可附的用户原话，所以不转达、不带原话派活、不改 MCP 权限、不开 ultracode、不记记忆、不搁置、不叫停、不停止任务；要用户拍板就用 ask，带上 task 时用户的回答会直接送到那个会话。\n")

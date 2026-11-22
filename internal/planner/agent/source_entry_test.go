@@ -30,6 +30,8 @@ func TestSourceEntryAndDynamic(t *testing.T) {
 		{SourceUnrun, "unrun", true},
 		{SourceLookup, "lookup", true},
 		{SourceMorning, "morning", true},
+		{SourceWatch, "watch", true},
+		{SourceWatchOutside, "watch", true},
 	} {
 		if got := tc.src.Entry(); got != tc.entry {
 			t.Errorf("%s.Entry() = %q, want %q", tc.src, got, tc.entry)
@@ -99,5 +101,50 @@ func TestMorningTurnFooting(t *testing.T) {
 	turns.sources = nil
 	if a.Tidying() {
 		t.Fatal("tidying once the turn is over")
+	}
+}
+
+// A watched session's turn end starts a turn of its own, never merged with
+// the user's message (Alone), and one of a session that read outside content
+// is an outside turn as well: its limits ride with the source into
+// turns.json. WatchTurn is what the action runner judges such a turn by.
+func TestWatchTurnFooting(t *testing.T) {
+	for _, tc := range []struct {
+		src            Source
+		alone, outside bool
+	}{
+		{SourceUser, false, false},
+		{SourceReceipt, false, false},
+		{SourceUnrun, false, false},
+		{SourceScout, true, true},
+		{SourceRefusal, true, true},
+		{SourceWatch, true, false},
+		{SourceWatchOutside, true, true},
+	} {
+		if tc.src.Alone() != tc.alone || tc.src.Outside() != tc.outside {
+			t.Errorf("%s: alone %v outside %v, want %v %v", tc.src, tc.src.Alone(), tc.src.Outside(), tc.alone, tc.outside)
+		}
+	}
+	now := time.Now()
+	a, _ := newTestAgent(t, &fakeSessions{}, &now)
+	if a.WatchTurn() {
+		t.Fatal("a watch turn before Start")
+	}
+	turns := &fakeTurns{}
+	a.turns = turns
+	for _, tc := range []struct {
+		sources []Source
+		watch   bool
+		outside string
+	}{
+		{nil, false, ""},
+		{[]Source{SourceReceipt}, false, ""},
+		{[]Source{SourceWatch}, true, ""},
+		{[]Source{SourceWatchOutside}, true, "读过外部内容的会话"},
+	} {
+		turns.sources = tc.sources
+		if a.WatchTurn() != tc.watch || a.OutsideTurn() != tc.outside || a.UnrunTurn() || len(a.TurnWords()) != 0 {
+			t.Errorf("%v: watch %v outside %q unrun %v, want %v %q", tc.sources, a.WatchTurn(), a.OutsideTurn(), a.UnrunTurn(), tc.watch, tc.outside)
+		}
 	}
 }

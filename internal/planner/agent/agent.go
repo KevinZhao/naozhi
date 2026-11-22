@@ -248,8 +248,8 @@ type persisted struct {
 	// what it started with is not what this binary would start it with after
 	// an upgrade that moved the tools or the rules.
 	Scope string `json:"scope,omitempty"`
-	// Held is the receipts waiting for the next one (held.go), kept so a
-	// restart loses none.
+	// Held is the receipts and the watched sessions' turn ends waiting
+	// (held.go), kept so a restart loses none.
 	Held []heldReceipt `json:"held,omitempty"`
 }
 
@@ -1201,6 +1201,12 @@ func (a *Agent) TellAnswer(text string, w Words) error { return a.tellSaid(Sourc
 func (a *Agent) tell(src Source, text string) error { return a.tellSaid(src, nil, text) }
 
 func (a *Agent) tellSaid(src Source, said *Words, text string) error {
+	return a.submit(src, said, "<naozhi-receipt>\n"+strings.TrimSpace(text)+"\n</naozhi-receipt>")
+}
+
+// submit runs block, the gateway's own message, as a Planner turn from src:
+// no snapshot, no receipt shown.
+func (a *Agent) submit(src Source, said *Words, block string) error {
 	if !a.cfg.Enabled {
 		return ErrOff
 	}
@@ -1213,7 +1219,7 @@ func (a *Agent) tellSaid(src Source, said *Words, text string) error {
 	case turns == nil:
 		return ErrNotReady
 	}
-	_, err := turns.SubmitPlanner(Key, src, said, "<naozhi-receipt>\n"+strings.TrimSpace(text)+"\n</naozhi-receipt>", nil, opts, nil)
+	_, err := turns.SubmitPlanner(Key, src, said, block, nil, opts, nil)
 	return err
 }
 
@@ -1346,6 +1352,9 @@ func (a *Agent) SetStopped(stopped bool) error {
 	a.mu.Lock()
 	a.state.Stopped = stopped
 	a.failures, a.retryAt = 0, time.Time{}
+	if stopped {
+		a.dropWatchLocked()
+	}
 	a.saveLocked()
 	a.mu.Unlock()
 	slog.Info("planner: switched", "stopped", stopped)
