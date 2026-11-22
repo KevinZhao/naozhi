@@ -34,7 +34,9 @@ type fakeGateway struct {
 	told     []string
 	unrun    []string
 	refused  []string
-	sideDir  string
+	// watchRefused are the receipts of a watch turn's blocks.
+	watchRefused []string
+	sideDir      string
 }
 
 func newRunner(t *testing.T) (*Runner, *fakeGateway, *notify.Notifier, *sidecar.Store, string) {
@@ -65,6 +67,10 @@ func newRunner(t *testing.T) (*Runner, *fakeGateway, *notify.Notifier, *sidecar.
 		Tell:        func(text string) error { g.told = append(g.told, text); return nil },
 		TellRefused: func(text string) error { g.refused = append(g.refused, text); return nil },
 		TellUnrun:   func(text string) error { g.unrun = append(g.unrun, text); return nil },
+		TellWatchRefused: func(text string) error {
+			g.watchRefused = append(g.watchRefused, text)
+			return nil
+		},
 	})
 	return r, g, inbox, side, dir
 }

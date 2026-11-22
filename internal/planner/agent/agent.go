@@ -306,6 +306,12 @@ type Agent struct {
 	// Not kept across a restart: the first idle Planner after one gets what
 	// was held.
 	userAt time.Time
+	// watchSent is, per watched session, when a turn last went with its
+	// line (flushWatch): the next waits watchEvery from it. watchNow checks
+	// a waiting line as it goes out (SetWatchNow); nil sends it as held.
+	// Neither is kept across a restart: the first line after one goes afresh.
+	watchSent map[string]time.Time
+	watchNow  func(key, line string) (fresh string, outside, ok bool)
 }
 
 // ctxReading is one read of the Planner transcript's context size.
@@ -1193,6 +1199,11 @@ func (a *Agent) TellRefused(text string) error { return a.tell(SourceRefusal, te
 // TellUnrun is Tell for the receipt of the action blocks a reply's turn did
 // not run, from SourceUnrun so the receipt's own turn is known (UnrunTurn).
 func (a *Agent) TellUnrun(text string) error { return a.tell(SourceUnrun, text) }
+
+// TellWatchRefused is Tell for the receipt of the action blocks a watch
+// turn did not run: from SourceWatchRefusal, whose turn runs none of them
+// either.
+func (a *Agent) TellWatchRefused(text string) error { return a.tell(SourceWatchRefusal, text) }
 
 // TellAnswer is Tell for the user's answer to a question: a turn the user
 // started, w its words, so the Planner may pass the answer on (D98).

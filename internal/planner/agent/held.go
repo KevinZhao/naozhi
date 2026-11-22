@@ -16,14 +16,18 @@ const (
 	// Planner that never goes idle must not grow agent.json, nor one turn's
 	// message, without end.
 	heldMax = 40
+	// watchEvery is how often one watched session's turn ends wake the
+	// Planner (§15.22 ①, D138), counted from the turn the last went in.
+	watchEvery = 10 * time.Minute
 )
 
 // heldReceipt is a receipt waiting for the next one (agent.json). Along is
 // a line that never starts a turn of its own (TellAlong); the rest wait for
 // the user to go quiet (TellLater). Watch is a watched session's turn end
 // (TellWatch), Key its session and Outside whether that session read
-// outside content: it waits as the rest do, and for an idle Planner, but
-// goes in a watch turn of its own, never in a receipt's.
+// outside content: it waits as the rest do, for an idle Planner and for its
+// session's watchEvery, but goes in a watch turn of its own, never in a
+// receipt's.
 type heldReceipt struct {
 	Text    string    `json:"text"`
 	At      time.Time `json:"at"`
@@ -64,12 +68,14 @@ func (a *Agent) TellLater(text string) error {
 // ended a turn normally (§15.22 ①, D138): line is the gateway's JSON line of
 // it, outside whether the session read outside content. It goes as a turn
 // from SourceWatch (SourceWatchOutside for outside), which runs only note,
-// notify and front blocks; the lines of several sessions go in one. While
-// the user is chatting on the Planner page (chatQuiet, D114), a Planner turn
-// runs or the shift changes it waits in agent.json, a later line of the same
-// session replacing it, and goes once the Planner is idle and the user
-// quiet. The error is why the Planner takes none (off, stopped, not ready):
-// nothing is kept then.
+// notify and front blocks; the lines of several sessions go in one. One
+// session's lines go at most once in watchEvery, counted from the turn the
+// last one went in: until then, and while the user is chatting on the
+// Planner page (chatQuiet, D114), a Planner turn runs or the shift changes,
+// the line waits in agent.json, a later line of the same session replacing
+// it, so the turns that ended meanwhile are told as one, the latest. The
+// error is why the Planner takes none (off, stopped, not ready): nothing is
+// kept then.
 func (a *Agent) TellWatch(key, line string, outside bool) error {
 	line = strings.TrimSpace(line)
 	if key == "" || line == "" {
@@ -82,10 +88,13 @@ func (a *Agent) TellWatch(key, line string, outside bool) error {
 	a.mu.Lock()
 	a.state.Held = slices.DeleteFunc(a.state.Held, func(h heldReceipt) bool { return h.Watch && h.Key == key })
 	a.holdLocked(heldReceipt{Text: line, At: now, Watch: true, Outside: outside, Key: key})
-	quietAt := a.userAt.Add(chatQuiet)
+	due := a.userAt.Add(chatQuiet)
+	if at, ok := a.watchSent[key]; ok && at.Add(watchEvery).After(due) {
+		due = at.Add(watchEvery)
+	}
 	a.mu.Unlock()
-	if now.Before(quietAt) {
-		a.pokeAt(quietAt.Sub(now))
+	if now.Before(due) {
+		a.pokeAt(due.Sub(now))
 		return nil
 	}
 	// A busy Planner's are sent by the loop's next reconcile.
@@ -93,49 +102,91 @@ func (a *Agent) TellWatch(key, line string, outside bool) error {
 	return nil
 }
 
+// SetWatchNow wires what a waiting watch line is checked against as it goes
+// out (action.Runner.WatchNow); the runner is built after the Planner, so it
+// comes in later. now returns key's line as its session stands then, and
+// whether the session has read outside content; ok false is a session no
+// longer told of (观察 turned off, in custody, gone), whose line is dropped.
+// A line may wait minutes, and what it goes as decides what its turn may
+// run, so the one judged as it was handed in is not sent unchecked.
+func (a *Agent) SetWatchNow(now func(key, line string) (fresh string, outside, ok bool)) {
+	a.mu.Lock()
+	a.watchNow = now
+	a.mu.Unlock()
+}
+
 // flushWatch sends the watch lines waiting once the user has been quiet
-// chatQuiet and the Planner is idle in its current conversation: those of
-// the sessions that read outside content in one turn, the rest in another,
-// each dropped once its turn is submitted.
+// chatQuiet and the Planner is idle in its current conversation, each as
+// its session stands now (SetWatchNow): those of the sessions that read
+// outside content in one turn, the rest in another, each dropped once its
+// turn is submitted. A session told of within watchEvery keeps waiting.
 func (a *Agent) flushWatch(now time.Time) {
 	a.tellMu.Lock()
 	defer a.tellMu.Unlock()
 	a.mu.Lock()
-	quiet, shifting := !now.Before(a.userAt.Add(chatQuiet)), a.shifting
-	var plain, outside []heldReceipt
+	quiet, shifting, fresh := !now.Before(a.userAt.Add(chatQuiet)), a.shifting, a.watchNow
+	var due []heldReceipt
 	for _, h := range a.state.Held {
-		switch {
-		case !h.Watch:
-		case h.Outside:
-			outside = append(outside, h)
-		default:
-			plain = append(plain, h)
+		if at, ok := a.watchSent[h.Key]; h.Watch && !(ok && now.Before(at.Add(watchEvery))) {
+			due = append(due, h)
 		}
 	}
 	a.mu.Unlock()
-	if len(plain)+len(outside) == 0 || !quiet || shifting {
+	if len(due) == 0 || !quiet || shifting {
 		return
 	}
 	if st := a.cfg.Sessions.State(Key); !st.Alive || st.Running {
 		return
 	}
-	for _, batch := range []struct {
-		src  Source
-		held []heldReceipt
-	}{{SourceWatch, plain}, {SourceWatchOutside, outside}} {
-		if len(batch.held) == 0 {
-			continue
+	type batch struct {
+		src   Source
+		held  []heldReceipt
+		lines []string
+	}
+	batches := []*batch{{src: SourceWatch}, {src: SourceWatchOutside}}
+	var gone []heldReceipt
+	for _, h := range due {
+		line, outside := h.Text, h.Outside
+		if fresh != nil {
+			l, out, ok := fresh(h.Key, h.Text)
+			if !ok {
+				gone = append(gone, h)
+				continue
+			}
+			// The mark is never taken back: a line handed in as outside
+			// stays so.
+			line, outside = l, outside || out
 		}
-		lines := make([]string, len(batch.held))
-		for i, h := range batch.held {
-			lines[i] = h.Text
+		b := batches[0]
+		if outside {
+			b = batches[1]
+		}
+		b.held, b.lines = append(b.held, h), append(b.lines, line)
+	}
+	a.dropHeld(gone)
+	for _, b := range batches {
+		if len(b.held) == 0 {
+			continue
 		}
 		// No snapshot, as a receipt: the lines name what the turn is about.
-		if err := a.submit(batch.src, nil, watchBlock(lines)); err != nil {
-			slog.Warn("planner: watched sessions' turn ends not sent", "source", batch.src, "err", err)
+		if err := a.submit(b.src, nil, watchBlock(b.lines)); err != nil {
+			slog.Warn("planner: watched sessions' turn ends not sent", "source", b.src, "err", err)
 			continue
 		}
-		a.dropHeld(batch.held)
+		a.mu.Lock()
+		if a.watchSent == nil {
+			a.watchSent = map[string]time.Time{}
+		}
+		for k, at := range a.watchSent {
+			if !now.Before(at.Add(watchEvery)) {
+				delete(a.watchSent, k)
+			}
+		}
+		for _, h := range b.held {
+			a.watchSent[h.Key] = now
+		}
+		a.mu.Unlock()
+		a.dropHeld(b.held)
 	}
 }
 

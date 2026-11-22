@@ -64,6 +64,12 @@ const (
 	// limits as well and may not write the ledger. A source of its own, so
 	// the limit is in turns.json with the request and holds across a restart.
 	SourceWatchOutside Source = "watch_outside"
+	// SourceWatchRefusal is the receipt of the action blocks a watch turn
+	// did not run (TellWatchRefused). Its turn is a watch turn and an
+	// outside one both, so it runs only note and notify: a block the watch
+	// turn was refused is not run on a second asking, which a receipt from
+	// SourceUnrun would let it be. It gets no receipt of its own.
+	SourceWatchRefusal Source = "watch_refusal"
 )
 
 // Words is what the user said in a Planner turn, as the gateway recorded it
@@ -82,14 +88,16 @@ type Words struct {
 // and a session you handed over, the user's own as on any session; the
 // source's name for the rest, your answer among them. A turn merging
 // requests of different sources carries "" (turn.startTurn), which the page
-// reads part by part. Both watch sources write "watch": the page lays the
-// two out alike.
+// reads part by part. Both watch sources write "watch", and the receipt of
+// a watch turn's blocks "refusal": the page lays each pair out alike.
 func (s Source) Entry() string {
 	switch s {
 	case SourceUser, SourceHandover:
 		return ""
 	case SourceWatchOutside:
 		return string(SourceWatch)
+	case SourceWatchRefusal:
+		return string(SourceRefusal)
 	}
 	return string(s)
 }
@@ -110,9 +118,10 @@ func DynamicSources() []string {
 // answer a turn that did: a line in one could pose as a request, so their
 // turns may only notify, promise and ask, and write the user a side note
 // (note), which reaches no session. A watched session that read outside
-// content is among them, its turn held to a watch turn's limits besides.
+// content is among them, and the receipt of any watch turn's blocks, their
+// turns held to a watch turn's limits besides.
 var outsideLabels = map[Source]string{SourceScout: "巡检", SourceBriefing: "会前简报", SourceRefusal: "被拒动作的回执", SourceLookup: "网页查询结果",
-	SourceWatchOutside: "读过外部内容的会话"}
+	SourceWatchOutside: "读过外部内容的会话", SourceWatchRefusal: "被拒动作的回执"}
 
 // Outside reports whether a turn from s carries outside content (or answers
 // a turn that did).
@@ -177,13 +186,13 @@ func (a *Agent) OutsideTurn() string {
 }
 
 // UnrunTurn reports whether the turn in flight answers a receipt of action
-// blocks not run (TellUnrun, TellRefused). The action runner reads it as a
-// turn's result arrives: such a turn's own blocks not run get no receipt, so
-// the two do not go round, while any other turn's do, however the turns
-// queued up between.
+// blocks not run (TellUnrun, TellRefused, TellWatchRefused). The action
+// runner reads it as a turn's result arrives: such a turn's own blocks not
+// run get no receipt, so the two do not go round, while any other turn's do,
+// however the turns queued up between.
 func (a *Agent) UnrunTurn() bool {
 	for _, src := range a.TurnSources() {
-		if src == SourceUnrun || src == SourceRefusal {
+		if src == SourceUnrun || src == SourceRefusal || src == SourceWatchRefusal {
 			return true
 		}
 	}
@@ -191,11 +200,12 @@ func (a *Agent) UnrunTurn() bool {
 }
 
 // WatchTurn reports whether the turn in flight was started by a watched
-// session's turn end (TellWatch). The action runner reads it as a turn's
-// result arrives: such a turn runs only its note, notify and front blocks.
+// session's turn end (TellWatch), or answers the receipt of such a turn's
+// blocks (TellWatchRefused). The action runner reads it as a turn's result
+// arrives: such a turn runs only its note, notify and front blocks.
 func (a *Agent) WatchTurn() bool {
 	for _, src := range a.TurnSources() {
-		if src == SourceWatch || src == SourceWatchOutside {
+		if src == SourceWatch || src == SourceWatchOutside || src == SourceWatchRefusal {
 			return true
 		}
 	}

@@ -109,6 +109,9 @@ func TestPlannerTurnEntrySource(t *testing.T) {
 		{agent.SourceBriefing, "briefing"},
 		{agent.SourceLookup, "lookup"},
 		{agent.SourceRefusal, "refusal"},
+		{agent.SourceWatch, "watch"},
+		{agent.SourceWatchOutside, "watch"},
+		{agent.SourceWatchRefusal, "refusal"},
 		{agent.SourceShift, "shift"},
 	} {
 		if _, err := e.submitPlanner(agent.Key, tc.src, nil, "m-"+string(tc.src), nil, session.AgentOpts{}, nil); err != nil {

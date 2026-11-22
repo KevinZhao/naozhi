@@ -243,9 +243,15 @@ type Config struct {
 	// why the Planner takes none now (stopped, off). nil tells none.
 	TellWatch func(key, line string, outside bool) error
 	// WatchTurn reports whether the Planner turn in flight was started by
-	// such a turn end (agent.Agent.WatchTurn): it runs only its note, notify
-	// and front blocks. nil reports none.
+	// such a turn end, or answers the receipt of such a turn's blocks
+	// (agent.Agent.WatchTurn): it runs only its note, notify and front
+	// blocks. nil reports none.
 	WatchTurn func() bool
+	// TellWatchRefused sends the receipt of the blocks such a turn did not
+	// run, as a turn held to the same limits and an outside turn's
+	// (agent.Agent.TellWatchRefused): through TellUnrun the receipt's turn
+	// would run the block refused, asked for again. nil sends none.
+	TellWatchRefused func(text string) error
 	// SessionDir is session key's working directory on this node
 	// (wireup.CustodySources.Dir), "" when unknown: the workspace a watched
 	// session's line names. nil names none.
@@ -334,12 +340,6 @@ type Runner struct {
 	// after it (Config.Prompted) are not told. Only the handling goroutine
 	// touches it; a restart tells the next one afresh.
 	custodyTold map[string]time.Time
-	// watchTold is, per watched session, when the Planner was last told of
-	// a turn end (checkWatch); watchHeld the turn end each holds to its
-	// window's end, a later one replacing it, on one timer per session. Only
-	// the handling goroutine touches them; neither survives a restart.
-	watchTold map[string]time.Time
-	watchHeld map[string]ended
 	// reportTold is the reports told the Planner, by task, until the reply
 	// of the turn they started comes: that reply is checked for leaving the
 	// task 进行中 (checkReports), as for a report sent by SendMessage.
@@ -355,11 +355,12 @@ type toldReport struct {
 // ended is a dispatched session's turn end: the reply, when the turn ended
 // (at), the span a report of it may come in (from on), and how long a busy
 // Planner can hold the check off (until). A watched session's (watchEnded)
-// has only its key, when it ended and, as text, its last reply's first
-// sentence; its wake is its window's end (Runner.watchHeld).
+// has only its key, when it ended, as text its last reply's first sentence,
+// and when its digest was asked for (asked).
 type ended struct {
 	key, text       string
 	at, from, until time.Time
+	asked           time.Time
 	// wake is the timer of key's quiet window ending: what is checked is
 	// the turn end the window holds (Runner.quiet).
 	wake bool
@@ -431,8 +432,7 @@ func New(cfg Config) *Runner {
 	// previous run's to check.
 	r := &Runner{cfg: cfg, ch: make(chan reply, queueLen), endCh: make(chan ended, queueLen), watchCh: make(chan ended, watchQueue), grace: endGrace, reportGrace: endReportGrace,
 		after: func(d time.Duration, f func()) { time.AfterFunc(d, f) }, last: cfg.Now(), doneTold: map[string]bool{}, endTold: map[string]time.Time{}, doingAt: map[string]time.Time{},
-		quiet: map[string]ended{}, custodyTold: map[string]time.Time{}, reopened: map[string]bool{}, reportTold: map[string]toldReport{}, relayedAt: map[string]time.Time{},
-		watchTold: map[string]time.Time{}, watchHeld: map[string]ended{}}
+		quiet: map[string]ended{}, custodyTold: map[string]time.Time{}, reopened: map[string]bool{}, reportTold: map[string]toldReport{}, relayedAt: map[string]time.Time{}}
 	if cfg.Inbox != nil {
 		cfg.Inbox.HandleDecisions(HandlerAsk, r.decideAsk)
 		open, _ := cfg.Inbox.List(0)
@@ -1280,8 +1280,7 @@ func (r *Runner) handle(rep reply) {
 		case rep.watch && !(b.Note != nil || b.Notify != nil || b.Front != nil && rep.outside == ""):
 			// Before the two below: a watch turn's limit is the narrowest, and
 			// its receipt says which blocks it does run.
-			un.add(i, b, r.refuseWatch(b, rep.outside != ""))
-			un.watch = true
+			un.add(i, b, r.refuseWatch(b, rep))
 		case rep.outside != "" && (b.Dispatch != nil || b.Status != nil || b.Custody != nil || b.Relay != nil || b.Remember != nil || b.Lookup != nil || b.Park != nil ||
 			b.Halt != nil || b.Cancel != nil || b.Routine != nil || b.Front != nil):
 			un.add(i, b, r.refuseOutside(b, rep.outside))
@@ -1362,8 +1361,8 @@ type blockError struct{ error }
 // kinds of reason they had; notes are the blocks run with something the
 // Planner should know, what the gateway changed or did on the way.
 type unrun struct {
-	lines, notes                                []string
-	tooMany, malformed, outside, notUser, watch bool
+	lines, notes                         []string
+	tooMany, malformed, outside, notUser bool
 }
 
 // add lists block i (0-based) of a reply, not run for why.
@@ -1653,38 +1652,48 @@ func (r *Runner) refuseOutside(b Block, by string) string {
 
 // refuseWatch answers a block of a turn a watched session's turn end
 // started (D138) that is none of the three such a turn runs, or a front
-// block of one whose session read outside content (outside): the turn was
-// not the user's and what started it is a session's output, so the gateway
-// refuses by the turn's source, as refuseOutside does. It returns why, as
-// the receipt says it.
-func (r *Runner) refuseWatch(b Block, outside bool) string {
-	if f := b.Front; f != nil && outside {
-		r.note("读过外部内容的会话一轮结束触发的回合不能改工作线台账：「" + cmp.Or(f.Name, f.ID) + "」没有记")
+// block of one whose session read outside content: the turn was not the
+// user's and what started it is a session's output, so the gateway refuses
+// by the turn's source, as refuseOutside does. The turn answering such a
+// turn's receipt is refused the same, or the limit would hold for one turn
+// only. It returns why, as the receipt says it.
+func (r *Runner) refuseWatch(b Block, rep reply) string {
+	label := cmp.Or(strings.TrimSuffix(strings.TrimPrefix(blockLabel(b), "（"), "）"), "动作块")
+	outside := rep.outside != ""
+	switch {
+	case rep.unrunTurn:
+		// It gets no receipt (tellUnrun): said in the conversation alone.
+		r.note("你开的会话一轮结束触发的回合，它的回执那一轮也只能写旁注、发通知：" + label + "没有执行")
+		return "这一轮回的是 <naozhi-watch> 回合的回执，只能用 note、notify，没有执行"
+	case b.Front != nil && outside:
+		r.note("读过外部内容的会话一轮结束触发的回合不能改工作线台账：「" + cmp.Or(b.Front.Name, b.Front.ID) + "」没有记")
 		return "这个会话读过外部内容，这一轮不能改工作线台账，没有记"
 	}
 	does, blocks := "只能写旁注、发通知、更新工作线", "note、notify、front"
 	if outside {
 		does, blocks = "只能写旁注、发通知", "note、notify"
 	}
-	label := strings.TrimSuffix(strings.TrimPrefix(blockLabel(b), "（"), "）")
-	r.note("你开的会话一轮结束触发的回合" + does + "：" + cmp.Or(label, "动作块") + "没有执行")
+	r.note("你开的会话一轮结束触发的回合" + does + "：" + label + "没有执行")
 	return "这一轮由用户自己开的会话一轮结束触发，只能用 " + blocks + "，没有执行"
 }
 
 // tellUnrun sends the Planner one receipt naming each block of the reply
 // that was not run, why, and what to do about it, and the notes of the
-// blocks run; an outside turn's goes
-// through TellRefused, held to the same limits. The turn answering such a
-// receipt gets none of its own (the blocks still show in the conversation),
-// judged by its source, so a turn queued ahead of the receipt still gets
-// its own.
+// blocks run; an outside turn's goes through TellRefused and a watch
+// turn's, whatever its blocks were not run for, through TellWatchRefused,
+// each held to the same limits. The turn answering such a receipt gets none
+// of its own (the blocks still show in the conversation), judged by its
+// source, so a turn queued ahead of the receipt still gets its own.
 func (r *Runner) tellUnrun(rep reply, u unrun) {
 	if len(u.lines)+len(u.notes) == 0 || rep.unrunTurn {
 		return
 	}
 	by := rep.outside
 	send := r.cfg.TellUnrun
-	if by != "" {
+	switch {
+	case rep.watch:
+		send = r.cfg.TellWatchRefused
+	case by != "":
 		send = r.cfg.TellRefused
 	}
 	if send == nil {
@@ -1716,8 +1725,8 @@ func (r *Runner) tellUnrun(rep reply, u unrun) {
 	if u.outside {
 		b.WriteString("这一轮由" + by + "触发，网关只执行 notify、promise、ask 与 note；需要派活、改任务状态、托管、记记忆、搁置、网页查询、叫停或停止任务，就在对话里向用户说明，等用户发消息让你做。\n")
 	}
-	if u.watch {
-		b.WriteString("这一轮由用户自己开的会话一轮结束触发（<naozhi-watch>），网关只执行 note、notify 与 front（会话读过外部内容时只有 note、notify）；别的事等用户在对话里让你做。\n")
+	if rep.watch {
+		b.WriteString("这一轮由用户自己开的会话一轮结束触发（<naozhi-watch>），网关只执行 note、notify 与 front（会话读过外部内容时只有 note、notify）；回这条回执的这一轮只执行 note、notify，别的块重发也不执行。别的事等用户在对话里让你做。\n")
 	}
 	if u.notUser {
 		b.WriteString("这一轮不是用户发起的（回执、提醒、托管等），网关没有可附的用户原话，所以不转达、不带原话派活、不改 MCP 权限、不开 ultracode、不记记忆、不搁置、不叫停、不停止任务；要用户拍板就用 ask，带上 task 时用户的回答会直接送到那个会话。\n")

@@ -32,6 +32,7 @@ func TestSourceEntryAndDynamic(t *testing.T) {
 		{SourceMorning, "morning", true},
 		{SourceWatch, "watch", true},
 		{SourceWatchOutside, "watch", true},
+		{SourceWatchRefusal, "refusal", true},
 	} {
 		if got := tc.src.Entry(); got != tc.entry {
 			t.Errorf("%s.Entry() = %q, want %q", tc.src, got, tc.entry)
@@ -107,7 +108,11 @@ func TestMorningTurnFooting(t *testing.T) {
 // A watched session's turn end starts a turn of its own, never merged with
 // the user's message (Alone), and one of a session that read outside content
 // is an outside turn as well: its limits ride with the source into
-// turns.json. WatchTurn is what the action runner judges such a turn by.
+// turns.json. WatchTurn is what the action runner judges such a turn by. The
+// receipt of a watch turn's blocks not run (TellWatchRefused) starts a turn
+// that is all three: a watch turn, an outside one and a receipt's own, so
+// what the watch turn was refused is not run there either and gets no
+// receipt.
 func TestWatchTurnFooting(t *testing.T) {
 	for _, tc := range []struct {
 		src            Source
@@ -120,6 +125,7 @@ func TestWatchTurnFooting(t *testing.T) {
 		{SourceRefusal, true, true},
 		{SourceWatch, true, false},
 		{SourceWatchOutside, true, true},
+		{SourceWatchRefusal, true, true},
 	} {
 		if tc.src.Alone() != tc.alone || tc.src.Outside() != tc.outside {
 			t.Errorf("%s: alone %v outside %v, want %v %v", tc.src, tc.src.Alone(), tc.src.Outside(), tc.alone, tc.outside)
@@ -136,15 +142,27 @@ func TestWatchTurnFooting(t *testing.T) {
 		sources []Source
 		watch   bool
 		outside string
+		unrun   bool
 	}{
-		{nil, false, ""},
-		{[]Source{SourceReceipt}, false, ""},
-		{[]Source{SourceWatch}, true, ""},
-		{[]Source{SourceWatchOutside}, true, "读过外部内容的会话"},
+		{nil, false, "", false},
+		{[]Source{SourceReceipt}, false, "", false},
+		{[]Source{SourceUnrun}, false, "", true},
+		{[]Source{SourceRefusal}, false, "被拒动作的回执", true},
+		{[]Source{SourceWatch}, true, "", false},
+		{[]Source{SourceWatchOutside}, true, "读过外部内容的会话", false},
+		{[]Source{SourceWatchRefusal}, true, "被拒动作的回执", true},
 	} {
 		turns.sources = tc.sources
-		if a.WatchTurn() != tc.watch || a.OutsideTurn() != tc.outside || a.UnrunTurn() || len(a.TurnWords()) != 0 {
-			t.Errorf("%v: watch %v outside %q unrun %v, want %v %q", tc.sources, a.WatchTurn(), a.OutsideTurn(), a.UnrunTurn(), tc.watch, tc.outside)
+		if a.WatchTurn() != tc.watch || a.OutsideTurn() != tc.outside || a.UnrunTurn() != tc.unrun || len(a.TurnWords()) != 0 {
+			t.Errorf("%v: watch %v outside %q unrun %v, want %v %q %v", tc.sources, a.WatchTurn(), a.OutsideTurn(), a.UnrunTurn(), tc.watch, tc.outside, tc.unrun)
 		}
+	}
+	turns.sources = nil
+	if err := a.TellWatchRefused("第 1 块（dispatch）没有执行"); err != nil {
+		t.Fatal(err)
+	}
+	if len(turns.sent) != 1 || turns.srcs[0] != SourceWatchRefusal || turns.said[0] != nil ||
+		turns.sent[0] != "<naozhi-receipt>\n第 1 块（dispatch）没有执行\n</naozhi-receipt>" {
+		t.Errorf("sent %q from %q with words %v, want the receipt from watch_refusal", turns.sent, turns.srcs, turns.said)
 	}
 }

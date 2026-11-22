@@ -86,7 +86,7 @@ func TestPlannerTurnSources(t *testing.T) {
 // A watched session's turn end is carried by its own source, so the turn a
 // restart cut across is still held to a watch turn's blocks (D138).
 func TestPlannerTurnsCarriedOver(t *testing.T) {
-	for _, src := range []agent.Source{agent.SourceScout, agent.SourceWatch, agent.SourceWatchOutside} {
+	for _, src := range []agent.Source{agent.SourceScout, agent.SourceWatch, agent.SourceWatchOutside, agent.SourceWatchRefusal} {
 		t.Run(string(src), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "planner", "turns.json")
 			ctx, cancel := context.WithCancel(context.Background())
