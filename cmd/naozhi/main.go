@@ -602,6 +602,16 @@ func main() {
 	// wake the Planner, which sorts them; the caps on what comes of them
 	// are the patrol's. It follows the one pause and stays off on an
 	// isolated instance, as the scout does.
+	// A deep check's allow rules are its whole grant only where the session
+	// settings are naozhi's own: under dontAsk the base file's
+	// permissions.allow is left out. With the CLI reading
+	// ~/.claude/settings.json itself the user's own allow rules would widen
+	// what the session reads, so there it gets no deny rules, and does not
+	// run.
+	var patrolDeny func() []string
+	if naozhiSettingsFile != "" {
+		patrolDeny = plannerAgent.ReadDeny
+	}
 	patroller := patrol.New(patrol.Config{
 		Dir:         sessionLayout.PlannerPatrolRoot(),
 		Workspaces:  plannerState.Workspaces.LocalDirs,
@@ -615,7 +625,7 @@ func main() {
 		Session:     wireup.PatrolSession(router),
 		Wake:        wireup.PatrolWake(plannerAgent),
 		// What the Planner may not read, a deep check may not either.
-		Deny:     plannerAgent.ReadDeny,
+		Deny:     patrolDeny,
 		TaskOpen: wireup.PatrolTaskOpen(tasks),
 		Alarm:    wireup.PatrolAlarm(notifier),
 		Ctx:      ctx,

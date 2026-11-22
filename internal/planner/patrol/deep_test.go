@@ -465,6 +465,31 @@ func TestDeepContext(t *testing.T) {
 	}
 }
 
+// TestDeepNeedsDeny: with no deny rules to give its session — none wired,
+// or the session settings not naozhi's own, where the user's own allow
+// rules would widen what it reads — no deep check runs, on the schedule or
+// asked for; the hourly checks go on.
+func TestDeepNeedsDeny(t *testing.T) {
+	d := newDeep(t)
+	d.cfg.Deny = nil
+	d.p = New(d.cfg)
+	t.Cleanup(d.p.Stop)
+	dir := d.repo(wsA, "gateway", "a")
+	d.fe.repos[dir].status = " M old.go\x00"
+	d.file(dir, "old.go", 9*day)
+	d.at(wsA, 0)
+	d.tick()
+	if d.sessions() != 0 {
+		t.Fatalf("%d deep check sessions with no deny rules", d.sessions())
+	}
+	if _, err := d.p.Trigger(wsA); !errors.Is(err, ErrOff) {
+		t.Errorf("Trigger = %v, want ErrOff", err)
+	}
+	if len(d.open()) != 1 || d.read(wsA+".md") == "" {
+		t.Errorf("the hourly checks did not run: items %q", d.open())
+	}
+}
+
 // TestDeepDedup: a finding reported again under its ID is the same one: its
 // record goes on, it is not new and the Planner is not woken for it.
 func TestDeepDedup(t *testing.T) {

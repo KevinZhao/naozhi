@@ -108,7 +108,9 @@ type Config struct {
 	// Deny is the read rules a deep check's session is denied besides the
 	// credential files by name: the Planner's own (agent.Agent.ReadDeny),
 	// read as each check starts. nil makes no deep checks: a session that
-	// reads a repository does not run without them.
+	// reads a repository does not run without them. It is nil too where the
+	// session settings are not naozhi's own: the user's own allow rules
+	// would be added to the session's, which are to be all it may read.
 	Deny func() []string
 	// TaskOpen reports whether dispatched session key is still going: not
 	// marked done or failed, not stopped, not gone from 任务

@@ -62,8 +62,9 @@ const (
 
 var (
 	// ErrOff answers a manual deep check where none can run: no state
-	// root, no session to run it in, or no deny rules for it.
-	ErrOff = errors.New("项目巡查的深查没有开启：没有状态目录，或没有接上会话")
+	// root, no session to run it in, or no deny rules for it (the session
+	// settings are not naozhi's own).
+	ErrOff = errors.New("项目巡查的深查没有开启：没有状态目录、没有接上会话，或会话设置不归 naozhi 管（naozhi_settings 没开）")
 	// ErrBusy answers a manual deep check while one runs.
 	ErrBusy = errors.New("深查正在进行")
 	// ErrNoWorkspace answers one for a workspace this node does not have.
