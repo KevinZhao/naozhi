@@ -1,14 +1,51 @@
 package wireup
 
 import (
+	"errors"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/notify"
+	"github.com/naozhi/naozhi/internal/planner/journal"
+	"github.com/naozhi/naozhi/internal/planner/note"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
 	"github.com/naozhi/naozhi/internal/session"
 )
+
+// The Planner's notes follow the inbox's one pause, and a note the user
+// marked useless reaches the Planner through tell under the session's name.
+func TestSessionNotesPauseAndReceipt(t *testing.T) {
+	j, err := journal.Open(filepath.Join(t.TempDir(), "log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { j.Close() })
+	inbox := notify.New(notify.Config{System: func(string, string) error { return nil }})
+	var told []string
+	notes := SessionNotes(j, inbox, nil, nil,
+		func(text string) error { told = append(told, text); return nil },
+		func(key string) string { return "名字-" + key })
+	const key = "dashboard:direct:u:general"
+
+	inbox.Pause(time.Now().Add(time.Hour))
+	if _, err := notes.Write(key, "暂停时的旁注", "依据"); !errors.Is(err, note.ErrPaused) {
+		t.Fatalf("Write while paused: err = %v, want note.ErrPaused", err)
+	}
+	inbox.Pause(time.Time{})
+	nt, err := notes.Write(key, "恢复后的旁注", "依据")
+	if err != nil {
+		t.Fatalf("Write after the pause: %v", err)
+	}
+	if _, err := notes.Useless(key, nt.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(told) != 1 || !strings.Contains(told[0], key+"（名字-"+key+"）") || !strings.Contains(told[0], "「恢复后的旁注」") {
+		t.Fatalf("receipt = %q, want the session under its name and the note", told)
+	}
+}
 
 // A side note goes on a session this node's router holds: the user's, a
 // dispatched task's, a cron job's. The Planner's own, a one-shot run's, a

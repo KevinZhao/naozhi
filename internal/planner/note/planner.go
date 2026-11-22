@@ -22,6 +22,11 @@ const (
 	UselessMute = 3
 )
 
+// ahead is how far past now the counts and "没用" read the journal: after
+// the clock stepped back, the notes and marks written before it are stamped
+// later than now, and must still hold a limit and be found.
+const ahead = 24 * time.Hour
+
 // Events of a kind=note journal entry.
 const (
 	EventWrite   = "write"
@@ -76,13 +81,10 @@ func (n *Notes) tally(now time.Time) (tally, error) {
 	if hourAgo.Before(since) {
 		since = hourAgo
 	}
-	entries, err := n.cfg.Journal.Read(since, now.Add(time.Minute))
+	entries, err := n.cfg.Journal.Read(since, now.Add(ahead))
 	if err != nil {
 		return t, err
 	}
-	// A note marked twice counts once: the handler does not write the
-	// second, and a journal carrying one must not mute a session early.
-	marked := map[string]bool{}
 	for _, e := range entries {
 		d, ok := plannerData(e)
 		if !ok {
@@ -97,8 +99,8 @@ func (n *Notes) tally(now time.Time) (tally, error) {
 				t.hour[e.Unit]++
 			}
 		case EventUseless:
-			if !e.TS.Before(today) && !marked[e.Unit+"\x00"+d.ID] {
-				marked[e.Unit+"\x00"+d.ID] = true
+			// Useless writes one mark a note, so each is one click.
+			if !e.TS.Before(today) {
 				t.useless[e.Unit]++
 			}
 		}
@@ -201,7 +203,7 @@ func (n *Notes) Useless(key, id string) (Note, error) {
 // find returns key's Planner note id of the Window before now and whether
 // it is already marked useless; ErrNoNote when the session has none such.
 func (n *Notes) find(key, id string, now time.Time) (nt Note, marked bool, err error) {
-	entries, err := n.cfg.Journal.Read(now.Add(-Window), now.Add(time.Minute))
+	entries, err := n.cfg.Journal.Read(now.Add(-Window), now.Add(ahead))
 	if err != nil {
 		return Note{}, false, err
 	}

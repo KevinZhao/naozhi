@@ -29,8 +29,9 @@ func (f *fakeNotes) Useless(key, id string) (note.Note, error) {
 }
 
 // "没用" marks a Planner note of a local session: a key or ID that is none,
-// a remote node's session, a note the session does not have and a gateway
-// without side notes are each refused before or by the source.
+// a request naming a node (the body takes no such field), a note the
+// session does not have and a gateway without side notes are each refused
+// before or by the source.
 func TestHandleNoteUseless(t *testing.T) {
 	t.Parallel()
 	const key, id = "dashboard:direct:u:general", "p0123456789ab"
@@ -42,7 +43,6 @@ func TestHandleNoteUseless(t *testing.T) {
 		marked     bool
 	}{
 		{name: "marked", body: `{"key":"` + key + `","id":"` + id + `"}`, status: http.StatusOK, marked: true},
-		{name: "local node named", body: `{"key":"` + key + `","id":"` + id + `","node":"local"}`, status: http.StatusOK, marked: true},
 		{name: "bad key", body: `{"key":"a\nb","id":"` + id + `"}`, status: http.StatusBadRequest},
 		{name: "no key", body: `{"id":"` + id + `"}`, status: http.StatusBadRequest},
 		{name: "health note id", body: `{"key":"` + key + `","id":"h1700000000000000000"}`, status: http.StatusBadRequest},

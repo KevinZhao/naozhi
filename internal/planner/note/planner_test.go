@@ -167,6 +167,72 @@ func TestPlannerHourLimit(t *testing.T) {
 	}
 }
 
+// The clock stepping back does not free a limit: the notes and marks
+// stamped after now still count, and a note just written is still found.
+func TestPlannerClockSteppedBack(t *testing.T) {
+	t.Parallel()
+	r := newPlannerRig(t)
+	var last Note
+	for i := range PerHour {
+		last = r.write("a", fmt.Sprint("note ", i))
+	}
+	r.now = r.now.Add(-10 * time.Minute)
+	if _, err := r.n.Write("a", "多的一条", "y"); !errors.Is(err, ErrHourFull) {
+		t.Fatalf("err = %v, want ErrHourFull: the three notes are ahead of the clock", err)
+	}
+	if got, err := r.n.Useless("a", last.ID); err != nil || !got.Useless {
+		t.Fatalf("Useless on a note ahead of the clock = %+v, %v", got, err)
+	}
+	r.now = r.now.Add(-10 * time.Minute)
+	if _, err := r.n.Useless("a", last.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.entries(); len(got) != PerHour+1 || len(r.told) != 1 {
+		t.Fatalf("journal = %v, told = %v: a mark ahead of the clock was made again", got, r.told)
+	}
+}
+
+// In the hour after midnight the hour's count reaches into yesterday and
+// the day's does not: a session's notes of the last hour still hold it,
+// yesterday's full day and yesterday's "没用" marks do not.
+func TestPlannerLimitsOverMidnight(t *testing.T) {
+	t.Parallel()
+	r := newPlannerRig(t)
+	r.now = time.Date(2026, 11, 23, 23, 20, 0, 0, time.Local)
+	// Yesterday: the day filled, "a" with three notes in its last hour, "m"
+	// marked useless three times.
+	var marked []Note
+	for i := range PerHour {
+		r.write("a", fmt.Sprint("a ", i))
+		marked = append(marked, r.write("m", fmt.Sprint("m ", i)))
+		r.now = r.now.Add(10 * time.Minute)
+	}
+	for i := 2 * PerHour; i < PerDay; i++ {
+		r.write(fmt.Sprint("s", i/PerHour), fmt.Sprint("note ", i))
+	}
+	for _, nt := range marked {
+		if _, err := r.n.Useless("m", nt.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := r.n.Write("fresh", "昨天的第 31 条", "y"); !errors.Is(err, ErrDayFull) {
+		t.Fatalf("before midnight err = %v, want ErrDayFull", err)
+	}
+	if _, err := r.n.Write("m", "x", "y"); !errors.Is(err, ErrMuted) {
+		t.Fatalf("before midnight err = %v, want ErrMuted", err)
+	}
+
+	r.now = time.Date(2026, 11, 24, 0, 10, 0, 0, time.Local)
+	if _, err := r.n.Write("a", "零点后的第 4 条", "y"); !errors.Is(err, ErrHourFull) {
+		t.Fatalf("err = %v, want ErrHourFull: three notes within the last hour", err)
+	}
+	r.write("fresh", "昨天写满不算今天")
+	// "m" is past yesterday's marks, still within the hour read, once its
+	// three notes left it.
+	r.now = time.Date(2026, 11, 24, 0, 45, 0, 0, time.Local)
+	r.write("m", "昨天点的没用不算今天")
+}
+
 // All sessions together take PerDay notes in a local day; the next day
 // starts afresh.
 func TestPlannerDayLimit(t *testing.T) {

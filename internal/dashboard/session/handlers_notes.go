@@ -43,14 +43,14 @@ func (h *Handlers) HandleNotes(w http.ResponseWriter, r *http.Request) {
 // HandleNoteUseless serves POST /api/sessions/notes/useless: the user marks
 // note id, which the Planner wrote on session key, useless (planner RFC
 // §15.22 ②). The mark is journaled and the Planner told. Only this node's
-// sessions: the notes are in this node's journal, and a remote node's
-// Planner is told by its own gateway, so the route is not among a reverse
-// node's api routes either.
+// sessions: the note is looked up in this node's journal, so one written on
+// another node is not found. The route is deliberately not among a node's
+// api routes (node.APIRoutes): the primary's page shows a remote session's
+// notes without 没用, which is clicked on that node's own page.
 func (h *Handlers) HandleNoteUseless(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Key  string `json:"key"`
-		ID   string `json:"id"`
-		Node string `json:"node"`
+		Key string `json:"key"`
+		ID  string `json:"id"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, httputil.MaxRequestBodyBytes)
 	if err := httputil.DecodeJSONBody(r, &req); err != nil {
@@ -63,10 +63,6 @@ func (h *Handlers) HandleNoteUseless(w http.ResponseWriter, r *http.Request) {
 	}
 	if !plannerNoteID.MatchString(req.ID) {
 		http.Error(w, "invalid id parameter", http.StatusBadRequest)
-		return
-	}
-	if req.Node != "" && req.Node != "local" {
-		http.Error(w, "远程节点的旁注请在那台机器上标", http.StatusBadRequest)
 		return
 	}
 	if h.deps.Notes == nil {
