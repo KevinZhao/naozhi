@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/naozhi/naozhi/internal/planner/front"
 )
 
 // Limits on a deep check's output (§15.23 ②). What is only too long is cut;
@@ -100,10 +102,7 @@ func SplitRef(ref string) (ws, id string, ok bool) {
 // changes: the item is told by it (D143), and a pull request's link in its
 // place would hand the item to the stalled-PR check, which closes what it
 // no longer hits.
-func ItemSource(ref string) string { return ItemSourcePrefix + ref }
-
-// ItemSourcePrefix opens the source of a finding's open item.
-const ItemSourcePrefix = "patrol:"
+func ItemSource(ref string) string { return front.PatrolSource + ref }
 
 // ParseFindings reads a deep check's reply strictly: one JSON object with
 // exactly the contract's fields, no text before or after it and no code

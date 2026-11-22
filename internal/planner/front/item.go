@@ -113,7 +113,13 @@ var (
 	ErrItemClosed = errors.New("这条未了事项已经了结")
 	// ErrNoFront is an item filed under a line the ledger does not have.
 	ErrNoFront = errors.New("没有这条工作线")
+	// ErrPatrolSource is a new source for an item the patrol filed.
+	ErrPatrolSource = errors.New("巡查记的未了事项按出处认，出处不能改；要换出处就用 done 了结它，再记一条新的")
 )
+
+// PatrolSource opens the source of the item a deep check's finding is
+// filed as, "patrol:<workspace ID>/<finding ID>" (planner/patrol).
+const PatrolSource = "patrol:"
 
 var itemIDRE = regexp.MustCompile(`^i[a-z0-9]{7}$`)
 
@@ -231,6 +237,11 @@ func (s *Store) hasLocked(front string) bool {
 // EditItem changes an open item's text, source or line; nil leaves a field,
 // a front of "" takes it off its line. The ID and Created stay: an item
 // whose source becomes the issue it was filed as is still that item.
+//
+// An item the patrol filed keeps its source (ErrPatrolSource): the source
+// is what its check, or its finding's record, tells it by. Given another it
+// would leave its group, the check still hitting would file a second item,
+// and nothing would close the first.
 func (s *Store) EditItem(id string, text, source, front *string) (Item, error) {
 	now := s.now()
 	s.mu.Lock()
@@ -253,6 +264,9 @@ func (s *Store) EditItem(id string, text, source, front *string) (Item, error) {
 		it.Source = oneLine(*source)
 		if err := checkSource(it.Source); err != nil {
 			return Item{}, err
+		}
+		if it.From == FromPatrol && it.Source != s.items[i].Source {
+			return Item{}, ErrPatrolSource
 		}
 	}
 	if front != nil {

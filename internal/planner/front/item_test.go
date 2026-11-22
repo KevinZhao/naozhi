@@ -651,3 +651,47 @@ func TestReconcileText(t *testing.T) {
 		t.Fatalf("at the cap: added %+v, closed %+v, full %d", added, closed, full)
 	}
 }
+
+// An item the patrol filed is told by its source: the check that filed it
+// reconciles by it, and so does a finding's record. Its source is not
+// edited, so the next round finds its item where it left it and neither
+// files a second one nor leaves the first open for good; its text and its
+// line still are.
+func TestPatrolItemSource(t *testing.T) {
+	now := time.Date(2026, 11, 23, 10, 0, 0, 0, time.UTC)
+	s := New("", func() time.Time { return now })
+	if _, err := s.Apply(Update{ID: "gateway-refactor", Name: "网关重构"}); err != nil {
+		t.Fatal(err)
+	}
+	const ws = "ws_ab12cd34"
+	dirty := func(it Item) bool {
+		return it.From == FromPatrol && it.Workspace == ws && strings.HasPrefix(it.Source, "check:dirty:")
+	}
+	want := []Item{{Text: "3 处改动没提交，最早的在 4 天前", Workspace: ws, Source: "check:dirty:/srv/repo", From: FromPatrol}}
+	added, _ := s.Reconcile(dirty, want, ByPatrol)
+	if len(added) != 1 {
+		t.Fatalf("filed %+v", added)
+	}
+	id := added[0].ID
+	if _, err := s.EditItem(id, nil, ptr("https://github.com/owner/repo/issues/7"), nil); !errors.Is(err, ErrPatrolSource) {
+		t.Fatalf("a patrol item's source edited: %v", err)
+	}
+	// The same source written again is no change, and the rest still edits.
+	if _, err := s.EditItem(id, nil, ptr(" check:dirty:/srv/repo "), ptr("gateway-refactor")); err != nil {
+		t.Fatalf("the same source with a line: %v", err)
+	}
+	if _, err := s.EditItem(id, ptr("5 处改动没提交，最早的在 5 天前"), nil, nil); err != nil {
+		t.Fatalf("its text: %v", err)
+	}
+	// The next round still finds it: nothing filed again, and it closes once
+	// the check no longer hits.
+	if added, closed := s.Reconcile(dirty, want, ByPatrol); len(added)+len(closed) != 0 {
+		t.Fatalf("the next round filed %+v, closed %+v", added, closed)
+	}
+	if open := s.Items(); len(open) != 1 || open[0].ID != id || open[0].Source != "check:dirty:/srv/repo" {
+		t.Fatalf("open items %+v", open)
+	}
+	if _, closed := s.Reconcile(dirty, nil, ByPatrol); len(closed) != 1 || closed[0].ID != id {
+		t.Fatalf("no longer hitting closed %+v", closed)
+	}
+}
