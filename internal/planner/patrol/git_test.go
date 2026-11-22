@@ -26,13 +26,23 @@ func git(t *testing.T, dir string, at time.Time, args ...string) {
 	}
 }
 
-// clone is a repository at root/main with a bare remote beside it, one
-// commit on master pushed 30 days before at.
-func clone(t *testing.T, at time.Time) (root, main string) {
+// realGit skips a test where there is no git, and keeps the git the patrol
+// runs off the machine's own configuration: a global ignore file or
+// status.showUntrackedFiles would change what the checks find.
+func realGit(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("no git")
 	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+}
+
+// clone is a repository at root/main with a bare remote beside it, one
+// commit on master pushed 30 days before at.
+func clone(t *testing.T, at time.Time) (root, main string) {
+	t.Helper()
+	realGit(t)
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -249,12 +259,10 @@ func TestBranches(t *testing.T) {
 // branches were not looked at; one with nothing pushed says nothing.
 func TestBranchesNoDefault(t *testing.T) {
 	at := time.Now()
+	realGit(t)
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
-	}
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("no git")
 	}
 	remote, main := filepath.Join(root, "remote.git"), filepath.Join(root, "main")
 	git(t, root, at, "init", "-q", "--bare", "-b", "trunk", remote)
@@ -273,16 +281,20 @@ func TestBranchesNoDefault(t *testing.T) {
 // TestNotARepository: a directory in no repository is not a failure; the
 // worktrees a put-away left below it are still found.
 func TestNotARepository(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("no git")
-	}
-	dir, err := filepath.EvalSymlinks(t.TempDir())
+	realGit(t)
+	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
+	dir := filepath.Join(root, "ws")
 	left, gone := filepath.Join(dir, "repo", ".claude", "worktrees", "x"), filepath.Join(dir, "repo", ".claude", "worktrees", "gone")
-	if err := os.MkdirAll(left, 0o700); err != nil {
-		t.Fatal(err)
+	// One a put-away left in a repository that is not below dir: it is on
+	// disk, and not this directory's.
+	elsewhere := filepath.Join(root, "elsewhere", "wt")
+	for _, d := range []string{left, elsewhere} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	at := time.Now()
 	p := New(Config{Dir: t.TempDir(), Now: func() time.Time { return at }, Worktrees: func() []Worktree {
@@ -290,7 +302,7 @@ func TestNotARepository(t *testing.T) {
 			{Dir: left, GitDir: filepath.Join(dir, "repo", ".git"), Why: "有未提交的改动"},
 			{Dir: left, GitDir: filepath.Join(dir, "repo", ".git"), Why: "有未提交的改动"},
 			{Dir: gone, GitDir: filepath.Join(dir, "repo", ".git")},
-			{Dir: filepath.Join(filepath.Dir(dir), "elsewhere", "wt"), GitDir: filepath.Join(filepath.Dir(dir), "elsewhere", ".git")},
+			{Dir: elsewhere, GitDir: filepath.Join(root, "elsewhere", ".git")},
 		}
 	}})
 	rep := p.inspect(context.Background(), &round{now: at, repos: map[string]*repoReport{}}, target{ID: wsA, Dirs: []string{dir}}, dir)
@@ -336,6 +348,15 @@ func TestLinkedWorktree(t *testing.T) {
 	}
 	if got, want := names(look(t, at, wt, both...)), []string{"feat"}; !slices.Equal(got, want) {
 		t.Errorf("the linked worktree reports %v, want %v", got, want)
+	}
+	// A registered directory below another: the deepest that holds the
+	// worktree reports its branch.
+	nested := append(slices.Clone(both), workspace.Dir{ID: "ws_ccccccc3", Path: filepath.Join(main, ".claude", "worktrees", "inside")})
+	if got, want := names(look(t, at, main, nested...)), []string{"loose"}; !slices.Equal(got, want) {
+		t.Errorf("with a worktree below it registered, the main worktree reports %v, want %v", got, want)
+	}
+	if got, want := names(look(t, at, nested[2].Path, nested...)), []string{"inside"}; !slices.Equal(got, want) {
+		t.Errorf("the worktree registered below the main one reports %v, want %v", got, want)
 	}
 	// The linked worktree not registered: the main one reports its branch.
 	if got, want := names(look(t, at, main, both[0])), []string{"feat", "inside", "loose"}; !slices.Equal(got, want) {

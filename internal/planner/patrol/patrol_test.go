@@ -349,6 +349,12 @@ func TestScope(t *testing.T) {
 	if !strings.Contains(e.read(wsB+".md"), "- 1 处改动没提交，最早的在 20 天前") {
 		t.Errorf("the workspace back in scope:\n%s", e.read(wsB+".md"))
 	}
+	// A check's items are one workspace's: the other's stay.
+	for _, source := range []string{"check:dirty:" + dir, "check:dirty:" + idle} {
+		if !slices.ContainsFunc(e.open(), func(s string) bool { return strings.HasPrefix(s, source+"|") }) {
+			t.Errorf("no open item %s with both workspaces in scope: %v", source, e.open())
+		}
+	}
 
 	// The first one idle for 8 days: nothing of it changes, whatever
 	// happened in it.
@@ -497,7 +503,9 @@ func TestCancelled(t *testing.T) {
 
 // TestPrune: the file of a workspace no longer registered is removed and
 // the checks' items filed under it are closed; naozhi.md, the files the
-// deep check keeps beside and the items no check here wrote stay.
+// deep check keeps beside and the items no check here wrote stay. A
+// registry with nothing in it prunes nothing: it is one that could not be
+// read, not every workspace gone at once.
 func TestPrune(t *testing.T) {
 	e := newEnv(t)
 	gateway(e)
@@ -519,7 +527,16 @@ func TestPrune(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	before, file := e.open(), e.read(wsA+".md")
 	e.dirs = nil
+	e.round()
+	if got := e.open(); !slices.Equal(got, before) || e.read(wsA+".md") != file || e.read("ws_zzzzzzz9.md") == "" {
+		t.Errorf("an empty registry pruned: items = %v", got)
+	}
+
+	// Another workspace is registered, this one no longer.
+	e.workspace(wsB, "other")
+	e.active[wsB] = now.Add(-30 * day)
 	e.round()
 	var names []string
 	entries, _ := os.ReadDir(e.cfg.Dir)
@@ -739,6 +756,34 @@ func TestRoutines(t *testing.T) {
 	}
 	if md := e.read(ownFile); !strings.Contains(md, "## 例行任务\n\n无\n") {
 		t.Errorf("naozhi.md:\n%s", md)
+	}
+}
+
+// TestAllWired: as naozhi wires it — the workspaces' checks and the
+// standing tasks' together — each check's items are its own: none closes
+// another's, round after round.
+func TestAllWired(t *testing.T) {
+	e := newEnv(t)
+	gateway(e)
+	e.cfg.Routines = func() []Routine { return []Routine{{ID: "j1", Title: "账单更新", Failures: 2}} }
+	e.p = New(e.cfg)
+	e.round()
+	before := e.open()
+	if len(before) != 7 || !slices.Contains(before, "check:routine:j1|例行任务「账单更新」连续失败 2 次") {
+		t.Fatalf("items = %v, want the workspace's six and the standing task's", before)
+	}
+	ids := map[string]string{}
+	for _, it := range e.items.Items() {
+		ids[it.Source] = it.ID
+	}
+	e.round()
+	if got := e.open(); !slices.Equal(got, before) {
+		t.Errorf("after another round items = %v, want %v", got, before)
+	}
+	for _, it := range e.items.Items() {
+		if ids[it.Source] != it.ID {
+			t.Errorf("item %s was closed and filed again", it.Source)
+		}
 	}
 }
 

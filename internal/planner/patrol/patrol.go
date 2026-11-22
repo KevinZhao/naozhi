@@ -467,8 +467,15 @@ func groupOf(source string) (check, repo string) {
 
 // prune removes the files of workspaces no longer registered and closes
 // the checks' items filed under them: nothing looks at those again.
-// naozhi.md and whatever else lives in the directory stay.
+// naozhi.md and whatever else lives in the directory stay. A registry with
+// nothing on this node prunes nothing: that is one that could not be read,
+// or a node whose ID changed, far more often than every workspace gone at
+// once, and the files and items of the workspaces out of scope would not
+// come back.
 func (p *Patrol) prune(rd *round) {
+	if len(rd.dirs) == 0 {
+		return
+	}
 	registered := map[string]bool{}
 	for _, d := range rd.dirs {
 		registered[d.ID] = true
