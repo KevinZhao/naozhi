@@ -31,7 +31,7 @@ func TestItems(t *testing.T) {
 		t.Fatalf("filed %+v, %v, %v", a, added, err)
 	}
 	now = now.Add(time.Minute)
-	again, added, err := s.AddItem(Item{Text: "补上 reconnect 路径的单测", Source: "task:9f3c2a71d0", From: FromReport})
+	again, added, err := s.AddItem(Item{Text: "补上 reconnect 路径的单测", Workspace: "ws_ab12cd34", Source: "task:9f3c2a71d0", From: FromReport})
 	if err != nil || added || again.ID != a.ID {
 		t.Fatalf("the same report filed twice: %+v, %v, %v", again, added, err)
 	}
@@ -39,6 +39,26 @@ func TestItems(t *testing.T) {
 	b, added, err := s.AddItem(Item{Text: "补上 reconnect 路径的单测", Source: "task:9f3c2a71d0", From: FromPlanner})
 	if err != nil || !added || b.ID == a.ID {
 		t.Fatalf("the Planner's own item: %+v, %v, %v", b, added, err)
+	}
+	// So is the same sentence under another line, or another workspace: the
+	// user adding it there means it there.
+	if _, err := s.Apply(Update{ID: "docs", Name: "文档"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range []Item{
+		{Text: "补文档", From: FromUser},
+		{Text: "补文档", Front: "docs", From: FromUser},
+		{Text: "补文档", Workspace: "ws_ab12cd34", From: FromUser},
+	} {
+		if out, added, err := s.AddItem(it); err != nil || !added || out.Front != it.Front || out.Workspace != it.Workspace {
+			t.Fatalf("%+v filed as %+v, %v, %v", it, out, added, err)
+		}
+		if out, added, err := s.AddItem(it); err != nil || added || out.Front != it.Front || out.Workspace != it.Workspace {
+			t.Fatalf("%+v filed twice: %+v, %v, %v", it, out, added, err)
+		}
+	}
+	if got := s.CloseItems(func(it Item) bool { return it.Text == "补文档" }, ByPlanner); len(got) != 3 {
+		t.Fatalf("closed %+v", got)
 	}
 	for _, bad := range []Item{
 		{Text: " ", From: FromUser},
@@ -69,7 +89,7 @@ func TestItems(t *testing.T) {
 		t.Fatalf("closed %+v, %v", c, err)
 	}
 	now = now.Add(time.Hour)
-	if c, err := reloaded.CloseItem(a.ID, ByUser); err != nil || c.ClosedBy != ByPlanner || !c.Closed.Equal(closedAt) {
+	if c, err := reloaded.CloseItem(a.ID, ByFact); err != nil || c.ClosedBy != ByPlanner || !c.Closed.Equal(closedAt) {
 		t.Errorf("closing a closed item changed it: %+v, %v", c, err)
 	}
 	if got := reloaded.Items(); len(got) != 1 || got[0].ID != b.ID {
@@ -230,6 +250,55 @@ func TestItemFront(t *testing.T) {
 	if got := s.Items(); got[0].ID != filed || got[1].ID != bySession || got[2].ID != loose {
 		t.Errorf("order: %v", texts(got))
 	}
+
+	// A session on two lines: its items go by the line updated last.
+	two := add(Item{Text: "两条线上的会话留下的", Source: "task:two", From: FromReport})
+	for _, id := range []string{"docs", "gateway-refactor", "docs"} {
+		now = now.Add(time.Minute)
+		if _, err := s.Apply(Update{ID: id, Sessions: []string{"task:two"}}); err != nil {
+			t.Fatal(err)
+		}
+		if got := fronts(); got[two] != id {
+			t.Fatalf("with %s updated last: %v", id, got)
+		}
+	}
+}
+
+// A line keeps its newest sessions only; what an older one left stays under
+// the line it was listed under.
+func TestItemFrontPastSessions(t *testing.T) {
+	now := time.Date(2026, 11, 23, 10, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "fronts.json")
+	s := New(path, func() time.Time { return now })
+	for _, u := range []Update{
+		{ID: "gateway-refactor", Name: "网关重构", Sessions: []string{"task:0"}},
+		{ID: "docs", Name: "文档"},
+	} {
+		if _, err := s.Apply(u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	left, _, err := s.AddItem(Item{Text: "最早那个会话留下的", Source: "task:0", From: FromReport})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Filed under another line by hand: not the session's line's to take.
+	moved, _, err := s.AddItem(Item{Text: "归到别的线上的", Front: "docs", Source: "task:0", From: FromPlanner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= MaxSessions; i++ {
+		now = now.Add(time.Minute)
+		if _, err := s.Apply(Update{ID: "gateway-refactor", Sessions: []string{fmt.Sprintf("task:%d", i)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, st := range []*Store{s, New(path, nil)} {
+		got := st.Items()
+		if len(got) != 2 || got[0].ID != left.ID || got[0].Front != "gateway-refactor" || got[1].ID != moved.ID || got[1].Front != "docs" {
+			t.Fatalf("after the line's sessions moved on: %+v", got)
+		}
+	}
 }
 
 // Reconcile makes a check's group be its hits: new ones filed, the ones
@@ -382,5 +451,203 @@ func TestItemsReadOnly(t *testing.T) {
 	}
 	if again := New(old, nil); len(again.Items()) != 1 || len(again.Open()) != 1 || again.Items()[0].Front != "docs" {
 		t.Errorf("after a reload: %+v", again.Items())
+	}
+}
+
+// The user striking an item in one group says nothing of another group's
+// hit of the same source: the patrol's sources name the check, the group
+// the workspace.
+func TestReconcileStruckElsewhere(t *testing.T) {
+	now := time.Date(2026, 11, 23, 10, 0, 0, 0, time.UTC)
+	s := New("", func() time.Time { return now })
+	group := func(ws string) func(Item) bool {
+		return func(it Item) bool { return it.From == FromPatrol && it.Workspace == ws && it.Source == "check:dirty" }
+	}
+	hit := func(ws string) []Item {
+		return []Item{{Text: "3 个文件 4 天没提交", Workspace: ws, Source: "check:dirty", From: FromPatrol}}
+	}
+	added, _ := s.Reconcile(group("ws_ab12cd34"), hit("ws_ab12cd34"), ByPatrol)
+	if len(added) != 1 {
+		t.Fatalf("first group: added %+v", added)
+	}
+	if _, err := s.CloseItem(added[0].ID, ByUser); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Hour)
+	if added, closed := s.Reconcile(group("ws_zz99zz99"), hit("ws_zz99zz99"), ByPatrol); len(added) != 1 || len(closed) != 0 || added[0].Workspace != "ws_zz99zz99" {
+		t.Fatalf("another group's hit of the same source: added %+v, closed %+v", added, closed)
+	}
+	if added, closed := s.Reconcile(group("ws_ab12cd34"), hit("ws_ab12cd34"), ByPatrol); len(added)+len(closed) != 0 {
+		t.Fatalf("the group it was struck in: added %+v, closed %+v", added, closed)
+	}
+}
+
+// A hit Reconcile cannot file as it is given is still a hit: its item stays
+// open. A text too long is cut, as a report's is.
+func TestReconcileLeftOut(t *testing.T) {
+	now := time.Date(2026, 11, 23, 10, 0, 0, 0, time.UTC)
+	s := New("", func() time.Time { return now })
+	group := func(it Item) bool { return it.From == FromPatrol && it.Workspace == "ws_ab12cd34" }
+	hit := func(text string) Item {
+		return Item{Text: text, Workspace: "ws_ab12cd34", Source: "check:worktree:a", From: FromPatrol}
+	}
+	added, _ := s.Reconcile(group, []Item{hit("收起时留下的 worktree a")}, ByPatrol)
+	if len(added) != 1 {
+		t.Fatalf("first round: added %+v", added)
+	}
+	id := added[0].ID
+
+	now = now.Add(time.Hour)
+	long := strings.Repeat("长", ItemRunes+20)
+	added, closed := s.Reconcile(group, []Item{hit(long)}, ByPatrol)
+	if got := s.Items(); len(added)+len(closed) != 0 || len(got) != 1 || got[0].ID != id || got[0].Text != strings.Repeat("长", ItemRunes-1)+"…" {
+		t.Fatalf("a long text: added %+v, closed %+v, open %+v", added, closed, got)
+	}
+	// The same long text again is no change.
+	if added, closed = s.Reconcile(group, []Item{hit(long)}, ByPatrol); len(added)+len(closed) != 0 {
+		t.Fatalf("the long text again: added %+v, closed %+v", added, closed)
+	}
+
+	for name, bad := range map[string]Item{
+		"no text":       hit(" "),
+		"another from":  {Text: "x", Workspace: "ws_ab12cd34", Source: "check:worktree:a", From: "someone"},
+		"another group": {Text: "x", Workspace: "ws_zz99zz99", Source: "check:worktree:a", From: FromPatrol},
+	} {
+		now = now.Add(time.Hour)
+		added, closed = s.Reconcile(group, []Item{bad}, ByPatrol)
+		if got := s.Items(); len(added)+len(closed) != 0 || len(got) != 1 || got[0].ID != id || got[0].Text != strings.Repeat("长", ItemRunes-1)+"…" {
+			t.Errorf("%s: added %+v, closed %+v, open %+v", name, added, closed, got)
+		}
+	}
+	// No longer hitting at all closes it.
+	if _, closed = s.Reconcile(group, nil, ByPatrol); len(closed) != 1 || closed[0].ID != id {
+		t.Fatalf("no hit: closed %+v", closed)
+	}
+}
+
+// At the cap a round that swaps its hits still fits: the ones gone are
+// closed before the new ones are filed.
+func TestReconcileAtCap(t *testing.T) {
+	now := time.Date(2026, 11, 23, 10, 0, 0, 0, time.UTC)
+	s := New("", func() time.Time { return now })
+	group := func(it Item) bool { return it.From == FromPatrol }
+	hit := func(source string) Item { return Item{Text: source, Source: source, From: FromPatrol} }
+	if added, _ := s.Reconcile(group, []Item{hit("check:a"), hit("check:b")}, ByPatrol); len(added) != 2 {
+		t.Fatalf("added %+v", added)
+	}
+	for i := 2; i < MaxOpenItems; i++ {
+		if _, _, err := s.AddItem(Item{Text: fmt.Sprintf("第 %d 条", i), From: FromUser}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	added, closed := s.Reconcile(group, []Item{hit("check:b"), hit("check:c"), hit("check:d")}, ByPatrol)
+	if len(added) != 1 || added[0].Source != "check:c" || len(closed) != 1 || closed[0].Source != "check:a" {
+		t.Fatalf("at the cap: added %+v, closed %+v", added, closed)
+	}
+}
+
+// The user's strike outlasts whoever closed the item before: struck on a
+// page that had not seen the check close it, it is not filed again.
+func TestStrikeClosedItem(t *testing.T) {
+	now := time.Date(2026, 11, 23, 10, 0, 0, 0, time.UTC)
+	s := New("", func() time.Time { return now })
+	group := func(it Item) bool { return it.From == FromPatrol }
+	want := []Item{{Text: "3 个文件 4 天没提交", Source: "check:dirty", From: FromPatrol}}
+	added, _ := s.Reconcile(group, want, ByPatrol)
+	if len(added) != 1 {
+		t.Fatalf("added %+v", added)
+	}
+	now = now.Add(time.Hour)
+	if _, closed := s.Reconcile(group, nil, ByPatrol); len(closed) != 1 {
+		t.Fatalf("closed %+v", closed)
+	}
+	now = now.Add(time.Hour)
+	struck := now
+	if it, err := s.CloseItem(added[0].ID, ByUser); err != nil || it.ClosedBy != ByUser || !it.Closed.Equal(struck) {
+		t.Fatalf("struck after the check closed it: %+v, %v", it, err)
+	}
+	// Struck twice is struck once.
+	now = now.Add(time.Hour)
+	if it, err := s.CloseItem(added[0].ID, ByUser); err != nil || it.ClosedBy != ByUser || !it.Closed.Equal(struck) {
+		t.Fatalf("struck again: %+v, %v", it, err)
+	}
+	if added, _ = s.Reconcile(group, want, ByPatrol); len(added) != 0 {
+		t.Fatalf("hitting again after the strike: added %+v", added)
+	}
+	now = struck.Add(itemRetention + time.Hour)
+	if added, _ = s.Reconcile(group, want, ByPatrol); len(added) != 1 {
+		t.Fatalf("past the retention: added %+v", added)
+	}
+}
+
+// ReconcileText takes what one source says is left as the whole of it: said
+// again an item keeps its ID, no longer said it is closed, and one the user
+// struck is not filed again for a week however often it is said.
+func TestReconcileText(t *testing.T) {
+	now := time.Date(2026, 11, 23, 10, 0, 0, 0, time.UTC)
+	s := New("", func() time.Time { return now })
+	const key = "task:9f3c2a71d0"
+	mine := func(it Item) bool { return it.From == FromReport && it.Source == key }
+	left := func(texts ...string) []Item {
+		var out []Item
+		for _, text := range texts {
+			out = append(out, Item{Text: text, Workspace: "ws_ab12cd34", Source: key, From: FromReport})
+		}
+		return out
+	}
+	other, _, err := s.AddItem(Item{Text: "跑一遍集成测试", Source: "task:other", From: FromReport})
+	if err != nil {
+		t.Fatal(err)
+	}
+	own, _, err := s.AddItem(Item{Text: "跑一遍集成测试", Source: key, From: FromPlanner})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	added, closed, full := s.ReconcileText(mine, left("迁完 internal/b 的调用点", "跑一遍集成测试"), ByReport)
+	if len(added) != 2 || len(closed) != 0 || full != 0 || added[1].Workspace != "ws_ab12cd34" {
+		t.Fatalf("first report: added %+v, closed %+v, full %d", added, closed, full)
+	}
+	kept := added[1]
+
+	now = now.Add(time.Hour)
+	added, closed, _ = s.ReconcileText(mine, left("跑一遍集成测试", "更新 README"), ByReport)
+	if len(added) != 1 || added[0].Text != "更新 README" || len(closed) != 1 || closed[0].Text != "迁完 internal/b 的调用点" || closed[0].ClosedBy != ByReport {
+		t.Fatalf("second report: added %+v, closed %+v", added, closed)
+	}
+	open := s.Items()
+	if len(open) != 4 || open[0].ID != other.ID || open[1].ID != own.ID || open[2].ID != kept.ID || open[3].ID != added[0].ID {
+		t.Fatalf("after the second report: %+v", open)
+	}
+
+	// Struck by the user, said again by the session: not filed, and the
+	// rest of what it says is.
+	struck := now
+	if _, err := s.CloseItem(kept.ID, ByUser); err != nil {
+		t.Fatal(err)
+	}
+	now = struck.Add(itemRetention - time.Hour)
+	if added, closed, _ = s.ReconcileText(mine, left("跑一遍集成测试", "更新 README", "补一条迁移说明"), ByReport); len(added) != 1 || added[0].Text != "补一条迁移说明" || len(closed) != 0 {
+		t.Fatalf("a struck line said again: added %+v, closed %+v", added, closed)
+	}
+	// Another session saying the same sentence is not what was struck.
+	theirs := func(it Item) bool { return it.From == FromReport && it.Source == "task:third" }
+	if added, _, _ = s.ReconcileText(theirs, []Item{{Text: "跑一遍集成测试", Source: "task:third", From: FromReport}}, ByReport); len(added) != 1 {
+		t.Fatalf("another session's same line: added %+v", added)
+	}
+	now = struck.Add(itemRetention + time.Hour)
+	if added, _, _ = s.ReconcileText(mine, left("跑一遍集成测试", "更新 README", "补一条迁移说明"), ByReport); len(added) != 1 || added[0].Text != "跑一遍集成测试" || added[0].ID == kept.ID {
+		t.Fatalf("past the retention: added %+v", added)
+	}
+
+	// Past the cap the count of what was not filed comes back.
+	for i := len(s.Items()); i < MaxOpenItems; i++ {
+		if _, _, err := s.AddItem(Item{Text: fmt.Sprintf("第 %d 条", i), From: FromUser}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	added, closed, full = s.ReconcileText(mine, left("更新 README", "新的一条", "又一条", "再一条"), ByReport)
+	if len(closed) != 2 || len(added) != 2 || full != 1 {
+		t.Fatalf("at the cap: added %+v, closed %+v, full %d", added, closed, full)
 	}
 }

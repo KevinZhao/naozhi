@@ -221,7 +221,15 @@ func (s *Store) Apply(u Update) (Front, error) {
 				keys = append(keys, k)
 			}
 		}
-		f.Sessions = keys[:min(len(keys), MaxSessions)]
+		n := min(len(keys), MaxSessions)
+		// What a session the line no longer keeps left under it stays under
+		// it: Items finds an item's line by the sessions kept.
+		for i := range s.items {
+			if it := &s.items[i]; it.Open() && it.Front == "" && slices.Contains(keys[n:], it.Source) {
+				it.Front = f.ID
+			}
+		}
+		f.Sessions = keys[:n]
 	}
 	if u.Decision != "" {
 		f.Decisions = append([]Decision{{At: now, Text: u.Decision}}, f.Decisions...)
