@@ -194,6 +194,174 @@ test('delete: a 409 puts the row back with the latest, and the next delete names
   }
 });
 
+// The head counts, an emptied group and 最近 7 天 follow the row at once,
+// not after the 5 s and the DELETE; 撤销 and a refused delete put them back.
+test('delete: the group count and an emptied group follow the hidden row; 撤销 and a refused delete restore both', async ({ page }) => {
+  const data = memories();
+  const mock = await startMockServer({ memories: data });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await openSettings(page);
+    const sec = page.locator('#settings-memory');
+    const grp = (project) => sec.locator('.mem-grp[data-project="' + project + '"]');
+    const naozhi = grp('-Users-me-workspace-naozhi');
+    const planner = grp('-Users-me--naozhi-planner-main');
+    const toast = page.locator('#mem-undo-toast');
+
+    // naozhi keeps its other entry and its index: one fewer.
+    const az = row(page, 'frankfurt-az');
+    await az.locator('.mem-row-h').click();
+    await az.locator('[data-mem="delete"]').click();
+    await expect(az).toBeHidden();
+    await expect(naozhi.locator('.mem-grp-l')).toHaveText(/^naozhi · 1 条 · 索引 3 行/, { timeout: 1000 });
+    await toast.locator('button').click();
+    await expect(az).toBeVisible();
+    await expect(naozhi.locator('.mem-grp-l')).toHaveText(/^naozhi · 2 条 · 索引 3 行/);
+
+    // The Planner's only entry: the group and its 最近 7 天 copy go too.
+    const style = row(page, 'reply-style');
+    await style.locator('.mem-row-h').click();
+    await style.locator('[data-mem="delete"]').click();
+    await expect(planner).toBeHidden({ timeout: 1000 });
+    await expect(sec.locator('.mem-recent .mem-row[data-name="reply-style"]')).toBeHidden();
+    await expect(sec.locator('.mem-recent')).toBeVisible();
+    await toast.locator('button').click();
+    await expect(planner).toBeVisible();
+    await expect(planner.locator('.mem-grp-l')).toHaveText(/^Planner 自己的 · 1 条/);
+    await expect(style).toBeVisible();
+    expect(mock.memoryCalls).toEqual([]);
+
+    // Refused after the 5 s: both back, and why.
+    data.deleteStatus = 500;
+    await style.locator('[data-mem="delete"]').click();
+    await expect(planner).toBeHidden({ timeout: 1000 });
+    await expect.poll(() => mock.memoryCalls.length, { timeout: 8000 }).toBe(1);
+    await expect(planner).toBeVisible();
+    await expect(style).toBeVisible();
+    await expect(planner.locator('.mem-grp-l')).toHaveText(/^Planner 自己的 · 1 条/);
+    await expect(page.locator('#toast')).toHaveText('没删成（HTTP 500）');
+
+    // Taken: the emptied group stays gone, the count stays down.
+    delete data.deleteStatus;
+    await style.locator('[data-mem="delete"]').click();
+    await expect.poll(() => mock.memoryCalls.length, { timeout: 8000 }).toBe(2);
+    await expect(style).toHaveCount(0);
+    await expect(planner).toBeHidden();
+    await expect(sec.locator('.mem-none')).toBeHidden();
+  } finally {
+    mock.server.close();
+  }
+});
+
+test('delete: the last entry on the node leaves the empty state at once, 撤销 takes it away', async ({ page }) => {
+  const data = memories();
+  data.groups = data.groups.slice(0, 1);
+  const mock = await startMockServer({ memories: data });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await openSettings(page);
+    const none = page.locator('#settings-memory .mem-none');
+    await expect(none).toBeHidden();
+    const style = row(page, 'reply-style');
+    await style.locator('.mem-row-h').click();
+    await style.locator('[data-mem="delete"]').click();
+    await expect(none).toHaveText('这台机器上还没有记忆', { timeout: 1000 });
+    await expect(page.locator('#settings-memory .mem-recent')).toBeHidden();
+    await page.locator('#mem-undo-toast button').click();
+    await expect(none).toBeHidden();
+    await expect(page.locator('#settings-memory .mem-recent')).toBeVisible();
+    await expect(style).toBeVisible();
+  } finally {
+    mock.server.close();
+  }
+});
+
+// holdPut parks the PUTs of /api/memories/file until release(), then
+// answers with answer(route) (the mock by default).
+async function holdPut(page, answer) {
+  let release;
+  const held = new Promise((r) => { release = r; });
+  await page.route((url) => url.pathname === '/api/memories/file', async (route) => {
+    if (route.request().method() !== 'PUT') return route.fallback();
+    await held;
+    if (answer) await answer(route); else await route.fallback();
+  });
+  return () => release();
+}
+
+test('save: the editor closes on the draft at once; the PUT confirms it, the read after it in the background', async ({ page }) => {
+  const mock = await startMockServer({ memories: memories() });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await openSettings(page);
+    const release = await holdPut(page);
+    const r = row(page, 'frankfurt-az');
+    await r.locator('.mem-row-h').click();
+    await r.locator('[data-mem="edit"]').click();
+    await r.locator('textarea.mem-edit').fill('---\nname: 法兰克福可用区\n---\n\n用 **az3**。\n');
+    await r.locator('[data-mem="save"]').click();
+    await expect(r.locator('textarea.mem-edit')).toHaveCount(0, { timeout: 1000 });
+    await expect(r.locator('.mem-md strong')).toHaveText('az3');
+    await expect(r.locator('.mem-md')).not.toContainText('name:');
+    await expect(r.locator('.mem-note')).toHaveText('保存中…');
+    // No second write on the version this one replaces.
+    await expect(r.locator('[data-mem="edit"]')).toHaveCount(0);
+    await expect(r.locator('[data-mem="delete"]')).toHaveCount(0);
+    expect(mock.memoryCalls).toEqual([]);
+
+    release();
+    await expect(r.locator('.mem-note')).toHaveText('已保存');
+    await expect(r.locator('[data-mem="edit"]')).toBeVisible();
+    expect(mock.memoryCalls.map((c) => c.method + ' ' + c.version)).toEqual(['PUT v1']);
+    await expect(r.locator('.mem-md strong')).toHaveText('az3');
+    // The next edit opens on the saved text and sends the new version.
+    await r.locator('[data-mem="edit"]').click();
+    await expect(r.locator('textarea.mem-edit')).toHaveValue(/用 \*\*az3\*\*/);
+    await r.locator('[data-mem="save"]').click();
+    await expect(r.locator('.mem-note')).toHaveText('已保存');
+    expect(mock.memoryCalls.map((c) => c.method + ' ' + c.version)).toEqual(['PUT v1', 'PUT v2']);
+  } finally {
+    mock.server.close();
+  }
+});
+
+test('save: a refused or conflicting save goes back to the editor with the draft, kept through a re-entry meanwhile', async ({ page }) => {
+  const data = memories();
+  const mock = await startMockServer({ memories: data });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await openSettings(page);
+    let status = 500;
+    const release = await holdPut(page, (route) => (status ? route.fulfill({ status, contentType: 'application/json', body: '{"error":"x"}' }) : route.fallback()));
+    const r = row(page, 'frankfurt-az');
+    const draft = '---\nname: 法兰克福可用区\n---\n\n用 az3。\n';
+    await r.locator('.mem-row-h').click();
+    await r.locator('[data-mem="edit"]').click();
+    await r.locator('textarea.mem-edit').fill(draft);
+    await r.locator('[data-mem="save"]').click();
+    await expect(r.locator('textarea.mem-edit')).toHaveCount(0, { timeout: 1000 });
+    // Leaving and coming back while the PUT is out does not re-read over it.
+    await page.click('#abnav-chat');
+    await page.click('#abnav-settings');
+    await expect(r.locator('.mem-note')).toHaveText('保存中…');
+
+    release();
+    await expect(r.locator('textarea.mem-edit')).toHaveValue(draft);
+    await expect(r.locator('.mem-note')).toHaveText('没保存成（HTTP 500）');
+
+    // Someone else wrote it: the conflict view, the draft still below.
+    status = 0;
+    data.files['-Users-me-workspace-naozhi/frankfurt-az'] = { ...data.files['-Users-me-workspace-naozhi/frankfurt-az'], text: '会话写的新内容\n', body: '会话写的新内容\n', version: 'v7', modified: iso(Date.now()) };
+    await r.locator('[data-mem="save"]').click();
+    await expect(r.locator('.mem-note')).toContainText('这条在你打开后被改过');
+    await expect(r.locator('.mem-latest')).toHaveText('会话写的新内容\n');
+    await expect(r.locator('textarea.mem-edit')).toHaveValue(draft);
+    expect(mock.memoryCalls.map((c) => c.method + ' ' + c.version)).toEqual(['PUT v1']);
+  } finally {
+    mock.server.close();
+  }
+});
+
 function remoteSessions() {
   const s = defaultSessions();
   s.nodes = {

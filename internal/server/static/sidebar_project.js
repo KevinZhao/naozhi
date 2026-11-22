@@ -168,46 +168,74 @@ function toggleProjectCollapsed(key) {
   }
 }
 
-// In-flight guard against a double-click race: the star button's DOM state
-// lags behind sessionList.projectsData until the next shell.fetchSessions re-render. Without
-// this set, a second click inside that window would read a stale DOM hint and
-// potentially fire the same or opposite polarity. Keyed by (node, name).
-const _favInFlight = new Set();
+// _favPending is the favorite flag each (node, name) was set to while its
+// POST is in flight. The star flips and the sidebar regroups at the click;
+// a sessions poll answering from before the POST would flip it back, so
+// withPendingFavorites lays these over every polled project list until the
+// request and the refresh after it settle. A second click inside that
+// window is dropped: it would read the flag this one has not confirmed.
+const _favPending = new Map();
+
+// withPendingFavorites overrides, in place, the favorite flag of the
+// projects whose toggle is in flight, and answers the list.
+export function withPendingFavorites(projects) {
+  if (_favPending.size === 0 || !Array.isArray(projects)) return projects;
+  for (const p of projects) {
+    const v = _favPending.get((p.node || 'local') + ':' + p.name);
+    if (v !== undefined) p.favorite = v;
+  }
+  return projects;
+}
+
+// setFavoriteLocal sets the flag on the cached project lists and repaints
+// the sidebar from the cached payload: favorites sort first, and an empty
+// favorite group shows or leaves at once. projectsData and the payload's
+// stats.projects are normally one array; both are set in case they are not,
+// since renderSidebar takes projectsData from the payload.
+function setFavoriteLocal(name, nodeID, value) {
+  const lists = [sessionList.projectsData, sessionList.lastSidebarData && sessionList.lastSidebarData.stats && sessionList.lastSidebarData.stats.projects];
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    for (const p of list) if (p.name === name && (p.node || 'local') === nodeID) p.favorite = value;
+  }
+  if (sessionList.lastSidebarData) shell.renderSidebar(sessionList.lastSidebarData);
+}
 
 async function toggleFavorite(name, node) {
   const nodeID = node || 'local';
   const key = nodeID + ':' + name;
-  if (_favInFlight.has(key)) return; // drop re-entry
+  if (_favPending.has(key)) return; // drop re-entry
   // Derive current state from the source of truth (sessionList.projectsData), not the
   // button's data-fav attribute which may not have been re-rendered yet.
   const proj = sessionList.projectsData.find(x => x.name === name && (x.node || 'local') === nodeID);
   if (!proj) return;
-  const next = !proj.favorite;
-  _favInFlight.add(key);
+  const prev = !!proj.favorite;
+  const next = !prev;
+  _favPending.set(key, next);
+  setFavoriteLocal(name, nodeID, next);
+  const qs = 'name=' + encodeURIComponent(name) + '&favorite=' + (next ? 'true' : 'false') +
+    (node && node !== 'local' ? '&node=' + encodeURIComponent(node) : '');
   try {
-    const headers = {};
-    const qs = 'name=' + encodeURIComponent(name) + '&favorite=' + (next ? 'true' : 'false') +
-      (node && node !== 'local' ? '&node=' + encodeURIComponent(node) : '');
-    try {
-      await fetchJSON(NZ_CONTRACT.API.projects_favorite + '?' + qs, { timeoutMs: 10000, method: 'POST', headers });
-    } catch (err) {
-      if (err && err.status) {
-        showAPIError(next ? '收藏项目' : '取消收藏', err.status, '');
-      } else {
-        showNetworkError(next ? '收藏项目' : '取消收藏', err);
-      }
-      // Re-render from the server so the star's visual hover/click state
-      // snaps back to the authoritative `sessionList.projectsData` value; otherwise the
-      // user sees a phantom success.
-      shell.fetchSessions();
-      return;
+    await fetchJSON(NZ_CONTRACT.API.projects_favorite + '?' + qs, { timeoutMs: 10000, method: 'POST', headers: {} });
+  } catch (err) {
+    _favPending.delete(key);
+    setFavoriteLocal(name, nodeID, prev);
+    if (err && err.status) {
+      showAPIError(next ? '收藏项目' : '取消收藏', err.status, '');
+    } else {
+      showNetworkError(next ? '收藏项目' : '取消收藏', err);
     }
-    // Optimistic update then refresh.
-    proj.favorite = next;
-    showToast(next ? '已收藏 ' + name : '已取消收藏 ' + name, 'success');
+    // The server may have taken it after all (a timeout): the next poll says.
     shell.fetchSessions();
+    return;
+  }
+  showToast(next ? '已收藏 ' + name : '已取消收藏 ' + name, 'success');
+  // The override holds through this refresh: a poll sent before the POST
+  // can still answer after it.
+  try {
+    await shell.fetchSessions();
   } finally {
-    _favInFlight.delete(key);
+    _favPending.delete(key);
   }
 }
 
