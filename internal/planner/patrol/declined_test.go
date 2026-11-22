@@ -497,6 +497,52 @@ func TestDeclinedHandEdit(t *testing.T) {
 	}
 }
 
+// TestDeclinedWhileChecking: the list is read again once the session ends:
+// what the user turned down while a deep check ran is not reported by it.
+func TestDeclinedWhileChecking(t *testing.T) {
+	d := newDeep(t)
+	d.repo(wsA, "gateway", "a")
+	hold := make(chan struct{})
+	d.set(func() {
+		d.hold = hold
+		d.reply = findings(finding("bug-one", nil), finding("doc-readme", map[string]string{"kind": doc}))
+	})
+	if _, err := d.p.Trigger(wsA); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-d.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the deep check did not start")
+	}
+	// The session is reading the repository; the user stops the kind.
+	d.writeDeclined(`{"v":1,"findings":[],"kinds":[{"workspace":"` + wsA + `","kind":"doc","by":"user","at":"2026-11-23T14:02:00+08:00"}],"workspaces":[]}`)
+	close(hold)
+	d.wait()
+	st := d.state(wsA)
+	if st.Last.State != RunOK || st.Last.Dropped != 1 || states(st) != "bug-one=told" {
+		t.Errorf("last run %+v, records %s; want the kind stopped meanwhile dropped", st.Last, states(st))
+	}
+	// Unreadable by the session's end: the run fails and takes nothing.
+	hold = make(chan struct{})
+	d.set(func() { d.hold = hold; d.reply = findings(finding("bug-two", nil)) })
+	if _, err := d.p.Trigger(wsA); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-d.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the deep check did not start")
+	}
+	d.writeDeclined("{")
+	close(hold)
+	d.wait()
+	st = d.state(wsA)
+	if st.Last.State != RunFailed || !strings.Contains(st.Last.Error, "declined.json 读不了") || states(st) != "bug-one=told" {
+		t.Errorf("last run %+v, records %s; want it failed with nothing taken", st.Last, states(st))
+	}
+}
+
 // TestDeclinedUnreadable: a list that does not read is not a list of
 // nothing. No choice is written over it, no deep check runs, the round
 // looks at nothing, and the user is told once, until it reads again.
