@@ -13,7 +13,7 @@ import { turnState, updateSendButton } from './running_banner.js';
 import { PENDING_LS_KEY, announce, formatAbsTime, persistPending, refreshSidebarTimes, renderRecentSessionsPanel, setActiveSessionCard, showAuthModal, timeAgo } from './utilities.js';
 import { scanDiscovered } from './discovery.js';
 import { invalidateGitState } from './tuning.js';
-import { NODE_GROUP_PREFIX, nodeHeaderHtml, sectionHeaderFallbackHtml, sectionHeaderHtml } from './sidebar_project.js';
+import { NODE_GROUP_PREFIX, nodeHeaderHtml, sectionHeaderFallbackHtml, sectionHeaderHtml, withPendingFavorites } from './sidebar_project.js';
 import { nodeRunsPlanner, plannerHost } from './planner_host.js';
 import { custody, statusOf } from './custody.js';
 import { accessProfileChipHtml, backendDisplayName, backendDisplayVersion } from './auth_modal.js';
@@ -129,7 +129,8 @@ function syncHistory(tag) {
 function applySessionsStats(data) {
   if (data.nodes) sessionList.nodesData = data.nodes;
   if (data.stats.default_workspace) serverInfo.defaultWorkspace = data.stats.default_workspace;
-  if (data.stats.projects) sessionList.projectsData = data.stats.projects;
+  // A star toggled but not yet confirmed keeps its new flag over the poll's.
+  if (data.stats.projects) sessionList.projectsData = withPendingFavorites(data.stats.projects);
   if (data.stats.cli_name) serverInfo.defaultCLIName = data.stats.cli_name;
   if (data.stats.cli_version) serverInfo.defaultCLIVersion = data.stats.cli_version;
   // The Home panel's health strip reads uptime / watchdog / active-count off
