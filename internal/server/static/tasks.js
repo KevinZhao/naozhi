@@ -78,7 +78,7 @@
 import { NZ_CONTRACT } from './contract.js';
 import { selection, ui } from './state.js';
 import { HEALTH_STATES, backgroundTasksText, esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
-import { formatAbsTime, formatMonthDayTime, timeAgo } from './utilities.js';
+import { formatAbsTime, formatMonthDayTime, holdPutAway, releasePutAway, timeAgo } from './utilities.js';
 import { custody, custodyChipHtml, refreshCustody, sessionShown, statusOf } from './custody.js';
 import { isLit, light } from './notify.js';
 import { shell } from './shell.js';
@@ -115,6 +115,12 @@ let onlyNew = null;
 // unwatched is the sessions whose 观察 this page just switched off, by key
 // (→ a mark of that switch): 你开的 leaves them out meanwhile.
 const unwatched = new Map();
+// pending holds the changes posted from here not answered yet: id → {patch},
+// the fields the change set. A read answering meanwhile (refreshTasks, the
+// live tick, a session_state frame) may have the task as it was, so
+// fetchTasks lays the patch over it and the card does not flip back; once
+// the POST answered, the next read is the server's.
+const pending = new Map();
 
 // LIVE_MS is how often the group refetches while a dispatched session runs;
 // STATE_DEBOUNCE_MS gathers a burst of session_state frames into one fetch.
@@ -584,7 +590,11 @@ function fetchTasks(fresh = false) {
     }
     if (load && load.p === p) load = null;
     if (g !== gen) return fetchTasks();
-    const list = (data && Array.isArray(data.tasks)) ? data.tasks : [];
+    let list = (data && Array.isArray(data.tasks)) ? data.tasks : [];
+    if (pending.size) {
+      list = list.map((t) => (pending.has(t.id) ? { ...t, ...pending.get(t.id).patch } : t));
+      data = { ...data, tasks: list };
+    }
     byId = new Map(list.map((t) => [t.id, t]));
     if (actsOpen && !byId.has(actsOpen)) actsOpen = '';
     if (digestOpen && !byId.has(digestOpen)) digestOpen = '';
@@ -914,24 +924,92 @@ nzBus.addEventListener('planner:node', () => {
   paintTaskHeader();
 });
 
-// post sends a task change from control el, then refreshes every group.
-async function post(el, url, body, failed) {
-  el.disabled = true;
+// post sends a change to task body.id from control el, then refreshes every
+// group. A task in the last list shows the change at once (patch: the fields
+// the gateway sets, as the user's): its card, the header counts, the
+// session's own header; a refused POST puts the task as it was back and says
+// why. A session the change puts away leaves the sidebar at once too
+// (sidebarPutAway).
+async function post(el, url, body, failed, patch) {
+  const id = body.id;
+  const prev = byId.get(id);
+  const mark = prev ? { patch: { ...patch, by: 'user', at: new Date().toISOString() } } : null;
+  const node = plannerHost.node;
+  let held = false;
+  if (mark) {
+    pending.set(id, mark);
+    putTask({ ...prev, ...mark.patch });
+    held = sidebarPutAway(prev, mark.patch.state, node);
+    actsOpen = '';
+    repaintChanged(id);
+  } else {
+    el.disabled = true;
+  }
   try {
     await fetchJSON(url, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), timeoutMs: 8000,
     });
     actsOpen = '';
   } catch (e) {
+    if (mark && pending.get(id) === mark) {
+      pending.delete(id);
+      putTask(prev);
+      repaintChanged(id);
+    }
+    if (held) releasePutAway(id, node, true);
     showToast(failed + e.message, 'error');
   }
+  if (mark && pending.get(id) === mark) pending.delete(id);
   el.disabled = false;
   el.blur();
   await refreshTasks();
 }
 
+// putTask puts t in the last list in place of the task with its ID.
+function putTask(t) {
+  byId.set(t.id, t);
+  if (last && Array.isArray(last.tasks)) last = { ...last, tasks: last.tasks.map((x) => (x.id === t.id ? t : x)) };
+}
+
+// repaintChanged repaints what reads task id from the last list: the groups,
+// the page header's new results, the session headers. Focus, on a control of
+// the "⋯" just closed, goes back to the card's "⋯".
+function repaintChanged(id) {
+  paintNews();
+  repaintAll();
+  nzBus.dispatchEvent(new CustomEvent('tasks:changed'));
+  const a = document.activeElement;
+  if (!a || a === document.body) document.querySelector('#pl-task .tk-card[data-id="' + CSS.escape(id) + '"] .tk-more')?.focus();
+}
+
+// putsAwayNow reports whether the gateway puts session task t away as soon
+// as the user marks it done or stops it (planner/reap, D137: their own mark
+// waits only on what still runs): it is in the session list (live), no turn
+// runs, nothing runs in the background and no question waits. Anything else
+// holds it there, possibly for long, and its card stays.
+function putsAwayNow(t) {
+  if (t.kind !== 'session' || t.retired || t.reap || !t.live) return false;
+  if (t.live.running || (t.live.background && t.live.background.count > 0)) return false;
+  return t.state !== 'waiting' && t.health !== 'waiting';
+}
+
+// sidebarPutAway takes task t's session card off the sidebar when the
+// change to state puts it away at once (holdPutAway, bounded), and ends that
+// hold for a change back to in progress. It reports whether it held one.
+function sidebarPutAway(t, state, node) {
+  if (state === 'done' && putsAwayNow(t)) {
+    holdPutAway(t.id, node);
+    return true;
+  }
+  if (state === 'doing') releasePutAway(t.id, node, true);
+  return false;
+}
+
 function setState(el, id, state) {
-  if (id && state) return post(el, plannerAPI(NZ_CONTRACT.API.tasks_state), { id, state }, '没有改成：');
+  if (!id || !state) return;
+  // Back in progress, a put-away session is reopened (planner/reap Reopen).
+  const patch = state === 'doing' ? { state, why: '', reap: undefined } : { state, why: '' };
+  return post(el, plannerAPI(NZ_CONTRACT.API.tasks_state), { id, state }, '没有改成：', patch);
 }
 
 function repaintAll() {
@@ -1010,7 +1088,7 @@ registerActions({
   'task-done': (el) => setState(el, el.dataset.id, 'done'),
   'task-doing': (el) => setState(el, el.dataset.id, 'doing'),
   'task-reopen': (el) => setState(el, el.dataset.id, 'doing'),
-  'task-stop': (el) => el.dataset.id && post(el, plannerAPI(NZ_CONTRACT.API.tasks_stop), { id: el.dataset.id }, '没有停下：'),
+  'task-stop': (el) => el.dataset.id && post(el, plannerAPI(NZ_CONTRACT.API.tasks_stop), { id: el.dataset.id }, '没有停下：', { state: 'done', why: STOPPED_WHY }),
   // The Planner page opens on the card; planner_view.js unfolds the phone's
   // left block it is in ('tasks:reveal').
   'task-reveal': (el) => {

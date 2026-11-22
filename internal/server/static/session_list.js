@@ -10,7 +10,7 @@ import { NEEDS_YOU, backgroundTasksText, esc, escAttr, fetchJSON, nzBus, patchCa
 import { setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderPRChip, setHeaderSpawnDiagChip } from './session_header.js';
 import { deselectNodeSession, reconcileSelectedNode } from './system_view.js';
 import { turnState, updateSendButton } from './running_banner.js';
-import { PENDING_LS_KEY, announce, formatAbsTime, persistPending, refreshSidebarTimes, renderRecentSessionsPanel, setActiveSessionCard, showAuthModal, timeAgo } from './utilities.js';
+import { PENDING_LS_KEY, announce, formatAbsTime, persistPending, refreshSidebarTimes, renderRecentSessionsPanel, setActiveSessionCard, showAuthModal, sidebarHidden, timeAgo } from './utilities.js';
 import { scanDiscovered } from './discovery.js';
 import { invalidateGitState } from './tuning.js';
 import { NODE_GROUP_PREFIX, nodeHeaderHtml, sectionHeaderFallbackHtml, sectionHeaderHtml, withPendingFavorites } from './sidebar_project.js';
@@ -164,6 +164,9 @@ function mergeBackendSessions(polled, backendKeys, pushesBefore) {
     if (perSession.optimisticRunning[sKey] && s.state !== 'running') {
       s = Object.assign({}, s, { state: 'running' });
     }
+    // A rename in flight: the snapshot may predate the PATCH.
+    const label = sessionList.pendingLabels.get(sKey);
+    if (label && s.user_label !== label.label) s = Object.assign({}, s, { user_label: label.label });
     // A new workspace (/cd, or the first snapshot after spawn resolved the
     // real cwd) can be another repo, another worktree or no repo at all.
     const prevWS = cur && cur.workspace;
@@ -380,11 +383,13 @@ export function renderSidebar(data) {
 // allSessionsCache, whose order msg_nav walks. Cron stubs never reach it: the
 // server filters them (cron-panel-consolidation RFC §4.2).
 function buildSidebarItems(data) {
-  const items = (data.sessions || []).map(s => {
+  const items = (data.sessions || []).filter(s => !sidebarHidden(sid(s.key, s.node || 'local'))).map(s => {
     if (!s.source) s.source = 'managed';
     return s;
   });
   sessionList.discoveredItems.forEach(d => {
+    // A close in flight: the discovery poll may list it again meanwhile.
+    if (sidebarHidden(sid(discoveredKey(d.pid, d.node), d.node || 'local'))) return;
     items.push({
       key: discoveredKey(d.pid, d.node),
       state: d.state || 'ready',

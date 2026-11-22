@@ -128,10 +128,22 @@ export const transcript = {
 export const sessionList = {
   sessionsData: {},
   allSessionsCache: [],
-  // Keys (sid(key,node)) dismissSession removed before its DELETE resolves:
+  // Keys (sid(key,node)) taken off the sidebar while the request that removes
+  // them server-side is in flight (or, for 移除, waits out its 撤销 window): a
+  // managed session's DELETE, a discovered CLI's close, a 单独聊's end.
   // fetchSessions/renderSidebar skip them so a lagging poll or sessions_update
-  // cannot resurrect the card. Cleared once the DELETE confirms (200/404) or fails.
+  // cannot resurrect the card. Cleared once the request settles.
   optimisticDeleteKeys: new Set(),
+  // putAwayHolds: sid(key,node) → the timer ending the hold that keeps a
+  // session the user just marked done or stopped in 任务 off the sidebar: the
+  // gateway puts it away (planner/reap, D137) only after the POST answered.
+  // Bounded, so a put away that does not come shows the card again
+  // (holdPutAway).
+  putAwayHolds: new Map(),
+  // pendingLabels: sid(key,node) → the user_label a rename in flight set
+  // locally; a poll answering with the label from before keeps this one
+  // until the PATCH settles (setPendingLabel).
+  pendingLabels: new Map(),
   // Initialized in dashboard.js at load.
   collapsedProjects: null,
   // The sidebar's 只看 Planner 派出 and 只看需要我 filters; initialized in dashboard.js.
