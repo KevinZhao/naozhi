@@ -118,6 +118,32 @@ for (const vp of VIEWPORTS) {
   });
 }
 
+// The gateway's progress line (§15.22 ④): the card says what the session's
+// progress notes say — how long the work has run, the workflow's agents done
+// and its phase — as text, its latest progress still at the line's end.
+test('the task card says the progress line the session\'s notes say', async ({ page }) => {
+  const data = tasks();
+  const progress = '已跑 1 小时 20 分钟 · 工作流 review-all：12 个子代理完成 5 个，阶段「验证」 <img src=x onerror="window.__bgXSS=1">';
+  data.tasks[0].live.progress = progress;
+  const mock = await server(data);
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await waitForWs(page, 'CONNECTED');
+    await page.click('#abnav-planner');
+    const line = (id) => card(page, id).locator('.tk-status');
+    await expect(line(TASK).locator('.tk-badge')).toHaveText('后台中');
+    await expect(line(TASK).locator('.tk-now')).toHaveText(progress);
+    await expect(line(TASK).locator('.tk-now')).toHaveAttribute('title', progress);
+    await expect(line(TASK).locator('.tk-time')).toHaveText('最近进度 3 分钟前');
+    // A list without the line (an older node's) names the tasks, as before.
+    await expect(line(YOURS).locator('.tk-now')).toHaveText('1 个任务 · watch CI #4242');
+    await expect(page.locator('#pl-task img')).toHaveCount(0);
+    expect(await page.evaluate(() => window.__bgXSS)).toBeUndefined();
+  } finally {
+    mock.server.close();
+  }
+});
+
 test('the Planner turning observing off reads 不再观察, naming the session', async ({ browser }) => {
   for (const vp of VIEWPORTS) {
     const ctx = await browser.newContext({ viewport: vp.viewport, isMobile: !!vp.isMobile, hasTouch: !!vp.hasTouch });

@@ -101,7 +101,9 @@ func TestSettle(t *testing.T) {
 		t.Fatalf("open after the refresh = %v, want %v (closed: %v)", open, want, []string{merged, merged2, closedPR, issue, hash})
 	}
 	for _, id := range []string{merged, merged2, closedPR, issue, hash} {
-		if it, err := ledger.CloseItem(id, front.ByUser); err != nil || it.ClosedBy != front.ByFact {
+		// Closing a closed item again returns it as it was closed (only the
+		// user's strike would take it over).
+		if it, err := ledger.CloseItem(id, front.ByPlanner); err != nil || it.ClosedBy != front.ByFact {
 			t.Errorf("item %s: %+v, %v, want closed by the fact", id, it, err)
 		}
 	}

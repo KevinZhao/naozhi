@@ -382,9 +382,10 @@ type ended struct {
 	// onBackground is a hold on background work, not on a doing window:
 	// only the CLI's end under such a hold killed work (woken).
 	onBackground bool
-	// left is how many open items the report filed (fileLeft). It is not
-	// kept on disk: a check redone after a restart says nothing of them.
-	left int
+	// left is how many open items the report filed, leftFull how many it
+	// could not for the ledger being full (fileLeft). Neither is kept on
+	// disk: a check redone after a restart says nothing of them.
+	left, leftFull int
 }
 
 const (
@@ -556,7 +557,7 @@ func (r *Runner) taskEnded(key, text string) {
 	// Filed before the turn is recorded: a restart in between has the
 	// session report again, and the same item is not filed twice.
 	if ok {
-		e.left = r.fileLeft(key, m.Workspace, rep)
+		e.left, e.leftFull = r.fileLeft(key, m.Workspace, rep)
 	}
 	// On disk until checked: a restart in between checks it again. The
 	// report and the turn it ended are one write, so a restart never finds
@@ -639,29 +640,35 @@ func (r *Runner) taskEnded(key, text string) {
 	}
 }
 
-// fileLeft files what session key's report leaves as the ledger's open
-// items, the session their source, and returns how many are new; a report
-// of done that leaves nothing closes the ones the session left before
-// (§15.23, D143: closed by the fact, not by a tick). An item not filed (the
-// list full) is logged only: the report itself still goes on.
-func (r *Runner) fileLeft(key, ws string, rep Report) int {
+// fileLeft makes the open items session key's reports left be what this
+// report leaves, the session their source (§15.23, D143): its left is all
+// the session still has left, so a line said again stays the item it was, a
+// new one is filed, and one no longer said is closed — by the fact, not by
+// a tick. One the user struck is not filed again (front.Store.reconcile). A
+// report that says nothing of what is left closes them only when it is
+// done: blocked or waiting, the session has not finished them. It returns
+// how many are new, and how many the full ledger did not take: those are
+// logged and said in the receipt, the report itself still goes on.
+func (r *Runner) fileLeft(key, ws string, rep Report) (filed, full int) {
 	if r.cfg.Items == nil {
-		return 0
+		return 0, 0
 	}
-	n := 0
-	for _, l := range rep.Left {
-		_, added, err := r.cfg.Items.AddItem(front.Item{Text: l, Workspace: ws, Source: key, From: front.FromReport})
-		switch {
-		case err != nil:
-			slog.Warn("planner actions: an item a report left not filed", "key", key, "err", err)
-		case added:
-			n++
+	mine := func(it front.Item) bool { return it.From == front.FromReport && it.Source == key }
+	switch {
+	case len(rep.Left) > 0:
+		want := make([]front.Item, len(rep.Left))
+		for i, l := range rep.Left {
+			want[i] = front.Item{Text: l, Workspace: ws, Source: key, From: front.FromReport}
 		}
+		added, _, full := r.cfg.Items.ReconcileText(mine, want, front.ByReport)
+		if full > 0 {
+			slog.Warn("planner actions: items a report left not filed, the ledger is full", "key", key, "n", full)
+		}
+		return len(added), full
+	case rep.State == ReportDone:
+		r.cfg.Items.CloseItems(mine, front.ByReport)
 	}
-	if rep.State == ReportDone && len(rep.Left) == 0 {
-		r.cfg.Items.CloseItems(func(it front.Item) bool { return it.From == front.FromReport && it.Source == key }, front.ByReport)
-	}
-	return n
+	return 0, 0
 }
 
 // ReportSource is the "等你" source of session key's need_user report:
@@ -955,7 +962,10 @@ func (r *Runner) checkReport(e ended, tasks []task.Task, i int, now time.Time) {
 	case e.markedDone:
 		line += "（任务已标完成）"
 	}
-	if e.left > 0 {
+	switch {
+	case e.leftFull > 0:
+		line += fmt.Sprintf(" · 留下 %d 条未了事项（已入列；另有 %d 条没记进去：台账已满）", e.left, e.leftFull)
+	case e.left > 0:
 		line += fmt.Sprintf(" · 留下 %d 条未了事项（已入列）", e.left)
 	}
 	// A path is named only where the digest shows the report: one not
@@ -2442,14 +2452,17 @@ type Items interface {
 	EditItem(id string, text, source, frontID *string) (front.Item, error)
 	CloseItem(id, by string) (front.Item, error)
 	CloseItems(match func(front.Item) bool, by string) []front.Item
+	ReconcileText(match func(front.Item) bool, want []front.Item, by string) (added, closed []front.Item, full int)
 }
 
 // front writes a line of work into the ledger (§15.17, D132), then the
 // block's open items (§15.23, D143): the one it files or re-sources, the
 // ones it closes. The card says what changed; only a failure gets a line
 // and a receipt. byUser is whether the user started the turn: an item is
-// theirs then, the Planner's own otherwise, by the turn's source and never
-// by what the block says.
+// theirs then, the Planner's own otherwise, and so is who closed one, by
+// the turn's source and never by what the block says. A done in the user's
+// turn is the user saying no, which a check still hitting must not undo
+// (front.Store.reconcile files nothing the user closed).
 //
 // A block that only closes items applies nothing to its front: Apply
 // reopens a closed line, which closing an item must not. What cannot be
@@ -2494,8 +2507,12 @@ func (r *Runner) front(f Front, byUser bool) error {
 			failed = append(failed, "未了事项 "+f.Item.ID+" 的出处没有改："+err.Error())
 		}
 	}
+	by := front.ByPlanner
+	if byUser {
+		by = front.ByUser
+	}
 	for _, id := range f.Done {
-		if _, err := r.cfg.Items.CloseItem(id, front.ByPlanner); err != nil {
+		if _, err := r.cfg.Items.CloseItem(id, by); err != nil {
 			failed = append(failed, "未了事项 "+id+" 没有了结："+err.Error())
 		}
 	}

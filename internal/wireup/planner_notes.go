@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/action"
 	"github.com/naozhi/naozhi/internal/planner/agent"
@@ -44,6 +45,36 @@ func SessionNotes(j *journal.Journal, inbox *notify.Notifier, sidecars *sidecar.
 			return sessionReports(m, ok, func() []time.Time { return plannerReports(router, key) })
 		},
 	})
+}
+
+// ProgressNotes is the health loop's minute for the gateway's progress notes
+// (§15.22 ④): it hands notes the sessions progressList finds.
+func ProgressNotes(notes *note.Notes, router *session.Router, watched func(key string) bool) func() {
+	return func() { notes.Progress(progressList(router, watched)) }
+}
+
+// progressList are the sessions of this node whose turn is over with
+// background work open (bgtask, the judgment 后台中 reads): those the
+// Planner dispatched and those the user opened that the gateway observes
+// (watched: planner/custody.Engine.Watched). The Planner's own, a one-shot
+// run's, a cron run's, a daemon's and a scratch session are never the
+// user's to follow, whatever watched says.
+func progressList(router *session.Router, watched func(key string) bool) []note.Background {
+	var out []note.Background
+	for _, snap := range router.ListSessions() {
+		key := snap.Key
+		if snap.State == "running" || !health.UserSession(key, health.KindSession) || !sessionkey.IsTaskKey(key) && !watched(key) {
+			continue
+		}
+		s := router.SessionFor(key)
+		if s == nil {
+			continue
+		}
+		if bg := background(s, snap); bg.Open() {
+			out = append(out, note.Background{Key: key, Turn: unixMilli(snap.TurnAt), State: bg})
+		}
+	}
+	return out
 }
 
 // NoteTarget is action.Config.NoteTarget over the router: a side note goes

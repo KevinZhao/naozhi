@@ -34,7 +34,7 @@ func (c CustodySources) Local(key string) bool { return c.Router.SessionFor(key)
 func (c CustodySources) Workflows() []string {
 	var out []string
 	for _, snap := range c.Router.ListSessions() {
-		if len(runningWorkflows(snap.Workflows, time.Time{})) > 0 {
+		if len(runningWorkflows(snap.Workflows, nil, time.Time{})) > 0 {
 			out = append(out, snap.Key)
 		}
 	}

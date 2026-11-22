@@ -35,9 +35,9 @@ const (
 )
 
 // Report is a dispatched session's report: State one of the Report states,
-// Summary its conclusion first, on one line. Left is what this turn did not
-// finish and leaves for later, one line each: the gateway files them as the
-// ledger's open items, the session their source (§15.23, D143).
+// Summary its conclusion first, on one line. Left is all the session still
+// has left undone, one line each: the gateway makes the ledger's open items
+// of this session be them (§15.23, D143). An empty one reads as not given.
 type Report struct {
 	State   string   `json:"state"`
 	Summary string   `json:"summary"`

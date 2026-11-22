@@ -1,6 +1,7 @@
 package front
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // The ledger's open items (未了事项, docs/rfc/planner.md §15.23, D143): the
@@ -58,11 +61,14 @@ const (
 
 // Who closed an item (Item.ClosedBy).
 const (
-	// ByUser is the user striking it.
+	// ByUser is the user striking it, or a front block's done in a turn
+	// the user started. It alone keeps the item from being filed again
+	// (reconcile).
 	ByUser = "user"
-	// ByPlanner is a front block's done.
+	// ByPlanner is a front block's done in any other turn.
 	ByPlanner = "planner"
-	// ByReport is its session reporting done with nothing left.
+	// ByReport is its session's next report not listing it, or reporting
+	// done with nothing left.
 	ByReport = "report"
 	// ByFact is its PR merged or closed, its issue closed.
 	ByFact = "fact"
@@ -157,10 +163,11 @@ func (it *Item) normalize() error {
 }
 
 // AddItem files it (Text, Workspace, Front, Source and From; the rest is
-// the store's). An open item of the same From, Source and text is returned
-// as it is, added false: a report sent twice, or a restart between the
-// filing and the record of it, leaves one item. Front must name a line the
-// ledger has.
+// the store's). An open item the same in all five is returned as it is,
+// added false: a block run twice, or a click sent twice, leaves one item.
+// The same sentence under another line or workspace is another item: the
+// user adding it there would otherwise see nothing appear. Front must name
+// a line the ledger has.
 func (s *Store) AddItem(it Item) (out Item, added bool, err error) {
 	if err := it.normalize(); err != nil {
 		return Item{}, false, err
@@ -172,7 +179,8 @@ func (s *Store) AddItem(it Item) (out Item, added bool, err error) {
 		return Item{}, false, ErrNoFront
 	}
 	if i := slices.IndexFunc(s.items, func(o Item) bool {
-		return o.Open() && o.From == it.From && o.Source == it.Source && o.Text == it.Text
+		return o.Open() && o.From == it.From && o.Source == it.Source && o.Text == it.Text &&
+			o.Front == it.Front && o.Workspace == it.Workspace
 	}); i >= 0 {
 		return s.items[i], false, nil
 	}
@@ -260,7 +268,10 @@ func (s *Store) EditItem(id string, text, source, front *string) (Item, error) {
 }
 
 // CloseItem closes the item id names, by being who (the By constants). One
-// already closed is returned as it was closed.
+// already closed is returned as it was closed, but for the user striking
+// one somebody else closed: the page they struck it on may not have seen it
+// close, and what they said (not to be filed again, reconcile) holds from
+// now.
 func (s *Store) CloseItem(id, by string) (Item, error) {
 	now := s.now()
 	s.mu.Lock()
@@ -269,8 +280,8 @@ func (s *Store) CloseItem(id, by string) (Item, error) {
 	if i < 0 {
 		return Item{}, ErrNoItem
 	}
-	if s.items[i].Open() {
-		s.items[i].Closed, s.items[i].ClosedBy = now, by
+	if it := &s.items[i]; it.Open() || by == ByUser && it.ClosedBy != ByUser {
+		it.Closed, it.ClosedBy = now, by
 		s.saveLocked(now)
 	}
 	return s.items[i], nil
@@ -298,31 +309,60 @@ func (s *Store) CloseItems(match func(Item) bool, by string) []Item {
 // Reconcile makes the open items match takes be exactly want, told apart by
 // Source, in one write: a wanted one already open keeps its ID and Created
 // and takes the new text; one not open yet is filed; an open one no longer
-// wanted is closed by by. A wanted one the user struck (an item of the same
-// From and Source closed by ByUser, still kept) is not filed again: the
-// user said no, and the check hitting again an hour later is not news. A
-// wanted item that does not validate, has no Source (what tells it apart)
-// or is not one match takes, or one past MaxOpenItems, is left out: filed
-// outside its own group it would be filed again every round. A wanted
-// item's Front the ledger lacks is dropped, the item kept. match runs under
-// the store's lock: it must not call the store.
+// wanted is closed by by. match runs under the store's lock: it must not
+// call the store. What is left out of want, and why, is reconcile's.
 //
 // It is what a deterministic check calls each round with its hits (the
 // patrol, D142): the hits are the list, whatever was filed before.
 func (s *Store) Reconcile(match func(Item) bool, want []Item, by string) (added, closed []Item) {
+	added, closed, _ = s.reconcile(match, want, by, func(it Item) string { return it.Source })
+	return added, closed
+}
+
+// ReconcileText is Reconcile for a list told apart by its items' text: what
+// one source says is left, said whole each time (a dispatched session's
+// report, whose items all have the session for their source). One said
+// again keeps its ID; one no longer said is closed by by. full is how many
+// were not filed for MaxOpenItems.
+func (s *Store) ReconcileText(match func(Item) bool, want []Item, by string) (added, closed []Item, full int) {
+	return s.reconcile(match, want, by, func(it Item) string { return it.Text })
+}
+
+// reconcile is Reconcile and ReconcileText, key what tells two items of the
+// group apart.
+//
+// A wanted one the user struck (an item of the group with the same From,
+// Source and key closed by ByUser, still kept) is not filed again: the user
+// said no, and the check hitting again an hour later is not news. Only a
+// strike within the group counts: the same source in another group (the
+// same check in another workspace) is another item.
+//
+// A wanted item's text past ItemRunes is cut. One that does not validate,
+// has no key or is not one match takes is left out (filed outside its own
+// group it would be filed again every round), as is one past MaxOpenItems;
+// its key still counts as wanted, so the item it names stays open: what
+// could not be filed this round has not stopped hitting. A wanted item's
+// Front the ledger lacks is dropped, the item kept.
+func (s *Store) reconcile(match func(Item) bool, want []Item, by string, key func(Item) string) (added, closed []Item, full int) {
 	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	changed := false
 	wanted := map[string]bool{}
+	var valid []Item
 	for _, w := range want {
+		if w.Text = oneLine(w.Text); utf8.RuneCountInString(w.Text) > ItemRunes {
+			w.Text = textutil.TruncateRunesNoEllipsis(w.Text, ItemRunes-1) + "…"
+		}
 		err := w.normalize()
+		k := key(w)
 		switch {
-		case err != nil:
-		case w.Source == "":
-			err = errors.New("no source")
-		case !match(w):
+		case k == "":
+			err = cmp.Or(err, errors.New("nothing to tell it apart by"))
+		case err == nil && !match(w):
 			err = errors.New("not in the group reconciled")
+		}
+		if k != "" {
+			wanted[k] = true
 		}
 		if err != nil {
 			slog.Warn("planner fronts: an item to reconcile left out", "source", w.Source, "err", err)
@@ -331,8 +371,20 @@ func (s *Store) Reconcile(match func(Item) bool, want []Item, by string) (added,
 		if w.Front != "" && !s.hasLocked(w.Front) {
 			w.Front = ""
 		}
-		wanted[w.Source] = true
-		if i := slices.IndexFunc(s.items, func(o Item) bool { return o.Open() && o.Source == w.Source && match(o) }); i >= 0 {
+		valid = append(valid, w)
+	}
+	// Closed before the new ones are filed: at the cap, a list that swaps
+	// its items still fits.
+	for i := range s.items {
+		if it := &s.items[i]; it.Open() && !wanted[key(*it)] && match(*it) {
+			it.Closed, it.ClosedBy = now, by
+			closed = append(closed, *it)
+		}
+	}
+	changed := false
+	for _, w := range valid {
+		same := func(o Item) bool { return key(o) == key(w) && match(o) }
+		if i := slices.IndexFunc(s.items, func(o Item) bool { return o.Open() && same(o) }); i >= 0 {
 			if s.items[i].Text != w.Text {
 				s.items[i].Text = w.Text
 				changed = true
@@ -340,26 +392,22 @@ func (s *Store) Reconcile(match func(Item) bool, want []Item, by string) (added,
 			continue
 		}
 		if slices.ContainsFunc(s.items, func(o Item) bool {
-			return !o.Open() && o.ClosedBy == ByUser && o.From == w.From && o.Source == w.Source && now.Sub(o.Closed) <= itemRetention
+			return !o.Open() && o.ClosedBy == ByUser && o.From == w.From && o.Source == w.Source && same(o) &&
+				now.Sub(o.Closed) <= itemRetention
 		}) {
 			continue
 		}
 		if s.openItemsLocked() >= MaxOpenItems {
 			slog.Warn("planner fronts: open items at their cap; an item to reconcile left out", "source", w.Source)
+			full++
 			continue
 		}
 		added = append(added, s.addLocked(w, now))
 	}
-	for i := range s.items {
-		if it := &s.items[i]; it.Open() && !wanted[it.Source] && match(*it) {
-			it.Closed, it.ClosedBy = now, by
-			closed = append(closed, *it)
-		}
-	}
 	if changed || len(added)+len(closed) > 0 {
 		s.saveLocked(now)
 	}
-	return added, closed
+	return added, closed, full
 }
 
 // Items lists the open items, the oldest first so the list does not jump,

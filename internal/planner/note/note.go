@@ -2,16 +2,18 @@
 // (docs/rfc/planner.md §15.3 ③): its health entering "waiting for you",
 // "stalled" or "failed" and recovering, its "等你" items opening and closing,
 // the Planner dispatching it, it reporting to the Planner, what custody
-// did on it, and what the Planner wrote on it for the user (its note blocks,
-// §15.22 ②). The notes are
+// did on it, what the Planner wrote on it for the user (its note blocks,
+// §15.22 ②), and how far its background work got while its turn is over
+// (§15.22 ④). The notes are
 // shown in the session view only; they never reach the CLI and are not
 // events of the session's own log.
 //
 // No file is kept here: health and inbox notes are read back from the
 // Planner journal (the health and notify entries already written there), the
 // dispatch from the session's sidecar file and the reports from planner:main's
-// history, and the Planner's notes are journal entries of their own
-// (kind=note), so a restart keeps them. Nothing here calls a model.
+// history, and the Planner's notes and the progress notes are journal entries
+// of their own (kind=note), so a restart keeps them. Nothing here calls a
+// model.
 package note
 
 import (
@@ -43,6 +45,7 @@ const (
 	KindReport   Kind = "report"   // the session's message reached the Planner
 	KindCustody  Kind = "custody"  // custody switched, sent, held back or stopped
 	KindPlanner  Kind = "planner"  // the Planner's words to the user on the session
+	KindProgress Kind = "progress" // how far the session's background work got
 )
 
 // Note is one side note on session Key. ID is stable across reads and
@@ -70,10 +73,13 @@ type Note struct {
 	By       string `json:"by,omitempty"`
 	N        int    `json:"n,omitempty"`
 	// Planner notes: what the Planner tells the user, what it goes by, and
-	// whether the user marked the note useless.
+	// whether the user marked the note useless. Progress notes: Text the
+	// progress, Run the stretch of background work it is of, whose latest
+	// note stands for the earlier ones.
 	Text    string `json:"text,omitempty"`
 	Why     string `json:"why,omitempty"`
 	Useless bool   `json:"useless,omitempty"`
+	Run     string `json:"run,omitempty"`
 }
 
 // Health states a note is written for: entering one, or leaving one for a
@@ -146,12 +152,16 @@ func FromEntry(e journal.Entry) (Note, bool) {
 		n.Kind, n.ID = KindCustody, fmt.Sprintf("c%d", e.TS.UnixNano())
 		n.Event, n.Evidence, n.By, n.N = d.Event, d.Reason, d.By, d.N
 	case journal.KindNote:
-		// Only the writing is a note; the user's "没用" marks one (List).
-		var d PlannerData
-		if json.Unmarshal(e.Data, &d) != nil || d.Event != EventWrite || d.ID == "" {
+		// Only a writing is a note; the user's "没用" marks one (List).
+		d, ok := plannerData(e)
+		switch {
+		case ok && d.Event == EventWrite:
+			n.Kind, n.ID, n.Text, n.Why = KindPlanner, d.ID, d.Text, d.Why
+		case ok && d.Event == EventProgress:
+			n.Kind, n.ID, n.Text, n.Run = KindProgress, d.ID, d.Text, d.Run
+		default:
 			return Note{}, false
 		}
-		n.Kind, n.ID, n.Text, n.Why = KindPlanner, d.ID, d.Text, d.Why
 	default:
 		return Note{}, false
 	}
@@ -188,7 +198,11 @@ type Notes struct {
 	push atomic.Pointer[func(Note)]
 	// mu makes the Planner's notes count and write in one step (Write,
 	// Useless): two at once would both pass a limit with one place left.
+	// It also guards stretches.
 	mu sync.Mutex
+	// stretches are the sessions Progress follows, by key; nil until its
+	// first call reads the journal.
+	stretches map[string]*stretch
 }
 
 // New returns a Notes over cfg; it pushes once SetPush binds an exit.
@@ -239,6 +253,9 @@ func (n *Notes) List(key string, now time.Time) []Note {
 			slog.Warn("session notes: journal read", "key", key, "err", err)
 		}
 		useless := map[string]bool{}
+		// latest is a stretch's latest progress note: the earlier ones are
+		// left out, so a long run does not push the other notes past Limit.
+		latest := map[string]string{}
 		for _, e := range entries {
 			if e.Unit != key {
 				continue
@@ -247,9 +264,13 @@ func (n *Notes) List(key string, now time.Time) []Note {
 				useless[d.ID] = true
 			}
 			if nt, ok := FromEntry(e); ok {
+				if nt.Kind == KindProgress {
+					latest[nt.Run] = nt.ID
+				}
 				out = append(out, n.fill(nt))
 			}
 		}
+		out = slices.DeleteFunc(out, func(nt Note) bool { return nt.Kind == KindProgress && latest[nt.Run] != nt.ID })
 		for i := range out {
 			out[i].Useless = out[i].Kind == KindPlanner && useless[out[i].ID]
 		}
