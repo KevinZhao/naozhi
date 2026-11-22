@@ -30,9 +30,12 @@ type dirReport struct {
 	// applies to it.
 	notRepo bool
 	// err is the local git failing: the directory's section keeps its last
-	// body, and its dirty and branch items stay as they are.
-	err   error
-	dirty []hit
+	// body, and its dirty and branch items stay as they are. repoUnknown
+	// says it failed before telling which repository dir is in: the file's
+	// GitHub sections are kept as well.
+	err         error
+	repoUnknown bool
+	dirty       []hit
 	// branches are the branches pushed and left; branchErr is that check
 	// not made (the pull requests could not be asked for), notes what it
 	// left out.
@@ -54,13 +57,13 @@ func (p *Patrol) inspect(ctx context.Context, rd *round, t target, dir string) d
 		if strings.Contains(err.Error(), "not a git repository") {
 			rep.notRepo = true
 		} else {
-			rep.err = err
+			rep.err, rep.repoUnknown = err, true
 		}
 		return rep
 	}
 	lines := strings.Split(strings.TrimRight(out, "\r\n"), "\n")
 	if len(lines) != 3 {
-		rep.err = errors.New("git rev-parse: 输出不认识")
+		rep.err, rep.repoUnknown = errors.New("git rev-parse: 输出不认识"), true
 		return rep
 	}
 	top, gitDir, common := lines[0], lines[1], lines[2]
@@ -71,7 +74,7 @@ func (p *Patrol) inspect(ctx context.Context, rd *round, t target, dir string) d
 	// the local checks below.
 	remotes, err := p.call(ctx, dir, "git", "remote", "-v")
 	if err != nil {
-		rep.err = err
+		rep.err, rep.repoUnknown = err, true
 		return rep
 	}
 	if owner, name, ok := github.PickRemote(remotes); ok {

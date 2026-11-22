@@ -179,7 +179,7 @@ func TestGitHubFailure(t *testing.T) {
 				t.Fatalf("items with gh failing =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 			}
 			md := e.read(wsA + ".md")
-			stale := "## GitHub（acme/gateway）\n\n> 最近一次检查失败：2026-11-23 14:02（gh " + strings.Fields(fail)[0] + ": error connecting to api.github.com），下面是上一次成功时的结果。\n\n- PR #12 开了 9 天"
+			stale := "## GitHub（acme/gateway）\n\n> 最近一次检查失败：2026-11-23 14:02（gh " + strings.Fields(fail)[0] + ": error connecting to api.github.com），下面是上一次成功（2026-11-23 14:02）时的结果。\n\n- PR #12 开了 9 天"
 			for _, want := range []string{stale, "- main 最近一次 CI 失败：test", "- 3 个 issue 超过 30 天没动",
 				"- 推上去的分支这一轮没查成（gh " + strings.Fields(fail)[0] + ": error connecting to api.github.com），未了事项里是上一次的结果\n"} {
 				if !strings.Contains(md, want) {
@@ -240,9 +240,71 @@ func TestLocalGitFailure(t *testing.T) {
 		t.Errorf("items with git failing =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(before, "\n"))
 	}
 	md := e.read(wsA + ".md")
-	want := "## git（" + dir + "）\n\n> 最近一次检查失败：2026-11-23 14:02（git status: 超时），下面是上一次成功时的结果。\n\n- 2 处改动没提交，最早的在 9 天前\n- 分支 feat/reconnect"
+	want := "## git（" + dir + "）\n\n> 最近一次检查失败：2026-11-23 14:02（git status: 超时），下面是上一次成功（2026-11-23 14:02）时的结果。\n\n- 2 处改动没提交，最早的在 9 天前\n- 分支 feat/reconnect"
 	if !strings.Contains(md, want) {
 		t.Errorf("file with git failing lacks %q:\n%s", want, md)
+	}
+}
+
+// TestStaleSince: a section kept over failed checks says when its body was
+// written, however many rounds failed since: the file's own date is the
+// last round's. With git failing before the directory's repository is
+// told, the GitHub section the file had is kept the same way, and the
+// repository's items with it.
+func TestStaleSince(t *testing.T) {
+	e := newEnv(t)
+	dir := gateway(e)
+	e.round()
+	before := e.open()
+	at := func(d time.Duration) {
+		e.cfg.Now = func() time.Time { return now.Add(d) }
+		e.active[wsA] = now.Add(d) // a session there, still
+		e.p = New(e.cfg)
+		e.round()
+	}
+
+	e.fe.gh["acme/gateway"].fail = "pr list"
+	at(time.Hour)
+	at(21 * day)
+	md := e.read(wsA + ".md")
+	want := "更新于 2026-12-14 14:02（"
+	if !strings.Contains(md, want) {
+		t.Errorf("file lacks %q:\n%s", want, md)
+	}
+	want = "## GitHub（acme/gateway）\n\n> 最近一次检查失败：2026-12-14 14:02（gh pr: error connecting to api.github.com），下面是上一次成功（2026-11-23 14:02）时的结果。\n\n- PR #12 开了 9 天"
+	if !strings.Contains(md, want) || strings.Count(md, stalePrefix) != 1 {
+		t.Errorf("file after three weeks of gh failing lacks %q:\n%s", want, md)
+	}
+
+	// gh would answer again, but git cannot say which repository this is.
+	e.fe.gh["acme/gateway"] = &fakeGH{def: "main"}
+	e.fe.repos[dir].fail = "remote"
+	at(22 * day)
+	md = e.read(wsA + ".md")
+	for _, want := range []string{
+		"## git（" + dir + "）\n\n> 最近一次检查失败：2026-12-15 14:02（git remote: 超时），下面是上一次成功（2026-12-14 14:02）时的结果。\n\n- 2 处改动没提交",
+		"## GitHub（acme/gateway）\n\n> 最近一次检查失败：2026-12-15 14:02（git remote: 超时），下面是上一次成功（2026-11-23 14:02）时的结果。\n\n- PR #12 开了 9 天",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("file with git remote failing lacks %q:\n%s", want, md)
+		}
+	}
+	if n := strings.Count(md, "## GitHub（"); n != 1 {
+		t.Errorf("%d GitHub sections, want the one the file had:\n%s", n, md)
+	}
+	// The local check went on while gh failed, and its item's text with it.
+	notDirty := func(items []string) []string {
+		return slices.DeleteFunc(slices.Clone(items), func(s string) bool { return strings.HasPrefix(s, "check:dirty:") })
+	}
+	if got, want := notDirty(e.open()), notDirty(before); len(got) != len(before)-1 || !slices.Equal(got, want) {
+		t.Errorf("items with the checks failing =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+
+	// Back: the sections are this round's again.
+	e.fe.repos[dir].fail = ""
+	at(23 * day)
+	if md := e.read(wsA + ".md"); strings.Contains(md, stalePrefix) || !strings.Contains(md, "## GitHub（acme/gateway）\n\n无\n") {
+		t.Errorf("file once the checks are made again:\n%s", md)
 	}
 }
 
