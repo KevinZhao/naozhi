@@ -51,10 +51,6 @@ var ghRead = []string{
 	"Bash(gh repo view:*)", "Bash(gh search:*)",
 }
 
-// GHReadRules is ghRead, a copy: the same reads for the project patrol's
-// deep check.
-func GHReadRules() []string { return slices.Clone(ghRead) }
-
 // mcpRead and mcpWrite are the Planner's read tools of servers, and the
 // write tools denied by name, as the CLI names them, in server order.
 func mcpRead(servers []string) (read, write []string) {

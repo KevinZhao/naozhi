@@ -612,13 +612,9 @@ var secretDeny = []string{
 	"Read(//**/id_ed25519*)",
 }
 
-// SecretReadDeny is secretDeny, a copy: the deny rules of another
-// restricted session that reads a repository (the project patrol's deep
-// check).
-func SecretReadDeny() []string { return slices.Clone(secretDeny) }
-
-// ReadRule is the allow rule for reading everything below dir.
-func ReadRule(dir string) string { return absRule("Read", filepath.Join(dir, "**")) }
+// ReadRule is the allow rule for reading path, an absolute path or a
+// pattern below one.
+func ReadRule(path string) string { return absRule("Read", path) }
 
 // denyRules keep credentials out of reach even inside an allowed tree: the
 // home-relative ones (homeDeny), the name-bound ones (secretDeny), the data
@@ -669,6 +665,13 @@ func denyRules(home, dataRoot string, extra []string, aliases map[string]string)
 // denied, the Planner reading such sources itself (D129).
 func (a *Agent) denyRules(aliases map[string]string) []string {
 	return denyRules(a.cfg.Home, a.cfg.Layout.Root(), a.cfg.DenyPaths, aliases)
+}
+
+// ReadDeny is the Planner's deny rules as they stand now, for another
+// restricted session that reads the user's files (the project patrol's deep
+// check): what the Planner may not read, it may not either.
+func (a *Agent) ReadDeny() []string {
+	return a.denyRules(a.cfg.Workspaces.LocalAliases())
 }
 
 // maxMemoryIndexes caps the auto-memory indexes listed in the prompt.

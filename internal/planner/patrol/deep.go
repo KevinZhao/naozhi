@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -52,7 +53,7 @@ const (
 
 var (
 	// ErrOff answers a manual deep check where none can run: no state
-	// root, or no session to run it in.
+	// root, no session to run it in, or no deny rules for it.
 	ErrOff = errors.New("项目巡查的深查没有开启：没有状态目录，或没有接上会话")
 	// ErrBusy answers a manual deep check while one runs.
 	ErrBusy = errors.New("深查正在进行")
@@ -63,7 +64,7 @@ var (
 // deepOn reports whether deep checks can run here at all. The schedule is
 // the round's, so it also needs Enabled; a manual one does not.
 func (p *Patrol) deepOn() bool {
-	return p != nil && p.cfg.Dir != "" && p.cfg.Session != nil && p.cfg.Workspaces != nil && p.cfg.Items != nil
+	return p != nil && p.cfg.Dir != "" && p.cfg.Session != nil && p.cfg.Deny != nil && p.cfg.Workspaces != nil && p.cfg.Items != nil
 }
 
 // slot is when workspace ws's deep check is due in now's week: a weekday
@@ -228,6 +229,14 @@ func (p *Patrol) start(t target, trig string, now time.Time) (string, error) {
 	return id, nil
 }
 
+// existing is path when a regular file is there, "" otherwise.
+func existing(path string) string {
+	if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() {
+		return ""
+	}
+	return path
+}
+
 // runID names a run by its start, local time, and a random suffix.
 func runID(t time.Time) string {
 	var b [2]byte
@@ -282,33 +291,34 @@ func (p *Patrol) runDeep(ctx context.Context, t target, id, trig string, started
 		}
 	}
 	run.Head = head
-	opts := sessionOpts(dir, p.cfg.OwnSettings)
+	// What a session without a shell needs of git and GitHub is read here
+	// and handed to it: the branch and the commits since the last check, and
+	// the two files the hourly round keeps. Whatever is missing is left out;
+	// the check runs all the same.
+	rc := p.repoContext(ctx, dir, head, st.Head)
+	checks, issues := existing(filepath.Join(p.cfg.Dir, t.ID+".md")), ""
+	if owner, name, ok := strings.Cut(repo, "/"); ok {
+		issues = existing(filepath.Join(filepath.Dir(p.cfg.Dir), "github", github.Repo{Owner: owner, Name: name}.File()))
+	}
+	var files []string
+	for _, f := range []string{checks, issues} {
+		if f != "" {
+			files = append(files, f)
+		}
+	}
+	opts := sessionOpts(dir, files, p.cfg.Deny())
 	sctx, cancel := context.WithTimeout(ctx, runTimeout)
-	reply, tools, writes, err := p.cfg.Session(sctx, sessionkey.PatrolKeyPrefix+id, opts, prompt(started, t.Name, p.cfg.OwnSettings, st.Findings, declined, t.ID))
+	reply, err := p.cfg.Session(sctx, sessionkey.PatrolKeyPrefix+id, opts, prompt(started, t.Name, rc, checks, issues, st.Findings, declined, t.ID))
 	cancel()
 	if ctx.Err() != nil {
 		slog.Info("planner patrol: deep check cut short by shutdown; it runs again after the next start", "run", id, "workspace", t.ID)
 		return
 	}
-	if extra := slices.DeleteFunc(slices.Clone(tools), func(tool string) bool { return slices.Contains(opts.Tools, tool) }); len(extra) > 0 {
-		// Refused under dontAsk; a call at all means the prompt needs a look.
-		slog.Warn("planner patrol: deep check tried tools outside its list", "run", id, "tools", extra)
-	}
 	var kept []Finding
-	switch {
-	case len(writes) > 0:
-		// Found after the fact, not stopped: what stops a write is the
-		// session's spec. Nothing a session that wrote says is taken.
-		err = fmt.Errorf("深查会话做了写操作：%s", strings.Join(writes, "、"))
-		if p.cfg.Alarm != nil {
-			p.cfg.Alarm("patrol:write:"+id, "项目巡查的深查会话做了写操作", fold(t.Name)+"："+strings.Join(writes, "、")+"；它本该只读，请检查这个仓库")
-		}
-	case err != nil:
+	if err != nil {
 		err = fmt.Errorf("深查会话：%w", err)
-	default:
-		if kept, run.Dropped, err = ParseFindings(reply, dir); err != nil {
-			err = fmt.Errorf("深查输出：%w", err)
-		}
+	} else if kept, run.Dropped, err = ParseFindings(reply, dir); err != nil {
+		err = fmt.Errorf("深查输出：%w", err)
 	}
 	now := p.cfg.Now()
 	run.Ended = now

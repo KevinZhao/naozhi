@@ -82,8 +82,9 @@ func TestBrief(t *testing.T) {
 }
 
 // TestDetails: a finding as the page shows it: each piece of evidence with
-// where it opens — a file line at its GitHub link, a link at itself, a file
-// line of a repository that is not on GitHub nowhere.
+// where it opens — a file line at the gateway's GitHub link to it, a file
+// line of a repository that is not on GitHub nowhere. A link a session
+// wrote as evidence is not kept at all.
 func TestDetails(t *testing.T) {
 	d := newDeep(t)
 	d.repo(wsA, "gateway", "a")
@@ -93,7 +94,7 @@ func TestDetails(t *testing.T) {
 	blob := "https://github.com/owner/gateway/blob/" + sha("a") + "/a.go"
 	want := map[string]Detail{ref("bug-one"): {
 		Kind: "bug", Size: "M", Confidence: "medium", Impact: "重连即崩", Fix: "先判空", State: StatePR, PR: "https://github.com/owner/gateway/pull/31",
-		Evidence: []Evidence{{Text: "a.go:2", Link: blob + "#L2"}, {Text: "https://example.com/issue/7", Link: "https://example.com/issue/7"}, {Text: "a.go:1-3", Link: blob + "#L1-L3"}},
+		Evidence: []Evidence{{Text: "a.go:2", Link: blob + "#L2"}, {Text: "a.go:1-3", Link: blob + "#L1-L3"}},
 	}}
 	if got := d.p.Details([]string{ref("bug-one"), ref("bug-nope"), "x"}); !reflect.DeepEqual(got, want) {
 		t.Errorf("Details:\n%+v\nwant:\n%+v", got, want)
@@ -105,7 +106,7 @@ func TestDetails(t *testing.T) {
 	local.file(dir, "a.go", 0)
 	local.found(finding("bug-one", map[string]string{"evidence": `["a.go:1","https://example.com/x"]`}))
 	got := local.p.Details([]string{ref("bug-one")})[ref("bug-one")]
-	if !reflect.DeepEqual(got.Evidence, []Evidence{{Text: "a.go:1"}, {Text: "https://example.com/x", Link: "https://example.com/x"}}) {
+	if !reflect.DeepEqual(got.Evidence, []Evidence{{Text: "a.go:1"}}) {
 		t.Errorf("evidence outside GitHub: %+v", got.Evidence)
 	}
 }

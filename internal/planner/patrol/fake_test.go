@@ -40,6 +40,13 @@ type fakeRepo struct {
 	// sha is HEAD's commit ("" has none) and prefix the directory's path
 	// below the repository's top, as `git rev-parse --show-prefix HEAD`.
 	sha, prefix string
+	// branch is `git branch --show-current` ("" is a detached HEAD); log
+	// the commits `git log` lists, newest first, each "<short sha>
+	// <subject>". A range of a commit not in gone lists them all; one in
+	// gone fails, as an unknown revision does.
+	branch string
+	log    []string
+	gone   []string
 }
 
 // fakeGH is what gh answers for one repository.
@@ -95,6 +102,13 @@ func (f *fakeExec) run(_ context.Context, dir, name string, args ...string) (str
 				return dir + "\n" + filepath.Join(filepath.Dir(dir), "main", ".git", "worktrees", "x") + "\n" + filepath.Join(filepath.Dir(dir), "main", ".git") + "\n", nil
 			}
 			return dir + "\n" + gitDir + "\n.git\n", nil
+		case "branch":
+			return r.branch + "\n", nil
+		case "log":
+			if rev := args[len(args)-1]; strings.HasSuffix(rev, "..HEAD") && slices.Contains(r.gone, strings.TrimSuffix(rev, "..HEAD")) {
+				return "", errors.New("git log: fatal: bad revision")
+			}
+			return strings.Join(r.log, "\n") + "\n", nil
 		case "status":
 			return r.status, nil
 		case "remote":

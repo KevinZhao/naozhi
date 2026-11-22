@@ -105,16 +105,17 @@ type Config struct {
 	// a deep check is a week away, so none is dropped for a Planner that is
 	// off. nil hands none over.
 	Wake func(sent func(batch int, err error), blocks ...string) error
-	// OwnSettings is agent.Config.OwnSettings: a deep check gets Bash, for
-	// git's and gh's reads, only where the session settings are naozhi's
-	// own.
-	OwnSettings bool
+	// Deny is the read rules a deep check's session is denied besides the
+	// credential files by name: the Planner's own (agent.Agent.ReadDeny),
+	// read as each check starts. nil makes no deep checks: a session that
+	// reads a repository does not run without them.
+	Deny func() []string
 	// TaskOpen reports whether dispatched session key is still at work (in
 	// progress or waiting on the user in 任务). nil counts every one as at
 	// work.
 	TaskOpen func(key string) bool
-	// Alarm opens an error in "等你": a deep check's session did what it
-	// must not. nil only logs.
+	// Alarm opens an error in "等你": a file of the patrol's the user
+	// edits does not read. nil only logs.
 	Alarm func(source, title, why string)
 	// Ctx bounds the deep checks' sessions; nil is Background. Stop cuts
 	// them as well.
@@ -132,10 +133,8 @@ type Config struct {
 }
 
 // Session runs one deep check: key's session started with opts and sent
-// text. It returns the reply, the tools the session called, and its calls
-// that change state as "<tool>:<activity>" (planner/activity's types); the
-// session is gone when it returns.
-type Session func(ctx context.Context, key string, opts sessionview.AgentOpts, text string) (reply string, tools, writes []string, err error)
+// text. It returns the reply; the session is gone when it returns.
+type Session func(ctx context.Context, key string, opts sessionview.AgentOpts, text string) (reply string, err error)
 
 // Items is the part of the ledger the patrol writes: Reconcile makes a
 // check's open items be its hits, CloseItems closes those of a workspace no

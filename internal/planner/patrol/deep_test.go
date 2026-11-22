@@ -16,6 +16,9 @@ import (
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
+// plannerDeny stands for the Planner's deny rules in the tests.
+const plannerDeny = "Read(~/.aws/**)"
+
 // sha is a commit ID of the letter c.
 func sha(c string) string { return strings.Repeat(c, 40) }
 
@@ -31,12 +34,11 @@ type deepEnv struct {
 	*env
 	mu    sync.Mutex
 	calls []sessionCall
-	// reply, tools, writes and err are what the next session returns; hold,
-	// when set, keeps it going until closed or its context ends.
-	reply         string
-	tools, writes []string
-	err           error
-	hold          chan struct{}
+	// reply and err are what the next session returns; hold, when set,
+	// keeps it going until closed or its context ends.
+	reply string
+	err   error
+	hold  chan struct{}
 	// entered gets a session's key as it starts.
 	entered chan string
 	// woke are the blocks handed to the Planner; wakeErr fails the wake;
@@ -58,10 +60,10 @@ type deepEnv struct {
 func newDeep(t *testing.T) *deepEnv {
 	t.Helper()
 	d := &deepEnv{env: newEnv(t), atWork: map[string]bool{}, reply: findings(), entered: make(chan string, 16)}
-	d.cfg.Session = func(ctx context.Context, key string, opts sessionview.AgentOpts, text string) (string, []string, []string, error) {
+	d.cfg.Session = func(ctx context.Context, key string, opts sessionview.AgentOpts, text string) (string, error) {
 		d.mu.Lock()
 		d.calls = append(d.calls, sessionCall{key: key, text: text, opts: opts})
-		reply, tools, writes, err, hold := d.reply, d.tools, d.writes, d.err, d.hold
+		reply, err, hold := d.reply, d.err, d.hold
 		d.mu.Unlock()
 		select {
 		case d.entered <- key:
@@ -71,10 +73,10 @@ func newDeep(t *testing.T) *deepEnv {
 			select {
 			case <-hold:
 			case <-ctx.Done():
-				return "", nil, nil, ctx.Err()
+				return "", ctx.Err()
 			}
 		}
-		return reply, tools, writes, err
+		return reply, err
 	}
 	d.cfg.Wake = func(sent func(int, error), blocks ...string) error {
 		d.mu.Lock()
@@ -110,7 +112,7 @@ func newDeep(t *testing.T) *deepEnv {
 		defer d.mu.Unlock()
 		d.closed = append(d.closed, ref+"|"+why)
 	}
-	d.cfg.OwnSettings = true
+	d.cfg.Deny = func() []string { return []string{plannerDeny} }
 	d.p = New(d.cfg)
 	t.Cleanup(d.p.Stop)
 	return d
@@ -121,7 +123,8 @@ func newDeep(t *testing.T) *deepEnv {
 func (d *deepEnv) repo(id, name, c string) string {
 	d.t.Helper()
 	dir := d.workspace(id, name)
-	d.fe.repos[dir] = &fakeRepo{sha: sha(c), remotes: "origin\tgit@github.com:owner/" + name + ".git (fetch)\n"}
+	d.fe.repos[dir] = &fakeRepo{sha: sha(c), remotes: "origin\tgit@github.com:owner/" + name + ".git (fetch)\n",
+		branch: "main", log: []string{"1111111 fix: 重连时判空", "2222222 docs: 安装步骤"}}
 	d.fe.gh["owner/"+name] = &fakeGH{def: "main"}
 	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n\nfunc A() {}\n"), 0o600); err != nil {
 		d.t.Fatal(err)
@@ -297,6 +300,29 @@ func TestDeepRun(t *testing.T) {
 	if !strings.Contains(call.text, `工作区："gateway"`) {
 		t.Errorf("prompt does not name the workspace:\n%s", call.text)
 	}
+	// No shell: what it needs of git the gateway read for it, with its own
+	// read-only calls, and the hourly round's file is its to read.
+	checks := filepath.Join(d.cfg.Dir, wsA+".md")
+	if !slices.Equal(call.opts.Tools, []string{"Read", "Grep", "Glob"}) {
+		t.Errorf("tools %q", call.opts.Tools)
+	}
+	if want := []string{"Read(/" + filepath.ToSlash(dir) + "/**)", "Read(/" + filepath.ToSlash(checks) + ")"}; !slices.Equal(call.opts.PermissionsAllow, want) {
+		t.Errorf("allow %q, want %q", call.opts.PermissionsAllow, want)
+	}
+	if !slices.Contains(call.opts.PermissionsDeny, plannerDeny) || !slices.Contains(call.opts.PermissionsDeny, "Read(//**/.env*)") {
+		t.Errorf("deny %q lacks the Planner's rules or the credential names", call.opts.PermissionsDeny)
+	}
+	for _, want := range []string{"- 当前分支 main，HEAD " + sha("a") + "\n", "- 最近的提交（", "\n  1111111 fix: 重连时判空\n  2222222 docs: 安装步骤\n", "- 每小时确定性检查的结果：" + checks + "（"} {
+		if !strings.Contains(call.text, want) {
+			t.Errorf("prompt lacks %q:\n%s", want, call.text)
+		}
+	}
+	if strings.Contains(call.text, "开着的 issue：") {
+		t.Errorf("prompt names an issue file there is none of:\n%s", call.text)
+	}
+	if n := d.fe.count("git log --no-decorate --format=%h %s -n 30"); n != 1 {
+		t.Errorf("%d git log calls, want the one for the prompt", n)
+	}
 	st := d.state(wsA)
 	if st.Last == nil || st.Last.State != RunOK || st.Last.Trigger != TriggerSchedule || st.Last.Findings != 2 || st.Last.New != 2 || st.Last.Dropped != 1 ||
 		st.Last.Head != sha("a") || "patrol:"+st.Last.ID != call.key {
@@ -344,6 +370,62 @@ func TestDeepRun(t *testing.T) {
 	d.tick()
 	if d.sessions() != 1 || len(d.blocks()) != 1 {
 		t.Errorf("%d sessions and %d blocks after another round the same week, want 1 and 1", d.sessions(), len(d.blocks()))
+	}
+}
+
+// TestDeepContext: the repository's open issues are the session's to read
+// once planner/github has written them; a workspace that is no git
+// repository is checked all the same, with nothing read for it; and the
+// commits listed are those since the last check that went through.
+func TestDeepContext(t *testing.T) {
+	d := newDeep(t)
+	dir := d.repo(wsA, "gateway", "a")
+	issues := filepath.Join(d.root, "planner", "github", "owner+gateway.md")
+	if err := os.MkdirAll(filepath.Dir(issues), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(issues, []byte("# issues\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plain := d.workspace(wsB, "notes")
+	d.file(plain, "a.go", 0)
+	d.at(wsA, 0)
+	d.tick()
+	if _, err := d.p.Trigger(wsB); err != nil {
+		t.Fatal(err)
+	}
+	d.wait()
+	if d.sessions() != 2 {
+		t.Fatalf("%d sessions, want one a workspace", d.sessions())
+	}
+	repo, bare := d.calls[0], d.calls[1]
+	if rule := "Read(/" + filepath.ToSlash(issues) + ")"; !slices.Contains(repo.opts.PermissionsAllow, rule) || !strings.Contains(repo.text, "- 这个仓库开着的 issue："+issues+"（") {
+		t.Errorf("the issues file is not the session's to read: allow %q", repo.opts.PermissionsAllow)
+	}
+	if bare.opts.Workspace != plain || strings.Contains(bare.text, "当前分支") || strings.Contains(bare.text, "的提交（") || strings.Contains(bare.text, "开着的 issue：") {
+		t.Errorf("a directory that is no repository got a repository's context:\n%s", bare.text)
+	}
+	if st := d.state(wsB); st.Last == nil || st.Last.State != RunOK {
+		t.Errorf("the check of a directory that is no repository: %+v", st.Last)
+	}
+
+	// A week on, with a new commit: the range from the last check's commit.
+	d.fe.repos[dir].sha = sha("b")
+	d.at(wsA, 7*day)
+	d.tick()
+	if n := d.fe.count("git log --no-decorate --format=%h %s -n 30 " + sha("a") + "..HEAD"); n != 1 {
+		t.Errorf("%d git log calls from the last check's commit, want 1", n)
+	}
+	if text := d.calls[2].text; !strings.Contains(text, "- 上次深查以来的提交（") {
+		t.Errorf("prompt does not list the commits since the last check:\n%s", text)
+	}
+	// That commit gone (a rebase): the latest ones instead, and the check
+	// still runs.
+	d.fe.repos[dir].sha, d.fe.repos[dir].gone = sha("c"), []string{sha("b")}
+	d.at(wsA, 14*day)
+	d.tick()
+	if text := d.calls[3].text; !strings.Contains(text, "- 最近的提交（") || d.state(wsA).Last.State != RunOK {
+		t.Errorf("after the last check's commit is gone:\n%s", text)
 	}
 }
 
@@ -471,27 +553,6 @@ func TestDeepFailure(t *testing.T) {
 	}
 	if len(d.blocks()) != 1 {
 		t.Errorf("%d blocks, want the failed runs to wake nobody", len(d.blocks()))
-	}
-}
-
-// TestDeepWrote: a session that changed state fails its run, its findings
-// are not taken and the user is told.
-func TestDeepWrote(t *testing.T) {
-	d := newDeep(t)
-	d.repo(wsA, "gateway", "a")
-	d.at(wsA, 0)
-	d.set(func() {
-		d.reply = findings(finding("bug-a-nil", nil))
-		d.tools = []string{"Read", "Bash", "Write"}
-		d.writes = []string{"Bash:git_push"}
-	})
-	d.tick()
-	st := d.state(wsA)
-	if st.Last.State != RunFailed || !strings.Contains(st.Last.Error, "Bash:git_push") || len(st.Findings) != 0 || len(d.blocks()) != 0 {
-		t.Fatalf("last %+v, findings %s, blocks %d", st.Last, states(st), len(d.blocks()))
-	}
-	if len(d.alarms) != 1 || !strings.HasPrefix(d.alarms[0], "patrol:write:"+st.Last.ID+"|项目巡查的深查会话做了写操作|gateway：Bash:git_push") {
-		t.Errorf("alarms %q", d.alarms)
 	}
 }
 

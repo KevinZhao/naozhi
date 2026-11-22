@@ -35,7 +35,6 @@ const (
 	// maxEvidenceFile bounds a file whose lines are counted for a finding's
 	// evidence.
 	maxEvidenceFile = 5 << 20
-	urlBytes        = 2048
 )
 
 // Kinds, sizes and confidences of a finding.
@@ -70,7 +69,7 @@ type Finding struct {
 	Title string `json:"title"`
 	Kind  string `json:"kind"`
 	// Evidence is where it shows: "path:line" or "path:from-to" relative to
-	// the workspace's directory, or an http(s) link.
+	// the workspace's directory.
 	Evidence   []string `json:"evidence"`
 	Impact     string   `json:"impact"`
 	Fix        string   `json:"fix"`
@@ -112,10 +111,10 @@ func ItemSource(ref string) string { return front.PatrolSource + ref }
 // below is dropped, as is a second one of the same id. dropped counts them.
 //
 // The gateway checks the evidence again, whatever the session says it did:
-// a link must be http(s); a file must lie inside dir with its symlinks
-// resolved, be a regular file and have the line named. Evidence that fails
-// is dropped, and a finding with none left goes with it: what cannot be
-// opened is not shown to the user as evidence.
+// a file must lie inside dir with its symlinks resolved, be a regular file
+// and have the line named; a link is no evidence. Evidence that fails is
+// dropped, and a finding with none left goes with it: what cannot be opened
+// is not shown to the user as evidence.
 func ParseFindings(reply, dir string) (kept []Finding, dropped int, err error) {
 	text := strings.TrimSpace(reply)
 	if !strings.HasPrefix(text, "{") {
@@ -166,16 +165,14 @@ func ParseFindings(reply, dir string) (kept []Finding, dropped int, err error) {
 	return kept, dropped, nil
 }
 
-// evidenceOK reports whether e is evidence the user can open: an http(s)
-// link, or a line of a regular file inside root (a directory with its
-// symlinks resolved).
+// evidenceOK reports whether e is evidence the user can open: a line of a
+// regular file inside root (a directory with its symlinks resolved). A link
+// is none: the session has no way to have opened one, and the links the
+// user is shown are the gateway's own (blobLinks), to this repository at
+// the commit checked, never to a host a session named.
 func evidenceOK(root, e string) bool {
 	if e == "" || utf8.RuneCountInString(e) > evidenceRunes {
 		return false
-	}
-	if strings.HasPrefix(e, "http://") || strings.HasPrefix(e, "https://") {
-		u, err := url.Parse(e)
-		return err == nil && u.Hostname() != "" && len(e) <= urlBytes
 	}
 	rel, _, to, ok := fileLine(e)
 	if !ok {
@@ -230,8 +227,7 @@ func fileLine(e string) (rel string, from, to int, ok bool) {
 // blobLinks is a GitHub link for each file line of evidence, at commit sha
 // of repo ("owner/name"), prefix being the workspace's directory relative
 // to the repository's top ("" at the top): what the user clicks to see the
-// evidence. Links in the evidence itself are not repeated; nil for a
-// repository not on GitHub or with no commit.
+// evidence; nil for a repository not on GitHub or with no commit.
 func blobLinks(repo, sha, prefix string, evidence []string) []string {
 	if repo == "" || sha == "" {
 		return nil

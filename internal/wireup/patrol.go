@@ -5,12 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"slices"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/notify"
@@ -199,15 +197,12 @@ func PatrolSelf(j *journal.Journal) func(since, until time.Time) patrol.Self {
 
 // PatrolSession is patrol.Config.Session over the session router, as
 // ScoutSession is the scout's: a fresh session spawned for the deep check,
-// its one turn sent, then reset. Besides the reply it returns what the
-// session did, read off its events: the tools it called, and the calls
-// planner/activity classifies as changing state (a push, a tag, a pull
-// request made or merged, a release), which a read-only session has none of.
+// its one turn sent, then reset.
 func PatrolSession(router *session.Router) patrol.Session {
-	return func(ctx context.Context, key string, opts session.AgentOpts, text string) (string, []string, []string, error) {
+	return func(ctx context.Context, key string, opts session.AgentOpts, text string) (string, error) {
 		sess, _, err := router.GetOrCreate(ctx, key, opts)
 		if err != nil {
-			return "", nil, nil, err
+			return "", err
 		}
 		defer router.Reset(key)
 		res, err := sendTimed(ctx, sess, text)
@@ -216,27 +211,11 @@ func PatrolSession(router *session.Router) patrol.Session {
 			// close, which waits past Patrol.Stop's wait (ScoutSession).
 			sess.Interrupt()
 		}
-		entries := sess.EventLastN(scoutEventScan)
 		if err == nil && res.Text == "" {
 			err = errors.New("empty reply")
 		}
-		return res.Text, calledTools(entries), stateChanges(entries), err
+		return res.Text, err
 	}
-}
-
-// stateChanges is the tool calls of entries that change state, each
-// "<tool>:<activity types>", in call order.
-func stateChanges(entries []clievent.EventEntry) []string {
-	var out []string
-	for _, e := range entries {
-		if e.Type != clievent.KindToolUse || e.Activity == "" {
-			continue
-		}
-		if c := e.Tool + ":" + e.Activity; !slices.Contains(out, c) {
-			out = append(out, c)
-		}
-	}
-	return out
 }
 
 // PatrolWake is patrol.Config.Wake over the Planner: each block of a

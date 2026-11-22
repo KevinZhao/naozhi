@@ -170,8 +170,10 @@ func TestEvidence(t *testing.T) {
 		{"sub/one.txt:1", true}, // a last line with no newline is a line
 		{"sub/空 格.md:2", true},
 		{"alias.go:3", true}, // a symlink that stays inside
-		{"https://github.com/owner/repo/issues/12", true},
-		{"http://example.com/x", true},
+		// A link is no evidence: the user's links are the gateway's own.
+		{"https://github.com/owner/repo/issues/12", false},
+		{"http://example.com/x", false},
+		{"https://example.com/a.go:1", false},
 		{"a.go:4", false},   // past the end
 		{"a.go:2-9", false}, // range past the end
 		{"a.go:3-1", false}, // backwards
@@ -206,7 +208,7 @@ func TestEvidence(t *testing.T) {
 	if err != nil || len(kept) != 1 {
 		t.Fatalf("kept %v, err %v", kept, err)
 	}
-	if want := []string{"a.go:2", "https://example.com/a", "a.go:1", "a.go:3", "sub/one.txt:1"}; !slices.Equal(kept[0].Evidence, want) {
+	if want := []string{"a.go:2", "a.go:1", "a.go:3", "sub/one.txt:1", "sub/空 格.md:1"}; !slices.Equal(kept[0].Evidence, want) {
 		t.Errorf("evidence %q, want %q", kept[0].Evidence, want)
 	}
 	// A workspace directory that is gone opens nothing.

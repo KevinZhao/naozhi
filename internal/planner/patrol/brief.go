@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"log/slog"
 	"slices"
-	"strings"
 	"time"
 )
 
@@ -130,11 +129,6 @@ type Evidence struct {
 	Link string `json:"link,omitempty"`
 }
 
-// isLink reports whether evidence e is a web link rather than a file line.
-func isLink(e string) bool {
-	return strings.HasPrefix(e, "http://") || strings.HasPrefix(e, "https://")
-}
-
 // Details are the findings refs name, by ref; one not on record is left
 // out.
 func (p *Patrol) Details(refs []string) map[string]Detail {
@@ -146,16 +140,12 @@ func (p *Patrol) Details(refs []string) map[string]Detail {
 		}
 		d := Detail{Kind: r.Kind, Size: r.Size, Confidence: r.Confidence, Impact: r.Impact, Fix: r.Fix, State: r.State, PR: r.PR, CI: r.CI,
 			Evidence: make([]Evidence, 0, len(r.Evidence))}
-		// The links are the file lines' in order (blobLinks); evidence that
-		// is a link opens itself.
+		// The links are the file lines' in order (blobLinks).
 		links := r.Links
 		for _, e := range r.Evidence {
 			ev := Evidence{Text: e}
 			if _, _, _, file := fileLine(e); file && len(links) > 0 {
 				ev.Link, links = links[0], links[1:]
-			}
-			if isLink(e) {
-				ev.Link = e
 			}
 			d.Evidence = append(d.Evidence, ev)
 		}

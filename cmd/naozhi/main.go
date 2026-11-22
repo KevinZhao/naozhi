@@ -614,12 +614,11 @@ func main() {
 		Isolated:    isolated,
 		Session:     wireup.PatrolSession(router),
 		Wake:        wireup.PatrolWake(plannerAgent),
-		// Bash for git and gh only where the session settings are naozhi's
-		// own, as for the Planner.
-		OwnSettings: naozhiSettingsFile != "",
-		TaskOpen:    wireup.PatrolTaskOpen(tasks),
-		Alarm:       wireup.PatrolAlarm(notifier),
-		Ctx:         ctx,
+		// What the Planner may not read, a deep check may not either.
+		Deny:     plannerAgent.ReadDeny,
+		TaskOpen: wireup.PatrolTaskOpen(tasks),
+		Alarm:    wireup.PatrolAlarm(notifier),
+		Ctx:      ctx,
 		// The user's say on a finding (§15.23 ④): "做" reaches the Planner
 		// as their words, a finding settled closes its cards.
 		Answer:     wireup.PatrolAnswer(plannerAgent, nil),

@@ -11,8 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
-	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/action"
@@ -284,36 +282,8 @@ func TestPatrolRoutines(t *testing.T) {
 	}
 }
 
-// TestStateChanges: a deep check's calls that change state are told from
-// its events, each once, by the tool and what planner/activity classifies
-// the call as; reads are none.
-func TestStateChanges(t *testing.T) {
-	bash := func(cmd string) clievent.EventEntry {
-		in, _ := json.Marshal(map[string]string{"command": cmd})
-		ev := clievent.Event{Type: "assistant", Message: &clievent.AssistantMessage{Role: "assistant",
-			Content: []clievent.ContentBlock{{Type: "tool_use", ID: "tu", Name: "Bash", Input: in}}}}
-		return cli.EventEntriesFromEventAt(ev, 1)[0]
-	}
-	reads := []clievent.EventEntry{
-		bash("git log --oneline -20"), bash("gh pr list --state open"), bash("git status && git diff HEAD~1"),
-		bash("git tag --list"), bash("git push --dry-run origin x"),
-		{Type: clievent.KindToolUse, Tool: "Read"}, {Type: clievent.KindText, Activity: "git_push"},
-	}
-	if got := stateChanges(reads); got != nil {
-		t.Errorf("reads told as state changes: %q", got)
-	}
-	writes := append(reads,
-		bash("git push origin fix/x"), bash("cd /srv/repo && git push origin fix/x"), bash("gh pr merge 31 --squash"),
-		bash("git tag v1.2.3"), bash("gh pr create --fill"), bash("gh release create v1.2.3"), bash("git push origin fix/x"))
-	want := []string{"Bash:git_push", "Bash:pr_merge", "Bash:git_tag", "Bash:pr_create", "Bash:release"}
-	if got := stateChanges(writes); !slices.Equal(got, want) {
-		t.Errorf("state changes %q, want %q", got, want)
-	}
-}
-
 // TestPatrolSession: the deep check's one turn runs on the key's session;
-// what comes back is its reply, the tools it called and the calls that
-// changed state, and the session is reset.
+// what comes back is its reply, and the session is reset.
 func TestPatrolSession(t *testing.T) {
 	// A cron key: reconnect retires a one-shot key's surviving shim, and
 	// the key is all PatrolSession takes from the patrol (as ScoutSession's
@@ -325,19 +295,16 @@ func TestPatrolSession(t *testing.T) {
 	r.ReconnectShimsCtx(context.Background())
 	fs.Attached(t)
 	type out struct {
-		reply         string
-		tools, writes []string
-		err           error
+		reply string
+		err   error
 	}
 	done := make(chan out, 1)
 	go func() {
-		reply, tools, writes, err := PatrolSession(r)(context.Background(), key, session.AgentOpts{}, "深查")
-		done <- out{reply, tools, writes, err}
+		reply, err := PatrolSession(r)(context.Background(), key, session.AgentOpts{}, "深查")
+		done <- out{reply, err}
 	}()
 	testhelper.Eventually(t, func() bool { return len(fs.Sent()) > 0 }, 5*time.Second, "the turn never reached the shim")
 	fs.Emit(t, `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu1","name":"Read","input":{"file_path":"/ws/a.go"}}]},"session_id":"s1"}`)
-	fs.Emit(t, `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu2","name":"Bash","input":{"command":"git log -3"}}]},"session_id":"s1"}`)
-	fs.Emit(t, `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu3","name":"Bash","input":{"command":"git push origin fix/x"}}]},"session_id":"s1"}`)
 	fs.Emit(t, `{"type":"result","subtype":"success","result":"{\"findings\":[]}","session_id":"s1"}`)
 	var got out
 	select {
@@ -347,9 +314,6 @@ func TestPatrolSession(t *testing.T) {
 	}
 	if got.err != nil || got.reply != `{"findings":[]}` {
 		t.Fatalf("reply %q, err %v", got.reply, got.err)
-	}
-	if !slices.Equal(got.tools, []string{"Read", "Bash"}) || !slices.Equal(got.writes, []string{"Bash:git_push"}) {
-		t.Errorf("tools %q writes %q, want Read, Bash and the push", got.tools, got.writes)
 	}
 	if r.SessionFor(key) != nil {
 		t.Error("the session is still in the router after the deep check")
@@ -469,10 +433,11 @@ func TestPatrolCards(t *testing.T) {
 		Exec: func(context.Context, string, string, ...string) (string, error) {
 			return "", os.ErrNotExist // no git here
 		},
-		Session: func(context.Context, string, session.AgentOpts, string) (string, []string, []string, error) {
+		Deny: func() []string { return nil },
+		Session: func(context.Context, string, session.AgentOpts, string) (string, error) {
 			return `{"findings":[
 				{"id":"bug-one","title":"重连时会话为空会崩","kind":"bug","evidence":["a.go:1"],"impact":"重连即崩","fix":"先判空","size":"S","reversible":true,"confidence":"high"},
-				{"id":"doc-two","title":"README 与脚本不符","kind":"doc","evidence":["a.go:1"],"impact":"装不上","fix":"改 README","size":"S","reversible":true,"confidence":"high"}]}`, nil, nil, nil
+				{"id":"doc-two","title":"README 与脚本不符","kind":"doc","evidence":["a.go:1"],"impact":"装不上","fix":"改 README","size":"S","reversible":true,"confidence":"high"}]}`, nil
 		},
 		// The findings are on record once they are handed to the Planner.
 		Wake:       func(func(int, error), ...string) error { handed <- struct{}{}; return nil },
