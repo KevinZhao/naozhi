@@ -364,6 +364,9 @@ test('a session you opened ending a turn: the Planner saying 无 leaves nothing 
     { type: 'user', detail: watch('iso 又一轮。'), time: at(25), uuid: 'wt-u4' },
     { type: 'text', detail: '无。', time: at(25.1), uuid: 'wt-t4' },
     { type: 'result', time: at(25.2), uuid: 'wt-r4' },
+    // A turn that ended without a word.
+    { type: 'user', source: 'watch', detail: watch('iso 没有回话的一轮。'), time: at(27), uuid: 'wt-u5' },
+    { type: 'result', time: at(27.2), uuid: 'wt-r5' },
   ];
   const mock = await startMockServer({ ws: true, plannerEvents: events, tasks: tasks(), planner });
   try {
@@ -374,7 +377,8 @@ test('a session you opened ending a turn: the Planner saying 无 leaves nothing 
     await expect(stream.locator('.event.user:visible')).toHaveCount(2);
     await expect(stream.getByText('naozhi-watch', { exact: false })).toHaveCount(0);
     await expect(stream.locator('.event.text:visible', { hasText: /^无[。]?$/ })).toHaveCount(0);
-    // One row, for the turn with the note; the two 无 turns are no entry.
+    // One row, for the turn with the note; the two 无 turns and the one
+    // without a word are no entry.
     const rows = stream.locator('.pl-dyn');
     await expect(rows).toHaveCount(1);
     await expect(rows.locator('.pl-dyn-h')).toHaveText('▸ ' + hm(at(20)) + ' · 1 条动态（hello world）');
@@ -395,7 +399,13 @@ test('a session you opened ending a turn: the Planner saying 无 leaves nothing 
     events.push({ type: 'user', source: 'watch', detail: watch('iso 第四轮。'), time: t0, uuid: 'wt-live-u' });
     await expect(page.locator('#pl-status')).toHaveText('处理汇报中');
     await expect(rows).toHaveCount(1);
-    events.push({ type: 'text', detail: '无', time: t0 + 1, uuid: 'wt-live-t' }, { type: 'result', time: t0 + 2, uuid: 'wt-live-r' });
+    // What it says on the way to 无 (before it reads the digest) is not
+    // something to show either: no entry comes and then goes.
+    events.push({ type: 'text', detail: 'iso 我先看一下摘要。', time: t0 + 1, uuid: 'wt-live-t0' });
+    await expect(stream.locator('.event.text', { hasText: 'iso 我先看一下摘要。' })).toHaveCount(1);
+    await expect(rows).toHaveCount(1);
+    await expect(rows.locator('.pl-dyn-h')).toContainText('1 条动态（hello world）');
+    events.push({ type: 'text', detail: '无', time: t0 + 2, uuid: 'wt-live-t' }, { type: 'result', time: t0 + 3, uuid: 'wt-live-r' });
     await expect(page.locator('#pl-status')).toHaveText('');
     await expect(rows).toHaveCount(1);
     await expect(rows.locator('.pl-dyn-h')).toContainText('1 条动态（hello world）');
