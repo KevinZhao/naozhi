@@ -498,13 +498,22 @@ function closeCronDetail() {
 function cronDrawerForgetJob(jobId) {
   if (cronDrawerState.jobId === jobId) {
     cronDrawerState.jobId = null;
+    return true;
   }
+  return false;
+}
+
+// cronDrawerRestoreJob reopens the drawer a failed delete closed, unless the
+// operator has opened another one since (theirs wins over the rollback).
+function cronDrawerRestoreJob(jobId) {
+  if (cronDrawerState.jobId === null) cronDrawerState.jobId = jobId;
 }
 
 export {
   closeCronDetail,
   cronDrawerSpecPromptToggle,
   cronDrawerForgetJob,
+  cronDrawerRestoreJob,
   openCronDetail,
   renderCronDrawer,
 };
