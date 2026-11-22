@@ -78,6 +78,14 @@ export const custody = {
 
 // The session this tab last reported it is at, and when.
 const view = { key: '', at: 0 };
+// readSeq numbers the reads of GET /api/custody. A switch flipped here shows
+// at once, ahead of the gateway: held (key → {st, upTo}) keeps key reading
+// st while the PUT is out (upTo Infinity) and for a read started before it
+// answered (seq ≤ upTo), which still lists the session as it was.
+// pauseHold does the same for the one pause: {paused, upTo, prior}.
+let readSeq = 0;
+const held = new Map();
+let pauseHold = null;
 // The custody answers taken back from this tab, by bubble.
 const undone = new Set();
 
@@ -176,41 +184,137 @@ async function plannerEnabled() {
   return custody.enabled === true;
 }
 
-function noteList(res) {
+// pausedState is a status's state with custody paused or not: a session in
+// custody reads 已暂停 while the pause holds (custody.Engine.Status).
+function pausedState(st, paused) {
+  if (paused && st.on && (st.state === 'on' || st.state === 'deferred')) return 'paused';
+  if (!paused && st.state === 'paused') return 'on';
+  return st.state;
+}
+
+// showPaused sets every listed session's state as paused or not; it returns
+// the states it changed, by key, to put back.
+function showPaused(paused) {
+  const was = new Map();
+  for (const [k, st] of custody.byKey) {
+    const state = pausedState(st, paused);
+    if (state !== st.state) { was.set(k, st.state); custody.byKey.set(k, Object.assign({}, st, { state })); }
+  }
+  custody.paused = paused;
+  return was;
+}
+
+function noteList(res, seq) {
   custody.paused = !!res?.paused;
   custody.pausedAt = res?.paused_at ? Date.parse(res.paused_at) || 0 : 0;
   if (Array.isArray(res?.sessions)) {
     custody.byKey = new Map(res.sessions.filter((s) => s && s.key).map((s) => [s.key, s]));
     custody.listed = true;
   }
+  for (const [k, h] of held) {
+    if (seq > h.upTo) held.delete(k);
+    else custody.byKey.set(k, h.st);
+  }
+  if (pauseHold) {
+    if (seq > pauseHold.upTo) pauseHold = null;
+    else showPaused(pauseHold.paused);
+  }
 }
 
 // refreshCustody reads GET /api/custody again; one read at a time.
 export function refreshCustody() {
   if (custody.loading) return custody.loading;
+  const seq = ++readSeq;
   custody.loading = (async () => {
     try {
       if (!(await plannerEnabled())) return;
-      noteList(await fetchJSON(plannerAPI(NZ_CONTRACT.API.custody), { timeoutMs: 8000 }));
+      noteList(await fetchJSON(plannerAPI(NZ_CONTRACT.API.custody), { timeoutMs: 8000 }), seq);
     } catch { /* the next refresh tries again */ }
     finally { custody.loading = null; custody.readAt = Date.now(); changed(); reportViewing(); }
   })();
   return custody.loading;
 }
 
+// refreshAfter is a read started from now on: one already out may have
+// left before the change and would only say what was.
+function refreshAfter() {
+  return custody.loading ? custody.loading.then(refreshCustody) : refreshCustody();
+}
+
+// holdCustodyPaused shows custody paused (or resumed) at once, for the
+// request that does it (the one pause's PUT / DELETE). done(actual) once it
+// answered — actual the gateway's paused when it says — reads the list
+// again and resolves after; undo() puts back what was shown.
+export function holdCustodyPaused(paused) {
+  const mark = { paused, upTo: Infinity, priorPaused: custody.paused, priorAt: custody.pausedAt, was: showPaused(paused) };
+  pauseHold = mark;
+  changed();
+  return {
+    done(actual) {
+      if (pauseHold === mark) {
+        if (typeof actual === 'boolean' && actual !== mark.paused) { mark.paused = actual; showPaused(actual); }
+        mark.upTo = readSeq;
+      }
+      changed();
+      return refreshAfter();
+    },
+    undo() {
+      if (pauseHold !== mark) return;
+      pauseHold = null;
+      custody.paused = mark.priorPaused;
+      custody.pausedAt = mark.priorAt;
+      for (const [k, state] of mark.was) {
+        const st = custody.byKey.get(k);
+        if (st) custody.byKey.set(k, Object.assign({}, st, { state }));
+      }
+      changed();
+    },
+  };
+}
+
+// holdSwitch shows key reading st at once, ahead of the PUT that sets it;
+// settle(res) takes the gateway's answer (res null: the prediction stays
+// until the next read), undo() puts back what key read before.
+function holdSwitch(key, st) {
+  const prior = custody.byKey.get(key);
+  const mark = { st, upTo: Infinity };
+  held.set(key, mark);
+  custody.byKey.set(key, st);
+  changed();
+  return {
+    settle(res) {
+      if (held.get(key) !== mark) return;
+      if (res) { mark.st = res; custody.byKey.set(key, res); }
+      mark.upTo = readSeq;
+      changed();
+    },
+    undo() {
+      if (held.get(key) !== mark) return;
+      held.delete(key);
+      if (prior) custody.byKey.set(key, prior);
+      else custody.byKey.delete(key);
+      changed();
+    },
+  };
+}
+
 const failText = (e) => String(e?.message || e).replace(/^HTTP \d+: /, '').trim();
 
 // setCustodyPaused pauses or resumes custody alone (/api/custody/pause, the
 // one pause's alias since D94: the Planner page ends a pause from before the
-// two were one with it), then reads every session's custody again.
+// two were one with it), shown at once, then reads every session's custody
+// again.
 export async function setCustodyPaused(paused) {
+  const h = holdCustodyPaused(paused);
   try {
-    noteList(await fetchJSON(plannerAPI(NZ_CONTRACT.API.custody_pause), { method: paused ? 'PUT' : 'DELETE', timeoutMs: 8000 }));
+    const res = await fetchJSON(plannerAPI(NZ_CONTRACT.API.custody_pause), { method: paused ? 'PUT' : 'DELETE', timeoutMs: 8000 });
+    custody.pausedAt = res?.paused_at ? Date.parse(res.paused_at) || 0 : 0;
+    await h.done(typeof res?.paused === 'boolean' ? res.paused : undefined);
   } catch (e) {
+    h.undo();
     showToast((paused ? '暂停托管' : '恢复托管') + '失败：' + failText(e), 'error');
+    await refreshCustody();
   }
-  changed();
-  await refreshCustody();
 }
 
 // toggleToast says what a click on the chip just did: on a phone there is
@@ -221,49 +325,58 @@ export function toggleToast(was, on) {
   return on ? '托管已打开：有推荐选项的提问按建议回答，停下时交给 Planner；再点一下关掉' : '托管已关：停下时等你处理（出错照样自动重试）';
 }
 
-async function toggle(el) {
+// switchedOn is st as the gateway will have it once custody is switched
+// on (or off) as the user's: a stopped one starts afresh, its count reset.
+function switchedOn(st, on) {
+  const next = Object.assign({}, st, { on, by: 'user', at: new Date().toISOString() });
+  if (!on) next.state = 'off';
+  else {
+    next.state = custody.paused ? 'paused' : 'on';
+    if (st.state === 'stopped') { next.sent = 0; delete next.why; }
+  }
+  return next;
+}
+
+// toggle flips the chip at once and says so, then sends it; the gateway's
+// answer replaces the prediction, a failure puts the chip back.
+function toggle(el) {
   const key = el.dataset.key;
   if (!key) return;
   const st = statusOf(key);
   // A stopped one turns on afresh: the user's switch restarts the count.
   const on = st.state === 'stopped' ? true : !st.on;
-  el.disabled = true;
-  try {
-    const res = await fetchJSON(plannerAPI(NZ_CONTRACT.API.custody), {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, on }), timeoutMs: 8000,
-    });
-    if (res && res.key) custody.byKey.set(res.key, res);
-    showToast(toggleToast(st.state, on), 'success', 4000);
-  } catch (e) {
+  const h = holdSwitch(key, switchedOn(st, on));
+  showToast(toggleToast(st.state, on), 'success', 4000);
+  fetchJSON(plannerAPI(NZ_CONTRACT.API.custody), {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, on }), timeoutMs: 8000,
+  }).then((res) => h.settle(res && res.key === key ? res : null), (e) => {
+    h.undo();
     showToast((on ? '没有打开托管：' : '没有关掉托管：') + failText(e), 'error');
-  }
-  el.disabled = false;
-  changed();
+  });
 }
 
 // watchToast says what a click on 观察 just did (no title to hover on a
 // phone).
 export const watchToast = (on) => on ? '观察已开：写摘要、放进任务的「你开的」；不发任何消息' : '观察已关：不进任务、不写摘要（托管不受影响）';
 
-async function toggleWatch(el) {
+function toggleWatch(el) {
   const key = el.dataset.key;
   if (!key) return;
   const watch = !watchOf(key);
-  el.disabled = true;
-  try {
-    const res = await fetchJSON(plannerAPI(NZ_CONTRACT.API.custody), {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, watch }), timeoutMs: 8000,
-    });
-    if (res && res.key) custody.byKey.set(res.key, res);
+  const h = holdSwitch(key, Object.assign({}, statusOf(key), { watch, watch_by: 'user' }));
+  showToast(watchToast(watch), 'success', 4000);
+  fetchJSON(plannerAPI(NZ_CONTRACT.API.custody), {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, watch }), timeoutMs: 8000,
+  }).then((res) => {
+    h.settle(res && res.key === key ? res : null);
     // The gateway's answer is what it is now.
-    showToast(watchToast(res && typeof res.watch === 'boolean' ? res.watch : watch), 'success', 4000);
-  } catch (e) {
+    if (res && typeof res.watch === 'boolean' && res.watch !== watch) showToast(watchToast(res.watch), 'success', 4000);
+    // 任务's 你开的 gains or loses the session: the gateway has it now.
+    nzBus.dispatchEvent(new CustomEvent('watch:changed', { detail: { key, watch } }));
+  }, (e) => {
+    h.undo();
     showToast((watch ? '没有打开观察：' : '没有关掉观察：') + failText(e), 'error');
-  }
-  el.disabled = false;
-  changed();
-  // 任务's 你开的 gains or loses the session.
-  nzBus.dispatchEvent(new CustomEvent('watch:changed', { detail: { key, watch } }));
+  });
 }
 
 // ---- you are at the session ----
@@ -418,6 +531,9 @@ nzBus.addEventListener('custody:changed', paintCustodyChip);
 // Another node's Planner: its custody.
 nzBus.addEventListener('planner:node', () => {
   custody.enabled = null;
+  // What was held was the last node's.
+  held.clear();
+  pauseHold = null;
   custody.byKey = new Map();
   custody.listed = false;
   custody.paused = false;

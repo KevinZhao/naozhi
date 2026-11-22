@@ -17,7 +17,8 @@
 // offered. With no line the group takes no room.
 //
 // The lines are read when the page opens and after each Planner turn
-// (refreshFronts, with the tasks).
+// (refreshFronts, with the tasks). An edit or 结束 shows at once, ahead of
+// the gateway (held); a failure puts the line back as it was.
 import { NZ_CONTRACT } from './contract.js';
 import { esc, escAttr, fetchJSON, registerActions, showToast } from './nz_util.js';
 import { formatAbsTime } from './utilities.js';
@@ -34,6 +35,11 @@ let last = null; // { fronts, writable }
 let openId = '';
 let editId = '';
 let gen = 0;
+// held is the user's edits this page shows ahead of the ledger, by line:
+// {edit} (the fields saved; close drops the line). While the POST is out
+// (upTo Infinity), and for a read started before it answered (gen ≤ upTo),
+// a list still showing the line as it was must not undo the edit.
+const held = new Map();
 
 const str = (v) => (typeof v === 'string' ? v : '');
 // waitText drops the verb the Planner often writes itself ("等客户确认").
@@ -92,6 +98,19 @@ function cardHtml(f, writable, now) {
     '</div>';
 }
 
+// applyEdit returns fronts with edit applied as the ledger applies it: the
+// fields given, the line then the latest updated (first); close takes it
+// off the open list.
+function applyEdit(fronts, edit) {
+  const i = fronts.findIndex((f) => f.id === edit.id);
+  if (i < 0) return fronts;
+  const rest = fronts.slice(0, i).concat(fronts.slice(i + 1));
+  if (edit.close) return rest;
+  const f = Object.assign({}, fronts[i], { updated: new Date().toISOString() });
+  for (const k of ['state', 'next', 'waiting']) if (typeof edit[k] === 'string') f[k] = edit[k];
+  return [f].concat(rest);
+}
+
 // frontsHtml renders a GET /api/planner/fronts answer, "" with no line.
 export function frontsHtml(data, now = Date.now()) {
   const fronts = data && Array.isArray(data.fronts) ? data.fronts : [];
@@ -127,7 +146,12 @@ export async function refreshFronts() {
   try {
     const data = await fetchJSON(NZ_CONTRACT.API.planner_fronts, { timeoutMs: 8000 });
     if (g !== gen) return;
-    last = data;
+    let list = Array.isArray(data.fronts) ? data.fronts : [];
+    for (const [id, h] of held) {
+      if (g > h.upTo) held.delete(id);
+      else list = applyEdit(list, h.edit);
+    }
+    last = Object.assign({}, data, { fronts: list });
     if (openId && !(data.fronts || []).some((f) => f.id === openId)) openId = '';
     if (editId && !(data.fronts || []).some((f) => f.id === editId)) editId = '';
   } catch {
@@ -149,24 +173,58 @@ export function mountFronts(el) {
       ev.preventDefault();
       const body = { id: form.dataset.id };
       form.querySelectorAll('textarea').forEach((t) => { body[t.dataset.field] = t.value.trim(); });
-      save(form.querySelector('[type="submit"]'), body, '没有保存：');
+      save(body, '没有保存：');
     });
   }
   return refreshFronts();
 }
 
-async function save(el, body, failed) {
-  if (el) el.disabled = true;
+// save shows the edit (or 结束) at once and leaves the editor, then sends
+// it. A failure puts the line back as it was, the editor reopened on what
+// was typed (or its card's controls, for 结束), and says why; a line the
+// ledger no longer has is gone already, which is what 结束 asked.
+async function save(body, failed) {
+  if (!last || !Array.isArray(last.fronts)) return;
+  const prior = { fronts: last.fronts, openId, editId };
+  const mark = { edit: body, upTo: Infinity };
+  held.set(body.id, mark);
+  last = Object.assign({}, last, { fronts: applyEdit(last.fronts, body) });
+  editId = '';
+  if (body.close && openId === body.id) openId = '';
+  paint();
+  let ok = true;
   try {
-    await fetchJSON(NZ_CONTRACT.API.planner_fronts, {
+    const res = await fetchJSON(NZ_CONTRACT.API.planner_fronts, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), timeoutMs: 8000,
     });
-    editId = '';
-    if (body.close) openId = '';
+    // The ledger's line is what it holds now.
+    if (!body.close && res && res.id === body.id && held.get(body.id) === mark && last) {
+      last = Object.assign({}, last, { fronts: last.fronts.map((f) => (f.id === body.id ? Object.assign({}, f, res) : f)) });
+      paint();
+    }
   } catch (e) {
-    showToast(failed + e.message, 'error');
+    ok = body.close && e.status === 404;
+    if (!ok) {
+      if (held.get(body.id) === mark) held.delete(body.id);
+      const was = prior.fronts.find((f) => f.id === body.id);
+      if (was && last) {
+        // Put back where it stood, among what the page lists now.
+        const now = last.fronts.filter((f) => f.id !== body.id);
+        const at = prior.fronts.indexOf(was);
+        last = Object.assign({}, last, { fronts: now.slice(0, at).concat([was], now.slice(at)) });
+      }
+      openId = prior.openId;
+      editId = prior.editId;
+      paint();
+      if (!body.close && editId === body.id) {
+        mount?.querySelectorAll('.fr-edit[data-id="' + CSS.escape(body.id) + '"] textarea').forEach((t) => {
+          if (typeof body[t.dataset.field] === 'string') t.value = body[t.dataset.field];
+        });
+      }
+      showToast(failed + e.message, 'error');
+    }
   }
-  if (el) el.disabled = false;
+  if (ok && held.get(body.id) === mark) mark.upTo = gen;
   await refreshFronts();
 }
 
@@ -200,6 +258,6 @@ registerActions({
   },
   'front-close': (el) => {
     const id = el.dataset.id || '';
-    if (id) save(el, { id, close: true }, '没有结束：');
+    if (id) save({ id, close: true }, '没有结束：');
   },
 });
