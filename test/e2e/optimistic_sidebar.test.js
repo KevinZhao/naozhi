@@ -570,16 +570,18 @@ test('重命名 in the session header shows at once, through a read from before;
       gets.push(route);
     });
     page.evaluate(() => { window.nz.test.fetchSessions(); });
-    await expect.poll(() => gets.length).toBe(1);
+    // At least: the sidebar's own 5 s poll may be held here too on a slow run.
+    await expect.poll(() => gets.length).toBeGreaterThanOrEqual(1);
+    const before = gets.length;
     await label.release();
     await expect(page.locator('#toast')).toHaveText('已重命名');
-    await expect.poll(() => gets.length).toBe(2);
+    await expect.poll(() => gets.length).toBeGreaterThan(before);
     await gets.shift().fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(stale) });
     await expect.poll(() => page.evaluate((k) => !!(window.nz.test.sessionsData[k] || {}).iso_stale, BETA1 + '\tlocal')).toBe(true);
     await expect(card(page, BETA1)).toContainText('iso 第三个名字');
     await expect(title).toHaveText('iso 第三个名字');
     await page.unroute('**/api/sessions');
-    await gets.shift().continue();
+    for (const g of gets.splice(0)) await g.continue();
     await expect(card(page, BETA1)).toContainText('iso 第三个名字');
     expect(errors).toEqual([]);
   } finally {

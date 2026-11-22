@@ -923,6 +923,9 @@ nzBus.addEventListener('planner:node', () => {
   gen++; readAt = 0; failedAt = 0;
   digestOpen = ''; digests.clear(); onlyNew = null;
   unwatched.clear();
+  // The node before's marks would lay its tasks over this one's list; a
+  // request still out for one finds its mark gone and leaves the list alone.
+  pending.clear();
   // The count was the node before's; its own list repaints it.
   const news = document.getElementById('pl-news');
   if (news) news.hidden = true;
