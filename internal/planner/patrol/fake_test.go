@@ -41,14 +41,15 @@ type fakeRepo struct {
 
 // fakeGH is what gh answers for one repository.
 type fakeGH struct {
+	// parent is the repository this one is a fork of ("owner/name"), ""
+	// for none.
+	parent string
 	// def is the default branch; full is owner/name as GitHub spells it,
 	// "" for the spelling of the key.
 	def, full           string
 	pulls, runs, issues string
 	// heads answers `gh pr list --head=<branch>` per branch; missing: [].
 	heads map[string]string
-	// parent is the repository this one is a fork of ("owner/name").
-	parent string
 	// fail is the "<command> <subcommand>" that fails ("pr list"); "head"
 	// fails the per-branch lookups only.
 	fail string
