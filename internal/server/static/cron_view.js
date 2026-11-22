@@ -969,7 +969,7 @@ function ensureCronRunningTick() {
 }
 
 // cronJobCardHtml renders a single cron row. v3 redesign: high-density row
-// replaces the v2 card (see docs/TODO.md; inspired by Claude Code Routines,
+// replaces the v2 card (inspired by Claude Code Routines,
 // Every Agent Tasks, shadcn cron-jobs block). Structure:
 //
 //   ● title                 每天 04:00  ...  14h 后    [▷ 运行] [⋯]

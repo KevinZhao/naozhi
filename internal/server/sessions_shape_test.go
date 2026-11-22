@@ -19,7 +19,7 @@ import (
 // WHY THIS CONTRACT EXISTS:
 //   - naozhi has no dashboard API versioning and no OpenAPI spec; the only
 //     defense against a silent refactor dropping a key dashboard.js relies on
-//     is regex-based shape tests like this one (RNEW-ARCH-401 in docs/TODO.md).
+//     is regex-based shape tests like this one.
 //   - dashboard.js (internal/server/static/dashboard.js) treats "sessions"
 //     as an array and per-row accesses .key, .state, .last_active, .workspace.
 //     Renaming or removing any of those yields a silent empty-sidebar bug.
