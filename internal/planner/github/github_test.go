@@ -351,3 +351,40 @@ func TestRefreshSimilarReposApart(t *testing.T) {
 		t.Errorf("the old-named file kept: %v", err)
 	}
 }
+
+// TestExecDeadlineHolds: a call ends by its deadline though something the
+// command started still holds its output open (git status in a repository
+// with submodules, a credential helper), and a command that ended well is
+// not failed, nor waited on, for a process it left behind.
+func TestExecDeadlineHolds(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	// Each left process outlives its call by 20 seconds at most and holds
+	// nothing but the pipe; ten is far from both ends on a loaded machine.
+	const bound = 10 * time.Second
+	t.Run("killed", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		start := time.Now()
+		_, err := Exec(ctx, t.TempDir(), "sh", "-c", "sleep 20 & wait")
+		if err == nil || !strings.Contains(err.Error(), "超时") {
+			t.Errorf("err = %v, want a timeout", err)
+		}
+		if d := time.Since(start); d > bound {
+			t.Errorf("the call returned after %s, held by a process the command left", d)
+		}
+	})
+	t.Run("ended", func(t *testing.T) {
+		t.Parallel()
+		start := time.Now()
+		out, err := Exec(context.Background(), t.TempDir(), "sh", "-c", "sleep 20 & echo done")
+		if err != nil || out != "done\n" {
+			t.Errorf("out = %q, err = %v, want the command's output", out, err)
+		}
+		if d := time.Since(start); d > bound {
+			t.Errorf("the call returned after %s, held by a process the command left", d)
+		}
+	})
+}

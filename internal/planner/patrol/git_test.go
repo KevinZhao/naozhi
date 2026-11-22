@@ -26,13 +26,23 @@ func git(t *testing.T, dir string, at time.Time, args ...string) {
 	}
 }
 
-// clone is a repository at root/main with a bare remote beside it, one
-// commit on master pushed 30 days before at.
-func clone(t *testing.T, at time.Time) (root, main string) {
+// realGit skips a test where there is no git, and keeps the git the patrol
+// runs off the machine's own configuration: a global ignore file or
+// status.showUntrackedFiles would change what the checks find.
+func realGit(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("no git")
 	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+}
+
+// clone is a repository at root/main with a bare remote beside it, one
+// commit on master pushed 30 days before at.
+func clone(t *testing.T, at time.Time) (root, main string) {
+	t.Helper()
+	realGit(t)
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -189,17 +199,37 @@ func TestBranches(t *testing.T) {
 	git(t, main, at, "push", "-q", "-u", "origin", "merged")
 	git(t, main, at, "merge", "-q", "--ff-only", "merged")
 	git(t, main, at, "push", "-q", "origin", "master")
+	// Cut from another branch of origin and never pushed: git makes that
+	// branch its upstream from the start, and it is ahead of it.
+	commit(t, main, "develop", old)
+	git(t, main, at, "push", "-q", "origin", "develop")
+	git(t, main, old, "checkout", "-q", "-b", "stacked", "origin/develop")
+	git(t, main, old, "commit", "-q", "--allow-empty", "-m", "stacked")
+	git(t, main, at, "checkout", "-q", "master")
+	git(t, main, at, "branch", "-q", "-D", "develop")
+	// Tracks a local branch, never pushed.
+	git(t, main, old, "checkout", "-q", "-b", "local-track", "--track", "master")
+	git(t, main, old, "commit", "-q", "--allow-empty", "-m", "local-track")
+	git(t, main, at, "checkout", "-q", "master")
+	// Pushed under another name, which it tracks.
+	commit(t, main, "aliased", at.Add(-5*day))
+	git(t, main, at, "push", "-q", "origin", "aliased:published")
+	git(t, main, at, "branch", "-q", "--set-upstream-to=origin/published", "aliased")
 
 	want := []string{
 		"分支 plain 推上去了还没合进 master，最后的提交在 6 天前",
+		"分支 aliased（远端是 published）推上去了还没合进 master，最后的提交在 5 天前",
 		"分支 feat 推上去了还没合进 master，最后的提交在 4 天前",
 	}
 	rep := look(t, at, main)
 	if got := texts(rep.branches); !slices.Equal(got, want) {
 		t.Fatalf("branches = %v, want %v", got, want)
 	}
-	if rep.branches[1].Source != "check:branch:feat" || !strings.HasSuffix(rep.branches[1].Line, "（按本地上次 fetch 的状态）") {
-		t.Errorf("hit = %+v", rep.branches[1])
+	if rep.branches[2].Source != "check:branch:feat" || !strings.HasSuffix(rep.branches[2].Line, "（按本地上次 fetch 的状态）") {
+		t.Errorf("hit = %+v", rep.branches[2])
+	}
+	if rep.branches[1].Source != "check:branch:aliased" {
+		t.Errorf("a branch pushed under another name is told by %q, want its local name", rep.branches[1].Source)
 	}
 	if len(rep.notes) != 0 || rep.gh != nil {
 		t.Errorf("notes = %v, gh = %v", rep.notes, rep.gh)
@@ -214,8 +244,14 @@ func TestBranches(t *testing.T) {
 	// Merged since: it no longer hits.
 	git(t, main, at, "merge", "-q", "-m", "merge feat", "feat")
 	git(t, main, at, "push", "-q", "origin", "master")
-	if got := texts(look(t, at, main).branches); !slices.Equal(got, want[:1]) {
-		t.Errorf("after the merge branches = %v, want %v", got, want[:1])
+	if got := texts(look(t, at, main).branches); !slices.Equal(got, want[:2]) {
+		t.Errorf("after the merge branches = %v, want %v", got, want[:2])
+	}
+
+	// The default branch ahead of origin's is not a branch pushed and left.
+	git(t, main, old, "commit", "-q", "--allow-empty", "-m", "not pushed yet")
+	if got := texts(look(t, at, main).branches); !slices.Equal(got, want[:2]) {
+		t.Errorf("with master ahead of origin branches = %v, want %v", got, want[:2])
 	}
 }
 
@@ -223,12 +259,10 @@ func TestBranches(t *testing.T) {
 // branches were not looked at; one with nothing pushed says nothing.
 func TestBranchesNoDefault(t *testing.T) {
 	at := time.Now()
+	realGit(t)
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
-	}
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("no git")
 	}
 	remote, main := filepath.Join(root, "remote.git"), filepath.Join(root, "main")
 	git(t, root, at, "init", "-q", "--bare", "-b", "trunk", remote)
@@ -247,16 +281,20 @@ func TestBranchesNoDefault(t *testing.T) {
 // TestNotARepository: a directory in no repository is not a failure; the
 // worktrees a put-away left below it are still found.
 func TestNotARepository(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("no git")
-	}
-	dir, err := filepath.EvalSymlinks(t.TempDir())
+	realGit(t)
+	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
+	dir := filepath.Join(root, "ws")
 	left, gone := filepath.Join(dir, "repo", ".claude", "worktrees", "x"), filepath.Join(dir, "repo", ".claude", "worktrees", "gone")
-	if err := os.MkdirAll(left, 0o700); err != nil {
-		t.Fatal(err)
+	// One a put-away left in a repository that is not below dir: it is on
+	// disk, and not this directory's.
+	elsewhere := filepath.Join(root, "elsewhere", "wt")
+	for _, d := range []string{left, elsewhere} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	at := time.Now()
 	p := New(Config{Dir: t.TempDir(), Now: func() time.Time { return at }, Worktrees: func() []Worktree {
@@ -264,7 +302,7 @@ func TestNotARepository(t *testing.T) {
 			{Dir: left, GitDir: filepath.Join(dir, "repo", ".git"), Why: "有未提交的改动"},
 			{Dir: left, GitDir: filepath.Join(dir, "repo", ".git"), Why: "有未提交的改动"},
 			{Dir: gone, GitDir: filepath.Join(dir, "repo", ".git")},
-			{Dir: filepath.Join(filepath.Dir(dir), "elsewhere", "wt"), GitDir: filepath.Join(filepath.Dir(dir), "elsewhere", ".git")},
+			{Dir: elsewhere, GitDir: filepath.Join(root, "elsewhere", ".git")},
 		}
 	}})
 	rep := p.inspect(context.Background(), &round{now: at, repos: map[string]*repoReport{}}, target{ID: wsA, Dirs: []string{dir}}, dir)
@@ -311,8 +349,54 @@ func TestLinkedWorktree(t *testing.T) {
 	if got, want := names(look(t, at, wt, both...)), []string{"feat"}; !slices.Equal(got, want) {
 		t.Errorf("the linked worktree reports %v, want %v", got, want)
 	}
+	// A registered directory below another: the deepest that holds the
+	// worktree reports its branch.
+	nested := append(slices.Clone(both), workspace.Dir{ID: "ws_ccccccc3", Path: filepath.Join(main, ".claude", "worktrees", "inside")})
+	if got, want := names(look(t, at, main, nested...)), []string{"loose"}; !slices.Equal(got, want) {
+		t.Errorf("with a worktree below it registered, the main worktree reports %v, want %v", got, want)
+	}
+	if got, want := names(look(t, at, nested[2].Path, nested...)), []string{"inside"}; !slices.Equal(got, want) {
+		t.Errorf("the worktree registered below the main one reports %v, want %v", got, want)
+	}
 	// The linked worktree not registered: the main one reports its branch.
 	if got, want := names(look(t, at, main, both[0])), []string{"feat", "inside", "loose"}; !slices.Equal(got, want) {
 		t.Errorf("alone, the main worktree reports %v, want %v", got, want)
+	}
+}
+
+// TestCaseVariantPaths: on a filesystem that folds case a registered path
+// may spell a directory otherwise than git does (the registry keeps what
+// the session came in by, git says what is on disk). The worktrees a
+// put-away left are still found there, and a branch is still reported by
+// the registered directory its worktree is in.
+func TestCaseVariantPaths(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk, registered := filepath.Join(root, "Repo"), filepath.Join(root, "repo")
+	left := filepath.Join(disk, ".claude", "worktrees", "x")
+	if err := os.MkdirAll(left, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if a, err := os.Stat(disk); err != nil {
+		t.Fatal(err)
+	} else if b, err := os.Stat(registered); err != nil || !os.SameFile(a, b) {
+		t.Skip("the filesystem tells case apart")
+	}
+	p := New(Config{Dir: t.TempDir(), Worktrees: func() []Worktree {
+		return []Worktree{{Dir: left, GitDir: filepath.Join(disk, ".git"), Why: "有未提交的改动"}}
+	}})
+	if got, want := texts(p.leftWorktrees(registered)), []string{"收起时留下的 worktree .claude/worktrees/x（有未提交的改动）"}; !slices.Equal(got, want) {
+		t.Errorf("worktrees = %v, want %v", got, want)
+	}
+
+	other := filepath.Join(root, "other")
+	dirs := []workspace.Dir{{ID: wsA, Path: other}, {ID: wsB, Path: registered}}
+	if !reports(dirs, registered, false, disk) {
+		t.Error("the registered directory does not report the branch checked out in it")
+	}
+	if reports(dirs, other, true, disk) {
+		t.Error("the main worktree reports a branch whose worktree is a registered directory")
 	}
 }

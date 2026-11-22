@@ -22,7 +22,7 @@ const (
 
 	greenPull = `{"number":12,"title":"修正重连时的\n会话恢复","createdAt":"2026-11-14T03:00:00Z","isDraft":false,"headRefName":"fix/reconnect",
 		"statusCheckRollup":[{"__typename":"CheckRun","name":"test","workflowName":"CI","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-11-14T03:01:00Z"}]}`
-	failedRun = `{"workflowName":"test","status":"completed","conclusion":"failure","createdAt":"2026-11-22T02:02:00Z","url":"https://github.com/acme/gateway/actions/runs/123"}`
+	failedRun = `{"workflowName":"test","event":"push","status":"completed","conclusion":"failure","createdAt":"2026-11-22T02:02:00Z","url":"https://github.com/acme/gateway/actions/runs/123"}`
 	oldIssues = `[{"number":1,"updatedAt":"2026-10-01T00:00:00Z"},{"number":2,"updatedAt":"2026-10-02T00:00:00Z"},{"number":3,"updatedAt":"2026-10-03T00:00:00Z"},
 		{"number":4,"updatedAt":"2026-10-24T10:00:00Z"}]`
 
@@ -179,7 +179,7 @@ func TestGitHubFailure(t *testing.T) {
 				t.Fatalf("items with gh failing =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 			}
 			md := e.read(wsA + ".md")
-			stale := "## GitHub（acme/gateway）\n\n> 最近一次检查失败：2026-11-23 14:02（gh " + strings.Fields(fail)[0] + ": error connecting to api.github.com），下面是上一次成功时的结果。\n\n- PR #12 开了 9 天"
+			stale := "## GitHub（acme/gateway）\n\n> 最近一次检查失败：2026-11-23 14:02（gh " + strings.Fields(fail)[0] + ": error connecting to api.github.com），下面是上一次成功（2026-11-23 14:02）时的结果。\n\n- PR #12 开了 9 天"
 			for _, want := range []string{stale, "- main 最近一次 CI 失败：test", "- 3 个 issue 超过 30 天没动",
 				"- 推上去的分支这一轮没查成（gh " + strings.Fields(fail)[0] + ": error connecting to api.github.com），未了事项里是上一次的结果\n"} {
 				if !strings.Contains(md, want) {
@@ -240,9 +240,71 @@ func TestLocalGitFailure(t *testing.T) {
 		t.Errorf("items with git failing =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(before, "\n"))
 	}
 	md := e.read(wsA + ".md")
-	want := "## git（" + dir + "）\n\n> 最近一次检查失败：2026-11-23 14:02（git status: 超时），下面是上一次成功时的结果。\n\n- 2 处改动没提交，最早的在 9 天前\n- 分支 feat/reconnect"
+	want := "## git（" + dir + "）\n\n> 最近一次检查失败：2026-11-23 14:02（git status: 超时），下面是上一次成功（2026-11-23 14:02）时的结果。\n\n- 2 处改动没提交，最早的在 9 天前\n- 分支 feat/reconnect"
 	if !strings.Contains(md, want) {
 		t.Errorf("file with git failing lacks %q:\n%s", want, md)
+	}
+}
+
+// TestStaleSince: a section kept over failed checks says when its body was
+// written, however many rounds failed since: the file's own date is the
+// last round's. With git failing before the directory's repository is
+// told, the GitHub section the file had is kept the same way, and the
+// repository's items with it.
+func TestStaleSince(t *testing.T) {
+	e := newEnv(t)
+	dir := gateway(e)
+	e.round()
+	before := e.open()
+	at := func(d time.Duration) {
+		e.cfg.Now = func() time.Time { return now.Add(d) }
+		e.active[wsA] = now.Add(d) // a session there, still
+		e.p = New(e.cfg)
+		e.round()
+	}
+
+	e.fe.gh["acme/gateway"].fail = "pr list"
+	at(time.Hour)
+	at(21 * day)
+	md := e.read(wsA + ".md")
+	want := "更新于 2026-12-14 14:02（"
+	if !strings.Contains(md, want) {
+		t.Errorf("file lacks %q:\n%s", want, md)
+	}
+	want = "## GitHub（acme/gateway）\n\n> 最近一次检查失败：2026-12-14 14:02（gh pr: error connecting to api.github.com），下面是上一次成功（2026-11-23 14:02）时的结果。\n\n- PR #12 开了 9 天"
+	if !strings.Contains(md, want) || strings.Count(md, stalePrefix) != 1 {
+		t.Errorf("file after three weeks of gh failing lacks %q:\n%s", want, md)
+	}
+
+	// gh would answer again, but git cannot say which repository this is.
+	e.fe.gh["acme/gateway"] = &fakeGH{def: "main"}
+	e.fe.repos[dir].fail = "remote"
+	at(22 * day)
+	md = e.read(wsA + ".md")
+	for _, want := range []string{
+		"## git（" + dir + "）\n\n> 最近一次检查失败：2026-12-15 14:02（git remote: 超时），下面是上一次成功（2026-12-14 14:02）时的结果。\n\n- 2 处改动没提交",
+		"## GitHub（acme/gateway）\n\n> 最近一次检查失败：2026-12-15 14:02（git remote: 超时），下面是上一次成功（2026-11-23 14:02）时的结果。\n\n- PR #12 开了 9 天",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("file with git remote failing lacks %q:\n%s", want, md)
+		}
+	}
+	if n := strings.Count(md, "## GitHub（"); n != 1 {
+		t.Errorf("%d GitHub sections, want the one the file had:\n%s", n, md)
+	}
+	// The local check went on while gh failed, and its item's text with it.
+	notDirty := func(items []string) []string {
+		return slices.DeleteFunc(slices.Clone(items), func(s string) bool { return strings.HasPrefix(s, "check:dirty:") })
+	}
+	if got, want := notDirty(e.open()), notDirty(before); len(got) != len(before)-1 || !slices.Equal(got, want) {
+		t.Errorf("items with the checks failing =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+
+	// Back: the sections are this round's again.
+	e.fe.repos[dir].fail = ""
+	at(23 * day)
+	if md := e.read(wsA + ".md"); strings.Contains(md, stalePrefix) || !strings.Contains(md, "## GitHub（acme/gateway）\n\n无\n") {
+		t.Errorf("file once the checks are made again:\n%s", md)
 	}
 }
 
@@ -286,6 +348,12 @@ func TestScope(t *testing.T) {
 	e.round()
 	if !strings.Contains(e.read(wsB+".md"), "- 1 处改动没提交，最早的在 20 天前") {
 		t.Errorf("the workspace back in scope:\n%s", e.read(wsB+".md"))
+	}
+	// A check's items are one workspace's: the other's stay.
+	for _, source := range []string{"check:dirty:" + dir, "check:dirty:" + idle} {
+		if !slices.ContainsFunc(e.open(), func(s string) bool { return strings.HasPrefix(s, source+"|") }) {
+			t.Errorf("no open item %s with both workspaces in scope: %v", source, e.open())
+		}
 	}
 
 	// The first one idle for 8 days: nothing of it changes, whatever
@@ -435,7 +503,9 @@ func TestCancelled(t *testing.T) {
 
 // TestPrune: the file of a workspace no longer registered is removed and
 // the checks' items filed under it are closed; naozhi.md, the files the
-// deep check keeps beside and the items no check here wrote stay.
+// deep check keeps beside and the items no check here wrote stay. A
+// registry with nothing in it prunes nothing: it is one that could not be
+// read, not every workspace gone at once.
 func TestPrune(t *testing.T) {
 	e := newEnv(t)
 	gateway(e)
@@ -457,7 +527,16 @@ func TestPrune(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	before, file := e.open(), e.read(wsA+".md")
 	e.dirs = nil
+	e.round()
+	if got := e.open(); !slices.Equal(got, before) || e.read(wsA+".md") != file || e.read("ws_zzzzzzz9.md") == "" {
+		t.Errorf("an empty registry pruned: items = %v", got)
+	}
+
+	// Another workspace is registered, this one no longer.
+	e.workspace(wsB, "other")
+	e.active[wsB] = now.Add(-30 * day)
 	e.round()
 	var names []string
 	entries, _ := os.ReadDir(e.cfg.Dir)
@@ -503,6 +582,58 @@ func TestPerCheckCap(t *testing.T) {
 	}
 	if n := e.fe.count("gh "); n != 0 {
 		t.Errorf("gh ran %d times for a repository not on GitHub", n)
+	}
+}
+
+// TestSeveralDirectories: a workspace's cap is over its directories
+// together, and each directory's section says which of its own hits were
+// left out; a branch of one name in two of its repositories is two items.
+func TestSeveralDirectories(t *testing.T) {
+	e := newEnv(t)
+	a, b := e.workspace(wsA, "a"), e.workspace(wsA, "b")
+	for i, dir := range []string{a, b} {
+		repo := &fakeRepo{remotes: "origin\t/srv/git/" + filepath.Base(dir) + ".git (fetch)\n", remoteRefs: []string{"master", "shared"}}
+		repo.branches = append(repo.branches, branchLine("shared", "", now.Add(-time.Duration(20-i)*day-time.Hour), ""))
+		for j := range 3 {
+			name := fmt.Sprintf("%s%d", filepath.Base(dir), j)
+			repo.remoteRefs = append(repo.remoteRefs, name)
+			repo.branches = append(repo.branches, branchLine(name, "", now.Add(-time.Duration(10-j)*day-time.Hour), ""))
+		}
+		e.fe.repos[dir] = repo
+	}
+	e.round()
+	want := []string{
+		"check:branch:a0:" + a + "|分支 a0 推上去了还没合进 master，最后的提交在 10 天前",
+		"check:branch:a1:" + a + "|分支 a1 推上去了还没合进 master，最后的提交在 9 天前",
+		"check:branch:a2:" + a + "|分支 a2 推上去了还没合进 master，最后的提交在 8 天前",
+		"check:branch:shared:" + a + "|分支 shared 推上去了还没合进 master，最后的提交在 20 天前",
+		"check:branch:shared:" + b + "|分支 shared 推上去了还没合进 master，最后的提交在 19 天前",
+	}
+	if got := e.open(); !slices.Equal(got, want) {
+		t.Fatalf("items =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	md := e.read(wsA + ".md")
+	first, second, ok := strings.Cut(md, "## git（"+b+"）")
+	if !ok || strings.Count(first, "- 分支 ") != 4 || strings.Contains(first, "没列进未了事项") {
+		t.Errorf("the first directory's section, all of whose hits were filed:\n%s", md)
+	}
+	if strings.Count(second, "- 分支 ") != 4 || !strings.Contains(second, "- 分支 b2 推上去了还没合进 master，最后的提交在 8 天前（按本地上次 fetch 的状态）\n- （上面这一类的后 3 条没列进未了事项）\n") {
+		t.Errorf("the second directory's section, three of whose hits were not filed:\n%s", md)
+	}
+
+	// The next round finds the same: nothing is filed again.
+	ids := map[string]string{}
+	for _, it := range e.items.Items() {
+		ids[it.Source] = it.ID
+	}
+	e.round()
+	for _, it := range e.items.Items() {
+		if ids[it.Source] != it.ID {
+			t.Errorf("item %s was filed again", it.Source)
+		}
+	}
+	if got := e.open(); !slices.Equal(got, want) {
+		t.Errorf("after another round items =\n%s", strings.Join(got, "\n"))
 	}
 }
 
@@ -625,6 +756,34 @@ func TestRoutines(t *testing.T) {
 	}
 	if md := e.read(ownFile); !strings.Contains(md, "## 例行任务\n\n无\n") {
 		t.Errorf("naozhi.md:\n%s", md)
+	}
+}
+
+// TestAllWired: as naozhi wires it — the workspaces' checks and the
+// standing tasks' together — each check's items are its own: none closes
+// another's, round after round.
+func TestAllWired(t *testing.T) {
+	e := newEnv(t)
+	gateway(e)
+	e.cfg.Routines = func() []Routine { return []Routine{{ID: "j1", Title: "账单更新", Failures: 2}} }
+	e.p = New(e.cfg)
+	e.round()
+	before := e.open()
+	if len(before) != 7 || !slices.Contains(before, "check:routine:j1|例行任务「账单更新」连续失败 2 次") {
+		t.Fatalf("items = %v, want the workspace's six and the standing task's", before)
+	}
+	ids := map[string]string{}
+	for _, it := range e.items.Items() {
+		ids[it.Source] = it.ID
+	}
+	e.round()
+	if got := e.open(); !slices.Equal(got, before) {
+		t.Errorf("after another round items = %v, want %v", got, before)
+	}
+	for _, it := range e.items.Items() {
+		if ids[it.Source] != it.ID {
+			t.Errorf("item %s was closed and filed again", it.Source)
+		}
 	}
 }
 

@@ -165,8 +165,12 @@ func TestPatrolSelf(t *testing.T) {
 	// The inbox journals the items it opens: the start after a crash is
 	// one, by its source.
 	inbox := notify.New(notify.Config{System: func(string, string) error { return nil }, Journal: j})
-	inbox.Add(notify.Item{Kind: notify.KindNotice, Level: notify.LevelTimely, Source: notify.CrashSource + now.Format(time.RFC3339), Title: "naozhi 上次异常退出"})
+	crash := notify.CrashSource + now.Format(time.RFC3339)
+	inbox.Add(notify.Item{Kind: notify.KindNotice, Level: notify.LevelTimely, Source: crash, Title: "naozhi 上次异常退出"})
 	inbox.Add(notify.Item{Kind: notify.KindNotice, Level: notify.LevelTimely, Source: "disk", Title: "磁盘快满了"})
+	// The user closing the notice is journaled with the same source: it is
+	// not another crash.
+	inbox.DismissSource(crash)
 
 	got := PatrolSelf(j)(since, time.Now().Add(time.Minute))
 	if want := (patrol.Self{ScoutRuns: 3, ScoutFailed: 1, Unrun: 2, CustodyStopped: 1, Crashes: 1}); got != want {

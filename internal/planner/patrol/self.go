@@ -59,13 +59,21 @@ func (p *Patrol) own(rd *round) {
 		})
 		lines = hitLines(hits)
 	}
-	week := ""
-	if p.cfg.Self != nil {
-		week = weekLine(rd.now, p.cfg.Self(weekStart(rd.now), rd.now))
-	}
 	path := filepath.Join(p.cfg.Dir, ownFile)
-	old, _ := os.ReadFile(path)
-	if err := osutil.WriteFileAtomic(path, renderOwn(rd.now, lines, p.cfg.Routines != nil, week, string(old)), 0o600); err != nil {
+	data, _ := os.ReadFile(path)
+	week, old := "", string(data)
+	if p.cfg.Self != nil {
+		monday := weekStart(rd.now)
+		week = weekLine(rd.now, p.cfg.Self(monday, rd.now))
+		// The week before was last counted by its last round, which left
+		// out what came after it, and days if naozhi was paused or off. The
+		// first round of a new week counts it whole.
+		if !hasWeek(old, weekLabel(rd.now)) {
+			before := monday.AddDate(0, 0, -7)
+			old = withWeek(old, weekLine(before, p.cfg.Self(before, monday)))
+		}
+	}
+	if err := osutil.WriteFileAtomic(path, renderOwn(rd.now, lines, p.cfg.Routines != nil, week, old), 0o600); err != nil {
 		slog.Warn("planner patrol: file not written", "path", path, "err", err)
 	}
 }
@@ -84,6 +92,32 @@ func weekLabel(now time.Time) string {
 
 // weekRE is a weekly line, by its label.
 var weekRE = regexp.MustCompile(`^- (\d{4}-W\d{2})：`)
+
+// hasWeek reports whether old has the weekly line labelled label.
+func hasWeek(old, label string) bool {
+	for l := range strings.SplitSeq(old, "\n") {
+		if m := weekRE.FindStringSubmatch(l); m != nil && m[1] == label {
+			return true
+		}
+	}
+	return false
+}
+
+// withWeek is old with line as its first weekly line, in place of the one
+// it had for that week.
+func withWeek(old, line string) string {
+	label := ""
+	if m := weekRE.FindStringSubmatch(line); m != nil {
+		label = m[1]
+	}
+	kept := []string{line}
+	for l := range strings.SplitSeq(old, "\n") {
+		if m := weekRE.FindStringSubmatch(l); m == nil || m[1] != label {
+			kept = append(kept, l)
+		}
+	}
+	return strings.Join(kept, "\n")
+}
 
 // weekLine is the line of now's week so far.
 func weekLine(now time.Time, s Self) string {

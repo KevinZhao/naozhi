@@ -3,6 +3,7 @@ package patrol
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -43,6 +44,9 @@ type fakeRepo struct {
 
 // fakeGH is what gh answers for one repository.
 type fakeGH struct {
+	// parent is the repository this one is a fork of ("owner/name"), ""
+	// for none.
+	parent string
 	// def is the default branch; full is owner/name as GitHub spells it,
 	// "" for the spelling of the key.
 	def, full           string
@@ -130,6 +134,9 @@ func (f *fakeExec) run(_ context.Context, dir, name string, args ...string) (str
 			return "", errors.New("gh " + args[0] + ": error connecting to api.github.com")
 		}
 		switch {
+		case cmd == "repo view" && g.parent != "":
+			owner, name, _ := strings.Cut(g.parent, "/")
+			return `{"nameWithOwner":"` + strings.ToLower(repo) + `","defaultBranchRef":{"name":"` + g.def + `"},"parent":{"name":"` + name + `","owner":{"login":"` + owner + `"}}}`, nil
 		case lookup:
 			if out, ok := g.heads[head]; ok {
 				return out, nil
@@ -145,12 +152,31 @@ func (f *fakeExec) run(_ context.Context, dir, name string, args ...string) (str
 		case cmd == "pr list":
 			return orEmpty(g.pulls), nil
 		case cmd == "run list":
+			if i := slices.Index(args, "--event"); i >= 0 {
+				return byEvent(orEmpty(g.runs), args[i+1])
+			}
 			return orEmpty(g.runs), nil
 		case cmd == "issue list":
 			return orEmpty(g.issues), nil
 		}
 	}
 	return "", errors.New("unexpected " + name + " " + strings.Join(args, " "))
+}
+
+// byEvent is the runs of a JSON list an event triggered, as gh's --event
+// keeps them.
+func byEvent(runs, event string) (string, error) {
+	var all, kept []map[string]any
+	if err := json.Unmarshal([]byte(runs), &all); err != nil {
+		return "", err
+	}
+	for _, r := range all {
+		if r["event"] == event {
+			kept = append(kept, r)
+		}
+	}
+	out, err := json.Marshal(append([]map[string]any{}, kept...))
+	return string(out), err
 }
 
 func orEmpty(s string) string {
@@ -173,8 +199,12 @@ func (f *fakeExec) count(prefix string) int {
 	return n
 }
 
-// branchLine is one line of the unmerged local branches as git lists them.
+// branchLine is one line of the unmerged local branches as git lists them;
+// upstream is a remote-tracking branch ("origin/x") or a full ref name.
 func branchLine(name, upstream string, tip time.Time, worktree string) string {
+	if upstream != "" && !strings.HasPrefix(upstream, "refs/") {
+		upstream = "refs/remotes/" + upstream
+	}
 	return strings.Join([]string{"refs/heads/" + name, upstream, "", strconv.FormatInt(tip.Unix(), 10), worktree}, "\x00")
 }
 

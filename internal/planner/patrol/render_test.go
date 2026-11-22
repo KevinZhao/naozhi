@@ -135,3 +135,44 @@ func TestOwnFile(t *testing.T) {
 		t.Errorf("the weekly line filed items: %v", got)
 	}
 }
+
+// TestOwnFileWeekBefore: the week before was last counted by its last
+// round, on Sunday at the latest and earlier when naozhi was paused or
+// off. The first round of a new week counts it whole, once.
+func TestOwnFileWeekBefore(t *testing.T) {
+	e := newEnv(t)
+	type span struct{ since, until time.Time }
+	var asked []span
+	e.cfg.Self = func(s, u time.Time) Self {
+		asked = append(asked, span{s, u})
+		if u.Equal(weekStart(now)) {
+			return Self{ScoutRuns: 12, ScoutFailed: 3}
+		}
+		return Self{ScoutRuns: 2}
+	}
+	e.p = New(e.cfg)
+	if err := os.MkdirAll(e.cfg.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := "# naozhi 自己\n\n## 每周\n\n- 2026-W47：巡检 10 次、失败 1 次（10%）\n- 2026-W46：巡检 46 次\n"
+	if err := os.WriteFile(filepath.Join(e.cfg.Dir, ownFile), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.round()
+	want := "- 2026-W48：巡检 2 次、失败 0 次（0%） · 没执行的动作块 0 个 · 托管停下 0 次 · 异常退出 0 次\n" +
+		"- 2026-W47：巡检 12 次、失败 3 次（25%） · 没执行的动作块 0 个 · 托管停下 0 次 · 异常退出 0 次\n" +
+		"- 2026-W46：巡检 46 次\n"
+	if md := e.read(ownFile); !strings.HasSuffix(md, want) {
+		t.Errorf("naozhi.md =\n%s\nwant it to end with\n%s", md, want)
+	}
+	monday := weekStart(now)
+	if len(asked) != 2 || !asked[1].since.Equal(monday.AddDate(0, 0, -7)) || !asked[1].until.Equal(monday) {
+		t.Errorf("counts asked for %v, want this week's and then the whole week before", asked)
+	}
+
+	// The week has its line now: the one before is not counted again.
+	e.round()
+	if md := e.read(ownFile); !strings.HasSuffix(md, want) || len(asked) != 3 {
+		t.Errorf("after another round counts were asked for %d times (want 3), naozhi.md =\n%s", len(asked), md)
+	}
+}

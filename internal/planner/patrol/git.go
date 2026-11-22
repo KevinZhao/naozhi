@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/planner/github"
 	"github.com/naozhi/naozhi/internal/planner/workspace"
 )
@@ -30,9 +31,12 @@ type dirReport struct {
 	// applies to it.
 	notRepo bool
 	// err is the local git failing: the directory's section keeps its last
-	// body, and its dirty and branch items stay as they are.
-	err   error
-	dirty []hit
+	// body, and its dirty and branch items stay as they are. repoUnknown
+	// says it failed before telling which repository dir is in: the file's
+	// GitHub sections are kept as well.
+	err         error
+	repoUnknown bool
+	dirty       []hit
 	// branches are the branches pushed and left; branchErr is that check
 	// not made (the pull requests could not be asked for), notes what it
 	// left out.
@@ -54,13 +58,13 @@ func (p *Patrol) inspect(ctx context.Context, rd *round, t target, dir string) d
 		if strings.Contains(err.Error(), "not a git repository") {
 			rep.notRepo = true
 		} else {
-			rep.err = err
+			rep.err, rep.repoUnknown = err, true
 		}
 		return rep
 	}
 	lines := strings.Split(strings.TrimRight(out, "\r\n"), "\n")
 	if len(lines) != 3 {
-		rep.err = errors.New("git rev-parse: 输出不认识")
+		rep.err, rep.repoUnknown = errors.New("git rev-parse: 输出不认识"), true
 		return rep
 	}
 	top, gitDir, common := lines[0], lines[1], lines[2]
@@ -71,7 +75,7 @@ func (p *Patrol) inspect(ctx context.Context, rd *round, t target, dir string) d
 	// the local checks below.
 	remotes, err := p.call(ctx, dir, "git", "remote", "-v")
 	if err != nil {
-		rep.err = err
+		rep.err, rep.repoUnknown = err, true
 		return rep
 	}
 	if owner, name, ok := github.PickRemote(remotes); ok {
@@ -147,16 +151,33 @@ func statusPaths(out string) []string {
 
 // branch is a local branch not merged into the default branch.
 type branch struct {
-	name, upstream string
-	// gone says its upstream was deleted on the remote.
-	gone bool
-	tip  time.Time
+	name string
+	// remote is the name it was pushed to origin under, "" for not pushed:
+	// its own, else that of the origin branch it tracks.
+	remote string
+	tip    time.Time
 	// worktree is where it is checked out, "" for nowhere.
 	worktree string
 }
 
-// branches is the local branches pushed (their name is on origin, or they
-// track a remote branch other than the default) whose last commit is
+// pushedAs is the name a local branch is on origin under, "" when it was
+// not pushed: its own name when origin has it, else the origin branch it
+// tracks when its tip is in that one (it was pushed under another name).
+// An upstream alone does not say pushed: a branch cut from a remote branch
+// tracks it from its first commit, and a branch may track a local one. The
+// pull request, if any, is under the name returned.
+func pushedAs(name, upstream, track, def string, remote map[string]bool) string {
+	if remote[name] {
+		return name
+	}
+	up, ok := strings.CutPrefix(upstream, "refs/remotes/origin/")
+	if !ok || !remote[up] || up == def || strings.Contains(track, "ahead") {
+		return ""
+	}
+	return up
+}
+
+// branches is the local branches pushed (pushedAs) whose last commit is
 // branchDays old and that are not merged into the default branch. In a
 // GitHub repository merged is having, or having had, a pull request: a
 // squash merge leaves the branch no ancestor of anything. Elsewhere it is
@@ -204,7 +225,7 @@ func (p *Patrol) branches(ctx context.Context, rd *round, rep *dirReport, main b
 		return
 	}
 	out, err = p.call(ctx, dir, "git", "for-each-ref", "--no-merged=refs/remotes/origin/"+def,
-		"--format=%(refname)%00%(upstream:short)%00%(upstream:track)%00%(committerdate:unix)%00%(worktreepath)", "refs/heads")
+		"--format=%(refname)%00%(upstream)%00%(upstream:track)%00%(committerdate:unix)%00%(worktreepath)", "refs/heads")
 	if err != nil {
 		rep.err = err
 		return
@@ -220,9 +241,8 @@ func (p *Patrol) branches(ctx context.Context, rd *round, rep *dirReport, main b
 		if !ok || err != nil {
 			continue
 		}
-		b := branch{name: name, upstream: f[1], gone: strings.Contains(f[2], "gone"), tip: time.Unix(unix, 0), worktree: f[4]}
-		pushed := remote[b.name] || (b.upstream != "" && b.upstream != "origin/"+def && !b.gone)
-		if b.name == def || !pushed || rd.now.Sub(b.tip) < branchDays*day || !reports(rd.dirs, dir, main, b.worktree) {
+		b := branch{name: name, remote: pushedAs(name, f[1], f[2], def, remote), tip: time.Unix(unix, 0), worktree: f[4]}
+		if b.name == def || b.remote == "" || rd.now.Sub(b.tip) < branchDays*day || !reports(rd.dirs, dir, main, b.worktree) {
 			continue
 		}
 		left = append(left, b)
@@ -247,7 +267,7 @@ func (p *Patrol) branches(ctx context.Context, rd *round, rep *dirReport, main b
 	}
 	unknown := 0
 	for _, b := range left {
-		has, known, err := p.hasPull(ctx, rep.gh, dir, b.name)
+		has, known, err := p.hasPull(ctx, rep.gh, dir, b.remote)
 		switch {
 		case err != nil:
 			rep.branches, rep.branchErr = nil, err
@@ -264,7 +284,11 @@ func (p *Patrol) branches(ctx context.Context, rd *round, rep *dirReport, main b
 }
 
 func branchHit(b branch, what string, now time.Time) hit {
-	text := fmt.Sprintf("分支 %s 推上去了%s，最后的提交在 %d 天前", clip(fold(b.name), branchRunes), what, days(now, b.tip))
+	as := " "
+	if b.remote != b.name {
+		as = "（远端是 " + clip(fold(b.remote), branchRunes) + "）"
+	}
+	text := fmt.Sprintf("分支 %s%s推上去了%s，最后的提交在 %d 天前", clip(fold(b.name), branchRunes), as, what, days(now, b.tip))
 	return hit{Source: sourcePrefix + checkBranch + ":" + b.name, Text: text, Line: text}
 }
 
@@ -286,9 +310,12 @@ func reports(dirs []workspace.Dir, dir string, main bool, worktree string) bool 
 	return main
 }
 
-// within reports whether path is root or lies below it, byte-wise.
+// within reports whether path is root or lies below it. Not by the bytes
+// alone: the registry keeps a directory as the session came in by, git
+// says what is on disk, and on a filesystem that folds case the two may
+// spell one directory differently.
 func within(path, root string) bool {
-	return path == root || strings.HasPrefix(path, root+string(filepath.Separator))
+	return osutil.PathContainedInRoot(path, root)
 }
 
 // leftWorktrees is the worktrees a put-away left whose repository is in
@@ -310,7 +337,7 @@ func (p *Patrol) leftWorktrees(dir string) []hit {
 			continue
 		}
 		name := wt.Dir
-		if rel, err := filepath.Rel(dir, wt.Dir); err == nil && !strings.HasPrefix(rel, "..") {
+		if rel, ok := osutil.RelUnderRoot(filepath.Clean(wt.Dir), filepath.Clean(dir)); ok {
 			name = rel
 		}
 		text := "收起时留下的 worktree " + fold(name)
