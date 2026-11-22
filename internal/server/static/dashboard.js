@@ -92,7 +92,7 @@ import { backendDisplayName, backendDisplayVersion, createNewSession, doCreateSe
 import { accessProfileChipInfo, fetchAccessProfiles, fetchCLIBackends } from './backend_catalog.js';
 import { pendingBackendID } from './features.js';
 import { handleKey, sendMessage } from './send_message.js';
-import { collectWorkspaceSessionIDs, fetchSessions, onSessionsApplied, originBadgeHtml, refreshHeaderExitChip, restorePending, toggleOnlyDispatched, toggleOnlyNeedsYou, updateCardUnreadChip, updateMainState } from './session_list.js';
+import { collectWorkspaceSessionIDs, fetchSessions, onSessionsApplied, originBadgeHtml, refreshHeaderExitChip, renderSidebar, restorePending, toggleOnlyDispatched, toggleOnlyNeedsYou, updateCardUnreadChip, updateMainState } from './session_list.js';
 import { findDiscovered, isDiscoveredKey, matchProject, parseDiscoveredPid, sid } from './session_ident.js';
 import { ICONS } from './icons.js';
 import { initLightbox } from './lightbox.js';
@@ -719,17 +719,80 @@ async function resumeRecentById(sessionId, workspace, lastPrompt, target) {
     const key = data.key;
     if (!key) return;
 
-    // Force sidebar refresh to pick up the dismissed entry
-    sessionList.lastVersion = 0;
-    await fetchSessions();
-
-    selectSession(key, 'local');
+    openFreshSession(key, { session_id: sessionId, workspace, last_prompt: lastPrompt });
     previewRecentSession(key, sessionId, workspace);
     revealEvent(target);
   } catch (e) {
     showNetworkError('恢复会话', e);
   }
 }
+
+// freshSeeds holds, per sid, the stand-in row of a session the server has
+// just made (a resume, a promoted 追问) while the refresh that lists it is
+// out. A poll sent before the server made it answers without the key; with
+// the seed kept the open session's card does not vanish under it.
+const freshSeeds = new Map();
+
+// openFreshSession opens a session the server has just made as soon as its
+// key is known, before the sidebar lists it: a seed row from what the caller
+// knows (seed: session_id, workspace, last_prompt) gives the header its title
+// and the sidebar its card, and the refresh's row replaces it. A key the
+// sidebar already holds opens as it is.
+function openFreshSession(key, seed) {
+  const sKey = sid(key, 'local');
+  const row = sessionList.sessionsData[sKey] ? null : freshRow(key, seed || {});
+  if (row) {
+    sessionList.sessionsData[sKey] = row;
+    freshSeeds.set(sKey, row);
+    paintFreshSeeds();
+  }
+  selectSession(key, 'local');
+  // A zero version makes the refresh bypass the ETag and the unchanged
+  // short-circuit, so it repaints with the new key.
+  sessionList.lastVersion = 0;
+  fetchSessions().finally(() => {
+    freshSeeds.delete(sKey);
+    // The header was drawn from the seed; the server's row (model, CLI,
+    // title) shows once the refresh put it in place.
+    if (row && sessionList.sessionsData[sKey] !== row && selection.key === key && selection.node === 'local') renderMainHeader();
+  });
+}
+
+function freshRow(key, seed) {
+  const parts = key.split(':');
+  const ws = seed.workspace || serverInfo.defaultWorkspace || '';
+  // Same project / project_fallback shape as the server's, so the card
+  // lands in the group the refresh keeps it in.
+  const project = matchProject(ws);
+  const base = ws.replace(/\/+$/, '').split('/').pop() || '';
+  const now = Date.now();
+  return {
+    key, node: 'local', state: 'ready', source: 'managed', seed: true,
+    platform: parts[0] || 'dashboard', agent: parts[3] || 'general',
+    workspace: ws, session_id: seed.session_id || '', last_prompt: seed.last_prompt || '', last_response: '',
+    created_at: now, last_active: now,
+    project: project || base, project_fallback: !project && !!base,
+    cli_name: serverInfo.defaultCLIName, cli_version: serverInfo.defaultCLIVersion,
+  };
+}
+
+// paintFreshSeeds adds to the sidebar each seed its last payload lacks. A
+// session removed meanwhile (dismissManaged drops its row and marks the key)
+// stays out: the payload lacks it for that reason, not for being stale. An
+// undo puts the row back, and the seed with it.
+function paintFreshSeeds() {
+  const data = sessionList.lastSidebarData;
+  if (!data || freshSeeds.size === 0) return;
+  const listed = new Set((data.sessions || []).map(s => sid(s.key, s.node || 'local')));
+  const missing = [...freshSeeds.keys()]
+    .filter(k => !listed.has(k) && !sessionList.optimisticDeleteKeys.has(k) && sessionList.sessionsData[k])
+    .map(k => sessionList.sessionsData[k]);
+  if (missing.length === 0) return;
+  // The sidebar search repaints from lastSidebarData: it keeps the seed too.
+  sessionList.lastSidebarData = Object.assign({}, data, { sessions: (data.sessions || []).concat(missing) });
+  renderSidebar(sessionList.lastSidebarData);
+}
+onSessionsApplied(paintFreshSeeds);
 
 async function previewRecentSession(expectedKey, sessionId, cwd) {
   try {
@@ -1847,7 +1910,7 @@ registerActions({
   'ask-submit': (el) => onAskSubmit(el),
   'event-copy': (el) => copyEventContent(el),
   'ask-aside': (el) => askAside(el),
-  'scratch-promote': () => promoteScratch().then((key) => { if (key) selectSession(key, 'local'); }),
+  'scratch-promote': () => promoteScratch().then((made) => { if (made) openFreshSession(made.key, made); }),
   'upload-retry': (el) => retryUpload(thumbIdxOf(el), trayOf(el)),
   'file-remove': (el) => removeFile(thumbIdxOf(el), trayOf(el)),
   'thumb-dragstart': (el, e) => onThumbDragStart(e, thumbIdxOf(el), trayOf(el)),

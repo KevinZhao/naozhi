@@ -13,7 +13,7 @@ import { collapseSidebarForDrawer, mobileLayer, restoreSidebarAfterDrawer } from
 import { splitDock } from './split_view.js';
 import { regroupAvatars } from './file_refs.js';
 import { confirmDialog, showAPIError, showNetworkError, timeDividerHtml } from './utilities.js';
-import { fetchSessions } from './session_list.js';
+import { sid } from './session_ident.js';
 
 // Self-scheduling poll cadence. A brand-new scratch session has no
 // persisted events yet, so /api/sessions/events returns 404 ("session not
@@ -40,6 +40,7 @@ const ad = {
   pollGen: 0,
   sending: false,
   pollDelayMs: POLL_BASE_MS,
+  loadingText: '',        // #ad-loading's own text, back once setOpening(false)
 };
 
 // setScratch mirrors the open scratch's router key into selection.scratchKey,
@@ -88,6 +89,11 @@ async function closeScratch(silent) {
   paintAsideButton(false);
   clearMessages();
   ad.elInput.value = '';
+  if (ad.drawer.classList.contains('ad-opening')) setOpening(false);
+  if (id) await deleteScratch(id);
+}
+
+async function deleteScratch(id) {
   if (!id) return;
   try {
     await fetch(NZ_CONTRACT.API.scratch_id.replace('{id}', encodeURIComponent(id)), {
@@ -333,6 +339,43 @@ async function openScratch(quote, agentId, sourceKey, sourceMsgTime) {
     if (!ok) return;
     await closeScratch(true);
   }
+  // The drawer opens on the quote at once and the scratch's id and key fill
+  // in when scratch_open answers. Until then st has neither: nothing can be
+  // sent, and a close deletes nothing. A drawer closed or replaced meanwhile
+  // no longer holds st, and the scratch that answers is deleted unseen.
+  const st = {
+    scratchId: '',
+    key: '',
+    agentId: agentId || 'general',
+    sourceKey,
+    sourceMsgTime: sourceMsgTime || 0,
+    quote,
+    lastEventTime: 0,
+    seenAtWM: new Set(), // uuids processed AT lastEventTime (scratchAdmitEvent)
+    // Bounded Set of user-message bodies that sendInScratch rendered
+    // locally. Consumed by matchesPendingEcho when the server event
+    // stream replays the same text as a `user` event. Set over array
+    // for O(1) lookup; bounded at ~10 entries by sendInScratch.
+    pendingUserEchoes: new Set(),
+  };
+  setScratch(st);
+  paintAgentLabel();
+  ad.elQuotePreview.textContent = previewText(quote);
+  ad.elQuoteTrunc.style.display = 'none';
+  if (ad.elQuoteCtx) {
+    ad.elQuoteCtx.textContent = '';
+    ad.elQuoteCtx.style.display = 'none';
+  }
+  ad.elQuoteChip.classList.remove('expanded');
+  ad.elQuoteChip.dataset.full = quote;
+  clearMessages();
+  ad.elSave.classList.remove('visible');
+  paintAsideButton(false);
+  setOpening(true);
+  // Collapse first: the split sizes itself against the sidebar it sees.
+  collapseSidebarForDrawer();
+  showDrawer();
+  setTimeout(() => ad.elInput.focus(), 60);
   try {
     const r = await fetch(NZ_CONTRACT.API.scratch_open, {
       method: 'POST',
@@ -349,27 +392,21 @@ async function openScratch(quote, agentId, sourceKey, sourceMsgTime) {
     });
     if (!r.ok) {
       const txt = await r.text().catch(() => '');
+      if (ad.state !== st) return;
+      failOpen();
       showAPIError('打开追问', r.status, txt);
       return;
     }
     const data = await r.json();
-    setScratch({
-      scratchId: data.scratch_id,
-      key: data.key,
-      agentId: data.agent_id || agentId || 'general',
-      sourceKey,
-      sourceMsgTime: sourceMsgTime || 0,
-      quote,
-      lastEventTime: 0,
-      seenAtWM: new Set(), // uuids processed AT lastEventTime (scratchAdmitEvent)
-      // Bounded Set of user-message bodies that sendInScratch rendered
-      // locally. Consumed by matchesPendingEcho when the server event
-      // stream replays the same text as a `user` event. Set over array
-      // for O(1) lookup; bounded at ~10 entries by sendInScratch.
-      pendingUserEchoes: new Set(),
-    });
-    ad.elAgent.textContent = ad.state.agentId && ad.state.agentId !== 'general' ? '· ' + ad.state.agentId : '';
-    ad.elQuotePreview.textContent = previewText(quote);
+    if (ad.state !== st) {
+      deleteScratch(data.scratch_id);
+      return;
+    }
+    st.scratchId = data.scratch_id;
+    st.key = data.key;
+    st.agentId = data.agent_id || st.agentId;
+    setScratch(st); // selection.scratchKey takes the key now known
+    paintAgentLabel();
     ad.elQuoteTrunc.style.display = data.quote_truncated ? 'inline' : 'none';
     // Context badge states (all three visible to the user):
     //   turns > 0                    → "(上下文 N 轮[+])"  — injected; "+" = byte-budget trimmed
@@ -386,31 +423,47 @@ async function openScratch(quote, agentId, sourceKey, sourceMsgTime) {
       } else if (truncated) {
         ad.elQuoteCtx.textContent = '(上下文已抑制)';
         ad.elQuoteCtx.style.display = 'inline';
-      } else {
-        ad.elQuoteCtx.textContent = '';
-        ad.elQuoteCtx.style.display = 'none';
       }
     }
-    ad.elQuoteChip.classList.remove('expanded');
-    ad.elQuoteChip.dataset.full = quote;
-    clearMessages();
-    ad.elSave.classList.remove('visible');
-    paintAsideButton(false);
-    // Collapse first: the split sizes itself against the sidebar it sees.
-    collapseSidebarForDrawer();
-    showDrawer();
-    setTimeout(() => ad.elInput.focus(), 60);
+    setOpening(false);
     startPolling();
+    if (st.sendWhenOpen) sendInScratch();
   } catch (e) {
     console.error('open scratch', e);
+    if (ad.state !== st) return;
+    failOpen();
     showNetworkError('打开追问', e);
   }
+}
+
+// failOpen closes a drawer whose scratch_open failed. What was typed into it
+// meanwhile stays in the box: the next 追问 opens on it.
+function failOpen() {
+  const typed = ad.elInput.value;
+  closeScratch(true); // no scratch id yet: it clears synchronously
+  ad.elInput.value = typed;
+}
+
+function paintAgentLabel() {
+  const a = ad.state && ad.state.agentId;
+  ad.elAgent.textContent = a && a !== 'general' ? '· ' + a : '';
+}
+
+// setOpening marks the drawer as waiting on scratch_open: the loading line
+// says so, and a send made meanwhile waits for the key (sendInScratch).
+function setOpening(on) {
+  ad.drawer.classList.toggle('ad-opening', on);
+  ad.elLoading.textContent = on ? '正在打开…' : ad.loadingText;
+  ad.elLoading.classList.toggle('visible', on);
 }
 
 async function sendInScratch() {
   if (ad.sending || !ad.state) return;
   const text = ad.elInput.value.trim();
   if (!text) return;
+  // No key yet while scratch_open is out (setOpening): the text stays in the
+  // box and goes once the key is known.
+  if (!ad.state.key) { ad.state.sendWhenOpen = true; return; }
   ad.sending = true;
   ad.elSend.disabled = true;
   ad.elLoading.classList.add('visible');
@@ -423,6 +476,7 @@ async function sendInScratch() {
   }
   ad.state.pendingUserEchoes.add(text);
   if (!ad.state.firstAsk) ad.state.firstAsk = text;
+  ad.state.lastAsk = text;
   // Render the user message immediately via renderNewEvents so scroll
   // policy, divider insertion, and ↗-button stripping all match the
   // poll path. Its time only places the bubble's divider: a reply event
@@ -474,16 +528,18 @@ function paintAsideButton(replied) {
 }
 
 // promoteScratch turns the open scratch into a sidebar session (the
-// 'scratch-promote' action on #ad-save) and resolves to the new session's key
-// once the sidebar has it, for dashboard to select; otherwise to undefined.
+// 'scratch-promote' action on #ad-save) and resolves, as soon as the server
+// names the new key, to {key, workspace, last_prompt}: dashboard opens it at
+// once and seeds its card from these while the sidebar refresh is out.
+// Otherwise it resolves to undefined.
 export async function promoteScratch() {
-  if (!ad.state) {
+  const st = ad.state;
+  if (!st || !st.scratchId) {
     showToast('追问会话已关闭，无法保存', 'error');
     return;
   }
-  const id = ad.state.scratchId;
   try {
-    const r = await fetch(NZ_CONTRACT.API.scratch_id_promote.replace('{id}', encodeURIComponent(id)), {
+    const r = await fetch(NZ_CONTRACT.API.scratch_id_promote.replace('{id}', encodeURIComponent(st.scratchId)), {
       method: 'POST',
     });
     if (!r.ok) {
@@ -499,12 +555,11 @@ export async function promoteScratch() {
     ad.elSave.classList.remove('visible');
     ad.elInput.value = '';
     showToast('已保存为正式会话');
-    // Refresh sidebar so the caller can select the new key.
-    try {
-      if (typeof sessionList.lastVersion !== 'undefined') sessionList.lastVersion = 0;
-      await fetchSessions();
-      return data.key;
-    } catch (_) {}
+    if (!data.key) return;
+    // The scratch ran in its source session's workspace, and the server's
+    // last_prompt is the latest thing asked here.
+    const src = sessionList.sessionsData[sid(st.sourceKey, 'local')];
+    return { key: data.key, workspace: (src && src.workspace) || '', last_prompt: st.lastAsk || st.firstAsk || '' };
   } catch (e) {
     console.error('promote scratch', e);
     showNetworkError('保存为正式会话', e);
@@ -596,6 +651,7 @@ export function initAsideDrawer() {
   ad.elQuoteCtx = $('ad-quote-ctx');
   ad.elLoading = $('ad-loading');
   ad.elAgent = $('ad-agent');
+  ad.loadingText = ad.elLoading.textContent;
   // A phone's back closes it as its × does.
   ad.layer = mobileLayer('scratch', () => drawer.classList.contains('visible'), () => closeScratch(true));
 

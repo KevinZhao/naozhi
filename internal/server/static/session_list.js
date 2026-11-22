@@ -1043,13 +1043,15 @@ const SETTLED_RESULT_MS = 10000;
 const turnSettledAt = new Map();
 
 // repliedSince lists the polled sessions whose last reply moved since the
-// last poll while no turn of theirs was running or just settled.
+// last poll while no turn of theirs was running or just settled. A stand-in
+// row (seed: dashboard's openFreshSession) never knew the reply, so the
+// server's first row is not a turn that ended.
 function repliedSince(polled) {
   const now = Date.now();
   return polled.filter((s) => {
     const sKey = sid(s.key, s.node || 'local');
     const cur = sessionList.sessionsData[sKey];
-    if (!cur || cur.state === 'new' || !s.last_response || s.last_response === cur.last_response) return false;
+    if (!cur || cur.state === 'new' || cur.seed || !s.last_response || s.last_response === cur.last_response) return false;
     if (s.state === 'running' || cur.state === 'running' || perSession.optimisticRunning[sKey]) return false;
     return now - (turnSettledAt.get(sKey) || 0) >= SETTLED_REPLY_MS;
   });
