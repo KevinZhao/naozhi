@@ -154,3 +154,28 @@ func TestDashboardProjectKeyVsPlannerNoCollision(t *testing.T) {
 		t.Errorf("planner key %q should be a planner key", plannerKey)
 	}
 }
+
+// A project patrol's deep check runs in a one-shot session, as a scout run
+// and a lookup do: every place that leaves those out of the store, the list
+// and the sends goes by IsOneShotKey.
+func TestOneShotKeys(t *testing.T) {
+	t.Parallel()
+	for _, k := range []string{"scout:r1", "reader:r1", "patrol:20261125T110412-9c1e"} {
+		if !IsOneShotKey(k) {
+			t.Errorf("IsOneShotKey(%q) = false", k)
+		}
+	}
+	for _, k := range []string{"task:ab12", "planner:main", "patrolling:x", "dashboard:direct:u:patrol:", ""} {
+		if IsOneShotKey(k) {
+			t.Errorf("IsOneShotKey(%q) = true", k)
+		}
+	}
+	if !IsPatrolKey(PatrolKeyPrefix+"r1") || IsPatrolKey("scout:r1") {
+		t.Error("IsPatrolKey does not go by the patrol: prefix")
+	}
+	// "patrol:" is not the Planner's own namespace: a deep check is no
+	// Planner session.
+	if IsPlannerNSKey("patrol:r1") {
+		t.Error(`IsPlannerNSKey("patrol:r1") = true`)
+	}
+}

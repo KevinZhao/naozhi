@@ -30,6 +30,10 @@ const (
 	// ReaderKeyPrefix is the namespace of the one-shot reader sessions a
 	// Planner lookup runs, "reader:<run ID>" (docs/rfc/planner.md §15.12 ⑨).
 	ReaderKeyPrefix = "reader:"
+	// PatrolKeyPrefix is the namespace of the one-shot sessions the project
+	// patrol's weekly deep check runs, "patrol:<run ID>"
+	// (docs/rfc/planner.md §15.23 ②).
+	PatrolKeyPrefix = "patrol:"
 )
 
 // PlannerMainKey is the global Planner's session key.
@@ -72,10 +76,14 @@ func IsScoutKey(s string) bool { return strings.HasPrefix(s, ScoutKeyPrefix) }
 // IsReaderKey reports whether s belongs to the lookup readers' namespace.
 func IsReaderKey(s string) bool { return strings.HasPrefix(s, ReaderKeyPrefix) }
 
+// IsPatrolKey reports whether s belongs to the project patrol's deep checks.
+func IsPatrolKey(s string) bool { return strings.HasPrefix(s, PatrolKeyPrefix) }
+
 // IsOneShotKey reports whether s is a one-shot session of the gateway's,
-// a scout run's or a lookup's: spawned for one turn, reset when it ends,
-// never persisted, listed or reachable from a send.
-func IsOneShotKey(s string) bool { return IsScoutKey(s) || IsReaderKey(s) }
+// a scout run's, a lookup's or a project patrol's deep check: spawned for
+// one turn, reset when it ends, never persisted, listed or reachable from a
+// send.
+func IsOneShotKey(s string) bool { return IsScoutKey(s) || IsReaderKey(s) || IsPatrolKey(s) }
 
 // IsScratchKey reports whether s belongs to the dashboard scratch namespace.
 func IsScratchKey(s string) bool { return strings.HasPrefix(s, ScratchKeyPrefix) }
