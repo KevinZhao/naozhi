@@ -99,20 +99,21 @@ type Config struct {
 	// nil makes no deep checks (§15.23 ②).
 	Session Session
 	// Wake hands a workspace's new findings to the Planner, a block a
-	// batch, each batch a turn of its own (agent.Agent.Wake from
-	// agent.SourcePatrol); sent is told how each later batch went. Whatever
-	// the error, the findings stay pending and go again at the next round:
-	// a deep check is a week away, so none is dropped for a Planner that is
-	// off. nil hands none over.
-	Wake func(sent func(batch int, err error), blocks ...string) error
+	// batch, each batch a turn of its own (agent.Agent.WakeEnded from
+	// agent.SourcePatrol); sent is told how each later batch went, ended
+	// how each batch's turn ended. Whatever the error, the findings go
+	// again at the next round, twice in all: a deep check is a week away,
+	// so none is dropped for a Planner that is off. nil hands none over.
+	Wake func(sent, ended func(batch int, err error), blocks ...string) error
 	// Deny is the read rules a deep check's session is denied besides the
 	// credential files by name: the Planner's own (agent.Agent.ReadDeny),
 	// read as each check starts. nil makes no deep checks: a session that
 	// reads a repository does not run without them.
 	Deny func() []string
-	// TaskOpen reports whether dispatched session key is still at work (in
-	// progress or waiting on the user in 任务). nil counts every one as at
-	// work.
+	// TaskOpen reports whether dispatched session key is still going: not
+	// marked done or failed, not stopped, not gone from 任务
+	// (wireup.PatrolTaskOpen). A failure custody sends on is still going.
+	// nil counts every one as going.
 	TaskOpen func(key string) bool
 	// Alarm opens an error in "等你": a file of the patrol's the user
 	// edits does not read. nil only logs.
@@ -203,9 +204,13 @@ type Patrol struct {
 	deepMu sync.Mutex
 	// deepRunning is the deep check in flight: one at a time.
 	deepRunning bool
-	// sending are the findings (by ref) a wake of this process still has
-	// to submit: a round does not hand them over a second time.
+	// sending are the findings (by ref) handed to the Planner by this
+	// process whose turn has not ended: a round does not hand them over a
+	// second time. had are those whose turn ended normally, and when: what
+	// the Planner left without a word after its turn is the gateway's to
+	// file.
 	sending map[string]bool
+	had     map[string]time.Time
 	// declinedAlarmed says declined.json was unreadable at the last look,
 	// and the user was told.
 	declinedAlarmed bool
@@ -227,7 +232,7 @@ func New(cfg Config) *Patrol {
 	if cfg.Ctx == nil {
 		cfg.Ctx = context.Background()
 	}
-	p := &Patrol{cfg: cfg, hasPR: map[string]bool{}, sending: map[string]bool{}}
+	p := &Patrol{cfg: cfg, hasPR: map[string]bool{}, sending: map[string]bool{}, had: map[string]time.Time{}}
 	p.deepCtx, p.deepCancel = context.WithCancel(cfg.Ctx)
 	return p
 }

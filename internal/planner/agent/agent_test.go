@@ -852,6 +852,51 @@ func TestWakeBatches(t *testing.T) {
 	}
 }
 
+// TestWakeEnded: a caller that follows its blocks to the end of their turns
+// is told how each turn went — over, failed, dropped — before the next
+// block goes, the last block's too; submitted alone tells it nothing.
+func TestWakeEnded(t *testing.T) {
+	now := time.Now()
+	a, _ := newTestAgent(t, &fakeSessions{}, &now)
+	h := &heldTurns{}
+	a.turns = h
+	var log []string
+	sent := func(i int, err error) { log = append(log, fmt.Sprint("sent ", i, " ", err)) }
+	ended := func(i int, err error) { log = append(log, fmt.Sprint("ended ", i, " ", err)) }
+	if err := a.WakeEnded(SourcePatrol, sent, ended, "<b1>", "<b2>", "<b3>"); err != nil {
+		t.Fatal(err)
+	}
+	if len(log) != 0 {
+		t.Fatalf("told before any turn ended: %q", log)
+	}
+	h.dones[0]("好的", nil)
+	h.dones[1]("", errors.New("turn failed"))
+	h.dones[2]("", errors.New("消息未被处理"))
+	want := []string{"ended 0 <nil>", "sent 1 <nil>", "ended 1 turn failed", "sent 2 <nil>", "ended 2 消息未被处理"}
+	if !slices.Equal(log, want) {
+		t.Errorf("told %q, want %q", log, want)
+	}
+	// One block, and no callback for the submissions.
+	log = nil
+	if err := a.WakeEnded(SourcePatrol, nil, ended, "<only>"); err != nil {
+		t.Fatal(err)
+	}
+	h.dones[3]("好的", nil)
+	if !slices.Equal(log, []string{"ended 0 <nil>"}) {
+		t.Errorf("a single block: told %q", log)
+	}
+	// Wake is the same without the follow-up.
+	if err := a.Wake(SourceScout, nil, "<w>"); err != nil {
+		t.Fatal(err)
+	}
+	if h.dones[4] != nil {
+		h.dones[4]("", nil)
+	}
+	if len(log) != 1 {
+		t.Errorf("Wake told the caller of a turn's end: %q", log)
+	}
+}
+
 // TestSetStoppedAlive: the switch answers with the outcome, so stopping an
 // idle Planner reports it no longer alive; a busy one stays alive until its
 // turn is over.

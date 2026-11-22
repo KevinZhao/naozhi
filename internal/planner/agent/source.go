@@ -274,6 +274,15 @@ func (a *Agent) PatrolTaskTurn() bool {
 // take gets the error, and so does every block after it, for the caller to
 // keep; it is said in the conversation as well.
 func (a *Agent) Wake(src Source, sent func(block int, err error), blocks ...string) error {
+	return a.WakeEnded(src, sent, nil, blocks...)
+}
+
+// WakeEnded is Wake for a caller that follows each block to its turn's
+// end: ended (nil for none) is told how block's turn went once it is over,
+// the error of one that failed or was dropped from the queue. Submitted is
+// not handled: a turn may fail, or be lost to a restart while it waits, in
+// which case ended is never told.
+func (a *Agent) WakeEnded(src Source, sent, ended func(block int, err error), blocks ...string) error {
 	if !a.cfg.Enabled {
 		return ErrOff
 	}
@@ -299,11 +308,11 @@ func (a *Agent) Wake(src Source, sent func(block int, err error), blocks ...stri
 	if sent == nil {
 		sent = func(int, error) {}
 	}
-	return a.wakeChain(src, sent, blocks, 0)
+	return a.wakeChain(src, sent, ended, blocks, 0)
 }
 
 // wakeChain submits blocks[i] and chains the rest on its turn's end.
-func (a *Agent) wakeChain(src Source, sent func(int, error), blocks []string, i int) error {
+func (a *Agent) wakeChain(src Source, sent, ended func(int, error), blocks []string, i int) error {
 	a.mu.Lock()
 	turns, stopped, opts := a.turns, a.state.Stopped, a.opts
 	a.mu.Unlock()
@@ -315,7 +324,7 @@ func (a *Agent) wakeChain(src Source, sent func(int, error), blocks []string, i 
 		var once sync.Once
 		done = func(string, error) {
 			once.Do(func() {
-				err := a.wakeChain(src, sent, blocks, next)
+				err := a.wakeChain(src, sent, ended, blocks, next)
 				if err == nil {
 					return
 				}
@@ -326,6 +335,16 @@ func (a *Agent) wakeChain(src Source, sent func(int, error), blocks []string, i 
 					sent(j, err)
 				}
 			})
+		}
+	}
+	// The caller hears of this block's turn before the next one goes.
+	if ended != nil {
+		next := done
+		done = func(reply string, err error) {
+			ended(i, err)
+			if next != nil {
+				next(reply, err)
+			}
 		}
 	}
 	// The block leads: the logged bubble keeps only the message's head, and

@@ -66,6 +66,13 @@ func TestSystemPrompt(t *testing.T) {
 		`用 dispatch 派一个任务去修，带上 "finding":"<ref>"`,
 		`source 写 "patrol:<ref>"`,
 		"这一轮只能用 dispatch（带 finding）、front、notify、ask、note",
+		// Every finding ends somewhere, and what follows from a dispatch is
+		// held to the same limits.
+		`在 front 块的 done 里写 "patrol:<ref>"，表示放过`,
+		"这一轮结束时还没有去处的发现，网关自己记成未了事项",
+		`要放过一条还没有条目的巡查发现，写 "patrol:<ref>"`,
+		"它的回执那几轮（已派出、汇报、一轮结束）和巡查的回合一样由网关限着",
+		"另外可以用 status 标它的状态、用 custody 让它继续",
 		"这样派出的任务没有用户的原话，开 PR 但不合并",
 		"先用 gh pr checks 核实 CI",
 		"/state/planner/patrol/deep/<工作区 ID>.json（每周深查的记录",

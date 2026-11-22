@@ -462,8 +462,9 @@ func (t *Routine) validate() error {
 //
 // Item and Done write the ledger's open items (未了事项, §15.23, D143): Item
 // files one, under the front ID names when it names one, or changes the
-// source of the one its id names; Done closes the ones it lists. A block
-// carrying only those needs no ID, and touches no front.
+// source of the one its id names; Done closes the ones it lists, and lets
+// be the patrol finding an entry "patrol:<ref>" names (Patrol.Pass). A
+// block carrying only those needs no ID, and touches no front.
 type Front struct {
 	ID       string     `json:"id,omitempty"`
 	Name     string     `json:"name,omitempty"`
@@ -548,8 +549,11 @@ func (f *Front) validate() error {
 		return fmt.Errorf("done 最多 %d 个", maxFrontDone)
 	}
 	for i, id := range f.Done {
-		if id = strings.TrimSpace(id); !front.ItemID(id) {
-			return errors.New("done 里要写未了事项的 id（i 加 7 位小写字母或数字，见 fronts.json 的 items）")
+		id = strings.TrimSpace(id)
+		// A patrol finding let be goes by its ref, as its item's source
+		// would.
+		if ref, ok := strings.CutPrefix(id, front.PatrolSource); !front.ItemID(id) && !(ok && findingRE.MatchString(ref)) {
+			return errors.New("done 里要写未了事项的 id（i 加 7 位小写字母或数字，见 fronts.json 的 items），或要放过的巡查发现 \"patrol:<ref>\"")
 		}
 		f.Done[i] = id
 	}

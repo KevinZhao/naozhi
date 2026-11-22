@@ -30,7 +30,7 @@ const (
 	stateVersion  = 1
 	maxStateBytes = 4 << 20
 	// recordKeep is how long a finding that is over (merged, closed, turned
-	// down) stays on record after it was last seen.
+	// down, passed over) stays on record after it was last seen.
 	recordKeep = 90 * day
 	// MaxOpenTasks is how many tasks the patrol dispatched may be going in
 	// one workspace at a time; MaxSurfaced how many findings a day are put
@@ -44,8 +44,13 @@ const (
 const (
 	// StateNew is found and not handed to the Planner yet.
 	StateNew = "new"
-	// StateTold is handed to the Planner.
+	// StateTold is handed to the Planner, which has not said what becomes
+	// of it yet: a task, a question, an open item, or nothing (StatePassed).
+	// It is no place to stay: flush sees to that.
 	StateTold = "told"
+	// StatePassed is one the Planner let be: covered already by an issue or
+	// an open item, so it is not filed a second time.
+	StatePassed = "passed"
 	// StateItem is filed as an open item of the ledger.
 	StateItem = "item"
 	// StateAsked is put to the user as a question.
@@ -99,8 +104,10 @@ type Record struct {
 	First time.Time `json:"first"`
 	Seen  time.Time `json:"seen"`
 	State string    `json:"state"`
-	// Pending is set until the Planner was handed it.
+	// Pending is set until the Planner was handed it; Sent is how many
+	// times it was.
 	Pending bool `json:"pending,omitempty"`
+	Sent    int  `json:"sent,omitempty"`
 	// Task is the session it was dispatched to, Item the open item it is
 	// filed as, PR the pull request that fixes it and CI that one's checks
 	// as last looked at ("通过", "失败", "进行中").
@@ -242,7 +249,7 @@ func (p *Patrol) loadDeep(ws string) (deepState, error) {
 func (p *Patrol) saveDeep(st deepState, now time.Time) error {
 	st.V = stateVersion
 	st.Findings = slices.DeleteFunc(slices.Clone(st.Findings), func(r Record) bool {
-		return (r.State == StateMerged || r.State == StateClosed || r.State == StateDeclined) && now.Sub(r.Seen) > recordKeep
+		return (r.State == StateMerged || r.State == StateClosed || r.State == StateDeclined || r.State == StatePassed) && now.Sub(r.Seen) > recordKeep
 	})
 	if st.Findings == nil {
 		st.Findings = []Record{}
@@ -377,12 +384,12 @@ func auto(st deepState, r Record) error {
 }
 
 // CanDispatch is why the finding ref names may not be dispatched now, nil
-// when it may; ws is its workspace. A turn with the user's words (auto
-// false) needs only that the finding is on record: the user asked. One
-// without is held to what the patrol may do on its own: the finding small,
-// reversible and sure, its repository on GitHub, not in a task's or a pull
-// request's hands already, and fewer than MaxOpenTasks of the workspace's
-// findings with a task at work.
+// when it may; ws is its workspace. A turn with the user's words (unasked
+// false) needs only that the finding is on record and no task has it in
+// hand: the user asked. One without is held to what the patrol may do on
+// its own: the finding small, reversible and sure, its repository on
+// GitHub, not in a pull request's hands already, and fewer than
+// MaxOpenTasks of the workspace's findings with a task still going.
 func (p *Patrol) CanDispatch(ref string, unasked bool) (ws string, err error) {
 	ws, id, ok := SplitRef(ref)
 	if p == nil || p.cfg.Dir == "" || !ok {
@@ -398,6 +405,10 @@ func (p *Patrol) CanDispatch(ref string, unasked bool) (ws string, err error) {
 	switch {
 	case r == nil:
 		return "", ErrNoFinding
+	case r.State == StateDispatched && p.taskOpen(r.Task):
+		// Whoever asks: a second task would fix the same thing beside the
+		// first, whose report the record would no longer take.
+		return "", fmt.Errorf("这条发现已经派给 %s 在做", r.Task)
 	case !unasked:
 		return ws, nil
 	}
@@ -405,8 +416,6 @@ func (p *Patrol) CanDispatch(ref string, unasked bool) (ws string, err error) {
 		return "", err
 	}
 	switch {
-	case r.State == StateDispatched && p.taskOpen(r.Task):
-		return "", fmt.Errorf("这条发现已经派给 %s 在做", r.Task)
 	case r.State == StatePR:
 		return "", fmt.Errorf("这条发现已有 PR %s", r.PR)
 	case r.State == StateMerged || r.State == StateClosed:
@@ -449,22 +458,28 @@ func (p *Patrol) record(ref string, edit func(st *deepState, r *Record) bool) {
 // among prs, the finding is fixed and waits on the user, and is an open
 // item saying so. The item's source stays the finding (ItemSource). A
 // report without a pull request leaves the record alone: the Planner has
-// the report and decides, and once the task is no longer at work the round
-// files the finding as an open item (follow).
+// the report and decides, and once the task is over the round files the
+// finding as an open item (follow). A report that comes after that (the
+// task was stopped and taken up again) is taken all the same: the task is
+// still the finding's.
+//
+// A report names other pull requests too ("introduced by #100"). The
+// task's own is the latest opened, so the one with the highest number of
+// the repository's: numbers only go up, and the task opened its after
+// whatever it read.
 func (p *Patrol) Reported(ref, task, state string, prs []string) {
 	if state != "done" || len(prs) == 0 {
 		return
 	}
 	p.record(ref, func(st *deepState, r *Record) bool {
-		if r.Task != task || r.State != StateDispatched && r.State != StatePR {
+		if r.Task != task || !slices.Contains([]string{StateDispatched, StatePR, StateItem}, r.State) {
 			return false
 		}
 		link, n := "", 0
 		for _, u := range prs {
 			o, name, num, ok := front.SourcePR(u)
-			if ok && (st.Repo == "" || strings.EqualFold(o+"/"+name, st.Repo)) {
+			if ok && (st.Repo == "" || strings.EqualFold(o+"/"+name, st.Repo)) && num > n {
 				link, n = u, num
-				break
 			}
 		}
 		if link == "" {
@@ -490,6 +505,44 @@ func (p *Patrol) Reported(ref, task, state string, prs []string) {
 		r.Item = it.ID
 		return true
 	})
+}
+
+// Pass records that the Planner let the finding ref names be (action.Patrol):
+// it is covered already, by an issue or an open item, so nothing more
+// comes of it, and the item the gateway may have filed for it meanwhile is
+// closed. known is false for a ref no finding has. One in a task's, a pull
+// request's or the user's hands is not the Planner's to pass over: the
+// error says where it is. One that is over already stays as it is.
+func (p *Patrol) Pass(ref string) (known bool, err error) {
+	ws, id, ok := SplitRef(ref)
+	if p == nil || p.cfg.Dir == "" || !ok {
+		return false, nil
+	}
+	var held error
+	err = p.editDeep(ws, func(st *deepState) bool {
+		r := st.find(id)
+		if known = r != nil; !known {
+			return false
+		}
+		switch r.State {
+		case StateNew, StateTold, StateItem:
+		case StateAsked, StateDoing:
+			held = errors.New("这条发现在等用户的决定，不能放过")
+			return false
+		case StateDispatched, StatePR:
+			held = errors.New("这条发现已经在任务或 PR 手里，不能放过")
+			return false
+		default:
+			return false
+		}
+		r.State, r.Pending = StatePassed, false
+		if r.Item != "" {
+			source := ItemSource(ref)
+			p.cfg.Items.CloseItems(func(it front.Item) bool { return it.From == front.FromPatrol && it.Source == source }, front.ByPlanner)
+		}
+		return true
+	})
+	return known, cmp.Or(err, held)
 }
 
 // Surface counts the finding ref names as put in front of the user: asked

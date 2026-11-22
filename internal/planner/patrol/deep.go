@@ -39,6 +39,15 @@ const (
 	// finding gets at most two blocks (a dispatch and a front), and one
 	// reply runs ten.
 	batchFindings = 5
+	// maxHandOvers is how many times a finding is handed to the Planner:
+	// one whose turn failed, was dropped or was lost to a restart goes once
+	// more, and after that the gateway files it itself.
+	maxHandOvers = 2
+	// handGrace is how long after a finding's turn ended the gateway waits
+	// before it files what the Planner left: the reply's action blocks are
+	// run after the turn's end is told, and the gateway must not get ahead
+	// of them.
+	handGrace = 5 * time.Minute
 	// runErrRunes caps a run's error as recorded.
 	runErrRunes = 500
 	// runIDTime is the start-time part of a run ID, local time.
@@ -331,7 +340,9 @@ func (p *Patrol) runDeep(ctx context.Context, t target, id, trig string, started
 		// edit, and half an hour went by.
 		if declined, err = p.loadDeclined(); err == nil {
 			n := len(kept)
-			kept = slices.DeleteFunc(kept, func(f Finding) bool { return declined.covers(t.ID, f) })
+			// The workspace taken out of the patrol while it was read:
+			// nothing of this run is wanted.
+			kept = slices.DeleteFunc(kept, func(f Finding) bool { return declined.workspace(t.ID) || declined.covers(t.ID, f) })
 			run.Dropped += n - len(kept)
 		}
 	}
@@ -360,6 +371,13 @@ func (p *Patrol) runDeep(ctx context.Context, t target, id, trig string, started
 					run.New++
 					continue
 				}
+				if r != nil && (r.State == StateMerged || r.State == StateClosed) {
+					// Its pull request is over and the checkout may not have
+					// it yet: not a new finding, and not seen again either,
+					// so the record lapses and a real return is reported
+					// anew.
+					continue
+				}
 				if r != nil {
 					// The same thing found again: its record goes on.
 					r.Finding, r.Links, r.Seen = f, links, now
@@ -382,11 +400,17 @@ func (p *Patrol) runDeep(ctx context.Context, t target, id, trig string, started
 	p.flush()
 }
 
-// flush hands the findings the Planner has not been handed to it, each
-// workspace's in batches of batchFindings, a batch a turn. One handed over
-// is told; one the Planner did not take (off, stopped, busy closing) stays
-// pending for the next round, whatever the reason. Those a wake of this
-// process still has to submit are left to it.
+// flush sees every finding found to an end with the Planner (§15.23 ③).
+// Those not handed over yet go to it, each workspace's in batches of
+// batchFindings, a batch a turn. Handed over is not dealt with: a finding
+// stays told until the Planner's turn says what becomes of it — a task, a
+// question, an open item, or let be. One it left without a word once its
+// turn ended is filed as an open item by the gateway; one whose turn
+// failed, was dropped or was lost to a restart goes again, maxHandOvers
+// times in all, and is filed after that. So nothing found waits on the
+// Planner for ever, and nothing is put to the user twice: an open item is
+// no push. One the Planner cannot take now (off, stopped, busy closing)
+// stays for the next round, whatever the reason.
 func (p *Patrol) flush() {
 	// Paused with pushes and custody, the Planner is not woken to dispatch
 	// either: the findings wait for the first round after the pause.
@@ -402,13 +426,41 @@ func (p *Patrol) flush() {
 		recs []Record
 	}
 	var todo []batch
+	now := p.cfg.Now()
 	p.deepMu.Lock()
 	for _, st := range p.deepStatesLocked() {
 		var recs []Record
-		for _, r := range st.Findings {
-			if ref := Ref(st.Workspace, r.ID); r.Pending && !p.sending[ref] {
+		filed := false
+		for i := range st.Findings {
+			r := &st.Findings[i]
+			ref := Ref(st.Workspace, r.ID)
+			at, had := p.had[ref]
+			switch {
+			case p.sending[ref]:
+			case r.Pending:
 				p.sending[ref] = true
-				recs = append(recs, r)
+				recs = append(recs, *r)
+			case r.State != StateTold:
+				delete(p.had, ref)
+			case had && now.Sub(at) < handGrace:
+			case had || r.Sent >= maxHandOvers:
+				// The Planner had its turn, or its chances, and said
+				// nothing of it.
+				if err := p.fileLocked(&st, r, "", ""); err != nil {
+					slog.Warn("planner patrol: a finding the Planner left not filed; tried again next round", "finding", ref, "err", err)
+					continue
+				}
+				r.State, filed = StateItem, true
+				delete(p.had, ref)
+				slog.Info("planner patrol: a finding the Planner left filed as an open item", "finding", ref, "handed", r.Sent)
+			default:
+				p.sending[ref] = true
+				recs = append(recs, *r)
+			}
+		}
+		if filed {
+			if err := p.saveDeep(st, now); err != nil {
+				slog.Warn("planner patrol: findings filed not marked", "workspace", st.Workspace, "err", err)
 			}
 		}
 		if len(recs) > 0 {
@@ -428,26 +480,27 @@ func (p *Patrol) flush() {
 		for i, recs := range batches {
 			blocks[i] = p.block(b.st, names[ws], run, recs, free, i+1, len(batches))
 		}
-		err := p.cfg.Wake(func(i int, err error) { p.settle(ws, batches[i], err) }, blocks...)
+		err := p.cfg.Wake(func(i int, err error) { p.handed(ws, batches[i], err) }, func(i int, err error) { p.ended(ws, batches[i], err) }, blocks...)
 		if err != nil {
 			slog.Info("planner patrol: the Planner did not take the new findings; they go again next round", "workspace", ws, "findings", len(b.recs), "err", err)
-			p.settle(ws, b.recs, err)
+			p.handed(ws, b.recs, err)
 			continue
 		}
-		p.settle(ws, batches[0], nil)
+		p.handed(ws, batches[0], nil)
 	}
 }
 
-// settle ends a batch's wake: submitted (nil), its findings are told;
-// otherwise they stay pending.
-func (p *Patrol) settle(ws string, batch []Record, err error) {
+// handed ends a batch's submission: submitted (nil), its findings are told
+// and counted as handed over once more; otherwise they are free to go
+// again.
+func (p *Patrol) handed(ws string, batch []Record, err error) {
 	now := p.cfg.Now()
 	p.deepMu.Lock()
 	defer p.deepMu.Unlock()
-	for _, r := range batch {
-		delete(p.sending, Ref(ws, r.ID))
-	}
 	if err != nil {
+		for _, r := range batch {
+			delete(p.sending, Ref(ws, r.ID))
+		}
 		return
 	}
 	st, err := p.loadDeep(ws)
@@ -456,8 +509,9 @@ func (p *Patrol) settle(ws string, batch []Record, err error) {
 		return
 	}
 	for _, b := range batch {
-		if r := st.find(b.ID); r != nil && r.Pending {
+		if r := st.find(b.ID); r != nil && (r.Pending || r.State == StateTold) {
 			r.Pending = false
+			r.Sent++
 			if r.State == StateNew {
 				r.State = StateTold
 			}
@@ -465,6 +519,25 @@ func (p *Patrol) settle(ws string, batch []Record, err error) {
 	}
 	if err := p.saveDeep(st, now); err != nil {
 		slog.Warn("planner patrol: findings handed over not marked; they may go again", "workspace", ws, "err", err)
+	}
+}
+
+// ended is told how a batch's turn went: over normally, the Planner had its
+// say on each finding, and what it left is filed at a later flush; failed
+// or dropped, the findings go again.
+func (p *Patrol) ended(ws string, batch []Record, err error) {
+	now := p.cfg.Now()
+	p.deepMu.Lock()
+	defer p.deepMu.Unlock()
+	for _, r := range batch {
+		ref := Ref(ws, r.ID)
+		delete(p.sending, ref)
+		if err == nil {
+			p.had[ref] = now
+		}
+	}
+	if err != nil {
+		slog.Info("planner patrol: the turn the findings went in did not end well; they go again next round", "workspace", ws, "findings", len(batch), "err", err)
 	}
 }
 
@@ -508,6 +581,10 @@ func (p *Patrol) block(st deepState, name, run string, recs []Record, free bool,
 	fmt.Fprintf(&b, "1. auto 为 true 的（小、可逆、把握大、仓库在 GitHub 上、这个工作区巡查派出的任务不到 %d 个）：用 dispatch 派一个任务去修，带上 \"finding\":\"<ref>\"；message 写清问题、证据、建议的改法和完成标准：开分支、修好、开 PR、等 CI 通过后汇报，不合并。\n", MaxOpenTasks)
 	b.WriteString("2. 要用户取舍的（有不止一种改法、要动接口或数据、你拿不准值不值得）：写清方案，用 ask 问用户，带上 \"finding\":\"<ref>\"。\n")
 	b.WriteString("3. 其余：用 front 块的 item 记成未了事项，source 写 \"patrol:<ref>\"。\n")
+	b.WriteString("每条都要有个去处。已经有 issue 或未了事项覆盖、不用再记的：在 front 块的 done 里写 \"patrol:<ref>\"，表示放过。这一轮结束时还没有去处的，网关会自己把它记成未了事项。\n")
+	if slices.ContainsFunc(recs, func(r Record) bool { return r.Sent > 0 }) {
+		b.WriteString("这一批里有上次交给你、那一轮没有处理完的（回合出错，或网关重启了）；已经处理过的照“已经有的”办，这是最后一次交给你。\n")
+	}
 	fmt.Fprintf(&b, "这一轮只能用 dispatch（带 finding）、front、notify、ask、note；ask 和 timely 的 notify 也要带 finding。每天提到用户面前的（提问与已备好的 PR 合计）最多 %d 条，超出的网关会改记成未了事项。\n", MaxSurfaced)
 	if n > 1 {
 		fmt.Fprintf(&b, "这次发现较多，分 %d 批发给你，这是第 %d 批；只处理这一批，其余的随后单独发来。\n", n, i)

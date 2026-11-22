@@ -42,10 +42,14 @@ type deepEnv struct {
 	// entered gets a session's key as it starts.
 	entered chan string
 	// woke are the blocks handed to the Planner; wakeErr fails the wake;
-	// sent is the last wake's callback for its later batches.
+	// sent is the last wake's callback for its later batches, ended the one
+	// for its batches' turns.
 	woke    []string
 	wakeErr error
 	sent    func(int, error)
+	ended   func(int, error)
+	// batches is how many batches the last wake had.
+	batches int
 	// atWork are the dispatched sessions still at work.
 	atWork map[string]bool
 	alarms []string
@@ -78,14 +82,14 @@ func newDeep(t *testing.T) *deepEnv {
 		}
 		return reply, err
 	}
-	d.cfg.Wake = func(sent func(int, error), blocks ...string) error {
+	d.cfg.Wake = func(sent, ended func(int, error), blocks ...string) error {
 		d.mu.Lock()
 		defer d.mu.Unlock()
 		if d.wakeErr != nil {
 			return d.wakeErr
 		}
 		d.woke = append(d.woke, blocks...)
-		d.sent = sent
+		d.sent, d.ended, d.batches = sent, ended, len(blocks)
 		return nil
 	}
 	d.cfg.TaskOpen = func(key string) bool {
@@ -151,6 +155,30 @@ func (d *deepEnv) wait() {
 	case <-time.After(10 * time.Second):
 		d.t.Fatal("deep check still going")
 	}
+}
+
+// over ends the turns of the last wake's batches, each with err: the
+// Planner had its turn (nil), or the turn failed or was dropped.
+func (d *deepEnv) over(err error) {
+	d.t.Helper()
+	d.mu.Lock()
+	ended, n := d.ended, d.batches
+	d.mu.Unlock()
+	if ended == nil {
+		d.t.Fatal("no wake to end the turns of")
+	}
+	for i := range n {
+		ended(i, err)
+	}
+}
+
+// restart is naozhi started again over the same state: a new Patrol, with
+// nothing of the old one's memory.
+func (d *deepEnv) restart() {
+	d.t.Helper()
+	d.p.Stop()
+	d.p = New(d.cfg)
+	d.t.Cleanup(d.p.Stop)
 }
 
 // tick is one hourly round and the deep check it started.

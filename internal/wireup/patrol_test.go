@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/action"
 	"github.com/naozhi/naozhi/internal/planner/activity"
@@ -321,23 +322,74 @@ func TestPatrolSession(t *testing.T) {
 }
 
 // TestPatrolTaskOpen: a task of the patrol's holds its place in the
-// workspace's cap while it is in progress or waits on the user, and gives it
-// up once done, failed, stopped or gone.
+// workspace's cap, and its finding, until it is really over: marked done
+// or failed, stopped by the user, its session gone, or no longer listed. A
+// failure health reports of a live session is none of those — custody sends
+// it on in minutes — nor is waiting on the user.
 func TestPatrolTaskOpen(t *testing.T) {
 	side := sidecar.Open(t.TempDir(), nil)
 	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
-	put := func(key string, mark *sidecar.Mark) {
+	put := func(key string, edit func(*sidecar.Meta)) {
 		t.Helper()
-		if err := side.Put(sidecar.Meta{Key: key, Purpose: sidecar.PurposeTask, Title: key, Created: now.Add(-time.Hour), Mark: mark}); err != nil {
+		m := sidecar.Meta{Key: key, Purpose: sidecar.PurposeTask, Title: key, Created: now.Add(-time.Hour)}
+		if edit != nil {
+			edit(&m)
+		}
+		if err := side.Put(m); err != nil {
 			t.Fatal(err)
 		}
 	}
+	mark := func(st task.State, by task.By) func(*sidecar.Meta) {
+		return func(m *sidecar.Meta) {
+			m.Mark = &sidecar.Mark{State: string(st), By: string(by), At: now.Add(-time.Minute)}
+		}
+	}
 	put("task:doing", nil)
-	put("task:done", &sidecar.Mark{State: string(task.Done), By: string(task.ByPlanner), At: now.Add(-time.Minute)})
-	put("task:failed", &sidecar.Mark{State: string(task.Failed), By: string(task.ByPlanner), At: now.Add(-time.Minute)})
-	put("task:reopened", &sidecar.Mark{State: string(task.Doing), By: string(task.ByPlanner), At: now.Add(-time.Minute)})
-	open := PatrolTaskOpen(task.New(task.Config{Sessions: side, Now: func() time.Time { return now }}))
-	for key, want := range map[string]bool{"task:doing": true, "task:reopened": true, "task:done": false, "task:failed": false, "task:gone": false, "": false} {
+	put("task:waiting", nil)
+	put("task:failing", nil) // health says failed; the session is alive
+	put("task:done", mark(task.Done, task.ByPlanner))
+	put("task:failed", mark(task.Failed, task.ByPlanner))
+	put("task:failed-by-user", mark(task.Failed, task.ByUser))
+	put("task:reopened", mark(task.Doing, task.ByPlanner))
+	put("task:ended", func(m *sidecar.Meta) { m.Retired = now.Add(-time.Minute) })
+	put("task:died", func(m *sidecar.Meta) {
+		m.Retired = now.Add(-time.Minute)
+		m.Failure = &sidecar.Mark{State: string(task.Failed), By: string(task.ByHealth), Why: "CLI exited", At: now.Add(-2 * time.Minute)}
+	})
+	put("task:archived", func(m *sidecar.Meta) {
+		m.Mark = &sidecar.Mark{State: string(task.Done), By: string(task.ByPlanner), At: now.Add(-2 * task.Archive)}
+		m.SeenAt = now.Add(-2 * task.Archive)
+	})
+	board := task.New(task.Config{Sessions: side, Now: func() time.Time { return now }, Health: func() health.Snapshot {
+		return health.Snapshot{Units: []health.Unit{
+			{ID: "task:waiting", State: health.Waiting, Since: now.Add(-time.Minute)},
+			{ID: "task:failing", State: health.Failed, Since: now.Add(-time.Minute), Evidence: "API Error: 529"},
+		}}
+	}})
+	if err := board.Stop("task:doing-then-stopped"); err == nil {
+		t.Fatal("stopped a task that is not there")
+	}
+	put("task:stopped", nil)
+	if err := board.Stop("task:stopped"); err != nil {
+		t.Fatal(err)
+	}
+	// The board's own states, so the cases above are what they claim.
+	states := map[string]task.Task{}
+	for _, tk := range board.List() {
+		states[tk.ID] = tk
+	}
+	if tk := states["task:failing"]; tk.State != task.Failed || tk.By != task.ByHealth {
+		t.Fatalf("task:failing is %s by %s on the board, want failed by health", tk.State, tk.By)
+	}
+	if _, listed := states["task:archived"]; listed {
+		t.Fatal("task:archived is still listed")
+	}
+	open := PatrolTaskOpen(board)
+	for key, want := range map[string]bool{
+		"task:doing": true, "task:waiting": true, "task:failing": true, "task:reopened": true,
+		"task:done": false, "task:failed": false, "task:failed-by-user": false, "task:stopped": false,
+		"task:ended": false, "task:died": false, "task:archived": false, "task:gone": false, "": false,
+	} {
 		if got := open(key); got != want {
 			t.Errorf("open(%q) = %v, want %v", key, got, want)
 		}
@@ -440,7 +492,7 @@ func TestPatrolCards(t *testing.T) {
 				{"id":"doc-two","title":"README 与脚本不符","kind":"doc","evidence":["a.go:1"],"impact":"装不上","fix":"改 README","size":"S","reversible":true,"confidence":"high"}]}`, nil
 		},
 		// The findings are on record once they are handed to the Planner.
-		Wake:       func(func(int, error), ...string) error { handed <- struct{}{}; return nil },
+		Wake:       func(_, _ func(int, error), _ ...string) error { handed <- struct{}{}; return nil },
 		Answer:     func(text, _, words string) error { told = append(told, words+"|"+text); return nil },
 		CloseCards: PatrolCloseCards(n),
 	})

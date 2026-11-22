@@ -30,6 +30,8 @@ type fakePatrol struct {
 	// item (it is in a task's hands, or over).
 	fileErr error
 	inHand  bool
+	// passErr fails Pass of a known finding.
+	passErr error
 	// card is the Decision a notice about a known finding gets; left and
 	// decideErr what Decided answers.
 	card      *notify.Decision
@@ -76,6 +78,11 @@ func (p *fakePatrol) File(ref, text, line string) (bool, bool, error) {
 		return false, false, nil
 	}
 	return true, p.fileErr == nil && !p.inHand, p.fileErr
+}
+
+func (p *fakePatrol) Pass(ref string) (bool, error) {
+	p.calls = append(p.calls, "pass "+ref)
+	return p.known[ref], p.passErr
 }
 
 func (p *fakePatrol) Card(ref string) *notify.Decision {
@@ -616,6 +623,99 @@ func TestPatrolFrontItem(t *testing.T) {
 	pt.run(block(`{"type":"front","item":{"text":"看看这个","source":"patrol:ws_ab12cd34/bug-nope"}}`))
 	if items := s.Items(); len(items) != 1 || items[0].From != front.FromPlanner || items[0].Source != "patrol:ws_ab12cd34/bug-nope" {
 		t.Errorf("items %+v", items)
+	}
+}
+
+// A front block's done naming a finding ("patrol:<ref>") lets it be: the
+// Planner found it covered already, so the patrol is told and no item of
+// the ledger is touched. It runs in a patrol turn, beside the items the
+// block closes; one the patrol does not let pass, and a ref no finding
+// has, come back in the receipt.
+func TestPatrolPass(t *testing.T) {
+	pt := newPatrolTurn(t)
+	s := ledger(t, pt.r)
+	it, _, err := s.AddItem(front.Item{Text: "手工记的一条", Source: "task:ab12", From: front.FromReport})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pt.run(block(`{"type":"front","done":["patrol:` + refA + `","` + it.ID + `"]}`))
+	if got := pt.p.did("pass "); !slices.Equal(got, []string{"pass " + refA}) {
+		t.Errorf("passed %q", got)
+	}
+	if len(s.Items()) != 0 || len(pt.refusals)+len(pt.g.notes) != 0 {
+		t.Errorf("items %+v, receipts %q, notes %q; want the item closed and nothing said", s.Items(), pt.refusals, pt.g.notes)
+	}
+	pt.p.passErr = errors.New("这条发现已经在任务或 PR 手里，不能放过")
+	pt.run(block(`{"type":"front","done":["patrol:` + refB + `","patrol:ws_ab12cd34/bug-nope"]}`))
+	if len(pt.refusals) != 1 || !strings.Contains(pt.refusals[0], "巡查发现 "+refB+" 没有放过：这条发现已经在任务或 PR 手里，不能放过") ||
+		!strings.Contains(pt.refusals[0], "巡查发现 ws_ab12cd34/bug-nope 没有放过") {
+		t.Errorf("receipt %q", pt.refusals)
+	}
+	// With no patrol on this gateway there is nothing to let be.
+	pt.refusals, pt.r.cfg.Patrol = nil, nil
+	pt.run(block(`{"type":"front","done":["patrol:` + refA + `"]}`))
+	if len(pt.refusals) != 1 || !strings.Contains(pt.refusals[0], "没有放过：这台网关没有开项目巡查") {
+		t.Errorf("receipt with no patrol %q", pt.refusals)
+	}
+	// What is no finding's ref is no done entry.
+	for _, bad := range []string{"patrol:", "patrol:ws_ab12cd34", "patrol:ws_ab12cd34/BUG", "patrol:../x/bug-one", "check:dirty:/srv/repo"} {
+		blocks := Parse(block(`{"type":"front","done":["` + bad + `"]}`))
+		if len(blocks) != 1 || blocks[0].Err == nil || !strings.Contains(blocks[0].Err.Error(), "done 里要写未了事项的 id") {
+			t.Errorf("done %q parsed: %+v", bad, blocks)
+		}
+	}
+}
+
+// A finding's open item closed by a front block's done settles the finding
+// with it: on the user's word it is turned down, as 不做 on the page; in a
+// turn of the Planner's own it is let be. An item that is no finding's —
+// a check's, the user's own naming a finding in its source — is only
+// closed.
+func TestPatrolItemDone(t *testing.T) {
+	add := func(s *front.Store, source string, from front.From) string {
+		t.Helper()
+		it, _, err := s.AddItem(front.Item{Text: "重连时会话为空会崩", Source: source, From: from, Workspace: "ws_ab12cd34"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return it.ID
+	}
+	for _, tc := range []struct {
+		name string
+		user bool
+		want string
+	}{
+		{"the user's word", true, "decided " + refA + " skip"},
+		{"the Planner's own turn", false, "pass " + refA},
+	} {
+		pt := newPatrolTurn(t)
+		pt.patrol = false
+		if tc.user {
+			userTurn(pt.r, said)
+		}
+		s := ledger(t, pt.r)
+		finding, check, own := add(s, "patrol:"+refA, front.FromPatrol), add(s, "check:dirty:/srv/repo", front.FromPatrol), add(s, "patrol:"+refB, front.FromUser)
+		pt.run(block(`{"type":"front","done":["` + finding + `","` + check + `","` + own + `"]}`))
+		if len(s.Items()) != 0 {
+			t.Errorf("%s: items left open %+v", tc.name, s.Items())
+		}
+		if got := slices.Concat(pt.p.did("decided"), pt.p.did("pass")); !slices.Equal(got, []string{tc.want}) {
+			t.Errorf("%s: the patrol heard %q, want %q", tc.name, got, tc.want)
+		}
+		if len(pt.refusals)+len(pt.g.unrun) != 0 {
+			t.Errorf("%s: receipts %q %q", tc.name, pt.refusals, pt.g.unrun)
+		}
+	}
+	// The choice not written down is said: the item is closed, the finding
+	// is not turned down.
+	pt := newPatrolTurn(t)
+	pt.patrol = false
+	userTurn(pt.r, said)
+	s := ledger(t, pt.r)
+	pt.p.decideErr = errors.New("被否清单 declined.json 读不了")
+	pt.run(block(`{"type":"front","done":["` + add(s, "patrol:"+refA, front.FromPatrol) + `"]}`))
+	if len(pt.g.unrun) != 1 || !strings.Contains(pt.g.unrun[0], "巡查发现 "+refA+" 的条目已了结，但“不做”没有记下：被否清单 declined.json 读不了") {
+		t.Errorf("receipt %q", pt.g.unrun)
 	}
 }
 

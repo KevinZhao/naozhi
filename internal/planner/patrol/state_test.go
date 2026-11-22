@@ -305,7 +305,10 @@ func TestReported(t *testing.T) {
 	if r, _ := d.p.Finding(ref("bug-one")); r.State != StateDispatched || r.PR != "" || len(d.items.Items()) != 0 {
 		t.Fatalf("record %+v, %d items", r, len(d.items.Items()))
 	}
-	d.p.Reported(ref("bug-one"), "task:t1", "done", []string{"https://github.com/someone/else/pull/9", link, "https://github.com/owner/gateway/pull/32"})
+	// A report names other pull requests too: the one a fix came of, one
+	// of another repository. The task's own is the latest opened, the
+	// highest number of this repository's, wherever in the text it stands.
+	d.p.Reported(ref("bug-one"), "task:t1", "done", []string{"https://github.com/owner/gateway/pull/12", "https://github.com/someone/else/pull/99", link, "https://github.com/owner/gateway/pull/7"})
 	r, _ := d.p.Finding(ref("bug-one"))
 	items := d.items.Items()
 	if r.State != StatePR || r.PR != link || len(items) != 1 || r.Item != items[0].ID {
@@ -438,17 +441,32 @@ func TestRecordsKept(t *testing.T) {
 	d.p.Dispatched(ref("bug-one"), "task:t1")
 	d.p.Reported(ref("bug-one"), "task:t1", "done", []string{"https://github.com/owner/gateway/pull/31"})
 	d.fe.gh["owner/gateway"].views = map[string]string{"31": `{"state":"MERGED","statusCheckRollup":[]}`}
+	seen := d.state(wsA).Findings[0].Seen
 	d.at(wsA, 0)
 	d.tick()
-	d.now = d.now.AddDate(0, 0, 89)
+	// The check of that round reported both again. One whose pull request
+	// is merged is no new finding and is not seen again either: the
+	// checkout may not have the merge yet, and a record seen for ever would
+	// keep a real return from being reported.
+	st := d.state(wsA)
+	if got := states(st); got != "bug-one=merged bug-two=told" || st.Last == nil || st.Last.New != 0 || !st.Findings[0].Seen.Equal(seen) || !st.Findings[1].Seen.After(seen) {
+		t.Fatalf("after the round: %s, last %+v, seen %s and %s", got, st.Last, st.Findings[0].Seen, st.Findings[1].Seen)
+	}
+	d.now = seen.AddDate(0, 0, 89)
 	d.p.Dispatched(ref("bug-two"), "task:t2")
 	if got := states(d.state(wsA)); got != "bug-one=merged bug-two=dispatched" {
 		t.Fatalf("at 89 days: %s", got)
 	}
-	d.now = d.now.AddDate(0, 0, 100)
+	d.now = seen.AddDate(0, 0, 91)
 	d.p.Dispatched(ref("bug-two"), "task:t3")
 	if got := states(d.state(wsA)); got != "bug-two=dispatched" {
 		t.Fatalf("past 90 days: %s", got)
+	}
+	// Gone from the record, the same thing found again is new.
+	d.over(nil)
+	d.found(finding("bug-one", nil))
+	if st := d.state(wsA); st.Last.New != 1 || !strings.Contains(states(st), "bug-one=told") {
+		t.Errorf("found again once the record lapsed: %s, last %+v", states(st), st.Last)
 	}
 }
 

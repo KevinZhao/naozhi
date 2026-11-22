@@ -219,24 +219,35 @@ func PatrolSession(router *session.Router) patrol.Session {
 }
 
 // PatrolWake is patrol.Config.Wake over the Planner: each block of a
-// workspace's new findings as a turn from agent.SourcePatrol. Whatever
-// keeps the Planner from taking them, the patrol keeps them for its next
-// round.
-func PatrolWake(a *agent.Agent) func(sent func(batch int, err error), blocks ...string) error {
-	return func(sent func(int, error), blocks ...string) error {
-		return a.Wake(agent.SourcePatrol, sent, blocks...)
+// workspace's new findings as a turn from agent.SourcePatrol, the patrol
+// told how each turn ended. Whatever keeps the Planner from taking them,
+// the patrol keeps them for its next round.
+func PatrolWake(a *agent.Agent) func(sent, ended func(batch int, err error), blocks ...string) error {
+	return func(sent, ended func(int, error), blocks ...string) error {
+		return a.WakeEnded(agent.SourcePatrol, sent, ended, blocks...)
 	}
 }
 
 // PatrolTaskOpen is patrol.Config.TaskOpen: whether dispatched session key
-// is in progress or waiting on the user in 任务. One done, failed, stopped
-// or archived has left its place to the next.
+// is still going in 任务. Over is one marked done or failed (by the Planner
+// or the user, a stop among them), one whose session is gone, and one no
+// longer listed. A failure health reports of a live session is not over:
+// custody sends it on in minutes and the user may, so the task keeps its
+// place in the workspace's cap and its finding, and the pull request it
+// reports after going on is the finding's.
 func PatrolTaskOpen(tasks *task.Board) func(key string) bool {
 	return func(key string) bool {
 		for _, t := range tasks.List() {
-			if t.ID == key {
-				return t.State == task.Doing || t.State == task.Waiting
+			if t.ID != key {
+				continue
 			}
+			switch {
+			case t.State == task.Done:
+				return false
+			case t.State == task.Failed:
+				return t.By == task.ByHealth && t.Retired.IsZero()
+			}
+			return true
 		}
 		return false
 	}

@@ -179,7 +179,7 @@ const knownInPrompt = 50
 var stateWords = map[string]string{
 	StateNew: "已报", StateTold: "已报", StateItem: "已记为未了事项", StateAsked: "已问用户",
 	StateDispatched: "已派任务在修", StatePR: "已有 PR", StateMerged: "已修（PR 已合并）", StateClosed: "PR 已关闭、没合并",
-	StateDoing: "用户说了做",
+	StateDoing: "用户说了做", StatePassed: "已有 issue 或未了事项覆盖",
 }
 
 // prompt is the deep check session's one message: what to look for, what

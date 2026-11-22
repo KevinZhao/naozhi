@@ -282,8 +282,10 @@ func TestDecideDo(t *testing.T) {
 			t.Errorf("telling lacks %q:\n%s", want, got[0])
 		}
 	}
-	if got := d.cardsClosed(); len(got) != 0 {
-		t.Errorf("cards closed %q for a finding to be done", got)
+	// The other cards about it still offer "做": closed, so it is not said
+	// twice.
+	if got := d.cardsClosed(); !slices.Equal(got, []string{ref("bug-big") + "|你已选了做"}) {
+		t.Errorf("cards closed %q, want the finding's other cards", got)
 	}
 	if d.read(declinedFile) != "" {
 		t.Errorf("declined.json written for a finding to be done:\n%s", d.read(declinedFile))
@@ -473,7 +475,9 @@ func TestDeclinedHandEdit(t *testing.T) {
 	if st := d.state(wsA); st.Last.Dropped != 2 || st.Last.New != 0 {
 		t.Fatalf("last run %+v, want both dropped", st.Last)
 	}
-	// The user takes the finding off the list, and the kind.
+	// The user takes the finding off the list, and the kind. The turn the
+	// findings first went in is long over by then.
+	d.over(nil)
 	d.writeDeclined(`{"v":1,"findings":[{"workspace":"` + wsA + `","id":"doc-readme","kind":"doc","title":"x","at":"2026-11-23T14:02:00+08:00"}],"kinds":null}`)
 	woke := len(d.blocks())
 	d.now = d.now.Add(time.Hour)
@@ -794,6 +798,7 @@ func TestMuteWorkspace(t *testing.T) {
 
 	// Taken off the list: patrolled again, and the finding turned down
 	// with it is reported anew.
+	d.over(nil)
 	d.writeDeclined(`{"v":1,"findings":[],"kinds":[],"workspaces":[]}`)
 	d.now = d.now.Add(time.Hour)
 	d.active[wsA] = d.now // a session since the last deep check

@@ -256,6 +256,12 @@ func (p *Patrol) Decide(ref string, c Choice) error {
 		if err != nil {
 			return err
 		}
+		if dec.rec.State == StateDoing {
+			// Said already, and the Planner has it: a second click (a card
+			// still open elsewhere, a request sent twice) is no second word,
+			// which would have a second task started.
+			return nil
+		}
 		if p.cfg.Answer == nil {
 			return ErrPlanner
 		}
@@ -266,6 +272,8 @@ func (p *Patrol) Decide(ref string, c Choice) error {
 		if _, err := p.decide(ref, c, true); err != nil {
 			slog.Warn("planner patrol: a finding handed to the Planner not marked", "finding", ref, "err", err)
 		}
+		// The other cards about it still offer the choice just made.
+		p.closeCards([]string{ref}, "你已选了"+LabelDo)
 		return nil
 	}
 	dec, err := p.decide(ref, c, true)

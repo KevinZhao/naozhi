@@ -320,6 +320,11 @@ type Patrol interface {
 	// has; filed says the finding has its item (one in a task's hands, or
 	// over, gets none).
 	File(ref, text, line string) (known, filed bool, err error)
+	// Pass records that the Planner let the finding be: covered already by
+	// an issue or an open item (a front block's done naming it). known is
+	// false for a ref no finding has; an error for one that is not the
+	// Planner's to pass over.
+	Pass(ref string) (known bool, err error)
 	// Card is the choices a notice about the finding carries for the user
 	// (do it, don't, no more of its kind; §15.23 ④), answered through the
 	// patrol's own handler; nil for a ref no finding has, or one that is
@@ -2897,14 +2902,51 @@ func (r *Runner) front(f Front, byUser bool) error {
 		by = front.ByUser
 	}
 	for _, id := range f.Done {
-		if _, err := r.cfg.Items.CloseItem(id, by); err != nil {
+		// A patrol finding by its ref: let be, not an item to close.
+		if ref, ok := strings.CutPrefix(id, front.PatrolSource); ok {
+			switch known, err := r.passFinding(ref); {
+			case err != nil:
+				failed = append(failed, "巡查发现 "+ref+" 没有放过："+err.Error())
+			case !known:
+				failed = append(failed, "巡查发现 "+ref+" 没有放过：没有这条发现")
+			}
+			continue
+		}
+		it, err := r.cfg.Items.CloseItem(id, by)
+		if err != nil {
 			failed = append(failed, "未了事项 "+id+" 没有了结："+err.Error())
+			continue
+		}
+		// A finding's item closed is the finding settled, or its record
+		// would go on as open: followed, listed, dispatched again. Struck
+		// on the user's word it is turned down, as 不做 on the page is; by
+		// the Planner it is let be. What is left of it (a task, a pull
+		// request) the Planner has in the turn it closed the item in.
+		ref, ok := strings.CutPrefix(it.Source, front.PatrolSource)
+		if !ok || it.From != front.FromPatrol || r.cfg.Patrol == nil {
+			continue
+		}
+		if byUser {
+			if _, err := r.cfg.Patrol.Decided(ref, FindingSkip); err != nil {
+				failed = append(failed, "巡查发现 "+ref+" 的条目已了结，但“不做”没有记下："+err.Error())
+			}
+		} else if _, err := r.cfg.Patrol.Pass(ref); err != nil {
+			slog.Info("planner actions: a finding whose item the Planner closed not passed over", "finding", ref, "err", err)
 		}
 	}
 	if len(failed) == 0 {
 		return nil
 	}
 	return errors.New(did + strings.Join(failed, "；"))
+}
+
+// passFinding lets the patrol finding ref names be for the Planner
+// (Patrol.Pass).
+func (r *Runner) passFinding(ref string) (known bool, err error) {
+	if r.cfg.Patrol == nil {
+		return false, errors.New("这台网关没有开项目巡查")
+	}
+	return r.cfg.Patrol.Pass(ref)
 }
 
 // itemWorkspace is the workspace ID a front block's new item belongs to:

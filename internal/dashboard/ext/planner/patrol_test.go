@@ -164,7 +164,7 @@ func decideHandler(t *testing.T) (h *Handler, p *patrol.Patrol, ledger *front.St
 				{"id":"doc-two","title":"README 与脚本不符","kind":"doc","evidence":["a.go:1"],"impact":"装不上","fix":"改 README","size":"M","reversible":true,"confidence":"medium"}]}`, nil
 		},
 		// The findings are on record once they are handed over.
-		Wake: func(func(int, error), ...string) error { handed <- struct{}{}; return nil },
+		Wake: func(_, _ func(int, error), _ ...string) error { handed <- struct{}{}; return nil },
 		// The Planner takes what it is told while reach is true.
 		Answer: func(string, string, string) error {
 			if !*reach {
