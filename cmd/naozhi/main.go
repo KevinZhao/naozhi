@@ -657,6 +657,7 @@ func main() {
 		LastActive: reapSources.LastActive,
 		Nearby:     custodian.Nearby,
 		Waiting:    wireup.ReapWaiting(notifier),
+		Yours:      tasks.YoursDone,
 		Archive:    reapSources.Archive,
 		Restore:    reapSources.Restore,
 		Dirs:       reapSources.Dirs,

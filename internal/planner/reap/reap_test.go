@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -864,5 +865,106 @@ func TestUnreadResultHoldsPutAway(t *testing.T) {
 	g.r.Tick(context.Background())
 	if g.archived != 1 {
 		t.Fatalf("unread past the keep: archived %d, Wait = %v", g.archived, func() string { w, _ := g.r.Wait(key); return w }())
+	}
+}
+
+// A task the user marked done or stopped themselves goes as soon as nothing
+// of it runs: no idleness, no "you are at it" hold it, they asked for it gone
+// (D137). A turn still running, a question unanswered or background work
+// does.
+func TestOwnMarkPutsAwayAtOnce(t *testing.T) {
+	mark := func(f *fixture) {
+		t.Helper()
+		if _, err := f.sc.SetMark(key, sidecar.Mark{State: string(task.Done), By: string(task.ByUser), Why: task.StoppedWhy, At: f.now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := newFixture(t)
+	mark(f)
+	f.sess.LastActive = f.now // active this very minute
+	f.nearby = true           // and the user is looking at it
+	f.r.Tick(context.Background())
+	if f.archived != 1 || f.reap() == nil || f.reap().By != "user" {
+		t.Fatalf("the user's own mark: archived %d, reap %+v, Wait %v", f.archived, f.reap(), func() string { w, _ := f.r.Wait(key); return w }())
+	}
+
+	for _, tc := range []struct {
+		name string
+		set  func(*Session)
+		why  string
+	}{
+		{"running", func(s *Session) { s.Running = true }, "这一轮还没结束"},
+		{"asking", func(s *Session) { s.Asking = true }, "有提问没回答"},
+		{"background", func(s *Session) { s.Background = true }, "后台还有任务在跑"},
+	} {
+		g := newFixture(t)
+		mark(g)
+		tc.set(&g.sess)
+		g.r.Tick(context.Background())
+		if why, _ := g.r.Wait(key); g.archived != 0 || why != tc.why {
+			t.Errorf("%s: archived %d, Wait = %q, want held by %q", tc.name, g.archived, why, tc.why)
+		}
+		g.sess = Session{}
+		g.r.Tick(context.Background())
+		if g.archived != 1 {
+			t.Errorf("%s over: archived %d", tc.name, g.archived)
+		}
+	}
+}
+
+// A session the user opened is put away only on their own done mark, and
+// only while it holds (Config.Yours): its directories are left alone, the
+// card keeps its name, and marking it in progress puts it back. The
+// Planner's mark on such a session leaves it where it is (D137).
+func TestYoursPutAwayOnOwnMark(t *testing.T) {
+	const yours = "dashboard:direct:u:general"
+	setup := func(by task.By, holds bool) *fixture {
+		f := newFixture(t, "/x/wt") // a worktree its transcript ran in
+		f.r.cfg.Yours = func(m sidecar.Meta) bool { return holds && m.Key == yours }
+		f.r.cfg.Name = func(string) string { return "分析 TGW 迁移" }
+		session := f.r.cfg.Session
+		f.r.cfg.Session = func(k string) (Session, bool) {
+			if k != yours {
+				return Session{}, false
+			}
+			return session(k)
+		}
+		f.r.cfg.LastActive = nil
+		if err := f.sc.Upsert(yours, func(m *sidecar.Meta) bool {
+			m.Mark = &sidecar.Mark{State: string(task.Done), By: string(by), At: f.now}
+			return true
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	get := func(f *fixture) sidecar.Meta { m, _ := f.sc.Get(yours); return m }
+
+	f := setup(task.ByUser, true)
+	f.r.Tick(context.Background())
+	m := get(f)
+	if f.archived != 1 || m.Reap == nil || len(m.Reap.Worktrees) != 0 || m.Title != "分析 TGW 迁移" {
+		t.Fatalf("the user's mark: archived %d, sidecar %+v", f.archived, m)
+	}
+	if len(f.git.removed) != 0 || len(f.git.statusCalls) != 0 {
+		t.Errorf("a directory of the user's own session looked at or removed: %v, %v", f.git.removed, f.git.statusCalls)
+	}
+	// 标为进行中 puts it back.
+	f.r.OnState(yours, task.Doing)
+	if m := get(f); m.Reap != nil || len(f.restored) != 1 || !strings.HasPrefix(f.restored[0], yours+" sid-1") {
+		t.Fatalf("reopen: reap %+v, restored %q", m.Reap, f.restored)
+	}
+
+	if g := setup(task.ByPlanner, true); true {
+		g.r.Tick(context.Background())
+		if g.archived != 0 || get(g).Reap != nil {
+			t.Error("the Planner's mark put the user's session away")
+		}
+	}
+	if g := setup(task.ByUser, false); true { // talked to since, or not watched
+		g.r.Tick(context.Background())
+		if g.archived != 0 {
+			t.Error("a mark that no longer holds put the session away")
+		}
 	}
 }
