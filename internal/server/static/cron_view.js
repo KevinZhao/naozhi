@@ -1283,13 +1283,18 @@ function cronSummaryChipHtml(attentionCount) {
 }
 
 // cronFilterBarHtml is the adaptive filter bar. The search row shows only
-// when cronStore.jobs > 5 (search adds noise at small scale). The status chips row
+// when cronStore.jobs > 5 (search adds noise at small scale), or while a query
+// is set or the box has focus: a delete that takes the list to 5 must not hide
+// the box that is still filtering it (the hidden rows would have no visible way
+// back), nor pull it from under someone who is retyping. The status chips row
 // additionally shows whenever something 需关注 exists (the rail badge says
 // "需关注 N" — the panel must offer the matching 需关注 chip) or a non-default
 // filter is active (the missed-banner sets 'attention'; without chips a
 // ≤5-job install had no visible way back to 全部).
 function cronFilterBarHtml(attentionCount) {
-  const showSearchRow = cronStore.jobs.length > 5;
+  const active = document.activeElement;
+  const showSearchRow = cronStore.jobs.length > 5 || cronFilterQuery !== '' ||
+    !!(active && active.id === 'cron-search-input');
   if (!showSearchRow && attentionCount === 0 && cronFilterStatus === 'all') return '';
   const chipActive = s => cronFilterStatus === s ? ' active' : '';
   const chipPressed = s => cronFilterStatus === s ? 'true' : 'false';
@@ -1302,7 +1307,7 @@ function cronFilterBarHtml(attentionCount) {
     : '';
   const searchRow = showSearchRow
     ? '<div class="cron-search-row">' +
-        '<input type="text" id="cron-search-input" class="cron-search-input" placeholder="搜索名称、提示词、目录..." autocomplete="off" spellcheck="false" aria-label="搜索定时任务" value="' + escAttr(cronFilterQuery) + '" data-action-input="cron-search" />' +
+        '<input type="text" id="cron-search-input" class="cron-search-input" placeholder="搜索名称、提示词、目录..." autocomplete="off" spellcheck="false" aria-label="搜索定时任务" data-action-input="cron-search" />' +
         '<button type="button" class="cron-search-clear" data-action="cron-search-clear" title="清空搜索" aria-label="清空搜索">&times;</button>' +
       '</div>'
     : '';
@@ -1327,8 +1332,10 @@ function cronFilterBarHtml(attentionCount) {
 // the title's summary counts, the filter bar (its 需关注 N chip, and whether the
 // bar and its search row show at all) and the missed banner — so a pause, a
 // delete or a refetch moves them with the rows. Each part is rewritten only when
-// its markup changed; a rebuilt search box gets back the text, caret and focus
-// it had, so a repaint while the user types does not interrupt them.
+// its markup changed. The search box's text is kept out of the markup (set on
+// the element instead), so typing never makes the markup differ and a repaint
+// while the user types — mid IME composition included — leaves the box alone;
+// when it is rebuilt for another reason it gets back its text, caret and focus.
 function renderCronChrome() {
   const title = document.getElementById('cron-list-title');
   const host = document.getElementById('cron-list-chrome');
@@ -1350,10 +1357,10 @@ function renderCronChrome() {
   } : null;
   host.innerHTML = chromeHtml;
   host._nzHtml = chromeHtml;
-  const input = typed && document.getElementById('cron-search-input');
+  const input = document.getElementById('cron-search-input');
   if (input) {
-    input.value = typed.value;
-    if (typed.focused) {
+    input.value = typed ? typed.value : cronFilterQuery;
+    if (typed && typed.focused) {
       input.focus();
       try { input.setSelectionRange(typed.start, typed.end); } catch (_) {}
     }
@@ -1492,7 +1499,7 @@ async function cronSetPaused(id, paused) {
   const what = paused ? '暂停定时任务' : '恢复定时任务';
   const job = cronStore.jobs.find(j => j && j.id === id);
   const prev = job ? { paused: job.paused, paused_reason: job.paused_reason } : null;
-  const op = { paused, settledAt: 0 };
+  const op = { paused };
   cronPendingOps.set(id, op);
   if (job) {
     job.paused = paused;
@@ -1577,7 +1584,7 @@ async function cronDelete(id) {
   // another one was opened meanwhile).
   const idx = cronStore.jobs.findIndex(j => j && j.id === id);
   const removed = idx >= 0 ? cronStore.jobs[idx] : null;
-  const op = { deleted: true, settledAt: 0 };
+  const op = { deleted: true };
   cronPendingOps.set(id, op);
   if (idx >= 0) cronStore.jobs.splice(idx, 1);
   const drawerWasOpen = cronDrawerForgetJob(id);

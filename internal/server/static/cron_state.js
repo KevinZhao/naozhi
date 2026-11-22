@@ -171,32 +171,68 @@ export function reconcileCurrentRun(prevRun, freshRun, fetchStartedAt, cleared) 
 
 // cronPendingOps: jobId → the pause / resume / delete the user just made and the
 // list already shows ({ paused } or { deleted }). A list response cannot know
-// about it until the server has applied it, so every response that left before
-// the request settled (settledAt 0, or started earlier) is overridden by it; the
-// first one that left after it is the server's word and retires the entry.
+// about it until the server has applied it, so every response whose request
+// left before the op settled overrides it with the op. The entry retires once a
+// response that left after the settle has landed (the server's word) and no
+// response that left before it is still on its way — otherwise a slow earlier
+// fetch landing last would put the pre-change state back with nothing left to
+// override it. Order is by cronListSeq, not the clock, so a fetch begun in the
+// same millisecond as the settle is still placed on the right side of it.
 // cron_view writes the entries; the object identity is the op's token, so a
 // later op on the same job replaces it and the earlier op's settle is a no-op.
 export const cronPendingOps = new Map();
 
+let cronListSeq = 0;
+// Start sequence numbers of the list fetches still on their way.
+const cronListInFlight = new Set();
+
 export function cronPendingSettle(id, op) {
-  if (cronPendingOps.get(id) === op) op.settledAt = Date.now();
+  if (cronPendingOps.get(id) === op) op.settledSeq = ++cronListSeq;
 }
 
 export function cronPendingDrop(id, op) {
   if (cronPendingOps.get(id) === op) cronPendingOps.delete(id);
 }
 
-function applyCronPending(jobs, fetchStartedAt) {
+function cronListFetchBegin() {
+  const seq = ++cronListSeq;
+  cronListInFlight.add(seq);
+  return seq;
+}
+
+// cronListFetchEnd is called once per begun fetch, landed or not, so a timed
+// out fetch does not hold an op forever.
+function cronListFetchEnd(seq) {
+  cronListInFlight.delete(seq);
+  for (const [id, op] of cronPendingOps) {
+    if (!op.confirmed) continue;
+    let olderInFlight = false;
+    for (const s of cronListInFlight) if (s < op.settledSeq) { olderInFlight = true; break; }
+    if (!olderInFlight) cronPendingOps.delete(id);
+  }
+}
+
+function cronPendingCurrent(op, startSeq) {
+  return !!op && !(op.settledSeq && startSeq > op.settledSeq);
+}
+
+// applyCronPending overlays the ops on a list response that left at startSeq,
+// and marks the ops it is the server's word for.
+function applyCronPending(jobs, startSeq) {
+  for (const op of cronPendingOps.values()) {
+    if (op.settledSeq && startSeq > op.settledSeq) op.confirmed = true;
+  }
   if (cronPendingOps.size === 0) return jobs;
   const out = [];
   for (const j of jobs) {
-    let op = j && cronPendingOps.get(j.id);
-    if (op && op.settledAt && fetchStartedAt >= op.settledAt) op = null;
-    if (op && op.deleted) continue;
-    if (op && typeof op.paused === 'boolean') {
-      j.paused = op.paused;
-      // Both transitions clear the reason server-side (manual pause, resume).
-      j.paused_reason = '';
+    const op = j && cronPendingOps.get(j.id);
+    if (cronPendingCurrent(op, startSeq)) {
+      if (op.deleted) continue;
+      if (typeof op.paused === 'boolean') {
+        j.paused = op.paused;
+        // Both transitions clear the reason server-side (manual pause, resume).
+        j.paused_reason = '';
+      }
     }
     out.push(j);
   }
@@ -220,6 +256,7 @@ export async function fetchCronJobs() {
   // stale-clobber 保护）。取在请求发出前，宁可偏早（多保留补丁一拍）也
   // 不偏晚（把新补丁误判为旧）。
   const fetchStartedAt = Date.now();
+  const listSeq = cronListFetchBegin();
   try {
     const headers = {};
     // 8s timeout, so a hung disk/fs call releases before the next fetch.
@@ -243,15 +280,13 @@ export async function fetchCronJobs() {
       const prev = nj && nj.id && (Array.isArray(cronStore.jobs) ? cronStore.jobs : []).find(o => o && o.id === nj.id);
       if (prev) nj.current_run = reconcileCurrentRun(prev.current_run, nj.current_run, fetchStartedAt, cronRunClearedAtLocal.get(nj.id));
     }
-    cronStore.jobs = applyCronPending(freshJobs, fetchStartedAt);
-    for (const [id, op] of cronPendingOps) {
-      if (op.settledAt && fetchStartedAt >= op.settledAt) cronPendingOps.delete(id);
-    }
+    cronStore.jobs = applyCronPending(freshJobs, listSeq);
     cronStore.notifyDefault = data.notify_default || null;
     cronStore.recentRunsCap = (data.recent_runs_cap | 0) > 0 ? (data.recent_runs_cap | 0) : 0;
     setCronTimezoneMeta(data);
     cronRailBadgeRefresh();
   } catch (e) { console.error('fetch cron:', e); }
+  finally { cronListFetchEnd(listSeq); }
 }
 
 // cronRefetchFullJob refills `cronStore.jobs[i].prompt` for a single job from
@@ -277,7 +312,7 @@ export async function cronRefetchFullJob(id) {
   // open — and Save — a stale prompt: open a drawer, have the prompt rewritten
   // elsewhere, open the editor, and the old body goes back to disk.
   if (!cached.prompt_truncated && !cached.prompt_refetched) return { ok: true, job: cached };
-  const fetchStartedAt = Date.now();
+  const listSeq = cronListFetchBegin();
   try {
     const headers = {};
     // No compact param: there is no per-job GET, so the full list is pulled.
@@ -291,11 +326,12 @@ export async function cronRefetchFullJob(id) {
       // The splice is a list response too: a pause still in flight keeps its
       // state, and a job deleted meanwhile is not brought back.
       const idx = cronStore.jobs.findIndex(j => j.id === id);
-      const [spliced] = applyCronPending([Object.assign({}, fresh, { prompt_refetched: true })], fetchStartedAt);
+      const [spliced] = applyCronPending([Object.assign({}, fresh, { prompt_refetched: true })], listSeq);
       if (!spliced) return { ok: false, reason: 'missing' };
       if (idx >= 0) cronStore.jobs[idx] = spliced;
       return { ok: true, job: spliced };
     }
   } catch (e) { /* fall through to fetch-failure */ }
+  finally { cronListFetchEnd(listSeq); }
   return { ok: false, reason: 'fetch' };
 }
