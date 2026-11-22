@@ -253,7 +253,10 @@ function defaultGitStates() {
  *   shape, newest first); ?key= filters them. A test may edit the array in place.
  * @param {object} [overrides.sessionDetails] - key → GET /api/sessions/detail payload.
  * @param {object} [overrides.notes] - key → GET /api/sessions/notes entries (note.Note wire shape,
- *   oldest first); other keys list none. A test may edit the arrays in place.
+ *   oldest first); other keys list none. A test may edit the arrays in place. POST
+ *   /api/sessions/notes/useless ({key, id}) lands in noteUselessCalls and marks that entry
+ *   useless, answering {note}; 404 for a note not listed.
+ * @param {boolean} [overrides.noteUselessFail] - that POST answers 500 and marks nothing.
  * @param {object} [overrides.digests] - key → the session's digest markdown, GET
  *   /api/sessions/digest?key= answers {key, updated, markdown}; other keys 404, as a session
  *   without one does. Each request's key lands in digestCalls. A test may edit it in place.
@@ -384,6 +387,7 @@ function startMockServer(overrides = {}) {
   const outputs = overrides.outputs || [];
   const sessionDetails = overrides.sessionDetails || {};
   const notesData = overrides.notes || {};
+  const noteUselessCalls = [];
   const digestsData = overrides.digests || {};
   const digestCalls = [];
   const outputsCalls = [];
@@ -826,6 +830,24 @@ function startMockServer(overrides = {}) {
       const key = url.searchParams.get('key') || '';
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ notes: notesData[key] || [] }));
+      return;
+    }
+
+    // 没用 on a Planner note: recorded, and the listed entry marked.
+    if (pathname === NZ_CONTRACT.API.sessions_notes_useless && req.method === 'POST') {
+      if (!checkAuth()) return;
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        const { key, id } = JSON.parse(body || '{}');
+        noteUselessCalls.push({ key, id });
+        if (overrides.noteUselessFail) { res.writeHead(500); res.end('the mark was not kept'); return; }
+        const n = (notesData[key] || []).find((x) => x.id === id && x.kind === 'planner');
+        if (!n) { res.writeHead(404); res.end('note not found'); return; }
+        n.useless = true;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ note: n }));
+      });
       return;
     }
 
@@ -1629,6 +1651,7 @@ function startMockServer(overrides = {}) {
         get workflowCalls() { return workflowCalls; },
         get outputsCalls() { return outputsCalls; },
         get digestCalls() { return digestCalls; },
+        get noteUselessCalls() { return noteUselessCalls; },
         get inboxCalls() { return inboxCalls; },
         get tasksCalls() { return tasksCalls; },
         get frontsCalls() { return frontsCalls; },

@@ -232,7 +232,7 @@ function mentionedKeys(ev) {
 
 // ---- action blocks (§6.2) ----
 
-const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask', 'status', 'notify', 'custody', 'relay', 'remember', 'lookup', 'park', 'halt', 'cancel', 'routine', 'front']);
+const ACTION_TYPES = new Set(['dispatch', 'promise', 'ask', 'status', 'notify', 'custody', 'relay', 'remember', 'lookup', 'park', 'halt', 'cancel', 'routine', 'front', 'note']);
 // STOP_HEAD is a halt or cancel block's one line (§15.15 ①): its mark, what
 // the gateway did and the tooltip saying it.
 const STOP_HEAD = {
@@ -434,6 +434,17 @@ function actionCardHtml(raw) {
     const why = str(a.why);
     return '<div class="pl-act pl-act-lookup pl-act-line"' + (why ? ' title="' + escAttr('为什么查：' + why) + '"' : '') + '>' +
       '<span class="pl-act-k">查一下</span>' + (q ? ' · <span class="pl-act-goal">' + esc(q) + '</span>' : '') + '</div>';
+  }
+  if (a.type === 'note') {
+    // One line: 旁注 · the session · the note; it stands in that session's
+    // view (session_notes.js, §15.22 ②), what it goes by in the tooltip.
+    const key = str(a.key);
+    const text = oneLine(str(a.text));
+    const why = oneLine(str(a.why));
+    return '<div class="pl-act pl-act-note pl-act-line" title="' + escAttr('写在那个会话里，只给你看，不进会话上下文' + (why ? '。依据：' + why : '')) + '">' +
+      '<span class="pl-act-k">旁注</span>' +
+      (key ? ' · <b class="pl-act-name pl-stop-name" data-key="' + escAttr(key) + '">' + esc(sessionTitle(key)) + '</b>' : '') +
+      (text ? '<span class="pl-act-goal"> · ' + esc(text) + '</span>' : '') + '</div>';
   }
   if (a.type === 'promise') {
     return '<div class="pl-act pl-act-promise"><div class="pl-act-h">登记承诺</div>' +
