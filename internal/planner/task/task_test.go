@@ -380,7 +380,7 @@ func TestLive(t *testing.T) {
 		},
 		Live: func() map[string]Live {
 			return map[string]Live{
-				run:     {Running: true, Activity: "Bash:\n  go test\t./...", Reply: long, LastActive: t0},
+				run:     {Running: true, Activity: "Bash:\n  go test\t./...", Reply: long, LastActive: t0, Progress: "已跑 40 分钟 ·\n 1 个后台任务：make"},
 				retired: {Activity: "x"},
 			}
 		}})
@@ -389,7 +389,7 @@ func TestLive(t *testing.T) {
 		by[tk.ID] = tk
 	}
 	l := by[run].Live
-	if l == nil || !l.Running || l.Activity != "Bash: go test ./..." || !l.LastActive.Equal(t0) {
+	if l == nil || !l.Running || l.Activity != "Bash: go test ./..." || !l.LastActive.Equal(t0) || l.Progress != "已跑 40 分钟 · 1 个后台任务：make" {
 		t.Fatalf("live = %+v", l)
 	}
 	if n := len([]rune(l.Reply)); n > liveRunes+3 || !strings.HasSuffix(l.Reply, "...") {

@@ -377,8 +377,9 @@ func TestPlannerMuted(t *testing.T) {
 	r.write("a", "第二天恢复")
 }
 
-// Only the writing of a note is a note: the mark, an event of a later
-// version and an entry with no ID are none.
+// Only the writing of a note is a note, the Planner's or the gateway's
+// progress note: the mark, an event of a later version and an entry with no
+// ID are none.
 func TestFromEntryPlanner(t *testing.T) {
 	ts := time.Date(2026, 11, 23, 10, 0, 0, 0, time.UTC)
 	for _, c := range []struct {
@@ -387,7 +388,8 @@ func TestFromEntryPlanner(t *testing.T) {
 	}{
 		{"k", `{"event":"write","id":"p0123456789ab","text":"正文","why":"依据"}`, &Note{ID: "p0123456789ab", Key: "k", Time: ts, Kind: KindPlanner, Text: "正文", Why: "依据"}},
 		{"k", `{"event":"useless","id":"p0123456789ab"}`, nil},
-		{"k", `{"event":"progress","id":"g1","text":"跑了 30 分钟"}`, nil},
+		{"k", `{"event":"progress","id":"g1","text":"已跑 30 分钟","run":"1700000000000"}`, &Note{ID: "g1", Key: "k", Time: ts, Kind: KindProgress, Text: "已跑 30 分钟", Run: "1700000000000"}},
+		{"k", `{"event":"retract","id":"p0123456789ab"}`, nil},
 		{"k", `{"event":"write","text":"没有 id"}`, nil},
 		{"", `{"event":"write","id":"p0123456789ab","text":"没有会话"}`, nil},
 		{"k", `not json`, nil},

@@ -10,6 +10,8 @@
 // See docs/rfc/workflow-dashboard.md §4.2 and §5.2-§5.7.
 package workflow
 
+import "strconv"
+
 // Status is a workflow's normalized status.
 type Status string
 
@@ -177,6 +179,34 @@ type Workflow struct {
 	Src       FieldSrc `json:"-"`
 	// RunDir is written only by the board, after resolving it off-lock.
 	RunDir string `json:"-"`
+}
+
+// Phase is the title of the phase w is in: the first with agents still to
+// finish, else the last that has any; "#<index>" for one without a title,
+// "" when none has an agent yet. Phases are all declared up front, so
+// between two of them and before the first agent the later ones are empty:
+// the dashboard's panel heads a workflow with the last of them then and is
+// right again a frame later, where a progress note that named it would stay
+// wrong and count the next phase as one more move.
+func (w *Workflow) Phase() string {
+	var p *Phase
+	for i := range w.Phases {
+		x := &w.Phases[i]
+		if x.Queued+x.Running > 0 {
+			p = x
+			break
+		}
+		if x.Total > 0 {
+			p = x
+		}
+	}
+	switch {
+	case p == nil:
+		return ""
+	case p.Title == "":
+		return "#" + strconv.Itoa(p.Index)
+	}
+	return p.Title
 }
 
 // FieldSrc grades how Name, StartedAt and SessionID were learned; higher

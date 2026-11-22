@@ -156,6 +156,10 @@ type Live struct {
 	// says them; nil while none is open. With no turn running the card
 	// says 后台中: the turn is over, the work is not (D109).
 	Background *health.IndexBackground `json:"background,omitempty"`
+	// Progress says how far that background work got, the turn over: the
+	// line the gateway's progress notes say in the session (bgtask's
+	// State.Progress, §15.22 ④), as of this read. "" while none is open.
+	Progress string `json:"progress,omitempty"`
 }
 
 // oneLine folds s to one line of at most liveRunes.
@@ -403,7 +407,7 @@ func (b *Board) List() []Task {
 			t := Task{ID: m.Key, Kind: KindSession, Title: cmp.Or(m.Title, m.Key), Created: m.Created, Health: u.State, HealthSince: u.Since, Retired: m.Retired, Reap: m.Reap, Report: m.Report}
 			t.Digest = b.cfg.Digest != nil && b.cfg.Digest(m.Key)
 			if l, ok := live[m.Key]; ok && m.Retired.IsZero() {
-				l.Activity, l.Reply = oneLine(l.Activity), oneLine(l.Reply)
+				l.Activity, l.Reply, l.Progress = oneLine(l.Activity), oneLine(l.Reply), oneLine(l.Progress)
 				t.Live = &l
 			}
 			t.State, t.By, t.Why, t.At = sessionState(m, u)
@@ -448,7 +452,7 @@ func (b *Board) yours(units map[string]health.Unit, live map[string]Live, now ti
 			Health: u.State, HealthSince: u.Since, Report: m.Report}
 		t.Digest = b.cfg.Digest != nil && b.cfg.Digest(u.ID)
 		if l, ok := live[u.ID]; ok {
-			l.Activity, l.Reply = oneLine(l.Activity), oneLine(l.Reply)
+			l.Activity, l.Reply, l.Progress = oneLine(l.Activity), oneLine(l.Reply), oneLine(l.Progress)
 			t.Live = &l
 		}
 		t.State, t.By, t.Why, t.At = yoursState(m, u, b.userSince(u.ID))
