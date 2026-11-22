@@ -113,20 +113,29 @@ func (c *bgCache) state(s *session.ManagedSession, snap session.SessionSnapshot)
 	c.mu.Unlock()
 	// The board is read fresh: a snapshot is cheap, and a workflow's end
 	// moves no event of the session's.
-	wfs := runningWorkflows(snap.Workflows, unixMilli(s.WorkflowBoard().LastObservedAt()))
+	board := s.WorkflowBoard()
+	wfs := runningWorkflows(snap.Workflows, board.Published(), unixMilli(board.LastObservedAt()))
 	return bgtask.WithWorkflows(e.scan, wfs).At(now)
 }
 
 // runningWorkflows are the running workflows of a board's summaries, seen
-// the board's latest observation; a paused one waits on purpose and is no
-// work going on.
-func runningWorkflows(sums []workflow.Summary, seen time.Time) []bgtask.Workflow {
+// the board's latest observation, each in the phase pub has it in (nil
+// names none); a paused one waits on purpose and is no work going on.
+func runningWorkflows(sums []workflow.Summary, pub *workflow.Published, seen time.Time) []bgtask.Workflow {
 	var out []bgtask.Workflow
 	for _, s := range sums {
-		if s.Status == workflow.StatusRunning {
-			start := unixMilli(s.StartedAt)
-			out = append(out, bgtask.Workflow{ID: s.TaskID, Name: cmp.Or(s.Name, s.TaskID), Start: start, Seen: later(start, seen)})
+		if s.Status != workflow.StatusRunning {
+			continue
 		}
+		start := unixMilli(s.StartedAt)
+		w := bgtask.Workflow{ID: s.TaskID, Name: cmp.Or(s.Name, s.TaskID), Start: start, Seen: later(start, seen),
+			Agents: s.Counts.Total, Done: s.Counts.Done, Failed: s.Counts.Failed}
+		if pub != nil {
+			if i := slices.IndexFunc(pub.Workflows, func(p *workflow.Workflow) bool { return p.TaskID == s.TaskID }); i >= 0 {
+				w.Phase = pub.Workflows[i].Phase()
+			}
+		}
+		out = append(out, w)
 	}
 	return out
 }

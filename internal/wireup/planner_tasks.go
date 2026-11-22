@@ -361,7 +361,12 @@ func TaskLive(router *session.Router) func() map[string]task.Live {
 				l.LastActive = time.UnixMilli(snap.LastActive)
 			}
 			if s := router.SessionFor(snap.Key); s != nil {
-				l.Background = health.NewIndexBackground(background(s, snap))
+				bg := background(s, snap)
+				l.Background = health.NewIndexBackground(bg)
+				// The line the progress notes say (§15.22 ④), as of now.
+				if !l.Running {
+					l.Progress = bg.Progress(time.Now())
+				}
 			}
 			out[snap.Key] = l
 		}

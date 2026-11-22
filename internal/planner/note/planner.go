@@ -34,12 +34,14 @@ const (
 )
 
 // PlannerData is a kind=note journal entry's data: the Planner writing note
-// ID on the entry's unit, or the user marking it useless.
+// ID on the entry's unit, the user marking it useless, or the gateway
+// writing progress note ID of stretch Run (EventProgress).
 type PlannerData struct {
 	Event string `json:"event"`
 	ID    string `json:"id"`
 	Text  string `json:"text,omitempty"`
 	Why   string `json:"why,omitempty"`
+	Run   string `json:"run,omitempty"`
 }
 
 // Why a note was not written. The texts are what the Planner reads in the
@@ -139,7 +141,7 @@ func (n *Notes) Write(key, text, why string) (Note, error) {
 	case t.day >= PerDay:
 		return Note{}, ErrDayFull
 	}
-	e, err := noteEntry(now, key, PlannerData{Event: EventWrite, ID: newID(), Text: text, Why: why})
+	e, err := noteEntry(now, key, PlannerData{Event: EventWrite, ID: newID("p"), Text: text, Why: why})
 	if err != nil {
 		return Note{}, err
 	}
@@ -235,10 +237,11 @@ func noteEntry(now time.Time, key string, d PlannerData) (journal.Entry, error) 
 	return journal.Entry{TS: now, Kind: journal.KindNote, Unit: key, Data: data}, nil
 }
 
-// newID names a note. Random, not the entry's time: two notes written in
-// the same instant must not share one, and "没用" names a note by it.
-func newID() string {
+// newID names a note, after prefix: "p" the Planner's, "g" the gateway's
+// progress note. Random, not the entry's time: two notes written in the same
+// instant must not share one, and "没用" names a note by it.
+func newID(prefix string) string {
 	var b [6]byte
 	_, _ = rand.Read(b[:])
-	return "p" + hex.EncodeToString(b[:])
+	return prefix + hex.EncodeToString(b[:])
 }
