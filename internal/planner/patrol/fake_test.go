@@ -47,6 +47,8 @@ type fakeGH struct {
 	pulls, runs, issues string
 	// heads answers `gh pr list --head=<branch>` per branch; missing: [].
 	heads map[string]string
+	// parent is the repository this one is a fork of ("owner/name").
+	parent string
 	// fail is the "<command> <subcommand>" that fails ("pr list"); "head"
 	// fails the per-branch lookups only.
 	fail string
@@ -120,6 +122,9 @@ func (f *fakeExec) run(_ context.Context, dir, name string, args ...string) (str
 			return "", errors.New("gh " + args[0] + ": error connecting to api.github.com")
 		}
 		switch {
+		case cmd == "repo view" && g.parent != "":
+			owner, name, _ := strings.Cut(g.parent, "/")
+			return `{"nameWithOwner":"` + strings.ToLower(repo) + `","defaultBranchRef":{"name":"` + g.def + `"},"parent":{"name":"` + name + `","owner":{"login":"` + owner + `"}}}`, nil
 		case lookup:
 			if out, ok := g.heads[head]; ok {
 				return out, nil

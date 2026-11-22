@@ -39,6 +39,9 @@ type repoReport struct {
 	err error
 	// def is the default branch.
 	def string
+	// parent is the owner/name of the repository this one is a fork of, ""
+	// for none: where the pull requests of a fork's branches are.
+	parent string
 	// heads are the head branches of the open pull requests.
 	heads map[string]bool
 	pulls []hit
@@ -118,11 +121,20 @@ func (p *Patrol) ask(ctx context.Context, r *repoReport, dir string, now time.Ti
 		DefaultBranchRef struct {
 			Name string `json:"name"`
 		} `json:"defaultBranchRef"`
+		Parent *struct {
+			Name  string `json:"name"`
+			Owner struct {
+				Login string `json:"login"`
+			} `json:"owner"`
+		} `json:"parent"`
 	}
-	if err := p.gh(ctx, dir, &view, "repo", "view", "--json", "defaultBranchRef,nameWithOwner", "--", repo); err != nil {
+	if err := p.gh(ctx, dir, &view, "repo", "view", "--json", "defaultBranchRef,nameWithOwner,parent", "--", repo); err != nil {
 		return err
 	}
 	r.def = view.DefaultBranchRef.Name
+	if v := view.Parent; v != nil && repoRE.MatchString(v.Owner.Login+"/"+v.Name) {
+		r.parent = v.Owner.Login + "/" + v.Name
+	}
 	// Only another casing of the same name is taken: a repository renamed
 	// on GitHub answers with its new name, which the items' sources would
 	// then no longer be told by.
@@ -300,16 +312,24 @@ func (p *Patrol) hasPull(ctx context.Context, r *repoReport, dir, branch string)
 		return false, false, nil
 	}
 	r.lookups++
-	var prs []struct {
-		Number int `json:"number"`
+	// A fork's pull requests are opened in the repository it was forked
+	// from: `gh pr list -R` lists those into the repository named.
+	repos := []string{r.Owner + "/" + r.Name}
+	if r.parent != "" {
+		repos = append(repos, r.parent)
 	}
-	// --head= in one argument: a branch name is never read as a flag.
-	if err := p.gh(ctx, dir, &prs, "pr", "list", "-R", r.Owner+"/"+r.Name, "--head="+branch, "--state", "all", "--limit", "1", "--json", "number"); err != nil {
-		return false, false, err
-	}
-	if len(prs) > 0 {
-		p.hasPR[key] = true
-		return true, true, nil
+	for _, repo := range repos {
+		var prs []struct {
+			Number int `json:"number"`
+		}
+		// --head= in one argument: a branch name is never read as a flag.
+		if err := p.gh(ctx, dir, &prs, "pr", "list", "-R", repo, "--head="+branch, "--state", "all", "--limit", "1", "--json", "number"); err != nil {
+			return false, false, err
+		}
+		if len(prs) > 0 {
+			p.hasPR[key] = true
+			return true, true, nil
+		}
 	}
 	return false, true, nil
 }

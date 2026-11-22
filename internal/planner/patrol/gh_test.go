@@ -229,6 +229,52 @@ func TestBranchPulls(t *testing.T) {
 	}
 }
 
+// TestForkPulls: where origin is a fork, a branch's pull request is in the
+// repository it was forked from; one that has it there does not hit, and
+// is remembered. That lookup failing leaves the branch items as they were.
+func TestForkPulls(t *testing.T) {
+	e := newEnv(t)
+	dir := e.workspace(wsA, "gateway")
+	old := now.Add(-4*day - time.Hour)
+	e.fe.repos[dir] = &fakeRepo{remotes: "origin\tgit@github.com:me/gateway.git (fetch)\n", head: "origin/main",
+		remoteRefs: []string{"main", "upstreamed", "none"},
+		branches:   []string{branchLine("upstreamed", "origin/upstreamed", old, ""), branchLine("none", "origin/none", old, "")}}
+	e.fe.gh["me/gateway"] = &fakeGH{def: "main", parent: "acme/gateway"}
+	parent := &fakeGH{def: "main", heads: map[string]string{"upstreamed": `[{"number":7}]`}}
+	e.fe.gh["acme/gateway"] = parent
+	e.round()
+	want := []string{"check:branch:none|分支 none 推上去了还没开 PR，最后的提交在 4 天前"}
+	if got := e.open(); !slices.Equal(got, want) {
+		t.Fatalf("items = %v, want %v", got, want)
+	}
+	e.round()
+	own, up := "gh pr list -R me/gateway --head=", "gh pr list -R acme/gateway --head="
+	if a, b, c, d := e.fe.count(own+"upstreamed "), e.fe.count(up+"upstreamed "), e.fe.count(own+"none "), e.fe.count(up+"none "); a != 1 || b != 1 || c != 2 || d != 2 {
+		t.Errorf("lookups over two rounds: upstreamed %d and %d in the parent (want 1 and 1, remembered), none %d and %d (want 2 and 2)", a, b, c, d)
+	}
+	// Only the pull requests are asked of the parent: the rest is origin's.
+	for _, c := range e.fe.calls {
+		if strings.Contains(c, "acme/gateway") && !strings.HasPrefix(c, up) {
+			t.Errorf("the parent was asked for more than a branch's pull requests: %s", c)
+		}
+	}
+
+	parent.fail = "head"
+	e.round()
+	if got := e.open(); !slices.Equal(got, want) {
+		t.Errorf("with the parent's lookup failing items = %v, want %v", got, want)
+	}
+	if md := e.read(wsA + ".md"); !strings.Contains(md, "- 推上去的分支这一轮没查成（gh pr: error connecting to api.github.com），未了事项里是上一次的结果\n") {
+		t.Errorf("file with the parent's lookup failing:\n%s", md)
+	}
+
+	parent.fail, parent.heads["none"] = "", `[{"number":9}]`
+	e.round()
+	if got := e.open(); len(got) != 0 {
+		t.Errorf("after the pull request was opened in the parent items = %v", got)
+	}
+}
+
 // A round asks a repository about at most maxHeadLookups branches; the
 // rest are not hits yet, and the file says how many wait.
 func TestBranchLookupCap(t *testing.T) {

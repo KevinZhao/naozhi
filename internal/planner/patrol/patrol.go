@@ -410,6 +410,9 @@ const (
 var (
 	ciRE     = regexp.MustCompile(`^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/actions\?query=branch%3A`)
 	issuesRE = regexp.MustCompile(`^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/issues\?q=is%3Aissue\+is%3Aopen\+sort%3Aupdated-asc$`)
+	// repoRE is an owner/name fit to be an argument: a fork's parent comes
+	// from gh's answer, not from a remote's URL.
+	repoRE = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 )
 
 // groupOf is the check an item's source belongs to, and for a GitHub check
