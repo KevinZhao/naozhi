@@ -3,6 +3,7 @@ package patrol
 import (
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -207,6 +208,32 @@ func TestSurface(t *testing.T) {
 	}
 	if err := d.p.Surface(ref("bug-nope"), "ask", true); !errors.Is(err, ErrNoFinding) {
 		t.Errorf("unknown finding = %v, want ErrNoFinding", err)
+	}
+	// A workspace's record that does not read may hold today's three: the
+	// cap is not judged without it. The user asking counts for nothing and
+	// goes on.
+	rec := d.p.deepPath(wsB)
+	kept, err := os.ReadFile(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(rec, []byte(`{"v":1,"findings":[`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.p.Surface(ref("bug-five"), "ask", true); !errors.Is(err, ErrState) {
+		t.Errorf("with another workspace's record unreadable = %v, want ErrState", err)
+	}
+	if r, _ := d.p.Finding(ref("bug-five")); !r.Surfaced.IsZero() {
+		t.Errorf("counted on a guess: %+v", r)
+	}
+	if err := d.p.Surface(ref("bug-five"), "ask", false); err != nil {
+		t.Errorf("the user's own question with a record unreadable: %v", err)
+	}
+	if err := os.WriteFile(rec, kept, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.p.Surface(ref("bug-four"), "pr", true); err != nil {
+		t.Errorf("once the record reads again: %v", err)
 	}
 }
 

@@ -110,11 +110,14 @@ type Record struct {
 	Sent    int  `json:"sent,omitempty"`
 	// Task is the session it was dispatched to, Item the open item it is
 	// filed as, PR the pull request that fixes it and CI that one's checks
-	// as last looked at ("通过", "失败", "进行中").
+	// ("通过", "失败", "进行中").
 	Task string `json:"task,omitempty"`
 	Item string `json:"item,omitempty"`
 	PR   string `json:"pr,omitempty"`
 	CI   string `json:"ci,omitempty"`
+	// Looked is when that pull request was last looked at: what CI is as
+	// of.
+	Looked time.Time `json:"looked,omitzero"`
 	// Ready is when that pull request was first reported.
 	Ready time.Time `json:"ready,omitzero"`
 	// Surfaced is when it was last put in front of the user in a turn that
@@ -145,8 +148,6 @@ type DeepRun struct {
 	Findings int `json:"findings"`
 	New      int `json:"new"`
 	Dropped  int `json:"dropped"`
-	// Woke says the new ones were handed to the Planner by the run's end.
-	Woke bool `json:"woke"`
 }
 
 // deepState is one workspace's file.
@@ -292,15 +293,18 @@ func (p *Patrol) deepStates() []deepState {
 	}
 	p.deepMu.Lock()
 	defer p.deepMu.Unlock()
-	return p.deepStatesLocked()
+	states, _ := p.deepStatesLocked()
+	return states
 }
 
-func (p *Patrol) deepStatesLocked() []deepState {
+// deepStatesLocked is deepStates for a caller that holds deepMu; unread
+// says some workspace's record does not read, so what is counted over the
+// records is short.
+func (p *Patrol) deepStatesLocked() (out []deepState, unread bool) {
 	entries, err := os.ReadDir(filepath.Join(p.cfg.Dir, deepDir))
 	if err != nil {
-		return nil
+		return nil, false
 	}
-	var out []deepState
 	for _, e := range entries {
 		ws, ok := strings.CutSuffix(e.Name(), ".json")
 		if e.IsDir() || !ok || !wsRE.MatchString(ws) {
@@ -308,12 +312,14 @@ func (p *Patrol) deepStatesLocked() []deepState {
 		}
 		st, err := p.loadDeep(ws)
 		if err != nil {
-			slog.Warn("planner patrol: a deep check record unreadable; left as it is", "workspace", ws, "err", err)
+			// Said once, where the round looks at the workspace (deep).
+			slog.Debug("planner patrol: a deep check record unreadable; left as it is", "workspace", ws, "err", err)
+			unread = true
 			continue
 		}
 		out = append(out, st)
 	}
-	return out
+	return out, unread
 }
 
 // Finding is the finding ref names as it is on record.
@@ -332,20 +338,6 @@ func (p *Patrol) Finding(ref string) (Record, bool) {
 		return *r, true
 	}
 	return Record{}, false
-}
-
-// Findings is workspace ws's findings on record, as found.
-func (p *Patrol) Findings(ws string) []Record {
-	if p == nil || p.cfg.Dir == "" || !wsRE.MatchString(ws) {
-		return nil
-	}
-	p.deepMu.Lock()
-	st, err := p.loadDeep(ws)
-	p.deepMu.Unlock()
-	if err != nil {
-		return nil
-	}
-	return st.Findings
 }
 
 // taskOpen reports whether dispatched session key is still at work.
@@ -558,7 +550,15 @@ func (p *Patrol) Surface(ref, kind string, unasked bool) error {
 	}
 	now := p.cfg.Now()
 	today := 0
-	for _, st := range p.deepStates() {
+	p.deepMu.Lock()
+	states, unread := p.deepStatesLocked()
+	p.deepMu.Unlock()
+	if unread && unasked {
+		// What a record that does not read counted today is not known:
+		// the cap is not judged on a guess.
+		return ErrState
+	}
+	for _, st := range states {
 		for _, r := range st.Findings {
 			if sameDay(r.Surfaced, now) {
 				today++

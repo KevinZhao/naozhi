@@ -1,6 +1,7 @@
 package patrol
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -43,6 +44,12 @@ func TestBrief(t *testing.T) {
 		{"workspace":"","kind":"stale","by":"auto","at":"2026-11-20T08:10:00+08:00","adopted":1,"of":10,"briefed":true},
 		{"workspace":"` + wsA + `","kind":"risk","by":"user","at":"2026-11-24T08:10:00+08:00"}],"workspaces":[]}`)
 
+	// The pull request's checks were looked at a day ago: not said as if
+	// they were now. The round looks again.
+	if got := d.p.Brief(since); len(got.PRs) != 1 || got.PRs[0].CI != "" {
+		t.Errorf("Brief a day after the last look at the pull request: %+v, want no CI said", got.PRs)
+	}
+	d.round()
 	want := Report{
 		PRs: []ReadyPR{{Title: "修正重连时的会话恢复", URL: "https://github.com/owner/gateway/pull/31", CI: "通过", Workspace: "gateway"}},
 		New: []NewFinding{{Title: "配置热加载丢了 watchdog 的新值", Kind: "bug", Workspace: "gateway"}, {Title: "README 与脚本不符", Kind: "doc", Workspace: "gateway"},
@@ -78,6 +85,29 @@ func TestBrief(t *testing.T) {
 	}
 	if got := New(Config{}).Brief(since); !reflect.DeepEqual(got, Report{}) {
 		t.Errorf("Brief with no state root: %+v", got)
+	}
+}
+
+// TestBriefNotHandedOver: a finding the Planner has not been handed yet
+// (it was off) is not in the brief: nothing can be done about it from
+// there, and it is new again once it is handed over.
+func TestBriefNotHandedOver(t *testing.T) {
+	d := newDeep(t)
+	d.repo(wsA, "gateway", "a")
+	d.set(func() { d.wakeErr = errors.New("已停用 Planner") })
+	d.found(finding("bug-one", nil))
+	since := d.now.Add(-time.Hour)
+	if got := states(d.state(wsA)); got != "bug-one=new(pending)" {
+		t.Fatalf("with the Planner off: %s", got)
+	}
+	if got := d.p.Brief(since); len(got.New) != 0 {
+		t.Errorf("Brief lists a finding nobody was handed: %+v", got.New)
+	}
+	d.set(func() { d.wakeErr = nil })
+	d.at(wsA, 0)
+	d.tick()
+	if got := d.p.Brief(since); len(got.New) != 1 || got.New[0].Title != "重连时会话为空会崩" {
+		t.Errorf("Brief once it was handed over: %+v", got.New)
 	}
 }
 

@@ -190,7 +190,14 @@ var taskDeny = []string{
 // command against them; a command line rewritten to start otherwise (gh -R
 // … pr merge, a script) still gets past, so like taskDeny's Bash rules they
 // slow a session down and are no boundary.
-var patrolTaskDeny = []string{"Bash(gh pr merge:*)", "Bash(gh release create:*)"}
+//
+// The rest close the ways round those two that cost a fix nothing: a tag
+// pushed is a release where a workflow cuts one on it, gh api merges as gh
+// pr merge does, and a workflow can be started by hand.
+var patrolTaskDeny = []string{
+	"Bash(gh pr merge:*)", "Bash(gh release create:*)",
+	"Bash(git tag:*)", "Bash(git push*--tags*)", "Bash(git push*refs/tags/*)", "Bash(gh api:*)", "Bash(gh workflow run:*)",
+}
 
 // maxMCPConfigBytes caps cli.mcp_config as read here (the scout's cap).
 const maxMCPConfigBytes = 1 << 20

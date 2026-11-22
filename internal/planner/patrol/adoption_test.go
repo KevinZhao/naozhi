@@ -250,6 +250,46 @@ func TestAdoptionResumed(t *testing.T) {
 	}
 }
 
+// TestAdoptionResumedPastWindow: with more than ten settled when the kind
+// is stopped, the ones before the last ten are counted too: brought back,
+// the kind is stopped again only on ten more, not on the first few that
+// fill a window up with what was settled long ago. And a finding counted
+// once is not counted again for being settled a second time.
+func TestAdoptionResumedPastWindow(t *testing.T) {
+	d := newDeep(t)
+	d.repo(wsA, "gateway", "a")
+	// Five taken and five not: not stopped. An eleventh, not taken, tips
+	// the last ten to 4 of 10.
+	first := append(d.debts(1, 10), d.debts(11, 1)...)
+	d.settle(first, true, false, true, false, true, false, true, false, true, false, false)
+	if got := d.stops(); !slices.Equal(got, []string{"debt 4/10"}) {
+		t.Fatalf("stopped %q", got)
+	}
+	for _, id := range first {
+		if r, _ := d.p.Finding(ref(id)); !r.Tallied {
+			t.Errorf("%s was settled before the stop and is not counted towards it: %+v", id, r)
+		}
+	}
+	d.writeDeclined(`{"v":1,"findings":[],"kinds":[],"workspaces":[]}`)
+	// One counted already, said again: still one finding, still counted.
+	if err := d.p.Decide(ref(first[0]), ChoiceSkip); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := d.p.Finding(ref(first[0])); !r.Tallied || r.Adopted {
+		t.Errorf("settled a second time: %+v, want the latest word and still counted", r)
+	}
+	more := d.debts(12, 10)
+	no := make([]bool, 10)
+	d.settle(more[:9], no[:9]...)
+	if got := d.stops(); got != nil {
+		t.Fatalf("stopped %q again on nine more", got)
+	}
+	d.settle(more[9:], false)
+	if got := d.stops(); !slices.Equal(got, []string{"debt 0/10"}) {
+		t.Errorf("stopped %q, want it stopped again on the tenth", got)
+	}
+}
+
 // TestDecided: an answer to a question about a finding. One of the
 // Planner's own options counts as the finding taken and leaves it where it
 // is; the two the gateway adds turn it down, and say what that leaves to do.

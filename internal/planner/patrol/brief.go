@@ -7,6 +7,10 @@ import (
 	"time"
 )
 
+// ciFresh is how old a pull request's checks may be for the brief to say
+// them: three rounds.
+const ciFresh = 3 * Interval
+
 // Report is what the morning brief says of the patrol (§15.23 ⑤).
 type Report struct {
 	// PRs are the pull requests ready and waiting on the user.
@@ -22,8 +26,8 @@ type Report struct {
 // ReadyPR is a finding's pull request that waits on the user.
 type ReadyPR struct {
 	// Title is the finding's, URL the pull request's, CI its checks as
-	// last looked at ("" before the first look), Workspace the workspace's
-	// name.
+	// last looked at ("" before the first look, and when that was more
+	// than ciFresh ago), Workspace the workspace's name.
 	Title, URL, CI, Workspace string
 	// Fresh says it became ready in the brief's window.
 	Fresh bool
@@ -53,12 +57,19 @@ func (p *Patrol) Brief(since time.Time) Report {
 		first time.Time
 	}
 	var fresh []found
+	now := p.cfg.Now()
 	for _, st := range p.deepStates() {
 		name := p.name(st.Workspace)
 		for _, r := range st.Findings {
 			switch {
 			case r.State == StatePR:
-				rep.PRs = append(rep.PRs, ReadyPR{Title: r.Title, URL: r.PR, CI: r.CI, Workspace: name, Fresh: !r.Ready.Before(since)})
+				// Checks looked at long ago (the rounds paused, gh failing)
+				// are not said as if they were now.
+				ci := r.CI
+				if now.Sub(r.Looked) > ciFresh {
+					ci = ""
+				}
+				rep.PRs = append(rep.PRs, ReadyPR{Title: r.Title, URL: r.PR, CI: ci, Workspace: name, Fresh: !r.Ready.Before(since)})
 			case !r.First.Before(since) && (unsettled(r.State) || r.State == StateDispatched) && !r.Pending:
 				fresh = append(fresh, found{NewFinding{Title: r.Title, Kind: r.Kind, Workspace: name}, r.First})
 			}

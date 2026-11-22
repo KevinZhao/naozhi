@@ -155,7 +155,9 @@ func TestDecideSkipLeftOver(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := d.told()
-	if len(got) != 1 || !strings.HasPrefix(got[0], "不做|项目巡查的发现「重连时会话为空会崩」（"+ref("bug-task")+"）怎么处置|") ||
+	// The question the choice answers names the finding by its ref alone;
+	// its title rides in the gateway's own line as quoted data.
+	if len(got) != 1 || !strings.HasPrefix(got[0], "不做|项目巡查的发现（"+ref("bug-task")+"）怎么处置|用户对项目巡查的发现「重连时会话为空会崩」（"+ref("bug-task")+"，") ||
 		!strings.Contains(got[0], "工作区 gateway）选了：不做") || !strings.Contains(got[0], "任务 task:t1 还在修它：用 cancel") {
 		t.Errorf("told %q, want the task to stop", got)
 	}
@@ -276,7 +278,7 @@ func TestDecideDo(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("told %q, want one telling", got)
 	}
-	for _, want := range []string{"做|项目巡查的发现「重连时会话为空会崩」（" + ref("bug-big") + "）怎么处置|", "工作区 gateway）选了：做", `dispatch 带 "finding":"` + ref("bug-big") + `"`,
+	for _, want := range []string{"做|项目巡查的发现（" + ref("bug-big") + "）怎么处置|用户对项目巡查的发现「重连时会话为空会崩」（", "工作区 gateway）选了：做", `dispatch 带 "finding":"` + ref("bug-big") + `"`,
 		`{"ref":"` + ref("bug-big") + `","title":"重连时会话为空会崩","kind":"bug","evidence":["a.go:2"]`, `"size":"L"`, "不合并"} {
 		if !strings.Contains(got[0], want) {
 			t.Errorf("telling lacks %q:\n%s", want, got[0])

@@ -212,8 +212,10 @@ type Patrol struct {
 	sending map[string]bool
 	had     map[string]time.Time
 	// declinedAlarmed says declined.json was unreadable at the last look,
-	// and the user was told.
+	// and the user was told; stateAlarmed the same of the workspaces'
+	// records, by workspace ID.
 	declinedAlarmed bool
+	stateAlarmed    map[string]bool
 	// deepCtx bounds the deep checks' sessions, cut by Stop; runs are the
 	// ones in flight, for Stop to wait on.
 	deepCtx    context.Context
@@ -232,7 +234,7 @@ func New(cfg Config) *Patrol {
 	if cfg.Ctx == nil {
 		cfg.Ctx = context.Background()
 	}
-	p := &Patrol{cfg: cfg, hasPR: map[string]bool{}, sending: map[string]bool{}, had: map[string]time.Time{}}
+	p := &Patrol{cfg: cfg, hasPR: map[string]bool{}, sending: map[string]bool{}, had: map[string]time.Time{}, stateAlarmed: map[string]bool{}}
 	p.deepCtx, p.deepCancel = context.WithCancel(cfg.Ctx)
 	return p
 }
@@ -573,13 +575,15 @@ func groupOf(source string) (check, repo string) {
 	return "", ""
 }
 
-// prune removes the files of workspaces no longer registered and closes
-// the checks' items filed under them: nothing looks at those again.
-// naozhi.md and whatever else lives in the directory stay. A registry with
-// nothing on this node prunes nothing: that is one that could not be read,
-// or a node whose ID changed, far more often than every workspace gone at
-// once, and the files and items of the workspaces out of scope would not
-// come back.
+// prune removes the files of workspaces no longer registered — the checks'
+// result and the deep checks' record — and closes the patrol's items filed
+// under them, the deep checks' findings among them: nothing looks at those
+// again, and a finding left on record would still be handed to the Planner
+// for a workspace it cannot dispatch into. naozhi.md and whatever else
+// lives in the directory stay. A registry with nothing on this node prunes
+// nothing: that is one that could not be read, or a node whose ID changed,
+// far more often than every workspace gone at once, and the files and
+// items of the workspaces out of scope would not come back.
 func (p *Patrol) prune(rd *round) {
 	if len(rd.dirs) == 0 {
 		return
@@ -588,20 +592,28 @@ func (p *Patrol) prune(rd *round) {
 	for _, d := range rd.dirs {
 		registered[d.ID] = true
 	}
-	if entries, err := os.ReadDir(p.cfg.Dir); err == nil {
+	gone := func(dir, suffix string) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
 		for _, e := range entries {
-			id, ok := strings.CutSuffix(e.Name(), ".md")
+			id, ok := strings.CutSuffix(e.Name(), suffix)
 			if e.IsDir() || !ok || !wsRE.MatchString(id) || registered[id] {
 				continue
 			}
-			if err := os.Remove(filepath.Join(p.cfg.Dir, e.Name())); err == nil {
+			if err := os.Remove(filepath.Join(dir, e.Name())); err == nil {
 				slog.Info("planner patrol: workspace no longer registered; file removed", "file", e.Name())
 			}
 		}
 	}
+	gone(p.cfg.Dir, ".md")
+	p.deepMu.Lock()
+	gone(filepath.Join(p.cfg.Dir, deepDir), ".json")
+	p.deepMu.Unlock()
 	closed := p.cfg.Items.CloseItems(func(it front.Item) bool {
 		g, _ := groupOf(it.Source)
-		return it.From == front.FromPatrol && g != "" && it.Workspace != "" && !registered[it.Workspace]
+		return it.From == front.FromPatrol && (g != "" || strings.HasPrefix(it.Source, front.PatrolSource)) && it.Workspace != "" && !registered[it.Workspace]
 	}, front.ByPatrol)
 	rd.closed += len(closed)
 }

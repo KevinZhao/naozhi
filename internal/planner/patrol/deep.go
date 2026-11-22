@@ -88,7 +88,7 @@ func slot(ws string, now time.Time) time.Time {
 // due reports whether ws's deep check is to run at now: a weekday, at or
 // past its slot (a machine asleep on the day catches up on the next weekday
 // of the week; a week missed whole is not made up), and not looked at this
-// week yet — or tried once and failed, on an earlier day.
+// week yet — or tried once by the schedule and failed, on an earlier day.
 func due(st deepState, ws string, now time.Time) bool {
 	if wd := now.Weekday(); wd == time.Saturday || wd == time.Sunday || now.Before(slot(ws, now)) {
 		return false
@@ -96,7 +96,9 @@ func due(st deepState, ws string, now time.Time) bool {
 	if st.Week != weekLabel(now) {
 		return true
 	}
-	return st.Tries == 1 && st.Last != nil && st.Last.State == RunFailed && !sameDay(st.Last.Started, now)
+	// The schedule's own failed run: one the user asked for and that failed
+	// is no reason for the schedule to run a second time in the week.
+	return st.Tries == 1 && st.Last != nil && st.Last.Trigger == TriggerSchedule && st.Last.State == RunFailed && !sameDay(st.Last.Started, now)
 }
 
 // deep is the round's part of the deep checks: the findings the Planner has
@@ -126,9 +128,23 @@ func (p *Patrol) deep(ctx context.Context, now time.Time, declined Declined) {
 		}
 		p.deepMu.Lock()
 		st, err := p.loadDeep(t.ID)
-		p.deepMu.Unlock()
+		alarm := err != nil && !p.stateAlarmed[t.ID]
 		if err != nil {
+			p.stateAlarmed[t.ID] = true
+		} else {
+			delete(p.stateAlarmed, t.ID)
+		}
+		p.deepMu.Unlock()
+		if alarm {
+			// Once each time it stops reading: the workspace's deep checks
+			// stop with it, which the user would otherwise never hear of.
 			slog.Warn("planner patrol: deep check record unreadable; the workspace is not deep-checked until it is fixed or removed", "workspace", t.ID, "err", err)
+			if p.cfg.Alarm != nil {
+				p.cfg.Alarm("patrol:state:"+t.ID, "项目巡查的记录读不了，这个工作区的深查已停", fold(t.Name)+"："+filepath.Dir(p.deepPath(t.ID))+" 下的 "+
+					strings.TrimPrefix(err.Error(), ErrState.Error()+"：")+"。改好或删掉它之后照常深查；删掉后已报过的发现会重新报一遍。")
+			}
+		}
+		if err != nil {
 			continue
 		}
 		if !due(st, t.ID, now) {
@@ -428,7 +444,8 @@ func (p *Patrol) flush() {
 	var todo []batch
 	now := p.cfg.Now()
 	p.deepMu.Lock()
-	for _, st := range p.deepStatesLocked() {
+	states, _ := p.deepStatesLocked()
+	for _, st := range states {
 		var recs []Record
 		filed := false
 		for i := range st.Findings {
@@ -655,16 +672,15 @@ func (p *Patrol) follow(ctx context.Context) {
 				if r.State != StatePR {
 					return false
 				}
-				ci := map[string]string{rollPass: ciPass, rollFail: ciFail, rollPending: ciPending}[rollup(pr.Checks)]
-				changed := r.CI != ci
-				r.CI = ci
+				r.CI = map[string]string{rollPass: ciPass, rollFail: ciFail, rollPending: ciPending}[rollup(pr.Checks)]
+				r.Looked = p.cfg.Now()
 				switch pr.State {
 				case "MERGED":
 					r.State, over = StateMerged, "它的 PR 已合并"
 				case "CLOSED":
 					r.State, over = StateClosed, "它的 PR 已关闭"
 				default:
-					return changed
+					return true
 				}
 				// Merging it is taking the finding, closing it unmerged is
 				// not (§15.23 ④); what the user said of it before stands.

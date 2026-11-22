@@ -501,11 +501,12 @@ func TestCancelled(t *testing.T) {
 	}
 }
 
-// TestPrune: the file of a workspace no longer registered is removed and
-// the checks' items filed under it are closed; naozhi.md, the files the
-// deep check keeps beside and the items no check here wrote stay. A
-// registry with nothing in it prunes nothing: it is one that could not be
-// read, not every workspace gone at once.
+// TestPrune: the files of a workspace no longer registered are removed —
+// the checks' result and the deep checks' record — and the patrol's items
+// filed under it are closed, its findings' among them; naozhi.md,
+// declined.json, another workspace's record and the items the patrol did
+// not write stay. A registry with nothing in it prunes nothing: it is one
+// that could not be read, not every workspace gone at once.
 func TestPrune(t *testing.T) {
 	e := newEnv(t)
 	gateway(e)
@@ -519,6 +520,14 @@ func TestPrune(t *testing.T) {
 	}
 	if err := os.Mkdir(filepath.Join(e.cfg.Dir, "deep"), 0o700); err != nil {
 		t.Fatal(err)
+	}
+	// A finding of the workspace's still to be handed to the Planner, and
+	// another workspace's record.
+	record := `{"v":1,"workspace":"` + wsA + `","findings":[{"id":"bug-reconnect","title":"重连时会 panic","kind":"bug","evidence":["a.go:1"],"impact":"崩","fix":"判空","size":"S","reversible":true,"confidence":"high","first":"2026-11-20T10:00:00+08:00","seen":"2026-11-20T10:00:00+08:00","state":"new","pending":true}]}`
+	for _, ws := range []string{wsA, wsB} {
+		if err := os.WriteFile(filepath.Join(e.cfg.Dir, "deep", ws+".json"), []byte(strings.ReplaceAll(record, wsA, ws)), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	finding, _, err := e.items.AddItem(front.Item{Text: "重连时会 panic", Workspace: wsA, Source: "patrol:" + wsA + "/bug-reconnect", From: front.FromPatrol})
 	if err != nil {
@@ -552,8 +561,16 @@ func TestPrune(t *testing.T) {
 	for _, it := range e.items.Items() {
 		left = append(left, it.ID)
 	}
-	if want := []string{finding.ID, mine.ID}; !slices.Equal(left, want) {
-		t.Errorf("open items = %v, want the finding and the user's (%v)", e.open(), want)
+	if want := []string{mine.ID}; !slices.Equal(left, want) {
+		t.Errorf("open items = %v, want the user's alone (%v): the finding %s goes with its workspace", e.open(), want, finding.ID)
+	}
+	// The record of the workspace that is gone went with it; the one still
+	// registered keeps its own.
+	if _, err := os.Stat(filepath.Join(e.cfg.Dir, "deep", wsA+".json")); !os.IsNotExist(err) {
+		t.Errorf("the record of a workspace no longer registered is still there: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(e.cfg.Dir, "deep", wsB+".json")); err != nil {
+		t.Errorf("the record of a registered workspace: %v", err)
 	}
 }
 

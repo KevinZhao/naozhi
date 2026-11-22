@@ -420,7 +420,7 @@ func TestLaunchSpecProjectSettings(t *testing.T) {
 }
 
 // TestLaunchSpecDrift_TaskDeny: a dispatched session's deny rules (the
-// Outlook enable_write_tools one every task: session carries, and the two
+// Outlook enable_write_tools one every task: session carries, and the
 // Bash rules of one fixing a patrol finding; wireup.TaskOpts) ride in the
 // overlay the shim state records, survive its JSON round trip, are written
 // into the session's settings file from it, and do not read as drift on
@@ -428,7 +428,8 @@ func TestLaunchSpecProjectSettings(t *testing.T) {
 func TestLaunchSpecDrift_TaskDeny(t *testing.T) {
 	for name, rules := range map[string][]string{
 		"task":   {"mcp__aws-outlook-mcp__enable_write_tools"},
-		"patrol": {"mcp__aws-outlook-mcp__enable_write_tools", "Bash(gh pr merge:*)", "Bash(gh release create:*)"},
+		"patrol": {"mcp__aws-outlook-mcp__enable_write_tools", "Bash(gh pr merge:*)", "Bash(gh release create:*)",
+			"Bash(git tag:*)", "Bash(git push*--tags*)", "Bash(git push*refs/tags/*)", "Bash(gh api:*)", "Bash(gh workflow run:*)"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := mkOverlayRouter(t)

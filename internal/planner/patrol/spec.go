@@ -207,7 +207,7 @@ func prompt(now time.Time, name string, rc repoContext, checks, issues string, k
 	slices.SortStableFunc(known, func(a, b Record) int { return b.Seen.Compare(a.Seen) })
 	var seen strings.Builder
 	for _, r := range known[:min(len(known), knownInPrompt)] {
-		fmt.Fprintf(&seen, "\n- %s · %s · %s", r.ID, fold(r.Title), stateWords[r.State])
+		fmt.Fprintf(&seen, "\n- %s · %s · %s", r.ID, attr(r.Title), stateWords[r.State])
 	}
 	if seen.Len() == 0 {
 		seen.WriteString("（还没有）")
@@ -217,7 +217,7 @@ func prompt(now time.Time, name string, rc repoContext, checks, issues string, k
 	var no strings.Builder
 	for _, f := range turned[:min(len(turned), knownInPrompt)] {
 		// The file is edited by hand: an entry is shown at a finding's size.
-		fmt.Fprintf(&no, "\n- %s · %s", clip(fold(f.ID), titleCap), clip(fold(f.Title), titleCap))
+		fmt.Fprintf(&no, "\n- %s · %s", clip(attr(f.ID), titleCap), clip(attr(f.Title), titleCap))
 	}
 	if no.Len() == 0 {
 		no.WriteString("（还没有）")

@@ -396,26 +396,29 @@ func TestPatrolTaskOpen(t *testing.T) {
 	}
 }
 
-// TestPatrolAlarm: a deep check that wrote opens an error in "等你".
+// TestPatrolAlarm: a file of the patrol's that does not read opens an
+// error in "等你".
 func TestPatrolAlarm(t *testing.T) {
 	n := notify.New(notify.Config{System: func(string, string) error { return nil }})
-	PatrolAlarm(n)("patrol:write:r1", "项目巡查的深查会话做了写操作", "gateway：Bash:git_push；它本该只读，请检查这个仓库")
+	PatrolAlarm(n)("patrol:declined", "项目巡查的被否清单读不了，巡查已停", "declined.json：文件是空的")
 	open, _ := n.List(0)
-	if len(open) != 1 || open[0].Kind != notify.KindError || open[0].Source != "patrol:write:r1" || open[0].Title != "项目巡查的深查会话做了写操作" {
+	if len(open) != 1 || open[0].Kind != notify.KindError || open[0].Source != "patrol:declined" || open[0].Title != "项目巡查的被否清单读不了，巡查已停" {
 		t.Errorf("inbox %+v", open)
 	}
 }
 
 // TestPatrolTaskDeny: a session dispatched to fix a patrol finding cannot
-// merge a pull request or cut a release by gh: the two rules are in its
-// deny list at dispatch and on a respawn from its sidecar. Any other
-// dispatched session does not carry them.
+// merge a pull request or cut a release by gh, nor by the ways round them
+// that cost a fix nothing (a tag, gh api, a workflow started by hand): the
+// rules are in its deny list at dispatch and on a respawn from its sidecar.
+// Any other dispatched session does not carry them.
 func TestPatrolTaskDeny(t *testing.T) {
 	const finding = "ws_ab12cd34/bug-router-nil"
 	merge, release := "Bash(gh pr merge:*)", "Bash(gh release create:*)"
 	side := sidecar.Open("", nil)
 	to := TaskOpts{Base: session.AgentOpts{PermissionsDeny: []string{"Bash(rm -rf /)"}}, Sessions: side, Planner: "planner-abc123"}
-	want := append(append([]string{"Bash(rm -rf /)"}, taskDenyRules...), merge, release)
+	want := append(append([]string{"Bash(rm -rf /)"}, taskDenyRules...), merge, release,
+		"Bash(git tag:*)", "Bash(git push*--tags*)", "Bash(git push*refs/tags/*)", "Bash(gh api:*)", "Bash(gh workflow run:*)")
 
 	opts, err := to.For("task:ab12", action.Spawn{Dir: "/tmp/ws", Title: "修重连", Finding: finding})
 	if err != nil || !slices.Equal(opts.PermissionsDeny, want) {

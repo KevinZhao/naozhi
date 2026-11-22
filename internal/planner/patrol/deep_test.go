@@ -258,7 +258,9 @@ func TestDue(t *testing.T) {
 	week := weekLabel(s)
 	monday := weekStart(s)
 	saturday := monday.AddDate(0, 0, 5).Add(12 * time.Hour)
-	failed := &DeepRun{State: RunFailed, Started: s}
+	failed := &DeepRun{State: RunFailed, Trigger: TriggerSchedule, Started: s}
+	// The schedule's run went through; one the user asked for later failed.
+	asked := &DeepRun{State: RunFailed, Trigger: TriggerManual, Started: s.Add(time.Hour)}
 	for _, tc := range []struct {
 		name string
 		st   deepState
@@ -274,6 +276,7 @@ func TestDue(t *testing.T) {
 		{"not changed this week", deepState{Week: week}, s.Add(time.Hour), false},
 		{"failed, the same day", deepState{Week: week, Tries: 1, Last: failed}, s.Add(5 * time.Hour), false},
 		{"failed twice", deepState{Week: week, Tries: 2, Last: failed}, s.AddDate(0, 0, 7).Add(-time.Hour), false},
+		{"a manual run failed after the schedule's, the same day", deepState{Week: week, Tries: 1, Last: asked}, s.Add(5 * time.Hour), false},
 		{"last week's", deepState{Week: weekLabel(s.AddDate(0, 0, -7)), Tries: 2, Last: failed}, s, true},
 	} {
 		if got := due(tc.st, wsA, tc.at); got != tc.want {
@@ -291,6 +294,11 @@ func TestDue(t *testing.T) {
 		}
 		if due(deepState{Week: week, Tries: 2, Last: failed}, wsA, at) && weekLabel(at) == week {
 			t.Errorf("failed twice, %d days later (%s): due again within the week", d, at.Weekday())
+		}
+		// Once a week: a manual run that failed is no failed try of the
+		// schedule's, which went through.
+		if due(deepState{Week: week, Tries: 1, Last: asked}, wsA, at) && weekLabel(at) == week {
+			t.Errorf("a manual run failed, %d days later (%s): the schedule runs a second time in the week", d, at.Weekday())
 		}
 		if want {
 			later++
@@ -700,8 +708,15 @@ func TestDeepStopped(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("deep check did not start")
 	}
+	// Stop itself waits for the deep check: its session is in the router,
+	// which shuts down after the patrol.
 	d.p.Stop()
-	d.wait()
+	d.p.deepMu.Lock()
+	running := d.p.deepRunning
+	d.p.deepMu.Unlock()
+	if running {
+		t.Fatal("Stop returned with the deep check still going")
+	}
 	if st := d.state(wsA); st.Last != nil || st.Week != "" {
 		t.Fatalf("a run cut short left a record: %+v week %q", st.Last, st.Week)
 	}
@@ -740,6 +755,27 @@ func TestDeepUnreadable(t *testing.T) {
 			}
 			if data, _ := os.ReadFile(path); string(data) != body {
 				t.Errorf("the record was rewritten: %s", data)
+			}
+			// The user is told, once for as long as it does not read, and
+			// again when it stops reading a second time.
+			d.later(time.Hour)
+			if len(d.alarms) != 1 || !strings.HasPrefix(d.alarms[0], "patrol:state:"+wsA+"|项目巡查的记录读不了，这个工作区的深查已停|gateway："+filepath.Dir(path)+" 下的 "+wsA+".json ") {
+				t.Fatalf("alarms %q, want one for the record", d.alarms)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			d.later(time.Hour)
+			if d.sessions() != 1 || len(d.alarms) != 1 {
+				t.Fatalf("once the record is removed: %d sessions, alarms %q", d.sessions(), d.alarms)
+			}
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			d.at(wsA, 7*day)
+			d.tick()
+			if len(d.alarms) != 2 {
+				t.Errorf("alarms %q, want a second once it does not read again", d.alarms)
 			}
 		})
 	}

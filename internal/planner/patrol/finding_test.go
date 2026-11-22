@@ -120,6 +120,16 @@ func TestParseFindingsEach(t *testing.T) {
 	if dropped != 13 {
 		t.Errorf("dropped %d, want 13", dropped)
 	}
+	// A second finding of an ID already kept, within the ten looked at, is
+	// dropped: a record is told by its ID.
+	kept, dropped, err = ParseFindings(findings(finding("bug-dup", nil), finding("bug-other", nil), finding("bug-dup", map[string]string{"title": `"第二条"`})), dir)
+	if err != nil || len(kept) != 2 || kept[0].ID != "bug-dup" || kept[0].Title == "第二条" || kept[1].ID != "bug-other" || dropped != 1 {
+		t.Fatalf("a repeated ID: kept %+v, dropped %d, err %v; want the first of it and the other", kept, dropped, err)
+	}
+	kept, _, err = ParseFindings(reply, dir)
+	if err != nil || len(kept) != 1 {
+		t.Fatal(err)
+	}
 	f := kept[0]
 	if n := len([]rune(f.Title)); n != titleCap {
 		t.Errorf("title is %d runes, want cut to %d", n, titleCap)
