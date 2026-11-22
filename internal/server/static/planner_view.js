@@ -979,6 +979,10 @@ const MEETING_RE = /^<naozhi-scout kind="meeting" start="(\d\d:\d\d)"/;
 // LOOKUP_RE is a web lookup's answer (planner/reader): the turn shows as the
 // query card (planner_cards.js lookupLine) rather than your bubble.
 const LOOKUP_RE = /^<naozhi-lookup q="([^"]*)" run="(\d{8}T\d{6}-[0-9a-f]{4})"/;
+// WATCH_RE is the gateway telling the Planner a session you opened ended a
+// turn (planner/agent TellWatch, D138): written for the model, as a receipt
+// is, so it is not shown.
+const WATCH_RE = /^<naozhi-watch>/;
 // unescapeAttr undoes the gateway's html.EscapeString of an attribute.
 const unescapeAttr = (s) => s.replace(/&(lt|gt|quot|#39|#34|amp);/g, (_, n) => ({ lt: '<', gt: '>', quot: '"', '#39': "'", '#34': '"', amp: '&' })[n]);
 // COALESCE_HEAD leads requests that queued while the Planner was busy and
@@ -1018,6 +1022,7 @@ const CLI_NOISE = new Set(['api_retry']);
 // to do; a session's view still shows its own).
 function withoutSnapshot(e) {
   if (e.type === 'user' && RECEIPT_RE.test(e.detail || e.summary || '')) return answerBubble(e);
+  if (e.type === 'user' && WATCH_RE.test(e.detail || e.summary || '')) return null;
   if (e.type === 'system' && CLI_NOISE.has(e.summary)) return null;
   if (e.type === 'permission_denied') return null;
   const sc = e.type === 'user' && SCOUT_RE.exec(e.detail || e.summary || '');

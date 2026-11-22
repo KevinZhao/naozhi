@@ -179,6 +179,16 @@ func (c CustodySources) Asking(key string) bool {
 	return s != nil && askPending(s.EventLastN(askScan))
 }
 
+// Dir is action.Config.SessionDir: key's working directory, "" for no
+// session of this node.
+func (c CustodySources) Dir(key string) string {
+	s := c.Router.SessionFor(key)
+	if s == nil {
+		return ""
+	}
+	return s.Workspace()
+}
+
 // Events is custody.Config.Events: the session's latest n events.
 func (c CustodySources) Events(key string, n int) []clievent.EventEntry {
 	s := c.Router.SessionFor(key)

@@ -13,10 +13,13 @@ import (
 
 // Watching (§15.12 ⑥, D104) is a second switch beside custody: the gateway
 // observing a session the user opened — its digest, its card in 任务's
-// "你开的", a result marked when a turn ends with the user away. It sends
-// nothing and changes no inbox policy, so unlike custody it is on by
-// default. It lives here because it answers to the same "this node's
-// session, the Planner on" and the same "你在旁边" as custody.
+// "你开的", a result marked when a turn ends with the user away, and the
+// Planner told of a turn that ended normally (planner/action's watch.go,
+// D138, which reads Watched and Nearby: the reply reaches the gateway
+// there, not here). It sends the session nothing and changes no inbox
+// policy, so unlike custody it is on by default. It lives here because it
+// answers to the same "this node's session, the Planner on" and the same
+// "你在旁边" as custody.
 
 // watchable reports whether key is one the gateway may observe, as a key:
 // not the Planner's, a scout run's or a daemon's (eligible refuses those),

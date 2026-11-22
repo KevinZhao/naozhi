@@ -160,3 +160,18 @@ func TestFailedTurnWithoutEnvelope(t *testing.T) {
 		t.Errorf("fact after an answer Failed = %q", f.Failed)
 	}
 }
+
+// Dir is a session's working directory, the workspace a watched session's
+// line to the Planner names; none for a key with no session here.
+func TestCustodySourcesDir(t *testing.T) {
+	r := newDigestRouter(t)
+	src := CustodySources{Router: r}
+	const key = "dashboard:direct:a:general"
+	r.InjectSession(key, session.NewTestProcess()).SetWorkspaceForTest("/work/naozhi")
+	if got := src.Dir(key); got != "/work/naozhi" {
+		t.Errorf("Dir = %q, want the session's workspace", got)
+	}
+	if got := src.Dir("dashboard:direct:gone:general"); got != "" {
+		t.Errorf("Dir of no session = %q", got)
+	}
+}

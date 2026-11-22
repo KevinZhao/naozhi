@@ -98,17 +98,20 @@ type Config struct {
 // file is what the Writer knows of a digest on disk: when it was written
 // and its body's hash, to skip a write that would change nothing, and the
 // time of the report it shows (zero for none, or not known since a
-// restart until it is written again).
+// restart until it is written again). settled is when it was last brought
+// up to date in this run: written, or found to show what a write would.
 type file struct {
 	updated time.Time
 	body    [sha256.Size]byte
 	report  time.Time
+	settled time.Time
 }
 
 // Writer writes the digests on one goroutine (Run), each session's at most
-// once per MinGap and always once more after its last Touch. Touch, Path,
-// State and the setters are safe from any goroutine; every method of a nil
-// Writer is a no-op, so the wiring can leave the digests off.
+// once per MinGap (but for one someone waits on: a report's, TouchNow) and
+// always once more after its last Touch. Touch, Path, State and the setters
+// are safe from any goroutine; every method of a nil Writer is a no-op, so
+// the wiring can leave the digests off.
 type Writer struct {
 	cfg  Config
 	poke chan struct{}
@@ -232,6 +235,22 @@ func parseHeader(data []byte) (key string, updated time.Time, body []byte, ok bo
 // Touch asks for key's digest to be written. Never blocks; safe on a read
 // loop.
 func (w *Writer) Touch(key string) { w.touch(key, false) }
+
+// TouchNow is Touch for a digest someone is about to read (a watched
+// session's turn end told the Planner): written at once, past MinGap, as a
+// report's is. Settled says when it was.
+func (w *Writer) TouchNow(key string) { w.touch(key, true) }
+
+// Settled is when key's digest was last brought up to date: written, or
+// found to show what a write would. Zero for none since the start.
+func (w *Writer) Settled(key string) time.Time {
+	if w == nil {
+		return time.Time{}
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.files[key].settled
+}
 
 func (w *Writer) touch(key string, urgent bool) {
 	if w == nil || key == "" {
@@ -550,7 +569,7 @@ func (w *Writer) write(key string, now time.Time) bool {
 	old, had := w.files[key]
 	if had && old.body == sum {
 		// The file on disk shows what this write would.
-		old.report = report
+		old.report, old.settled = report, now
 		w.files[key] = old
 		w.mu.Unlock()
 		return false
@@ -569,7 +588,7 @@ func (w *Writer) write(key string, now time.Time) bool {
 		return false
 	}
 	w.mu.Lock()
-	w.files[key] = file{updated: now, body: sum, report: report}
+	w.files[key] = file{updated: now, body: sum, report: report, settled: now}
 	w.mu.Unlock()
 	if w.cfg.Written != nil {
 		w.cfg.Written(key)
