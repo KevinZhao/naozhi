@@ -5,7 +5,10 @@
 // (switched, held back, stopped, a retry coming; a message it sent is its
 // own bubble), and what the Planner wrote to you about the session (its note
 // blocks, §15.22 ②: marked Planner, what it goes by folded behind 依据, and
-// 没用 to tell it the note did not help). GET /api/sessions/notes
+// 没用 to tell it the note did not help), and how far its background work
+// got while its turn is over (§15.22 ④: the gateway writes one every 30
+// minutes and when a workflow changes phase; a stretch of background work
+// shows its latest only). GET /api/sessions/notes
 // lists them (read back from the Planner journal, so a restart keeps them)
 // and session_note frames add the new ones. Shown to you only: nothing here
 // reaches the CLI.
@@ -95,6 +98,9 @@ function noteBody(n, paired) {
     case 'dispatch': return { icon: '↗', tone: 'planner', text: 'Planner 派出' };
     case 'report': return { icon: '↩', tone: 'planner', text: '已向 Planner 汇报' };
     case 'custody': return custodyBody(n);
+    // The text is the gateway's line (bgtask's State.Progress), the task
+    // card's too; 后台中 is the state's word everywhere (D109).
+    case 'progress': return n.text ? { icon: '◔', tone: 'progress', text: '后台中 · ' + n.text } : null;
   }
   return null;
 }
@@ -103,9 +109,14 @@ function noteBody(n, paired) {
 // event (the health machine opens the item as it journals the transition),
 // and custody's stop with the error item it opened as it stopped (one event,
 // said by the stop): skip holds the notes not shown on their own, paired maps
-// an open note to its health note and a stop to its item's open note.
+// an open note to its health note and a stop to its item's open note. A
+// progress note a later one of its stretch (run) stands for is skipped too:
+// the same run said again, further on.
 function pairs() {
   const skip = new Set(), paired = new Map();
+  const latest = new Map();
+  for (const n of notes.list) if (n.kind === 'progress') latest.set(n.run || '', n.id);
+  for (const n of notes.list) if (n.kind === 'progress' && latest.get(n.run || '') !== n.id) skip.add(n.id);
   for (const n of notes.list) {
     if (n.kind !== 'custody' || n.event !== 'stopped') continue;
     const o = notes.list.find((x) => x.kind === 'inbox' && x.event === 'open' && x.item_kind === 'error' && !skip.has(x.id) && Math.abs(x.ms - n.ms) <= PAIR_MS);

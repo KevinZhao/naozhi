@@ -674,6 +674,14 @@ func main() {
 		PutAway:    func(key string) { actions.PutAway(key) },
 	})
 
+	// The gateway's progress notes on a session whose turn is over with
+	// background work going on (§15.22 ④, D141), on the health loop's minute;
+	// only with the Planner on, as the notes they join are.
+	progressNotes := func() {}
+	if cfg.Planner.Enabled {
+		progressNotes = wireup.ProgressNotes(notes, router, watched)
+	}
+
 	routing := buildRouting(cfg, agents, projectMgr, scheduler)
 	// The options of the sessions the Planner dispatches: at dispatch, and
 	// rebuilt from their sidecar when one respawns from the dashboard.
@@ -799,6 +807,7 @@ func main() {
 		Watch: func() {
 			notifier.WatchPeer()
 			briefer.Poke()
+			progressNotes()
 		},
 	})
 	routerEvents.BindMonitor(healthMon.Poke)

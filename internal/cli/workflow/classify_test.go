@@ -86,3 +86,27 @@ func TestIsWorkflowTask(t *testing.T) {
 		t.Error("subagent_type did not veto")
 	}
 }
+
+// Phase is the first phase with agents still to finish, else the last.
+func TestWorkflowPhase(t *testing.T) {
+	ph := func(i int, title string, queued, running, done int) Phase {
+		return Phase{Index: i, Title: title, Counts: Counts{Total: queued + running + done, Queued: queued, Running: running, Done: done}}
+	}
+	tests := []struct {
+		name   string
+		phases []Phase
+		want   string
+	}{
+		{name: "no phases"},
+		{name: "the first unfinished", phases: []Phase{ph(0, "探索", 0, 0, 3), ph(1, "实现", 1, 2, 0), ph(2, "验证", 4, 0, 0)}, want: "实现"},
+		{name: "all finished: the last", phases: []Phase{ph(0, "探索", 0, 0, 3), ph(1, "实现", 0, 0, 2)}, want: "实现"},
+		{name: "between two phases: the one that just ran", phases: []Phase{ph(0, "探索", 0, 0, 3), ph(1, "实现", 0, 0, 0), ph(2, "验证", 0, 0, 0)}, want: "探索"},
+		{name: "no agent yet", phases: []Phase{ph(0, "探索", 0, 0, 0), ph(1, "实现", 0, 0, 0)}},
+		{name: "no title", phases: []Phase{ph(3, "", 0, 1, 0)}, want: "#3"},
+	}
+	for _, tt := range tests {
+		if got := (&Workflow{Phases: tt.phases}).Phase(); got != tt.want {
+			t.Errorf("%s: Phase = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
