@@ -80,6 +80,9 @@ func (l Layout) WorkspaceOverridesPath() string { return l.Join("workspace-overr
 // EventsRoot is the per-session event-log directory (<root>/events).
 func (l Layout) EventsRoot() string { return l.Join("events") }
 
+// APIWatchRoot is the model API observation directory (<root>/apiwatch).
+func (l Layout) APIWatchRoot() string { return l.Join("apiwatch") }
+
 // CostRoot is the cost-ledger directory (<root>/cost).
 func (l Layout) CostRoot() string { return l.Join("cost") }
 

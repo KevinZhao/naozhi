@@ -1,4 +1,4 @@
-// system_view.js — the 系统 view (sysession daemons, 全会话健康).
+// system_view.js — the 系统 view (sysession daemons, 接口监控, 全会话健康).
 // Layering: never import dashboard.js back; setActivityView is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, sessionList, ui } from './state.js';
@@ -7,6 +7,7 @@ import { discoveredKey, getNodeDisplayName, sid } from './session_ident.js';
 import { wireQuickAskInput } from './auth_modal.js';
 import { shell } from './shell.js';
 import { coverable, custody, refreshCustody } from './custody.js';
+import { fetchAPIWatch, renderAPIWatchHtml } from './apiwatch_view.js';
 import { cachedCostSummary, costCardTitle, formatAbsTime, formatHomeCost, getMsgValue, mainEmptyHtml, refreshCostSummary, renderServiceOverviewHtml, shortPath, timeAgo } from './utilities.js';
 
 // ===== System view (sysession daemons) =====
@@ -34,6 +35,7 @@ let systemPollTimer = null;
 function fetchSystemAll() {
   fetchSystemDaemons().then(renderSystemView).catch(function () {});
   fetchSystemHealth().then(renderSystemView).catch(function () {});
+  fetchAPIWatch(renderSystemView);
   refreshCustody();
 }
 
@@ -340,7 +342,7 @@ function renderSystemView() {
     : '';
   // The poll repaints every 5s: keep the reader where they scrolled to.
   const prevBody = root.querySelector('.system-body');
-  const prevTable = root.querySelector('.hl-scroll');
+  const prevTable = root.querySelector('.sys-health .hl-scroll');
   const top = prevBody ? prevBody.scrollTop : 0;
   const left = prevTable ? prevTable.scrollLeft : 0;
   root.innerHTML =
@@ -348,10 +350,11 @@ function renderSystemView() {
     '<div class="system-body">' +
       renderServiceOverviewHtml() +
       daemonsHtml +
+      renderAPIWatchHtml() +
       renderSystemHealthHtml() +
     '</div>';
   const nextBody = root.querySelector('.system-body');
-  const nextTable = root.querySelector('.hl-scroll');
+  const nextTable = root.querySelector('.sys-health .hl-scroll');
   if (nextBody) nextBody.scrollTop = top;
   if (nextTable) nextTable.scrollLeft = left;
 }

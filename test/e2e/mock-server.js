@@ -403,6 +403,7 @@ function startMockServer(overrides = {}) {
   const overrideCalls = [];
   const inboxData = overrides.inbox || null;
   const inboxCalls = [];
+  const apiWatchCalls = [];
   const tasksCalls = [];
   const frontsCalls = [];
   const patrolCalls = [];
@@ -1389,6 +1390,16 @@ function startMockServer(overrides = {}) {
       return;
     }
 
+    // GET /api/system/apiwatch: opt-in via overrides.apiWatch (the body);
+    // ?hours= lands in apiWatchCalls. Unset, the route 404s.
+    if (pathname === NZ_CONTRACT.API.system_apiwatch && req.method === 'GET' && overrides.apiWatch) {
+      if (!checkAuth()) return;
+      apiWatchCalls.push(url.searchParams.get('hours'));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(overrides.apiWatch));
+      return;
+    }
+
     // GET /api/tasks and POST /api/tasks/state: opt-in via overrides.tasks
     // ({tasks}); a state change sets the task's state, by and at in place,
     // so the test's object shows it, and lands in tasksCalls.
@@ -1713,6 +1724,7 @@ function startMockServer(overrides = {}) {
         get digestCalls() { return digestCalls; },
         get noteUselessCalls() { return noteUselessCalls; },
         get inboxCalls() { return inboxCalls; },
+        get apiWatchCalls() { return apiWatchCalls; },
         get tasksCalls() { return tasksCalls; },
         get frontsCalls() { return frontsCalls; },
         get patrolCalls() { return patrolCalls; },

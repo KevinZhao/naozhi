@@ -3,6 +3,7 @@ package server
 
 import (
 	"context"
+	"github.com/naozhi/naozhi/internal/apiwatch"
 	"log/slog"
 	"time"
 
@@ -141,7 +142,9 @@ type ServerOptions struct {
 	// /api/sessions/detail reads, called per request; nil serves an empty
 	// one (and leaves the detail's health unit out). Workspaces names their
 	// workspaces, UnitName their units (a cron job's title).
-	Health     func() health.Snapshot
+	Health func() health.Snapshot
+	// APIWatch is what /api/system/apiwatch reports; nil reports empty.
+	APIWatch   *apiwatch.Store
 	Workspaces *workspace.Registry
 	UnitName   func(unit string) string
 	// Notify is the "等你" inbox /api/inbox serves; the server binds the

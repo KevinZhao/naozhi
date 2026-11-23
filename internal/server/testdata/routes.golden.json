@@ -500,6 +500,11 @@
     "handler_type": "*accessprofile.Handler"
   },
   {
+    "method": "GET",
+    "path": "/api/system/apiwatch",
+    "handler_type": "*system.Handlers"
+  },
+  {
     "method": "POST",
     "path": "/api/system/config/reload",
     "handler_type": "*system.Handlers"
