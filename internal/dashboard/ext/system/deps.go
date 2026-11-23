@@ -5,6 +5,7 @@
 //
 //	GET  /api/system/daemons        read-only daemon status list
 //	GET  /api/system/health         read-only session health table
+//	GET  /api/system/apiwatch       model API retries, failures, timeouts, latency
 //	GET  /api/system/update         version state + what the operator can do
 //	POST /api/system/update/apply   carry it out (install and/or restart)
 //	POST /api/system/config/reload  re-read config.yaml, apply hot sections
@@ -12,6 +13,7 @@ package system
 
 import (
 	"context"
+	"github.com/naozhi/naozhi/internal/apiwatch"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/monitor/health"
@@ -55,6 +57,8 @@ type Deps struct {
 	Health     func() health.Snapshot
 	Workspaces WorkspaceLister
 	UnitName   func(unit string) string
+	// APIWatch is the model API observation store; nil reports empty.
+	APIWatch *apiwatch.Store
 }
 
 // Handlers serves the /api/system/* endpoint family.
@@ -75,6 +79,7 @@ type Handlers struct {
 	health        func() health.Snapshot
 	workspaces    WorkspaceLister
 	unitName      func(unit string) string
+	apiWatch      *apiwatch.Store
 }
 
 // New returns Handlers wired from d.
@@ -100,6 +105,7 @@ func New(d Deps) *Handlers {
 		health:         d.Health,
 		workspaces:     d.Workspaces,
 		unitName:       d.UnitName,
+		apiWatch:       d.APIWatch,
 	}
 }
 

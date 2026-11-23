@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/naozhi/naozhi/internal/apiwatch"
 	"log/slog"
 	"net/http"
 	"os"
@@ -165,6 +166,17 @@ func main() {
 	// An isolated instance reads no outside source on a schedule and
 	// installs no update unless isolation.run_schedules says so.
 	isolated := schedulesOff(cfg, sessionLayout.Root())
+
+	// What the CLIs say about their model API calls (retries, turn timings,
+	// watchdog kills), for the 系统 view's 接口监控. Bound before the router
+	// exists, so a shim reattached at startup books its turns too.
+	apiWatch := apiwatch.Open(sessionLayout.APIWatchRoot())
+	defer apiWatch.Close()
+	for _, rt := range backendRuntimes {
+		if rt.Wrapper != nil {
+			rt.Wrapper.APIWatch = apiWatch
+		}
+	}
 
 	claudeDir := ""
 	if home, err := os.UserHomeDir(); err == nil {
@@ -752,6 +764,7 @@ func main() {
 		PutAway:          wireup.PutAwayRecord{Sidecars: sidecars, EventsDir: sessionLayout.EventsRoot()},
 		Briefs:           briefer,
 		Health:           func() health.Snapshot { return healthMon.Snapshot() },
+		APIWatch:         apiWatch,
 		Workspaces:       plannerState.Workspaces,
 		UnitName:         unitNames,
 		Notify:           notifier,

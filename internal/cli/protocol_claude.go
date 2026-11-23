@@ -578,6 +578,12 @@ func (p *ClaudeProtocol) ReadEventInto(line string, buf []clievent.Event) ([]cli
 	}
 	if ev.Type == "system" {
 		parseSystemDetail(line, ev)
+		if ev.SubType == "api_retry" {
+			ev.APIRetry = parseAPIRetry(line)
+		}
+	}
+	if ev.Type == "result" {
+		ev.APITiming = parseAPITiming(line)
 	}
 	// Copy the value out so the caller owns an independent clievent.Event; the deferred
 	// Put resets only the pooled struct's view, not the freshly-unmarshalled

@@ -258,6 +258,7 @@ func buildSystemHandlers(opts ServerOptions, router *session.Router) *system.Han
 		InstallEnabled: opts.Update.DashboardInstall == nil || *opts.Update.DashboardInstall,
 		ConfigReload:   system.ConfigReloader(opts.Config.Reload),
 		Health:         opts.Health,
+		APIWatch:       opts.APIWatch,
 		Workspaces:     workspaces,
 		UnitName:       opts.UnitName,
 	})

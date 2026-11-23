@@ -124,6 +124,9 @@ type Process struct {
 	// onResult receives each result frame the read loop sees. Set via
 	// SetOnResult at any time.
 	onResult atomic.Pointer[func(clievent.SendResult)]
+	// apiWatch books the CLI's API retries, turn timings and watchdog kills
+	// (process_apiwatch.go). Set once before startReadLoop; nil for none.
+	apiWatch *apiWatchSink
 	// activityHook receives the activities the tool calls produce
 	// (process_activity.go); acts is the read loop's state behind it.
 	activityHook atomic.Pointer[activityHook]
@@ -254,6 +257,7 @@ func (p *Process) setDeathReason(reason string) {
 	}
 	fresh := reason
 	if p.deathReason.CompareAndSwap(nil, &fresh) {
+		p.observeWatchdog(reason)
 		return
 	}
 	// Upgrade path: tolerate an explicit pointer to "" (no path stores it today);

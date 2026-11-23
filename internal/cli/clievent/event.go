@@ -123,6 +123,10 @@ type Event struct {
 	Refusal *Refusal `json:"-"`
 	// ModelSwitch is populated for the fallback frames ModelSwitch names.
 	ModelSwitch *ModelSwitch `json:"-"`
+	// APIRetry is populated for system/api_retry, APITiming for a claude
+	// result frame (ClaudeProtocol.ReadEventInto); internal/apiwatch records them.
+	APIRetry  *APIRetry  `json:"-"`
+	APITiming *APITiming `json:"-"`
 
 	// ToolResultImages holds the image blocks of a user frame's tool_result
 	// blocks (ClaudeProtocol.ReadEventInto), one element per tool_result that

@@ -18,6 +18,8 @@ func (h *Handlers) Routes() []httputil.Route {
 		{Pattern: "GET /api/system/daemons", Handler: h.HandleDaemons},
 		// session health table (docs/rfc/planner.md §3.8).
 		{Pattern: "GET /api/system/health", Handler: h.HandleHealth},
+		// model API retries, failures, timeouts and latency (internal/apiwatch).
+		{Pattern: "GET /api/system/apiwatch", Handler: h.HandleAPIWatch},
 		// self-update (docs/rfc/dashboard-update-notice.md).
 		{Pattern: "GET /api/system/update", Handler: h.HandleUpdateStatus},
 		{Pattern: "POST /api/system/update/apply", Handler: h.HandleUpdateApply},

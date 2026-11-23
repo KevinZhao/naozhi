@@ -530,6 +530,9 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 			(*fn)(resultFromEvent(ev))
 		}
 	}
+	if ev.Type == "result" || ev.APIRetry != nil {
+		p.observeAPI(ev, now)
+	}
 
 	// ---- Passthrough mode hooks ----
 	// These run before the legacy eventCh / ring.EventLog delivery paths.
