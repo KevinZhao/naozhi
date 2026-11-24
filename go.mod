@@ -7,7 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.33.12
 	github.com/aws/aws-sdk-go-v2/service/transcribestreaming v1.44.9
 	github.com/bwmarrin/discordgo v0.29.0
-	github.com/gorilla/websocket v1.5.3
+	github.com/gorilla/websocket v1.5.4-0.20240701034025-d67f41855da4
 	github.com/larksuite/oapi-sdk-go/v3 v3.12.2
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/slack-go/slack v0.31.0
@@ -34,4 +34,5 @@ require (
 	github.com/aws/smithy-go v1.28.7 // indirect
 	github.com/gogo/protobuf v1.3.3-0.20221024144010-f67b8970b736 // indirect
 	golang.org/x/crypto v0.52.0 // indirect
+	golang.org/x/net v0.54.0 // indirect
 )
