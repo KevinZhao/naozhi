@@ -187,7 +187,8 @@ jobs:
   # don't touch the dashboard, blocking the merge.
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The suite runs about 8 minutes since the meeting views joined it.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 

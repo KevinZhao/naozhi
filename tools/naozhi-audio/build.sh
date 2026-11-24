@@ -6,6 +6,8 @@ set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 out=${1:?output path}
 arch=${2:-$(uname -m)}
+# OUT is relative to the caller's directory, not the package's the build runs in.
+case $out in /*) ;; *) out="$PWD/$out" ;; esac
 cd "$here"
 swift build -c release --arch "$arch" --product naozhi-audio
 cp "$(swift build -c release --arch "$arch" --show-bin-path)/naozhi-audio" "$out"
