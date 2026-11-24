@@ -253,7 +253,10 @@ function defaultGitStates() {
  *   shape, newest first); ?key= filters them. A test may edit the array in place.
  * @param {object} [overrides.sessionDetails] - key → GET /api/sessions/detail payload.
  * @param {object} [overrides.notes] - key → GET /api/sessions/notes entries (note.Note wire shape,
- *   oldest first); other keys list none. A test may edit the arrays in place.
+ *   oldest first); other keys list none. A test may edit the arrays in place. POST
+ *   /api/sessions/notes/useless ({key, id}) lands in noteUselessCalls and marks that entry
+ *   useless, answering {note}; 404 for a note not listed.
+ * @param {boolean} [overrides.noteUselessFail] - that POST answers 500 and marks nothing.
  * @param {object} [overrides.digests] - key → the session's digest markdown, GET
  *   /api/sessions/digest?key= answers {key, updated, markdown}; other keys 404, as a session
  *   without one does. Each request's key lands in digestCalls. A test may edit it in place.
@@ -264,8 +267,15 @@ function defaultGitStates() {
  *   PUT / DELETE /api/inbox/pause set
  *   paused_until, and pause or resume custody with it (D94: one pause). Every write lands in
  *   inboxCalls. Unset, the routes 404.
- * @param {object} [overrides.fronts] - GET /api/planner/fronts body ({fronts, writable}); POST
- *   /api/planner/fronts lands in frontsCalls and edits or closes the line when writable (403 otherwise).
+ * @param {object} [overrides.fronts] - GET /api/planner/fronts body ({fronts, items, writable}); POST
+ *   /api/planner/fronts lands in frontsCalls and edits or closes the line when writable (403 otherwise);
+ *   {item} adds an open item (id i<n>, from user) and {item_done} drops one. `itemsFail` (not served)
+ *   makes those two answer 500. `findings` (served) are the patrol findings the items point at, by
+ *   ref; POST /api/planner/patrol/decide lands in patrolCalls and, when writable (403 otherwise),
+ *   does what the gateway does: skip drops the finding's item, mute_kind drops it with the
+ *   workspace's other findings of its kind nobody has in hand, mute_ws drops the patrol's items of
+ *   the workspace, do marks the finding doing. `decideFail` (not served, a message) makes it
+ *   answer 409 with that message.
  * @param {object} [overrides.meetings] - GET /api/meetings body ({status, meetings}) and
  *   `details` (id → GET /api/meetings/{id} body); POST /api/meetings/stop clears
  *   status.recording, every POST / DELETE lands in meetingCalls. Unset, the routes 404.
@@ -387,6 +397,7 @@ function startMockServer(overrides = {}) {
   const outputs = overrides.outputs || [];
   const sessionDetails = overrides.sessionDetails || {};
   const notesData = overrides.notes || {};
+  const noteUselessCalls = [];
   const digestsData = overrides.digests || {};
   const digestCalls = [];
   const outputsCalls = [];
@@ -397,8 +408,10 @@ function startMockServer(overrides = {}) {
   const inboxCalls = [];
   const meetingsData = overrides.meetings || null;
   const meetingCalls = [];
+  const apiWatchCalls = [];
   const tasksCalls = [];
   const frontsCalls = [];
+  const patrolCalls = [];
   const taskStopCalls = [];
   const tasksSeenCalls = [];
   const custodyData = overrides.custody || null;
@@ -831,6 +844,24 @@ function startMockServer(overrides = {}) {
       const key = url.searchParams.get('key') || '';
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ notes: notesData[key] || [] }));
+      return;
+    }
+
+    // 没用 on a Planner note: recorded, and the listed entry marked.
+    if (pathname === NZ_CONTRACT.API.sessions_notes_useless && req.method === 'POST') {
+      if (!checkAuth()) return;
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        const { key, id } = JSON.parse(body || '{}');
+        noteUselessCalls.push({ key, id });
+        if (overrides.noteUselessFail) { res.writeHead(500); res.end('the mark was not kept'); return; }
+        const n = (notesData[key] || []).find((x) => x.id === id && x.kind === 'planner');
+        if (!n) { res.writeHead(404); res.end('note not found'); return; }
+        n.useless = true;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ note: n }));
+      });
       return;
     }
 
@@ -1392,17 +1423,29 @@ function startMockServer(overrides = {}) {
       return;
     }
 
+    // GET /api/system/apiwatch: opt-in via overrides.apiWatch (the body);
+    // ?hours= lands in apiWatchCalls. Unset, the route 404s.
+    if (pathname === NZ_CONTRACT.API.system_apiwatch && req.method === 'GET' && overrides.apiWatch) {
+      if (!checkAuth()) return;
+      apiWatchCalls.push(url.searchParams.get('hours'));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(overrides.apiWatch));
+      return;
+    }
+
     // GET /api/tasks and POST /api/tasks/state: opt-in via overrides.tasks
     // ({tasks}); a state change sets the task's state, by and at in place,
     // so the test's object shows it, and lands in tasksCalls.
-    // The ledger of the lines of work (overrides.fronts: {fronts, writable}).
-    // A POST lands in frontsCalls and, when writable, changes the line as
-    // the gateway does: the fields named, "" clearing one, close dropping it
-    // from the open list.
+    // The ledger of the lines of work (overrides.fronts: {fronts, items,
+    // writable}). A POST lands in frontsCalls and, when writable, changes
+    // the line as the gateway does: the fields named, "" clearing one, close
+    // dropping it from the open list; {item} adds an open item and
+    // {item_done} drops one, both answering 500 while itemsFail is set.
     if (pathname === NZ_CONTRACT.API.planner_fronts && req.method === 'GET' && overrides.fronts) {
       if (!checkAuth()) return;
+      const { itemsFail: _, decideFail: __, ...ledger } = overrides.fronts;
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(overrides.fronts));
+      res.end(JSON.stringify(ledger));
       return;
     }
     if (pathname === NZ_CONTRACT.API.planner_fronts && req.method === 'POST' && overrides.fronts) {
@@ -1413,6 +1456,22 @@ function startMockServer(overrides = {}) {
         const req2 = JSON.parse(body || '{}');
         frontsCalls.push(req2);
         if (!overrides.fronts.writable) { res.writeHead(403, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'fronts_readonly_remote' })); return; }
+        if (req2.item || req2.item_done) {
+          if (overrides.fronts.itemsFail) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: '台账写不进去' })); return; }
+          const items = overrides.fronts.items || (overrides.fronts.items = []);
+          let it;
+          if (req2.item) {
+            it = { id: 'i' + String(frontsCalls.length).padStart(7, '0'), from: 'user', created: new Date().toISOString(), ...req2.item };
+            items.push(it);
+          } else {
+            it = items.find(x => x.id === req2.item_done);
+            if (!it) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: '找不到这条未了事项' })); return; }
+            overrides.fronts.items = items.filter(x => x !== it);
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(it));
+          return;
+        }
         const f = overrides.fronts.fronts.find(x => x.id === req2.id);
         if (!f) { res.writeHead(404); res.end(); return; }
         for (const k of ['state', 'next', 'waiting']) if (typeof req2[k] === 'string') f[k] = req2[k];
@@ -1420,6 +1479,40 @@ function startMockServer(overrides = {}) {
         if (req2.close) overrides.fronts.fronts = overrides.fronts.fronts.filter(x => x.id !== req2.id);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(f));
+      });
+      return;
+    }
+    if (pathname === NZ_CONTRACT.API.planner_patrol_decide && req.method === 'POST' && overrides.fronts) {
+      if (!checkAuth()) return;
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        const req2 = JSON.parse(body || '{}');
+        patrolCalls.push(req2);
+        const fail = (code, error) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error })); };
+        const led = overrides.fronts;
+        if (!led.writable) return fail(403, 'patrol_readonly_remote');
+        if (led.decideFail) return fail(409, led.decideFail);
+        const items = led.items || [];
+        const findings = led.findings || {};
+        const refOf = (x) => (x.from === 'patrol' && String(x.source || '').startsWith('patrol:') ? x.source.slice(7) : '');
+        if (req2.choice === 'mute_ws') {
+          led.items = items.filter(x => !(x.from === 'patrol' && x.workspace === req2.workspace && !String(x.source || '').startsWith('check:routine:')));
+        } else {
+          const f = findings[req2.ref];
+          const it = items.find(x => refOf(x) === req2.ref);
+          if (!f || !it) return fail(404, '没有这条巡查发现');
+          if (req2.choice === 'do') f.state = 'doing';
+          if (req2.choice === 'skip') led.items = items.filter(x => x !== it);
+          if (req2.choice === 'mute_kind') {
+            led.items = items.filter(x => {
+              const o = findings[refOf(x)];
+              return !(x === it || (o && x.workspace === it.workspace && o.kind === f.kind && o.state !== 'dispatched' && o.state !== 'pr'));
+            });
+          }
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok' }));
       });
       return;
     }
@@ -1662,10 +1755,13 @@ function startMockServer(overrides = {}) {
         get workflowCalls() { return workflowCalls; },
         get outputsCalls() { return outputsCalls; },
         get digestCalls() { return digestCalls; },
+        get noteUselessCalls() { return noteUselessCalls; },
         get inboxCalls() { return inboxCalls; },
         get meetingCalls() { return meetingCalls; },
+        get apiWatchCalls() { return apiWatchCalls; },
         get tasksCalls() { return tasksCalls; },
         get frontsCalls() { return frontsCalls; },
+        get patrolCalls() { return patrolCalls; },
         get taskStopCalls() { return taskStopCalls; },
         get tasksSeenCalls() { return tasksSeenCalls; },
         get custodyCalls() { return custodyCalls; },

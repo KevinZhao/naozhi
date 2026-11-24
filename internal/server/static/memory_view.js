@@ -49,6 +49,9 @@ const mem = {
   focus: null,
   // pending is the delete waiting out UNDO_MS.
   pending: null,
+  // recentBuilt is the 最近 7 天 content last put in, so a filter keystroke
+  // does not rebuild it.
+  recentBuilt: null,
 };
 
 const keyOf = (project, name) => project + '/' + name;
@@ -108,12 +111,17 @@ function nodeLabel(n) {
   return (nd && nd.display_name) || n;
 }
 
+// dirty is whether a draft would be lost by re-reading the list: one in an
+// editor, or one shown as saved while its PUT is still out (a failed save
+// puts it back in the editor).
 function dirty() {
-  for (const k in mem.rows) {
-    const r = mem.rows[k];
-    if (r.editing && r.file && r.draft !== r.file.text) return true;
-  }
-  return false;
+  return saving() || Object.values(mem.rows).some((r) => r.editing && r.file && r.draft !== r.file.text);
+}
+
+// saving is whether a save's PUT is still out: nothing is left to save or
+// cancel then, only to wait for.
+function saving() {
+  return Object.values(mem.rows).some((r) => r.saving);
 }
 
 // mountMemoryView builds the section once into el.
@@ -130,7 +138,7 @@ export function mountMemoryView(el) {
     const next = e.target.value;
     if (dirty()) {
       e.target.value = mem.node;
-      showToast('先保存或取消正在改的那条', 'info');
+      showToast(saving() ? '正在保存，稍等' : '先保存或取消正在改的那条', 'info');
       return;
     }
     mem.node = next;
@@ -288,27 +296,58 @@ function paintBody() {
       '<button type="button" class="mem-row-h" data-mem="toggle" aria-expanded="false"><span class="mem-title">~/.claude/CLAUDE.md</span>' +
       '<span class="mem-tag">只读</span><span class="mem-desc">Planner 读；naozhi 拉起的会话不读</span></button><div class="mem-detail" hidden></div></div>');
   }
-  const recent = recentEntries();
-  if (recent.length) {
-    parts.push('<div class="mem-recent"><h3>最近 7 天</h3>' + recent.slice(0, RECENT_MAX).map((x) => rowHtml(x.g, x.e, true)).join('') +
-      (recent.length > RECENT_MAX ? '<div class="mem-more">还有 ' + (recent.length - RECENT_MAX) + ' 条</div>' : '') + '</div>');
-  }
-  if (!mem.data.groups.length) parts.push('<div class="mem-empty">这台机器上还没有记忆</div>');
+  parts.push('<div class="mem-recent" hidden></div>');
+  mem.recentBuilt = null;
+  parts.push('<div class="mem-empty mem-none" hidden>这台机器上还没有记忆</div>');
   parts.push(mem.data.groups.map(groupHtml).join(''));
   body.innerHTML = parts.join('');
   applyFilter();
 }
 
+// recentHtml is the 最近 7 天 block's content from the data, '' when no
+// entry is recent. It is rebuilt rather than patched: a removed entry has left
+// the data, so the next one moves up into the shown ten and 还有 N 条 counts
+// down. Its rows never hold an open detail (a click opens the group's row),
+// so a rebuild loses nothing.
+function recentHtml() {
+  const recent = recentEntries();
+  if (!recent.length) return '';
+  return '<h3>最近 7 天</h3>' + recent.slice(0, RECENT_MAX).map((x) => rowHtml(x.g, x.e, true)).join('') +
+    (recent.length > RECENT_MAX ? '<div class="mem-more">还有 ' + (recent.length - RECENT_MAX) + ' 条</div>' : '');
+}
+
+// emptied is whether a group's last entry was removed here (it may still be
+// waiting out 撤销): the group then goes with it, while a group the server
+// lists empty stays as it came.
+function emptied(g) {
+  return g.removed > 0 && !g.entries.length && !g.index;
+}
+
+// applyFilter repaints what the rows imply: which rows and groups the filter
+// keeps, each group's head count (from the data, which a removed entry has
+// already left), an emptied group, 最近 7 天, and the empty state.
 function applyFilter() {
   if (!mem.root) return;
+  const recent = mem.root.querySelector('.mem-recent');
+  if (recent && mem.data) {
+    const html = recentHtml();
+    if (mem.recentBuilt !== html) { recent.innerHTML = html; mem.recentBuilt = html; }
+    recent.hidden = !html;
+  }
   const q = (mem.root.querySelector('.mem-filter').value || '').trim().toLowerCase();
   for (const row of mem.root.querySelectorAll('.mem-row')) {
     row.hidden = !!q && !(row.dataset.filter || '').includes(q) || row.classList.contains('mem-gone');
   }
-  for (const g of mem.root.querySelectorAll('.mem-grp')) {
-    g.hidden = !!q && !g.querySelector('.mem-row:not([hidden])');
-    if (q && !g.hidden) g.open = true;
+  const groups = mem.data ? mem.data.groups : [];
+  for (const el of mem.root.querySelectorAll('.mem-grp')) {
+    const g = groups.find((x) => x.project === el.dataset.project);
+    const l = el.querySelector('.mem-grp-l');
+    if (g && l) l.textContent = groupHeadText(g);
+    el.hidden = !!q && !el.querySelector('.mem-row:not([hidden])') || !!g && emptied(g);
+    if (q && !el.hidden) el.open = true;
   }
+  const none = mem.root.querySelector('.mem-none');
+  if (none) none.hidden = !groups.every(emptied);
 }
 
 function findEntry(project, name) {
@@ -410,7 +449,7 @@ function paintDetail(key) {
   detail.innerHTML = note + '<div class="mem-md">' + (isIndex || f.project === '' ? '<pre class="mem-raw">' + esc(f.body) + '</pre>' : renderMd(f.body || '')) + '</div>' +
     (f.truncated ? '<div class="mem-hint">（已截断）</div>' : '') +
     (why ? '<div class="mem-hint">' + esc(why) + '</div>' : '') +
-    (writable ? '<div class="mem-acts"><button type="button" class="pl-btn" data-mem="edit">编辑</button>' +
+    (writable && !r.saving ? '<div class="mem-acts"><button type="button" class="pl-btn" data-mem="edit">编辑</button>' +
       (isIndex ? '' : '<button type="button" class="pl-btn mem-del" data-mem="delete">删除</button>') + '</div>' : '');
 }
 
@@ -436,27 +475,57 @@ function cancelEdit(key) {
   paintDetail(key);
 }
 
+// draftBody is what the rendered view shows of text before the server has
+// read it back: the part after the frontmatter, or all of it for the index
+// and CLAUDE.md (as the server's body).
+function draftBody(f, text) {
+  if (f.name === 'MEMORY' || f.project === '') return text;
+  const m = /^\uFEFF?---\r?\n[\s\S]*?\n---[^\n]*(?:\n|$)/.exec(text);
+  return (m ? text.slice(m[0].length) : text.replace(/^\uFEFF/, '')).replace(/^[\r\n]+/, '');
+}
+
+// save leaves the editor at once, showing the draft as the saved text, then
+// PUTs it with the version it was opened at. Until the PUT answers the row
+// offers no 编辑 / 删除 (either would act on the version this write
+// replaces) and the draft counts as unsaved (dirty), so nothing re-reads
+// over it. A refused save goes back to the editor exactly as it was, the
+// draft in it.
 async function save(key) {
   const r = mem.rows[key];
-  if (!r || !r.file || mem.pending && mem.pending.key === key) return;
-  const row = rowEl(key);
-  const btn = row && row.querySelector('[data-mem="save"]');
-  if (btn) btn.disabled = true;
+  if (!r || !r.file || r.saving || mem.pending && mem.pending.key === key) return;
+  const opened = r.file;
+  const draft = r.draft;
+  const conflictText = r.conflictText;
+  const node = mem.node;
+  r.saving = true;
+  r.editing = false;
+  r.conflictText = null;
+  r.file = { ...opened, text: draft, body: draftBody(opened, draft) };
+  r.note = '保存中…';
+  paintDetail(key);
   const res = await api(NZ_CONTRACT.API.memories_file, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ project: r.file.project, name: r.file.name, text: r.draft, version: r.file.version }),
-  });
+    body: JSON.stringify({ project: opened.project, name: opened.name, text: draft, version: opened.version }),
+  }, node);
+  r.saving = false;
   if (res.status === 200) {
-    r.file = { ...r.file, text: r.draft, version: res.body.version, modified: res.body.modified, size: res.body.size };
-    r.editing = false;
-    r.conflictText = null;
-    // The rendered view and the row's title come from a fresh read.
-    const fresh = await api(NZ_CONTRACT.API.memories_file + '?project=' + encodeURIComponent(r.file.project) + '&name=' + encodeURIComponent(r.file.name));
-    if (fresh.status === 200) r.file = fresh.body;
+    r.file = { ...r.file, version: res.body.version, modified: res.body.modified, size: res.body.size };
     r.note = '已保存';
     paintDetail(key);
+    // The rendered view and the title then come from a fresh read, unless
+    // the row moved on meanwhile (another edit, a re-read list).
+    const version = r.file.version;
+    api(NZ_CONTRACT.API.memories_file + '?project=' + encodeURIComponent(opened.project) + '&name=' + encodeURIComponent(opened.name), undefined, node).then((fresh) => {
+      if (fresh.status !== 200 || mem.rows[key] !== r || r.editing || r.saving || !r.file || r.file.version !== version) return;
+      r.file = fresh.body;
+      paintDetail(key);
+    });
     return;
   }
+  r.file = opened;
+  r.editing = true;
+  r.draft = draft;
+  r.conflictText = conflictText;
   if (res.status === 409 && res.body && res.body.error === 'memory_changed') {
     // Someone else wrote it: take their version, keep the draft below.
     const latest = res.body;
@@ -468,7 +537,6 @@ async function save(key) {
     return;
   }
   if (res.status === 404 && res.body && res.body.error === 'memory_gone') {
-    r.editing = true;
     r.note = '这条已经被删了';
     paintDetail(key);
     return;
@@ -481,10 +549,20 @@ async function save(key) {
 // does the DELETE go out. A failed delete puts the row back and says why.
 function remove(key) {
   const r = mem.rows[key];
-  if (!r || !r.file) return;
+  if (!r || !r.file || r.saving) return;
   if (mem.pending) mem.pending.commit();
   const rows = [...mem.root.querySelectorAll('.mem-row')].filter((x) => x.dataset.key === key);
-  for (const x of rows) { x.classList.add('mem-gone'); x.hidden = true; }
+  for (const x of rows) x.classList.add('mem-gone');
+  // The entry leaves the data with its row, so the group's count and an
+  // emptied group follow at once; restore puts it back where it was.
+  const found = findEntry(r.file.project, r.file.name);
+  const g = found && found.e ? found.g : null;
+  const at = g ? g.entries.indexOf(found.e) : -1;
+  if (g) {
+    g.entries.splice(at, 1);
+    g.removed = (g.removed || 0) + 1;
+  }
+  applyFilter();
   const title = r.file.title || r.file.name;
   const node = mem.node;
   const p = { key };
@@ -494,6 +572,11 @@ function remove(key) {
   };
   const restore = (msg) => {
     for (const x of rows) x.classList.remove('mem-gone');
+    // A list re-read meanwhile has its own copy of the entry.
+    if (g && mem.data && mem.data.groups.includes(g) && !g.entries.includes(found.e)) {
+      g.entries.splice(Math.min(at, g.entries.length), 0, found.e);
+      g.removed--;
+    }
     applyFilter();
     if (msg) showToast(msg, 'error');
   };
@@ -530,16 +613,17 @@ function remove(key) {
   showUndo('已删除「' + title + '」');
 }
 
+// dropEntry forgets a deleted entry: remove took it out of the data already,
+// a list re-read since may still have it.
 function dropEntry(project, name) {
   const found = findEntry(project, name);
-  if (found && found.e) found.g.entries = found.g.entries.filter((x) => x !== found.e);
+  if (found && found.e) {
+    found.g.entries = found.g.entries.filter((x) => x !== found.e);
+    found.g.removed = (found.g.removed || 0) + 1;
+  }
   delete mem.rows[keyOf(project, name)];
   for (const x of [...mem.root.querySelectorAll('.mem-row')]) if (x.dataset.key === keyOf(project, name)) x.remove();
-  if (found) {
-    const head = [...mem.root.querySelectorAll('.mem-grp')].find((x) => x.dataset.project === project);
-    const l = head && head.querySelector('.mem-grp-l');
-    if (l) l.textContent = groupHeadText(found.g);
-  }
+  applyFilter();
 }
 
 function showUndo(text) {

@@ -50,6 +50,7 @@ type keyNamespace struct {
 var keyNamespaces = []keyNamespace{
 	{prefix: CronKeyPrefix, exempt: true, kind: "cron"},
 	{prefix: sessionkey.MeetingKeyPrefix, exempt: true, kind: "meeting"},
+	{prefix: sessionkey.PatrolKeyPrefix, exempt: true, kind: "patrol"},
 	{prefix: PlannerNSPrefix, exempt: true, kind: "planner"},
 	{prefix: ProjectKeyPrefix, exempt: true, kind: "project"},
 	{prefix: sessionkey.ScratchKeyPrefix, exempt: false, kind: ""},

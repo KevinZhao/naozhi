@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/naozhi/naozhi/internal/apiwatch"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -174,6 +175,10 @@ type Wrapper struct {
 	// under a long-lived naozhi; EffectiveVersion prefers this once set. The one
 	// mutable field on the Wrapper — lock-free via atomic.Pointer.
 	liveVersion atomic.Pointer[string]
+
+	// APIWatch is where this backend's processes book their API retries, turn
+	// timings and watchdog kills; nil records nothing. Set before the first spawn.
+	APIWatch *apiwatch.Store
 
 	// History factories are looked up by BackendID on every NewHistorySource call,
 	// never cached here: caching would let a backend init() registration that
@@ -499,6 +504,7 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 	proc.setSpawnDiags(spawnDiags)
 	// Push the self-reported binary version (init frame) up for the global banner.
 	proc.SetOnLiveVersion(w.ObserveLiveVersion)
+	proc.setAPIWatch(w.APIWatch, opts.Key, w.BackendID)
 	proc.stateDir = w.StateDir
 
 	// Protocol init handshake (stream-json: no-op; ACP: initialize + session/new)
@@ -596,6 +602,7 @@ func (w *Wrapper) attachReconnected(ctx context.Context, handle *shim.ShimHandle
 	proc.InitLinker("")
 	// Mirror the fresh-spawn wiring so a re-attached process also feeds its live version.
 	proc.SetOnLiveVersion(w.ObserveLiveVersion)
+	proc.setAPIWatch(w.APIWatch, key, w.BackendID)
 	proc.stateDir = w.StateDir
 
 	if handle.Hello.SessionID != "" {

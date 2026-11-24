@@ -1,12 +1,14 @@
 // Package reap puts away the sessions the Planner dispatched once their task
 // is done (docs/rfc/planner.md §5.2, D95). A task: session marked 已完成 —
-// by the Planner's status block or by the user in 任务 — is put away when the
-// gateway sees, deterministically, that its turn ended normally, nothing
+// by the Planner's status block or by the user in 任务 — and a session the
+// user opened that they marked done themselves there (D137: its directories
+// are left alone) is put away when the gateway sees, deterministically, that its turn ended normally, nothing
 // waits on an AskUserQuestion, nothing runs in the background, the user is
 // not at it (custody's "你在旁边": viewing it, or a message to it in the last
 // 5 minutes), the user has looked at its result (D136: one not looked at
 // holds it up to task.UnreadKeep), and it has been idle IdleFor (D105). Until then it waits for the next state change or check;
-// nothing is reported.
+// nothing is reported. One the user marked done or stopped themselves goes
+// as soon as nothing of it runs: they asked for it gone (D137).
 //
 // Putting away takes two steps. First the process is closed and the session
 // leaves the session list for the history (Router.Archive): its event log,
@@ -155,6 +157,11 @@ type Config struct {
 	// Waiting reports whether a question of key's waits on the user in
 	// "等你" (its need_user report's, action.ReportSource); nil is none.
 	Waiting func(key string) bool
+	// Yours reports whether m is a session the user opened whose done mark
+	// still holds (task.Board.YoursDone): one the user marked done
+	// themselves is put away as a dispatched one is (D137). nil puts none
+	// away.
+	Yours func(m sidecar.Meta) bool
 	// Archive closes key's process and takes it out of the session list,
 	// keeping its history (Router.Archive).
 	Archive func(key string) (Archived, bool)
@@ -295,7 +302,10 @@ func (r *Reaper) Tick(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if m.Purpose != sidecar.PurposeTask {
+		// A session the user opened is looked at only once they marked it
+		// done themselves, or while it is put away (its record ends when it
+		// is back in the router).
+		if m.Purpose != sidecar.PurposeTask && m.Reap == nil && !r.done(m) {
 			continue
 		}
 		// The recheck comes first: it also ends a put away whose session is
@@ -306,11 +316,22 @@ func (r *Reaper) Tick(ctx context.Context) {
 	}
 }
 
-// done reports whether m is a done task not put away yet.
-func done(m sidecar.Meta) bool {
-	return m.Purpose == sidecar.PurposeTask && m.Reap == nil && m.Mark != nil &&
-		task.State(m.Mark.State) == task.Done
+// done reports whether m is a done task not put away yet: a session the
+// Planner dispatched, or one the user opened and marked done themselves
+// (D137; the Planner's mark on such a session leaves it where it is).
+func (r *Reaper) done(m sidecar.Meta) bool {
+	if m.Reap != nil || m.Mark == nil || task.State(m.Mark.State) != task.Done {
+		return false
+	}
+	if m.Purpose == sidecar.PurposeTask {
+		return true
+	}
+	return own(m) && r.cfg.Yours != nil && r.cfg.Yours(m)
 }
+
+// own reports whether done task m was marked by the user themselves (a
+// mark in 任务, a stop): their word that they are through with it.
+func own(m sidecar.Meta) bool { return m.Mark != nil && task.By(m.Mark.By) == task.ByUser }
 
 // due reports whether done task m, its session last active at lastActive,
 // is still within window. The window opens again when the user looks at the
@@ -349,14 +370,19 @@ func (r *Reaper) holds(key string, m sidecar.Meta, s Session) waiting {
 	switch {
 	case s.Running:
 		return waiting{why: "这一轮还没结束"}
-	case s.Failed != "":
-		return waiting{why: "这一轮出错结束"}
 	case s.Asking:
 		return waiting{why: "有提问没回答"}
-	case waitsOnUser(m) || r.cfg.Waiting != nil && r.cfg.Waiting(key):
-		return waiting{why: "在等你决定"}
 	case s.Background:
 		return waiting{why: "后台还有任务在跑"}
+	case own(m):
+		// The user marked it done or stopped it themselves: it goes once
+		// nothing of it runs. What follows keeps a session the Planner
+		// judged done within the user's reach; here they asked for it gone.
+		return waiting{}
+	case s.Failed != "":
+		return waiting{why: "这一轮出错结束"}
+	case waitsOnUser(m) || r.cfg.Waiting != nil && r.cfg.Waiting(key):
+		return waiting{why: "在等你决定"}
 	case r.cfg.Nearby != nil && r.cfg.Nearby(key):
 		return waiting{why: "你正看着它，或 5 分钟内给它发过消息"}
 	case r.unread(m):
@@ -391,7 +417,7 @@ func (r *Reaper) tryPutAway(ctx context.Context, key string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	m, ok := r.cfg.Sessions.Get(key)
-	if !ok || !done(m) {
+	if !ok || !r.done(m) {
 		r.setWait(key, waiting{})
 		return
 	}
@@ -414,18 +440,36 @@ func (r *Reaper) tryPutAway(ctx context.Context, key string) {
 		return
 	}
 	r.setWait(key, waiting{})
+	name := ""
+	if m.Title == "" && r.cfg.Name != nil {
+		name = r.cfg.Name(key)
+	}
 	a, ok := r.cfg.Archive(key)
 	if !ok {
 		return
 	}
 	now := r.cfg.Now()
 	rp := &sidecar.Reap{At: now, By: m.Mark.By, Why: m.Mark.Why, SessionID: a.SessionID, Workspace: a.Workspace, LastPrompt: a.LastPrompt}
-	rp.Worktrees = carry(r.worktrees(ctx, a), m.LeftWorktrees)
 	rec := record{Event: "reaped", Key: key, Trigger: m.Mark.By, Why: m.Mark.Why, Steps: []string{"关掉进程，会话移到历史会话"}}
-	if len(rp.Worktrees) == 0 {
-		rec.Skipped = append(rec.Skipped, skip{Step: "worktree", Why: "不在 worktree 里干活"})
+	if m.Purpose == sidecar.PurposeTask {
+		rp.Worktrees = carry(r.worktrees(ctx, a), m.LeftWorktrees)
+		if len(rp.Worktrees) == 0 {
+			rec.Skipped = append(rec.Skipped, skip{Step: "worktree", Why: "不在 worktree 里干活"})
+		}
+	} else {
+		// A session the user opened works where the user chose: its
+		// directories are theirs to keep or remove.
+		rec.Skipped = append(rec.Skipped, skip{Step: "worktree", Why: "你自己开的会话，目录不动"})
 	}
-	if _, err := r.cfg.Sessions.Update(key, func(m *sidecar.Meta) bool { m.Reap, m.LeftWorktrees = rp, nil; return true }); err != nil {
+	if _, err := r.cfg.Sessions.Update(key, func(m *sidecar.Meta) bool {
+		m.Reap, m.LeftWorktrees = rp, nil
+		// Out of the router nothing names it any more: the card keeps the
+		// name it had.
+		if m.Title == "" {
+			m.Title = name
+		}
+		return true
+	}); err != nil {
 		slog.Warn("reap: put-away session not recorded; reopening it will not resume it", "key", key, "err", err)
 	}
 	slog.Info("reap: done task's session put away", "key", key, "by", m.Mark.By, "worktrees", len(rp.Worktrees))

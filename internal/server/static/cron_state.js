@@ -169,11 +169,94 @@ export function reconcileCurrentRun(prevRun, freshRun, fetchStartedAt, cleared) 
   return resurrects ? null : freshRun;
 }
 
+// cronPendingOps: jobId → the pause / resume / delete the user just made and the
+// list already shows ({ paused } or { deleted }). A list response cannot know
+// about it until the server has applied it, so every response whose request
+// left before the op settled overrides it with the op. The entry retires once a
+// response that left after the settle has landed (the server's word) and no
+// response that left before it is still on its way — otherwise a slow earlier
+// fetch landing last would put the pre-change state back with nothing left to
+// override it. Order is by cronListSeq, not the clock, so a fetch begun in the
+// same millisecond as the settle is still placed on the right side of it.
+// cron_view writes the entries; the object identity is the op's token, so a
+// later op on the same job replaces it and the earlier op's settle is a no-op.
+export const cronPendingOps = new Map();
+
+let cronListSeq = 0;
+// Start sequence numbers of the list fetches still on their way.
+const cronListInFlight = new Set();
+
+export function cronPendingSettle(id, op) {
+  if (cronPendingOps.get(id) === op) op.settledSeq = ++cronListSeq;
+}
+
+export function cronPendingDrop(id, op) {
+  if (cronPendingOps.get(id) === op) cronPendingOps.delete(id);
+}
+
+function cronListFetchBegin() {
+  const seq = ++cronListSeq;
+  cronListInFlight.add(seq);
+  return seq;
+}
+
+// cronListFetchEnd is called once per begun fetch, landed or not, so a timed
+// out fetch does not hold an op forever.
+function cronListFetchEnd(seq) {
+  cronListInFlight.delete(seq);
+  for (const [id, op] of cronPendingOps) {
+    if (!op.confirmed) continue;
+    let olderInFlight = false;
+    for (const s of cronListInFlight) if (s < op.settledSeq) { olderInFlight = true; break; }
+    if (!olderInFlight) cronPendingOps.delete(id);
+  }
+}
+
+function cronPendingCurrent(op, startSeq) {
+  return !!op && !(op.settledSeq && startSeq > op.settledSeq);
+}
+
+// applyCronPending overlays the ops on a list response that left at startSeq,
+// and marks the ops it is the server's word for.
+function applyCronPending(jobs, startSeq) {
+  for (const op of cronPendingOps.values()) {
+    if (op.settledSeq && startSeq > op.settledSeq) op.confirmed = true;
+  }
+  if (cronPendingOps.size === 0) return jobs;
+  const out = [];
+  for (const j of jobs) {
+    const op = j && cronPendingOps.get(j.id);
+    if (cronPendingCurrent(op, startSeq)) {
+      if (op.deleted) continue;
+      if (typeof op.paused === 'boolean') {
+        j.paused = op.paused;
+        // Both transitions clear the reason server-side (manual pause, resume).
+        j.paused_reason = '';
+      }
+    }
+    out.push(j);
+  }
+  return out;
+}
+
+// cronRailBadgeRefresh repaints the rail's 自动化 attention dot from the cache:
+// jobs needing intervention (last run errored, or a scheduled run was missed
+// across a restart), not the raw total — avoids a persistent red dot on healthy
+// setups. #2435: manually paused jobs are a deliberate operator state, so they
+// do not light the rail dot; the in-view 需关注 filter / header chip still
+// include paused for context.
+export function cronRailBadgeRefresh() {
+  const attention = cronStore.jobs.filter(j => j.last_error || j.missed).length;
+  const railBadge = document.getElementById('abnav-cron-badge');
+  if (railBadge) railBadge.hidden = attention === 0;
+}
+
 export async function fetchCronJobs() {
   // 响应新旧的判据：比这个时刻更新的本地乐观补丁不被本响应覆盖（下方
   // stale-clobber 保护）。取在请求发出前，宁可偏早（多保留补丁一拍）也
   // 不偏晚（把新补丁误判为旧）。
   const fetchStartedAt = Date.now();
+  const listSeq = cronListFetchBegin();
   try {
     const headers = {};
     // 8s timeout, so a hung disk/fs call releases before the next fetch.
@@ -197,23 +280,13 @@ export async function fetchCronJobs() {
       const prev = nj && nj.id && (Array.isArray(cronStore.jobs) ? cronStore.jobs : []).find(o => o && o.id === nj.id);
       if (prev) nj.current_run = reconcileCurrentRun(prev.current_run, nj.current_run, fetchStartedAt, cronRunClearedAtLocal.get(nj.id));
     }
-    cronStore.jobs = freshJobs;
+    cronStore.jobs = applyCronPending(freshJobs, listSeq);
     cronStore.notifyDefault = data.notify_default || null;
     cronStore.recentRunsCap = (data.recent_runs_cap | 0) > 0 ? (data.recent_runs_cap | 0) : 0;
     setCronTimezoneMeta(data);
-    // Badge surfaces jobs needing intervention (last run errored, or a
-    // scheduled run was missed across a restart), not the raw total — avoids
-    // a persistent red dot on healthy setups. #2435: manually paused jobs are
-    // a deliberate operator state, so they no longer light the rail dot; the
-    // in-view 需关注 filter / header chip still include paused for context.
-    const attention = cronStore.jobs.filter(j => j.last_error || j.missed).length;
-    // Surface the attention dot on the rail's 自动化 icon so the alert is
-    // visible from any view.
-    const railBadge = document.getElementById('abnav-cron-badge');
-    if (railBadge) {
-      railBadge.hidden = attention === 0;
-    }
+    cronRailBadgeRefresh();
   } catch (e) { console.error('fetch cron:', e); }
+  finally { cronListFetchEnd(listSeq); }
 }
 
 // cronRefetchFullJob refills `cronStore.jobs[i].prompt` for a single job from
@@ -239,6 +312,7 @@ export async function cronRefetchFullJob(id) {
   // open — and Save — a stale prompt: open a drawer, have the prompt rewritten
   // elsewhere, open the editor, and the old body goes back to disk.
   if (!cached.prompt_truncated && !cached.prompt_refetched) return { ok: true, job: cached };
+  const listSeq = cronListFetchBegin();
   try {
     const headers = {};
     // No compact param: there is no per-job GET, so the full list is pulled.
@@ -249,11 +323,15 @@ export async function cronRefetchFullJob(id) {
     const fresh = jobs.find(j => j.id === id);
     if (fresh && !fresh.prompt_truncated) {
       // Splice the full copy back so later opens / renders skip the round trip.
+      // The splice is a list response too: a pause still in flight keeps its
+      // state, and a job deleted meanwhile is not brought back.
       const idx = cronStore.jobs.findIndex(j => j.id === id);
-      const spliced = Object.assign({}, fresh, { prompt_refetched: true });
+      const [spliced] = applyCronPending([Object.assign({}, fresh, { prompt_refetched: true })], listSeq);
+      if (!spliced) return { ok: false, reason: 'missing' };
       if (idx >= 0) cronStore.jobs[idx] = spliced;
       return { ok: true, job: spliced };
     }
   } catch (e) { /* fall through to fetch-failure */ }
+  finally { cronListFetchEnd(listSeq); }
   return { ok: false, reason: 'fetch' };
 }

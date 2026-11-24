@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/naozhi/naozhi/internal/apiwatch"
 	"log/slog"
 	"net/http"
 	"os"
@@ -32,6 +33,7 @@ import (
 	"github.com/naozhi/naozhi/internal/planner/digest"
 	"github.com/naozhi/naozhi/internal/planner/front"
 	"github.com/naozhi/naozhi/internal/planner/github"
+	"github.com/naozhi/naozhi/internal/planner/patrol"
 	"github.com/naozhi/naozhi/internal/planner/promise"
 	"github.com/naozhi/naozhi/internal/planner/reader"
 	"github.com/naozhi/naozhi/internal/planner/reap"
@@ -164,6 +166,17 @@ func main() {
 	// An isolated instance reads no outside source on a schedule and
 	// installs no update unless isolation.run_schedules says so.
 	isolated := schedulesOff(cfg, sessionLayout.Root())
+
+	// What the CLIs say about their model API calls (retries, turn timings,
+	// watchdog kills), for the 系统 view's 接口监控. Bound before the router
+	// exists, so a shim reattached at startup books its turns too.
+	apiWatch := apiwatch.Open(sessionLayout.APIWatchRoot())
+	defer apiWatch.Close()
+	for _, rt := range backendRuntimes {
+		if rt.Wrapper != nil {
+			rt.Wrapper.APIWatch = apiWatch
+		}
+	}
 
 	claudeDir := ""
 	if home, err := os.UserHomeDir(); err == nil {
@@ -318,7 +331,10 @@ func main() {
 		slog.Info("session sidecars given a seen_at baseline", "set", n)
 	}
 	// The ledger of the user's lines of work (§15.17, D132): the Planner's
-	// front blocks write it, its snapshot lists the open ones.
+	// front blocks write it, its snapshot lists the open ones. Its open
+	// items (§15.23, D143) are filed by the dispatched sessions' reports,
+	// the front blocks and the user, and closed by the hourly GitHub
+	// refresh once their pull request or issue is.
 	fronts := front.New(sessionLayout.PlannerFrontsPath(), nil)
 	// The global Planner (planner:main); Start below, once the turn entry and
 	// the health machine exist. Built even when planner.enabled is off, so
@@ -334,6 +350,7 @@ func main() {
 		Journal:    plannerState.Journal,
 		Promises:   wireup.PlannerPromises(promises),
 		Fronts:     wireup.PlannerFronts(fronts),
+		Items:      fronts.Items,
 		Conclusion: wireup.PlannerConclusion(sidecars),
 		MCPConfig:  mcpConfigFile,
 		// Bash for gh only where the session settings are naozhi's own.
@@ -518,7 +535,7 @@ func main() {
 	})
 	// Side notes in the session view (§15.3 ③), read back from the journal
 	// and pushed as the health machine and the inbox write it.
-	notes := wireup.SessionNotes(plannerState.Journal, notifier, sidecars, router)
+	notes := wireup.SessionNotes(plannerState.Journal, notifier, sidecars, router, plannerAgent.TellLater, unitNames)
 
 	// Morning brief (早报, §15.1): judged after the first health reconcile
 	// past 08:30 on a weekday, pushed once through the notifier. Only the
@@ -590,6 +607,46 @@ func main() {
 	})
 	plannerAgent.SetTaskIndex(wireup.PlannerTaskIndex(tasks, digests))
 	plannerAgent.SetRoutines(wireup.PlannerRoutineList(scheduler))
+	// The project patrol (§15.23, D142). Its deterministic checks: hourly,
+	// with no model, over the workspaces that had a session in the last 7
+	// days; its hits are open items of the ledger. Its deep check: once a
+	// week per workspace, a one-shot read-only session whose new findings
+	// wake the Planner, which sorts them; the caps on what comes of them
+	// are the patrol's. It follows the one pause and stays off on an
+	// isolated instance, as the scout does.
+	// A deep check's allow rules are its whole grant only where the session
+	// settings are naozhi's own: under dontAsk the base file's
+	// permissions.allow is left out. With the CLI reading
+	// ~/.claude/settings.json itself the user's own allow rules would widen
+	// what the session reads, so there it gets no deny rules, and does not
+	// run.
+	var patrolDeny func() []string
+	if naozhiSettingsFile != "" {
+		patrolDeny = plannerAgent.ReadDeny
+	}
+	patroller := patrol.New(patrol.Config{
+		Dir:         sessionLayout.PlannerPatrolRoot(),
+		Workspaces:  plannerState.Workspaces.LocalDirs,
+		Active:      wireup.PatrolActive(plannerState.Journal, nil, wireup.PatrolOwnTask(sidecars)),
+		Items:       fronts,
+		Worktrees:   wireup.PatrolWorktrees(sidecars),
+		Routines:    wireup.PatrolRoutines(scheduler, plannerState.Workspaces),
+		Self:        wireup.PatrolSelf(plannerState.Journal),
+		PausedUntil: notifier.PausedUntil,
+		Isolated:    isolated,
+		Session:     wireup.PatrolSession(router),
+		Wake:        wireup.PatrolWake(plannerAgent),
+		// What the Planner may not read, a deep check may not either.
+		Deny:     patrolDeny,
+		TaskOpen: wireup.PatrolTaskOpen(tasks),
+		Alarm:    wireup.PatrolAlarm(notifier),
+		Ctx:      ctx,
+		// The user's say on a finding (§15.23 ④): "做" reaches the Planner
+		// as their words, a finding settled closes its cards.
+		Answer:     wireup.PatrolAnswer(plannerAgent, nil),
+		CloseCards: wireup.PatrolCloseCards(notifier),
+	})
+	notifier.HandleDecisions(patrol.Handler, patroller.DecideCard)
 	briefer := brief.New(brief.Config{
 		Journal: plannerState.Journal,
 		Health:  func() health.Snapshot { return healthMon.Snapshot() },
@@ -609,9 +666,13 @@ func main() {
 		Parked:       plannerAgent.Parked,
 		// The brief leads with the lines of work; the Planner brings the
 		// ledger up to date first (§15.18, D133).
-		Fronts:  fronts.Open,
-		Tidy:    wireup.BriefTidy(plannerAgent),
-		Tidying: plannerAgent.Tidying,
+		Fronts: fronts.Open,
+		Items:  fronts.Items,
+		// The patrol's section comes after them (§15.23 ⑤).
+		Projects:        wireup.BriefProjects(patroller),
+		ProjectsBriefed: patroller.Briefed,
+		Tidy:            wireup.BriefTidy(plannerAgent),
+		Tidying:         plannerAgent.Tidying,
 		// With several nodes the scout's node sends the brief, each node's
 		// Planner covering its own sessions (docs/rfc/remote-planner.md §2.1).
 		Elsewhere: func() bool { return multiNode(cfg) && !scouter.Enabled() },
@@ -657,6 +718,7 @@ func main() {
 		LastActive: reapSources.LastActive,
 		Nearby:     custodian.Nearby,
 		Waiting:    wireup.ReapWaiting(notifier),
+		Yours:      tasks.YoursDone,
 		Archive:    reapSources.Archive,
 		Restore:    reapSources.Restore,
 		Dirs:       reapSources.Dirs,
@@ -682,6 +744,13 @@ func main() {
 		Workspaces: plannerState.Workspaces,
 		ReadRules:  plannerAgent.ReadRules,
 	})
+	// The gateway's progress notes on a session whose turn is over with
+	// background work going on (§15.22 ④, D141), on the health loop's minute;
+	// only with the Planner on, as the notes they join are.
+	progressNotes := func() {}
+	if cfg.Planner.Enabled {
+		progressNotes = wireup.ProgressNotes(notes, router, watched)
+	}
 
 	routing := buildRouting(cfg, agents, projectMgr, scheduler)
 	// The options of the sessions the Planner dispatches: at dispatch, and
@@ -705,9 +774,11 @@ func main() {
 		Scout:            scouter,
 		Lookups:          lookups,
 		Fronts:           fronts,
+		Patrol:           patroller,
 		PutAway:          wireup.PutAwayRecord{Sidecars: sidecars, EventsDir: sessionLayout.EventsRoot()},
 		Briefs:           briefer,
 		Health:           func() health.Snapshot { return healthMon.Snapshot() },
+		APIWatch:         apiWatch,
 		Workspaces:       plannerState.Workspaces,
 		UnitName:         unitNames,
 		Notify:           notifier,
@@ -809,6 +880,7 @@ func main() {
 		Watch: func() {
 			notifier.WatchPeer()
 			briefer.Poke()
+			progressNotes()
 		},
 	})
 	routerEvents.BindMonitor(healthMon.Poke)
@@ -831,45 +903,68 @@ func main() {
 	// 进行中 after it reported, or that ended a turn without reporting, gets
 	// the Planner a receipt.
 	actions = action.New(action.Config{
-		Planner:     agent.Key,
-		Inbox:       notifier,
-		Promises:    promises,
-		Workspaces:  plannerState.Workspaces,
-		Sessions:    sidecars,
-		Tasks:       tasks,
-		Brief:       briefer.Hold,
-		Spawn:       wireup.TaskSpawner{Router: router, Opts: taskOpts, Submit: srv.SubmitPlanner, Digests: digests}.Spawn,
-		Note:        plannerAgent.Note,
-		Tell:        plannerAgent.Tell,
-		TellLater:   plannerAgent.TellLater,
-		TellAlong:   plannerAgent.TellAlong,
-		ChatQuiet:   plannerAgent.ChatQuietAt,
-		Reports:     wireup.PlannerReports(router),
-		Digests:     digests,
-		Outside:     plannerAgent.OutsideTurn,
-		TellRefused: plannerAgent.TellRefused,
-		TellUnrun:   plannerAgent.TellUnrun,
-		UnrunTurn:   plannerAgent.UnrunTurn,
-		PlannerBusy: plannerAgent.Busy,
-		Background:  sources.Background,
-		UserSent:    sources.UserSent,
-		UserTyped:   sources.UserSince,
-		Reopen:      func(key string) { reaper.Reopen(ctx, key) },
-		Prompted:    sources.Prompted,
-		Custody:     custodian,
-		StopProcess: wireup.StopProcess(router, func(key string) { srv.DropPlannerQueue(key) }),
-		Asking:      sources.Asking,
-		Words:       wireup.PlannerWords(plannerAgent),
-		Relay:       srv.SubmitRelay,
-		RelayTarget: srv.RelayTarget,
-		Remember:    plannerAgent.Remember,
-		Park:        plannerAgent.Park,
-		Routines:    wireup.PlannerRoutines{Sched: scheduler},
-		Front:       fronts.Apply,
-		Lookup:      wireup.PlannerLookup(lookups),
-		TellAnswer:  wireup.PlannerTellAnswer(plannerAgent),
-		Ctx:         ctx,
+		Planner:          agent.Key,
+		Inbox:            notifier,
+		Promises:         promises,
+		Workspaces:       plannerState.Workspaces,
+		Sessions:         sidecars,
+		Tasks:            tasks,
+		Brief:            briefer.Hold,
+		Spawn:            wireup.TaskSpawner{Router: router, Opts: taskOpts, Submit: srv.SubmitPlanner, Digests: digests}.Spawn,
+		Note:             plannerAgent.Note,
+		Tell:             plannerAgent.Tell,
+		TellLater:        plannerAgent.TellLater,
+		TellAlong:        plannerAgent.TellAlong,
+		ChatQuiet:        plannerAgent.ChatQuietAt,
+		Reports:          wireup.PlannerReports(router),
+		Digests:          digests,
+		Outside:          plannerAgent.OutsideTurn,
+		TellRefused:      plannerAgent.TellRefused,
+		TellUnrun:        plannerAgent.TellUnrun,
+		UnrunTurn:        plannerAgent.UnrunTurn,
+		PlannerBusy:      plannerAgent.Busy,
+		Background:       sources.Background,
+		UserSent:         sources.UserSent,
+		UserTyped:        sources.UserSince,
+		Reopen:           func(key string) { reaper.Reopen(ctx, key) },
+		Prompted:         sources.Prompted,
+		Custody:          custodian,
+		StopProcess:      wireup.StopProcess(router, func(key string) { srv.DropPlannerQueue(key) }),
+		Asking:           sources.Asking,
+		TellWatch:        plannerAgent.TellWatch,
+		WatchTurn:        plannerAgent.WatchTurn,
+		TellWatchRefused: plannerAgent.TellWatchRefused,
+		SessionDir:       sources.Dir,
+		Words:            wireup.PlannerWords(plannerAgent),
+		Relay:            srv.SubmitRelay,
+		RelayTarget:      srv.RelayTarget,
+		SideNote: func(key, text, why string) error {
+			_, err := notes.Write(key, text, why)
+			return err
+		},
+		NoteTarget: wireup.NoteTarget(router),
+		Remember:   plannerAgent.Remember,
+		Park:       plannerAgent.Park,
+		Routines:   wireup.PlannerRoutines{Sched: scheduler},
+		Front:      fronts.Apply,
+		Items:      fronts,
+		Lookup:     wireup.PlannerLookup(lookups),
+		TellAnswer: wireup.PlannerTellAnswer(plannerAgent),
+		// The blocks naming a patrol finding, and the turns its findings
+		// start.
+		PatrolTurn:        plannerAgent.PatrolTurn,
+		TellPatrolRefused: plannerAgent.TellPatrolRefused,
+		// The receipts about a task dispatched to fix a finding, and the
+		// turns they start: held to the patrol's limits as well.
+		PatrolTaskTurn:  plannerAgent.PatrolTaskTurn,
+		TellPatrol:      plannerAgent.TellPatrol,
+		TellPatrolLater: plannerAgent.TellPatrolLater,
+		TellPatrolAlong: plannerAgent.TellPatrolAlong,
+		Patrol:          patroller,
+		Ctx:             ctx,
 	})
+	// A watch line the Planner held goes out as its session stands then.
+	plannerAgent.SetWatchNow(actions.WatchNow)
 	// The result is judged by the turn's sources before the ledger lets go
 	// of a request carried over from the last run.
 	resultSink := func(key, text string) {
@@ -894,7 +989,10 @@ func main() {
 		go reaper.Run(ctx)
 		// The registered repositories' GitHub issues, hourly, where the
 		// Planner reads (§15.14 ⑤): it has no network tool of its own.
-		go github.New(github.Config{Dir: sessionLayout.PlannerGitHubRoot(), Workspaces: plannerState.Workspaces.LocalDirs}).Run(ctx)
+		// The same round closes the open items whose pull request or issue
+		// is over.
+		go github.New(github.Config{Dir: sessionLayout.PlannerGitHubRoot(), Workspaces: plannerState.Workspaces.LocalDirs, Ledger: fronts}).Run(ctx)
+		go patroller.Run(ctx)
 	}
 	go sidecars.Run(ctx, func(key string) bool { return router.SessionFor(key) != nil })
 	go briefer.Run(ctx)
@@ -978,6 +1076,11 @@ func main() {
 				// The meeting recorder likewise: its summary session calls into
 				// the router, and its helper closes the segment it is writing.
 				{name: "meeting", run: meetings.Stop},
+				// The patrol's round in flight: its git and gh calls end with
+				// the cancel above, and nothing of it is left writing the
+				// ledger while the rest goes down. Its deep check's session
+				// calls into the router, as the scout's does.
+				{name: "patrol", run: patroller.Stop},
 				// ShutdownComplete closes after srv.Shutdown's 30s drain, i.e. after
 				// every in-flight handler finished, so router.Shutdown never races a
 				// half-cleaned session map. Already closed on server-exit paths.

@@ -1,10 +1,12 @@
 package wireup
 
 import (
+	"fmt"
 	"slices"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/notify"
 	"github.com/naozhi/naozhi/internal/planner/action"
 	"github.com/naozhi/naozhi/internal/planner/agent"
@@ -18,10 +20,15 @@ import (
 // SessionNotes builds the session side notes (docs/rfc/planner.md §15.3 ③)
 // over the journal, the inbox for item titles, the sidecars for dispatches
 // and the latest report block, and planner:main's history for the reports
-// sent by SendMessage.
-func SessionNotes(j *journal.Journal, inbox *notify.Notifier, sidecars *sidecar.Store, router *session.Router) *note.Notes {
+// sent by SendMessage. The Planner's own notes (§15.22 ②) follow the
+// inbox's pause; tell sends the Planner the receipt of one the user marked
+// useless, name being the session's name in it.
+func SessionNotes(j *journal.Journal, inbox *notify.Notifier, sidecars *sidecar.Store, router *session.Router, tell func(string) error, name func(string) string) *note.Notes {
 	return note.New(note.Config{
-		Journal: j,
+		Journal:     j,
+		PausedUntil: inbox.PausedUntil,
+		Tell:        tell,
+		Name:        name,
 		Item: func(id string) (string, bool) {
 			it, ok := inbox.Item(id)
 			return it.Title, ok
@@ -38,6 +45,53 @@ func SessionNotes(j *journal.Journal, inbox *notify.Notifier, sidecars *sidecar.
 			return sessionReports(m, ok, func() []time.Time { return plannerReports(router, key) })
 		},
 	})
+}
+
+// ProgressNotes is the health loop's minute for the gateway's progress notes
+// (§15.22 ④): it hands notes the sessions progressList finds.
+func ProgressNotes(notes *note.Notes, router *session.Router, watched func(key string) bool) func() {
+	return func() { notes.Progress(progressList(router, watched)) }
+}
+
+// progressList are the sessions of this node whose turn is over with
+// background work open (bgtask, the judgment 后台中 reads): those the
+// Planner dispatched and those the user opened that the gateway observes
+// (watched: planner/custody.Engine.Watched). The Planner's own, a one-shot
+// run's, a cron run's, a daemon's and a scratch session are never the
+// user's to follow, whatever watched says.
+func progressList(router *session.Router, watched func(key string) bool) []note.Background {
+	var out []note.Background
+	for _, snap := range router.ListSessions() {
+		key := snap.Key
+		if snap.State == "running" || !health.UserSession(key, health.KindSession) || !sessionkey.IsTaskKey(key) && !watched(key) {
+			continue
+		}
+		s := router.SessionFor(key)
+		if s == nil {
+			continue
+		}
+		if bg := background(s, snap); bg.Open() {
+			out = append(out, note.Background{Key: key, Turn: unixMilli(snap.TurnAt), State: bg})
+		}
+	}
+	return out
+}
+
+// NoteTarget is action.Config.NoteTarget over the router: a side note goes
+// on a session of this node the user can open. One put away is not in the
+// router, and a remote node's is its own Planner's (D96).
+func NoteTarget(router *session.Router) func(key string) error {
+	return func(key string) error {
+		switch {
+		case sessionkey.ValidateSessionKey(key) != nil:
+			return fmt.Errorf("%q 不是合法的会话 key", key)
+		case sessionkey.IsPlannerNSKey(key), sessionkey.IsOneShotKey(key):
+			return fmt.Errorf("会话 %s 不能写旁注", key)
+		case router == nil || router.SessionFor(key) == nil:
+			return fmt.Errorf("找不到会话 %s（填 index.json 里本机会话的 key；远程节点的会话写不了旁注）", key)
+		}
+		return nil
+	}
 }
 
 // sessionReports are the times session m reported to the Planner: its

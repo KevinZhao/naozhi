@@ -37,7 +37,9 @@
 // column on its raw record, tool calls and all, as 看原始记录 › under its
 // expanded digest does (D124, the third of D67's layers). A done dispatched
 // session is put away once its turn ended, you are not at it and it has
-// been idle 2 hours (planner/reap, D105): while only the idleness holds it
+// been idle 2 hours (planner/reap, D105); one you marked done or stopped
+// yourself, a session you opened included, goes as soon as nothing of it
+// runs (D137). While only the idleness holds it
 // its status line says about when (the task's reap_at), otherwise its card
 // says what holds it, then that it was put away; 重新打开 puts it back. The
 // Planner page's header offers the same 停止 for the session open in the
@@ -76,7 +78,7 @@
 import { NZ_CONTRACT } from './contract.js';
 import { selection, ui } from './state.js';
 import { HEALTH_STATES, backgroundTasksText, esc, escAttr, fetchJSON, nzBus, registerActions, showToast } from './nz_util.js';
-import { formatAbsTime, formatMonthDayTime, timeAgo } from './utilities.js';
+import { formatAbsTime, formatMonthDayTime, holdPutAway, releasePutAway, timeAgo } from './utilities.js';
 import { custody, custodyChipHtml, refreshCustody, sessionShown, statusOf } from './custody.js';
 import { isLit, light } from './notify.js';
 import { shell } from './shell.js';
@@ -110,6 +112,19 @@ let digestOpen = '';
 const digests = new Map();
 let digestSeq = 0;
 let onlyNew = null;
+// unwatched is the sessions whose 观察 this page just switched off, by key
+// (→ a mark of that switch): 你开的 leaves them out meanwhile.
+const unwatched = new Map();
+// pending holds the changes made here ahead of their request: id → {patch}
+// (the fields the change set) or {gone} (a task taken off the list), and
+// settled, readSeq when the request answered (unset before). A read that
+// started before then (refreshTasks, the live tick, a session_state frame)
+// may have the task as it was, even one landing after the answer, so
+// fetchTasks lays the mark over it and the card does not flip back; a read
+// started after is the server's, and drops the mark.
+const pending = new Map();
+// readSeq numbers the reads of the list as they start.
+let readSeq = 0;
 
 // LIVE_MS is how often the group refetches while a dispatched session runs;
 // STATE_DEBOUNCE_MS gathers a burst of session_state frames into one fetch.
@@ -288,7 +303,10 @@ export function taskStatus(t, now = Date.now()) {
   const bg = live && live.background;
   if (bg && bg.count > 0) {
     const p = ms(bg.last_progress);
-    return { badge: BADGES.bg, text: backgroundTasksText(bg.count, (bg.tasks || []).map((x) => x.summary)), ...(p ? { time: '最近进度 ' + timeAgo(p), tip: formatAbsTime(p) } : {}) };
+    // live.progress is the line the gateway's progress notes say in the
+    // session (§15.22 ④): how long it has run, a workflow's agents done and
+    // its phase. A list without it (an older node's) names the tasks.
+    return { badge: BADGES.bg, text: live.progress || backgroundTasksText(bg.count, (bg.tasks || []).map((x) => x.summary)), ...(p ? { time: '最近进度 ' + timeAgo(p), tip: formatAbsTime(p) } : {}) };
   }
   if (live) {
     const at = lastActive || ms(t.at);
@@ -321,13 +339,23 @@ function titleHtml(t) {
 function actsHtml(t) {
   const btn = (action, label, tip) => '<button type="button" class="pl-btn tk-act tk-' + action.replace('task-', '') + '" data-action="' + action + '" data-id="' + escAttr(t.id) + '"' + (tip ? ' title="' + escAttr(tip) + '"' : '') + '>' + label + '</button>';
   const raw = t.kind === 'session' ? rawHtml(t, 'pl-btn tk-act tk-raw', '原始记录') : '';
-  // A session you opened is only marked: nothing stops or reopens it.
-  if (isYours(t)) return (t.state === 'done' ? btn('task-doing', '标为进行中', '放回「你开的」') : btn('task-done', '标为已完成', '从「你开的」里拿掉（会话本身不动）')) + raw;
-  if (t.state === 'done') return btn('task-reopen', '重新打开', t.reap ? '放回会话列表，下一条消息接着上下文继续' : '') + raw;
-  return (running(t) ? btn('task-stop', '停止', '停止这个会话正在做的事') : '') +
+  // A session you opened: marking it done yourself also closes it (D137:
+  // put away to the history, its record kept), and a put-away one reopens.
+  // One the Planner marked is only listed as done; nothing stops one.
+  if (isYours(t)) {
+    if (t.state !== 'done') return btn('task-done', '标为已完成', CLOSES_TIP) + raw;
+    return (t.reap ? btn('task-reopen', '重新打开', REOPENS_TIP) : btn('task-doing', '标为进行中', '放回「你开的」')) + raw;
+  }
+  if (t.state === 'done') return btn('task-reopen', '重新打开', t.reap ? REOPENS_TIP : '') + raw;
+  return (running(t) ? btn('task-stop', '停止', '停止这个会话正在做的事，并把会话收进历史') : '') +
     (t.state === 'doing' || t.state === 'remind' ? '' : btn('task-doing', '标为进行中')) +
-    btn('task-done', '标为已完成') + raw;
+    btn('task-done', '标为已完成', t.kind === 'session' ? CLOSES_TIP : '') + raw;
 }
+
+// CLOSES_TIP and REOPENS_TIP say what marking a session done yourself does
+// to the session, and how it comes back (D137).
+const CLOSES_TIP = '标为已完成，并关掉“会话”里的这个会话：收进历史，记录都在，可以从这里重新打开';
+const REOPENS_TIP = '放回会话列表，下一条消息接着上下文继续';
 
 // rawHtml opens session t in the middle column on its raw record, tool
 // calls and all, scrolled to the latest (planner_chat.js's
@@ -463,7 +491,8 @@ export const countHeadHtml = (label, n) => esc(label) + (n ? ' <span class="tk-n
 // progress, the phone's folded block's number (one number for 任务 on the
 // screen, §15.8 F1), its parts each their own.
 export function tasksHtml(data) {
-  const all = (data && Array.isArray(data.tasks)) ? data.tasks : [];
+  // A session put away is listed from its record, watched or not.
+  const all = ((data && Array.isArray(data.tasks)) ? data.tasks : []).filter((t) => !(isYours(t) && !t.reap && !t.retired && unwatched.has(t.id)));
   let html = '<h2 class="pl-group-h tk-head">' + countHeadHtml('任务', all.filter(inProgress).length) + '</h2>';
   if (!all.length) return html + '<div class="pl-empty">还没有任务<span>Planner 派出的会话、它答应你的事和你开的会话会列在这里</span></div>';
   // "N 件新结果" filters to the new ones (those it was chosen for, and any
@@ -556,6 +585,7 @@ function fetchTasks(fresh = false) {
     return load.next;
   }
   const g = gen;
+  const seq = ++readSeq;
   const p = (async () => {
     let data;
     try {
@@ -568,7 +598,11 @@ function fetchTasks(fresh = false) {
     }
     if (load && load.p === p) load = null;
     if (g !== gen) return fetchTasks();
-    const list = (data && Array.isArray(data.tasks)) ? data.tasks : [];
+    let list = (data && Array.isArray(data.tasks)) ? data.tasks : [];
+    if (pending.size) {
+      list = overlay(list, seq);
+      data = { ...data, tasks: list };
+    }
     byId = new Map(list.map((t) => [t.id, t]));
     if (actsOpen && !byId.has(actsOpen)) actsOpen = '';
     if (digestOpen && !byId.has(digestOpen)) digestOpen = '';
@@ -891,30 +925,159 @@ nzBus.addEventListener('session:select', () => {
 nzBus.addEventListener('planner:node', () => {
   gen++; readAt = 0; failedAt = 0;
   digestOpen = ''; digests.clear(); onlyNew = null;
+  unwatched.clear();
+  // The node before's marks would lay its tasks over this one's list; a
+  // request still out for one finds its mark gone and leaves the list alone.
+  pending.clear();
   // The count was the node before's; its own list repaints it.
   const news = document.getElementById('pl-news');
   if (news) news.hidden = true;
   paintTaskHeader();
 });
 
-// post sends a task change from control el, then refreshes every group.
-async function post(el, url, body, failed) {
-  el.disabled = true;
+// overlay lays the pending marks over list, a read started as seq: a task
+// taken off stays off, a changed one keeps the change. A mark whose request
+// answered before this read started is done with.
+function overlay(list, seq) {
+  const out = [];
+  for (const t of list) {
+    const m = pending.get(t.id);
+    if (!m) out.push(t);
+    else if (m.settled != null && seq > m.settled) { pending.delete(t.id); out.push(t); }
+    else if (!m.gone) out.push({ ...t, ...m.patch });
+  }
+  for (const [id, m] of pending) if (m.settled != null && seq > m.settled) pending.delete(id);
+  return out;
+}
+
+// settle ends mark, task id's, once its request answered: kept over the
+// reads started before, until the refresh that follows read the list.
+async function settle(id, mark) {
+  mark.settled = readSeq;
+  await refreshTasks();
+  if (pending.get(id) === mark) pending.delete(id);
+}
+
+// dropTask takes task id off the list at once, for a request about to end
+// it (a 单独聊's 结束: 你开的 lists it until the gateway archived it), and
+// keeps it off reads answering before the request did. It returns done(ok)
+// for when the request answered: ok refreshes, else the task is put back
+// where it was and the list read again (a request failed late may have ended
+// it all the same). null when the list does not have it.
+export function dropTask(id) {
+  const t = byId.get(id);
+  if (!t || !last || !Array.isArray(last.tasks)) return null;
+  const at = last.tasks.findIndex((x) => x.id === id);
+  const mark = { gone: true };
+  pending.set(id, mark);
+  byId.delete(id);
+  last = { ...last, tasks: last.tasks.filter((x) => x.id !== id) };
+  if (actsOpen === id) actsOpen = '';
+  if (digestOpen === id) digestOpen = '';
+  repaintChanged(id);
+  return (ok) => {
+    if (pending.get(id) !== mark) return;
+    if (ok) { settle(id, mark); return; }
+    pending.delete(id);
+    if (!byId.has(id) && last && Array.isArray(last.tasks)) {
+      const tasks = last.tasks.slice();
+      tasks.splice(at < 0 ? tasks.length : Math.min(at, tasks.length), 0, t);
+      last = { ...last, tasks };
+      byId.set(id, t);
+    }
+    repaintChanged(id);
+    refreshTasks();
+  };
+}
+
+// post sends a change to task body.id from control el, then refreshes every
+// group. A task in the last list shows the change at once (patch: the fields
+// the gateway sets, as the user's): its card, the header counts, the
+// session's own header; a refused POST puts the task as it was back and says
+// why. A session the change puts away leaves the sidebar at once too
+// (sidebarPutAway).
+async function post(el, url, body, failed, patch) {
+  const id = body.id;
+  const prev = byId.get(id);
+  const mark = prev ? { patch: { ...patch, by: 'user', at: new Date().toISOString() } } : null;
+  const node = plannerHost.node;
+  let held = false;
+  if (mark) {
+    pending.set(id, mark);
+    putTask({ ...prev, ...mark.patch });
+    held = sidebarPutAway(prev, mark.patch.state, node);
+    actsOpen = '';
+    repaintChanged(id);
+  } else {
+    el.disabled = true;
+  }
   try {
     await fetchJSON(url, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), timeoutMs: 8000,
     });
     actsOpen = '';
   } catch (e) {
+    if (mark && pending.get(id) === mark) {
+      pending.delete(id);
+      putTask(prev);
+      repaintChanged(id);
+    }
+    if (held) releasePutAway(id, node, true);
     showToast(failed + e.message, 'error');
   }
   el.disabled = false;
   el.blur();
-  await refreshTasks();
+  if (mark && pending.get(id) === mark) await settle(id, mark);
+  else await refreshTasks();
+}
+
+// putTask puts t in the last list in place of the task with its ID.
+function putTask(t) {
+  byId.set(t.id, t);
+  if (last && Array.isArray(last.tasks)) last = { ...last, tasks: last.tasks.map((x) => (x.id === t.id ? t : x)) };
+}
+
+// repaintChanged repaints what reads task id from the last list: the groups,
+// the page header's new results, the session headers, the phone's left-block
+// counts ('tasks:list'). Focus, on a control of the "⋯" just closed, goes
+// back to the card's "⋯".
+function repaintChanged(id) {
+  paintNews();
+  repaintAll();
+  nzBus.dispatchEvent(new CustomEvent('tasks:changed'));
+  if (last) nzBus.dispatchEvent(new CustomEvent('tasks:list', { detail: last }));
+  const a = document.activeElement;
+  if (!a || a === document.body) document.querySelector('#pl-task .tk-card[data-id="' + CSS.escape(id) + '"] .tk-more')?.focus();
+}
+
+// putsAwayNow reports whether the gateway puts session task t away as soon
+// as the user marks it done or stops it (planner/reap, D137: their own mark
+// waits only on what still runs): it is in the session list (live), no turn
+// runs, nothing runs in the background and no question waits. Anything else
+// holds it there, possibly for long, and its card stays.
+function putsAwayNow(t) {
+  if (t.kind !== 'session' || t.retired || t.reap || !t.live) return false;
+  if (t.live.running || (t.live.background && t.live.background.count > 0)) return false;
+  return t.state !== 'waiting' && t.health !== 'waiting';
+}
+
+// sidebarPutAway takes task t's session card off the sidebar when the
+// change to state puts it away at once (holdPutAway, bounded), and ends that
+// hold for a change back to in progress. It reports whether it held one.
+function sidebarPutAway(t, state, node) {
+  if (state === 'done' && putsAwayNow(t)) {
+    holdPutAway(t.id, node);
+    return true;
+  }
+  if (state === 'doing') releasePutAway(t.id, node, true);
+  return false;
 }
 
 function setState(el, id, state) {
-  if (id && state) return post(el, plannerAPI(NZ_CONTRACT.API.tasks_state), { id, state }, '没有改成：');
+  if (!id || !state) return;
+  // Back in progress, a put-away session is reopened (planner/reap Reopen).
+  const patch = state === 'doing' ? { state, why: '', reap: undefined } : { state, why: '' };
+  return post(el, plannerAPI(NZ_CONTRACT.API.tasks_state), { id, state }, '没有改成：', patch);
 }
 
 function repaintAll() {
@@ -930,8 +1093,28 @@ nzBus.addEventListener('inbox:count', () => {
   if (!mounts.size && headerTaskKey()) ensureTasks(0);
 });
 nzBus.addEventListener('custody:changed', repaintAll);
-// 观察 switched in a session's header: 你开的 gains or loses it.
-nzBus.addEventListener('watch:changed', () => { if (mounts.size) refreshTasks(); });
+// 观察 switched in a session's header (custody.js): 你开的 loses it at once,
+// ahead of the gateway, and gains it from the list read once the gateway
+// answered (a card needs what only the list says). The key stays out until
+// that read is shown: one started before the answer still lists it.
+nzBus.addEventListener('watch:changed', (e) => {
+  const { key, watch, pending, failed } = e.detail || {};
+  if (!key) return;
+  if (pending) {
+    if (watch) unwatched.delete(key);
+    else unwatched.set(key, {});
+    repaintAll();
+    return;
+  }
+  const mark = unwatched.get(key);
+  const settle = () => {
+    if (!mark || unwatched.get(key) !== mark) return;
+    unwatched.delete(key);
+    repaintAll();
+  };
+  if (failed || !mounts.size) { settle(); return; }
+  refreshTasks().finally(settle);
+});
 
 registerActions({
   'task-more': (el) => {
@@ -973,7 +1156,7 @@ registerActions({
   'task-done': (el) => setState(el, el.dataset.id, 'done'),
   'task-doing': (el) => setState(el, el.dataset.id, 'doing'),
   'task-reopen': (el) => setState(el, el.dataset.id, 'doing'),
-  'task-stop': (el) => el.dataset.id && post(el, plannerAPI(NZ_CONTRACT.API.tasks_stop), { id: el.dataset.id }, '没有停下：'),
+  'task-stop': (el) => el.dataset.id && post(el, plannerAPI(NZ_CONTRACT.API.tasks_stop), { id: el.dataset.id }, '没有停下：', { state: 'done', why: STOPPED_WHY }),
   // The Planner page opens on the card; planner_view.js unfolds the phone's
   // left block it is in ('tasks:reveal').
   'task-reveal': (el) => {

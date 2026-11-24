@@ -129,9 +129,14 @@ func (u *Update) Validate() error {
 	return nil
 }
 
+// file is fronts.json. Items came after the fronts and is left out when
+// empty; the version stays, so a build from before them still reads the
+// fronts (and drops the items on its next write) rather than taking the
+// whole ledger for a newer build's and going read-only.
 type file struct {
 	V      int     `json:"v"`
 	Fronts []Front `json:"fronts"`
+	Items  []Item  `json:"items,omitempty"`
 }
 
 // Store is the ledger.
@@ -141,6 +146,8 @@ type Store struct {
 
 	mu     sync.Mutex
 	fronts []Front
+	// items are the open items and the closed ones still kept (item.go).
+	items []Item
 	// readOnly keeps a file this build cannot read from being overwritten.
 	readOnly bool
 }
@@ -163,7 +170,7 @@ func New(path string, now func() time.Time) *Store {
 		slog.Warn("planner fronts written by a newer naozhi; not overwriting them", "version", f.V)
 		s.readOnly = true
 	case out == jsonfile.Parsed:
-		s.fronts = f.Fronts
+		s.fronts, s.items = f.Fronts, f.Items
 	}
 	return s
 }
@@ -214,7 +221,15 @@ func (s *Store) Apply(u Update) (Front, error) {
 				keys = append(keys, k)
 			}
 		}
-		f.Sessions = keys[:min(len(keys), MaxSessions)]
+		n := min(len(keys), MaxSessions)
+		// What a session the line no longer keeps left under it stays under
+		// it: Items finds an item's line by the sessions kept.
+		for i := range s.items {
+			if it := &s.items[i]; it.Open() && it.Front == "" && slices.Contains(keys[n:], it.Source) {
+				it.Front = f.ID
+			}
+		}
+		f.Sessions = keys[:n]
 	}
 	if u.Decision != "" {
 		f.Decisions = append([]Decision{{At: now, Text: u.Decision}}, f.Decisions...)
@@ -234,7 +249,7 @@ func (s *Store) Apply(u Update) (Front, error) {
 func (s *Store) Has(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return slices.ContainsFunc(s.fronts, func(f Front) bool { return f.ID == id })
+	return s.hasLocked(id)
 }
 
 func (s *Store) openLocked() int {
@@ -263,16 +278,19 @@ func (s *Store) Open() []Front {
 	return out
 }
 
-// saveLocked drops the fronts closed longer than closedRetention and writes
-// the file.
+// saveLocked drops the fronts closed longer than closedRetention and the
+// items closed longer than itemRetention, and writes the file.
 func (s *Store) saveLocked(now time.Time) {
 	s.fronts = slices.DeleteFunc(s.fronts, func(f Front) bool {
 		return !f.Open() && now.Sub(f.Closed) > closedRetention
 	})
+	s.items = slices.DeleteFunc(s.items, func(it Item) bool {
+		return !it.Open() && now.Sub(it.Closed) > itemRetention
+	})
 	if s.readOnly || s.path == "" {
 		return
 	}
-	data, err := json.MarshalIndent(file{V: Version, Fronts: s.fronts}, "", "  ")
+	data, err := json.MarshalIndent(file{V: Version, Fronts: s.fronts, Items: s.items}, "", "  ")
 	if err == nil {
 		err = osutil.WriteFileAtomic(s.path, data, 0o600)
 	}

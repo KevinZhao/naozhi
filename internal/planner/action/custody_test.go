@@ -31,7 +31,13 @@ type fakeCustody struct {
 	stopped map[string]bool
 	halts   []string
 	haltErr error
+	// watched are the sessions the gateway observes, nearby those the user
+	// is at.
+	watched, nearby map[string]bool
 }
+
+func (f *fakeCustody) Watched(key string) bool { return f.watched[key] }
+func (f *fakeCustody) Nearby(key string) bool  { return f.nearby[key] }
 
 func (f *fakeCustody) On(key string) bool { return f.on[key] }
 func (f *fakeCustody) Check(key string) error {

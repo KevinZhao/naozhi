@@ -1,6 +1,6 @@
 // Package action is the Planner's way to ask the gateway for something
 // (docs/rfc/planner.md §6.2): the ```naozhi-action blocks at the end of a
-// planner:main reply. There are twelve: dispatch (a task: session, started at
+// planner:main reply. They are: dispatch (a task: session, started at
 // once, D88), promise (a promise among the 任务), ask (a
 // question in "通知" whose answer goes back to the Planner, or straight to a
 // session, D98), status (the Planner's judgment of a task's state, §15.4),
@@ -12,14 +12,17 @@
 // §15.12 ⑧), lookup (a web lookup by a one-shot reader, §15.12 ⑨), park
 // (an item the user put down, moved into the 搁置区, §15.14 ⑤), halt (a
 // session the user asked to stop: its custody stopped, its process closed,
-// D119) and cancel (a task the user said is not wanted, stopped as from 任务,
-// D120). A block
+// D119), cancel (a task the user said is not wanted, stopped as from 任务,
+// D120), routine (a standing task, D131), front (a line of work in the
+// ledger, D132) and note (a side note on a session, for the user alone,
+// §15.22 ②). A block
 // that does not parse, or names an unknown type, a bad field or a task that
 // does not exist, is not run: the Planner conversation shows it as it was
 // written, with the reason, and the Planner gets a receipt naming it.
 package action
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -52,10 +55,13 @@ const (
 	// maxBlockBytes caps one block's body.
 	maxBlockBytes = 64 << 10
 	// titleRunes is the CLI's --name cap.
-	titleRunes        = 64
-	messageRunes      = 20000
-	textRunes         = 500
-	maxOptions        = 6
+	titleRunes   = 64
+	messageRunes = 20000
+	textRunes    = 500
+	maxOptions   = 6
+	// maxFindingOptions is maxOptions less the two choices every patrol
+	// finding's question leaves room for.
+	maxFindingOptions = 4
 	optionRunes       = 80
 	workspaceRefRunes = 128
 	// goalRunes caps a dispatch's goal (D103).
@@ -92,11 +98,12 @@ const (
 	TypeCancel   Type = "cancel"
 	TypeRoutine  Type = "routine"
 	TypeFront    Type = "front"
+	TypeNote     Type = "note"
 )
 
 // allTypes lists the block types as the refusal of an unknown one names
 // them.
-const allTypes = "dispatch、promise、ask、status、notify、custody、relay、remember、lookup、park、halt、cancel、routine、front"
+const allTypes = "dispatch、promise、ask、status、notify、custody、relay、remember、lookup、park、halt、cancel、routine、front、note"
 
 // Dispatch asks for a session in a workspace.
 type Dispatch struct {
@@ -123,6 +130,23 @@ type Dispatch struct {
 	// Message does nothing: the CLI takes it only from a human's input. Only
 	// a turn the user started may set it, as the user's choice.
 	Ultracode bool `json:"ultracode,omitempty"`
+	// Finding is the project patrol's finding the task is to fix, by its
+	// ref (§15.23 ③, D142): the gateway judges whether it may be dispatched
+	// with no word of the user's, and counts the task against the
+	// workspace's cap.
+	Finding string `json:"finding,omitempty"`
+}
+
+// findingRE is a patrol finding's ref, "<workspace ID>/<finding ID>"
+// (planner/patrol.Ref).
+var findingRE = regexp.MustCompile(`^ws_[a-z0-9]{8}/[a-z0-9][a-z0-9-]{2,59}$`)
+
+// validFinding checks a block's finding: a ref, or none.
+func validFinding(ref *string) error {
+	if *ref = strings.TrimSpace(*ref); *ref != "" && !findingRE.MatchString(*ref) {
+		return errors.New("finding 要写 <naozhi-patrol> 里那条发现的 ref（<工作区 ID>/<发现 id>）")
+	}
+	return nil
 }
 
 // Promise registers something the Planner promised the user.
@@ -140,6 +164,9 @@ type Ask struct {
 	Question string   `json:"question"`
 	Options  []string `json:"options"`
 	Task     string   `json:"task,omitempty"`
+	// Finding is the patrol finding the question is about, by its ref: it
+	// counts against the day's cap of findings put to the user.
+	Finding string `json:"finding,omitempty"`
 	// Trimmed is how many options were cut to optionRunes, "…" included: a
 	// question is worth asking even if an option ran long, so the Planner is
 	// told in the receipt instead of the block refused.
@@ -165,12 +192,16 @@ const (
 // Notify tells the user something: Level timely pushes it, brief holds it
 // for the next morning brief. ID is the scout finding it is about, "" when
 // none; with Title and Link it names the thing, so it is pushed once a day.
+// Finding is the patrol finding it is about, by its ref (its pull request
+// ready): a timely one counts against the day's cap, and it names the
+// thing when there is no ID.
 type Notify struct {
-	Title string `json:"title"`
-	Why   string `json:"why"`
-	Level string `json:"level"`
-	Link  string `json:"link"`
-	ID    string `json:"id"`
+	Title   string `json:"title"`
+	Why     string `json:"why"`
+	Level   string `json:"level"`
+	Link    string `json:"link"`
+	ID      string `json:"id"`
+	Finding string `json:"finding,omitempty"`
 }
 
 // Custody switches session Key's custody (On), sends it Text through
@@ -243,6 +274,41 @@ func (p *Park) validate() error {
 		return errors.New("park 缺少 source（出处：任务 key、承诺 ID、#issue，或用户那句话的时间）")
 	case utf8.RuneCountInString(p.Source) > parkSourceRunes:
 		return fmt.Errorf("source 超过 %d 字", parkSourceRunes)
+	}
+	return nil
+}
+
+// Note writes a side note on session Key (§15.22 ②, D139): the gateway puts
+// Text into that session's view, marked as the Planner's, with Why (what it
+// goes by, and where that is) behind it. The user alone reads it: it is not
+// sent to the session and never enters its context, so a turn of any source
+// may write one.
+type Note struct {
+	Key  string `json:"key"`
+	Text string `json:"text"`
+	Why  string `json:"why"`
+}
+
+// noteTextRunes caps a side note: one sentence beside the conversation.
+const noteTextRunes = 200
+
+func (n *Note) validate() error {
+	n.Key = strings.TrimSpace(n.Key)
+	n.Text, n.Why = strings.Join(strings.Fields(n.Text), " "), strings.Join(strings.Fields(n.Why), " ")
+	if err := validKey("key", n.Key); err != nil {
+		return errors.New("note " + err.Error())
+	}
+	switch {
+	case sessionkey.IsPlannerNSKey(n.Key) || sessionkey.IsOneShotKey(n.Key):
+		return errors.New("note 的 key 不能是 planner:main 或一次性会话（巡检、网页查询）")
+	case n.Text == "":
+		return errors.New("note 缺少 text")
+	case utf8.RuneCountInString(n.Text) > noteTextRunes:
+		return fmt.Errorf("text 超过 %d 字", noteTextRunes)
+	case n.Why == "":
+		return errors.New("note 缺少 why（依据与出处）")
+	case utf8.RuneCountInString(n.Why) > textRunes:
+		return fmt.Errorf("why 超过 %d 字", textRunes)
 	}
 	return nil
 }
@@ -393,16 +459,38 @@ func (t *Routine) validate() error {
 // Front writes one line of work into the ledger (工作线台账, §15.17, D132):
 // the front ID names is made (with Name) or changed field by field. State,
 // Next and Waiting left out stay as they are; "" clears one.
+//
+// Item and Done write the ledger's open items (未了事项, §15.23, D143): Item
+// files one, under the front ID names when it names one, or changes the
+// source of the one its id names; Done closes the ones it lists, and lets
+// be the patrol finding an entry "patrol:<ref>" names (Patrol.Pass). A
+// block carrying only those needs no ID, and touches no front.
 type Front struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name,omitempty"`
-	State    *string  `json:"state,omitempty"`
-	Next     *string  `json:"next,omitempty"`
-	Waiting  *string  `json:"waiting,omitempty"`
-	Sessions []string `json:"sessions,omitempty"`
-	Decision string   `json:"decision,omitempty"`
-	Close    bool     `json:"close,omitempty"`
+	ID       string     `json:"id,omitempty"`
+	Name     string     `json:"name,omitempty"`
+	State    *string    `json:"state,omitempty"`
+	Next     *string    `json:"next,omitempty"`
+	Waiting  *string    `json:"waiting,omitempty"`
+	Sessions []string   `json:"sessions,omitempty"`
+	Decision string     `json:"decision,omitempty"`
+	Close    bool       `json:"close,omitempty"`
+	Item     *FrontItem `json:"item,omitempty"`
+	Done     []string   `json:"done,omitempty"`
 }
+
+// FrontItem is a front block's open item: with no ID a new one (Text, and
+// the workspace and source it has), with one the new source of the item it
+// names (the issue it was filed as).
+type FrontItem struct {
+	ID   string `json:"id,omitempty"`
+	Text string `json:"text,omitempty"`
+	// Workspace is a workspace's ID or name, "" to go by the source.
+	Workspace string `json:"workspace,omitempty"`
+	Source    string `json:"source,omitempty"`
+}
+
+// maxFrontDone is how many items one front block closes.
+const maxFrontDone = 10
 
 // Update is f as the ledger takes it.
 func (f Front) Update() front.Update {
@@ -410,18 +498,71 @@ func (f Front) Update() front.Update {
 		Sessions: f.Sessions, Decision: f.Decision, Close: f.Close}
 }
 
-func (f *Front) validate() error {
-	u := f.Update()
-	if err := u.Validate(); err != nil {
-		return err
+// ledger reports whether f changes a front, not only the open items.
+func (f Front) ledger() bool {
+	return f.Name != "" || f.State != nil || f.Next != nil || f.Waiting != nil || len(f.Sessions) > 0 || f.Decision != "" || f.Close
+}
+
+// label names f as the conversation does: its front, else its item.
+func (f Front) label() string {
+	if name := cmp.Or(f.Name, f.ID); name != "" {
+		return name
 	}
-	f.ID, f.Name, f.Decision = u.ID, u.Name, u.Decision
+	if f.Item != nil && f.Item.Text != "" {
+		return textutil.TruncateRunes(f.Item.Text, labelRunes)
+	}
+	return "未了事项"
+}
+
+func (f *Front) validate() error {
+	f.ID, f.Name = strings.TrimSpace(f.ID), strings.TrimSpace(f.Name)
+	// Only a block that writes no front may go without its ID.
+	if f.ID != "" || f.ledger() || f.Item == nil && len(f.Done) == 0 {
+		u := f.Update()
+		if err := u.Validate(); err != nil {
+			return err
+		}
+		f.ID, f.Name, f.Decision = u.ID, u.Name, u.Decision
+	}
+	if it := f.Item; it != nil {
+		it.ID, it.Workspace = strings.TrimSpace(it.ID), strings.TrimSpace(it.Workspace)
+		it.Text, it.Source = strings.Join(strings.Fields(it.Text), " "), strings.Join(strings.Fields(it.Source), " ")
+		switch {
+		case utf8.RuneCountInString(it.Source) > front.SourceRunes:
+			return fmt.Errorf("item 的 source 超过 %d 字", front.SourceRunes)
+		case it.ID != "" && !front.ItemID(it.ID):
+			return errors.New("item 的 id 不是未了事项的 id（i 加 7 位小写字母或数字，见 fronts.json 的 items）")
+		case it.ID != "" && (it.Text != "" || it.Workspace != ""):
+			return errors.New("item 带 id 是改已有那条的出处，只能再带 source")
+		case it.ID != "" && it.Source == "":
+			return errors.New("item 带 id 时要有 source（新的出处）")
+		case it.ID != "":
+		case it.Text == "":
+			return errors.New("item 缺少 text")
+		case utf8.RuneCountInString(it.Text) > front.ItemRunes:
+			return fmt.Errorf("item 的 text 超过 %d 字，写成一句话", front.ItemRunes)
+		case utf8.RuneCountInString(it.Workspace) > workspaceRefRunes:
+			return errors.New("item 的 workspace 太长")
+		}
+	}
+	if len(f.Done) > maxFrontDone {
+		return fmt.Errorf("done 最多 %d 个", maxFrontDone)
+	}
+	for i, id := range f.Done {
+		id = strings.TrimSpace(id)
+		// A patrol finding let be goes by its ref, as its item's source
+		// would.
+		if ref, ok := strings.CutPrefix(id, front.PatrolSource); !front.ItemID(id) && !(ok && findingRE.MatchString(ref)) {
+			return errors.New("done 里要写未了事项的 id（i 加 7 位小写字母或数字，见 fronts.json 的 items），或要放过的巡查发现 \"patrol:<ref>\"")
+		}
+		f.Done[i] = id
+	}
 	return nil
 }
 
 // Block is one action block of a reply: exactly one of Dispatch, Promise,
 // Ask, Status, Notify, Custody, Relay, Remember, Lookup, Park, Halt, Cancel,
-// Routine and Front is set, or Err says why it is not run.
+// Routine, Front and Note is set, or Err says why it is not run.
 type Block struct {
 	// Raw is the block's body as written.
 	Raw      string
@@ -440,6 +581,7 @@ type Block struct {
 	Cancel   *Cancel
 	Routine  *Routine
 	Front    *Front
+	Note     *Note
 	Err      error
 }
 
@@ -656,6 +798,15 @@ func (b *Block) decode() {
 			err = f.validate()
 			b.Front = &f.Front
 		}
+	case TypeNote:
+		var n struct {
+			Type Type `json:"type"`
+			Note
+		}
+		if err = strict(b.Raw, &n); err == nil {
+			err = n.validate()
+			b.Note = &n.Note
+		}
 	case "":
 		err = errors.New("缺少 type")
 	default:
@@ -701,6 +852,9 @@ func (d *Dispatch) validate() error {
 		return errors.New("model 不是合法的模型名")
 	}
 	if err := noEnvelope("message", d.Message); err != nil {
+		return err
+	}
+	if err := validFinding(&d.Finding); err != nil {
 		return err
 	}
 	return validMCPTools(d.MCPTools)
@@ -854,6 +1008,14 @@ func (a *Ask) validate() error {
 	case len(a.Options) > maxOptions:
 		return fmt.Errorf("options 最多 %d 个", maxOptions)
 	}
+	if err := validFinding(&a.Finding); err != nil {
+		return err
+	}
+	// A question about a finding leaves room, within maxOptions, for the
+	// user's own two choices on any finding (不做, 这类别再提; §15.23 ④).
+	if a.Finding != "" && len(a.Options) > maxFindingOptions {
+		return fmt.Errorf("带 finding 的 ask，options 最多 %d 个", maxFindingOptions)
+	}
 	// The question and the option picked go into the relay envelope with
 	// the answer (relayEnvelope), there or from the answer's turn.
 	if err := noEnvelope("question", a.Question); err != nil {
@@ -938,7 +1100,7 @@ func (n *Notify) validate() error {
 	case n.Link != "" && !webLink(n.Link):
 		return errors.New("link 要是 http(s) 链接或空")
 	}
-	return nil
+	return validFinding(&n.Finding)
 }
 
 func (c *Custody) validate() error {

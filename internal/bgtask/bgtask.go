@@ -62,13 +62,22 @@ func Quiet(k Kind) time.Duration {
 
 // Task is one open background task. Last is its latest task_start or
 // task_progress (a workflow's latest observation); Summary is the CLI's
-// description of it, the session's own text.
+// description of it, the session's own text. Agents, Done, Failed and Phase
+// are a workflow's, as its board has them (Workflow).
 type Task struct {
 	ID      string    `json:"id"`
 	Kind    Kind      `json:"kind"`
 	Summary string    `json:"summary"`
 	Start   time.Time `json:"start"`
 	Last    time.Time `json:"last"`
+	// Replayed is a task only a shim's replay started: Start is when the
+	// gateway attached, the latest moment it was known open, and how long
+	// it ran before is not known.
+	Replayed bool   `json:"replayed,omitempty"`
+	Agents   int    `json:"agents,omitempty"`
+	Done     int    `json:"done,omitempty"`
+	Failed   int    `json:"failed,omitempty"`
+	Phase    string `json:"phase,omitempty"`
 }
 
 // State is a session's open background tasks, in the order they started,
@@ -92,6 +101,11 @@ type Workflow struct {
 	Start time.Time
 	// Seen is the board's latest observation of it.
 	Seen time.Time
+	// Agents is how many agents it has, Done and Failed how many of them
+	// ended so; Phase is the phase it is in. Zero and "" when the board
+	// does not say.
+	Agents, Done, Failed int
+	Phase                string
 }
 
 // Input is what Judge reads of one session.
@@ -228,7 +242,7 @@ func ScanFrom(c Carry, in Input) (State, Carry) {
 			}
 			t := open[e.TaskID]
 			if t == nil {
-				t = &Task{ID: e.TaskID, Kind: kindOf(e.TaskType, ""), Start: attached, Last: attached}
+				t = &Task{ID: e.TaskID, Kind: kindOf(e.TaskType, ""), Start: attached, Last: attached, Replayed: true}
 				open[e.TaskID] = t
 				order = append(order, e.TaskID)
 			}
@@ -277,7 +291,8 @@ func WithWorkflows(s State, ws []Workflow) State {
 	}
 	var out State
 	for _, w := range ws {
-		out.add(Task{ID: w.ID, Kind: KindWorkflow, Summary: cmp.Or(w.Name, w.ID), Start: w.Start, Last: cmp.Or(w.Seen, w.Start)})
+		out.add(Task{ID: w.ID, Kind: KindWorkflow, Summary: cmp.Or(w.Name, w.ID), Start: w.Start, Last: cmp.Or(w.Seen, w.Start),
+			Agents: w.Agents, Done: w.Done, Failed: w.Failed, Phase: w.Phase})
 	}
 	for _, t := range s.Tasks {
 		out.add(t)

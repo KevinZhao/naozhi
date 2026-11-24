@@ -57,13 +57,14 @@ import { decisionActsHtml, decorateEvents, noteWorkspaces, paintSessionCards, re
 import { clearAck, clearPending, closePlannerSession, mountComposer, noteAck, notePlannerStatus, openPlannerSession, showPlannerLeft } from './planner_chat.js';
 import { onSessionsApplied } from './session_list.js';
 import { countHeadHtml, ensureTasks, inProgress, mountTasks, refreshTasks, revealTask, taskOf } from './tasks.js';
-import { mountFronts, refreshFronts } from './fronts.js';
+import { mountFronts, paintFronts, refreshFronts } from './fronts.js';
 import { initPlannerResize } from './planner_resize.js';
-import { custody, refreshCustody, setCustodyPaused } from './custody.js';
+import { custody, holdCustodyPaused, refreshCustody, setCustodyPaused } from './custody.js';
 import { workbench } from './workbench.js';
 import { choosePlannerNode, eventsURL, hostName, hostOnline, hostRemote, isLocalNode, nodeAPI, notePlannerNodes, plannerAPI, plannerHost, plannerNodes, readLocalPlanner } from './planner_host.js';
 import { WS_STATES, wsm } from './ws_manager.js';
 import { shell } from './shell.js';
+import { followPane, notePane, placedPane, settlePane } from './scroll_follow.js';
 import { EARLIER_PAGE_LIMIT, EVENT_DIVIDER_GAP_MS, formatAbsTime, formatMonthDayTime, lastDividerTime, timeAgo, timeDividerHtml } from './utilities.js';
 import { answerOf, endHtml, layerMode, layerStream, markerHtml, noteRunning, paintLayerSwitch, plannerBusy, plannerHead, setOnLayerChange } from './planner_layers.js';
 
@@ -446,6 +447,7 @@ async function openReport(key) {
 // listed last.
 export async function fetchInbox() {
   const host = plannerHost.node;
+  const seq = ++inboxSeq;
   const local = isLocalNode(host);
   // What it listed last stays; never listed, 等你 says it could not read.
   const failed = () => {
@@ -458,21 +460,93 @@ export async function fetchInbox() {
   try {
     res = await fetchJSON(plannerAPI(NZ_CONTRACT.API.inbox), { timeoutMs: 8000 });
   } catch { failed(); return; }
-  if (host !== plannerHost.node) return;
-  pl.open = ((res && Array.isArray(res.open)) ? res.open : []).map((it) => Object.assign({}, it, { node: host }));
+  // An answer older than one shown already says less than it.
+  if (host !== plannerHost.node || seq < inboxShown) return;
+  inboxShown = seq;
+  for (const [ref, mark] of gone) if (seq > mark.upTo) gone.delete(ref);
+  if (pauseHold && seq > pauseHold.upTo) pauseHold = null;
+  const listed = ((res && Array.isArray(res.open)) ? res.open : []).map((it) => Object.assign({}, it, { node: host }));
+  // What this tab closed or answered stays off, uncounted, until the list
+  // says so itself.
+  const held = listed.filter((it) => gone.has(itemRef(it)));
+  pl.open = listed.filter((it) => !gone.has(itemRef(it)));
   pl.openState = 'read';
   pl.expired = expiredOf((res && Array.isArray(res.closed)) ? res.closed : []).map((it) => Object.assign({}, it, { node: host }));
   // Without a socket this node's notify frames do not come either: its new
   // items are told from the list too. With one, the list only marks them seen.
   if (!local || !wsm.isConnected()) notifyNewRemote(host, pl.open);
   else remoteSeen = new Set(pl.open.map(itemRef));
-  pl.pausedUntil = res && res.paused_until ? Date.parse(res.paused_until) || 0 : 0;
+  pl.pausedUntil = pauseHold ? pauseHold.until : res && res.paused_until ? Date.parse(res.paused_until) || 0 : 0;
   if (res && res.counts) {
+    const counts = held.length ? {
+      open: Math.max(0, (Number(res.counts.open) || 0) - held.length),
+      badge: Math.max(0, (Number(res.counts.badge) || 0) - held.filter((it) => KIND_LABEL[it.kind]).length),
+    } : res.counts;
     pl.seeding = true;
-    try { onInboxCount(local ? res.counts : null, local ? null : res.counts); } finally { pl.seeding = false; }
+    try { onInboxCount(local ? counts : null, local ? null : counts); } finally { pl.seeding = false; }
   }
   if (pl.host) { paintWaiting(); paintTools(); }
   noteItems();
+}
+
+// inboxSeq numbers the reads of GET /api/inbox, inboxShown is the latest
+// one shown.
+let inboxSeq = 0;
+let inboxShown = 0;
+// gone is the items this tab took off 等你 ahead of the gateway (closed, or
+// answered), by ref: {it, upTo}. While the request is out (upTo Infinity),
+// and for a read started before it answered (seq ≤ upTo), a list still
+// holding the item must not put it back.
+const gone = new Map();
+// pauseHold is the pause this tab set ahead of the gateway, {until, upTo}
+// (until 0: resumed), held against the reads of the list as gone is.
+let pauseHold = null;
+
+// countBy moves the badge's counts by d for item it, as the gateway's will
+// once it closed (or reopened) it; inbox:count is ours then, no refetch.
+function countBy(it, d) {
+  if (inbox.open === null) return;
+  const c = { open: Math.max(0, inbox.open + d), badge: Math.max(0, (inbox.badge || 0) + (KIND_LABEL[it.kind] ? d : 0)) };
+  pl.seeding = true;
+  try { if (hostRemote()) onInboxCount(null, c); else onInboxCount(c); } finally { pl.seeding = false; }
+}
+
+// takeOff takes item ref off 等你 at once, with what counts it, ahead of
+// the request that closes it. done() once the gateway closed it; back() when
+// it did not: the item is listed again as it was. Either reads the list
+// again.
+function takeOff(ref) {
+  const host = plannerHost.node;
+  const it = pl.open.find((x) => itemRef(x) === ref);
+  // A notice shows only as pl.notice, which painting without its item
+  // clears and nothing sets again (the push's focus is spent): back() must
+  // set it again for the card to come back.
+  const notice = pl.notice === ref;
+  const mark = { it, upTo: Infinity };
+  gone.set(ref, mark);
+  if (it) {
+    pl.open = pl.open.filter((x) => x !== it);
+    countBy(it, -1);
+  }
+  paintWaiting();
+  noteItems();
+  return {
+    done() {
+      if (gone.get(ref) === mark) mark.upTo = inboxSeq;
+      fetchInbox();
+    },
+    back() {
+      if (gone.get(ref) === mark) gone.delete(ref);
+      if (it && host === plannerHost.node && !pl.open.some((x) => itemRef(x) === ref)) {
+        pl.open = pl.open.concat(it);
+        if (notice) pl.notice = ref;
+        countBy(it, 1);
+        paintWaiting();
+        noteItems();
+      }
+      fetchInbox();
+    },
+  };
 }
 
 // remoteSeen is the Planner's node's open items already seen (by ref): this
@@ -531,6 +605,9 @@ function onHostChanged() {
   pl.notes = [];
   pl.open = [];
   pl.openState = 'unread';
+  // What was held was the last node's.
+  gone.clear();
+  pauseHold = null;
   // The last node's tasks are not this one's.
   pl.tasksActive = null;
   pl.tasksAll = -1;
@@ -632,34 +709,91 @@ function layerToolHtml() {
   return '<div class="pl-tool pl-layer-tool"><span class="pl-tool-l">时间线</span><span class="pl-layer" role="group" aria-label="时间线">' + b('talk', '对话') + b('all', '全部') + '</span></div>';
 }
 
-async function pause(forVal) {
-  try {
-    const put = (url) => fetchJSON(url, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ for: forVal }), timeoutMs: 8000,
-    });
-    const res = await put(plannerAPI(NZ_CONTRACT.API.inbox_pause));
-    pl.pausedUntil = res && res.paused_until ? Date.parse(res.paused_until) || 0 : 0;
-    pl.customPause = false;
-    closeMenu();
-  } catch (e) {
-    showToast('暂停失败：' + e.message, 'error');
+// pauseEnd is when a pause asked for as forVal ends, as the gateway reads
+// it (notify.ParsePause): "today" until the next midnight, else hours.
+function pauseEnd(forVal) {
+  if (forVal === 'today') {
+    const d = new Date();
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime();
   }
-  paintTools();
-  // The gateway paused custody with the pushes: the chips follow.
-  refreshCustody();
+  return Date.now() + (parseInt(forVal, 10) || 1) * 3600000;
 }
 
-// resume ends the pause of pushes and custody; a custody pause from before
-// the two were one is ended too.
+// holdPause shows the pause ending at until (0: resumed) at once, ahead of
+// the request: done(u) takes the gateway's end, back() puts back the one
+// the gateway last said, true when it did. Over a hold still unanswered (恢复
+// clicked while the pause is out) what shows is only that one's prediction:
+// the prior is the one it held, so a failure never puts back a pause that
+// never was. A request answering after another took over reads the list
+// again: the later one's prior may be what this one just changed.
+function holdPause(until) {
+  const prev = pauseHold && pauseHold.upTo === Infinity ? pauseHold : null;
+  const prior = prev ? prev.prior : pl.pausedUntil;
+  const mark = { until, upTo: Infinity, prior };
+  pauseHold = mark;
+  pl.pausedUntil = until;
+  return {
+    done(u) {
+      if (pauseHold !== mark) { fetchInbox(); return; }
+      mark.until = u;
+      mark.upTo = inboxSeq;
+      pl.pausedUntil = u;
+    },
+    back() {
+      const mine = pauseHold === mark;
+      if (mine) {
+        pauseHold = null;
+        pl.pausedUntil = prior;
+      }
+      fetchInbox();
+      return mine;
+    },
+  };
+}
+
+// pause shows the pause at once, ending when it should, then asks the
+// gateway, whose end it takes. The gateway pauses custody with the pushes:
+// the chips follow at once too.
+async function pause(forVal) {
+  const custom = pl.customPause;
+  const h = holdPause(pauseEnd(forVal));
+  const c = holdCustodyPaused(true);
+  pl.customPause = false;
+  closeMenu();
+  paintTools();
+  try {
+    const res = await fetchJSON(plannerAPI(NZ_CONTRACT.API.inbox_pause), {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ for: forVal }), timeoutMs: 8000,
+    });
+    h.done(res && res.paused_until ? Date.parse(res.paused_until) || 0 : 0);
+    paintTools();
+    c.done();
+  } catch (e) {
+    if (h.back()) pl.customPause = custom;
+    c.undo();
+    paintTools();
+    showToast('暂停失败：' + e.message, 'error');
+  }
+}
+
+// resume ends the pause of pushes and custody at once, then asks the
+// gateway; a custody pause from before the two were one is ended too.
 async function resume() {
+  const h = holdPause(0);
+  const c = holdCustodyPaused(false);
+  closeMenu();
+  paintTools();
   try {
     await fetchJSON(plannerAPI(NZ_CONTRACT.API.inbox_pause), { method: 'DELETE', timeoutMs: 8000 });
-    pl.pausedUntil = 0;
-    closeMenu();
   } catch (e) {
+    h.back();
+    c.undo();
+    paintTools();
     showToast('恢复失败：' + e.message, 'error');
+    return;
   }
-  await refreshCustody();
+  h.done(0);
+  await c.done();
   if (custody.paused) await setCustodyPaused(false);
   paintTools();
 }
@@ -721,7 +855,7 @@ function placeBriefs() {
   const box = $('pl-stream');
   const scroller = $('pl-events');
   if (!box || !scroller) return;
-  const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 40;
+  notePane(scroller);
   let placed = false;
   for (const b of pl.briefs.slice().reverse()) {
     const t = Date.parse(b.at);
@@ -736,7 +870,7 @@ function placeBriefs() {
   paintStreamEmpty();
   relayer();
   runPendingAsync();
-  if (atBottom) scroller.scrollTop = scroller.scrollHeight;
+  settlePane(scroller);
   revealBrief();
 }
 
@@ -755,6 +889,8 @@ function revealBrief() {
   pl.briefOpen.set(day, true);
   pl.revealed = day;
   el.scrollIntoView({ block: 'start' });
+  // The reader is on the brief now: what arrives below does not take them off it.
+  placedPane($('pl-events'));
   light(el, sel, id);
 }
 
@@ -783,7 +919,7 @@ async function fetchStatus() {
   }
   notePlannerStatus(pl.status);
   const named = noteWorkspaces(pl.status && pl.status.workspaces);
-  if (pl.host) { paintStatus(); paintTools(); paintStreamEmpty(); if (named) paintWaiting(); }
+  if (pl.host) { paintStatus(); paintTools(); paintStreamEmpty(); if (named) { paintWaiting(); paintFronts(); } }
 }
 
 // EXAMPLES are the empty conversation's starters: a tap puts one in the
@@ -843,6 +979,14 @@ const MEETING_RE = /^<naozhi-scout kind="meeting" start="(\d\d:\d\d)"/;
 // LOOKUP_RE is a web lookup's answer (planner/reader): the turn shows as the
 // query card (planner_cards.js lookupLine) rather than your bubble.
 const LOOKUP_RE = /^<naozhi-lookup q="([^"]*)" run="(\d{8}T\d{6}-[0-9a-f]{4})"/;
+// WATCH_RE is the gateway telling the Planner a session you opened ended a
+// turn (planner/agent TellWatch, D138): written for the model, as a receipt
+// is, so it is not shown.
+const WATCH_RE = /^<naozhi-watch>/;
+// PATROL_RE is a project patrol's weekly deep check waking the Planner with
+// what it found in a workspace (planner/patrol): the turn is marked 来自项目巡查
+// with the workspace's name rather than shown as your bubble.
+const PATROL_RE = /^<naozhi-patrol workspace="[^"]*" name="([^"]*)" run="[^"]*" findings="(\d+)"/;
 // unescapeAttr undoes the gateway's html.EscapeString of an attribute.
 const unescapeAttr = (s) => s.replace(/&(lt|gt|quot|#39|#34|amp);/g, (_, n) => ({ lt: '<', gt: '>', quot: '"', '#39': "'", '#34': '"', amp: '&' })[n]);
 // COALESCE_HEAD leads requests that queued while the Planner was busy and
@@ -882,12 +1026,15 @@ const CLI_NOISE = new Set(['api_retry']);
 // to do; a session's view still shows its own).
 function withoutSnapshot(e) {
   if (e.type === 'user' && RECEIPT_RE.test(e.detail || e.summary || '')) return answerBubble(e);
+  if (e.type === 'user' && WATCH_RE.test(e.detail || e.summary || '')) return null;
   if (e.type === 'system' && CLI_NOISE.has(e.summary)) return null;
   if (e.type === 'permission_denied') return null;
   const sc = e.type === 'user' && SCOUT_RE.exec(e.detail || e.summary || '');
   if (sc) return Object.assign({}, e, { type: 'system', summary: '来自巡检：' + sc[1] + ' 条新发现', detail: '' });
   const mt = e.type === 'user' && MEETING_RE.exec(e.detail || e.summary || '');
   if (mt) return Object.assign({}, e, { type: 'system', summary: '来自会前简报：' + mt[1] + ' 开始的会议', detail: '' });
+  const pa = e.type === 'user' && PATROL_RE.exec(e.detail || e.summary || '');
+  if (pa) return Object.assign({}, e, { type: 'system', summary: '来自项目巡查 · ' + pa[1] + '：' + pa[2] + ' 条新发现', detail: '' });
   const lk = e.type === 'user' && LOOKUP_RE.exec(e.detail || e.summary || '');
   if (lk) return Object.assign({}, e, { type: 'system', summary: '🔎 ' + lk[2] + ' ' + unescapeAttr(lk[1]), detail: '' });
   if (e.type !== 'user' || !GATEWAY_HEAD_RE.test(e.detail || e.summary || '')) return e;
@@ -990,7 +1137,7 @@ function appendEvents(events, reset) {
   const box = $('pl-stream');
   const scroller = $('pl-events');
   if (!box || !scroller) return;
-  const atBottom = reset || scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 40;
+  notePane(scroller);
   if (reset) { pl.lastTime = 0; pl.seenAtWM.clear(); }
   const ack = events.find(isAck);
   if (ack) {
@@ -1015,7 +1162,10 @@ function appendEvents(events, reset) {
   paintStreamEmpty();
   relayer();
   runPendingAsync();
-  if (atBottom) scroller.scrollTop = scroller.scrollHeight;
+  // A first page opens at the newest; after it the pane follows until its
+  // reader scrolls up (scroll_follow.js).
+  if (reset) followPane(scroller);
+  else settlePane(scroller);
   // After the scroll: a brief a push asked for scrolls to itself.
   if (reset) placeBriefs();
   // A first page shorter than the stream leaves nothing to scroll up by.
@@ -1184,6 +1334,7 @@ function prependEvents(events) {
   const moved = anchor !== null && revealedEl();
   if (moved) scroller.scrollTop += moved.getBoundingClientRect().top - anchor;
   else scroller.scrollTop = scroller.scrollHeight - fromBottom;
+  placedPane(scroller);
 }
 
 function revealedEl() {
@@ -1392,44 +1543,53 @@ wsm.on(NZ_CONTRACT.WS.session_state, (msg) => {
 setOnLayerChange(() => {
   if (!pl.host) return;
   relayer();
-  const scroller = $('pl-events');
-  if (scroller) scroller.scrollTop = scroller.scrollHeight;
+  followPane($('pl-events'));
 });
 
 registerActions({
   'planner-open-task': (el) => openReport(el.dataset.key || ''),
   'planner-jump-ask': (el) => jumpToAsk(el.dataset.id || ''),
+  // Closing takes the card off at once; an item the gateway has closed
+  // already (404, or 409 "already closed") is what was asked. Another 409
+  // (an answer to it being applied) leaves it open: the card comes back.
   'planner-inbox-close': async (el) => {
     const ref = el.dataset.id;
     const { node, id } = itemOf(ref);
-    el.disabled = true;
+    const h = takeOff(ref);
     try {
       await fetchJSON(nodeAPI(node, NZ_CONTRACT.API.inbox_close), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }), timeoutMs: 8000 });
-      pl.open = pl.open.filter((it) => itemRef(it) !== ref);
-      paintWaiting();
-      noteItems();
     } catch (e) {
-      el.disabled = false;
-      showToast('关闭失败：' + e.message, 'error');
+      if (e.status !== 404 && !(e.status === 409 && /already closed|已过期/.test(e.message))) {
+        h.back();
+        showToast('关闭失败：' + e.message, 'error');
+        return;
+      }
     }
-    fetchInbox();
+    h.done();
   },
+  // An answer takes the card off at once (the left column's and the
+  // conversation's repeat of it answer the same item); it comes back if the
+  // answer did not go through, but for an expired question, closed on the
+  // gateway already.
   'planner-inbox-decide': async (el) => {
-    // The left column's card and the conversation's repeat of it answer
-    // the same item.
-    const card = el.closest('.pl-card');
-    card?.querySelectorAll('.pl-card-acts button').forEach((b) => { b.disabled = true; });
+    const ref = el.dataset.id;
+    const { node, id } = itemOf(ref);
+    const h = takeOff(ref);
     try {
-      const { node, id } = itemOf(el.dataset.id);
       await fetchJSON(nodeAPI(node, NZ_CONTRACT.API.inbox_decide), {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action: el.dataset.act }), timeoutMs: 15000,
       });
     } catch (e) {
       // An expired question says why in words of its own (§15.14 ④).
-      if (e.status === 409 && e.message.includes('已过期')) showToast(e.message.replace(/^HTTP 409:\s*/, '').trim(), 'warning');
-      else showToast('没有生效：' + e.message, 'error');
+      if (e.status === 409 && e.message.includes('已过期')) {
+        showToast(e.message.replace(/^HTTP 409:\s*/, '').trim(), 'warning');
+      } else {
+        h.back();
+        showToast('没有生效：' + e.message, 'error');
+        return;
+      }
     }
-    fetchInbox();
+    h.done();
   },
   'planner-notify-perm': async () => {
     await requestNotifyPermission();

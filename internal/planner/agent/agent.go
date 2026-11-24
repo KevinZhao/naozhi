@@ -190,6 +190,9 @@ type Config struct {
 	// Fronts feeds the snapshot the lines of work in progress (§15.17); nil
 	// leaves the section out.
 	Fronts func() []front.Front
+	// Items feeds the snapshot the ledger's open items, each under its line
+	// (front.Store.Items, §15.23); nil counts none.
+	Items func() []front.Item
 	// Conclusion is the first sentence of a session's latest report, for
 	// its snapshot line; nil shows none.
 	Conclusion func(key string) string
@@ -248,8 +251,8 @@ type persisted struct {
 	// what it started with is not what this binary would start it with after
 	// an upgrade that moved the tools or the rules.
 	Scope string `json:"scope,omitempty"`
-	// Held is the receipts waiting for the next one (held.go), kept so a
-	// restart loses none.
+	// Held is the receipts and the watched sessions' turn ends waiting
+	// (held.go), kept so a restart loses none.
 	Held []heldReceipt `json:"held,omitempty"`
 }
 
@@ -306,6 +309,12 @@ type Agent struct {
 	// Not kept across a restart: the first idle Planner after one gets what
 	// was held.
 	userAt time.Time
+	// watchSent is, per watched session, when a turn last went with its
+	// line (flushWatch): the next waits watchEvery from it. watchNow checks
+	// a waiting line as it goes out (SetWatchNow); nil sends it as held.
+	// Neither is kept across a restart: the first line after one goes afresh.
+	watchSent map[string]time.Time
+	watchNow  func(key, line string) (fresh string, outside, ok bool)
 }
 
 // ctxReading is one read of the Planner transcript's context size.
@@ -597,10 +606,26 @@ var homeDeny = []string{
 	".zsh_history", ".bash_history", ".zshenv", ".zshrc", ".zprofile", ".bashrc", ".bash_profile", ".profile",
 }
 
+// secretDeny keeps the files that hold credentials by their name unread
+// wherever they lie, a repository's working tree included.
+var secretDeny = []string{
+	"Read(//**/.env)",
+	"Read(//**/.env.*)",
+	"Read(//**/*.pem)",
+	"Read(//**/*.key)",
+	"Read(//**/id_rsa*)",
+	"Read(//**/id_ed25519*)",
+}
+
+// ReadRule is the allow rule for reading path, an absolute path or a
+// pattern below one.
+func ReadRule(path string) string { return absRule("Read", path) }
+
 // denyRules keep credentials out of reach even inside an allowed tree: the
-// home-relative ones (homeDeny), the data root's secret-bearing files (its
-// config-shaped files, shim state with auth tokens, profile secrets, debug
-// captures with API keys) and the extra paths, each under every spelling
+// home-relative ones (homeDeny), the name-bound ones (secretDeny), the data
+// root's secret-bearing files (its config-shaped files, shim state with
+// auth tokens, profile secrets, debug captures with API keys) and the extra
+// paths, each under every spelling
 // (spelledRules). The CLI expands "~" to the one home spelling it was
 // given, so the other spellings of home get absolute rules.
 func denyRules(home, dataRoot string, extra []string, aliases map[string]string) []string {
@@ -608,14 +633,7 @@ func denyRules(home, dataRoot string, extra []string, aliases map[string]string)
 	for _, p := range homeDeny {
 		rules = append(rules, "Read(~/"+p+")")
 	}
-	rules = append(rules,
-		"Read(//**/.env)",
-		"Read(//**/.env.*)",
-		"Read(//**/*.pem)",
-		"Read(//**/*.key)",
-		"Read(//**/id_rsa*)",
-		"Read(//**/id_ed25519*)",
-	)
+	rules = append(rules, secretDeny...)
 	if home != "" {
 		pats := make([]string, len(homeDeny))
 		for i, p := range homeDeny {
@@ -652,6 +670,13 @@ func denyRules(home, dataRoot string, extra []string, aliases map[string]string)
 // denied, the Planner reading such sources itself (D129).
 func (a *Agent) denyRules(aliases map[string]string) []string {
 	return denyRules(a.cfg.Home, a.cfg.Layout.Root(), a.cfg.DenyPaths, aliases)
+}
+
+// ReadDeny is the Planner's deny rules as they stand now, for another
+// restricted session that reads the user's files (the project patrol's deep
+// check): what the Planner may not read, it may not either.
+func (a *Agent) ReadDeny() []string {
+	return a.denyRules(a.cfg.Workspaces.LocalAliases())
 }
 
 // maxMemoryIndexes caps the auto-memory indexes listed in the prompt.
@@ -1176,14 +1201,27 @@ func (a *Agent) Send(text, ref string, images []clievent.Attachment) error {
 // same turn, ahead of text; with none, an empty text sends nothing.
 // Tells run one at a time (tellMu), so two cannot both send the receipts
 // waiting, and drop only what they sent: one held meanwhile stays.
-func (a *Agent) Tell(text string) error {
+func (a *Agent) Tell(text string) error { return a.tellHeld(text, false) }
+
+// TellPatrol is Tell for a receipt about a session dispatched to fix a
+// patrol finding: its turn is from SourcePatrolReceipt.
+func (a *Agent) TellPatrol(text string) error { return a.tellHeld(text, true) }
+
+// tellHeld is Tell; patrol says text is about a task of the patrol's. The
+// turn is from SourcePatrolReceipt when text is, or any receipt going with
+// it: one turn answers them all, so it is held to the stricter limits.
+func (a *Agent) tellHeld(text string, patrol bool) error {
 	a.tellMu.Lock()
 	defer a.tellMu.Unlock()
 	text, sent := a.withHeld(text)
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
-	if err := a.tell(SourceReceipt, text); err != nil {
+	src := SourceReceipt
+	if patrol || slices.ContainsFunc(sent, func(h heldReceipt) bool { return h.Patrol }) {
+		src = SourcePatrolReceipt
+	}
+	if err := a.tell(src, text); err != nil {
 		return err
 	}
 	a.dropHeld(sent)
@@ -1199,6 +1237,16 @@ func (a *Agent) TellRefused(text string) error { return a.tell(SourceRefusal, te
 // not run, from SourceUnrun so the receipt's own turn is known (UnrunTurn).
 func (a *Agent) TellUnrun(text string) error { return a.tell(SourceUnrun, text) }
 
+// TellWatchRefused is Tell for the receipt of the action blocks a watch
+// turn did not run: from SourceWatchRefusal, whose turn runs none of them
+// either.
+func (a *Agent) TellWatchRefused(text string) error { return a.tell(SourceWatchRefusal, text) }
+
+// TellPatrolRefused is Tell for the receipt of the action blocks a patrol
+// turn did not run: from SourcePatrolRefusal, whose turn is held to the
+// same limits.
+func (a *Agent) TellPatrolRefused(text string) error { return a.tell(SourcePatrolRefusal, text) }
+
 // TellAnswer is Tell for the user's answer to a question: a turn the user
 // started, w its words, so the Planner may pass the answer on (D98).
 func (a *Agent) TellAnswer(text string, w Words) error { return a.tellSaid(SourceAnswer, &w, text) }
@@ -1206,6 +1254,12 @@ func (a *Agent) TellAnswer(text string, w Words) error { return a.tellSaid(Sourc
 func (a *Agent) tell(src Source, text string) error { return a.tellSaid(src, nil, text) }
 
 func (a *Agent) tellSaid(src Source, said *Words, text string) error {
+	return a.submit(src, said, "<naozhi-receipt>\n"+strings.TrimSpace(text)+"\n</naozhi-receipt>")
+}
+
+// submit runs block, the gateway's own message, as a Planner turn from src:
+// no snapshot, no receipt shown.
+func (a *Agent) submit(src Source, said *Words, block string) error {
 	if !a.cfg.Enabled {
 		return ErrOff
 	}
@@ -1218,7 +1272,7 @@ func (a *Agent) tellSaid(src Source, said *Words, text string) error {
 	case turns == nil:
 		return ErrNotReady
 	}
-	_, err := turns.SubmitPlanner(Key, src, said, "<naozhi-receipt>\n"+strings.TrimSpace(text)+"\n</naozhi-receipt>", nil, opts, nil)
+	_, err := turns.SubmitPlanner(Key, src, said, block, nil, opts, nil)
 	return err
 }
 
@@ -1287,6 +1341,9 @@ func (a *Agent) snapshotInput() snapshotInput {
 	if a.cfg.Fronts != nil {
 		in.Fronts = orEmpty(a.cfg.Fronts())
 	}
+	if a.cfg.Items != nil {
+		in.Items = a.cfg.Items()
+	}
 	if routines != nil {
 		in.Routines = orEmpty(routines())
 	}
@@ -1351,6 +1408,9 @@ func (a *Agent) SetStopped(stopped bool) error {
 	a.mu.Lock()
 	a.state.Stopped = stopped
 	a.failures, a.retryAt = 0, time.Time{}
+	if stopped {
+		a.dropWatchLocked()
+	}
 	a.saveLocked()
 	a.mu.Unlock()
 	slog.Info("planner: switched", "stopped", stopped)

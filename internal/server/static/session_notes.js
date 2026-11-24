@@ -3,7 +3,12 @@
 // 停滞 / 失败 and recovering, its 通知 items opening and closing, the Planner
 // dispatching it, its reports to the Planner and what custody did on it
 // (switched, held back, stopped, a retry coming; a message it sent is its
-// own bubble). GET /api/sessions/notes
+// own bubble), and what the Planner wrote to you about the session (its note
+// blocks, §15.22 ②: marked Planner, what it goes by folded behind 依据, and
+// 没用 to tell it the note did not help), and how far its background work
+// got while its turn is over (§15.22 ④: the gateway writes one every 30
+// minutes and when a workflow changes phase; a stretch of background work
+// shows its latest only). GET /api/sessions/notes
 // lists them (read back from the Planner journal, so a restart keeps them)
 // and session_note frames add the new ones. Shown to you only: nothing here
 // reaches the CLI.
@@ -18,10 +23,11 @@
 // #main [data-inbox-item="<id>"] (notify.js, §15.3 ④).
 import { NZ_CONTRACT } from './contract.js';
 import { selection } from './state.js';
-import { HEALTH_STATES, esc, escAttr, evidenceCause, evidenceText, fetchJSON, nzBus, nzViews } from './nz_util.js';
+import { HEALTH_STATES, esc, escAttr, evidenceCause, evidenceText, fetchJSON, nzBus, nzViews, registerActions, showToast } from './nz_util.js';
 import { wsm } from './ws_manager.js';
 import { formatTimeFull, formatTimeShort } from './utilities.js';
 import { isLocalNode, nodeAPI, nodeRunsPlanner } from './planner_host.js';
+import { notePane, settlePane } from './scroll_follow.js';
 
 // REPORT_REFETCH_MS: a turn's report reaches the Planner after the turn
 // ends, and reports are not pushed, so the list is fetched again this long
@@ -92,6 +98,9 @@ function noteBody(n, paired) {
     case 'dispatch': return { icon: '↗', tone: 'planner', text: 'Planner 派出' };
     case 'report': return { icon: '↩', tone: 'planner', text: '已向 Planner 汇报' };
     case 'custody': return custodyBody(n);
+    // The text is the gateway's line (bgtask's State.Progress), the task
+    // card's too; 后台中 is the state's word everywhere (D109).
+    case 'progress': return n.text ? { icon: '◔', tone: 'progress', text: '后台中 · ' + n.text } : null;
   }
   return null;
 }
@@ -100,9 +109,14 @@ function noteBody(n, paired) {
 // event (the health machine opens the item as it journals the transition),
 // and custody's stop with the error item it opened as it stopped (one event,
 // said by the stop): skip holds the notes not shown on their own, paired maps
-// an open note to its health note and a stop to its item's open note.
+// an open note to its health note and a stop to its item's open note. A
+// progress note a later one of its stretch (run) stands for is skipped too:
+// the same run said again, further on.
 function pairs() {
   const skip = new Set(), paired = new Map();
+  const latest = new Map();
+  for (const n of notes.list) if (n.kind === 'progress') latest.set(n.run || '', n.id);
+  for (const n of notes.list) if (n.kind === 'progress' && latest.get(n.run || '') !== n.id) skip.add(n.id);
   for (const n of notes.list) {
     if (n.kind !== 'custody' || n.event !== 'stopped') continue;
     const o = notes.list.find((x) => x.kind === 'inbox' && x.event === 'open' && x.item_kind === 'error' && !skip.has(x.id) && Math.abs(x.ms - n.ms) <= PAIR_MS);
@@ -121,10 +135,29 @@ function pairs() {
   return { skip, paired };
 }
 
+// plannerNoteHtml is a note the Planner wrote: its words in full, what it
+// goes by behind 依据 (a native <details>, so no handler), and 没用. A
+// remote node's session shows no 没用: the mark goes to the journal of the
+// node the note was written on.
+function plannerNoteHtml(n) {
+  const mark = n.useless ? '<span class="gw-note-done">已标没用</span>'
+    : isLocalNode(notes.node) ? '<button type="button" class="gw-note-btn" data-action="session-note-useless" data-id="' + escAttr(n.id) +
+      '" title="告诉 Planner 这条旁注没有帮助；同一会话一天点 3 次，当天不再给它写">没用</button>' : '';
+  return '<div class="gw-note gw-planner gw-note-pl' + (n.useless ? ' gw-note-off' : '') + '" role="note" data-note-id="' + escAttr(n.id) +
+    '" data-note-time="' + n.ms + '" title="' + escAttr(formatTimeFull(n.ms)) + '">' +
+    '<span class="gw-note-icon" aria-hidden="true">✎</span>' +
+    '<span class="gw-note-by">Planner</span>' +
+    '<span class="gw-note-text">' + esc(n.text || '') + '</span>' +
+    (n.why ? '<details class="gw-note-why"><summary>依据</summary><div>' + esc(n.why) + '</div></details>' : '') +
+    mark +
+    '<span class="gw-note-time">' + esc(formatTimeShort(n.ms)) + '</span></div>';
+}
+
 // noteHtml is a note's element. It links nowhere: the note sits in the very
 // session its item is about, which the item's card on the Planner page only
 // opens again. data-inbox-item keeps a notification's deep link landing here.
 function noteHtml(n, paired) {
+  if (n.kind === 'planner') return plannerNoteHtml(n);
   const b = noteBody(n, paired);
   if (!b) return '';
   const h = paired || n;
@@ -181,15 +214,50 @@ function placeNotes() {
 }
 
 function addNotes(list) {
-  const known = new Set(notes.list.map((n) => n.id));
+  const known = new Map(notes.list.map((n) => [n.id, n]));
   for (const n of list) {
     const ms = Date.parse(n.time);
-    if (!n.id || known.has(n.id) || isNaN(ms)) continue;
-    notes.list.push({ ...n, ms });
-    known.add(n.id);
+    if (!n.id || isNaN(ms)) continue;
+    const have = known.get(n.id);
+    if (have) {
+      // A list read again brings a mark made in another tab.
+      if (n.useless && !have.useless) setUseless(have, true);
+      continue;
+    }
+    const add = { ...n, ms };
+    notes.list.push(add);
+    known.set(n.id, add);
   }
   notes.list.sort((a, b) => a.ms - b.ms);
 }
+
+// setUseless marks Planner note n and repaints it where it stands.
+function setUseless(n, on) {
+  n.useless = on;
+  if (!notes.el) return;
+  for (const node of notes.el.querySelectorAll(':scope > .gw-note')) {
+    if (node.dataset.noteId === n.id) node.outerHTML = noteHtml(n);
+  }
+}
+
+// 没用: the note shows marked at once, the mark is journaled and the Planner
+// told; a mark not kept is taken back.
+registerActions({
+  'session-note-useless': (el) => {
+    const key = notes.key, list = notes.list;
+    const n = list.find((x) => x.kind === 'planner' && x.id === el.dataset.id);
+    if (!n || n.useless || !isLocalNode(notes.node)) return;
+    setUseless(n, true);
+    fetchJSON(NZ_CONTRACT.API.sessions_notes_useless, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, id: n.id }),
+    }).catch(() => {
+      // Another session's list by now is not this note's to repaint.
+      if (list === notes.list) setUseless(n, false);
+      else n.useless = false;
+      showToast('没记下，请再点一次', 'error');
+    });
+  },
+});
 
 async function fetchNotes() {
   const key = notes.key;
@@ -228,11 +296,10 @@ wsm.on(NZ_CONTRACT.WS.session_note, (msg) => {
   // Custody's notes, on any session, also change what custody.js shows.
   if (msg.note?.kind === 'custody') nzBus.dispatchEvent(new CustomEvent('custody:note', { detail: msg }));
   if (!msg.note || msg.key !== notes.key || !isLocalNode(notes.node) || !notes.el) return;
-  const el = notes.el;
-  const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+  notePane(notes.el);
   addNotes([msg.note]);
   placeNotes();
-  if (wasBottom) el.scrollTop = el.scrollHeight;
+  settlePane(notes.el);
 });
 
 // Frames pushed while the socket was down are lost: list again on a new one.

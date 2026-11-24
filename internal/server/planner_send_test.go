@@ -83,33 +83,39 @@ func TestPlannerTurnSources(t *testing.T) {
 
 // TestPlannerTurnsCarriedOver: a request in flight when the engine shut
 // down stays on disk, and the next run counts it until a result answers it.
+// A watched session's turn end is carried by its own source, so the turn a
+// restart cut across is still held to a watch turn's blocks (D138).
 func TestPlannerTurnsCarriedOver(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "planner", "turns.json")
-	ctx, cancel := context.WithCancel(context.Background())
-	var before plannerTurns
-	before.load(ctx, path)
-	o := &plannerOrigin{key: agent.Key, src: agent.SourceScout, turns: &before, notify: nopNotifier{}}
-	o.Begin(ctx, turn.TurnInfo{Role: turn.RoleHead})
-	cancel() // shutdown: the shim keeps the turn, the Send gives up
-	o.Finish(ctx, turn.Outcome{Err: context.Canceled})
+	for _, src := range []agent.Source{agent.SourceScout, agent.SourceWatch, agent.SourceWatchOutside, agent.SourceWatchRefusal} {
+		t.Run(string(src), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "planner", "turns.json")
+			ctx, cancel := context.WithCancel(context.Background())
+			var before plannerTurns
+			before.load(ctx, path)
+			o := &plannerOrigin{key: agent.Key, src: src, turns: &before, notify: nopNotifier{}}
+			o.Begin(ctx, turn.TurnInfo{Role: turn.RoleHead})
+			cancel() // shutdown: the shim keeps the turn, the Send gives up
+			o.Finish(ctx, turn.Outcome{Err: context.Canceled})
 
-	var after plannerTurns
-	after.load(context.Background(), path)
-	if got := after.sources(agent.Key); !slices.Equal(got, []agent.Source{agent.SourceScout}) {
-		t.Fatalf("carried over = %q, want [scout]", got)
-	}
-	after.resulted("task:0a1b2c3d4e5f")
-	if got := after.sources(agent.Key); len(got) != 1 {
-		t.Errorf("another key's result answered it: %q", got)
-	}
-	after.resulted(agent.Key)
-	if got := after.sources(agent.Key); len(got) != 0 {
-		t.Errorf("after its result = %q, want none", got)
-	}
-	var again plannerTurns
-	again.load(context.Background(), path)
-	if got := again.sources(agent.Key); len(got) != 0 {
-		t.Errorf("answered request carried over again: %q", got)
+			var after plannerTurns
+			after.load(context.Background(), path)
+			if got := after.sources(agent.Key); !slices.Equal(got, []agent.Source{src}) {
+				t.Fatalf("carried over = %q, want [%s]", got, src)
+			}
+			after.resulted("task:0a1b2c3d4e5f")
+			if got := after.sources(agent.Key); len(got) != 1 {
+				t.Errorf("another key's result answered it: %q", got)
+			}
+			after.resulted(agent.Key)
+			if got := after.sources(agent.Key); len(got) != 0 {
+				t.Errorf("after its result = %q, want none", got)
+			}
+			var again plannerTurns
+			again.load(context.Background(), path)
+			if got := again.sources(agent.Key); len(got) != 0 {
+				t.Errorf("answered request carried over again: %q", got)
+			}
+		})
 	}
 }
 

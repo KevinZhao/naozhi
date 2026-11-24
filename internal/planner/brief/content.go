@@ -27,8 +27,12 @@ import (
 
 // Rendering caps.
 const (
-	maxItems   = 10 // per section; the rest become a count
-	titleRunes = 80
+	maxItems = 10 // per section; the rest become a count
+	// maxFrontItems is how many open items the brief lists under a line.
+	maxFrontItems = 3
+	// maxPatrolNew is how many of the patrol's new findings are listed.
+	maxPatrolNew = 3
+	titleRunes   = 80
 	// maxSlack is how many unread Slack conversations are listed: more than
 	// a section's, as the digest is what the user reads them by.
 	maxSlack       = 20
@@ -131,6 +135,10 @@ type input struct {
 	Midway time.Time
 	// Fronts are the lines of work in progress, the latest updated first.
 	Fronts []front.Front
+	// Items are the open items of those lines, by line, oldest first.
+	Items map[string][]front.Item
+	// Projects is the project patrol's part.
+	Projects ProjectPatrol
 	// Done are the sessions handed out (the Planner's dispatches, another
 	// node's) that finished; Yours the ones the user opened that got
 	// somewhere, which the user was there for and the brief only names.
@@ -163,6 +171,14 @@ func (in input) counts() Counts {
 		Custody: in.Custody.Retries + in.Custody.Stopped + in.Custody.Answered}
 	if !in.Midway.IsZero() {
 		c.Midway = 1
+	}
+	p := in.Projects
+	c.Patrol = len(p.PRs) + len(p.New) + len(p.Stopped)
+	c.PatrolNews = len(p.New) + len(p.Stopped)
+	for _, pr := range p.PRs {
+		if pr.Fresh {
+			c.PatrolNews++
+		}
 	}
 	return c
 }
@@ -354,6 +370,17 @@ func (b *Briefer) gather(since, now time.Time) input {
 	}
 	if b.cfg.Fronts != nil {
 		in.Fronts = b.cfg.Fronts()
+	}
+	if b.cfg.Items != nil && len(in.Fronts) > 0 {
+		in.Items = map[string][]front.Item{}
+		for _, it := range b.cfg.Items() {
+			if it.Front != "" {
+				in.Items[it.Front] = append(in.Items[it.Front], it)
+			}
+		}
+	}
+	if b.cfg.Projects != nil {
+		in.Projects = b.cfg.Projects(since)
 	}
 
 	if b.cfg.Inbox != nil {
@@ -563,22 +590,8 @@ func render(in input) string {
 		}
 	}
 
-	section(&b, "工作线", in.Fronts, func(f front.Front) string {
-		line := "**" + plain(f.Name) + "**"
-		if f.State != "" {
-			line += "：" + plain(f.State)
-		}
-		if f.Next != "" {
-			line += " → " + plain(f.Next)
-		}
-		if w := strings.TrimSpace(strings.TrimPrefix(f.Waiting, "等")); w != "" {
-			line += "（等 " + plain(w) + "）"
-		}
-		if idle := in.Now.Sub(f.Updated); !f.Updated.IsZero() && idle >= frontIdle {
-			line += " · " + ago(idle) + "没动"
-		}
-		return line
-	})
+	frontsSection(&b, in)
+	patrolSection(&b, in.Projects)
 	section(&b, "今天的日程", in.Meetings, func(m meetingItem) string {
 		line := "全天"
 		if !m.AllDay {
@@ -742,6 +755,77 @@ func slackLine(cv scout.SlackConversation) string {
 	return line
 }
 
+// frontsSection lists the lines of work in progress, each with the first
+// of its open items under it (§15.23, D143): what is left on a line is what
+// the user picks the day's work from. The items under no line are not
+// listed: the Planner page's left column has them.
+func frontsSection(b *strings.Builder, in input) {
+	if len(in.Fronts) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "\n### 工作线（%d）\n", len(in.Fronts))
+	for i, f := range in.Fronts {
+		if i == maxItems {
+			fmt.Fprintf(b, "- …另有 %d 项\n", len(in.Fronts)-i)
+			break
+		}
+		line := "**" + plain(f.Name) + "**"
+		if f.State != "" {
+			line += "：" + plain(f.State)
+		}
+		if f.Next != "" {
+			line += " → " + plain(f.Next)
+		}
+		if w := strings.TrimSpace(strings.TrimPrefix(f.Waiting, "等")); w != "" {
+			line += "（等 " + plain(w) + "）"
+		}
+		if idle := in.Now.Sub(f.Updated); !f.Updated.IsZero() && idle >= frontIdle {
+			line += " · " + ago(idle) + "没动"
+		}
+		b.WriteString("- " + line + "\n")
+		for j, it := range in.Items[f.ID] {
+			if j == maxFrontItems {
+				fmt.Fprintf(b, "  - …另有 %d 条\n", len(in.Items[f.ID])-j)
+				break
+			}
+			b.WriteString("  - 未了：" + plain(it.Text) + "\n")
+		}
+	}
+}
+
+// patrolSection is the project patrol's part (§15.23 ⑤), after the lines
+// of work: the pull requests it had made that wait on the user, each with
+// its link and checks; the new findings, the first few; and, once, a kind
+// it stopped reporting. Nothing at all with none of them.
+func patrolSection(b *strings.Builder, p ProjectPatrol) {
+	n := len(p.PRs) + len(p.New) + len(p.Stopped)
+	if n == 0 {
+		return
+	}
+	fmt.Fprintf(b, "\n### 巡查（%d）\n", n)
+	for i, pr := range p.PRs {
+		if i == maxItems {
+			fmt.Fprintf(b, "- …另有 %d 个 PR\n", len(p.PRs)-i)
+			break
+		}
+		line := "已备好的 PR：" + link(textutil.TruncateRunes(pr.Title, titleRunes), escapeHref(pr.URL))
+		if pr.CI != "" {
+			line += " · CI " + plain(pr.CI)
+		}
+		b.WriteString("- " + line + wsPart(pr.Workspace) + "\n")
+	}
+	for i, f := range p.New {
+		if i == maxPatrolNew {
+			fmt.Fprintf(b, "- …另有 %d 条\n", len(p.New)-i)
+			break
+		}
+		b.WriteString("- 新发现：" + plain(textutil.TruncateRunes(f.Title, titleRunes)) + " · " + plain(f.Kind) + wsPart(f.Workspace) + "\n")
+	}
+	for _, s := range p.Stopped {
+		fmt.Fprintf(b, "- %s 类你处置过的最近 %d 条只采纳了 %d 条，已停报；要恢复，从 planner/patrol/declined.json 的 kinds 里删掉它\n", plain(s.Kind), s.Of, s.Adopted)
+	}
+}
+
 func section[T any](b *strings.Builder, title string, items []T, line func(T) string) {
 	if len(items) == 0 {
 		return
@@ -768,7 +852,7 @@ func summary(c Counts, push bool) string {
 	for _, p := range []struct {
 		label string
 		n     int
-	}{{"工作线", c.Fronts}, {"今天日程", c.Meetings}, {"等你回复", c.Replies}, {"Asana 到期", c.Deadlines}, {"Slack 未读", c.Slack},
+	}{{"工作线", c.Fronts}, {"巡查", c.Patrol}, {"今天日程", c.Meetings}, {"等你回复", c.Replies}, {"Asana 到期", c.Deadlines}, {"Slack 未读", c.Slack},
 		{"完成", c.Done}, {"你开的会话有新输出", c.Yours}, {"失败", c.Failed}, {"例行任务有变化", c.Routines}, {"等你", waits},
 		{"通知", c.Notices}, {"未完成的任务", c.Tasks}, {"Planner 记下", c.Planner}, {"搁置", c.Parked}} {
 		if p.n > 0 {

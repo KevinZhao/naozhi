@@ -33,6 +33,10 @@ const (
 	// MeetingKeyPrefix is the namespace of the one-shot meeting summary
 	// sessions, "meeting:<meeting ID>" (docs/rfc/meeting-notes.md §4).
 	MeetingKeyPrefix = "meeting:"
+	// PatrolKeyPrefix is the namespace of the one-shot sessions the project
+	// patrol's weekly deep check runs, "patrol:<run ID>"
+	// (docs/rfc/planner.md §15.23 ②).
+	PatrolKeyPrefix = "patrol:"
 )
 
 // PlannerMainKey is the global Planner's session key.
@@ -78,10 +82,16 @@ func IsReaderKey(s string) bool { return strings.HasPrefix(s, ReaderKeyPrefix) }
 // IsMeetingKey reports whether s belongs to the meeting summary sessions.
 func IsMeetingKey(s string) bool { return strings.HasPrefix(s, MeetingKeyPrefix) }
 
+// IsPatrolKey reports whether s belongs to the project patrol's deep checks.
+func IsPatrolKey(s string) bool { return strings.HasPrefix(s, PatrolKeyPrefix) }
+
 // IsOneShotKey reports whether s is a one-shot session of the gateway's,
-// a scout run's, a lookup's or a meeting summary's: spawned for one turn,
-// reset when it ends, never persisted, listed or reachable from a send.
-func IsOneShotKey(s string) bool { return IsScoutKey(s) || IsReaderKey(s) || IsMeetingKey(s) }
+// a scout run's, a lookup's, a meeting summary's or a project patrol's
+// deep check: spawned for one turn, reset when it ends, never persisted,
+// listed or reachable from a send.
+func IsOneShotKey(s string) bool {
+	return IsScoutKey(s) || IsReaderKey(s) || IsMeetingKey(s) || IsPatrolKey(s)
+}
 
 // IsScratchKey reports whether s belongs to the dashboard scratch namespace.
 func IsScratchKey(s string) bool { return strings.HasPrefix(s, ScratchKeyPrefix) }

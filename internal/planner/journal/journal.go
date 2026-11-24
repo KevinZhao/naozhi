@@ -63,11 +63,15 @@ const (
 	// those without a source, and the "等你定" moved into the 搁置区
 	// (planner/agent, §15.14 ⑤).
 	KindHandoff Kind = "handoff"
+	// KindNote is a side note the Planner wrote on a session, the user
+	// marking one useless, and the gateway's progress note on a session's
+	// background work (planner/note, §15.22 ② ④).
+	KindNote Kind = "note"
 )
 
 func (k Kind) known() bool {
 	switch k {
-	case KindHealth, KindNotify, KindBrief, KindHeartbeat, KindActivity, KindDialog, KindCustody, KindReap, KindTurn, KindHandoff:
+	case KindHealth, KindNotify, KindBrief, KindHeartbeat, KindActivity, KindDialog, KindCustody, KindReap, KindTurn, KindHandoff, KindNote:
 		return true
 	}
 	return false

@@ -75,6 +75,11 @@ type Meta struct {
 	MCPTools map[string][]string `json:"mcp_tools,omitempty"`
 	// Ultracode is the dispatch's ultracode, kept for a respawn.
 	Ultracode bool `json:"ultracode,omitempty"`
+	// Finding is the project patrol's finding the session was dispatched to
+	// fix, by its ref (planner/patrol.Ref), "" for none: its report goes
+	// back to the finding's record, and a respawn keeps the rules such a
+	// session starts with (wireup.TaskOpts).
+	Finding string `json:"finding,omitempty"`
 	// ReportBlock is set on a session dispatched on the prompt that has it
 	// report in a naozhi-report block (§15.12 ③): what it sends the Planner
 	// by SendMessage is a question on the way, not a report. A session
@@ -223,11 +228,16 @@ type Chain struct {
 // the credential to expire later than Cred, its expiry then: refreshed.
 // Held is set once the pause held the retry back: past the pause, one
 // grown stale (custody's staleAfter) is left to the user, not sent.
+// A failure of a class custody waits out (network, region) is one of a run:
+// Since is when the run's first failure was, moved on by what custody does
+// not count of a long gap between two of them; N which of the run this is.
 type Retry struct {
 	Failed time.Time `json:"failed"`
 	Class  string    `json:"class,omitempty"`
 	At     time.Time `json:"at,omitzero"`
 	Cred   time.Time `json:"cred,omitzero"`
+	Since  time.Time `json:"since,omitzero"`
+	N      int       `json:"n,omitempty"`
 	Held   bool      `json:"held,omitempty"`
 	Done   bool      `json:"done,omitempty"`
 }

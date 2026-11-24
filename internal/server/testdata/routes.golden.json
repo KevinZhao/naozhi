@@ -311,6 +311,16 @@
   },
   {
     "method": "POST",
+    "path": "/api/planner/patrol/decide",
+    "handler_type": "*dashplanner.Handler"
+  },
+  {
+    "method": "POST",
+    "path": "/api/planner/patrol/run",
+    "handler_type": "*dashplanner.Handler"
+  },
+  {
+    "method": "POST",
     "path": "/api/planner/send",
     "handler_type": "*dashplanner.Handler"
   },
@@ -476,6 +486,11 @@
   },
   {
     "method": "POST",
+    "path": "/api/sessions/notes/useless",
+    "handler_type": "*dashsession.Handlers"
+  },
+  {
+    "method": "POST",
     "path": "/api/sessions/orient",
     "handler_type": "*SendHandler"
   },
@@ -543,6 +558,11 @@
     "method": "POST",
     "path": "/api/settings/models",
     "handler_type": "*accessprofile.Handler"
+  },
+  {
+    "method": "GET",
+    "path": "/api/system/apiwatch",
+    "handler_type": "*system.Handlers"
   },
   {
     "method": "POST",

@@ -140,6 +140,50 @@ func TestThrottle(t *testing.T) {
 	}
 }
 
+// TestTouchNow: a digest someone is about to read is written at once, inside
+// MinGap of its last write, and Settled says when it was last brought up to
+// date: by a write, or by one that found the file already showing it. A
+// plain Touch inside MinGap settles nothing until its write is due.
+func TestTouchNow(t *testing.T) {
+	r := newRig(t)
+	const key = "dashboard:direct:u:general"
+	if got := r.w.Settled(key); !got.IsZero() {
+		t.Fatalf("Settled before any write = %v", got)
+	}
+	r.w.Touch(key)
+	r.w.step(r.now)
+	first := r.now
+	if got := r.w.Settled(key); !got.Equal(first) || r.writes() != 1 {
+		t.Fatalf("first write: settled %v writes %d, want %v 1", got, r.writes(), first)
+	}
+	r.now = r.now.Add(20 * time.Second)
+	r.setReply("r2")
+	r.w.Touch(key)
+	r.w.step(r.now)
+	if got := r.w.Settled(key); !got.Equal(first) || r.writes() != 1 {
+		t.Fatalf("a Touch inside MinGap: settled %v writes %d, want it still waiting", got, r.writes())
+	}
+	r.w.TouchNow(key)
+	if next := r.w.step(r.now); !next.IsZero() {
+		t.Fatalf("after TouchNow next = %v, want nothing left due", next)
+	}
+	if got := r.w.Settled(key); !got.Equal(r.now) || r.writes() != 2 || !strings.Contains(r.read(t, key), "> r2") {
+		t.Fatalf("TouchNow: settled %v writes %d content %s", got, r.writes(), r.read(t, key))
+	}
+	// Nothing new to show: no write, but the file is known up to date.
+	r.now = r.now.Add(5 * time.Second)
+	r.w.TouchNow(key)
+	r.w.step(r.now)
+	if got := r.w.Settled(key); !got.Equal(r.now) || r.writes() != 2 {
+		t.Fatalf("unchanged: settled %v writes %d, want %v 2", got, r.writes(), r.now)
+	}
+	var none *Writer
+	none.TouchNow(key)
+	if got := none.Settled(key); !got.IsZero() {
+		t.Errorf("a nil Writer settled %v", got)
+	}
+}
+
 // TestUnchangedNotWritten: a digest whose content is the same is not
 // rewritten, nor is its updated time moved; nor after a restart.
 func TestUnchangedNotWritten(t *testing.T) {

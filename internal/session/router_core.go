@@ -125,6 +125,9 @@ const (
 	// maxMeetingExempt caps the meeting summary sessions (meeting:<id>):
 	// meetings are summarised one at a time.
 	maxMeetingExempt = 1
+	// maxPatrolExempt caps the project patrol's deep checks (patrol:<run>):
+	// one runs at a time.
+	maxPatrolExempt = 1
 
 	// historyLoadConcurrency limits parallel disk I/O goroutines during
 	// startup session history loading.

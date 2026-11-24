@@ -1,6 +1,7 @@
 package inbox
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -34,6 +35,27 @@ func TestDecideExpired(t *testing.T) {
 		h.HandleDecide(w, httptest.NewRequest(http.MethodPost, "/api/inbox/decide", strings.NewReader(`{"id":"in_1","action":"是"}`)))
 		if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), c.want) {
 			t.Errorf("%v: %d %q, want 409 %q", c.err, w.Code, w.Body.String(), c.want)
+		}
+	}
+}
+
+// An answer its handler refused for a reason the user can act on is a
+// conflict that carries the reason; any other failure stays a bare 500.
+func TestDecideRefused(t *testing.T) {
+	const why = "现在联系不上 Planner（没开或已停用），这条发现没有交出去"
+	for _, c := range []struct {
+		err  error
+		code int
+		want string
+	}{
+		{notify.Refused{Why: why}, http.StatusConflict, why},
+		{errors.New("disk full: /secret/path"), http.StatusInternalServerError, "decision failed"},
+	} {
+		h := New(&fakeSource{decideErr: c.err})
+		w := httptest.NewRecorder()
+		h.HandleDecide(w, httptest.NewRequest(http.MethodPost, "/api/inbox/decide", strings.NewReader(`{"id":"in_1","action":"做"}`)))
+		if w.Code != c.code || strings.TrimSpace(w.Body.String()) != c.want {
+			t.Errorf("%v: %d %q, want %d %q", c.err, w.Code, w.Body.String(), c.code, c.want)
 		}
 	}
 }

@@ -42,3 +42,23 @@ type Refusal struct {
 	// Text is the rejection message the model got, or the refusal content.
 	Text string
 }
+
+// APIRetry is a system/api_retry frame: the CLI is about to retry a model API
+// request that failed.
+type APIRetry struct {
+	Attempt, MaxRetries int
+	RetryDelayMS        int64
+	// Status is the HTTP status; 0 when no response came.
+	Status int
+	// Category is the CLI's error class (rate_limit, overloaded, …).
+	Category string
+	// WaitedMS is set when no response headers came within the first-byte window.
+	WaitedMS int64
+}
+
+// APITiming is a claude result frame's account of the turn's API calls.
+type APITiming struct {
+	DurationMS, APIMS, TTFTMS int64
+	// ErrorStatus is the HTTP status of the API error that ended the turn, 0 for none.
+	ErrorStatus int
+}

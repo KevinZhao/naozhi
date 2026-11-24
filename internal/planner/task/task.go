@@ -156,6 +156,10 @@ type Live struct {
 	// says them; nil while none is open. With no turn running the card
 	// says 后台中: the turn is over, the work is not (D109).
 	Background *health.IndexBackground `json:"background,omitempty"`
+	// Progress says how far that background work got, the turn over: the
+	// line the gateway's progress notes say in the session (bgtask's
+	// State.Progress, §15.22 ④), as of this read. "" while none is open.
+	Progress string `json:"progress,omitempty"`
 }
 
 // oneLine folds s to one line of at most liveRunes.
@@ -320,6 +324,9 @@ func archivedYours(t Task, now time.Time) bool {
 		if t.Live != nil && t.Live.LastActive.After(from) {
 			from = t.Live.LastActive
 		}
+		if t.Reap != nil && t.Reap.At.After(from) {
+			from = t.Reap.At
+		}
 		if t.SeenAt.After(from) {
 			from = t.SeenAt
 		}
@@ -400,7 +407,7 @@ func (b *Board) List() []Task {
 			t := Task{ID: m.Key, Kind: KindSession, Title: cmp.Or(m.Title, m.Key), Created: m.Created, Health: u.State, HealthSince: u.Since, Retired: m.Retired, Reap: m.Reap, Report: m.Report}
 			t.Digest = b.cfg.Digest != nil && b.cfg.Digest(m.Key)
 			if l, ok := live[m.Key]; ok && m.Retired.IsZero() {
-				l.Activity, l.Reply = oneLine(l.Activity), oneLine(l.Reply)
+				l.Activity, l.Reply, l.Progress = oneLine(l.Activity), oneLine(l.Reply), oneLine(l.Progress)
 				t.Live = &l
 			}
 			t.State, t.By, t.Why, t.At = sessionState(m, u)
@@ -445,10 +452,15 @@ func (b *Board) yours(units map[string]health.Unit, live map[string]Live, now ti
 			Health: u.State, HealthSince: u.Since, Report: m.Report}
 		t.Digest = b.cfg.Digest != nil && b.cfg.Digest(u.ID)
 		if l, ok := live[u.ID]; ok {
-			l.Activity, l.Reply = oneLine(l.Activity), oneLine(l.Reply)
+			l.Activity, l.Reply, l.Progress = oneLine(l.Activity), oneLine(l.Reply), oneLine(l.Progress)
 			t.Live = &l
 		}
 		t.State, t.By, t.Why, t.At = yoursState(m, u, b.userSince(u.ID))
+		// Marked done by the user, it is being put away (D137): the card
+		// says what still holds it.
+		if t.State == Done && t.By == ByUser && b.cfg.ReapWait != nil {
+			t.ReapWait, t.ReapAt = b.cfg.ReapWait(u.ID)
+		}
 		t.ResultAt = resultTime(m, t.State, t.By, t.At)
 		t.New = isNew(t.ResultAt, m.SeenAt) && m.V <= sidecar.Version
 		t.SeenAt = m.SeenAt
@@ -457,7 +469,60 @@ func (b *Board) yours(units map[string]health.Unit, live map[string]Live, now ti
 		}
 		out = append(out, t)
 	}
+	// The ones the user marked done, put away since (planner/reap, D137):
+	// out of the health table, listed from their sidecar until archived, so
+	// the card stays to reopen them from.
+	for _, m := range b.cfg.Sessions.List() {
+		if !putAwayYours(m) {
+			continue
+		}
+		if _, live := units[m.Key]; live {
+			continue // back in the router: listed above, the record about to end
+		}
+		t := Task{ID: m.Key, Kind: KindSession, Group: GroupYours, Title: cmp.Or(m.Title, firstLine(m.Reap.LastPrompt), m.Key), Created: m.Created,
+			Retired: m.Retired, Reap: m.Reap, Report: m.Report, SeenAt: m.SeenAt,
+			State: State(m.Mark.State), By: By(m.Mark.By), Why: m.Mark.Why, At: m.Mark.At}
+		t.Digest = b.cfg.Digest != nil && b.cfg.Digest(m.Key)
+		if archivedYours(t, now) {
+			continue
+		}
+		out = append(out, t)
+	}
 	return out
+}
+
+// putAwayYours reports whether m is a session the user opened that was put
+// away once they marked it done.
+func putAwayYours(m sidecar.Meta) bool {
+	return m.Purpose != sidecar.PurposeTask && !sessionkey.IsTaskKey(m.Key) && m.Reap != nil && m.Mark != nil && State(m.Mark.State) == Done
+}
+
+// firstLine is s's first line, cut to a title's length.
+func firstLine(s string) string {
+	line, _, _ := strings.Cut(strings.TrimSpace(s), "\n")
+	return textutil.TruncateRunes(strings.TrimSpace(line), 60)
+}
+
+// YoursDone reports whether m is a session the user opened whose done mark
+// still holds: watched, and sent nothing by the user since the mark (talking
+// to it again brings it back). planner/reap puts such a session away when
+// the mark is the user's own (D137).
+func (b *Board) YoursDone(m sidecar.Meta) bool {
+	return m.Mark != nil && State(m.Mark.State) == Done && m.Purpose != sidecar.PurposeTask &&
+		b.watched(m.Key) && !b.userSince(m.Key)(m.Mark.At)
+}
+
+// yoursKey reports whether id is a session the user opened, in the router
+// and watched, or put away from 你开的.
+func (b *Board) yoursKey(id string) bool {
+	if b.watched(id) {
+		return true
+	}
+	if b.cfg.Sessions == nil || sessionkey.IsTaskKey(id) {
+		return false
+	}
+	m, ok := b.cfg.Sessions.Get(id)
+	return ok && putAwayYours(m)
 }
 
 // name is how the user reads session key.
@@ -523,9 +588,13 @@ func (b *Board) Title(id string) (string, bool) {
 		}
 		return cmp.Or(m.Title, id), true
 	}
-	if b.watched(id) {
+	if b.yoursKey(id) {
 		m, _ := b.cfg.Sessions.Get(id)
-		return cmp.Or(m.Title, b.name(id)), true
+		reaped := ""
+		if m.Reap != nil {
+			reaped = firstLine(m.Reap.LastPrompt)
+		}
+		return cmp.Or(m.Title, reaped, b.name(id)), true
 	}
 	if b.cfg.Promises == nil {
 		return "", false
@@ -554,7 +623,7 @@ func (b *Board) Set(id string, state State, by By, why string) error {
 		case err != nil:
 			return err
 		}
-	} else if b.watched(id) {
+	} else if b.yoursKey(id) {
 		// A session the user opened has a sidecar once a mark needs one.
 		mark := sidecar.Mark{State: string(state), By: string(by), Why: why, At: b.cfg.Now()}
 		if err := b.cfg.Sessions.Upsert(id, func(m *sidecar.Meta) bool { m.Mark = &mark; return true }); err != nil {
@@ -585,8 +654,9 @@ func (b *Board) Set(id string, state State, by By, why string) error {
 		unit = "promise:" + id
 	}
 	b.record(unit, id, state, by, why)
-	// planner/reap puts away only what the Planner dispatched.
-	if sessionkey.IsTaskKey(id) && b.cfg.OnState != nil {
+	// planner/reap: done puts a session away (a dispatched one, and one the
+	// user opened on their own mark), doing puts it back.
+	if unit == id && b.cfg.OnState != nil {
 		b.cfg.OnState(id, state)
 	}
 	return nil

@@ -80,6 +80,9 @@ func (l Layout) WorkspaceOverridesPath() string { return l.Join("workspace-overr
 // EventsRoot is the per-session event-log directory (<root>/events).
 func (l Layout) EventsRoot() string { return l.Join("events") }
 
+// APIWatchRoot is the model API observation directory (<root>/apiwatch).
+func (l Layout) APIWatchRoot() string { return l.Join("apiwatch") }
+
 // CostRoot is the cost-ledger directory (<root>/cost).
 func (l Layout) CostRoot() string { return l.Join("cost") }
 
@@ -244,6 +247,11 @@ func (l Layout) PlannerReaderRoot() string { return l.Join("planner", "reader") 
 // registered repository, for the Planner to read (<root>/planner/github,
 // docs/rfc/planner.md §15.14 ⑤).
 func (l Layout) PlannerGitHubRoot() string { return l.Join("planner", "github") }
+
+// PlannerPatrolRoot holds the project patrol's files, for the Planner to
+// read: one markdown file per workspace looked over and naozhi.md
+// (<root>/planner/patrol, docs/rfc/planner.md §15.23).
+func (l Layout) PlannerPatrolRoot() string { return l.Join("planner", "patrol") }
 
 // ReaderMCPConfigPath is a lookup's reader session's --mcp-config,
 // cli.mcp_config cut down to the web search servers and the internal page

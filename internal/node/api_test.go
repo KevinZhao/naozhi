@@ -23,6 +23,8 @@ func TestCheckAPIRequest(t *testing.T) {
 		{APIRequest{Method: "GET", Path: "/api/tasks/seen"}, false},
 		{APIRequest{Method: "POST", Path: "/api/tasks"}, false},
 		{APIRequest{Method: "POST", Path: "/api/sessions/send"}, false},
+		// "没用" on a Planner note is for the node's own page only.
+		{APIRequest{Method: "POST", Path: "/api/sessions/notes/useless", Body: []byte(`{"key":"task:abc","id":"p0123456789ab"}`)}, false},
 		{APIRequest{Method: "GET", Path: "/api/tasks/../config"}, false},
 		{APIRequest{Method: "GET", Path: "/api//tasks"}, false},
 		{APIRequest{Method: "GET", Path: "/api/tasks?x=1"}, false},

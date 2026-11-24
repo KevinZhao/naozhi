@@ -7,7 +7,7 @@ import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, serverInfo, sessionList } from './state.js';
 import { esc, escAttr, fetchJSON, isComposingKey, isCronSessionKey, sessionTitleText, showToast } from './nz_util.js';
 import { sessionStream } from './session_stream.js';
-import { mainEmptyHtml, promptDialog, removePendingSession, removeSidebarCard, showAPIError, showNetworkError, stopPreviewPolling } from './utilities.js';
+import { dropSidebarRow, mainEmptyHtml, promptDialog, removePendingSession, repaintSidebar, restoreSidebarRow, setPendingLabel, showAPIError, showNetworkError, stopPreviewPolling } from './utilities.js';
 import { dropDiscovered, findDiscovered, isDiscoveredKey, parseDiscoveredPid, sameDiscovered, sid } from './session_ident.js';
 import { gitChipHtml, gitStateCache, setHeaderGitChip } from './session_header.js';
 import { wireQuickAskInput } from './auth_modal.js';
@@ -479,32 +479,43 @@ function resyncSidebar() {
 }
 
 // dismissDiscovered kills an external (discovered) CLI via
-// /api/discovered/close; its card goes once the server confirms.
+// /api/discovered/close. Its card goes at once, kept off the list
+// (optimisticDeleteKeys) against a discovery poll answering before the close
+// did; a refused close puts it back and says why. The preview of it, if open,
+// closes only once the close went through: a refused one leaves it readable.
 async function dismissDiscovered(key, node) {
   const d = findDiscovered(parseDiscoveredPid(key), node);
   if (!d) { showToast('未找到该外部会话', 'warning'); return; }
+  const skey = sid(key, node);
+  sessionList.optimisticDeleteKeys.add(skey);
+  dropDiscovered(d.pid, d.node);
+  repaintSidebar();
   try {
-    const headers = {'Content-Type': 'application/json'};
-    try {
-      await fetchJSON(NZ_CONTRACT.API.discovered_close, {
-        timeoutMs: 10000,
-        method: 'POST', headers,
-        body: JSON.stringify({pid: d.pid, session_id: d.session_id || '', cwd: d.cwd || '', proc_start_time: d.proc_start_time || 0, node: node || ''})
-      });
-    } catch (err) {
-      if (err && err.status) showAPIError('关闭外部会话', err.status, err.message || '');
-      else showNetworkError('关闭外部会话', err);
-      return;
-    }
-    dropDiscovered(d.pid, d.node);
-    if (selection.pendingDiscovered && sameDiscovered(selection.pendingDiscovered, d.pid, d.node)) {
-      selection.pendingDiscovered = null;
-      stopPreviewPolling();
-      showMainEmpty();
-    }
-    removeSidebarCard(key);
-    resyncSidebar();
-  } catch (e) { showNetworkError('关闭外部会话', e); }
+    await fetchJSON(NZ_CONTRACT.API.discovered_close, {
+      timeoutMs: 10000,
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({pid: d.pid, session_id: d.session_id || '', cwd: d.cwd || '', proc_start_time: d.proc_start_time || 0, node: node || ''})
+    });
+  } catch (err) {
+    sessionList.optimisticDeleteKeys.delete(skey);
+    // A discovery poll since may have listed it again: one card, not two.
+    if (!findDiscovered(d.pid, d.node)) sessionList.discoveredItems = sessionList.discoveredItems.concat([d]);
+    sessionList.lastDiscoveredJSON = '';
+    repaintSidebar();
+    if (err && err.status) showAPIError('关闭外部会话', err.status, err.message || '');
+    else showNetworkError('关闭外部会话', err);
+    return;
+  }
+  sessionList.optimisticDeleteKeys.delete(skey);
+  // A discovery poll that answered before the close may have listed it again.
+  dropDiscovered(d.pid, d.node);
+  if (selection.pendingDiscovered && sameDiscovered(selection.pendingDiscovered, d.pid, d.node)) {
+    selection.pendingDiscovered = null;
+    stopPreviewPolling();
+    showMainEmpty();
+  }
+  repaintSidebar();
+  resyncSidebar();
 }
 
 // UNDO_MS is how long a removed session can be brought back (已移除 · 撤销)
@@ -524,11 +535,12 @@ function dismissManaged(key, node, forget) {
   // Mark dismissed so an in-flight poll / sessions_update event can't
   // resurrect the card while it waits or before DELETE confirms.
   sessionList.optimisticDeleteKeys.add(skey);
-  const row = sessionList.sessionsData[skey];
   const wasOpen = selection.key === key && (selection.node || 'local') === node;
-  delete sessionList.sessionsData[skey];
+  // Out of the cached payload too, so the repaint below (and any other one
+  // from the cache meanwhile: a filter chip, a project fold) lists it nowhere.
+  const row = dropSidebarRow(key, node);
   clearMainIfSelected(key);
-  removeSidebarCard(key);
+  repaintSidebar();
 
   const p = { skey };
   const settle = () => {
@@ -538,16 +550,16 @@ function dismissManaged(key, node, forget) {
   p.commit = (leaving) => {
     settle();
     forget();
-    deleteManaged(key, node, skey, leaving === true);
+    deleteManaged(key, node, skey, row, leaving === true);
   };
   p.undo = () => {
     settle();
     sessionList.optimisticDeleteKeys.delete(skey);
-    if (row && !sessionList.sessionsData[skey]) sessionList.sessionsData[skey] = row;
+    restoreSidebarRow(row);
+    repaintSidebar();
+    if (wasOpen && !selection.key) shell.selectSession(key, node);
     sessionList.lastVersion = 0;
-    shell.debouncedFetchSessions().then(() => {
-      if (wasOpen && !selection.key) shell.selectSession(key, node);
-    });
+    shell.debouncedFetchSessions();
   };
   pendingRemoval = p;
   p.timer = setTimeout(p.commit, UNDO_MS);
@@ -559,9 +571,10 @@ window.addEventListener('pagehide', () => { if (pendingRemoval) pendingRemoval.c
 
 // deleteManaged sends the DELETE. DELETE /api/sessions unregisters
 // synchronously and tears down in a detached goroutine (RemoveAsync), so 200
-// means "gone from the list"; the UI does not wait for it. leaving keeps the
-// request alive past the page's unload.
-function deleteManaged(key, node, skey, leaving) {
+// means "gone from the list"; the UI does not wait for it. A refused one puts
+// row back in the list at once. leaving keeps the request alive past the
+// page's unload.
+function deleteManaged(key, node, skey, row, leaving) {
   const headers = {'Content-Type': 'application/json'};
   const body = {key: key};
   if (node && node !== 'local') body.node = node;
@@ -575,14 +588,19 @@ function deleteManaged(key, node, skey, leaving) {
       if (err && err.status !== 404) {
         if (err.status) showAPIError('删除会话', err.status, err.message || '');
         else showNetworkError('删除会话', err);
+        return false;
       }
     })
-    .finally(() => {
+    .then((ok) => {
       // Stop suppressing this key so the next fetch reflects server truth:
       // if the delete stuck, the session stays gone; if it failed, the card
       // comes back (operator must re-select it — we intentionally don't
       // restore the cleared main panel to avoid masking a failed delete).
       sessionList.optimisticDeleteKeys.delete(skey);
+      if (ok === false) {
+        restoreSidebarRow(row);
+        repaintSidebar();
+      }
       resyncSidebar();
     });
 }
@@ -648,7 +666,8 @@ async function dismissSession(key, node, opts) {
   // scheduler still owns the stub) and DO NOT touch cron panel state.
   if (isCronSessionKey(key)) {
     clearMainIfSelected(key);
-    removeSidebarCard(key);
+    dropSidebarRow(key, node);
+    repaintSidebar();
     resyncSidebar();
     return;
   }
@@ -656,11 +675,12 @@ async function dismissSession(key, node, opts) {
   // If it's a pending (never-sent) session, just remove from localStorage
   if (perSession.workspaces[key] !== undefined) {
     removePendingSession(key);
-    delete sessionList.sessionsData[sid(key, node)];
+    dropSidebarRow(key, node);
     if (selection.key === key) {
       selection.key = null;
       showMainEmpty();
     }
+    repaintSidebar();
     resyncSidebar();
     return;
   }
@@ -693,31 +713,37 @@ async function renameSession() {
   if (input === null) return; // user cancelled
   const next = input.trim();
   if (next === current) return;
-  const headers = {'Content-Type': 'application/json'};
-  const body = {key: selection.key, label: next};
-  if (selection.node && selection.node !== 'local') body.node = selection.node;
+  const key = selection.key;
+  const node = selection.node || 'local';
+  const body = {key, label: next};
+  if (node !== 'local') body.node = node;
+  // The title shows at once; a poll answering before the PATCH keeps it
+  // (setPendingLabel), a refused PATCH puts the old one back.
+  const settle = setPendingLabel(key, node, next);
+  repaintRenamedHeader(key, node);
   try {
     await fetchJSON(NZ_CONTRACT.API.sessions_label, {
       timeoutMs: 10000,
-      method: 'PATCH', headers,
+      method: 'PATCH', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
     });
   } catch (err) {
+    settle(false);
+    repaintRenamedHeader(key, node);
     if (err && err.status) showAPIError('重命名', err.status, err.message || '');
     else showNetworkError('重命名', err);
     return;
   }
-  // Patch local cache so the title refreshes before the next poll lands.
-  const cacheKey = sid(selection.key, selection.node);
-  if (sessionList.sessionsData[cacheKey]) {
-    sessionList.sessionsData[cacheKey].user_label = next;
-  }
-  sessionList.lastVersion = 0;
-  shell.debouncedFetchSessions();
-  // Header-only repaint: a full renderMainShell would rebuild #events-scroll
-  // empty with nothing refetching the conversation (see renderMainHeader).
-  shell.renderMainHeader();
+  settle(true);
   showToast(next ? '已重命名' : '已恢复默认标题');
+}
+
+// repaintRenamedHeader repaints the header for a rename of key, when key is
+// still the session on screen. Header-only: a full renderMainShell would
+// rebuild #events-scroll empty with nothing refetching the conversation (see
+// renderMainHeader).
+function repaintRenamedHeader(key, node) {
+  if (selection.key === key && (selection.node || 'local') === node) shell.renderMainHeader();
 }
 
 

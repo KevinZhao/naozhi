@@ -10,10 +10,10 @@ import { NEEDS_YOU, backgroundTasksText, esc, escAttr, fetchJSON, nzBus, patchCa
 import { setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderPRChip, setHeaderSpawnDiagChip } from './session_header.js';
 import { deselectNodeSession, reconcileSelectedNode } from './system_view.js';
 import { turnState, updateSendButton } from './running_banner.js';
-import { PENDING_LS_KEY, announce, formatAbsTime, persistPending, refreshSidebarTimes, renderRecentSessionsPanel, setActiveSessionCard, showAuthModal, timeAgo } from './utilities.js';
+import { PENDING_LS_KEY, announce, formatAbsTime, persistPending, refreshSidebarTimes, renderRecentSessionsPanel, setActiveSessionCard, showAuthModal, sidebarHidden, timeAgo } from './utilities.js';
 import { scanDiscovered } from './discovery.js';
 import { invalidateGitState } from './tuning.js';
-import { NODE_GROUP_PREFIX, nodeHeaderHtml, sectionHeaderFallbackHtml, sectionHeaderHtml } from './sidebar_project.js';
+import { NODE_GROUP_PREFIX, nodeHeaderHtml, sectionHeaderFallbackHtml, sectionHeaderHtml, withPendingFavorites } from './sidebar_project.js';
 import { nodeRunsPlanner, plannerHost } from './planner_host.js';
 import { custody, statusOf } from './custody.js';
 import { accessProfileChipHtml, backendDisplayName, backendDisplayVersion } from './auth_modal.js';
@@ -129,7 +129,8 @@ function syncHistory(tag) {
 function applySessionsStats(data) {
   if (data.nodes) sessionList.nodesData = data.nodes;
   if (data.stats.default_workspace) serverInfo.defaultWorkspace = data.stats.default_workspace;
-  if (data.stats.projects) sessionList.projectsData = data.stats.projects;
+  // A star toggled but not yet confirmed keeps its new flag over the poll's.
+  if (data.stats.projects) sessionList.projectsData = withPendingFavorites(data.stats.projects);
   if (data.stats.cli_name) serverInfo.defaultCLIName = data.stats.cli_name;
   if (data.stats.cli_version) serverInfo.defaultCLIVersion = data.stats.cli_version;
   // The Home panel's health strip reads uptime / watchdog / active-count off
@@ -141,7 +142,9 @@ function applySessionsStats(data) {
 // key to backendKeys and returns the list the sidebar paints from. A key pushed
 // since the poll went out (pushesBefore) keeps its pushed state and death_reason;
 // overriding a state zeroes lastVersion, as the snapshot may postdate a lost push.
-function mergeBackendSessions(polled, backendKeys, pushesBefore) {
+function mergeBackendSessions(polled, backendKeys, pushesBefore, seq) {
+  // A rename whose PATCH answered before this read went out: the read has it.
+  for (const [k, m] of sessionList.pendingLabels) if (m.settled != null && seq > m.settled) sessionList.pendingLabels.delete(k);
   // A session the operator just dismissed stays out until its DELETE
   // resolves, or a lagging poll re-adds the card; a failed delete clears the
   // key and the session reappears on the next poll.
@@ -163,6 +166,9 @@ function mergeBackendSessions(polled, backendKeys, pushesBefore) {
     if (perSession.optimisticRunning[sKey] && s.state !== 'running') {
       s = Object.assign({}, s, { state: 'running' });
     }
+    // A rename in flight or just answered: the snapshot may predate the PATCH.
+    const label = sessionList.pendingLabels.get(sKey);
+    if (label && s.user_label !== label.label) s = Object.assign({}, s, { user_label: label.label });
     // A new workspace (/cd, or the first snapshot after spawn resolved the
     // real cwd) can be another repo, another worktree or no repo at all.
     const prevWS = cur && cur.workspace;
@@ -263,6 +269,7 @@ export function onSessionsApplied(fn) {
 export async function fetchSessions() {
   try {
     const pushesBefore = sessionList.statePushes.n;
+    const seq = ++sessionList.fetchSeq;
     const got = await fetchSessionsPayload();
     if (got === NOT_MODIFIED) return;
     if (!got) { noteFirstLoadFailed(); return false; }
@@ -281,7 +288,7 @@ export async function fetchSessions() {
     applySessionsStats(data);
     const backendKeys = new Set();
     const replied = repliedSince(data.sessions || []);
-    data = Object.assign({}, data, { sessions: mergeBackendSessions(data.sessions || [], backendKeys, pushesBefore) });
+    data = Object.assign({}, data, { sessions: mergeBackendSessions(data.sessions || [], backendKeys, pushesBefore, seq) });
     replied.forEach(noteUnseenTurnEnd);
     reconcilePending(backendKeys);
     appendPendingCards(data.sessions, backendKeys);
@@ -379,11 +386,13 @@ export function renderSidebar(data) {
 // allSessionsCache, whose order msg_nav walks. Cron stubs never reach it: the
 // server filters them (cron-panel-consolidation RFC §4.2).
 function buildSidebarItems(data) {
-  const items = (data.sessions || []).map(s => {
+  const items = (data.sessions || []).filter(s => !sidebarHidden(sid(s.key, s.node || 'local'))).map(s => {
     if (!s.source) s.source = 'managed';
     return s;
   });
   sessionList.discoveredItems.forEach(d => {
+    // A close in flight: the discovery poll may list it again meanwhile.
+    if (sidebarHidden(sid(discoveredKey(d.pid, d.node), d.node || 'local'))) return;
     items.push({
       key: discoveredKey(d.pid, d.node),
       state: d.state || 'ready',
@@ -1042,13 +1051,15 @@ const SETTLED_RESULT_MS = 10000;
 const turnSettledAt = new Map();
 
 // repliedSince lists the polled sessions whose last reply moved since the
-// last poll while no turn of theirs was running or just settled.
+// last poll while no turn of theirs was running or just settled. A stand-in
+// row (seed: dashboard's openFreshSession) never knew the reply, so the
+// server's first row is not a turn that ended.
 function repliedSince(polled) {
   const now = Date.now();
   return polled.filter((s) => {
     const sKey = sid(s.key, s.node || 'local');
     const cur = sessionList.sessionsData[sKey];
-    if (!cur || cur.state === 'new' || !s.last_response || s.last_response === cur.last_response) return false;
+    if (!cur || cur.state === 'new' || cur.seed || !s.last_response || s.last_response === cur.last_response) return false;
     if (s.state === 'running' || cur.state === 'running' || perSession.optimisticRunning[sKey]) return false;
     return now - (turnSettledAt.get(sKey) || 0) >= SETTLED_REPLY_MS;
   });

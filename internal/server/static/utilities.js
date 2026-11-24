@@ -7,7 +7,9 @@ import { esc, escAttr, isComposingKey, showToast, trapFocus, sessionDot, session
 import { wsm } from './ws_manager.js';
 import { lsSet } from './platform.js';
 import { sid } from './session_ident.js';
+import { shell } from './shell.js';
 import { featureForBackend, pendingBackendID } from './features.js';
+import { followPane } from './scroll_follow.js';
 
 // --- Utilities ---
 
@@ -1140,35 +1142,11 @@ export function setActiveSessionCard(key, node) {
 export function getMsgValue(el) { return (el ? el.innerText : '').trim(); }
 export function setMsgValue(el, v) { if (el) el.innerText = v; }
 
-// stickEventsBottom forces the events pane to the last bubble and keeps it there
-// across the async layout tail — lazy-loaded images, mermaid diagrams, katex
-// formulas, and the "load earlier" button that inserts at the top after the
-// initial scrollTop assignment all change scrollHeight after the first paint.
-// Used by session-open flows where losing the bottom anchor would hide the
-// newest messages (the whole point of opening the session).
+// stickEventsBottom puts the events pane at its last bubble and has it follow
+// what comes after (scroll_follow.js): opening a session, the reader's own
+// send, a repaint with no reading position to go back to.
 export function stickEventsBottom() {
-  const el = document.getElementById('events-scroll');
-  if (!el) return;
-  el.scrollTop = el.scrollHeight;
-  requestAnimationFrame(() => {
-    el.scrollTop = el.scrollHeight;
-    requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
-  });
-  // Re-stick after each lazy-loaded image, but only while the user hasn't
-  // scrolled away from the bottom. Without this guard, a session opened
-  // seconds ago whose images are still loading will yank the viewport back
-  // to the bottom the moment any image finishes — even if the user has
-  // since scrolled up to read history (common on mobile/slow networks).
-  el.querySelectorAll('img').forEach(img => {
-    if (img.complete) return;
-    const restick = () => {
-      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 30) {
-        el.scrollTop = el.scrollHeight;
-      }
-    };
-    img.addEventListener('load', restick, { once: true });
-    img.addEventListener('error', restick, { once: true });
-  });
+  followPane(document.getElementById('events-scroll'));
 }
 
 // Read the data-time of the last event-time-divider in the scroll container so
@@ -1240,6 +1218,119 @@ export function removeSidebarCard(key) {
   // a `"` or `\` would otherwise make querySelector throw mid-takeover/dismiss.
   const card = document.querySelector('.session-card[data-key="' + (window.CSS && CSS.escape ? CSS.escape(key) : key) + '"]');
   if (card) card.remove();
+}
+
+// sidebarHidden reports whether the row sKey (sid(key,node)) is kept off the
+// sidebar for now: a removal in flight, or a put away the gateway is about
+// to do. The row may still be in sessionsData (a put-away session open in the
+// main panel keeps its header); only the list leaves it out.
+export function sidebarHidden(sKey) {
+  return sessionList.optimisticDeleteKeys.has(sKey) || sessionList.putAwayHolds.has(sKey);
+}
+
+// repaintSidebar paints the sidebar from the last payload as the local
+// changes since have left it: what an optimistic change shows before its
+// request answers. Everything derived from the rows comes with it (project
+// groups and their counts, the phone's one-row header, the filter chips, the
+// Home 最近会话), which removing one card's node would leave stale.
+export function repaintSidebar() {
+  if (sessionList.lastSidebarData) shell.renderSidebar(sessionList.lastSidebarData);
+}
+
+const sameRow = (key, node) => (s) => s.key === key && (s.node || 'local') === node;
+
+// dropSidebarRow takes key's row out of sessionsData and the cached payload,
+// so no repaint from the cache brings it back once its hold ends, and returns
+// it for restoreSidebarRow (null when neither had it).
+export function dropSidebarRow(key, node) {
+  node = node || 'local';
+  const sKey = sid(key, node);
+  let row = sessionList.sessionsData[sKey] || null;
+  delete sessionList.sessionsData[sKey];
+  const d = sessionList.lastSidebarData;
+  if (d && Array.isArray(d.sessions)) {
+    const match = sameRow(key, node);
+    row = row || d.sessions.find(match) || null;
+    d.sessions = d.sessions.filter((s) => !match(s));
+  }
+  return row;
+}
+
+// restoreSidebarRow puts back a row dropSidebarRow took (an undo, a refused
+// request), unless a poll listed the key again since.
+export function restoreSidebarRow(row) {
+  if (!row) return;
+  const node = row.node || 'local';
+  const sKey = sid(row.key, node);
+  if (!sessionList.sessionsData[sKey]) sessionList.sessionsData[sKey] = row;
+  const d = sessionList.lastSidebarData;
+  if (d && Array.isArray(d.sessions) && !d.sessions.some(sameRow(row.key, node))) d.sessions = d.sessions.concat([row]);
+}
+
+// PUT_AWAY_HOLD_MS bounds holdPutAway: the gateway puts a session away a
+// moment after the POST that marked it done (a poke, then git and gh checks
+// and Router.Archive); past this the list shows what the server says.
+const PUT_AWAY_HOLD_MS = 30000;
+
+// holdPutAway takes key's card off the sidebar at once, for a put away the
+// gateway is about to do, until releasePutAway or PUT_AWAY_HOLD_MS. The row
+// stays in sessionsData: the main panel showing it is left alone.
+export function holdPutAway(key, node) {
+  const sKey = sid(key, node || 'local');
+  clearTimeout(sessionList.putAwayHolds.get(sKey));
+  sessionList.putAwayHolds.set(sKey, setTimeout(() => releasePutAway(key, node, false), PUT_AWAY_HOLD_MS));
+  repaintSidebar();
+}
+
+// releasePutAway ends key's hold and reads the list again. repaint shows the
+// card at once from the cache (a refused POST, a reopen); a hold that ran out
+// waits for the read, as the cache may still list a session put away since.
+export function releasePutAway(key, node, repaint) {
+  const sKey = sid(key, node || 'local');
+  if (!sessionList.putAwayHolds.has(sKey)) return;
+  clearTimeout(sessionList.putAwayHolds.get(sKey));
+  sessionList.putAwayHolds.delete(sKey);
+  if (repaint) repaintSidebar();
+  sessionList.lastVersion = 0;
+  shell.debouncedFetchSessions();
+}
+
+// setPendingLabel shows label as key's title at once (sessionsData and the
+// cached payload) and keeps it over polls answering with the one before. The
+// returned settle(ok) runs once the PATCH answered: accepted, the label is
+// kept over the polls sent before then still; refused, the label before goes
+// back, unless a later rename replaced it.
+export function setPendingLabel(key, node, label) {
+  node = node || 'local';
+  const sKey = sid(key, node);
+  const mark = { label };
+  sessionList.pendingLabels.set(sKey, mark);
+  const prev = writeLabel(key, node, label);
+  repaintSidebar();
+  return (ok) => {
+    if (sessionList.pendingLabels.get(sKey) !== mark || mark.settled != null) return;
+    if (ok) {
+      mark.settled = sessionList.fetchSeq;
+    } else {
+      sessionList.pendingLabels.delete(sKey);
+      writeLabel(key, node, prev);
+      repaintSidebar();
+    }
+    sessionList.lastVersion = 0;
+    shell.debouncedFetchSessions();
+  };
+}
+
+// writeLabel sets key's user_label in sessionsData and the cached payload
+// and returns the one sessionsData had.
+function writeLabel(key, node, label) {
+  const row = sessionList.sessionsData[sid(key, node)];
+  const prev = row ? row.user_label : undefined;
+  if (row) row.user_label = label;
+  const d = sessionList.lastSidebarData;
+  const cached = d && Array.isArray(d.sessions) ? d.sessions.find(sameRow(key, node)) : null;
+  if (cached && cached !== row) cached.user_label = label;
+  return prev;
 }
 
 // Pending-session persistence: the three pending maps (sessionWorkspaces /

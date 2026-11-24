@@ -130,11 +130,13 @@ type Item struct {
 }
 
 // Decision is what a decision item asks: Payload is its handler's own
-// description of the proposal, Actions the answers offered.
+// description of the proposal, Actions the answers offered, More those the
+// card keeps behind "⋯": taken as any other, only not put forward.
 type Decision struct {
 	Handler string          `json:"handler"`
 	Payload json.RawMessage `json:"payload,omitempty"`
 	Actions []Action        `json:"actions"`
+	More    []Action        `json:"more,omitempty"`
 	// Answer is the action the user chose, once closed by one.
 	Answer Action `json:"answer,omitempty"`
 }
@@ -166,6 +168,13 @@ func (e Expired) Error() string { return "notify: item expired: " + e.Why }
 
 // Is lets callers that only know an answer came too late match ErrClosed.
 func (e Expired) Is(target error) bool { return target == ErrExpired || target == ErrClosed }
+
+// Refused is an answer a DecisionFunc did not apply for a reason the user
+// can act on (Why, in words for them): the item stays open for another
+// answer, and the inbox API passes Why on instead of a bare failure.
+type Refused struct{ Why string }
+
+func (e Refused) Error() string { return "notify: answer not applied: " + e.Why }
 
 // Retention for closed items: they are kept this long, at most keepClosed
 // of them, so the inbox file stays small.
@@ -511,7 +520,7 @@ func (n *Notifier) Decide(id string, a Action) error {
 	case n.deciding[id]:
 		n.mu.Unlock()
 		return ErrPending
-	case it.Decision == nil || !slices.Contains(it.Decision.Actions, a):
+	case it.Decision == nil || !slices.Contains(it.Decision.Actions, a) && !slices.Contains(it.Decision.More, a):
 		n.mu.Unlock()
 		return ErrNoDecision
 	}

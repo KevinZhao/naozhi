@@ -272,3 +272,460 @@ func TestHeldConcurrentTells(t *testing.T) {
 		t.Errorf("held receipt sent %d times, held after: %+v", n, a.state.Held)
 	}
 }
+
+const (
+	watchKeyA = "dashboard:direct:u:general"
+	watchKeyB = "dashboard:direct:u:review"
+)
+
+func watchLine(key, last string) string { return `{"key":"` + key + `","last":"` + last + `"}` }
+
+// heldWatch is the watch lines waiting, as key=text.
+func heldWatch(a *Agent) []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var out []string
+	for _, h := range a.state.Held {
+		if h.Watch {
+			out = append(out, h.Key+"="+h.Text)
+		}
+	}
+	return out
+}
+
+// TestTellWatchAtOnce (D138): with the user not chatting and the Planner
+// idle, a watched session's turn end starts a turn from SourceWatch at once,
+// its text the <naozhi-watch> block and no receipt's; one of a session that
+// read outside content is from SourceWatchOutside. Nothing stays waiting.
+func TestTellWatchAtOnce(t *testing.T) {
+	now := time.Date(2026, 11, 22, 14, 0, 0, 0, time.UTC)
+	a, _, turns := heldAgent(t, &now)
+	if err := a.TellWatch(watchKeyA, watchLine(watchKeyA, "改好了"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.TellWatch(watchKeyB, watchLine(watchKeyB, "读完了网页"), true); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"<naozhi-watch>\n" + watchLine(watchKeyA, "改好了") + "\n</naozhi-watch>",
+		"<naozhi-watch>\n" + watchLine(watchKeyB, "读完了网页") + "\n</naozhi-watch>",
+	}
+	if !slices.Equal(turns.sent, want) || !slices.Equal(turns.srcs, []Source{SourceWatch, SourceWatchOutside}) {
+		t.Fatalf("sent %q from %q, want %q from watch, watch_outside", turns.sent, turns.srcs, want)
+	}
+	if turns.said[0] != nil || turns.said[1] != nil {
+		t.Errorf("a watch turn carried the user's words: %v", turns.said)
+	}
+	if got := heldWatch(a); len(got) != 0 {
+		t.Errorf("held after sending: %q", got)
+	}
+}
+
+// TestTellWatchWhileChatting (D114, D138): while the user sent a Planner
+// message in the last 5 minutes the watch lines wait, a session's later
+// line replacing its earlier one; a receipt going meanwhile does not take
+// them along, so they are never answered in a turn that may dispatch. Once
+// the user has been quiet 5 minutes and the Planner is idle they go: the
+// sessions that read outside content in one turn, the rest in another.
+func TestTellWatchWhileChatting(t *testing.T) {
+	now := time.Date(2026, 11, 22, 14, 0, 0, 0, time.UTC)
+	a, _, turns := heldAgent(t, &now)
+	if err := a.Send("在吗", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	const keyC, keyD = "dashboard:direct:u:docs", "feishu:direct:alice:general"
+	for _, w := range []struct {
+		key, last string
+		outside   bool
+	}{
+		{watchKeyA, "第一轮", false},
+		{watchKeyB, "查了网页", true},
+		{watchKeyA, "第二轮", false},
+		{keyC, "文档写完了", false},
+		{keyD, "读了邮件", true},
+	} {
+		now = now.Add(10 * time.Second)
+		if err := a.TellWatch(w.key, watchLine(w.key, w.last), w.outside); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(turns.sent) != 1 {
+		t.Fatalf("while chatting: sent %q, want only the user's message", turns.sent)
+	}
+	wantHeld := []string{
+		watchKeyB + "=" + watchLine(watchKeyB, "查了网页"), watchKeyA + "=" + watchLine(watchKeyA, "第二轮"),
+		keyC + "=" + watchLine(keyC, "文档写完了"), keyD + "=" + watchLine(keyD, "读了邮件"),
+	}
+	if got := heldWatch(a); !slices.Equal(got, wantHeld) {
+		t.Fatalf("held = %q, want %q", got, wantHeld)
+	}
+	// A receipt of the gateway's own goes at once and leaves them waiting.
+	if err := a.Tell("派出「甲」失败"); err != nil {
+		t.Fatal(err)
+	}
+	if len(turns.sent) != 2 || turns.srcs[1] != SourceReceipt || strings.Contains(turns.sent[1], "naozhi-watch") || strings.Contains(turns.sent[1], watchKeyA) {
+		t.Fatalf("receipt = %q from %q, want it alone", turns.sent[1:], turns.srcs[1:])
+	}
+	if got := heldWatch(a); !slices.Equal(got, wantHeld) {
+		t.Fatalf("held after a receipt = %q, want %q", got, wantHeld)
+	}
+	ctx := context.Background()
+	now = now.Add(4 * time.Minute) // under 5 minutes after the message
+	a.reconcile(ctx)
+	if len(turns.sent) != 2 {
+		t.Fatalf("before the user is quiet: sent %q", turns.sent)
+	}
+	now = now.Add(time.Minute)
+	a.reconcile(ctx)
+	want := []string{
+		"<naozhi-watch>\n" + watchLine(watchKeyA, "第二轮") + "\n" + watchLine(keyC, "文档写完了") + "\n</naozhi-watch>",
+		"<naozhi-watch>\n" + watchLine(watchKeyB, "查了网页") + "\n" + watchLine(keyD, "读了邮件") + "\n</naozhi-watch>",
+	}
+	if !slices.Equal(turns.sent[2:], want) || !slices.Equal(turns.srcs[2:], []Source{SourceWatch, SourceWatchOutside}) {
+		t.Fatalf("quiet and idle: sent %q from %q, want %q", turns.sent[2:], turns.srcs[2:], want)
+	}
+	a.reconcile(ctx)
+	if len(turns.sent) != 4 || len(heldWatch(a)) != 0 {
+		t.Errorf("sent again %q, held %q", turns.sent[4:], heldWatch(a))
+	}
+}
+
+// TestTellWatchWhileBusy: a watch line that comes while a Planner turn runs
+// waits for it, in agent.json, so a restart keeps it; the reconcile of an
+// idle Planner sends it.
+func TestTellWatchWhileBusy(t *testing.T) {
+	now := time.Date(2026, 11, 22, 14, 0, 0, 0, time.UTC)
+	a, sess, turns := heldAgent(t, &now)
+	sess.mu.Lock()
+	sess.st.Running = true
+	sess.mu.Unlock()
+	if err := a.TellWatch(watchKeyA, watchLine(watchKeyA, "改好了"), false); err != nil {
+		t.Fatal(err)
+	}
+	a.reconcile(context.Background())
+	if len(turns.sent) != 0 || len(heldWatch(a)) != 1 {
+		t.Fatalf("with a turn running: sent %q, held %q", turns.sent, heldWatch(a))
+	}
+	b := New(a.cfg)
+	if got := heldWatch(b); len(got) != 1 {
+		t.Fatalf("held after a restart: %q", got)
+	}
+	b.turns = turns
+	b.markShift(now)
+	b.reconcile(context.Background())
+	if len(turns.sent) != 0 {
+		t.Fatalf("the restarted run sent %q into a running turn", turns.sent)
+	}
+	sess.mu.Lock()
+	sess.st.Running = false
+	sess.mu.Unlock()
+	b.reconcile(context.Background())
+	if len(turns.sent) != 1 || turns.srcs[0] != SourceWatch || !strings.Contains(turns.sent[0], watchLine(watchKeyA, "改好了")) {
+		t.Fatalf("idle: sent %q from %q", turns.sent, turns.srcs)
+	}
+	if c := New(a.cfg); len(heldWatch(c)) != 0 {
+		t.Errorf("held once sent: %q", heldWatch(c))
+	}
+}
+
+// TestTellWatchPlannerOff: a Planner stopped, not enabled or not started
+// takes no watch line and keeps none; stopping drops the ones waiting (a
+// turn end told once it is back on would be stale) and leaves the receipts.
+func TestTellWatchPlannerOff(t *testing.T) {
+	now := time.Date(2026, 11, 22, 14, 0, 0, 0, time.UTC)
+	a, _, turns := heldAgent(t, &now)
+	if err := a.Send("在吗", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.TellLater("已派出：乙"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.TellWatch(watchKeyA, watchLine(watchKeyA, "改好了"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SetStopped(true); err != nil {
+		t.Fatal(err)
+	}
+	if len(heldWatch(a)) != 0 || len(a.state.Held) != 1 || a.state.Held[0].Text != "已派出：乙" {
+		t.Fatalf("held after the stop: %+v, want the receipt alone", a.state.Held)
+	}
+	if err := a.TellWatch(watchKeyA, watchLine(watchKeyA, "又一轮"), false); err != ErrStopped {
+		t.Errorf("TellWatch on a stopped Planner = %v, want ErrStopped", err)
+	}
+	if len(heldWatch(a)) != 0 || len(turns.sent) != 1 {
+		t.Errorf("stopped: held %q, sent %q", heldWatch(a), turns.sent)
+	}
+	if c := New(a.cfg); len(heldWatch(c)) != 0 {
+		t.Errorf("agent.json keeps watch lines after the stop: %q", heldWatch(c))
+	}
+
+	off := New(Config{Layout: a.cfg.Layout, Sessions: a.cfg.Sessions, Now: a.cfg.Now})
+	if err := off.TellWatch(watchKeyA, watchLine(watchKeyA, "x"), false); err != ErrOff {
+		t.Errorf("TellWatch with the Planner not enabled = %v, want ErrOff", err)
+	}
+	fresh, _ := newTestAgent(t, &fakeSessions{}, &now)
+	if err := fresh.TellWatch(watchKeyA, watchLine(watchKeyA, "x"), false); err != ErrNotReady {
+		t.Errorf("TellWatch before Start = %v, want ErrNotReady", err)
+	}
+	if len(heldWatch(off))+len(heldWatch(fresh)) != 0 {
+		t.Errorf("a Planner that takes none kept a line")
+	}
+}
+
+// TestTellWatchOncePerWindow (D138): one session's turn ends wake the Planner
+// once in 10 minutes. Those ending inside the window of the one told wait,
+// a later one replacing the earlier, and go as one, the latest, when the
+// window ends; the next window runs from that turn. Another session has a
+// window of its own.
+func TestTellWatchOncePerWindow(t *testing.T) {
+	now := time.Date(2026, 11, 22, 14, 0, 0, 0, time.UTC)
+	a, _, turns := heldAgent(t, &now)
+	ctx := context.Background()
+	tell := func(d time.Duration, key, last string) {
+		t.Helper()
+		now = now.Add(d)
+		if err := a.TellWatch(key, watchLine(key, last), false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	block := func(key, last string) string { return "<naozhi-watch>\n" + watchLine(key, last) + "\n</naozhi-watch>" }
+	tell(0, watchKeyA, "第一轮")
+	if !slices.Equal(turns.sent, []string{block(watchKeyA, "第一轮")}) {
+		t.Fatalf("first turn: sent %q", turns.sent)
+	}
+	tell(3*time.Minute, watchKeyA, "第二轮")
+	tell(3*time.Minute, watchKeyA, "第三轮")
+	if len(turns.sent) != 1 || !slices.Equal(heldWatch(a), []string{watchKeyA + "=" + watchLine(watchKeyA, "第三轮")}) {
+		t.Fatalf("inside the window: sent %q, held %q; want the latest waiting", turns.sent[1:], heldWatch(a))
+	}
+	tell(time.Minute, watchKeyB, "别的会话")
+	if len(turns.sent) != 2 || turns.sent[1] != block(watchKeyB, "别的会话") {
+		t.Fatalf("another session inside the first one's window: sent %q", turns.sent[1:])
+	}
+	now = now.Add(3*time.Minute - time.Second) // a second short of 10 minutes after the first
+	a.reconcile(ctx)
+	if len(turns.sent) != 2 {
+		t.Fatalf("before the window's end: sent %q", turns.sent[2:])
+	}
+	now = now.Add(time.Second)
+	a.reconcile(ctx)
+	if len(turns.sent) != 3 || turns.sent[2] != block(watchKeyA, "第三轮") || len(heldWatch(a)) != 0 {
+		t.Fatalf("at the window's end: sent %q, held %q; want the third turn once", turns.sent[2:], heldWatch(a))
+	}
+	// The window now runs from 14:10.
+	tell(9*time.Minute, watchKeyA, "第四轮")
+	a.reconcile(ctx)
+	if len(turns.sent) != 3 {
+		t.Fatalf("9 minutes after the merged one: sent %q", turns.sent[3:])
+	}
+	now = now.Add(time.Minute)
+	a.reconcile(ctx)
+	if len(turns.sent) != 4 || turns.sent[3] != block(watchKeyA, "第四轮") {
+		t.Fatalf("second window's end: sent %q", turns.sent[3:])
+	}
+	// Past its window a turn end goes at once again.
+	tell(11*time.Minute, watchKeyA, "第五轮")
+	if len(turns.sent) != 5 || len(heldWatch(a)) != 0 {
+		t.Fatalf("past the window: sent %q, held %q", turns.sent[4:], heldWatch(a))
+	}
+}
+
+// TestTellWatchWindowFromTheTurnSent: the 10 minutes run from the turn a
+// session's line went in, not from when it was handed in. One that waited
+// 9m50s on a busy Planner is followed by the next no sooner than 10 minutes
+// after it went; meanwhile a later turn end replaces the one waiting, so
+// the line that goes is the latest.
+func TestTellWatchWindowFromTheTurnSent(t *testing.T) {
+	now := time.Date(2026, 11, 22, 14, 0, 0, 0, time.UTC)
+	a, sess, turns := heldAgent(t, &now)
+	ctx := context.Background()
+	busy := func(on bool) {
+		sess.mu.Lock()
+		sess.st.Running = on
+		sess.mu.Unlock()
+	}
+	tell := func(last string) {
+		t.Helper()
+		if err := a.TellWatch(watchKeyA, watchLine(watchKeyA, last), false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	busy(true)
+	tell("第一轮")
+	now = now.Add(5 * time.Minute)
+	tell("第二轮") // the Planner still busy: nothing went, so no window holds it back
+	now = now.Add(4*time.Minute + 50*time.Second)
+	busy(false)
+	a.reconcile(ctx)
+	if len(turns.sent) != 1 || !strings.Contains(turns.sent[0], watchLine(watchKeyA, "第二轮")) || strings.Contains(turns.sent[0], "第一轮") {
+		t.Fatalf("idle at 14:09:50: sent %q, want the latest turn alone", turns.sent)
+	}
+	now = now.Add(20 * time.Second)
+	tell("第三轮")
+	if len(turns.sent) != 1 {
+		t.Fatalf("20 seconds after the last one went: sent %q", turns.sent[1:])
+	}
+	now = now.Add(9*time.Minute + 39*time.Second)
+	a.reconcile(ctx)
+	if len(turns.sent) != 1 {
+		t.Fatalf("a second short of 10 minutes after it went: sent %q", turns.sent[1:])
+	}
+	now = now.Add(time.Second)
+	a.reconcile(ctx)
+	if len(turns.sent) != 2 || !strings.Contains(turns.sent[1], watchLine(watchKeyA, "第三轮")) {
+		t.Fatalf("10 minutes after it went: sent %q", turns.sent[1:])
+	}
+}
+
+// TestTellWatchCheckedAsItGoes: a line that waited goes as its session
+// stands when it goes, not as it was handed in (SetWatchNow). One whose
+// session read outside content meanwhile goes as an outside turn's, which
+// may not write the ledger; one whose 观察 was turned off, or whose session
+// is gone, does not go at all; a line handed in as outside stays so.
+func TestTellWatchCheckedAsItGoes(t *testing.T) {
+	now := time.Date(2026, 11, 22, 14, 0, 0, 0, time.UTC)
+	a, _, turns := heldAgent(t, &now)
+	const keyC, keyD = "dashboard:direct:u:docs", "dashboard:direct:u:mail"
+	gone, tainted := map[string]bool{}, map[string]bool{}
+	a.SetWatchNow(func(key, line string) (string, bool, bool) {
+		if gone[key] {
+			return "", false, false
+		}
+		return line + "@now", tainted[key], true
+	})
+	if err := a.Send("在吗", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range []struct {
+		key     string
+		outside bool
+	}{{watchKeyA, false}, {watchKeyB, false}, {keyC, false}, {keyD, true}} {
+		if err := a.TellWatch(w.key, watchLine(w.key, "改好了"), w.outside); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(turns.sent) != 1 || len(heldWatch(a)) != 4 {
+		t.Fatalf("while chatting: sent %q, held %q", turns.sent[1:], heldWatch(a))
+	}
+	// Meanwhile: A's 观察 is turned off, B's next turn fetches a web page.
+	gone[watchKeyA], tainted[watchKeyB] = true, true
+	now = now.Add(5 * time.Minute)
+	a.reconcile(context.Background())
+	want := []string{
+		"<naozhi-watch>\n" + watchLine(keyC, "改好了") + "@now\n</naozhi-watch>",
+		"<naozhi-watch>\n" + watchLine(watchKeyB, "改好了") + "@now\n" + watchLine(keyD, "改好了") + "@now\n</naozhi-watch>",
+	}
+	if !slices.Equal(turns.sent[1:], want) || !slices.Equal(turns.srcs[1:], []Source{SourceWatch, SourceWatchOutside}) {
+		t.Fatalf("quiet: sent %q from %q, want %q from watch, watch_outside", turns.sent[1:], turns.srcs[1:], want)
+	}
+	if got := heldWatch(a); len(got) != 0 {
+		t.Errorf("held after: %q, want the dropped line gone too", got)
+	}
+	if c := New(a.cfg); len(heldWatch(c)) != 0 {
+		t.Errorf("agent.json keeps %q", heldWatch(c))
+	}
+}
+
+// TestPatrolReceipts: a receipt about a session dispatched to fix a patrol
+// finding starts a turn from patrol_receipt, which the action runner holds
+// to the patrol's limits; so does a receipt that takes one waiting along,
+// whichever of the two is the patrol's, the turn answering both. A receipt
+// with none of the patrol's is from receipt as before. The mark is kept in
+// agent.json with the receipt.
+func TestPatrolReceipts(t *testing.T) {
+	if !SourcePatrolReceipt.Alone() || SourcePatrolReceipt.Outside() || SourcePatrolReceipt.Entry() != string(SourceReceipt) {
+		t.Errorf("patrol_receipt: alone %v outside %v entry %q; want a turn of its own, laid out as a receipt", SourcePatrolReceipt.Alone(),
+			SourcePatrolReceipt.Outside(), SourcePatrolReceipt.Entry())
+	}
+	now := time.Date(2026, 11, 16, 14, 0, 0, 0, time.UTC)
+	a, _, turns := heldAgent(t, &now)
+	last := func() (Source, string) { return turns.srcs[len(turns.srcs)-1], turns.sent[len(turns.sent)-1] }
+
+	if err := a.TellPatrol("task:p1（修重连）汇报：完成"); err != nil {
+		t.Fatal(err)
+	}
+	if src, text := last(); src != SourcePatrolReceipt || !strings.Contains(text, "task:p1（修重连）汇报：完成") || turns.said[0] != nil {
+		t.Fatalf("TellPatrol sent %q from %q", text, src)
+	}
+	if err := a.TellPatrolLater("已派出：修重连（task:p1）"); err != nil {
+		t.Fatal(err)
+	}
+	if src, _ := last(); len(turns.sent) != 2 || src != SourcePatrolReceipt {
+		t.Fatalf("TellPatrolLater with the user away: sent %q from %q", turns.sent, turns.srcs)
+	}
+	if err := a.Tell("task:n1（写文档）汇报：完成"); err != nil {
+		t.Fatal(err)
+	}
+	if src, _ := last(); src != SourceReceipt {
+		t.Fatalf("a plain receipt went from %q", src)
+	}
+
+	// The user is chatting: the patrol's receipt waits, and the plain one
+	// that takes it along goes from patrol_receipt.
+	if err := a.Send("在吗", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.TellPatrolLater("已派出：修退避（task:p2）"); err != nil {
+		t.Fatal(err)
+	}
+	if len(a.state.Held) != 1 || !a.state.Held[0].Patrol {
+		t.Fatalf("held %+v, want the patrol's receipt marked", a.state.Held)
+	}
+	if err := a.Tell("task:n1（写文档）汇报：完成"); err != nil {
+		t.Fatal(err)
+	}
+	if src, text := last(); src != SourcePatrolReceipt || !strings.Contains(text, "已派出：修退避") || !strings.Contains(text, "task:n1") || len(a.state.Held) != 0 {
+		t.Fatalf("a plain receipt carrying the patrol's: sent %q from %q, held %+v", text, src, a.state.Held)
+	}
+
+	// The other way round: a plain one waiting, the patrol's taking it.
+	if err := a.TellLater("已派出：写文档（task:n2）"); err != nil {
+		t.Fatal(err)
+	}
+	a.TellPatrolAlong("task:p2 汇报：进度")
+	if err := a.TellPatrol("task:p2（修退避）汇报：完成"); err != nil {
+		t.Fatal(err)
+	}
+	if src, text := last(); src != SourcePatrolReceipt || !strings.Contains(text, "已派出：写文档") || !strings.Contains(text, "task:p2 汇报：进度") {
+		t.Fatalf("the patrol's receipt carrying a plain one: sent %q from %q", text, src)
+	}
+
+	// Held ones going by themselves once the user is quiet: by their marks.
+	if err := a.TellLater("已派出：写文档（task:n3）"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(10 * time.Minute)
+	a.reconcile(context.Background())
+	if src, text := last(); src != SourceReceipt || !strings.Contains(text, "task:n3") {
+		t.Fatalf("plain receipts waiting went from %q: %q", src, text)
+	}
+	if err := a.Send("在吗", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.TellPatrolLater("已派出：修超时（task:p3）"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(10 * time.Minute)
+	a.reconcile(context.Background())
+	if src, text := last(); src != SourcePatrolReceipt || !strings.Contains(text, "task:p3") {
+		t.Fatalf("the patrol's receipt waiting went from %q: %q", src, text)
+	}
+
+	// PatrolTaskTurn is what the runner reads; a patrol turn proper is not
+	// one, nor the other way round.
+	for _, tc := range []struct {
+		sources      []Source
+		task, patrol bool
+	}{
+		{nil, false, false},
+		{[]Source{SourceReceipt}, false, false},
+		{[]Source{SourcePatrolReceipt}, true, false},
+		{[]Source{SourcePatrol}, false, true},
+		{[]Source{SourcePatrolRefusal}, false, true},
+	} {
+		turns.sources = tc.sources
+		if a.PatrolTaskTurn() != tc.task || a.PatrolTurn() != tc.patrol || a.UnrunTurn() != (len(tc.sources) > 0 && tc.sources[0] == SourcePatrolRefusal) {
+			t.Errorf("%v: task turn %v, patrol turn %v", tc.sources, a.PatrolTaskTurn(), a.PatrolTurn())
+		}
+	}
+}

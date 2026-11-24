@@ -5,7 +5,9 @@
 // 动态 entry: a receipt (a report, a dispatch's outcome, custody's), a
 // session's SendMessage, a due reminder, the receipt of blocks not run or
 // refused, a scout run, a pre-meeting brief, a web lookup's answer, the
-// line a 单独聊 you opened left (§15.14 ⑥: its line opens it). The
+// line a 单独聊 you opened left (§15.14 ⑥: its line opens it), a session
+// you opened ending a turn (§15.22 ①, D138), which is an entry only when
+// the Planner had something to say. The
 // entries between two of yours fold into one row
 // "▸ HH:MM–HH:MM · N 条动态（…）", which unfolds to one line each (time, task
 // or source, the Planner's first sentence, "→ 等你" when the turn asked you
@@ -50,6 +52,14 @@ const RECEIPT_END_RE = /<\/naozhi-receipt>\s*$/;
 const SCOUT_RE = /^<naozhi-scout findings="/;
 const MEETING_RE = /^<naozhi-scout kind="meeting"/;
 const LOOKUP_RE = /^<naozhi-lookup /;
+const PATROL_RE = /^<naozhi-patrol /;
+// WATCH_RE is the gateway's word that a session you opened ended a turn
+// (planner/agent TellWatch), WATCH_KEY_RE each session's line in it.
+const WATCH_RE = /^<naozhi-watch>/;
+const WATCH_KEY_RE = /^\{"key":"([^"]+)"/gm;
+// NOTHING_RE is the Planner's whole reply to one it has nothing to say on
+// (the prompt's 无).
+const NOTHING_RE = /^无[。.]?$/;
 // SHIFT_ASK_RE is the shift change's request for a handoff (planner/agent
 // handoffPrompt), HANDOFF_RE the new conversation's first message with it
 // (handoffMessage).
@@ -82,14 +92,16 @@ const KEY_RE = /\btask:[A-Za-z0-9_-]+|\b(?:dashboard|feishu|slack|discord|weixin
 // not what the turn is about.
 const SNAPSHOT_ANY_RE = /<naozhi-snapshot(?:\s[^>]*\/>|[\s>][\s\S]*?(?:<\/naozhi-snapshot>|$))/g;
 // BY_SOURCE are the turns named by their source alone: what a scout run, a
-// pre-meeting brief or a lookup brought in names sessions of its own, and
-// the morning tidy lists every session that moved.
-const BY_SOURCE = new Set(['scout', 'briefing', 'lookup', 'morning']);
+// pre-meeting brief, a lookup or a project patrol's deep check brought in
+// names sessions of its own, and the morning tidy lists every session that
+// moved.
+const BY_SOURCE = new Set(['scout', 'briefing', 'lookup', 'morning', 'patrol']);
 
 // SOURCE_NAME names an entry by where it came from when no session does.
 const SOURCE_NAME = {
   receipt: '网关回执', unrun: '没执行的动作', refusal: '被拒的动作', scout: '巡检', briefing: '会前简报',
   lookup: '网页查询', reminder: '到点提醒', morning: '晨间整理', peer: '会话消息', report: '汇报', aside: '单独聊',
+  watch: '你开的会话', patrol: '项目巡查',
 };
 // MAX_NAMED is how many tasks or sources a row's parentheses name.
 const MAX_NAMED = 3;
@@ -125,6 +137,8 @@ function partKind(t, merged) {
   if (MEETING_RE.test(t)) return 'briefing';
   if (SCOUT_RE.test(t)) return 'scout';
   if (LOOKUP_RE.test(t)) return 'lookup';
+  if (PATROL_RE.test(t)) return 'patrol';
+  if (WATCH_RE.test(t)) return 'watch';
   if (SHIFT_ASK_RE.test(t) || HANDOFF_RE.test(t)) return 'shift';
   return 'user';
 }
@@ -174,7 +188,11 @@ export function plannerHead(e) {
   else if (src) kind = src === ANSWER ? ANSWER : 'user';
   else kind = textKind(text);
   const head = { id, at, kind, layer: kind === 'shift' ? 'shift' : DYNAMIC.has(kind) ? 'dyn' : 'talk' };
-  if (head.layer === 'dyn' && !BY_SOURCE.has(kind)) head.key = (KEY_RE.exec(text.replace(SNAPSHOT_ANY_RE, '')) || [''])[0];
+  if (kind === 'watch') {
+    // One session's turn end is named by it; several told as one are not.
+    const keys = [...text.matchAll(WATCH_KEY_RE)];
+    if (keys.length === 1) head.key = keys[0][1];
+  } else if (head.layer === 'dyn' && !BY_SOURCE.has(kind)) head.key = (KEY_RE.exec(text.replace(SNAPSHOT_ANY_RE, '')) || [''])[0];
   if (kind === 'shift') {
     const h = HANDOFF_RE.exec(text);
     if (h) {
@@ -285,7 +303,11 @@ export function layerStream(box) {
   const kept = new Set();
   if (talk) {
     for (const r of runs) {
-      const items = r.type === 'dyn' ? mergeReports(r.items) : r.items;
+      // A watch turn the Planner had nothing to say on is no entry; a row
+      // of nothing else is no row.
+      const under = (it) => it === last && open && lay.running !== false;
+      const items = r.type === 'dyn' ? mergeReports(r.items).filter((it) => !saidNothing(it, under(it))) : r.items;
+      if (!items.length) continue;
       const fresh = r.type === 'dyn' ? rowEl(items, last) : shiftEl(items);
       const prev = old.get(rowKey(fresh));
       const el = prev && prev.dataset.sig === fresh.dataset.sig ? keep(prev, fresh) : fresh;
@@ -327,6 +349,21 @@ function focusAgain(box, r) {
   const scope = r.item ? row.querySelector('.pl-dyn-item[data-id="' + CSS.escape(r.item) + '"]') : row;
   const el = scope && r.act ? scope.querySelector('[data-action="' + CSS.escape(r.act) + '"]') : null;
   el?.focus({ preventScroll: true });
+}
+
+// saidNothing reports whether a watch turn (a session you opened ended a
+// turn, D138) left nothing to show: no card, no line of the gateway's, and
+// a last reply that is empty or 无. One still under way with neither card
+// nor line counts too, so an entry does not show 处理中… and then go.
+function saidNothing(it, under) {
+  if (it.kind !== 'watch') return false;
+  let reply = '';
+  for (const el of it.els) {
+    if (!el.matches('.event') || el.matches('.pl-ev-empty')) continue;
+    if (el.matches('.event.system') || el.querySelector('.pl-act')) return false;
+    if (el.matches('.event.text')) reply = textOf(el);
+  }
+  return under || !reply || NOTHING_RE.test(reply);
 }
 
 // mergeReports makes a session's report one entry: the gateway's line and

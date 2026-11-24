@@ -43,7 +43,10 @@ const (
 	callTimeout = time.Minute
 	titleRunes  = 200
 	errRunes    = 200
-	timeLayout  = "2006-01-02 15:04"
+	// execWait is how long Exec waits, once the command is over, for what
+	// it started to let go of its output.
+	execWait   = 2 * time.Second
+	timeLayout = "2006-01-02 15:04"
 )
 
 // ExecFunc runs name with args in dir and returns its standard output; the
@@ -57,6 +60,10 @@ type Config struct {
 	// Workspaces lists the registered directories on this node
 	// (workspace.Registry.LocalDirs).
 	Workspaces func() []workspace.Dir
+	// Ledger is the ledger's open items (front.Store): the ones whose
+	// source is a pull request or an issue are closed once it is (settle).
+	// nil checks none.
+	Ledger Ledger
 	// Exec runs git and gh; nil is Exec.
 	Exec ExecFunc
 	// Now is the wall clock; nil is time.Now.
@@ -66,6 +73,9 @@ type Config struct {
 // Writer refreshes the issue files.
 type Writer struct {
 	cfg Config
+	// settled is the last open item a round over factsMax looked up, where
+	// the next goes on (settle). Refresh's goroutine alone touches it.
+	settled string
 }
 
 // New returns a Writer; nothing runs until Run or Refresh.
@@ -103,8 +113,10 @@ type Repo struct {
 	Owner, Name string
 	// Dir is a directory of it, where gh runs.
 	Dir string
-	// Workspaces names the workspaces in it, in registration order.
-	Workspaces []string
+	// Workspaces names the workspaces in it, in registration order;
+	// WorkspaceIDs are their IDs.
+	Workspaces   []string
+	WorkspaceIDs []string
 }
 
 // File is the repository's file name under planner/github. The separator is
@@ -166,6 +178,7 @@ func (w *Writer) Refresh(ctx context.Context) {
 		w.prune(repos)
 	}
 	slog.Info("planner github: issues refreshed", "repos", len(repos), "failed", failed)
+	w.settle(ctx, repos)
 }
 
 // repos is the GitHub repositories the registered directories are in, by
@@ -201,6 +214,9 @@ func (w *Writer) repos(ctx context.Context) (out []Repo, complete bool) {
 		}
 		if d.Name != "" && !slices.Contains(out[i].Workspaces, d.Name) {
 			out[i].Workspaces = append(out[i].Workspaces, d.Name)
+		}
+		if d.ID != "" && !slices.Contains(out[i].WorkspaceIDs, d.ID) {
+			out[i].WorkspaceIDs = append(out[i].WorkspaceIDs, d.ID)
 		}
 	}
 	slices.SortFunc(out, func(a, b Repo) int { return strings.Compare(strings.ToLower(a.File()), strings.ToLower(b.File())) })
@@ -404,10 +420,20 @@ func Exec(ctx context.Context, dir, name string, args ...string) (string, error)
 	// directory from an unreadable one by git's English text, and a
 	// translated git (Homebrew's follows the macOS language even with no
 	// LANG set) would leave every refresh incomplete and the prune off.
-	cmd.Env = append(os.Environ(), "LC_ALL=C", "GIT_TERMINAL_PROMPT=0", "GH_PROMPT_DISABLED=1", "NO_COLOR=1")
+	// GIT_OPTIONAL_LOCKS=0 keeps a read (git status, which the patrol runs
+	// hourly) from rewriting the index: it would take index.lock under a
+	// session's own git command and fail it.
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "GIT_TERMINAL_PROMPT=0", "GH_PROMPT_DISABLED=1", "NO_COLOR=1", "GIT_OPTIONAL_LOCKS=0")
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
-	if err := cmd.Run(); err != nil {
+	// The context only kills the command itself. A process it started (git
+	// for a submodule, a credential helper) that still holds the output
+	// would keep Run waiting past any deadline, and the caller's loop with
+	// it; past execWait the pipes are closed instead.
+	cmd.WaitDelay = execWait
+	// A command that ended well and left such a process behind has said
+	// all it had to say.
+	if err := cmd.Run(); err != nil && !errors.Is(err, exec.ErrWaitDelay) {
 		if msg := strings.TrimSpace(errb.String()); msg != "" {
 			return out.String(), fmt.Errorf("%s %s: %s", name, args[0], msg)
 		}
