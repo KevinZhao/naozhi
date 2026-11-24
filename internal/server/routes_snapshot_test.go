@@ -211,6 +211,7 @@ var routeDeclOwners = map[string]string{
 	"../dashboard/ext/ccassets/routes.go":      "*extccassets.Handler",
 	"../dashboard/ext/planner/routes.go":       "*dashplanner.Handler",
 	"../dashboard/ext/inbox/routes.go":         "*inbox.Handler",
+	"../dashboard/ext/meetings/routes.go":      "*meetings.Handler",
 	"../dashboard/ext/tasks/routes.go":         "*tasks.Handler",
 	"../dashboard/ext/custody/routes.go":       "*dashcustody.Handler",
 }

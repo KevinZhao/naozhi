@@ -70,7 +70,6 @@ Flags:
 	if err != nil {
 		fatalf("%v\n", err)
 	}
-
 	// 6. Restart service (unless skipped or not running). Deliberately NO
 	// rollback on restart error: the binary is already verified, and a restart
 	// failure is almost always a slow Type=notify cold start rather than a bad
@@ -140,6 +139,10 @@ func downloadAndReplace(rel *selfupdate.Release, selfPath string) (string, error
 	if err != nil {
 		return "", fmt.Errorf("replace binary: %w", err)
 	}
+	// The meeting-audio helper beside it (macOS); best effort.
+	hctx, hcancel := context.WithTimeout(context.Background(), selfupdate.DownloadTimeout)
+	selfupdate.InstallHelper(hctx, rel, tmp, selfPath)
+	hcancel()
 	return backupPath, nil
 }
 

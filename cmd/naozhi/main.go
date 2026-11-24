@@ -730,6 +730,20 @@ func main() {
 		PutAway:    func(key string) { actions.PutAway(key) },
 	})
 
+	// Meeting recording (docs/rfc/meeting-notes.md), macOS with
+	// meeting.enabled; nil otherwise.
+	meetings := wireup.OpenMeetings(wireup.MeetingDeps{
+		Enabled:  cfg.Meeting.Enabled,
+		Layout:   sessionLayout,
+		Router:   router,
+		Promises: promises,
+		Notifier: notifier,
+		Journal:  plannerState.Journal,
+		Calendar: scouter.Calendar,
+		// The summary reads the projects with the Planner's read scope.
+		Workspaces: plannerState.Workspaces,
+		ReadRules:  plannerAgent.ReadRules,
+	})
 	// The gateway's progress notes on a session whose turn is over with
 	// background work going on (§15.22 ④, D141), on the health loop's minute;
 	// only with the Planner on, as the notes they join are.
@@ -769,6 +783,7 @@ func main() {
 		UnitName:         unitNames,
 		Notify:           notifier,
 		Tasks:            tasks,
+		Meetings:         meetings,
 		Custody:          custodian,
 		Purpose:          sidecars.Purpose,
 		TaskOpts:         taskOpts.ForKey,
@@ -982,6 +997,7 @@ func main() {
 	go sidecars.Run(ctx, func(key string) bool { return router.SessionFor(key) != nil })
 	go briefer.Run(ctx)
 	go scouter.Run(ctx)
+	go meetings.Run(ctx)
 
 	// Upstream connector: this node connects to a primary.
 	if cfg.Upstream != nil {
@@ -1057,6 +1073,9 @@ func main() {
 				// session calls into the router. A run cut short leaves no record.
 				{name: "scout", run: scouter.Stop},
 				{name: "reader", run: lookups.Stop},
+				// The meeting recorder likewise: its summary session calls into
+				// the router, and its helper closes the segment it is writing.
+				{name: "meeting", run: meetings.Stop},
 				// The patrol's round in flight: its git and gh calls end with
 				// the cancel above, and nothing of it is left writing the
 				// ledger while the rest goes down. Its deep check's session

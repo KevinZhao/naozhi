@@ -37,7 +37,7 @@ var errTaskNamespace = sendUsageError("task: 会话只能由 Planner 派出")
 
 // errScoutNamespace answers a send to a scout: key: only a scout run talks
 // to one.
-var errScoutNamespace = sendUsageError("巡检会话不接收消息")
+var errScoutNamespace = sendUsageError("巡检与会议纪要会话不接收消息")
 
 var (
 	errPlannerBusy     = errors.New("服务忙：Planner 消息未送达，请稍后重试")
