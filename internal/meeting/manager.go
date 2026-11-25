@@ -280,7 +280,7 @@ func (m *Manager) observe(ctx context.Context, procs []Proc) {
 	m.mu.Lock()
 	act := m.det.Observe(now, procs)
 	app := m.det.App()
-	auth := m.auth
+	auth, authAt := m.auth, m.authAt
 	m.mu.Unlock()
 	switch act {
 	case ActStart:
@@ -289,7 +289,7 @@ func (m *Manager) observe(ctx context.Context, procs []Proc) {
 			m.startRecording(ctx, *app, "resume")
 			return
 		}
-		if !auth.Ready() && now.Sub(m.authAt) > time.Minute {
+		if !auth.Ready() && now.Sub(authAt) > time.Minute {
 			auth = m.refreshAuth(ctx)
 		}
 		if !auth.Ready() {
