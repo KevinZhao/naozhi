@@ -301,7 +301,7 @@ func (m *Manager) observe(ctx context.Context, procs []Proc) {
 		}
 		d := &Detected{App: app.Name, Since: now}
 		if m.cfg.Calendar != nil {
-			if e, ok := eventAt(m.cfg.Calendar(), now); ok {
+			if e, ok := eventAt(m.cfg.Calendar(), now, *app); ok {
 				d.Title = e.Title
 			}
 		}
@@ -415,7 +415,7 @@ func (m *Manager) startRecording(ctx context.Context, app App, by string) {
 		mt = Meeting{App: app.Name, Bundles: app.Bundles, Started: now, State: StateRecording,
 			Title: fmt.Sprintf("%s 会议 %s", app.Name, now.Local().Format("15:04"))}
 		if m.cfg.Calendar != nil {
-			if e, ok := eventAt(m.cfg.Calendar(), now); ok {
+			if e, ok := eventAt(m.cfg.Calendar(), now, app); ok {
 				mt.Title, mt.Attendees = e.Title, e.Attendees
 			}
 		}

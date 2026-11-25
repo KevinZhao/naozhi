@@ -723,3 +723,39 @@ func TestMatchWorkspaces(t *testing.T) {
 		t.Fatalf("matched %v", got)
 	}
 }
+
+// A Feishu call started minutes before a Zoom webinar on the calendar must not take the
+// webinar's name; the same event still names a Zoom meeting or one joined in a browser.
+func TestEventAtSkipsAnotherProgramsMeeting(t *testing.T) {
+	now := time.Date(2026, 11, 25, 22, 57, 0, 0, time.Local)
+	zoom := CalendarEvent{Title: "Webinar", Start: now.Add(3 * time.Minute), End: now.Add(48 * time.Minute),
+		Link: "https://amazon.zoom.us/j/123?pwd=x"}
+	unlinked := CalendarEvent{Title: "周会", Start: now.Add(-time.Hour), End: now.Add(time.Hour)}
+	app := func(name string) App {
+		for _, a := range Apps {
+			if a.Name == name {
+				return a
+			}
+		}
+		t.Fatalf("no app %s", name)
+		return App{}
+	}
+	cases := []struct {
+		app    string
+		events []CalendarEvent
+		want   string
+	}{
+		{"飞书", []CalendarEvent{zoom}, ""},
+		{"飞书", []CalendarEvent{unlinked, zoom}, "周会"},
+		{"Zoom", []CalendarEvent{unlinked, zoom}, "Webinar"},
+		{"Chrome", []CalendarEvent{zoom}, "Webinar"},
+		{"飞书", []CalendarEvent{{Title: "飞书会", Start: now, End: now.Add(time.Hour), Link: "https://vc.feishu.cn/j/1"}}, "飞书会"},
+		{"飞书", []CalendarEvent{{Title: "外链", Start: now, End: now.Add(time.Hour), Link: "https://example.com/x"}}, "外链"},
+	}
+	for _, c := range cases {
+		e, _ := eventAt(c.events, now, app(c.app))
+		if e.Title != c.want {
+			t.Errorf("%s: got %q, want %q", c.app, e.Title, c.want)
+		}
+	}
+}
