@@ -45,7 +45,7 @@ type keyNamespace struct {
 //
 // When adding an entry also update: DESIGN.md §"Session key namespace"; the
 // sidebar / persistence filter if it must not be shown by default; and, if
-// exempt=true, a sub-quota cap in router_core.go's exemptCapFor (otherwise
+// exempt=true, a sub-quota cap in exempt.go's exemptCapFor (otherwise
 // reserveSpawn falls back to maxExemptSessions).
 var keyNamespaces = []keyNamespace{
 	{prefix: CronKeyPrefix, exempt: true, kind: "cron"},

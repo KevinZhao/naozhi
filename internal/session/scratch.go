@@ -40,7 +40,8 @@ const MaxScratchContextTurns = 20
 const DefaultScratchTTL = 10 * time.Minute
 
 // DefaultScratchMax is the global concurrent-scratch cap. Each scratch owns a
-// real CLI process sharing Router.MaxProcs headroom; 20 mirrors maxExemptSessions.
+// real CLI process sharing Router.MaxProcs headroom. It is scratch's own cap,
+// independent of maxExemptSessions and the exempt sub-quotas.
 const DefaultScratchMax = 20
 
 // Errors surfaced by ScratchPool callers; sentinels so HTTP handlers can map

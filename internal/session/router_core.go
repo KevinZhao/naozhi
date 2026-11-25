@@ -93,7 +93,7 @@ const (
 	// project planners + sys daemon stubs). The per-namespace sub-quotas below
 	// are the primary limit; this global cap is the relief valve so a future
 	// exempt namespace added without sub-quota wiring still has a hard ceiling.
-	// Sum of sub-quotas must stay ≤ maxExemptSessions (docs/design/exempt-quotas.md).
+	// Sum of sub-quotas must stay ≤ maxExemptSessions (TestExemptSubQuotasFitGlobalCeiling asserts it).
 	maxExemptSessions = 25
 
 	// maxCronExempt caps alive cron exempt sessions so a noisy chat with
