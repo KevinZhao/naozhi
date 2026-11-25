@@ -11,18 +11,22 @@ import (
 type App struct {
 	Name    string
 	Bundles []string
+	// Hosts are the domains of this program's meeting links: a calendar event linking to
+	// another program's meeting is not the one under way in this one. Browsers have none,
+	// joining any program's meeting on the web.
+	Hosts []string
 }
 
 // Apps is the meeting programs whose microphone use is a meeting (§3.2: a constant list, not configuration).
 // Browsers count while they use the microphone, for meetings joined on the web.
 var Apps = []App{
-	{Name: "Teams", Bundles: []string{"com.microsoft.teams"}},
-	{Name: "Zoom", Bundles: []string{"us.zoom."}},
-	{Name: "Chime", Bundles: []string{"com.amazon.Amazon-Chime", "com.amazon.chime"}},
-	{Name: "Webex", Bundles: []string{"com.cisco.webex", "com.webex.", "Cisco-Systems.Spark"}},
-	{Name: "Slack", Bundles: []string{"com.tinyspeck.slackmacgap"}},
-	{Name: "飞书", Bundles: []string{"com.larksuite.", "com.bytedance.lark", "com.electron.lark"}},
-	{Name: "腾讯会议", Bundles: []string{"com.tencent.meeting", "com.tencent.wemeet"}},
+	{Name: "Teams", Bundles: []string{"com.microsoft.teams"}, Hosts: []string{"teams.microsoft.com", "teams.live.com"}},
+	{Name: "Zoom", Bundles: []string{"us.zoom."}, Hosts: []string{"zoom.us", "zoom.com", "zoomgov.com"}},
+	{Name: "Chime", Bundles: []string{"com.amazon.Amazon-Chime", "com.amazon.chime"}, Hosts: []string{"chime.aws", "chime.amazon.com"}},
+	{Name: "Webex", Bundles: []string{"com.cisco.webex", "com.webex.", "Cisco-Systems.Spark"}, Hosts: []string{"webex.com"}},
+	{Name: "Slack", Bundles: []string{"com.tinyspeck.slackmacgap"}, Hosts: []string{"slack.com"}},
+	{Name: "飞书", Bundles: []string{"com.larksuite.", "com.bytedance.lark", "com.electron.lark"}, Hosts: []string{"feishu.cn", "larksuite.com", "larkoffice.com"}},
+	{Name: "腾讯会议", Bundles: []string{"com.tencent.meeting", "com.tencent.wemeet"}, Hosts: []string{"meeting.tencent.com", "voovmeeting.com"}},
 	{Name: "Chrome", Bundles: []string{"com.google.Chrome"}},
 	{Name: "Safari", Bundles: []string{"com.apple.Safari", "com.apple.WebKit"}},
 	{Name: "Edge", Bundles: []string{"com.microsoft.edgemac"}},

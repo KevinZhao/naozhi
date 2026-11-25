@@ -64,7 +64,7 @@ func OpenMeetings(d MeetingDeps) *meeting.Manager {
 		cfg.Calendar = func() []meeting.CalendarEvent {
 			var out []meeting.CalendarEvent
 			for _, e := range d.Calendar() {
-				out = append(out, meeting.CalendarEvent{Title: e.Title, Start: e.Start, End: e.End, Organizer: e.Organizer, Attendees: e.Attendees})
+				out = append(out, meeting.CalendarEvent{Title: e.Title, Start: e.Start, End: e.End, Organizer: e.Organizer, Attendees: e.Attendees, Link: e.Link})
 			}
 			return out
 		}

@@ -3,6 +3,7 @@ package meeting
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -16,14 +17,21 @@ type CalendarEvent struct {
 	End       time.Time
 	Organizer string
 	Attendees []string
+	// Link is the online meeting's join link, "" when none.
+	Link string
 }
 
-// eventAt is the calendar event under way at t, the one that started last when several are.
-func eventAt(events []CalendarEvent, t time.Time) (CalendarEvent, bool) {
+// eventAt is the calendar event under way at t in app, the one that started last when several
+// are. An event linking to another meeting program's meeting is not this one: a Feishu call
+// minutes before a Zoom webinar must not take the webinar's name.
+func eventAt(events []CalendarEvent, t time.Time, app App) (CalendarEvent, bool) {
 	var best CalendarEvent
 	ok := false
 	for _, e := range events {
 		if e.Start.After(t.Add(5*time.Minute)) || !e.End.After(t) {
+			continue
+		}
+		if o := linkApp(e.Link); o != "" && len(app.Hosts) > 0 && o != app.Name {
 			continue
 		}
 		if !ok || e.Start.After(best.Start) {
@@ -31,6 +39,26 @@ func eventAt(events []CalendarEvent, t time.Time) (CalendarEvent, bool) {
 		}
 	}
 	return best, ok
+}
+
+// linkApp is the meeting program whose meeting link is link, "" when none of Apps' is.
+func linkApp(link string) string {
+	u, err := url.Parse(strings.TrimSpace(link))
+	if err != nil {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return ""
+	}
+	for _, a := range Apps {
+		for _, h := range a.Hosts {
+			if host == h || strings.HasSuffix(host, "."+h) {
+				return a.Name
+			}
+		}
+	}
+	return ""
 }
 
 // Clues is where the summary session may look for context (§4): the registered workspaces on
