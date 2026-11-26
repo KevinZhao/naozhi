@@ -565,6 +565,17 @@ function startMockServer(overrides = {}) {
       }
       return;
     }
+    if (pathname.startsWith('/icons/') && pathname.endsWith('.png')) {
+      try {
+        const png = fs.readFileSync(path.join(STATIC_DIR, 'icons', path.basename(pathname)));
+        res.writeHead(200, { 'Content-Type': 'image/png' });
+        res.end(png);
+      } catch {
+        res.writeHead(404);
+        res.end();
+      }
+      return;
+    }
     if (pathname === '/sw.js') {
       res.writeHead(200, { 'Content-Type': 'application/javascript' });
       res.end('// mock sw');
