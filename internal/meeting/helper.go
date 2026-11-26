@@ -3,16 +3,20 @@ package meeting
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -77,7 +81,22 @@ type ExecHelper struct {
 	Path string
 	// ModelsDir is where diarize keeps its CoreML models (fetched on first use).
 	ModelsDir string
+	// StopGrace and StallAfter override stopGrace and stallAfter (tests).
+	StopGrace, StallAfter time.Duration
 }
+
+const (
+	// stopGrace is how long a recorder told to stop may take to close its segment and exit.
+	stopGrace = 15 * time.Second
+	// stallAfter is how long a recorder may print nothing (it prints "started", then a segment
+	// every 30 seconds) before it counts as stuck. A meeting program that crashes with its own
+	// audio driver loaded can leave coreaudiod not answering: the helper then hangs in its first
+	// Core Audio call, before it watches stdin, and would never stop by itself.
+	stallAfter = 2 * time.Minute
+)
+
+// errRecorderHung is Record's error when the recorder was killed for not answering.
+var errRecorderHung = errors.New("naozhi-audio 没有响应，已结束")
 
 // HelperPath is naozhi-audio beside the running executable.
 func HelperPath() string {
@@ -174,7 +193,10 @@ func (h ExecHelper) Watch(ctx context.Context, snap func([]Proc)) error {
 	return c.Wait()
 }
 
-// Record closes the helper's stdin on stop: it finishes the current segment and exits 0.
+// Record closes the helper's stdin on stop: it finishes the current segment and exits 0. A
+// recorder that does not exit within StopGrace of the stop, or prints nothing for StallAfter, is
+// killed with its process group: the helper re-spawns itself (TCC disclaim) and the child holds
+// stdout too, so killing the parent alone would leave the read blocked.
 func (h ExecHelper) Record(ctx context.Context, dir string, bundles []string, startIndex int, stop <-chan struct{}, events func(Event)) (Event, error) {
 	args := []string{"record", "-out", dir, "-segment", "30", "-start-index", strconv.Itoa(startIndex)}
 	for _, b := range bundles {
@@ -185,6 +207,7 @@ func (h ExecHelper) Record(ctx context.Context, dir string, bundles []string, st
 	if err != nil {
 		return Event{}, err
 	}
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := c.StdinPipe()
 	if err != nil {
 		return Event{}, err
@@ -198,17 +221,42 @@ func (h ExecHelper) Record(ctx context.Context, dir string, bundles []string, st
 	}
 	var once sync.Once
 	closeIn := func() { once.Do(func() { stdin.Close() }) }
+	grace, stall := cmp.Or(h.StopGrace, stopGrace), cmp.Or(h.StallAfter, stallAfter)
 	done := make(chan struct{})
+	lines := make(chan struct{}, 1)
+	var hung atomic.Bool
 	go func() {
-		select {
-		case <-stop:
-			closeIn()
-		case <-done:
+		stallT := time.NewTimer(stall)
+		defer stallT.Stop()
+		stopC := stop
+		var graceC <-chan time.Time
+		for {
+			select {
+			case <-stopC:
+				closeIn()
+				stopC, graceC = nil, time.After(grace)
+				continue
+			case <-lines:
+				stallT.Reset(stall)
+				continue
+			case <-done:
+				return
+			case <-stallT.C:
+			case <-graceC:
+			}
+			// The group is still unreaped (Wait has not run), so its ID is not reused yet.
+			hung.Store(true)
+			_ = syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+			return
 		}
 	}()
 	var last Event
 	sc := bufio.NewScanner(out)
 	for sc.Scan() {
+		select {
+		case lines <- struct{}{}:
+		default:
+		}
 		var ev Event
 		if json.Unmarshal(sc.Bytes(), &ev) == nil && ev.Event != "" {
 			last = ev
@@ -222,6 +270,10 @@ func (h ExecHelper) Record(ctx context.Context, dir string, bundles []string, st
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
 		err = nil
+	}
+	if hung.Load() {
+		slog.Warn("meeting: naozhi-audio record killed", "err", errRecorderHung, "last_event", last.Event)
+		err = errRecorderHung
 	}
 	return last, err
 }
