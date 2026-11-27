@@ -40,8 +40,8 @@ type keyNamespace struct {
 	kind string
 }
 
-// keyNamespaces is the authoritative reserved-namespace table; reservedKeyPrefixes,
-// exemptKeyPrefixes and exemptKind derive from it. Kept sorted.
+// keyNamespaces is the authoritative reserved-namespace table; reservedKeyPrefixes
+// and exemptInfo derive from it. Kept sorted.
 //
 // When adding an entry also update: DESIGN.md §"Session key namespace"; the
 // sidebar / persistence filter if it must not be shown by default; and, if

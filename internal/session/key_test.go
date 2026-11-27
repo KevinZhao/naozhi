@@ -89,36 +89,6 @@ func TestIsReservedNamespace(t *testing.T) {
 	}
 }
 
-// TestExemptKeyPrefixesUsesConstants locks the invariant that
-// router.go's exemptKeyPrefixes references the canonical constants,
-// not bare string literals that could drift. The concrete values live
-// on the constants; this test fails loudly if exemptKeyPrefixes is
-// ever re-grown with literal strings.
-func TestExemptKeyPrefixesUsesConstants(t *testing.T) {
-	t.Parallel()
-	want := map[string]bool{
-		CronKeyPrefix:               true,
-		ProjectKeyPrefix:            true,
-		SysKeyPrefix:                true,
-		PlannerNSPrefix:             true,
-		sessionkey.ScoutKeyPrefix:   true,
-		sessionkey.ReaderKeyPrefix:  true,
-		sessionkey.MeetingKeyPrefix: true,
-		sessionkey.PatrolKeyPrefix:  true,
-	}
-	for _, p := range exemptKeyPrefixes {
-		if !want[p] {
-			t.Errorf("exemptKeyPrefixes has unexpected entry %q; "+
-				"exempt-namespace policy must compose from the "+
-				"canonical reserved-prefix constants in key.go", p)
-		}
-		delete(want, p)
-	}
-	for missing := range want {
-		t.Errorf("exemptKeyPrefixes missing expected constant %q", missing)
-	}
-}
-
 // TestIsExemptKey exercises the router-private predicate that drives TTL
 // exemption. Kept in the key_test.go file because the policy set it
 // derives from lives here.
@@ -132,6 +102,12 @@ func TestIsExemptKey(t *testing.T) {
 		{"cron", "cron:foo", true},
 		{"project", "project:bar:planner", true},
 		{"sys", "sys:auto-titler", true},
+		{"planner", "planner:main", true},
+		{"scout", "scout:run1", true},
+		{"reader", "reader:run1", true},
+		{"meeting", "meeting:m1", true},
+		{"patrol", "patrol:run1", true},
+		{"task NOT exempt", "task:abc", false},
 		{"scratch NOT exempt", "scratch:abc:general:general", false},
 		{"IM NOT exempt", "feishu:group:chat:general", false},
 		{"empty NOT exempt", "", false},
