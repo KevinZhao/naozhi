@@ -3,6 +3,7 @@ package server
 import (
 	"log/slog"
 	"net/http"
+	"path"
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
@@ -106,6 +107,11 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	// Favicon is unauthenticated so it resolves on the login page.
 	s.mux.HandleFunc("GET /favicon.ico", handleFavicon)
 	s.mux.HandleFunc("GET /favicon.svg", handleFavicon)
+	// App icons, unauthenticated like the manifest that lists them: browsers
+	// fetch manifest icons without credentials. Safari also probes the root
+	// apple-touch-icon.png on its own.
+	s.mux.HandleFunc("GET /icons/{name}", handleAppIcon)
+	s.mux.HandleFunc("GET /apple-touch-icon.png", handleAppIcon)
 	// Dashboard JS is auth-gated: it embeds the API endpoint list + client
 	// schema (recon surface); the login page loads no /static/ JS (#1328).
 	// Modules, stylesheets and vendored libraries, all from the embedded table.
@@ -211,6 +217,27 @@ func handleFavicon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeStaticAssetBody(w, r, "favicon.svg")
+}
+
+// handleAppIcon serves an embedded static/icons/*.png. The name comes from the
+// request, so only a table hit is served; anything else is a 404.
+func handleAppIcon(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		name = "apple-touch-icon.png"
+	}
+	key := "icons/" + name
+	if path.Ext(name) != ".png" || strings.Contains(name, "/") || !hasStaticAsset(key) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "max-age=86400")
+	if serveStaticWithETag(w, r, key) {
+		return
+	}
+	writeStaticAssetBody(w, r, key)
 }
 
 func handleSW(w http.ResponseWriter, r *http.Request) {

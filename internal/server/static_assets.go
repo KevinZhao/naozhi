@@ -103,7 +103,8 @@ func buildStaticAssets() (map[string]staticAsset, string) {
 			return addVendorAsset(out, name, key)
 		}
 		switch {
-		case key == "manifest.json", key == "sw.js":
+		case key == "manifest.json", key == "sw.js",
+			path.Dir(key) == "icons" && path.Ext(key) == ".png":
 			return addStaticAsset(out, name, key, false)
 		case key == "dashboard.html", key == "favicon.svg",
 			path.Ext(key) == ".js" && !strings.Contains(key, "/"),

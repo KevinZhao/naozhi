@@ -393,6 +393,7 @@ var packageFuncType = map[string]string{
 	"handleSW":          "http.HandlerFunc",
 	"handleStaticAsset": "http.HandlerFunc",
 	"handleFavicon":     "http.HandlerFunc",
+	"handleAppIcon":     "http.HandlerFunc",
 }
 
 var serverFieldType = map[string]string{

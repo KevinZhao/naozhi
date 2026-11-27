@@ -616,6 +616,11 @@
   },
   {
     "method": "GET",
+    "path": "/apple-touch-icon.png",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/dashboard",
     "handler_type": "*Server"
   },
@@ -633,6 +638,11 @@
     "method": "GET",
     "path": "/health",
     "handler_type": "*HealthHandler"
+  },
+  {
+    "method": "GET",
+    "path": "/icons/{name}",
+    "handler_type": "http.HandlerFunc"
   },
   {
     "method": "GET",
