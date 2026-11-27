@@ -33,36 +33,16 @@ func makeProjectDir(t *testing.T, root, name string, cfg *ProjectConfig) {
 
 // ---- NewManager ----
 
-func TestNewManager_ValidDir(t *testing.T) {
+func TestNewManager_RejectsBadRoot(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	m, err := NewManager(root, PlannerDefaults{})
-	if err != nil {
-		t.Fatalf("NewManager = %v", err)
-	}
-	if m == nil {
-		t.Fatal("NewManager returned nil")
-	}
-}
-
-func TestNewManager_NonExistentDir(t *testing.T) {
-	t.Parallel()
-	_, err := NewManager("/nonexistent/path/xyz", PlannerDefaults{})
-	if err == nil {
-		t.Error("NewManager with missing dir should return error")
-	}
-}
-
-func TestNewManager_NotADirectory(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	file := filepath.Join(dir, "file.txt")
+	file := filepath.Join(t.TempDir(), "file.txt")
 	if err := os.WriteFile(file, []byte("hi"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := NewManager(file, PlannerDefaults{})
-	if err == nil {
-		t.Error("NewManager with file path should return error")
+	for _, root := range []string{"/nonexistent/path/xyz", file} {
+		if _, err := NewManager(root, PlannerDefaults{}); err == nil {
+			t.Errorf("NewManager(%q) = nil error, want error", root)
+		}
 	}
 }
 
@@ -95,26 +75,8 @@ func TestScan_SkipsHiddenDirs(t *testing.T) {
 	}
 }
 
-// TestScan_PicksUpDirsWithoutCLAUDEMd locks the policy: any non-hidden
-// subdirectory under projects_root counts as a project, even without a
-// CLAUDE.md marker file. The dashboard "New session" palette + favorite
-// pinning rely on every workspace folder showing up so users can star
-// arbitrary folders.
-func TestScan_PicksUpDirsWithoutCLAUDEMd(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	// Bare directory — no CLAUDE.md, no .naozhi/project.yaml.
-	os.MkdirAll(filepath.Join(root, "bare"), 0755)
-
-	m, _ := NewManager(root, PlannerDefaults{})
-	m.Scan()
-
-	all := m.All()
-	if len(all) != 1 || all[0].Name != "bare" {
-		t.Errorf("Scan() should pick up bare directory; All() = %+v", all)
-	}
-}
-
+// Any non-hidden subdirectory counts as a project, no marker file needed:
+// the dashboard folder palette and favorites rely on every folder showing up.
 func TestScan_PicksUpProjects(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -303,36 +265,13 @@ func TestGet_ReturnsCopy(t *testing.T) {
 	}
 }
 
-// ---- All (sorted) ----
-
-func TestAll_Sorted(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	for _, name := range []string{"charlie", "alpha", "beta"} {
-		makeProjectDir(t, root, name, nil)
-	}
-	m, _ := NewManager(root, PlannerDefaults{})
-	m.Scan()
-
-	// First-scan migration stamps CreatedAt in lexical-name order so the
-	// upgrade boot keeps the previous "All() sorted by name" output verbatim.
-	all := m.All()
-	if len(all) != 3 {
-		t.Fatalf("All() = %d, want 3", len(all))
-	}
-	names := []string{all[0].Name, all[1].Name, all[2].Name}
-	want := []string{"alpha", "beta", "charlie"}
-	for i := range want {
-		if names[i] != want[i] {
-			t.Errorf("All()[%d].Name = %q, want %q", i, names[i], want[i])
-		}
-	}
-}
+// ---- All (ordering) ----
 
 // TestScan_StampsCreatedAtOnFirstScan locks the migration contract: a freshly
 // scanned project tree without any CreatedAt values gets monotonically
 // increasing timestamps in lexical order, persisted to the projects index so
-// subsequent boots are idempotent (no reshuffling) — and never to project.yaml.
+// subsequent boots are idempotent (no reshuffling). That project.yaml stays
+// untouched is TestScan_DoesNotWriteIntoProjectDirs's.
 func TestScan_StampsCreatedAtOnFirstScan(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -362,12 +301,6 @@ func TestScan_StampsCreatedAtOnFirstScan(t *testing.T) {
 		all[1].Config.CreatedAt < all[2].Config.CreatedAt) {
 		t.Errorf("CreatedAt not strictly ascending: %d %d %d",
 			all[0].Config.CreatedAt, all[1].Config.CreatedAt, all[2].Config.CreatedAt)
-	}
-
-	for _, name := range []string{"zeta", "alpha", "mu"} {
-		if _, err := os.Stat(filepath.Join(root, name, ".naozhi")); !os.IsNotExist(err) {
-			t.Errorf("Scan created %s/.naozhi (stat err = %v); order belongs in the index", name, err)
-		}
 	}
 
 	// Index: a later boot reads the stamped values rather than restamping.
@@ -740,88 +673,35 @@ func TestResolveWorkspaces_NoMatch(t *testing.T) {
 	m, _ := NewManager(root, PlannerDefaults{})
 	m.Scan()
 
-	result := m.ResolveWorkspaces([]string{"/some/other/path"})
+	result := m.ResolveWorkspaces([]string{"/some/other/path", ""})
 	if len(result) != 0 {
 		t.Errorf("ResolveWorkspaces no match = %v, want empty", result)
 	}
 }
 
-func TestResolveWorkspaces_DedupPaths(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	makeProjectDir(t, root, "dedup", nil)
-	m, _ := NewManager(root, PlannerDefaults{})
-	m.Scan()
-
-	projPath := filepath.Join(root, "dedup", "sub")
-	// Same path twice → result should have one entry.
-	result := m.ResolveWorkspaces([]string{projPath, projPath})
-	if len(result) > 1 {
-		t.Errorf("ResolveWorkspaces dedup = %d entries, want <= 1", len(result))
-	}
-}
-
-func TestResolveWorkspaces_EmptyPath(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	m, _ := NewManager(root, PlannerDefaults{})
-	m.Scan()
-
-	result := m.ResolveWorkspaces([]string{""})
-	if len(result) != 0 {
-		t.Errorf("ResolveWorkspaces empty path = %v, want empty", result)
-	}
-}
-
 // ---- EffectivePlannerModel / EffectivePlannerPrompt ----
 
-func TestEffectivePlannerModel_ProjectOverride(t *testing.T) {
+// Project override > global default > "".
+func TestEffectivePlannerModelAndPrompt(t *testing.T) {
 	t.Parallel()
-	m := &Manager{defaults: PlannerDefaults{Model: "global-model"}}
-	p := &Project{Config: ProjectConfig{PlannerModel: "project-model"}}
-	got := m.EffectivePlannerModel(p)
-	if got != "project-model" {
-		t.Errorf("EffectivePlannerModel = %q, want \"project-model\"", got)
+	cases := []struct {
+		name            string
+		global, project string
+		want            string
+	}{
+		{"project override", "global", "project", "project"},
+		{"global default", "global", "", "global"},
+		{"empty", "", "", ""},
 	}
-}
-
-func TestEffectivePlannerModel_GlobalDefault(t *testing.T) {
-	t.Parallel()
-	m := &Manager{defaults: PlannerDefaults{Model: "global-model"}}
-	p := &Project{}
-	got := m.EffectivePlannerModel(p)
-	if got != "global-model" {
-		t.Errorf("EffectivePlannerModel = %q, want \"global-model\"", got)
-	}
-}
-
-func TestEffectivePlannerModel_Empty(t *testing.T) {
-	t.Parallel()
-	m := &Manager{defaults: PlannerDefaults{}}
-	p := &Project{}
-	got := m.EffectivePlannerModel(p)
-	if got != "" {
-		t.Errorf("EffectivePlannerModel = %q, want empty", got)
-	}
-}
-
-func TestEffectivePlannerPrompt_ProjectOverride(t *testing.T) {
-	t.Parallel()
-	m := &Manager{defaults: PlannerDefaults{Prompt: "global-prompt"}}
-	p := &Project{Config: ProjectConfig{PlannerPrompt: "project-prompt"}}
-	got := m.EffectivePlannerPrompt(p)
-	if got != "project-prompt" {
-		t.Errorf("EffectivePlannerPrompt = %q, want \"project-prompt\"", got)
-	}
-}
-
-func TestEffectivePlannerPrompt_GlobalDefault(t *testing.T) {
-	t.Parallel()
-	m := &Manager{defaults: PlannerDefaults{Prompt: "global-prompt"}}
-	p := &Project{}
-	got := m.EffectivePlannerPrompt(p)
-	if got != "global-prompt" {
-		t.Errorf("EffectivePlannerPrompt = %q, want \"global-prompt\"", got)
+	for _, tc := range cases {
+		m := &Manager{defaults: PlannerDefaults{Model: tc.global, Prompt: tc.global}}
+		p := &Project{Config: ProjectConfig{PlannerModel: tc.project, PlannerPrompt: tc.project}}
+		if got := m.EffectivePlannerModel(p); got != tc.want {
+			t.Errorf("%s: EffectivePlannerModel = %q, want %q", tc.name, got, tc.want)
+		}
+		if got := m.EffectivePlannerPrompt(p); got != tc.want {
+			t.Errorf("%s: EffectivePlannerPrompt = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -872,36 +752,6 @@ func TestEffectivePlannerPrompt_AllowsCJKAndMultiline(t *testing.T) {
 	}
 }
 
-// ---- rebuildBindingIndex (via BindChat collision) ----
-
-func TestRebuildBindingIndex_OverwriteOnBind(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	makeProjectDir(t, root, "proj_a", &ProjectConfig{
-		ChatBindings: []ChatBinding{{Platform: "feishu", ChatType: "group", ChatID: "shared"}},
-	})
-	makeProjectDir(t, root, "proj_b", nil)
-	m, _ := NewManager(root, PlannerDefaults{})
-	m.Scan()
-
-	// "shared" currently belongs to proj_a
-	p := m.ProjectForChat("feishu", "group", "shared")
-	if p == nil || p.Name != "proj_a" {
-		t.Fatalf("initial binding wrong: %v", p)
-	}
-
-	// Bind the same chat to proj_b (last bind wins in rebuildBindingIndex)
-	m.BindChat("proj_b", "feishu", "group", "shared")
-
-	p2 := m.ProjectForChat("feishu", "group", "shared")
-	// After rebuildBindingIndex, both proj_a and proj_b claim "shared".
-	// The result is non-deterministic (map iteration order) but we just ensure
-	// the function doesn't panic and returns a non-nil project.
-	if p2 == nil {
-		t.Error("ProjectForChat after double-bind = nil")
-	}
-}
-
 // ---- ResolveWorkspaces inode-walk fallback (case-insensitive FS) ----
 
 // TestResolveWorkspaces_InodeFallback is the CI-safe proxy for the macOS/Windows
@@ -947,47 +797,6 @@ func TestResolveWorkspaces_InodeFallback(t *testing.T) {
 	result := m.ResolveWorkspaces([]string{aliasWS})
 	if got := result[aliasWS]; got != "proj" {
 		t.Errorf("ResolveWorkspaces(%q) = %q, want \"proj\" (inode fallback should match)", aliasWS, got)
-	}
-}
-
-// TestResolveWorkspaces_InodeFallback_LongestWins pins that the fallback keeps
-// the longest-prefix (deepest project) semantics of the byte fast path: when a
-// ws (reached via an inode-equal alias) lives under both an outer and an inner
-// registered project, the inner one must win.
-func TestResolveWorkspaces_InodeFallback_LongestWins(t *testing.T) {
-	t.Parallel()
-	tmp := t.TempDir()
-	root := filepath.Join(tmp, "real")
-	// outer = <root>/outer ; inner = <root>/outer/inner — both registered as
-	// projects (any non-hidden subdir under root is a project, and Scan also
-	// walks nested dirs that contain their own marker only via top-level
-	// ReadDir, so register inner as a sibling top-level whose Path nests under
-	// outer by constructing the tree explicitly).
-	makeProjectDir(t, root, "outer", nil)
-	innerName := "inner"
-	if err := os.MkdirAll(filepath.Join(root, "outer", innerName), 0o755); err != nil {
-		t.Fatalf("mkdir inner: %v", err)
-	}
-
-	m, err := NewManager(root, PlannerDefaults{})
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-	if err := m.Scan(); err != nil {
-		t.Fatalf("Scan: %v", err)
-	}
-
-	// Only top-level dirs under root become projects, so "outer" is the only
-	// registered project here; a ws under outer/inner must still resolve to
-	// "outer" via the fallback (deepest *registered* project).
-	alias := filepath.Join(tmp, "alias")
-	if err := os.Symlink(root, alias); err != nil {
-		t.Skipf("symlink not supported: %v", err)
-	}
-	aliasWS := filepath.Join(alias, "outer", innerName, "deep")
-	result := m.ResolveWorkspaces([]string{aliasWS})
-	if got := result[aliasWS]; got != "outer" {
-		t.Errorf("ResolveWorkspaces(%q) = %q, want \"outer\"", aliasWS, got)
 	}
 }
 

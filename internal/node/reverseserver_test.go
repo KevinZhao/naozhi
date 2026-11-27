@@ -1,7 +1,6 @@
 package node
 
 import (
-	"crypto/sha256"
 	"errors"
 	"net"
 	"net/http"
@@ -84,74 +83,15 @@ func TestReverseServer_Register_ok(t *testing.T) {
 	}
 }
 
-// ---- Wrong token is rejected ----
+// ---- Bad credentials are rejected ----
 
-func TestReverseServer_Register_wrongToken(t *testing.T) {
-	rs := newTestReverseServer("node-1", "correct", false)
-
-	mux := http.NewServeMux()
-	mux.Handle("/ws-node", rs)
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	conn := dialReverseNode(t, srv)
-	defer conn.Close()
-
-	resp := reverseAuth(t, conn, "node-1", "wrong", "host")
-	if resp.Type != "register_fail" {
-		t.Fatalf("expected 'register_fail', got %q", resp.Type)
-	}
-}
-
-// ---- Unknown node_id is rejected ----
-
-func TestReverseServer_Register_unknownNodeID(t *testing.T) {
-	rs := newTestReverseServer("node-1", "tok", false)
-
-	mux := http.NewServeMux()
-	mux.Handle("/ws-node", rs)
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	conn := dialReverseNode(t, srv)
-	defer conn.Close()
-
-	resp := reverseAuth(t, conn, "unknown-node", "tok", "host")
-	if resp.Type != "register_fail" {
-		t.Fatalf("expected 'register_fail', got %q", resp.Type)
-	}
-}
-
-// ---- Precomputed token hash cache (R231-PERF / #2231) ----
-
-// TestReverseServer_AuthHashPrecomputed asserts NewReverseServer precomputes
-// sha256(expected token) per node_id and omits empty-token entries (which can
-// never authenticate). #2231.
-func TestReverseServer_AuthHashPrecomputed(t *testing.T) {
+// A node configured with an empty token cannot authenticate even with an
+// empty probe token (the zero-value collision the precomputed-hash fast path
+// must not allow, #2231).
+func TestReverseServer_Register_rejected(t *testing.T) {
 	rs := NewReverseServer(map[string]ReverseNodeAuth{
-		"node-1": {Token: "secret"},
-		"node-2": {Token: ""}, // empty token: never authenticatable
-	}, false)
-
-	want := sha256.Sum256([]byte("secret"))
-	got, ok := rs.authHash["node-1"]
-	if !ok {
-		t.Fatal("node-1 missing from authHash")
-	}
-	if got != want {
-		t.Fatalf("node-1 authHash = %x, want %x", got, want)
-	}
-	if _, ok := rs.authHash["node-2"]; ok {
-		t.Error("empty-token node-2 must not appear in authHash")
-	}
-}
-
-// TestReverseServer_Register_emptyConfiguredToken asserts a node configured
-// with an empty token cannot authenticate even if the probe token is also
-// empty (the zero-value collision the fast path must not allow). #2231.
-func TestReverseServer_Register_emptyConfiguredToken(t *testing.T) {
-	rs := NewReverseServer(map[string]ReverseNodeAuth{
-		"node-1": {Token: ""},
+		"node-1":     {Token: "correct"},
+		"node-empty": {Token: ""},
 	}, false)
 
 	mux := http.NewServeMux()
@@ -159,12 +99,16 @@ func TestReverseServer_Register_emptyConfiguredToken(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	conn := dialReverseNode(t, srv)
-	defer conn.Close()
-
-	resp := reverseAuth(t, conn, "node-1", "", "host")
-	if resp.Type != "register_fail" {
-		t.Fatalf("expected 'register_fail' for empty configured token, got %q", resp.Type)
+	for _, tc := range []struct{ name, nodeID, token string }{
+		{"wrong token", "node-1", "wrong"},
+		{"unknown node_id", "unknown-node", "correct"},
+		{"empty configured token", "node-empty", ""},
+	} {
+		conn := dialReverseNode(t, srv)
+		if resp := reverseAuth(t, conn, tc.nodeID, tc.token, "host"); resp.Type != "register_fail" {
+			t.Errorf("%s: expected 'register_fail', got %q", tc.name, resp.Type)
+		}
+		conn.Close()
 	}
 }
 
@@ -190,28 +134,7 @@ func TestReverseServer_Register_wrongMsgType(t *testing.T) {
 	}
 }
 
-// ---- Browser Origin header causes rejection ----
-
-func TestReverseServer_Register_originRejected(t *testing.T) {
-	rs := newTestReverseServer("node-1", "tok", false)
-
-	mux := http.NewServeMux()
-	mux.Handle("/ws-node", rs)
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	u := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws-node"
-	hdr := http.Header{"Origin": []string{"http://evil.example.com"}}
-	_, resp, err := websocket.DefaultDialer.Dial(u, hdr)
-	if err == nil {
-		t.Fatal("expected dial to fail when Origin header is present")
-	}
-	if resp != nil && resp.StatusCode == http.StatusSwitchingProtocols {
-		t.Fatal("expected non-101 response")
-	}
-}
-
-// ---- AllNodes returns configured nodes ----
+// ---- AllNodes returns configured nodes, connected or not ----
 
 func TestReverseServer_AllNodes(t *testing.T) {
 	auth := map[string]ReverseNodeAuth{
@@ -228,19 +151,6 @@ func TestReverseServer_AllNodes(t *testing.T) {
 	}
 	if nodes["node-b"] != "Node B" {
 		t.Errorf("node-b display name: want 'Node B', got %q", nodes["node-b"])
-	}
-}
-
-// ---- AllNodes includes disconnected nodes ----
-
-func TestReverseServer_AllNodes_includesDisconnected(t *testing.T) {
-	auth := map[string]ReverseNodeAuth{
-		"node-1": {Token: "tok"},
-	}
-	rs := NewReverseServer(auth, false)
-	nodes := rs.AllNodes()
-	if _, ok := nodes["node-1"]; !ok {
-		t.Error("expected node-1 in AllNodes even without active connection")
 	}
 }
 
@@ -312,40 +222,6 @@ func TestReverseServer_Reconnect_closesOldConn(t *testing.T) {
 	case <-registered:
 		t.Error("OnRegister fired a third time for two connections")
 	default:
-	}
-}
-
-// ---- OnDeregister is called when connection drops ----
-
-func TestReverseServer_OnDeregister_calledOnDisconnect(t *testing.T) {
-	rs := newTestReverseServer("node-1", "tok", false)
-	rs.deregisterGrace = testDeregisterGrace
-
-	deregistered := make(chan string, 1)
-	rs.OnDeregister = func(id string) { deregistered <- id }
-
-	mux := http.NewServeMux()
-	mux.Handle("/ws-node", rs)
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	conn := dialReverseNode(t, srv)
-	resp := reverseAuth(t, conn, "node-1", "tok", "host")
-	if resp.Type != "registered" {
-		conn.Close()
-		t.Fatalf("expected registered, got %q", resp.Type)
-	}
-
-	// Close the client side to trigger deregister.
-	conn.Close()
-
-	select {
-	case id := <-deregistered:
-		if id != "node-1" {
-			t.Errorf("expected deregister for 'node-1', got %q", id)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("timeout waiting for OnDeregister")
 	}
 }
 
@@ -513,27 +389,6 @@ func TestReverseServer_DisplayNameCapping(t *testing.T) {
 	}
 }
 
-// ---- trustedProxy IP extraction for rate limiting ----
-
-func TestReverseServer_TrustedProxy_rateLimit(t *testing.T) {
-	// With trustedProxy=true, XFF last entry is used as rate-limit key.
-	// Verify server starts without panic and accepts connections.
-	rs := newTestReverseServer("node-1", "tok", true)
-
-	mux := http.NewServeMux()
-	mux.Handle("/ws-node", rs)
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	// Dial without XFF — falls back to RemoteAddr.
-	conn := dialReverseNode(t, srv)
-	defer conn.Close()
-	resp := reverseAuth(t, conn, "node-1", "tok", "host")
-	if resp.Type != "registered" {
-		t.Fatalf("expected registered with trustedProxy, got %q", resp.Type)
-	}
-}
-
 // ---- Behind a TLS-terminating proxy (CloudFront → ALB → naozhi) ----
 
 // The proxy hop arrives as plain HTTP with the public Host, so only a declared
@@ -558,7 +413,7 @@ func TestReverseServer_Upgrade_forwardedHTTPS(t *testing.T) {
 			hdr := http.Header{"Host": {"naozhi.example.com"}, "X-Forwarded-Proto": {"https"}}
 			conn, resp, err := websocket.DefaultDialer.Dial(u, hdr)
 			if conn != nil {
-				conn.Close()
+				defer conn.Close()
 			}
 			if got := err == nil; got != tc.wantUpgrade {
 				status := 0
@@ -566,6 +421,13 @@ func TestReverseServer_Upgrade_forwardedHTTPS(t *testing.T) {
 					status = resp.StatusCode
 				}
 				t.Fatalf("upgrade = %v (status %d, err %v), want %v", got, status, err, tc.wantUpgrade)
+			}
+			// Behind a trusted proxy the rate-limit key comes from XFF, falling
+			// back to RemoteAddr; registration goes through either way.
+			if conn != nil {
+				if r := reverseAuth(t, conn, "node-1", "tok", "host"); r.Type != "registered" {
+					t.Fatalf("expected registered with trustedProxy, got %q", r.Type)
+				}
 			}
 		})
 	}

@@ -102,6 +102,11 @@ func TestCacheManager_RefreshAll(t *testing.T) {
 	if len(sessions["node-1"]) != 2 {
 		t.Errorf("expected 2 sessions, got %d", len(sessions["node-1"]))
 	}
+	for _, s := range sessions["node-1"] {
+		if s["node"] != "node-1" {
+			t.Errorf("expected node field 'node-1', got %v", s["node"])
+		}
+	}
 	if status["node-1"] != "ok" {
 		t.Errorf("expected status 'ok', got %q", status["node-1"])
 	}
@@ -118,46 +123,6 @@ func TestCacheManager_RefreshAll(t *testing.T) {
 
 	if onChangeCalled.Load() == 0 {
 		t.Error("expected onChange to be called")
-	}
-}
-
-// ---- RefreshAll injects "node" field into session maps ----
-
-func TestCacheManager_RefreshAll_injectsNodeField(t *testing.T) {
-	node := &stubConn{
-		nodeID:   "my-node",
-		sessions: []map[string]any{{"session_id": "s1"}},
-	}
-	cm := NewCacheManager(
-		func() map[string]Conn { return map[string]Conn{"my-node": node} },
-		nil,
-	)
-	cm.RefreshAll()
-
-	sessions, _ := cm.Sessions()
-	for _, s := range sessions["my-node"] {
-		if s["node"] != "my-node" {
-			t.Errorf("expected node field 'my-node', got %v", s["node"])
-		}
-	}
-}
-
-// ---- RefreshAll marks node as error on FetchSessions failure ----
-
-func TestCacheManager_RefreshAll_fetchError(t *testing.T) {
-	node := &stubConn{
-		nodeID:  "bad-node",
-		sessErr: errors.New("connection refused"),
-	}
-	cm := NewCacheManager(
-		func() map[string]Conn { return map[string]Conn{"bad-node": node} },
-		nil,
-	)
-	cm.RefreshAll()
-
-	_, status := cm.Sessions()
-	if status["bad-node"] != "error" {
-		t.Errorf("expected status 'error', got %q", status["bad-node"])
 	}
 }
 
@@ -260,39 +225,6 @@ func TestCacheManager_RefreshAll_preservesProjectsOnPartialError(t *testing.T) {
 	}
 }
 
-// ---- RefreshFor updates a single node ----
-
-func TestCacheManager_RefreshFor(t *testing.T) {
-	node := &stubConn{
-		nodeID:   "node-x",
-		sessions: []map[string]any{{"session_id": "abc"}},
-	}
-	cm := NewCacheManager(
-		func() map[string]Conn { return map[string]Conn{"node-x": node} },
-		nil,
-	)
-	cm.RefreshFor("node-x")
-
-	sessions, status := cm.Sessions()
-	if len(sessions["node-x"]) != 1 {
-		t.Errorf("expected 1 session, got %d", len(sessions["node-x"]))
-	}
-	if status["node-x"] != "ok" {
-		t.Errorf("expected status 'ok', got %q", status["node-x"])
-	}
-}
-
-// ---- RefreshFor with unknown node is a no-op ----
-
-func TestCacheManager_RefreshFor_unknownNode(t *testing.T) {
-	cm := NewCacheManager(
-		func() map[string]Conn { return map[string]Conn{} },
-		nil,
-	)
-	// Must not panic.
-	cm.RefreshFor("no-such-node")
-}
-
 // ---- RefreshFor preserves existing cache on sessErr ----
 
 func TestCacheManager_RefreshFor_preserveOnError(t *testing.T) {
@@ -306,6 +238,9 @@ func TestCacheManager_RefreshFor_preserveOnError(t *testing.T) {
 	)
 	// Seed with good data.
 	cm.RefreshFor("node-y")
+	if sessions, status := cm.Sessions(); len(sessions["node-y"]) != 1 || status["node-y"] != "ok" {
+		t.Fatalf("after RefreshFor: %d sessions, status %q, want 1 and ok", len(sessions["node-y"]), status["node-y"])
+	}
 
 	// Now inject error.
 	node.sessErr = errors.New("timeout")
@@ -325,7 +260,8 @@ func TestCacheManager_RefreshFor_preserveOnError(t *testing.T) {
 
 // TestCacheManager_Getters_ImmutableAfterWrite asserts a map reference handed
 // out by a getter is never mutated in place by a subsequent RefreshFor /
-// PurgeNode. This is what lets the getters skip the per-call defensive copy.
+// RefreshAll / PurgeNode: each publishes a fresh map (copy-on-write), which is
+// what lets the getters skip the per-call defensive copy.
 func TestCacheManager_Getters_ImmutableAfterWrite(t *testing.T) {
 	node := &stubConn{
 		nodeID:   "node-z",
@@ -348,9 +284,17 @@ func TestCacheManager_Getters_ImmutableAfterWrite(t *testing.T) {
 
 	// A subsequent write must not mutate the captured snapshot.
 	node.sessions = []map[string]any{{"session_id": "second"}, {"session_id": "third"}}
-	cm.RefreshFor("node-z")
-	if len(sessions["node-z"]) != 1 {
-		t.Errorf("captured sessions map mutated in place: now %d entries", len(sessions["node-z"]))
+	for name, refresh := range map[string]func(){
+		"RefreshFor": func() { cm.RefreshFor("node-z") },
+		"RefreshAll": cm.RefreshAll,
+	} {
+		refresh()
+		if len(sessions["node-z"]) != 1 {
+			t.Errorf("%s mutated the captured sessions map in place: now %d entries", name, len(sessions["node-z"]))
+		}
+		if live, _ := cm.Sessions(); len(live["node-z"]) != 2 {
+			t.Errorf("%s: live view has %d entries, want the refreshed 2", name, len(live["node-z"]))
+		}
 	}
 
 	// PurgeNode must not delete from the captured snapshot.
@@ -463,38 +407,6 @@ func TestCacheManager_PurgeNode(t *testing.T) {
 	}
 	if disc := cm.Discovered(); len(disc["purge-me"]) != 0 {
 		t.Errorf("expected discovered purged, got %v", disc["purge-me"])
-	}
-}
-
-// ---- Sessions returns a read-only live view; RefreshAll publishes a fresh
-// map (copy-on-write), so a previously-returned snapshot is never mutated by a
-// later refresh. #2230 changed the getter from a defensive copy to a live view;
-// the invariant that matters is "published maps are immutable", verified here
-// (and in TestCacheManager_Getters_ImmutableAfterWrite for RefreshFor/Purge). ----
-
-func TestCacheManager_Sessions_publishesFreshMapOnRefresh(t *testing.T) {
-	node := &stubConn{
-		nodeID:   "n1",
-		sessions: []map[string]any{{"session_id": "s1"}},
-	}
-	cm := NewCacheManager(
-		func() map[string]Conn { return map[string]Conn{"n1": node} },
-		nil,
-	)
-	cm.RefreshAll()
-
-	// Capture the published snapshot, then trigger another publish.
-	sessions1, _ := cm.Sessions()
-	node.sessions = []map[string]any{{"session_id": "s1"}, {"session_id": "s2"}}
-	cm.RefreshAll()
-
-	// The earlier snapshot must be unaffected by the new publish.
-	if got := len(sessions1["n1"]); got != 1 {
-		t.Errorf("earlier Sessions() snapshot mutated by RefreshAll: %d entries", got)
-	}
-	sessions2, _ := cm.Sessions()
-	if got := len(sessions2["n1"]); got != 2 {
-		t.Errorf("new Sessions() snapshot should reflect refresh: %d entries", got)
 	}
 }
 

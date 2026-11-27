@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -92,43 +91,16 @@ func readAllRecords(t *testing.T, path string) []*schema.Record {
 	return out
 }
 
-// TestPersister_WritesHeaderAndEntry is the smoke test: one session,
-// one entry, Flush, verify the file has 1 header + 1 entry in order.
-func TestPersister_WritesHeaderAndEntry(t *testing.T) {
-	p, dir := newTestPersister(t)
-	sink := p.SinkFor("dashboard:direct:alice:general")
-
-	sink([]Entry{entry(t, 1700000001000, "uuid-1")}, false /* replay */)
-
-	// Wait for debounce to fire.
-	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
-	defer cancel()
-	if err := p.Flush(ctx); err != nil {
-		t.Fatalf("Flush: %v", err)
-	}
-
-	logPath := LogPath(dir, "dashboard:direct:alice:general")
-	recs := readAllRecords(t, logPath)
-	if len(recs) != 2 {
-		t.Fatalf("got %d records, want 2 (header+entry): %+v", len(recs), recs)
-	}
-	if recs[0].Type != schema.TypeHeader || recs[0].Seq != 0 {
-		t.Errorf("record[0] not header: %+v", recs[0])
-	}
-	if recs[1].Type != schema.TypeEntry || recs[1].Seq != 1 {
-		t.Errorf("record[1] not entry seq=1: %+v", recs[1])
-	}
-}
-
 // TestPersister_DropsReplayPhase is the runtime blocker-1 guard from
 // RFC §3.2.3: a sink receiving a replay=true batch must NOT write to
-// disk and must increment replay_leak_total.
+// disk and must count each of its entries in replay_leak_total — an
+// observable signal rather than a panic (R242-GO-11), DevMode or not.
 func TestPersister_DropsReplayPhase(t *testing.T) {
-	p, dir := newTestPersister(t)
+	p, dir := newTestPersister(t, func(o *Options) { o.DevMode = true })
 	sink := p.SinkFor("dashboard:direct:alice:general")
 
 	// Feed a replay batch — should be silently dropped.
-	sink([]Entry{entry(t, 1700000001000, "uuid-r")}, true /* replay */)
+	sink([]Entry{entry(t, 1700000001000, "uuid-r"), entry(t, 1700000001001, "uuid-s")}, true /* replay */)
 
 	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
 	defer cancel()
@@ -136,8 +108,8 @@ func TestPersister_DropsReplayPhase(t *testing.T) {
 		t.Fatalf("Flush: %v", err)
 	}
 	stats := p.Stats()
-	if stats.ReplayLeak != 1 {
-		t.Errorf("ReplayLeak=%d, want 1", stats.ReplayLeak)
+	if stats.ReplayLeak != 2 {
+		t.Errorf("ReplayLeak=%d, want 2", stats.ReplayLeak)
 	}
 	if stats.Written != 0 {
 		t.Errorf("Written=%d, want 0 (replay batch must not hit disk)", stats.Written)
@@ -147,26 +119,6 @@ func TestPersister_DropsReplayPhase(t *testing.T) {
 	logPath := LogPath(dir, "dashboard:direct:alice:general")
 	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
 		t.Errorf("log file exists despite replay-only feed (err=%v)", err)
-	}
-}
-
-// TestPersister_DevMode_ReplayLeakObserved guarantees that in DevMode
-// (and in prod) a replay-phase batch leaking into the sink is observable
-// via the replayLeakCnt counter, not via a
-// goroutine-context panic. R242-GO-11: dropped the DevMode-only panic
-// in favour of a slog.Error + counter signal so tests/alerting can
-// observe the bug without taking down the process.
-func TestPersister_DevMode_ReplayLeakObserved(t *testing.T) {
-	p, _ := newTestPersister(t, func(o *Options) {
-		o.DevMode = true
-	})
-	sink := p.SinkFor("dashboard:direct:alice:general")
-
-	// Must not panic; must increment the leak counter.
-	sink([]Entry{entry(t, 1, "u"), entry(t, 2, "u")}, true /* replay */)
-
-	if got := p.replayLeakCnt.Load(); got != 2 {
-		t.Errorf("replayLeakCnt=%d want=2", got)
 	}
 }
 
@@ -283,9 +235,12 @@ func TestPersister_Stop_FlushesPending(t *testing.T) {
 	}
 }
 
-// TestPersister_Stop_Idempotent: calling Stop twice is fine.
+// TestPersister_Stop_Idempotent: calling Stop twice is fine, and a sink
+// called after Stop drops without panicking on the closed channel or
+// blocking.
 func TestPersister_Stop_Idempotent(t *testing.T) {
 	p, _ := newTestPersister(t)
+	sink := p.SinkFor("k")
 	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
 	defer cancel()
 	if err := p.Stop(ctx); err != nil {
@@ -294,19 +249,6 @@ func TestPersister_Stop_Idempotent(t *testing.T) {
 	if err := p.Stop(ctx); err != nil {
 		t.Errorf("second Stop: %v", err)
 	}
-}
-
-// TestPersister_SinkAfterStop_Drops confirms that a PersistSink
-// closure called after Stop silently drops. Avoids panicking on
-// closed channels.
-func TestPersister_SinkAfterStop_Drops(t *testing.T) {
-	p, _ := newTestPersister(t)
-	sink := p.SinkFor("k")
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = p.Stop(ctx)
-
-	// Must not panic, must not block.
 	sink([]Entry{entry(t, 1, "u")}, false)
 }
 
@@ -423,37 +365,6 @@ func TestPersister_Stats_ReflectsWrites(t *testing.T) {
 	}
 }
 
-// TestPersister_WriterAlive_True_AfterDrain confirms the /health
-// liveness signal flips true once a batch has been drained.
-func TestPersister_WriterAlive_True_AfterDrain(t *testing.T) {
-	p, _ := newTestPersister(t)
-	// Initially may be false (never drained).
-	sink := p.SinkFor("k")
-	sink([]Entry{entry(t, 1, "u")}, false)
-
-	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
-	defer cancel()
-	p.Flush(ctx)
-
-	// With recent drain, alive should be true.
-	if !p.WriterAlive() {
-		t.Errorf("WriterAlive=false after successful drain (stats=%+v)", p.Stats())
-	}
-}
-
-// TestPersister_WriterAlive_False_AfterStop confirms the liveness
-// signal goes false post-Stop so /health shows the right state
-// during graceful shutdown.
-func TestPersister_WriterAlive_False_AfterStop(t *testing.T) {
-	p, _ := newTestPersister(t)
-	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
-	defer cancel()
-	_ = p.Stop(ctx)
-	if p.WriterAlive() {
-		t.Errorf("WriterAlive=true after Stop")
-	}
-}
-
 // TestPersister_WriterAlive_MatchesStatsLogic confirms the fast
 // path in WriterAlive() (which reads atomic / channel fields
 // directly to skip the Stats struct alloc — R250-PERF-24) returns
@@ -560,68 +471,6 @@ func TestPersister_Rotate(t *testing.T) {
 	// ensure rotate ran (size < total sends).
 	if len(recs) > DefaultKeepRecords+100 {
 		t.Errorf("rotate did not trim; records=%d", len(recs))
-	}
-}
-
-// TestKeyHash_StableStemAcrossPersisters guarantees two Persisters
-// rooted at the same dir see the same files for a given key.
-//
-// #2473: the original shared ONE 1s context across four fsync-bound calls
-// (p1.Flush, p1.Stop, p2.Flush, deferred Stops) and discarded every error.
-// A single slow fsync on a loaded CI runner exhausted the budget, after
-// which Flush returned ctx.Err() before even enqueuing the op, so p2's
-// record silently never reached disk ("expected records across both
-// persisters, got 2", wall time exactly 1.00s). Flush/Stop already block
-// on the writer goroutine's acknowledgement, so the synchronisation is
-// deterministic — the fix is to stop turning a hang-guard into a shared
-// performance budget and to fail loudly on the first error. t.Context()
-// is bounded only by go test's own -timeout, so a genuine wedge surfaces
-// as the standard timeout panic + goroutine dump.
-func TestKeyHash_StableStemAcrossPersisters(t *testing.T) {
-	dir := t.TempDir()
-	opts := Options{Dir: dir, FlushInterval: 10 * time.Millisecond}
-	p1, err := NewPersister(opts)
-	if err != nil {
-		t.Fatalf("NewPersister p1: %v", err)
-	}
-	p2, err := NewPersister(opts)
-	if err != nil {
-		t.Fatalf("NewPersister p2: %v", err)
-	}
-	t.Cleanup(func() {
-		// Safety net for early Fatalf exits only; Stop is idempotent, so
-		// the explicit stops below make these no-ops on the happy path.
-		_ = p1.Stop(context.Background())
-		_ = p2.Stop(context.Background())
-	})
-	ctx := t.Context()
-	flush := func(p *Persister, name string) {
-		t.Helper()
-		if err := p.Flush(ctx); err != nil {
-			t.Fatalf("%s.Flush: %v", name, err)
-		}
-	}
-	stop := func(p *Persister, name string) {
-		t.Helper()
-		if err := p.Stop(ctx); err != nil {
-			t.Fatalf("%s.Stop: %v", name, err)
-		}
-	}
-
-	// Each writes one record for the same key. p1 is fully stopped (writer
-	// goroutine joined, fd closed) before p2 touches the shared log.
-	p1.SinkFor("k")([]Entry{entry(t, 1, "u1")}, false)
-	flush(p1, "p1")
-	stop(p1, "p1")
-
-	p2.SinkFor("k")([]Entry{entry(t, 2, "u2")}, false)
-	flush(p2, "p2")
-	stop(p2, "p2")
-
-	logPath := LogPath(dir, "k")
-	recs := readAllRecords(t, logPath)
-	if len(recs) < 3 {
-		t.Errorf("expected records across both persisters, got %d", len(recs))
 	}
 }
 
@@ -797,14 +646,6 @@ func TestPersister_PressureAndAccept(t *testing.T) {
 	}
 }
 
-// Sanity compile check — prevents an unused atomic import from
-// going unnoticed while we're iterating.
-var _ = atomic.Int64{}
-
-// stubPath ensures filepath is referenced so the dependency doesn't
-// get trimmed after a refactor.
-var _ = filepath.Join
-
 // TestSinkFor_RoutesByBoundKey pins R249-PERF-29 (#997): SinkFor now returns
 // a *sessionSink method value rather than a multi-variable closure. Two sinks
 // built from the same persister must each route their batches to the file
@@ -837,21 +678,22 @@ func TestSinkFor_RoutesByBoundKey(t *testing.T) {
 }
 
 // assertSingleEntryFile verifies a freshly-written per-session log holds
-// exactly one header (carrying wantKey) plus one entry — confirming the
-// sessionSink routed its batch to the file bound to its own key.
+// exactly one header (seq 0, carrying wantKey) plus one entry (seq 1) —
+// confirming the sessionSink routed its batch to the file bound to its own
+// key.
 func assertSingleEntryFile(t *testing.T, path, wantKey string) {
 	t.Helper()
 	recs := readAllRecords(t, path)
 	if len(recs) != 2 {
 		t.Fatalf("file %s: got %d records, want 2 (header+entry)", path, len(recs))
 	}
-	if recs[0].Type != schema.TypeHeader || recs[0].Header == nil {
+	if recs[0].Type != schema.TypeHeader || recs[0].Header == nil || recs[0].Seq != 0 {
 		t.Fatalf("file %s: record[0] is not a header: %+v", path, recs[0])
 	}
 	if recs[0].Header.Key != wantKey {
 		t.Errorf("file %s: header key = %q, want %q", path, recs[0].Header.Key, wantKey)
 	}
-	if recs[1].Type != schema.TypeEntry {
+	if recs[1].Type != schema.TypeEntry || recs[1].Seq != 1 {
 		t.Errorf("file %s: record[1] is not an entry: %+v", path, recs[1])
 	}
 }

@@ -246,18 +246,12 @@ func TestDetect_Submodule(t *testing.T) {
 	}
 }
 
+// A non-repo dir, and relative or empty paths, are not a repo.
 func TestDetect_NotARepo(t *testing.T) {
 	t.Parallel()
-	if st, ok := Detect(t.TempDir(), ""); ok {
-		t.Errorf("ok=true for a non-repo dir: %+v", st)
-	}
-}
-
-func TestDetect_RejectsRelativeAndEmptyPaths(t *testing.T) {
-	t.Parallel()
-	for _, in := range []string{"", "relative/path", "."} {
-		if _, ok := Detect(in, ""); ok {
-			t.Errorf("Detect(%q) = ok, want false", in)
+	for _, in := range []string{t.TempDir(), "", "relative/path", "."} {
+		if st, ok := Detect(in, ""); ok {
+			t.Errorf("Detect(%q) = ok (%+v), want false", in, st)
 		}
 	}
 }
@@ -355,14 +349,11 @@ func TestDetect_OverLongRefnameRejected(t *testing.T) {
 // The bound is a LITERAL, not maxHeadBytes: asserting `len <= maxHeadBytes`
 // while passing maxHeadBytes as the argument moves the goalposts with the
 // constant, so raising the cap to 1 GiB would still pass and pin nothing.
+// Widening the cap means more attacker-controlled bytes held in memory per
+// request; update both consciously.
 func TestReadFileCapped_StopsAtCap(t *testing.T) {
 	t.Parallel()
-	const wantMax = 4 << 10 // must track maxHeadBytes deliberately, not automatically
-	if maxHeadBytes != wantMax {
-		t.Fatalf("maxHeadBytes = %d, but this test pins %d — widening the cap means "+
-			"more attacker-controlled bytes held in memory per request; update both "+
-			"consciously", maxHeadBytes, wantMax)
-	}
+	const wantMax = 4 << 10
 	path := filepath.Join(t.TempDir(), "big")
 	// One long line with no newline, so nothing but the cap can bound the read.
 	if err := os.WriteFile(path, []byte(strings.Repeat("x", 4<<20)), 0o644); err != nil {

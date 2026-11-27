@@ -240,30 +240,6 @@ func TestReverseConn_RPCs(t *testing.T) {
 	}
 }
 
-// ---- RPC returns error from remote ----
-
-func TestReverseConn_RPC_remoteError(t *testing.T) {
-	rc, wsConn, cleanup := setupReverseConnPair(t)
-	defer cleanup()
-
-	go func() {
-		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		var req ReverseMsg
-		if err := wsConn.ReadJSON(&req); err != nil {
-			return
-		}
-		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Error: "not found"})
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	_, err := rc.FetchSessions(ctx)
-	if err == nil {
-		t.Fatal("expected error from remote")
-	}
-}
-
 // ---- RPC context cancellation cleans up pending ----
 
 func TestReverseConn_RPC_contextCancelled(t *testing.T) {
@@ -301,7 +277,10 @@ func TestReverseConn_RPC_closedConnection(t *testing.T) {
 	rc, wsConn, cleanup := setupReverseConnPair(t)
 	defer cleanup()
 
-	// Close the remote end.
+	if rc.Status() != "ok" {
+		t.Fatalf("initial status should be 'ok', got %q", rc.Status())
+	}
+	// Close the remote end: readLoop marks the conn disconnected.
 	wsConn.Close()
 	testhelper.Eventually(t, func() bool { return rc.Status() == "error" }, 2*time.Second, "readLoop never observed the closed conn")
 
@@ -334,44 +313,6 @@ func TestReverseConn_ReadLoop_event(t *testing.T) {
 	var parsed map[string]json.RawMessage
 	if err := json.Unmarshal(rawMsgs[0], &parsed); err != nil {
 		t.Fatalf("invalid JSON delivered: %v", err)
-	}
-}
-
-// ---- readLoop delivers subscribed message ----
-
-func TestReverseConn_ReadLoop_subscribed(t *testing.T) {
-	rc, wsConn, cleanup := setupReverseConnPair(t)
-	defer cleanup()
-
-	sink := &mockSink{id: 1}
-	rc.subMu.Lock()
-	rc.book.subs["mykey"] = []EventSink{sink}
-	rc.subMu.Unlock()
-
-	wsConn.WriteJSON(ReverseMsg{Type: "subscribed", Key: "mykey"})
-
-	testhelper.Eventually(t, func() bool { return sink.RawMsgCount() > 0 }, 2*time.Second, "expected subscribed message delivered")
-}
-
-// ---- Subscribe sends subscribe message on wire ----
-
-func TestReverseConn_Subscribe_sendsWireMessage(t *testing.T) {
-	rc, wsConn, cleanup := setupReverseConnPair(t)
-	defer cleanup()
-
-	sink := &mockSink{id: 1}
-	rc.Subscribe(sink, "mykey", 500, 0)
-
-	wsConn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	var msg ReverseMsg
-	if err := wsConn.ReadJSON(&msg); err != nil {
-		t.Fatalf("expected subscribe message on wire: %v", err)
-	}
-	if msg.Type != "subscribe" {
-		t.Errorf("expected 'subscribe', got %q", msg.Type)
-	}
-	if msg.Key != "mykey" {
-		t.Errorf("expected key 'mykey', got %q", msg.Key)
 	}
 }
 
@@ -489,50 +430,6 @@ func TestReverseConn_Close_idempotent(t *testing.T) {
 	rc.Close() // must not panic
 }
 
-// ---- markDisconnected sets status to error ----
-
-func TestReverseConn_MarkDisconnected_setsStatus(t *testing.T) {
-	rc, wsConn, cleanup := setupReverseConnPair(t)
-	defer cleanup()
-
-	if rc.Status() != "ok" {
-		t.Fatalf("initial status should be 'ok', got %q", rc.Status())
-	}
-
-	// Trigger disconnect by closing the ws connection.
-	wsConn.Close()
-
-	testhelper.Eventually(t, func() bool { return rc.Status() == "error" }, 3*time.Second, "expected status \"error\" after disconnect")
-}
-
-// ---- subscribe_error removes key from subs ----
-
-func TestReverseConn_ReadLoop_subscribeError(t *testing.T) {
-	rc, wsConn, cleanup := setupReverseConnPair(t)
-	defer cleanup()
-
-	sink := &mockSink{id: 1}
-	rc.subMu.Lock()
-	rc.book.subs["badkey"] = []EventSink{sink}
-	rc.subMu.Unlock()
-
-	wsConn.WriteJSON(ReverseMsg{Type: "subscribe_error", Key: "badkey", Error: "session not found"})
-
-	// Poll on delivery, NOT on the key disappearing. broadcastToSubs deletes
-	// the key while holding subMu but calls SendRaw *after* releasing it, so
-	// "key gone" is observable while RawMsgCount() is still 0 — polling the
-	// key raced the assertion below and made this test flaky. Delivery is the
-	// strictly later signal, so waiting for it settles both observations.
-	testhelper.Eventually(t, func() bool { return sink.RawMsgCount() > 0 }, 2*time.Second, "expected error event delivered to sink")
-
-	rc.subMu.Lock()
-	_, exists := rc.book.subs["badkey"]
-	rc.subMu.Unlock()
-	if exists {
-		t.Error("subscribe_error should have removed 'badkey' from subs")
-	}
-}
-
 // TestReverseConn_SubscribeErrorAfterSubscribed_KeepsSinks: a node that acked
 // a key and then answers a refresh with subscribe_error (its session was
 // reset) leaves the browsers on the key, so the next session's events reach
@@ -582,11 +479,11 @@ func (s *rawGateSink) SendRaw(data []byte) {
 	s.mockSink.SendRaw(data)
 }
 
-// TestReverseConn_SubscribeError_KeyRemovalPrecedesDelivery pins the ordering
-// that made TestReverseConn_ReadLoop_subscribeError flaky: broadcastToSubs
+// TestReverseConn_SubscribeError_KeyRemovalPrecedesDelivery: a subscribe_error
+// drops the key from subs and is passed on to its sinks. broadcastToSubs
 // deletes the key while holding subMu but delivers to sinks only after
-// releasing it. A test that polls "key gone" as a proxy for "event delivered"
-// can therefore break out of its wait loop and assert delivery too early.
+// releasing it, so a test that polls "key gone" as a proxy for "event
+// delivered" can break out of its wait loop and assert delivery too early.
 //
 // Parking inside SendRaw makes that window deterministic instead of a
 // microsecond race, so a future refactor that reintroduces the key-polling

@@ -28,7 +28,9 @@ func collectDiags(t *testing.T) map[string]spawndiag.Diag {
 // settings key outside AWS_/CLAUDE_, this forces the wording (and the heuristic)
 // to be revisited rather than silently mislabelling the rejection. It also pins
 // the silent case: a key outside the allowed namespaces is everyday noise, not a
-// gate rejection, and must produce no diag at all.
+// gate rejection, and must produce no diag at all. The kill-switch / mock-mode
+// keys are refused though CLAUDE_ is allowlisted (R20260603-SEC-8, #1660), while
+// ordinary CLAUDE_ config still flows.
 //
 // Not parallel: the diag observer is process-global.
 func TestFilterClaudeEnv_DenyDiagPerKey(t *testing.T) {
@@ -40,9 +42,10 @@ func TestFilterClaudeEnv_DenyDiagPerKey(t *testing.T) {
 		"CLAUDE_CODE_USE_MOCK_RESPONSES":           "1",
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
 		"UNRELATED_VAR":                            "silent-skip", // outside namespaces: no diag at all
+		"CLAUDE_CONFIG_DIR":                        "/home/x/.claude",
 	})
-	if len(kept) != 0 {
-		t.Fatalf("all inputs must be dropped, got %v", kept)
+	if len(kept) != 1 || kept["CLAUDE_CONFIG_DIR"] != "/home/x/.claude" {
+		t.Fatalf("all inputs but CLAUDE_CONFIG_DIR must be dropped, got %v", kept)
 	}
 
 	want := map[string]string{

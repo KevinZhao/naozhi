@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -27,6 +28,10 @@ func TestSubcmdRegistryDispatch(t *testing.T) {
 	}
 	if len(subcmds) != len(names) {
 		t.Errorf("registry has %d entries, test knows %d — update both together", len(subcmds), len(names))
+	}
+	// The ops runbook's `naozhi doctor` must forward to runDoctor.
+	if sc := findSubcmd("doctor"); sc != nil && reflect.ValueOf(sc.run).Pointer() != reflect.ValueOf(runDoctor).Pointer() {
+		t.Error(`registry "doctor" entry does not run runDoctor`)
 	}
 	for _, unknown := range []string{"", "serve", "-config", "Setup"} {
 		if findSubcmd(unknown) != nil {
