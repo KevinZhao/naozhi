@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -414,9 +413,6 @@ const retirePIDHolderEnv = "NAOZHI_TEST_RETIRE_PID_HOLDER"
 // binary-identity check passes), then the copy is made non-executable so the
 // spawn itself fails at cmd.Start, after the pre-bind check.
 func TestStartShimWithBackend_RetiresDeadCLIShimBeforeSpawn(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("unix sockets and process identity checks")
-	}
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)

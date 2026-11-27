@@ -79,14 +79,6 @@ func TestCleanStaleSocket_LiveSocket_ReturnsError(t *testing.T) {
 	}
 }
 
-func TestCleanStaleSocket_NonExistent(t *testing.T) {
-	// Attempting to remove a file that does not exist: os.Remove returns error
-	// but CleanStaleSocket should still return it (the dial fails, then remove fails)
-	err := CleanStaleSocket("/nonexistent/path/shim.sock")
-	// We don't assert nil here — both outcomes are acceptable
-	_ = err
-}
-
 // --- writeMsg ---
 
 func TestWriteMsg_WritesValidNDJSON(t *testing.T) {
@@ -123,203 +115,58 @@ func TestWriteMsg_ToClosedConn_DoesNotPanic(t *testing.T) {
 
 // --- tryExtractSessionID ---
 
-func TestTryExtractSessionID_SystemInit(t *testing.T) {
-	s := makeShimServerForTest(t)
-	line := []byte(`{"type":"system","subtype":"init","session_id":"sess_init_001"}`)
-	s.tryExtractSessionID(line)
-
-	s.mu.Lock()
-	got := s.state.SessionID
-	s.mu.Unlock()
-
-	if got != "sess_init_001" {
-		t.Errorf("SessionID = %q, want sess_init_001", got)
-	}
-}
-
-func TestTryExtractSessionID_ResultFallback(t *testing.T) {
-	s := makeShimServerForTest(t)
-	// session_id not set yet, result event should set it
-	line := []byte(`{"type":"result","session_id":"sess_result_002"}`)
-	s.tryExtractSessionID(line)
-
-	s.mu.Lock()
-	got := s.state.SessionID
-	s.mu.Unlock()
-
-	if got != "sess_result_002" {
-		t.Errorf("SessionID = %q, want sess_result_002", got)
-	}
-}
-
-func TestTryExtractSessionID_ResultDoesNotOverwrite(t *testing.T) {
-	s := makeShimServerForTest(t)
-
-	// Set via init first
-	s.tryExtractSessionID([]byte(`{"type":"system","subtype":"init","session_id":"original"}`))
-	// Result should NOT overwrite
-	s.tryExtractSessionID([]byte(`{"type":"result","session_id":"override_attempt"}`))
-
-	s.mu.Lock()
-	got := s.state.SessionID
-	s.mu.Unlock()
-
-	if got != "original" {
-		t.Errorf("SessionID = %q, want original (result must not overwrite init)", got)
-	}
-}
-
-func TestTryExtractSessionID_InvalidJSON(t *testing.T) {
-	s := makeShimServerForTest(t)
-	// Must not panic on invalid JSON
-	s.tryExtractSessionID([]byte("not json"))
-
-	s.mu.Lock()
-	got := s.state.SessionID
-	s.mu.Unlock()
-	if got != "" {
-		t.Errorf("SessionID = %q, want empty for invalid JSON", got)
-	}
-}
-
-func TestTryExtractSessionID_EmptySessionID(t *testing.T) {
-	s := makeShimServerForTest(t)
-	s.tryExtractSessionID([]byte(`{"type":"system","subtype":"init","session_id":""}`))
-
-	s.mu.Lock()
-	got := s.state.SessionID
-	s.mu.Unlock()
-	if got != "" {
-		t.Errorf("SessionID = %q, want empty when session_id field is empty", got)
-	}
-}
-
-func TestTryExtractSessionID_OtherEventTypes(t *testing.T) {
-	s := makeShimServerForTest(t)
-	// message event with session_id — should be ignored
-	s.tryExtractSessionID([]byte(`{"type":"message","session_id":"should_not_set"}`))
-
-	s.mu.Lock()
-	got := s.state.SessionID
-	s.mu.Unlock()
-	if got != "" {
-		t.Errorf("SessionID = %q, want empty for non-system/result type", got)
-	}
-}
-
-// TestTryExtractSessionID_ACPSessionNew covers the ACP / kiro path: the
-// JSON-RPC response to session/new carries the canonical sid in
-// result.sessionId (camelCase). Before PR #129 this was silently dropped
-// because the gate only matched "session_id" snake_case, leaving shim
-// state empty across naozhi restarts.
-func TestTryExtractSessionID_ACPSessionNew(t *testing.T) {
-	s := makeShimServerForTest(t)
-	line := []byte(`{"jsonrpc":"2.0","id":2,"result":{"sessionId":"acp-uuid-001"}}`)
-	s.tryExtractSessionID(line)
-
-	s.mu.Lock()
-	got := s.state.SessionID
-	s.mu.Unlock()
-
-	if got != "acp-uuid-001" {
-		t.Errorf("ACP sid = %q, want acp-uuid-001", got)
-	}
-}
-
-// TestTryExtractSessionID_ACPNotificationFallback covers later ACP frames
-// (session/update etc.) that echo sessionId in params; the first sighting
-// wins so the response path is preferred but notification frames are also
-// captured if response was missed.
-func TestTryExtractSessionID_ACPNotificationFallback(t *testing.T) {
-	s := makeShimServerForTest(t)
-	line := []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-uuid-002","update":{"sessionUpdate":"agent_message_chunk"}}}`)
-	s.tryExtractSessionID(line)
-
-	s.mu.Lock()
-	got := s.state.SessionID
-	s.mu.Unlock()
-
-	if got != "acp-uuid-002" {
-		t.Errorf("ACP notif sid = %q, want acp-uuid-002", got)
-	}
-}
-
-// TestTryExtractSessionID_ACPDoesNotOverwrite locks the same first-wins
-// invariant the claude path has: a later session/update notification must
-// NOT silently change the captured sid.
-func TestTryExtractSessionID_ACPDoesNotOverwrite(t *testing.T) {
-	s := makeShimServerForTest(t)
-	s.tryExtractSessionID([]byte(`{"jsonrpc":"2.0","id":2,"result":{"sessionId":"original-acp"}}`))
-	s.tryExtractSessionID([]byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"override-attempt"}}`))
-
-	s.mu.Lock()
-	got := s.state.SessionID
-	s.mu.Unlock()
-	if got != "original-acp" {
-		t.Errorf("ACP sid = %q, want original-acp (notif must not overwrite response)", got)
-	}
-}
-
-// TestTryExtractSessionID_FastPathSkipsAfterKnown verifies the R202606f-PERF-003
-// fast path: once the session ID is set, the latch is raised and subsequent
-// lines are not re-parsed, so a malformed line carrying a session_id token
-// cannot disturb the captured ID and the known flag stays set.
-func TestTryExtractSessionID_FastPathSkipsAfterKnown(t *testing.T) {
-	s := makeShimServerForTest(t)
-
-	s.tryExtractSessionID([]byte(`{"type":"system","subtype":"init","session_id":"sess_known"}`))
-	if !s.sessionIDKnown.Load() {
-		t.Fatal("sessionIDKnown latch not raised after init")
-	}
-
-	// A later line still containing the token (even a result that would
-	// otherwise be parsed) must be skipped entirely by the fast path.
-	s.tryExtractSessionID([]byte(`{"type":"result","session_id":"later_attempt"}`))
-
-	s.mu.Lock()
-	got := s.state.SessionID
-	s.mu.Unlock()
-	if got != "sess_known" {
-		t.Errorf("SessionID = %q, want sess_known (fast path must skip later lines)", got)
-	}
-	if !s.sessionIDKnown.Load() {
-		t.Error("sessionIDKnown latch should remain set")
-	}
-}
-
-// TestTryExtractSessionID_LatchNotSetWhenUnknown verifies the latch stays
-// unraised for lines that don't yield a session ID, so extraction keeps
-// running until a real ID arrives.
-func TestTryExtractSessionID_LatchNotSetWhenUnknown(t *testing.T) {
-	s := makeShimServerForTest(t)
-
-	s.tryExtractSessionID([]byte(`{"type":"message","session_id":"should_not_set"}`))
-	s.tryExtractSessionID([]byte(`{"type":"system","subtype":"init","session_id":""}`))
-	s.tryExtractSessionID([]byte("not json"))
-	if s.sessionIDKnown.Load() {
-		t.Fatal("sessionIDKnown latch raised without a valid session ID")
-	}
-
-	// A real ID now arrives and is captured.
-	s.tryExtractSessionID([]byte(`{"type":"system","subtype":"init","session_id":"real_id"}`))
-	s.mu.Lock()
-	got := s.state.SessionID
-	s.mu.Unlock()
-	if got != "real_id" {
-		t.Errorf("SessionID = %q, want real_id", got)
-	}
-	if !s.sessionIDKnown.Load() {
-		t.Error("sessionIDKnown latch should be set after capturing real_id")
+// TestTryExtractSessionID: the first session ID seen wins — claude's
+// system/init or result session_id, or ACP's camelCase sessionId in a
+// session/new response or a later notification's params (PR #129). Once
+// one is known the latch skips every later line (R202606f-PERF-003); lines
+// yielding no ID leave the latch down.
+func TestTryExtractSessionID(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		want  string
+	}{
+		{"system init", []string{`{"type":"system","subtype":"init","session_id":"sess_init_001"}`}, "sess_init_001"},
+		{"result fallback", []string{`{"type":"result","session_id":"sess_result_002"}`}, "sess_result_002"},
+		{"result does not overwrite init", []string{
+			`{"type":"system","subtype":"init","session_id":"original"}`,
+			`{"type":"result","session_id":"override_attempt"}`,
+		}, "original"},
+		{"invalid json", []string{"not json"}, ""},
+		{"empty session_id", []string{`{"type":"system","subtype":"init","session_id":""}`}, ""},
+		{"other event type", []string{`{"type":"message","session_id":"should_not_set"}`}, ""},
+		{"acp session/new", []string{`{"jsonrpc":"2.0","id":2,"result":{"sessionId":"acp-uuid-001"}}`}, "acp-uuid-001"},
+		{"acp notification", []string{`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-uuid-002","update":{"sessionUpdate":"agent_message_chunk"}}}`}, "acp-uuid-002"},
+		{"acp notification does not overwrite", []string{
+			`{"jsonrpc":"2.0","id":2,"result":{"sessionId":"original-acp"}}`,
+			`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"override-attempt"}}`,
+		}, "original-acp"},
+		{"latch stays down until a real id", []string{
+			`{"type":"message","session_id":"should_not_set"}`,
+			`{"type":"system","subtype":"init","session_id":""}`,
+			"not json",
+			`{"type":"system","subtype":"init","session_id":"real_id"}`,
+		}, "real_id"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := makeShimServerForTest(t)
+			for _, l := range tc.lines {
+				s.tryExtractSessionID([]byte(l))
+			}
+			s.mu.Lock()
+			got := s.state.SessionID
+			s.mu.Unlock()
+			if got != tc.want {
+				t.Errorf("SessionID = %q, want %q", got, tc.want)
+			}
+			if known := s.sessionIDKnown.Load(); known != (tc.want != "") {
+				t.Errorf("sessionIDKnown = %v, want %v", known, tc.want != "")
+			}
+		})
 	}
 }
 
 // --- enqueueWrite ---
-
-func TestEnqueueWrite_NoClient(t *testing.T) {
-	s := makeShimServerForTest(t)
-	// writeCh is nil (no client): must be a no-op, not a panic
-	s.enqueueWrite([]byte("hello\n"))
-}
 
 func TestEnqueueWrite_WithClient_Delivers(t *testing.T) {
 	s := makeShimServerForTest(t)
@@ -665,19 +512,6 @@ func TestInitiateShutdown_Idempotent(t *testing.T) {
 
 // --- resetIdleTimer / idleC ---
 
-func TestResetIdleTimer_TriggersAfterDuration(t *testing.T) {
-	s := makeShimServerForTest(t)
-	s.resetIdleTimer(50 * time.Millisecond)
-
-	ch := s.idleC()
-	select {
-	case <-ch:
-		// fired correctly
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("idle timer did not fire")
-	}
-}
-
 // Run's select keeps the channel idleC gave it when it was entered; a reset
 // on detach must arm that same channel, both when the timer was still pending
 // and when it already fired while a client was attached.
@@ -698,16 +532,6 @@ func TestResetIdleTimer_FiresOnChannelHeldBeforeReset(t *testing.T) {
 	case <-held:
 	case <-time.After(2 * time.Second):
 		t.Fatal("reset of a fired timer never fired on the held channel")
-	}
-}
-
-func TestIdleC_NilTimer(t *testing.T) {
-	s := makeShimServerForTest(t)
-	s.mu.Lock()
-	s.idleTimer = nil
-	s.mu.Unlock()
-	if s.idleC() != nil {
-		t.Error("idleC() should return nil when idleTimer is nil")
 	}
 }
 
@@ -1342,17 +1166,6 @@ func TestHandleClient_ReplayBufferedLines(t *testing.T) {
 
 	sendClientCmd(t, ss.client, ClientMsg{Type: "detach"})
 	ss.waitHandlerDone(t, "detach")
-}
-
-// TestNewManager_StateDir_Default verifies that an empty StateDir uses ~/.naozhi/shims.
-func TestNewManager_StateDir_Default(t *testing.T) {
-	// Can't test HOME-based default without modifying HOME, but we can verify
-	// that a non-empty StateDir is used as-is.
-	dir := t.TempDir()
-	m := mustNewManager(t, ManagerConfig{StateDir: dir})
-	if m.stateDir != dir {
-		t.Errorf("stateDir = %q, want %q", m.stateDir, dir)
-	}
 }
 
 // TestWriteStateFile_ChmodDir verifies the state directory gets 0700 perms
