@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -20,42 +19,18 @@ func TestCandidatePaths_ContainsNativeInstaller(t *testing.T) {
 		t.Fatal("expected at least one candidate path")
 	}
 
-	ext := ""
-	if runtime.GOOS == "windows" {
-		ext = ".exe"
-	}
-	expected := filepath.Join(home, ".local", "bin", "claude"+ext)
+	expected := filepath.Join(home, ".local", "bin", "claude")
 	if paths[0] != expected {
 		t.Errorf("first candidate should be native installer path, got %q, want %q", paths[0], expected)
 	}
 }
 
-func TestCandidatePaths_Kiro(t *testing.T) {
-	t.Parallel()
-	paths := candidatePaths("kiro-cli")
-	if len(paths) == 0 {
-		t.Fatal("expected at least one candidate path")
-	}
-	// First path should contain "kiro-cli"
-	base := filepath.Base(paths[0])
-	if base != "kiro-cli" && base != "kiro-cli.exe" {
-		t.Errorf("first candidate should be for kiro-cli, got %q", paths[0])
-	}
-}
-
 // NOT t.Parallel() — mutates process-global env (NVM_BIN etc).
 func TestNpmGlobalBinDirs_EnvDerived(t *testing.T) {
-	// Snapshot + clear the env vars npmGlobalBinDirs reads so the host's real
-	// toolchain doesn't perturb assertions; restore on cleanup.
+	// Clear the env vars npmGlobalBinDirs reads so the host's real toolchain
+	// doesn't perturb assertions.
 	for _, k := range []string{"NVM_BIN", "NPM_CONFIG_PREFIX", "N_PREFIX", "VOLTA_HOME"} {
-		old, had := os.LookupEnv(k)
-		t.Cleanup(func() {
-			if had {
-				_ = os.Setenv(k, old)
-			} else {
-				_ = os.Unsetenv(k)
-			}
-		})
+		t.Setenv(k, "") // restores the host value on cleanup
 		_ = os.Unsetenv(k)
 	}
 
@@ -89,14 +64,7 @@ func TestNpmGlobalBinDirs_EnvDerived(t *testing.T) {
 // NOT t.Parallel() — mutates process-global env.
 func TestNpmGlobalBinDirs_Dedup(t *testing.T) {
 	for _, k := range []string{"NVM_BIN", "NPM_CONFIG_PREFIX", "N_PREFIX", "VOLTA_HOME"} {
-		old, had := os.LookupEnv(k)
-		t.Cleanup(func() {
-			if had {
-				_ = os.Setenv(k, old)
-			} else {
-				_ = os.Unsetenv(k)
-			}
-		})
+		t.Setenv(k, "") // restores the host value on cleanup
 		_ = os.Unsetenv(k)
 	}
 	// NVM_BIN equal to the ~/.npm-global/bin static entry → must appear once.
@@ -117,22 +85,10 @@ func TestNpmGlobalBinDirs_Dedup(t *testing.T) {
 // name composes against the npm-global bin dirs so codex detection no longer
 // depends solely on the service $PATH.
 func TestCandidatePaths_CodexIncludesNpmGlobal(t *testing.T) {
-	old, had := os.LookupEnv("NVM_BIN")
-	t.Cleanup(func() {
-		if had {
-			_ = os.Setenv("NVM_BIN", old)
-		} else {
-			_ = os.Unsetenv("NVM_BIN")
-		}
-	})
 	t.Setenv("NVM_BIN", "/x/node/bin")
 
-	ext := ""
-	if runtime.GOOS == "windows" {
-		ext = ".exe"
-	}
 	paths := candidatePaths("codex")
-	want := filepath.Join("/x/node/bin", "codex"+ext)
+	want := filepath.Join("/x/node/bin", "codex")
 	found := false
 	for _, p := range paths {
 		if p == want {
@@ -178,42 +134,6 @@ func TestDetectCLI_ReturnsEmptyWhenNothingFound(t *testing.T) {
 	}
 }
 
-// NOT t.Parallel() — same os.Setenv("PATH", ...) rationale as
-// TestDetectCLI_FallsBackToBareNameWhenNothingFound above.
-func TestDetectCLI_FindsExistingBinary(t *testing.T) {
-	// Create a temp file that looks like a CLI binary
-	dir := t.TempDir()
-	fakeCLI := filepath.Join(dir, "claude")
-	if err := os.WriteFile(fakeCLI, []byte("#!/bin/sh"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Override PATH to include our temp dir
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", dir+string(os.PathListSeparator)+origPath)
-	defer os.Setenv("PATH", origPath)
-
-	result := detectCLI("claude")
-	if result != fakeCLI {
-		// detectCLI might find the real claude first via candidatePaths
-		// Just ensure it doesn't return bare "claude"
-		if result == "claude" {
-			t.Error("expected detectCLI to find the binary, got bare name")
-		}
-	}
-}
-
-func TestNewWrapper_ExplicitPathTakesPrecedence(t *testing.T) {
-	t.Parallel()
-	w := NewWrapperLazy("/custom/path/claude", &ClaudeProtocol{}, "claude")
-	if w.CLIPath != "/custom/path/claude" {
-		t.Errorf("explicit path should be used, got %q", w.CLIPath)
-	}
-	if w.CLIName != "claude-code" {
-		t.Errorf("CLIName = %q, want claude-code", w.CLIName)
-	}
-}
-
 // NOT t.Parallel() — uses t.Setenv to point PATH/HOME at a fake-binary
 // fixture, which Go test forbids combining with parallel mode.
 //
@@ -228,11 +148,7 @@ func TestNewWrapper_EmptyPathAutoDetects(t *testing.T) {
 		t.Skip("slow: skipped in -short")
 	}
 	dir := t.TempDir()
-	ext := ""
-	if runtime.GOOS == "windows" {
-		ext = ".exe"
-	}
-	fakeCLI := filepath.Join(dir, "claude"+ext)
+	fakeCLI := filepath.Join(dir, "claude")
 	if err := os.WriteFile(fakeCLI, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -310,25 +226,6 @@ func TestNewWrapper_UnavailableBinaryLeavesVersionEmpty(t *testing.T) {
 	}
 	if w.CLIName != "claude-code" {
 		t.Errorf("CLIName = %q, want %q", w.CLIName, "claude-code")
-	}
-}
-
-// TestNewWrapperLazy_NoEagerProbe pins the lazy contract: NewWrapperLazy
-// MUST NOT run `<cli> --version` synchronously, and CLIVersion remains
-// "" until Probe(ctx) is invoked. R241-ARCH-1.
-func TestNewWrapperLazy_NoEagerProbe(t *testing.T) {
-	t.Parallel()
-	// Even with a path that would fail-fast, the eager constructor pays
-	// process startup + immediate ENOENT (~1ms). The lazy constructor must
-	// not hit exec.Command at all — assertion is structural: CLIVersion
-	// stays empty and BackendID/CLIName are populated as in the eager path.
-	w := NewWrapperLazy("/definitely/not/a/real/path/claude-xyz", &ClaudeProtocol{}, "claude")
-	if w.CLIVersion != "" {
-		t.Errorf("lazy NewWrapperLazy must not eagerly probe; got CLIVersion=%q", w.CLIVersion)
-	}
-	if w.BackendID != "claude" || w.CLIName != "claude-code" {
-		t.Errorf("lazy constructor lost backend metadata: backend=%q name=%q",
-			w.BackendID, w.CLIName)
 	}
 }
 

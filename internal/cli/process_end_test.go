@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"os/exec"
 	"reflect"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -140,9 +139,6 @@ func childPID(t *testing.T, exited bool) int {
 // reconcile loop reattaches that CLI, which then reports the spend itself.
 // The CLI's exit, naozhi's Kill or Close, and a dead shim all end the CLI.
 func TestProcess_EndShimLiveOnlyWhenTheShimOutlivesTheSocket(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("needs a POSIX child process for the shim PID")
-	}
 	for _, tc := range []struct {
 		name     string
 		deadShim bool

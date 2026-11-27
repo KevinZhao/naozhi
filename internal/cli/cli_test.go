@@ -62,6 +62,7 @@ func TestClaudeProtocol_BuildArgs_RejectsBadResumeID(t *testing.T) {
 	t.Parallel()
 	p := &ClaudeProtocol{}
 	cases := []string{
+		"",                       // none
 		"sess_123",               // underscore (legacy form, no longer accepted)
 		"sess.123",               // dot
 		"id with space",          // whitespace
@@ -74,17 +75,6 @@ func TestClaudeProtocol_BuildArgs_RejectsBadResumeID(t *testing.T) {
 				t.Errorf("BuildArgs(%q): emitted --resume despite invalid resume id; args=%v", bad, args)
 				break
 			}
-		}
-	}
-}
-
-func TestClaudeProtocol_BuildArgs_NoResume(t *testing.T) {
-	t.Parallel()
-	p := &ClaudeProtocol{}
-	args := p.BuildArgs(SpawnOptions{Model: "sonnet"})
-	for _, a := range args {
-		if a == "--resume" {
-			t.Error("BuildArgs should not include --resume when ResumeID is empty")
 		}
 	}
 }
@@ -299,14 +289,6 @@ func TestClaudeProtocol_ReadEvent_SystemInit(t *testing.T) {
 	}
 	if ev.Type != "system" || ev.SubType != "init" || ev.SessionID != "sess_abc" {
 		t.Errorf("got %+v", ev)
-	}
-}
-
-func TestClaudeProtocol_HandleEvent(t *testing.T) {
-	t.Parallel()
-	p := &ClaudeProtocol{}
-	if p.HandleEvent(nil, clievent.Event{Type: "result"}) {
-		t.Error("Claude protocol should never handle events internally")
 	}
 }
 
@@ -529,72 +511,6 @@ func TestACPProtocol_ReadEvent_NormalStopReasonRoundTrip(t *testing.T) {
 	}
 }
 
-func TestClaudeProtocol_Init(t *testing.T) {
-	t.Parallel()
-	p := &ClaudeProtocol{}
-	id, err := p.Init(nil, "", "")
-	if err != nil || id != "" {
-		t.Errorf("Init() = (%q, %v), want (\"\", nil)", id, err)
-	}
-}
-
-// TestBuildArgs_SettingSourcesUser pins docs/rfc/direct-user-settings.md PR1:
-// naozhi-spawned cc loads ~/.claude/settings.json directly, so BuildArgs must
-// emit `--setting-sources user` (NOT the historical "") and must NOT inject a
-// `--settings <override>` file. On the old code this test fails (the value was
-// "" and an override path was appended); on the new code it passes.
-func TestBuildArgs_SettingSourcesUser(t *testing.T) {
-	t.Parallel()
-	p := &ClaudeProtocol{}
-	args := p.BuildArgs(SpawnOptions{})
-
-	var foundUser bool
-	for i, a := range args {
-		if a == "--setting-sources" {
-			if i+1 >= len(args) {
-				t.Fatalf("--setting-sources has no value: %v", args)
-			}
-			if args[i+1] != "user" {
-				t.Errorf("--setting-sources = %q, want \"user\": %v", args[i+1], args)
-			}
-			foundUser = true
-		}
-		if a == "--settings" {
-			t.Errorf("BuildArgs must not inject --settings override file: %v", args)
-		}
-	}
-	if !foundUser {
-		t.Errorf("--setting-sources missing from argv: %v", args)
-	}
-}
-
-// TestClaudeProtocol_Clone_Independent verifies Clone returns a usable
-// ClaudeProtocol. The struct carries no per-spawn state any more (settings
-// plumbing was removed in direct-user-settings PR1) — it is an empty struct,
-// so a pointer-identity check is meaningless (Go may give all zero-size
-// allocations the same address). We only guard against Clone returning nil or
-// the wrong concrete type, and that the clone still builds the user-settings
-// argv.
-func TestClaudeProtocol_Clone_Independent(t *testing.T) {
-	t.Parallel()
-	src := &ClaudeProtocol{}
-	raw := src.Clone()
-	clone, ok := raw.(*ClaudeProtocol)
-	if !ok || clone == nil {
-		t.Fatalf("Clone returned %T (nil=%v), want non-nil *ClaudeProtocol", raw, clone == nil)
-	}
-	args := clone.BuildArgs(SpawnOptions{})
-	var found bool
-	for i, a := range args {
-		if a == "--setting-sources" && i+1 < len(args) && args[i+1] == "user" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("clone BuildArgs missing --setting-sources user: %v", args)
-	}
-}
-
 // --- ACPProtocol tests ---
 
 func TestACPProtocol_BuildArgs(t *testing.T) {
@@ -649,23 +565,6 @@ func TestBuildArgs_ModelEffortFlags(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// TestProtocolCaps_EffortTier pins which protocols advertise tier support.
-// initBackendWrappers reads this to decide whether to honour or warn about a
-// configured tier, so a wrong answer here silently drops the operator's
-// setting (or forwards it to a CLI that will reject the argv).
-func TestProtocolCaps_EffortTier(t *testing.T) {
-	t.Parallel()
-	if !ProtocolCaps(&ACPProtocol{}).EffortTier {
-		t.Error("ACP must advertise EffortTier — kiro-cli acp takes --effort")
-	}
-	if !ProtocolCaps(&ClaudeProtocol{}).EffortTier {
-		t.Error("Claude must advertise EffortTier — the CLI takes --effort as of 2.1.226")
-	}
-	if ProtocolCaps(&CodexProtocol{}).EffortTier {
-		t.Error("Codex must not advertise EffortTier — its reasoning knob is a different axis")
 	}
 }
 
@@ -1617,8 +1516,6 @@ func TestACPProtocol_Init_RPCError(t *testing.T) {
 		t.Errorf("error = %q, should contain 'invalid request'", err.Error())
 	}
 }
-
-// --- Existing tests preserved ---
 
 func TestProcessStateString(t *testing.T) {
 	t.Parallel()

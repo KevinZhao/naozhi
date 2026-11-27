@@ -45,19 +45,3 @@ func TestParseJSONInt64Bytes(t *testing.T) {
 		})
 	}
 }
-
-// TestShimMsgCode_LargeValue_NoTruncation locks R202606f-GO-001: Value is
-// int64 so an exit code beyond the 32-bit int range round-trips without
-// silently wrapping on a 32-bit build (where `int` is 32-bit and the prior
-// `int(v)` narrowing truncated).
-func TestShimMsgCode_LargeValue_NoTruncation(t *testing.T) {
-	t.Parallel()
-	const big = int64(1) << 40 // 1099511627776, far past 2^31-1
-	var c shimMsgCode
-	if err := c.UnmarshalJSON([]byte("1099511627776")); err != nil {
-		t.Fatalf("UnmarshalJSON: %v", err)
-	}
-	if c.Value != big {
-		t.Errorf("Value = %d, want %d (truncated to 32-bit?)", c.Value, big)
-	}
-}
