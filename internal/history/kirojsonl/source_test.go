@@ -157,9 +157,6 @@ func TestSource_LoadBefore_BeforeFiltering(t *testing.T) {
 	}
 }
 
-// TestSource_LoadBefore_MissingFile pins the zero-state path: a
-// session ID with no on-disk jsonl returns (nil, nil), not an error.
-// Pagination must treat this as end-of-history rather than retry.
 // TestSource_LoadBefore_RejectsPathTraversal pins the security guard:
 // a SessionIDFunc returning a sid with path separators or ".." must NOT
 // reach the filesystem. The guard treats it as "no session" so callers
@@ -192,62 +189,56 @@ func TestSource_LoadBefore_RejectsPathTraversal(t *testing.T) {
 	}
 }
 
-func TestSource_LoadBefore_MissingFile(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	src := New(dir, func() string { return "no-such-session" })
-	got, err := src.LoadBefore(context.Background(), 0, 10)
-	if err != nil {
-		t.Errorf("missing file produced err=%v; want nil", err)
-	}
-	if got != nil {
-		t.Errorf("missing file returned %d entries; want nil", len(got))
-	}
-}
-
-// TestSource_LoadBefore_EmptySessionID pins the unbound-session path:
-// when SessionIDFunc returns "", LoadBefore must return (nil, nil)
-// without touching the filesystem at all (so a misconfigured rootDir
-// still yields a clean nil instead of an error).
-func TestSource_LoadBefore_EmptySessionID(t *testing.T) {
-	t.Parallel()
-	src := New("/nonexistent/dir", func() string { return "" })
-	got, err := src.LoadBefore(context.Background(), 0, 10)
-	if err != nil {
-		t.Errorf("empty sid produced err=%v; want nil", err)
-	}
-	if got != nil {
-		t.Errorf("empty sid returned %d entries; want nil", len(got))
-	}
-}
-
 // TestSource_LoadBefore_PartialLastLine simulates a concurrent kiro
 // writer mid-append: the final line lacks the closing brace. The
 // scanner must skip the malformed tail and still surface the prior
 // well-formed records — losing them would visibly truncate the chat
-// view on every "load earlier" press during an active session.
+// view on every "load earlier" press during an active session. Blank lines
+// (a flush that SIGTERM raced mid-newline) are skipped too.
 func TestSource_LoadBefore_PartialLastLine(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	sid := "partial"
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	good := promptLine("good", 100)
-	// Truncate at column ~40 to mimic a half-flushed append.
-	bad := `{"version":"v1","kind":"Prompt","data":{"message_id":"x","co`
-	body := good + "\n" + bad + "\n"
-	if err := os.WriteFile(filepath.Join(dir, sid+".jsonl"), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeSession(t, dir, sid, []string{
+		promptLine("good", 100), "", "",
+		promptLine("good2", 200),
+		// Truncate at column ~40 to mimic a half-flushed append.
+		`{"version":"v1","kind":"Prompt","data":{"message_id":"x","co`,
+	})
 
 	src := New(dir, func() string { return sid })
 	got, err := src.LoadBefore(context.Background(), 0, 10)
 	if err != nil {
 		t.Fatalf("LoadBefore: %v", err)
 	}
-	if len(got) != 1 || got[0].Summary != "good" {
-		t.Errorf("entries=%v; want only the good entry", got)
+	if len(got) != 2 || got[0].Summary != "good" || got[1].Summary != "good2" {
+		t.Errorf("entries=%v; want only the two good entries", got)
+	}
+}
+
+// TestSource_LoadBefore_PromptContent: a Prompt's text chunks join into its
+// summary (the schema is a list, so a model streaming partial messages into
+// one record still reads sensibly), a non-text chunk such as an image is
+// skipped rather than garbling it, and an empty content list still yields a
+// user entry, a placeholder rather than a hidden gap.
+func TestSource_LoadBefore_PromptContent(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ content, want string }{
+		{`[{"kind":"text","data":"first "},{"kind":"text","data":"second"}]`, "first second"},
+		{`[{"kind":"image","data":"<binary>"},{"kind":"text","data":"caption"}]`, "caption"},
+		{`[]`, ""},
+	} {
+		dir := t.TempDir()
+		writeSession(t, dir, "s", []string{
+			`{"version":"v1","kind":"Prompt","data":{"message_id":"x","content":` + tc.content + `,"meta":{"timestamp":100}}}`,
+		})
+		got, err := New(dir, func() string { return "s" }).LoadBefore(context.Background(), 0, 10)
+		if err != nil {
+			t.Fatalf("LoadBefore: %v", err)
+		}
+		if len(got) != 1 || got[0].Type != "user" || got[0].Summary != tc.want {
+			t.Errorf("content %s: got %+v; want one user entry %q", tc.content, got, tc.want)
+		}
 	}
 }
 
@@ -388,49 +379,6 @@ func TestSource_LoadBefore_MissingPromptTimestamp(t *testing.T) {
 	}
 }
 
-// TestSource_LoadBefore_MultiChunkContent pins the content
-// concatenation rule: a Prompt with two text chunks joins to a single
-// summary string. Kiro typically emits one chunk but the schema is a
-// list, so a future model that streams partial messages into a single
-// jsonl record must still surface a sensible summary.
-func TestSource_LoadBefore_MultiChunkContent(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	sid := "multi-chunk"
-	writeSession(t, dir, sid, []string{
-		`{"version":"v1","kind":"Prompt","data":{"message_id":"x","content":[{"kind":"text","data":"first "},{"kind":"text","data":"second"}],"meta":{"timestamp":100}}}`,
-	})
-	src := New(dir, func() string { return sid })
-	got, err := src.LoadBefore(context.Background(), 0, 10)
-	if err != nil {
-		t.Fatalf("LoadBefore: %v", err)
-	}
-	if len(got) != 1 || got[0].Summary != "first second" {
-		t.Errorf("got=%v; want concat of two text chunks", got)
-	}
-}
-
-// TestSource_LoadBefore_NonTextChunkSkipped pins the multi-modal
-// fallback: an image/binary chunk in a content list must be skipped
-// without producing a garbled summary. Today the dashboard chat view
-// renders text only; future image support is a separate sprint.
-func TestSource_LoadBefore_NonTextChunkSkipped(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	sid := "non-text"
-	writeSession(t, dir, sid, []string{
-		`{"version":"v1","kind":"Prompt","data":{"message_id":"x","content":[{"kind":"image","data":"<binary>"},{"kind":"text","data":"caption"}],"meta":{"timestamp":100}}}`,
-	})
-	src := New(dir, func() string { return sid })
-	got, err := src.LoadBefore(context.Background(), 0, 10)
-	if err != nil {
-		t.Fatalf("LoadBefore: %v", err)
-	}
-	if len(got) != 1 || got[0].Summary != "caption" {
-		t.Errorf("got=%v; want text-only concat 'caption'", got)
-	}
-}
-
 // TestSource_LoadBefore_ContextCanceled pins the cooperative
 // cancellation contract: a cancelled ctx returns promptly without
 // erroring (errors mean "real I/O failure" — cancellation is just
@@ -462,7 +410,9 @@ func TestSource_LoadBefore_ContextCanceled(t *testing.T) {
 // for the receiver: nil receiver, empty rootDir, nil sessionID, and
 // limit≤0 all return (nil, nil) without panicking. Each row corresponds
 // to a misconfiguration mode the router could plausibly hit during
-// startup before its config has fully resolved.
+// startup before its config has fully resolved. An unbound session (an
+// empty ID) returns nil without touching the filesystem, and a session ID
+// with no jsonl on disk is end-of-history, not an error to retry.
 func TestSource_LoadBefore_DegradesOnMisconfig(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -472,6 +422,8 @@ func TestSource_LoadBefore_DegradesOnMisconfig(t *testing.T) {
 		{"nil receiver", (*Source)(nil)},
 		{"empty rootDir", New("", func() string { return "x" })},
 		{"nil sessionIDFn", New("/tmp", nil)},
+		{"empty session ID", New("/nonexistent/dir", func() string { return "" })},
+		{"missing file", New(t.TempDir(), func() string { return "no-such-session" })},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -515,51 +467,6 @@ func TestSource_LoadBefore_SessionIDReevaluated(t *testing.T) {
 	}
 }
 
-// TestSource_LoadBefore_BlankAndEmptyLines pins resilience to a kiro
-// flush that leaves a blank line in the file (rare, but observed when
-// SIGTERM races a partial newline). The scanner must skip blanks.
-func TestSource_LoadBefore_BlankAndEmptyLines(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	sid := "blanks"
-	body := promptLine("kept", 100) + "\n\n\n" + promptLine("kept2", 200) + "\n"
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, sid+".jsonl"), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	src := New(dir, func() string { return sid })
-	got, err := src.LoadBefore(context.Background(), 0, 10)
-	if err != nil {
-		t.Fatalf("LoadBefore: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("got=%v; want 2 entries (blanks skipped)", got)
-	}
-}
-
-// TestSource_LoadBefore_EmptyContent pins the zero-content edge case:
-// a Prompt with an empty content array decodes to an EventEntry with
-// an empty Summary so the timeline gets a placeholder entry rather
-// than a hidden gap.
-func TestSource_LoadBefore_EmptyContent(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	sid := "empty-content"
-	writeSession(t, dir, sid, []string{
-		`{"version":"v1","kind":"Prompt","data":{"message_id":"x","content":[],"meta":{"timestamp":100}}}`,
-	})
-	src := New(dir, func() string { return sid })
-	got, err := src.LoadBefore(context.Background(), 0, 10)
-	if err != nil {
-		t.Fatalf("LoadBefore: %v", err)
-	}
-	if len(got) != 1 || got[0].Summary != "" || got[0].Type != "user" {
-		t.Errorf("got=%+v; want one user entry with empty summary", got)
-	}
-}
-
 // TestSource_LoadBefore_AssistantToolAndThinkingFiltered pins parity
 // with the Claude Code path (discovery/history_tail.go: assistant arm):
 // only non-empty text chunks become EventEntry rows. Thinking, toolUse,
@@ -573,7 +480,8 @@ func TestSource_LoadBefore_EmptyContent(t *testing.T) {
 //
 // and the empty trailing text chunk in particular must not surface as
 // an empty bubble — without this filter every assistant turn produces
-// a blank message.
+// a blank message. Whitespace-only text is blank too (cc's
+// strings.TrimSpace == "" check).
 func TestSource_LoadBefore_AssistantToolAndThinkingFiltered(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -590,8 +498,9 @@ func TestSource_LoadBefore_AssistantToolAndThinkingFiltered(t *testing.T) {
 
 	writeSession(t, dir, sid, []string{
 		promptLine("user prompt", 100),
-		assistantLineRaw(thinkingOnly, 200), // must be dropped entirely
-		assistantLineRaw(textAndTool, 300),  // surfaces as one text entry
+		assistantLineRaw(thinkingOnly, 200),                         // must be dropped entirely
+		assistantLineRaw(`[{"kind":"text","data":"   \n  "}]`, 250), // blank: dropped
+		assistantLineRaw(textAndTool, 300),                          // surfaces as one text entry
 	})
 
 	src := New(dir, func() string { return sid })
@@ -613,36 +522,6 @@ func TestSource_LoadBefore_AssistantToolAndThinkingFiltered(t *testing.T) {
 	}
 	if got[1].Time != 300_000 {
 		t.Errorf("entry[1].Time=%d; want 300_000", got[1].Time)
-	}
-}
-
-// TestSource_LoadBefore_AssistantEmptyTextDropped pins the whitespace
-// rule: an assistant content list with only blank/whitespace text must
-// not produce a bubble (matches cc's strings.TrimSpace == "" check).
-// Without this, every "assistant emits text:” before tool_use" turn
-// would inject an empty card into the transcript.
-func TestSource_LoadBefore_AssistantEmptyTextDropped(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	sid := "asst-empty"
-
-	writeSession(t, dir, sid, []string{
-		promptLine("hi", 100),
-		assistantLineRaw(`[{"kind":"text","data":""}]`, 200),
-		assistantLineRaw(`[{"kind":"text","data":"   \n  "}]`, 300),
-		assistantLineRaw(`[{"kind":"text","data":"real reply"}]`, 400),
-	})
-
-	src := New(dir, func() string { return sid })
-	got, err := src.LoadBefore(context.Background(), 0, 10)
-	if err != nil {
-		t.Fatalf("LoadBefore: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("entries=%d, want 2 (prompt + only the non-blank assistant)", len(got))
-	}
-	if got[1].Type != "text" || got[1].Summary != "real reply" {
-		t.Errorf("entry[1]=%+v; want text/real reply", got[1])
 	}
 }
 

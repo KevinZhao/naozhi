@@ -38,13 +38,8 @@ func TestResolveProjectDir(t *testing.T) {
 		"":                                "",
 		"/tmp/Abc123":                     "-tmp-Abc123",
 		"/":                               "-",
-		"/tmp/中文":                         "-tmp---", // 3-byte runes → 3 dashes each (CLI spec: non-alnum byte → '-')
+		"/tmp/中文":                         "-tmp---", // the CLI walks runes: one dash per non-alnum rune
 	}
-	// NOTE: the "chinese chars → 3 dashes each" case is byte-level because the
-	// CLI in practice walks runes (range). The actual claude CLI walks runes,
-	// so our ProjectDir does too. Expected output below reflects
-	// "one rune → one dash" (not one byte).
-	cases["/tmp/中文"] = "-tmp---"
 	for cwd, want := range cases {
 		got := ProjectDir(cwd)
 		if cwd == "" {
@@ -153,63 +148,26 @@ func TestLinker_Resolve_SingleCandidate(t *testing.T) {
 	}
 }
 
-func TestLinker_Resolve_MTimeDescSelector(t *testing.T) {
+// TestLinker_Resolve_SkipsForeignAndStaleCandidates: a jsonl of another
+// session (R7: a projectDir collision across cwds leaves one behind) and one
+// whose timestamp is over 10s older than the Agent tool_use (R10 §3.3.1 step
+// 5; the CLI should never write it, but be strict) must not be linked.
+func TestLinker_Resolve_SkipsForeignAndStaleCandidates(t *testing.T) {
 	t.Parallel()
-	const sessionID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-	l, subagentDir := newLinkerForTest(t, sessionID)
-
-	oldTime := time.Now().Add(-1 * time.Hour)
-	newTime := time.Now()
-
-	// Two candidates with agentType=="worker" — same-turn CLI double-write
-	// scenario (§1.4). Must pick the newer mtime ("complete version").
-	writeAgentFiles(t, subagentDir, "aaaaaaaaaaaaaaaaa", "worker", sessionID, "p_old", oldTime)
-	writeAgentFiles(t, subagentDir, "bbbbbbbbbbbbbbbbb", "worker", sessionID, "p_new", newTime)
-
-	toolUseTime := newTime.Add(-50 * time.Millisecond).UnixMilli()
-	info, resolved := l.Resolve(context.Background(), "t_worker", "toolu_W", "worker", "", toolUseTime)
-	if !resolved {
-		t.Fatalf("Resolve failed")
-	}
-	if info.InternalAgentID != "agent-bbbbbbbbbbbbbbbbb" {
-		t.Errorf("picked older candidate, InternalAgentID=%q", info.InternalAgentID)
-	}
-	if info.FirstPromptID != "p_new" {
-		t.Errorf("FirstPromptID=%q, want p_new", info.FirstPromptID)
-	}
-}
-
-func TestLinker_Resolve_SessionIDMismatch_Skip(t *testing.T) {
-	t.Parallel()
-	const realSession = "deadbeef-1111-2222-3333-444444444444"
-	const otherSession = "11112222-3333-4444-5555-666677778888"
-	l, subagentDir := newLinkerForTest(t, realSession)
-
-	// Cross-contamination scenario (R7): projectDir collision across cwds
-	// leaves a stray jsonl from another session. Must skip.
-	writeAgentFiles(t, subagentDir, "11111111111111111", "collider", otherSession, "p_other", time.Now())
-
-	toolUseTime := time.Now().UnixMilli()
-	info, resolved := l.Resolve(context.Background(), "t_coll", "toolu_C", "collider", "", toolUseTime)
-	if resolved && info.InternalAgentID != "" {
-		t.Errorf("cross-session jsonl leaked: %+v", info)
-	}
-}
-
-func TestLinker_Resolve_StaleCandidate_Skip(t *testing.T) {
-	t.Parallel()
-	const sessionID = "cafecafe-1111-2222-3333-444444444444"
-	l, subagentDir := newLinkerForTest(t, sessionID)
-
-	// jsonl timestamp > 10s OLDER than the Agent tool_use — stale candidate
-	// (R10 §3.3.1 step 5). Claude CLI should never emit this, but be strict.
-	fileTime := time.Now().Add(-1 * time.Minute)
-	writeAgentFiles(t, subagentDir, "22222222222222222", "stale", sessionID, "p_stale", fileTime)
-
-	toolUseTime := time.Now().UnixMilli()
-	info, resolved := l.Resolve(context.Background(), "t_stale", "toolu_S", "stale", "", toolUseTime)
-	if resolved && info.InternalAgentID != "" {
-		t.Errorf("stale candidate accepted: %+v", info)
+	const sessionID = "deadbeef-1111-2222-3333-444444444444"
+	for _, tc := range []struct {
+		name, fileSession string
+		fileTime          time.Time
+	}{
+		{"other session", "11112222-3333-4444-5555-666677778888", time.Now()},
+		{"stale", sessionID, time.Now().Add(-1 * time.Minute)},
+	} {
+		l, subagentDir := newLinkerForTest(t, sessionID)
+		writeAgentFiles(t, subagentDir, "11111111111111111", "collider", tc.fileSession, "p_other", tc.fileTime)
+		info, resolved := l.Resolve(context.Background(), "t_coll", "toolu_C", "collider", "", time.Now().UnixMilli())
+		if resolved && info.InternalAgentID != "" {
+			t.Errorf("%s: candidate linked: %+v", tc.name, info)
+		}
 	}
 }
 
@@ -244,8 +202,7 @@ func TestLinker_Resolve_RetryThenSucceed(t *testing.T) {
 func TestLinker_Resolve_Timeout_Tombstone(t *testing.T) {
 	t.Parallel()
 	const sessionID = "11111111-2222-3333-4444-bbbbbbbbbbbb"
-	l, subagentDir := newLinkerForTest(t, sessionID)
-	_ = subagentDir
+	l, _ := newLinkerForTest(t, sessionID)
 	l.retryInterval = 5 * time.Millisecond
 	l.retryLimit = 3
 
@@ -488,7 +445,8 @@ func TestAppendNamedLink_CapsHistory(t *testing.T) {
 
 // TestLinker_Resolve_AgentTypeFilter verifies that only candidates whose
 // meta agentType matches the requested one are considered, and that among
-// the matches the newest (mtime-desc) is selected.
+// the matches the newest (mtime-desc) is selected: the same-turn CLI
+// double-write (§1.4) leaves two, and the newer is the complete version.
 func TestLinker_Resolve_AgentTypeFilter(t *testing.T) {
 	t.Parallel()
 	const sessionID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
@@ -508,11 +466,7 @@ func TestLinker_Resolve_AgentTypeFilter(t *testing.T) {
 	if !resolved {
 		t.Fatalf("Resolve failed")
 	}
-	if info.InternalAgentID != "agent-0000000000000002b" {
-		t.Errorf("expected newest candidate, got InternalAgentID=%q", info.InternalAgentID)
-	}
-	// Verify the other-type candidate was NOT picked.
-	if info.JSONLPath == filepath.Join(subagentDir, "agent-0000000000000003c.jsonl") {
-		t.Error("other-type candidate was picked despite agentType mismatch")
+	if info.InternalAgentID != "agent-0000000000000002b" || info.FirstPromptID != "p_new" {
+		t.Errorf("expected newest candidate, got InternalAgentID=%q FirstPromptID=%q", info.InternalAgentID, info.FirstPromptID)
 	}
 }

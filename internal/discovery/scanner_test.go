@@ -103,147 +103,53 @@ func makeSessionFile(t *testing.T, sessDir string, sf sessionFile) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// IsValidSessionID
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// projDirName
-// ---------------------------------------------------------------------------
+// projectFor makes cwd's project dir under a fresh ~/.claude and, when prompt
+// is not empty, a <sessionID>.jsonl in it holding that one user prompt.
+func projectFor(t *testing.T, cwd, sessionID, prompt string) (claudeDir, projDir, jsonlPath string) {
+	t.Helper()
+	claudeDir = makeClaudeDir(t)
+	projDir = filepath.Join(claudeDir, "projects", claudefs.ProjectSlug(cwd))
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	jsonlPath = filepath.Join(projDir, sessionID+".jsonl")
+	if prompt != "" {
+		makeJSONLWithUserPrompts(t, jsonlPath, []string{prompt})
+	}
+	return claudeDir, projDir, jsonlPath
+}
 
 // ---------------------------------------------------------------------------
 // LookupSummaries
 // ---------------------------------------------------------------------------
 
-func TestLookupSummaries_Empty(t *testing.T) {
+// TestLookupSummaries: each session's summary from its project's index, the
+// same on a second (cached) call; a session the index does not list, or whose
+// project has no index, gets no entry; empty inputs give nil.
+func TestLookupSummaries(t *testing.T) {
 	t.Parallel()
 	sc := NewScanner()
-	got := sc.LookupSummaries("", nil)
-	if got != nil {
-		t.Errorf("expected nil, got %v", got)
+	if got := sc.LookupSummaries("", nil); got != nil {
+		t.Errorf("empty claudeDir: %v, want nil", got)
 	}
-	got = sc.LookupSummaries("/some/dir", nil)
-	if got != nil {
-		t.Errorf("expected nil for empty sessions map, got %v", got)
-	}
-}
-
-func TestLookupSummaries_BasicLookup(t *testing.T) {
-	t.Parallel()
-	sc := NewScanner()
-	claudeDir := makeClaudeDir(t)
-	cwd := "/tmp/lookup-project"
-	sid := "aaaabbbb-0000-0000-0000-000000000001"
-	dirName := claudefs.ProjectSlug(cwd)
-	projDir := filepath.Join(claudeDir, "projects", dirName)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	writeSessionsIndex(t, projDir, sessionsIndex{
-		OriginalPath: cwd,
-		Entries: []sessionsIndexEntry{
-			{SessionID: sid, Summary: "My session summary"},
-		},
-	})
-
-	got := sc.LookupSummaries(claudeDir, map[string]string{sid: cwd})
-	if got[sid] != "My session summary" {
-		t.Errorf("LookupSummaries[%q] = %q, want %q", sid, got[sid], "My session summary")
-	}
-}
-
-func TestLookupSummaries_NotInIndex(t *testing.T) {
-	t.Parallel()
-	sc := NewScanner()
-	claudeDir := makeClaudeDir(t)
-	cwd := "/tmp/lookup-missing"
-	sid := "aaaabbbb-0000-0000-0000-000000000002"
-	dirName := claudefs.ProjectSlug(cwd)
-	projDir := filepath.Join(claudeDir, "projects", dirName)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	writeSessionsIndex(t, projDir, sessionsIndex{
-		OriginalPath: cwd,
-		Entries:      []sessionsIndexEntry{},
-	})
-
-	got := sc.LookupSummaries(claudeDir, map[string]string{sid: cwd})
-	if val, ok := got[sid]; ok {
-		t.Errorf("expected no entry for missing session, got %q", val)
-	}
-}
-
-func TestLookupSummaries_CacheHit(t *testing.T) {
-	t.Parallel()
-	sc := NewScanner()
-	claudeDir := makeClaudeDir(t)
-	cwd := "/tmp/cache-test"
-	sid := "aaaabbbb-0000-0000-0000-000000000003"
-	dirName := claudefs.ProjectSlug(cwd)
-	projDir := filepath.Join(claudeDir, "projects", dirName)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	writeSessionsIndex(t, projDir, sessionsIndex{
-		Entries: []sessionsIndexEntry{
-			{SessionID: sid, Summary: "cached summary"},
-		},
-	})
-
-	// First call: cache miss
-	got1 := sc.LookupSummaries(claudeDir, map[string]string{sid: cwd})
-	if got1[sid] != "cached summary" {
-		t.Errorf("first call: got %q, want cached summary", got1[sid])
+	if got := sc.LookupSummaries("/some/dir", nil); got != nil {
+		t.Errorf("empty sessions: %v, want nil", got)
 	}
 
-	// Second call on same mtime: cache hit
-	got2 := sc.LookupSummaries(claudeDir, map[string]string{sid: cwd})
-	if got2[sid] != "cached summary" {
-		t.Errorf("second call (cache hit): got %q, want cached summary", got2[sid])
-	}
-}
-
-func TestLookupSummaries_MissingIndexFile(t *testing.T) {
-	t.Parallel()
-	sc := NewScanner()
-	claudeDir := makeClaudeDir(t)
-	sid := "aaaabbbb-0000-0000-0000-000000000004"
-	cwd := "/tmp/no-index"
-	// Don't create any directory or index file
-	got := sc.LookupSummaries(claudeDir, map[string]string{sid: cwd})
-	if len(got) != 0 {
-		t.Errorf("expected empty map, got %v", got)
-	}
-}
-
-func TestLookupSummaries_MultipleSessionsSameProject(t *testing.T) {
-	t.Parallel()
-	sc := NewScanner()
-	claudeDir := makeClaudeDir(t)
-	cwd := "/tmp/multi"
-	sid1 := "aaaabbbb-0000-0000-0000-000000000005"
-	sid2 := "aaaabbbb-0000-0000-0000-000000000006"
-	dirName := claudefs.ProjectSlug(cwd)
-	projDir := filepath.Join(claudeDir, "projects", dirName)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	writeSessionsIndex(t, projDir, sessionsIndex{
-		OriginalPath: cwd,
-		Entries: []sessionsIndexEntry{
-			{SessionID: sid1, Summary: "summary one"},
-			{SessionID: sid2, Summary: "summary two"},
-		},
-	})
-
-	sessions := map[string]string{sid1: cwd, sid2: cwd}
-	got := sc.LookupSummaries(claudeDir, sessions)
-	if got[sid1] != "summary one" {
-		t.Errorf("sid1 summary = %q, want summary one", got[sid1])
-	}
-	if got[sid2] != "summary two" {
-		t.Errorf("sid2 summary = %q, want summary two", got[sid2])
+	const cwd = "/tmp/multi"
+	sid1, sid2 := "aaaabbbb-0000-0000-0000-000000000005", "aaaabbbb-0000-0000-0000-000000000006"
+	unlisted, noIndex := "aaaabbbb-0000-0000-0000-000000000002", "aaaabbbb-0000-0000-0000-000000000004"
+	claudeDir, projDir, _ := projectFor(t, cwd, sid1, "")
+	writeSessionsIndex(t, projDir, sessionsIndex{OriginalPath: cwd, Entries: []sessionsIndexEntry{
+		{SessionID: sid1, Summary: "summary one"},
+		{SessionID: sid2, Summary: "summary two"},
+	}})
+	sessions := map[string]string{sid1: cwd, sid2: cwd, unlisted: cwd, noIndex: "/tmp/no-index"}
+	for call := 1; call <= 2; call++ {
+		got := sc.LookupSummaries(claudeDir, sessions)
+		if len(got) != 2 || got[sid1] != "summary one" || got[sid2] != "summary two" {
+			t.Errorf("call %d: %v, want only the two indexed summaries", call, got)
+		}
 	}
 }
 
@@ -315,26 +221,15 @@ func TestExtractLastPromptUncached_Basic(t *testing.T) {
 	if got != "third prompt" {
 		t.Errorf("extractLastPromptUncached = %q, want %q", got, "third prompt")
 	}
-}
 
-func TestExtractLastPromptUncached_EmptyFile(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "empty.jsonl")
-	if err := os.WriteFile(path, []byte{}, 0o644); err != nil {
+	empty := filepath.Join(dir, "empty.jsonl")
+	if err := os.WriteFile(empty, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got := extractLastPromptUncached(path, 0)
-	if got != "" {
-		t.Errorf("expected empty, got %q", got)
-	}
-}
-
-func TestExtractLastPromptUncached_NonexistentFile(t *testing.T) {
-	t.Parallel()
-	got := extractLastPromptUncached("/nonexistent/path.jsonl", 0)
-	if got != "" {
-		t.Errorf("expected empty for nonexistent file, got %q", got)
+	for _, p := range []string{empty, "/nonexistent/path.jsonl"} {
+		if got := extractLastPromptUncached(p, 0); got != "" {
+			t.Errorf("extractLastPromptUncached(%s) = %q, want empty", p, got)
+		}
 	}
 }
 
@@ -350,11 +245,7 @@ func TestExtractLastPromptUncached_LargeTailFallback(t *testing.T) {
 	// The real user text prompt at the head should be found via fallback.
 	var sb strings.Builder
 	// First line: valid user prompt near the beginning
-	msg, _ := json.Marshal(struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}{Role: "user", Content: "early prompt"})
-	sb.WriteString(fmt.Sprintf(`{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":%s}`+"\n", string(msg)))
+	sb.WriteString(userJSONLLine("user", "early prompt") + "\n")
 
 	// Fill up more than 512KB with non-text user lines so that the tail scan
 	// returns empty and the function falls back to start-of-file.
@@ -409,22 +300,8 @@ func TestExtractLastPromptUncached_SkipsSystemInjectedXML(t *testing.T) {
 		"<available-deferred-tools>x,y,z</available-deferred-tools>",
 	}
 
-	var lines []string
-	// Real prompt first.
-	msg, _ := json.Marshal(struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}{Role: "user", Content: realPrompt})
-	lines = append(lines, fmt.Sprintf(`{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":%s}`, string(msg)))
-	// Then a series of system-injected synthetic user messages.
-	for i, inj := range injected {
-		m, _ := json.Marshal(struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		}{Role: "user", Content: inj})
-		lines = append(lines, fmt.Sprintf(`{"type":"user","timestamp":"2026-01-01T%02d:00:00Z","message":%s}`, i+1, string(m)))
-	}
-	writeJSONLFile(t, path, lines)
+	// The real prompt first, then the system-injected synthetic user messages.
+	makeJSONLWithUserPrompts(t, path, append([]string{realPrompt}, injected...))
 
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -478,69 +355,26 @@ func TestIsClaudeSystemInjectedText(t *testing.T) {
 // extractLastPrompt cache behaviour
 // ---------------------------------------------------------------------------
 
-func TestExtractLastPrompt_CacheHit(t *testing.T) {
+// TestExtractLastPrompt_Cache: a read fills the cache under the file's mtime,
+// and a rewrite (a new mtime) is read afresh.
+func TestExtractLastPrompt_Cache(t *testing.T) {
 	t.Parallel()
 	sc := NewScanner()
-	claudeDir := makeClaudeDir(t)
-	cwd := "/tmp/cache-hit"
-	sessionID := "ccccdddd-0000-0000-0000-000000000001"
-	dirName := claudefs.ProjectSlug(cwd)
-	projDir := filepath.Join(claudeDir, "projects", dirName)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	jsonlPath := filepath.Join(projDir, sessionID+".jsonl")
-	makeJSONLWithUserPrompts(t, jsonlPath, []string{"cached prompt"})
+	const cwd, sessionID = "/tmp/cache-hit", "ccccdddd-0000-0000-0000-000000000001"
+	claudeDir, _, jsonlPath := projectFor(t, cwd, sessionID, "old prompt")
 
-	// First call: cache miss → reads file
-	got1 := sc.extractLastPrompt(claudeDir, cwd, sessionID)
-	if got1 != "cached prompt" {
-		t.Errorf("first call = %q, want cached prompt", got1)
+	if got := sc.extractLastPrompt(claudeDir, cwd, sessionID); got != "old prompt" {
+		t.Errorf("first call = %q, want old prompt", got)
 	}
-	// Verify cache was populated
 	fi, _ := os.Stat(jsonlPath)
-	mtime := fi.ModTime().UnixNano()
-	cached, ok := sc.getCachedPrompt(jsonlPath, mtime)
-	if !ok {
-		t.Error("expected cache hit after first extractLastPrompt call")
-	}
-	if cached != "cached prompt" {
-		t.Errorf("cached value = %q, want cached prompt", cached)
+	if cached, ok := sc.getCachedPrompt(jsonlPath, fi.ModTime().UnixNano()); !ok || cached != "old prompt" {
+		t.Errorf("cache after the first call = (%q, %v), want (old prompt, true)", cached, ok)
 	}
 
-	// Second call: cache hit (no file read needed)
-	got2 := sc.extractLastPrompt(claudeDir, cwd, sessionID)
-	if got2 != "cached prompt" {
-		t.Errorf("second call = %q, want cached prompt", got2)
-	}
-}
-
-func TestExtractLastPrompt_CacheInvalidatedOnMtimeChange(t *testing.T) {
-	t.Parallel()
-	sc := NewScanner()
-	claudeDir := makeClaudeDir(t)
-	cwd := "/tmp/cache-invalidate"
-	sessionID := "ccccdddd-0000-0000-0000-000000000002"
-	dirName := claudefs.ProjectSlug(cwd)
-	projDir := filepath.Join(claudeDir, "projects", dirName)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	jsonlPath := filepath.Join(projDir, sessionID+".jsonl")
-	makeJSONLWithUserPrompts(t, jsonlPath, []string{"old prompt"})
-
-	got1 := sc.extractLastPrompt(claudeDir, cwd, sessionID)
-	if got1 != "old prompt" {
-		t.Errorf("first call = %q, want old prompt", got1)
-	}
-
-	// Overwrite file (different mtime guaranteed on most filesystems)
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond) // a different mtime on most filesystems
 	makeJSONLWithUserPrompts(t, jsonlPath, []string{"new prompt"})
-
-	got2 := sc.extractLastPrompt(claudeDir, cwd, sessionID)
-	if got2 != "new prompt" {
-		t.Errorf("after file update = %q, want new prompt", got2)
+	if got := sc.extractLastPrompt(claudeDir, cwd, sessionID); got != "new prompt" {
+		t.Errorf("after file update = %q, want new prompt", got)
 	}
 }
 
@@ -635,45 +469,56 @@ func TestRefreshDynamic_EmptyInputs(t *testing.T) {
 	}
 }
 
-func TestRefreshDynamic_LastActiveAndState(t *testing.T) {
+// TestRefreshDynamic_LastActivePromptAndSummary: a refresh takes LastActive
+// from the JSONL's mtime, the prompt from its last user line and the summary
+// from the index, and reports the change; a second refresh with nothing new
+// reports none.
+func TestRefreshDynamic_LastActivePromptAndSummary(t *testing.T) {
 	t.Parallel()
 	sc := NewScanner()
-	claudeDir := makeClaudeDir(t)
-	cwd := "/tmp/refresh-dynamic"
-	sessionID := "eeeeffff-0000-0000-0000-000000000001"
-	dirName := claudefs.ProjectSlug(cwd)
-	projDir := filepath.Join(claudeDir, "projects", dirName)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	jsonlPath := filepath.Join(projDir, sessionID+".jsonl")
-	makeJSONLWithUserPrompts(t, jsonlPath, []string{"refresh me"})
-
+	const cwd, sessionID = "/tmp/refresh-dynamic", "eeeeffff-0000-0000-0000-000000000001"
+	claudeDir, projDir, jsonlPath := projectFor(t, cwd, sessionID, "refresh me")
+	writeSessionsIndex(t, projDir, sessionsIndex{OriginalPath: cwd, Entries: []sessionsIndexEntry{
+		{SessionID: sessionID, Summary: "freshly computed summary"},
+	}})
 	fi, err := os.Stat(jsonlPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedMtime := fi.ModTime().UnixMilli()
 
-	sessions := []DiscoveredSession{
-		{
-			SessionID:  sessionID,
-			CWD:        cwd,
-			LastActive: 0, // stale
-			State:      "ready",
-			LastPrompt: "",
-		},
-	}
-
-	changed := sc.RefreshDynamic(claudeDir, sessions)
-	if !changed {
+	sessions := []DiscoveredSession{{SessionID: sessionID, CWD: cwd, State: "ready"}}
+	if !sc.RefreshDynamic(claudeDir, sessions) {
 		t.Error("expected changed=true after refresh")
 	}
-	if sessions[0].LastActive != expectedMtime {
-		t.Errorf("LastActive = %d, want %d", sessions[0].LastActive, expectedMtime)
+	s := sessions[0]
+	if s.LastActive != fi.ModTime().UnixMilli() || s.LastPrompt != "refresh me" || s.Summary != "freshly computed summary" {
+		t.Errorf("after refresh: LastActive %d (want %d), prompt %q, summary %q",
+			s.LastActive, fi.ModTime().UnixMilli(), s.LastPrompt, s.Summary)
 	}
-	if sessions[0].LastPrompt != "refresh me" {
-		t.Errorf("LastPrompt = %q, want refresh me", sessions[0].LastPrompt)
+	if sc.RefreshDynamic(claudeDir, sessions) {
+		t.Error("expected changed=false when nothing changed")
+	}
+}
+
+// R20260603-PERF-2: extractLastPromptWithMtime returns the JSONL mtime so the
+// caller can avoid a second os.Stat. Verify the mtime matches a direct Stat
+// and that missing files report ok=false.
+func TestExtractLastPromptWithMtime(t *testing.T) {
+	t.Parallel()
+	sc := NewScanner()
+	const cwd, sessionID = "/tmp/extract-mtime", "eeeeffff-0000-0000-0000-0000000000cd"
+	claudeDir, _, jsonlPath := projectFor(t, cwd, sessionID, "hello mtime")
+	fi, err := os.Stat(jsonlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prompt, mtime, ok := sc.extractLastPromptWithMtime(claudeDir, cwd, sessionID)
+	if !ok || prompt != "hello mtime" || mtime != fi.ModTime().UnixMilli() {
+		t.Errorf("= (%q, %d, %v), want (hello mtime, %d, true)", prompt, mtime, ok, fi.ModTime().UnixMilli())
+	}
+	if _, _, ok := sc.extractLastPromptWithMtime(claudeDir, "/tmp/nope", "00000000-0000-0000-0000-000000000000"); ok {
+		t.Error("expected ok=false for missing JSONL")
 	}
 }
 
@@ -702,117 +547,5 @@ func TestRefreshDynamic_MissingJSONLFallsBackToStartedAt(t *testing.T) {
 	}
 	if sessions[0].LastPrompt != "" {
 		t.Errorf("LastPrompt = %q, want empty for missing JSONL", sessions[0].LastPrompt)
-	}
-}
-
-// R20260603-PERF-2: extractLastPromptWithMtime returns the JSONL mtime so the
-// caller can avoid a second os.Stat. Verify the mtime matches a direct Stat
-// and that missing files report ok=false.
-func TestExtractLastPromptWithMtime(t *testing.T) {
-	t.Parallel()
-	sc := NewScanner()
-	claudeDir := makeClaudeDir(t)
-	cwd := "/tmp/extract-mtime"
-	sessionID := "eeeeffff-0000-0000-0000-0000000000cd"
-	projDir := filepath.Join(claudeDir, "projects", claudefs.ProjectSlug(cwd))
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	jsonlPath := filepath.Join(projDir, sessionID+".jsonl")
-	makeJSONLWithUserPrompts(t, jsonlPath, []string{"hello mtime"})
-
-	fi, err := os.Stat(jsonlPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantMtime := fi.ModTime().UnixMilli()
-
-	prompt, mtime, ok := sc.extractLastPromptWithMtime(claudeDir, cwd, sessionID)
-	if !ok {
-		t.Fatal("expected ok=true for existing JSONL")
-	}
-	if prompt != "hello mtime" {
-		t.Errorf("prompt = %q, want hello mtime", prompt)
-	}
-	if mtime != wantMtime {
-		t.Errorf("mtime = %d, want %d", mtime, wantMtime)
-	}
-
-	if _, _, ok := sc.extractLastPromptWithMtime(claudeDir, "/tmp/nope", "00000000-0000-0000-0000-000000000000"); ok {
-		t.Error("expected ok=false for missing JSONL")
-	}
-}
-
-func TestRefreshDynamic_SummaryUpdated(t *testing.T) {
-	t.Parallel()
-	sc := NewScanner()
-	claudeDir := makeClaudeDir(t)
-	cwd := "/tmp/refresh-summary"
-	sessionID := "eeeeffff-0000-0000-0000-000000000002"
-	dirName := claudefs.ProjectSlug(cwd)
-	projDir := filepath.Join(claudeDir, "projects", dirName)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// JSONL needed so the mtime lookup works
-	jsonlPath := filepath.Join(projDir, sessionID+".jsonl")
-	makeJSONLWithUserPrompts(t, jsonlPath, []string{"hello"})
-
-	writeSessionsIndex(t, projDir, sessionsIndex{
-		OriginalPath: cwd,
-		Entries: []sessionsIndexEntry{
-			{SessionID: sessionID, Summary: "freshly computed summary"},
-		},
-	})
-
-	sessions := []DiscoveredSession{
-		{
-			SessionID: sessionID,
-			CWD:       cwd,
-			Summary:   "", // no summary yet
-		},
-	}
-
-	changed := sc.RefreshDynamic(claudeDir, sessions)
-	if !changed {
-		t.Error("expected changed=true when summary is added")
-	}
-	if sessions[0].Summary != "freshly computed summary" {
-		t.Errorf("Summary = %q, want freshly computed summary", sessions[0].Summary)
-	}
-}
-
-func TestRefreshDynamic_NoChanges(t *testing.T) {
-	t.Parallel()
-	sc := NewScanner()
-	claudeDir := makeClaudeDir(t)
-	cwd := "/tmp/no-change"
-	sessionID := "eeeeffff-0000-0000-0000-000000000003"
-	dirName := claudefs.ProjectSlug(cwd)
-	projDir := filepath.Join(claudeDir, "projects", dirName)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	jsonlPath := filepath.Join(projDir, sessionID+".jsonl")
-	makeJSONLWithUserPrompts(t, jsonlPath, []string{"stable prompt"})
-	fi, _ := os.Stat(jsonlPath)
-	mtime := fi.ModTime().UnixMilli()
-
-	// Since the JSONL was just written, its mtime is "now" and state should
-	// be "running" (within the 30s runningThreshold window).
-	sessions := []DiscoveredSession{
-		{
-			SessionID:  sessionID,
-			CWD:        cwd,
-			LastActive: mtime,
-			State:      "running",
-			LastPrompt: "stable prompt",
-			Summary:    "",
-		},
-	}
-
-	changed := sc.RefreshDynamic(claudeDir, sessions)
-	if changed {
-		t.Error("expected changed=false when nothing changed")
 	}
 }

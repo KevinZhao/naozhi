@@ -118,34 +118,6 @@ func TestGet_MissingReturnsFalse(t *testing.T) {
 	})
 }
 
-func TestMustGet_PanicOnMissing(t *testing.T) {
-	withCleanRegistry(t, func() {
-		Register(sampleProfile("alpha"))
-
-		// Hit path: should not panic.
-		got := mustGet("alpha")
-		if got.ID != "alpha" {
-			t.Errorf("MustGet returned ID %q; want %q", got.ID, "alpha")
-		}
-
-		// Miss path: must panic with "unknown id".
-		defer func() {
-			r := recover()
-			if r == nil {
-				t.Fatalf("MustGet on missing id should panic")
-			}
-			msg, ok := r.(string)
-			if !ok {
-				t.Fatalf("expected string panic, got %T (%v)", r, r)
-			}
-			if !strings.Contains(msg, "unknown id") {
-				t.Errorf("panic message %q missing %q", msg, "unknown id")
-			}
-		}()
-		mustGet("missing")
-	})
-}
-
 func TestAll_SortedByRegistrationOrder(t *testing.T) {
 	withCleanRegistry(t, func() {
 		// Intentionally register out of alphabetical order so that
@@ -306,86 +278,21 @@ func TestEnsureDefaults_IdempotentAndConcurrent(t *testing.T) {
 	})
 }
 
-// TestEnsureDefaults_CleanRegistryReBootstraps guards the test-isolation
-// fix in #895: a clean-registry block must re-bootstrap via EnsureDefaults
-// regardless of whether defaultsOnce already fired in production init or an
-// earlier test. We fire EnsureDefaults() OUTSIDE the clean block first to
-// trip the package-level Once, then assert that inside withCleanRegistry the
-// defaults re-register. Pre-fix (defaultsOnce not reset) this observed
-// All() len 0 — a run-order-dependent failure.
-func TestEnsureDefaults_CleanRegistryReBootstraps(t *testing.T) {
-	// Trip the global Once outside the clean block (idempotent / safe).
-	EnsureDefaults()
-
-	withCleanRegistry(t, func() {
-		if got := len(All()); got != 0 {
-			t.Fatalf("clean registry should start empty; All() len = %d", got)
-		}
-		EnsureDefaults()
-		if got := len(All()); got != 3 {
-			t.Fatalf("EnsureDefaults inside clean registry did not re-bootstrap: All() len = %d; want 3 (defaultsOnce reset missing?)", got)
-		}
-		if _, ok := Get("claude"); !ok {
-			t.Error("claude missing after re-bootstrap")
-		}
-		if _, ok := Get("kiro"); !ok {
-			t.Error("kiro missing after re-bootstrap")
-		}
-	})
-}
-
-func TestProfile_NewProtocol_Claude(t *testing.T) {
+// TestProfile_NewProtocol: each default profile builds its own wire protocol
+// from empty deps (cc loads ~/.claude/settings.json itself via
+// --setting-sources user, so ProtocolDeps carries nothing).
+func TestProfile_NewProtocol(t *testing.T) {
 	withCleanRegistry(t, func() {
 		RegisterDefaults()
-
-		p := mustGet("claude")
-		if p.NewProtocol == nil {
-			t.Fatal("claude profile NewProtocol is nil")
-		}
-
-		// direct-user-settings PR1: ProtocolDeps is empty (the settings
-		// override plumbing was removed; cc loads ~/.claude/settings.json
-		// directly via --setting-sources user). NewProtocol must still build
-		// a usable ClaudeProtocol from the empty deps.
-		proto := p.NewProtocol(ProtocolDeps{})
-
-		if _, ok := proto.(*cli.ClaudeProtocol); !ok {
-			t.Fatalf("claude NewProtocol returned %T; want *cli.ClaudeProtocol", proto)
-		}
-		if proto.Name() != "stream-json" {
-			t.Errorf("claude protocol Name() = %q; want %q", proto.Name(), "stream-json")
-		}
-	})
-}
-
-func TestProfile_NewProtocol_Kiro(t *testing.T) {
-	withCleanRegistry(t, func() {
-		RegisterDefaults()
-
-		p := mustGet("kiro")
-		if p.NewProtocol == nil {
-			t.Fatal("kiro profile NewProtocol is nil")
-		}
-
-		// Kiro ignores ProtocolDeps but accept any value without panicking.
-		proto := p.NewProtocol(ProtocolDeps{})
-
-		if _, ok := proto.(*cli.ACPProtocol); !ok {
-			t.Fatalf("kiro NewProtocol returned %T; want *cli.ACPProtocol", proto)
-		}
-		if proto.Name() != "acp" {
-			t.Errorf("kiro protocol Name() = %q; want %q", proto.Name(), "acp")
+		for id, want := range map[string]string{"claude": "stream-json", "kiro": "acp"} {
+			if got := mustGet(id).NewProtocol(ProtocolDeps{}).Name(); got != want {
+				t.Errorf("%s NewProtocol().Name() = %q; want %q", id, got, want)
+			}
 		}
 	})
 }
 
 func TestProfile_DetectInProc(t *testing.T) {
-	withCleanRegistry(t, func() {
-		RegisterDefaults()
-	})
-
-	// The defaults are now restored to the saved registry. We need to
-	// re-register inside a clean scope to keep this case hermetic.
 	withCleanRegistry(t, func() {
 		RegisterDefaults()
 

@@ -3,6 +3,7 @@ package naozhilog
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"testing"
 	"time"
 
@@ -15,7 +16,7 @@ import (
 // (persister, naozhi-log source, sink) triple so tests can produce
 // data via the sink and read it back via the source — the same
 // round-trip the router does in production.
-func newPersister(t *testing.T, key string) (*persist.Persister, *Source, persist.PersistSink, string) {
+func newPersister(t *testing.T, key string) (*persist.Persister, *Source, persist.PersistSink) {
 	t.Helper()
 	dir := t.TempDir()
 	p, err := persist.NewPersister(persist.Options{
@@ -33,12 +34,12 @@ func newPersister(t *testing.T, key string) (*persist.Persister, *Source, persis
 		defer cancel()
 		_ = p.Stop(ctx)
 	})
-	return p, New(dir, key), p.SinkFor(key), dir
+	return p, New(dir, key), p.SinkFor(key)
 }
 
 // persistOne is a test-only adapter that does what session.Router's
-// bridge will do in Phase 4: marshal a clievent.EventEntry into
-// persist.Entry and hand it to the sink.
+// bridge does: marshal a clievent.EventEntry into persist.Entry and hand
+// it to the sink.
 func persistOne(t *testing.T, sink persist.PersistSink, e clievent.EventEntry) {
 	t.Helper()
 	buf, err := json.Marshal(e)
@@ -48,17 +49,36 @@ func persistOne(t *testing.T, sink persist.PersistSink, e clievent.EventEntry) {
 	sink([]persist.Entry{{JSON: buf, TimeMS: e.Time}}, false)
 }
 
-// TestSource_LoadLatest_EmptyDir returns nil without error for a key
-// that has never been written to. The router relies on this to
-// distinguish "no local history" from an actual failure.
-func TestSource_LoadLatest_EmptyDir(t *testing.T) {
-	_, src, _, _ := newPersister(t, "k")
-	got, err := src.LoadLatest(context.Background(), 500)
-	if err != nil {
-		t.Fatalf("LoadLatest: %v", err)
+// flush waits for the persister to write what the sink was handed.
+func flush(p *persist.Persister) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = p.Flush(ctx)
+}
+
+// userLog persists n user entries at Time first, first+step, … and returns
+// the source reading them back.
+func userLog(t *testing.T, key string, n int, first, step int64) *Source {
+	t.Helper()
+	p, src, sink := newPersister(t, key)
+	for i := 0; i < n; i++ {
+		persistOne(t, sink, clievent.EventEntry{UUID: key + "-" + rune2hex(i), Time: first + int64(i)*step, Type: "user", Summary: rune2hex(i)})
 	}
-	if len(got) != 0 {
-		t.Errorf("got %d entries, want 0", len(got))
+	flush(p)
+	return src
+}
+
+// TestSource_EmptyOrDisabled: a key never written to, and a Source with no
+// dir (deployments that opt out of event-log persistence), return nil
+// without error. The router relies on this to distinguish "no local
+// history" from an actual failure.
+func TestSource_EmptyOrDisabled(t *testing.T) {
+	_, src, _ := newPersister(t, "k")
+	for name, s := range map[string]*Source{"never written": src, "no dir": New("", "k")} {
+		got, err := s.LoadLatest(context.Background(), 500)
+		if err != nil || len(got) != 0 {
+			t.Errorf("%s: LoadLatest = (%d entries, %v), want (0, nil)", name, len(got), err)
+		}
 	}
 }
 
@@ -67,7 +87,7 @@ func TestSource_LoadLatest_EmptyDir(t *testing.T) {
 // matters for dashboard rendering (UUID, Time, Type, Summary,
 // Images, ImagePaths) and the RunID join key must survive the trip.
 func TestSource_LoadLatest_RoundTrip(t *testing.T) {
-	p, src, sink, _ := newPersister(t, "k")
+	p, src, sink := newPersister(t, "k")
 
 	inputs := []clievent.EventEntry{
 		{UUID: "aaaa11", Time: 100, Type: "user", Summary: "hi", RunID: "0123456789abcdef"},
@@ -82,10 +102,7 @@ func TestSource_LoadLatest_RoundTrip(t *testing.T) {
 	for _, e := range inputs {
 		persistOne(t, sink, e)
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = p.Flush(ctx)
+	flush(p)
 
 	got, err := src.LoadLatest(context.Background(), 100)
 	if err != nil {
@@ -116,148 +133,53 @@ func TestSource_LoadLatest_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestSource_LoadLatest_RespectsLimit: 10 entries, limit=3, returns
-// the newest 3 in chronological order.
-func TestSource_LoadLatest_RespectsLimit(t *testing.T) {
-	p, src, sink, _ := newPersister(t, "k")
-	for i := 0; i < 10; i++ {
-		persistOne(t, sink, clievent.EventEntry{
-			UUID: "u" + rune2hex(i),
-			Time: int64(100 + i),
-			Type: "user",
-		})
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = p.Flush(ctx)
-
-	got, err := src.LoadLatest(context.Background(), 3)
+// TestSource_Pages: over 10 entries at 100..109, a page is the newest
+// `limit` entries strictly before beforeMS in chronological order — users
+// paginating "load earlier" want the entries adjacent to the screen first.
+// beforeMS 0 is LoadLatest, so the first page and the later ones share one
+// read path.
+func TestSource_Pages(t *testing.T) {
+	src := userLog(t, "k", 10, 100, 1)
+	bg := context.Background()
+	latest, err := src.LoadLatest(bg, 3)
 	if err != nil {
 		t.Fatalf("LoadLatest: %v", err)
 	}
-	if len(got) != 3 {
-		t.Fatalf("got %d, want 3", len(got))
+	if got := times(latest); !slices.Equal(got, []int64{107, 108, 109}) {
+		t.Errorf("LoadLatest(3) = %v, want the newest 3", got)
 	}
-	// Newest 3 by Time are 107, 108, 109.
-	for i, want := range []int64{107, 108, 109} {
-		if got[i].Time != want {
-			t.Errorf("got[%d].Time=%d, want %d", i, got[i].Time, want)
+	for _, tc := range []struct {
+		before int64
+		limit  int
+		want   []int64
+	}{
+		{105, 100, []int64{100, 101, 102, 103, 104}},
+		{108, 3, []int64{105, 106, 107}},
+		{0, 10, []int64{100, 101, 102, 103, 104, 105, 106, 107, 108, 109}},
+	} {
+		got, err := src.LoadBefore(bg, tc.before, tc.limit)
+		if err != nil {
+			t.Fatalf("LoadBefore(%d, %d): %v", tc.before, tc.limit, err)
 		}
-	}
-}
-
-// TestSource_LoadBefore_FiltersAndOrders: 10 entries times 100..109,
-// LoadBefore(beforeMS=105) returns the 5 entries strictly < 105
-// (100..104) in chronological order.
-func TestSource_LoadBefore_FiltersAndOrders(t *testing.T) {
-	p, src, sink, _ := newPersister(t, "k")
-	for i := 0; i < 10; i++ {
-		persistOne(t, sink, clievent.EventEntry{
-			UUID: "u" + rune2hex(i),
-			Time: int64(100 + i),
-			Type: "user",
-		})
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = p.Flush(ctx)
-
-	got, err := src.LoadBefore(context.Background(), 105, 100)
-	if err != nil {
-		t.Fatalf("LoadBefore: %v", err)
-	}
-	wantTimes := []int64{100, 101, 102, 103, 104}
-	if len(got) != len(wantTimes) {
-		t.Fatalf("got %d entries, want %d", len(got), len(wantTimes))
-	}
-	for i, w := range wantTimes {
-		if got[i].Time != w {
-			t.Errorf("got[%d].Time=%d, want %d", i, got[i].Time, w)
+		if !slices.Equal(times(got), tc.want) {
+			t.Errorf("LoadBefore(%d, %d) = %v, want %v", tc.before, tc.limit, times(got), tc.want)
 		}
-	}
-}
-
-// TestSource_LoadBefore_RespectsLimit returns the newest `limit`
-// filtered entries, not the oldest — users paginating "load earlier"
-// want adjacent-to-screen entries first.
-func TestSource_LoadBefore_RespectsLimit(t *testing.T) {
-	p, src, sink, _ := newPersister(t, "k")
-	for i := 0; i < 10; i++ {
-		persistOne(t, sink, clievent.EventEntry{
-			UUID: "u" + rune2hex(i),
-			Time: int64(100 + i),
-			Type: "user",
-		})
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = p.Flush(ctx)
-
-	got, err := src.LoadBefore(context.Background(), 108, 3)
-	if err != nil {
-		t.Fatalf("LoadBefore: %v", err)
-	}
-	// Candidates (<108) are 100..107, newest 3 are 105,106,107.
-	wantTimes := []int64{105, 106, 107}
-	if len(got) != len(wantTimes) {
-		t.Fatalf("got %d entries, want %d", len(got), len(wantTimes))
-	}
-	for i, w := range wantTimes {
-		if got[i].Time != w {
-			t.Errorf("got[%d].Time=%d, want %d", i, got[i].Time, w)
-		}
-	}
-}
-
-// TestSource_LoadBefore_ZeroBeforeMS degenerates to LoadLatest so
-// the dashboard's "first page" and "paginated" call sites share
-// one code path on the read side.
-func TestSource_LoadBefore_ZeroBeforeMS(t *testing.T) {
-	p, src, sink, _ := newPersister(t, "k")
-	for i := 0; i < 5; i++ {
-		persistOne(t, sink, clievent.EventEntry{
-			UUID: "u" + rune2hex(i),
-			Time: int64(100 + i),
-			Type: "user",
-		})
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = p.Flush(ctx)
-
-	got, err := src.LoadBefore(context.Background(), 0, 10)
-	if err != nil {
-		t.Fatalf("LoadBefore: %v", err)
-	}
-	if len(got) != 5 {
-		t.Errorf("got %d, want 5", len(got))
 	}
 }
 
 // TestSource_LoadBefore_IdxSeekMatchesFullScan is the R20260530-PERF-1
-// (#1485) regression: the idx-seek fast path must return byte-for-byte the
-// same page as the full-scan fallback. We write a log large enough that the
-// sparse idx (IdxStride=2 from newPersister) has many entries, then compare
-// loadBeforeViaIdx against loadBeforeFullScan across a sweep of (beforeMS,
-// limit) windows. A drift between the two — e.g. an off-by-one in the
-// back-up-by-slots seek math — fails here.
+// (#1485) regression: the idx-seek fast path must return the same page as
+// the full-scan fallback. The log is large enough that the sparse idx
+// (IdxStride=2 from newPersister) has many entries; records 10 ms apart let
+// the sweep put beforeMS exactly on a record, between two and past all of
+// them, the binary-search boundary cases of R112714-PERF-12. A drift between
+// the two — e.g. an off-by-one in the back-up-by-slots seek math — fails
+// here.
 func TestSource_LoadBefore_IdxSeekMatchesFullScan(t *testing.T) {
-	p, src, sink, _ := newPersister(t, "k")
-	const n = 60
-	for i := 0; i < n; i++ {
-		persistOne(t, sink, clievent.EventEntry{
-			UUID:    "uuid-" + rune2hex(i),
-			Time:    int64(1000 + i), // distinct ms so ordering is unambiguous
-			Type:    "user",
-			Summary: rune2hex(i),
-		})
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = p.Flush(ctx)
+	src := userLog(t, "k", 60, 1000, 10) // 1000, 1010, …, 1590
 
 	bg := context.Background()
-	for _, before := range []int64{1005, 1020, 1037, 1055, 1060, 1100} {
+	for _, before := range []int64{1000, 1001, 1050, 1099, 1100, 1205, 1370, 1555, 1591, 9999} {
 		for _, limit := range []int{1, 3, 10, 100} {
 			idxGot, ok, err := src.loadBeforeViaIdx(bg, before, limit)
 			if err != nil {
@@ -270,11 +192,9 @@ func TestSource_LoadBefore_IdxSeekMatchesFullScan(t *testing.T) {
 			// When the idx path declines (ok==false) the public LoadBefore
 			// would use the full scan, so only compare when idx produced a
 			// result. Either way the public result must equal full scan.
-			if ok {
-				if !equalTimes(idxGot, fullGot) {
-					t.Errorf("idx vs full mismatch before=%d limit=%d: idx=%v full=%v",
-						before, limit, times(idxGot), times(fullGot))
-				}
+			if ok && !equalTimes(idxGot, fullGot) {
+				t.Errorf("idx vs full mismatch before=%d limit=%d: idx=%v full=%v",
+					before, limit, times(idxGot), times(fullGot))
 			}
 			pub, err := src.LoadBefore(bg, before, limit)
 			if err != nil {
@@ -308,170 +228,50 @@ func equalTimes(a, b []clievent.EventEntry) bool {
 	return true
 }
 
-// TestSource_DisabledConfig: empty dir returns nil without error.
-// Used by deployments that opt out of event-log persistence (e.g.
-// stateless test harnesses).
-func TestSource_DisabledConfig(t *testing.T) {
-	s := New("", "k")
-	got, err := s.LoadLatest(context.Background(), 100)
-	if err != nil {
-		t.Fatalf("LoadLatest on empty dir: %v", err)
-	}
-	if len(got) != 0 {
-		t.Errorf("got %d, want 0", len(got))
-	}
-}
-
 // TestSource_ContextCancel surfaces ctx cancellation promptly. The
 // HTTP handler that drives this uses request-scoped ctx, so a
 // client-side abort MUST stop the read.
 func TestSource_ContextCancel(t *testing.T) {
-	p, src, sink, _ := newPersister(t, "k")
-	for i := 0; i < 100; i++ {
-		persistOne(t, sink, clievent.EventEntry{
-			UUID: "u" + rune2hex(i),
-			Time: int64(i),
-			Type: "user",
-		})
-	}
-	flushCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = p.Flush(flushCtx)
-
+	src := userLog(t, "k", 100, 0, 1)
 	ctx, cancelRead := context.WithCancel(context.Background())
 	cancelRead() // cancel immediately
-	_, err := src.LoadLatest(ctx, 100)
-	if err == nil {
+	if _, err := src.LoadLatest(ctx, 100); err == nil {
 		t.Errorf("expected cancellation error, got nil")
 	}
 }
 
-// TestSource_LoadBefore_BinarySearchBoundary verifies that the binary-search
-// idx boundary (R112714-PERF-12) produces results equivalent to the full-scan
-// path for a range of beforeMS values, including at the exact timestamp of a
-// record (boundary = coincident) and just before/after it.
-func TestSource_LoadBefore_BinarySearchBoundary(t *testing.T) {
-	p, src, sink, _ := newPersister(t, "k2")
-	// Write 20 records with distinct timestamps so boundary tests are unambiguous.
-	for i := 0; i < 20; i++ {
-		persistOne(t, sink, clievent.EventEntry{
-			UUID:    "bsearch-" + rune2hex(i),
-			Time:    int64(2000 + i*10), // 2000, 2010, …, 2190
-			Type:    "user",
-			Summary: rune2hex(i),
-		})
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = p.Flush(ctx)
-
+// TestLoadBefore_NoSliceAlias: neither the full-scan nor the idx loader may
+// hand back a slice sharing its backing array with what it read from disk:
+// mutating the returned slice must not affect the next read
+// (R20260603-CR-3).
+func TestLoadBefore_NoSliceAlias(t *testing.T) {
+	src := userLog(t, "alias", 30, 200, 1) // enough idx entries (IdxStride=2) for the idx path
 	bg := context.Background()
-	for _, tc := range []struct {
-		before int64
-		limit  int
-	}{
-		{2000, 5},  // exact lower bound
-		{2001, 5},  // just after lower bound
-		{2050, 5},  // mid range
-		{2099, 5},  // between records
-		{2100, 5},  // exact mid boundary
-		{2191, 10}, // just above all records
-		{9999, 20}, // far future
-	} {
-		fullGot, err := src.loadBeforeFullScan(bg, tc.before, tc.limit)
+	loaders := map[string]func() ([]clievent.EventEntry, bool, error){
+		"full scan": func() ([]clievent.EventEntry, bool, error) {
+			es, err := src.loadBeforeFullScan(bg, 220, 5)
+			return es, true, err
+		},
+		"via idx": func() ([]clievent.EventEntry, bool, error) { return src.loadBeforeViaIdx(bg, 220, 5) },
+	}
+	for name, load := range loaders {
+		got1, ok, err := load()
 		if err != nil {
-			t.Fatalf("loadBeforeFullScan(before=%d,limit=%d): %v", tc.before, tc.limit, err)
+			t.Fatalf("%s: %v", name, err)
 		}
-		idxGot, ok, err := src.loadBeforeViaIdx(bg, tc.before, tc.limit)
-		if err != nil {
-			t.Fatalf("loadBeforeViaIdx(before=%d,limit=%d): %v", tc.before, tc.limit, err)
+		if !ok || len(got1) == 0 {
+			t.Errorf("%s: no page (ok=%v), want one to check", name, ok)
+			continue
 		}
-		if ok && !equalTimes(idxGot, fullGot) {
-			t.Errorf("binary-search boundary mismatch before=%d limit=%d: idx=%v full=%v",
-				tc.before, tc.limit, times(idxGot), times(fullGot))
+		const sentinel = int64(9999)
+		got1[0].Time = sentinel
+		got2, _, err := load()
+		if err != nil || len(got2) == 0 {
+			t.Fatalf("%s second call: %d entries, %v", name, len(got2), err)
 		}
-	}
-}
-
-// TestLoadBefore_NoSliceAlias_FullScan asserts that loadBeforeFullScan returns a
-// slice that does not share its backing array with the source slice read from
-// disk. Mutating the returned slice must not affect a subsequent full scan
-// result (R20260603-CR-3).
-func TestLoadBefore_NoSliceAlias_FullScan(t *testing.T) {
-	p, src, sink, _ := newPersister(t, "alias-full")
-	for i := 0; i < 5; i++ {
-		persistOne(t, sink, clievent.EventEntry{
-			UUID: "u" + rune2hex(i),
-			Time: int64(100 + i),
-			Type: "user",
-		})
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = p.Flush(ctx)
-
-	bg := context.Background()
-	// Read a page that filters entries Time < 103 → entries 100,101,102.
-	got1, err := src.loadBeforeFullScan(bg, 103, 10)
-	if err != nil {
-		t.Fatalf("loadBeforeFullScan: %v", err)
-	}
-	if len(got1) == 0 {
-		t.Fatal("expected at least one entry")
-	}
-	// Mutate the returned slice in place.
-	sentinel := int64(9999)
-	got1[0].Time = sentinel
-
-	// A second call must return the original data, unaffected by the mutation.
-	got2, err := src.loadBeforeFullScan(bg, 103, 10)
-	if err != nil {
-		t.Fatalf("loadBeforeFullScan second call: %v", err)
-	}
-	if len(got2) == 0 {
-		t.Fatal("second call returned empty")
-	}
-	if got2[0].Time == sentinel {
-		t.Errorf("loadBeforeFullScan: mutation of returned slice affected source data — slice alias detected (CR-3)")
-	}
-}
-
-// TestLoadBefore_NoSliceAlias_ViaIdx asserts the same no-alias property for
-// loadBeforeViaIdx (R20260603-CR-3).
-func TestLoadBefore_NoSliceAlias_ViaIdx(t *testing.T) {
-	p, src, sink, _ := newPersister(t, "alias-idx")
-	// Write enough entries that the idx has multiple entries (IdxStride=2).
-	for i := 0; i < 30; i++ {
-		persistOne(t, sink, clievent.EventEntry{
-			UUID: "v" + rune2hex(i),
-			Time: int64(200 + i),
-			Type: "user",
-		})
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = p.Flush(ctx)
-
-	bg := context.Background()
-	got1, ok, err := src.loadBeforeViaIdx(bg, 220, 5)
-	if err != nil {
-		t.Fatalf("loadBeforeViaIdx: %v", err)
-	}
-	if !ok || len(got1) == 0 {
-		t.Skip("idx path declined (too few records or stride too large) — skip alias check")
-	}
-	sentinel := int64(8888)
-	got1[0].Time = sentinel
-
-	got2, ok2, err := src.loadBeforeViaIdx(bg, 220, 5)
-	if err != nil {
-		t.Fatalf("loadBeforeViaIdx second call: %v", err)
-	}
-	if !ok2 || len(got2) == 0 {
-		t.Skip("idx path declined on second call — skip alias check")
-	}
-	if got2[0].Time == sentinel {
-		t.Errorf("loadBeforeViaIdx: mutation of returned slice affected source data — slice alias detected (CR-3)")
+		if got2[0].Time == sentinel {
+			t.Errorf("%s: mutation of returned slice affected source data — slice alias detected (CR-3)", name)
+		}
 	}
 }
 
@@ -487,7 +287,7 @@ func rune2hex(i int) string {
 // (shared by the full-scan and idx paths) must keep them: dropping would lose
 // the gap marker and history.
 func TestDecode_KeepsUUIDLessEntries(t *testing.T) {
-	p, src, sink, _ := newPersister(t, "k")
+	p, src, sink := newPersister(t, "k")
 	for _, e := range []clievent.EventEntry{
 		{UUID: "a", Time: 1000, Type: "user", Summary: "q"},
 		{Time: 2000, Type: clievent.KindPersistGap, Detail: "dropped=3"},
@@ -496,9 +296,7 @@ func TestDecode_KeepsUUIDLessEntries(t *testing.T) {
 	} {
 		persistOne(t, sink, e)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = p.Flush(ctx)
+	flush(p)
 
 	got, err := src.LoadLatest(context.Background(), 100)
 	if err != nil {

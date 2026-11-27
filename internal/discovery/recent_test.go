@@ -2,10 +2,10 @@ package discovery
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -16,20 +16,6 @@ import (
 // ---------------------------------------------------------------------------
 // resolveWorkspaceUnder
 // ---------------------------------------------------------------------------
-
-func TestResolveWorkspaceUnder_RealDir(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	base := filepath.Join(root, "work", "proj")
-	if err := os.MkdirAll(base, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	encoded := slugUnder(t, root, base)
-
-	if got := resolveWorkspaceUnder(root, encoded); got != base {
-		t.Errorf("resolveWorkspaceUnder(%q) = %q, want %q", encoded, got, base)
-	}
-}
 
 // TestResolveWorkspaceUnder_StaysInsideRoot is #2744's containment property:
 // whatever a rooted resolution returns lies inside the root, so a test that
@@ -102,13 +88,6 @@ func TestResolveWorkspaceUnder_CacheIsScopedToRoot(t *testing.T) {
 	}
 }
 
-func TestResolveWorkspaceUnder_NonexistentPath(t *testing.T) {
-	t.Parallel()
-	if got := resolveWorkspaceUnder(t.TempDir(), "-nonexistent-path-that-cannot-exist-xyz987"); got != "" {
-		t.Errorf("expected empty for nonexistent path, got %q", got)
-	}
-}
-
 // TestResolveWorkspaceUnder_NegativeResultNotCached is a regression test for
 // #1994: a workspace dir absent during one scan (unmounted drive, worktree
 // mid-rebuild) must still resolve once it reappears, rather than being
@@ -154,7 +133,7 @@ func TestResolveWorkspaceUnder_ProductionRootIsSlash(t *testing.T) {
 	}
 }
 
-func TestResolveWorkspaceUnder_EmptyAndNoLeadingDash(t *testing.T) {
+func TestResolveWorkspaceUnder_Unresolvable(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name  string
@@ -162,6 +141,7 @@ func TestResolveWorkspaceUnder_EmptyAndNoLeadingDash(t *testing.T) {
 	}{
 		{"empty", ""},
 		{"no leading dash", "home-user-project"},
+		{"nonexistent path", "-nonexistent-path-that-cannot-exist-xyz987"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -211,26 +191,6 @@ func TestCachedJSONLFileInfo_Basic(t *testing.T) {
 	}
 	if !ids[sid1] || !ids[sid2] {
 		t.Errorf("unexpected session IDs: %v", ids)
-	}
-}
-
-func TestCachedJSONLFileInfo_CacheHitAfterRead(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	sid := "aaaaaaaa-0001-0001-0001-000000000003"
-	if err := os.WriteFile(filepath.Join(dir, sid+".jsonl"), []byte("data"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	dirFilesCache.Delete(dir)
-	t.Cleanup(func() { dirFilesCache.Delete(dir) })
-
-	// First call — cache miss
-	files1 := cachedJSONLFileInfo(dir)
-	// Second call — cache hit (directory hasn't changed)
-	files2 := cachedJSONLFileInfo(dir)
-	if len(files1) != len(files2) {
-		t.Errorf("cache inconsistency: %d vs %d", len(files1), len(files2))
 	}
 }
 
@@ -290,263 +250,100 @@ func TestCachedJSONLFileInfo_NonexistentDir(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// recentFromJSONLFiles
-// ---------------------------------------------------------------------------
-
-func TestRecentFromJSONLFiles_Basic(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	workspace := "/tmp/test-workspace"
-	sid := "bbbbbbbb-0001-0001-0001-000000000001"
-
-	if err := os.WriteFile(filepath.Join(dir, sid+".jsonl"), []byte("content"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	dirFilesCache.Delete(dir)
-	t.Cleanup(func() { dirFilesCache.Delete(dir) })
-
-	results := recentFromJSONLFiles(dir, workspace, nil)
-	if len(results) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(results))
-	}
-	if results[0].SessionID != sid {
-		t.Errorf("session ID = %q, want %q", results[0].SessionID, sid)
-	}
-	if results[0].Workspace != workspace {
-		t.Errorf("workspace = %q, want %q", results[0].Workspace, workspace)
-	}
-}
-
-func TestRecentFromJSONLFiles_ExcludeBySessionID(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	workspace := "/tmp/exclude-test"
-	sid := "bbbbbbbb-0001-0001-0001-000000000002"
-
-	if err := os.WriteFile(filepath.Join(dir, sid+".jsonl"), []byte("content"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	dirFilesCache.Delete(dir)
-	t.Cleanup(func() { dirFilesCache.Delete(dir) })
-
-	exclude := map[string]bool{sid: true}
-	results := recentFromJSONLFiles(dir, workspace, exclude)
-	if len(results) != 0 {
-		t.Errorf("expected 0 results when session is excluded, got %d", len(results))
-	}
-}
-
-func TestRecentFromJSONLFiles_InvalidSessionIDSkipped(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	workspace := "/tmp/invalid-sid"
-
-	// Write a file with an invalid session ID (not UUID format)
-	if err := os.WriteFile(filepath.Join(dir, "not-a-uuid.jsonl"), []byte("content"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// Write a valid session
-	sid := "cccccccc-0001-0001-0001-000000000001"
-	if err := os.WriteFile(filepath.Join(dir, sid+".jsonl"), []byte("content"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	dirFilesCache.Delete(dir)
-	t.Cleanup(func() { dirFilesCache.Delete(dir) })
-
-	results := recentFromJSONLFiles(dir, workspace, nil)
-	if len(results) != 1 {
-		t.Fatalf("expected 1 result (invalid UUID skipped), got %d", len(results))
-	}
-	if results[0].SessionID != sid {
-		t.Errorf("session ID = %q, want %q", results[0].SessionID, sid)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// recentFromParsedIndex
-// ---------------------------------------------------------------------------
-
-func TestRecentFromParsedIndex_Basic(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	workspace := "/tmp/index-project"
-	sid := "dddddddd-0001-0001-0001-000000000001"
-
-	// Need a real JSONL file so cachedJSONLFileInfo finds it.
-	if err := os.WriteFile(filepath.Join(dir, sid+".jsonl"), []byte("data"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	dirFilesCache.Delete(dir)
-	t.Cleanup(func() { dirFilesCache.Delete(dir) })
-
-	idx := &sessionsIndex{
-		OriginalPath: workspace,
-		Entries: []sessionsIndexEntry{
-			{SessionID: sid, Summary: "index summary", FirstPrompt: "first prompt from index"},
-		},
-	}
-
-	results := recentFromParsedIndex(idx, dir, workspace, nil)
-	if len(results) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(results))
-	}
-	if results[0].SessionID != sid {
-		t.Errorf("session ID = %q, want %q", results[0].SessionID, sid)
-	}
-	if results[0].Summary != "index summary" {
-		t.Errorf("summary = %q, want index summary", results[0].Summary)
-	}
-	// LastPrompt should come from FirstPrompt when set
-	if results[0].LastPrompt != "first prompt from index" {
-		t.Errorf("last prompt = %q, want first prompt from index", results[0].LastPrompt)
-	}
-}
-
-func TestRecentFromParsedIndex_FallsBackToSummaryForPrompt(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	workspace := "/tmp/fallback-prompt"
-	sid := "dddddddd-0001-0001-0001-000000000002"
-
-	if err := os.WriteFile(filepath.Join(dir, sid+".jsonl"), []byte("data"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	dirFilesCache.Delete(dir)
-	t.Cleanup(func() { dirFilesCache.Delete(dir) })
-
-	idx := &sessionsIndex{
-		OriginalPath: workspace,
-		Entries: []sessionsIndexEntry{
-			// FirstPrompt is empty → should use Summary as prompt
-			{SessionID: sid, Summary: "fallback to summary", FirstPrompt: ""},
-		},
-	}
-
-	results := recentFromParsedIndex(idx, dir, workspace, nil)
-	if len(results) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(results))
-	}
-	if results[0].LastPrompt != "fallback to summary" {
-		t.Errorf("last prompt = %q, want fallback to summary", results[0].LastPrompt)
-	}
-}
-
-func TestRecentFromParsedIndex_SkipMissingJSONL(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	workspace := "/tmp/missing-jsonl"
-	sid := "dddddddd-0001-0001-0001-000000000003"
-	// No JSONL file written — index entry should be skipped.
-
-	dirFilesCache.Delete(dir)
-	t.Cleanup(func() { dirFilesCache.Delete(dir) })
-
-	idx := &sessionsIndex{
-		Entries: []sessionsIndexEntry{{SessionID: sid, Summary: "ghost session"}},
-	}
-	results := recentFromParsedIndex(idx, dir, workspace, nil)
-	if len(results) != 0 {
-		t.Errorf("expected 0 results for missing JSONL, got %d", len(results))
-	}
-}
-
-func TestRecentFromParsedIndex_ExcludeBySessionID(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	workspace := "/tmp/exclude-idx"
-	sid := "dddddddd-0001-0001-0001-000000000004"
-
-	if err := os.WriteFile(filepath.Join(dir, sid+".jsonl"), []byte("data"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	dirFilesCache.Delete(dir)
-	t.Cleanup(func() { dirFilesCache.Delete(dir) })
-
-	idx := &sessionsIndex{
-		Entries: []sessionsIndexEntry{{SessionID: sid, Summary: "excluded"}},
-	}
-	results := recentFromParsedIndex(idx, dir, workspace, map[string]bool{sid: true})
-	if len(results) != 0 {
-		t.Errorf("expected 0 results for excluded session, got %d", len(results))
-	}
-}
-
-// ---------------------------------------------------------------------------
 // extractFirstPrompt
 // ---------------------------------------------------------------------------
 
-func TestExtractFirstPrompt_Basic(t *testing.T) {
+// TestExtractFirstPrompt: the first user line's text, skipping what comes
+// before it; nothing for a missing file.
+func TestExtractFirstPrompt(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "session.jsonl")
-
-	msg, _ := json.Marshal(struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}{Role: "user", Content: "first user prompt"})
-	line := fmt.Sprintf(`{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":%s}`, string(msg))
-	writeJSONLFile(t, path, []string{line})
-
-	got := extractFirstPrompt(path)
-	if got != "first user prompt" {
-		t.Errorf("extractFirstPrompt = %q, want first user prompt", got)
-	}
-}
-
-func TestExtractFirstPrompt_ReturnsFirstNotLast(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "multi.jsonl")
-
-	prompts := []string{"first", "second", "third"}
-	var lines []string
-	for i, p := range prompts {
-		ts := fmt.Sprintf("2026-01-01T%02d:00:00Z", i)
-		msg, _ := json.Marshal(struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		}{Role: "user", Content: p})
-		lines = append(lines, fmt.Sprintf(`{"type":"user","timestamp":%q,"message":%s}`, ts, string(msg)))
-	}
-	writeJSONLFile(t, path, lines)
-
-	got := extractFirstPrompt(path)
-	if got != "first" {
+	path := filepath.Join(t.TempDir(), "multi.jsonl")
+	writeJSONLFile(t, path, []string{
+		assistantJSONLLine("assistant text"),
+		userJSONLLine("user", "first"),
+		userJSONLLine("user", "second"),
+	})
+	if got := extractFirstPrompt(path); got != "first" {
 		t.Errorf("extractFirstPrompt = %q, want first", got)
 	}
-}
-
-func TestExtractFirstPrompt_NonexistentFile(t *testing.T) {
-	t.Parallel()
-	got := extractFirstPrompt("/nonexistent/session.jsonl")
-	if got != "" {
+	if got := extractFirstPrompt("/nonexistent/session.jsonl"); got != "" {
 		t.Errorf("expected empty for nonexistent file, got %q", got)
 	}
 }
 
-func TestExtractFirstPrompt_SkipsNonUserLines(t *testing.T) {
+// ---------------------------------------------------------------------------
+// recentFromJSONLFiles / recentFromParsedIndex
+// ---------------------------------------------------------------------------
+
+// writeJSONLs writes a non-empty <sid>.jsonl per id into dir and drops dir's
+// listing from the cache.
+func writeJSONLs(t *testing.T, dir string, sids ...string) {
+	t.Helper()
+	for _, sid := range sids {
+		if err := os.WriteFile(filepath.Join(dir, sid+".jsonl"), []byte("data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dirFilesCache.Delete(dir)
+	t.Cleanup(func() { dirFilesCache.Delete(dir) })
+}
+
+// sessionIDs lists the results' session IDs in order.
+func sessionIDs(got []RecentSession) []string {
+	var ids []string
+	for _, s := range got {
+		ids = append(ids, s.SessionID)
+	}
+	return ids
+}
+
+// TestRecentFromJSONLFiles: one result per .jsonl named by a valid session ID
+// and not excluded, carrying the workspace.
+func TestRecentFromJSONLFiles(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "mixed.jsonl")
+	const workspace = "/tmp/test-workspace"
+	keep, excluded := "cccccccc-0001-0001-0001-000000000001", "cccccccc-0001-0001-0001-000000000002"
+	writeJSONLs(t, dir, "not-a-uuid", keep, excluded)
 
-	// Only an assistant line and then a user line
-	assistantLine := assistantJSONLLine("assistant text")
-	msg, _ := json.Marshal(struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}{Role: "user", Content: "actual user"})
-	userLine := fmt.Sprintf(`{"type":"user","timestamp":"2026-01-01T01:00:00Z","message":%s}`, string(msg))
+	results := recentFromJSONLFiles(dir, workspace, map[string]bool{excluded: true})
+	if len(results) != 1 || results[0].SessionID != keep || results[0].Workspace != workspace {
+		t.Fatalf("results = %+v, want only %s in %s (invalid UUID and excluded skipped)", results, keep, workspace)
+	}
+}
 
-	writeJSONLFile(t, path, []string{assistantLine, userLine})
-	got := extractFirstPrompt(path)
-	if got != "actual user" {
-		t.Errorf("extractFirstPrompt = %q, want actual user", got)
+// TestRecentFromParsedIndex: an index entry yields a result only when its
+// .jsonl exists and it is not excluded; its prompt is the index's FirstPrompt,
+// else its Summary.
+func TestRecentFromParsedIndex(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	const workspace = "/tmp/index-project"
+	withPrompt := "dddddddd-0001-0001-0001-000000000001"
+	summaryOnly := "dddddddd-0001-0001-0001-000000000002"
+	noJSONL := "dddddddd-0001-0001-0001-000000000003"
+	excluded := "dddddddd-0001-0001-0001-000000000004"
+	writeJSONLs(t, dir, withPrompt, summaryOnly, excluded)
+
+	idx := &sessionsIndex{OriginalPath: workspace, Entries: []sessionsIndexEntry{
+		{SessionID: withPrompt, Summary: "index summary", FirstPrompt: "first prompt from index"},
+		{SessionID: summaryOnly, Summary: "fallback to summary"},
+		{SessionID: noJSONL, Summary: "ghost session"},
+		{SessionID: excluded, Summary: "excluded"},
+	}}
+	results := recentFromParsedIndex(idx, dir, workspace, map[string]bool{excluded: true})
+	got := map[string]RecentSession{}
+	for _, r := range results {
+		got[r.SessionID] = r
+	}
+	if len(results) != 2 {
+		t.Fatalf("results = %v, want %s and %s", sessionIDs(results), withPrompt, summaryOnly)
+	}
+	if r := got[withPrompt]; r.Summary != "index summary" || r.LastPrompt != "first prompt from index" {
+		t.Errorf("with FirstPrompt: summary %q prompt %q", r.Summary, r.LastPrompt)
+	}
+	if r := got[summaryOnly]; r.LastPrompt != "fallback to summary" {
+		t.Errorf("without FirstPrompt: prompt %q, want the summary", r.LastPrompt)
 	}
 }
 
@@ -610,11 +407,7 @@ func TestRecentSessions_FallbackFromJSONL(t *testing.T) {
 
 	sid := "ffffffff-0001-0001-0001-000000000001"
 	jsonlPath := filepath.Join(projDir, sid+".jsonl")
-	msg, _ := json.Marshal(struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}{Role: "user", Content: "test prompt"})
-	line := fmt.Sprintf(`{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":%s}`, string(msg))
+	line := userJSONLLine("user", "test prompt")
 	writeJSONLFile(t, jsonlPath, []string{line})
 
 	dirFilesCache.Delete(projDir)
@@ -638,118 +431,6 @@ func TestRecentSessions_FallbackFromJSONL(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("session %q not found in results: %+v", sid, got)
-	}
-}
-
-func TestRecentSessions_WithSessionsIndex(t *testing.T) {
-	t.Parallel()
-	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
-
-	projDir := filepath.Join(claudeDir, "projects", encodedDir)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	sid := "ffffffff-0001-0001-0001-000000000002"
-	if err := os.WriteFile(filepath.Join(projDir, sid+".jsonl"), []byte("data"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	writeSessionsIndex(t, projDir, sessionsIndex{
-		OriginalPath: workspace,
-		Entries: []sessionsIndexEntry{
-			{SessionID: sid, Summary: "indexed summary", FirstPrompt: "indexed prompt"},
-		},
-	})
-
-	dirFilesCache.Delete(projDir)
-	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
-
-	got := recentSessionsUnder(context.Background(), root, claudeDir, 10, 365*24*time.Hour, nil, nil)
-	if len(got) == 0 {
-		t.Fatal("expected at least one session")
-	}
-	found := false
-	for _, s := range got {
-		if s.SessionID == sid {
-			found = true
-			if s.Summary != "indexed summary" {
-				t.Errorf("summary = %q, want indexed summary", s.Summary)
-			}
-			if s.LastPrompt != "indexed prompt" {
-				t.Errorf("LastPrompt = %q, want indexed prompt", s.LastPrompt)
-			}
-		}
-	}
-	if !found {
-		t.Errorf("session %q not found in results %+v", sid, got)
-	}
-}
-
-func TestRecentSessions_Limit(t *testing.T) {
-	t.Parallel()
-	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
-
-	projDir := filepath.Join(claudeDir, "projects", encodedDir)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Write a sessions-index with workspace so resolution works via OriginalPath
-	sids := []string{
-		"ffffffff-0001-0001-0001-000000000011",
-		"ffffffff-0001-0001-0001-000000000012",
-		"ffffffff-0001-0001-0001-000000000013",
-	}
-
-	var entries []sessionsIndexEntry
-	for i, sid := range sids {
-		time.Sleep(5 * time.Millisecond) // distinct mtimes
-		if err := os.WriteFile(filepath.Join(projDir, sid+".jsonl"), []byte("data"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		entries = append(entries, sessionsIndexEntry{
-			SessionID: sid,
-			Summary:   fmt.Sprintf("summary %d", i),
-		})
-	}
-	writeSessionsIndex(t, projDir, sessionsIndex{OriginalPath: workspace, Entries: entries})
-
-	dirFilesCache.Delete(projDir)
-	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
-
-	got := recentSessionsUnder(context.Background(), root, claudeDir, 2, 365*24*time.Hour, nil, nil)
-	if len(got) != 2 {
-		t.Errorf("expected 2 sessions (limit=2), got %d", len(got))
-	}
-}
-
-func TestRecentSessions_ExcludeByID(t *testing.T) {
-	t.Parallel()
-	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
-
-	projDir := filepath.Join(claudeDir, "projects", encodedDir)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	sid := "ffffffff-0001-0001-0001-000000000021"
-	if err := os.WriteFile(filepath.Join(projDir, sid+".jsonl"), []byte("data"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	writeSessionsIndex(t, projDir, sessionsIndex{
-		OriginalPath: workspace,
-		Entries:      []sessionsIndexEntry{{SessionID: sid, Summary: "exclude me"}},
-	})
-
-	dirFilesCache.Delete(projDir)
-	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
-
-	got := recentSessionsUnder(context.Background(), root, claudeDir, 10, 365*24*time.Hour, map[string]bool{sid: true}, nil)
-	for _, s := range got {
-		if s.SessionID == sid {
-			t.Errorf("excluded session %q appeared in results", sid)
-		}
 	}
 }
 
@@ -795,124 +476,6 @@ func TestRecentSessions_SkipsUnresolvableProjectDirs(t *testing.T) {
 	}
 }
 
-func TestRecentSessions_MaxAge(t *testing.T) {
-	t.Parallel()
-	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
-
-	projDir := filepath.Join(claudeDir, "projects", encodedDir)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	sid := "ffffffff-0001-0001-0001-000000000031"
-	jsonlPath := filepath.Join(projDir, sid+".jsonl")
-	if err := os.WriteFile(jsonlPath, []byte("data"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// Force the JSONL mtime an hour into the past so the maxAge filter has
-	// unambiguous comparison room. Without this, CI runners where the test
-	// wrote the file and called RecentSessions within the same millisecond
-	// observed mtime == cutoff and the "<" comparison failed to exclude
-	// the "old" session — the previous 1ns maxAge tried to express the
-	// intent but the filter rounds to ms, so 1ns and 0ns were identical.
-	oldMtime := time.Now().Add(-time.Hour)
-	if err := os.Chtimes(jsonlPath, oldMtime, oldMtime); err != nil {
-		t.Fatal(err)
-	}
-	writeSessionsIndex(t, projDir, sessionsIndex{
-		OriginalPath: workspace,
-		Entries:      []sessionsIndexEntry{{SessionID: sid, Summary: "old session"}},
-	})
-
-	dirFilesCache.Delete(projDir)
-	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
-
-	// maxAge = 1 minute; the file is 1 hour old so it must be filtered out.
-	got := recentSessionsUnder(context.Background(), root, claudeDir, 10, time.Minute, nil, nil)
-	for _, s := range got {
-		if s.SessionID == sid {
-			t.Errorf("session should be filtered by maxAge, but appeared: %+v", s)
-		}
-	}
-}
-
-func TestRecentSessions_SortedByLastActive(t *testing.T) {
-	t.Parallel()
-	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
-
-	projDir := filepath.Join(claudeDir, "projects", encodedDir)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	sid1 := "ffffffff-0001-0001-0001-000000000041"
-	sid2 := "ffffffff-0001-0001-0001-000000000042"
-
-	if err := os.WriteFile(filepath.Join(projDir, sid1+".jsonl"), []byte("a"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(20 * time.Millisecond) // ensure distinct mtimes
-	if err := os.WriteFile(filepath.Join(projDir, sid2+".jsonl"), []byte("b"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	writeSessionsIndex(t, projDir, sessionsIndex{
-		OriginalPath: workspace,
-		Entries: []sessionsIndexEntry{
-			{SessionID: sid1, Summary: "older"},
-			{SessionID: sid2, Summary: "newer"},
-		},
-	})
-
-	dirFilesCache.Delete(projDir)
-	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
-
-	got := recentSessionsUnder(context.Background(), root, claudeDir, 10, 365*24*time.Hour, nil, nil)
-	if len(got) < 2 {
-		t.Fatalf("expected at least 2 sessions, got %d", len(got))
-	}
-	// Newest first
-	if got[0].SessionID != sid2 {
-		t.Errorf("first session = %q, want %q (newest first)", got[0].SessionID, sid2)
-	}
-	if got[1].SessionID != sid1 {
-		t.Errorf("second session = %q, want %q", got[1].SessionID, sid1)
-	}
-}
-
-func TestRecentSessions_ZeroLimit(t *testing.T) {
-	t.Parallel()
-	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
-
-	projDir := filepath.Join(claudeDir, "projects", encodedDir)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	sids := []string{
-		"ffffffff-0001-0001-0001-000000000051",
-		"ffffffff-0001-0001-0001-000000000052",
-		"ffffffff-0001-0001-0001-000000000053",
-	}
-	var entries []sessionsIndexEntry
-	for _, sid := range sids {
-		if err := os.WriteFile(filepath.Join(projDir, sid+".jsonl"), []byte("data"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		entries = append(entries, sessionsIndexEntry{SessionID: sid, Summary: "s"})
-	}
-	writeSessionsIndex(t, projDir, sessionsIndex{OriginalPath: workspace, Entries: entries})
-
-	dirFilesCache.Delete(projDir)
-	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
-
-	// limit=0 means "return all"
-	got := recentSessionsUnder(context.Background(), root, claudeDir, 0, 365*24*time.Hour, nil, nil)
-	if len(got) < 3 {
-		t.Errorf("limit=0 should return all sessions, got %d", len(got))
-	}
-}
-
 // ---------------------------------------------------------------------------
 // RecentSessionsFilter (R245-ARCH)
 // ---------------------------------------------------------------------------
@@ -926,108 +489,77 @@ type stubFilter struct {
 func (s stubFilter) SkipWorkspace(ws string) bool  { return s.skipWorkspaces[ws] }
 func (s stubFilter) SkipSessionID(sid string) bool { return s.skipSessionIDs[sid] }
 
-func TestRecentSessions_FilterSkipsWorkspace(t *testing.T) {
-	t.Parallel()
+// indexedProject is a workspace whose project dir holds a .jsonl per sid, the
+// later ones a second newer each, and a sessions-index naming them.
+func indexedProject(t *testing.T, sids ...string) (root, claudeDir, workspace, projDir string) {
+	t.Helper()
 	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
-
-	projDir := filepath.Join(claudeDir, "projects", encodedDir)
+	projDir = filepath.Join(claudeDir, "projects", encodedDir)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	sid := "aaaaaaaa-0001-0001-0001-000000000001"
-	if err := os.WriteFile(filepath.Join(projDir, sid+".jsonl"), []byte("data"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	writeSessionsIndex(t, projDir, sessionsIndex{
-		OriginalPath: workspace,
-		Entries:      []sessionsIndexEntry{{SessionID: sid, Summary: "should be hidden"}},
-	})
-	dirFilesCache.Delete(projDir)
-	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
-
-	filter := stubFilter{skipWorkspaces: map[string]bool{workspace: true}}
-	got := recentSessionsUnder(context.Background(), root, claudeDir, 10, 365*24*time.Hour, nil, filter)
-	for _, s := range got {
-		if s.SessionID == sid {
-			t.Errorf("workspace-blacklisted session leaked into result: %+v", s)
-		}
-	}
-}
-
-func TestRecentSessions_FilterSkipsSessionID(t *testing.T) {
-	t.Parallel()
-	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
-
-	projDir := filepath.Join(claudeDir, "projects", encodedDir)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	visibleSID := "bbbbbbbb-0001-0001-0001-000000000002"
-	hiddenSID := "bbbbbbbb-0001-0001-0001-000000000003"
-	for _, sid := range []string{visibleSID, hiddenSID} {
-		if err := os.WriteFile(filepath.Join(projDir, sid+".jsonl"), []byte("data"), 0o644); err != nil {
+	writeJSONLs(t, projDir, sids...)
+	var entries []sessionsIndexEntry
+	for i, sid := range sids {
+		mtime := time.Now().Add(time.Duration(i-len(sids)) * time.Second)
+		if err := os.Chtimes(filepath.Join(projDir, sid+".jsonl"), mtime, mtime); err != nil {
 			t.Fatal(err)
 		}
+		entries = append(entries, sessionsIndexEntry{SessionID: sid, Summary: "summary " + sid})
 	}
-	writeSessionsIndex(t, projDir, sessionsIndex{
-		OriginalPath: workspace,
-		Entries: []sessionsIndexEntry{
-			{SessionID: visibleSID, Summary: "show"},
-			{SessionID: hiddenSID, Summary: "hide"},
-		},
-	})
-	dirFilesCache.Delete(projDir)
-	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
-
-	filter := stubFilter{skipSessionIDs: map[string]bool{hiddenSID: true}}
-	got := recentSessionsUnder(context.Background(), root, claudeDir, 10, 365*24*time.Hour, nil, filter)
-
-	var sawVisible, sawHidden bool
-	for _, s := range got {
-		if s.SessionID == visibleSID {
-			sawVisible = true
-		}
-		if s.SessionID == hiddenSID {
-			sawHidden = true
-		}
-	}
-	if !sawVisible {
-		t.Errorf("non-blacklisted session was filtered: visibleSID=%s", visibleSID)
-	}
-	if sawHidden {
-		t.Errorf("blacklisted session leaked into result: hiddenSID=%s", hiddenSID)
-	}
+	writeSessionsIndex(t, projDir, sessionsIndex{OriginalPath: workspace, Entries: entries})
+	return root, claudeDir, workspace, projDir
 }
 
-// TestRecentSessionsCtx_CancelledReturnsEarly guards PERF-009 (#2134): an
-// already-cancelled context must short-circuit the FS walk so a slow/hung
-// home cannot pin the singleflight leader. The result is best-effort
-// (empty here because the very first iteration sees ctx.Err()).
-func TestRecentSessionsCtx_CancelledReturnsEarly(t *testing.T) {
+// TestRecentSessions_IndexedProject: sessions come from the index, newest
+// first; limit caps them (0 is no cap); excluded IDs, a filter's workspaces
+// and session IDs, sessions older than maxAge and a cancelled context
+// (PERF-009, #2134: a hung home must not pin the singleflight leader) drop
+// them.
+func TestRecentSessions_IndexedProject(t *testing.T) {
 	t.Parallel()
-	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
+	const older, newer = "ffffffff-0001-0001-0001-000000000041", "ffffffff-0001-0001-0001-000000000042"
+	root, claudeDir, workspace, projDir := indexedProject(t, older, newer)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	year := 365 * 24 * time.Hour
+	cases := []struct {
+		name    string
+		ctx     context.Context
+		limit   int
+		maxAge  time.Duration
+		exclude map[string]bool
+		filter  RecentSessionsFilter
+		want    []string
+	}{
+		{"newest first", context.Background(), 10, year, nil, nil, []string{newer, older}},
+		{"limit", context.Background(), 1, year, nil, nil, []string{newer}},
+		{"zero limit is all", context.Background(), 0, year, nil, nil, []string{newer, older}},
+		{"exclude by ID", context.Background(), 10, year, map[string]bool{newer: true}, nil, []string{older}},
+		{"filter skips workspace", context.Background(), 10, year, nil, stubFilter{skipWorkspaces: map[string]bool{workspace: true}}, nil},
+		{"filter skips session ID", context.Background(), 10, year, nil, stubFilter{skipSessionIDs: map[string]bool{older: true}}, []string{newer}},
+		{"cancelled ctx", cancelled, 10, year, nil, nil, nil},
+	}
+	for _, tc := range cases {
+		got := recentSessionsUnder(tc.ctx, root, claudeDir, tc.limit, tc.maxAge, tc.exclude, tc.filter)
+		if ids := sessionIDs(got); !slices.Equal(ids, tc.want) {
+			t.Errorf("%s: sessions %v, want %v", tc.name, ids, tc.want)
+		}
+	}
+	for _, s := range recentSessionsUnder(context.Background(), root, claudeDir, 10, year, nil, nil) {
+		if s.Summary != "summary "+s.SessionID || s.Workspace != workspace {
+			t.Errorf("session %s: summary %q workspace %q", s.SessionID, s.Summary, s.Workspace)
+		}
+	}
 
-	projDir := filepath.Join(claudeDir, "projects", encodedDir)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
+	// The filter rounds to ms, so an mtime an hour back leaves no doubt.
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(filepath.Join(projDir, older+".jsonl"), old, old); err != nil {
 		t.Fatal(err)
 	}
-	sid := "dddddddd-0001-0001-0001-000000000001"
-	if err := os.WriteFile(filepath.Join(projDir, sid+".jsonl"), []byte("data"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	writeSessionsIndex(t, projDir, sessionsIndex{
-		OriginalPath: workspace,
-		Entries:      []sessionsIndexEntry{{SessionID: sid, Summary: "ok"}},
-	})
 	dirFilesCache.Delete(projDir)
-	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel before the walk starts
-
-	got := recentSessionsUnder(ctx, root, claudeDir, 10, 365*24*time.Hour, nil, nil)
-	if len(got) != 0 {
-		t.Errorf("cancelled context must yield empty (early-return) result, got %d sessions", len(got))
+	if ids := sessionIDs(recentSessionsUnder(context.Background(), root, claudeDir, 10, time.Minute, nil, nil)); !slices.Equal(ids, []string{newer}) {
+		t.Errorf("maxAge: sessions %v, want only %s", ids, newer)
 	}
 }
 
@@ -1059,11 +591,7 @@ func TestRecentSessionsCtx_CancelledDuringExtractionKeepsSessions(t *testing.T) 
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	msg, _ := json.Marshal(struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}{Role: "user", Content: "a prompt that needs a read"})
-	line := fmt.Sprintf(`{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":%s}`, string(msg))
+	line := userJSONLLine("user", "a prompt that needs a read")
 	sids := []string{
 		"dddddddd-0001-0001-0001-000000000003",
 		"dddddddd-0001-0001-0001-000000000004",

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -155,8 +154,6 @@ func (s *passthroughShim) close() {
 	s.readerWG.Wait()
 }
 
-// --- Tests ---
-
 // TestPassthrough_Independent_OneMessageOneResult verifies the simplest case:
 // a single SendPassthrough writes stdin, receives a replay, gets the matching
 // result, and returns to caller.
@@ -235,22 +232,18 @@ func TestPassthrough_Merged_FanoutHeadFollower(t *testing.T) {
 	defer sh.close()
 	go sh.proc.readLoop()
 
-	type sendOut struct {
-		res *clievent.SendResult
-		err error
-	}
-	outA := make(chan sendOut, 1)
-	outB := make(chan sendOut, 1)
+	outA := make(chan passthroughOut, 1)
+	outB := make(chan passthroughOut, 1)
 
 	go func() {
 		res, err := sh.proc.SendPassthrough(context.Background(), "msg A", nil, nil, "")
-		outA <- sendOut{res, err}
+		outA <- passthroughOut{res, err}
 	}()
 	inputA := sh.expectWrite(t, 2*time.Second)
 
 	go func() {
 		res, err := sh.proc.SendPassthrough(context.Background(), "msg B", nil, nil, "")
-		outB <- sendOut{res, err}
+		outB <- passthroughOut{res, err}
 	}()
 	inputB := sh.expectWrite(t, 2*time.Second)
 
@@ -265,7 +258,7 @@ func TestPassthrough_Merged_FanoutHeadFollower(t *testing.T) {
 	sh.emitReplay("cli-merged-uuid", "msg A msg B")
 	sh.emitResult("s1", "merged reply text")
 
-	var a, b sendOut
+	var a, b passthroughOut
 	select {
 	case a = <-outA:
 	case <-time.After(3 * time.Second):
@@ -311,22 +304,18 @@ func TestPassthrough_CtxCancel_TombstoneDoesNotBreakFIFO(t *testing.T) {
 
 	// Slot A — will be canceled
 	ctxA, cancelA := context.WithCancel(context.Background())
-	type sendOut struct {
-		res *clievent.SendResult
-		err error
-	}
-	outA := make(chan sendOut, 1)
+	outA := make(chan passthroughOut, 1)
 	go func() {
 		res, err := sh.proc.SendPassthrough(ctxA, "msg A", nil, nil, "")
-		outA <- sendOut{res, err}
+		outA <- passthroughOut{res, err}
 	}()
 	inputA := sh.expectWrite(t, 2*time.Second)
 
 	// Slot B — stays alive, should still get its own result correctly
-	outB := make(chan sendOut, 1)
+	outB := make(chan passthroughOut, 1)
 	go func() {
 		res, err := sh.proc.SendPassthrough(context.Background(), "msg B", nil, nil, "")
-		outB <- sendOut{res, err}
+		outB <- passthroughOut{res, err}
 	}()
 	inputB := sh.expectWrite(t, 2*time.Second)
 
@@ -376,27 +365,23 @@ func TestPassthrough_CLIDeath_FansOutErrProcessExited(t *testing.T) {
 	defer sh.close()
 	go sh.proc.readLoop()
 
-	type sendOut struct {
-		res *clievent.SendResult
-		err error
-	}
-	outA := make(chan sendOut, 1)
-	outB := make(chan sendOut, 1)
+	outA := make(chan passthroughOut, 1)
+	outB := make(chan passthroughOut, 1)
 	go func() {
 		res, err := sh.proc.SendPassthrough(context.Background(), "msg A", nil, nil, "")
-		outA <- sendOut{res, err}
+		outA <- passthroughOut{res, err}
 	}()
 	_ = sh.expectWrite(t, 2*time.Second)
 	go func() {
 		res, err := sh.proc.SendPassthrough(context.Background(), "msg B", nil, nil, "")
-		outB <- sendOut{res, err}
+		outB <- passthroughOut{res, err}
 	}()
 	_ = sh.expectWrite(t, 2*time.Second)
 
 	// CLI exits while both slots are waiting
 	sh.srv.SendCLIExited(0)
 
-	for i, ch := range []chan sendOut{outA, outB} {
+	for i, ch := range []chan passthroughOut{outA, outB} {
 		select {
 		case o := <-ch:
 			if !errors.Is(o.err, clierr.ErrProcessExited) {
@@ -414,14 +399,10 @@ func TestPassthrough_Discard_FiresErrSessionReset(t *testing.T) {
 	defer sh.close()
 	go sh.proc.readLoop()
 
-	type sendOut struct {
-		res *clievent.SendResult
-		err error
-	}
-	out := make(chan sendOut, 1)
+	out := make(chan passthroughOut, 1)
 	go func() {
 		res, err := sh.proc.SendPassthrough(context.Background(), "msg", nil, nil, "")
-		out <- sendOut{res, err}
+		out <- passthroughOut{res, err}
 	}()
 	_ = sh.expectWrite(t, 2*time.Second)
 
@@ -538,15 +519,11 @@ func TestPassthrough_FIFOOrder_TwoIndependentSends(t *testing.T) {
 	defer sh.close()
 	go sh.proc.readLoop()
 
-	type sendOut struct {
-		res *clievent.SendResult
-		err error
-	}
-	outA := make(chan sendOut, 1)
-	outB := make(chan sendOut, 1)
+	outA := make(chan passthroughOut, 1)
+	outB := make(chan passthroughOut, 1)
 	go func() {
 		res, err := sh.proc.SendPassthrough(context.Background(), "first", nil, nil, "")
-		outA <- sendOut{res, err}
+		outA <- passthroughOut{res, err}
 	}()
 	inputA := sh.expectWrite(t, 2*time.Second)
 
@@ -555,7 +532,7 @@ func TestPassthrough_FIFOOrder_TwoIndependentSends(t *testing.T) {
 
 	go func() {
 		res, err := sh.proc.SendPassthrough(context.Background(), "second", nil, nil, "")
-		outB <- sendOut{res, err}
+		outB <- passthroughOut{res, err}
 	}()
 	inputB := sh.expectWrite(t, 2*time.Second)
 
@@ -712,6 +689,3 @@ func TestPassthrough_AssistantEvent_DeliveredToOnEvent(t *testing.T) {
 		t.Error("#1958: onEvent did not receive AskQuestion event in passthrough mode (askQuestionFired would not be set)")
 	}
 }
-
-// Silence unused imports when test file compiles without exercising them.
-var _ = net.Pipe
