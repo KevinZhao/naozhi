@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -68,9 +67,6 @@ func (f *fakeServerRouter) BumpVersion()       {}
 // session, no workspace, an excluded (managed) PID, and a candidate that
 // reaches the reservation with its CWD as the workspace.
 func TestTryAutoTakeover_FakeRouterGates(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("discovery is POSIX-only")
-	}
 	cmd := exec.Command("sleep", "30")
 	if err := cmd.Start(); err != nil {
 		t.Skipf("cannot start child: %v", err)

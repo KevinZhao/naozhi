@@ -13,6 +13,7 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // TestDashboardJSON_Projects_ShapeContract pins the wire shape of
@@ -94,5 +95,9 @@ func TestDashboardJSON_Projects_ShapeContract(t *testing.T) {
 		if _, ok := first[k]; !ok {
 			t.Errorf("projects[0].%s missing; body=%s", k, w.Body.String())
 		}
+	}
+	// Each row carries the project's stable dashboard key.
+	if got, want := first["stableKey"], sessionkey.ProjectStableKey(projDir, "general"); got != want {
+		t.Errorf("stableKey = %v, want %q", got, want)
 	}
 }

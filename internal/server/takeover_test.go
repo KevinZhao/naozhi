@@ -69,9 +69,6 @@ func TestVerifyProcOwnedByEuid_NonLinux(t *testing.T) {
 // can resume on claude: an IM agent pinned to another backend, or a deployment
 // without claude, would trade the user's live session for an unrelated fresh one.
 func TestTryAutoTakeover_KillsOnlyForAClaudeResume(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("discovery is POSIX-only")
-	}
 	cases := []struct {
 		name, backend, agentBackend string
 		wantKill                    bool
@@ -130,9 +127,6 @@ func TestTryAutoTakeover_KillsOnlyForAClaudeResume(t *testing.T) {
 // the precheck runs before SIGTERM, so the child dies only by the test's own
 // SIGKILL.
 func TestTryAutoTakeover_RefusedTakeoverLeavesCLIAlive(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("discovery is POSIX-only")
-	}
 	cases := []struct {
 		name  string
 		model string
@@ -191,9 +185,6 @@ func TestTryAutoTakeover_RefusedTakeoverLeavesCLIAlive(t *testing.T) {
 // dashboard: the precheck sees the general agent's model that Takeover will
 // be given, so a model the router rejects is refused before the SIGTERM.
 func TestDashboardTakeover_InvalidAgentModelLeavesCLIAlive(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("discovery is POSIX-only")
-	}
 	cmd := exec.Command("sleep", "30")
 	if err := cmd.Start(); err != nil {
 		t.Skipf("cannot start child: %v", err)
@@ -233,9 +224,6 @@ func TestDashboardTakeover_InvalidAgentModelLeavesCLIAlive(t *testing.T) {
 // is reserved before the SIGTERM, so while the terminal CLI exits another
 // takeover of it is refused, and the key is free again once the takeover ends.
 func TestTryAutoTakeover_HoldsTheKeyWhileTheCLIExits(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("discovery is POSIX-only")
-	}
 	const key = "test:direct:u1:general"
 	dir := t.TempDir()
 	termed, trapped := filepath.Join(dir, "termed"), filepath.Join(dir, "trapped")
@@ -294,9 +282,6 @@ func TestTryAutoTakeover_HoldsTheKeyWhileTheCLIExits(t *testing.T) {
 // A kill refused for a PID whose identity changed gives the key back: a lease
 // kept would park every later spawn of it until restart.
 func TestAdoptCandidate_KillFailureReleasesTheKey(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("discovery is POSIX-only")
-	}
 	const key = "test:direct:u2:general"
 	cmd := exec.Command("sleep", "30")
 	if err := cmd.Start(); err != nil {

@@ -142,27 +142,10 @@ func TestHandleDashboard_TrustedProxy_ValidXFF_FirstServesLogin(t *testing.T) {
 	}
 }
 
-// TestHandleUpgrade_TrustedProxy_MissingXFF_FailsClosed pins R20260614-SEC-10
-// (#2120) for the WS upgrade path (wshub_upgrade.go). The WSUpgradeAllow
-// limiter previously shared unknownIPKey for every XFF-less upgrade in
-// trusted-proxy mode; the gate must now reject up front.
-func TestHandleUpgrade_TrustedProxy_MissingXFF_FailsClosed(t *testing.T) {
-	srv := newTestServerTrustedProxy(&mockPlatform{}, "secret")
-
-	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
-	req.RemoteAddr = "10.0.0.1:1234" // no XFF
-	w := httptest.NewRecorder()
-	srv.hub.HandleUpgrade(w, req)
-
-	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("WS upgrade with trustedProxy=true and missing XFF returned %d, want 429 (fail-closed); the unknownIPKey shared-bucket regression is back", w.Code)
-	}
-}
-
-// TestHandleUpgrade_TrustedProxy_MissingXFF_SetsRetryAfter pins
-// R202606-CORR-002: the fail-closed 429 branch for unresolvable IPs in
-// wshub_upgrade.go must carry Retry-After: 60, consistent with the sibling
-// 429 paths in routes.go and health.go.
+// TestHandleUpgrade_TrustedProxy_MissingXFF_SetsRetryAfter pins R20260614-SEC-10
+// (#2120) and R202606-CORR-002 for the WS upgrade path: an XFF-less upgrade in
+// trusted-proxy mode is refused up front (not sharing unknownIPKey) with a 429
+// carrying Retry-After: 60, consistent with the sibling 429 paths.
 func TestHandleUpgrade_TrustedProxy_MissingXFF_SetsRetryAfter(t *testing.T) {
 	srv := newTestServerTrustedProxy(&mockPlatform{}, "secret")
 

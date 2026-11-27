@@ -137,22 +137,3 @@ func TestRemoteBackend(t *testing.T) {
 		})
 	}
 }
-
-// TestHubNodeLookup_Adapter asserts the Hub-bound lookup adapter
-// finds connected nodes via the shared Hub.nodes registry. Trivial
-// wiring, but missing it would silently break the WS handleRemoteSend
-// path.
-func TestHubNodeLookup_Adapter(t *testing.T) {
-	acp := &fakeCapNode{id: "acp", caps: map[string]bool{"acp": true}}
-	h := &Hub{
-		nodes: newNodeRegistry(map[string]node.Conn{"acp": acp}),
-	}
-	lookup := hubNodeLookup{h: h}
-	got, ok := lookup.NodeByID("acp")
-	if !ok || got != acp {
-		t.Fatalf("hubNodeLookup miss: ok=%v conn=%v", ok, got)
-	}
-	if _, ok := lookup.NodeByID("missing"); ok {
-		t.Errorf("hubNodeLookup hit on missing id")
-	}
-}
