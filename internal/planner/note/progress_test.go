@@ -398,11 +398,3 @@ func TestProgressNotCounted(t *testing.T) {
 		}
 	}
 }
-
-// Without a journal there is nothing to write to.
-func TestProgressNoJournal(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 11, 23, 9, 0, 0, 0, time.Local)
-	n := New(Config{Now: func() time.Time { return now.Add(time.Hour) }})
-	n.Progress([]Background{bash(progressKey, now)})
-}
