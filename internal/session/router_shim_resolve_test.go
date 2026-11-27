@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -97,9 +96,6 @@ const (
 // main transcript.
 func reconnectReplaying(t *testing.T, transcript string, firstSeq int64, backlog []string) *cli.Process {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("shim discovery needs unix PID liveness and unix sockets")
-	}
 	dir := shortTempDir(t)
 	mgr, err := shim.NewManager(shim.ManagerConfig{StateDir: dir})
 	if err != nil {

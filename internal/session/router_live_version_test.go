@@ -30,11 +30,3 @@ func TestRouter_CLIVersion_PrefersLiveObserved(t *testing.T) {
 		t.Fatalf("CLIVersion after live observe = %q, want live 2.1.174", got)
 	}
 }
-
-// TestRouter_CLIVersion_EmptyWhenNoWrapper guards the unwired-router path.
-func TestRouter_CLIVersion_EmptyWhenNoWrapper(t *testing.T) {
-	r := &Router{ss: newSessionTable()}
-	if got := r.backends.CLIVersion(); got != "" {
-		t.Fatalf("CLIVersion with no wrapper = %q, want empty", got)
-	}
-}

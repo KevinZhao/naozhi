@@ -88,37 +88,3 @@ func TestIsReservedNamespace(t *testing.T) {
 		})
 	}
 }
-
-// TestIsExemptKey exercises the router-private predicate that drives TTL
-// exemption. Kept in the key_test.go file because the policy set it
-// derives from lives here.
-func TestIsExemptKey(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		key  string
-		want bool
-	}{
-		{"cron", "cron:foo", true},
-		{"project", "project:bar:planner", true},
-		{"sys", "sys:auto-titler", true},
-		{"planner", "planner:main", true},
-		{"scout", "scout:run1", true},
-		{"reader", "reader:run1", true},
-		{"meeting", "meeting:m1", true},
-		{"patrol", "patrol:run1", true},
-		{"task NOT exempt", "task:abc", false},
-		{"scratch NOT exempt", "scratch:abc:general:general", false},
-		{"IM NOT exempt", "feishu:group:chat:general", false},
-		{"empty NOT exempt", "", false},
-	}
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := isExemptKey(tt.key); got != tt.want {
-				t.Errorf("isExemptKey(%q) = %v, want %v", tt.key, got, tt.want)
-			}
-		})
-	}
-}

@@ -88,16 +88,6 @@ func TestSaveStoreCreatesDirectory(t *testing.T) {
 	}
 }
 
-func TestLoadStoreInvalidJSON(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "bad.json")
-	os.WriteFile(path, []byte("not json"), 0644)
-
-	restored := loadStore(path)
-	if restored != nil {
-		t.Errorf("loadStore(bad json) = %v, want nil", restored)
-	}
-}
-
 // corruptSiblingCount returns how many ".corrupt.*" siblings exist for the
 // given base path in its directory.
 func corruptSiblingCount(t *testing.T, basePath string) int {

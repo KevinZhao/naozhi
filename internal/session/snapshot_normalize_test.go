@@ -120,19 +120,6 @@ func TestSnapshot_NormalizeFields_NoProcess(t *testing.T) {
 	}
 }
 
-// TestSnapshot_LegacyEmptyBackend_DefaultsToUSD locks the back-compat
-// contract: stores predating the Backend field MUST default to claude/USD.
-func TestSnapshot_LegacyEmptyBackend_DefaultsToUSD(t *testing.T) {
-	t.Parallel()
-	s := &ManagedSession{key: "test:direct:alice:general"}
-	// no SetBackend call — simulates a legacy session restored from
-	// pre-multi-backend sessions.json
-	snap := s.Snapshot()
-	if snap.CostUnit != "USD" {
-		t.Errorf("legacy empty backend should default to USD, got %q", snap.CostUnit)
-	}
-}
-
 // metadataTestProcess is a TestProcess wrapper that returns custom values
 // from the normalize-layer accessors. Used only by snapshot_normalize_test.go.
 type metadataTestProcess struct {

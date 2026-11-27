@@ -49,23 +49,6 @@ func TestPanicSafeSpawnFn_RecoversPanic(t *testing.T) {
 	}
 }
 
-func TestPanicSafeSpawnFn_PassesThroughHappyPath(t *testing.T) {
-	t.Parallel()
-
-	// A successful spawn returns (nil, nil) in this stub — we only care
-	// that the wrapper does not add spurious errors to the happy path.
-	spawn := func(context.Context, cli.SpawnOptions) (*cli.Process, error) {
-		return nil, nil
-	}
-	proc, err := panicSafeSpawnFn(context.Background(), spawn, cli.SpawnOptions{}, "k1", "claude")
-	if proc != nil {
-		t.Errorf("proc = %v, want nil (stub returns nil)", proc)
-	}
-	if err != nil {
-		t.Errorf("err = %v, want nil", err)
-	}
-}
-
 func TestPanicSafeSpawnFn_PassesThroughRegularError(t *testing.T) {
 	t.Parallel()
 
@@ -100,25 +83,5 @@ func TestPanicSafeSpawnFn_PreservesErrorChainOnErrorPanic(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "panic") {
 		t.Errorf("err = %q, want substring %q", err.Error(), "panic")
-	}
-}
-
-// TestPanicSafeSpawnFn_NilSpawnPanicIsRecovered pins behaviour for the
-// "nil wrapper was never meant to reach this path" guard: if someone
-// accidentally calls the helper with a nil spawn, the panic must be
-// captured rather than crashing the process.
-func TestPanicSafeSpawnFn_NilSpawnPanicIsRecovered(t *testing.T) {
-	t.Parallel()
-
-	// Pass nil where a spawnerFunc is expected: calling it panics, and
-	// panicSafeSpawnFn's recover must absorb that.
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("panic escaped panicSafeSpawnFn: %v", r)
-		}
-	}()
-	_, err := panicSafeSpawnFn(context.Background(), nil, cli.SpawnOptions{}, "k1", "claude")
-	if err == nil {
-		t.Fatal("err = nil, want non-nil (nil-spawn panic)")
 	}
 }

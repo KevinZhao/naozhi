@@ -3,7 +3,6 @@ package session
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -119,15 +118,13 @@ func TestCLIDebugFileFor(t *testing.T) {
 
 	// #2171: cliDebugFileFor pre-creates the log 0600 so the spawned CLI's
 	// --debug-file (which may carry API keys) is not left world-readable by
-	// the child's umask. Perm bits are POSIX-only.
-	if runtime.GOOS != "windows" {
-		fi, err := os.Stat(got)
-		if err != nil {
-			t.Fatalf("debug file not pre-created: %v", err)
-		}
-		if perm := fi.Mode().Perm(); perm != 0o600 {
-			t.Errorf("debug file mode = %o, want 0600", perm)
-		}
+	// the child's umask.
+	fi, err := os.Stat(got)
+	if err != nil {
+		t.Fatalf("debug file not pre-created: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("debug file mode = %o, want 0600", perm)
 	}
 }
 
@@ -136,9 +133,6 @@ func TestCLIDebugFileFor(t *testing.T) {
 // on the next cliDebugFileFor call, since O_CREATE alone does not touch the
 // mode of a pre-existing file.
 func TestCLIDebugFileFor_RepairsWorldReadable(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX permission bits not enforced on windows")
-	}
 	key := "dashboard:direct:2026-06-09-naozhi:general"
 	dir := t.TempDir()
 	r := &Router{ss: newSessionTable(), spawn: spawnConfig{cliDebugDir: dir}}

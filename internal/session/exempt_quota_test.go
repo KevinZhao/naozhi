@@ -40,37 +40,6 @@ func TestCountExemptCombined(t *testing.T) {
 	})
 }
 
-// TestExemptKindClassification pins R242-ARCH-2: each exempt prefix
-// resolves to its own namespace string and non-exempt keys return "".
-// Sub-quota dispatch in the spawn depends on this mapping; a
-// classification regression would silently route a stub into the wrong
-// quota.
-func TestExemptKindClassification(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		key  string
-		want string
-	}{
-		{"cron:abc123", "cron"},
-		{"cron:" + "x", "cron"},
-		{"project:my-proj:planner", "project"},
-		{"sys:auto-titler", "sys"},
-		{"planner:main", "planner"},
-		{"feishu:direct:alice:general", ""},
-		{"scratch:feishu:direct:alice:general", ""},
-		{"", ""},
-	}
-	for _, c := range cases {
-		c := c
-		t.Run(c.key, func(t *testing.T) {
-			t.Parallel()
-			if got := exemptKind(c.key); got != c.want {
-				t.Errorf("exemptKind(%q) = %q, want %q", c.key, got, c.want)
-			}
-		})
-	}
-}
-
 // TestExemptInfo pins R20260603-PERF-8 (#1654): the merged single-scan
 // helper must agree with the public isExemptKey / exemptKind wrappers on
 // every case, returning both the exempt bool and the kind label from one
@@ -86,6 +55,11 @@ func TestExemptInfo(t *testing.T) {
 		{"project:my-proj:planner", true, "project"},
 		{"sys:auto-titler", true, "sys"},
 		{"planner:main", true, "planner"},
+		{"scout:run1", true, "scout"},
+		{"reader:run1", true, "reader"},
+		{"meeting:m1", true, "meeting"},
+		{"patrol:run1", true, "patrol"},
+		{"task:abc", false, ""},
 		{"scratch:feishu:direct:alice:general", false, ""},
 		{"feishu:direct:alice:general", false, ""},
 		{"", false, ""},

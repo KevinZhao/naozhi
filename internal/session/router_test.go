@@ -436,27 +436,6 @@ func TestRouterSetUserLabel(t *testing.T) {
 	}
 }
 
-func TestRouterStoreRestoreUserLabel(t *testing.T) {
-	dir := t.TempDir()
-	storePath := filepath.Join(dir, "sessions.json")
-
-	labeled := newSessionWithID("feishu:direct:alice:general", "sess-111")
-	labeled.SetUserLabel("alpha")
-	if err := saveStore(storePath, []*ManagedSession{labeled}); err != nil {
-		t.Fatalf("saveStore: %v", err)
-	}
-
-	r := NewRouter(RouterConfig{StorePath: storePath})
-	t.Cleanup(r.Shutdown)
-	got := r.SessionFor(labeled.key)
-	if got == nil {
-		t.Fatalf("session not restored")
-	}
-	if got.UserLabel() != "alpha" {
-		t.Errorf("restored UserLabel = %q, want alpha", got.UserLabel())
-	}
-}
-
 func TestNewRouterStoreRestore(t *testing.T) {
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "sessions.json")

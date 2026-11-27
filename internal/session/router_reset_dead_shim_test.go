@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -38,9 +37,6 @@ type resetShimFake struct {
 // naming it. Not parallel-safe: it sets XDG_RUNTIME_DIR.
 func newResetShimRouter(t *testing.T, key string, cliAlive, lateFrames bool) (*Router, *resetShimFake) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("shim retire needs unix sockets and unix PID liveness")
-	}
 	// t.TempDir() on darwin overflows the 104-byte sun_path limit.
 	dir, err := os.MkdirTemp("/tmp", "nz-rst-")
 	if err != nil {

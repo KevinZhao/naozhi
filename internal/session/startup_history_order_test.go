@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -66,9 +65,6 @@ func historyOrderRouter(t *testing.T, dir string, w *cli.Wrapper, loader History
 // Claude JSONL, so the race with the startup loaders cannot leave the
 // session with the Claude-only view.
 func TestReconnectShims_RestoresEventLogBeforeJSONL(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shim discovery needs unix PID liveness and unix sockets")
-	}
 	for _, tc := range []struct {
 		name  string
 		drift bool
@@ -184,9 +180,6 @@ func (l *timedHistoryLoader) LoadHistoryChainTail(_ context.Context, _ string, i
 // rows reads its JSONL only after the grace wait and only if nothing filled it
 // meanwhile; a session no shim manages reads without the wait.
 func TestStartupHistory_ShimGraceWait(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shim discovery needs unix PID liveness")
-	}
 	const grace = time.Second
 	for _, tc := range []struct {
 		name string

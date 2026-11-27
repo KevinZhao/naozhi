@@ -15,7 +15,8 @@ func TestRegisterCronStub_CreatesFreshStub(t *testing.T) {
 	var notified int
 	observe(r).changed = func() { notified++ }
 
-	r.RegisterCronStubWithChain("cron:job-1", "/tmp/work", "initial prompt", nil)
+	chain := []string{"sess-aaa", "sess-bbb"}
+	r.RegisterCronStubWithChain("cron:job-1", "/tmp/work", "initial prompt", chain)
 
 	if notified != 1 {
 		t.Fatalf("onChange fired %d times on first stub, want 1", notified)
@@ -34,6 +35,15 @@ func TestRegisterCronStub_CreatesFreshStub(t *testing.T) {
 	if !dirty {
 		t.Errorf("storeDirty should be true after RegisterCronStub(new)")
 	}
+	// The chain is cloned in: a caller editing its slice cannot reach the stub.
+	s := r.SessionFor("cron:job-1")
+	if !slices.Equal(s.prevSessionIDs, chain) {
+		t.Errorf("prevSessionIDs = %v, want %v", s.prevSessionIDs, chain)
+	}
+	chain[0] = "hijacked"
+	if s.prevSessionIDs[0] == "hijacked" {
+		t.Errorf("caller-side mutation bled into router: prevSessionIDs shares backing array")
+	}
 }
 
 // TestRegisterCronStub_NoOpOnIdenticalRefresh pins R176-PERF-P1 for cron:
@@ -49,7 +59,7 @@ func TestRegisterCronStub_NoOpOnIdenticalRefresh(t *testing.T) {
 	t.Parallel()
 	r := newTestRouter(3)
 	// Initial creation.
-	r.RegisterCronStubWithChain("cron:job-2", "/w", "p", nil)
+	r.RegisterCronStubWithChain("cron:job-2", "/w", "p", []string{"sess-xxx"})
 
 	// Reset tracking to isolate the second call.
 	observe(r).changed = func() {}
@@ -60,7 +70,7 @@ func TestRegisterCronStub_NoOpOnIdenticalRefresh(t *testing.T) {
 	})
 
 	// Reload with identical values — must NOT mark dirty / bump version.
-	r.RegisterCronStubWithChain("cron:job-2", "/w", "p", nil)
+	r.RegisterCronStubWithChain("cron:job-2", "/w", "p", []string{"sess-xxx"})
 
 	var dirty bool
 	r.ss.View(func(v sessView) {
@@ -83,17 +93,19 @@ func TestRegisterCronStub_DirtyOnActualChange(t *testing.T) {
 		name         string
 		newWorkspace string
 		newPrompt    string
+		newChain     []string // nil keeps the recorded chain
 	}{
-		{"workspace_changed", "/new", "p"},
-		{"prompt_changed", "/w", "p2"},
-		{"both_changed", "/new", "p2"},
+		{"workspace_changed", "/new", "p", nil},
+		{"prompt_changed", "/w", "p2", nil},
+		{"both_changed", "/new", "p2", nil},
+		{"chain_changed", "/w", "p", []string{"sess-new"}},
 	}
 	for _, c := range cases {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			r := newTestRouter(3)
-			r.RegisterCronStubWithChain("cron:job-3", "/w", "p", nil)
+			r.RegisterCronStubWithChain("cron:job-3", "/w", "p", []string{"sess-old"})
 
 			var notified int
 			observe(r).changed = func() { notified++ }
@@ -103,7 +115,7 @@ func TestRegisterCronStub_DirtyOnActualChange(t *testing.T) {
 				genBefore = tx.Gen()
 			})
 
-			r.RegisterCronStubWithChain("cron:job-3", c.newWorkspace, c.newPrompt, nil)
+			r.RegisterCronStubWithChain("cron:job-3", c.newWorkspace, c.newPrompt, c.newChain)
 
 			if notified != 1 {
 				t.Errorf("onChange fired %d times on %s, want 1", notified, c.name)
@@ -117,6 +129,9 @@ func TestRegisterCronStub_DirtyOnActualChange(t *testing.T) {
 			}
 			if got := r.ss.Gen(); got == genBefore {
 				t.Errorf("storeGen did not advance on %s", c.name)
+			}
+			if c.newChain != nil && !slices.Equal(r.SessionFor("cron:job-3").prevSessionIDs, c.newChain) {
+				t.Errorf("prevSessionIDs = %v, want %v", r.SessionFor("cron:job-3").prevSessionIDs, c.newChain)
 			}
 		})
 	}
@@ -151,102 +166,6 @@ func TestRegisterCronStub_EmptyValuesDoNotClobber(t *testing.T) {
 	}
 	if got := loadAtomicString(&r.ss.Load("cron:job-4").lastPrompt); got != "keepme" {
 		t.Errorf("lastPrompt clobbered by empty refresh: got %q", got)
-	}
-}
-
-// TestRegisterCronStubWithChain_SetsChainOnFreshStub 固化 fresh stub 注入
-// chain 的契约：无 chain 的旧路径会得到 nil prevSessionIDs；带 chain 时
-// 必须 Clone 进 ManagedSession（不共享底层数组，防 caller 改 slice
-// 污染 router 内部状态）。
-func TestRegisterCronStubWithChain_SetsChainOnFreshStub(t *testing.T) {
-	t.Parallel()
-	r := newTestRouter(3)
-	chain := []string{"sess-aaa", "sess-bbb"}
-
-	r.RegisterCronStubWithChain("cron:job-c1", "/w", "p", chain)
-
-	var s *ManagedSession
-	r.ss.View(func(v sessView) {
-		s = v.Get("cron:job-c1")
-	})
-	if s == nil {
-		t.Fatal("stub not registered")
-	}
-	if !slices.Equal(s.prevSessionIDs, chain) {
-		t.Errorf("prevSessionIDs = %v, want %v", s.prevSessionIDs, chain)
-	}
-	// Caller mutation of the passed slice must not affect router state.
-	chain[0] = "hijacked"
-	if s.prevSessionIDs[0] == "hijacked" {
-		t.Errorf("caller-side mutation bled into router: prevSessionIDs shares backing array")
-	}
-}
-
-// TestRegisterCronStubWithChain_NoOpOnIdenticalChain pins that a reload with
-// the same chainIDs does not mark the store dirty or bump the generation.
-// Cron's stubRefresh goroutine is paved over onExecute; repeat calls with
-// unchanged chain are the steady-state case, which must stay fsync-free.
-func TestRegisterCronStubWithChain_NoOpOnIdenticalChain(t *testing.T) {
-	t.Parallel()
-	r := newTestRouter(3)
-	r.RegisterCronStubWithChain("cron:job-c2", "/w", "p", []string{"sess-xxx"})
-
-	observe(r).changed = func() {}
-	var genBefore uint64
-	r.ss.Update(func(tx sessTx) {
-		tx.SetDirty(false)
-		genBefore = tx.Gen()
-	})
-
-	r.RegisterCronStubWithChain("cron:job-c2", "/w", "p", []string{"sess-xxx"})
-
-	var dirty bool
-	r.ss.View(func(v sessView) {
-		dirty = v.Dirty()
-	})
-	if dirty {
-		t.Errorf("storeDirty flipped on identical chain refresh")
-	}
-	if got := r.ss.Gen(); got != genBefore {
-		t.Errorf("storeGen advanced on identical chain refresh: got %d, want %d", got, genBefore)
-	}
-}
-
-// TestRegisterCronStubWithChain_DirtyOnChainChange covers the new code path:
-// when the chain actually changes (cron recorded a new LastSessionID), the
-// stub's prevSessionIDs must be updated in place and the store marked
-// dirty so sessions.json persists the new chain on the next save tick.
-func TestRegisterCronStubWithChain_DirtyOnChainChange(t *testing.T) {
-	t.Parallel()
-	r := newTestRouter(3)
-	r.RegisterCronStubWithChain("cron:job-c3", "/w", "p", []string{"sess-old"})
-
-	observe(r).changed = func() {}
-	var genBefore uint64
-	r.ss.Update(func(tx sessTx) {
-		tx.SetDirty(false)
-		genBefore = tx.Gen()
-	})
-
-	newChain := []string{"sess-new"}
-	r.RegisterCronStubWithChain("cron:job-c3", "/w", "p", newChain)
-
-	var (
-		dirty bool
-		s     *ManagedSession
-	)
-	r.ss.View(func(v sessView) {
-		dirty = v.Dirty()
-		s = v.Get("cron:job-c3")
-	})
-	if !dirty {
-		t.Errorf("storeDirty should be true after chain change")
-	}
-	if got := r.ss.Gen(); got == genBefore {
-		t.Errorf("storeGen did not advance on chain change")
-	}
-	if !slices.Equal(s.prevSessionIDs, newChain) {
-		t.Errorf("prevSessionIDs = %v, want %v", s.prevSessionIDs, newChain)
 	}
 }
 

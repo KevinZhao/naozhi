@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -369,9 +368,6 @@ var _ processEndNotifier = (*cli.Process)(nil)
 // assistant frame and dies, and the real process hands that frame's usage
 // to the session it was reattached to.
 func TestReconnectShims_ReattachedProcessBooksItsEnd(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shim discovery needs unix PID liveness and unix sockets")
-	}
 	dir := shortTempDir(t)
 	mgr, err := shim.NewManager(shim.ManagerConfig{StateDir: dir})
 	if err != nil {

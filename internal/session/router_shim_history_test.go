@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync/atomic"
 	"testing"
 
@@ -176,9 +175,6 @@ func writeLiveShimReplay(t *testing.T, dir string, r *Router, w *cli.Wrapper, se
 // earlier tick got there), and never appends onto history a startup loader
 // filled while the read ran.
 func TestReconnectShims_DriftBackfillOnlyFillsEmptyHistory(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shim discovery needs unix PID liveness")
-	}
 	jsonl := historyEntries("jsonl", 3)
 	loaded := historyEntries("loaded", 2)
 	for _, tc := range []struct {
@@ -234,9 +230,6 @@ func TestReconnectShims_DriftBackfillOnlyFillsEmptyHistory(t *testing.T) {
 // reattached session holds that history once, with no JSONL copy appended,
 // in persistedHistory and in the process event log seeded from it.
 func TestReconnectShims_ReconnectKeepsHistoryLoadedDuringRead(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shim discovery needs unix PID liveness and unix sockets")
-	}
 	dir := shortTempDir(t)
 	mgr, err := shim.NewManager(shim.ManagerConfig{StateDir: dir})
 	if err != nil {
