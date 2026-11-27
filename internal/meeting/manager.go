@@ -672,8 +672,13 @@ func (m *Manager) Retranscribe(ctx context.Context, id, language string) error {
 	if err != nil {
 		return err
 	}
+	// The stored state, not m.processing, says whether the meeting is being
+	// processed: it stays StateProcessing from enqueue until process writes
+	// StateDone, after which the loop only sends the done notice before it
+	// clears m.processing. The queue is serial, so a retranscribe enqueued in
+	// that tail runs after it.
 	m.mu.Lock()
-	busy := (m.rec != nil && m.rec.m.ID == id) || m.processing == id
+	busy := m.rec != nil && m.rec.m.ID == id
 	m.mu.Unlock()
 	if busy || mt.State == StateRecording || mt.State == StateProcessing {
 		return errors.New("会议正在录音或处理中")
