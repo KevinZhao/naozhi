@@ -67,7 +67,7 @@ type Server struct {
 	sessionH   *dashsession.Handlers
 	// projectFiles serves a primary's file RPCs (NodeFiles).
 	projectFiles *dashproject.Handlers
-	// nodeAPI holds the Planner routes (node.APIRoutes) without the API
+	// nodeAPI holds the Planner routes (node.IsAPIRoute) without the API
 	// chain, for a primary's `api` calls (NodePlanner); nil when no Planner
 	// runs here. purpose is ServerOptions.Purpose.
 	nodeAPI *http.ServeMux

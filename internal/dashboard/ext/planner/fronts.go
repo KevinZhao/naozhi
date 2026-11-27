@@ -31,7 +31,7 @@ import (
 //	                          otherwise
 //
 // The read sits behind the /api/* auth like the rest of the page. Neither
-// route is among a reverse node's `api` routes (node.APIRoutes): the ledger
+// route is among a reverse node's `api` routes (node.IsAPIRoute): the ledger
 // is shown and edited on the machine that keeps it.
 
 // maxFrontBody caps an edit's body: a few short fields.

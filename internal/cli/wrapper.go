@@ -17,11 +17,9 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/apiwatch"
-
-	"github.com/naozhi/naozhi/internal/cliinfo"
-
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/cliinfo"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/shim"
 )
