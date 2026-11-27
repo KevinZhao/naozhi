@@ -223,68 +223,15 @@ func TestHandleAttachment_NoWorkspace(t *testing.T) {
 	}
 }
 
-// TestHandleAttachment_PathFilepathAgreement pins R215-SEC-P2-3: after
-// path.Clean (POSIX) the handler now requires filepath.Clean to round-trip
-// to the same forward-slash representation. On Linux the two cleaners are
-// identical so all valid attachment paths still pass through; on macOS /
-// Windows any divergence is rejected as 400 rather than silently accepted
-// with a different on-disk shape than the wire.
-//
-// The positive sub-case exercises the agreement path on the host that runs
-// CI (Linux) — if a future refactor breaks the path.Clean → filepath.Clean
-// round-trip in any way, the previously-passing fixture flips to 400.
-func TestHandleAttachment_PathFilepathAgreement(t *testing.T) {
-	ws := t.TempDir()
-	// Path that exercises path.Clean's ".." resolution and trailing-slash
-	// normalisation; must agree with filepath.Clean on Linux.
-	rel := writeAttachmentFixture(t, ws, "2026-05-25", "img.png", []byte{0x89, 'P', 'N', 'G'})
-	_, hs := newAttachmentServer(t, ws)
-	key := "dash:direct:alice:general"
-
-	u := "/api/sessions/attachment?key=" + url.QueryEscape(key) +
-		"&path=" + url.QueryEscape(rel)
-	req := httptest.NewRequest(http.MethodGet, u, nil)
-	w := httptest.NewRecorder()
-	hs.sendH.handleAttachment(w, req)
-	if w.Code != http.StatusOK {
-		t.Errorf("valid attachment path rejected by path/filepath agreement guard: "+
-			"status=%d want 200 (body=%s)", w.Code, w.Body.String())
-	}
-
-	// Embedded "./" segment — path.Clean strips it, then the agreement
-	// check re-cleans through filepath. Both arrive at the same canonical
-	// form on Linux, so this still resolves; on Windows the dot-segment
-	// would still be stripped identically.
-	rel2 := ".naozhi/./attachments/2026-05-25/img.png"
-	u2 := "/api/sessions/attachment?key=" + url.QueryEscape(key) +
-		"&path=" + url.QueryEscape(rel2)
-	req2 := httptest.NewRequest(http.MethodGet, u2, nil)
-	w2 := httptest.NewRecorder()
-	hs.sendH.handleAttachment(w2, req2)
-	if w2.Code != http.StatusOK {
-		t.Errorf("dot-segment path cleaned by both cleaners should resolve, got status=%d body=%s",
-			w2.Code, w2.Body.String())
-	}
-}
-
 // TestHandleAttachment_RejectsSymlinkAtFinalComponent pins R249-SEC-3 (#917):
 // the final-component open MUST refuse to follow a symlink that was swapped
 // in between EvalSymlinks/Lstat and the open syscall. We can't deterministically
 // race the swap from a test, but we can assert the equivalent contract: a
 // symlink already present at the resolved path is rejected as 404, even if
 // the target is a legitimate readable file. Pre-fix, os.Open would have
-// followed the symlink; post-fix openWorkspaceFile raises ELOOP on unix
-// (mapped to 404) and the windows shim still gets caught by the existing
-// Lstat-symlink rejection at line ~1223 above.
-//
-// On unix, this exercises the O_NOFOLLOW kernel-atomic close. On windows
-// the prior Lstat ModeSymlink check still fires; both paths produce 404.
+// followed the symlink; post-fix openWorkspaceFile raises ELOOP (mapped to
+// 404) through O_NOFOLLOW.
 func TestHandleAttachment_RejectsSymlinkAtFinalComponent(t *testing.T) {
-	if filepath.Separator == '\\' {
-		// Symlink creation requires admin or developer-mode on Windows;
-		// the prior Lstat-ModeSymlink branch covers this platform anyway.
-		t.Skip("symlink test skipped on Windows")
-	}
 	ws := t.TempDir()
 
 	// Plant a legitimate target file outside the attachment dir — the

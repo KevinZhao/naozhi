@@ -15,22 +15,6 @@ func claudeProjectsAllowedRoot() string {
 	return claudefs.ResolvedProjectsRoot(claudefs.DefaultDir())
 }
 
-// TestNew_ProjectsRoot: the server-injected root (the WS tailer's root too)
-// is the one New uses, and without one there is no default to fall back to,
-// so agent_events fails closed instead of deriving a second root.
-func TestNew_ProjectsRoot(t *testing.T) {
-	t.Parallel()
-	if got := New(Deps{ProjectsRoot: "/srv/claude/projects"}).ProjectsRoot(); got != "/srv/claude/projects" {
-		t.Errorf("New(ProjectsRoot set).ProjectsRoot() = %q, want the injected root", got)
-	}
-	if got := New(Deps{}).ProjectsRoot(); got != "" {
-		t.Errorf("New(ProjectsRoot unset).ProjectsRoot() = %q, want \"\" (fail closed)", got)
-	}
-	if jsonlPathUnderAllowedRoot(filepath.Join(claudeProjectsAllowedRoot(), "-ws", "agent-a1.jsonl"), "") {
-		t.Error("an empty root admitted a transcript under the default projects root")
-	}
-}
-
 // TestJsonlPathUnderAllowedRoot_CaseInsensitiveFS mirrors the server
 // package's table for the tailer gate: both gates answer alike on a
 // case-insensitive filesystem.

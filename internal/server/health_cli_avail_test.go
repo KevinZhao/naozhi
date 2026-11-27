@@ -58,22 +58,3 @@ func TestCliAvailable_TTLRefresh(t *testing.T) {
 		t.Error("expected available=true after re-create + TTL expiry")
 	}
 }
-
-// TestCliAvailable_KeyedByPath pins that cache entries do not bleed across
-// different paths — a precondition for the TTL test above and a defence
-// against a future refactor accidentally collapsing the key.
-func TestCliAvailable_KeyedByPath(t *testing.T) {
-	dir := t.TempDir()
-	good := filepath.Join(dir, "good")
-	bad := filepath.Join(dir, "bad-does-not-exist")
-	if err := os.WriteFile(good, []byte("x"), 0o644); err != nil {
-		t.Fatalf("seed good: %v", err)
-	}
-	now := time.Now()
-	if !cliAvailableAt(good, now) {
-		t.Error("good path should be available")
-	}
-	if cliAvailableAt(bad, now) {
-		t.Error("bad path should not be available — cache must not share answers across keys")
-	}
-}

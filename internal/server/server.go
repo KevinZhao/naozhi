@@ -135,19 +135,6 @@ func (s *Server) log() *slog.Logger {
 	return slog.Default()
 }
 
-// RotateDashboardSessions invalidates every outstanding dashboard auth cookie
-// without a restart by bumping the auth generation mixed into the cookie HMAC;
-// both the HTTP cookie path and the WS upgrade path read the live MAC. Safe
-// from any goroutine (#595).
-func (s *Server) RotateDashboardSessions() {
-	if s.auth == nil {
-		return
-	}
-	s.auth.RotateCookieGen()
-	s.log().Info("dashboard auth sessions rotated; outstanding cookies invalidated",
-		"reason", "rotate_dashboard_sessions")
-}
-
 // listenTCP is the listener factory Start binds with; a package var so tests
 // can inject a listener whose Accept fails post-bind.
 var listenTCP = net.Listen

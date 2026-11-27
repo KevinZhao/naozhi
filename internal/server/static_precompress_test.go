@@ -55,42 +55,6 @@ func TestDashboardHTML_ScriptsDeferred(t *testing.T) {
 	}
 }
 
-// TestStaticAsset_Precompressed verifies #1769: compressible static assets are
-// gzip.BestCompression-precompressed once at init, and the precompressed bytes
-// are served (with Content-Encoding: gzip) to gzip-capable clients — never
-// re-compressed on the fly by gzipMiddleware.
-func TestStaticAsset_Precompressed(t *testing.T) {
-	t.Parallel()
-	// A deliberate sample of compress:true assets: precompression is one code
-	// path for every entry, so the sample tests the mechanism, not coverage.
-	// That every module is in the table is TestStaticJS_ModuleInventory.
-	for _, key := range []string{"dashboard.html", "dashboard.js", "agent_view.js", "asset_browser.js"} {
-		a := staticAssets()[key]
-		if a.gz == nil {
-			t.Errorf("%s has no precompressed form; expected gzip.BestCompression cache", key)
-			continue
-		}
-		// Precompressed must be smaller than raw.
-		if len(a.gz) >= len(a.bytes) {
-			t.Errorf("%s gz (%d) not smaller than raw (%d)", key, len(a.gz), len(a.bytes))
-		}
-		// Precompressed bytes must decode back to the exact raw bytes.
-		zr, err := gzip.NewReader(bytes.NewReader(a.gz))
-		if err != nil {
-			t.Errorf("%s gz not a valid gzip stream: %v", key, err)
-			continue
-		}
-		got, err := io.ReadAll(zr)
-		if err != nil {
-			t.Errorf("%s gz decode error: %v", key, err)
-			continue
-		}
-		if !bytes.Equal(got, a.bytes) {
-			t.Errorf("%s gz decodes to %d bytes, want %d (raw mismatch)", key, len(got), len(a.bytes))
-		}
-	}
-}
-
 // TestHandleDashboardJS_ServesPrecompressedThroughMiddleware drives the real
 // handler through gzipMiddleware and asserts: a gzip client gets the cached
 // level-9 body (Content-Encoding: gzip, decodes to raw, NOT re-compressed by

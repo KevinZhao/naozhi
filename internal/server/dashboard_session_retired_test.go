@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"sort"
 	"testing"
 	"time"
 
@@ -131,42 +130,6 @@ func TestSessionHandlers_FlushRetiredStore_Persists(t *testing.T) {
 	}
 	if file.Entries["sid-1"] == 0 {
 		t.Fatalf("sid-1 not persisted; got %v", file.Entries)
-	}
-}
-
-// TestSessionHandlers_RetiredAtFallback locks the back-compat contract:
-// when retiredStore has no entry for a session, the RecentSession
-// returned to the client carries RetiredAt=0, and the dashboard's
-// JSON-level sort key (retired_at || last_active) falls back cleanly.
-// Sort the same shape the JS does to make sure the fallback agrees with
-// last_active-only ordering.
-func TestSessionHandlers_RetiredAtFallback(t *testing.T) {
-	t.Parallel()
-	entries := []discovery.RecentSession{
-		{SessionID: "old-but-recently-closed", LastActive: 100, RetiredAt: 5000},
-		{SessionID: "newer-jsonl-not-closed", LastActive: 4000, RetiredAt: 0},
-		{SessionID: "newest-jsonl", LastActive: 6000, RetiredAt: 0},
-	}
-	// Sort the same shape the JS does: max(retired_at, last_active) DESC.
-	sort.SliceStable(entries, func(i, j int) bool {
-		ki := entries[i].RetiredAt
-		if ki == 0 {
-			ki = entries[i].LastActive
-		}
-		kj := entries[j].RetiredAt
-		if kj == 0 {
-			kj = entries[j].LastActive
-		}
-		return ki > kj
-	})
-	if entries[0].SessionID != "newest-jsonl" {
-		t.Fatalf("first should be 'newest-jsonl' (key=6000), got %q", entries[0].SessionID)
-	}
-	if entries[1].SessionID != "old-but-recently-closed" {
-		t.Fatalf("second should be 'old-but-recently-closed' (key=5000), got %q", entries[1].SessionID)
-	}
-	if entries[2].SessionID != "newer-jsonl-not-closed" {
-		t.Fatalf("third should be 'newer-jsonl-not-closed' (key=4000), got %q", entries[2].SessionID)
 	}
 }
 

@@ -2,7 +2,6 @@ package server
 
 import (
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -42,9 +41,6 @@ func TestResolveExistingAncestor_MaxDepthBounded(t *testing.T) {
 // re-join the unwritten leaf tail. R20260607-SEC-11 (#1891) must not regress
 // R20260531070014-SEC-6 (#1533).
 func TestResolveExistingAncestor_ShallowStillResolves(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink/path semantics differ on windows")
-	}
 	t.Parallel()
 	tmp := t.TempDir() // exists
 	// Leaf does not exist yet, only a couple components below an existing dir.

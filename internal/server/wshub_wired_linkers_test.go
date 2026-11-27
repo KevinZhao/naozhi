@@ -11,37 +11,16 @@ import (
 	"github.com/naozhi/naozhi/internal/subagent"
 )
 
-// stubAgentLinker is a minimal AgentLinker for the wiring tests; its methods
-// are no-ops because the tests only look at identity.
-type stubAgentLinker struct {
-	id string
-}
+// stubAgentLinker is a no-op AgentLinker of a different dynamic type than
+// recordingLinker (below); the wiring tests only look at identity.
+type stubAgentLinker struct{ id string }
 
-func (s *stubAgentLinker) OnResolve(fn func(taskID, toolUseID, internalAgentID string)) {
-}
-func (s *stubAgentLinker) Query(taskID string) (subagent.LinkInfo, bool) {
-	return subagent.LinkInfo{}, false
-}
-func (s *stubAgentLinker) QueryOrResolveFast(taskID string) (subagent.LinkInfo, bool) {
+func (s *stubAgentLinker) OnResolve(func(taskID, toolUseID, internalAgentID string)) {}
+func (s *stubAgentLinker) Query(string) (subagent.LinkInfo, bool)                    { return subagent.LinkInfo{}, false }
+func (s *stubAgentLinker) QueryOrResolveFast(string) (subagent.LinkInfo, bool) {
 	return subagent.LinkInfo{}, false
 }
 func (s *stubAgentLinker) ProjectSessionDir() string { return "" }
-
-// secondStubAgentLinker is structurally identical to stubAgentLinker but
-// has a different dynamic type.
-type secondStubAgentLinker struct {
-	id string
-}
-
-func (s *secondStubAgentLinker) OnResolve(fn func(taskID, toolUseID, internalAgentID string)) {
-}
-func (s *secondStubAgentLinker) Query(taskID string) (subagent.LinkInfo, bool) {
-	return subagent.LinkInfo{}, false
-}
-func (s *secondStubAgentLinker) QueryOrResolveFast(taskID string) (subagent.LinkInfo, bool) {
-	return subagent.LinkInfo{}, false
-}
-func (s *secondStubAgentLinker) ProjectSessionDir() string { return "" }
 
 // TestWiredLinkers_WireOnce: a linker's callbacks are installed once per
 // linker. Identity is the interface key (dynamic type, value): the same
@@ -63,7 +42,7 @@ func TestWiredLinkers_WireOnce(t *testing.T) {
 	if !r.wireOnce(&stubAgentLinker{id: "b"}) {
 		t.Error("a different linker of the same type was refused")
 	}
-	var c agentlink.AgentLinker = &secondStubAgentLinker{id: "a"}
+	var c agentlink.AgentLinker = &recordingLinker{}
 	if !r.wireOnce(c) {
 		t.Error("a linker of a different dynamic type was refused")
 	}

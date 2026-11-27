@@ -64,9 +64,6 @@ func TestHandleRemoteInterrupt_FailureBroadcastsToSubscribers(t *testing.T) {
 			if m.Type == "interrupt_ack" && m.Status == "error" {
 				sawAck = true
 			}
-			if m.Type == "event" && m.Event != nil && m.Event.Type == "system" {
-				// origin is also a subscriber, so it receives the broadcast too.
-			}
 		case m := <-watcherOut:
 			if m.Type == "event" && m.Event != nil && m.Event.Type == "system" {
 				if m.Key != key {

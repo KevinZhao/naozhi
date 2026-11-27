@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,184 +11,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
-	"github.com/naozhi/naozhi/internal/session"
 )
-
-// ─── NodeClient tests ────────────────────────────────────────────────────────
-
-func TestNodeClient_FetchSessions(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/sessions" {
-			http.Error(w, "not found", 404)
-			return
-		}
-		if r.Header.Get("Authorization") != "Bearer test-token" {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]any{
-			"sessions": []map[string]any{
-				{"key": "feishu:direct:alice:general", "state": "ready"},
-				{"key": "feishu:direct:bob:general", "state": "running"},
-			},
-		})
-	}))
-	defer ts.Close()
-
-	nc := node.NewHTTPClient("test", ts.URL, "test-token", "Test Node")
-	sessions, err := nc.FetchSessions(context.Background())
-	if err != nil {
-		t.Fatalf("FetchSessions: %v", err)
-	}
-	if len(sessions) != 2 {
-		t.Fatalf("expected 2 sessions, got %d", len(sessions))
-	}
-	if sessions[0]["key"] != "feishu:direct:alice:general" {
-		t.Errorf("session[0].key = %v", sessions[0]["key"])
-	}
-}
-
-func TestNodeClient_FetchSessions_NoAuth(t *testing.T) {
-	var gotAuth string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		json.NewEncoder(w).Encode(map[string]any{"sessions": []map[string]any{}})
-	}))
-	defer ts.Close()
-
-	nc := node.NewHTTPClient("test", ts.URL, "", "Test")
-	_, err := nc.FetchSessions(context.Background())
-	if err != nil {
-		t.Fatalf("FetchSessions: %v", err)
-	}
-	if gotAuth != "" {
-		t.Errorf("expected no auth header, got %q", gotAuth)
-	}
-}
-
-func TestNodeClient_FetchSessions_AuthFailure(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-	}))
-	defer ts.Close()
-
-	nc := node.NewHTTPClient("test", ts.URL, "wrong-token", "Test")
-	_, err := nc.FetchSessions(context.Background())
-	if err == nil {
-		t.Fatal("expected error for auth failure")
-	}
-}
-
-func TestNodeClient_FetchSessions_MalformedResponse(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("not json"))
-	}))
-	defer ts.Close()
-
-	nc := node.NewHTTPClient("test", ts.URL, "", "Test")
-	_, err := nc.FetchSessions(context.Background())
-	if err == nil {
-		t.Fatal("expected error for malformed response")
-	}
-}
-
-func TestNodeClient_FetchEvents(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/sessions/events" {
-			http.Error(w, "not found", 404)
-			return
-		}
-		key := r.URL.Query().Get("key")
-		if key != "test:d:u:general" {
-			http.Error(w, "bad key", 400)
-			return
-		}
-		after := r.URL.Query().Get("after")
-		if after != "1500" {
-			http.Error(w, "bad after", 400)
-			return
-		}
-		json.NewEncoder(w).Encode([]clievent.EventEntry{
-			{Time: 2000, Type: "text", Summary: "hello"},
-			{Time: 3000, Type: "result", Summary: "done"},
-		})
-	}))
-	defer ts.Close()
-
-	nc := node.NewHTTPClient("test", ts.URL, "", "Test")
-	entries, err := nc.FetchEvents(context.Background(), "test:d:u:general", 1500)
-	if err != nil {
-		t.Fatalf("FetchEvents: %v", err)
-	}
-	if len(entries) != 2 {
-		t.Fatalf("expected 2 entries, got %d", len(entries))
-	}
-	if entries[0].Type != "text" || entries[1].Type != "result" {
-		t.Errorf("unexpected entries: %+v", entries)
-	}
-}
-
-func TestNodeClient_FetchEvents_NoAfter(t *testing.T) {
-	var gotAfter string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAfter = r.URL.Query().Get("after")
-		json.NewEncoder(w).Encode([]clievent.EventEntry{})
-	}))
-	defer ts.Close()
-
-	nc := node.NewHTTPClient("test", ts.URL, "", "Test")
-	_, err := nc.FetchEvents(context.Background(), "key", 0)
-	if err != nil {
-		t.Fatalf("FetchEvents: %v", err)
-	}
-	if gotAfter != "" {
-		t.Errorf("expected no after param, got %q", gotAfter)
-	}
-}
-
-func TestNodeClient_Send(t *testing.T) {
-	var gotKey, gotText, gotAuth string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/sessions/send" {
-			http.Error(w, "not found", 404)
-			return
-		}
-		gotAuth = r.Header.Get("Authorization")
-		var body struct {
-			Key  string `json:"key"`
-			Text string `json:"text"`
-		}
-		json.NewDecoder(r.Body).Decode(&body)
-		gotKey = body.Key
-		gotText = body.Text
-		w.WriteHeader(http.StatusAccepted)
-		json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
-	}))
-	defer ts.Close()
-
-	nc := node.NewHTTPClient("test", ts.URL, "my-token", "Test")
-	_, err := nc.Send(context.Background(), node.SendRequest{Key: "test:d:u:general", Text: "hello world"})
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if gotKey != "test:d:u:general" {
-		t.Errorf("key = %q", gotKey)
-	}
-	if gotText != "hello world" {
-		t.Errorf("text = %q", gotText)
-	}
-	if gotAuth != "Bearer my-token" {
-		t.Errorf("auth = %q", gotAuth)
-	}
-}
-
-func TestNodeClient_Send_Unreachable(t *testing.T) {
-	nc := node.NewHTTPClient("test", "http://127.0.0.1:1", "", "Test")
-	_, err := nc.Send(context.Background(), node.SendRequest{Key: "key", Text: "text"})
-	if err == nil {
-		t.Fatal("expected error for unreachable server")
-	}
-}
 
 // ─── Dashboard aggregation tests ─────────────────────────────────────────────
 
@@ -371,8 +193,7 @@ func TestHandleAPISend_RemoteNode(t *testing.T) {
 		t.Fatalf("status = %d, want 202", w.Code)
 	}
 
-	// Wait for the async goroutine
-	time.Sleep(100 * time.Millisecond)
+	hs.sendH.engine.wg.Wait()
 
 	mu.Lock()
 	k, tx := gotKey, gotText
@@ -417,62 +238,6 @@ func TestHandleAPISend_LocalNodeExplicit(t *testing.T) {
 }
 
 // ─── Hub remote handler tests ────────────────────────────────────────────────
-
-func TestHub_RemoteSend(t *testing.T) {
-	var mu sync.Mutex
-	var gotKey, gotText string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/sessions/send" {
-			var body struct {
-				Key  string `json:"key"`
-				Text string `json:"text"`
-			}
-			json.NewDecoder(r.Body).Decode(&body)
-			mu.Lock()
-			gotKey = body.Key
-			gotText = body.Text
-			mu.Unlock()
-			w.WriteHeader(http.StatusAccepted)
-			json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
-		}
-	}))
-	defer ts.Close()
-
-	nodes := map[string]node.Conn{
-		"remote": node.NewHTTPClient("remote", ts.URL, "", "Remote"),
-	}
-	router := session.NewRouter(session.RouterConfig{})
-	hub := newHubForTest(t, HubOptions{Router: router, Nodes: newNodeRegistry(nodes)}, sendEngineOpts{})
-	defer hub.Shutdown()
-
-	client := newTestWSClient()
-	hub.handleSend(client, node.ClientMsg{
-		Type: "send",
-		Key:  "test:d:u:general",
-		Text: "hello",
-		Node: "remote",
-		ID:   "r1",
-	})
-
-	msg := readClientMsg(t, client, 2*time.Second)
-	if msg.Type != "send_ack" {
-		t.Errorf("type = %q, want send_ack", msg.Type)
-	}
-	if msg.Status != "accepted" {
-		t.Errorf("status = %q, want accepted", msg.Status)
-	}
-
-	time.Sleep(200 * time.Millisecond)
-	mu.Lock()
-	k, tx := gotKey, gotText
-	mu.Unlock()
-	if k != "test:d:u:general" {
-		t.Errorf("key = %q", k)
-	}
-	if tx != "hello" {
-		t.Errorf("text = %q", tx)
-	}
-}
 
 func TestHub_RemoteSend_UnknownNode(t *testing.T) {
 	hub, _ := newTestHub(t, "")

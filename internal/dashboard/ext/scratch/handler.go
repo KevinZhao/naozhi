@@ -383,10 +383,6 @@ func New(d Deps) *Handler {
 	}
 }
 
-// RouterIsWired reports whether the router field has been wired; used by the
-// server-package wiring-regression test.
-func (h *Handler) RouterIsWired() bool { return h.router != nil }
-
 // Pool is the *session.ScratchPool surface the scratch handlers drive.
 type Pool interface {
 	Open(opts session.OpenOptions) (*session.Scratch, error)

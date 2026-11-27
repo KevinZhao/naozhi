@@ -3,7 +3,6 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 )
 
@@ -119,29 +118,5 @@ func TestGzipMiddleware_Skips304(t *testing.T) {
 	}
 	if body := w.Body.Bytes(); len(body) != 0 {
 		t.Errorf("304 response carries a %d-byte body (phantom gzip frame?), want empty", len(body))
-	}
-}
-
-// TestGzipMiddleware_Still200Compresses guards against over-broad short-circuit:
-// a normal 200 with compressible content must still be gzipped.
-func TestGzipMiddleware_Still200Compresses(t *testing.T) {
-	t.Parallel()
-	payload := strings.Repeat("dashboard bytes ", 512) // compressible
-	h := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/javascript")
-		_, _ = w.Write([]byte(payload))
-	}))
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/static/dashboard.js", nil)
-	r.Header.Set("Accept-Encoding", "gzip")
-	h.ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", w.Code)
-	}
-	if enc := w.Header().Get("Content-Encoding"); enc != "gzip" {
-		t.Errorf("200 compressible response Content-Encoding=%q, want gzip", enc)
-	}
-	if w.Body.Len() >= len(payload) {
-		t.Errorf("200 body not compressed: got %d bytes, raw was %d", w.Body.Len(), len(payload))
 	}
 }

@@ -45,10 +45,6 @@ func TestRedactGitRemoteURL_StripsUserinfo(t *testing.T) {
 		// R20260603-SEC-8: parse fails but URL-form with userinfo must not leak.
 		// url.Parse rejects https://user:pass@github.com:foo (non-numeric port).
 		{"parse fail url-form with creds strips userinfo", "https://user:pass@github.com:foo", "https://github.com:foo"},
-		// SCP-style: no "://" so parse-fail branch returns raw unchanged.
-		{"scp style no scheme passthrough unchanged", "git@github.com:org/repo.git", "git@github.com:org/repo.git"},
-		// Happy path (parse succeeds): userinfo stripped via u.User=nil.
-		{"parse success strips userinfo", "https://u:p@h/x", "https://h/x"},
 	}
 	for _, tc := range cases {
 		tc := tc

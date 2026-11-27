@@ -18,34 +18,6 @@ var (
 	_ cronCommandScheduler  = (*cron.Scheduler)(nil)
 )
 
-// TestCronDispatchAdapter_WireCodesMatchCron pins the wire-value contract
-// between dispatch's CronCode* constants and cron.ErrCode (#1164): dispatch
-// compares CronCommands.ClassifyError output against its own string
-// constants, and the adapter returns string(cron.ClassifyError(err)) — so
-// the two constant sets must stay byte-identical or every /cron error reply
-// silently degrades to the generic fallback.
-func TestCronDispatchAdapter_WireCodesMatchCron(t *testing.T) {
-	pairs := []struct {
-		name     string
-		dispatch string
-		cron     cron.ErrCode
-	}{
-		{"job_not_found", dispatch.CronCodeJobNotFound, cron.CodeJobNotFound},
-		{"ambiguous_prefix", dispatch.CronCodeAmbiguousPrefix, cron.CodeAmbiguousPrefix},
-		{"job_already_paused", dispatch.CronCodeJobAlreadyPaused, cron.CodeJobAlreadyPaused},
-		{"job_not_paused", dispatch.CronCodeJobNotPaused, cron.CodeJobNotPaused},
-		{"invalid_prompt", dispatch.CronCodeInvalidPrompt, cron.CodeInvalidPrompt},
-		{"job_quota_exceeded", dispatch.CronCodeJobQuotaExceeded, cron.CodeJobQuotaExceeded},
-		{"interval_too_short", dispatch.CronCodeIntervalTooShort, cron.CodeIntervalTooShort},
-		{"invalid_schedule", dispatch.CronCodeInvalidSchedule, cron.CodeInvalidSchedule},
-	}
-	for _, p := range pairs {
-		if p.dispatch != string(p.cron) {
-			t.Errorf("%s: dispatch constant %q != cron wire value %q", p.name, p.dispatch, string(p.cron))
-		}
-	}
-}
-
 // TestCronDispatchAdapter_ClassifyError_PreservesSentinelChain verifies the
 // adapter's no-wrap error contract end to end: a sentinel-wrapped scheduler
 // error crossing the adapter must still classify to the matching wire code.

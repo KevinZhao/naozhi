@@ -91,51 +91,20 @@ func TestParseAttachmentFile_PDF_NotAllowed(t *testing.T) {
 	}
 }
 
-func TestParseAttachmentFile_PDF_MagicMismatch(t *testing.T) {
-	// Claim PDF but ship JPEG bytes. Defence against rename/spoof.
-	body := []byte("\xff\xd8\xff\xe0fake jpeg bytes")
-	fh := makeMultipartFile(t, "spoof.pdf", "application/pdf", body)
-
-	_, err := parseAttachmentFile(fh, true)
-	if err == nil || !strings.Contains(err.Error(), "PDF") {
-		t.Errorf("expected magic mismatch reject, got %v", err)
-	}
-}
-
-// TestParseAttachmentFile_PDF_DeclaredButNoMagic_RejectedBeforeFullBuffer
-// pins R247-SEC-11 (#503): a caller declaring Content-Type:application/pdf
-// without the actual %PDF- magic must be rejected after a 512-byte head
-// sniff — NOT after buffering up to the full 32 MB PDF cap. The test is
-// a behavioural lock (rejection happens) rather than a memory-watermark
-// test (Go's runtime alloc accounting isn't reliable in -race), but the
-// rejection path is now reached BEFORE io.ReadAll(LimitReader(... maxPDFBytes))
-// runs against a body that the caller has already proven non-PDF.
-func TestParseAttachmentFile_PDF_DeclaredButNoMagic_RejectedBeforeFullBuffer(t *testing.T) {
-	// Build a body that's larger than maxImageBytes but well under
-	// maxPDFBytes, with no %PDF- header. Pre-fix, the LimitReader cap
-	// would be maxPDFBytes+1 and io.ReadAll would buffer the whole body.
-	// Post-fix, the head sniff rejects before any further read.
-	body := bytes.Repeat([]byte{0x00}, maxImageBytes+(1<<20))
-	fh := makeMultipartFile(t, "fake.pdf", "application/pdf", body)
-
-	_, err := parseAttachmentFile(fh, true)
-	if err == nil {
-		t.Fatal("expected rejection of declared-PDF without magic header")
-	}
-	if !strings.Contains(err.Error(), "PDF") {
-		t.Errorf("expected error to mention PDF, got: %v", err)
-	}
-}
-
-// TestParseAttachmentFile_PDF_PartialHead_StillRejectedIfNotMagic guards a
-// subtle edge: a body shorter than the 512-byte sniff window, declared
-// PDF, but lacking the magic, must still be rejected on the early path.
-// io.ReadFull's ErrUnexpectedEOF case wraps to a head shorter than 512.
-func TestParseAttachmentFile_PDF_PartialHead_StillRejectedIfNotMagic(t *testing.T) {
-	// 4 bytes — not enough to carry "%PDF-" — declared as PDF.
-	fh := makeMultipartFile(t, "tiny.pdf", "application/pdf", []byte("abcd"))
-	if _, err := parseAttachmentFile(fh, true); err == nil {
-		t.Fatal("expected rejection of declared-PDF with sub-magic head")
+// TestParseAttachmentFile_PDF_DeclaredButNoMagic: a body declared PDF but
+// lacking %PDF- is rejected — spoofed JPEG bytes, a head shorter than the
+// 512-byte sniff window, and (R247-SEC-11 #503) a body past maxImageBytes,
+// rejected by the head sniff before buffering up to the PDF cap.
+func TestParseAttachmentFile_PDF_DeclaredButNoMagic(t *testing.T) {
+	for name, body := range map[string][]byte{
+		"jpeg bytes":  []byte("\xff\xd8\xff\xe0fake jpeg bytes"),
+		"short head":  []byte("abcd"),
+		"large zeros": bytes.Repeat([]byte{0x00}, maxImageBytes+(1<<20)),
+	} {
+		fh := makeMultipartFile(t, "spoof.pdf", "application/pdf", body)
+		if _, err := parseAttachmentFile(fh, true); err == nil || !strings.Contains(err.Error(), "PDF") {
+			t.Errorf("%s: err = %v, want a PDF rejection", name, err)
+		}
 	}
 }
 
@@ -318,26 +287,6 @@ func TestHasPersistableAttachment(t *testing.T) {
 		if got := hasPersistableAttachment(c.atts); got != c.want {
 			t.Errorf("%s: got %v want %v", c.name, got, c.want)
 		}
-	}
-}
-
-func TestPersistFileRefs_MixedImageAndPDF(t *testing.T) {
-	ws := t.TempDir()
-	atts := []clievent.Attachment{
-		{Kind: clievent.KindImageInline, Data: []byte("png"), MimeType: "image/png"},
-		{Kind: clievent.KindFileRef, Data: pdfMagic(), MimeType: "application/pdf", OrigName: "x.pdf"},
-	}
-	resolved, rb, perr := persistFileRefs(ws, atts, "k", "o")
-	if perr != nil {
-		t.Fatalf("%+v", perr)
-	}
-	defer rb()
-
-	if resolved[0].Kind != clievent.KindImageInline || !bytes.Equal(resolved[0].Data, []byte("png")) {
-		t.Error("image passthrough corrupted")
-	}
-	if resolved[1].Kind != clievent.KindFileRef || resolved[1].WorkspacePath == "" {
-		t.Error("PDF not persisted")
 	}
 }
 

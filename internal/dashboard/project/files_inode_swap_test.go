@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -27,15 +26,6 @@ import (
 // re-introduces os.Open would pass the fixture by following the symlink
 // out of the workspace.
 func TestHandleFileGet_OpenOnce_NoFollowSymlink(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		// O_NOFOLLOW is the unix-only kernel-atomic guard. The windows
-		// shim falls back to plain Open and relies on the fstat-IsRegular
-		// re-check; covering it would require a fstat-time symlink-swap
-		// fixture that's flaky on the windows-latest CI runner. naozhi's
-		// production target is Linux per the project_files_open_windows
-		// godoc.
-		t.Skip("O_NOFOLLOW is unix-only; production target is Linux")
-	}
 	h, projName, projDir := newProjectHandlersForTest(t, nil)
 
 	// Drop a real file outside the workspace that the symlink will redirect

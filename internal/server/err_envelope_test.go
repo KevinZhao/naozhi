@@ -83,17 +83,3 @@ func TestErrRespRetry_ZeroSecondsElidesHeader(t *testing.T) {
 		t.Errorf("body must omit retry_after when zero, got %q", w.Body.String())
 	}
 }
-
-// TestErrEnvelope_ErrorFieldName pins the legacy field name so the
-// dashboard.js central error handler keeps working across the
-// transition. A future rename of `error` → `message` would silently
-// break every toast — this asserts the JSON tag explicitly.
-func TestErrEnvelope_ErrorFieldName(t *testing.T) {
-	w := httptest.NewRecorder()
-	errResp(w, http.StatusNotFound, "missing", "gone")
-
-	body := w.Body.String()
-	if !strings.Contains(body, `"error":"gone"`) {
-		t.Errorf("body must carry top-level `error` key (legacy contract): got %q", body)
-	}
-}

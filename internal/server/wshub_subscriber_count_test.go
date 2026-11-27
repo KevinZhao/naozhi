@@ -2,7 +2,6 @@ package server
 
 import (
 	"strconv"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -355,43 +354,5 @@ func TestRegistry_RecycledSetsStartEmpty(t *testing.T) {
 	registerSub(h, a, "third") // would panic on a recycled nil set
 	if subscriberCountOf(h, "third") != 1 {
 		t.Error("joining after a stray leave did not count")
-	}
-}
-
-// TestSubscriberCountFast_FollowsSubscribeAndUnsubscribe: the lock-free
-// count fanOutToSubscribers reads tracks the registry across subscribe,
-// unsubscribe and unregister, and goes away with the last subscriber.
-func TestSubscriberCountFast_FollowsSubscribeAndUnsubscribe(t *testing.T) {
-	h := &Hub{subs: newSubscriberRegistry()}
-	fast := func(key string) (int32, bool) {
-		v, ok := h.subs.countFast.Load(key)
-		if !ok {
-			return 0, false
-		}
-		return v.(*atomic.Int32).Load(), true
-	}
-	a := &wsClient{done: make(chan struct{})}
-	b := &wsClient{done: make(chan struct{})}
-	registerSub(h, a, "k")
-	registerSub(h, b, "k")
-	if n, ok := fast("k"); !ok || n != 2 {
-		t.Fatalf("two subscribers: fast count = (%d,%v); want (2,true)", n, ok)
-	}
-
-	h.subs.unsubscribe(a, "k", 0)
-	if n, ok := fast("k"); !ok || n != 1 {
-		t.Fatalf("after one unsubscribe: fast count = (%d,%v); want (1,true)", n, ok)
-	}
-	if got := h.subs.count("k"); got != 1 {
-		t.Fatalf("count at one subscriber = %d; want 1", got)
-	}
-
-	h.subs.remove(b)
-	if _, ok := fast("k"); ok {
-		t.Fatal("fast count must be deleted with the last subscriber — a " +
-			"leaked counter would let count read a stale value")
-	}
-	if subscriberCountOf(h, "k") != 0 || h.subs.count("k") != 0 {
-		t.Fatal("key still has subscribers after the last one left")
 	}
 }

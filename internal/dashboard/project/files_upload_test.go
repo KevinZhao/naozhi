@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -118,7 +117,7 @@ func TestCreateWorkspaceFile_ExclAndPerm(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 	_ = f.Close()
-	if fi, _ := os.Stat(p); fi != nil && runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
+	if fi, _ := os.Stat(p); fi != nil && fi.Mode().Perm() != 0o600 {
 		t.Errorf("perm = %o, want 600", fi.Mode().Perm())
 	}
 	// Second create without overwrite must fail O_EXCL → ErrExist.
@@ -232,9 +231,6 @@ func TestHandleFilesUpload_GitSubtreeBlocked(t *testing.T) {
 }
 
 func TestHandleFilesUpload_SymlinkedParentIntoControlDirRefused(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink semantics differ on windows")
-	}
 	// A workspace symlink `docs -> .git` must not let an upload to dir=docs
 	// write into the .git control subtree (which the logical-path deny-list
 	// would miss). The resolved-path re-check must catch it.
@@ -252,9 +248,6 @@ func TestHandleFilesUpload_SymlinkedParentIntoControlDirRefused(t *testing.T) {
 }
 
 func TestHandleFilesUpload_SymlinkedLeafRefused(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("O_NOFOLLOW semantics differ on windows")
-	}
 	h, proj, projDir := newProjectHandlersForTest(t, nil)
 	outside := filepath.Join(t.TempDir(), "target.txt")
 	if err := os.WriteFile(outside, []byte("original"), 0o644); err != nil {
@@ -277,9 +270,6 @@ func TestHandleFilesUpload_SymlinkedLeafRefused(t *testing.T) {
 }
 
 func TestHandleFilesUpload_SymlinkedParentRefused(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink semantics differ on windows")
-	}
 	h, proj, projDir := newProjectHandlersForTest(t, nil)
 	outside := t.TempDir()
 	link := filepath.Join(projDir, "outdir")

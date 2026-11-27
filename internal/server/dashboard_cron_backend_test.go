@@ -122,48 +122,14 @@ func TestCronCreate_AcceptsValidBackend(t *testing.T) {
 	}
 }
 
-// TestCronCreate_RejectsInvalidBackendChars covers the regex-style
-// boundary validator: any byte outside isValidBackendID's superset
-// ([a-zA-Z0-9._-]) must be rejected at the dashboard edge with 400 so
-// a multi-KB hostile `backend=` cannot land in slog or in cron_jobs.json.
-// Cases mirror send.go's gate to keep the surfaces in sync (R233-SEC-9).
-//
-// Uppercase + dot are NOT in this list anymore: R233-SEC-9 unified the
-// cron / send / WS charsets onto isValidBackendID, which accepts
-// [A-Za-z0-9._-]. The previous tighter [a-z0-9_-] cron-only rule rejected
-// uppercase + dot — see TestValidateCronBackend_Standalone for the
-// positive-case coverage of that relaxation.
-func TestCronCreate_RejectsInvalidBackendChars(t *testing.T) {
+// TestCronCreate_RejectsInvalidBackend: the create path runs the validator
+// too, so a hostile backend= never lands in cron_jobs.json.
+func TestCronCreate_RejectsInvalidBackend(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name string
-		val  string
-	}{
-		{"slash", "claude/v2"},
-		{"space", "claude v2"},
-		{"newline", "claude\n"},
-		{"too_long", strings.Repeat("a", 65)},
-		{"emoji", "claude🚀"},
-	}
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			srv := newTestServerWithScheduler(&mockPlatform{})
-			payload := map[string]any{
-				"schedule": "@every 5m",
-				"prompt":   "x",
-				"backend":  tc.val,
-			}
-			raw, err := json.Marshal(payload)
-			if err != nil {
-				t.Fatalf("marshal: %v", err)
-			}
-			w := postCronCreate(t, srv, string(raw))
-			if w.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
-			}
-		})
+	srv := newTestServerWithScheduler(&mockPlatform{})
+	w := postCronCreate(t, srv, `{"schedule":"@every 5m","prompt":"x","backend":"claude/v2"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
 	}
 }
 

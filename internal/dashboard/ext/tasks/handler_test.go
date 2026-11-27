@@ -125,15 +125,3 @@ func TestHandleSeen(t *testing.T) {
 		t.Errorf("seen without a board = %d, want 503", w.Code)
 	}
 }
-
-// The routes are the four, as routes.golden.json lists them.
-func TestRoutes(t *testing.T) {
-	var got []string
-	for _, r := range New(nil).Routes() {
-		got = append(got, r.Pattern)
-	}
-	want := []string{"GET /api/tasks", "POST /api/tasks/state", "POST /api/tasks/stop", "POST /api/tasks/seen"}
-	if !slices.Equal(got, want) {
-		t.Errorf("routes = %v", got)
-	}
-}

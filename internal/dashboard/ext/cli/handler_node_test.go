@@ -154,55 +154,32 @@ func TestHandle_NodeProxy_LocalFallsThrough(t *testing.T) {
 	}
 }
 
-// TestHandle_NodeProxy_UpstreamErrorIs502 pins the degrade contract: when the
-// remote FetchBackends errors (e.g. an older peer that predates fetch_backends
-// returns an unknown-method error), Handle returns 502 so the dashboard's
-// fetch falls back to the local manifest rather than silently showing a wrong
-// list.
-func TestHandle_NodeProxy_UpstreamErrorIs502(t *testing.T) {
-	r, _ := routerWithWrapper("2.1.100")
-	h := &Handler{router: r}
-	h.nodeAccess = &fakeNodeAccess{wantID: "remote", conn: &fakeConn{err: errors.New("unknown method: fetch_backends")}}
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/cli/backends?node=remote", nil)
-	h.Handle(rec, req)
-
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502 on upstream error", rec.Code)
+// TestHandle_NodeProxy_Errors: a remote FetchBackends error (e.g. an older
+// peer without fetch_backends) and a single-node build with no accessor both
+// answer 502, so the dashboard falls back to the local manifest; an unknown
+// node keeps LookupNode's own 404 rather than being overwritten.
+func TestHandle_NodeProxy_Errors(t *testing.T) {
+	cases := []struct {
+		name   string
+		access *fakeNodeAccess
+		node   string
+		want   int
+	}{
+		{"upstream error", &fakeNodeAccess{wantID: "remote", conn: &fakeConn{err: errors.New("unknown method: fetch_backends")}}, "remote", http.StatusBadGateway},
+		{"no accessor", nil, "remote", http.StatusBadGateway},
+		{"unknown node", &fakeNodeAccess{wantID: "known", conn: &fakeConn{raw: json.RawMessage(`{}`)}}, "ghost", http.StatusNotFound},
 	}
-}
-
-// TestHandle_NodeProxy_NoAccessorIs502 covers a single-node build (nodeAccess
-// never wired): a stray ?node= request degrades to 502 rather than panicking
-// on a nil accessor.
-func TestHandle_NodeProxy_NoAccessorIs502(t *testing.T) {
-	r, _ := routerWithWrapper("2.1.100")
-	h := &Handler{router: r} // SetNodeAccess never called → nodeAccess nil
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/cli/backends?node=remote", nil)
-	h.Handle(rec, req)
-
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502 when node routing unavailable", rec.Code)
-	}
-}
-
-// TestHandle_NodeProxy_UnknownNodePropagates confirms LookupNode's own error
-// response (404 for an unknown node id) is not overwritten — Handle must
-// return after LookupNode already wrote to w.
-func TestHandle_NodeProxy_UnknownNodePropagates(t *testing.T) {
-	r, _ := routerWithWrapper("2.1.100")
-	h := &Handler{router: r}
-	h.nodeAccess = &fakeNodeAccess{wantID: "known", conn: &fakeConn{raw: json.RawMessage(`{}`)}}
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/cli/backends?node=ghost", nil)
-	h.Handle(rec, req)
-
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 from LookupNode for unknown node", rec.Code)
+	for _, tc := range cases {
+		r, _ := routerWithWrapper("2.1.100")
+		h := &Handler{router: r}
+		if tc.access != nil {
+			h.nodeAccess = tc.access
+		}
+		rec := httptest.NewRecorder()
+		h.Handle(rec, httptest.NewRequest(http.MethodGet, "/api/cli/backends?node="+tc.node, nil))
+		if rec.Code != tc.want {
+			t.Errorf("%s: status = %d, want %d", tc.name, rec.Code, tc.want)
+		}
 	}
 }
 

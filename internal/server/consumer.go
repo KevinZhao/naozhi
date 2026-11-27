@@ -1,5 +1,5 @@
 // consumer.go: per-consumer interface subsets of *session.Router (HubRouter /
-// ScratchRouter / serverRouter / healthRouter) and *wsBroadcaster (HubBroadcaster). Declared here (not in
+// sendEngineRouter / serverRouter / healthRouter) and *wsBroadcaster (sendNotifier). Declared here (not in
 // session) so tests can inject fakes; the concrete types satisfy them
 // structurally; the wiring-site assignments check that at compile time. See
 // docs/rfc/consumer-interfaces.md §3.2.2.
@@ -9,7 +9,6 @@ package server
 import (
 	"context"
 
-	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/wsproto"
 
 	"github.com/naozhi/naozhi/internal/session"
@@ -60,8 +59,6 @@ type sendEngineRouter interface {
 // sendNotifier is *sendEngine's only way out to the dashboard, and the
 // hand-off point for Epic K (#2549): the broadcast facet is its own type,
 // *wsBroadcaster, so the engine depends on it and not on the Hub.
-// Deliberately not HubBroadcaster — 4 of its 6 methods are cron / daemon
-// run-lifecycle, and it lacks the two unexported methods needed here.
 // *wsBroadcaster satisfies it.
 type sendNotifier interface {
 	BroadcastSessionReady(key string)
@@ -69,15 +66,6 @@ type sendNotifier interface {
 	broadcastState(key, state, deathReason string)
 	broadcastSendError(key, msg string)
 	broadcastRemoteSendError(f wsproto.SendError)
-}
-
-// ScratchRouter is the *ScratchHandler-only subset of *session.Router
-// (#566). *session.Router satisfies it structurally; tests inject a fake
-// via ScratchHandler.router.
-type ScratchRouter interface {
-	SessionFor(key string) *session.ManagedSession
-	Remove(key string) bool
-	RenameSession(oldKey, newKey string) bool
 }
 
 // serverRouter is the subset of *session.Router *Server's runtime methods
@@ -102,16 +90,4 @@ type healthRouter interface {
 	Backends() *session.BackendRegistry
 	History() *session.HistoryIO
 	StoreWriteBlocks() []session.StoreBlock
-}
-
-// HubBroadcaster names the broadcast / fan-out facet, *wsBroadcaster — the "push a
-// frame to authenticated WS clients" surface producers (the router observer's SessionsChanged,
-// send paths, cron / sysession run-lifecycle hooks, node register/deregister)
-// reach for. *wsBroadcaster satisfies it structurally. Prefer the narrower subsets (scratch.Broadcaster)
-// when only part of this surface is needed.
-type HubBroadcaster interface {
-	BroadcastSessionReady(key string)
-	BroadcastSessionsUpdate()
-	BroadcastRunStarted(ev runtelemetry.RunStartedEvent)
-	BroadcastRunEnded(ev runtelemetry.RunEndedEvent)
 }

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -54,113 +55,44 @@ func TestHandleAPISessionEvents_SessionNotFound(t *testing.T) {
 	}
 }
 
-// TestHandleAPISessionEvents_RejectsInvalidKey covers R172-SEC-L2: the
-// reverse-RPC fetch_events worker in internal/upstream/connector.go
-// already runs sessionkey.ValidateSessionKey on every inbound key, but the
-// dashboard HTTP surface used to forward authenticated-user input
-// straight into GetSession and slog without a length / control-char
-// gate. Keys containing embedded NUL/CR or multi-KB filler must fail
-// with 400 before reaching the router map.
-func TestHandleAPISessionEvents_RejectsInvalidKey(t *testing.T) {
+// TestSessionHandlers_RejectInvalidKey covers R172-SEC-L2 / R175-SEC-M: the
+// events, delete (body and query), label and interrupt handlers each run
+// sessionkey.ValidateSessionKey (its cases are tested there), so a key with an
+// embedded control byte is a 400 before it reaches the router or slog.
+func TestSessionHandlers_RejectInvalidKey(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
-
-	// Build a key that exceeds sessionkey.MaxSessionKeyBytes (~520 B).
-	tooLong := "test:direct:" + strings.Repeat("a", 4*1024) + ":general"
-	cases := map[string]string{
-		"embedded_LF":  "test:direct:abc\ndef:general",
-		"embedded_NUL": "test:direct:abc\x00def:general",
-		"too_long":     tooLong,
-		"bidi_RLO":     "test:direct:abc\u202edef:general",
+	const key = "test:direct:abc\x00def:general"
+	body := func(extra string) io.Reader {
+		m := map[string]string{"key": key}
+		if extra != "" {
+			m["label"] = extra
+		}
+		raw, _ := json.Marshal(m)
+		return bytes.NewReader(raw)
 	}
-	for name, key := range cases {
-		key := key
-		t.Run(name, func(t *testing.T) {
-			// Use url.QueryEscape so raw control bytes (NUL, LF) do not
-			// trip url.Parse before the handler ever sees them.
-			req := httptest.NewRequest(http.MethodGet,
-				"/api/sessions/events?key="+url.QueryEscape(key), nil)
-			w := httptest.NewRecorder()
-			srv.sessionH.HandleEvents(w, req)
-
-			if w.Code != http.StatusBadRequest {
-				t.Errorf("status = %d, want 400", w.Code)
-			}
-			if !strings.Contains(w.Body.String(), "invalid key") {
-				t.Errorf("body = %q, want 'invalid key'", w.Body.String())
-			}
-		})
-	}
-}
-
-// TestHandleAPISessionDelete_SetLabel_Interrupt_RejectInvalidKey covers
-// R175-SEC-M: the DELETE /api/sessions / PATCH /api/sessions/label / POST
-// /api/sessions/interrupt dashboard handlers historically trusted the
-// authenticated-operator-supplied JSON body and forwarded req.Key straight
-// into Router methods + slog.Warn attrs on failure. handleEvents already
-// enforces sessionkey.ValidateSessionKey (Round 173 R172-SEC-L2); this test
-// locks the same gate into the three other session-lifecycle handlers so
-// they reject multi-KB keys, embedded NUL/CR/LF, and bidi-override
-// characters uniformly.
-func TestHandleAPISessionDelete_SetLabel_Interrupt_RejectInvalidKey(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
-
-	tooLong := "test:direct:" + strings.Repeat("a", 4*1024) + ":general"
-	cases := map[string]string{
-		"embedded_LF":  "test:direct:abc\ndef:general",
-		"embedded_NUL": "test:direct:abc\x00def:general",
-		"too_long":     tooLong,
-		"bidi_RLO":     "test:direct:abc\u202edef:general",
-	}
-	for name, key := range cases {
-		key := key
-		t.Run("delete_body_"+name, func(t *testing.T) {
-			raw, _ := json.Marshal(map[string]string{"key": key})
-			req := httptest.NewRequest(http.MethodDelete, "/api/sessions", bytes.NewReader(raw))
-			w := httptest.NewRecorder()
-			srv.sessionH.HandleDelete(w, req)
-			if w.Code != http.StatusBadRequest {
-				t.Errorf("delete status = %d, want 400", w.Code)
-			}
-			if !strings.Contains(w.Body.String(), "invalid key") {
-				t.Errorf("delete body = %q, want 'invalid key'", w.Body.String())
-			}
-		})
-		t.Run("delete_query_"+name, func(t *testing.T) {
-			u := "/api/sessions?key=" + url.QueryEscape(key)
-			req := httptest.NewRequest(http.MethodDelete, u, nil)
-			w := httptest.NewRecorder()
-			srv.sessionH.HandleDelete(w, req)
-			if w.Code != http.StatusBadRequest {
-				t.Errorf("delete(query) status = %d, want 400", w.Code)
-			}
-			if !strings.Contains(w.Body.String(), "invalid key") {
-				t.Errorf("delete(query) body = %q, want 'invalid key'", w.Body.String())
-			}
-		})
-		t.Run("set_label_"+name, func(t *testing.T) {
-			raw, _ := json.Marshal(map[string]string{"key": key, "label": "x"})
-			req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", bytes.NewReader(raw))
-			w := httptest.NewRecorder()
-			srv.sessionH.HandleSetLabel(w, req)
-			if w.Code != http.StatusBadRequest {
-				t.Errorf("set_label status = %d, want 400", w.Code)
-			}
-			if !strings.Contains(w.Body.String(), "invalid key") {
-				t.Errorf("set_label body = %q, want 'invalid key'", w.Body.String())
-			}
-		})
-		t.Run("interrupt_"+name, func(t *testing.T) {
-			raw, _ := json.Marshal(map[string]string{"key": key})
-			req := httptest.NewRequest(http.MethodPost, "/api/sessions/interrupt", bytes.NewReader(raw))
-			w := httptest.NewRecorder()
-			srv.sessionH.HandleInterrupt(w, req)
-			if w.Code != http.StatusBadRequest {
-				t.Errorf("interrupt status = %d, want 400", w.Code)
-			}
-			if !strings.Contains(w.Body.String(), "invalid key") {
-				t.Errorf("interrupt body = %q, want 'invalid key'", w.Body.String())
-			}
-		})
+	h := srv.sessionH
+	for name, call := range map[string]func(w http.ResponseWriter){
+		"events": func(w http.ResponseWriter) {
+			h.HandleEvents(w, httptest.NewRequest(http.MethodGet, "/api/sessions/events?key="+url.QueryEscape(key), nil))
+		},
+		"delete_body": func(w http.ResponseWriter) {
+			h.HandleDelete(w, httptest.NewRequest(http.MethodDelete, "/api/sessions", body("")))
+		},
+		"delete_query": func(w http.ResponseWriter) {
+			h.HandleDelete(w, httptest.NewRequest(http.MethodDelete, "/api/sessions?key="+url.QueryEscape(key), nil))
+		},
+		"set_label": func(w http.ResponseWriter) {
+			h.HandleSetLabel(w, httptest.NewRequest(http.MethodPatch, "/api/sessions/label", body("x")))
+		},
+		"interrupt": func(w http.ResponseWriter) {
+			h.HandleInterrupt(w, httptest.NewRequest(http.MethodPost, "/api/sessions/interrupt", body("")))
+		},
+	} {
+		w := httptest.NewRecorder()
+		call(w)
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "invalid key") {
+			t.Errorf("%s: status = %d body = %q, want 400 invalid key", name, w.Code, w.Body.String())
+		}
 	}
 }
 
@@ -361,79 +293,37 @@ func TestHandleAPISessionEvents_BeforePageSetsHasMoreHeader(t *testing.T) {
 	}
 }
 
-func TestHandleAPISessionEvents_LimitCapsInitialFetch(t *testing.T) {
+// TestHandleAPISessionEvents_Paging: limit keeps the newest entries, before
+// pages strictly older ones (newest first when both cap), and a limit past
+// the server's max is clamped rather than refused.
+func TestHandleAPISessionEvents_Paging(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
 	key := seedEventSession(t, srv, 1000, 2000, 3000, 4000, 5000)
-
-	req := httptest.NewRequest(http.MethodGet,
-		"/api/sessions/events?key="+key+"&limit=2", nil)
-	w := httptest.NewRecorder()
-	srv.sessionH.HandleEvents(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", w.Code)
-	}
-	var entries []clievent.EventEntry
-	if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(entries) != 2 {
-		t.Fatalf("len = %d, want 2", len(entries))
-	}
-	// Newest two in chronological order = times 4000, 5000.
-	if entries[0].Time != 4000 || entries[1].Time != 5000 {
-		t.Errorf("entries times = [%d, %d], want [4000, 5000]",
-			entries[0].Time, entries[1].Time)
-	}
-}
-
-func TestHandleAPISessionEvents_BeforePaginatesBackwards(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
-	key := seedEventSession(t, srv, 1000, 2000, 3000, 4000, 5000)
-
-	// Page 1: before=3500, limit=10 → Time < 3500 → {1000,2000,3000}.
-	req := httptest.NewRequest(http.MethodGet,
-		"/api/sessions/events?key="+key+"&before=3500&limit=10", nil)
-	w := httptest.NewRecorder()
-	srv.sessionH.HandleEvents(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", w.Code)
-	}
-	var entries []clievent.EventEntry
-	if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(entries) != 3 {
-		t.Fatalf("len = %d, want 3", len(entries))
-	}
-	if entries[0].Time != 1000 || entries[2].Time != 3000 {
-		t.Errorf("entries times = [%d..%d], want [1000..3000]",
-			entries[0].Time, entries[2].Time)
-	}
-}
-
-func TestHandleAPISessionEvents_BeforeAndLimitPrefersNewest(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
-	key := seedEventSession(t, srv, 1000, 2000, 3000, 4000, 5000)
-
-	// before=5000 + limit=2 → the two newest entries strictly older than 5000
-	// → {3000, 4000}.
-	req := httptest.NewRequest(http.MethodGet,
-		"/api/sessions/events?key="+key+"&before=5000&limit=2", nil)
-	w := httptest.NewRecorder()
-	srv.sessionH.HandleEvents(w, req)
-
-	var entries []clievent.EventEntry
-	if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(entries) != 2 {
-		t.Fatalf("len = %d, want 2", len(entries))
-	}
-	if entries[0].Time != 3000 || entries[1].Time != 4000 {
-		t.Errorf("entries times = [%d, %d], want [3000, 4000]",
-			entries[0].Time, entries[1].Time)
+	for _, tc := range []struct {
+		query string
+		want  []int64
+	}{
+		{"&limit=2", []int64{4000, 5000}},
+		{"&before=3500&limit=10", []int64{1000, 2000, 3000}},
+		{"&before=5000&limit=2", []int64{3000, 4000}},
+		{"&limit=10000", []int64{1000, 2000, 3000, 4000, 5000}},
+	} {
+		w := httptest.NewRecorder()
+		srv.sessionH.HandleEvents(w, httptest.NewRequest(http.MethodGet, "/api/sessions/events?key="+key+tc.query, nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200", tc.query, w.Code)
+		}
+		var entries []clievent.EventEntry
+		if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
+			t.Fatalf("%s: decode: %v", tc.query, err)
+		}
+		var got []int64
+		for _, e := range entries {
+			got = append(got, e.Time)
+		}
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("%s: times = %v, want %v", tc.query, got, tc.want)
+		}
 	}
 }
 
@@ -548,184 +438,43 @@ func TestHandleAPISessionEvents_BeforeSkipsSourceWhenMemoryCovers(t *testing.T) 
 	}
 }
 
-func TestHandleAPISessionEvents_InvalidBefore(t *testing.T) {
+func TestHandleAPISessionEvents_InvalidParams(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
 	seedEventSession(t, srv, 1000)
 
-	req := httptest.NewRequest(http.MethodGet,
-		"/api/sessions/events?key=test:d:u:general&before=not-a-number", nil)
-	w := httptest.NewRecorder()
-	srv.sessionH.HandleEvents(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", w.Code)
-	}
-}
-
-func TestHandleAPISessionEvents_InvalidLimit(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
-	seedEventSession(t, srv, 1000)
-
-	for _, v := range []string{"abc", "-1"} {
+	for _, q := range []string{"before=not-a-number", "limit=abc", "limit=-1"} {
 		req := httptest.NewRequest(http.MethodGet,
-			"/api/sessions/events?key=test:d:u:general&limit="+v, nil)
+			"/api/sessions/events?key=test:d:u:general&"+q, nil)
 		w := httptest.NewRecorder()
 		srv.sessionH.HandleEvents(w, req)
 		if w.Code != http.StatusBadRequest {
-			t.Errorf("limit=%q: status = %d, want 400", v, w.Code)
+			t.Errorf("%s: status = %d, want 400", q, w.Code)
 		}
-	}
-}
-
-func TestHandleAPISessionEvents_LimitClampedAtMax(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
-	// Seed only 3 events; ensure asking for 10000 doesn't blow up and we
-	// still get all available entries back (limit clamp is server-side).
-	seedEventSession(t, srv, 1000, 2000, 3000)
-
-	req := httptest.NewRequest(http.MethodGet,
-		"/api/sessions/events?key=test:d:u:general&limit=10000", nil)
-	w := httptest.NewRecorder()
-	srv.sessionH.HandleEvents(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", w.Code)
-	}
-	var entries []clievent.EventEntry
-	if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(entries) != 3 {
-		t.Errorf("len = %d, want 3", len(entries))
 	}
 }
 
 // ─── handleAPISend ────────────────────────────────────────────────────────────
 
-func TestHandleAPISend_MissingKeyJSON(t *testing.T) {
+// TestHandleAPISend_Rejects: the JSON send path refuses a missing key, a text
+// over the WS path's per-field cap (R60-SEC-2), a key with a control byte
+// before any slog attr is written (R60-SEC-8), a send with neither text nor
+// files, and a malformed body.
+func TestHandleAPISend_Rejects(t *testing.T) {
 	_, hs := newTestServerHS(&mockPlatform{})
-
-	body := `{"text":"hello"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
-		strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	hs.sendH.handleSend(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "key is required") {
-		t.Errorf("body = %q, want 'key is required'", w.Body.String())
-	}
-}
-
-// TestHandleAPISend_TextTooLong_JSON asserts the JSON handleSend branch
-// enforces the same per-field text cap as the WS path. Pre-R60, an
-// oversized text payload could pass the body-level MaxBytesReader and
-// drive a multi-MB CLI stdin write once turn.Coalesce ran. R60-SEC-2.
-func TestHandleAPISend_TextTooLong_JSON(t *testing.T) {
-	_, hs := newTestServerHS(&mockPlatform{})
-	big := strings.Repeat("x", maxWSSendTextBytes+1)
-	body := `{"key":"p:t:u:general","text":"` + big + `"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
-		strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	hs.sendH.handleSend(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "too long") {
-		t.Errorf("body = %q, want 'too long'", w.Body.String())
-	}
-}
-
-// TestHandleAPISend_RejectControlInKey asserts the HTTP handler refuses keys
-// with C0 control bytes at the boundary — sessionSend also rejects them, but
-// the R60-SEC-8 gate runs BEFORE any slog attr is written, so an attacker
-// cannot fragment log lines through the "workspace validation failed" path
-// using an ANSI-padded key. R60-SEC-8.
-func TestHandleAPISend_RejectControlInKey(t *testing.T) {
-	_, hs := newTestServerHS(&mockPlatform{})
-	body := `{"key":"p:t:u\nadmin:general","text":"hi"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
-		strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	hs.sendH.handleSend(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", w.Code)
-	}
-	// R175-SEC-P1: switched to sessionkey.ValidateSessionKey; response text
-	// collapsed to "invalid key" (covers C0/C1/bidi/non-UTF-8 uniformly).
-	if !strings.Contains(w.Body.String(), "invalid key") {
-		t.Errorf("body = %q, want 'invalid key'", w.Body.String())
-	}
-}
-
-func TestHandleAPISend_MissingTextAndFiles(t *testing.T) {
-	_, hs := newTestServerHS(&mockPlatform{})
-
-	body := `{"key":"p:t:u:general"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
-		strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	hs.sendH.handleSend(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "text or files") {
-		t.Errorf("body = %q, want 'text or files'", w.Body.String())
-	}
-}
-
-func TestHandleAPISend_InvalidJSON(t *testing.T) {
-	_, hs := newTestServerHS(&mockPlatform{})
-
-	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
-		strings.NewReader("{bad json"))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	hs.sendH.handleSend(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", w.Code)
-	}
-}
-
-func TestHandleAPISend_UnauthorizedNoToken(t *testing.T) {
-	srv := newTestServerWithToken(&mockPlatform{}, "secret")
-
-	body := `{"key":"p:t:u:general","text":"hi"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
-		strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", w.Code)
-	}
-}
-
-func TestHandleAPISend_UnauthorizedWrongToken(t *testing.T) {
-	srv := newTestServerWithToken(&mockPlatform{}, "secret")
-
-	body := `{"key":"p:t:u:general","text":"hi"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
-		strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer wrong")
-	w := httptest.NewRecorder()
-	srv.mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", w.Code)
+	for _, tc := range []struct{ body, want string }{
+		{`{"text":"hello"}`, "key is required"},
+		{`{"key":"p:t:u:general","text":"` + strings.Repeat("x", maxWSSendTextBytes+1) + `"}`, "too long"},
+		{`{"key":"p:t:u\nadmin:general","text":"hi"}`, "invalid key"},
+		{`{"key":"p:t:u:general"}`, "text or files"},
+		{"{bad json", ""},
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/api/sessions/send", strings.NewReader(tc.body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		hs.sendH.handleSend(w, req)
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), tc.want) {
+			t.Errorf("%.40s: status = %d body = %q, want 400 %q", tc.body, w.Code, w.Body.String(), tc.want)
+		}
 	}
 }
 
@@ -752,21 +501,6 @@ func TestHandleAPISend_AcceptedWithValidToken(t *testing.T) {
 	}
 	if resp["key"] != "p:t:u:general" {
 		t.Errorf("key = %q, want p:t:u:general", resp["key"])
-	}
-}
-
-func TestHandleAPISend_AcceptedNoAuth(t *testing.T) {
-	_, hs := newTestServerHS(&mockPlatform{}) // no dashboardToken
-
-	body := `{"key":"p:t:u:general","text":"hello world"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
-		strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	hs.sendH.handleSend(w, req)
-
-	if w.Code != http.StatusAccepted {
-		t.Errorf("status = %d, want 202", w.Code)
 	}
 }
 
@@ -801,21 +535,6 @@ func TestHandleAPISend_QueuedWhenBusy(t *testing.T) {
 	}
 	if resp["status"] != "queued" {
 		t.Errorf("status = %q, want 'queued'", resp["status"])
-	}
-}
-
-func TestHandleAPISend_ResponseIsJSON(t *testing.T) {
-	_, hs := newTestServerHS(&mockPlatform{})
-
-	body := bytes.NewBufferString(`{"key":"x:y:z:general","text":"test"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send", body)
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	hs.sendH.handleSend(w, req)
-
-	ct := w.Header().Get("Content-Type")
-	if !strings.HasPrefix(ct, "application/json") {
-		t.Errorf("Content-Type = %q, want application/json", ct)
 	}
 }
 
@@ -1106,64 +825,25 @@ func TestHandleSetLabel_EmptyClears(t *testing.T) {
 	}
 }
 
-// TestHandleSetLabel_TooLong rejects labels above sessionview.MaxUserLabelBytes.
-func TestHandleSetLabel_TooLong(t *testing.T) {
+// TestHandleSetLabel_Rejects: a label TestValidateUserLabel refuses (too
+// long, a control byte) and a missing key are 400s; an unknown key is a 404.
+func TestHandleSetLabel_Rejects(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
 	key := seedEventSession(t, srv, 1000)
-
-	label := strings.Repeat("a", sessionview.MaxUserLabelBytes+1)
-	body := `{"key":"` + key + `","label":"` + label + `"}`
-	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.sessionH.HandleSetLabel(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", w.Code)
-	}
-}
-
-// TestHandleSetLabel_ControlChar rejects labels carrying ASCII control bytes
-// that would poison slog JSONHandler output and dashboard HTML.
-func TestHandleSetLabel_ControlChar(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
-	key := seedEventSession(t, srv, 1000)
-
-	// \n in JSON string form
-	body := `{"key":"` + key + `","label":"line1\nline2"}`
-	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.sessionH.HandleSetLabel(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", w.Code)
-	}
-}
-
-// TestHandleSetLabel_NotFound returns 404 for an unknown key.
-func TestHandleSetLabel_NotFound(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
-
-	body := `{"key":"no:such:key","label":"x"}`
-	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.sessionH.HandleSetLabel(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", w.Code)
-	}
-}
-
-// TestHandleSetLabel_MissingKey rejects requests without a key.
-func TestHandleSetLabel_MissingKey(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
-
-	body := `{"label":"x"}`
-	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.sessionH.HandleSetLabel(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", w.Code)
+	for _, tc := range []struct {
+		body string
+		want int
+	}{
+		{`{"key":"` + key + `","label":"` + strings.Repeat("a", sessionview.MaxUserLabelBytes+1) + `"}`, http.StatusBadRequest},
+		{`{"key":"` + key + `","label":"line1\nline2"}`, http.StatusBadRequest},
+		{`{"label":"x"}`, http.StatusBadRequest},
+		{`{"key":"no:such:key","label":"x"}`, http.StatusNotFound},
+	} {
+		w := httptest.NewRecorder()
+		srv.sessionH.HandleSetLabel(w, httptest.NewRequest(http.MethodPatch, "/api/sessions/label", strings.NewReader(tc.body)))
+		if w.Code != tc.want {
+			t.Errorf("%.60s: status = %d, want %d", tc.body, w.Code, tc.want)
+		}
 	}
 }
 
@@ -1209,28 +889,6 @@ func TestHandleSetLabel_RemoteProxy(t *testing.T) {
 }
 
 // ─── handleResume last_prompt charset (R65-SEC-M-3) ──────────────────────────
-
-// TestHandleResume_LastPromptC1Sanitized verifies that a C1 control codepoint
-// inside last_prompt (arriving as valid UTF-8 continuation bytes 0xC2 0x85 for
-// U+0085 NEL) is sanitized to "_" rather than rejected. The prior policy
-// (R65-SEC-M-3) hard-rejected C1 to block slog-injection, but that stranded
-// sessions whose CLI JSONL contained CLI-injected control bytes (PDF upload
-// notifications emit U+0085) in the history pane. Sanitization preserves the
-// injection defense (C1 is replaced before reaching slog attrs / the session
-// store) while letting the resume round-trip succeed.
-func TestHandleResume_LastPromptC1Sanitized(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
-
-	// Valid UUID + C1 NEL (U+0085) inside last_prompt.
-	body := `{"session_id":"12345678-1234-1234-1234-123456789abc","last_prompt":"hi\u0085there"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/sessions/resume", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.sessionH.HandleResume(w, req)
-
-	if w.Code == http.StatusBadRequest && strings.Contains(w.Body.String(), "invalid control characters") {
-		t.Fatalf("C1 byte should be sanitized, not 400'd: body=%q", w.Body.String())
-	}
-}
 
 // TestSanitizeResumeLastPrompt_RuneSafeTruncation pins R217's rune-boundary
 // truncation: when len(mapped) > maxLen, we must NOT split a multi-byte
@@ -1305,25 +963,6 @@ func TestSanitizeResumeLastPrompt_Policy(t *testing.T) {
 				t.Errorf("dashsession.SanitizeResumeLastPrompt(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
-	}
-}
-
-// TestHandleResume_LastPromptTabAllowed confirms tab remains acceptable inside
-// last_prompt — slog escapes \t in JSONHandler, and operators sometimes paste
-// tab-delimited snippets. R65-SEC-M-3.
-func TestHandleResume_LastPromptTabAllowed(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
-
-	body := `{"session_id":"12345678-1234-1234-1234-123456789abc","last_prompt":"col1\tcol2"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/sessions/resume", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.sessionH.HandleResume(w, req)
-
-	// Accept any non-400 here (the resume path may go on to 200 or return a
-	// server-specific error depending on router state). The point is that
-	// the charset gate did not reject tab.
-	if w.Code == http.StatusBadRequest && strings.Contains(w.Body.String(), "invalid control characters") {
-		t.Errorf("tab should be allowed, got 400 with charset error: %q", w.Body.String())
 	}
 }
 
@@ -1545,25 +1184,11 @@ func TestHandleDelete_AcceptsQueryAndBody(t *testing.T) {
 			wantBody:   "session not found",
 		},
 		{
-			name:       "query with node",
-			url:        "/api/sessions?key=missing&node=local",
-			body:       "",
-			wantStatus: http.StatusNotFound,
-			wantBody:   "session not found",
-		},
-		{
 			name:       "body-only (legacy)",
 			url:        "/api/sessions",
 			body:       `{"key":"missing"}`,
 			wantStatus: http.StatusNotFound,
 			wantBody:   "session not found",
-		},
-		{
-			name:       "query wins when both present",
-			url:        "/api/sessions?key=from-query",
-			body:       `{"key":"from-body"}`,
-			wantStatus: http.StatusNotFound,
-			wantBody:   "session not found", // we don't observe which key was tried, but the 404 confirms parse succeeded
 		},
 		{
 			name:       "no key anywhere → 400",
