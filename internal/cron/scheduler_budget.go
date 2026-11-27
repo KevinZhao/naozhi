@@ -1,27 +1,20 @@
 package cron
 
-// scheduler_budget.go holds the Stop-budget constants: StopPolicyBudgetThenLeak,
-// defaultStopBudget, gcWaitBudget. Scheduler.Stop() stays in scheduler.go.
+// scheduler_budget.go holds the Stop-budget constants: defaultStopBudget,
+// gcWaitBudget. Scheduler.Stop() stays in scheduler.go.
 
 import "time"
-
-// StopPolicyBudgetThenLeak is the documented Stop-overflow strategy this
-// Scheduler honours: when the wait budget elapses with goroutines still in
-// flight, Stop logs a warning and proceeds to the final persist, leaving
-// orphaned goroutines for the OS to reap on exit. Deliberately a string
-// constant, not an enum shared with sysession's StopPolicyForceExit: the
-// divergence is a security decision (sysession daemons run prompt-derived
-// strings through a CLI subprocess and a stuck goroutine could echo excerpts
-// into another session's reply path; cron deliveries have no such surface), so
-// a shared enum would invite the wrong "harmonise" intuition. Doc-only today —
-// not consulted in control flow (#1060).
-const StopPolicyBudgetThenLeak = "budget_then_leak"
 
 // defaultStopBudget is the overall deadline Scheduler.Stop() spends waiting on
 // cron.Stop + triggerWG before proceeding to save. Shared between both waits
 // (not doubled) so execTimeout=3600s cannot pin a restart for ≈2 h. Aligned
 // with session.ShutdownTimeout (30s) so both subsystems agree on the upper
-// bound systemd sees.
+// bound systemd sees. When it elapses with goroutines still in flight, Stop
+// logs a warning and proceeds to the final persist, leaving them for the OS to
+// reap on exit. sysession's Manager exits instead; the divergence is
+// deliberate (sysession daemons run conversation excerpts through a CLI
+// subprocess that a stuck goroutine could echo into another reply path; cron
+// deliveries have no such surface).
 const defaultStopBudget = 30 * time.Second
 
 // gcWaitBudget bounds the cold-start GC goroutine wait in Stop(). Smaller than

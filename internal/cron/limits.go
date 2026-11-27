@@ -122,7 +122,7 @@ const (
 	MaxScheduleBytes = 256
 
 	// maxStoredResultRunes bounds CronRun.Result + Job.LastResult after rune-safe
-	// truncation; the record is hard-capped at MaxRunRecordBytes downstream, but
+	// truncation; the record is hard-capped at runstore.MaxRecordBytes downstream, but
 	// trimming early avoids carrying multi-KB strings through SanitizeForLog.
 	maxStoredResultRunes = 4 * 1024
 
@@ -147,11 +147,6 @@ const (
 	previousTickMaxIter = 1000
 )
 
-// CronRun history limits, re-exported from the run store that enforces them.
-// The keep defaults are the retention policy every Scheduler uses;
-// MaxRunRecordBytes is a per-record format invariant.
-const (
-	DefaultRunsKeepCount  = runstore.DefaultKeepCount
-	DefaultRunsKeepWindow = runstore.DefaultKeepWindow
-	MaxRunRecordBytes     = runstore.MaxRecordBytes
-)
+// DefaultRunsKeepCount is the run store's retention count, re-exported for the
+// dashboard's runs endpoint clamp.
+const DefaultRunsKeepCount = runstore.DefaultKeepCount

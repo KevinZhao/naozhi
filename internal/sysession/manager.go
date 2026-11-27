@@ -14,18 +14,6 @@ import (
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
-// StopPolicyForceExit names the Stop-overflow strategy this Manager
-// honours: when stopCtx expires with daemons still in flight, Stop fires
-// OnHardFail (default os.Exit(2)) rather than leaking goroutines that
-// could touch a torn-down router. Doc-only; not consulted at runtime (#1060).
-//
-// Deliberately diverges from cron's StopPolicyBudgetThenLeak (see
-// RFC system-session.md §5.2): sysession daemons run user-conversation
-// excerpts through a CLI subprocess and a stuck goroutine could echo them
-// into another session's reply path; cron deliveries re-resolve the active
-// session via dispatch's outbound retry, so leaking is safe there.
-const StopPolicyForceExit = "force_exit"
-
 // Config is the top-level sysession configuration handed to NewManager.
 // Mirrors the YAML shape under config.sysession (see RFC §7.5).
 type Config struct {
@@ -295,7 +283,9 @@ func (m *Manager) Start(parent context.Context) {
 // goroutine stacks carrying in-flight buildExcerpt strings (user
 // conversation fragments) into container logs (RFC §9.4),
 // and exit code 2 is a discriminable signal to systemd. The divergence
-// from cron's budget+leak Stop is deliberate; see StopPolicyForceExit.
+// from cron's budget+leak Stop is deliberate (RFC system-session.md §5.2):
+// a stuck daemon goroutine could echo conversation excerpts into another
+// session's reply path; cron deliveries have no such surface.
 //
 // Stop is idempotent.
 func (m *Manager) Stop(stopCtx context.Context) {

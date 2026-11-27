@@ -65,19 +65,6 @@ func (s *Scheduler) stampSendWatermark(rc runCtx, sess Session) {
 	s.runMarkers().Rewrite(rc.markerPath, m)
 }
 
-// reconcileRunInflight is the startup pass: every marker left on disk is a run
-// whose process died mid-flight. Each becomes a canceled record with
-// ErrClassInterrupted so the dashboard shows what happened, and the marker
-// is removed either way — a marker that cannot be turned into a record must
-// still not be reconciled again on every boot.
-//
-// Runs end through finishRun, the same path a live finish uses, so the job
-// card, retention and the orphan re-check apply identically; with the run
-// store disabled, everything but the history row still happens.
-func (s *Scheduler) reconcileRunInflight() {
-	s.settleRunInflight(s.claimRunInflight())
-}
-
 // inflightSettlement is what claimRunInflight decided and left for the async
 // half: the interrupted records to write (run-store IO) and the adoptions to
 // await (bounded by adoptionWaitBudget, far too long for Start).

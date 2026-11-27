@@ -328,10 +328,6 @@ type TriggerKind = runtelemetry.TriggerKind
 const (
 	TriggerScheduled = runtelemetry.TriggerScheduled
 	TriggerManual    = runtelemetry.TriggerManual
-	// TriggerCatchup is reserved for the missed-schedule replay path (not yet
-	// implemented). No production code may emit it until that design is settled;
-	// consumers treat unknown trigger strings as forward-compatible.
-	TriggerCatchup = runtelemetry.TriggerCatchup
 )
 
 // ErrorClass 是 cron run 错误的机器可读分类。executeOpt 各失败分支映射到
@@ -380,7 +376,7 @@ const (
 	// ErrClassInterrupted marks a run still executing when the process went away
 	// — a graceful shutdown that outran the drain budget, or a hard kill. The
 	// RunState stays canceled; this class is what distinguishes it from an
-	// operator cancel (Epic H #2546). Written only by reconcileRunInflight, at
+	// operator cancel (Epic H #2546). Written only by the run-inflight reconcile, at
 	// startup.
 	ErrClassInterrupted = runtelemetry.ErrClassCronInterrupted
 	// ErrClassConfigDrift marks a run whose surviving shim was shut down at
