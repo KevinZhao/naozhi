@@ -100,86 +100,12 @@ type eventReaderInto interface {
 	ReadEventInto(line string, buf []clievent.Event) (events []clievent.Event, done bool, err error)
 }
 
-// ProtocolCore is the protocol-agnostic subset of Protocol that every backend
-// implements without degrading to a noop or panic; the passthrough-flavoured
-// methods live on ProtocolPassthroughExt. This is an additive facet split
-// (#668): Protocol still embeds both facets, so nothing existing changes.
-// Consumers that only ingest/parse events (transcript re-player, protocol
-// probe) depend on ProtocolCore and stay compatible with backends that never
-// grow the passthrough surface. The compile-time pins below keep the partition.
-type ProtocolCore interface {
-	// Name returns the protocol identifier (e.g., "stream-json", "acp").
-	Name() string
-
-	// Clone returns a fresh Protocol instance for a new process.
-	Clone() Protocol
-
-	// BuildArgs returns CLI arguments to launch the agent in this protocol mode.
-	BuildArgs(opts SpawnOptions) []string
-
-	// Init performs any handshake required after process spawn but before readLoop.
-	Init(rw *JSONRW, resumeID string, cwd string) (sessionID string, err error)
-
-	// WriteMessage writes a user message (with optional images) to the agent's stdin.
-	WriteMessage(w io.Writer, text string, images []clievent.Attachment) error
-
-	// ReadEvent parses a single NDJSON line into zero or more Events; done is
-	// advisory (see Protocol.ReadEvent for the full contract).
-	ReadEvent(line string) (events []clievent.Event, done bool, err error)
-
-	// HandleEvent allows the protocol to react to events.
-	HandleEvent(w io.Writer, ev clievent.Event) (handled bool)
-}
-
-// ProtocolPassthroughExt is the stream-json-specific surface of Protocol
-// (#668); ACP / codex degrade these to noop / fallback / clierr.ErrInterruptUnsupported.
-// The complement of ProtocolCore; a future refactor may shrink Protocol to
-// ProtocolCore and reach this facet via type assertion.
-type ProtocolPassthroughExt interface {
-	// WriteUserMessageLocked is the passthrough-aware writer (caller holds the
-	// per-process stdin write lock). ACP ignores the extras.
-	WriteUserMessageLocked(w io.Writer, uuid, text string, images []clievent.Attachment, priority string) error
-
-	// SupportsPriority reports whether this protocol forwards a top-level
-	// "priority" field to the backing agent.
-	SupportsPriority() bool
-
-	// SupportsReplay reports whether the backing agent echoes stdin user
-	// messages as replay events.
-	SupportsReplay() bool
-
-	// WriteInterrupt writes an in-band interrupt request to stdin.
-	// Protocols without stdin-level interrupt return clierr.ErrInterruptUnsupported.
-	WriteInterrupt(w io.Writer, requestID string) error
-}
-
-// Compile-time guarantees that ProtocolCore and ProtocolPassthroughExt are each
-// a strict subset of Protocol (#668), so a method change on either side fails
-// the build instead of letting the facets silently desync.
-var (
-	_ ProtocolCore           = (Protocol)(nil)
-	_ ProtocolPassthroughExt = (Protocol)(nil)
-)
-
 // Caps aggregates Protocol capabilities so consumers feature-route via one
-// accessor instead of individual SupportsX() methods. Only Replay is consumed
-// on hot paths (passthrough.go, process_readloop.go); Priority, SoftInterrupt
-// and StreamJSON are populated but unread — forward-compatibility anchors a
-// future feature gate can read. protocol_caps_test.go pins the values.
+// accessor instead of individual SupportsX() methods.
 type Caps struct {
 	// Replay is true if the protocol echoes stdin user messages back with a
 	// round-tripped uuid (Claude stream-json); required for passthrough matching.
 	Replay bool
-	// Priority is reserved. Set by ClaudeProtocol but not yet consumed —
-	// today /urgent gates on Process.SupportsPriority() directly.
-	Priority bool
-	// SoftInterrupt is reserved. true if WriteInterrupt is a safe soft cancel
-	// once a session is established (ACP session/cancel); pre-handshake calls
-	// may still return clierr.ErrInterruptUnsupported (see ACPProtocol.WriteInterrupt).
-	SoftInterrupt bool
-	// StreamJSON is reserved. true if the wire format is stream-json (Claude);
-	// anticipates a backend whose Name() does not encode the wire shape.
-	StreamJSON bool
 	// EffortTier is true if BuildArgs honours SpawnOptions.Effort (kiro's
 	// `acp --effort`, Claude CLI `--effort` ≥ 2.1.226). The composition root
 	// rejects `cli.backends[].effort` on a backend that would silently ignore
@@ -188,21 +114,13 @@ type Caps struct {
 }
 
 // ProtocolCaps returns the capability set of any Protocol: an implementation's
-// own Capabilities() method wins; otherwise Caps is derived from
-// SupportsReplay / SupportsPriority / Name().
+// own Capabilities() method wins; otherwise only Replay is derived, from
+// SupportsReplay.
 func ProtocolCaps(p Protocol) Caps {
 	if cp, ok := p.(interface{ Capabilities() Caps }); ok {
 		return cp.Capabilities()
 	}
-	return Caps{
-		Replay:     p.SupportsReplay(),
-		Priority:   p.SupportsPriority(),
-		StreamJSON: p.Name() != "acp",
-		// Fallback derivation for protocols without Capabilities(). A backend
-		// that grows a tier flag or a soft interrupt should implement
-		// Capabilities() rather than widen this default.
-		EffortTier: p.Name() == "acp",
-	}
+	return Caps{Replay: p.SupportsReplay()}
 }
 
 // JSONRW provides line-oriented JSON read/write over stdin/stdout.
