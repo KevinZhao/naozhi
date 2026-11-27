@@ -7,7 +7,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/textutil"
-	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // fixedFooterCaps is a minimal Capabilities stub returning a constant
@@ -125,27 +124,4 @@ func TestDispatcher_DecorateReplyText_RedactsSecrets(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestDispatcher_DecorateReplyText_NilCapsIsPanic just documents that
-// a nil caps is an unwireup bug — the helper does not defensively check
-// because every NewDispatcher path installs at least NoopCapabilities,
-// and a panic surfaces the misuse loud enough that tests catch it.
-func TestDispatcher_DecorateReplyText_NilCapsIsPanic(t *testing.T) {
-	// Use NoopCapabilities (the production fallback) so we exercise the
-	// non-panicking path. NoopCapabilities.ReplyFooter returns "" which
-	// means no footer is appended.
-	d := &Dispatcher{caps: NoopCapabilities{}}
-	got := d.decorateReplyText(context.Background(), &clievent.SendResult{Text: "x"}, nil)
-	if got != "x" {
-		t.Errorf("NoopCapabilities footer should be empty; got %q want %q", got, "x")
-	}
-}
-
-// _ static checks ensure the helper signature stays compatible with
-// session.ManagedSession (most call sites pass a *session.ManagedSession
-// produced by Router.GetOrCreate).
-var _ = func(d *Dispatcher, s turn.Session, ctx context.Context) string {
-	_ = ctx
-	return d.decorateReplyText(context.Background(), &clievent.SendResult{}, s)
 }

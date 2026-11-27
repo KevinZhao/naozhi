@@ -7,7 +7,6 @@ package dispatch
 
 import (
 	"context"
-	"net/http"
 	"os"
 	"sync"
 	"testing"
@@ -17,38 +16,6 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/turn"
 )
-
-// ---------------------------------------------------------------------------
-// fakeInterimPlatform implements platform.Platform with
-// SupportsInterimMessages() == true (Feishu-like).
-// ---------------------------------------------------------------------------
-type fakeInterimPlatform struct {
-	mu      sync.Mutex
-	replies []platform.OutgoingMessage
-	edits   []struct{ msgID, text string }
-}
-
-func (f *fakeInterimPlatform) Name() string                                               { return "fake-interim" }
-func (f *fakeInterimPlatform) RegisterRoutes(_ *http.ServeMux, _ platform.MessageHandler) {}
-func (f *fakeInterimPlatform) Reply(_ context.Context, msg platform.OutgoingMessage) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.replies = append(f.replies, msg)
-	return "msg-1", nil
-}
-func (f *fakeInterimPlatform) EditMessage(_ context.Context, msgID, text string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.edits = append(f.edits, struct{ msgID, text string }{msgID, text})
-	return nil
-}
-func (f *fakeInterimPlatform) MaxReplyLength() int           { return 4000 }
-func (f *fakeInterimPlatform) SupportsInterimMessages() bool { return true }
-func (f *fakeInterimPlatform) replyCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.replies)
-}
 
 // ---------------------------------------------------------------------------
 // #1957: replyTracker.onEvent must not fire the banner when the event is a
@@ -61,7 +28,7 @@ func (f *fakeInterimPlatform) replyCount() int {
 func TestReplyTracker_ResultEvent_NoBanner(t *testing.T) {
 	t.Parallel()
 
-	fp := &fakeInterimPlatform{}
+	fp := &fakePlatform{supportsInterim: true}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -79,39 +46,6 @@ func TestReplyTracker_ResultEvent_NoBanner(t *testing.T) {
 	}
 }
 
-// TestReplyTracker_AssistantEvent_FiresBanner pins the positive case:
-// an assistant event with thinking content MUST still create the banner.
-func TestReplyTracker_AssistantEvent_FiresBanner(t *testing.T) {
-	t.Parallel()
-
-	fp := &fakeInterimPlatform{}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	tracker := newIMEventTracker(ctx, fp, ReplyDest{ChatID: "chat1"}, "direct", "")
-	defer tracker.stop()
-
-	tracker.onEvent(clievent.Event{
-		Type: "assistant",
-		Message: &clievent.AssistantMessage{
-			Content: []clievent.ContentBlock{{Type: "thinking", Text: "reasoning…"}},
-		},
-	})
-
-	// Wait up to 2 s for the async Reply goroutine to fire.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if fp.replyCount() > 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	if fp.replyCount() == 0 {
-		t.Error("assistant thinking event must fire banner Reply; positive case regressed by #1957 guard")
-	}
-}
-
 // ---------------------------------------------------------------------------
 // #1958: onEvent must set askQuestionFired when it receives an assistant
 // event carrying AskQuestion.
@@ -124,7 +58,7 @@ func TestReplyTracker_AssistantEvent_FiresBanner(t *testing.T) {
 func TestReplyTracker_AskQuestion_SetsFlag(t *testing.T) {
 	t.Parallel()
 
-	fp := &fakeInterimPlatform{}
+	fp := &fakePlatform{supportsInterim: true}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 

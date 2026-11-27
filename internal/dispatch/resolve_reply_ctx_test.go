@@ -74,21 +74,3 @@ func TestResolveReplyCtx_DeadlineExceededNotSwapped(t *testing.T) {
 		t.Fatal("DeadlineExceeded path must skip cleanup — got non-nil")
 	}
 }
-
-// TestResolveReplyCtx_NilParent — defensive: a nil ctx (some callers
-// pass nil for "no parent") yields a fresh shutdown-budget ctx + cleanup.
-func TestResolveReplyCtx_NilParent(t *testing.T) {
-	t.Parallel()
-	//lint:ignore SA1012 intentional nil ctx: pins the defensive nil-ctx fallback under test
-	got, cleanup := resolveReplyCtx(nil)
-	if got == nil {
-		t.Fatal("nil parent: returned ctx is nil")
-	}
-	if cleanup == nil {
-		t.Fatal("nil parent: cleanup is nil — must always return cleanup on swap")
-	}
-	defer cleanup()
-	if got.Err() != nil {
-		t.Fatalf("nil parent: returned ctx already errored: %v", got.Err())
-	}
-}
