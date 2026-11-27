@@ -32,9 +32,6 @@ func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 	httputil.WriteJSONStatus(w, status, v)
 }
 
-// errEmptyJSONBody re-exports httputil.ErrEmptyJSONBody for errors.Is call sites.
-var errEmptyJSONBody = httputil.ErrEmptyJSONBody
-
 // startDashboardLoops starts the dashboard's background goroutines. Separate
 // from registerDashboard since #2553: registration runs at construction (so the
 // handlerSet can be a local), but a goroutine started at construction would

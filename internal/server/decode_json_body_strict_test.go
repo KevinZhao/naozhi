@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 )
 
 // TestDecodeJSONBody_RejectsUnknownFields pins #1329
@@ -56,8 +58,8 @@ func TestDecodeJSONBody_EmptyBody(t *testing.T) {
 	r := httptest.NewRequest("POST", "/x", strings.NewReader(""))
 	var dst struct{}
 	err := decodeJSONBody(r, &dst)
-	if !errors.Is(err, errEmptyJSONBody) {
-		t.Fatalf("decodeJSONBody empty body err = %v; want errEmptyJSONBody", err)
+	if !errors.Is(err, httputil.ErrEmptyJSONBody) {
+		t.Fatalf("decodeJSONBody empty body err = %v; want httputil.ErrEmptyJSONBody", err)
 	}
 }
 
