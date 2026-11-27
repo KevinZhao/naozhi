@@ -207,37 +207,29 @@ func TestHandleFile_RefusedOrCancelledForwardsNothing(t *testing.T) {
 // handler with the sender's file name.
 func TestFileMessage_WebSocket(t *testing.T) {
 	t.Parallel()
-	check := func(t *testing.T, stub *fileStub, h *handled) {
-		t.Helper()
-		got := h.all()
-		if len(got) != 1 || len(got[0].Files) != 1 {
-			t.Fatalf("handler got %+v, want one message with one file", got)
-		}
-		if file := got[0].Files[0]; file.Name != "notes.md" || !bytes.Equal(file.Data, pdfBytes) || file.Reject != "" {
-			t.Errorf("file = %+v, want notes.md with the downloaded bytes", file)
-		}
-		if got[0].Text != "" || len(got[0].Images) != 0 {
-			t.Errorf("file message carried text %q / %d images", got[0].Text, len(got[0].Images))
-		}
-		if stub.hits.Load() != 1 {
-			t.Errorf("downloads = %d, want 1", stub.hits.Load())
-		}
+	stub := &fileStub{body: pdfBytes}
+	f := newFileFeishu(t, Config{}, stub)
+	var h handled
+	pe, ok := f.parseSDKEvent(sdkMediaEvent("ev_file", "file", `{"file_key":"file_v3_abc","file_name":"notes.md"}`))
+	if !ok {
+		t.Fatal("parseSDKEvent rejected the file message")
 	}
-	const content = `{"file_key":"file_v3_abc","file_name":"notes.md"}`
+	f.routeParsed(context.Background(), h.handler, pe)
+	f.dispatch.Wait()
 
-	t.Run("websocket", func(t *testing.T) {
-		t.Parallel()
-		stub := &fileStub{body: pdfBytes}
-		f := newFileFeishu(t, Config{}, stub)
-		var h handled
-		pe, ok := f.parseSDKEvent(sdkMediaEvent("ev_file", "file", content))
-		if !ok {
-			t.Fatal("parseSDKEvent rejected the file message")
-		}
-		f.routeParsed(context.Background(), h.handler, pe)
-		f.dispatch.Wait()
-		check(t, stub, &h)
-	})
+	got := h.all()
+	if len(got) != 1 || len(got[0].Files) != 1 {
+		t.Fatalf("handler got %+v, want one message with one file", got)
+	}
+	if file := got[0].Files[0]; file.Name != "notes.md" || !bytes.Equal(file.Data, pdfBytes) || file.Reject != "" {
+		t.Errorf("file = %+v, want notes.md with the downloaded bytes", file)
+	}
+	if got[0].Text != "" || len(got[0].Images) != 0 {
+		t.Errorf("file message carried text %q / %d images", got[0].Text, len(got[0].Images))
+	}
+	if stub.hits.Load() != 1 {
+		t.Errorf("downloads = %d, want 1", stub.hits.Load())
+	}
 }
 
 // The shared client's 10s Client.Timeout also covers the body read, so a file
@@ -315,10 +307,7 @@ func TestDownloadResource_QueryType(t *testing.T) {
 			_, _, err := f.DownloadImage(context.Background(), "om_1", "img_1")
 			return err
 		}, "/open-apis/im/v1/messages/om_1/resources/img_1?type=image"},
-		{"file", pdfBytes, func(f *Feishu) error {
-			_, err := f.DownloadFile(context.Background(), "om_1", "file_1")
-			return err
-		}, "/open-apis/im/v1/messages/om_1/resources/file_1?type=file"},
+		// type=file for a file download is pinned by TestHandleFile_Download.
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

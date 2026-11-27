@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -148,59 +147,58 @@ func TestReply_NoContextToken(t *testing.T) {
 	}
 }
 
-func TestPollLoop_ReceivesMessages(t *testing.T) {
-	t.Parallel()
-	pollCount := atomic.Int32{}
+// serveOneBatch is a getupdates endpoint that answers its first poll with msgs
+// and holds every later poll open; polls counts the requests.
+func serveOneBatch(t *testing.T, polls *atomic.Int32, msgs ...weixinMessage) *httptest.Server {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := pollCount.Add(1)
-		if n == 1 {
-			// First poll: return a message
-			json.NewEncoder(w).Encode(getUpdatesResp{
-				Ret: 0,
-				Msgs: []weixinMessage{
-					{
-						MessageID:    42,
-						FromUserID:   "alice",
-						MessageType:  msgTypeUser,
-						ContextToken: "ctx-1",
-						ItemList: []messageItem{
-							{Type: msgItemTypeText, TextItem: &textItem{Text: "hello bot"}},
-						},
-					},
-				},
-				GetUpdatesBuf: "cursor-1",
-			})
-		} else {
-			// Subsequent polls: nothing new, held open like the real long-poll.
-			holdLongPoll(r)
+		if polls.Add(1) == 1 {
+			_ = json.NewEncoder(w).Encode(getUpdatesResp{Msgs: msgs, GetUpdatesBuf: "cursor-1"})
+			return
 		}
+		holdLongPoll(r)
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
+	return srv
+}
 
-	w := New(Config{Token: "tok", BaseURL: srv.URL})
-
-	var received atomic.Int32
-	var receivedMsg platform.IncomingMessage
-	var mu sync.Mutex
-
-	handler := func(_ context.Context, msg platform.IncomingMessage) {
-		mu.Lock()
-		receivedMsg = msg
-		mu.Unlock()
-		received.Add(1)
-	}
-
-	if err := w.Start(handler); err != nil {
+// firstMessage starts w and returns the first message its handler receives;
+// w is stopped when the test ends.
+func firstMessage(t *testing.T, w *Weixin) platform.IncomingMessage {
+	t.Helper()
+	got := make(chan platform.IncomingMessage, 1)
+	if err := w.Start(func(_ context.Context, m platform.IncomingMessage) {
+		select {
+		case got <- m:
+		default:
+		}
+	}); err != nil {
 		t.Fatalf("Start() error: %v", err)
 	}
-	defer w.Stop()
+	t.Cleanup(func() { _ = w.Stop() })
+	select {
+	case m := <-got:
+		return m
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for message")
+	}
+	return platform.IncomingMessage{}
+}
 
-	// Wait for message to be received
-	testhelper.Eventually(t, func() bool { return received.Load() != 0 }, 3*time.Second, "timeout waiting for message")
-
-	mu.Lock()
-	msg := receivedMsg
-	mu.Unlock()
+func TestPollLoop_ReceivesMessages(t *testing.T) {
+	t.Parallel()
+	var polls atomic.Int32
+	srv := serveOneBatch(t, &polls, weixinMessage{
+		MessageID:    42,
+		FromUserID:   "alice",
+		MessageType:  msgTypeUser,
+		ContextToken: "ctx-1",
+		ItemList: []messageItem{
+			{Type: msgItemTypeText, TextItem: &textItem{Text: "hello bot"}},
+		},
+	})
+	w := New(Config{Token: "tok", BaseURL: srv.URL})
+	msg := firstMessage(t, w)
 
 	if msg.Platform != "weixin" {
 		t.Errorf("Platform = %q, want %q", msg.Platform, "weixin")
@@ -239,78 +237,27 @@ func TestPollLoop_ReceivesMessages(t *testing.T) {
 // from+minute and two distinct messages in the same wall-clock minute collide.
 func TestPollLoop_FallbackMessageID(t *testing.T) {
 	t.Parallel()
+	text := []messageItem{{Type: msgItemTypeText, TextItem: &textItem{Text: "hi"}}}
 	tests := []struct {
 		name      string
 		msg       weixinMessage
-		wantEvent string
 		wantMsgID string
 	}{
-		{
-			name: "seq when no message_id",
-			msg: weixinMessage{
-				MessageID:   0,
-				Seq:         7,
-				FromUserID:  "bob",
-				MessageType: msgTypeUser,
-				ItemList:    []messageItem{{Type: msgItemTypeText, TextItem: &textItem{Text: "hi"}}},
-			},
-			wantEvent: "",
-			wantMsgID: "seq:7",
-		},
-		{
-			name: "create_time_ms when no message_id or seq",
-			msg: weixinMessage{
-				MessageID:    0,
-				Seq:          0,
-				CreateTimeMs: 1700000000123,
-				FromUserID:   "carol",
-				MessageType:  msgTypeUser,
-				ItemList:     []messageItem{{Type: msgItemTypeText, TextItem: &textItem{Text: "hi"}}},
-			},
-			wantEvent: "",
-			wantMsgID: "ts:1700000000123",
-		},
+		{"seq when no message_id",
+			weixinMessage{Seq: 7, FromUserID: "bob", MessageType: msgTypeUser, ItemList: text},
+			"seq:7"},
+		{"create_time_ms when no message_id or seq",
+			weixinMessage{CreateTimeMs: 1700000000123, FromUserID: "carol", MessageType: msgTypeUser, ItemList: text},
+			"ts:1700000000123"},
 	}
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			pollCount := atomic.Int32{}
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if pollCount.Add(1) == 1 {
-					json.NewEncoder(w).Encode(getUpdatesResp{
-						Ret:           0,
-						Msgs:          []weixinMessage{tc.msg},
-						GetUpdatesBuf: "cursor-1",
-					})
-					return
-				}
-				holdLongPoll(r)
-			}))
-			defer srv.Close()
-
-			w := New(Config{Token: "tok", BaseURL: srv.URL})
-			var received atomic.Int32
-			var receivedMsg platform.IncomingMessage
-			var mu sync.Mutex
-			handler := func(_ context.Context, msg platform.IncomingMessage) {
-				mu.Lock()
-				receivedMsg = msg
-				mu.Unlock()
-				received.Add(1)
-			}
-			if err := w.Start(handler); err != nil {
-				t.Fatalf("Start() error: %v", err)
-			}
-			defer w.Stop()
-
-			testhelper.Eventually(t, func() bool { return received.Load() != 0 }, 3*time.Second, "timeout waiting for message")
-			mu.Lock()
-			msg := receivedMsg
-			mu.Unlock()
-
-			if msg.EventID != tc.wantEvent {
-				t.Errorf("EventID = %q, want %q", msg.EventID, tc.wantEvent)
+			var polls atomic.Int32
+			srv := serveOneBatch(t, &polls, tc.msg)
+			msg := firstMessage(t, New(Config{Token: "tok", BaseURL: srv.URL}))
+			if msg.EventID != "" {
+				t.Errorf("EventID = %q, want empty", msg.EventID)
 			}
 			if msg.MessageID != tc.wantMsgID {
 				t.Errorf("MessageID = %q, want %q", msg.MessageID, tc.wantMsgID)
@@ -321,28 +268,15 @@ func TestPollLoop_FallbackMessageID(t *testing.T) {
 
 func TestPollLoop_SkipsBotMessages(t *testing.T) {
 	t.Parallel()
-	pollCount := atomic.Int32{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := pollCount.Add(1)
-		if n == 1 {
-			json.NewEncoder(w).Encode(getUpdatesResp{
-				Ret: 0,
-				Msgs: []weixinMessage{
-					{
-						MessageID:   1,
-						FromUserID:  "bot",
-						MessageType: msgTypeBOT, // bot message, should be skipped
-						ItemList: []messageItem{
-							{Type: msgItemTypeText, TextItem: &textItem{Text: "bot reply"}},
-						},
-					},
-				},
-			})
-		} else {
-			holdLongPoll(r)
-		}
-	}))
-	defer srv.Close()
+	var polls atomic.Int32
+	srv := serveOneBatch(t, &polls, weixinMessage{
+		MessageID:   1,
+		FromUserID:  "bot",
+		MessageType: msgTypeBOT, // bot message, should be skipped
+		ItemList: []messageItem{
+			{Type: msgItemTypeText, TextItem: &textItem{Text: "bot reply"}},
+		},
+	})
 
 	w := New(Config{Token: "tok", BaseURL: srv.URL})
 	var received atomic.Int32
@@ -358,9 +292,7 @@ func TestPollLoop_SkipsBotMessages(t *testing.T) {
 	// holding the bot message. Stop then drains every handler that batch
 	// dispatched (Stop waits on the dispatch group), so a bot message that
 	// slipped past the filter has certainly been handled by the time we look.
-	// No fixed wait: the old 500ms sleep both slowed the suite and could pass
-	// before a regressed dispatch goroutine had run.
-	testhelper.Eventually(t, func() bool { return pollCount.Load() >= 2 }, 3*time.Second,
+	testhelper.Eventually(t, func() bool { return polls.Load() >= 2 }, 3*time.Second,
 		"second poll never arrived: the first batch was not processed")
 	if err := w.Stop(); err != nil {
 		t.Fatalf("Stop() error: %v", err)
