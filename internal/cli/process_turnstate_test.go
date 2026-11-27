@@ -156,3 +156,10 @@ func TestSystemInit_WithoutASendMarksTheTurnRunning(t *testing.T) {
 	testhelper.Eventually(t, func() bool { return p.State() == StateRunning }, 5*time.Second,
 		"system/init did not mark the turn Running")
 }
+
+// armed reports whether an abort is pending; tests only.
+func (m *abortMarker) armed() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.n > 0
+}

@@ -21,7 +21,7 @@ const psPath = "/bin/ps"
 
 // ProcStartTime returns a value that uniquely identifies a process instance
 // even after PID reuse: the ps(1) start time as Unix microseconds, which stay
-// below MaxSafeJSONInt until ~2255 so dashboard.js can JSON.parse the field
+// below 2^53-1 (JS Number.MAX_SAFE_INTEGER) until ~2255 so dashboard.js can JSON.parse the field
 // without truncation (proc_darwin_test.go pins this).
 func ProcStartTime(pid int) (uint64, error) {
 	// ps -o lstart= outputs e.g. "Sat Apr 12 14:30:00 2026"

@@ -103,19 +103,8 @@ func (t *turnState) transitionLocked(ev stateEvent) (prev ProcessState, moved bo
 	return prev, moved
 }
 
-// claimSend is transition(evSendBegin) that also records runID as the run
-// now holding the turn.
-func (t *turnState) claimSend(runID string) (prev ProcessState, claimed bool) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	prev, claimed = t.transitionLocked(evSendBegin)
-	if claimed {
-		t.runID = runID
-	}
-	return prev, claimed
-}
-
-// claimSendWait is claimSend that waits out a Running turn instead of
+// claimSendWait is transition(evSendBegin) that also records runID as the
+// run now holding the turn, and waits out a Running turn instead of
 // refusing it: the CLI may run a turn of its own (a background-task
 // notification), a reconnect may find one in flight, or a passthrough turn
 // may still hold the process, and none of those is a reason to drop the
@@ -331,10 +320,4 @@ func (m *abortMarker) clear() {
 	m.mu.Lock()
 	m.n, m.orphaned, m.orphanRun = 0, false, ""
 	m.mu.Unlock()
-}
-
-func (m *abortMarker) armed() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.n > 0
 }

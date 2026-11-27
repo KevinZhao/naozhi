@@ -70,11 +70,11 @@ func TestProcStartTime_WithinJSONSafeRange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProcStartTime: %v", err)
 	}
-	if pst > MaxSafeJSONInt {
-		t.Errorf("ProcStartTime = %d exceeds MaxSafeJSONInt = %d; "+
+	if pst > maxSafeJSONInt {
+		t.Errorf("ProcStartTime = %d exceeds maxSafeJSONInt = %d; "+
 			"JS JSON.parse will truncate the value and PID-identity checks "+
 			"(handleTakeover / verifyProcIdentity) will fail after restart",
-			pst, MaxSafeJSONInt)
+			pst, maxSafeJSONInt)
 	}
 }
 

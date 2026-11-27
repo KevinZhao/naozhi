@@ -27,7 +27,7 @@ func procPidPath(pid int, leaf string) string {
 
 // ProcStartTime reads the start time (field 22, jiffies since boot) from
 // /proc/{pid}/stat; it uniquely identifies a process instance even after PID
-// reuse. At CLK_TCK=100 Hz it stays below MaxSafeJSONInt for ~2.85M years, so
+// reuse. At CLK_TCK=100 Hz it stays below 2^53-1 (JS Number.MAX_SAFE_INTEGER) for ~2.85M years, so
 // dashboard.js can JSON.parse it without truncation (proc_test.go pins this).
 // Byte-level scanning avoids copying the whole stat payload per PID.
 func ProcStartTime(pid int) (uint64, error) {

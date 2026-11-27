@@ -21,7 +21,7 @@ import (
 // against read-ahead amplification; most JSONL lines are 200-2000 bytes.
 const tailChunkSize = 256 * 1024
 
-// maxTailReadBytes caps how many trailing bytes parseTail will scan, since
+// maxTailReadBytes caps how many trailing bytes parseTailOpts will scan, since
 // stat.Size() is untrustworthy on FUSE / /proc mounts and a size=TB report
 // would otherwise spin size/tailChunkSize iterations. The tail needs ~2MB
 // worst-case, so 128MB is generous; beyond it a warning notes the truncation.
@@ -82,7 +82,7 @@ func loadTail(ctx context.Context, claudeDir, sessionID, cwd string, beforeMS in
 	if size == 0 {
 		return nil, nil
 	}
-	// parseTail's scanBudget bounds the work even when stat.Size() lies
+	// parseTailOpts's scanBudget bounds the work even when stat.Size() lies
 	// (FUSE / /proc); the real size is still passed so the reverse read
 	// seeks from genuine EOF. Warn so the operator sees the truncation.
 	if size > maxTailReadBytes {
@@ -119,15 +119,7 @@ func resolveJSONLPath(claudeDir, sessionID, cwd string) (string, error) {
 	return path, nil
 }
 
-// parseTail does the reverse chunked read + parse, accumulating lines from
-// newest to oldest until `limit` entries are collected or the file head is
-// reached; with beforeMS > 0, entries at Time >= beforeMS are skipped without
-// counting. The result is reversed so callers see chronology.
-func parseTail(ctx context.Context, f *os.File, size int64, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
-	return parseTailOpts(ctx, f, size, beforeMS, limit, tailOpts{toolImages: true})
-}
-
-// tailOpts narrows parseTail for a caller that needs less than the display:
+// tailOpts narrows parseTailOpts for a caller that needs less than the display:
 // toolImages keeps the tool_result screenshot entries (thumbnailed), and
 // maxUsers > 0 stops the read once that many user entries are collected.
 type tailOpts struct {
@@ -144,7 +136,10 @@ var tailBufPool = sync.Pool{New: func() any {
 
 const tailBufPoolMax = 1024 * 1024
 
-// parseTailOpts is parseTail with tailOpts.
+// parseTailOpts does the reverse chunked read + parse, accumulating lines from
+// newest to oldest until `limit` entries are collected or the file head is
+// reached; with beforeMS > 0, entries at Time >= beforeMS are skipped without
+// counting. The result is reversed so callers see chronology.
 //
 // One buffer holds the bytes still to parse at buf[start:stop]: each older
 // chunk is read in front of them at buf[start-chunk:start], so a line

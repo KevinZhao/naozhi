@@ -122,12 +122,3 @@ func ParseClientMsg(line []byte) (ClientMsg, error) {
 	err := json.Unmarshal(line, &msg)
 	return msg, err
 }
-
-// ParseServerMsg parses a single NDJSON line into a ServerMsg. No in-tree
-// consumer; kept as the symmetric public counterpart of ParseClientMsg for
-// external decoders and round-trip tests.
-func ParseServerMsg(line []byte) (ServerMsg, error) {
-	var msg ServerMsg
-	err := json.Unmarshal(line, &msg)
-	return msg, err
-}

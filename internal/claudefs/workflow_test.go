@@ -182,16 +182,10 @@ func TestWorkflowPathHelpers(t *testing.T) {
 	if got := WorkflowRunDir(sub, wfTestRun); got != filepath.Join(sub, "workflows", wfTestRun) {
 		t.Errorf("WorkflowRunDir = %q", got)
 	}
-	if got := WorkflowResultFile("p", wfTestSID, wfTestRun); got != filepath.Join("p", wfTestSID, "workflows", wfTestRun+".json") {
-		t.Errorf("WorkflowResultFile = %q", got)
-	}
 	for name, got := range map[string]string{
 		"runs dir, no subagents": WorkflowRunsDir(""),
 		"run dir, bad run":       WorkflowRunDir(sub, "../wf_x"),
 		"run dir, no subagents":  WorkflowRunDir("", wfTestRun),
-		"result, bad run":        WorkflowResultFile("p", wfTestSID, "wf_"),
-		"result, bad session":    WorkflowResultFile("p", "..", wfTestRun),
-		"result, no project":     WorkflowResultFile("", wfTestSID, wfTestRun),
 	} {
 		if got != "" {
 			t.Errorf("%s = %q, want \"\"", name, got)

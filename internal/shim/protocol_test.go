@@ -60,75 +60,6 @@ func TestParseClientMsg_TableDriven(t *testing.T) {
 	}
 }
 
-func TestParseServerMsg_TableDriven(t *testing.T) {
-	tests := []struct {
-		name    string
-		input   string
-		wantErr bool
-		check   func(t *testing.T, msg ServerMsg)
-	}{
-		{
-			name:  "hello message full",
-			input: `{"type":"hello","shim_pid":100,"cli_pid":200,"cli_alive":true,"session_id":"sess1","buffer_seq_start":1,"buffer_seq_end":10,"protocol_version":1}`,
-			check: func(t *testing.T, msg ServerMsg) {
-				if msg.Type != "hello" {
-					t.Errorf("Type = %q, want hello", msg.Type)
-				}
-				if msg.ShimPID != 100 {
-					t.Errorf("ShimPID = %d, want 100", msg.ShimPID)
-				}
-				if msg.CLIPID != 200 {
-					t.Errorf("CLIPID = %d, want 200", msg.CLIPID)
-				}
-				if msg.CLIAlive == nil || *msg.CLIAlive != true {
-					t.Errorf("CLIAlive = %v, want &true", msg.CLIAlive)
-				}
-				if msg.SessionID != "sess1" {
-					t.Errorf("SessionID = %q, want sess1", msg.SessionID)
-				}
-				if msg.BufferSeqStart != 1 || msg.BufferSeqEnd != 10 {
-					t.Errorf("BufferSeqStart/End = %d/%d, want 1/10", msg.BufferSeqStart, msg.BufferSeqEnd)
-				}
-				if msg.ProtocolVersion != 1 {
-					t.Errorf("ProtocolVersion = %d, want 1", msg.ProtocolVersion)
-				}
-			},
-		},
-		{
-			name:  "cli_exited with non-zero code",
-			input: `{"type":"cli_exited","code":1,"signal":"SIGTERM"}`,
-			check: func(t *testing.T, msg ServerMsg) {
-				if msg.Code == nil || *msg.Code != 1 {
-					t.Errorf("Code = %v, want &1", msg.Code)
-				}
-				if msg.Signal != "SIGTERM" {
-					t.Errorf("Signal = %q, want SIGTERM", msg.Signal)
-				}
-			},
-		},
-		{
-			name:    "invalid json",
-			input:   `{bad json}`,
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := ParseServerMsg([]byte(tc.input))
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("ParseServerMsg err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantErr {
-				return
-			}
-			if tc.check != nil {
-				tc.check(t, got)
-			}
-		})
-	}
-}
-
 func TestServerMsg_MarshalLine_TableDriven(t *testing.T) {
 	cliAlive := true
 	code := 42
@@ -256,10 +187,10 @@ func TestServerMsg_MarshalLine_NewlineTerminated(t *testing.T) {
 	if nl := strings.Count(string(data), "\n"); nl != 1 {
 		t.Fatalf("expected exactly one \\n, got %d in %q", nl, data)
 	}
-	// Round-trip still works (ParseServerMsg ignores trailing whitespace).
-	parsed, err := ParseServerMsg(data)
-	if err != nil {
-		t.Fatalf("ParseServerMsg: %v", err)
+	// Round-trip still works (json.Unmarshal ignores trailing whitespace).
+	var parsed ServerMsg
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
 	}
 	if parsed.Type != "stdout" || parsed.Seq != 1 || parsed.Line != "hello" {
 		t.Fatalf("roundtrip mismatch: %+v", parsed)
@@ -268,7 +199,7 @@ func TestServerMsg_MarshalLine_NewlineTerminated(t *testing.T) {
 
 // TestMarshalStdoutLine_WireEquivalent locks down R67-PERF-3: the fast
 // stdout-frame encoder must produce byte-identical output to the generic
-// MarshalLine() path so naozhi's ParseServerMsg cannot tell the two apart.
+// MarshalLine() path so naozhi's decoder cannot tell the two apart.
 // Covers the three classes of CLI stdout content the readStdout hot path
 // actually produces: pure ASCII (most assistant_delta frames), embedded
 // JSON-special bytes that demand escaping (tool_use payloads with quotes /
@@ -298,10 +229,9 @@ func TestMarshalStdoutLine_WireEquivalent(t *testing.T) {
 			if string(fast) != string(slow) {
 				t.Fatalf("wire mismatch:\n fast=%q\n slow=%q", fast, slow)
 			}
-			// Round-trip through ParseServerMsg.
-			parsed, err := ParseServerMsg(fast)
-			if err != nil {
-				t.Fatalf("ParseServerMsg: %v", err)
+			var parsed ServerMsg
+			if err := json.Unmarshal(fast, &parsed); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
 			}
 			if parsed.Type != "stdout" || parsed.Seq != tc.seq || parsed.Line != tc.line {
 				t.Fatalf("roundtrip mismatch: got %+v want seq=%d line=%q",
@@ -340,9 +270,9 @@ func TestMarshalReplayLine_WireEquivalent(t *testing.T) {
 			if string(fast) != string(slow) {
 				t.Fatalf("wire mismatch:\n fast=%q\n slow=%q", fast, slow)
 			}
-			parsed, err := ParseServerMsg(fast)
-			if err != nil {
-				t.Fatalf("ParseServerMsg: %v", err)
+			var parsed ServerMsg
+			if err := json.Unmarshal(fast, &parsed); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
 			}
 			if parsed.Type != "replay" || parsed.Seq != tc.seq || parsed.Line != tc.line {
 				t.Fatalf("roundtrip mismatch: got %+v want seq=%d line=%q",

@@ -56,7 +56,7 @@ func TestAgentEvents_RestoredRouterWorkflowAgent(t *testing.T) {
 	claudeDir, ws := filepath.Join(tmp, "claude"), filepath.Join(tmp, "ws")
 	projectDir := filepath.Join(claudefs.ProjectsRoot(claudeDir), claudefs.ProjectSlug(ws))
 	runDir := claudefs.WorkflowRunDir(claudefs.SubagentsDir(projectDir, wfSID), wfRun)
-	resultPath := claudefs.WorkflowResultFile(projectDir, wfSID, wfRun)
+	resultPath := filepath.Join(projectDir, wfSID, "workflows", wfRun+".json")
 	for _, dir := range []string{ws, runDir, filepath.Dir(resultPath)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
