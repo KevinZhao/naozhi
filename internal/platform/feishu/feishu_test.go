@@ -216,27 +216,45 @@ func TestIsBotMentioned(t *testing.T) {
 	}
 }
 
+// newBotInfoFeishu returns an adapter whose API goes to a fake that issues a
+// tenant token and answers bot/v3/info with body; onInfo, when set, sees each
+// bot/v3/info request first.
+func newBotInfoFeishu(t *testing.T, body string, onInfo func(*http.Request)) *Feishu {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			_, _ = w.Write([]byte(`{"code":0,"tenant_access_token":"t_abc","expire":7200}`))
+		case "/open-apis/bot/v3/info":
+			if onInfo != nil {
+				onInfo(r)
+			}
+			_, _ = w.Write([]byte(body))
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	f := New(Config{AppID: "app", AppSecret: "secret"}, nil)
+	t.Cleanup(func() { _ = f.Stop() })
+	f.baseURL = server.URL
+	return f
+}
+
+func botOpenID(f *Feishu) string {
+	f.botInfoMu.RLock()
+	defer f.botInfoMu.RUnlock()
+	return f.botOpenID
+}
+
 // TestMaybeRefreshBotInfo_SelfHeals: when isBotMentioned is in the degraded
 // "any @" fallback (open_id unknown), a group mention triggers a background
 // re-fetch that populates botOpenID so subsequent mentions match strictly.
 // Locks in R229-ARCH-19 (#1009).
 func TestMaybeRefreshBotInfo_SelfHeals(t *testing.T) {
 	t.Parallel()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/open-apis/auth/v3/tenant_access_token/internal":
-			_, _ = w.Write([]byte(`{"code":0,"tenant_access_token":"t_abc","expire":7200}`))
-		case "/open-apis/bot/v3/info":
-			_, _ = w.Write([]byte(`{"code":0,"msg":"ok","bot":{"open_id":"ou_bot_self","app_name":"NaozhiBot"}}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	f := New(Config{AppID: "app", AppSecret: "secret"}, nil)
-	defer func() { _ = f.Stop() }()
-	f.baseURL = server.URL
+	f := newBotInfoFeishu(t, `{"code":0,"msg":"ok","bot":{"open_id":"ou_bot_self","app_name":"NaozhiBot"}}`, nil)
 
 	// open_id unknown → degraded path returns true for any mention AND kicks
 	// the lazy re-fetch.
@@ -246,13 +264,7 @@ func TestMaybeRefreshBotInfo_SelfHeals(t *testing.T) {
 
 	// Wait for the background re-fetch to populate open_id.
 	deadline := time.Now().Add(2 * time.Second)
-	for {
-		f.botInfoMu.RLock()
-		got := f.botOpenID
-		f.botInfoMu.RUnlock()
-		if got == "ou_bot_self" {
-			break
-		}
+	for botOpenID(f) != "ou_bot_self" {
 		if time.Now().After(deadline) {
 			t.Fatal("botOpenID was not self-healed within 2s")
 		}
@@ -272,23 +284,9 @@ func TestMaybeRefreshBotInfo_SelfHeals(t *testing.T) {
 // a burst of degraded mentions doesn't hammer bot/v3/info. R229-ARCH-19 (#1009).
 func TestMaybeRefreshBotInfo_RateLimited(t *testing.T) {
 	t.Parallel()
-	var calls int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/open-apis/auth/v3/tenant_access_token/internal":
-			_, _ = w.Write([]byte(`{"code":0,"tenant_access_token":"t_abc","expire":7200}`))
-		case "/open-apis/bot/v3/info":
-			atomic.AddInt32(&calls, 1)
-			_, _ = w.Write([]byte(`{"code":99991663,"msg":"app access denied"}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	f := New(Config{AppID: "app", AppSecret: "secret"}, nil)
-	defer func() { _ = f.Stop() }()
-	f.baseURL = server.URL
+	var calls atomic.Int32
+	f := newBotInfoFeishu(t, `{"code":99991663,"msg":"app access denied"}`,
+		func(*http.Request) { calls.Add(1) })
 
 	// Fire several degraded mentions in quick succession.
 	for i := 0; i < 5; i++ {
@@ -297,43 +295,26 @@ func TestMaybeRefreshBotInfo_RateLimited(t *testing.T) {
 	// Let any spawned goroutines settle.
 	f.dispatch.Wait()
 
-	if n := atomic.LoadInt32(&calls); n > 1 {
+	if n := calls.Load(); n > 1 {
 		t.Errorf("bot/v3/info called %d times, want ≤1 (cooldown should rate-limit)", n)
 	}
 }
 
 // TestFetchBotInfo_Success: end-to-end happy path — token fetch + bot/v3/info
-// call + botOpenID population. Uses httptest to serve both endpoints so no
-// network is required.
+// call (with the tenant token) + botOpenID population.
 func TestFetchBotInfo_Success(t *testing.T) {
 	t.Parallel()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/open-apis/auth/v3/tenant_access_token/internal":
-			_, _ = w.Write([]byte(`{"code":0,"tenant_access_token":"t_abc","expire":7200}`))
-		case "/open-apis/bot/v3/info":
+	f := newBotInfoFeishu(t, `{"code":0,"msg":"ok","bot":{"open_id":"ou_bot_test","app_name":"NaozhiBot"}}`,
+		func(r *http.Request) {
 			if got := r.Header.Get("Authorization"); got != "Bearer t_abc" {
 				t.Errorf("Authorization header = %q, want Bearer t_abc", got)
 			}
-			_, _ = w.Write([]byte(`{"code":0,"msg":"ok","bot":{"open_id":"ou_bot_test","app_name":"NaozhiBot"}}`))
-		default:
-			t.Errorf("unexpected path: %s", r.URL.Path)
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	f := New(Config{AppID: "app", AppSecret: "secret"}, nil)
-	defer func() { _ = f.Stop() }()
-	f.baseURL = server.URL
+		})
 
 	if err := f.fetchBotInfo(context.Background()); err != nil {
 		t.Fatalf("fetchBotInfo: %v", err)
 	}
-	f.botInfoMu.RLock()
-	got := f.botOpenID
-	f.botInfoMu.RUnlock()
-	if got != "ou_bot_test" {
+	if got := botOpenID(f); got != "ou_bot_test" {
 		t.Errorf("botOpenID = %q, want ou_bot_test", got)
 	}
 }
@@ -342,37 +323,18 @@ func TestFetchBotInfo_Success(t *testing.T) {
 // *APIError so callers can log the upstream code/msg.
 func TestFetchBotInfo_APIError(t *testing.T) {
 	t.Parallel()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/open-apis/auth/v3/tenant_access_token/internal":
-			_, _ = w.Write([]byte(`{"code":0,"tenant_access_token":"t_abc","expire":7200}`))
-		case "/open-apis/bot/v3/info":
-			_, _ = w.Write([]byte(`{"code":99991663,"msg":"app access denied"}`))
-		}
-	}))
-	defer server.Close()
-
-	f := New(Config{AppID: "app", AppSecret: "secret"}, nil)
-	defer func() { _ = f.Stop() }()
-	f.baseURL = server.URL
+	f := newBotInfoFeishu(t, `{"code":99991663,"msg":"app access denied"}`, nil)
 
 	err := f.fetchBotInfo(context.Background())
-	if err == nil {
-		t.Fatal("expected error for non-zero code")
-	}
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
-		t.Fatalf("error type = %T, want *APIError", err)
+		t.Fatalf("error = %v (%T), want *APIError", err, err)
 	}
 	if apiErr.Code != 99991663 {
 		t.Errorf("APIError.Code = %d, want 99991663", apiErr.Code)
 	}
-
 	// botOpenID must stay empty on failure so isBotMentioned degrades.
-	f.botInfoMu.RLock()
-	got := f.botOpenID
-	f.botInfoMu.RUnlock()
-	if got != "" {
+	if got := botOpenID(f); got != "" {
 		t.Errorf("botOpenID on error = %q, want empty", got)
 	}
 }
@@ -382,25 +344,10 @@ func TestFetchBotInfo_APIError(t *testing.T) {
 // degraded mention check.
 func TestFetchBotInfo_EmptyOpenID(t *testing.T) {
 	t.Parallel()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/open-apis/auth/v3/tenant_access_token/internal":
-			_, _ = w.Write([]byte(`{"code":0,"tenant_access_token":"t_abc","expire":7200}`))
-		case "/open-apis/bot/v3/info":
-			_, _ = w.Write([]byte(`{"code":0,"msg":"ok","bot":{"open_id":""}}`))
-		}
-	}))
-	defer server.Close()
-
-	f := New(Config{AppID: "app", AppSecret: "secret"}, nil)
-	defer func() { _ = f.Stop() }()
-	f.baseURL = server.URL
+	f := newBotInfoFeishu(t, `{"code":0,"msg":"ok","bot":{"open_id":""}}`, nil)
 
 	err := f.fetchBotInfo(context.Background())
-	if err == nil {
-		t.Fatal("expected error for empty open_id")
-	}
-	if !strings.Contains(err.Error(), "empty open_id") {
+	if err == nil || !strings.Contains(err.Error(), "empty open_id") {
 		t.Errorf("error = %v, want substring 'empty open_id'", err)
 	}
 }

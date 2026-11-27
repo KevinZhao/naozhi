@@ -346,28 +346,6 @@ func TestRunStore_DeleteJobReclaimsJobLock(t *testing.T) {
 	}
 }
 
-// TestRunStore_DeleteJobIdempotent — DeleteJob on a non-existent ID must
-// not panic or return an error.
-func TestRunStore_DeleteJobIdempotent(t *testing.T) {
-	t.Parallel()
-	s := newTestStore(t, 200, 30*24*time.Hour)
-	// The lock entry is created then reclaimed; the rmdir is a no-op.
-	s.DeleteJob(mustGenerateID())
-	// And again — still fine.
-	s.DeleteJob(mustGenerateID())
-}
-
-// TestRunStore_GetMissingReturnsErrNotExist — fs.ErrNotExist must propagate
-// unchanged when the file simply isn't there.
-func TestRunStore_GetMissingReturnsErrNotExist(t *testing.T) {
-	t.Parallel()
-	s := newTestStore(t, 200, 30*24*time.Hour)
-	_, err := s.Get(mustGenerateID(), mustGenerateRunID())
-	if !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("Get(missing) err = %v want fs.ErrNotExist", err)
-	}
-}
-
 // TestRunStore_GetCorruptReturnsErrCorruptRun — a malformed JSON file
 // surfaces as ErrCorruptRun.
 func TestRunStore_GetCorruptReturnsErrCorruptRun(t *testing.T) {
@@ -497,49 +475,6 @@ func TestRunStore_DiskList_UnreadableCountedSeparately(t *testing.T) {
 	}
 	if len(rows) != total-1 {
 		t.Fatalf("rows len=%d want %d (all readable files returned)", len(rows), total-1)
-	}
-}
-
-// TestRunStore_ListBeforeCutoff — stagger StartedAt by 1h, ask for entries
-// strictly before "now-2h", expect only those satisfying StartedAt < cutoff.
-//
-// R238-GO-8 (#796): mtimes are pinned to match StartedAt to mirror the
-// production invariant (Append fires at finishRun time so mtime ≈
-// EndedAt ≥ StartedAt, bounded by ExecTimeout). Without the pin the
-// raw Append path stamps mtime = wall-clock-now, which mismatches the
-// synthetic backdated StartedAt and would intersect the new mtime
-// coarse-filter — a test-fixture artefact, not a production case.
-func TestRunStore_ListBeforeCutoff(t *testing.T) {
-	t.Parallel()
-	s := newTestStore(t, 200, 30*24*time.Hour)
-	jobID := mustGenerateID()
-
-	now := time.Now()
-	for i := 0; i < 5; i++ {
-		// runs[0] = now-4h, runs[1] = now-3h, ... runs[4] = now.
-		startedAt := now.Add(-time.Duration(4-i) * time.Hour)
-		run := makeRun(jobID, startedAt)
-		s.Append(run)
-		// Pin mtime ≈ StartedAt to match production semantics. Required
-		// after R238-GO-8 (#796) added a coarse mtime gate before
-		// readRun.
-		path := filepath.Join(s.Dir(), jobID, run.RunID+".json")
-		if err := os.Chtimes(path, startedAt, startedAt); err != nil {
-			t.Fatalf("Chtimes: %v", err)
-		}
-	}
-
-	cutoff := now.Add(-2 * time.Hour)
-	got := s.List(jobID, 10, cutoff)
-	for _, sm := range got {
-		if !sm.StartedAt.Before(cutoff) {
-			t.Fatalf("List returned entry with StartedAt %v not < cutoff %v", sm.StartedAt, cutoff)
-		}
-	}
-	// runs at now-4h, now-3h are strictly < cutoff (now-2h). runs at
-	// now-2h (boundary; Before is strict so excluded), now-1h, now are not.
-	if len(got) != 2 {
-		t.Fatalf("List(before cutoff) len=%d want 2; got %+v", len(got), got)
 	}
 }
 

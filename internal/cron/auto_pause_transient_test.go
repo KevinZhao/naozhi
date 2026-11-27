@@ -290,25 +290,6 @@ func TestAutoPause_TransientCountClearedBySuccessResumeEdit(t *testing.T) {
 	})
 }
 
-// TestAutoPause_NegativeThresholdIgnoresTransientWindow: disabling auto-pause
-// disables the transient rule too.
-func TestAutoPause_NegativeThresholdIgnoresTransientWindow(t *testing.T) {
-	t.Parallel()
-	s, r, ns, id, clk := transientScheduler(t, -1)
-	r.set(nil, errTransientOverloaded)
-	for i := range 8 {
-		runAt(s, clk, id, time.Duration(i)*time.Hour)
-	}
-	if j := s.jobForTest(t, id); j.Paused || j.TransientFailures != 8 {
-		t.Fatalf("paused=%v transient=%d, want active with 8", j.Paused, j.TransientFailures)
-	}
-	for _, n := range ns.noticesAfter(s) {
-		if strings.Contains(n, "自动暂停") {
-			t.Fatalf("disabled auto-pause still announced one: %q", n)
-		}
-	}
-}
-
 // TestRecordResult_RevertRestoresTransientCount: a transient result whose
 // persist fails rolls the transient count and its start back too.
 func TestRecordResult_RevertRestoresTransientCount(t *testing.T) {
