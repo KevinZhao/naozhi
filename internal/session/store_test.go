@@ -190,10 +190,7 @@ func TestSaveLoadKnownIDs_RoundTripSorted(t *testing.T) {
 	for _, id := range []string{"zeta", "alpha", "mike"} {
 		kid.Track(id)
 	}
-	data, err := kid.MarshalSnapshot()
-	if err != nil {
-		t.Fatalf("MarshalSnapshot: %v", err)
-	}
+	data := kid.MarshalSnapshot()
 	if err := saveKnownIDsBytes(storePath, data); err != nil {
 		t.Fatalf("saveKnownIDsBytes: %v", err)
 	}

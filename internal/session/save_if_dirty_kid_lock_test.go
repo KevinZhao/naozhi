@@ -56,10 +56,7 @@ func TestSaveIfDirty_KnownIDsConcurrentTrackAndSnapshot(t *testing.T) {
 			default:
 			}
 			_ = r.kid.SortedSnapshot()
-			if _, err := r.kid.MarshalSnapshot(); err != nil {
-				t.Errorf("MarshalSnapshot: %v", err)
-				return
-			}
+			_ = r.kid.MarshalSnapshot()
 			_ = r.kid.Dirty()
 			_ = r.kid.Gen()
 		}

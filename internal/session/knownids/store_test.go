@@ -2,7 +2,6 @@ package knownids
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -20,12 +19,11 @@ func TestZeroValue_Usable(t *testing.T) {
 	if got := s.SortedSnapshot(); len(got) != 0 {
 		t.Errorf("SortedSnapshot on empty = %v, want empty", got)
 	}
-	data, err := s.MarshalSnapshot()
-	if err != nil || string(data) != "[]" {
-		t.Errorf("MarshalSnapshot on empty = %q, %v; want \"[]\"", data, err)
+	if data := s.MarshalSnapshot(); string(data) != "[]" {
+		t.Errorf("MarshalSnapshot on empty = %q; want \"[]\"", data)
 	}
-	if _, _, due, err := s.ClaimSave(time.Now(), interval); due || err != nil {
-		t.Errorf("clean store must not be due (due=%v err=%v)", due, err)
+	if _, _, due := s.ClaimSave(time.Now(), interval); due {
+		t.Error("clean store must not be due")
 	}
 	if !s.MarkSavedIfUnchanged(0) {
 		t.Error("MarkSavedIfUnchanged(0) on untouched store must succeed")
@@ -149,9 +147,9 @@ func TestClaimSave_ThrottleAndDirtySemantics(t *testing.T) {
 	s.Track("b")
 	s.Track("a")
 
-	data, gen, due, err := s.ClaimSave(now, interval)
-	if err != nil || !due {
-		t.Fatalf("dirty store with open throttle must be due (due=%v err=%v)", due, err)
+	data, gen, due := s.ClaimSave(now, interval)
+	if !due {
+		t.Fatal("dirty store with open throttle must be due")
 	}
 	if string(data) != `["a","b"]` || gen != s.Gen() {
 		t.Errorf("ClaimSave = %q gen=%d, want sorted JSON at gen %d", data, gen, s.Gen())
@@ -164,10 +162,10 @@ func TestClaimSave_ThrottleAndDirtySemantics(t *testing.T) {
 	}
 
 	// Within the interval the window is closed even though still dirty.
-	if _, _, due, _ := s.ClaimSave(now.Add(interval-time.Second), interval); due {
+	if _, _, due := s.ClaimSave(now.Add(interval-time.Second), interval); due {
 		t.Error("second claim inside the interval must not be due")
 	}
-	if _, _, due, _ := s.ClaimSave(now.Add(interval), interval); !due {
+	if _, _, due := s.ClaimSave(now.Add(interval), interval); !due {
 		t.Error("claim exactly at the interval must be due")
 	}
 	// Success path clears dirty; the next claim is not due regardless of time.
@@ -177,63 +175,31 @@ func TestClaimSave_ThrottleAndDirtySemantics(t *testing.T) {
 	if s.Dirty() {
 		t.Error("dirty must be cleared after MarkSavedIfUnchanged")
 	}
-	if _, _, due, _ := s.ClaimSave(now.Add(time.Hour), interval); due {
+	if _, _, due := s.ClaimSave(now.Add(time.Hour), interval); due {
 		t.Error("clean store must never be due")
 	}
 	// A failed write reopens the throttle without touching dirty.
 	s.Track("c")
-	if _, _, due, _ := s.ClaimSave(now.Add(2*time.Hour), interval); !due {
+	if _, _, due := s.ClaimSave(now.Add(2*time.Hour), interval); !due {
 		t.Fatal("dirty again → due")
 	}
-	if _, _, due, _ := s.ClaimSave(now.Add(2*time.Hour), interval); due {
+	if _, _, due := s.ClaimSave(now.Add(2*time.Hour), interval); due {
 		t.Fatal("same instant re-claim must be throttled")
 	}
 	s.ResetSaveThrottle()
 	if !s.SavedAt().IsZero() || !s.Dirty() {
 		t.Error("ResetSaveThrottle must zero savedAt and keep dirty")
 	}
-	if _, _, due, _ := s.ClaimSave(now.Add(2*time.Hour), interval); !due {
+	if _, _, due := s.ClaimSave(now.Add(2*time.Hour), interval); !due {
 		t.Error("after ResetSaveThrottle the claim must be due again")
-	}
-}
-
-func TestClaimSave_MarshalErrorReleasesClaim(t *testing.T) {
-	boom := errors.New("boom")
-	orig := marshalJSON
-	marshalJSON = func(any) ([]byte, error) { return nil, boom }
-	t.Cleanup(func() { marshalJSON = orig })
-
-	var s Store
-	s.Track("x")
-	now := time.Now()
-	data, gen, due, err := s.ClaimSave(now, interval)
-	if !errors.Is(err, boom) || err.Error() != "marshal known IDs: boom" {
-		t.Fatalf("err = %v, want wrapped boom", err)
-	}
-	if data != nil || gen != 0 || due {
-		t.Errorf("error path must return zero results, got %q %d %v", data, gen, due)
-	}
-	if !s.SavedAt().IsZero() {
-		t.Error("marshal error must release the claim (savedAt reset)")
-	}
-	if !s.Dirty() {
-		t.Error("marshal error must leave dirty set")
-	}
-	if _, err := s.MarshalSnapshot(); !errors.Is(err, boom) {
-		t.Errorf("MarshalSnapshot err = %v, want boom", err)
-	}
-
-	marshalJSON = orig
-	if _, _, due, err := s.ClaimSave(now, interval); !due || err != nil {
-		t.Errorf("next tick after a marshal error must retry (due=%v err=%v)", due, err)
 	}
 }
 
 func TestMarkSavedIfUnchanged_ConcurrentTrackKeepsDirty(t *testing.T) {
 	var s Store
 	s.Track("a")
-	_, gen, due, err := s.ClaimSave(time.Now(), interval)
-	if !due || err != nil {
+	_, gen, due := s.ClaimSave(time.Now(), interval)
+	if !due {
 		t.Fatal("expected due")
 	}
 	// An add + evict pair keeps Len identical, so length is not a valid
@@ -258,8 +224,8 @@ func TestMarshalSnapshot_DeterministicAcrossCalls(t *testing.T) {
 	for _, id := range []string{"b", "c", "a", "d"} {
 		b.Track(id)
 	}
-	ma, _ := a.MarshalSnapshot()
-	mb, _ := b.MarshalSnapshot()
+	ma := a.MarshalSnapshot()
+	mb := b.MarshalSnapshot()
 	if string(ma) != string(mb) || string(ma) != `["a","b","c","d"]` {
 		t.Errorf("same logical set must marshal identically: %q vs %q", ma, mb)
 	}
@@ -296,11 +262,7 @@ func TestConcurrent_TrackClaimSnapshot_RaceFree(t *testing.T) {
 			default:
 			}
 			s.ResetSaveThrottle()
-			data, gen, due, err := s.ClaimSave(time.Now(), interval)
-			if err != nil {
-				t.Errorf("ClaimSave: %v", err)
-				return
-			}
+			data, gen, due := s.ClaimSave(time.Now(), interval)
 			if due {
 				var ids []string
 				if err := json.Unmarshal(data, &ids); err != nil || !slices.IsSorted(ids) {
@@ -324,10 +286,7 @@ func TestConcurrent_TrackClaimSnapshot_RaceFree(t *testing.T) {
 				t.Errorf("unsorted snapshot %v", got)
 				return
 			}
-			if _, err := s.MarshalSnapshot(); err != nil {
-				t.Errorf("MarshalSnapshot: %v", err)
-				return
-			}
+			_ = s.MarshalSnapshot()
 			_ = s.Dirty()
 			_ = s.Gen()
 			_ = s.SavedAt()
