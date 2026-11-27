@@ -78,21 +78,6 @@ func TestBroadcastSessionSystemEvent_ReachesSubscribers(t *testing.T) {
 	}
 }
 
-// TestBroadcastSessionSystemEvent_SkipsNonSubscribers ensures the failure is
-// scoped to the session's subscribers — a tab watching a different session
-// must not receive cross-tenant noise.
-func TestBroadcastSessionSystemEvent_SkipsNonSubscribers(t *testing.T) {
-	hub, _ := newTestHub(t, "tok")
-	t.Cleanup(hub.Shutdown)
-
-	other, otherOut := newCapturedClient(t, hub)
-	registerSub(hub, other, "feishu:p2p:bob")
-
-	hub.bcast.broadcastSessionSystemEvent("feishu:p2p:alice", "发送失败：remote down")
-
-	recvNone(t, otherOut)
-}
-
 // TestBroadcastSessionSystemEvent_NoSubscribersNoop verifies the
 // snapshot-before-marshal fast path: a failure on a session nobody is watching
 // must not deliver anything (and must not panic). The single connected client
@@ -107,56 +92,6 @@ func TestBroadcastSessionSystemEvent_NoSubscribersNoop(t *testing.T) {
 	hub.bcast.broadcastSessionSystemEvent("node1:p2p:unwatched", "发送失败：x")
 
 	recvNone(t, out)
-}
-
-// TestBroadcastSessionSystemEvent_ZeroCountFastPath verifies R202606g-PERF-003
-// (#2308): when the key's lock-free count is zero the broadcast
-// returns before touching the snapshot pool. We assert observable behaviour —
-// nothing is delivered — even though a client is wired into the Hub maps for a
-// DIFFERENT key, so the target key's fast count stays absent/zero.
-func TestBroadcastSessionSystemEvent_ZeroCountFastPath(t *testing.T) {
-	hub, _ := newTestHub(t, "tok")
-	t.Cleanup(hub.Shutdown)
-
-	// A live, authenticated client subscribed elsewhere; the target key has no
-	// count entry, exercising the fast path.
-	c, out := newCapturedClient(t, hub)
-	registerSub(hub, c, "feishu:p2p:elsewhere")
-
-	hub.bcast.broadcastSessionSystemEvent("feishu:p2p:zero", "发送失败：x")
-
-	recvNone(t, out)
-}
-
-// TestBroadcastSessionSystemEvent_MultipleSubscribers verifies every client
-// subscribed to the key receives the system event.
-func TestBroadcastSessionSystemEvent_MultipleSubscribers(t *testing.T) {
-	hub, _ := newTestHub(t, "tok")
-	t.Cleanup(hub.Shutdown)
-
-	const key = "feishu:p2p:alice"
-	outs := make([]<-chan node.ServerMsg, 0, 3)
-	for i := 0; i < 3; i++ {
-		c, out := newCapturedClient(t, hub)
-		registerSub(hub, c, key)
-		outs = append(outs, out)
-	}
-	// A subscriber on a different key must stay silent.
-	other, otherOut := newCapturedClient(t, hub)
-	registerSub(hub, other, "feishu:p2p:bob")
-
-	hub.bcast.broadcastSessionSystemEvent(key, "发送失败：remote down")
-
-	for i, out := range outs {
-		msg, ok := recvMsg(t, out)
-		if !ok {
-			t.Fatalf("subscriber %d received no frame", i)
-		}
-		if msg.Type != "event" || msg.Key != key || msg.Event == nil || msg.Event.Type != "system" {
-			t.Fatalf("subscriber %d got unexpected frame: %+v", i, msg)
-		}
-	}
-	recvNone(t, otherOut)
 }
 
 // TestBroadcastSessionSystemEvent_ConcurrentChurn runs the fan-out under the

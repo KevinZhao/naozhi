@@ -21,42 +21,14 @@ func TestReserveOwnerSlot_HitsCap(t *testing.T) {
 	if h.reserveOwner(owner) {
 		t.Fatalf("reserve %d should have failed (cap=%d)", maxConnsPerOwner+1, maxConnsPerOwner)
 	}
-}
-
-// TestReserveOwnerSlot_ReleaseFreesSlot pins that releaseOwner
-// returns budget so a reconnect after a tab close immediately succeeds.
-// Without this, a flapping client would lock itself out of its own
-// budget for the lifetime of the Hub.
-func TestReserveOwnerSlot_ReleaseFreesSlot(t *testing.T) {
-	h := newConnAdmission(HubOptions{})
-	const owner = "owner-A"
-
-	for i := 0; i < maxConnsPerOwner; i++ {
-		h.reserveOwner(owner)
+	// Another owner has its own allowance.
+	if !h.reserveOwner("owner-B") {
+		t.Fatal("owner B should still have its full budget")
 	}
-	if h.reserveOwner(owner) {
-		t.Fatal("budget should be exhausted")
-	}
+	// A release returns budget, so a reconnect after a tab close succeeds.
 	h.releaseOwner(owner)
 	if !h.reserveOwner(owner) {
 		t.Fatal("after release, one slot should be available")
-	}
-}
-
-// TestReserveOwnerSlot_OwnersIndependent pins that two distinct owners
-// each get their own maxConnsPerOwner allowance — exhausting owner A
-// must NOT block owner B.
-func TestReserveOwnerSlot_OwnersIndependent(t *testing.T) {
-	h := newConnAdmission(HubOptions{})
-
-	for i := 0; i < maxConnsPerOwner; i++ {
-		h.reserveOwner("A")
-	}
-	if h.reserveOwner("A") {
-		t.Fatal("owner A should be capped")
-	}
-	if !h.reserveOwner("B") {
-		t.Fatal("owner B should still have its full budget")
 	}
 }
 

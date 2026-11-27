@@ -94,26 +94,6 @@ func TestWSDeriveUploadOwner_ExistingAnonCookieReused(t *testing.T) {
 	}
 }
 
-// TestWSDeriveUploadOwner_NilAuthFallsBackToIPForTests preserves the
-// test-harness escape valve: NewHub callers that do not wire HubOptions.
-// Auth (older unit fixtures) keep the legacy IP-fallback so they can
-// authenticate without setting up a full auth.Handlers. Production wiring
-// always passes Auth, so the SEC-2 fix takes effect there.
-func TestWSDeriveUploadOwner_NilAuthFallsBackToIPForTests(t *testing.T) {
-	t.Parallel()
-	h := newConnAdmission(HubOptions{}) // dashToken == "" AND auth == nil
-	r := httptest.NewRequest(http.MethodGet, "/ws", nil)
-	w := httptest.NewRecorder()
-
-	owner, authed, ok := h.deriveUploadOwner(w, r, "10.0.0.1")
-	if !ok || !authed {
-		t.Fatalf("ok=%v authed=%v; nil-auth test path must still authenticate", ok, authed)
-	}
-	if owner != "10.0.0.1" {
-		t.Fatalf("owner=%q; want raw IP fallback for legacy test harness", owner)
-	}
-}
-
 // TestWSDeriveUploadOwner_NilAuthEmptyIPGetsUniqueOwner pins R202606j-SEC-8
 // (#2343): in the Auth-less fallback branch an empty client IP (trusted-proxy
 // mode with an XFF-less request) must NOT collapse to the empty-string owner

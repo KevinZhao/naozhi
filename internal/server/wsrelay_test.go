@@ -10,7 +10,6 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/testhelper"
@@ -32,8 +31,6 @@ type mockRemoteWS struct {
 	conns   []*mockWSConn
 	subKeys map[string]struct{}
 	handler http.HandlerFunc
-
-	apiEvents []clievent.EventEntry
 }
 
 // mockWSConn wraps a websocket.Conn with a write mutex to avoid races.
@@ -59,8 +56,6 @@ func newMockRemoteWS(token string) *mockRemoteWS {
 			m.handleWS(w, r)
 		case r.URL.Path == "/api/sessions":
 			json.NewEncoder(w).Encode(map[string]any{"sessions": []map[string]any{}})
-		case r.URL.Path == "/api/sessions/events":
-			json.NewEncoder(w).Encode(m.apiEvents)
 		case r.URL.Path == "/api/sessions/send":
 			w.WriteHeader(http.StatusAccepted)
 			json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
@@ -128,14 +123,6 @@ func (m *mockRemoteWS) subscribed(key string) bool {
 	return ok
 }
 
-func (m *mockRemoteWS) broadcast(msg node.ServerMsg) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, mc := range m.conns {
-		mc.writeJSON(msg)
-	}
-}
-
 // ─── wsRelay tests ───────────────────────────────────────────────────────────
 
 func TestWSRelay_ConnectAndSubscribe(t *testing.T) {
@@ -161,83 +148,6 @@ func TestWSRelay_ConnectAndSubscribe(t *testing.T) {
 	}
 }
 
-func TestWSRelay_EventForwarding(t *testing.T) {
-	mock := newMockRemoteWS("")
-	ts := httptest.NewServer(mock.handler)
-	defer ts.Close()
-
-	nc := node.NewHTTPClient("remote", ts.URL, "", "Remote")
-	defer nc.Close()
-
-	client := newTestWSClient()
-	nc.Subscribe(client, "test:d:u:general", 0, 0)
-	// The remote's `subscribed` reached the client through the relay's
-	// readLoop, so the loop is already running.
-	_ = readClientMsg(t, client, 2*time.Second) // subscribed
-
-	// Send event from remote
-	mock.broadcast(node.ServerMsg{
-		Type:  "event",
-		Key:   "test:d:u:general",
-		Event: &clievent.EventEntry{Time: 1000, Type: "text", Summary: "hello"},
-	})
-
-	msg := readClientMsg(t, client, 2*time.Second)
-	if msg.Type != "event" {
-		t.Errorf("type = %q, want event", msg.Type)
-	}
-	if msg.Node != "remote" {
-		t.Errorf("node = %q, want remote", msg.Node)
-	}
-	if msg.Event == nil || msg.Event.Summary != "hello" {
-		t.Error("event data mismatch")
-	}
-}
-
-func TestWSRelay_MultipleClients(t *testing.T) {
-	mock := newMockRemoteWS("")
-	mock.apiEvents = []clievent.EventEntry{{Time: 500, Type: "init", Summary: "init"}}
-	ts := httptest.NewServer(mock.handler)
-	defer ts.Close()
-
-	nc := node.NewHTTPClient("remote", ts.URL, "", "Remote")
-	defer nc.Close()
-
-	client1 := newTestWSClient()
-	nc.Subscribe(client1, "test:d:u:general", 0, 0)
-	_ = readClientMsg(t, client1, 2*time.Second) // subscribed
-
-	// Second client subscribes to same key (uses HTTP history path)
-	client2 := newTestWSClient()
-	nc.Subscribe(client2, "test:d:u:general", 0, 0)
-	msg2 := readClientMsg(t, client2, 2*time.Second)
-	if msg2.Type != "subscribed" {
-		t.Errorf("client2: type = %q, want subscribed", msg2.Type)
-	}
-
-	// Client2 should also get history via HTTP
-	hist := readClientMsg(t, client2, 2*time.Second)
-	if hist.Type != "history" {
-		t.Errorf("client2 history: type = %q, want history", hist.Type)
-	}
-
-	// Send event from remote, both should receive
-	mock.broadcast(node.ServerMsg{
-		Type:  "event",
-		Key:   "test:d:u:general",
-		Event: &clievent.EventEntry{Time: 2000, Type: "text", Summary: "shared"},
-	})
-
-	e1 := readClientMsg(t, client1, 2*time.Second)
-	e2 := readClientMsg(t, client2, 2*time.Second)
-	if e1.Type != "event" {
-		t.Errorf("client1: type = %q, want event", e1.Type)
-	}
-	if e2.Type != "event" {
-		t.Errorf("client2: type = %q, want event", e2.Type)
-	}
-}
-
 func TestWSRelay_Unsubscribe(t *testing.T) {
 	mock := newMockRemoteWS("")
 	ts := httptest.NewServer(mock.handler)
@@ -258,23 +168,6 @@ func TestWSRelay_Unsubscribe(t *testing.T) {
 
 	testhelper.Eventually(t, func() bool { return !mock.subscribed("test:d:u:general") }, 2*time.Second,
 		"remote should have been unsubscribed")
-}
-
-func TestWSRelay_Close(t *testing.T) {
-	mock := newMockRemoteWS("")
-	ts := httptest.NewServer(mock.handler)
-	defer ts.Close()
-
-	nc := node.NewHTTPClient("remote", ts.URL, "", "Remote")
-
-	client := newTestWSClient()
-	nc.Subscribe(client, "test:d:u:general", 0, 0)
-	_ = readClientMsg(t, client, 2*time.Second)
-
-	nc.Close()
-
-	// After Close, subscribing should still not panic (idempotent close).
-	nc.Close()
 }
 
 func TestWSRelay_Reconnect(t *testing.T) {

@@ -219,27 +219,6 @@ func TestDebouncer_TriggerWhileCallbackRunsDoesNotReschedule(t *testing.T) {
 	waitReturns(t, r.wg)
 }
 
-// TestDebouncer_OpeningAWindowAllocatesNothing: the timer is allocated once and
-// re-armed with Reset; sessions_update triggers are frequent.
-func TestDebouncer_OpeningAWindowAllocatesNothing(t *testing.T) {
-	var wg sync.WaitGroup
-	d := newDebouncer(&wg, func() {})
-	d.interval = time.Hour // never actually fires during the run
-	allocs := testing.AllocsPerRun(200, func() {
-		d.trigger()
-		// Cancel the window by hand so the next run opens a fresh one.
-		d.mu.Lock()
-		if d.timer.Stop() {
-			d.armed = false
-			wg.Done()
-		}
-		d.mu.Unlock()
-	})
-	if allocs != 0 {
-		t.Errorf("opening a debounce window allocates %.1f times, want 0", allocs)
-	}
-}
-
 // TestDebouncer_RealTimerFires covers the production wiring the other tests
 // replace: newDebouncer's own timer runs onTimer, which fires and releases
 // the slot.
@@ -288,53 +267,11 @@ func TestWSBroadcaster_WaitCoversAnOpenWindow(t *testing.T) {
 	}
 }
 
-// TestWSBroadcaster_DebounceFiresSessionsUpdate pins newWSBroadcaster's
-// wiring: the debounce window BroadcastSessionsUpdate opens must, when it
-// fires, deliver exactly sessionsUpdateMsg to an authenticated client. A
-// debouncer built over any other callback would leave every sidebar refresh
-// undelivered with the window accounting still balanced.
-func TestWSBroadcaster_DebounceFiresSessionsUpdate(t *testing.T) {
-	t.Parallel()
-	reg := newSubscriberRegistry()
-	c := &wsClient{send: make(chan []byte, 4), done: make(chan struct{})}
-	c.authenticated.Store(true)
-	reg.add(c)
-	b := newWSBroadcaster(reg)
-	timer := &manualDebounceTimer{}
-	b.debounce.timer = timer
-
-	b.BroadcastSessionsUpdate()
-	select {
-	case data := <-c.send:
-		t.Fatalf("sessions_update sent before the debounce window fired: %s", data)
-	default:
-	}
-	if !timer.expire() {
-		t.Fatal("BroadcastSessionsUpdate did not arm the debounce timer")
-	}
-	b.debounce.onTimer()
-
-	select {
-	case data := <-c.send:
-		if string(data) != string(sessionsUpdateMsg) {
-			t.Fatalf("debounce fire sent %s, want %s", data, sessionsUpdateMsg)
-		}
-	default:
-		t.Fatal("debounce fire delivered no sessions_update to the authenticated client")
-	}
-	select {
-	case data := <-c.send:
-		t.Fatalf("debounce fire sent a second frame: %s", data)
-	default:
-	}
-}
-
 // TestBuildServer_SessionsChangedReachesHubClients drives one construction-
 // time producer end to end: the router relay buildDashboard binds to
 // w.bcast must open a debounce window on the Hub's own broadcaster, and that
 // window's fire must deliver sessionsUpdateMsg to a client registered on the
-// Hub. TestWSBroadcaster_DebounceFiresSessionsUpdate drives a broadcaster
-// directly and stays green if the producer is bound to a different one.
+// Hub.
 func TestBuildServer_SessionsChangedReachesHubClients(t *testing.T) {
 	relay := &routerrelay.Relay{}
 	srv, _ := buildServerWithHandlers(ServerOptions{

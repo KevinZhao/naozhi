@@ -1,9 +1,6 @@
 package server
 
-import (
-	"sync"
-	"testing"
-)
+import "testing"
 
 // TestUnregister_UnsubClosuresInvokedOutsideMu: unregister runs a client's
 // unsub closures after releasing the registry's lock, so a heavy-tab
@@ -14,44 +11,23 @@ func TestUnregister_UnsubClosuresInvokedOutsideMu(t *testing.T) {
 	hub, _ := newTestHub(t, "")
 	t.Cleanup(hub.Shutdown)
 
-	// A subscription whose unsub closure tries to take the registry's lock:
-	// unregister must not hold it when the closure runs, or TryLock fails.
 	c := &wsClient{done: make(chan struct{})}
-	var (
-		mu        sync.Mutex
-		muHeld    bool
-		invokeErr error
-	)
+	var lockFree, ran bool
 	registerSub(hub, c, "")
 	subscribeTest(hub, c, "k1", func() {
-		// The registry's lock must be released by the time we get here.
-		if !hub.subs.mu.TryLock() {
-			mu.Lock()
-			invokeErr = errLockStillHeld
-			mu.Unlock()
-			return
+		ran = true
+		if hub.subs.mu.TryLock() {
+			lockFree = true
+			hub.subs.mu.Unlock()
 		}
-		muHeld = true
-		hub.subs.mu.Unlock()
 	})
 
 	hub.unregister(c)
 
-	mu.Lock()
-	defer mu.Unlock()
-	if invokeErr != nil {
-		t.Fatalf("unsub closure observed the registry lock still held: %v", invokeErr)
-	}
-	if !muHeld {
+	if !ran {
 		t.Fatal("unsub closure did not run; check unregister snapshot path")
 	}
+	if !lockFree {
+		t.Fatal("unsub closure observed the registry lock still held")
+	}
 }
-
-// errLockStillHeld is the sentinel surfaced when the unsub closure cannot
-// acquire the registry lock. Distinct error type so future test additions that reuse
-// this pattern can errors.Is rather than string-match.
-var errLockStillHeld = lockHeldErr("registry lock still held when unsub closure ran")
-
-type lockHeldErr string
-
-func (e lockHeldErr) Error() string { return string(e) }

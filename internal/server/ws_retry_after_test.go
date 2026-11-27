@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 	"time"
@@ -52,7 +53,7 @@ func TestHandleAuth_RateLimitEmitsRetryAfter(t *testing.T) {
 		// The raw JSON must carry the snake_case tag so dashboard.js's
 		// msg.retry_after lookup resolves — structural assertion on the
 		// wire format, not the Go field name.
-		if !containsBytes(raw, []byte(`"retry_after":`)) {
+		if !bytes.Contains(raw, []byte(`"retry_after":`)) {
 			t.Errorf("raw payload missing retry_after field; got %s", raw)
 		}
 	case <-time.After(2 * time.Second):
@@ -94,7 +95,7 @@ func TestHandleAuth_InvalidTokenOmitsRetryAfter(t *testing.T) {
 			t.Errorf("retry_after = %d on invalid-token branch, want 0 (omitempty)", msg.RetryAfter)
 		}
 		// Structural: omitempty means the key must be absent from the wire.
-		if containsBytes(raw, []byte(`"retry_after":`)) {
+		if bytes.Contains(raw, []byte(`"retry_after":`)) {
 			t.Errorf("raw payload must not carry retry_after on invalid-token branch; got %s", raw)
 		}
 	case <-time.After(2 * time.Second):
@@ -144,20 +145,4 @@ func TestHandleAuth_OnlyFailuresSpendLoginBucket(t *testing.T) {
 			t.Errorf("after 5 failures, token %q = %s retry_after=%d, want the rate-limit answer", tok, msg.Type, msg.RetryAfter)
 		}
 	}
-}
-
-func containsBytes(haystack, needle []byte) bool {
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		match := true
-		for j := 0; j < len(needle); j++ {
-			if haystack[i+j] != needle[j] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return true
-		}
-	}
-	return false
 }
