@@ -1109,34 +1109,20 @@ func TestSnapshotUnchanged(t *testing.T) {
 // change, so a message still carries only the mark. The full snapshot still
 // says 最后输出, and a state change is a change.
 func TestSnapshotUnchangedWhileRunning(t *testing.T) {
-	loc := time.FixedZone("CST", 8*3600)
-	now := time.Date(2026, 11, 3, 10, 0, 0, 0, loc)
-	sess := &fakeSessions{st: SessionState{Exists: true, Alive: true, SessionID: "s1"}}
-	a, _ := newTestAgent(t, sess, &now)
-	turns := &fakeTurns{reply: "ok"}
-	a.turns = turns
+	start := snapshotStart
 	units := []health.Unit{
-		{ID: "task:aa", State: health.Active, LastActive: now},
-		{ID: "task:bb", State: health.Active, LastActive: now.Add(-time.Minute)},
+		{ID: "task:aa", State: health.Active, LastActive: start},
+		{ID: "task:bb", State: health.Active, LastActive: start.Add(-time.Minute)},
 	}
-	a.health = func() health.Snapshot { return health.Snapshot{Units: slices.Clone(units)} }
-	a.markShift(now)
-	send := func(text string) string {
-		t.Helper()
-		now = now.Add(3 * time.Minute)
-		if err := a.Send(text, "", nil); err != nil {
-			t.Fatal(err)
-		}
-		return turns.sent[len(turns.sent)-1]
-	}
+	_, _, _, send := snapshotRig(t, 3*time.Minute, func() []health.Unit { return slices.Clone(units) })
 	if got := send("a"); !strings.Contains(got, "task:aa [活跃] · 最后输出 11-03 10:00") {
 		t.Fatalf("full snapshot: %q", got)
 	}
-	units[0].LastActive = now.Add(2 * time.Minute)
+	units[0].LastActive = start.Add(5 * time.Minute)
 	if got := send("b"); !strings.HasPrefix(got, "<naozhi-snapshot unchanged") {
 		t.Fatalf("only 最后输出 moved: %q", got)
 	}
-	units[1].LastActive = now.Add(time.Minute) // task:bb now leads the list
+	units[1].LastActive = start.Add(7 * time.Minute) // task:bb now leads the list
 	if got := send("c"); !strings.HasPrefix(got, "<naozhi-snapshot unchanged") {
 		t.Fatalf("only the order moved: %q", got)
 	}
@@ -1147,38 +1133,50 @@ func TestSnapshotUnchangedWhileRunning(t *testing.T) {
 	}
 }
 
-// TestSnapshotBackground: an idle session with background tasks open is
-// 后台中 · N, listed with the running ones, the tasks' latest progress after
-// its 最后输出. A change of how many are open is a change; their progress
-// alone is not, as 最后输出 is not.
-func TestSnapshotBackground(t *testing.T) {
-	loc := time.FixedZone("CST", 8*3600)
-	now := time.Date(2026, 11, 3, 10, 0, 0, 0, loc)
+// snapshotStart is when snapshotRig's agent starts.
+var snapshotStart = time.Date(2026, 11, 3, 10, 0, 0, 0, time.FixedZone("CST", 8*3600))
+
+// snapshotRig is an agent at snapshotStart on the live conversation s1, its
+// shift marked and its fleet what units says; send moves the clock by step,
+// sends text and returns what went out.
+func snapshotRig(t *testing.T, step time.Duration, units func() []health.Unit) (*Agent, *fakeSessions, *fakeTurns, func(string) string) {
+	t.Helper()
+	now := snapshotStart
 	sess := &fakeSessions{st: SessionState{Exists: true, Alive: true, SessionID: "s1"}}
 	a, _ := newTestAgent(t, sess, &now)
 	turns := &fakeTurns{reply: "ok"}
 	a.turns = turns
-	units := []health.Unit{
-		{ID: "task:aa", State: health.Idle, LastActive: now.Add(-48 * time.Hour), BackgroundN: 2, BackgroundProgress: now.Add(-time.Minute)},
-		{ID: "task:bb", State: health.Active, LastActive: now, BackgroundN: 1},
-	}
-	a.health = func() health.Snapshot { return health.Snapshot{Units: slices.Clone(units)} }
+	a.health = func() health.Snapshot { return health.Snapshot{Units: units()} }
 	a.markShift(now)
 	send := func(text string) string {
 		t.Helper()
-		now = now.Add(3 * time.Minute)
+		now = now.Add(step)
 		if err := a.Send(text, "", nil); err != nil {
 			t.Fatal(err)
 		}
 		return turns.sent[len(turns.sent)-1]
 	}
+	return a, sess, turns, send
+}
+
+// TestSnapshotBackground: an idle session with background tasks open is
+// 后台中 · N, listed with the running ones, the tasks' latest progress after
+// its 最后输出. A change of how many are open is a change; their progress
+// alone is not, as 最后输出 is not.
+func TestSnapshotBackground(t *testing.T) {
+	start := snapshotStart
+	units := []health.Unit{
+		{ID: "task:aa", State: health.Idle, LastActive: start.Add(-48 * time.Hour), BackgroundN: 2, BackgroundProgress: start.Add(-time.Minute)},
+		{ID: "task:bb", State: health.Active, LastActive: start, BackgroundN: 1},
+	}
+	_, _, _, send := snapshotRig(t, 3*time.Minute, func() []health.Unit { return slices.Clone(units) })
 	got := send("a")
 	for _, want := range []string{"会话（在跑 2，", "task:aa [后台中 · 2] · 最后输出 11-01 10:00 · 后台最近进度 11-03 09:59", "task:bb [活跃 · 后台 1]"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("full snapshot lacks %q: %q", want, got)
 		}
 	}
-	units[0].BackgroundProgress = now
+	units[0].BackgroundProgress = start.Add(3 * time.Minute)
 	if got := send("b"); !strings.HasPrefix(got, "<naozhi-snapshot unchanged") {
 		t.Fatalf("only the progress moved: %q", got)
 	}
@@ -1199,28 +1197,11 @@ func TestSnapshotBackground(t *testing.T) {
 // busy Planner is queued, and may reach another conversation by its turn;
 // a compaction may have summarised the last one away.
 func TestSnapshotMarkOnlyWhenSafe(t *testing.T) {
-	loc := time.FixedZone("CST", 8*3600)
 	const full, mark = `<naozhi-snapshot at="`, `<naozhi-snapshot unchanged since="10:05" at="2026-11-03 10:10 CST"/>`
 	setup := func(t *testing.T) (*Agent, *fakeSessions, *fakeTurns, func(string) string) {
-		now := time.Date(2026, 11, 3, 10, 0, 0, 0, loc)
-		sess := &fakeSessions{st: SessionState{Exists: true, Alive: true, SessionID: "s1"}}
-		a, _ := newTestAgent(t, sess, &now)
-		turns := &fakeTurns{reply: "ok"}
-		a.turns = turns
-		last := now
-		a.health = func() health.Snapshot {
-			return health.Snapshot{Units: []health.Unit{{ID: "dashboard:direct:x:general", State: health.Idle, LastActive: last}}}
-		}
-		a.markShift(now)
-		send := func(text string) string {
-			t.Helper()
-			now = now.Add(5 * time.Minute)
-			if err := a.Send(text, "", nil); err != nil {
-				t.Fatal(err)
-			}
-			return turns.sent[len(turns.sent)-1]
-		}
-		return a, sess, turns, send
+		return snapshotRig(t, 5*time.Minute, func() []health.Unit {
+			return []health.Unit{{ID: "dashboard:direct:x:general", State: health.Idle, LastActive: snapshotStart}}
+		})
 	}
 
 	t.Run("its turn never ran", func(t *testing.T) {

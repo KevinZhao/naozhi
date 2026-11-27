@@ -177,11 +177,6 @@ func TestTouchNow(t *testing.T) {
 	if got := r.w.Settled(key); !got.Equal(r.now) || r.writes() != 2 {
 		t.Fatalf("unchanged: settled %v writes %d, want %v 2", got, r.writes(), r.now)
 	}
-	var none *Writer
-	none.TouchNow(key)
-	if got := none.Settled(key); !got.IsZero() {
-		t.Errorf("a nil Writer settled %v", got)
-	}
 }
 
 // TestUnchangedNotWritten: a digest whose content is the same is not
@@ -349,9 +344,10 @@ func TestRun(t *testing.T) {
 func TestNilWriter(t *testing.T) {
 	var w *Writer
 	w.Touch("k")
+	w.TouchNow("k")
 	w.Sweep()
 	w.Run(context.Background())
-	if w.Path("k") != "" || !w.ReportShown("k").IsZero() {
+	if w.Path("k") != "" || !w.ReportShown("k").IsZero() || !w.Settled("k").IsZero() {
 		t.Fatal("nil Path")
 	}
 	if _, ok := w.State("k"); ok {
