@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -116,9 +115,6 @@ func TestSessionUsage_MissingTranscriptNotFound(t *testing.T) {
 // A symlinked agent transcript or workflow directory is not followed, though
 // what it points at holds in-window usage.
 func TestSessionUsage_SymlinksNotFollowed(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlinks need privileges on windows")
-	}
 	proj := t.TempDir()
 	sub := SubagentsDir(proj, usageSID)
 	recent := usageT0.Add(time.Hour)

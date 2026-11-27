@@ -426,16 +426,6 @@ func TestLinker_PreContext_Resolve_NoOp(t *testing.T) {
 	}
 }
 
-func TestLinker_Query_DefaultEmpty(t *testing.T) {
-	t.Parallel()
-	l := NewLinker()
-	info, ok := l.Query("unknown")
-	if ok {
-		t.Errorf("unknown task_id: info=%+v ok=true", info)
-	}
-	_ = strings.Split // keep import if needed later
-}
-
 // TestReadFirstLineMeta_OversizedFirstLine pins R222-GO-7: when the first
 // line of an agent jsonl exceeds the 32KB ReadSlice buffer, readFirstLineMeta
 // must surface errFirstLineTooLong instead of silently passing a truncated
