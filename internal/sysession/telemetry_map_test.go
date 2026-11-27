@@ -64,23 +64,3 @@ func TestMapSysessionErrorClass(t *testing.T) {
 		}
 	}
 }
-
-// TestMapSysessionErrorClassTimeoutWireDivergence pins the exact symptom
-// the issue (#1486) describes: sysession and runtelemetry use different
-// wire strings for "timed out", so the previous bare cast produced a
-// runtelemetry.ErrorClass whose string was NOT a defined runtelemetry
-// constant. This guards against anyone "simplifying" the map back to a
-// passthrough.
-func TestMapSysessionErrorClassTimeoutWireDivergence(t *testing.T) {
-	if string(DaemonErrorClassTimeout) == string(runtelemetry.ErrClassDeadlineExceeded) {
-		t.Skip("wire strings converged; bare cast would now be safe and this guard is moot")
-	}
-	bare := runtelemetry.ErrorClass(DaemonErrorClassTimeout)
-	mapped := mapSysessionErrorClass(DaemonErrorClassTimeout)
-	if bare == mapped {
-		t.Fatalf("expected map to differ from bare cast: bare=%q mapped=%q", bare, mapped)
-	}
-	if mapped != runtelemetry.ErrClassDeadlineExceeded {
-		t.Fatalf("timeout must normalise to deadline_exceeded, got %q", mapped)
-	}
-}

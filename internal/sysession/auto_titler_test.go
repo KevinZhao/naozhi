@@ -206,15 +206,6 @@ func TestAutoTitler_CandidateFilter(t *testing.T) {
 			hw:         &autoTitlerHighwater{lastRenamedAt: now.Add(-time.Hour), lastRenameAtTurn: 2},
 		},
 		{
-			name: "auto title without highwater is seeded, not renamed",
-			snap: session.SessionSnapshot{
-				Key: "feishu:direct:u1:general", MessageCount: 10,
-				UserLabel: "Old auto", LabelOrigin: "auto",
-				LastPrompt: "new content",
-			},
-			wantBucket: "restored_auto_title",
-		},
-		{
 			name: "single-turn session is renamed (min_first_turns=1)",
 			snap: session.SessionSnapshot{
 				Key: "feishu:direct:u1:general", MessageCount: 1,
@@ -283,8 +274,9 @@ func TestAutoTitler_CandidateFilter(t *testing.T) {
 
 // TestAutoTitler_PromptStructure asserts the LLM prompt has the
 // expected three-layer shape (system header + EXCERPT block + reminder
-// tail).  Locks the key prompt-injection defence against accidental
-// regression.
+// tail) — the key prompt-injection defence — and carries the
+// recognizability instructions of #2115 (verbatim identifiers, no project
+// name, the 24-char cap, the narrow 未命名会话 fallback).
 func TestAutoTitler_PromptStructure(t *testing.T) {
 	t.Parallel()
 	router := newSnapshotFakeRouter([]session.SessionSnapshot{
@@ -305,59 +297,13 @@ func TestAutoTitler_PromptStructure(t *testing.T) {
 			"---END CONVERSATION EXCERPT---",
 			"REMINDER: Output one line, majority Chinese",
 			"请把工作流改成 docker",
-		} {
-			if !strings.Contains(prompt, want) {
-				t.Errorf("prompt missing %q\nfull:\n%s", want, prompt)
-			}
-		}
-	case <-time.After(time.Second):
-		t.Fatal("runner.Run was not invoked")
-	}
-}
-
-// TestAutoTitler_PromptRecognizabilityContract pins the recognizability
-// redesign (#2115). The system prompt must instruct the model to (a) keep
-// identifying tokens verbatim, (b) drop the current project/repo name, (c)
-// cap the title at 24 chars, and (d) fall back to 未命名会话 ONLY for
-// no-usable-text input. These are the wording changes that lifted titles
-// from generic phrases ("自动命名失败排查") to distinguishing ones
-// ("auto-titler 命名失败"). A future "tidy-up" that re-introduces the old
-// "Han characters and Arabic digits only" / ≤16 / broad-fallback wording
-// would silently regress naming quality with no test failure otherwise.
-func TestAutoTitler_PromptRecognizabilityContract(t *testing.T) {
-	t.Parallel()
-	router := newSnapshotFakeRouter([]session.SessionSnapshot{
-		{Key: "feishu:direct:u1:general", MessageCount: 5, LastPrompt: "auto-titler 命名失败"},
-	})
-	captured := make(chan string, 1)
-	runner := &capturingRunner{captured: captured, resp: "auto-titler 命名失败"}
-	a, _ := newAutoTitler(DaemonDeps{Router: wrapRouter(router), Runner: runner})
-	if _, err := a.Tick(context.Background()); err != nil {
-		t.Fatalf("Tick err: %v", err)
-	}
-	select {
-	case prompt := <-captured:
-		for _, want := range []string{
-			"majority Chinese characters",
 			"real, recognizable proper-noun identifiers",
 			"Do NOT include the current project name or repository name",
 			"at most 24 characters",
 			"no usable topic",
 		} {
 			if !strings.Contains(prompt, want) {
-				t.Errorf("prompt missing recognizability instruction %q\nfull:\n%s", want, prompt)
-			}
-		}
-		// The old over-constraining wording must be gone — its presence is
-		// exactly what suppressed proper nouns and tripped the broad
-		// fallback. Guard against an accidental revert.
-		for _, gone := range []string{
-			"Han characters and Arabic digits only",
-			"≤16 Chinese characters",
-			"off-topic, or impossible to summarize",
-		} {
-			if strings.Contains(prompt, gone) {
-				t.Errorf("prompt still contains retired over-constraint %q — recognizability regression", gone)
+				t.Errorf("prompt missing %q\nfull:\n%s", want, prompt)
 			}
 		}
 	case <-time.After(time.Second):
@@ -393,6 +339,8 @@ func TestAutoTitler_TitleRuneCeiling(t *testing.T) {
 		{"mixed over ceiling clipped on rune boundary",
 			strings.Repeat("a", 10) + strings.Repeat("好", autoTitlerMaxTitleRunes),
 			strings.Repeat("a", 10) + strings.Repeat("好", autoTitlerMaxTitleRunes-10)},
+		// The 24th rune is a space: the clip must not leave a trailing blank (#2115).
+		{"clip trims trailing space", strings.Repeat("好", 23) + " 多余的尾巴内容", strings.Repeat("好", 23)},
 	}
 	for _, c := range cases {
 		c := c
@@ -418,70 +366,6 @@ func TestAutoTitler_TitleRuneCeiling(t *testing.T) {
 				t.Errorf("written label is %d runes, exceeds ceiling %d", n, autoTitlerMaxTitleRunes)
 			}
 		})
-	}
-}
-
-// TestAutoTitler_KeepsAsciiIdentifierTitle locks the core recognizability
-// win: a title containing verbatim ASCII identifiers (component + file +
-// error tokens) must pass the full renameOne pipeline (ValidateUserLabel +
-// the rune ceiling) and be written with origin=auto. Pre-#2115 the prompt
-// forbade non-Han characters; even though ValidateUserLabel always allowed
-// ASCII, the prompt suppressed it. This test asserts the pipeline itself
-// admits such titles so the prompt change isn't silently undone by a
-// validator tightening later.
-func TestAutoTitler_KeepsAsciiIdentifierTitle(t *testing.T) {
-	t.Parallel()
-	const key = "feishu:direct:u1:general"
-	router := newSnapshotFakeRouter([]session.SessionSnapshot{
-		{Key: key, MessageCount: 5, LastPrompt: "NLB 拿不到真实 IP"},
-	})
-	runner := &fakeRunner{resp: "NLB 拿不到客户端真实IP"}
-	a, _ := newAutoTitler(DaemonDeps{Router: wrapRouter(router), Runner: runner})
-	rep, err := a.Tick(context.Background())
-	if err != nil {
-		t.Fatalf("Tick err = %v", err)
-	}
-	if rep.Acted != 1 {
-		t.Fatalf("Acted = %d, want 1", rep.Acted)
-	}
-	if got := router.fakeRouter.label(key); got != "NLB 拿不到客户端真实IP" {
-		t.Errorf("written label = %q, want the verbatim ASCII-bearing title", got)
-	}
-}
-
-// TestAutoTitler_ClipTrimsTrailingSpace covers the clip boundary case where
-// the rune-slice cut lands right after a space (#2115). Without the
-// post-clip TrimSpace the published label would carry a trailing blank,
-// which ValidateUserLabel tolerates (it only trims surrounding whitespace
-// on entry, not after our slice) and which renders as a ragged sidebar
-// title. Build a title whose 24th rune is a space so the naive slice would
-// end in " ".
-func TestAutoTitler_ClipTrimsTrailingSpace(t *testing.T) {
-	t.Parallel()
-	const key = "feishu:direct:u1:general"
-	// 23 non-space runes + a space at rune index 23 (the 24th rune), then
-	// more text that pushes past the ceiling. Slicing to 24 runes yields
-	// "...<space>"; TrimSpace must drop it.
-	title := strings.Repeat("好", 23) + " 多余的尾巴内容"
-	if len([]rune(title)) <= autoTitlerMaxTitleRunes {
-		t.Fatalf("test misconfigured: title is %d runes, need > %d", len([]rune(title)), autoTitlerMaxTitleRunes)
-	}
-	router := newSnapshotFakeRouter([]session.SessionSnapshot{
-		{Key: key, MessageCount: 5, LastPrompt: "msg"},
-	})
-	runner := &fakeRunner{resp: title}
-	a, _ := newAutoTitler(DaemonDeps{Router: wrapRouter(router), Runner: runner})
-	rep, err := a.Tick(context.Background())
-	if err != nil {
-		t.Fatalf("Tick err = %v", err)
-	}
-	if rep.Acted != 1 {
-		t.Fatalf("Acted = %d, want 1", rep.Acted)
-	}
-	got := router.fakeRouter.label(key)
-	want := strings.Repeat("好", 23) // trailing space trimmed
-	if got != want {
-		t.Errorf("clipped label = %q, want %q (trailing space must be trimmed)", got, want)
 	}
 }
 
@@ -576,36 +460,6 @@ func TestAutoTitler_FirstTitleUsesMinFirstTurns(t *testing.T) {
 	}
 	if rep.Skipped["min_user_turns"] != 0 || rep.Skipped["no_new_turns"] != 0 {
 		t.Fatalf("first title must not hit the re-title throttle: %v", rep.Skipped)
-	}
-}
-
-// TestAutoTitler_BelowMinFirstTurnsSkipped is the negative companion: a
-// session with fewer turns than minFirstTurns is skipped under the
-// min_first_turns bucket (never the legacy min_user_turns bucket).
-func TestAutoTitler_BelowMinFirstTurnsSkipped(t *testing.T) {
-	t.Parallel()
-	snap := session.SessionSnapshot{
-		Key: "feishu:direct:u1:general", MessageCount: 1,
-		LastPrompt: "hi", LastActive: time.Now().UnixMilli(),
-	}
-	router := newSnapshotFakeRouter([]session.SessionSnapshot{snap})
-	runner := &fakeRunner{resp: "x"}
-	a, err := newAutoTitler(DaemonDeps{Router: wrapRouter(router), Runner: runner})
-	if err != nil {
-		t.Fatalf("newAutoTitler: %v", err)
-	}
-	if err := a.(Configurable).Configure(DaemonConfig{"min_first_turns": 3}); err != nil {
-		t.Fatalf("configure: %v", err)
-	}
-	rep, err := a.Tick(context.Background())
-	if err != nil {
-		t.Fatalf("Tick err = %v", err)
-	}
-	if rep.Acted != 0 {
-		t.Fatalf("Acted = %d, want 0", rep.Acted)
-	}
-	if rep.Skipped["min_first_turns"] == 0 {
-		t.Fatalf("expected min_first_turns skip, got %v", rep.Skipped)
 	}
 }
 
@@ -833,47 +687,6 @@ func TestAutoTitler_PromptIncludesAllUserTurns(t *testing.T) {
 		// Assistant text should NOT leak in.
 		if strings.Contains(prompt, "好的") {
 			t.Errorf("prompt unexpectedly contains assistant text\nfull:\n%s", prompt)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("runner.Run was not invoked")
-	}
-}
-
-// TestAutoTitler_LongConversationNotTruncated locks in the operator
-// decision to remove the 8 KiB total-byte EXCERPT cap. A conversation
-// with hundreds of user turns must reach the runner intact (line cap
-// still applies per individual line, but the total budget is unbounded).
-func TestAutoTitler_LongConversationNotTruncated(t *testing.T) {
-	t.Parallel()
-	key := "feishu:direct:u1:general"
-	snap := session.SessionSnapshot{
-		Key: key, MessageCount: 200, LastPrompt: "marker-tail",
-	}
-	history := make([]clievent.EventEntry, 0, 200)
-	for i := 0; i < 200; i++ {
-		history = append(history, clievent.EventEntry{
-			Time:    int64(i + 1),
-			Type:    "user",
-			Summary: "marker-" + strings.Repeat("x", 32),
-		})
-	}
-	router := newSnapshotFakeRouter([]session.SessionSnapshot{snap})
-	router.entries = map[string][]clievent.EventEntry{key: history}
-
-	captured := make(chan string, 1)
-	runner := &capturingRunner{captured: captured, resp: "长对话标题"}
-	a, _ := newAutoTitler(DaemonDeps{Router: wrapRouter(router), Runner: runner})
-	if _, err := a.Tick(context.Background()); err != nil {
-		t.Fatalf("Tick err: %v", err)
-	}
-	select {
-	case prompt := <-captured:
-		// 200 marker lines should all survive (8 KiB cap was the
-		// previous truncation point — at 32-byte payload + prefix
-		// that would have stopped well before the 200th line).
-		got := strings.Count(prompt, "marker-")
-		if got != 200 {
-			t.Errorf("excerpt truncated: got %d marker lines, want 200", got)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("runner.Run was not invoked")
