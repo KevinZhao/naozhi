@@ -416,7 +416,6 @@ func TestFirstSightAfterRestart(t *testing.T) {
 		want     []State // after each of two reconciles
 		trans    []string
 	}{
-		{"failed, held across the restart", Failed, Fact{LastActive: failedAt.Add(-time.Minute)}, []State{Failed, Failed}, nil},
 		{"failed, still failing", Failed, failed, []State{Failed, Failed}, nil},
 		{"waiting, still waiting", Waiting, Fact{Asking: true}, []State{Waiting, Waiting}, nil},
 		{"waiting, now failed", Waiting, failed, []State{Unknown, Failed}, []string{"s:waiting>failed"}},

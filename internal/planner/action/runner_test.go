@@ -1053,46 +1053,6 @@ func TestHoldEarlierThanArmed(t *testing.T) {
 	}
 }
 
-// TestTaskEndedAcrossRestart: a turn end a restart cut short of its check
-// (the grace, a busy Planner) is checked by the next run, from the sidecar,
-// and only once; a checked one is not checked again.
-func TestTaskEndedAcrossRestart(t *testing.T) {
-	r, g, _, side, dir := newRunner(t)
-	r.cfg.Tasks = task.New(task.Config{Sessions: side})
-	r.cfg.Reports = func(time.Time, time.Time) []string { return nil }
-	r.Handle(block(`{"type":"dispatch","workspace":"` + filepath.Base(dir) + `","title":"iso 写 hello","model":"","message":"写一个 hello.md"}`))
-	key := g.spawned[0]
-	g.told = nil
-	r.Result(key, "hello.md 写好了") // the restart comes before its check
-
-	cfg := r.cfg
-	cfg.Sessions = sidecar.Open(g.sideDir, nil)
-	cfg.Tasks = task.New(task.Config{Sessions: cfg.Sessions})
-	for run := range 2 {
-		r2 := New(cfg)
-		r2.grace = 0
-		r2.recheck()
-		wait := 50 * time.Millisecond
-		if run == 0 {
-			wait = 5 * time.Second
-		}
-		select {
-		case e := <-r2.endCh:
-			if run > 0 {
-				t.Fatalf("checked again after the receipt: %+v", e)
-			}
-			r2.checkEnded(e)
-		case <-time.After(wait):
-			if run == 0 {
-				t.Fatal("the turn end the restart cut short was never checked")
-			}
-		}
-		if len(g.told) != 1 || !strings.Contains(g.told[0], key) || !strings.Contains(g.told[0], "hello.md 写好了") {
-			t.Fatalf("run %d: told = %q", run, g.told)
-		}
-	}
-}
-
 // TestStatusFormatParses: the format a receipt spells out is a block Parse
 // accepts as written, with only why to fill in.
 func TestStatusFormatParses(t *testing.T) {
@@ -1684,65 +1644,74 @@ func TestSendMessageIsAQuestion(t *testing.T) {
 	}
 }
 
-// TestTaskReportAcrossRestart: a turn that ended with a report and that a
-// restart cut short of its check gets the report line from the next run,
-// read back from the sidecar, never the receipt of an unreported turn.
-func TestTaskReportAcrossRestart(t *testing.T) {
-	r, g, _, side, dir := newRunner(t)
-	r.cfg.Tasks = task.New(task.Config{Sessions: side})
-	r.Handle(block(`{"type":"dispatch","workspace":"` + filepath.Base(dir) + `","title":"iso 写 hello","model":"","message":"写一个 hello.md"}`))
-	key := g.spawned[0]
-	g.told = nil
-	r.Result(key, reportReply("done", "hello.md 写好了")) // the restart comes before its check
+// TestTaskEndedAcrossRestart: a turn end a restart cut short of its check
+// (the grace, a busy Planner) is checked by the next run, from the sidecar,
+// and only once; a checked one is not checked again. One that ended with a
+// report gets the report line, read back from the sidecar, never the receipt
+// of an unreported turn; the reason a report block did not parse is on disk
+// with its turn too, so the receipt still says the block was malformed.
+func TestTaskEndedAcrossRestart(t *testing.T) {
+	cases := []struct {
+		name, reply string
+		check       func(t *testing.T, key string, g *fakeGateway)
+	}{
+		{"unreported", "hello.md 写好了", func(t *testing.T, key string, g *fakeGateway) {
+			if len(g.told) != 1 || !strings.Contains(g.told[0], key) || !strings.Contains(g.told[0], "hello.md 写好了") {
+				t.Fatalf("told = %q", g.told)
+			}
+		}},
+		{"report", reportReply("done", "hello.md 写好了"), func(t *testing.T, key string, g *fakeGateway) {
+			if want := key + "（iso 写 hello）汇报：完成 · 「hello.md 写好了」"; len(g.told) != 1 || g.told[0] != want {
+				t.Fatalf("told = %q, want %q", g.told, want)
+			}
+			if !slices.Contains(g.notes, "📨 "+key+" 汇报：完成 · hello.md 写好了") {
+				t.Errorf("notes = %q", g.notes)
+			}
+		}},
+		{"malformed report", "写好了。\n" + reportBlock(`{"state":"finished","summary":"写好了"}`), func(t *testing.T, _ string, g *fakeGateway) {
+			if len(g.told) != 1 || !strings.Contains(g.told[0], "汇报块格式不对（state 只能是") {
+				t.Fatalf("told = %q", g.told)
+			}
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r, g, _, side, dir := newRunner(t)
+			r.cfg.Tasks = task.New(task.Config{Sessions: side})
+			r.cfg.Reports = func(time.Time, time.Time) []string { return nil }
+			r.Handle(block(`{"type":"dispatch","workspace":"` + filepath.Base(dir) + `","title":"iso 写 hello","model":"","message":"写一个 hello.md"}`))
+			key := g.spawned[0]
+			g.told = nil
+			r.Result(key, c.reply) // the restart comes before its check
+			if m, _ := side.Get(key); m.Turn == nil || !m.Turn.Check || c.name == "malformed report" && (m.Turn.ReportErr == "" || m.Report != nil) {
+				t.Fatalf("sidecar = %+v, want the turn left unchecked", m)
+			}
 
-	cfg := r.cfg
-	cfg.Sessions = sidecar.Open(g.sideDir, nil)
-	cfg.Tasks = task.New(task.Config{Sessions: cfg.Sessions})
-	r2 := New(cfg)
-	r2.grace = 0
-	r2.recheck()
-	select {
-	case e := <-r2.endCh:
-		r2.checkEnded(e)
-	case <-time.After(5 * time.Second):
-		t.Fatal("the turn end the restart cut short was never checked")
-	}
-	if want := key + "（iso 写 hello）汇报：完成 · 「hello.md 写好了」"; len(g.told) != 1 || g.told[0] != want {
-		t.Fatalf("told = %q, want %q", g.told, want)
-	}
-	if !slices.Contains(g.notes, "📨 "+key+" 汇报：完成 · hello.md 写好了") {
-		t.Errorf("notes = %q", g.notes)
-	}
-}
-
-// TestTaskReportErrAcrossRestart: the reason a report block did not parse
-// is on disk with its turn, so the receipt the next run sends for it still
-// says the block was malformed.
-func TestTaskReportErrAcrossRestart(t *testing.T) {
-	r, g, _, side, dir := newRunner(t)
-	r.cfg.Tasks = task.New(task.Config{Sessions: side})
-	r.Handle(block(`{"type":"dispatch","workspace":"` + filepath.Base(dir) + `","title":"iso 写 hello","model":"","message":"写一个 hello.md"}`))
-	key := g.spawned[0]
-	g.told = nil
-	r.Result(key, "写好了。\n"+reportBlock(`{"state":"finished","summary":"写好了"}`)) // the restart comes before its check
-	if m, _ := side.Get(key); m.Turn == nil || !m.Turn.Check || m.Turn.ReportErr == "" || m.Report != nil {
-		t.Fatalf("sidecar = %+v", m)
-	}
-
-	cfg := r.cfg
-	cfg.Sessions = sidecar.Open(g.sideDir, nil)
-	cfg.Tasks = task.New(task.Config{Sessions: cfg.Sessions})
-	r2 := New(cfg)
-	r2.grace = 0
-	r2.recheck()
-	select {
-	case e := <-r2.endCh:
-		r2.checkEnded(e)
-	case <-time.After(5 * time.Second):
-		t.Fatal("the turn end the restart cut short was never checked")
-	}
-	if len(g.told) != 1 || !strings.Contains(g.told[0], "汇报块格式不对（state 只能是") {
-		t.Fatalf("told = %q", g.told)
+			cfg := r.cfg
+			cfg.Sessions = sidecar.Open(g.sideDir, nil)
+			cfg.Tasks = task.New(task.Config{Sessions: cfg.Sessions})
+			for run := range 2 {
+				r2 := New(cfg)
+				r2.grace = 0
+				r2.recheck()
+				wait := 50 * time.Millisecond
+				if run == 0 {
+					wait = 5 * time.Second
+				}
+				select {
+				case e := <-r2.endCh:
+					if run > 0 {
+						t.Fatalf("checked again after the receipt: %+v", e)
+					}
+					r2.checkEnded(e)
+				case <-time.After(wait):
+					if run == 0 {
+						t.Fatal("the turn end the restart cut short was never checked")
+					}
+				}
+				c.check(t, key, g)
+			}
+		})
 	}
 }
 

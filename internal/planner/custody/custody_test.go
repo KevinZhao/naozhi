@@ -630,30 +630,6 @@ func TestDisabled(t *testing.T) {
 	}
 }
 
-func TestIrreversible(t *testing.T) {
-	for _, tc := range []struct {
-		text string
-		want bool
-	}{
-		{"要 push 到远端吗？", true},
-		{"Merge the PR (Recommended)", true},
-		{"合并到 master", true},
-		{"现在发版吗", true},
-		{"打 tag v1.2.0", true},
-		{"Deploy to prod", true},
-		{"部署到测试环境", true},
-		{"给客户发邮件", true},
-		{"删除远程分支 feat/x", true},
-		{"去支付", true},
-		{"先跑测试（推荐）", false},
-		{"改用表驱动测试", false},
-	} {
-		if got := Irreversible(tc.text); got != tc.want {
-			t.Errorf("Irreversible(%q) = %v, want %v", tc.text, got, tc.want)
-		}
-	}
-}
-
 // The user having the Planner halt a session (§15.15 ②, D119) is custody's
 // own stop: every message custody would send it is refused, a retry of a
 // failure too, the stop is journaled and left to the user, and it holds

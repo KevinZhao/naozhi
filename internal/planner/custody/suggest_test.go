@@ -78,16 +78,24 @@ func TestSuggest(t *testing.T) {
 	}
 }
 
-// Every keyword of the gateway's list (D93) in the recommended option keeps
-// custody from answering it.
+// Every keyword of the gateway's list (D93) is Irreversible, and in the
+// recommended option keeps custody from answering it.
 func TestSuggestIrreversibleKeywords(t *testing.T) {
+	for _, safe := range []string{"先跑测试（推荐）", "改用表驱动测试"} {
+		if Irreversible(safe) {
+			t.Errorf("Irreversible(%q) = true", safe)
+		}
+	}
 	for _, opt := range []string{
 		"现在 push", "git push origin main", "Merge the PR", "合并到 master", "Cut a release", "现在发版", "打 tag v1.2.0", "git tag v1.2.0",
-		"给客户发邮件", "在群里发消息", "对外发送报告", "删除远程仓库", "删除分支 feat/x", "删除资源组", "deploy to prod", "部署到测试环境",
-		"去付款", "用信用卡支付",
+		"给客户发邮件", "在群里发消息", "对外发送报告", "删除远程仓库", "删除分支 feat/x", "删除资源组", "deploy to prod", "Deploy to prod", "部署到测试环境",
+		"去付款", "去支付", "用信用卡支付",
 		"推送到远端", "现在推送", "提交并推送", "强推", "发布 v1.2", "发布到 npm", "npm publish", "上线", "发送邮件给客户", "发一封邮件",
-		"删除远端分支", "删掉分支", "删掉远程的 tag", "合入主干", "打标签 v1.2",
+		"删除远端分支", "删除远程分支 feat/x", "删掉分支", "删掉远程的 tag", "合入主干", "打标签 v1.2",
 	} {
+		if !Irreversible(opt) {
+			t.Errorf("Irreversible(%q) = false", opt)
+		}
 		for _, mark := range recommendedMarks {
 			card := clievent.AskQuestion{Items: []clievent.AskQuestionItem{item("下一步", "接下来做什么？", opt+" "+mark, "先停下")}}
 			if s := Suggest(card); s.Act != ActUser {
