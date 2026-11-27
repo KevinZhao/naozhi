@@ -325,6 +325,19 @@ func TestDispatchCommand_UrgentCopyNamesToolDelay(t *testing.T) {
 	}
 }
 
+// TestDispatchCommand_BareCdShowsUsage pins that a bare /cd is answered with
+// the usage line rather than falling through to the agent as a chat turn.
+func TestDispatchCommand_BareCdShowsUsage(t *testing.T) {
+	fp := &fakePlatform{}
+	d := newTestDispatcher(fp)
+	if !d.dispatchCommand(context.Background(), incomingMsg("/cd"), "/cd", slog.Default()) {
+		t.Fatal("expected bare /cd to be handled as a command")
+	}
+	if !strings.Contains(fp.lastReply(), "用法: /cd") {
+		t.Errorf("bare /cd reply = %q, want the usage line", fp.lastReply())
+	}
+}
+
 // TestResolveAgentToken pins the two-stage resolution shared by both
 // handleNewCommand branches (R0530-CR-1): exact lowercase key lookup, then
 // EqualFold scan over stored (possibly mixed-case) values.
