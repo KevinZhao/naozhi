@@ -119,6 +119,9 @@ func (d *Detector) Observe(now time.Time, procs []Proc) Action {
 	return ActNone
 }
 
+// Undecline takes Decline back: the followed meeting may be offered again.
+func (d *Detector) Undecline() { d.declined = false }
+
 // Decline marks the followed meeting as stopped by the user.
 func (d *Detector) Decline() {
 	if d.app != nil {

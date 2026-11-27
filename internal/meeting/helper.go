@@ -30,6 +30,9 @@ type Auth struct {
 // Ready reports whether both grants are in place.
 func (a Auth) Ready() bool { return a.Microphone == "authorized" && a.AudioCapture == "authorized" }
 
+// Denied reports a grant refused: only System Settings can change it, so asking again is no use.
+func (a Auth) Denied() bool { return a.Microphone == "denied" || a.AudioCapture == "denied" }
+
 // Event is one line naozhi-audio record prints.
 type Event struct {
 	Event    string  `json:"event"`

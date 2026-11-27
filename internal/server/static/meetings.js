@@ -195,7 +195,7 @@ async function refreshList() {
     return;
   }
   $('mtg-body').innerHTML = mt.meetings.length ? mt.meetings.map(rowHtml).join('') :
-    '<div class="files-empty">还没有会议。开启 meeting.enabled 并授权后，线上会议会自动录音。</div>';
+    '<div class="files-empty">还没有会议。开启 meeting.enabled 并授权后，线上会议开始时顶部会出现「录音」按钮，点了才录。</div>';
 }
 
 function rowHtml(m) {

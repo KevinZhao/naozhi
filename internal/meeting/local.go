@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 )
 
 //go:embed engine/naozhi_meeting_engine.py
@@ -108,7 +109,7 @@ func (e *LocalEngine) Transcribe(ctx context.Context, wav string, h Hints) ([]Se
 	if err := json.Unmarshal(b, &res); err != nil {
 		return nil, err
 	}
-	return res.Segments, nil
+	return dropHintEchoes(res.Segments, hintText(h)), nil
 }
 
 // hintText is the recogniser's context prompt: names and terms it should spell right.
@@ -124,4 +125,47 @@ func hintText(h Hints) string {
 		parts = append(parts, "可能出现的项目与术语："+strings.Join(h.Terms[:min(len(h.Terms), maxTerms)], "、"))
 	}
 	return strings.Join(parts, "\n")
+}
+
+// hintLabels are the labels hintText writes; an echo carries one of them.
+var hintLabels = []string{"会议", "参会人", "可能出现的项目与术语"}
+
+// dropHintEchoes drops the segments that only repeat the context prompt: over a nearly silent
+// stretch the recogniser writes out its context ("会议：<标题>。参会人：…") as if someone said
+// it. A segment is an echo when, punctuation and spaces aside, it is a piece of the prompt
+// that carries one of its labels; speech that merely names the meeting is kept.
+func dropHintEchoes(segs []Segment, hint string) []Segment {
+	h := echoKey(hint)
+	if h == "" {
+		return segs
+	}
+	out := segs[:0]
+	for _, s := range segs {
+		k := echoKey(s.Text)
+		if k != "" && strings.Contains(h, k) && hasHintLabel(k) {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+func hasHintLabel(k string) bool {
+	for _, l := range hintLabels {
+		if strings.Contains(k, l) {
+			return true
+		}
+	}
+	return false
+}
+
+// echoKey is s with only its letters and digits, lower-cased.
+func echoKey(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
