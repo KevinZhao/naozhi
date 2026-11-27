@@ -59,6 +59,3 @@ func TestHandleFileGet_OpenOnce_NoFollowSymlink(t *testing.T) {
 		})
 	}
 }
-
-// containsBytes is provided by ws_retry_after_test.go in the same package —
-// reused here to keep the inode-swap fixture allocation-free.

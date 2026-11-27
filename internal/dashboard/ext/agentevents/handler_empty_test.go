@@ -5,10 +5,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/naozhi/naozhi/internal/cli/clievent"
-	"github.com/naozhi/naozhi/internal/session/agentlink"
-	"github.com/naozhi/naozhi/internal/subagent"
 )
 
 // TestAgentEvents_EmptyTranscriptReturnsEmptyArray: a resolved task whose
@@ -16,19 +12,7 @@ import (
 // treats a falsy body as "no data" and never subscribes to the live WS feed,
 // leaving a permanent spinner.
 func TestAgentEvents_EmptyTranscriptReturnsEmptyArray(t *testing.T) {
-	dir := claudeProjectsTestRoot(t)
-	path := writeTranscript(t, dir, "bbbbbbbbbbbbbbbbb", nil)
-
-	linker := subagent.NewLinker()
-	linker.SeedFromHistory([]clievent.EventEntry{{
-		Type:            "task_start",
-		ToolUseID:       "toolu_T",
-		TaskID:          "t1",
-		InternalAgentID: "agent-bbbbbbbbbbbbbbbbb",
-		JSONLPath:       path,
-		Subagent:        "worker",
-	}})
-	h := &Handler{linkerFor: func(string) agentlink.AgentLinker { return linker }, allowedRoot: claudeProjectsAllowedRoot()}
+	h := seededHandler(t)
 
 	w := httptest.NewRecorder()
 	h.HandleAgentEvents(w, agentEventsReq(testAgentEventsKey, "t1", "", ""))

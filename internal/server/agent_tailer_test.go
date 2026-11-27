@@ -11,18 +11,9 @@ import (
 	"github.com/naozhi/naozhi/internal/node"
 )
 
-// ─── fakeWSClient ───────────────────────────────────────────────────────
-//
-// A tiny in-memory wsClient stand-in. The real wsClient.SendJSON writes to
-// a websocket connection; here we capture every emitted node.ServerMsg so
-// tests can assert the agent_event / agent_meta / agent_done sequencing
-// without hoisting a full ws test harness.
-//
-// We reuse the real *wsClient type because tailerRegistry.subs maps it as
-// a key and tests rely on map identity. The trick is to point its send
-// channel at a capture goroutine — easier than faking the whole conn+mux
-// surface.
-
+// newCapturedClient is a real *wsClient (tailerRegistry.subs keys on it)
+// whose send channel feeds a capture goroutine, so tests read every
+// node.ServerMsg the tailer emits.
 func newCapturedClient(t *testing.T, hub *Hub) (*wsClient, <-chan node.ServerMsg) {
 	t.Helper()
 	c := &wsClient{
@@ -80,8 +71,6 @@ func writeJSONL(t *testing.T, dir, text string, append bool) string {
 	f.Close()
 	return path
 }
-
-// ─── tests ──────────────────────────────────────────────────────────────
 
 // TestTailer_RegistryEnsureIdempotent: ensureTailer called twice with the
 // same (key, taskID) returns the same tailer. RFC §3.5.4: the silent tailer
@@ -281,9 +270,6 @@ func TestTailer_DetachDoesNotStopTailer(t *testing.T) {
 	}
 }
 
-// TestTailer_DetachClientDropsAllSubscriptions: on WS disconnect, the
-// registry must drop every subscription the client held so stale pointers
-// don't linger in `subs` maps.
 // TestTailer_AttachAfterDoneClosedIsNoOp reproduces R20260622-LB-1 (#2259):
 // when a client's done channel is already closed (its pumps have torn down and
 // detachClient already ran), a late attach — readPump still mid-flight in
@@ -331,6 +317,9 @@ func TestTailer_AttachAfterDoneClosedIsNoOp(t *testing.T) {
 	}
 }
 
+// TestTailer_DetachClientDropsAllSubscriptions: on WS disconnect, the
+// registry must drop every subscription the client held so stale pointers
+// don't linger in `subs` maps.
 func TestTailer_DetachClientDropsAllSubscriptions(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

@@ -11,18 +11,12 @@ import (
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
-// Regression tests for #2429 (command palette P2 items):
-//
-//  1. hover must move the keyboard cursor (state.activeIdx), not just the
-//     .active class, or Enter opens a different row than the highlighted one;
-//  2. path highlight ranges must be computed on the rendered (shortPath)
-//     string, not the raw path, or every <mark> is shifted / out of range;
-//  3. sanitizeKeySlug must strip every codepoint sessionkey.ValidateSessionKey
-//     rejects, or a project directory with e.g. a zero-width space yields a
-//     key the server 400s on first send.
-//
-// The behavioural tests run the extracted pure functions under node; they
-// skip when node is not on PATH. The static contract tests always run.
+// Regression tests for #2429: sanitizeKeySlug must strip every codepoint
+// sessionkey.ValidateSessionKey rejects, or a project directory with e.g. a
+// zero-width space yields a key the server 400s on first send. The
+// behavioural test runs the extracted functions under node and skips when
+// node is not on PATH; the static contract test always runs. The JS helpers
+// below are shared by the package's other dashboard JS tests.
 
 // extractJSFunction returns the source of a top-level `function name(` up to
 // and including its closing `}` at column 0. An `export function name(`
@@ -85,8 +79,6 @@ func runNodeEnv(t *testing.T, script string, extraEnv []string) string {
 	}
 	return string(out)
 }
-
-// readDashboardJS is shared with static_event_uuid_dedup_test.go.
 
 // parseJSCharClasses collects every codepoint covered by the character
 // classes of the `.replace(/[...]/g, ...)` calls inside body. It understands

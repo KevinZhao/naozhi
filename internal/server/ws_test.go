@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -252,113 +253,58 @@ func TestWS_SubscribeAndHistory(t *testing.T) {
 	}
 }
 
-// TestWS_SubscribeWithLimit verifies the dashboard pagination fast path:
-// a fresh subscribe with limit=N only receives the newest N events instead
-// of the full event log.
-func TestWS_SubscribeWithLimit(t *testing.T) {
-	hub, router := newTestHub(t, "")
-	proc := session.NewTestProcess()
-	for i := 1; i <= 5; i++ {
-		proc.EventLog.Append(clievent.EventEntry{Time: int64(i * 1000), Type: "text", Summary: "msg"})
-	}
-	router.InjectSession("test:d:u:general", proc)
+// TestWS_SubscribeHasMore: a fresh subscribe with limit=N receives only the
+// newest N events, and its has_more is what mounts "load earlier" — a non-nil
+// false when the whole log fits (the "no more" answer must survive
+// serialization); an after-cursor catch-up is not an initial page, so it
+// omits has_more and the client keeps its fallback.
+func TestWS_SubscribeHasMore(t *testing.T) {
+	yes, no := true, false
+	for _, tc := range []struct {
+		name      string
+		events    int
+		msg       node.ClientMsg
+		wantTimes []int64
+		wantMore  *bool
+	}{
+		{"limit keeps newest", 5, node.ClientMsg{Limit: 2}, []int64{4000, 5000}, &yes},
+		{"whole log fits", 1, node.ClientMsg{Limit: 100}, []int64{1000}, &no},
+		{"after cursor", 2, node.ClientMsg{After: 500}, []int64{1000, 2000}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hub, router := newTestHub(t, "")
+			proc := session.NewTestProcess()
+			for i := 1; i <= tc.events; i++ {
+				proc.EventLog.Append(clievent.EventEntry{Time: int64(i * 1000), Type: "text", Summary: "msg"})
+			}
+			router.InjectSession("test:d:u:general", proc)
+			url, cleanup := startWSServer(t, hub)
+			defer cleanup()
+			conn := dialWS(t, url)
+			defer conn.Close()
 
-	url, cleanup := startWSServer(t, hub)
-	defer cleanup()
-
-	conn := dialWS(t, url)
-	defer conn.Close()
-
-	wsWrite(t, conn, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general", Limit: 2})
-
-	resp := wsRead(t, conn)
-	if resp.Type != "subscribed" {
-		t.Fatalf("type = %q, want subscribed", resp.Type)
-	}
-
-	resp = wsRead(t, conn)
-	if resp.Type != "history" {
-		t.Fatalf("type = %q, want history", resp.Type)
-	}
-	if len(resp.Events) != 2 {
-		t.Fatalf("events = %d, want 2 (limit should keep only newest)", len(resp.Events))
-	}
-	// Chronological order: newest two are time=4000 and time=5000.
-	if resp.Events[0].Time != 4000 || resp.Events[1].Time != 5000 {
-		t.Errorf("events times = [%d, %d], want [4000, 5000]",
-			resp.Events[0].Time, resp.Events[1].Time)
-	}
-	// has_more is what mounts "load earlier": the page holds 2 of 5 events.
-	if resp.HasMore == nil || !*resp.HasMore {
-		t.Errorf("has_more = %v, want true (3 older events exist beyond the limit=2 page)", resp.HasMore)
-	}
-}
-
-// TestWS_SubscribeLimitNoMore: the whole log fits in the page → has_more is a
-// non-nil false (the modern "no more" answer must survive serialization).
-func TestWS_SubscribeLimitNoMore(t *testing.T) {
-	hub, router := newTestHub(t, "")
-	proc := session.NewTestProcess()
-	proc.EventLog.Append(clievent.EventEntry{Time: 1000, Type: "text", Summary: "only"})
-	router.InjectSession("test:d:u:general", proc)
-
-	url, cleanup := startWSServer(t, hub)
-	defer cleanup()
-
-	conn := dialWS(t, url)
-	defer conn.Close()
-
-	wsWrite(t, conn, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general", Limit: 100})
-
-	resp := wsRead(t, conn)
-	if resp.Type != "subscribed" {
-		t.Fatalf("type = %q, want subscribed", resp.Type)
-	}
-	resp = wsRead(t, conn)
-	if resp.Type != "history" {
-		t.Fatalf("type = %q, want history", resp.Type)
-	}
-	if resp.HasMore == nil {
-		t.Fatal("has_more is nil on an initial history frame, want non-nil *bool false")
-	}
-	if *resp.HasMore {
-		t.Error("has_more = true, want false (the single event is the whole history)")
+			tc.msg.Type, tc.msg.Key = "subscribe", "test:d:u:general"
+			wsWrite(t, conn, tc.msg)
+			if resp := wsRead(t, conn); resp.Type != "subscribed" {
+				t.Fatalf("type = %q, want subscribed", resp.Type)
+			}
+			resp := wsRead(t, conn)
+			if resp.Type != "history" {
+				t.Fatalf("type = %q, want history", resp.Type)
+			}
+			var times []int64
+			for _, e := range resp.Events {
+				times = append(times, e.Time)
+			}
+			if !slices.Equal(times, tc.wantTimes) {
+				t.Errorf("event times = %v, want %v", times, tc.wantTimes)
+			}
+			if (resp.HasMore == nil) != (tc.wantMore == nil) || (resp.HasMore != nil && *resp.HasMore != *tc.wantMore) {
+				t.Errorf("has_more = %v, want %v", resp.HasMore, tc.wantMore)
+			}
+		})
 	}
 }
-
-// TestWS_SubscribeAfterOmitsHasMore: an after-cursor catch-up is not an initial
-// page, so has_more must be omitted (nil) — the client keeps its fallback.
-func TestWS_SubscribeAfterOmitsHasMore(t *testing.T) {
-	hub, router := newTestHub(t, "")
-	proc := session.NewTestProcess()
-	proc.EventLog.Append(clievent.EventEntry{Time: 1000, Type: "text"})
-	proc.EventLog.Append(clievent.EventEntry{Time: 2000, Type: "text"})
-	router.InjectSession("test:d:u:general", proc)
-
-	url, cleanup := startWSServer(t, hub)
-	defer cleanup()
-
-	conn := dialWS(t, url)
-	defer conn.Close()
-
-	wsWrite(t, conn, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general", After: 500})
-
-	resp := wsRead(t, conn)
-	if resp.Type != "subscribed" {
-		t.Fatalf("type = %q, want subscribed", resp.Type)
-	}
-	resp = wsRead(t, conn)
-	if resp.Type != "history" {
-		t.Fatalf("type = %q, want history", resp.Type)
-	}
-	if resp.HasMore != nil {
-		t.Errorf("has_more = %v, want nil (after-cursor catch-up is not an initial page)", *resp.HasMore)
-	}
-}
-
-// ─── Event push tests ────────────────────────────────────────────────────────
-
-// ─── Unsubscribe test ────────────────────────────────────────────────────────
 
 // ─── Send tests ──────────────────────────────────────────────────────────────
 
@@ -458,96 +404,36 @@ func TestWS_SendBusy(t *testing.T) {
 	}
 }
 
-func TestWS_SendMissingKey(t *testing.T) {
+// TestWS_SendRejects: a send without a key or text is an error ack, and so is
+// a text past the per-field cap (R59-SEC-H1) — rather than truncated, or
+// accepted and coalesced into a multi-MB CLI stdin write. A remote-node send
+// enforces the same cap, before the unknown-node lookup (R62-SEC-1), so a
+// dashboard user cannot bypass it by targeting a node.
+func TestWS_SendRejects(t *testing.T) {
 	hub, _ := newTestHub(t, "")
 	url, cleanup := startWSServer(t, hub)
 	defer cleanup()
-
-	conn := dialWS(t, url)
-	defer conn.Close()
-
-	wsWrite(t, conn, node.ClientMsg{Type: "send", Text: "hello"})
-	resp := wsRead(t, conn)
-
-	if resp.Type != "send_ack" {
-		t.Fatalf("type = %q, want send_ack", resp.Type)
-	}
-	if resp.Status != "error" {
-		t.Errorf("status = %q, want error", resp.Status)
-	}
-}
-
-func TestWS_SendMissingText(t *testing.T) {
-	hub, _ := newTestHub(t, "")
-	url, cleanup := startWSServer(t, hub)
-	defer cleanup()
-
-	conn := dialWS(t, url)
-	defer conn.Close()
-
-	wsWrite(t, conn, node.ClientMsg{Type: "send", Key: "test:d:u:general"})
-	resp := wsRead(t, conn)
-
-	if resp.Type != "send_ack" {
-		t.Fatalf("type = %q, want send_ack", resp.Type)
-	}
-	if resp.Status != "error" {
-		t.Errorf("status = %q, want error", resp.Status)
-	}
-}
-
-// Remote-node send must enforce the same per-field text cap as the local
-// send path. Without this guard an authenticated dashboard user who
-// targets a remote node can bypass the local cap and push up to
-// wsMaxMessageSize bytes into nc.Send, amplifying input into the remote
-// shim's 12 MB stdin line ceiling via coalesce at the remote. R62-SEC-1.
-func TestWS_RemoteSendTextTooLong(t *testing.T) {
-	hub, _ := newTestHub(t, "")
-	url, cleanup := startWSServer(t, hub)
-	defer cleanup()
-
-	conn := dialWS(t, url)
-	defer conn.Close()
 
 	big := strings.Repeat("x", maxWSSendTextBytes+1)
-	// Node name is syntactically valid (isValidNodeID) but not registered
-	// on the hub. The cap check must fire before the unknown-node lookup
-	// so oversized text is rejected even when the target node is missing,
-	// matching the defence-in-depth shape of handleSend.
-	wsWrite(t, conn, node.ClientMsg{Type: "send", Node: "macbook", Key: "test:d:u:general", Text: big})
-	resp := wsRead(t, conn)
-
-	if resp.Type != "send_ack" || resp.Status != "error" {
-		t.Fatalf("resp = %+v, want send_ack/error", resp)
-	}
-	if !strings.Contains(resp.Error, "too long") {
-		t.Errorf("error = %q, want 'too long'", resp.Error)
-	}
-}
-
-// Text oversize is rejected with a clear error instead of silently getting
-// truncated or accepted then coalesced into a multi-MB CLI stdin write. The
-// dispatch queue's coalescing depth is bounded but the per-message cap is
-// what prevents a single send from dominating memory. R59-SEC-H1.
-func TestWS_SendTextTooLong(t *testing.T) {
-	hub, _ := newTestHub(t, "")
-	url, cleanup := startWSServer(t, hub)
-	defer cleanup()
-
-	conn := dialWS(t, url)
-	defer conn.Close()
-
-	// One byte past the cap — enough to prove the boundary without bumping
-	// the ws read limit.
-	big := strings.Repeat("x", maxWSSendTextBytes+1)
-	wsWrite(t, conn, node.ClientMsg{Type: "send", Key: "test:d:u:general", Text: big})
-	resp := wsRead(t, conn)
-
-	if resp.Type != "send_ack" || resp.Status != "error" {
-		t.Fatalf("resp = %+v, want send_ack/error", resp)
-	}
-	if !strings.Contains(resp.Error, "too long") {
-		t.Errorf("error = %q, want 'too long'", resp.Error)
+	for _, tc := range []struct {
+		name string
+		msg  node.ClientMsg
+		want string
+	}{
+		{"missing key", node.ClientMsg{Type: "send", Text: "hello"}, ""},
+		{"missing text", node.ClientMsg{Type: "send", Key: "test:d:u:general"}, ""},
+		{"text too long", node.ClientMsg{Type: "send", Key: "test:d:u:general", Text: big}, "too long"},
+		{"remote text too long", node.ClientMsg{Type: "send", Node: "macbook", Key: "test:d:u:general", Text: big}, "too long"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := dialWS(t, url)
+			defer conn.Close()
+			wsWrite(t, conn, tc.msg)
+			resp := wsRead(t, conn)
+			if resp.Type != "send_ack" || resp.Status != "error" || !strings.Contains(resp.Error, tc.want) {
+				t.Fatalf("resp = %+v, want send_ack/error %q", resp, tc.want)
+			}
+		})
 	}
 }
 
@@ -578,8 +464,6 @@ func TestWS_ClientDisconnectCleanup(t *testing.T) {
 		t.Errorf("client count = %d after disconnect, want 0", clientCount)
 	}
 }
-
-// ─── Multiple clients ────────────────────────────────────────────────────────
 
 // ─── Hub shutdown ────────────────────────────────────────────────────────────
 
@@ -661,8 +545,6 @@ func TestWS_FullFlow(t *testing.T) {
 		t.Errorf("unsub: type = %q, want unsubscribed", resp.Type)
 	}
 }
-
-// ─── node.ServerMsg JSON roundtrip ──────────────────────────────────────────────
 
 // Two tabs of one user share the per-owner send budget: once it is spent, the
 // second tab's first send is rate limited although its own per-connection

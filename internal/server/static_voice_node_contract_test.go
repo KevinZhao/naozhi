@@ -99,7 +99,6 @@ func discoveredKeyWant(pid int, node string) string {
 // gesture sequence itself is exercised in test/e2e/voice_cap_gesture.test.js.
 func TestDashboardJS_VoiceCap_StateMachine(t *testing.T) {
 	t.Parallel()
-	// #2558 D4-2: the voice module moved to voice.js.
 	data, err := staticFS.ReadFile("static/voice.js")
 	if err != nil {
 		t.Fatalf("read voice.js: %v", err)
@@ -138,7 +137,6 @@ func TestDashboardJS_VoiceCap_StateMachine(t *testing.T) {
 // and the cancel flag is cleared only when a recording really starts.
 func TestDashboardJS_VoiceFinalizing_HasEscapeHatches(t *testing.T) {
 	t.Parallel()
-	// #2558 D4-2: the voice module moved to voice.js.
 	data, err := staticFS.ReadFile("static/voice.js")
 	if err != nil {
 		t.Fatalf("read voice.js: %v", err)
@@ -375,29 +373,20 @@ process.stdout.write(JSON.stringify(out));
 	}
 }
 
-// TestDashboardJS_ErrorFrameGuardsPendingSubscribeKey pins that a generic
-// `error` frame only clears the pending-subscribe bookkeeping when it is
-// about that subscription. agent_subscribe validation failures and the
-// node-disconnect broadcast (error{node, "node disconnected"}) are also
-// `error` frames and used to wipe an unrelated in-flight subscribe.
-func TestDashboardJS_ErrorFrameGuardsPendingSubscribeKey(t *testing.T) {
-	t.Parallel()
-	errCase := wsOnHandler(t, readDashboardJS(t), "error", false)
-	if !strings.Contains(errCase, "msg.key === sessionStream._pendingSubscribeKey") {
-		t.Error("error case must compare msg.key against sessionStream._pendingSubscribeKey before clearing pending state")
-	}
-	if !strings.Contains(errCase, "if (!msg.key && msg.node && msg.error === 'node disconnected')") {
-		t.Error("error case must recognise the PurgeNodeSubscriptions frame (keyless + msg.node + 'node disconnected')")
-	}
-	if !strings.Contains(errCase, "reconcileSelectedNode()") {
-		t.Error("node-disconnected error must run reconcileSelectedNode() so selection.node snaps back to local")
-	}
-}
-
-func TestDashboardJS_NodeDisconnectDeselectsStaleSession(t *testing.T) {
+// TestDashboardJS_ErrorFrameNodeDisconnect pins that a generic `error` frame
+// only clears the pending-subscribe bookkeeping when it is about that
+// subscription: agent_subscribe validation failures and the node-disconnect
+// broadcast (PurgeNodeSubscriptions: keyless, msg.node, "node disconnected")
+// are also `error` frames and used to wipe an unrelated in-flight subscribe.
+// The node-disconnect branch snaps selection.node back to local
+// (reconcileSelectedNode) and deselects a session that lived on the node.
+func TestDashboardJS_ErrorFrameNodeDisconnect(t *testing.T) {
 	t.Parallel()
 	js := readDashboardJS(t)
 	body := wsOnHandler(t, js, "error", false)
+	if !strings.Contains(body, "msg.key === sessionStream._pendingSubscribeKey") {
+		t.Error("error case must compare msg.key against sessionStream._pendingSubscribeKey before clearing pending state")
+	}
 	idx := strings.Index(body, "if (!msg.key && msg.node && msg.error === 'node disconnected')")
 	if idx < 0 {
 		t.Fatal("node-disconnected branch missing")

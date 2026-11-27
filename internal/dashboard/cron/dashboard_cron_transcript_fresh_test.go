@@ -87,10 +87,12 @@ func fixtureRunWindow(t *testing.T, fresh bool, startedAt, endedAt time.Time, js
 	return h, jobID, runID, claudeDir
 }
 
-// TestTranscript_BoundaryEnd pins R242-SEC-12 (#642): fresh=false filters on
-// the half-open [startedMS, endedMS), so an event stamped exactly at EndedAt
-// belongs to the next run (which starts there) and not to both. fresh=true
-// owns its JSONL, so its upper bound stays inclusive.
+// TestTranscript_BoundaryEnd pins the run's time window: turns from before
+// the run started (a prior invocation in the same session) never show, and
+// R242-SEC-12 (#642): fresh=false filters on the half-open [startedMS,
+// endedMS), so an event stamped exactly at EndedAt belongs to the next run
+// (which starts there) and not to both. fresh=true owns its JSONL, so its
+// upper bound stays inclusive.
 func TestTranscript_BoundaryEnd(t *testing.T) {
 	t.Parallel()
 	startedAt := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
@@ -100,6 +102,7 @@ func TestTranscript_BoundaryEnd(t *testing.T) {
 			`","message":{"role":"assistant","content":[{"type":"text","text":"` + text + `"}]}}`
 	}
 	lines := []string{
+		line(startedAt.Add(-time.Hour), "BEFORE_START"),
 		line(startedAt.Add(time.Minute), "IN_WINDOW"),
 		line(endedAt, "BOUNDARY_EVENT"),
 		line(endedAt.Add(time.Second), "PAST_END"),
@@ -121,8 +124,8 @@ func TestTranscript_BoundaryEnd(t *testing.T) {
 		for _, tr := range resp.Turns {
 			got[tr.Text] = true
 		}
-		if !got["IN_WINDOW"] || got["PAST_END"] || got["BOUNDARY_EVENT"] != tc.wantBoundary {
-			t.Errorf("fresh=%v: turns=%+v, want IN_WINDOW, no PAST_END, BOUNDARY_EVENT=%v",
+		if !got["IN_WINDOW"] || got["BEFORE_START"] || got["PAST_END"] || got["BOUNDARY_EVENT"] != tc.wantBoundary {
+			t.Errorf("fresh=%v: turns=%+v, want IN_WINDOW, no BEFORE_START / PAST_END, BOUNDARY_EVENT=%v",
 				tc.fresh, resp.Turns, tc.wantBoundary)
 		}
 	}

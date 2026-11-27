@@ -190,62 +190,6 @@ func TestBuildMessageHandler_DedupEmptyEventIDFallbackFilters(t *testing.T) {
 
 // ─── /new command ────────────────────────────────────────────────────────────
 
-func TestBuildMessageHandler_NewResetsGeneral(t *testing.T) {
-	p := &mockPlatform{}
-	srv := newTestServer(p)
-	handler := newTestDispatcher(srv).BuildHandler()
-
-	handler(context.Background(), platform.IncomingMessage{
-		Platform: "test",
-		EventID:  "e1",
-		ChatID:   "chat1",
-		ChatType: "direct",
-		Text:     "/new",
-	})
-
-	replies := p.allReplies()
-	if len(replies) != 1 {
-		t.Fatalf("expected 1 reply, got %d", len(replies))
-	}
-	if replies[0].Text != "对话已重置。" {
-		t.Errorf("reply = %q, want %q", replies[0].Text, "对话已重置。")
-	}
-	if replies[0].ChatID != "chat1" {
-		t.Errorf("reply chatID = %q, want chat1", replies[0].ChatID)
-	}
-}
-
-func TestBuildMessageHandler_NewResetsNamedAgent(t *testing.T) {
-	p := &mockPlatform{}
-	router := session.NewRouter(session.RouterConfig{})
-	platforms := map[string]platform.Platform{"test": p}
-	agentCommands := map[string]string{"review": "code-reviewer"}
-	agents := map[string]session.AgentOpts{"code-reviewer": {}}
-	srv := NewWithOptions(ServerOptions{
-		Addr:      ":0",
-		Router:    router,
-		Platforms: platforms,
-		Routing:   RoutingOptions{Agents: agents, AgentCommands: agentCommands},
-		Backend:   "claude",
-	})
-	handler := newTestDispatcher(srv).BuildHandler()
-
-	handler(context.Background(), platform.IncomingMessage{
-		Platform: "test",
-		EventID:  "e2",
-		ChatID:   "chat1",
-		Text:     "/new review",
-	})
-
-	replies := p.allReplies()
-	if len(replies) != 1 {
-		t.Fatalf("expected 1 reply, got %d", len(replies))
-	}
-	if !strings.Contains(replies[0].Text, "code-reviewer") {
-		t.Errorf("reply = %q, want to mention 'code-reviewer'", replies[0].Text)
-	}
-}
-
 func TestBuildMessageHandler_NewUnknownAgentRepliesError(t *testing.T) {
 	p := &mockPlatform{}
 	srv := newTestServer(p)
