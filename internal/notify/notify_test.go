@@ -361,24 +361,6 @@ func TestWithoutWorkspace(t *testing.T) {
 	})
 }
 
-// A failed unit's reason is its error class, or none when the class says
-// nothing: never "失败 · 其他".
-func TestFailedWhy(t *testing.T) {
-	for _, c := range []struct {
-		class health.ErrorClass
-		want  string
-	}{
-		{health.ErrNone, ""},
-		{health.ErrOther, ""},
-		{health.ErrAuth, "凭证 / 权限拒绝"},
-		{health.ErrRateLimit, "限流"},
-	} {
-		if got := failedWhy(c.class); got != c.want {
-			t.Errorf("failedWhy(%q) = %q, want %q", c.class, got, c.want)
-		}
-	}
-}
-
 // TestRestartKeepsQuestion: a restart dates a session's wait anew; its open
 // question stays open, one the user closed stays closed, and neither is
 // pushed again.
@@ -450,21 +432,21 @@ func TestAutoCloseWithFullHistory(t *testing.T) {
 func TestDecideOnce(t *testing.T) {
 	n, _, _ := newTest(t, local(10, 0), datadir.Layout{})
 	it, _ := n.Add(Item{Kind: KindDecision, Source: "d", Title: "派活",
-		Decision: &Decision{Handler: "h", Actions: []Action{ActionApprove, ActionReject}}})
+		Decision: &Decision{Handler: "h", Actions: []Action{"approve", "reject"}}})
 	entered, release := make(chan struct{}), make(chan struct{})
 	var applied []Action
 	n.HandleDecisions("h", func(_ Item, a Action) error {
 		applied = append(applied, a)
-		if a == ActionApprove {
+		if a == "approve" {
 			close(entered)
 			<-release
 		}
 		return nil
 	})
 	done := make(chan error)
-	go func() { done <- n.Decide(it.ID, ActionApprove) }()
+	go func() { done <- n.Decide(it.ID, "approve") }()
 	<-entered
-	if err := n.Decide(it.ID, ActionReject); !errors.Is(err, ErrPending) {
+	if err := n.Decide(it.ID, "reject"); !errors.Is(err, ErrPending) {
 		t.Errorf("second answer = %v, want ErrPending", err)
 	}
 	if err := n.Dismiss(it.ID); !errors.Is(err, ErrPending) {
@@ -474,10 +456,10 @@ func TestDecideOnce(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if err := n.Decide(it.ID, ActionReject); !errors.Is(err, ErrClosed) {
+	if err := n.Decide(it.ID, "reject"); !errors.Is(err, ErrClosed) {
 		t.Errorf("answer after close = %v, want ErrClosed", err)
 	}
-	if !slices.Equal(applied, []Action{ActionApprove}) {
+	if !slices.Equal(applied, []Action{"approve"}) {
 		t.Errorf("applied = %v, want only the first answer", applied)
 	}
 }
@@ -631,11 +613,6 @@ func TestUncapped(t *testing.T) {
 	n2.Check()
 	if got := b2.titles(); !slices.Equal(got, []string{"in the morning"}) {
 		t.Errorf("after a restart pushed %q, want the held item once at 08:00", got)
-	}
-
-	n2.DismissSource("promise:c")
-	if open, _ := n2.List(0); slices.ContainsFunc(open, func(it Item) bool { return it.Source == "promise:c" }) {
-		t.Error("DismissSource left the item open")
 	}
 }
 

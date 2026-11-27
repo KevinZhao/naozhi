@@ -88,9 +88,6 @@ func New(path, decidePath string, now func() time.Time) *Store {
 	return &Store{path: path, decidePath: decidePath, now: now}
 }
 
-// Path is the 搁置区's file.
-func (s *Store) Path() string { return s.path }
-
 // List returns the parked items in the file's order; none when it is
 // missing.
 func (s *Store) List() ([]Entry, error) {

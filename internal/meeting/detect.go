@@ -126,9 +126,6 @@ func (d *Detector) Decline() {
 	}
 }
 
-// Declined reports whether the user stopped the followed meeting.
-func (d *Detector) Declined() bool { return d.app != nil && d.declined }
-
 func usesMic(a App, procs []Proc) bool {
 	for _, p := range procs {
 		if !p.Input {
