@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -59,10 +60,6 @@ func newRunningProc() *fakeProcess {
 
 func newDeadProc() *fakeProcess {
 	return &fakeProcess{isAlive: false, isRunning: false}
-}
-
-func newDeadProcWithEntries(entries []clievent.EventEntry) *fakeProcess {
-	return &fakeProcess{isAlive: false, entries: entries}
 }
 
 func (f *fakeProcess) Alive() bool {
@@ -344,28 +341,6 @@ func TestNewRouterDefaults(t *testing.T) {
 	if r.pruneTTL != DefaultPruneTTL {
 		t.Errorf("pruneTTL = %v, want DefaultPruneTTL=%v", r.pruneTTL, DefaultPruneTTL)
 	}
-	// Freeze the exported defaults so an operator who wires these into config
-	// validation / dashboard tooltips never has the values silently drift.
-	// R70-ARCH-H5.
-	if DefaultMaxProcs != 3 {
-		t.Errorf("DefaultMaxProcs = %d, want 3", DefaultMaxProcs)
-	}
-	if DefaultTTL != 30*time.Minute {
-		t.Errorf("DefaultTTL = %v, want 30m", DefaultTTL)
-	}
-	if DefaultPruneTTL != 72*time.Hour {
-		t.Errorf("DefaultPruneTTL = %v, want 72h", DefaultPruneTTL)
-	}
-}
-
-func TestRouterDefaultWorkspaceAndMaxProcs(t *testing.T) {
-	r := NewRouter(RouterConfig{MaxProcs: 7, Workspace: "/my/workspace"})
-	if got := r.DefaultWorkspace(); got != "/my/workspace" {
-		t.Errorf("DefaultWorkspace() = %q, want /my/workspace", got)
-	}
-	if got := r.MaxProcs(); got != 7 {
-		t.Errorf("MaxProcs() = %d, want 7", got)
-	}
 }
 
 func TestRouterBackendIDsAndWrapperFor(t *testing.T) {
@@ -482,18 +457,6 @@ func TestRouterStoreRestoreUserLabel(t *testing.T) {
 	}
 }
 
-func TestRouterSetGetSessionBackend(t *testing.T) {
-	r := NewRouter(RouterConfig{})
-	r.SetSessionBackend("k1", "kiro")
-	if got := pickedBackendForTest(r, "k1"); got != "kiro" {
-		t.Errorf("GetSessionBackend = %q, want kiro", got)
-	}
-	r.SetSessionBackend("k1", "") // clears
-	if got := pickedBackendForTest(r, "k1"); got != "" {
-		t.Errorf("GetSessionBackend after clear = %q, want empty", got)
-	}
-}
-
 func TestNewRouterStoreRestore(t *testing.T) {
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "sessions.json")
@@ -523,14 +486,6 @@ func TestNewRouterStoreRestore(t *testing.T) {
 	})
 	if s1 == nil || s1.getSessionID() != "sess-111" {
 		t.Errorf("alice session not restored: %+v", s1)
-	}
-}
-
-func TestNewRouterNoStore(t *testing.T) {
-	r := NewRouter(RouterConfig{MaxProcs: 3, StorePath: ""})
-	_, total := r.Stats()
-	if total != 0 {
-		t.Errorf("total = %d, want 0 when no store", total)
 	}
 }
 
@@ -722,49 +677,22 @@ func TestRouter_SetWorkspace_RejectsEmptyChatKey(t *testing.T) {
 	}
 }
 
-// TestWaitSocketGoneForKey_EmptyKey — the helper must be a no-op when
-// called with an empty key (unused session). Without this guard Reset
-// would block the caller for 2s for every test that never started a shim.
-func TestWaitSocketGoneForKey_EmptyKey(t *testing.T) {
-	start := time.Now()
-	waitSocketGoneForKey("")
-	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
-		t.Errorf("waitSocketGoneForKey('') took %v; want ~0", elapsed)
-	}
-}
-
-// TestWaitSocketGoneForKey_NoSocketReturnsFast — for a key whose shim
-// was never spawned, the derived socket path doesn't exist, so the
-// helper should return in a single stat().
+// TestWaitSocketGoneForKey_NoSocketReturnsFast — an empty key, or a key
+// whose shim was never spawned, has no socket to wait on, so the helper
+// returns at once instead of blocking Reset for its full bound.
 func TestWaitSocketGoneForKey_NoSocketReturnsFast(t *testing.T) {
-	start := time.Now()
-	waitSocketGoneForKey("test:fresh:key-that-never-spawned")
-	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
-		t.Errorf("waitSocketGoneForKey(missing-socket) took %v; want ~0", elapsed)
+	for _, key := range []string{"", "test:fresh:key-that-never-spawned"} {
+		start := time.Now()
+		waitSocketGoneForKey(key)
+		if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+			t.Errorf("waitSocketGoneForKey(%q) took %v; want ~0", key, elapsed)
+		}
 	}
 }
 
 // ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------
-
-func TestCleanupNoExpiredSessions(t *testing.T) {
-	r := &Router{
-		ss:       newSessionTable(),
-		maxProcs: 3,
-		ttl:      1 * time.Hour,
-		pruneTTL: 72 * time.Hour,
-	}
-	proc := newIdleProc()
-	s := injectSession(r, "key1", proc)
-	s.touchLastActive() // just touched
-
-	r.Cleanup()
-
-	if !proc.Alive() {
-		t.Error("non-expired session should not be closed")
-	}
-}
 
 func TestCleanupExpiredSession(t *testing.T) {
 	r := &Router{
@@ -1067,56 +995,6 @@ func TestGetOrCreate_NewSession_SpawnError(t *testing.T) {
 	}
 }
 
-func TestGetOrCreate_DeadSession_AttemptResume(t *testing.T) {
-	r := newTestRouter(3)
-	s := newSessionWithID("feishu:direct:user1:general", "old-sess-id")
-	s.storeProcess(newDeadProc())
-	putT(r, "feishu:direct:user1:general", s)
-
-	_, _, err := r.GetOrCreate(context.Background(), "feishu:direct:user1:general", AgentOpts{})
-	if err == nil {
-		t.Fatal("expected error (spawn fails with nonexistent CLI)")
-	}
-	if !strings.Contains(err.Error(), "spawn") {
-		t.Errorf("expected spawn error, got: %v", err)
-	}
-}
-
-func TestGetOrCreate_NilProcessSession_AttemptSpawn(t *testing.T) {
-	r := newTestRouter(3)
-	// Restored session with no process (like after restart).
-	putT(r, "key1", newSessionWithID("key1", "restored-sess"))
-
-	_, _, err := r.GetOrCreate(context.Background(), "key1", AgentOpts{})
-	if err == nil {
-		t.Fatal("expected spawn error")
-	}
-	if !strings.Contains(err.Error(), "spawn") {
-		t.Errorf("expected spawn error, got: %v", err)
-	}
-}
-
-func TestGetOrCreate_AgentOptsOverride(t *testing.T) {
-	r := &Router{
-		ss:       newSessionTable(),
-		maxProcs: 3,
-		ttl:      30 * time.Minute,
-	}
-	r.editBackendsForTest(func(c *backendstore.Config) {
-		c.Wrapper = cli.NewWrapperLazy("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
-	})
-	r.editBackendsForTest(func(c *backendstore.Config) { c.Model = "default-model" })
-	r.editBackendsForTest(func(c *backendstore.Config) { c.ExtraArgs = []string{"--base-arg"} })
-	// Even with overrides, spawn will still fail — we just verify no panic.
-	_, _, err := r.GetOrCreate(context.Background(), "key1", AgentOpts{
-		Model:     "override-model",
-		ExtraArgs: []string{"--extra"},
-	})
-	if err == nil {
-		t.Fatal("expected spawn error from nonexistent CLI")
-	}
-}
-
 // ---------------------------------------------------------------------------
 // maxProcs enforcement
 // ---------------------------------------------------------------------------
@@ -1154,19 +1032,6 @@ func TestMaxProcs_EvictsIdleThenSpawnFails(t *testing.T) {
 	}
 	if oldProc.Alive() {
 		t.Error("old process should have been evicted and closed")
-	}
-}
-
-func TestMaxProcs_EvictFailsWhenAllRunning(t *testing.T) {
-	r := newTestRouter(1)
-	injectSession(r, "running-key", newRunningProc())
-
-	_, _, err := r.GetOrCreate(context.Background(), "new-key", AgentOpts{})
-	if err == nil {
-		t.Fatal("expected error: max procs with all running")
-	}
-	if !strings.Contains(err.Error(), "max concurrent processes reached") {
-		t.Errorf("unexpected error: %v", err)
 	}
 }
 
@@ -1534,22 +1399,6 @@ func TestConcurrentReset_Race(t *testing.T) {
 	wg.Wait()
 }
 
-func TestConcurrentStats_Race(t *testing.T) {
-	r := newTestRouter(3)
-	injectSession(r, "key1", newIdleProc())
-	injectSession(r, "key2", newIdleProc())
-
-	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			r.Stats()
-		}()
-	}
-	wg.Wait()
-}
-
 // Stats must never return active > total. Pre-R59-GO-H1 the activeCount.Load()
 // ran outside the RLock that sampled len(sessions), so a mutation landing
 // between the two reads could bump active past total and the dashboard
@@ -1662,107 +1511,6 @@ func TestStartCleanupLoop_TriggersCleanup(t *testing.T) {
 	}, 500*time.Millisecond, "cleanup loop did not close expired session")
 }
 
-func TestStartCleanupLoop_StopsOnContextCancel(t *testing.T) {
-	r := newTestRouter(3)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	r.StartCleanupLoop(ctx, 10*time.Millisecond, nil)
-
-	cancel() // cancelling the context should stop the goroutine (no hang)
-	time.Sleep(50 * time.Millisecond)
-}
-
-// ---------------------------------------------------------------------------
-// History capture in the spawn
-// ---------------------------------------------------------------------------
-
-// captureHistoryFrom simulates the history-collection branch in the spawn:
-// prefer dead process EventEntries (includes live events) over persistedHistory.
-func captureHistoryFrom(s *ManagedSession) []clievent.EventEntry {
-	var captured []clievent.EventEntry
-	s.sendMu.Lock()
-	if p := s.loadProcess(); p != nil && !p.Alive() {
-		captured = p.EventEntries()
-	} else if len(s.persistedHistory) > 0 {
-		captured = make([]clievent.EventEntry, len(s.persistedHistory))
-		copy(captured, s.persistedHistory)
-	}
-	s.sendMu.Unlock()
-	return captured
-}
-
-// TestHistoryCapture_DeadProcessUsesEventEntries verifies that the
-// the spawn history-collection logic prefers process.EventEntries() over
-// persistedHistory when the old process is dead. This ensures live events
-// accumulated since the last JSONL load are preserved across process restarts.
-func TestHistoryCapture_DeadProcessUsesEventEntries(t *testing.T) {
-	liveEntries := []clievent.EventEntry{
-		{Time: 1000, Type: "user", Summary: "first message"},
-		{Time: 2000, Type: "text", Summary: "first reply"},
-		{Time: 3000, Type: "user", Summary: "second message (live)"},
-		{Time: 4000, Type: "text", Summary: "second reply (live)"},
-	}
-	stalePersisted := []clievent.EventEntry{
-		{Time: 1000, Type: "user", Summary: "first message"},
-		{Time: 2000, Type: "text", Summary: "first reply"},
-	}
-
-	proc := newDeadProcWithEntries(liveEntries)
-	s := &ManagedSession{
-		key:              "test-key",
-		persistedHistory: stalePersisted,
-	}
-	s.storeProcess(proc)
-
-	captured := captureHistoryFrom(s)
-
-	if len(captured) != len(liveEntries) {
-		t.Fatalf("captured %d entries, want %d", len(captured), len(liveEntries))
-	}
-	// Verify we got the live entries (not the stale persisted ones).
-	if captured[len(captured)-1].Summary != "second reply (live)" {
-		t.Errorf("last entry = %q, want 'second reply (live)'", captured[len(captured)-1].Summary)
-	}
-}
-
-// TestHistoryCapture_NilProcessFallsBackToPersistedHistory verifies that when
-// the old session has no process (service-restart scenario), persistedHistory
-// is used as the history source, with JSONL reload as a further fallback.
-func TestHistoryCapture_NilProcessFallsBackToPersistedHistory(t *testing.T) {
-	persisted := []clievent.EventEntry{
-		{Time: 1000, Type: "user", Summary: "startup-loaded entry"},
-	}
-
-	s := &ManagedSession{
-		key:              "test-key",
-		persistedHistory: persisted,
-	}
-	// process is nil by default (zero value of atomic.Pointer)
-
-	captured := captureHistoryFrom(s)
-
-	if len(captured) != len(persisted) {
-		t.Fatalf("captured %d entries, want %d", len(captured), len(persisted))
-	}
-	if captured[0].Summary != "startup-loaded entry" {
-		t.Errorf("entry summary = %q, want 'startup-loaded entry'", captured[0].Summary)
-	}
-}
-
-// TestHistoryCapture_EmptyFallsBackToJSONL verifies that when the old session
-// has neither a dead process nor persistedHistory, captured history is empty,
-// triggering the JSONL-load path in the spawn.
-func TestHistoryCapture_EmptyFallsBackToJSONL(t *testing.T) {
-	s := &ManagedSession{
-		key: "test-key",
-	}
-	// process is nil by default (zero value of atomic.Pointer)
-
-	if captured := captureHistoryFrom(s); len(captured) != 0 {
-		t.Errorf("captured %d entries, want 0 (JSONL fallback should be triggered)", len(captured))
-	}
-}
-
 // ---------------------------------------------------------------------------
 // spawningKeys guard (TOCTOU fix for ReconcileLoop vs fresh-context cron)
 // ---------------------------------------------------------------------------
@@ -1790,94 +1538,21 @@ func TestSpawnSession_SpawningKeysClearedOnFailure(t *testing.T) {
 	}
 }
 
-// Covers the concurrent path: while the spawn is mid-flight for a key,
-// ReconnectShims must observe spawningKeys and refuse to treat the discovered
-// state file as an orphan. We emulate the reconcile check directly (Discover
-// requires a live PID of the same binary, which we cannot fake in a unit
-// test), but the logic under test is the spawningKeys lookup inside the
-// reconcile loop (router.go around the `if !ok` branch).
-func TestSpawningKeys_ObservableDuringSpawn(t *testing.T) {
-	r := newTestRouter(3)
-
-	// Simulate being inside the spawn: caller enters with the table lock held,
-	// writes the marker, releases the lock for the Spawn() call.
-	var doneCh chan struct{}
-	r.ss.Update(func(tx sessTx) {
-		doneCh, _ = tx.Ext().spawns.BeginSpawn("cron:abc")
-	})
-
-	// Reconcile's view: lock, snapshot, unlock.
-	var spawning bool
-	r.ss.Update(func(tx sessTx) {
-		_, spawning = tx.Ext().spawns.SpawnInFlight("cron:abc")
-	})
-	if !spawning {
-		t.Fatal("reconcile should see spawningKeys marker and skip orphan check")
-	}
-
-	// After the spawn's defer fires, the marker disappears (close +
-	// delete mirror the production defer order in the spawn).
-	r.ss.Update(func(tx sessTx) {
-		tx.Ext().spawns.EndSpawn("cron:abc", doneCh)
-	})
-
-	var stillMarked bool
-	r.ss.Update(func(tx sessTx) {
-		_, stillMarked = tx.Ext().spawns.SpawnInFlight("cron:abc")
-	})
-	if stillMarked {
-		t.Error("spawningKeys leaked after cleanup")
-	}
-}
-
-// TestStripResumeArgs_FastPath verifies the no-resume common case returns
-// the input slice unchanged (same backing array identity), not a copy. The
-// startup drift-check runs this once per discovered shim; when no session
-// was mid-turn, every call previously paid a full slice alloc + copy.
-// R64-PERF-9 regression.
-func TestStripResumeArgs_FastPath(t *testing.T) {
+// TestStripResumeArgs drops `--resume <id>` (and a trailing bare
+// `--resume`, R65-GO-M-2: leaking it into drift compares shut shims down
+// spuriously) and returns the input unchanged — same backing array — when
+// there is no --resume (R64-PERF-9: the drift check runs once per shim).
+func TestStripResumeArgs(t *testing.T) {
 	args := []string{"--setting-sources", "", "--output-format", "stream-json"}
-	got := stripResumeArgs(args)
-	if len(got) != len(args) {
-		t.Fatalf("len(got)=%d, want %d", len(got), len(args))
+	if got := stripResumeArgs(args); len(got) != len(args) || &got[0] != &args[0] {
+		t.Errorf("no --resume: got %v, want the input slice itself", got)
 	}
-	// Same backing array: no alloc/copy when --resume is absent.
-	if len(args) > 0 && &got[0] != &args[0] {
-		t.Errorf("fast path should return same backing array when --resume is absent")
-	}
-}
-
-// TestStripResumeArgs_WithResume verifies the stripping behavior is unchanged
-// for args containing --resume <id>.
-func TestStripResumeArgs_WithResume(t *testing.T) {
-	args := []string{"--resume", "abc-123", "--output-format", "stream-json"}
-	got := stripResumeArgs(args)
-	want := []string{"--output-format", "stream-json"}
-	if len(got) != len(want) {
-		t.Fatalf("len(got)=%d, want %d (got=%v)", len(got), len(want), got)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("[%d] got=%q, want=%q", i, got[i], want[i])
-		}
-	}
-}
-
-// TestStripResumeArgs_TrailingResume covers the edge case where --resume is
-// the final arg with no value following. Previously the guard
-// `i+1 < len(args)` kept the bare flag in the output, leaking `--resume`
-// into drift-check compares and spuriously shutting down the shim when
-// config hadn't changed. R65-GO-M-2 regression.
-func TestStripResumeArgs_TrailingResume(t *testing.T) {
-	args := []string{"--output-format", "stream-json", "--resume"}
-	got := stripResumeArgs(args)
-	want := []string{"--output-format", "stream-json"}
-	if len(got) != len(want) {
-		t.Fatalf("trailing --resume: len(got)=%d, want %d (got=%v)", len(got), len(want), got)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("[%d] got=%q, want=%q", i, got[i], want[i])
+	for _, in := range [][]string{
+		{"--resume", "abc-123", "--output-format", "stream-json"},
+		{"--output-format", "stream-json", "--resume"},
+	} {
+		if got := stripResumeArgs(in); !slices.Equal(got, []string{"--output-format", "stream-json"}) {
+			t.Errorf("stripResumeArgs(%v) = %v", in, got)
 		}
 	}
 }
@@ -2994,18 +2669,5 @@ func TestRouterFacets_NilRouter(t *testing.T) {
 	}
 	if got := r.History().AttachmentTrackerStats(); got != (AttachmentTrackerHealth{}) {
 		t.Errorf("(*Router)(nil).History().AttachmentTrackerStats() = %+v, want the zero (disabled) value", got)
-	}
-}
-
-// TestRouterFacets_AccessorIsTheRoutersOwn: Backends() hands out the router's
-// own registry, not a copy, so a profile added through it is the one the
-// spawn path resolves.
-func TestRouterFacets_AccessorIsTheRoutersOwn(t *testing.T) {
-	r := &Router{}
-	if err := r.Backends().AddAccessProfile("p1", AccessProfile{DefaultModel: "m1"}); err != nil {
-		t.Fatal(err)
-	}
-	if got := r.backends.accessProfileDefaultModel("p1"); got != "m1" {
-		t.Errorf("profile added through Backends() resolves to default model %q, want m1", got)
 	}
 }

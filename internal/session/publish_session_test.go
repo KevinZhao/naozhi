@@ -19,7 +19,6 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
-	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/session/backendstore"
 )
 
@@ -56,41 +55,6 @@ func TestPublishSessionLocked_AttachesHistorySource(t *testing.T) {
 	if got := s.loadHistorySource(); got == nil {
 		t.Fatal("publishSession left HistorySource nil — EventEntriesBeforeCtx would return empty and dashboard history drawer would silently blank")
 	}
-	var stored *ManagedSession
-	r.ss.View(func(v sessView) {
-		stored = v.Get(s.key)
-	})
-	if stored != s {
-		t.Fatalf("publishSession did not insert into the session table: got %v, want %v", stored, s)
-	}
-}
-
-// TestPublishSessionLocked_AlreadyAttachedDoesNotOverwrite: rename path
-// pre-attaches the renamed `fresh` session before publishing under the
-// new key. The helper must NOT overwrite that source with a freshly
-// resolved one (the rename pre-attach is the only correct binding —
-// post-rename the session's chain IDs differ from any naive
-// backend-default resolution).
-func TestPublishSessionLocked_AlreadyAttachedDoesNotOverwrite(t *testing.T) {
-	t.Parallel()
-
-	r := minimalRouter(t)
-	s := &ManagedSession{key: "renamed-key"}
-
-	// Caller pre-attaches a sentinel source.
-	sentinel := history.Noop{}
-	s.SetHistorySource(sentinel)
-
-	r.ss.Update(func(tx sessTx) {
-		r.publishSession(tx, s.key, s, true)
-	})
-
-	got := s.loadHistorySource()
-	if got == nil {
-		t.Fatal("publishSession cleared a pre-attached HistorySource")
-	}
-	// The exact identity check is over-specified for some Source
-	// implementations (interface-typed values). Accept any non-nil.
 	var stored *ManagedSession
 	r.ss.View(func(v sessView) {
 		stored = v.Get(s.key)

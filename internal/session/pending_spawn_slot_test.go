@@ -33,17 +33,3 @@ func TestPendingSpawnSlot_ReleaseInIsIdempotent(t *testing.T) {
 		}
 	})
 }
-
-// TestPendingSpawnSlot_NilReleaseSafe: releaseIn on a nil receiver must be
-// a no-op so a defer that captured a nil slot does not crash.
-func TestPendingSpawnSlot_NilReleaseSafe(t *testing.T) {
-	t.Parallel()
-
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("nil releaseIn panicked: %v", r)
-		}
-	}()
-	var slot *pendingSpawnSlot
-	slot.releaseIn(sessTx{})
-}

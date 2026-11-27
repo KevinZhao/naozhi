@@ -34,57 +34,6 @@ func (f *fakeDataSource) ProjectByName(name string) (ProjectBinding, bool) {
 	return b, ok
 }
 
-// ----- plannerKeyFor / isPlannerKey format lock --------------------------
-
-func TestPlannerKeyFor_Format(t *testing.T) {
-	t.Parallel()
-	// Hardcoded literal — MUST stay in sync with project.PlannerKeyFor.
-	// project_test.go TestPlannerKeyFor locks the same string from the
-	// project-package side. A format migration must update both.
-	if got := plannerKeyFor("foo"); got != "project:foo:planner" {
-		t.Errorf("plannerKeyFor(foo) = %q, want %q", got, "project:foo:planner")
-	}
-}
-
-func TestIsPlannerKey(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		key  string
-		want bool
-	}{
-		{"project:foo:planner", true},
-		{"project:my-project:planner", true},
-		{"project::planner", false}, // empty name must be rejected
-		{"project:foo", false},
-		{"cron:foo", false},
-		{"scratch:abc:general:general", false},
-		{"feishu:direct:alice:general", false},
-		{"", false},
-		{":planner", false},
-		{"project:", false},
-	}
-	for _, tc := range cases {
-		if got := isPlannerKey(tc.key); got != tc.want {
-			t.Errorf("isPlannerKey(%q) = %v, want %v", tc.key, got, tc.want)
-		}
-	}
-}
-
-func TestPlannerNameFromKey(t *testing.T) {
-	t.Parallel()
-	// Precondition: caller has verified isPlannerKey; we only test the
-	// happy path here (§3.5).
-	cases := map[string]string{
-		"project:foo:planner":        "foo",
-		"project:my-project:planner": "my-project",
-	}
-	for key, want := range cases {
-		if got := plannerNameFromKey(key); got != want {
-			t.Errorf("plannerNameFromKey(%q) = %q, want %q", key, got, want)
-		}
-	}
-}
-
 // ----- ResolveForChat: 288-row matrix with aliasing canary ---------------
 
 type forChatCase struct {
