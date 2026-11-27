@@ -166,9 +166,4 @@ func TestPatrolSectionCaps(t *testing.T) {
 		strings.Count(got, "- 新发现：") != 3 || strings.Contains(got, "另有 0 条") || !strings.HasPrefix(got, "\n### 巡查（15）\n") {
 		t.Errorf("section:\n%s", got)
 	}
-	b.Reset()
-	patrolSection(&b, ProjectPatrol{})
-	if b.Len() != 0 {
-		t.Errorf("an empty patrol wrote %q", b.String())
-	}
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -36,11 +35,7 @@ type waitFixture struct {
 func newWaitFixture(t *testing.T, noCred bool) *waitFixture {
 	t.Helper()
 	f := &waitFixture{root: t.TempDir(), reply: `{"findings":[],"cursors":{"email":"e1","slack":"","asana":""}}`}
-	mcp := filepath.Join(f.root, "mcp.json")
-	if err := os.WriteFile(mcp, []byte(`{"mcpServers":{"slack-mcp":{"command":"s"},"aws-outlook-mcp":{"command":"o"}}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	f.s = f.open(mcp, noCred)
+	f.s = f.open(writeMCP(t, f.root, `{"mcpServers":{"slack-mcp":{"command":"s"},"aws-outlook-mcp":{"command":"o"}}}`), noCred)
 	return f
 }
 

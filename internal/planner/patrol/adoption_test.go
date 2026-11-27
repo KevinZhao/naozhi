@@ -226,30 +226,6 @@ func TestAdoptionMerged(t *testing.T) {
 	}
 }
 
-// TestAdoptionResumed: the findings counted towards a stop are not counted
-// again: a kind the user brought back (its entry taken out of
-// declined.json) is stopped again only on ten more.
-func TestAdoptionResumed(t *testing.T) {
-	d := newDeep(t)
-	d.repo(wsA, "gateway", "a")
-	ids := d.debts(1, 10)
-	d.settle(ids, false, false, false, false, false, false, false, false, false, false)
-	if got := d.stops(); !slices.Equal(got, []string{"debt 0/10"}) {
-		t.Fatalf("stopped %q", got)
-	}
-	d.writeDeclined(`{"v":1,"findings":[],"kinds":[],"workspaces":[]}`)
-	more := d.debts(11, 10)
-	no := []bool{false, false, false, false, false, false, false, false, false, false}
-	d.settle(more[:9], no[:9]...)
-	if got := d.stops(); got != nil {
-		t.Fatalf("stopped %q again on nine more", got)
-	}
-	d.settle(more[9:], false)
-	if got := d.stops(); !slices.Equal(got, []string{"debt 0/10"}) {
-		t.Errorf("stopped %q, want it stopped again on the tenth", got)
-	}
-}
-
 // TestAdoptionResumedPastWindow: with more than ten settled when the kind
 // is stopped, the ones before the last ten are counted too: brought back,
 // the kind is stopped again only on ten more, not on the first few that

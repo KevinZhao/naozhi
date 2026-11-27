@@ -197,6 +197,19 @@ func TestCustodyWatchOff(t *testing.T) {
 	}
 }
 
+// custodyRig is a runner checking dashKey in custody at once, settled.
+func custodyRig(t *testing.T) (*Runner, *fakeGateway, *fakeCustody) {
+	t.Helper()
+	r, g, _, _, _ := newRunner(t)
+	r.grace = 0
+	fc := &fakeCustody{on: map[string]bool{dashKey: true}, settled: true}
+	r.cfg.Custody = fc
+	if err := r.cfg.Sessions.Put(sidecarMeta(dashKey)); err != nil {
+		t.Fatal(err)
+	}
+	return r, g, fc
+}
+
 // A session in custody whose turn ended with nothing pending gets the
 // Planner a receipt to judge it (E, A); it waits while the user is at the
 // session or the Planner is busy, and none comes for a session out of
@@ -212,18 +225,8 @@ func TestCustodyEnded(t *testing.T) {
 			return ended{}, false
 		}
 	}
-	setup := func(t *testing.T) (*Runner, *fakeGateway, *fakeCustody) {
-		r, g, _, _, _ := newRunner(t)
-		r.grace = 0
-		fc := &fakeCustody{on: map[string]bool{dashKey: true}, settled: true}
-		r.cfg.Custody = fc
-		if err := r.cfg.Sessions.Put(sidecarMeta(dashKey)); err != nil {
-			t.Fatal(err)
-		}
-		return r, g, fc
-	}
 	t.Run("told", func(t *testing.T) {
-		r, g, fc := setup(t)
+		r, g, fc := custodyRig(t)
 		fc.check = custody.ErrNearby
 		busy := false
 		r.cfg.PlannerBusy = func() bool { return busy }
@@ -260,7 +263,7 @@ func TestCustodyEnded(t *testing.T) {
 		{"stopped", func(r *Runner, fc *fakeCustody) { fc.check = custody.ErrStopped }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			r, g, fc := setup(t)
+			r, g, fc := custodyRig(t)
 			c.prep(r, fc)
 			r.Result(dashKey, "x")
 			if e, ok := next(t, r); ok {
@@ -272,7 +275,7 @@ func TestCustodyEnded(t *testing.T) {
 		})
 	}
 	t.Run("a later turn ended", func(t *testing.T) {
-		r, g, _ := setup(t)
+		r, g, _ := custodyRig(t)
 		now := time.Now()
 		r.cfg.Now = func() time.Time { return now }
 		r.Result(dashKey, "第一轮")
@@ -289,7 +292,7 @@ func TestCustodyEnded(t *testing.T) {
 	// A background task open: no receipt; its end lost, the turn end held
 	// back comes again once the task is no longer counted.
 	t.Run("background lost", func(t *testing.T) {
-		r, g, fc := setup(t)
+		r, g, fc := custodyRig(t)
 		now := time.Now()
 		r.cfg.Now = func() time.Time { return now }
 		var wakes []time.Duration
@@ -326,7 +329,7 @@ func TestCustodyEnded(t *testing.T) {
 		}
 	})
 	t.Run("restart", func(t *testing.T) {
-		r, g, fc := setup(t)
+		r, g, fc := custodyRig(t)
 		r.Result(dashKey, "做到一半")
 		cfg := r.cfg
 		r2 := New(cfg)

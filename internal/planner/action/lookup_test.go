@@ -6,25 +6,14 @@ import (
 )
 
 func TestLookupParse(t *testing.T) {
-	for _, c := range []struct{ raw, err string }{
+	parseCases(t, []parseCase{
 		{`{"type":"lookup","q":"M4 Max 的内存带宽","why":"用户问规格"}`, ""},
 		{`{"type":"lookup","q":"x"}`, ""},
 		{`{"type":"lookup","q":" ","why":"w"}`, "q"},
 		{`{"type":"lookup","q":"` + strings.Repeat("字", lookupQRunes+1) + `"}`, "q"},
 		{`{"type":"lookup","q":"x","why":"` + strings.Repeat("字", lookupWhyRunes+1) + `"}`, "why"},
 		{`{"type":"lookup","q":"x","url":"https://e.com"}`, "字段"},
-	} {
-		b := Parse(block(c.raw))
-		if len(b) != 1 {
-			t.Fatalf("%s: %d blocks", c.raw, len(b))
-		}
-		switch {
-		case c.err == "" && (b[0].Err != nil || b[0].Lookup == nil):
-			t.Errorf("%s: %v", c.raw, b[0].Err)
-		case c.err != "" && (b[0].Err == nil || !strings.Contains(b[0].Err.Error(), c.err)):
-			t.Errorf("%s: err %v, want one with %q", c.raw, b[0].Err, c.err)
-		}
-	}
+	})
 }
 
 // A lookup runs from any turn but an outside one: a scout's, a brief's, or

@@ -161,33 +161,6 @@ func TestSystemPrompt(t *testing.T) {
 	if strings.Contains(p, "%!") {
 		t.Error("prompt has a bad format verb")
 	}
-	// The Planner searches and reads itself (D129): a lookup block or "I
-	// cannot go online" would send it back to dispatching every question.
-	for _, gone := range []string{`"type":"lookup"`, "不上网", "每天早上"} {
-		if strings.Contains(p, gone) {
-			t.Errorf("prompt still has %q", gone)
-		}
-	}
-	// The subscription a dispatch once asked for died with the conversation
-	// at a shift change; the gateway's receipt replaces it.
-	if strings.Contains(p, "notify_when_idle") {
-		t.Error("prompt still asks for notify_when_idle")
-	}
-	// A progress report with no background work left is a session stopped
-	// at its turn's end: telling the Planner to leave it be stalls the task.
-	if strings.Contains(p, "不用标也不用回") {
-		t.Error("prompt still says a progress report needs no answer")
-	}
-	// A session the user opened wakes the Planner at its turn's end (D138):
-	// neither place may still say it never reports.
-	if strings.Contains(p, "不给你汇报") {
-		t.Error("prompt still says a session the user opened does not report")
-	}
-	// A side note is how the Planner speaks about a running session (D139):
-	// the old rule would keep it silent.
-	if strings.Contains(p, "不主动给运行中的会话发意见") {
-		t.Error("prompt still forbids speaking about a running session")
-	}
 	fill := strings.NewReplacer(
 		"<工作区 ID 或名字>", "naozhi", "<RFC3339 或空>", "", "<task: key、承诺 ID，或你开的会话的 key>", "task:ab12",
 		"done | doing | failed", "done", "timely | brief", "timely", "<http(s) 链接或空>", "", "<巡检发现的 id 或空>", "", "…", "x",

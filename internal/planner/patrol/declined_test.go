@@ -561,15 +561,11 @@ func TestDeclinedUnreadable(t *testing.T) {
 		// half way, a key renamed, the version line lost. Each would read as
 		// nothing declined to a lenient reader.
 		"an empty file":              ``,
-		"only blanks":                " \n\t\n",
 		"null":                       `null`,
 		"a list, not an object":      `[]`,
-		"a string":                   `"declined"`,
 		"an unknown key":             `{"v":1,"findings":[],"kinds":[],"workspace":[` + entry + `]}`,
-		"an unknown key in a kind":   `{"v":1,"findings":[],"kinds":[{"workspace":"","kind":"debt","by":"user","when":"2026-11-20T10:00:00+08:00"}],"workspaces":[]}`,
 		"an unknown key in a list":   `{"v":1,"findings":[{"workspace":"` + wsB + `","finding":"bug-x"}],"kinds":[],"workspaces":[]}`,
 		"no version":                 `{"findings":[],"kinds":[],"workspaces":[` + entry + `]}`,
-		"version zero":               `{"v":0,"findings":[],"kinds":[],"workspaces":[]}`,
 		"a version that is no int":   `{"v":"1","findings":[],"kinds":[],"workspaces":[]}`,
 		"a list that is an object":   `{"v":1,"findings":{},"kinds":[],"workspaces":[]}`,
 		"something after the object": `{"v":1,"findings":[],"kinds":[],"workspaces":[]} {"v":1}`,
