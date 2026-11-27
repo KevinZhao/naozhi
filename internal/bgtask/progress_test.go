@@ -71,7 +71,7 @@ func TestProgressReplayed(t *testing.T) {
 	now := time.Date(2026, 11, 23, 15, 0, 0, 0, time.Local)
 	in := Input{Alive: true, Since: now.Add(-4 * time.Hour), Attached: now.Add(-10 * time.Minute), Now: now,
 		Replayed: []clievent.EventEntry{{Type: clievent.KindTaskStart, TaskID: "b1", TaskType: "local_bash", Summary: "npm run bench"}}}
-	s := Judge(in)
+	s := Scan(in).At(in.Now)
 	if got := s.Progress(now); got != "1 个后台任务：npm run bench" {
 		t.Errorf("Progress of a task the replay alone started = %q, want no duration", got)
 	}
@@ -83,7 +83,7 @@ func TestProgressReplayed(t *testing.T) {
 		{Type: clievent.KindTaskStart, TaskID: "b1", TaskType: "local_bash", Summary: "npm run bench", Time: now.Add(-3 * time.Hour).UnixMilli()},
 		{Type: clievent.KindResult, Time: now.Add(-3*time.Hour).UnixMilli() + 1},
 	}
-	if got := Judge(in).Progress(now); got != "已跑 3 小时 · 1 个后台任务：npm run bench" {
+	if got := Scan(in).At(in.Now).Progress(now); got != "已跑 3 小时 · 1 个后台任务：npm run bench" {
 		t.Errorf("Progress with the start in the log = %q", got)
 	}
 }

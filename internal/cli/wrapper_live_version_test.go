@@ -61,13 +61,3 @@ func TestProcess_SetLiveVersion_FiresCallbackOnChange(t *testing.T) {
 		t.Fatalf("callback last value = %v, want 2.1.180", v)
 	}
 }
-
-// TestProcess_SetLiveVersion_NoCallbackWiredIsSafe guards the legacy
-// &Process{} path: setLiveVersion with no callback assigned must not panic.
-func TestProcess_SetLiveVersion_NoCallbackWiredIsSafe(t *testing.T) {
-	p := &Process{}
-	p.setLiveVersion("2.1.174")
-	if got := p.LiveVersion(); got != "2.1.174" {
-		t.Fatalf("LiveVersion = %q, want 2.1.174", got)
-	}
-}

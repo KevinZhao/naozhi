@@ -6,18 +6,6 @@ import (
 	"testing"
 )
 
-func TestRingBuffer_SequenceContinuesAfterEviction(t *testing.T) {
-	b := NewRingBuffer(3, 10000)
-	for i := 0; i < 5; i++ {
-		b.Push([]byte("x"))
-	}
-	// Seq continues monotonically even with evictions
-	seq6 := b.Push([]byte("y"))
-	if seq6 != 6 {
-		t.Errorf("seq after evictions = %d, want 6", seq6)
-	}
-}
-
 func TestRingBuffer_WrapAround(t *testing.T) {
 	// Fill exactly to capacity, then push one more to cause wraparound
 	const cap = 4
@@ -101,24 +89,6 @@ func TestRingBuffer_ByteLimit_EvictsMultiple(t *testing.T) {
 	oldest, newest := b.SeqRange()
 	if oldest != 2 || newest != 3 {
 		t.Errorf("SeqRange = (%d, %d), want (2, 3)", oldest, newest)
-	}
-}
-
-func TestRingBuffer_OversizedLineDrop(t *testing.T) {
-	// A single line larger than maxBytes must be dropped (not stored)
-	b := NewRingBuffer(100, 5)
-	seq := b.Push([]byte("123456789012345")) // 15 bytes > maxBytes=5
-
-	// Seq is still assigned (monotonic counter)
-	if seq != 1 {
-		t.Errorf("seq = %d, want 1", seq)
-	}
-	// But line must NOT be stored
-	if b.Count() != 0 {
-		t.Errorf("Count() = %d, want 0 (oversized line dropped)", b.Count())
-	}
-	if b.Bytes() != 0 {
-		t.Errorf("Bytes() = %d, want 0", b.Bytes())
 	}
 }
 

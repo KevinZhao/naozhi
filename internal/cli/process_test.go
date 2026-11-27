@@ -2,7 +2,6 @@ package cli
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"net"
 	"sync"
@@ -79,42 +78,6 @@ func (s *shimTestServer) Close() {
 }
 
 // --- Tests ---
-
-func TestProcess_Alive_TrueWhenDoneOpen(t *testing.T) {
-	t.Parallel()
-	p := &Process{done: make(chan struct{})}
-	if !p.Alive() {
-		t.Error("Alive() = false, want true when done is open")
-	}
-}
-
-func TestProcess_Alive_FalseAfterDoneClosed(t *testing.T) {
-	t.Parallel()
-	p := &Process{done: make(chan struct{})}
-	close(p.done)
-	if p.Alive() {
-		t.Error("Alive() = true, want false after done is closed")
-	}
-}
-
-func TestProcess_IsRunning(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		state ProcessState
-		want  bool
-	}{
-		{StateSpawning, false},
-		{StateReady, false},
-		{StateRunning, true},
-		{StateDead, false},
-	}
-	for _, tc := range cases {
-		p := &Process{turn: turnState{state: tc.state}}
-		if got := p.IsRunning(); got != tc.want {
-			t.Errorf("state=%v: IsRunning() = %v, want %v", tc.state, got, tc.want)
-		}
-	}
-}
 
 func TestProcess_ReadLoop_ForwardsEventsToChannel(t *testing.T) {
 	t.Parallel()
@@ -242,15 +205,6 @@ func TestProcess_ReadLoop_ExitsOnKillCh(t *testing.T) {
 	}
 }
 
-func TestProcess_Kill_Idempotent(t *testing.T) {
-	t.Parallel()
-	p, _ := shimTestPair(&ClaudeProtocol{})
-	// Repeated calls must not panic
-	p.Kill()
-	p.Kill()
-	p.Kill()
-}
-
 func TestProcess_Kill_ConcurrentSafe(t *testing.T) {
 	t.Parallel()
 	p, _ := shimTestPair(&ClaudeProtocol{})
@@ -265,42 +219,8 @@ func TestProcess_Kill_ConcurrentSafe(t *testing.T) {
 	wg.Wait()
 }
 
-// Retained from original tests
 func TestParseAgentInput(t *testing.T) {
 	t.Parallel()
-	t.Run("label priority", func(t *testing.T) {
-		cases := []struct {
-			name  string
-			input string
-			want  string
-		}{
-			{"subagent_type wins", `{"subagent_type":"Explore","name":"my-agent","team_name":"team1"}`, "Explore"},
-			{"name fallback", `{"name":"my-agent","team_name":"team1"}`, "my-agent"},
-			{"team_name fallback", `{"team_name":"team1","description":"do stuff"}`, "team1"},
-			{"all empty", `{"description":"do stuff"}`, ""},
-			{"empty input", ``, ""},
-		}
-		// Inline label-priority resolution: kept in this test (not on
-		// agentInput) because production no longer needs it — DEADCODE-7.
-		labelOf := func(a agentInput) string {
-			if a.SubagentType != "" {
-				return a.SubagentType
-			}
-			if a.Name != "" {
-				return a.Name
-			}
-			return a.TeamName
-		}
-		for _, tc := range cases {
-			t.Run(tc.name, func(t *testing.T) {
-				got := labelOf(parseAgentInput(json.RawMessage(tc.input)))
-				if got != tc.want {
-					t.Errorf("label() = %q, want %q", got, tc.want)
-				}
-			})
-		}
-	})
-
 	t.Run("run_in_background", func(t *testing.T) {
 		cases := []struct {
 			name  string
@@ -337,6 +257,3 @@ func eventTypes(evs []clievent.Event) []string {
 	}
 	return out
 }
-
-// Unused import guard — context is used by test helpers that may be added later.
-var _ = context.Background

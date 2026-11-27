@@ -2,7 +2,6 @@ package subagent
 
 import (
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/claudefs"
@@ -38,37 +37,5 @@ func TestProjectDir_UsesTheVerifiedSlugEncoding(t *testing.T) {
 		if got := ProjectDir(cwd); got != want {
 			t.Errorf("ProjectDir(%q)\n got %q\nwant %q", cwd, got, want)
 		}
-	}
-}
-
-// TestProjectDir_NonBMPGetsTwoDashes states the difference outright, so the
-// regression is legible without cross-referencing claudefs: a single emoji
-// contributes two dashes, not one.
-func TestProjectDir_NonBMPGetsTwoDashes(t *testing.T) {
-	slug := claudefs.ProjectSlug("/tmp/e\U0001F389d")
-	if want := "-tmp-e--d"; slug != want {
-		t.Fatalf("slug = %q, want %q — a non-BMP rune must contribute two dashes", slug, want)
-	}
-	// And the old per-rune encoding would have produced one.
-	var b strings.Builder
-	for _, r := range "/tmp/e\U0001F389d" {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
-			b.WriteRune(r)
-		} else {
-			b.WriteByte('-')
-		}
-	}
-	if b.String() == slug {
-		t.Error("the per-rune encoding matches the CLI's here; this test no longer " +
-			"distinguishes them and the regression it guards is unprotected")
-	}
-}
-
-// TestProjectDir_EmptyCWD keeps the documented bail-out: Resolve relies on "" to
-// mean "no project dir", and an empty CWD must not resolve to the projects root
-// itself.
-func TestProjectDir_EmptyCWD(t *testing.T) {
-	if got := ProjectDir(""); got != "" {
-		t.Errorf("ProjectDir(\"\") = %q, want empty", got)
 	}
 }

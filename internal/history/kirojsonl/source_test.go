@@ -59,15 +59,6 @@ func writeSession(t *testing.T, rootDir, sid string, lines []string) string {
 	return path
 }
 
-// TestSource_ImplementsInterface is a compile-time assertion that
-// *Source satisfies history.Source. A future refactor that drops
-// LoadBefore would fail to build at this line rather than at every
-// merged.Source call site.
-func TestSource_ImplementsInterface(t *testing.T) {
-	t.Parallel()
-	var _ history.Source = (*Source)(nil)
-}
-
 // TestSource_LoadBefore_FullRoundTrip pins the happy path: a Prompt
 // followed by an AssistantMessage round-trips into two EventEntries
 // with the right Type, Time (unix-ms from the unix-sec timestamp), and

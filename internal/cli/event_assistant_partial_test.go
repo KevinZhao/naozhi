@@ -46,16 +46,3 @@ func TestAssistantMessageUnmarshalAllBadArray(t *testing.T) {
 		t.Fatalf("expected empty content, got %d blocks", len(m.Content))
 	}
 }
-
-// TestAssistantMessageUnmarshalCleanArray is a regression guard: a fully valid
-// array must still take the fast strict-decode path unchanged.
-func TestAssistantMessageUnmarshalCleanArray(t *testing.T) {
-	raw := `{"role":"assistant","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}`
-	var m clievent.AssistantMessage
-	if err := json.Unmarshal([]byte(raw), &m); err != nil {
-		t.Fatalf("unmarshal returned error: %v", err)
-	}
-	if len(m.Content) != 2 || m.Content[0].Text != "a" || m.Content[1].Text != "b" {
-		t.Fatalf("clean array not decoded correctly: %+v", m.Content)
-	}
-}

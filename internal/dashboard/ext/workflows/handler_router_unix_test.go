@@ -24,7 +24,7 @@ func TestHandleWorkflow_RestoredRouterRealRun(t *testing.T) {
 	}
 	claudeDir, ws, storePath := filepath.Join(tmp, "claude"), filepath.Join(tmp, "ws"), filepath.Join(tmp, "sessions.json")
 	projectDir := filepath.Join(claudefs.ProjectsRoot(claudeDir), claudefs.ProjectSlug(ws))
-	resultPath := claudefs.WorkflowResultFile(projectDir, storeSID, storeRun)
+	resultPath := filepath.Join(projectDir, storeSID, "workflows", storeRun+".json")
 	data, err := os.ReadFile(filepath.Join("..", "..", "..", "cli", "workflow", "testdata", "run", storeRun+".json"))
 	if err != nil {
 		t.Fatal(err)

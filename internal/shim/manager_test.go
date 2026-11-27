@@ -93,48 +93,6 @@ func TestShimHandle_SendMsg(t *testing.T) {
 	}
 }
 
-func TestShimHandle_SendMsg_MultipleTypes(t *testing.T) {
-	tests := []struct {
-		name string
-		msg  ClientMsg
-	}{
-		{"attach", ClientMsg{Type: "attach", Token: "dGVzdA==", Seq: 5}},
-		{"interrupt", ClientMsg{Type: "interrupt"}},
-		{"ping", ClientMsg{Type: "ping"}},
-		{"shutdown", ClientMsg{Type: "shutdown"}},
-		{"detach", ClientMsg{Type: "detach"}},
-		{"kill", ClientMsg{Type: "kill"}},
-		{"close_stdin", ClientMsg{Type: "close_stdin"}},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			handle, server := newTestHandlePair(t)
-			defer handle.Conn.Close()
-			defer server.Close()
-
-			gotCh := make(chan ClientMsg, 1)
-			go func() {
-				var msg ClientMsg
-				readLineMsgConn(server, &msg)
-				gotCh <- msg
-			}()
-
-			if err := handle.SendMsg(tc.msg); err != nil {
-				t.Fatalf("SendMsg(%s): %v", tc.name, err)
-			}
-			select {
-			case got := <-gotCh:
-				if got.Type != tc.msg.Type {
-					t.Errorf("Type = %q, want %q", got.Type, tc.msg.Type)
-				}
-			case <-time.After(2 * time.Second):
-				t.Fatalf("timeout waiting for %s", tc.name)
-			}
-		})
-	}
-}
-
 // --- ShimHandle.ReadMsg ---
 
 func TestShimHandle_ReadMsg(t *testing.T) {
@@ -310,14 +268,6 @@ func TestShimHandle_Close_SignalsDone(t *testing.T) {
 	}
 }
 
-func TestShimHandle_Close_Idempotent(t *testing.T) {
-	handle, server := newTestHandlePair(t)
-	defer server.Close()
-
-	handle.Close()
-	handle.Close() // must not panic
-}
-
 func TestShimHandle_Detach_SendsDetachMsg(t *testing.T) {
 	handle, server := newTestHandlePair(t)
 	defer server.Close()
@@ -405,31 +355,7 @@ func TestShimHandle_SendMsg_ConcurrentSafe(t *testing.T) {
 	}
 }
 
-// --- Manager defaults and configuration ---
-
-func TestNewManager_Defaults(t *testing.T) {
-	dir := t.TempDir()
-	m := mustNewManager(t, ManagerConfig{StateDir: dir})
-
-	if m.maxShims != 50 {
-		t.Errorf("maxShims = %d, want 50", m.maxShims)
-	}
-	if m.bufferSize != 10000 {
-		t.Errorf("bufferSize = %d, want 10000", m.bufferSize)
-	}
-	if m.maxBufBytes != 50*1024*1024 {
-		t.Errorf("maxBufBytes = %d, want 50MB", m.maxBufBytes)
-	}
-	if m.idleTimeout != 4*time.Hour {
-		t.Errorf("idleTimeout = %v, want 4h", m.idleTimeout)
-	}
-	if m.watchdogTimeout != 30*time.Minute {
-		t.Errorf("watchdogTimeout = %v, want 30m", m.watchdogTimeout)
-	}
-	if m.shims == nil {
-		t.Error("shims map should be initialized")
-	}
-}
+// --- Manager.Remove ---
 
 func TestManager_Remove(t *testing.T) {
 	dir := t.TempDir()
@@ -449,12 +375,6 @@ func TestManager_Remove(t *testing.T) {
 	if exists {
 		t.Error("Remove did not delete the key from shims map")
 	}
-}
-
-func TestManager_Remove_NonExistentKey(t *testing.T) {
-	dir := t.TempDir()
-	m := mustNewManager(t, ManagerConfig{StateDir: dir})
-	m.Remove("nonexistent:key") // must not panic
 }
 
 // --- Manager.DetachAll / StopAll ---

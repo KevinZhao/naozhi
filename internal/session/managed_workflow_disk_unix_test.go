@@ -36,7 +36,7 @@ func realRunLayout(t *testing.T) (root, workspace, resultPath string) {
 	if err := os.MkdirAll(claudefs.WorkflowRunDir(claudefs.SubagentsDir(projectDir, wfSID), wfRun), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	resultPath = claudefs.WorkflowResultFile(projectDir, wfSID, wfRun)
+	resultPath = filepath.Join(projectDir, wfSID, "workflows", wfRun+".json")
 	if err := os.MkdirAll(filepath.Dir(resultPath), 0o755); err != nil {
 		t.Fatal(err)
 	}

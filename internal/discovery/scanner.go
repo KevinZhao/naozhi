@@ -230,14 +230,6 @@ const runningThreshold = 30 * time.Second
 // the editor's lifetime that never gets a JSONL and would duplicate the sidebar.
 const noJSONLGrace = 5 * time.Second
 
-// MaxSafeJSONInt mirrors JavaScript's Number.MAX_SAFE_INTEGER (2^53 - 1). Any
-// uint64 that crosses a JSON boundary into dashboard.js or a reverse-RPC peer
-// must stay below it or JSON.parse rounds it and PID-identity comparisons
-// (ProcStartTime) match wrongly. Producers are far below (Linux jiffies:
-// ~2.85M years of uptime; Darwin Unix μs: year ~2255) and proc_*_test.go
-// asserts ProcStartTime(os.Getpid()) <= MaxSafeJSONInt to catch encoding changes.
-const MaxSafeJSONInt uint64 = (1 << 53) - 1
-
 // DiscoveredSession represents a Claude CLI process found on the system.
 type DiscoveredSession struct {
 	PID        int    `json:"pid"`
@@ -254,7 +246,7 @@ type DiscoveredSession struct {
 	LastPrompt string `json:"last_prompt,omitempty"` // most recent user message
 	// ProcStartTime is a per-PID boot identity that detects PID reuse (Linux:
 	// /proc/PID/stat field 22; Darwin: Unix μs from ps lstart). It crosses JSON
-	// boundaries and MUST stay below MaxSafeJSONInt or handleTakeover's check fails.
+	// boundaries and MUST stay below 2^53-1 (JS Number.MAX_SAFE_INTEGER) or handleTakeover's check fails.
 	ProcStartTime uint64 `json:"proc_start_time"`
 	Project       string `json:"project,omitempty"` // project name resolved from CWD (filled by server)
 	Node          string `json:"node,omitempty"`    // workspace/node ID (filled by server for multi-node)

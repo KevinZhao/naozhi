@@ -3,7 +3,6 @@ package cli
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -39,9 +38,6 @@ func TestEnforceCLIPathSafe(t *testing.T) {
 		{"absolute missing", fixed("/nonexistent/abs/claude"), ""},
 		{"regular file", func(t *testing.T) string { return writeBin(t, filepath.Join(t.TempDir(), "fakecli")) }, ""},
 		{"symlink to regular file", func(t *testing.T) string {
-			if runtime.GOOS == "windows" {
-				t.Skip("symlink semantics differ on windows")
-			}
 			dir := t.TempDir()
 			link := filepath.Join(dir, "link")
 			if err := os.Symlink(writeBin(t, filepath.Join(dir, "real")), link); err != nil {

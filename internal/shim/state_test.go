@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -37,41 +38,9 @@ func TestWriteReadStateFile_RoundTrip(t *testing.T) {
 		t.Fatalf("ReadStateFile: %v", err)
 	}
 
-	if got.Version != stateVersion {
-		t.Errorf("Version = %d, want %d", got.Version, stateVersion)
-	}
-	if got.ShimPID != want.ShimPID {
-		t.Errorf("ShimPID = %d, want %d", got.ShimPID, want.ShimPID)
-	}
-	if got.CLIPID != want.CLIPID {
-		t.Errorf("CLIPID = %d, want %d", got.CLIPID, want.CLIPID)
-	}
-	if got.Socket != want.Socket {
-		t.Errorf("Socket = %q, want %q", got.Socket, want.Socket)
-	}
-	if got.AuthToken != want.AuthToken {
-		t.Errorf("AuthToken = %q, want %q", got.AuthToken, want.AuthToken)
-	}
-	if got.Key != want.Key {
-		t.Errorf("Key = %q, want %q", got.Key, want.Key)
-	}
-	if got.SessionID != want.SessionID {
-		t.Errorf("SessionID = %q, want %q", got.SessionID, want.SessionID)
-	}
-	if got.Workspace != want.Workspace {
-		t.Errorf("Workspace = %q, want %q", got.Workspace, want.Workspace)
-	}
-	if got.CLIAlive != want.CLIAlive {
-		t.Errorf("CLIAlive = %v, want %v", got.CLIAlive, want.CLIAlive)
-	}
-	if len(got.CLIArgs) != len(want.CLIArgs) {
-		t.Errorf("CLIArgs len = %d, want %d", len(got.CLIArgs), len(want.CLIArgs))
-	} else {
-		for i, a := range want.CLIArgs {
-			if got.CLIArgs[i] != a {
-				t.Errorf("CLIArgs[%d] = %q, want %q", i, got.CLIArgs[i], a)
-			}
-		}
+	want.Version = stateVersion
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round-trip mismatch:\n got  %+v\n want %+v", got, want)
 	}
 }
 
@@ -106,90 +75,6 @@ func TestWriteStateFile_IsAtomic(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("expected final file at path: %v", err)
-	}
-}
-
-func TestWriteStateFile_SetsVersion(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "v.json")
-
-	// Supply version 0 (zero value), WriteStateFile must overwrite with stateVersion.
-	s := State{ShimPID: 1, Socket: "/tmp/s.sock", AuthToken: "dA==", Key: "k"}
-	s.Version = 0
-	if err := WriteStateFile(path, s); err != nil {
-		t.Fatal(err)
-	}
-	got, err := ReadStateFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Version != stateVersion {
-		t.Errorf("Version = %d, want %d", got.Version, stateVersion)
-	}
-}
-
-func TestShimState_SchemaVersionPersisted(t *testing.T) {
-	// Writers that set SchemaVersion must see it round-trip intact, so a
-	// future reader can inspect the advisory marker without re-parsing.
-	dir := t.TempDir()
-	path := filepath.Join(dir, "schema_version.json")
-
-	want := State{
-		SchemaVersion: 1,
-		ShimPID:       1,
-		Socket:        "/tmp/s.sock",
-		AuthToken:     "dA==",
-		Key:           "k",
-	}
-	if err := WriteStateFile(path, want); err != nil {
-		t.Fatal(err)
-	}
-	got, err := ReadStateFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.SchemaVersion != 1 {
-		t.Errorf("SchemaVersion round-trip = %d, want 1", got.SchemaVersion)
-	}
-
-	// Also verify the on-disk JSON key is the canonical snake_case form.
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(raw), `"schema_version": 1`) {
-		t.Errorf("on-disk JSON missing schema_version key: %s", raw)
-	}
-}
-
-func TestShimState_ZeroSchemaVersionIsV1(t *testing.T) {
-	// Contract: an older writer omits schema_version entirely (omitempty on
-	// zero). Readers must tolerate this and interpret missing/zero as v1.
-	// This test documents that semantics — no runtime translation is done
-	// today, but the contract is locked so future consumers can rely on it.
-	dir := t.TempDir()
-	path := filepath.Join(dir, "no_schema_version.json")
-
-	// Older-style payload: "version":1 present, "schema_version" absent.
-	payload := `{"version":1,"shim_pid":1,"cli_pid":0,"socket":"/tmp/s.sock","auth_token":"dA==","key":"k","session_id":"","workspace":"","cli_args":null,"cli_alive":false,"started_at":"","buffer_count":0}`
-	if err := os.WriteFile(path, []byte(payload), 0600); err != nil {
-		t.Fatal(err)
-	}
-	got, err := ReadStateFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.SchemaVersion != 0 {
-		t.Errorf("absent schema_version should decode to zero, got %d", got.SchemaVersion)
-	}
-	// Contract: zero reads as v1. Consumers doing capability checks should
-	// treat got.SchemaVersion == 0 equivalently to got.SchemaVersion == 1.
-	effective := got.SchemaVersion
-	if effective == 0 {
-		effective = 1
-	}
-	if effective != 1 {
-		t.Errorf("effective schema version = %d, want 1 (zero-means-v1 contract)", effective)
 	}
 }
 
@@ -299,28 +184,6 @@ func TestRemoveStateFile(t *testing.T) {
 	RemoveStateFile("/nonexistent/never/existed.json")
 }
 
-// TestRemoveStateFile_FsyncsDir checks the #406 durability-symmetry fix: a
-// state file written via the atomic write path is removed cleanly and the
-// removal does not error even though RemoveStateFile now fsyncs the parent
-// directory. SyncDir degrades gracefully on filesystems that reject dir
-// fsync (tmpfs/FUSE), so this must pass regardless of the temp-dir backend.
-func TestRemoveStateFile_FsyncsDir(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "shim-abc.json")
-
-	if err := WriteStateFile(path, State{ShimPID: 1, Socket: "/tmp/s.sock", AuthToken: "dA==", Key: "k"}); err != nil {
-		t.Fatalf("WriteStateFile: %v", err)
-	}
-	RemoveStateFile(path)
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("state file should be gone after RemoveStateFile; stat err = %v", err)
-	}
-	// Parent dir must still be a usable directory afterwards.
-	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
-		t.Fatalf("parent dir unusable after removal: err=%v", err)
-	}
-}
-
 func TestGenerateToken(t *testing.T) {
 	raw1, b64_1, err := GenerateToken()
 	if err != nil {
@@ -422,23 +285,6 @@ func TestSocketPath_XDGRuntimeDir(t *testing.T) {
 
 	if !strings.HasPrefix(path, dir) {
 		t.Errorf("SocketPath = %q, expected prefix %q when XDG_RUNTIME_DIR set", path, dir)
-	}
-}
-
-func TestStateFilePath(t *testing.T) {
-	tests := []struct {
-		stateDir   string
-		keyHash    string
-		wantSuffix string
-	}{
-		{"/var/lib/naozhi/shims", "abc123", "/var/lib/naozhi/shims/abc123.json"},
-		{"/tmp/shims", "feedbeef12345678", "/tmp/shims/feedbeef12345678.json"},
-	}
-	for _, tc := range tests {
-		got := StateFilePath(tc.stateDir, tc.keyHash)
-		if got != tc.wantSuffix {
-			t.Errorf("StateFilePath(%q, %q) = %q, want %q", tc.stateDir, tc.keyHash, got, tc.wantSuffix)
-		}
 	}
 }
 

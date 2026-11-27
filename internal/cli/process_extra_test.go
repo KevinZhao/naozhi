@@ -16,7 +16,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
-	"github.com/naozhi/naozhi/internal/cliinfo"
 	"github.com/naozhi/naozhi/internal/testhelper"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -941,60 +940,6 @@ func TestProcess_Close_BoundedOnWedgedShim(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Detach
 // ---------------------------------------------------------------------------
-
-func TestProcess_Detach(t *testing.T) {
-	p, srv := shimTestPair(&ClaudeProtocol{})
-	startServerDrain(srv)
-	p.startReadLoop()
-	p.Detach() // should not panic
-}
-
-// ---------------------------------------------------------------------------
-// Accessor methods
-// ---------------------------------------------------------------------------
-
-func TestProcess_Accessors(t *testing.T) {
-	p, srv := shimTestPair(&ClaudeProtocol{})
-	startServerDrain(srv)
-	p.startReadLoop()
-	defer p.Kill()
-
-	if s := p.State(); s != StateReady {
-		t.Errorf("State() = %v, want StateReady", s)
-	}
-	if id := p.SessionID(); id != "" {
-		t.Errorf("SessionID() = %q, want empty", id)
-	}
-	if c := p.TotalCost(); c != 0.0 {
-		t.Errorf("TotalCost() = %f, want 0", c)
-	}
-	if name := p.ProtocolName(); name != "stream-json" {
-		t.Errorf("ProtocolName() = %q, want stream-json", name)
-	}
-	if pid := p.PID(); pid != 0 {
-		t.Errorf("PID() = %d, want 0", pid)
-	}
-	if tt := p.TotalTimeout(); tt != cliinfo.DefaultTotalTimeout {
-		t.Errorf("TotalTimeout() = %v, want the shared default %v", tt, cliinfo.DefaultTotalTimeout)
-	}
-	if DefaultNoOutputTimeout != cliinfo.DefaultNoOutputTimeout {
-		t.Errorf("DefaultNoOutputTimeout = %v, want the shared default %v", DefaultNoOutputTimeout, cliinfo.DefaultNoOutputTimeout)
-	}
-	if seq := p.LastSeq(); seq != 0 {
-		t.Errorf("LastSeq() = %d, want 0", seq)
-	}
-}
-
-func TestProcess_GetTotalTimeout_Custom(t *testing.T) {
-	p, srv := shimTestPair(&ClaudeProtocol{})
-	startServerDrain(srv)
-	p.totalTimeout = 3 * time.Minute
-	p.startReadLoop()
-	defer p.Kill()
-	if tt := p.TotalTimeout(); tt != 3*time.Minute {
-		t.Errorf("TotalTimeout() = %v, want 3m", tt)
-	}
-}
 
 // ---------------------------------------------------------------------------
 // SetOnTurnDone

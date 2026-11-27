@@ -187,7 +187,7 @@ func assertShimMsgProjects(t *testing.T, frameType string, sm shim.ServerMsg, cm
 }
 
 // TestShimMsgRoundTripsEveryShimFrame encodes each sample through the
-// shim's real marshal path and decodes it with both shim.ParseServerMsg
+// shim's real marshal path and decodes it as both shim.ServerMsg
 // (authoritative) and cli.shimMsg (live hot path), asserting the two agree
 // on every field shimMsg carries and that nothing the shim populated is
 // silently dropped.
@@ -210,9 +210,9 @@ func TestShimMsgRoundTripsEveryShimFrame(t *testing.T) {
 			}
 			payload := line[:len(line)-1]
 
-			authoritative, err := shim.ParseServerMsg(payload)
-			if err != nil {
-				t.Fatalf("shim.ParseServerMsg: %v", err)
+			var authoritative shim.ServerMsg
+			if err := json.Unmarshal(payload, &authoritative); err != nil {
+				t.Fatalf("Unmarshal shim.ServerMsg: %v", err)
 			}
 			if !reflect.DeepEqual(authoritative, s.msg) {
 				t.Fatalf("ServerMsg round-trip drift:\n got  %#v\n want %#v", authoritative, s.msg)

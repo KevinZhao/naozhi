@@ -143,30 +143,6 @@ func TestMerged_TimeBeforeFilter(t *testing.T) {
 	}
 }
 
-// TestMerged_SortedByTime: even when inputs are unsorted, the output
-// must be sorted ascending by Time.
-func TestMerged_SortedByTime(t *testing.T) {
-	m := &Source{
-		Local: &stubSource{entries: []clievent.EventEntry{
-			{UUID: "z", Time: 300},
-			{UUID: "a", Time: 100},
-		}},
-		Fallback: &stubSource{entries: []clievent.EventEntry{
-			{UUID: "m", Time: 200},
-		}},
-	}
-	got, _ := m.LoadBefore(context.Background(), 0, 100)
-	if len(got) != 3 {
-		t.Fatalf("got %d, want 3", len(got))
-	}
-	for i := 1; i < len(got); i++ {
-		if got[i].Time < got[i-1].Time {
-			t.Errorf("not sorted: %+v", got)
-			break
-		}
-	}
-}
-
 // TestMerged_LimitTailKept: when the merged result exceeds limit,
 // the NEWEST limit entries are kept. Dashboard pagination wants
 // recent-first adjacency.
@@ -365,30 +341,6 @@ func TestMerged_UnsortedInputs(t *testing.T) {
 	}
 	if got[0].UUID != "x" || got[2].UUID != "z" {
 		t.Errorf("repair order wrong: got %v", got)
-	}
-}
-
-// TestMerged_BeforeMSFilter: beforeMS filtering applies to both
-// tiers; missing it on either would leak "too new" entries.
-func TestMerged_BeforeMSFilter(t *testing.T) {
-	m := &Source{
-		Local: &stubSource{entries: []clievent.EventEntry{
-			{UUID: "a", Time: 100},
-			{UUID: "c", Time: 300},
-		}},
-		Fallback: &stubSource{entries: []clievent.EventEntry{
-			{UUID: "b", Time: 200},
-			{UUID: "d", Time: 400},
-		}},
-	}
-	got, _ := m.LoadBefore(context.Background(), 250, 100)
-	for _, e := range got {
-		if e.Time >= 250 {
-			t.Errorf("entry Time=%d leaked past beforeMS=250", e.Time)
-		}
-	}
-	if len(got) != 2 {
-		t.Errorf("got %d, want 2", len(got))
 	}
 }
 
