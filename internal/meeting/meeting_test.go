@@ -795,3 +795,30 @@ func TestEventAtSkipsAnotherProgramsMeeting(t *testing.T) {
 		}
 	}
 }
+
+// TestObserveReadsAuthAtUnderLock runs observe's ActStart against refreshAuth, as housekeeping's
+// refresh may overlap a snapshot from Watch: under -race an unlocked read of authAt is reported.
+func TestObserveReadsAuthAtUnderLock(t *testing.T) {
+	clock := &fakeClock{t: time.Date(2026, 11, 9, 10, 0, 0, 0, time.Local)}
+	h := &fakeHelper{t: t, auth: Auth{Microphone: "authorized", AudioCapture: "not_determined"}}
+	m := New(Config{Root: t.TempDir(), Helper: h, Now: clock.Now})
+	ctx := context.Background()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 200 {
+			m.refreshAuth(ctx)
+		}
+	}()
+	for range 200 {
+		m.mu.Lock()
+		m.det = Detector{}
+		m.mu.Unlock()
+		m.observe(ctx, []Proc{teams})
+		clock.Add(2 * time.Minute)
+	}
+	<-done
+	if m.Status().Detected != nil {
+		t.Fatal("offered a recording without authorisation")
+	}
+}
