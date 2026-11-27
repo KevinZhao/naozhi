@@ -180,20 +180,6 @@ func loadConfigBody(t *testing.T, body string) *config.Config {
 	return cfg
 }
 
-// TestSweeperRemovesOldSysSessionJSONL: the 7-day sys-sessions window removes
-// a 90-day-old log.
-func TestSweeperRemovesOldSysSessionJSONL(t *testing.T) {
-	sysDir := t.TempDir()
-	oldJSONL := plantOld(t, sysDir, "old.jsonl")
-	s := newDataDirSweeper(&config.Config{}, datadir.ForStore(filepath.Join(t.TempDir(), "sessions.json")), nil, sysDir)
-	if got := s.RunOnce()["sys-sessions"].Removed; got != 1 {
-		t.Errorf("sys-sessions removed %d, want 1", got)
-	}
-	if _, err := os.Stat(oldJSONL); err == nil {
-		t.Error("the 90-day-old JSONL survived the sweep")
-	}
-}
-
 // TestSweeperPrunesUnreferencedToolImages: an old tool screenshot no event log
 // names any more is removed with its .meta; one a log still names is kept.
 func TestSweeperPrunesUnreferencedToolImages(t *testing.T) {

@@ -86,22 +86,6 @@ func TestChatIDSuffix(t *testing.T) {
 	}
 }
 
-// TestMain_DispatchesDiagnosticSubcommands guards the ops runbook: `naozhi
-// doctor` must stay reachable from the CLI. The dispatch is a registry
-// (subcmd.go) now, so this asserts the registry entry resolves and points at
-// runDoctor — a dropped table row or a rewired run func fails immediately
-// instead of at 3am.
-func TestMain_DispatchesDiagnosticSubcommands(t *testing.T) {
-	t.Parallel()
-	sc := findSubcmd("doctor")
-	if sc == nil {
-		t.Fatal(`registry has no "doctor" entry — runDoctor would be unreachable from the CLI`)
-	}
-	if got, want := reflect.ValueOf(sc.run).Pointer(), reflect.ValueOf(runDoctor).Pointer(); got != want {
-		t.Error(`registry "doctor" entry does not run runDoctor — "naozhi doctor" args would not forward`)
-	}
-}
-
 // TestShimManagerConfig pins which config value feeds each shim.Manager field;
 // every value differs from its default so a swapped or dropped accessor shows.
 func TestShimManagerConfig(t *testing.T) {

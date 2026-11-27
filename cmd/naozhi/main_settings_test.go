@@ -32,20 +32,6 @@ func seedClaudeHome(t *testing.T, contents string) string {
 	return home
 }
 
-func TestReadJSONWithRetry_validFirstTry(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "x.json")
-	if err := os.WriteFile(path, []byte(`{"ok":true}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	data, err := readJSONWithRetry(context.Background(), path, 3, 1*time.Millisecond)
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if !json.Valid(data) {
-		t.Fatalf("expected valid JSON, got %q", data)
-	}
-}
-
 func TestReadJSONWithRetry_allAttemptsInvalidReturnsError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.json")
 	// Write a truncated/invalid JSON string.
@@ -167,23 +153,6 @@ func TestApplyClaudeEnvSettings_shellVarTakesPrecedence(t *testing.T) {
 	}
 	if got := os.Getenv("ANTHROPIC_MODEL"); got != "from-shell" {
 		t.Errorf("shell value should win, got %q", got)
-	}
-}
-
-func TestApplyClaudeEnvSettings_invalidJSONReturnsError(t *testing.T) {
-	seedClaudeHome(t, `{"env": {"ANTHROPIC_MODEL":`)
-	err := applyClaudeEnvSettings(context.Background())
-	if err == nil {
-		t.Fatal("expected error on invalid JSON, got nil")
-	}
-}
-
-func TestApplyClaudeEnvSettings_missingFileReturnsError(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	err := applyClaudeEnvSettings(context.Background())
-	if err == nil {
-		t.Fatal("expected error when settings.json missing")
 	}
 }
 

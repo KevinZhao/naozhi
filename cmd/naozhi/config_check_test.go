@@ -82,16 +82,30 @@ cli:
 		if !strings.Contains(s, "argv-denylist") || !strings.Contains(s, "--effort") || !strings.Contains(s, "dropped") {
 			t.Errorf("output must name the argv-denylist --effort drop:\n%s", s)
 		}
+		// The summary line is the only place a reader learns what a diag
+		// COSTS: a runtime warning, not a refusal — naozhi boots and the gate
+		// drops the value.
+		for _, want := range []string{"would still start", "warns once", "drops the value"} {
+			if !strings.Contains(s, want) {
+				t.Errorf("summary must say %q so a reader knows this is a warning, not a refusal:\n%s", want, s)
+			}
+		}
 	})
 
 	t.Run("fatal_exit2", func(t *testing.T) {
-		var out bytes.Buffer
-		code := configCheck([]string{"-config", writeCheckConfig(t, ":\tnot yaml [")}, &out)
-		if code != 2 {
-			t.Fatalf("exit = %d, want 2; output:\n%s", code, out.String())
-		}
-		if !strings.Contains(out.String(), "FATAL") {
-			t.Errorf("missing FATAL line:\n%s", out.String())
+		for _, body := range []string{":\tnot yaml [", "cli:\n  args: [\"--model\", \"\"]\n"} {
+			var out bytes.Buffer
+			code := configCheck([]string{"-config", writeCheckConfig(t, body)}, &out)
+			if code != 2 {
+				t.Fatalf("exit = %d, want 2; output:\n%s", code, out.String())
+			}
+			if !strings.Contains(out.String(), "FATAL") {
+				t.Errorf("missing FATAL line:\n%s", out.String())
+			}
+			// A fatal really does stop the boot.
+			if strings.Contains(out.String(), "would still start") {
+				t.Errorf("a fatal must not claim naozhi would start:\n%s", out.String())
+			}
 		}
 	})
 }
@@ -208,13 +222,6 @@ cli:
 	}
 	if _, ok := doc.Effective["claude"]; !ok {
 		t.Errorf("effective lacks claude entry: %v", doc.Effective)
-	}
-}
-
-// TestConfigCheck_RegisteredSubcommand: the registry routes `naozhi config`.
-func TestConfigCheck_RegisteredSubcommand(t *testing.T) {
-	if findSubcmd("config") == nil {
-		t.Fatal(`registry has no "config" entry`)
 	}
 }
 

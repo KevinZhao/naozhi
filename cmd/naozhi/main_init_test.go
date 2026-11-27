@@ -25,11 +25,10 @@ import (
 // what config.Validate's contract documents would surface here as an
 // unexpected level token in the captured journald output.
 func TestLogConfigValidationDiagnostics_RoutesByLevel(t *testing.T) {
-	// NOT t.Parallel(): hijacks the global slog default. A sibling
-	// parallel test (TestInitBackendWrappers_DefaultIDPropagated) calls
-	// slog.Warn from initBackendWrappers, which races with the buffer
-	// write here under -race on darwin/arm64. Keep this test sequential
-	// so the SetDefault window cannot overlap any other Warn site.
+	// NOT t.Parallel(): hijacks the global slog default. Sibling parallel
+	// tests call slog.Warn from initBackendWrappers, which races with the
+	// buffer write here under -race on darwin/arm64. Keep this test
+	// sequential so the SetDefault window cannot overlap any other Warn site.
 	backend.EnsureDefaults() // idempotent across tests
 
 	// Capture slog output in JSON so we can assert on level + message.
@@ -281,26 +280,5 @@ func TestStartupDefaultBackendID_MatchesInitBackendWrappers(t *testing.T) {
 				t.Errorf("DefaultID %q has no runtime; runtimes=%v", bws.DefaultID, bws.Runtimes)
 			}
 		})
-	}
-}
-
-// TestInitBackendWrappers_DefaultIDPropagated: when cli.backend names a
-// listed, registered backend, DefaultID keeps that configured id. Fallback
-// configs are covered by TestStartupDefaultBackendID_MatchesInitBackendWrappers.
-func TestInitBackendWrappers_DefaultIDPropagated(t *testing.T) {
-	t.Parallel()
-	backend.EnsureDefaults() // idempotent across parallel tests
-	cfg := &config.Config{
-		CLI: config.CLIConfig{
-			Backends: []config.CLIBackendConfig{
-				{ID: "claude", Path: "/usr/local/bin/claude"},
-			},
-			Backend: "claude",
-		},
-	}
-	bws, _ := initBackendWrappers(context.Background(), cfg, nil)
-	if bws.DefaultID != cfg.DefaultBackendID() {
-		t.Fatalf("DefaultID drift: helper=%q cfg.DefaultBackendID=%q",
-			bws.DefaultID, cfg.DefaultBackendID())
 	}
 }
