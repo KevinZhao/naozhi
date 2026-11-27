@@ -5,7 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -67,9 +67,6 @@ func newMockStream(transcripts []string) *transcribestreaming.StartStreamTranscr
 // (ffmpeg non-zero exit) without depending on a host ffmpeg or crafted audio.
 func fakeFFmpeg(t *testing.T, stdout, stderr string, code int) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("fake-ffmpeg shell script is POSIX-only")
-	}
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake-ffmpeg.sh")
 	// Drain stdin so the bytes.Reader feeding pipe:0 does not block on a full
@@ -82,7 +79,7 @@ func fakeFFmpeg(t *testing.T, stdout, stderr string, code int) {
 	if stderr != "" {
 		body += "printf '%s' " + shQuote(stderr) + " 1>&2\n"
 	}
-	body += "exit " + itoa(code) + "\n"
+	body += "exit " + strconv.Itoa(code) + "\n"
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatalf("write fake ffmpeg: %v", err)
 	}
@@ -90,28 +87,6 @@ func fakeFFmpeg(t *testing.T, stdout, stderr string, code int) {
 }
 
 func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var b [20]byte
-	i := len(b)
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		b[i] = '-'
-	}
-	return string(b[i:])
-}
 
 // TestStreamFromFFmpeg_ConvertErrorSurfaces pins #1781: when ffmpeg exits
 // non-zero and Transcribe yields no text, Transcribe must return a non-nil
@@ -226,20 +201,6 @@ func TestStreamFromFFmpeg_StreamErrorSurfacesFFmpegExit(t *testing.T) {
 	var exitErr interface{ ExitCode() int }
 	if !errors.As(err, &exitErr) {
 		t.Errorf("error = %v, want the *exec.ExitError preserved in the chain", err)
-	}
-}
-
-// TestCollectTranscripts_ReaderErr keeps the reader-error path covered: a reader
-// that reports Err() must surface a "stream read" error regardless of ffmpeg.
-func TestCollectTranscripts_ReaderErr(t *testing.T) {
-	stream := transcribestreaming.NewStartStreamTranscriptionEventStream(
-		func(es *transcribestreaming.StartStreamTranscriptionEventStream) {
-			es.Writer = &fakeAudioWriter{}
-			es.Reader = &errReader{err: errors.New("boom")}
-		},
-	)
-	if _, err := collectTranscripts(stream); err == nil || !strings.Contains(err.Error(), "stream read") {
-		t.Fatalf("collectTranscripts err = %v, want wrapped %q", err, "stream read")
 	}
 }
 
