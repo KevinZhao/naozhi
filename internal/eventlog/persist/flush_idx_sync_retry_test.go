@@ -13,12 +13,10 @@ import (
 
 // TestFlush_RetainsPendingIdxOnSyncError pins R20260605B-CORR-12 (#1816):
 // flush() must run the idx durability barrier (idxWriter.Sync) BEFORE it
-// discards the in-memory retry buffer (pendingIdx) and advances the stride
-// cursor. If a transient idx fsync error occurs, pendingIdx must survive
-// (and dirty stay true) so the next flush re-appends and re-fsyncs the
-// same entries. The old code cleared pendingIdx first, leaving the idx
-// bytes stranded in page cache and driving recovery to truncate
-// already-fsynced log records on a crash.
+// discards pendingIdx and advances the stride cursor. On an idx fsync error
+// the writer is poisoned (TestFlush_IdxSyncFailure_Poisons) and retired, and
+// retireWriter counts the events still in pendingIdx as dropped — so they
+// must still be there.
 func TestFlush_RetainsPendingIdxOnSyncError(t *testing.T) {
 	p, dir := newTestPersister(t, func(o *Options) {
 		o.IdxStride = 4
@@ -90,8 +88,6 @@ func TestFlush_RetainsPendingIdxOnSyncError(t *testing.T) {
 	// it modulo stride after a durable idx sync.
 	w.dirty = true
 
-	idxSizeBefore := idxFileSize(t, idxPath)
-
 	// Inject a transient idx fsync fault.
 	injected := errors.New("injected idx fsync EIO")
 	idxW.syncFailHook = func() error { return injected }
@@ -104,8 +100,8 @@ func TestFlush_RetainsPendingIdxOnSyncError(t *testing.T) {
 		t.Fatalf("flush: err=%v, want wrapped %v", err, injected)
 	}
 
-	// THE FIX: pendingIdx retained, dirty still true — the retry source
-	// must not have been discarded ahead of the durability barrier.
+	// THE FIX: pendingIdx retained, dirty still true — the entries must not
+	// have been discarded ahead of the durability barrier.
 	if len(w.pendingIdx) != 1 {
 		t.Fatalf("pendingIdx len=%d after sync failure, want 1 (retry buffer must survive)",
 			len(w.pendingIdx))
@@ -117,30 +113,4 @@ func TestFlush_RetainsPendingIdxOnSyncError(t *testing.T) {
 		t.Fatalf("entriesSinceIdxWrite=%d after sync failure, want 0 (cursor must not advance)",
 			w.entriesSinceIdxWrite)
 	}
-
-	// Clear the fault and retry: the same idx entry must now be appended
-	// and durably synced.
-	idxW.syncFailHook = nil
-	if err := w.flush(p); err != nil {
-		t.Fatalf("retry flush: unexpected error: %v", err)
-	}
-	if len(w.pendingIdx) != 0 {
-		t.Fatalf("pendingIdx len=%d after successful retry, want 0", len(w.pendingIdx))
-	}
-	if w.dirty {
-		t.Fatalf("w.dirty=true after successful retry, want false")
-	}
-	if got := idxFileSize(t, idxPath); got <= idxSizeBefore {
-		t.Fatalf("idx file did not grow after retry flush (before=%d after=%d); "+
-			"the pending entry was lost", idxSizeBefore, got)
-	}
-}
-
-func idxFileSize(t *testing.T, path string) int64 {
-	t.Helper()
-	fi, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat idx: %v", err)
-	}
-	return fi.Size()
 }
