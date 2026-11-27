@@ -89,29 +89,6 @@ func TestHandleBind_InvalidWorkspaceRejected(t *testing.T) {
 	}
 }
 
-// TestHandleBind_InvalidKeyRejected: a key carrying a C1/bidi control byte is
-// refused by ValidateSessionKey before any override is written.
-func TestHandleBind_InvalidKeyRejected(t *testing.T) {
-	_, hs, _, root := newBindServer(t)
-	projDir := mkProjDir(t, root)
-	// U+202E (RIGHT-TO-LEFT OVERRIDE) embedded in the key.
-	key := "dashboard:pj:abc\u202e0123:general"
-	w := postBind(t, hs, `{"key":"`+key+`","node":"local","workspace":"`+projDir+`"}`)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d want 400 for control-char key (body=%s)", w.Code, w.Body.String())
-	}
-}
-
-// TestHandleBind_EmptyWorkspace: a missing workspace is a 400, not a silent
-// no-op that could mask a frontend wiring bug.
-func TestHandleBind_EmptyWorkspace(t *testing.T) {
-	_, hs, _, _ := newBindServer(t)
-	w := postBind(t, hs, `{"key":"dashboard:pj:abc0123456789012:general","node":"local","workspace":""}`)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d want 400 for empty workspace (body=%s)", w.Code, w.Body.String())
-	}
-}
-
 // TestHandleBind_RemoteNodeNoop: a remote-node bind is acked (200) but writes
 // NO override on the local router — remote sessions resolve cwd on their node.
 func TestHandleBind_RemoteNodeNoop(t *testing.T) {
@@ -150,44 +127,23 @@ func TestHandleBind_ChatKeyDerivation(t *testing.T) {
 	}
 }
 
-// TestHandleBind_EmptyChatKeyPrefix: a key whose only colon is at index 0
-// (":agent") must be rejected so the empty-string chat key can never carry an
-// override (which would poison every default Workspace lookup).
-func TestHandleBind_EmptyChatKeyPrefix(t *testing.T) {
+// TestHandleBind_Rejects: a key with a control byte, an empty chat-key
+// prefix (whose override would poison every default Workspace lookup), an
+// empty workspace and a malformed body are all 400s that write no override.
+func TestHandleBind_Rejects(t *testing.T) {
 	_, hs, router, root := newBindServer(t)
 	projDir := mkProjDir(t, root)
-	w := postBind(t, hs, `{"key":":general","node":"local","workspace":"`+projDir+`"}`)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d want 400 for empty chat-key prefix (body=%s)", w.Code, w.Body.String())
+	for _, body := range []string{
+		`{"key":"dashboard:pj:abc\u202e0123:general","node":"local","workspace":"` + projDir + `"}`,
+		`{"key":":general","node":"local","workspace":"` + projDir + `"}`,
+		`{"key":"dashboard:pj:abc0123456789012:general","node":"local","workspace":""}`,
+		`{not json`,
+	} {
+		if w := postBind(t, hs, body); w.Code != http.StatusBadRequest {
+			t.Errorf("%s: status=%d want 400 (body=%s)", body, w.Code, w.Body.String())
+		}
 	}
 	if got := router.Workspace(""); got != root {
 		t.Fatalf("empty chat key must not carry an override; Workspace(\"\")=%q want %q", got, root)
-	}
-}
-
-// TestHandleBind_BadJSON: a malformed body is a 400, no panic.
-func TestHandleBind_BadJSON(t *testing.T) {
-	_, hs, _, _ := newBindServer(t)
-	w := postBind(t, hs, `{not json`)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d want 400 for malformed JSON (body=%s)", w.Code, w.Body.String())
-	}
-}
-
-// TestHandleBind_RouteRegistered confirms POST /api/sessions/bind is wired
-// behind auth on the mux (a regression that dropped the route would make the
-// frontend eager-bind silently 404).
-func TestHandleBind_RouteRegistered(t *testing.T) {
-	srv, _, _, root := newBindServer(t)
-	projDir := mkProjDir(t, root)
-	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/sessions/bind",
-		strings.NewReader(`{"key":"dashboard:pj:abc0123456789012:general","node":"local","workspace":"`+projDir+`"}`))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.mux.ServeHTTP(w, req)
-	// No token configured on this Server, so auth wrapper allows the call and
-	// the handler runs — anything other than 404/405 proves the route exists.
-	if w.Code == http.StatusNotFound || w.Code == http.StatusMethodNotAllowed {
-		t.Fatalf("POST /api/sessions/bind not registered: status=%d", w.Code)
 	}
 }

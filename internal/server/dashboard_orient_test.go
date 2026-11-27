@@ -297,35 +297,14 @@ func TestHandleOrient_UnknownIDNotFound(t *testing.T) {
 	}
 }
 
-// TestHandleOrient_InvalidIDRejected pins [R20260614-SEC-7]: IDs that do not
-// match the 32-char lowercase hex shape of uploadStore.Put must be rejected
-// with 400 before reaching the store.
+// TestHandleOrient_InvalidIDRejected pins [R20260614-SEC-7]: an ID not of
+// uploadStore.Put's shape (TestIsUploadID) is a 400 before reaching the store.
 func TestHandleOrient_InvalidIDRejected(t *testing.T) {
 	h := newOrientTestHandler(&orientConfig{enabled: true, runner: &stubVision{answer: "right"}, timeout: time.Second})
-
-	cases := []struct {
-		name string
-		id   string
-	}{
-		{"too short", "deadbeef"},
-		{"too long", strings.Repeat("a", 33)},
-		{"uppercase hex", strings.Repeat("A", 32)},
-		{"non-hex chars", strings.Repeat("g", 32)},
-		{"path traversal", "../../../etc/passwd" + strings.Repeat("a", 13)},
-		{"empty after strip", ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.id == "" {
-				// empty id is caught by the earlier req.ID == "" check (400 "missing id")
-				return
-			}
-			w := httptest.NewRecorder()
-			h.handleOrient(w, orientReq(tc.id))
-			if w.Code != http.StatusBadRequest {
-				t.Errorf("id %q: want 400, got %d", tc.id, w.Code)
-			}
-		})
+	w := httptest.NewRecorder()
+	h.handleOrient(w, orientReq("../../../etc/passwd"+strings.Repeat("a", 13)))
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("want 400, got %d", w.Code)
 	}
 }
 

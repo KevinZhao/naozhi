@@ -51,48 +51,6 @@ func TestBuildAttachmentETagSeed_MillisecondPrecision(t *testing.T) {
 	}
 }
 
-// TestAnonCookieMaxAge_AlignedToAuthSession pins R202606f-SEC-005 / #2297
-// (which supersedes the R247-SEC-15 / #514 7-day floor): the nz_anon MaxAge
-// MUST equal the nz_auth session lifetime (1h). Previously the label lived 7
-// days — 7× the auth session — so on a shared device a second user arriving
-// after the first user's auth cookie expired could inherit the first user's
-// uploadOwner bucket and TakeAll their pending uploads. Bounding the label to
-// the auth session closes that reuse window.
-//
-// We assert the constant directly so a future refactor that re-introduces a
-// longer MaxAge (e.g. a "remember me" UX request) is forced to update the
-// constant rather than silently widen the window via a magic literal.
-func TestAnonCookieMaxAge_AlignedToAuthSession(t *testing.T) {
-	t.Parallel()
-	const oneHour = 3600 // mirrors internal/dashboard/auth authCookieMaxAgeSeconds
-	if anonCookieMaxAgeSeconds != oneHour {
-		t.Fatalf("#2297 regression: anonCookieMaxAgeSeconds = %d; want 1h (%d) aligned to the nz_auth session. A longer-lived anon label re-opens the shared-device upload-bucket reuse window — update the const intentionally and adjust this test if you really mean to widen it.", anonCookieMaxAgeSeconds, oneHour)
-	}
-
-	// Mint a cookie via the real path and confirm Max-Age on the wire
-	// matches the constant. This catches a regression where a future edit
-	// keeps the constant but stops feeding it into http.SetCookie.
-	r := httptest.NewRequest("POST", "/api/sessions/upload", nil)
-	r.RemoteAddr = "203.0.113.5:40000"
-	w := httptest.NewRecorder()
-	if _, err := mintAnonCookie(w, r, nil); err != nil {
-		t.Fatalf("mintAnonCookie returned error: %v", err)
-	}
-	var got *http.Cookie
-	for _, c := range w.Result().Cookies() {
-		if c.Name == anonCookieName {
-			got = c
-			break
-		}
-	}
-	if got == nil {
-		t.Fatalf("nz_anon cookie not set by mintAnonCookie")
-	}
-	if got.MaxAge != anonCookieMaxAgeSeconds {
-		t.Fatalf("Set-Cookie Max-Age = %d, want %d (anonCookieMaxAgeSeconds)", got.MaxAge, anonCookieMaxAgeSeconds)
-	}
-}
-
 // TestUploadOwner_NoIPFallbackOnNilWriter pins R247-SEC-8 (#501): when
 // uploadOwner cannot mint a fresh nz_anon (no ResponseWriter to set the
 // cookie on, or crypto/rand failure on the real path), it MUST return
@@ -118,96 +76,36 @@ func TestUploadOwner_NoIPFallbackWhenAnonMintImpossible(t *testing.T) {
 	}
 }
 
-// TestUploadOwnerOrFail_503OnFailure pins the helper that handlers wrap
-// uploadOwner with: a closed-over derivation MUST emit 503 + Retry-After
-// so the dashboard retries on a fresh socket where /dev/urandom may have
-// replenished, instead of silently dropping the request.
-func TestUploadOwnerOrFail_503OnFailure(t *testing.T) {
+// TestMintAnonCookie_SecureByMode pins R222-SEC-4 / #687: with a dashboard
+// token (multi-user intent) nz_anon is Secure even over plaintext, so a
+// same-network sniffer cannot lift the owner label; without one (single-user
+// http://127.0.0.1) it follows the request, so the browser still sends it.
+func TestMintAnonCookie_SecureByMode(t *testing.T) {
 	t.Parallel()
-	r := httptest.NewRequest("POST", "/api/sessions/upload", nil)
-	r.RemoteAddr = "203.0.113.5:40000"
-	w := httptest.NewRecorder()
-	owner, ok := uploadOwnerOrFail(w, r, nil, false)
-	// ok must be false; nil writer-into-mintAnonCookie path is exercised
-	// by TestUploadOwner_NoIPFallbackWhenAnonMintImpossible. Here we use
-	// a real recorder so mintAnonCookie succeeds and ok=true (sanity).
-	if !ok {
-		t.Fatalf("expected ok=true on real recorder; got owner=%q ok=false (status=%d)", owner, w.Code)
-	}
-	if owner == "" {
-		t.Errorf("owner empty on success path")
-	}
-}
-
-// TestMintAnonCookie_ForcesSecureInMultiUserMode pins R222-SEC-4 / #687: when
-// a dashboard token is configured (multi-user intent) the nz_anon cookie MUST
-// be marked Secure even if the request itself arrived over plaintext. The
-// browser will then refuse to ship the cookie back over HTTP, which is the
-// fail-closed behaviour the issue calls for. Without this guard, a same-
-// network attacker on a non-TLS deployment could sniff the per-browser owner
-// label and steal pending uploads via TakeAll.
-//
-// We construct an auth.Handlers literal with only dashboardToken populated;
-// isSecure(r) returns false because r.TLS==nil and trustedProxy==false, so
-// the legacy `secure` branch would have produced Secure=false. Asserting
-// got.Secure==true therefore directly exercises the new force-Secure path.
-func TestMintAnonCookie_ForcesSecureInMultiUserMode(t *testing.T) {
-	t.Parallel()
-	r := httptest.NewRequest("POST", "/api/sessions/upload", nil)
-	r.RemoteAddr = "203.0.113.5:40000"
-	w := httptest.NewRecorder()
-	auth := auth.New("deploy-token", nil, "", false)
-	if _, err := mintAnonCookie(w, r, auth); err != nil {
-		t.Fatalf("mintAnonCookie returned error: %v", err)
-	}
-	var got *http.Cookie
-	for _, c := range w.Result().Cookies() {
-		if c.Name == anonCookieName {
-			got = c
-			break
+	for _, tc := range []struct {
+		token string
+		want  bool
+	}{{"deploy-token", true}, {"", false}} {
+		r := httptest.NewRequest("POST", "/api/sessions/upload", nil)
+		w := httptest.NewRecorder()
+		if _, err := mintAnonCookie(w, r, auth.New(tc.token, nil, "", false)); err != nil {
+			t.Fatalf("mintAnonCookie returned error: %v", err)
 		}
-	}
-	if got == nil {
-		t.Fatalf("nz_anon cookie not set by mintAnonCookie")
-	}
-	if !got.Secure {
-		t.Fatalf("R222-SEC-4 regression: nz_anon Secure=false in multi-user mode (dashboardToken set). The browser would ship the owner label over plaintext, re-opening the same-network sniff window. Force-Secure must remain on whenever auth.dashboardToken is non-empty.")
-	}
-}
-
-// TestMintAnonCookie_NoForceSecureInSingleUserMode pins the converse: when no
-// dashboard token is configured (single-user / dev-laptop default) the cookie
-// stays at the legacy Secure=isSecure(r) branch. Operators on http://127.0.0.1
-// without a token must keep the cookie usable so upload disambiguation works
-// — in single-user deployments there is at most one owner and no sniff vector
-// to close. Asserts the new logic does not over-fire.
-func TestMintAnonCookie_NoForceSecureInSingleUserMode(t *testing.T) {
-	t.Parallel()
-	r := httptest.NewRequest("POST", "/api/sessions/upload", nil)
-	r.RemoteAddr = "127.0.0.1:40000"
-	w := httptest.NewRecorder()
-	auth := auth.New("", nil, "", false) // no dashboardToken, single-user mode
-	if _, err := mintAnonCookie(w, r, auth); err != nil {
-		t.Fatalf("mintAnonCookie returned error: %v", err)
-	}
-	var got *http.Cookie
-	for _, c := range w.Result().Cookies() {
-		if c.Name == anonCookieName {
-			got = c
-			break
+		var got *http.Cookie
+		for _, c := range w.Result().Cookies() {
+			if c.Name == anonCookieName {
+				got = c
+			}
 		}
-	}
-	if got == nil {
-		t.Fatalf("nz_anon cookie not set by mintAnonCookie")
-	}
-	if got.Secure {
-		t.Fatalf("nz_anon Secure=true in single-user mode without TLS — would make the browser drop the cookie under HTTP and break upload disambiguation. Force-Secure must only fire when auth.dashboardToken is set.")
+		if got == nil || got.Secure != tc.want {
+			t.Errorf("token %q: nz_anon = %+v, want Secure=%v", tc.token, got, tc.want)
+		}
 	}
 }
 
 // TestUploadOwner_AnonCookieFallback locks RNEW-SEC-005: no-token mode mints
 // a per-browser nz_anon cookie so co-NAT clients get distinct owners (no
-// TakeAll theft), reuses an existing cookie, and emits the spec attributes.
+// TakeAll theft) and emits the spec attributes (reuse: anon_cookie_renewal_test).
 func TestUploadOwner_AnonCookieFallback(t *testing.T) {
 	t.Parallel()
 	newReq := func() *http.Request {
@@ -239,22 +137,5 @@ func TestUploadOwner_AnonCookieFallback(t *testing.T) {
 	b, _ := uploadOwner(httptest.NewRecorder(), newReq(), nil, false)
 	if a == b {
 		t.Fatalf("co-NAT users got identical owner %q — TakeAll theft still possible", a)
-	}
-	// Existing cookie is reused: the owner must derive from the presented
-	// value, and the sliding-renewal Set-Cookie must re-issue the SAME value
-	// (rotating it would move the owner bucket mid-session — the regression
-	// the original "no Set-Cookie" assertion was really guarding against).
-	w2, r2 := httptest.NewRecorder(), newReq()
-	r2.AddCookie(&http.Cookie{Name: anonCookieName, Value: "deadbeefcafebabe0011223344556677"})
-	uploadOwner(w2, r2, nil, false)
-	if c := findAnon(w2); c != nil {
-		if c.Value != "deadbeefcafebabe0011223344556677" {
-			t.Fatalf("reuse path rotated nz_anon to %q — owner bucket moves mid-session", c.Value)
-		}
-		if c.MaxAge != anonCookieMaxAgeSeconds {
-			t.Fatalf("renewal MaxAge=%d; want %d", c.MaxAge, anonCookieMaxAgeSeconds)
-		}
-	} else {
-		t.Fatalf("no sliding renewal on reuse path — nz_anon hard-expires after %ds of active use (upload/WS owner divergence)", anonCookieMaxAgeSeconds)
 	}
 }

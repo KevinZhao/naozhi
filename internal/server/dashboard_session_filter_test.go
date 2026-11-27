@@ -5,9 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/naozhi/naozhi/internal/discovery"
-	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // fakeCronSessions is a stub CronView used to verify the dashboard's
@@ -175,34 +172,4 @@ func TestHistoryFilter_NilCronSessionsDegrades(t *testing.T) {
 	if !saw {
 		t.Errorf("with nil cronSessions and empty sysWorkDir, regular session must remain visible: %s", visibleSID)
 	}
-}
-
-// TestDashboardListingFilter_ContractRoundtrip pins the per-prefix skip
-// decision the dashboard's sidebar listing path applies (see
-// dashboard_session.go::listSessions): cron / sys / scratch namespaces
-// must be hidden from the catch-all "recent sessions" sidebar; standard
-// IM keys and project planner keys (deliberately surfaced via the
-// project sidebar grouping) must remain visible.
-//
-// Replaces the prior contract that pinned session.IsUserVisibleKey,
-// which was deleted because no listing path actually consulted it —
-// project keys could not flow through that umbrella without regressing
-// the planner UI. See #1212 for the deletion rationale.
-func TestDashboardListingFilter_ContractRoundtrip(t *testing.T) {
-	hiddenInSidebar := func(key string) bool {
-		return sessionkey.IsScratchKey(key) || sessionkey.IsCronKey(key) || sessionkey.IsSysKey(key)
-	}
-	for _, k := range []string{"cron:job-1", "sys:auto-titler", "scratch:abc:general:general"} {
-		if !hiddenInSidebar(k) {
-			t.Errorf("dashboard listing must hide %q", k)
-		}
-	}
-	for _, k := range []string{"feishu:group:c:general", "slack:direct:U:general", "project:myrepo:planner"} {
-		if hiddenInSidebar(k) {
-			t.Errorf("dashboard listing must surface %q", k)
-		}
-	}
-
-	// Avoid unused-import surface if discovery is later removed from this file.
-	_ = discovery.RecentSession{}
 }

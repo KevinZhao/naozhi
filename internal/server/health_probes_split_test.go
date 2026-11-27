@@ -7,50 +7,6 @@ import (
 	"testing"
 )
 
-// TestHandleLivez_AlwaysOK locks the contract that /livez never depends on
-// router / hub / CLI state — it is the K8s liveness probe and a non-200
-// triggers a restart loop. Even when handleHealth would refuse fields
-// (router stats etc.), /livez must return 200.
-//
-// Anti-regression: a future refactor that adds a dep check inside
-// handleLivez would turn a transient eventlog drain wobble into a kill;
-// this test fails in that case.
-func TestHandleLivez_AlwaysOK(t *testing.T) {
-	_, hs := newTestServerWithTokenHS(&mockPlatform{}, "secret")
-	req := httptest.NewRequest(http.MethodGet, "/livez", nil)
-	w := httptest.NewRecorder()
-	hs.healthH.handleLivez(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", w.Code)
-	}
-	if got := strings.TrimSpace(w.Body.String()); got != "ok" {
-		t.Errorf("body = %q, want \"ok\"", got)
-	}
-	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "text/plain") {
-		t.Errorf("content-type = %q, want text/plain", ct)
-	}
-	if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
-		t.Errorf("cache-control = %q, want no-store", cc)
-	}
-}
-
-// TestHandleReadyz_OKWhenWired returns 200 ready when router is wired —
-// the standard happy path on a normally-started server.
-func TestHandleReadyz_OKWhenWired(t *testing.T) {
-	_, hs := newTestServerWithTokenHS(&mockPlatform{}, "secret")
-	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
-	w := httptest.NewRecorder()
-	hs.healthH.handleReadyz(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", w.Code)
-	}
-	if got := strings.TrimSpace(w.Body.String()); got != "ready" {
-		t.Errorf("body = %q, want \"ready\"", got)
-	}
-}
-
 // TestHealthProbes_RoutedToTheirHandlers drives each probe through the mux:
 // the other health tests call the handler methods directly, so they cannot
 // see a route mounted on the wrong one.

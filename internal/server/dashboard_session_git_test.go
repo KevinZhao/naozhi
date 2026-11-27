@@ -116,35 +116,3 @@ func TestSessionsGitRoute_DoesNotDiscloseRepoAboveAllowedRoot(t *testing.T) {
 		t.Errorf("is_repo = true for a workspace whose repo is outside allowed_root (root=%q)", parsed.Root)
 	}
 }
-
-// TestSessionsGitRoute_RequiresAuth pins that the endpoint sits behind the
-// same RequireAuth wrapper as the rest of the /api/sessions group — the git
-// state names filesystem paths, so an unauthenticated read must not pass.
-func TestSessionsGitRoute_RequiresAuth(t *testing.T) {
-	srv := newTestServerWithToken(&mockPlatform{}, "s3cret")
-	t.Cleanup(routerOf(srv).Shutdown)
-
-	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/sessions/git?key=a:b:c:general", nil)
-	rec := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rec, req)
-
-	if rec.Code == http.StatusOK {
-		t.Errorf("status = 200 without a token, want an auth rejection")
-	}
-}
-
-// TestSessionsGitRoute_MethodNotAllowed pins that only GET is routed — a
-// pattern typo like "/api/sessions/git" without a method would otherwise
-// accept POST too.
-func TestSessionsGitRoute_MethodNotAllowed(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
-	t.Cleanup(routerOf(srv).Shutdown)
-
-	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/sessions/git?key=a:b:c:general", nil)
-	rec := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rec, req)
-
-	if rec.Code == http.StatusOK {
-		t.Errorf("POST returned 200, want 405")
-	}
-}

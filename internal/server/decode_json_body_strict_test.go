@@ -29,14 +29,6 @@ func TestDecodeJSONBody_RejectsUnknownFields(t *testing.T) {
 	if !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("decodeJSONBody err = %v; want json unknown-field error", err)
 	}
-	// dst should not have been populated with the legitimate fields either —
-	// strict decode bails on the first unknown field, but even if it did, the
-	// security property we care about is that the unknown one never lands.
-	if dst.Name == "alice" {
-		// Acceptable: encoding/json may still set Name before hitting the
-		// unknown field. The critical assertion is the error above.
-		t.Logf("note: dst.Name populated before unknown-field rejection (allowed)")
-	}
 }
 
 // TestDecodeJSONBody_AcceptsKnownFields keeps the common path green: a
