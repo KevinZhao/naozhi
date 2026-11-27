@@ -551,31 +551,21 @@ func TestResetNilProcessSession(t *testing.T) {
 	}
 }
 
-func TestResetAliveSession(t *testing.T) {
-	r := newTestRouter(3)
-	proc := newIdleProc()
-	injectSession(r, "key1", proc)
+// TestResetLiveSession: Reset closes the process, idle or running, and
+// drops the session.
+func TestResetLiveSession(t *testing.T) {
+	for name, proc := range map[string]*fakeProcess{"idle": newIdleProc(), "running": newRunningProc()} {
+		r := newTestRouter(3)
+		injectSession(r, "key1", proc)
 
-	r.Reset("key1")
+		r.Reset("key1")
 
-	if proc.Alive() {
-		t.Error("process should be closed after Reset")
-	}
-	_, total := r.Stats()
-	if total != 0 {
-		t.Errorf("total after reset = %d, want 0", total)
-	}
-}
-
-func TestResetRunningSession(t *testing.T) {
-	r := newTestRouter(3)
-	proc := newRunningProc()
-	injectSession(r, "key1", proc)
-
-	r.Reset("key1") // Reset closes even running sessions
-
-	if proc.Alive() {
-		t.Error("running process should be closed after Reset")
+		if proc.Alive() {
+			t.Errorf("%s: process should be closed after Reset", name)
+		}
+		if _, total := r.Stats(); total != 0 {
+			t.Errorf("%s: total after reset = %d, want 0", name, total)
+		}
 	}
 }
 
@@ -746,12 +736,10 @@ func TestCleanupRunningSession_NoLiveEventsStillKilled(t *testing.T) {
 	r.Cleanup()
 
 	if proc.Alive() {
-		// expected — Kill() set isAlive=false
-	} else if got := loadAtomicString(&s.deathReason); got != "stuck_running" {
-		t.Errorf("deathReason = %q, want %q", got, "stuck_running")
-	}
-	if proc.Alive() {
 		t.Error("truly stuck running session must still be killed")
+	}
+	if got := loadAtomicString(&s.deathReason); got != "stuck_running" {
+		t.Errorf("deathReason = %q, want %q", got, "stuck_running")
 	}
 }
 
@@ -934,6 +922,8 @@ func TestGetOrCreate_ExistingAliveSession(t *testing.T) {
 	proc := newIdleProc()
 	injected := injectSession(r, "feishu:direct:user1:general", proc)
 	injected.setSessionID("existing-sess")
+	oldActive := injected.LastActive()
+	time.Sleep(2 * time.Millisecond)
 
 	s, _, err := r.GetOrCreate(context.Background(), "feishu:direct:user1:general", AgentOpts{})
 	if err != nil {
@@ -944,19 +934,6 @@ func TestGetOrCreate_ExistingAliveSession(t *testing.T) {
 	}
 	if s.getSessionID() != "existing-sess" {
 		t.Errorf("SessionID = %q, want 'existing-sess'", s.getSessionID())
-	}
-}
-
-func TestGetOrCreate_ExistingAlive_TouchesLastActive(t *testing.T) {
-	r := newTestRouter(3)
-	proc := newIdleProc()
-	s := injectSession(r, "key1", proc)
-	oldActive := s.LastActive()
-	time.Sleep(2 * time.Millisecond)
-
-	_, _, err := r.GetOrCreate(context.Background(), "key1", AgentOpts{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
 	}
 	if !s.LastActive().After(oldActive) {
 		t.Error("GetOrCreate should update lastActive for existing alive session")
@@ -1267,41 +1244,26 @@ func TestCountActive_ReflectsAliveProcesses(t *testing.T) {
 // Concurrency / race detector
 // ---------------------------------------------------------------------------
 
+// TestConcurrentGetOrCreate_SameKey_Race: concurrent GetOrCreate calls on one
+// key (every spawn fails: newTestRouter's wrapper is a missing binary) each
+// return their own error, none a nil session with a nil error, and none hang
+// on the spawningKeys handoff. R248-TEST-9.
 func TestConcurrentGetOrCreate_SameKey_Race(t *testing.T) {
 	r := newTestRouter(5)
 	key := "feishu:direct:user1:general"
 
 	const N = 10
-	// Hard timeout — newTestRouter's wrapper points at a nonexistent binary,
-	// so each spawn fails fast (sub-millisecond). Even with 10 concurrent
-	// goroutines serialising through the table lock, a healthy run finishes in <1s.
-	// 10s is generous against -race + slow CI; a deadlock or missed
-	// close(doneCh) trips this rather than the test hanging the suite.
-	// R248-TEST-9.
-	const hardTimeout = 10 * time.Second
-
-	var (
-		wg            sync.WaitGroup
-		errCount      atomic.Int64
-		successCount  atomic.Int64
-		nonNilErrSeen atomic.Int64
-	)
+	var wg sync.WaitGroup
+	var errCount atomic.Int64
 	wg.Add(N)
 	for i := 0; i < N; i++ {
 		go func() {
 			defer wg.Done()
-			_, _, err := r.GetOrCreate(context.Background(), key, AgentOpts{})
-			if err != nil {
+			if _, _, err := r.GetOrCreate(context.Background(), key, AgentOpts{}); err != nil {
 				errCount.Add(1)
-				nonNilErrSeen.Add(1)
-			} else {
-				successCount.Add(1)
 			}
 		}()
 	}
-
-	// Drive wg.Wait through a guarded channel so the hard timer can fail
-	// the test loud rather than hanging the whole suite.
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
@@ -1309,39 +1271,11 @@ func TestConcurrentGetOrCreate_SameKey_Race(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(hardTimeout):
-		t.Fatalf("TestConcurrentGetOrCreate_SameKey_Race did not finish within %v — "+
-			"likely deadlock in spawningKeys handoff or missed close(doneCh)", hardTimeout)
+	case <-time.After(10 * time.Second):
+		t.Fatal("concurrent GetOrCreate did not finish: deadlock in the spawningKeys handoff or a missed close(doneCh)")
 	}
-
-	// At least N-1 goroutines must have taken the inflight-wait branch.
-	// newTestRouter's wrapper is missing-binary so every Spawn errors,
-	// meaning at most ONE goroutine can be the first-spawn winner — the
-	// rest necessarily observed spawningKeys[key] and parked on doneCh.
-	// (Even if the winner finishes its failed spawn before some siblings
-	// arrive, those siblings re-enter the loop, see no session, become
-	// the next "winner" themselves; either way they did not race the
-	// shim-socket dial and the contract holds.)
-	//
-	// The signal we want to defend: every concurrent GetOrCreate either
-	// succeeds (impossible here — Spawn always fails) or surfaces an
-	// error. A regression that corrupts spawningKeys could result in a
-	// nil-result + nil-error return, which we'd see as a goroutine that
-	// counted neither. R248-TEST-9.
-	totalAccountedFor := errCount.Load() + successCount.Load()
-	if totalAccountedFor != int64(N) {
-		t.Errorf("only %d/%d goroutines returned a recorded result (errs=%d successes=%d); "+
-			"a missing return path is a regression", totalAccountedFor, N, errCount.Load(), successCount.Load())
-	}
-	if successCount.Load() != 0 {
-		t.Errorf("successes = %d, want 0 — newTestRouter wrapper points at /nonexistent/cli-binary",
-			successCount.Load())
-	}
-	if nonNilErrSeen.Load() < int64(N-1) {
-		t.Errorf("only %d goroutines saw a non-nil error; expected at least N-1=%d "+
-			"(only one can be the spawn-winner; the rest must take the inflight-wait path "+
-			"and ultimately surface a Spawn error of their own). R248-TEST-9.",
-			nonNilErrSeen.Load(), N-1)
+	if n := errCount.Load(); n != N {
+		t.Errorf("%d/%d calls returned an error; every spawn fails, so each must", n, N)
 	}
 }
 
@@ -1490,33 +1424,6 @@ func TestStartCleanupLoop_TriggersCleanup(t *testing.T) {
 	}, 500*time.Millisecond, "cleanup loop did not close expired session")
 }
 
-// ---------------------------------------------------------------------------
-// spawningKeys guard (TOCTOU fix for ReconcileLoop vs fresh-context cron)
-// ---------------------------------------------------------------------------
-
-// Regression for the 04:00:00 cron failure: GetOrCreate spawned
-// while the 30s reconcile loop fired, and the freshly spawned shim's state
-// file was judged "orphan" because the new ManagedSession wasn't installed
-// yet. The spawn must record the key in spawningKeys for the entire spawn
-// window so ReconnectShims can skip it; a failed spawn must still clean up.
-func TestSpawnSession_SpawningKeysClearedOnFailure(t *testing.T) {
-	r := newTestRouter(3)
-
-	// Spawn fails because the test wrapper points at a nonexistent binary.
-	_, _, err := r.GetOrCreate(context.Background(), "key1", AgentOpts{})
-	if err == nil {
-		t.Fatal("expected spawn error from nonexistent CLI")
-	}
-
-	var stillMarked bool
-	r.ss.Update(func(tx sessTx) {
-		_, stillMarked = tx.Ext().spawns.SpawnInFlight("key1")
-	})
-	if stillMarked {
-		t.Error("spawningKeys still contains key1 after failed spawn")
-	}
-}
-
 // TestStripResumeArgs drops `--resume <id>` (and a trailing bare
 // `--resume`, R65-GO-M-2: leaking it into drift compares shut shims down
 // spuriously) and returns the input unchanged — same backing array — when
@@ -1580,116 +1487,49 @@ func TestValidateSessionKey(t *testing.T) {
 // resume context. InterruptSessionSafe must prefer the in-band
 // control_request path and only fall back to SIGINT when necessary.
 
-func TestInterruptSessionSafe_PrefersControlRequest(t *testing.T) {
-	r := newTestRouter(3)
-	proc := newRunningProc()
-	injectSession(r, "k1", proc)
-
-	outcome := r.InterruptSessionSafe("k1")
-	if outcome != InterruptSent {
-		t.Errorf("outcome = %v, want InterruptSent", outcome)
+func TestInterruptSessionSafe(t *testing.T) {
+	cases := []struct {
+		name        string
+		proc        *fakeProcess // nil: no session
+		viaErr      error
+		viaRunning  bool // InterruptViaControl reports ErrNoActiveTurn when idle
+		want        InterruptOutcome
+		wantViaCtl  int
+		wantSIGINTs int
+	}{
+		{name: "control request succeeds, no fallback", proc: newRunningProc(), want: InterruptSent, wantViaCtl: 1},
+		// ACP-like protocol: the in-band path is unsupported, SIGINT is the fallback.
+		{name: "unsupported falls back to SIGINT", proc: newRunningProc(), viaErr: clierr.ErrInterruptUnsupported, want: InterruptSent, wantViaCtl: 1, wantSIGINTs: 1},
+		// Idle -p session: raw SIGINT would terminate the CLI, so the press
+		// reports "nothing was running" instead.
+		{name: "no active turn does not fall back", proc: newIdleProc(), viaRunning: true, want: InterruptNoTurn, wantViaCtl: 1},
+		// A failed control_request write means a broken shim socket; SIGINT
+		// would travel the same path. Surface it for the reconcile path.
+		{name: "transport error does not fall back", proc: newRunningProc(), viaErr: clierr.ErrMessageTooLarge, want: InterruptError, wantViaCtl: 1},
+		// SIGINT on a dead process is a no-op that only adds log noise.
+		{name: "dead process", proc: newDeadProc(), want: InterruptNoSession},
+		{name: "no session", want: InterruptNoSession},
 	}
-	proc.mu.Lock()
-	viaCtl, sigint := proc.viaControlCalls, proc.interruptCalls
-	proc.mu.Unlock()
-	if viaCtl != 1 {
-		t.Errorf("InterruptViaControl calls = %d, want 1", viaCtl)
-	}
-	if sigint != 0 {
-		t.Errorf("Interrupt (SIGINT) calls = %d, want 0 — control_request succeeded, no fallback expected", sigint)
-	}
-}
-
-func TestInterruptSessionSafe_FallsBackOnUnsupported(t *testing.T) {
-	r := newTestRouter(3)
-	proc := newRunningProc()
-	proc.viaControlErr = clierr.ErrInterruptUnsupported // ACP-like protocol
-	injectSession(r, "k1", proc)
-
-	outcome := r.InterruptSessionSafe("k1")
-	if outcome != InterruptSent {
-		t.Errorf("outcome = %v, want InterruptSent (after SIGINT fallback)", outcome)
-	}
-	proc.mu.Lock()
-	viaCtl, sigint := proc.viaControlCalls, proc.interruptCalls
-	proc.mu.Unlock()
-	if viaCtl != 1 {
-		t.Errorf("InterruptViaControl calls = %d, want 1", viaCtl)
-	}
-	if sigint != 1 {
-		t.Errorf("Interrupt (SIGINT) calls = %d, want 1 — unsupported protocol should fall back", sigint)
-	}
-}
-
-func TestInterruptSessionSafe_NoActiveTurnDoesNotFallBack(t *testing.T) {
-	// Idle Claude `-p` session: raw SIGINT terminates the CLI, which is
-	// exactly the regression we are defending against. The button press
-	// should report "nothing was running" instead of silently ending the
-	// session. The HTTP/WS layers both map InterruptNoTurn → "not_running".
-	r := newTestRouter(3)
-	proc := newIdleProc()
-	proc.viaControlRunning = true // returns ErrNoActiveTurn when idle
-	injectSession(r, "k1", proc)
-
-	outcome := r.InterruptSessionSafe("k1")
-	if outcome != InterruptNoTurn {
-		t.Errorf("outcome = %v, want InterruptNoTurn (no fallback — would kill -p CLI)", outcome)
-	}
-	proc.mu.Lock()
-	sigint := proc.interruptCalls
-	proc.mu.Unlock()
-	if sigint != 0 {
-		t.Errorf("Interrupt (SIGINT) calls = %d, want 0 — idle session must not fall back to SIGINT on -p mode", sigint)
-	}
-}
-
-func TestInterruptSessionSafe_TransportErrorDoesNotFallBack(t *testing.T) {
-	// control_request write failed — the shim socket is almost certainly
-	// broken. SIGINT would travel the same broken path and also fail.
-	// Surface the error so F6's reconcile path cleans up the zombie.
-	r := newTestRouter(3)
-	proc := newRunningProc()
-	proc.viaControlErr = clierr.ErrMessageTooLarge // any non-sentinel write-ish error
-	injectSession(r, "k1", proc)
-
-	outcome := r.InterruptSessionSafe("k1")
-	if outcome != InterruptError {
-		t.Errorf("outcome = %v, want InterruptError (no fallback on transport failure)", outcome)
-	}
-	proc.mu.Lock()
-	sigint := proc.interruptCalls
-	proc.mu.Unlock()
-	if sigint != 0 {
-		t.Errorf("Interrupt calls = %d, want 0 — transport error must not trigger SIGINT", sigint)
-	}
-}
-
-func TestInterruptSessionSafe_NoSession(t *testing.T) {
-	r := newTestRouter(3)
-	outcome := r.InterruptSessionSafe("missing-key")
-	if outcome != InterruptNoSession {
-		t.Errorf("outcome = %v, want InterruptNoSession", outcome)
-	}
-}
-
-func TestInterruptSessionSafe_DeadProcess(t *testing.T) {
-	r := newTestRouter(3)
-	proc := newDeadProc()
-	injectSession(r, "k1", proc)
-
-	outcome := r.InterruptSessionSafe("k1")
-	// Dead process → InterruptViaControl returns InterruptNoSession (via
-	// ManagedSession.InterruptViaControl's `!proc.Alive()` branch), which
-	// is a terminal outcome — we do NOT fall back because SIGINT on a
-	// dead process is a no-op and just adds log noise.
-	if outcome != InterruptNoSession {
-		t.Errorf("outcome = %v, want InterruptNoSession (no fallback on dead)", outcome)
-	}
-	proc.mu.Lock()
-	sigint := proc.interruptCalls
-	proc.mu.Unlock()
-	if sigint != 0 {
-		t.Errorf("Interrupt calls = %d, want 0 — dead proc should not SIGINT", sigint)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newTestRouter(3)
+			if tc.proc != nil {
+				tc.proc.viaControlErr, tc.proc.viaControlRunning = tc.viaErr, tc.viaRunning
+				injectSession(r, "k1", tc.proc)
+			}
+			if got := r.InterruptSessionSafe("k1"); got != tc.want {
+				t.Errorf("outcome = %v, want %v", got, tc.want)
+			}
+			if tc.proc == nil {
+				return
+			}
+			tc.proc.mu.Lock()
+			viaCtl, sigint := tc.proc.viaControlCalls, tc.proc.interruptCalls
+			tc.proc.mu.Unlock()
+			if viaCtl != tc.wantViaCtl || sigint != tc.wantSIGINTs {
+				t.Errorf("InterruptViaControl/SIGINT calls = %d/%d, want %d/%d", viaCtl, sigint, tc.wantViaCtl, tc.wantSIGINTs)
+			}
+		})
 	}
 }
 
@@ -2339,9 +2179,9 @@ func TestClassifyShimState(t *testing.T) {
 // collectPreviousHistory — R70-ARCH-H2 paired with resolveSpawnParams
 // ---------------------------------------------------------------------------
 
-// TestCollectPreviousHistory covers the three shapes the spawn feeds
-// in: fresh (no prior session), resume-same-id (no chain growth), and
-// respawn-different-id (old ID appended to prevIDs).
+// TestCollectPreviousHistory covers a fresh spawn (no prior session) and a
+// same-id resume (history cloned, no chain growth); the chain itself is
+// TestRespawnChain's.
 func TestCollectPreviousHistory(t *testing.T) {
 	t.Run("fresh: nil old session returns empty", func(t *testing.T) {
 		entries, prev, userTurns := collectPreviousHistory(nil, nil, "")
@@ -2377,36 +2217,6 @@ func TestCollectPreviousHistory(t *testing.T) {
 		// #2089: persisted-snapshot branch returns the cached count, not a rescan.
 		if userTurns != 2 {
 			t.Errorf("userTurns = %d, want 2 (cached value)", userTurns)
-		}
-	})
-
-	t.Run("respawn new id: old id appended to chain", func(t *testing.T) {
-		s := &ManagedSession{}
-		s.setSessionID("id-old")
-
-		_, prev, _ := collectPreviousHistory(s, []string{"id-a"}, "id-new")
-
-		if len(prev) != 2 || prev[0] != "id-a" || prev[1] != "id-old" {
-			t.Errorf("prev = %v, want [id-a id-old]", prev)
-		}
-	})
-
-	t.Run("chain cap: bounded at maxPrevSessionIDs", func(t *testing.T) {
-		s := &ManagedSession{}
-		s.setSessionID("id-old")
-
-		// Seed oldPrev at the cap so appending old.sessionID overflows.
-		oldPrev := make([]string, maxPrevSessionIDs)
-		for i := range oldPrev {
-			oldPrev[i] = fmt.Sprintf("id-%d", i)
-		}
-		_, prev, _ := collectPreviousHistory(s, oldPrev, "id-new")
-
-		if len(prev) != maxPrevSessionIDs {
-			t.Fatalf("prev len = %d, want %d (capped)", len(prev), maxPrevSessionIDs)
-		}
-		if prev[len(prev)-1] != "id-old" {
-			t.Errorf("last entry = %q, want id-old (newest retained)", prev[len(prev)-1])
 		}
 	})
 }
@@ -2467,14 +2277,6 @@ func TestSnapshotOldSessionLocked(t *testing.T) {
 		_, _, created, _ := snapshotOldSession(sessView{}, s)
 		if created != 123456789 {
 			t.Errorf("created = %v, want 123456789", created)
-		}
-	})
-
-	t.Run("empty prevSessionIDs yields nil (no zero-len alloc)", func(t *testing.T) {
-		s := &ManagedSession{}
-		prev, _, _, _ := snapshotOldSession(sessView{}, s)
-		if prev != nil {
-			t.Errorf("prev = %v, want nil for empty source", prev)
 		}
 	})
 

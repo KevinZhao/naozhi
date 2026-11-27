@@ -332,10 +332,6 @@ func TestTakeover_WorkspaceOverrideIdempotent(t *testing.T) {
 	}
 }
 
-// compile-time sanity: hookCloseProc satisfies processIface through its
-// embedded fakeProcess. If this compiles we're good.
-var _ processIface = (*hookCloseProc)(nil)
-
 // takeoverKey is a key with no session yet; sfSID's transcript is in sfWS.
 const takeoverKey = "feishu:direct:bob:general"
 

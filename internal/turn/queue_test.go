@@ -9,23 +9,14 @@ import (
 	"time"
 )
 
-func TestEnqueue_FirstMessageBecomesOwner(t *testing.T) {
+// TestEnqueue_OwnerThenQueued: the first message owns the key and is not
+// queued; the next one is queued behind it.
+func TestEnqueue_OwnerThenQueued(t *testing.T) {
 	t.Parallel()
 	q := newTestQueue(10, 500*time.Millisecond)
-	isOwner, enqueued, _, gen := q.enqueueTuple("k1", Msg{Text: "hello"})
-	if !isOwner {
-		t.Fatal("first message should become owner")
+	if isOwner, enqueued, _, _ := q.enqueueTuple("k1", Msg{Text: "A"}); !isOwner || enqueued {
+		t.Fatalf("first message: isOwner=%v enqueued=%v, want the owner, not queued", isOwner, enqueued)
 	}
-	if enqueued {
-		t.Fatal("owner message should not be enqueued")
-	}
-	_ = gen
-}
-
-func TestEnqueue_SubsequentMessagesEnqueued(t *testing.T) {
-	t.Parallel()
-	q := newTestQueue(10, 500*time.Millisecond)
-	q.Enqueue("k1", Msg{Text: "A"}) // owner
 
 	isOwner, enqueued, _, _ := q.enqueueTuple("k1", Msg{Text: "B"})
 	if isOwner {
