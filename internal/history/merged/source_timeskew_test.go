@@ -60,7 +60,9 @@ func skewedPair(typ, text string, localTime, skewMS int64) (local, fallback clie
 // TestMerged_ClockSkewDoesNotDuplicate is the primary regression: the same
 // turn seen by both tiers must render exactly once at every skew magnitude
 // observed in production. Before the fix only skew==0 deduped, which is
-// precisely why users saw "most messages doubled, a few not".
+// precisely why users saw "most messages doubled, a few not". Skew 0 is
+// [R20260622-184753-LB-3] itself: the tiers' UUIDs never coincide, so a
+// UUID-only dedup renders every turn twice.
 func TestMerged_ClockSkewDoesNotDuplicate(t *testing.T) {
 	cases := []struct {
 		typ   string

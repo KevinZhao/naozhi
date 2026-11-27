@@ -609,7 +609,7 @@ stub，行为测试数不到（2026-10 注：该源码守卫已删除）。
 签名改动顺带修好了两个测试的可达性：`TestRollbackHint` 的 no-service 分支此前
 在"本机恰好由 launchd 托管"时被 skip，`TestRollbackHint_IncludesRestartWhenServiceRuns`
 此前是 linux-only（`systemdUnitActive` 是唯一能 stub 的探针）。现在两者都在任何
-主机上真跑，后者按 GOOS 断言 `kickstart` 或 `systemctl`。
+主机上真跑，后者按 GOOS 断言 `kickstart` 或 `systemctl`（后并入 `TestManualCommand`）。
 
 **(e) busy 态的 spinner 补上**（§3.4 原本就要求"disabled + spinner"，实现只做到
 了 dim + `pointer-events:none`）。等待的轮询有 3s 间隔，一个变暗的静止图标读起来

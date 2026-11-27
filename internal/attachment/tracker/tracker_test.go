@@ -59,6 +59,22 @@ func newTracker(t *testing.T, workspace string) *Tracker {
 	return tr
 }
 
+// readMeta returns the .meta sidecar at path, zero-valued if missing or bad.
+func readMeta(path string) attachment.Meta {
+	raw, _ := os.ReadFile(path)
+	var m attachment.Meta
+	_ = json.Unmarshal(raw, &m)
+	return m
+}
+
+// flush waits up to two seconds for the tracker to write every pending bump.
+func flush(t *testing.T, tr *Tracker) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = tr.Flush(ctx)
+}
+
 // TestNewTracker_RequiresWorkspaces: a nil resolver is a caller bug
 // — constructor must refuse.
 func TestNewTracker_RequiresWorkspaces(t *testing.T) {
@@ -119,41 +135,16 @@ func TestOnPersistedEntry_CoalescesDuplicates(t *testing.T) {
 		tr.OnPersistedEntry("sess", []string{rel}, int64(1700000000000+i))
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = tr.Flush(ctx)
+	flush(t, tr)
 
 	if tr.Stats().Written != 1 {
 		t.Errorf("OnReferenceBump=%d, want 1 (coalesced)", tr.Stats().Written)
 	}
 	// LastReferencedAt must reflect the HIGHEST observed timeMS.
-	raw, _ := os.ReadFile(metaPath)
-	var m attachment.Meta
-	_ = json.Unmarshal(raw, &m)
+	m := readMeta(metaPath)
 	if m.LastReferencedAt != 1700000000009 {
 		t.Errorf("LastReferencedAt=%d, want last timeMS 1700000000009",
 			m.LastReferencedAt)
-	}
-}
-
-// TestOnPersistedEntry_MultipleKeysDistinctPaths: two sessions
-// referencing different attachments → two .meta writes, both keyhash
-// strings land exactly once each.
-func TestOnPersistedEntry_MultipleKeysDistinctPaths(t *testing.T) {
-	ws := t.TempDir()
-	date := time.Now().Format("2006-01-02")
-	rel1, _ := writeAttachment(t, ws, date, "x1", attachment.Meta{UploadedAt: time.Now()})
-	rel2, _ := writeAttachment(t, ws, date, "x2", attachment.Meta{UploadedAt: time.Now()})
-
-	tr := newTracker(t, ws)
-	tr.OnPersistedEntry("sA", []string{rel1}, 10)
-	tr.OnPersistedEntry("sB", []string{rel2}, 20)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = tr.Flush(ctx)
-
-	if tr.Stats().Written != 2 {
-		t.Errorf("bumps=%d, want 2", tr.Stats().Written)
 	}
 }
 
@@ -169,13 +160,9 @@ func TestOnPersistedEntry_SharedAttachment(t *testing.T) {
 	tr := newTracker(t, ws)
 	tr.OnPersistedEntry("sB", []string{rel}, 10)
 	tr.OnPersistedEntry("sA", []string{rel}, 20)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = tr.Flush(ctx)
+	flush(t, tr)
 
-	raw, _ := os.ReadFile(metaPath)
-	var m attachment.Meta
-	_ = json.Unmarshal(raw, &m)
+	m := readMeta(metaPath)
 	if len(m.ReferencingKeyHashes) != 2 {
 		t.Fatalf("refs=%v", m.ReferencingKeyHashes)
 	}
@@ -199,9 +186,7 @@ func TestOnPersistedEntry_EscapedPathRejected(t *testing.T) {
 	// .naozhi/attachments/).
 	tr.OnPersistedEntry("s", []string{"other.png"}, 3)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = tr.Flush(ctx)
+	flush(t, tr)
 
 	if tr.Stats().Written != 0 {
 		t.Errorf("bumps=%d, expected 0 (all escapes rejected)", tr.Stats().Written)
@@ -230,13 +215,9 @@ func TestOnPersistedEntry_UnknownKeyhash(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = tr.Stop(context.Background()) })
 	tr.OnPersistedEntry("unknown-sess", []string{rel}, 1)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = tr.Flush(ctx)
+	flush(t, tr)
 
-	raw, _ := os.ReadFile(metaPath)
-	var m attachment.Meta
-	_ = json.Unmarshal(raw, &m)
+	m := readMeta(metaPath)
 	if len(m.ReferencingKeyHashes) != 0 {
 		t.Errorf("refs=%v, expected no bump", m.ReferencingKeyHashes)
 	}
@@ -258,9 +239,7 @@ func TestOnSessionRemoved_ClearsRefs(t *testing.T) {
 
 	// Pre-check: both metas have the reference.
 	for _, mp := range []string{meta1, meta2} {
-		raw, _ := os.ReadFile(mp)
-		var m attachment.Meta
-		_ = json.Unmarshal(raw, &m)
+		m := readMeta(mp)
 		if !m.HasReference("sessX") {
 			t.Fatalf("reference not set in %s: %v", mp, m)
 		}
@@ -271,9 +250,7 @@ func TestOnSessionRemoved_ClearsRefs(t *testing.T) {
 	}
 	// Post-condition: keyhash removed from both.
 	for _, mp := range []string{meta1, meta2} {
-		raw, _ := os.ReadFile(mp)
-		var m attachment.Meta
-		_ = json.Unmarshal(raw, &m)
+		m := readMeta(mp)
 		if m.HasReference("sessX") {
 			t.Errorf("reference still present in %s", mp)
 		}
@@ -309,9 +286,7 @@ func TestHandleClear_AbortsOnClose(t *testing.T) {
 		t.Fatalf("handleClear after close = %v, want ErrTrackerClosed", err)
 	}
 	// The aborted sweep must not have rewritten the meta.
-	raw, _ := os.ReadFile(meta1)
-	var m attachment.Meta
-	_ = json.Unmarshal(raw, &m)
+	m := readMeta(meta1)
 	if !m.HasReference("sessX") {
 		t.Errorf("reference removed despite aborted sweep in %s", meta1)
 	}
@@ -403,9 +378,7 @@ func TestStop_DrainsPendingBumps(t *testing.T) {
 	if err := tr.Stop(ctx); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	raw, _ := os.ReadFile(metaPath)
-	var m attachment.Meta
-	_ = json.Unmarshal(raw, &m)
+	m := readMeta(metaPath)
 	if !m.HasReference("sess") {
 		t.Errorf("pending bump not flushed on Stop: %+v", m)
 	}
@@ -427,19 +400,6 @@ func TestStop_Idempotent(t *testing.T) {
 	if err := tr.Stop(ctx); err != nil {
 		t.Fatalf("Stop 2: %v", err)
 	}
-}
-
-// TestOnPersistedEntry_AfterStop_NoOp: hot-path calls post-Stop
-// must not panic or write.
-func TestOnPersistedEntry_AfterStop_NoOp(t *testing.T) {
-	ws := t.TempDir()
-	tr := newTracker(t, ws)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = tr.Stop(ctx)
-	// Should not panic. If a .meta is missing, a stale bump would
-	// hit err-write; with no bump nothing happens.
-	tr.OnPersistedEntry("s", []string{"x"}, 1)
 }
 
 // TestWriterAlive_Lifecycle: idle tracker is alive (empty channel);
@@ -480,13 +440,9 @@ func TestResolve_AbsolutePathUnderWorkspace(t *testing.T) {
 
 	tr := newTracker(t, ws)
 	tr.OnPersistedEntry("s", []string{absPath}, 99)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = tr.Flush(ctx)
+	flush(t, tr)
 
-	raw, _ := os.ReadFile(metaPath)
-	var m attachment.Meta
-	_ = json.Unmarshal(raw, &m)
+	m := readMeta(metaPath)
 	if !m.HasReference("s") {
 		t.Errorf("absolute path under workspace not accepted: %+v", m)
 	}
@@ -514,9 +470,7 @@ func TestConcurrent_Bumps(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	_ = tr.Flush(ctx)
+	flush(t, tr)
 
 	if tr.Stats().Written != 1 {
 		t.Errorf("bumps=%d, want 1 (coalesce across goroutines)", tr.Stats().Written)
@@ -537,9 +491,7 @@ func TestErrWriteFailure(t *testing.T) {
 
 	tr := newTracker(t, ws)
 	tr.OnPersistedEntry("s", []string{rel}, 1)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = tr.Flush(ctx)
+	flush(t, tr)
 
 	if tr.Stats().Errors != 1 {
 		t.Errorf("errs=%d, want 1 (missing sidecar)", tr.Stats().Errors)

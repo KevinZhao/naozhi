@@ -77,18 +77,6 @@ func TestServiceUserSudo_ResolvesRealUser(t *testing.T) {
 	}
 }
 
-func TestRunInstallMissingConfig(t *testing.T) {
-	// Verify that install checks for config existence.
-	tmp := t.TempDir()
-	configPath := filepath.Join(tmp, "nonexistent.yaml")
-
-	// We can't call runInstall directly because it calls os.Exit.
-	// Instead, verify the config check logic.
-	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
-		t.Error("expected config to not exist")
-	}
-}
-
 func TestLaunchdPlistPath(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("launchd plist path only meaningful on darwin")
@@ -114,28 +102,11 @@ func TestGenerateSystemdUnit(t *testing.T) {
 	if !strings.Contains(unit, "Environment=HOME=/home/app") {
 		t.Error("HOME environment missing")
 	}
-	if !strings.Contains(unit, "Type=notify") {
-		t.Error("expected Type=notify for sd_notify support")
-	}
-	if !strings.Contains(unit, "WatchdogSec=120") {
-		t.Error("expected WatchdogSec=120 for hung-process detection")
-	}
-	if !strings.Contains(unit, "NotifyAccess=main") {
-		t.Error("expected NotifyAccess=main")
-	}
-	// Shim-survival settings: naozhi moves shim helpers into a shared
-	// cgroup so they outlive the main service process for zero-downtime
-	// reconnect. The default control-group kill mode would tear them
-	// down on every `systemctl restart`. Test all three directives so a
-	// future refactor that drops any one of them trips.
-	if !strings.Contains(unit, "KillMode=process") {
-		t.Error("expected KillMode=process to preserve shim processes across restart")
-	}
-	if !strings.Contains(unit, "SendSIGKILL=no") {
-		t.Error("expected SendSIGKILL=no so cgroup shims are never force-killed")
-	}
-	if !strings.Contains(unit, "TimeoutStopSec=5") {
-		t.Error("expected TimeoutStopSec=5 for prompt graceful shutdown budget")
+	// The service-semantics directives are TestGenerateSystemdUnit_MatchesDeployTemplate's.
+
+	unit = generateSystemdUnit("/opt/my app/naozhi", "/home/user/my config/config.yaml", "user", "/home/user")
+	if !strings.Contains(unit, `ExecStart="/opt/my app/naozhi" --config "/home/user/my config/config.yaml"`) {
+		t.Errorf("ExecStart does not properly quote paths with spaces:\n%s", unit)
 	}
 }
 
@@ -161,8 +132,9 @@ func TestGenerateSystemdUnit_MatchesDeployTemplate(t *testing.T) {
 
 	// Directives that both templates MUST carry identically. Missing in
 	// either path corrupts service semantics: Type=notify is required
-	// by main.go's sd_notify call; KillMode/SendSIGKILL/TimeoutStopSec
-	// protect the cgroup shim processes on restart.
+	// by main.go's sd_notify call, WatchdogSec catches a hung process;
+	// KillMode/SendSIGKILL/TimeoutStopSec let the shims, moved into a
+	// shared cgroup, outlive a `systemctl restart`.
 	sharedDirectives := []string{
 		"Type=notify",
 		"NotifyAccess=main",
@@ -223,14 +195,6 @@ func TestStartLimitDirectivesInUnitSection(t *testing.T) {
 		if strings.Contains(unit, "StartLimitInterval=") {
 			t.Errorf("%s: uses legacy StartLimitInterval=, want StartLimitIntervalSec=", name)
 		}
-	}
-}
-
-func TestGenerateSystemdUnitQuotesSpaces(t *testing.T) {
-	unit := generateSystemdUnit("/opt/my app/naozhi", "/home/user/my config/config.yaml", "user", "/home/user")
-
-	if !strings.Contains(unit, `ExecStart="/opt/my app/naozhi" --config "/home/user/my config/config.yaml"`) {
-		t.Errorf("ExecStart does not properly quote paths with spaces:\n%s", unit)
 	}
 }
 

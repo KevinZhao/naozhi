@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/ctxutil"
@@ -53,26 +51,4 @@ func TestNewLogHandler_JSONAndLevel(t *testing.T) {
 	if !newLogHandler(nil, &config.Config{Log: config.LogConfig{Level: "debug"}}, nil).Enabled(context.Background(), slog.LevelDebug) {
 		t.Errorf("level=debug handler should enable Debug")
 	}
-}
-
-// TestStartWatchdogLoop_StopsOnCtxCancel ensures the heartbeat goroutine
-// returns when its context is cancelled, and that a nil HealthCheck func is
-// tolerated (no panic). The 30s tick means no heartbeat fires inside the
-// test window — we only assert clean shutdown. R237-ARCH-8 (#590).
-func TestStartWatchdogLoop_StopsOnCtxCancel(t *testing.T) {
-	t.Parallel()
-	var calls atomic.Int32
-	ctx, cancel := context.WithCancel(context.Background())
-	startWatchdogLoop(ctx, func() bool { calls.Add(1); return true })
-	cancel()
-	// Give the goroutine a moment to observe ctx.Done(); no assertion on
-	// goroutine count (the runtime offers no portable hook), but the cancel
-	// path must not deadlock or panic.
-	time.Sleep(20 * time.Millisecond)
-
-	// nil HealthCheck must not panic on construction.
-	ctx2, cancel2 := context.WithCancel(context.Background())
-	startWatchdogLoop(ctx2, nil)
-	cancel2()
-	time.Sleep(20 * time.Millisecond)
 }

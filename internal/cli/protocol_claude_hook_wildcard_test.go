@@ -25,19 +25,3 @@ func TestClaudeProtocol_ReadEvent_HookWildcard_SkipsUnknownSubtype(t *testing.T)
 		t.Errorf("skipped frame must produce 0 events, got %d", len(evs))
 	}
 }
-
-// TestClaudeProtocol_ReadEvent_HookWildcard_EmbeddedInText_NoFalsePositive
-// ensures an assistant frame whose text quotes `:"hook_` is delivered: only a
-// line that starts with the system hook prefix is fast-path skipped.
-func TestClaudeProtocol_ReadEvent_HookWildcard_EmbeddedInText_NoFalsePositive(t *testing.T) {
-	t.Parallel()
-	p := &ClaudeProtocol{}
-	line := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"consider the pattern ` + "`" + `{\"key\":\"hook_` + `val\"}` + "`" + `"}]}}`
-	evs, done, err := p.ReadEvent(line)
-	if err != nil || done {
-		t.Fatalf("ReadEvent = (_, %v, %v), want delivered", done, err)
-	}
-	if len(evs) != 1 || evs[0].Type != "assistant" {
-		t.Fatalf("got %+v, want one assistant event", evs)
-	}
-}

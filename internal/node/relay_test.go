@@ -55,58 +55,6 @@ func authHandshake(t *testing.T, conn *websocket.Conn) bool {
 	return conn.WriteJSON(ServerMsg{Type: "auth_ok"}) == nil
 }
 
-// ---- Subscribe triggers WS connection and subscribe message ----
-
-func TestWSRelay_Subscribe_connectsAndSubscribes(t *testing.T) {
-	var gotSubscribe atomic.Bool
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	srv := wsTestServer(t, func(conn *websocket.Conn) {
-		defer conn.Close()
-		if !authHandshake(t, conn) {
-			return
-		}
-		conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		var msg ClientMsg
-		if err := conn.ReadJSON(&msg); err == nil && msg.Type == "subscribe" {
-			gotSubscribe.Store(true)
-		}
-		wg.Done()
-		// drain remaining to avoid broken pipe on server
-		conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-		for {
-			if _, _, err := conn.ReadMessage(); err != nil {
-				return
-			}
-		}
-	})
-	defer srv.Close()
-
-	node := newRelayNode(srv)
-	relay := newWSRelay(node)
-
-	sink := &mockSink{id: 1}
-	relay.Subscribe(sink, "feishu:group:123", 0, 0)
-
-	doneCh := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(doneCh)
-	}()
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("timeout waiting for subscribe message")
-	}
-
-	if !gotSubscribe.Load() {
-		t.Error("server did not receive subscribe message")
-	}
-
-	relay.Close()
-}
-
 // ---- Subscribe sends error event to sink when connection fails ----
 
 func TestWSRelay_Subscribe_connectFailureSendsError(t *testing.T) {
@@ -167,17 +115,8 @@ func TestWSRelay_Unsubscribe_sendsUnsubscribed(t *testing.T) {
 	relay.Close()
 }
 
-// ---- Close is idempotent ----
-
-func TestWSRelay_Close_idempotent(t *testing.T) {
-	node := NewHTTPClient("n", "http://127.0.0.1:1", "", "")
-	relay := newWSRelay(node)
-	relay.Close()
-	relay.Close() // must not panic
-}
-
 // TestWSRelay_CloseForgetsBook: Close releases every sink, watermark and
-// remote-drop mark the relay held.
+// remote-drop mark the relay held, and a second Close is a no-op.
 func TestWSRelay_CloseForgetsBook(t *testing.T) {
 	relay := newWSRelay(NewHTTPClient("n", "http://127.0.0.1:1", "", ""))
 	relay.mu.Lock()
@@ -185,6 +124,7 @@ func TestWSRelay_CloseForgetsBook(t *testing.T) {
 	relay.remoteDropped["key1"] = true
 	relay.mu.Unlock()
 
+	relay.Close()
 	relay.Close()
 
 	relay.mu.Lock()
@@ -312,8 +252,6 @@ func TestWSRelay_RemoveClient(t *testing.T) {
 // ---- readLoop delivers injected events to subscribers ----
 
 func TestWSRelay_ReadLoop_deliversEvents(t *testing.T) {
-	var receivedRaw [][]byte
-
 	srv := wsTestServer(t, func(conn *websocket.Conn) {
 		defer conn.Close()
 		if !authHandshake(t, conn) {
@@ -348,8 +286,6 @@ func TestWSRelay_ReadLoop_deliversEvents(t *testing.T) {
 	relay := newWSRelay(node)
 
 	sink := &mockSink{id: 1}
-	// rawMsgs is initialized empty by default
-
 	relay.Subscribe(sink, "feishu:group:123", 0, 0)
 
 	testhelper.Eventually(t, func() bool { return sink.RawMsgCount() > 0 }, 2*time.Second, "expected at least one event delivered to sink")
@@ -365,7 +301,6 @@ func TestWSRelay_ReadLoop_deliversEvents(t *testing.T) {
 	}
 
 	relay.Close()
-	_ = receivedRaw
 }
 
 // ---- Second subscriber on same key gets history via HTTP, not re-subscribe ----
@@ -431,9 +366,10 @@ func TestWSRelay_SecondSubscriberGetsHistory(t *testing.T) {
 	relay.Close()
 }
 
-// TestWSRelay_FirstSubscribeCarriesLimit: the relay's first subscribe hands
-// the remote primary the browser's page size, so it answers with its
-// visible-aware page and has_more rather than the legacy full log.
+// TestWSRelay_FirstSubscribeCarriesLimit: the first Subscribe dials the remote
+// and sends it a subscribe for the key that hands over the browser's page
+// size, so it answers with its visible-aware page and has_more rather than the
+// legacy full log.
 func TestWSRelay_FirstSubscribeCarriesLimit(t *testing.T) {
 	got := make(chan ClientMsg, 1)
 	srv := wsTestServer(t, func(conn *websocket.Conn) {
@@ -459,8 +395,8 @@ func TestWSRelay_FirstSubscribeCarriesLimit(t *testing.T) {
 	relay.Subscribe(&mockSink{id: 1}, "feishu:group:123", 0, 100)
 	select {
 	case msg := <-got:
-		if msg.Type != "subscribe" || msg.Limit != 100 || msg.After != 0 {
-			t.Fatalf("relay subscribe = {type %q after %d limit %d}, want {subscribe 0 100}", msg.Type, msg.After, msg.Limit)
+		if msg.Type != "subscribe" || msg.Key != "feishu:group:123" || msg.Limit != 100 || msg.After != 0 {
+			t.Fatalf("relay subscribe = {type %q key %q after %d limit %d}, want {subscribe feishu:group:123 0 100}", msg.Type, msg.Key, msg.After, msg.Limit)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("timeout waiting for the relay's subscribe")

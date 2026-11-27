@@ -305,9 +305,10 @@ func TestAutoPause_SuccessResetsAndSkipsDoNotCount(t *testing.T) {
 	}
 }
 
-// TestAutoPause_ResumeClearsAndManualPauseHasNoReason: resume starts a fresh
-// streak and drops the reason; a manual pause records none.
-func TestAutoPause_ResumeClearsAndManualPauseHasNoReason(t *testing.T) {
+// TestAutoPause_ResumeClearsStreakAndReason: resume starts a fresh streak and
+// drops the reason. (A manual pause recording none is
+// TestAutoPause_ManualPauseClearsStaleReason.)
+func TestAutoPause_ResumeClearsStreakAndReason(t *testing.T) {
 	t.Parallel()
 	s, r, _, id := newAutoPauseScheduler(t, 2, "feishu")
 	r.set(nil, errStreakSend)
@@ -322,14 +323,6 @@ func TestAutoPause_ResumeClearsAndManualPauseHasNoReason(t *testing.T) {
 	}
 	if n := len(s.cron.Entries()); n != 1 {
 		t.Errorf("entries after resume = %d, want 1", n)
-	}
-
-	runN(s, id, 1)
-	if _, err := s.PauseJobByID(id); err != nil {
-		t.Fatalf("PauseJobByID: %v", err)
-	}
-	if j := s.jobForTest(t, id); j.PausedReason != "" {
-		t.Errorf("manual pause reason = %q, want empty", j.PausedReason)
 	}
 }
 
@@ -352,14 +345,21 @@ func TestAutoPause_UpdateResetsStreakKeepsReason(t *testing.T) {
 }
 
 // TestAutoPause_NegativeThresholdDisables: a negative setting never pauses,
-// and the streak is still tracked.
+// neither on the transient window nor on a failure streak, and both counts
+// are still tracked.
 func TestAutoPause_NegativeThresholdDisables(t *testing.T) {
 	t.Parallel()
-	s, r, ns, id := newAutoPauseScheduler(t, -1, "feishu")
+	s, r, ns, id, clk := transientScheduler(t, -1)
+	r.set(nil, errTransientOverloaded)
+	for i := range 8 {
+		runAt(s, clk, id, time.Duration(i)*time.Hour)
+	}
 	r.set(nil, errStreakSend)
-	runN(s, id, 8)
-	if j := s.jobForTest(t, id); j.Paused || j.ConsecutiveFailures != 8 {
-		t.Fatalf("paused=%v streak=%d, want active with streak 8", j.Paused, j.ConsecutiveFailures)
+	for i := range 8 {
+		runAt(s, clk, id, 8*time.Hour+time.Duration(i)*time.Minute)
+	}
+	if j := s.jobForTest(t, id); j.Paused || j.TransientFailures != 8 || j.ConsecutiveFailures != 8 {
+		t.Fatalf("paused=%v transient=%d streak=%d, want active with 8 of each", j.Paused, j.TransientFailures, j.ConsecutiveFailures)
 	}
 	for _, n := range ns.noticesAfter(s) {
 		if strings.Contains(n, "自动暂停") {

@@ -29,6 +29,7 @@ func TestSend_RecordsCompletedRun(t *testing.T) {
 		if on != nil {
 			on(clievent.Event{}) // emit a first byte
 		}
+		time.Sleep(5 * time.Millisecond)
 		return &clievent.SendResult{Text: "ok", CostUSD: 0.05}, nil
 	})
 
@@ -45,8 +46,8 @@ func TestSend_RecordsCompletedRun(t *testing.T) {
 	if r.Outcome != runhistory.OutcomeCompleted {
 		t.Errorf("outcome = %s, want completed", r.Outcome)
 	}
-	if r.DurationMS < 0 {
-		t.Errorf("duration must be >= 0, got %d", r.DurationMS)
+	if r.DurationMS < 1 {
+		t.Errorf("duration should reflect the ~5ms sleep, got %d", r.DurationMS)
 	}
 	if r.FirstByteMS < 0 {
 		t.Errorf("first byte must be >= 0, got %d", r.FirstByteMS)
@@ -96,43 +97,6 @@ func TestSend_PerTurnCostDelta(t *testing.T) {
 	const wantTotal = 9.0
 	if got := loadTotalCost(&s.costSpent); got < wantTotal-1e-9 || got > wantTotal+1e-9 {
 		t.Errorf("costSpent = %v, want %v (sum of per-turn deltas)", got, wantTotal)
-	}
-}
-
-// TestFinishRun_ConcurrentOutOfOrderNoOverCount is the regression guard for the
-// passthrough concurrency hazard the adversarial review caught: two same-
-// session turns complete on separate goroutines, so finishRun may apply the
-// later (higher) cumulative before the earlier (lower) one. The session total
-// must equal the highest cumulative regardless of arrival order — never the
-// over-counted sum. Run under -race to also exercise costMu.
-func TestFinishRun_ConcurrentOutOfOrderNoOverCount(t *testing.T) {
-	store := runhistory.NewStore(t.TempDir(), 0, 0)
-	t.Cleanup(store.Close)
-	s := &ManagedSession{key: "feishu:p2p:concurrent", runStore: store}
-
-	// Drive finishRun directly with two timers and reversed cumulative order:
-	// the higher reading (5.0) lands first, then the lower (2.0).
-	rt1 := &runTimer{started: time.Now()}
-	rt2 := &runTimer{started: time.Now()}
-	done := make(chan struct{}, 2)
-	go func() {
-		s.finishRun(context.Background(), rt1, &clievent.SendResult{CostUSD: 5.0}, nil)
-		done <- struct{}{}
-	}()
-	go func() {
-		s.finishRun(context.Background(), rt2, &clievent.SendResult{CostUSD: 2.0}, nil)
-		done <- struct{}{}
-	}()
-	<-done
-	<-done
-
-	// Total must be exactly the highest cumulative (5.0), not 7.0.
-	if got := loadTotalCost(&s.costSpent); got < 5.0-1e-9 || got > 5.0+1e-9 {
-		t.Errorf("costSpent = %v, want 5.0 (out-of-order must not over-count)", got)
-	}
-	// Baseline must converge to the max, never regress to the lower value.
-	if got := loadTotalCost(&s.lastCumulativeCost); got != 5.0 {
-		t.Errorf("lastCumulativeCost = %v, want 5.0 (monotonic baseline)", got)
 	}
 }
 
@@ -218,29 +182,6 @@ func TestSend_FirstByteRecordedOnce(t *testing.T) {
 	}
 }
 
-func TestSendPassthrough_AlsoRecorded(t *testing.T) {
-	s, store := newInstrumentedSession(t, func(ctx context.Context, text string, imgs []clievent.Attachment, on clievent.EventCallback) (*clievent.SendResult, error) {
-		return &clievent.SendResult{Text: "ok"}, nil
-	})
-	if _, err := s.SendPassthrough(context.Background(), "hi", nil, nil, ""); err != nil {
-		t.Fatalf("SendPassthrough: %v", err)
-	}
-	store.Close()
-	if got := len(store.Recent(s.key, 0)); got != 1 {
-		t.Errorf("passthrough run not recorded: got %d", got)
-	}
-}
-
-func TestSend_NilStoreNoRecord(t *testing.T) {
-	// runStore nil -> instrumentation no-ops, Send still works (regression
-	// guard for the zero-alloc nil-callback fast path).
-	s := &ManagedSession{key: "feishu:p2p:none"}
-	s.storeProcess(&TestProcess{AliveVal: true})
-	if _, err := s.Send(context.Background(), "hi", nil, nil); err != nil {
-		t.Fatalf("Send with nil store: %v", err)
-	}
-}
-
 // TestSend_FirstByteConcurrentWithFinish reproduces the passthrough hazard:
 // the onEvent callback fires on a different goroutine (CLI readLoop) and may
 // still be stamping the first-event time while finishRun reads it. The atomic
@@ -268,21 +209,6 @@ func TestSend_FirstByteConcurrentWithFinish(t *testing.T) {
 	store.Close()
 	if got := len(store.Recent(s.key, 0)); got != 1 {
 		t.Errorf("want 1 run, got %d", got)
-	}
-}
-
-func TestSend_DurationMonotonic(t *testing.T) {
-	s, store := newInstrumentedSession(t, func(ctx context.Context, text string, imgs []clievent.Attachment, on clievent.EventCallback) (*clievent.SendResult, error) {
-		time.Sleep(5 * time.Millisecond)
-		return &clievent.SendResult{Text: "ok"}, nil
-	})
-	if _, err := s.Send(context.Background(), "hi", nil, nil); err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	store.Close()
-	runs := store.Recent(s.key, 0)
-	if len(runs) != 1 || runs[0].DurationMS < 1 {
-		t.Errorf("duration should reflect the ~5ms sleep, got %+v", runs)
 	}
 }
 

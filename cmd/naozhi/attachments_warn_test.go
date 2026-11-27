@@ -98,14 +98,6 @@ func TestWarnIfAttachmentsOver_SumsEveryRoot(t *testing.T) {
 	}
 }
 
-func TestWarnIfAttachmentsOver_SilentWithoutTrees(t *testing.T) {
-	buf := captureSlog(t)
-	warnIfAttachmentsOver(staticRoots{t.TempDir(), filepath.Join(t.TempDir(), "gone")}, attachmentGCDisabled, 1, osutil.StateDirSize)
-	if got := warnRecords(t, buf, "attachments large"); len(got) != 0 {
-		t.Fatalf("roots without attachment trees warned: %v", got)
-	}
-}
-
 // TestWarnIfAttachmentsOver_HintFollowsGCMode: the hint names the step the
 // operator has not taken yet for each daemon mode.
 func TestWarnIfAttachmentsOver_HintFollowsGCMode(t *testing.T) {

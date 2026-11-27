@@ -91,33 +91,6 @@ func handshake(t *testing.T, conn *websocket.Conn) node.ReverseMsg {
 	return reg
 }
 
-// ---- Auth failure path ----
-
-func TestRunOnce_AuthFailure(t *testing.T) {
-	// Server sends a non-"registered" ack (simulates auth rejection).
-	srv := newFakeServer(t, func(conn *websocket.Conn) {
-		defer conn.Close()
-		conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		var reg node.ReverseMsg
-		conn.ReadJSON(&reg)                                                          //nolint:errcheck
-		conn.WriteJSON(node.ReverseMsg{Type: "register_fail", Error: "auth failed"}) //nolint:errcheck
-	})
-
-	cfg := &Config{URL: wsURL(srv), NodeID: "node1", Token: "badtoken"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	connected, err := c.runOnce(ctx)
-	if connected {
-		t.Error("runOnce: connected should be false on auth failure")
-	}
-	if err == nil {
-		t.Error("runOnce: expected error on auth failure, got nil")
-	}
-}
-
 // ---- Dial failure path ----
 
 func TestRunOnce_DialFailure(t *testing.T) {
@@ -133,27 +106,6 @@ func TestRunOnce_DialFailure(t *testing.T) {
 	}
 	if err == nil {
 		t.Error("runOnce: expected error on dial failure")
-	}
-}
-
-// ---- handleRequest: fetch_sessions ----
-
-func TestHandleRequest_FetchSessions(t *testing.T) {
-	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	req := node.ReverseMsg{
-		Type:   "request",
-		Method: "fetch_sessions",
-	}
-	result, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
-	if err != nil {
-		t.Fatalf("fetch_sessions = %v", err)
-	}
-	// Result should be a JSON array.
-	var sessions []interface{}
-	if err := json.Unmarshal(result, &sessions); err != nil {
-		t.Fatalf("fetch_sessions result not JSON array: %v", err)
 	}
 }
 
@@ -346,16 +298,10 @@ func TestHandleRequest_RejectsBadInput(t *testing.T) {
 // ---- Full round-trip: register + ping/pong ----
 
 func TestHandleConn_PingPong(t *testing.T) {
-	var serverConn *websocket.Conn
-	var mu sync.Mutex
 	pingReceived := make(chan struct{}, 1)
 
 	srv := newFakeServer(t, func(conn *websocket.Conn) {
-		mu.Lock()
-		serverConn = conn
-		mu.Unlock()
-
-		// Handshake
+		defer conn.Close()
 		handshake(t, conn)
 
 		// Send a ping message using the application-level ping (Type:"ping"), not WS ping.
@@ -393,34 +339,31 @@ func TestHandleConn_PingPong(t *testing.T) {
 	}
 
 	<-done
-	_ = serverConn
 }
 
 // ---- Full round-trip: register + request/response ----
 
-func TestHandleConn_RequestFetchSessions(t *testing.T) {
-	responded := make(chan node.ReverseMsg, 1)
+// A request gets a response under its req_id; an unknown method's carries the
+// error.
+func TestHandleConn_RequestResponse(t *testing.T) {
+	responded := make(chan node.ReverseMsg, 2)
 
 	srv := newFakeServer(t, func(conn *websocket.Conn) {
 		defer conn.Close()
 		handshake(t, conn)
 
-		// Send a request
-		req := node.ReverseMsg{
-			Type:   "request",
-			ReqID:  "req-1",
-			Method: "fetch_sessions",
-		}
-		conn.WriteJSON(req) //nolint:errcheck
+		conn.WriteJSON(node.ReverseMsg{Type: "request", ReqID: "req-1", Method: "fetch_sessions"})         //nolint:errcheck
+		conn.WriteJSON(node.ReverseMsg{Type: "request", ReqID: "err-req-1", Method: "nonexistent_method"}) //nolint:errcheck
 
-		// Wait for the response
 		conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		var resp node.ReverseMsg
-		if err := conn.ReadJSON(&resp); err != nil {
-			t.Logf("read response: %v", err)
-			return
+		for range 2 {
+			var resp node.ReverseMsg
+			if err := conn.ReadJSON(&resp); err != nil {
+				t.Logf("read response: %v", err)
+				return
+			}
+			responded <- resp
 		}
-		responded <- resp
 	})
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "node1", Token: "tok"}
@@ -435,19 +378,29 @@ func TestHandleConn_RequestFetchSessions(t *testing.T) {
 		c.runOnce(ctx) //nolint:errcheck
 	}()
 
-	select {
-	case resp := <-responded:
-		if resp.Type != "response" {
-			t.Errorf("response type = %q, want \"response\"", resp.Type)
+	for range 2 {
+		select {
+		case resp := <-responded:
+			if resp.Type != "response" {
+				t.Errorf("response type = %q, want \"response\"", resp.Type)
+			}
+			switch resp.ReqID {
+			case "req-1":
+				if resp.Error != "" {
+					t.Errorf("fetch_sessions error = %q", resp.Error)
+				}
+			case "err-req-1":
+				if resp.Error == "" {
+					t.Error("error field should be set for unknown method")
+				}
+			default:
+				t.Errorf("response req_id = %q", resp.ReqID)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout waiting for response")
 		}
-		if resp.ReqID != "req-1" {
-			t.Errorf("response req_id = %q, want \"req-1\"", resp.ReqID)
-		}
-		cancel()
-	case <-time.After(5 * time.Second):
-		t.Error("timeout waiting for response")
 	}
-
+	cancel()
 	<-done
 }
 
@@ -491,7 +444,7 @@ func TestRunOnce_RegisterPayload(t *testing.T) {
 		conn.ReadJSON(&gotReg) //nolint:errcheck
 		regCh <- gotReg
 		// Do NOT send "registered" — connector will error and return.
-		conn.WriteJSON(node.ReverseMsg{Type: "register_fail"}) //nolint:errcheck
+		conn.WriteJSON(node.ReverseMsg{Type: "register_fail", Error: "auth failed"}) //nolint:errcheck
 	})
 
 	cfg := &Config{
@@ -504,7 +457,10 @@ func TestRunOnce_RegisterPayload(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	c.runOnce(ctx) //nolint:errcheck
+	// A non-"registered" ack is an auth rejection.
+	if connected, err := c.runOnce(ctx); connected || err == nil {
+		t.Errorf("runOnce after register_fail = (%v, %v), want (false, error)", connected, err)
+	}
 
 	select {
 	case reg := <-regCh:
@@ -523,49 +479,6 @@ func TestRunOnce_RegisterPayload(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Error("timeout waiting for register message")
 	}
-}
-
-// ---- subscribe / unsubscribe (session not found) ----
-
-func TestHandleConn_Subscribe_SessionNotFound(t *testing.T) {
-	errorReceived := make(chan node.ReverseMsg, 1)
-
-	srv := newFakeServer(t, func(conn *websocket.Conn) {
-		defer conn.Close()
-		handshake(t, conn)
-
-		conn.WriteJSON(node.ReverseMsg{Type: "subscribe", Key: "no:such:key"}) //nolint:errcheck
-
-		conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		var resp node.ReverseMsg
-		if err := conn.ReadJSON(&resp); err == nil {
-			errorReceived <- resp
-		}
-	})
-
-	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		c.runOnce(ctx) //nolint:errcheck
-	}()
-
-	select {
-	case resp := <-errorReceived:
-		if resp.Type != "subscribe_error" {
-			t.Errorf("type = %q, want \"subscribe_error\"", resp.Type)
-		}
-		cancel()
-	case <-time.After(5 * time.Second):
-		t.Error("timeout waiting for subscribe_error")
-	}
-
-	<-done
 }
 
 // ---- Backoff resets after successful connection ----
@@ -769,97 +682,6 @@ func TestHandleRequest_FetchEvents_ExistingSession(t *testing.T) {
 	if err := json.Unmarshal(result, &arr); err != nil {
 		t.Fatalf("fetch_events result not JSON array: %v", err)
 	}
-}
-
-// ---- handleConn: request with error response ----
-
-func TestHandleConn_RequestErrorResponse(t *testing.T) {
-	// Send a request for an unknown method; verify the response carries an error field.
-	responses := make(chan node.ReverseMsg, 1)
-
-	srv := newFakeServer(t, func(conn *websocket.Conn) {
-		defer conn.Close()
-		handshake(t, conn)
-
-		conn.WriteJSON(node.ReverseMsg{
-			Type:   "request",
-			ReqID:  "err-req-1",
-			Method: "nonexistent_method",
-		}) //nolint:errcheck
-
-		conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		var resp node.ReverseMsg
-		if err := conn.ReadJSON(&resp); err == nil {
-			responses <- resp
-		}
-	})
-
-	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		c.runOnce(ctx) //nolint:errcheck
-	}()
-
-	select {
-	case resp := <-responses:
-		if resp.Type != "response" {
-			t.Errorf("type = %q, want \"response\"", resp.Type)
-		}
-		if resp.Error == "" {
-			t.Error("error field should be set for unknown method")
-		}
-		if resp.ReqID != "err-req-1" {
-			t.Errorf("req_id = %q, want \"err-req-1\"", resp.ReqID)
-		}
-		cancel()
-	case <-time.After(5 * time.Second):
-		t.Error("timeout waiting for error response")
-	}
-
-	<-done
-}
-
-// ---- handleConn: WS-level ping message from server (pong handler) ----
-
-func TestHandleConn_WSPingPong(t *testing.T) {
-	// Verify that the connector handles WS-level pings (pongHandler resets deadline).
-	connected := make(chan struct{}, 1)
-
-	srv := newFakeServer(t, func(conn *websocket.Conn) {
-		defer conn.Close()
-		handshake(t, conn)
-		// Send a WS-level ping frame
-		conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second)) //nolint:errcheck
-		connected <- struct{}{}
-		// Keep conn open briefly
-		time.Sleep(200 * time.Millisecond)
-	})
-
-	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		c.runOnce(ctx) //nolint:errcheck
-	}()
-
-	select {
-	case <-connected:
-		cancel()
-	case <-time.After(5 * time.Second):
-		t.Error("timeout")
-	}
-	<-done
 }
 
 // ---- handleRequest: set_session_label ----

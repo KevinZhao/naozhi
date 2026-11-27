@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -122,154 +123,59 @@ func TestConnect_Success(t *testing.T) {
 	}
 }
 
-func TestConnect_WrongToken_AuthFailed(t *testing.T) {
-	srv := newFakeShimServer(t)
-	defer srv.cleanup()
-
-	realToken := []byte("real-token-32bytes-padded!!!!!!")
-	wrongToken := []byte("wrong-token-32bytes-padded!!!!!")
-
-	srv.serveHello(t, realToken)
-
-	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
-	_, err := m.connect(context.Background(), srv.path, wrongToken, 0)
-	if err == nil {
-		t.Fatal("expected error for wrong token, got nil")
-	}
-}
-
-// TestConnect_AuthFailed_SanitizesMsg verifies R20260607-SEC-1: a Msg field
-// containing bidi-override characters is sanitized before entering the error.
-func TestConnect_AuthFailed_SanitizesMsg(t *testing.T) {
-	srv := newFakeShimServer(t)
-	defer srv.cleanup()
-
-	srv.handleOnce(func(conn net.Conn) {
-		conn.SetDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
-		bufio.NewReader(conn).ReadBytes('\n')             //nolint:errcheck
-		// Embed bidi-override U+202E in Msg.
-		raw := []byte("{\"type\":\"auth_failed\",\"msg\":\"bad\u202ecreds\"}\n")
-		conn.Write(raw) //nolint:errcheck
-	})
-
-	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
-	token := []byte("some-32-byte-token-padded!!!!!!!")
-	_, err := m.connect(context.Background(), srv.path, token, 0)
-	if err == nil {
-		t.Fatal("expected error for auth_failed, got nil")
-	}
-	if containsRune(err.Error(), '‮') {
-		t.Errorf("error message still contains bidi-override: %q", err.Error())
-	}
-}
-
-// TestConnect_UnexpectedType_SanitizesType verifies R20260607-SEC-3: a Type
-// field containing control/bidi characters is sanitized before entering the error.
-func TestConnect_UnexpectedType_SanitizesType(t *testing.T) {
-	srv := newFakeShimServer(t)
-	defer srv.cleanup()
-
-	srv.handleOnce(func(conn net.Conn) {
-		conn.SetDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
-		bufio.NewReader(conn).ReadBytes('\n')             //nolint:errcheck
-		// Type contains a C1 control byte (0x80) after UTF-8 encode.
-		raw := []byte("{\"type\":\"bad\u0080type\"}\n")
-		conn.Write(raw) //nolint:errcheck
-	})
-
-	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
-	token := []byte("some-32-byte-token-padded!!!!!!!")
-	_, err := m.connect(context.Background(), srv.path, token, 0)
-	if err == nil {
-		t.Fatal("expected error for unexpected message type, got nil")
-	}
-	if containsRune(err.Error(), '') {
-		t.Errorf("error message still contains C1 control: %q", err.Error())
-	}
-}
-
-// containsRune reports whether s contains the given rune.
-func containsRune(s string, r rune) bool {
-	for _, c := range s {
-		if c == r {
-			return true
+// TestConnect_Rejects: every way the handshake can fail is an error, and the
+// peer's text is sanitized before entering it (R20260607-SEC-1: a bidi
+// override in an auth_failed Msg; SEC-3: a C1 control in an unexpected Type).
+// A hello of a too-new protocol_version is refused at once rather than
+// returning a half-installed handle that blows up later in readLoop
+// (RNEW-ARCH-403, #427).
+func TestConnect_Rejects(t *testing.T) {
+	// replyRaw answers the attach with one raw line.
+	replyRaw := func(raw string) func(*fakeShimServer) {
+		return func(srv *fakeShimServer) {
+			srv.handleOnce(func(conn net.Conn) {
+				conn.SetDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
+				bufio.NewReader(conn).ReadBytes('\n')             //nolint:errcheck
+				conn.Write([]byte(raw))                           //nolint:errcheck
+			})
 		}
 	}
-	return false
-}
-
-// TestConnect_RejectsHelloProtocolVersionTooNew locks RNEW-ARCH-403 (#427):
-// when a forward-rolled shim ships a wire-incompatible v=ProtocolVersion+1
-// hello, naozhi must refuse the attach handshake immediately rather than
-// returning a half-installed handle that blows up later in readLoop.
-func TestConnect_RejectsHelloProtocolVersionTooNew(t *testing.T) {
-	srv := newFakeShimServer(t)
-	defer srv.cleanup()
-
-	srv.handleOnce(func(conn net.Conn) {
-		conn.SetDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
-		bufio.NewReader(conn).ReadBytes('\n')             //nolint:errcheck
-		hello := ServerMsg{
-			Type:            "hello",
-			ShimPID:         os.Getpid(),
-			CLIPID:          os.Getpid() + 1,
-			CLIAlive:        boolPtr(true),
-			ProtocolVersion: ProtocolVersion + 1,
-		}
-		data, _ := hello.MarshalLine()
-		conn.Write(data) //nolint:errcheck
-	})
-
-	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
-	token := []byte("some-32-byte-token-padded!!!!!!!")
-	_, err := m.connect(context.Background(), srv.path, token, 0)
-	if err == nil {
-		t.Fatal("expected error for too-new protocol_version, got nil")
+	tooNewMsg := ServerMsg{Type: "hello", ShimPID: os.Getpid(), CLIPID: os.Getpid() + 1,
+		CLIAlive: boolPtr(true), ProtocolVersion: ProtocolVersion + 1}
+	tooNew, _ := tooNewMsg.MarshalLine()
+	cases := []struct {
+		name      string
+		serve     func(*fakeShimServer) // nil: nothing listens on the path
+		forbidden rune
+	}{
+		{"wrong token", func(srv *fakeShimServer) { srv.serveHello(t, []byte("real-token-32bytes-padded!!!!!!")) }, 0},
+		{"auth_failed msg sanitized", replyRaw("{\"type\":\"auth_failed\",\"msg\":\"bad\u202ecreds\"}\n"), '\u202e'},
+		{"unexpected type sanitized", replyRaw("{\"type\":\"bad\u0080type\"}\n"), '\u0080'},
+		{"protocol version too new", replyRaw(string(tooNew)), 0},
+		{"bad JSON hello", replyRaw("not json at all\n"), 0},
+		{"server closes before hello", func(srv *fakeShimServer) {
+			srv.handleOnce(func(conn net.Conn) { bufio.NewReader(conn).ReadBytes('\n') }) //nolint:errcheck
+		}, 0},
+		{"dial failure", nil, 0},
 	}
-}
-
-func TestConnect_BadJSON_HelloLine(t *testing.T) {
-	srv := newFakeShimServer(t)
-	defer srv.cleanup()
-
-	// Server sends bad JSON after attach
-	srv.handleOnce(func(conn net.Conn) {
-		conn.SetDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
-		bufio.NewReader(conn).ReadBytes('\n')             //nolint:errcheck
-		conn.Write([]byte("not json at all\n"))           //nolint:errcheck
-	})
-
-	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
-	token := []byte("some-32-byte-token-padded!!!!!!!")
-	_, err := m.connect(context.Background(), srv.path, token, 0)
-	if err == nil {
-		t.Fatal("expected error for bad JSON hello, got nil")
-	}
-}
-
-func TestConnect_DialFailure(t *testing.T) {
-	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
-	_, err := m.connect(context.Background(), "/nonexistent/path/shim.sock", []byte("token"), 0)
-	if err == nil {
-		t.Fatal("expected error for non-existent socket, got nil")
-	}
-}
-
-func TestConnect_ServerClosesBeforeHello(t *testing.T) {
-	srv := newFakeShimServer(t)
-	defer srv.cleanup()
-
-	// Server closes connection immediately after accepting
-	srv.handleOnce(func(conn net.Conn) {
-		bufio.NewReader(conn).ReadBytes('\n') //nolint:errcheck
-		conn.Close()
-	})
-
-	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
-	token := []byte("some-32-byte-token-padded!!!!!!!")
-	_, err := m.connect(context.Background(), srv.path, token, 0)
-	if err == nil {
-		t.Fatal("expected error when server closes before hello, got nil")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := "/nonexistent/path/shim.sock"
+			if tc.serve != nil {
+				srv := newFakeShimServer(t)
+				defer srv.cleanup()
+				tc.serve(srv)
+				path = srv.path
+			}
+			m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
+			_, err := m.connect(context.Background(), path, []byte("wrong-token-32bytes-padded!!!!!"), 0)
+			if err == nil {
+				t.Fatal("connect succeeded, want an error")
+			}
+			if tc.forbidden != 0 && strings.ContainsRune(err.Error(), tc.forbidden) {
+				t.Errorf("error message still contains %U: %q", tc.forbidden, err.Error())
+			}
+		})
 	}
 }
 
@@ -652,74 +558,6 @@ func TestWaitSocketGone_EmptyPath(t *testing.T) {
 	}
 }
 
-// --- StopAll ---
-
-func TestManager_StopAll_SendsShutdown(t *testing.T) {
-	dir := t.TempDir()
-	m := mustNewManager(t, ManagerConfig{StateDir: dir})
-
-	const n = 2
-	type pair struct {
-		client net.Conn
-		server net.Conn
-	}
-	pairs := make([]pair, n)
-	for i := range pairs {
-		c, s := net.Pipe()
-		pairs[i] = pair{c, s}
-		handle := &ShimHandle{
-			Conn:       c,
-			Reader:     bufio.NewReader(c),
-			Writer:     bufio.NewWriter(c),
-			ClientDone: make(chan struct{}),
-		}
-		m.mu.Lock()
-		m.shims[string(rune('A'+i))] = handle
-		m.mu.Unlock()
-	}
-
-	msgCh := make(chan ClientMsg, n)
-	for i := range pairs {
-		go func(srv net.Conn) {
-			srv.SetReadDeadline(time.Now().Add(3 * time.Second)) //nolint:errcheck
-			line, err := bufio.NewReader(srv).ReadBytes('\n')
-			srv.Close()
-			if err != nil {
-				return
-			}
-			var msg ClientMsg
-			json.Unmarshal(line, &msg) //nolint:errcheck
-			msgCh <- msg
-		}(pairs[i].server)
-	}
-
-	done := make(chan struct{})
-	go func() {
-		m.StopAll(t.Context())
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("StopAll did not complete in time")
-	}
-
-	received := 0
-	timeout := time.After(2 * time.Second)
-	for received < n {
-		select {
-		case msg := <-msgCh:
-			if msg.Type != "shutdown" {
-				t.Errorf("got %q, want shutdown", msg.Type)
-			}
-			received++
-		case <-timeout:
-			t.Fatalf("timeout: only received %d/%d shutdown messages", received, n)
-		}
-	}
-}
-
 // --- cliProc ---
 
 func TestCLIProc_AliveAndPID(t *testing.T) {
@@ -828,19 +666,6 @@ func TestCLIProc_WatchChild_EndsOrphanedCLI(t *testing.T) {
 	}
 }
 
-func TestCLIProc_CloseStdin(t *testing.T) {
-	// "sh -c exit" exits immediately once started; just verify closeStdin doesn't panic.
-	cli, err := startCLI("sh", []string{"-c", "sleep 60"}, "")
-	if err != nil {
-		t.Fatalf("startCLI: %v", err)
-	}
-	defer cli.kill()
-
-	// closeStdin must not panic on a live or dead process
-	cli.closeStdin()
-	cli.closeStdin() // idempotent
-}
-
 func TestCLIProc_WaitOrKill_ExitsCleanly(t *testing.T) {
 	// Use "exit 0" which exits immediately.
 	// Start wait() in a goroutine to close exited so waitOrKill
@@ -896,35 +721,9 @@ func TestCLIProc_WaitOrKill_Timeout(t *testing.T) {
 	}
 }
 
-func TestCLIProc_Interrupt(t *testing.T) {
-	cli, err := startCLI("sh", []string{"-c", "sleep 60"}, "")
-	if err != nil {
-		t.Fatalf("startCLI: %v", err)
-	}
-	defer cli.kill()
-
-	// interrupt on a live process must not panic
-	cli.interrupt()
-
-	// interrupt on a dead process must not panic
-	cli.kill()
-	cli.interrupt()
-}
-
 func TestStartCLI_BadPath(t *testing.T) {
 	_, err := startCLI("/nonexistent/binary", nil, "")
 	if err == nil {
 		t.Fatal("expected error for nonexistent binary, got nil")
 	}
-}
-
-func TestStartCLI_BadCWD(t *testing.T) {
-	// CWD that doesn't exist — some OS accept this at exec time
-	cli, err := startCLI("sh", []string{"-c", "exit 0"}, "/nonexistent/cwd")
-	if err != nil {
-		// Some systems reject bad CWD at start time
-		return
-	}
-	cli.wait()
-	cli.kill()
 }

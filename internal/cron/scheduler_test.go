@@ -131,59 +131,15 @@ func TestStoreRoundTrip(t *testing.T) {
 
 func TestLoadJobsMissing(t *testing.T) {
 	t.Parallel()
-	result, err := loadJobs("/nonexistent/path.json")
-	if err != nil {
-		t.Fatalf("missing file should not error: %v", err)
-	}
-	if result != nil {
-		t.Error("expected nil for missing file")
-	}
-}
-
-func TestLoadJobsEmpty(t *testing.T) {
-	t.Parallel()
-	result, err := loadJobs("")
-	if err != nil {
-		t.Fatalf("empty path should not error: %v", err)
-	}
-	if result != nil {
-		t.Error("expected nil for empty path")
-	}
-}
-
-// TestLoadJobsOversizeRefuses guards the critical data-loss bug: a store file
-// larger than maxCronStoreBytes must fail loadly (returned error) AND leave
-// the original file untouched, so Scheduler.Start can abort and the operator
-// can inspect/recover the real data.
-func TestLoadJobsOversizeRefuses(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cron_jobs.json")
-	// maxCronStoreBytes+1 bytes of valid-looking JSON prefix; contents don't
-	// matter because the size check fires before Unmarshal.
-	payload := make([]byte, maxCronStoreBytes+1)
-	for i := range payload {
-		payload[i] = 'x'
-	}
-	if err := os.WriteFile(path, payload, 0600); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	m, err := loadJobs(path)
-	if err == nil {
-		t.Fatal("expected oversize error, got nil")
-	}
-	if m != nil {
-		t.Errorf("expected nil map on oversize, got %d entries", len(m))
-	}
-
-	// File must still be on disk — critically, NOT renamed and NOT truncated.
-	info, statErr := os.Stat(path)
-	if statErr != nil {
-		t.Fatalf("original file missing after oversize refusal: %v", statErr)
-	}
-	if info.Size() != int64(len(payload)) {
-		t.Errorf("file mutated after oversize refusal: size=%d want=%d", info.Size(), len(payload))
+	// A missing file and an empty path (no store configured) both load as no jobs.
+	for _, path := range []string{"/nonexistent/path.json", ""} {
+		result, err := loadJobs(path)
+		if err != nil {
+			t.Fatalf("loadJobs(%q) should not error: %v", path, err)
+		}
+		if result != nil {
+			t.Errorf("loadJobs(%q) = %v, want nil", path, result)
+		}
 	}
 }
 
@@ -261,30 +217,6 @@ func TestSchedulerStartFailsOnOversize(t *testing.T) {
 	}
 	if info.Size() != originalSize {
 		t.Errorf("store file clobbered after failed Start: size=%d want=%d", info.Size(), originalSize)
-	}
-}
-
-func TestResolveAgent(t *testing.T) {
-	t.Parallel()
-	cmds := map[string]string{
-		"review":   "code-reviewer",
-		"research": "researcher",
-	}
-	tests := []struct {
-		text      string
-		wantAgent string
-		wantText  string
-	}{
-		{"hello", "general", "hello"},
-		{"/review check PRs", "code-reviewer", "check PRs"},
-		{"/research blockchain", "researcher", "blockchain"},
-		{"/unknown stuff", "general", "/unknown stuff"},
-	}
-	for _, tt := range tests {
-		agent, text := resolveAgent(tt.text, cmds)
-		if agent != tt.wantAgent || text != tt.wantText {
-			t.Errorf("resolveAgent(%q): got (%q, %q), want (%q, %q)", tt.text, agent, text, tt.wantAgent, tt.wantText)
-		}
 	}
 }
 

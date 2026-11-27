@@ -508,13 +508,7 @@ func TestOnDisconnect_ProbeLifetime(t *testing.T) {
 		t.Fatal("a drop started no probe")
 	}
 	cancel()
-	done := make(chan struct{})
-	go func() { d.dispatch.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(connStateTestTimeout):
-		t.Fatal("the probe outlived Stop")
-	}
+	waitDispatch(t, d, "the probe outlived Stop")
 	if d.probing.Load() {
 		t.Fatal("probing still set after the probe exited")
 	}

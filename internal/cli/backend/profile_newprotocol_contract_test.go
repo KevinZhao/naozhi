@@ -8,9 +8,8 @@ import (
 
 // TestAll_NewProtocolReturnsNonNilProtocol pins the registry-wide contract
 // that EVERY registered Profile produces a non-nil cli.Protocol from
-// NewProtocol(ProtocolDeps{}). The existing tests
-// (TestProfile_NewProtocol_Claude / _Kiro) assert this per hard-coded ID;
-// this case asserts it across the whole registry so a new backend added to
+// NewProtocol(ProtocolDeps{}). TestProfile_NewProtocol asserts this per
+// hard-coded ID; this case asserts it across the whole registry so a new backend added to
 // RegisterDefaults with a nil or panicking NewProtocol fails CI without
 // anyone remembering to extend a per-ID test.
 //

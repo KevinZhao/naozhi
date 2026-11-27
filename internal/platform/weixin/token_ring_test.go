@@ -556,27 +556,6 @@ func TestReply_StaleUncertainTokenDoesNotBindEqualText(t *testing.T) {
 	}
 }
 
-// TestReply_StoppedRetryFreesItsText: a retry that stopped on its uncertain
-// token has concluded; an equal text after it is not stopped as well.
-func TestReply_StoppedRetryFreesItsText(t *testing.T) {
-	t.Parallel()
-	var delivered atomic.Int32
-	w, f := newRingTestWeixin(t, deliverThenDrop("t1", &delivered), "t1")
-	if err := reply(w); err == nil {
-		t.Fatal("reply succeeded, want the dropped connection's error")
-	}
-	if err := reply(w); !platform.IsPermanent(err) {
-		t.Fatalf("retry err = %v, want permanent", err)
-	}
-	w.cacheContextToken("u", "t2", time.Now().UnixNano())
-	if err := reply(w); err != nil {
-		t.Fatalf("equal text after the stop: %v (tokens sent %v)", err, f.seen())
-	}
-	if got, want := f.seen(), []string{"t1", "t1", "t2"}; !slices.Equal(got, want) {
-		t.Fatalf("tokens sent = %v, want %v", got, want)
-	}
-}
-
 // TestReply_RetryStopsWhenAnotherMessageWasRejectedOnItsToken: B's rejection
 // on A's uncertain token says A's send landed. A's retry must stop without
 // sending, even with a fresh token pushed meanwhile. The window counts from

@@ -2,10 +2,12 @@ package main
 
 import "testing"
 
-// TestFilterClaudeEnv_BaseURLGuard verifies R20260602-SEC-1 (#1576): a tampered
+// TestFilterClaudeEnv_URLGuards verifies R20260602-SEC-1 (#1576): a tampered
 // settings.json that points an API base-URL var at an attacker / IMDS host over
 // plain http is dropped, while https endpoints and loopback http mocks pass.
-func TestFilterClaudeEnv_BaseURLGuard(t *testing.T) {
+// Proxy env vars get the same guard (R20260603-SEC-5, #1660); NO_PROXY is not a
+// URL and passes through unmodified.
+func TestFilterClaudeEnv_URLGuards(t *testing.T) {
 	cases := []struct {
 		name string
 		in   map[string]string
@@ -41,32 +43,6 @@ func TestFilterClaudeEnv_BaseURLGuard(t *testing.T) {
 			in:   map[string]string{"ANTHROPIC_MODEL": "claude-opus"},
 			want: map[string]string{"ANTHROPIC_MODEL": "claude-opus"},
 		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := filterClaudeEnv(tc.in)
-			if len(got) != len(tc.want) {
-				t.Fatalf("got %v, want %v", got, tc.want)
-			}
-			for k, v := range tc.want {
-				if got[k] != v {
-					t.Fatalf("key %q: got %q, want %q", k, got[k], v)
-				}
-			}
-		})
-	}
-}
-
-// TestFilterClaudeEnv_ProxyGuard pins R20260603-SEC-5 (#1660): proxy env vars
-// from settings.json get the same SSRF/redirect guard as base-URL vars, so a
-// remote plaintext-http interceptor is dropped while https / loopback proxies
-// pass. NO_PROXY is not a URL and must pass through unmodified.
-func TestFilterClaudeEnv_ProxyGuard(t *testing.T) {
-	cases := []struct {
-		name string
-		in   map[string]string
-		want map[string]string
-	}{
 		{
 			name: "remote plaintext http proxy rejected",
 			in:   map[string]string{"HTTPS_PROXY": "http://attacker.example.com:3128"},
@@ -105,26 +81,5 @@ func TestFilterClaudeEnv_ProxyGuard(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// TestFilterClaudeEnv_ClaudeKillSwitchDenied pins R20260603-SEC-8 (#1660):
-// known CLAUDE_CODE_* kill-switch / mock-mode keys are refused even though the
-// CLAUDE_ prefix is allowlisted, while ordinary CLAUDE_ config still flows.
-func TestFilterClaudeEnv_ClaudeKillSwitchDenied(t *testing.T) {
-	in := map[string]string{
-		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-		"CLAUDE_CODE_USE_MOCK_RESPONSES":           "1",
-		"CLAUDE_CONFIG_DIR":                        "/home/x/.claude",
-	}
-	got := filterClaudeEnv(in)
-	if _, ok := got["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"]; ok {
-		t.Error("kill-switch CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC was propagated")
-	}
-	if _, ok := got["CLAUDE_CODE_USE_MOCK_RESPONSES"]; ok {
-		t.Error("kill-switch CLAUDE_CODE_USE_MOCK_RESPONSES was propagated")
-	}
-	if got["CLAUDE_CONFIG_DIR"] != "/home/x/.claude" {
-		t.Errorf("ordinary CLAUDE_ var dropped: got %q", got["CLAUDE_CONFIG_DIR"])
 	}
 }

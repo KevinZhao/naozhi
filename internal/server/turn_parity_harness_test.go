@@ -541,7 +541,7 @@ func waitEngineIdle(t *testing.T, e *sendEngine) {
 	}
 }
 
-// replyMatching reports whether any IM reply contains sub.
+// replyMatching counts the IM replies that contain sub.
 func replyMatching(replies []string, sub string) int {
 	n := 0
 	for _, r := range replies {

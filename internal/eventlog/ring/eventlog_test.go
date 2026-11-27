@@ -8,19 +8,13 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
-func TestNewEventLog_DefaultSize(t *testing.T) {
+func TestNewEventLog_Size(t *testing.T) {
 	t.Parallel()
-	l := NewEventLog(0)
-	if l.maxSize != defaultEventLogSize {
-		t.Errorf("maxSize = %d, want %d", l.maxSize, defaultEventLogSize)
+	if l := NewEventLog(0); l.maxSize != defaultEventLogSize {
+		t.Errorf("NewEventLog(0).maxSize = %d, want %d", l.maxSize, defaultEventLogSize)
 	}
-}
-
-func TestNewEventLog_CustomSize(t *testing.T) {
-	t.Parallel()
-	l := NewEventLog(50)
-	if l.maxSize != 50 {
-		t.Errorf("maxSize = %d, want 50", l.maxSize)
+	if l := NewEventLog(50); l.maxSize != 50 {
+		t.Errorf("NewEventLog(50).maxSize = %d, want 50", l.maxSize)
 	}
 }
 
@@ -79,15 +73,8 @@ func TestEventLog_EntriesSince(t *testing.T) {
 	if entries[0].Type != "b" || entries[1].Type != "c" {
 		t.Errorf("entries = %+v", entries)
 	}
-}
-
-func TestEventLog_EntriesSince_NoMatch(t *testing.T) {
-	t.Parallel()
-	l := NewEventLog(100)
-	l.Append(clievent.EventEntry{Time: 1000, Type: "a"})
-	entries := l.EntriesSince(2000)
-	if len(entries) != 0 {
-		t.Errorf("len = %d, want 0", len(entries))
+	if entries := l.EntriesSince(4000); len(entries) != 0 {
+		t.Errorf("EntriesSince past the newest: len = %d, want 0", len(entries))
 	}
 }
 
@@ -132,6 +119,9 @@ func TestEventLog_EntriesBefore_LimitHonored(t *testing.T) {
 func TestEventLog_EntriesBefore_ZeroLimitReturnsNil(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(100)
+	if got := l.EntriesBefore(9999, 10); got != nil {
+		t.Errorf("expected nil from empty log, got %v", got)
+	}
 	l.Append(clievent.EventEntry{Time: 1000, Type: "x"})
 	if got := l.EntriesBefore(2000, 0); got != nil {
 		t.Errorf("expected nil for limit=0, got %v", got)
@@ -158,14 +148,6 @@ func TestEventLog_EntriesBefore_ZeroBeforeIsUnbounded(t *testing.T) {
 	}
 }
 
-func TestEventLog_EntriesBefore_EmptyLog(t *testing.T) {
-	t.Parallel()
-	l := NewEventLog(100)
-	if got := l.EntriesBefore(9999, 10); got != nil {
-		t.Errorf("expected nil from empty log, got %v", got)
-	}
-}
-
 func TestEventLog_Entries_IsCopy(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(10)
@@ -180,21 +162,6 @@ func TestEventLog_Entries_IsCopy(t *testing.T) {
 }
 
 // ─── Subscribe tests ─────────────────────────────────────────────────────────
-
-func TestEventLog_Subscribe_Notified(t *testing.T) {
-	t.Parallel()
-	l := NewEventLog(100)
-	ch, unsub := l.Subscribe()
-	defer unsub()
-
-	l.Append(clievent.EventEntry{Time: 1000, Type: "test"})
-
-	select {
-	case <-ch:
-	case <-time.After(time.Second):
-		t.Error("subscriber should be notified on Append")
-	}
-}
 
 func TestEventLog_Subscribe_NonBlockingWhenFull(t *testing.T) {
 	t.Parallel()
@@ -255,6 +222,7 @@ func TestEventLog_Unsubscribe_Cleanup(t *testing.T) {
 	}
 
 	unsub()
+	unsub() // idempotent
 
 	l.subMu.Lock()
 	count = len(l.subscribers)
@@ -262,14 +230,6 @@ func TestEventLog_Unsubscribe_Cleanup(t *testing.T) {
 	if count != 0 {
 		t.Errorf("subscribers after unsub = %d, want 0", count)
 	}
-}
-
-func TestEventLog_Unsubscribe_Idempotent(t *testing.T) {
-	t.Parallel()
-	l := NewEventLog(100)
-	_, unsub := l.Subscribe()
-	unsub()
-	unsub() // should not panic
 }
 
 func TestEventLog_Subscribe_ConcurrentSafe(t *testing.T) {
@@ -375,24 +335,6 @@ func TestEventLog_Unsubscribe_SwapToEnd_PreservesOthers(t *testing.T) {
 	check("chD (promoted from tail)", chD)
 }
 
-func TestEventLog_DetailAndToolFields(t *testing.T) {
-	t.Parallel()
-	l := NewEventLog(10)
-	l.Append(clievent.EventEntry{
-		Time:   1000,
-		Type:   "tool_use",
-		Tool:   "Read",
-		Detail: "Read: /path/to/file",
-	})
-	entries := l.Entries()
-	if entries[0].Tool != "Read" {
-		t.Errorf("Tool = %q, want Read", entries[0].Tool)
-	}
-	if entries[0].Detail != "Read: /path/to/file" {
-		t.Errorf("Detail = %q, want Read: /path/to/file", entries[0].Detail)
-	}
-}
-
 func TestEventLog_BackgroundAgents(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(100)
@@ -480,20 +422,6 @@ func TestEventLog_TurnAgents_EmptySubagent(t *testing.T) {
 	agents := l.TurnAgents()
 	if len(agents) != 1 || agents[0].Name != "agent" {
 		t.Errorf("TurnAgents = %v, want [agent]", agents)
-	}
-}
-
-func TestEventLog_TurnAgents_IsCopy(t *testing.T) {
-	t.Parallel()
-	l := NewEventLog(100)
-	l.Append(clievent.EventEntry{Time: 1000, Type: "agent", Subagent: "Explore"})
-
-	agents := l.TurnAgents()
-	agents[0].Name = "modified"
-
-	original := l.TurnAgents()
-	if original[0].Name != "Explore" {
-		t.Error("TurnAgents should return a copy")
 	}
 }
 

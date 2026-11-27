@@ -453,6 +453,7 @@ func TestTurnParity23_IM_DisabledQueueBusyNotice(t *testing.T) {
 }
 
 func TestTurnParity24_IM_QueuedAck(t *testing.T) {
+	// Row 28 too: a busy IM send takes the queue path, never a busy notice.
 	t.Run("reactor platform gets an hourglass", func(t *testing.T) {
 		h := newParityHarness(t, parityOpts{reactor: true})
 		turns := h.session(parityKey, false)
@@ -536,20 +537,4 @@ func TestTurnParity27_IM_NoCronPromptAutosave(t *testing.T) {
 	if saver.calls != 0 {
 		t.Fatalf("SetJobPrompt calls = %d through the IM entry, want 0", saver.calls)
 	}
-}
-
-// Row 28: a busy IM send takes the queue path and waits behind the
-// owner; no path around the queue exists.
-func TestTurnParity28_IM_QueuePathNotGuard(t *testing.T) {
-	h := newParityHarness(t, parityOpts{reactor: true})
-	turns := h.session(parityKey, false)
-	owner := h.imAsync("m1", "first")
-	turns.next(t, "owner turn")
-	h.imSend("m2", "second")
-	if h.plat.addedFor("m2") != 1 || replyMatching(h.plat.allReplies(), parityBusyText) != 0 {
-		t.Fatal("busy IM message did not take the queue path")
-	}
-	turns.answer(okTurn("R1"))
-	turns.turn(t, "drain turn", okTurn("R2"))
-	h.waitDone(owner, "owner loop")
 }

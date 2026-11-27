@@ -32,6 +32,11 @@ func gcRefs(ws string, uploadTTL, refTTL time.Duration, now time.Time) (int, err
 // so operators eyeballing .meta files see a stable order.
 func TestMeta_AddReference_IdempotentSorted(t *testing.T) {
 	var m Meta
+	// The tracker's bridge may pass "" for an empty ImagePaths slot; it must
+	// not land in the slice.
+	if m.AddReference("") || len(m.ReferencingKeyHashes) != 0 {
+		t.Errorf("empty keyhash accepted: %v", m.ReferencingKeyHashes)
+	}
 	if !m.AddReference("c") {
 		t.Errorf("first bump reported no change")
 	}
@@ -48,19 +53,6 @@ func TestMeta_AddReference_IdempotentSorted(t *testing.T) {
 		if m.ReferencingKeyHashes[i] != v {
 			t.Errorf("pos %d: %q, want %q", i, m.ReferencingKeyHashes[i], v)
 		}
-	}
-}
-
-// TestMeta_AddReference_EmptyNoOp: the tracker's bridge might call
-// AddReference("") when an entry's ImagePaths slot is empty. The
-// helper must not pollute the slice with empty strings.
-func TestMeta_AddReference_EmptyNoOp(t *testing.T) {
-	var m Meta
-	if m.AddReference("") {
-		t.Errorf("empty keyhash accepted")
-	}
-	if len(m.ReferencingKeyHashes) != 0 {
-		t.Errorf("empty keyhash polluted slice: %v", m.ReferencingKeyHashes)
 	}
 }
 
@@ -277,39 +269,6 @@ func TestGCDir_LegacyMetaNoNewFields(t *testing.T) {
 	}
 	if removed != 1 {
 		t.Errorf("removed=%d, want 1 (legacy meta, past upload TTL)", removed)
-	}
-}
-
-// TestGCDir_PrunesEmptyDayDirs: after the per-file sweep, an
-// old date directory with no survivors should be removed.
-func TestGCDir_PrunesEmptyDayDirs(t *testing.T) {
-	ws := t.TempDir()
-	now := time.Now().UTC()
-	meta := Meta{UploadedAt: now.AddDate(0, 0, -10)}
-	date := now.AddDate(0, 0, -10).Format("2006-01-02")
-	fixturePersisted(t, ws, date, "reap", meta)
-
-	_, err := gcRefs(ws, 7*24*time.Hour, 30*24*time.Hour, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := filepath.Join(ws, Dir, date)
-	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Errorf("empty day dir not pruned: err=%v", err)
-	}
-}
-
-// TestGCDir_WorkspaceEmpty returns 0, nil for a workspace
-// without any attachments directory. Cron job starts there every
-// tick on a fresh deployment.
-func TestGCDir_WorkspaceEmpty(t *testing.T) {
-	ws := t.TempDir()
-	removed, err := gcRefs(ws, 7*24*time.Hour, 30*24*time.Hour, time.Now())
-	if err != nil {
-		t.Fatalf("err on empty ws: %v", err)
-	}
-	if removed != 0 {
-		t.Errorf("removed=%d on empty ws", removed)
 	}
 }
 

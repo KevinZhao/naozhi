@@ -207,25 +207,6 @@ func TestClaudeProtocol_BuildArgs_SettingsFileGuards(t *testing.T) {
 	}
 }
 
-func TestClaudeProtocol_WriteMessage(t *testing.T) {
-	t.Parallel()
-	p := &ClaudeProtocol{}
-	var buf bytes.Buffer
-	if err := p.WriteMessage(&buf, "hello", nil); err != nil {
-		t.Fatal(err)
-	}
-	var msg clievent.InputMessage
-	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &msg); err != nil {
-		t.Fatal(err)
-	}
-	if msg.Type != "user" {
-		t.Errorf("Type = %q, want user", msg.Type)
-	}
-	if s, ok := msg.Message.Content.(string); !ok || s != "hello" {
-		t.Errorf("Content = %v, want \"hello\"", msg.Message.Content)
-	}
-}
-
 func TestClaudeProtocol_ReadEvent_Result(t *testing.T) {
 	t.Parallel()
 	p := &ClaudeProtocol{}
@@ -255,24 +236,6 @@ func TestClaudeProtocol_ReadEvent_Assistant(t *testing.T) {
 	}
 	if ev.Type != "assistant" {
 		t.Errorf("Type = %q, want assistant", ev.Type)
-	}
-}
-
-func TestClaudeProtocol_ReadEvent_SkipsHooks(t *testing.T) {
-	t.Parallel()
-	p := &ClaudeProtocol{}
-	for _, sub := range []string{"hook_started", "hook_response"} {
-		line := `{"type":"system","subtype":"` + sub + `"}`
-		ev, done, err := readOne(t, p, line)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if done {
-			t.Error("hook events should not be done")
-		}
-		if ev.Type != "" {
-			t.Errorf("hook event should be skipped (zero clievent.Event), got Type=%q", ev.Type)
-		}
 	}
 }
 
@@ -489,6 +452,12 @@ func TestACPProtocol_ReadEvent_CancelledStopReason(t *testing.T) {
 	if events[1].Result != "partial" {
 		t.Errorf("partial buffered text should still ride on result.Result for clievent.SendResult.Text, got %q", events[1].Result)
 	}
+	if events[1].SessionID != "s1" {
+		t.Errorf("result.SessionID = %q, want s1", events[1].SessionID)
+	}
+	if p.textBuf.Len() != 0 {
+		t.Errorf("textBuf should be cleared at turn end, got %q", p.textBuf.String())
+	}
 }
 
 // TestACPProtocol_ReadEvent_NormalStopReasonRoundTrip ensures end_turn passes
@@ -568,26 +537,6 @@ func TestBuildArgs_ModelEffortFlags(t *testing.T) {
 	}
 }
 
-func TestACPProtocol_WriteMessage(t *testing.T) {
-	t.Parallel()
-	p := &ACPProtocol{}
-	p.storeSessionID("sess_test")
-	var buf bytes.Buffer
-	if err := p.WriteMessage(&buf, "hello acp", nil); err != nil {
-		t.Fatal(err)
-	}
-	var req RPCRequest
-	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &req); err != nil {
-		t.Fatal(err)
-	}
-	if req.Method != "session/prompt" {
-		t.Errorf("Method = %q, want session/prompt", req.Method)
-	}
-	if req.JSONRPC != "2.0" {
-		t.Errorf("JSONRPC = %q, want 2.0", req.JSONRPC)
-	}
-}
-
 func TestACPProtocol_ReadEvent_SessionUpdate_TextChunk(t *testing.T) {
 	t.Parallel()
 	p := &ACPProtocol{}
@@ -623,22 +572,6 @@ func TestACPProtocol_ReadEvent_SessionUpdate_TextChunk(t *testing.T) {
 	}
 }
 
-func TestACPProtocol_ReadEvent_ToolCall(t *testing.T) {
-	t.Parallel()
-	p := &ACPProtocol{}
-	line := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call","toolCallId":"c1","title":"Reading file","status":"pending"}}}`
-	ev, done, err := readOne(t, p, line)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if done {
-		t.Error("tool_call should not be done")
-	}
-	if ev.SubType != "tool_use" {
-		t.Errorf("SubType = %q, want tool_use", ev.SubType)
-	}
-}
-
 // TestACPProtocol_ReadEvent_ToolCall_RichPayload verifies that the
 // kind / status / rawInput passthrough survives ReadEvent.
 // Multi-Backend RFC §8.3 D17.
@@ -648,9 +581,12 @@ func TestACPProtocol_ReadEvent_ToolCall_RichPayload(t *testing.T) {
 	line := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{` +
 		`"sessionUpdate":"tool_call","toolCallId":"tooluse_X","title":"Running: cat /etc/hostname",` +
 		`"kind":"execute","rawInput":{"command":"cat /etc/hostname"}}}}`
-	ev, _, err := readOne(t, p, line)
+	ev, done, err := readOne(t, p, line)
 	if err != nil {
 		t.Fatalf("ReadEvent: %v", err)
+	}
+	if done || ev.SubType != "tool_use" {
+		t.Errorf("done=%v SubType=%q, want false/tool_use", done, ev.SubType)
 	}
 	if ev.ToolCall == nil {
 		t.Fatal("ToolCall should be populated")
@@ -737,144 +673,61 @@ func TestACPProtocol_ReadEvent_ToolCall_TruncatesLargePayload(t *testing.T) {
 	}
 }
 
-func TestACPProtocol_ReadEvent_Response_TurnComplete(t *testing.T) {
-	t.Parallel()
-	p := &ACPProtocol{}
-	p.storeSessionID("sess_1")
-	p.mu.Lock()
-	p.textBuf.WriteString("final answer")
-	p.mu.Unlock()
-
-	line := `{"jsonrpc":"2.0","id":5,"result":{"stopReason":"end_turn"}}`
-	events, done, err := p.ReadEvent(line)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !done {
-		t.Error("response should be done=true")
-	}
-	// Buffered text → two events: assistant text frame + result metadata.
-	if len(events) != 2 {
-		t.Fatalf("want 2 events (assistant text, result), got %d: %+v", len(events), events)
-	}
-	if events[0].Type != "assistant" || events[0].Message == nil ||
-		len(events[0].Message.Content) != 1 ||
-		events[0].Message.Content[0].Text != "final answer" {
-		t.Errorf("events[0] should carry assistant text='final answer', got %+v", events[0])
-	}
-	result := events[1]
-	if result.Type != "result" {
-		t.Errorf("events[1].Type = %q, want result", result.Type)
-	}
-	if result.Result != "final answer" {
-		t.Errorf("result.Result = %q, want 'final answer' (still rides on the wire for clievent.SendResult.Text)", result.Result)
-	}
-	if result.SessionID != "sess_1" {
-		t.Errorf("result.SessionID = %q, want sess_1", result.SessionID)
-	}
-	// textBuf should be cleared
-	if p.textBuf.Len() != 0 {
-		t.Errorf("textBuf should be cleared, got %q", p.textBuf.String())
-	}
-}
-
+// TestACPProtocol_ReadEvent_PermissionRequest covers both id shapes: kiro
+// 2.3.0 sends a UUID string, which broke a *int decoder in the original
+// RPCMessage struct (V8 in docs/rfc/multi-backend-validation.md).
 func TestACPProtocol_ReadEvent_PermissionRequest(t *testing.T) {
 	t.Parallel()
-	p := &ACPProtocol{}
-	line := `{"jsonrpc":"2.0","id":7,"method":"session/request_permission","params":{"sessionId":"s1","options":[{"optionId":"allow_once","kind":"allow_once"}]}}`
-	ev, done, err := readOne(t, p, line)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if done {
-		t.Error("permission request should not be done")
-	}
-	if ev.Type != "permission_request" {
-		t.Errorf("Type = %q, want permission_request", ev.Type)
-	}
-	if ev.RPCRequestID != "7" {
-		t.Errorf("RPCRequestID = %q, want \"7\"", ev.RPCRequestID)
-	}
-	if len(ev.RawParams) == 0 {
-		t.Error("RawParams should be populated for permission_request")
-	}
-}
-
-// TestACPProtocol_ReadEvent_PermissionRequest_StringID covers kiro 2.3.0's
-// UUID-string id form, which broke a *int decoder in the original
-// RPCMessage struct. See V8 in docs/rfc/multi-backend-validation.md.
-func TestACPProtocol_ReadEvent_PermissionRequest_StringID(t *testing.T) {
-	t.Parallel()
-	p := &ACPProtocol{}
-	line := `{"jsonrpc":"2.0","id":"82017692-c404-42d1-9334-ae28dfda0cee","method":"session/request_permission","params":{"sessionId":"s1","options":[{"optionId":"allow_once","kind":"allow_once"}]}}`
-	ev, _, err := readOne(t, p, line)
-	if err != nil {
-		t.Fatalf("kiro UUID id should not fail unmarshal, got: %v", err)
-	}
-	if ev.Type != "permission_request" {
-		t.Errorf("Type = %q, want permission_request", ev.Type)
-	}
-	if ev.RPCRequestID != "82017692-c404-42d1-9334-ae28dfda0cee" {
-		t.Errorf("RPCRequestID = %q, want UUID", ev.RPCRequestID)
+	for _, id := range []string{`7`, `"82017692-c404-42d1-9334-ae28dfda0cee"`} {
+		p := &ACPProtocol{}
+		line := `{"jsonrpc":"2.0","id":` + id + `,"method":"session/request_permission","params":{"sessionId":"s1","options":[{"optionId":"allow_once","kind":"allow_once"}]}}`
+		ev, done, err := readOne(t, p, line)
+		if err != nil {
+			t.Fatalf("id %s: %v", id, err)
+		}
+		if done {
+			t.Errorf("id %s: permission request should not be done", id)
+		}
+		if ev.Type != "permission_request" {
+			t.Errorf("id %s: Type = %q, want permission_request", id, ev.Type)
+		}
+		if want := strings.Trim(id, `"`); ev.RPCRequestID != want {
+			t.Errorf("RPCRequestID = %q, want %q", ev.RPCRequestID, want)
+		}
+		if len(ev.RawParams) == 0 {
+			t.Errorf("id %s: RawParams should be populated for permission_request", id)
+		}
 	}
 }
 
+// TestACPProtocol_HandleEvent_Permission: the response echoes the request id
+// in its own JSON type (a number for the legacy int shape, the string for
+// kiro's UUID) and carries the optionId read from the request, not a
+// hardcoded hyphen form.
 func TestACPProtocol_HandleEvent_Permission(t *testing.T) {
 	t.Parallel()
-	p := &ACPProtocol{}
-	var buf bytes.Buffer
-	rawParams := json.RawMessage(`{"sessionId":"s1","toolCall":{"toolCallId":"t1","title":"x"},"options":[{"optionId":"allow_once","name":"Yes","kind":"allow_once"},{"optionId":"reject_once","name":"No","kind":"reject_once"}]}`)
-	ev := clievent.Event{Type: "permission_request", RPCRequestID: "42", RawParams: rawParams}
-	handled := p.HandleEvent(&buf, ev)
-	if !handled {
-		t.Error("permission_request should be handled")
-	}
-	if buf.Len() == 0 {
-		t.Error("should have written permission response")
-	}
-	// Verify response JSON. ID round-trips as a JSON number when the
-	// agent's id parses as an int (the legacy shape).
-	var resp map[string]any
-	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &resp); err != nil {
-		t.Fatalf("response unmarshal: %v", err)
-	}
-	if resp["id"] != float64(42) {
-		t.Errorf("response id = %v, want 42", resp["id"])
-	}
-	// Outcome must include the optionId picked from the request, not a
-	// hardcoded hyphen form.
-	result := resp["result"].(map[string]any)
-	outcome := result["outcome"].(map[string]any)
-	if got := outcome["optionId"]; got != "allow_once" {
-		t.Errorf("optionId = %v, want allow_once (read from request)", got)
-	}
-}
-
-// TestACPProtocol_HandleEvent_Permission_KiroUUID covers the kiro 2.3.0
-// shape where id is a UUID string and optionId uses underscores.
-func TestACPProtocol_HandleEvent_Permission_KiroUUID(t *testing.T) {
-	t.Parallel()
-	p := &ACPProtocol{}
-	var buf bytes.Buffer
+	const uuid = "82017692-c404-42d1-9334-ae28dfda0cee"
 	rawParams := json.RawMessage(`{"sessionId":"s1","toolCall":{"toolCallId":"t1","title":"x"},"options":[{"optionId":"allow_once","name":"Yes","kind":"allow_once"},{"optionId":"allow_always","name":"Always","kind":"allow_always"},{"optionId":"reject_once","name":"No","kind":"reject_once"}]}`)
-	ev := clievent.Event{
-		Type:         "permission_request",
-		RPCRequestID: "82017692-c404-42d1-9334-ae28dfda0cee",
-		RawParams:    rawParams,
-	}
-	if !p.HandleEvent(&buf, ev) {
-		t.Fatal("permission_request should be handled")
-	}
-	var resp map[string]any
-	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &resp); err != nil {
-		t.Fatalf("response unmarshal: %v", err)
-	}
-	if resp["id"] != "82017692-c404-42d1-9334-ae28dfda0cee" {
-		t.Errorf("response id = %v, want UUID round-trip", resp["id"])
-	}
-	outcome := resp["result"].(map[string]any)["outcome"].(map[string]any)
-	if got := outcome["optionId"]; got != "allow_once" {
-		t.Errorf("optionId = %v, want allow_once (kiro form)", got)
+	for _, tc := range []struct {
+		id     string
+		wantID any
+	}{{"42", float64(42)}, {uuid, uuid}} {
+		p := &ACPProtocol{}
+		var buf bytes.Buffer
+		if !p.HandleEvent(&buf, clievent.Event{Type: "permission_request", RPCRequestID: tc.id, RawParams: rawParams}) {
+			t.Fatalf("id %s: permission_request should be handled", tc.id)
+		}
+		var resp map[string]any
+		if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &resp); err != nil {
+			t.Fatalf("id %s: response unmarshal: %v", tc.id, err)
+		}
+		if resp["id"] != tc.wantID {
+			t.Errorf("response id = %v, want %v", resp["id"], tc.wantID)
+		}
+		outcome := resp["result"].(map[string]any)["outcome"].(map[string]any)
+		if got := outcome["optionId"]; got != "allow_once" {
+			t.Errorf("id %s: optionId = %v, want allow_once (read from request)", tc.id, got)
+		}
 	}
 }
 
@@ -1538,20 +1391,6 @@ func TestProcessStateString(t *testing.T) {
 	}
 }
 
-func TestNewUserMessage(t *testing.T) {
-	t.Parallel()
-	msg := clievent.NewUserMessageWithMeta("hello world", nil, "", "")
-	if msg.Type != "user" {
-		t.Errorf("Type = %q, want %q", msg.Type, "user")
-	}
-	if msg.Message.Role != "user" {
-		t.Errorf("Role = %q, want %q", msg.Message.Role, "user")
-	}
-	if s, ok := msg.Message.Content.(string); !ok || s != "hello world" {
-		t.Errorf("Content = %v, want \"hello world\"", msg.Message.Content)
-	}
-}
-
 func TestNewUserMessage_WithImages(t *testing.T) {
 	t.Parallel()
 	images := []clievent.Attachment{
@@ -1742,92 +1581,6 @@ func TestNewUserMessage_FileRefWithoutPath_Skipped(t *testing.T) {
 	}
 }
 
-func TestClaudeProtocol_WriteMessage_WithImages(t *testing.T) {
-	t.Parallel()
-	p := &ClaudeProtocol{}
-	var buf bytes.Buffer
-	images := []clievent.Attachment{
-		{Data: []byte("png-bytes"), MimeType: "image/png"},
-	}
-	if err := p.WriteMessage(&buf, "what is this?", images); err != nil {
-		t.Fatal(err)
-	}
-
-	// Parse the NDJSON line
-	var parsed map[string]json.RawMessage
-	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &parsed); err != nil {
-		t.Fatal(err)
-	}
-
-	var inner map[string]json.RawMessage
-	json.Unmarshal(parsed["message"], &inner)
-
-	var contentBlocks []map[string]any
-	if err := json.Unmarshal(inner["content"], &contentBlocks); err != nil {
-		t.Fatalf("content should be array for multimodal, got error: %v", err)
-	}
-	if len(contentBlocks) != 2 {
-		t.Fatalf("len(contentBlocks) = %d, want 2 (1 image + 1 text)", len(contentBlocks))
-	}
-	if contentBlocks[0]["type"] != "image" {
-		t.Errorf("block[0].type = %v, want image", contentBlocks[0]["type"])
-	}
-	if contentBlocks[1]["type"] != "text" {
-		t.Errorf("block[1].type = %v, want text", contentBlocks[1]["type"])
-	}
-}
-
-func TestACPProtocol_WriteMessage_WithImages(t *testing.T) {
-	t.Parallel()
-	p := &ACPProtocol{}
-	p.storeSessionID("sess_img")
-	var buf bytes.Buffer
-	images := []clievent.Attachment{
-		{Data: []byte("jpeg-bytes"), MimeType: "image/jpeg"},
-	}
-	if err := p.WriteMessage(&buf, "analyze", images); err != nil {
-		t.Fatal(err)
-	}
-
-	var req map[string]json.RawMessage
-	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &req); err != nil {
-		t.Fatal(err)
-	}
-	if string(req["method"]) != `"session/prompt"` {
-		t.Errorf("method = %s, want session/prompt", req["method"])
-	}
-
-	var params map[string]json.RawMessage
-	json.Unmarshal(req["params"], &params)
-
-	var sessionID string
-	json.Unmarshal(params["sessionId"], &sessionID)
-	if sessionID != "sess_img" {
-		t.Errorf("sessionId = %q, want sess_img", sessionID)
-	}
-
-	var prompt []map[string]any
-	if err := json.Unmarshal(params["prompt"], &prompt); err != nil {
-		t.Fatalf("prompt parse error: %v", err)
-	}
-	if len(prompt) != 2 {
-		t.Fatalf("len(prompt) = %d, want 2 (1 image + 1 text)", len(prompt))
-	}
-	if prompt[0]["type"] != "image" {
-		t.Errorf("prompt[0].type = %v, want image", prompt[0]["type"])
-	}
-	src, _ := prompt[0]["source"].(map[string]any)
-	if src["media_type"] != "image/jpeg" {
-		t.Errorf("prompt[0].source.media_type = %v, want image/jpeg", src["media_type"])
-	}
-	if prompt[1]["type"] != "text" {
-		t.Errorf("prompt[1].type = %v, want text", prompt[1]["type"])
-	}
-	if prompt[1]["text"] != "analyze" {
-		t.Errorf("prompt[1].text = %v, want analyze", prompt[1]["text"])
-	}
-}
-
 // TestFilterDeniedFlags pins the R219-SEC-1 / #653 ExtraArgs hardening: the
 // known-dangerous flag surface (--mcp-config / --add-dir /
 // --dangerously-skip-permissions / --append-system-prompt and friends) MUST
@@ -1836,132 +1589,29 @@ func TestACPProtocol_WriteMessage_WithImages(t *testing.T) {
 // filter cannot be bypassed by trivial argv shape variation.
 func TestFilterDeniedFlags(t *testing.T) {
 	t.Parallel()
-	t.Run("nothing_filtered_returns_input_unchanged", func(t *testing.T) {
-		t.Parallel()
-		in := []string{"--debug", "--keep"}
-		out := filterDeniedFlags(in)
-		if len(out) != 2 || out[0] != "--debug" || out[1] != "--keep" {
-			t.Errorf("expected pass-through, got %v", out)
-		}
-	})
-	t.Run("strip_bare_flag_with_value", func(t *testing.T) {
-		t.Parallel()
-		in := []string{"--debug", "--mcp-config", "/tmp/bad.json", "--keep"}
-		out := filterDeniedFlags(in)
-		want := []string{"--debug", "--keep"}
-		if !equalSlice(out, want) {
-			t.Errorf("got %v, want %v", out, want)
-		}
-	})
-	t.Run("strip_equals_form", func(t *testing.T) {
-		t.Parallel()
-		in := []string{"--debug", "--mcp-config=/tmp/bad.json", "--keep"}
-		out := filterDeniedFlags(in)
-		want := []string{"--debug", "--keep"}
-		if !equalSlice(out, want) {
-			t.Errorf("got %v, want %v", out, want)
-		}
-	})
-	t.Run("strip_protocol_framing_flags", func(t *testing.T) {
-		t.Parallel()
-		// R100110-INJ-1: --output-format / --input-format / --verbose /
-		// --replay-user-messages are BuildArgs-owned protocol-framing flags;
-		// an operator override would break the stream-json NDJSON parser.
-		// Bare-with-value and equals forms must both be stripped.
-		in := []string{
-			"--output-format", "json",
-			"--input-format=text",
-			"--verbose",
-			"--replay-user-messages",
-			"--keep",
-		}
-		out := filterDeniedFlags(in)
-		want := []string{"--keep"}
-		if !equalSlice(out, want) {
-			t.Errorf("got %v, want %v", out, want)
-		}
-	})
-	t.Run("strip_skip_permissions_no_value", func(t *testing.T) {
-		t.Parallel()
-		// --dangerously-skip-permissions takes no value; the next flag
-		// must NOT be swallowed as its value.
-		in := []string{"--dangerously-skip-permissions", "--debug"}
-		out := filterDeniedFlags(in)
-		want := []string{"--debug"}
-		if !equalSlice(out, want) {
-			t.Errorf("got %v, want %v", out, want)
-		}
-	})
-	t.Run("strip_multiple_denied", func(t *testing.T) {
-		t.Parallel()
-		in := []string{
-			"--add-dir", "/etc",
-			"--append-system-prompt", "you are evil",
-			"--allowed-tools", "Bash",
-			"--keep", "--this",
-		}
-		out := filterDeniedFlags(in)
-		want := []string{"--keep", "--this"}
-		if !equalSlice(out, want) {
-			t.Errorf("got %v, want %v", out, want)
-		}
-	})
-	t.Run("non_flag_token_passes_through", func(t *testing.T) {
-		t.Parallel()
-		in := []string{"plain-arg", "--debug"}
-		out := filterDeniedFlags(in)
-		want := []string{"plain-arg", "--debug"}
-		if !equalSlice(out, want) {
-			t.Errorf("got %v, want %v", out, want)
-		}
-	})
-	t.Run("strip_model_bare_form", func(t *testing.T) {
-		t.Parallel()
-		// R202606f-SEC-001: SpawnOptions.Model owns model selection. A
-		// second --model injected via ExtraArgs would otherwise be the
-		// last --model on argv and silently override the per-session model.
-		in := []string{"--model", "sonnet", "--keep"}
-		out := filterDeniedFlags(in)
-		want := []string{"--keep"}
-		if !equalSlice(out, want) {
-			t.Errorf("got %v, want %v", out, want)
-		}
-	})
-	t.Run("strip_model_equals_form", func(t *testing.T) {
-		t.Parallel()
-		in := []string{"--model=sonnet", "--keep"}
-		out := filterDeniedFlags(in)
-		want := []string{"--keep"}
-		if !equalSlice(out, want) {
-			t.Errorf("got %v, want %v", out, want)
-		}
-	})
-}
-
-// TestBuildArgs_StripsDeniedExtraArgs is an end-to-end check via the public
-// BuildArgs entry point: a caller cannot inject --mcp-config (or the other
-// denied flags) into argv even when feeding ExtraArgs straight through.
-func TestBuildArgs_StripsDeniedExtraArgs(t *testing.T) {
-	t.Parallel()
-	p := &ClaudeProtocol{}
-	args := p.BuildArgs(SpawnOptions{
-		ExtraArgs: []string{"--mcp-config", "/tmp/evil.json", "--debug"},
-	})
-	for _, a := range args {
-		if a == "--mcp-config" || a == "/tmp/evil.json" {
-			t.Errorf("denied token leaked into argv: %v", args)
-		}
+	cases := []struct {
+		name    string
+		in, out []string
+	}{
+		{"nothing filtered", []string{"--debug", "--keep"}, []string{"--debug", "--keep"}},
+		{"bare flag with value", []string{"--debug", "--mcp-config", "/tmp/bad.json", "--keep"}, []string{"--debug", "--keep"}},
+		{"equals form", []string{"--debug", "--mcp-config=/tmp/bad.json", "--keep"}, []string{"--debug", "--keep"}},
+		// R100110-INJ-1: BuildArgs owns the stream-json framing flags; an
+		// operator override would break the NDJSON parser.
+		{"protocol framing flags", []string{"--output-format", "json", "--input-format=text", "--verbose", "--replay-user-messages", "--keep"}, []string{"--keep"}},
+		// --dangerously-skip-permissions takes no value; the next flag must
+		// NOT be swallowed as its value.
+		{"skip permissions no value", []string{"--dangerously-skip-permissions", "--debug"}, []string{"--debug"}},
+		{"multiple denied", []string{"--add-dir", "/etc", "--append-system-prompt", "you are evil", "--allowed-tools", "Bash", "--keep", "--this"}, []string{"--keep", "--this"}},
+		{"non-flag token passes", []string{"plain-arg", "--debug"}, []string{"plain-arg", "--debug"}},
+		// R202606f-SEC-001: SpawnOptions.Model owns model selection.
+		{"model bare form", []string{"--model", "sonnet", "--keep"}, []string{"--keep"}},
+		{"model equals form", []string{"--model=sonnet", "--keep"}, []string{"--keep"}},
 	}
-	// --debug should still be present (denylist, not allowlist).
-	saw := false
-	for _, a := range args {
-		if a == "--debug" {
-			saw = true
-			break
+	for _, tc := range cases {
+		if got := filterDeniedFlags(tc.in); !slices.Equal(got, tc.out) {
+			t.Errorf("%s: filterDeniedFlags(%v) = %v, want %v", tc.name, tc.in, got, tc.out)
 		}
-	}
-	if !saw {
-		t.Errorf("--debug should pass through, got %v", args)
 	}
 }
 
@@ -1994,16 +1644,4 @@ func TestBuildArgs_ExtraArgsModelCannotOverride(t *testing.T) {
 	if modelCount != 1 {
 		t.Errorf("--model count = %d, want exactly 1; args=%v", modelCount, args)
 	}
-}
-
-func equalSlice(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

@@ -268,49 +268,30 @@ func TestShimHandle_Close_SignalsDone(t *testing.T) {
 	}
 }
 
-func TestShimHandle_Detach_SendsDetachMsg(t *testing.T) {
-	handle, server := newTestHandlePair(t)
-	defer server.Close()
-
-	gotCh := make(chan ClientMsg, 1)
-	go func() {
-		var msg ClientMsg
-		readLineMsgConn(server, &msg)
-		gotCh <- msg
-	}()
-
-	go handle.Detach()
-
-	select {
-	case got := <-gotCh:
-		if got.Type != "detach" {
-			t.Errorf("msg.Type = %q, want detach", got.Type)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for detach message")
-	}
-}
-
-func TestShimHandle_Shutdown_SendsShutdownMsg(t *testing.T) {
-	handle, server := newTestHandlePair(t)
-	defer server.Close()
-
-	gotCh := make(chan ClientMsg, 1)
-	go func() {
-		var msg ClientMsg
-		readLineMsgConn(server, &msg)
-		gotCh <- msg
-	}()
-
-	go handle.Shutdown()
-
-	select {
-	case got := <-gotCh:
-		if got.Type != "shutdown" {
-			t.Errorf("msg.Type = %q, want shutdown", got.Type)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for shutdown message")
+func TestShimHandle_DetachAndShutdownSendTheirMsg(t *testing.T) {
+	for want, call := range map[string]func(*ShimHandle){
+		"detach":   (*ShimHandle).Detach,
+		"shutdown": (*ShimHandle).Shutdown,
+	} {
+		t.Run(want, func(t *testing.T) {
+			handle, server := newTestHandlePair(t)
+			defer server.Close()
+			gotCh := make(chan ClientMsg, 1)
+			go func() {
+				var msg ClientMsg
+				readLineMsgConn(server, &msg)
+				gotCh <- msg
+			}()
+			go call(handle)
+			select {
+			case got := <-gotCh:
+				if got.Type != want {
+					t.Errorf("msg.Type = %q, want %s", got.Type, want)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("timeout waiting for %s message", want)
+			}
+		})
 	}
 }
 
@@ -379,70 +360,57 @@ func TestManager_Remove(t *testing.T) {
 
 // --- Manager.DetachAll / StopAll ---
 
-func TestManager_DetachAll_SendsDetach(t *testing.T) {
-	dir := t.TempDir()
-	m := mustNewManager(t, ManagerConfig{StateDir: dir})
-
-	const n = 3
-	type pair struct {
-		client net.Conn
-		server net.Conn
-	}
-	pairs := make([]pair, n)
-	for i := range pairs {
-		c, s := net.Pipe()
-		pairs[i] = pair{c, s}
-		handle := &ShimHandle{
-			Conn:       c,
-			Reader:     bufio.NewReader(c),
-			Writer:     bufio.NewWriter(c),
-			ClientDone: make(chan struct{}),
-		}
-		m.mu.Lock()
-		m.shims[fmt.Sprintf("key%d", i)] = handle
-		m.mu.Unlock()
-	}
-
-	// For each server end, read one message concurrently
-	msgCh := make(chan ClientMsg, n)
-	for i := range pairs {
-		go func(srv net.Conn) {
-			srv.SetReadDeadline(time.Now().Add(3 * time.Second)) //nolint:errcheck
-			line, err := bufio.NewReader(srv).ReadBytes('\n')
-			srv.Close()
-			if err != nil {
-				return
+// DetachAll and StopAll send every registered shim its detach / shutdown.
+func TestManager_DetachAllAndStopAll(t *testing.T) {
+	for _, tc := range []struct {
+		want string
+		call func(*Manager, context.Context)
+	}{
+		{"detach", func(m *Manager, _ context.Context) { m.DetachAll() }},
+		{"shutdown", (*Manager).StopAll},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
+			const n = 3
+			msgCh := make(chan ClientMsg, n)
+			for i := range n {
+				c, srv := net.Pipe()
+				m.mu.Lock()
+				m.shims[fmt.Sprintf("key%d", i)] = &ShimHandle{
+					Conn: c, Reader: bufio.NewReader(c), Writer: bufio.NewWriter(c), ClientDone: make(chan struct{}),
+				}
+				m.mu.Unlock()
+				go func() {
+					var msg ClientMsg
+					err := readLineMsgConn(srv, &msg)
+					srv.Close()
+					if err == nil {
+						msgCh <- msg
+					}
+				}()
 			}
-			var msg ClientMsg
-			json.Unmarshal(line, &msg) //nolint:errcheck
-			msgCh <- msg
-		}(pairs[i].server)
-	}
 
-	done := make(chan struct{})
-	go func() {
-		m.DetachAll()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("DetachAll did not complete in time")
-	}
-
-	// Drain received messages
-	received := 0
-	timeout := time.After(2 * time.Second)
-	for received < n {
-		select {
-		case msg := <-msgCh:
-			if msg.Type != "detach" {
-				t.Errorf("got %q, want detach", msg.Type)
+			done := make(chan struct{})
+			go func() {
+				tc.call(m, t.Context())
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s did not complete in time", tc.want)
 			}
-			received++
-		case <-timeout:
-			t.Fatalf("timeout: only received %d/%d detach messages", received, n)
-		}
+			timeout := time.After(2 * time.Second)
+			for received := 0; received < n; received++ {
+				select {
+				case msg := <-msgCh:
+					if msg.Type != tc.want {
+						t.Errorf("got %q, want %s", msg.Type, tc.want)
+					}
+				case <-timeout:
+					t.Fatalf("timeout: only received %d/%d %s messages", received, n, tc.want)
+				}
+			}
+		})
 	}
 }

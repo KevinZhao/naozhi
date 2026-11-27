@@ -64,33 +64,6 @@ func TestEventLog_StampUUID_Append(t *testing.T) {
 	}
 }
 
-// TestEventLog_StampUUID_AppendBatch covers the batch path. Each
-// entry in the batch must get its own fresh UUID; a regression that
-// reuses the same UUID across the batch would coalesce distinct
-// events.
-func TestEventLog_StampUUID_AppendBatch(t *testing.T) {
-	l := NewEventLog(16)
-	l.AppendBatch([]clievent.EventEntry{
-		{Type: "user", Summary: "a"},
-		{Type: "user", Summary: "b"},
-		{Type: "user", Summary: "c"},
-	})
-	got := l.Entries()
-	if len(got) != 3 {
-		t.Fatalf("got %d entries", len(got))
-	}
-	seen := make(map[string]struct{})
-	for _, e := range got {
-		if e.UUID == "" {
-			t.Errorf("entry %q has no UUID", e.Summary)
-		}
-		if _, dup := seen[e.UUID]; dup {
-			t.Errorf("duplicate UUID %q in batch", e.UUID)
-		}
-		seen[e.UUID] = struct{}{}
-	}
-}
-
 // TestEventLog_StampUUID_PreservesCaller: if the caller already set
 // a UUID (e.g. DeriveLegacyUUID on Claude JSONL replay), stampUUID
 // must not overwrite it. This keeps replay → persist → replay stable
@@ -211,125 +184,6 @@ func TestEventLog_ReplayPhase_WithoutSink(t *testing.T) {
 	}
 	if batch[0].Summary != "live" {
 		t.Errorf("sink saw %q, want 'live'", batch[0].Summary)
-	}
-}
-
-// TestEventLog_ReplayPhase_NilResetsSinkReady locks in the
-// R20260526-GO-010 contract: SetPersistSink(nil) flips sinkReady
-// back to false so any subsequent SetPersistSink(real) re-enters
-// the pre-attach phase cleanly. Without this reset, a
-// "pause-persist → InjectHistory replay → resume-persist" sequence
-// would tag replay batches as live and the Persister would commit
-// duplicates to disk.
-//
-// The post-reinstall Append below MUST land with replayPhase=false
-// because SetPersistSink(real) flips sinkReady back to true atomically.
-// What the test really proves is that nil + real-install behaves like
-// a fresh EventLog — the install path's atomic Store(true) cancels
-// the nil path's Store(false) before any live Append observes it.
-func TestEventLog_ReplayPhase_NilResetsSinkReady(t *testing.T) {
-	l := NewEventLog(16)
-	c := &captureSink{}
-	l.SetPersistSink(c.asSink())
-
-	// Uninstall via nil. After this call sinkReady MUST be false so a
-	// subsequent install enters the pre-attach phase.
-	l.SetPersistSink(nil)
-	if l.sinkReady.Load() {
-		t.Errorf("SetPersistSink(nil) did not reset sinkReady")
-	}
-
-	// Reinstall a fresh capture. The install path flips sinkReady
-	// back to true, so the next Append sees replayPhase=false.
-	c2 := &captureSink{}
-	l.SetPersistSink(c2.asSink())
-	if !l.sinkReady.Load() {
-		t.Errorf("SetPersistSink(real) after nil did not flip sinkReady=true")
-	}
-
-	l.Append(clievent.EventEntry{Type: "user", Summary: "post-reinstall"})
-	_, replay, _ := c2.lastBatch()
-	if replay {
-		t.Errorf("post-reinstall live Append marked replayPhase=true")
-	}
-}
-
-// TestEventLog_SetPersistSinkNil_ThenInstall_ReplaysCorrectly
-// exercises the operationally-meaningful path the R20260526-GO-010
-// fix opens: pause persist via SetPersistSink(nil), feed a replay
-// batch (e.g. InjectHistory), then re-install the sink. The replay
-// batch fired between nil and re-install fires no sink (pointer is
-// nil); the batch fired AFTER re-install but during the new replay
-// phase MUST carry replayPhase=true so downstream persisters drop
-// the duplicate.
-//
-// The "pre-install replay" + "post-install live" boundary is the
-// inverse of this — exercised by TestEventLog_ReplayPhase_WithoutSink.
-// What this test adds is the toggle: sinkReady must be reset by
-// nil so that AppendBatchReplay-style use after re-install lands
-// with replayPhase=true. SetPersistSink(real) flips it back to true
-// before live Appends, so we use AppendBatchReplay (or its public
-// equivalent) to exercise the moment between sink re-attach and the
-// next live event — but since the public API doesn't expose a
-// "stay-replay" hook, we assert via the simpler invariant: after
-// SetPersistSink(nil) the field is false; after SetPersistSink(real)
-// the field is true again, no leftover state.
-func TestEventLog_SetPersistSinkNil_TogglesSinkReadyBoth(t *testing.T) {
-	l := NewEventLog(16)
-	if l.sinkReady.Load() {
-		t.Fatalf("fresh EventLog has sinkReady=true")
-	}
-
-	c1 := &captureSink{}
-	l.SetPersistSink(c1.asSink())
-	if !l.sinkReady.Load() {
-		t.Errorf("first install did not flip sinkReady=true")
-	}
-
-	l.SetPersistSink(nil)
-	if l.sinkReady.Load() {
-		t.Errorf("uninstall did not reset sinkReady=false")
-	}
-
-	c2 := &captureSink{}
-	l.SetPersistSink(c2.asSink())
-	if !l.sinkReady.Load() {
-		t.Errorf("re-install did not flip sinkReady back to true")
-	}
-}
-
-// TestEventLog_SetPersistSinkPair_NilBatchResetsSinkReady mirrors
-// the SetPersistSink(nil) reset behaviour for SetPersistSinkPair's
-// nil-batch uninstall path. R20260526-GO-010 symmetry: both clear
-// entrypoints must produce a clean pre-attach state for the next
-// install.
-func TestEventLog_SetPersistSinkPair_NilBatchResetsSinkReady(t *testing.T) {
-	l := NewEventLog(16)
-	batch := &captureSink{}
-	one := &captureSinkOne{}
-	l.SetPersistSinkPair(batch.asSink(), one.asSink())
-	if !l.sinkReady.Load() {
-		t.Fatalf("SetPersistSinkPair did not flip sinkReady=true")
-	}
-
-	l.SetPersistSinkPair(nil, nil)
-	if l.sinkReady.Load() {
-		t.Errorf("SetPersistSinkPair(nil, nil) did not reset sinkReady=false")
-	}
-}
-
-// TestEventLog_SinkNotCalledWhenUnset confirms Append is a no-op
-// on the persist side when no sink is installed. Fake processes
-// and unit-test harnesses rely on this.
-func TestEventLog_SinkNotCalledWhenUnset(t *testing.T) {
-	l := NewEventLog(16)
-	// No SetPersistSink call at all.
-	l.Append(clievent.EventEntry{Type: "user", Summary: "alone"})
-	// Nothing to assert except that we reach here without panic and
-	// the entry is visible in the ring.
-	got := l.Entries()
-	if len(got) != 1 || got[0].Summary != "alone" {
-		t.Errorf("ring state wrong: %+v", got)
 	}
 }
 
@@ -459,17 +313,28 @@ func TestEventLog_SinkReady_LifecycleTransitions(t *testing.T) {
 		t.Fatalf("SinkReady after SetPersistSink(nil) = true, want false")
 	}
 
-	// Re-install: ready returns to true.
-	l.SetPersistSink(c.asSink())
+	// Re-install: ready returns to true, so a live Append is not tagged
+	// replay — nil + real-install behaves like a fresh EventLog.
+	c2 := &captureSink{}
+	l.SetPersistSink(c2.asSink())
 	if !l.SinkReady() {
 		t.Fatalf("SinkReady after re-install = false, want true")
 	}
+	l.Append(clievent.EventEntry{Type: "user", Summary: "post-reinstall"})
+	if _, replay, ok := c2.lastBatch(); !ok || replay {
+		t.Errorf("post-reinstall live Append: delivered=%v replayPhase=%v, want delivered live", ok, replay)
+	}
 
-	// SetPersistSinkPair install path also flips ready=true.
+	// SetPersistSinkPair install path also flips ready=true, and its
+	// nil-batch uninstall resets it like SetPersistSink(nil).
 	l2 := NewEventLog(16)
 	l2.SetPersistSinkPair(c.asSink(), nil)
 	if !l2.SinkReady() {
 		t.Fatalf("SinkReady after SetPersistSinkPair = false, want true")
+	}
+	l2.SetPersistSinkPair(nil, nil)
+	if l2.SinkReady() {
+		t.Errorf("SinkReady after SetPersistSinkPair(nil, nil) = true, want false")
 	}
 }
 
@@ -545,8 +410,10 @@ func TestEventLog_AppendBatch_NoSinkFastPath(t *testing.T) {
 	if len(ring) != 2 {
 		t.Fatalf("ring len=%d, want 2", len(ring))
 	}
-	if ring[0].UUID == "" || ring[1].UUID == "" {
-		t.Errorf("UUIDs not stamped on no-sink path: %+v", ring)
+	// Each entry gets its own UUID; reusing one across the batch would
+	// coalesce distinct events in MergedSource dedup.
+	if ring[0].UUID == "" || ring[1].UUID == "" || ring[0].UUID == ring[1].UUID {
+		t.Errorf("UUIDs not stamped distinctly on no-sink path: %+v", ring)
 	}
 	if ring[0].Time == 0 {
 		t.Errorf("default Time not applied on no-sink path: %d", ring[0].Time)

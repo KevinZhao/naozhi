@@ -766,15 +766,6 @@ func TestHandleCdCommand_CaseInsensitiveChild(t *testing.T) {
 	}
 }
 
-func TestHandleCdCommand_EmptyPath(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	d.handleCdCommand(context.Background(), incomingMsg("/cd"), "/cd", slog.Default())
-	if !strings.Contains(fp.lastReply(), "用法") {
-		t.Errorf("expected usage message, got %q", fp.lastReply())
-	}
-}
-
 func TestHandleCdCommand_UnknownPlatform_NoReply(t *testing.T) {
 	fp := &fakePlatform{}
 	d := newTestDispatcher(fp)

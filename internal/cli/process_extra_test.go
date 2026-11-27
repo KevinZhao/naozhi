@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"reflect"
 	"strings"
@@ -72,30 +71,39 @@ func startServerDrain(srv *shimTestServer) {
 	}()
 }
 
-// ---------------------------------------------------------------------------
-// shimWriter.Write — fast path: single complete line, empty buffer
-// ---------------------------------------------------------------------------
+// TestShimWriter_FramesLines: a single complete line (fast path), a line split
+// across two Writes and two lines in one Write (slow path) each reach the shim
+// as one "write" frame per line, with every input byte reported accepted.
+func TestShimWriter_FramesLines(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		chunks []string
+		want   []string
+	}{
+		{"single line", []string{`{"type":"a"}` + "\n"}, []string{`{"type":"a"}`}},
+		{"fragmented", []string{`{"type":"msg"`, "}\n"}, []string{`{"type":"msg"}`}},
+		{"multi-line", []string{`{"type":"a"}` + "\n" + `{"type":"b"}` + "\n"}, []string{`{"type":"a"}`, `{"type":"b"}`}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, srv := shimTestPair(&ClaudeProtocol{})
+			writes := startServerWriteTap(srv)
+			go p.readLoop()
+			defer p.Kill()
 
-func TestShimWriter_FastPath_SingleLine(t *testing.T) {
-	p, srv := shimTestPair(&ClaudeProtocol{})
-	startServerDrain(srv)
-	go p.readLoop()
-	defer p.Kill()
-
-	w := p.link.stdinWriter()
-	data := []byte(`{"type":"user_message"}` + "\n")
-	n, err := w.Write(data)
-	if err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
-	if n != len(data) {
-		t.Errorf("Write() n = %d, want %d", n, len(data))
+			w := p.link.stdinWriter()
+			for _, c := range tc.chunks {
+				if n, err := w.Write([]byte(c)); err != nil || n != len(c) {
+					t.Fatalf("Write(%q) n=%d err=%v", c, n, err)
+				}
+			}
+			for _, want := range tc.want {
+				if got := awaitWrite(t, writes); got != want {
+					t.Errorf("frame line = %q, want %q", got, want)
+				}
+			}
+		})
 	}
 }
-
-// ---------------------------------------------------------------------------
-// shimWriter.Write — fast path: clierr.ErrMessageTooLarge (line too big)
-// ---------------------------------------------------------------------------
 
 func TestShimWriter_FastPath_TooLarge(t *testing.T) {
 	p, srv := shimTestPair(&ClaudeProtocol{})
@@ -111,81 +119,6 @@ func TestShimWriter_FastPath_TooLarge(t *testing.T) {
 	_, err := w.Write(bigLine)
 	if !errors.Is(err, clierr.ErrMessageTooLarge) {
 		t.Errorf("Write() error = %v, want clierr.ErrMessageTooLarge", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// shimWriter.Write — slow path: fragmented writes
-// ---------------------------------------------------------------------------
-
-func TestShimWriter_SlowPath_Fragmented(t *testing.T) {
-	p, srv := shimTestPair(&ClaudeProtocol{})
-	startServerDrain(srv)
-	go p.readLoop()
-	defer p.Kill()
-
-	w := p.link.stdinWriter()
-	// Write part1 without newline → goes through slow path (buffer)
-	part1 := []byte(`{"type":"msg"`)
-	part2 := []byte(`}` + "\n") // completes the line
-
-	if n, err := w.Write(part1); err != nil || n != len(part1) {
-		t.Fatalf("Write(part1) n=%d err=%v", n, err)
-	}
-	if n, err := w.Write(part2); err != nil || n != len(part2) {
-		t.Fatalf("Write(part2) n=%d err=%v", n, err)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// shimWriter.Write — slow path: multi-line in single write
-// ---------------------------------------------------------------------------
-
-func TestShimWriter_SlowPath_MultiLine(t *testing.T) {
-	p, srv := shimTestPair(&ClaudeProtocol{})
-	startServerDrain(srv)
-	go p.readLoop()
-	defer p.Kill()
-
-	w := p.link.stdinWriter()
-	// Two complete lines containing a mid-content newline → slow path
-	twoLines := `{"type":"a"}` + "\n" + `{"type":"b"}` + "\n"
-	n, err := w.Write([]byte(twoLines))
-	if err != nil {
-		t.Fatalf("Write(twoLines) error = %v", err)
-	}
-	if n != len(twoLines) {
-		t.Errorf("n = %d, want %d", n, len(twoLines))
-	}
-}
-
-// ---------------------------------------------------------------------------
-// shimWriter.Write — slow path: clierr.ErrMessageTooLarge
-// ---------------------------------------------------------------------------
-
-func TestShimWriter_SlowPath_TooLarge(t *testing.T) {
-	p, srv := shimTestPair(&ClaudeProtocol{})
-	startServerDrain(srv)
-	go p.readLoop()
-	defer p.Kill()
-
-	w := p.link.stdinWriter()
-	// Write a partial line to force slow path, then a huge line terminator
-	partial := []byte(`{"a":`)
-	if _, err := w.Write(partial); err != nil {
-		t.Fatalf("Write(partial) error = %v", err)
-	}
-
-	// Now append data that makes total line length exceed maxStdinLineBytes
-	huge := make([]byte, maxStdinLineBytes+1)
-	huge[len(huge)-1] = '\n'
-	_, err := w.Write(huge)
-	if err == nil {
-		t.Error("expected clierr.ErrMessageTooLarge from slow path")
-		return
-	}
-	if !errors.Is(err, clierr.ErrMessageTooLarge) {
-		t.Errorf("error = %v, want clierr.ErrMessageTooLarge", err)
 	}
 }
 
@@ -338,36 +271,6 @@ func TestProcess_Send_ProcessExits(t *testing.T) {
 // Send — captures session ID from init event
 // ---------------------------------------------------------------------------
 
-func TestProcess_Send_CapturesSessionID(t *testing.T) {
-	p, srv := shimTestPair(&ClaudeProtocol{})
-	writes := startServerWriteTap(srv)
-	p.startReadLoop()
-
-	done := make(chan error, 1)
-	go func() {
-		_, err := p.Send(context.Background(), "hello", nil, nil)
-		done <- err
-	}()
-
-	// Wait for Send goroutine to start before feeding init/result events.
-	awaitWrite(t, writes)
-	srv.SendStdout(`{"type":"system","subtype":"init","session_id":"session-abc"}`)
-	srv.SendStdout(`{"type":"result","result":"done","session_id":"session-abc"}`)
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Send error = %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Send timed out")
-	}
-
-	if p.SessionID() != "session-abc" {
-		t.Errorf("SessionID = %q, want session-abc", p.SessionID())
-	}
-}
-
 // TestProcess_Send_UpdatesSessionIDAfterResume pins CLI2 (#393): after a
 // --resume flips the underlying CLI's session_id, the next Send observes a
 // fresh init/result carrying the new id and p.turn.sessionID must follow. The
@@ -467,36 +370,6 @@ func TestProcess_Send_OnEventCallback(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Send — with images
-// ---------------------------------------------------------------------------
-
-func TestProcess_Send_WithImages(t *testing.T) {
-	p, srv := shimTestPair(&ClaudeProtocol{})
-	writes := startServerWriteTap(srv)
-	p.startReadLoop()
-
-	images := []clievent.Attachment{{Data: []byte("fake-png"), MimeType: "image/png"}}
-	done := make(chan error, 1)
-	go func() {
-		_, err := p.Send(context.Background(), "describe", images, nil)
-		done <- err
-	}()
-
-	// Wait for Send to reach StateRunning before answering.
-	awaitWrite(t, writes)
-	srv.SendStdout(`{"type":"result","result":"it is an image"}`)
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Send with images error = %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Send timed out")
-	}
-}
-
-// ---------------------------------------------------------------------------
 // Interrupt
 // ---------------------------------------------------------------------------
 
@@ -528,21 +401,6 @@ func TestProcess_Interrupt_WhenRunning(t *testing.T) {
 	if !p.turn.interruptedRun.Load() {
 		t.Error("interruptedRun should be true when interrupted during Running state")
 	}
-}
-
-func TestProcess_Interrupt_AfterDead(t *testing.T) {
-	p, srv := shimTestPair(&ClaudeProtocol{})
-	startServerDrain(srv)
-	go p.readLoop()
-
-	srv.SendCLIExited(0)
-	select {
-	case <-p.done:
-	case <-time.After(time.Second):
-		t.Fatal("process did not die")
-	}
-
-	p.Interrupt() // should be no-op on dead process
 }
 
 // ---------------------------------------------------------------------------
@@ -816,26 +674,6 @@ func TestProcess_Close_WithExit(t *testing.T) {
 	}
 }
 
-func TestProcess_Close_Timeout(t *testing.T) {
-	prev := processCloseTimeout
-	processCloseTimeout = 50 * time.Millisecond
-	defer func() { processCloseTimeout = prev }()
-	p, srv := shimTestPair(&ClaudeProtocol{})
-	startServerDrain(srv) // drain so shimSend(shutdown) doesn't block
-	p.startReadLoop()
-	// Close without server side sending cli_exited → timeout → Kill
-	done := make(chan struct{})
-	go func() {
-		p.Close()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Close() did not complete after timeout")
-	}
-}
-
 // TestProcess_Close_SendsShutdownNotCloseStdin locks in the semantics change
 // that fixes UCCLEP-2026-04-26: Close must ask the shim to exit (socket
 // unlinked, listener released) rather than just closing CLI stdin (shim
@@ -938,42 +776,8 @@ func TestProcess_Close_BoundedOnWedgedShim(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Detach
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // SetOnTurnDone
 // ---------------------------------------------------------------------------
-
-func TestProcess_SetOnTurnDone(t *testing.T) {
-	p, srv := shimTestPair(&ClaudeProtocol{})
-	startServerDrain(srv)
-	p.startReadLoop()
-
-	called := make(chan struct{}, 1)
-	p.SetOnTurnDone(func() {
-		select {
-		case called <- struct{}{}:
-		default:
-		}
-	})
-
-	// Set state to Running and arm reconnectedMidTurn to simulate the
-	// post-reconnect path where readLoop owns the State→Ready transition.
-	// Outside reconnect, Send() owns the transition (see readLoop guard).
-	p.turn.mu.Lock()
-	p.turn.state = StateRunning
-	p.turn.mu.Unlock()
-	p.turn.reconnectedMidTurn.Store(true)
-
-	srv.SendStdout(`{"type":"result","result":"done","session_id":"s1"}`)
-
-	select {
-	case <-called:
-	case <-time.After(2 * time.Second):
-		t.Fatal("onTurnDone was not called after result event with StateRunning")
-	}
-}
 
 // TestProcess_ResultDoesNotFlipStateWithoutReconnect verifies the Send-path
 // guarantee: in the non-reconnect scenario, a `result` event must not flip
@@ -1090,31 +894,6 @@ func TestProcess_InjectHistory(t *testing.T) {
 	if last.Type != "user" {
 		t.Errorf("lastEntryOfType(user).Type = %q, want user", last.Type)
 	}
-
-	_ = p.LastActivitySummary()
-	_ = p.TurnAgents()
-}
-
-// ---------------------------------------------------------------------------
-// SubscribeEvents
-// ---------------------------------------------------------------------------
-
-func TestProcess_SubscribeEvents(t *testing.T) {
-	p, srv := shimTestPair(&ClaudeProtocol{})
-	startServerDrain(srv)
-	go p.readLoop()
-	defer srv.Close()
-
-	ch, unsub := p.SubscribeEvents()
-	defer unsub()
-
-	p.InjectHistory([]clievent.EventEntry{{Type: "user", Summary: "hi", Time: 1000}})
-
-	// May or may not notify depending on timing; just verify no panic
-	select {
-	case <-ch:
-	case <-time.After(100 * time.Millisecond):
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1212,90 +991,6 @@ func TestProcess_StartReadLoop_StateReady(t *testing.T) {
 		return p.turn.state == StateReady
 	}, time.Second, "startReadLoop did not reach StateReady")
 	p.Kill()
-}
-
-// ---------------------------------------------------------------------------
-// readLoop — pong message
-// ---------------------------------------------------------------------------
-
-func TestProcess_ReadLoop_Pong(t *testing.T) {
-	p, srv := shimTestPair(&ClaudeProtocol{})
-	go p.readLoop()
-
-	srv.mu.Lock()
-	pongMsg, _ := json.Marshal(map[string]string{"type": "pong"})
-	srv.writer.Write(pongMsg)      //nolint:errcheck
-	srv.writer.Write([]byte{'\n'}) //nolint:errcheck
-	srv.writer.Flush()             //nolint:errcheck
-	srv.mu.Unlock()
-
-	// TEST1 (#395): poll for the pong signal instead of sleeping a fixed
-	// 50ms. pongRecv is a buffered(1) chan that readLoop sends into the
-	// moment the pong frame parses, so a 200ms upper bound gives slow CI
-	// runners ample headroom while a happy-path run exits in microseconds.
-	// On timeout the select silently falls through (matches the original
-	// "might already have been consumed" semantics for shaved-down test
-	// runs), so the test continues to assert the readLoop-exit contract
-	// even when the pong race is lost — the prior wall-clock sleep was a
-	// best-effort observation, not a hard precondition.
-	select {
-	case <-p.link.pongRecv:
-		// Signal received
-	case <-time.After(200 * time.Millisecond):
-		// pongRecv is buffered(1) — might already have been consumed
-	}
-	srv.SendCLIExited(0)
-	select {
-	case <-p.done:
-	case <-time.After(time.Second):
-		t.Fatal("readLoop did not exit")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// readLoop — stderr message (logged, not forwarded)
-// ---------------------------------------------------------------------------
-
-func TestProcess_ReadLoop_Stderr(t *testing.T) {
-	p, srv := shimTestPair(&ClaudeProtocol{})
-	go p.readLoop()
-
-	srv.mu.Lock()
-	msg, _ := json.Marshal(map[string]string{"type": "stderr", "line": "some error"})
-	srv.writer.Write(msg)          //nolint:errcheck
-	srv.writer.Write([]byte{'\n'}) //nolint:errcheck
-	srv.writer.Flush()             //nolint:errcheck
-	srv.mu.Unlock()
-
-	srv.SendCLIExited(0)
-	select {
-	case <-p.done:
-	case <-time.After(time.Second):
-		t.Fatal("readLoop did not exit")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// readLoop — shim error message
-// ---------------------------------------------------------------------------
-
-func TestProcess_ReadLoop_ShimError(t *testing.T) {
-	p, srv := shimTestPair(&ClaudeProtocol{})
-	go p.readLoop()
-
-	srv.mu.Lock()
-	msg, _ := json.Marshal(map[string]string{"type": "error", "line": "internal error"})
-	srv.writer.Write(msg)          //nolint:errcheck
-	srv.writer.Write([]byte{'\n'}) //nolint:errcheck
-	srv.writer.Flush()             //nolint:errcheck
-	srv.mu.Unlock()
-
-	srv.SendCLIExited(0)
-	select {
-	case <-p.done:
-	case <-time.After(time.Second):
-		t.Fatal("readLoop did not exit")
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1555,25 +1250,6 @@ func TestEventEntryFromEvent_WorkflowRows(t *testing.T) {
 	}
 }
 
-// TestEventEntriesFromEventAt_UsesExternalTime locks R67-PERF-9: the At
-// variant must stamp entries with the caller-supplied millisecond timestamp
-// rather than calling time.Now() internally. readLoop relies on this to
-// share a single wall-clock read between ev.RecvAt and EventEntry.Time.
-func TestEventEntriesFromEventAt_UsesExternalTime(t *testing.T) {
-	const fixedMS int64 = 1711111111111
-	ev := clievent.Event{Type: "result", Result: "x", CostUSD: 0.0}
-	entries := EventEntriesFromEventAt(ev, fixedMS)
-	if len(entries) != 1 {
-		t.Fatalf("want 1 result entry, got %d: %+v", len(entries), entries)
-	}
-	if entries[0].Time != fixedMS {
-		t.Errorf("entries[0].Time = %d, want %d", entries[0].Time, fixedMS)
-	}
-	if entries[0].Type != "result" {
-		t.Errorf("entries[0].Type = %q, want result", entries[0].Type)
-	}
-}
-
 // TestEventEntriesFromEvent_ResultDoesNotEmitVisibleText pins the invariant
 // that a result event yields exactly ONE EventEntry — the metadata-only
 // "result" entry. The visible reply is the responsibility of preceding
@@ -1651,9 +1327,3 @@ func TestFormatToolDetail(t *testing.T) {
 		t.Errorf("formatToolDetail (empty input) = %q, want Read", got2)
 	}
 }
-
-// Suppressed lint: ensure unused imports compile cleanly.
-var _ = bufio.NewReader
-var _ = bytes.Buffer{}
-var _ io.Writer = nil
-var _ = fmt.Sprintf

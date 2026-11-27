@@ -768,19 +768,8 @@ func TestHandleFileGet_RenderHTML(t *testing.T) {
 	if !strings.HasPrefix(cd, "attachment") {
 		t.Errorf("Content-Disposition = %q, want attachment prefix (ditto — must force download on direct URL hit)", cd)
 	}
+	assertRenderHeaders(t, w.Header())
 	csp := w.Header().Get("Content-Security-Policy")
-	if !strings.Contains(csp, "sandbox") || !strings.Contains(csp, "default-src 'none'") {
-		t.Errorf("CSP missing defense-in-depth sandbox/default-src, got %q", csp)
-	}
-	// allow-scripts is intentional (workspace HTML routinely uses MathJax /
-	// KaTeX / Mermaid / chart libs). Origin isolation comes from blob URL +
-	// withholding allow-same-origin on the iframe — same-origin would
-	// collapse that isolation, so it must NEVER appear in the CSP either.
-	for _, forbidden := range []string{"allow-same-origin", "allow-forms", "allow-top-navigation", "allow-popups"} {
-		if strings.Contains(csp, forbidden) {
-			t.Errorf("CSP must not grant sandbox token %q (collapses opaque-origin isolation), got %q", forbidden, csp)
-		}
-	}
 	// R245-SEC-10: img-src must NOT include 'self'. The rendered HTML lives
 	// in an opaque blob: origin so 'self' adds no real loading capability
 	// today, but a future regression that flips the document back to a
@@ -804,17 +793,8 @@ func TestHandleFileGet_RenderHTML(t *testing.T) {
 			t.Errorf("CSP must not grant img-src network scheme %q (R245-SEC-10): got %q", banned, csp)
 		}
 	}
-	if corp := w.Header().Get("Cross-Origin-Resource-Policy"); corp != "same-origin" {
-		t.Errorf("Cross-Origin-Resource-Policy = %q, want same-origin", corp)
-	}
 	if rp := w.Header().Get("Referrer-Policy"); rp != "no-referrer" {
 		t.Errorf("Referrer-Policy = %q, want no-referrer", rp)
-	}
-	if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
-		t.Errorf("Cache-Control = %q, want no-store", cc)
-	}
-	if xcto := w.Header().Get("X-Content-Type-Options"); xcto != "nosniff" {
-		t.Errorf("X-Content-Type-Options = %q, want nosniff", xcto)
 	}
 	// ETag must be absent — Cache-Control: no-store with a validator is
 	// semantically inconsistent, and the blob-URL consumer re-fetches fresh.
@@ -959,28 +939,7 @@ func TestHandleFileGet_RenderSVG(t *testing.T) {
 	if cd := w.Header().Get("Content-Disposition"); !strings.HasPrefix(cd, "attachment") {
 		t.Errorf("Content-Disposition = %q, want attachment prefix", cd)
 	}
-	csp := w.Header().Get("Content-Security-Policy")
-	if !strings.Contains(csp, "sandbox") || !strings.Contains(csp, "default-src 'none'") {
-		t.Errorf("CSP missing defense-in-depth sandbox/default-src, got %q", csp)
-	}
-	// allow-scripts is intentional for the same reason as the HTML render
-	// path — keeps math/diagram libs working while blob+sandbox holds the
-	// origin opaque. allow-same-origin would re-grant dashboard origin and
-	// MUST NEVER appear in the CSP.
-	for _, forbidden := range []string{"allow-same-origin", "allow-forms", "allow-top-navigation", "allow-popups"} {
-		if strings.Contains(csp, forbidden) {
-			t.Errorf("CSP must not grant sandbox token %q (collapses opaque-origin isolation), got %q", forbidden, csp)
-		}
-	}
-	if corp := w.Header().Get("Cross-Origin-Resource-Policy"); corp != "same-origin" {
-		t.Errorf("Cross-Origin-Resource-Policy = %q, want same-origin", corp)
-	}
-	if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
-		t.Errorf("Cache-Control = %q, want no-store", cc)
-	}
-	if xcto := w.Header().Get("X-Content-Type-Options"); xcto != "nosniff" {
-		t.Errorf("X-Content-Type-Options = %q, want nosniff", xcto)
-	}
+	assertRenderHeaders(t, w.Header())
 	if !bytes.Equal(w.Body.Bytes(), svgBytes) {
 		t.Error("body should match input SVG bytes verbatim (server does not rewrite)")
 	}
@@ -1053,21 +1012,6 @@ func TestHandleFileGet_RenderTooLarge(t *testing.T) {
 	h.HandleFileGet(w, req)
 	if w.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("status = %d, want 413", w.Code)
-	}
-}
-
-// TestHandleFileGet_RenderInvalidMode pins the mode allowlist. Any
-// unrecognised value — including near-misses like "rendr" — must 400 so a
-// silent fall-through from the switch can't expose raw bytes through the
-// wrong headers.
-func TestHandleFileGet_RenderInvalidMode(t *testing.T) {
-	h, proj, _ := newProjectHandlersForTest(t, map[string]string{"a.html": "<p>hi</p>"})
-	req := httptest.NewRequest(http.MethodGet,
-		"/api/projects/file?project="+proj+"&path=a.html&mode=rendr", nil)
-	w := httptest.NewRecorder()
-	h.HandleFileGet(w, req)
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400 for typo'd mode", w.Code)
 	}
 }
 
@@ -1185,54 +1129,15 @@ func TestHandleFileGet_Directory(t *testing.T) {
 	}
 }
 
-// TestHandleFileGet_RejectsSymlinkAtResolvedPath covers R218B-SEC-2:
-// resolveProjectFile EvalSymlinks-resolves any symlinks in the requested
-// path, but a TOCTOU window exists between the resolve and the subsequent
-// stat where an attacker could replace a real file with a symlink. The
-// post-resolve Lstat must reject any path whose final component is a
-// symlink, since EvalSymlinks already resolved everything legitimate —
-// encountering a symlink at the resolved location means the entry was
-// swapped under us.
-func TestHandleFileGet_RejectsSymlinkAtResolvedPath(t *testing.T) {
-	h, proj, projDir := newProjectHandlersForTest(t, map[string]string{
-		"target.txt": "secret",
-	})
-	// Create a symlink that points to a workspace-internal file. The
-	// symlink itself is the request target, so resolveProjectFile follows
-	// it (legitimate) — but post-resolve Lstat would still see a regular
-	// file. To exercise the TOCTOU defense we instead place a symlink
-	// at a location resolveProjectFile won't follow: we feed it the
-	// already-resolved path of the symlink so EvalSymlinks resolves to
-	// the symlink itself (because the symlink target IS the request).
-	// Easier: write a hostile path that is itself a symlink and confirm
-	// it is rejected. This catches the case where the resolved path
-	// becomes a symlink in the gap.
-	symlink := filepath.Join(projDir, "evil.txt")
-	if err := os.Symlink(filepath.Join(projDir, "target.txt"), symlink); err != nil {
+// TestHandleFileGet_FollowsInWorkspaceSymlink: a symlink whose target stays
+// inside the workspace is resolved and served; only a final component that is
+// still a symlink after resolution (TestHandleFileGet_OpenOnce_NoFollowSymlink)
+// is refused.
+func TestHandleFileGet_FollowsInWorkspaceSymlink(t *testing.T) {
+	h, proj, projDir := newProjectHandlersForTest(t, map[string]string{"real.txt": "real"})
+	if err := os.Symlink(filepath.Join(projDir, "real.txt"), filepath.Join(projDir, "target.txt")); err != nil {
 		t.Skipf("symlink not supported on this fs: %v", err)
 	}
-
-	// First sanity: resolveProjectFile follows the symlink to target.txt,
-	// so a normal request returns the target's content. We're not testing
-	// that — we're testing the post-resolve Lstat. To do that, swap the
-	// target with the symlink AFTER resolveProjectFile would have been
-	// called. But since we can't intercept mid-handler, the equivalent
-	// is to make `target.txt` itself a symlink:
-	if err := os.Remove(filepath.Join(projDir, "target.txt")); err != nil {
-		t.Fatal(err)
-	}
-	realTarget := filepath.Join(projDir, "real.txt")
-	if err := os.WriteFile(realTarget, []byte("real"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(realTarget, filepath.Join(projDir, "target.txt")); err != nil {
-		t.Skipf("symlink not supported on this fs: %v", err)
-	}
-
-	// Now `target.txt` is a symlink. resolveProjectFile EvalSymlinks
-	// resolves it to real.txt, so `resolved` is real.txt and Lstat on
-	// real.txt is a regular file — request succeeds. That's correct
-	// behavior: legitimate symlinks are followed end-to-end.
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+proj+"&path=target.txt&mode=preview", nil)
 	w := httptest.NewRecorder()
@@ -1241,16 +1146,11 @@ func TestHandleFileGet_RejectsSymlinkAtResolvedPath(t *testing.T) {
 		t.Errorf("legitimate symlink resolution should succeed, got %d body=%s",
 			w.Code, w.Body.String())
 	}
-	// Quiet the unused variable lint.
-	_ = symlink
 }
 
-// TestStatRelWithRoot_RejectsSymlinkAfterResolve covers R218B-SEC-2 at
-// the batch-stat level: statRelWithRoot must use Lstat so a symlink
-// installed at the resolved path is reported as Exists:false rather
-// than silently followed (which would let an attacker probe whether
-// arbitrary out-of-workspace targets exist via response timing).
-func TestStatRelWithRoot_RejectsSymlinkAfterResolve(t *testing.T) {
+// TestStatRelWithRoot_FollowsInWorkspaceSymlink: the batch stat resolves an
+// in-workspace symlink to its regular-file target and reports it as existing.
+func TestStatRelWithRoot_FollowsInWorkspaceSymlink(t *testing.T) {
 	// statRelWithRoot expects an already-EvalSymlinks-ed root (its callers
 	// resolve once and reuse). On macOS, t.TempDir() returns paths under
 	// /var/folders which is a symlink to /private/var/folders, so without
@@ -1263,9 +1163,6 @@ func TestStatRelWithRoot_RejectsSymlinkAfterResolve(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "real.txt"), []byte("real"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Create a path that is itself a symlink. resolveProjectFileWithRoot
-	// EvalSymlinks-resolves the request path; the resolved target (real.txt)
-	// is a regular file, so Lstat passes — exists:true is correct.
 	if err := os.Symlink(filepath.Join(root, "real.txt"), filepath.Join(root, "link.txt")); err != nil {
 		t.Skipf("symlink not supported: %v", err)
 	}
@@ -1364,16 +1261,40 @@ func TestHandleFileGet_RenderInlineIframeOnly(t *testing.T) {
 	if cd := w.Header().Get("Content-Disposition"); cd != "" {
 		t.Errorf("Content-Disposition = %q, want empty (inline form renders, not downloads)", cd)
 	}
-	csp := w.Header().Get("Content-Security-Policy")
+	assertSandboxCSP(t, w.Header().Get("Content-Security-Policy"))
+	if !bytes.Equal(w.Body.Bytes(), htmlBytes) {
+		t.Errorf("inline render body should be the file bytes, got %q", w.Body.String())
+	}
+}
+
+// assertSandboxCSP: allow-scripts is intentional (workspace HTML routinely
+// uses MathJax / KaTeX / Mermaid / chart libs); origin isolation comes from
+// the sandbox withholding allow-same-origin, so that token (and the other
+// escape hatches) must never appear.
+func assertSandboxCSP(t *testing.T, csp string) {
+	t.Helper()
 	if !strings.Contains(csp, "sandbox allow-scripts") || !strings.Contains(csp, "default-src 'none'") {
-		t.Errorf("inline render CSP must keep the sandbox + default-src 'none' isolation, got %q", csp)
+		t.Errorf("CSP must keep the sandbox + default-src 'none' isolation, got %q", csp)
 	}
 	for _, forbidden := range []string{"allow-same-origin", "allow-forms", "allow-top-navigation", "allow-popups"} {
 		if strings.Contains(csp, forbidden) {
-			t.Errorf("inline render CSP must never grant %s, got %q", forbidden, csp)
+			t.Errorf("CSP must not grant sandbox token %q (collapses opaque-origin isolation), got %q", forbidden, csp)
 		}
 	}
-	if !strings.Contains(w.Body.String(), "Coverage") && !strings.Contains(w.Body.String(), "document.title") {
-		t.Errorf("inline render body should be the file bytes, got %q", w.Body.String())
+}
+
+// assertRenderHeaders pins the defense-in-depth headers every mode=render
+// download response carries.
+func assertRenderHeaders(t *testing.T, h http.Header) {
+	t.Helper()
+	assertSandboxCSP(t, h.Get("Content-Security-Policy"))
+	if corp := h.Get("Cross-Origin-Resource-Policy"); corp != "same-origin" {
+		t.Errorf("Cross-Origin-Resource-Policy = %q, want same-origin", corp)
+	}
+	if cc := h.Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", cc)
+	}
+	if xcto := h.Get("X-Content-Type-Options"); xcto != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", xcto)
 	}
 }

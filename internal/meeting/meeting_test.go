@@ -287,7 +287,14 @@ func TestRecordSummarizeEndToEnd(t *testing.T) {
 	x.snap()
 	x.clock.Add(Grace + time.Second)
 	x.snap()
-	waitFor(t, "done", func() bool { ms := x.m.Store().List(); return len(ms) == 1 && ms[0].State == StateDone })
+	// The loop writes StateDone before it journals the summary and sends the
+	// done notice, so wait for the notice too.
+	waitFor(t, "done", func() bool {
+		ms := x.m.Store().List()
+		x.mu.Lock()
+		defer x.mu.Unlock()
+		return len(ms) == 1 && ms[0].State == StateDone && len(x.notices) == 2
+	})
 	mt := x.only(t)
 	if mt.Seconds != 3 || mt.StopBy != "auto" || mt.Silent || mt.Speakers != 1 {
 		t.Fatalf("meeting = %+v", mt)

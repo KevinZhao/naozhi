@@ -69,32 +69,25 @@ func claudeProjectsTestRoot(t *testing.T) string {
 	return sub
 }
 
-func TestAgentEvents_Happy(t *testing.T) {
-	// Cannot run in parallel — t.Setenv("HOME") mutates process state.
-	dir := claudeProjectsTestRoot(t)
-	line := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]},"sessionId":"s","timestamp":"2026-05-10T10:00:00Z"}`
-	path := writeTranscript(t, dir, "aaaaaaaaaaaaaaaaa", []string{line})
-
+// seededHandler is a Handler whose linker has resolved task "t1" to a
+// sub-agent transcript of lines under the test's ~/.claude/projects. It sets
+// HOME, so its callers cannot run in parallel.
+func seededHandler(t *testing.T, lines ...string) *Handler {
+	t.Helper()
+	path := writeTranscript(t, claudeProjectsTestRoot(t), "bbbbbbbbbbbbbbbbb", lines)
 	linker := subagent.NewLinker()
 	linker.SeedFromHistory([]clievent.EventEntry{{
-		Type:            "task_start",
-		ToolUseID:       "toolu_T",
-		TaskID:          "t1",
-		InternalAgentID: "agent-aaaaaaaaaaaaaaaaa",
-		JSONLPath:       path,
-		Subagent:        "worker",
+		Type: "task_start", ToolUseID: "toolu_T", TaskID: "t1",
+		InternalAgentID: "agent-bbbbbbbbbbbbbbbbb", JSONLPath: path, Subagent: "worker",
 	}})
-
-	h := &Handler{
+	return &Handler{
 		allowedRoot: claudeProjectsAllowedRoot(),
-		linkerFor: func(k string) agentlink.AgentLinker {
-			if k != testAgentEventsKey {
-				return nil
-			}
-			return linker
-		},
+		linkerFor:   func(string) agentlink.AgentLinker { return linker },
 	}
+}
 
+func TestAgentEvents_Happy(t *testing.T) {
+	h := seededHandler(t, `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]},"sessionId":"s","timestamp":"2026-05-10T10:00:00Z"}`)
 	w := httptest.NewRecorder()
 	h.HandleAgentEvents(w, agentEventsReq(testAgentEventsKey, "t1", "", ""))
 	if w.Code != http.StatusOK {
@@ -114,19 +107,7 @@ func TestAgentEvents_Happy(t *testing.T) {
 // printed is redacted on both paths.
 func TestAgentEvents_SendsTheWireView(t *testing.T) {
 	const secret = "sk-ant-api03-RRRRRRRRRRRRRRRRRRRRRRRR"
-	dir := claudeProjectsTestRoot(t)
-	line := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"key ` + secret + `"}]},"sessionId":"s","timestamp":"2026-05-10T10:00:00Z"}`
-	path := writeTranscript(t, dir, "bbbbbbbbbbbbbbbbb", []string{line})
-	linker := subagent.NewLinker()
-	linker.SeedFromHistory([]clievent.EventEntry{{
-		Type: "task_start", ToolUseID: "toolu_W", TaskID: "t1",
-		InternalAgentID: "agent-bbbbbbbbbbbbbbbbb", JSONLPath: path, Subagent: "worker",
-	}})
-	h := &Handler{
-		allowedRoot: claudeProjectsAllowedRoot(),
-		linkerFor:   func(string) agentlink.AgentLinker { return linker },
-	}
-
+	h := seededHandler(t, `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"key `+secret+`"}]},"sessionId":"s","timestamp":"2026-05-10T10:00:00Z"}`)
 	w := httptest.NewRecorder()
 	h.HandleAgentEvents(w, agentEventsReq(testAgentEventsKey, "t1", "", ""))
 	body := w.Body.String()
@@ -183,54 +164,30 @@ func TestAgentEvents_Tombstone_404(t *testing.T) {
 	}
 }
 
-func TestAgentEvents_InvalidKey_400(t *testing.T) {
+func TestAgentEvents_InvalidParams_400(t *testing.T) {
 	t.Parallel()
 	h := &Handler{
 		linkerFor: func(k string) agentlink.AgentLinker { return subagent.NewLinker() },
 	}
-	w := httptest.NewRecorder()
-	h.HandleAgentEvents(w, agentEventsReq("", "t1", "", ""))
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d want 400", w.Code)
-	}
-}
-
-func TestAgentEvents_InvalidTaskID_400(t *testing.T) {
-	t.Parallel()
-	h := &Handler{
-		linkerFor: func(k string) agentlink.AgentLinker { return subagent.NewLinker() },
-	}
-	w := httptest.NewRecorder()
-	h.HandleAgentEvents(w, agentEventsReq(testAgentEventsKey, "t/../escape", "", ""))
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d want 400", w.Code)
+	for _, tc := range []struct{ key, taskID string }{
+		{"", "t1"},
+		{testAgentEventsKey, "t/../escape"},
+	} {
+		w := httptest.NewRecorder()
+		h.HandleAgentEvents(w, agentEventsReq(tc.key, tc.taskID, "", ""))
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("key=%q task_id=%q: status=%d want 400", tc.key, tc.taskID, w.Code)
+		}
 	}
 }
 
 func TestAgentEvents_AfterFilter(t *testing.T) {
-	// Cannot run in parallel — t.Setenv("HOME") mutates process state.
-	dir := claudeProjectsTestRoot(t)
-	line1 := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"old"}]},"sessionId":"s","timestamp":"2026-05-10T10:00:00Z"}`
-	line2 := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"new"}]},"sessionId":"s","timestamp":"2026-05-10T10:00:05Z"}`
-	path := writeTranscript(t, dir, "bbbbbbbbbbbbbbbbb", []string{line1, line2})
-
-	linker := subagent.NewLinker()
-	linker.SeedFromHistory([]clievent.EventEntry{{
-		Type:            "task_start",
-		ToolUseID:       "toolu_A",
-		TaskID:          "ta",
-		InternalAgentID: "agent-bbbbbbbbbbbbbbbbb",
-		JSONLPath:       path,
-	}})
-
-	h := &Handler{
-		allowedRoot: claudeProjectsAllowedRoot(),
-		linkerFor:   func(k string) agentlink.AgentLinker { return linker },
-	}
-	// after=2026-05-10T10:00:03Z → only line2 should remain. Parse as ms.
-	// 2026-05-10T10:00:03Z = 1778407203000
+	h := seededHandler(t,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"old"}]},"sessionId":"s","timestamp":"2026-05-10T10:00:00Z"}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"new"}]},"sessionId":"s","timestamp":"2026-05-10T10:00:05Z"}`)
+	// after=2026-05-10T10:00:03Z (1778407203000 ms) → only the second line.
 	w := httptest.NewRecorder()
-	h.HandleAgentEvents(w, agentEventsReq(testAgentEventsKey, "ta", "1778407203000", ""))
+	h.HandleAgentEvents(w, agentEventsReq(testAgentEventsKey, "t1", "1778407203000", ""))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -349,25 +306,12 @@ func TestToolResult_Oversize_413(t *testing.T) {
 // R248-TEST-5 — AgentLinker typed-nil guard
 // ---------------------------------------------------------------------------
 
-// TestLinkerForSession_TypedNilGuard pins the typed-nil interface guard at
-// dashboard_agent_events.go:linkerForSession's `if concrete == nil` line.
-// ManagedSession.SubagentLinker() returns *subagent.Linker — a concrete
-// pointer type — and a nil concrete return becomes a NON-nil agentlink.AgentLinker
-// interface value when promoted directly (Go's classic typed-nil hazard).
-// Without the explicit guard, callers checking `if linker == nil` would see
-// false and dereference the nil pointer on the next method call.
-//
-// To exercise the production code path (no linkerFor injection), this test
-// stands up a real *session.Router, injects a session backed by a non-cli.Process
-// (session.TestProcess satisfies processIface but is not *cli.Process), and
-// observes that:
-//
-//   - linkerForSession returns an interface value that compares == nil
-//     (the guard converted typed-nil → untyped nil).
-//   - The HTTP handler routed through this lookup returns 404 "unknown task",
-//     proving the guard prevents a nil-dereference panic from leaking.
-//
-// R248-TEST-5.
+// TestLinkerForSession_TypedNilGuard (R248-TEST-5): ManagedSession's
+// SubagentLinker returns a concrete *subagent.Linker, so a nil one promoted
+// straight into agentlink.AgentLinker would be a non-nil interface and the
+// next method call would dereference it. A session backed by a TestProcess
+// (not a *cli.Process) has no linker: linkerForSession must answer an untyped
+// nil, and the handler 404 rather than panic.
 func TestLinkerForSession_TypedNilGuard(t *testing.T) {
 	t.Parallel()
 	router := session.NewRouter(session.RouterConfig{MaxProcs: 3})
@@ -459,61 +403,11 @@ func TestAgentEvents_JSONLPathOutsideAllowedRoot(t *testing.T) {
 	}
 }
 
-// TestAgentEvents_JSONLPathUnderAllowedRoot_Accepted pins R112714-SEC-3:
-// a legitimate JSONLPath under allowedRoot must NOT be rejected by the
-// path check (regression guard against over-rejection).
-func TestAgentEvents_JSONLPathUnderAllowedRoot_Accepted(t *testing.T) {
-	t.Parallel()
-	// EvalSymlinks to match production: New() stores the resolved root, and
-	// jsonlPathUnderAllowedRoot resolves the request path before comparing.
-	// On macOS t.TempDir() returns an unresolved /var/... path that the
-	// in-handler EvalSymlinks expands to /private/var/..., so the raw
-	// TempDir would spuriously fail the prefix check.
-	allowedRoot, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatalf("EvalSymlinks(TempDir): %v", err)
-	}
-
-	// Write a transcript file INSIDE allowedRoot.
-	line := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]},"sessionId":"s","timestamp":"2026-05-10T10:00:00Z"}`
-	jsonlPath := filepath.Join(allowedRoot, "agent-ccc.jsonl")
-	if err := os.WriteFile(jsonlPath, []byte(line+"\n"), 0o644); err != nil {
-		t.Fatalf("write jsonl: %v", err)
-	}
-
-	linker := &stubLinker{
-		info: subagent.LinkInfo{
-			InternalAgentID: "agent-ccccccccccccccccc",
-			JSONLPath:       jsonlPath,
-			Resolved:        true,
-		},
-		resolved: true,
-	}
-
-	h := &Handler{
-		allowedRoot: allowedRoot,
-		linkerFor:   func(k string) agentlink.AgentLinker { return linker },
-	}
-
-	w := httptest.NewRecorder()
-	h.HandleAgentEvents(w, agentEventsReq(testAgentEventsKey, "tok1", "", ""))
-	if w.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s — legitimate JSONLPath under allowedRoot must be accepted [R112714-SEC-3]",
-			w.Code, w.Body.String())
-	}
-}
-
 // An empty allowed root rejects every path (404), as documented: it must not
 // switch the containment check off.
 func TestAgentEvents_EmptyAllowedRootFailsClosed(t *testing.T) {
-	dir := claudeProjectsTestRoot(t)
-	path := writeTranscript(t, dir, "ddddddddddddddddd", nil)
-	linker := subagent.NewLinker()
-	linker.SeedFromHistory([]clievent.EventEntry{{
-		Type: "task_start", ToolUseID: "toolu_T", TaskID: "t1",
-		InternalAgentID: "agent-ddddddddddddddddd", JSONLPath: path, Subagent: "worker",
-	}})
-	h := &Handler{linkerFor: func(string) agentlink.AgentLinker { return linker }}
+	h := seededHandler(t)
+	h.allowedRoot = ""
 	w := httptest.NewRecorder()
 	h.HandleAgentEvents(w, agentEventsReq(testAgentEventsKey, "t1", "", ""))
 	if w.Code != http.StatusNotFound {

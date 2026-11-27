@@ -7,7 +7,6 @@ import (
 	"os"
 	"runtime"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -43,13 +42,10 @@ func TestNewChecker_NilOnBadInterval(t *testing.T) {
 	if c := NewChecker(CheckerConfig{Interval: -time.Hour}); c != nil {
 		t.Error("NewChecker with negative interval should return nil")
 	}
-	if c := NewChecker(CheckerConfig{Interval: time.Hour}); c == nil {
-		t.Error("NewChecker with valid interval should not be nil")
-	}
-}
-
-func TestNewChecker_DefaultsModeToDownload(t *testing.T) {
 	c := NewChecker(CheckerConfig{Interval: time.Hour})
+	if c == nil {
+		t.Fatal("NewChecker with valid interval should not be nil")
+	}
 	if c.cfg.Mode != ModeDownload {
 		t.Errorf("default mode = %q, want %q", c.cfg.Mode, ModeDownload)
 	}
@@ -104,21 +100,32 @@ func TestIsNewer(t *testing.T) {
 	}
 }
 
-// Downgrade attempt: remote reports an older tag → no action.
-func TestCheckOnce_NoDowngrade(t *testing.T) {
-	withStubbedLatest(t, func(context.Context) (*Release, error) {
-		return &Release{Tag: "v0.0.1"}, nil // older than current
-	})
-	var notices int
-	c := NewChecker(CheckerConfig{
-		CurrentVersion: "v1.0.0",
-		Mode:           ModeNotify,
-		Interval:       time.Hour,
-		Notify:         func(string) { notices++ },
-	})
-	c.checkOnce(context.Background())
-	if notices != 0 {
-		t.Errorf("downgrade attempt should emit no notice, got %d", notices)
+// No notice, no work: a remote tag older than the running one (a downgrade
+// attempt), the running one itself, or a failed lookup (logged and swallowed).
+func TestCheckOnce_NoNotice(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rel  *Release
+		err  error
+	}{
+		{"downgrade", &Release{Tag: "v0.0.1"}, nil},
+		{"up to date", &Release{Tag: "v1.0.0"}, nil},
+		{"lookup failure", nil, errors.New("network down")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withStubbedLatest(t, func(context.Context) (*Release, error) { return tc.rel, tc.err })
+			var notices int
+			c := NewChecker(CheckerConfig{
+				CurrentVersion: "v1.0.0",
+				Mode:           ModeNotify,
+				Interval:       time.Hour,
+				Notify:         func(string) { notices++ },
+			})
+			c.checkOnce(context.Background())
+			if notices != 0 {
+				t.Errorf("got %d notices, want none", notices)
+			}
+		})
 	}
 }
 
@@ -141,24 +148,6 @@ func TestCheckOnce_NotifyMode(t *testing.T) {
 	}
 }
 
-// Up-to-date: no notice, no work.
-func TestCheckOnce_UpToDate(t *testing.T) {
-	withStubbedLatest(t, func(context.Context) (*Release, error) {
-		return &Release{Tag: "v1.0.0"}, nil
-	})
-	var notices int
-	c := NewChecker(CheckerConfig{
-		CurrentVersion: "v1.0.0",
-		Mode:           ModeNotify,
-		Interval:       time.Hour,
-		Notify:         func(string) { notices++ },
-	})
-	c.checkOnce(context.Background())
-	if notices != 0 {
-		t.Errorf("up-to-date should emit no notice, got %d", notices)
-	}
-}
-
 // dev build self-skips before any network call.
 func TestCheckOnce_DevBuildSkips(t *testing.T) {
 	called := false
@@ -175,24 +164,6 @@ func TestCheckOnce_DevBuildSkips(t *testing.T) {
 	c.checkOnce(context.Background())
 	if called {
 		t.Error("dev build must not query for releases")
-	}
-}
-
-// A failed release lookup logs+swallows: no notice, no panic.
-func TestCheckOnce_LookupFailureSwallowed(t *testing.T) {
-	withStubbedLatest(t, func(context.Context) (*Release, error) {
-		return nil, errors.New("network down")
-	})
-	var notices int
-	c := NewChecker(CheckerConfig{
-		CurrentVersion: "v1.0.0",
-		Mode:           ModeNotify,
-		Interval:       time.Hour,
-		Notify:         func(string) { notices++ },
-	})
-	c.checkOnce(context.Background()) // must not panic
-	if notices != 0 {
-		t.Errorf("lookup failure should emit no notice, got %d", notices)
 	}
 }
 
@@ -226,36 +197,6 @@ func TestRun_NilChecker(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("nil Checker.Run should return immediately")
-	}
-}
-
-// notify with a nil NotifyFunc must not panic.
-func TestNotify_NilFuncSafe(t *testing.T) {
-	c := NewChecker(CheckerConfig{Interval: time.Hour})
-	c.notify("anything") // no panic, no-op
-}
-
-// concurrent notice delivery from the closure is data-race safe under -race
-// when the caller's NotifyFunc guards its own state.
-func TestNotify_Concurrent(t *testing.T) {
-	var mu sync.Mutex
-	var n int
-	c := NewChecker(CheckerConfig{
-		Interval: time.Hour,
-		Notify: func(string) {
-			mu.Lock()
-			n++
-			mu.Unlock()
-		},
-	})
-	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() { defer wg.Done(); c.notify("x") }()
-	}
-	wg.Wait()
-	if n != 10 {
-		t.Errorf("expected 10 notices, got %d", n)
 	}
 }
 

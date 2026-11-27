@@ -335,37 +335,24 @@ func TestInstallLocked_ShortCircuitsOnInstalledTag(t *testing.T) {
 	}
 }
 
-// Up-to-date deployment: nothing to apply, and no attempt to install.
-func TestInstallLatest_NothingToDo(t *testing.T) {
-	withStubbedLatest(t, func(context.Context) (*Release, error) {
-		return &Release{Tag: "v1.0.0"}, nil
-	})
-	c := NewChecker(CheckerConfig{
-		CurrentVersion: "v1.0.0",
-		Mode:           ModeDownload,
-		Interval:       time.Hour,
-		Status:         NewStatus("v1.0.0"),
-	})
-	if err := c.InstallLatest(context.Background(), true); !errors.Is(err, ErrNothingToDo) {
-		t.Errorf("err = %v, want ErrNothingToDo", err)
-	}
-}
-
-// A remote tag OLDER than the running version must never be installed
+// Up-to-date deployment: nothing to apply, and no attempt to install. A remote
+// tag OLDER than the running version must never be installed either
 // (R20260602141221-SEC-1) — the apply path is subject to the same
 // no-downgrade rule as the background tick.
-func TestInstallLatest_RefusesDowngrade(t *testing.T) {
-	withStubbedLatest(t, func(context.Context) (*Release, error) {
-		return &Release{Tag: "v0.9.0"}, nil
-	})
-	c := NewChecker(CheckerConfig{
-		CurrentVersion: "v1.0.0",
-		Mode:           ModeDownload,
-		Interval:       time.Hour,
-		Status:         NewStatus("v1.0.0"),
-	})
-	if err := c.InstallLatest(context.Background(), true); !errors.Is(err, ErrNothingToDo) {
-		t.Errorf("err = %v, want ErrNothingToDo for an older remote tag", err)
+func TestInstallLatest_NothingToDo(t *testing.T) {
+	for _, tag := range []string{"v1.0.0", "v0.9.0"} {
+		withStubbedLatest(t, func(context.Context) (*Release, error) {
+			return &Release{Tag: tag}, nil
+		})
+		c := NewChecker(CheckerConfig{
+			CurrentVersion: "v1.0.0",
+			Mode:           ModeDownload,
+			Interval:       time.Hour,
+			Status:         NewStatus("v1.0.0"),
+		})
+		if err := c.InstallLatest(context.Background(), true); !errors.Is(err, ErrNothingToDo) {
+			t.Errorf("remote %s: err = %v, want ErrNothingToDo", tag, err)
+		}
 	}
 }
 
@@ -449,24 +436,6 @@ func TestRollbackHint(t *testing.T) {
 		if strings.Contains(hint, unwanted) {
 			t.Errorf("hint %q must not guess a restart command with no managed service detected", hint)
 		}
-	}
-}
-
-// With a managed service the hint DOES end in a restart — restoring the bytes
-// alone leaves the bad build running. Both platforms are covered now that the
-// service verdict is injected: this case used to be linux-only because
-// systemdUnitActive was the only probe that could be stubbed.
-func TestRollbackHint_IncludesRestartWhenServiceRuns(t *testing.T) {
-	hint := RollbackHint(true)
-	if hint == "" {
-		t.Skip("SelfPath unavailable in this environment")
-	}
-	want := "systemctl restart"
-	if runtime.GOOS == "darwin" {
-		want = "launchctl kickstart -k"
-	}
-	if !strings.Contains(hint, want) {
-		t.Errorf("hint %q must end in %q when a managed service exists", hint, want)
 	}
 }
 

@@ -47,9 +47,6 @@ func TestDoctor_HealthDown(t *testing.T) {
 	if !d.hasFail {
 		t.Error("unreachable health endpoint must produce fail-level finding")
 	}
-	if !strings.Contains(buf.String()+renderFindings(d.findings), "✗") {
-		// buf is empty before render, so assert via findings.
-	}
 	if d.findings[0].Level != "fail" {
 		t.Errorf("finding level = %q, want fail", d.findings[0].Level)
 	}
@@ -259,7 +256,11 @@ func TestValidateDoctorAddr(t *testing.T) {
 		{"loopback https", "https://127.0.0.1:8180", false},
 		{"localhost http", "http://localhost:8180", false},
 		{"remote https", "https://example.com:8180", false},
+		// A bare host:port is a path to url.Parse, so its scheme is empty.
 		{"no scheme", "127.0.0.1:8180", true},
+		{"no scheme localhost", "localhost:8180", true},
+		{"no scheme host", "example.com:443", true},
+		{"scheme-relative", "//evil.com/path", true},
 		{"file scheme", "file:///etc/passwd", true},
 		{"ftp scheme", "ftp://example.com", true},
 		{"empty string", "", true},
@@ -275,59 +276,6 @@ func TestValidateDoctorAddr(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestValidateDoctorAddr_SchemelessHostPort pins that a bare host:port
-// (no scheme) is rejected — it would be treated as a path by url.Parse,
-// and the scheme would be empty, which our check blocks.
-func TestValidateDoctorAddr_SchemelessHostPort(t *testing.T) {
-	t.Parallel()
-	cases := []string{
-		"127.0.0.1:8180",
-		"localhost:8180",
-		"example.com:443",
-		"//evil.com/path",
-	}
-	for _, addr := range cases {
-		if err := validateDoctorAddr(addr); err == nil {
-			t.Errorf("validateDoctorAddr(%q) = nil, want error for schemeless addr", addr)
-		}
-	}
-}
-
-// TestDoctor_CheckAuth_NonLoopbackWarning verifies that checkAuth still
-// works correctly when the doctor is pointed at a remote (non-loopback)
-// server — the validation must not break the normal localhost flow and
-// the auth check itself must still produce correct pass/fail results
-// regardless of host. (The slog.Warn fires at runDoctor level, not here.)
-func TestDoctor_CheckAuth_NonLoopbackWarning(t *testing.T) {
-	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-	// httptest.NewServer binds 127.0.0.1; addr validation (http scheme) passes.
-	if err := validateDoctorAddr(srv.URL); err != nil {
-		t.Fatalf("loopback server URL failed validation: %v", err)
-	}
-	d := &doctor{addr: srv.URL, client: srv.Client(), token: "tok", timeout: 2 * time.Second, out: io.Discard}
-	d.checkAuth()
-	if d.findings[0].Level != "pass" {
-		t.Errorf("auth finding level = %q, want pass", d.findings[0].Level)
-	}
-}
-
-// renderFindings helps a few tests that need to inspect findings
-// without reaching into the doctor's internal state through render.
-func renderFindings(fs []finding) string {
-	var b strings.Builder
-	for _, f := range fs {
-		b.WriteString(f.Level)
-		b.WriteString(": ")
-		b.WriteString(f.Detail)
-		b.WriteString("\n")
-	}
-	return b.String()
 }
 
 // TestDoctor_IMAccess grades each configured IM platform's im_access state:

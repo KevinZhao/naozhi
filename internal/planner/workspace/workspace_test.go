@@ -158,22 +158,28 @@ func TestEnsureContainer(t *testing.T) {
 	}
 }
 
-// TestLoadCorruptFailsClosed: IDs cannot be regenerated, so a registry that no
-// longer parses is left in place and never replaced by a fresh seed, on this
-// start or the next.
-func TestLoadCorruptFailsClosed(t *testing.T) {
-	root := tempRoot(t, "repo")
-	path := filepath.Join(root, "workspaces.json")
-	orig := []byte(`{"v":1,"workspaces":[{"id":"ws_aaaaaaaa","name":"renamed",,"paths":{}}]}`)
-	if err := os.WriteFile(path, orig, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for range 2 {
-		r := Load(path, node)
-		r.SeedIfEmpty([]Seed{{Path: filepath.Join(root, "repo")}})
-		r.Ensure(filepath.Join(root, "repo"))
-		if got, _ := os.ReadFile(path); string(got) != string(orig) {
-			t.Fatalf("corrupt registry overwritten: %s", got)
+// TestLoadUnreadableFailsClosed: IDs cannot be regenerated, so a registry
+// that no longer parses, or one a newer build wrote, is left in place and
+// never replaced by a fresh seed, on this start or the next.
+func TestLoadUnreadableFailsClosed(t *testing.T) {
+	for name, orig := range map[string]string{
+		"corrupt": `{"v":1,"workspaces":[{"id":"ws_aaaaaaaa","name":"renamed",,"paths":{}}]}`,
+		"newer":   `{"v":2,"workspaces":[]}`,
+	} {
+		root := tempRoot(t, "repo")
+		path := filepath.Join(root, "workspaces.json")
+		if err := os.WriteFile(path, []byte(orig), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for range 2 {
+			r := Load(path, node)
+			r.SeedIfEmpty([]Seed{{Path: filepath.Join(root, "repo")}})
+			if _, ok := r.Ensure(filepath.Join(root, "repo")); !ok && name == "newer" {
+				t.Fatal("Ensure refused")
+			}
+			if got, _ := os.ReadFile(path); string(got) != orig {
+				t.Fatalf("%s registry overwritten: %s", name, got)
+			}
 		}
 	}
 }
@@ -243,22 +249,6 @@ func TestLookupOn(t *testing.T) {
 	}
 	if w, ok := r.Lookup("/srv/app"); !ok || w.Name != "local" {
 		t.Errorf("Lookup(/srv/app) = %+v, %v; want this node's workspace", w, ok)
-	}
-}
-
-func TestLoadNewerVersionNotOverwritten(t *testing.T) {
-	root := tempRoot(t, "repo")
-	path := filepath.Join(root, "workspaces.json")
-	orig := []byte(`{"v":2,"workspaces":[]}`)
-	if err := os.WriteFile(path, orig, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	r := Load(path, node)
-	if _, ok := r.Ensure(filepath.Join(root, "repo")); !ok {
-		t.Fatal("Ensure refused")
-	}
-	if got, _ := os.ReadFile(path); string(got) != string(orig) {
-		t.Errorf("newer-version registry overwritten: %s", got)
 	}
 }
 

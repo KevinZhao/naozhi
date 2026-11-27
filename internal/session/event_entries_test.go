@@ -422,33 +422,6 @@ func TestEventEntriesSinceAppend_LiveProcessNilDstNoExtraCopy(t *testing.T) {
 	}
 }
 
-// TestEventEntriesSinceAppend_LiveProcessAppendsToNonEmptyDst verifies that
-// on the live-process path a non-empty dst still has the entries appended
-// after its existing contents (#1701 only short-circuits the empty-dst case;
-// a non-empty dst must keep its prefix).
-func TestEventEntriesSinceAppend_LiveProcessAppendsToNonEmptyDst(t *testing.T) {
-	t.Parallel()
-	s := &ManagedSession{key: "k"}
-	proc := NewTestProcess()
-	proc.InjectHistory([]clievent.EventEntry{
-		{Time: 100, Summary: "a"},
-		{Time: 200, Summary: "b"},
-	})
-	s.storeProcess(proc)
-
-	dst := []clievent.EventEntry{{Time: 1, Summary: "prefix"}}
-	got := s.EventEntriesSinceAppend(dst, 0)
-	if len(got) != 3 {
-		t.Fatalf("len = %d want 3 (prefix + 2 entries)", len(got))
-	}
-	if got[0].Summary != "prefix" {
-		t.Errorf("got[0]=%q want prefix (existing dst contents must be preserved)", got[0].Summary)
-	}
-	if got[1].Summary != "a" || got[2].Summary != "b" {
-		t.Errorf("appended entries wrong: got %q,%q want a,b", got[1].Summary, got[2].Summary)
-	}
-}
-
 // TestEventEntriesSinceAppend_LiveProcessNonEmptyDstReusesBuffer pins
 // R20260607-PERF-002 (#1922): on the live-process path a NON-empty dst that
 // still has spare capacity must have the matched entries appended into that

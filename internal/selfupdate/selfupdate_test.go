@@ -92,39 +92,6 @@ func TestVerifyChecksum(t *testing.T) {
 
 // ----- Replace ------------------------------------------------------------
 
-func TestReplace_BacksUpOld(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-
-	installPath := filepath.Join(dir, "naozhi")
-	if err := os.WriteFile(installPath, []byte("old binary"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	newBin := filepath.Join(dir, "naozhi-new")
-	if err := os.WriteFile(newBin, []byte("new binary"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	backupPath, err := Replace(newBin, installPath)
-	if err != nil {
-		t.Fatalf("Replace: %v", err)
-	}
-
-	got, _ := os.ReadFile(installPath)
-	if string(got) != "new binary" {
-		t.Errorf("after Replace, installPath = %q, want %q", got, "new binary")
-	}
-	if fi, err := os.Stat(installPath); err != nil {
-		t.Fatalf("stat installPath: %v", err)
-	} else if fi.Mode().Perm()&0o111 == 0 {
-		t.Errorf("installed binary is not executable: mode %o", fi.Mode().Perm())
-	}
-	bak, _ := os.ReadFile(backupPath)
-	if string(bak) != "old binary" {
-		t.Errorf("backup = %q, want %q", bak, "old binary")
-	}
-}
-
 // TestReplace_ForcesExecutableFromNonExecutableSource is the regression test
 // for the v0.0.27 upgrade outage: when the source binary is NOT executable
 // (0600 — the mode fetchFile writes before Download's post-verify chmod, a
@@ -154,7 +121,6 @@ func TestReplace_ForcesExecutableFromNonExecutableSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Remove(backupPath) })
 
 	fi, err := os.Stat(installPath)
 	if err != nil {
@@ -165,6 +131,9 @@ func TestReplace_ForcesExecutableFromNonExecutableSource(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(installPath); string(got) != "new binary" {
 		t.Errorf("installPath content = %q, want %q", got, "new binary")
+	}
+	if bak, _ := os.ReadFile(backupPath); string(bak) != "old binary" {
+		t.Errorf("backup = %q, want %q", bak, "old binary")
 	}
 }
 
@@ -193,62 +162,6 @@ func TestReplace_StagingCleanedOnRenameFailure(t *testing.T) {
 	stale, _ := filepath.Glob(filepath.Join(dir, stagingPattern))
 	if len(stale) > 0 {
 		t.Errorf("staging files should have been removed on failure: %v", stale)
-	}
-}
-
-// ----- LatestRelease (mock HTTP server) -------------------------------------
-
-func TestLatestRelease_OK(t *testing.T) {
-	t.Parallel()
-
-	// Two-handler server: /latest redirects to /releases/tag/v9.9.9, which
-	// the second handler serves as 200 OK (so resp.Body.Close() works).
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/latest":
-			http.Redirect(w, r, "/releases/tag/v9.9.9", http.StatusFound)
-		default:
-			w.WriteHeader(http.StatusOK)
-		}
-	}))
-	defer srv.Close()
-
-	// Temporarily override the repo URL by monkey-patching extractTag with a
-	// helper that uses the test server URL instead of the real GitHub URL.
-	// Since latestRelease builds the URL from `repo`, we test the tag-parsing
-	// path directly with a fabricated final URL.
-	finalURL := srv.URL + "/releases/tag/v9.9.9"
-	tag := extractTag(finalURL)
-	if tag != "v9.9.9" {
-		t.Errorf("extractTag(%q) = %q, want v9.9.9", finalURL, tag)
-	}
-
-	// Also verify the Release struct fields are populated correctly.
-	rel := &Release{
-		Tag:      tag,
-		AssetURL: srv.URL + "/releases/download/v9.9.9/naozhi-linux-amd64",
-		SumURL:   srv.URL + "/releases/download/v9.9.9/checksums.txt",
-	}
-	if rel.Tag != "v9.9.9" {
-		t.Errorf("Tag = %q, want v9.9.9", rel.Tag)
-	}
-	if !strings.Contains(rel.AssetURL, "v9.9.9") {
-		t.Errorf("AssetURL should contain tag, got %q", rel.AssetURL)
-	}
-}
-
-func TestLatestRelease_NoRelease(t *testing.T) {
-	t.Parallel()
-	// Server returns 404 (no releases yet).
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer srv.Close()
-
-	// extractTag on a non-tag URL returns "".
-	tag := extractTag(srv.URL + "/404")
-	if tag != "" {
-		t.Errorf("expected empty tag from non-release URL, got %q", tag)
 	}
 }
 
@@ -364,34 +277,12 @@ func TestDownload_HTTP404(t *testing.T) {
 	}
 }
 
-// TestFetchFile_RejectsNonHTTPS guards R240-SEC-4 (#1048): the entry-point
-// https-prefix check refuses any URL that doesn't start with https://, so a
-// future caller passing a plain http:// asset URL fails fast instead of
-// silently transmitting the binary in cleartext.
-func TestFetchFile_RejectsNonHTTPS(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	dest := filepath.Join(dir, "asset")
-
-	err := fetchFile(context.Background(), "http://example.invalid/asset", dest, maxBinaryBytes)
-	if err == nil {
-		t.Fatal("expected http:// URL to be rejected")
-	}
-	if !strings.Contains(err.Error(), "non-https") {
-		t.Errorf("expected non-https rejection message, got: %v", err)
-	}
-	// Staging file must NOT be created when the URL is rejected — the
-	// 0600 file-creation step lives downstream of the prefix check.
-	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
-		t.Errorf("expected dest to NOT be created, stat err = %v", statErr)
-	}
-}
-
-// TestFetchFile_RejectsBadSchemeShapes anchors R247-SEC-5 (#497): the
-// belt-and-suspenders parsed-scheme check after http.NewRequestWithContext
-// rejects schemes the prefix gate already covers AND any future regression
-// where a caller pre-strips the scheme. Each case must fail before the
-// staging file is touched.
+// TestFetchFile_RejectsBadSchemeShapes anchors R240-SEC-4 (#1048) and
+// R247-SEC-5 (#497): the entry-point https-prefix check refuses any URL that
+// doesn't start with https://, so a plain http:// asset URL fails fast instead
+// of transmitting the binary in cleartext, and the belt-and-suspenders
+// parsed-scheme check after http.NewRequestWithContext backs it up. Each case
+// must fail before the staging file is touched.
 func TestFetchFile_RejectsBadSchemeShapes(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -414,6 +305,11 @@ func TestFetchFile_RejectsBadSchemeShapes(t *testing.T) {
 			err := fetchFile(context.Background(), c.url, dest, maxBinaryBytes)
 			if err == nil {
 				t.Fatalf("expected %q to be rejected", c.url)
+			}
+			// The two gates emit different messages so an operator can tell
+			// which leg tripped; the prefix gate fires first for plain http.
+			if c.name == "plain_http" && (!strings.Contains(err.Error(), "non-https") || strings.Contains(err.Error(), "after parse")) {
+				t.Errorf("plain http: err = %v, want the prefix gate's non-https rejection", err)
 			}
 			// Either the prefix gate or the post-parse scheme gate (or
 			// the request builder for malformed input like the empty URL)
@@ -492,35 +388,5 @@ func TestBlockPrivateDialContext_NilInTestMode(t *testing.T) {
 
 	if got := blockPrivateDialContext(); got != nil {
 		t.Error("blockPrivateDialContext() should return nil in test mode (testHTTPTransport != nil)")
-	}
-}
-
-// TestFetchFile_ErrorMessageDistinguishesGuards pins R247-SEC-5 (#497):
-// the prefix and parsed-scheme gates emit DIFFERENT error substrings
-// ("non-https URL" vs "non-https URL after parse") so an operator
-// reading logs can tell which leg of the defense-in-depth tripped. Today
-// only the prefix check fires for plain http://; the parsed-scheme check
-// only catches a hypothetical caller that bypasses the prefix gate.
-// Asserting the message split here prevents a future "consolidate the
-// two errors into one" cleanup from silently merging the two
-// observability signals.
-func TestFetchFile_ErrorMessageDistinguishesGuards(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	dest := filepath.Join(dir, "asset")
-
-	err := fetchFile(context.Background(), "http://example.invalid/asset", dest, maxBinaryBytes)
-	if err == nil {
-		t.Fatal("expected http:// to be rejected")
-	}
-	// Prefix gate fires first; its message must NOT include "after parse"
-	// (the parsed-scheme gate's discriminator). If a future patch reorders
-	// the gates so the parsed-scheme one fires first for plain http://,
-	// the message changes and an operator-facing ops runbook breaks.
-	if strings.Contains(err.Error(), "after parse") {
-		t.Errorf("prefix gate should fire first, but message points at parsed-scheme: %v", err)
-	}
-	if !strings.Contains(err.Error(), "non-https") {
-		t.Errorf("expected non-https rejection, got: %v", err)
 	}
 }

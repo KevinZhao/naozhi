@@ -53,6 +53,8 @@ func allEntries(t *testing.T, l *costledger.Store) []costledger.Entry {
 
 // P4 regression: cost must accrue even when run-history persistence is off.
 // On the pre-RFC code finishRun returned before the delta and this failed.
+// It is also the control for AdoptedBaselineChargesNothingForHistory: a new
+// session's first report (0.3) is its increment.
 func TestAccountTurnCost_AccruesWithoutRunStore(t *testing.T) {
 	proc := &TestProcess{AliveVal: true, SendFunc: scripted(
 		&clievent.SendResult{Text: "a", CostUSD: 0.3}, &clievent.SendResult{Text: "b", CostUSD: 0.5})}
@@ -273,6 +275,10 @@ func TestAccountTurnCost_ConcurrentTurnsNoLostOrDoubleUpdate(t *testing.T) {
 	if got := loadTotalCost(&s.costSpent); !approxEq(got, 4) {
 		t.Fatalf("costSpent = %v, want 4", got)
 	}
+	// The baseline converges to the highest reading, never back to a lower one.
+	if got := loadTotalCost(&s.lastCumulativeCost); got != 4 {
+		t.Fatalf("lastCumulativeCost = %v, want 4", got)
+	}
 	var sum float64
 	for _, e := range allEntries(t, ledger) {
 		sum += e.Amount
@@ -487,24 +493,6 @@ func TestAccountTurnCost_AdoptedBaselineChargesNothingForHistory(t *testing.T) {
 	}
 	if !approxEq(ents[0].Amount, 0.4) {
 		t.Errorf("ledger amount = %v, want 0.4", ents[0].Amount)
-	}
-}
-
-// TestAccountTurnCost_NewSessionStillChargesItsFirstTurn is the control: the
-// flag must not leak into the ordinary path, where a first cumulative report
-// genuinely IS the increment. Without this, "charge nothing for the first turn"
-// would look correct in the test above while silently zeroing every new
-// session's opening turn.
-func TestAccountTurnCost_NewSessionStillChargesItsFirstTurn(t *testing.T) {
-	proc := &TestProcess{AliveVal: true, SendFunc: scripted(
-		&clievent.SendResult{Text: "a", CostUSD: 0.7})}
-	s := &ManagedSession{key: "feishu:p2p:brandnew"}
-	s.storeProcess(proc)
-	if _, err := s.Send(context.Background(), "hi", nil, nil); err != nil {
-		t.Fatal(err)
-	}
-	if got := loadTotalCost(&s.costSpent); !approxEq(got, 0.7) {
-		t.Fatalf("costSpent = %v, want 0.7 — a new session's first report is its increment", got)
 	}
 }
 
