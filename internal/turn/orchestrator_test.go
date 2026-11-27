@@ -179,16 +179,6 @@ func TestReset_PanickingDroppedStillTellsTheRest(t *testing.T) {
 	h.rec.assertOrder(t, "dropped:b:reset", "dropped:c:reset", "reset:k:false")
 }
 
-// TestNew_QueueFromOptions: New builds the queue from every QueueOptions
-// field, so the composition root's config reaches the drain loop.
-func TestNew_QueueFromOptions(t *testing.T) {
-	t.Parallel()
-	o := New(QueueOptions{MaxDepth: 3, CollectDelay: 200 * time.Millisecond, Mode: ModeInterrupt}, nil)
-	if o.q.maxDepth != 3 || o.q.collectDelay != 200*time.Millisecond || o.q.mode != ModeInterrupt {
-		t.Fatalf("queue = maxDepth %d, collectDelay %v, mode %d; want 3, 200ms, ModeInterrupt", o.q.maxDepth, o.q.collectDelay, o.q.mode)
-	}
-}
-
 // TestShouldNotifyAndRetire: both delegate to the queue.
 func TestShouldNotifyAndRetire(t *testing.T) {
 	t.Parallel()

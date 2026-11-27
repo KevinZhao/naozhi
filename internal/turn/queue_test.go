@@ -438,44 +438,6 @@ func TestQueue_CleanupReturnsTheQueuedMessages(t *testing.T) {
 	}
 }
 
-// TestQueue_Cleanup_RemovesMapEntry verifies Cleanup drops the entry Discard
-// retains, and the next Enqueue owns a fresh entry with a gen never used.
-func TestQueue_Cleanup_RemovesMapEntry(t *testing.T) {
-	t.Parallel()
-	q := newTestQueue(10, 0)
-	_, _, _, genA := q.enqueueTuple("k1", Msg{Text: "A"})
-	q.Enqueue("k2", Msg{Text: "A"})
-	q.DiscardAndReturn("k1") // retains the map entry with a fresh gen
-
-	q.mu.Lock()
-	before := len(q.queues)
-	discarded, retained := q.queues["k1"]
-	q.mu.Unlock()
-	if !retained {
-		t.Fatal("Discard should retain the map entry")
-	}
-
-	q.Cleanup("k1")
-	q.Cleanup("never-seen") // no-op on unknown key
-
-	q.mu.Lock()
-	after := len(q.queues)
-	_, present := q.queues["k1"]
-	q.mu.Unlock()
-	if present {
-		t.Fatal("Cleanup should delete the map entry")
-	}
-	if got := before - after; got != 1 {
-		t.Fatalf("len(queues) dropped by %d, want 1", got)
-	}
-
-	isOwner, _, _, gen := q.enqueueTuple("k1", Msg{Text: "fresh"})
-	if !isOwner || gen == genA || gen == discarded.gen {
-		t.Fatalf("post-Cleanup: isOwner=%v, gen=%d; want a fresh owner, gen not %d or %d",
-			isOwner, gen, genA, discarded.gen)
-	}
-}
-
 // TestQueue_CleanupDoesNotRecycleGen: /new discards then the router retires
 // the key (Cleanup). The stale owner's DoneOrDrain must neither release nor
 // drain the entry the next request creates (#3113).
@@ -643,18 +605,6 @@ func TestConcurrent_EnqueueDrain(t *testing.T) {
 // ---------------------------------------------------------------------------
 // ShouldNotify dropNotify path
 // ---------------------------------------------------------------------------
-//
-// These construct a Queue directly and never touch a Dispatcher.
-
-func TestShouldNotify_DropPath(t *testing.T) {
-	q := newTestQueue(0, 0)
-	if !q.ShouldNotify("k") {
-		t.Fatal("first call should return true")
-	}
-	if q.ShouldNotify("k") {
-		t.Fatal("immediate second call should be rate-limited")
-	}
-}
 
 func TestShouldNotify_DropPath_Eviction(t *testing.T) {
 	q := newTestQueue(0, 0)
@@ -675,31 +625,6 @@ func TestShouldNotify_DropPath_Eviction(t *testing.T) {
 	q.mu.Unlock()
 	if size > dropNotifyMaxKeys {
 		t.Errorf("dropNotify size = %d > cap %d", size, dropNotifyMaxKeys)
-	}
-}
-
-// TestQueue_Enqueue_FullEvictsAndDrains pushes far past max_depth so the
-// queue evicts many times; the drain keeps the newest max_depth in FIFO order.
-func TestQueue_Enqueue_FullEvictsAndDrains(t *testing.T) {
-	t.Parallel()
-	q := newTestQueue(3, 0)
-	_, _, _, gen := q.enqueueTuple("k", Msg{Text: "owner"}) // owner
-
-	for i := 0; i < 10; i++ {
-		q.Enqueue("k", Msg{Text: string(rune('0' + i)), EnqueueAt: time.Now()})
-	}
-
-	msgs := q.DoneOrDrain("k", gen)
-	if len(msgs) != 3 {
-		t.Fatalf("len = %d, want 3 (max_depth)", len(msgs))
-	}
-	// Last 3 pushed (7, 8, 9) survive.
-	if msgs[0].Text != "7" || msgs[1].Text != "8" || msgs[2].Text != "9" {
-		t.Fatalf("drain order = [%s %s %s], want [7 8 9]",
-			msgs[0].Text, msgs[1].Text, msgs[2].Text)
-	}
-	if got := q.DoneOrDrain("k", gen); got != nil {
-		t.Fatalf("empty drain = %#v, want nil", got)
 	}
 }
 

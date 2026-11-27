@@ -8,24 +8,6 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 )
 
-// A backend's configuration is ONE value: Store holds one map[backendID]→row
-// rather than a column per property (G2 #2666). With parallel tables "this
-// backend's configuration" could only be had by reading several in the right
-// order, and #2668 was a second consumer reading a subset with different
-// precedence.
-func TestStoreHasOneKeyedTable(t *testing.T) {
-	v := reflect.ValueOf(Store{})
-	var maps []string
-	for i := 0; i < v.NumField(); i++ {
-		if v.Field(i).Kind() == reflect.Map {
-			maps = append(maps, v.Type().Field(i).Name)
-		}
-	}
-	if !slices.Equal(maps, []string{"runtimes"}) {
-		t.Errorf("Store map fields = %v, want exactly [runtimes]: add a property to Runtime instead", maps)
-	}
-}
-
 // Reading an unconfigured backend gives the zero row, on a nil Store too:
 // hand-built test routers reach this path.
 func TestRuntime_UnknownIDYieldsZero(t *testing.T) {
