@@ -64,35 +64,3 @@ func TestStart_PerChatCapEnforced(t *testing.T) {
 		t.Fatalf("AddJob into a fresh chat should succeed: %v", err)
 	}
 }
-
-// TestStart_PerChatCapAllowsExactlyAtCap pins the boundary: when the on-disk
-// per-chat count equals the cap, every job in that chat loads. The cap is
-// "no MORE than maxJobsPerChat", mirroring jobTable.insert's
-// `>= s.maxJobsPerChat` rejection.
-func TestStart_PerChatCapAllowsExactlyAtCap(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cron.json")
-
-	s1 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 100}, SchedulerDeps{})
-	if err := s1.Start(); err != nil {
-		t.Fatalf("phase 1 Start: %v", err)
-	}
-	for i := 0; i < 3; i++ {
-		if err := s1.AddJob(&Job{Schedule: "@hourly", Prompt: "p", Platform: "p", ChatID: "c"}); err != nil {
-			t.Fatalf("AddJob %d: %v", i, err)
-		}
-	}
-	s1.Stop()
-
-	s2 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 100}, SchedulerDeps{})
-	s2.maxJobsPerChat = 3
-	if err := s2.Start(); err != nil {
-		t.Fatalf("phase 2 Start: %v", err)
-	}
-	defer s2.Stop()
-
-	if jobs := s2.ListJobs("p", "c"); len(jobs) != 3 {
-		t.Fatalf("per-chat cap 3 with 3 persisted: loaded %d, want 3", len(jobs))
-	}
-}

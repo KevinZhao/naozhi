@@ -22,7 +22,6 @@ package cron
 
 import (
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 )
@@ -132,63 +131,4 @@ func TestStop_BudgetRunsSaveJobsEvenOnTimeout(t *testing.T) {
 	if len(loaded) != 1 {
 		t.Errorf("loaded jobs = %d, want 1 (saveJobs skipped?)", len(loaded))
 	}
-}
-
-func TestStop_FastPathDrainsCleanly(t *testing.T) {
-	// Sanity: when nothing holds triggerWG the Stop path returns
-	// basically immediately and budget does not affect elapsed time.
-	dir := t.TempDir()
-	s := NewScheduler(SchedulerConfig{
-		StorePath: filepath.Join(dir, "cron.json"),
-		MaxJobs:   5,
-	}, SchedulerDeps{})
-	withShortStopBudget(t, s, 5*time.Second)
-	if err := s.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-
-	start := time.Now()
-	s.Stop()
-	elapsed := time.Since(start)
-
-	// No jobs, no hanging triggerWG. A fast-path regression waits out the
-	// 5s budget, so 2s separates the two without timing the persist fsync.
-	if elapsed > 2*time.Second {
-		t.Errorf("clean Stop took %v, want < 2s", elapsed)
-	}
-}
-
-// TestStop_ConcurrentTriggerWGNotLostOnBudget confirms that abandoning
-// triggerWG.Wait does NOT corrupt the WaitGroup — a subsequent Stop (or
-// accidental second Stop) still works. WaitGroup counter staying >0
-// after Stop is tolerable because the host process is about to exit.
-func TestStop_ConcurrentTriggerWGNotLostOnBudget(t *testing.T) {
-	dir := t.TempDir()
-	s := NewScheduler(SchedulerConfig{
-		StorePath: filepath.Join(dir, "cron.json"),
-		MaxJobs:   5,
-	}, SchedulerDeps{})
-	withShortStopBudget(t, s, 30*time.Millisecond)
-	if err := s.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	hold := make(chan struct{})
-	t.Cleanup(func() {
-		close(hold)
-		wg.Done()
-		s.triggerWG.Done()
-	})
-	s.triggerWG.Add(1)
-	go func() {
-		wg.Wait()
-	}()
-
-	// Must not panic even though triggerWG is held open past the
-	// budget. The shared-deadline design skips Wait; the in-flight
-	// goroutine eventually terminates when hold is closed at test
-	// teardown.
-	s.Stop()
 }

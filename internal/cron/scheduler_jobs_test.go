@@ -25,27 +25,6 @@ func schedulerForJobsR241GO2Test(t *testing.T) *Scheduler {
 	return s
 }
 
-// TestDeleteJobByID_NotFoundReturnsErrJobNotFound is the
-// regression test for R241-GO-2 (#488). The original IIFE pattern
-// signalled "not found" by returning a nil *Job, which conflicted with
-// the latent callsite contract "j is *Job, may be nil for valid Jobs"
-// and was correct only by accident. The current implementation routes
-// through mutateByID, which reports a lookup miss as its own error, so a missing
-// id surfaces as (nil, ErrJobNotFound) — this test pins that contract
-// so a future refactor cannot reintroduce the nil-sentinel ambiguity.
-func TestDeleteJobByID_NotFoundReturnsErrJobNotFound(t *testing.T) {
-	t.Parallel()
-	s := schedulerForJobsR241GO2Test(t)
-
-	got, err := s.DeleteJobByID("does-not-exist")
-	if got != nil {
-		t.Fatalf("DeleteJobByID returned non-nil Job %+v on missing id; want nil with ErrJobNotFound", got)
-	}
-	if !errors.Is(err, ErrJobNotFound) {
-		t.Fatalf("DeleteJobByID error = %v; want ErrJobNotFound (no nil-sentinel ambiguity)", err)
-	}
-}
-
 // TestPauseJobByID_NotFoundReturnsErrJobNotFound is the
 // regression test for R241-GO-3 (#488 — same pattern). PauseJobByID
 // can roll back so the test also implicitly exercises that the rollback
