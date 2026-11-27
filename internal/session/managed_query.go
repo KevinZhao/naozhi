@@ -85,7 +85,21 @@ func (s *ManagedSession) State() string {
 	if proc == nil {
 		return "ready"
 	}
-	return proc.State().String()
+	return s.liveState(proc)
+}
+
+// liveState is proc's state as the dashboard is told it: a Ready process with
+// a send under way (turnWaiters) reads "running". sendTurn pushes "running"
+// before the send, and a passthrough send leaves the process Ready until the
+// CLI's system/init for that turn, which can be seconds later; a poll or a
+// subscribe answered "ready" in that gap hides the running banner, and no
+// later push brings it back.
+func (s *ManagedSession) liveState(proc processIface) string {
+	st := proc.State()
+	if st == cli.StateReady && s.turnWaiters.Load() != 0 {
+		st = cli.StateRunning
+	}
+	return st.String()
 }
 
 // DeathReason returns the recorded death cause string ("" when the
@@ -199,7 +213,7 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 		// AutoTitler's minUserTurns gate still sees idle-evicted sessions (#1644).
 		snap.MessageCount = s.persistedUserTurns.Load()
 	} else {
-		snap.State = proc.State().String()
+		snap.State = s.liveState(proc)
 		snap.Protocol = proc.ProtocolName()
 		snap.DeathDetail = proc.DeathDetail()
 		snap.StartupFailure = startupFailureView(s, spawnpool.StartupFailure{}, false)
