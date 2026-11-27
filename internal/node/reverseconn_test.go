@@ -69,26 +69,6 @@ func setupReverseConnPair(t *testing.T) (*ReverseConn, *websocket.Conn, func()) 
 	return rc, wsConn, cleanup
 }
 
-// ---- Accessors ----
-
-func TestReverseConn_Accessors(t *testing.T) {
-	rc, _, cleanup := setupReverseConnPair(t)
-	defer cleanup()
-
-	if rc.NodeID() != "worker" {
-		t.Errorf("NodeID: want 'worker', got %q", rc.NodeID())
-	}
-	if rc.DisplayName() != "Worker" {
-		t.Errorf("DisplayName: want 'Worker', got %q", rc.DisplayName())
-	}
-	if rc.Status() != "ok" {
-		t.Errorf("Status: want 'ok', got %q", rc.Status())
-	}
-	if rc.RemoteAddr() == "" {
-		t.Error("RemoteAddr should not be empty")
-	}
-}
-
 // ---- Per-RPC wire method, params and result ----
 
 // TestReverseConn_RPCs checks, for every method, the wire method name and

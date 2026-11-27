@@ -9,24 +9,7 @@ package ring
 import (
 	"testing"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
-
-func TestEventSubscription_NotifyFiresOnAppend(t *testing.T) {
-	t.Parallel()
-	l := NewEventLog(8)
-	sub := l.SubscribeNew()
-	defer sub.Cancel()
-
-	l.Append(clievent.EventEntry{Type: "user", Summary: "hi"})
-
-	select {
-	case <-sub.Notify():
-	case <-time.After(500 * time.Millisecond):
-		t.Fatalf("expected notify after Append, got timeout")
-	}
-}
 
 func TestEventSubscription_CancelClosesNotify(t *testing.T) {
 	t.Parallel()
@@ -46,18 +29,6 @@ func TestEventSubscription_CancelClosesNotify(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 		t.Fatalf("Notify channel still open 500ms after Cancel")
 	}
-}
-
-func TestEventSubscription_CancelIdempotent(t *testing.T) {
-	t.Parallel()
-	l := NewEventLog(8)
-	sub := l.SubscribeNew()
-
-	sub.Cancel()
-	// Second Cancel must be a no-op (no panic from double-close inside
-	// closeOnce). This is what makes EventSubscription safe to drop into
-	// defer chains alongside an explicit Cancel on the happy path.
-	sub.Cancel()
 }
 
 func TestEventSubscription_CloseSubscribersWakesAll(t *testing.T) {

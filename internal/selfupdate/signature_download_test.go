@@ -11,7 +11,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -101,9 +100,6 @@ func assertRefusedUnexecutable(t *testing.T, err error, dir string) {
 	if !strings.Contains(err.Error(), "verify signature") {
 		t.Errorf("error %q does not name the signature step", err)
 	}
-	if runtime.GOOS == "windows" {
-		return
-	}
 	info, statErr := os.Stat(filepath.Join(dir, assetName()))
 	if statErr != nil {
 		t.Fatalf("stat fetched binary: %v", statErr)
@@ -126,14 +122,12 @@ func TestDownload_ValidSignature_OK(t *testing.T) {
 	if got := r.sigHits.Load(); got != 1 {
 		t.Errorf("signature fetched %d times, want 1", got)
 	}
-	if runtime.GOOS != "windows" {
-		info, err := os.Stat(binPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if mode := info.Mode().Perm(); mode != 0o755 {
-			t.Errorf("verified binary has mode %o, want 0755", mode)
-		}
+	info, err := os.Stat(binPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o755 {
+		t.Errorf("verified binary has mode %o, want 0755", mode)
 	}
 }
 

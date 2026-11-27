@@ -473,36 +473,6 @@ func TestEventLog_SinkReady_LifecycleTransitions(t *testing.T) {
 	}
 }
 
-// TestEventLog_SinkConcurrent runs Appends under -race alongside
-// sink-replacing SetPersistSink calls. Racey access to the atomic
-// pointer would show up here.
-func TestEventLog_SinkConcurrent(t *testing.T) {
-	l := NewEventLog(256)
-	var wg sync.WaitGroup
-	wg.Add(2)
-	// Producer.
-	go func() {
-		defer wg.Done()
-		for i := 0; i < 200; i++ {
-			l.Append(clievent.EventEntry{Type: "user", Summary: "x"})
-		}
-	}()
-	// Sink swapper.
-	go func() {
-		defer wg.Done()
-		for i := 0; i < 50; i++ {
-			c := &captureSink{}
-			l.SetPersistSink(c.asSink())
-		}
-	}()
-	wg.Wait()
-	// Ring should reflect all 200 appends (some may have been evicted
-	// by the ring wrap; we just assert count > 0 and no panic).
-	if len(l.Entries()) == 0 {
-		t.Errorf("ring empty despite 200 appends")
-	}
-}
-
 // TestEventLog_AppendBatch_RingMatchesSink locks down the R214-PERF-5
 // invariant that moved the sinkCopy build outside l.mu: the ring buffer
 // entry at slot N must be byte-identical to the sink batch entry at

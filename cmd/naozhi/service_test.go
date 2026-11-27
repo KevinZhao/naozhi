@@ -43,9 +43,6 @@ func TestServiceUserSudo(t *testing.T) {
 // $HOME fails on every host. Where Lookup cannot resolve the user (minimal
 // containers) the expectation is the /home/<user> fallback.
 func TestServiceUserSudo_ResolvesRealUser(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("SUDO_USER path is POSIX-only; skip on windows")
-	}
 	currentUser := os.Getenv("USER")
 	if currentUser == "" {
 		cur, err := osuser.Current()

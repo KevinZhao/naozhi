@@ -35,69 +35,58 @@ func TestExtractTag(t *testing.T) {
 
 // ----- verifyChecksum -------------------------------------------------------
 
-func TestVerifyChecksum_OK(t *testing.T) {
+// TestVerifyChecksum covers the checksums.txt parser: only a 64-char hex
+// field counts as an entry (a "# asset" comment or junk is no entry, so no
+// "expected #" mismatch), and a second entry for the asset under verification
+// is a tampered file (#474), while duplicates for another asset do not matter.
+func TestVerifyChecksum(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-
+	const asset = "naozhi-linux-amd64"
 	content := []byte("fake binary content")
-	binPath := filepath.Join(dir, "naozhi-linux-amd64")
-	if err := os.WriteFile(binPath, content, 0644); err != nil {
-		t.Fatal(err)
-	}
-
 	h := sha256.Sum256(content)
-	sum := hex.EncodeToString(h[:])
-	sums := fmt.Sprintf("%s  naozhi-linux-amd64\n", sum)
-	sumPath := filepath.Join(dir, "checksums.txt")
-	if err := os.WriteFile(sumPath, []byte(sums), 0644); err != nil {
-		t.Fatal(err)
+	good := hex.EncodeToString(h[:])
+	other := sha256.Sum256([]byte("different content"))
+	cases := []struct {
+		name, sums, wantErr string // wantErr "" = accepted
+	}{
+		{"ok", good + "  " + asset + "\n", ""},
+		{"mismatch", hex.EncodeToString(other[:]) + "  " + asset + "\n", "checksum mismatch"},
+		{"missing entry", "abc123  naozhi-darwin-arm64\n", "no checksum entry"},
+		{"comment line", "# " + asset + "\n", "no checksum entry"},
+		{"too short", strings.Repeat("a", 32) + "  " + asset + "\n", "?"},
+		{"too long", strings.Repeat("a", 65) + "  " + asset + "\n", "?"},
+		{"non-hex chars", strings.Repeat("z", 64) + "  " + asset + "\n", "?"},
+		{"mixed junk", "!!" + strings.Repeat("a", 62) + "  " + asset + "\n", "?"},
+		{"duplicate entry", good + "  " + asset + "\n" + strings.Repeat("a", 64) + "  " + asset + "\n", "duplicate"},
+		{"other asset duplicated", fmt.Sprintf("%s  %s\n%s  naozhi-linux-arm64\n%s  naozhi-linux-arm64\n",
+			good, asset, strings.Repeat("b", 64), strings.Repeat("c", 64)), ""},
 	}
-
-	if err := verifyChecksum(binPath, sumPath, "naozhi-linux-amd64"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestVerifyChecksum_Mismatch(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-
-	binPath := filepath.Join(dir, "naozhi-linux-amd64")
-	if err := os.WriteFile(binPath, []byte("real content"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	h := sha256.Sum256([]byte("different content"))
-	sums := fmt.Sprintf("%s  naozhi-linux-amd64\n", hex.EncodeToString(h[:]))
-	sumPath := filepath.Join(dir, "checksums.txt")
-	if err := os.WriteFile(sumPath, []byte(sums), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	err := verifyChecksum(binPath, sumPath, "naozhi-linux-amd64")
-	if err == nil {
-		t.Fatal("expected checksum mismatch error, got nil")
-	}
-	if !strings.Contains(err.Error(), "checksum mismatch") {
-		t.Errorf("error should mention checksum mismatch, got: %v", err)
-	}
-}
-
-func TestVerifyChecksum_MissingEntry(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-
-	binPath := filepath.Join(dir, "naozhi-linux-amd64")
-	if err := os.WriteFile(binPath, []byte("content"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	sumPath := filepath.Join(dir, "checksums.txt")
-	if err := os.WriteFile(sumPath, []byte("abc123  naozhi-darwin-arm64\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	err := verifyChecksum(binPath, sumPath, "naozhi-linux-amd64")
-	if err == nil || !strings.Contains(err.Error(), "no checksum entry") {
-		t.Errorf("expected 'no checksum entry' error, got: %v", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			binPath := filepath.Join(dir, asset)
+			if err := os.WriteFile(binPath, content, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			sumPath := filepath.Join(dir, "checksums.txt")
+			if err := os.WriteFile(sumPath, []byte(tc.sums), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			err := verifyChecksum(binPath, sumPath, asset)
+			switch {
+			case tc.wantErr == "":
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			case err == nil:
+				t.Fatal("accepted, want an error")
+			case strings.Contains(err.Error(), "expected #"):
+				t.Errorf("comment line accepted as a checksum: %v", err)
+			case tc.wantErr != "?" && !strings.Contains(err.Error(), tc.wantErr):
+				t.Errorf("error %q does not mention %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 

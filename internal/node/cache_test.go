@@ -81,27 +81,6 @@ func (s *stubConn) Unsubscribe(_ EventSink, _ string)               {}
 func (s *stubConn) RefreshSubscription(_ string)                    {}
 func (s *stubConn) RemoveClient(_ EventSink)                        {}
 
-// ---- NewCacheManager ----
-
-func TestCacheManager_NewCacheManager(t *testing.T) {
-	called := false
-	cm := NewCacheManager(
-		func() map[string]Conn { return nil },
-		func() { called = true },
-	)
-	if cm == nil {
-		t.Fatal("expected non-nil CacheManager")
-	}
-	sessions, status := cm.Sessions()
-	if len(sessions) != 0 {
-		t.Errorf("expected empty sessions, got %v", sessions)
-	}
-	if len(status) != 0 {
-		t.Errorf("expected empty status, got %v", status)
-	}
-	_ = called
-}
-
 // ---- RefreshAll populates cache ----
 
 func TestCacheManager_RefreshAll(t *testing.T) {

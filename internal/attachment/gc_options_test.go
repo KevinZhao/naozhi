@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -219,9 +218,6 @@ func TestGCDir_DeletesMetaFirst(t *testing.T) {
 // outside the attachment root must not be traversed or deleted
 // (security-critical, store.go Lstat guard).
 func TestGCDir_RefusesSymlinkedDayDir(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink semantics differ on Windows")
-	}
 	ws := t.TempDir()
 	now := time.Now().UTC()
 

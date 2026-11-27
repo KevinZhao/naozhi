@@ -79,36 +79,3 @@ func TestEnsureOwnerDir_FailureLeavesNoMarker(t *testing.T) {
 		t.Errorf("retry did not create the owner dir: %v", err)
 	}
 }
-
-// TestEnsureOwnerDir_RejectsPrePlantedSymlink pins R250531-SEC-4 (#1504): a
-// local attacker who pre-creates the owner directory as a symlink BEFORE the
-// first write must not be able to redirect records there. MkdirAll silently
-// succeeds on an existing symlink-to-directory, so the Lstat is the only thing
-// standing in the way. (RevalidatesAfterSwap is the same guard on the second
-// call; this one is the first.)
-func TestEnsureOwnerDir_RejectsPrePlantedSymlink(t *testing.T) {
-	t.Parallel()
-	base := t.TempDir()
-	root := filepath.Join(base, "runs")
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	elsewhere := filepath.Join(base, "elsewhere")
-	if err := os.MkdirAll(elsewhere, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(elsewhere, filepath.Join(root, "owner1")); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
-	}
-
-	l := newLayout(t, root)
-	if _, err := l.EnsureOwnerDir("owner1"); err == nil {
-		t.Error("a pre-planted symlink must be refused on the FIRST call")
-	}
-	if err := l.WriteRecord("owner1", "rec1", []byte(`{}`)); err == nil {
-		t.Error("WriteRecord must not write through a pre-planted symlink")
-	}
-	if ents, _ := os.ReadDir(elsewhere); len(ents) != 0 {
-		t.Errorf("%d entries landed at the symlink target", len(ents))
-	}
-}

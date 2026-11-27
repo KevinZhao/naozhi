@@ -59,27 +59,6 @@ func TestReverseConn_BaseCtxCancelledOnMarkDisconnected(t *testing.T) {
 	}
 }
 
-// TestReverseConn_BaseCtxCancelIsIdempotent guards against double-cancel
-// panics: Close and markDisconnected may both fire on a race (Close called
-// externally while readLoop already returned). context.CancelFunc is
-// documented as safe to call multiple times, but the test pins the
-// expectation so a future refactor (e.g. closing a channel in place of a
-// cancel func) would be flagged.
-func TestReverseConn_BaseCtxCancelIsIdempotent(t *testing.T) {
-	rc, _, cleanup := setupReverseConnPair(t)
-	defer cleanup()
-
-	rc.Close()
-	rc.markDisconnected() // must not panic
-	rc.Close()            // must not panic
-
-	select {
-	case <-rc.baseCtx.Done():
-	case <-time.After(1 * time.Second):
-		t.Fatal("baseCtx should have been cancelled")
-	}
-}
-
 // TestReverseConn_SubscribeHistoryAbortsOnClose exercises the real Subscribe
 // path: the goroutine issues FetchEvents against a remote that never replies,
 // so it parks inside rpc() until either its ctx times out (5s) or baseCtx

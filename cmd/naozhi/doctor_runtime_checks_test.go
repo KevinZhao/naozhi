@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -17,9 +16,6 @@ import (
 // writeFakeCLI writes an executable that prints out and exits with code.
 func writeFakeCLI(t *testing.T, dir, name, out string, code int) string {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("shell-script fake CLI needs a POSIX shell")
-	}
 	p := filepath.Join(dir, name)
 	script := "#!/bin/sh\necho '" + out + "'\nexit " + strconv.Itoa(code) + "\n"
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
