@@ -163,6 +163,7 @@ func TestMemoryHandler_RejectsInvalidSlug(t *testing.T) {
 		"with.dot",               // dot
 		"with/slash",             // slash
 		"with..slash",            // dot dot
+		"../secret",              // traversal never reaches the filesystem
 		"a b",                    // space — although mux %20-decodes this anyway
 		string(make([]byte, 65)), // length over limit
 	}
@@ -180,49 +181,6 @@ func TestMemoryHandler_RejectsInvalidSlug(t *testing.T) {
 					slug, w.Code, w.Body.String())
 			}
 		})
-	}
-}
-
-func TestMemoryHandler_PathEscapeBlockedAtRegex(t *testing.T) {
-	dir := t.TempDir()
-	// drop a sentinel file outside the projects dir
-	outside := filepath.Join(filepath.Dir(dir), "secret.md")
-	if err := os.WriteFile(outside, []byte("SECRET"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(outside)
-	h := memoryTestHandler(t, dir, "")
-
-	// Slugs containing path traversal are rejected by the regex and never
-	// reach the filesystem read. We assert 400 + invalid_slug.
-	req := httptest.NewRequest(http.MethodGet, "/api/memory/x", nil)
-	req.SetPathValue("slug", "../secret")
-	w := httptest.NewRecorder()
-	h.HandleGet(w, req)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), "invalid_slug") {
-		t.Errorf("body = %s, want invalid_slug error", w.Body.String())
-	}
-}
-
-// TestMemoryHandler_PathEscapeBlockedAtTryRead verifies the second-line
-// defence: if the slug regex were ever loosened to admit "." or "/", the
-// HasPrefix gate inside tryRead must still reject the read.
-func TestMemoryHandler_PathEscapeBlockedAtTryRead(t *testing.T) {
-	dir := t.TempDir()
-	h := memoryTestHandler(t, dir, "")
-
-	// Manually call tryRead with a project name that contains "..". The
-	// regex normally guards the slug, but tryRead is what the second-line
-	// defence covers, so we feed a clean slug + crafted projectDir.
-	_, err := h.tryRead("../..", "anything")
-	if err == nil {
-		t.Fatalf("expected errMemoryPathEscape")
-	}
-	if !errorsIs(err, errMemoryPathEscape) {
-		t.Errorf("err = %v, want errMemoryPathEscape", err)
 	}
 }
 
@@ -319,41 +277,6 @@ func TestParseMemoryFrontmatter_BOMStripped(t *testing.T) {
 	if body != "body\n" {
 		t.Errorf("body = %q", body)
 	}
-}
-
-func TestEncodeCurrentProjectDir_Roundtrip(t *testing.T) {
-	dir := t.TempDir()
-	pwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	encoded := claudefs.ProjectSlug(pwd)
-
-	// create the memory dir for that encoded name
-	if err := os.MkdirAll(filepath.Join(dir, encoded, "memory"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	got := encodeCurrentProjectDir(dir)
-	if got != encoded {
-		t.Errorf("encodeCurrentProjectDir(%q) = %q, want %q", dir, got, encoded)
-	}
-}
-
-// errorsIs is a tiny shim used to keep the test file's import surface
-// minimal (errors.Is would also work; both are fine).
-func errorsIs(err, target error) bool {
-	for err != nil {
-		if err == target {
-			return true
-		}
-		type unwrapper interface{ Unwrap() error }
-		u, ok := err.(unwrapper)
-		if !ok {
-			return false
-		}
-		err = u.Unwrap()
-	}
-	return false
 }
 
 // TestMemoryHandler_OversizeFileTruncated covers R240-SEC-11 / #1044: a

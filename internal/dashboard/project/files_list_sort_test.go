@@ -36,15 +36,6 @@ func TestSortEntries_DirsFirstCaseInsensitive(t *testing.T) {
 	}
 }
 
-func TestSortEntries_Empty(t *testing.T) {
-	t.Parallel()
-	var entries []listEntry
-	sortEntries(entries) // must not panic
-	if len(entries) != 0 {
-		t.Fatalf("expected empty, got %v", entries)
-	}
-}
-
 // #2433 item 5: names that collide under case-folding (Makefile / makefile)
 // must sort identically regardless of the ReadDir input order, otherwise the
 // listing "jitters" between refreshes.

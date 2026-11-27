@@ -84,22 +84,6 @@ func TestHandleRuns_ReturnsRunsAndStats(t *testing.T) {
 	}
 }
 
-func TestHandleRuns_MissingKey(t *testing.T) {
-	h := newRunsHandler(t, 0)
-	res, _ := doRuns(t, h, "")
-	if res.StatusCode != http.StatusBadRequest {
-		t.Errorf("missing key: status = %d, want 400", res.StatusCode)
-	}
-}
-
-func TestHandleRuns_InvalidKey(t *testing.T) {
-	h := newRunsHandler(t, 0)
-	res, _ := doRuns(t, h, "key=bad%00key")
-	if res.StatusCode != http.StatusBadRequest {
-		t.Errorf("control-char key: status = %d, want 400", res.StatusCode)
-	}
-}
-
 func TestHandleRuns_EmptySession(t *testing.T) {
 	h := newRunsHandler(t, 0)
 	res, body := doRuns(t, h, "key=feishu:p2p:nobody")
@@ -138,13 +122,12 @@ func TestHandleRuns_BeforePagination(t *testing.T) {
 	}
 }
 
-func TestHandleRuns_InvalidLimitAndBefore(t *testing.T) {
+func TestHandleRuns_BadRequest(t *testing.T) {
 	h := newRunsHandler(t, 1)
-	if res, _ := doRuns(t, h, "key="+runsTestKey+"&limit=-1"); res.StatusCode != http.StatusBadRequest {
-		t.Errorf("limit=-1 status = %d, want 400", res.StatusCode)
-	}
-	if res, _ := doRuns(t, h, "key="+runsTestKey+"&before=notanum"); res.StatusCode != http.StatusBadRequest {
-		t.Errorf("before=notanum status = %d, want 400", res.StatusCode)
+	for _, q := range []string{"", "key=bad%00key", "key=" + runsTestKey + "&limit=-1", "key=" + runsTestKey + "&before=notanum"} {
+		if res, _ := doRuns(t, h, q); res.StatusCode != http.StatusBadRequest {
+			t.Errorf("%q: status = %d, want 400", q, res.StatusCode)
+		}
 	}
 }
 
