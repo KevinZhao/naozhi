@@ -87,70 +87,47 @@ func TestRelayToDoneTaskKeepsState(t *testing.T) {
 	}
 }
 
-// A check held on background work is woken by the CLI's end, not left to
-// the work's quiet limit, and the receipt says the gateway reclaimed it:
-// in custody and for a dispatched task.
+// A check held on background work in custody is woken by the CLI's end,
+// not left to the work's quiet limit, and the receipt says the gateway
+// reclaimed it (a dispatched task's: TestNoGoneReceiptWhenHalted).
 func TestGoneWakesHeldCheck(t *testing.T) {
-	t.Run("custody", func(t *testing.T) {
-		r, g, fc := custodyRig(t)
-		now := time.Now()
-		r.cfg.Now = func() time.Time { return now }
-		var wakes int
-		r.after = func(d time.Duration, f func()) {
-			if d > 0 {
-				wakes++
-				return
-			}
-			f()
+	r, g, fc := custodyRig(t)
+	now := time.Now()
+	r.cfg.Now = func() time.Time { return now }
+	var wakes int
+	r.after = func(d time.Duration, f func()) {
+		if d > 0 {
+			wakes++
+			return
 		}
-		open := true
-		r.cfg.Background = func(string) bgtask.State {
-			if !open {
-				return bgtask.State{}
-			}
-			return bgtask.State{Tasks: []bgtask.Task{{ID: "b1", Kind: bgtask.KindBash, Last: now}}}.At(now)
+		f()
+	}
+	open := true
+	r.cfg.Background = func(string) bgtask.State {
+		if !open {
+			return bgtask.State{}
 		}
-		r.Result(dashKey, "trn2 在后台跑，跑完再看")
-		r.checkEnded(<-r.endCh)
-		if len(g.told) != 0 || wakes != 1 {
-			t.Fatalf("told %q wakes %d; want held", g.told, wakes)
-		}
-		open, fc.settled = false, true
-		now = now.Add(40 * time.Minute)
-		r.Gone(dashKey, "idle_timeout")
-		r.checkEnded(<-r.endCh)
-		if len(g.told) != 1 || !strings.Contains(g.told[0], "进程被网关空闲回收，后台任务随之停止") || strings.Contains(g.told[0], "正常结束了") ||
-			!strings.Contains(g.told[0], "trn2 在后台跑") {
-			t.Fatalf("told = %q", g.told)
-		}
-		// Nothing held: nothing told.
-		r.Gone(dashKey, "idle_timeout")
-		r.checkEnded(<-r.endCh)
-		if len(g.told) != 1 {
-			t.Errorf("told again: %q", g.told)
-		}
-	})
-	t.Run("task", func(t *testing.T) {
-		e := endedRunner(t)
-		open := true
-		e.r.cfg.Background = func(string) bgtask.State {
-			if !open {
-				return bgtask.State{}
-			}
-			return bgtask.State{Tasks: []bgtask.Task{{ID: "b1", Kind: bgtask.KindBash, Last: e.now}}}.At(e.now)
-		}
-		e.end("基准在后台跑")
-		if len(e.g.told) != 0 || len(e.held) == 0 {
-			t.Fatalf("told %q held %d; want held", e.g.told, len(e.held))
-		}
-		open = false
-		e.wait(40 * time.Minute)
-		e.r.Gone(e.key, "idle_timeout")
-		e.check()
-		if len(e.g.told) != 1 || !strings.Contains(e.g.told[0], "进程被网关空闲回收，后台任务随之停止，不是正常结束") {
-			t.Fatalf("told = %q", e.g.told)
-		}
-	})
+		return bgtask.State{Tasks: []bgtask.Task{{ID: "b1", Kind: bgtask.KindBash, Last: now}}}.At(now)
+	}
+	r.Result(dashKey, "trn2 在后台跑，跑完再看")
+	r.checkEnded(<-r.endCh)
+	if len(g.told) != 0 || wakes != 1 {
+		t.Fatalf("told %q wakes %d; want held", g.told, wakes)
+	}
+	open, fc.settled = false, true
+	now = now.Add(40 * time.Minute)
+	r.Gone(dashKey, "idle_timeout")
+	r.checkEnded(<-r.endCh)
+	if len(g.told) != 1 || !strings.Contains(g.told[0], "进程被网关空闲回收，后台任务随之停止") || strings.Contains(g.told[0], "正常结束了") ||
+		!strings.Contains(g.told[0], "trn2 在后台跑") {
+		t.Fatalf("told = %q", g.told)
+	}
+	// Nothing held: nothing told.
+	r.Gone(dashKey, "idle_timeout")
+	r.checkEnded(<-r.endCh)
+	if len(g.told) != 1 {
+		t.Errorf("told again: %q", g.told)
+	}
 }
 
 // A turn end held only to a doing window had no background work to kill:
@@ -209,17 +186,4 @@ func TestCustodySelfWokenTurnsToldOnce(t *testing.T) {
 	if len(g.told) != 2 || !strings.Contains(g.told[1], "按用户说的改好了") {
 		t.Fatalf("told = %q, want the prompted turn told", g.told)
 	}
-}
-
-// custodyRig is a runner checking dashKey in custody at once, settled.
-func custodyRig(t *testing.T) (*Runner, *fakeGateway, *fakeCustody) {
-	t.Helper()
-	r, g, _, _, _ := newRunner(t)
-	r.grace = 0
-	fc := &fakeCustody{on: map[string]bool{dashKey: true}, settled: true}
-	r.cfg.Custody = fc
-	if err := r.cfg.Sessions.Put(sidecarMeta(dashKey)); err != nil {
-		t.Fatal(err)
-	}
-	return r, g, fc
 }

@@ -114,9 +114,12 @@ func TestSizeShift(t *testing.T) {
 	}
 }
 
-// TestHandoffPrompt: the summary is asked by thread, within 2,000 字.
+// TestHandoffPrompt: the summary is asked by thread, within 2,000 字, with a
+// source on every item and the 等你定 section the gateway sweeps (§15.14 ⑤).
 func TestHandoffPrompt(t *testing.T) {
-	for _, want := range []string{"2000 字", "每条不超过 200 字", "## 进行中", "## 答应用户的事", "## 用户新说的偏好与决定", "## 待跟进"} {
+	for _, want := range []string{"2000 字", "每条不超过 200 字", "## 进行中", "## 答应用户的事", "## 用户新说的偏好与决定", "## 待跟进",
+		"五个小标题", "每条事项都要带出处：任务 key、承诺 ID、#issue，或用户那句话的时间", "## 等你定",
+		"原样抄了超过 3 天的网关会移进 parked.md", `"搁置 N 条"那一行由网关写`} {
 		if !strings.Contains(handoffPrompt, want) {
 			t.Errorf("handoff prompt lacks %q", want)
 		}

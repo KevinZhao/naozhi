@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -46,17 +45,6 @@ func handoffChecks(t *testing.T, j *journal.Journal, now time.Time) []handoffChe
 		out = append(out, ck)
 	}
 	return out
-}
-
-// The handoff prompt asks for a source on every item and for the 等你定
-// section the gateway sweeps (§15.14 ⑤).
-func TestHandoffPromptSources(t *testing.T) {
-	for _, want := range []string{"五个小标题", "每条事项都要带出处：任务 key、承诺 ID、#issue，或用户那句话的时间", "## 等你定",
-		"原样抄了超过 3 天的网关会移进 parked.md", `"搁置 N 条"那一行由网关写`} {
-		if !strings.Contains(handoffPrompt, want) {
-			t.Errorf("handoff prompt lacks %q", want)
-		}
-	}
 }
 
 // Every source form counts; a line naming none is journaled, not refused.
@@ -179,29 +167,6 @@ func TestShiftChangeParks(t *testing.T) {
 	}
 }
 
-// parked.md is in the Planner's read scope: under its state root's allow
-// rule, and no deny rule of the data root covers it.
-func TestParkedReadable(t *testing.T) {
-	now := time.Now()
-	a, lay := newTestAgent(t, &fakeSessions{}, &now)
-	p := lay.PlannerParkedPath()
-	root := lay.PlannerRoot()
-	if filepath.Dir(p) != root || !slices.Contains(a.Opts().PermissionsAllow, absRule("Read", filepath.Join(root, "**"))) {
-		t.Fatalf("parked.md %s not under the allowed root %s", p, root)
-	}
-	rel, _ := filepath.Rel(lay.Root(), p)
-	for _, pat := range []string{"*.yaml", "*.json", "*.pem", "*.key", ".env", ".env.*"} {
-		if ok, _ := path.Match(pat, filepath.Base(rel)); ok {
-			t.Errorf("deny pattern %s covers %s", pat, rel)
-		}
-	}
-	for _, r := range a.Opts().PermissionsDeny {
-		if strings.Contains(r, "parked") {
-			t.Errorf("deny rule %s names parked.md", r)
-		}
-	}
-}
-
 // In 等你定 each line is an item, bulleted or not, and a line opening with
 // an #issue is an item, not a heading: both are tracked and parked one by
 // one.
@@ -295,35 +260,19 @@ func covered(rules []string, home, path string) bool {
 	return false
 }
 
-// TestReadScopeGitHub (§15.14 ⑤): the GitHub issue files the gateway writes
-// under planner/github are in the Planner's read scope and no deny rule
-// covers them.
-func TestReadScopeGitHub(t *testing.T) {
-	now := time.Now()
-	a, lay := newTestAgent(t, &fakeSessions{}, &now)
-	o := a.Opts()
-	file := filepath.Join(lay.PlannerGitHubRoot(), "KevinZhao-naozhi.md")
-	if !covered(o.PermissionsAllow, a.cfg.Home, file) {
-		t.Errorf("%s is outside the read scope: %q", file, o.PermissionsAllow)
-	}
-	if covered(o.PermissionsDeny, a.cfg.Home, file) {
-		t.Errorf("%s is denied: %q", file, o.PermissionsDeny)
-	}
-	// The matcher does see a deny rule's file.
-	if yaml := filepath.Join(lay.PlannerGitHubRoot(), "x.yaml"); !covered(o.PermissionsDeny, a.cfg.Home, yaml) {
-		t.Errorf("matcher misses the deny rule for %s", yaml)
-	}
-}
-
 // TestReadScopeHome (D129): the user's home is in the Planner's read scope,
 // a project not registered as a workspace and the CLI's transcripts
 // included, so "I cannot read that" is left for the credentials: the paths
-// a login keeps its secrets at are denied.
+// a login keeps its secrets at are denied. The files the gateway writes for
+// the Planner under its state root (parked.md, the GitHub issue files,
+// §15.14 ⑤) are readable too, though the data root's secrets are not.
 func TestReadScopeHome(t *testing.T) {
 	now := time.Now()
-	a, _ := newTestAgent(t, &fakeSessions{}, &now)
+	a, lay := newTestAgent(t, &fakeSessions{}, &now)
 	o, home := a.Opts(), a.cfg.Home
 	for _, p := range []string{
+		lay.PlannerParkedPath(),
+		filepath.Join(lay.PlannerGitHubRoot(), "KevinZhao-naozhi.md"),
 		filepath.Join(home, ".claude", "projects", "-Users-u-w-x", "memory", "MEMORY.md"),
 		filepath.Join(home, ".claude", "projects", "-Users-u-w-x", "0f1e.jsonl"),
 		filepath.Join(home, "workspace", "cpu-capacity", "2026-11-12", "README.md"),
@@ -343,6 +292,7 @@ func TestReadScopeHome(t *testing.T) {
 		filepath.Join(home, ".zsh_history"),
 		filepath.Join(home, ".naozhi", "mcp.json"),
 		filepath.Join(home, "workspace", "x", ".env"),
+		filepath.Join(lay.PlannerGitHubRoot(), "x.yaml"),
 	} {
 		if !covered(o.PermissionsDeny, home, p) {
 			t.Errorf("%s not denied: the whole home is readable", p)

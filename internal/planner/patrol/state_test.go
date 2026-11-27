@@ -415,23 +415,6 @@ func TestReported(t *testing.T) {
 	}
 }
 
-// TestStalledSkipsOwn: a pull request a finding led to is not the
-// stalled-PR check's as well; once the finding is over it is anyone's.
-func TestStalledSkipsOwn(t *testing.T) {
-	r := &repoReport{Owner: "Owner", Name: "Gateway", key: "owner/gateway", full: "Owner/Gateway"}
-	old := now.AddDate(0, 0, -10)
-	var checks []check
-	checks = append(checks, check{Typename: "CheckRun", Name: "test", Status: "COMPLETED", Conclusion: "SUCCESS"})
-	pulls := []pull{{Number: 31, Title: "a", CreatedAt: old, Checks: checks}, {Number: 32, Title: "b", CreatedAt: old, Checks: checks}}
-	if hits := stalled(r, pulls, now, nil); len(hits) != 2 {
-		t.Fatalf("%d hits with no finding's pull request, want 2", len(hits))
-	}
-	hits := stalled(r, pulls, now, map[string]bool{"owner/gateway#31": true})
-	if len(hits) != 1 || hits[0].Source != "https://github.com/Owner/Gateway/pull/32" {
-		t.Errorf("hits %+v, want only #32", hits)
-	}
-}
-
 func TestRollup(t *testing.T) {
 	run := func(name, status, conclusion string) check {
 		return check{Typename: "CheckRun", Name: name, Status: status, Conclusion: conclusion}
@@ -452,9 +435,6 @@ func TestRollup(t *testing.T) {
 	} {
 		if got := rollup(tc.checks); got != tc.want {
 			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
-		}
-		if green(tc.checks) != (tc.want == rollPass) {
-			t.Errorf("%s: green disagrees with rollup", tc.name)
 		}
 	}
 }

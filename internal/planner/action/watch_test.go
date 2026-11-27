@@ -1,6 +1,7 @@
 package action
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -271,7 +272,7 @@ func TestWatchEndedNotTold(t *testing.T) {
 			if c.prep != nil {
 				c.prep(w)
 			}
-			w.end(0, c.key, cmpOr(c.text, "改好了。"))
+			w.end(0, c.key, cmp.Or(c.text, "改好了。"))
 			for {
 				select {
 				case e := <-w.r.endCh:
@@ -289,13 +290,6 @@ func TestWatchEndedNotTold(t *testing.T) {
 			}
 		})
 	}
-}
-
-func cmpOr(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }
 
 // A session turned into custody, or its 观察 turned off, between its turn's

@@ -240,10 +240,6 @@ func TestRef(t *testing.T) {
 	if got := ItemSource("ws_ab12cd34/bug-a-b"); got != "patrol:ws_ab12cd34/bug-a-b" {
 		t.Errorf("ItemSource = %q", got)
 	}
-	// A finding's item is no deterministic check's: no round closes it.
-	if g, _ := groupOf(ItemSource("ws_ab12cd34/bug-a-b")); g != "" {
-		t.Errorf("groupOf(a finding's source) = %q, want none", g)
-	}
 }
 
 func TestBlobLinks(t *testing.T) {

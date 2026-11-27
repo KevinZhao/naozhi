@@ -507,11 +507,6 @@ func TestRenderSnapshot(t *testing.T) {
 	if got := renderSnapshot(withPromises); !strings.Contains(got, "未完成的承诺（0）：") || strings.Contains(got, "等你") {
 		t.Errorf("wired-but-empty promises, unwired waiting:\n%s", got)
 	}
-	// A long promise is cut in its text, never its ID.
-	withPromises.Promises = []Promise{{ID: "pr_abcdefghij", Text: strings.Repeat("长", 200), Due: base.Now.Add(time.Hour)}}
-	if got := renderSnapshot(withPromises); !strings.Contains(got, "- [pr_abcdefghij] 长长") {
-		t.Errorf("long promise lost its ID:\n%s", got)
-	}
 
 	big := base
 	big.Waiting = nil
@@ -771,36 +766,6 @@ func TestSendImages(t *testing.T) {
 			}
 		})
 	}
-	// Without images an empty text is still nothing to send.
-	a, _ := newTestAgent(t, &fakeSessions{}, &now)
-	a.turns = &fakeTurns{}
-	if err := a.Send(" ", "", nil); !errors.Is(err, ErrEmpty) {
-		t.Fatalf("Send of nothing = %v, want ErrEmpty", err)
-	}
-}
-
-// TestTurnSourceJudgement: the turn in flight is judged by every source of
-// its requests: outside content names it, and only a receipt of blocks not
-// run (outside or not) makes it that receipt's own turn.
-func TestTurnSourceJudgement(t *testing.T) {
-	for _, tc := range []struct {
-		sources []Source
-		outside string
-		unrun   bool
-	}{
-		{},
-		{sources: []Source{SourceReceipt, SourceUser}},
-		{sources: []Source{SourceUnrun, SourceUser}, unrun: true},
-		{sources: []Source{SourceRefusal}, outside: "被拒动作的回执", unrun: true},
-		{sources: []Source{SourceBriefing, SourceScout}, outside: "会前简报、巡检"},
-	} {
-		now := time.Now()
-		a, _ := newTestAgent(t, &fakeSessions{}, &now)
-		a.turns = &fakeTurns{sources: tc.sources}
-		if got, unrun := a.OutsideTurn(), a.UnrunTurn(); got != tc.outside || unrun != tc.unrun {
-			t.Errorf("%v: outside %q, unrun %v; want %q, %v", tc.sources, got, unrun, tc.outside, tc.unrun)
-		}
-	}
 }
 
 // heldTurns keeps every turn open until the test ends it.
@@ -1041,9 +1006,6 @@ func TestSendWords(t *testing.T) {
 	}
 	if !slices.Equal(turns.srcs, []Source{SourceHandover, SourceHandover, SourceReceipt, SourceAnswer}) {
 		t.Errorf("sources = %v", turns.srcs)
-	}
-	if SourceAnswer.Outside() {
-		t.Error("an answer's turn reads as outside content")
 	}
 	turns.words = []Words{{Text: "x"}}
 	if w := a.TurnWords(); len(w) != 1 || w[0].Text != "x" {

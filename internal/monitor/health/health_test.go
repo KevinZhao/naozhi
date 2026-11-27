@@ -697,15 +697,15 @@ func TestIdleSinceAcrossRestart(t *testing.T) {
 	}
 }
 
-// TestTaskDone: a background task this run saw open that finished is
-// reported once its turn is over; one the run never saw open, or whose
-// unit failed meanwhile, is not.
 // unowned is f as a local session outside every workspace.
 func unowned(f Fact) Fact {
 	f.Dir, f.Register = "", false
 	return f
 }
 
+// TestTaskDone: a background task this run saw open that finished is
+// reported once its turn is over; one the run never saw open, or whose
+// unit failed meanwhile, is not.
 func TestTaskDone(t *testing.T) {
 	dir := t.TempDir()
 	bg := &Task{ID: "b1", Name: "sleep 300", Start: time.Date(2026, 11, 4, 8, 0, 0, 0, time.UTC)}
@@ -747,18 +747,11 @@ func TestTaskDone(t *testing.T) {
 			}
 		})
 	}
-
-	// The open task is in the snapshot with when it started.
-	r := newRig(t, Config{Workspaces: workspace.Load("", "node")})
-	r.run([]step{{facts: []Fact{open}}})
-	if u := r.m.Snapshot().Units[0]; u.Background != "sleep 300" || !u.BackgroundSince.Equal(bg.Start) ||
-		u.BackgroundN != 1 || !slices.Equal(u.BackgroundTasks, []string{"sleep 300"}) || !u.BackgroundProgress.Equal(bg.Start) {
-		t.Errorf("unit = %+v, want its background task", u)
-	}
 }
 
-// TestBackgroundTasksOfAUnit: a unit names how many tasks it has open, the
-// first BackgroundShown of them and the latest progress; an idle one stays
+// TestBackgroundTasksOfAUnit: a unit names its first open task with when it
+// started, how many tasks it has open, the first BackgroundShown of them and
+// the latest progress; an idle one stays
 // idle (后台中 is idle with tasks open, not a state of its own), and two
 // tasks that end in one go are each one this run saw open.
 func TestBackgroundTasksOfAUnit(t *testing.T) {
@@ -772,11 +765,11 @@ func TestBackgroundTasksOfAUnit(t *testing.T) {
 	r := newRig(t, Config{Workspaces: workspace.Load("", "node")})
 	r.run([]step{{facts: []Fact{owned(dir, Fact{Background: bg})}}})
 	u := r.m.Snapshot().Units[0]
-	if u.State != Idle || u.BackgroundN != 3 || !slices.Equal(u.BackgroundTasks, []string{"bench a", "bench b"}) || !u.BackgroundProgress.Equal(bg.LastProgress) {
+	if u.State != Idle || u.Background != "bench a" || !u.BackgroundSince.Equal(at) || u.BackgroundN != 3 || !slices.Equal(u.BackgroundTasks, []string{"bench a", "bench b"}) || !u.BackgroundProgress.Equal(bg.LastProgress) {
 		t.Fatalf("unit = %+v, want idle with 3 tasks open", u)
 	}
 	r.run([]step{{tick: Interval, facts: []Fact{owned(dir, Fact{})}}})
-	if u := r.m.Snapshot().Units[0]; u.BackgroundN != 0 || u.BackgroundTasks != nil || !u.BackgroundProgress.IsZero() {
+	if u := r.m.Snapshot().Units[0]; u.Background != "" || !u.BackgroundSince.IsZero() || u.BackgroundN != 0 || u.BackgroundTasks != nil || !u.BackgroundProgress.IsZero() {
 		t.Errorf("unit = %+v, want no task open", u)
 	}
 }

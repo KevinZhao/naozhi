@@ -9,28 +9,20 @@ import (
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
-// TestUpstreamRouter_AMissingSessionIsANilInterface: the connector checks
-// `sess == nil`, so the adapter must turn the router's nil *ManagedSession
-// into a nil interface rather than wrapping it.
-func TestUpstreamRouter_AMissingSessionIsANilInterface(t *testing.T) {
+// TestUpstreamRouter_SessionFor: the connector checks `sess == nil`, so the
+// adapter must turn the router's nil *ManagedSession into a nil interface
+// rather than wrapping it; a session the router has is the one the connector
+// gets, so identity comparisons still work.
+func TestUpstreamRouter_SessionFor(t *testing.T) {
 	r := session.NewRouter(session.RouterConfig{MaxProcs: 1})
 	t.Cleanup(r.Shutdown)
 	u := UpstreamRouter(r)
-
 	if s := u.SessionFor("feishu:direct:absent:general"); s != nil {
 		t.Errorf("SessionFor(absent) = %#v, want a nil interface", s)
 	}
-}
-
-// TestUpstreamRouter_ALiveSessionComesThrough: a session the router has is
-// the one the connector gets, so identity comparisons still work.
-func TestUpstreamRouter_ALiveSessionComesThrough(t *testing.T) {
-	r := session.NewRouter(session.RouterConfig{MaxProcs: 1})
-	t.Cleanup(r.Shutdown)
 	const key = "feishu:direct:present:general"
 	want := r.InjectSession(key, nil)
-
-	got := UpstreamRouter(r).SessionFor(key)
+	got := u.SessionFor(key)
 	if got == nil {
 		t.Fatal("SessionFor(present) = nil")
 	}

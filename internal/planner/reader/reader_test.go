@@ -117,28 +117,10 @@ func TestParseResultTruncates(t *testing.T) {
 	})
 }
 
-// TestBlockTruncated: a cut answer reaches the Planner with a line saying
-// what was cut, and its JSON line carries truncated; an uncut one has neither.
-func TestBlockTruncated(t *testing.T) {
-	res, err := ParseResult(`{"answer":"` + strings.Repeat("新", 1205) + `","facts":[],"confidence":"high"}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b := Block(Run{ID: "20261110T170049-a85a", Q: "Fable 5.2 新特性", State: StateOK, Result: &res}, false)
-	if !strings.Contains(b, "网关截断了 answer") || !strings.Contains(b, `"truncated":["answer"]`) || !strings.Contains(b, TruncatedMark) {
-		t.Fatalf("block = %s", b)
-	}
-	ok, err := ParseResult(goodReply)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if b := Block(Run{ID: "20261110T165033-37cb", Q: "q", State: StateOK, Result: &ok}, false); strings.Contains(b, "截断") || strings.Contains(b, "truncated") {
-		t.Fatalf("uncut block = %s", b)
-	}
-}
-
 // A long answer is cut, not failed: the run is ok, its record (what GET
-// /api/planner/lookup serves) says what was cut, and so does the block.
+// /api/planner/lookup serves) says what was cut, and so does the block, in
+// a line and in its JSON's truncated. An uncut answer's block has neither
+// (TestLookupCacheAndLimit).
 func TestLookupLongAnswer(t *testing.T) {
 	sess := &fakeSession{reply: `{"answer":"` + strings.Repeat("新", 1205) + `","facts":[{"claim":"c","url":"https://e.com","quote":"q"}],"confidence":"high"}`}
 	shift := "s"
@@ -148,7 +130,8 @@ func TestLookupLongAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b := wait(t, blocks); !strings.Contains(b, `state="ok"`) || !strings.Contains(b, "网关截断了 answer") {
+	if b := wait(t, blocks); !strings.Contains(b, `state="ok"`) || !strings.Contains(b, "网关截断了 answer") ||
+		!strings.Contains(b, `"truncated":["answer"]`) || !strings.Contains(b, TruncatedMark) {
 		t.Fatalf("block = %s", b)
 	}
 	run, ok := r.Get(tk.Run)
@@ -223,7 +206,8 @@ func TestLookupCacheAndLimit(t *testing.T) {
 		t.Fatalf("Lookup = %+v, %v", tk, err)
 	}
 	b := wait(t, blocks)
-	if !strings.HasPrefix(b, `<naozhi-lookup q="M4 Max 内存带宽" run="`+tk.Run+`" state="ok">`) || !strings.Contains(b, "546GB/s") {
+	if !strings.HasPrefix(b, `<naozhi-lookup q="M4 Max 内存带宽" run="`+tk.Run+`" state="ok">`) || !strings.Contains(b, "546GB/s") ||
+		strings.Contains(b, "截断") || strings.Contains(b, "truncated") {
 		t.Fatalf("block = %s", b)
 	}
 	if run, ok := r.Get(tk.Run); !ok || run.State != StateOK || run.Result == nil {

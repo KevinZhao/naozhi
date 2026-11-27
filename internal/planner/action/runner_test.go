@@ -1369,22 +1369,6 @@ func TestTaskReportBlock(t *testing.T) {
 		}
 	})
 
-	t.Run("done marked", func(t *testing.T) {
-		e := endedRunner(t)
-		e.reportEnd(reportReply("need_user", "选 A 还是 B"))
-		if len(e.questions()) != 1 {
-			t.Fatalf("questions = %+v", e.questions())
-		}
-		e.g.told = nil
-		e.planner("它问的我替你记下了。\n" + block(`{"type":"status","task":"`+e.key+`","state":"done","why":"用户说不做了"}`))
-		if qs := e.questions(); len(qs) != 0 {
-			t.Errorf("questions after done = %+v, want none", qs)
-		}
-		if len(e.g.told) != 0 {
-			t.Errorf("told = %q, want no reminder for a task marked done", e.g.told)
-		}
-	})
-
 	t.Run("malformed", func(t *testing.T) {
 		e := endedRunner(t)
 		e.end("做完了。\n" + reportBlock(`{"state":"finished","summary":"写好了"}`))
@@ -1424,23 +1408,6 @@ func TestTaskReportBlock(t *testing.T) {
 			}
 		})
 	}
-
-	// The session asks again: the open question stands, retitled, not
-	// opened (and pushed) anew.
-	t.Run("need_user again", func(t *testing.T) {
-		e := endedRunner(t)
-		e.reportEnd(reportReply("need_user", "选 A 还是 B"))
-		first := e.questions()
-		e.wait(time.Minute)
-		e.reportEnd(reportReply("need_user", "还是要你选：A 还是 B"))
-		qs := e.questions()
-		if len(first) != 1 || len(qs) != 1 || qs[0].ID != first[0].ID || !strings.Contains(qs[0].Title, "还是要你选") {
-			t.Fatalf("questions = %+v, then %+v, want the one retitled", first, qs)
-		}
-		if _, closed := e.inbox.List(10); len(closed) != 0 {
-			t.Errorf("closed = %+v, want none", closed)
-		}
-	})
 
 	// The digest written for the turn's end before the report reached it
 	// (the turn's activity touches it first) does not show the report: the

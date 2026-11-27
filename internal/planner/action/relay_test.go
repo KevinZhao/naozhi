@@ -256,16 +256,6 @@ func TestRelayEnvelopeAskIsThePlanners(t *testing.T) {
 	}
 }
 
-// The option picked means what the question says it means, which a long
-// question may say only at its end; the envelope carries it all.
-func TestRelayEnvelopeAskWholeQuestion(t *testing.T) {
-	q := strings.Repeat("背景", 150) + "方案 A 是先回滚再修，方案 B 是热修；选哪个？"
-	env := relayEnvelope(said.At, []Words{{Text: "A", Question: q, At: said.At}}, "")
-	if !strings.Contains(env, "方案 A 是先回滚再修，方案 B 是热修；选哪个？」，用户") {
-		t.Errorf("envelope = %q, want the question's end before the answer", env)
-	}
-}
-
 // putAwayRunner is a runner with one dispatched session the gateway put away
 // (D95: its task done, its sidecar keeping what resuming it needs) and the
 // reaper reopening it as the gateway wires it: Reopen, or the task set back

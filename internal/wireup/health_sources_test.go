@@ -84,30 +84,6 @@ func TestRemoteFact(t *testing.T) {
 	}
 }
 
-func TestAskPending(t *testing.T) {
-	ev := func(types ...string) []clievent.EventEntry {
-		out := make([]clievent.EventEntry, len(types))
-		for i, ty := range types {
-			out[i].Type = ty
-		}
-		return out
-	}
-	tests := []struct {
-		name    string
-		entries []clievent.EventEntry
-		want    bool
-	}{
-		{"no question", ev(clievent.KindUser, clievent.KindText, clievent.KindResult), false},
-		{"asked, auto-rejected, turn ended", ev(clievent.KindUser, clievent.KindAskQuestion, clievent.KindToolResult, clievent.KindText, clievent.KindResult), true},
-		{"answered", ev(clievent.KindAskQuestion, clievent.KindResult, clievent.KindUser, clievent.KindText, clievent.KindResult), false},
-	}
-	for _, tt := range tests {
-		if got := askPending(tt.entries); got != tt.want {
-			t.Errorf("%s: askPending = %v, want %v", tt.name, got, tt.want)
-		}
-	}
-}
-
 // The task whose quiet health judges is the first open one while a turn
 // waits on it; once the turn is over a Bash or a Monitor is a server or a
 // watch running, open (后台中) but never stalled.

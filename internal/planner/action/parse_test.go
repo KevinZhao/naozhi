@@ -172,6 +172,26 @@ func TestParse(t *testing.T) {
 	}
 }
 
+// parseCase is one block body and a substring of the error Parse gives it,
+// "" for a block that parses.
+type parseCase struct{ raw, err string }
+
+// parseCases checks each case's block parses, or is refused with its error.
+func parseCases(t *testing.T, cases []parseCase) {
+	t.Helper()
+	for _, c := range cases {
+		b := Parse(block(c.raw))
+		switch {
+		case len(b) != 1:
+			t.Errorf("%s: %d blocks", c.raw, len(b))
+		case c.err == "" && (b[0].Err != nil || b[0].Type == ""):
+			t.Errorf("%s: %v", c.raw, b[0].Err)
+		case c.err != "" && (b[0].Err == nil || !strings.Contains(b[0].Err.Error(), c.err)):
+			t.Errorf("%s: err %v, want one with %q", c.raw, b[0].Err, c.err)
+		}
+	}
+}
+
 func reportBlock(body string) string { return "```naozhi-report\n" + body + "\n```" }
 
 // ParseReport takes the last naozhi-report block, when nothing but

@@ -788,7 +788,7 @@ func TestFindingParse(t *testing.T) {
 	const d = `{"type":"dispatch","workspace":"gateway","title":"修重连","model":"","message":"修","finding":%s}`
 	const a = `{"type":"ask","question":"要不要统一？","options":[%s],"finding":"` + refA + `"}`
 	const n = `{"type":"notify","title":"PR 已备好","why":"","level":"timely","link":"","id":"","finding":%s}`
-	for _, c := range []struct{ raw, err string }{
+	parseCases(t, []parseCase{
 		{fmt.Sprintf(d, `"`+refA+`"`), ""},
 		{fmt.Sprintf(d, `" `+refA+` "`), ""},
 		{fmt.Sprintf(d, `""`), ""},
@@ -802,16 +802,7 @@ func TestFindingParse(t *testing.T) {
 		{fmt.Sprintf(a, `"一","二","三","四","五"`), "options 最多 4 个"},
 		{`{"type":"ask","question":"q","options":["一","二","三","四","五","六"]}`, ""},
 		{`{"type":"ask","question":"q","finding":"nope"}`, "finding 要写"},
-	} {
-		blocks := Parse(block(c.raw))
-		if len(blocks) != 1 {
-			t.Fatalf("%s: %d blocks", c.raw, len(blocks))
-		}
-		err := blocks[0].Err
-		if c.err == "" && err != nil || c.err != "" && (err == nil || !strings.Contains(err.Error(), c.err)) {
-			t.Errorf("%s: err %v, want %q", c.raw, err, c.err)
-		}
-	}
+	})
 	if b := Parse(block(fmt.Sprintf(d, `" `+refA+` "`)))[0]; b.Dispatch == nil || b.Dispatch.Finding != refA {
 		t.Errorf("finding not trimmed: %+v", b.Dispatch)
 	}
