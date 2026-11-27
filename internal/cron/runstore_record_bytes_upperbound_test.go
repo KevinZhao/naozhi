@@ -6,18 +6,19 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/naozhi/naozhi/internal/cron/runstore"
 )
 
 // TestCronRunRecordBytesUpperBoundTracksFieldCaps pins R249-CR-28 (#967):
-// MaxRunRecordBytes (32 KiB) must stay above the largest CronRun JSON a
+// runstore.MaxRecordBytes (32 KiB) must stay above the largest CronRun JSON a
 // well-behaved finish path can produce. The worst-case record fills every
 // string field to its documented cap THROUGH the same truncation helpers the
 // finish path uses (Prompt ≤ MaxPromptBytes, Result via sanitiseRunResult →
 // maxStoredResultRunes, ErrorMsg via sanitiseRunErrMsg → maxCronErrMsgRunes)
 // and uses 4-byte runes for the rune-capped fields so the byte expansion is
 // maximal. The test fails loudly if any field cap is bumped without raising
-// MaxRunRecordBytes — the exact regression the godoc at limits.go:308 warns
-// about but had no test guarding.
+// runstore.MaxRecordBytes.
 func TestCronRunRecordBytesUpperBoundTracksFieldCaps(t *testing.T) {
 	// 4-byte UTF-8 rune (U+1F600) — maximises bytes-per-rune so the
 	// rune-capped fields hit their largest possible byte footprint.
@@ -69,12 +70,12 @@ func TestCronRunRecordBytesUpperBoundTracksFieldCaps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if int64(len(data)) > MaxRunRecordBytes {
-		t.Fatalf("worst-case CronRun JSON = %d bytes exceeds MaxRunRecordBytes %d; "+
+	if int64(len(data)) > runstore.MaxRecordBytes {
+		t.Fatalf("worst-case CronRun JSON = %d bytes exceeds runstore.MaxRecordBytes %d; "+
 			"a field cap (MaxPromptBytes=%d, maxStoredResultRunes=%d, maxCronErrMsgRunes=%d) "+
-			"was raised without bumping MaxRunRecordBytes",
-			len(data), MaxRunRecordBytes, MaxPromptBytes, maxStoredResultRunes, maxCronErrMsgRunes)
+			"was raised without bumping runstore.MaxRecordBytes",
+			len(data), runstore.MaxRecordBytes, MaxPromptBytes, maxStoredResultRunes, maxCronErrMsgRunes)
 	}
 	t.Logf("worst-case CronRun JSON = %d bytes (cap %d, headroom %d)",
-		len(data), MaxRunRecordBytes, MaxRunRecordBytes-len(data))
+		len(data), runstore.MaxRecordBytes, runstore.MaxRecordBytes-len(data))
 }

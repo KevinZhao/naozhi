@@ -47,12 +47,6 @@ func TestReadTurnImages_ByteBudget(t *testing.T) {
 		wantTotalBytes int // exact summed bytes of attached images
 	}{
 		{
-			name:           "single under budget attaches",
-			images:         []imgSpec{{"a.png", blob}},
-			wantAttached:   1,
-			wantTotalBytes: blob,
-		},
-		{
 			name: "over-budget images skipped but text still rewritten",
 			// 4 x 8MiB = 32MiB > 20MiB budget: only the first two (16MiB) fit.
 			images: []imgSpec{

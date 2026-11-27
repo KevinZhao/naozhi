@@ -13,45 +13,12 @@ package cron
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
-
-func TestWorkDirReachable_EmptyPath(t *testing.T) {
-	t.Parallel()
-	if !workDirReachable("") {
-		t.Error("workDirReachable(\"\") = false, want true (empty = router default)")
-	}
-}
-
-func TestWorkDirReachable_ExistingDir(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	if !workDirReachable(dir) {
-		t.Errorf("workDirReachable(%q) = false, want true", dir)
-	}
-}
-
-func TestWorkDirReachable_MissingDir(t *testing.T) {
-	t.Parallel()
-	missing := filepath.Join(t.TempDir(), "does-not-exist")
-	if workDirReachable(missing) {
-		t.Errorf("workDirReachable(%q) = true, want false (missing)", missing)
-	}
-}
-
-func TestWorkDirReachable_FileNotDir(t *testing.T) {
-	t.Parallel()
-	f := filepath.Join(t.TempDir(), "plain.txt")
-	if err := os.WriteFile(f, []byte("x"), 0600); err != nil {
-		t.Fatalf("setup WriteFile: %v", err)
-	}
-	if workDirReachable(f) {
-		t.Errorf("workDirReachable(%q) = true, want false (file, not dir)", f)
-	}
-}
 
 // TestCRON2_FreshExecuteSkipsWhenWorkDirMissing is the integration test:
 // with a fresh-mode job pointed at a deleted directory, execute() must
@@ -122,104 +89,53 @@ func TestCRON2_FreshExecuteSkipsWhenWorkDirMissing(t *testing.T) {
 	}
 }
 
-// TestCRON2_FreshExecuteProceedsWhenWorkDirExists pairs with the skip
-// test: if the guard over-fires we'd silently suppress legitimate runs.
-// Here we give the job an existing tempdir and expect Reset + GetOrCreate
-// to fire on the fake router as before.
-func TestCRON2_FreshExecuteProceedsWhenWorkDirExists(t *testing.T) {
+func TestWorkDirReachable(t *testing.T) {
 	t.Parallel()
-	fake := &fakeSessionRouter{}
-	s := NewScheduler(SchedulerConfig{
-		MaxJobs: 5,
-	}, SchedulerDeps{
-		Router: fake,
-	})
-	if err := s.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "plain.txt")
+	if err := os.WriteFile(file, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
 	}
-	defer s.Stop()
-
-	job := &Job{
-		Schedule:     "@hourly",
-		Prompt:       "hello",
-		Platform:     "p",
-		ChatID:       "c",
-		WorkDir:      t.TempDir(),
-		FreshContext: true,
-	}
-	if err := s.AddJob(job); err != nil {
-		t.Fatalf("AddJob: %v", err)
-	}
-
-	// execute triggers Reset + GetOrCreate under a valid workDir. fake
-	// GetOrCreate returns (nil, 0, nil) so the dereference that follows
-	// panics; absorb it — the assertions we care about are recorded
-	// before the panic site.
-	func() {
-		defer func() { _ = recover() }()
-		s.executeOpt(job.ID, false)
-	}()
-
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	wantKey := sessionkey.CronKey(job.ID)
-	resetFound := false
-	for _, k := range fake.resetCalls {
-		if k == wantKey {
-			resetFound = true
-			break
+	for path, want := range map[string]bool{
+		"":                                   true, // router default
+		dir:                                  true,
+		filepath.Join(dir, "does-not-exist"): false,
+		file:                                 false, // not a directory
+	} {
+		if got := workDirReachable(path); got != want {
+			t.Errorf("workDirReachable(%q) = %v, want %v", path, got, want)
 		}
-	}
-	if !resetFound {
-		t.Errorf("Reset(%q) not seen after happy-path execute", wantKey)
 	}
 }
 
-// TestCRON2_EmptyWorkDirPassesThrough covers the most common production
-// shape: a job without an explicit WorkDir uses the router default.
-// The guard must not reject this (workDirReachable("") returns true).
-func TestCRON2_EmptyWorkDirPassesThrough(t *testing.T) {
+// TestCRON2_FreshExecuteProceeds: the guard must not over-fire — an existing
+// workDir, or none (the router default), still reaches Reset.
+func TestCRON2_FreshExecuteProceeds(t *testing.T) {
 	t.Parallel()
-	fake := &fakeSessionRouter{}
-	s := NewScheduler(SchedulerConfig{
-		MaxJobs: 5,
-	}, SchedulerDeps{
-		Router: fake,
-	})
-	if err := s.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer s.Stop()
-
-	job := &Job{
-		Schedule:     "@hourly",
-		Prompt:       "hello",
-		Platform:     "p",
-		ChatID:       "c",
-		WorkDir:      "", // uses router default
-		FreshContext: true,
-	}
-	if err := s.AddJob(job); err != nil {
-		t.Fatalf("AddJob: %v", err)
-	}
-
-	func() {
-		defer func() { _ = recover() }()
-		s.executeOpt(job.ID, false)
-	}()
-
-	// Empty WorkDir must reach Reset (guard is permissive on empty).
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	wantKey := sessionkey.CronKey(job.ID)
-	found := false
-	for _, k := range fake.resetCalls {
-		if k == wantKey {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("Reset(%q) not seen with empty WorkDir", wantKey)
+	for name, workDir := range map[string]string{"existing workdir": t.TempDir(), "empty workdir": ""} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			fake := &fakeSessionRouter{}
+			s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: fake})
+			if err := s.Start(); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			defer s.Stop()
+			job := &Job{Schedule: "@hourly", Prompt: "hello", Platform: "p", ChatID: "c", WorkDir: workDir, FreshContext: true}
+			if err := s.AddJob(job); err != nil {
+				t.Fatalf("AddJob: %v", err)
+			}
+			// fakeSessionRouter's GetOrCreate returns a nil session, so the run
+			// panics after Reset; the Reset is what this test is after.
+			func() {
+				defer func() { _ = recover() }()
+				s.executeOpt(job.ID, false)
+			}()
+			fake.mu.Lock()
+			defer fake.mu.Unlock()
+			if !slices.Contains(fake.resetCalls, sessionkey.CronKey(job.ID)) {
+				t.Errorf("Reset(%q) not seen", sessionkey.CronKey(job.ID))
+			}
+		})
 	}
 }

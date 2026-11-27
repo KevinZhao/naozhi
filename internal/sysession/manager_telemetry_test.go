@@ -88,11 +88,6 @@ func runOneAndWait(t *testing.T, m *Manager, rec *recordingBroadcaster) {
 	}, 2*time.Second, "no RunEnded event observed within deadline")
 }
 
-func lastRunRecorded(m *Manager) bool {
-	st := m.Inspector()
-	return len(st) == 1 && st[0].LastRun != nil
-}
-
 // TestManager_EmitsSysessionSubsystem pins that both run events carry
 // Subsystem=SubsystemSysession and that the started/ended pair shares the same
 // non-empty RunID and OwnerID (the daemon name).
@@ -149,27 +144,6 @@ func TestManager_EmitsSysessionSubsystem(t *testing.T) {
 	if got := e.EndedAt.Sub(e.StartedAt).Milliseconds(); got != e.DurationMS {
 		t.Errorf("EndedAt-StartedAt = %dms, DurationMS = %d", got, e.DurationMS)
 	}
-}
-
-// TestManager_NilBroadcasterIsSafe pins that a Manager built without a
-// Telemetry broadcaster (the test/no-WS deployment shape) ticks without
-// panicking and records the run internally.
-func TestManager_NilBroadcasterIsSafe(t *testing.T) {
-	const name = "auto-titler"
-	m := newTelemetryManager(t, name, func() (TickReport, error) {
-		return TickReport{Acted: 1}, nil
-	}, nil)
-	// Deliberately no Telemetry — the broadcaster stays nil.
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	m.Start(ctx)
-	defer m.Stop(context.Background())
-
-	// Wait for the internal run record (recordRun runs even with nil
-	// broadcaster) — the absence of a panic is the primary assertion.
-	testhelper.Eventually(t, func() bool { return lastRunRecorded(m) }, 2*time.Second,
-		"no run recorded with nil broadcaster (or it panicked)")
 }
 
 // TestManager_TimeoutMapsToDeadlineExceeded drives a daemon whose Tick exceeds

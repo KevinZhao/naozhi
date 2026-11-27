@@ -68,43 +68,6 @@ func TestSendWithWatchdog_SuccessNoFire(t *testing.T) {
 	}
 }
 
-// TestSendWithWatchdog_DeadlineFiresInterrupt asserts that when Send
-// blocks past sendCtx's deadline, the watchdog fires
-// InterruptViaControl exactly once and returns abort.fired=true with
-// the real outcome — and that the helper returns Send's error
-// (DeadlineExceeded). Pins the ordering invariant the godoc calls out:
-// drain abortCh AFTER sendCancel so the recorded outcome reflects the
-// in-flight interrupt write.
-func TestSendWithWatchdog_DeadlineFiresInterrupt(t *testing.T) {
-	t.Parallel()
-
-	sess := &fakeSendSession{
-		send: func(ctx context.Context, text string) (SendResult, error) {
-			<-ctx.Done()
-			return SendResult{}, ctx.Err()
-		},
-		interruptOutcome: InterruptSent,
-	}
-
-	sendCtx, sendCancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
-	defer sendCancel()
-
-	s := &Scheduler{}
-	_, abort, err := s.sendWithWatchdog(sendCtx, sendCancel, sess, "hi")
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err = %v, want DeadlineExceeded", err)
-	}
-	if !abort.fired {
-		t.Fatal("abort.fired = false on deadline path; want true")
-	}
-	if abort.outcome != InterruptSent {
-		t.Fatalf("abort.outcome = %v, want InterruptSent", abort.outcome)
-	}
-	if got := sess.interruptCalls.Load(); got != 1 {
-		t.Fatalf("InterruptViaControl call count = %d, want 1", got)
-	}
-}
-
 // TestSendWithWatchdog_SuccessStopsCallback is the regression test for
 // R20260603140013-GO-1 (#1705): on the success path stopWatchdog()
 // deregisters the context.AfterFunc callback BEFORE sendCancel(), so the

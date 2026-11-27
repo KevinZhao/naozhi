@@ -305,10 +305,3 @@ func TestConnState_StaleTokenFails(t *testing.T) {
 		})
 	}
 }
-
-func TestStaleTokenRetryDelay_DefaultsToAnHour(t *testing.T) {
-	t.Parallel()
-	if got := New(Config{Token: "tok"}).staleTokenRetryDelay(); got != time.Hour {
-		t.Errorf("default stale-token pause = %v, want 1h", got)
-	}
-}

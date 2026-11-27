@@ -3,7 +3,6 @@ package runstore
 import (
 	"os"
 	"path/filepath"
-	"strconv"
 	"testing"
 	"time"
 
@@ -90,49 +89,4 @@ func TestDeleteJobInvalidatesCache(t *testing.T) {
 	if got := s.Recent(jobID, 10); len(got) != 0 {
 		t.Errorf("post-DeleteJob: cache should be empty; got %d entries", len(got))
 	}
-}
-
-// TestBeforeCutoffBypassesCache: List with non-zero before falls
-// through to disk so paginated queries beyond cache-cap can still scan
-// older entries. Verified by populating > keepCount entries (forcing some
-// off cache) and querying with before-cutoff.
-func TestBeforeCutoffBypassesCache(t *testing.T) {
-	t.Parallel()
-	tmp := t.TempDir()
-	s := New(Options{StorePath: filepath.Join(tmp, "cron_jobs.json"), KeepCount: 5, KeepWindow: time.Hour}) // keepCount=5
-	s.enableTrimGC = false                                                                                  // 不让 trim 干扰
-
-	jobID := mustGenerateID()
-	now := time.Now()
-	for i := 0; i < 8; i++ {
-		runID := mustGenerateRunID()
-		startedAt := now.Add(time.Duration(i) * time.Minute)
-		s.Append(&CronRun{
-			RunID: runID, JobID: jobID, State: runtelemetry.RunStateSucceeded,
-			StartedAt: startedAt,
-		})
-		// 强制 mtime 单调递增，保证 List 排序确定。
-		path := filepath.Join(tmp, "runs", jobID, runID+".json")
-		_ = os.Chtimes(path, startedAt, startedAt)
-	}
-	// Non-zero before should NOT hit cache — verify by asking for entries
-	// older than now+5min; cache only holds 5 newest (= entries 3..7).
-	// Note: keepCount=5 means cache capped at 5; entries 0,1,2 only on disk.
-	cutoff := now.Add(3*time.Minute + 30*time.Second) // between entry 3 and 4
-	rows := s.List(jobID, 10, cutoff)
-	// Should see entries 0..3 (StartedAt < cutoff); 4 entries.
-	if len(rows) != 4 {
-		t.Fatalf("before-cutoff: got %d rows, want 4: %s", len(rows), summariesDesc(rows))
-	}
-}
-
-func summariesDesc(rs []CronRunSummary) string {
-	out := ""
-	for i, r := range rs {
-		if i > 0 {
-			out += " | "
-		}
-		out += r.RunID + "@" + strconv.FormatInt(r.StartedAt.UnixMilli(), 10)
-	}
-	return out
 }

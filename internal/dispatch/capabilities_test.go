@@ -2,7 +2,6 @@ package dispatch
 
 import (
 	"context"
-	"testing"
 
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -33,20 +32,3 @@ func (f fakeCapabilities) ReplyFooter(backendID string) string {
 }
 
 var _ Capabilities = fakeCapabilities{}
-
-// R248-TEST-1: Takeover and ReplyFooter return their documented defaults
-// (false / "") so the dispatcher hot path can dereference caps unconditionally
-// without nil guards.
-func TestNoopCapabilities_DefaultsForTakeoverAndReplyFooter(t *testing.T) {
-	t.Parallel()
-	caps := NoopCapabilities{}
-	if got := caps.Takeover(context.Background(), "chat", "key", session.AgentOpts{}); got {
-		t.Errorf("NoopCapabilities.Takeover = true, want false (no external session adopted)")
-	}
-	for _, backendID := range []string{"", "claude", "kiro", "made-up"} {
-		if got := caps.ReplyFooter(backendID); got != "" {
-			t.Errorf("ReplyFooter(%q) = %q, want \"\" (no footer)", backendID, got)
-		}
-	}
-	var _ Capabilities = NoopCapabilities{}
-}

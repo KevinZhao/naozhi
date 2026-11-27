@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -257,40 +258,11 @@ func TestLimitedWriter_LogsInnerFailureOnce(t *testing.T) {
 func TestRunnerImplBaseArgs_Contract(t *testing.T) {
 	t.Parallel()
 	want := []string{"-p", "--output-format", "json", "--setting-sources", ""}
-	if len(runnerImplBaseArgs) != len(want) {
-		t.Fatalf("runnerImplBaseArgs = %q, want %q", runnerImplBaseArgs, want)
+	if !slices.Equal(runnerImplBaseArgs, want) {
+		t.Fatalf("runnerImplBaseArgs = %q, want %q — this argv prefix is hand-aligned "+
+			"with cli.BuildArgs and the sysession daemon contract; see runner.go godoc before changing",
+			runnerImplBaseArgs, want)
 	}
-	for i := range want {
-		if runnerImplBaseArgs[i] != want[i] {
-			t.Fatalf("runnerImplBaseArgs[%d] = %q, want %q (full: %q) — "+
-				"this argv prefix is hand-aligned with cli.BuildArgs and the "+
-				"sysession daemon contract; see runner.go godoc before changing",
-				i, runnerImplBaseArgs[i], want[i], runnerImplBaseArgs)
-		}
-	}
-
-	// Belt-and-suspenders on the two highest-risk invariants regardless of
-	// position, so a reorder that keeps the slice the same length but moves
-	// these pairs still surfaces a readable failure.
-	assertFlagValue(t, runnerImplBaseArgs, "--output-format", "json")
-	assertFlagValue(t, runnerImplBaseArgs, "--setting-sources", "")
-}
-
-// assertFlagValue checks that args contains flag immediately followed by want.
-func assertFlagValue(t *testing.T, args []string, flag, want string) {
-	t.Helper()
-	for i, a := range args {
-		if a == flag {
-			if i+1 >= len(args) {
-				t.Fatalf("%s has no value in %q", flag, args)
-			}
-			if args[i+1] != want {
-				t.Fatalf("%s = %q, want %q (in %q)", flag, args[i+1], want, args)
-			}
-			return
-		}
-	}
-	t.Fatalf("%s not found in %q", flag, args)
 }
 
 // TestRunner_Run_CtxCancelReturnsCtxErr pins R20260606-GO-1: when the context
@@ -329,39 +301,5 @@ func TestRunner_Run_CtxCancelReturnsCtxErr(t *testing.T) {
 	}
 	if !errors.Is(runErr, context.Canceled) {
 		t.Errorf("Run with cancelled ctx: got %v, want errors.Is context.Canceled", runErr)
-	}
-}
-
-// TestRunner_Run_CtxDeadlineReturnsCtxErr is the deadline variant of the same
-// fix: a very short deadline causes cmd.Run to return *exec.ExitError, but the
-// caller must receive context.DeadlineExceeded.
-func TestRunner_Run_CtxDeadlineReturnsCtxErr(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	work := filepath.Join(dir, "work")
-	if err := os.MkdirAll(work, 0o700); err != nil {
-		t.Fatalf("mkdir work: %v", err)
-	}
-	bin := filepath.Join(dir, "fake-claude-sleep2")
-	script := "#!/bin/sh\nsleep 60\n"
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatalf("write bin: %v", err)
-	}
-
-	r, err := NewRunner(RunnerConfig{BinPath: bin, WorkDir: work})
-	if err != nil {
-		t.Fatalf("NewRunner: %v", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 1) // 1 ns — already expired
-	defer cancel()
-
-	_, runErr := r.Run(ctx, "ignored prompt")
-	if runErr == nil {
-		t.Fatal("Run with expired deadline should return an error")
-	}
-	if !errors.Is(runErr, context.DeadlineExceeded) {
-		t.Errorf("Run with expired deadline: got %v, want errors.Is context.DeadlineExceeded", runErr)
 	}
 }

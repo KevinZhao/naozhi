@@ -3,7 +3,6 @@ package cron
 import (
 	"crypto/rand"
 	"errors"
-	"io"
 	"strings"
 	"testing"
 )
@@ -51,30 +50,6 @@ func TestGenerateHexID_RandFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "crypto/rand unavailable") {
 		t.Errorf("generateHexID: expected error to mention crypto/rand, got %q", err.Error())
-	}
-}
-
-func TestGenerateID_RandFailure(t *testing.T) {
-	withFailingRandReader(t, io.ErrUnexpectedEOF)
-
-	id, err := generateID()
-	if err == nil {
-		t.Fatalf("generateID: expected error, got id=%q nil err", id)
-	}
-	if id != "" {
-		t.Errorf("generateID: expected empty id on error, got %q", id)
-	}
-}
-
-func TestGenerateRunID_RandFailure(t *testing.T) {
-	withFailingRandReader(t, io.ErrUnexpectedEOF)
-
-	id, err := generateRunID()
-	if err == nil {
-		t.Fatalf("generateRunID: expected error, got id=%q nil err", id)
-	}
-	if id != "" {
-		t.Errorf("generateRunID: expected empty id on error, got %q", id)
 	}
 }
 

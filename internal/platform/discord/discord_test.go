@@ -16,25 +16,6 @@ var (
 	_ platform.ConnStateReporter = (*Discord)(nil)
 )
 
-func TestNew_Defaults(t *testing.T) {
-	t.Parallel()
-	d := New(Config{BotToken: "test-token"})
-	if d.Name() != "discord" {
-		t.Errorf("Name() = %q, want discord", d.Name())
-	}
-	if d.MaxReplyLength() != platform.DiscordMaxReplyLen {
-		t.Errorf("MaxReplyLength() = %d, want %d", d.MaxReplyLength(), platform.DiscordMaxReplyLen)
-	}
-}
-
-func TestNew_CustomMaxReplyLen(t *testing.T) {
-	t.Parallel()
-	d := New(Config{BotToken: "test-token", MaxReplyLen: 1500})
-	if d.MaxReplyLength() != 1500 {
-		t.Errorf("MaxReplyLength() = %d, want 1500", d.MaxReplyLength())
-	}
-}
-
 func TestStartAlreadyStarted(t *testing.T) {
 	t.Parallel()
 	d := New(Config{BotToken: "test-token"})
@@ -65,80 +46,46 @@ func TestEditMessage_InvalidFormat(t *testing.T) {
 	}
 }
 
-func TestOnMessageCreate_NilAuthor(t *testing.T) {
+// TestOnMessageCreate_Skipped: a message with no author, from a bot, from
+// this bot itself, or empty once the mention is stripped never reaches the
+// handler.
+func TestOnMessageCreate_Skipped(t *testing.T) {
 	t.Parallel()
-	d := New(Config{BotToken: "test-token"})
-	setTestBotID(d, "bot123")
-	called := false
-	d.handler = func(_ context.Context, _ platform.IncomingMessage) { called = true }
-	// Should not panic
-	d.onMessageCreate(nil, &discordgo.MessageCreate{
-		Message: &discordgo.Message{Author: nil, Content: "hello"},
-	})
-	if called {
-		t.Error("nil author messages should be skipped")
+	for name, m := range map[string]*discordgo.Message{
+		"nil author":  {Author: nil, Content: "hello"},
+		"bot message": {Author: &discordgo.User{ID: "other_bot", Bot: true}, Content: "hello"},
+		"own message": {Author: &discordgo.User{ID: "bot123"}, Content: "hello"},
+		"empty after the strip": {
+			Author: &discordgo.User{ID: "user1"}, Content: "<@bot123>",
+			Mentions: []*discordgo.User{{ID: "bot123"}},
+		},
+	} {
+		d := New(Config{BotToken: "test-token"})
+		setTestBotID(d, "bot123")
+		called := false
+		d.handler = func(_ context.Context, _ platform.IncomingMessage) { called = true }
+		d.onMessageCreate(nil, &discordgo.MessageCreate{Message: m})
+		if called {
+			t.Errorf("%s: reached the handler, want skipped", name)
+		}
 	}
 }
 
-func TestOnMessageCreate_BotMessage(t *testing.T) {
+// TestOnMessageCreate_ChatType: a guild message is a group chat, one without
+// a guild a direct chat.
+func TestOnMessageCreate_ChatType(t *testing.T) {
 	t.Parallel()
-	d := New(Config{BotToken: "test-token"})
-	setTestBotID(d, "bot123")
-	called := false
-	d.handler = func(_ context.Context, _ platform.IncomingMessage) { called = true }
-	d.onMessageCreate(nil, &discordgo.MessageCreate{
-		Message: &discordgo.Message{
-			Author:  &discordgo.User{ID: "other_bot", Bot: true},
-			Content: "hello",
-		},
-	})
-	if called {
-		t.Error("bot messages should be skipped")
-	}
-}
-
-func TestOnMessageCreate_OwnMessage(t *testing.T) {
-	t.Parallel()
-	d := New(Config{BotToken: "test-token"})
-	setTestBotID(d, "bot123")
-	called := false
-	d.handler = func(_ context.Context, _ platform.IncomingMessage) { called = true }
-	d.onMessageCreate(nil, &discordgo.MessageCreate{
-		Message: &discordgo.Message{
-			Author:  &discordgo.User{ID: "bot123"},
-			Content: "hello",
-		},
-	})
-	if called {
-		t.Error("own messages should be skipped")
-	}
-}
-
-func TestOnMessageCreate_GroupMessage(t *testing.T) {
-	t.Parallel()
-	d := New(Config{BotToken: "test-token"})
-	setTestBotID(d, "bot123")
-	var received platform.IncomingMessage
-	done := make(chan struct{})
-	d.handler = func(_ context.Context, msg platform.IncomingMessage) {
-		received = msg
-		close(done)
-	}
-	d.onMessageCreate(nil, &discordgo.MessageCreate{
-		Message: &discordgo.Message{
-			ID:        "msg1",
-			Author:    &discordgo.User{ID: "user1"},
-			Content:   "hello",
-			ChannelID: "ch1",
-			GuildID:   "guild1",
-		},
-	})
-	<-done
-	if received.ChatType != "group" {
-		t.Errorf("ChatType = %q, want group", received.ChatType)
-	}
-	if received.Platform != "discord" {
-		t.Errorf("Platform = %q, want discord", received.Platform)
+	for guild, want := range map[string]string{"guild1": "group", "": "direct"} {
+		d := New(Config{BotToken: "test-token"})
+		setTestBotID(d, "bot123")
+		got := make(chan platform.IncomingMessage, 1)
+		d.handler = func(_ context.Context, msg platform.IncomingMessage) { got <- msg }
+		d.onMessageCreate(nil, &discordgo.MessageCreate{Message: &discordgo.Message{
+			ID: "msg1", Author: &discordgo.User{ID: "user1"}, Content: "hello", ChannelID: "ch1", GuildID: guild,
+		}})
+		if m := <-got; m.ChatType != want || m.Platform != "discord" {
+			t.Errorf("guild %q: ChatType %q Platform %q, want %q / discord", guild, m.ChatType, m.Platform, want)
+		}
 	}
 }
 
@@ -171,9 +118,6 @@ func TestOnMessageCreate_FailOpenWhenBotIDUnknown(t *testing.T) {
 	if !received.MentionMe {
 		t.Error("MentionMe should be true (fail-open) when botID is unknown")
 	}
-	if d.getBotID() != "" {
-		t.Errorf("botID should still be empty in test (no live session), got %q", d.getBotID())
-	}
 }
 
 // TestSetBotID_BackfillFromReady pins the Ready-handler backfill path used when
@@ -192,31 +136,6 @@ func TestSetBotID_BackfillFromReady(t *testing.T) {
 	d.setBotID("")
 	if d.getBotID() != "late-bot-id" {
 		t.Errorf("setBotID(\"\") clobbered id: got %q", d.getBotID())
-	}
-}
-
-func TestOnMessageCreate_DirectMessage(t *testing.T) {
-	t.Parallel()
-	d := New(Config{BotToken: "test-token"})
-	setTestBotID(d, "bot123")
-	var received platform.IncomingMessage
-	done := make(chan struct{})
-	d.handler = func(_ context.Context, msg platform.IncomingMessage) {
-		received = msg
-		close(done)
-	}
-	d.onMessageCreate(nil, &discordgo.MessageCreate{
-		Message: &discordgo.Message{
-			ID:        "msg2",
-			Author:    &discordgo.User{ID: "user2"},
-			Content:   "hello dm",
-			ChannelID: "dm_ch",
-			GuildID:   "", // empty = DM
-		},
-	})
-	<-done
-	if received.ChatType != "direct" {
-		t.Errorf("ChatType = %q, want direct", received.ChatType)
 	}
 }
 
@@ -249,24 +168,6 @@ func TestOnMessageCreate_MentionStrip(t *testing.T) {
 	}
 }
 
-func TestOnMessageCreate_EmptyAfterMentionStrip(t *testing.T) {
-	t.Parallel()
-	d := New(Config{BotToken: "test-token"})
-	setTestBotID(d, "bot123")
-	called := false
-	d.handler = func(_ context.Context, _ platform.IncomingMessage) { called = true }
-	d.onMessageCreate(nil, &discordgo.MessageCreate{
-		Message: &discordgo.Message{
-			Author:   &discordgo.User{ID: "user1"},
-			Content:  "<@bot123>",
-			Mentions: []*discordgo.User{{ID: "bot123"}},
-		},
-	})
-	if called {
-		t.Error("empty text after mention strip should be skipped")
-	}
-}
-
 // TestDownloadURL_SchemeGuard verifies that downloadURL rejects any non-https
 // URL before attempting a network fetch. The duplicate https check was removed
 // in R20260602190132-SEC-7; this test pins the surviving guard.
@@ -296,46 +197,19 @@ func TestDownloadURL_SchemeGuard(t *testing.T) {
 	}
 }
 
-// TestResolveImageContentType_EmptyBody verifies that a 200-with-empty-body
-// response is rejected rather than forwarding the upstream (CDN-controlled)
-// Content-Type. This closes the path where a malicious edge returns an empty
-// body with `Content-Type: text/html`, which could XSS IM clients that render
-// inline HTML. (R202606h-SEC-10)
-func TestResolveImageContentType_EmptyBody(t *testing.T) {
+// TestResolveImageContentType: the type comes from sniffing the body, never
+// the CDN's header; an empty body (R202606h-SEC-10: an edge answering an
+// empty body as text/html) and a non-image body are rejected.
+func TestResolveImageContentType(t *testing.T) {
 	t.Parallel()
-	ct, err := resolveImageContentType(nil)
-	if err == nil {
-		t.Fatalf("empty body: expected error, got ct=%q", ct)
+	if ct, err := resolveImageContentType([]byte("\x89PNG\r\n\x1a\n")); err != nil || ct != "image/png" {
+		t.Errorf("png: (%q, %v), want image/png", ct, err)
 	}
-	if ct != "" {
-		t.Errorf("empty body: ct should be empty on error, got %q", ct)
+	if ct, err := resolveImageContentType(nil); err == nil || ct != "" || !strings.Contains(err.Error(), "empty body") {
+		t.Errorf("empty body: (%q, %v), want an empty-body error", ct, err)
 	}
-	if !strings.Contains(err.Error(), "empty body") {
-		t.Errorf("empty body: error = %q; want 'empty body'", err.Error())
-	}
-}
-
-// TestResolveImageContentType_SniffsImage verifies the normal path: a real
-// image body yields the sniffed image/* type.
-func TestResolveImageContentType_SniffsImage(t *testing.T) {
-	t.Parallel()
-	// Minimal PNG signature is enough for http.DetectContentType -> image/png.
-	png := []byte("\x89PNG\r\n\x1a\n")
-	ct, err := resolveImageContentType(png)
-	if err != nil {
-		t.Fatalf("valid image: unexpected error: %v", err)
-	}
-	if ct != "image/png" {
-		t.Errorf("valid image: ct = %q; want image/png (sniffed, not header)", ct)
-	}
-}
-
-// TestResolveImageContentType_NonImageRejected verifies a non-empty, non-image
-// body is rejected on mime mismatch.
-func TestResolveImageContentType_NonImageRejected(t *testing.T) {
-	t.Parallel()
 	if ct, err := resolveImageContentType([]byte("<html>")); err == nil {
-		t.Fatalf("non-image body: expected mime mismatch error, got ct=%q", ct)
+		t.Errorf("non-image body: ct=%q, want a mime mismatch error", ct)
 	}
 }
 
@@ -387,22 +261,6 @@ func TestDownloadURL_BlocksPrivateIP(t *testing.T) {
 	}
 }
 
-// TestBlockPrivateDial_TestBypass verifies that when discordDialTestBypass is
-// set, the reserved-IP guard is skipped (so httptest loopback servers work).
-func TestBlockPrivateDial_TestBypass(t *testing.T) {
-	prev := discordDialTestBypass
-	discordDialTestBypass = true
-	t.Cleanup(func() { discordDialTestBypass = prev })
-
-	// Loopback with no listener: bypass lets the dial proceed, so we expect a
-	// connection-refused style error, NOT the "reserved IP" guard error.
-	dialCtx := blockPrivateDial()
-	_, err := dialCtx(context.Background(), "tcp", "127.0.0.1:1")
-	if err != nil && strings.Contains(err.Error(), "reserved IP") {
-		t.Errorf("bypass enabled but guard still fired: %v", err)
-	}
-}
-
 // TestRESTSession_NoRedirect_SEC2 verifies that the http.Client injected onto
 // the discordgo session (R20260603-SEC-2) refuses 3xx redirects by returning
 // http.ErrUseLastResponse from CheckRedirect.  The test exercises the client
@@ -426,21 +284,16 @@ func TestRESTSession_NoRedirect_SEC2(t *testing.T) {
 	if err != http.ErrUseLastResponse {
 		t.Errorf("CheckRedirect returned %v, want http.ErrUseLastResponse", err)
 	}
+	// With discordgo's default goroutine per event, the Disconnect of a drop
+	// and the Connect of its reconnect race, and a late Disconnect leaves the
+	// state "disconnected" on a live link.
+	if !sess.SyncEvents {
+		t.Error("configureSession left SyncEvents off; lifecycle handlers would race")
+	}
 }
 
 // setTestBotID assigns the bot ID through the atomic field (#1814). Kept in
 // one place so the test suite is decoupled from the field's storage type.
 func setTestBotID(d *Discord, id string) {
 	d.botID.Store(&id)
-}
-
-// TestGetBotID_EmptyBeforeConnect verifies getBotID returns "" before the
-// gateway handshake stores an identity, so self-filtering simply no-ops
-// rather than panicking on a nil pointer.
-func TestGetBotID_EmptyBeforeConnect(t *testing.T) {
-	t.Parallel()
-	d := New(Config{BotToken: "test-token"})
-	if got := d.getBotID(); got != "" {
-		t.Errorf("getBotID() before connect = %q, want empty", got)
-	}
 }

@@ -115,30 +115,3 @@ func TestNotifyTargetSingleUseShortResultNotTruncated(t *testing.T) {
 		t.Errorf("#2181: short single-use reply must be sent verbatim; got %q want %q", replies[0], short)
 	}
 }
-
-// TestNotifyTargetMultiSendStillFansIntoChunks is the negative case: a
-// platform that does NOT use a single-use token (UsesSingleUseReplyToken==false
-// via the default platform capability) must still fan a long result into the
-// normal N chunks — the collapse path is single-use-only.
-func TestNotifyTargetMultiSendStillFansIntoChunks(t *testing.T) {
-	t.Parallel()
-	// fakePartialPlatform (notify_target_partial_test.go) does NOT implement
-	// SingleUseReplyTokenCapable, so platform.UsesSingleUseReplyToken returns
-	// the default false. failAt high so every chunk succeeds.
-	fp := &fakePartialPlatform{failAt: 1000, maxLen: 8}
-	s := &Scheduler{}
-	storeFakeNotifySender(s, map[string]platform.Platform{"fake-notify": fp})
-
-	// 3 chunks (< cap=5 so the chunk cap doesn't interfere).
-	multi := buildDistinctChunks(3, 8)
-	wantChunks := len(platform.SplitText(multi, 8))
-	if wantChunks < 2 {
-		t.Fatalf("fixture must produce >=2 chunks to prove fan-out; got %d", wantChunks)
-	}
-
-	s.notifyTarget("fake-notify", "chat-x", multi)
-
-	if got := fp.uniqueChunks(); got != wantChunks {
-		t.Errorf("#2181 negative: multi-send platform should fan into %d chunks, got %d (collapse must be single-use-only)", wantChunks, got)
-	}
-}

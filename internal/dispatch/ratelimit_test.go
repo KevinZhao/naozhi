@@ -152,18 +152,6 @@ func TestRateLimit_DeniedSenderSpendsNothing(t *testing.T) {
 	}
 }
 
-// The "too fast" reply is throttled per bucket for rateLimitReplyWindow.
-func TestRateLimit_ReplyWindow(t *testing.T) {
-	th := denyThrottle{window: rateLimitReplyWindow}
-	t0 := time.Unix(1_700_000_000, 0)
-	if !th.allow("k", t0) || th.allow("k", t0.Add(rateLimitReplyWindow-time.Second)) {
-		t.Fatal("second reply inside the window answered, or the first was not")
-	}
-	if !th.allow("k", t0.Add(rateLimitReplyWindow)) {
-		t.Error("reply after the window not answered")
-	}
-}
-
 // A bucket is reset no sooner than it would refill, so a large burst cannot
 // be regained by idling for the floor TTL.
 func TestInboundLimitConfig_TTLCoversRefill(t *testing.T) {

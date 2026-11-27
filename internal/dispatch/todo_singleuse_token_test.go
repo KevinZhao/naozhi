@@ -61,7 +61,7 @@ func TestReplyTracker_TodoWrite_SuppressedOnSingleUseToken(t *testing.T) {
 func TestReplyTracker_TodoWrite_DeliveredOnMultiSend(t *testing.T) {
 	t.Parallel()
 
-	fp := &fakeInterimPlatform{}
+	fp := &fakePlatform{supportsInterim: true}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 

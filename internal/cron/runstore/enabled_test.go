@@ -6,33 +6,7 @@ import (
 	"io/fs"
 	"testing"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/runlog"
 )
-
-// TestStoreEnabled_FoldsNilAndDisabled pins R249-ARCH-29 (#993): the
-// Enabled() predicate must collapse the two historically-separate "off"
-// signals — a nil *Store receiver and the disabled flag — into one
-// gate so external callers stop mixing a nil check with the
-// method-internal Enabled() guard (now the shared layout's predicate).
-func TestStoreEnabled_FoldsNilAndDisabled(t *testing.T) {
-	t.Parallel()
-
-	var nilStore *Store
-	if nilStore.Enabled() {
-		t.Fatal("nil *Store must report Enabled()==false")
-	}
-
-	disabled := &Store{layout: runlog.New(runlog.Options{})}
-	if disabled.Enabled() {
-		t.Fatal("disabled Store must report Enabled()==false")
-	}
-
-	live := &Store{layout: runlog.New(runlog.Options{Root: t.TempDir(), Label: "cron run"})}
-	if !live.Enabled() {
-		t.Fatal("non-nil, non-disabled Store must report Enabled()==true")
-	}
-}
 
 // TestStore_NilBehavesDisabled: a nil *Store is how a Scheduler built without
 // NewScheduler holds its history, and cron calls the store directly, so every
@@ -40,6 +14,12 @@ func TestStoreEnabled_FoldsNilAndDisabled(t *testing.T) {
 func TestStore_NilBehavesDisabled(t *testing.T) {
 	t.Parallel()
 	var s *Store
+	if s.Enabled() {
+		t.Fatal("nil *Store must report Enabled()==false")
+	}
+	if df, ot := s.WriteFailedTotals(); df != 0 || ot != 0 {
+		t.Errorf("WriteFailedTotals = (%d,%d), want (0,0)", df, ot)
+	}
 	jobID, runID := mustGenerateID(), mustGenerateRunID()
 	s.Append(&CronRun{JobID: jobID, RunID: runID})
 	s.DeleteJob(jobID)

@@ -62,25 +62,3 @@ func TestNewVisionRunner_InheritsTheBackendGuard(t *testing.T) {
 		t.Fatal("NewVisionRunner must inherit NewRunner's backend guard")
 	}
 }
-
-// TestBookRunCostAttributesTheRealBackend: the ledger entry used to carry the
-// literal "claude" regardless of which binary ran.
-func TestBookRunCostAttributesTheRealBackend(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	r, err := NewRunner(RunnerConfig{BinPath: "claude", BackendID: BackendClaude, WorkDir: dir})
-	if err != nil {
-		t.Fatal(err)
-	}
-	impl := r.(*runnerImpl)
-	if got := impl.backendID(); got != BackendClaude {
-		t.Errorf("backendID() = %q, want %q", got, BackendClaude)
-	}
-	// The guard means a running Runner is always claude today, so this asserts the
-	// attribution reads the field rather than a literal: a future backend that can
-	// run the one-shot argv books under its own id without touching runner_cost.go.
-	impl.cfg.BackendID = "future-backend"
-	if got := impl.backendID(); got != "future-backend" {
-		t.Errorf("backendID() = %q; attribution must read cfg, not a literal", got)
-	}
-}

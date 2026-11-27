@@ -3,7 +3,6 @@ package runstore
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 )
@@ -17,9 +16,6 @@ import (
 // files (which carry script source, env values, stdout summaries) world-
 // readable. The chmod is the perm-tightening step that closes that gap.
 func TestRunStore_ChmodsExistingRunsRootTo0700(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("posix mode bits not enforced on windows")
-	}
 	t.Parallel()
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
@@ -46,39 +42,5 @@ func TestRunStore_ChmodsExistingRunsRootTo0700(t *testing.T) {
 	}
 	if perm := fi.Mode().Perm(); perm != 0o700 {
 		t.Errorf("runs root mode = %#o after newRunStore, want 0o700 (R247-SEC-12 #504 regression)", perm)
-	}
-}
-
-// TestRunStore_PreservesAlready0700RunsRoot pins the no-op path: when
-// runs/ is already at 0o700 the constructor leaves it alone (no chmod
-// log noise, no syscall surprise). Verified via stat round-trip — if a
-// future change accidentally chmod's on every startup, the test still
-// passes because the mode is unchanged, but the godoc here documents
-// the intent so a reviewer adding a logging hook to chmod sees the
-// expectation.
-func TestRunStore_PreservesAlready0700RunsRoot(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("posix mode bits not enforced on windows")
-	}
-	t.Parallel()
-	tmp := t.TempDir()
-	storePath := filepath.Join(tmp, "cron_jobs.json")
-	root := filepath.Join(tmp, "runs")
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		t.Fatalf("seed runs root: %v", err)
-	}
-	if err := os.Chmod(root, 0o700); err != nil {
-		t.Fatalf("chmod runs root: %v", err)
-	}
-	s := New(Options{StorePath: storePath, KeepCount: 10, KeepWindow: time.Hour})
-	if s == nil || !s.layout.Enabled() {
-		t.Fatalf("newRunStore returned nil/disabled despite valid root")
-	}
-	fi, err := os.Stat(root)
-	if err != nil {
-		t.Fatalf("stat runs root: %v", err)
-	}
-	if perm := fi.Mode().Perm(); perm != 0o700 {
-		t.Errorf("runs root mode = %#o, want 0o700 (constructor must not weaken existing mode)", perm)
 	}
 }

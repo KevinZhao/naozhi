@@ -97,32 +97,6 @@ func (t *jobTable) exists(id string) bool {
 	return ok
 }
 
-// count returns the number of registered jobs.
-func (t *jobTable) count() int {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return len(t.jobs)
-}
-
-// countForChat returns how many jobs are registered for one chat. This is the
-// cap check's O(1) answer, and it comes from chatJobCount rather than a scan of
-// jobs precisely so the two cannot disagree without this file noticing.
-func (t *jobTable) countForChat(k chatJobKey) int {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return t.chatJobCount[k]
-}
-
-// ids returns the registered ids in ascending order. A copy: the caller may hold
-// it past the lock, which is the whole point of returning data.
-func (t *jobTable) ids() []string {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	out := make([]string, len(t.sortedJobIDs))
-	copy(out, t.sortedJobIDs)
-	return out
-}
-
 // liveness reports whether id is registered and, if so, whether it is paused.
 // One call rather than exists + a second lookup: the two answers have to come
 // from the same lock hold, or a pause landing between them turns "live" into a

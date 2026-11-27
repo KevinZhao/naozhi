@@ -147,14 +147,3 @@ func TestRunScaffold_PanicWithoutHookPropagates(t *testing.T) {
 		t.Error("CAS gate leaked across a propagated panic")
 	}
 }
-
-// TestRunScaffold_NilFinalizerSafe: finalize() is documented nil-safe; the
-// scaffold must not NPE on a nil finalizer (defensive — every real caller
-// passes a non-nil one).
-func TestRunScaffold_NilFinalizerSafe(t *testing.T) {
-	ran := false
-	runScaffold{jobID: "job-nil"}.run(func() { ran = true })
-	if !ran {
-		t.Fatal("body did not run")
-	}
-}

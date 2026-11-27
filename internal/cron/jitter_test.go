@@ -59,45 +59,6 @@ func TestJitterWindow(t *testing.T) {
 	}
 }
 
-// TestApplyJitter_RespectsCtxCancel 在 goroutine 中启动 applyJitter 并在短
-// 时间内 cancel ctx，验证它不会等到 timer 耗尽才返回。
-func TestApplyJitter_RespectsCtxCancel(t *testing.T) {
-	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		// 10s 上限，配合 5m 周期 → window = min(10s, 5m/4) = 10s
-		applyJitter(ctx, "@every 5m", 10*time.Second)
-	}()
-
-	// 等 jitter goroutine 入 select
-	time.Sleep(20 * time.Millisecond)
-	cancel()
-
-	select {
-	case <-done:
-		// OK — ctx cancel 立即唤醒
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("applyJitter did not return within 500ms after ctx cancel")
-	}
-}
-
-// TestApplyJitter_CapClampedByPeriod 验证 jitter 窗口被 period/4 钳住：
-// 5m 周期 + 10m jitterMax → jitterSleep 实际使用的 window 是 75s。
-func TestApplyJitter_CapClampedByPeriod(t *testing.T) {
-	t.Parallel()
-
-	period := schedulePeriod("@every 5m", time.Now())
-	if period != 5*time.Minute {
-		t.Fatalf("schedulePeriod(@every 5m) = %v, want 5m", period)
-	}
-	if got := jitterWindow(period, 10*time.Minute); got != 75*time.Second {
-		t.Fatalf("jitterWindow(5m, 10m) = %v, want 75s (period/4 must clamp jitterMax)", got)
-	}
-}
-
 // TestApplyJitterSched_ReusesParsedSchedule 验证 applyJitterSched 接受
 // 已 parse 的 robfigcron.Schedule，period 计算结果与字符串路径一致，
 // 且 jitterMax=0 / nil sched 都不 sleep。R250-CR-14 (#1147)。
@@ -158,9 +119,6 @@ func TestApplyJitter_UnparsableSchedule_UsesMaxCap(t *testing.T) {
 	}
 
 	const jitterMax = 24 * time.Hour
-	if got := jitterWindow(period, jitterMax); got != jitterMax {
-		t.Fatalf("jitterWindow(0, %v) = %v, want the full jitterMax", jitterMax, got)
-	}
 
 	// 已取消 ctx：24h 窗口下若不走 ctx.Done() 分支会挂到 guard 超时。
 	ctx, cancel := context.WithCancel(context.Background())

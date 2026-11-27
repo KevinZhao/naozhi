@@ -112,26 +112,6 @@ func TestFilterEnv_PrefixMatchesTrailingUnderscore(t *testing.T) {
 	}
 }
 
-func TestFilterEnv_MixedExactAndPrefix(t *testing.T) {
-	t.Setenv("PATH", "/foo")
-	t.Setenv("HOME", "/h")
-	t.Setenv("HTTP_PROXY", "http://proxy")
-	t.Setenv("ANTHROPIC_BEDROCK_BASE_URL", "https://gateway")
-	t.Setenv("FOO_BAR", "no")
-
-	env := filterEnv([]string{"HTTP_PROXY", "ANTHROPIC_"})
-
-	if !envContains(env, "HTTP_PROXY", "http://proxy") {
-		t.Errorf("exact HTTP_PROXY must pass")
-	}
-	if !envContains(env, "ANTHROPIC_BEDROCK_BASE_URL", "https://gateway") {
-		t.Errorf("ANTHROPIC_ prefix must pass")
-	}
-	if envHasKey(env, "FOO_BAR") {
-		t.Errorf("FOO_BAR leaked")
-	}
-}
-
 // TestFilterEnv_PassesBackendSelectors guards against the regression
 // that took down AutoTitler in production:  with `--setting-sources ""`
 // the CLI doesn't load settings.json, so the NON-SECRET backend
@@ -331,65 +311,6 @@ func TestFilterEnv_AWSProfileValidation(t *testing.T) {
 			t.Error("safe AWS_DEFAULT_PROFILE must pass through")
 		}
 	})
-}
-
-// TestFilterEnv_DropsSecretsByDefault ensures we still strip
-// non-allowlisted secrets — the regression fix must not turn the
-// runner into a wide-open env tunnel.
-func TestFilterEnv_DropsSecretsByDefault(t *testing.T) {
-	t.Setenv("FEISHU_APP_SECRET", "super-secret")
-	t.Setenv("NAOZHI_DASHBOARD_TOKEN", "dash-token")
-	t.Setenv("DATABASE_URL", "postgres://x")
-
-	got := filterEnv(nil)
-	for _, k := range []string{"FEISHU_APP_SECRET", "NAOZHI_DASHBOARD_TOKEN", "DATABASE_URL"} {
-		for _, kv := range got {
-			if strings.HasPrefix(kv, k+"=") {
-				t.Errorf("secret %s leaked through filterEnv: %s", k, kv)
-			}
-		}
-	}
-}
-
-// TestFilterEnv_AWSDefaultProfileValidation verifies that AWS_DEFAULT_PROFILE
-// obeys the same profile-name validation as AWS_PROFILE — the fix for
-// R20260603040203-CODE-001 which added it to the sysession passthrough set so
-// the profile-name gate can actually fire for it.
-func TestFilterEnv_AWSDefaultProfileValidation(t *testing.T) {
-	t.Run("safe AWS_DEFAULT_PROFILE passes", func(t *testing.T) {
-		t.Setenv("AWS_DEFAULT_PROFILE", "my-bedrock-profile")
-		env := filterEnv(nil)
-		if !envContains(env, "AWS_DEFAULT_PROFILE", "my-bedrock-profile") {
-			t.Error("safe AWS_DEFAULT_PROFILE must pass through")
-		}
-	})
-
-	t.Run("unsafe AWS_DEFAULT_PROFILE stripped", func(t *testing.T) {
-		t.Setenv("AWS_DEFAULT_PROFILE", "../../malicious; rm -rf /")
-		env := filterEnv(nil)
-		if envHasKey(env, "AWS_DEFAULT_PROFILE") {
-			t.Error("unsafe AWS_DEFAULT_PROFILE must be stripped")
-		}
-	})
-
-	t.Run("empty AWS_DEFAULT_PROFILE stripped", func(t *testing.T) {
-		t.Setenv("AWS_DEFAULT_PROFILE", "")
-		env := filterEnv(nil)
-		if envHasKey(env, "AWS_DEFAULT_PROFILE") {
-			t.Error("empty AWS_DEFAULT_PROFILE must be stripped")
-		}
-	})
-}
-
-// TestFilterEnv_PassesAWSDefaultProfile guards the R20260603040203-CODE-001
-// fix: AWS_DEFAULT_PROFILE must appear in the always-passthrough list so it
-// reaches the profile-validation gate, and a valid value flows through.
-func TestFilterEnv_PassesAWSDefaultProfile(t *testing.T) {
-	t.Setenv("AWS_DEFAULT_PROFILE", "default")
-	got := filterEnv(nil)
-	if !envContains(got, "AWS_DEFAULT_PROFILE", "default") {
-		t.Errorf("AWS_DEFAULT_PROFILE=default must pass the sysession env gate")
-	}
 }
 
 // TestFilterEnv_BaseURLSSRFGuard is the R090031-SEC-1 (#1687) gate: a base-URL

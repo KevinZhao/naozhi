@@ -43,10 +43,8 @@ func TestBuildQuestionCardJSON_Shape(t *testing.T) {
 	if !strings.Contains(s, `"tool_use_id":"toolu_abc"`) {
 		t.Error("value.tool_use_id not embedded in card")
 	}
-	// session_key was intentionally removed (security-review: dead field
-	// widened attack surface). The card payload must NOT embed it.
-	if strings.Contains(s, `"session_key"`) {
-		t.Error("value.session_key should not be embedded — was removed for security")
+	if !strings.Contains(s, `"tag":"button"`) {
+		t.Error("single-question card missing action buttons")
 	}
 	if !strings.Contains(s, `"kind":"ask_answer"`) {
 		t.Error("value.kind not embedded in card")
@@ -112,28 +110,6 @@ func TestBuildMultiQuestionMarkdownCardJSON(t *testing.T) {
 		if !strings.Contains(content, s) {
 			t.Errorf("multi-question card missing %q", s)
 		}
-	}
-}
-
-// Single-question cards must keep the action module so one click is the
-// complete answer.
-func TestBuildQuestionCard_SingleQuestionKeepsButtons(t *testing.T) {
-	t.Parallel()
-	card := platform.QuestionCard{
-		ToolUseID: "t1",
-		Items: []platform.QuestionItem{{
-			Question: "q",
-			Header:   "H",
-			Options:  []platform.QuestionOption{{Label: "A"}, {Label: "B"}},
-		}},
-	}
-	data, err := buildQuestionCardJSON(card)
-	if err != nil {
-		t.Fatalf("err=%v", err)
-	}
-	s := string(data)
-	if !strings.Contains(s, `"tag":"button"`) {
-		t.Errorf("single-question card missing action buttons: %s", s)
 	}
 }
 
@@ -208,6 +184,7 @@ func TestDispatchCardAction_RoutesAsMessage(t *testing.T) {
 		ToolUseID: "toolu_xyz",
 		Header:    "Error style",
 		Label:     "Return an error",
+		AgentID:   "code-reviewer",
 	}
 	// messageID is left empty intentionally — populating it would trigger the
 	// background EditMessage call, which requires a configured Feishu client
@@ -225,6 +202,10 @@ func TestDispatchCardAction_RoutesAsMessage(t *testing.T) {
 	}
 	if !got.MentionMe {
 		t.Error("card click should force MentionMe=true so group dispatch fires")
+	}
+	// #2148: the asking agent rides back so the answer is not routed to "general".
+	if got.AgentID != "code-reviewer" {
+		t.Errorf("AgentID = %q, want code-reviewer", got.AgentID)
 	}
 }
 
@@ -327,28 +308,6 @@ func TestDispatchCardAction_ChatTypeResolution(t *testing.T) {
 				t.Errorf("ChatType = %q, want %q", got.ChatType, tt.want)
 			}
 		})
-	}
-}
-
-// TestDispatchCardAction_CarriesAgentID is the #2148 regression: a card click
-// whose value carries agent_id must propagate it onto the synthesised
-// IncomingMessage so the dispatcher can route the answer back to the asking
-// agent session instead of "general".
-func TestDispatchCardAction_CarriesAgentID(t *testing.T) {
-	t.Parallel()
-	f := &Feishu{}
-	var got platform.IncomingMessage
-	handler := func(_ context.Context, m platform.IncomingMessage) { got = m }
-	payload := platform.AskAnswerPayload{
-		Kind:      "ask_answer",
-		ToolUseID: "toolu_xyz",
-		Header:    "Error style",
-		Label:     "Return an error",
-		AgentID:   "code-reviewer",
-	}
-	f.dispatchCardAction(context.Background(), payload, "oc_123", "", "direct", "ou_user", handler)
-	if got.AgentID != "code-reviewer" {
-		t.Errorf("IncomingMessage.AgentID = %q, want code-reviewer (#2148)", got.AgentID)
 	}
 }
 

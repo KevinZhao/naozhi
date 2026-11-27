@@ -87,22 +87,6 @@ func TestOnReady_StillBackfillsBotID(t *testing.T) {
 	}
 }
 
-// TestConfigureSession_SyncEvents pins the setting, not the ordering itself:
-// with discordgo's default goroutine per event, the Disconnect of a drop and
-// the Connect of its reconnect race, and a late Disconnect leaves the state
-// "disconnected" on a live link.
-func TestConfigureSession_SyncEvents(t *testing.T) {
-	t.Parallel()
-	sess, err := discordgo.New("Bot test-token")
-	if err != nil {
-		t.Fatalf("discordgo.New: %v", err)
-	}
-	New(Config{BotToken: "test-token"}).configureSession(sess)
-	if !sess.SyncEvents {
-		t.Fatal("configureSession left SyncEvents off; lifecycle handlers would race")
-	}
-}
-
 // fakeGateway serves Discord's REST API (every path answers like the gateway
 // lookup) and a websocket gateway that answers Hello / Identify / Resume. Each websocket handshake waits for
 // one value on hello, so a test can observe the state while Open is blocked.

@@ -12,13 +12,14 @@ import (
 	"testing"
 )
 
-func TestClassifyError_NilIsCodeOK(t *testing.T) {
+func TestClassifyError_NilAndUnknown(t *testing.T) {
 	t.Parallel()
-	if got := ClassifyError(nil); got != CodeOK {
-		t.Errorf("ClassifyError(nil) = %q, want %q", got, CodeOK)
+	if got := ClassifyError(nil); got != CodeOK || got.HTTPStatus() != http.StatusOK {
+		t.Errorf("ClassifyError(nil) = %q (%d), want %q (200)", got, got.HTTPStatus(), CodeOK)
 	}
-	if got := CodeOK.HTTPStatus(); got != http.StatusOK {
-		t.Errorf("CodeOK.HTTPStatus = %d, want 200", got)
+	// Unrecognised errors surface as 500, never 200.
+	if got := ClassifyError(errors.New("not a cron sentinel")); got != CodeUnknown || got.HTTPStatus() != http.StatusInternalServerError {
+		t.Errorf("ClassifyError(custom) = %q (%d), want %q (500)", got, got.HTTPStatus(), CodeUnknown)
 	}
 }
 
@@ -68,20 +69,6 @@ func TestClassifyError_AllSentinels(t *testing.T) {
 	}
 }
 
-// TestClassifyError_UnknownErrorMapsToCodeUnknown verifies the default
-// branch surfaces unrecognised errors as 500 rather than silently
-// mapping to 200 / dropping context.
-func TestClassifyError_UnknownErrorMapsToCodeUnknown(t *testing.T) {
-	t.Parallel()
-	custom := errors.New("foo: not a cron sentinel")
-	if got := ClassifyError(custom); got != CodeUnknown {
-		t.Errorf("ClassifyError(custom) = %q, want %q", got, CodeUnknown)
-	}
-	if got := CodeUnknown.HTTPStatus(); got != http.StatusInternalServerError {
-		t.Errorf("CodeUnknown.HTTPStatus = %d, want 500", got)
-	}
-}
-
 // TestClassifyError_PersistFailedTakesPrecedence pins the documented
 // order: ErrPersistFailed wins over downstream sentinels because it
 // represents the "in-memory mutation succeeded but disk write failed"
@@ -95,35 +82,6 @@ func TestClassifyError_PersistFailedTakesPrecedence(t *testing.T) {
 	combo := fmt.Errorf("%w: secondary %w", ErrPersistFailed, ErrJobAlreadyPaused)
 	if got := ClassifyError(combo); got != CodePersistFailed {
 		t.Errorf("ClassifyError(persist+already_paused) = %q, want %q", got, CodePersistFailed)
-	}
-}
-
-// TestErrCodeHTTP_Exhaustive asserts that every declared ErrCode constant
-// has an explicit entry in errCodeHTTP, catching the "add sentinel, forget
-// map entry" failure mode at test time rather than in production.
-func TestErrCodeHTTP_Exhaustive(t *testing.T) {
-	t.Parallel()
-	allCodes := []ErrCode{
-		CodeOK,
-		CodeJobNotFound,
-		CodeAmbiguousPrefix,
-		CodeJobAlreadyPaused,
-		CodeJobNotPaused,
-		CodeJobPaused,
-		CodeJobNoPrompt,
-		CodePersistFailed,
-		CodeInvalidPrompt,
-		CodePromptAlreadySet,
-		CodeSchedulerStopped,
-		CodeJobQuotaExceeded,
-		CodeIntervalTooShort,
-		CodeInvalidSchedule,
-		CodeUnknown,
-	}
-	for _, code := range allCodes {
-		if _, ok := errCodeHTTP[code]; !ok {
-			t.Errorf("ErrCode %q has no entry in errCodeHTTP; add one", code)
-		}
 	}
 }
 

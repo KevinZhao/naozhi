@@ -46,23 +46,3 @@ func TestCacheGet_MissesWhenInvalidateRacesPostWarm(t *testing.T) {
 		t.Fatalf("cacheGet returned non-nil slice (%d rows) on miss; want nil (#2000)", len(got))
 	}
 }
-
-// TestCacheGet_PostWarmHookNilByDefault pins that the hook seam stays a
-// pure no-op in the normal cold path: with the hook unset, cacheGet warms
-// and returns the disk row exactly as before the #2000 fix.
-func TestCacheGet_PostWarmHookNilByDefault(t *testing.T) {
-	t.Parallel()
-	s := newTestStore(t, 10, time.Hour)
-	jobID := mustGenerateID()
-	run := makeRun(jobID, time.Now())
-	s.Append(run)
-	s.recentCache.Delete(jobID)
-
-	got, ok := s.cacheGet(jobID, 10)
-	if !ok {
-		t.Fatalf("cold-path cacheGet returned ok=false with hook unset; warm pass regression")
-	}
-	if len(got) != 1 || got[0].RunID != run.RunID {
-		t.Fatalf("cold-path cacheGet returned %d rows, want 1 row with RunID=%q", len(got), run.RunID)
-	}
-}

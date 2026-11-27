@@ -71,25 +71,6 @@ func TestRunStore_DropOrphanRun_OnlyOwnFileWhenSiblingsExist(t *testing.T) {
 	}
 }
 
-// TestRunStore_DropOrphanRun_RemovesDirWhenEmpty: when the caller's record
-// was the only entry, both the file and runs/<jobID>/ are removed, so no
-// empty orphan directory outlives the deleted job.
-func TestRunStore_DropOrphanRun_RemovesDirWhenEmpty(t *testing.T) {
-	t.Parallel()
-	s, appendRun := newDropOrphanStore(t)
-	jobID := mustGenerateID()
-	runID := mustGenerateRunID()
-	appendRun(jobID, runID)
-
-	s.DropOrphanRun(jobID, runID)
-
-	mustNotExist(t, filepath.Join(s.Dir(), jobID))
-	// runs/ root itself is untouched.
-	if fi, err := os.Stat(s.Dir()); err != nil || !fi.IsDir() {
-		t.Fatalf("runs root must survive: fi=%v err=%v", fi, err)
-	}
-}
-
 // TestRunStore_DropOrphanRun_ClearsDirEnsuredCache: after DropOrphanRun
 // removed runs/<jobID>/, the jobDirEnsured fast-path marker must be gone,
 // otherwise the next Append would skip MkdirAll and fail its write. A

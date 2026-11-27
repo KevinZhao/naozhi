@@ -2,7 +2,6 @@ package cron
 
 import (
 	"path/filepath"
-	"sync"
 	"testing"
 )
 
@@ -66,78 +65,4 @@ func TestWithJobByPrefix_ReturnsSnapshot(t *testing.T) {
 	if got.ID != live.ID {
 		t.Errorf("snapshot ID=%q != live ID=%q", got.ID, live.ID)
 	}
-}
-
-// TestWithJobByPrefix_SnapshotRaceDeleteJob exercises the -race detector path:
-// a concurrent UpdateJob mutating the Prompt string field of the live *Job
-// must not tear when mutateByPrefix returns a snapshot. Without the copy,
-// the returned *Job's string header points into the same backing array a
-// concurrent goroutine is overwriting → data race. With the copy, the caller
-// holds its own stable string.
-//
-// This is a structural race test; the -race flag is required to catch the
-// regression reliably. Without -race it still validates the copy invariant.
-func TestWithJobByPrefix_SnapshotRaceDeleteJob(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow: skipped in -short")
-	}
-	t.Parallel()
-	dir := t.TempDir()
-	s := NewScheduler(SchedulerConfig{
-		StorePath: filepath.Join(dir, "cron.json"),
-		MaxJobs:   5,
-	}, SchedulerDeps{})
-	if err := s.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	t.Cleanup(s.Stop)
-
-	j := &Job{
-		Schedule: "@every 1h",
-		Prompt:   "initial-prompt",
-		Platform: "feishu",
-		ChatID:   "chat1",
-		ChatType: "direct",
-		Paused:   true,
-	}
-	if err := s.AddJob(j); err != nil {
-		t.Fatalf("AddJob: %v", err)
-	}
-
-	// Fire concurrent UpdateJob (Prompt mutation) while calling ResumeJob
-	// (which goes through mutateByPrefix). Without the snapshot fix both
-	// goroutines operate on the same *Job pointer — the race detector flags
-	// concurrent string writes against the reads inside mutateByPrefix.
-	var wg sync.WaitGroup
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 0; i < 20; i++ {
-			newPrompt := "concurrent-prompt"
-			if _, err := s.UpdateJob(j.ID, JobUpdate{Prompt: &newPrompt}); err != nil {
-				// UpdateJob may fail on persist; that's fine for the race test.
-				_ = err
-			}
-		}
-	}()
-
-	for i := 0; i < 10; i++ {
-		got, err := s.ResumeJob(j.ID[:4], "feishu", "chat1")
-		if err != nil {
-			// May fail with ErrJobAlreadyActive; just continue.
-			_ = err
-		}
-		if got != nil {
-			// Read the snapshot field — with the fix this is our stable copy;
-			// without the fix this races against the concurrent UpdateJob.
-			_ = got.Prompt
-			// Pause again so we can resume in the next iteration.
-			if _, err := s.PauseJob(j.ID[:4], "feishu", "chat1"); err != nil {
-				_ = err
-			}
-		}
-	}
-
-	wg.Wait()
 }

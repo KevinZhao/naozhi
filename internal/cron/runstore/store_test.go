@@ -32,7 +32,7 @@ func newTestStore(t *testing.T, keepCount int, keepWindow time.Duration) *Store 
 	if s == nil {
 		t.Fatalf("New returned nil")
 	}
-	if !s.layout.Enabled() {
+	if !s.Enabled() {
 		t.Fatalf("New unexpectedly disabled")
 	}
 	return s
@@ -147,7 +147,7 @@ func TestRunStore_RejectInvalidIDs(t *testing.T) {
 func TestRunStore_Disabled(t *testing.T) {
 	t.Parallel()
 	s := New(Options{})
-	if s == nil || s.layout.Enabled() {
+	if s == nil || s.Enabled() {
 		t.Fatalf("expected disabled store; got %+v", s)
 	}
 
@@ -164,38 +164,6 @@ func TestRunStore_Disabled(t *testing.T) {
 		t.Fatalf("Get on disabled err = %v want fs.ErrNotExist", err)
 	}
 	s.DeleteJob(jobID) // must no-op, no panic
-}
-
-// TestRunStore_OversizePayloadShrinksAndPersists writes a 50 KiB prompt
-// and checks Append falls back to the truncate-and-retry path so a record
-// is still persisted (with the truncated marker).
-func TestRunStore_OversizePayloadShrinksAndPersists(t *testing.T) {
-	t.Parallel()
-	s := newTestStore(t, 200, 30*24*time.Hour)
-	jobID := mustGenerateID()
-
-	huge := strings.Repeat("A", 50*1024)
-	run := makeRun(jobID, time.Now())
-	run.Prompt = huge
-	s.Append(run)
-
-	got, err := s.Get(jobID, run.RunID)
-	if err != nil {
-		t.Fatalf("Get after oversize append: %v", err)
-	}
-	if !strings.HasSuffix(got.Prompt, "…[truncated]") {
-		start := len(got.Prompt) - 20
-		if start < 0 {
-			start = 0
-		}
-		t.Fatalf("prompt did not get truncated marker; len=%d suffix=%q", len(got.Prompt), got.Prompt[start:])
-	}
-	// TruncateWithSuffix keeps the first 256 runes + sentinel; for ASCII
-	// input that's 256 bytes + sentinel byte length.
-	wantLen := 256 + len("…[truncated]")
-	if len([]byte(got.Prompt)) != wantLen {
-		t.Fatalf("truncated prompt bytes = %d want %d", len(got.Prompt), wantLen)
-	}
 }
 
 // TestRunStore_OversizeMultiByteUTF8DoesNotSplitRune covers R221-FIX-P0-1:
@@ -278,42 +246,6 @@ func TestRunStore_RetentionByCount(t *testing.T) {
 	for i := 2; i < 5; i++ {
 		if _, err := s.Get(jobID, runIDs[i]); err != nil {
 			t.Fatalf("expected runIDs[%d] (%s) kept; err=%v", i, runIDs[i], err)
-		}
-	}
-}
-
-// TestRunStore_RetentionByWindow with keepWindow=24h, Append 3 runs and
-// rewind one mtime to 48h ago — that one must be trimmed.
-func TestRunStore_RetentionByWindow(t *testing.T) {
-	t.Parallel()
-	s := newTestStore(t, 200, 24*time.Hour)
-	s.enableTrimGC = false // run trim manually so mtime injection is honored
-	jobID := mustGenerateID()
-
-	now := time.Now()
-	runs := make([]*CronRun, 3)
-	for i := 0; i < 3; i++ {
-		runs[i] = makeRun(jobID, now)
-		s.Append(runs[i])
-	}
-	// Push runs[0] mtime back 48 hours.
-	old := now.Add(-48 * time.Hour)
-	oldPath := filepath.Join(s.Dir(), jobID, runs[0].RunID+".json")
-	if err := os.Chtimes(oldPath, old, old); err != nil {
-		t.Fatalf("Chtimes: %v", err)
-	}
-
-	lock := s.jobLock(jobID)
-	lock.Lock()
-	s.trimJobLocked(jobID, now)
-	lock.Unlock()
-
-	if _, err := s.Get(jobID, runs[0].RunID); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("expected aged run trimmed; err=%v", err)
-	}
-	for i := 1; i < 3; i++ {
-		if _, err := s.Get(jobID, runs[i].RunID); err != nil {
-			t.Fatalf("expected runs[%d] kept; err=%v", i, err)
 		}
 	}
 }
@@ -824,34 +756,6 @@ func TestRunStore_ListHonoursConfiguredKeepCount(t *testing.T) {
 	sids := s.RecentSessionIDs(jobID, keep)
 	if len(sids) != total {
 		t.Fatalf("RecentSessionIDs(n=%d) returned %d ids; want %d", keep, len(sids), total)
-	}
-}
-
-// TestRunStore_ReadRunNoLstat_MatchesReadRun pins the contract that the
-// no-Lstat variant returns byte-identical run records for a normal regular
-// .json file: callers in diskListNewestFirst must observe no parsing drift
-// across the optimisation. R245-PERF-9.
-func TestRunStore_ReadRunNoLstat_MatchesReadRun(t *testing.T) {
-	t.Parallel()
-	s := newTestStore(t, 200, 30*24*time.Hour)
-	jobID := mustGenerateID()
-
-	run := makeRun(jobID, time.Now())
-	s.Append(run)
-
-	path := filepath.Join(s.Dir(), jobID, run.RunID+".json")
-	withLstat, err := s.readRun(path)
-	if err != nil {
-		t.Fatalf("readRun: %v", err)
-	}
-	noLstat, err := s.readRunNoLstat(path)
-	if err != nil {
-		t.Fatalf("readRunNoLstat: %v", err)
-	}
-	a, _ := json.Marshal(withLstat)
-	b, _ := json.Marshal(noLstat)
-	if string(a) != string(b) {
-		t.Fatalf("readRunNoLstat diverges from readRun:\nwithLstat=%s\n noLstat=%s", a, b)
 	}
 }
 

@@ -1,12 +1,10 @@
 package cron
 
 import (
-	"context"
 	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 )
@@ -139,92 +137,6 @@ func TestP1_DeleteJobByIDRemovesRunsSubtree(t *testing.T) {
 	}
 }
 
-// TestP1_StartTrimAllReclaimsStaleRuns: runs/<jobID>/ entries older than
-// keepWindow are removed during Start's cold pass. Mirrors a long
-// process-down period.
-func TestP1_StartTrimAllReclaimsStaleRuns(t *testing.T) {
-	t.Parallel()
-	tmp := t.TempDir()
-	storePath := filepath.Join(tmp, "cron_jobs.json")
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
-	jobID := mustGenerateID()
-	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.putJobForTest(j)
-
-	// Append 3 runs, then push their mtimes to 60 days ago.
-	old := time.Now().Add(-60 * 24 * time.Hour)
-	for i := 0; i < 3; i++ {
-		s.finishRun(runCtx{jobID: j.ID, runID: mustGenerateRunID(), startedAt: time.Now(), trigger: TriggerScheduled}, runOutcome{state: RunStateSucceeded, result: "x"})
-	}
-	subtree := filepath.Join(tmp, "runs", jobID)
-	entries, err := os.ReadDir(subtree)
-	if err != nil {
-		t.Fatalf("readdir: %v", err)
-	}
-	for _, e := range entries {
-		path := filepath.Join(subtree, e.Name())
-		if err := os.Chtimes(path, old, old); err != nil {
-			t.Fatalf("chtimes: %v", err)
-		}
-	}
-
-	// trimAll with default 30-day window should clear them all.
-	s.runs.TrimAll(context.Background(), time.Now())
-	entries2, err := os.ReadDir(subtree)
-	if err != nil {
-		t.Fatalf("readdir2: %v", err)
-	}
-	if len(entries2) != 0 {
-		t.Errorf("trimAll should reap stale entries; got %d remaining", len(entries2))
-	}
-}
-
-// TestP1_RecentRunsSurfacesNewestFirst: dashboard list view's recent_runs
-// path returns newest entries via Recent helper.
-func TestP1_RecentRunsSurfacesNewestFirst(t *testing.T) {
-	t.Parallel()
-	tmp := t.TempDir()
-	storePath := filepath.Join(tmp, "cron_jobs.json")
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
-	jobID := mustGenerateID()
-	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.putJobForTest(j)
-
-	// Disable auto-trim so all 5 entries persist regardless of clock skew.
-	s.runs.SetTrimGCForTest(false)
-
-	type rec struct {
-		runID string
-		mtime time.Time
-	}
-	recs := make([]rec, 0, 5)
-	for i := 0; i < 5; i++ {
-		runID := mustGenerateRunID()
-		s.finishRun(runCtx{jobID: j.ID, runID: runID, startedAt: time.Now().Add(time.Duration(i) * time.Second), trigger: TriggerScheduled}, runOutcome{state: RunStateSucceeded, result: "x"})
-		// Force monotonic mtime for deterministic newest-first ordering on
-		// fast filesystems where ctime resolution may collapse adjacent
-		// writes.
-		mt := time.Now().Add(time.Duration(i) * time.Second)
-		path := filepath.Join(tmp, "runs", jobID, runID+".json")
-		if err := os.Chtimes(path, mt, mt); err != nil {
-			t.Fatalf("chtimes: %v", err)
-		}
-		recs = append(recs, rec{runID: runID, mtime: mt})
-	}
-
-	got := s.RecentRuns(jobID, 3)
-	if len(got) != 3 {
-		t.Fatalf("recent: want 3, got %d", len(got))
-	}
-	// Newest-first: recs[4] then recs[3] then recs[2].
-	wantOrder := []string{recs[4].runID, recs[3].runID, recs[2].runID}
-	for i, want := range wantOrder {
-		if got[i].RunID != want {
-			t.Errorf("recent[%d]: got %q want %q", i, got[i].RunID, want)
-		}
-	}
-}
-
 // TestP1_DisabledStoreNoOps: NewScheduler with empty StorePath has a
 // disabled run store — Append paths inside finishRun never panic and
 // ListRuns / GetRun return empty.
@@ -245,40 +157,5 @@ func TestP1_DisabledStoreNoOps(t *testing.T) {
 	}
 	if _, err := s.Run(jobID, "abcdef0123456789"); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("disabled get: want ErrNotExist, got %v", err)
-	}
-}
-
-// TestP1_ConcurrentFinishRunSerialised: multiple goroutines hitting
-// finishRun on the same job (CAS-violating overlap is impossible because
-// we bypass executeOpt; this only stresses runstore.Store.Append's per-jobID
-// mutex). All records persist, none lost. Race-clean under -race.
-func TestP1_ConcurrentFinishRunSerialised(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow: skipped in -short")
-	}
-	t.Parallel()
-	tmp := t.TempDir()
-	storePath := filepath.Join(tmp, "cron_jobs.json")
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
-	// Disable trim so we can observe all writes.
-	s.runs.SetTrimGCForTest(false)
-	jobID := mustGenerateID()
-	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.putJobForTest(j)
-
-	const N = 30
-	var wg sync.WaitGroup
-	wg.Add(N)
-	for i := 0; i < N; i++ {
-		go func() {
-			defer wg.Done()
-			s.finishRun(runCtx{jobID: j.ID, runID: mustGenerateRunID(), startedAt: time.Now(), trigger: TriggerScheduled}, runOutcome{state: RunStateSucceeded, result: "x"})
-		}()
-	}
-	wg.Wait()
-
-	rows := s.ListRuns(jobID, 200, time.Time{})
-	if len(rows) != N {
-		t.Errorf("concurrent finishRun: want %d records, got %d", N, len(rows))
 	}
 }

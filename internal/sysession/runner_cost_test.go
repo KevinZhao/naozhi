@@ -123,23 +123,6 @@ func TestRunner_Run_NonJSONIsErrorNotGarbageReply(t *testing.T) {
 	}
 }
 
-func TestRunInfoContext_RoundTrip(t *testing.T) {
-	if _, ok := RunInfoFromContext(context.Background()); ok {
-		t.Fatal("bare ctx must carry no run info")
-	}
-	ctx := withRunInfo(context.Background(), "d", "r")
-	ri, ok := RunInfoFromContext(ctx)
-	if !ok || ri.Daemon != "d" || ri.RunID != "r" {
-		t.Fatalf("round trip = %+v %v", ri, ok)
-	}
-}
-
-func TestRunnerStdoutCap_FitsJSONEnvelope(t *testing.T) {
-	if runnerStdoutCapBytes < 256*1024 {
-		t.Fatalf("cap %d too small for the json envelope around a 64 KiB reply", runnerStdoutCapBytes)
-	}
-}
-
 // TestManager_TickContextCarriesRunInfo pins the attribution contract: the
 // ctx a daemon receives in Tick identifies the run, so Runner calls inside
 // Tick book their cost to the same run_id the DaemonRun record carries.

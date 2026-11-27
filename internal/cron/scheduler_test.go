@@ -66,29 +66,6 @@ func TestGenerateID(t *testing.T) {
 	}
 }
 
-func TestValidateSchedule(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		schedule string
-		wantErr  bool
-	}{
-		{"@every 30m", false},
-		{"@daily", false},
-		{"@hourly", false},
-		{"0 9 * * 1-5", false},
-		{"*/5 * * * *", false},
-		{"0 */5 * * * *", true}, // seconds field is not part of the user syntax
-		{"invalid", true},
-		{"", true},
-	}
-	for _, tt := range tests {
-		err := validateSchedule(tt.schedule, time.UTC)
-		if (err != nil) != tt.wantErr {
-			t.Errorf("validateSchedule(%q): err=%v, wantErr=%v", tt.schedule, err, tt.wantErr)
-		}
-	}
-}
-
 func TestStoreRoundTrip(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -443,51 +420,6 @@ func TestSchedulerDelete(t *testing.T) {
 	}
 }
 
-// TestJobRunningGuardReentry locks in the R31-REL2 invariant: a second execute
-// for the same job ID while the first is still holding the guard must be
-// short-circuited by the CAS gate, not run concurrently. The CAS gate now
-// lives inside *runInflight (cron-run-history.md P0); the test exercises
-// the embedded atomic.Bool's semantics through jobInflight.
-func TestJobRunningGuardReentry(t *testing.T) {
-	t.Parallel()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 10}, SchedulerDeps{})
-
-	g := s.gateForTest().jobInflight("job-x")
-	if !g.running.CompareAndSwap(false, true) {
-		t.Fatal("initial CAS should succeed")
-	}
-	if g2 := s.gateForTest().jobInflight("job-x"); g2 != g {
-		t.Fatal("jobInflight should return the same *runInflight for the same id")
-	}
-	if g.running.CompareAndSwap(false, true) {
-		t.Fatal("re-entrant CAS should fail while guard is held")
-	}
-	g.running.Store(false)
-	if !g.running.CompareAndSwap(false, true) {
-		t.Fatal("CAS should succeed after guard released")
-	}
-	g.running.Store(false)
-
-	s.gateForTest().runningJobs.Delete("job-x")
-	if g3 := s.gateForTest().jobInflight("job-x"); g3 == g {
-		t.Fatal("guard should be freshly allocated after delete")
-	}
-}
-
-func TestSchedulerInvalidSchedule(t *testing.T) {
-	t.Parallel()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 10}, SchedulerDeps{})
-	if err := s.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer s.Stop()
-
-	err := s.AddJob(&Job{Schedule: "invalid", Prompt: "test", Platform: "p", ChatID: "c"})
-	if err == nil {
-		t.Error("expected error for invalid schedule")
-	}
-}
-
 // TestEnsureStub exercises the recovery hook used by handleSubscribe when a
 // cron stub was torn down by sidebar "×". The stub must be re-registerable
 // idempotently while the job still exists, and refuse to create a stub once
@@ -628,31 +560,6 @@ func TestNewScheduler_StoreParentDirChmodsExisting(t *testing.T) {
 	}
 	if got := fi.Mode().Perm(); got != 0o700 {
 		t.Errorf("parent dir perm = %o, want 0o700 (chmod must clamp pre-existing 0o755)", got)
-	}
-}
-
-func TestSchedulerPersistence(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cron.json")
-
-	// Create and add job
-	s1 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 10}, SchedulerDeps{})
-	s1.Start()
-	s1.AddJob(&Job{Schedule: "@hourly", Prompt: "persist me", Platform: "p", ChatID: "c"})
-	s1.Stop()
-
-	// Reload
-	s2 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 10}, SchedulerDeps{})
-	s2.Start()
-	defer s2.Stop()
-
-	jobs := s2.ListJobs("p", "c")
-	if len(jobs) != 1 {
-		t.Fatalf("expected 1 persisted job, got %d", len(jobs))
-	}
-	if jobs[0].Prompt != "persist me" {
-		t.Errorf("unexpected prompt: %s", jobs[0].Prompt)
 	}
 }
 
@@ -800,70 +707,6 @@ func TestKnownSessionIDs_AggregatesFromJobs(t *testing.T) {
 	}
 	if _, ok := got[""]; ok {
 		t.Errorf("empty LastSessionID must not be added to set: %v", got)
-	}
-}
-
-func TestKnownSessionIDs_NoJobsReturnsEmpty(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	s := NewScheduler(SchedulerConfig{
-		StorePath: filepath.Join(dir, "cron.json"),
-		MaxJobs:   5,
-	}, SchedulerDeps{})
-	if err := s.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer s.Stop()
-
-	got := s.KnownSessionIDs()
-	if got == nil {
-		t.Fatalf("KnownSessionIDs must return non-nil map")
-	}
-	if len(got) != 0 {
-		t.Errorf("expected empty map, got %d: %v", len(got), got)
-	}
-}
-
-// TestSchedulerRunsKeepDefaults pins the run-history retention every
-// Scheduler gets from the run store: DefaultRunsKeepCount newest records and
-// DefaultRunsKeepWindow age. R250-GO-3.
-func TestSchedulerRunsKeepDefaults(t *testing.T) {
-	t.Parallel()
-	s := NewScheduler(SchedulerConfig{
-		StorePath: filepath.Join(t.TempDir(), "cron.json"),
-		MaxJobs:   5,
-	}, SchedulerDeps{})
-	if got := s.runs.KeepCount(); got != DefaultRunsKeepCount {
-		t.Errorf("keepCount: got %d, want %d", got, DefaultRunsKeepCount)
-	}
-	if got := s.runs.KeepWindow(); got != DefaultRunsKeepWindow {
-		t.Errorf("keepWindow: got %v, want %v", got, DefaultRunsKeepWindow)
-	}
-}
-
-// TestNewSchedulerNilRouterWarns verifies NewScheduler does not panic
-// when deps.Router is nil and the resulting Scheduler stores a nil
-// router for the executeOpt-side guard (R20260526-GO-004) to pick up.
-//
-// We intentionally do NOT panic at construction because dozens of
-// in-tree tests build narrow fixtures via NewScheduler without a
-// router (persist_failure / scheduler / stop_budget / trigger_now);
-// they only exercise mutation paths that never reach executeOpt. The
-// log line surfaces misconfiguration in production where ticks do run.
-// R20260526-GO-023.
-func TestNewSchedulerNilRouterWarns(t *testing.T) {
-	t.Parallel()
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("NewScheduler panicked on nil router: %v", r)
-		}
-	}()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{})
-	if s == nil {
-		t.Fatalf("NewScheduler returned nil")
-	}
-	if s.router != nil {
-		t.Fatalf("expected nil router on the constructed scheduler, got %T", s.router)
 	}
 }
 

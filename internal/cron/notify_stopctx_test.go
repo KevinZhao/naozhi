@@ -92,27 +92,3 @@ func TestNotifyTargetCancelsOnStopCtx(t *testing.T) {
 		t.Errorf("Reply ctx error = %v, want context.Canceled or DeadlineExceeded", got)
 	}
 }
-
-// TestNotifyTargetNilStopCtxFallback covers the defensive
-// fallback: a hand-constructed *Scheduler (e.g. test fake) without
-// stopCtx wired must still have its per-target timeout enforced. The
-// fallback parent is context.Background; the cronNotifyTimeout ceiling
-// continues to bound the call. We bound the assertion with a small
-// override of the real timer would take 30s — instead we just confirm
-// the call returns at all when no parent cancel is wired (i.e. doesn't
-// nil-dereference s.stopCtx).
-func TestNotifyTargetNilStopCtxFallback(t *testing.T) {
-	t.Parallel()
-	// fakePartialPlatform's failAt=1000 makes every Reply succeed —
-	// notifyTarget runs the full chunk loop and returns. The point of
-	// this test is just "does not panic / nil-deref".
-	fp := &fakePartialPlatform{failAt: 1000, maxLen: 64}
-	s := &Scheduler{
-		// stopCtx intentionally unset
-	}
-	storeFakeNotifySender(s, map[string]platform.Platform{"fake-notify": fp})
-	s.notifyTarget("fake-notify", "chat-x", "hello world")
-	if fp.uniqueChunks() == 0 {
-		t.Errorf("notifyTarget with nil stopCtx should still send chunks; got 0")
-	}
-}

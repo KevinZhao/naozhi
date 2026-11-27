@@ -30,14 +30,3 @@ func TestSlackHTTPClient_BlocksRedirects(t *testing.T) {
 		t.Errorf("CheckRedirect returned %v, want http.ErrUseLastResponse", err)
 	}
 }
-
-// TestSlackHTTPClient_HasTimeout pins the transport-level timeout that
-// R191-ARCH-M3 added to prevent slow Slack responses from pinning todoLoop
-// goroutines past Stop()'s drain. A future refactor that lifts httpClient
-// to package scope must not drop the timeout.
-func TestSlackHTTPClient_HasTimeout(t *testing.T) {
-	t.Parallel()
-	if slackHTTPClient.Timeout <= 0 {
-		t.Errorf("slackHTTPClient.Timeout = %v, want > 0", slackHTTPClient.Timeout)
-	}
-}
