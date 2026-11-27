@@ -139,49 +139,6 @@ func TestReconnectMidTurn_ResultTransitionsToReady(t *testing.T) {
 	t.Fatalf("State = %v after reconnect result, want StateReady (session stuck Running)", p.State())
 }
 
-// TestIsMidTurn covers the helper SpawnReconnect uses to decide whether to arm
-// reconnectedMidTurn. The arm decision depends ONLY on the already-drained
-// replays, which is why #1778 can safely evaluate it before startReadLoop.
-func TestIsMidTurn(t *testing.T) {
-	proto := &ClaudeProtocol{}
-
-	tests := []struct {
-		name    string
-		replays []shim.ServerMsg
-		want    bool
-	}{
-		{
-			name:    "no replays is not mid-turn",
-			replays: nil,
-			want:    false,
-		},
-		{
-			name: "last event is result -> turn complete",
-			replays: []shim.ServerMsg{
-				{Type: "replay", Line: `{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]},"session_id":"s1"}`},
-				{Type: "replay", Line: `{"type":"result","result":"ok","session_id":"s1"}`},
-			},
-			want: false,
-		},
-		{
-			name: "last event is assistant -> mid turn",
-			replays: []shim.ServerMsg{
-				{Type: "replay", Line: `{"type":"result","result":"ok","session_id":"s1"}`},
-				{Type: "replay", Line: `{"type":"assistant","message":{"content":[{"type":"text","text":"still going"}]},"session_id":"s1"}`},
-			},
-			want: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got, _, _ := reconnectVerdict(tt.replays, 0, proto).settle(nil, ""); got != tt.want {
-				t.Errorf("reconnectVerdict() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 // doneIgnoringProtocol embeds *ClaudeProtocol (inheriting the full Protocol
 // surface) and overrides only ReadEvent to return done=true alongside a NON
 // result event. It pins the R202606f-ARCH-5 (#2303) contract: turn-end is
@@ -212,16 +169,20 @@ func TestIsMidTurn_IgnoresAdvisoryDone(t *testing.T) {
 	}
 }
 
-// TestIsMidTurn_SkipsControlAck pins the reconnect regression introduced by
-// the set_model control channel: a claude control_response carrying a
-// request_id parses into a Type:"control_ack" clievent.Event. It is an RPC receipt,
-// not turn content, so it must not be the frame that decides mid-turn-ness.
-// Scenario: idle claude session → operator switches model (control_response
-// buffered in the shim) → naozhi restarts → replay ends with the ack. Reading
-// that as "last event != result" arms reconnectedMidTurn, the session sits in
+// TestIsMidTurn covers the decision SpawnReconnect uses to arm
+// reconnectedMidTurn. It depends ONLY on the already-drained replays, which is
+// why #1778 can safely evaluate it before startReadLoop.
+//
+// The control_ack rows pin the reconnect regression introduced by the
+// set_model control channel: a claude control_response carrying a request_id
+// parses into a Type:"control_ack" event. It is an RPC receipt, not turn
+// content, so it must not be the frame that decides mid-turn-ness. Scenario:
+// idle claude session → operator switches model (control_response buffered in
+// the shim) → naozhi restarts → replay ends with the ack. Reading that as
+// "last event != result" arms reconnectedMidTurn, the session sits in
 // StateRunning forever (no result will ever come) and every Send fails with
 // clierr.ErrProcessBusy.
-func TestIsMidTurn_SkipsControlAck(t *testing.T) {
+func TestIsMidTurn(t *testing.T) {
 	proto := &ClaudeProtocol{}
 	const ack = `{"type":"control_response","response":{"subtype":"success","request_id":"naozhi-setmodel-1"}}`
 	const errAck = `{"type":"control_response","response":{"subtype":"error","request_id":"naozhi-setmodel-2","error":"unknown model"}}`
@@ -231,6 +192,15 @@ func TestIsMidTurn_SkipsControlAck(t *testing.T) {
 		replays []shim.ServerMsg
 		want    bool
 	}{
+		{name: "no replays is not mid-turn", replays: nil, want: false},
+		{
+			name: "last event is assistant -> mid turn",
+			replays: []shim.ServerMsg{
+				{Type: "replay", Line: `{"type":"result","result":"ok","session_id":"s1"}`},
+				{Type: "replay", Line: `{"type":"assistant","message":{"content":[{"type":"text","text":"still going"}]},"session_id":"s1"}`},
+			},
+			want: true,
+		},
 		{
 			name: "result then set_model ack -> still turn complete",
 			replays: []shim.ServerMsg{

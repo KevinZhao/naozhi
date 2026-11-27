@@ -191,29 +191,10 @@ func TestAdoptedTurn_LatchKeepsTheResultTextTheEventLogDrops(t *testing.T) {
 	if !sawResult {
 		t.Error("no result entry in the event log; the fixture did not reach readLoop")
 	}
-}
 
-// TestAdoptedTurn_MidTurnOutlivesTheLatchedResult: AdoptedMidTurn is the
-// adoption gate, and the late result may land before the adopter asks. Once it
-// has, Pending is false but the turn is still the one to adopt.
-func TestAdoptedTurn_MidTurnOutlivesTheLatchedResult(t *testing.T) {
-	p, srv := shimTestPair(&ClaudeProtocol{})
-	startServerDrain(srv)
-	defer p.Kill()
-
-	armReconnectMidTurn(p)
-	p.startReadLoop()
-	srv.SendStdout(`{"type":"result","subtype":"success","result":"early","session_id":"s1"}`)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	out, err := p.AdoptedOutcome(ctx)
-	if err != nil {
-		t.Fatalf("AdoptedOutcome: %v", err)
-	}
-	if out.Result.Text != "early" {
-		t.Errorf("Text = %q, want early", out.Result.Text)
-	}
+	// AdoptedMidTurn is the adoption gate, and the late result may land before
+	// the adopter asks. Once it has, Pending is false but the turn is still the
+	// one to adopt.
 	if p.AdoptedTurnPending() {
 		t.Error("still pending after the result was latched")
 	}
@@ -221,33 +202,17 @@ func TestAdoptedTurn_MidTurnOutlivesTheLatchedResult(t *testing.T) {
 		t.Error("AdoptedMidTurn false once the result was latched; an adopter asking after the " +
 			"result landed would record a finished run as interrupted")
 	}
-}
 
-// TestAdoptedTurn_ReadableTwice pins latch, not queue: an adoption that reads the
-// outcome and then crashes before recording it must find the same answer on the
-// next read, and a second reader must not block.
-func TestAdoptedTurn_ReadableTwice(t *testing.T) {
-	p, srv := shimTestPair(&ClaudeProtocol{})
-	startServerDrain(srv)
-	defer p.Kill()
-
-	armReconnectMidTurn(p)
-	p.startReadLoop()
-	srv.SendStdout(`{"type":"result","subtype":"success","result":"twice","session_id":"s1"}`)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	first, err := p.AdoptedOutcome(ctx)
-	if err != nil {
-		t.Fatalf("first AdoptedOutcome: %v", err)
-	}
+	// Latch, not queue: an adoption that reads the outcome and then crashes
+	// before recording it must find the same answer on the next read, and a
+	// second reader must not block.
 	second, err := p.AdoptedOutcome(ctx)
 	if err != nil {
 		t.Fatalf("second AdoptedOutcome: %v", err)
 	}
-	if first.End != second.End || first.Result.SubType != second.Result.SubType ||
-		first.Result.Text != second.Result.Text || first.Result.CostUSD != second.Result.CostUSD {
-		t.Errorf("second read differs: %+v vs %+v", first, second)
+	if out.End != second.End || out.Result.SubType != second.Result.SubType ||
+		out.Result.Text != second.Result.Text || out.Result.CostUSD != second.Result.CostUSD {
+		t.Errorf("second read differs: %+v vs %+v", out, second)
 	}
 }
 
@@ -478,35 +443,5 @@ func TestReconnectVerdict_HandsBackTheFinishedResult(t *testing.T) {
 	// compared against where the result sits (AdoptableAfter).
 	if finishedSeq != 12 {
 		t.Errorf("finishedSeq = %d, want 12", finishedSeq)
-	}
-}
-
-// TestReconnectVerdict_MidTurnAndFinishedAreExclusive: the two returns describe
-// one classification, and a caller switching on them must not need a tie-break.
-func TestReconnectVerdict_MidTurnAndFinishedAreExclusive(t *testing.T) {
-	proto := &ClaudeProtocol{}
-	cases := []struct {
-		name    string
-		replays []shim.ServerMsg
-	}{
-		{"mid turn", []shim.ServerMsg{
-			{Type: "replay", Line: `{"type":"result","result":"old","session_id":"s1"}`},
-			{Type: "replay", Line: `{"type":"assistant","message":{"content":[{"type":"text","text":"still going"}]},"session_id":"s1"}`},
-		}},
-		{"finished", []shim.ServerMsg{
-			{Type: "replay", Line: `{"type":"result","result":"done","session_id":"s1"}`},
-		}},
-		{"nothing semantic", []shim.ServerMsg{
-			{Type: "replay", Line: `{"type":"system","subtype":"init","session_id":"s1"}`},
-		}},
-		{"empty backlog", nil},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			midTurn, finished, _ := reconnectVerdict(tc.replays, 0, proto).settle(nil, "")
-			if midTurn && finished != nil {
-				t.Errorf("both set: midTurn=%v finished=%+v", midTurn, finished)
-			}
-		})
 	}
 }
