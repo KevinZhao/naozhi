@@ -250,21 +250,6 @@ func TestUpdateApply_ConfirmActionMismatch(t *testing.T) {
 	}
 }
 
-func TestUpdateApply_NothingToDo(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow: skipped in -short")
-	}
-	h, applied := applyTestHandlers(t, selfupdate.StatusFixture{Current: "v1.0.0"})
-
-	w := postApply(t, h, `{"confirm_action":"install"}`)
-	if w.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409 when there is nothing to apply", w.Code)
-	}
-	if calls, _ := applied(); calls != 0 {
-		t.Errorf("apply ran %d times with nothing to do, want 0", calls)
-	}
-}
-
 // A blocked preflight must fail fast AND start nothing. The restart-only state
 // with no managed service is the real-world case: the binary is staged but only
 // a human can restart the process.
@@ -341,17 +326,21 @@ func TestUpdateApply_NoCheckerConflicts(t *testing.T) {
 	}
 }
 
-// Rate limit: a held-down button must not spray the failure path (log lines and,
-// on the install branch, GitHub requests). Rejected attempts consume the window
-// too — the aim is to bound attempts, not successes.
-func TestUpdateApply_RateLimited(t *testing.T) {
-	h, _ := applyTestHandlers(t, selfupdate.StatusFixture{Current: "v1.0.0"})
+// Nothing to apply is a 409 that starts nothing. Rate limit: a held-down button
+// must not spray the failure path (log lines and, on the install branch, GitHub
+// requests). Rejected attempts consume the window too — the aim is to bound
+// attempts, not successes.
+func TestUpdateApply_NothingToDoRateLimited(t *testing.T) {
+	h, applied := applyTestHandlers(t, selfupdate.StatusFixture{Current: "v1.0.0"})
 
 	if w := postApply(t, h, `{"confirm_action":"install"}`); w.Code != http.StatusConflict {
 		t.Fatalf("first attempt status = %d, want 409 (nothing to do)", w.Code)
 	}
 	if w := postApply(t, h, `{"confirm_action":"install"}`); w.Code != http.StatusTooManyRequests {
 		t.Errorf("second attempt status = %d, want 429", w.Code)
+	}
+	if calls, _ := applied(); calls != 0 {
+		t.Errorf("apply ran %d times with nothing to do, want 0", calls)
 	}
 }
 

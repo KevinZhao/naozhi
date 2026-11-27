@@ -8,8 +8,6 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
-	"github.com/naozhi/naozhi/internal/session/agentlink"
-	"github.com/naozhi/naozhi/internal/subagent"
 )
 
 // TestAgentEvents_AfterReadmitsWatermarkMillisecond (#2432 item 5): the HTTP
@@ -20,26 +18,11 @@ import (
 // forever. The read must be `Time >= after`; agent_view.js dedups the
 // replayed first entry by content key.
 func TestAgentEvents_AfterReadmitsWatermarkMillisecond(t *testing.T) {
-	// Cannot run in parallel — t.Setenv("HOME") mutates process state.
-	dir := claudeProjectsTestRoot(t)
 	// Shape observed in ~/.claude/projects/*/subagents/agent-*.jsonl:
 	// a thinking line and a text line with the identical timestamp.
-	lines := []string{
+	h := seededHandler(t,
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"}]},"sessionId":"s","timestamp":"2026-09-02T04:38:14.871Z"}`,
-		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"answer"}]},"sessionId":"s","timestamp":"2026-09-02T04:38:14.871Z"}`,
-	}
-	path := writeTranscript(t, dir, "bbbbbbbbbbbbbbbbb", lines)
-
-	linker := subagent.NewLinker()
-	linker.SeedFromHistory([]clievent.EventEntry{{
-		Type:            "task_start",
-		ToolUseID:       "toolu_T",
-		TaskID:          "t1",
-		InternalAgentID: "agent-bbbbbbbbbbbbbbbbb",
-		JSONLPath:       path,
-		Subagent:        "worker",
-	}})
-	h := &Handler{linkerFor: func(string) agentlink.AgentLinker { return linker }, allowedRoot: claudeProjectsAllowedRoot()}
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"answer"}]},"sessionId":"s","timestamp":"2026-09-02T04:38:14.871Z"}`)
 
 	fetch := func(after, limit string) []clievent.EventEntry {
 		t.Helper()

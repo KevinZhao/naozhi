@@ -137,10 +137,6 @@ content
 
 func TestMemoryHandler_NotFound(t *testing.T) {
 	dir := t.TempDir()
-	// create the projects dir but no memories
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	h := memoryTestHandler(t, dir, "")
 
 	w, resp, _ := callMemoryHandler(t, h, "nope")
@@ -247,6 +243,34 @@ body never closed
 `,
 			wantBody: "---\nname: hanging\nbody never closed\n",
 		},
+		{
+			name:     "BOM stripped",
+			input:    "\xEF\xBB\xBF---\nname: bom\n---\nbody\n",
+			wantName: "bom",
+			wantBody: "body\n",
+		},
+		// #2433 item 6: memory files written by Claude Code use a top-level
+		// `type:` key; the nested metadata form wins when both are present.
+		{
+			name:     "top-level type",
+			input:    "---\nname: n\ndescription: d\ntype: feedback\noriginSessionId: abc\n---\nbody\n",
+			wantName: "n",
+			wantDesc: "d",
+			wantType: "feedback",
+			wantBody: "body\n",
+		},
+		{
+			name:     "metadata type wins when after top-level",
+			input:    "---\ntype: feedback\nmetadata:\n  type: project\n---\nbody\n",
+			wantType: "project",
+			wantBody: "body\n",
+		},
+		{
+			name:     "metadata type wins when before top-level",
+			input:    "---\nmetadata:\n  type: project\ntype: feedback\n---\nbody\n",
+			wantType: "project",
+			wantBody: "body\n",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -267,45 +291,27 @@ body never closed
 	}
 }
 
-func TestParseMemoryFrontmatter_BOMStripped(t *testing.T) {
-	bom := []byte{0xEF, 0xBB, 0xBF}
-	input := append(bom, []byte("---\nname: bom\n---\nbody\n")...)
-	meta, body := parseMemoryFrontmatter(input)
-	if meta.name != "bom" {
-		t.Errorf("name = %q, want bom", meta.name)
-	}
-	if body != "body\n" {
-		t.Errorf("body = %q", body)
-	}
-}
+// TestMemoryHandler_TruncatedAtCap covers R240-SEC-11 / #1044: a memory
+// file larger than maxMemoryFileBytes is capped at the limit and flagged
+// truncated so the client can hint the user instead of silently losing the
+// tail; one exactly at the cap is not flagged.
+func TestMemoryHandler_TruncatedAtCap(t *testing.T) {
+	for _, tc := range []struct {
+		size      int
+		truncated bool
+	}{{maxMemoryFileBytes * 2, true}, {maxMemoryFileBytes, false}} {
+		dir := t.TempDir()
+		writeMemoryFile(t, dir, "-cur", "big_memory", strings.Repeat("a", tc.size))
+		h := memoryTestHandler(t, dir, "-cur")
 
-// TestMemoryHandler_OversizeFileTruncated covers R240-SEC-11 / #1044: a
-// memory file larger than maxMemoryFileBytes must be capped at the limit
-// and the response must carry truncated=true so the client can hint the
-// user instead of silently losing the tail.
-func TestMemoryHandler_OversizeFileTruncated(t *testing.T) {
-	dir := t.TempDir()
-	// Build content well beyond the cap so we positively cross the limit
-	// even after frontmatter parsing strips a header (none here — plain
-	// body only). 2× cap is enough to detect any off-by-one.
-	big := strings.Repeat("a", maxMemoryFileBytes*2)
-	writeMemoryFile(t, dir, "-cur", "huge_memory", big)
-	h := memoryTestHandler(t, dir, "-cur")
-
-	w, resp, _ := callMemoryHandler(t, h, "huge_memory")
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
-	}
-	if !resp.Found {
-		t.Fatalf("resp.Found = false, want true")
-	}
-	if !resp.Truncated {
-		t.Errorf("resp.Truncated = false, want true for >cap file")
-	}
-	// Body holds the cap-capped prefix (no frontmatter on this fixture, so
-	// body == raw[:cap]).
-	if got, want := len(resp.Body), maxMemoryFileBytes; got != want {
-		t.Errorf("len(Body) = %d, want %d (cap)", got, want)
+		w, resp, _ := callMemoryHandler(t, h, "big_memory")
+		if w.Code != http.StatusOK || !resp.Found {
+			t.Fatalf("size %d: status = %d found = %v; body=%s", tc.size, w.Code, resp.Found, w.Body.String())
+		}
+		// No frontmatter on this fixture, so body == raw[:cap].
+		if resp.Truncated != tc.truncated || len(resp.Body) != maxMemoryFileBytes {
+			t.Errorf("size %d: truncated = %v, len(Body) = %d; want %v, %d", tc.size, resp.Truncated, len(resp.Body), tc.truncated, maxMemoryFileBytes)
+		}
 	}
 }
 
@@ -318,10 +324,6 @@ func TestMemoryHandler_OversizeFileTruncated(t *testing.T) {
 // cache must intercept it and return 200/found=false instead.
 func TestMemoryHandler_NegativeCacheSkipsReadDir(t *testing.T) {
 	dir := t.TempDir()
-	// Create the projects dir but put no memory file for slug "ghost_slug".
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	h := memoryTestHandler(t, dir, "")
 
 	// First call: full ReadDir scan, nothing found — populates negative cache.
@@ -350,35 +352,11 @@ func TestMemoryHandler_NegativeCacheSkipsReadDir(t *testing.T) {
 	}
 }
 
-// TestMemoryHandler_AtCapNotTruncated guards the boundary: a file exactly
-// at maxMemoryFileBytes must NOT be flagged truncated.
-func TestMemoryHandler_AtCapNotTruncated(t *testing.T) {
-	dir := t.TempDir()
-	exact := strings.Repeat("b", maxMemoryFileBytes)
-	writeMemoryFile(t, dir, "-cur", "boundary_mem", exact)
-	h := memoryTestHandler(t, dir, "-cur")
-
-	_, resp, _ := callMemoryHandler(t, h, "boundary_mem")
-	if !resp.Found {
-		t.Fatalf("resp.Found = false")
-	}
-	if resp.Truncated {
-		t.Errorf("file exactly at cap must NOT be truncated, got Truncated=true")
-	}
-	if got := len(resp.Body); got != maxMemoryFileBytes {
-		t.Errorf("len(Body) = %d, want %d", got, maxMemoryFileBytes)
-	}
-}
-
 // TestNegCache_SweepOnWrite verifies R164029-CR-2: expired entries are
 // evicted from the negative cache on the next write, preventing unbounded
 // map growth when an attacker sprays unique slugs.
 func TestNegCache_SweepOnWrite(t *testing.T) {
 	dir := t.TempDir()
-	// No memory files — every slug lookup will miss and populate negCache.
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	h := memoryTestHandler(t, dir, "")
 
 	// Pre-populate negCache with three already-expired entries by writing
@@ -418,9 +396,6 @@ func TestNegCache_SweepOnWrite(t *testing.T) {
 // succession (defence-in-depth against slug-spray attacks).
 func TestNegCache_MaxEntries(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	h := memoryTestHandler(t, dir, "")
 
 	// Pre-fill the cache to exactly the cap with live (non-expired) entries.
@@ -452,9 +427,6 @@ func TestNegCache_MaxEntries(t *testing.T) {
 // data races. Run with -race to detect any violation.
 func TestNegCache_ConcurrentReads(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	h := memoryTestHandler(t, dir, "")
 
 	// Seed the negative cache with a valid entry so the read path (RLock) fires.
@@ -522,19 +494,9 @@ func TestReadCappedMemoryFile_NormalPath(t *testing.T) {
 	}
 }
 
-// TestReadCappedMemoryFile_SymlinkSwapDetected verifies R20260606-SEC-6: if a
-// symlink swap replaces the target between EvalSymlinks and the open, the
-// SameFile inode recheck must catch the divergence and return an error (so the
-// caller treats the read as "not found" rather than returning the wrong file's
-// bytes).
-//
-// We simulate the race by writing a real file, doing a Lstat to capture its
-// inode, then replacing it with a symlink pointing elsewhere before calling
-// readCappedMemoryFile on the symlink target path. Because OpenWorkspaceFile
-// uses O_NOFOLLOW, opening the symlink itself returns an error (ELOOP /
-// ErrNotExist on linux), which readCappedMemoryFile already propagates as
-// an error. This test therefore confirms that both the O_NOFOLLOW gate and the
-// SameFile path are exercised without panicking.
+// TestReadCappedMemoryFile_SymlinkRejectedByONofollow (R20260606-SEC-6): a
+// symlink swapped in between EvalSymlinks and the open is refused by
+// O_NOFOLLOW, so the caller reads "not found" rather than the wrong file.
 func TestReadCappedMemoryFile_SymlinkRejectedByONofollow(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -556,44 +518,6 @@ func TestReadCappedMemoryFile_SymlinkRejectedByONofollow(t *testing.T) {
 	_, _, _, err := readCappedMemoryFile(link, int64(maxMemoryFileBytes))
 	if err == nil {
 		t.Error("expected an error when opening a symlink path, got nil")
-	}
-}
-
-// #2433 item 6: memory files written by Claude Code use a top-level `type:`
-// key (not `metadata:\n  type:`); it must be recognised, with the nested
-// metadata form taking precedence when both are present.
-func TestParseMemoryFrontmatter_TopLevelType(t *testing.T) {
-	cases := []struct {
-		name  string
-		input string
-		want  string
-	}{
-		{
-			name:  "top-level only",
-			input: "---\nname: n\ndescription: d\ntype: feedback\noriginSessionId: abc\n---\nbody\n",
-			want:  "feedback",
-		},
-		{
-			name:  "metadata wins when after top-level",
-			input: "---\ntype: feedback\nmetadata:\n  type: project\n---\nbody\n",
-			want:  "project",
-		},
-		{
-			name:  "metadata wins when before top-level",
-			input: "---\nmetadata:\n  type: project\ntype: feedback\n---\nbody\n",
-			want:  "project",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			meta, body := parseMemoryFrontmatter([]byte(tc.input))
-			if meta.typ != tc.want {
-				t.Errorf("type = %q, want %q", meta.typ, tc.want)
-			}
-			if body != "body\n" {
-				t.Errorf("body = %q", body)
-			}
-		})
 	}
 }
 

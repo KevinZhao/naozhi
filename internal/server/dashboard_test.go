@@ -100,13 +100,11 @@ func TestSessionHandlers_RejectInvalidKey(t *testing.T) {
 // Extracted so pagination tests can share setup.
 func seedEventSession(t *testing.T, srv *Server, times ...int64) string {
 	t.Helper()
-	key := "test:d:u:general"
-	proc := session.NewTestProcess()
-	for _, ts := range times {
-		proc.EventLog.Append(clievent.EventEntry{Time: ts, Type: "text", Summary: "msg"})
+	evs := make([]typedEvent, len(times))
+	for i, ts := range times {
+		evs[i] = typedEvent{ts, "text"}
 	}
-	routerOf(srv).InjectSession(key, proc)
-	return key
+	return seedTypedEventSession(t, srv, evs...)
 }
 
 // typedEvent is a (time,type) pair for seedTypedEventSession.
@@ -248,70 +246,32 @@ func TestHandleAPISessionEvents_InitialPageHasMoreHeader(t *testing.T) {
 	}
 }
 
-// TestHandleAPISessionEvents_InitialPageNoHasMoreHeader: a short session whose
-// entire history fits in the initial page → no header (no useless "load
-// earlier" button).
-func TestHandleAPISessionEvents_InitialPageNoHasMoreHeader(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
-	key := seedEventSession(t, srv, 1000, 2000, 3000)
-
-	req := httptest.NewRequest(http.MethodGet,
-		"/api/sessions/events?key="+key+"&limit=100", nil)
-	w := httptest.NewRecorder()
-	srv.sessionH.HandleEvents(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", w.Code)
-	}
-	if got := w.Header().Get("X-Events-Has-More"); got != "0" {
-		t.Errorf("X-Events-Has-More = %q, want \"0\" (whole history fit in the page, header always set on initial branch)", got)
-	}
-}
-
-// TestHandleAPISessionEvents_BeforePageSetsHasMoreHeader: the pagination
-// path (before>0) always emits the header, so the client need not read a
-// short page as exhausted.
-func TestHandleAPISessionEvents_BeforePageSetsHasMoreHeader(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
-	key := seedEventSession(t, srv, 1000, 2000, 3000, 4000, 5000)
-
-	for _, tc := range []struct{ query, want string }{
-		{"&before=3500&limit=10", "0"},
-		{"&before=3500&limit=2", "1"},
-	} {
-		req := httptest.NewRequest(http.MethodGet,
-			"/api/sessions/events?key="+key+tc.query, nil)
-		w := httptest.NewRecorder()
-		srv.sessionH.HandleEvents(w, req)
-
-		if w.Code != http.StatusOK {
-			t.Fatalf("%s: status = %d, want 200", tc.query, w.Code)
-		}
-		if got := w.Header().Get("X-Events-Has-More"); got != tc.want {
-			t.Errorf("%s: X-Events-Has-More = %q, want %q", tc.query, got, tc.want)
-		}
-	}
-}
-
 // TestHandleAPISessionEvents_Paging: limit keeps the newest entries, before
 // pages strictly older ones (newest first when both cap), and a limit past
-// the server's max is clamped rather than refused.
+// the server's max is clamped rather than refused. Both the initial and the
+// before= branch always set X-Events-Has-More, so the client need not read a
+// short page as exhausted (nor show a useless "load earlier" on a full one).
 func TestHandleAPISessionEvents_Paging(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
 	key := seedEventSession(t, srv, 1000, 2000, 3000, 4000, 5000)
 	for _, tc := range []struct {
 		query string
 		want  []int64
+		more  string
 	}{
-		{"&limit=2", []int64{4000, 5000}},
-		{"&before=3500&limit=10", []int64{1000, 2000, 3000}},
-		{"&before=5000&limit=2", []int64{3000, 4000}},
-		{"&limit=10000", []int64{1000, 2000, 3000, 4000, 5000}},
+		{"&limit=2", []int64{4000, 5000}, "1"},
+		{"&before=3500&limit=10", []int64{1000, 2000, 3000}, "0"},
+		{"&before=3500&limit=2", []int64{2000, 3000}, "1"},
+		{"&before=5000&limit=2", []int64{3000, 4000}, "1"},
+		{"&limit=10000", []int64{1000, 2000, 3000, 4000, 5000}, "0"},
 	} {
 		w := httptest.NewRecorder()
 		srv.sessionH.HandleEvents(w, httptest.NewRequest(http.MethodGet, "/api/sessions/events?key="+key+tc.query, nil))
 		if w.Code != http.StatusOK {
 			t.Fatalf("%s: status = %d, want 200", tc.query, w.Code)
+		}
+		if got := w.Header().Get("X-Events-Has-More"); got != tc.more {
+			t.Errorf("%s: X-Events-Has-More = %q, want %q", tc.query, got, tc.more)
 		}
 		var entries []clievent.EventEntry
 		if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
@@ -741,46 +701,6 @@ func TestHandleAPISessions_NodeAggregation(t *testing.T) {
 	}
 	if !found {
 		t.Error("remote session with node='macbook' not found in aggregated sessions")
-	}
-}
-
-// ─── sessionview.ValidateUserLabel ──────────────────────────────────────────────
-// Validation logic lives in the session package (sessionview.ValidateUserLabel)
-// so the dashboard HTTP path and the reverse-RPC worker share one rule set.
-// Tab is rejected (slog.TextHandler uses it as key/value separator) and C1
-// control range is rejected. R64-GO-H2 / L2.
-
-func TestValidateUserLabel(t *testing.T) {
-	cases := []struct {
-		name    string
-		in      string
-		want    string
-		wantErr bool
-	}{
-		{"empty passes", "", "", false},
-		{"whitespace-only passes (treated as clear)", "   ", "", false},
-		{"ASCII label", "hello", "hello", false},
-		{"Chinese label", "重构会话", "重构会话", false},
-		{"trims surrounding space", "  hi  ", "hi", false},
-		{"128 bytes exact", strings.Repeat("a", 128), strings.Repeat("a", 128), false},
-		{"129 bytes rejected", strings.Repeat("a", 129), "", true},
-		{"tab rejected", "a\tb", "", true},
-		{"newline rejected", "a\nb", "", true},
-		{"NUL rejected", "a\x00b", "", true},
-		{"DEL rejected", "a\x7fb", "", true},
-		{"C1 control rejected (U+0085)", "a\u0085b", "", true},
-		{"invalid utf-8 rejected", "\xc3\x28", "", true},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got, err := sessionview.ValidateUserLabel(c.in)
-			if (err != nil) != c.wantErr {
-				t.Fatalf("err = %v, wantErr = %v", err, c.wantErr)
-			}
-			if !c.wantErr && got != c.want {
-				t.Errorf("got = %q, want = %q", got, c.want)
-			}
-		})
 	}
 }
 

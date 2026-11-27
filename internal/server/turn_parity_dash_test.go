@@ -46,6 +46,8 @@ func TestTurnParity01_Dash_DrainTurnFailureReported(t *testing.T) {
 		h.waitEngineIdle()
 		onlyErrorAck(t, ws.errorAcks(), "w2", asyncErrorMessage(errParityBoom))
 	})
+	// Row 26: the drain turn re-resolves the agent opts, and its GetOrCreate
+	// refuses the ones changed under it.
 	t.Run("session lookup fails", func(t *testing.T) {
 		agents := map[string]session.AgentOpts{"general": {}}
 		h := newParityHarness(t, parityOpts{agents: agents})
@@ -457,24 +459,6 @@ func TestTurnParity23_Dash_DisabledQueueBusyAck(t *testing.T) {
 	turns.noMoreTurns(t)
 }
 
-func TestTurnParity24_Dash_QueuedAck(t *testing.T) {
-	h := newParityHarness(t, parityOpts{})
-	turns := h.session(parityKey, false)
-	ws := h.ws()
-	ws.send("w1", "first")
-	if s := ws.ack(t, "w1"); s != "accepted" {
-		t.Fatalf("w1 ack = %q", s)
-	}
-	turns.next(t, "owner turn")
-	ws.send("w2", "second")
-	if s := ws.ack(t, "w2"); s != "queued" {
-		t.Fatalf("w2 ack = %q, want queued", s)
-	}
-	turns.answer(okTurn("R1"))
-	turns.turn(t, "drain turn", okTurn("R2"))
-	h.waitEngineIdle()
-}
-
 func TestTurnParity25_Dash_ShutdownAdmissionBusy(t *testing.T) {
 	for _, mode := range []string{"collect", "passthrough"} {
 		t.Run(mode, func(t *testing.T) {
@@ -492,23 +476,6 @@ func TestTurnParity25_Dash_ShutdownAdmissionBusy(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestTurnParity26_Dash_OptsResolvedPerTurn(t *testing.T) {
-	agents := map[string]session.AgentOpts{"general": {}}
-	h := newParityHarness(t, parityOpts{agents: agents})
-	turns := h.session(parityKey, false)
-	ws := h.ws()
-	ws.send("w1", "first")
-	turns.next(t, "owner turn")
-	ws.send("w2", "second")
-	if s := ws.ack(t, "w2"); s != "queued" {
-		t.Fatalf("w2 ack = %q", s)
-	}
-	agents["general"] = session.AgentOpts{Model: "not a model"}
-	turns.answer(okTurn("R1"))
-	h.waitEngineIdle()
-	turns.noMoreTurns(t) // the drain turn re-resolved opts and its GetOrCreate refused them
 }
 
 // Row 27: the autosave moved into turnSender (D), the Sender every entry's
