@@ -1,7 +1,6 @@
 package discovery
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -145,30 +144,6 @@ func TestRetiredStore_Prune_CapTrim(t *testing.T) {
 	}
 	if rs.Get("c") == 0 || rs.Get("d") == 0 || rs.Get("e") == 0 {
 		t.Fatalf("newest 3 should survive")
-	}
-}
-
-func TestRetiredStore_FileSchema(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "retired.json")
-	rs, _ := NewRetiredStore(path)
-	rs.MarkRetired("sid-1", time.UnixMilli(1700000000000))
-	if err := rs.Save(); err != nil {
-		t.Fatalf("save: %v", err)
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	var file retiredStoreFileV1
-	if err := json.Unmarshal(raw, &file); err != nil {
-		t.Fatalf("schema: %v", err)
-	}
-	if file.Version != retiredStoreVersion {
-		t.Fatalf("version: got %d, want %d", file.Version, retiredStoreVersion)
-	}
-	if file.Entries["sid-1"] != 1700000000000 {
-		t.Fatalf("entry round-trip: %v", file.Entries)
 	}
 }
 

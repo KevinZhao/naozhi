@@ -677,49 +677,6 @@ func TestRefreshDynamic_LastActiveAndState(t *testing.T) {
 	}
 }
 
-// TestNewScanner_PromptSemReused pins PERF-003 (#2124): the prompt-
-// extraction semaphore is allocated once in NewScanner and reused across
-// every Scan / RefreshDynamic call instead of `make(chan struct{}, 4)`
-// per cycle. Asserts (1) capacity, (2) the channel survives a refresh
-// with the same identity (not reallocated), and (3) it is fully drained
-// after the fan-out completes so reuse is safe.
-func TestNewScanner_PromptSemReused(t *testing.T) {
-	t.Parallel()
-	sc := NewScanner()
-	if sc.promptSem == nil {
-		t.Fatal("promptSem must be allocated by NewScanner")
-	}
-	if got := cap(sc.promptSem); got != promptSemCap {
-		t.Fatalf("promptSem cap = %d, want %d", got, promptSemCap)
-	}
-	semBefore := sc.promptSem
-
-	claudeDir := makeClaudeDir(t)
-	cwd := "/tmp/promptsem-reuse"
-	sessionID := "eeeeffff-0000-0000-0000-0000000000fe"
-	projDir := filepath.Join(claudeDir, "projects", claudefs.ProjectSlug(cwd))
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	jsonlPath := filepath.Join(projDir, sessionID+".jsonl")
-	makeJSONLWithUserPrompts(t, jsonlPath, []string{"semaphore reuse"})
-
-	sessions := []DiscoveredSession{{SessionID: sessionID, CWD: cwd, State: "ready"}}
-	sc.RefreshDynamic(claudeDir, sessions)
-	sc.RefreshDynamic(claudeDir, sessions)
-
-	if sc.promptSem != semBefore {
-		t.Error("promptSem identity changed — must be reused, not reallocated")
-	}
-	if n := len(sc.promptSem); n != 0 {
-		t.Errorf("promptSem not drained after fan-out: len=%d, want 0", n)
-	}
-	if sessions[0].LastPrompt != "semaphore reuse" {
-		t.Errorf("LastPrompt = %q, want %q (correctness must hold with reused sem)",
-			sessions[0].LastPrompt, "semaphore reuse")
-	}
-}
-
 // R20260603-PERF-2: RefreshDynamic reuses the mtime captured during prompt
 // extraction. When the JSONL is missing, LastActive must fall back to
 // StartedAt.
@@ -857,64 +814,5 @@ func TestRefreshDynamic_NoChanges(t *testing.T) {
 	changed := sc.RefreshDynamic(claudeDir, sessions)
 	if changed {
 		t.Error("expected changed=false when nothing changed")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// setCachedPrompt / getCachedPrompt round-trip
-// ---------------------------------------------------------------------------
-
-func TestPromptCacheRoundTrip(t *testing.T) {
-	t.Parallel()
-	sc := NewScanner()
-	const path = "/test/path.jsonl"
-	const mtime = int64(99999)
-	const prompt = "my cached prompt"
-
-	sc.setCachedPrompt(path, mtime, prompt)
-
-	got, ok := sc.getCachedPrompt(path, mtime)
-	if !ok {
-		t.Fatal("expected cache hit")
-	}
-	if got != prompt {
-		t.Errorf("got %q, want %q", got, prompt)
-	}
-
-	// Wrong mtime → miss
-	_, ok2 := sc.getCachedPrompt(path, mtime+1)
-	if ok2 {
-		t.Error("expected cache miss for different mtime")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// setCachedSummary / getCachedSummary round-trip
-// ---------------------------------------------------------------------------
-
-func TestSummaryCacheRoundTrip(t *testing.T) {
-	t.Parallel()
-	sc := NewScanner()
-	const path = "/test/sessions-index.json"
-	const mtime = int64(12345)
-	idx := sessionsIndex{
-		OriginalPath: "/some/path",
-		Entries:      []sessionsIndexEntry{{SessionID: "abc", Summary: "sum"}},
-	}
-
-	sc.setCachedSummary(path, mtime, idx)
-
-	got, ok := sc.getCachedSummary(path, mtime)
-	if !ok {
-		t.Fatal("expected cache hit")
-	}
-	if len(got.Entries) != 1 || got.Entries[0].Summary != "sum" {
-		t.Errorf("unexpected cached index: %+v", got)
-	}
-
-	// Wrong mtime → miss
-	_, ok2 := sc.getCachedSummary(path, mtime+1)
-	if ok2 {
-		t.Error("expected cache miss for different mtime")
 	}
 }

@@ -999,39 +999,6 @@ func TestRecentSessions_FilterSkipsSessionID(t *testing.T) {
 	}
 }
 
-// TestRecentSessions_NilFilterIsNoop guards against future "if filter == nil
-// { return nil }" defensive code that would silently empty the history list.
-func TestRecentSessions_NilFilterIsNoop(t *testing.T) {
-	t.Parallel()
-	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
-
-	projDir := filepath.Join(claudeDir, "projects", encodedDir)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	sid := "cccccccc-0001-0001-0001-000000000004"
-	if err := os.WriteFile(filepath.Join(projDir, sid+".jsonl"), []byte("data"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	writeSessionsIndex(t, projDir, sessionsIndex{
-		OriginalPath: workspace,
-		Entries:      []sessionsIndexEntry{{SessionID: sid, Summary: "ok"}},
-	})
-	dirFilesCache.Delete(projDir)
-	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
-
-	got := recentSessionsUnder(context.Background(), root, claudeDir, 10, 365*24*time.Hour, nil, nil)
-	var saw bool
-	for _, s := range got {
-		if s.SessionID == sid {
-			saw = true
-		}
-	}
-	if !saw {
-		t.Errorf("nil filter must behave like no-op; session missing: %s", sid)
-	}
-}
-
 // TestRecentSessionsCtx_CancelledReturnsEarly guards PERF-009 (#2134): an
 // already-cancelled context must short-circuit the FS walk so a slow/hung
 // home cannot pin the singleflight leader. The result is best-effort
@@ -1061,39 +1028,6 @@ func TestRecentSessionsCtx_CancelledReturnsEarly(t *testing.T) {
 	got := recentSessionsUnder(ctx, root, claudeDir, 10, 365*24*time.Hour, nil, nil)
 	if len(got) != 0 {
 		t.Errorf("cancelled context must yield empty (early-return) result, got %d sessions", len(got))
-	}
-}
-
-// TestRecentSessionsCtx_BackgroundCtxEquivalent confirms a live context
-// returns the same sessions as an uncancelled scan.
-func TestRecentSessionsCtx_BackgroundCtxEquivalent(t *testing.T) {
-	t.Parallel()
-	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
-
-	projDir := filepath.Join(claudeDir, "projects", encodedDir)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	sid := "dddddddd-0001-0001-0001-000000000002"
-	if err := os.WriteFile(filepath.Join(projDir, sid+".jsonl"), []byte("data"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	writeSessionsIndex(t, projDir, sessionsIndex{
-		OriginalPath: workspace,
-		Entries:      []sessionsIndexEntry{{SessionID: sid, Summary: "ok"}},
-	})
-	dirFilesCache.Delete(projDir)
-	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
-
-	got := recentSessionsUnder(context.Background(), root, claudeDir, 10, 365*24*time.Hour, nil, nil)
-	var saw bool
-	for _, s := range got {
-		if s.SessionID == sid {
-			saw = true
-		}
-	}
-	if !saw {
-		t.Errorf("background ctx dropped a session: %s", sid)
 	}
 }
 

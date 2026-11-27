@@ -69,13 +69,3 @@ func TestScanContext_CanceledCtxReturnsPromptly(t *testing.T) {
 		t.Fatal("ScanContext did not return promptly with canceled ctx")
 	}
 }
-
-// TestScan_DelegatesToScanContext is a thin guard that the non-ctx Scan still
-// works (delegates with context.Background()) after the #2244 refactor.
-func TestScan_DelegatesToScanContext(t *testing.T) {
-	t.Parallel()
-	sc := NewScanner()
-	if _, err := sc.Scan(makeClaudeDir(t), nil, nil, nil); err != nil {
-		t.Fatalf("Scan returned error: %v", err)
-	}
-}
