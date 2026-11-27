@@ -80,7 +80,7 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 		d.handleHelpCommand(ctx, msg)
 		return true
 
-	case strings.HasPrefix(trimmed, "/cd "):
+	case trimmed == "/cd" || strings.HasPrefix(trimmed, "/cd "):
 		// Read project state through the resolver so /cd sees the same snapshot
 		// the IM hot path's key derivation used (#648).
 		if b := d.resolver.ProjectBindingForChat(msg.Platform, msg.ChatType, msg.ChatID); b.Bound {
