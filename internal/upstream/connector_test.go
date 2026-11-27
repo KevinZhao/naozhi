@@ -91,53 +91,6 @@ func handshake(t *testing.T, conn *websocket.Conn) node.ReverseMsg {
 	return reg
 }
 
-// ---- marshalResult ----
-
-func TestMarshalResult_Simple(t *testing.T) {
-	data, err := marshalResult(map[string]string{"key": "value"})
-	if err != nil {
-		t.Fatalf("marshalResult = %v", err)
-	}
-	var got map[string]string
-	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
-	}
-	if got["key"] != "value" {
-		t.Errorf("marshalResult[\"key\"] = %q, want \"value\"", got["key"])
-	}
-}
-
-func TestMarshalResult_Nil(t *testing.T) {
-	data, err := marshalResult(nil)
-	if err != nil {
-		t.Fatalf("marshalResult(nil) = %v", err)
-	}
-	if string(data) != "null" {
-		t.Errorf("marshalResult(nil) = %s, want \"null\"", data)
-	}
-}
-
-// ---- Connector.New ----
-
-func TestNew_CreatesConnector(t *testing.T) {
-	cfg := &Config{
-		URL:    "wss://example.com/ws-node",
-		NodeID: "node1",
-		Token:  "secret",
-	}
-	router := testRouter(makeRouter())
-	c := New(cfg, router, nil, Discovery{}, nil)
-	if c == nil {
-		t.Fatal("New() = nil")
-	}
-	if c.cfg != cfg {
-		t.Error("cfg not stored")
-	}
-	if c.router != router {
-		t.Error("router not stored")
-	}
-}
-
 // ---- Auth failure path ----
 
 func TestRunOnce_AuthFailure(t *testing.T) {

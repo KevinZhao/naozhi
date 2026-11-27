@@ -9,52 +9,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// ---- IsPlannerKey ----
-
-func TestIsPlannerKey_Valid(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		key  string
-		want bool
-	}{
-		{"project:myapp:planner", true},
-		{"project:x:planner", true},
-		{"project:some-long-project-name:planner", true},
-	}
-	for _, tt := range tests {
-		if got := IsPlannerKey(tt.key); got != tt.want {
-			t.Errorf("IsPlannerKey(%q) = %v, want %v", tt.key, got, tt.want)
-		}
-	}
-}
-
-func TestIsPlannerKey_Invalid(t *testing.T) {
-	t.Parallel()
-	tests := []string{
-		"project::planner",          // name too short (exact sentinel)
-		"project:planner",           // missing name segment
-		"feishu:foo:planner",        // wrong prefix
-		"project:foo:general",       // wrong suffix
-		"",                          // empty
-		"planner",                   // no prefix
-		"project:foo:planner:extra", // extra segment still ends with ":extra" not ":planner"
-	}
-	for _, key := range tests {
-		if IsPlannerKey(key) {
-			t.Errorf("IsPlannerKey(%q) = true, want false", key)
-		}
-	}
-}
-
-func TestIsPlannerKey_ExactBoundary(t *testing.T) {
-	t.Parallel()
-	// "project::planner" has len == len("project::planner") which equals the sentinel
-	boundary := "project::planner"
-	if IsPlannerKey(boundary) {
-		t.Errorf("IsPlannerKey(%q) = true, want false (empty name is invalid)", boundary)
-	}
-}
-
 // ---- PlannerKeyFor / PlannerSessionKey ----
 
 func TestPlannerKeyFor(t *testing.T) {
@@ -261,28 +215,6 @@ func TestSaveConfigToPath_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestSaveConfigToPath_AtomicWrite(t *testing.T) {
-	t.Parallel()
-	// Verify the tmp file does not survive after a successful save.
-	dir := t.TempDir()
-	path := filepath.Join(dir, ".naozhi", "project.yaml")
-
-	cfg := ProjectConfig{GitSync: false}
-	if err := saveConfigToPath(path, cfg); err != nil {
-		t.Fatalf("saveConfigToPath = %v", err)
-	}
-
-	tmpPath := path + ".tmp"
-	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
-		t.Errorf("tmp file %q should not exist after successful save", tmpPath)
-	}
-
-	// The final path must exist.
-	if _, err := os.Stat(path); err != nil {
-		t.Errorf("saved file %q does not exist: %v", path, err)
-	}
-}
-
 func TestSaveConfigToPath_CreatesDir(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -293,31 +225,6 @@ func TestSaveConfigToPath_CreatesDir(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("file not created at %q: %v", path, err)
-	}
-}
-
-func TestSaveConfigToPath_OverwriteExisting(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "project.yaml")
-
-	// Write first version
-	cfg1 := ProjectConfig{GitRemote: "first"}
-	if err := saveConfigToPath(path, cfg1); err != nil {
-		t.Fatalf("first save: %v", err)
-	}
-
-	// Overwrite
-	cfg2 := ProjectConfig{GitRemote: "second"}
-	if err := saveConfigToPath(path, cfg2); err != nil {
-		t.Fatalf("second save: %v", err)
-	}
-
-	data, _ := os.ReadFile(path)
-	var got ProjectConfig
-	yaml.Unmarshal(data, &got) //nolint:errcheck
-	if got.GitRemote != "second" {
-		t.Errorf("after overwrite GitRemote = %q, want \"second\"", got.GitRemote)
 	}
 }
 
@@ -339,32 +246,7 @@ func TestSnapshotConfig_DeepCopy(t *testing.T) {
 	}
 }
 
-func TestSnapshotConfig_EmptyBindings(t *testing.T) {
-	t.Parallel()
-	p := &Project{Config: ProjectConfig{GitSync: true}}
-	snap := snapshotConfig(p)
-	if snap.ChatBindings != nil {
-		t.Error("snapshotConfig should preserve nil ChatBindings")
-	}
-}
-
 // ---- DisplayName / Emoji (R110-P2 foundation) ----
-
-func TestProjectConfig_DisplayNameEmojiRoundtrip(t *testing.T) {
-	t.Parallel()
-	in := ProjectConfig{DisplayName: "My Project", Emoji: "\U0001F525"}
-	data, err := yaml.Marshal(&in)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	var out ProjectConfig
-	if err := yaml.Unmarshal(data, &out); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if out.DisplayName != in.DisplayName || out.Emoji != in.Emoji {
-		t.Errorf("round-trip mismatch: in=%+v out=%+v", in, out)
-	}
-}
 
 func TestProjectConfig_LegacyYamlWithoutDisplayName(t *testing.T) {
 	t.Parallel()

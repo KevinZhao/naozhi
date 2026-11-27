@@ -3,7 +3,6 @@ package persist
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -43,11 +42,7 @@ func TestTruncateFile_CreatesMissingFile(t *testing.T) {
 	if fi.IsDir() {
 		t.Errorf("created path is a directory; expected regular file")
 	}
-	// On Windows file mode bits are not faithfully reported via os.Stat,
-	// so guard the mode assertion to POSIX-class platforms.
-	if runtime.GOOS != "windows" {
-		if got, want := fi.Mode().Perm(), os.FileMode(0o600); got != want {
-			t.Errorf("mode = %v, want %v (recovery must not silently widen permissions)", got, want)
-		}
+	if got, want := fi.Mode().Perm(), os.FileMode(0o600); got != want {
+		t.Errorf("mode = %v, want %v (recovery must not silently widen permissions)", got, want)
 	}
 }

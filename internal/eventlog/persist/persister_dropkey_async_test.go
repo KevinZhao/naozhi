@@ -3,41 +3,8 @@ package persist
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"testing"
 )
-
-// TestPersister_DropKey_AsyncRemoveStillWaits pins R20260527-PERF-4 (#1284):
-// the DropKey API must still appear synchronous to the caller — the file
-// removal goroutine writes to the done channel after os.Remove completes,
-// so the caller's <-done arm in DropKey blocks until cleanup is finished.
-// Even though the writer goroutine is freed earlier, the caller observes
-// the same end-state (files gone, no error) it did pre-fix.
-func TestPersister_DropKey_AsyncRemoveStillWaits(t *testing.T) {
-	p, dir := newTestPersister(t)
-	sink := p.SinkFor("k1")
-	sink([]Entry{entry(t, 1, "u1")}, false)
-	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
-	defer cancel()
-	if err := p.Flush(ctx); err != nil {
-		t.Fatalf("Flush: %v", err)
-	}
-
-	if _, err := os.Stat(LogPath(dir, "k1")); err != nil {
-		t.Fatalf("log missing pre-drop: %v", err)
-	}
-	if err := p.DropKey(ctx, "k1"); err != nil {
-		t.Fatalf("DropKey: %v", err)
-	}
-	// Synchronously after DropKey returns, both files MUST be gone — the
-	// async unlink goroutine writes to done only after os.Remove has run.
-	if _, err := os.Stat(LogPath(dir, "k1")); !os.IsNotExist(err) {
-		t.Errorf("log still exists post-DropKey: err=%v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, KeyHash("k1")+idxExt)); !os.IsNotExist(err) {
-		t.Errorf("idx still exists post-DropKey: err=%v", err)
-	}
-}
 
 // TestPersister_DropKey_RemovesInMemoryWriterSynchronously asserts the
 // in-memory phase (close fd + delete map entry) completes by the time

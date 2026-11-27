@@ -331,11 +331,6 @@ func TestPatrolDecideNotANodeRoute(t *testing.T) {
 	if node.IsAPIRoute(route) {
 		t.Errorf("%s is among a reverse node's api routes", route)
 	}
-	for _, r := range node.APIRoutes() {
-		if strings.Contains(r, "/api/planner/patrol") {
-			t.Errorf("%s is among a reverse node's api routes", r)
-		}
-	}
 	found := false
 	for _, rt := range New(nil, nil, nil, nil).Routes() {
 		found = found || rt.Pattern == route

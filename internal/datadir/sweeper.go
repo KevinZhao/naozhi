@@ -136,7 +136,6 @@ type Sweeper struct {
 	mu     sync.Mutex
 	passes []Pass
 	tasks  []task
-	last   map[string]Result // cumulative per pass, for reporting
 }
 
 // task is housekeeping that is not a directory sweep, e.g. StdioTask.
@@ -149,7 +148,7 @@ type task struct {
 // non-positive interval means Run does a single pass and returns, which is what
 // one-shot callers (and tests) want.
 func NewSweeper(interval time.Duration) *Sweeper {
-	return &Sweeper{interval: interval, last: map[string]Result{}}
+	return &Sweeper{interval: interval}
 }
 
 // Add registers a pass. Passes with a non-positive MaxAge are accepted and
@@ -208,25 +207,6 @@ func (s *Sweeper) RunOnce() map[string]Result {
 		t.fn()
 	}
 
-	s.mu.Lock()
-	for name, res := range out {
-		agg := s.last[name]
-		agg.Removed += res.Removed
-		agg.Bytes += res.Bytes
-		s.last[name] = agg
-	}
-	s.mu.Unlock()
-	return out
-}
-
-// Totals returns what each pass has reclaimed over this process's lifetime.
-func (s *Sweeper) Totals() map[string]Result {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make(map[string]Result, len(s.last))
-	for k, v := range s.last {
-		out[k] = v
-	}
 	return out
 }
 

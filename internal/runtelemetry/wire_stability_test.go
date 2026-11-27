@@ -50,110 +50,32 @@ var (
 	}
 )
 
-// TestRunState_WireStable freezes the wire string for every RunState.
-// Changing a value here without coordinating with dashboard.js + cron
-// runs/<id>.json on disk + sysession runRing JSON breaks the contract.
-//
-// Adding a new RunState: extend wireRunStates; the duplicate-detector at
-// the bottom of the test guards against accidental wire collisions.
-func TestRunState_WireStable(t *testing.T) {
+// TestEnums_WireStable freezes the wire string of every enum constant:
+// dashboard.js, cron runs/<id>.json on disk and the sysession run ring read
+// them. Two constants sharing a value would already fail to compile here
+// (duplicate map key).
+func TestEnums_WireStable(t *testing.T) {
 	t.Parallel()
 	for c, w := range wireRunStates {
 		if string(c) != w {
-			t.Errorf("RunState %q wire = %q, want %q", c, string(c), w)
+			t.Errorf("RunState %q, want %q", c, w)
 		}
 	}
-	assertNoDuplicateWireValues(t, "RunState", stringValuesRunState(wireRunStates))
-}
-
-// TestErrorClass_WireStable freezes wire strings for every ErrorClass.
-// Cross-subsystem (canceled / deadline_exceeded / panic / "") and
-// subsystem-specific values are both pinned. The duplicate-detector
-// catches a future "ErrClassCronUpstream = upstream" addition that
-// would silently collide with ErrClassSysessionUpstream.
-func TestErrorClass_WireStable(t *testing.T) {
-	t.Parallel()
 	for c, w := range wireErrorClasses {
 		if string(c) != w {
-			t.Errorf("ErrorClass %q wire = %q, want %q", c, string(c), w)
+			t.Errorf("ErrorClass %q, want %q", c, w)
 		}
 	}
-	assertNoDuplicateWireValues(t, "ErrorClass", stringValuesErrorClass(wireErrorClasses))
-}
-
-// TestTriggerKind_WireStable freezes wire strings for every TriggerKind.
-func TestTriggerKind_WireStable(t *testing.T) {
-	t.Parallel()
 	for c, w := range wireTriggerKinds {
 		if string(c) != w {
-			t.Errorf("TriggerKind %q wire = %q, want %q", c, string(c), w)
+			t.Errorf("TriggerKind %q, want %q", c, w)
 		}
 	}
-	assertNoDuplicateWireValues(t, "TriggerKind", stringValuesTriggerKind(wireTriggerKinds))
-}
-
-// TestSubsystem_WireStable freezes wire strings for every Subsystem.
-func TestSubsystem_WireStable(t *testing.T) {
-	t.Parallel()
 	for c, w := range wireSubsystems {
 		if string(c) != w {
-			t.Errorf("Subsystem %q wire = %q, want %q", c, string(c), w)
+			t.Errorf("Subsystem %q, want %q", c, w)
 		}
 	}
-	assertNoDuplicateWireValues(t, "Subsystem", stringValuesSubsystem(wireSubsystems))
-}
-
-// assertNoDuplicateWireValues guards against two named constants of the
-// same type accidentally sharing a wire string. ErrClassNone is empty
-// by design and excluded — every other duplicate is a bug.
-func assertNoDuplicateWireValues(t *testing.T, typeName string, values []string) {
-	t.Helper()
-	seen := make(map[string]int, len(values))
-	for _, v := range values {
-		if v == "" {
-			// "" is reserved for "no error class" and not a wire collision.
-			continue
-		}
-		seen[v]++
-	}
-	for v, n := range seen {
-		if n > 1 {
-			t.Errorf("%s: wire string %q appears %d times — wire collision",
-				typeName, v, n)
-		}
-	}
-}
-
-func stringValuesRunState(m map[RunState]string) []string {
-	out := make([]string, 0, len(m))
-	for _, v := range m {
-		out = append(out, v)
-	}
-	return out
-}
-
-func stringValuesErrorClass(m map[ErrorClass]string) []string {
-	out := make([]string, 0, len(m))
-	for _, v := range m {
-		out = append(out, v)
-	}
-	return out
-}
-
-func stringValuesTriggerKind(m map[TriggerKind]string) []string {
-	out := make([]string, 0, len(m))
-	for _, v := range m {
-		out = append(out, v)
-	}
-	return out
-}
-
-func stringValuesSubsystem(m map[Subsystem]string) []string {
-	out := make([]string, 0, len(m))
-	for _, v := range m {
-		out = append(out, v)
-	}
-	return out
 }
 
 // TestRunRecord_WireStable pins RunRecord's JSON byte-for-byte (#2540). The

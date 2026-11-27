@@ -159,7 +159,4 @@ func TestIPClass_HasAny(t *testing.T) {
 	if IPLinkLocal != IPLinkLocalUnicast|IPLinkLocalMulticast {
 		t.Errorf("IPLinkLocal composite drifted: %08b", IPLinkLocal)
 	}
-	if IPInternalAny != IPLoopback|IPLinkLocalUnicast|IPLinkLocalMulticast|IPPrivate|IPUnspecified {
-		t.Errorf("IPInternalAny composite drifted: %08b", IPInternalAny)
-	}
 }

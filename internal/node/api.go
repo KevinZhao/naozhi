@@ -78,15 +78,6 @@ var apiRoutes = map[string]bool{
 	"GET /api/memories/file":          true,
 }
 
-// APIRoutes lists the routes an `api` call may reach, "METHOD path" each.
-func APIRoutes() []string {
-	out := make([]string, 0, len(apiRoutes))
-	for r := range apiRoutes {
-		out = append(out, r)
-	}
-	return out
-}
-
 // CheckAPIRequest reports why req may not be forwarded or served: a method
 // and path outside apiRoutes, a path not in canonical form, a body over
 // MaxAPIBody.

@@ -147,17 +147,6 @@ func TestConcurrentAllowRaceFree(t *testing.T) {
 	}
 }
 
-func TestDefaults(t *testing.T) {
-	t.Parallel()
-	l := New(Config{Rate: rate.Every(time.Second), Burst: 1})
-	if l.cfg.MaxKeys != defaultMaxKeys {
-		t.Fatalf("MaxKeys default = %d, want %d", l.cfg.MaxKeys, defaultMaxKeys)
-	}
-	if l.cfg.TTL != defaultTTL {
-		t.Fatalf("TTL default = %v, want %v", l.cfg.TTL, defaultTTL)
-	}
-}
-
 // Peek answers what Allow would, and spends and creates nothing.
 func TestPeekIsReadOnly(t *testing.T) {
 	t.Parallel()

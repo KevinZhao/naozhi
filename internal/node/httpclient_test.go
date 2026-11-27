@@ -326,24 +326,6 @@ func TestHTTPClient_RPCs_notApplied(t *testing.T) {
 	}
 }
 
-// ---- Metadata accessors ----
-
-func TestHTTPClient_Accessors(t *testing.T) {
-	c := NewHTTPClient("id1", "http://example.com", "tok", "My Node")
-	if c.NodeID() != "id1" {
-		t.Errorf("NodeID: want %q, got %q", "id1", c.NodeID())
-	}
-	if c.DisplayName() != "My Node" {
-		t.Errorf("DisplayName: want %q, got %q", "My Node", c.DisplayName())
-	}
-	if c.Status() != "ok" {
-		t.Errorf("Status: want %q, got %q", "ok", c.Status())
-	}
-	if c.RemoteAddr() != "http://example.com" {
-		t.Errorf("RemoteAddr: want %q, got %q", "http://example.com", c.RemoteAddr())
-	}
-}
-
 // ---- Context cancellation ----
 
 func TestHTTPClient_FetchSessions_contextCancelled(t *testing.T) {
@@ -362,14 +344,6 @@ func TestHTTPClient_FetchSessions_contextCancelled(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected context cancellation error")
 	}
-}
-
-// ---- RefreshSubscription no-op ----
-
-func TestHTTPClient_RefreshSubscription_noop(t *testing.T) {
-	c := NewHTTPClient("id", "http://localhost", "", "")
-	// Should not panic or do anything.
-	c.RefreshSubscription("some-key")
 }
 
 // ---- Close idempotent ----

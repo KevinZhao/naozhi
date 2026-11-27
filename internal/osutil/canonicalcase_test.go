@@ -3,7 +3,6 @@ package osutil
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -99,9 +98,6 @@ func TestCanonicalCase_ExactMatchWinsOverFold(t *testing.T) {
 // case-canonicalized but its target is not substituted — CanonicalCase is
 // orthogonal to EvalSymlinks.
 func TestCanonicalCase_SymlinkNameNotResolved(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink creation needs elevation on windows")
-	}
 	tmp := t.TempDir()
 	target := filepath.Join(tmp, "realdir")
 	if err := os.MkdirAll(filepath.Join(target, "inner"), 0o700); err != nil {

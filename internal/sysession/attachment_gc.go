@@ -50,7 +50,7 @@ type attachmentGC struct {
 
 	// cursor is the round-robin start offset across roots so a high-churn root
 	// that keeps hitting perRootCap cannot starve the others (E3). In-memory
-	// only; GCWithRefs is idempotent so reset-on-restart is harmless.
+	// only; GCDir is idempotent so reset-on-restart is harmless.
 	cursor int
 
 	// nowFn is injected in tests; nil → time.Now.

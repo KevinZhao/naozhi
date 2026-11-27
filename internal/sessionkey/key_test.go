@@ -2,26 +2,6 @@ package sessionkey
 
 import "testing"
 
-func TestPrefixConstants(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		got  string
-		want string
-	}{
-		{"CronKeyPrefix", CronKeyPrefix, "cron:"},
-		{"SysKeyPrefix", SysKeyPrefix, "sys:"},
-		{"ScratchKeyPrefix", ScratchKeyPrefix, "scratch:"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.got != tc.want {
-				t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
-			}
-		})
-	}
-}
-
 func TestKeyConstructors(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

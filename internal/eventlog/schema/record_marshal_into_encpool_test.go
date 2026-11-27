@@ -21,7 +21,7 @@ func TestMarshalRecordInto_ParsesBackIdentically(t *testing.T) {
 	}
 	for i, p := range payloads {
 		var buf bytes.Buffer
-		got, err := MarshalRecordInto(&buf, NewEntry(uint64(i+1), p))
+		got, err := MarshalRecordInto(&buf, newEntry(uint64(i+1), p))
 		if err != nil {
 			t.Fatalf("payload %d MarshalRecordInto: %v", i, err)
 		}
@@ -57,14 +57,14 @@ func TestMarshalRecordInto_ParsesBackIdentically(t *testing.T) {
 func TestMarshalRecordInto_StableOutput(t *testing.T) {
 	p := []byte(`{"time":1700000002000,"uuid":"bb00","type":"assistant","summary":"a<b>c&d"}`)
 	var first bytes.Buffer
-	want, err := MarshalRecordInto(&first, NewEntry(5, p))
+	want, err := MarshalRecordInto(&first, newEntry(5, p))
 	if err != nil {
 		t.Fatalf("first MarshalRecordInto: %v", err)
 	}
 	wantCopy := append([]byte(nil), want...)
 	for i := 0; i < 8; i++ {
 		var b bytes.Buffer
-		got, err := MarshalRecordInto(&b, NewEntry(5, p))
+		got, err := MarshalRecordInto(&b, newEntry(5, p))
 		if err != nil {
 			t.Fatalf("iter %d MarshalRecordInto: %v", i, err)
 		}
@@ -80,7 +80,7 @@ func TestMarshalRecordInto_StableOutput(t *testing.T) {
 func TestMarshalRecordInto_AppendsToCallerBuf(t *testing.T) {
 	var buf bytes.Buffer
 	buf.WriteString("PREFIX")
-	r := NewEntry(7, []byte(`{"time":1700000003000,"uuid":"dd00","type":"user","summary":"x"}`))
+	r := newEntry(7, []byte(`{"time":1700000003000,"uuid":"dd00","type":"user","summary":"x"}`))
 	body, err := MarshalRecordInto(&buf, r)
 	if err != nil {
 		t.Fatalf("MarshalRecordInto: %v", err)

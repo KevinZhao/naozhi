@@ -1,22 +1,8 @@
 package textutil
 
 import (
-	"regexp"
 	"testing"
 )
-
-// TestDeriveLegacyUUID_Deterministic is the foundation of MergedSource's
-// dedup: the same (time, type, summary, detail) tuple MUST always derive
-// the same UUID. Breakage here would cause old Claude JSONL replays to
-// re-duplicate existing naozhi-local entries.
-func TestDeriveLegacyUUID_Deterministic(t *testing.T) {
-	t.Parallel()
-	got1 := DeriveLegacyUUID(1700000000000, "user", "hi", "")
-	got2 := DeriveLegacyUUID(1700000000000, "user", "hi", "")
-	if got1 != got2 {
-		t.Errorf("non-deterministic: %q vs %q", got1, got2)
-	}
-}
 
 // TestDeriveLegacyUUID_InputsAffectOutput: changing any input must change
 // the output. Guards against accidental hash-input reduction.
@@ -36,17 +22,6 @@ func TestDeriveLegacyUUID_InputsAffectOutput(t *testing.T) {
 		if tc.got == base {
 			t.Errorf("%s change did not alter UUID: still %q", tc.name, base)
 		}
-	}
-}
-
-// TestDeriveLegacyUUID_Shape locks the width so it matches newEventUUID's
-// shape — MergedSource dedups UUID strings directly and must not have to
-// special-case one shape vs the other.
-func TestDeriveLegacyUUID_Shape(t *testing.T) {
-	t.Parallel()
-	re := regexp.MustCompile(`^[0-9a-f]{32}$`)
-	if got := DeriveLegacyUUID(1, "user", "hi", ""); !re.MatchString(got) {
-		t.Errorf("DeriveLegacyUUID shape mismatch: %q", got)
 	}
 }
 

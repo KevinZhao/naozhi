@@ -202,19 +202,6 @@ func NewHeader(key string, createdAtMS int64, generator string) *Record {
 	}
 }
 
-// NewEntry constructs a TypeEntry Record from an already-serialized
-// payload. seq must be > 0 (0 is the header slot). entryJSON is taken over
-// by the returned Record without copying: callers must not retain or
-// mutate it afterwards.
-func NewEntry(seq uint64, entryJSON []byte) *Record {
-	return &Record{
-		V:     WireVersion,
-		Seq:   seq,
-		Type:  TypeEntry,
-		Entry: json.RawMessage(entryJSON),
-	}
-}
-
 // Errors that users of this package may want to match with errors.Is.
 var (
 	ErrNilRecord              = errors.New("schema: nil record")

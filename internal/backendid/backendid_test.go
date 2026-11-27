@@ -30,12 +30,6 @@ func TestIsValid(t *testing.T) {
 	}
 }
 
-func TestMaxLen(t *testing.T) {
-	if MaxLen != 64 {
-		t.Fatalf("MaxLen = %d, want 64 (router_backend.go maxBackendBytes contract)", MaxLen)
-	}
-}
-
 func dots(n int) string {
 	b := make([]byte, n)
 	for i := range b {

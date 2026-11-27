@@ -3,7 +3,6 @@ package gitinfo
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -312,9 +311,6 @@ func TestDetect_ControlBytesStrippedFromBranch(t *testing.T) {
 }
 
 func TestDetect_SymlinkedDotGitRejected(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink creation needs privileges on Windows")
-	}
 	t.Parallel()
 	base := t.TempDir()
 	real := filepath.Join(base, "real")

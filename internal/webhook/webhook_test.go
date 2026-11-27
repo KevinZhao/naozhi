@@ -63,7 +63,7 @@ func TestDeliver_SignedPayloadAndHeaders(t *testing.T) {
 	if h.Get("X-Naozhi-Event") != EventRunEnded || h.Get("X-Naozhi-Delivery") != "r1-run.ended" || h.Get("Content-Type") != "application/json" {
 		t.Fatalf("headers = %v", h)
 	}
-	if !Verify("s3cr3t", r.bodies[0], h.Get("X-Naozhi-Signature")) || Verify("other", r.bodies[0], h.Get("X-Naozhi-Signature")) {
+	if sig := h.Get("X-Naozhi-Signature"); sig != Sign("s3cr3t", r.bodies[0]) || sig == Sign("other", r.bodies[0]) {
 		t.Fatalf("signature %q does not verify", h.Get("X-Naozhi-Signature"))
 	}
 }
