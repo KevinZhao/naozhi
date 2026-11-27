@@ -48,7 +48,6 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -59,7 +58,6 @@ import (
 	"github.com/naozhi/naozhi/internal/cliinfo"
 	"github.com/naozhi/naozhi/internal/monitor/health"
 	"github.com/naozhi/naozhi/internal/notify"
-	"github.com/naozhi/naozhi/internal/osutil/jsonfile"
 	"github.com/naozhi/naozhi/internal/planner/journal"
 	"github.com/naozhi/naozhi/internal/planner/note"
 	"github.com/naozhi/naozhi/internal/planner/sidecar"
@@ -107,8 +105,6 @@ const (
 	staleAfter = 30 * time.Minute
 	// maxLineage bounds the walk up a lineage.
 	maxLineage = 32
-	// stateBytes caps custody.json.
-	stateBytes = 4 << 10
 )
 
 // Backoff is the wait before the retry of a class's n-th failure.
@@ -289,9 +285,6 @@ type Config struct {
 	// call (monitor/wake.Detector.Woke); a network error's retry is due at
 	// once then. Called from Tick only.
 	Woke func() bool
-	// Path is custody.json, where v0.5.0 kept its own pause: one found
-	// paused is carried over to the one pause until the end of today.
-	Path string
 	Now  func() time.Time
 	// Disabled leaves every session out of custody: with the Planner off
 	// no one judges a turn's end, and the gateway does not start replying
@@ -328,34 +321,13 @@ type Engine struct {
 	faulted map[string]bool
 }
 
-// state is v0.5.0's custody.json.
-type state struct {
-	V      int  `json:"v"`
-	Paused bool `json:"paused"`
-}
-
-// New returns an Engine. A pause v0.5.0 kept in custody.json is carried
-// over to the one pause, until the end of today, and the file removed.
+// New returns an Engine.
 func New(cfg Config) *Engine {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
 	e := &Engine{cfg: cfg, poke: make(chan struct{}, 1), ends: make(chan turnEnd, endsQueued), viewing: map[string]map[string]time.Time{}, deferred: map[string]bool{},
 		asks: map[string]*askWait{}, faulted: map[string]bool{}}
-	if cfg.Path != "" {
-		st, out, err := jsonfile.Load[state](cfg.Path, jsonfile.Options{MaxBytes: stateBytes, Label: "custody state", Corrupt: jsonfile.LeaveCorrupt})
-		switch {
-		case err != nil:
-			slog.Warn("custody state unreadable; its pause not carried over", "err", err)
-		case out == jsonfile.Parsed:
-			if st.Paused {
-				e.pause(notify.EndOfToday(e.now()))
-			}
-			if err := os.Remove(cfg.Path); err != nil {
-				slog.Warn("custody state not removed", "err", err)
-			}
-		}
-	}
 	return e
 }
 
