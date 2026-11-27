@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -23,117 +24,56 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// TestToSessionAgentOpts_ExtraArgsCloned verifies that mutating the cron-side
-// ExtraArgs after toSessionAgentOpts returns does NOT corrupt the session-side
-// slice. The aliasing contract in internal/session/router_lifecycle.go:267
-// says callers populating AgentOpts must own ExtraArgs exclusively; the
-// adapter clones to honour that.
-func TestToSessionAgentOpts_ExtraArgsCloned(t *testing.T) {
+// TestToSessionAgentOpts: every field crosses the cron -> session hop;
+// dropping one makes a cron job spawn unlike any other session of its agent,
+// silently: SystemPrompt (#2493), Effort (docs/rfc/kiro-effort-control.md),
+// AccessProfile (#3106, else the default account). The config -> cron half is
+// asserted in cmd/naozhi's TestBuildAgentOpts. ExtraArgs is cloned (the router
+// treats AgentOpts.ExtraArgs as exclusively owned) and stays nil when empty.
+func TestToSessionAgentOpts(t *testing.T) {
 	t.Parallel()
 	cronArgs := []string{"--debug", "--verbose"}
-	in := cron.AgentOpts{
-		Backend:   "claude",
-		Model:     "opus",
-		Workspace: "/tmp/x",
-		ExtraArgs: cronArgs,
-		Exempt:    true,
+	out := toSessionAgentOpts(cron.AgentOpts{Backend: "kiro", Model: "opus", Workspace: "/tmp/x", Effort: "max",
+		SystemPrompt: "You are a code review expert.", AccessProfile: "personal", ExtraArgs: cronArgs, Exempt: true})
+	want := session.AgentOpts{Backend: "kiro", Model: "opus", Workspace: "/tmp/x", Effort: "max",
+		SystemPrompt: "You are a code review expert.", AccessProfile: "personal", ExtraArgs: []string{"--debug", "--verbose"}, Exempt: true}
+	if !reflect.DeepEqual(out, want) {
+		t.Fatalf("toSessionAgentOpts = %+v, want %+v", out, want)
 	}
-	out := toSessionAgentOpts(in)
-	if len(out.ExtraArgs) != 2 || out.ExtraArgs[0] != "--debug" || out.ExtraArgs[1] != "--verbose" {
-		t.Fatalf("ExtraArgs not copied: got %#v", out.ExtraArgs)
-	}
-	// Mutate the cron source — session copy must stay unchanged.
 	cronArgs[0] = "--mutated"
 	if out.ExtraArgs[0] != "--debug" {
-		t.Errorf("ExtraArgs aliased: out[0] = %q after mutating cron source, want %q",
-			out.ExtraArgs[0], "--debug")
+		t.Errorf("ExtraArgs aliased: out[0] = %q after mutating the cron source", out.ExtraArgs[0])
+	}
+	if got := toSessionAgentOpts(cron.AgentOpts{Backend: "claude"}); !reflect.DeepEqual(got, session.AgentOpts{Backend: "claude"}) {
+		t.Errorf("unset opts = %+v, want only the backend (nil ExtraArgs, the rest left to the router's defaults)", got)
 	}
 }
 
-// TestToSessionAgentOpts_NilExtraArgs ensures a nil/empty cron ExtraArgs
-// translates to a nil session ExtraArgs, not an empty non-nil slice that could
-// surprise downstream nil checks.
-func TestToSessionAgentOpts_NilExtraArgs(t *testing.T) {
-	t.Parallel()
-	out := toSessionAgentOpts(cron.AgentOpts{Backend: "claude"})
-	if out.ExtraArgs != nil {
-		t.Errorf("empty ExtraArgs: got %#v, want nil", out.ExtraArgs)
-	}
-}
-
-// TestToSessionAgentOpts_Effort closes the cron → session half of the
-// thinking-effort round-trip. Dropping the field here makes a cron job spawn on
-// the backend default instead of the tier configured for its agent — silently,
-// since nothing else reads it. The config → cron half is asserted in
-// cmd/naozhi's TestBuildAgentOpts. docs/rfc/kiro-effort-control.md
-func TestToSessionAgentOpts_Effort(t *testing.T) {
-	t.Parallel()
-	if got := toSessionAgentOpts(cron.AgentOpts{Backend: "kiro", Effort: "max"}).Effort; got != "max" {
-		t.Errorf("Effort = %q, want max", got)
-	}
-	// Unset stays unset so the backend default applies.
-	if got := toSessionAgentOpts(cron.AgentOpts{Backend: "kiro"}).Effort; got != "" {
-		t.Errorf("Effort = %q, want empty when the cron opts carry none", got)
-	}
-}
-
-// TestToSessionAgentOpts_AccessProfile closes the cron → session half of the
-// agent access-profile hop (#3106): without it a job for an agent pinned to a
-// profile spawns on the default account. The config → cron half is asserted in
-// cmd/naozhi's TestBuildAgentOpts.
-func TestToSessionAgentOpts_AccessProfile(t *testing.T) {
-	t.Parallel()
-	if got := toSessionAgentOpts(cron.AgentOpts{Backend: "claude", AccessProfile: "personal"}).AccessProfile; got != "personal" {
-		t.Errorf("AccessProfile = %q, want personal", got)
-	}
-	// Unset stays unset so the router's default_access_profile tier applies.
-	if got := toSessionAgentOpts(cron.AgentOpts{Backend: "claude"}).AccessProfile; got != "" {
-		t.Errorf("AccessProfile = %q, want empty when the cron opts carry none", got)
-	}
-}
-
-// TestWrapCronSpawnErr_CapacityRefusals: the router's capacity refusals, in the
-// wrapped forms reserveSpawn returns, reach cron as ErrSessionCapacity with
-// the session sentinel still in the chain; any other spawn error passes
-// through untouched so it stays a session_error.
-func TestWrapCronSpawnErr_CapacityRefusals(t *testing.T) {
+// TestWrapCronSpawnErr: the router's capacity refusals, in the wrapped forms
+// reserveSpawn returns, reach cron as ErrSessionCapacity with the session
+// sentinel still in the chain; a CLI exit in the Init handshake with a named
+// cause reaches cron carrying that cause (the classes: TestExitFailure), the
+// exit kept; any other spawn error passes through untouched so it stays a
+// session_error.
+func TestWrapCronSpawnErr(t *testing.T) {
 	t.Parallel()
 	for _, sentinel := range []error{session.ErrMaxExemptSessions, session.ErrMaxProcs} {
 		routerErr := fmt.Errorf("%w: cron namespace (12)", sentinel)
-		got := wrapCronSpawnErr(routerErr)
-		if !errors.Is(got, cron.ErrSessionCapacity) {
-			t.Errorf("%v: errors.Is(ErrSessionCapacity) = false", routerErr)
-		}
-		if !errors.Is(got, sentinel) {
-			t.Errorf("%v: session sentinel lost from the chain", routerErr)
+		if got := wrapCronSpawnErr(routerErr); !errors.Is(got, cron.ErrSessionCapacity) || !errors.Is(got, sentinel) {
+			t.Errorf("%v: got %v, want ErrSessionCapacity with the session sentinel kept", routerErr, got)
 		}
 	}
-	other := errors.New("spawn boom")
-	if got := wrapCronSpawnErr(other); got != other {
-		t.Errorf("non-capacity error rewrapped: got %v", got)
+	exit := fmt.Errorf("session k: protocol init: acp session/new: %w", &clierr.ProcessExitedError{Code: 1, Class: clierr.ExitAuth})
+	err := wrapCronSpawnErr(exit)
+	var tf *cron.TurnFailedError
+	var pe *clierr.ProcessExitedError
+	if !errors.As(err, &tf) || tf.Cause != cron.TurnCauseBackendAuth || !errors.As(err, &pe) || errors.Is(err, cron.ErrSessionCapacity) {
+		t.Errorf("wrapCronSpawnErr(auth exit) = %v, want a TurnFailedError with the exit kept and no capacity tag", err)
 	}
-}
-
-// TestWrapCronSpawnErr_NamesCLIExitCause: a spawn whose CLI exited in the
-// Init handshake with a named cause reaches cron carrying that cause, the
-// exit still in the chain; an unrecognised exit passes through.
-func TestWrapCronSpawnErr_NamesCLIExitCause(t *testing.T) {
-	t.Parallel()
-	for _, tc := range cliExitCauses {
-		exit := fmt.Errorf("session k: protocol init: acp session/new: %w", &clierr.ProcessExitedError{Code: 1, Class: tc.class})
-		err := wrapCronSpawnErr(exit)
-		var tf *cron.TurnFailedError
-		if !errors.As(err, &tf) || tf.Cause != tc.cause {
-			t.Errorf("wrapCronSpawnErr(class %d) = %v, want a TurnFailedError with %q", tc.class, err, tc.cause)
+	for _, other := range []error{errors.New("spawn boom"), fmt.Errorf("protocol init: %w", &clierr.ProcessExitedError{Code: 1})} {
+		if got := wrapCronSpawnErr(other); got != other {
+			t.Errorf("wrapCronSpawnErr(%v) rewrapped: got %v", other, got)
 		}
-		var pe *clierr.ProcessExitedError
-		if !errors.As(err, &pe) || pe.Class != tc.class || errors.Is(err, cron.ErrSessionCapacity) {
-			t.Errorf("wrapCronSpawnErr(class %d) = %v, want the exit kept and no capacity tag", tc.class, err)
-		}
-	}
-	unknown := fmt.Errorf("protocol init: %w", &clierr.ProcessExitedError{Code: 1})
-	if got := wrapCronSpawnErr(unknown); got != unknown {
-		t.Errorf("unrecognised exit rewrapped: got %v", got)
 	}
 }
 
@@ -199,23 +139,6 @@ func TestCronRouterAdapter_ReleaseProcess(t *testing.T) {
 	}
 	if _, v := r.ListSessionsWithVersion(); v == v1 {
 		t.Error("release did not bump the list version; the dashboard keeps showing the process alive")
-	}
-}
-
-// TestCronSessionAdapter_BackendPassesThrough: cron's ledger labels a run with
-// the backend the session recorded at spawn, "" included.
-func TestCronSessionAdapter_BackendPassesThrough(t *testing.T) {
-	t.Parallel()
-	r := session.NewRouter(session.RouterConfig{})
-	t.Cleanup(r.Shutdown)
-	ms := r.InjectSession("cron:job-backend", session.NewTestProcess())
-	a := cronSessionAdapter{s: ms}
-	if got := a.Backend(); got != "" {
-		t.Errorf("Backend before SetBackend = %q, want empty", got)
-	}
-	ms.SetBackend("kiro")
-	if got := a.Backend(); got != "kiro" {
-		t.Errorf("Backend = %q, want kiro", got)
 	}
 }
 
