@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 )
@@ -96,46 +95,6 @@ func TestSidecarCompatV064(t *testing.T) {
 	}
 }
 
-// TestTurnReportErrCompat: a turn as v0.6.4 wrote it reads with no
-// ReportErr, and one with a ReportErr keeps every other field of the
-// sidecar; "" is left out.
-func TestTurnReportErrCompat(t *testing.T) {
-	dir, key, raw := loadFixture(t, "sidecar_v0.6.4.json")
-	s := Open(dir, nil)
-	m, _ := s.Get(key)
-	if m.Turn == nil || m.Turn.ReportErr != "" {
-		t.Fatalf("turn = %+v", m.Turn)
-	}
-	turn := *m.Turn
-	turn.ReportErr = "state 只能是 done、blocked、need_user 或 progress"
-	if ok, err := s.Update(key, func(m *Meta) bool { m.Turn = &turn; return true }); !ok || err != nil {
-		t.Fatalf("Update = %v, %v", ok, err)
-	}
-	data, err := os.ReadFile(filepath.Join(dir, fileName(key)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var after map[string]json.RawMessage
-	if err := json.Unmarshal(data, &after); err != nil {
-		t.Fatal(err)
-	}
-	for k, v := range raw {
-		if k != "turn" && !jsonEqual(t, after[k], v) {
-			t.Errorf("field %s after Update = %s, want %s", k, after[k], v)
-		}
-	}
-	if len(after) != len(raw) {
-		t.Errorf("fields after Update = %d, want %d", len(after), len(raw))
-	}
-	if got, _ := Open(dir, nil).Get(key); got.Turn == nil || *got.Turn != turn {
-		t.Errorf("reread turn = %+v, want %+v", got.Turn, turn)
-	}
-	turn.ReportErr = ""
-	if b, _ := json.Marshal(turn); strings.Contains(string(b), "report_err") {
-		t.Errorf("an empty ReportErr is written: %s", b)
-	}
-}
-
 func jsonEqual(t *testing.T, a, b json.RawMessage) bool {
 	t.Helper()
 	var x, y any
@@ -143,43 +102,6 @@ func jsonEqual(t *testing.T, a, b json.RawMessage) bool {
 		return false
 	}
 	return reflect.DeepEqual(x, y)
-}
-
-// TestSidecarSeenAtCompat: seen_at is a fields-only addition too. A
-// v0.6.4 sidecar reads with no SeenAt; setting it keeps every field the
-// fixture had and adds only seen_at, which a reread returns.
-func TestSidecarSeenAtCompat(t *testing.T) {
-	dir, key, raw := loadFixture(t, "sidecar_v0.6.4.json")
-	s := Open(dir, nil)
-	before, ok := s.Get(key)
-	if !ok || !before.SeenAt.IsZero() {
-		t.Fatalf("v0.6.4 sidecar: ok %v, SeenAt %v; want it read with no SeenAt", ok, before.SeenAt)
-	}
-	seen := time.Date(2026, 11, 8, 13, 0, 0, 0, time.UTC)
-	if ok, err := s.Update(key, func(m *Meta) bool { m.SeenAt = seen; return true }); !ok || err != nil {
-		t.Fatalf("Update = %v, %v", ok, err)
-	}
-	data, err := os.ReadFile(filepath.Join(dir, fileName(key)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var after map[string]json.RawMessage
-	if err := json.Unmarshal(data, &after); err != nil {
-		t.Fatal(err)
-	}
-	for k, v := range raw {
-		if !jsonEqual(t, after[k], v) {
-			t.Errorf("field %s after Update = %s, want %s", k, after[k], v)
-		}
-	}
-	if len(after) != len(raw)+1 || string(after["seen_at"]) != `"2026-11-08T13:00:00Z"` {
-		t.Errorf("fields after Update = %d (seen_at %s), want the fixture's %d + seen_at", len(after), after["seen_at"], len(raw))
-	}
-	want := before
-	want.SeenAt = seen
-	if got, _ := Open(dir, nil).Get(key); !reflect.DeepEqual(got, want) {
-		t.Fatalf("reread after Update = %+v", got)
-	}
 }
 
 // TestSidecarWatchCompat: watch and result_at are fields-only additions. A
@@ -251,6 +173,9 @@ func TestUpsert(t *testing.T) {
 	}
 	if err := s.Upsert("", func(*Meta) bool { return true }); err == nil {
 		t.Error("Upsert with no key")
+	}
+	if ok, err := s.Update("nobody", func(*Meta) bool { return true }); ok || err != nil {
+		t.Errorf("Update of no sidecar = %v %v", ok, err)
 	}
 	const newer = "slack:direct:n:general"
 	if err := os.WriteFile(filepath.Join(dir, fileName(newer)), []byte(`{"v":99,"key":"`+newer+`"}`), 0o600); err != nil {

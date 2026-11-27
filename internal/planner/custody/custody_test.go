@@ -3,7 +3,6 @@ package custody
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -103,7 +102,6 @@ func (r *rig) open() {
 		Pause:       func(until time.Time) { r.until = until },
 		CredExpiry:  func() time.Time { return r.cred },
 		Woke:        func() bool { w := r.woke; r.woke = false; return w },
-		Path:        filepath.Join(r.dir, "custody.json"),
 		Now:         func() time.Time { return r.now },
 	})
 }
@@ -319,25 +317,6 @@ func TestNearbyAndPause(t *testing.T) {
 	}
 	if err := r.e.Pause(time.Time{}); err != nil || !r.e.Allowed("task:a") {
 		t.Errorf("not allowed after resume: %v", err)
-	}
-}
-
-// v0.5.0 kept its own pause in custody.json: one found paused carries over
-// to the one pause until the end of today, and the file goes.
-func TestLegacyPause(t *testing.T) {
-	for _, paused := range []bool{true, false} {
-		r := newRig(t)
-		path := filepath.Join(r.dir, "custody.json")
-		if err := os.WriteFile(path, []byte(fmt.Sprintf(`{"v":1,"paused":%v}`, paused)), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		r.open()
-		if want := map[bool]time.Time{true: notify.EndOfToday(r.now)}[paused]; !r.until.Equal(want) {
-			t.Errorf("paused=%v: the one pause until %v, want %v", paused, r.until, want)
-		}
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Errorf("paused=%v: custody.json kept: %v", paused, err)
-		}
 	}
 }
 

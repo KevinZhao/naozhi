@@ -401,9 +401,12 @@ func TestFromEntryPlanner(t *testing.T) {
 	}
 }
 
-// With no journal there is nowhere to keep a note.
+// With no journal there is nowhere to keep a note, and Progress writes
+// none.
 func TestPlannerNoJournal(t *testing.T) {
-	n := New(Config{})
+	now := time.Date(2026, 11, 23, 9, 0, 0, 0, time.Local)
+	n := New(Config{Now: func() time.Time { return now.Add(time.Hour) }})
+	n.Progress([]Background{bash(progressKey, now)})
 	if _, err := n.Write("a", "x", "y"); err == nil {
 		t.Error("Write without a journal succeeded")
 	}
