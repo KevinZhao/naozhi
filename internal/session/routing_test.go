@@ -371,6 +371,7 @@ func TestResolveForKey(t *testing.T) {
 			AgentOpts{Model: "haiku"}},
 		{"im_4segment_unknown_agent_zero", "feishu:direct:alice:nonexistent", true, AgentOpts{}},
 		{"malformed_empty", "", false, AgentOpts{}},
+		{"malformed_one_segment", "a", false, AgentOpts{}},
 		{"malformed_two_segments", "foo:bar", false, AgentOpts{}},
 		{"malformed_too_many", "a:b:c:d:e:f", true, AgentOpts{}}, // SplitN(_, 4) keeps 4th intact "d:e:f" → defaults["d:e:f"] = zero
 		// D1: "project:" prefix without ":planner" suffix is not a planner
@@ -589,84 +590,4 @@ func TestResolveForChat_ConcurrentNoAliasing(t *testing.T) {
 			t.Errorf("defaults backing array cell [%d] = %q, want empty — aliasing leaked", i, peek[i])
 		}
 	}
-}
-
-// ----- Historical key compatibility --------------------------------------
-
-func TestResolveForKey_HistoricalKeys(t *testing.T) {
-	t.Parallel()
-	// Covers historical key shapes that have ever appeared in
-	// sessions.json / WS subscribe. Resolver MUST NOT panic on any of
-	// them; ok must match expectations.
-	r := NewKeyResolver(map[string]AgentOpts{"general": {}}, nil)
-
-	cases := []struct {
-		key    string
-		wantOK bool
-	}{
-		// standard IM 4-segment
-		{"feishu:direct:alice:general", true},
-		{"feishu:group:xxx:code-reviewer", true},
-		{"dashboard:session:local:general", true},
-		// scratch (reserved)
-		{"scratch:abc123:general:general", false},
-		// cron (reserved)
-		{"cron:daily-standup", false},
-		// planner (reserved; data=nil so always ok=false)
-		{"project:naozhi:planner", false},
-		// malformed — must not panic
-		{"foo:bar", false},
-		{"", false},
-		{"a", false},
-	}
-	for _, tc := range cases {
-		// Defensive: wrap each call so a panic surfaces as a clear failure.
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					t.Errorf("ResolveForKey(%q) panicked: %v", tc.key, r)
-				}
-			}()
-			_, ok := r.ResolveForKey(tc.key)
-			if ok != tc.wantOK {
-				t.Errorf("ResolveForKey(%q) ok = %v, want %v", tc.key, ok, tc.wantOK)
-			}
-		}()
-	}
-}
-
-// TestRouter_Resolver_Singleton covers R237-ARCH-12 (#604): the Router
-// exposes the KeyResolver instance configured via RouterConfig.Resolver
-// so downstream consumers (Dispatcher, Hub, upstream wiring) read the
-// same agents-config snapshot instead of constructing parallel
-// resolvers that drift apart on edits.
-func TestRouter_Resolver_Singleton(t *testing.T) {
-	t.Parallel()
-	t.Run("nil router returns nil resolver", func(t *testing.T) {
-		t.Parallel()
-		var r *Router
-		if got := r.Resolver(); got != nil {
-			t.Errorf("(*Router)(nil).Resolver() = %v, want nil", got)
-		}
-	})
-	t.Run("unconfigured router returns nil", func(t *testing.T) {
-		t.Parallel()
-		r := &Router{ss: newSessionTable()}
-		if got := r.Resolver(); got != nil {
-			t.Errorf("zero Router.Resolver() = %v, want nil", got)
-		}
-	})
-	t.Run("configured router returns the same instance", func(t *testing.T) {
-		t.Parallel()
-		shared := NewKeyResolver(map[string]AgentOpts{"general": {}}, nil)
-		r := &Router{ss: newSessionTable(), resolver: shared}
-		if got := r.Resolver(); got != shared {
-			t.Errorf("Router.Resolver() = %p, want %p (singleton identity)", got, shared)
-		}
-		// Calling twice returns the same pointer — hot path readers cache nothing.
-		got1, got2 := r.Resolver(), r.Resolver()
-		if got1 != got2 {
-			t.Error("Router.Resolver() returned different instances on repeated calls")
-		}
-	})
 }

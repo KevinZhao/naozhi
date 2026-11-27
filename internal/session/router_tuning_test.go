@@ -150,12 +150,14 @@ func TestSetSessionTuning_RPCPath(t *testing.T) {
 	t.Run("rejection records nothing and surfaces CLI text", func(t *testing.T) {
 		r := mkTuningTestRouter(t)
 		proc := &tuningFakeProc{TestProcess: NewTestProcess()}
-		proc.setModelErr = clierr.ErrSetModelRejected
+		// The CLI's text was sanitized at the protocol layer; this layer
+		// passes it through for the dashboard toast.
+		proc.setModelErr = errors.Join(clierr.ErrSetModelRejected, errors.New("set_model rejected by CLI: policy says no"))
 		s := addTuningSession(r, "k1", "claude", proc)
 
 		_, err := r.SetSessionTuning(ctx, "k1", strp("haiku"), nil)
-		if !errors.Is(err, clierr.ErrSetModelRejected) {
-			t.Fatalf("err = %v, want ErrSetModelRejected", err)
+		if !errors.Is(err, clierr.ErrSetModelRejected) || !strings.Contains(err.Error(), "policy says no") {
+			t.Fatalf("err = %v, want ErrSetModelRejected carrying the CLI text", err)
 		}
 		if s.TuningModel() != "" {
 			t.Errorf("rejected override was recorded: %q (violates §6 R8)", s.TuningModel())
@@ -316,24 +318,6 @@ func TestSetSessionTuning_F9PathSelection(t *testing.T) {
 			t.Errorf("clear failed: model=%q effort=%q", s.TuningModel(), s.TuningEffort())
 		}
 	})
-}
-
-// TestSetSessionTuning_ErrorTextIsSanitizedUpstream documents where trust
-// boundaries sit: the CLI rejection text reaching the API error was already
-// sanitized at the protocol layer (parseControlAck / ACP interception), so
-// this layer passes it through verbatim.
-func TestSetSessionTuning_ErrorTextIsSanitizedUpstream(t *testing.T) {
-	r := mkTuningTestRouter(t)
-	proc := &tuningFakeProc{TestProcess: NewTestProcess()}
-	proc.setModelErr = errors.New("set_model rejected by CLI: policy says no")
-	// Wrap so errors.Is matches the sentinel like the real path does.
-	proc.setModelErr = errors.Join(clierr.ErrSetModelRejected, proc.setModelErr)
-	addTuningSession(r, "k1", "claude", proc)
-
-	_, err := r.SetSessionTuning(context.Background(), "k1", strp("haiku"), nil)
-	if err == nil || !strings.Contains(err.Error(), "policy says no") {
-		t.Errorf("CLI text must reach the caller for the dashboard toast, got: %v", err)
-	}
 }
 
 // TestSetSessionTuning_ClearModelNeverTakesRPC pins the "恢复默认" fix: a

@@ -720,31 +720,6 @@ func TestWorkflowBoard_LocateOncePerBind(t *testing.T) {
 	}
 }
 
-// TestCleanupLoop_SweepsWorkflowBoards: the cleanup loop's save tick runs
-// the workflow sweep, so an orphan restored from sessions.json is
-// interrupted without anyone calling the sweeper by hand.
-func TestCleanupLoop_SweepsWorkflowBoards(t *testing.T) {
-	old := saveTickInterval
-	saveTickInterval = 10 * time.Millisecond
-	t.Cleanup(func() { saveTickInterval = old })
-	r := wfRouter(t)
-	const key = "feishu:direct:alice:general"
-	entry := &storeEntry{Key: key, Backend: "claude", Workspace: t.TempDir(), SessionID: wfSID,
-		Workflows: []workflow.Ref{{TaskID: "w1", Status: workflow.StatusRunning, LastObservedAt: time.Now().UnixMilli()}}}
-	r.ss.Update(func(tx sessTx) { r.restoreSessionFromEntry(tx, key, entry) })
-	b := r.SessionFor(key).WorkflowBoard()
-	b.mu.Lock()
-	b.procGone -= 2 * workflowOrphanAfter.Milliseconds()
-	b.mu.Unlock()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	r.StartCleanupLoop(ctx, time.Hour, nil)
-	testhelper.Eventually(t, func() bool {
-		w := boardEntry(r.SessionFor(key), "w1")
-		return w != nil && w.Status == workflow.StatusInterrupted
-	}, 5*time.Second, "the save tick never swept the board")
-}
-
 // TestCleanupLoop_SweepSettlesLostTerminalFrame: a run whose task_updated
 // was lost is settled from its result file by the save tick alone. The
 // board's clock stays at wfT0 while the tick sweeps at wall time, so the

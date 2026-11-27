@@ -240,10 +240,9 @@ func TestAgentOverlayDrift_ResumeArgsStripped(t *testing.T) {
 	s.SetBackend("claude")
 	putT(r, key, s)
 
-	state, sp := spawnShimState(t, r, key, "", AgentOpts{Backend: "claude", Workspace: "/ws", Model: "sonnet"})
+	state, _ := spawnShimState(t, r, key, "", AgentOpts{Backend: "claude", Workspace: "/ws", Model: "sonnet"})
 	// resolveResumeID downgrades a missing on-disk target to fresh; inject the
 	// pair the way a real resume would have recorded it.
-	_ = sp
 	state.CLIArgs = append(slices.Clone(state.CLIArgs), "--resume", "sess-2494-resume")
 
 	wrapper, backendID := r.backends.wrapperFor(state.Backend)

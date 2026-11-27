@@ -101,8 +101,6 @@ type fakeOrigin struct {
 	opts     sessionview.AgentOpts
 	// scope is returned by Scope; empty matches nothing.
 	scope string
-	// nilDelivery makes Begin return nil (a receiver that wants nothing).
-	nilDelivery bool
 	// panicIn names a hook ("begin", "finish", "dropped") that panics.
 	panicIn string
 	// onEvent, when set, is the callback SessionReady returns.
@@ -149,9 +147,6 @@ func (o *fakeOrigin) Begin(_ context.Context, t TurnInfo) Delivery {
 	o.rec.add("begin:%s:%s", o.name, roleName(t.Role))
 	if o.panicIn == "begin" {
 		panic("begin " + o.name)
-	}
-	if o.nilDelivery {
-		return nil
 	}
 	return &fakeDelivery{o: o}
 }
@@ -216,12 +211,11 @@ type sendCall struct {
 // fakeSender records every call. Send blocks on gate when it is set, so a
 // test can hold a turn open; sendErr / getErr / panicIn shape the outcome.
 type fakeSender struct {
-	rec      *recorder
-	gate     chan struct{}
-	getErr   error
-	sendErr  error
-	panicGet bool
-	panicIf  func(text string) bool // Send panics, once let through the gate, when true
+	rec     *recorder
+	gate    chan struct{}
+	getErr  error
+	sendErr error
+	panicIf func(text string) bool // Send panics, once let through the gate, when true
 	// panicEarly is panicIf checked before the gate.
 	panicEarly func(text string) bool
 	status     sessionview.SessionStatus
@@ -243,9 +237,6 @@ func (s *fakeSender) GetOrCreate(_ context.Context, key string, o sessionview.Ag
 	s.opts = append(s.opts, o)
 	s.mu.Unlock()
 	s.rec.add("get:%s", key)
-	if s.panicGet {
-		panic("get")
-	}
 	if s.getErr != nil {
 		return nil, 0, s.getErr
 	}

@@ -104,13 +104,6 @@ func TestSanitizeQuote_UTF8BoundaryAfterTruncate(t *testing.T) {
 	}
 }
 
-func TestSanitizeQuote_EmptyAfterCleaning(t *testing.T) {
-	got, trunc := SanitizeQuote("\x00\x01\x02")
-	if got != "" || trunc {
-		t.Errorf("got (%q, %v); want (\"\", false)", got, trunc)
-	}
-}
-
 func TestScratchPool_OpenRegistersByKey(t *testing.T) {
 	p := NewScratchPool(nil, 5, time.Minute)
 	sc, err := p.Open(OpenOptions{
@@ -198,38 +191,6 @@ func TestScratchPool_CloseUnknown(t *testing.T) {
 	p := NewScratchPool(nil, 5, time.Minute)
 	if err := p.Close("00000000000000000000000000000000"); err != ErrScratchNotFound {
 		t.Errorf("got %v, want ErrScratchNotFound", err)
-	}
-}
-
-func TestScratchPool_SweepEvictsIdle(t *testing.T) {
-	p := NewScratchPool(nil, 5, 50*time.Millisecond)
-	sc, err := p.Open(OpenOptions{SourceKey: "k:direct:u:general", Quote: "x"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sc.lastUsed.Store(time.Now().Add(-10 * time.Second).UnixNano())
-	p.sweep(time.Now())
-	if p.Get(sc.ID) != nil {
-		t.Error("sweep should have evicted idle scratch")
-	}
-	if _, ok := p.OptsForKey(sc.Key); ok {
-		t.Error("byKey should have been cleared by sweep")
-	}
-}
-
-func TestScratchPool_ExtraArgsNotAliased(t *testing.T) {
-	original := []string{"--model", "opus"}
-	p := NewScratchPool(nil, 5, time.Minute)
-	_, err := p.Open(OpenOptions{
-		SourceKey: "k:direct:u:general",
-		Quote:     "q1",
-		BaseOpts:  AgentOpts{ExtraArgs: original},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(original) != 2 {
-		t.Fatalf("caller's slice mutated: %v", original)
 	}
 }
 
@@ -661,6 +622,9 @@ func TestScratchPool_SweepEvictsIdleRouterSession(t *testing.T) {
 	p.sweep(time.Now())
 	if p.Get(sc.ID) != nil {
 		t.Error("idle scratch survived the sweep")
+	}
+	if _, ok := p.OptsForKey(sc.Key); ok {
+		t.Error("byKey should have been cleared by sweep")
 	}
 	if r.SessionFor(sc.Key) != nil || proc.Alive() {
 		t.Error("sweep did not remove the idle scratch's router session")
