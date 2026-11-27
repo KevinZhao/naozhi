@@ -165,6 +165,38 @@ func TestManager_DisabledIsNoOp(t *testing.T) {
 	}
 }
 
+// newTestManager installs d as the only builtin daemon and returns an enabled
+// Manager that runs it with rt (Enabled forced on) and newTicker.
+func newTestManager(t *testing.T, d *signalDaemon, tickTimeout time.Duration, rt DaemonRuntimeConfig, newTicker tickerFactory) *Manager {
+	t.Helper()
+	withRegistry(t, []builtinDaemonFactory{
+		{Name: d.name, Build: func(DaemonDeps) (Daemon, error) { return d, nil }},
+	})
+	rt.Enabled = true
+	m, err := NewManager(Config{
+		Enabled:     true,
+		TickTimeout: tickTimeout,
+		Router:      newFakeRouter(),
+		Daemons:     map[string]DaemonRuntimeConfig{d.name: rt},
+		NewTicker:   newTicker,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	return m
+}
+
+// startManager starts m and stops it when the test ends.
+func startManager(t *testing.T, m *Manager) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	m.Start(ctx)
+	t.Cleanup(func() {
+		m.Stop(context.Background())
+		cancel()
+	})
+}
+
 // TestManager_StartIdempotent pins R260528-ARCH-16 (#1377): a second
 // Start call must NOT panic — instead it logs a Warn and returns.
 // Aligns sysession with cron.Scheduler's CAS-idempotent Start contract
@@ -173,26 +205,9 @@ func TestManager_DisabledIsNoOp(t *testing.T) {
 // fact that Stop afterwards still drains both calls is what makes this
 // safe rather than just "panic deferred".
 func TestManager_StartIdempotent(t *testing.T) {
-	d := &signalDaemon{name: "auto-titler"}
-	withRegistry(t, []builtinDaemonFactory{
-		{Name: "auto-titler", Build: func(deps DaemonDeps) (Daemon, error) { return d, nil }},
-	})
-
-	router := newFakeRouter()
-	pulse, tickFn := pulseTicker()
-	_ = pulse
-	m, err := NewManager(Config{
-		Enabled:     true,
-		TickTimeout: 100 * time.Millisecond,
-		Router:      router,
-		Daemons: map[string]DaemonRuntimeConfig{
-			"auto-titler": {Enabled: true, Tick: 50 * time.Millisecond},
-		},
-		NewTicker: tickFn,
-	})
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+	_, tickFn := pulseTicker()
+	m := newTestManager(t, &signalDaemon{name: "auto-titler"}, 100*time.Millisecond,
+		DaemonRuntimeConfig{Tick: 50 * time.Millisecond}, tickFn)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -216,25 +231,9 @@ func TestManager_StartIdempotent(t *testing.T) {
 // subsequent Stop must drain via the package-internal cancelP rather than
 // the original parent.
 func TestManager_StartNilCtxFallsBack(t *testing.T) {
-	d := &signalDaemon{name: "auto-titler"}
-	withRegistry(t, []builtinDaemonFactory{
-		{Name: "auto-titler", Build: func(deps DaemonDeps) (Daemon, error) { return d, nil }},
-	})
-
-	router := newFakeRouter()
 	_, tickFn := pulseTicker()
-	m, err := NewManager(Config{
-		Enabled:     true,
-		TickTimeout: 100 * time.Millisecond,
-		Router:      router,
-		Daemons: map[string]DaemonRuntimeConfig{
-			"auto-titler": {Enabled: true, Tick: 50 * time.Millisecond},
-		},
-		NewTicker: tickFn,
-	})
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+	m := newTestManager(t, &signalDaemon{name: "auto-titler"}, 100*time.Millisecond,
+		DaemonRuntimeConfig{Tick: 50 * time.Millisecond}, tickFn)
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -265,38 +264,12 @@ func TestManager_NewRequiresRouterWhenEnabled(t *testing.T) {
 
 func TestManager_TickRunsAndRecords(t *testing.T) {
 	pulse, tickFn := pulseTicker()
-
-	// Replace the auto-titler factory with our signal daemon for the
-	// duration of this test.  We do this by temporarily installing
-	// our own one-entry registry — see the helper below.
 	d := &signalDaemon{name: "auto-titler"}
-	withRegistry(t, []builtinDaemonFactory{
-		{Name: "auto-titler", Build: func(deps DaemonDeps) (Daemon, error) { return d, nil }},
-	})
-
-	router := newFakeRouter()
-	m, err := NewManager(Config{
-		Enabled:     true,
-		TickTimeout: 100 * time.Millisecond,
-		Router:      router,
-		Daemons: map[string]DaemonRuntimeConfig{
-			"auto-titler": {Enabled: true, Tick: 50 * time.Millisecond},
-		},
-		NewTicker: tickFn,
-	})
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	m.Start(ctx)
-	defer m.Stop(context.Background())
+	m := newTestManager(t, d, 100*time.Millisecond, DaemonRuntimeConfig{Tick: 50 * time.Millisecond}, tickFn)
+	startManager(t, m)
 
 	// Drive one tick.  The runDaemonLoop performs an initial random
-	// jitter wait first; tests that need determinism on the very first
-	// tick want a tick interval small enough that the jitter is brief.
-	// With Tick=50ms, jitter is in [0, 50ms).
+	// jitter wait first; with Tick=50ms, jitter is in [0, 50ms).
 	pulse <- time.Now()
 
 	testhelper.Eventually(t, func() bool { return d.calls.Load() > 0 }, 2*time.Second,
@@ -311,9 +284,6 @@ func TestManager_TickRunsAndRecords(t *testing.T) {
 	if len(statuses) != 1 {
 		t.Fatalf("Inspector returned %d statuses, want 1", len(statuses))
 	}
-	if statuses[0].LastRun == nil {
-		t.Fatal("LastRun was nil after first tick")
-	}
 	if statuses[0].LastRun.State != DaemonRunSucceeded {
 		t.Errorf("LastRun.State = %q, want succeeded", statuses[0].LastRun.State)
 	}
@@ -322,37 +292,15 @@ func TestManager_TickRunsAndRecords(t *testing.T) {
 // TestManager_RunOnStartFiresWithoutPulse pins the startup-tick
 // contract (docs/rfc/attachment-gc-daemon.md §4.6-3): a daemon with
 // RunOnStart=true must Tick once immediately at startup, BEFORE any
-// ticker pulse. We deliberately never send on `pulse` — the only way
-// calls>0 is the startup tick.
+// ticker pulse. We deliberately never pulse — the only way calls>0 is the
+// startup tick.
 func TestManager_RunOnStartFiresWithoutPulse(t *testing.T) {
-	pulse, tickFn := pulseTicker()
-	_ = pulse // intentionally never pulsed
-
+	_, tickFn := pulseTicker()
 	d := &signalDaemon{name: "auto-titler"}
-	withRegistry(t, []builtinDaemonFactory{
-		{Name: "auto-titler", Build: func(deps DaemonDeps) (Daemon, error) { return d, nil }},
-	})
-
-	router := newFakeRouter()
-	m, err := NewManager(Config{
-		Enabled:     true,
-		TickTimeout: 100 * time.Millisecond,
-		Router:      router,
-		Daemons: map[string]DaemonRuntimeConfig{
-			// Long tick so a scheduled pulse would never arrive in the
-			// test window; RunOnStart is the only path to a Tick.
-			"auto-titler": {Enabled: true, Tick: time.Hour, RunOnStart: true},
-		},
-		NewTicker: tickFn,
-	})
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	m.Start(ctx)
-	defer m.Stop(context.Background())
+	// Long tick so a scheduled pulse would never arrive in the test window;
+	// RunOnStart is the only path to a Tick.
+	m := newTestManager(t, d, 100*time.Millisecond, DaemonRuntimeConfig{Tick: time.Hour, RunOnStart: true}, tickFn)
+	startManager(t, m)
 
 	testhelper.Eventually(t, func() bool { return d.calls.Load() > 0 }, 2*time.Second,
 		"RunOnStart daemon never ticked at startup")
@@ -363,34 +311,12 @@ func TestManager_RunOnStartFiresWithoutPulse(t *testing.T) {
 // pulse arrives.
 func TestManager_NoRunOnStartWaitsForPulse(t *testing.T) {
 	pulse, tickFn, ready := readyPulseTicker()
-
 	d := &signalDaemon{name: "auto-titler"}
-	withRegistry(t, []builtinDaemonFactory{
-		{Name: "auto-titler", Build: func(deps DaemonDeps) (Daemon, error) { return d, nil }},
-	})
-
-	router := newFakeRouter()
-	m, err := NewManager(Config{
-		Enabled:     true,
-		TickTimeout: 100 * time.Millisecond,
-		Router:      router,
-		Daemons: map[string]DaemonRuntimeConfig{
-			// Short tick so the [0,tick) startup jitter elapses quickly
-			// and the loop reaches its ticker select; the manual pulse
-			// channel (pulseTicker) never fires on its own, so no pulse
-			// means no tick.
-			"auto-titler": {Enabled: true, Tick: 20 * time.Millisecond, RunOnStart: false},
-		},
-		NewTicker: tickFn,
-	})
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	m.Start(ctx)
-	defer m.Stop(context.Background())
+	// Short tick so the [0,tick) startup jitter elapses quickly and the loop
+	// reaches its ticker select; the manual pulse channel never fires on its
+	// own, so no pulse means no tick.
+	m := newTestManager(t, d, 100*time.Millisecond, DaemonRuntimeConfig{Tick: 20 * time.Millisecond}, tickFn)
+	startManager(t, m)
 
 	// The loop has cleared jitter and is about to select on pulses; a
 	// RunOnStart tick would already have run on this same goroutine.
@@ -410,20 +336,7 @@ func TestManager_NoRunOnStartWaitsForPulse(t *testing.T) {
 // missing one; the gate is what keeps a second concurrent caller out.
 func TestRunOnce_InflightGateSkipsOverlap(t *testing.T) {
 	d := &signalDaemon{name: "auto-titler"}
-	withRegistry(t, []builtinDaemonFactory{
-		{Name: "auto-titler", Build: func(deps DaemonDeps) (Daemon, error) { return d, nil }},
-	})
-	m, err := NewManager(Config{
-		Enabled:     true,
-		TickTimeout: time.Second,
-		Router:      newFakeRouter(),
-		Daemons: map[string]DaemonRuntimeConfig{
-			"auto-titler": {Enabled: true, Tick: time.Hour},
-		},
-	})
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+	m := newTestManager(t, d, time.Second, DaemonRuntimeConfig{Tick: time.Hour}, nil)
 	rec := m.daemons[0]
 
 	rec.inflight.Store(true) // another run holds the gate
@@ -450,7 +363,6 @@ func TestRunOnce_InflightGateSkipsOverlap(t *testing.T) {
 
 func TestManager_PanicRecoveredAndInflightReset(t *testing.T) {
 	pulse, tickFn, ready := readyPulseTicker()
-
 	d := &signalDaemon{
 		name: "auto-titler",
 		tickFn: func(ctx context.Context, calls int32) (TickReport, error) {
@@ -460,25 +372,8 @@ func TestManager_PanicRecoveredAndInflightReset(t *testing.T) {
 			return TickReport{}, nil
 		},
 	}
-	withRegistry(t, []builtinDaemonFactory{
-		{Name: "auto-titler", Build: func(deps DaemonDeps) (Daemon, error) { return d, nil }},
-	})
-
-	router := newFakeRouter()
-	m, _ := NewManager(Config{
-		Enabled:     true,
-		TickTimeout: time.Second,
-		Router:      router,
-		Daemons: map[string]DaemonRuntimeConfig{
-			"auto-titler": {Enabled: true, Tick: 1 * time.Millisecond},
-		},
-		NewTicker: tickFn,
-	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	m.Start(ctx)
-	defer m.Stop(context.Background())
+	m := newTestManager(t, d, time.Second, DaemonRuntimeConfig{Tick: time.Millisecond}, tickFn)
+	startManager(t, m)
 
 	waitLoopReady(t, ready)
 	pulse <- time.Now()
@@ -496,7 +391,6 @@ func TestManager_PanicRecoveredAndInflightReset(t *testing.T) {
 
 func TestManager_CircuitBreakerTripsOnConsecutiveCLIErrors(t *testing.T) {
 	pulse, tickFn, ready := readyPulseTicker()
-
 	upstreamErr := errors.New("upstream went away")
 	d := &signalDaemon{
 		name: "auto-titler",
@@ -504,25 +398,8 @@ func TestManager_CircuitBreakerTripsOnConsecutiveCLIErrors(t *testing.T) {
 			return TickReport{}, upstreamErr
 		},
 	}
-	withRegistry(t, []builtinDaemonFactory{
-		{Name: "auto-titler", Build: func(deps DaemonDeps) (Daemon, error) { return d, nil }},
-	})
-
-	router := newFakeRouter()
-	m, _ := NewManager(Config{
-		Enabled:     true,
-		TickTimeout: time.Second,
-		Router:      router,
-		Daemons: map[string]DaemonRuntimeConfig{
-			"auto-titler": {Enabled: true, Tick: 1 * time.Millisecond},
-		},
-		NewTicker: tickFn,
-	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	m.Start(ctx)
-	defer m.Stop(context.Background())
+	m := newTestManager(t, d, time.Second, DaemonRuntimeConfig{Tick: time.Millisecond}, tickFn)
+	startManager(t, m)
 
 	waitLoopReady(t, ready)
 
@@ -551,32 +428,14 @@ func TestManager_CircuitBreakerTripsOnConsecutiveCLIErrors(t *testing.T) {
 
 func TestManager_ValidationDoesNotTripBreaker(t *testing.T) {
 	pulse, tickFn, ready := readyPulseTicker()
-
 	d := &signalDaemon{
 		name: "auto-titler",
 		tickFn: func(ctx context.Context, _ int32) (TickReport, error) {
 			return TickReport{}, ErrValidation
 		},
 	}
-	withRegistry(t, []builtinDaemonFactory{
-		{Name: "auto-titler", Build: func(deps DaemonDeps) (Daemon, error) { return d, nil }},
-	})
-
-	router := newFakeRouter()
-	m, _ := NewManager(Config{
-		Enabled:     true,
-		TickTimeout: time.Second,
-		Router:      router,
-		Daemons: map[string]DaemonRuntimeConfig{
-			"auto-titler": {Enabled: true, Tick: 1 * time.Millisecond},
-		},
-		NewTicker: tickFn,
-	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	m.Start(ctx)
-	defer m.Stop(context.Background())
+	m := newTestManager(t, d, time.Second, DaemonRuntimeConfig{Tick: time.Millisecond}, tickFn)
+	startManager(t, m)
 
 	waitLoopReady(t, ready)
 
@@ -616,25 +475,8 @@ func TestManager_ValidationDoesNotTripBreaker(t *testing.T) {
 // cancelled), and our explicit drain check below would time out.
 func TestManager_StopPreStart_DoesNotBurnStopOnce(t *testing.T) {
 	pulse, tickFn := pulseTicker()
-
 	d := &signalDaemon{name: "auto-titler"}
-	withRegistry(t, []builtinDaemonFactory{
-		{Name: "auto-titler", Build: func(deps DaemonDeps) (Daemon, error) { return d, nil }},
-	})
-
-	router := newFakeRouter()
-	m, err := NewManager(Config{
-		Enabled:     true,
-		TickTimeout: 100 * time.Millisecond,
-		Router:      router,
-		Daemons: map[string]DaemonRuntimeConfig{
-			"auto-titler": {Enabled: true, Tick: 50 * time.Millisecond},
-		},
-		NewTicker: tickFn,
-	})
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+	m := newTestManager(t, d, 100*time.Millisecond, DaemonRuntimeConfig{Tick: 50 * time.Millisecond}, tickFn)
 
 	// 1) Stop pre-Start: must be a true no-op (cancelP is nil; early
 	// return). Pre-fix this would burn stopOnce.
@@ -650,11 +492,10 @@ func TestManager_StopPreStart_DoesNotBurnStopOnce(t *testing.T) {
 	testhelper.Eventually(t, func() bool { return d.calls.Load() > 0 }, 2*time.Second,
 		"daemon Tick was never invoked after Start")
 
-	// 3) Stop: must cancel daemon ctx and drain m.wg. We bound the
-	// Stop call with a stopCtx; if the bug were present, Stop would
-	// hit the early-return branch (stopOnce already burned) and the
-	// daemon ctx would NOT be cancelled. We additionally probe m.wg
-	// directly so the assertion does not rely on Stop's internal
+	// 3) Stop: must cancel daemon ctx and drain m.wg. If the bug were
+	// present, Stop would hit the early-return branch (stopOnce already
+	// burned) and the daemon ctx would NOT be cancelled. We additionally
+	// probe m.wg directly so the assertion does not rely on Stop's internal
 	// watcher behaviour.
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer stopCancel()

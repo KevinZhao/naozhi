@@ -260,64 +260,40 @@ func TestFilterEnv_CredsGatedByBackend(t *testing.T) {
 
 // TestFilterEnv_AWSProfileValidation verifies that a safe AWS_PROFILE passes
 // through while a malformed one is stripped. R20260603000023-SEC-1 (#1617).
+// R100110-LEAK-4: a value carrying control / bidi-override chars must still be
+// rejected, and the warn-then-reject path must not panic sanitizing it.
 func TestFilterEnv_AWSProfileValidation(t *testing.T) {
-	t.Run("safe profile passes", func(t *testing.T) {
-		t.Setenv("AWS_PROFILE", "my-bedrock-profile")
-		env := filterEnv(nil)
-		if !envContains(env, "AWS_PROFILE", "my-bedrock-profile") {
-			t.Error("safe AWS_PROFILE must pass through")
-		}
-	})
-
-	t.Run("unsafe profile stripped", func(t *testing.T) {
-		t.Setenv("AWS_PROFILE", "../../malicious; rm -rf /")
-		env := filterEnv(nil)
-		if envHasKey(env, "AWS_PROFILE") {
-			t.Error("unsafe AWS_PROFILE must be stripped")
-		}
-	})
-
-	t.Run("empty profile stripped", func(t *testing.T) {
-		t.Setenv("AWS_PROFILE", "")
-		env := filterEnv(nil)
-		if envHasKey(env, "AWS_PROFILE") {
-			t.Error("empty AWS_PROFILE must be stripped")
-		}
-	})
-
-	// R100110-LEAK-4: a profile value carrying control / bidi-override chars
-	// must still be rejected, and the warn-then-reject path must not panic
-	// when sanitizing the value for the log.
-	t.Run("control-char profile stripped without panic", func(t *testing.T) {
-		t.Setenv("AWS_PROFILE", "evil\u202e\r\nname")
-		env := filterEnv(nil)
-		if envHasKey(env, "AWS_PROFILE") {
-			t.Error("unsafe AWS_PROFILE with control chars must be stripped")
-		}
-	})
-
-	t.Run("AWS_DEFAULT_PROFILE unsafe stripped", func(t *testing.T) {
-		t.Setenv("AWS_DEFAULT_PROFILE", "../../malicious; rm -rf /")
-		env := filterEnv(nil)
-		if envHasKey(env, "AWS_DEFAULT_PROFILE") {
-			t.Error("unsafe AWS_DEFAULT_PROFILE must be stripped")
-		}
-	})
-
-	t.Run("AWS_DEFAULT_PROFILE safe passes", func(t *testing.T) {
-		t.Setenv("AWS_DEFAULT_PROFILE", "my-bedrock-profile")
-		env := filterEnv(nil)
-		if !envContains(env, "AWS_DEFAULT_PROFILE", "my-bedrock-profile") {
-			t.Error("safe AWS_DEFAULT_PROFILE must pass through")
-		}
-	})
+	for _, tc := range []struct {
+		key, val string
+		pass     bool
+	}{
+		{"AWS_PROFILE", "my-bedrock-profile", true},
+		{"AWS_PROFILE", "../../malicious; rm -rf /", false},
+		{"AWS_PROFILE", "", false},
+		{"AWS_PROFILE", "evil\u202e\r\nname", false},
+		{"AWS_DEFAULT_PROFILE", "../../malicious; rm -rf /", false},
+		{"AWS_DEFAULT_PROFILE", "my-bedrock-profile", true},
+	} {
+		t.Run(tc.key+"="+tc.val, func(t *testing.T) {
+			t.Setenv(tc.key, tc.val)
+			env := filterEnv(nil)
+			if tc.pass && !envContains(env, tc.key, tc.val) {
+				t.Errorf("safe %s must pass through", tc.key)
+			}
+			if !tc.pass && envHasKey(env, tc.key) {
+				t.Errorf("unsafe %s=%q must be stripped", tc.key, tc.val)
+			}
+		})
+	}
 }
 
 // TestFilterEnv_BaseURLSSRFGuard is the R090031-SEC-1 (#1687) gate: a base-URL
 // env var inherited from a tampered parent process must NOT pass through to the
 // Runner subprocess when it points at a plaintext-http non-loopback host (e.g.
-// IMDS), even though the key passes the sysession env gate. A safe https value for
-// the same key still flows through.
+// IMDS), even though the key passes the sysession env gate — and a broad
+// "ANTHROPIC_" prefix allowlist must not re-admit it, since the sysession
+// column (and its guard) is consulted before the prefix branch. A safe https
+// value for the same key still flows through.
 func TestFilterEnv_BaseURLSSRFGuard(t *testing.T) {
 	for _, key := range []string{
 		"ANTHROPIC_BASE_URL",
@@ -326,9 +302,11 @@ func TestFilterEnv_BaseURLSSRFGuard(t *testing.T) {
 	} {
 		t.Run(key+"/rejects_imds", func(t *testing.T) {
 			t.Setenv(key, "http://169.254.169.254/latest/meta-data/")
-			got := filterEnv(nil)
-			if envHasKey(got, key) {
+			if envHasKey(filterEnv(nil), key) {
 				t.Errorf("%s pointing at IMDS over http must be stripped", key)
+			}
+			if envHasKey(filterEnv([]string{"ANTHROPIC_"}), key) {
+				t.Errorf("prefix allowlist must not bypass the %s SSRF guard", key)
 			}
 		})
 		t.Run(key+"/allows_https", func(t *testing.T) {
@@ -345,18 +323,6 @@ func TestFilterEnv_BaseURLSSRFGuard(t *testing.T) {
 				t.Errorf("%s with loopback http value must pass through", key)
 			}
 		})
-	}
-}
-
-// TestFilterEnv_BaseURLGuardNotBypassedByPrefixAllowlist ensures a broad
-// "ANTHROPIC_" prefix allowlist cannot re-admit a tampered base-URL value:
-// the sysession column is consulted (and the guard applied) before the prefix
-// branch. R090031-SEC-1 (#1687).
-func TestFilterEnv_BaseURLGuardNotBypassedByPrefixAllowlist(t *testing.T) {
-	t.Setenv("ANTHROPIC_BASE_URL", "http://169.254.169.254/")
-	got := filterEnv([]string{"ANTHROPIC_"})
-	if envHasKey(got, "ANTHROPIC_BASE_URL") {
-		t.Error("prefix allowlist must not bypass the base-URL SSRF guard")
 	}
 }
 
