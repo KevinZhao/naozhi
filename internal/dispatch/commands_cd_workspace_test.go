@@ -44,34 +44,14 @@ func TestHandleCdCommand_WorkspacePersistedAfterReset(t *testing.T) {
 		t.Errorf("router.Workspace(%q) = %q, want %q — SetWorkspace override was deleted by ResetChat (R20260607-CR-020)",
 			chatKey, got, tmpDir)
 	}
-}
 
-// TestHandleCdCommand_WorkspaceReplacesExistingOverride verifies that a
-// second /cd in the same chat replaces the previous override (not a no-op).
-func TestHandleCdCommand_WorkspaceReplacesExistingOverride(t *testing.T) {
-	t.Parallel()
-
-	dir1, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatalf("EvalSymlinks dir1: %v", err)
-	}
+	// A second /cd replaces the override.
 	dir2, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
-		t.Fatalf("EvalSymlinks dir2: %v", err)
+		t.Fatalf("EvalSymlinks: %v", err)
 	}
-
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-
-	msg1 := incomingMsg("/cd " + dir1)
-	d.handleCdCommand(context.Background(), msg1, "/cd "+dir1, slog.Default())
-
-	msg2 := incomingMsg("/cd " + dir2)
-	d.handleCdCommand(context.Background(), msg2, "/cd "+dir2, slog.Default())
-
-	chatKey := sessionkey.ChatKey(msg1.Platform, msg1.ChatType, msg1.ChatID)
-	got := d.router.Workspace(chatKey)
-	if got != dir2 {
+	d.handleCdCommand(context.Background(), incomingMsg("/cd "+dir2), "/cd "+dir2, slog.Default())
+	if got := d.router.Workspace(chatKey); got != dir2 {
 		t.Errorf("second /cd: router.Workspace(%q) = %q, want %q", chatKey, got, dir2)
 	}
 }

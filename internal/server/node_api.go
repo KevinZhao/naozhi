@@ -31,7 +31,7 @@ const remoteAPITimeout = 15 * time.Second
 
 // handleRemoteAPI serves /api/remote/{node}/{path...}: the Planner route
 // /api/{path} of the node, run by the node's own handler (node.APICaller).
-// Only node.APIRoutes pass, checked here and again on the node.
+// Only node.IsAPIRoute pass, checked here and again on the node.
 func (s *Server) handleRemoteAPI(w http.ResponseWriter, r *http.Request) {
 	nc, ok := s.nodes.LookupNode(w, r.PathValue("node"))
 	if !ok {

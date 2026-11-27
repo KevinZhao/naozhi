@@ -138,49 +138,6 @@ func TestConnect_WrongToken_AuthFailed(t *testing.T) {
 	}
 }
 
-func TestConnect_AuthFailed_Response(t *testing.T) {
-	srv := newFakeShimServer(t)
-	defer srv.cleanup()
-
-	// Server immediately sends auth_failed
-	srv.handleOnce(func(conn net.Conn) {
-		conn.SetDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
-		// Consume the attach message
-		bufio.NewReader(conn).ReadBytes('\n') //nolint:errcheck
-		msg := ServerMsg{Type: "auth_failed", Msg: "bad credentials"}
-		data, _ := msg.MarshalLine()
-		conn.Write(data) //nolint:errcheck
-	})
-
-	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
-	token := []byte("some-32-byte-token-padded!!!!!!!")
-	_, err := m.connect(context.Background(), srv.path, token, 0)
-	if err == nil {
-		t.Fatal("expected error for auth_failed, got nil")
-	}
-}
-
-func TestConnect_UnexpectedMessageType(t *testing.T) {
-	srv := newFakeShimServer(t)
-	defer srv.cleanup()
-
-	// Server sends an unexpected message type
-	srv.handleOnce(func(conn net.Conn) {
-		conn.SetDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
-		bufio.NewReader(conn).ReadBytes('\n')             //nolint:errcheck
-		msg := ServerMsg{Type: "stdout", Line: "oops"}
-		data, _ := msg.MarshalLine()
-		conn.Write(data) //nolint:errcheck
-	})
-
-	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
-	token := []byte("some-32-byte-token-padded!!!!!!!")
-	_, err := m.connect(context.Background(), srv.path, token, 0)
-	if err == nil {
-		t.Fatal("expected error for unexpected message type, got nil")
-	}
-}
-
 // TestConnect_AuthFailed_SanitizesMsg verifies R20260607-SEC-1: a Msg field
 // containing bidi-override characters is sanitized before entering the error.
 func TestConnect_AuthFailed_SanitizesMsg(t *testing.T) {
@@ -317,18 +274,6 @@ func TestConnect_ServerClosesBeforeHello(t *testing.T) {
 }
 
 // --- Discover ---
-
-func TestDiscover_EmptyDir(t *testing.T) {
-	dir := t.TempDir()
-	m := mustNewManager(t, ManagerConfig{StateDir: dir})
-	states, _, err := m.Discover()
-	if err != nil {
-		t.Fatalf("Discover: %v", err)
-	}
-	if len(states) != 0 {
-		t.Errorf("expected 0 states, got %d", len(states))
-	}
-}
 
 func TestDiscover_NonExistentDir(t *testing.T) {
 	dir := t.TempDir()

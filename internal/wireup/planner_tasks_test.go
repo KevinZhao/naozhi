@@ -203,29 +203,6 @@ func countOf(list []string, v string) (n int) {
 	return n
 }
 
-// TestTaskOptsDenyEnableWrites: a dispatched session with no mcp_tools and
-// no cli.mcp_config still denies Outlook's enable_write_tools, on the first
-// spawn and on a respawn from its sidecar, and the base options (shared by
-// every dispatch) are left as they were.
-func TestTaskOptsDenyEnableWrites(t *testing.T) {
-	side := sidecar.Open("", nil)
-	to := TaskOpts{Sessions: side, Planner: "planner-abc123"}
-	opts, err := to.For("task:ab12", action.Spawn{Dir: "/tmp/ws", Title: "只读"})
-	if err != nil || !slices.Equal(opts.PermissionsDeny, taskDenyRules) {
-		t.Fatalf("For = %v, %v", opts.PermissionsDeny, err)
-	}
-	if to.Base.PermissionsDeny != nil {
-		t.Errorf("base changed: %v", to.Base.PermissionsDeny)
-	}
-	key := sidecar.TaskKey()
-	if err := side.Put(sidecar.Meta{Key: key, Purpose: sidecar.PurposeTask, Title: "只读", Dir: "/tmp/ws"}); err != nil {
-		t.Fatal(err)
-	}
-	if opts, ok := to.ForKey(key); !ok || !slices.Equal(opts.PermissionsDeny, taskDenyRules) {
-		t.Errorf("respawn = %v, %v", opts.PermissionsDeny, ok)
-	}
-}
-
 // The task prompt's report block is one ParseReport takes once its
 // placeholders are filled in; the note after the first message asks for it
 // too and holds no full-width closing parenthesis before its end, which the

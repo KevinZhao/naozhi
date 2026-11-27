@@ -67,28 +67,6 @@ func TestUploadOwner_RejectsForgedAuthCookie(t *testing.T) {
 			"computeMAC and auth.Handlers.CookieMAC drifted", got, validMAC)
 	}
 
-	// Bearer-only baseline: no auth cookie present, only Bearer. Owner
-	// derives from sha256(token) so we can compare against the
-	// "forged-cookie + Bearer" path below — they MUST match if the
-	// fix is working (forged cookie ignored, Bearer wins).
-	t.Run("bearer_only_baseline", func(t *testing.T) {
-		t.Parallel()
-		r := httptest.NewRequest("POST", "/api/sessions/upload", nil)
-		r.Header.Set("Authorization", "Bearer "+token)
-		owner, ok := uploadOwner(httptest.NewRecorder(), r, ah, false)
-		if !ok || owner == "" {
-			t.Fatalf("Bearer-only path failed: ok=%v owner=%q", ok, owner)
-		}
-		// Recompute Bearer-derived owner so the next subtest can assert
-		// equality without re-running uploadOwner here (we need the
-		// same string to compare).
-		sum := sha256.Sum256([]byte(token))
-		want := hex.EncodeToString(sum[:16])
-		if owner != want {
-			t.Fatalf("Bearer owner = %q, want %q (sha256 truncated)", owner, want)
-		}
-	})
-
 	t.Run("forged_cookie_ignored_bearer_wins", func(t *testing.T) {
 		t.Parallel()
 		r := httptest.NewRequest("POST", "/api/sessions/upload", nil)

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/platform"
-	"github.com/naozhi/naozhi/internal/session"
 )
 
 // TestHandleHealth_Unauthenticated_OnlyBaseFields locks the wire contract
@@ -257,10 +256,3 @@ func TestHealthEndpoints_SecurityHeaders(t *testing.T) {
 		assertHeaders(t, w)
 	})
 }
-
-// _ pins a compile-time signature check: the authenticated branch factory
-// must accept a platform.Platform map, so a future refactor that swaps the
-// newTestServerWithToken helper still compiles this test file against the
-// same platform type contract.
-var _ = platform.Platform(nil)
-var _ session.Router

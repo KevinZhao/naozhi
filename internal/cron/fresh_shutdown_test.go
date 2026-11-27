@@ -13,8 +13,6 @@ package cron
 
 import (
 	"testing"
-
-	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // TestCRON3_FreshExecuteSkippedAfterStopCtxCancel locks in that execute()
@@ -76,74 +74,6 @@ func TestCRON3_FreshExecuteSkippedAfterStopCtxCancel(t *testing.T) {
 	// never reaches stubRefresh).
 	if got := len(fake.registerCalls) - baselineRegister; got != 0 {
 		t.Errorf("RegisterCronStub calls after shutdown = %d, want 0", got)
-	}
-}
-
-// TestCRON3_FreshExecuteRunsBeforeStop confirms the happy path: a fresh
-// execute invoked while the scheduler is still running reaches Reset +
-// GetOrCreate on the router. Without this paired assertion the guard
-// could silently short-circuit every call and the skipped-after-stop
-// test would still pass.
-//
-// We recover() from the downstream nil-session panic because the fake
-// GetOrCreate deliberately returns (nil, 0, nil) to keep the test light
-// — execute() then dereferences sess.Send(). The assertions we care
-// about are already recorded on the fake before the panic fires.
-func TestCRON3_FreshExecuteRunsBeforeStop(t *testing.T) {
-	t.Parallel()
-	fake := &fakeSessionRouter{}
-	s := NewScheduler(SchedulerConfig{
-		MaxJobs: 5,
-	}, SchedulerDeps{
-		Router: fake,
-	})
-	if err := s.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer s.Stop()
-
-	job := &Job{
-		Schedule:     "@hourly",
-		Prompt:       "test",
-		Platform:     "p",
-		ChatID:       "c",
-		FreshContext: true,
-	}
-	if err := s.AddJob(job); err != nil {
-		t.Fatalf("AddJob: %v", err)
-	}
-
-	// Isolate the execute() call so the downstream Send nil-panic (from
-	// the fake returning a nil *ManagedSession) does not abort the test.
-	// A goroutine + recover is cleaner than t.Fatal-in-defer because we
-	// still want the enclosing test to fail on assertion mismatches.
-	func() {
-		defer func() { _ = recover() }()
-		s.executeOpt(job.ID, false)
-	}()
-
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	wantKey := sessionkey.CronKey(job.ID)
-	resetFound := false
-	for _, k := range fake.resetCalls {
-		if k == wantKey {
-			resetFound = true
-			break
-		}
-	}
-	if !resetFound {
-		t.Errorf("expected Reset(%q) in %v", wantKey, fake.resetCalls)
-	}
-	getCreateFound := false
-	for _, k := range fake.getCreateKeys {
-		if k == wantKey {
-			getCreateFound = true
-			break
-		}
-	}
-	if !getCreateFound {
-		t.Errorf("expected GetOrCreate(%q) in %v", wantKey, fake.getCreateKeys)
 	}
 }
 

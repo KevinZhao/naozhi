@@ -32,109 +32,52 @@ func baseDeps(t *testing.T) SchedulersDeps {
 	}
 }
 
-// TestWireSchedulers_SysessionDisabled: when no builder is supplied
-// (sysession disabled), the helper must report no build error and no
-// manager. Disabled must be distinguishable from a failed build.
-func TestWireSchedulers_SysessionDisabled(t *testing.T) {
-	deps := baseDeps(t)
-	deps.BuildSysession = nil
-
-	out, err := WireSchedulers(deps)
-	if err != nil {
-		t.Fatalf("WireSchedulers returned terminal error: %v", err)
-	}
-	t.Cleanup(func() {
-		if out.Cron != nil {
-			out.Cron.Stop()
-		}
-		if out.Sysession != nil {
-			out.Sysession.Stop(context.Background())
-		}
-	})
-	if out.Sysession != nil {
-		t.Errorf("expected nil Sysession when disabled, got %v", out.Sysession)
-	}
-	if out.SysessionBuildErr != nil {
-		t.Errorf("expected nil SysessionBuildErr when disabled, got %v", out.SysessionBuildErr)
-	}
-}
-
-// TestWireSchedulers_SysessionBuildFailure: when the builder returns an
-// error, the helper must surface it via the Schedulers struct return
-// contract — not require a caller-managed closure side-channel — while
-// keeping startup degradable (no terminal error, nil manager).
-func TestWireSchedulers_SysessionBuildFailure(t *testing.T) {
-	deps := baseDeps(t)
-	wantErr := errors.New("claude binary missing")
-	deps.BuildSysession = func() (*sysession.Manager, string, error) {
-		return nil, "", wantErr
-	}
-
-	out, err := WireSchedulers(deps)
-	if err != nil {
-		t.Fatalf("build failure must be degradable, got terminal error: %v", err)
-	}
-	t.Cleanup(func() {
-		if out.Cron != nil {
-			out.Cron.Stop()
-		}
-		if out.Sysession != nil {
-			out.Sysession.Stop(context.Background())
-		}
-	})
-	if out.Sysession != nil {
-		t.Errorf("expected nil Sysession on build failure, got %v", out.Sysession)
-	}
-	if !errors.Is(out.SysessionBuildErr, wantErr) {
-		t.Errorf("expected SysessionBuildErr=%v, got %v", wantErr, out.SysessionBuildErr)
-	}
-	if out.SysessionWorkDir != "" {
-		t.Errorf("expected empty SysessionWorkDir on build failure, got %q", out.SysessionWorkDir)
+// TestWireSchedulers_SysessionBuild: a failed sysession build is surfaced
+// through Schedulers.SysessionBuildErr while startup stays degradable (no
+// terminal error, nil manager); sysession disabled (no builder) and a builder
+// returning no error leave SysessionBuildErr nil, so the caller can tell
+// disabled from a failed build and logs no spurious warning.
+func TestWireSchedulers_SysessionBuild(t *testing.T) {
+	boom := errors.New("claude binary missing")
+	for _, c := range []struct {
+		name  string
+		build func() (*sysession.Manager, string, error)
+		want  error
+	}{
+		{"disabled", nil, nil},
+		{"builder returns no error", func() (*sysession.Manager, string, error) { return nil, "", nil }, nil},
+		{"build failure", func() (*sysession.Manager, string, error) { return nil, "", boom }, boom},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			deps := baseDeps(t)
+			deps.BuildSysession = c.build
+			out, err := WireSchedulers(deps)
+			if err != nil {
+				t.Fatalf("WireSchedulers returned terminal error: %v", err)
+			}
+			t.Cleanup(func() {
+				if out.Cron != nil {
+					out.Cron.Stop()
+				}
+				if out.Sysession != nil {
+					out.Sysession.Stop(context.Background())
+				}
+			})
+			if out.Sysession != nil || !errors.Is(out.SysessionBuildErr, c.want) || out.SysessionWorkDir != "" {
+				t.Errorf("Sysession = %v, SysessionBuildErr = %v, SysessionWorkDir = %q; want nil, %v, empty",
+					out.Sysession, out.SysessionBuildErr, out.SysessionWorkDir, c.want)
+			}
+		})
 	}
 }
 
-// TestWireSchedulers_SysessionSuccessNoErr: a builder that returns a nil
-// error (even with a nil manager, e.g. disabled-at-builder) must leave
-// SysessionBuildErr nil so the caller does not log a spurious warning.
-func TestWireSchedulers_SysessionSuccessNoErr(t *testing.T) {
-	deps := baseDeps(t)
-	deps.BuildSysession = func() (*sysession.Manager, string, error) {
-		return nil, "", nil
-	}
-
-	out, err := WireSchedulers(deps)
-	if err != nil {
-		t.Fatalf("WireSchedulers returned terminal error: %v", err)
-	}
-	t.Cleanup(func() {
-		if out.Cron != nil {
-			out.Cron.Stop()
-		}
-		if out.Sysession != nil {
-			out.Sysession.Stop(context.Background())
-		}
-	})
-	if out.SysessionBuildErr != nil {
-		t.Errorf("expected nil SysessionBuildErr on success, got %v", out.SysessionBuildErr)
-	}
-}
-
-// TestWireSchedulers_NilRouter verifies that a nil Router is rejected at
-// startup with a clear error rather than panicking at first job execution.
-// R260528-ARCH-23 (#1382): the nil check moved from the caller-built
-// SessionRouterAdapter field to deps.Router now that WireSchedulers builds the
-// adapter internally.
+// TestWireSchedulers_NilRouter: a nil Router is rejected at startup rather
+// than panicking at the first job execution.
 func TestWireSchedulers_NilRouter(t *testing.T) {
 	deps := baseDeps(t)
-	deps.Router = nil // deliberately nil
-
-	_, err := WireSchedulers(deps)
-	if err == nil {
+	deps.Router = nil
+	if _, err := WireSchedulers(deps); err == nil {
 		t.Fatal("WireSchedulers must return error when Router is nil")
-	}
-	const want = "nil Router"
-	if msg := err.Error(); len(msg) == 0 {
-		t.Errorf("error message is empty, want %q substring", want)
 	}
 }
 

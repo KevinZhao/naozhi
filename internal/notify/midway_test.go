@@ -46,7 +46,8 @@ func TestMidwayNotice(t *testing.T) {
 }
 
 // A session's failure that is not retried for the user says what they do
-// about it; a cron job's says only its class.
+// about it; a cron job's says only its class, and nothing for a class that
+// says nothing (never "失败 · 其他").
 func TestFailHint(t *testing.T) {
 	for _, c := range []struct {
 		kind  health.Kind
@@ -58,6 +59,8 @@ func TestFailHint(t *testing.T) {
 		{health.KindSession, health.ErrAuth, "凭证 / 权限拒绝；需要你处理凭证后发「继续」"},
 		{health.KindSession, health.ErrRefusal, "模型拒答"},
 		{health.KindCron, health.ErrRateLimit, "限流"},
+		{health.KindCron, health.ErrNone, ""},
+		{health.KindCron, health.ErrOther, ""},
 	} {
 		n := New(Config{System: func(string, string) error { return nil }})
 		n.HandleHealth(health.Event{Transition: &health.Transition{From: health.Idle,

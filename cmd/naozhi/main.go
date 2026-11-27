@@ -707,7 +707,6 @@ func main() {
 		Pause:       notifier.Pause,
 		CredExpiry:  wireup.MidwayExpiry,
 		Woke:        wake.NewDetector(wake.SystemClock()).Woke,
-		Path:        sessionLayout.PlannerCustodyPath(),
 		Disabled:    !cfg.Planner.Enabled,
 	})
 	reapSources := wireup.ReapSources{Router: router, Health: func() health.Snapshot { return healthMon.Snapshot() }, ClaudeDir: claudeDir,

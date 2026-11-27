@@ -120,44 +120,6 @@ func TestCacheTrimAfterDisk_RunIDsAllEvicted(t *testing.T) {
 	}
 }
 
-// TestCacheTrimAfterDisk_RunIDsNoEviction checks that when survive==count
-// (nothing evicted) runIDs is untouched.
-func TestCacheTrimAfterDisk_RunIDsNoEviction(t *testing.T) {
-	t.Parallel()
-
-	const total = 4
-	now := time.Now()
-
-	rows := make([]CronRunSummary, total)
-	for i := 0; i < total; i++ {
-		rows[i] = CronRunSummary{
-			RunID:     mustGenerateRunID(),
-			JobID:     "ffeeddcc99887766",
-			State:     runtelemetry.RunStateSucceeded,
-			StartedAt: now.Add(-time.Duration(i) * time.Minute),
-			EndedAt:   now.Add(-time.Duration(i) * time.Minute),
-		}
-	}
-
-	s := newTestStore(t, total, 30*24*time.Hour)
-	jobID := "ffeeddcc99887766"
-	entry := &recentCacheEntry{}
-	entry.ringSeed(rows, total)
-	entry.warm = true
-	s.recentCache.Store(jobID, entry)
-
-	// Far-past cutoff — nothing evicted.
-	cutoff := now.Add(-100 * time.Hour)
-	s.cacheTrimAfterDisk(jobID, cutoff)
-
-	if entry.count != total {
-		t.Fatalf("count = %d, want %d", entry.count, total)
-	}
-	if len(entry.runIDs) != total {
-		t.Fatalf("len(runIDs) = %d, want %d (should be unchanged)", len(entry.runIDs), total)
-	}
-}
-
 // TestCacheTrimAfterDisk_RunIDsWrapHead checks that the runIDs cleanup works
 // correctly when the ring head is not at position 0 (wrap case): with head=5
 // the evicted range physically wraps around the end of the ring. It is the

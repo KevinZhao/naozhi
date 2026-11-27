@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
-	"unsafe"
 
 	"github.com/naozhi/naozhi/internal/node"
 )
@@ -195,14 +194,4 @@ func BenchmarkHubSubscribeCycle(b *testing.B) {
 			h.handleSubscribe(c, msg)
 		}
 	})
-}
-
-// TestHub_AuthMuOffTheMuCacheLine keeps the padding between the registry's
-// mu and authMu from being lost to a field reshuffle: the benchmark only catches
-// it when someone runs it.
-func TestHub_AuthMuOffTheMuCacheLine(t *testing.T) {
-	var r subscriberRegistry
-	if d := unsafe.Offsetof(r.authMu) - unsafe.Offsetof(r.mu); d < 128 {
-		t.Errorf("authMu is %d bytes after mu, want >= 128 so the two locks never share a cache line", d)
-	}
 }

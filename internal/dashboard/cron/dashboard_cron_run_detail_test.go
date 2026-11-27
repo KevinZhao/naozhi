@@ -13,80 +13,42 @@ import (
 	cronpkg "github.com/naozhi/naozhi/internal/cron"
 )
 
-// TestHandleRunDetail_SessionID_Clean passes through a normal UUID unchanged.
-func TestHandleRunDetail_SessionID_Clean(t *testing.T) {
+// TestHandleRunDetailAndList_SessionIDClean is the happy path of the run
+// detail and runs list endpoints: a persisted run is served and a normal UUID
+// session_id passes through SanitizeForLog unchanged.
+func TestHandleRunDetailAndList_SessionIDClean(t *testing.T) {
 	t.Parallel()
+	const sessionID = "12345678-1234-1234-1234-123456789abc" // fixtureRunWithJSONL's
+	h, jobID, runID, _ := fixtureRunWithJSONL(t, []string{`{"type":"user","message":{"role":"user","content":"x"}}`})
 
-	tmp := t.TempDir()
-	storePath := filepath.Join(tmp, "cron_jobs.json")
-	workDir := filepath.Join(tmp, "workspace")
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		t.Fatalf("mkdir workdir: %v", err)
-	}
-
-	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{
-		StorePath:      storePath,
-		AllowNilRouter: true,
-	}, cronpkg.SchedulerDeps{})
-
-	job := cronpkg.Job{
-		ID:       strings.Repeat("e", 16),
-		Schedule: "@every 1h",
-		Prompt:   "clean session test",
-		WorkDir:  workDir,
-	}
-	if err := sched.AddJob(&job); err != nil {
-		t.Fatalf("add job: %v", err)
-	}
-
-	jobID := job.ID
-	runID := strings.Repeat("f", 16)
-	cleanSessionID := "aaaaaaaa-1234-1234-1234-000000000002"
-
-	runsDir := filepath.Join(tmp, "runs", jobID)
-	if err := os.MkdirAll(runsDir, 0o700); err != nil {
-		t.Fatalf("mkdir runs: %v", err)
-	}
-	now := time.Now().UTC()
-	runRec := cronpkg.CronRun{
-		RunID:     runID,
-		JobID:     jobID,
-		State:     cronpkg.RunStateSucceeded,
-		Trigger:   cronpkg.TriggerScheduled,
-		StartedAt: now.Add(-1 * time.Minute),
-		EndedAt:   now,
-		SessionID: cleanSessionID,
-		WorkDir:   workDir,
-	}
-	runJSON, err := json.Marshal(runRec)
-	if err != nil {
-		t.Fatalf("marshal run: %v", err)
-	}
-	runPath := filepath.Join(runsDir, runID+".json")
-	if err := os.WriteFile(runPath, runJSON, 0o600); err != nil {
-		t.Fatalf("write run json: %v", err)
-	}
-
-	h := &Handlers{deps: Deps{Scheduler: sched}}
-	req := httptest.NewRequest(http.MethodGet,
-		"/api/cron/runs/"+runID+"?job_id="+jobID, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+runID+"?job_id="+jobID, nil)
 	req.SetPathValue("run_id", runID)
 	w := httptest.NewRecorder()
 	h.HandleRunDetail(w, req)
-
 	if w.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+		t.Fatalf("detail status=%d body=%s", w.Code, w.Body.String())
 	}
-
-	var resp cronRunDetailView
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+	var detail cronRunDetailView
+	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
 		t.Fatalf("unmarshal: %v body=%s", err, w.Body.String())
 	}
+	if detail.SessionID != sessionID {
+		t.Errorf("detail session_id = %q, want %q", detail.SessionID, sessionID)
+	}
 
-	// A clean UUID must pass through unchanged.
-	if resp.SessionID != cleanSessionID {
-		t.Errorf("session_id = %q, want %q — SanitizeForLog must not mangle clean UUIDs",
-			resp.SessionID, cleanSessionID)
+	w = httptest.NewRecorder()
+	h.HandleRunsList(w, httptest.NewRequest(http.MethodGet, "/api/cron/runs?job_id="+jobID, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", w.Code, w.Body.String())
+	}
+	var list struct {
+		Runs []cronRunSummaryView `json:"runs"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, w.Body.String())
+	}
+	if len(list.Runs) != 1 || list.Runs[0].SessionID != sessionID {
+		t.Errorf("runs = %+v, want one run with session_id %q", list.Runs, sessionID)
 	}
 }
 

@@ -2,6 +2,7 @@ package clievent_test
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -43,59 +44,8 @@ func TestEventEntry_JSONShape(t *testing.T) {
 	}
 	got := string(buf)
 	for _, s := range wantSubs {
-		if !contains(got, s) {
+		if !strings.Contains(got, s) {
 			t.Errorf("JSON missing %q\nfull: %s", s, got)
 		}
-	}
-}
-
-func contains(s, sub string) bool {
-	return len(sub) == 0 || (len(s) >= len(sub) && (indexOf(s, sub) >= 0))
-}
-
-func indexOf(s, sub string) int {
-	// tiny helper avoids importing strings just for one check; behaviour
-	// matches strings.Index for our short fixtures.
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
-}
-
-// TestEventEntry_LeafFields anchors R247-ARCH-16 (#659):
-// the proposed `eventcore` types-only sub-package landed as
-// `internal/cli/clievent` (cluster anchor R246-ARCH-13) so that
-// internal/history/* — which reads/writes EventEntry off persisted JSONL
-// and would otherwise form a diamond import — can bind to the leaf
-// without dragging in the rest of the cli surface.
-//
-// The `cli.EventEntry` type alias that originally bridged the two names
-// was removed in #2496 step 1; every consumer now imports the leaf
-// directly, so the alias-identity checks that used to live here are moot.
-// What remains is the invariant that still matters: the leaf carries
-// every field the cli ring-buffer and history consumers depend on, so a
-// future refactor that moves a field back into cli (re-introducing a
-// behavioural type) breaks the construction below.
-//
-// If you find yourself adding `behaviour` (methods, tagged-union state)
-// to clievent.EventEntry and have to weaken this check, that's the signal
-// the leaf has outgrown its types-only charter — split a new `eventcore`
-// (or similar) leaf rather than relaxing the contract.
-func TestEventEntry_LeafFields(t *testing.T) {
-	e := clievent.EventEntry{
-		UUID:            "u1",
-		Time:            1700000000000,
-		Type:            "task_start",
-		Summary:         "s",
-		ToolUseID:       "tu1",
-		TaskID:          "task-x",
-		InternalAgentID: "ia1",
-		JSONLPath:       "/tmp/agent.jsonl",
-		FirstPromptID:   "fp1",
-	}
-	if e.TaskID != "task-x" || e.InternalAgentID != "ia1" {
-		t.Fatalf("leaf field roundtrip lost: %+v", e)
 	}
 }

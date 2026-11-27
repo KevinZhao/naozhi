@@ -74,22 +74,30 @@ func TestTaskLiveUserSessions(t *testing.T) {
 	}
 }
 
-// Asking is an AskUserQuestion of the session's left unanswered: a turn
-// ending so is 等你, not a result.
+// Asking is an AskUserQuestion of the session's left unanswered (the CLI
+// auto-rejects it and the turn ends): a turn ending so is 等你, not a
+// result. One answered, or none asked, is not.
 func TestCustodyAsking(t *testing.T) {
 	r := newDigestRouter(t)
-	asking, answered := session.NewTestProcess(), session.NewTestProcess()
-	for _, ty := range []string{clievent.KindUser, clievent.KindAskQuestion, clievent.KindText, clievent.KindResult} {
-		asking.EventLog.Append(clievent.EventEntry{Type: ty})
+	for key, types := range map[string][]string{
+		"dashboard:direct:a:general": {clievent.KindUser, clievent.KindAskQuestion, clievent.KindToolResult, clievent.KindText, clievent.KindResult},
+		"dashboard:direct:b:general": {clievent.KindAskQuestion, clievent.KindResult, clievent.KindUser, clievent.KindText, clievent.KindResult},
+		"dashboard:direct:c:general": {clievent.KindUser, clievent.KindText, clievent.KindResult},
+	} {
+		p := session.NewTestProcess()
+		for _, ty := range types {
+			p.EventLog.Append(clievent.EventEntry{Type: ty})
+		}
+		r.InjectSession(key, p)
 	}
-	for _, ty := range []string{clievent.KindAskQuestion, clievent.KindResult, clievent.KindUser, clievent.KindText, clievent.KindResult} {
-		answered.EventLog.Append(clievent.EventEntry{Type: ty})
-	}
-	r.InjectSession("dashboard:direct:a:general", asking)
-	r.InjectSession("dashboard:direct:b:general", answered)
 	c := CustodySources{Router: r}
-	if !c.Asking("dashboard:direct:a:general") || c.Asking("dashboard:direct:b:general") || c.Asking("dashboard:direct:gone:general") {
-		t.Error("Asking: want only the session left asking")
+	for _, key := range []string{"dashboard:direct:b:general", "dashboard:direct:c:general", "dashboard:direct:gone:general"} {
+		if c.Asking(key) {
+			t.Errorf("Asking(%s) = true", key)
+		}
+	}
+	if !c.Asking("dashboard:direct:a:general") {
+		t.Error("Asking: the session left asking is not")
 	}
 }
 

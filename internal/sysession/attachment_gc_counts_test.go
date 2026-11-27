@@ -137,16 +137,6 @@ func TestAttachmentGC_LiveCountsHaveNoDryRunKey(t *testing.T) {
 	}
 }
 
-// TestAttachmentGC_CountKeysAvoidReservedStats: no Counts key may collide
-// with the names flattenTickReport derives from Examined / Acted / Skipped.
-func TestAttachmentGC_CountKeysAvoidReservedStats(t *testing.T) {
-	for _, k := range []string{gcCountDryRun, gcCountBytes, gcCountLegacyNoMeta, gcCountMetaNoRefs, gcCountRefsExpired} {
-		if k == "examined" || k == "acted" || strings.HasPrefix(k, "skipped_") {
-			t.Errorf("Counts key %q collides with a reserved Stats name", k)
-		}
-	}
-}
-
 // TestAttachmentGC_SweepSummaryLog: each root with something to reap logs one
 // summary line carrying its buckets and bytes; a root with nothing logs none.
 func TestAttachmentGC_SweepSummaryLog(t *testing.T) {

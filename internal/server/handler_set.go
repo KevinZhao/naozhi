@@ -11,7 +11,7 @@
 // it, and lets it fall out of scope. Server keeps a pointer only to the three
 // handlers something OTHER than registration needs:
 //
-//	auth        — ccassets wrappers, RotateDashboardSessions
+//	auth        — ccassets wrappers
 //	sessionH    — retired-store flusher loop, WarmHistory + Flush on shutdown
 //	discoveryH  — Wait() drains takeover goroutines during shutdown
 //

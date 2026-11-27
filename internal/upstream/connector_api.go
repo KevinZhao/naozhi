@@ -17,7 +17,7 @@ import (
 
 // Planner is what this node serves the primary of its Planner
 // (docs/rfc/remote-planner.md §4): API answers the `api` RPC from a mux
-// holding only node.APIRoutes, without the dashboard's auth chain (the link
+// holding only node.IsAPIRoute, without the dashboard's auth chain (the link
 // is the primary's credential); Purpose stamps fetch_sessions' snapshots as
 // /api/sessions stamps them, so a dispatched session groups as one on the
 // primary too. A nil API means no Planner runs here: node.CapPlanner is not

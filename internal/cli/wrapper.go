@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/naozhi/naozhi/internal/apiwatch"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -17,10 +16,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cliinfo"
-
+	"github.com/naozhi/naozhi/internal/apiwatch"
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/cliinfo"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/shim"
 )
@@ -364,13 +363,8 @@ func candidatePaths(name string) []string {
 		return nil
 	}
 
-	ext := ""
-	if runtime.GOOS == "windows" {
-		ext = ".exe"
-	}
-
 	var paths []string
-	paths = append(paths, filepath.Join(home, ".local", "bin", name+ext))
+	paths = append(paths, filepath.Join(home, ".local", "bin", name))
 
 	switch runtime.GOOS {
 	case "darwin":
@@ -378,17 +372,13 @@ func candidatePaths(name string) []string {
 		paths = append(paths, filepath.Join("/usr/local/bin", name))
 	case "linux":
 		paths = append(paths, filepath.Join("/usr/local/bin", name))
-	case "windows":
-		if appdata := os.Getenv("APPDATA"); appdata != "" {
-			paths = append(paths, filepath.Join(appdata, "npm", name+".cmd"))
-		}
 	}
 
 	// npm-global backends (codex; gemini-cli) live in node version-manager bin
 	// dirs that a bare systemd unit's $PATH often lacks, so exec.LookPath misses
 	// them; probe those dirs directly (each os.Stat-guarded by the caller).
 	for _, dir := range npmGlobalBinDirs(home) {
-		paths = append(paths, filepath.Join(dir, name+ext))
+		paths = append(paths, filepath.Join(dir, name))
 	}
 
 	return paths

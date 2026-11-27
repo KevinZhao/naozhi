@@ -305,7 +305,7 @@ func snapshotJobLocked(j *Job) jobSnapshot {
 	// Alias j.Notify instead of deep-copying (#1931): UpdateJob only ever
 	// *reassigns* j.Notify to a fresh pointer under s.tbl.mu.Lock, never mutates
 	// *j.Notify in place, so the pointed-to bool is immutable once published
-	// and the sole reader (resolveNotifyDecision) only nil-checks and derefs.
+	// and the sole reader (resolveNotifyTarget) only nil-checks and derefs.
 	// Aliasing is therefore alloc-free and tear-free.
 	snap.notify = j.Notify
 	return snap

@@ -149,8 +149,3 @@ func TestSchedulerConfig_ResetCalledOnDelete(t *testing.T) {
 		t.Errorf("expected Reset(%q) in %v", wantKey, fake.resetCalls)
 	}
 }
-
-// The legacy "*session.Router satisfies cron.SessionRouter" compile-time
-// assertion was removed in Phase B: the interface now speaks in
-// cron-local types and the production glue lives in
-// internal/wireup/cron_router_adapter.go (with its own round-trip test).

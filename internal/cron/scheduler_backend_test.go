@@ -64,11 +64,6 @@ func TestScheduler_RunJobPropagatesBackendToAgentOpts(t *testing.T) {
 			jobBackend:  "",
 			wantBackend: "",
 		},
-		{
-			name:        "alphanumeric_backend_propagates",
-			jobBackend:  "claude",
-			wantBackend: "claude",
-		},
 	}
 	for _, tc := range cases {
 		tc := tc

@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"runtime"
 	"testing"
 	"time"
 
@@ -23,9 +22,6 @@ import (
 // waits out the 10s hello deadline or the 15s spawn timeout. The orphan branch
 // is left out: its SIGUSR2 fallback would signal ShimPID, the test binary.
 func TestReconnectShimsCtx_CancelAbortsShimHandshake(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shim discovery needs unix PID liveness and unix sockets")
-	}
 	for _, tc := range []struct {
 		name      string
 		extra     []string // appended to the recorded argv; non-nil = drift branch

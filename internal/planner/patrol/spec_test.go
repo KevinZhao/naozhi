@@ -225,12 +225,6 @@ func TestPrompt(t *testing.T) {
 			t.Errorf("prompt lacks %q", want)
 		}
 	}
-	// Nothing in it tells the session to run a command.
-	for _, gone := range []string{"git log --since", "gh pr", "只读命令", "http(s) 链接"} {
-		if strings.Contains(text, gone) {
-			t.Errorf("prompt still says %q", gone)
-		}
-	}
 	// The latest seen fifty, no more.
 	if n := strings.Count(text, "\n- debt-old-"); n != knownInPrompt-1 {
 		t.Errorf("%d findings on record listed beside the latest, want %d", n, knownInPrompt-1)

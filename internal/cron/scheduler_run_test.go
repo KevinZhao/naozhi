@@ -1,11 +1,8 @@
 package cron
 
 import (
-	"bytes"
 	"context"
-	"log/slog"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 
@@ -133,37 +130,5 @@ func TestStubRefresher(t *testing.T) {
 	gone.run()
 	if router.registers != 1 {
 		t.Fatalf("run() for a deleted job must not re-register; got %d total", router.registers)
-	}
-}
-
-// TestExecuteJobIDIfLive_SkipLogLabels pins that the dispatch
-// gate's skip Debug logs still carry both the {subject, job_id} labels after
-// the slog.With consolidation (#841) — the label set must not drift between
-// the deleted-job and paused-job branches.
-func TestExecuteJobIDIfLive_SkipLogLabels(t *testing.T) {
-	// NOT t.Parallel(): mutates the process-wide default slog logger.
-	prev := slog.Default()
-	t.Cleanup(func() { slog.SetDefault(prev) })
-
-	var buf bytes.Buffer
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-
-	router := &stubRefreshCountingRouter{}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router})
-
-	// Deleted job: not in s.tbl.jobs at all.
-	s.executeJobIDIfLive("missing-job", false, "cron")
-	// Paused job.
-	s.putJobForTest(&Job{ID: "paused-job", Schedule: "@every 5m", Paused: true})
-	s.executeJobIDIfLive("paused-job", false, "cron")
-
-	out := buf.String()
-	for _, frag := range []string{
-		`subject=cron job_id=missing-job`,
-		`subject=cron job_id=paused-job`,
-	} {
-		if !strings.Contains(out, frag) {
-			t.Errorf("skip log missing label pair %q\nfull log:\n%s", frag, out)
-		}
 	}
 }

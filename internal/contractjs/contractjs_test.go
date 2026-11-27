@@ -34,14 +34,21 @@ func TestContractJS_Current(t *testing.T) {
 	}
 }
 
-// TestContractJS_KnownAnchors pins a handful of load-bearing entries so the
-// generator cannot silently produce an empty or misshapen file that still
-// byte-matches a broken committed copy.
-func TestContractJS_KnownAnchors(t *testing.T) {
+// TestContractJS_Anchors pins load-bearing entries, so the generator cannot
+// produce an empty or misshapen file that still byte-matches a broken
+// committed copy, and each generated list to the Go accessor it must come
+// from, so a swapped or hand-typed list cannot ride through a regenerate.
+func TestContractJS_Anchors(t *testing.T) {
 	t.Parallel()
 	out, err := Build(filepath.Join("..", "..", "internal", "server", "testdata", "routes.golden.json"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	list := func(name string, items []string) string {
+		if len(items) == 0 {
+			t.Fatalf("no items for %s", name)
+		}
+		return "    " + name + ": ['" + strings.Join(items, "', '") + "'],\n"
 	}
 	for _, anchor := range []string{
 		"sessions_update: 'sessions_update'",         // WS enum
@@ -49,83 +56,18 @@ func TestContractJS_KnownAnchors(t *testing.T) {
 		"subscribe: 'subscribe'",                     // WS enum, inbound (send-side check reads these)
 		"sessions: '/api/sessions'",                  // API table
 		"export const NZ_CONTRACT = Object.freeze({", // the export every consumer imports
+		list("EVENT_TYPE", clievent.AllKinds()),
+		list("EVENT_TYPE_INTERNAL", clievent.InternalKinds()),
+		list("EVENT_TYPE_MD_IGNORE", clievent.MarkdownIgnoreKinds()),
+		list("EVENT_TYPE_NO_BUBBLE", clievent.NoBubbleKinds()),
+		list("STARTUP_FAILURE_CLASS", clierr.AllExitClassWires()),
+		list("PLANNER_TURN_DYNAMIC", agent.DynamicSources()),
+		list("PLANNER_TURN_SHIFT", []string{agent.SourceShift.Entry()}),
+		"  DEATH_REASON_PREFIX: { CODE: '" + cliinfo.DeathReasonCLIExitedCodePrefix +
+			"', SIGNAL: '" + cliinfo.DeathReasonCLIExitedSignalPrefix + "' },\n",
 	} {
 		if !strings.Contains(out, anchor) {
-			t.Errorf("contract.js lacks anchor %q", anchor)
-		}
-	}
-}
-
-// TestContractJS_EventTypeEnums pins each generated kind list to the clievent
-// accessor it must come from. The golden above only proves contract.js matches
-// Build; this proves Build put the right column under the right name, so a
-// swapped or hand-typed list cannot ride through a regenerate.
-func TestContractJS_EventTypeEnums(t *testing.T) {
-	t.Parallel()
-	out, err := Build(filepath.Join("..", "..", "internal", "server", "testdata", "routes.golden.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, want := range map[string][]string{
-		"EVENT_TYPE":           clievent.AllKinds(),
-		"EVENT_TYPE_INTERNAL":  clievent.InternalKinds(),
-		"EVENT_TYPE_MD_IGNORE": clievent.MarkdownIgnoreKinds(),
-		"EVENT_TYPE_NO_BUBBLE": clievent.NoBubbleKinds(),
-	} {
-		if len(want) == 0 {
-			t.Fatalf("clievent returned no kinds for %s", name)
-		}
-		line := "    " + name + ": ['" + strings.Join(want, "', '") + "'],\n"
-		if !strings.Contains(out, line) {
-			t.Errorf("contract.js lacks %q", line)
-		}
-	}
-}
-
-// TestContractJS_DeathReasonPrefix pins DEATH_REASON_PREFIX to the cliinfo
-// constants the cli package builds suffixed cli_exited reasons from.
-func TestContractJS_DeathReasonPrefix(t *testing.T) {
-	t.Parallel()
-	out, err := Build(filepath.Join("..", "..", "internal", "server", "testdata", "routes.golden.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "  DEATH_REASON_PREFIX: { CODE: '" + cliinfo.DeathReasonCLIExitedCodePrefix +
-		"', SIGNAL: '" + cliinfo.DeathReasonCLIExitedSignalPrefix + "' },\n"
-	if !strings.Contains(out, want) {
-		t.Errorf("contract.js lacks %q", want)
-	}
-}
-
-// TestContractJS_StartupFailureClass pins STARTUP_FAILURE_CLASS to the wire
-// names snapshots carry in startup_failure.class.
-func TestContractJS_StartupFailureClass(t *testing.T) {
-	t.Parallel()
-	out, err := Build(filepath.Join("..", "..", "internal", "server", "testdata", "routes.golden.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "    STARTUP_FAILURE_CLASS: ['" + strings.Join(clierr.AllExitClassWires(), "', '") + "'],\n"
-	if !strings.Contains(out, want) {
-		t.Errorf("contract.js lacks %q", want)
-	}
-}
-
-// TestContractJS_PlannerTurnEnums pins the Planner page's turn vocabularies
-// to planner/agent, the one place that says which turns fold into 动态.
-func TestContractJS_PlannerTurnEnums(t *testing.T) {
-	t.Parallel()
-	out, err := Build(filepath.Join("..", "..", "internal", "server", "testdata", "routes.golden.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, want := range map[string][]string{
-		"PLANNER_TURN_DYNAMIC": agent.DynamicSources(),
-		"PLANNER_TURN_SHIFT":   {agent.SourceShift.Entry()},
-	} {
-		line := "    " + name + ": ['" + strings.Join(want, "', '") + "'],\n"
-		if !strings.Contains(out, line) {
-			t.Errorf("contract.js lacks %q", line)
+			t.Errorf("contract.js lacks %q", anchor)
 		}
 	}
 }

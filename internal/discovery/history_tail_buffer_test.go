@@ -97,7 +97,7 @@ func TestParseTail_ShortReadKeepsNoPooledBytes(t *testing.T) {
 		}
 		tailBufPool.Put(bp)
 
-		got, err := parseTail(context.Background(), f, st.Size()+100<<10, 0, 50)
+		got, err := parseTailOpts(context.Background(), f, st.Size()+100<<10, 0, 50, tailOpts{toolImages: true})
 		if err != nil {
 			t.Fatal(err)
 		}

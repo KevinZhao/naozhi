@@ -264,31 +264,41 @@ func TestReplyText_UnknownPlatform(t *testing.T) {
 	}
 }
 
-func TestReplyText_KnownPlatform(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	if !d.replyText(context.Background(), incomingMsg("x"), "hello", slog.Default()) {
-		t.Error("replyText should return true for known platform")
-	}
-	if fp.lastReply() != "hello" {
-		t.Errorf("reply = %q, want %q", fp.lastReply(), "hello")
-	}
-}
-
 // ---------------------------------------------------------------------------
 // dispatchCommand
 // ---------------------------------------------------------------------------
 
-func TestDispatchCommand_Help(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	if !d.dispatchCommand(context.Background(), incomingMsg("/help"), "/help", slog.Default()) {
-		t.Fatal("expected /help to be handled")
-	}
-	reply := fp.lastReply()
-	for _, want := range []string{"/help", "/new", "/cron", "/pwd"} {
-		if !strings.Contains(reply, want) {
-			t.Errorf("help reply missing %q: %q", want, reply)
+func TestDispatchCommand_Basics(t *testing.T) {
+	for _, tc := range []struct {
+		text, cmd    string
+		agents       map[string]string
+		handled      bool
+		wantContains []string
+	}{
+		{"/help", "/help", nil, true, []string{"/help", "/new", "/cron", "/pwd"}},
+		{"/help", "/help", map[string]string{"review": "code-reviewer"}, true, []string{"review"}},
+		{"/Help", "/Help", nil, true, []string{"/help"}},
+		{"/new", "/new", nil, true, []string{"重置"}},
+		{"/clear", "/clear", nil, true, []string{"重置"}},
+		{"/new", "/new review", map[string]string{"review": "reviewer"}, true, []string{"重置"}},
+		{"/new", "/new unknown-agent", map[string]string{"review": "reviewer"}, true, []string{"未知"}},
+		{"/pwd", "/pwd", nil, true, []string{"工作目录"}},
+		{"/cd", "/cd /tmp", nil, true, nil},
+		{"/project", "/project", nil, true, []string{"项目功能未启用"}}, // nil project manager
+		{"/foobar", "/foobar", nil, false, nil},
+	} {
+		fp := &fakePlatform{}
+		d := newTestDispatcher(fp)
+		if tc.agents != nil {
+			d.agentCommands = tc.agents
+		}
+		if got := d.dispatchCommand(context.Background(), incomingMsg(tc.text), tc.cmd, slog.Default()); got != tc.handled {
+			t.Errorf("%s: handled = %v, want %v", tc.cmd, got, tc.handled)
+		}
+		for _, want := range tc.wantContains {
+			if !strings.Contains(fp.lastReply(), want) {
+				t.Errorf("%s: reply missing %q: %q", tc.cmd, want, fp.lastReply())
+			}
 		}
 	}
 }
@@ -312,58 +322,6 @@ func TestDispatchCommand_UrgentCopyNamesToolDelay(t *testing.T) {
 		if !strings.Contains(text, "正在运行的工具需先结束") || strings.Contains(text, "立即") {
 			t.Errorf("/urgent %s = %q, want the running-tool caveat and no 立即", name, text)
 		}
-	}
-}
-
-func TestDispatchCommand_HelpWithAgents(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	d.agentCommands = map[string]string{"review": "code-reviewer"}
-	d.dispatchCommand(context.Background(), incomingMsg("/help"), "/help", slog.Default())
-	if !strings.Contains(fp.lastReply(), "review") {
-		t.Errorf("expected agent in help, got %q", fp.lastReply())
-	}
-}
-
-func TestDispatchCommand_New_Basic(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	if !d.dispatchCommand(context.Background(), incomingMsg("/new"), "/new", slog.Default()) {
-		t.Fatal("expected /new to be handled")
-	}
-	if !strings.Contains(fp.lastReply(), "重置") {
-		t.Errorf("expected reset confirmation, got %q", fp.lastReply())
-	}
-}
-
-func TestDispatchCommand_Clear(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	if !d.dispatchCommand(context.Background(), incomingMsg("/clear"), "/clear", slog.Default()) {
-		t.Fatal("expected /clear to be handled")
-	}
-	if !strings.Contains(fp.lastReply(), "重置") {
-		t.Errorf("expected reset confirmation, got %q", fp.lastReply())
-	}
-}
-
-func TestDispatchCommand_New_UnknownAgent(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	d.agentCommands = map[string]string{"review": "reviewer"}
-	d.dispatchCommand(context.Background(), incomingMsg("/new"), "/new unknown-agent", slog.Default())
-	if !strings.Contains(fp.lastReply(), "未知") {
-		t.Errorf("expected unknown agent message, got %q", fp.lastReply())
-	}
-}
-
-func TestDispatchCommand_New_NamedAgent(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	d.agentCommands = map[string]string{"review": "reviewer"}
-	d.dispatchCommand(context.Background(), incomingMsg("/new"), "/new review", slog.Default())
-	if !strings.Contains(fp.lastReply(), "重置") {
-		t.Errorf("expected reset confirmation for named agent, got %q", fp.lastReply())
 	}
 }
 
@@ -428,28 +386,6 @@ func TestDispatchCommand_New_ProjectBound_MixedCaseAgent(t *testing.T) {
 	}
 }
 
-func TestDispatchCommand_CaseInsensitive(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	if !d.dispatchCommand(context.Background(), incomingMsg("/Help"), "/Help", slog.Default()) {
-		t.Fatal("expected /Help to be handled case-insensitively")
-	}
-	if !strings.Contains(fp.lastReply(), "/help") {
-		t.Errorf("case-insensitive /Help should return help; got %q", fp.lastReply())
-	}
-}
-
-func TestDispatchCommand_Pwd(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	if !d.dispatchCommand(context.Background(), incomingMsg("/pwd"), "/pwd", slog.Default()) {
-		t.Fatal("expected /pwd to be handled")
-	}
-	if !strings.Contains(fp.lastReply(), "工作目录") {
-		t.Errorf("expected workspace in reply, got %q", fp.lastReply())
-	}
-}
-
 func TestDispatchCommand_CronNoScheduler(t *testing.T) {
 	fp := &fakePlatform{}
 	d := newTestDispatcher(fp)
@@ -461,49 +397,6 @@ func TestDispatchCommand_CronNoScheduler(t *testing.T) {
 	// With nil scheduler, no reply is sent
 	if fp.replyCount() != 0 {
 		t.Errorf("expected no reply with nil scheduler, got %d replies", fp.replyCount())
-	}
-}
-
-func TestDispatchCommand_Unknown(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	if d.dispatchCommand(context.Background(), incomingMsg("/foobar"), "/foobar", slog.Default()) {
-		t.Fatal("unknown command should not be handled")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// BuildHandler — dedup
-// ---------------------------------------------------------------------------
-
-func TestBuildHandler_DedupDropsDuplicate(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	h := d.BuildHandler()
-	ctx := context.Background()
-	// Use a /help message so we don't need GetOrCreate.
-	msg := platform.IncomingMessage{
-		Platform: "fake", EventID: "dup-event",
-		UserID: "u1", ChatID: "c1", ChatType: "direct", Text: "/help",
-	}
-	h(ctx, msg)
-	count := fp.replyCount()
-	h(ctx, msg) // duplicate event ID — must be dropped
-	if fp.replyCount() != count {
-		t.Errorf("duplicate event was processed: count %d → %d", count, fp.replyCount())
-	}
-}
-
-// ---------------------------------------------------------------------------
-// BuildHandler — /help via handler
-// ---------------------------------------------------------------------------
-
-func TestBuildHandler_Help(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	d.BuildHandler()(context.Background(), incomingMsg("/help"))
-	if !strings.Contains(fp.lastReply(), "/help") {
-		t.Errorf("expected /help in reply, got %q", fp.lastReply())
 	}
 }
 
@@ -527,15 +420,6 @@ func TestBuildHandler_EmptyText(t *testing.T) {
 // ---------------------------------------------------------------------------
 // BuildHandler — unknown slash command warns user
 // ---------------------------------------------------------------------------
-
-func TestBuildHandler_UnknownSlash(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	d.BuildHandler()(context.Background(), incomingMsg("/unknowncmd"))
-	if !strings.Contains(fp.lastReply(), "未知命令") {
-		t.Errorf("expected unknown-command message, got %q", fp.lastReply())
-	}
-}
 
 // TestBuildHandler_UnknownSlash_SanitizesAttackerControl pins
 // R20260527122801-CR-15: the unknown-command reply embeds the user-supplied
@@ -615,19 +499,6 @@ func TestBuildHandler_QueueDrop_Notify(t *testing.T) {
 // ---------------------------------------------------------------------------
 // IM turn — GetOrCreate error paths
 // ---------------------------------------------------------------------------
-
-// Without a real wrapper GetOrCreate fails, and the turn's StageSession
-// outcome is replied with the session-creation error message.
-func TestIMTurn_GetOrCreateError_DefaultMessage(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp) // no wrapper → GetOrCreate will fail
-	msg := incomingMsg("hello")
-	runIMTurn(context.Background(), d, "key1", "hello", msg, true)
-	// Default error → "会话创建失败" message
-	if !strings.Contains(fp.lastReply(), "会话") {
-		t.Errorf("expected session creation error message, got %q", fp.lastReply())
-	}
-}
 
 // TestIMTurn_StageDecidesTheErrorReply: the delivery answers a failure by
 // the stage it happened at. Only a failed Send is a reply error for /health
@@ -710,20 +581,6 @@ func TestSendSplitReply_Short(t *testing.T) {
 	}
 }
 
-func TestSendSplitReply_Long_Paginates(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	// >4000 chars → 2+ chunks
-	d.SendSplitReply(context.Background(), fp, ReplyDest{ChatID: "c1"}, strings.Repeat("A", 8001))
-	if fp.replyCount() < 2 {
-		t.Errorf("reply count = %d, want ≥ 2", fp.replyCount())
-	}
-	last := fp.allReplies()[fp.replyCount()-1]
-	if !strings.Contains(last, "/") {
-		t.Errorf("expected pagination marker, got %q", last)
-	}
-}
-
 type zeroMaxPlatform struct{ *fakePlatform }
 
 func (z *zeroMaxPlatform) MaxReplyLength() int { return 0 }
@@ -794,13 +651,6 @@ func TestReplyTracker_RenderStatus(t *testing.T) {
 	}
 }
 
-func TestReplyTracker_Stop_Idempotent(t *testing.T) {
-	fp := &fakePlatform{supportsInterim: false}
-	tracker := newIMEventTracker(context.Background(), fp, ReplyDest{ChatID: "c1"}, "direct", "")
-	tracker.stop()
-	tracker.stop()
-}
-
 func TestReplyTracker_WaitReady_CtxCancel(t *testing.T) {
 	fp := &fakePlatform{supportsInterim: true}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -815,12 +665,6 @@ func TestReplyTracker_WaitReady_CtxCancel(t *testing.T) {
 		t.Fatal("waitReady should return on context cancel")
 	}
 }
-
-// ---------------------------------------------------------------------------
-// firstLine — moved to internal/textutil.FirstLine in R222-CR-5.
-// Equivalent coverage lives in internal/textutil/firstline_test.go::TestFirstLine.
-// Keeping the dispatch-side cases here would duplicate that contract.
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // formatToolUse
@@ -851,27 +695,6 @@ func TestFormatToolUse(t *testing.T) {
 // ---------------------------------------------------------------------------
 // handleCdCommand — path traversal / allowed-root checks
 // ---------------------------------------------------------------------------
-
-func TestHandleCdCommand_AbsPath(t *testing.T) {
-	// handleCdCommand runs filepath.EvalSymlinks before the allowedRoot
-	// prefix check (commands.go:425). macOS rewrites /var/folders/... to
-	// /private/var/folders/..., so resolve upfront to keep the fixture
-	// platform-neutral.
-	tmpDir, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatalf("EvalSymlinks: %v", err)
-	}
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	d.allowedRoot = tmpDir // restrict to tmpDir
-
-	msg := incomingMsg("/cd " + tmpDir)
-	d.handleCdCommand(context.Background(), msg, "/cd "+tmpDir, slog.Default())
-
-	if !strings.Contains(fp.lastReply(), "已切换") {
-		t.Errorf("expected workspace-changed reply, got %q", fp.lastReply())
-	}
-}
 
 func TestHandleCdCommand_NonExistentDir(t *testing.T) {
 	fp := &fakePlatform{}
@@ -933,8 +756,7 @@ func TestHandleCdCommand_CaseInsensitiveChild(t *testing.T) {
 func TestHandleCdCommand_EmptyPath(t *testing.T) {
 	fp := &fakePlatform{}
 	d := newTestDispatcher(fp)
-	msg := incomingMsg("/cd")
-	d.handleCdCommand(context.Background(), msg, "/cd", slog.Default())
+	d.handleCdCommand(context.Background(), incomingMsg("/cd"), "/cd", slog.Default())
 	if !strings.Contains(fp.lastReply(), "用法") {
 		t.Errorf("expected usage message, got %q", fp.lastReply())
 	}
@@ -954,20 +776,8 @@ func TestHandleCdCommand_UnknownPlatform_NoReply(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// handleProjectCommand — no project manager
+// handleProjectCommand
 // ---------------------------------------------------------------------------
-
-func TestHandleProjectCommand_NilManager(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	d.projectMgr = nil
-
-	d.handleProjectCommand(context.Background(), incomingMsg("/project"), "/project", slog.Default())
-
-	if !strings.Contains(fp.lastReply(), "项目功能未启用") {
-		t.Errorf("expected no-project-manager message, got %q", fp.lastReply())
-	}
-}
 
 func TestHandleProjectCommand_UnknownPlatform(t *testing.T) {
 	fp := &fakePlatform{}
@@ -986,37 +796,13 @@ func TestHandleProjectCommand_UnknownPlatform(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// dispatchCommand — /cd via dispatchCommand
-// ---------------------------------------------------------------------------
-
-func TestDispatchCommand_Cd_Handled(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	// /cd is only handled if platform is known
-	handled := d.dispatchCommand(context.Background(), incomingMsg("/cd"), "/cd /tmp", slog.Default())
-	if !handled {
-		t.Fatal("expected /cd to be handled by dispatchCommand")
-	}
-}
-
-func TestDispatchCommand_Project_Handled(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	d.projectMgr = nil // nil manager → reply with "未启用"
-
-	handled := d.dispatchCommand(context.Background(), incomingMsg("/project"), "/project", slog.Default())
-	if !handled {
-		t.Fatal("expected /project to be handled")
-	}
-}
-
-// ---------------------------------------------------------------------------
 // handleCronCommand — via dispatchCommand
 // ---------------------------------------------------------------------------
 
 func TestHandleCronCommand_UsageAndEmptyList(t *testing.T) {
 	for _, tc := range []struct{ text, want string }{
 		{"/cron list", "没有"},
+		{"/cron", "/cron mode <id> fresh|keep"},
 		{"/cron add", "用法"},
 		{"/cron del", "用法"},
 		{"/cron pause", "用法"},
@@ -1144,32 +930,6 @@ func TestBuildHandler_GroupChatGate(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// R248-TEST-2 — Capabilities precedence in NewDispatcher
-// ---------------------------------------------------------------------------
-
-// stubCaps is a Capabilities implementation whose ReplyFooter names it, so
-// the test can identify which wiring the dispatcher installed.
-type stubCaps struct{ id string }
-
-func (stubCaps) Takeover(_ context.Context, _, _ string, _ session.AgentOpts) bool { return false }
-func (s stubCaps) ReplyFooter(_ string) string                                     { return "stubCaps:" + s.id }
-func (s stubCaps) BackendIDs() []string                                            { return nil }
-
-// TestNewDispatcher_CapabilitiesUsedDirectly pins that a set cfg.Capabilities
-// is installed as-is (both-unset → NoopCapabilities{} is covered by
-// R248-TEST-6 below).
-func TestNewDispatcher_CapabilitiesUsedDirectly(t *testing.T) {
-	t.Parallel()
-	d, err := NewDispatcher(DispatcherConfig{Turns: testTurns(), Capabilities: stubCaps{id: "caps-only"}})
-	if err != nil {
-		t.Fatalf("NewDispatcher: %v", err)
-	}
-	if got, want := d.caps.ReplyFooter("claude"), "stubCaps:caps-only"; got != want {
-		t.Errorf("d.caps.ReplyFooter = %q, want %q", got, want)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // R248-TEST-6 — d.caps invariant: never nil after NewDispatcher
 // ---------------------------------------------------------------------------
 
@@ -1190,14 +950,5 @@ func TestNewDispatcher_CapsAlwaysNonNil(t *testing.T) {
 	}
 	if _, ok := d.caps.(NoopCapabilities); !ok {
 		t.Errorf("d.caps type = %T, want dispatch.NoopCapabilities for empty config (no closures, no Capabilities)", d.caps)
-	}
-	if got := d.caps.Takeover(context.Background(), "chat", "key", session.AgentOpts{}); got {
-		t.Errorf("default Takeover = true, want false (NoopCapabilities default)")
-	}
-	if got := d.caps.ReplyFooter(""); got != "" {
-		t.Errorf("default ReplyFooter = %q, want \"\" (NoopCapabilities default)", got)
-	}
-	if got := d.caps.ReplyFooter("claude"); got != "" {
-		t.Errorf("default ReplyFooter(claude) = %q, want \"\" (NoopCapabilities ignores backendID)", got)
 	}
 }

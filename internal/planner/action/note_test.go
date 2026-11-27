@@ -199,7 +199,7 @@ func TestNoteJournaled(t *testing.T) {
 }
 
 func TestNoteParse(t *testing.T) {
-	for _, c := range []struct{ raw, err string }{
+	parseCases(t, []parseCase{
 		{`{"type":"note","key":"dashboard:direct:u:general","text":"t","why":"w"}`, ""},
 		{`{"type":"note","key":"task:ab12","text":"` + strings.Repeat("字", noteTextRunes) + `","why":"` + strings.Repeat("字", textRunes) + `"}`, ""},
 		{`{"type":"note","key":"cron:job1","text":"t","why":"w"}`, ""},
@@ -217,18 +217,7 @@ func TestNoteParse(t *testing.T) {
 		{`{"type":"note","key":"reader:r1","text":"t","why":"w"}`, "不能是 planner:main 或一次性会话"},
 		{`{"type":"note","key":"k","text":"t","why":"w","level":"timely"}`, "字段不对"},
 		{`{"type":"nope"}`, "front、note）"},
-	} {
-		b := Parse(block(c.raw))
-		if len(b) != 1 {
-			t.Fatalf("%s: %d blocks", c.raw, len(b))
-		}
-		switch {
-		case c.err == "" && (b[0].Err != nil || b[0].Note == nil || b[0].Type != TypeNote):
-			t.Errorf("%s: %v", c.raw, b[0].Err)
-		case c.err != "" && (b[0].Err == nil || b[0].Note != nil || !strings.Contains(b[0].Err.Error(), c.err)):
-			t.Errorf("%s: err %v, want one with %q", c.raw, b[0].Err, c.err)
-		}
-	}
+	})
 	// Text and why are one line each; the key is trimmed.
 	n := Parse(block(`{"type":"note","key":" task:ab12 ","text":" 一句\n话 ","why":" 出处：\n\tgh pr view 12 "}`))[0].Note
 	if n == nil || *n != (Note{Key: "task:ab12", Text: "一句 话", Why: "出处： gh pr view 12"}) {

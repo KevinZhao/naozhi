@@ -144,9 +144,6 @@ type Carry struct {
 	ended map[string]bool
 }
 
-// Judge returns in's open background tasks: Scan, then At in.Now.
-func Judge(in Input) State { return Scan(in).At(in.Now) }
-
 // Scan returns in's open background tasks, the workflows first, with no
 // quiet limit applied (in.Now unread): ScanFrom with no earlier scan.
 func Scan(in Input) State {

@@ -338,10 +338,3 @@ func TestHandleWorkflow_ServerNowAfterResult(t *testing.T) {
 		t.Errorf("server_now %d, want %d: the clock after Result", resp.ServerNow, nowMS+3000)
 	}
 }
-
-func TestRoutes(t *testing.T) {
-	routes := New(Deps{}).Routes()
-	if len(routes) != 1 || routes[0].Pattern != "GET /api/sessions/workflow" {
-		t.Errorf("routes %+v, want the one workflow endpoint (v4's /workflow_agent is gone)", routes)
-	}
-}

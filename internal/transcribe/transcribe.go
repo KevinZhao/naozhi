@@ -60,14 +60,6 @@ func New(ctx context.Context, cfg Config) (Service, error) {
 	return &awsService{client: client, cfg: cfg}, nil
 }
 
-// newWithClient creates a Service with an injected API client (for testing).
-func newWithClient(client transcribeAPI, cfg Config) *awsService {
-	if cfg.LanguageCode == "" {
-		cfg.LanguageCode = "zh-CN"
-	}
-	return &awsService{client: client, cfg: cfg}
-}
-
 func (s *awsService) Transcribe(ctx context.Context, data []byte, mimeType string) (string, error) {
 	// Magic bytes win over the mimeType hint.
 	detected := DetectFormat(data)

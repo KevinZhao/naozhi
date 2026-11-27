@@ -89,25 +89,3 @@ func TestSessionsList_CronFilteredOut(t *testing.T) {
 		t.Errorf("stats.running = %d, want 1 (cron stub running)", resp.Stats.Running)
 	}
 }
-
-// TestSessionsList_CronFilterRespectsCronKeyPrefix guards against prefix
-// drift: any future addition to session.CronKeyPrefix must remain consistent
-// with the filter at HandleList. The test injects a session whose key is
-// exactly "{CronKeyPrefix}edge" and asserts it is filtered, so a refactor
-// that hardcodes "cron:" elsewhere would not silently bypass this filter.
-func TestSessionsList_CronFilterRespectsCronKeyPrefix(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
-	key := session.CronKeyPrefix + "edge"
-	proc := session.NewTestProcess()
-	routerOf(srv).InjectSession(key, proc)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
-	w := httptest.NewRecorder()
-	srv.sessionH.HandleList(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d", w.Code)
-	}
-	if strings.Contains(w.Body.String(), key) {
-		t.Errorf("response leaks cron-prefixed key %q; body=%s", key, w.Body.String())
-	}
-}

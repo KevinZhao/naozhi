@@ -327,7 +327,7 @@ func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOu
 	// done is intentionally discarded (#2303): turn-end is driven only by a
 	// result clievent.Event in the dispatch loop below (or the rpcErrorTurnEnd synthesis
 	// on err), never by this advisory bool. A protocol that needs a turn to
-	// close MUST emit a result clievent.Event — see ProtocolCore.ReadEvent.
+	// close MUST emit a result clievent.Event — see Protocol.ReadEvent.
 	if ri, ok := p.protocol.(eventReaderInto); ok {
 		events, _, err = ri.ReadEventInto(msg.Line, p.readEventBuf[:0])
 		// The buf slots outlive this frame, so a snapshot left in one stays

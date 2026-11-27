@@ -11,11 +11,11 @@ import (
 	"time"
 )
 
-// TestGCWithRefs_FIFOMetaDoesNotWedge: a FIFO planted as a payload's .meta in a
+// TestGCDir_FIFOMetaDoesNotWedge: a FIFO planted as a payload's .meta in a
 // shared workspace must not block the sweep in open(2) — ctx cannot interrupt
 // that, and a stuck daemon tick holds up shutdown. The unreadable sidecar keeps
 // the payload, as any other unreadable meta does.
-func TestGCWithRefs_FIFOMetaDoesNotWedge(t *testing.T) {
+func TestGCDir_FIFOMetaDoesNotWedge(t *testing.T) {
 	ws := t.TempDir()
 	now := time.Now().UTC()
 	dayDir := filepath.Join(ws, Dir, now.AddDate(0, 0, -10).Format("2006-01-02"))
@@ -33,7 +33,7 @@ func TestGCWithRefs_FIFOMetaDoesNotWedge(t *testing.T) {
 
 	done := make(chan GCResult, 1)
 	go func() {
-		res, _ := GCWithRefs(context.Background(), ws, GCOptions{
+		res, _ := gcWorkspace(context.Background(), ws, GCOptions{
 			UploadTTL: 7 * 24 * time.Hour,
 			RefTTL:    DefaultRefTTL,
 			Now:       now,

@@ -81,27 +81,6 @@ func (s *stubConn) Unsubscribe(_ EventSink, _ string)               {}
 func (s *stubConn) RefreshSubscription(_ string)                    {}
 func (s *stubConn) RemoveClient(_ EventSink)                        {}
 
-// ---- NewCacheManager ----
-
-func TestCacheManager_NewCacheManager(t *testing.T) {
-	called := false
-	cm := NewCacheManager(
-		func() map[string]Conn { return nil },
-		func() { called = true },
-	)
-	if cm == nil {
-		t.Fatal("expected non-nil CacheManager")
-	}
-	sessions, status := cm.Sessions()
-	if len(sessions) != 0 {
-		t.Errorf("expected empty sessions, got %v", sessions)
-	}
-	if len(status) != 0 {
-		t.Errorf("expected empty status, got %v", status)
-	}
-	_ = called
-}
-
 // ---- RefreshAll populates cache ----
 
 func TestCacheManager_RefreshAll(t *testing.T) {
@@ -279,19 +258,6 @@ func TestCacheManager_RefreshAll_preservesProjectsOnPartialError(t *testing.T) {
 	if got := cm.Discovered()["partial"]; len(got) != 2 {
 		t.Errorf("expected 2 fresh discovered after recovery, got %d", len(got))
 	}
-}
-
-// ---- RefreshAll with no nodes is a no-op ----
-
-func TestCacheManager_RefreshAll_noNodes(t *testing.T) {
-	var onChangeCalled atomic.Int32
-	cm := NewCacheManager(
-		func() map[string]Conn { return map[string]Conn{} },
-		func() { onChangeCalled.Add(1) },
-	)
-	cm.RefreshAll()
-	// onChange is always called even with no nodes.
-	_ = onChangeCalled.Load()
 }
 
 // ---- RefreshFor updates a single node ----

@@ -460,12 +460,8 @@ func TestCodexProtocol_HandleEvent_NonPermissionPassThrough(t *testing.T) {
 func TestCodexProtocol_Capabilities(t *testing.T) {
 	t.Parallel()
 	p := &CodexProtocol{}
-	caps := p.Capabilities()
-	if caps.Replay || caps.Priority || caps.StreamJSON {
-		t.Errorf("caps = %+v; want Replay/Priority/StreamJSON all false", caps)
-	}
-	if !caps.SoftInterrupt {
-		t.Error("codex should advertise SoftInterrupt=true (turn/interrupt)")
+	if caps := p.Capabilities(); caps != (Caps{}) {
+		t.Errorf("caps = %+v; want none", caps)
 	}
 	if p.SupportsPriority() || p.SupportsReplay() {
 		t.Error("codex SupportsPriority/SupportsReplay must be false in phase1")

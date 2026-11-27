@@ -24,7 +24,7 @@ import (
 //	                              where none can.
 //
 // It sits behind the /api/* auth like the rest, and is not among a reverse
-// node's `api` routes (node.APIRoutes): a deep check reads a repository on
+// node's `api` routes (node.IsAPIRoute): a deep check reads a repository on
 // the machine that has it, started from that machine's own page, as the
 // scout's run is.
 //

@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -149,9 +148,6 @@ func TestHandleFilesList_Traversal(t *testing.T) {
 }
 
 func TestHandleFilesList_SymlinkEscapeRejected(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink semantics differ on windows")
-	}
 	h, proj, projDir := newProjectHandlersForTest(t, map[string]string{"keep.txt": "x"})
 	// A symlink whose target is outside the workspace must not be navigable,
 	// and listing a directory THROUGH it must 404.
@@ -263,9 +259,6 @@ func TestHandleFilesList_Truncation(t *testing.T) {
 }
 
 func TestHandleFilesList_IrregularTypeSkipped(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fifo not supported on windows")
-	}
 	h, proj, projDir := newProjectHandlersForTest(t, map[string]string{"real.txt": "x"})
 	fifo := filepath.Join(projDir, "pipe")
 	if err := mkfifoForTest(fifo); err != nil {

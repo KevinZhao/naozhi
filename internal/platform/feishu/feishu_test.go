@@ -16,22 +16,6 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
-func TestDefaultMaxReplyLen(t *testing.T) {
-	t.Parallel()
-	f := New(Config{AppID: "id"}, nil)
-	if f.MaxReplyLength() != 4000 {
-		t.Errorf("MaxReplyLength() = %d, want 4000", f.MaxReplyLength())
-	}
-}
-
-func TestCustomMaxReplyLen(t *testing.T) {
-	t.Parallel()
-	f := New(Config{AppID: "id", MaxReplyLen: 2000}, nil)
-	if f.MaxReplyLength() != 2000 {
-		t.Errorf("MaxReplyLength() = %d, want 2000", f.MaxReplyLength())
-	}
-}
-
 // Verify Feishu implements RunnablePlatform at compile time.
 var (
 	_ platform.RunnablePlatform   = (*Feishu)(nil)
@@ -39,39 +23,6 @@ var (
 	_ platform.QuestionCardSender = (*Feishu)(nil)
 	_ platform.ConnStateReporter  = (*Feishu)(nil)
 )
-
-// --- Start/Stop lifecycle tests ---
-
-func TestStopNoop(t *testing.T) {
-	t.Parallel()
-	f := New(Config{AppID: "id"}, nil)
-	if err := f.Stop(); err != nil {
-		t.Errorf("Stop() error = %v, want nil", err)
-	}
-}
-
-func TestStopCancelsDone(t *testing.T) {
-	t.Parallel()
-	f := New(Config{AppID: "id"}, nil)
-	// Simulate a started WS by manually setting cancel/done
-	ctx, cancel := context.WithCancel(context.Background())
-	f.cancel = cancel
-	f.done = make(chan struct{})
-	go func() {
-		<-ctx.Done()
-		close(f.done)
-	}()
-
-	if err := f.Stop(); err != nil {
-		t.Errorf("Stop() error = %v", err)
-	}
-	// done channel should be closed
-	select {
-	case <-f.done:
-	default:
-		t.Error("done channel should be closed after Stop()")
-	}
-}
 
 // --- parseSDKEvent tests ---
 
@@ -127,34 +78,6 @@ func TestParseSDKEvent_TextMessage(t *testing.T) {
 	}
 }
 
-func TestParseSDKEvent_DirectMessage(t *testing.T) {
-	t.Parallel()
-	event := &larkim.P2MessageReceiveV1{
-		EventV2Base: &larkevent.EventV2Base{
-			Header: &larkevent.EventHeader{EventID: "ev_456"},
-		},
-		Event: &larkim.P2MessageReceiveV1Data{
-			Sender: &larkim.EventSender{
-				SenderId: &larkim.UserId{OpenId: strPtr("ou_user2")},
-			},
-			Message: &larkim.EventMessage{
-				MessageType: strPtr("text"),
-				ChatId:      strPtr("oc_chat2"),
-				ChatType:    strPtr("p2p"),
-				Content:     strPtr(`{"text":"hi"}`),
-			},
-		},
-	}
-
-	pe, ok := (&Feishu{}).parseSDKEvent(event)
-	if !ok {
-		t.Fatal("expected ok=true")
-	}
-	if pe.Msg.ChatType != "direct" {
-		t.Errorf("ChatType = %q, want direct", pe.Msg.ChatType)
-	}
-}
-
 func TestParseSDKEvent_WithMentions(t *testing.T) {
 	t.Parallel()
 	event := &larkim.P2MessageReceiveV1{
@@ -186,32 +109,6 @@ func TestParseSDKEvent_WithMentions(t *testing.T) {
 	}
 	if !pe.Msg.MentionMe {
 		t.Error("MentionMe should be true")
-	}
-}
-
-func TestParseSDKEvent_ImageMessage(t *testing.T) {
-	t.Parallel()
-	event := &larkim.P2MessageReceiveV1{
-		Event: &larkim.P2MessageReceiveV1Data{
-			Sender: &larkim.EventSender{
-				SenderId: &larkim.UserId{OpenId: strPtr("ou_user1")},
-			},
-			Message: &larkim.EventMessage{
-				MessageType: strPtr("image"),
-				ChatId:      strPtr("oc_chat1"),
-				Content:     strPtr(`{"image_key":"img_v3_xxx"}`),
-			},
-		},
-	}
-	pe, ok := (&Feishu{}).parseSDKEvent(event)
-	if !ok {
-		t.Fatal("expected ok=true for image message")
-	}
-	if pe.MediaKey != "img_v3_xxx" {
-		t.Errorf("MediaKey = %q, want img_v3_xxx", pe.MediaKey)
-	}
-	if pe.Msg.Text != "" {
-		t.Errorf("Text = %q, want empty for image message", pe.Msg.Text)
 	}
 }
 
@@ -271,90 +168,51 @@ func TestParseSDKEvent_UnsupportedType(t *testing.T) {
 	}
 }
 
-func TestParseSDKEvent_AudioMessage(t *testing.T) {
+// TestParseSDKEvent_MediaMessage: image and voice messages carry their
+// resource key and message ID, with no text; a p2p chat is "direct".
+func TestParseSDKEvent_MediaMessage(t *testing.T) {
 	t.Parallel()
-	event := &larkim.P2MessageReceiveV1{
-		Event: &larkim.P2MessageReceiveV1Data{
-			Sender: &larkim.EventSender{
-				SenderId: &larkim.UserId{OpenId: strPtr("ou_user1")},
-			},
-			Message: &larkim.EventMessage{
-				MessageType: strPtr("audio"),
-				MessageId:   strPtr("msg_audio_1"),
-				ChatId:      strPtr("oc_chat1"),
-				Content:     strPtr(`{"file_key":"file_v3_audio_xxx"}`),
-			},
-		},
-	}
-	pe, ok := (&Feishu{}).parseSDKEvent(event)
-	if !ok {
-		t.Fatal("expected ok=true for audio message")
-	}
-	if pe.MediaType != "audio" {
-		t.Errorf("MediaType = %q, want audio", pe.MediaType)
-	}
-	if pe.MediaKey != "file_v3_audio_xxx" {
-		t.Errorf("MediaKey = %q, want file_v3_audio_xxx", pe.MediaKey)
-	}
-	if pe.MessageID != "msg_audio_1" {
-		t.Errorf("MessageID = %q, want msg_audio_1", pe.MessageID)
+	for _, tc := range []struct{ msgType, content, key string }{
+		{"image", `{"image_key":"img_v3_xxx"}`, "img_v3_xxx"},
+		{"audio", `{"file_key":"file_v3_audio_xxx"}`, "file_v3_audio_xxx"},
+	} {
+		pe, ok := (&Feishu{}).parseSDKEvent(sdkMediaEvent("ev_m", tc.msgType, tc.content))
+		if !ok {
+			t.Fatalf("%s: parseSDKEvent rejected it", tc.msgType)
+		}
+		if pe.MediaType != tc.msgType || pe.MediaKey != tc.key || pe.MessageID != "om_ev_m" || pe.Msg.Text != "" {
+			t.Errorf("%s: parsed %+v, want type %s key %s, no text", tc.msgType, pe, tc.msgType, tc.key)
+		}
+		if pe.Msg.ChatType != "direct" {
+			t.Errorf("%s: ChatType = %q, want direct for p2p", tc.msgType, pe.Msg.ChatType)
+		}
 	}
 }
 
 // --- MentionMe precision (isBotMentioned) + fetchBotInfo tests ---
 
-// TestIsBotMentioned_ExactMatch: botOpenID is known, at least one mention
-// matches → true.
-func TestIsBotMentioned_ExactMatch(t *testing.T) {
+// TestIsBotMentioned: with the bot's open_id known only a mention of it
+// counts (entries with an empty open_id are skipped); with it unknown
+// (fetchBotInfo failed or has not run) any mention counts.
+func TestIsBotMentioned(t *testing.T) {
 	t.Parallel()
-	f := &Feishu{botOpenID: "ou_bot_self"}
-	openIDs := []string{"ou_alice", "ou_bot_self", "ou_bob"}
-	got := f.isBotMentioned(len(openIDs), func(i int) string { return openIDs[i] })
-	if !got {
-		t.Error("expected true when bot is among the mentions")
+	cases := []struct {
+		name, botID string
+		openIDs     []string
+		want        bool
+	}{
+		{"exact match", "ou_bot_self", []string{"ou_alice", "ou_bot_self", "ou_bob"}, true},
+		{"no match", "ou_bot_self", []string{"ou_alice", "ou_bob"}, false},
+		{"match after an empty id", "ou_bot_self", []string{"", "ou_bot_self"}, true},
+		{"only empty ids", "ou_bot_self", []string{"", ""}, false},
+		{"unknown bot id, any mention", "", []string{"", "", ""}, true},
+		{"unknown bot id, no mentions", "", nil, false},
 	}
-}
-
-// TestIsBotMentioned_NoMatch: botOpenID is known but no mention matches → false.
-// This is the core precision fix — the old code returned true here.
-func TestIsBotMentioned_NoMatch(t *testing.T) {
-	t.Parallel()
-	f := &Feishu{botOpenID: "ou_bot_self"}
-	openIDs := []string{"ou_alice", "ou_bob"}
-	got := f.isBotMentioned(len(openIDs), func(i int) string { return openIDs[i] })
-	if got {
-		t.Error("expected false when bot is NOT among the mentions")
-	}
-}
-
-// TestIsBotMentioned_DegradesWhenBotIDUnknown: botOpenID empty (fetchBotInfo
-// failed or hasn't run) → any mention counts, any empty list is false.
-// Preserves legacy behaviour for DM-heavy users.
-func TestIsBotMentioned_DegradesWhenBotIDUnknown(t *testing.T) {
-	t.Parallel()
-	f := &Feishu{} // botOpenID=""
-	if !f.isBotMentioned(3, func(i int) string { return "" }) {
-		t.Error("expected degraded path to return true when any mention exists")
-	}
-	if f.isBotMentioned(0, func(i int) string { return "" }) {
-		t.Error("expected false for zero mentions even in degraded path")
-	}
-}
-
-// TestIsBotMentioned_EmptyOpenIDInPayload: botOpenID known but a mention
-// carries empty open_id (older Feishu schema without id.open_id field) →
-// skip that mention, keep scanning. Matches real-world rollout where some
-// payloads decode with empty ID.
-func TestIsBotMentioned_EmptyOpenIDInPayload(t *testing.T) {
-	t.Parallel()
-	f := &Feishu{botOpenID: "ou_bot_self"}
-	openIDs := []string{"", "ou_bot_self"}
-	if !f.isBotMentioned(len(openIDs), func(i int) string { return openIDs[i] }) {
-		t.Error("expected true when bot appears after an empty-ID entry")
-	}
-	onlyEmpty := []string{"", ""}
-	if f.isBotMentioned(len(onlyEmpty), func(i int) string { return onlyEmpty[i] }) {
-		t.Error("expected false when all IDs are empty and bot ID is known")
+	for _, tc := range cases {
+		f := &Feishu{botOpenID: tc.botID}
+		if got := f.isBotMentioned(len(tc.openIDs), func(i int) string { return tc.openIDs[i] }); got != tc.want {
+			t.Errorf("%s: isBotMentioned = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 

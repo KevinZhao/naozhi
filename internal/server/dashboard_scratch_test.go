@@ -60,57 +60,31 @@ func TestScratchOpen_Happy(t *testing.T) {
 	}
 }
 
-func TestScratchOpen_MissingQuote(t *testing.T) {
+// TestScratchOpen_Rejects: a missing quote, an unknown source, a scratch
+// source and a malformed source key are each refused before a scratch opens.
+func TestScratchOpen_Rejects(t *testing.T) {
 	srv, hs := newScratchTestServer(t)
 	routerOf(srv).InjectSession("feishu:direct:alice:general", session.NewTestProcess())
-	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open",
-		strings.NewReader(`{"source_key":"feishu:direct:alice:general"}`))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	hs.scratchH.HandleOpen(w, req)
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", w.Code)
-	}
-}
-
-func TestScratchOpen_UnknownSource(t *testing.T) {
-	_, hs := newScratchTestServer(t)
-	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open",
-		strings.NewReader(`{"source_key":"no:such:chat:general","quote":"hi"}`))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	hs.scratchH.HandleOpen(w, req)
-	if w.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want 404", w.Code)
-	}
-}
-
-func TestScratchOpen_SourceIsScratchRefused(t *testing.T) {
-	srv, hs := newScratchTestServer(t)
-	// Simulate a live scratch source.
 	scratchKey := "scratch:aaaaaa:general:general"
 	routerOf(srv).InjectSession(scratchKey, session.NewTestProcess())
-
-	body, _ := json.Marshal(map[string]string{"source_key": scratchKey, "quote": "x"})
-	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	hs.scratchH.HandleOpen(w, req)
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", w.Code)
-	}
-}
-
-func TestScratchOpen_InvalidSourceKey(t *testing.T) {
-	_, hs := newScratchTestServer(t)
-	body := map[string]string{"source_key": "bad\x00key", "quote": "hi"}
-	raw, _ := json.Marshal(body)
-	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open", bytes.NewReader(raw))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	hs.scratchH.HandleOpen(w, req)
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", w.Code)
+	for _, tc := range []struct {
+		name string
+		body map[string]string
+		want int
+	}{
+		{"missing quote", map[string]string{"source_key": "feishu:direct:alice:general"}, http.StatusBadRequest},
+		{"unknown source", map[string]string{"source_key": "no:such:chat:general", "quote": "hi"}, http.StatusNotFound},
+		{"scratch source", map[string]string{"source_key": scratchKey, "quote": "x"}, http.StatusBadRequest},
+		{"invalid source key", map[string]string{"source_key": "bad\x00key", "quote": "hi"}, http.StatusBadRequest},
+	} {
+		raw, _ := json.Marshal(tc.body)
+		req := httptest.NewRequest(http.MethodPost, "/api/scratch/open", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		hs.scratchH.HandleOpen(w, req)
+		if w.Code != tc.want {
+			t.Errorf("%s: status = %d, want %d", tc.name, w.Code, tc.want)
+		}
 	}
 }
 

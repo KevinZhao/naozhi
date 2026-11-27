@@ -265,60 +265,18 @@ workspaces:
 	}
 }
 
-func TestLoadNodeConfig_HTTPWithToken(t *testing.T) {
-	tmpFile := t.TempDir() + "/config.yaml"
-	os.WriteFile(tmpFile, []byte(`
-workspaces:
-  bad:
-    url: "http://10.0.0.2:8180"
-    token: "secret"
-`), 0600)
-
-	_, err := Load(tmpFile)
-	if err == nil {
-		t.Fatal("expected error for HTTP with bearer token")
-	}
-}
-
-func TestLoadNodeConfig_TrailingSlash(t *testing.T) {
-	tmpFile := t.TempDir() + "/config.yaml"
-	os.WriteFile(tmpFile, []byte(`
-workspaces:
-  bad:
-    url: "http://10.0.0.2:8180/"
-`), 0600)
-
-	_, err := Load(tmpFile)
-	if err == nil {
-		t.Fatal("expected error for trailing slash")
-	}
-}
-
-func TestLoadNodeConfig_InvalidScheme(t *testing.T) {
-	tmpFile := t.TempDir() + "/config.yaml"
-	os.WriteFile(tmpFile, []byte(`
-workspaces:
-  bad:
-    url: "ftp://10.0.0.2:8180"
-`), 0600)
-
-	_, err := Load(tmpFile)
-	if err == nil {
-		t.Fatal("expected error for non-http URL")
-	}
-}
-
-func TestLoadNodeConfig_MissingURL(t *testing.T) {
-	tmpFile := t.TempDir() + "/config.yaml"
-	os.WriteFile(tmpFile, []byte(`
-workspaces:
-  bad:
-    token: "secret"
-`), 0600)
-
-	_, err := Load(tmpFile)
-	if err == nil {
-		t.Fatal("expected error for missing URL")
+func TestLoadNodeConfig_Refusals(t *testing.T) {
+	for name, node := range map[string]string{
+		"http with bearer token": "    url: \"http://10.0.0.2:8180\"\n    token: \"secret\"\n",
+		"trailing slash":         "    url: \"http://10.0.0.2:8180/\"\n",
+		"non-http scheme":        "    url: \"ftp://10.0.0.2:8180\"\n",
+		"missing url":            "    token: \"secret\"\n",
+	} {
+		tmpFile := t.TempDir() + "/config.yaml"
+		os.WriteFile(tmpFile, []byte("workspaces:\n  bad:\n"+node), 0600)
+		if _, err := Load(tmpFile); err == nil {
+			t.Errorf("%s: Load accepted the node", name)
+		}
 	}
 }
 

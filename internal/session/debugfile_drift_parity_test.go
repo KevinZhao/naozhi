@@ -62,6 +62,11 @@ func mkClaudeDriftRouter(t *testing.T, debugDir string) *Router {
 func TestDebugFileDriftParity_NoFalseDrift(t *testing.T) {
 	debugDir := t.TempDir()
 	r := mkClaudeDriftRouter(t, debugDir)
+	// The other router-global argv inputs ride along: a drift side that drops
+	// cli.mcp_config or cli.permission_mode kills every shim the same way.
+	const mcpPath = "/data/naozhi/mcp.json"
+	r.spawn.mcpConfigFile = mcpPath
+	r.spawn.permissionMode = cli.PermissionModeAuto
 	key := "dashboard:direct:2026-09-02-151927-3-naozhi:general"
 	s := newSessionWithID(key, "sess-debugfile-1")
 	s.SetBackend("claude")
@@ -93,6 +98,12 @@ func TestDebugFileDriftParity_NoFalseDrift(t *testing.T) {
 	}
 	if driftArgs[i+1] != wantPath {
 		t.Errorf("--debug-file path = %q, want %q", driftArgs[i+1], wantPath)
+	}
+	if !slices.Contains(driftArgs, mcpPath) {
+		t.Errorf("the configured MCP path never reached the drift argv: %v", driftArgs)
+	}
+	if !slices.Contains(driftArgs, "--permission-mode") || slices.Contains(driftArgs, "--dangerously-skip-permissions") {
+		t.Errorf("auto mode did not reach the drift argv: %v", driftArgs)
 	}
 }
 

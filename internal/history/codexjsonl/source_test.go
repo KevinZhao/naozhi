@@ -27,11 +27,6 @@ func writeRollout(t *testing.T, root, sid string, lines []string) {
 	}
 }
 
-func TestSource_ImplementsInterface(t *testing.T) {
-	t.Parallel()
-	var _ history.Source = (*Source)(nil)
-}
-
 func TestSource_LoadBefore_FullRoundTrip(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

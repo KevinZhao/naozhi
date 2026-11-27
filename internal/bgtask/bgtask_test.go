@@ -123,7 +123,7 @@ func TestJudge(t *testing.T) {
 				in.Alive = true
 			}
 			in.Since = since
-			got := Judge(in)
+			got := Scan(in).At(in.Now)
 			var ids []want
 			for _, task := range got.Tasks {
 				ids = append(ids, want{task.ID, task.Kind, task.Last.Sub(since)})
@@ -144,11 +144,11 @@ func TestJudge(t *testing.T) {
 // A task's summary is the CLI's description, its ID when it has none.
 func TestJudgeSummary(t *testing.T) {
 	now := time.UnixMilli(5000)
-	got := Judge(Input{Alive: true, Now: now, Entries: []clievent.EventEntry{
+	got := Scan(Input{Alive: true, Now: now, Entries: []clievent.EventEntry{
 		{Type: clievent.KindTaskStart, TaskID: "b1", TaskType: "local_bash", Summary: "go test ./...", Time: 1000},
 		{Type: clievent.KindTaskStart, TaskID: "b2", TaskType: "local_bash", Time: 2000},
 		{Type: clievent.KindResult, Time: 3000},
-	}})
+	}}).At(now)
 	if len(got.Tasks) != 2 || got.Tasks[0].Summary != "go test ./..." || got.Tasks[1].Summary != "b2" || !got.Tasks[1].Start.Equal(time.UnixMilli(2000)) {
 		t.Fatalf("tasks = %+v", got.Tasks)
 	}

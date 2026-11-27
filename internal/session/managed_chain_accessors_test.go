@@ -24,16 +24,6 @@ func TestSnapshotPrevSessionIDs_DefensiveClone(t *testing.T) {
 	}
 }
 
-// TestSnapshotPrevSessionIDs_EmptyReturnsNil keeps the no-zero-len-alloc
-// contract.
-func TestSnapshotPrevSessionIDs_EmptyReturnsNil(t *testing.T) {
-	t.Parallel()
-	s := &ManagedSession{}
-	if got := s.SnapshotPrevSessionIDs(); got != nil {
-		t.Errorf("SnapshotPrevSessionIDs on empty = %v, want nil", got)
-	}
-}
-
 // TestReplacePrevSessionIDs_ClonesInput asserts the setter clones its
 // argument so subsequent caller mutation cannot reach into the session.
 func TestReplacePrevSessionIDs_ClonesInput(t *testing.T) {
@@ -76,15 +66,5 @@ func TestSnapshotPersistedHistory_DefensiveCopy(t *testing.T) {
 	got[0].Summary = "MUTATED"
 	if s.persistedHistory[0].Summary != "first" {
 		t.Errorf("source mutated through returned slice: %v", s.persistedHistory)
-	}
-}
-
-// TestSnapshotPersistedHistory_EmptyReturnsNil keeps the no-zero-len-alloc
-// contract.
-func TestSnapshotPersistedHistory_EmptyReturnsNil(t *testing.T) {
-	t.Parallel()
-	s := &ManagedSession{}
-	if got := s.SnapshotPersistedHistory(); got != nil {
-		t.Errorf("SnapshotPersistedHistory on empty = %v, want nil", got)
 	}
 }

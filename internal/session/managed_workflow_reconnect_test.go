@@ -37,9 +37,6 @@ type shimScript struct {
 // scripts, one per connection, and returns the router and the session.
 func workflowShim(t *testing.T, entry *storeEntry, scripts ...shimScript) (*Router, *ManagedSession) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("shim discovery needs unix PID liveness and unix sockets")
-	}
 	dir := shortTempDir(t)
 	mgr, err := shim.NewManager(shim.ManagerConfig{StateDir: dir})
 	if err != nil {

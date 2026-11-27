@@ -74,7 +74,7 @@ func TestRememberRefused(t *testing.T) {
 }
 
 func TestRememberParse(t *testing.T) {
-	for _, c := range []struct{ raw, err string }{
+	parseCases(t, []parseCase{
 		{`{"type":"remember","workspace":"w","name":"ok-1_a","text":"t"}`, ""},
 		{`{"type":"remember","workspace":"","name":"n","text":"t"}`, "workspace"},
 		{`{"type":"remember","workspace":"w","name":"../x","text":"t"}`, "name"},
@@ -82,16 +82,5 @@ func TestRememberParse(t *testing.T) {
 		{`{"type":"remember","workspace":"w","name":"n","text":" "}`, "text"},
 		{`{"type":"remember","workspace":"w","name":"n","text":"` + strings.Repeat("字", rememberTextRunes+1) + `"}`, "text"},
 		{`{"type":"remember","workspace":"w","name":"n","text":"t","kind":"x"}`, "字段"},
-	} {
-		b := Parse(block(c.raw))
-		if len(b) != 1 {
-			t.Fatalf("%s: %d blocks", c.raw, len(b))
-		}
-		switch {
-		case c.err == "" && (b[0].Err != nil || b[0].Remember == nil):
-			t.Errorf("%s: %v", c.raw, b[0].Err)
-		case c.err != "" && (b[0].Err == nil || !strings.Contains(b[0].Err.Error(), c.err)):
-			t.Errorf("%s: err %v, want one with %q", c.raw, b[0].Err, c.err)
-		}
-	}
+	})
 }

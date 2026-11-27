@@ -67,7 +67,7 @@ type Server struct {
 	sessionH   *dashsession.Handlers
 	// projectFiles serves a primary's file RPCs (NodeFiles).
 	projectFiles *dashproject.Handlers
-	// nodeAPI holds the Planner routes (node.APIRoutes) without the API
+	// nodeAPI holds the Planner routes (node.IsAPIRoute) without the API
 	// chain, for a primary's `api` calls (NodePlanner); nil when no Planner
 	// runs here. purpose is ServerOptions.Purpose.
 	nodeAPI *http.ServeMux
@@ -133,19 +133,6 @@ func (s *Server) log() *slog.Logger {
 		return s.logger
 	}
 	return slog.Default()
-}
-
-// RotateDashboardSessions invalidates every outstanding dashboard auth cookie
-// without a restart by bumping the auth generation mixed into the cookie HMAC;
-// both the HTTP cookie path and the WS upgrade path read the live MAC. Safe
-// from any goroutine (#595).
-func (s *Server) RotateDashboardSessions() {
-	if s.auth == nil {
-		return
-	}
-	s.auth.RotateCookieGen()
-	s.log().Info("dashboard auth sessions rotated; outstanding cookies invalidated",
-		"reason", "rotate_dashboard_sessions")
 }
 
 // listenTCP is the listener factory Start binds with; a package var so tests

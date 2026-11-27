@@ -110,27 +110,6 @@ func TestAttachmentGC_ReapsAttachmentDirs(t *testing.T) {
 	}
 }
 
-// TestAttachmentGC_DryRunDeletesNothing: dry-run reports work but leaves
-// files on disk.
-func TestAttachmentGC_DryRunDeletesNothing(t *testing.T) {
-	now := time.Now().UTC()
-	ws := t.TempDir()
-	p := seedOldAttachment(t, ws, "a", now)
-
-	gc := newTestGC(fakeRoots{[]string{ws}}, now)
-	gc.dryRun = true
-	rep, err := gc.Tick(context.Background())
-	if err != nil {
-		t.Fatalf("Tick: %v", err)
-	}
-	if rep.Acted != 0 {
-		t.Errorf("Acted=%d in dry-run, want 0", rep.Acted)
-	}
-	if _, err := os.Stat(p); err != nil {
-		t.Errorf("dry-run deleted payload: %v", err)
-	}
-}
-
 // TestAttachmentGC_PerRootCapAndCursor: a root with 3 reapable files and
 // per_root_cap=1 deletes 1 per tick; the round-robin cursor advances so
 // repeated ticks drain it and also visit the second root.
@@ -230,30 +209,9 @@ func TestAttachmentGC_ConfigureMetaGraceZeroDisables(t *testing.T) {
 	}
 }
 
-// TestAttachmentGC_CtxCancelDoesNotIncrementExamined: when the context
-// is cancelled before any root sweep completes, Examined must be 0.
-// A cancelled partial sweep must not count the root as examined.
-// [R20260601-CR-6]
-func TestAttachmentGC_CtxCancelDoesNotIncrementExamined(t *testing.T) {
-	now := time.Now().UTC()
-	ws := t.TempDir()
-	seedOldAttachment(t, ws, "a", now)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel before Tick
-
-	gc := newTestGC(fakeRoots{[]string{ws}}, now)
-	rep, err := gc.Tick(ctx)
-	if err == nil {
-		t.Errorf("expected ctx error, got nil")
-	}
-	if rep.Examined != 0 {
-		t.Errorf("Examined=%d after cancel, want 0 (incomplete sweep must not count)", rep.Examined)
-	}
-}
-
 // TestAttachmentGC_CtxCancelStops: a cancelled context halts the sweep
-// promptly without touching files.
+// without touching files, and the unfinished root is not counted as
+// examined [R20260601-CR-6].
 func TestAttachmentGC_CtxCancelStops(t *testing.T) {
 	now := time.Now().UTC()
 	ws := t.TempDir()
@@ -263,9 +221,12 @@ func TestAttachmentGC_CtxCancelStops(t *testing.T) {
 	cancel()
 
 	gc := newTestGC(fakeRoots{[]string{ws}}, now)
-	_, err := gc.Tick(ctx)
+	rep, err := gc.Tick(ctx)
 	if err == nil {
 		t.Errorf("expected ctx error")
+	}
+	if rep.Examined != 0 {
+		t.Errorf("Examined=%d after cancel, want 0 (incomplete sweep must not count)", rep.Examined)
 	}
 	if _, err := os.Stat(p); err != nil {
 		t.Errorf("payload deleted despite cancelled ctx: %v", err)

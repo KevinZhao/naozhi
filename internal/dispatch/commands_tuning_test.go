@@ -157,18 +157,6 @@ func TestBackendCommand_LiveSessionNeedsNew(t *testing.T) {
 	}
 }
 
-func TestHelpCommand_ListsTuningCommands(t *testing.T) {
-	t.Parallel()
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	got := runCmd(t, d, fp, "/help")
-	for _, want := range []string{"/model", "/effort", "/backend"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("/help lacks %s: %q", want, got)
-		}
-	}
-}
-
 func TestAppliedText_Modes(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{

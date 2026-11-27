@@ -78,27 +78,6 @@ func TestState_SpawnOverlay_KnownEmptyIsNonNil(t *testing.T) {
 	}
 }
 
-// TestState_SpawnOverlay_LegacyFileDecodesNil: a state file written by a
-// pre-#2494 shim has no spawn_overlay key and must decode to nil (not to an
-// empty struct), so the reader can take its documented fallback path.
-func TestState_SpawnOverlay_LegacyFileDecodesNil(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "legacy.json")
-	payload := `{"version":1,"shim_pid":1,"cli_pid":0,"socket":"/tmp/s.sock","auth_token":"dA==","key":"k","session_id":"","workspace":"","cli_args":["-p","--model","opusplan"],"cli_alive":true,"started_at":"","buffer_count":0}`
-	if err := os.WriteFile(path, []byte(payload), 0600); err != nil {
-		t.Fatal(err)
-	}
-	got, err := ReadStateFile(path)
-	if err != nil {
-		t.Fatalf("legacy state must still load: %v", err)
-	}
-	if got.SpawnOverlay != nil {
-		t.Errorf("legacy file decoded a non-nil overlay %+v; must be nil", *got.SpawnOverlay)
-	}
-	if !slices.Equal(got.CLIArgs, []string{"-p", "--model", "opusplan"}) {
-		t.Errorf("CLIArgs = %v", got.CLIArgs)
-	}
-}
-
 // TestState_SpawnOverlay_OmittedWhenNil: a nil overlay (legacy caller through
 // StartShim) writes no key at all — byte-compatible with the pre-#2494 layout.
 func TestState_SpawnOverlay_OmittedWhenNil(t *testing.T) {

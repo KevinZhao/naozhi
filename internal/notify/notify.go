@@ -82,11 +82,6 @@ const (
 // Action is an answer to a decision item.
 type Action string
 
-const (
-	ActionApprove Action = "approve"
-	ActionReject  Action = "reject"
-)
-
 // Item is one inbox entry.
 type Item struct {
 	ID    string `json:"id"`

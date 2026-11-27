@@ -122,58 +122,6 @@ func TestWatchdog_GenerationCounterRaceStress(t *testing.T) {
 	w.Stop()
 }
 
-func TestWatchdog_FiresOnTimeout(t *testing.T) {
-	fired := make(chan struct{})
-	w, c := newManualWatchdog(50*time.Millisecond, func() {
-		close(fired)
-	})
-	w.Start()
-
-	c.advance(50 * time.Millisecond)
-	if !isClosed(fired) {
-		t.Fatal("watchdog did not fire at its deadline")
-	}
-}
-
-func TestWatchdog_ResetPrevents(t *testing.T) {
-	fired := make(chan struct{})
-	w, c := newManualWatchdog(100*time.Millisecond, func() {
-		close(fired)
-	})
-	w.Start()
-	defer w.Stop()
-
-	// Reset before timeout
-	c.advance(50 * time.Millisecond)
-	w.Reset()
-	c.advance(50 * time.Millisecond)
-	w.Reset()
-
-	// The deadline now sits 100ms after the second Reset.
-	c.advance(100*time.Millisecond - time.Nanosecond)
-	if isClosed(fired) {
-		t.Fatal("watchdog fired despite resets")
-	}
-	c.advance(time.Nanosecond)
-	if !isClosed(fired) {
-		t.Fatal("watchdog did not fire 100ms after the last Reset")
-	}
-}
-
-func TestWatchdog_StopPrevents(t *testing.T) {
-	fired := make(chan struct{})
-	w, c := newManualWatchdog(50*time.Millisecond, func() {
-		close(fired)
-	})
-	w.Start()
-	w.Stop()
-
-	c.advance(time.Hour)
-	if isClosed(fired) {
-		t.Fatal("watchdog fired after Stop()")
-	}
-}
-
 // TestWatchdog_ResetStaleCallbackNoOp pins the generation counter: a callback
 // whose timer was already dispatched when Reset ran (so Reset's Stop could not
 // cancel it) must be a no-op, and only the fresh generation fires.

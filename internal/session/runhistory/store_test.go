@@ -60,24 +60,6 @@ func TestStore_Persistence_ColdReadAfterRestart(t *testing.T) {
 	}
 }
 
-func TestStore_NoIndexJSON(t *testing.T) {
-	dir := t.TempDir()
-	const key = "weixin:p2p:bob"
-	st := NewStore(dir, 0, 0)
-	st.Append(mkRun(t, key, 50, time.Now(), OutcomeCompleted))
-
-	root := dir
-	if _, err := os.Stat(filepath.Join(root, "index.json")); !os.IsNotExist(err) {
-		t.Errorf("index.json must not be written (cron-parity), stat err=%v", err)
-	}
-	// exactly one per-run file under the hashed dir
-	hash := dirHashFor(key)
-	ents, _ := os.ReadDir(filepath.Join(root, hash))
-	if len(ents) != 1 {
-		t.Errorf("want 1 run file, got %d", len(ents))
-	}
-}
-
 func TestStore_KeepCountTrim_EvictsDisk(t *testing.T) {
 	dir := t.TempDir()
 	const key = "feishu:p2p:carol"

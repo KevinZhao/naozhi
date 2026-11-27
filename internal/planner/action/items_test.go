@@ -337,8 +337,8 @@ func TestFrontItemFailures(t *testing.T) {
 }
 
 // A turn a watched session's turn end started files an item (the Planner's
-// own); one whose session read outside content does not, nor does a scout
-// run's turn.
+// own); one whose session read outside content does not (a scout run's
+// turn: TestFrontRefused).
 func TestFrontItemTurnSources(t *testing.T) {
 	const item = `{"type":"front","item":{"text":"登录页的空状态还没做","source":"` + dashKey + `"}}`
 	w := newWatchTurn(t, "")
@@ -360,21 +360,11 @@ func TestFrontItemTurnSources(t *testing.T) {
 	if len(w.g.notes) != 2 || !strings.Contains(w.g.notes[0], "不能改工作线台账：「登录页的空状态还没做」没有记") || !strings.Contains(w.g.notes[1], "「未了事项」没有记") {
 		t.Errorf("conversation lines = %q", w.g.notes)
 	}
-
-	r, g, _, _, _ := newRunner(t)
-	userTurn(r, said)
-	s = ledger(t, r)
-	r.cfg.Outside = func() string { return "巡检" }
-	r.Result(r.cfg.Planner, block(item))
-	r.handle(<-r.ch)
-	if len(s.Items()) != 0 || len(g.refused) != 1 || !strings.Contains(g.refused[0], "不能改工作线台账") {
-		t.Errorf("a scout turn: filed %+v, receipts %q", s.Items(), g.refused)
-	}
 }
 
 func TestFrontItemParse(t *testing.T) {
 	long := strings.Repeat("字", front.ItemRunes+1)
-	for _, c := range []struct{ raw, err string }{
+	parseCases(t, []parseCase{
 		{`{"type":"front","item":{"text":"迁完剩下的调用点"}}`, ""},
 		{`{"type":"front","id":"gateway-refactor","item":{"text":"x","workspace":"ws_ab12cd34","source":"task:ab12"},"done":["i7k2m9qa"]}`, ""},
 		{`{"type":"front","done":["i7k2m9qa"," i0c4x8zn "]}`, ""},
@@ -392,18 +382,7 @@ func TestFrontItemParse(t *testing.T) {
 		{`{"type":"front","done":["gateway-refactor"]}`, "done 里要写未了事项的 id"},
 		{`{"type":"front","done":["i7k2m9qa","i7k2m9qb","i7k2m9qc","i7k2m9qd","i7k2m9qe","i7k2m9qf","i7k2m9qg","i7k2m9qh","i7k2m9qi","i7k2m9qj","i7k2m9qk"]}`, "最多 10 个"},
 		{`{"type":"front","done":"i7k2m9qa"}`, "字段"},
-	} {
-		b := Parse(block(c.raw))
-		if len(b) != 1 {
-			t.Fatalf("%s: %d blocks", c.raw, len(b))
-		}
-		switch {
-		case c.err == "" && (b[0].Err != nil || b[0].Front == nil):
-			t.Errorf("%s: %v", c.raw, b[0].Err)
-		case c.err != "" && (b[0].Err == nil || !strings.Contains(b[0].Err.Error(), c.err)):
-			t.Errorf("%s: err %v, want one with %q", c.raw, b[0].Err, c.err)
-		}
-	}
+	})
 	if b := Parse(block(`{"type":"front","done":[" i0c4x8zn "]}`))[0]; b.Front == nil || b.Front.Done[0] != "i0c4x8zn" {
 		t.Errorf("done not trimmed: %+v", b.Front)
 	}

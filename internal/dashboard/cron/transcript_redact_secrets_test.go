@@ -11,81 +11,37 @@ import (
 	"time"
 )
 
-// TestTranscript_RedactsSecretsInToolResult verifies that a sk-ant-api03-…
-// token embedded in a tool_result Output is replaced with [REDACTED] before
-// it reaches the wire response (R20260603-SEC-4).
-func TestTranscript_RedactsSecretsInToolResult(t *testing.T) {
+// TestTranscript_RedactsSecrets verifies each wire field a secret can reach
+// — tool_result Output (R20260603-SEC-4), assistant Text (-SEC-8), user Text
+// (-SEC-9) and the raw tool_use Input (R20260607-SEC-8 / #1914; an unknown
+// field name so the Summary one-liner does not carry it) — is redacted.
+func TestTranscript_RedactsSecrets(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339Nano)
-	secret := "sk-ant-api03-" + strings.Repeat("A", 40)
-	lines := []string{
-		`{"type":"user","timestamp":"` + now + `","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"output contains ` + secret + ` here","is_error":false}]}}`,
+	cases := []struct {
+		name, secret, line string
+	}{
+		{"tool_result", "sk-ant-api03-" + strings.Repeat("A", 40),
+			`{"type":"user","timestamp":"` + now + `","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"output contains SECRET here","is_error":false}]}}`},
+		{"assistant_text", "ghp_" + strings.Repeat("B", 20),
+			`{"type":"assistant","timestamp":"` + now + `","message":{"role":"assistant","content":[{"type":"text","text":"here is SECRET in my reply"}],"usage":{"input_tokens":1,"output_tokens":1}}}`},
+		{"user_text", "AKIA" + strings.Repeat("C", 20),
+			`{"type":"user","timestamp":"` + now + `","message":{"role":"user","content":"my key is SECRET done"}}`},
+		{"tool_use_input", "sk-ant-api03-" + strings.Repeat("F", 40),
+			`{"type":"assistant","timestamp":"` + now + `","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_9","name":"CustomTool","input":{"apiKey":"SECRET"}}],"usage":{"input_tokens":1,"output_tokens":1}}}`},
 	}
-	h, jobID, runID, _ := fixtureRunWithJSONL(t, lines)
-
-	w := callTranscript(h, jobID, runID)
-	body := w.Body.String()
-
-	if strings.Contains(body, secret) {
-		t.Errorf("tool_result secret leaked into wire response (R20260603-SEC-4): found %q in body", secret)
-	}
-	if !strings.Contains(body, "[REDACTED]") {
-		t.Errorf("tool_result: expected [REDACTED] marker in body, got: %s", body)
-	}
-
-	var resp transcriptResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	for _, tr := range resp.Turns {
-		if tr.Kind == "tool_result" && strings.Contains(tr.Output, secret) {
-			t.Errorf("tool_result turn Output contains raw secret: %q", tr.Output)
-		}
-	}
-}
-
-// TestTranscript_RedactsSecretsInAssistantText verifies that a ghp_… token
-// embedded in an assistant text block is replaced with [REDACTED] before the
-// wire response (R20260603-SEC-8).
-func TestTranscript_RedactsSecretsInAssistantText(t *testing.T) {
-	t.Parallel()
-	now := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339Nano)
-	secret := "ghp_" + strings.Repeat("B", 20)
-	lines := []string{
-		`{"type":"assistant","timestamp":"` + now + `","message":{"role":"assistant","content":[{"type":"text","text":"here is ` + secret + ` in my reply"}],"usage":{"input_tokens":1,"output_tokens":1}}}`,
-	}
-	h, jobID, runID, _ := fixtureRunWithJSONL(t, lines)
-
-	w := callTranscript(h, jobID, runID)
-	body := w.Body.String()
-
-	if strings.Contains(body, secret) {
-		t.Errorf("assistant text secret leaked into wire response (R20260603-SEC-8): found %q in body", secret)
-	}
-	if !strings.Contains(body, "[REDACTED]") {
-		t.Errorf("assistant text: expected [REDACTED] marker in body, got: %s", body)
-	}
-}
-
-// TestTranscript_RedactsSecretsInUserText verifies that a secret in a plain
-// user text message is redacted before the wire response (R20260603-SEC-9).
-func TestTranscript_RedactsSecretsInUserText(t *testing.T) {
-	t.Parallel()
-	now := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339Nano)
-	secret := "AKIA" + strings.Repeat("C", 20)
-	lines := []string{
-		`{"type":"user","timestamp":"` + now + `","message":{"role":"user","content":"my key is ` + secret + ` done"}}`,
-	}
-	h, jobID, runID, _ := fixtureRunWithJSONL(t, lines)
-
-	w := callTranscript(h, jobID, runID)
-	body := w.Body.String()
-
-	if strings.Contains(body, secret) {
-		t.Errorf("user text secret leaked into wire response (R20260603-SEC-9): found %q in body", secret)
-	}
-	if !strings.Contains(body, "[REDACTED]") {
-		t.Errorf("user text: expected [REDACTED] marker in body, got: %s", body)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h, jobID, runID, _ := fixtureRunWithJSONL(t, []string{strings.ReplaceAll(tc.line, "SECRET", tc.secret)})
+			body := callTranscript(h, jobID, runID).Body.String()
+			if strings.Contains(body, tc.secret) {
+				t.Errorf("secret leaked into wire response: %s", body)
+			}
+			if !strings.Contains(body, "[REDACTED]") {
+				t.Errorf("expected [REDACTED] marker in body, got: %s", body)
+			}
+		})
 	}
 }
 
@@ -114,43 +70,6 @@ func TestTranscript_RedactsSecretsInSummariseToolInput(t *testing.T) {
 	}
 	if !strings.Contains(got2, "[REDACTED]") {
 		t.Errorf("summariseToolInput fallback path: expected [REDACTED], got: %q", got2)
-	}
-}
-
-// TestTranscript_RedactsSecretsInToolUseInput verifies that a secret embedded
-// in the raw tool_use Input JSON is redacted before it reaches the wire — the
-// Summary one-liner was already redacted but the full Input RawMessage went out
-// verbatim (R20260607-SEC-8 / #1914).
-func TestTranscript_RedactsSecretsInToolUseInput(t *testing.T) {
-	t.Parallel()
-	now := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339Nano)
-	secret := "sk-ant-api03-" + strings.Repeat("F", 40)
-	// Use an unrecognised field name so summariseToolInput's priority-key path
-	// does NOT surface it — the secret can then only reach the wire through the
-	// raw Input field, isolating the fix under test.
-	lines := []string{
-		`{"type":"assistant","timestamp":"` + now + `","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_9","name":"CustomTool","input":{"apiKey":"` + secret + `"}}],"usage":{"input_tokens":1,"output_tokens":1}}}`,
-	}
-	h, jobID, runID, _ := fixtureRunWithJSONL(t, lines)
-
-	w := callTranscript(h, jobID, runID)
-	body := w.Body.String()
-
-	if strings.Contains(body, secret) {
-		t.Errorf("tool_use Input secret leaked into wire response (R20260607-SEC-8): found %q in body", secret)
-	}
-	if !strings.Contains(body, "[REDACTED]") {
-		t.Errorf("tool_use Input: expected [REDACTED] marker in body, got: %s", body)
-	}
-
-	var resp transcriptResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	for _, tr := range resp.Turns {
-		if tr.Kind == "tool_use" && strings.Contains(string(tr.Input), secret) {
-			t.Errorf("tool_use turn Input contains raw secret: %q", string(tr.Input))
-		}
 	}
 }
 

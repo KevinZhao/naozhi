@@ -1,7 +1,6 @@
 package system
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -32,26 +31,5 @@ func TestHandleDaemons_DisabledReturnsEmptyArray(t *testing.T) {
 	body := strings.TrimSpace(w.Body.String())
 	if body != "[]" {
 		t.Errorf("body = %q, want %q", body, "[]")
-	}
-}
-
-// TestHandleDaemons_JSONShape sanity-checks the top-level shape: the response
-// is a JSON array (empty in unconfigured tests). A real Manager is exercised
-// by the sysession package tests; this only locks the HTTP-layer contract.
-func TestHandleDaemons_JSONShape(t *testing.T) {
-	t.Parallel()
-	h := newDaemonHandlers()
-
-	r := httptest.NewRequest(http.MethodGet, "/api/system/daemons", nil)
-	w := httptest.NewRecorder()
-	h.HandleDaemons(w, r)
-
-	var got []map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
-		t.Fatalf("decode body: %v; body=%q", err, w.Body.String())
-	}
-	// Disabled Manager → empty list.
-	if len(got) != 0 {
-		t.Errorf("disabled handler: expected empty list, got %v", got)
 	}
 }

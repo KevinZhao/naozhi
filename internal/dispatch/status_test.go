@@ -8,130 +8,51 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
-func TestFormatEventLine_Thinking(t *testing.T) {
+// formatEventLine's tool_use arm delegates to formatToolUse, whose per-tool
+// rendering TestFormatToolUse covers; one tool row here pins the delegation.
+func TestFormatEventLine(t *testing.T) {
 	t.Parallel()
-	ev := clievent.Event{
-		Type:    "assistant",
-		Message: &clievent.AssistantMessage{Content: []clievent.ContentBlock{{Type: "thinking", Text: "Let me analyze the code structure"}}},
+	block := func(b clievent.ContentBlock) clievent.Event {
+		return clievent.Event{Type: "assistant", Message: &clievent.AssistantMessage{Content: []clievent.ContentBlock{b}}}
 	}
-	got := formatEventLine(ev)
-	if !strings.HasPrefix(got, "💭") {
-		t.Errorf("expected thinking prefix, got %q", got)
-	}
-	if !strings.Contains(got, "analyze") {
-		t.Errorf("expected thinking summary, got %q", got)
+	readInput, _ := json.Marshal(map[string]string{"file_path": "/home/user/project/src/main.go"})
+	for _, tc := range []struct {
+		name string
+		ev   clievent.Event
+		want string
+	}{
+		{"thinking", block(clievent.ContentBlock{Type: "thinking", Text: "Let me analyze"}), "💭 Let me analyze"},
+		{"empty thinking", block(clievent.ContentBlock{Type: "thinking"}), ""},
+		{"tool use", block(clievent.ContentBlock{Type: "tool_use", Name: "Read", Input: readInput}), "📖 src/main.go"},
+		{"no message", clievent.Event{Type: "assistant"}, ""},
+	} {
+		if got := formatEventLine(tc.ev); got != tc.want {
+			t.Errorf("%s: formatEventLine = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 
-func TestFormatEventLine_ThinkingEmpty(t *testing.T) {
+func TestAppendStatusLine(t *testing.T) {
 	t.Parallel()
-	ev := clievent.Event{
-		Type:    "assistant",
-		Message: &clievent.AssistantMessage{Content: []clievent.ContentBlock{{Type: "thinking", Text: ""}}},
+	for _, tc := range []struct {
+		in   []string
+		want []string
+	}{
+		{[]string{"🔧 Read", "🔧 Edit"}, []string{"🔧 Read", "🔧 Edit"}},
+		// consecutive thinking lines collapse to the latest
+		{[]string{"💭 first", "💭 second"}, []string{"💭 second"}},
+		{[]string{"💭 a", "🔧 Read", "💭 b"}, []string{"💭 a", "🔧 Read", "💭 b"}},
+	} {
+		var lines []string
+		for _, l := range tc.in {
+			lines = appendStatusLine(lines, l)
+		}
+		if strings.Join(lines, "\n") != strings.Join(tc.want, "\n") {
+			t.Errorf("appendStatusLine(%q) = %q, want %q", tc.in, lines, tc.want)
+		}
 	}
-	got := formatEventLine(ev)
-	if got != "" {
-		t.Errorf("expected empty for empty thinking, got %q", got)
-	}
-}
-
-func TestFormatEventLine_ToolUse_Read(t *testing.T) {
-	t.Parallel()
-	input, _ := json.Marshal(map[string]string{"file_path": "/home/user/project/src/main.go"})
-	ev := clievent.Event{
-		Type:    "assistant",
-		Message: &clievent.AssistantMessage{Content: []clievent.ContentBlock{{Type: "tool_use", Name: "Read", Input: input}}},
-	}
-	got := formatEventLine(ev)
-	if got != "📖 src/main.go" {
-		t.Errorf("got %q, want '📖 src/main.go'", got)
-	}
-}
-
-func TestFormatEventLine_ToolUse_Bash(t *testing.T) {
-	t.Parallel()
-	input, _ := json.Marshal(map[string]string{"command": "go test ./..."})
-	ev := clievent.Event{
-		Type:    "assistant",
-		Message: &clievent.AssistantMessage{Content: []clievent.ContentBlock{{Type: "tool_use", Name: "Bash", Input: input}}},
-	}
-	got := formatEventLine(ev)
-	if got != "⚡ go test ./..." {
-		t.Errorf("got %q", got)
-	}
-}
-
-func TestFormatEventLine_ToolUse_Agent(t *testing.T) {
-	t.Parallel()
-	input, _ := json.Marshal(map[string]string{"description": "review code changes"})
-	ev := clievent.Event{
-		Type:    "assistant",
-		Message: &clievent.AssistantMessage{Content: []clievent.ContentBlock{{Type: "tool_use", Name: "Agent", Input: input}}},
-	}
-	got := formatEventLine(ev)
-	if got != "🤖 review code changes" {
-		t.Errorf("got %q", got)
-	}
-}
-
-func TestFormatEventLine_ToolUse_Unknown(t *testing.T) {
-	t.Parallel()
-	ev := clievent.Event{
-		Type:    "assistant",
-		Message: &clievent.AssistantMessage{Content: []clievent.ContentBlock{{Type: "tool_use", Name: "CustomTool"}}},
-	}
-	got := formatEventLine(ev)
-	if got != "🔧 CustomTool" {
-		t.Errorf("got %q", got)
-	}
-}
-
-func TestFormatEventLine_NoMessage(t *testing.T) {
-	t.Parallel()
-	ev := clievent.Event{Type: "assistant"}
-	if got := formatEventLine(ev); got != "" {
-		t.Errorf("expected empty, got %q", got)
-	}
-}
-
-func TestAppendStatusLine_Basic(t *testing.T) {
-	t.Parallel()
 	var lines []string
-	lines = appendStatusLine(lines, "🔧 Read")
-	lines = appendStatusLine(lines, "🔧 Edit")
-	if len(lines) != 2 {
-		t.Fatalf("len = %d, want 2", len(lines))
-	}
-}
-
-func TestAppendStatusLine_CollapseThinking(t *testing.T) {
-	t.Parallel()
-	var lines []string
-	lines = appendStatusLine(lines, "💭 first thought")
-	lines = appendStatusLine(lines, "💭 second thought")
-	if len(lines) != 1 {
-		t.Fatalf("len = %d, want 1 (thinking collapsed)", len(lines))
-	}
-	if lines[0] != "💭 second thought" {
-		t.Errorf("got %q, want second thought", lines[0])
-	}
-}
-
-func TestAppendStatusLine_ThinkingThenTool(t *testing.T) {
-	t.Parallel()
-	var lines []string
-	lines = appendStatusLine(lines, "💭 thinking")
-	lines = appendStatusLine(lines, "🔧 Read")
-	lines = appendStatusLine(lines, "💭 more thinking")
-	if len(lines) != 3 {
-		t.Fatalf("len = %d, want 3", len(lines))
-	}
-}
-
-func TestAppendStatusLine_MaxLines(t *testing.T) {
-	t.Parallel()
-	var lines []string
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		lines = appendStatusLine(lines, "🔧 tool")
 	}
 	if len(lines) > maxStatusLines {

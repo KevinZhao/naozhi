@@ -21,7 +21,7 @@ import (
 // renamed or moved (a new memory goes through the Planner's remember). A
 // write is taken only from a request that reached this node's listener
 // directly from loopback (directLoopback, D126 decision B); the routes the
-// reverse-node `api` call reaches are the GETs only (node.APIRoutes).
+// reverse-node `api` call reaches are the GETs only (node.IsAPIRoute).
 
 // maxPutBody caps PUT's JSON body: the text at maxMemoryFileBytes, escaped.
 const maxPutBody = 2 << 20

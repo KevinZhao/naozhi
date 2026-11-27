@@ -211,7 +211,7 @@ func parseJSONL(path string) ([]clievent.EventEntry, error) {
 	// bufio.Reader, not bufio.Scanner: the CLI inlines uploaded images as
 	// base64 on a single NDJSON line (5-10 MB), and Scanner would abort the
 	// whole file with "token too long". ReadJSONLLine skips just that line;
-	// its 4 MB threshold matches parseTail's maxCarryBytes so both readers
+	// its 4 MB threshold matches parseTailOpts's maxCarryBytes so both readers
 	// drop the same lines.
 	r := bufio.NewReaderSize(f, 64*1024)
 	for {
@@ -231,7 +231,7 @@ func parseJSONL(path string) ([]clievent.EventEntry, error) {
 }
 
 // maxJSONLLineBytes caps a JSONL line's content length (excluding '\n')
-// before history.ReadJSONLLine skips it. Equal to parseTail's maxCarryBytes so the
+// before history.ReadJSONLLine skips it. Equal to parseTailOpts's maxCarryBytes so the
 // forward and reverse readers drop exactly the same oversized lines.
 const maxJSONLLineBytes = 4 * 1024 * 1024
 

@@ -53,25 +53,3 @@ func TestSessionRole_String(t *testing.T) {
 		}
 	}
 }
-
-// TestManagedSession_Role drives Role() through ManagedSession to lock
-// in that the method respects the live session's key (i.e. the field
-// it actually reads is .key, not e.g. an unset .role-like field).
-func TestManagedSession_Role(t *testing.T) {
-	cases := []struct {
-		key  string
-		want SessionRole
-	}{
-		{"cron:nightly", RoleCron},
-		{"scratch:s1", RoleScratch},
-		{"sys:autotitler", RoleSys},
-		{"project:p:planner", RoleProject},
-		{"feishu:c2c:U:general", RoleIM},
-	}
-	for _, tc := range cases {
-		s := &ManagedSession{key: tc.key}
-		if got := s.Role(); got != tc.want {
-			t.Errorf("Role() with key %q = %v, want %v", tc.key, got, tc.want)
-		}
-	}
-}

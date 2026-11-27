@@ -151,75 +151,51 @@ func TestAdoption_LiveRunCompletesAcrossRestart(t *testing.T) {
 	}
 }
 
-// TestAdoption_CLIDiesWithoutResult: the adopted turn ends with cli_exited —
-// the record is Phase 0's interrupted, with the marker cleaned up.
-func TestAdoption_CLIDiesWithoutResult(t *testing.T) {
+// TestAdoption_NotAdoptedRecordsCanceled: every way a marked run does not end
+// as an adopted success is a canceled record whose class says why.
+//   - cli_exited: the adopted turn ended without a result.
+//   - drift: startup shut the shim down for argv drift — the operator's config
+//     edit ended the run, not the restart (#2749).
+//   - attempt bound: a marker that already burned its adoption attempt is not
+//     adopted again, even if the router says live — no crash loop.
+//   - no adopter: a router without the capability records interrupted.
+func TestAdoption_NotAdoptedRecordsCanceled(t *testing.T) {
 	t.Parallel()
-	router := &adoptingRouter{verdicts: map[string]AdoptVerdict{}, runs: map[string]*fakeInFlightRun{}}
-	s, jobID, runID, _ := seedMarkedRun(t, router, 0)
-	key := "cron:" + jobID
-	run := &fakeInFlightRun{outcome: AdoptedRunOutcome{Completed: false}, ready: make(chan struct{})}
-	router.verdicts[key] = AdoptLive
-	router.runs[key] = run
+	for _, tc := range []struct {
+		name     string
+		adopter  bool
+		verdict  AdoptVerdict
+		run      *fakeInFlightRun
+		attempts int
+		want     ErrorClass
+	}{
+		{"cli_exited", true, AdoptLive, &fakeInFlightRun{outcome: AdoptedRunOutcome{Completed: false}, ready: make(chan struct{})}, 0, ErrClassInterrupted},
+		{"drift", true, AdoptDriftShutdown, nil, 0, ErrClassConfigDrift},
+		{"attempt bound", true, AdoptLive, &fakeInFlightRun{ready: make(chan struct{})}, maxAdoptAttempts, ErrClassInterrupted},
+		{"no adopter", false, 0, nil, 0, ErrClassInterrupted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var router SessionRouter = &fakeRouter{}
+			ar := &adoptingRouter{verdicts: map[string]AdoptVerdict{}, runs: map[string]*fakeInFlightRun{}}
+			if tc.adopter {
+				router = ar
+			}
+			s, jobID, runID, _ := seedMarkedRun(t, router, tc.attempts)
+			ar.verdicts["cron:"+jobID] = tc.verdict
+			ar.runs["cron:"+jobID] = tc.run
 
-	s.reconcileRunInflight()
-	close(run.ready)
+			s.reconcileRunInflight()
+			if tc.verdict == AdoptLive && tc.attempts == 0 {
+				close(tc.run.ready)
+			}
 
-	got := waitRun(t, s, jobID, runID)
-	if got.State != RunStateCanceled || got.ErrorClass != ErrClassInterrupted {
-		t.Errorf("got (%s, %s), want (canceled, interrupted)", got.State, got.ErrorClass)
-	}
-	s.gcWG.Wait()
-}
-
-// TestAdoption_DriftShutdownRecordsConfigDrift (#2749): the shim survived but
-// startup shut it down for argv drift — the operator's own config edit ended
-// the run, and the record must say config_drift, not blame the restart.
-func TestAdoption_DriftShutdownRecordsConfigDrift(t *testing.T) {
-	t.Parallel()
-	router := &adoptingRouter{verdicts: map[string]AdoptVerdict{}, runs: map[string]*fakeInFlightRun{}}
-	s, jobID, runID, _ := seedMarkedRun(t, router, 0)
-	router.verdicts["cron:"+jobID] = AdoptDriftShutdown
-
-	s.reconcileRunInflight()
-
-	got := waitRun(t, s, jobID, runID)
-	if got.State != RunStateCanceled || got.ErrorClass != ErrClassConfigDrift {
-		t.Errorf("got (%s, %s), want (canceled, config_drift)", got.State, got.ErrorClass)
-	}
-}
-
-// TestAdoption_AttemptBoundStopsRetrying pins the crash-loop bound: a marker
-// that already burned its adoption attempt is recorded interrupted, NOT
-// adopted again — the worst case is one extra boot (#2751's class), never a
-// loop with no exit.
-func TestAdoption_AttemptBoundStopsRetrying(t *testing.T) {
-	t.Parallel()
-	router := &adoptingRouter{verdicts: map[string]AdoptVerdict{}, runs: map[string]*fakeInFlightRun{}}
-	s, jobID, runID, _ := seedMarkedRun(t, router, maxAdoptAttempts)
-	key := "cron:" + jobID
-	// The router still says live — the bound must win anyway.
-	router.verdicts[key] = AdoptLive
-	router.runs[key] = &fakeInFlightRun{ready: make(chan struct{})}
-
-	s.reconcileRunInflight()
-
-	got := waitRun(t, s, jobID, runID)
-	if got.State != RunStateCanceled || got.ErrorClass != ErrClassInterrupted {
-		t.Errorf("got (%s, %s), want (canceled, interrupted) without a second adoption", got.State, got.ErrorClass)
-	}
-}
-
-// TestAdoption_NoAdopterKeepsPhase0Behaviour: a router without the capability
-// (every cron test fake, and any deployment predating the wireup change)
-// degrades to exactly the old reconcile.
-func TestAdoption_NoAdopterKeepsPhase0Behaviour(t *testing.T) {
-	t.Parallel()
-	s, jobID, runID, _ := seedMarkedRun(t, &fakeRouter{}, 0)
-	s.reconcileRunInflight()
-	got := waitRun(t, s, jobID, runID)
-	if got.State != RunStateCanceled || got.ErrorClass != ErrClassInterrupted {
-		t.Errorf("got (%s, %s), want the Phase 0 interrupted record", got.State, got.ErrorClass)
+			got := waitRun(t, s, jobID, runID)
+			if got.State != RunStateCanceled || got.ErrorClass != tc.want {
+				t.Errorf("got (%s, %s), want (canceled, %s)", got.State, got.ErrorClass, tc.want)
+			}
+			s.gcWG.Wait()
+		})
 	}
 }
 

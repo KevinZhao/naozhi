@@ -84,19 +84,3 @@ func TestCronSummaryToView_PreservesOrderAndFields(t *testing.T) {
 		t.Errorf("running run EndedAt = %d, want 0 (zero time → omitted)", out[2].EndedAt)
 	}
 }
-
-// TestFormatTZOffset_MatchesStdlib verifies the helper agrees with time.Zone()
-// for a live half-hour zone, so locale database changes cannot regress the
-// output format without a test failure.
-func TestFormatTZOffset_MatchesStdlib(t *testing.T) {
-	loc, err := time.LoadLocation("Asia/Kolkata")
-	if err != nil {
-		t.Skipf("zone unavailable: %v", err)
-	}
-	_, offset := time.Now().In(loc).Zone()
-	got := formatTZOffset(loc.String(), offset)
-	want := "Asia/Kolkata (UTC+05:30)"
-	if got != want {
-		t.Fatalf("got %q, want %q", got, want)
-	}
-}

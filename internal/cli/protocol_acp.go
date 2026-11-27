@@ -532,13 +532,10 @@ type acpSetModelParams struct {
 func (p *ACPProtocol) SupportsPriority() bool { return false }
 func (p *ACPProtocol) SupportsReplay() bool   { return false }
 
-// Capabilities returns the hard-coded Caps for ACP JSON-RPC. SoftInterrupt=true:
-// session/cancel is a safe soft cancel once the handshake completed (before
-// that WriteInterrupt returns clierr.ErrInterruptUnsupported → SIGINT fallback).
-// EffortTier=true: BuildArgs forwards SpawnOptions.Effort as `--effort`.
+// Capabilities returns the hard-coded Caps for ACP JSON-RPC. EffortTier=true:
+// BuildArgs forwards SpawnOptions.Effort as `--effort`.
 func (p *ACPProtocol) Capabilities() Caps {
-	return Caps{Replay: false, Priority: false, SoftInterrupt: true, StreamJSON: false,
-		EffortTier: true}
+	return Caps{EffortTier: true}
 }
 
 // ReadEventInto is the allocation-aware variant of ReadEvent (#1676). ACP's

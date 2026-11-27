@@ -2,8 +2,6 @@ package scout
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -64,10 +62,7 @@ func TestBriefDue(t *testing.T) {
 // Planner is off.
 func TestBriefRun(t *testing.T) {
 	root := t.TempDir()
-	mcp := filepath.Join(root, "mcp.json")
-	if err := os.WriteFile(mcp, []byte(`{"mcpServers":{"slack-mcp":{"command":"s"},"aws-outlook-mcp":{"command":"o"}}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	mcp := writeMCP(t, root, `{"mcpServers":{"slack-mcp":{"command":"s"},"aws-outlook-mcp":{"command":"o"}}}`)
 	now := time.Date(2026, 11, 2, 9, 46, 0, 0, time.Local)
 	start := time.Date(2026, 11, 2, 10, 0, 0, 0, time.Local)
 	st := store{dir: datadir.FromRoot(root).PlannerScoutRoot()}

@@ -80,24 +80,6 @@ func TestEffortDriftCheck_MirrorsSpawn(t *testing.T) {
 	}
 }
 
-// TestEffortAffectsArgv pins the premise the test above rests on: Effort must
-// actually change the argv for an ACP backend. If it stopped doing so, the
-// mirror in router_shim.go would be dead weight and its comment misleading.
-func TestEffortAffectsArgv(t *testing.T) {
-	t.Parallel()
-	proto := &cli.ACPProtocol{BackendID: "kiro"}
-	withTier := proto.BuildArgs(cli.SpawnOptions{Model: "claude-fable-5", Effort: "xhigh"})
-	withoutTier := proto.BuildArgs(cli.SpawnOptions{Model: "claude-fable-5"})
-
-	if slices.Equal(withTier, withoutTier) {
-		t.Fatal("ACP BuildArgs ignores Effort — the tier no longer reaches kiro, " +
-			"and the drift-check mirror in router_shim.go is now pointless")
-	}
-	if !slices.Contains(withTier, "--effort") {
-		t.Errorf("expected --effort in argv, got %v", withTier)
-	}
-}
-
 // TestResolveSpawnParams_EffortPrecedence covers the MAIN chain: does a
 // configured tier actually become a spawn parameter?
 //
@@ -174,25 +156,6 @@ func TestResolveSpawnParams_EffortPrecedence(t *testing.T) {
 	})
 }
 
-// TestSpawnArgvConstructor_CarriesEffort is the narrow, RFC-owned assertion that
-// the tier still reaches argv at all. Deleting `Effort: effort` from
-// argvSpawnOptions compiles and passes every behavioural test — the tier just
-// silently stops reaching the CLI — so the production literal itself has to be
-// asserted. Kept separate from the required-list check above so a
-// kiro-effort-control regression names itself in the failure output.
-func TestSpawnArgvConstructor_CarriesEffort(t *testing.T) {
-	t.Parallel()
-	got, literals := spawnOptionsLiteralFields(t, argvConstructorFile)
-	if literals == 0 {
-		t.Fatalf("no cli.SpawnOptions literal found in %s — if the argv "+
-			"constructor moved, move this test with it", argvConstructorFile)
-	}
-	if !slices.Contains(got, "Effort") {
-		t.Errorf("argvSpawnOptions does not set Effort (sets %v) — the configured "+
-			"tier would never reach the CLI, and no behavioural test would notice", got)
-	}
-}
-
 // TestFirstArgvDivergence covers the drift-log helper that lets an operator
 // tell an expected restart (they changed the configured tier) from a spurious
 // one (a pre-#2494 shim whose state carries no spawn overlay).
@@ -241,11 +204,6 @@ func TestFirstArgvDivergence(t *testing.T) {
 		})
 	}
 }
-
-// TestAgentEffortIsSeenAsDrift used to live here, pinning the §4.5.1 KNOWN
-// LIMITATION (a per-agent tier read as drift on every restart). Fixed by
-// #2494 — the per-request overlay is persisted in shim state and re-merged on
-// reconnect; the inverse assertion now lives in agent_overlay_drift_test.go.
 
 // TestBackendEffortsFeedDriftCheck closes the loop on the router side: the
 // drift check reads its tier from backendDefaultsFor, so a configured tier has

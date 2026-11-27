@@ -171,6 +171,12 @@ func TestMimeFromExtOnly(t *testing.T) {
 		{"pdf not short-circuited", "doc.pdf", "", false},
 		// Unknown extension — fall through.
 		{"unknown ext", "blob.xyz", "", false},
+		// .html/.htm must not short-circuit to text/html without a sniff
+		// (R244-SEC-P2-2); .env must not map to text/plain, or preview would
+		// echo secrets (R225-SEC-5).
+		{"html not short-circuited", "index.html", "", false},
+		{"htm not short-circuited", "index.htm", "", false},
+		{"dotenv not short-circuited", ".env", "", false},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -182,33 +188,6 @@ func TestMimeFromExtOnly(t *testing.T) {
 					tc.path, got, ok, tc.wantMime, tc.wantOK)
 			}
 		})
-	}
-}
-
-// TestPreviewableByExt_DoesNotIncludeHTML locks R244-SEC-P2-2: .html / .htm
-// files must NOT be in previewableByExt. mimeFromExtOnly's batch fast path
-// would otherwise return text/html without a byte-sniff confirmation; that
-// short-circuit makes the existing servePreview / serveRaw HTML-block gates
-// brittle (a new render handler bypassing them would silently inherit
-// text/html). detectMime still pins .html → text/html for the dedicated
-// serveRender path, defense-in-depth without the trust short-circuit.
-func TestPreviewableByExt_DoesNotIncludeHTML(t *testing.T) {
-	for _, ext := range []string{".html", ".htm"} {
-		if mime, ok := previewableByExt[ext]; ok {
-			t.Errorf("previewableByExt[%q] = %q, must NOT be in allowlist (R244-SEC-P2-2)", ext, mime)
-		}
-	}
-}
-
-// TestPreviewableByExt_DoesNotIncludeDotEnv locks R225-SEC-5: .env files
-// must NOT be in the previewableByExt allowlist. Mapping .env → text/plain
-// would let any authenticated dashboard user fetch ?path=.env&mode=preview
-// and have API keys / database URLs / OAuth secrets echoed back as JSON.
-// Falling through to DetectContentType gives application/octet-stream which
-// servePreview's MIME guard rejects.
-func TestPreviewableByExt_DoesNotIncludeDotEnv(t *testing.T) {
-	if mime, ok := previewableByExt[".env"]; ok {
-		t.Errorf("previewableByExt[%q] = %q, must NOT be in allowlist (R225-SEC-5)", ".env", mime)
 	}
 }
 

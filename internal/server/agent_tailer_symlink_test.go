@@ -3,7 +3,6 @@ package server
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -19,9 +18,6 @@ import (
 // HasPrefix("/private/var/.../projects/<hex>/foo.jsonl",
 // "/var/.../projects/") returns false on macOS.
 func TestJsonlPathUnderAllowedRootSymlinkResolution(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink semantics differ on windows")
-	}
 	t.Parallel()
 	tmp := t.TempDir()
 	// Real root: <tmp>/real/projects.
@@ -106,9 +102,6 @@ func TestJsonlPathUnderAllowedRootSymlinkResolution(t *testing.T) {
 // the same symlink so both sides land in the resolved-form world before
 // the prefix check.
 func TestJsonlPathUnderAllowedRoot_NonExistentLeafThroughSymlinkedRoot(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink semantics differ on windows")
-	}
 	t.Parallel()
 	tmp := t.TempDir()
 
@@ -161,9 +154,6 @@ func TestJsonlPathUnderAllowedRoot_NonExistentLeafThroughSymlinkedRoot(t *testin
 // under the resolved root match the prefix. The fix rejects any
 // one-sided-resolution compare.
 func TestJsonlPathUnderAllowedRoot_AsymmetricResolveRejected(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink semantics differ on windows")
-	}
 	t.Parallel()
 	tmp := t.TempDir()
 

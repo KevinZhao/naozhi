@@ -16,25 +16,6 @@ import (
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
-func TestNew_Defaults(t *testing.T) {
-	t.Parallel()
-	w := New(Config{Token: "tok"})
-	if w.Name() != "weixin" {
-		t.Errorf("Name() = %q, want %q", w.Name(), "weixin")
-	}
-	if w.MaxReplyLength() != 4000 {
-		t.Errorf("MaxReplyLength() = %d, want 4000", w.MaxReplyLength())
-	}
-}
-
-func TestNew_CustomMaxReplyLen(t *testing.T) {
-	t.Parallel()
-	w := New(Config{Token: "tok", MaxReplyLen: 2000})
-	if w.MaxReplyLength() != 2000 {
-		t.Errorf("MaxReplyLength() = %d, want 2000", w.MaxReplyLength())
-	}
-}
-
 func TestExtractText(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -85,32 +66,6 @@ func TestExtractText(t *testing.T) {
 	}
 }
 
-func TestStartStop(t *testing.T) {
-	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Return empty response for getUpdates
-		json.NewEncoder(w).Encode(getUpdatesResp{Ret: 0})
-	}))
-	defer srv.Close()
-
-	w := New(Config{Token: "tok", BaseURL: srv.URL})
-
-	handler := func(_ context.Context, _ platform.IncomingMessage) {}
-
-	if err := w.Start(handler); err != nil {
-		t.Fatalf("Start() error: %v", err)
-	}
-
-	// Double start should fail
-	if err := w.Start(handler); err == nil {
-		t.Fatal("expected error on double Start()")
-	}
-
-	if err := w.Stop(); err != nil {
-		t.Fatalf("Stop() error: %v", err)
-	}
-}
-
 // holdLongPoll parks a fake getupdates request the way the real long-poll
 // endpoint does: until the client gives up on it. A fixed sleep before an
 // empty reply made every test pay that sleep per poll, and let a Stop that
@@ -148,6 +103,9 @@ func TestStartStop_JoinsPollLoop(t *testing.T) {
 
 	if err := w.Start(handler); err != nil {
 		t.Fatalf("Start() error: %v", err)
+	}
+	if err := w.Start(handler); err == nil {
+		t.Fatal("expected error on double Start()")
 	}
 
 	// Let the loop poll at least once so it is genuinely in-flight.
@@ -187,46 +145,6 @@ func TestReply_NoContextToken(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error when no context_token cached")
-	}
-}
-
-func TestReply_WithContextToken(t *testing.T) {
-	t.Parallel()
-	var called atomic.Bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called.Store(true)
-		var req sendMessageReq
-		json.NewDecoder(r.Body).Decode(&req)
-
-		if req.Msg.ToUserID != "user123" {
-			http.Error(w, "bad to_user_id", 400)
-			return
-		}
-		if req.Msg.ContextToken == "" {
-			http.Error(w, "missing context_token", 400)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"ret":0}`))
-	}))
-	defer srv.Close()
-
-	w := New(Config{Token: "tok", BaseURL: srv.URL})
-	// Pre-cache a context token
-	w.cacheContextToken("user123", "ctx-tok-abc", time.Now().UnixNano())
-
-	msgID, err := w.Reply(context.Background(), platform.OutgoingMessage{
-		ChatID: "user123",
-		Text:   "hi there",
-	})
-	if err != nil {
-		t.Fatalf("Reply() error: %v", err)
-	}
-	if msgID == "" {
-		t.Error("expected non-empty msgID")
-	}
-	if !called.Load() {
-		t.Error("sendMessage was not called")
 	}
 }
 
@@ -548,15 +466,6 @@ func TestAPIClient_SendMessage_SanitizesErrMsg(t *testing.T) {
 	}
 	if !strings.Contains(msg, "ret=1") || !strings.Contains(msg, "errcode=42") {
 		t.Errorf("error message missing ret/errcode context: %q", msg)
-	}
-}
-
-func TestEditMessage_Noop(t *testing.T) {
-	t.Parallel()
-	w := New(Config{Token: "tok"})
-	err := w.EditMessage(context.Background(), "any-id", "new text")
-	if err != nil {
-		t.Errorf("EditMessage should be no-op, got error: %v", err)
 	}
 }
 

@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 )
 
 // TestDecodeJSONBody_RejectsUnknownFields pins #1329
@@ -28,14 +30,6 @@ func TestDecodeJSONBody_RejectsUnknownFields(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("decodeJSONBody err = %v; want json unknown-field error", err)
-	}
-	// dst should not have been populated with the legitimate fields either —
-	// strict decode bails on the first unknown field, but even if it did, the
-	// security property we care about is that the unknown one never lands.
-	if dst.Name == "alice" {
-		// Acceptable: encoding/json may still set Name before hitting the
-		// unknown field. The critical assertion is the error above.
-		t.Logf("note: dst.Name populated before unknown-field rejection (allowed)")
 	}
 }
 
@@ -64,8 +58,8 @@ func TestDecodeJSONBody_EmptyBody(t *testing.T) {
 	r := httptest.NewRequest("POST", "/x", strings.NewReader(""))
 	var dst struct{}
 	err := decodeJSONBody(r, &dst)
-	if !errors.Is(err, errEmptyJSONBody) {
-		t.Fatalf("decodeJSONBody empty body err = %v; want errEmptyJSONBody", err)
+	if !errors.Is(err, httputil.ErrEmptyJSONBody) {
+		t.Fatalf("decodeJSONBody empty body err = %v; want httputil.ErrEmptyJSONBody", err)
 	}
 }
 

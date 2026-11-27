@@ -3,6 +3,7 @@ package session
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"strings"
@@ -254,8 +255,8 @@ func TestFakeShim_Emit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		msg, err := shim.ParseServerMsg(line)
-		if err != nil {
+		var msg shim.ServerMsg
+		if err := json.Unmarshal(line, &msg); err != nil {
 			t.Fatal(err)
 		}
 		if msg.Seq != want {

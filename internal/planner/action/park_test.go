@@ -75,23 +75,12 @@ func TestParkRefused(t *testing.T) {
 }
 
 func TestParkParse(t *testing.T) {
-	for _, c := range []struct{ raw, err string }{
+	parseCases(t, []parseCase{
 		{`{"type":"park","text":"t","source":"task:ab12"}`, ""},
 		{`{"type":"park","text":" ","source":"#1"}`, "text"},
 		{`{"type":"park","text":"t","source":""}`, "source"},
 		{`{"type":"park","text":"` + strings.Repeat("字", parkTextRunes+1) + `","source":"#1"}`, "text"},
 		{`{"type":"park","text":"t","source":"` + strings.Repeat("字", parkSourceRunes+1) + `"}`, "source"},
 		{`{"type":"park","text":"t","source":"#1","why":"x"}`, "字段"},
-	} {
-		b := Parse(block(c.raw))
-		if len(b) != 1 {
-			t.Fatalf("%s: %d blocks", c.raw, len(b))
-		}
-		switch {
-		case c.err == "" && (b[0].Err != nil || b[0].Park == nil):
-			t.Errorf("%s: %v", c.raw, b[0].Err)
-		case c.err != "" && (b[0].Err == nil || !strings.Contains(b[0].Err.Error(), c.err)):
-			t.Errorf("%s: err %v, want one with %q", c.raw, b[0].Err, c.err)
-		}
-	}
+	})
 }

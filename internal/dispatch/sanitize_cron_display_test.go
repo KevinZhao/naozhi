@@ -59,29 +59,16 @@ func TestSanitizeCronDisplay_Truncation(t *testing.T) {
 	}
 }
 
-// TestSanitizeCronDisplay_StripNewlines verifies that embedded \n and \t are
-// replaced with spaces so table rows aren't broken.
-func TestSanitizeCronDisplay_StripNewlines(t *testing.T) {
-	got := sanitizeCronDisplay("line1\nline2\ttab", 60)
-	if strings.ContainsAny(got, "\n\r\t") {
-		t.Errorf("sanitizeCronDisplay still contains newline/tab: %q", got)
+// Newlines and tabs become spaces (table rows stay intact), bidi overrides
+// are stripped, and short plain input passes unchanged.
+func TestSanitizeCronDisplay_ControlRunes(t *testing.T) {
+	if got := sanitizeCronDisplay("line1\nline2\ttab", 60); got != "line1 line2 tab" {
+		t.Errorf("newline/tab: got %q", got)
 	}
-}
-
-// TestSanitizeCronDisplay_BidiStripped verifies bidi override runes are removed.
-func TestSanitizeCronDisplay_BidiStripped(t *testing.T) {
-	// U+202E RIGHT-TO-LEFT OVERRIDE
-	got := sanitizeCronDisplay("safe\u202etext", 60)
-	if strings.ContainsRune(got, '‮') {
-		t.Errorf("sanitizeCronDisplay did not strip RLO rune: %q", got)
+	if got := sanitizeCronDisplay("safe\u202etext", 60); strings.ContainsRune(got, '\u202e') {
+		t.Errorf("did not strip RLO rune: %q", got)
 	}
-}
-
-// TestSanitizeCronDisplay_NoTruncationBelowLimit verifies short inputs are not modified.
-func TestSanitizeCronDisplay_NoTruncationBelowLimit(t *testing.T) {
-	input := "* * * * *"
-	got := sanitizeCronDisplay(input, 30)
-	if got != input {
-		t.Errorf("sanitizeCronDisplay(%q) = %q; want unchanged", input, got)
+	if got := sanitizeCronDisplay("* * * * *", 30); got != "* * * * *" {
+		t.Errorf("short input changed: %q", got)
 	}
 }

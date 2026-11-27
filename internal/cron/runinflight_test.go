@@ -125,8 +125,7 @@ func TestRunInflight_ResetClearsView(t *testing.T) {
 // contract the early hook would race the post-Send write and leave the
 // inflight view's SessionID empty for the run's lifetime, defeating the
 // entire purpose of the early-set fix (KnownSessionIDs miss during the
-// Send window). Same-value writes also fast-path so the post-Send call
-// stays cheap when sess.SessionID() already matched.
+// Send window).
 func TestRunInflight_SetSessionIDEmptyIsNoop(t *testing.T) {
 	inf := &runInflight{}
 	inf.running.Store(true)
@@ -152,103 +151,12 @@ func TestRunInflight_SetSessionIDEmptyIsNoop(t *testing.T) {
 		t.Errorf("setSessionID(\"\") clobbered prior value: got %q", v.SessionID)
 	}
 
-	// Same id again — fast-path skips Store. View pointer stays the same.
-	before := inf.view.Load()
-	inf.setSessionID("sess-early")
-	after := inf.view.Load()
-	if before != after {
-		t.Errorf("same-value setSessionID must skip Store: before=%p after=%p", before, after)
-	}
-
 	// Replacing with a different id IS authoritative — the post-Send
 	// path writes result.SessionID which can differ from sess.SessionID()
 	// if the CLI handshake assigned a new id mid-turn.
 	inf.setSessionID("sess-final")
 	if v, _ := inf.snapshot(); v.SessionID != "sess-final" {
 		t.Errorf("replacement setSessionID lost: got %q", v.SessionID)
-	}
-}
-
-// TestRunInflight_SetPhaseFastPath ensures setPhase is a no-op when the
-// phase is unchanged (preserving the cache-line write economy of the
-// pre-refactor implementation).
-func TestRunInflight_SetPhaseFastPath(t *testing.T) {
-	inf := &runInflight{}
-	inf.running.Store(true)
-	inf.populate(runInflightView{Phase: PhaseQueued, RunID: "x"})
-	before := inf.view.Load()
-	inf.setPhase(PhaseQueued) // same — fast path skips Store
-	after := inf.view.Load()
-	if before != after {
-		t.Errorf("setPhase with unchanged value must not Store: before=%p after=%p", before, after)
-	}
-	inf.setPhase(PhaseSending) // change — must Store
-	v, ok := inf.snapshot()
-	if !ok || v.Phase != PhaseSending || v.RunID != "x" {
-		t.Errorf("phase update lost siblings: ok=%v v=%+v", ok, v)
-	}
-}
-
-// TestRunInflight_FinalizeReleaseContract pins the live terminal release
-// path. R246-CR-017 (#759) once put this contract in a releaseRun method;
-// R246-GO-3 (#689) superseded it with the per-run runFinalizer (see the
-// anchor comment in runinflight.go), so the contract is now: after
-// finalize(), the CAS gate is released and snapshot() returns ok=false
-// (so list handlers stop surfacing stale RunID/Phase), and the gauge
-// Add(-1) at the defer site pairs with the CAS-true Add(+1). reset
-// happens BEFORE CAS-release inside finalize (R238-GO-2 ordering).
-func TestRunInflight_FinalizeReleaseContract(t *testing.T) {
-	inf := &runInflight{}
-	if !inf.running.CompareAndSwap(false, true) {
-		t.Fatal("CAS")
-	}
-	inf.populate(runInflightView{
-		RunID:     "aaaaaaaaaaaaaaaa",
-		StartedAt: time.Now(),
-		Phase:     PhaseSending,
-		SessionID: "sess-x",
-		Trigger:   TriggerScheduled,
-	})
-
-	if v, ok := inf.snapshot(); !ok || v.RunID == "" {
-		t.Fatalf("precondition: snapshot before release must be live: ok=%v v=%+v", ok, v)
-	}
-
-	// Live path: per-run finalizer does reset + CAS-release.
-	finalizer := &runFinalizer{inflight: inf}
-	finalizer.finalize()
-
-	if inf.running.Load() {
-		t.Errorf("finalize must Store(false) on running CAS gate")
-	}
-	if v, ok := inf.snapshot(); ok || v.RunID != "" {
-		t.Errorf("finalize must reset view (no stale metadata): ok=%v v=%+v", ok, v)
-	}
-}
-
-// TestRunInflight_FinalizeNilSafe locks in the nil-safety of the live
-// release path: a nil finalizer and a finalizer over a nil inflight must
-// both no-op rather than panic (mirrors reset / populate nil-receiver).
-func TestRunInflight_FinalizeNilSafe(t *testing.T) {
-	defer func() {
-		if r := recover(); r != nil {
-			t.Errorf("finalize on nil finalizer / nil inflight panicked: %v", r)
-		}
-	}()
-	var nilFinalizer *runFinalizer
-	nilFinalizer.finalize() // nil finalizer
-
-	(&runFinalizer{inflight: nil}).finalize() // nil inflight
-
-	live := &runInflight{}
-	live.running.Store(true)
-	live.populate(runInflightView{RunID: "y"})
-	(&runFinalizer{inflight: live}).finalize() // must still reset + release CAS
-	if live.running.Load() {
-		t.Errorf("finalize must still release CAS gate")
-	}
-	if _, ok := live.snapshot(); ok {
-		t.Errorf("finalize must still reset view")
 	}
 }
 

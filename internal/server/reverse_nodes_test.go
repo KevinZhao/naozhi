@@ -42,13 +42,3 @@ func TestAttachReverseNodeServer_WiresNodeLifecycle(t *testing.T) {
 		t.Errorf("n1 status after deregister = %q, want disconnected (still known, no longer live)", st)
 	}
 }
-
-// TestAttachReverseNodeServer_NilIsNoop: most deployments configure no reverse
-// server at all.
-func TestAttachReverseNodeServer_NilIsNoop(t *testing.T) {
-	s := newTestServer(&mockPlatform{})
-	s.attachReverseNodeServer(nil)
-	if s.reverseNodeServer != nil {
-		t.Error("nil reverse server must leave the field nil")
-	}
-}

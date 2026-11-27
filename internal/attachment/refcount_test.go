@@ -3,7 +3,6 @@ package attachment
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,11 +10,15 @@ import (
 	"time"
 )
 
-// gcRefs is the test shim for the production GCWithRefs(ctx, ws, opts)
-// signature with the standard 7d/30d TTLs. Returns removed count for
-// the legacy (removed, err) assertion style most tests use.
+// gcWorkspace sweeps a workspace's attachment root.
+func gcWorkspace(ctx context.Context, ws string, opts GCOptions) (GCResult, error) {
+	return GCDir(ctx, filepath.Join(ws, Dir), opts)
+}
+
+// gcRefs returns the removed count for the (removed, err) assertion style
+// most tests use.
 func gcRefs(ws string, uploadTTL, refTTL time.Duration, now time.Time) (int, error) {
-	res, err := GCWithRefs(context.Background(), ws, GCOptions{
+	res, err := gcWorkspace(context.Background(), ws, GCOptions{
 		UploadTTL: uploadTTL,
 		RefTTL:    refTTL,
 		Now:       now,
@@ -156,9 +159,9 @@ func fixturePersisted(t *testing.T, workspace, date, stem string, meta Meta) (st
 	return payload, metaPath
 }
 
-// TestGCWithRefs_KeepsReferenced: a file past upload TTL stays on
+// TestGCDir_KeepsReferenced: a file past upload TTL stays on
 // disk as long as last_referenced_at is within refTTL.
-func TestGCWithRefs_KeepsReferenced(t *testing.T) {
+func TestGCDir_KeepsReferenced(t *testing.T) {
 	ws := t.TempDir()
 	now := time.Now().UTC()
 	// Uploaded 10 days ago (> 7-day upload TTL) but referenced 1 day
@@ -172,7 +175,7 @@ func TestGCWithRefs_KeepsReferenced(t *testing.T) {
 
 	removed, err := gcRefs(ws, 7*24*time.Hour, 30*24*time.Hour, now)
 	if err != nil {
-		t.Fatalf("GCWithRefs: %v", err)
+		t.Fatalf("GCDir: %v", err)
 	}
 	if removed != 0 {
 		t.Errorf("removed=%d, want 0 (reference within refTTL)", removed)
@@ -182,9 +185,9 @@ func TestGCWithRefs_KeepsReferenced(t *testing.T) {
 	}
 }
 
-// TestGCWithRefs_RemovesExpiredAndUnreferenced covers the happy
+// TestGCDir_RemovesExpiredAndUnreferenced covers the happy
 // reap: both bounds elapsed.
-func TestGCWithRefs_RemovesExpiredAndUnreferenced(t *testing.T) {
+func TestGCDir_RemovesExpiredAndUnreferenced(t *testing.T) {
 	ws := t.TempDir()
 	now := time.Now().UTC()
 	meta := Meta{UploadedAt: now.AddDate(0, 0, -10)} // no refs
@@ -192,7 +195,7 @@ func TestGCWithRefs_RemovesExpiredAndUnreferenced(t *testing.T) {
 
 	removed, err := gcRefs(ws, 7*24*time.Hour, 30*24*time.Hour, now)
 	if err != nil {
-		t.Fatalf("GCWithRefs: %v", err)
+		t.Fatalf("GCDir: %v", err)
 	}
 	if removed != 1 {
 		t.Errorf("removed=%d, want 1", removed)
@@ -205,10 +208,10 @@ func TestGCWithRefs_RemovesExpiredAndUnreferenced(t *testing.T) {
 	}
 }
 
-// TestGCWithRefs_RemovesRefsElapsed: referenced sessions exist BUT
+// TestGCDir_RemovesRefsElapsed: referenced sessions exist BUT
 // their last observation is past refTTL — file is orphaned in
 // practice and must be collected.
-func TestGCWithRefs_RemovesRefsElapsed(t *testing.T) {
+func TestGCDir_RemovesRefsElapsed(t *testing.T) {
 	ws := t.TempDir()
 	now := time.Now().UTC()
 	meta := Meta{
@@ -220,7 +223,7 @@ func TestGCWithRefs_RemovesRefsElapsed(t *testing.T) {
 
 	removed, err := gcRefs(ws, 7*24*time.Hour, 30*24*time.Hour, now)
 	if err != nil {
-		t.Fatalf("GCWithRefs: %v", err)
+		t.Fatalf("GCDir: %v", err)
 	}
 	if removed != 1 {
 		t.Errorf("removed=%d, want 1", removed)
@@ -230,9 +233,9 @@ func TestGCWithRefs_RemovesRefsElapsed(t *testing.T) {
 	}
 }
 
-// TestGCWithRefs_KeepsFresh: within upload TTL wins even with no
+// TestGCDir_KeepsFresh: within upload TTL wins even with no
 // refs. Mirrors legacy behaviour for never-referenced recent uploads.
-func TestGCWithRefs_KeepsFresh(t *testing.T) {
+func TestGCDir_KeepsFresh(t *testing.T) {
 	ws := t.TempDir()
 	now := time.Now().UTC()
 	meta := Meta{UploadedAt: now.AddDate(0, 0, -1)} // 1 day old, no refs
@@ -240,7 +243,7 @@ func TestGCWithRefs_KeepsFresh(t *testing.T) {
 
 	removed, err := gcRefs(ws, 7*24*time.Hour, 30*24*time.Hour, now)
 	if err != nil {
-		t.Fatalf("GCWithRefs: %v", err)
+		t.Fatalf("GCDir: %v", err)
 	}
 	if removed != 0 {
 		t.Errorf("removed=%d, want 0 (within upload TTL)", removed)
@@ -250,10 +253,10 @@ func TestGCWithRefs_KeepsFresh(t *testing.T) {
 	}
 }
 
-// TestGCWithRefs_LegacyMetaNoNewFields: meta exists but predates the
+// TestGCDir_LegacyMetaNoNewFields: meta exists but predates the
 // RFC (no new fields). Must behave like "no refs" and use the
 // legacy upload-TTL only decision.
-func TestGCWithRefs_LegacyMetaNoNewFields(t *testing.T) {
+func TestGCDir_LegacyMetaNoNewFields(t *testing.T) {
 	ws := t.TempDir()
 	now := time.Now().UTC()
 	day := now.AddDate(0, 0, -10).Format("2006-01-02")
@@ -270,16 +273,16 @@ func TestGCWithRefs_LegacyMetaNoNewFields(t *testing.T) {
 
 	removed, err := gcRefs(ws, 7*24*time.Hour, 30*24*time.Hour, now)
 	if err != nil {
-		t.Fatalf("GCWithRefs: %v", err)
+		t.Fatalf("GCDir: %v", err)
 	}
 	if removed != 1 {
 		t.Errorf("removed=%d, want 1 (legacy meta, past upload TTL)", removed)
 	}
 }
 
-// TestGCWithRefs_PrunesEmptyDayDirs: after the per-file sweep, an
+// TestGCDir_PrunesEmptyDayDirs: after the per-file sweep, an
 // old date directory with no survivors should be removed.
-func TestGCWithRefs_PrunesEmptyDayDirs(t *testing.T) {
+func TestGCDir_PrunesEmptyDayDirs(t *testing.T) {
 	ws := t.TempDir()
 	now := time.Now().UTC()
 	meta := Meta{UploadedAt: now.AddDate(0, 0, -10)}
@@ -296,10 +299,10 @@ func TestGCWithRefs_PrunesEmptyDayDirs(t *testing.T) {
 	}
 }
 
-// TestGCWithRefs_WorkspaceEmpty returns 0, nil for a workspace
+// TestGCDir_WorkspaceEmpty returns 0, nil for a workspace
 // without any attachments directory. Cron job starts there every
 // tick on a fresh deployment.
-func TestGCWithRefs_WorkspaceEmpty(t *testing.T) {
+func TestGCDir_WorkspaceEmpty(t *testing.T) {
 	ws := t.TempDir()
 	removed, err := gcRefs(ws, 7*24*time.Hour, 30*24*time.Hour, time.Now())
 	if err != nil {
@@ -307,15 +310,6 @@ func TestGCWithRefs_WorkspaceEmpty(t *testing.T) {
 	}
 	if removed != 0 {
 		t.Errorf("removed=%d on empty ws", removed)
-	}
-}
-
-// TestGCWithRefs_RequiresWorkspace rejects empty workspace with
-// the documented sentinel.
-func TestGCWithRefs_RequiresWorkspace(t *testing.T) {
-	_, err := gcRefs("", time.Hour, time.Hour, time.Now())
-	if !errors.Is(err, ErrWorkspaceRequired) {
-		t.Errorf("err=%v, want ErrWorkspaceRequired", err)
 	}
 }
 

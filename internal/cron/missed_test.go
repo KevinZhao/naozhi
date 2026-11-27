@@ -5,295 +5,51 @@ import (
 	"time"
 )
 
-// TestHasMissedSchedule_NilJob 验证 nil 输入不 panic。
-func TestHasMissedSchedule_NilJob(t *testing.T) {
+func TestHasMissedSchedule(t *testing.T) {
 	t.Parallel()
-	missed, prev := HasMissedSchedule(nil, time.Now(), time.Time{})
-	if missed || !prev.IsZero() {
-		t.Fatalf("nil job should return (false, zero); got (%v, %v)", missed, prev)
+	if missed, prev := HasMissedSchedule(nil, time.Now(), time.Time{}); missed || !prev.IsZero() {
+		t.Fatalf("nil job = (%v, %v), want (false, zero)", missed, prev)
 	}
-}
-
-// TestHasMissedSchedule_UnparsableSchedule_NoMiss 验证无法解析的 schedule
-// 不误报 missed（保守）。
-func TestHasMissedSchedule_UnparsableSchedule_NoMiss(t *testing.T) {
-	t.Parallel()
-	j := &Job{Schedule: "not-a-cron", CreatedAt: time.Now().Add(-time.Hour)}
-	missed, _ := HasMissedSchedule(j, time.Now(), time.Time{})
-	if missed {
-		t.Fatal("bogus schedule should not be flagged missed")
-	}
-}
-
-// TestHasMissedSchedule_StartupSuppression 验证刚启动的 5×period 抑制
-// 窗口内不判 missed，即使 LastRunAt 为零。
-func TestHasMissedSchedule_StartupSuppression(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	startedAt := now.Add(-30 * time.Minute) // 刚启动半小时
-	j := &Job{
-		Schedule:  "@every 30m", // period=30m, 5×period=2h30m
-		CreatedAt: now.Add(-24 * time.Hour),
-	}
-	missed, _ := HasMissedSchedule(j, now, startedAt)
-	if missed {
-		t.Fatal("within startup suppression window should not flag missed")
-	}
-}
-
-// TestHasMissedSchedule_RecentRun_NoMiss 验证刚跑过的 job 不判 missed。
-func TestHasMissedSchedule_RecentRun_NoMiss(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	// startedAt 足够早以绕过抑制窗口
-	startedAt := now.Add(-10 * time.Hour)
-	j := &Job{
-		Schedule:  "@every 30m",
-		CreatedAt: now.Add(-24 * time.Hour),
-		LastRunAt: now.Add(-20 * time.Minute), // 20m 内跑过，比 period*1.5 新
-	}
-	missed, _ := HasMissedSchedule(j, now, startedAt)
-	if missed {
-		t.Fatal("recent run within period*1.5 should not be missed")
-	}
-}
-
-// TestHasMissedSchedule_StaleRun_Missed 验证 LastRunAt 比 prev expected
-// 老于 period*1.5 时判 missed。
-func TestHasMissedSchedule_StaleRun_Missed(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	startedAt := now.Add(-10 * time.Hour)
-	j := &Job{
-		Schedule:  "@every 30m",
-		CreatedAt: now.Add(-24 * time.Hour),
-		LastRunAt: now.Add(-3 * time.Hour), // 3h 未跑，远超 period*1.5 (45m)
-	}
-	missed, prev := HasMissedSchedule(j, now, startedAt)
-	if !missed {
-		t.Fatal("3h stale LastRunAt should be flagged missed")
-	}
-	if prev.IsZero() {
-		t.Error("prev expected time should be non-zero when missed=true")
-	}
-	// prev 应该在 last run 和 now 之间
-	if !prev.After(j.LastRunAt) || !prev.Before(now) {
-		t.Errorf("prev=%v should be between LastRunAt=%v and now=%v", prev, j.LastRunAt, now)
-	}
-}
-
-// TestHasMissedSchedule_NeverRun_CreatedRecent 验证刚创建不到一个周期
-// 的 job 即使没跑过也不算 missed（还没到它的第一次执行时刻）。
-func TestHasMissedSchedule_NeverRun_CreatedRecent(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	startedAt := now.Add(-10 * time.Hour)
-	j := &Job{
-		Schedule:  "@every 30m",
-		CreatedAt: now.Add(-10 * time.Minute), // 创建才 10m
-	}
-	missed, _ := HasMissedSchedule(j, now, startedAt)
-	if missed {
-		t.Fatal("never-run job within one period of creation should not be missed")
-	}
-}
-
-// TestHasMissedSchedule_NeverRun_CreatedLongAgo 验证创建超过一个周期
-// 但从未跑过的 job 判 missed。
-func TestHasMissedSchedule_NeverRun_CreatedLongAgo(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	startedAt := now.Add(-10 * time.Hour)
-	j := &Job{
-		Schedule:  "@every 30m",
-		CreatedAt: now.Add(-5 * time.Hour), // 5h 前创建，远超一个 period
-	}
-	missed, _ := HasMissedSchedule(j, now, startedAt)
-	if !missed {
-		t.Fatal("never-run job created 5h ago with 30m schedule should be missed")
-	}
-}
-
-// TestHasMissedSchedule_NeverRun_Paused_NotMissed 锁定 R20260609-COR-004
-// (#1979)：一个创建已久、从未运行、当前处于 paused 的 job 即便恢复（startedAt
-// 抑制窗口外）也不应被判 missed——它从未有机会运行。对照
-// TestHasMissedSchedule_NeverRun_CreatedLongAgo 是完全相同的时间形态，仅多了
-// Paused=true。
-func TestHasMissedSchedule_NeverRun_Paused_NotMissed(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	startedAt := now.Add(-10 * time.Hour) // 远超抑制窗口
-	j := &Job{
-		Schedule:  "@every 30m",
-		CreatedAt: now.Add(-5 * time.Hour), // 5h 前创建，远超一个 period
-		Paused:    true,
-	}
-	missed, _ := HasMissedSchedule(j, now, startedAt)
-	if missed {
-		t.Fatal("paused never-run job must not be flagged missed even after resume window")
-	}
-}
-
-// TestHasMissedSchedule_NeverRun_JitterSlack 锁定 R20260603140013-CR-5：
-// never-run 分支必须用与已跑分支相同的 slack（period*3/2），而不是裸
-// `> period`。否则首个 jitter 窗口内（默认最多 30s）的健康 job 会被误报
-// missed —— 刚到第一个周期、还没真正错过就告警。table-driven 覆盖
-// period+ε（健康，不报）和 period*1.5+ε（确实超期，报）两侧边界。
-func TestHasMissedSchedule_NeverRun_JitterSlack(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
-	// startedAt 放 10h 前，越过 5×period(=2h30m) 的启动抑制窗口。
-	startedAt := now.Add(-10 * time.Hour)
-	const period = 30 * time.Minute // @every 30m → slack = 45m
-
+	now := time.Date(2026, 5, 9, 9, 15, 0, 0, time.UTC)
+	ago := func(d time.Duration) time.Time { return now.Add(-d) }
+	const day = 24 * time.Hour
+	// startedAt is far enough back to clear the 5×period startup suppression
+	// unless the case says otherwise.
 	cases := []struct {
 		name      string
-		createdAt time.Time
+		schedule  string
+		created   time.Time
+		lastRun   time.Time
+		startedAt time.Time
+		paused    bool
 		want      bool
 	}{
-		{
-			// period + 30s jitter 头：健康 job，绝不能误报。这是 CR-5
-			// 修复前会 false-positive 的关键 case（旧阈值 > period）。
-			name:      "period_plus_jitter_no_miss",
-			createdAt: now.Add(-(period + 30*time.Second)),
-			want:      false,
-		},
-		{
-			// 恰好踩在 slack 阈值内侧（period*1.5 - 1m）：仍不报。
-			name:      "just_under_slack_no_miss",
-			createdAt: now.Add(-(period*3/2 - time.Minute)),
-			want:      false,
-		},
-		{
-			// 超过 slack 阈值（period*1.5 + 1m）：确实错过了首次执行，应报。
-			name:      "beyond_slack_missed",
-			createdAt: now.Add(-(period*3/2 + time.Minute)),
-			want:      true,
-		},
+		{"unparsable schedule is never missed", "not-a-cron", ago(time.Hour), time.Time{}, ago(10 * time.Hour), false, false},
+		{"startup suppression (5×period)", "@every 30m", ago(day), time.Time{}, ago(30 * time.Minute), false, false},
+		{"recent run within period*1.5", "@every 30m", ago(day), ago(20 * time.Minute), ago(10 * time.Hour), false, false},
+		{"stale run", "@every 30m", ago(day), ago(3 * time.Hour), ago(10 * time.Hour), false, true},
+		{"never run, created long ago", "@every 30m", ago(5 * time.Hour), time.Time{}, ago(10 * time.Hour), false, true},
+		// #1979: a paused job never had the chance to run.
+		{"never run, paused", "@every 30m", ago(5 * time.Hour), time.Time{}, ago(10 * time.Hour), true, false},
+		// The never-run branch uses the same period*3/2 slack as the ran branch,
+		// so the first jitter window is not a false positive (CR-5).
+		{"never run, period plus jitter", "@every 30m", ago(30*time.Minute + 30*time.Second), time.Time{}, ago(10 * time.Hour), false, false},
+		{"never run, just under slack", "@every 30m", ago(45*time.Minute - time.Minute), time.Time{}, ago(10 * time.Hour), false, false},
+		{"never run, beyond slack", "@every 30m", ago(45*time.Minute + time.Minute), time.Time{}, ago(10 * time.Hour), false, true},
+		{"daily, ran at the last tick", "0 9 * * *", ago(30 * day), time.Date(2026, 5, 9, 9, 0, 0, 0, time.UTC), ago(8 * day), false, false},
+		{"daily, stale by three days", "0 9 * * *", ago(30 * day), ago(3 * day), ago(8 * day), false, true},
+		{"daily, startup suppression", "0 9 * * *", ago(30 * day), ago(10 * day), ago(15 * time.Minute), false, false},
 	}
 	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			j := &Job{Schedule: "@every 30m", CreatedAt: tc.createdAt}
-			missed, _ := HasMissedSchedule(j, now, startedAt)
-			if missed != tc.want {
-				t.Fatalf("never-run job created %v ago: missed=%v, want %v",
-					now.Sub(tc.createdAt), missed, tc.want)
-			}
-		})
+		j := &Job{Schedule: tc.schedule, CreatedAt: tc.created, LastRunAt: tc.lastRun, Paused: tc.paused}
+		missed, prev := HasMissedSchedule(j, now, tc.startedAt)
+		if missed != tc.want {
+			t.Errorf("%s: missed = %v, want %v", tc.name, missed, tc.want)
+			continue
+		}
+		// A missed run reports the tick it missed, between the last run and now.
+		if missed && !tc.lastRun.IsZero() && (!prev.After(tc.lastRun) || !prev.Before(now)) {
+			t.Errorf("%s: prev = %v, want strictly between lastRun %v and now %v", tc.name, prev, tc.lastRun, now)
+		}
 	}
-}
-
-// TestPreviousTickBefore_IntervalSchedule 验证 previousTickBefore 在
-// 简单 @every N 形态下能正确回推到上一次 tick。
-func TestPreviousTickBefore_IntervalSchedule(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	prev := previousTickBefore("@every 30m", now)
-	if prev.IsZero() {
-		t.Fatal("should return non-zero prev for @every 30m")
-	}
-	// prev 应该严格 before now
-	if !prev.Before(now) {
-		t.Errorf("prev=%v should be strictly before now=%v", prev, now)
-	}
-	// 距 now 不超过一个 period
-	if now.Sub(prev) > 31*time.Minute {
-		t.Errorf("prev=%v is more than one period before now=%v", prev, now)
-	}
-}
-
-// TestPreviousTickBefore_Unparsable 验证错误 schedule 返回零值。
-func TestPreviousTickBefore_Unparsable(t *testing.T) {
-	t.Parallel()
-	prev := previousTickBefore("not-a-cron", time.Now())
-	if !prev.IsZero() {
-		t.Fatalf("unparsable schedule should return zero time, got %v", prev)
-	}
-}
-
-// TestHasMissedSchedule_DailySchedule_RecentRun_NotMissed 锁定 daily cron
-// 形态（`0 9 * * *`，period=24h）下 "LastRunAt 落在最近一次应触发时刻附近"
-// 不判 missed。现有 TestHasMissedSchedule_RecentRun_NoMiss 只覆盖 `@every 30m`
-// 等短周期；daily 形态是生产里最常见但测试盲区，`previousTickBefore` 回推
-// 3×period（= 72h）的分支没有独立覆盖。RNEW-TEST-431。
-//
-// TZ 说明：now/LastRunAt 用固定 UTC 时刻。schedulePeriod 现在从调用方
-// 显式接受 now（见 job.go）——HasMissedSchedule 把它传递给
-// previousTickBefore 和 schedulePeriod，三者锚到同一瞬间，不再受 host TZ
-// 或 DST 切换影响。
-func TestHasMissedSchedule_DailySchedule_RecentRun_NotMissed(t *testing.T) {
-	t.Parallel()
-	// 用固定 UTC 时刻避免 host TZ 影响：9:15 UTC 对应 `0 9 * * *` 的最近一次
-	// tick 是 "今天 9:00 UTC"，距 now 只差 15 分钟，远小于 period*1.5=36h。
-	now := time.Date(2026, 5, 9, 9, 15, 0, 0, time.UTC)
-	// startedAt 放 8 天前，足够越过 5×period=5 天的启动抑制窗口。
-	startedAt := now.Add(-8 * 24 * time.Hour)
-	j := &Job{
-		Schedule:  "0 9 * * *",
-		CreatedAt: now.Add(-30 * 24 * time.Hour),
-		LastRunAt: time.Date(2026, 5, 9, 9, 0, 0, 0, time.UTC),
-	}
-	missed, _ := HasMissedSchedule(j, now, startedAt)
-	if missed {
-		t.Fatalf("daily 9am cron run at the expected tick must not be flagged missed (now=%v lastRun=%v)", now, j.LastRunAt)
-	}
-}
-
-// TestHasMissedSchedule_DailySchedule_StaleByThreeDays_Missed 锁定 daily cron
-// 形态下 "LastRunAt 已过 3 天没跑" 必须判 missed。对照上一个 not-missed
-// 测试，这对断言同时覆盖 HasMissedSchedule 对 daily 形态的"跑过但过期"
-// 判定；period*1.5=36h，3 天远超阈值。RNEW-TEST-431。
-func TestHasMissedSchedule_DailySchedule_StaleByThreeDays_Missed(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 5, 9, 9, 15, 0, 0, time.UTC)
-	startedAt := now.Add(-8 * 24 * time.Hour)
-	j := &Job{
-		Schedule:  "0 9 * * *",
-		CreatedAt: now.Add(-30 * 24 * time.Hour),
-		LastRunAt: now.Add(-3 * 24 * time.Hour), // 3 天没跑
-	}
-	missed, prev := HasMissedSchedule(j, now, startedAt)
-	if !missed {
-		t.Fatalf("daily 9am cron with LastRunAt=3 days ago must be flagged missed (now=%v lastRun=%v)", now, j.LastRunAt)
-	}
-	if prev.IsZero() {
-		t.Error("prev expected tick must be non-zero when missed=true")
-	}
-	if !prev.Before(now) || !prev.After(j.LastRunAt) {
-		t.Errorf("prev=%v should sit strictly between LastRunAt=%v and now=%v", prev, j.LastRunAt, now)
-	}
-}
-
-// TestHasMissedSchedule_DailySchedule_StartupSuppression 锁定 daily cron 形态
-// 下的启动抑制：5×period=5 天；重启 15 分钟后即使 LastRunAt 很老也不应
-// 报 missed（避免运行几分钟就拉起一堆 "错过" 告警）。RNEW-TEST-431。
-func TestHasMissedSchedule_DailySchedule_StartupSuppression(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 5, 9, 9, 15, 0, 0, time.UTC)
-	startedAt := now.Add(-15 * time.Minute) // 刚启动 15 分钟
-	j := &Job{
-		Schedule:  "0 9 * * *",
-		CreatedAt: now.Add(-30 * 24 * time.Hour),
-		LastRunAt: now.Add(-10 * 24 * time.Hour), // 10 天没跑
-	}
-	missed, _ := HasMissedSchedule(j, now, startedAt)
-	if missed {
-		t.Fatalf("startup suppression (5×24h window) must swallow missed flag even for 10-day-stale LastRunAt (startedAt=%v)", startedAt)
-	}
-}
-
-// previousTickBefore 是 previousTickBeforeFromSched 的字符串入口，供测试直测
-// 回推逻辑；无法解析的 schedule 返回零值 time。
-func previousTickBefore(schedule string, now time.Time) time.Time {
-	sched, err := cronParser.Parse(schedule)
-	if err != nil {
-		return time.Time{}
-	}
-	period := schedulePeriodFromSched(sched, now)
-	if period <= 0 {
-		return time.Time{}
-	}
-	return previousTickBeforeFromSched(sched, period, now)
 }

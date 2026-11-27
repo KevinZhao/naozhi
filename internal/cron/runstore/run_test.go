@@ -66,18 +66,3 @@ func TestCronRun_WireFormatGolden(t *testing.T) {
 		t.Errorf("summary bytes drifted:\n got %s\nwant %s", sum, goldenSummaryJSON)
 	}
 }
-
-// TestCronRun_DecodesRemovedSandboxKeys: records written while the cloud
-// sandbox existed carry replay_of and sandbox_meta. Both keys are ignored on
-// read, so those records still load as the run they describe.
-func TestCronRun_DecodesRemovedSandboxKeys(t *testing.T) {
-	t.Parallel()
-	const legacy = `{"run_id":"0123456789abcdef","job_id":"fedcba9876543210","state":"failed","trigger":"manual","started_at":"2026-10-06T12:00:00.123Z","ended_at":"2026-10-06T12:00:01.623Z","duration_ms":1500,"session_id":"sess-\u003c1\u003e\u0026","prompt":"say \"hi\" \u003cb\u003e","work_dir":"/srv/wd","fresh":true,"result":"partial…[truncated]","result_bytes":22,"error_class":"send_error","error_msg":"send: timeout","replay_of":"aaaaaaaaaaaaaaaa","sandbox_meta":{"runtime_arn":"arn:aws:bedrock-agentcore:us-east-1:1:runtime/x","image_version":"v7","exit_status":0,"cost_usd":0.25,"duration_ms":1400,"memory_peak_bytes":1048576,"models":[{"model":"opus","raw_model":"claude-opus","provider":"bedrock","basis":"list","cost_usd":0.25,"input":10,"output":20,"cache_read":30,"cache_write":40}],"basis":"list"},"cost_usd":0.5}`
-	back, err := decodeRunBytes([]byte(legacy), MaxRecordBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(back, goldenCronRun()) {
-		t.Errorf("legacy record decodes to %+v, want %+v", back, goldenCronRun())
-	}
-}

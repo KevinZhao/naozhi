@@ -89,19 +89,3 @@ func TestHandleCronMode_ErrorReplyByClass(t *testing.T) {
 		}
 	}
 }
-
-// The /cron usage block and /help both advertise the mode command.
-func TestCronMode_ListedInUsageAndHelp(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	d.scheduler = &fakeCronScheduler{}
-	d.handleCronCommand(context.Background(), incomingMsg("/cron"), "/cron", slog.Default())
-	if got := fp.lastReply(); !strings.Contains(got, "/cron <add|list|del|pause|resume|mode>") ||
-		!strings.Contains(got, "/cron mode <id> fresh|keep") {
-		t.Errorf("/cron usage = %q, want the mode subcommand listed", got)
-	}
-	d.handleHelpCommand(context.Background(), incomingMsg("/help"))
-	if got := fp.lastReply(); !strings.Contains(got, "/cron <add|list|del|pause|resume|mode>") {
-		t.Errorf("/help = %q, want the mode subcommand listed", got)
-	}
-}

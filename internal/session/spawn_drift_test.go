@@ -9,7 +9,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"testing"
 	"time"
@@ -32,9 +31,6 @@ func driftArgsFor(r *Router) driftArgs {
 // shutdown. The shim is this test process with a socket file nothing listens
 // on, so the reconnect and the shutdown both fail harmlessly after the verdict.
 func TestReconnectShims_DriftCheckUsesTheRoutersFacets(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shim discovery needs unix PID liveness")
-	}
 	for _, tc := range []struct {
 		name  string
 		extra []string
@@ -107,9 +103,6 @@ func TestReconnectShims_DriftCheckUsesTheRoutersFacets(t *testing.T) {
 // polls at 1s); a zeroed or swapped no-output timeout waits minutes and hits
 // the test's own deadline. The total timeout is read back directly.
 func TestReconnectShims_ReconnectCarriesTheRoutersSpawnTimeouts(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shim discovery needs unix PID liveness and unix sockets")
-	}
 	const noOutput, total = time.Millisecond, 97 * time.Minute
 	// A task: session reattached after a restart keeps its own floor, not
 	// the router's configured budget.

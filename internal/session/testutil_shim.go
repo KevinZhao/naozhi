@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"net"
 	"os"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -41,9 +40,6 @@ type FakeShim struct {
 // call t.Parallel.
 func StartFakeShimForTest(t testing.TB, key string, firstSeq int64, backlog []string) *FakeShim {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("shim discovery needs unix PID liveness and unix sockets")
-	}
 	// t.TempDir() on darwin overflows the 104-byte sun_path limit.
 	dir, err := os.MkdirTemp("/tmp", "nz-adopt-")
 	if err != nil {

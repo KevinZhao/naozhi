@@ -19,19 +19,3 @@ func (w *watchdogCounters) noOutPtr() *atomic.Int64 { return &w.noOutput }
 
 // totalPtr returns the shared total-kill counter for by-pointer DI.
 func (w *watchdogCounters) totalPtr() *atomic.Int64 { return &w.total }
-
-// watchdogSnapshot is the read-side view of the kill counters. The two
-// fields are loaded independently, so it is eventually-consistent rather
-// than a single linearization point.
-type watchdogSnapshot struct {
-	NoOutputKills int64
-	TotalKills    int64
-}
-
-// Snapshot returns the current kill counts in one call.
-func (w *watchdogCounters) Snapshot() watchdogSnapshot {
-	return watchdogSnapshot{
-		NoOutputKills: w.noOutput.Load(),
-		TotalKills:    w.total.Load(),
-	}
-}

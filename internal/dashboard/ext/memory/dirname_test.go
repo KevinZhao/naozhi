@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -99,8 +100,8 @@ func TestTryRead_RejectsExplicitMalformedDir(t *testing.T) {
 	}
 	for _, dir := range traversalCases {
 		got, err := h.tryRead(dir, "any-slug")
-		if err == nil {
-			t.Fatalf("tryRead(%q): expected errMemoryPathEscape, got nil", dir)
+		if !errors.Is(err, errMemoryPathEscape) {
+			t.Fatalf("tryRead(%q): err = %v, want errMemoryPathEscape", dir, err)
 		}
 		if got != nil {
 			t.Fatalf("tryRead(%q): expected nil hit on error, got %+v", dir, got)

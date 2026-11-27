@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -113,7 +114,7 @@ func TestTailer_CapacityRejected(t *testing.T) {
 
 	// Fill to the cap.
 	for i := 0; i < agentTailerMax; i++ {
-		taskID := "t" + itoaSmall(i)
+		taskID := "t" + strconv.Itoa(i)
 		_, ok := r.ensureTailer("k", taskID, "toolu", path, nil)
 		if !ok {
 			t.Fatalf("unexpected reject at slot %d", i)
@@ -458,22 +459,6 @@ func TestTailer_FinalizeClosesReaderFD(t *testing.T) {
 			t.Errorf("Shutdown leaked %d open fd(s) for the transcript; finalize must Close the reader", got)
 		}
 	})
-}
-
-// itoaSmall without fmt to keep this file lean (fmt import is already allowed,
-// but this is a micro-helper that's easier to read inline).
-func itoaSmall(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [10]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
 }
 
 // TestTailer_DoneSettled: a workflow tailer is over only after its board has

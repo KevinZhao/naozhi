@@ -31,10 +31,6 @@ func TestUploadStoreOwnership(t *testing.T) {
 	if s.Take(id, "alice") != nil {
 		t.Error("second Take should return nil (already consumed)")
 	}
-}
-
-func TestUploadStoreNotFound(t *testing.T) {
-	s := newUploadStore()
 	if got := s.Take("nonexistent", "alice"); got != nil {
 		t.Error("Take on missing id should return nil")
 	}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"testing"
 	"time"
@@ -53,9 +52,6 @@ func TestReplayLinkerTasks_SkipsWorkflowAndBash(t *testing.T) {
 // an agent-<task_id>.jsonl on disk that Resolve would link. Only the agent
 // task reaches the reattached process's linker.
 func TestReconnectShims_ReplayLinksOnlyAgentTasks(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shim discovery needs unix PID liveness and unix sockets")
-	}
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	ws := filepath.Join(home, "ws")

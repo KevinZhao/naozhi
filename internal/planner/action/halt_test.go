@@ -19,7 +19,7 @@ import (
 
 func TestHaltCancelParse(t *testing.T) {
 	long := strings.Repeat("字", textRunes+1)
-	for _, c := range []struct{ raw, err string }{
+	parseCases(t, []parseCase{
 		{`{"type":"halt","task":"task:ab12","why":"用户说先停下"}`, ""},
 		{`{"type":"halt","task":"feishu:direct:alice:general","why":"用户说停"}`, ""},
 		{`{"type":"cancel","task":"task:ab12","why":"用户说不用做了"}`, ""},
@@ -30,19 +30,7 @@ func TestHaltCancelParse(t *testing.T) {
 		{`{"type":"cancel","task":"task:ab12","why":"w","state":"done"}`, "字段"},
 		{`{"type":"cancel","task":"dashboard:direct:u:general","why":"w"}`, "task: key"},
 		{`{"type":"nope"}`, "halt、cancel"},
-	} {
-		b := Parse(block(c.raw))
-		if len(b) != 1 {
-			t.Fatalf("%s: %d blocks", c.raw, len(b))
-		}
-		ok := b[0].Halt != nil || b[0].Cancel != nil
-		switch {
-		case c.err == "" && (b[0].Err != nil || !ok):
-			t.Errorf("%s: %v", c.raw, b[0].Err)
-		case c.err != "" && (b[0].Err == nil || !strings.Contains(b[0].Err.Error(), c.err) || ok):
-			t.Errorf("%s: err %v, want one with %q and no block", c.raw, b[0].Err, c.err)
-		}
-	}
+	})
 }
 
 // haltRig is a runner with a dispatched task, custody faked, the task

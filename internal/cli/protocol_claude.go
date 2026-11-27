@@ -395,8 +395,7 @@ func (p *ClaudeProtocol) SupportsReplay() bool   { return true }
 // EffortTier=true: BuildArgs forwards SpawnOptions.Effort as `--effort <tier>`
 // (Claude CLI ≥ 2.1.226).
 func (p *ClaudeProtocol) Capabilities() Caps {
-	return Caps{Replay: true, Priority: true, SoftInterrupt: false, StreamJSON: true,
-		EffortTier: true}
+	return Caps{Replay: true, EffortTier: true}
 }
 
 // WriteInterrupt writes the in-band "abort this turn" control_request. The CLI

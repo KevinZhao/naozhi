@@ -2,7 +2,6 @@ package cron
 
 import (
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"sync"
@@ -33,47 +32,6 @@ func (f *fakeRouter) GetOrCreate(ctx context.Context, key string, opts AgentOpts
 	return nil, SessionExisting, f.getErr
 }
 
-// TestP0_OverlapSkippedEmitsTerminalEvent: when the CAS gate rejects a
-// re-entrant execute, finishRun must still fire so the dashboard sees the
-// skip. The callback shape is the contract dashboard.go relies on.
-func TestP0_OverlapSkippedEmitsTerminalEvent(t *testing.T) {
-	t.Parallel()
-	rec := &recordingBroadcaster{}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}, Telemetry: rec})
-
-	// Manually trip the inflight gate as if a run were in flight.
-	inf := s.gateForTest().jobInflight("job-overlap")
-	if !inf.running.CompareAndSwap(false, true) {
-		t.Fatal("initial CAS must succeed")
-	}
-	defer inf.running.Store(false)
-
-	// Now simulate a TriggerNow racing the in-flight run. emitOverlapSkipped
-	// is the synthetic terminal event for this path; it should record one
-	// run-ended with state=skipped + class=overlap_skipped.
-	j := &Job{ID: "job-overlap", Schedule: "@every 5m"}
-	s.putJobForTest(j)
-
-	s.emitOverlapSkipped(j.ID, true)
-
-	if rec.endedCount() != 1 {
-		t.Fatalf("want 1 ended event, got %d", rec.endedCount())
-	}
-	got := rec.endedAtCron(0)
-	if got.State != RunStateSkipped {
-		t.Errorf("state: want skipped, got %q", got.State)
-	}
-	if got.ErrorClass != ErrClassOverlapSkipped {
-		t.Errorf("error_class: want overlap_skipped, got %q", got.ErrorClass)
-	}
-	if got.OwnerID != "job-overlap" {
-		t.Errorf("job_id: want job-overlap, got %q", got.OwnerID)
-	}
-	if got.Trigger != TriggerManual {
-		t.Errorf("trigger: want manual, got %q", got.Trigger)
-	}
-}
-
 // TestP0_RunCountersAdvanceByState: Job.RunCounters bumps by terminal state.
 // Mirrors the list API stats field.
 func TestP0_RunCountersAdvanceByState(t *testing.T) {
@@ -89,41 +47,6 @@ func TestP0_RunCountersAdvanceByState(t *testing.T) {
 	want := JobRunCounters{Total: 6, Succeeded: 2, Failed: 1, Skipped: 1, TimedOut: 1, Canceled: 1}
 	if c != want {
 		t.Errorf("counters: got %+v want %+v", c, want)
-	}
-}
-
-// TestP0_InflightSnapshotReflectsCASState: snapshot returns ok=false when
-// the CAS gate is open, true with populated metadata otherwise. Used by
-// list API's CurrentRun path.
-func TestP0_InflightSnapshotReflectsCASState(t *testing.T) {
-	t.Parallel()
-	inf := &runInflight{}
-	if _, ok := inf.snapshot(); ok {
-		t.Fatal("zero inflight should snapshot as not-running")
-	}
-	if !inf.running.CompareAndSwap(false, true) {
-		t.Fatal("CAS")
-	}
-	// R238-ARCH-3 (#742): writers go through populate / setPhase /
-	// setSessionID instead of touching per-field atomic.Pointers
-	// directly; test exercises the same observable surface.
-	st := time.Now()
-	inf.populate(runInflightView{
-		RunID:     "abc",
-		StartedAt: st,
-		Phase:     PhaseSending,
-		Trigger:   TriggerScheduled,
-	})
-	v, ok := inf.snapshot()
-	if !ok {
-		t.Fatal("running snapshot should return ok=true")
-	}
-	if v.RunID != "abc" || v.Phase != PhaseSending || v.Trigger != TriggerScheduled {
-		t.Errorf("snapshot fields: %+v", v)
-	}
-	inf.running.Store(false)
-	if _, ok := inf.snapshot(); ok {
-		t.Fatal("snapshot must follow CAS gate")
 	}
 }
 
@@ -198,6 +121,3 @@ func TestP0_PreflightWorkdirUnreachableMapsCorrectErrorClass(t *testing.T) {
 		t.Errorf("Reset should not fire when workdir unreachable, got key=%q", router.resetKey)
 	}
 }
-
-// silence unused import errors when running -short selectively
-var _ = errors.New

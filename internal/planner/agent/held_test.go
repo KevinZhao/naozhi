@@ -633,10 +633,6 @@ func TestTellWatchCheckedAsItGoes(t *testing.T) {
 // with none of the patrol's is from receipt as before. The mark is kept in
 // agent.json with the receipt.
 func TestPatrolReceipts(t *testing.T) {
-	if !SourcePatrolReceipt.Alone() || SourcePatrolReceipt.Outside() || SourcePatrolReceipt.Entry() != string(SourceReceipt) {
-		t.Errorf("patrol_receipt: alone %v outside %v entry %q; want a turn of its own, laid out as a receipt", SourcePatrolReceipt.Alone(),
-			SourcePatrolReceipt.Outside(), SourcePatrolReceipt.Entry())
-	}
 	now := time.Date(2026, 11, 16, 14, 0, 0, 0, time.UTC)
 	a, _, turns := heldAgent(t, &now)
 	last := func() (Source, string) { return turns.srcs[len(turns.srcs)-1], turns.sent[len(turns.sent)-1] }
@@ -709,23 +705,5 @@ func TestPatrolReceipts(t *testing.T) {
 	a.reconcile(context.Background())
 	if src, text := last(); src != SourcePatrolReceipt || !strings.Contains(text, "task:p3") {
 		t.Fatalf("the patrol's receipt waiting went from %q: %q", src, text)
-	}
-
-	// PatrolTaskTurn is what the runner reads; a patrol turn proper is not
-	// one, nor the other way round.
-	for _, tc := range []struct {
-		sources      []Source
-		task, patrol bool
-	}{
-		{nil, false, false},
-		{[]Source{SourceReceipt}, false, false},
-		{[]Source{SourcePatrolReceipt}, true, false},
-		{[]Source{SourcePatrol}, false, true},
-		{[]Source{SourcePatrolRefusal}, false, true},
-	} {
-		turns.sources = tc.sources
-		if a.PatrolTaskTurn() != tc.task || a.PatrolTurn() != tc.patrol || a.UnrunTurn() != (len(tc.sources) > 0 && tc.sources[0] == SourcePatrolRefusal) {
-			t.Errorf("%v: task turn %v, patrol turn %v", tc.sources, a.PatrolTaskTurn(), a.PatrolTurn())
-		}
 	}
 }

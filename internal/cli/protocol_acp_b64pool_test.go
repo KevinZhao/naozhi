@@ -3,7 +3,6 @@ package cli
 import (
 	"encoding/base64"
 	"testing"
-	"testing/quick"
 )
 
 // TestEncodeImageBase64_RoundTrip pins R247-PERF-17 correctness: the pooled
@@ -40,23 +39,4 @@ func truncateHead(s string) string {
 		return s[:32]
 	}
 	return s
-}
-
-// TestEncodeImageBase64_QuickRoundTrip is a property-style guard: any byte
-// slice up to 8 KiB encoded via the pooled path must match
-// base64.StdEncoding.EncodeToString. quick.Check defaults to 100 random
-// inputs, deterministic per Go release. R247-PERF-17.
-func TestEncodeImageBase64_QuickRoundTrip(t *testing.T) {
-	t.Parallel()
-	prop := func(b []byte) bool {
-		// Bound the slice to keep the test fast; pool grow/shrink is
-		// already covered by the table above.
-		if len(b) > 8*1024 {
-			b = b[:8*1024]
-		}
-		return encodeImageBase64(b) == base64.StdEncoding.EncodeToString(b)
-	}
-	if err := quick.Check(prop, nil); err != nil {
-		t.Fatalf("quick.Check: %v", err)
-	}
 }

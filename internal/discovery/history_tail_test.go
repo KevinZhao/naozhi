@@ -237,7 +237,7 @@ func TestParseTail_ScanBudgetBoundsIterations(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := parseTail(ctx, f, fakeSize, 0, 10)
+		_, err := parseTailOpts(ctx, f, fakeSize, 0, 10, tailOpts{toolImages: true})
 		done <- err
 	}()
 

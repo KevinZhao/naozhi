@@ -88,7 +88,7 @@ function errorText(res, what) {
 
 // canWrite is whether the section may offer 编辑 / 删除. Another node is
 // read-only whatever its own list says: the primary does not forward a
-// write (node.APIRoutes), and a node reached over a loopback URL (a tunnel,
+// write (node.IsAPIRoute), and a node reached over a loopback URL (a tunnel,
 // a second instance on this host) sees a loopback RemoteAddr and answers
 // writable:true.
 function canWrite() {

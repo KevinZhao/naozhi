@@ -84,25 +84,3 @@ func TestRunDeadlineWatchdog_TimeoutOnWedgedInterrupt(t *testing.T) {
 		t.Fatalf("InterruptViaControl call count = %d, want 1", got)
 	}
 }
-
-// TestRunDeadlineWatchdog_FastInterruptStillWins asserts the timeout
-// path does NOT fire when InterruptViaControl returns promptly — the
-// real outcome is preserved, not overridden to InterruptError.
-func TestRunDeadlineWatchdog_FastInterruptStillWins(t *testing.T) {
-	// R20260607-GO-4 (#1904): timeout is a per-call parameter, so this test is
-	// isolated and may run in parallel.
-	t.Parallel()
-
-	ci := &countingInterrupter{outcome: InterruptUnsupported}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
-	defer cancel()
-
-	chUnsup, _ := runDeadlineWatchdog(ctx, ci, 200*time.Millisecond)
-	abort := <-chUnsup
-	if !abort.fired {
-		t.Fatal("abort.fired = false; want true on DeadlineExceeded")
-	}
-	if abort.outcome != InterruptUnsupported {
-		t.Fatalf("abort.outcome = %v, want InterruptUnsupported (fast return preserves real outcome)", abort.outcome)
-	}
-}

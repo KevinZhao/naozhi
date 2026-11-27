@@ -67,16 +67,3 @@ func TestFallbackDedupKey_DistinguishesFields(t *testing.T) {
 		t.Errorf("Platform change did not affect key: %q", a)
 	}
 }
-
-// TestFallbackDedupKey_PrefixedNamespace pins the "fallback:" prefix so
-// real EventIDs (which never start with "fallback:") cannot collide with
-// the synthetic namespace. The prefix is part of the wire contract for
-// the dedup map; downstream operators inspecting the cache should be
-// able to spot fallback entries at a glance.
-func TestFallbackDedupKey_PrefixedNamespace(t *testing.T) {
-	t.Parallel()
-	got := fallbackDedupKey(platform.IncomingMessage{Platform: "p", ChatID: "c", MessageID: "m"}, time.Unix(0, 0))
-	if got[:9] != "fallback:" {
-		t.Errorf("expected key to start with 'fallback:', got %q", got)
-	}
-}

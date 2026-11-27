@@ -172,16 +172,6 @@ func TestExtractTextAndImages_ThumbnailReturnsEmpty(t *testing.T) {
 	}
 }
 
-// TestExtractText_BackwardCompat confirms the thin wrapper still returns only
-// text and ignores images.
-func TestExtractText_BackwardCompat(t *testing.T) {
-	setThumbnailFn(t, stubThumb)
-	raw := `[{"type":"text","text":"hi"},{"type":"image","source":{"type":"base64","data":"` + b64("x") + `"}}]`
-	if got, _ := extractTextAndImages(json.RawMessage(raw)); got != "hi" {
-		t.Errorf("extractText = %q, want %q", got, "hi")
-	}
-}
-
 // TestParseHistoryLine_UserWithImage covers the parseHistoryLine user branch:
 // an image block must populate EventEntry.Images with a data URI while leaving
 // ImagePaths empty and the summary untouched (so UUID derivation is stable).

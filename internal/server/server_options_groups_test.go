@@ -47,12 +47,13 @@ func TestServerOptions_GroupsReachTheirConsumers(t *testing.T) {
 		Stats struct {
 			WorkspaceID   string `json:"workspace_id"`
 			WorkspaceName string `json:"workspace_name"`
+			VersionTag    string `json:"version_tag"`
 		} `json:"stats"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &sessions); err != nil {
 		t.Fatal(err)
 	}
-	if sessions.Stats.WorkspaceID != "ws-id" || sessions.Stats.WorkspaceName != "ws-name" {
+	if sessions.Stats.WorkspaceID != "ws-id" || sessions.Stats.WorkspaceName != "ws-name" || sessions.Stats.VersionTag != "v9.8.7" {
 		t.Errorf("sessions stats identity = %+v", sessions.Stats)
 	}
 

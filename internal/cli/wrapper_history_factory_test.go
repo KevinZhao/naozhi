@@ -101,44 +101,6 @@ func TestNewHistorySource_FactoryReturningNilUpgradesToNoop(t *testing.T) {
 	}
 }
 
-// TestNewHistorySource_ClaudeWithEmptyDirReturnsNoop pins the
-// claudejsonl factory's degradation rule: an empty ClaudeDir means
-// "no on-disk source available" and must surface as a noop, not as
-// a Source pointed at an empty path that would later fail or — worse
-// — read from the process working directory.
-//
-// This test exercises a stand-in factory that mirrors the real claude
-// factory's empty-dir branch — keeping it in the cli package avoids a
-// circular dependency on claudejsonl while still pinning the contract.
-func TestNewHistorySource_ClaudeWithEmptyDirReturnsNoop(t *testing.T) {
-	t.Parallel()
-	// Mimic the claudejsonl factory's first-line branch.
-	history.RegisterFactory("cli-test-claude-empty", func(s history.SessionView, deps history.Wiring) history.Source {
-		if deps.ClaudeDir == "" {
-			return history.Noop{}
-		}
-		return nil
-	})
-	w := NewWrapperLazy("/bin/false", &ClaudeProtocol{}, "cli-test-claude-empty")
-	// Sanity: factory was registered before NewWrapper.
-	// R240-ARCH-28: lookup happens at NewHistorySource call time, so we
-	// confirm the registry side rather than a Wrapper field.
-	if history.PickFactory(w.BackendID) == nil {
-		t.Fatal("registry did not bind cli-test-claude-empty factory")
-	}
-
-	src := w.NewHistorySource(&fakeHistorySession{
-		key: "k", workspace: "/tmp", sessionID: "sid",
-		chain: []string{"sid"},
-	}, history.Wiring{ClaudeDir: ""})
-	if src == nil {
-		t.Fatal("empty ClaudeDir must yield non-nil noop")
-	}
-	if _, ok := src.(history.Noop); !ok {
-		t.Errorf("empty ClaudeDir factory result = %T; want history.Noop", src)
-	}
-}
-
 // TestNewHistorySource_DepsRoundTrip verifies that all fields of
 // history.Wiring are passed through to the factory unchanged and that
 // the history.SessionView accessors are reachable. The factory is the
@@ -203,18 +165,5 @@ func TestNewHistorySource_DepsRoundTrip(t *testing.T) {
 		if sawChain[i] != id {
 			t.Errorf("chain[%d]=%q want %q", i, sawChain[i], id)
 		}
-	}
-}
-
-// TestPickHistoryFactory_UnknownBackendReturnsNil ensures the lookup
-// path returns nil (not a panic, not a placeholder) for unregistered
-// backends. NewWrapper relies on this nil to leave w.historyFactory
-// unset, which NewHistorySource then handles via its noop fallback.
-func TestPickHistoryFactory_UnknownBackendReturnsNil(t *testing.T) {
-	t.Parallel()
-	// Random-enough id that no registered factory matches.
-	got := history.PickFactory("cli-test-totally-unknown-x9q7")
-	if got != nil {
-		t.Errorf("history.PickFactory(unknown) = %v; want nil", got)
 	}
 }

@@ -505,10 +505,6 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 // Callers MUST defer cleanup() when non-nil or the timer goroutine leaks.
 // DeadlineExceeded is a legitimate per-turn timeout and is NOT extended (#550).
 func resolveReplyCtx(ctx context.Context) (replyCtx context.Context, cleanup func()) {
-	if ctx == nil {
-		// Caller lost its turn ctx; mint a shutdown-budget ctx.
-		return NotifyCtx(context.Background(), NotifyKindShutdown, shutdownReplyTimeout)
-	}
 	if !errors.Is(ctx.Err(), context.Canceled) {
 		return ctx, nil
 	}

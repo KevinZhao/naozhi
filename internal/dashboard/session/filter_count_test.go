@@ -75,16 +75,3 @@ func TestFilterAndCountSnapshots(t *testing.T) {
 		}
 	}
 }
-
-// TestFilterAndCountSnapshotsEmpty guards the trivial path so a future
-// "len(snapshots)==0 short-circuit" optimisation can't accidentally
-// return the wrong slice header.
-func TestFilterAndCountSnapshotsEmpty(t *testing.T) {
-	got, running, ready := filterAndCountSnapshots(nil, time.Now())
-	if len(got) != 0 {
-		t.Errorf("len = %d, want 0", len(got))
-	}
-	if running != 0 || ready != 0 {
-		t.Errorf("running=%d ready=%d, want 0/0", running, ready)
-	}
-}

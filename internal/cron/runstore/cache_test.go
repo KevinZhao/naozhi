@@ -94,34 +94,3 @@ func TestRunStore_WarmCacheLocked_ConcurrentWarmAndGet(t *testing.T) {
 		seen[id] = struct{}{}
 	}
 }
-
-// TestRunStore_WarmCacheLocked_DiscardsRedundantScan asserts the defensive
-// post-scan warm re-check: if the entry is already warm by the time a warmer
-// re-acquires entry.mu, it must discard its own scan rather than re-seed
-// (which would otherwise clobber rows appended in the meantime). Driven via
-// the public warm path so the contract holds end-to-end.
-func TestRunStore_WarmCacheLocked_DiscardsRedundantScan(t *testing.T) {
-	t.Parallel()
-	s := newTestStore(t, 200, 30*24*time.Hour)
-
-	jobID := mustGenerateID()
-	s.Append(makeRun(jobID, time.Now()))
-
-	// First warm seeds the ring.
-	s.warmCacheLocked(jobID)
-	v, _ := s.recentCache.Load(jobID)
-	entry := v.(*recentCacheEntry)
-
-	// A second warm on an already-warm entry must be a no-op (warm check
-	// short-circuits before any disk scan).
-	s.warmCacheLocked(jobID)
-
-	entry.mu.RLock()
-	defer entry.mu.RUnlock()
-	if !entry.warm {
-		t.Fatalf("entry must stay warm")
-	}
-	if entry.count != 1 {
-		t.Fatalf("redundant warm must not change count; got %d want 1", entry.count)
-	}
-}

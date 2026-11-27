@@ -73,26 +73,6 @@ func TestSaveMarshaledSeq_AcceptsAdvancingSeq(t *testing.T) {
 	}
 }
 
-// TestSaveMarshaledSeq_EqualSeqIsDropped verifies the `seq <= last` boundary:
-// two writers sharing the same seq (can't happen in production because
-// persistLocked.Add(1) is monotonic, but contract-test the gate) do not
-// both land. This matters if a future refactor ever reuses a seq value.
-func TestSaveMarshaledSeq_EqualSeqIsDropped(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cron_jobs.json")
-	s := &Scheduler{storePath: path}
-
-	s.saveMarshaledSeq([]byte(`{"first":true}`), 5)
-	// Equal seq — must be dropped (newer-OR-equal landed already).
-	s.saveMarshaledSeq([]byte(`{"second":true}`), 5)
-
-	got, _ := os.ReadFile(path)
-	if string(got) != `{"first":true}` {
-		t.Errorf("equal-seq write overwrote; got %q", got)
-	}
-}
-
 // TestSaveMarshaledSeq_ConcurrentWritersNoRollback stresses the gate with
 // 50 concurrent writers assigned seq=1..50 in arbitrary goroutine schedule.
 // After Wait, the disk MUST hold exactly seq=50's payload. Run with -race

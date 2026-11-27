@@ -242,12 +242,10 @@ func (p *CodexProtocol) WriteUserMessageLocked(w io.Writer, _, text string, imag
 func (p *CodexProtocol) SupportsPriority() bool { return false }
 func (p *CodexProtocol) SupportsReplay() bool   { return false }
 
-// Capabilities: SoftInterrupt via turn/interrupt once a thread exists; not
-// stream-json. EffortTier=false: codex's reasoning control rides on
+// Capabilities: no replay. EffortTier=false: codex's reasoning control rides on
 // `-c model_reasoning_effort=`, a different axis this RFC does not model.
 func (p *CodexProtocol) Capabilities() Caps {
-	return Caps{Replay: false, Priority: false, SoftInterrupt: true, StreamJSON: false,
-		EffortTier: false}
+	return Caps{}
 }
 
 // --- notification decode shapes ---

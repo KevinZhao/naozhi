@@ -241,7 +241,7 @@ func Remove(absPath string) {
 	}
 }
 
-// DefaultRefTTL is the second time-bound applied by GCWithRefs: files
+// DefaultRefTTL is the second time-bound applied by GCDir: files
 // referenced by at least one session's event log survive this long past
 // their last observed reference even if UploadedAt is older than uploadTTL.
 // Operators tighten it via the attachment-gc daemon config.
@@ -262,7 +262,7 @@ const (
 	ReasonRefsExpired ReapReason = "refs_expired"
 )
 
-// GCOptions controls a single GCWithRefs sweep over one workspace.
+// GCOptions controls a single GCDir sweep over one workspace.
 type GCOptions struct {
 	// UploadTTL: files younger than this (UploadedAt, or date-dir for legacy) are kept.
 	UploadTTL time.Duration
@@ -280,7 +280,7 @@ type GCOptions struct {
 	DryRun bool
 }
 
-// GCResult reports the outcome of one GCWithRefs sweep.
+// GCResult reports the outcome of one GCDir sweep.
 type GCResult struct {
 	// Removed is the number of payloads deleted (0 in dry-run).
 	Removed int
@@ -303,8 +303,9 @@ func (r *GCResult) bump(reason ReapReason, fe fs.DirEntry) {
 	}
 }
 
-// GCWithRefs is the refcount-aware reaper. For every payload under
-// <workspace>/.naozhi/attachments/<date>/ it reads the sibling .meta and
+// GCDir is the refcount-aware reaper over an attachment root (the dir
+// PersistIn wrote to, <workspace>/.naozhi/attachments). For every payload
+// under <root>/<date>/ it reads the sibling .meta and
 // keeps the file when
 //
 //	( now - UploadedAt < uploadTTL ) OR
@@ -313,15 +314,6 @@ func (r *GCResult) bump(reason ReapReason, fe fs.DirEntry) {
 // Files without a .meta use the date-directory NAME (not mtime) for the
 // upload-TTL check and count as unreferenced. ctx is honoured per day-dir
 // and per file; on cancellation the partial result is returned with ctx.Err().
-func GCWithRefs(ctx context.Context, workspace string, opts GCOptions) (GCResult, error) {
-	if workspace == "" {
-		return GCResult{}, ErrWorkspaceRequired
-	}
-	return GCDir(ctx, filepath.Join(workspace, Dir), opts)
-}
-
-// GCDir is GCWithRefs over an attachment root itself (the dir PersistIn
-// wrote to) rather than a workspace.
 func GCDir(ctx context.Context, root string, opts GCOptions) (GCResult, error) {
 	var res GCResult
 	// A non-positive UploadTTL would make the keep-branch never fire and reap
@@ -459,7 +451,7 @@ func GCDir(ctx context.Context, root string, opts GCOptions) (GCResult, error) {
 	return res, nil
 }
 
-// shouldKeepAttachment applies the double-TTL rule (see GCWithRefs).
+// shouldKeepAttachment applies the double-TTL rule (see GCDir).
 // Returns (keep, reapReason, err); reapReason is meaningful only when
 // keep==false. Missing .meta falls back to the date-directory time for
 // upload-age and assumes no references.

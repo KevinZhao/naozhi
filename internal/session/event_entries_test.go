@@ -210,24 +210,6 @@ func TestEventEntriesBeforeCtx_NilSourceReturnsEmpty(t *testing.T) {
 	}
 }
 
-func TestEventEntriesBeforeCtx_SourceErrorReturnsMemoryPart(t *testing.T) {
-	// A Source error does not propagate: the reader logs it and returns what
-	// memory held (nothing here). EventPageBeforeCtx is the caller that turns
-	// it into a fail-open hasMore.
-	t.Parallel()
-	s := &ManagedSession{key: "k"}
-	fake := &fakeHistorySource{err: errors.New("disk read failed")}
-	s.SetHistorySource(fake)
-
-	got := s.EventEntriesBeforeCtx(context.Background(), 100, 10)
-	if fake.calls != 1 {
-		t.Errorf("Source must be called exactly once, got %d", fake.calls)
-	}
-	if got != nil {
-		t.Errorf("got %+v, want nil on Source error", got)
-	}
-}
-
 func TestEventEntriesBeforeCtx_LimitZeroShortCircuits(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
@@ -270,15 +252,6 @@ func TestSnapshotChainIDs_OmitsEmptyCurrent(t *testing.T) {
 	got := s.SnapshotChainIDs()
 	if len(got) != 1 || got[0] != "p1" {
 		t.Errorf("got %v, want [p1]", got)
-	}
-}
-
-func TestSnapshotChainIDs_AllEmpty(t *testing.T) {
-	t.Parallel()
-	s := &ManagedSession{key: "k"}
-	got := s.SnapshotChainIDs()
-	if got != nil {
-		t.Errorf("got %v, want nil", got)
 	}
 }
 
@@ -385,32 +358,6 @@ func TestEventEntriesSinceDeadSessionShortCircuit(t *testing.T) {
 	empty.persistedHistorySorted = true
 	if got := empty.EventEntriesSince(0); got != nil {
 		t.Fatalf("empty sorted: got %v want nil", got)
-	}
-}
-
-// TestEventEntriesSinceAppend_EquivalentToSince verifies that the append
-// variant returns the same entries as EventEntriesSince (dead-session path).
-// R112714-PERF-11.
-func TestEventEntriesSinceAppend_EquivalentToSince(t *testing.T) {
-	t.Parallel()
-	s := &ManagedSession{key: "k"}
-	s.persistedHistory = []clievent.EventEntry{
-		{Time: 100, Summary: "a"},
-		{Time: 200, Summary: "b"},
-		{Time: 300, Summary: "c"},
-	}
-	s.persistedHistorySorted = true
-
-	want := s.EventEntriesSince(150)
-	got := s.EventEntriesSinceAppend(nil, 150)
-	if len(got) != len(want) {
-		t.Fatalf("len mismatch: got %d want %d", len(got), len(want))
-	}
-	for i := range want {
-		if got[i].Time != want[i].Time || got[i].Summary != want[i].Summary {
-			t.Errorf("entry[%d]: got {Time:%d Summary:%q} want {Time:%d Summary:%q}",
-				i, got[i].Time, got[i].Summary, want[i].Time, want[i].Summary)
-		}
 	}
 }
 
@@ -540,33 +487,6 @@ func TestEventEntriesSinceAppend_LiveProcessNonEmptyDstReusesBuffer(t *testing.T
 	}
 }
 
-// TestEventEntriesSinceAppend_LiveProcessNonEmptyDstNoSpareGrows verifies the
-// fallback half of the #1922 fix: when the non-empty dst has NO spare capacity,
-// the result still correctly preserves the prefix and folds in the matched
-// entries (append grows into a new backing array).
-func TestEventEntriesSinceAppend_LiveProcessNonEmptyDstNoSpareGrows(t *testing.T) {
-	t.Parallel()
-	s := &ManagedSession{key: "k"}
-	proc := NewTestProcess()
-	proc.InjectHistory([]clievent.EventEntry{
-		{Time: 100, Summary: "a"},
-		{Time: 200, Summary: "b"},
-	})
-	s.storeProcess(proc)
-
-	// len == cap so there is no spare capacity past the prefix.
-	dst := make([]clievent.EventEntry, 0, 1)
-	dst = append(dst, clievent.EventEntry{Time: 1, Summary: "prefix"})
-	got := s.EventEntriesSinceAppend(dst, 0)
-	if len(got) != 3 {
-		t.Fatalf("len=%d want 3 (prefix + a + b)", len(got))
-	}
-	if got[0].Summary != "prefix" || got[1].Summary != "a" || got[2].Summary != "b" {
-		t.Fatalf("entries wrong: got %q,%q,%q want prefix,a,b",
-			got[0].Summary, got[1].Summary, got[2].Summary)
-	}
-}
-
 // TestEventEntriesSinceAppend_LiveProcessReusesBuffer pins R20260604-PERF-25
 // (#1740): on the live-process path an empty (cap>0) dst must have its backing
 // array reused rather than a fresh slice allocated per call. Before the fix the
@@ -630,50 +550,7 @@ func TestEventEntriesBefore_SortedFlagSkipsSort(t *testing.T) {
 	}
 }
 
-// TestEventEntriesBefore_UnsortedFlagFallsBackToSort verifies that when
-// persistedHistorySorted=false, the full stable sort is still applied and
-// the result is correct.
-func TestEventEntriesBefore_UnsortedFlagFallsBackToSort(t *testing.T) {
-	t.Parallel()
-	s := &ManagedSession{key: "k"}
-	// Out-of-order insertion order.
-	s.persistedHistory = []clievent.EventEntry{
-		{Time: 300, Summary: "c"},
-		{Time: 100, Summary: "a"},
-		{Time: 200, Summary: "b"},
-	}
-	s.persistedHistorySorted = false
-
-	got := s.EventEntriesBefore(350, 10)
-	if len(got) != 3 {
-		t.Fatalf("len=%d want 3", len(got))
-	}
-	for i := 1; i < len(got); i++ {
-		if got[i].Time <= got[i-1].Time {
-			t.Errorf("not strictly ascending at index %d: Time %d <= %d",
-				i, got[i].Time, got[i-1].Time)
-		}
-	}
-}
-
-// TestEventEntriesBefore_SortedEmptyReturnsNil checks the nil-return contract
-// for an empty sorted history.
-func TestEventEntriesBefore_SortedEmptyReturnsNil(t *testing.T) {
-	t.Parallel()
-	s := &ManagedSession{key: "k"}
-	s.persistedHistorySorted = true
-	if got := s.EventEntriesBefore(500, 10); got != nil {
-		t.Errorf("empty sorted: got %v want nil", got)
-	}
-}
-
-// TestEventEntriesSinceAppend_BinarySearch_R20260613PERF1 exercises the
-// binary-search optimisation in the dead-session (persistedHistory) branch.
-// Each sub-case asserts that EventEntriesSinceAppend returns exactly the same
-// entries as a reference linear scan (the semantics must be identical to the
-// old O(n) loop).  R20260613-PERF-1.
-
-// helper: linearSince returns entries with Time > afterMS by brute-force scan.
+// linearSince returns entries with Time > afterMS by brute-force scan.
 func linearSince(history []clievent.EventEntry, afterMS int64) []clievent.EventEntry {
 	var out []clievent.EventEntry
 	for _, e := range history {
@@ -698,105 +575,16 @@ func assertEntriesEqual(t *testing.T, label string, got, want []clievent.EventEn
 	}
 }
 
-func TestEventEntriesSinceAppend_BinarySearch_Empty(t *testing.T) {
-	t.Parallel()
-	s := &ManagedSession{key: "k"}
-	s.persistedHistorySorted = true
-	got := s.EventEntriesSinceAppend(nil, 0)
-	if got != nil {
-		t.Errorf("empty history: got %v want nil", got)
-	}
-}
-
-func TestEventEntriesSinceAppend_BinarySearch_AllBelowOrEqual(t *testing.T) {
-	t.Parallel()
-	s := &ManagedSession{key: "k"}
-	s.persistedHistory = []clievent.EventEntry{
-		{Time: 100, Summary: "a"},
-		{Time: 200, Summary: "b"},
-		{Time: 300, Summary: "c"},
-	}
-	s.persistedHistorySorted = true
-	// afterMS == last.Time: strict > means nothing qualifies.
-	got := s.EventEntriesSinceAppend(nil, 300)
-	if got != nil {
-		t.Errorf("all <= afterMS: got %v want nil", got)
-	}
-	// afterMS > last.Time: also nothing.
-	got = s.EventEntriesSinceAppend(nil, 400)
-	if got != nil {
-		t.Errorf("afterMS > last: got %v want nil", got)
-	}
-}
-
-func TestEventEntriesSinceAppend_BinarySearch_AllAbove(t *testing.T) {
-	t.Parallel()
-	s := &ManagedSession{key: "k"}
-	s.persistedHistory = []clievent.EventEntry{
-		{Time: 100, Summary: "a"},
-		{Time: 200, Summary: "b"},
-		{Time: 300, Summary: "c"},
-	}
-	s.persistedHistorySorted = true
-	// afterMS is below all entries: all three should be returned.
-	got := s.EventEntriesSinceAppend(nil, 0)
-	want := linearSince(s.persistedHistory, 0)
-	assertEntriesEqual(t, "all > afterMS=0", got, want)
-}
-
-func TestEventEntriesSinceAppend_BinarySearch_BoundaryExact(t *testing.T) {
-	t.Parallel()
-	// Strict > semantics: afterMS exactly equal to an entry's Time must NOT
-	// include that entry.
-	s := &ManagedSession{key: "k"}
-	s.persistedHistory = []clievent.EventEntry{
-		{Time: 100, Summary: "a"},
-		{Time: 200, Summary: "b"},
-		{Time: 300, Summary: "c"},
-		{Time: 400, Summary: "d"},
-	}
-	s.persistedHistorySorted = true
-
-	// afterMS == 200: only entries with Time 300 and 400 qualify.
-	got := s.EventEntriesSinceAppend(nil, 200)
-	want := linearSince(s.persistedHistory, 200)
-	assertEntriesEqual(t, "boundary exact afterMS=200", got, want)
-}
-
-func TestEventEntriesSinceAppend_BinarySearch_DuplicateTimes(t *testing.T) {
-	t.Parallel()
-	// When multiple entries share the same Time value, the boundary is still
-	// correct: all entries with Time == afterMS are excluded; all with Time
-	// strictly greater are included.
-	s := &ManagedSession{key: "k"}
-	s.persistedHistory = []clievent.EventEntry{
-		{Time: 100, Summary: "a1"},
-		{Time: 100, Summary: "a2"},
-		{Time: 200, Summary: "b1"},
-		{Time: 200, Summary: "b2"},
-		{Time: 300, Summary: "c"},
-	}
-	s.persistedHistorySorted = true
-
-	// afterMS == 100: both b1, b2, c qualify; a1 and a2 do not.
-	got := s.EventEntriesSinceAppend(nil, 100)
-	want := linearSince(s.persistedHistory, 100)
-	assertEntriesEqual(t, "duplicate times afterMS=100", got, want)
-
-	// afterMS == 200: only c qualifies.
-	got = s.EventEntriesSinceAppend(nil, 200)
-	want = linearSince(s.persistedHistory, 200)
-	assertEntriesEqual(t, "duplicate times afterMS=200", got, want)
-}
-
 func TestEventEntriesSinceAppend_BinarySearch_MatchesLinear(t *testing.T) {
 	t.Parallel()
-	// Comprehensive cross-check: binary search result equals the old linear
-	// scan for every possible afterMS boundary in the history.
+	// The dead-session branch binary-searches the sorted history; its result
+	// must equal a linear strict-> scan at every boundary, including on,
+	// between, before and past entries and across duplicate Times.
 	s := &ManagedSession{key: "k"}
 	s.persistedHistory = []clievent.EventEntry{
 		{Time: 10, Summary: "a"},
-		{Time: 20, Summary: "b"},
+		{Time: 20, Summary: "b1"},
+		{Time: 20, Summary: "b2"},
 		{Time: 30, Summary: "c"},
 		{Time: 40, Summary: "d"},
 		{Time: 50, Summary: "e"},

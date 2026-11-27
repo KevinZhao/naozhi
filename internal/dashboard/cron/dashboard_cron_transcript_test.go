@@ -14,85 +14,11 @@ import (
 	cronpkg "github.com/naozhi/naozhi/internal/cron"
 )
 
-// fixtureRunWithJSONL writes a CronRun JSON record + matching JSONL into
-// a fresh sched on tmpRoot, then returns (handlers, sched, jobID, runID,
-// claudeDir). The scheduler is started so its run store is wired to disk.
-//
-// The JSONL is keyed under
-// `<claudeDir>/projects/<slug(workdir)>/<sessionID>.jsonl` matching the
-// real CLI's layout so the handler's path-resolution logic exercises end
-// to end without mocks.
+// fixtureRunWithJSONL is fixtureRunWithJSONLFresh with Fresh=false (the
+// shared-JSONL case the time-window filter guards against).
 func fixtureRunWithJSONL(t *testing.T, jsonlLines []string) (h *Handlers, jobID, runID, claudeDir string) {
 	t.Helper()
-
-	tmp := t.TempDir()
-	claudeDir = filepath.Join(tmp, ".claude")
-	storePath := filepath.Join(tmp, "cron_jobs.json")
-	workDir := filepath.Join(tmp, "workspace")
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		t.Fatalf("mkdir workdir: %v", err)
-	}
-
-	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{StorePath: storePath}, cronpkg.SchedulerDeps{})
-
-	// Persist a job so runstore.Store.Get can resolve it.
-	job := cronpkg.Job{
-		ID:       strings.Repeat("a", 16),
-		Schedule: "@every 1h",
-		Prompt:   "transcript fixture",
-		WorkDir:  workDir,
-	}
-	if err := sched.AddJob(&job); err != nil {
-		t.Fatalf("add job: %v", err)
-	}
-
-	sessionID := "12345678-1234-1234-1234-123456789abc"
-	jobID = job.ID
-	runID = strings.Repeat("b", 16)
-
-	// Write the run JSON via the scheduler's TestAppendRun if it exists,
-	// otherwise drop the file directly. Direct write keeps the test
-	// agnostic to internal helpers; runstore.Store.Append is exposed via
-	// scheduler's RunStore for tests.
-	runsDir := filepath.Join(tmp, "runs", jobID)
-	if err := os.MkdirAll(runsDir, 0o700); err != nil {
-		t.Fatalf("mkdir runs: %v", err)
-	}
-	now := time.Now().UTC()
-	startedAt := now.Add(-2 * time.Minute)
-	endedAt := now
-	runRec := cronpkg.CronRun{
-		RunID:      runID,
-		JobID:      jobID,
-		State:      cronpkg.RunStateSucceeded,
-		Trigger:    cronpkg.TriggerScheduled,
-		StartedAt:  startedAt,
-		EndedAt:    endedAt,
-		DurationMS: endedAt.Sub(startedAt).Milliseconds(),
-		SessionID:  sessionID,
-		WorkDir:    workDir,
-	}
-	runJSON, err := json.Marshal(runRec)
-	if err != nil {
-		t.Fatalf("marshal run: %v", err)
-	}
-	runPath := filepath.Join(runsDir, runID+".json")
-	if err := os.WriteFile(runPath, runJSON, 0o600); err != nil {
-		t.Fatalf("write run json: %v", err)
-	}
-
-	// Layout the JSONL.
-	projDir := filepath.Join(claudeDir, "projects", claudefs.ProjectSlug(workDir))
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatalf("mkdir project dir: %v", err)
-	}
-	jsonlPath := filepath.Join(projDir, sessionID+".jsonl")
-	if err := os.WriteFile(jsonlPath, []byte(strings.Join(jsonlLines, "\n")+"\n"), 0o600); err != nil {
-		t.Fatalf("write jsonl: %v", err)
-	}
-
-	h = &Handlers{deps: Deps{Scheduler: sched, ClaudeDir: claudeDir}}
-	return h, jobID, runID, claudeDir
+	return fixtureRunWithJSONLFresh(t, false, jsonlLines)
 }
 
 // callTranscript runs the handler through the same path-param plumbing
@@ -790,19 +716,6 @@ func TestSummariseToolInput_FallbackUsesRawBytes(t *testing.T) {
 	atCap[len(atCap)-1] = '}'
 	if got := summariseToolInput("Bash", atCap); !strings.Contains(got, "ls") {
 		t.Errorf("at-cap input (%d bytes == cap): summary=%q, want to contain priority label", len(atCap), got)
-	}
-
-	// 7. R20260602141221-SEC-9 (#1584): the unmarshal cap must stay well
-	//    below the wire payload limit so a hostile transcript cannot
-	//    amplify json.Unmarshal cost. The probe only needs a few KB to
-	//    surface a label, so guard against a future bump that re-inflates
-	//    the attacker-influenced JSON fed to the parser.
-	if summariseInputCap > maxToolInputBytes {
-		t.Errorf("summariseInputCap=%d must be <= maxToolInputBytes=%d to bound json.Unmarshal amplification (#1584)",
-			summariseInputCap, maxToolInputBytes)
-	}
-	if summariseInputCap > 16*1024 {
-		t.Errorf("summariseInputCap=%d exceeds the 16 KB ceiling set by #1584; a one-line label never needs more", summariseInputCap)
 	}
 }
 

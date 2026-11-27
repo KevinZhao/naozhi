@@ -3,7 +3,6 @@ package datadir
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -99,17 +98,12 @@ func TestEnsureDir_CreatesAt0700(t *testing.T) {
 	if !fi.IsDir() {
 		t.Fatal("EnsureDir did not create a directory")
 	}
-	if runtime.GOOS != "windows" {
-		if perm := fi.Mode().Perm(); perm != DirMode {
-			t.Errorf("mode = %s, want %s", perm, DirMode)
-		}
+	if perm := fi.Mode().Perm(); perm != DirMode {
+		t.Errorf("mode = %s, want %s", perm, DirMode)
 	}
 }
 
 func TestEnsureDir_TightensLooseMode(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("unix perms only")
-	}
 	base := t.TempDir()
 	dir := filepath.Join(base, "loose")
 	if err := os.Mkdir(dir, 0o755); err != nil {
@@ -125,9 +119,6 @@ func TestEnsureDir_TightensLooseMode(t *testing.T) {
 }
 
 func TestEnsureDir_RejectsSymlink(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink semantics differ on windows")
-	}
 	base := t.TempDir()
 	target := filepath.Join(base, "target")
 	if err := os.Mkdir(target, 0o700); err != nil {

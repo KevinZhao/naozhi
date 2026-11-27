@@ -73,15 +73,3 @@ func TestRunStore_WriteFailedTotalsBumpsOnPermDenied(t *testing.T) {
 		t.Errorf("writeFailedDiskFullTotal must not bump on EACCES: got delta %d", df1-df0)
 	}
 }
-
-// TestRunStore_WriteFailedTotalsNilSafe pins that the exported accessor
-// stays safe to call on a nil receiver — server /health may construct
-// the response before the store is initialised.
-func TestRunStore_WriteFailedTotalsNilSafe(t *testing.T) {
-	t.Parallel()
-	var s *Store
-	df, ot := s.WriteFailedTotals()
-	if df != 0 || ot != 0 {
-		t.Errorf("nil-receiver totals: want (0,0), got (%d,%d)", df, ot)
-	}
-}

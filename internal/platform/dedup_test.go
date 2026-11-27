@@ -48,10 +48,3 @@ func TestDedupEviction(t *testing.T) {
 		t.Error("Seen(b) should return false after double rotation")
 	}
 }
-
-func TestDedupDefaultCap(t *testing.T) {
-	d := NewDedup(0)
-	if d.cap != 10000 {
-		t.Errorf("default cap = %d, want 10000", d.cap)
-	}
-}

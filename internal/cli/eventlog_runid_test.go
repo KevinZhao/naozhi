@@ -131,7 +131,7 @@ func TestEventLogRunID_OrphanedAbortResult(t *testing.T) {
 	p.turn.sendAbandoned = true
 	p.turn.mu.Unlock()
 	p.transition(evSendEnd)
-	if _, ok := p.turn.claimSend("run-b"); !ok {
+	if _, ok := p.turn.claimSendWait(context.Background(), "run-b", time.Second); !ok {
 		t.Fatal("second claim failed")
 	}
 
@@ -149,8 +149,8 @@ func bareTurnProcess(t *testing.T, eventCh chan clievent.Event, run string) *Pro
 	t.Helper()
 	p := &Process{eventLog: ring.NewEventLog(8), eventCh: eventCh, killCh: make(chan struct{})}
 	p.transition(evReadLoopStart)
-	if _, ok := p.turn.claimSend(run); !ok {
-		t.Fatal("claimSend did not claim a Ready process")
+	if _, ok := p.turn.claimSendWait(context.Background(), run, time.Second); !ok {
+		t.Fatal("claimSendWait did not claim a Ready process")
 	}
 	return p
 }

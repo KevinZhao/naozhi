@@ -51,18 +51,6 @@ func TestStripANSI_AllClasses(t *testing.T) {
 	}
 }
 
-// TestStripANSI_NoEscFastPath asserts that strings without any ESC byte
-// take the fast-path return (no regex engine work). Verified by equality:
-// Go strings are immutable, so a same-content return guarantees the
-// caller sees the same backing bytes when the fast-path fires.
-func TestStripANSI_NoEscFastPath(t *testing.T) {
-	in := "no escapes here, even with 中文 and tabs\t"
-	got := stripANSI(in)
-	if got != in {
-		t.Fatalf("stripANSI returned different string for ANSI-free input: got %q want %q", got, in)
-	}
-}
-
 // TestFormatEventLine_StripsANSIInThinking pins #836: when a thinking event
 // echoes terminal output (e.g. the model relays Bash stdout containing
 // hyperlink escapes), the IM banner gets only the visible characters.

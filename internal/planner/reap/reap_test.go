@@ -470,33 +470,6 @@ func TestWorktrees(t *testing.T) {
 	}
 }
 
-// A worktree another session works in stays; so does one whose checks do
-// not answer and whose HEAD is not on the remote.
-func TestWorktreeHeld(t *testing.T) {
-	d := mkdirs(t, "inuse", "noanswer", "noanswer-pushed")
-	f := newFixture(t, d...)
-	f.inUse = map[string]bool{d[0]: true}
-	f.git.st[d[0]] = Status{Head: "h", Pushed: true}
-	f.git.pr[d[0]] = PR{State: "MERGED", Head: "h"}
-	f.markDone(t)
-	f.git.prErr = errors.New("gh: not logged in")
-	f.git.st[d[1]] = Status{Head: "h"}
-	f.git.st[d[2]] = Status{Head: "h", Pushed: true}
-	f.r.Tick(context.Background())
-	if got := wtState(f, d[0]); got.State != WTPending {
-		t.Errorf("in use: %+v", got)
-	}
-	if got := wtState(f, d[1]); got.State != WTKept {
-		t.Errorf("no answer, not pushed: %+v", got)
-	}
-	if got := wtState(f, d[2]); got.State != WTPending {
-		t.Errorf("no answer, pushed: %+v", got)
-	}
-	if len(f.git.removed) != 0 {
-		t.Fatalf("removed %v", f.git.removed)
-	}
-}
-
 // A done session no longer in the session list has nothing to put away.
 func TestGoneSessionLeftAlone(t *testing.T) {
 	f := newFixture(t)

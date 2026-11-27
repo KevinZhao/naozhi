@@ -58,13 +58,3 @@ func TestPrepareInbound_DedupAndGate(t *testing.T) {
 		t.Error("un-mentioned group message must be gated (ok=false)")
 	}
 }
-
-// TestPrepareInbound_EmptyTextDropped verifies the empty-body guard returns
-// ok=false (with no agent prefix → no reply).
-func TestPrepareInbound_EmptyTextDropped(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	if _, ok := d.prepareInbound(context.Background(), incomingMsg("   ")); ok {
-		t.Error("whitespace-only message must be dropped (ok=false)")
-	}
-}

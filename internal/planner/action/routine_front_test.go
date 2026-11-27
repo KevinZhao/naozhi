@@ -120,7 +120,7 @@ func TestRoutineRefused(t *testing.T) {
 }
 
 func TestRoutineParse(t *testing.T) {
-	for _, c := range []struct{ raw, err string }{
+	parseCases(t, []parseCase{
 		{`{"type":"routine","title":"t","workspace":"w","schedule":"0 9 * * 1-5","prompt":"p"}`, ""},
 		{`{"type":"routine","id":"abc","off":false}`, ""},
 		{`{"type":"routine","title":"t","workspace":"w","schedule":"@daily"}`, "prompt"},
@@ -136,18 +136,7 @@ func TestRoutineParse(t *testing.T) {
 		{`{"type":"routine","title":"t","workspace":"w","schedule":"@daily","prompt":"p","off":true}`, "只和 id 一起用"},
 		{`{"type":"routine","title":"t","workspace":"w","schedule":"@daily","prompt":"p","delete":true}`, "只和 id 一起用"},
 		{`{"type":"routine","title":"t","workspace":"w","schedule":"@daily","prompt":"` + strings.Repeat("字", routinePromptRunes+1) + `"}`, "prompt"},
-	} {
-		b := Parse(block(c.raw))
-		if len(b) != 1 {
-			t.Fatalf("%s: %d blocks", c.raw, len(b))
-		}
-		switch {
-		case c.err == "" && (b[0].Err != nil || b[0].Routine == nil):
-			t.Errorf("%s: %v", c.raw, b[0].Err)
-		case c.err != "" && (b[0].Err == nil || !strings.Contains(b[0].Err.Error(), c.err)):
-			t.Errorf("%s: err %v, want one with %q", c.raw, b[0].Err, c.err)
-		}
-	}
+	})
 }
 
 // fronter wires r's Front and records the updates.
@@ -223,7 +212,7 @@ func TestFrontRefused(t *testing.T) {
 }
 
 func TestFrontParse(t *testing.T) {
-	for _, c := range []struct{ raw, err string }{
+	parseCases(t, []parseCase{
 		{`{"type":"front","id":"jd-tgw","name":"JD","state":"s","next":"n","waiting":"w","sessions":["k"],"decision":"d","close":false}`, ""},
 		{`{"type":"front","id":"jd-tgw","close":true}`, ""},
 		{`{"type":"front","id":"JD TGW","name":"x"}`, "id"},
@@ -231,16 +220,5 @@ func TestFrontParse(t *testing.T) {
 		{`{"type":"front","id":"a","state":"` + strings.Repeat("字", front.TextRunes+1) + `"}`, "state"},
 		{`{"type":"front","id":"a","sessions":[""]}`, "sessions"},
 		{`{"type":"front","id":"a","workspace":"w"}`, "字段"},
-	} {
-		b := Parse(block(c.raw))
-		if len(b) != 1 {
-			t.Fatalf("%s: %d blocks", c.raw, len(b))
-		}
-		switch {
-		case c.err == "" && (b[0].Err != nil || b[0].Front == nil):
-			t.Errorf("%s: %v", c.raw, b[0].Err)
-		case c.err != "" && (b[0].Err == nil || !strings.Contains(b[0].Err.Error(), c.err)):
-			t.Errorf("%s: err %v, want one with %q", c.raw, b[0].Err, c.err)
-		}
-	}
+	})
 }

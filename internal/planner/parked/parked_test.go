@@ -74,7 +74,7 @@ func TestPark(t *testing.T) {
 	if _, err := s.Park("x", ""); err == nil {
 		t.Error("parked without a source")
 	}
-	data, _ := os.ReadFile(s.Path())
+	data, _ := os.ReadFile(s.path)
 	text := string(data)
 	if !strings.HasPrefix(text, "# 搁置区\n") || strings.Count(text, "家里网络") != 1 ||
 		!strings.Contains(text, "- 家里网络 换不换路由器（出处：11-14 15:25 用户说） · 移入 2026-11-16 · 你说放下\n") {
@@ -83,7 +83,7 @@ func TestPark(t *testing.T) {
 	// The user's own note and a deletion.
 	text = strings.Replace(text, "# 搁置区\n", "# 搁置区\n我的备注\n", 1)
 	text += "- CDE 要不要做（出处：#3800） · 移入 2026-11-10\n"
-	if err := os.WriteFile(s.Path(), []byte(text), 0o600); err != nil {
+	if err := os.WriteFile(s.path, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if list, _ := s.List(); len(list) != 2 {
@@ -92,7 +92,7 @@ func TestPark(t *testing.T) {
 	if _, err := s.Park("M1", "#3901"); err != nil {
 		t.Fatal(err)
 	}
-	data, _ = os.ReadFile(s.Path())
+	data, _ = os.ReadFile(s.path)
 	if got := string(data); !strings.Contains(got, "我的备注\n") || strings.Count(got, "# 搁置区") != 1 || !strings.Contains(got, "CDE") {
 		t.Fatalf("parked.md lost the user's lines: %q", got)
 	}

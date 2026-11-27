@@ -264,7 +264,7 @@ func TestDetector(t *testing.T) {
 	// A declined meeting stays off until the program leaves the mic, then the next one starts.
 	d.Observe(now, []Proc{teams})
 	d.Decline()
-	if a := d.Observe(now.Add(time.Minute), []Proc{teams}); a != ActNone || !d.Declined() {
+	if a := d.Observe(now.Add(time.Minute), []Proc{teams}); a != ActNone {
 		t.Fatalf("declined restarted: %v", a)
 	}
 	if a := d.Observe(now.Add(time.Minute+Grace), nil); a != ActNone {

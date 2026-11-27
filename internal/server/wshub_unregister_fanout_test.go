@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"sync/atomic"
 	"testing"
 
@@ -9,57 +10,35 @@ import (
 
 // TestUnregister_RemoveClientFanOut: Hub.unregister tells every remote
 // node to drop the client (#1356), so no node keeps a ghost subscription.
+// One node takes the no-goroutine fast path; several fan out.
 func TestUnregister_RemoveClientFanOut(t *testing.T) {
-	const numNodes = 5
+	for _, numNodes := range []int{1, 5} {
+		t.Run(fmt.Sprint(numNodes), func(t *testing.T) {
+			hub, _ := newTestHub(t, "")
+			t.Cleanup(hub.Shutdown)
 
-	hub, _ := newTestHub(t, "")
-	t.Cleanup(hub.Shutdown)
+			stubs := make([]*recordingFanoutNode, 0, numNodes)
+			for i := 0; i < numNodes; i++ {
+				s := &recordingFanoutNode{fakeCapNode: fakeCapNode{id: "fanout"}}
+				stubs = append(stubs, s)
+				hub.nodes.Add(fmt.Sprintf("stub-%d", i), s)
+			}
 
-	stubs := make([]*recordingFanoutNode, 0, numNodes)
-	for i := 0; i < numNodes; i++ {
-		s := &recordingFanoutNode{fakeCapNode: fakeCapNode{id: "fanout"}}
-		stubs = append(stubs, s)
-		// Distinct keys so the registry holds all N entries.
-		hub.nodes.Add(stubKey(i), s)
-	}
+			c := &wsClient{}
+			hub.register(c)
+			hub.unregister(c)
 
-	c := &wsClient{}
-	hub.register(c)
-	hub.unregister(c)
-
-	for i, s := range stubs {
-		if got := s.calls.Load(); got != 1 {
-			t.Errorf("stub %d: RemoveClient called %d times, want 1", i, got)
-		}
-	}
-}
-
-// TestUnregister_RemoveClientSingleNode pins that the fast path
-// (len(nodes) == 1) still invokes RemoveClient exactly once. The
-// single-node branch skips the goroutine spawn for the steady-state
-// deployment where fan-out has no benefit.
-func TestUnregister_RemoveClientSingleNode(t *testing.T) {
-	hub, _ := newTestHub(t, "")
-	t.Cleanup(hub.Shutdown)
-
-	stub := &recordingFanoutNode{
-		fakeCapNode: fakeCapNode{id: "single"},
-	}
-	hub.nodes.Add("single", stub)
-
-	c := &wsClient{}
-	hub.register(c)
-
-	hub.unregister(c)
-
-	if got := stub.calls.Load(); got != 1 {
-		t.Errorf("single-node RemoveClient called %d times, want 1", got)
+			for i, s := range stubs {
+				if got := s.calls.Load(); got != 1 {
+					t.Errorf("stub %d: RemoveClient called %d times, want 1", i, got)
+				}
+			}
+		})
 	}
 }
 
-// recordingFanoutNode embeds the full-surface fakeCapNode stub from
-// select_node_for_backend_test.go and overrides only RemoveClient to
-// record invocation counts.
+// recordingFanoutNode embeds the full-surface fakeCapNode stub and overrides
+// only RemoveClient to record invocation counts.
 type recordingFanoutNode struct {
 	fakeCapNode
 	calls atomic.Int64
@@ -67,12 +46,4 @@ type recordingFanoutNode struct {
 
 func (r *recordingFanoutNode) RemoveClient(_ node.EventSink) {
 	r.calls.Add(1)
-}
-
-func stubKey(i int) string {
-	// Distinct map keys per stub so all entries survive in hub.nodes.
-	const tmpl = "stub-fanout-x"
-	b := []byte(tmpl)
-	b[len(b)-1] = byte('0' + i)
-	return string(b)
 }

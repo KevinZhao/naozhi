@@ -45,7 +45,7 @@ func (h *Handlers) HandleNotes(w http.ResponseWriter, r *http.Request) {
 // §15.22 ②). The mark is journaled and the Planner told. Only this node's
 // sessions: the note is looked up in this node's journal, so one written on
 // another node is not found. The route is deliberately not among a node's
-// api routes (node.APIRoutes): the primary's page shows a remote session's
+// api routes (node.IsAPIRoute): the primary's page shows a remote session's
 // notes without 没用, which is clicked on that node's own page.
 func (h *Handlers) HandleNoteUseless(w http.ResponseWriter, r *http.Request) {
 	var req struct {

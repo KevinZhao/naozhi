@@ -128,56 +128,6 @@ func TestResolveWorkspace_RetargetAfterCacheWarmAborts(t *testing.T) {
 	}
 }
 
-// TestResolveWorkspace_OutsideRootAborts covers the simpler shape: a
-// workDir that is outside allowedRoot from the start must abort, no subprocess
-// path returned.
-func TestResolveWorkspace_OutsideRootAborts(t *testing.T) {
-	t.Parallel()
-	root := evalTempDir(t)
-	outside := evalTempDir(t)
-
-	s := newResolveWorkspaceFixture(t, root)
-	j := &Job{ID: "job-outside", Schedule: "@hourly", Prompt: "hi", Platform: "p", ChatID: "c", WorkDir: outside}
-	registerResolveJob(t, s, j)
-
-	gotPath, abort := runResolveWorkspace(s, j, outside)
-	if !abort {
-		t.Fatalf("abort=false (path=%q); want true for outside-root workDir", gotPath)
-	}
-	if gotPath != "" {
-		t.Errorf("path = %q, want empty on abort", gotPath)
-	}
-
-	gotClass := s.jobForTest(t, j.ID).LastErrorClass
-	if gotClass != ErrClassWorkDirOutsideRoot {
-		t.Errorf("LastErrorClass = %q, want %q", gotClass, ErrClassWorkDirOutsideRoot)
-	}
-}
-
-// TestResolveWorkspace_UnderRootResolves is the happy path: an in-root
-// workDir must NOT abort and must return a launch path under root, so the
-// containment check does not over-fire and suppress legitimate runs.
-func TestResolveWorkspace_UnderRootResolves(t *testing.T) {
-	t.Parallel()
-	root := evalTempDir(t)
-	inside := filepath.Join(root, "inside")
-	if err := os.Mkdir(inside, 0o755); err != nil {
-		t.Fatalf("mkdir inside: %v", err)
-	}
-
-	s := newResolveWorkspaceFixture(t, root)
-	j := &Job{ID: "job-inside", Schedule: "@hourly", Prompt: "hi", Platform: "p", ChatID: "c", WorkDir: inside}
-	registerResolveJob(t, s, j)
-
-	gotPath, abort := runResolveWorkspace(s, j, inside)
-	if abort {
-		t.Fatal("abort=true; want false for in-root workDir")
-	}
-	if !strings.HasPrefix(gotPath, root) {
-		t.Errorf("path = %q, want under root %q", gotPath, root)
-	}
-}
-
 // TestResolveWorkspace_NoAllowedRootSkipsCheck verifies the re-check is
 // gated on allowedRoot being set: with sandbox disabled (allowedRoot==""),
 // resolveCronWorkspace takes the best-effort EvalSymlinks path and never

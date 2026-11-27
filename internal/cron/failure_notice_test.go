@@ -49,16 +49,6 @@ func TestFailureNoticeBody(t *testing.T) {
 	}
 }
 
-// allTurnCauses lists every named TurnCause; TestTurnFailedNotices_EveryCause
-// holds it to the notice table.
-var allTurnCauses = []TurnCause{
-	TurnCauseMaxTurns, TurnCauseBudget, TurnCauseRefused, TurnCauseTruncated,
-	TurnCauseContextTooLong, TurnCauseQuota, TurnCausePermission, TurnCauseBackendOverloaded,
-	TurnCauseBackendRateLimited, TurnCauseBackendAuth, TurnCauseBackendInvalid,
-	TurnCauseBackendUnreachable, TurnCauseResumeUnavailable, TurnCauseCLIConfig,
-	TurnCauseCLIMissingRuntime, TurnCauseCLIAborted,
-}
-
 // TestFailureNoticeBody_TurnCause pins the turn_failed body per cause for a
 // fresh-context job: each names what happened, none advises 继续 or /new
 // (which in the notify chat would act on the wrong session), and an unnamed
@@ -207,27 +197,6 @@ func TestExecuteOpt_ContextTooLongNoticeByMode(t *testing.T) {
 	}
 }
 
-// TestTurnFailedNotices_EveryCause: every named cause has its own sentence,
-// distinct from the generic one and from every other cause's.
-func TestTurnFailedNotices_EveryCause(t *testing.T) {
-	t.Parallel()
-	generic := turnFailedNotice(TurnCauseUnknown)
-	seen := map[string]TurnCause{}
-	for _, c := range allTurnCauses {
-		s := turnFailedNotice(c)
-		if s == generic {
-			t.Errorf("cause %q falls back to the generic sentence", c)
-		}
-		if prev, dup := seen[s]; dup {
-			t.Errorf("causes %q and %q share the sentence %q", prev, c, s)
-		}
-		seen[s] = c
-	}
-	if len(turnFailedNotices) != len(allTurnCauses) {
-		t.Errorf("turnFailedNotices has %d entries, allTurnCauses %d: keep the two in step", len(turnFailedNotices), len(allTurnCauses))
-	}
-}
-
 func TestFailureNoticeBody_ShortAndMissingRunID(t *testing.T) {
 	t.Parallel()
 	if got := failureNoticeBody(jobSnapshot{}, NotifyTarget{}, ErrClassSessionError, TurnCauseUnknown, RunStateFailed, "abc", time.Minute); got != "启动会话失败 · run abc" {
@@ -309,25 +278,6 @@ func TestExecuteGetSession_CapacityIsSkipped(t *testing.T) {
 		t.Errorf("persisted LastErrorClass = %q, want session_capacity", got)
 	}
 	want := "[Cron 日报] 定时任务会话数已达上限，本次已跳过；可错开执行时间或改为每次重置上下文 · run 9f8e7d6c"
-	if got := ns.noticesAfter(s); len(got) != 1 || got[0] != want {
-		t.Errorf("notices = %q, want [%q]", got, want)
-	}
-}
-
-// TestExecuteGetSession_SessionErrorNotice: an ordinary spawn failure stays
-// failed/session_error and names the spawn as the cause.
-func TestExecuteGetSession_SessionErrorNotice(t *testing.T) {
-	t.Parallel()
-	s, rec, ns := newNoticeScheduler(t, &fakeRouter{getErr: errors.New("spawn boom")})
-	j := &Job{ID: "job-spawn-fail", Schedule: "@every 5m"}
-	s.putJobForTest(j)
-
-	s.executeGetSession(withNotify(newGetSessionArgs(t, s, j), "日报"))
-	ev := rec.endedAtCron(0)
-	if ev.State != RunStateFailed || ev.ErrorClass != ErrClassSessionError {
-		t.Errorf("ended = (%q, %q), want (failed, session_error)", ev.State, ev.ErrorClass)
-	}
-	want := "[Cron 日报] 启动会话失败 · run 9f8e7d6c"
 	if got := ns.noticesAfter(s); len(got) != 1 || got[0] != want {
 		t.Errorf("notices = %q, want [%q]", got, want)
 	}

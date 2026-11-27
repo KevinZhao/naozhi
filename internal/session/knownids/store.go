@@ -18,7 +18,6 @@ package knownids
 
 import (
 	"encoding/json"
-	"fmt"
 	"slices"
 	"sync"
 	"time"
@@ -28,9 +27,6 @@ import (
 // still-active ID is never dropped ahead of older ones. UUIDs are 36 bytes,
 // so 10K entries cost ~360KB in memory.
 const MaxKnownIDs = 10000
-
-// marshalJSON is swapped by tests to exercise the marshal-error path.
-var marshalJSON = json.Marshal
 
 // Store is the known-session-ID container; the zero value is ready to use
 // and must not be copied after first use.
@@ -99,7 +95,7 @@ func (s *Store) SortedSnapshot() []string {
 
 // MarshalSnapshot returns the sorted set as JSON regardless of dirty or
 // throttle state (Shutdown's final save). The bytes are a fresh copy.
-func (s *Store) MarshalSnapshot() ([]byte, error) {
+func (s *Store) MarshalSnapshot() []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.marshaledLocked()
@@ -109,21 +105,15 @@ func (s *Store) MarshalSnapshot() ([]byte, error) {
 // least interval has elapsed since the previous claim it stamps savedAt=now
 // and returns the sorted JSON plus the gen it reflects, with due=true.
 // The caller writes the bytes outside every lock, then calls
-// MarkSavedIfUnchanged(gen) on success or ResetSaveThrottle on failure. A
-// marshal error releases the claim so the next tick retries.
-func (s *Store) ClaimSave(now time.Time, interval time.Duration) (data []byte, gen uint64, due bool, err error) {
+// MarkSavedIfUnchanged(gen) on success or ResetSaveThrottle on failure.
+func (s *Store) ClaimSave(now time.Time, interval time.Duration) (data []byte, gen uint64, due bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.dirty || now.Sub(s.savedAt) < interval {
-		return nil, 0, false, nil
+		return nil, 0, false
 	}
 	s.savedAt = now
-	data, err = s.marshaledLocked()
-	if err != nil {
-		s.savedAt = time.Time{}
-		return nil, 0, false, err
-	}
-	return data, s.gen, true, nil
+	return s.marshaledLocked(), s.gen, true
 }
 
 // MarkSavedIfUnchanged clears dirty iff gen still equals snapshotGen (the
@@ -198,12 +188,9 @@ func (s *Store) sortedLocked() []string {
 }
 
 // marshaledLocked returns the sorted set as freshly allocated JSON.
-func (s *Store) marshaledLocked() ([]byte, error) {
-	data, err := marshalJSON(s.sortedLocked())
-	if err != nil {
-		return nil, fmt.Errorf("marshal known IDs: %w", err)
-	}
-	return data, nil
+func (s *Store) marshaledLocked() []byte {
+	data, _ := json.Marshal(s.sortedLocked()) // a []string always marshals
+	return data
 }
 
 func (s *Store) ensureIDs() {

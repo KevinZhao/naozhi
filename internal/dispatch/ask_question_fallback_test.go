@@ -11,7 +11,7 @@ import (
 // without native question cards receives, byte for byte.
 func TestSendAskQuestionFallback_Text(t *testing.T) {
 	t.Parallel()
-	fp := &fakeInterimPlatform{}
+	fp := &fakePlatform{supportsInterim: true}
 	tr := &replyTracker{p: fp, to: ReplyDest{ChatID: "chat1"}}
 	tr.sendAskQuestionFallback(context.Background(), &clievent.AskQuestion{
 		ToolUseID: "t1",

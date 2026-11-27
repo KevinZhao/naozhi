@@ -140,14 +140,14 @@ func TestRemove_SilentOnMissing(t *testing.T) {
 }
 
 // The TestGC_* tests below exercise the legacy-fallback path of
-// GCWithRefs: attachments with NO .meta sidecar, decided purely by the
+// GCDir: attachments with NO .meta sidecar, decided purely by the
 // date-directory upload-TTL heuristic. The standalone legacy GC()
 // function was removed (docs/rfc/attachment-gc-daemon.md §3.1) — its
-// behaviour is a strict subset of GCWithRefs's meta==nil branch, so
+// behaviour is a strict subset of GCDir's meta==nil branch, so
 // these cases now run through the production reaper.
 
 func legacyGC(ws string, ttl time.Duration, now time.Time) (int, error) {
-	res, err := GCWithRefs(context.Background(), ws, GCOptions{
+	res, err := gcWorkspace(context.Background(), ws, GCOptions{
 		UploadTTL: ttl,
 		RefTTL:    DefaultRefTTL,
 		Now:       now,
@@ -179,7 +179,7 @@ func TestGC_DropsOldDatesKeepsRecent(t *testing.T) {
 	now := time.Date(2026, 5, 6, 12, 0, 0, 0, time.UTC)
 	n, err := legacyGC(ws, 7*24*time.Hour, now)
 	if err != nil {
-		t.Fatalf("GCWithRefs: %v", err)
+		t.Fatalf("GCDir: %v", err)
 	}
 	if n != 1 {
 		t.Errorf("removed=%d want=1", n)
@@ -198,7 +198,7 @@ func TestGC_NoAttachmentDirIsNotAnError(t *testing.T) {
 	ws := t.TempDir()
 	n, err := legacyGC(ws, time.Hour, time.Now())
 	if err != nil {
-		t.Errorf("GCWithRefs on empty workspace returned err=%v", err)
+		t.Errorf("GCDir on empty workspace returned err=%v", err)
 	}
 	if n != 0 {
 		t.Errorf("removed=%d want=0", n)
@@ -215,7 +215,7 @@ func TestGC_IgnoresNonDateDirectories(t *testing.T) {
 	}
 	n, err := legacyGC(ws, time.Hour, time.Now().Add(1000*time.Hour))
 	if err != nil {
-		t.Fatalf("GCWithRefs: %v", err)
+		t.Fatalf("GCDir: %v", err)
 	}
 	if n != 0 {
 		t.Errorf("removed=%d want=0", n)

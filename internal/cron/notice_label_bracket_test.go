@@ -75,12 +75,6 @@ func TestFormatCronNoticeBodyMarkdownEscape(t *testing.T) {
 	body := "click [here](http://attacker) to win"
 	got := formatCronNotice("ok", body)
 
-	// None of `[` `(` `)` from the body should survive in the output.
-	if strings.ContainsAny(got, "[(") {
-		// `]` test stays separate — the template emits one trailing `]`.
-		// Strip the template `]` from the prefix `[Cron ok]` for the
-		// `[` check by scanning beyond the template-known prefix bytes.
-	}
 	// Body-portion check: the output is "[Cron ok] " + escaped body.
 	// Slice past the template prefix bytes to inspect just the body.
 	const prefix = "[Cron ok] "

@@ -8,25 +8,6 @@ import "strings"
 // keyNamespaces table (key.go) and the max*Exempt constants
 // (router_core.go). They touch no Router state.
 
-// exemptKeyPrefixes lists the session-key namespaces that are exempt from
-// TTL expiry, LRU eviction, and the active-process counter. Rebuilt at
-// package init from keyNamespaces (key.go) so the reserved + exempt lists
-// share a single source of truth; toggle the `exempt` flag there.
-//
-// Scratch keys are deliberately NOT exempt — they must pay the normal TTL /
-// eviction cost (ScratchPool manages its own lifetime on top). SysKeyPrefix
-// is exempt so system daemon stubs outlive TTL/LRU pressure
-// (docs/rfc/system-session.md).
-var exemptKeyPrefixes = func() []string {
-	out := make([]string, 0, len(keyNamespaces))
-	for _, ns := range keyNamespaces {
-		if ns.exempt {
-			out = append(out, ns.prefix)
-		}
-	}
-	return out
-}()
-
 // exemptInfo scans keyNamespaces once and reports both whether key belongs
 // to an exempt namespace and that namespace's kind label, so callers that
 // need both answers (reserveSpawn) pay for a single prefix scan.

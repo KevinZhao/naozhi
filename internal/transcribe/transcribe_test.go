@@ -111,7 +111,7 @@ func (m *mockTranscribeAPI) StartStreamTranscription(
 
 func TestStreamTranscribe_StartError(t *testing.T) {
 	wantErr := errors.New("service unavailable")
-	svc := newWithClient(&mockTranscribeAPI{err: wantErr}, Config{})
+	svc := &awsService{client: &mockTranscribeAPI{err: wantErr}, cfg: Config{LanguageCode: "zh-CN"}}
 
 	_, err := svc.streamFromBuffer(context.Background(), []byte("fake-audio"), "audio/ogg")
 	if err == nil {
@@ -119,18 +119,6 @@ func TestStreamTranscribe_StartError(t *testing.T) {
 	}
 	if !errors.Is(err, wantErr) {
 		t.Errorf("error = %v, want wrapped %v", err, wantErr)
-	}
-}
-
-func TestNewWithClient_DefaultLanguageCode(t *testing.T) {
-	svc := newWithClient(&mockTranscribeAPI{}, Config{})
-	if svc.cfg.LanguageCode != "zh-CN" {
-		t.Errorf("default LanguageCode = %q, want %q", svc.cfg.LanguageCode, "zh-CN")
-	}
-
-	svc2 := newWithClient(&mockTranscribeAPI{}, Config{LanguageCode: "en-US"})
-	if svc2.cfg.LanguageCode != "en-US" {
-		t.Errorf("LanguageCode = %q, want %q", svc2.cfg.LanguageCode, "en-US")
 	}
 }
 
@@ -153,7 +141,6 @@ func TestBuildInput(t *testing.T) {
 		wantPreferred string
 	}{
 		{"single language", "zh-CN", false, "zh-CN", "", ""},
-		{"default", "", false, "zh-CN", "", ""},
 		{"two languages", "zh-CN,en-US", true, "", "zh-CN,en-US", "zh-CN"},
 		{"spaces normalized", "zh-CN, en-US , ja-JP", true, "", "zh-CN,en-US,ja-JP", "zh-CN"},
 		{"degrade: trailing comma", "zh-CN,", true, "zh-CN", "", ""},
@@ -163,7 +150,7 @@ func TestBuildInput(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc := newWithClient(&mockTranscribeAPI{}, Config{LanguageCode: tt.lang})
+			svc := &awsService{client: &mockTranscribeAPI{}, cfg: Config{LanguageCode: tt.lang}}
 			// The degrade cases DO trip isMultiLang (they contain a comma),
 			// which is exactly why the degrade path matters.
 			if got := svc.isMultiLang(); got != tt.wantMultiLang {

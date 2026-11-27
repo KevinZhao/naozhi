@@ -522,14 +522,11 @@ func (r *Router) Cleanup() {
 	// Known IDs live off the table lock. ClaimSave stamps savedAt so a concurrent
 	// saveIfDirty tick skips the redundant work (an I/O budget gate, not a
 	// file-level race guard: tmp files are unique per WriteFileAtomic call).
-	knownIDsCopy, snapshotKnownIDsGen, knownIDsDue, knownIDsMarshalErr := r.kid.ClaimSave(now, knownIDsSaveInterval)
+	knownIDsCopy, snapshotKnownIDsGen, knownIDsDue := r.kid.ClaimSave(now, knownIDsSaveInterval)
 
 	// Periodic save outside any transaction to reduce crash-recovery data loss.
 	r.saveDirty(snap)
-	if knownIDsMarshalErr != nil {
-		// ClaimSave already released the throttle; dirty stays set.
-		slog.Warn("periodic known IDs marshal failed", "err", knownIDsMarshalErr)
-	} else if knownIDsDue {
+	if knownIDsDue {
 		if err := saveKnownIDsBytes(snap.storePath, knownIDsCopy); err != nil {
 			logStoreSaveFailure("periodic known IDs save failed", err)
 			r.kid.ResetSaveThrottle()
@@ -709,13 +706,10 @@ func (r *Router) saveIfDirty() {
 	// Known IDs live off the table lock. ClaimSave checks the throttle and stamps
 	// savedAt in one critical section, so two ticks cannot both claim the
 	// same save window and double-write the file.
-	knownIDsCopy, snapshotKnownIDsGen, knownIDsDue, knownIDsMarshalErr := r.kid.ClaimSave(time.Now(), knownIDsSaveInterval)
+	knownIDsCopy, snapshotKnownIDsGen, knownIDsDue := r.kid.ClaimSave(time.Now(), knownIDsSaveInterval)
 
 	r.saveDirty(snap)
-	if knownIDsMarshalErr != nil {
-		// ClaimSave already released the throttle; dirty stays set.
-		slog.Warn("periodic known IDs marshal failed", "err", knownIDsMarshalErr)
-	} else if knownIDsDue {
+	if knownIDsDue {
 		if err := saveKnownIDsBytes(snap.storePath, knownIDsCopy); err != nil {
 			logStoreSaveFailure("periodic known IDs save failed", err)
 			r.kid.ResetSaveThrottle()
@@ -829,7 +823,7 @@ func (r *Router) shutdown() {
 	}
 
 	// Known IDs live off the table lock; the final save is unthrottled.
-	knownIDsCopy, knownIDsMarshalErr := r.kid.MarshalSnapshot()
+	knownIDsCopy := r.kid.MarshalSnapshot()
 
 	// Save session state outside the transaction (no JSON marshal or file I/O
 	// under the table lock).
@@ -838,9 +832,7 @@ func (r *Router) shutdown() {
 	if err := saveStore(storePath, sessionsCopy); err != nil {
 		slog.Error("save session store on shutdown", "err", err, "disk_full", osutil.IsDiskFull(err))
 	}
-	if knownIDsMarshalErr != nil {
-		slog.Error("marshal known session IDs on shutdown", "err", knownIDsMarshalErr)
-	} else if err := saveKnownIDsBytes(storePath, knownIDsCopy); err != nil {
+	if err := saveKnownIDsBytes(storePath, knownIDsCopy); err != nil {
 		slog.Error("save known session IDs on shutdown", "err", err, "disk_full", osutil.IsDiskFull(err))
 	}
 	if err := saveWorkspaceOverrides(storePath, wsOverrides); err != nil {

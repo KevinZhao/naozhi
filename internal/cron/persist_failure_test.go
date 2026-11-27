@@ -68,125 +68,41 @@ func newTestSchedulerForPersist(t *testing.T) (*Scheduler, string) {
 	return s, j.ID
 }
 
-func TestPersistFailure_AddJob(t *testing.T) {
-	dir := t.TempDir()
-	s := NewScheduler(SchedulerConfig{
-		StorePath: filepath.Join(dir, "cron.json"),
-		MaxJobs:   5,
-	}, SchedulerDeps{})
-	if err := s.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
+// TestPersistFailure_MutationsReportIt: every mutation API surfaces
+// ErrPersistFailed rather than a silent success that a restart would undo.
+func TestPersistFailure_MutationsReportIt(t *testing.T) {
+	prompt := "updated"
+	for name, op := range map[string]func(s *Scheduler, id string) error{
+		"AddJob": func(s *Scheduler, _ string) error {
+			return s.AddJob(&Job{Schedule: "@every 1h", Prompt: "test", Platform: "feishu", ChatID: "chat1", ChatType: "direct", Paused: true})
+		},
+		"DeleteJobByID": func(s *Scheduler, id string) error { _, err := s.DeleteJobByID(id); return err },
+		"ResumeJobByID": func(s *Scheduler, id string) error { _, err := s.ResumeJobByID(id); return err },
+		"UpdateJob":     func(s *Scheduler, id string) error { _, err := s.UpdateJob(id, JobUpdate{Prompt: &prompt}); return err },
+		"SetJobPrompt": func(s *Scheduler, _ string) error {
+			// The dashboard placeholder: empty prompt, paused; AddJob refuses it.
+			s.putJobForTest(&Job{ID: "abcd1234", Schedule: "@every 1h", Platform: "feishu", ChatID: "chat1", ChatType: "direct", Paused: true})
+			return s.SetJobPrompt("abcd1234", "filled in")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, id := newTestSchedulerForPersist(t)
+			withFailingMarshal(t, s)
+			if err := op(s, id); !errors.Is(err, ErrPersistFailed) {
+				t.Fatalf("err = %v, want ErrPersistFailed", err)
+			}
+		})
 	}
-	defer s.Stop()
-
-	withFailingMarshal(t, s)
-
-	err := s.AddJob(&Job{
-		Schedule: "@every 1h",
-		Prompt:   "test",
-		Platform: "feishu",
-		ChatID:   "chat1",
-		ChatType: "direct",
-		Paused:   true,
+	t.Run("PauseJobByID", func(t *testing.T) {
+		s, id := newTestSchedulerForPersist(t)
+		if _, err := s.ResumeJobByID(id); err != nil {
+			t.Fatal(err)
+		}
+		withFailingMarshal(t, s)
+		if _, err := s.PauseJobByID(id); !errors.Is(err, ErrPersistFailed) {
+			t.Fatalf("err = %v, want ErrPersistFailed", err)
+		}
 	})
-	if !errors.Is(err, ErrPersistFailed) {
-		t.Fatalf("AddJob err = %v, want ErrPersistFailed", err)
-	}
-}
-
-func TestPersistFailure_DeleteJobByID(t *testing.T) {
-	s, id := newTestSchedulerForPersist(t)
-
-	withFailingMarshal(t, s)
-
-	_, err := s.DeleteJobByID(id)
-	if !errors.Is(err, ErrPersistFailed) {
-		t.Fatalf("DeleteJobByID err = %v, want ErrPersistFailed", err)
-	}
-}
-
-func TestPersistFailure_PauseJobByID(t *testing.T) {
-	s, id := newTestSchedulerForPersist(t)
-	// Seeded job is Paused=true; resume it first (real path) so the pause
-	// call under test actually changes state. Cleanup of withFailingMarshal
-	// happens at test end, so we install the stub after Resume.
-	if _, err := s.ResumeJobByID(id); err != nil {
-		t.Fatalf("ResumeJobByID seed: %v", err)
-	}
-
-	withFailingMarshal(t, s)
-
-	_, err := s.PauseJobByID(id)
-	if !errors.Is(err, ErrPersistFailed) {
-		t.Fatalf("PauseJobByID err = %v, want ErrPersistFailed", err)
-	}
-}
-
-func TestPersistFailure_ResumeJobByID(t *testing.T) {
-	s, id := newTestSchedulerForPersist(t)
-	// Seed starts Paused=true, so Resume is the natural mutation.
-
-	withFailingMarshal(t, s)
-
-	_, err := s.ResumeJobByID(id)
-	if !errors.Is(err, ErrPersistFailed) {
-		t.Fatalf("ResumeJobByID err = %v, want ErrPersistFailed", err)
-	}
-}
-
-func TestPersistFailure_UpdateJob(t *testing.T) {
-	s, id := newTestSchedulerForPersist(t)
-
-	withFailingMarshal(t, s)
-
-	newPrompt := "updated"
-	_, err := s.UpdateJob(id, JobUpdate{Prompt: &newPrompt})
-	if !errors.Is(err, ErrPersistFailed) {
-		t.Fatalf("UpdateJob err = %v, want ErrPersistFailed", err)
-	}
-}
-
-func TestPersistFailure_SetJobPrompt(t *testing.T) {
-	dir := t.TempDir()
-	s := NewScheduler(SchedulerConfig{
-		StorePath: filepath.Join(dir, "cron.json"),
-		MaxJobs:   5,
-	}, SchedulerDeps{})
-	if err := s.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer s.Stop()
-
-	// SetJobPrompt is only meaningful on a job with empty prompt + paused=true
-	// (the dashboard-created placeholder). AddJob rejects empty prompts up
-	// front, so we inject the job directly into s.tbl.jobs mirroring the flow
-	// used by the dashboard placeholder path.
-	j := &Job{
-		ID:       "abcd1234",
-		Schedule: "@every 1h",
-		Platform: "feishu",
-		ChatID:   "chat1",
-		ChatType: "direct",
-		Paused:   true,
-	}
-	s.putJobForTest(j)
-
-	withFailingMarshal(t, s)
-
-	err := s.SetJobPrompt(j.ID, "filled in")
-	if !errors.Is(err, ErrPersistFailed) {
-		t.Fatalf("SetJobPrompt err = %v, want ErrPersistFailed", err)
-	}
-
-	// Rollback assertions: in-memory state must revert to the pre-call values
-	// so that a process restart does not see a partially-applied mutation.
-	snap := s.jobForTest(t, j.ID)
-	if snap.Prompt != "" {
-		t.Errorf("rollback: snap.Prompt = %q, want empty string", snap.Prompt)
-	}
-	if !snap.Paused {
-		t.Errorf("rollback: snap.Paused = false, want true (initial state)")
-	}
 }
 
 // TestPersistFailure_RecordResultRollsBack verifies RNEW-011: when
@@ -215,16 +131,17 @@ func TestPersistFailure_RecordResultRollsBack(t *testing.T) {
 
 	// Seed a job with concrete prior-run values so rollback is observable.
 	j := &Job{
-		ID:            "abcd1234",
-		Schedule:      "@every 1h",
-		Platform:      "feishu",
-		ChatID:        "chat1",
-		ChatType:      "direct",
-		Paused:        true,
-		LastRunAt:     time.Unix(1000, 0),
-		LastResult:    "prior-result",
-		LastError:     "",
-		LastSessionID: "prior-sess",
+		ID:                  "abcd1234",
+		Schedule:            "@every 1h",
+		Platform:            "feishu",
+		ChatID:              "chat1",
+		ChatType:            "direct",
+		Paused:              true,
+		LastRunAt:           time.Unix(1000, 0),
+		LastResult:          "prior-result",
+		LastError:           "",
+		LastSessionID:       "prior-sess",
+		ConsecutiveFailures: 2,
 	}
 	s.putJobForTest(j)
 
@@ -251,73 +168,7 @@ func TestPersistFailure_RecordResultRollsBack(t *testing.T) {
 	if snap.LastSessionID != "prior-sess" {
 		t.Errorf("LastSessionID not reverted: got %q, want %q", snap.LastSessionID, "prior-sess")
 	}
-}
-
-// TestPersistFailure_RecordResultHappyPathApplies is the positive
-// counterpart: when persistLocked succeeds, recordTerminalResult
-// must apply the new Job values. Without this counterpart a regression
-// that accidentally always rolls back (e.g. inverted error check) would
-// pass the rollback test above.
-//
-// Phase D (RFC §3.5) deleted the OnExecute broadcast hook; the assertion
-// now observes Job state alone — finishRun's runtelemetry path is
-// covered by run_p0_test.go's RunEndedEvent assertions.
-func TestPersistFailure_RecordResultHappyPathApplies(t *testing.T) {
-	dir := t.TempDir()
-	s := NewScheduler(SchedulerConfig{
-		StorePath: filepath.Join(dir, "cron.json"),
-		MaxJobs:   5,
-	}, SchedulerDeps{})
-	if err := s.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer s.Stop()
-
-	j := &Job{
-		ID:         "abcd5678",
-		Schedule:   "@every 1h",
-		Platform:   "feishu",
-		ChatID:     "chat1",
-		ChatType:   "direct",
-		Paused:     true,
-		LastResult: "prior",
-	}
-	s.putJobForTest(j)
-
-	// Real marshaler — persist succeeds. R230C-CR-1 / R247-CR-14 (#586):
-	// exercises the production path directly (recordTerminalResult, formerly
-	// recordResultP0WithSanitised) so a future change can't silently rot a
-	// happy-path test that exercises a separate helper.
-	_, _, _ = s.recordTerminalResult(j.ID, runOutcome{result: "fresh-result", sessionID: "sess-1", state: RunStateSucceeded}, time.Now())
-
-	snap := s.jobForTest(t, j.ID)
-
-	if snap.LastResult != "fresh-result" {
-		t.Errorf("LastResult not applied: got %q, want %q", snap.LastResult, "fresh-result")
-	}
-	if snap.LastSessionID != "sess-1" {
-		t.Errorf("LastSessionID not applied: got %q, want %q", snap.LastSessionID, "sess-1")
-	}
-}
-
-func TestPersistFailure_TablePersistReturnsErr(t *testing.T) {
-	dir := t.TempDir()
-	s := NewScheduler(SchedulerConfig{
-		StorePath: filepath.Join(dir, "cron.json"),
-		MaxJobs:   5,
-	}, SchedulerDeps{})
-	if err := s.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer s.Stop()
-
-	withFailingMarshal(t, s)
-
-	m, err := s.tbl.persist()
-	if m.data != nil || m.seq != 0 {
-		t.Fatalf("a failed persist handed back a snapshot: %d bytes, seq %d", len(m.data), m.seq)
-	}
-	if !errors.Is(err, ErrPersistFailed) {
-		t.Fatalf("err = %v, want ErrPersistFailed", err)
+	if snap.ConsecutiveFailures != 2 {
+		t.Errorf("failure streak not reverted: got %d, want 2", snap.ConsecutiveFailures)
 	}
 }

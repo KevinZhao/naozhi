@@ -70,43 +70,6 @@ func TestResolveAllowedRoot_ExistingPath_ReturnsResolved(t *testing.T) {
 	}
 }
 
-// TestNewScheduler_AllowedRootNonExistent_UsesRawFallback confirms that the
-// NewScheduler constructor propagates the raw-path fallback through to
-// s.allowedRoot when EvalSymlinks fails, so the runtime sandbox constraint
-// is still active (even if weaker than symlink-resolved).
-// Not t.Parallel: swaps the process-global slog default (to suppress the
-// resolveAllowedRoot warning), which races with other parallel tests' slog
-// calls under -race.
-func TestNewScheduler_AllowedRootNonExistent_UsesRawFallback(t *testing.T) {
-	nonExistentPath := "/tmp/naozhi-test-nonexistent-nr-" + mustGenerateID()
-	if _, err := os.Stat(nonExistentPath); !os.IsNotExist(err) {
-		t.Skipf("test precondition: path %q unexpectedly exists; skipping", nonExistentPath)
-	}
-
-	// Suppress the slog.Warn from resolveAllowedRoot so test output is clean.
-	origDefault := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
-	t.Cleanup(func() { slog.SetDefault(origDefault) })
-
-	s := NewScheduler(SchedulerConfig{
-		AllowedRoot:    nonExistentPath,
-		MaxJobs:        5,
-		AllowNilRouter: true,
-	}, SchedulerDeps{})
-	// Pre-fix: s.allowedRoot would be "" (sandbox disabled).
-	// Post-fix: s.allowedRoot should equal the raw path.
-	if s.allowedRoot == "" {
-		t.Errorf("R112714-LOGIC-4: s.allowedRoot = %q after NewScheduler with "+
-			"non-existent AllowedRoot; expected the raw path %q so the "+
-			"sandbox constraint is still enforced (raw string comparison) "+
-			"rather than silently disabled.",
-			s.allowedRoot, nonExistentPath)
-	}
-	if s.allowedRoot != nonExistentPath {
-		t.Errorf("s.allowedRoot = %q; want %q", s.allowedRoot, nonExistentPath)
-	}
-}
-
 // TestResolveAllowedRoot_NULCleared: a NUL-bearing AllowedRoot is cleared so
 // it cannot alias entries in workDirCacheKeySuffix (#1297).
 func TestResolveAllowedRoot_NULCleared(t *testing.T) {

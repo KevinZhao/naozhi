@@ -12,7 +12,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/discovery"
-	"github.com/naozhi/naozhi/internal/history"
 )
 
 func makeClaudeDir(t *testing.T) string {
@@ -47,12 +46,6 @@ func userLineAt(content string, unixSec int64) string {
 		Content string `json:"content"`
 	}{Role: "user", Content: content})
 	return fmt.Sprintf(`{"type":"user","timestamp":%q,"message":%s}`, ts, string(msg))
-}
-
-func TestSource_ImplementsInterface(t *testing.T) {
-	t.Parallel()
-	// Compile-time check.
-	var _ history.Source = (*Source)(nil)
 }
 
 func TestSource_LoadBefore_WalksChain(t *testing.T) {

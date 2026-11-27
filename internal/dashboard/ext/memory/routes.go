@@ -13,7 +13,7 @@ import "github.com/naozhi/naozhi/internal/dashboard/httputil"
 // (docs/rfc/memory-link-rendering.md), and the settings view's 懂你 section
 // (planner RFC §15.15 ⑦) under its own prefix, since any word after
 // /api/memory/ is already a valid slug. Only the two GETs are reverse-node
-// api routes (node.APIRoutes); PUT and DELETE also refuse any request that
+// api routes (node.IsAPIRoute); PUT and DELETE also refuse any request that
 // did not come straight from loopback (directLoopback).
 //
 // Patterns must stay string literals: routes_snapshot_test.go reads them from

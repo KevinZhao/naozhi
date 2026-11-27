@@ -66,9 +66,9 @@ func TestBackgroundAfterTurnEnd(t *testing.T) {
 	}
 }
 
-// A Monitor started at a long turn's head is still seen past the old
-// 256-event window; a dead process has nothing open; a process started
-// after the task (a /new, a --resume) does not inherit it.
+// A dead process has nothing open; a process started after the task (a
+// /new, a --resume) does not inherit it. (A Monitor past the scan's window:
+// TestBackgroundBeyondTheWindow.)
 func TestBackgroundBoundaries(t *testing.T) {
 	r := newDigestRouter(t)
 	now := time.Now()
@@ -76,23 +76,15 @@ func TestBackgroundBoundaries(t *testing.T) {
 		{Type: clievent.KindToolUse, Tool: "Monitor", Time: now.Add(-time.Hour).UnixMilli()},
 		taskStart("m1", "local_bash", "watch CI", now.Add(-time.Hour)),
 	}
-	for i := range 400 {
-		entries = append(entries, clievent.EventEntry{Type: clievent.KindToolUse, Tool: "Read", Time: now.Add(-time.Hour).UnixMilli() + int64(i) + 1})
-	}
 	cs := CustodySources{Router: r}
 
-	bgSession(r, "dashboard:direct:mon:general", now.Add(-2*time.Hour), entries...)
-	if bg := cs.Background("dashboard:direct:mon:general"); bg.Count() != 1 || bg.Tasks[0].ID != "m1" {
-		t.Errorf("monitor: Background = %+v, want m1", bg)
-	}
-
-	_, p := bgSession(r, "dashboard:direct:dead:general", now.Add(-2*time.Hour), entries[:2]...)
+	_, p := bgSession(r, "dashboard:direct:dead:general", now.Add(-2*time.Hour), entries...)
 	p.SetState(cli.StateDead)
 	if cs.Background("dashboard:direct:dead:general").Open() {
 		t.Error("dead: a task open in an exited process")
 	}
 
-	bgSession(r, "dashboard:direct:new:general", now.Add(-time.Minute), entries[:2]...)
+	bgSession(r, "dashboard:direct:new:general", now.Add(-time.Minute), entries...)
 	if cs.Background("dashboard:direct:new:general").Open() {
 		t.Error("/new: the earlier process's task open in the new one")
 	}

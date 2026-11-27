@@ -38,27 +38,3 @@ func TestStopCtx_ParentCancelPropagates(t *testing.T) {
 			"stopCtx is no longer derived from ParentCtx (R249-ARCH-8 / #974)")
 	}
 }
-
-// TestStopCtx_StopCancels pins the other convergence half: an explicit Stop()
-// cancels the same stopCtx, with no dependence on ParentCtx (default parent).
-func TestStopCtx_StopCancels(t *testing.T) {
-	t.Parallel()
-
-	s := NewScheduler(SchedulerConfig{
-		StorePath: filepath.Join(t.TempDir(), "cron.json"),
-		MaxJobs:   10,
-	}, SchedulerDeps{})
-	if err := s.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-
-	if err := s.stopCtx.Err(); err != nil {
-		t.Fatalf("stopCtx must be live before Stop, got %v", err)
-	}
-
-	s.Stop()
-
-	if err := s.stopCtx.Err(); err == nil {
-		t.Fatal("Stop() must cancel stopCtx — the authoritative cancel signal (#974)")
-	}
-}

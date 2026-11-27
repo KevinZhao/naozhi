@@ -2,6 +2,7 @@ package cron
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -41,16 +42,21 @@ func TestNotifyTarget_MultiChunkCarriesPageSuffix(t *testing.T) {
 		t.Fatalf("fixture produced %d chunk(s); need at least 2 for a page suffix to appear", len(sent))
 	}
 	for i, chunk := range sent {
+		// The suffix width is reserved before the split: a chunk that only
+		// breaches maxLen once the suffix is on never arrives (#2008).
+		if n := utf8.RuneCountInString(chunk); n > 40 {
+			t.Errorf("chunk %d is %d runes, over the platform limit 40", i+1, n)
+		}
 		m := pageSuffixRe.FindStringSubmatch(chunk)
 		if m == nil {
 			t.Errorf("chunk %d has no page suffix; recipients of a split cron notify "+
 				"cannot tell how many parts there are:\n%q", i+1, chunk)
 			continue
 		}
-		if want := itoa(i + 1); m[1] != want {
+		if want := strconv.Itoa(i + 1); m[1] != want {
 			t.Errorf("chunk %d numbered %q, want %q", i+1, m[1], want)
 		}
-		if want := itoa(len(sent)); m[2] != want {
+		if want := strconv.Itoa(len(sent)); m[2] != want {
 			t.Errorf("chunk %d reports total %q, want %q", i+1, m[2], want)
 		}
 	}
@@ -72,28 +78,6 @@ func TestNotifyTarget_SingleChunkHasNoPageSuffix(t *testing.T) {
 	}
 	if pageSuffixRe.MatchString(sent[0]) {
 		t.Errorf("single-chunk notify gained a page suffix: %q", sent[0])
-	}
-}
-
-// TestNotifyTarget_ChunkPlusSuffixStaysWithinMaxLen is the reason the width is
-// reserved BEFORE splitting rather than appended after. Discord rejects payloads
-// over its ceiling outright and the retry re-sends the same oversized bytes
-// (#2008), so a chunk that only breaches the limit once the suffix is glued on is
-// a message that never arrives.
-func TestNotifyTarget_ChunkPlusSuffixStaysWithinMaxLen(t *testing.T) {
-	t.Parallel()
-	const maxLen = 40
-	fp := &fakePartialPlatform{failAt: 1000, maxLen: maxLen}
-	s := &Scheduler{}
-	storeFakeNotifySender(s, map[string]platform.Platform{"fake-notify": fp})
-
-	s.notifyTarget("fake-notify", "chat-x", buildDistinctChunks(4, maxLen))
-
-	for i, chunk := range fp.sentChunks() {
-		if n := utf8.RuneCountInString(chunk); n > maxLen {
-			t.Errorf("chunk %d is %d runes, over the platform's %d: the page suffix must be "+
-				"reserved before the split, not appended after (#2008)\n%q", i+1, n, maxLen, chunk)
-		}
 	}
 }
 
@@ -155,7 +139,7 @@ func TestNotifyTarget_CapDroppedTailKeepsOriginalTotal(t *testing.T) {
 		t.Fatalf("first chunk has no page suffix: %q", sent[0])
 	}
 	// The delivered count is capped; the reported total must exceed it.
-	if m[2] == itoa(len(sent)) && len(sent) < total {
+	if m[2] == strconv.Itoa(len(sent)) && len(sent) < total {
 		t.Errorf("reported total %q equals the DELIVERED count %d while %d chunks existed; "+
 			"a capped notify must not claim to be complete", m[2], len(sent), total)
 	}
@@ -185,16 +169,4 @@ func TestNotifyTarget_SuffixSuppressedWhenMaxLenTooSmall(t *testing.T) {
 			t.Errorf("chunk %d is %d runes, over %d", i+1, n, maxLen)
 		}
 	}
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b []byte
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	return string(b)
 }
