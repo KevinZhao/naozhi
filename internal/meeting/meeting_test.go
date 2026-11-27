@@ -584,6 +584,35 @@ func TestRetranscribeInAnotherLanguage(t *testing.T) {
 	}
 }
 
+// TestRetranscribeRightAfterDone pins that a meeting shown as done can be
+// retranscribed at once: the processing loop still runs the done notice for
+// it, and that tail must not read as busy.
+func TestRetranscribeRightAfterDone(t *testing.T) {
+	inNotice, release := make(chan struct{}), make(chan struct{})
+	x := newHarness(t, func(c *Config, _ *fakeHelper) {
+		c.Notify = func(key, title, body string) {
+			if strings.HasSuffix(title, "的纪要好了") {
+				select {
+				case inNotice <- struct{}{}:
+					<-release
+				default:
+				}
+			}
+		}
+	})
+	x.record(t)
+	waitFor(t, "recording", func() bool { r := x.m.Status().Recording; return r != nil && r.Segments == 3 })
+	x.m.StopRecording("user")
+	<-inNotice
+	defer close(release)
+	if st := x.only(t).State; st != StateDone {
+		t.Fatalf("state during the done notice = %q, want done", st)
+	}
+	if err := x.m.Retranscribe(context.Background(), x.only(t).ID, "English"); err != nil {
+		t.Fatalf("retranscribe while the done notice is sent: %v", err)
+	}
+}
+
 func (x *harness) asrCalls() []string {
 	x.asr.mu.Lock()
 	defer x.asr.mu.Unlock()
