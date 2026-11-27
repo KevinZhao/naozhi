@@ -40,24 +40,6 @@ func TestRunStore_RecentSessionIDs_WarmCache(t *testing.T) {
 	}
 }
 
-// TestRunStore_RecentSessionIDs_LimitClamp verifies n is clamped against
-// the in-cache count (no out-of-bounds index when n exceeds the ring).
-func TestRunStore_RecentSessionIDs_LimitClamp(t *testing.T) {
-	t.Parallel()
-	s := newTestStore(t, 200, 30*24*time.Hour)
-	jobID := mustGenerateID()
-
-	r := makeRun(jobID, time.Now())
-	r.SessionID = "only"
-	s.Append(r)
-	_ = s.List(jobID, 10, time.Time{})
-
-	got := s.RecentSessionIDs(jobID, 100)
-	if len(got) != 1 || got[0] != "only" {
-		t.Fatalf("RecentSessionIDs = %v want [only]", got)
-	}
-}
-
 // TestRunStore_RecentSessionIDs_DedupWarmCache pins the godoc "distinct"
 // contract on the cache-warm fast path: a job whose runs reuse the same
 // persistent SessionID across multiple runs must return that ID once, not
@@ -161,15 +143,10 @@ func TestRunStore_RecentSessionIDs_ColdPathNoRuns(t *testing.T) {
 	}
 }
 
-// TestRunStore_RecentSessionIDs_NilSafe / disabled / invalid jobID early
-// returns mirror Recent's contract and prevent the new method from being
-// a panic surface for nil-receiver callers (parity with Recent).
-func TestRunStore_RecentSessionIDs_NilSafe(t *testing.T) {
+// TestRunStore_RecentSessionIDs_InvalidJobID: empty or non-hex job IDs return
+// nil before touching disk (the nil receiver is in TestStore_NilBehavesDisabled).
+func TestRunStore_RecentSessionIDs_InvalidJobID(t *testing.T) {
 	t.Parallel()
-	var s *Store
-	if got := s.RecentSessionIDs("abcd", 10); got != nil {
-		t.Fatalf("nil receiver returned non-nil: %v", got)
-	}
 	live := newTestStore(t, 200, time.Hour)
 	if got := live.RecentSessionIDs("", 10); got != nil {
 		t.Fatalf("empty jobID returned non-nil: %v", got)

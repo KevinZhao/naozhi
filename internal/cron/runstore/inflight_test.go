@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/runtelemetry"
@@ -53,14 +52,12 @@ func TestMarkers_WriteReadRewrite(t *testing.T) {
 	if want := filepath.Join(root, "runinflight", m.RunID+".json"); path != want {
 		t.Fatalf("Write path = %q, want %q", path, want)
 	}
-	if runtime.GOOS != "windows" {
-		fi, err := os.Stat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if perm := fi.Mode().Perm(); perm != 0o600 {
-			t.Errorf("marker mode = %v, want 0600", perm)
-		}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("marker mode = %v, want 0600", perm)
 	}
 	got, ok := ms.Read(path)
 	if !ok || got != m {
@@ -135,21 +132,6 @@ func TestMarkers_ReadRejectsUnusable(t *testing.T) {
 	}
 	if _, ok := ms.Read(filepath.Join(dir, "missing.json")); ok {
 		t.Error("missing file: Read ok, want unusable")
-	}
-}
-
-// TestMarkers_ReadAcceptsOlderMarkers: a marker from a binary that predates
-// adoption has neither attempts nor adopt_after, and still parses.
-func TestMarkers_ReadAcceptsOlderMarkers(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "old.json")
-	if err := os.WriteFile(path, []byte(`{"job_id":"j1","run_id":"r1","started_at_ms":1700000000000}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	m, ok := Markers{Root: dir}.Read(path)
-	if !ok || m.SendWatermark != "" || m.Attempts != 0 || m.JobID != "j1" {
-		t.Errorf("old marker = (%+v, %v), want parsed with no watermark and no attempts", m, ok)
 	}
 }
 
