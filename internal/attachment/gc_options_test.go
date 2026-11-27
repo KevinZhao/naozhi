@@ -26,21 +26,21 @@ func seedReapable(t *testing.T, ws string, n int, now time.Time) string {
 
 func stemf(i int) string { return "reap-" + string(rune('a'+i%26)) + string(rune('0'+i/26)) }
 
-// TestGCWithRefs_MaxRemoveCaps: with MaxRemove=2 over 5 reapable files,
+// TestGCDir_MaxRemoveCaps: with MaxRemove=2 over 5 reapable files,
 // exactly 2 are deleted and Stopped is reported (RFC §4.6-2).
-func TestGCWithRefs_MaxRemoveCaps(t *testing.T) {
+func TestGCDir_MaxRemoveCaps(t *testing.T) {
 	ws := t.TempDir()
 	now := time.Now().UTC()
 	seedReapable(t, ws, 5, now)
 
-	res, err := GCWithRefs(context.Background(), ws, GCOptions{
+	res, err := gcWorkspace(context.Background(), ws, GCOptions{
 		UploadTTL: 7 * 24 * time.Hour,
 		RefTTL:    DefaultRefTTL,
 		Now:       now,
 		MaxRemove: 2,
 	})
 	if err != nil {
-		t.Fatalf("GCWithRefs: %v", err)
+		t.Fatalf("GCDir: %v", err)
 	}
 	if res.Removed != 2 {
 		t.Errorf("Removed=%d, want 2 (capped)", res.Removed)
@@ -50,24 +50,24 @@ func TestGCWithRefs_MaxRemoveCaps(t *testing.T) {
 	}
 }
 
-// TestGCWithRefs_NonPositiveUploadTTLNoOps covers #2226: a zero or negative
+// TestGCDir_NonPositiveUploadTTLNoOps covers #2226: a zero or negative
 // UploadTTL makes uploadCutoff = now (or future), so without a guard every
 // unreferenced upload — even ones uploaded moments ago — gets reaped. The
 // guard treats a non-positive TTL as "GC disabled" and deletes nothing.
-func TestGCWithRefs_NonPositiveUploadTTLNoOps(t *testing.T) {
+func TestGCDir_NonPositiveUploadTTLNoOps(t *testing.T) {
 	for _, ttl := range []time.Duration{0, -time.Hour} {
 		t.Run(ttl.String(), func(t *testing.T) {
 			ws := t.TempDir()
 			now := time.Now().UTC()
 			dayDir := seedReapable(t, ws, 3, now) // 3 old, unreferenced files
 
-			res, err := GCWithRefs(context.Background(), ws, GCOptions{
+			res, err := gcWorkspace(context.Background(), ws, GCOptions{
 				UploadTTL: ttl,
 				RefTTL:    DefaultRefTTL,
 				Now:       now,
 			})
 			if err != nil {
-				t.Fatalf("GCWithRefs: %v", err)
+				t.Fatalf("GCDir: %v", err)
 			}
 			if res.Removed != 0 {
 				t.Errorf("Removed=%d, want 0 (GC disabled for non-positive UploadTTL)", res.Removed)
@@ -84,9 +84,9 @@ func TestGCWithRefs_NonPositiveUploadTTLNoOps(t *testing.T) {
 	}
 }
 
-// TestGCWithRefs_DryRunBuckets: dry-run deletes nothing but reports
+// TestGCDir_DryRunBuckets: dry-run deletes nothing but reports
 // WouldRemove bucketed by reason (RFC §6 E4).
-func TestGCWithRefs_DryRunBuckets(t *testing.T) {
+func TestGCDir_DryRunBuckets(t *testing.T) {
 	ws := t.TempDir()
 	now := time.Now().UTC()
 	day10 := now.AddDate(0, 0, -10).Format("2006-01-02")
@@ -108,14 +108,14 @@ func TestGCWithRefs_DryRunBuckets(t *testing.T) {
 		LastReferencedAt:     now.AddDate(0, 0, -35).UnixMilli(),
 	})
 
-	res, err := GCWithRefs(context.Background(), ws, GCOptions{
+	res, err := gcWorkspace(context.Background(), ws, GCOptions{
 		UploadTTL: 7 * 24 * time.Hour,
 		RefTTL:    DefaultRefTTL,
 		Now:       now,
 		DryRun:    true,
 	})
 	if err != nil {
-		t.Fatalf("GCWithRefs: %v", err)
+		t.Fatalf("GCDir: %v", err)
 	}
 	if res.Removed != 0 {
 		t.Errorf("Removed=%d in dry-run, want 0", res.Removed)
@@ -135,9 +135,9 @@ func TestGCWithRefs_DryRunBuckets(t *testing.T) {
 	}
 }
 
-// TestGCWithRefs_CtxCancel: a cancelled context returns promptly with
+// TestGCDir_CtxCancel: a cancelled context returns promptly with
 // the context error and no further deletions (RFC §4.6-1, §10 F4).
-func TestGCWithRefs_CtxCancel(t *testing.T) {
+func TestGCDir_CtxCancel(t *testing.T) {
 	ws := t.TempDir()
 	now := time.Now().UTC()
 	seedReapable(t, ws, 5, now)
@@ -145,7 +145,7 @@ func TestGCWithRefs_CtxCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled
 
-	res, err := GCWithRefs(ctx, ws, GCOptions{
+	res, err := gcWorkspace(ctx, ws, GCOptions{
 		UploadTTL: 7 * 24 * time.Hour,
 		RefTTL:    DefaultRefTTL,
 		Now:       now,
@@ -158,9 +158,9 @@ func TestGCWithRefs_CtxCancel(t *testing.T) {
 	}
 }
 
-// TestGCWithRefs_MetaGraceSkips: a reapable file whose .meta was just
+// TestGCDir_MetaGraceSkips: a reapable file whose .meta was just
 // modified is retained this sweep (F2 — closes the bump-race window).
-func TestGCWithRefs_MetaGraceSkips(t *testing.T) {
+func TestGCDir_MetaGraceSkips(t *testing.T) {
 	ws := t.TempDir()
 	now := time.Now().UTC()
 	day := now.AddDate(0, 0, -10).Format("2006-01-02")
@@ -172,14 +172,14 @@ func TestGCWithRefs_MetaGraceSkips(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := GCWithRefs(context.Background(), ws, GCOptions{
+	res, err := gcWorkspace(context.Background(), ws, GCOptions{
 		UploadTTL: 7 * 24 * time.Hour,
 		RefTTL:    DefaultRefTTL,
 		Now:       now,
 		MetaGrace: 10 * time.Minute,
 	})
 	if err != nil {
-		t.Fatalf("GCWithRefs: %v", err)
+		t.Fatalf("GCDir: %v", err)
 	}
 	if res.Removed != 0 {
 		t.Errorf("Removed=%d, want 0 (within meta grace)", res.Removed)
@@ -189,23 +189,23 @@ func TestGCWithRefs_MetaGraceSkips(t *testing.T) {
 	}
 }
 
-// TestGCWithRefs_DeletesMetaFirst: verify deletion order leaves no
+// TestGCDir_DeletesMetaFirst: verify deletion order leaves no
 // orphan .meta. After a live reap, neither payload nor meta remains
 // (F1). The ordering guarantee itself is covered structurally; here we
 // assert the post-condition.
-func TestGCWithRefs_DeletesMetaFirst(t *testing.T) {
+func TestGCDir_DeletesMetaFirst(t *testing.T) {
 	ws := t.TempDir()
 	now := time.Now().UTC()
 	day := now.AddDate(0, 0, -10).Format("2006-01-02")
 	payload, metaPath := fixturePersisted(t, ws, day, "ordered",
 		Meta{UploadedAt: now.AddDate(0, 0, -10)})
 
-	if _, err := GCWithRefs(context.Background(), ws, GCOptions{
+	if _, err := gcWorkspace(context.Background(), ws, GCOptions{
 		UploadTTL: 7 * 24 * time.Hour,
 		RefTTL:    DefaultRefTTL,
 		Now:       now,
 	}); err != nil {
-		t.Fatalf("GCWithRefs: %v", err)
+		t.Fatalf("GCDir: %v", err)
 	}
 	if _, err := os.Stat(metaPath); !os.IsNotExist(err) {
 		t.Errorf("orphan .meta remains: %v", err)
@@ -215,10 +215,10 @@ func TestGCWithRefs_DeletesMetaFirst(t *testing.T) {
 	}
 }
 
-// TestGCWithRefs_RefusesSymlinkedDayDir: a date-named symlink pointing
+// TestGCDir_RefusesSymlinkedDayDir: a date-named symlink pointing
 // outside the attachment root must not be traversed or deleted
 // (security-critical, store.go Lstat guard).
-func TestGCWithRefs_RefusesSymlinkedDayDir(t *testing.T) {
+func TestGCDir_RefusesSymlinkedDayDir(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink semantics differ on Windows")
 	}
@@ -242,13 +242,13 @@ func TestGCWithRefs_RefusesSymlinkedDayDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := GCWithRefs(context.Background(), ws, GCOptions{
+	res, err := gcWorkspace(context.Background(), ws, GCOptions{
 		UploadTTL: 7 * 24 * time.Hour,
 		RefTTL:    DefaultRefTTL,
 		Now:       now,
 	})
 	if err != nil {
-		t.Fatalf("GCWithRefs: %v", err)
+		t.Fatalf("GCDir: %v", err)
 	}
 	if res.Removed != 0 {
 		t.Errorf("Removed=%d, want 0 (symlink must be skipped)", res.Removed)
@@ -258,11 +258,11 @@ func TestGCWithRefs_RefusesSymlinkedDayDir(t *testing.T) {
 	}
 }
 
-// TestGCWithRefs_ZeroNowFallsBackToRealClock: passing a zero-value
+// TestGCDir_ZeroNowFallsBackToRealClock: passing a zero-value
 // opts.Now must not use epoch (which would make uploadCutoff ancient
 // and delete every attachment). The guard substitutes time.Now() so
 // recent attachments are retained. [R20260601-GO-5]
-func TestGCWithRefs_ZeroNowFallsBackToRealClock(t *testing.T) {
+func TestGCDir_ZeroNowFallsBackToRealClock(t *testing.T) {
 	ws := t.TempDir()
 	// Seed a 1-day-old attachment — well within the 7-day upload TTL.
 	now := time.Now().UTC()
@@ -270,14 +270,14 @@ func TestGCWithRefs_ZeroNowFallsBackToRealClock(t *testing.T) {
 	payload, _ := fixturePersisted(t, ws, day,
 		"recent", Meta{UploadedAt: now.AddDate(0, 0, -1)})
 
-	res, err := GCWithRefs(context.Background(), ws, GCOptions{
+	res, err := gcWorkspace(context.Background(), ws, GCOptions{
 		UploadTTL: 7 * 24 * time.Hour,
 		RefTTL:    DefaultRefTTL,
 		// Deliberately zero — must fall back to real clock, not epoch.
 		Now: time.Time{},
 	})
 	if err != nil {
-		t.Fatalf("GCWithRefs: %v", err)
+		t.Fatalf("GCDir: %v", err)
 	}
 	if res.Removed != 0 {
 		t.Errorf("Removed=%d with zero Now, want 0 (recent attachment must survive)", res.Removed)
@@ -287,9 +287,9 @@ func TestGCWithRefs_ZeroNowFallsBackToRealClock(t *testing.T) {
 	}
 }
 
-// TestGCWithRefs_CorruptMetaRetains: a corrupt .meta makes the
+// TestGCDir_CorruptMetaRetains: a corrupt .meta makes the
 // keep-decision error out, and the file is retained (err-on-keep).
-func TestGCWithRefs_CorruptMetaRetains(t *testing.T) {
+func TestGCDir_CorruptMetaRetains(t *testing.T) {
 	ws := t.TempDir()
 	now := time.Now().UTC()
 	day := now.AddDate(0, 0, -10).Format("2006-01-02")
@@ -306,13 +306,13 @@ func TestGCWithRefs_CorruptMetaRetains(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := GCWithRefs(context.Background(), ws, GCOptions{
+	res, err := gcWorkspace(context.Background(), ws, GCOptions{
 		UploadTTL: 7 * 24 * time.Hour,
 		RefTTL:    DefaultRefTTL,
 		Now:       now,
 	})
 	if err != nil {
-		t.Fatalf("GCWithRefs: %v", err)
+		t.Fatalf("GCDir: %v", err)
 	}
 	if res.Removed != 0 {
 		t.Errorf("Removed=%d, want 0 (corrupt meta → retain)", res.Removed)
@@ -322,12 +322,12 @@ func TestGCWithRefs_CorruptMetaRetains(t *testing.T) {
 	}
 }
 
-// TestGCWithRefs_HostileMetaRetainsAcrossSweeps: whatever sits at the .meta
+// TestGCDir_HostileMetaRetainsAcrossSweeps: whatever sits at the .meta
 // path, a payload is reaped only on a sidecar the GC actually read. Each
 // variant below would otherwise fall to the no-meta branch, which assumes no
 // references. Two sweeps, because a loader that moved the bad sidecar aside
 // would retain on the first and reap on the second.
-func TestGCWithRefs_HostileMetaRetainsAcrossSweeps(t *testing.T) {
+func TestGCDir_HostileMetaRetainsAcrossSweeps(t *testing.T) {
 	now := time.Now().UTC()
 	// Past the upload TTL with no references: exactly what the GC reaps.
 	reapable, err := json.Marshal(Meta{UploadedAt: now.AddDate(0, 0, -10)})
@@ -366,13 +366,13 @@ func TestGCWithRefs_HostileMetaRetainsAcrossSweeps(t *testing.T) {
 			tc.plant(t, filepath.Join(dayDir, "hostile.meta"))
 
 			for sweep := 1; sweep <= 2; sweep++ {
-				res, err := GCWithRefs(context.Background(), ws, GCOptions{
+				res, err := gcWorkspace(context.Background(), ws, GCOptions{
 					UploadTTL: 7 * 24 * time.Hour,
 					RefTTL:    DefaultRefTTL,
 					Now:       now,
 				})
 				if err != nil {
-					t.Fatalf("sweep %d: GCWithRefs: %v", sweep, err)
+					t.Fatalf("sweep %d: GCDir: %v", sweep, err)
 				}
 				if _, err := os.Stat(payload); err != nil {
 					t.Fatalf("sweep %d reaped the payload (Removed=%d): %v", sweep, res.Removed, err)
@@ -382,9 +382,9 @@ func TestGCWithRefs_HostileMetaRetainsAcrossSweeps(t *testing.T) {
 	}
 }
 
-// TestGCWithRefs_MissingMetaStillReaps is the control: only a sidecar that is
+// TestGCDir_MissingMetaStillReaps is the control: only a sidecar that is
 // truly absent takes the no-meta path.
-func TestGCWithRefs_MissingMetaStillReaps(t *testing.T) {
+func TestGCDir_MissingMetaStillReaps(t *testing.T) {
 	ws := t.TempDir()
 	now := time.Now().UTC()
 	dayDir := filepath.Join(ws, Dir, now.AddDate(0, 0, -10).Format("2006-01-02"))
@@ -394,22 +394,22 @@ func TestGCWithRefs_MissingMetaStillReaps(t *testing.T) {
 	payload := filepath.Join(dayDir, "legacy.png")
 	writeFile(t, payload, "x")
 
-	if _, err := GCWithRefs(context.Background(), ws, GCOptions{
+	if _, err := gcWorkspace(context.Background(), ws, GCOptions{
 		UploadTTL: 7 * 24 * time.Hour,
 		RefTTL:    DefaultRefTTL,
 		Now:       now,
 	}); err != nil {
-		t.Fatalf("GCWithRefs: %v", err)
+		t.Fatalf("GCDir: %v", err)
 	}
 	if _, err := os.Stat(payload); !os.IsNotExist(err) {
 		t.Errorf("a legacy payload with no sidecar past the upload TTL must be reaped, stat = %v", err)
 	}
 }
 
-// TestGCWithRefs_WouldRemoveBytes: the byte total covers exactly the payloads
+// TestGCDir_WouldRemoveBytes: the byte total covers exactly the payloads
 // WouldRemove counts — not their .meta sidecars, not kept files — in
 // dry-run, and only the payloads counted before MaxRemove stopped a live sweep.
-func TestGCWithRefs_WouldRemoveBytes(t *testing.T) {
+func TestGCDir_WouldRemoveBytes(t *testing.T) {
 	now := time.Now().UTC()
 	day10 := now.AddDate(0, 0, -10).Format("2006-01-02")
 	t.Run("dry_run", func(t *testing.T) {
@@ -423,11 +423,11 @@ func TestGCWithRefs_WouldRemoveBytes(t *testing.T) {
 		fixturePersisted(t, ws, day10, "fresh", Meta{UploadedAt: now}) // kept
 		writeFile(t, filepath.Join(dayDir, "fresh.png"), strings.Repeat("k", 100))
 
-		res, err := GCWithRefs(context.Background(), ws, GCOptions{
+		res, err := gcWorkspace(context.Background(), ws, GCOptions{
 			UploadTTL: 7 * 24 * time.Hour, RefTTL: DefaultRefTTL, Now: now, DryRun: true,
 		})
 		if err != nil {
-			t.Fatalf("GCWithRefs: %v", err)
+			t.Fatalf("GCDir: %v", err)
 		}
 		if want := int64(len("abc") + len("fake")); res.WouldRemoveBytes != want {
 			t.Errorf("WouldRemoveBytes=%d, want %d (legacy 3 + norefs payload 4)", res.WouldRemoveBytes, want)
@@ -436,11 +436,11 @@ func TestGCWithRefs_WouldRemoveBytes(t *testing.T) {
 	t.Run("live_capped", func(t *testing.T) {
 		ws := t.TempDir()
 		seedReapable(t, ws, 5, now) // 5 × "fake"
-		res, err := GCWithRefs(context.Background(), ws, GCOptions{
+		res, err := gcWorkspace(context.Background(), ws, GCOptions{
 			UploadTTL: 7 * 24 * time.Hour, RefTTL: DefaultRefTTL, Now: now, MaxRemove: 2,
 		})
 		if err != nil {
-			t.Fatalf("GCWithRefs: %v", err)
+			t.Fatalf("GCDir: %v", err)
 		}
 		if want := int64(2 * len("fake")); res.WouldRemoveBytes != want {
 			t.Errorf("WouldRemoveBytes=%d, want %d (2 payloads before the cap)", res.WouldRemoveBytes, want)

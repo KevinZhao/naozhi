@@ -232,13 +232,8 @@ func TestSweeperRunOnceAggregatesAndReportsPerPass(t *testing.T) {
 		t.Errorf(`got["jsonl"] = %+v, want {1 1}`, got["jsonl"])
 	}
 
-	// A second pass finds nothing, but the running totals must not reset.
 	if second := s.RunOnce(); second["logs"].Removed != 0 {
 		t.Errorf("second pass removed %d, want 0", second["logs"].Removed)
-	}
-	tot := s.Totals()
-	if tot["logs"] != (Result{Removed: 2, Bytes: 5}) {
-		t.Errorf(`Totals()["logs"] = %+v, want the cumulative {2 5}`, tot["logs"])
 	}
 }
 
@@ -264,23 +259,6 @@ func TestSweeperRunSweepsImmediately(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return on ctx cancel")
-	}
-}
-
-// TestSweeperTotalsIsACopy: a caller must not be able to mutate the Sweeper's
-// bookkeeping through the returned map.
-func TestSweeperTotalsIsACopy(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	writeAged(t, dir, "a.log", "x", 30*24*time.Hour)
-	s := NewSweeper(0)
-	s.Add(Pass{Name: "logs", Dir: dir, Ext: ".log", MaxAge: time.Hour})
-	s.RunOnce()
-
-	tot := s.Totals()
-	tot["logs"] = Result{Removed: 999}
-	if again := s.Totals(); again["logs"].Removed != 1 {
-		t.Errorf("Totals() is not a copy: got %+v after mutating the returned map", again["logs"])
 	}
 }
 

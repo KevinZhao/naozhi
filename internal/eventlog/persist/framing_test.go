@@ -3,6 +3,7 @@ package persist
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -52,7 +53,7 @@ func TestWriteRecord_HappyPath(t *testing.T) {
 // protocol.
 func TestReadRecord_RoundTrip(t *testing.T) {
 	var buf bytes.Buffer
-	want := schema.NewEntry(7, []byte(`{"time":1,"uuid":"aa","type":"user","summary":"hi"}`))
+	want := newEntry(7, []byte(`{"time":1,"uuid":"aa","type":"user","summary":"hi"}`))
 	if _, err := writeRecord(&buf, want); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -74,7 +75,7 @@ func TestReadRecord_RoundTrip(t *testing.T) {
 func TestReadRecord_MultipleInSequence(t *testing.T) {
 	var buf bytes.Buffer
 	for i := uint64(1); i <= 5; i++ {
-		r := schema.NewEntry(i, []byte(`{"time":1,"uuid":"aa","type":"user"}`))
+		r := newEntry(i, []byte(`{"time":1,"uuid":"aa","type":"user"}`))
 		if _, err := writeRecord(&buf, r); err != nil {
 			t.Fatalf("write %d: %v", i, err)
 		}
@@ -352,4 +353,9 @@ func intToStr(n int) string {
 		b[i] = '-'
 	}
 	return string(b[i:])
+}
+
+// newEntry is a TypeEntry Record carrying an already-serialized payload.
+func newEntry(seq uint64, entryJSON []byte) *schema.Record {
+	return &schema.Record{V: schema.WireVersion, Seq: seq, Type: schema.TypeEntry, Entry: json.RawMessage(entryJSON)}
 }

@@ -46,7 +46,7 @@ func fixture(t *testing.T, dir string, nEntries int) (logPath, idxPath string) {
 	for i := 1; i <= nEntries; i++ {
 		payload := []byte(`{"time":` + itoa(int64(1700000000000+i)) +
 			`,"uuid":"uuid-` + itoa(int64(i)) + `","type":"user","summary":"m"}`)
-		rec := schema.NewEntry(uint64(i), payload)
+		rec := newEntry(uint64(i), payload)
 		body, _ := schema.MarshalRecord(rec)
 		nWrote, err := WriteRecordRaw(lf, body)
 		if err != nil {

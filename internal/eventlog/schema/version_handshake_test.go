@@ -69,7 +69,7 @@ func TestVersionHandshake_RejectsBelowMinRead(t *testing.T) {
 // round-trip through UnmarshalRecord without a version error. Pairs with the
 // reject tests so the accept window is pinned from both sides.
 func TestVersionHandshake_AcceptsWireVersion(t *testing.T) {
-	rec := NewEntry(1, []byte(`{"time":1}`))
+	rec := newEntry(1, []byte(`{"time":1}`))
 	body, err := MarshalRecord(rec)
 	if err != nil {
 		t.Fatalf("MarshalRecord: %v", err)

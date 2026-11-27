@@ -100,15 +100,6 @@ type Sender struct {
 // Option tunes a Sender.
 type Option func(*Sender)
 
-// WithClient replaces the HTTP client every endpoint uses (tests).
-func WithClient(c *http.Client) Option {
-	return func(s *Sender) {
-		for _, w := range s.workers {
-			w.client = c
-		}
-	}
-}
-
 // WithNode sets Event.Node, the sending naozhi's workspace id.
 func WithNode(id string) Option { return func(s *Sender) { s.node = id } }
 
@@ -334,11 +325,6 @@ func Sign(secret string, body []byte) string {
 	m := hmac.New(sha256.New, []byte(secret))
 	m.Write(body)
 	return "sha256=" + hex.EncodeToString(m.Sum(nil))
-}
-
-// Verify reports whether sig is Sign(secret, body); for receivers and tests.
-func Verify(secret string, body []byte, sig string) bool {
-	return hmac.Equal([]byte(sig), []byte(Sign(secret, body)))
 }
 
 // RedactURL is raw reduced to scheme://host, or "?" when unparsable. The

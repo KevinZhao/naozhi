@@ -20,7 +20,6 @@ import (
 const (
 	DefaultChannelBuffer  = 1024
 	DefaultCoalesceWindow = 1 * time.Second
-	DefaultIdleCloseAfter = 10 * time.Minute
 )
 
 // WorkspaceResolver maps a session key-hash to its absolute workspace path

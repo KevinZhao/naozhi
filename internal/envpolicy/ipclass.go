@@ -27,10 +27,6 @@ const (
 // guards because the IMDS SSRF pivot lives here.
 const IPLinkLocal = IPLinkLocalUnicast | IPLinkLocalMulticast
 
-// IPInternalAny is the widest deny-set (the shim endpoint guard's; loopback is
-// subtracted at the call site for local mock gateways).
-const IPInternalAny = IPLoopback | IPLinkLocal | IPPrivate | IPUnspecified
-
 // Has reports whether every bit in c is set in k.
 func (k IPClass) Has(c IPClass) bool { return k&c == c }
 

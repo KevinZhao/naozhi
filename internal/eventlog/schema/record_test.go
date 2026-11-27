@@ -64,7 +64,7 @@ func TestRecord_HeaderRoundTrip(t *testing.T) {
 // payload is kept as raw JSON so downstream callers own EventEntry shape.
 func TestRecord_EntryRoundTrip(t *testing.T) {
 	payload := []byte(`{"time":1700000001000,"uuid":"aa00","type":"user","summary":"hi"}`)
-	r := NewEntry(1, payload)
+	r := newEntry(1, payload)
 	if err := r.Validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestRecord_Validate_RejectsMalformed(t *testing.T) {
 		{
 			name: "entry carries header",
 			build: func() *Record {
-				r := NewEntry(1, []byte(`{}`))
+				r := newEntry(1, []byte(`{}`))
 				r.Header = &FileHeader{Version: WireVersion, Key: "k", CreatedAt: 1}
 				return r
 			},
@@ -200,7 +200,7 @@ func TestRecord_MarshalRecord_RejectsOversize(t *testing.T) {
 	// a JSON-safe byte means the encode step cannot magically shrink it.
 	payload := []byte(`{"time":1,"uuid":"aa","type":"user","detail":"` +
 		strings.Repeat("a", MaxRecordBytes+1) + `"}`)
-	r := NewEntry(1, payload)
+	r := newEntry(1, payload)
 	_, err := MarshalRecord(r)
 	if !errors.Is(err, ErrRecordTooLarge) {
 		t.Fatalf("MarshalRecord oversize = %v, want ErrRecordTooLarge", err)
@@ -270,4 +270,9 @@ func TestRecord_UnmarshalRecord_ReservedFields(t *testing.T) {
 	if got.Seq != 2 {
 		t.Errorf("Seq=%d, want 2", got.Seq)
 	}
+}
+
+// newEntry is a TypeEntry Record carrying an already-serialized payload.
+func newEntry(seq uint64, entryJSON []byte) *Record {
+	return &Record{V: WireVersion, Seq: seq, Type: TypeEntry, Entry: json.RawMessage(entryJSON)}
 }
