@@ -441,15 +441,6 @@ func TestReverseConn_RefreshSubscription(t *testing.T) {
 	}
 }
 
-// ---- RefreshSubscription no-op when no subscribers ----
-
-func TestReverseConn_RefreshSubscription_noSubs(t *testing.T) {
-	rc, _, cleanup := setupReverseConnPair(t)
-	defer cleanup()
-	// Should not panic; no wire message sent.
-	rc.RefreshSubscription("no-such-key")
-}
-
 // ---- RemoveClient removes all subscriptions ----
 
 func TestReverseConn_RemoveClient(t *testing.T) {

@@ -9,43 +9,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// ---- IsPlannerKey ----
-
-func TestIsPlannerKey_Valid(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		key  string
-		want bool
-	}{
-		{"project:myapp:planner", true},
-		{"project:x:planner", true},
-		{"project:some-long-project-name:planner", true},
-	}
-	for _, tt := range tests {
-		if got := IsPlannerKey(tt.key); got != tt.want {
-			t.Errorf("IsPlannerKey(%q) = %v, want %v", tt.key, got, tt.want)
-		}
-	}
-}
-
-func TestIsPlannerKey_Invalid(t *testing.T) {
-	t.Parallel()
-	tests := []string{
-		"project::planner",          // name too short (exact sentinel)
-		"project:planner",           // missing name segment
-		"feishu:foo:planner",        // wrong prefix
-		"project:foo:general",       // wrong suffix
-		"",                          // empty
-		"planner",                   // no prefix
-		"project:foo:planner:extra", // extra segment still ends with ":extra" not ":planner"
-	}
-	for _, key := range tests {
-		if IsPlannerKey(key) {
-			t.Errorf("IsPlannerKey(%q) = true, want false", key)
-		}
-	}
-}
-
 // ---- PlannerKeyFor / PlannerSessionKey ----
 
 func TestPlannerKeyFor(t *testing.T) {

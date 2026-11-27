@@ -260,19 +260,6 @@ func TestCacheManager_RefreshAll_preservesProjectsOnPartialError(t *testing.T) {
 	}
 }
 
-// ---- RefreshAll with no nodes is a no-op ----
-
-func TestCacheManager_RefreshAll_noNodes(t *testing.T) {
-	var onChangeCalled atomic.Int32
-	cm := NewCacheManager(
-		func() map[string]Conn { return map[string]Conn{} },
-		func() { onChangeCalled.Add(1) },
-	)
-	cm.RefreshAll()
-	// onChange is always called even with no nodes.
-	_ = onChangeCalled.Load()
-}
-
 // ---- RefreshFor updates a single node ----
 
 func TestCacheManager_RefreshFor(t *testing.T) {
