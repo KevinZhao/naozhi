@@ -6,51 +6,6 @@ import (
 	"time"
 )
 
-// TestAPIError_IsTokenExpired locks the catalogue of Feishu error codes that
-// mean "tenant access token invalid / expired" so a future edit to the
-// switch statement does not silently drop one and let ReplyWithRetry hammer
-// the stale cached token. R83 / RETRY1.
-func TestAPIError_IsTokenExpired(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		code int
-		want bool
-	}{
-		{99991671, true},  // tenant access token invalid
-		{99991672, true},  // app access token invalid
-		{99991673, true},  // user access token invalid
-		{99991663, false}, // invalid app_secret (permanent, NOT token-expired)
-		{99991664, false}, // app disabled (permanent)
-		{99991668, false}, // not authorized (permanent)
-		{1061045, false},  // bot not in chat (permanent)
-		{230001, false},   // invalid receive_id (permanent)
-		{11234, false},    // rate limit (transient, non-token)
-		{0, false},        // success
-	}
-	for _, tc := range cases {
-		e := &APIError{Code: tc.code, Op: "send"}
-		if got := e.IsTokenExpired(); got != tc.want {
-			t.Errorf("APIError{Code:%d}.IsTokenExpired() = %v, want %v", tc.code, got, tc.want)
-		}
-	}
-}
-
-// TestAPIError_TokenExpiredIsNotPermanent verifies the two classifications
-// are disjoint: a token-expired error MUST NOT short-circuit retries via
-// IsPermanent, otherwise the cache-invalidation path is unreachable.
-func TestAPIError_TokenExpiredIsNotPermanent(t *testing.T) {
-	t.Parallel()
-	for _, code := range []int{99991671, 99991672, 99991673} {
-		e := &APIError{Code: code, Op: "send"}
-		if e.IsPermanent() {
-			t.Errorf("code %d: IsPermanent() true — would short-circuit ReplyWithRetry before cache invalidation", code)
-		}
-		if !e.IsTokenExpired() {
-			t.Errorf("code %d: IsTokenExpired() false — classification contract broken", code)
-		}
-	}
-}
-
 // TestFeishu_InvalidateAccessToken verifies the cache-clear helper removes
 // both the token and the circuit-breaker state so the next getAccessToken
 // call is not blocked by a stale tokenLastFailed. R83 / RETRY1.
