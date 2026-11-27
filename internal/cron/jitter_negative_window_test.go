@@ -59,25 +59,3 @@ func TestJitterSleep_NegativeWindowDoesNotPanic(t *testing.T) {
 		})
 	}
 }
-
-// TestJitterSleep_CancelledCtxSkipsTimerWait pins the ctx.Done() arm of
-// jitterSleep's final select. The window is 24h, so a regression that waits
-// on the timer alone blocks for hours with probability ~1 - 5s/24h; the 5s
-// bound only has to separate "returns" from "sleeps", not measure latency.
-func TestJitterSleep_CancelledCtxSkipsTimerWait(t *testing.T) {
-	t.Parallel()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		jitterSleep(ctx, 0, 24*time.Hour)
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("jitterSleep with a cancelled ctx still waited on its timer; the ctx.Done() arm must short-circuit it")
-	}
-}

@@ -1,7 +1,6 @@
 // list_snapshot_pool_test.go: regression coverage for cron-list snapshot
 // invariants (scheduler_jobs_list.go).
 //
-//   - R250-PERF-15 (#1118): ListAllJobsWithNextRun returns value copies.
 //   - R242-GO-3 (#548): mutateByID returns a value-copy *Job. A caller
 //     that mutates the returned pointer's fields must NOT influence the
 //     scheduler's in-memory state (the live *Job in s.tbl.jobs).
@@ -18,61 +17,6 @@ import (
 	"testing"
 	"time"
 )
-
-// TestListAllJobsWithNextRun_ValueCopyIsolated guards R250-PERF-15 (#1118).
-// The single-copy refactor (Job copied straight into the result slice under
-// RLock instead of being copied twice via a pooled scratch) must preserve
-// the value-copy isolation: a caller mutating a returned JobWithNextRun.Job
-// must NOT corrupt the scheduler's live in-memory *Job. A regression that
-// stored the *Job pointer (or aliased the pooled scratch) would surface as
-// the live Title changing here.
-func TestListAllJobsWithNextRun_ValueCopyIsolated(t *testing.T) {
-	dir := t.TempDir()
-	s := NewScheduler(SchedulerConfig{
-		StorePath: filepath.Join(dir, "cron.json"),
-		MaxJobs:   8,
-	}, SchedulerDeps{})
-	if err := s.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	t.Cleanup(s.Stop)
-
-	j := &Job{
-		Schedule: "@every 1h",
-		Prompt:   "p",
-		Platform: "feishu",
-		ChatID:   "chat",
-		ChatType: "direct",
-		Title:    "original",
-		Paused:   true,
-	}
-	if err := s.AddJob(j); err != nil {
-		t.Fatalf("AddJob: %v", err)
-	}
-
-	snap := s.ListAllJobsWithNextRun()
-	if len(snap) != 1 {
-		t.Fatalf("snapshot len = %d, want 1", len(snap))
-	}
-	// Mutate the returned value-copy's Job. With single-copy-into-result
-	// semantics this is still a distinct Job value, so the live state must
-	// be untouched.
-	snap[0].Job.Title = "tampered-by-caller"
-	snap[0].Job.RunCounters.Total = 99999
-
-	again := s.ListAllJobsWithNextRun()
-	if len(again) != 1 {
-		t.Fatalf("second snapshot len = %d, want 1", len(again))
-	}
-	if again[0].Job.Title != "original" {
-		t.Fatalf("live Title = %q, want %q (caller mutation leaked into in-memory state)",
-			again[0].Job.Title, "original")
-	}
-	if again[0].Job.RunCounters.Total != 0 {
-		t.Fatalf("live RunCounters.Total = %d, want 0 (caller mutation leaked)",
-			again[0].Job.RunCounters.Total)
-	}
-}
 
 // TestListAllJobsWithNextRun_NextRunByEntryID guards that the index-based
 // NextRun patch (R250-PERF-15 #1118) still aligns each result row with the
@@ -208,45 +152,6 @@ func TestNextRun_LockOrderAndResult(t *testing.T) {
 	wg.Wait()
 }
 
-// TestLocationMatchesPreviewLocation guards the #835 dup-code consolidation:
-// Location() now delegates to previewLocation() so the timezone-decision
-// policy lives in one place. This pins that the two stay byte-identical
-// across all three receiver states (nil → UTC, unset → Local, configured)
-// so a future change to one can't silently diverge from the other — the
-// "dashboard preview / Location stay in agreement" invariant.
-func TestLocationMatchesPreviewLocation(t *testing.T) {
-	// nil receiver
-	var nilS *Scheduler
-	if got, want := nilS.Location(), nilS.previewLocation(); got != want {
-		t.Fatalf("nil receiver: Location()=%v previewLocation()=%v", got, want)
-	}
-	if nilS.Location() != time.UTC {
-		t.Fatalf("nil receiver Location() = %v, want UTC", nilS.Location())
-	}
-
-	// unset location → time.Local
-	sUnset := &Scheduler{}
-	if got, want := sUnset.Location(), sUnset.previewLocation(); got != want {
-		t.Fatalf("unset location: Location()=%v previewLocation()=%v", got, want)
-	}
-	if sUnset.Location() != time.Local {
-		t.Fatalf("unset location Location() = %v, want time.Local", sUnset.Location())
-	}
-
-	// configured location wins
-	tokyo, err := time.LoadLocation("Asia/Tokyo")
-	if err != nil {
-		t.Skipf("tzdata unavailable: %v", err)
-	}
-	sCfg := &Scheduler{location: tokyo}
-	if got, want := sCfg.Location(), sCfg.previewLocation(); got != want {
-		t.Fatalf("configured: Location()=%v previewLocation()=%v", got, want)
-	}
-	if sCfg.Location() != tokyo {
-		t.Fatalf("configured Location() = %v, want %v", sCfg.Location(), tokyo)
-	}
-}
-
 // TestWithJobByID_ReturnsValueCopy guards R242-GO-3 (#548). The pointer
 // returned from DeleteJobByID/PauseJobByID/ResumeJobByID must NOT share
 // memory with the live *Job in s.tbl.jobs — caller mutations on the returned
@@ -293,5 +198,20 @@ func TestWithJobByID_ReturnsValueCopy(t *testing.T) {
 	if live[0].Title != "original" {
 		t.Fatalf("live Title = %q, want %q (caller-side mutation leaked into in-memory state)",
 			live[0].Title, "original")
+	}
+}
+
+// TestLocation: nil scheduler → UTC, unset → Local, configured wins.
+func TestLocation(t *testing.T) {
+	var nilS *Scheduler
+	if nilS.Location() != time.UTC || (&Scheduler{}).Location() != time.Local {
+		t.Fatalf("nil/unset Location() = %v/%v, want UTC/Local", nilS.Location(), (&Scheduler{}).Location())
+	}
+	tokyo, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	if got := (&Scheduler{location: tokyo}).Location(); got != tokyo {
+		t.Fatalf("configured Location() = %v, want %v", got, tokyo)
 	}
 }

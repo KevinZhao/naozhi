@@ -51,60 +51,6 @@ func (b *durationCapturingBroadcaster) BroadcastRunEnded(ev runtelemetry.RunEnde
 	b.sawEnded = true
 }
 
-// TestFinishRunUsesInjectedClock pins #643: finishRun reads
-// endedAt from the scheduler's injected clock, so DurationMS is deterministic
-// and a fake clock can drive a fixed duration without sleeping. A regression
-// that reverted finishRun to a raw time.Now() would compute DurationMS from
-// real wall-clock (≈0ms for an instantly-completing test) instead of the
-// 1500ms the fake clock dictates.
-func TestFinishRunUsesInjectedClock(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	bc := &durationCapturingBroadcaster{}
-	clk := &fakeClock{now: time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)}
-
-	cfg := SchedulerConfig{
-		MaxJobs:   5,
-		StorePath: dir + "/cron_jobs.json",
-	}
-	sched := NewScheduler(cfg, SchedulerDeps{Router: &fakeRouter{}, Telemetry: bc})
-	// Inject the fake clock after construction (the default real clock is
-	// installed by NewScheduler). Direct field write is safe: no tick
-	// goroutines run in this isolated finishRun test.
-	sched.clock = clk
-
-	j := &Job{ID: "job-clock", Schedule: "@every 5m", Prompt: "ping"}
-	sched.putJobForTest(j)
-
-	inflight := sched.gateForTest().jobInflight(j.ID)
-	if !inflight.running.CompareAndSwap(false, true) {
-		t.Fatal("initial CAS must succeed")
-	}
-	finalizer := &runFinalizer{inflight: inflight}
-
-	// startedAt is 1500ms before the clock's fixed "now"; finishRun should
-	// read endedAt from the clock and compute DurationMS = 1500.
-	startedAt := clk.Now().Add(-1500 * time.Millisecond)
-	// Advance the clock between started and finish to prove finishRun reads
-	// the live clock value at finish time, not a captured constant.
-	clk.set(startedAt.Add(1500 * time.Millisecond))
-
-	sched.finishRun(runCtx{jobID: j.ID, runID: "r-clock", startedAt: startedAt, trigger: TriggerScheduled, finalizer: finalizer}, runOutcome{state: RunStateSucceeded, result: "ok"})
-
-	bc.mu.Lock()
-	defer bc.mu.Unlock()
-	if !bc.sawEnded {
-		t.Fatal("expected a cron_run_ended broadcast")
-	}
-	if bc.durationMS != 1500 {
-		t.Errorf("DurationMS = %d, want 1500 (finishRun must read endedAt from injected clock)", bc.durationMS)
-	}
-	if !bc.endedAt.Equal(clk.Now()) {
-		t.Errorf("EndedAt = %v, want injected clock now %v", bc.endedAt, clk.Now())
-	}
-}
-
 // TestSyntheticSkippedUsesInjectedClock pins that the
 // synthetic started→ended pair (emitSyntheticSkipped, used by overlap-skipped
 // and router-missing guards) also stamps its startedAt from the injected

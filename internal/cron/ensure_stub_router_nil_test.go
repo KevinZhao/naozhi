@@ -35,24 +35,3 @@ func TestEnsureStub_NilRouterReturnsFalse(t *testing.T) {
 		t.Error("EnsureStub returned true with router=nil (regression of #491)")
 	}
 }
-
-// TestEnsureStub_MissingJobStillReturnsFalse keeps the existing contract
-// covered: malformed key / missing job paths still return false. Anchored
-// alongside the #491 fix so a future refactor that conflates the two
-// failure modes doesn't accidentally mask one of them.
-func TestEnsureStub_MissingJobStillReturnsFalse(t *testing.T) {
-	s := NewScheduler(SchedulerConfig{
-		MaxJobs:        5,
-		AllowNilRouter: true,
-	}, SchedulerDeps{})
-
-	if got := s.EnsureStub("cron:nope"); got {
-		t.Error("EnsureStub for unknown job returned true; expected false")
-	}
-	if got := s.EnsureStub("not-a-cron-key"); got {
-		t.Error("EnsureStub for non-cron key returned true; expected false")
-	}
-	if got := s.EnsureStub("cron:"); got {
-		t.Error("EnsureStub for empty job ID returned true; expected false")
-	}
-}

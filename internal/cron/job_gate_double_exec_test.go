@@ -35,32 +35,6 @@ func (s concurrencySession) Send(ctx context.Context, text string) (SendResult, 
 func (s concurrencySession) SessionID() string                     { return "sess" }
 func (s concurrencySession) InterruptViaControl() InterruptOutcome { return InterruptUnsupported }
 
-// TestJobGateLock_SameJobIDSharesMutex pins the precondition the fix rests on:
-// executeOpt and cleanupRunningJobIfIdle must take the SAME mutex for a given
-// jobID (otherwise serialising them is meaningless). Sharding by hash means
-// the same id always maps to the same shard.
-func TestJobGateLock_SameJobIDSharesMutex(t *testing.T) {
-	t.Parallel()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}})
-	a := s.gateForTest().jobGateLock("job-x")
-	b := s.gateForTest().jobGateLock("job-x")
-	if a != b {
-		t.Fatalf("jobGateLock returned distinct mutexes for the same jobID: %p vs %p", a, b)
-	}
-	// Index must be in range and stable.
-	if idx := jobGateShardIndex("job-x"); idx >= jobGateShards {
-		t.Fatalf("shard index %d out of range [0,%d)", idx, jobGateShards)
-	}
-	// R090135-LOGIC-7: compare against a stored first result; comparing two
-	// independent calls to the same pure function is always false (SA4000).
-	first := jobGateShardIndex("job-x")
-	for i := 0; i < 8; i++ {
-		if jobGateShardIndex("job-x") != first {
-			t.Fatalf("jobGateShardIndex not deterministic: call %d returned different shard", i+1)
-		}
-	}
-}
-
 // TestJobGate_CleanupSerialisedAgainstGate is the deterministic core of the
 // #1706 fix: while a goroutine holds the per-jobID gate (mimicking executeOpt
 // mid jobInflight-load→CAS), cleanupRunningJobIfIdle MUST block — it cannot

@@ -53,54 +53,6 @@ func TestRegisterJob_TickReportsScheduledTrigger(t *testing.T) {
 	}
 }
 
-// TestRegisterJob_TickSkipsAPausedJob covers the other half of what the factory
-// delegates for: executeJobIDIfLive is the shared paused/deleted pre-flight gate,
-// so a callback that bypassed it would run a job the operator paused.
-func TestRegisterJob_TickSkipsAPausedJob(t *testing.T) {
-	rec := &recordingBroadcaster{}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &reapRouter{sid: "sess-tick"}, Telemetry: rec})
-
-	jobID := mustGenerateID()
-	j := &Job{ID: jobID, Schedule: "@every 1h", Prompt: "ping"}
-	s.putJobForTest(j)
-	if err := s.registerJobForTest(j); err != nil {
-		t.Fatalf("registerJob: %v", err)
-	}
-	// Pause AFTER registration, the way an operator does: the callback captured
-	// jobID by value and must re-read the live job to see this.
-	s.editJobForTest(t, jobID, func(j *Job) { j.Paused = true })
-
-	s.cron.Entry(j.entryID).Job.Run()
-
-	if n := rec.endedCount(); n != 0 {
-		t.Errorf("the tick ran a paused job (%d ended events); the callback must go through the shared paused/deleted gate", n)
-	}
-}
-
-// TestRegisterJob_TickSkipsADeletedJob is the same gate's other case, and it also
-// covers the jobID-by-value capture: a callback holding a *Job pointer would still
-// find its target after the map entry is gone.
-func TestRegisterJob_TickSkipsADeletedJob(t *testing.T) {
-	rec := &recordingBroadcaster{}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &reapRouter{sid: "sess-tick"}, Telemetry: rec})
-
-	jobID := mustGenerateID()
-	j := &Job{ID: jobID, Schedule: "@every 1h", Prompt: "ping"}
-	s.putJobForTest(j)
-	if err := s.registerJobForTest(j); err != nil {
-		t.Fatalf("registerJob: %v", err)
-	}
-	entry := s.cron.Entry(j.entryID)
-
-	s.dropJobForTest(jobID)
-
-	entry.Job.Run()
-
-	if n := rec.endedCount(); n != 0 {
-		t.Errorf("the tick ran a deleted job (%d ended events); the callback must look the job up by ID at fire time, not hold the *Job it was registered with", n)
-	}
-}
-
 // TestRegisterJob_ManualOnlySkipsTicks: an isolated instance's scheduler
 // (ManualOnly) skips the tick but still runs a job started by hand.
 func TestRegisterJob_ManualOnlySkipsTicks(t *testing.T) {
@@ -120,5 +72,37 @@ func TestRegisterJob_ManualOnlySkipsTicks(t *testing.T) {
 	s.executeIfNotDeletedOrPaused(jobID)
 	if n := rec.endedCount(); n != 1 {
 		t.Fatalf("a manual run on a ManualOnly scheduler produced %d ended events, want 1", n)
+	}
+}
+
+// TestRegisterJob_TickSkipsPausedOrDeletedJob: the tick callback goes through
+// the shared paused/deleted gate and looks the job up by ID at fire time, so a
+// pause or delete after registration stops the run.
+func TestRegisterJob_TickSkipsPausedOrDeletedJob(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		after func(t *testing.T, s *Scheduler, id string)
+	}{
+		{"paused", func(t *testing.T, s *Scheduler, id string) {
+			s.editJobForTest(t, id, func(j *Job) { j.Paused = true })
+		}},
+		{"deleted", func(_ *testing.T, s *Scheduler, id string) { s.dropJobForTest(id) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recordingBroadcaster{}
+			s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &reapRouter{sid: "sess-tick"}, Telemetry: rec})
+			jobID := mustGenerateID()
+			j := &Job{ID: jobID, Schedule: "@every 1h", Prompt: "ping"}
+			s.putJobForTest(j)
+			if err := s.registerJobForTest(j); err != nil {
+				t.Fatalf("registerJob: %v", err)
+			}
+			entry := s.cron.Entry(j.entryID)
+			tc.after(t, s, jobID)
+			entry.Job.Run()
+			if n := rec.endedCount(); n != 0 {
+				t.Errorf("the tick ran a %s job (%d ended events)", tc.name, n)
+			}
+		})
 	}
 }

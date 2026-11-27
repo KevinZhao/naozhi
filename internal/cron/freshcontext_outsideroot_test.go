@@ -13,6 +13,7 @@ package cron
 
 import (
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -102,79 +103,33 @@ func TestCRON3_FreshPreflightSkipsWhenWorkDirOutsideRoot(t *testing.T) {
 	}
 }
 
-// TestCRON3_FreshPreflightProceedsWhenWorkDirUnderRoot pairs with the skip
-// test: an in-root workDir must reach Reset so the guard does not over-fire
-// and suppress legitimate fresh runs.
-func TestCRON3_FreshPreflightProceedsWhenWorkDirUnderRoot(t *testing.T) {
+// TestCRON3_FreshPreflightProceeds: the guard must not over-fire — an in-root
+// workDir, or any workDir with the sandbox off, still reaches Reset.
+func TestCRON3_FreshPreflightProceeds(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	s, fake := newFreshPreflightFixture(t, root)
+	for _, tc := range []struct {
+		name   string
+		inRoot bool
+	}{{"workdir under root", true}, {"no allowed root", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			workDir := t.TempDir()
+			root := ""
+			if tc.inRoot {
+				root = workDir
+			}
+			s, fake := newFreshPreflightFixture(t, root)
+			j := &Job{ID: "job-proceeds", Schedule: "@hourly", Prompt: "hi", Platform: "p", ChatID: "c", WorkDir: workDir, FreshContext: true}
+			s.putJobForTest(j)
 
-	j := &Job{
-		ID:           "job-inside-root",
-		Schedule:     "@hourly",
-		Prompt:       "hi",
-		Platform:     "p",
-		ChatID:       "c",
-		WorkDir:      root,
-		FreshContext: true,
-	}
-	s.putJobForTest(j)
-
-	_, ok := runFreshPreflight(s, j, root)
-	if !ok {
-		t.Fatal("preflight ok=false; want true for in-root reachable workDir")
-	}
-
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	found := false
-	for _, k := range fake.resetCalls {
-		if k == sessionkey.CronKey(j.ID) {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("Reset(%q) not seen for in-root workDir", sessionkey.CronKey(j.ID))
-	}
-}
-
-// TestCRON3_FreshPreflightNoAllowedRootSkipsCheck verifies the guard is gated
-// on allowedRoot being set: with sandbox disabled (allowedRoot==""), an
-// arbitrary workDir must still reach Reset (the containment check does not
-// apply).
-func TestCRON3_FreshPreflightNoAllowedRootSkipsCheck(t *testing.T) {
-	t.Parallel()
-	s, fake := newFreshPreflightFixture(t, "") // sandbox disabled
-	workDir := t.TempDir()
-
-	j := &Job{
-		ID:           "job-no-root",
-		Schedule:     "@hourly",
-		Prompt:       "hi",
-		Platform:     "p",
-		ChatID:       "c",
-		WorkDir:      workDir,
-		FreshContext: true,
-	}
-	s.putJobForTest(j)
-
-	_, ok := runFreshPreflight(s, j, workDir)
-	if !ok {
-		t.Fatal("preflight ok=false; want true when allowedRoot is unset")
-	}
-
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	found := false
-	for _, k := range fake.resetCalls {
-		if k == sessionkey.CronKey(j.ID) {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("Reset(%q) not seen with allowedRoot unset", sessionkey.CronKey(j.ID))
+			if _, ok := runFreshPreflight(s, j, workDir); !ok {
+				t.Fatal("preflight ok=false; want true")
+			}
+			fake.mu.Lock()
+			defer fake.mu.Unlock()
+			if !slices.Contains(fake.resetCalls, sessionkey.CronKey(j.ID)) {
+				t.Errorf("Reset(%q) not seen", sessionkey.CronKey(j.ID))
+			}
+		})
 	}
 }

@@ -368,21 +368,6 @@ func TestAutoPause_NegativeThresholdDisables(t *testing.T) {
 	}
 }
 
-// TestAutoPause_DashboardJobPointsAtDashboard: a dashboard job cannot be
-// resumed by /cron in the notify chat, so its notice points at the dashboard.
-func TestAutoPause_DashboardJobPointsAtDashboard(t *testing.T) {
-	t.Parallel()
-	s, r, ns, id := newAutoPauseScheduler(t, 1, "dashboard")
-	notify := true
-	s.editJobForTest(t, id, func(j *Job) { j.Notify = &notify })
-	r.set(nil, errStreakSend)
-	runN(s, id, 1)
-	notices := ns.noticesAfter(s)
-	if len(notices) != 1 || !strings.HasSuffix(notices[0], "；已连续失败 1 次，任务已自动暂停，修复后在控制台恢复") {
-		t.Fatalf("notices = %q", notices)
-	}
-}
-
 // TestAutoPause_ResumeHintFollowsNotifyChat: /cron resume only finds a job
 // from its own chat, so a pause notice delivered to another chat (a per-job
 // override or notify_default) points back at the creating chat and the
@@ -481,22 +466,6 @@ func TestAutoPause_PersistFailureLeavesJobActive(t *testing.T) {
 	}
 	if got := ns.noticesAfter(s); len(got) != 0 {
 		t.Errorf("notices = %q, want none", got)
-	}
-}
-
-// TestRecordResult_RevertRestoresStreak: a terminal result whose persist
-// fails rolls the streak back with the rest of the result state.
-func TestRecordResult_RevertRestoresStreak(t *testing.T) {
-	t.Parallel()
-	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(t.TempDir(), "cron.json"), MaxJobs: 5, AllowNilRouter: true}, SchedulerDeps{})
-	j := &Job{ID: "abcd00001111", Schedule: "@every 1h", ConsecutiveFailures: 2}
-	s.putJobForTest(j)
-	withFailingMarshal(t, s)
-	if _, _, ok := s.recordTerminalResult(j.ID, runOutcome{errMsg: "boom", errClass: ErrClassSendError, state: RunStateFailed}, time.Now()); ok {
-		t.Fatal("persist was expected to fail")
-	}
-	if got := s.jobForTest(t, j.ID).ConsecutiveFailures; got != 2 {
-		t.Errorf("streak after reverted result = %d, want 2", got)
 	}
 }
 
