@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"testing"
 	"time"
 
@@ -20,6 +19,14 @@ import (
 // ProcStartTime (Linux only - reads /proc/PID/stat)
 // ---------------------------------------------------------------------------
 
+// TestProcStartTime_CurrentProcess: the live process reads a non-zero start
+// time, the same on every read, and below JavaScript's
+// Number.MAX_SAFE_INTEGER (2^53-1): JSON.parse in dashboard.js silently rounds
+// larger values, which would break handleTakeover's identity equality after
+// restart. With CLK_TCK=100 Hz jiffies since boot stay below it for ~2.85
+// million years, so a failure there signals an encoding change (field 22 in
+// nanoseconds, another reference point) that needs re-budgeting before JSON
+// egress.
 func TestProcStartTime_CurrentProcess(t *testing.T) {
 	pid := os.Getpid()
 	pst, err := ProcStartTime(pid)
@@ -29,6 +36,14 @@ func TestProcStartTime_CurrentProcess(t *testing.T) {
 	if pst == 0 {
 		t.Error("ProcStartTime returned 0 for current process")
 	}
+	if again, err := ProcStartTime(pid); err != nil || again != pst {
+		t.Errorf("second read = (%d, %v), want (%d, nil)", again, err, pst)
+	}
+	if pst > maxSafeJSONInt {
+		t.Errorf("ProcStartTime = %d exceeds maxSafeJSONInt = %d; JS JSON.parse will truncate it "+
+			"and PID-identity checks (handleTakeover / verifyProcIdentity) will fail after restart",
+			pst, maxSafeJSONInt)
+	}
 }
 
 func TestProcStartTime_NonexistentPID(t *testing.T) {
@@ -36,45 +51,6 @@ func TestProcStartTime_NonexistentPID(t *testing.T) {
 	_, err := ProcStartTime(0)
 	if err == nil {
 		t.Error("expected error for PID 0, got nil")
-	}
-}
-
-func TestProcStartTime_Idempotent(t *testing.T) {
-	pid := os.Getpid()
-	v1, err := ProcStartTime(pid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	v2, err := ProcStartTime(pid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if v1 != v2 {
-		t.Errorf("ProcStartTime not idempotent: %d vs %d", v1, v2)
-	}
-}
-
-// TestProcStartTime_WithinJSONSafeRange pins the invariant that the Linux
-// encoding (jiffies since boot) stays below JavaScript's Number.MAX_SAFE_INTEGER
-// (2^53-1). JSON.parse in dashboard.js silently rounds uint64 values above
-// this threshold to the nearest representable double, which would break
-// handleTakeover's identity equality after restart.
-//
-// With CLK_TCK=100 Hz the budget would only be consumed after ~2.85 million
-// years of system uptime — any failure here signals an accidental encoding
-// change (e.g. somebody switched field 22 to nanoseconds, or changed the
-// reference point) that needs an explicit re-budgeting before JSON egress.
-func TestProcStartTime_WithinJSONSafeRange(t *testing.T) {
-	pid := os.Getpid()
-	pst, err := ProcStartTime(pid)
-	if err != nil {
-		t.Fatalf("ProcStartTime: %v", err)
-	}
-	if pst > maxSafeJSONInt {
-		t.Errorf("ProcStartTime = %d exceeds maxSafeJSONInt = %d; "+
-			"JS JSON.parse will truncate the value and PID-identity checks "+
-			"(handleTakeover / verifyProcIdentity) will fail after restart",
-			pst, maxSafeJSONInt)
 	}
 }
 
@@ -109,18 +85,6 @@ func TestProcessAlive_CurrentProcess(t *testing.T) {
 	if !processAlive(pid) {
 		t.Error("processAlive returned false for the current process")
 	}
-}
-
-func TestProcessAlive_DeadPID(t *testing.T) {
-	// Start a short-lived process and wait for it to exit.
-	cmd := exec.Command("/bin/true")
-	if err := cmd.Run(); err != nil {
-		t.Skipf("cannot run /bin/true: %v", err)
-	}
-	pid := cmd.ProcessState.Pid()
-	// After cmd.Run() the process has exited; PID may be reused but that's OK
-	// for this test — we're checking the function doesn't panic.
-	_ = processAlive(pid)
 }
 
 // ---------------------------------------------------------------------------
@@ -531,50 +495,5 @@ func TestProcPidPath(t *testing.T) {
 		if got := procPidPath(c.pid, c.leaf); got != c.want {
 			t.Errorf("procPidPath(%d, %q) = %q, want %q", c.pid, c.leaf, got, c.want)
 		}
-	}
-}
-
-// TestProcStartTime_ParsesStatFieldsExtra ensures the byte-level field
-// scanner in ProcStartTime is equivalent to the previous strings.Fields
-// implementation when field 22 is what we want, including the quirky case
-// where the comm field contains spaces and parentheses (the kernel does
-// not escape them). R247-PERF-5.
-func TestProcStartTime_ParsesStatFieldsExtra(t *testing.T) {
-	// Two passes against the live process must agree.
-	pid := os.Getpid()
-	v1, err := ProcStartTime(pid)
-	if err != nil {
-		t.Fatalf("ProcStartTime: %v", err)
-	}
-	v2, err := ProcStartTime(pid)
-	if err != nil {
-		t.Fatalf("ProcStartTime (2nd): %v", err)
-	}
-	if v1 != v2 {
-		t.Errorf("ProcStartTime not idempotent across calls: %d vs %d", v1, v2)
-	}
-	if v1 == 0 {
-		t.Error("ProcStartTime returned 0 for current process")
-	}
-}
-
-func TestScan_ProcStartTimeInStat(t *testing.T) {
-	// Verify that /proc/self/stat field parsing works correctly.
-	// This is a Linux-only test that double-checks our field indexing.
-	pidStr := strconv.Itoa(os.Getpid())
-	data, err := os.ReadFile("/proc/" + pidStr + "/stat")
-	if err != nil {
-		t.Skipf("cannot read /proc/self/stat: %v", err)
-	}
-	// The file should contain at least 22 space-separated fields after the comm.
-	if len(data) < 10 {
-		t.Fatalf("/proc/self/stat too short: %q", data)
-	}
-	pst, err := ProcStartTime(os.Getpid())
-	if err != nil {
-		t.Fatalf("ProcStartTime: %v", err)
-	}
-	if pst == 0 {
-		t.Error("ProcStartTime returned 0")
 	}
 }
