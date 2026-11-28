@@ -66,11 +66,15 @@ type Config struct {
 	Promise func(text string, due time.Time) (string, error)
 	// Notify pushes a notice; key ties repeats of one notice together.
 	Notify func(key, title, body string)
+	// Unnotify closes the notice of key once what it said no longer holds; nil leaves it.
+	Unnotify func(key string)
 	// Journal records a step as an activity entry.
 	Journal func(data map[string]any)
 	// Changed is told after every change of Status (the dashboard's red strip).
 	Changed func(Status)
 	Now     func() time.Time
+	// AuthPollEvery overrides authPollEvery (tests).
+	AuthPollEvery time.Duration
 }
 
 // Status is the recorder as the dashboard sees it.
@@ -125,6 +129,9 @@ type Manager struct {
 	wg         sync.WaitGroup
 	// unauthorisedTold is the day the "not authorised" notice went out.
 	unauthorisedTold string
+	// heldForAuth marks the followed meeting as passed over for want of the grants (not by the
+	// user's 不录): once they are given, it is offered after all.
+	heldForAuth bool
 }
 
 type recording struct {
@@ -210,15 +217,46 @@ func (m *Manager) setError(s string) {
 
 func (m *Manager) refreshAuth(ctx context.Context) Auth {
 	a, err := m.cfg.Helper.Status(ctx)
-	m.mu.Lock()
-	m.auth, m.authAt = a, m.cfg.Now()
-	m.authErr = ""
+	errText := ""
 	if err != nil {
-		m.authErr = err.Error()
+		errText = err.Error()
 	}
-	m.mu.Unlock()
+	m.setAuth(a, errText)
 	return a
 }
+
+// setAuth records the grants; their becoming ready closes the "not authorised" notice and
+// offers a meeting that was passed over for want of them.
+func (m *Manager) setAuth(a Auth, errText string) {
+	now := m.cfg.Now()
+	m.mu.Lock()
+	was := m.auth
+	m.auth, m.authAt, m.authErr = a, now, errText
+	var offer *App
+	if a.Ready() && m.heldForAuth {
+		m.heldForAuth = false
+		if app := m.det.App(); app != nil && m.rec == nil && m.detected == nil {
+			m.det.Undecline()
+			offer = app
+		}
+	}
+	m.mu.Unlock()
+	if a.Ready() && !was.Ready() {
+		m.unnotify("meeting:auth")
+	}
+	if offer != nil {
+		m.offer(*offer, now)
+	} else if a != was {
+		m.changed()
+	}
+}
+
+// authPoll is how often, and how long, the grants are re-read after the prompts were shown:
+// the helper's answer can come back before macOS has written the user's choice.
+const (
+	authPollEvery = 3 * time.Second
+	authPollFor   = 5 * time.Minute
+)
 
 // Authorize shows the system prompts for whatever is still undecided.
 func (m *Manager) Authorize(ctx context.Context) (Auth, error) {
@@ -229,11 +267,26 @@ func (m *Manager) Authorize(ctx context.Context) (Auth, error) {
 	if err != nil {
 		return a, err
 	}
-	m.mu.Lock()
-	m.auth, m.authAt, m.authErr = a, m.cfg.Now(), ""
-	m.mu.Unlock()
-	m.changed()
+	m.setAuth(a, "")
+	for end := m.cfg.Now().Add(authPollFor); !a.Ready() && !a.Denied() && m.cfg.Now().Before(end); {
+		select {
+		case <-ctx.Done():
+			return a, nil
+		case <-time.After(m.pollEvery()):
+		}
+		a = m.refreshAuth(ctx)
+	}
 	return a, nil
+}
+
+func (m *Manager) pollEvery() time.Duration {
+	return cmp.Or(m.cfg.AuthPollEvery, authPollEvery)
+}
+
+func (m *Manager) unnotify(key string) {
+	if m.cfg.Unnotify != nil {
+		m.cfg.Unnotify(key)
+	}
 }
 
 // Status reports the recorder.
@@ -296,34 +349,46 @@ func (m *Manager) observe(ctx context.Context, procs []Proc) {
 			m.tellUnauthorised(*app, now)
 			m.mu.Lock()
 			m.det.Decline()
+			m.heldForAuth = true
 			m.mu.Unlock()
 			return
 		}
-		d := &Detected{App: app.Name, Since: now}
-		if m.cfg.Calendar != nil {
-			if e, ok := eventAt(m.cfg.Calendar(), now, *app); ok {
-				d.Title = e.Title
-			}
-		}
-		m.mu.Lock()
-		m.detected = d
-		m.mu.Unlock()
-		m.changed()
-		if m.cfg.Notify != nil {
-			what := app.Name + " 会议"
-			if d.Title != "" {
-				what = "「" + d.Title + "」"
-			}
-			m.cfg.Notify("meeting:detected", "检测到"+what+"，要录音吗？", "在 dashboard 顶部点「录音」开始；不录就不用管。")
-		}
+		m.offer(*app, now)
 	case ActStop:
 		m.mu.Lock()
 		had := m.detected != nil
 		m.detected = nil
 		m.mu.Unlock()
+		m.unnotify("meeting:detected")
 		if !m.StopRecording("auto") && had {
 			m.changed()
 		}
+	}
+	m.mu.Lock()
+	if m.det.App() == nil {
+		m.heldForAuth = false
+	}
+	m.mu.Unlock()
+}
+
+// offer puts the 录音 / 不录 strip up for app's meeting and pushes it once.
+func (m *Manager) offer(app App, now time.Time) {
+	d := &Detected{App: app.Name, Since: now}
+	if m.cfg.Calendar != nil {
+		if e, ok := eventAt(m.cfg.Calendar(), now, app); ok {
+			d.Title = e.Title
+		}
+	}
+	m.mu.Lock()
+	m.detected = d
+	m.mu.Unlock()
+	m.changed()
+	if m.cfg.Notify != nil {
+		what := app.Name + " 会议"
+		if d.Title != "" {
+			what = "「" + d.Title + "」"
+		}
+		m.cfg.Notify("meeting:detected", "检测到"+what+"，要录音吗？", "在 dashboard 顶部点「录音」开始；不录就不用管。")
 	}
 }
 
@@ -369,9 +434,11 @@ func (m *Manager) Start() (Meeting, error) {
 func (m *Manager) Dismiss() {
 	m.mu.Lock()
 	m.det.Decline()
+	m.heldForAuth = false
 	had := m.detected != nil
 	m.detected = nil
 	m.mu.Unlock()
+	m.unnotify("meeting:detected")
 	if had {
 		m.changed()
 	}
@@ -389,7 +456,7 @@ func (m *Manager) tellUnauthorised(app App, now time.Time) {
 		return
 	}
 	m.cfg.Notify("meeting:auth", "检测到 "+app.Name+" 会议，但还没有录音授权",
-		"在 dashboard 的 设置 → 会议录音 里授权「麦克风」和「屏幕与系统录音」后，下一场会议会自动录音。")
+		"在 dashboard 的 设置 → 会议录音 里授权「麦克风」和「屏幕与系统录音」。授权后，正在开的这场和以后的会议开始时，顶部会出现「录音」按钮，点了才录。")
 }
 
 func (m *Manager) startRecording(ctx context.Context, app App, by string) {
@@ -430,6 +497,7 @@ func (m *Manager) startRecording(ctx context.Context, app App, by string) {
 	m.rec = r
 	m.detected = nil
 	m.mu.Unlock()
+	m.unnotify("meeting:detected")
 	m.journal(map[string]any{"meeting": mt.ID, "step": "record_start", "summary": "开始录音：" + mt.Title, "app": app.Name, "by": by, "resumed": resumed})
 	m.changed()
 	m.wg.Add(1)

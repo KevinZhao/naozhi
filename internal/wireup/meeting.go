@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/datadir"
@@ -64,7 +65,7 @@ func OpenMeetings(d MeetingDeps) *meeting.Manager {
 		cfg.Calendar = func() []meeting.CalendarEvent {
 			var out []meeting.CalendarEvent
 			for _, e := range d.Calendar() {
-				out = append(out, meeting.CalendarEvent{Title: e.Title, Start: e.Start, End: e.End, Organizer: e.Organizer, Attendees: e.Attendees, Link: e.Link})
+				out = append(out, meeting.CalendarEvent{Title: e.Title, Start: e.Start, End: e.End, Organizer: e.Organizer, Attendees: othersThanMe(e.Attendees), Link: e.Link})
 			}
 			return out
 		}
@@ -82,6 +83,7 @@ func OpenMeetings(d MeetingDeps) *meeting.Manager {
 		cfg.Notify = func(key, title, body string) {
 			d.Notifier.Add(notify.Item{Kind: notify.KindNotice, Level: notify.LevelTimely, Uncapped: true, Source: key, Title: title, Why: body})
 		}
+		cfg.Unnotify = func(key string) { d.Notifier.CloseSource(key, notify.ClosedByAuto) }
 	}
 	if d.Journal != nil {
 		cfg.Journal = func(data map[string]any) {
@@ -140,4 +142,17 @@ func MeetingSession(router *session.Router, workDir string, rules func() (allow,
 		}
 		return res.Text, err
 	}
+}
+
+// othersThanMe drops the scout's "me" (the user) from a calendar attendee list: the user is
+// already 你 in the transcript, and the bare word fed to the recogniser as an attendee name
+// came back as text in silent stretches.
+func othersThanMe(attendees []string) []string {
+	var out []string
+	for _, a := range attendees {
+		if !strings.EqualFold(strings.TrimSpace(a), "me") {
+			out = append(out, a)
+		}
+	}
+	return out
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -820,5 +821,83 @@ func TestObserveReadsAuthAtUnderLock(t *testing.T) {
 	<-done
 	if m.Status().Detected != nil {
 		t.Fatal("offered a recording without authorisation")
+	}
+}
+
+// grantHelper answers Status and Request from fields a test changes while Authorize polls.
+type grantHelper struct {
+	*fakeHelper
+	mu              sync.Mutex
+	status, request Auth
+}
+
+func (g *grantHelper) Status(context.Context) (Auth, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.status, nil
+}
+
+func (g *grantHelper) Request(context.Context) (Auth, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.request, nil
+}
+
+// TestAuthorizeOffersTheMeetingPassedOver: a meeting that started before the grants were given
+// is offered once they are, even though the helper's own answer to the prompts came back stale,
+// and each notice closes once what it said no longer holds.
+func TestAuthorizeOffersTheMeetingPassedOver(t *testing.T) {
+	clock := &fakeClock{t: time.Date(2026, 11, 24, 14, 0, 0, 0, time.Local)}
+	undecided := Auth{Microphone: "not_determined", AudioCapture: "not_determined"}
+	g := &grantHelper{fakeHelper: &fakeHelper{t: t}, status: undecided, request: undecided}
+	var mu sync.Mutex
+	var pushed, closed []string
+	m := New(Config{Root: t.TempDir(), Helper: g, Now: clock.Now, AuthPollEvery: time.Millisecond,
+		Notify:   func(key, _, _ string) { mu.Lock(); pushed = append(pushed, key); mu.Unlock() },
+		Unnotify: func(key string) { mu.Lock(); closed = append(closed, key); mu.Unlock() }})
+	ctx := context.Background()
+
+	m.observe(ctx, []Proc{teams})
+	if m.Status().Detected != nil {
+		t.Fatal("offered a recording without the grants")
+	}
+
+	g.mu.Lock()
+	g.status = Auth{Microphone: "authorized", AudioCapture: "authorized"}
+	g.mu.Unlock()
+	if a, err := m.Authorize(ctx); err != nil || !a.Ready() {
+		t.Fatalf("Authorize = %+v, %v; want the grants read back as ready", a, err)
+	}
+	if d := m.Status().Detected; d == nil || d.App != "Teams" {
+		t.Fatalf("Detected = %+v; want the Teams meeting offered", d)
+	}
+	m.observe(ctx, []Proc{teams})
+	m.Dismiss()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []string{"meeting:auth", "meeting:detected"}; !slices.Equal(pushed, want) {
+		t.Errorf("pushed %v, want %v", pushed, want)
+	}
+	if want := []string{"meeting:auth", "meeting:detected"}; !slices.Equal(closed, want) {
+		t.Errorf("closed %v, want %v", closed, want)
+	}
+}
+
+func TestDropHintEchoes(t *testing.T) {
+	hint := hintText(Hints{Title: "[Biweekly] Tiger Team Meeting", Attendees: []string{"俊杰"}})
+	segs := []Segment{
+		{Text: "会议：[Biweekly] Tiger Team Meeting。"},
+		{Text: "会议：[Biweekly] Tiger Team Meeting，参会人：俊杰。"},
+		{Text: "Tiger Team Meeting 今天先到这里。"},
+		{Text: "会议开始吧。"},
+		{Text: "Tiger Team Meeting"},
+	}
+	var got []string
+	for _, s := range dropHintEchoes(segs, hint) {
+		got = append(got, s.Text)
+	}
+	if want := []string{"Tiger Team Meeting 今天先到这里。", "会议开始吧。", "Tiger Team Meeting"}; !slices.Equal(got, want) {
+		t.Errorf("kept %q, want %q", got, want)
 	}
 }
