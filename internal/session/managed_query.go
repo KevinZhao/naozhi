@@ -383,8 +383,8 @@ func (s *ManagedSession) EventEntries() []clievent.EventEntry {
 //
 // Intentionally type-asserts rather than widening processIface so fake test
 // processes need not implement the Linker surface; the agentlink.AgentLinker
-// interface widens only at the server boundary. TODO: AgentIntrospector
-// interface when a second backend needs agent-view support (docs/TODO.md).
+// interface widens only at the server boundary. A backend-neutral
+// AgentIntrospector interface waits until a second backend needs agent views.
 func (s *ManagedSession) SubagentLinker() *subagent.Linker {
 	if real := s.loadCliProcess(); real != nil {
 		return real.Linker()

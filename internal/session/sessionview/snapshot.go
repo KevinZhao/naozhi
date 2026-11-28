@@ -26,7 +26,7 @@ type SessionSnapshot struct {
 	// Model is the CLI model identifier (live process value, else the
 	// persisted spawn-time value). Empty when the operator did not configure
 	// one; the dashboard renders "(模型未配置)". For ACP backends the runtime
-	// model from session/new is not read back (see docs/TODO.md), so this
+	// model from session/new is not read back, so this
 	// reflects the configured value.
 	Model string `json:"model,omitempty"`
 	// TuningModel / TuningEffort are the per-session overrides recorded by

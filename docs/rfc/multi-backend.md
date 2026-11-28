@@ -406,7 +406,7 @@ func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]c
 
 ### 4.3 Wrapper 工厂化
 
-为避免 `internal/session/router.go` 反向依赖 `kirojsonl` / `claudejsonl`（呼应 docs/TODO.md R219-ARCH-2），把 history 工厂下放到 `cli.Wrapper`：
+为避免 `internal/session/router.go` 反向依赖 `kirojsonl` / `claudejsonl`，把 history 工厂下放到 `cli.Wrapper`：
 
 ```go
 // internal/cli/wrapper.go

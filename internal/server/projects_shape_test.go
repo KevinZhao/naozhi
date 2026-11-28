@@ -22,7 +22,7 @@ import (
 //
 // WHY: naozhi has no API versioning and no OpenAPI spec; regex-based shape
 // tests are the sole guard against a silent refactor dropping a key
-// dashboard.js relies on (RNEW-ARCH-401 in docs/TODO.md). The handler
+// dashboard.js relies on. The handler
 // returns a raw JSON array of per-project objects carrying name/path/
 // config/favorite/git_remote_url/github + planner_state/planner_model.
 //
